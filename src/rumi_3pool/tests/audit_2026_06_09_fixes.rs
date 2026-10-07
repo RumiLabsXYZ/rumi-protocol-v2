@@ -55,6 +55,23 @@ fn pool_balances(h: &ThreePoolHarness) -> [u128; 3] {
     status.balances
 }
 
+fn pool_lp_supply(h: &ThreePoolHarness) -> u128 {
+    let res = h
+        .pic
+        .query_call(h.three_pool, Principal::anonymous(), "get_pool_status", encode_args(()).unwrap())
+        .expect("get_pool_status failed");
+    let status: PoolStatus = decode_one(&reply_bytes(res)).unwrap();
+    status.lp_total_supply
+}
+
+fn pool_ledger_balances(h: &ThreePoolHarness) -> [u128; 3] {
+    [
+        ledger_balance(h, h.ledgers[0], h.three_pool),
+        ledger_balance(h, h.ledgers[1], h.three_pool),
+        ledger_balance(h, h.ledgers[2], h.three_pool),
+    ]
+}
+
 fn swap(h: &ThreePoolHarness, i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoolError> {
     let res = h
         .pic
@@ -199,6 +216,38 @@ fn ic_s_003_remove_liquidity_dust_leg_rejected_before_lp_burn() {
 
     assert_eq!(lp_balance(&h, h.user), lp_before, "LP must not be burned");
     assert_eq!(pool_balances(&h), pool_before);
+}
+
+/// CL-01 proportional runtime regression: the pre-fix crossover showed this
+/// submitted withdrawal can execute across the concurrent same-user LP transfer.
+#[test]
+fn cl_01_proportional_remove_rechecks_lp_after_fee_await() {
+    let h = deploy_pool_with_liquidity_fee_and_swaps(0, 0);
+    let before = lp_balance(&h, h.user);
+    let burn = before / 4;
+    assert!(burn > 0);
+    let supply_before = pool_lp_supply(&h);
+    let balances_before = pool_balances(&h);
+    let ledger_balances_before = pool_ledger_balances(&h);
+    let recipient = Principal::self_authenticating(&[31, 41, 59]);
+    let to_transfer = before - (burn - 1);
+
+    let withdrawal = h.pic.submit_call(
+        h.three_pool,
+        h.user,
+        "remove_liquidity",
+        encode_args((burn, vec![0u128; 3])).unwrap(),
+    ).expect("submit remove_liquidity failed");
+    lp_transfer(&h, recipient, to_transfer, None, None)
+        .expect("same-user LP transfer failed");
+    let response = h.pic.await_call(withdrawal).expect("await remove_liquidity failed");
+    let result: Result<Vec<Nat>, ThreePoolError> = decode_one(&reply_bytes(response)).unwrap();
+    assert!(matches!(result, Err(ThreePoolError::InsufficientLiquidity)),
+        "withdrawal must reject after LP moved during fee lookup: {result:?}");
+    assert_eq!(lp_balance(&h, h.user), burn - 1, "only concurrent transfer may debit user LP");
+    assert_eq!(pool_lp_supply(&h), supply_before, "failed withdrawal must not burn supply");
+    assert_eq!(pool_balances(&h), balances_before, "failed withdrawal must not debit pool balances");
+    assert_eq!(pool_ledger_balances(&h), ledger_balances_before, "failed withdrawal must not transfer pool tokens");
 }
 
 #[test]
