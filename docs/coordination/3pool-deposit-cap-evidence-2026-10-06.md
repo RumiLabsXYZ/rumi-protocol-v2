@@ -15,14 +15,14 @@ Frontend policy checks are informational; the backend under the lock is authorit
 ## Deterministic evidence
 
 - `cargo test -p rumi_3pool --lib`: 123 passed.
-- Fresh `cargo build -p rumi_3pool --target wasm32-unknown-unknown --release`:passed. Added the standard Candid export macro so the compiled interface can be extracted. No canister install performed.
-- `cargo test -p rumi_3pool --test deposit_concentration_cap -- --test-threads=1`: 9 passed using official PocketIC server 7.0.0 with pinned crate 6.0.0 and existing real ICRC ledger fixtures. Covers unchanged balances/LP supply on rejection, exact-cap proportional admission, above-cap70/30 rejection, either/both stable pairing, stable-only deposits and swap parity.
+- Fresh `cargo build -p rumi_3pool --target wasm32-unknown-unknown --release`: passed. Added the standard Candid export macro so the compiled interface can be extracted. No canister install performed.
+- `cargo test -p rumi_3pool --test deposit_concentration_cap -- --test-threads=1`: 9 passed using official PocketIC server 7.0.0 with pinned crate 6.0.0 and existing real ICRC ledger fixtures. Covers unchanged balances/LP supply on rejection, exact-cap proportional admission, above-cap 70/30 rejection, either/both stable pairing, stable-only deposits and swap parity.
 - Existing `cargo test -p rumi_3pool --test integration_test -- --test-threads=1`: 9 passed, including upgrade event preservation.
 - `cargo test -p stability_pool --lib three_pool_deposit_error_compatibility_tests`: 2 passed; the remote consumer decodes both the new rejection and ordinary successful replies.
-- `cargo check -p rumi_protocol_backend --lib`:passed with existing warnings.
-- Final frontend full regression suite: 934 passed in 74 files; production build and frontend authentication asset verification passed. Focused policy/service/mounted suites total22cases.
+- `cargo check -p rumi_protocol_backend --lib`: passed with existing warnings.
+- Final frontend full regression suite: 934 passed in 74 files; production build and frontend authentication asset verification passed. Focused policy/service/mounted suites total 22 cases.
 - Full frontend type-check baseline and final: 28 errors and 65 warnings in 24 files. Error-message multisets are identical; no new errors introduced.
-- Deposit endpoint Candid comparison:strict structural equality passed for `add_liquidity` and `calc_add_liquidity_query` against the freshly extracted Rust interface, including the new error. Bindings regenerated via `scripts/regenerate-declarations.sh rumi_3pool`.
+- Deposit endpoint Candid comparison: strict structural equality passed for `add_liquidity` and `calc_add_liquidity_query` against the freshly extracted Rust interface, including the new error. Bindings regenerated via `scripts/regenerate-declarations.sh rumi_3pool`.
 - Full interface structural equality has pre-existing drift: source exposes `receive_donation` absent from canonical Candid, and source ICRC3 archive callback uses a record while the declared callback is a function. These unrelated repairs are deferred rather than blocking the deposit change. No claim of full-interface equality.
 - Local browser `/3usd` could not load pool data (Failed to fetch), so no connected-wallet or browser transaction proof is claimed. Mounted Svelte tests and mocked wallet-flow tests cover the changed form and approval ordering.
 - Disk-pressure cleanup: 0 eligible removals, 0 removed; dirty, locked and unmerged worktrees preserved. The managed implementation checkout reuses the existing Rust target cache and locked frontend dependencies.
@@ -33,4 +33,16 @@ Both reviewers receive the same accepted behavior and diff. Verify exact 666/100
 
 Fresh compiled Wasm SHA-256: `f158f3f1bcf13d3bb1983ab240df9ccf952569909325c483f48901e038470078`. This is a build identity, not deployment proof.
 
-Review results and merge proof pending.
+## Caller-path and proof boundaries
+
+The no-pull rejection guarantee applies to the 3pool `add_liquidity` endpoint. The existing Stability Pool `deposit_as_3usd` wrapper pulls first and then calls 3pool; rejection follows its existing refund path. Refunds deduct a ledger fee, dust at or below that fee is not refundable, and failed refunds become pending claims. This change adds decoding compatibility; it does not make that wrapper atomic or fee-free (`src/stability_pool/src/deposits.rs:801-834`, `916-953`, `998-1053`).
+
+The exact-amount, principal and TTL preflight protects `ThreePoolService.addLiquidity` and the liquidity form. Historical direct OISY multi-hop executors in `swapRouter.ts` do not use that cache. Current `AMM1_ROUTING_PAUSED = true` excludes icUSD-to-3USD fallback routes; other stable-only deposits cannot violate this icUSD cap. Before enabling the dormant route, its broader quote-freshness behavior is optional follow-up scope, not part of this deposit-form guarantee.
+
+OISY false-negative confirmation uses an LP balance delta rather than an operation-specific receipt. An intervening external LP credit can affect that inference; no live confirmation proof is claimed.
+
+## Independent review
+
+Round 1: both independent Luna reviewers returned PASS on frozen implementation commit `e525b5f7f954383a7309bb8c5965be0614e9e738`. Round 2: both fresh independent Luna reviewers returned PASS on the same frozen implementation. One initially raised caller-path concerns; source verification established that the icUSD fallback route is dormant under the current routing pause and that the pre-pull guarantee is specific to the 3pool endpoint. The wrapper refund and dormant route limitations above were documented; no production changes were necessary.
+
+The deterministic and independent-review merge gate passed. The authoritative merge proof is the state, timestamp and merge commit recorded by [PR #420](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/420). This evidence does not authorize or prove deployment.

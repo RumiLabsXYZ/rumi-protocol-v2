@@ -185,10 +185,10 @@ Authorization: implement a 66.6% deposit cap with Luna workers and merge when ve
 
 | ID | State | Owner | Requested / actual model | Scope | Acceptance / evidence |
 | --- | --- | --- | --- | --- | --- |
-| DEP-01 | Review | deposit_backend | Luna / gpt-5.6-luna | 3pool deposit admission and pure unit tests | Exact 666/1000 cap; before pulls; query/update parity; corrective deposits above cap; integer normalization |
-| DEP-02 | Review | deposit_frontend | Luna / gpt-5.6-luna | Deposit form and service helpers/tests | Explain cap, block invalid deposits before wallet approval, offer paired amounts, preserve wallet flows |
-| DEP-03 | Review | deposit_integration | Luna / gpt-5.6-luna | New focused PocketIC deposit-policy tests | Rejection before debit; accepted paired/stable deposits; quote/update parity |
-| DEP-04 | In progress | coordinator + two independent Luna reviewers | Luna / gpt-5.6-luna | Interfaces, deterministic checks, independent review, PR and merge | Focused tests/builds pass; both independent reviewers pass; source merged |
+| DEP-01 | Done | deposit_backend | Luna / gpt-5.6-luna | 3pool deposit admission and pure unit tests | Exact 666/1000 cap; before pulls; query/update parity; corrective deposits above cap; integer normalization |
+| DEP-02 | Done | deposit_frontend | Luna / gpt-5.6-luna | Deposit form and service helpers/tests | Explain cap, block invalid deposits before wallet approval, offer paired amounts, preserve wallet flows |
+| DEP-03 | Done | deposit_integration | Luna / gpt-5.6-luna | New focused PocketIC deposit-policy tests | Rejection before debit; accepted paired/stable deposits; quote/update parity |
+| DEP-04 | Merge gate passed | coordinator + two independent Luna reviewers | Luna / gpt-5.6-luna | Interfaces, deterministic checks, independent review, PR and merge | Focused tests/builds pass; both independent reviewers pass; source merged |
 
 ## Acceptance contract
 
@@ -200,4 +200,4 @@ Authorization: implement a 66.6% deposit cap with Luna workers and merge when ve
 - UI offers the minimum required combined stable amount split across both coins, rounded up to their native precision. At exact 66.6%, 200 icUSD requires approximately 100.300301 total stablecoins; 700 icUSD +300 stablecoins is rejected when the pool is 70% icUSD. Proportional deposits at the cap are allowed. Treat corrective deposits as gradual improvement, not a guarantee of restoring the pool to the cap in one deposit.
 - Existing unrelated work and historical board entries remain untouched. Models are explicitly user-selected Luna, so no Sonnet check/fallback is required.
 
-Evidence and shared reviewer rubric: `docs/coordination/3pool-deposit-cap-evidence-2026-10-06.md`. DEP-01 native123passed; DEP-03 new real-ledger tests9passed plus9existing canister regressionspassed. Final frontend934passed, productionbuildpassed, type-checkbaselineunchanged. Independentreview remains.
+Evidence and shared reviewer rubric: `docs/coordination/3pool-deposit-cap-evidence-2026-10-06.md`. DEP-01: 123 native tests passed. DEP-03: 9 new real-ledger tests and 9 existing canister regressions passed. Final frontend: 934 tests and production build passed; type-check baseline unchanged. Both independent reviewer pairs passed across two rounds. The merge gate passed; authoritative merge state is recorded in PR #420. No deployment or live wallet transaction is claimed.
