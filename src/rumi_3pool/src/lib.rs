@@ -857,6 +857,22 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
 
 // ─── Remove Liquidity (proportional) ───
 
+/// Prepare the LP debit from balances re-read after an async fee lookup.
+/// Both removal branches use this at their synchronous commit boundary.
+fn checked_lp_burn_debit(
+    current_user_lp: u128,
+    current_supply: u128,
+    lp_burn: u128,
+) -> Result<(u128, u128), ThreePoolError> {
+    if current_user_lp < lp_burn || current_supply < lp_burn {
+        return Err(ThreePoolError::InsufficientLiquidity);
+    }
+    Ok((
+        current_user_lp.checked_sub(lp_burn).ok_or(ThreePoolError::MathOverflow)?,
+        current_supply.checked_sub(lp_burn).ok_or(ThreePoolError::MathOverflow)?,
+    ))
+}
+
 #[update]
 pub async fn remove_liquidity(
     lp_burn: u128,
@@ -921,21 +937,29 @@ pub async fn remove_liquidity(
         }
     }
 
-    // 5. Deduct LP first (deduct-before-transfer pattern)
-    mutate_state(|s| {
-        let cur = storage::lp_balance_get(&caller);
-        storage::lp_balance_set(caller, cur - lp_burn);
-        s.lp_total_supply -= lp_burn;
+    // 5. Revalidate and deduct LP first (deduct-before-transfer pattern).
+    // `ledger_fee` above can await on a cold cache; ICRC-1 LP transfers are
+    // not covered by PoolGuard and may have reduced this balance meanwhile.
+    // Check everything before changing state, in this synchronous commit.
+    let current_lp = storage::lp_balance_get(&caller);
+    let current_supply = read_state(|s| s.lp_total_supply);
+    let (new_user_lp, new_supply) = checked_lp_burn_debit(current_lp, current_supply, lp_burn)?;
+    mutate_state(|s| -> Result<(), ThreePoolError> {
+        let mut new_balances = s.balances;
         for k in 0..3 {
-            s.balances[k] -= amounts[k];
+            new_balances[k] = s.balances[k].checked_sub(amounts[k]).ok_or(ThreePoolError::MathOverflow)?;
         }
+        storage::lp_balance_set(caller, new_user_lp);
+        s.lp_total_supply = new_supply;
+        s.balances = new_balances;
         // Log burn block for ICRC-3 index
         s.log_block(Icrc3Transaction::Burn {
             from: caller,
             amount: lp_burn,
             from_subaccount: None,
         });
-    });
+        Ok(())
+    })?;
 
     // 6. Transfer each non-zero amount to user.
     //
@@ -1070,26 +1094,34 @@ pub async fn remove_one_coin(
         return Err(ThreePoolError::SlippageExceeded);
     }
 
-    // 5. Deduct LP and balance first
-    let admin_fee_share = fee * (admin_fee_bps as u128) / 10_000;
+    // 5. Deduct LP and balance first. Revalidate after the fee-cache await:
+    // LP-token transfers can execute while this update is suspended.
+    let admin_fee_share = fee.checked_mul(admin_fee_bps as u128)
+        .ok_or(ThreePoolError::MathOverflow)? / 10_000;
 
     // The pool sends `amount` to the user and reserves `admin_fee_share` for
     // admin withdrawal. The LP-fee portion stays inside `s.balances[idx]` so
     // virtual_price grows for remaining LPs. Subtracting `amount + fee` would
     // double-deduct the LP fee.
-    mutate_state(|s| {
-        let cur = storage::lp_balance_get(&caller);
-        storage::lp_balance_set(caller, cur - lp_burn);
-        s.lp_total_supply -= lp_burn;
-        s.balances[idx] -= amount + admin_fee_share;
-        s.admin_fees[idx] += admin_fee_share;
+    let current_lp = storage::lp_balance_get(&caller);
+    let current_supply = read_state(|s| s.lp_total_supply);
+    let (new_user_lp, new_supply) = checked_lp_burn_debit(current_lp, current_supply, lp_burn)?;
+    mutate_state(|s| -> Result<(), ThreePoolError> {
+        let pool_debit = amount.checked_add(admin_fee_share).ok_or(ThreePoolError::MathOverflow)?;
+        let new_balance = s.balances[idx].checked_sub(pool_debit).ok_or(ThreePoolError::MathOverflow)?;
+        let new_admin_fees = s.admin_fees[idx].checked_add(admin_fee_share).ok_or(ThreePoolError::MathOverflow)?;
+        storage::lp_balance_set(caller, new_user_lp);
+        s.lp_total_supply = new_supply;
+        s.balances[idx] = new_balance;
+        s.admin_fees[idx] = new_admin_fees;
         // Log burn block for ICRC-3 index
         s.log_block(Icrc3Transaction::Burn {
             from: caller,
             amount: lp_burn,
             from_subaccount: None,
         });
-    });
+        Ok(())
+    })?;
 
     // 6. Transfer to user.
     //
@@ -3288,6 +3320,48 @@ mod explorer_tests {
             sum_swap_fees_over_window(&events, 0, &dec),
             10 + 100 + 200
         );
+    }
+}
+
+#[cfg(test)]
+mod cl_01_post_await_debit_tests {
+    use super::checked_lp_burn_debit;
+    use crate::types::ThreePoolError;
+
+    // Model the same-user ICRC-1 transfer that occurs while the withdrawal is
+    // awaiting a cold fee lookup: initial LP covered the burn, current LP does
+    // not. Both proportional and one-coin removal use this exact commit helper.
+    #[test]
+    fn proportional_remove_rejects_lp_transferred_during_await() {
+        let initial_lp = 1_000;
+        let lp_burn = 400;
+        let transferred_away = 601;
+        assert!(initial_lp >= lp_burn);
+        assert!(matches!(
+            checked_lp_burn_debit(initial_lp - transferred_away, 5_000, lp_burn),
+            Err(ThreePoolError::InsufficientLiquidity)
+        ));
+    }
+
+    #[test]
+    fn one_coin_remove_rejects_lp_transferred_during_await() {
+        let initial_lp = 1_000;
+        let lp_burn = 400;
+        let transferred_away = 601;
+        assert!(initial_lp >= lp_burn);
+        assert!(matches!(
+            checked_lp_burn_debit(initial_lp - transferred_away, 5_000, lp_burn),
+            Err(ThreePoolError::InsufficientLiquidity)
+        ));
+    }
+
+    #[test]
+    fn post_await_lp_debit_uses_current_balance_and_checked_supply() {
+        assert!(matches!(checked_lp_burn_debit(700, 5_000, 400), Ok((300, 4_600))));
+        assert!(matches!(
+            checked_lp_burn_debit(700, 300, 400),
+            Err(ThreePoolError::InsufficientLiquidity)
+        ));
     }
 }
 
