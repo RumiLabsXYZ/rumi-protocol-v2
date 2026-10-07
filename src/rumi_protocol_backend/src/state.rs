@@ -7552,7 +7552,26 @@ impl State {
         }
     }
 
+    /// Convenience entry point. Wasm runtime calls are freshness-gated with
+    /// the canister clock; host tests use the `_at` variant to supply a
+    /// deterministic time when exercising that gate.
     pub fn update_total_collateral_ratio_and_mode(&mut self, rate: UsdIcp) {
+        #[cfg(target_arch = "wasm32")]
+        return self.update_total_collateral_ratio_and_mode_at(rate, ic_cdk::api::time());
+
+        #[cfg(not(target_arch = "wasm32"))]
+        self.update_total_collateral_ratio_and_mode_inner(rate, None);
+    }
+
+    pub fn update_total_collateral_ratio_and_mode_at(&mut self, rate: UsdIcp, now_ns: u64) {
+        self.update_total_collateral_ratio_and_mode_inner(rate, Some(now_ns));
+    }
+
+    fn update_total_collateral_ratio_and_mode_inner(
+        &mut self,
+        rate: UsdIcp,
+        now_ns: Option<u64>,
+    ) {
         let previous_mode = self.mode;
         let new_total_collateral_ratio = self.compute_total_collateral_ratio(rate);
         self.total_collateral_ratio = new_total_collateral_ratio;
@@ -7576,6 +7595,13 @@ impl State {
         // Price recovery may update the cached TCR, but only the controller's
         // explicit recovery-exit path may clear this latch.
         if self.deficit_readonly_latched_at_e8s.is_some() {
+            self.mode = Mode::ReadOnly;
+            return;
+        }
+
+        if now_ns.is_some_and(|now| !self.tcr_collateral_prices_are_fresh_at(now)) {
+            // TCR includes the cached USD value of all collateral in open
+            // vaults. Do not reopen GA or Recovery from a stale valuation.
             self.mode = Mode::ReadOnly;
             return;
         }
@@ -7623,6 +7649,30 @@ impl State {
                 dynamic_threshold.to_f64()
             );
         }
+    }
+
+    /// Returns whether every nonzero collateral amount contributing to TCR
+    /// has a positive cached price whose source timestamp is within XRC's
+    /// freshness window. A debt-free protocol has no price-dependent TCR.
+    pub fn tcr_collateral_prices_are_fresh_at(&self, now_ns: u64) -> bool {
+        if self.total_borrowed_icusd_amount() == ICUSD::new(0) {
+            return true;
+        }
+        self.vault_id_to_vaults.values().all(|vault| {
+            if vault.collateral_amount == 0 {
+                return true;
+            }
+            self.get_collateral_config(&vault.collateral_type)
+                .is_some_and(|config| match (config.last_price, config.last_price_timestamp) {
+                    (Some(price), Some(timestamp))
+                        if price.is_finite() && price > 0.0 && timestamp <= now_ns =>
+                    {
+                        now_ns - timestamp
+                            <= crate::xrc::PRICE_FRESHNESS_THRESHOLD_NANOS
+                    }
+                    _ => false,
+                })
+        })
     }
 
     pub fn open_vault(&mut self, vault: Vault) {
@@ -7899,7 +7949,11 @@ impl State {
             return None; // already at or above target
         }
         let deficit = numerator_icusd - collateral_value;
-        let denominator = recovery_target - liq_bonus;
+        // Admin-controlled collateral settings can be changed independently.
+        // A zero or negative denominator has no meaningful recovery repay cap;
+        // let the caller use the conservative generic liquidation cap instead
+        // of trapping while sizing a live liquidation.
+        let denominator = checked_liquidation_denominator(recovery_target, liq_bonus)?;
         let repay_amount = deficit / denominator;
         Some(repay_amount.min(vault.borrowed_icusd_amount))
     }
@@ -8292,7 +8346,10 @@ impl State {
             }
 
             let deficit = numerator_icusd - collateral_value;
-            let denominator = recovery_target - liq_bonus;
+            // No successful historical liquidation can have used a zero or
+            // negative denominator. Fail closed instead of trapping an event
+            // replay if collateral settings are inconsistent.
+            let denominator = checked_liquidation_denominator(recovery_target, liq_bonus)?;
             Some((deficit / denominator).min(vault.borrowed_icusd_amount))
         } else {
             Some(vault.borrowed_icusd_amount) // full liquidation
@@ -13155,6 +13212,72 @@ mod tests {
         assert_eq!(state.mode, Mode::GeneralAvailability);
     }
 
+    fn stale_non_icp_tcr_state(now_ns: u64) -> State {
+        let mut state = test_state();
+        let icp = state.icp_collateral_type();
+        state.set_icp_rate(UsdIcp::from(dec!(5.0)), Some(now_ns));
+        let other = Principal::from_slice(&[42]);
+        let mut config = state
+            .collateral_configs
+            .get(&icp)
+            .expect("initial ICP collateral config")
+            .clone();
+        config.last_price = Some(10_000.0);
+        config.last_price_timestamp = Some(1);
+        state.collateral_configs.insert(other, config);
+        state.open_vault(audit_vault(77, other, 100_000_000, 100_000_000));
+        state
+    }
+
+    #[test]
+    fn stale_non_icp_price_blocks_automatic_ga_after_recovery_exit() {
+        let now_ns = 200_000_000_000;
+        let mut state = stale_non_icp_tcr_state(now_ns);
+        state.mode = Mode::Recovery;
+        let other = Principal::from_slice(&[42]);
+        state
+            .collateral_configs
+            .get_mut(&other)
+            .expect("non-ICP collateral config")
+            .last_price_timestamp = Some(now_ns);
+
+        // A successful exit with all feeds fresh may reach GA.
+        state.update_total_collateral_ratio_and_mode_at(UsdIcp::from(dec!(5.0)), now_ns);
+        assert_eq!(state.mode, Mode::GeneralAvailability);
+
+        // After the non-ICP observation ages out, the next ICP-driven TCR
+        // update must not reuse its overstated cached price to remain in GA.
+        state
+            .collateral_configs
+            .get_mut(&other)
+            .expect("non-ICP collateral config")
+            .last_price_timestamp = Some(1);
+
+        state.update_total_collateral_ratio_and_mode_at(UsdIcp::from(dec!(5.0)), now_ns);
+
+        assert!(state.total_collateral_ratio > Ratio::from(dec!(1.0)));
+        assert!(!state.tcr_collateral_prices_are_fresh_at(now_ns));
+        assert_eq!(state.mode, Mode::ReadOnly);
+    }
+
+    #[test]
+    fn stale_non_icp_price_keeps_deficit_latch_clear_fail_closed_after_icp_success() {
+        let now_ns = 200_000_000_000;
+        let mut state = stale_non_icp_tcr_state(now_ns);
+        state.mode = Mode::ReadOnly;
+        state.mode_triggered_by_oracle = true;
+        state.deficit_readonly_threshold_e8s = 100;
+        state.deficit_readonly_latched_at_e8s = Some(100);
+        state.protocol_deficit_icusd = ICUSD::new(99);
+
+        assert_eq!(state.clear_deficit_readonly_latch(), Ok(true));
+        crate::xrc::note_xrc_success(&mut state);
+        state.update_total_collateral_ratio_and_mode_at(UsdIcp::from(dec!(5.0)), now_ns);
+
+        assert!(!state.tcr_collateral_prices_are_fresh_at(now_ns));
+        assert_eq!(state.mode, Mode::ReadOnly);
+    }
+
     #[test]
     fn test_dynamic_rmr_healthy_system() {
         let mut state = test_state();
@@ -15449,6 +15572,30 @@ mod tests {
             state.effective_liquidation_amount(&vault, price_usd, None),
             recovery_cap,
             "Recovery mode must drive the amount via compute_recovery_repay_cap"
+        );
+    }
+
+    #[test]
+    fn invalid_recovery_target_bonus_order_falls_back_without_trapping() {
+        let mut state = test_state();
+        let icp = state.icp_collateral_type();
+        let config = state.collateral_configs.get_mut(&icp).unwrap();
+        config.last_price = Some(1.0);
+        config.liquidation_bonus = Ratio::from(dec!(1.5));
+        state.mode = Mode::Recovery;
+        state.recovery_mode_threshold = Ratio::from(dec!(1.5));
+        state.recovery_cr_multiplier = Ratio::from(dec!(1.0));
+
+        let vault = liq0xx_vault(1, icp, 1_400_000_000, 1_000_000_000);
+        let price = UsdIcp::from(Decimal::ONE);
+        assert_eq!(state.compute_recovery_repay_cap(&vault, price), None);
+        assert_eq!(
+            state.legacy_recovery_or_full_repay_amount(&vault, Mode::Recovery, price),
+            None
+        );
+        assert_eq!(
+            state.effective_liquidation_amount(&vault, price, None),
+            state.compute_partial_liquidation_cap(&vault, price)
         );
     }
 

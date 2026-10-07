@@ -89,13 +89,15 @@ pub fn note_xrc_failure_at(state: &mut State, now_ns: u64) -> Option<Event> {
 
 /// Wave-14a CDP-01: record an XRC fetch success. Resets the consecutive-
 /// failure counter to 0. If ReadOnly was triggered by the oracle path,
-/// clears it back to `GeneralAvailability`. Operator-set ReadOnly is
-/// preserved.
+/// clears it back to `GeneralAvailability` unless an explicit manual hold is
+/// active. Recovery-exit uses that hold while refreshing every price input to
+/// TCR, then clears the latch synchronously after all inputs pass.
 pub fn note_xrc_success(state: &mut State) {
     state.consecutive_xrc_failures = 0;
 
     if state.mode == Mode::ReadOnly
         && state.mode_triggered_by_oracle
+        && !state.manual_mode_override
         && state.deficit_readonly_latched_at_e8s.is_none()
     {
         state.mode = Mode::GeneralAvailability;
@@ -887,7 +889,9 @@ pub async fn fetch_icp_rate() {
         crate::storage::record_event(&ev);
     }
     if let Some(last_icp_rate) = read_state(|s| s.last_icp_rate) {
-        mutate_state(|s| s.update_total_collateral_ratio_and_mode(last_icp_rate));
+        mutate_state(|s| {
+            s.update_total_collateral_ratio_and_mode_at(last_icp_rate, ic_cdk::api::time())
+        });
     }
     // Do not serialize future ICP publications behind an LST rate-canister
     // await. The LST helper has its own per-collateral guard and verifies the

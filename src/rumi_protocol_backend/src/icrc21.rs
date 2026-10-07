@@ -108,6 +108,40 @@ fn format_icusd_amount(e8s: u64) -> String {
     format!("{:.2} icUSD", icusd)
 }
 
+fn format_token_amount_exact(raw: u64, decimals: u8, symbol: &str) -> String {
+    if decimals > 38 {
+        return format!("{} raw units ({} decimals) {}", raw, decimals, symbol);
+    }
+    let scale = 10u128.pow(u32::from(decimals));
+    let whole = u128::from(raw) / scale;
+    let fraction = u128::from(raw) % scale;
+    if decimals == 0 || fraction == 0 {
+        return format!("{} {}", whole, symbol);
+    }
+    let fractional = format!("{:0width$}", fraction, width = usize::from(decimals));
+    format!("{}.{} {}", whole, fractional.trim_end_matches('0'), symbol)
+}
+
+fn format_icusd_amount_exact(e8s: u64) -> String {
+    format_token_amount_exact(e8s, 8, "icUSD")
+}
+
+fn safe_token_symbol(symbol: &str) -> String {
+    let mut safe = String::new();
+    for ch in symbol.chars().take(16) {
+        safe.push(if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            ch
+        } else {
+            '_'
+        });
+    }
+    if safe.is_empty() {
+        UNKNOWN_COLLATERAL_LABEL.to_string()
+    } else {
+        safe
+    }
+}
+
 /// Human-readable label for a collateral whose symbol is unknown (not yet
 /// backfilled, or a fetch failure). We deliberately do NOT default to "ICP" —
 /// that is the exact bug this module is fixing.
@@ -128,9 +162,7 @@ fn resolve_collateral_display(collateral_type: Option<Principal>) -> (String, u8
         let ct = collateral_type.unwrap_or_else(|| s.icp_collateral_type());
         match s.get_collateral_config(&ct) {
             Some(cfg) => (
-                cfg.symbol
-                    .clone()
-                    .unwrap_or_else(|| UNKNOWN_COLLATERAL_LABEL.to_string()),
+                safe_token_symbol(cfg.symbol.as_deref().unwrap_or(UNKNOWN_COLLATERAL_LABEL)),
                 cfg.decimals,
             ),
             None => (UNKNOWN_COLLATERAL_LABEL.to_string(), 8),
@@ -168,13 +200,123 @@ fn format_collateral_amount(raw: u64, decimals: u8, symbol: &str) -> String {
     format!("{} {}", s, symbol)
 }
 
-/// Helper to convert bytes to hex string for debugging
-fn bytes_to_hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<Vec<_>>()
-        .join(" ")
+const MAX_CONSENT_METHOD_DISPLAY_CHARS: usize = 64;
+
+fn safe_method_display(method: &str) -> String {
+    let truncated = method.chars().count() > MAX_CONSENT_METHOD_DISPLAY_CHARS;
+    let mut display: String = method
+        .chars()
+        .take(MAX_CONSENT_METHOD_DISPLAY_CHARS)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if truncated {
+        display.push_str("...");
+    }
+    display
+}
+
+const MAX_LINE_DISPLAY_CHARS_PER_LINE: u16 = 256;
+const MAX_LINE_DISPLAY_LINES_PER_PAGE: u16 = 256;
+const MAX_LINE_DISPLAY_PAGES: usize = 256;
+const MAX_CONSENT_VALUE_CHARS: usize = 64;
+
+fn safe_consent_value(value: &str) -> String {
+    let mut safe = String::new();
+    let mut truncated = false;
+    for ch in value.chars() {
+        if safe.chars().count() >= MAX_CONSENT_VALUE_CHARS {
+            truncated = true;
+            break;
+        }
+        if ch.is_control()
+            || is_bidi_format_control(ch)
+            || matches!(ch, '*' | '`' | '_' | '[' | ']' | '(' | ')' | '<' | '>')
+        {
+            safe.push('_');
+        } else {
+            safe.push(ch);
+        }
+    }
+    if truncated {
+        safe.push_str("...");
+    }
+    safe
+}
+
+fn is_bidi_format_control(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x061C | 0x200E..=0x200F | 0x202A..=0x202E | 0x2060..=0x2069 | 0xFEFF
+    )
+}
+
+fn line_display_message(
+    message: &str,
+    requested_characters_per_line: u16,
+    requested_lines_per_page: u16,
+) -> Option<ConsentMessage> {
+    let chars = usize::from(requested_characters_per_line.clamp(1, MAX_LINE_DISPLAY_CHARS_PER_LINE));
+    let lines = usize::from(requested_lines_per_page.clamp(1, MAX_LINE_DISPLAY_LINES_PER_PAGE));
+
+    let all_lines: Vec<String> = message
+        .lines()
+        .flat_map(|line| {
+            // Remove markdown formatting for line displays.
+            let clean_line = line
+                .replace("##", "")
+                .replace("**", "")
+                .replace('*', "")
+                .trim()
+                .to_string();
+
+            if clean_line.is_empty() {
+                vec![]
+            } else if clean_line.chars().count() <= chars {
+                vec![clean_line]
+            } else {
+                let mut wrapped = Vec::new();
+                let mut current_line = String::new();
+                for word in clean_line.split_whitespace() {
+                    if current_line.is_empty() {
+                        current_line = String::new();
+                    } else if current_line.chars().count() + 1 + word.chars().count() <= chars {
+                        current_line.push(' ');
+                    } else if !current_line.is_empty() {
+                        wrapped.push(current_line);
+                        current_line = String::new();
+                    }
+                    for ch in word.chars() {
+                        if current_line.chars().count() >= chars {
+                            wrapped.push(current_line);
+                            current_line = String::new();
+                        }
+                        current_line.push(ch);
+                    }
+                }
+                if !current_line.is_empty() {
+                    wrapped.push(current_line);
+                }
+                wrapped
+            }
+        })
+        .collect();
+
+    if all_lines.len() > lines * MAX_LINE_DISPLAY_PAGES {
+        return None;
+    }
+    let pages: Vec<LineDisplayPage> = all_lines
+        .chunks(lines)
+        .map(|chunk| LineDisplayPage {
+            lines: chunk.to_vec(),
+        })
+        .collect();
+    Some(ConsentMessage::LineDisplayMessage { pages })
 }
 
 /// Try to decode a u64 from Candid bytes, handling empty args gracefully
@@ -220,18 +362,6 @@ fn try_decode_principal_u64(
     match Decode!(arg, Principal, u64) {
         Ok((ct, amount)) => Ok(Some((ct, amount))),
         Err(_) => Ok(None),
-    }
-}
-
-/// Try to decode two u64 values from Candid bytes
-fn try_decode_u64_pair(arg: &[u8], _method_name: &str) -> Result<Option<(u64, u64)>, String> {
-    if arg.is_empty() || arg.len() < 6 {
-        return Ok(None);
-    }
-
-    match Decode!(arg, u64, u64) {
-        Ok(values) => Ok(Some(values)),
-        Err(_) => Ok(None), // Graceful fallback - return generic message
     }
 }
 
@@ -398,19 +528,13 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
             match try_decode_vault_arg(arg, "repay_to_vault")? {
                 Some(vault_arg) => Ok(format!(
                     "## Repay icUSD\n\n\
-                    You are repaying **{}** to vault #{}.\n\n\
-                    This will:\n\
-                    - Burn the icUSD from your balance\n\
-                    - Increase your collateral ratio",
+                    The legacy repayment endpoint for vault #{} is disabled. The requested amount is **{}**, but this call will not pull or burn icUSD.",
+                    vault_arg.vault_id,
                     format_icusd_amount(vault_arg.amount),
-                    vault_arg.vault_id
                 )),
                 None => Ok(
                     "## Repay icUSD\n\n\
-                    You are repaying icUSD to your vault.\n\n\
-                    This will:\n\
-                    - Burn the icUSD from your balance\n\
-                    - Increase your collateral ratio".to_string()
+                    The legacy repayment endpoint is disabled and will not pull or burn icUSD. Use the request-ID repayment endpoint.".to_string()
                 ),
             }
         }
@@ -419,21 +543,13 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
             match try_decode_vault_arg(arg, "repay_and_close_vault")? {
                 Some(vault_arg) => Ok(format!(
                     "## Repay and Close Vault\n\n\
-                    You are repaying **{}** to vault #{} and closing it.\n\n\
-                    This will:\n\
-                    - Burn the icUSD from your balance\n\
-                    - Return all remaining collateral to your wallet\n\
-                    - Remove the vault from the protocol",
+                    This legacy endpoint is disabled. It would request **{}** icUSD for vault #{}, but it will not pull or burn tokens or close the vault.",
                     format_icusd_amount(vault_arg.amount),
                     vault_arg.vault_id
                 )),
                 None => Ok(
                     "## Repay and Close Vault\n\n\
-                    You are repaying icUSD to your vault and closing it.\n\n\
-                    This will:\n\
-                    - Burn the icUSD from your balance\n\
-                    - Return all remaining collateral to your wallet\n\
-                    - Remove the vault from the protocol".to_string()
+                    This legacy endpoint is disabled and will not pull or burn tokens or close the vault.".to_string()
                 ),
             }
         }
@@ -445,7 +561,7 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
                     You are closing vault #{}.\n\n\
                     **Requirements:**\n\
                     - All borrowed icUSD must be repaid first\n\n\
-                    Your remaining collateral will be returned to your wallet.",
+                    Closing this vault removes it from the protocol without transferring collateral. All debt must be repaid and collateral withdrawn first.",
                     vault_id
                 )),
                 None => Ok(
@@ -453,14 +569,14 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
                     You are closing your vault.\n\n\
                     **Requirements:**\n\
                     - All borrowed icUSD must be repaid first\n\n\
-                    Your remaining collateral will be returned to your wallet.".to_string()
+                    Closing this vault removes it from the protocol without transferring collateral. All debt must be repaid and collateral withdrawn first.".to_string()
                 ),
             }
         }
         
         "withdraw_collateral" => {
             // Argument is the VAULT ID (nat64), not an amount — this endpoint
-            // withdraws all excess collateral and computes the amount itself, so
+            // withdraws all collateral after debt reaches zero and computes the amount itself, so
             // the consent message references the vault and its collateral token
             // rather than a (nonexistent) amount.
             match try_decode_u64(arg, "withdraw_collateral")? {
@@ -468,16 +584,14 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
                     let (symbol, _decimals) = resolve_collateral_for_vault(vault_id);
                     Ok(format!(
                         "## Withdraw Collateral\n\n\
-                        You are withdrawing excess **{}** collateral from vault #{}.\n\n\
-                        Only collateral above the minimum ratio can be withdrawn.",
+                        You are withdrawing all **{}** collateral from vault #{} after repaying all debt.",
                         symbol,
                         vault_id
                     ))
                 }
                 None => Ok(
                     "## Withdraw Collateral\n\n\
-                    You are withdrawing excess collateral from your vault.\n\n\
-                    Only collateral above the minimum ratio can be withdrawn.".to_string()
+                    This call withdraws all collateral from your vault after all debt is repaid.".to_string()
                 ),
             }
         }
@@ -506,65 +620,129 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
             match try_decode_u64(arg, "liquidate_vault")? {
                 Some(vault_id) => Ok(format!(
                     "## Liquidate Vault\n\n\
-                    You are liquidating vault #{} which is undercollateralized.\n\n\
-                    This will:\n\
-                    - Use icUSD from the stability pool to cover the debt\n\
-                    - Transfer the vault's collateral to liquidators\n\n\
-                    *You will receive a liquidation reward.*",
+                    The legacy liquidation endpoint for vault #{} is currently unavailable. No icUSD will be pulled and no collateral will be transferred.",
                     vault_id
                 )),
                 None => Ok(
                     "## Liquidate Vault\n\n\
-                    You are liquidating an undercollateralized vault.\n\n\
-                    This will:\n\
-                    - Use icUSD from the stability pool to cover the debt\n\
-                    - Transfer the vault's collateral to liquidators\n\n\
-                    *You will receive a liquidation reward.*".to_string()
+                    This legacy liquidation endpoint is currently unavailable. No icUSD will be pulled and no collateral will be transferred.".to_string()
                 ),
             }
         }
         
         "liquidate_vault_partial" => {
-            match try_decode_u64_pair(arg, "liquidate_vault_partial")? {
-                Some((vault_id, amount)) => Ok(format!(
-                    "## Partial Liquidation\n\n\
-                    You are partially liquidating vault #{} for **{}**.\n\n\
-                    This will:\n\
-                    - Repay part of the vault's debt\n\
-                    - Transfer proportional collateral to you at a discount\n\n\
-                    *You will receive the collateral at a discount to market rate.*",
-                    vault_id,
-                    format_icusd_amount(amount)
+            match try_decode_vault_arg(arg, "liquidate_vault_partial")? {
+                Some(vault_arg) => Ok(format!(
+                    "## Partial liquidation\n\n\
+                    This legacy endpoint is unavailable. The requested amount is **{}** icUSD for vault #{}, but no funds will be pulled or transferred.",
+                    format_icusd_amount(vault_arg.amount),
+                    vault_arg.vault_id
                 )),
                 None => Ok(
                     "## Partial Liquidation\n\n\
-                    You are partially liquidating an undercollateralized vault.\n\n\
-                    This will:\n\
-                    - Repay part of the vault's debt\n\
-                    - Transfer proportional collateral to you at a discount\n\n\
-                    *You will receive the collateral at a discount to market rate.*".to_string()
+                    This legacy endpoint is unavailable and will not pull or transfer funds.".to_string()
                 ),
             }
         }
+
+        "partial_repay_to_vault" => match try_decode_vault_arg(arg, "partial_repay_to_vault")? {
+            Some(vault_arg) => Ok(format!(
+                "## Partial icUSD repayment\n\n\
+                This legacy endpoint for vault #{} is disabled. The requested amount is **{}**, but this call will not pull or burn icUSD. Use the request-ID repayment endpoint.",
+                vault_arg.vault_id,
+                format_icusd_amount(vault_arg.amount)
+            )),
+            None => Ok(
+                "## Partial icUSD repayment\n\n\
+                This legacy endpoint is disabled and will not pull or burn icUSD. Use the request-ID repayment endpoint."
+                    .to_string(),
+            ),
+        },
+
+        "partial_liquidate_vault" => match try_decode_vault_arg(arg, "partial_liquidate_vault")? {
+            Some(vault_arg) => Ok(format!(
+                "## Partial liquidation\n\n\
+                This legacy endpoint for vault #{} is unavailable. The requested amount is **{}** icUSD, but this call will not transfer funds.",
+                vault_arg.vault_id,
+                format_icusd_amount(vault_arg.amount)
+            )),
+            None => Ok(
+                "## Partial liquidation\n\n\
+                This legacy endpoint is unavailable and will not transfer funds."
+                    .to_string(),
+            ),
+        },
+
+        "withdraw_partial_collateral" => match try_decode_vault_arg(arg, "withdraw_partial_collateral")? {
+            Some(vault_arg) => {
+                let (symbol, decimals) = resolve_collateral_for_vault(vault_arg.vault_id);
+                Ok(format!(
+                    "## Withdraw collateral\n\n\
+                    You are requesting withdrawal of **{}** from vault #{}. The collateral will be sent to your wallet if the request passes protocol checks.",
+                    format_collateral_amount(vault_arg.amount, decimals, &symbol),
+                    vault_arg.vault_id
+                ))
+            }
+            None => Ok(
+                "## Withdraw collateral\n\n\
+                This call requests a partial withdrawal of collateral from your vault to your wallet."
+                    .to_string(),
+            ),
+        },
+
+        "repay_to_vault_with_stable" => match Decode!(arg, crate::VaultArgWithToken) {
+            Ok(vault_arg) => {
+                let token = match vault_arg.token_type {
+                    crate::StableTokenType::CKUSDT => "ckUSDT",
+                    crate::StableTokenType::CKUSDC => "ckUSDC",
+                };
+                Ok(format!(
+                    "## Repay vault with {}\n\n\
+                    This legacy endpoint is disabled. It would request {} raw units of {} from your balance for vault #{}, but this call will not pull or burn tokens.",
+                    token,
+                    vault_arg.amount,
+                    token,
+                    vault_arg.vault_id
+                ))
+            }
+            Err(_) => Ok(
+                "## Repay vault with stablecoin\n\n\
+                This legacy endpoint is disabled and will not pull or burn tokens."
+                    .to_string(),
+            ),
+        },
+
+        "liquidate_vault_partial_with_stable" => match Decode!(arg, crate::VaultArgWithToken) {
+            Ok(vault_arg) => {
+                let token = match vault_arg.token_type {
+                    crate::StableTokenType::CKUSDT => "ckUSDT",
+                    crate::StableTokenType::CKUSDC => "ckUSDC",
+                };
+                Ok(format!(
+                    "## Stablecoin liquidation\n\n\
+                    This legacy endpoint is unavailable. It would request {} raw units of {} from your balance for vault #{}, but this call will not pull tokens.",
+                    vault_arg.amount,
+                    token,
+                    vault_arg.vault_id
+                ))
+            }
+            Err(_) => Ok(
+                "## Stablecoin liquidation\n\n\
+                This legacy endpoint is unavailable and will not pull tokens."
+                    .to_string(),
+            ),
+        },
         
         "provide_liquidity" => {
             match try_decode_u64(arg, "provide_liquidity")? {
                 Some(amount) => Ok(format!(
-                    "## Provide Liquidity to Stability Pool\n\n\
-                    You are depositing **{}** to the stability pool.\n\n\
-                    Benefits:\n\
-                    - Earn rewards from liquidations\n\
-                    - Support the protocol's stability\n\n\
-                    *You can withdraw your liquidity at any time.*",
+                    "## Deposit icUSD\n\n\
+                    The legacy liquidity endpoint is disabled. It would request **{}** icUSD, but this call will not pull tokens.",
                     format_icusd_amount(amount)
                 )),
                 None => Ok(
-                    "## Provide Liquidity to Stability Pool\n\n\
-                    You are depositing icUSD to the stability pool.\n\n\
-                    Benefits:\n\
-                    - Earn rewards from liquidations\n\
-                    - Support the protocol's stability\n\n\
-                    *You can withdraw your liquidity at any time.*".to_string()
+                    "## Deposit icUSD\n\n\
+                    The legacy liquidity endpoint is disabled and will not pull icUSD.".to_string()
                 ),
             }
         }
@@ -572,23 +750,20 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
         "withdraw_liquidity" => {
             match try_decode_u64(arg, "withdraw_liquidity")? {
                 Some(amount) => Ok(format!(
-                    "## Withdraw from Stability Pool\n\n\
-                    You are withdrawing **{}** from the stability pool.\n\n\
-                    Your icUSD will be returned to your wallet.",
+                    "## Withdraw icUSD\n\n\
+                    The legacy liquidity endpoint is disabled. It would request **{}** icUSD, but this call will not mint or transfer tokens.",
                     format_icusd_amount(amount)
                 )),
                 None => Ok(
-                    "## Withdraw from Stability Pool\n\n\
-                    You are withdrawing icUSD from the stability pool.\n\n\
-                    Your icUSD will be returned to your wallet.".to_string()
+                    "## Withdraw icUSD\n\n\
+                    The legacy liquidity endpoint is disabled and will not mint or transfer icUSD.".to_string()
                 ),
             }
         }
         
         "claim_liquidity_returns" => {
-            Ok("## Claim Liquidation Rewards\n\n\
-                You are claiming your accumulated liquidation rewards.\n\n\
-                This will transfer all earned ICP collateral to your wallet.".to_string())
+            Ok("## Claim Liquidity Returns\n\n\
+                The legacy liquidity endpoint is disabled and will not transfer rewards.".to_string())
         }
         
         "redeem_collateral" => {
@@ -599,24 +774,15 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
                     let (symbol, _decimals) = resolve_collateral_display(Some(collateral_type));
                     Ok(format!(
                         "## Redeem icUSD for {}\n\n\
-                        You are redeeming **{}** for {}.\n\n\
-                        This will:\n\
-                        - Burn your icUSD\n\
-                        - Transfer {} to your wallet at the current oracle rate\n\n\
-                        *A small redemption fee may apply.*",
+                        Redemptions are currently paused. This call will not pull or burn **{}** icUSD or transfer {}.",
                         symbol,
                         format_icusd_amount(amount),
-                        symbol,
                         symbol
                     ))
                 }
                 None => Ok(
                     "## Redeem icUSD for Collateral\n\n\
-                    You are redeeming icUSD for collateral.\n\n\
-                    This will:\n\
-                    - Burn your icUSD\n\
-                    - Transfer collateral to your wallet at the current oracle rate\n\n\
-                    *A small redemption fee may apply.*".to_string()
+                    Redemptions are currently paused. This call will not pull or burn icUSD or transfer collateral.".to_string()
                 ),
             }
         }
@@ -625,21 +791,138 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
             match try_decode_u64(arg, "redeem_icp")? {
                 Some(amount) => Ok(format!(
                     "## Redeem icUSD for ICP\n\n\
-                    You are redeeming **{}** for ICP.\n\n\
-                    This will:\n\
-                    - Burn your icUSD\n\
-                    - Transfer ICP to your wallet at the current oracle rate\n\n\
-                    *A small redemption fee may apply.*",
+                    Redemptions are currently paused. This call will not pull or burn **{}** icUSD or transfer ICP.",
                     format_icusd_amount(amount)
                 )),
                 None => Ok(
                     "## Redeem icUSD for ICP\n\n\
-                    You are redeeming icUSD for ICP.\n\n\
-                    This will:\n\
-                    - Burn your icUSD\n\
-                    - Transfer ICP to your wallet at the current oracle rate\n\n\
-                    *A small redemption fee may apply.*".to_string()
+                    Redemptions are currently paused. This call will not pull or burn icUSD or transfer ICP.".to_string()
                 ),
+            }
+        }
+
+        "redeem_quoted" => match Decode!(arg, crate::RedeemQuotedRequest) {
+            Ok(request) => Ok(format!(
+                "## Redeem icUSD for collateral\n\n\
+                Redemptions are currently paused. This call will not pull **{}** icUSD or transfer collateral to {}. The requested minimum output is {} raw units.",
+                format_icusd_amount(request.amount_e8s),
+                resolve_collateral_display(Some(request.expected_collateral_type)).0,
+                request.min_net_collateral_raw
+            )),
+            Err(_) => Ok(
+                "## Redeem icUSD for collateral\n\n\
+                Redemptions are currently paused. This call will not pull icUSD or transfer collateral."
+                    .to_string(),
+            ),
+        },
+
+        "redeem_quoted_v2" => match Decode!(arg, crate::state::RedemptionV2Request) {
+            Ok(request) => {
+                let (symbol, decimals) =
+                    resolve_collateral_display(Some(request.expected_collateral_type));
+                Ok(format!(
+                    "## Redeem icUSD for collateral\n\n\
+                    Request **{}** asks to pull and burn **{}** icUSD for a minimum payout of **{}**.\n\n\
+                    If accepted, payout is queued to the caller's account in {}. Verify the request ID, amounts, and collateral asset.",
+                    request.request_id,
+                    format_icusd_amount_exact(request.amount_e8s),
+                    format_token_amount_exact(
+                        request.min_net_collateral_raw,
+                        decimals,
+                        &symbol
+                    ),
+                    symbol
+                ))
+            }
+            Err(_) => Ok(
+                "## Redeem icUSD for collateral\n\n\
+                This request-ID redemption can pull and burn icUSD and queue collateral payout to your caller account. Verify the request ID and decoded amounts in your wallet before approving."
+                    .to_string(),
+            ),
+        },
+
+        "redeem_reserves" => match Decode!(arg, u64, Option<Principal>) {
+            Ok((amount, preferred_token)) => {
+                let token = preferred_token
+                    .map(|ct| resolve_collateral_display(Some(ct)).0)
+                    .unwrap_or_else(|| "an eligible reserve asset".to_string());
+                Ok(format!(
+                    "## Redeem reserves\n\n\
+                    You are requesting redemption of **{}** icUSD for {}.\n\n\
+                    This endpoint is currently paused; no icUSD will be pulled while it is unavailable.",
+                    format_icusd_amount(amount),
+                    token
+                ))
+            }
+            Err(_) => Ok(
+                "## Redeem reserves\n\n\
+                This endpoint is currently paused; no icUSD will be pulled while it is unavailable."
+                    .to_string(),
+            ),
+        },
+
+        "settle_xrp_claim" => match Decode!(arg, u64, String) {
+            Ok((claim_id, destination)) => Ok(format!(
+                "## Settle XRP claim\n\n\
+                You are requesting payout of XRP claim #{} to XRPL address **{}**. Verify this destination carefully.",
+                claim_id, safe_consent_value(&destination)
+            )),
+            Err(_) => Ok(
+                "## Settle XRP claim\n\n\
+                This call sends an XRP claim to the XRPL destination supplied in the arguments. Verify the destination in your wallet before approving."
+                    .to_string(),
+            ),
+        },
+
+        "settle_xrp_claim_with_tag" => match Decode!(arg, u64, String, u32) {
+            Ok((claim_id, destination, tag)) => Ok(format!(
+                "## Settle XRP claim\n\n\
+                You are requesting payout of XRP claim #{} to XRPL address **{}** with destination tag **{}**. Verify both values carefully.",
+                claim_id, safe_consent_value(&destination), tag
+            )),
+            Err(_) => Ok(
+                "## Settle XRP claim\n\n\
+                This call sends an XRP claim to the XRPL destination and tag supplied in the arguments. Verify both in your wallet before approving."
+                    .to_string(),
+            ),
+        },
+
+        "open_xrp_vault" => Ok(
+            "## Open XRP vault\n\n\
+            This requests XRP vault setup and returns deposit information if the route is enabled. It does not transfer XRP or credit collateral; any deposit and confirmation are separate steps."
+                .to_string(),
+        ),
+
+        "open_chain_vault_evm"
+        | "borrow_chain_vault_evm"
+        | "withdraw_chain_collateral_evm"
+        | "close_chain_vault_evm" => {
+            type Intent = crate::chains::evm::eip712::VaultIntent;
+            match Decode!(arg, Intent, Vec<u8>) {
+                Ok((intent, _signature)) => {
+                    let action = match method {
+                        "open_chain_vault_evm" => "open a vault",
+                        "borrow_chain_vault_evm" => "borrow icUSD",
+                        "withdraw_chain_collateral_evm" => "withdraw collateral",
+                        _ => "close a vault",
+                    };
+                    Ok(format!(
+                        "## EVM signed intent: {}\n\n\
+                        This signed request will {} on chain {} for vault #{}. Collateral: {} raw units; debt: {} e8s. Recipient: {}. Verify the signed intent and recipient in your wallet.",
+                        method,
+                        action,
+                        intent.chain_id,
+                        intent.vault_id,
+                        intent.collateral_wei,
+                        intent.debt_e8s,
+                        intent.recipient
+                    ))
+                }
+                Err(_) => Ok(format!(
+                    "## EVM signed intent: {}\n\n\
+                    This call submits a signed EVM vault action. Verify its action, amounts, chain, vault, and recipient in your wallet before approving.",
+                    method
+                )),
             }
         }
         
@@ -704,10 +987,9 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
         _ => {
             // Unknown method - provide a generic message
             Ok(format!(
-                "## Rumi Protocol Action\n\n\
-                You are calling the **{}** method on the Rumi Protocol.\n\n\
-                *Please verify this action before approving.*",
-                method
+                "## Rumi Protocol Action: {}\n\n\
+                Review the method name and arguments in your wallet before approving. The effect could not be decoded here.",
+                safe_method_display(method)
             ))
         }
     }
@@ -717,25 +999,14 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
 pub fn icrc21_canister_call_consent_message(
     request: ConsentMessageRequest,
 ) -> Icrc21ConsentMessageResult {
-    // Log the incoming request for debugging
-    ic_cdk::println!(
-        "[ICRC21] Consent message request - method: {}, arg_len: {}, arg_hex: {}, language: {}",
-        request.method,
-        request.arg.len(),
-        bytes_to_hex(&request.arg),
-        request.user_preferences.metadata.language
-    );
+    // This endpoint accepts anonymous ingress. Keep caller-controlled method,
+    // language, and argument data out of logs.
+    ic_cdk::println!("[ICRC21] Consent message request received");
 
     let message = match generate_consent_message(&request.method, &request.arg) {
-        Ok(msg) => {
-            ic_cdk::println!(
-                "[ICRC21] Generated message successfully for method: {}",
-                request.method
-            );
-            msg
-        }
+        Ok(msg) => msg,
         Err(description) => {
-            ic_cdk::println!("[ICRC21] Error generating message: {}", description);
+            ic_cdk::println!("[ICRC21] Consent message generation unavailable");
             return Err(Icrc21Error::ConsentMessageUnavailable(ErrorInfo {
                 description,
             }));
@@ -747,58 +1018,10 @@ pub fn icrc21_canister_call_consent_message(
             characters_per_line,
             lines_per_page,
         }) => {
-            // Format for line displays (hardware wallets)
-            let chars = *characters_per_line as usize;
-            let lines = *lines_per_page as usize;
-
-            // Simple line breaking - split by newlines first, then wrap long lines
-            let all_lines: Vec<String> = message
-                .lines()
-                .flat_map(|line| {
-                    // Remove markdown formatting for line displays
-                    let clean_line = line
-                        .replace("##", "")
-                        .replace("**", "")
-                        .replace("*", "")
-                        .trim()
-                        .to_string();
-
-                    if clean_line.is_empty() {
-                        vec![]
-                    } else if clean_line.len() <= chars {
-                        vec![clean_line]
-                    } else {
-                        // Word wrap
-                        let mut wrapped = Vec::new();
-                        let mut current_line = String::new();
-                        for word in clean_line.split_whitespace() {
-                            if current_line.is_empty() {
-                                current_line = word.to_string();
-                            } else if current_line.len() + 1 + word.len() <= chars {
-                                current_line.push(' ');
-                                current_line.push_str(word);
-                            } else {
-                                wrapped.push(current_line);
-                                current_line = word.to_string();
-                            }
-                        }
-                        if !current_line.is_empty() {
-                            wrapped.push(current_line);
-                        }
-                        wrapped
-                    }
-                })
-                .collect();
-
-            // Split into pages
-            let pages: Vec<LineDisplayPage> = all_lines
-                .chunks(lines)
-                .map(|chunk| LineDisplayPage {
-                    lines: chunk.to_vec(),
-                })
-                .collect();
-
-            ConsentMessage::LineDisplayMessage { pages }
+            line_display_message(&message, *characters_per_line, *lines_per_page)
+                // ICRC-21 prefers a fallback message when requested formatting is
+                // unsupported. This also bounds the number of generated pages.
+                .unwrap_or_else(|| ConsentMessage::GenericDisplayMessage(message))
         }
         _ => {
             // Generic display - use markdown
@@ -931,5 +1154,183 @@ mod tests {
                 "generic {method} consent message must not hardcode ICP: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn consent_messages_describe_financial_effects_and_destinations() {
+        crate::state::replace_state(crate::state::State::default());
+
+        let liquidation =
+            generate_consent_message("liquidate_vault", &Encode!(&7u64).unwrap()).unwrap();
+        assert!(liquidation.contains("currently unavailable"));
+        assert!(liquidation.contains("No icUSD will be pulled"));
+        assert!(!liquidation.contains("stability pool"));
+
+        let close = generate_consent_message("close_vault", &Encode!(&7u64).unwrap()).unwrap();
+        assert!(close.contains("without transferring collateral"));
+
+        let withdrawal =
+            generate_consent_message("withdraw_collateral", &Encode!(&7u64).unwrap()).unwrap();
+        assert!(withdrawal.contains("all"));
+        assert!(withdrawal.contains("after repaying all debt"));
+
+        let deposit =
+            generate_consent_message("provide_liquidity", &Encode!(&125_000_000u64).unwrap())
+                .unwrap();
+        assert!(deposit.contains("disabled"));
+        assert!(deposit.contains("will not pull tokens"));
+        assert!(!deposit.contains("Earn rewards"));
+
+        let withdrawal =
+            generate_consent_message("withdraw_liquidity", &Encode!(&125_000_000u64).unwrap())
+                .unwrap();
+        assert!(withdrawal.contains("disabled"));
+        assert!(withdrawal.contains("will not mint or transfer"));
+
+        let destination = "rDestination123".to_string();
+        let settlement =
+            generate_consent_message("settle_xrp_claim", &Encode!(&9u64, &destination).unwrap())
+                .unwrap();
+        assert!(settlement.contains(&destination));
+
+        let tagged_settlement = generate_consent_message(
+            "settle_xrp_claim_with_tag",
+            &Encode!(&9u64, &destination, &42u32).unwrap(),
+        )
+        .unwrap();
+        assert!(tagged_settlement.contains(&destination));
+        assert!(tagged_settlement.contains("42"));
+    }
+
+    #[test]
+    fn generic_method_display_is_printable_and_bounded() {
+        let method = format!("bad\n**{}💣", "x".repeat(100));
+        let display = safe_method_display(&method);
+        assert!(display.len() <= MAX_CONSENT_METHOD_DISPLAY_CHARS + 3);
+        assert!(!display.contains('\n'));
+        assert!(!display.contains('*'));
+        assert!(display.ends_with("..."));
+
+        let message = generate_consent_message(&method, &[]).unwrap();
+        assert!(message.len() < 256);
+        assert!(!message.contains("bad\n"));
+        assert!(!message.contains("💣"));
+    }
+
+    #[test]
+    fn anonymous_consent_with_zero_line_dimensions_does_not_trap() {
+        let request = ConsentMessageRequest {
+            method: "unrecognized_method".to_string(),
+            arg: vec![],
+            user_preferences: ConsentMessageSpec {
+                metadata: ConsentMessageMetadata {
+                    language: "en".to_string(),
+                    utc_offset_minutes: None,
+                },
+                device_spec: Some(DeviceSpec::LineDisplay {
+                    characters_per_line: 0,
+                    lines_per_page: 0,
+                }),
+            },
+        };
+
+        let response = icrc21_canister_call_consent_message(request).unwrap();
+        match response.consent_message {
+            ConsentMessage::LineDisplayMessage { pages } => {
+                assert!(!pages.is_empty());
+                assert!(pages.len() <= MAX_LINE_DISPLAY_PAGES);
+                assert!(pages.iter().all(|page| !page.lines.is_empty()));
+            }
+            ConsentMessage::GenericDisplayMessage(_) => {
+                panic!("small zero-dimension request should normalize and render as line display")
+            }
+        }
+    }
+
+    #[test]
+    fn line_display_bounds_extreme_dimensions_and_page_count() {
+        let message = "word ".repeat(MAX_LINE_DISPLAY_PAGES + 1);
+        assert!(line_display_message(&message, 0, 0).is_none());
+
+        let message = "short text";
+        let rendered =
+            line_display_message(&message, u16::MAX, u16::MAX).expect("bounded display output");
+        match rendered {
+            ConsentMessage::LineDisplayMessage { pages } => {
+                assert_eq!(pages.len(), 1);
+                assert!(pages[0].lines.len() <= usize::from(MAX_LINE_DISPLAY_LINES_PER_PAGE));
+                assert!(pages[0]
+                    .lines
+                    .iter()
+                    .all(|line| line.len() <= usize::from(MAX_LINE_DISPLAY_CHARS_PER_LINE)));
+            }
+            ConsentMessage::GenericDisplayMessage(_) => panic!("expected bounded line display"),
+        }
+    }
+
+    #[test]
+    fn quoted_v2_consent_identifies_request_amount_asset_and_minimum() {
+        crate::state::replace_state(crate::state::State::default());
+        let request = crate::state::RedemptionV2Request {
+            request_id: u128::MAX,
+            amount_e8s: 100_000_001,
+            expected_collateral_type: Principal::anonymous(),
+            min_net_collateral_raw: 400_000,
+        };
+        let message = generate_consent_message(
+            "redeem_quoted_v2",
+            &Encode!(&request).expect("encode request"),
+        )
+        .expect("consent message");
+
+        assert!(message.contains(&u128::MAX.to_string()));
+        assert!(message.contains("1.00000001 icUSD"));
+        assert!(message.contains("minimum payout"));
+        assert!(message.contains("caller's account"));
+    }
+
+    #[test]
+    fn consent_values_and_line_display_bound_hostile_long_content() {
+        let hostile_destination = format!("r\n**{}\u{202e}💥", "x".repeat(10_000));
+        let message = generate_consent_message(
+            "settle_xrp_claim",
+            &Encode!(&1u64, &hostile_destination).expect("encode claim"),
+        )
+        .expect("consent message");
+        assert!(message.len() < 512);
+        assert!(message.contains("..."));
+        let escaped = safe_consent_value(&hostile_destination);
+        assert!(!escaped.contains('\n'));
+        assert!(!escaped.contains("**"));
+        assert!(!escaped.contains('\u{202e}'));
+
+        let long_word = "界".repeat(1_000);
+        let rendered = line_display_message(&long_word, 7, 2).expect("bounded pages");
+        match rendered {
+            ConsentMessage::LineDisplayMessage { pages } => {
+                assert!(pages.len() <= MAX_LINE_DISPLAY_PAGES);
+                assert!(pages.iter().flat_map(|page| &page.lines).all(|line| {
+                    line.chars().count() <= 7 && line.len() <= "界".len() * 7
+                }));
+            }
+            ConsentMessage::GenericDisplayMessage(_) => panic!("expected line display"),
+        }
+    }
+
+    #[test]
+    fn exact_consent_amounts_preserve_smallest_units() {
+        assert_eq!(
+            format_icusd_amount_exact(100_000_001),
+            "1.00000001 icUSD"
+        );
+        assert_eq!(
+            format_token_amount_exact(1, 18, "ckETH"),
+            "0.000000000000000001 ckETH"
+        );
+        assert_eq!(safe_token_symbol("ckETH\u{202e}**"), "ckETH___");
+        assert_eq!(
+            format_token_amount_exact(u64::MAX, 255, "token"),
+            "18446744073709551615 raw units (255 decimals) token"
+        );
     }
 }

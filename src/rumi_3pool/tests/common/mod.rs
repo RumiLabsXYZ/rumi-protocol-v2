@@ -175,6 +175,17 @@ pub fn deploy_pool_with_liquidity_fee_and_swaps(
     n_swaps: u64,
     transfer_fee: u128,
 ) -> ThreePoolHarness {
+    deploy_pool_with_archive_cycles(n_swaps, transfer_fee, None)
+}
+
+/// Deploy the standard harness with explicit cycles forwarded when the ledger
+/// creates an archive canister. Most tests leave this unset; archive-history
+/// tests opt in so PocketIC's archive canister creation is funded.
+pub fn deploy_pool_with_archive_cycles(
+    n_swaps: u64,
+    transfer_fee: u128,
+    cycles_for_archive_creation: Option<u64>,
+) -> ThreePoolHarness {
     let pic = PocketIcBuilder::new().with_application_subnet().build();
 
     let minting_account = Principal::self_authenticating(&[100, 100, 100]);
@@ -234,7 +245,7 @@ pub fn deploy_pool_with_liquidity_fee_and_swaps(
                 controller_id: admin,
                 max_transactions_per_response: None,
                 max_message_size_bytes: None,
-                cycles_for_archive_creation: None,
+                cycles_for_archive_creation,
                 node_max_memory_size_bytes: None,
                 more_controller_ids: None,
             },

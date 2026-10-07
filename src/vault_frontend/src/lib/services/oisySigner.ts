@@ -40,7 +40,8 @@ const oisySigner = new Signer({
 
 let cachedAgent: any = null;
 let cachedPrincipalText: string | null = null;
-let preWarmedFor: string | null = null;
+const inFlightByPrincipal = new Map<string, Promise<any>>();
+let cacheWriteGeneration = 0;
 
 /**
  * Get or create a v5 SignerAgent for the given principal.
@@ -64,19 +65,36 @@ export async function getOisySignerAgent(principal: Principal): Promise<any> {
   if (cachedAgent && cachedPrincipalText === principalText) {
     return cachedAgent;
   }
+  const existing = inFlightByPrincipal.get(principalText);
+  if (existing) return existing;
 
   // Convert @dfinity/principal → @icp-sdk/core/principal via text representation.
   // The two libs have separate Principal classes; passing one to the other
   // directly causes a `_arr` mismatch (the v4-era bug).
   const sdkPrincipal = IcpSdkPrincipal.fromText(principalText);
 
-  cachedAgent = await SignerAgent.create({
-    signer: oisySigner,
-    account: sdkPrincipal,
-  });
-
-  cachedPrincipalText = principalText;
-  return cachedAgent;
+  const writeGeneration = ++cacheWriteGeneration;
+  const creation = (async () => {
+    const agent = await SignerAgent.create({
+      signer: oisySigner,
+      account: sdkPrincipal,
+    });
+    // A slower create for an old account must never replace the agent most
+    // recently requested for the active account.
+    if (writeGeneration === cacheWriteGeneration) {
+      cachedAgent = agent;
+      cachedPrincipalText = principalText;
+    }
+    return agent;
+  })();
+  inFlightByPrincipal.set(principalText, creation);
+  try {
+    return await creation;
+  } finally {
+    if (inFlightByPrincipal.get(principalText) === creation) {
+      inFlightByPrincipal.delete(principalText);
+    }
+  }
 }
 
 /**
@@ -94,14 +112,9 @@ export async function getOisySignerAgent(principal: Principal): Promise<any> {
  * means the click path falls back to a cold create, exactly as before.
  */
 export async function preWarmOisySigner(principal: Principal): Promise<void> {
-  const principalText = principal.toText();
-  if (preWarmedFor === principalText && cachedAgent) return;
   try {
     await getOisySignerAgent(principal);
-    preWarmedFor = principalText;
-  } catch {
-    preWarmedFor = null;
-  }
+  } catch { /* Best-effort prewarm; the signing path reports later failure. */ }
 }
 
 /**
@@ -127,7 +140,8 @@ export function createOisyActor(
  * Clear cached signer agent (call on wallet disconnect).
  */
 export function clearOisySigner(): void {
+  cacheWriteGeneration += 1;
   cachedAgent = null;
   cachedPrincipalText = null;
-  preWarmedFor = null;
+  inFlightByPrincipal.clear();
 }

@@ -107,23 +107,34 @@ fn arb001_redemption_waterfill_skips_locked_and_bot_vaults() {
 }
 
 #[test]
-fn arb001_bot_confirm_and_admin_resolve_saturate() {
+fn arb001_bot_confirm_saturates_but_admin_recovery_requires_proof() {
     let src = read("src/main.rs");
-    for header in [
-        "async fn bot_confirm_liquidation(",
-        "fn admin_resolve_stuck_claim(",
+    let confirm = fn_body(&src, "async fn bot_confirm_liquidation(");
+    assert!(
+        !confirm.contains("-= ICUSD::new(claim.debt_amount)"),
+        "bot confirm must not use a non-saturating debt subtraction (AR-B-001)."
+    );
+    assert!(
+        confirm.contains("saturating_sub(ICUSD::new(claim.debt_amount))"),
+        "bot confirm must saturate the claim write-down (AR-B-001)."
+    );
+
+    let admin = fn_body(&src, "fn admin_resolve_stuck_claim(");
+    assert!(
+        admin.contains("reject_unproven_stuck_claim_resolution"),
+        "the compatibility admin resolver must fail closed and direct operators to proof-backed recovery (BOT-10)."
+    );
+    for forbidden in [
+        "saturating_sub(ICUSD::new(claim.debt_amount))",
+        "vault.collateral_amount =",
+        "bot_budget_remaining_e8s +=",
+        "bot_processing = false",
+        "bot_claims.remove(",
     ] {
-        let body = fn_body(&src, header);
         assert!(
-            !body.contains("-= ICUSD::new(claim.debt_amount)"),
-            "`{}` must not use a non-saturating debt subtraction: it traps on a shrunken \
-             vault, sticking it at bot_processing=true with the bot's collateral gone (AR-B-001).",
-            header
-        );
-        assert!(
-            body.contains("saturating_sub(ICUSD::new(claim.debt_amount))"),
-            "`{}` must saturate the claim write-down (AR-B-001).",
-            header
+            !admin.contains(forbidden),
+            "the proofless admin resolver must not mutate state via `{}` (BOT-10).",
+            forbidden
         );
     }
 }

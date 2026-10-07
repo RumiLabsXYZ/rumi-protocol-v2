@@ -216,6 +216,47 @@ pub(crate) async fn ledger_transfer_fee(ledger: Principal) -> u64 {
     }
 }
 
+/// Query the ledger directly instead of trusting the process-local fee cache.
+/// Liquidation approvals use an explicit `fee` and must book the exact value
+/// offered to the ledger; a cache hit here could silently under-book after a
+/// fee change. `None` means the query failed or returned an unrepresentable fee
+/// and callers must hold the operation.
+pub(crate) async fn fresh_ledger_transfer_fee(ledger: Principal) -> Option<u64> {
+    match call::<(), (candid::Nat,)>(ledger, "icrc1_fee", ()).await {
+        Ok((fee_nat,)) => cache_fresh_ledger_fee(ledger, fee_nat),
+        Err(error) => {
+            invalidate_cached_ledger_fee(ledger);
+            log!(
+                INFO,
+                "Fresh icrc1_fee query failed for {}: {:?}; liquidation held",
+                ledger,
+                error
+            );
+            None
+        }
+    }
+}
+
+fn cache_fresh_ledger_fee(ledger: Principal, fee_nat: candid::Nat) -> Option<u64> {
+    let Ok(fee) = nat_fee_to_u64(fee_nat) else {
+        invalidate_cached_ledger_fee(ledger);
+        log!(
+            INFO,
+            "icrc1_fee returned a value exceeding u64 for {}; liquidation held",
+            ledger
+        );
+        return None;
+    };
+    LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, fee));
+    Some(fee)
+}
+
+/// A typed `BadFee` guarantees the approve had no ledger effect. Evict a
+/// potentially stale fee so a later liquidation must obtain a fresh quote.
+pub(crate) fn invalidate_cached_ledger_fee_after_approve_bad_fee(ledger: Principal) {
+    invalidate_cached_ledger_fee(ledger);
+}
+
 /// Result of an unallocated-interest transfer attempt. A `BadFee` is known not
 /// to have moved funds, so the durable receipt may safely update its fee and
 /// retry with the same timestamp/memo.
@@ -900,8 +941,9 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
 #[cfg(test)]
 mod nat_fee_conversion_tests {
     use super::{
-        invalidate_fee_cache_after_transfer_error, nat_fee_to_u64, outbound_transfer_args,
-        outbound_payout_memo, LEDGER_FEES,
+        cache_fresh_ledger_fee, invalidate_cached_ledger_fee_after_approve_bad_fee,
+        invalidate_fee_cache_after_transfer_error, nat_fee_to_u64, outbound_payout_memo,
+        outbound_transfer_args, LEDGER_FEES,
     };
     use candid::Nat;
     use candid::Principal;
@@ -970,6 +1012,30 @@ mod nat_fee_conversion_tests {
             },
         );
         assert!(LEDGER_FEES.with(|fees| !fees.borrow().contains_key(&ledger)));
+    }
+
+    #[test]
+    fn changed_approve_fee_invalidates_cache_without_authorizing_a_stale_book_debit() {
+        let ledger = Principal::from_slice(&[11]);
+        LEDGER_FEES.with(|fees| {
+            fees.borrow_mut().insert(ledger, 10);
+        });
+
+        // The explicit fee on the approve can be rejected after the ledger's
+        // fee changes. The typed BadFee has no effect; invalidate 10 so a later
+        // attempt must query the current value instead of booking it.
+        invalidate_cached_ledger_fee_after_approve_bad_fee(ledger);
+        assert_eq!(
+            LEDGER_FEES.with(|fees| fees.borrow().get(&ledger).copied()),
+            None
+        );
+
+        // A fresh query replaces the stale cache rather than returning it.
+        assert_eq!(cache_fresh_ledger_fee(ledger, Nat::from(13u64)), Some(13));
+        assert_eq!(
+            LEDGER_FEES.with(|fees| fees.borrow().get(&ledger).copied()),
+            Some(13)
+        );
     }
 
     #[test]
@@ -1712,16 +1778,14 @@ pub async fn reconcile_pending_refund_history(refund_id: u64) -> Result<(), Stab
         .saturating_add(MAX_PENDING_REFUND_HISTORY_BLOCKS_PER_CALL)
         .min(tip);
     for index in cursor..end {
-        let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(
-            refund.token_ledger,
-            index,
-        )
-        .await
-        .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
-            reason: format!(
+        let block =
+            rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(refund.token_ledger, index)
+                .await
+                .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                    reason: format!(
                 "icUSD history is incomplete at block {index}; refund remains held: {reason}"
             ),
-        })?;
+                })?;
         match validate_pending_refund_block(&refund, &block) {
             Ok(()) => {
                 let completed = mutate_state(|state| {

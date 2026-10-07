@@ -64,14 +64,13 @@
       and a CDP stablecoin is the most fundamental one.
     </p>
 
-    <h2>Open source & audited</h2>
+    <h2>Open source & security reviews</h2>
 
     <p>
       The entire codebase is public on <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener">GitHub</a>.
-      The protocol has been through an internal three-pass security review and an external
-      pre-audit by AVAI; both are fully remediated and published on the
-      <a href="/security">security page</a>. All canister IDs are public so anyone can
-      verify the code that's running.
+      The protocol has an internal three-pass review and an external pre-audit by AVAI in its
+      published history. The <a href="/security">security page</a> shows the current remediation
+      and deployment status. All canister IDs are public so anyone can check the code that's running.
     </p>
 
     <p>

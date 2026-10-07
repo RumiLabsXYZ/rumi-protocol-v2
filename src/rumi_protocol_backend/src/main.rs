@@ -745,30 +745,31 @@ fn check_postcondition<T>(t: T) -> T {
 /// but yields once to the executor; in either case, treat the call as a
 /// suspension boundary.
 async fn validate_call() -> Result<(), ProtocolError> {
-    if ic_cdk::caller() == Principal::anonymous() {
-        return Err(ProtocolError::AnonymousCallerNotAllowed);
-    }
-    // Freeze check — if frozen, reject ALL state-changing operations
-    if read_state(|s| s.frozen) {
-        return Err(ProtocolError::TemporarilyUnavailable(
-            "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
-        ));
-    }
+    validate_authenticated_unfrozen_caller(ic_cdk::caller(), read_state(|s| s.frozen))?;
     rumi_protocol_backend::xrc::ensure_fresh_price().await
 }
 
-/// Reconciliation endpoints must remain reachable when the oracle is stale;
-/// preserve identity and the protocol-wide emergency freeze policy.
-fn validate_frozen_only_recovery_call() -> Result<(), ProtocolError> {
-    if ic_cdk::caller() == Principal::anonymous() {
+/// Identity and protocol-wide emergency-freeze checks for updates whose
+/// correctness does not depend on any oracle price.
+fn validate_authenticated_unfrozen_caller(
+    caller: Principal,
+    frozen: bool,
+) -> Result<(), ProtocolError> {
+    if caller == Principal::anonymous() {
         return Err(ProtocolError::AnonymousCallerNotAllowed);
     }
-    if read_state(|s| s.frozen) {
+    if frozen {
         return Err(ProtocolError::TemporarilyUnavailable(
             "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
         ));
     }
     Ok(())
+}
+
+/// Reconciliation and price-independent risk-reducing operations must remain
+/// available during an oracle outage, while preserving caller and freeze gates.
+fn validate_price_independent_update() -> Result<(), ProtocolError> {
+    validate_authenticated_unfrozen_caller(ic_cdk::caller(), read_state(|s| s.frozen))
 }
 
 fn validate_mode() -> Result<(), ProtocolError> {
@@ -838,38 +839,88 @@ async fn validate_freshness_for_collateral(
 /// Pre-filter to reduce cycle waste from anonymous spam.
 /// Runs on ONE replica without consensus. Can be bypassed by malicious nodes.
 /// NOT a security boundary — all real access control is inside each #[update] method.
+// Update proof arguments are compact in this interface: settlement proofs carry
+// transaction hashes and log indexes, SP writedown proofs are scalar tuples,
+// and EVM signatures are validated as 65 bytes. This generous ceiling leaves
+// room for structured admin arguments while preventing multi-megabyte decoding.
+const MAX_INSPECTED_INGRESS_BYTES: usize = 256 * 1024;
+const MAX_ANONYMOUS_INGRESS_BYTES: usize = 16 * 1024;
+
+fn inspect_message_should_accept(method: &str, caller: Principal, arg_size: usize) -> bool {
+    if arg_size > MAX_INSPECTED_INGRESS_BYTES {
+        return false;
+    }
+
+    let anonymous_allowed = matches!(
+        method,
+        "icrc21_canister_call_consent_message"
+            | "icrc10_supported_standards"
+            | "prepare_redemption_offer"
+            | "open_chain_vault_evm"
+            | "borrow_chain_vault_evm"
+            | "withdraw_chain_collateral_evm"
+            | "close_chain_vault_evm"
+    );
+    if caller == Principal::anonymous() {
+        anonymous_allowed && arg_size <= MAX_ANONYMOUS_INGRESS_BYTES
+    } else {
+        true
+    }
+}
+
 #[ic_cdk_macros::inspect_message]
 fn inspect_message() {
     let method = ic_cdk::api::call::method_name();
     let caller = ic_cdk::caller();
+    let arg_size = ic_cdk::api::call::arg_data_raw_size();
+    if inspect_message_should_accept(&method, caller, arg_size) {
+        ic_cdk::api::call::accept_message();
+    }
+}
 
-    match method.as_str() {
-        // Query-like reads exposed as update for certification: accept all callers
-        // and the read-only offer preparation endpoint never transfers funds.
-        "icrc21_canister_call_consent_message"
-        | "icrc10_supported_standards"
-        | "prepare_redemption_offer" => {
-            ic_cdk::api::call::accept_message();
+#[cfg(test)]
+mod inspect_message_tests {
+    use super::{
+        inspect_message_should_accept, MAX_ANONYMOUS_INGRESS_BYTES,
+        MAX_INSPECTED_INGRESS_BYTES,
+    };
+    use candid::Principal;
+
+    #[test]
+    fn anonymous_ingress_methods_have_a_small_argument_bound() {
+        let anonymous = Principal::anonymous();
+        for method in [
+            "icrc21_canister_call_consent_message",
+            "icrc10_supported_standards",
+            "prepare_redemption_offer",
+            "open_chain_vault_evm",
+            "borrow_chain_vault_evm",
+            "withdraw_chain_collateral_evm",
+            "close_chain_vault_evm",
+        ] {
+            assert!(inspect_message_should_accept(method, anonymous, MAX_ANONYMOUS_INGRESS_BYTES));
+            assert!(!inspect_message_should_accept(
+                method,
+                anonymous,
+                MAX_ANONYMOUS_INGRESS_BYTES + 1
+            ));
         }
-        // M2 EVM-native self-serve: authority is the EIP-712 signature, so the IC
-        // caller is irrelevant and ANONYMOUS ingress MUST be accepted (a relayer or
-        // a wallet's anonymous agent forwards the signed intent). The in-method
-        // signature verification + per-owner nonce/cap are the real boundary; this
-        // accept just lets the message reach the method body. inspect_message is a
-        // single-replica pre-filter, never a security boundary.
-        "open_chain_vault_evm"
-        | "borrow_chain_vault_evm"
-        | "withdraw_chain_collateral_evm"
-        | "close_chain_vault_evm" => {
-            ic_cdk::api::call::accept_message();
-        }
-        // Everything else requires a non-anonymous caller
-        _ => {
-            if caller != Principal::anonymous() {
-                ic_cdk::api::call::accept_message();
-            }
-            // Anonymous callers silently rejected — saves cycles on Candid decoding
-        }
+        assert!(!inspect_message_should_accept("some_update", anonymous, 0));
+    }
+
+    #[test]
+    fn all_inspected_ingress_is_bounded_for_authenticated_callers_too() {
+        let caller = Principal::management_canister();
+        assert!(inspect_message_should_accept(
+            "some_update",
+            caller,
+            MAX_INSPECTED_INGRESS_BYTES
+        ));
+        assert!(!inspect_message_should_accept(
+            "some_update",
+            caller,
+            MAX_INSPECTED_INGRESS_BYTES + 1
+        ));
     }
 }
 
@@ -1418,6 +1469,10 @@ fn capture_protocol_snapshot() {
 
 fn main() {}
 
+fn developer_principal_is_valid(developer_principal: Principal) -> bool {
+    developer_principal != Principal::anonymous()
+}
+
 #[candid_method(init)]
 #[init]
 fn init(arg: ProtocolArg) {
@@ -1432,6 +1487,10 @@ fn init(arg: ProtocolArg) {
     );
     match arg {
         ProtocolArg::Init(init_arg) => {
+            assert!(
+                developer_principal_is_valid(init_arg.developer_principal),
+                "developer_principal must not be anonymous"
+            );
             log!(
                 INFO,
                 "[init] initialized Rumi Protocol with args: {:?}",
@@ -7511,7 +7570,7 @@ async fn add_margin_v2(
     request_id: u128,
     arg: VaultArg,
 ) -> Result<rumi_protocol_backend::InboundCollateralStatusView, ProtocolError> {
-    validate_call().await?;
+    validate_price_independent_update()?;
     let owner = ic_cdk::api::caller();
     let requested_vault_id = arg.vault_id;
     let requested_amount = arg.amount;
@@ -7655,7 +7714,7 @@ async fn repay_to_vault_v2(
     request_id: u128,
     arg: VaultArg,
 ) -> Result<rumi_protocol_backend::RepaymentV2StatusView, ProtocolError> {
-    validate_call().await?;
+    validate_price_independent_update()?;
     rumi_protocol_backend::vault::repay_v2(request_id, arg, false).await
 }
 
@@ -7665,7 +7724,7 @@ async fn repay_and_close_vault_v2(
     request_id: u128,
     arg: VaultArg,
 ) -> Result<rumi_protocol_backend::RepaymentV2StatusView, ProtocolError> {
-    validate_call().await?;
+    validate_price_independent_update()?;
     rumi_protocol_backend::vault::repay_v2(request_id, arg, true).await
 }
 
@@ -7723,7 +7782,7 @@ async fn attach_my_repayment_v2_candidate(
     request_id: u128,
     block_index: u64,
 ) -> Result<rumi_protocol_backend::RepaymentV2StatusView, ProtocolError> {
-    validate_call().await?;
+    validate_price_independent_update()?;
     rumi_protocol_backend::vault::attach_repayment_v2_candidate(request_id, block_index).await
 }
 
@@ -7733,16 +7792,9 @@ async fn repay_to_vault_with_stable_v2(
     request_id: u128,
     arg: VaultArgWithToken,
 ) -> Result<rumi_protocol_backend::StableRepaymentV2StatusView, ProtocolError> {
-    let owner = ic_cdk::api::caller();
-    let replay = rumi_protocol_backend::state::read_state(|s| {
-        s.stable_repayment_v2_active
-            .get(&owner)
-            .or_else(|| s.stable_repayment_v2_latest_result.get(&owner))
-            .is_some_and(|row| row.request_id == request_id)
-    });
-    if !replay {
-        validate_call().await?;
-    }
+    // The vault path retains its separate fresh ckUSDT/ckUSDC depeg check.
+    // ICP/USD freshness is unrelated to this repayment and must not block it.
+    validate_price_independent_update()?;
     rumi_protocol_backend::vault::repay_to_vault_with_stable_v2(request_id, arg).await
 }
 
@@ -8043,7 +8095,7 @@ async fn open_vault_with_deposit_v2(
 #[candid_method(update)]
 #[update]
 async fn add_margin_with_deposit_v2(vault_id: u64, request_id: u128) -> Result<u64, ProtocolError> {
-    validate_call().await?;
+    validate_price_independent_update()?;
     check_postcondition(
         rumi_protocol_backend::vault::add_margin_with_deposit_v2(vault_id, request_id).await,
     )
@@ -8089,7 +8141,7 @@ async fn recover_my_push_deposit_sweep(
     ledger: Principal,
     request_id: u128,
 ) -> Result<rumi_protocol_backend::state::PushDepositSweepResult, ProtocolError> {
-    validate_frozen_only_recovery_call()?;
+    validate_price_independent_update()?;
     check_postcondition(
         rumi_protocol_backend::vault::recover_push_deposit_sweep(
             ic_cdk::api::caller(),
@@ -8107,7 +8159,7 @@ async fn attach_my_push_deposit_sweep_receipt(
     request_id: u128,
     block_index: u64,
 ) -> Result<rumi_protocol_backend::state::PushDepositSweepResult, ProtocolError> {
-    validate_frozen_only_recovery_call()?;
+    validate_price_independent_update()?;
     check_postcondition(
         rumi_protocol_backend::vault::attach_push_deposit_sweep_receipt(
             ic_cdk::api::caller(),
@@ -8122,7 +8174,7 @@ async fn attach_my_push_deposit_sweep_receipt(
 #[candid_method(update)]
 #[update]
 async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
-    validate_call().await?;
+    validate_price_independent_update()?;
     check_postcondition(rumi_protocol_backend::vault::close_vault(vault_id).await)
 }
 
@@ -12209,7 +12261,7 @@ async fn confirm_xrp_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
 /// (claimant bears the fee). Claimant-only. Returns the local tx hash.
 #[update]
 async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<String, ProtocolError> {
-    validate_call().await?;
+    validate_price_independent_update()?;
     check_postcondition(rumi_protocol_backend::vault::settle_xrp_claim(claim_id, destination).await)
 }
 
@@ -12222,7 +12274,7 @@ async fn settle_xrp_claim_with_tag(
     destination: String,
     destination_tag: u32,
 ) -> Result<String, ProtocolError> {
-    validate_call().await?;
+    validate_price_independent_update()?;
     check_postcondition(
         rumi_protocol_backend::vault::settle_xrp_claim_with_tag(
             claim_id,
@@ -12247,7 +12299,7 @@ async fn stability_pool_settle_xrp_claim(
     destination: String,
     destination_tag: Option<u32>,
 ) -> Result<String, ProtocolError> {
-    validate_call().await?;
+    validate_price_independent_update()?;
     let caller = ic_cdk::caller();
     read_state(|s| {
         rumi_protocol_backend::vault::validate_sp_settle_xrp_claim_in_state(
@@ -17909,13 +17961,11 @@ fn get_bot_claim_return_buffer_capacity() -> (u64, u64) {
     })
 }
 
-/// Admin-only: force-resolve a stuck bot claim. Used when the bot's ckUSDC transfer
-/// or confirm failed and the vault is stuck with bot_processing=true.
-///
-/// - `apply_debt_reduction = false`: TransferFailed case. ckUSDC never reached the backend,
-///   so vault debt stays as-is. Just unlocks vault and restores budget.
-/// - `apply_debt_reduction = true`: ConfirmFailed case. ckUSDC DID reach the backend,
-///   so also write down the vault's debt and collateral (same as what confirm would do).
+/// Deprecated compatibility endpoint. A boolean cannot prove either ckUSDC
+/// payment or claim-specific collateral return, so both requested actions fail
+/// closed without changing the claim, vault, or reserved bot budget. Use the
+/// generation-bound proof paths while the registered bot can still call them;
+/// historical claims without sufficient proof remain held for reconciliation.
 #[candid_method(update)]
 #[update]
 fn admin_resolve_stuck_claim(
@@ -17930,43 +17980,10 @@ fn admin_resolve_stuck_claim(
         ));
     }
 
-    let claim = read_state(|s| s.bot_claims.get(&vault_id).cloned()).ok_or_else(|| {
-        ProtocolError::GenericError(format!("No active claim for vault #{}", vault_id))
-    })?;
-
-    mutate_state(|s| {
-        if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
-            if apply_debt_reduction {
-                // AR-B-001 (audit 2026-06-09): saturate, same as
-                // bot_confirm_liquidation. The non-saturating `-=` made this
-                // recovery endpoint trap on exactly the stuck state it exists
-                // to resolve (debt already reduced below the claim amount).
-                vault.borrowed_icusd_amount = vault
-                    .borrowed_icusd_amount
-                    .saturating_sub(ICUSD::new(claim.debt_amount));
-                vault.collateral_amount = vault
-                    .collateral_amount
-                    .saturating_sub(claim.collateral_amount);
-                s.bot_total_debt_covered_e8s += claim.debt_amount;
-            }
-            vault.bot_processing = false;
-        }
-        if !apply_debt_reduction {
-            s.bot_budget_remaining_e8s += claim.debt_amount;
-        }
-        s.bot_claims.remove(&vault_id);
-        // Wave-8b LIQ-002: re-key only when debt/collateral was actually
-        // reduced. The pure-cancel branch only flips `bot_processing`, which
-        // does not affect CR.
-        if apply_debt_reduction {
-            s.reindex_vault_cr(vault_id);
-        }
-    });
-
-    log!(INFO, "[admin_resolve_stuck_claim] Resolved stuck claim for vault #{}: debt={}, collateral={}, debt_reduced={}",
-        vault_id, claim.debt_amount, claim.collateral_amount, apply_debt_reduction);
-
-    Ok(())
+    Err(reject_unproven_stuck_claim_resolution(
+        vault_id,
+        apply_debt_reduction,
+    ))
 }
 
 // ---- Stable token repayment admin functions ----
@@ -18537,14 +18554,14 @@ fn enter_recovery_mode() -> Result<(), ProtocolError> {
 /// collateral ratio.
 #[candid_method(update)]
 #[update]
-fn exit_recovery_mode() -> Result<(), ProtocolError> {
+async fn exit_recovery_mode() -> Result<(), ProtocolError> {
     require_controller()?;
-    mutate_state(|s| -> Result<(), ProtocolError> {
-        if let Some(latched_threshold_e8s) = s.deficit_readonly_latched_at_e8s {
-            // Validate both the captured trip threshold and the current
-            // configured threshold before recording a successful clear.
-            // This also prevents the event log from claiming a clear that
-            // state rejected after a threshold was lowered.
+
+    // The deficit latch has independent clear semantics: it may only be
+    // removed after the recorded and current thresholds are satisfied. Keep
+    // that explicit path independent of oracle freshness.
+    if let Some(latched_threshold_e8s) = read_state(|s| s.deficit_readonly_latched_at_e8s) {
+        mutate_state(|s| -> Result<(), ProtocolError> {
             s.clear_deficit_readonly_latch()
                 .map_err(ProtocolError::GenericError)?;
             rumi_protocol_backend::storage::record_event(
@@ -18558,17 +18575,160 @@ fn exit_recovery_mode() -> Result<(), ProtocolError> {
                 "[admin] cleared deficit ReadOnly latch at deficit {}; automatic mode management restored after fresh price",
                 s.protocol_deficit_icusd.0
             );
-            return Ok(());
+            Ok(())
+        })?;
+        return Ok(());
+    }
+
+    let oracle_latched_before_refresh = read_state(|s| s.mode_triggered_by_oracle);
+    // Pin the protocol before the first XRC await. Fetching ICP can itself
+    // clear an oracle latch and update mode; keep every route fail-closed
+    // until all prices used in the TCR have been refreshed and checked.
+    mutate_state(pin_readonly_after_tcr_price_failure);
+    let previous_timestamp = read_state(|s| s.last_icp_timestamp);
+    if oracle_latched_before_refresh {
+        // A cached sample can predate the circuit-breaker failures. Require a
+        // newly accepted XRC observation before releasing this specific latch.
+        rumi_protocol_backend::xrc::fetch_icp_rate().await;
+    } else if let Err(error) = rumi_protocol_backend::xrc::ensure_fresh_price().await {
+        hold_readonly_after_oracle_failure();
+        return Err(error);
+    }
+
+    let (last_timestamp, last_rate) = read_state(|s| (s.last_icp_timestamp, s.last_icp_rate));
+    let timestamp_fresh = last_timestamp.is_some_and(|timestamp| {
+        let now = ic_cdk::api::time();
+        timestamp <= now
+            && now - timestamp <= rumi_protocol_backend::xrc::PRICE_FRESHNESS_THRESHOLD_NANOS
+    });
+    let accepted_new_sample = match (previous_timestamp, last_timestamp) {
+        (Some(previous), Some(current)) => current > previous,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    if !timestamp_fresh || last_rate.is_none() {
+        hold_readonly_after_oracle_failure();
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "A fresh ICP oracle sample is required before exiting Recovery mode".into(),
+        ));
+    }
+
+    // TCR includes every collateral contributing to TCR, not just ICP. Refresh all
+    // such feeds and fail closed unless each cached value is source-fresh.
+    // Re-scan after each await so a collateral type added during an XRC call
+    // cannot be omitted from the recomputation.
+    let mut refreshed_collateral_types = BTreeSet::new();
+    loop {
+        let pending_collateral_types = read_state(|s| {
+            if s.total_borrowed_icusd_amount() == ICUSD::new(0) {
+                return BTreeSet::new();
+            }
+            s.vault_id_to_vaults
+                .values()
+                .filter(|vault| vault.collateral_amount > 0)
+                .map(|vault| vault.collateral_type)
+                .filter(|collateral_type| !refreshed_collateral_types.contains(collateral_type))
+                .collect::<BTreeSet<_>>()
+        });
+        if pending_collateral_types.is_empty() {
+            break;
         }
-        s.mode = Mode::GeneralAvailability;
-        s.manual_mode_override = false;
-        log!(
-            INFO,
-            "[admin] exited Recovery mode, automatic mode management restored"
-        );
-        Ok(())
+        for collateral_type in pending_collateral_types {
+            if let Err(error) =
+                rumi_protocol_backend::xrc::ensure_fresh_price_for(&collateral_type).await
+            {
+                hold_readonly_after_oracle_failure();
+                return Err(error);
+            }
+            refreshed_collateral_types.insert(collateral_type);
+        }
+    }
+
+    let collateral_prices_fresh = read_state(|s| s.tcr_collateral_prices_are_fresh_at(ic_cdk::api::time()));
+    if !collateral_prices_fresh {
+        hold_readonly_after_oracle_failure();
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Fresh prices for all collateral contributing to TCR are required before exiting Recovery mode".into(),
+        ));
+    }
+
+    mutate_state(|s| {
+        finalize_recovery_mode_exit(
+            s,
+            accepted_new_sample,
+            oracle_latched_before_refresh,
+            ic_cdk::api::time(),
+        )
     })?;
     Ok(())
+}
+
+fn finalize_recovery_mode_exit(
+    s: &mut State,
+    accepted_new_sample: bool,
+    oracle_latch_requires_new_sample: bool,
+    now_ns: u64,
+) -> Result<(), ProtocolError> {
+    if s.deficit_readonly_latched_at_e8s.is_some() {
+        // The latch may have activated while this update awaited XRC. Require
+        // a separate explicit exit so its balance check cannot be skipped.
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Deficit ReadOnly latch activated during oracle refresh; retry recovery exit after threshold check".into(),
+        ));
+    }
+
+    let rate = s
+        .last_icp_rate
+        .ok_or_else(|| ProtocolError::TemporarilyUnavailable("No ICP price available".into()))?;
+    if rate < UsdIcp::from(dec!(0.01)) {
+        s.mode = Mode::ReadOnly;
+        s.manual_mode_override = true;
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "ICP price remains below the ReadOnly safety threshold".into(),
+        ));
+    }
+
+    if s.mode_triggered_by_oracle || oracle_latch_requires_new_sample {
+        if !accepted_new_sample {
+            s.mode = Mode::ReadOnly;
+            s.manual_mode_override = true;
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "A newly accepted ICP oracle sample is required to clear the oracle ReadOnly latch"
+                    .into(),
+            ));
+        }
+        // The new accepted sample is required when the oracle latch was active
+        // at entry. Keep the latch through the awaits; only clear it now, after
+        // all TCR price inputs have passed freshness checks.
+        s.mode = Mode::ReadOnly;
+        s.manual_mode_override = false;
+        rumi_protocol_backend::xrc::note_xrc_success(s);
+    }
+
+    s.manual_mode_override = false;
+    s.update_total_collateral_ratio_and_mode_at(rate, now_ns);
+    log!(
+        INFO,
+        "[admin] exited Recovery mode after fresh oracle recompute; resulting mode: {}",
+        s.mode
+    );
+    Ok(())
+}
+
+fn hold_readonly_after_oracle_failure() {
+    mutate_state(pin_readonly_after_tcr_price_failure);
+}
+
+fn pin_readonly_after_tcr_price_failure(s: &mut State) {
+    if s.deficit_readonly_latched_at_e8s.is_none() {
+        s.mode = Mode::ReadOnly;
+        // Keep periodic TCR updates from reopening the protocol while a feed
+        // needed for the full TCR remains stale. A successful retry explicitly
+        // clears this override after refreshing every input. Keep the oracle
+        // marker across retries; note_xrc_success honors the manual hold so an
+        // ICP success cannot reopen GA before all other feeds are checked.
+        s.manual_mode_override = true;
+    }
 }
 
 /// Emergency kill switch — halts ALL state-changing operations.
@@ -24148,5 +24308,282 @@ mod chain_rail_mutation_guard_tests {
             ..UpdateChainConfigArg::default()
         };
         assert!(!chain_config_update_is_idempotent(&config, &changed));
+    }
+}
+
+#[cfg(test)]
+mod p03_recovery_hardening_tests {
+    use super::{
+        pin_readonly_after_tcr_price_failure, developer_principal_is_valid,
+        finalize_recovery_mode_exit,
+        validate_authenticated_unfrozen_caller, Mode, ProtocolError, State, UsdIcp,
+    };
+    use candid::Principal;
+    use rumi_protocol_backend::numeric::ICUSD;
+    use rumi_protocol_backend::state::CollateralStatus;
+    use rumi_protocol_backend::vault::Vault;
+    use rust_decimal_macros::dec;
+    use std::path::PathBuf;
+
+    const TEST_NOW_NS: u64 = 200_000_000_000;
+
+    fn fresh_state() -> State {
+        State::from(rumi_protocol_backend::InitArg {
+            xrc_principal: Principal::from_slice(&[1]),
+            icusd_ledger_principal: Principal::from_slice(&[2]),
+            icp_ledger_principal: Principal::from_slice(&[3]),
+            fee_e8s: 0,
+            developer_principal: Principal::from_slice(&[4]),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        })
+    }
+
+    fn unsafe_tcr_state() -> State {
+        let mut state = fresh_state();
+        let collateral_type = state.icp_collateral_type();
+        let config = state
+            .collateral_configs
+            .get_mut(&collateral_type)
+            .expect("initial ICP collateral config");
+        config.last_price = Some(1.0);
+        config.status = CollateralStatus::Active;
+        state.set_icp_rate(UsdIcp::from(dec!(5.0)), Some(TEST_NOW_NS));
+        state
+            .collateral_configs
+            .get_mut(&collateral_type)
+            .expect("initial ICP collateral config")
+            .last_price = Some(1.0);
+        state.vault_id_to_vaults.insert(
+            1,
+            Vault {
+                owner: Principal::from_slice(&[5]),
+                borrowed_icusd_amount: ICUSD::new(200_000_000),
+                collateral_amount: 100_000_000,
+                vault_id: 1,
+                collateral_type,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+        state.last_icp_rate = Some(UsdIcp::from(dec!(5.0)));
+        state
+    }
+
+    fn main_source() -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()))
+    }
+
+    fn async_fn_body<'a>(source: &'a str, name: &str) -> &'a str {
+        let start = source
+            .find(&format!("async fn {name}("))
+            .unwrap_or_else(|| panic!("missing async function {name}"));
+        let end = source[start + 1..]
+            .find("\n#[")
+            .map(|offset| start + 1 + offset)
+            .unwrap_or(source.len());
+        &source[start..end]
+    }
+
+    #[test]
+    fn price_independent_routes_keep_the_no_price_gate() {
+        let source = main_source();
+        for name in [
+            "add_margin_v2",
+            "add_margin_with_deposit_v2",
+            "repay_to_vault_v2",
+            "repay_and_close_vault_v2",
+            "repay_to_vault_with_stable_v2",
+            "attach_my_repayment_v2_candidate",
+            "close_vault",
+            "settle_xrp_claim",
+            "settle_xrp_claim_with_tag",
+            "stability_pool_settle_xrp_claim",
+        ] {
+            let body = async_fn_body(&source, name);
+            assert!(
+                body.contains("validate_price_independent_update()"),
+                "{name}"
+            );
+            assert!(!body.contains("validate_call().await"), "{name}");
+        }
+
+        for name in [
+            "borrow_from_vault",
+            "withdraw_collateral",
+            "withdraw_partial_collateral",
+            "open_vault_and_borrow",
+            "open_vault_with_deposit_v2",
+        ] {
+            let body = async_fn_body(&source, name);
+            assert!(body.contains("validate_call().await"), "{name}");
+        }
+    }
+
+    #[test]
+    fn price_independent_preflight_still_rejects_anonymous_and_frozen_callers() {
+        assert!(matches!(
+            validate_authenticated_unfrozen_caller(Principal::anonymous(), false),
+            Err(ProtocolError::AnonymousCallerNotAllowed)
+        ));
+        assert!(matches!(
+            validate_authenticated_unfrozen_caller(Principal::from_slice(&[8]), true),
+            Err(ProtocolError::TemporarilyUnavailable(_))
+        ));
+        assert!(validate_authenticated_unfrozen_caller(Principal::from_slice(&[8]), false).is_ok());
+    }
+
+    #[test]
+    fn recovery_exit_recomputes_unsafe_tcr_as_read_only() {
+        let mut state = unsafe_tcr_state();
+        state.mode = Mode::Recovery;
+        state.manual_mode_override = true;
+
+        finalize_recovery_mode_exit(&mut state, false, false, TEST_NOW_NS)
+            .expect("fresh cached price is sufficient");
+
+        assert_eq!(state.mode, Mode::ReadOnly);
+        assert!(!state.manual_mode_override);
+    }
+
+    #[test]
+    fn stale_non_icp_debt_collateral_blocks_fresh_tcr_recompute() {
+        let mut state = fresh_state();
+        let icp = state.icp_collateral_type();
+        let other = Principal::from_slice(&[6]);
+        let mut config = state
+            .collateral_configs
+            .get(&icp)
+            .expect("initial ICP collateral config")
+            .clone();
+        config.last_price = Some(5.0);
+        config.last_price_timestamp = Some(1);
+        state.collateral_configs.insert(other, config);
+        state.vault_id_to_vaults.insert(
+            2,
+            Vault {
+                owner: Principal::from_slice(&[7]),
+                borrowed_icusd_amount: ICUSD::new(100_000_000),
+                collateral_amount: 100_000_000,
+                vault_id: 2,
+                collateral_type: other,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+
+        assert!(!state.tcr_collateral_prices_are_fresh_at(200_000_000_000));
+    }
+
+    #[test]
+    fn icp_success_during_manual_recovery_hold_cannot_reopen_protocol() {
+        let mut state = fresh_state();
+        state.mode = Mode::ReadOnly;
+        state.mode_triggered_by_oracle = true;
+
+        pin_readonly_after_tcr_price_failure(&mut state);
+        rumi_protocol_backend::xrc::note_xrc_success(&mut state);
+        state.update_total_collateral_ratio_and_mode_at(
+            UsdIcp::from(dec!(5.0)),
+            200_000_000_000,
+        );
+
+        assert_eq!(state.mode, Mode::ReadOnly);
+        assert!(state.manual_mode_override);
+        assert!(state.mode_triggered_by_oracle);
+    }
+
+    #[test]
+    fn oracle_latch_requires_a_new_sample_before_reopening() {
+        let mut state = fresh_state();
+        state.mode = Mode::Recovery;
+        state.manual_mode_override = true;
+        state.mode_triggered_by_oracle = true;
+        state.last_icp_rate = Some(UsdIcp::from(dec!(5.0)));
+        pin_readonly_after_tcr_price_failure(&mut state);
+
+        let result = finalize_recovery_mode_exit(&mut state, false, true, TEST_NOW_NS);
+        assert!(matches!(
+            result,
+            Err(ProtocolError::TemporarilyUnavailable(_))
+        ));
+        assert_eq!(state.mode, Mode::ReadOnly);
+        assert!(state.manual_mode_override);
+        assert!(state.mode_triggered_by_oracle);
+
+        // A second attempt with the same still-fresh cached bar must not lose
+        // the requirement for a newly accepted observation.
+        let retry = finalize_recovery_mode_exit(&mut state, false, true, TEST_NOW_NS);
+        assert!(matches!(
+            retry,
+            Err(ProtocolError::TemporarilyUnavailable(_))
+        ));
+        assert_eq!(state.mode, Mode::ReadOnly);
+        assert!(state.manual_mode_override);
+        assert!(state.mode_triggered_by_oracle);
+
+        finalize_recovery_mode_exit(&mut state, true, true, TEST_NOW_NS)
+            .expect("new oracle sample clears latch");
+        assert_eq!(state.mode, Mode::GeneralAvailability);
+        assert!(!state.mode_triggered_by_oracle);
+    }
+
+    #[test]
+    fn fresh_sample_clears_oracle_latch_but_unsafe_tcr_stays_read_only() {
+        let mut state = unsafe_tcr_state();
+        state.mode = Mode::Recovery;
+        state.manual_mode_override = true;
+        state.mode_triggered_by_oracle = true;
+
+        finalize_recovery_mode_exit(&mut state, true, true, TEST_NOW_NS)
+            .expect("fresh sample permits TCR recompute");
+
+        assert_eq!(state.mode, Mode::ReadOnly);
+        assert!(!state.mode_triggered_by_oracle);
+    }
+
+    #[test]
+    fn recovery_exit_preserves_independent_deficit_latch() {
+        let mut state = fresh_state();
+        state.mode = Mode::ReadOnly;
+        state.manual_mode_override = true;
+        state.deficit_readonly_latched_at_e8s = Some(100);
+
+        let result = finalize_recovery_mode_exit(&mut state, true, false, TEST_NOW_NS);
+        assert!(matches!(
+            result,
+            Err(ProtocolError::TemporarilyUnavailable(_))
+        ));
+        assert_eq!(state.mode, Mode::ReadOnly);
+        assert!(state.manual_mode_override);
+        assert_eq!(state.deficit_readonly_latched_at_e8s, Some(100));
+    }
+
+    #[test]
+    fn low_icp_price_cannot_be_reopened_by_recovery_exit() {
+        let mut state = fresh_state();
+        state.mode = Mode::Recovery;
+        state.manual_mode_override = true;
+        state.last_icp_rate = Some(UsdIcp::from(dec!(0.005)));
+
+        let result = finalize_recovery_mode_exit(&mut state, false, false, TEST_NOW_NS);
+        assert!(matches!(
+            result,
+            Err(ProtocolError::TemporarilyUnavailable(_))
+        ));
+        assert_eq!(state.mode, Mode::ReadOnly);
+        assert!(state.manual_mode_override);
+    }
+
+    #[test]
+    fn initialization_rejects_anonymous_developer_principal() {
+        assert!(!developer_principal_is_valid(Principal::anonymous()));
+        assert!(developer_principal_is_valid(Principal::from_slice(&[9])));
     }
 }

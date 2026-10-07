@@ -4682,6 +4682,42 @@ pub struct XrpVaultOpenInfo {
     pub reserve_base_drops: u64,
 }
 
+const MAX_XRP_PENDING_PER_CALLER: usize = 10;
+const MAX_XRP_PENDING_GLOBAL: usize = 10_000;
+
+/// Insert a newly opened XRP staging row without allowing concurrent opens to
+/// race past the admission caps. The initial preflight avoids expensive work
+/// when a cap is already full; this check runs again in the final synchronous
+/// state mutation after the XRPL and threshold-key awaits.
+fn insert_xrp_pending_deposit_with_capacity(
+    s: &mut crate::state::State,
+    vault_id: u64,
+    pending: crate::state::XrpPendingDeposit,
+) -> Result<(), ProtocolError> {
+    if s.xrp_pending_deposits.contains_key(&vault_id) {
+        return Err(ProtocolError::GenericError(
+            "XRP pending deposit id is already in use; please retry.".to_string(),
+        ));
+    }
+    if s.xrp_pending_deposits.len() >= MAX_XRP_PENDING_GLOBAL {
+        return Err(ProtocolError::GenericError(
+            "XRP deposit staging is full; please retry after pending deposits clear.".to_string(),
+        ));
+    }
+    if s.xrp_pending_deposits
+        .values()
+        .filter(|deposit| deposit.owner == pending.owner)
+        .count()
+        >= MAX_XRP_PENDING_PER_CALLER
+    {
+        return Err(ProtocolError::GenericError(
+            "Too many open XRP deposits; confirm or settle existing ones first.".to_string(),
+        ));
+    }
+    s.xrp_pending_deposits.insert(vault_id, pending);
+    Ok(())
+}
+
 fn require_xrp_production_key() -> Result<(), ProtocolError> {
     let configured_key = crate::chains::xrp::config::xrp_schnorr_key_name();
     if crate::chains::xrp::config::is_xrp_production_key_name(&configured_key) {
@@ -4737,11 +4773,9 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
     // Hardening (P3/P4 review): bound per-caller pending deposits so a caller can't
     // spam unfunded opens (each would consume a vault_id + a threshold derivation +
     // a persisted state entry).
-    const MAX_XRP_PENDING_PER_CALLER: usize = 10;
     // Global cap bounds total persisted pending-deposit state (and the O(N) per-caller
     // scan below) across all callers — safe (refuses NEW opens when full; never
     // orphans an existing entry, unlike a TTL prune of a maybe-funded deposit).
-    const MAX_XRP_PENDING_GLOBAL: usize = 10_000;
     let (global_pending, caller_pending) = read_state(|s| {
         (
             s.xrp_pending_deposits.len(),
@@ -4802,8 +4836,9 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
     };
 
     let opened_at_ns = ic_cdk::api::time();
-    mutate_state(|s| {
-        s.xrp_pending_deposits.insert(
+    let inserted = mutate_state(|s| {
+        insert_xrp_pending_deposit_with_capacity(
+            s,
             vault_id,
             crate::state::XrpPendingDeposit {
                 owner: caller,
@@ -4812,8 +4847,12 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
                 opened_at_ns,
                 reserve_base_drops,
             },
-        );
+        )
     });
+    if let Err(e) = inserted {
+        guard_principal.fail();
+        return Err(e);
+    }
 
     guard_principal.complete();
     Ok(XrpVaultOpenInfo {
@@ -7114,6 +7153,50 @@ mod xrp_p3_tests {
     }
 
     #[test]
+    fn pending_open_insert_rechecks_global_capacity_atomically() {
+        let mut s = crate::state::State::default();
+        for vault_id in 0..MAX_XRP_PENDING_GLOBAL as u64 {
+            s.xrp_pending_deposits.insert(
+                vault_id,
+                pending(Principal::from_slice(&vault_id.to_be_bytes()), "address"),
+            );
+        }
+
+        let before = s.xrp_pending_deposits.len();
+        assert!(matches!(
+            insert_xrp_pending_deposit_with_capacity(
+                &mut s,
+                MAX_XRP_PENDING_GLOBAL as u64,
+                pending(Principal::from_slice(&[0x44; 16]), "new-address"),
+            ),
+            Err(ProtocolError::GenericError(_))
+        ));
+        assert_eq!(s.xrp_pending_deposits.len(), before);
+    }
+
+    #[test]
+    fn pending_open_insert_rechecks_per_caller_capacity_atomically() {
+        let owner = Principal::from_slice(&[0x44; 16]);
+        let mut s = crate::state::State::default();
+        for vault_id in 0..MAX_XRP_PENDING_PER_CALLER as u64 {
+            s.xrp_pending_deposits
+                .insert(vault_id, pending(owner, "existing-address"));
+        }
+
+        let before = s.xrp_pending_deposits.len();
+        assert!(matches!(
+            insert_xrp_pending_deposit_with_capacity(
+                &mut s,
+                MAX_XRP_PENDING_PER_CALLER as u64,
+                pending(owner, "new-address"),
+            ),
+            Err(ProtocolError::GenericError(_))
+        ));
+        assert_eq!(s.xrp_pending_deposits.len(), before);
+        assert!(!s.xrp_pending_deposits.contains_key(&(MAX_XRP_PENDING_PER_CALLER as u64)));
+    }
+
+    #[test]
     fn credit_nets_the_base_reserve() {
         // 5 XRP balance, 1 XRP reserve -> 4 XRP (drops) credited.
         assert_eq!(
@@ -8033,6 +8116,63 @@ fn repayment_v2_failure(
     row.phase = crate::RepaymentV2Phase::HeldPull;
 }
 
+/// A repayment V2 journal can survive an upgrade after admission but before
+/// its first ledger dispatch. The per-vault in-memory guard is reacquired on
+/// recovery, but a bot claim is a durable state flag and may already have
+/// started before the upgrade. Check that flag again at the dispatch boundary
+/// so recovery cannot pull repayment funds from a vault the bot now owns.
+fn repayment_v2_bot_processing_preflight(
+    vault_id: u64,
+    vault: Option<&Vault>,
+) -> Result<(), ProtocolError> {
+    match vault {
+        Some(vault) if vault.vault_id == vault_id && !vault.bot_processing => Ok(()),
+        Some(vault) if vault.vault_id == vault_id => Err(ProtocolError::TemporarilyUnavailable(
+            format!("Vault #{vault_id} is locked — bot liquidation in progress"),
+        )),
+        _ => Err(ProtocolError::TemporarilyUnavailable(format!(
+            "Vault #{vault_id} disappeared before repayment dispatch"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod repayment_v2_bot_processing_preflight_tests {
+    use super::{repayment_v2_bot_processing_preflight, require_vault_not_processing, Vault};
+    use crate::{numeric::ICUSD, ProtocolError};
+    use candid::Principal;
+
+    fn vault(bot_processing: bool) -> Vault {
+        Vault {
+            owner: Principal::anonymous(),
+            vault_id: 7,
+            borrowed_icusd_amount: ICUSD::new(100),
+            collateral_amount: 100,
+            collateral_type: Principal::anonymous(),
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing,
+        }
+    }
+
+    #[test]
+    fn repayment_recovery_rejects_bot_claim_before_pull() {
+        assert!(repayment_v2_bot_processing_preflight(7, Some(&vault(false))).is_ok());
+        assert!(matches!(
+            repayment_v2_bot_processing_preflight(7, Some(&vault(true))),
+            Err(ProtocolError::TemporarilyUnavailable(_))
+        ));
+        assert!(matches!(
+            require_vault_not_processing(&vault(true)),
+            Err(ProtocolError::GenericError(_))
+        ));
+        assert!(matches!(
+            repayment_v2_bot_processing_preflight(7, None),
+            Err(ProtocolError::TemporarilyUnavailable(_))
+        ));
+    }
+}
+
 /// Durable caller-ID repayment. The pull tuple is saved before dispatch and a
 /// positive exact ICRC-3 burn receipt is required before debt/event mutation.
 pub async fn repay_v2(
@@ -8245,6 +8385,12 @@ pub async fn repay_v2(
         crate::RepaymentV2Phase::PendingPull | crate::RepaymentV2Phase::HeldPull
     ) && row.candidate_block_index.is_none()
     {
+        read_state(|s| {
+            repayment_v2_bot_processing_preflight(
+                row.vault_id,
+                s.vault_id_to_vaults.get(&row.vault_id),
+            )
+        })?;
         // Recheck that the pinned ledger is still the configured icUSD ledger
         // and still names this backend as mint authority before each dispatch.
         crate::sp_burn_refund::verify_mint_authority(row.ledger).await?;
@@ -8354,6 +8500,7 @@ pub async fn repay_v2(
             if vault.owner != caller
                 || vault.collateral_type != row.collateral_type
                 || vault.borrowed_icusd_amount.0 < row.effective_amount_raw
+                || vault.bot_processing
                 || s.pending_collateral_withdrawals.contains_key(&row.vault_id)
             {
                 return Err(
@@ -8576,6 +8723,12 @@ async fn settle_stable_repayment_v2(
     }
 
     if row.candidate_block_index.is_none() {
+        read_state(|s| {
+            repayment_v2_bot_processing_preflight(
+                row.vault_id,
+                s.vault_id_to_vaults.get(&row.vault_id),
+            )
+        })?;
         // Attempt count is persisted before the await. On a callback trap or
         // GenericError, retries use the exact same source/amount/fee/memo/time.
         row.dispatch_attempts = row.dispatch_attempts.saturating_add(1);
@@ -15498,6 +15651,40 @@ async fn liquidate_vault_debt_already_burned_inner(
     Ok(committed_result)
 }
 
+fn liquidation_full_close_at_commit(
+    was_full_before_pull: bool,
+    pinned_repayment: ICUSD,
+    live_debt: ICUSD,
+) -> bool {
+    was_full_before_pull && pinned_repayment >= live_debt
+}
+
+#[cfg(test)]
+mod liquidation_full_close_at_commit_tests {
+    use super::liquidation_full_close_at_commit;
+    use crate::numeric::ICUSD;
+
+    #[test]
+    fn accrued_debt_after_pull_keeps_precomputed_excess_in_vault() {
+        let pinned_debt = ICUSD::new(1_000_000_000);
+        assert!(liquidation_full_close_at_commit(
+            true,
+            pinned_debt,
+            pinned_debt
+        ));
+        assert!(!liquidation_full_close_at_commit(
+            true,
+            pinned_debt,
+            ICUSD::new(pinned_debt.to_u64() + 1)
+        ));
+        assert!(!liquidation_full_close_at_commit(
+            false,
+            pinned_debt,
+            pinned_debt
+        ));
+    }
+}
+
 pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_{}", vault_id))?;
@@ -15685,24 +15872,35 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         // concurrent reduction unreachable, and this clamp keeps any residual
         // drift solvency-safe (protocol cut first, then liquidator, then the
         // owner's excess — never more than the vault actually holds).
-        let live_collateral = s
+        let live_vault = s
             .vault_id_to_vaults
             .get(&vault_id)
-            .map(|v| v.collateral_amount)
-            .unwrap_or(0);
+            .expect("vault presence was checked immediately above");
+        let live_collateral = live_vault.collateral_amount;
+        // Interest accrual is allowed to run while the icUSD pull is in
+        // flight. If it raised debt above the pinned full-repayment amount,
+        // this operation now applies only a partial liquidation. Keep the
+        // precomputed owner excess in the vault as backing for that debt.
+        let full_close_at_commit = liquidation_full_close_at_commit(
+            !is_partial_liquidation,
+            debt_amount,
+            live_vault.borrowed_icusd_amount,
+        );
         let cut_applied = protocol_cut.min(live_collateral);
         let liquidator_pay = ICP::from(
             collateral_to_liquidator
                 .to_u64()
                 .min(live_collateral.saturating_sub(cut_applied)),
         );
-        let excess_pay = ICP::from(
+        let excess_pay = ICP::from(if full_close_at_commit {
             excess_collateral.to_u64().min(
                 live_collateral
                     .saturating_sub(cut_applied)
                     .saturating_sub(liquidator_pay.to_u64()),
-            ),
-        );
+            )
+        } else {
+            0
+        });
 
         // Execute the liquidation in state first (this must happen).
         // LIQ-0XX (review finding 1): pass the PINNED `debt_amount` decided
@@ -16276,6 +16474,14 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
             )));
         }
     };
+
+    // The process-local vault guard serializes new bot claims, but a durable
+    // bot claim may already exist across an upgrade. Never pull repayment
+    // funds while that claim owns the vault's collateral.
+    if let Err(error) = require_vault_not_processing(&vault) {
+        guard_principal.fail();
+        return Err(error);
+    }
 
     // Check collateral status allows repayment
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));

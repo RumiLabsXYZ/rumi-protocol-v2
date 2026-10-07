@@ -37,7 +37,8 @@ const mocks = vi.hoisted(() => {
     getRedemptionPreview: vi.fn(),
     prepareRedemptionOffer: vi.fn(),
 		getRedemptionPreflight: vi.fn(),
-		redeemQuoted: vi.fn(),
+    redeemQuoted: vi.fn(),
+    getOisySignerAgent: vi.fn(),
 		resolveRoute: vi.fn().mockResolvedValue({ estimatedOutput: 0n }),
 		formatProtocolError: vi.fn((error: unknown) => String(error)),
 	};
@@ -61,6 +62,7 @@ vi.mock('$lib/components/dashboard/ProtocolStats.svelte', async () => ({
 	default: (await vi.importActual<typeof import('./ProtocolStatsStub.svelte')>('./ProtocolStatsStub.svelte')).default,
 }));
 vi.mock('$lib/services/swapRouter', () => ({ resolveRoute: mocks.resolveRoute }));
+vi.mock('$lib/services/oisySigner', () => ({ getOisySignerAgent: mocks.getOisySignerAgent }));
 vi.mock('$lib/services/ammService', () => ({
 	AMM_TOKENS: ['icUSD', 'ckUSDT', 'ckUSDC', 'ICP'].map((symbol) => ({ symbol })),
 }));
@@ -213,6 +215,7 @@ beforeEach(() => {
 	mocks.walletStore.setState(connectedWallet());
 	mocks.currentWalletType.set(null);
 	mocks.walletSessionGeneration.set(0);
+	mocks.getOisySignerAgent.mockReset().mockResolvedValue({});
 	mocks.walletStore.refreshBalance.mockReset().mockResolvedValue(undefined);
   mocks.getRedemptionPreview.mockReset().mockImplementation(async (amount: bigint) => makePreview(amount));
   mocks.prepareRedemptionOffer.mockReset().mockImplementation(async (amount: bigint) => makePreparedOffer(amount));
@@ -410,6 +413,73 @@ describe('redemption route quote and queue safety', () => {
 		expect(mocks.prepareRedemptionOffer).toHaveBeenCalledWith(1_000_000_000n);
 		expect(host.textContent).toContain('Live offer · not yet accepted');
 		expectPausedWithoutSubmission();
+	});
+
+	it('waits for the current Oisy signer prewarm before marking the wallet ready', async () => {
+		const warming = deferred<any>();
+		mocks.getOisySignerAgent.mockReturnValueOnce(warming.promise);
+		mocks.currentWalletType.set('oisy');
+		render();
+		await settle();
+		expect(mocks.getOisySignerAgent).toHaveBeenCalledWith(mocks.walletStore.getState().principal);
+		expect(host.textContent).toContain('Preparing the Oisy signer for this wallet session');
+		warming.resolve({ agent: 'ready' });
+		await settle();
+		expect(host.textContent).not.toContain('Preparing the Oisy signer for this wallet session');
+		expect(host.textContent).not.toContain('Oisy signer preparation failed');
+	});
+
+	it('does not require an Oisy prewarm for other wallet types', async () => {
+		mocks.currentWalletType.set('plug');
+		render();
+		await settle();
+		expect(mocks.getOisySignerAgent).not.toHaveBeenCalled();
+		expect(host.textContent).not.toContain('Oisy signer preparation failed');
+	});
+
+	it('keeps Oisy readiness closed after prewarm failure and opens it after explicit retry', async () => {
+		mocks.getOisySignerAgent.mockRejectedValueOnce(new Error('signer transport offline'));
+		mocks.currentWalletType.set('oisy');
+		render();
+		await settle();
+		expect(host.textContent).toContain('signer transport offline');
+		const retry = host.querySelector<HTMLButtonElement>('button') && Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent?.includes('Retry Oisy signer preparation'));
+		expect(retry).toBeTruthy();
+		retry!.click();
+		await settle();
+		expect(mocks.getOisySignerAgent).toHaveBeenCalledTimes(2);
+		expect(host.textContent).not.toContain('Oisy signer preparation failed');
+	});
+
+	it('does not let an old identity prewarm satisfy the new Oisy wallet session', async () => {
+		const first = deferred<any>();
+		const second = deferred<any>();
+		mocks.getOisySignerAgent.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+		mocks.currentWalletType.set('oisy');
+		render();
+		await settle();
+		mocks.walletStore.setState(connectedWallet('w7x7r-cok77-xa'));
+		flushSync();
+		await settle();
+		expect(mocks.getOisySignerAgent).toHaveBeenCalledTimes(2);
+		expect(mocks.getOisySignerAgent.mock.calls[1][0].toText()).toBe('w7x7r-cok77-xa');
+		first.resolve({ agent: 'old wallet' });
+		await settle();
+		expect(host.textContent).toContain('Preparing the Oisy signer for this wallet session');
+		second.resolve({ agent: 'new wallet' });
+		await settle();
+		expect(host.textContent).not.toContain('Preparing the Oisy signer for this wallet session');
+	});
+
+	it('rewarms Oisy after a same-principal wallet session generation change', async () => {
+		mocks.currentWalletType.set('oisy');
+		render();
+		await settle();
+		expect(mocks.getOisySignerAgent).toHaveBeenCalledTimes(1);
+		mocks.walletSessionGeneration.set(1);
+		flushSync();
+		await settle();
+		expect(mocks.getOisySignerAgent).toHaveBeenCalledTimes(2);
 	});
 
 	it('does not dispatch a prepared offer into a reply-lost submission path while paused', async () => {

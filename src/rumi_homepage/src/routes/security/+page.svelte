@@ -1,754 +1,369 @@
 <script>
-  const findings = [
-    { sev: 'Critical', count: 0, tone: 'good' },
-    { sev: 'High',     count: 23, tone: 'closed' },
-    { sev: 'Medium',   count: 73, tone: 'closed' },
-    { sev: 'Low',      count: 66, tone: 'closed' },
-  ];
-
-  const programStats = [
-    { label: 'Unit + integration tests', value: '1,440' },
-    { label: 'Audit fence test files',   value: '60' },
-    { label: 'Security review cycles',   value: '6' },
-    { label: 'Canisters in scope',       value: '9' },
-    { label: 'Lines of Rust reviewed',   value: '~89k' },
-    { label: 'Lines of TypeScript / Svelte reviewed', value: '~61k' },
-    { label: 'Mainnet pauses during review', value: '0' },
-    { label: 'Funds lost during review',     value: '0' },
-  ];
-
-  const architecturalSecurity = [
+  const publishedReviews = [
     {
-      title: 'Per-vault isolation and locking',
-      desc: 'Each borrower owns an isolated CDP with its own collateral and debt. Every operation that can move a vault\'s collateral (liquidation, redemption, and the owner\'s own withdrawals and repayments) is serialized under a per-vault lock, so concurrent operations on the same vault cannot interfere or double-spend its backing.',
-    },
-    {
-      title: 'On-chain price feeds',
-      desc: 'ICP/USD prices come from the Internet Computer\'s native Exchange Rate Canister (XRC), with a multi-source floor and staleness gate before any liquidation or redemption can use them.',
-    },
-    {
-      title: 'No bridges, no off-chain workers',
-      desc: 'Frontend, backend, ledger, oracle, liquidation bot, and stability pool all run inside ICP canisters. There is no off-chain server, no signer, no bridge, no relayer to compromise.',
-    },
-    {
-      title: 'Stability Pool first, fallback second',
-      desc: 'Liquidations route through the Stability Pool before falling to public liquidators. Bad debt that exceeds both layers lands in a tracked deficit account rather than silently socializing onto solvent vaults.',
-    },
-    {
-      title: 'Deterministic upgrade safety',
-      desc: 'All cross-upgrade state is held in stable structures with explicit migration tests. Pre-deploy hooks run the full unit + PocketIC suite against every release before mainnet install.',
-    },
-    {
-      title: 'Mass-liquidation circuit breaker',
-      desc: 'A per-cycle liquidation budget and oracle-deviation guard pause cascading liquidations during oracle glitches or flash crashes, preserving the protocol against a single-block wipeout.',
-    },
-  ];
-
-  const exploitResistance = [
-    'Async-state races at every cross-canister `await` (saga pattern + idempotent retries)',
-    'Reentrancy via per-canister `CallerGuard` locks on swap, liquidity, and CDP entry points',
-    'ICRC double-spend windows closed with `created_at_time` deduplication on every transfer',
-    'Oracle staleness gate + multi-source floor before any price-driven action',
-    'Authorization boundary between protocol and stability pool (no anonymous principals, no `dev_*` endpoints in mainnet wasm)',
-    'Inter-canister call failure paths produce typed errors and stranded-fund refund queues, not silent loss',
-    'Bot auto-cancel verifies on-chain collateral return before clearing pending state',
-    'Unbounded query DoS closed via pagination, cached aggregates, and sharded vault checks',
-  ];
-
-  const audits = [
-    {
-      title: 'Full-Protocol Security Review',
-      tag: 'Latest',
-      tagTone: 'primary',
+      title: 'Full-protocol security review',
       date: 'June 9, 2026',
-      authors: 'Internal differential re-audit',
-      scope: 'Whole-stack re-audit anchored to commit e49ed10: the CDP backend, 3pool stableswap (3USD token), pair AMM, stability pool, treasury, liquidation bot, the now-live points engine, analytics, and the vault frontend. Sixteen specialist finder passes, three differential passes, and adversarial verification of every medium-and-above finding. Folds in and verifies the interim June 3 and June 5 audit cycles.',
-      summary: 'Three new HIGH findings, all in the redemption path and all rooted in one gap: the per-vault liquidation lock introduced earlier covered liquidations but not redemption or the owner\'s own vault write-ops. Plus 8 medium and 12 low across every canister. All fixed with regression fences and verified in PocketIC; one low stays open at dev-gated severity inside the parked experimental cross-chain module.',
+      kind: 'Internal differential review',
+      description:
+        'A review of the ICP-native protocol and related services, anchored to the source snapshot named in the report. Its findings and deployment notes describe that review period; they are not a statement about today’s installed code.',
       slug: 'rumi-security-review-2026-06-09',
+      featured: true
     },
     {
-      title: 'Combined Security Review',
-      tag: 'Close-out',
-      tagTone: 'neutral',
+      title: 'Combined security review',
       date: 'May 2, 2026',
-      authors: 'Internal + AVAI close-out',
-      scope: 'Unified close-out of every finding from the internal three-pass review and the AVAI external pre-audit, including the eight net-new findings closed in Wave 14a/b/c.',
-      summary: 'Anchored to backend hash 0xc6b99934 and 3pool hash 0x63916ab7. Every finding from both reviews resolved, deferred-by-design, or accepted with a documented watch threshold.',
+      kind: 'Internal review + AVAI automated pre-audit',
+      description:
+        'A historical close-out of the April internal review and AVAI’s automated pre-audit. AVAI’s work was an automated pre-audit, not a traditional human-led audit engagement.',
       slug: 'rumi-combined-security-review-2026-05-02',
+      featured: false
     },
     {
-      title: 'Internal Three-Pass Review',
-      tag: 'Internal',
-      tagTone: 'neutral',
-      date: 'April 22, 2026',
-      authors: 'Rumi Labs',
-      scope: 'Eleven specialist analysis passes covering ~84k lines of Rust across nine canisters and ~55k lines of TypeScript/Svelte across both frontends. Anchored to commit 28e9896.',
-      summary: '73 findings (8 HIGH, 36 MEDIUM, 25 LOW, 4 INFO) shipped across thirteen numbered remediation waves over nine days, then verified by three independent post-fix passes.',
-      slug: 'rumi-internal-review-2026-04-22',
-    },
-    {
-      title: 'AVAI External Pre-Audit',
-      tag: 'External',
-      tagTone: 'neutral',
+      title: 'AVAI external pre-audit',
       date: 'April 24, 2026',
-      authors: 'AVAI',
-      scope: 'Independent automated sweep against the Breitner IC Canister Security Guidelines and a CDP protocol domain checklist. Anchored to commit e749620d.',
-      summary: '20 numbered findings (4 IC-hygiene, 16 CDP-domain). Twelve overlapped with internal-review fixes already shipped. Eight net-new findings closed in Wave 14a/b/c.',
+      kind: 'Automated external pre-audit',
+      description:
+        'A snapshot-specific automated review with its own scope, limitations, and findings. Read the report before drawing conclusions from its summary.',
       slug: 'rumi-avai-external-audit-2026-04-24',
+      featured: false
     },
+    {
+      title: 'Internal three-pass review',
+      date: 'April 22, 2026',
+      kind: 'Internal review',
+      description:
+        'The report records the review scope, remediation decisions, and status at the time. It does not establish the state of later source or deployed modules.',
+      slug: 'rumi-internal-review-2026-04-22',
+      featured: false
+    }
   ];
 
-  const canisters = [
-    { name: 'rumi_protocol_backend', id: 'tfesu-vyaaa-aaaap-qrd7a-cai', role: 'CDP engine: vaults, minting, redemption, liquidation' },
-    { name: 'rumi_stability_pool',   id: 'tmhzi-dqaaa-aaaap-qrd6q-cai', role: 'Stability Pool: absorbs liquidations, distributes collateral' },
-    { name: 'rumi_treasury',         id: 'tlg74-oiaaa-aaaap-qrd6a-cai', role: 'Protocol treasury: ckUSDT/ckUSDC reserves' },
-    { name: 'icusd_ledger',          id: 't6bor-paaaa-aaaap-qrd5q-cai', role: 'icUSD ICRC-1/ICRC-2 ledger' },
-    { name: 'rumi_3pool',            id: 'fohh4-yyaaa-aaaap-qtkpa-cai', role: 'Curve-style stableswap (icUSD / ckUSDT / ckUSDC), 3USD LP token' },
-    { name: 'rumi_amm',              id: 'ijlzs-2yaaa-aaaap-quaaq-cai', role: 'AMM router for non-stable pairs' },
-    { name: 'liquidation_bot',       id: 'nygob-3qaaa-aaaap-qttcq-cai', role: 'Automated liquidation triggering with cancel-and-return safety' },
-    { name: 'icusd_index',           id: '6niqu-siaaa-aaaap-qrjeq-cai', role: 'icUSD ledger index canister' },
-    { name: 'threeusd_index',        id: 'jagpu-pyaaa-aaaap-qtm6q-cai', role: '3USD ledger index canister' },
+  const releaseEvidence = [
+    {
+      number: '01',
+      title: 'Upgrade and migration checks',
+      text: 'Review representative populated-state upgrades and confirm relevant obligation continuity across canisters.'
+    },
+    {
+      number: '02',
+      title: 'Cross-canister and ledger outcomes',
+      text: 'Continue targeted runtime checks for ambiguous calls, refunds, archive history, and recovery paths where relevant.'
+    },
+    {
+      number: '03',
+      title: 'Live-state reconciliation',
+      text: 'Reconcile identified operational inventories and document evidence-backed outcomes for held or legacy operations.'
+    },
+    {
+      number: '04',
+      title: 'Release artifact and activation',
+      text: 'Verify artifact interfaces and compare artifact hashes with installed modules; consider route admission separately against its applicable evidence.'
+    }
   ];
-
-  function tagClass(tone) {
-    return tone === 'primary' ? 'audit-tag tag-primary' : 'audit-tag';
-  }
-  function findingClass(tone) {
-    return tone === 'good' ? 'finding-card good' : 'finding-card closed';
-  }
 </script>
 
 <svelte:head>
   <title>Security · Rumi Protocol</title>
-  <meta name="description" content="Audit reports, architectural security, testing methodology, and responsible disclosure for Rumi Protocol on the Internet Computer." />
+  <meta
+    name="description"
+    content="Security review history, current release status, and responsible disclosure for Rumi Protocol. Status reviewed October 7, 2026."
+  />
 </svelte:head>
 
-<!-- Hero + at-a-glance findings -->
-<section class="hero-wrap">
-  <div class="max-w-5xl mx-auto px-6 pt-20 md:pt-24 pb-10">
-    <p class="eyebrow">Security</p>
-    <h1 class="page-title">Security at Rumi Protocol</h1>
-    <p class="page-lead">
-      Rumi Protocol is a fully on-chain CDP stablecoin running on the Internet Computer.
-      Multiple independent security reviews, an automated external pre-audit by AVAI, and a
-      continuing differential re-audit cycle have shipped to mainnet, most recently the
-      June 2026 full-protocol review. Every finding is in one of three states: resolved with
-      a regression test, deferred-by-design until SNS migration, or accepted as housekeeping
-      with a documented watch threshold.
-    </p>
-
-    <div class="findings-grid">
-      {#each findings as f}
-        <div class={findingClass(f.tone)}>
-          <div class="finding-num">{f.count}</div>
-          <div class="finding-label">{f.sev}</div>
-          <div class="finding-status">{f.tone === 'good' ? 'None reported' : 'All closed'}</div>
+<main>
+  <section class="hero">
+    <div class="page-width hero-inner">
+      <p class="eyebrow"><span class="eyebrow-mark" aria-hidden="true"></span> Security &amp; disclosure</p>
+      <div class="hero-grid">
+        <div>
+          <h1>Security is a process,<br /><span>not a badge.</span></h1>
+          <p class="hero-copy">
+            This page separates published review history from current source work and deployed
+            code. A passing test, a source change, and an installed canister are different kinds
+            of evidence.
+          </p>
+          <p class="review-date">Status reviewed <time datetime="2026-10-07">October 7, 2026</time></p>
         </div>
-      {/each}
-    </div>
 
-    <div class="program-stats">
-      {#each programStats as s}
-        <div class="stat">
-          <div class="stat-value">{s.value}</div>
-          <div class="stat-label">{s.label}</div>
-        </div>
-      {/each}
-    </div>
-  </div>
-</section>
-
-<!-- Architectural security -->
-<section class="max-w-5xl mx-auto px-6 py-16 border-t" style="border-color: var(--rumi-border);">
-  <h2 class="section-h2">Architectural Security</h2>
-  <p class="section-sub">
-    The strongest defenses are the ones built into the protocol's shape, not bolted on
-    after the fact. Rumi's design eliminates entire classes of attack before any code is
-    written.
-  </p>
-
-  <div class="arch-grid">
-    {#each architecturalSecurity as item}
-      <div class="arch-card">
-        <h3 class="arch-title">{item.title}</h3>
-        <p class="arch-desc">{item.desc}</p>
+        <aside class="status-card" aria-labelledby="release-status-title">
+          <div class="status-card-top">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span>Release status</span>
+            <span class="status-label">In progress</span>
+          </div>
+          <h2 id="release-status-title">Remediation is not live</h2>
+          <p>
+            The broader October security-remediation branch remains unmerged and has not been
+            installed on mainnet. Separately, the CL-01 3pool hotfix (PR #421) has merged to main
+            and its production artifact has been built. The artifact has not been installed: on
+            October 7, 2026, the live 3pool module hash did not match the artifact hash.
+          </p>
+          <div class="status-divider"></div>
+          <p class="status-footnote">
+            No complete finding-closure or release-verification claim is made here. The CL-01
+            artifact SHA-256 was e3182b5d545b279619ffeb10032feffdd222904fa20860d4755b9fabe37c00af;
+            the observed live 3pool module SHA-256 was
+            e89ad4f73a16012a8a7b3e389db13121aefe611ec6b459b3fcd270350ea92eab. Recheck exact
+            installed hashes before describing the hotfix as deployed.
+          </p>
+        </aside>
       </div>
-    {/each}
-  </div>
-</section>
 
-<!-- Testing methodology -->
-<section class="max-w-5xl mx-auto px-6 py-16 border-t" style="border-color: var(--rumi-border);">
-  <h2 class="section-h2">Testing Methodology</h2>
-  <p class="section-sub">
-    Every audit finding has at least one fence test that fails on the unfixed commit and
-    passes on the fix. Pre-deploy hooks run the full unit and PocketIC integration suites
-    before any mainnet install.
-  </p>
+      <div class="evidence-rail" aria-label="Security evidence states">
+        <div class="evidence-step published">
+          <span class="step-icon" aria-hidden="true">01</span>
+          <div><strong>Published reviews</strong><span>Historical source snapshots</span></div>
+        </div>
+        <span class="rail-line" aria-hidden="true"></span>
+        <div class="evidence-step working">
+          <span class="step-icon" aria-hidden="true">02</span>
+          <div><strong>Source remediation</strong><span>Unmerged; release evidence open</span></div>
+        </div>
+        <span class="rail-line" aria-hidden="true"></span>
+        <div class="evidence-step live">
+          <span class="step-icon" aria-hidden="true">03</span>
+          <div><strong>Installed code</strong><span>Separate on-chain verification</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
 
-  <div class="test-grid">
-    <div class="test-block">
-      <h3 class="test-block-title">Test surface</h3>
-      <ul class="test-list">
-        <li><strong>1,440</strong> Rust unit and integration tests across the workspace</li>
-        <li><strong>60</strong> dedicated audit fence test files (one per finding family)</li>
-        <li><strong>PocketIC</strong> integration tests exercise full inter-canister flows</li>
-        <li><strong>Pre-deploy hook</strong> blocks mainnet installs if any test fails</li>
-        <li><strong>24-hour bake-watch</strong> on every wave before the next deploys</li>
-      </ul>
+  <section class="section page-width" aria-labelledby="what-we-know">
+    <div class="section-heading">
+      <p class="section-kicker">Current picture</p>
+      <h2 id="what-we-know">What the evidence says</h2>
+      <p>These statements describe different stages of the work and should be read separately.</p>
     </div>
 
-    <div class="test-block">
-      <h3 class="test-block-title">What gets verified</h3>
-      <ul class="test-list">
-        <li>Liquidation invariants: sorted-troves index, min-debt floor, ICRC-3 burn proof</li>
-        <li>Stability Pool accounting: no double-deduction, balance reconciliation, deficit account</li>
-        <li>Oracle behaviour: staleness gate, multi-source floor, frozen-price liquidation halt</li>
-        <li>Interest accrual under concurrent harvest + treasury drain</li>
-        <li>Bot cancel paths return collateral before clearing pending state</li>
-        <li>ICRC transfer idempotency via `created_at_time` deduplication</li>
-        <li>Pagination and cache caps on every previously-unbounded query</li>
-      </ul>
-    </div>
-  </div>
-</section>
-
-<!-- Exploit resistance -->
-<section class="max-w-5xl mx-auto px-6 py-16 border-t" style="border-color: var(--rumi-border);">
-  <h2 class="section-h2">Exploit Resistance</h2>
-  <p class="section-sub">
-    Specific attack vectors examined during the reviews, with the structural mitigation
-    that addresses each.
-  </p>
-  <ul class="exploit-list">
-    {#each exploitResistance as item}
-      <li>
-        <span class="check">✓</span>
-        <span>{item}</span>
-      </li>
-    {/each}
-  </ul>
-</section>
-
-<!-- Audit reports -->
-<section class="max-w-5xl mx-auto px-6 py-16 border-t" style="border-color: var(--rumi-border);">
-  <h2 class="section-h2">Audit Reports</h2>
-  <p class="section-sub">
-    Each report is published as PDF for human reading and as Markdown for AI agents,
-    indexers, and grep. Both formats contain the same findings and remediation status.
-  </p>
-
-  <div class="audit-stack">
-    {#each audits as audit}
-      <article class="audit-card">
-        <div class="audit-head">
-          <h3 class="audit-title">{audit.title}</h3>
-          <span class={tagClass(audit.tagTone)}>{audit.tag}</span>
-        </div>
-        <div class="audit-meta">
-          <span>{audit.date}</span>
-          <span class="meta-sep">·</span>
-          <span>{audit.authors}</span>
-        </div>
-        <p class="audit-scope">{audit.scope}</p>
-        <p class="audit-summary">{audit.summary}</p>
-        <div class="audit-actions">
-          <a href="/audits/{audit.slug}.pdf" target="_blank" rel="noopener" class="btn-primary">
-            Read PDF
-          </a>
-          <a href="/audits/{audit.slug}.md" target="_blank" rel="noopener" class="btn-secondary">
-            Markdown <span class="btn-hint">(for AI agents)</span>
-          </a>
-        </div>
+    <div class="state-grid">
+      <article class="state-card state-published">
+        <span class="state-icon" aria-hidden="true">↗</span>
+        <p class="state-label">Public record</p>
+        <h3>Reviews are available</h3>
+        <p>
+          The reports below document specific code snapshots, scope, and limitations. The latest
+          published full-protocol report is dated June 9, 2026.
+        </p>
       </article>
-    {/each}
-  </div>
-</section>
 
-<!-- Transparency note -->
-<section class="max-w-5xl mx-auto px-6 py-16 border-t" style="border-color: var(--rumi-border);">
-  <h2 class="section-h2">Transparency</h2>
-  <div class="prose-block callout">
-    <p>
-      The reviews above were conducted using AI-driven security analysis, not a traditional
-      brand-name audit firm. The methodology is rigorous: a structured threat model, anchored
-      commits, fence tests for every finding, three independent verification passes. It is
-      not a substitute for a top-tier external engagement, and we treat it as the floor of
-      our security posture, not the ceiling. As the protocol grows we intend to commission a
-      full external audit. Until then, please do your own research and never deposit more
-      than you can comfortably lose.
-    </p>
-  </div>
-</section>
+      <article class="state-card state-source">
+        <span class="state-icon" aria-hidden="true">◷</span>
+        <p class="state-label">Source work</p>
+        <h3>A newer review is still being closed out</h3>
+        <p>
+          A later internal review led to changes in a release branch. Some targeted tests and
+          source checks have passed, while additional finding adjudication and operational
+          evidence remain open. No final public report for that cycle is posted here.
+        </p>
+      </article>
 
-<!-- Deployed canisters -->
-<section class="max-w-5xl mx-auto px-6 py-16 border-t" style="border-color: var(--rumi-border);">
-  <h2 class="section-h2">Canisters in Scope</h2>
-  <p class="section-sub">
-    Every canister listed below is verifiable on-chain. Module hashes can be queried directly
-    against each canister and matched to commits in the public source tree.
-  </p>
-  <div class="canister-table-wrap">
-    <table class="canister-table">
-      <thead>
-        <tr><th>Canister</th><th>ID</th><th>Role</th></tr>
-      </thead>
-      <tbody>
-        {#each canisters as c}
-          <tr>
-            <td><code>{c.name}</code></td>
-            <td>
-              <a href="https://dashboard.internetcomputer.org/canister/{c.id}" target="_blank" rel="noopener" class="canister-link">
-                <code>{c.id}</code>
-              </a>
-            </td>
-            <td>{c.role}</td>
-          </tr>
+      <article class="state-card state-live">
+        <span class="state-icon" aria-hidden="true">⌁</span>
+        <p class="state-label">Mainnet</p>
+        <h3>Source changes do not update canisters</h3>
+        <p>
+          The October remediation branch was unmerged and undeployed at the date above. A source
+          fix does not prove an upgrade, feature activation, migration, or successful live
+          operation.
+        </p>
+      </article>
+    </div>
+  </section>
+
+  <section class="release-section" aria-labelledby="release-evidence-title">
+    <div class="page-width release-inner">
+      <div class="section-heading release-heading">
+        <p class="section-kicker">Current follow-up</p>
+        <h2 id="release-evidence-title">Additional verification work</h2>
+        <p>
+          These areas describe ongoing follow-up, not blanket release gates. Whether a particular
+          item blocks a release depends on the applicable finding and its acceptance criteria.
+        </p>
+      </div>
+      <ol class="evidence-list">
+        {#each releaseEvidence as item}
+          <li>
+            <span class="evidence-number">{item.number}</span>
+            <div>
+              <h3>{item.title}</h3>
+              <p>{item.text}</p>
+            </div>
+          </li>
         {/each}
-      </tbody>
-    </table>
-  </div>
-  <p class="canister-foot">
-    Source code: <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener">github.com/RumiLabsXYZ/rumi-protocol-v2</a>
-  </p>
-</section>
+      </ol>
+      <p class="release-note">
+        Feature admission, merging, deployment, and live verification are separate decisions.
+        None should be inferred from the existence of a remediation branch.
+      </p>
+    </div>
+  </section>
 
-<!-- Responsible disclosure -->
-<section class="max-w-5xl mx-auto px-6 py-16 border-t" style="border-color: var(--rumi-border);">
-  <h2 class="section-h2">Responsible Disclosure</h2>
-  <div class="prose-block">
-    <p>
-      If you believe you've found a vulnerability in any Rumi Protocol canister or frontend,
-      please report it privately rather than disclosing publicly. We aim to acknowledge
-      reports within 48 hours.
-    </p>
-    <ul class="contact-list">
-      <li>
-        <strong>Email:</strong>
-        <a href="mailto:info@rumiprotocol.com">info@rumiprotocol.com</a>
-      </li>
-      <li>
-        <strong>GitHub Security Advisories:</strong>
-        <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2/security/advisories" target="_blank" rel="noopener">
-          rumi-protocol-v2 advisories
+  <section class="section page-width" aria-labelledby="review-library-title">
+    <div class="section-heading">
+      <p class="section-kicker">Review archive</p>
+      <h2 id="review-library-title">Published reports</h2>
+      <p>
+        Each report is a historical record tied to its own scope and source snapshot. Read the
+        full report for methodology, limitations, and the status recorded at that time.
+      </p>
+    </div>
+
+    <div class="report-grid">
+      {#each publishedReviews as report}
+        <article class:featured={report.featured} class="report-card">
+          <div class="report-card-top">
+            <span class="report-kind">{report.kind}</span>
+            {#if report.featured}<span class="latest-tag">Latest published</span>{/if}
+          </div>
+          <h3>{report.title}</h3>
+          <p class="report-date">{report.date}</p>
+          <p class="report-description">{report.description}</p>
+          <div class="report-links">
+            <a href="/audits/{report.slug}.md" target="_blank" rel="noopener">Read report <span aria-hidden="true">↗</span></a>
+            <a class="pdf-link" href="/audits/{report.slug}.pdf" target="_blank" rel="noopener">PDF <span aria-hidden="true">↗</span></a>
+          </div>
+        </article>
+      {/each}
+    </div>
+  </section>
+
+  <section class="section disclosure-section" aria-labelledby="disclosure-title">
+    <div class="page-width disclosure-grid">
+      <div>
+        <p class="section-kicker">Help us protect users</p>
+        <h2 id="disclosure-title">Report a vulnerability privately</h2>
+        <p>
+          Please do not post suspected vulnerabilities in a public issue. Send a private report
+          with the affected component, impact, and enough detail for us to investigate safely.
+          Avoid including real user balances or secrets in the report.
+        </p>
+      </div>
+      <div class="disclosure-card">
+        <p class="disclosure-response">We aim to acknowledge reports within 72 hours.</p>
+        <a class="disclosure-link" href="mailto:vector.iso@gmail.com">
+          Email the security contact <span aria-hidden="true">↗</span>
         </a>
-      </li>
-    </ul>
-    <p>
-      Please include reproduction steps, affected canister IDs, and any proof-of-concept
-      material. Coordinated disclosure is appreciated.
-    </p>
-  </div>
-</section>
+        <a
+          class="advisory-link"
+          href="https://github.com/RumiLabsXYZ/rumi-protocol-v2/security/advisories"
+          target="_blank"
+          rel="noopener"
+        >Open a private GitHub Security Advisory <span aria-hidden="true">↗</span></a>
+        <p class="bounty-note">Rumi does not currently operate a paid bug-bounty programme.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer class="page-width page-foot">
+    <span>Security status last reviewed October 7, 2026.</span>
+    <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener">
+      Verify source and release history <span aria-hidden="true">↗</span>
+    </a>
+  </footer>
+</main>
 
 <style>
-  /* ── Hero ── */
-  .hero-wrap {
-    background:
-      radial-gradient(ellipse at top, color-mix(in srgb, var(--rumi-purple-accent) 8%, transparent) 0%, transparent 60%),
-      transparent;
-  }
-  .eyebrow {
-    font-size: 0.8125rem;
-    font-weight: 500;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    color: var(--rumi-purple-accent);
-    margin-bottom: 1.25rem;
-  }
-  .page-title {
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: clamp(2rem, 4.5vw, 2.75rem);
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    color: var(--rumi-text-primary);
-    margin-bottom: 1.5rem;
-  }
-  .page-lead {
-    color: var(--rumi-text-secondary);
-    font-size: 1rem;
-    line-height: 1.7;
-    max-width: 720px;
-    margin-bottom: 2.5rem;
-  }
-
-  /* ── Findings strip ── */
-  .findings-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 0.75rem;
-    margin-bottom: 1.5rem;
-  }
-  .finding-card {
-    padding: 1.25rem 1rem;
-    border-radius: 0.75rem;
-    border: 1px solid var(--rumi-border);
-    background: var(--rumi-bg-surface1);
-    text-align: center;
-    transition: transform 0.2s ease, border-color 0.2s ease;
-  }
-  .finding-card:hover { transform: translateY(-1px); }
-  .finding-card.good {
-    border-color: color-mix(in srgb, var(--rumi-action) 35%, var(--rumi-border));
-  }
-  .finding-card.closed {
-    border-color: color-mix(in srgb, var(--rumi-purple-accent) 25%, var(--rumi-border));
-  }
-  .finding-num {
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 2.25rem;
-    font-weight: 600;
-    color: var(--rumi-text-primary);
-    line-height: 1;
-    margin-bottom: 0.5rem;
-  }
-  .finding-card.good .finding-num { color: var(--rumi-action); }
-  .finding-label {
-    font-size: 0.875rem;
-    font-weight: 500;
-    color: var(--rumi-text-secondary);
-    margin-bottom: 0.25rem;
-  }
-  .finding-status {
-    font-size: 0.6875rem;
-    color: var(--rumi-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  /* ── Program stats ── */
-  .program-stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 0.75rem;
-    padding: 1.25rem;
-    border-radius: 0.75rem;
-    border: 1px solid var(--rumi-border);
-    background: color-mix(in srgb, var(--rumi-bg-surface1) 60%, transparent);
-  }
-  .stat { text-align: left; }
-  .stat-value {
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 1.375rem;
-    font-weight: 600;
-    color: var(--rumi-text-primary);
-    line-height: 1;
-    margin-bottom: 0.375rem;
-  }
-  .stat-label {
-    font-size: 0.75rem;
-    color: var(--rumi-text-muted);
-    line-height: 1.4;
-  }
-
-  /* ── Section heads ── */
-  .section-h2 {
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 1.5rem;
-    font-weight: 600;
-    color: var(--rumi-text-primary);
-    margin-bottom: 0.5rem;
-    letter-spacing: -0.01em;
-  }
-  .section-sub {
-    color: var(--rumi-text-muted);
-    font-size: 0.9375rem;
-    line-height: 1.65;
-    margin-bottom: 2rem;
-    max-width: 680px;
-  }
-
-  /* ── Architectural cards ── */
-  .arch-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 1rem;
-  }
-  .arch-card {
-    padding: 1.5rem;
-    border-radius: 0.75rem;
-    border: 1px solid var(--rumi-border);
-    background: var(--rumi-bg-surface1);
-    transition: border-color 0.2s ease, transform 0.2s ease;
-  }
-  .arch-card:hover {
-    border-color: color-mix(in srgb, var(--rumi-purple-accent) 30%, var(--rumi-border));
-  }
-  .arch-title {
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--rumi-text-primary);
-    margin-bottom: 0.625rem;
-  }
-  .arch-desc {
-    font-size: 0.875rem;
-    line-height: 1.6;
-    color: var(--rumi-text-secondary);
-  }
-
-  /* ── Testing blocks ── */
-  .test-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 1rem;
-  }
-  .test-block {
-    padding: 1.5rem;
-    border-radius: 0.75rem;
-    border: 1px solid var(--rumi-border);
-    background: var(--rumi-bg-surface1);
-  }
-  .test-block-title {
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 0.9375rem;
-    font-weight: 600;
-    color: var(--rumi-text-primary);
-    margin-bottom: 0.875rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .test-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.625rem;
-  }
-  .test-list li {
-    font-size: 0.875rem;
-    color: var(--rumi-text-secondary);
-    line-height: 1.55;
-    padding-left: 1rem;
+  main { color: var(--rumi-text-primary); }
+  .page-width { width: min(1120px, calc(100% - 3rem)); margin-inline: auto; }
+  .hero {
     position: relative;
-  }
-  .test-list li::before {
-    content: '·';
-    position: absolute;
-    left: 0;
-    color: var(--rumi-purple-accent);
-    font-weight: bold;
-  }
-  .test-list strong {
-    color: var(--rumi-text-primary);
-    font-weight: 600;
-  }
-
-  /* ── Exploit list ── */
-  .exploit-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-    gap: 0.625rem;
-  }
-  .exploit-list li {
-    display: flex;
-    gap: 0.75rem;
-    align-items: flex-start;
-    padding: 0.875rem 1rem;
-    border-radius: 0.5rem;
-    border: 1px solid var(--rumi-border);
-    background: var(--rumi-bg-surface1);
-    font-size: 0.875rem;
-    color: var(--rumi-text-secondary);
-    line-height: 1.55;
-  }
-  .check {
-    color: var(--rumi-action);
-    font-weight: 700;
-    flex-shrink: 0;
-  }
-
-  /* ── Audit cards ── */
-  .audit-stack { display: flex; flex-direction: column; gap: 1rem; }
-  .audit-card {
-    padding: 1.75rem;
-    background: var(--rumi-bg-surface1);
-    border: 1px solid var(--rumi-border);
-    border-radius: 0.75rem;
-    transition: border-color 0.2s ease;
-  }
-  .audit-head {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    flex-wrap: wrap;
-    margin-bottom: 0.5rem;
-  }
-  .audit-title {
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-size: 1.125rem;
-    font-weight: 600;
-    color: var(--rumi-text-primary);
-  }
-  .audit-tag {
-    font-size: 0.6875rem;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    padding: 0.25rem 0.5rem;
-    border-radius: 0.25rem;
-    color: var(--rumi-text-muted);
-    border: 1px solid var(--rumi-border);
-  }
-  .audit-tag.tag-primary {
-    color: var(--rumi-purple-accent);
-    border-color: color-mix(in srgb, var(--rumi-purple-accent) 35%, transparent);
-    background: color-mix(in srgb, var(--rumi-purple-accent) 8%, transparent);
-  }
-  .audit-meta {
-    display: flex;
-    gap: 0.5rem;
-    font-size: 0.8125rem;
-    color: var(--rumi-text-muted);
-    margin-bottom: 1rem;
-  }
-  .meta-sep { opacity: 0.6; }
-  .audit-scope, .audit-summary {
-    color: var(--rumi-text-secondary);
-    font-size: 0.9375rem;
-    line-height: 1.65;
-    margin-bottom: 0.75rem;
-  }
-  .audit-summary { color: var(--rumi-text-muted); }
-  .audit-actions {
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-    margin-top: 1rem;
-  }
-  .btn-primary, .btn-secondary {
-    font-family: 'Circular Std', 'Inter', sans-serif;
-    font-weight: 500;
-    font-size: 0.875rem;
-    padding: 0.5rem 1rem;
-    border-radius: 0.5rem;
-    text-decoration: none;
-    transition: all 0.15s ease;
-    white-space: nowrap;
-    display: inline-block;
-  }
-  .btn-primary {
-    background: var(--rumi-action);
-    color: var(--rumi-bg-primary);
-  }
-  .btn-primary:hover {
-    background: var(--rumi-action-bright);
-    box-shadow: 0 0 20px rgba(52,211,153,0.15);
-  }
-  .btn-secondary {
-    background: transparent;
-    color: var(--rumi-text-secondary);
-    border: 1px solid var(--rumi-border);
-  }
-  .btn-secondary:hover {
-    color: var(--rumi-text-primary);
-  }
-  .btn-hint {
-    color: var(--rumi-text-muted);
-    font-weight: 400;
-    font-size: 0.75rem;
-    margin-left: 0.25rem;
-  }
-
-  /* ── Prose blocks ── */
-  .prose-block { max-width: 720px; }
-  .prose-block p {
-    color: var(--rumi-text-secondary);
-    font-size: 0.9375rem;
-    line-height: 1.7;
-    margin-bottom: 1rem;
-  }
-  .prose-block.callout {
-    padding: 1.5rem;
-    border-radius: 0.75rem;
-    border: 1px solid color-mix(in srgb, var(--rumi-purple-accent) 25%, var(--rumi-border));
-    background: color-mix(in srgb, var(--rumi-purple-accent) 4%, transparent);
-    max-width: none;
-  }
-  .prose-block a {
-    color: var(--rumi-action);
-    text-decoration: none;
-  }
-  .prose-block a:hover { text-decoration: underline; }
-  .contact-list {
-    list-style: none;
-    padding: 0;
-    margin: 0 0 1rem 0;
-  }
-  .contact-list li {
-    color: var(--rumi-text-secondary);
-    font-size: 0.9375rem;
-    line-height: 1.9;
-  }
-
-  /* ── Canister table ── */
-  .canister-table-wrap {
-    border: 1px solid var(--rumi-border);
-    border-radius: 0.75rem;
     overflow: hidden;
-    background: var(--rumi-bg-surface1);
-  }
-  .canister-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.8125rem;
-  }
-  .canister-table thead th {
-    text-align: left;
-    padding: 0.75rem 1rem;
-    color: var(--rumi-text-muted);
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-size: 0.6875rem;
     border-bottom: 1px solid var(--rumi-border);
-    background: color-mix(in srgb, var(--rumi-bg-primary) 40%, transparent);
+    background:
+      radial-gradient(ellipse at 12% 0%, color-mix(in srgb, var(--rumi-purple-accent) 16%, transparent), transparent 52%),
+      radial-gradient(ellipse at 92% 70%, color-mix(in srgb, var(--rumi-action) 8%, transparent), transparent 38%),
+      var(--rumi-bg-primary);
   }
-  .canister-table tbody td {
-    padding: 0.75rem 1rem;
-    border-top: 1px solid var(--rumi-border);
-    color: var(--rumi-text-secondary);
-    vertical-align: top;
+  .hero-inner { padding-top: clamp(4rem, 8vw, 7rem); padding-bottom: 2.75rem; }
+  .eyebrow, .section-kicker {
+    display: flex; align-items: center; gap: .65rem; margin: 0 0 1rem;
+    color: var(--rumi-purple-accent); font-size: .72rem; font-weight: 700;
+    letter-spacing: .16em; text-transform: uppercase;
   }
-  .canister-table tbody tr:first-child td { border-top: none; }
-  .canister-table code {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 0.78125rem;
-    color: var(--rumi-text-primary);
-  }
-  .canister-link {
-    color: inherit;
-    text-decoration: none;
-    border-bottom: 1px dotted var(--rumi-border);
-  }
-  .canister-link:hover { color: var(--rumi-action); }
-  .canister-foot {
-    margin-top: 0.75rem;
-    font-size: 0.8125rem;
-    color: var(--rumi-text-muted);
-  }
-  .canister-foot a {
-    color: var(--rumi-action);
-    text-decoration: none;
-  }
-  .canister-foot a:hover { text-decoration: underline; }
+  .eyebrow-mark { width: .5rem; height: .5rem; border-radius: 50%; background: var(--rumi-purple-accent); box-shadow: 0 0 18px color-mix(in srgb, var(--rumi-purple-accent) 65%, transparent); }
+  .hero-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(300px, .8fr); align-items: center; gap: clamp(2rem, 6vw, 5rem); }
+  h1 { max-width: 720px; margin: 0; font-size: clamp(2.6rem, 6.3vw, 5.4rem); line-height: .99; letter-spacing: -.055em; }
+  h1 span { color: var(--rumi-purple-accent); }
+  .hero-copy { max-width: 620px; margin: 1.6rem 0 1rem; color: var(--rumi-text-secondary); font-size: 1.08rem; line-height: 1.75; }
+  .review-date { color: var(--rumi-text-muted); font-size: .84rem; }
+  .review-date time { color: var(--rumi-text-secondary); }
+  .status-card { padding: 1.5rem; border: 1px solid color-mix(in srgb, #f6bd60 35%, var(--rumi-border)); border-radius: 1rem; background: linear-gradient(150deg, color-mix(in srgb, #f6bd60 8%, var(--rumi-bg-surface1)), var(--rumi-bg-surface1) 72%); box-shadow: 0 24px 80px rgba(0,0,0,.22); }
+  .status-card-top { display: flex; align-items: center; gap: .55rem; color: #f4c46e; font-size: .72rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+  .status-dot { width: .5rem; height: .5rem; border-radius: 50%; background: #f4c46e; box-shadow: 0 0 0 4px rgba(244,196,110,.12); }
+  .status-label { margin-left: auto; padding: .32rem .55rem; border: 1px solid rgba(244,196,110,.25); border-radius: 999px; font-size: .62rem; letter-spacing: .08em; }
+  .status-card h2 { margin: 1.2rem 0 .55rem; font-size: 1.45rem; letter-spacing: -.03em; }
+  .status-card p { margin: 0; color: var(--rumi-text-secondary); font-size: .9rem; line-height: 1.65; }
+  .status-divider { height: 1px; margin: 1.1rem 0; background: var(--rumi-border); }
+  .status-card .status-footnote { color: var(--rumi-text-muted); font-size: .77rem; }
+  .evidence-rail { display: grid; grid-template-columns: 1fr minmax(28px,.15fr) 1fr minmax(28px,.15fr) 1fr; align-items: center; gap: .75rem; margin-top: clamp(3rem, 7vw, 5.5rem); padding: 1.1rem 1.3rem; border: 1px solid var(--rumi-border); border-radius: .9rem; background: color-mix(in srgb, var(--rumi-bg-surface1) 76%, transparent); }
+  .evidence-step { display: flex; align-items: center; gap: .8rem; min-width: 0; }
+  .step-icon { display: grid; width: 2.2rem; height: 2.2rem; flex: 0 0 auto; place-items: center; border: 1px solid var(--rumi-border); border-radius: .65rem; color: var(--rumi-purple-accent); font-size: .68rem; font-weight: 700; }
+  .evidence-step div { display: grid; gap: .2rem; }
+  .evidence-step strong { font-size: .82rem; }
+  .evidence-step span:last-child { color: var(--rumi-text-muted); font-size: .7rem; }
+  .evidence-step.working .step-icon { color: #f4c46e; border-color: rgba(244,196,110,.3); }
+  .evidence-step.live .step-icon { color: var(--rumi-teal); }
+  .rail-line { height: 1px; background: linear-gradient(90deg, var(--rumi-purple-accent), rgba(244,196,110,.6)); }
+  .section { padding-block: clamp(4rem, 8vw, 6.5rem); }
+  .section-heading { max-width: 680px; margin-bottom: 2rem; }
+  .section-kicker { margin-bottom: .7rem; color: var(--rumi-teal); }
+  .section-heading h2, .disclosure-grid h2 { margin: 0; font-size: clamp(1.8rem, 3.4vw, 2.7rem); letter-spacing: -.04em; }
+  .section-heading > p:last-child, .disclosure-grid > div:first-child > p:last-child { margin: .85rem 0 0; color: var(--rumi-text-muted); line-height: 1.7; }
+  .state-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+  .state-card { position: relative; min-height: 245px; padding: 1.4rem; border: 1px solid var(--rumi-border); border-radius: .9rem; background: var(--rumi-bg-surface1); }
+  .state-card::before { position: absolute; inset: 0 auto 0 0; width: 2px; border-radius: .9rem 0 0 .9rem; background: var(--rumi-purple-accent); content: ''; opacity: .7; }
+  .state-source::before { background: #f4c46e; }
+  .state-live::before { background: var(--rumi-teal); }
+  .state-icon { display: grid; width: 2rem; height: 2rem; place-items: center; border-radius: .6rem; background: color-mix(in srgb, var(--rumi-purple-accent) 12%, var(--rumi-bg-surface2)); color: var(--rumi-purple-accent); font-size: .95rem; }
+  .state-source .state-icon { color: #f4c46e; background: rgba(244,196,110,.1); }
+  .state-live .state-icon { color: var(--rumi-teal); background: color-mix(in srgb, var(--rumi-teal) 10%, var(--rumi-bg-surface2)); }
+  .state-label { margin: 1.2rem 0 .35rem; color: var(--rumi-text-muted); font-size: .66rem; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
+  .state-card h3 { margin: 0 0 .65rem; font-size: 1.1rem; }
+  .state-card > p:last-child { margin: 0; color: var(--rumi-text-secondary); font-size: .86rem; line-height: 1.7; }
+  .release-section { border-block: 1px solid var(--rumi-border); background: linear-gradient(120deg, rgba(14,18,34,.95), rgba(10,14,26,.96)); }
+  .release-inner { padding-block: clamp(4rem, 8vw, 6rem); }
+  .release-heading { margin-bottom: 2.3rem; }
+  .evidence-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: .9rem; margin: 0; padding: 0; list-style: none; }
+  .evidence-list li { display: flex; gap: 1rem; padding: 1.2rem; border: 1px solid var(--rumi-border); border-radius: .8rem; background: rgba(20,26,46,.58); }
+  .evidence-number { flex: 0 0 auto; padding-top: .1rem; color: var(--rumi-purple-accent); font-size: .72rem; font-weight: 700; letter-spacing: .1em; }
+  .evidence-list h3 { margin: 0 0 .4rem; font-size: .98rem; }
+  .evidence-list p { margin: 0; color: var(--rumi-text-muted); font-size: .82rem; line-height: 1.65; }
+  .release-note { margin: 1.4rem 0 0; padding-left: 1rem; border-left: 2px solid #f4c46e; color: var(--rumi-text-secondary); font-size: .82rem; line-height: 1.65; }
+  .report-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+  .report-card { display: flex; min-height: 280px; flex-direction: column; padding: 1.4rem; border: 1px solid var(--rumi-border); border-radius: .9rem; background: var(--rumi-bg-surface1); }
+  .report-card.featured { border-color: color-mix(in srgb, var(--rumi-purple-accent) 38%, var(--rumi-border)); background: linear-gradient(135deg, color-mix(in srgb, var(--rumi-purple-accent) 7%, var(--rumi-bg-surface1)), var(--rumi-bg-surface1) 65%); }
+  .report-card-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; }
+  .report-kind, .latest-tag { color: var(--rumi-text-muted); font-size: .66rem; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; }
+  .latest-tag { padding: .3rem .5rem; border-radius: 999px; background: rgba(209,118,232,.12); color: var(--rumi-purple-accent); font-size: .59rem; }
+  .report-card h3 { margin: 1rem 0 .2rem; font-size: 1.2rem; }
+  .report-date { margin: 0; color: var(--rumi-text-muted); font-size: .75rem; }
+  .report-description { margin: .9rem 0 1.2rem; color: var(--rumi-text-secondary); font-size: .83rem; line-height: 1.65; }
+  .report-links { display: flex; gap: 1.2rem; margin-top: auto; padding-top: .9rem; border-top: 1px solid var(--rumi-border); }
+  .report-links a, .page-foot a { color: var(--rumi-purple-accent); font-size: .82rem; font-weight: 600; text-decoration: none; }
+  .report-links .pdf-link { color: var(--rumi-text-muted); font-weight: 500; }
+  a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  a:focus-visible { outline: 2px solid var(--rumi-teal-bright); outline-offset: 4px; border-radius: 2px; }
+  .disclosure-section { border-top: 1px solid var(--rumi-border); background: radial-gradient(ellipse at 85% 100%, rgba(52,211,153,.07), transparent 42%); }
+  .disclosure-grid { display: grid; grid-template-columns: 1fr minmax(300px, .72fr); gap: 3rem; align-items: center; }
+  .disclosure-grid > div:first-child > p:last-child { max-width: 620px; }
+  .disclosure-card { padding: 1.4rem; border: 1px solid color-mix(in srgb, var(--rumi-teal) 25%, var(--rumi-border)); border-radius: .9rem; background: var(--rumi-bg-surface1); }
+  .disclosure-response { margin: 0 0 1rem; color: var(--rumi-text-secondary); font-size: .82rem; }
+  .disclosure-link, .advisory-link { display: flex; justify-content: space-between; gap: 1rem; padding: .85rem 0; border-top: 1px solid var(--rumi-border); color: var(--rumi-teal-bright); font-size: .84rem; font-weight: 600; text-decoration: none; }
+  .advisory-link { color: var(--rumi-text-secondary); font-size: .79rem; font-weight: 500; }
+  .bounty-note { margin: .75rem 0 0; color: var(--rumi-text-muted); font-size: .7rem; }
+  .page-foot { display: flex; justify-content: space-between; gap: 1rem; padding-block: 1.3rem 2rem; border-top: 1px solid var(--rumi-border); color: var(--rumi-text-muted); font-size: .72rem; }
 
-  /* Mobile: tighten table */
-  @media (max-width: 640px) {
-    .canister-table thead { display: none; }
-    .canister-table, .canister-table tbody, .canister-table tr, .canister-table td {
-      display: block;
-      width: 100%;
-    }
-    .canister-table tr {
-      padding: 0.875rem 0;
-      border-top: 1px solid var(--rumi-border);
-    }
-    .canister-table tbody tr:first-child { border-top: none; }
-    .canister-table td { padding: 0.25rem 1rem; border: none; }
+  @media (max-width: 760px) {
+    .page-width { width: min(100% - 2rem, 600px); }
+    .hero-grid, .disclosure-grid { grid-template-columns: 1fr; }
+    .hero-grid { gap: 2rem; }
+    .status-card { max-width: 540px; }
+    .evidence-rail { grid-template-columns: 1fr; gap: .7rem; padding: 1rem; }
+    .rail-line { width: 1px; height: 16px; margin-left: 1.05rem; background: linear-gradient(180deg, var(--rumi-purple-accent), rgba(244,196,110,.6)); }
+    .state-grid { grid-template-columns: 1fr; }
+    .state-card { min-height: auto; }
+    .evidence-list, .report-grid { grid-template-columns: 1fr; }
+    .disclosure-grid { gap: 1.5rem; }
+    .page-foot { flex-direction: column; }
   }
 </style>

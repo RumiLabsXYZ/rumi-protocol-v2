@@ -965,6 +965,19 @@ pub struct SpLiquidationApprovalReceipt {
     pub tuple: SpLiquidationApprovalTuple,
 }
 
+/// Durable identity for an approval fee in the legacy liquidation executor.
+/// The exact ICRC-2 tuple is retried after interruption and fee accounting is
+/// applied only after its ICRC-3 block has been verified.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingSpLegacyApprovalFee {
+    pub vault_id: u64,
+    pub approval: SpLiquidationApprovalTuple,
+    #[serde(default)]
+    pub dispatch_in_flight: bool,
+    #[serde(default)]
+    pub ambiguous_seen: bool,
+}
+
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingSpLiquidationV2 {
     pub request: SpLiquidationV2Intent,

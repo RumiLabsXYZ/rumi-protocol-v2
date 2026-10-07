@@ -814,7 +814,11 @@ pub async fn advance_swap_absence_scan_v1(
             transfer.absence_scan = Some(scan);
         }
         receipts::AbsencePage::Complete => {
-            receipts::rotate_absent_identity(transfer, scan.fixed_tip)
+            let fixed_tip = scan.fixed_tip.clone();
+            let mut completed_scan = scan;
+            completed_scan.cursor = completed_scan.fixed_tip.clone();
+            transfer.absence_scan = Some(completed_scan);
+            receipts::rotate_absent_identity(transfer, fixed_tip)
                 .map_err(|_| SwapReceiptErrorV1::ProofUnavailable)?;
         }
     }
@@ -1290,8 +1294,14 @@ pub async fn advance_ingress_absence_scan_v1(
             scan.cursor = cursor;
             transfer.absence_scan = Some(scan);
         }
-        receipts::AbsencePage::Complete => receipts::rotate_absent_identity(transfer, scan.fixed_tip)
-            .map_err(|_| IngressReceiptErrorV1::ProofUnavailable)?,
+        receipts::AbsencePage::Complete => {
+            let fixed_tip = scan.fixed_tip.clone();
+            let mut completed_scan = scan;
+            completed_scan.cursor = completed_scan.fixed_tip.clone();
+            transfer.absence_scan = Some(completed_scan);
+            receipts::rotate_absent_identity(transfer, fixed_tip)
+                .map_err(|_| IngressReceiptErrorV1::ProofUnavailable)?;
+        }
     }
     receipts::save_ingress(&receipt);
     Ok(receipt)
@@ -3635,6 +3645,44 @@ pub async fn test_seed_absent_swap_input_v1(request: SwapRequestV1) {
     receipt.input = Some(transfer);
     receipt.status = SwapReceiptStatusV1::Unresolved;
     receipts::save(&receipt);
+    receipts::set_fence(true);
+}
+
+/// Seed a TooOld-after-ambiguity ingress pull for the fixed-tip archive
+/// regression. This test-only endpoint creates no ledger side effect.
+#[cfg(feature = "test_endpoints")]
+#[update]
+pub async fn test_seed_absent_ingress_pull_v1(intent_id: Vec<u8>, token_index: u8) {
+    let caller = ic_cdk::caller();
+    assert_ne!(caller, Principal::anonymous(), "anonymous caller");
+    assert!(token_index < 3, "token index out of range");
+    let request = IngressRequestV1::Donate {
+        token_index,
+        amount: 100_000_000,
+    };
+    let (mut receipt, _) = receipts::reserve_ingress(caller, intent_id, request)
+        .expect("valid test ingress request");
+    let ledger = read_state(|s| s.config.tokens[token_index as usize].ledger_id);
+    let fee = transfers::ledger_fee_for_amount(ledger, 100_000_000).await;
+    let history_start = receipts::ledger_log_length(ledger).await.expect("ledger tip");
+    let mut transfer = receipts::ingress_transfer_intent(
+        caller,
+        &receipt.intent_id,
+        0,
+        ledger,
+        caller,
+        ic_cdk::id(),
+        100_000_000,
+        fee,
+    );
+    transfer.created_at_time = ic_cdk::api::time().saturating_sub(90_000_000_000_000);
+    transfer.history_start = Some(history_start);
+    transfer.dispatch_count = Some(2);
+    transfer.too_old_after_ambiguity = Some(true);
+    transfer.status = receipts::SwapTransferStatusV1::Unresolved;
+    receipt.pulls = vec![transfer];
+    receipt.status = receipts::IngressStatusV1::Unresolved;
+    receipts::save_ingress(&receipt);
     receipts::set_fence(true);
 }
 

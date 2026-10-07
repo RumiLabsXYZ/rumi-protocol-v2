@@ -1,5 +1,6 @@
 import { Actor, AnonymousIdentity, HttpAgent } from '@dfinity/agent';
 import { Principal } from '@dfinity/principal';
+import { keccak_256 } from '@noble/hashes/sha3';
 import { CANISTER_IDS, CONFIG } from '../config';
 import { walletStore } from '../stores/wallet';
 import { idlFactory as ledgerIdl } from '../idls/ledger.idl.js';
@@ -106,7 +107,23 @@ export function formatTokenAmount(amount: bigint, decimals = 6, maxFraction = 6)
 }
 
 export function validateEthereumAddress(address: string): boolean {
-  return /^0x[0-9a-fA-F]{40}$/.test(address.trim());
+  const trimmed = address.trim();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(trimmed) || /^0x0{40}$/i.test(trimmed)) return false;
+
+  const body = trimmed.slice(2);
+  // EIP-55 permits legacy all-lowercase and all-uppercase addresses. Mixed
+  // case is a checksum signal and must match Keccak-256 of the lowercase
+  // hexadecimal body (the standard EIP-55 algorithm).
+  if (body === body.toLowerCase() || body === body.toUpperCase()) return true;
+
+  const hash = Array.from(keccak_256(new TextEncoder().encode(body.toLowerCase())))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+  return [...body].every((character, index) => {
+    if (!/[a-f]/i.test(character)) return true;
+    const shouldBeUppercase = Number.parseInt(hash[index], 16) >= 8;
+    return shouldBeUppercase ? character === character.toUpperCase() : character === character.toLowerCase();
+  });
 }
 
 export function principalToBytes32(principal: Principal): string {

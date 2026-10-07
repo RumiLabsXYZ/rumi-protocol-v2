@@ -1,6 +1,21 @@
 use crate::read_state;
 use std::io::Write;
 
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
 pub fn build_dashboard() -> Vec<u8> {
     format!(
         "
@@ -177,10 +192,10 @@ fn construct_metadata_table() -> String {
                     </tr>
                 </tbody>
             </table>",
-            s.mode,
-            s.icusd_ledger_principal,
-            s.icp_ledger_principal,
-            s.xrc_principal,
+            escape_html(&s.mode.to_string()),
+            escape_html(&s.icusd_ledger_principal.to_string()),
+            escape_html(&s.icp_ledger_principal.to_string()),
+            escape_html(&s.xrc_principal.to_string()),
             last_icp_rate.unwrap_or(crate::UsdIcp::from(rust_decimal::Decimal::ZERO)),
             last_icp_timetsamp.unwrap_or(0),
             s.total_collateral_ratio.to_f64() * 100.0,
@@ -203,6 +218,9 @@ fn construct_vault_table() -> String {
                 } else {
                     ct_short
                 };
+                let owner = escape_html(&vault.owner.to_string());
+                let collateral_type = escape_html(&vault.collateral_type.to_string());
+                let collateral_display = escape_html(&ct_display);
                 write!(
                     buf,
                     "
@@ -215,11 +233,11 @@ fn construct_vault_table() -> String {
                 </tr>
                 ",
                     vault.vault_id,
-                    vault.owner,
+                    owner,
                     vault.borrowed_icusd_amount,
                     vault.collateral_amount,
-                    vault.collateral_type,
-                    ct_display,
+                    collateral_type,
+                    collateral_display,
                 )
                 .unwrap();
             }
@@ -268,6 +286,9 @@ fn construct_collateral_types_table() -> String {
                 } else {
                     format!("{}", config.debt_ceiling)
                 };
+                let collateral_type = escape_html(&ct.to_string());
+                let collateral_display =
+                    escape_html(&ct.to_string()[..std::cmp::min(ct.to_string().len(), 12)]);
                 write!(
                     buf,
                     "<tr>
@@ -280,8 +301,8 @@ fn construct_collateral_types_table() -> String {
                         <td>{}</td>
                         <td>{}</td>
                     </tr>",
-                    ct,
-                    &ct.to_string()[..std::cmp::min(ct.to_string().len(), 12)],
+                    collateral_type,
+                    collateral_display,
                     config.status,
                     config.decimals,
                     price_str,
@@ -302,6 +323,7 @@ fn construct_liquidity_table() -> String {
     with_utf8_buffer(|buf| {
         read_state(|s| {
             for (principal, amount) in s.liquidity_pool.iter() {
+                let principal = escape_html(&principal.to_string());
                 write!(
                     buf,
                     "
@@ -329,6 +351,7 @@ fn construct_liquidity_returns() -> String {
     with_utf8_buffer(|buf| {
         read_state(|s| {
             for (principal, amount) in s.liquidity_returns.iter() {
+                let principal = escape_html(&principal.to_string());
                 write!(buf, "<tr><td>{}</td><td>{}</td></tr>", principal, (*amount)).unwrap();
             }
             write!(
@@ -345,10 +368,12 @@ fn display_logs() -> String {
     use crate::logs::{Log, LogEntry};
 
     fn display_entry(buf: &mut Vec<u8>, e: &LogEntry) {
+        let file = escape_html(&e.file);
+        let message = escape_html(&e.message);
         write!(
             buf,
             "<tr><td>{:?}</td><td class=\"ts-class\">{}</td><td><code>{}:{}</code></td><td>{}</td></tr>",
-            e.priority, e.timestamp, e.file, e.line, e.message
+            e.priority, e.timestamp, file, e.line, message
         )
         .unwrap()
     }
@@ -362,4 +387,22 @@ fn display_logs() -> String {
             display_entry(buf, &e);
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_html;
+
+    #[test]
+    fn escapes_html_text_and_attribute_delimiters() {
+        assert_eq!(
+            escape_html("<script title=\"x\">a & b's</script>"),
+            "&lt;script title=&quot;x&quot;&gt;a &amp; b&#39;s&lt;/script&gt;"
+        );
+    }
+
+    #[test]
+    fn leaves_plain_text_and_unicode_readable() {
+        assert_eq!(escape_html("provider error: café"), "provider error: café");
+    }
 }

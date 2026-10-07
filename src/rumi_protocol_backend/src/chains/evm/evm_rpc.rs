@@ -389,8 +389,8 @@ pub fn parse_hex_quantity(s: &str) -> Result<u128, String> {
     let hex = s
         .strip_prefix("0x")
         .or_else(|| s.strip_prefix("0X"))
-        .ok_or_else(|| format!("missing 0x prefix: {:?}", s))?;
-    u128::from_str_radix(hex, 16).map_err(|e| format!("invalid hex quantity {:?}: {}", s, e))
+        .ok_or_else(|| "missing 0x prefix".to_string())?;
+    u128::from_str_radix(hex, 16).map_err(|_| "invalid hex quantity".to_string())
 }
 
 /// Strictly validates an Ethereum JSON-RPC QUANTITY per the wire spec: a
@@ -406,35 +406,33 @@ pub fn parse_hex_quantity(s: &str) -> Result<u128, String> {
 /// path in this file depends on (e.g. `getReserves`/`eth_call` ABI words,
 /// which are naturally zero-padded on-chain and MUST keep being accepted),
 /// this validator exists so the probe's tx-count existence proof does not
-/// inherit that permissiveness. `parse_hex_quantity` itself is left
-/// unchanged.
+/// inherit that permissiveness. The shared parser's acceptance behavior is
+/// unchanged; its errors omit the untrusted input value.
 fn parse_strict_eth_quantity(s: &str) -> Result<u128, String> {
     let hex = s
         .strip_prefix("0x")
-        .ok_or_else(|| format!("not a lowercase 0x-prefixed QUANTITY: {:?}", s))?;
+        .ok_or_else(|| "not a lowercase 0x-prefixed QUANTITY".to_string())?;
     if hex.is_empty() {
-        return Err(format!("QUANTITY has no hex digits: {:?}", s));
+        return Err("QUANTITY has no hex digits".to_string());
     }
     if !hex
         .bytes()
         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
-        return Err(format!(
-            "QUANTITY has non-canonical (non-lowercase-hex, or non-hex) digits: {:?}",
-            s
-        ));
+        return Err(
+            "QUANTITY has non-canonical (non-lowercase-hex, or non-hex) digits".to_string(),
+        );
     }
     if hex == "0" {
         return Ok(0);
     }
     if hex.starts_with('0') {
-        return Err(format!(
-            "QUANTITY is not minimally encoded (leading-zero padding on a nonzero value): {:?}",
-            s
-        ));
+        return Err(
+            "QUANTITY is not minimally encoded (leading-zero padding on a nonzero value)"
+                .to_string(),
+        );
     }
-    u128::from_str_radix(hex, 16)
-        .map_err(|e| format!("QUANTITY overflow or invalid: {:?}: {}", s, e))
+    u128::from_str_radix(hex, 16).map_err(|_| "QUANTITY overflow or invalid".to_string())
 }
 
 /// Decode an `eth_call` result word (a 0x-prefixed 32-byte ABI uint) into a
@@ -446,15 +444,11 @@ pub fn parse_eth_call_u128(result_hex: &str) -> Result<u128, String> {
     let hex = result_hex
         .strip_prefix("0x")
         .or_else(|| result_hex.strip_prefix("0X"))
-        .ok_or_else(|| format!("eth_call result missing 0x prefix: {:?}", result_hex))?;
+        .ok_or_else(|| "eth_call result missing 0x prefix".to_string())?;
     if hex.is_empty() {
-        return Err(format!(
-            "eth_call returned empty result {:?} (revert/empty)",
-            result_hex
-        ));
+        return Err("eth_call returned empty result (revert/empty)".to_string());
     }
-    u128::from_str_radix(hex, 16)
-        .map_err(|e| format!("eth_call result {:?} not a u128: {}", result_hex, e))
+    u128::from_str_radix(hex, 16).map_err(|_| "eth_call result not a u128".to_string())
 }
 
 /// Decode an `eth_call` result word containing an ABI address into a normalized
@@ -463,34 +457,20 @@ pub fn parse_eth_call_address(result_hex: &str) -> Result<String, String> {
     let hex = result_hex
         .strip_prefix("0x")
         .or_else(|| result_hex.strip_prefix("0X"))
-        .ok_or_else(|| {
-            format!(
-                "eth_call address result missing 0x prefix: {:?}",
-                result_hex
-            )
-        })?;
+        .ok_or_else(|| "eth_call address result missing 0x prefix".to_string())?;
     if hex.len() != 64 {
-        return Err(format!(
-            "eth_call address result must be one ABI word: {:?}",
-            result_hex
-        ));
+        return Err("eth_call address result must be one ABI word".to_string());
     }
     if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!("eth_call address result not hex: {:?}", result_hex));
+        return Err("eth_call address result not hex".to_string());
     }
     let word = hex;
     if !word[..24].bytes().all(|b| b == b'0') {
-        return Err(format!(
-            "eth_call address result has non-zero padding: {:?}",
-            result_hex
-        ));
+        return Err("eth_call address result has non-zero padding".to_string());
     }
     let address = &word[24..64];
     if address.bytes().all(|b| b == b'0') {
-        return Err(format!(
-            "eth_call address result is zero address: {:?}",
-            result_hex
-        ));
+        return Err("eth_call address result is zero address".to_string());
     }
     Ok(format!("0x{}", address.to_lowercase()))
 }
@@ -564,10 +544,7 @@ impl BurnLog {
             ));
         }
         if !topics[0].eq_ignore_ascii_case(BURN_EVENT_TOPIC0) {
-            return Err(format!(
-                "BurnLog: wrong topic0: expected {} got {}",
-                BURN_EVENT_TOPIC0, topics[0]
-            ));
+            return Err("BurnLog: wrong topic0".to_string());
         }
         let vault_id_raw = parse_hex_quantity(&topics[1])?;
         if vault_id_raw > u64::MAX as u128 {
@@ -610,7 +587,7 @@ pub fn decode_burn_log_with_burner(
         .or_else(|| raw.strip_prefix("0X"))
         .unwrap_or(raw);
     if hex.len() < 40 {
-        return Err(format!("BurnLogWithBurner: burner topic too short: {raw}"));
+        return Err("BurnLogWithBurner: burner topic too short".to_string());
     }
     Ok(BurnLogWithBurner {
         vault_id: burn.vault_id,
@@ -656,10 +633,7 @@ impl MintLog {
             ));
         }
         if !topics[0].eq_ignore_ascii_case(MINT_EVENT_TOPIC0) {
-            return Err(format!(
-                "MintLog: wrong topic0: expected {} got {}",
-                MINT_EVENT_TOPIC0, topics[0]
-            ));
+            return Err("MintLog: wrong topic0".to_string());
         }
         let vault_id_raw = parse_hex_quantity(&topics[1])?;
         if vault_id_raw > u64::MAX as u128 {
@@ -714,7 +688,7 @@ impl TransferLog {
             ));
         }
         if !topics[0].eq_ignore_ascii_case(TRANSFER_EVENT_TOPIC0) {
-            return Err(format!("TransferLog: wrong topic0: {}", topics[0]));
+            return Err("TransferLog: wrong topic0".to_string());
         }
         let to = {
             let raw = topics[2]
@@ -741,15 +715,15 @@ pub fn parse_two_uint112(result_hex: &str) -> Result<(u128, u128), String> {
     let hex = result_hex
         .strip_prefix("0x")
         .or_else(|| result_hex.strip_prefix("0X"))
-        .ok_or_else(|| format!("getReserves result missing 0x prefix: {:?}", result_hex))?;
+        .ok_or_else(|| "getReserves result missing 0x prefix".to_string())?;
     // Two full 32-byte words for the two uint112 reserves = 128 hex chars.
     if hex.len() < 128 {
-        return Err(format!("getReserves result too short: {:?}", result_hex));
+        return Err("getReserves result too short".to_string());
     }
     let r0 = u128::from_str_radix(&hex[0..64], 16)
-        .map_err(|e| format!("getReserves reserve0 parse: {}", e))?;
+        .map_err(|_| "getReserves reserve0 parse failed".to_string())?;
     let r1 = u128::from_str_radix(&hex[64..128], 16)
-        .map_err(|e| format!("getReserves reserve1 parse: {}", e))?;
+        .map_err(|_| "getReserves reserve1 parse failed".to_string())?;
     Ok((r0, r1))
 }
 
@@ -815,9 +789,71 @@ async fn single_call(canister: Principal, url: &str, json_payload: &str) -> Resu
     .await;
     match result {
         Ok((RequestResult::Ok(text),)) => Ok(text),
-        Ok((RequestResult::Err(rpc_err),)) => Err(format!("RPC error from {}: {:?}", url, rpc_err)),
-        Err((code, msg)) => Err(format!("call error to {} ({:?}): {}", url, code, msg)),
+        Ok((RequestResult::Err(rpc_err),)) => Err(format!(
+            "RPC provider error: {}",
+            safe_rpc_error_summary(&rpc_err)
+        )),
+        Err((code, _msg)) => Err(format!("EVM RPC canister call failed ({:?})", code)),
     }
+}
+
+/// Summarize an RPC error without forwarding provider-controlled text, which
+/// can echo a configured URL containing credentials in its path or query.
+fn safe_rpc_error_summary(error: &RpcError) -> String {
+    match error {
+        RpcError::JsonRpcError(error) => format!("JsonRpcError(code={})", error.code),
+        RpcError::ProviderError(ProviderError::TooFewCycles(cycles)) => format!(
+            "ProviderError::TooFewCycles(expected={}, received={})",
+            cycles.expected, cycles.received
+        ),
+        RpcError::ProviderError(ProviderError::MissingRequiredProvider) => {
+            "ProviderError::MissingRequiredProvider".to_string()
+        }
+        RpcError::ProviderError(ProviderError::ProviderNotFound) => {
+            "ProviderError::ProviderNotFound".to_string()
+        }
+        RpcError::ProviderError(ProviderError::NoPermission) => {
+            "ProviderError::NoPermission".to_string()
+        }
+        RpcError::ProviderError(ProviderError::InvalidRpcConfig(_)) => {
+            "ProviderError::InvalidRpcConfig".to_string()
+        }
+        RpcError::ValidationError(ValidationError::Custom(_)) => {
+            "ValidationError::Custom".to_string()
+        }
+        RpcError::ValidationError(ValidationError::InvalidHex(_)) => {
+            "ValidationError::InvalidHex".to_string()
+        }
+        RpcError::HttpOutcallError(HttpOutcallError::IcError(error)) => {
+            format!("HttpOutcallError::IcError({:?})", error.code)
+        }
+        RpcError::HttpOutcallError(HttpOutcallError::InvalidHttpJsonRpcResponse(error)) => {
+            format!(
+                "HttpOutcallError::InvalidHttpJsonRpcResponse(status={})",
+                error.status
+            )
+        }
+    }
+}
+
+fn parse_rpc_json(text: &str, method: &str) -> Result<serde_json::Value, String> {
+    serde_json::from_str(text).map_err(|_| format!("{}: malformed JSON-RPC response", method))
+}
+
+fn rpc_result_str<'a>(value: &'a serde_json::Value, method: &str) -> Result<&'a str, String> {
+    value
+        .get("result")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("{}: missing or non-string result", method))
+}
+
+fn rpc_error_summary(method: &str, error: &serde_json::Value) -> String {
+    let code = error
+        .get("code")
+        .and_then(serde_json::Value::as_i64)
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("{} RPC error (code={})", method, code)
 }
 
 /// The consensus key of a SHAPE-VALID JSON-RPC response, or `None` if the
@@ -980,13 +1016,12 @@ async fn call_evm_rpc_detailed(chain: ChainId, json_payload: &str) -> Result<Str
     }
     let canister = evm_rpc_principal();
 
-    // Collect EVERY provider's outcome (not just the last error), so a
-    // disagreement or all-fail diagnosis can name every provider by URL.
+    // Collect every provider outcome while keeping logs free of configured URLs.
     let mut outcomes: Vec<(String, Result<String, String>)> = Vec::new();
-    for url in &endpoints {
+    for (index, url) in endpoints.iter().enumerate() {
         let outcome = single_call(canister, url, json_payload).await;
         if let Err(ref e) = outcome {
-            log!(DEBUG, "[evm_rpc] provider read error via {}: {}", url, e);
+            log!(DEBUG, "[evm_rpc] provider #{} read error: {}", index + 1, e);
         }
         outcomes.push((url.clone(), outcome));
     }
@@ -1008,19 +1043,25 @@ fn tally_provider_outcomes(
 
     // Collect every Ok response PAIRED with its provider URL, so the tally counts
     // DISTINCT providers (M-04), not list slots or raw response multiplicity.
-    let oks: Vec<(&str, &str)> = outcomes
+    let oks: Vec<(usize, &str, &str)> = outcomes
         .iter()
-        .filter_map(|(url, r)| r.as_ref().ok().map(|text| (url.as_str(), text.as_str())))
+        .enumerate()
+        .filter_map(|(index, (url, r))| {
+            r.as_ref()
+                .ok()
+                .map(|text| (index + 1, url.as_str(), text.as_str()))
+        })
         .collect();
-    let errs: Vec<(&str, &str)> = outcomes
+    let errs: Vec<usize> = outcomes
         .iter()
-        .filter_map(|(url, r)| r.as_ref().err().map(|e| (url.as_str(), e.as_str())))
+        .enumerate()
+        .filter_map(|(index, (_, r))| r.as_ref().err().map(|_| index + 1))
         .collect();
 
     if oks.is_empty() {
         let detail = errs
             .iter()
-            .map(|(url, e)| format!("{} -> {}", url, e))
+            .map(|index| format!("provider #{} failed", index))
             .collect::<Vec<_>>()
             .join("; ");
         return Err(QuorumError::AllProvidersFailed(format!(
@@ -1036,12 +1077,12 @@ fn tally_provider_outcomes(
     // than being grouped under a synthetic key, so it can never form a false
     // quorum with a genuine result/error response, and two malformed
     // responses never vote for EACH OTHER either.
-    let mut keyed: Vec<(&str, serde_json::Value)> = Vec::new();
-    let mut malformed: Vec<(&str, &str)> = Vec::new();
-    for (url, text) in &oks {
+    let mut keyed: Vec<(usize, &str, serde_json::Value)> = Vec::new();
+    let mut malformed: Vec<usize> = Vec::new();
+    for (index, url, text) in &oks {
         match response_consensus_key(text) {
-            Some(key) => keyed.push((*url, key)),
-            None => malformed.push((*url, *text)),
+            Some(key) => keyed.push((*index, *url, key)),
+            None => malformed.push(*index),
         }
     }
     let malformed_detail = if malformed.is_empty() {
@@ -1051,7 +1092,7 @@ fn tally_provider_outcomes(
             "; malformed responses excluded from tally (shape-invalid, not a vote): {}",
             malformed
                 .iter()
-                .map(|(url, text)| format!("{} -> {:?}", url, text))
+                .map(|index| format!("provider #{}", index))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -1061,11 +1102,10 @@ fn tally_provider_outcomes(
         // Every Ok response that came back was shape-malformed: functionally
         // the same as no usable response being available to tally (nothing
         // to agree on), so this fails the same way `AllProvidersFailed` does,
-        // carrying both the outright call errors and the malformed responses
-        // in the diagnostic.
+        // carrying only safe provider indices in the diagnostic.
         let errs_detail = errs
             .iter()
-            .map(|(url, e)| format!("{} -> {}", url, e))
+            .map(|index| format!("provider #{} failed", index))
             .collect::<Vec<_>>()
             .join("; ");
         return Err(QuorumError::AllProvidersFailed(format!(
@@ -1084,8 +1124,8 @@ fn tally_provider_outcomes(
     let mut best_count = 0usize;
     for i in 0..keyed.len() {
         let mut providers_for_key = std::collections::BTreeSet::new();
-        for (url, key) in &keyed {
-            if *key == keyed[i].1 {
+        for (_, url, key) in &keyed {
+            if *key == keyed[i].2 {
                 providers_for_key.insert(*url);
             }
         }
@@ -1107,11 +1147,11 @@ fn tally_provider_outcomes(
         // Return the winning provider's ORIGINAL response text (looked up by
         // URL, since `keyed` may be a strict subset of `oks` once malformed
         // responses are excluded).
-        let winning_url = keyed[best_idx].0;
+        let winning_url = keyed[best_idx].1;
         let winning_text = oks
             .iter()
-            .find(|(url, _)| *url == winning_url)
-            .map(|(_, text)| *text)
+            .find(|(_, url, _)| *url == winning_url)
+            .map(|(_, _, text)| *text)
             .expect("winning url must be present in oks: keyed is built only from oks entries");
         Ok(winning_text.to_string())
     } else {
@@ -1119,16 +1159,24 @@ fn tally_provider_outcomes(
         // disagreed about, grouped by distinct value, plus any provider that
         // errored outright (it did not vote either way) or was excluded as
         // malformed.
-        let mut groups: Vec<(serde_json::Value, Vec<&str>)> = Vec::new();
-        for (url, key) in &keyed {
+        let mut groups: Vec<(serde_json::Value, Vec<usize>)> = Vec::new();
+        for (index, _, key) in &keyed {
             match groups.iter_mut().find(|(k, _)| k == key) {
-                Some(g) => g.1.push(*url),
-                None => groups.push((key.clone(), vec![*url])),
+                Some(g) => g.1.push(*index),
+                None => groups.push((key.clone(), vec![*index])),
             }
         }
         let groups_detail = groups
             .iter()
-            .map(|(key, urls)| format!("{} from [{}]", key, urls.join(", ")))
+            .enumerate()
+            .map(|(i, (_, providers))| {
+                let providers = providers
+                    .iter()
+                    .map(|index| format!("provider #{}", index))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("response group {} from [{}]", i + 1, providers)
+            })
             .collect::<Vec<_>>()
             .join("; ");
         let errs_detail = if errs.is_empty() {
@@ -1137,7 +1185,7 @@ fn tally_provider_outcomes(
             format!(
                 "; provider errors: {}",
                 errs.iter()
-                    .map(|(url, e)| format!("{} -> {}", url, e))
+                    .map(|index| format!("provider #{} failed", index))
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -1317,15 +1365,12 @@ fn block_probe_outcome(
 /// `block_probe_outcome`, never advances the cursor) rather than silently
 /// collapsing into the benign not-yet-produced case.
 fn parse_block_probe_response(chain: ChainId, n: u64, text: &str) -> Result<Option<u64>, String> {
-    let val: serde_json::Value = match serde_json::from_str(text) {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(format!(
-                "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: malformed JSON-RPC response: {} (raw={:?})",
-                n, chain, e, text
-            ))
-        }
-    };
+    let val: serde_json::Value = serde_json::from_str(text).map_err(|_| {
+        format!(
+            "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: malformed JSON-RPC response",
+            n, chain
+        )
+    })?;
 
     // `.get(...)` (unlike `val["..."]`) distinguishes a MISSING key from an
     // explicit `null` value; a bare `.is_null()` check on the indexed value
@@ -1338,8 +1383,8 @@ fn parse_block_probe_response(chain: ChainId, n: u64, text: &str) -> Result<Opti
         // Malformed: a well-formed response never carries both. Fail closed
         // loudly rather than guessing which field to trust.
         return Err(format!(
-            "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: malformed JSON-RPC response carries BOTH result and error: {:?}",
-            n, chain, text
+            "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: malformed JSON-RPC response carries BOTH result and error",
+            n, chain
         ));
     }
 
@@ -1351,15 +1396,15 @@ fn parse_block_probe_response(chain: ChainId, n: u64, text: &str) -> Result<Opti
         // AND actionable: return Err so the caller propagates it distinctly
         // rather than silently collapsing it into "not yet produced".
         return Err(format!(
-            "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: providers agreed on a JSON-RPC error: {}",
-            n, chain, err
+            "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: providers agreed on a JSON-RPC error (code={})",
+            n, chain, err.get("code").and_then(serde_json::Value::as_i64).unwrap_or_default()
         ));
     }
 
     match result_field {
         None => Err(format!(
-            "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: malformed JSON-RPC response missing both result and error: {:?}",
-            n, chain, text
+            "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: malformed JSON-RPC response missing both result and error",
+            n, chain
         )),
         Some(v) if v.is_null() => Ok(None), // benign: chain has not produced this block yet
         Some(v) => match v.as_str() {
@@ -1371,14 +1416,14 @@ fn parse_block_probe_response(chain: ChainId, n: u64, text: &str) -> Result<Opti
                 // (B2 hardening, review round 2), not the permissive shared
                 // `parse_hex_quantity` other callers in this file rely on.
                 Ok(_) => Ok(Some(n)),
-                Err(e) => Err(format!(
-                    "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: result is not a valid hex quantity: {} (raw={:?})",
-                    n, chain, e, text
+                Err(_) => Err(format!(
+                    "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: result is not a valid hex quantity",
+                    n, chain
                 )),
             },
             None => Err(format!(
-                "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: unexpected result shape (not a string): {:?}",
-                n, chain, text
+                "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: unexpected result shape (not a string)",
+                n, chain
             )),
         },
     }
@@ -1458,11 +1503,8 @@ pub async fn get_balance(chain: ChainId, address: &str) -> Result<u128, String> 
         next_rpc_id()
     );
     let text = call_evm_rpc(chain, &payload).await?;
-    let val: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("eth_getBalance parse: {}", e))?;
-    let hex = val["result"]
-        .as_str()
-        .ok_or_else(|| format!("eth_getBalance: missing result in {:?}", text))?;
+    let val = parse_rpc_json(&text, "eth_getBalance")?;
+    let hex = rpc_result_str(&val, "eth_getBalance")?;
     parse_hex_quantity(hex)
 }
 
@@ -1486,14 +1528,11 @@ pub async fn get_balance_at_block(
         next_rpc_id()
     );
     let text = call_evm_rpc(chain, &payload).await?;
-    let val: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("eth_getBalance(at block) parse: {}", e))?;
+    let val = parse_rpc_json(&text, "eth_getBalance(at block)")?;
     if let Some(err) = val.get("error") {
-        return Err(format!("eth_getBalance(at block) RPC error: {}", err));
+        return Err(rpc_error_summary("eth_getBalance(at block)", err));
     }
-    let hex = val["result"]
-        .as_str()
-        .ok_or_else(|| format!("eth_getBalance(at block): missing result in {:?}", text))?;
+    let hex = rpc_result_str(&val, "eth_getBalance(at block)")?;
     parse_hex_quantity(hex)
 }
 
@@ -1516,14 +1555,11 @@ pub async fn erc20_total_supply_at(
         next_rpc_id()
     );
     let text = call_evm_rpc(chain, &payload).await?;
-    let val: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("eth_call(totalSupply) parse: {}", e))?;
+    let val = parse_rpc_json(&text, "eth_call(totalSupply)")?;
     if let Some(err) = val.get("error") {
-        return Err(format!("eth_call(totalSupply) RPC error: {}", err));
+        return Err(rpc_error_summary("eth_call(totalSupply)", err));
     }
-    let hex = val["result"]
-        .as_str()
-        .ok_or_else(|| format!("eth_call(totalSupply): missing result in {:?}", text))?;
+    let hex = rpc_result_str(&val, "eth_call(totalSupply)")?;
     parse_eth_call_u128(hex)
 }
 
@@ -1545,15 +1581,11 @@ async fn eth_call_at_block(
         next_rpc_id()
     );
     let text = call_evm_rpc(chain, &payload).await?;
-    let val: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("eth_call parse: {}", e))?;
+    let val = parse_rpc_json(&text, "eth_call")?;
     if let Some(err) = val.get("error") {
-        return Err(format!("eth_call RPC error: {}", err));
+        return Err(rpc_error_summary("eth_call", err));
     }
-    val["result"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| format!("eth_call: missing result in {:?}", text))
+    Ok(rpc_result_str(&val, "eth_call")?.to_string())
 }
 
 /// UniswapV2 `getReserves()` at a pinned finalized block -> `(reserve0,
@@ -1574,7 +1606,7 @@ pub async fn get_pair_token0(chain: ChainId, pair: &str, block: u64) -> Result<S
         .or_else(|| hex.strip_prefix("0X"))
         .unwrap_or(&hex);
     if raw.len() < 40 {
-        return Err(format!("token0: result too short: {:?}", hex));
+        return Err("token0: result too short".to_string());
     }
     Ok(format!("0x{}", raw[raw.len() - 40..].to_lowercase()))
 }
@@ -1623,11 +1655,8 @@ pub async fn get_transaction_count(chain: ChainId, address: &str) -> Result<u64,
         next_rpc_id()
     );
     let text = call_evm_rpc(chain, &payload).await?;
-    let val: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("eth_getTransactionCount parse: {}", e))?;
-    let hex = val["result"]
-        .as_str()
-        .ok_or_else(|| format!("eth_getTransactionCount: missing result in {:?}", text))?;
+    let val = parse_rpc_json(&text, "eth_getTransactionCount")?;
+    let hex = rpc_result_str(&val, "eth_getTransactionCount")?;
     Ok(parse_hex_quantity(hex)? as u64)
 }
 
@@ -1713,16 +1742,15 @@ async fn get_logs_single_range(
         next_rpc_id()
     );
     let text = call_evm_rpc(chain, &payload).await?;
-    let val: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("eth_getLogs parse: {}", e))?;
+    let val = parse_rpc_json(&text, "eth_getLogs")?;
 
     if let Some(err) = val.get("error") {
-        return Err(format!("eth_getLogs RPC error: {}", err));
+        return Err(rpc_error_summary("eth_getLogs", err));
     }
 
     let logs = val["result"]
         .as_array()
-        .ok_or_else(|| format!("eth_getLogs: result is not an array in {:?}", text))?;
+        .ok_or_else(|| "eth_getLogs: result is not an array".to_string())?;
 
     let mut out = Vec::with_capacity(logs.len());
     for (position, entry) in logs.iter().enumerate() {
@@ -1766,8 +1794,7 @@ pub async fn get_transaction_receipt(
         next_rpc_id()
     );
     let text = call_evm_rpc(chain, &payload).await?;
-    let val: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("eth_getTransactionReceipt parse: {}", e))?;
+    let val = parse_rpc_json(&text, "eth_getTransactionReceipt")?;
 
     if val["result"].is_null() {
         return Ok(None); // transaction still pending
@@ -1777,7 +1804,7 @@ pub async fn get_transaction_receipt(
     let success = parse_hex_quantity(status_hex)? == 1;
     let block_number_hex = val["result"]["blockNumber"]
         .as_str()
-        .ok_or_else(|| format!("receipt missing blockNumber in {:?}", text))?;
+        .ok_or_else(|| "receipt missing blockNumber".to_string())?;
     let block_number = parse_hex_quantity(block_number_hex)? as u64;
     Ok(Some((success, block_number)))
 }
@@ -1795,10 +1822,9 @@ pub struct TxReceiptWithLogs {
 /// Pure parser for an `eth_getTransactionReceipt` JSON-RPC response string.
 /// Returns Ok(None) if the receipt is null (tx still pending).
 pub fn parse_receipt_with_logs(text: &str) -> Result<Option<TxReceiptWithLogs>, String> {
-    let val: serde_json::Value = serde_json::from_str(text)
-        .map_err(|e| format!("eth_getTransactionReceipt parse: {}", e))?;
+    let val = parse_rpc_json(text, "eth_getTransactionReceipt")?;
     if let Some(err) = val.get("error") {
-        return Err(format!("eth_getTransactionReceipt RPC error: {}", err));
+        return Err(rpc_error_summary("eth_getTransactionReceipt", err));
     }
     if val["result"].is_null() {
         return Ok(None);
@@ -1811,7 +1837,7 @@ pub fn parse_receipt_with_logs(text: &str) -> Result<Option<TxReceiptWithLogs>, 
     let block_number = parse_hex_quantity(
         res["blockNumber"]
             .as_str()
-            .ok_or_else(|| format!("receipt missing blockNumber in {:?}", text))?,
+            .ok_or_else(|| "receipt missing blockNumber".to_string())?,
     )? as u64;
     let mut logs = Vec::new();
     if let Some(arr) = res["logs"].as_array() {
@@ -1878,8 +1904,7 @@ where
     );
     // A broadcast is a write: first-Ok, not quorum (see call_evm_rpc_broadcast_guarded).
     let text = call_evm_rpc_broadcast_guarded(chain, &payload, before_attempt).await?;
-    let val: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("eth_sendRawTransaction parse: {}", e))?;
+    let val = parse_rpc_json(&text, "eth_sendRawTransaction")?;
 
     if let Some(err) = val.get("error") {
         // IDEMPOTENT-SUCCESS: a broadcast that the node already has is NOT a
@@ -1894,13 +1919,13 @@ where
         if msg.contains("already known") || msg.contains("already exists") {
             return crate::chains::evm::tx::raw_tx_hash(raw_tx_hex);
         }
-        return Err(format!("eth_sendRawTransaction RPC error: {}", err));
+        return Err(rpc_error_summary("eth_sendRawTransaction", err));
     }
 
     val["result"]
         .as_str()
         .map(String::from)
-        .ok_or_else(|| format!("eth_sendRawTransaction: missing result in {:?}", text))
+        .ok_or_else(|| "eth_sendRawTransaction: missing or non-string result".to_string())
 }
 
 /// Returns `(base_fee_wei, priority_fee_wei)` for gas estimation.
@@ -1919,11 +1944,8 @@ pub async fn fetch_fees(chain: ChainId) -> Result<(u128, u128), String> {
     );
     match call_evm_rpc(chain, &payload).await {
         Ok(text) => {
-            let val: serde_json::Value =
-                serde_json::from_str(&text).map_err(|e| format!("eth_gasPrice parse: {}", e))?;
-            let hex = val["result"]
-                .as_str()
-                .ok_or_else(|| format!("eth_gasPrice: missing result in {:?}", text))?;
+            let val = parse_rpc_json(&text, "eth_gasPrice")?;
+            let hex = rpc_result_str(&val, "eth_gasPrice")?;
             let gas_price = parse_hex_quantity(hex)?;
             // Simple split: 90% base, 10% priority tip.
             let base_fee = gas_price * 9 / 10;
@@ -1984,8 +2006,7 @@ mod tests {
     // per `chains::evm::conflux::config`).
 
     use super::{
-        block_probe_outcome, tally_provider_outcomes, ProviderError, QuorumError, RpcError,
-        TooFewCyclesRecord,
+        block_probe_outcome, tally_provider_outcomes, JsonRpcError, QuorumError, RpcError,
     };
     use crate::chains::config::ChainId;
 
@@ -2004,15 +2025,123 @@ mod tests {
         format!(r#"{{"jsonrpc":"2.0","id":{},"result":{}}}"#, id, result)
     }
 
-    fn too_few_cycles_err(url: &str, expected: u64, received: u64) -> String {
-        // Mirrors EXACTLY what `single_call` produces for a `TooFewCycles`
-        // provider error, so this fixture is a regression check on that format
-        // too: `format!("RPC error from {}: {:?}", url, rpc_err)`.
-        let rpc_err = RpcError::ProviderError(ProviderError::TooFewCycles(TooFewCyclesRecord {
-            expected: candid::Nat::from(expected),
-            received: candid::Nat::from(received),
-        }));
-        format!("RPC error from {}: {:?}", url, rpc_err)
+    #[test]
+    fn malformed_provider_response_diagnostics_omit_credential_fragments() {
+        let urls = [
+            "https://rpc.example/private/key-one?token=secret-one".to_string(),
+            "https://rpc.example/private/key-two?token=secret-two".to_string(),
+            "https://rpc.example/private/key-three?token=secret-three".to_string(),
+        ];
+        let outcomes = urls
+            .iter()
+            .enumerate()
+            .map(|(i, url)| {
+                let fragment = format!("secret-{}", ["one", "two", "three"][i]);
+                (url.clone(), Ok(format!("{{\"echo\":{:?}}}", fragment)))
+            })
+            .collect::<Vec<_>>();
+
+        let error = tally_provider_outcomes(CHAIN, &outcomes, FLOOR)
+            .unwrap_err()
+            .to_string();
+        for secret_url in &urls {
+            assert!(
+                !error.contains(secret_url),
+                "provider URL leaked: {}",
+                error
+            );
+        }
+        assert!(error.contains("provider #1"), "{}", error);
+        for fragment in ["secret-one", "secret-two", "secret-three"] {
+            assert!(
+                !error.contains(fragment),
+                "credential fragment leaked: {}",
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn well_formed_provider_error_disagreement_omits_credential_fragments() {
+        let urls = providers();
+        let outcomes = urls
+            .iter()
+            .enumerate()
+            .map(|(index, url)| {
+                let fragment = format!("path-query-secret-{}", index + 1);
+                let response = format!(
+                    r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":-32000,"message":"{}"}}}}"#,
+                    fragment
+                );
+                (url.clone(), Ok(response))
+            })
+            .collect::<Vec<_>>();
+
+        let error = tally_provider_outcomes(CHAIN, &outcomes, FLOOR)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("response group"), "{}", error);
+        for fragment in [
+            "path-query-secret-1",
+            "path-query-secret-2",
+            "path-query-secret-3",
+        ] {
+            assert!(
+                !error.contains(fragment),
+                "provider response leaked: {}",
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn synthetic_provider_error_text_is_not_in_quorum_diagnostics() {
+        let urls = providers();
+        let outcomes = urls
+            .iter()
+            .enumerate()
+            .map(|(index, url)| {
+                (
+                    url.clone(),
+                    Err(format!("provider echoed query-secret-{}", index + 1)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let error = tally_provider_outcomes(CHAIN, &outcomes, FLOOR)
+            .unwrap_err()
+            .to_string();
+        for fragment in ["query-secret-1", "query-secret-2", "query-secret-3"] {
+            assert!(
+                !error.contains(fragment),
+                "provider error leaked: {}",
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn provider_error_summary_omits_provider_controlled_text() {
+        let secret = "credential-in-provider-message";
+        let error = RpcError::JsonRpcError(JsonRpcError {
+            code: -32000,
+            message: secret.to_string(),
+        });
+        let summary = super::safe_rpc_error_summary(&error);
+        assert!(summary.contains("-32000"));
+        assert!(!summary.contains(secret));
+    }
+
+    #[test]
+    fn missing_result_error_omits_provider_metadata_secret() {
+        let secret = "standalone-path-query-credential";
+        let response = serde_json::json!({"metadata": secret});
+        let error = super::rpc_result_str(&response, "eth_getBalance").unwrap_err();
+        assert!(error.contains("missing or non-string result"));
+        assert!(
+            !error.contains(secret),
+            "provider metadata leaked: {}",
+            error
+        );
     }
 
     // (a) quorum of "0x0" (and a nonzero count) at N => Some(N): block exists.
@@ -2068,11 +2197,13 @@ mod tests {
     // Ok(None).
     #[test]
     fn malformed_response_fails_closed_with_actionable_error() {
-        let err = super::parse_block_probe_response(CHAIN, 7, "not json at all");
+        let secret = "credential-fragment-in-malformed-body";
+        let err = super::parse_block_probe_response(CHAIN, 7, secret);
         assert!(err.is_err());
         let msg = err.unwrap_err();
         assert!(msg.contains("malformed JSON-RPC response"), "{}", msg);
         assert!(msg.contains("chain="), "{}", msg);
+        assert!(!msg.contains(secret), "provider body leaked: {}", msg);
     }
 
     #[test]
@@ -2083,7 +2214,7 @@ mod tests {
             .map(|u| {
                 (
                     u.clone(),
-                    Ok(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"header not found"}}"#.to_string()),
+                    Ok(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"path-query-secret-token"}}"#.to_string()),
                 )
             })
             .collect();
@@ -2104,7 +2235,8 @@ mod tests {
             "{}",
             msg
         );
-        assert!(msg.contains("header not found"), "{}", msg);
+        assert!(msg.contains("code=-32000"), "{}", msg);
+        assert!(!msg.contains("path-query-secret-token"), "{}", msg);
     }
 
     // Missing `result` key entirely (distinct from an explicit `null`) is
@@ -2268,18 +2400,18 @@ mod tests {
         assert_eq!(outcome, Ok(Some(154_850_928)));
     }
 
-    // (e) all providers TooFewCycles (or otherwise errored) => infrastructure
-    // failure diagnosis with per-provider summaries, INCLUDING the TooFewCycles
-    // expected/received cycle counts; cursor unchanged (propagated as Err).
+    // (e) all providers errored => infrastructure failure with safe provider
+    // indices; provider-controlled error details are never returned.
     #[test]
-    fn all_providers_too_few_cycles_is_an_infra_failure_with_per_provider_detail() {
+    fn all_providers_errored_is_an_infra_failure_with_safe_provider_detail() {
         let urls = providers();
         let make_outcomes = || -> Vec<(String, Result<String, String>)> {
             urls.iter()
-                .map(|u| {
+                .enumerate()
+                .map(|(index, u)| {
                     (
                         u.clone(),
-                        Err(too_few_cycles_err(u, 3_714_459_200, 2_000_000_000)),
+                        Err(format!("provider secret-fragment-{}", index + 1)),
                     )
                 })
                 .collect()
@@ -2291,27 +2423,28 @@ mod tests {
         let detail = quorum_err.to_string();
         // Actionable: names the failure class...
         assert!(detail.contains("infrastructure failure"), "{}", detail);
-        // ...every provider by URL...
-        for url in &urls {
+        // ...every provider by safe index, without its configured URL...
+        for index in 1..=urls.len() {
             assert!(
-                detail.contains(url.as_str()),
-                "missing {} in: {}",
-                url,
+                detail.contains(&format!("provider #{}", index)),
+                "{}",
                 detail
             );
         }
-        // ...and the exact TooFewCycles expected/received cycle counts.
-        assert!(detail.contains("TooFewCycles"), "{}", detail);
-        assert!(
-            detail.contains("3714459200") || detail.contains("3_714_459_200"),
-            "{}",
-            detail
-        );
-        assert!(
-            detail.contains("2000000000") || detail.contains("2_000_000_000"),
-            "{}",
-            detail
-        );
+        for url in &urls {
+            assert!(
+                !detail.contains(url.as_str()),
+                "provider URL leaked: {}",
+                detail
+            );
+        }
+        for index in 1..=urls.len() {
+            assert!(
+                !detail.contains(&format!("secret-fragment-{}", index)),
+                "provider error leaked: {}",
+                detail
+            );
+        }
 
         // The probe propagates this as Err (not Ok(None)) so the caller's
         // "fetch_block_numbers failed; will retry" log fires distinctly from
@@ -2324,7 +2457,6 @@ mod tests {
         assert!(outcome.is_err(), "{:?}", outcome);
         let msg = outcome.unwrap_err();
         assert!(msg.contains("infrastructure failure"), "{}", msg);
-        assert!(msg.contains("TooFewCycles"), "{}", msg);
     }
 
     // All-providers-plain-errored (not TooFewCycles specifically) is the SAME
@@ -2410,7 +2542,8 @@ mod tests {
         match &tally {
             Err(QuorumError::Disagreement(detail)) => {
                 assert!(detail.contains("malformed"), "{}", detail);
-                assert!(detail.contains(urls[1].as_str()), "{}", detail);
+                assert!(detail.contains("provider #2"), "{}", detail);
+                assert!(!detail.contains(urls[1].as_str()), "{}", detail);
             }
             other => panic!("expected Disagreement (a votable response existed but didn't reach quorum), got {:?}", other),
         }
@@ -2566,7 +2699,8 @@ mod tests {
         match &tally {
             Err(QuorumError::Disagreement(detail)) => {
                 assert!(detail.contains("malformed"), "{}", detail);
-                assert!(detail.contains(urls[2].as_str()), "{}", detail);
+                assert!(detail.contains("provider #3"), "{}", detail);
+                assert!(!detail.contains(urls[2].as_str()), "{}", detail);
             }
             other => panic!(
                 "expected Disagreement (malformed cannot manufacture a false quorum), got {:?}",

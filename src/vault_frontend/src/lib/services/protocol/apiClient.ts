@@ -81,7 +81,7 @@ import {
 } from '$lib/utils/repaymentV2Intent';
 import { stableRepaymentV2Outcome, stableRepaymentV2RequiredAllowance, stableRepaymentV2TransportOutcome, unwrapStableRepaymentV2Status } from '$lib/utils/stableRepaymentV2';
 import { liquidityV2ClaimIdentityMatches, liquidityV2Disposition, liquidityV2MayAdoptClaimAmount, liquidityV2StatusHasOwner, liquidityV2StatusMatchesIntent, type LiquidityV2Intent, type LiquidityV2Operation } from '$lib/utils/liquidityV2Intent';
-import { fetchLedgerFee } from '../ledgerFeeService';
+import { fetchLedgerFee, fetchLedgerFeeStrict, getFreshCachedLedgerFee } from '../ledgerFeeService';
 
 type StableRepaymentV2Token = 'CKUSDT' | 'CKUSDC';
 interface StableRepaymentV2Intent {
@@ -2487,7 +2487,7 @@ static async repayToVaultWithStable(
       } catch (error) {
         // Handle specific error cases
         const errorMsg = error?.toString() || '';
-        if (ApiClient.isVaultNotFoundError(errorMsg)) {
+        if (ApiClient.isVaultNotFoundError(errorMsg, vaultId)) {
           return {
             success: true,
             message: `Vault #${vaultId} has already been closed.`,
@@ -2837,7 +2837,19 @@ static async repayToVaultWithStable(
 
         const icusdE8s = BigInt(Math.floor(icusdAmount * E8S));
         const spenderCanisterId = CONFIG.currentCanisterId;
-        const bufferedAmount = icusdE8s * 105n / 100n;
+        // ICRC-2 transfer_from allowance must cover the pulled amount plus
+        // the ledger fee. Do not grant a percentage cushion: it leaves an
+        // unnecessarily large standing authorization for this operation.
+        const fee = isOisyWallet()
+          ? getFreshCachedLedgerFee({ ledgerId: CONFIG.currentIcusdLedgerId, decimals: 8, symbol: 'icUSD' })
+          : await fetchLedgerFeeStrict({ ledgerId: CONFIG.currentIcusdLedgerId, decimals: 8, symbol: 'icUSD' });
+        if (fee === null) {
+          return {
+            success: false,
+            error: 'The icUSD ledger fee is not freshly cached. Refresh the redemption fee quote before retrying.',
+          };
+        }
+        const requiredAllowance = icusdE8s + fee;
 
         const preferredOpt: [] | [Principal] = preferredToken
           ? [Principal.fromText(preferredToken)]
@@ -2870,7 +2882,6 @@ static async repayToVaultWithStable(
         const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
         if (signerAgent) {
           console.log(`[Oisy] Sequential icUSD approve + redeem_reserves`);
-          const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
           const icusdLedgerActor = await walletStore.getActor(
             CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL
           ) as any;
@@ -2878,7 +2889,7 @@ static async repayToVaultWithStable(
 
           // 1) Approve icUSD (first consent screen, Tier 1 native).
           const approveResult = await icusdLedgerActor.icrc2_approve({
-            amount: LARGE_APPROVAL,
+            amount: requiredAllowance,
             spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
             expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
             from_subaccount: [], created_at_time: []
@@ -2919,10 +2930,9 @@ static async repayToVaultWithStable(
 
         // ─── Standard path (non-Oisy, or sufficient allowance) ───
         const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
-        if (currentAllowance < bufferedAmount) {
-          const LARGE_APPROVAL = BigInt(100_000_000_000_000_000);
+        if (currentAllowance < requiredAllowance) {
           const approvalResult = await walletOperations.approveIcusdTransfer(
-            LARGE_APPROVAL, spenderCanisterId
+            requiredAllowance, spenderCanisterId
           );
           if (!approvalResult.success) {
             return {
@@ -3630,7 +3640,7 @@ static async repayToVaultWithStable(
     const [allowance, balance, fee] = await Promise.all([
       ledgerActor.icrc2_allowance({ account, spender }),
       ledgerActor.icrc1_balance_of(account),
-      ledgerActor.icrc1_fee(),
+      fetchLedgerFeeStrict({ ledgerId, decimals: 8, symbol: 'icUSD' }),
     ]);
     assertActionBoundContextCurrent(ctx);
     return {
@@ -3976,6 +3986,12 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
       let borrowedIcusdHuman: number;
       if (isOisyWallet()) {
         const snap = ApiClient.getCachedRawSnapshot(vaultId);
+        if (!snap) {
+          return {
+            success: false,
+            error: `Vault #${vaultId} status is not loaded. Refresh your vaults and try again.`,
+          };
+        }
         vaultExists = !!snap;
         borrowedIcusdHuman = snap ? Number(snap.borrowedIcusd) / E8S : 0;
       } else {
@@ -4047,7 +4063,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           const errorMsg = ApiClient.formatProtocolError(result.Err);
           
           // If the error indicates the vault doesn't exist, treat as success
-          if (ApiClient.isVaultNotFoundError(errorMsg)) {
+          if (ApiClient.isVaultNotFoundError(errorMsg, vaultId)) {
             return {
               success: true,
               message: `Vault #${vaultId} has already been closed.`,
@@ -4082,11 +4098,11 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
   /**
    * Helper to check if an error indicates vault not found
    */
-  private static isVaultNotFoundError(errorMsg: string): boolean {
-    const lowerMsg = errorMsg.toLowerCase();
-    return lowerMsg.includes('not found') || 
-           lowerMsg.includes('unknown vault') ||
-           lowerMsg.includes('tried to close unknown vault');
+  private static isVaultNotFoundError(errorMsg: string, vaultId: number): boolean {
+    // Backend close paths identify the missing vault by ID. Require the full
+    // requested ID so an unrelated not-found error cannot imply closure.
+    const normalized = errorMsg.trim().toLowerCase();
+    return normalized === `vault #${vaultId} not found`;
   }
 
     /**

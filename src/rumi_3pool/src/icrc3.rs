@@ -50,13 +50,11 @@ pub struct ArchivedBlocks {
     pub callback: ArchivedBlocksCallback,
 }
 
-/// Candid `func` reference — we never actually use archives, but the type
-/// must be present in the response for Candid compatibility.
-#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
-pub struct ArchivedBlocksCallback {
-    pub canister_id: Principal,
-    pub method: String,
-}
+/// ICRC-3 archive callbacks are Candid function references. Keeping the
+/// signature in the type matters: a record containing `canister_id` and
+/// `method` has a different wire shape and cannot decode a real ledger reply.
+pub type ArchivedBlocksCallback =
+    icrc_ledger_types::icrc3::archive::QueryArchiveFn<Vec<GetBlocksArgs>, GetBlocksResult>;
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub struct GetArchivesArgs {

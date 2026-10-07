@@ -56,6 +56,9 @@ pub(crate) fn pool_balance_mutation_blocked() -> bool {
                 || s.pending_sp_three_usd_absorbs
                     .as_ref()
                     .is_some_and(|requests| !requests.is_empty())
+                || s.pending_sp_legacy_approval_fees
+                    .as_ref()
+                    .is_some_and(|approvals| !approvals.is_empty())
         })
 }
 
@@ -103,6 +106,13 @@ pub(crate) fn pool_balance_mutation_blocked_for_ledger(ledger: Principal) -> boo
                 || s.pending_sp_three_usd_absorbs
                     .as_ref()
                     .is_some_and(|requests| !requests.is_empty())
+                || s.pending_sp_legacy_approval_fees
+                    .as_ref()
+                    .is_some_and(|approvals| {
+                        approvals
+                            .keys()
+                            .any(|(_, pending_ledger)| *pending_ledger == ledger)
+                    })
         })
 }
 
@@ -143,6 +153,13 @@ pub(crate) fn ensure_outbound_retry_allowed(
                 || s.pending_sp_three_usd_absorbs
                     .as_ref()
                     .is_some_and(|requests| !requests.is_empty())
+                || s.pending_sp_legacy_approval_fees
+                    .as_ref()
+                    .is_some_and(|approvals| {
+                        approvals
+                            .keys()
+                            .any(|(_, pending_ledger)| *pending_ledger == ledger)
+                    })
         });
     if blocked {
         Err(StabilityPoolError::SystemBusy)
@@ -243,6 +260,26 @@ fn setup_sp_liquidation_v2_recovery_timer() {
                 });
                 for absorb_id in absorb_ids {
                     let _ = crate::three_usd_v2::recover_proven_three_usd_absorb(absorb_id).await;
+                }
+                let legacy_approval_keys =
+                    read_state(|state| state.pending_sp_legacy_approval_fee_keys(1));
+                if !legacy_approval_keys.is_empty() {
+                    if let Ok(_guard) = crate::pool_guard::SpLiquidationGuard::new() {
+                        for (vault_id, ledger) in legacy_approval_keys {
+                            if let Err(error) =
+                                crate::liquidation::recover_sp_legacy_approval_fee(vault_id, ledger)
+                                    .await
+                            {
+                                log!(
+                                    INFO,
+                                    "Legacy approval fee recovery held for vault {} on ledger {}: {:?}",
+                                    vault_id,
+                                    ledger,
+                                    error
+                                );
+                            }
+                        }
+                    }
                 }
             });
         },

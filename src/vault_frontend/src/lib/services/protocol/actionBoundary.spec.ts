@@ -92,6 +92,7 @@ import {
 } from './apiClient';
 import type { AcceptedRedemptionOffer } from '$lib/utils/redemptionPreview';
 import { walletOperations, StaleActionSessionError, type ActionBoundContext } from './walletOperations';
+import { _clearLedgerFeeCache, getFreshCachedLedgerFee } from '../ledgerFeeService';
 
 const CKDOGE_LEDGER_ID = CANISTER_IDS.CKDOGE_LEDGER;
 const BACKEND_ID = CONFIG.currentCanisterId;
@@ -158,6 +159,7 @@ let ledgerActor: { icrc2_approve: ReturnType<typeof vi.fn> };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  _clearLedgerFeeCache();
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -546,6 +548,27 @@ describe('redemption submission is paused before wallet approval', () => {
     expect(result.error).toContain('paused until transfer recovery');
     expect(mocks.getSignerAgent).not.toHaveBeenCalled();
     expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+  });
+
+  it('preflight warms the exact icUSD fee cache before an Oisy click path', async () => {
+    currentWalletType.set(WALLET_TYPES.OISY);
+    const preflight = await ApiClient.getRedemptionPreflight();
+
+    expect(preflight.feeRaw).toBe(100_000n);
+    expect(getFreshCachedLedgerFee({
+      ledgerId: CONFIG.currentIcusdLedgerId,
+      decimals: 8,
+      symbol: 'icUSD',
+    })).toBe(100_000n);
+  });
+
+  it('recognizes only exact vault-missing close errors', () => {
+    const isVaultNotFoundError = (ApiClient as any).isVaultNotFoundError as (message: string, vaultId: number) => boolean;
+    expect(isVaultNotFoundError('Vault #42 not found', 42)).toBe(true);
+    expect(isVaultNotFoundError('Vault #43 not found', 42)).toBe(false);
+    expect(isVaultNotFoundError('Vault not found', 42)).toBe(false);
+    expect(isVaultNotFoundError('Price #42 not found', 42)).toBe(false);
+    expect(isVaultNotFoundError('unknown vault #42 while fetching price', 42)).toBe(false);
   });
 });
 

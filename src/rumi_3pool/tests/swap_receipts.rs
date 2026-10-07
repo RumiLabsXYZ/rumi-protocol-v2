@@ -3,7 +3,10 @@
 //! keeps reserve mutations fenced even after an upgrade.
 mod common;
 use candid::{decode_one, encode_args, encode_one, Nat, Principal};
-use common::{deploy_pool_with_liquidity_fee_and_swaps, three_pool_wasm, ThreePoolHarness};
+use common::{
+    deploy_pool_with_archive_cycles, deploy_pool_with_liquidity_fee_and_swaps, three_pool_wasm,
+    ThreePoolHarness,
+};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use pocket_ic::WasmResult;
@@ -276,6 +279,297 @@ fn too_old_after_ambiguous_no_effect_rotates_only_after_complete_fixed_tip_scan(
     assert_eq!(completed.status, SwapReceiptStatusV1::Completed);
     assert_eq!(completed.input.as_ref().unwrap().generation, Some(1));
 }
+
+#[test]
+fn archived_nonmatching_history_is_scanned_and_cursor_survives_upgrade() {
+    use icrc_ledger_types::icrc1::transfer::TransferArg;
+    use rumi_3pool::icrc3::{GetBlocksArgs, GetBlocksResult};
+    use std::time::UNIX_EPOCH;
+
+    let h = deploy_pool_with_archive_cycles(0, 10_000, Some(1_000_000_000_000));
+    let _: () = decode_one(&bytes(
+        h.pic
+            .update_call(
+                h.three_pool,
+                h.user,
+                "test_seed_absent_swap_input_v1",
+                encode_one(request()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    let baseline = query(&h, h.user)
+        .unwrap()
+        .input
+        .unwrap()
+        .history_start
+        .unwrap();
+    let baseline: u64 = baseline.0.try_into().unwrap();
+
+    // The harness ledger archives after 1,000 blocks. Create an archived run
+    // of valid, timestamped ICRC-3 transfers after the seeded receipt baseline;
+    // none can match the caller-to-pool receipt tuple.
+    let recipient = Principal::self_authenticating(b"archive-absence-recipient");
+    let timestamp = h
+        .pic
+        .get_time()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    for n in 0..1_100u64 {
+        let arg = TransferArg {
+            from_subaccount: None,
+            to: Account {
+                owner: recipient,
+                subaccount: None,
+            },
+            amount: Nat::from(1_000_000u64),
+            fee: Some(Nat::from(10_000u64)),
+            memo: Some(n.to_be_bytes().to_vec().into()),
+            created_at_time: Some(timestamp),
+        };
+        let result: Result<Nat, TransferError> = decode_one(&bytes(
+            h.pic
+                .update_call(
+                    h.ledgers[0],
+                    h.user,
+                    "icrc1_transfer",
+                    encode_one(arg).unwrap(),
+                )
+                .unwrap(),
+        ))
+        .unwrap();
+        result.expect("archive filler transfer should succeed");
+    }
+
+    let query_args = vec![GetBlocksArgs {
+        start: Nat::from(baseline),
+        length: Nat::from(100u64),
+    }];
+    let response: GetBlocksResult = decode_one(&bytes(
+        h.pic
+            .query_call(
+                h.ledgers[0],
+                h.user,
+                "icrc3_get_blocks",
+                encode_one(query_args.clone()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(
+        !response.archived_blocks.is_empty(),
+        "ledger should route this history page to its archive"
+    );
+    let archive = &response.archived_blocks[0];
+    let archived: GetBlocksResult = decode_one(&bytes(
+        h.pic
+            .query_call(
+                archive.callback.canister_id,
+                h.user,
+                &archive.callback.method,
+                encode_one(archive.args.clone()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(
+        !archived.blocks.is_empty(),
+        "archive response must contain the requested nonempty history"
+    );
+
+    h.pic
+        .advance_time(std::time::Duration::from_secs(30 * 60 * 60));
+    let aged = submit(&h, request()).unwrap();
+    assert_eq!(aged.status, SwapReceiptStatusV1::Unresolved);
+    assert_eq!(
+        aged.input.as_ref().unwrap().too_old_after_ambiguity,
+        Some(true)
+    );
+
+    // One page must consume the nonempty archive response and persist its
+    // cursor. An upgrade between pages must not restart at the old baseline.
+    let mut scanned = advance_absence_page(&h);
+    let first_scan = scanned
+        .input
+        .as_ref()
+        .unwrap()
+        .absence_scan
+        .as_ref()
+        .unwrap()
+        .clone();
+    assert!(first_scan.cursor > Nat::from(baseline));
+    h.pic
+        .upgrade_canister(
+            h.three_pool,
+            three_pool_wasm(),
+            encode_args(()).unwrap(),
+            None,
+        )
+        .unwrap();
+    scanned = query(&h, h.user).expect("receipt survives upgrade");
+    assert_eq!(
+        scanned.input.as_ref().unwrap().absence_scan.as_ref(),
+        Some(&first_scan)
+    );
+
+    for _ in 0..20 {
+        if scanned.input.as_ref().unwrap().ready_to_dispatch == Some(true) {
+            break;
+        }
+        scanned = advance_absence_page(&h);
+    }
+    let replacement = scanned.input.as_ref().unwrap();
+    assert_eq!(replacement.ready_to_dispatch, Some(true));
+    assert_eq!(replacement.generation, Some(1));
+    assert!(replacement.retired_identity_hash.is_some());
+}
+
+fn advance_absence_page(h: &ThreePoolHarness) -> SwapReceiptV1 {
+    let result: Result<SwapReceiptV1, SwapReceiptErrorV1> = decode_one(&bytes(
+        h.pic
+            .update_call(
+                h.three_pool,
+                h.user,
+                "advance_swap_absence_scan_v1",
+                encode_args((request().intent_id, 0u8)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    result.expect("complete contiguous ledger/archive page")
+}
+
+#[test]
+fn ingress_archived_absence_scan_rotates_after_nonempty_final_page() {
+    use icrc_ledger_types::icrc1::transfer::TransferArg;
+    use rumi_3pool::icrc3::{GetBlocksArgs, GetBlocksResult};
+    use rumi_3pool::receipts::{IngressReceiptErrorV1, IngressReceiptV1};
+    use std::time::UNIX_EPOCH;
+
+    let h = deploy_pool_with_archive_cycles(0, 10_000, Some(1_000_000_000_000));
+    let intent_id = vec![9; 32];
+    let _: () = decode_one(&bytes(
+        h.pic
+            .update_call(
+                h.three_pool,
+                h.user,
+                "test_seed_absent_ingress_pull_v1",
+                encode_args((intent_id.clone(), 0u8)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    let baseline = query_ingress(&h, &intent_id)
+        .expect("seeded ingress receipt")
+        .pulls[0]
+        .history_start
+        .clone()
+        .unwrap();
+    let baseline: u64 = baseline.0.try_into().unwrap();
+
+    let recipient = Principal::self_authenticating(b"ingress-archive-absence-recipient");
+    let timestamp = h
+        .pic
+        .get_time()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    for n in 0..1_100u64 {
+        let arg = TransferArg {
+            from_subaccount: None,
+            to: Account {
+                owner: recipient,
+                subaccount: None,
+            },
+            amount: Nat::from(1_000_000u64),
+            fee: Some(Nat::from(10_000u64)),
+            memo: Some(n.to_be_bytes().to_vec().into()),
+            created_at_time: Some(timestamp),
+        };
+        let result: Result<Nat, TransferError> = decode_one(&bytes(
+            h.pic
+                .update_call(
+                    h.ledgers[0],
+                    h.user,
+                    "icrc1_transfer",
+                    encode_one(arg).unwrap(),
+                )
+                .unwrap(),
+        ))
+        .unwrap();
+        result.expect("archive filler transfer should succeed");
+    }
+
+    let response: GetBlocksResult = decode_one(&bytes(
+        h.pic
+            .query_call(
+                h.ledgers[0],
+                h.user,
+                "icrc3_get_blocks",
+                encode_one(vec![GetBlocksArgs {
+                    start: Nat::from(baseline),
+                    length: Nat::from(100u64),
+                }])
+                .unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(!response.archived_blocks.is_empty());
+    let archive = &response.archived_blocks[0];
+    let archived: GetBlocksResult = decode_one(&bytes(
+        h.pic
+            .query_call(
+                archive.callback.canister_id,
+                h.user,
+                &archive.callback.method,
+                encode_one(archive.args.clone()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(!archived.blocks.is_empty());
+
+    let mut receipt = query_ingress(&h, &intent_id).expect("seeded ingress receipt");
+    for _ in 0..20 {
+        let transfer = &receipt.pulls[0];
+        if transfer.ready_to_dispatch == Some(true) {
+            break;
+        }
+        let result: Result<IngressReceiptV1, IngressReceiptErrorV1> = decode_one(&bytes(
+            h.pic
+                .update_call(
+                    h.three_pool,
+                    h.user,
+                    "advance_ingress_absence_scan_v1",
+                    encode_args((intent_id.clone(), 0u8)).unwrap(),
+                )
+                .unwrap(),
+        ))
+        .unwrap();
+        receipt = result.expect("complete archived ingress page");
+    }
+    let transfer = &receipt.pulls[0];
+    assert_eq!(transfer.ready_to_dispatch, Some(true));
+    assert_eq!(transfer.generation, Some(1));
+    assert!(transfer.retired_identity_hash.is_some());
+}
+
+fn query_ingress(h: &ThreePoolHarness, intent_id: &[u8]) -> Option<IngressReceiptV1> {
+    decode_one(&bytes(
+        h.pic
+            .query_call(
+                h.three_pool,
+                h.user,
+                "get_ingress_receipt_v1",
+                encode_one(intent_id.to_vec()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap()
+}
+
 #[test]
 fn definitive_output_rejection_records_exact_refund_block_and_fees() {
     let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);

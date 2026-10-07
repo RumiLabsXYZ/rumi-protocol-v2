@@ -371,7 +371,8 @@ canisters:
   #     reserve_a = 164_849_934_256 (3USD), reserve_b = 64_214_037_983 (ICP),
   #     unique_lps = 1 (Rob is sole LP per MEMORY).
   #
-  # Production module hash at time of migration:
+  # Historical production module hash from the May migration (context only;
+  # never use it as an acceptance pin):
   #   0x31bde26fbe21feae9a9132a43e4985b79b1bc803f8231305fcb78e355725e93e
   #   (the post-PR #193 hash that fixed AMM1 pool_id and shipped admin_burn).
   #
@@ -577,14 +578,13 @@ canisters:
   # WASM SIZE: the raw cargo release wasm is ~6.7 MB, well over the 2 MiB
   # ingress limit (2_097_152 bytes). `ic-wasm shrink` alone may not be enough.
   # Following the rumi_analytics pattern we go straight to the explicit
-  # `build: steps:` form with shrink + gzip -9. For an installed gzip artifact,
-  # `canister_status.module_hash` is the SHA-256 of the uploaded gzip bytes,
-  # not the SHA-256 of the locally decompressed Wasm. Record both identities:
-  # the gzip hash is the live pre-start/post-start gate, while the decompressed
-  # hash is semantic-content/build-reproducibility evidence only.
+  # `build: steps:` form with shrink + gzip -9. ICP accepts compressed Wasm
+  # uploads but reports the SHA-256 of the installed module after decompression.
+  # The gzip digest identifies transport bytes; only the raw Wasm digest is
+  # compared to `canister_status.module_hash`.
   #
   # Build pipeline:
-  #   1. `cargo build --release --target wasm32-unknown-unknown --package rumi_protocol_backend`
+  #   1. `cargo build --locked --release --target wasm32-unknown-unknown --package rumi_protocol_backend`
   #   2. copy the artifact to ICP_WASM_OUTPUT_PATH (icp-cli's expected location)
   #   3. embed candid:service metadata so query tools and dashboards see the
   #      candid interface without a sidecar file
@@ -606,7 +606,7 @@ canisters:
       steps:
         - type: script
           commands:
-            - cargo build --release --target wasm32-unknown-unknown --package rumi_protocol_backend
+            - cargo build --locked --release --target wasm32-unknown-unknown --package rumi_protocol_backend
             - cp target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm "$ICP_WASM_OUTPUT_PATH"
             - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata candid:service -f src/rumi_protocol_backend/rumi_protocol_backend.did -v public
             - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" shrink --keep-name-section

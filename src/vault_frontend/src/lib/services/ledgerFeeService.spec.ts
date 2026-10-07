@@ -32,7 +32,7 @@ vi.mock('../idls/ledger.idl.js', () => ({
   ICRC1_IDL: {},
 }));
 
-import { fetchLedgerFee, fetchLedgerFeeStrict, getCachedLedgerFee, _clearLedgerFeeCache } from './ledgerFeeService';
+import { fetchLedgerFee, fetchLedgerFeeStrict, getCachedLedgerFee, getFreshCachedLedgerFee, _clearLedgerFeeCache } from './ledgerFeeService';
 
 describe('ledgerFeeService', () => {
   beforeEach(() => {
@@ -128,5 +128,16 @@ describe('strict fee reads for ckBTC approval quotes', () => {
     mocks.icrc1Fee.mockRejectedValueOnce(new Error('ledger unavailable'));
     await expect(fetchLedgerFeeStrict({ ledgerId: 'ckbtc-unavailable', decimals: 8, symbol: 'ckBTC' }))
       .rejects.toThrow('ledger unavailable');
+  });
+
+  it('returns a fee synchronously only while a strict prewarmed cache entry is fresh', async () => {
+    const ref = { ledgerId: 'icusd-ledger', decimals: 8, symbol: 'icUSD' };
+    expect(getFreshCachedLedgerFee(ref)).toBeNull();
+    mocks.icrc1Fee.mockResolvedValueOnce(123_456n);
+    expect(await fetchLedgerFeeStrict(ref)).toBe(123_456n);
+    expect(getFreshCachedLedgerFee(ref)).toBe(123_456n);
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 5 * 60 * 1000);
+    expect(getFreshCachedLedgerFee(ref)).toBeNull();
   });
 });
