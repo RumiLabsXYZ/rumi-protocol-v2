@@ -78,9 +78,9 @@ type CallResult<T> = Result<T, (RejectionCode, String)>;
 pub async fn poll_all() -> usize {
     // RAII guard (AR-S-001): released on every exit path INCLUDING a trap (the
     // dropped future runs destructors), so a panicking poll never wedges polling.
-    let _guard = match state::PollGuard::new() {
+    let _guard = match state::try_poll_guard() {
         Some(g) => g,
-        None => return 0, // a poll is already in flight
+        None => return 0, // poll active, epoch closing, or legacy reseed in progress
     };
     let mut applied = 0;
     applied += poll_backend().await;

@@ -1,4 +1,19 @@
 type AssetType = variant { Icp; IcUsd; CkUsdc; CkUsdt; ThreeUsd };
+type CycleManagerCyclesStatus = record {
+  idle_burn_cycles_per_day : opt nat;
+  stable_memory_bytes : opt nat64;
+  low_watermark : nat;
+  balance : nat;
+  heap_memory_bytes : opt nat64;
+  healthy : bool;
+  freeze_threshold_secs : nat64;
+};
+type CycleManagerMetric = record {
+  key : text;
+  value : nat;
+  count : nat64;
+  label : opt text;
+};
 type DepositKey = record { asset : AssetType; venue : Venue };
 type DepositRecord = record {
   asset : AssetType;
@@ -8,9 +23,11 @@ type DepositRecord = record {
   recorded_value_usd : nat;
 };
 type EpochStatus = record {
+  legacy_transition_held : bool;
   open_epoch : opt OpenEpoch;
   snapshot_seed_committed : bool;
   driver_interval_secs : nat64;
+  legacy_reseed_pending : bool;
   revealed_seed_count : nat64;
   current_epoch_index : nat64;
   driver_enabled : bool;
@@ -60,28 +77,28 @@ type OpenEpoch = record {
   close_points_accrued : nat;
   epoch_end_ns : nat64;
 };
-type PointSource = variant {
-  Registration;
-  IcUsdDebt;
-  IcUsd3Pool;
-  CkStable3PoolUnmatched;
-  CkStable3PoolMatched;
-  VaultRepayment;
-  IcUsdStabilityPool;
-  ThreeUsdStabilityPool;
-  AmmLp;
-};
 type PointEntry = record {
   "principal" : principal;
   epoch_index : nat64;
-  points_delta : nat;
   source : PointSource;
   recorded_at_ns : nat64;
+  points_delta : nat;
 };
 type PointEntryPage = record {
+  reached_end : bool;
   entries : vec PointEntry;
   next_offset : nat64;
-  reached_end : bool;
+};
+type PointSource = variant {
+  CkStable3PoolMatched;
+  Registration;
+  CkStable3PoolUnmatched;
+  VaultRepayment;
+  IcUsd3Pool;
+  AmmLp;
+  IcUsdStabilityPool;
+  IcUsdDebt;
+  ThreeUsdStabilityPool;
 };
 type PointsConfig = record {
   admin : principal;
@@ -136,36 +153,22 @@ type RepaymentEvent = record {
   window_end : nat64;
 };
 type Result = variant { Ok; Err : PointsError };
-type Result_1 = variant { Ok; Err : text };
-type Result_2 = variant { Ok : nat64; Err : PointsError };
-type Result_3 = variant { Ok : nat64; Err : text };
+type Result_1 = variant { Ok : nat64; Err : text };
+type Result_2 = variant { Ok; Err : text };
+type Result_3 = variant { Ok : nat64; Err : PointsError };
 type RevealedSeed = record {
   revealed_at_ns : nat64;
   epoch_index : nat64;
+  derivation_entropy : opt blob;
   seed : blob;
   snapshot_time_a_ns : nat64;
   snapshot_time_b_ns : nat64;
 };
 type SourceStatus = record { tag : nat8; cursor : nat64; canister : principal };
 type Venue = variant { Amm; ThreePool; Vault; StabilityPool };
-type CycleManagerCyclesStatus = record {
-  balance : nat;
-  low_watermark : nat;
-  healthy : bool;
-  freeze_threshold_secs : nat64;
-  stable_memory_bytes : opt nat64;
-  heap_memory_bytes : opt nat64;
-  idle_burn_cycles_per_day : opt nat;
-};
-type CycleManagerMetric = record {
-  key : text;
-  count : nat64;
-  value : nat;
-  label : opt text;
-};
 service : (opt InitArgs) -> {
   add_excluded_principal : (principal) -> (Result);
-  admin_rebuild_3pool_recorded : () -> (Result_3);
+  admin_rebuild_3pool_recorded : () -> (Result_1);
   cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   cycles_status : () -> (CycleManagerCyclesStatus) query;
   force_epoch_tick : () -> (Result);
@@ -180,7 +183,9 @@ service : (opt InitArgs) -> {
   get_point_entries : (nat64, nat32) -> (PointEntryPage) query;
   get_point_ledger_len : () -> (nat64) query;
   get_points_config : () -> (PointsConfig) query;
-  get_principal_point_entries : (principal, nat64, nat32) -> (PointEntryPage) query;
+  get_principal_point_entries : (principal, nat64, nat32) -> (
+      PointEntryPage,
+    ) query;
   get_principal_state : (principal) -> (opt PrincipalState) query;
   get_registration_info : (principal) -> (opt RegistrationInfo) query;
   get_revealed_seed : (nat64) -> (opt RevealedSeed) query;
@@ -194,7 +199,8 @@ service : (opt InitArgs) -> {
   set_excluded_principals : (vec principal) -> (Result);
   set_poll_enabled : (bool) -> (Result);
   set_poll_interval_secs : (nat64) -> (Result);
+  set_season_end_ns : (nat64) -> (Result_2);
   set_source_canister : (nat8, principal) -> (Result);
-  start_season : (blob) -> (Result_1);
-  trigger_poll : () -> (Result_2);
+  start_season : (blob) -> (Result_2);
+  trigger_poll : () -> (Result_3);
 }

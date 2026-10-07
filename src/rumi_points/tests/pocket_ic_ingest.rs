@@ -15,6 +15,7 @@
 use candid::{CandidType, Decode, Encode, Principal};
 use pocket_ic::{PocketIcBuilder, WasmResult};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::time::{Duration, SystemTime};
 
 const RUMI_POINTS_WASM: &[u8] =
@@ -44,7 +45,7 @@ enum PointsError {
 // flags, read via the admin-only `get_epoch_status_admin` (POINTS-001 moved these
 // off the public `get_epoch_status`). Width subtyping lets this decode the full
 // record while ignoring the close_* fields the tests do not assert on.
-#[derive(CandidType, Deserialize)]
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
 struct TOpenEpoch {
     epoch_index: u64,
     epoch_start_ns: u64,
@@ -65,6 +66,29 @@ struct TEpochStatus {
     open_epoch: Option<TOpenEpoch>,
     revealed_seed_count: u64,
     snapshot_seed_committed: bool,
+}
+
+// Admin status additions on the current Wasm that are absent from the legacy
+// pre-randomness canister's Candid response.
+#[derive(CandidType, Deserialize, Debug)]
+struct THeldEpochStatus {
+    current_epoch_index: u64,
+    driver_enabled: bool,
+    open_epoch: Option<TOpenEpoch>,
+    legacy_transition_held: bool,
+    legacy_reseed_pending: bool,
+}
+
+#[derive(CandidType, Deserialize, Debug, PartialEq)]
+struct TSourceCursor {
+    tag: u8,
+    canister: Principal,
+    cursor: u64,
+}
+
+#[derive(CandidType, Deserialize)]
+struct TIngestStatus {
+    sources: Vec<TSourceCursor>,
 }
 
 // Public open-epoch view: bounds only, NO capture/close cursors (POINTS-001);
@@ -271,6 +295,30 @@ fn install_points(pic: &pocket_ic::PocketIc) -> Principal {
     rp
 }
 
+fn install_legacy_points(
+    pic: &pocket_ic::PocketIc,
+    legacy_wasm: &[u8],
+    season_start_ns: u64,
+    season_end_ns: u64,
+) -> Principal {
+    let rp = pic.create_canister();
+    pic.add_cycles(rp, 4_000_000_000_000);
+    let init = InitArgs {
+        admin: Some(admin()),
+        excluded_principals: None,
+        season_start_ns: Some(season_start_ns),
+        season_end_ns: Some(season_end_ns),
+        snapshot_seed_commit: Some(rumi_points::snapshot_seed::commitment(&SEASON_SEED)),
+    };
+    pic.install_canister(
+        rp,
+        legacy_wasm.to_vec(),
+        Encode!(&Some(init)).unwrap(),
+        None,
+    );
+    rp
+}
+
 fn set_time_ns(pic: &pocket_ic::PocketIc, ns: u64) {
     pic.set_time(SystemTime::UNIX_EPOCH + Duration::from_nanos(ns));
 }
@@ -330,6 +378,43 @@ fn epoch_status(pic: &pocket_ic::PocketIc, rp: Principal) -> TEpochStatus {
     }
 }
 
+fn held_epoch_status(pic: &pocket_ic::PocketIc, rp: Principal) -> THeldEpochStatus {
+    let res = pic
+        .query_call(rp, admin(), "get_epoch_status_admin", Encode!().unwrap())
+        .expect("get_epoch_status_admin call failed after upgrade");
+    match res {
+        WasmResult::Reply(b) => Decode!(&b, THeldEpochStatus).unwrap(),
+        WasmResult::Reject(m) => panic!("get_epoch_status_admin rejected after upgrade: {m}"),
+    }
+}
+
+fn source_status(pic: &pocket_ic::PocketIc, rp: Principal, tag: u8) -> TSourceCursor {
+    let res = pic
+        .query_call(rp, admin(), "get_ingest_status", Encode!().unwrap())
+        .expect("get_ingest_status call failed");
+    let status = match res {
+        WasmResult::Reply(b) => Decode!(&b, TIngestStatus).unwrap(),
+        WasmResult::Reject(m) => panic!("get_ingest_status rejected: {m}"),
+    };
+    status
+        .sources
+        .into_iter()
+        .find(|source| source.tag == tag)
+        .unwrap_or_else(|| panic!("get_ingest_status omitted configured source tag {tag}"))
+}
+
+fn trigger_poll_count(pic: &pocket_ic::PocketIc, rp: Principal) -> u64 {
+    let res = pic
+        .update_call(rp, admin(), "trigger_poll", Encode!().unwrap())
+        .expect("trigger_poll call failed");
+    match res {
+        WasmResult::Reply(b) => Decode!(&b, Result<u64, PointsError>)
+            .unwrap()
+            .expect("admin trigger_poll should succeed"),
+        WasmResult::Reject(m) => panic!("trigger_poll rejected: {m}"),
+    }
+}
+
 /// Public epoch status (anonymous caller), via `get_epoch_status`. Used to assert
 /// the cursors are NOT exposed (POINTS-001).
 fn public_epoch_status(pic: &pocket_ic::PocketIc, rp: Principal) -> TPublicEpochStatus {
@@ -351,6 +436,162 @@ fn total_points(pic: &pocket_ic::PocketIc, rp: Principal, who: Principal) -> u12
         WasmResult::Reject(m) => panic!("get_principal_state rejected: {m}"),
     };
     st.map(|s| nat_to_u128(&s.total_points)).unwrap_or(0)
+}
+
+/// Exercise the live-observed partially captured epoch shape against the
+/// hash-pinned pre-randomness Wasm: epoch 18 is open, snapshot A is complete,
+/// snapshot B is pending, and the driver remains enabled. The epoch is built
+/// through the legacy public/admin API rather than by editing stable memory.
+///
+/// Run after building the legacy Wasm from commit
+/// `5a20bd6a1b724dec10778630dcff1570c175b7da` and the current default Wasm:
+/// `RUMI_POINTS_LEGACY_WASM=/path/to/legacy.wasm POCKET_IC_BIN=/path/to/pocket-ic \
+///   cargo test -p rumi_points --test pocket_ic_ingest \
+///   legacy_points_upgrade_holds_epoch_18_between_snapshots -- --ignored`
+#[test]
+#[ignore = "requires a default rumi_points Wasm built from pre-randomness commit 5a20bd6"]
+fn legacy_points_upgrade_holds_epoch_18_between_snapshots() {
+    let legacy_path = std::env::var_os("RUMI_POINTS_LEGACY_WASM")
+        .expect("set RUMI_POINTS_LEGACY_WASM to a Wasm built from commit 5a20bd6");
+    let legacy_wasm = std::fs::read(&legacy_path)
+        .unwrap_or_else(|e| panic!("failed to read legacy Wasm at {:?}: {e}", legacy_path));
+    assert!(!legacy_wasm.is_empty(), "legacy Wasm must not be empty");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&legacy_wasm)),
+        "d3fc3919ab50d75f245c2ad9539fb5c83a8da38a25c22d36b8f97e82ba0a3fbc",
+        "expected the default Wasm built from pre-randomness commit 5a20bd6 with the pinned toolchain/dependencies"
+    );
+
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let season_start_ns = 1_700_000_000_000_000_000;
+    set_time_ns(&pic, season_start_ns);
+    let rp = install_legacy_points(
+        &pic,
+        &legacy_wasm,
+        season_start_ns,
+        1_800_000_000_000_000_000,
+    );
+    let registered = Principal::from_slice(&[79; 10]);
+    admin_ok(
+        &pic,
+        rp,
+        "register_test_principal",
+        Encode!(&registered).unwrap(),
+    );
+    let mock = install_mock(&pic);
+    set_all_sources(&pic, rp, mock);
+    let source_before_upgrade = source_status(&pic, rp, 0);
+    assert_eq!(source_before_upgrade.canister, mock);
+    assert_eq!(source_before_upgrade.cursor, 0);
+    set_vault_debt(&pic, mock, registered, 100_000_000);
+    start_season_ok(&pic, rp, SEASON_SEED);
+
+    // Advance through the actual legacy epoch driver. Each action is a
+    // separate force tick so no cursor or epoch transition is synthesized.
+    for expected_epoch in 0..18 {
+        let open = epoch_status(&pic, rp)
+            .open_epoch
+            .expect("legacy driver should have an open epoch");
+        assert_eq!(open.epoch_index, expected_epoch);
+        set_time_ns(&pic, open.snapshot_a_ns);
+        force_tick(&pic, rp);
+        let after_a = epoch_status(&pic, rp).open_epoch.unwrap();
+        assert!(
+            after_a.a_complete,
+            "snapshot A completes for epoch {expected_epoch}"
+        );
+
+        set_time_ns(&pic, after_a.snapshot_b_ns);
+        force_tick(&pic, rp);
+        let after_b = epoch_status(&pic, rp).open_epoch.unwrap();
+        assert!(
+            after_b.b_complete,
+            "snapshot B completes for epoch {expected_epoch}"
+        );
+
+        set_time_ns(&pic, after_b.epoch_end_ns);
+        force_tick(&pic, rp);
+        if expected_epoch < 17 {
+            // Closing an epoch leaves the next one unopened until its scheduled
+            // start; the following iteration's explicit force tick opens it.
+            let next_start = after_b.epoch_end_ns;
+            set_time_ns(&pic, next_start);
+            force_tick(&pic, rp);
+        }
+    }
+
+    // The loop closes epoch 17; one more scheduled driver action opens 18.
+    force_tick(&pic, rp);
+    let before = epoch_status(&pic, rp);
+    assert!(before.driver_enabled);
+    assert_eq!(before.current_epoch_index, 18);
+    let before_open = before.open_epoch.expect("epoch 18 is open");
+    assert_eq!(before_open.epoch_index, 18);
+    assert!(!before_open.a_complete, "snapshot A has not fired yet");
+    assert!(!before_open.b_complete, "snapshot B is pending");
+    let reward_before = total_points(&pic, rp, registered);
+    assert!(reward_before > 0, "prior completed epochs accrued rewards");
+
+    // Complete A for epoch 18, while leaving B pending, using the legacy API.
+    set_time_ns(&pic, before_open.snapshot_a_ns);
+    force_tick(&pic, rp);
+    let partially_captured = epoch_status(&pic, rp);
+    assert_eq!(partially_captured.current_epoch_index, 18);
+    let partial_open = partially_captured.open_epoch.unwrap();
+    assert!(partial_open.a_complete);
+    assert!(!partial_open.b_complete);
+    let partial_reward = total_points(&pic, rp, registered);
+
+    pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None)
+        .expect("upgrade populated legacy epoch 18 to current Wasm");
+
+    let after = held_epoch_status(&pic, rp);
+    assert!(after.driver_enabled);
+    assert!(
+        after.legacy_transition_held,
+        "partially captured legacy epoch pauses for review"
+    );
+    assert!(!after.legacy_reseed_pending);
+    assert_eq!(after.current_epoch_index, 18);
+    assert_eq!(after.open_epoch, Some(partial_open.clone()));
+    assert_eq!(total_points(&pic, rp, registered), partial_reward);
+    assert_eq!(partial_reward, reward_before);
+
+    // The installed mock would advance the backend ingest cursor and register
+    // its synthetic caller if poll fencing failed.
+    assert_eq!(source_status(&pic, rp, 0), source_before_upgrade);
+    assert_eq!(trigger_poll_count(&pic, rp), 0);
+    assert_eq!(source_status(&pic, rp, 0), source_before_upgrade);
+    assert!(!is_registered(&pic, rp, synthetic_caller()));
+
+    // Move past the persisted timer deadline and deliver enough PocketIC ticks
+    // for the re-registered driver to have a chance to run; then exercise the
+    // admin force path explicitly.
+    set_time_ns(&pic, partial_open.snapshot_b_ns);
+    pic.advance_time(Duration::from_secs(301));
+    for _ in 0..15 {
+        pic.tick();
+    }
+    admin_ok(&pic, rp, "force_epoch_tick", Encode!().unwrap());
+    let after_drivers = held_epoch_status(&pic, rp);
+    assert!(after_drivers.legacy_transition_held);
+    assert_eq!(after_drivers.current_epoch_index, 18);
+    assert_eq!(after_drivers.open_epoch, Some(partial_open.clone()));
+    assert_eq!(total_points(&pic, rp, registered), partial_reward);
+    assert_eq!(source_status(&pic, rp, 0), source_before_upgrade);
+
+    // Repeat the real upgrade to prove the review marker remains durable.
+    pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None)
+        .expect("second current Wasm upgrade should preserve the review hold");
+    let after_second_upgrade = held_epoch_status(&pic, rp);
+    assert!(after_second_upgrade.legacy_transition_held);
+    assert!(after_second_upgrade.driver_enabled);
+    assert!(!after_second_upgrade.legacy_reseed_pending);
+    assert_eq!(after_second_upgrade.current_epoch_index, 18);
+    assert_eq!(after_second_upgrade.open_epoch, Some(partial_open));
+    admin_ok(&pic, rp, "force_epoch_tick", Encode!().unwrap());
+    assert_eq!(total_points(&pic, rp, registered), partial_reward);
+    assert_eq!(source_status(&pic, rp, 0), source_before_upgrade);
 }
 
 fn nat_to_u128(n: &candid::Nat) -> u128 {

@@ -31,9 +31,11 @@ export interface DepositRecord {
   'recorded_value_usd' : bigint,
 }
 export interface EpochStatus {
+  'legacy_transition_held' : boolean,
   'open_epoch' : [] | [OpenEpoch],
   'snapshot_seed_committed' : boolean,
   'driver_interval_secs' : bigint,
+  'legacy_reseed_pending' : boolean,
   'revealed_seed_count' : bigint,
   'current_epoch_index' : bigint,
   'driver_enabled' : boolean,
@@ -157,15 +159,16 @@ export interface RepaymentEvent {
 }
 export type Result = { 'Ok' : null } |
   { 'Err' : PointsError };
-export type Result_1 = { 'Ok' : null } |
+export type Result_1 = { 'Ok' : bigint } |
   { 'Err' : string };
-export type Result_2 = { 'Ok' : bigint } |
-  { 'Err' : PointsError };
+export type Result_2 = { 'Ok' : null } |
+  { 'Err' : string };
 export type Result_3 = { 'Ok' : bigint } |
-  { 'Err' : string };
+  { 'Err' : PointsError };
 export interface RevealedSeed {
   'revealed_at_ns' : bigint,
   'epoch_index' : bigint,
+  'derivation_entropy' : [] | [Uint8Array | number[]],
   'seed' : Uint8Array | number[],
   'snapshot_time_a_ns' : bigint,
   'snapshot_time_b_ns' : bigint,
@@ -181,7 +184,7 @@ export type Venue = { 'Amm' : null } |
   { 'StabilityPool' : null };
 export interface _SERVICE {
   'add_excluded_principal' : ActorMethod<[Principal], Result>,
-  'admin_rebuild_3pool_recorded' : ActorMethod<[], Result_3>,
+  'admin_rebuild_3pool_recorded' : ActorMethod<[], Result_1>,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'force_epoch_tick' : ActorMethod<[], Result>,
@@ -213,10 +216,10 @@ export interface _SERVICE {
   'set_excluded_principals' : ActorMethod<[Array<Principal>], Result>,
   'set_poll_enabled' : ActorMethod<[boolean], Result>,
   'set_poll_interval_secs' : ActorMethod<[bigint], Result>,
-  'set_season_end_ns' : ActorMethod<[bigint], Result_1>,
+  'set_season_end_ns' : ActorMethod<[bigint], Result_2>,
   'set_source_canister' : ActorMethod<[number, Principal], Result>,
-  'start_season' : ActorMethod<[Uint8Array | number[]], Result_1>,
-  'trigger_poll' : ActorMethod<[], Result_2>,
+  'start_season' : ActorMethod<[Uint8Array | number[]], Result_2>,
+  'trigger_poll' : ActorMethod<[], Result_3>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];
