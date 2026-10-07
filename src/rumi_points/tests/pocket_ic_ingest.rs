@@ -79,9 +79,10 @@ struct THeldEpochStatus {
     legacy_reseed_pending: bool,
 }
 
-#[derive(CandidType, Deserialize)]
+#[derive(CandidType, Deserialize, Debug, PartialEq)]
 struct TSourceCursor {
     tag: u8,
+    canister: Principal,
     cursor: u64,
 }
 
@@ -387,7 +388,7 @@ fn held_epoch_status(pic: &pocket_ic::PocketIc, rp: Principal) -> THeldEpochStat
     }
 }
 
-fn source_cursor(pic: &pocket_ic::PocketIc, rp: Principal, tag: u8) -> u64 {
+fn source_status(pic: &pocket_ic::PocketIc, rp: Principal, tag: u8) -> TSourceCursor {
     let res = pic
         .query_call(rp, admin(), "get_ingest_status", Encode!().unwrap())
         .expect("get_ingest_status call failed");
@@ -399,8 +400,7 @@ fn source_cursor(pic: &pocket_ic::PocketIc, rp: Principal, tag: u8) -> u64 {
         .sources
         .into_iter()
         .find(|source| source.tag == tag)
-        .map(|source| source.cursor)
-        .unwrap_or(0)
+        .unwrap_or_else(|| panic!("get_ingest_status omitted configured source tag {tag}"))
 }
 
 fn trigger_poll_count(pic: &pocket_ic::PocketIc, rp: Principal) -> u64 {
@@ -480,6 +480,9 @@ fn legacy_points_upgrade_holds_epoch_18_between_snapshots() {
     );
     let mock = install_mock(&pic);
     set_all_sources(&pic, rp, mock);
+    let source_before_upgrade = source_status(&pic, rp, 0);
+    assert_eq!(source_before_upgrade.canister, mock);
+    assert_eq!(source_before_upgrade.cursor, 0);
     set_vault_debt(&pic, mock, registered, 100_000_000);
     start_season_ok(&pic, rp, SEASON_SEED);
 
@@ -556,23 +559,26 @@ fn legacy_points_upgrade_holds_epoch_18_between_snapshots() {
 
     // The installed mock would advance the backend ingest cursor and register
     // its synthetic caller if poll fencing failed.
-    assert_eq!(source_cursor(&pic, rp, 0), 0);
+    assert_eq!(source_status(&pic, rp, 0), source_before_upgrade);
     assert_eq!(trigger_poll_count(&pic, rp), 0);
-    assert_eq!(source_cursor(&pic, rp, 0), 0);
+    assert_eq!(source_status(&pic, rp, 0), source_before_upgrade);
     assert!(!is_registered(&pic, rp, synthetic_caller()));
 
-    // Let the persisted timer become due after snapshot B, then exercise the
-    // admin force path. Both must leave the legacy epoch and reward state fixed.
+    // Move past the persisted timer deadline and deliver enough PocketIC ticks
+    // for the re-registered driver to have a chance to run; then exercise the
+    // admin force path explicitly.
     set_time_ns(&pic, partial_open.snapshot_b_ns);
     pic.advance_time(Duration::from_secs(301));
-    pic.tick();
+    for _ in 0..15 {
+        pic.tick();
+    }
     admin_ok(&pic, rp, "force_epoch_tick", Encode!().unwrap());
     let after_drivers = held_epoch_status(&pic, rp);
     assert!(after_drivers.legacy_transition_held);
     assert_eq!(after_drivers.current_epoch_index, 18);
     assert_eq!(after_drivers.open_epoch, Some(partial_open.clone()));
     assert_eq!(total_points(&pic, rp, registered), partial_reward);
-    assert_eq!(source_cursor(&pic, rp, 0), 0);
+    assert_eq!(source_status(&pic, rp, 0), source_before_upgrade);
 
     // Repeat the real upgrade to prove the review marker remains durable.
     pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None)
@@ -585,7 +591,7 @@ fn legacy_points_upgrade_holds_epoch_18_between_snapshots() {
     assert_eq!(after_second_upgrade.open_epoch, Some(partial_open));
     admin_ok(&pic, rp, "force_epoch_tick", Encode!().unwrap());
     assert_eq!(total_points(&pic, rp, registered), partial_reward);
-    assert_eq!(source_cursor(&pic, rp, 0), 0);
+    assert_eq!(source_status(&pic, rp, 0), source_before_upgrade);
 }
 
 fn nat_to_u128(n: &candid::Nat) -> u128 {
