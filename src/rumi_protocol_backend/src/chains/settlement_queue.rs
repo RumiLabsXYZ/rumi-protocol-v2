@@ -12,6 +12,17 @@ use candid::{CandidType, Deserialize, Principal};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+/// Maximum retained pending/terminal operations on one chain queue. The worker
+/// scans and normalizes the pending IDs, so admission must bound that work as
+/// well as the number of live operations awaiting settlement.
+pub const MAX_PENDING_SETTLEMENT_OPS_PER_CHAIN: usize = 256;
+
+/// Maximum lifetime replay keys retained by one chain queue. Keys are never
+/// pruned because a key from a completed operation must remain inadmissible.
+/// Reaching this limit therefore fails closed and requires operator action to
+/// safely migrate the replay ledger before new operations can be accepted.
+pub const MAX_SEEN_IDEMPOTENCY_KEYS_PER_CHAIN: usize = 10_000;
+
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum SettlementOpKind {
     Mint {
@@ -96,6 +107,12 @@ pub struct SettlementOp {
     pub idempotency_key: String,
     pub enqueued_at_ns: u64,
     pub status: SettlementOpStatus,
+    /// EVM submit claim marker. New ops start as `Some(false)` and transition
+    /// to `Some(true)` atomically with the pre-broadcast hash/nonce claim.
+    /// `None` identifies legacy snapshots that may contain an ambiguous send
+    /// while still Queued; EVM must hold those for operator reconciliation.
+    #[serde(default)]
+    pub evm_submit_claimed: Option<bool>,
     /// Hash of the most recent on-chain submission for this op, set by the
     /// Phase-1b Timer-D worker when the op goes Inflight. Read back on the
     /// Confirm path to fetch the receipt. `#[serde(default)]` keeps any
@@ -133,6 +150,7 @@ impl SettlementOp {
             idempotency_key,
             enqueued_at_ns: now_ns,
             status: SettlementOpStatus::Queued,
+            evm_submit_claimed: Some(false),
             last_tx_hash: None,
             submit_nonce: None,
             tx_hash_candidates: Vec::new(),
@@ -213,6 +231,9 @@ pub struct SettlementQueueV1 {
 #[derive(Debug, PartialEq, Eq)]
 pub enum SettlementQueueError {
     DuplicateIdempotencyKey(String),
+    QueueCapacityReached { limit: usize },
+    ReplayProtectionCapacityReached { limit: usize },
+    OpIdSpaceExhausted,
 }
 
 impl SettlementQueueV1 {
@@ -222,13 +243,27 @@ impl SettlementQueueV1 {
                 op.idempotency_key,
             ));
         }
+        if self.pending.len() >= MAX_PENDING_SETTLEMENT_OPS_PER_CHAIN {
+            return Err(SettlementQueueError::QueueCapacityReached {
+                limit: MAX_PENDING_SETTLEMENT_OPS_PER_CHAIN,
+            });
+        }
+        if self.seen_idempotency_keys.len() >= MAX_SEEN_IDEMPOTENCY_KEYS_PER_CHAIN {
+            return Err(SettlementQueueError::ReplayProtectionCapacityReached {
+                limit: MAX_SEEN_IDEMPOTENCY_KEYS_PER_CHAIN,
+            });
+        }
+        let next_tail = self
+            .tail
+            .checked_add(1)
+            .ok_or(SettlementQueueError::OpIdSpaceExhausted)?;
         let assigned = self.tail;
         op.op_id = assigned;
         self.seen_idempotency_keys
             .insert(op.idempotency_key.clone());
         self.drain_order.push_back(assigned);
         self.pending.insert(assigned, op);
-        self.tail = self.tail.saturating_add(1);
+        self.tail = next_tail;
         Ok(assigned)
     }
 
@@ -377,6 +412,42 @@ mod tests {
     }
 
     #[test]
+    fn legacy_operation_decode_has_no_evm_submit_claim() {
+        #[derive(serde::Serialize)]
+        struct LegacySettlementOp {
+            op_id: u64,
+            kind: SettlementOpKind,
+            idempotency_key: String,
+            enqueued_at_ns: u64,
+            status: SettlementOpStatus,
+            last_tx_hash: Option<String>,
+            submit_nonce: Option<u64>,
+            tx_hash_candidates: Vec<String>,
+            chain_payout_uses_pending_reservation: Option<bool>,
+        }
+        let op = mint_op("legacy");
+        let legacy = LegacySettlementOp {
+            op_id: op.op_id,
+            kind: op.kind,
+            idempotency_key: op.idempotency_key,
+            enqueued_at_ns: op.enqueued_at_ns,
+            status: op.status,
+            last_tx_hash: op.last_tx_hash,
+            submit_nonce: op.submit_nonce,
+            tx_hash_candidates: op.tx_hash_candidates,
+            chain_payout_uses_pending_reservation: op.chain_payout_uses_pending_reservation,
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut bytes).expect("encode legacy CBOR op");
+        let decoded: SettlementOp =
+            ciborium::de::from_reader(bytes.as_slice()).expect("decode legacy op");
+        assert_eq!(decoded.evm_submit_claimed, None);
+
+        let fresh = mint_op("fresh");
+        assert_eq!(fresh.evm_submit_claimed, Some(false));
+    }
+
+    #[test]
     fn prune_terminal_empties_pending_and_meets_tail() {
         let mut q = SettlementQueueV1::default();
         let id0 = q.enqueue(mint_op("a")).unwrap();
@@ -408,6 +479,26 @@ mod tests {
         q.prune_terminal();
         assert_eq!(q.pending_len(), 1);
         assert_eq!(q.head, before_head);
+    }
+
+    #[test]
+    fn enqueue_rejects_exhausted_op_id_space_without_mutating_queue() {
+        let mut q = SettlementQueueV1 {
+            head: u64::MAX,
+            tail: u64::MAX,
+            ..SettlementQueueV1::default()
+        };
+        let before = q.clone();
+
+        assert_eq!(
+            q.enqueue(mint_op("last")),
+            Err(SettlementQueueError::OpIdSpaceExhausted)
+        );
+        assert_eq!(q.head, before.head);
+        assert_eq!(q.tail, before.tail);
+        assert!(q.pending.is_empty());
+        assert_eq!(q.seen_idempotency_keys, before.seen_idempotency_keys);
+        assert_eq!(q.drain_order, before.drain_order);
     }
 
     #[test]

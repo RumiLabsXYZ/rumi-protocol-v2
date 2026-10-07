@@ -1,9 +1,13 @@
 <script lang="ts">
+  function redemptionSubmissionPaused(): boolean {
+    return true;
+  }
   import { onMount } from 'svelte';
   import { walletStore as wallet } from '$lib/stores/wallet';
   import { protocolService } from '$lib/services/protocol';
   import { currentWalletType, walletSessionGeneration } from '$lib/services/auth';
   import { ApiClient } from '$lib/services/protocol/apiClient';
+  import { getOisySignerAgent } from '$lib/services/oisySigner';
   import { CONFIG } from '$lib/config';
   import { formatNumber } from '$lib/utils/format';
   import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
@@ -67,6 +71,11 @@
   let preserveSuccessMessageOnInputReset = false;
   let freshnessTimer: ReturnType<typeof setInterval> | null = null;
   let freshnessNowMs = Date.now();
+  let oisySignerPrincipal: any = null;
+  let oisySignerReadyKey: string | null = null;
+  let oisySignerWarmingKey: string | null = null;
+  let oisySignerFailedKey: string | null = null;
+  let oisySignerError = '';
 
   $: amountE8s = toE8s(icusdAmount);
   $: queue = preparedQueue ?? advisoryQueue;
@@ -104,13 +113,31 @@
   $: exceedsFreshBalance = redemptionPreflight
     ? amountE8s > redemptionPreflight.balanceRaw
     : icusdAmount > icusdBalance;
-  $: canAcceptOffer = liveOfferUsable && !offerDeclined && preflightFresh && !preflightLoading && !ambiguousNeedsRefresh;
+  $: currentOisySignerKey = isConnected && $currentWalletType === 'oisy' && walletPrincipal
+    ? `${walletPrincipal}|${$walletSessionGeneration}|${CONFIG.host}|${CONFIG.currentCanisterId}|${CONFIG.currentIcusdLedgerId}`
+    : null;
+  $: oisySignerReadyForCurrentSession = $currentWalletType !== 'oisy'
+    || (!!currentOisySignerKey && oisySignerReadyKey === currentOisySignerKey);
+  $: canAcceptOffer = liveOfferUsable && !offerDeclined && preflightFresh && !preflightLoading
+    && !ambiguousNeedsRefresh && oisySignerReadyForCurrentSession;
+  $: if (currentOisySignerKey && oisySignerReadyKey !== currentOisySignerKey
+      && oisySignerWarmingKey !== currentOisySignerKey
+      && oisySignerFailedKey !== currentOisySignerKey) {
+    void warmOisySigner(currentOisySignerKey);
+  }
 
   let unsubscribeWallet: (() => void) | null = null;
   unsubscribeWallet = wallet.subscribe(state => {
     const nextPrincipal = state.principal?.toText?.() ?? state.principal?.toString?.() ?? null;
     const principalChanged = walletSnapshotReady && nextPrincipal !== walletPrincipal;
     isConnected = state.isConnected;
+    oisySignerPrincipal = state.principal ?? null;
+    if (!state.isConnected || !nextPrincipal) {
+      oisySignerReadyKey = null;
+      oisySignerWarmingKey = null;
+      oisySignerFailedKey = null;
+      oisySignerError = '';
+    }
     icusdBalance = state.tokenBalances?.ICUSD ? Number(state.tokenBalances.ICUSD.formatted) : 0;
     walletPrincipal = nextPrincipal;
     walletSnapshotReady = true;
@@ -136,6 +163,34 @@
     return a.principalText === b.principalText && a.ledgerId === b.ledgerId
       && a.walletType === b.walletType && a.sessionGeneration === b.sessionGeneration
       && a.networkKey === b.networkKey;
+  }
+
+  async function warmOisySigner(key: string) {
+    const principal = oisySignerPrincipal;
+    if (!principal || key !== currentOisySignerKey) return;
+    oisySignerWarmingKey = key;
+    oisySignerError = '';
+    try {
+      await getOisySignerAgent(principal);
+      if (key === currentOisySignerKey) {
+        oisySignerReadyKey = key;
+        oisySignerFailedKey = null;
+      }
+    } catch (error) {
+      if (key === currentOisySignerKey) {
+        oisySignerReadyKey = null;
+        oisySignerFailedKey = key;
+        oisySignerError = error instanceof Error ? error.message : 'Could not prepare the Oisy signer.';
+      }
+    } finally {
+      if (oisySignerWarmingKey === key) oisySignerWarmingKey = null;
+    }
+  }
+
+  function retryOisySignerWarmup() {
+    if (!currentOisySignerKey) return;
+    oisySignerFailedKey = null;
+    void warmOisySigner(currentOisySignerKey);
   }
 
   function snapshotAgeLabel(timestampNs: bigint | undefined): string {
@@ -434,6 +489,14 @@
   $: swapIsBetter = swapAdvantageUsd > 0;
 
   async function acceptAndRedeem() {
+    if (!oisySignerReadyForCurrentSession) {
+      errorMessage = 'Oisy is still preparing for this wallet session. Wait for signer preparation or retry it before approving.';
+      return;
+    }
+    if (redemptionSubmissionPaused()) {
+      errorMessage = 'Redemption submissions are paused until transfer recovery is available. No icUSD was approved or submitted.';
+      return;
+    }
     const accepted = acceptPreparedRedemptionOffer(
       preparedQuote,
       preparedQueue,
@@ -669,6 +732,16 @@
           {:else if isConnected && !preflightFresh}
             <div class="msg msg-info" role="status">Wallet checks expired. Refresh them before redeeming.<button class="inline-action" on:click={refreshRedemptionPreflight}>Refresh wallet checks</button></div>
           {/if}
+          {#if currentOisySignerKey && !oisySignerReadyForCurrentSession}
+            <div class="msg msg-info" role="status">
+              {#if oisySignerWarmingKey === currentOisySignerKey}
+                Preparing the Oisy signer for this wallet session. Redemption approval stays disabled until this finishes.
+              {:else}
+                Oisy signer preparation failed{oisySignerError ? `: ${oisySignerError}` : ''}. Retry before approving.
+                <button class="inline-action" on:click={retryOisySignerWarmup}>Retry Oisy signer preparation</button>
+              {/if}
+            </div>
+          {/if}
           {#if quote && !quoteFresh}
             <div class="msg msg-info" role="status">This snapshot is only an estimate. Check a live offer before accepting or redeeming.</div>
           {/if}
@@ -684,6 +757,9 @@
           {/if}
           {#if liveOfferNotice}
             <div class="msg msg-info" role="status">{liveOfferNotice}</div>
+          {/if}
+          {#if redemptionSubmissionPaused()}
+            <div class="msg msg-info" role="status">Redemption submissions are paused while transfer recovery is added. Checking offers does not approve or move icUSD.</div>
           {/if}
           {#if ambiguousMessage}
             <div class="msg msg-info" role="status">
@@ -744,10 +820,12 @@
               <button
                 class="submit-btn"
                 on:click={acceptAndRedeem}
-                disabled={actionInProgress || !isConnected || amountE8s <= 0n || exceedsFreshBalance || !canAcceptOffer}
+                disabled={redemptionSubmissionPaused() || actionInProgress || !isConnected || amountE8s <= 0n || exceedsFreshBalance || !canAcceptOffer}
               >
                 {#if actionInProgress}
                   Processing accepted offer…
+                {:else if redemptionSubmissionPaused()}
+                  Redemptions paused
                 {:else if !isConnected}
                   Connect Wallet to Accept
                 {:else if preflightLoading || !preflightFresh}

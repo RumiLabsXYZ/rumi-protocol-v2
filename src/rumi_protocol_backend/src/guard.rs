@@ -1,8 +1,8 @@
 use crate::state::mutate_state;
 use candid::Principal;
-use std::marker::PhantomData;
-use ic_cdk::api::time;
 use ic_canister_log::log;
+use ic_cdk::api::time;
+use std::marker::PhantomData;
 
 const MAX_CONCURRENT: usize = 100;
 
@@ -49,7 +49,8 @@ impl GuardPrincipal {
                 if let Some(timestamp) = s.principal_guard_timestamps.get(guard_principal) {
                     if current_time.saturating_sub(*timestamp) > GUARD_TIMEOUT_NANOS {
                         if let Some(op_name) = s.operation_names.get(guard_principal) {
-                            log!(crate::INFO,
+                            log!(
+                                crate::INFO,
                                 "[guard] Removing stale operation: {} for principal: {} (age: {}s)",
                                 op_name,
                                 guard_principal.to_string(),
@@ -80,10 +81,14 @@ impl GuardPrincipal {
 
             // Check if this principal already has a guard
             if s.principal_guards.contains(&principal) {
-                let op_name = s.operation_names.get(&principal)
+                let op_name = s
+                    .operation_names
+                    .get(&principal)
                     .cloned()
                     .unwrap_or_default();
-                let timestamp = s.principal_guard_timestamps.get(&principal)
+                let timestamp = s
+                    .principal_guard_timestamps
+                    .get(&principal)
                     .copied()
                     .unwrap_or_default();
                 let age_seconds = current_time.saturating_sub(timestamp) / 1_000_000_000;
@@ -98,9 +103,12 @@ impl GuardPrincipal {
                     s.operation_states.remove(&principal);
                     s.operation_names.remove(&principal);
                 } else {
-                    log!(crate::INFO,
+                    log!(
+                        crate::INFO,
                         "[guard] Operation '{}' for principal {} is already in progress ({}s old)",
-                        op_name, principal.to_string(), age_seconds
+                        op_name,
+                        principal.to_string(),
+                        age_seconds
                     );
                     return Err(GuardError::AlreadyProcessing);
                 }
@@ -113,12 +121,16 @@ impl GuardPrincipal {
             // Add the guard
             s.principal_guards.insert(principal);
             s.principal_guard_timestamps.insert(principal, current_time);
-            s.operation_states.insert(principal, OperationState::InProgress);
-            s.operation_names.insert(principal, operation_name.to_string());
+            s.operation_states
+                .insert(principal, OperationState::InProgress);
+            s.operation_names
+                .insert(principal, operation_name.to_string());
 
-            log!(crate::INFO,
+            log!(
+                crate::INFO,
                 "[guard] Created new guard for principal {} operation '{}'",
-                principal.to_string(), operation_name
+                principal.to_string(),
+                operation_name
             );
 
             Ok(Self {
@@ -215,6 +227,35 @@ impl VaultLiquidationGuard {
     /// flight; the caller should back off (the stability pool, per project
     /// rule, must NOT retry — it falls through to manual, which is correct).
     pub fn new(vault_id: u64) -> Result<Self, crate::ProtocolError> {
+        Self::acquire(vault_id, None)
+    }
+
+    /// Add-margin ingress may reacquire its own durable fence after an
+    /// ambiguous reply or upgrade. Every competing vault mutator uses `new`
+    /// and remains blocked until that journal settles.
+    pub fn new_for_inbound_collateral(
+        vault_id: u64,
+        owner: candid::Principal,
+        ledger: candid::Principal,
+    ) -> Result<Self, crate::ProtocolError> {
+        Self::acquire(vault_id, Some((owner, ledger)))
+    }
+
+    fn acquire(
+        vault_id: u64,
+        allowed_inbound: Option<(candid::Principal, candid::Principal)>,
+    ) -> Result<Self, crate::ProtocolError> {
+        let conflicting_ingress = crate::state::read_state(|state| {
+            state.pending_inbound_collateral.iter().any(|(key, row)| {
+                matches!(&row.operation, crate::state::InboundCollateralOperation::AddMargin { vault_id: pending, .. }
+                    if *pending == vault_id && Some(*key) != allowed_inbound)
+            })
+        });
+        if conflicting_ingress {
+            return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                "An inbound collateral transfer for vault #{vault_id} is unresolved"
+            )));
+        }
         LIQUIDATING_VAULTS.with(|set| {
             let mut set = set.borrow_mut();
             if set.contains(&vault_id) {
@@ -370,10 +411,12 @@ impl Drop for BorrowReservationGuard {
 #[cfg(test)]
 mod vault_liquidation_guard_tests {
     use super::*;
+    use crate::state::{replace_state, State};
 
     #[test]
     fn vault_liquidation_guard_is_exclusive_per_vault() {
         // BK-001/002 fence: the lock is per-vault, not per-caller.
+        replace_state(State::default());
         let g1 = VaultLiquidationGuard::new(42).expect("first acquire for vault 42");
         // A second liquidator (any caller) racing the SAME vault is rejected.
         assert!(
@@ -390,6 +433,7 @@ mod vault_liquidation_guard_tests {
 
     #[test]
     fn chain_vault_liquidation_guard_is_exclusive_and_independent_of_icp() {
+        replace_state(State::default());
         let g1 = ChainVaultLiquidationGuard::new(7).expect("first acquire chain vault 7");
         assert!(
             ChainVaultLiquidationGuard::new(7).is_err(),
@@ -398,7 +442,8 @@ mod vault_liquidation_guard_tests {
         // Separate id-space from the ICP guard: the same id locks independently.
         let _icp = VaultLiquidationGuard::new(7).expect("ICP guard for id 7 is independent");
         drop(g1);
-        let _g2 = ChainVaultLiquidationGuard::new(7).expect("re-acquire chain vault 7 after release");
+        let _g2 =
+            ChainVaultLiquidationGuard::new(7).expect("re-acquire chain vault 7 after release");
     }
 
     #[test]
@@ -487,5 +532,55 @@ impl Drop for FetchXrcGuard {
         mutate_state(|s| {
             s.is_fetching_rate = false;
         });
+    }
+}
+
+thread_local! {
+    static INBOUND_COLLATERAL_DISPATCHES: std::cell::RefCell<std::collections::HashSet<(Principal, Principal)>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+#[must_use]
+pub struct InboundCollateralDispatchGuard((Principal, Principal));
+
+impl InboundCollateralDispatchGuard {
+    pub fn new(owner: Principal, ledger: Principal) -> Result<Self, crate::ProtocolError> {
+        let key = (owner, ledger);
+        INBOUND_COLLATERAL_DISPATCHES.with(|active| {
+            let mut active = active.borrow_mut();
+            if !active.insert(key) {
+                return Err(crate::ProtocolError::TemporarilyUnavailable(
+                    "collateral ingress recovery is already running for this owner and ledger"
+                        .into(),
+                ));
+            }
+            Ok(Self(key))
+        })
+    }
+}
+
+impl Drop for InboundCollateralDispatchGuard {
+    fn drop(&mut self) {
+        INBOUND_COLLATERAL_DISPATCHES.with(|active| {
+            active.borrow_mut().remove(&self.0);
+        });
+    }
+}
+
+#[cfg(test)]
+mod inbound_collateral_dispatch_guard_tests {
+    use super::InboundCollateralDispatchGuard;
+    use candid::Principal;
+
+    #[test]
+    fn concurrent_timer_and_user_recovery_for_same_tuple_is_suppressed() {
+        let owner = Principal::from_slice(&[1]);
+        let ledger = Principal::from_slice(&[2]);
+        let first = InboundCollateralDispatchGuard::new(owner, ledger)
+            .expect("first dispatcher owns the tuple lock");
+        assert!(InboundCollateralDispatchGuard::new(owner, ledger).is_err());
+        assert!(InboundCollateralDispatchGuard::new(owner, Principal::from_slice(&[3])).is_ok());
+        drop(first);
+        assert!(InboundCollateralDispatchGuard::new(owner, ledger).is_ok());
     }
 }

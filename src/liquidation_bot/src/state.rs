@@ -211,21 +211,27 @@ pub fn save_to_stable_memory() {
 
 pub fn load_from_stable_memory() {
     let size = ic_cdk::api::stable::stable64_size();
-    if size == 0 {
-        init_state(BotState::default());
-        return;
-    }
     let mut len_bytes = [0u8; 8];
-    ic_cdk::api::stable::stable64_read(0, &mut len_bytes);
-    let len = u64::from_le_bytes(len_bytes) as usize;
-    if len == 0 {
-        init_state(BotState::default());
-        return;
+    if size > 0 {
+        ic_cdk::api::stable::stable64_read(0, &mut len_bytes);
     }
-    let mut bytes = vec![0u8; len];
-    ic_cdk::api::stable::stable64_read(8, &mut bytes);
-    let state: BotState = serde_json::from_slice(&bytes).expect("Failed to deserialize state");
-    init_state(state);
+    match legacy_snapshot_body_len(size, &len_bytes) {
+        Ok(Some(len)) => {
+            let mut bytes = vec![0u8; len];
+            ic_cdk::api::stable::stable64_read(8, &mut bytes);
+            match decode_legacy_state(size, &len_bytes, &bytes) {
+                Ok(Some(state)) => init_state(state),
+                Ok(None) => unreachable!("nonempty legacy snapshot classified as empty"),
+                Err(error) => ic_cdk::trap(&format!("UPG-001 legacy state rescue failed: {error}")),
+            }
+        }
+        Ok(None) if size == 0 => init_state(BotState::default()),
+        Ok(None) => {
+            memory::init_memory_manager();
+            load_config_from_stable();
+        }
+        Err(error) => ic_cdk::trap(&format!("UPG-001 refusing to discard raw stable memory: {error}")),
+    }
 }
 
 // ---- New stable memory (MemoryManager virtual region MEM_ID_CONFIG) ----
@@ -246,6 +252,52 @@ pub fn save_config_to_stable() {
             .write(&bytes)
             .expect("Failed to write config bytes");
     });
+}
+
+/// Maximum accepted raw legacy snapshot size. Keep this in sync with the
+/// pre-MemoryManager JSON format written by `save_to_stable_memory`.
+const MAX_LEGACY_STATE_BYTES: u64 = 10_000_000;
+
+/// Return the payload size only for a complete, plausible legacy raw snapshot.
+/// Empty memory and an existing MemoryManager are the only no-legacy cases.
+pub fn legacy_snapshot_body_len(
+    stable_pages: u64,
+    prefix: &[u8; 8],
+) -> Result<Option<usize>, String> {
+    if stable_pages == 0 || memory::is_memory_manager_header(prefix) {
+        return Ok(None);
+    }
+    let len = u64::from_le_bytes(*prefix);
+    if len == 0 {
+        return Err("nonempty raw stable memory has a zero legacy snapshot length".to_string());
+    }
+    if len >= MAX_LEGACY_STATE_BYTES {
+        return Err(format!("legacy snapshot length {len} is not plausible (limit {MAX_LEGACY_STATE_BYTES})"));
+    }
+    let available_bytes = stable_pages.saturating_mul(65_536).saturating_sub(8);
+    if len > available_bytes {
+        return Err(format!("legacy snapshot length {len} exceeds available stable memory {available_bytes}"));
+    }
+    Ok(Some(len as usize))
+}
+
+/// Classify bytes at raw offset zero before MemoryManager initialization.
+/// Any nonempty unknown or malformed layout fails closed before stable memory
+/// can be overwritten by the new manager.
+pub fn decode_legacy_state(
+    stable_pages: u64,
+    prefix: &[u8; 8],
+    body: &[u8],
+) -> Result<Option<BotState>, String> {
+    let Some(len) = legacy_snapshot_body_len(stable_pages, prefix)? else {
+        return Ok(None);
+    };
+    if body.len() != len {
+        return Err(format!("legacy snapshot body has {} bytes, expected {len}", body.len()));
+    }
+    serde_json::from_slice(body)
+        .map(Some)
+        .map_err(|e| format!("legacy JSON snapshot failed to decode: {e}"))
 }
 
 #[cfg(test)]
@@ -287,8 +339,11 @@ mod tests {
         });
 
         let bytes = serde_json::to_vec(&legacy_blob).expect("encode legacy blob");
-        let state: BotState =
-            serde_json::from_slice(&bytes).expect("legacy state must deserialize cleanly");
+        let prefix = (bytes.len() as u64).to_le_bytes();
+        let pages = (8 + bytes.len() as u64 + 65_535) / 65_536;
+        let state = decode_legacy_state(pages.max(1), &prefix, &bytes)
+            .expect("legacy state must classify cleanly")
+            .expect("legacy state must be restored");
 
         let config = state.config.expect("config preserved");
         assert_eq!(
@@ -306,6 +361,64 @@ mod tests {
             !state.migrated_to_stable_structures,
             "legacy blob has no migration marker, must default to false so post_upgrade runs the StableBTreeMap migration"
         );
+    }
+
+    fn legacy_prefix_and_pages(body: &[u8]) -> ([u8; 8], u64) {
+        ((body.len() as u64).to_le_bytes(), ((8 + body.len() as u64 + 65_535) / 65_536).max(1))
+    }
+
+    #[test]
+    fn legacy_snapshot_classifier_preserves_populated_state() {
+        let mut state = BotState::default();
+        state.config = Some(test_config());
+        state.stats.events_count = 42;
+        state.pending_vaults.push(LiquidatableVaultInfo {
+            vault_id: 9,
+            collateral_type: Principal::anonymous(),
+            debt_amount: 10,
+            collateral_amount: 20,
+            recommended_liquidation_amount: 5,
+            collateral_price_e8s: 100,
+        });
+        let body = serde_json::to_vec(&state).expect("encode legacy state");
+        let (prefix, pages) = legacy_prefix_and_pages(&body);
+        let restored = decode_legacy_state(pages, &prefix, &body)
+            .expect("valid legacy snapshot must classify")
+            .expect("valid legacy snapshot must be restored");
+        assert_eq!(restored.stats.events_count, 42);
+        assert_eq!(restored.config.unwrap().backend_principal, test_config().backend_principal);
+        assert_eq!(restored.pending_vaults.len(), 1);
+        assert_eq!(restored.pending_vaults[0].vault_id, 9);
+    }
+
+    #[test]
+    fn legacy_snapshot_classifier_rejects_malformed_and_truncated_state() {
+        let malformed = b"{ not valid json }";
+        let (prefix, pages) = legacy_prefix_and_pages(malformed);
+        let error = decode_legacy_state(pages, &prefix, malformed)
+            .err().expect("malformed legacy JSON must fail closed");
+        assert!(error.contains("failed to decode"));
+        let (prefix, pages) = legacy_prefix_and_pages(b"valid");
+        let error = decode_legacy_state(pages, &prefix, b"bad")
+            .err().expect("truncated legacy body must fail closed");
+        assert!(error.contains("expected"));
+        let oversized = (MAX_LEGACY_STATE_BYTES + 1).to_le_bytes();
+        let error = decode_legacy_state(1, &oversized, &[])
+            .err().expect("implausible legacy length must fail closed");
+        assert!(error.contains("not plausible"));
+        let zero = [0u8; 8];
+        let error = decode_legacy_state(1, &zero, &[])
+            .err().expect("unknown allocated raw memory must not be treated as fresh");
+        assert!(error.contains("zero legacy snapshot length"));
+    }
+
+    #[test]
+    fn legacy_snapshot_classifier_accepts_fresh_and_memory_manager_layouts() {
+        let prefix = [0u8; 8];
+        assert!(decode_legacy_state(0, &prefix, &[]).unwrap().is_none());
+        let mut manager_header = [0u8; 8];
+        manager_header[..3].copy_from_slice(b"MGR");
+        assert!(decode_legacy_state(1, &manager_header, &[]).unwrap().is_none());
     }
 
     fn test_config() -> BotConfig {

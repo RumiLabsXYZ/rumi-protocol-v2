@@ -93,14 +93,18 @@
           </div>
           <h2 id="release-status-title">Remediation is not live</h2>
           <p>
-            The broader October security-remediation work remains unmerged and is not deployable.
-            Separately, the CL-01 3pool hotfix (PR #421) has merged to main, but its artifact was
-            not installed as of October 7, 2026.
+            The broader October security-remediation branch remains unmerged and has not been
+            installed on mainnet. Separately, the CL-01 3pool hotfix (PR #421) has merged to main
+            and its production artifact has been built. The artifact has not been installed: on
+            October 7, 2026, the live 3pool module hash did not match the artifact hash.
           </p>
           <div class="status-divider"></div>
           <p class="status-footnote">
-            This is a release-status update, not a finding-by-finding closure statement. See the
-            October report for the scope and limits of these statements.
+            No complete finding-closure or release-verification claim is made here. The CL-01
+            artifact SHA-256 was e3182b5d545b279619ffeb10032feffdd222904fa20860d4755b9fabe37c00af;
+            the observed live 3pool module SHA-256 was
+            e89ad4f73a16012a8a7b3e389db13121aefe611ec6b459b3fcd270350ea92eab. Recheck exact
+            installed hashes before describing the hotfix as deployed.
           </p>
         </aside>
       </div>
@@ -182,7 +186,6 @@
       </div>
     </article>
   </section>
-
   <section class="release-section" aria-labelledby="release-evidence-title">
     <div class="page-width release-inner">
       <div class="section-heading release-heading">
@@ -263,6 +266,7 @@
           target="_blank"
           rel="noopener"
         >Open a private GitHub Security Advisory <span aria-hidden="true">↗</span></a>
+        <p class="bounty-note">Rumi does not currently operate a paid bug-bounty programme.</p>
       </div>
     </div>
   </section>
@@ -363,6 +367,7 @@
   .disclosure-response { margin: 0 0 1rem; color: var(--rumi-text-secondary); font-size: .82rem; }
   .disclosure-link, .advisory-link { display: flex; justify-content: space-between; gap: 1rem; padding: .85rem 0; border-top: 1px solid var(--rumi-border); color: var(--rumi-teal-bright); font-size: .84rem; font-weight: 600; text-decoration: none; }
   .advisory-link { color: var(--rumi-text-secondary); font-size: .79rem; font-weight: 500; }
+  .bounty-note { margin: .75rem 0 0; color: var(--rumi-text-muted); font-size: .7rem; }
   .page-foot { display: flex; justify-content: space-between; gap: 1rem; padding-block: 1.3rem 2rem; border-top: 1px solid var(--rumi-border); color: var(--rumi-text-muted); font-size: .72rem; }
 
   @media (max-width: 760px) {

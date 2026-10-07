@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, unmount, flushSync } from 'svelte';
+import { Principal } from '@dfinity/principal';
 import {
   PRINCIPAL_A,
   PRINCIPAL_B,
@@ -120,16 +121,14 @@ const fx = vi.hoisted(() => {
     fetchProtocolStatus: vi.fn(async (_force?: boolean) => {}),
     refreshAll: vi.fn(async (_owner: unknown) => {}),
     fetchUserVaults: vi.fn(async (_owner: unknown, _force?: boolean) => [] as unknown[]),
-    openVaultAndBorrowBound: vi.fn(async (_ctx: unknown, _collateralRaw: bigint, _icusdRaw: bigint, _p?: string) => ({
-      kind: 'dispatched_err' as 'dispatched_err' | 'dispatched_ok' | 'predispatch_aborted' | 'ambiguous_transport',
-      vaultId: null as number | null,
-      blockIndex: null as number | null,
-      partialZeroDebtVaultId: null as number | null,
+    openVaultV2Bound: vi.fn(async (_ctx: unknown, _requestId: bigint, _amountRaw: bigint, _principal?: string) => ({
+      kind: 'ambiguous_transport' as const,
+      status: null,
       errorMessage: 'unset' as string | null,
       approvalMayHaveMutated: false,
-      submittedCollateralRaw: 0n,
-      submittedIcusdRaw: 0n,
     })),
+    getCollateralIngressStateBound: vi.fn(async () => ({ next_request_id: 1n, active_request: [], latest_result: [] })),
+    getCollateralIngressBound: vi.fn(async () => null),
     borrowFromVaultBound: vi.fn(async (_ctx: unknown, vaultId: number, _icusdRaw: bigint) => ({
       kind: 'dispatched_err' as const,
       vaultId,
@@ -179,7 +178,9 @@ vi.mock('$lib/stores/appDataStore', () => ({
 
 vi.mock('$lib/services/protocol', () => ({
   protocolService: {
-    openVaultAndBorrowBound: fx.openVaultAndBorrowBound,
+    openVaultV2Bound: fx.openVaultV2Bound,
+    getCollateralIngressStateBound: fx.getCollateralIngressStateBound,
+    getCollateralIngressBound: fx.getCollateralIngressBound,
     borrowFromVaultBound: fx.borrowFromVaultBound,
   },
 }));
@@ -285,6 +286,24 @@ function findButtonByText(text: string): HTMLButtonElement | null {
   return (qAll('button').find((b) => b.textContent?.includes(text)) as HTMLButtonElement | undefined) ?? null;
 }
 
+function completeOpenStatus(vaultId: number, amountRaw: bigint, requestId = 1n) {
+  return {
+    request_id: requestId,
+    owner: Principal.fromText(PRINCIPAL_A_TEXT),
+    ledger: Principal.fromText(CKDOGE_LEDGER_TEXT),
+    operation: { Open: { collateral_type: Principal.fromText(CKDOGE_LEDGER_TEXT) } },
+    phase: { Complete: null },
+    amount_raw: amountRaw,
+    fee_raw: 10_000n,
+    memo: [],
+    created_at_time_ns: 1n,
+    candidate_block_index: [9n],
+    result: [{ Open: { vault_id: BigInt(vaultId), block_index: 9n } }],
+    had_ambiguous_attempt: false,
+    last_error: [],
+  };
+}
+
 function readToasts(): ToastData[] {
   let value: ToastData[] = [];
   const unsubscribe = toastStore.subscribe((next) => { value = next; });
@@ -318,16 +337,9 @@ beforeEach(() => {
   fx.fetchProtocolStatus.mockReset().mockImplementation(async () => {});
   fx.refreshAll.mockReset().mockImplementation(async () => {});
   fx.fetchUserVaults.mockReset().mockImplementation(async () => []);
-  fx.openVaultAndBorrowBound.mockReset().mockResolvedValue({
-    kind: 'dispatched_err',
-    vaultId: null,
-    blockIndex: null,
-    partialZeroDebtVaultId: null,
-    errorMessage: 'unset',
-    approvalMayHaveMutated: false,
-    submittedCollateralRaw: 0n,
-    submittedIcusdRaw: 0n,
-  });
+  fx.openVaultV2Bound.mockReset().mockResolvedValue({ kind: 'ambiguous_transport', status: null, errorMessage: 'unset', approvalMayHaveMutated: false });
+  fx.getCollateralIngressStateBound.mockReset().mockResolvedValue({ next_request_id: 1n, active_request: [], latest_result: [] });
+  fx.getCollateralIngressBound.mockReset().mockResolvedValue(null);
   fx.borrowFromVaultBound.mockReset().mockImplementation(async (_ctx: unknown, vaultId: number) => ({
     kind: 'dispatched_err' as const,
     vaultId,
@@ -539,8 +551,8 @@ describe('/doge/borrow — account switching mid-flight', () => {
   });
 });
 
-describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
-  it('only calls openVaultAndBorrowBound on the explicit Confirm and borrow click, with EXACT raw bigint amounts, after a real mocked minted receipt and refreshed final terms', async () => {
+describe('/doge/borrow — deposit to staged open and explicit borrow', () => {
+  it('opens with exact raw koinu under a request ID, then borrows only after a separate click', async () => {
     // ledgerFee: 0 isolates this test's purpose (exact-bigint pass-through, no float rounding)
     // from the fee-reservation behavior, which has its own dedicated tests below.
     fx.collateralState.set({ collaterals: [fakeCollateralInfo({ ledgerFee: 0 })], loading: false });
@@ -561,7 +573,7 @@ describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
     await settle();
 
     expect(host.textContent).toContain('Minted 1000 DOGE worth of ckDOGE');
-    expect(fx.openVaultAndBorrowBound).not.toHaveBeenCalled();
+    expect(fx.openVaultV2Bound).not.toHaveBeenCalled();
 
     findButtonByText('Continue to confirm borrow')!.click();
     await settle();
@@ -569,7 +581,7 @@ describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
     // Reaching "confirm" refreshes live config/price before any submission.
     expect(fx.fetchSupportedCollateral).toHaveBeenCalledWith(true, { strict: true });
     expect(fx.fetchProtocolStatus).toHaveBeenCalledWith(true);
-    expect(fx.openVaultAndBorrowBound).not.toHaveBeenCalled();
+    expect(fx.openVaultV2Bound).not.toHaveBeenCalled();
 
     // Fee-adjusted net output and liquidation price are disclosed using the
     // real risk math, not just the gross requested amount.
@@ -585,21 +597,20 @@ describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
     expect(host.textContent).toContain(formatNumber(expected.icusdReceived, 4));
     expect(host.textContent).toContain(`$${formatNumber(expected.liquidationPriceUsd, 4)}`);
 
-    // Exactly 1000 DOGE minted (100_000_000_000 koinu) and 50 icUSD (5_000_000_000 e8s) —
-    // the vault the mocked bound call reports back must match EXACTLY, no 95% tolerance.
+    // The journal's Complete Open row and exact zero-debt vault make the open stage reviewable.
     fx.getVaults.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      fakeRawVault({ vaultId: 42, collateralAmount: 100_000_000_000n, borrowedIcusd: 0n }),
+    ]).mockResolvedValueOnce([
+      fakeRawVault({ vaultId: 42, collateralAmount: 100_000_000_000n, borrowedIcusd: 0n }),
+    ]).mockResolvedValueOnce([
       fakeRawVault({ vaultId: 42, collateralAmount: 100_000_000_000n, borrowedIcusd: 5_000_000_000n }),
     ]);
-    fx.openVaultAndBorrowBound.mockResolvedValue({
+    fx.openVaultV2Bound.mockResolvedValue({
       kind: 'dispatched_ok',
-      vaultId: 42,
-      blockIndex: 1,
-      partialZeroDebtVaultId: null,
+      status: completeOpenStatus(42, 100_000_000_000n),
       errorMessage: null,
       approvalMayHaveMutated: true,
-      submittedCollateralRaw: 100_000_000_000n,
-      submittedIcusdRaw: 5_000_000_000n,
-    });
+    } as any);
 
     // Model a stale global transfer failure from the prior attempt. The route
     // must retire this exact error at its authoritative success boundary while
@@ -607,19 +618,30 @@ describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
     const staleError = toastStore.error('Insufficient token funds. Your balance is too low for this amount.', 60_000);
     const unrelatedError = toastStore.error('Keep this current error visible', 60_000);
 
-    const confirmBtn = findButtonByText('Confirm and borrow')!;
+    const confirmBtn = findButtonByText('Confirm and open vault')!;
     expect(confirmBtn.disabled).toBe(false);
     confirmBtn.click();
     await settle();
 
-    expect(fx.openVaultAndBorrowBound).toHaveBeenCalledTimes(1);
-    // The bound API takes RAW bigint wire amounts directly — the exact minted koinu and the
-    // exact e8s for 50 icUSD, no float round-trip / +0.5 bias anywhere in this path.
-    const [, submittedCollateralRaw, submittedIcusdRaw, submittedCollateralPrincipal] = fx.openVaultAndBorrowBound.mock.calls[0];
+    expect(fx.openVaultV2Bound).toHaveBeenCalledTimes(1);
+    expect(fx.borrowFromVaultBound).not.toHaveBeenCalled();
+    // The open boundary takes the persistent request ID and exact raw collateral only.
+    const [, requestId, submittedCollateralRaw, submittedCollateralPrincipal] = fx.openVaultV2Bound.mock.calls[0];
+    expect(requestId).toBe(1n);
     expect(submittedCollateralRaw).toBe(100_000_000_000n);
-    expect(submittedIcusdRaw).toBe(5_000_000_000n);
     expect(submittedCollateralPrincipal).toBe(CKDOGE_LEDGER_TEXT);
     expect(host.textContent).toContain('Vault #42');
+    const savedIntent = Object.values(localStorage).map((raw) => JSON.parse(String(raw))).find((record: any) => record?.principal === PRINCIPAL_A_TEXT);
+    expect(savedIntent.openRequestId).toBe('1');
+    expect(savedIntent.borrowDispatchStarted).toBe(false);
+    const finishBorrow = findButtonByText('Finish borrowing 50 icUSD');
+    expect(finishBorrow).toBeTruthy();
+    fx.borrowFromVaultBound.mockResolvedValue({ kind: 'dispatched_ok', vaultId: 42, blockIndex: 2,
+      feePaidRaw: 1n, errorMessage: null, submittedIcusdRaw: 5_000_000_000n } as any);
+    finishBorrow!.click();
+    await settle();
+    expect(fx.borrowFromVaultBound).toHaveBeenCalledWith(expect.anything(), 42, 5_000_000_000n);
+    expect(host.textContent).toContain('Debt on the vault is');
 
     const remainingToastIds = readToasts().map((toast) => toast.id);
     expect(remainingToastIds).toContain(unrelatedError);
@@ -675,30 +697,28 @@ describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
     }
 
     fx.getVaults.mockResolvedValueOnce([]).mockResolvedValueOnce([
-      fakeRawVault({ vaultId: 99, collateralAmount: SAFE_COLLATERAL_KOINU, borrowedIcusd: 100_000_000n }),
+      fakeRawVault({ vaultId: 99, collateralAmount: SAFE_COLLATERAL_KOINU, borrowedIcusd: 0n }),
     ]);
-    fx.openVaultAndBorrowBound.mockResolvedValue({
+    fx.openVaultV2Bound.mockResolvedValue({
       kind: 'dispatched_ok',
-      vaultId: 99,
-      blockIndex: 3,
-      partialZeroDebtVaultId: null,
+      status: completeOpenStatus(99, SAFE_COLLATERAL_KOINU),
       errorMessage: null,
       approvalMayHaveMutated: true,
-      submittedCollateralRaw: SAFE_COLLATERAL_KOINU,
-      submittedIcusdRaw: 100_000_000n,
-    });
+    } as any);
 
-    const confirmBtn = findButtonByText('Confirm and borrow')!;
+    const confirmBtn = findButtonByText('Confirm and open vault')!;
     expect(confirmBtn.disabled).toBe(false);
     confirmBtn.click();
     await settle();
 
-    expect(fx.openVaultAndBorrowBound).toHaveBeenCalledTimes(1);
-    const [, submittedCollateralRaw] = fx.openVaultAndBorrowBound.mock.calls[0];
+    expect(fx.openVaultV2Bound).toHaveBeenCalledTimes(1);
+    expect(fx.borrowFromVaultBound).not.toHaveBeenCalled();
+    const [, , submittedCollateralRaw] = fx.openVaultV2Bound.mock.calls[0];
     // Exactly balance-minus-2x-fee — never the full 52 ckDOGE balance, and never a
     // float-rounded approximation of it.
     expect(submittedCollateralRaw).toBe(SAFE_COLLATERAL_KOINU);
     expect(host.textContent).toContain('Vault #99');
+    expect(findButtonByText('Finish borrowing 1 icUSD')).toBeTruthy();
   });
 
   it('reads the LIVE ckDOGE ledger fee from collateral config, not a hardcoded page constant', async () => {
@@ -753,11 +773,11 @@ describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
     // Simulate an environment without the Web Locks API.
     Object.defineProperty(navigator, 'locks', { value: undefined, configurable: true });
 
-    const confirmBtn = findButtonByText('Confirm and borrow')!;
+    const confirmBtn = findButtonByText('Confirm and open vault')!;
     confirmBtn.click();
     await settle();
 
-    expect(fx.openVaultAndBorrowBound).not.toHaveBeenCalled();
+    expect(fx.openVaultV2Bound).not.toHaveBeenCalled();
     expect(host.textContent).toContain('does not support the safety lock');
   });
 
@@ -784,13 +804,13 @@ describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
       originalSetItem.call(localStorage, key, value);
     });
     try {
-      findButtonByText('Confirm and borrow')!.click();
+      findButtonByText('Confirm and open vault')!.click();
       await settle();
     } finally {
       setItemSpy.mockRestore();
     }
 
-    expect(fx.openVaultAndBorrowBound).not.toHaveBeenCalled();
+    expect(fx.openVaultV2Bound).not.toHaveBeenCalled();
     expect(host.textContent).toContain('could not be saved safely');
   });
 
@@ -818,8 +838,8 @@ describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
 
     expect(fx.fetchSupportedCollateral).toHaveBeenCalledWith(true, { strict: true });
     expect(host.textContent).toContain('Could not refresh live borrowing terms');
-    expect(findButtonByText('Confirm and borrow')).toBeNull();
-    expect(fx.openVaultAndBorrowBound).not.toHaveBeenCalled();
+    expect(findButtonByText('Confirm and open vault')).toBeNull();
+    expect(fx.openVaultV2Bound).not.toHaveBeenCalled();
   });
 
   it('discards a stale final-terms refresh after reconnect and waits for the new session refresh', async () => {
@@ -878,18 +898,18 @@ describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
     staleCollateral.resolve();
     staleProtocol.resolve();
     await settle();
-    expect(findButtonByText('Confirm and borrow')).toBeNull();
+    expect(findButtonByText('Confirm and open vault')).toBeNull();
 
     freshCollateral.resolve();
     freshProtocol.resolve();
     await settle();
-    expect(findButtonByText('Confirm and borrow')).toBeTruthy();
-    expect(findButtonByText('Confirm and borrow')!.disabled).toBe(false);
+    expect(findButtonByText('Confirm and open vault')).toBeTruthy();
+    expect(findButtonByText('Confirm and open vault')!.disabled).toBe(false);
   });
 });
 
-describe('/doge/borrow — partial zero-debt recovery on reload', () => {
-  it('never blindly resubmits open_vault_and_borrow for a saved intent that already created a zero-debt vault', async () => {
+describe('/doge/borrow — unresolved mint recovery on reload', () => {
+  it('does not treat a persisted partial marker plus zero debt as proof that a pending mint is safe to retry', async () => {
     saveIntent(
       localStorage,
       fakeIntentRecord({
@@ -916,30 +936,15 @@ describe('/doge/borrow — partial zero-debt recovery on reload', () => {
     renderPage();
     await settle();
 
-    expect(fx.openVaultAndBorrowBound).not.toHaveBeenCalled();
-    expect(host.textContent).toContain('vault #99');
-    const finishBtn = findButtonByText('Finish borrowing');
-    expect(finishBtn).toBeTruthy();
-
-    // The preflight check inside finishBorrowOnVault re-reads the vault before
-    // ever calling borrowFromVault — still zero debt here, so it should call it.
-    fx.borrowFromVaultBound.mockResolvedValue({
-      kind: 'dispatched_err',
-      vaultId: 99,
-      blockIndex: null,
-      feePaidRaw: null,
-      errorMessage: 'unset',
-      submittedIcusdRaw: 5_000_000_000n,
-    });
-    finishBtn!.click();
-    await settle();
-
-    expect(fx.borrowFromVaultBound).toHaveBeenCalledTimes(1);
-    expect(fx.borrowFromVaultBound.mock.calls[0][1]).toBe(99);
-    expect(fx.borrowFromVaultBound.mock.calls[0][2]).toBe(5_000_000_000n);
-    // The one and only allowed recovery path is borrowFromVault on the exact
-    // existing vault — a fresh open_vault_and_borrow must never fire.
-    expect(fx.openVaultAndBorrowBound).not.toHaveBeenCalled();
+    expect(fx.openVaultV2Bound).not.toHaveBeenCalled();
+    expect(host.textContent).not.toContain('vault #99');
+    expect(host.textContent).toContain('Vault debt alone cannot attribute a borrow');
+    expect(findButtonByText('Finish borrowing')).toBeNull();
+    expect(host.textContent).toMatch(/recheck|uncertain|confirm/i);
+    // The stored marker may predate the durable mint journal; a zero-debt query
+    // cannot prove whether mint dispatch committed or remains pending.
+    expect(fx.borrowFromVaultBound).not.toHaveBeenCalled();
+    expect(fx.openVaultV2Bound).not.toHaveBeenCalled();
   });
 
   it('never resubmits borrowFromVault when a fresh preflight shows the vault already has nonzero debt (late response landed already)', async () => {
@@ -967,20 +972,9 @@ describe('/doge/borrow — partial zero-debt recovery on reload', () => {
     connectAs(PRINCIPAL_A);
     renderPage();
     await settle();
-    const finishBtn = findButtonByText('Finish borrowing');
-    expect(finishBtn).toBeTruthy();
-
-    // ...but by the time the user clicks, the vault's fresh preflight (a SEPARATE
-    // get_vaults call inside finishBorrowOnVault) shows the debt already landed
-    // (e.g. a slow first borrow_from_vault call finally committed).
-    fx.getVaults.mockResolvedValueOnce([
-      fakeRawVault({ vaultId: 99, collateralAmount: 100_000_000_000n, borrowedIcusd: 50_00000000n }),
-    ]);
-    finishBtn!.click();
-    await settle();
-
+    expect(findButtonByText('Finish borrowing')).toBeNull();
     expect(fx.borrowFromVaultBound).not.toHaveBeenCalled();
-    expect(host.textContent).toContain('vault #99');
+    expect(host.textContent).toMatch(/recheck|uncertain|confirm/i);
   });
 });
 
@@ -1017,7 +1011,7 @@ describe('/doge/borrow — unresolved intent with no known vault id recovers rea
     expect(fx.getVaults).toHaveBeenCalled();
     expect(host.textContent).toContain('possible matching vault');
     expect(findButtonByText('Recheck on-chain')).toBeTruthy();
-    expect(fx.openVaultAndBorrowBound).not.toHaveBeenCalled();
+    expect(fx.openVaultV2Bound).not.toHaveBeenCalled();
 
     const stored = JSON.parse(localStorage.getItem(storageKeyForPrincipal(PRINCIPAL_A_TEXT, TEST_NETWORK_SCOPE))!);
     expect(stored.vaultId).toBeNull();
@@ -1048,10 +1042,10 @@ describe('/doge/borrow — unresolved intent with no known vault id recovers rea
     renderPage();
     await settle();
 
-    expect(fx.openVaultAndBorrowBound).not.toHaveBeenCalled();
+    expect(fx.openVaultV2Bound).not.toHaveBeenCalled();
     const recheckBtn = findButtonByText('Recheck on-chain');
     expect(recheckBtn).toBeTruthy();
-    expect(findButtonByText('Confirm and borrow')).toBeNull();
+    expect(findButtonByText('Confirm and open vault')).toBeNull();
   });
 });
 

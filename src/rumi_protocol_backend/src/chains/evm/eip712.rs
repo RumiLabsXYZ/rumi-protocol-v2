@@ -109,9 +109,13 @@ fn word_address(addr: &str) -> Result<[u8; 32], String> {
 
 /// Parse a `0x`-prefixed 20-byte EVM address into raw bytes (canonical key input).
 pub fn parse_addr_20(addr: &str) -> Result<[u8; 20], String> {
-    let h = addr.strip_prefix("0x").or_else(|| addr.strip_prefix("0X")).unwrap_or(addr);
+    let h = addr
+        .strip_prefix("0x")
+        .or_else(|| addr.strip_prefix("0X"))
+        .unwrap_or(addr);
     let v = hex::decode(h).map_err(|e| format!("bad address hex: {e}"))?;
-    v.try_into().map_err(|v: Vec<u8>| format!("address is {} bytes, expected 20", v.len()))
+    v.try_into()
+        .map_err(|v: Vec<u8>| format!("address is {} bytes, expected 20", v.len()))
 }
 
 /// `domainSeparator = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak(name), keccak(version), chainId, verifyingContract))`
@@ -133,7 +137,9 @@ pub fn domain_separator(chain_id: u64, verifying_contract: &str) -> Result<[u8; 
     let mut buf = Vec::with_capacity(32 * 5);
     buf.extend_from_slice(&domain_typehash());
     buf.extend_from_slice(&<[u8; 32]>::from(Keccak256::digest(DOMAIN_NAME.as_bytes())));
-    buf.extend_from_slice(&<[u8; 32]>::from(Keccak256::digest(DOMAIN_VERSION.as_bytes())));
+    buf.extend_from_slice(&<[u8; 32]>::from(Keccak256::digest(
+        DOMAIN_VERSION.as_bytes(),
+    )));
     buf.extend_from_slice(&word_u64(chain_id));
     buf.extend_from_slice(&word_address(verifying_contract)?);
     Ok(Keccak256::digest(&buf).into())
@@ -234,7 +240,8 @@ pub fn verify_intent(
     if now_secs > intent.deadline_secs {
         return Err(VerifyError::Expired);
     }
-    let dsep = domain_separator(intent.chain_id, verifying_contract).map_err(VerifyError::Recover)?;
+    let dsep =
+        domain_separator(intent.chain_id, verifying_contract).map_err(VerifyError::Recover)?;
     let sh = intent_struct_hash(intent).map_err(VerifyError::Recover)?;
     let digest = intent_digest(&dsep, &sh);
     let signer = recover_evm_address(&digest, sig).map_err(VerifyError::Recover)?;

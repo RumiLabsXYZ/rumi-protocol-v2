@@ -1,6 +1,7 @@
 use candid::Principal;
 use ic_canister_log::log;
 use ic_cdk::{init, post_upgrade, pre_upgrade, query, update};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -9,6 +10,7 @@ pub mod liquidation;
 pub mod logs;
 pub mod pool_guard;
 pub mod state;
+mod three_usd_v2;
 pub mod types;
 
 use crate::logs::INFO;
@@ -16,6 +18,13 @@ use crate::state::{mutate_state, read_state};
 use crate::types::*;
 
 const CHAIN_ABSORB_AUTO_TIMER_POLL_SECONDS: u64 = 60;
+const CHAIN_BURN_RECOVERY_POLL_SECONDS: u64 = 600;
+const CHAIN_BURN_RECOVERY_MAX_PER_TICK: usize = 2;
+const NATIVE_XRP_BURN_RECOVERY_POLL_SECONDS: u64 = 600;
+const NATIVE_XRP_BURN_RECOVERY_MAX_PER_TICK: usize = 2;
+thread_local! {
+    static NATIVE_XRP_BURN_RECOVERY_CURSOR: Cell<u64> = const { Cell::new(0) };
+}
 /// Native-XRP payout settlement sweep cadence. Each settlement is a tEd25519
 /// signature + XRPL submit outcall on the backend, so the sweep is deliberately
 /// slow and bounded: at 2 claims per 10-minute tick a normal absorb fan-out
@@ -28,13 +37,141 @@ const UNALLOCATED_INTEREST_FORWARD_RETRY_SECONDS: u64 = 60;
 /// negligible cycle cost, while still surfacing drift long before it can trip a
 /// depositor's withdrawal.
 const LEDGER_RECONCILIATION_CHECK_SECONDS: u64 = 3600;
+const SP_LIQUIDATION_V2_RECOVERY_SECONDS: u64 = 60;
+const SP_LIQUIDATION_V2_RECOVERY_MAX_PER_TICK: usize = 2;
 
 pub(crate) fn pool_balance_mutation_blocked() -> bool {
-    crate::pool_guard::liquidation_in_progress() || read_state(|s| s.has_pending_pool_absorbs())
+    crate::pool_guard::liquidation_in_progress()
+        || read_state(|s| {
+            !s.in_flight_liquidations.is_empty()
+                || s.has_pending_pool_absorbs()
+                || s.pending_outbound_payouts.as_ref().is_some_and(|payouts| {
+                    payouts
+                        .values()
+                        .any(|p| p.kind == crate::types::OutboundPayoutKind::Withdraw)
+                })
+                || s.pending_sp_liquidations_v2
+                    .as_ref()
+                    .is_some_and(|requests| !requests.is_empty())
+                || s.pending_sp_three_usd_absorbs
+                    .as_ref()
+                    .is_some_and(|requests| !requests.is_empty())
+                || s.pending_sp_legacy_approval_fees
+                    .as_ref()
+                    .is_some_and(|approvals| !approvals.is_empty())
+        })
 }
 
 pub(crate) fn ensure_pool_balance_mutation_allowed() -> Result<(), StabilityPoolError> {
     if pool_balance_mutation_blocked() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(())
+}
+
+/// A retained burn intent fences only the exact stablecoin ledgers committed
+/// to its draw. The transient live-liquidation guard remains pool-wide while
+/// a snapshot is being formed or a callback is applying accounting.
+pub(crate) fn pool_balance_mutation_blocked_for_ledger(ledger: Principal) -> bool {
+    crate::pool_guard::liquidation_in_progress()
+        || read_state(|s| {
+            !s.in_flight_liquidations.is_empty()
+                || s.pending_chain_absorbs.as_ref().is_some_and(|intents| {
+                    intents.values().any(|intent| {
+                        intent.icusd_ledger == ledger
+                            || intent.stables_consumed.contains_key(&ledger)
+                    })
+                })
+                || s.pending_native_xrp_absorbs
+                    .as_ref()
+                    .is_some_and(|intents| {
+                        intents.values().any(|intent| {
+                            intent.icusd_ledger == ledger
+                                || intent.stables_consumed.contains_key(&ledger)
+                        })
+                    })
+                || s.pending_refunds.as_ref().is_some_and(|refunds| {
+                    refunds.values().any(|refund| refund.token_ledger == ledger)
+                })
+                || s.pending_outbound_payouts.as_ref().is_some_and(|payouts| {
+                    payouts
+                        .keys()
+                        .any(|(_, payout_ledger)| *payout_ledger == ledger)
+                })
+                || s.pending_sp_liquidations_v2
+                    .as_ref()
+                    .is_some_and(|requests| {
+                        requests.values().any(|row| row.stablecoin_ledger == ledger)
+                    })
+                || s.pending_sp_three_usd_absorbs
+                    .as_ref()
+                    .is_some_and(|requests| !requests.is_empty())
+                || s.pending_sp_legacy_approval_fees
+                    .as_ref()
+                    .is_some_and(|approvals| {
+                        approvals
+                            .keys()
+                            .any(|(_, pending_ledger)| *pending_ledger == ledger)
+                    })
+        })
+}
+
+/// Permit only the owner of an existing payout to retry that same durable
+/// tuple. Other callers remain fenced on the affected ledger.
+pub(crate) fn ensure_outbound_retry_allowed(
+    ledger: Principal,
+    caller: Principal,
+) -> Result<(), StabilityPoolError> {
+    let blocked = crate::pool_guard::liquidation_in_progress()
+        || read_state(|s| {
+            !s.in_flight_liquidations.is_empty()
+                || s.pending_chain_absorbs.as_ref().is_some_and(|intents| {
+                    intents.values().any(|i| {
+                        i.icusd_ledger == ledger || i.stables_consumed.contains_key(&ledger)
+                    })
+                })
+                || s.pending_native_xrp_absorbs
+                    .as_ref()
+                    .is_some_and(|intents| {
+                        intents.values().any(|i| {
+                            i.icusd_ledger == ledger || i.stables_consumed.contains_key(&ledger)
+                        })
+                    })
+                || s.pending_refunds
+                    .as_ref()
+                    .is_some_and(|refunds| refunds.values().any(|r| r.token_ledger == ledger))
+                || s.pending_outbound_payouts.as_ref().is_some_and(|payouts| {
+                    payouts.keys().any(|(owner, pending_ledger)| {
+                        *pending_ledger == ledger && *owner != caller
+                    })
+                })
+                || s.pending_sp_liquidations_v2
+                    .as_ref()
+                    .is_some_and(|requests| {
+                        requests.values().any(|row| row.stablecoin_ledger == ledger)
+                    })
+                || s.pending_sp_three_usd_absorbs
+                    .as_ref()
+                    .is_some_and(|requests| !requests.is_empty())
+                || s.pending_sp_legacy_approval_fees
+                    .as_ref()
+                    .is_some_and(|approvals| {
+                        approvals
+                            .keys()
+                            .any(|(_, pending_ledger)| *pending_ledger == ledger)
+                    })
+        });
+    if blocked {
+        Err(StabilityPoolError::SystemBusy)
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn ensure_pool_balance_mutation_allowed_for_ledger(
+    ledger: Principal,
+) -> Result<(), StabilityPoolError> {
+    if pool_balance_mutation_blocked_for_ledger(ledger) {
         return Err(StabilityPoolError::SystemBusy);
     }
     Ok(())
@@ -45,6 +182,34 @@ pub(crate) fn ensure_no_pool_balance_async_in_flight() -> Result<(), StabilityPo
         return Err(StabilityPoolError::SystemBusy);
     }
     Ok(())
+}
+
+fn validate_outbound_payout_receipt(
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+    caller: Principal,
+    pool: Principal,
+    payout: &PendingOutboundPayout,
+) -> Result<(), String> {
+    if block.btype.as_deref() != Some("1xfer") {
+        return Err("candidate block is not typed as an ICRC-1 transfer".into());
+    }
+    let expected_from = icrc_ledger_types::icrc1::account::Account {
+        owner: pool,
+        subaccount: None,
+    };
+    let expected_to = icrc_ledger_types::icrc1::account::Account {
+        owner: caller,
+        subaccount: None,
+    };
+    rumi_protocol_backend::icrc3_proof::validate_icrc3_transfer_block_with_fee(
+        block,
+        expected_from,
+        expected_to,
+        payout.transfer_amount,
+        payout.transfer_fee,
+        &payout.transfer_memo,
+        payout.transfer_created_at_time_ns,
+    )
 }
 
 // ─── Init / Upgrade ───
@@ -68,10 +233,81 @@ fn init(args: StabilityPoolInitArgs) {
     ic_cdk_timers::set_timer(Duration::ZERO, || {
         setup_virtual_price_timer();
         setup_chain_absorb_auto_timer();
+        setup_chain_burn_recovery_timer();
+        setup_native_xrp_burn_recovery_timer();
         setup_native_xrp_settle_sweep_timer();
         setup_unallocated_interest_forward_retry_timer();
         setup_ledger_reconciliation_timer();
+        setup_sp_liquidation_v2_recovery_timer();
     });
+}
+
+fn setup_sp_liquidation_v2_recovery_timer() {
+    ic_cdk_timers::set_timer_interval(
+        Duration::from_secs(SP_LIQUIDATION_V2_RECOVERY_SECONDS),
+        || {
+            ic_cdk::spawn(async {
+                let ids = mutate_state(|state| {
+                    state.take_sp_liquidation_v2_recovery_batch(
+                        SP_LIQUIDATION_V2_RECOVERY_MAX_PER_TICK,
+                    )
+                });
+                for request_id in ids {
+                    let _ = crate::liquidation::recover_sp_liquidation_v2(request_id).await;
+                }
+                let absorb_ids = mutate_state(|state| {
+                    state.take_sp_three_usd_recovery_batch(SP_LIQUIDATION_V2_RECOVERY_MAX_PER_TICK)
+                });
+                for absorb_id in absorb_ids {
+                    let _ = crate::three_usd_v2::recover_proven_three_usd_absorb(absorb_id).await;
+                }
+                let legacy_approval_keys =
+                    read_state(|state| state.pending_sp_legacy_approval_fee_keys(1));
+                if !legacy_approval_keys.is_empty() {
+                    if let Ok(_guard) = crate::pool_guard::SpLiquidationGuard::new() {
+                        for (vault_id, ledger) in legacy_approval_keys {
+                            if let Err(error) =
+                                crate::liquidation::recover_sp_legacy_approval_fee(vault_id, ledger)
+                                    .await
+                            {
+                                log!(
+                                    INFO,
+                                    "Legacy approval fee recovery held for vault {} on ledger {}: {:?}",
+                                    vault_id,
+                                    ledger,
+                                    error
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+        },
+    );
+}
+
+/// Read the durable local phase for one receipt-backed liquidation ID. This
+/// exposes held/ambiguous obligations so they remain operationally visible.
+#[query]
+pub fn get_sp_liquidation_v2_status(request_id: u64) -> Option<SpLiquidationV2LocalStatus> {
+    read_state(|state| {
+        state
+            .sp_liquidation_v2_row(request_id)
+            .map(|row| SpLiquidationV2LocalStatus {
+                request_id: row.request.request_id,
+                vault_id: row.request.vault_id,
+                amount: row.request.amount,
+                token: row.request.token,
+                stablecoin_ledger: row.stablecoin_ledger,
+                collateral_type: row.collateral_type,
+                phase: row.phase,
+                approval_fee_accounted: row.approval.fee_accounted,
+                approval_receipt_block_index: row.approval_receipt_block_index,
+                stable_debit_applied: row.stable_debit_applied,
+                backend_acknowledged: row.backend_acknowledged,
+                last_error: row.last_error,
+            })
+    })
 }
 
 #[pre_upgrade]
@@ -86,6 +322,35 @@ fn pre_upgrade() {
 #[post_upgrade]
 fn post_upgrade(_args: StabilityPoolInitArgs) {
     state::load_from_stable_memory();
+    let (indexed, retained) = mutate_state(|s| {
+        s.reconcile_pending_deposit_attempts_after_upgrade();
+        s.reconcile_pending_outbound_payouts_after_upgrade();
+        s.initialize_pending_outbound_payouts();
+        s.initialize_sp_liquidation_v2_journal();
+        s.initialize_sp_three_usd_absorb_journal();
+        s.recover_interrupted_sp_liquidation_v2_approvals();
+        s.initialize_unallocated_interest_mint_index();
+        (
+            s.unallocated_interest_mint_index.is_some(),
+            s.unallocated_interest_mint_index
+                .as_ref()
+                .map(BTreeMap::len)
+                .unwrap_or(0),
+        )
+    });
+    if !indexed {
+        log!(
+            INFO,
+            "CL-10 migration: legacy unallocated-interest receipt history exceeds the bounded index; new notifications will remain pending for reconciliation"
+        );
+    } else {
+        log!(
+            INFO,
+            "CL-10 migration: indexed {} retained unallocated-interest receipts",
+            retained
+        );
+    }
+    mutate_state(|s| s.normalize_pending_refund_fee_state());
     log!(
         INFO,
         "Stability Pool post-upgrade: state restored. {} depositors, {} liquidations",
@@ -108,9 +373,12 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
     ic_cdk_timers::set_timer(Duration::ZERO, || {
         setup_virtual_price_timer();
         setup_chain_absorb_auto_timer();
+        setup_chain_burn_recovery_timer();
+        setup_native_xrp_burn_recovery_timer();
         setup_native_xrp_settle_sweep_timer();
         setup_unallocated_interest_forward_retry_timer();
         setup_ledger_reconciliation_timer();
+        setup_sp_liquidation_v2_recovery_timer();
     });
 }
 
@@ -176,9 +444,335 @@ fn setup_chain_absorb_auto_timer() {
     );
 }
 
-/// A successful backend notification only means the SP has durably received
-/// the source receipt. This timer advances/retries the receipt so concurrent
-/// notifications and temporary ledger/treasury failures cannot strand funds.
+/// Resume retained chain burns independently of the liquidatable-vault feed.
+/// The recovery path only reuses a persisted exact burn proof.
+fn setup_chain_burn_recovery_timer() {
+    ic_cdk_timers::set_timer_interval(
+        Duration::from_secs(CHAIN_BURN_RECOVERY_POLL_SECONDS),
+        || {
+            ic_cdk::spawn(async {
+                let resumed = crate::liquidation::run_chain_burn_recovery_tick(
+                    CHAIN_BURN_RECOVERY_MAX_PER_TICK,
+                )
+                .await;
+                if resumed > 0 {
+                    log!(
+                        INFO,
+                        "chain burn recovery tick inspected {} retained intent(s)",
+                        resumed
+                    );
+                }
+            });
+        },
+    );
+}
+
+async fn reconcile_pending_native_xrp_absorb_from_status(
+    vault_id: u64,
+) -> Result<(), StabilityPoolError> {
+    let _liquidation_guard = crate::pool_guard::SpLiquidationGuard::new()?;
+    let mut intent =
+        read_state(|s| s.get_pending_native_xrp_absorb(vault_id)).ok_or_else(|| {
+            StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "missing pending native XRP absorb intent".to_string(),
+            }
+        })?;
+    let mut proof = intent.burn_proof.clone();
+
+    // A post-upgrade recovery may adopt the stale marker only when the retained
+    // exact intent is the sole matching liquidation. A proof-bearing intent is
+    // already recoverable; an attempted proofless intent may replay only its
+    // original ledger tuple below.
+    if !read_state(|s| native_xrp_recovery_can_adopt_marker(s, vault_id, &intent)) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let proofless_retry_eligible = proof.is_none()
+        && intent.burn_attempted == Some(true)
+        && intent.status == NativeXrpAbsorbIntentStatus::Prepared
+        && intent.backend_result.is_none();
+    if !proofless_retry_eligible
+        && intent.backend_result.is_none()
+        && !matches!(
+            intent.status,
+            NativeXrpAbsorbIntentStatus::Burned | NativeXrpAbsorbIntentStatus::BackendRejected
+        )
+    {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let marker_preexisted = read_state(|s| s.in_flight_liquidations.contains(&vault_id));
+    mutate_state(|s| {
+        s.in_flight_liquidations.insert(vault_id);
+    });
+
+    let recovery = async {
+        if proof.is_none() {
+            if intent.burn_attempted != Some(true)
+                || intent.status != NativeXrpAbsorbIntentStatus::Prepared
+                || intent.backend_result.is_some()
+            {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            // Reuse the persisted ICRC-1 identity. A committed first attempt
+            // returns Duplicate with its original block; if the first attempt
+            // had no effect, this exact tuple can safely become the one effect.
+            // TooOld and ambiguous replies remain held for admin history proof.
+            let recovered = crate::liquidation::burn_icusd_for_chain_writedown_with_account(
+                intent.icusd_ledger,
+                intent.icusd_minting_account,
+                intent.icusd_to_burn_e8s,
+                intent.vault_id,
+                intent.burn_created_at_time_ns,
+            )
+            .await
+            .map_err(|failure| failure.error)?;
+            let updated = mutate_state(|s| {
+                if s.get_pending_native_xrp_absorb(vault_id).as_ref() != Some(&intent)
+                    || s.get_pending_chain_absorb(vault_id).is_some()
+                {
+                    return Err(StabilityPoolError::LiquidationFailed {
+                        vault_id,
+                        reason: "pending native XRP snapshot changed during exact burn replay".into(),
+                    });
+                }
+                crate::liquidation::mark_native_xrp_absorb_burned_in_state(
+                    s, vault_id, recovered.clone(), ic_cdk::api::time(),
+                )
+            })?;
+            intent = updated;
+            proof = Some(recovered);
+        }
+        let proof = proof.clone().expect("proof replay or persisted proof checked");
+        let protocol_id = read_state(|s| s.protocol_canister_id);
+        let status = if let Some(result) = intent.backend_result.clone() {
+            rumi_protocol_backend::XrpSpAbsorbStatus::Accepted(result)
+        } else {
+            let request = crate::liquidation::native_xrp_request_from_intent(&intent, proof.clone());
+            let status_result: Result<
+                (Result<rumi_protocol_backend::XrpSpAbsorbStatus, rumi_protocol_backend::ProtocolError>,),
+                _,
+            > = ic_cdk::call(protocol_id, "stability_pool_xrp_absorb_status", (request,)).await;
+            match status_result {
+                Ok((Ok(status),)) => status,
+                Ok((Err(error),)) => {
+                    return Err(StabilityPoolError::LiquidationFailed {
+                        vault_id,
+                        reason: format!("backend could not resolve native XRP absorb status: {error:?}"),
+                    });
+                }
+                Err(_) => {
+                    return Err(StabilityPoolError::InterCanisterCallFailed {
+                        target: format!("{protocol_id}"),
+                        method: "stability_pool_xrp_absorb_status".to_string(),
+                    });
+                }
+            }
+        };
+        if read_state(|s| s.get_pending_native_xrp_absorb(vault_id)) != Some(intent.clone()) {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "pending native XRP intent changed during backend status lookup".to_string(),
+            });
+        }
+
+        match status {
+            rumi_protocol_backend::XrpSpAbsorbStatus::Accepted(result) => {
+                crate::liquidation::validate_xrp_absorb_backend_result(
+                    vault_id,
+                    intent.icusd_to_burn_e8s,
+                    intent.collateral_received_drops,
+                    &intent.allocations,
+                    &result,
+                )?;
+                let accepted = mutate_state(|s| {
+                    crate::liquidation::mark_native_xrp_absorb_backend_result_in_state(
+                        s, vault_id, result, ic_cdk::api::time(),
+                    )
+                })?;
+                mutate_state(|s| {
+                    crate::liquidation::apply_native_xrp_absorb_success_in_state_at(
+                        s, &accepted, ic_cdk::api::time(),
+                    )
+                })?;
+                Ok(())
+            }
+            rumi_protocol_backend::XrpSpAbsorbStatus::Unseen
+            | rumi_protocol_backend::XrpSpAbsorbStatus::RefundJournaled => {
+                let receipt = crate::liquidation::refund_and_verify_sp_burn(
+                    protocol_id,
+                    vault_id,
+                    intent.icusd_to_burn_e8s,
+                    intent.icusd_ledger,
+                    proof.clone(),
+                )
+                .await?;
+                if read_state(|s| s.get_pending_native_xrp_absorb(vault_id))
+                    != Some(intent.clone())
+                {
+                    return Err(StabilityPoolError::LiquidationFailed {
+                        vault_id,
+                        reason: "pending native XRP intent changed while verifying its refund".into(),
+                    });
+                }
+                let cleared = mutate_state(|s| {
+                    crate::liquidation::clear_refunded_native_xrp_absorb_in_state(s, &intent)
+                });
+                if !cleared {
+                    return Err(StabilityPoolError::LiquidationFailed {
+                        vault_id,
+                        reason: format!(
+                            "refund block {} verified but the exact native XRP intent could not be cleared",
+                            receipt.refund_block_index
+                        ),
+                    });
+                }
+                Ok(())
+            }
+            rumi_protocol_backend::XrpSpAbsorbStatus::ConsumedWithoutResult => {
+                mutate_state(|s| {
+                    crate::liquidation::mark_native_xrp_absorb_error_in_state(
+                        s,
+                        vault_id,
+                        NativeXrpAbsorbIntentStatus::Burned,
+                        "backend reports proof consumed without an exact absorb or refund result".to_string(),
+                        ic_cdk::api::time(),
+                    );
+                });
+                Err(StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "backend consumed this proof without an exact recoverable result; intent remains held".to_string(),
+                })
+            }
+        }
+    }
+    .await;
+
+    // A pre-upgrade marker remains held on every ambiguous result. A marker
+    // created by this recovery attempt is released on error because the retained
+    // matching native-XRP intent continues to fence the exact affected ledger(s).
+    let matching_intent_retained = read_state(|s| match intent.burn_proof.as_ref() {
+        Some(proof) => native_xrp_recovery_intent_still_retained(s, vault_id, &intent, proof),
+        None => s.get_pending_native_xrp_absorb(vault_id).as_ref() == Some(&intent),
+    });
+    mutate_state(|s| {
+        finish_native_xrp_recovery_marker(
+            s,
+            vault_id,
+            marker_preexisted,
+            recovery.is_ok(),
+            matching_intent_retained,
+        );
+    });
+    recovery
+}
+
+fn native_xrp_recovery_can_adopt_marker(
+    state: &crate::state::StabilityPoolState,
+    vault_id: u64,
+    intent: &NativeXrpAbsorbIntent,
+) -> bool {
+    intent.vault_id == vault_id
+        && (intent.burn_proof.is_some()
+            || (intent.burn_attempted == Some(true)
+                && intent.status == NativeXrpAbsorbIntentStatus::Prepared
+                && intent.backend_result.is_none()))
+        && state.collateral_requires_payout_address(&intent.collateral_type)
+        && state.get_pending_native_xrp_absorb(vault_id).as_ref() == Some(intent)
+        && state
+            .in_flight_liquidations
+            .iter()
+            .all(|in_flight_vault_id| *in_flight_vault_id == vault_id)
+}
+
+fn native_xrp_recovery_intent_still_retained(
+    state: &crate::state::StabilityPoolState,
+    vault_id: u64,
+    intent: &NativeXrpAbsorbIntent,
+    proof: &rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+) -> bool {
+    state
+        .get_pending_native_xrp_absorb(vault_id)
+        .is_some_and(|current| {
+            current.vault_id == intent.vault_id
+                && current.collateral_type == intent.collateral_type
+                && current.icusd_ledger == intent.icusd_ledger
+                && current.icusd_to_burn_e8s == intent.icusd_to_burn_e8s
+                && current.allocations == intent.allocations
+                && current.burn_proof.as_ref() == Some(proof)
+        })
+}
+
+fn finish_native_xrp_recovery_marker(
+    state: &mut crate::state::StabilityPoolState,
+    vault_id: u64,
+    marker_preexisted: bool,
+    terminal_result_committed: bool,
+    matching_intent_retained: bool,
+) {
+    if terminal_result_committed || (!marker_preexisted && matching_intent_retained) {
+        state.in_flight_liquidations.remove(&vault_id);
+    }
+}
+
+fn setup_native_xrp_burn_recovery_timer() {
+    ic_cdk_timers::set_timer_interval(
+        Duration::from_secs(NATIVE_XRP_BURN_RECOVERY_POLL_SECONDS),
+        || {
+            ic_cdk::spawn(async {
+                let mut ids = read_state(|state| {
+                    state
+                        .pending_native_xrp_absorbs()
+                        .into_iter()
+                        .filter(|intent| {
+                            (intent.burn_proof.is_some()
+                                && (intent.backend_result.is_some()
+                                    || matches!(
+                                        intent.status,
+                                        NativeXrpAbsorbIntentStatus::Burned
+                                            | NativeXrpAbsorbIntentStatus::BackendRejected
+                                    )))
+                                || (intent.burn_proof.is_none()
+                                    && intent.burn_attempted == Some(true)
+                                    && intent.status == NativeXrpAbsorbIntentStatus::Prepared
+                                    && intent.backend_result.is_none())
+                        })
+                        .map(|intent| intent.vault_id)
+                        .collect::<Vec<_>>()
+                });
+                ids.sort_unstable();
+                let cursor = NATIVE_XRP_BURN_RECOVERY_CURSOR.with(Cell::get);
+                let mut batch = ids
+                    .iter()
+                    .copied()
+                    .filter(|id| *id > cursor)
+                    .take(NATIVE_XRP_BURN_RECOVERY_MAX_PER_TICK)
+                    .collect::<Vec<_>>();
+                if batch.len() < NATIVE_XRP_BURN_RECOVERY_MAX_PER_TICK {
+                    batch.extend(
+                        ids.iter()
+                            .copied()
+                            .filter(|id| *id <= cursor)
+                            .take(NATIVE_XRP_BURN_RECOVERY_MAX_PER_TICK - batch.len()),
+                    );
+                }
+                for vault_id in batch {
+                    NATIVE_XRP_BURN_RECOVERY_CURSOR.with(|value| value.set(vault_id));
+                    if let Err(error) =
+                        reconcile_pending_native_xrp_absorb_from_status(vault_id).await
+                    {
+                        log!(
+                            INFO,
+                            "native XRP burn recovery {} remains pending: {:?}",
+                            vault_id,
+                            error
+                        );
+                    }
+                }
+            });
+        },
+    );
+}
+
 fn setup_unallocated_interest_forward_retry_timer() {
     ic_cdk_timers::set_timer_interval(
         Duration::from_secs(UNALLOCATED_INTEREST_FORWARD_RETRY_SECONDS),
@@ -245,6 +839,83 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
     crate::deposits::deposit(token_ledger, amount).await
 }
 
+/// Test-only seam for exercising an unresolved dispatched deposit against the
+/// official ledger. Production Wasm and the public Candid service omit it.
+#[cfg(feature = "test_endpoints")]
+#[update]
+pub fn test_seed_unresolved_deposit_intent(
+    token_ledger: Principal,
+    amount: u64,
+    created_at_override: Option<u64>,
+) -> Result<u64, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    let timestamp = mutate_state(|state| {
+        state.begin_deposit_intent(caller, token_ledger, amount, ic_cdk::api::time())
+    })
+    .map_err(|_| StabilityPoolError::LedgerTransferFailed {
+        reason: "could not seed test deposit intent".to_string(),
+    })?;
+    if let Some(created_at_time_ns) = created_at_override {
+        mutate_state(|state| {
+            if let Some(intent) = state
+                .pending_deposit_intents
+                .as_mut()
+                .and_then(|intents| intents.get_mut(&caller))
+            {
+                intent.transfer_created_at_time_ns = created_at_time_ns;
+            }
+        });
+        Ok(created_at_time_ns)
+    } else {
+        Ok(timestamp)
+    }
+}
+
+/// Test-only counterpart of the production typed-TooOld journal update.
+#[cfg(feature = "test_endpoints")]
+#[update]
+pub fn test_mark_deposit_intent_too_old(
+    token_ledger: Principal,
+    amount: u64,
+    transfer_created_at_time_ns: u64,
+) -> bool {
+    mutate_state(|state| {
+        state.mark_deposit_intent_too_old(
+            ic_cdk::api::caller(),
+            token_ledger,
+            amount,
+            transfer_created_at_time_ns,
+        )
+    })
+}
+
+/// Return only the caller's unresolved deposit identity and recovery progress.
+#[query]
+pub fn get_pending_deposit_intent() -> Option<PendingDepositIntent> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return None;
+    }
+    read_state(|state| {
+        state
+            .pending_deposit_intents
+            .as_ref()
+            .and_then(|intents| intents.get(&caller).cloned())
+    })
+}
+
+/// Attach an exact ICRC-3 transfer_from receipt to the caller's pending deposit.
+#[update]
+pub async fn reconcile_pending_deposit(block_index: u64) -> Result<(), StabilityPoolError> {
+    crate::deposits::reconcile_pending_deposit(block_index).await
+}
+
+/// Scan one bounded page of the caller's ledger history after typed TooOld.
+#[update]
+pub async fn reconcile_pending_deposit_history() -> Result<(), StabilityPoolError> {
+    crate::deposits::reconcile_pending_deposit_history().await
+}
+
 #[update]
 pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
     crate::deposits::withdraw(token_ledger, amount).await
@@ -260,8 +931,58 @@ pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, Stabilit
     crate::deposits::claim_all_collateral().await
 }
 
-/// Convenience: deposit a stablecoin (icUSD, ckUSDT, ckUSDC) and have the pool
-/// mint 3USD on the user's behalf by depositing into the 3pool.
+/// Return this caller's unresolved outbound payouts, including their exact
+/// ledger tuple. This is a read-only recovery/status surface; absence from this
+/// list never proves a transfer did not occur.
+#[query]
+pub fn get_pending_outbound_payouts() -> Vec<PendingOutboundPayoutStatus> {
+    let caller = ic_cdk::api::caller();
+    read_state(|s| s.pending_outbound_payouts_for(&caller))
+}
+
+/// Resolve an ambiguous outbound payout only from an exact ICRC-3 transfer
+/// receipt. Missing blocks, archive failures, and nonmatching blocks leave the
+/// durable row held; this endpoint never infers no effect from absence.
+#[update]
+pub async fn reconcile_pending_outbound_payout(
+    ledger: Principal,
+    block_index: u64,
+) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    ensure_outbound_retry_allowed(ledger, caller)?;
+    let existing = read_state(|s| s.pending_outbound_payout(&caller, &ledger))
+        .ok_or(StabilityPoolError::SystemBusy)?;
+    if existing.dispatch_in_flight {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let payout = mutate_state(|s| s.begin_outbound_payout_retry(caller, ledger))?;
+
+    let proof = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(ledger, block_index).await;
+    let proof = match proof {
+        Ok(block) => block,
+        Err(reason) => {
+            mutate_state(|s| s.mark_outbound_payout_ambiguous(caller, ledger, reason.clone()));
+            return Err(StabilityPoolError::LedgerTransferFailed { reason });
+        }
+    };
+    if let Err(reason) =
+        validate_outbound_payout_receipt(&proof, caller, ic_cdk::api::id(), &payout)
+    {
+        mutate_state(|s| s.mark_outbound_payout_ambiguous(caller, ledger, reason.clone()));
+        return Err(StabilityPoolError::LedgerTransferFailed { reason });
+    }
+
+    let completed =
+        mutate_state(|s| s.complete_outbound_payout(caller, ledger, ic_cdk::api::time()));
+    if completed {
+        Ok(())
+    } else {
+        Err(StabilityPoolError::SystemBusy)
+    }
+}
+
+/// Temporarily fail-closed: 3pool add-liquidity lacks a durable receipt, so this
+/// endpoint returns a typed error before pulling any input tokens.
 #[update]
 pub async fn deposit_as_3usd(
     token_ledger: Principal,
@@ -276,6 +997,24 @@ pub async fn deposit_as_3usd(
 #[update]
 pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolError> {
     crate::deposits::claim_pending_refund(refund_id).await
+}
+
+/// Attach an exact ledger receipt to a pending refund after an ambiguous call.
+/// This is evidence-only: it never emits a transfer.
+#[update]
+pub async fn reconcile_pending_refund(
+    refund_id: u64,
+    block_index: u64,
+) -> Result<u64, StabilityPoolError> {
+    crate::deposits::reconcile_pending_refund(refund_id, block_index).await
+}
+
+/// Advance one bounded archive-aware scan page after a typed TooOld response.
+/// A fresh tuple is enabled only after the full configured icUSD prefix proves
+/// no exact payout block exists.
+#[update]
+pub async fn reconcile_pending_refund_history(refund_id: u64) -> Result<(), StabilityPoolError> {
+    crate::deposits::reconcile_pending_refund_history(refund_id).await
 }
 
 #[update]
@@ -299,6 +1038,108 @@ pub fn recredit_failed_cfx_claim_payout(
     mutate_state(|s| {
         crate::liquidation::recredit_failed_cfx_claim_payout_in_state_at(s, recovery, now)
     })
+}
+
+/// Resume one existing 3USD absorb using operator-discovered receipt block
+/// indices. Every candidate is bound to the immutable journal/backend child;
+/// callers cannot supply accounts, amounts, memos, or transfer tuples.
+#[update]
+pub async fn recover_three_usd_absorb_v2(
+    absorb_id: u64,
+    approval_candidate_block_index: Option<u64>,
+    ingress_candidate_block_index: Option<u64>,
+    refund_candidate_block_index: Option<u64>,
+) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let row = read_state(|state| {
+        state
+            .pending_sp_three_usd_absorbs
+            .as_ref()
+            .and_then(|rows| rows.get(&absorb_id))
+            .cloned()
+    });
+    let Some(row) = row else {
+        return if read_state(|state| {
+            state
+                .completed_sp_three_usd_absorbs
+                .as_ref()
+                .and_then(|rows| rows.get(&absorb_id))
+                .is_some_and(|row| row.phase == SpThreeUsdAbsorbPhase::Complete)
+        }) {
+            Ok(())
+        } else {
+            Err(StabilityPoolError::SystemBusy)
+        };
+    };
+    if row.absorb_id != absorb_id || row.stability_pool != ic_cdk::api::id() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+
+    if row.approval_receipt_block_index.is_none() {
+        if let Some(block_index) = approval_candidate_block_index {
+            crate::three_usd_v2::prove_three_usd_approval_candidate(absorb_id, block_index).await?;
+        } else if row.approval_dispatch_may_have_happened {
+            return Err(StabilityPoolError::SystemBusy);
+        } else {
+            crate::three_usd_v2::submit_three_usd_approval(absorb_id).await?;
+        }
+    } else if approval_candidate_block_index
+        .is_some_and(|candidate| row.approval_receipt_block_index != Some(candidate))
+    {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+
+    // The backend journals this exact identity and tuple before it can pull.
+    // A reply error is ambiguous, so continue only to receipt reconciliation;
+    // never roll back the durable SP row or allocate from this return value.
+    let backend_result = crate::three_usd_v2::dispatch_three_usd_absorb(absorb_id).await;
+    if let Some(block_index) = ingress_candidate_block_index {
+        let protocol = row.protocol_canister_id;
+        let (result,): (Result<(), rumi_protocol_backend::ProtocolError>,) = ic_cdk::call(
+            protocol,
+            "attach_my_three_usd_reserve_ingress_v2_candidate",
+            (row.vault_id, row.absorb_id, block_index),
+        )
+        .await
+        .map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+            target: protocol.to_text(),
+            method: "attach_my_three_usd_reserve_ingress_v2_candidate".into(),
+        })?;
+        result.map_err(|_| StabilityPoolError::SystemBusy)?;
+    }
+    if let Some(block_index) = refund_candidate_block_index {
+        let protocol = row.protocol_canister_id;
+        let (result,): (Result<(), rumi_protocol_backend::ProtocolError>,) = ic_cdk::call(
+            protocol,
+            "attach_my_three_usd_reserve_ingress_v2_refund_candidate",
+            (row.vault_id, row.absorb_id, block_index),
+        )
+        .await
+        .map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+            target: protocol.to_text(),
+            method: "attach_my_three_usd_reserve_ingress_v2_refund_candidate".into(),
+        })?;
+        result.map_err(|_| StabilityPoolError::SystemBusy)?;
+    }
+
+    match crate::three_usd_v2::reconcile_three_usd_absorb(absorb_id).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if let Err(dispatch_error) = backend_result {
+                log!(
+                    INFO,
+                    "3USD absorb {} remains held after backend dispatch {:?} and status reconciliation {:?}",
+                    absorb_id,
+                    dispatch_error,
+                    error
+                );
+            }
+            Err(error)
+        }
+    }
 }
 
 // ─── Opt-in / Opt-out ───
@@ -527,6 +1368,54 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
     crate::liquidation::execute_liquidation(vault_id).await
 }
 
+/// Backend admission guard for the legacy V1 in-flight marker. The marker is
+/// stable state and survives upgrade; a V2 backend must recheck it immediately
+/// before any stable pull. Only the configured protocol backend may inspect it.
+#[update]
+pub fn has_legacy_liquidation_in_flight(vault_id: u64) -> Result<bool, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller != read_state(|state| state.protocol_canister_id) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    Ok(read_state(|state| {
+        state.in_flight_liquidations.contains(&vault_id)
+    }))
+}
+
+/// Execute an additive receipt-backed liquidation using one selected stable
+/// ledger and a caller-supplied maximum raw principal spend.
+#[update]
+pub async fn execute_liquidation_v2(
+    vault_id: u64,
+    token: SpLiquidationToken,
+    max_principal_pull_raw: u64,
+) -> Result<u64, StabilityPoolError> {
+    crate::liquidation::execute_liquidation_v2(vault_id, token, max_principal_pull_raw).await
+}
+
+#[update]
+pub async fn retry_sp_liquidation_v2(request_id: u64) -> Result<(), StabilityPoolError> {
+    crate::liquidation::retry_sp_liquidation_v2(request_id).await
+}
+
+#[update]
+pub async fn reconcile_sp_liquidation_v2_approval(
+    request_id: u64,
+    block_index: u64,
+) -> Result<(), StabilityPoolError> {
+    crate::liquidation::reconcile_sp_liquidation_v2_approval(request_id, block_index).await
+}
+
+#[update]
+pub async fn reconcile_sp_liquidation_v2_stable_pull(
+    request_id: u64,
+    vault_id: u64,
+    block_index: u64,
+) -> Result<(), StabilityPoolError> {
+    crate::liquidation::reconcile_sp_liquidation_v2_stable_pull(request_id, vault_id, block_index)
+        .await
+}
+
 #[update]
 pub async fn sp_absorb_chain_vault(
     vault_id: u64,
@@ -570,60 +1459,29 @@ pub fn get_chain_absorb_auto_status() -> ChainAbsorbAutoStatus {
 
 // ─── Interest Revenue ───
 
-/// Receive interest revenue from the protocol backend and distribute pro-rata to depositors.
-/// Only callable by the protocol canister.
+/// Legacy notification entry point retained for Candid compatibility.
 ///
-/// `collateral_type` identifies which collateral's vault generated the interest.
-/// Depositors who opted out of that collateral are excluded from the distribution.
-/// The parameter is optional for backward compatibility with older backend versions.
+/// It cannot safely credit interest because it has no source mint block for
+/// replay protection. The backend must use `receive_interest_revenue_v2`.
 #[update]
 pub fn receive_interest_revenue(
-    token_ledger: Principal,
-    amount: u64,
-    collateral_type: Option<Principal>,
+    _token_ledger: Principal,
+    _amount: u64,
+    _collateral_type: Option<Principal>,
 ) -> Result<(), StabilityPoolError> {
     let caller = ic_cdk::api::caller();
     let expected = read_state(|s| s.protocol_canister_id);
     if caller != expected {
         return Err(StabilityPoolError::Unauthorized);
     }
-    ensure_pool_balance_mutation_allowed()?;
-
-    if read_state(|s| s.configuration.emergency_pause) {
-        return Err(StabilityPoolError::EmergencyPaused);
-    }
-
-    if !read_state(|s| s.stablecoin_registry.contains_key(&token_ledger)) {
-        return Err(StabilityPoolError::TokenNotAccepted {
-            ledger: token_ledger,
-        });
-    }
-
-    mutate_state(|s| {
-        s.distribute_interest_revenue(token_ledger, amount, collateral_type);
-        s.push_event(
-            caller,
-            PoolEventType::InterestReceived {
-                token_ledger,
-                amount,
-            },
-        );
-    });
-
-    log!(
-        INFO,
-        "Distributed {} interest for token {} (collateral: {:?}) from backend",
-        amount,
-        token_ledger,
-        collateral_type
-    );
-    Ok(())
+    Err(StabilityPoolError::SystemBusy)
 }
 
 /// V2 interest notification carries the backend mint block, which supplies a
 /// durable source receipt for the no-eligible-recipient treasury route. The
-/// legacy V1 method above remains available during rollout but deliberately
-/// retains its original distribution-only behavior because it lacks that key.
+/// legacy V1 method above remains signature-compatible but fails closed because
+/// it lacks that key. The backend must use V2 before interest notifications
+/// can be acknowledged by this pool.
 #[update]
 pub async fn receive_interest_revenue_v2(
     token_ledger: Principal,
@@ -646,22 +1504,68 @@ pub async fn receive_interest_revenue_v2(
         });
     }
 
-    if read_state(|s| s.has_eligible_interest_recipient(collateral_type.as_ref())) {
-        mutate_state(|s| {
-            s.distribute_interest_revenue(token_ledger, amount, collateral_type);
-            s.push_event(
-                caller,
-                PoolEventType::InterestReceived {
-                    token_ledger,
-                    amount,
-                },
-            );
+    let receipt = state::InterestMintReceiptPayload {
+        token_ledger,
+        amount,
+        collateral_type,
+    };
+    match read_state(|s| s.interest_mint_receipt_status(source_mint_block, &receipt)) {
+        state::InterestMintReceiptStatus::PendingForward(batch_id) => {
+            return process_unallocated_interest_forward(batch_id).await;
+        }
+        state::InterestMintReceiptStatus::Duplicate => return Ok(()),
+        state::InterestMintReceiptStatus::PayloadMismatch => {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        state::InterestMintReceiptStatus::OutsideReplayWindow => {
+            // Keep the backend's durable notification pending. A stale receipt
+            // must never be acknowledged as a new distribution.
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        state::InterestMintReceiptStatus::New => {}
+    }
+
+    // Interest is an icUSD mint stream. Registration alone does not make a
+    // different stablecoin or LP token an eligible interest asset.
+    if !read_state(|s| {
+        s.icusd_ledger() == Some(token_ledger)
+            && s.stablecoin_registry
+                .get(&token_ledger)
+                .is_some_and(|config| config.decimals == 8)
+    }) {
+        return Err(StabilityPoolError::TokenNotAccepted {
+            ledger: token_ledger,
         });
-        return Ok(());
+    }
+
+    if read_state(|s| s.has_eligible_interest_recipient(collateral_type.as_ref())) {
+        return match mutate_state(|s| {
+            // Preflight before recording. If overflow is detected, the receipt
+            // remains unconsumed so the backend can hold it for reconciliation.
+            s.validate_interest_distribution_overflow(token_ledger, amount, collateral_type)?;
+            match s.record_interest_mint_receipt(source_mint_block, receipt.clone()) {
+                state::InterestMintReceiptStatus::New => {
+                    s.distribute_interest_revenue(token_ledger, amount, collateral_type);
+                    s.push_event(
+                        caller,
+                        PoolEventType::InterestReceived {
+                            token_ledger,
+                            amount,
+                        },
+                    );
+                    Ok(())
+                }
+                state::InterestMintReceiptStatus::Duplicate => Ok(()),
+                _ => Err(StabilityPoolError::SystemBusy),
+            }
+        }) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(error),
+        };
     }
 
     let batch_id = mutate_state(|s| {
-        s.queue_unallocated_interest_forward(source_mint_block, token_ledger, amount)
+        s.queue_interest_forward_with_receipt(source_mint_block, receipt.clone())
     })?;
     process_unallocated_interest_forward(batch_id).await
 }
@@ -849,6 +1753,63 @@ pub fn get_pending_refunds(user: Option<Principal>) -> Vec<PendingRefund> {
     read_state(|s| s.pending_refunds_for(&target))
 }
 
+/// Credit a protocol-paid refund fee reserve from an exact admin funding
+/// transfer. The caller first transfers `amount` from its default account to
+/// the pool's default account, then supplies the ICRC-3 receipt tuple.
+#[update]
+pub async fn fund_pending_refund_fee_reserve(
+    ledger: Principal,
+    amount: u64,
+    funding_block_index: u64,
+    created_at_time_ns: u64,
+    memo: Vec<u8>,
+) -> Result<u64, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    if amount == 0 {
+        return Err(StabilityPoolError::AmountTooLow { minimum_e8s: 1 });
+    }
+    if !read_state(|s| s.stablecoin_registry.contains_key(&ledger)) {
+        return Err(StabilityPoolError::TokenNotAccepted { ledger });
+    }
+    let source = icrc_ledger_types::icrc1::account::Account {
+        owner: caller,
+        subaccount: None,
+    };
+    let destination = icrc_ledger_types::icrc1::account::Account {
+        owner: ic_cdk::id(),
+        subaccount: None,
+    };
+    rumi_protocol_backend::icrc3_proof::verify_icrc3_direct_transfer_block(
+        ledger,
+        funding_block_index,
+        source,
+        destination,
+        amount,
+        Some(&memo),
+        Some(created_at_time_ns),
+    )
+    .await
+    .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+        reason: format!("refund fee funding receipt did not verify: {reason}"),
+    })?;
+    let balance = mutate_state(|s| {
+        s.credit_pending_refund_fee_reserve(ledger, funding_block_index, amount)
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: reason.to_string(),
+            })?;
+        Ok::<u64, StabilityPoolError>(
+            s.pending_refund_fee_reserves
+                .as_ref()
+                .and_then(|reserves| reserves.get(&ledger).copied())
+                .unwrap_or(0),
+        )
+    })?;
+    Ok(balance)
+}
+
 /// Durable no-recipient interest routes that still need a ledger transfer or
 /// treasury bookkeeping acknowledgement. Public for transparent operations.
 #[query]
@@ -934,8 +1895,8 @@ async fn compute_ledger_reconciliation() -> Vec<LedgerReconciliationEntry> {
 /// before it blocks withdrawals. Admin-gated because it triggers one
 /// inter-canister balance query per token.
 #[update]
-pub async fn get_ledger_reconciliation() -> Result<Vec<LedgerReconciliationEntry>, StabilityPoolError>
-{
+pub async fn get_ledger_reconciliation(
+) -> Result<Vec<LedgerReconciliationEntry>, StabilityPoolError> {
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1407,14 +2368,734 @@ pub fn admin_correct_collateral_gain(
     Ok(msg)
 }
 
+const MAX_PENDING_ICUSD_BURN_HISTORY_BLOCKS: u64 = 8;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PendingIcusdBurnIntentSnapshot {
+    Chain(ChainSpAbsorbIntent),
+    NativeXrp(NativeXrpAbsorbIntent),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingBurnReconciliationPhase {
+    Prepared,
+    Burned,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PendingBurnHistoryScanError {
+    InvalidRange,
+    RangePastLedgerTip { end_exclusive: u64, log_length: u64 },
+    IncompleteAt { block_index: u64, reason: String },
+    MultipleMatches,
+}
+
+/// Exact positive ledger proof may resolve legacy attempts whose dispatch marker
+/// is missing, but a known no-dispatch marker, advanced phase, or competing
+/// result/proof must never be overwritten.
+fn pending_burn_reconciliation_eligible(
+    attempted: Option<bool>,
+    phase: PendingBurnReconciliationPhase,
+    existing_proof: Option<&rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
+    backend_result_exists: bool,
+    requested_proof: &rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+) -> bool {
+    if attempted == Some(false) {
+        return false;
+    }
+    // Exact proof read-back is safe in every later phase, including a backend
+    // rejection followed by refund reconciliation. It must not rewrite phase.
+    if existing_proof == Some(requested_proof) {
+        return true;
+    }
+    if existing_proof.is_some() {
+        return false;
+    }
+    phase == PendingBurnReconciliationPhase::Prepared && !backend_result_exists
+}
+
+fn burn_snapshot_matches<T: PartialEq>(
+    expected: &T,
+    current: Option<&T>,
+    competing_intent_exists: bool,
+) -> bool {
+    !competing_intent_exists && current == Some(expected)
+}
+
+fn pending_burn_history_scan_eligible(
+    attempted: Option<bool>,
+    phase: PendingBurnReconciliationPhase,
+    has_proof: bool,
+    backend_result_exists: bool,
+) -> bool {
+    attempted != Some(false)
+        && phase == PendingBurnReconciliationPhase::Prepared
+        && !has_proof
+        && !backend_result_exists
+}
+
+fn capture_pending_icusd_burn(
+    vault_id: u64,
+) -> Result<PendingIcusdBurnIntentSnapshot, StabilityPoolError> {
+    read_state(|s| {
+        match (
+            s.get_pending_chain_absorb(vault_id),
+            s.get_pending_native_xrp_absorb(vault_id),
+        ) {
+            (Some(chain), None) => Ok(PendingIcusdBurnIntentSnapshot::Chain(chain)),
+            (None, Some(xrp)) => Ok(PendingIcusdBurnIntentSnapshot::NativeXrp(xrp)),
+            _ => Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "expected exactly one pending chain or native XRP absorb intent"
+                    .to_string(),
+            }),
+        }
+    })
+}
+
+fn pending_burn_identity(
+    pending: &PendingIcusdBurnIntentSnapshot,
+) -> (
+    Principal,
+    u64,
+    icrc_ledger_types::icrc1::account::Account,
+    u64,
+) {
+    match pending {
+        PendingIcusdBurnIntentSnapshot::Chain(intent) => (
+            intent.icusd_ledger,
+            intent.icusd_to_burn_e8s,
+            intent.icusd_minting_account,
+            intent.burn_created_at_time_ns,
+        ),
+        PendingIcusdBurnIntentSnapshot::NativeXrp(intent) => (
+            intent.icusd_ledger,
+            intent.icusd_to_burn_e8s,
+            intent.icusd_minting_account,
+            intent.burn_created_at_time_ns,
+        ),
+    }
+}
+
+fn pending_burn_is_eligible(
+    pending: &PendingIcusdBurnIntentSnapshot,
+    requested_proof: &rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+) -> bool {
+    match pending {
+        PendingIcusdBurnIntentSnapshot::Chain(intent) => pending_burn_reconciliation_eligible(
+            intent.burn_attempted,
+            match intent.status {
+                ChainSpAbsorbIntentStatus::Prepared => PendingBurnReconciliationPhase::Prepared,
+                ChainSpAbsorbIntentStatus::Burned => PendingBurnReconciliationPhase::Burned,
+                _ => PendingBurnReconciliationPhase::Other,
+            },
+            intent.burn_proof.as_ref(),
+            intent.backend_result.is_some(),
+            requested_proof,
+        ),
+        PendingIcusdBurnIntentSnapshot::NativeXrp(intent) => pending_burn_reconciliation_eligible(
+            intent.burn_attempted,
+            match intent.status {
+                NativeXrpAbsorbIntentStatus::Prepared => PendingBurnReconciliationPhase::Prepared,
+                NativeXrpAbsorbIntentStatus::Burned => PendingBurnReconciliationPhase::Burned,
+                _ => PendingBurnReconciliationPhase::Other,
+            },
+            intent.burn_proof.as_ref(),
+            intent.backend_result.is_some(),
+            requested_proof,
+        ),
+    }
+}
+
+/// Commit only against the exact full intent captured before any await. The
+/// equality includes phase, proof, backend result, error, timestamps, and all
+/// immutable burn-plan fields, preventing same-tuple phase races.
+fn commit_pending_icusd_burn_reconciliation(
+    vault_id: u64,
+    expected: PendingIcusdBurnIntentSnapshot,
+    proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+) -> Result<(), StabilityPoolError> {
+    mutate_state(|s| match expected {
+        PendingIcusdBurnIntentSnapshot::Chain(expected) => {
+            let current = s.get_pending_chain_absorb(vault_id);
+            if !burn_snapshot_matches(
+                &expected,
+                current.as_ref(),
+                s.get_pending_native_xrp_absorb(vault_id).is_some(),
+            ) {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "pending chain absorb full snapshot changed during burn reconciliation"
+                        .to_string(),
+                });
+            }
+            let current = current.expect("snapshot comparator established presence");
+            if !pending_burn_is_eligible(
+                &PendingIcusdBurnIntentSnapshot::Chain(current.clone()),
+                &proof,
+            ) {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "pending chain absorb is no longer eligible for burn reconciliation"
+                        .to_string(),
+                });
+            }
+            if current.burn_proof.as_ref() == Some(&proof) {
+                return Ok(()); // verified same proof; preserve the advanced phase
+            }
+            crate::liquidation::mark_chain_absorb_burned_in_state(
+                s,
+                vault_id,
+                proof,
+                ic_cdk::api::time(),
+            )?;
+            Ok(())
+        }
+        PendingIcusdBurnIntentSnapshot::NativeXrp(expected) => {
+            let current = s.get_pending_native_xrp_absorb(vault_id);
+            if !burn_snapshot_matches(
+                &expected,
+                current.as_ref(),
+                s.get_pending_chain_absorb(vault_id).is_some(),
+            ) {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason:
+                        "pending native XRP absorb full snapshot changed during burn reconciliation"
+                            .to_string(),
+                });
+            }
+            let current = current.expect("snapshot comparator established presence");
+            if !pending_burn_is_eligible(
+                &PendingIcusdBurnIntentSnapshot::NativeXrp(current.clone()),
+                &proof,
+            ) {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason:
+                        "pending native XRP absorb is no longer eligible for burn reconciliation"
+                            .to_string(),
+                });
+            }
+            if current.burn_proof.as_ref() == Some(&proof) {
+                return Ok(()); // verified same proof; preserve the advanced phase
+            }
+            crate::liquidation::mark_native_xrp_absorb_burned_in_state(
+                s,
+                vault_id,
+                proof,
+                ic_cdk::api::time(),
+            )?;
+            Ok(())
+        }
+    })
+}
+
+async fn scan_icusd_burn_history<F, Fut>(
+    start: u64,
+    length: u64,
+    log_length: u64,
+    sp_principal: Principal,
+    minting_account: icrc_ledger_types::icrc1::account::Account,
+    amount_e8s: u64,
+    vault_id: u64,
+    created_at_time_ns: u64,
+    mut fetch_block: F,
+) -> Result<Option<u64>, PendingBurnHistoryScanError>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<rumi_protocol_backend::icrc3_proof::DecodedBlock, String>,
+    >,
+{
+    let end_exclusive = start
+        .checked_add(length)
+        .ok_or(PendingBurnHistoryScanError::InvalidRange)?;
+    if length == 0 || length > MAX_PENDING_ICUSD_BURN_HISTORY_BLOCKS {
+        return Err(PendingBurnHistoryScanError::InvalidRange);
+    }
+    if end_exclusive > log_length {
+        return Err(PendingBurnHistoryScanError::RangePastLedgerTip {
+            end_exclusive,
+            log_length,
+        });
+    }
+
+    let mut found = None;
+    for index in start..end_exclusive {
+        let block = fetch_block(index).await.map_err(|reason| {
+            PendingBurnHistoryScanError::IncompleteAt {
+                block_index: index,
+                reason,
+            }
+        })?;
+        if crate::liquidation::validate_icusd_burn_reconciliation_block(
+            &block,
+            sp_principal,
+            minting_account,
+            amount_e8s,
+            vault_id,
+            created_at_time_ns,
+        )
+        .is_ok()
+        {
+            if found.replace(index).is_some() {
+                return Err(PendingBurnHistoryScanError::MultipleMatches);
+            }
+        }
+    }
+    Ok(found)
+}
+
+fn pending_burn_history_error(
+    vault_id: u64,
+    error: PendingBurnHistoryScanError,
+) -> StabilityPoolError {
+    let reason = match error {
+        PendingBurnHistoryScanError::InvalidRange => format!(
+            "invalid icUSD burn history range; length must be 1..={MAX_PENDING_ICUSD_BURN_HISTORY_BLOCKS} and end must not overflow"
+        ),
+        PendingBurnHistoryScanError::RangePastLedgerTip { end_exclusive, log_length } => format!(
+            "icUSD burn history range is incomplete: end {end_exclusive} exceeds ledger log_length {log_length}"
+        ),
+        PendingBurnHistoryScanError::IncompleteAt { block_index, reason } => format!(
+            "icUSD burn history scan is incomplete at block {block_index} (ledger/archive lookup failed: {reason}); no state changed"
+        ),
+        PendingBurnHistoryScanError::MultipleMatches =>
+            "icUSD burn history range contains multiple exact matches; no state changed".to_string(),
+    };
+    StabilityPoolError::LiquidationFailed { vault_id, reason }
+}
+
+fn authorize_icusd_burn_reconciliation(vault_id: u64) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    if vault_id == 0 {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "vault id must be nonzero".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Attach an independently verified icUSD burn block to a pending chain or
+/// native-XRP absorb whose original ledger reply was lost. Admin-only; the
+/// complete intent snapshot must still match after the ledger query.
+#[update]
+pub async fn reconcile_pending_icusd_burn(
+    vault_id: u64,
+    burn_block_index: u64,
+) -> Result<(), StabilityPoolError> {
+    authorize_icusd_burn_reconciliation(vault_id)?;
+    // Serialize recovery with liquidation replay after upgrades. The durable
+    // pending intent remains the upgrade-safe balance-mutation fence.
+    let _liquidation_guard = crate::pool_guard::SpLiquidationGuard::new()?;
+    let expected = capture_pending_icusd_burn(vault_id)?;
+    let proof = crate::liquidation::build_icusd_burn_proof(burn_block_index, vault_id);
+    if !pending_burn_is_eligible(&expected, &proof) {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "pending burn is not in an unresolved reconciliation phase".to_string(),
+        });
+    }
+    let (ledger, amount, minting_account, created_at_time_ns) = pending_burn_identity(&expected);
+    let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(ledger, burn_block_index)
+        .await
+        .map_err(|reason| StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: format!("supplied burn block could not be decoded: {reason}"),
+        })?;
+    crate::liquidation::validate_icusd_burn_reconciliation_block(
+        &block,
+        ic_cdk::id(),
+        minting_account,
+        amount,
+        vault_id,
+        created_at_time_ns,
+    )
+    .map_err(|reason| StabilityPoolError::LiquidationFailed {
+        vault_id,
+        reason: format!("supplied burn block failed exact ledger verification: {reason}"),
+    })?;
+    commit_pending_icusd_burn_reconciliation(vault_id, expected, proof)
+}
+
+/// Search a caller-supplied bounded range for a lost-reply burn. Every index
+/// is fetched exactly once through the existing ICRC-3 direct/archive resolver.
+/// Only one exact match across the fully fetched range is attached. A complete
+/// range with no match returns an error that explicitly limits absence to that
+/// range; it never clears/reissues the burn. Any gap, malformed block, or
+/// archive failure is incomplete and leaves the pending intent unchanged.
+#[update]
+pub async fn scan_pending_icusd_burn_history(
+    vault_id: u64,
+    start: u64,
+    length: u64,
+) -> Result<u64, StabilityPoolError> {
+    authorize_icusd_burn_reconciliation(vault_id)?;
+    let _liquidation_guard = crate::pool_guard::SpLiquidationGuard::new()?;
+    if length == 0
+        || length > MAX_PENDING_ICUSD_BURN_HISTORY_BLOCKS
+        || start.checked_add(length).is_none()
+    {
+        return Err(pending_burn_history_error(
+            vault_id,
+            PendingBurnHistoryScanError::InvalidRange,
+        ));
+    }
+    let expected = capture_pending_icusd_burn(vault_id)?;
+    let (ledger, amount, minting_account, created_at_time_ns) = pending_burn_identity(&expected);
+    let history_scan_eligible = match &expected {
+        PendingIcusdBurnIntentSnapshot::Chain(i) => pending_burn_history_scan_eligible(
+            i.burn_attempted,
+            match i.status {
+                ChainSpAbsorbIntentStatus::Prepared => PendingBurnReconciliationPhase::Prepared,
+                ChainSpAbsorbIntentStatus::Burned => PendingBurnReconciliationPhase::Burned,
+                _ => PendingBurnReconciliationPhase::Other,
+            },
+            i.burn_proof.is_some(),
+            i.backend_result.is_some(),
+        ),
+        PendingIcusdBurnIntentSnapshot::NativeXrp(i) => pending_burn_history_scan_eligible(
+            i.burn_attempted,
+            match i.status {
+                NativeXrpAbsorbIntentStatus::Prepared => PendingBurnReconciliationPhase::Prepared,
+                NativeXrpAbsorbIntentStatus::Burned => PendingBurnReconciliationPhase::Burned,
+                _ => PendingBurnReconciliationPhase::Other,
+            },
+            i.burn_proof.is_some(),
+            i.backend_result.is_some(),
+        ),
+    };
+    if !history_scan_eligible {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "pending burn is not an unresolved prepared attempt for history discovery"
+                .to_string(),
+        });
+    }
+
+    let log_length = rumi_protocol_backend::icrc3_proof::icrc3_log_length(ledger)
+        .await
+        .map_err(|reason| StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: format!("icUSD history log_length query failed: {reason}; no state changed"),
+        })?;
+
+    let matched = scan_icusd_burn_history(
+        start,
+        length,
+        log_length,
+        ic_cdk::id(),
+        minting_account,
+        amount,
+        vault_id,
+        created_at_time_ns,
+        |index| rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(ledger, index),
+    )
+    .await
+    .map_err(|error| pending_burn_history_error(vault_id, error))?;
+    let Some(block_index) = matched else {
+        let still_current = read_state(|s| match &expected {
+            PendingIcusdBurnIntentSnapshot::Chain(e) => burn_snapshot_matches(
+                e,
+                s.get_pending_chain_absorb(vault_id).as_ref(),
+                s.get_pending_native_xrp_absorb(vault_id).is_some(),
+            ),
+            PendingIcusdBurnIntentSnapshot::NativeXrp(e) => burn_snapshot_matches(
+                e,
+                s.get_pending_native_xrp_absorb(vault_id).as_ref(),
+                s.get_pending_chain_absorb(vault_id).is_some(),
+            ),
+        });
+        if !still_current {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason:
+                    "pending burn snapshot changed during complete history scan; no state changed"
+                        .to_string(),
+            });
+        }
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: format!(
+                "complete range [{start}, {}) at log_length {log_length} contains no exact burn; this is not proof of absence outside the scanned range, and no state changed",
+                start + length
+            ),
+        });
+    };
+
+    let proof = crate::liquidation::build_icusd_burn_proof(block_index, vault_id);
+    commit_pending_icusd_burn_reconciliation(vault_id, expected, proof)?;
+    Ok(block_index)
+}
+
+fn pending_burn_refund_request(
+    pending: &PendingIcusdBurnIntentSnapshot,
+) -> Result<(u64, rumi_protocol_backend::icrc3_proof::SpWritedownProof), StabilityPoolError> {
+    let (vault_id, amount, attempted, proof, backend_result_exists) = match pending {
+        PendingIcusdBurnIntentSnapshot::Chain(intent) => (
+            intent.vault_id,
+            intent.icusd_to_burn_e8s,
+            intent.burn_attempted,
+            intent.burn_proof.clone(),
+            intent.backend_result.is_some(),
+        ),
+        PendingIcusdBurnIntentSnapshot::NativeXrp(intent) => (
+            intent.vault_id,
+            intent.icusd_to_burn_e8s,
+            intent.burn_attempted,
+            intent.burn_proof.clone(),
+            intent.backend_result.is_some(),
+        ),
+    };
+    if attempted == Some(false) || backend_result_exists {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason:
+                "refund recovery requires a dispatched burn with no accepted backend absorb result"
+                    .into(),
+        });
+    }
+    let proof = proof.ok_or_else(|| StabilityPoolError::LiquidationFailed {
+        vault_id,
+        reason: "refund recovery requires an exact persisted burn proof".into(),
+    })?;
+    if proof.vault_id_memo != vault_id
+        || proof.ledger_kind != rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn
+    {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "persisted burn proof does not match the pending vault".into(),
+        });
+    }
+    Ok((amount, proof))
+}
+
+async fn clear_pending_burn_after_verified_refund(
+    vault_id: u64,
+    expected: &PendingIcusdBurnIntentSnapshot,
+    receipt: &rumi_protocol_backend::sp_burn_refund::SpBurnRefundReceipt,
+) -> Result<(), StabilityPoolError> {
+    let (amount, proof) = pending_burn_refund_request(expected)?;
+    let (ledger, _, _, _) = pending_burn_identity(expected);
+    let mut expected_memo = b"RSPRFND:".to_vec();
+    expected_memo.extend_from_slice(&proof.block_index.to_be_bytes());
+    expected_memo.extend_from_slice(&vault_id.to_be_bytes());
+    if receipt.vault_id != vault_id
+        || receipt.amount_e8s != amount
+        || receipt.ledger != ledger
+        || receipt.recipient != ic_cdk::id()
+        || receipt.burn_block_index != proof.block_index
+        || receipt.refund_memo != expected_memo
+    {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "backend refund receipt does not match the complete pending burn identity"
+                .into(),
+        });
+    }
+    rumi_protocol_backend::icrc3_proof::verify_icrc3_transfer_block(
+        ledger,
+        receipt.refund_block_index,
+        None,
+        icrc_ledger_types::icrc1::account::Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },
+        amount,
+        Some(&expected_memo),
+        Some(receipt.refund_created_at_time),
+    )
+    .await
+    .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+        reason: format!("backend refund receipt failed local ledger verification: {reason}"),
+    })?;
+    let cleared = mutate_state(|state| match expected {
+        PendingIcusdBurnIntentSnapshot::Chain(intent) => {
+            if state.get_pending_chain_absorb(vault_id).as_ref() != Some(intent)
+                || state.get_pending_native_xrp_absorb(vault_id).is_some()
+            {
+                return false;
+            }
+            crate::liquidation::clear_refunded_chain_absorb_in_state(state, intent)
+        }
+        PendingIcusdBurnIntentSnapshot::NativeXrp(intent) => {
+            if state.get_pending_native_xrp_absorb(vault_id).as_ref() != Some(intent)
+                || state.get_pending_chain_absorb(vault_id).is_some()
+            {
+                return false;
+            }
+            crate::liquidation::clear_refunded_native_xrp_absorb_in_state(state, intent)
+        }
+    });
+    if !cleared {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "refund receipt verified but pending burn intent changed; intent remains held"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+/// Retry compensation for a pending exact burn. The backend owns the durable
+/// refund tuple and either resumes that same operation or returns its verified
+/// receipt; this endpoint never creates a caller-selected transfer identity.
+#[update]
+pub async fn retry_pending_icusd_burn_refund(
+    vault_id: u64,
+) -> Result<rumi_protocol_backend::sp_burn_refund::SpBurnRefundReceipt, StabilityPoolError> {
+    authorize_icusd_burn_reconciliation(vault_id)?;
+    let _liquidation_guard = crate::pool_guard::SpLiquidationGuard::new()?;
+    let expected = capture_pending_icusd_burn(vault_id)?;
+    let (amount, proof) = pending_burn_refund_request(&expected)?;
+    let (ledger, _, _, _) = pending_burn_identity(&expected);
+    let receipt = crate::liquidation::refund_and_verify_sp_burn(
+        read_state(|s| s.protocol_canister_id),
+        vault_id,
+        amount,
+        ledger,
+        proof,
+    )
+    .await?;
+    clear_pending_burn_after_verified_refund(vault_id, &expected, &receipt).await?;
+    Ok(receipt)
+}
+
+/// Attach an exact positive ledger receipt to the backend's already-journaled
+/// compensation tuple, then clear only the unchanged pending SP burn intent.
+#[update]
+pub async fn reconcile_pending_icusd_burn_refund(
+    vault_id: u64,
+    refund_block_index: u64,
+) -> Result<rumi_protocol_backend::sp_burn_refund::SpBurnRefundReceipt, StabilityPoolError> {
+    authorize_icusd_burn_reconciliation(vault_id)?;
+    let _liquidation_guard = crate::pool_guard::SpLiquidationGuard::new()?;
+    let expected = capture_pending_icusd_burn(vault_id)?;
+    let (amount, proof) = pending_burn_refund_request(&expected)?;
+    let (result,): (
+        Result<
+            rumi_protocol_backend::sp_burn_refund::SpBurnRefundReceipt,
+            rumi_protocol_backend::ProtocolError,
+        >,
+    ) = ic_cdk::call(
+        read_state(|s| s.protocol_canister_id),
+        "reconcile_stability_pool_burn_refund",
+        (vault_id, amount, proof, refund_block_index),
+    )
+    .await
+    .map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+        target: read_state(|s| s.protocol_canister_id).to_string(),
+        method: "reconcile_stability_pool_burn_refund".into(),
+    })?;
+    let receipt = result.map_err(|error| StabilityPoolError::LiquidationFailed {
+        vault_id,
+        reason: format!("backend rejected exact refund receipt reconciliation: {error:?}"),
+    })?;
+    clear_pending_burn_after_verified_refund(vault_id, &expected, &receipt).await?;
+    Ok(receipt)
+}
+
+/// Ask the backend's archive-aware refund journal to find an exact positive
+/// receipt. History gaps and absence remain held; this route never remints or
+/// rotates a compensation tuple.
+#[update]
+pub async fn reconcile_pending_icusd_burn_refund_from_history(
+    vault_id: u64,
+) -> Result<rumi_protocol_backend::sp_burn_refund::SpBurnRefundReceipt, StabilityPoolError> {
+    authorize_icusd_burn_reconciliation(vault_id)?;
+    let _liquidation_guard = crate::pool_guard::SpLiquidationGuard::new()?;
+    let expected = capture_pending_icusd_burn(vault_id)?;
+    let (amount, proof) = pending_burn_refund_request(&expected)?;
+    let (result,): (
+        Result<
+            rumi_protocol_backend::sp_burn_refund::SpBurnRefundReceipt,
+            rumi_protocol_backend::ProtocolError,
+        >,
+    ) = ic_cdk::call(
+        read_state(|s| s.protocol_canister_id),
+        "reconcile_stability_pool_burn_refund_from_history",
+        (vault_id, amount, proof),
+    )
+    .await
+    .map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+        target: read_state(|s| s.protocol_canister_id).to_string(),
+        method: "reconcile_stability_pool_burn_refund_from_history".into(),
+    })?;
+    let receipt = result.map_err(|error| StabilityPoolError::LiquidationFailed {
+        vault_id,
+        reason: format!("backend could not reconcile exact refund history: {error:?}"),
+    })?;
+    clear_pending_burn_after_verified_refund(vault_id, &expected, &receipt).await?;
+    Ok(receipt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candid::{Decode, Encode};
     use icrc_ledger_types::icrc1::account::Account;
     use rumi_protocol_backend::chains::config::ChainId;
 
     fn principal(byte: u8) -> Principal {
         Principal::from_slice(&[byte])
+    }
+
+    #[test]
+    fn outbound_receipt_requires_exact_typed_transfer_tuple() {
+        let pool = principal(90);
+        let caller = principal(1);
+        let payout = PendingOutboundPayout {
+            kind: OutboundPayoutKind::Withdraw,
+            request_amount: 100,
+            gross_amount: 100,
+            transfer_amount: 90,
+            transfer_fee: 10,
+            transfer_created_at_time_ns: 123,
+            transfer_memo: b"payout-key".to_vec(),
+            dispatch_in_flight: false,
+            ambiguous_seen: true,
+            last_error: None,
+        };
+        let block = rumi_protocol_backend::icrc3_proof::DecodedBlock {
+            btype: Some("1xfer".into()),
+            op: "xfer".into(),
+            from: Some(Account {
+                owner: pool,
+                subaccount: None,
+            }),
+            to: Some(Account {
+                owner: caller,
+                subaccount: None,
+            }),
+            spender: None,
+            amount: 90,
+            transaction_fee: Some(10),
+            fee: Some(10),
+            memo: Some(b"payout-key".to_vec()),
+            created_at_time: Some(123),
+            expected_allowance: None,
+            expires_at: None,
+        };
+        assert!(validate_outbound_payout_receipt(&block, caller, pool, &payout).is_ok());
+
+        let mut wrong_recipient = block.clone();
+        wrong_recipient.to = Some(Account {
+            owner: principal(2),
+            subaccount: None,
+        });
+        assert!(validate_outbound_payout_receipt(&wrong_recipient, caller, pool, &payout).is_err());
+        let mut wrong_fee = block.clone();
+        wrong_fee.transaction_fee = Some(9);
+        wrong_fee.fee = Some(9);
+        assert!(validate_outbound_payout_receipt(&wrong_fee, caller, pool, &payout).is_err());
+        let mut wrong_memo = block;
+        wrong_memo.memo = Some(b"other-key".to_vec());
+        assert!(validate_outbound_payout_receipt(&wrong_memo, caller, pool, &payout).is_err());
     }
 
     fn pending_intent() -> ChainSpAbsorbIntent {
@@ -1432,11 +3113,43 @@ mod tests {
             icusd_to_burn_e8s: 100_00000000,
             stables_consumed,
             burn_created_at_time_ns: 123,
+            burn_attempted: Some(true),
             status: ChainSpAbsorbIntentStatus::Burned,
             burn_proof: Some(rumi_protocol_backend::icrc3_proof::SpWritedownProof {
                 block_index: 44,
                 ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn,
                 vault_id_memo: 77,
+            }),
+            backend_result: None,
+            last_error: None,
+            created_at_ns: 123,
+            updated_at_ns: 456,
+        }
+    }
+
+    fn pending_native_xrp_intent(vault_id: u64) -> NativeXrpAbsorbIntent {
+        let mut stables_consumed = BTreeMap::new();
+        stables_consumed.insert(principal(10), 100_00000000);
+        NativeXrpAbsorbIntent {
+            vault_id,
+            collateral_type: rumi_protocol_backend::state::xrp_collateral_principal(),
+            icusd_ledger: principal(10),
+            icusd_minting_account: Account {
+                owner: principal(90),
+                subaccount: None,
+            },
+            icusd_to_burn_e8s: 100_00000000,
+            stables_consumed,
+            collateral_received_drops: 1_000_000,
+            collateral_price_e8s: 50_000_000_000,
+            allocations: vec![],
+            burn_created_at_time_ns: 123,
+            burn_attempted: Some(true),
+            status: NativeXrpAbsorbIntentStatus::Burned,
+            burn_proof: Some(rumi_protocol_backend::icrc3_proof::SpWritedownProof {
+                block_index: 45,
+                ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn,
+                vault_id_memo: vault_id,
             }),
             backend_result: None,
             last_error: None,
@@ -1454,6 +3167,12 @@ mod tests {
         );
 
         mutate_state(|s| s.put_pending_chain_absorb(pending_intent()).unwrap());
+        assert!(pool_balance_mutation_blocked());
+        assert!(pool_balance_mutation_blocked_for_ledger(principal(10)));
+        assert!(
+            !pool_balance_mutation_blocked_for_ledger(principal(11)),
+            "a retained absorb fences only its committed stablecoin ledgers"
+        );
         assert!(
             matches!(
                 ensure_pool_balance_mutation_allowed(),
@@ -1463,12 +3182,224 @@ mod tests {
         );
 
         crate::state::replace_state(crate::state::StabilityPoolState::default());
+        let guard = crate::pool_guard::SpLiquidationGuard::new()
+            .expect("transient liquidation guard should be free");
+        assert!(pool_balance_mutation_blocked());
+        assert!(
+            pool_balance_mutation_blocked_for_ledger(principal(11)),
+            "the transient liquidation guard stays pool-wide"
+        );
+        drop(guard);
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+
+        // The persistent marker survives upgrade while the thread-local
+        // liquidation guard does not. A retained marker has no ledger scope,
+        // so both ordinary and per-ledger operations must remain globally held.
+        let mut restored_state = crate::state::StabilityPoolState::default();
+        restored_state.in_flight_liquidations.insert(77);
+        let stable_snapshot =
+            Encode!(&restored_state).expect("serialize in-flight marker as stable state");
+        let restored_state = Decode!(&stable_snapshot, crate::state::StabilityPoolState)
+            .expect("restore in-flight marker after upgrade");
+        crate::state::replace_state(restored_state);
+        assert!(pool_balance_mutation_blocked());
+        assert!(pool_balance_mutation_blocked_for_ledger(principal(11)));
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+    }
+
+    #[test]
+    fn pending_three_usd_absorb_fences_all_pool_mutations_and_liquidations() {
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+        mutate_state(|state| {
+            state.pending_sp_three_usd_absorbs.as_mut().unwrap().insert(
+                7,
+                PendingSpThreeUsdAbsorb {
+                    absorb_id: 7,
+                    vault_id: 77,
+                    stability_pool: principal(40),
+                    protocol_canister_id: principal(41),
+                    ledger: principal(30),
+                    collateral_type: principal(10),
+                    collateral_price_e8s: 100_000_000,
+                    started_at_ns: 1,
+                    debt_covered_e8s: 100,
+                    three_usd_amount: 100,
+                    virtual_price_e18: 1_000_000_000_000_000_000,
+                    aggregate_balance: 100,
+                    depositor_snapshot: BTreeMap::new(),
+                    approval: SpThreeUsdApprovalIntent {
+                        ledger: principal(30),
+                        allowance: 100,
+                        fee: 0,
+                        memo: vec![1; 16],
+                        created_at_time_ns: 1,
+                        expires_at_ns: 2,
+                    },
+                    approval_dispatch_may_have_happened: false,
+                    approval_receipt_block_index: None,
+                    backend_dispatch_may_have_happened: false,
+                    phase: SpThreeUsdAbsorbPhase::ApprovalPending,
+                    terminal: None,
+                    allocation: None,
+                    last_error: None,
+                },
+            );
+        });
+        assert!(pool_balance_mutation_blocked());
+        assert!(pool_balance_mutation_blocked_for_ledger(principal(30)));
+        assert!(
+            pool_balance_mutation_blocked_for_ledger(principal(11)),
+            "the pinned depositor snapshot depends on all position and opt-in state"
+        );
+        assert!(matches!(
+            ensure_pool_balance_mutation_allowed(),
+            Err(StabilityPoolError::SystemBusy)
+        ));
+        assert!(matches!(
+            crate::pool_guard::SpLiquidationGuard::new(),
+            Err(StabilityPoolError::SystemBusy)
+        ));
+        let resume = crate::pool_guard::SpLiquidationGuard::new_three_usd_resume(7).unwrap();
+        drop(resume);
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+    }
+
+    #[test]
+    fn upgraded_ambiguous_withdrawal_stays_fenced_and_cannot_restore_on_reject() {
+        let caller = principal(1);
+        let ledger = principal(10);
+        let mut state = crate::state::StabilityPoolState::default();
+        let mut position = DepositPosition::new(0);
+        position.stablecoin_balances.insert(ledger, 100);
+        state.deposits.insert(caller, position);
+        state.total_stablecoin_balances.insert(ledger, 100);
+        state.process_withdrawal(caller, ledger, 60).unwrap();
+        state.pending_outbound_payouts.as_mut().unwrap().insert(
+            (caller, ledger),
+            PendingOutboundPayout {
+                kind: OutboundPayoutKind::Withdraw,
+                request_amount: 60,
+                gross_amount: 60,
+                transfer_amount: 50,
+                transfer_fee: 10,
+                transfer_created_at_time_ns: 123,
+                transfer_memo: b"fixed-payout".to_vec(),
+                dispatch_in_flight: true,
+                ambiguous_seen: false,
+                last_error: None,
+            },
+        );
+
+        // Upgrade interruption turns an in-flight dispatch into an ambiguous
+        // retained obligation. Liquidation admission reads this durable fence.
+        state.reconcile_pending_outbound_payouts_after_upgrade();
+        let bytes = Encode!(&state).unwrap();
+        let restored = Decode!(&bytes, crate::state::StabilityPoolState).unwrap();
+        crate::state::replace_state(restored);
+        assert!(pool_balance_mutation_blocked());
+        assert!(pool_balance_mutation_blocked_for_ledger(ledger));
+        assert!(crate::pool_guard::SpLiquidationGuard::new().is_err());
+        assert!(matches!(
+            ensure_pool_balance_mutation_allowed(),
+            Err(StabilityPoolError::SystemBusy)
+        ));
+
+        // A later typed rejection cannot prove that the interrupted attempt
+        // had no effect, so it must not restore the withdrawn balance.
+        let restored_balance = mutate_state(|s| {
+            s.reject_outbound_payout_without_effect(caller, ledger, "BadFee".into(), 0)
+                .unwrap()
+        });
+        assert!(!restored_balance);
+        assert_eq!(
+            read_state(|s| s
+                .deposits
+                .get(&caller)
+                .and_then(|p| p.stablecoin_balances.get(&ledger).copied())),
+            Some(40),
+        );
+        assert!(read_state(|s| s
+            .pending_outbound_payout(&caller, &ledger)
+            .is_some()));
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+    }
+
+    #[test]
+    fn stale_native_xrp_marker_recovery_requires_matching_intent_and_committed_terminal_result() {
+        let vault_id = 77;
+        let intent = pending_native_xrp_intent(vault_id);
+        let mut state = crate::state::StabilityPoolState::default();
+        state
+            .put_pending_native_xrp_absorb(intent.clone())
+            .expect("retain exact native-XRP intent");
+
+        assert!(native_xrp_recovery_can_adopt_marker(
+            &state, vault_id, &intent
+        ));
+        let proof = intent.burn_proof.clone().expect("exact burn proof");
+        assert!(native_xrp_recovery_intent_still_retained(
+            &state, vault_id, &intent, &proof
+        ));
+
+        state.in_flight_liquidations.insert(vault_id);
+        assert!(native_xrp_recovery_can_adopt_marker(
+            &state, vault_id, &intent
+        ));
+
+        let wrong_vault_intent = pending_native_xrp_intent(vault_id + 1);
+        assert!(!native_xrp_recovery_can_adopt_marker(
+            &state,
+            vault_id,
+            &wrong_vault_intent
+        ));
+        let mut wrong_attempt = intent.clone();
+        wrong_attempt.icusd_to_burn_e8s += 1;
+        assert!(!native_xrp_recovery_intent_still_retained(
+            &state,
+            vault_id,
+            &wrong_attempt,
+            &proof
+        ));
+
+        let mut non_xrp_intent = intent.clone();
+        non_xrp_intent.collateral_type = principal(12);
+        assert!(!native_xrp_recovery_can_adopt_marker(
+            &state,
+            vault_id,
+            &non_xrp_intent
+        ));
+
+        state.in_flight_liquidations.insert(vault_id + 1);
+        assert!(!native_xrp_recovery_can_adopt_marker(
+            &state, vault_id, &intent
+        ));
+
+        state.in_flight_liquidations.remove(&(vault_id + 1));
+        finish_native_xrp_recovery_marker(&mut state, vault_id, true, false, true);
+        assert!(state.in_flight_liquidations.contains(&vault_id));
+        finish_native_xrp_recovery_marker(&mut state, vault_id, true, true, false);
+        assert!(!state.in_flight_liquidations.contains(&vault_id));
+
+        state.in_flight_liquidations.insert(vault_id);
+        finish_native_xrp_recovery_marker(&mut state, vault_id, false, false, true);
+        assert!(
+            !state.in_flight_liquidations.contains(&vault_id),
+            "an unresolved recovery releases only its newly acquired marker"
+        );
+
+        state.in_flight_liquidations.insert(vault_id);
+        finish_native_xrp_recovery_marker(&mut state, vault_id, false, false, false);
+        assert!(
+            state.in_flight_liquidations.contains(&vault_id),
+            "without the matching retained intent, even an attempt-owned marker remains held"
+        );
     }
 
     #[test]
     fn in_flight_balance_async_blocks_chain_absorb_start() {
         assert!(ensure_no_pool_balance_async_in_flight().is_ok());
-        let guard = crate::pool_guard::PoolBalanceAsyncGuard::new();
+        let guard = crate::pool_guard::PoolBalanceAsyncGuard::new()
+            .expect("balance async operation should acquire without liquidation");
         assert!(
             matches!(
                 ensure_no_pool_balance_async_in_flight(),
@@ -1478,5 +3409,266 @@ mod tests {
         );
         drop(guard);
         assert!(ensure_no_pool_balance_async_in_flight().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod pending_burn_history_scan_tests {
+    use super::*;
+    use rumi_protocol_backend::icrc3_proof::{DecodedBlock, SpProofLedger, SpWritedownProof};
+
+    const VAULT: u64 = 77;
+    const AMOUNT: u64 = 123_000_000;
+    const CAT: u64 = 987_654;
+
+    fn exact_burn() -> DecodedBlock {
+        DecodedBlock {
+            btype: Some("1burn".to_string()),
+            op: "burn".to_string(),
+            from: Some(icrc_ledger_types::icrc1::account::Account {
+                owner: Principal::anonymous(),
+                subaccount: None,
+            }),
+            to: None,
+            spender: None,
+            amount: AMOUNT as u128,
+            transaction_fee: None,
+            fee: None,
+            memo: Some(crate::liquidation::encode_chain_writedown_memo(VAULT)),
+            created_at_time: Some(CAT),
+            expected_allowance: None,
+            expires_at: None,
+        }
+    }
+
+    fn unrelated_block() -> DecodedBlock {
+        let mut block = exact_burn();
+        block.memo = Some(b"other operation".to_vec());
+        block
+    }
+
+    fn scan<F, Fut>(log_length: u64, fetch: F) -> Result<Option<u64>, PendingBurnHistoryScanError>
+    where
+        F: FnMut(u64) -> Fut,
+        Fut: std::future::Future<Output = Result<DecodedBlock, String>>,
+    {
+        futures::executor::block_on(scan_icusd_burn_history(
+            10,
+            3,
+            log_length,
+            Principal::anonymous(),
+            icrc_ledger_types::icrc1::account::Account {
+                owner: Principal::anonymous(),
+                subaccount: None,
+            },
+            AMOUNT,
+            VAULT,
+            CAT,
+            fetch,
+        ))
+    }
+
+    #[test]
+    fn complete_bounded_range_finds_one_exact_burn() {
+        let result = scan(13, |index| async move {
+            Ok(if index == 11 {
+                exact_burn()
+            } else {
+                unrelated_block()
+            })
+        });
+        assert_eq!(result, Ok(Some(11)));
+    }
+
+    #[test]
+    fn complete_range_without_match_reports_absence_only_in_range() {
+        let result = scan(13, |_| async { Ok(unrelated_block()) });
+        assert_eq!(result, Ok(None));
+    }
+
+    #[test]
+    fn truncated_or_invalid_ranges_do_not_fetch_or_claim_absence() {
+        assert_eq!(
+            scan(12, |_| async { panic!("truncated range must not fetch") }),
+            Err(PendingBurnHistoryScanError::RangePastLedgerTip {
+                end_exclusive: 13,
+                log_length: 12
+            })
+        );
+        let over_bound = futures::executor::block_on(scan_icusd_burn_history(
+            10,
+            MAX_PENDING_ICUSD_BURN_HISTORY_BLOCKS + 1,
+            100,
+            Principal::anonymous(),
+            icrc_ledger_types::icrc1::account::Account {
+                owner: Principal::anonymous(),
+                subaccount: None,
+            },
+            AMOUNT,
+            VAULT,
+            CAT,
+            |_| async { panic!("invalid range must not fetch") },
+        ));
+        assert_eq!(over_bound, Err(PendingBurnHistoryScanError::InvalidRange));
+    }
+
+    #[test]
+    fn archive_or_block_fetch_error_is_incomplete() {
+        let result = scan(13, |index| async move {
+            if index == 11 {
+                Err("advertised archive callback failed".to_string())
+            } else {
+                Ok(unrelated_block())
+            }
+        });
+        assert_eq!(
+            result,
+            Err(PendingBurnHistoryScanError::IncompleteAt {
+                block_index: 11,
+                reason: "advertised archive callback failed".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn multiple_exact_burns_in_the_complete_range_are_conflicting() {
+        let result = scan(13, |_| async { Ok(exact_burn()) });
+        assert_eq!(result, Err(PendingBurnHistoryScanError::MultipleMatches));
+    }
+
+    #[test]
+    fn history_discovery_requires_prepared_unresolved_intent_but_accepts_legacy_unknown() {
+        assert!(pending_burn_history_scan_eligible(
+            None,
+            PendingBurnReconciliationPhase::Prepared,
+            false,
+            false
+        ));
+        assert!(pending_burn_history_scan_eligible(
+            Some(true),
+            PendingBurnReconciliationPhase::Prepared,
+            false,
+            false
+        ));
+        assert!(!pending_burn_history_scan_eligible(
+            Some(false),
+            PendingBurnReconciliationPhase::Prepared,
+            false,
+            false
+        ));
+        assert!(!pending_burn_history_scan_eligible(
+            Some(true),
+            PendingBurnReconciliationPhase::Burned,
+            true,
+            false
+        ));
+        assert!(!pending_burn_history_scan_eligible(
+            Some(true),
+            PendingBurnReconciliationPhase::Prepared,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn stale_full_snapshot_or_competing_intent_fails_the_commit_cas() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct Snapshot {
+            phase: u8,
+            proof: Option<u64>,
+            backend_result: Option<u64>,
+        }
+        let expected = Snapshot {
+            phase: 0,
+            proof: None,
+            backend_result: None,
+        };
+        assert!(burn_snapshot_matches(&expected, Some(&expected), false));
+        let advanced = Snapshot {
+            phase: 1,
+            ..expected.clone()
+        };
+        assert!(!burn_snapshot_matches(&expected, Some(&advanced), false));
+        let proof_attached = Snapshot {
+            proof: Some(44),
+            ..expected.clone()
+        };
+        assert!(!burn_snapshot_matches(
+            &expected,
+            Some(&proof_attached),
+            false
+        ));
+        let backend_accepted = Snapshot {
+            backend_result: Some(1),
+            ..expected.clone()
+        };
+        assert!(!burn_snapshot_matches(
+            &expected,
+            Some(&backend_accepted),
+            false
+        ));
+        assert!(!burn_snapshot_matches(&expected, Some(&expected), true));
+        assert!(!burn_snapshot_matches::<Snapshot>(&expected, None, false));
+    }
+
+    #[test]
+    fn scan_eligibility_allows_legacy_only_for_positive_proof_and_rejects_no_dispatch() {
+        let proof = SpWritedownProof {
+            block_index: 11,
+            ledger_kind: SpProofLedger::IcusdBurn,
+            vault_id_memo: VAULT,
+        };
+        assert!(pending_burn_reconciliation_eligible(
+            None,
+            PendingBurnReconciliationPhase::Prepared,
+            None,
+            false,
+            &proof
+        ));
+        assert!(!pending_burn_reconciliation_eligible(
+            Some(false),
+            PendingBurnReconciliationPhase::Prepared,
+            None,
+            false,
+            &proof
+        ));
+        assert!(!pending_burn_reconciliation_eligible(
+            Some(true),
+            PendingBurnReconciliationPhase::Other,
+            None,
+            false,
+            &proof
+        ));
+        assert!(
+            pending_burn_reconciliation_eligible(
+                Some(true),
+                PendingBurnReconciliationPhase::Other,
+                Some(&proof),
+                false,
+                &proof
+            ),
+            "exact proof read-back must preserve BackendRejected while refund is pending"
+        );
+        assert!(
+            pending_burn_reconciliation_eligible(
+                Some(true),
+                PendingBurnReconciliationPhase::Burned,
+                Some(&proof),
+                true,
+                &proof
+            ),
+            "identical positive burn proof remains idempotent after backend response"
+        );
+        let conflicting = SpWritedownProof {
+            block_index: 12,
+            ..proof.clone()
+        };
+        assert!(!pending_burn_reconciliation_eligible(
+            Some(true),
+            PendingBurnReconciliationPhase::Burned,
+            Some(&conflicting),
+            true,
+            &proof
+        ));
     }
 }

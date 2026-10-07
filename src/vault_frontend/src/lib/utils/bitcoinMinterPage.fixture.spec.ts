@@ -17,7 +17,7 @@ const fx = vi.hoisted(() => {
       get_deposit_fee: vi.fn(async () => 10n),
       get_btc_address: vi.fn(async () => BITCOIN_ADDRESS),
       estimate_withdrawal_fee: vi.fn(async () => ({ bitcoin_fee: 100n, minter_fee: 200n })),
-      retrieve_btc_status_v2: vi.fn(async () => ({ Pending: null })),
+      retrieve_btc_status_v2: vi.fn(async (_args: { block_index: bigint }) => ({ Pending: null })),
       retrieve_btc_status_v2_by_account: vi.fn(async () => []),
     })),
     ledger: vi.fn(async () => ({ icrc1_balance_of: vi.fn(async () => 1_000_000n) })),
@@ -45,7 +45,7 @@ function actorDefaults() {
   return { get_minter_info: vi.fn(async () => ({ min_confirmations: 4, deposit_btc_min_amount: [10_000n], retrieve_btc_min_amount: 1_000n })),
     get_deposit_fee: vi.fn(async () => 10n), get_btc_address: vi.fn(async () => BITCOIN_ADDRESS),
     estimate_withdrawal_fee: vi.fn(async () => ({ bitcoin_fee: 100n, minter_fee: 200n })),
-    retrieve_btc_status_v2: vi.fn(async () => ({ Pending: null })), retrieve_btc_status_v2_by_account: vi.fn(async () => []) };
+    retrieve_btc_status_v2: vi.fn(async (_args: { block_index: bigint }) => ({ Pending: null })), retrieve_btc_status_v2_by_account: vi.fn(async () => []) };
 }
 function withdrawalKey(owner: string) { return `rumi:ckbtc-withdrawal:${CONFIG.isLocal ? `local:${CONFIG.host}` : 'mainnet'}:${CANISTER_IDS.CKBTC_LEDGER}:${CANISTER_IDS.CKBTC_MINTER}:${owner}`; }
 function installLocks() {

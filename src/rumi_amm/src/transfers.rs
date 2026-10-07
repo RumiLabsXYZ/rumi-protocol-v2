@@ -13,6 +13,18 @@ use std::collections::HashMap;
 /// solvent (we send slightly less) rather than risking an over-send.
 const DEFAULT_LEDGER_FEE_E8S: u128 = 10_000;
 
+/// Convert a ledger block index without turning an unrepresentable committed
+/// transfer into block zero. Callers must reconcile the same operation before
+/// retrying when this error is returned.
+fn checked_block_index(value: candid::Nat, source: &str) -> Result<u64, String> {
+    value.0.try_into().map_err(|_| {
+        format!(
+            "{} confirmed a transfer, but its block index exceeds u64; outcome is committed and must be reconciled before retry",
+            source
+        )
+    })
+}
+
 thread_local! {
     /// Per-ledger transfer-fee cache, populated lazily from `icrc1_fee` on the
     /// first outbound transfer to a ledger. Heap-only (not persisted), so it is
@@ -26,14 +38,30 @@ pub async fn ledger_fee(ledger: Principal) -> u128 {
     if let Some(fee) = LEDGER_FEES.with(|c| c.borrow().get(&ledger).copied()) {
         return fee;
     }
-    let result: Result<(candid::Nat,), _> =
-        ic_cdk::call(ledger, "icrc1_fee", ()).await;
+    let result: Result<(candid::Nat,), _> = ic_cdk::call(ledger, "icrc1_fee", ()).await;
     let fee: u128 = match result {
         Ok((f,)) => f.0.try_into().unwrap_or(DEFAULT_LEDGER_FEE_E8S),
         Err(_) => DEFAULT_LEDGER_FEE_E8S,
     };
     LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, fee));
     fee
+}
+
+/// Refresh when a payout is no larger than the cached fee. This lets small
+/// retained claims become payable after a fee reduction without adding an
+/// await to ordinary warm-cache transfers.
+pub async fn ledger_fee_for_amount(ledger: Principal, amount: u128) -> u128 {
+    let cached = ledger_fee(ledger).await;
+    if amount <= cached {
+        let result: Result<(candid::Nat,), _> = ic_cdk::call(ledger, "icrc1_fee", ()).await;
+        if let Ok((fee,)) = result {
+            if let Ok(fee) = fee.0.try_into() {
+                LEDGER_FEES.with(|cache| cache.borrow_mut().insert(ledger, fee));
+                return fee;
+            }
+        }
+    }
+    cached
 }
 
 /// Transfer tokens FROM a user TO a pool's subaccount (requires prior ICRC-2 approval).
@@ -51,7 +79,11 @@ pub async fn transfer_from_user(
         },
         to: Account {
             owner: ic_cdk::id(),
-            subaccount: Some(to_subaccount),
+            subaccount: if crate::is_threeusd_ledger(ledger) {
+                None
+            } else {
+                Some(to_subaccount)
+            },
         },
         amount: candid::Nat::from(amount),
         fee: None,
@@ -66,21 +98,100 @@ pub async fn transfer_from_user(
         ic_cdk::call(ledger, "icrc2_transfer_from", (args,)).await;
 
     match result {
-        Ok((Ok(block_index),)) => {
-            let idx: u64 = block_index.0.try_into().unwrap_or_else(|_| {
-                ic_cdk::println!("WARN: block index exceeds u64::MAX, returning 0");
-                0
-            });
-            Ok(idx)
-        }
+        Ok((Ok(block_index),)) => checked_block_index(block_index, "icrc2_transfer_from"),
         // Audit Wave-3 (ICRC-003): Duplicate means the previous attempt's
         // transfer landed at `duplicate_of`. Treat as success.
         Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => {
-            let idx: u64 = duplicate_of.0.try_into().unwrap_or(0);
-            Ok(idx)
+            checked_block_index(duplicate_of, "icrc2_transfer_from Duplicate")
         }
         Ok((Err(e),)) => Err(format!("icrc2_transfer_from error: {:?}", e)),
         Err((code, msg)) => Err(format!("inter-canister call failed: {:?} - {}", code, msg)),
+    }
+}
+
+#[derive(Debug)]
+pub enum IngressTransferError {
+    NoEffect(String),
+    TooOld,
+    Ambiguous(String),
+}
+
+pub fn invalidate_ledger_fee(ledger: Principal) {
+    LEDGER_FEES.with(|cache| {
+        cache.borrow_mut().remove(&ledger);
+    });
+}
+
+/// Submit an already-journaled ingress leg. The caller must persist the full
+/// `AmmIngressLeg` before entering this function and retain it until a block is
+/// confirmed; no fresh timestamp or memo is generated here.
+pub async fn transfer_from_user_exact(
+    leg: &crate::types::AmmIngressLeg,
+) -> Result<u64, IngressTransferError> {
+    let args = TransferFromArgs {
+        spender_subaccount: None,
+        from: Account {
+            owner: leg.from,
+            subaccount: None,
+        },
+        to: Account {
+            owner: ic_cdk::id(),
+            subaccount: if crate::is_threeusd_ledger(leg.ledger) && leg.to_subaccount == [0; 32] {
+                None
+            } else {
+                Some(leg.to_subaccount)
+            },
+        },
+        amount: candid::Nat::from(leg.amount),
+        fee: Some(candid::Nat::from(leg.transfer_fee.ok_or_else(|| {
+            IngressTransferError::Ambiguous(
+                "exact ingress transfer fee was not journaled before dispatch".to_string(),
+            )
+        })?)),
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo(
+            serde_bytes::ByteBuf::from(leg.memo.clone()),
+        )),
+        created_at_time: Some(leg.created_at_time),
+    };
+    let result: Result<(Result<candid::Nat, TransferFromError>,), _> =
+        ic_cdk::call(leg.ledger, "icrc2_transfer_from", (args,)).await;
+    match result {
+        Ok((Ok(block),)) => block.0.try_into().map_err(|_| {
+            IngressTransferError::Ambiguous("ledger block index exceeds u64".to_string())
+        }),
+        Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => {
+            duplicate_of.0.try_into().map_err(|_| {
+                IngressTransferError::Ambiguous("duplicate block index exceeds u64".to_string())
+            })
+        }
+        Ok((Err(TransferFromError::TooOld),)) => Err(IngressTransferError::TooOld),
+        Ok((Err(TransferFromError::BadFee { expected_fee }),)) => {
+            invalidate_ledger_fee(leg.ledger);
+            Err(IngressTransferError::NoEffect(format!(
+                "BadFee expected {}",
+                expected_fee
+            )))
+        }
+        Ok((Err(TransferFromError::BadBurn { min_burn_amount }),)) => Err(
+            IngressTransferError::NoEffect(format!("BadBurn minimum {}", min_burn_amount)),
+        ),
+        Ok((Err(TransferFromError::InsufficientFunds { balance }),)) => Err(
+            IngressTransferError::NoEffect(format!("InsufficientFunds balance {}", balance)),
+        ),
+        Ok((Err(TransferFromError::InsufficientAllowance { allowance }),)) => Err(
+            IngressTransferError::NoEffect(format!("InsufficientAllowance {}", allowance)),
+        ),
+        Ok((Err(TransferFromError::CreatedInFuture { ledger_time }),)) => Err(
+            IngressTransferError::NoEffect(format!("CreatedInFuture ledger time {}", ledger_time)),
+        ),
+        Ok((Err(error),)) => Err(IngressTransferError::Ambiguous(format!(
+            "icrc2_transfer_from error: {:?}",
+            error
+        ))),
+        Err((code, message)) => Err(IngressTransferError::Ambiguous(format!(
+            "icrc2_transfer_from call failed: {:?} - {}",
+            code, message
+        ))),
     }
 }
 
@@ -101,22 +212,30 @@ pub async fn transfer_to_user(
     to: Principal,
     amount: u128,
 ) -> Result<u64, String> {
-    let fee = ledger_fee(ledger).await;
+    let fee = ledger_fee_for_amount(ledger, amount).await;
     if amount <= fee {
-        // Nothing is transferable once the ledger fee is covered. The caller
-        // has already debited `amount` from its reserve, so leaving this dust
-        // in the subaccount keeps reserves <= the real balance (solvency-safe).
-        return Ok(0);
+        // Success would let admin/claim callers clear a value obligation
+        // without a ledger send. Preserve the amount for a later retry.
+        return Err(format!(
+            "amount {} does not exceed ledger fee {}; payout not sent",
+            amount, fee
+        ));
     }
     let send = amount - fee;
     let args = TransferArg {
-        from_subaccount: Some(from_subaccount),
+        from_subaccount: if crate::is_threeusd_ledger(ledger) {
+            None
+        } else {
+            Some(from_subaccount)
+        },
         to: Account {
             owner: to,
             subaccount: None,
         },
         amount: candid::Nat::from(send),
-        fee: None,
+        // Match the fee used to calculate `send`. A changed ledger fee must
+        // reject before debit rather than silently drift the reserve.
+        fee: Some(candid::Nat::from(fee)),
         memo: None,
         // Set created_at_time for ledger-side deduplication.
         created_at_time: Some(ic_cdk::api::time()),
@@ -126,16 +245,18 @@ pub async fn transfer_to_user(
         ic_cdk::call(ledger, "icrc1_transfer", (args,)).await;
 
     match result {
-        Ok((Ok(block_index),)) => {
-            let idx: u64 = block_index.0.try_into().unwrap_or_else(|_| {
-                ic_cdk::println!("WARN: block index exceeds u64::MAX, returning 0");
-                0
-            });
-            Ok(idx)
-        }
+        Ok((Ok(block_index),)) => checked_block_index(block_index, "icrc1_transfer"),
         Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
-            let idx: u64 = duplicate_of.0.try_into().unwrap_or(0);
-            Ok(idx)
+            checked_block_index(duplicate_of, "icrc1_transfer Duplicate")
+        }
+        Ok((Err(TransferError::BadFee { expected_fee }),)) => {
+            if let Ok(expected) = expected_fee.0.clone().try_into() {
+                LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, expected));
+            }
+            Err(format!(
+                "icrc1_transfer BadFee; refreshed fee cache, retry operation: expected {}",
+                expected_fee
+            ))
         }
         Ok((Err(e),)) => Err(format!("icrc1_transfer error: {:?}", e)),
         Err((code, msg)) => Err(format!("inter-canister call failed: {:?} - {}", code, msg)),
@@ -175,9 +296,9 @@ pub async fn transfer_reward_icusd(
     to: Principal,
     amount: u128,
 ) -> Result<u64, String> {
-    let icusd_ledger = Principal::from_text(crate::ICUSD_LEDGER)
-        .expect("invalid icUSD ledger principal");
-    let fee = ledger_fee(icusd_ledger).await;
+    let icusd_ledger =
+        Principal::from_text(crate::ICUSD_LEDGER).expect("invalid icUSD ledger principal");
+    let fee = ledger_fee_for_amount(icusd_ledger, amount).await;
     if amount <= fee {
         return Err(format!(
             "reward amount {} does not exceed ledger fee {}; refusing to burn the claim",
@@ -193,7 +314,7 @@ pub async fn transfer_reward_icusd(
             subaccount: None,
         },
         amount: candid::Nat::from(send),
-        fee: None,
+        fee: Some(candid::Nat::from(fee)),
         memo: None,
         // Set created_at_time for ledger-side deduplication; matches the
         // pattern used by transfer_to_user above.
@@ -204,19 +325,45 @@ pub async fn transfer_reward_icusd(
         ic_cdk::call(icusd_ledger, "icrc1_transfer", (args,)).await;
 
     match result {
-        Ok((Ok(block_index),)) => {
-            let idx: u64 = block_index.0.try_into().unwrap_or_else(|_| {
-                ic_cdk::println!("WARN: block index exceeds u64::MAX, returning 0");
-                0
-            });
-            Ok(idx)
-        }
+        Ok((Ok(block_index),)) => checked_block_index(block_index, "icrc1_transfer reward payout"),
         // Treat duplicates as success — the prior attempt landed.
         Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
-            let idx: u64 = duplicate_of.0.try_into().unwrap_or(0);
-            Ok(idx)
+            checked_block_index(duplicate_of, "icrc1_transfer reward payout Duplicate")
+        }
+        Ok((Err(TransferError::BadFee { expected_fee }),)) => {
+            if let Ok(expected) = expected_fee.0.clone().try_into() {
+                LEDGER_FEES.with(|c| c.borrow_mut().insert(icusd_ledger, expected));
+            }
+            Err(format!(
+                "icrc1_transfer BadFee; refreshed fee cache, retry operation: expected {}",
+                expected_fee
+            ))
         }
         Ok((Err(e),)) => Err(format!("icrc1_transfer error: {:?}", e)),
         Err((code, msg)) => Err(format!("inter-canister call failed: {:?} - {}", code, msg)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_block_index;
+    use candid::Nat;
+
+    #[test]
+    fn checked_block_index_accepts_u64_max() {
+        assert_eq!(
+            checked_block_index(Nat::from(u64::MAX), "ledger").unwrap(),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn checked_block_index_rejects_values_above_u64_without_zero_fallback() {
+        let error = checked_block_index(Nat::from(u128::from(u64::MAX) + 1), "ledger")
+            .expect_err("oversized committed block index must fail closed");
+        assert!(error.contains("confirmed a transfer"));
+        assert!(error.contains("exceeds u64"));
+        assert!(error.contains("committed"));
+        assert!(error.contains("reconciled before retry"));
     }
 }

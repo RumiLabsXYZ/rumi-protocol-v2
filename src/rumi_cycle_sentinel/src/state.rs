@@ -1,8 +1,8 @@
 //! Stable-storage layer for Cycle Sentinel (Task 1c).
 //!
 //! Wires the pure domain types in `types.rs` into `ic-stable-structures`
-//! storage: one `MemoryManager` partitions stable memory into 19 regions
-//! (memory IDs 0-18, see `MEMORY_LAYOUT` below), each backing exactly one
+//! storage: one `MemoryManager` partitions stable memory into 21 regions
+//! (memory IDs 0-20, see `MEMORY_LAYOUT` below), each backing exactly one
 //! `StableCell`/`StableBTreeMap`. This file owns storage + raw CRUD + count
 //! bound enforcement at the storage boundary; it does **not** own
 //! governance/funding *policy* (threshold math, proposal execution, rail
@@ -126,6 +126,7 @@ const MEM_ICP_SOURCE_RESERVE: MemoryId = MemoryId::new(16); // StableCell<Stored
 const MEM_SHARED_CONVERSION_BUDGET: MemoryId = MemoryId::new(17); // StableCell<StoredGlobalRollingSpendState> (singleton)
 const MEM_SHARED_RESERVE_MINT_RECEIPTS: MemoryId = MemoryId::new(18); // StableBTreeMap<u64, StoredSharedReserveMintReceipt>
 const MEM_SINGLE_OPERATOR_SETUP: MemoryId = MemoryId::new(19); // StableCell<StoredSingleOperatorSetup> (singleton)
+const MEM_LATEST_SUCCESSFUL_SAMPLES: MemoryId = MemoryId::new(20); // StableBTreeMap<StorablePrincipal, StoredSample>
 
 /// Every stable memory slot this canister owns, paired with a human label.
 /// Single source of truth for the layout; iterated by `memory_ids_unique`.
@@ -153,6 +154,7 @@ const MEMORY_LAYOUT: &[(MemoryId, &str)] = &[
         "shared_reserve_mint_receipts",
     ),
     (MEM_SINGLE_OPERATOR_SETUP, "single_operator_setup"),
+    (MEM_LATEST_SUCCESSFUL_SAMPLES, "latest_successful_samples"),
 ];
 
 // ─────────────────────── state.rs-owned bookkeeping types ───────────────────────
@@ -210,6 +212,10 @@ pub(crate) struct SampleMeta {
     pub(crate) last_success_at_secs: Option<u64>,
     pub(crate) last_attempt_at_secs: Option<u64>,
     pub(crate) total_writes: u64,
+    /// `None` means legacy metadata has not been backfilled yet;
+    /// `Some(None)` means no successful sample remains in the ring;
+    /// `Some(Some(sequence))` names the latest successful retained sample.
+    pub(crate) latest_successful_sequence: Option<Option<u64>>,
 }
 
 /// Memory ID 7.
@@ -282,6 +288,29 @@ struct SampleMetaV1 {
     last_attempt_at_secs: Option<u64>,
 }
 
+/// Frozen metadata shape immediately before the successful-sample cache.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SampleMetaV2 {
+    next_slot: u32,
+    filled_slots: u32,
+    last_success_at_secs: Option<u64>,
+    last_attempt_at_secs: Option<u64>,
+    total_writes: u64,
+}
+
+impl From<SampleMetaV2> for SampleMeta {
+    fn from(legacy: SampleMetaV2) -> Self {
+        Self {
+            next_slot: legacy.next_slot,
+            filled_slots: legacy.filled_slots,
+            last_success_at_secs: legacy.last_success_at_secs,
+            last_attempt_at_secs: legacy.last_attempt_at_secs,
+            total_writes: legacy.total_writes,
+            latest_successful_sequence: None,
+        }
+    }
+}
+
 /// Legacy V1 bytes predate `total_writes` entirely and, once `filled_slots`
 /// has reached the ring's capacity, carry no way to recover how many times
 /// the ring actually wrapped before this migration ever runs. Migration
@@ -301,6 +330,7 @@ impl From<SampleMetaV1> for SampleMeta {
             last_success_at_secs: legacy.last_success_at_secs,
             last_attempt_at_secs: legacy.last_attempt_at_secs,
             total_writes: legacy.filled_slots as u64,
+            latest_successful_sequence: None,
         }
     }
 }
@@ -308,14 +338,16 @@ impl From<SampleMetaV1> for SampleMeta {
 #[derive(CandidType, Deserialize, Clone)]
 enum StoredSampleMeta {
     V1(SampleMetaV1),
-    V2(SampleMeta),
+    V2(SampleMetaV2),
+    V3(SampleMeta),
 }
 
 impl StoredSampleMeta {
     fn into_current(self) -> SampleMeta {
         match self {
             Self::V1(v) => v.into(),
-            Self::V2(v) => v,
+            Self::V2(v) => v.into(),
+            Self::V3(v) => v,
         }
     }
 }
@@ -794,6 +826,9 @@ thread_local! {
     static SAMPLE_META: RefCell<StableBTreeMap<StorablePrincipal, StoredSampleMeta, VMem>> =
         MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(MEM_SAMPLE_META))));
 
+    static LATEST_SUCCESSFUL_SAMPLES: RefCell<StableBTreeMap<StorablePrincipal, StoredSample, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(MEM_LATEST_SUCCESSFUL_SAMPLES))));
+
     static ALARMS: RefCell<StableBTreeMap<u64, StoredAlarm, VMem>> =
         MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(MEM_ALARMS))));
 
@@ -945,13 +980,27 @@ pub(crate) fn single_operator_setup_available() -> bool {
 /// signer set: their setup is complete even though Memory ID 19 did not exist
 /// before this release. Existing `true` markers are never cleared.
 pub(crate) fn migrate_single_operator_setup_usage_on_upgrade() {
-    if !single_operator_setup_used() {
-        let config = global_config();
-        if crate::telemetry_access::is_single_operator_set(
-            &config.signers,
-            config.approval_threshold,
-        ) {
+    let config = global_config();
+    if crate::telemetry_access::is_single_operator_set(&config.signers, config.approval_threshold) {
+        if !single_operator_setup_used() {
             set_single_operator_setup_used(true);
+        }
+
+        // Older versions could leave open proposals authored by signers
+        // removed by the single-operator replacement. The migration marker
+        // is already used in those canisters, so the one-shot setup method
+        // cannot be relied on to perform this cleanup. Cancel only proposals
+        // whose proposer is no longer authorized; preserve operator-authored
+        // proposals and their approval reset semantics.
+        let active_signers: BTreeSet<Principal> = config.signers.iter().copied().collect();
+        for mut proposal in list_proposals_after(None, types::MAX_PROPOSALS) {
+            if proposal.status == ProposalStatus::Open
+                && !active_signers.contains(&proposal.proposer)
+            {
+                proposal.status = ProposalStatus::Cancelled;
+                insert_proposal(proposal)
+                    .expect("overwriting an existing proposal cannot exceed the storage bound");
+            }
         }
     }
 }
@@ -979,12 +1028,17 @@ pub(crate) fn configure_single_operator_governance(
         return Ok(false);
     }
 
-    // Approval counts belong to the old signer/quorum configuration. Clear
-    // them from every open proposal before installing the new quorum so a
-    // previously approved action cannot become executable as a side effect.
+    // Approval counts belong to the old signer/quorum configuration. Cancel
+    // proposals from removed proposers (replacement signers cannot exercise
+    // proposer-only cancellation), and clear approvals on retained proposers
+    // before installing the new quorum.
     for mut proposal in list_proposals_after(None, types::MAX_PROPOSALS) {
         if proposal.status == ProposalStatus::Open {
-            proposal.clear_approvals();
+            if !requested_signers.contains(&proposal.proposer) {
+                proposal.status = ProposalStatus::Cancelled;
+            } else {
+                proposal.clear_approvals();
+            }
             insert_proposal(proposal)
                 .expect("overwriting an existing proposal cannot exceed the storage bound");
         }
@@ -1098,6 +1152,9 @@ pub(crate) fn remove_target(
     });
     if removed.is_some() {
         SAMPLE_META.with(|m| {
+            m.borrow_mut().remove(&StorablePrincipal(principal));
+        });
+        LATEST_SUCCESSFUL_SAMPLES.with(|m| {
             m.borrow_mut().remove(&StorablePrincipal(principal));
         });
         SAMPLES.with(|m| {
@@ -1497,6 +1554,52 @@ pub(crate) fn record_sample(target: Principal, sample: Sample) -> Result<(), Rec
         .checked_add(1)
         .ok_or(RecordSampleError::SequenceOverflow)?;
     let slot = meta.next_slot;
+    let oldest_after_write = oldest_retained_sequence(total_writes);
+    let sample_is_successful =
+        sample.balance.is_some() && sample.state != types::PublicTargetState::Unreachable;
+    if sample_is_successful {
+        LATEST_SUCCESSFUL_SAMPLES.with(|m| {
+            m.borrow_mut()
+                .insert(StorablePrincipal(target), StoredSample::V2(sample.clone()));
+        });
+        meta.latest_successful_sequence = Some(Some(total_writes));
+    } else {
+        match meta.latest_successful_sequence {
+            Some(Some(sequence)) if oldest_after_write.is_some_and(|oldest| sequence >= oldest) => {
+            }
+            Some(Some(_)) => {
+                // Since this was the newest success, if it fell out of the
+                // ring every older successful sample fell out first.
+                LATEST_SUCCESSFUL_SAMPLES.with(|m| {
+                    m.borrow_mut().remove(&StorablePrincipal(target));
+                });
+                meta.latest_successful_sequence = Some(None);
+            }
+            Some(None) => {}
+            None => {
+                // One-time bounded backfill for V1/V2 metadata. Do this only
+                // during an update; queries never mutate stable memory.
+                let previous = list_samples(target, None, types::MAX_SAMPLES_PER_TARGET)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .find(|(_, prior)| {
+                        prior.balance.is_some()
+                            && prior.state != types::PublicTargetState::Unreachable
+                    });
+                if let Some((sequence, prior)) = previous {
+                    LATEST_SUCCESSFUL_SAMPLES.with(|m| {
+                        m.borrow_mut()
+                            .insert(StorablePrincipal(target), StoredSample::V2(prior));
+                    });
+                    meta.latest_successful_sequence = Some(Some(sequence));
+                } else {
+                    meta.latest_successful_sequence = Some(None);
+                }
+            }
+        }
+    }
     SAMPLES.with(|m| {
         m.borrow_mut().insert(
             SampleKey {
@@ -1513,35 +1616,14 @@ pub(crate) fn record_sample(target: Principal, sample: Sample) -> Result<(), Rec
     // A status reply can be successful while reporting an installed/stopped
     // target, but only a genuine balance observation is a successful sample
     // for stale-age/last-known-balance purposes.
-    if sample.balance.is_some() && sample.state != types::PublicTargetState::Unreachable {
+    if sample_is_successful {
         meta.last_success_at_secs = Some(sample.timestamp_secs);
     }
     SAMPLE_META.with(|m| {
         m.borrow_mut()
-            .insert(StorablePrincipal(target), StoredSampleMeta::V2(meta));
+            .insert(StorablePrincipal(target), StoredSampleMeta::V3(meta));
     });
     Ok(())
-}
-
-/// The chronological (oldest-to-newest) physical-slot order for a ring whose
-/// metadata is `(filled_slots, next_slot)`.
-///
-/// Before the first wrap (`filled_slots < MAX_SAMPLES_PER_TARGET`),
-/// `record_sample` always keeps `next_slot == filled_slots` (both start at 0
-/// and advance together), so slot order `0..filled_slots` already IS write
-/// order. Once the ring is full (`filled_slots == MAX_SAMPLES_PER_TARGET`),
-/// the slot about to be overwritten next (`next_slot`) holds the oldest
-/// surviving sample, and the slot just before it (`next_slot - 1`, wrapping)
-/// holds the newest — so the chronological order rotates to start at
-/// `next_slot` and wrap around through the rest of the ring.
-fn chronological_slot_order(filled_slots: u32, next_slot: u32) -> Vec<u32> {
-    if filled_slots < MAX_SAMPLES_PER_TARGET_U32 {
-        (0..filled_slots).collect()
-    } else {
-        (next_slot..MAX_SAMPLES_PER_TARGET_U32)
-            .chain(0..next_slot)
-            .collect()
-    }
 }
 
 /// The oldest logical sequence number (1-indexed, matching `total_writes`)
@@ -1605,7 +1687,6 @@ pub(crate) fn list_samples(
     limit: usize,
 ) -> Result<Vec<(u64, Sample)>, SampleCursorError> {
     let meta = sample_meta(target).unwrap_or_default();
-    let order = chronological_slot_order(meta.filled_slots, meta.next_slot);
     let oldest = oldest_retained_sequence(meta.total_writes);
     let start_sequence = match cursor {
         None => oldest.unwrap_or(1),
@@ -1620,26 +1701,34 @@ pub(crate) fn list_samples(
             seq + 1
         }
     };
-    let base = oldest.unwrap_or(start_sequence);
-    Ok(SAMPLES.with(|m| {
-        let map = m.borrow();
-        order
-            .iter()
-            .enumerate()
-            .filter_map(|(i, slot)| {
-                let seq = base + i as u64;
-                if seq < start_sequence {
-                    return None;
-                }
-                map.get(&SampleKey {
-                    principal: target,
-                    slot: *slot,
-                })
-                .map(|v| (seq, v.into_current()))
+    let Some(oldest) = oldest else {
+        return Ok(Vec::new());
+    };
+    let start_sequence = start_sequence.max(oldest);
+    Ok((start_sequence..=meta.total_writes)
+        .take(limit)
+        .filter_map(|sequence| {
+            sample_at_sequence(target, sequence).map(|sample| (sequence, sample))
+        })
+        .collect())
+}
+
+/// Directly reads one logical sequence from the sample ring's physical slot.
+/// This keeps latest-sample and paginated reads proportional to the requested
+/// rows instead of scanning or allocating the whole ring.
+fn sample_at_sequence(target: Principal, sequence: u64) -> Option<Sample> {
+    if sequence == 0 {
+        return None;
+    }
+    let slot = ((sequence - 1) % MAX_SAMPLES_PER_TARGET_U32 as u64) as u32;
+    SAMPLES.with(|m| {
+        m.borrow()
+            .get(&SampleKey {
+                principal: target,
+                slot,
             })
-            .take(limit)
-            .collect()
-    }))
+            .map(|stored| stored.into_current())
+    })
 }
 
 pub(crate) fn sample_meta(target: Principal) -> Option<SampleMeta> {
@@ -1655,13 +1744,43 @@ pub(crate) fn sample_meta(target: Principal) -> Option<SampleMeta> {
 /// numerically greatest slot.
 pub(crate) fn latest_sample(target: Principal) -> Option<Sample> {
     let meta = sample_meta(target)?;
-    let sequence = meta.total_writes.checked_sub(1)?;
-    list_samples(target, Some(sequence), 1)
-        .ok()
-        .and_then(|mut rows| rows.pop().map(|(_, sample)| sample))
+    sample_at_sequence(target, meta.total_writes)
 }
 
 pub(crate) fn latest_successful_sample(target: Principal) -> Option<Sample> {
+    let meta = sample_meta(target)?;
+    if let Some(sequence) = meta.latest_successful_sequence {
+        match sequence {
+            None => return None,
+            Some(sequence) => {
+                let oldest = oldest_retained_sequence(meta.total_writes);
+                if oldest.is_some_and(|oldest| sequence >= oldest && sequence <= meta.total_writes)
+                {
+                    let cached = LATEST_SUCCESSFUL_SAMPLES.with(|m| {
+                        m.borrow()
+                            .get(&StorablePrincipal(target))
+                            .map(|stored| stored.into_current())
+                    });
+                    let from_ring = sample_at_sequence(target, sequence);
+                    if let (Some(cached), Some(from_ring)) = (cached, from_ring) {
+                        if cached == from_ring
+                            && cached.balance.is_some()
+                            && cached.state != types::PublicTargetState::Unreachable
+                        {
+                            return Some(cached);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Legacy V1/V2 metadata has no sequence cache. Its first subsequent
+    // sample write upgrades the metadata and performs a one-time backfill.
+    latest_successful_sample_from_ring(target)
+}
+
+fn latest_successful_sample_from_ring(target: Principal) -> Option<Sample> {
     list_samples(target, None, types::MAX_SAMPLES_PER_TARGET)
         .ok()
         .into_iter()
@@ -3738,7 +3857,7 @@ mod tests {
                 "duplicate stable MemoryId {id:?} (store {label:?}) — pick an unused slot"
             );
         }
-        assert_eq!(MEMORY_LAYOUT.len(), 20, "expected exactly 20 memory ids");
+        assert_eq!(MEMORY_LAYOUT.len(), 21, "expected exactly 21 memory ids");
     }
 
     // ── round-trip tests, one per stable structure ──
@@ -3767,7 +3886,7 @@ mod tests {
     }
 
     #[test]
-    fn single_operator_setup_replaces_signers_once_and_clears_only_open_approvals() {
+    fn single_operator_setup_cancels_removed_proposers_and_clears_retained_approvals() {
         let old_signer_a = test_signer(1);
         let old_signer_b = test_signer(2);
         init_test_state(vec![old_signer_a, old_signer_b], 2, 1_000_000);
@@ -3796,6 +3915,18 @@ mod tests {
         closed.status = ProposalStatus::Executed;
         insert_proposal(closed).unwrap();
 
+        let retained_operator = crate::telemetry_access::operator_principals()[0];
+        let mut retained_open = ProposalRecord::new(
+            3,
+            ProposalPayload::AddSigner {
+                signer: test_signer(5),
+            },
+            retained_operator,
+            12,
+        );
+        retained_open.record_approval(old_signer_a);
+        insert_proposal(retained_open).unwrap();
+
         let operator = crate::telemetry_access::operator_principals()[0];
         assert_eq!(configure_single_operator_governance(operator), Ok(true));
         let config = global_config();
@@ -3805,7 +3936,10 @@ mod tests {
         );
         assert_eq!(config.approval_threshold, 1);
         assert!(!single_operator_setup_available());
-        assert!(get_proposal(1).unwrap().approvals().is_empty());
+        assert_eq!(get_proposal(1).unwrap().status, ProposalStatus::Cancelled);
+        assert_eq!(get_proposal(1).unwrap().approval_count(), 2);
+        assert_eq!(get_proposal(3).unwrap().status, ProposalStatus::Open);
+        assert!(get_proposal(3).unwrap().approvals().is_empty());
         assert_eq!(get_proposal(2).unwrap().approval_count(), 1);
 
         let changed_config = GlobalConfig {
@@ -3825,16 +3959,28 @@ mod tests {
 
     #[test]
     fn upgrade_marks_existing_single_operator_governance_as_already_setup() {
+        let operators = crate::telemetry_access::operator_principals();
         set_global_config(GlobalConfig {
-            signers: crate::telemetry_access::operator_principals(),
+            signers: operators,
             approval_threshold: 1,
             global_policy: test_global_policy(1_000_000),
         });
         set_single_operator_setup_used(false);
+        let stale_proposer = test_signer(77);
+        insert_proposal(ProposalRecord::new(
+            1,
+            ProposalPayload::AddSigner {
+                signer: test_signer(78),
+            },
+            stale_proposer,
+            10,
+        ))
+        .unwrap();
 
         migrate_single_operator_setup_usage_on_upgrade();
 
         assert!(!single_operator_setup_available());
+        assert_eq!(get_proposal(1).unwrap().status, ProposalStatus::Cancelled);
     }
 
     #[test]
@@ -4772,6 +4918,77 @@ mod tests {
             slot0.unwrap().timestamp_secs,
             types::MAX_SAMPLES_PER_TARGET as u64
         );
+        assert_eq!(
+            latest_sample(target).unwrap().timestamp_secs,
+            types::MAX_SAMPLES_PER_TARGET as u64
+        );
+    }
+
+    #[test]
+    fn latest_successful_sample_cache_survives_failed_observations() {
+        let global = test_global_policy(1_000);
+        let target = register_test_target(1, &global);
+        let success = test_sample(10, PublicTargetState::Healthy);
+        record_sample(target, success.clone()).unwrap();
+        record_sample(
+            target,
+            Sample {
+                timestamp_secs: 20,
+                balance: None,
+                state: PublicTargetState::Unreachable,
+                reported_operational_healthy: None,
+                burn_cycles_per_hour: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            sample_meta(target).unwrap().latest_successful_sequence,
+            Some(Some(1))
+        );
+        assert_eq!(latest_successful_sample(target), Some(success));
+    }
+
+    #[test]
+    fn latest_successful_sample_cache_expires_when_its_ring_slot_is_recycled() {
+        let global = test_global_policy(1_000);
+        let target = register_test_target(1, &global);
+        record_sample(target, test_sample(1, PublicTargetState::Healthy)).unwrap();
+        let failed = Sample {
+            timestamp_secs: 2,
+            balance: None,
+            state: PublicTargetState::Unreachable,
+            reported_operational_healthy: None,
+            burn_cycles_per_hour: None,
+        };
+        for at in 0..types::MAX_SAMPLES_PER_TARGET {
+            let mut sample = failed.clone();
+            sample.timestamp_secs += at as u64;
+            record_sample(target, sample).unwrap();
+        }
+
+        assert_eq!(
+            sample_meta(target).unwrap().latest_successful_sequence,
+            Some(None)
+        );
+        assert_eq!(latest_successful_sample(target), None);
+    }
+
+    #[test]
+    fn legacy_sample_meta_v2_decodes_without_a_success_sequence_cache() {
+        let legacy = StoredSampleMeta::V2(SampleMetaV2 {
+            next_slot: 1,
+            filled_slots: 1,
+            last_success_at_secs: Some(10),
+            last_attempt_at_secs: Some(10),
+            total_writes: 1,
+        });
+        let decoded = <StoredSampleMeta as Storable>::from_bytes(Cow::Owned(
+            candid::encode_one(legacy).unwrap(),
+        ))
+        .into_current();
+        assert_eq!(decoded.latest_successful_sequence, None);
+        assert_eq!(decoded.total_writes, 1);
     }
 
     #[test]
@@ -4800,10 +5017,11 @@ mod tests {
             last_success_at_secs: Some(1),
             last_attempt_at_secs: Some(1),
             total_writes: u64::MAX,
+            latest_successful_sequence: None,
         };
         SAMPLE_META.with(|m| {
             m.borrow_mut()
-                .insert(StorablePrincipal(target), StoredSampleMeta::V2(seeded_meta));
+                .insert(StorablePrincipal(target), StoredSampleMeta::V3(seeded_meta));
         });
 
         let result = record_sample(target, test_sample(1_000, PublicTargetState::Healthy));
@@ -7856,7 +8074,7 @@ mod tests {
                 // `next_slot != 0` state — use V2 directly with a
                 // `total_writes` that is actually consistent with
                 // `next_slot == 5` after wrapping past a full ring once.
-                StoredSampleMeta::V2(SampleMeta {
+                StoredSampleMeta::V2(SampleMetaV2 {
                     next_slot: 5,
                     filled_slots: MAX_SAMPLES_PER_TARGET_U32,
                     last_success_at_secs: None,

@@ -1,6 +1,5 @@
 use super::config::{
-    monad_default_register_arg, monad_ecdsa_key_name, MONAD_CHAIN_ID,
-    MONAD_ICUSD_DECIMALS,
+    monad_default_register_arg, monad_ecdsa_key_name, MONAD_CHAIN_ID, MONAD_ICUSD_DECIMALS,
 };
 use crate::chains::config::{ChainId, GasStrategy};
 

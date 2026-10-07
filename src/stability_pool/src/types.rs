@@ -228,6 +228,7 @@ impl DepositPosition {
 pub struct NativeXrpPendingPayout {
     pub claim_id: u64,
     pub collateral_type: Principal,
+    pub collateral_price_e8s: u64,
     pub vault_id: u64,
     pub drops: u64,
     pub payout_address: String,
@@ -270,6 +271,10 @@ pub struct NativeXrpAbsorbIntent {
     pub collateral_price_e8s: u64,
     pub allocations: Vec<XrpSpPayoutAllocation>,
     pub burn_created_at_time_ns: u64,
+    /// `None` on a legacy snapshot means dispatch history is unknown. `Some(true)` is
+    /// persisted before awaiting the ledger so a retry reuses the exact tuple.
+    #[serde(default)]
+    pub burn_attempted: Option<bool>,
     pub status: NativeXrpAbsorbIntentStatus,
     pub burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
     pub backend_result: Option<XrpSpAbsorbResult>,
@@ -436,6 +441,10 @@ pub struct ChainSpAbsorbIntent {
     pub icusd_to_burn_e8s: u64,
     pub stables_consumed: BTreeMap<Principal, u64>,
     pub burn_created_at_time_ns: u64,
+    /// `None` on a legacy snapshot means dispatch history is unknown. `Some(true)` is
+    /// persisted before awaiting the ledger so a retry reuses the exact tuple.
+    #[serde(default)]
+    pub burn_attempted: Option<bool>,
     pub status: ChainSpAbsorbIntentStatus,
     pub burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
     pub backend_result: Option<ChainStabilityPoolLiquidationResult>,
@@ -557,11 +566,39 @@ pub struct PendingRefund {
     pub id: u64,
     pub user: Principal,
     pub token_ledger: Principal,
-    /// Gross amount still held by the pool (native decimals). The payout
-    /// sends this minus the ledger transfer fee.
+    /// Full principal still owed to the user (native decimals). The protocol
+    /// pays the transfer fee from separately receipt-funded capacity.
     pub amount: u64,
     pub reason: String,
     pub created_at: u64,
+    /// Missing on pre-migration rows: their dispatch history is ambiguous and
+    /// they must remain held pending independent ledger evidence.
+    #[serde(default)]
+    pub transfer_attempted: Option<bool>,
+    /// Exact ICRC-1 identity persisted before the first payout call.
+    #[serde(default)]
+    pub transfer_created_at_time_ns: Option<u64>,
+    #[serde(default)]
+    pub transfer_fee: Option<u64>,
+    #[serde(default)]
+    pub transfer_memo: Option<Vec<u8>>,
+    /// Monotonic local attempt number. Changed only after an audited complete
+    /// history scan proves a TooOld transfer had no ledger effect.
+    #[serde(default)]
+    pub transfer_attempt_no: Option<u32>,
+    /// True only after the configured icUSD ledger returned typed TooOld for
+    /// this exact persisted transfer tuple.
+    #[serde(default)]
+    pub transfer_too_old_rejected: Option<bool>,
+    /// Cursor and fixed log tip for bounded, archive-aware no-effect scans.
+    #[serde(default)]
+    pub transfer_history_scan_cursor: Option<u64>,
+    #[serde(default)]
+    pub transfer_history_scan_tip: Option<u64>,
+    /// Fee capacity reserved from receipt-backed protocol funding. Retained
+    /// across ambiguous replies so another refund cannot consume it.
+    #[serde(default)]
+    pub protocol_fee_reserved: Option<u64>,
 }
 
 /// A durable, batched forward of interest that could not be allocated because
@@ -650,6 +687,501 @@ pub struct UserStabilityPosition {
     pub total_claimed_gains: BTreeMap<Principal, u64>,
     pub total_usd_value_e8s: u64,
     pub total_interest_earned_e8s: u64,
+}
+
+/// Exact ICRC-2 deposit identity retained while its transfer outcome is
+/// unresolved. `caller` is the key in the state map; the remaining fields plus
+/// the fixed pool-owned transfer arguments identify the ledger request.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDepositIntent {
+    pub token_ledger: Principal,
+    pub amount: u64,
+    pub transfer_created_at_time_ns: u64,
+    /// Ledger receipt captured from an `Ok` or exact `Duplicate` reply. It
+    /// lets a later retry finalize locally without another ledger call.
+    #[serde(default)]
+    pub transfer_block_index: Option<u64>,
+    /// Number of same-intent ledger dispatches still awaiting a reply. Missing
+    /// means the snapshot predates attempt tracking and must be treated as
+    /// ambiguous during upgrade recovery.
+    #[serde(default)]
+    pub in_flight_attempts: Option<u32>,
+    /// Once an ambiguous reply or interrupted pre-upgrade dispatch is observed,
+    /// a later rejection cannot prove that every earlier dispatch had no effect.
+    pub ambiguous_seen: bool,
+    /// True only after the configured ledger returned typed TooOld for this
+    /// exact persisted transfer_from identity. Once set, normal deposit retries
+    /// are fenced until exact receipt or complete history reconciliation.
+    #[serde(default)]
+    pub too_old_rejected: Option<bool>,
+    /// Cursor and fixed ICRC-3 log tip for bounded, archive-aware no-effect
+    /// scans. The range is [cursor, tip).
+    #[serde(default)]
+    pub history_scan_cursor: Option<u64>,
+    #[serde(default)]
+    pub history_scan_tip: Option<u64>,
+    /// Persistent lease preventing concurrent archive scans for this intent.
+    /// Upgrade recovery clears it so a bounded scan can resume.
+    #[serde(default)]
+    pub reconciliation_in_progress: Option<bool>,
+    #[serde(default)]
+    pub reconciliation_generation: Option<u64>,
+    #[serde(default)]
+    pub reconciliation_started_at_ns: Option<u64>,
+    /// Earliest IC time at which another proof request may start. Negative
+    /// block probes and each history page set a finite cooldown.
+    #[serde(default)]
+    pub reconciliation_next_allowed_at_ns: Option<u64>,
+    /// Number of fresh identities admitted after complete no-effect scans.
+    #[serde(default)]
+    pub attempt_no: Option<u32>,
+}
+
+/// Exact outbound ICRC-1 payout retained while the ledger outcome is unknown.
+/// The caller+ledger key permits one unresolved payout per position and keeps
+/// new withdrawals/claims fenced until this exact tuple is resolved.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingOutboundPayout {
+    pub kind: OutboundPayoutKind,
+    /// Original public request amount, retained so a corrected partial
+    /// withdrawal can still be retried through the legacy endpoint.
+    pub request_amount: u64,
+    pub gross_amount: u64,
+    pub transfer_amount: u64,
+    pub transfer_fee: u64,
+    pub transfer_created_at_time_ns: u64,
+    pub transfer_memo: Vec<u8>,
+    /// True from the moment the tuple is durably prepared until a response is
+    /// recorded. Upgrade recovery treats this state as ambiguous.
+    #[serde(default)]
+    pub dispatch_in_flight: bool,
+    /// Once any attempt may have reached the ledger, a later typed rejection
+    /// cannot justify restoring the debited position.
+    #[serde(default)]
+    pub ambiguous_seen: bool,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutboundPayoutKind {
+    Withdraw,
+    CollateralClaim,
+}
+
+/// Caller-scoped view of an unresolved outbound payout. The exact transfer
+/// tuple is exposed so clients can distinguish a held payout from no claim.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingOutboundPayoutStatus {
+    pub ledger: Principal,
+    pub kind: OutboundPayoutKind,
+    pub request_amount: u64,
+    pub gross_amount: u64,
+    pub transfer_amount: u64,
+    pub transfer_fee: u64,
+    pub transfer_created_at_time_ns: u64,
+    pub transfer_memo: Vec<u8>,
+    pub dispatch_in_flight: bool,
+    pub ambiguous_seen: bool,
+    pub last_error: Option<String>,
+}
+
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpLiquidationToken {
+    IcUsd,
+    CKUSDT,
+    CKUSDC,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2Request {
+    pub request_id: u64,
+    pub vault_id: u64,
+    /// Maximum selected-ledger principal pull in raw units, including any
+    /// CK-stable surcharge but excluding the ICRC-2 transfer fee.
+    pub amount: u64,
+    pub token: SpLiquidationToken,
+    pub approval: SpLiquidationApprovalReceipt,
+}
+
+/// Local monotonic intent persisted before the approval await. It deliberately
+/// has no approval receipt because that block does not exist yet.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2Intent {
+    pub request_id: u64,
+    pub vault_id: u64,
+    /// Maximum selected-ledger principal pull in raw units, including any
+    /// CK-stable surcharge but excluding the ICRC-2 transfer fee.
+    pub amount: u64,
+    pub token: SpLiquidationToken,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2StatusView {
+    pub stability_pool: Principal,
+    pub request_id: u64,
+    pub request: Option<SpLiquidationV2Request>,
+    pub status: SpLiquidationV2Status,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpLiquidationPayoutNoEffectEvidence {
+    BadFee { expected_fee_raw: u64 },
+    InsufficientFunds { reported_balance_raw: u64 },
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpLiquidationV2Status {
+    Unseen,
+    StablePullPending {
+        tuple: SpLiquidationStablePullTuple,
+        candidate_block_index: Option<u64>,
+        last_error: Option<String>,
+    },
+    StablePullRefundPending {
+        stable_pull_receipt: Option<SpLiquidationStablePullReceipt>,
+        tuple: SpLiquidationStableRefundTuple,
+        candidate_block_index: Option<u64>,
+        last_error: Option<String>,
+    },
+    StablePullRefunded {
+        stable_pull_receipt: Option<SpLiquidationStablePullReceipt>,
+        refund_receipt: SpLiquidationStableRefundReceipt,
+        reason: String,
+    },
+    CollateralPayoutPending {
+        stable_pull_receipt: SpLiquidationStablePullReceipt,
+        result: SpLiquidationV2SuccessWithFee,
+        tuple: SpLiquidationPayoutTuple,
+        candidate_block_index: Option<u64>,
+        last_error: Option<String>,
+    },
+    CollateralPayoutSupersessionPending {
+        stable_pull_receipt: SpLiquidationStablePullReceipt,
+        result: SpLiquidationV2SuccessWithFee,
+        predecessor: SpLiquidationPayoutTuple,
+        replacement: SpLiquidationPayoutTuple,
+        evidence: SpLiquidationPayoutNoEffectEvidence,
+        generation: u32,
+    },
+    Complete {
+        stable_pull_receipt: SpLiquidationStablePullReceipt,
+        result: SpLiquidationV2SuccessWithFee,
+        payout_receipt: SpLiquidationPayoutReceipt,
+    },
+    Rejected {
+        reason: String,
+    },
+    Acknowledged,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationStablePullTuple {
+    pub op_nonce: u128,
+    pub ledger: Principal,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub spender: icrc_ledger_types::icrc1::account::Account,
+    /// Expected ICRC-2 destination. For the supported icUSD minting account,
+    /// the official ledger records the pull as a legacy-shaped `burn` block
+    /// with no `to` field; this persisted account binds the requested call.
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    pub amount_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationStablePullReceipt {
+    pub block_index: u64,
+    pub tuple: SpLiquidationStablePullTuple,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationPayoutTuple {
+    pub op_nonce: u128,
+    pub ledger: Principal,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub gross_amount_raw: u64,
+    pub net_amount_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub collateral_type: Principal,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationPayoutReceipt {
+    pub block_index: u64,
+    pub tuple: SpLiquidationPayoutTuple,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationStableRefundTuple {
+    pub op_nonce: u128,
+    pub ledger: Principal,
+    /// Logical backend minter account; the actual ICRC-3 mint block has no
+    /// `from` field and must be proven against the exact destination/amount.
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub principal_refund_raw: u64,
+    pub approval_fee_refund_raw: u64,
+    pub pull_fee_refund_raw: u64,
+    pub amount_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationStableRefundReceipt {
+    pub block_index: u64,
+    pub tuple: SpLiquidationStableRefundTuple,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2SuccessWithFee {
+    pub block_index: u64,
+    pub fee_amount_paid: u64,
+    pub collateral_amount_received: Option<u64>,
+    pub debt_liquidated_e8s: Option<u64>,
+    pub stable_pulled_e6s: Option<u64>,
+    pub xrp_claim_id: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpLiquidationV2LocalPhase {
+    ApprovalPending,
+    BackendPending,
+    CollateralPending,
+    StableDebited,
+    Complete,
+    Rejected,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2ApprovalTuple {
+    pub ledger: Principal,
+    pub owner: icrc_ledger_types::icrc1::account::Account,
+    pub spender: icrc_ledger_types::icrc1::account::Account,
+    pub allowance_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub expires_at_ns: u64,
+    pub fee_accounted: bool,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationApprovalTuple {
+    pub ledger: Principal,
+    pub owner: icrc_ledger_types::icrc1::account::Account,
+    pub spender: icrc_ledger_types::icrc1::account::Account,
+    pub allowance_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub expires_at_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationApprovalReceipt {
+    pub block_index: u64,
+    pub tuple: SpLiquidationApprovalTuple,
+}
+
+/// Durable identity for an approval fee in the legacy liquidation executor.
+/// The exact ICRC-2 tuple is retried after interruption and fee accounting is
+/// applied only after its ICRC-3 block has been verified.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingSpLegacyApprovalFee {
+    pub vault_id: u64,
+    pub approval: SpLiquidationApprovalTuple,
+    #[serde(default)]
+    pub dispatch_in_flight: bool,
+    #[serde(default)]
+    pub ambiguous_seen: bool,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingSpLiquidationV2 {
+    pub request: SpLiquidationV2Intent,
+    #[serde(default)]
+    pub backend_request: Option<SpLiquidationV2Request>,
+    pub stablecoin_ledger: Principal,
+    pub collateral_type: Principal,
+    pub collateral_price_e8s: u64,
+    pub approval: SpLiquidationV2ApprovalTuple,
+    #[serde(default)]
+    pub approval_dispatch_in_flight: bool,
+    #[serde(default)]
+    pub approval_ambiguous_seen: bool,
+    #[serde(default)]
+    pub approval_proven_no_effect: bool,
+    #[serde(default)]
+    pub approval_candidate_block_index: Option<u64>,
+    #[serde(default)]
+    pub approval_receipt_block_index: Option<u64>,
+    pub phase: SpLiquidationV2LocalPhase,
+    pub ambiguous_seen: bool,
+    pub stable_pull_receipt: Option<SpLiquidationStablePullReceipt>,
+    #[serde(default)]
+    pub stable_pull_tuple: Option<SpLiquidationStablePullTuple>,
+    #[serde(default)]
+    pub stable_pull_candidate_block_index: Option<u64>,
+    pub payout_tuple: Option<SpLiquidationPayoutTuple>,
+    pub payout_candidate_block_index: Option<u64>,
+    #[serde(default)]
+    pub payout_receipt: Option<SpLiquidationPayoutReceipt>,
+    /// Present only for rows created with the supersession protocol. Missing
+    /// legacy state fails closed and cannot adopt a replacement tuple.
+    #[serde(default)]
+    pub payout_supersession_generation: Option<u32>,
+    #[serde(default)]
+    pub payout_supersession_predecessor: Option<SpLiquidationPayoutTuple>,
+    #[serde(default)]
+    pub payout_supersession_replacement: Option<SpLiquidationPayoutTuple>,
+    #[serde(default)]
+    pub payout_supersession_evidence: Option<SpLiquidationPayoutNoEffectEvidence>,
+    pub result: Option<SpLiquidationV2SuccessWithFee>,
+    pub stable_debit_applied: bool,
+    pub pending_collateral_allocations: BTreeMap<Principal, u64>,
+    #[serde(default)]
+    pub approval_fee_debits: BTreeMap<Principal, u64>,
+    #[serde(default)]
+    pub stable_pull_fee_debits: BTreeMap<Principal, u64>,
+    #[serde(default)]
+    pub stable_principal_debits: BTreeMap<Principal, u64>,
+    #[serde(default)]
+    pub stable_refund_tuple: Option<SpLiquidationStableRefundTuple>,
+    #[serde(default)]
+    pub stable_refund_candidate_block_index: Option<u64>,
+    #[serde(default)]
+    pub stable_refund_receipt: Option<SpLiquidationStableRefundReceipt>,
+    #[serde(default)]
+    pub stable_refund_applied: bool,
+    #[serde(default)]
+    pub backend_acknowledged: bool,
+    pub last_error: Option<String>,
+}
+
+/// Immutable depositor input pinned before a 3USD V2 approval/backend await.
+/// This is SP-local stable state, not a public Candid endpoint type.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpThreeUsdDepositorSnapshot {
+    pub balance: u64,
+    pub collateral_opted_in: bool,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpThreeUsdApprovalIntent {
+    pub ledger: Principal,
+    pub allowance: u64,
+    pub fee: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub expires_at_ns: u64,
+}
+
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpThreeUsdAbsorbPhase {
+    ApprovalPending,
+    ApprovalProven,
+    BackendPending,
+    Held,
+    TerminalProven,
+    Complete,
+}
+
+/// Receipt identity already checked by the future cross-canister driver
+/// against the backend's exact status and ledger proofs.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpThreeUsdTerminalEvidence {
+    PreTransferRejected {
+        backend_vault_id: u64,
+        backend_absorb_id: u64,
+        request: rumi_protocol_backend::state::ThreeUsdReserveIngressRequest,
+        reason: String,
+    },
+    Absorbed {
+        backend_vault_id: u64,
+        backend_absorb_id: u64,
+        request: rumi_protocol_backend::state::ThreeUsdReserveIngressRequest,
+        transfer_tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
+        transfer_block_index: u64,
+        observed_transfer_fee: u64,
+        proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+        result: rumi_protocol_backend::state::ThreeUsdReserveIngressResult,
+        proportional_refund:
+            Option<rumi_protocol_backend::state::ThreeUsdReserveIngressRefundReceipt>,
+        payout_receipt: rumi_protocol_backend::state::ThreeUsdReserveIngressPayoutReceipt,
+    },
+    FailedAfterTransfer {
+        backend_vault_id: u64,
+        backend_absorb_id: u64,
+        request: rumi_protocol_backend::state::ThreeUsdReserveIngressRequest,
+        transfer_tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
+        transfer_block_index: u64,
+        observed_transfer_fee: u64,
+        proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+        error: String,
+        full_refund: rumi_protocol_backend::state::ThreeUsdReserveIngressRefundReceipt,
+    },
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpThreeUsdAllocationPlan {
+    pub principal_debits: BTreeMap<Principal, u64>,
+    pub approval_fee_debits: BTreeMap<Principal, u64>,
+    pub collateral_credits: BTreeMap<Principal, u64>,
+    pub principal_consumed: u64,
+    pub refund_amount_received: u64,
+    pub total_stable_debit: u64,
+    pub collateral_received: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingSpThreeUsdAbsorb {
+    pub absorb_id: u64,
+    pub vault_id: u64,
+    pub stability_pool: Principal,
+    pub protocol_canister_id: Principal,
+    pub ledger: Principal,
+    pub collateral_type: Principal,
+    /// Positive admission-time oracle snapshot retained for audit. Terminal
+    /// history uses the separately authenticated backend execution price.
+    pub collateral_price_e8s: u64,
+    pub started_at_ns: u64,
+    pub debt_covered_e8s: u64,
+    pub three_usd_amount: u64,
+    pub virtual_price_e18: u128,
+    pub aggregate_balance: u64,
+    pub depositor_snapshot: BTreeMap<Principal, SpThreeUsdDepositorSnapshot>,
+    pub approval: SpThreeUsdApprovalIntent,
+    pub approval_dispatch_may_have_happened: bool,
+    pub approval_receipt_block_index: Option<u64>,
+    pub backend_dispatch_may_have_happened: bool,
+    pub phase: SpThreeUsdAbsorbPhase,
+    pub terminal: Option<SpThreeUsdTerminalEvidence>,
+    pub allocation: Option<SpThreeUsdAllocationPlan>,
+    pub last_error: Option<String>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2LocalStatus {
+    pub request_id: u64,
+    pub vault_id: u64,
+    pub amount: u64,
+    pub token: SpLiquidationToken,
+    pub stablecoin_ledger: Principal,
+    pub collateral_type: Principal,
+    pub phase: SpLiquidationV2LocalPhase,
+    pub approval_fee_accounted: bool,
+    pub approval_receipt_block_index: Option<u64>,
+    pub stable_debit_applied: bool,
+    pub backend_acknowledged: bool,
+    pub last_error: Option<String>,
 }
 
 // ──────────────────────────────────────────────────────────────

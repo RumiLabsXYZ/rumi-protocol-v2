@@ -18,15 +18,23 @@ pub trait ChainAdapter {
 
     async fn verify_deposit(&self, tx_hash: &str) -> Result<DepositRecord, ChainAdapterError>;
 
-    async fn sign_withdrawal(&self, req: WithdrawalRequest) -> Result<SignedWithdrawal, ChainAdapterError>;
+    async fn sign_withdrawal(
+        &self,
+        req: WithdrawalRequest,
+    ) -> Result<SignedWithdrawal, ChainAdapterError>;
 
     async fn sign_mint(&self, instr: MintInstruction) -> Result<SignedMint, ChainAdapterError>;
 
-    async fn sign_burn(&self, amount_e8s: u128, burner: Principal) -> Result<SignedBurn, ChainAdapterError>;
+    async fn sign_burn(
+        &self,
+        amount_e8s: u128,
+        burner: Principal,
+    ) -> Result<SignedBurn, ChainAdapterError>;
 
     async fn fetch_finality(&self) -> Result<FinalitySnapshot, ChainAdapterError>;
 
-    async fn observe_event(&self, from_block: u64) -> Result<Vec<DepositRecord>, ChainAdapterError>;
+    async fn observe_event(&self, from_block: u64)
+        -> Result<Vec<DepositRecord>, ChainAdapterError>;
 }
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug)]

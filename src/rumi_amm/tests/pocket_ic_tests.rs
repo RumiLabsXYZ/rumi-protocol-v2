@@ -590,6 +590,23 @@ fn test_pause_unpause() {
         WasmResult::Reject(msg) => panic!("swap rejected: {}", msg),
     }
 
+    // A pause blocks new risk but must still allow LPs to exit.
+    let mut request_id = vec![0u8; 32];
+    request_id[7] = 1;
+    let exit_result = env.pic.update_call(
+        env.amm_id,
+        env.user,
+        "remove_liquidity_v2",
+        encode_args((request_id, pool_id.clone(), 1_000_000u128, 0u128, 0u128)).unwrap(),
+    ).expect("remove_liquidity_v2 call failed");
+    match exit_result {
+        WasmResult::Reply(bytes) => {
+            let res: Result<(u128, u128), AmmError> = decode_one(&bytes).expect("decode failed");
+            res.expect("paused pool must allow LP exit");
+        }
+        WasmResult::Reject(msg) => panic!("remove_liquidity_v2 rejected: {}", msg),
+    }
+
     // Unpause
     let unpause_result = env.pic
         .update_call(env.amm_id, env.admin, "unpause_pool", encode_one(pool_id.clone()).unwrap())

@@ -18,3 +18,11 @@ members = [
     "src/flaky_ledger",
 ]
 resolver = "2"
+
+[profile.release]
+# Financial canisters trap and roll back on arithmetic overflow instead of
+# silently wrapping in production Wasm. Explicit wrapping_* operations remain.
+overflow-checks = true
+
+[profile.release.package.rumi_protocol_backend]
+opt-level = "z"

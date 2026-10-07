@@ -28,8 +28,8 @@ use candid::Principal;
 use solana_pubkey::Pubkey;
 
 use crate::chains::adapter::{
-    ChainAdapter, ChainAdapterError, DepositRecord, FinalitySnapshot, MintInstruction,
-    SignedBurn, SignedMint, SignedWithdrawal, WithdrawalRequest,
+    ChainAdapter, ChainAdapterError, DepositRecord, FinalitySnapshot, MintInstruction, SignedBurn,
+    SignedMint, SignedWithdrawal, WithdrawalRequest,
 };
 use crate::chains::config::ChainId;
 use crate::state::read_state;
@@ -157,13 +157,12 @@ impl ChainAdapter for SolanaAdapter {
         let nonce = decode_pubkey_bytes(&nonce_pk, "nonce")?;
 
         // 3. Read the current durable nonce (the message's recent_blockhash).
-        let durable_nonce =
-            sol_rpc::get_durable_nonce(&nonce_addr)
-                .await
-                .map_err(|message| ChainAdapterError::RpcError {
-                    provider: "sol_rpc".to_string(),
-                    message,
-                })?;
+        let durable_nonce = sol_rpc::get_durable_nonce(&nonce_addr)
+            .await
+            .map_err(|message| ChainAdapterError::RpcError {
+                provider: "sol_rpc".to_string(),
+                message,
+            })?;
 
         // 4. Build the nonce-led transfer message (advance_nonce first), serialize,
         //    sign once with the settlement key (single required signer), assemble
@@ -212,13 +211,12 @@ impl ChainAdapter for SolanaAdapter {
         let nonce = decode_pubkey_bytes(&nonce_pk, "nonce")?;
 
         // 3. Read the durable nonce.
-        let durable_nonce =
-            sol_rpc::get_durable_nonce(&nonce_addr)
-                .await
-                .map_err(|message| ChainAdapterError::RpcError {
-                    provider: "sol_rpc".to_string(),
-                    message,
-                })?;
+        let durable_nonce = sol_rpc::get_durable_nonce(&nonce_addr)
+            .await
+            .map_err(|message| ChainAdapterError::RpcError {
+                provider: "sol_rpc".to_string(),
+                message,
+            })?;
 
         // 4. Build the nonce-led mint message (authority = settlement is both the
         //    mint authority and the nonce authority), serialize, sign once with
@@ -255,18 +253,18 @@ impl ChainAdapter for SolanaAdapter {
     /// commitment level replaces EVM block depth: `confirmed` is the latest
     /// (super-majority) slot, `finalized` is the rooted/finalized slot.
     async fn fetch_finality(&self) -> Result<FinalitySnapshot, ChainAdapterError> {
-        let finalized_block = sol_rpc::get_slot("finalized")
-            .await
-            .map_err(|message| ChainAdapterError::RpcError {
+        let finalized_block = sol_rpc::get_slot("finalized").await.map_err(|message| {
+            ChainAdapterError::RpcError {
                 provider: "sol_rpc".to_string(),
                 message,
-            })?;
-        let latest_block = sol_rpc::get_slot("confirmed")
-            .await
-            .map_err(|message| ChainAdapterError::RpcError {
+            }
+        })?;
+        let latest_block = sol_rpc::get_slot("confirmed").await.map_err(|message| {
+            ChainAdapterError::RpcError {
                 provider: "sol_rpc".to_string(),
                 message,
-            })?;
+            }
+        })?;
         Ok(FinalitySnapshot {
             latest_block,
             finalized_block,

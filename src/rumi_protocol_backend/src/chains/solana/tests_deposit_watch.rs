@@ -110,10 +110,18 @@ fn deposit_watch_flips_to_mintpending_and_enqueues_mint_when_balance_covers_decl
 
     let observed = declared; // exactly covers (>= is the gate)
     let transitioned = verify_deposit_and_enqueue_mint_in_state(&mut s, 7, observed, 999);
-    assert_eq!(transitioned, Ok(true), "balance covers declared -> transition + enqueue");
+    assert_eq!(
+        transitioned,
+        Ok(true),
+        "balance covers declared -> transition + enqueue"
+    );
 
     let v = s.chain_vaults.get(&7).expect("vault present");
-    assert_eq!(v.status, ChainVaultStatus::MintPending, "flipped to MintPending");
+    assert_eq!(
+        v.status,
+        ChainVaultStatus::MintPending,
+        "flipped to MintPending"
+    );
 
     // Exactly one Mint op enqueued, for this vault and the intended amount.
     let q = s
@@ -122,9 +130,16 @@ fn deposit_watch_flips_to_mintpending_and_enqueues_mint_when_balance_covers_decl
         .expect("queue exists");
     assert_eq!(q.pending_len(), 1, "exactly one op enqueued");
     let op = q.pending.values().next().expect("the enqueued op");
-    assert!(matches!(op.status, SettlementOpStatus::Queued), "op is Queued");
+    assert!(
+        matches!(op.status, SettlementOpStatus::Queued),
+        "op is Queued"
+    );
     match &op.kind {
-        SettlementOpKind::Mint { recipient, amount_e8s, vault_id } => {
+        SettlementOpKind::Mint {
+            recipient,
+            amount_e8s,
+            vault_id,
+        } => {
             assert_eq!(*vault_id, 7);
             assert_eq!(*amount_e8s, HUNDRED_ICUSD_E8S);
             assert_eq!(recipient, &valid_solana_address(7));
@@ -144,7 +159,11 @@ fn deposit_watch_is_noop_when_balance_below_declared() {
     assert_eq!(res, Ok(false), "below declared -> no-op");
 
     let v = s.chain_vaults.get(&7).expect("vault present");
-    assert_eq!(v.status, ChainVaultStatus::AwaitingDeposit, "stays AwaitingDeposit");
+    assert_eq!(
+        v.status,
+        ChainVaultStatus::AwaitingDeposit,
+        "stays AwaitingDeposit"
+    );
     assert_eq!(
         s.settlement_queues
             .get(&SOLANA_CHAIN_ID)

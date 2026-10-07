@@ -8,7 +8,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-candid = "0.10.6"
+candid = { version = "0.10.6", features = ["value"] }
 ic-cdk = "0.12.0"
 ic-cdk-timers = "0.10.0"
 ic-cdk-macros = "0.8.3"
@@ -20,6 +20,9 @@ sha2 = "0.10"
 ciborium = "0.2"
 ic-canisters-http-types = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
 rumi_cycle_manager = { path = "../rumi_cycle_manager" }
+
+[features]
+test_endpoints = []
 
 [dev-dependencies]
 pocket-ic = "6.0.0"

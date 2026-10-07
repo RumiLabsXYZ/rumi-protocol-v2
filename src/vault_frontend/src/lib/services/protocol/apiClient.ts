@@ -16,7 +16,15 @@ import type {
     Fees,
     SuccessWithFee,
     ProtocolError,
-    OpenVaultSuccess
+    OpenVaultSuccess,
+    InboundCollateralRequestState,
+    InboundCollateralStatusView,
+    RepaymentV2RequestState,
+    RepaymentV2StatusView,
+    StableRepaymentV2RequestState,
+    StableRepaymentV2StatusView,
+    LiquidityV2RequestState,
+    LiquidityV2StatusView,
   } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
 import {
   walletOperations,
@@ -65,12 +73,45 @@ import {
 } from './rawSnapshotCache';
 import { TokenService } from '../tokenService';
 import { mapLiquidationSuccessWithFee } from '../xrpPayoutHelpers';
+import {
+  repaymentV2Disposition,
+  repaymentV2StatusMatchesIntent,
+  repaymentV2TransportOutcome,
+  type RepaymentV2Intent,
+} from '$lib/utils/repaymentV2Intent';
+import { stableRepaymentV2Outcome, stableRepaymentV2RequiredAllowance, stableRepaymentV2TransportOutcome, unwrapStableRepaymentV2Status } from '$lib/utils/stableRepaymentV2';
+import { liquidityV2ClaimIdentityMatches, liquidityV2Disposition, liquidityV2MayAdoptClaimAmount, liquidityV2StatusHasOwner, liquidityV2StatusMatchesIntent, type LiquidityV2Intent, type LiquidityV2Operation } from '$lib/utils/liquidityV2Intent';
+import { fetchLedgerFee, fetchLedgerFeeStrict, getFreshCachedLedgerFee } from '../ledgerFeeService';
+
+type StableRepaymentV2Token = 'CKUSDT' | 'CKUSDC';
+interface StableRepaymentV2Intent {
+  version: 2;
+  owner: string;
+  network: string;
+  requestId: string;
+  vaultId: string;
+  token: StableRepaymentV2Token;
+  amountRawE6: string;
+  approvalAttempted: boolean;
+  backendDispatchAttempted: boolean;
+}
+export interface BoundLiquidityV2Result {
+  kind: BoundActionOutcomeKind;
+  status: LiquidityV2StatusView | null;
+  errorMessage: string | null;
+  approvalMayHaveMutated: boolean;
+  amountAdopted?: boolean;
+}
 
 
 
 // Constants from backend
 export const E8S = 100_000_000;
 export let MIN_ICUSD_AMOUNT = 10_000_000; // 0.10 icUSD default; updated from protocol status
+const REDEMPTION_INGRESS_PAUSED = 'Redemption submissions are paused until transfer recovery is available. No icUSD was approved or submitted.';
+function redemptionIngressIsPaused(): boolean {
+  return true;
+}
 
 /** Update the minimum icUSD amount from protocol status (called after fetching status). */
 export function updateMinIcusdAmount(amountE8s: number) {
@@ -158,6 +199,29 @@ export interface BoundBorrowFromVaultResult {
   feePaidRaw: bigint | null;
   errorMessage: string | null;
   submittedIcusdRaw: bigint;
+}
+
+/** Result of opening collateral through the request-ID-backed ingress journal. */
+export interface BoundOpenVaultV2Result {
+  kind: BoundActionOutcomeKind;
+  status: InboundCollateralStatusView | null;
+  errorMessage: string | null;
+  approvalMayHaveMutated: boolean;
+}
+
+/** Result of adding collateral through the durable inbound collateral journal. */
+export interface BoundAddMarginV2Result {
+  kind: BoundActionOutcomeKind;
+  status: InboundCollateralStatusView | null;
+  errorMessage: string | null;
+  approvalMayHaveMutated: boolean;
+}
+
+export interface BoundRepaymentV2Result {
+  kind: BoundActionOutcomeKind;
+  status: RepaymentV2StatusView | null;
+  errorMessage: string | null;
+  approvalMayHaveMutated: boolean;
 }
 
 export type RedeemQuotedResult = VaultOperationResult & {
@@ -1127,6 +1191,361 @@ static async borrowFromVault(vaultId: number, icusdAmount: number): Promise<Vaul
  * executeSequentialOperation — no global mutex, no before/after vault-cache refresh; the caller
  * owns reconciliation.
  */
+static async getCollateralIngressStateBound(
+  ctx: ActionBoundContext,
+  ledgerCanisterId: string
+): Promise<InboundCollateralRequestState> {
+  assertActionBoundContextCurrent(ctx);
+  const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+  assertActionBoundContextCurrent(ctx);
+  const result = await actor.get_my_collateral_ingress_state(Principal.fromText(ledgerCanisterId));
+  assertActionBoundContextCurrent(ctx);
+  if ('Err' in result) throw new Error(ApiClient.formatProtocolError(result.Err));
+  return result.Ok;
+}
+
+static async getCollateralIngressBound(
+  ctx: ActionBoundContext,
+  ledgerCanisterId: string,
+  requestId: bigint
+): Promise<InboundCollateralStatusView | null> {
+  assertActionBoundContextCurrent(ctx);
+  const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+  assertActionBoundContextCurrent(ctx);
+  const result = await actor.get_my_collateral_ingress(Principal.fromText(ledgerCanisterId), requestId);
+  assertActionBoundContextCurrent(ctx);
+  return result[0] ?? null;
+}
+
+/**
+ * Opens a vault through the durable inbound collateral request journal. The caller must persist
+ * and reuse requestId (decimal Nat) across reloads; this method intentionally never allocates or
+ * rotates an ID. A thrown/lost reply stays ambiguous unless the owner-scoped journal query
+ * returns the exact request row/result.
+ */
+static async openVaultV2Bound(
+  ctx: ActionBoundContext,
+  requestId: bigint,
+  collateralAmountRaw: bigint,
+  collateralTypePrincipal?: string
+): Promise<BoundOpenVaultV2Result> {
+  const ctPrincipal = collateralTypePrincipal || CANISTER_IDS.ICP_LEDGER;
+  const collateralInfo = collateralStore.getCollateralInfo(ctPrincipal);
+  const ledgerCanisterId = collateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
+  const symbol = collateralInfo?.symbol ?? 'ICP';
+  let approvalDispatched = false;
+  let existingPendingRequest = false;
+  const result = (kind: BoundActionOutcomeKind, status: InboundCollateralStatusView | null, errorMessage: string | null) => ({
+    kind, status, errorMessage, approvalMayHaveMutated: approvalDispatched,
+  });
+
+  if (requestId <= 0n || collateralAmountRaw <= 0n) {
+    return result('predispatch_aborted', null, 'Invalid collateral request ID or amount.');
+  }
+  let collateralTypeOpt: [] | [Principal];
+  try {
+    assertActionBoundContextCurrent(ctx);
+    collateralTypeOpt = ctPrincipal === CANISTER_IDS.ICP_LEDGER ? [] : [Principal.fromText(ctPrincipal)];
+    const ingressState = await ApiClient.getCollateralIngressStateBound(ctx, ledgerCanisterId);
+    assertActionBoundContextCurrent(ctx);
+    const active = ingressState.active_request[0] ?? null;
+    const latest = ingressState.latest_result[0] ?? null;
+    const exactStatus = [active, latest].find((view) => view?.request_id === requestId) ?? null;
+    if (exactStatus) {
+      const operationMatches = 'Open' in exactStatus.operation &&
+        exactStatus.operation.Open.collateral_type.toText() === ctPrincipal;
+      if (exactStatus.owner.toText() !== ctx.expectedPrincipalText || exactStatus.ledger.toText() !== ledgerCanisterId ||
+          exactStatus.amount_raw !== collateralAmountRaw || !operationMatches) {
+        return result('predispatch_aborted', exactStatus, 'This request ID is already bound to different collateral arguments. No approval or new open was submitted.');
+      }
+      if ('Complete' in exactStatus.phase || 'Rejected' in exactStatus.phase) {
+        return 'Complete' in exactStatus.phase
+          ? result('dispatched_ok', exactStatus, null)
+          : result('predispatch_aborted', exactStatus, exactStatus.result[0] && 'Rejected' in exactStatus.result[0]
+              ? exactStatus.result[0].Rejected.message : 'The backend recorded this request as rejected.');
+      }
+      existingPendingRequest = true;
+    }
+    if (active && active.request_id !== requestId) {
+      return result('predispatch_aborted', active, 'Another collateral request is active for this ledger. No approval or open was submitted.');
+    }
+    if (!exactStatus && requestId !== ingressState.next_request_id) {
+      return result('predispatch_aborted', null, 'The request ID is old, missing, or not the next owner-scoped ID. Reconcile the journal before opening.');
+    }
+    const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
+    assertActionBoundContextCurrent(ctx);
+    const requiredAllowance = collateralAmountRaw + BigInt(collateralInfo?.ledgerFee ?? 10_000);
+    const currentAllowance = existingPendingRequest
+      ? requiredAllowance
+      : await walletOperations.checkCollateralAllowanceBound(ctx, CONFIG.currentCanisterId, ledgerCanisterId);
+    assertActionBoundContextCurrent(ctx);
+    const needsApproval = !existingPendingRequest && currentAllowance < requiredAllowance;
+
+    if (signerAgent) {
+      if (needsApproval) {
+        assertActionBoundContextCurrent(ctx);
+        const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL) as any;
+        assertActionBoundContextCurrent(ctx);
+        approvalDispatched = true;
+        const approveResult = await ledgerActor.icrc2_approve({
+          amount: collateralAmountRaw + BigInt(collateralInfo?.ledgerFee ?? 10_000) * 2n,
+          spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
+          expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [], from_subaccount: [], created_at_time: [],
+        });
+        assertActionBoundContextCurrent(ctx);
+        if (approveResult && 'Err' in approveResult) {
+          return result('predispatch_aborted', exactStatus, `${symbol} approval failed: ${JSON.stringify(approveResult.Err)}`);
+        }
+      }
+    } else {
+      if (needsApproval) {
+        const spender = CONFIG.currentCanisterId;
+        approvalDispatched = true;
+        const approval = await walletOperations.approveCollateralTransferBound(
+          ctx, collateralAmountRaw + BigInt(collateralInfo?.ledgerFee ?? 10_000) * 2n, spender, ledgerCanisterId
+        );
+        assertActionBoundContextCurrent(ctx);
+        if (!approval.success) return result('predispatch_aborted', null, approval.error || `Failed to approve ${symbol} transfer`);
+      }
+    }
+  } catch (error) {
+    return result('predispatch_aborted', null, error instanceof Error ? error.message : 'Unable to prepare collateral approval.');
+  }
+
+  let actor: _SERVICE;
+  try {
+    assertActionBoundContextCurrent(ctx);
+    actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+    assertActionBoundContextCurrent(ctx);
+  } catch (error) {
+    return result('predispatch_aborted', null, error instanceof Error ? error.message : 'Session changed before open dispatch.');
+  }
+
+  let response;
+  try {
+    assertActionBoundContextCurrent(ctx);
+    response = await actor.open_vault_v2(requestId, collateralAmountRaw, collateralTypeOpt);
+    assertActionBoundContextCurrent(ctx);
+  } catch (error) {
+    let status: InboundCollateralStatusView | null = null;
+    try { status = await ApiClient.getCollateralIngressBound(ctx, ledgerCanisterId, requestId); } catch { /* remains ambiguous */ }
+    return result('ambiguous_transport', status, error instanceof Error ? error.message : 'Open reply was lost or unresolved.');
+  }
+
+  if ('Ok' in response) {
+    const returnedStatus = response.Ok;
+    const exactReply = returnedStatus.owner.toText() === ctx.expectedPrincipalText &&
+      returnedStatus.ledger.toText() === ledgerCanisterId && returnedStatus.request_id === requestId &&
+      returnedStatus.amount_raw === collateralAmountRaw && 'Open' in returnedStatus.operation &&
+      returnedStatus.operation.Open.collateral_type.toText() === ctPrincipal;
+    if (exactReply) return result('dispatched_ok', returnedStatus, null);
+    let exactJournalStatus: InboundCollateralStatusView | null = null;
+    try { exactJournalStatus = await ApiClient.getCollateralIngressBound(ctx, ledgerCanisterId, requestId); } catch { /* remains ambiguous */ }
+    return result('ambiguous_transport', exactJournalStatus, 'The backend returned a collateral row that does not match this owner, request ID, ledger, and amount. Reconcile the exact request before continuing.');
+  }
+  let status: InboundCollateralStatusView | null = null;
+  try { status = await ApiClient.getCollateralIngressBound(ctx, ledgerCanisterId, requestId); } catch { /* keep typed error and journal unresolved */ }
+  return result('dispatched_err', status, ApiClient.formatProtocolError(response.Err));
+}
+
+/**
+ * Adds collateral using the owner-scoped durable request journal. The caller
+ * supplies and persists the request ID; this method never allocates or rotates
+ * one. Existing Pending/Held rows are replayed exactly without another
+ * approval. `beforeApprovalDispatch` must persist the caller's
+ * approval-may-have-mutated marker synchronously before an approval call.
+ */
+static async addMarginV2Bound(
+  ctx: ActionBoundContext,
+  requestId: bigint,
+  vaultId: number,
+  collateralAmountRaw: bigint,
+  collateralTypePrincipal: string,
+  approvalWasPreviouslyDispatched = false,
+  beforeApprovalDispatch?: () => void,
+  confirmAmbiguousApprovalRetry?: () => boolean,
+): Promise<BoundAddMarginV2Result> {
+  const collateralInfo = collateralStore.getCollateralInfo(collateralTypePrincipal);
+  const ledgerCanisterId = collateralInfo?.ledgerCanisterId ?? collateralTypePrincipal;
+  const symbol = collateralInfo?.symbol ?? 'collateral';
+  let approvalDispatched = approvalWasPreviouslyDispatched;
+  const result = (kind: BoundActionOutcomeKind, status: InboundCollateralStatusView | null, errorMessage: string | null) => ({
+    kind, status, errorMessage, approvalMayHaveMutated: approvalDispatched,
+  });
+  const matches = (status: InboundCollateralStatusView | null): status is InboundCollateralStatusView => !!status &&
+    status.owner.toText() === ctx.expectedPrincipalText &&
+    status.ledger.toText() === ledgerCanisterId &&
+    status.request_id === requestId &&
+    status.amount_raw === collateralAmountRaw &&
+    'AddMargin' in status.operation &&
+    status.operation.AddMargin.vault_id === BigInt(vaultId);
+  const complete = (status: InboundCollateralStatusView | null) => matches(status) &&
+    'Complete' in status.phase && status.result[0] !== undefined && 'AddMargin' in status.result[0];
+  const rejectedMessage = (status: InboundCollateralStatusView | null) =>
+    matches(status) && 'Rejected' in status.phase && status.result[0] && 'Rejected' in status.result[0]
+      ? status.result[0].Rejected.message : 'The backend recorded this collateral request as rejected.';
+
+  if (requestId <= 0n || !Number.isSafeInteger(vaultId) || vaultId <= 0 || collateralAmountRaw <= 0n) {
+    return result('predispatch_aborted', null, 'Invalid collateral request ID, vault, or amount.');
+  }
+  const minimumDeposit = collateralInfo?.minCollateralDeposit ?? 0;
+  if (minimumDeposit > 0 && collateralAmountRaw < BigInt(minimumDeposit)) {
+    return result('predispatch_aborted', null, `Amount too low. Minimum required: ${minimumDeposit} raw units.`);
+  }
+
+  let exactStatus: InboundCollateralStatusView | null = null;
+  let existingPendingRequest = false;
+  try {
+    assertActionBoundContextCurrent(ctx);
+    const state = await ApiClient.getCollateralIngressStateBound(ctx, ledgerCanisterId);
+    assertActionBoundContextCurrent(ctx);
+    const active = state.active_request[0] ?? null;
+    const latest = state.latest_result[0] ?? null;
+    exactStatus = [active, latest].find((view) => view?.request_id === requestId) ?? null;
+    if (exactStatus && !matches(exactStatus)) {
+      return result('predispatch_aborted', exactStatus, 'This request ID is bound to different collateral arguments. No approval or top-up was submitted.');
+    }
+    if (complete(exactStatus)) return result('dispatched_ok', exactStatus, null);
+    if (exactStatus && 'Rejected' in exactStatus.phase) {
+      return result('predispatch_aborted', exactStatus, rejectedMessage(exactStatus));
+    }
+    existingPendingRequest = exactStatus !== null;
+    if (active && active.request_id !== requestId) {
+      return result('predispatch_aborted', active, 'Another collateral request is active for this ledger. No approval or top-up was submitted.');
+    }
+    if (!exactStatus && requestId !== state.next_request_id) {
+      return result('predispatch_aborted', null, 'The request ID is old, missing, or not the next owner-scoped ID. Reconcile the journal before adding collateral.');
+    }
+
+    if (!existingPendingRequest) {
+      const requiredAllowance = collateralAmountRaw + BigInt(collateralInfo?.ledgerFee ?? 10_000);
+      const currentAllowance = await walletOperations.checkCollateralAllowanceBound(ctx, CONFIG.currentCanisterId, ledgerCanisterId);
+      assertActionBoundContextCurrent(ctx);
+      if (currentAllowance < requiredAllowance) {
+        let needsApproval = true;
+        if (approvalWasPreviouslyDispatched) {
+          if (confirmAmbiguousApprovalRetry?.() !== true) {
+            return result('predispatch_aborted', null, `A prior approval may have landed, but current ${symbol} allowance is still below the required amount. Confirm an approval retry to continue; no collateral top-up was submitted.`);
+          }
+          assertActionBoundContextCurrent(ctx);
+
+          // The confirmation may take time. Re-read the durable journal and live allowance
+          // immediately before a second approval so an exact pending row is replayed without
+          // another approval, and a newly sufficient allowance is reused as-is.
+          const retryState = await ApiClient.getCollateralIngressStateBound(ctx, ledgerCanisterId);
+          assertActionBoundContextCurrent(ctx);
+          const retryActive = retryState.active_request[0] ?? null;
+          const retryLatest = retryState.latest_result[0] ?? null;
+          const retryStatus = [retryActive, retryLatest].find((view) => view?.request_id === requestId) ?? null;
+          if (retryStatus && !matches(retryStatus)) {
+            return result('predispatch_aborted', retryStatus, 'The request ID is bound to different collateral arguments. No second approval or top-up was submitted.');
+          }
+          if (complete(retryStatus)) return result('dispatched_ok', retryStatus, null);
+          if (retryStatus && 'Rejected' in retryStatus.phase) {
+            return result('predispatch_aborted', retryStatus, rejectedMessage(retryStatus));
+          }
+          if (retryActive && retryActive.request_id !== requestId) {
+            return result('predispatch_aborted', retryActive, 'Another collateral request became active. No second approval or top-up was submitted.');
+          }
+          if (!retryStatus && requestId !== retryState.next_request_id) {
+            return result('predispatch_aborted', null, 'The request ID is no longer the next owner-scoped ID. Reconcile the journal before retrying approval.');
+          }
+          if (retryStatus) {
+            // A matching Pending/Held row owns the exact pull tuple. Retry it without a new
+            // approval; the backend journal, not allowance or balance deltas, decides its state.
+            existingPendingRequest = true;
+            needsApproval = false;
+          } else {
+            const retryAllowance = await walletOperations.checkCollateralAllowanceBound(ctx, CONFIG.currentCanisterId, ledgerCanisterId);
+            assertActionBoundContextCurrent(ctx);
+            if (retryAllowance < requiredAllowance) {
+              // Fall through to exactly one user-confirmed approval. Its amount includes the
+              // approval fee and the subsequent transfer fee.
+            } else {
+              // Another approval may have completed while the confirmation was open.
+              needsApproval = false;
+            }
+          }
+        }
+        if (needsApproval) {
+          if (isOisyWallet()) {
+            assertActionBoundContextCurrent(ctx);
+            const signerAgent = await pnp.getSignerAgent();
+            assertActionBoundContextCurrent(ctx);
+            if (!signerAgent) return result('predispatch_aborted', null, 'Oisy signer is unavailable before approval.');
+            const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL) as any;
+            assertActionBoundContextCurrent(ctx);
+            beforeApprovalDispatch?.();
+            approvalDispatched = true;
+            const approveResult = await ledgerActor.icrc2_approve({
+              amount: collateralAmountRaw + BigInt(collateralInfo?.ledgerFee ?? 10_000) * 2n,
+              spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
+              expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [], from_subaccount: [], created_at_time: [],
+            });
+            assertActionBoundContextCurrent(ctx);
+            if (approveResult && 'Err' in approveResult) {
+              return result('predispatch_aborted', null, `${symbol} approval failed: ${JSON.stringify(approveResult.Err)}. Its final allowance effect is not assumed; reconcile before retrying.`);
+            }
+          } else {
+            beforeApprovalDispatch?.();
+            approvalDispatched = true;
+            const approval = await walletOperations.approveCollateralTransferBound(
+              ctx,
+              collateralAmountRaw + BigInt(collateralInfo?.ledgerFee ?? 10_000) * 2n,
+              CONFIG.currentCanisterId,
+              ledgerCanisterId,
+            );
+            assertActionBoundContextCurrent(ctx);
+            if (!approval.success) return result('predispatch_aborted', null, `${approval.error || `Failed to approve ${symbol} transfer`}. Its final allowance effect is not assumed; reconcile before retrying.`);
+          }
+          const allowanceAfterApproval = await walletOperations.checkCollateralAllowanceBound(ctx, CONFIG.currentCanisterId, ledgerCanisterId);
+          assertActionBoundContextCurrent(ctx);
+          if (allowanceAfterApproval < requiredAllowance) {
+            return result('predispatch_aborted', null, `Approval was submitted, but allowance is still below the required ${symbol} amount. No top-up was submitted.`);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    return result('predispatch_aborted', exactStatus, error instanceof Error ? error.message : 'Unable to preflight collateral request.');
+  }
+
+  let actor: _SERVICE;
+  try {
+    assertActionBoundContextCurrent(ctx);
+    actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+    assertActionBoundContextCurrent(ctx);
+  } catch (error) {
+    return result('predispatch_aborted', exactStatus, error instanceof Error ? error.message : 'Session changed before top-up dispatch.');
+  }
+
+  let response;
+  try {
+    assertActionBoundContextCurrent(ctx);
+    response = await actor.add_margin_v2(requestId, { vault_id: BigInt(vaultId), amount: collateralAmountRaw });
+    assertActionBoundContextCurrent(ctx);
+  } catch (error) {
+    let status: InboundCollateralStatusView | null = null;
+    try { status = await ApiClient.getCollateralIngressBound(ctx, ledgerCanisterId, requestId); } catch { /* remains unresolved */ }
+    return result(complete(status) ? 'dispatched_ok' : 'ambiguous_transport', status,
+      complete(status) ? null : error instanceof Error ? error.message : 'Top-up reply was lost or unresolved.');
+  }
+
+  if ('Ok' in response) {
+    const returnedStatus = response.Ok;
+    if (matches(returnedStatus)) return result('dispatched_ok', returnedStatus, null);
+    let status: InboundCollateralStatusView | null = null;
+    try { status = await ApiClient.getCollateralIngressBound(ctx, ledgerCanisterId, requestId); } catch { /* remains unresolved */ }
+    return result(complete(status) ? 'dispatched_ok' : 'ambiguous_transport', status,
+      complete(status) ? null : 'The backend returned a collateral row that does not match this owner, request, ledger, vault, and amount. Reconcile the exact request.');
+  }
+  let status: InboundCollateralStatusView | null = null;
+  try { status = await ApiClient.getCollateralIngressBound(ctx, ledgerCanisterId, requestId); } catch { /* keep journal unresolved */ }
+  if (complete(status)) return result('dispatched_ok', status, null);
+  return result('dispatched_err', status, matches(status) && 'Rejected' in status.phase
+    ? rejectedMessage(status) : ApiClient.formatProtocolError(response.Err));
+}
+
 static async openVaultAndBorrowBound(
   ctx: ActionBoundContext,
   collateralAmountRaw: bigint,
@@ -1362,14 +1781,19 @@ static async borrowFromVaultBound(
  * @param collateralAmount Amount in human-readable units
  * @param collateralTypePrincipal Optional: the collateral type principal. If omitted, looks up from vault data or defaults to ICP.
  */
-static async addMarginToVault(vaultId: number, collateralAmount: number, collateralTypePrincipal?: string): Promise<VaultOperationResult> {
+static async addMarginToVault(vaultId: number, collateralAmount: number, collateralTypePrincipal?: string, actionContext?: ActionBoundContext): Promise<VaultOperationResult> {
   return ApiClient.executeSequentialOperation(async () => {
     try {
+      const assertCurrent = () => {
+        if (actionContext) assertActionBoundContextCurrent(actionContext);
+      };
+      assertCurrent();
       // Resolve collateral info — try the provided principal, or look up from vault, or default to ICP
       let ctPrincipal = collateralTypePrincipal;
       if (!ctPrincipal) {
         // Try to get collateral type from the user's vault data
         const vault = await ApiClient.getVaultById(vaultId);
+        assertCurrent();
         ctPrincipal = vault?.collateralType || CANISTER_IDS.ICP_LEDGER;
       }
       const ctInfo = collateralStore.getCollateralInfo(ctPrincipal);
@@ -1395,6 +1819,7 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
       // The canister validates balance anyway.
       if (ctPrincipal === CANISTER_IDS.ICP_LEDGER && !isOisyWallet()) {
         const hasSufficientBalance = await walletOperations.checkSufficientBalance(Number(bufferAmount) / ctDecimalsFactor);
+        assertCurrent();
         if (!hasSufficientBalance) {
           return {
             success: false,
@@ -1403,22 +1828,28 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         }
       }
 
-      const actor = await ApiClient.getAuthenticatedActor();
+      const actor = actionContext
+        ? await ApiClient.getBoundAuthenticatedActor(actionContext)
+        : await ApiClient.getAuthenticatedActor();
+      assertCurrent();
 
       // Snapshot pre-add collateral for the Oisy false-negative verifier.
       // We read RAW token units so we can compare with BigInt arithmetic.
       // Oisy reads the warm sync cache (no network await inside the click
       // gesture window); non-Oisy awaits a fresh snapshot.
       const beforeCollateral = isOisyWallet() ? ApiClient.getCachedRawCollateralAmount(vaultId) : await ApiClient.getRawCollateralAmount(vaultId);
+      assertCurrent();
 
       // ─── Oisy ICRC-112 batched path ───
       // Batches approve + add_margin into a single signer popup via ICRC-112.
       const marginSignerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
+      assertCurrent();
 
       if (marginSignerAgent) {
         console.log(`[Oisy] Sequential approve + add_margin for vault #${vaultId}`);
 
         const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL) as any;
+        assertCurrent();
 
         // 1) Approve (first Oisy consent screen).
         const approveResult = await ledgerActor.icrc2_approve({
@@ -1434,6 +1865,7 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
           from_subaccount: [],
           created_at_time: []
         });
+        assertCurrent();
         if (approveResult && 'Err' in approveResult) {
           return {
             success: false,
@@ -1442,6 +1874,7 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         }
 
         // 2) add_margin_to_vault (second consent screen), guarded against _arr.
+        assertCurrent();
         const marginResult = await callWithOisyFalseNegativeGuard(
           () => actor.add_margin_to_vault({
             vault_id: BigInt(vaultId),
@@ -1455,6 +1888,8 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
           },
           `Oisy add_margin ${collateralAmount} ${symbol} to vault #${vaultId}`
         );
+        try { assertCurrent(); }
+        catch { throw new Error('The add-margin call may have completed under the previous wallet. Check that wallet’s vault before retrying.'); }
 
         if (isOisyLandedSentinel(marginResult)) {
           return {
@@ -1485,7 +1920,10 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
       let currentAllowance;
 
       try {
-        currentAllowance = await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+        currentAllowance = actionContext
+          ? await walletOperations.checkCollateralAllowanceBound(actionContext, spenderCanisterId, ledgerCanisterId)
+          : await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+        assertCurrent();
         console.log(`Current ${symbol} allowance:`, currentAllowance.toString());
       } catch (err) {
         console.error('Error checking allowance:', err);
@@ -1500,9 +1938,11 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         console.log(`Requesting ${bufferAmount} raw (original: ${amountRaw} raw)`);
 
         try {
-          const approvalResult = await walletOperations.approveCollateralTransfer(
-            bufferAmount, spenderCanisterId, ledgerCanisterId
-          );
+          assertCurrent();
+          const approvalResult = actionContext
+            ? await walletOperations.approveCollateralTransferBound(actionContext, bufferAmount, spenderCanisterId, ledgerCanisterId)
+            : await walletOperations.approveCollateralTransfer(bufferAmount, spenderCanisterId, ledgerCanisterId);
+          assertCurrent();
 
           if (!approvalResult.success) {
             return {
@@ -1513,9 +1953,13 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
 
           // Short delay to allow approval to be processed
           await new Promise(resolve => setTimeout(resolve, 2000));
+          assertCurrent();
 
           // Verify approval worked
-          const newAllowance = await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+          const newAllowance = actionContext
+            ? await walletOperations.checkCollateralAllowanceBound(actionContext, spenderCanisterId, ledgerCanisterId)
+            : await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+          assertCurrent();
           console.log('New allowance after approval:', newAllowance.toString());
 
           if (newAllowance < amountRaw) {
@@ -1539,13 +1983,16 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         if (currentAllowance < bufferAmount) {
           console.log('Existing allowance is close to required amount, increasing for safety');
           try {
-            const approvalResult = await walletOperations.approveCollateralTransfer(
-              bufferAmount, spenderCanisterId, ledgerCanisterId
-            );
+            assertCurrent();
+            const approvalResult = actionContext
+              ? await walletOperations.approveCollateralTransferBound(actionContext, bufferAmount, spenderCanisterId, ledgerCanisterId)
+              : await walletOperations.approveCollateralTransfer(bufferAmount, spenderCanisterId, ledgerCanisterId);
+            assertCurrent();
 
             if (approvalResult.success) {
               console.log('Successfully increased allowance for future operations');
               await new Promise(resolve => setTimeout(resolve, 2000));
+              assertCurrent();
             } else {
               console.warn('Failed to increase allowance, but continuing with existing allowance');
             }
@@ -1566,6 +2013,7 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         amount: vaultArg.amount.toString()
       });
 
+      assertCurrent();
       const result = await callWithOisyFalseNegativeGuard(
         () => actor.add_margin_to_vault(vaultArg),
         async () => {
@@ -1576,6 +2024,8 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         },
         `add_margin ${collateralAmount} ${symbol} to vault #${vaultId}`
       );
+      try { assertCurrent(); }
+      catch { throw new Error('The add-margin call may have completed under the previous wallet. Check that wallet’s vault before retrying.'); }
 
       if (isOisyLandedSentinel(result)) {
         return {
@@ -1609,390 +2059,341 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
   }, vaultId); // Pass vaultId here to let executeSequentialOperation handle tracking
 }
   
+/** Compatibility entry point for the disabled no-ID legacy repayment route. */
+static async getRepaymentV2RequestStateBound(ctx: ActionBoundContext): Promise<RepaymentV2RequestState> {
+  assertActionBoundContextCurrent(ctx);
+  const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+  assertActionBoundContextCurrent(ctx);
+  const response = await actor.get_my_repayment_v2_request_state();
+  assertActionBoundContextCurrent(ctx);
+  if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+  return response.Ok;
+}
+
+static async getRepaymentV2StatusBound(ctx: ActionBoundContext, requestId: bigint): Promise<RepaymentV2StatusView | null> {
+  assertActionBoundContextCurrent(ctx);
+  const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+  assertActionBoundContextCurrent(ctx);
+  const response = await actor.get_my_repayment_v2_status(requestId);
+  assertActionBoundContextCurrent(ctx);
+  if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+  return response.Ok[0] ?? null;
+}
+
 /**
- * Repay icUSD to a vault.
- *
- * For Oisy wallets: if the icUSD allowance is insufficient, batches
- * icrc2_approve + repay_to_vault into a single ICRC-112 popup.
+ * Reconcile and submit one exact owner-global repayment request. Existing rows
+ * are replayed without another approval; a missing compacted/old ID is never
+ * treated as permission to allocate or dispatch a new payment.
  */
-static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOperationResult> {
-  return ApiClient.executeSequentialOperation(async () => {
-    try {
-      console.log(`Repaying ${icusdAmount} icUSD to vault #${vaultId}`);
+static async repayV2Bound(
+  ctx: ActionBoundContext,
+  intent: RepaymentV2Intent,
+  beforeApprovalDispatch: () => void,
+  confirmAmbiguousApprovalRetry: () => boolean,
+  beforeBackendDispatch: () => void,
+): Promise<BoundRepaymentV2Result> {
+  let approvalMayHaveMutated = false;
+  const result = (kind: BoundActionOutcomeKind, status: RepaymentV2StatusView | null, errorMessage: string | null) => ({
+    kind, status, errorMessage, approvalMayHaveMutated,
+  });
+  const requestId = BigInt(intent.requestId);
+  const amountRaw = BigInt(intent.requestedAmountRaw);
+  const ledgerText = CONFIG.currentIcusdLedgerId;
+  if (ctx.expectedPrincipalText !== intent.owner || requestId <= 0n || amountRaw <= 0n || !/^\d+$/.test(intent.vaultId)) {
+    return result('predispatch_aborted', null, 'The saved repayment intent does not match this wallet or has invalid raw arguments.');
+  }
 
-      // Validate input is finite before any calculations
-      if (!isFinite(icusdAmount) || icusdAmount <= 0) {
-        return {
-          success: false,
-          error: `Invalid repayment amount: ${icusdAmount}. Amount must be a finite positive number.`
-        };
-      }
+  let state: RepaymentV2RequestState;
+  let status: RepaymentV2StatusView | null;
+  try {
+    status = await ApiClient.getRepaymentV2StatusBound(ctx, requestId);
+    state = await ApiClient.getRepaymentV2RequestStateBound(ctx);
+  } catch (error) {
+    return result('predispatch_aborted', null, `Could not preflight the owner repayment journal; no approval or repayment was submitted. ${error instanceof Error ? error.message : ''}`);
+  }
+  const active = state.active_request[0] ?? null;
+  const latest = state.latest_result[0] ?? null;
+  status = status ?? [active, latest].find((row) => row?.request_id === requestId) ?? null;
+  const matches = (row: RepaymentV2StatusView | null): row is RepaymentV2StatusView => !!row && repaymentV2StatusMatchesIntent(row, intent, ledgerText);
+  if (status && !matches(status)) {
+    return result('predispatch_aborted', status, 'This request ID is bound to different owner, ledger, vault, amount, or close arguments. No approval or payment was submitted.');
+  }
+  if (active && active.request_id !== requestId) {
+    return result('predispatch_aborted', active, 'Another owner-global repayment is active. Reconcile that exact request before starting another repayment.');
+  }
+  if (!status && requestId !== state.next_request_id) {
+    return result('predispatch_aborted', null, 'This repayment ID is no longer available in the retained journal. A missing old status is unknown, not proof of no payment; do not submit a replacement.');
+  }
 
-      if (icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
-        return {
-          success: false,
-          error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S} icUSD`
-        };
-      }
+  if (status) {
+    if ('Complete' in status.phase) return status.result[0]
+      ? result('dispatched_ok', status, null)
+      : result('ambiguous_transport', status, 'The journal marked repayment complete without a result receipt. Reconcile before proceeding.');
+    if ('Rejected' in status.phase) return result('dispatched_err', status, status.last_error[0] ?? 'The exact repayment request was rejected before completion.');
+    if ('CloseNeedsAdditionalRepayment' in status.phase) {
+      return result('dispatched_ok', status, 'The repayment receipt is recorded, but accrued interest prevented closing. The vault remains open; any further repayment must use a new request ID.');
+    }
+  }
 
-      const amountE8s = BigInt(Math.floor(icusdAmount * E8S));
-      const actor = await ApiClient.getAuthenticatedActor();
-      const vaultArg = {
-        vault_id: BigInt(vaultId),
-        amount: amountE8s
-      };
-
-      // Snapshot pre-repay borrowed amount for the Oisy false-negative
-      // verifier. Repay reduces borrowed by `amount`; interest accrual
-      // (timer-driven, slow) can offset the reduction slightly so we
-      // accept any directional decrease >= 50% of expected as a landed
-      // op. Anything smaller would be too noisy.
-      // Oisy reads the warm sync cache (no network await inside the click
-      // gesture window); non-Oisy awaits a fresh snapshot.
-      const beforeBorrowed = isOisyWallet() ? ApiClient.getCachedRawBorrowedE8s(vaultId) : await ApiClient.getRawBorrowedE8s(vaultId);
-
-      const verifyRepayLanded = async () => {
-        if (beforeBorrowed === null) return false;
-        const after = await ApiClient.getRawBorrowedE8s(vaultId);
-        if (after === null) return false;
-        // Borrowed went down by at least half the requested amount.
-        // (Interest accrual since the snapshot can shrink the visible
-        // delta; full debt close can put `after` at 0.)
-        const drop = beforeBorrowed - after;
-        return drop >= (amountE8s * 50n) / 100n || after === 0n;
-      };
-
-      // ─── Oisy ICRC-112 batched path ───
-      // Always batch approve+repay — skipping the allowance check eliminates an
-      // async canister query that burns the browser user gesture context. The approve
-      // is idempotent (overwrites with a large allowance each time).
+  const existingJournal = status !== null;
+  try {
+    if (!existingJournal) {
       const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
-      if (signerAgent) {
-        console.log(`[Oisy] Sequential icUSD approve + repay_to_vault`);
-        const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
-        const icusdLedgerActor = await walletStore.getActor(
-          CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL
-        ) as any;
-
-        // 1) Approve icUSD (first consent screen, Tier 1 native).
-        const approveResult = await icusdLedgerActor.icrc2_approve({
-          amount: LARGE_APPROVAL,
-          spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
-          expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
-          from_subaccount: [], created_at_time: []
-        });
-        if (approveResult && 'Err' in approveResult) {
-          return { success: false, error: `icUSD approval failed: ${JSON.stringify(approveResult.Err)}` };
+      assertActionBoundContextCurrent(ctx);
+      const ledgerFee = 100_000n;
+      const requiredAllowance = amountRaw + ledgerFee * 2n;
+      const currentAllowance = await walletOperations.checkIcusdAllowanceBound(ctx, CONFIG.currentCanisterId);
+      const needsApproval = currentAllowance < requiredAllowance;
+      if (needsApproval) {
+        if (intent.approvalAttempted && !confirmAmbiguousApprovalRetry()) {
+          return result('predispatch_aborted', null, 'The prior approval outcome is uncertain and the live allowance is still insufficient. No repayment was submitted.');
         }
-
-        // 2) repay_to_vault (second consent screen), guarded against _arr.
-        const result = await callWithOisyFalseNegativeGuard(
-          () => actor.repay_to_vault(vaultArg),
-          verifyRepayLanded,
-          `Oisy repay ${icusdAmount} icUSD to vault #${vaultId}`
-        );
-
-        if (isOisyLandedSentinel(result)) {
-          return { success: true, vaultId, blockIndex: undefined, oisyResilient: true };
-        }
-
-        if ('Ok' in result) {
-          return { success: true, vaultId, blockIndex: Number(result.Ok) };
+        beforeApprovalDispatch();
+        assertActionBoundContextCurrent(ctx);
+        approvalMayHaveMutated = true;
+        let approval: { success: boolean; error?: string };
+        if (signerAgent) {
+          const ledgerActor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL) as any;
+          assertActionBoundContextCurrent(ctx);
+          const response = await ledgerActor.icrc2_approve({
+            amount: requiredAllowance,
+            spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
+            expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
+            from_subaccount: [], created_at_time: [],
+          });
+          assertActionBoundContextCurrent(ctx);
+          approval = 'Err' in response
+            ? { success: false, error: `icUSD approval failed: ${JSON.stringify(response.Err)}` }
+            : { success: true };
         } else {
-          return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+          approval = await walletOperations.approveIcusdTransferBound(
+            ctx, requiredAllowance, CONFIG.currentCanisterId,
+          );
         }
+        if (!approval.success) return result('predispatch_aborted', null, approval.error || 'icUSD approval failed. Its outcome is retained for reconciliation.');
       }
-
-      // ─── Standard path (non-Oisy) ───
-      const result = await callWithOisyFalseNegativeGuard(
-        () => actor.repay_to_vault(vaultArg),
-        verifyRepayLanded,
-        `repay ${icusdAmount} icUSD to vault #${vaultId}`
-      );
-
-      if (isOisyLandedSentinel(result)) {
-        return { success: true, vaultId, blockIndex: undefined, oisyResilient: true };
-      }
-
-      if ('Ok' in result) {
-        return {
-          success: true,
-          vaultId,
-          blockIndex: Number(result.Ok)
-        };
-      } else {
-        return {
-          success: false,
-          error: ApiClient.formatProtocolError(result.Err)
-        };
-      }
-    } catch (err) {
-      console.error('Error repaying to vault:', err);
-      return {
-        success: false,
-        error: err instanceof Error ? err.message : 'Unknown error repaying to vault'
-      };
     }
-  }, vaultId);
+  } catch (error) {
+    return result('predispatch_aborted', status, error instanceof Error ? error.message : 'Approval or journal preflight failed.');
+  }
+
+  let actor: _SERVICE;
+  try {
+    assertActionBoundContextCurrent(ctx);
+    actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+    assertActionBoundContextCurrent(ctx);
+  } catch (error) {
+    return result('predispatch_aborted', status, error instanceof Error ? error.message : 'Session changed before repayment dispatch.');
+  }
+  const arg = { vault_id: BigInt(intent.vaultId), amount: amountRaw };
+  try {
+    beforeBackendDispatch();
+    assertActionBoundContextCurrent(ctx);
+    const response = intent.closeAfterRepay
+      ? await actor.repay_and_close_vault_v2(requestId, arg)
+      : await actor.repay_to_vault_v2(requestId, arg);
+    assertActionBoundContextCurrent(ctx);
+    if ('Ok' in response) {
+      if (matches(response.Ok)) {
+        const outcome = repaymentV2TransportOutcome(response.Ok);
+        const errorMessage = outcome === 'dispatched_err'
+          ? response.Ok.last_error[0] ?? 'The exact repayment request was rejected before completion.'
+          : outcome === 'ambiguous_transport'
+            ? 'The exact repayment request is recorded but remains pending or held.'
+            : null;
+        return result(outcome, response.Ok, errorMessage);
+      }
+      const exact = await ApiClient.getRepaymentV2StatusBound(ctx, requestId).catch(() => null);
+      return result('ambiguous_transport', matches(exact) ? exact : null, 'The backend returned a status that does not match this exact repayment request. Reconcile before proceeding.');
+    }
+    const exact = await ApiClient.getRepaymentV2StatusBound(ctx, requestId).catch(() => null);
+    if (matches(exact)) {
+      const outcome = repaymentV2TransportOutcome(exact);
+      if (outcome === 'dispatched_ok') return result(outcome, exact, null);
+      if (outcome === 'ambiguous_transport') {
+        return result(outcome, exact, 'The repayment call returned an error while the exact journal row remains pending or held. Reconcile before retrying.');
+      }
+    }
+    return result('dispatched_err', matches(exact) ? exact : null, ApiClient.formatProtocolError(response.Err));
+  } catch (error) {
+    const exact = await ApiClient.getRepaymentV2StatusBound(ctx, requestId).catch(() => null);
+    if (matches(exact)) {
+      const outcome = repaymentV2TransportOutcome(exact);
+      if (outcome === 'dispatched_ok') return result(outcome, exact, null);
+      if (outcome === 'dispatched_err') {
+        return result(outcome, exact, exact.last_error[0] ?? 'The exact repayment request was rejected before completion.');
+      }
+      return result(outcome, exact, error instanceof Error ? error.message : 'Repayment reply was lost; the exact request remains pending or held.');
+    }
+    return result('ambiguous_transport', null,
+      error instanceof Error ? error.message : 'Repayment reply was lost; exact request remains unresolved.');
+  }
 }
 
-/**
- * Compound repay + close in a single canister call.
- *
- * Combines what would otherwise be `repay_to_vault` followed by
- * `withdraw_and_close_vault` into one call so Oisy wallets see 2 consent
- * screens (approve icUSD + this call) instead of 4. Use this when the user
- * wants to close a vault that still has outstanding debt — the backend
- * pulls the icUSD, zeroes the debt, returns all collateral, and removes
- * the vault under a single GuardPrincipal.
- *
- * Atomicity: if the repay phase fails, no state mutates. If the collateral
- * return fails after repay succeeded, the vault stays open with debt=0 and
- * the full collateral — recoverable via the existing
- * `withdrawCollateralAndCloseVault` call. The error message surfaces this.
- */
+static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOperationResult> {
+  // Legacy no-ID endpoint is fail-closed on the backend. Stop here so direct
+  // callers cannot pay an approval fee before reaching that backend gate.
+  void vaultId;
+  void icusdAmount;
+  return ApiClient.legacyIcusdRepaymentDisabled();
+}
+
+/** Compatibility entry point for the disabled no-ID legacy repay-and-close route. */
 static async repayAndCloseVault(vaultId: number, icusdAmount: number): Promise<VaultOperationResult> {
-  return ApiClient.executeSequentialOperation(async () => {
-    try {
-      console.log(`Repaying ${icusdAmount} icUSD and closing vault #${vaultId}`);
+  // This legacy no-ID path is gated before debit. Do not approve first; callers
+  // must use the persisted, journal-bound V2 flow with a stable request ID.
+  void vaultId;
+  void icusdAmount;
+  return ApiClient.legacyIcusdRepaymentDisabled();
+}
 
-      if (!isFinite(icusdAmount) || icusdAmount <= 0) {
-        return {
-          success: false,
-          error: `Invalid repayment amount: ${icusdAmount}. Amount must be a finite positive number.`
-        };
-      }
+static legacyIcusdRepaymentDisabled(): VaultOperationResult {
+  return {
+    success: false,
+    error: 'Legacy icUSD repayment is disabled. Refresh the app and use the journaled V2 repayment flow; no approval or repayment was submitted.',
+  };
+}
 
-      if (icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
-        return {
-          success: false,
-          error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S} icUSD`
-        };
-      }
+static legacyStableRepaymentDisabled(): VaultOperationResult {
+  return { success: false, error: 'Legacy stable repayment is disabled. Refresh the app and use the journaled V2 repayment flow; no approval or repayment was submitted.' };
+}
 
-      const amountE8s = BigInt(Math.floor(icusdAmount * E8S));
-      const actor = await ApiClient.getAuthenticatedActor();
-      const vaultArg = {
-        vault_id: BigInt(vaultId),
-        amount: amountE8s
-      };
+static async getStableRepaymentV2RequestStateBound(ctx: ActionBoundContext): Promise<StableRepaymentV2RequestState> {
+  assertActionBoundContextCurrent(ctx);
+  const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+  assertActionBoundContextCurrent(ctx);
+  const response = await actor.get_my_stable_repayment_v2_request_state();
+  assertActionBoundContextCurrent(ctx);
+  if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+  return response.Ok;
+}
 
-      // _arr verifier: the compound succeeded if the vault is gone. We can't
-      // use the borrowed-amount snapshot (vault is removed, snapshot lookup
-      // returns null) — query vault existence directly.
-      const verifyRepayCloseLanded = async () => {
-        const snap = await ApiClient.fetchVaultRawSnapshot(vaultId);
-        if (!snap) return false;
-        // Vault either fully gone, or husk with zero collateral and zero debt.
-        if (!snap.exists) return true;
-        return snap.collateralAmount === 0n && snap.borrowedIcusd === 0n;
-      };
+static async getStableRepaymentV2StatusBound(ctx: ActionBoundContext, requestId: bigint): Promise<StableRepaymentV2StatusView | null> {
+  assertActionBoundContextCurrent(ctx);
+  const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+  assertActionBoundContextCurrent(ctx);
+  const response = await actor.get_my_stable_repayment_v2_status(requestId);
+  assertActionBoundContextCurrent(ctx);
+  return unwrapStableRepaymentV2Status(response);
+}
 
-      // ─── Oisy path: sequential approve + repay_and_close_vault ───
-      const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
-      if (signerAgent) {
-        console.log(`[Oisy] Sequential icUSD approve + repay_and_close_vault`);
-        const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
-        const icusdLedgerActor = await walletStore.getActor(
-          CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL
-        ) as any;
+/** Submit/replay one exact stable repayment journal row. This route never calls the legacy method. */
+static async repayStableV2Bound(
+  ctx: ActionBoundContext,
+  intent: StableRepaymentV2Intent,
+  beforeApprovalDispatch: () => void,
+  confirmAmbiguousApprovalRetry: () => boolean,
+  beforeBackendDispatch: () => void,
+): Promise<{ kind: BoundActionOutcomeKind; status: StableRepaymentV2StatusView | null; errorMessage: string | null }> {
+  const requestId = BigInt(intent.requestId);
+  const amountRawE6 = BigInt(intent.amountRawE6);
+  const ledgerText = CONFIG.getStableLedgerId(intent.token);
+  const matches = (row: StableRepaymentV2StatusView | null): row is StableRepaymentV2StatusView => !!row &&
+    row.owner.toText() === intent.owner && row.ledger.toText() === ledgerText && row.request_id === requestId &&
+    row.vault_id === BigInt(intent.vaultId) && row.requested_amount_e8 === amountRawE6 * 100n &&
+    row.principal_pull_e6 > 0n && (intent.token in row.token_type);
+  const outcome = (kind: BoundActionOutcomeKind, status: StableRepaymentV2StatusView | null, errorMessage: string | null) => ({ kind, status, errorMessage });
+  if (ctx.expectedPrincipalText !== intent.owner || requestId <= 0n || amountRawE6 <= 0n || !/^\d+$/.test(intent.vaultId))
+    return outcome('predispatch_aborted', null, 'Saved stable repayment does not match this wallet or has invalid arguments.');
 
-        // 1) Approve icUSD (first consent screen, Tier 1 native).
-        const approveResult = await icusdLedgerActor.icrc2_approve({
-          amount: LARGE_APPROVAL,
-          spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
-          expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
-          from_subaccount: [], created_at_time: []
-        });
-        if (approveResult && 'Err' in approveResult) {
-          return { success: false, error: `icUSD approval failed: ${JSON.stringify(approveResult.Err)}` };
-        }
-
-        // 2) repay_and_close_vault (second consent screen), guarded against _arr.
-        const result = await callWithOisyFalseNegativeGuard(
-          () => actor.repay_and_close_vault(vaultArg),
-          verifyRepayCloseLanded,
-          `Oisy repay_and_close vault #${vaultId} (${icusdAmount} icUSD)`
-        );
-
-        if (isOisyLandedSentinel(result)) {
-          return {
-            success: true,
-            vaultId,
-            message: `Vault #${vaultId} closed (confirmed on-chain after wallet error).`,
-            oisyResilient: true,
-          };
-        }
-
-        if ('Ok' in result) {
-          return {
-            success: true,
-            vaultId,
-            blockIndex: Number(result.Ok.repay_block_index),
-            message: `Vault #${vaultId} closed. Repay block: ${result.Ok.repay_block_index}, collateral return block: ${result.Ok.collateral_return_block_index?.[0] ?? 'none'}.`,
-          };
-        }
-        return { success: false, error: ApiClient.formatProtocolError(result.Err) };
-      }
-
-      // ─── Standard path (non-Oisy): user must have already approved icUSD ───
-      const result = await callWithOisyFalseNegativeGuard(
-        () => actor.repay_and_close_vault(vaultArg),
-        verifyRepayCloseLanded,
-        `repay_and_close vault #${vaultId} (${icusdAmount} icUSD)`
-      );
-
-      if (isOisyLandedSentinel(result)) {
-        return {
-          success: true,
-          vaultId,
-          message: `Vault #${vaultId} closed (confirmed on-chain after wallet error).`,
-          oisyResilient: true,
-        };
-      }
-
-      if ('Ok' in result) {
-        return {
-          success: true,
-          vaultId,
-          blockIndex: Number(result.Ok.repay_block_index),
-          message: `Vault #${vaultId} closed.`,
-        };
-      }
-      return { success: false, error: ApiClient.formatProtocolError(result.Err) };
-    } catch (err) {
-      console.error('Error in repay_and_close_vault:', err);
-      return {
-        success: false,
-        error: err instanceof Error ? err.message : 'Unknown error in repay_and_close_vault'
-      };
+  let state: StableRepaymentV2RequestState;
+  let status: StableRepaymentV2StatusView | null;
+  try {
+    status = await ApiClient.getStableRepaymentV2StatusBound(ctx, requestId);
+    state = await ApiClient.getStableRepaymentV2RequestStateBound(ctx);
+  } catch (error) {
+    return outcome('predispatch_aborted', null, `Could not preflight the stable repayment journal; no approval or repayment was submitted. ${error instanceof Error ? error.message : ''}`);
+  }
+  const active = state.active_request[0] ?? null;
+  for (const row of [active, state.latest_result[0] ?? null]) {
+    if (!row) continue;
+    const rowToken: StableRepaymentV2Token = 'CKUSDT' in row.token_type ? 'CKUSDT' : 'CKUSDC';
+    if (row.owner.toText() !== intent.owner || row.ledger.toText() !== CONFIG.getStableLedgerId(rowToken)) {
+      return outcome('predispatch_aborted', row, 'The stable repayment journal returned an unexpected owner or token ledger. No approval or repayment was submitted.');
     }
-  }, vaultId);
+  }
+  status = status ?? [active, state.latest_result[0] ?? null].find((row) => row?.request_id === requestId) ?? null;
+  if (status && !matches(status)) return outcome('predispatch_aborted', status, 'This request ID is bound to a different owner, ledger, vault, amount, or token. No approval or repayment was submitted.');
+  if (active && active.request_id !== requestId) return outcome('predispatch_aborted', active, 'Another owner-global stable repayment is active. Reconcile it before starting another repayment.');
+  if (!status && requestId !== state.next_request_id) return outcome('predispatch_aborted', null, 'This old stable repayment ID is absent from the retained journal. Its outcome is unknown; do not replace it.');
+  if (status) {
+    const exactOutcome = stableRepaymentV2Outcome(status);
+    if (exactOutcome === 'complete') return outcome('dispatched_ok', status, null);
+    if (exactOutcome === 'rejected') return outcome('dispatched_err', status, status.last_error[0] ?? 'The stable repayment was rejected with no effect.');
+  }
+
+  // A journal row owns its precise pull tuple; replay it without another approval.
+  if (!status) {
+    try {
+      const signer = isOisyWallet() ? await pnp.getSignerAgent() : null;
+      assertActionBoundContextCurrent(ctx);
+      const ledgerId = CONFIG.getStableLedgerId(intent.token);
+      const wallet = get(walletStore).principal;
+      if (!wallet || wallet.toText() !== intent.owner) return outcome('predispatch_aborted', null, 'Wallet changed before stable allowance preflight.');
+      const allowance = await walletOperations.checkStableAllowance(CONFIG.currentCanisterId, intent.token);
+      assertActionBoundContextCurrent(ctx);
+      const protocolStatus = await QueryOperations.getProtocolStatus();
+      assertActionBoundContextCurrent(ctx);
+      const requiredAllowance = stableRepaymentV2RequiredAllowance(amountRawE6, protocolStatus.ckstableRepayFee || 0);
+      if (allowance < requiredAllowance) {
+        if (intent.approvalAttempted && !confirmAmbiguousApprovalRetry()) return outcome('predispatch_aborted', null, 'The previous approval may have landed, but allowance is still insufficient. No repayment was submitted.');
+        beforeApprovalDispatch();
+        assertActionBoundContextCurrent(ctx);
+        let approval: { success: boolean; error?: string };
+        if (signer) {
+          const response = await (await walletStore.getActor(ledgerId, icusd_ledgerIDL) as any).icrc2_approve({ amount: requiredAllowance, spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] }, expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [], from_subaccount: [], created_at_time: [] });
+          approval = 'Err' in response ? { success: false, error: `${intent.token} approval failed: ${JSON.stringify(response.Err)}` } : { success: true };
+        } else approval = await walletOperations.approveStableTransferBound(ctx, requiredAllowance, CONFIG.currentCanisterId, intent.token);
+        assertActionBoundContextCurrent(ctx);
+        if (!approval.success) return outcome('predispatch_aborted', null, approval.error ?? `${intent.token} approval failed.`);
+      }
+    } catch (error) {
+      return outcome('predispatch_aborted', null, error instanceof Error ? error.message : 'Stable approval preflight failed.');
+    }
+  }
+
+  try {
+    assertActionBoundContextCurrent(ctx);
+    const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+    assertActionBoundContextCurrent(ctx);
+    const token_type = intent.token === 'CKUSDT' ? { CKUSDT: null } as const : { CKUSDC: null } as const;
+    beforeBackendDispatch();
+    assertActionBoundContextCurrent(ctx);
+    const response = await actor.repay_to_vault_with_stable_v2(requestId, { vault_id: BigInt(intent.vaultId), amount: amountRawE6 * 100n, token_type });
+    assertActionBoundContextCurrent(ctx);
+    if ('Ok' in response) {
+      const returned = response.Ok;
+      if (!matches(returned)) return outcome('ambiguous_transport', await ApiClient.getStableRepaymentV2StatusBound(ctx, requestId).catch(() => null), 'Backend returned a status for different repayment arguments.');
+      const exactOutcome = stableRepaymentV2TransportOutcome(returned);
+      if (exactOutcome === 'dispatched_ok') return outcome(exactOutcome, returned, null);
+      if (exactOutcome === 'dispatched_err') return outcome(exactOutcome, returned, returned.last_error[0] ?? 'The stable repayment was rejected with no effect.');
+      return outcome(exactOutcome, returned, 'The exact stable repayment request is pending or held. Replay only this request after checking its journal.');
+    }
+    const exact = await ApiClient.getStableRepaymentV2StatusBound(ctx, requestId).catch(() => null);
+    if (matches(exact) && 'Rejected' in exact.phase) return outcome('dispatched_err', exact, exact.last_error[0] ?? ApiClient.formatProtocolError(response.Err));
+    return outcome('ambiguous_transport', matches(exact) ? exact : null, ApiClient.formatProtocolError(response.Err));
+  } catch (error) {
+    const exact = await ApiClient.getStableRepaymentV2StatusBound(ctx, requestId).catch(() => null);
+    if (matches(exact) && stableRepaymentV2Outcome(exact) === 'complete') return outcome('dispatched_ok', exact, null);
+    if (matches(exact) && stableRepaymentV2Outcome(exact) === 'rejected') return outcome('dispatched_err', exact, exact.last_error[0] ?? 'The repayment was rejected.');
+    return outcome('ambiguous_transport', matches(exact) ? exact : null, error instanceof Error ? error.message : 'Repayment reply was lost; the exact request remains unresolved.');
+  }
 }
 
 /**
- * Repay to vault using ckUSDT or ckUSDC (1:1 with icUSD).
- *
- * For Oisy wallets: if the stable allowance is insufficient, batches
- * icrc2_approve + repay_to_vault_with_stable into a single ICRC-112 popup.
+ * Compatibility wrapper for the disabled no-ID stable repayment route.
+ * Stable repayments must use the owner-journaled V2 request flow.
  */
 static async repayToVaultWithStable(
   vaultId: number,
   amount: number,
-  tokenType: 'CKUSDT' | 'CKUSDC'
+  tokenType: 'CKUSDT' | 'CKUSDC',
+  onStage?: (stage: 'approval_attempted' | 'backend_dispatch_attempted') => void,
+  actionContext?: ActionBoundContext,
+  exactAmountRawE6?: bigint
 ): Promise<VaultOperationResult> {
-  return ApiClient.executeSequentialOperation(async () => {
-    try {
-      console.log(`Repaying ${amount} ${tokenType} to vault #${vaultId}`);
-
-      // Validate input
-      if (!isFinite(amount) || amount <= 0) {
-        return {
-          success: false,
-          error: `Invalid repayment amount: ${amount}. Amount must be a finite positive number.`
-        };
-      }
-
-      if (amount * E8S < MIN_ICUSD_AMOUNT) {
-        return {
-          success: false,
-          error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S}`
-        };
-      }
-
-      const actor = await ApiClient.getAuthenticatedActor();
-      const token_type = tokenType === 'CKUSDT' ? { 'CKUSDT' : null } as const : { 'CKUSDC' : null } as const;
-      const amountE8s = BigInt(Math.floor(amount * E8S));
-      const vaultArgWithToken = {
-        vault_id: BigInt(vaultId),
-        amount: amountE8s,
-        token_type
-      };
-
-      // Pre-repay snapshot — same shape as repayToVault.
-      // Oisy reads the warm sync cache (no network await inside the click
-      // gesture window); non-Oisy awaits a fresh snapshot.
-      const beforeBorrowed = isOisyWallet() ? ApiClient.getCachedRawBorrowedE8s(vaultId) : await ApiClient.getRawBorrowedE8s(vaultId);
-      const verifyRepayLanded = async () => {
-        if (beforeBorrowed === null) return false;
-        const after = await ApiClient.getRawBorrowedE8s(vaultId);
-        if (after === null) return false;
-        const drop = beforeBorrowed - after;
-        return drop >= (amountE8s * 50n) / 100n || after === 0n;
-      };
-
-      // ─── Oisy ICRC-112 batched path ───
-      // Always batch approve+repay — skipping the allowance check eliminates an
-      // async canister query that burns the browser user gesture context.
-      const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
-      if (signerAgent) {
-        console.log(`[Oisy] Batching ${tokenType} approve + repay_to_vault_with_stable`);
-        const LARGE_APPROVAL = BigInt(1_000_000_000_000_000); // 1B in e6s
-        const stableLedgerId = CONFIG.getStableLedgerId(tokenType);
-        const stableLedgerActor = await walletStore.getActor(
-          stableLedgerId, CONFIG.icusd_ledgerIDL
-        ) as any;
-
-        // 1) Approve stable token (first consent screen, Tier 1 native).
-        const approveResult = await stableLedgerActor.icrc2_approve({
-          amount: LARGE_APPROVAL,
-          spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
-          expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
-          from_subaccount: [], created_at_time: []
-        });
-        if (approveResult && 'Err' in approveResult) {
-          return { success: false, error: `${tokenType} approval failed: ${JSON.stringify(approveResult.Err)}` };
-        }
-
-        // 2) repay_to_vault_with_stable (second consent screen), guarded against _arr.
-        const result = await callWithOisyFalseNegativeGuard(
-          () => actor.repay_to_vault_with_stable(vaultArgWithToken),
-          verifyRepayLanded,
-          `Oisy repay ${amount} ${tokenType} to vault #${vaultId}`
-        );
-
-        if (isOisyLandedSentinel(result)) {
-          return { success: true, vaultId, blockIndex: undefined, oisyResilient: true };
-        }
-
-        if ('Ok' in result) {
-          return { success: true, vaultId, blockIndex: Number(result.Ok) };
-        } else {
-          return { success: false, error: ApiClient.formatProtocolError(result.Err) };
-        }
-      }
-
-      // ─── Standard path (non-Oisy, or Oisy with sufficient allowance) ───
-      const result = await callWithOisyFalseNegativeGuard(
-        () => actor.repay_to_vault_with_stable(vaultArgWithToken),
-        verifyRepayLanded,
-        `repay ${amount} ${tokenType} to vault #${vaultId}`
-      );
-
-      if (isOisyLandedSentinel(result)) {
-        return { success: true, vaultId, blockIndex: undefined, oisyResilient: true };
-      }
-
-      if ('Ok' in result) {
-        return {
-          success: true,
-          vaultId,
-          blockIndex: Number(result.Ok)
-        };
-      } else {
-        return {
-          success: false,
-          error: ApiClient.formatProtocolError(result.Err)
-        };
-      }
-    } catch (err) {
-      console.error('Error repaying with stable token:', err);
-      return {
-        success: false,
-        error: err instanceof Error ? err.message : 'Unknown error repaying with stable token'
-      };
-    }
-  }, vaultId);
+  void vaultId; void amount; void tokenType; void onStage; void actionContext; void exactAmountRawE6;
+  return ApiClient.legacyStableRepaymentDisabled();
 }
 
   /**
@@ -2013,7 +2414,7 @@ static async repayToVaultWithStable(
         if (isOisyWallet()) {
           const snap = ApiClient.getCachedRawSnapshot(vaultId);
           if (!snap) {
-            return { success: true, message: `Vault #${vaultId} is already closed.`, vaultId };
+            return { success: false, error: `Vault #${vaultId} status is not loaded. Refresh your vaults and try again.` };
           }
           actor = await ApiClient.getAuthenticatedActor();
           isEmpty = snap.icpMargin === 0n && snap.borrowedIcusd === 0n;
@@ -2086,7 +2487,7 @@ static async repayToVaultWithStable(
       } catch (error) {
         // Handle specific error cases
         const errorMsg = error?.toString() || '';
-        if (ApiClient.isVaultNotFoundError(errorMsg)) {
+        if (ApiClient.isVaultNotFoundError(errorMsg, vaultId)) {
           return {
             success: true,
             message: `Vault #${vaultId} has already been closed.`,
@@ -2423,6 +2824,7 @@ static async repayToVaultWithStable(
       icusdAmount: number,
       preferredToken?: string
     ): Promise<VaultOperationResult & { stableAmountSent?: number; vaultSpillover?: number }> {
+      if (redemptionIngressIsPaused()) return { success: false, error: REDEMPTION_INGRESS_PAUSED };
       try {
         console.log(`Redeeming ${icusdAmount} icUSD for reserves`);
 
@@ -2435,7 +2837,19 @@ static async repayToVaultWithStable(
 
         const icusdE8s = BigInt(Math.floor(icusdAmount * E8S));
         const spenderCanisterId = CONFIG.currentCanisterId;
-        const bufferedAmount = icusdE8s * 105n / 100n;
+        // ICRC-2 transfer_from allowance must cover the pulled amount plus
+        // the ledger fee. Do not grant a percentage cushion: it leaves an
+        // unnecessarily large standing authorization for this operation.
+        const fee = isOisyWallet()
+          ? getFreshCachedLedgerFee({ ledgerId: CONFIG.currentIcusdLedgerId, decimals: 8, symbol: 'icUSD' })
+          : await fetchLedgerFeeStrict({ ledgerId: CONFIG.currentIcusdLedgerId, decimals: 8, symbol: 'icUSD' });
+        if (fee === null) {
+          return {
+            success: false,
+            error: 'The icUSD ledger fee is not freshly cached. Refresh the redemption fee quote before retrying.',
+          };
+        }
+        const requiredAllowance = icusdE8s + fee;
 
         const preferredOpt: [] | [Principal] = preferredToken
           ? [Principal.fromText(preferredToken)]
@@ -2468,7 +2882,6 @@ static async repayToVaultWithStable(
         const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
         if (signerAgent) {
           console.log(`[Oisy] Sequential icUSD approve + redeem_reserves`);
-          const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
           const icusdLedgerActor = await walletStore.getActor(
             CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL
           ) as any;
@@ -2476,7 +2889,7 @@ static async repayToVaultWithStable(
 
           // 1) Approve icUSD (first consent screen, Tier 1 native).
           const approveResult = await icusdLedgerActor.icrc2_approve({
-            amount: LARGE_APPROVAL,
+            amount: requiredAllowance,
             spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
             expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
             from_subaccount: [], created_at_time: []
@@ -2517,10 +2930,9 @@ static async repayToVaultWithStable(
 
         // ─── Standard path (non-Oisy, or sufficient allowance) ───
         const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
-        if (currentAllowance < bufferedAmount) {
-          const LARGE_APPROVAL = BigInt(100_000_000_000_000_000);
+        if (currentAllowance < requiredAllowance) {
           const approvalResult = await walletOperations.approveIcusdTransfer(
-            LARGE_APPROVAL, spenderCanisterId
+            requiredAllowance, spenderCanisterId
           );
           if (!approvalResult.success) {
             return {
@@ -2594,6 +3006,7 @@ static async repayToVaultWithStable(
      * @param icusdAmount Amount of icUSD to redeem
      */
       static async redeemIcp(icusdAmount: number): Promise<VaultOperationResult> {
+      if (redemptionIngressIsPaused()) return { success: false, error: REDEMPTION_INGRESS_PAUSED };
       try {
         console.log(`Redeeming ${icusdAmount} icUSD for ICP`);
 
@@ -2666,6 +3079,7 @@ static async repayToVaultWithStable(
      * @param icusdAmount Amount of icUSD to redeem
      */
     static async redeemCollateral(collateralTypePrincipal: string, icusdAmount: number): Promise<VaultOperationResult> {
+      if (redemptionIngressIsPaused()) return { success: false, error: REDEMPTION_INGRESS_PAUSED };
       try {
         console.log(`Redeeming ${icusdAmount} icUSD for collateral ${collateralTypePrincipal}`);
 
@@ -2914,216 +3328,188 @@ static async repayToVaultWithStable(
         }
       }
     
-      /**
-       * Provide liquidity to the protocol
-       */
+      static async getLiquidityV2RequestStateBound(ctx: ActionBoundContext): Promise<LiquidityV2RequestState> {
+        assertActionBoundContextCurrent(ctx);
+        const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+        assertActionBoundContextCurrent(ctx);
+        const state = await actor.get_my_liquidity_v2_request_state();
+        assertActionBoundContextCurrent(ctx);
+        return state;
+      }
+
+      static async attachLiquidityV2CandidateBound(
+        ctx: ActionBoundContext,
+        intent: LiquidityV2Intent,
+        blockIndex: bigint,
+      ): Promise<BoundLiquidityV2Result> {
+        const ledger = intent.ledgerPrincipal;
+        const result = (kind: BoundActionOutcomeKind, status: LiquidityV2StatusView | null, errorMessage: string | null): BoundLiquidityV2Result => ({
+          kind, status, errorMessage, approvalMayHaveMutated: intent.approvalAttempted,
+        });
+        if (ctx.expectedPrincipalText !== intent.owner || !ledger || blockIndex < 0n || blockIndex > 18_446_744_073_709_551_615n) {
+          return result('predispatch_aborted', null, 'Candidate block or owner does not match the saved liquidity request.');
+        }
+        const state = await ApiClient.getLiquidityV2RequestStateBound(ctx);
+        const active = state.active_request[0] ?? null;
+        if (!active || active.request_id !== BigInt(intent.requestId) ||
+            !liquidityV2StatusMatchesIntent(active, intent) || !active.had_ambiguous_attempt ||
+            !('Held' in active.phase)) {
+          return result('predispatch_aborted', active, 'Only the exact owner-bound Held request with an ambiguous attempt can accept a candidate block.');
+        }
+        assertActionBoundContextCurrent(ctx);
+        const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+        assertActionBoundContextCurrent(ctx);
+        const response = await actor.attach_my_liquidity_v2_candidate(BigInt(intent.requestId), blockIndex);
+        assertActionBoundContextCurrent(ctx);
+        const after = await ApiClient.getLiquidityV2RequestStateBound(ctx);
+        const exact = [after.active_request[0] ?? null, after.latest_result[0] ?? null]
+          .find((row) => row?.request_id === BigInt(intent.requestId)) ?? null;
+        if (exact && liquidityV2StatusMatchesIntent(exact, intent) &&
+            'Complete' in exact.phase && exact.result_block_index[0] !== undefined) {
+          return result('dispatched_ok', exact, null);
+        }
+        if (exact && !('Held' in exact.phase) && 'Rejected' in exact.phase)
+          return result('dispatched_err', exact, exact.last_error[0] ?? 'The candidate did not prove the exact liquidity transfer.');
+        return result('ambiguous_transport', exact, response && 'Err' in response
+          ? ApiClient.formatProtocolError(response.Err)
+          : 'The candidate remains held and did not prove the exact transfer. Keep the request locked and investigate ledger history.');
+      }
+
+      /** Reconcile or replay one exact owner-global liquidity request. */
+      static async liquidityV2Bound(
+        ctx: ActionBoundContext,
+        intent: LiquidityV2Intent,
+        beforeApprovalDispatch: () => void,
+        confirmAmbiguousApprovalRetry: () => boolean,
+        beforeBackendDispatch: () => void,
+      ): Promise<BoundLiquidityV2Result> {
+        let approvalMayHaveMutated = intent.approvalAttempted;
+        const requestId = BigInt(intent.requestId);
+        const amountRaw = BigInt(intent.amountRaw);
+        const expectedLedger = intent.ledgerPrincipal;
+        const result = (kind: BoundActionOutcomeKind, status: LiquidityV2StatusView | null, errorMessage: string | null, amountAdopted = false): BoundLiquidityV2Result => ({
+          kind, status, errorMessage, approvalMayHaveMutated, amountAdopted,
+        });
+        const matches = (status: LiquidityV2StatusView | null): status is LiquidityV2StatusView => !!status &&
+          liquidityV2StatusMatchesIntent(status, intent);
+        if (ctx.expectedPrincipalText !== intent.owner || !expectedLedger || requestId <= 0n || amountRaw <= 0n ||
+            amountRaw > 18_446_744_073_709_551_615n) {
+          return result('predispatch_aborted', null, 'Saved liquidity request does not match this wallet or has invalid wire arguments.');
+        }
+
+        let state: LiquidityV2RequestState;
+        try { state = await ApiClient.getLiquidityV2RequestStateBound(ctx); }
+        catch (error) { return result('predispatch_aborted', null, `Could not preflight the liquidity request journal; no approval or action was submitted. ${error instanceof Error ? error.message : ''}`); }
+        const active = state.active_request[0] ?? null;
+        const latest = state.latest_result[0] ?? null;
+        for (const row of [active, latest]) {
+          if (!row) continue;
+          if (!liquidityV2StatusHasOwner(row, intent.owner)) {
+            return result('predispatch_aborted', row, 'The liquidity journal returned an unexpected owner. No approval or action was submitted.');
+          }
+        }
+        let status = [active, latest].find((row) => row?.request_id === requestId) ?? null;
+        if (status && !matches(status)) return result('predispatch_aborted', status, 'This request ID is bound to different owner, ledger, operation, or amount arguments. No approval or action was submitted.');
+        if (active && active.request_id !== requestId) return result('predispatch_aborted', active, 'A different owner-global liquidity request is unresolved. Resume that exact request first.');
+        if (!status && requestId !== state.next_request_id) return result('predispatch_aborted', null, 'This liquidity request ID is absent from the retained journal and is no longer next. Its outcome is unknown; do not replace it.');
+        const canAdoptClaimAmount = liquidityV2MayAdoptClaimAmount(intent, !!status, !!active, state.next_request_id);
+        if (status) {
+          const disposition = liquidityV2Disposition(status);
+          if (disposition === 'complete') return result('dispatched_ok', status, null);
+          if (disposition === 'rejected') return result('dispatched_err', status, status.last_error[0] ?? 'The exact liquidity request was rejected with no effect.');
+        }
+
+        if (!status && expectedLedger !== (intent.operation === 'ClaimReturns' ? CONFIG.currentIcpLedgerId : CONFIG.currentIcusdLedgerId)) {
+          return result('predispatch_aborted', null, 'The saved request is pinned to a ledger that is no longer current, and no exact journal row exists. Reconcile the saved approval/request before proceeding.');
+        }
+
+        if (!status && intent.operation === 'Provide') {
+          try {
+            const fee = await fetchLedgerFee({ ledgerId: expectedLedger, decimals: 8, symbol: 'icUSD' });
+            assertActionBoundContextCurrent(ctx);
+            const allowance = await walletOperations.checkIcusdAllowanceBound(ctx, CONFIG.currentCanisterId);
+            assertActionBoundContextCurrent(ctx);
+            const requiredAllowance = amountRaw + fee;
+            if (allowance < requiredAllowance) {
+              if (intent.approvalAttempted && !confirmAmbiguousApprovalRetry())
+                return result('predispatch_aborted', null, 'A prior icUSD approval may have succeeded, but allowance is still insufficient. No liquidity request was dispatched.');
+              beforeApprovalDispatch();
+              assertActionBoundContextCurrent(ctx);
+              approvalMayHaveMutated = true;
+              const approval = await walletOperations.approveIcusdTransferBound(ctx, amountRaw + fee * 2n, CONFIG.currentCanisterId);
+              assertActionBoundContextCurrent(ctx);
+              if (!approval.success) return result('predispatch_aborted', null, approval.error ?? 'icUSD approval failed.');
+            }
+          } catch (error) {
+            return result('predispatch_aborted', null, error instanceof Error ? error.message : 'Liquidity approval preflight failed.');
+          }
+        }
+
+        let response: Awaited<ReturnType<_SERVICE['provide_liquidity_v2']>> | null = null;
+        try {
+          assertActionBoundContextCurrent(ctx);
+          const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+          assertActionBoundContextCurrent(ctx);
+          beforeBackendDispatch();
+          assertActionBoundContextCurrent(ctx);
+          if (intent.operation === 'Provide') response = await actor.provide_liquidity_v2(requestId, amountRaw);
+          else if (intent.operation === 'Withdraw') response = await actor.withdraw_liquidity_v2(requestId, amountRaw);
+          else response = await actor.claim_liquidity_returns_v2(requestId);
+          assertActionBoundContextCurrent(ctx);
+        } catch (error) {
+          let recovered: LiquidityV2StatusView | null = null;
+          let recoveredState: LiquidityV2RequestState | null = null;
+          try {
+            recoveredState = await ApiClient.getLiquidityV2RequestStateBound(ctx);
+            recovered = [recoveredState.active_request[0] ?? null, recoveredState.latest_result[0] ?? null].find((row) => row?.request_id === requestId) ?? null;
+          } catch { /* exact status remains unavailable */ }
+          const noConflictingActive = !!recoveredState && (!recoveredState.active_request[0] || recoveredState.active_request[0]?.request_id === requestId);
+          const recoveredMatches = matches(recovered) || (canAdoptClaimAmount && noConflictingActive && !!recovered && liquidityV2ClaimIdentityMatches(recovered, intent));
+          if (recoveredMatches && recovered) {
+            const disposition = liquidityV2Disposition(recovered);
+            const adopted = !matches(recovered) && canAdoptClaimAmount;
+            if (disposition === 'complete') return result('dispatched_ok', recovered, null, adopted);
+            if (disposition === 'rejected') return result('dispatched_err', recovered, recovered.last_error[0] ?? 'The exact liquidity request was rejected.', adopted);
+            if (adopted) return result('ambiguous_transport', recovered, recovered.last_error[0] ?? 'The exact claim request is pending or held.', true);
+          }
+          return result('ambiguous_transport', matches(recovered) ? recovered : null, error instanceof Error ? error.message : 'Liquidity reply was lost; reconcile this exact request.');
+        }
+
+        let after: LiquidityV2RequestState;
+        try { after = await ApiClient.getLiquidityV2RequestStateBound(ctx); }
+        catch (error) { return result('ambiguous_transport', null, `Liquidity call returned but its exact journal status is unavailable. ${error instanceof Error ? error.message : ''}`); }
+        const exact = [after.active_request[0] ?? null, after.latest_result[0] ?? null].find((row) => row?.request_id === requestId) ?? null;
+        const exactCanAdoptClaim = canAdoptClaimAmount && !!exact && liquidityV2ClaimIdentityMatches(exact, intent) &&
+          ((after.active_request[0]?.request_id === requestId) || !after.active_request[0]);
+        const exactMatches = matches(exact) || exactCanAdoptClaim;
+        if (exactMatches && exact) {
+          const disposition = liquidityV2Disposition(exact);
+          const adopted = exactCanAdoptClaim && !matches(exact);
+          if (disposition === 'complete') return result('dispatched_ok', exact, null, adopted);
+          if (disposition === 'rejected') return result('dispatched_err', exact, exact.last_error[0] ?? (response && 'Err' in response ? ApiClient.formatProtocolError(response.Err) : 'The exact liquidity request was rejected.'), adopted);
+          return result('ambiguous_transport', exact, exact.last_error[0] ?? 'The exact liquidity request remains pending or held. Replay only this request after checking its journal.', adopted);
+        }
+        if (response && 'Err' in response && !active && after.next_request_id === requestId) {
+          return result('dispatched_err', null, ApiClient.formatProtocolError(response.Err));
+        }
+        return result('ambiguous_transport', null, response && 'Err' in response
+          ? ApiClient.formatProtocolError(response.Err)
+          : 'Backend response has no exact matching receipt. Reconcile before taking another action.');
+      }
+
+      /** Legacy no-ID liquidity routes are disabled before approval or dispatch. */
       static async provideLiquidity(amount: number): Promise<VaultOperationResult> {
-        try {
-          console.log(`Providing ${amount} ICP as liquidity`);
-
-          if (amount <= 0) {
-            return {
-              success: false,
-              error: 'Amount must be greater than 0'
-            };
-          }
-
-          // Convert amount to e8s
-          const amountE8s = BigInt(Math.floor(amount * E8S));
-
-          if (USE_MOCK_DATA) {
-            // Simulate processing delay
-            await new Promise(resolve => setTimeout(resolve, 1500));
-
-            return {
-              success: true,
-              blockIndex: Math.floor(Math.random() * 1000) + 1
-            };
-          }
-
-          const actor = await ApiClient.getAuthenticatedActor();
-
-          // Pre-provide liquidity snapshot for the Oisy false-negative
-          // verifier. provide_liquidity grows liquidity_provided.
-          const before = await ApiClient.fetchLiquidityStatusSnapshot();
-
-          const result = await callWithOisyFalseNegativeGuard(
-            () => actor.provide_liquidity(amountE8s),
-            async () => {
-              if (!before) return false;
-              const after = await ApiClient.fetchLiquidityStatusSnapshot();
-              if (!after) return false;
-              return after.liquidityProvided - before.liquidityProvided >= (amountE8s * 95n) / 100n;
-            },
-            `provide_liquidity ${amount} ICP`
-          );
-
-          if (isOisyLandedSentinel(result)) {
-            return {
-              success: true,
-              blockIndex: undefined,
-              oisyResilient: true,
-            };
-          }
-
-          if (result && typeof result === 'object' && 'Ok' in result) {
-            return {
-              success: true,
-              blockIndex: Number(result.Ok)
-            };
-          } else if (result && typeof result === 'object' && 'Err' in result) {
-            return {
-              success: false,
-              error: ApiClient.formatProtocolError(result.Err)
-            };
-          } else {
-            return {
-              success: false,
-              error: 'Unknown response format from the protocol'
-            };
-          }
-        } catch (err) {
-          console.error('Error providing liquidity:', err);
-          return {
-            success: false,
-            error: err instanceof Error ? err.message : 'Unknown error providing liquidity'
-          };
-        }
+        void amount;
+        return { success: false, error: 'Legacy liquidity requests are disabled. Refresh the app and use the journaled V2 liquidity flow.' };
       }
 
-      /**
-       * Withdraw liquidity from the protocol
-       */
       static async withdrawLiquidity(amount: number): Promise<VaultOperationResult> {
-        try {
-          console.log(`Withdrawing ${amount} ICP from liquidity pool`);
-
-          if (amount <= 0) {
-            return {
-              success: false,
-              error: 'Amount must be greater than 0'
-            };
-          }
-
-          // Convert amount to e8s
-          const amountE8s = BigInt(Math.floor(amount * E8S));
-
-          if (USE_MOCK_DATA) {
-            // Simulate processing delay
-            await new Promise(resolve => setTimeout(resolve, 1500));
-
-            return {
-              success: true,
-              blockIndex: Math.floor(Math.random() * 1000) + 1
-            };
-          }
-
-          const actor = await ApiClient.getAuthenticatedActor();
-
-          // Pre-withdraw snapshot. withdraw_liquidity reduces
-          // liquidity_provided by `amount` (or all of it).
-          const before = await ApiClient.fetchLiquidityStatusSnapshot();
-
-          const result = await callWithOisyFalseNegativeGuard(
-            () => actor.withdraw_liquidity(amountE8s),
-            async () => {
-              if (!before) return false;
-              const after = await ApiClient.fetchLiquidityStatusSnapshot();
-              if (!after) return false;
-              const drop = before.liquidityProvided - after.liquidityProvided;
-              return drop >= (amountE8s * 95n) / 100n || after.liquidityProvided === 0n;
-            },
-            `withdraw_liquidity ${amount} ICP`
-          );
-
-          if (isOisyLandedSentinel(result)) {
-            return {
-              success: true,
-              blockIndex: undefined,
-              oisyResilient: true,
-            };
-          }
-
-          if ('Ok' in result) {
-            return {
-              success: true,
-              blockIndex: Number(result.Ok)
-            };
-          } else {
-            return {
-              success: false,
-              error: ApiClient.formatProtocolError(result.Err)
-            };
-          }
-        } catch (err) {
-          console.error('Error withdrawing liquidity:', err);
-          return {
-            success: false,
-            error: err instanceof Error ? err.message : 'Unknown error withdrawing liquidity'
-          };
-        }
+        void amount;
+        return { success: false, error: 'Legacy liquidity requests are disabled. Refresh the app and use the journaled V2 liquidity flow.' };
       }
 
-      /**
-       * Claim liquidity returns
-       */
       static async claimLiquidityReturns(): Promise<VaultOperationResult> {
-        try {
-          console.log('Claiming liquidity returns');
-
-          if (USE_MOCK_DATA) {
-            // Simulate processing delay
-            await new Promise(resolve => setTimeout(resolve, 1500));
-
-            return {
-              success: true,
-              blockIndex: Math.floor(Math.random() * 1000) + 1
-            };
-          }
-
-          const actor = await ApiClient.getAuthenticatedActor();
-
-          // Pre-claim snapshot. claim_liquidity_returns drops
-          // available_liquidity_reward to 0.
-          const before = await ApiClient.fetchLiquidityStatusSnapshot();
-
-          const result = await callWithOisyFalseNegativeGuard(
-            () => actor.claim_liquidity_returns(),
-            async () => {
-              if (!before || before.availableReward === 0n) return false;
-              const after = await ApiClient.fetchLiquidityStatusSnapshot();
-              if (!after) return false;
-              return after.availableReward < before.availableReward;
-            },
-            `claim_liquidity_returns`
-          );
-
-          if (isOisyLandedSentinel(result)) {
-            return {
-              success: true,
-              blockIndex: undefined,
-              oisyResilient: true,
-            };
-          }
-
-          if ('Ok' in result) {
-            return {
-              success: true,
-              blockIndex: Number(result.Ok)
-            };
-          } else {
-            return {
-              success: false,
-              error: ApiClient.formatProtocolError(result.Err)
-            };
-          }
-        } catch (err) {
-          console.error('Error claiming liquidity returns:', err);
-          return {
-            success: false,
-            error: err instanceof Error ? err.message : 'Unknown error claiming returns'
-          };
-        }
+        return { success: false, error: 'Legacy liquidity requests are disabled. Refresh the app and use the journaled V2 liquidity flow.' };
       }
 
       /**
@@ -3254,7 +3640,7 @@ static async repayToVaultWithStable(
     const [allowance, balance, fee] = await Promise.all([
       ledgerActor.icrc2_allowance({ account, spender }),
       ledgerActor.icrc1_balance_of(account),
-      ledgerActor.icrc1_fee(),
+      fetchLedgerFeeStrict({ ledgerId, decimals: 8, symbol: 'icUSD' }),
     ]);
     assertActionBoundContextCurrent(ctx);
     return {
@@ -3275,6 +3661,7 @@ static async repayToVaultWithStable(
     preparedPreflight: RedemptionPreflight | undefined,
     acceptedOffer: AcceptedRedemptionOffer,
   ): Promise<RedeemQuotedResult> {
+    if (redemptionIngressIsPaused()) return { success: false, error: REDEMPTION_INGRESS_PAUSED };
     let submissionDispatched = false;
     let submissionReplyObserved = false;
     try {
@@ -3599,6 +3986,12 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
       let borrowedIcusdHuman: number;
       if (isOisyWallet()) {
         const snap = ApiClient.getCachedRawSnapshot(vaultId);
+        if (!snap) {
+          return {
+            success: false,
+            error: `Vault #${vaultId} status is not loaded. Refresh your vaults and try again.`,
+          };
+        }
         vaultExists = !!snap;
         borrowedIcusdHuman = snap ? Number(snap.borrowedIcusd) / E8S : 0;
       } else {
@@ -3670,7 +4063,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           const errorMsg = ApiClient.formatProtocolError(result.Err);
           
           // If the error indicates the vault doesn't exist, treat as success
-          if (ApiClient.isVaultNotFoundError(errorMsg)) {
+          if (ApiClient.isVaultNotFoundError(errorMsg, vaultId)) {
             return {
               success: true,
               message: `Vault #${vaultId} has already been closed.`,
@@ -3705,11 +4098,11 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
   /**
    * Helper to check if an error indicates vault not found
    */
-  private static isVaultNotFoundError(errorMsg: string): boolean {
-    const lowerMsg = errorMsg.toLowerCase();
-    return lowerMsg.includes('not found') || 
-           lowerMsg.includes('unknown vault') ||
-           lowerMsg.includes('tried to close unknown vault');
+  private static isVaultNotFoundError(errorMsg: string, vaultId: number): boolean {
+    // Backend close paths identify the missing vault by ID. Require the full
+    // requested ID so an unrelated not-found error cannot imply closure.
+    const normalized = errorMsg.trim().toLowerCase();
+    return normalized === `vault #${vaultId} not found`;
   }
 
     /**
@@ -3774,373 +4167,38 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
      * @param vaultId The ID of the vault to liquidate
      * @param icusdAmount The amount of icUSD to liquidate
      */
-    static async liquidateVaultPartial(vaultId: number, icusdAmount: number): Promise<VaultOperationResult> {
-      return ApiClient.executeSequentialOperation(async () => {
-        try {
-          console.log(`Partially liquidating vault #${vaultId} with ${icusdAmount} icUSD`);
-          
-          // Non-Oisy: pre-validate against the liquidatable set. Oisy skips this
-          // network query to preserve the gesture window — the backend
-          // re-validates and the UI already validated against its loaded list.
-          if (!isOisyWallet()) {
-            const vaults = await ApiClient.getLiquidatableVaults();
-            const vault = vaults.find(v => Number(v.vault_id) === vaultId);
-
-            if (!vault) {
-              return {
-                success: false,
-                error: "Vault not found or is not liquidatable"
-              };
-            }
-
-            // Validate that partial liquidation amount is reasonable
-            const totalDebt = Number(vault.borrowed_icusd_amount) / E8S;
-            const maxPartialAmount = totalDebt * 0.5; // 50% maximum
-
-            if (icusdAmount > totalDebt) {
-              return {
-                success: false,
-                error: `Cannot liquidate more than total debt (${totalDebt.toFixed(2)} icUSD)`
-              };
-            }
-
-            if (icusdAmount > maxPartialAmount) {
-              return {
-                success: false,
-                error: `Partial liquidation limited to 50% of debt (${maxPartialAmount.toFixed(2)} icUSD maximum)`
-              };
-            }
-
-            console.log(`Vault #${vaultId} partial liquidation: ${icusdAmount} icUSD of ${totalDebt} icUSD total debt`);
-          }
-          
-          // Check and set allowance for icUSD with a 20% buffer
-          const bufferedAmount = BigInt(Math.floor((icusdAmount * 1.2) * E8S));
-          const spenderCanisterId = CONFIG.currentCanisterId;
-          const icusdAmountE8s = BigInt(Math.floor(icusdAmount * E8S));
-
-          // ─── Oisy ICRC-112 batched path ───
-          // Always batch approve+liquidate — skip allowance check to preserve gesture context.
-          const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
-          if (signerAgent) {
-            console.log(`[Oisy] Sequential icUSD approve + liquidate_vault_partial`);
-            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000);
-            const icusdLedgerActor = await walletStore.getActor(
-              CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL
-            ) as any;
-            const actor = await ApiClient.getAuthenticatedActor();
-
-            // 1) Approve icUSD (first consent screen, Tier 1 native).
-            const approveResult = await icusdLedgerActor.icrc2_approve({
-              amount: LARGE_APPROVAL,
-              spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
-              expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
-              from_subaccount: [], created_at_time: []
-            });
-            if (approveResult && 'Err' in approveResult) {
-              return { success: false, error: `icUSD approval failed: ${JSON.stringify(approveResult.Err)}` };
-            }
-
-            // 2) liquidate_vault_partial (second consent screen).
-            const result = await actor.liquidate_vault_partial({ vault_id: BigInt(vaultId), amount: icusdAmountE8s });
-
-            if ('Ok' in result) {
-              return mapLiquidationSuccessWithFee(vaultId, result.Ok);
-            } else {
-              return { success: false, error: ApiClient.formatProtocolError(result.Err) };
-            }
-          }
-
-          // ─── Standard path ───
-          const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
-          console.log(`Current icUSD allowance: ${Number(currentAllowance) / E8S}`);
-
-          if (currentAllowance < bufferedAmount) {
-            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000);
-            console.log(`Setting large icUSD approval (1B) to avoid future popups`);
-
-            const approvalResult = await walletOperations.approveIcusdTransfer(
-              LARGE_APPROVAL,
-              spenderCanisterId
-            );
-
-            if (!approvalResult.success) {
-              return {
-                success: false,
-                error: approvalResult.error || "Failed to approve icUSD transfer"
-              };
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 1000));
-          }
-
-          // Now proceed with partial liquidation
-          const actor = await ApiClient.getAuthenticatedActor();
-          const result = await actor.liquidate_vault_partial({ vault_id: BigInt(vaultId), amount: icusdAmountE8s });
-          
-          if ('Ok' in result) {
-            return mapLiquidationSuccessWithFee(vaultId, result.Ok);
-          } else {
-            return {
-              success: false,
-              error: ApiClient.formatProtocolError(result.Err)
-            };
-          }
-        } catch (err) {
-          console.error('Error partially liquidating vault:', err);
-          
-          // Check for specific underflow error and provide a better message
-          const errorMessage = err instanceof Error ? err.message : String(err);
-          if (errorMessage.includes('underflow') && errorMessage.includes('numeric.rs')) {
-            return {
-              success: false,
-              error: "Partial liquidation failed due to a calculation error. The vault may have been modified or its state has changed."
-            };
-          }
-          
-          return {
-            success: false,
-            error: err instanceof Error ? err.message : 'Unknown error partially liquidating vault'
-          };
-        }
-      }, vaultId); // Pass vaultId to ensure proper operation tracking
+    static async liquidateVaultPartial(_vaultId: number, _icusdAmount: number): Promise<VaultOperationResult> {
+      return {
+        success: false,
+        error: 'Manual liquidation is temporarily unavailable while receipt-backed recovery is being verified.'
+      };
     }
 
     /**
      * Partially liquidate a vault using ckUSDT or ckUSDC
      */
     static async liquidateVaultPartialWithStable(
-      vaultId: number,
-      icusdAmount: number,
-      tokenType: 'CKUSDT' | 'CKUSDC'
+      _vaultId: number,
+      _icusdAmount: number,
+      _tokenType: 'CKUSDT' | 'CKUSDC'
     ): Promise<VaultOperationResult> {
-      return ApiClient.executeSequentialOperation(async () => {
-        try {
-          console.log(`Partially liquidating vault #${vaultId} with ${icusdAmount} ${tokenType}`);
-
-          // Convert icUSD amount (e8s) to ckstable amount (e6s).
-          // ICRC-2 transfer_from deducts (amount + ledger_fee) from allowance.
-          const STABLE_LEDGER_FEE = BigInt(10_000); // 0.01 USDT/USDC
-          const amountE8s = Math.floor(icusdAmount * E8S);
-          const stableE6s = Math.floor(amountE8s / 100);
-          const spenderCanisterId = CONFIG.currentCanisterId;
-
-          // Non-Oisy: pre-validate + compute the approval buffer (needs the
-          // protocol fee rate). Oisy skips both network queries to preserve the
-          // gesture window — it approves a fixed LARGE_APPROVAL and never uses
-          // bufferedE6s; the backend re-validates.
-          let bufferedE6s = 0n;
-          if (!isOisyWallet()) {
-            const vaults = await ApiClient.getLiquidatableVaults();
-            const vault = vaults.find(v => Number(v.vault_id) === vaultId);
-            if (!vault) {
-              return { success: false, error: "Vault not found or is not liquidatable" };
-            }
-
-            const totalDebt = Number(vault.borrowed_icusd_amount) / E8S;
-            if (icusdAmount > totalDebt) {
-              return { success: false, error: `Cannot liquidate more than total debt (${totalDebt.toFixed(2)} icUSD)` };
-            }
-
-            // Fetch the admin-settable repay fee rate
-            const status = await QueryOperations.getProtocolStatus();
-            const feeRate = status.ckstableRepayFee || 0;
-            const protocolFee = BigInt(Math.ceil(stableE6s * feeRate));
-            bufferedE6s = BigInt(stableE6s) + protocolFee + STABLE_LEDGER_FEE + STABLE_LEDGER_FEE;
-          }
-
-          const liq_token_type = tokenType === 'CKUSDT' ? { 'CKUSDT' : null } as const : { 'CKUSDC' : null } as const;
-          const vaultArgWithToken = {
-            vault_id: BigInt(vaultId),
-            amount: BigInt(amountE8s),
-            token_type: liq_token_type
-          };
-
-          // ─── Oisy ICRC-112 batched path ───
-          // Always batch approve+liquidate — skip allowance check to preserve gesture context.
-          const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
-          if (signerAgent) {
-            console.log(`[Oisy] Sequential ${tokenType} approve + liquidate_vault_partial_with_stable`);
-            const LARGE_APPROVAL = BigInt(1_000_000_000_000_000);
-            const stableLedgerId = CONFIG.getStableLedgerId(tokenType);
-            const stableLedgerActor = await walletStore.getActor(
-              stableLedgerId, CONFIG.icusd_ledgerIDL
-            ) as any;
-            const actor = await ApiClient.getAuthenticatedActor();
-
-            // 1) Approve stable token (first consent screen, Tier 1 native).
-            const approveResult = await stableLedgerActor.icrc2_approve({
-              amount: LARGE_APPROVAL,
-              spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
-              expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
-              from_subaccount: [], created_at_time: []
-            });
-            if (approveResult && 'Err' in approveResult) {
-              return { success: false, error: `${tokenType} approval failed: ${JSON.stringify(approveResult.Err)}` };
-            }
-
-            // 2) liquidate_vault_partial_with_stable (second consent screen).
-            const result = await actor.liquidate_vault_partial_with_stable(vaultArgWithToken);
-
-            if ('Ok' in result) {
-              return mapLiquidationSuccessWithFee(vaultId, result.Ok);
-            } else {
-              return { success: false, error: ApiClient.formatProtocolError(result.Err) };
-            }
-          }
-
-          // ─── Standard path ───
-          const currentAllowance = await walletOperations.checkStableAllowance(spenderCanisterId, tokenType);
-          if (currentAllowance < bufferedE6s) {
-            const LARGE_APPROVAL = BigInt(1_000_000_000_000_000);
-            console.log(`Setting large ${tokenType} approval (1B) to avoid future popups`);
-            const approvalResult = await walletOperations.approveStableTransfer(
-              LARGE_APPROVAL, spenderCanisterId, tokenType
-            );
-            if (!approvalResult.success) {
-              return { success: false, error: approvalResult.error || `Failed to approve ${tokenType} transfer` };
-            }
-            await new Promise(resolve => setTimeout(resolve, 1000));
-          }
-
-          const actor = await ApiClient.getAuthenticatedActor();
-          const result = await actor.liquidate_vault_partial_with_stable(vaultArgWithToken);
-
-          if ('Ok' in result) {
-            return mapLiquidationSuccessWithFee(vaultId, result.Ok);
-          } else {
-            return { success: false, error: ApiClient.formatProtocolError(result.Err) };
-          }
-        } catch (err) {
-          console.error('Error liquidating with stable token:', err);
-          const errorMessage = err instanceof Error ? err.message : String(err);
-          if (errorMessage.includes('underflow')) {
-            return { success: false, error: "Liquidation failed due to a calculation error. The vault may have been modified." };
-          }
-          return { success: false, error: errorMessage };
-        }
-      }, vaultId);
+      // The backend keeps this legacy no-request-ID route closed. Avoid asking
+      // the wallet to approve funds for an operation that cannot be admitted.
+      return {
+        success: false,
+        error: 'Stablecoin liquidation is temporarily unavailable while receipt-backed recovery is being verified.'
+      };
     }
 
     /**
      * Liquidate a specific vault (complete liquidation)
      * @param vaultId The ID of the vault to liquidate
      */
-    static async liquidateVault(vaultId: number): Promise<VaultOperationResult> {
-      return ApiClient.executeSequentialOperation(async () => {
-        try {
-          console.log(`Liquidating vault #${vaultId}`);
-          
-          // Non-Oisy: pre-validate + compute the allowance buffer. Oisy skips
-          // the getLiquidatableVaults query to preserve the gesture window (it
-          // approves a fixed LARGE_APPROVAL and never uses bufferedDebt; the
-          // backend re-validates).
-          const spenderCanisterId = CONFIG.currentCanisterId;
-          let bufferedDebt = 0n;
-          if (!isOisyWallet()) {
-            const vaults = await ApiClient.getLiquidatableVaults();
-            const vault = vaults.find(v => Number(v.vault_id) === vaultId);
-
-            if (!vault) {
-              return {
-                success: false,
-                error: "Vault not found or is not liquidatable"
-              };
-            }
-
-            // Convert debt amount from bigint to number
-            const icusdDebt = Number(vault.borrowed_icusd_amount) / E8S;
-            console.log(`Vault #${vaultId} has debt of ${icusdDebt} icUSD`);
-
-            // Check and set allowance for icUSD with a 50% buffer
-            bufferedDebt = BigInt(Math.floor((icusdDebt * 1.5) * E8S));
-          }
-
-          // ─── Oisy ICRC-112 batched path ───
-          // Always batch approve+liquidate — skip allowance check to preserve gesture context.
-          const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
-          if (signerAgent) {
-            console.log(`[Oisy] Sequential icUSD approve + liquidate_vault`);
-            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000);
-            const icusdLedgerActor = await walletStore.getActor(
-              CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL
-            ) as any;
-            const actor = await ApiClient.getAuthenticatedActor();
-
-            // 1) Approve icUSD (first consent screen, Tier 1 native).
-            const approveResult = await icusdLedgerActor.icrc2_approve({
-              amount: LARGE_APPROVAL,
-              spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
-              expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
-              from_subaccount: [], created_at_time: []
-            });
-            if (approveResult && 'Err' in approveResult) {
-              return { success: false, error: `icUSD approval failed: ${JSON.stringify(approveResult.Err)}` };
-            }
-
-            // 2) liquidate_vault (second consent screen).
-            const result = await actor.liquidate_vault(BigInt(vaultId));
-
-            if ('Ok' in result) {
-              return mapLiquidationSuccessWithFee(vaultId, result.Ok);
-            } else {
-              return { success: false, error: ApiClient.formatProtocolError(result.Err) };
-            }
-          }
-
-          // ─── Standard path ───
-          const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
-          console.log(`Current icUSD allowance: ${Number(currentAllowance) / E8S}`);
-
-          if (currentAllowance < bufferedDebt) {
-            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000);
-            console.log(`Setting large icUSD approval (1B) to avoid future popups`);
-
-            const approvalResult = await walletOperations.approveIcusdTransfer(
-              LARGE_APPROVAL,
-              spenderCanisterId
-            );
-
-            if (!approvalResult.success) {
-              return {
-                success: false,
-                error: approvalResult.error || "Failed to approve icUSD transfer"
-              };
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 1000));
-          }
-
-          // Now proceed with liquidation
-          const actor = await ApiClient.getAuthenticatedActor();
-          const result = await actor.liquidate_vault(BigInt(vaultId));
-          
-          if ('Ok' in result) {
-            return mapLiquidationSuccessWithFee(vaultId, result.Ok);
-          } else {
-            return {
-              success: false,
-              error: ApiClient.formatProtocolError(result.Err)
-            };
-          }
-        } catch (err) {
-          console.error('Error liquidating vault:', err);
-          
-          // Check for specific underflow error and provide a better message
-          const errorMessage = err instanceof Error ? err.message : String(err);
-          if (errorMessage.includes('underflow') && errorMessage.includes('numeric.rs')) {
-            return {
-              success: false,
-              error: "Liquidation failed due to a calculation error. The vault may have already been liquidated or its state has changed."
-            };
-          }
-          
-          return {
-            success: false,
-            error: err instanceof Error ? err.message : 'Unknown error liquidating vault'
-          };
-        }
-      }, vaultId); // Pass vaultId to ensure proper operation tracking
+    static async liquidateVault(_vaultId: number): Promise<VaultOperationResult> {
+      return {
+        success: false,
+        error: 'Manual liquidation is temporarily unavailable while receipt-backed recovery is being verified.'
+      };
     }
 
   /**

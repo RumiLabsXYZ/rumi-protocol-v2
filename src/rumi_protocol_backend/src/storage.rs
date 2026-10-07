@@ -1,4 +1,7 @@
-use crate::event::Event;
+use crate::event::{
+    Event, PendingPayoutEvent, PendingPayoutJournalEntry, TreasuryPaymentEvent,
+    TreasuryPaymentJournalEntry,
+};
 use ic_stable_structures::{
     log::{Log as StableLog, NoSuchEntry},
     memory_manager::{MemoryId, MemoryManager, VirtualMemory},
@@ -23,11 +26,38 @@ const STATE_MEMORY_ID: MemoryId = MemoryId::new(4);
 // which matches today's behaviour.
 const EVENT_TS_INDEX_MEMORY_ID: MemoryId = MemoryId::new(5);
 const EVENT_TS_DATA_MEMORY_ID: MemoryId = MemoryId::new(6);
+const BOT_CLAIM_REQUEST_ID_FLOOR_USED_MEMORY_ID: MemoryId = MemoryId::new(16);
+// Sticky marker for V2 reserve-ingress obligations that cannot be rebuilt by
+// replaying the event log if the stable State snapshot is missing.
+const THREE_USD_RESERVE_INGRESS_V2_USED_MEMORY_ID: MemoryId = MemoryId::new(15);
+// Pending borrow-mint rows are held in the State snapshot, not reconstructable
+// from the public event log. Once any borrow tuple can reach a ledger, missing
+// State must never fall back to replay and erase that liability.
+const BORROW_MINT_JOURNAL_USED_MEMORY_ID: MemoryId = MemoryId::new(17);
+// V2 SP liquidation journal rows live in the State snapshot. Fail closed if
+// that snapshot disappears after an external stable transfer may have run.
+const SP_LIQUIDATION_V2_USED_MEMORY_ID: MemoryId = MemoryId::new(18);
+// Request-ID floors/completed tombstones and pending exact tuples are held in
+// State, not event-replayable. Missing snapshots must never erase them.
+const INBOUND_COLLATERAL_JOURNAL_USED_MEMORY_ID: MemoryId = MemoryId::new(19);
+const LIQUIDITY_V2_JOURNAL_USED_MEMORY_ID: MemoryId = MemoryId::new(20);
+const PAYOUT_JOURNAL_INDEX_MEMORY_ID: MemoryId = MemoryId::new(7);
+const PAYOUT_JOURNAL_DATA_MEMORY_ID: MemoryId = MemoryId::new(8);
+const TREASURY_PAYMENT_JOURNAL_INDEX_MEMORY_ID: MemoryId = MemoryId::new(9);
+const TREASURY_PAYMENT_JOURNAL_DATA_MEMORY_ID: MemoryId = MemoryId::new(10);
 
 type VMem = VirtualMemory<DefaultMemoryImpl>;
 type EventLog = StableLog<Vec<u8>, VMem, VMem>;
 type SnapshotLog = StableLog<Vec<u8>, VMem, VMem>;
 type TimestampLog = StableLog<u64, VMem, VMem>;
+type BotClaimRequestIdFloorUsedMarker = ic_stable_structures::Cell<u64, VMem>;
+type ThreeUsdReserveIngressV2UsedMarker = ic_stable_structures::StableCell<u64, VMem>;
+type BorrowMintJournalUsedMarker = ic_stable_structures::StableCell<u64, VMem>;
+type SpLiquidationV2UsedMarker = ic_stable_structures::StableCell<u64, VMem>;
+type InboundCollateralJournalUsedMarker = ic_stable_structures::StableCell<u64, VMem>;
+type LiquidityV2JournalUsedMarker = ic_stable_structures::StableCell<u64, VMem>;
+type PayoutJournalLog = StableLog<Vec<u8>, VMem, VMem>;
+type TreasuryPaymentJournalLog = StableLog<Vec<u8>, VMem, VMem>;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> = RefCell::new(
@@ -69,6 +99,121 @@ thread_local! {
                   ).expect("failed to initialize event timestamp log")
               )
         );
+    static BOT_CLAIM_REQUEST_ID_FLOOR_USED: RefCell<BotClaimRequestIdFloorUsedMarker> = MEMORY_MANAGER
+        .with(|m| RefCell::new(BotClaimRequestIdFloorUsedMarker::init(m.borrow().get(BOT_CLAIM_REQUEST_ID_FLOOR_USED_MEMORY_ID), 0).expect("failed to init bot claim request-ID floor marker")));
+    static THREE_USD_RESERVE_INGRESS_V2_USED: RefCell<ThreeUsdReserveIngressV2UsedMarker> =
+        MEMORY_MANAGER.with(|m| RefCell::new(
+            ThreeUsdReserveIngressV2UsedMarker::init(
+                m.borrow().get(THREE_USD_RESERVE_INGRESS_V2_USED_MEMORY_ID), 0
+            ).expect("failed to init 3USD reserve-ingress V2 marker")
+        ));
+    static BORROW_MINT_JOURNAL_USED: RefCell<BorrowMintJournalUsedMarker> =
+        MEMORY_MANAGER.with(|m| RefCell::new(
+            BorrowMintJournalUsedMarker::init(
+                m.borrow().get(BORROW_MINT_JOURNAL_USED_MEMORY_ID), 0
+            ).expect("failed to init borrow mint journal marker")
+        ));
+    static SP_LIQUIDATION_V2_USED: RefCell<SpLiquidationV2UsedMarker> =
+        MEMORY_MANAGER.with(|m| RefCell::new(
+            SpLiquidationV2UsedMarker::init(m.borrow().get(SP_LIQUIDATION_V2_USED_MEMORY_ID), 0)
+                .expect("failed to init SP liquidation V2 marker")
+        ));
+    static INBOUND_COLLATERAL_JOURNAL_USED: RefCell<InboundCollateralJournalUsedMarker> =
+        MEMORY_MANAGER.with(|m| RefCell::new(
+            InboundCollateralJournalUsedMarker::init(m.borrow().get(INBOUND_COLLATERAL_JOURNAL_USED_MEMORY_ID), 0)
+                .expect("failed to init inbound collateral journal marker")
+        ));
+    static LIQUIDITY_V2_JOURNAL_USED: RefCell<LiquidityV2JournalUsedMarker> =
+        MEMORY_MANAGER.with(|m| RefCell::new(
+            LiquidityV2JournalUsedMarker::init(m.borrow().get(LIQUIDITY_V2_JOURNAL_USED_MEMORY_ID), 0)
+                .expect("failed to init liquidity V2 journal marker")
+        ));
+    /// Private payout lifecycle journal, separate from the public Event stream.
+    static PAYOUT_JOURNAL: RefCell<PayoutJournalLog> = MEMORY_MANAGER
+        .with(|m| RefCell::new(StableLog::init(
+            m.borrow().get(PAYOUT_JOURNAL_INDEX_MEMORY_ID),
+             m.borrow().get(PAYOUT_JOURNAL_DATA_MEMORY_ID),
+         ).expect("failed to initialize payout journal")));
+    static TREASURY_PAYMENT_JOURNAL: RefCell<TreasuryPaymentJournalLog> = MEMORY_MANAGER
+        .with(|m| RefCell::new(StableLog::init(
+            m.borrow().get(TREASURY_PAYMENT_JOURNAL_INDEX_MEMORY_ID),
+            m.borrow().get(TREASURY_PAYMENT_JOURNAL_DATA_MEMORY_ID),
+        ).expect("failed to initialize treasury payment journal")));
+}
+
+/// Sticky marker prevents event replay from resetting the durable bot request-ID floor.
+pub fn mark_bot_claim_request_id_floor_used() -> Result<(), String> {
+    BOT_CLAIM_REQUEST_ID_FLOOR_USED.with(|marker| {
+        marker.borrow_mut().set(1).map(|_| ()).map_err(|error| {
+            format!("failed to persist bot claim request-ID floor marker: {error:?}")
+        })
+    })
+}
+
+pub fn mark_three_usd_reserve_ingress_v2_used() -> Result<(), String> {
+    THREE_USD_RESERVE_INGRESS_V2_USED.with(|marker| {
+        marker
+            .borrow_mut()
+            .set(1)
+            .map(|_| ())
+            .map_err(|error| format!("failed to persist 3USD reserve-ingress V2 marker: {error:?}"))
+    })
+}
+
+pub fn three_usd_reserve_ingress_v2_was_used() -> bool {
+    THREE_USD_RESERVE_INGRESS_V2_USED.with(|marker| *marker.borrow().get() != 0)
+}
+
+pub fn mark_borrow_mint_journal_used() -> Result<(), String> {
+    BORROW_MINT_JOURNAL_USED.with(|marker| {
+        marker
+            .borrow_mut()
+            .set(1)
+            .map(|_| ())
+            .map_err(|error| format!("failed to persist borrow mint journal marker: {error:?}"))
+    })
+}
+
+pub fn mark_sp_liquidation_v2_used() -> Result<(), String> {
+    SP_LIQUIDATION_V2_USED.with(|marker| {
+        marker
+            .borrow_mut()
+            .set(1)
+            .map(|_| ())
+            .map_err(|error| format!("failed to persist SP liquidation V2 marker: {error:?}"))
+    })
+}
+
+pub fn sp_liquidation_v2_was_used() -> bool {
+    SP_LIQUIDATION_V2_USED.with(|marker| *marker.borrow().get() != 0)
+}
+
+pub fn mark_inbound_collateral_journal_used() -> Result<(), String> {
+    INBOUND_COLLATERAL_JOURNAL_USED.with(|marker| {
+        marker.borrow_mut().set(1).map(|_| ()).map_err(|error| {
+            format!("failed to persist inbound collateral journal marker: {error:?}")
+        })
+    })
+}
+
+pub fn inbound_collateral_journal_was_used() -> bool {
+    INBOUND_COLLATERAL_JOURNAL_USED.with(|marker| *marker.borrow().get() != 0)
+}
+
+pub fn mark_liquidity_v2_journal_used() -> Result<(), String> {
+    LIQUIDITY_V2_JOURNAL_USED.with(|marker| {
+        marker.borrow_mut().set(1).map(|_| ()).map_err(|error| {
+            format!("failed to persist liquidity V2 journal marker: {error:?}")
+        })
+    })
+}
+
+pub fn liquidity_v2_journal_was_used() -> bool {
+    LIQUIDITY_V2_JOURNAL_USED.with(|marker| *marker.borrow().get() != 0)
+}
+
+pub fn borrow_mint_journal_was_used() -> bool {
+    BORROW_MINT_JOURNAL_USED.with(|marker| *marker.borrow().get() != 0)
 }
 
 pub struct EventIterator {
@@ -132,8 +277,11 @@ pub fn count_events() -> u64 {
 /// every set_*, admin_*). The two logs always grow in lock-step from this
 /// point forward — index N in EVENTS aligns with index N in EVENT_TIMESTAMPS.
 pub fn record_event(event: &Event) {
+    record_event_with_timestamp(event, ic_cdk::api::time());
+}
+
+fn record_event_with_timestamp(event: &Event, now: u64) {
     let bytes = encode_event(event);
-    let now = ic_cdk::api::time();
     EVENTS.with(|events| {
         events
             .borrow()
@@ -145,6 +293,103 @@ pub fn record_event(event: &Event) {
             .append(&now)
             .expect("failed to append to the event timestamp log");
     });
+}
+
+/// Append one private payout transition after the current public-event prefix.
+/// Stable log writes and the caller's in-memory state mutation happen in one
+/// update message, so a trap rolls the complete operation back.
+pub fn record_pending_payout_event(event: &PendingPayoutEvent) {
+    let entry = PendingPayoutJournalEntry {
+        after_legacy_event_count: count_events(),
+        event: event.clone(),
+    };
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&entry, &mut bytes)
+        .expect("failed to encode pending payout journal entry");
+    PAYOUT_JOURNAL.with(|log| {
+        log.borrow()
+            .append(&bytes)
+            .expect("failed to append pending payout journal entry")
+    });
+}
+
+pub struct PendingPayoutJournalIterator {
+    buf: Vec<u8>,
+    pos: u64,
+}
+
+impl Iterator for PendingPayoutJournalIterator {
+    type Item = PendingPayoutJournalEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        PAYOUT_JOURNAL.with(|log| {
+            let log = log.borrow();
+            match log.read_entry(self.pos, &mut self.buf) {
+                Ok(()) => {
+                    self.pos = self.pos.saturating_add(1);
+                    Some(
+                        ciborium::de::from_reader(&self.buf[..])
+                            .expect("failed to decode pending payout journal entry"),
+                    )
+                }
+                Err(NoSuchEntry) => None,
+            }
+        })
+    }
+}
+
+pub fn pending_payout_events() -> PendingPayoutJournalIterator {
+    PendingPayoutJournalIterator {
+        buf: Vec::new(),
+        pos: 0,
+    }
+}
+
+pub fn record_treasury_payment_event(event: &TreasuryPaymentEvent) {
+    let entry = TreasuryPaymentJournalEntry {
+        after_legacy_event_count: count_events(),
+        event: event.clone(),
+    };
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&entry, &mut bytes)
+        .expect("failed to encode treasury payment journal entry");
+    TREASURY_PAYMENT_JOURNAL.with(|log| {
+        log.borrow()
+            .append(&bytes)
+            .expect("failed to append treasury payment journal entry")
+    });
+}
+
+pub struct TreasuryPaymentJournalIterator {
+    buf: Vec<u8>,
+    pos: u64,
+}
+
+impl Iterator for TreasuryPaymentJournalIterator {
+    type Item = TreasuryPaymentJournalEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        TREASURY_PAYMENT_JOURNAL.with(|log| {
+            let log = log.borrow();
+            match log.read_entry(self.pos, &mut self.buf) {
+                Ok(()) => {
+                    self.pos = self.pos.saturating_add(1);
+                    Some(
+                        ciborium::de::from_reader(&self.buf[..])
+                            .expect("failed to decode treasury payment journal entry"),
+                    )
+                }
+                Err(NoSuchEntry) => None,
+            }
+        })
+    }
+}
+
+pub fn treasury_payment_events() -> TreasuryPaymentJournalIterator {
+    TreasuryPaymentJournalIterator {
+        buf: Vec::new(),
+        pos: 0,
+    }
 }
 
 /// Returns the recording-time timestamp for the event at the given **event-log
@@ -202,8 +447,7 @@ const WASM_PAGE_SIZE: u64 = 65_536; // 64 KiB
 pub fn save_state_to_stable(state: &crate::state::State) {
     let bytes = {
         let mut buf = Vec::new();
-        ciborium::ser::into_writer(state, &mut buf)
-            .expect("failed to serialize State to CBOR");
+        ciborium::ser::into_writer(state, &mut buf).expect("failed to serialize State to CBOR");
         buf
     };
 
@@ -245,12 +489,18 @@ pub fn load_state_from_stable() -> Option<crate::state::State> {
     MEMORY_MANAGER.with(|m| {
         let mem = m.borrow().get(STATE_MEMORY_ID);
         if mem.size() == 0 {
+            if three_usd_reserve_ingress_v2_was_used() || borrow_mint_journal_was_used() || sp_liquidation_v2_was_used() || inbound_collateral_journal_was_used() || liquidity_v2_journal_was_used() {
+                ic_cdk::trap("stable State snapshot is missing after a non-replayable financial journal dispatch; refusing event replay");
+            }
             return None; // No state memory allocated yet (genuine first upgrade).
         }
         let mut len_bytes = [0u8; 8];
         mem.read(0, &mut len_bytes);
         let len = u64::from_le_bytes(len_bytes);
         if len == 0 {
+            if three_usd_reserve_ingress_v2_was_used() || borrow_mint_journal_was_used() || sp_liquidation_v2_was_used() || inbound_collateral_journal_was_used() || liquidity_v2_journal_was_used() {
+                ic_cdk::trap("stable State snapshot is missing after a non-replayable financial journal dispatch; refusing event replay");
+            }
             return None; // No state saved yet (genuine first upgrade).
         }
         // A snapshot IS present from here on. Any failure below is corruption of
@@ -266,7 +516,38 @@ pub fn load_state_from_stable() -> Option<crate::state::State> {
         let mut buf = vec![0u8; len as usize];
         mem.read(8, &mut buf);
         match decode_state_body(&buf) {
-            Ok(state) => Some(state),
+            Ok(state) => {
+                if sp_liquidation_v2_was_used()
+                    && state.sp_liquidation_v2_journals.is_empty()
+                    && state.sp_liquidation_v2_acknowledged_through.is_empty()
+                {
+                    ic_cdk::trap("SP liquidation V2 marker exists but the State snapshot has neither journal rows nor acknowledged-ID floors; refusing stale snapshot recovery");
+                }
+                if inbound_collateral_journal_was_used()
+                    && state.pending_inbound_collateral.is_empty()
+                    && state.inbound_collateral_high_water.is_empty()
+                    && state.inbound_collateral_latest_result.is_empty()
+                    && state.repayment_v2_active.is_empty()
+                    && state.repayment_v2_latest_result.is_empty()
+                    && state.repayment_v2_high_water.is_empty()
+                    && state.stable_repayment_v2_active.is_empty()
+                    && state.stable_repayment_v2_latest_result.is_empty()
+                    && state.stable_repayment_v2_high_water.is_empty()
+                    && state.manual_liquidation_v2_active.is_empty()
+                    && state.manual_liquidation_v2_latest_result.is_empty()
+                    && state.manual_liquidation_v2_high_water.is_empty()
+                {
+                    ic_cdk::trap("inbound collateral, icUSD repayment, or stable repayment journal marker exists but the State snapshot has no request-ID floor or receipt journal; refusing stale snapshot recovery");
+                }
+                if liquidity_v2_journal_was_used()
+                    && state.liquidity_v2_active.is_empty()
+                    && state.liquidity_v2_high_water.is_empty()
+                    && state.liquidity_v2_latest_result.is_empty()
+                {
+                    ic_cdk::trap("liquidity V2 journal marker exists but the State snapshot has no request-ID floor or receipt journal; refusing stale snapshot recovery");
+                }
+                Some(state)
+            }
             Err(e) => ic_cdk::trap(&corrupt_snapshot_trap_msg(&e)),
         }
     })
@@ -308,7 +589,9 @@ fn decode_snapshot(buf: &[u8]) -> crate::ProtocolSnapshot {
 pub fn record_snapshot(snapshot: &crate::ProtocolSnapshot) {
     let bytes = encode_snapshot(snapshot);
     SNAPSHOTS.with(|log| {
-        log.borrow().append(&bytes).expect("failed to append snapshot");
+        log.borrow()
+            .append(&bytes)
+            .expect("failed to append snapshot");
     });
 }
 
@@ -321,6 +604,77 @@ pub fn snapshots() -> SnapshotIterator {
 
 pub fn count_snapshots() -> u64 {
     SNAPSHOTS.with(|log| log.borrow().len())
+}
+
+#[cfg(test)]
+mod payout_journal_tests {
+    use super::*;
+    use crate::{
+        event::{PendingPayoutEvent, PendingPayoutKind},
+        numeric::ICP,
+        InitArg,
+    };
+    use candid::Principal;
+
+    #[test]
+    fn private_payout_journal_does_not_change_legacy_public_event_stream() {
+        let init = InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        };
+        let before_public_count = count_events();
+        record_event_with_timestamp(&Event::Init(init), 1);
+        let after_legacy_event_count = count_events();
+        let operation_id = (1u128 << 64) | 7;
+        let transfer = crate::state::PendingMarginTransfer {
+            vault_id: 7,
+            owner: Principal::anonymous(),
+            margin: ICP::new(100_000),
+            collateral_type: Principal::anonymous(),
+            retry_count: 0,
+            op_nonce: operation_id,
+            ledger: Some(Principal::anonymous()),
+            transfer_amount_raw: Some(90_000),
+            redemption_transfer: None,
+            held_for_manual_retry: false,
+            reconciliation_required: false,
+            min_net_collateral_raw: None,
+        };
+        record_pending_payout_event(&PendingPayoutEvent::Queued {
+            operation_id,
+            kind: PendingPayoutKind::Margin,
+            transfer,
+            timestamp: 1,
+        });
+
+        let public_events: Vec<_> = events().collect();
+        assert_eq!(public_events.len() as u64, after_legacy_event_count);
+        assert_eq!(after_legacy_event_count, before_public_count + 1);
+        assert!(matches!(
+            public_events.get(before_public_count as usize),
+            Some(Event::Init(_))
+        ));
+        let response_bytes =
+            candid::encode_one(&public_events).expect("encode get_events response");
+        let decoded_response: Vec<Event> = candid::decode_one(&response_bytes)
+            .expect("decode get_events response using the unchanged public Event type");
+        assert_eq!(decoded_response, public_events);
+        let private_events: Vec<_> = pending_payout_events().collect();
+        let last = private_events
+            .last()
+            .expect("payout journal entry persisted");
+        assert_eq!(last.after_legacy_event_count, after_legacy_event_count);
+        assert!(
+            matches!(&last.event, PendingPayoutEvent::Queued { operation_id: id, .. } if *id == operation_id)
+        );
+    }
 }
 
 pub struct SnapshotIterator {
@@ -386,7 +740,10 @@ mod state_snapshot_tests {
         // live upgrade.
         let mut state = crate::state::State::default();
         let chain = ChainId(10143);
-        state.multi_chain.chain_supplies.insert(chain, 5_000_000_000);
+        state
+            .multi_chain
+            .chain_supplies
+            .insert(chain, 5_000_000_000);
         state.multi_chain.chain_vaults.insert(
             1,
             ChainVaultV1 {
@@ -403,7 +760,8 @@ mod state_snapshot_tests {
                 owner_evm: None,
                 last_interest_accrual_ns: 0,
                 pending_interest_mint_e8s: 0,
-                pending_liquidation: None,            },
+                pending_liquidation: None,
+            },
         );
 
         let bytes = encode_state(&state);
@@ -424,6 +782,28 @@ mod state_snapshot_tests {
         assert_eq!(
             decoded.multi_chain.total_supply_all_chains_e8s(),
             decoded.multi_chain.total_chain_vault_debt_e8s()
+        );
+    }
+
+    #[test]
+    fn missing_state_snapshot_after_borrow_journal_marker_refuses_event_replay() {
+        mark_borrow_mint_journal_used().expect("persist borrow-journal-used marker");
+        assert!(borrow_mint_journal_was_used());
+        let result = std::panic::catch_unwind(load_state_from_stable);
+        assert!(
+            result.is_err(),
+            "missing snapshot must trap instead of replaying away borrow journal"
+        );
+    }
+
+    #[test]
+    fn inbound_collateral_marker_is_sticky_before_any_external_pull() {
+        mark_inbound_collateral_journal_used().expect("persist inbound journal marker");
+        assert!(inbound_collateral_journal_was_used());
+        let result = std::panic::catch_unwind(load_state_from_stable);
+        assert!(
+            result.is_err(),
+            "missing State must not erase ingress request IDs or receipts"
         );
     }
 

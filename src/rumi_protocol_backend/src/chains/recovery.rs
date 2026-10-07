@@ -65,10 +65,9 @@ impl std::fmt::Display for RecoveryError {
 // ─── M-08: resolve a stuck settlement op, on-chain-verified ───────────────────
 
 /// Read the op, confirm it is `Inflight`, and capture its `last_tx_hash` (the
-/// only datum the async re-verification needs; the per-kind reversal re-reads the
-/// kind fresh from state under the commit borrow). Returns the tx hash, or
-/// `Ok(None)` if the op never broadcast a tx (so it cannot have landed).
-fn snapshot_inflight_op_tx(chain: ChainId, op_id: u64) -> Result<Option<String>, RecoveryError> {
+/// capture every candidate hash; the per-kind reversal re-reads the kind fresh
+/// from state under the commit borrow.
+fn snapshot_inflight_op_txs(chain: ChainId, op_id: u64) -> Result<Vec<String>, RecoveryError> {
     read_state(|s| {
         let q = s
             .multi_chain
@@ -85,7 +84,7 @@ fn snapshot_inflight_op_tx(chain: ChainId, op_id: u64) -> Result<Option<String>,
                 op.status
             )));
         }
-        Ok(op.last_tx_hash.clone())
+        Ok(op.receipt_tx_hash_candidates())
     })
 }
 
@@ -100,6 +99,30 @@ pub fn apply_resolve_reversal_in_state(
     op_id: u64,
     now: u64,
 ) -> Result<bool, RecoveryError> {
+    apply_resolve_reversal_if_candidates_unchanged_in_state(state, chain, op_id, now, None)
+}
+
+/// Apply the reversal only if the receipt-candidate list still matches the
+/// snapshot whose receipts were checked. A replacement claimed during an
+/// `.await` changes the list and invalidates this stale recovery attempt.
+pub fn apply_resolve_reversal_if_candidates_unchanged_in_state(
+    state: &mut crate::chains::multi_chain_state::MultiChainState,
+    chain: ChainId,
+    op_id: u64,
+    now: u64,
+    expected_candidates: Option<&[String]>,
+) -> Result<bool, RecoveryError> {
+    let live_candidates = state
+        .settlement_queues
+        .get(&chain)
+        .and_then(|q| q.pending.get(&op_id))
+        .ok_or(RecoveryError::UnknownOp(op_id))?
+        .receipt_tx_hash_candidates();
+    if expected_candidates.is_some_and(|expected| expected != live_candidates.as_slice()) {
+        return Err(RecoveryError::VerificationUnavailable(format!(
+            "op {op_id} transaction candidates changed during receipt verification; retry"
+        )));
+    }
     let still_inflight = state
         .settlement_queues
         .get(&chain)
@@ -182,13 +205,10 @@ pub fn apply_resolve_reversal_in_state(
 ///    landed NativeWithdrawal = double-credited collateral.
 ///  - Receipt shows the tx REVERTED → safe to reverse (the on-chain effect did
 ///    not happen) → apply the reversal.
-///  - Receipt is PENDING/UNKNOWN (`None`) → the tx is not mined, so its effect
-///    has NOT landed; reversing only marks the op Failed + clears a Mint's
-///    pending (it does NOT release collateral — the vault stays MintPending, and
-///    M-09's separate verified check gates the eventual collateral release).
-///    Allowed, but logged.
-///  - No `last_tx_hash` recorded → the op never broadcast a tx (it cannot have
-///    landed) → safe to reverse.
+///  - Receipt is PENDING/UNKNOWN (`None`) → refuse; it may still mine at the
+///    recorded nonce.
+///  - No candidate hash recorded → the worker never crossed the pre-broadcast
+///    claim boundary, so it could not have broadcast this op.
 ///  - The quorum read itself ERRORS → REFUSE (`VerificationUnavailable`): we
 ///    must not reverse on an unverifiable state.
 ///
@@ -198,10 +218,10 @@ pub async fn resolve_stuck_settlement_op_verified(
     chain: ChainId,
     op_id: u64,
 ) -> Result<bool, RecoveryError> {
-    let last_tx_hash = snapshot_inflight_op_tx(chain, op_id)?;
+    let tx_hashes = snapshot_inflight_op_txs(chain, op_id)?;
 
     // Re-verify on-chain unless there is simply no tx to check.
-    if let Some(tx_hash) = &last_tx_hash {
+    for tx_hash in &tx_hashes {
         match crate::chains::monad::evm_rpc::get_transaction_receipt(chain, tx_hash).await {
             Ok(Some((true, block))) => {
                 return Err(RecoveryError::OnChainLanded(format!(
@@ -212,8 +232,9 @@ pub async fn resolve_stuck_settlement_op_verified(
                 // Reverted on-chain — the effect did not happen; safe to reverse.
             }
             Ok(None) => {
-                // Pending / unknown: not mined, so not landed. Allowed (clears
-                // accounting only; collateral release is gated separately by M-09).
+                return Err(RecoveryError::VerificationUnavailable(format!(
+                    "op {op_id} tx {tx_hash} has no receipt; it may still be pending"
+                )));
             }
             Err(e) => {
                 return Err(RecoveryError::VerificationUnavailable(format!(
@@ -224,7 +245,15 @@ pub async fn resolve_stuck_settlement_op_verified(
     }
 
     let now = ic_cdk::api::time();
-    mutate_state(|s| apply_resolve_reversal_in_state(&mut s.multi_chain, chain, op_id, now))
+    mutate_state(|s| {
+        apply_resolve_reversal_if_candidates_unchanged_in_state(
+            &mut s.multi_chain,
+            chain,
+            op_id,
+            now,
+            Some(&tx_hashes),
+        )
+    })
 }
 
 // ─── M-09: recover a stuck chain vault, on-chain-verified ─────────────────────
@@ -268,18 +297,20 @@ pub fn precheck_recover_vault_in_state(
     if has_live_mint {
         return Err(RecoveryError::LiveMintOp(vault_id));
     }
-    // Collect tx hashes of TERMINAL Mint ops for this vault, so the async path can
-    // re-verify none of them actually succeeded on-chain (a Failed/Succeeded op
-    // may carry a `last_tx_hash` that did land).
+    // Collect all candidate hashes of TERMINAL Mint ops for this vault.
     let tx_hashes: Vec<String> = queue
         .map(|q| {
             q.pending
                 .values()
-                .filter_map(|op| match &op.kind {
+                .flat_map(|op| match &op.kind {
                     SettlementOpKind::Mint { vault_id: vid, .. } if *vid == vault_id => {
-                        op.last_tx_hash.clone()
+                        if op.tx_hash_candidates.is_empty() {
+                            op.last_tx_hash.clone().into_iter().collect::<Vec<_>>()
+                        } else {
+                            op.receipt_tx_hash_candidates()
+                        }
                     }
-                    _ => None,
+                    _ => Vec::new(),
                 })
                 .collect()
         })
@@ -370,7 +401,12 @@ pub async fn recover_stuck_chain_vault_verified(
                     "vault {vault_id} mint tx {tx_hash} succeeded on-chain at block {block}; refusing to release collateral"
                 )));
             }
-            Ok(Some((false, _))) | Ok(None) => { /* reverted or not mined — fine */ }
+            Ok(Some((false, _))) => { /* explicitly reverted */ }
+            Ok(None) => {
+                return Err(RecoveryError::VerificationUnavailable(format!(
+                    "vault {vault_id} mint tx {tx_hash} has no receipt; it may still be pending"
+                )));
+            }
             Err(e) => {
                 return Err(RecoveryError::VerificationUnavailable(format!(
                     "could not read mint receipt for vault {vault_id} tx {tx_hash} via quorum: {e}"

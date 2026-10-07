@@ -18,6 +18,9 @@ import type {
   BoundActionOutcomeKind,
   BoundOpenVaultAndBorrowResult,
   BoundBorrowFromVaultResult,
+  BoundOpenVaultV2Result,
+  BoundAddMarginV2Result,
+  BoundLiquidityV2Result,
 } from './protocol/apiClient';
 
 export { StaleActionSessionError };
@@ -26,6 +29,9 @@ export type {
   BoundActionOutcomeKind,
   BoundOpenVaultAndBorrowResult,
   BoundBorrowFromVaultResult,
+  BoundOpenVaultV2Result,
+  BoundAddMarginV2Result,
+  BoundLiquidityV2Result,
 };
 
 
@@ -53,6 +59,10 @@ export class ProtocolService {
   static openVault = ApiClient.openVault;
   static openVaultAndBorrow = ApiClient.openVaultAndBorrow;
   static openVaultAndBorrowBound = ApiClient.openVaultAndBorrowBound;
+  static openVaultV2Bound = ApiClient.openVaultV2Bound;
+  static addMarginV2Bound = ApiClient.addMarginV2Bound;
+  static getCollateralIngressStateBound = ApiClient.getCollateralIngressStateBound;
+  static getCollateralIngressBound = ApiClient.getCollateralIngressBound;
   static getUserVaults = ApiClient.getUserVaults;
   static getVaultById = ApiClient.getVaultById;
   static borrowFromVault = ApiClient.borrowFromVault;
@@ -79,6 +89,9 @@ export class ProtocolService {
 
   // Liquidity Operations - these go through ProtocolManager for proper error handling and queuing
   static getLiquidityStatus = ApiClient.getLiquidityStatus;
+  static getLiquidityV2RequestStateBound = ApiClient.getLiquidityV2RequestStateBound;
+  static liquidityV2Bound = ApiClient.liquidityV2Bound;
+  static attachLiquidityV2CandidateBound = ApiClient.attachLiquidityV2CandidateBound;
   static provideLiquidity = ApiClient.provideLiquidity;
   static withdrawLiquidity = ApiClient.withdrawLiquidity;
   static claimLiquidityReturns = ApiClient.claimLiquidityReturns;
@@ -124,6 +137,10 @@ export const protocolService = {
   openVault: ProtocolService.openVault,
   openVaultAndBorrow: ProtocolService.openVaultAndBorrow,
   openVaultAndBorrowBound: ProtocolService.openVaultAndBorrowBound,
+  openVaultV2Bound: ProtocolService.openVaultV2Bound,
+  addMarginV2Bound: ProtocolService.addMarginV2Bound,
+  getCollateralIngressStateBound: ProtocolService.getCollateralIngressStateBound,
+  getCollateralIngressBound: ProtocolService.getCollateralIngressBound,
   getUserVaults: ProtocolService.getUserVaults,
   borrowFromVault: ProtocolService.borrowFromVault,
   borrowFromVaultBound: ProtocolService.borrowFromVaultBound,
@@ -142,6 +159,9 @@ export const protocolService = {
   redeemQuoted: ProtocolService.redeemQuoted,
   getReserveBalances: ProtocolService.getReserveBalances,
   getLiquidityStatus: ProtocolService.getLiquidityStatus,
+  getLiquidityV2RequestStateBound: ProtocolService.getLiquidityV2RequestStateBound,
+  liquidityV2Bound: ProtocolService.liquidityV2Bound,
+  attachLiquidityV2CandidateBound: ProtocolService.attachLiquidityV2CandidateBound,
   provideLiquidity: ProtocolService.provideLiquidity,
   withdrawLiquidity: ProtocolService.withdrawLiquidity,
   claimLiquidityReturns: ProtocolService.claimLiquidityReturns,

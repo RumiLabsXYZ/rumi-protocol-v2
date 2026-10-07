@@ -1,27 +1,44 @@
 # Swap receipts v1
 
-`swap_with_receipt_v1` is additive. Existing `swap(i, j, dx, min_dy)` callers keep
-its wire signature, pricing, fee allocation, and gross-output return value.
-Both entrypoints use `swap_inner` for pricing and reserve accounting.
+`swap_with_receipt_v1` is the value-moving swap entrypoint. The legacy
+`swap(i, j, dx, min_dy)` wire method remains in Candid for compatibility but
+fails closed before pulling tokens. Wallet callers may use the receipt method
+without admin allowlisting; anonymous callers are rejected.
 
-Receipt clients must first be enabled by the pool admin through
-`set_swap_receipt_client_v1(client, enabled)`. The stable capability set starts
-empty and holds at most 64 clients. `is_swap_receipt_client_v1` exposes this
-capability. Source delivery does not enable any client.
+The receipt-backed swap, add-liquidity, and donation ingress methods currently
+return `PoolLocked` in production builds. Their full paths are available only
+to the `test_endpoints` PocketIC fixture while recovery is independently
+validated. Candidate-index ICRC-3 reconciliation proves a matching transfer
+when present; an aged ambiguous tuple can also be advanced through an update
+endpoint that scans at most 100 contiguous indexes per call to one fixed log
+tip, resolving every advertised archive range and rejecting gaps, duplicates,
+unknown block types, or malformed transfer fields. A complete negative scan
+retains a hash-chain tombstone and rotates the exact transfer timestamp/memo;
+it does not dispatch the replacement in the same call.
+
+That recovery path is still not a production admission decision. Production
+absence-based rotation is disabled for every ledger: a configured principal
+alone cannot prove the installed module hash or archive schema. A matching
+exact transfer receipt can still be reconciled. Production V1 ingress also
+remains explicitly disabled until the source-matched PocketIC/archive matrix,
+independent review, and ledger-specific trust gate are complete. Do not
+describe V1 ingress or absence recovery as ready for rollout.
 
 A receipt request binds an exactly 32-byte `intent_id`, input/output coin
 indices, input amount `dx`, and net minimum received `min_dy`. IDs are scoped to
-the authenticated caller. An identical retained request returns its existing
+the caller and must have a strictly increasing big-endian sequence in their
+first eight bytes. An identical retained request returns its existing
 receipt and never starts another transfer. A conflicting request is rejected.
-Revoking a client blocks submissions, including duplicates, but preserves that
-client's access to `get_swap_receipt_v1(intent_id)`.
+The frontend persists the exact ID and payload per wallet/action before update
+dispatch and blocks replacing an unresolved local intent.
 
 The receipt map uses stable MemoryId 22, the reserve fence uses 23, and the
 client capability set uses 24. Existing stable IDs and SlimState/legacy state
-schemas are unchanged. There are at most 10,000 receipts. Rows are never evicted;
-capacity is checked before any transfer and permanently rejects new intents
-when exhausted. Existing receipt lookup remains available. This bound requires
-an explicit future capacity/retention design before exhausting 10,000 attempts.
+schemas are unchanged. There are at most 10,000 retained receipts and 64 active
+receipts per owner. Terminal rows may be pruned only after that caller advances
+its sequence; unresolved value obligations are never evicted. A bounded global
+owner high-water map currently caps distinct owners at 100,000; this is an
+admission limit and requires monitoring before exhaustion.
 
 Each transfer records the ledger, default source/destination accounts, credited
 amount, explicit fee, creation timestamp, memo, status, and the block ID returned
@@ -49,12 +66,13 @@ rejection permits a refund; failed or uncertain refunds retain the fence. No
 uncertain submission is automatically retried or compensated.
 
 A callback trap or upgrade may retain a Submitted receipt. Such a receipt is
-unresolved evidence, never permission to replay. The stable fence blocks pool
-reserve mutations, including the legacy swap and pending-claim paths, even after
-an upgrade. Ordinary admin unpause cannot clear it. There is deliberately no
-operator-assertion recovery endpoint; clearing unresolved custody work requires
-a future implementation based on verified ledger evidence and correct reserve
-accounting.
+unresolved evidence, never permission to replay automatically. The stable
+fence is derived from all active stable swap/ingress rows, so a reset heap flag
+cannot unlock reserve mutations. Exact positive ICRC-3 evidence and the
+fixed-tip absence scan are caller-driven update methods. Unsupported ledgers,
+archive gaps, unknown block encodings, and scans that have not reached the
+persisted fixed tip remain held. Legacy rows without a pre-dispatch cursor
+scan from genesis, one bounded page at a time.
 
 `get_swap_receipt_v1` is caller-scoped. Canister consumers should use a replicated
 inter-canister call for authoritative observation. An off-chain ordinary query

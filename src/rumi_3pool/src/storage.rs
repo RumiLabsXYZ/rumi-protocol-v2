@@ -12,7 +12,7 @@
 //     first time on the new wasm (one-shot drain from the legacy blob) or
 //     subsequent times (load `SlimState` from its cell).
 //
-// Memory ID layout (25 IDs used; 255 available):
+// Memory ID layout (34 IDs used; 255 available):
 //
 //   0       SlimState cell              — bounded residual heap
 //   1       lp_balances                 — BTreeMap<Principal, u128>
@@ -29,9 +29,18 @@
 //                                         to blocks log; entry i == hash of block i)
 //   20      pending_claims              — BTreeMap<u64, ThreePoolPendingClaim>
 //   21      next_claim_id cell          — monotonic u64 claim id counter
-//   22      swap_receipts_v1            — never-evicted caller-scoped attempts
+//   22      swap_receipts_v1            — bounded caller-scoped active attempts
 //   23      swap_receipt_fence          — durable reserve mutation fence
 //   24      swap_receipt_clients        — bounded admin-managed capability set
+//   25      three_pool_donation_receipts — permanent backend donation receipts
+//   26      pending_payouts              — exact idempotency tuples for claims
+//   27      ingress_receipts             — caller-scoped durable input operations
+//   28      intent_high_water            — per-owner intent monotonicity
+//   29      lp_transfer_dedup            — ICRC-1/2 transfer retry identities
+//   30      lp_transfer_dedup_cutover    — first-upgrade timestamp for legacy retries
+//   31      lp_transfer_dedup_expiry     — ordered expiry index for retry identities
+//   32      lp_account_balances          — non-default ICRC account balances
+//   33      lp_account_allowances        — allowances involving non-default accounts
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -46,6 +55,7 @@ use ic_stable_structures::{
     storable::{Bound, Storable},
     DefaultMemoryImpl, StableBTreeMap, StableCell, StableLog,
 };
+use icrc_ledger_types::icrc1::account::Account;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -84,6 +94,18 @@ const MEM_NEXT_CLAIM_ID: MemoryId = MemoryId::new(21);
 const MEM_SWAP_RECEIPTS_V1: MemoryId = MemoryId::new(22);
 const MEM_SWAP_RECEIPT_FENCE: MemoryId = MemoryId::new(23);
 const MEM_SWAP_RECEIPT_CLIENTS: MemoryId = MemoryId::new(24);
+// Preserve the donation receipt slot introduced by the preceding source
+// revision so a future upgrade cannot reinterpret its stable bytes as payouts.
+const MEM_THREE_POOL_DONATION_RECEIPTS: MemoryId = MemoryId::new(25);
+const MEM_PENDING_PAYOUTS: MemoryId = MemoryId::new(26);
+const MEM_INGRESS_RECEIPTS: MemoryId = MemoryId::new(27);
+const MEM_INTENT_HIGH_WATER: MemoryId = MemoryId::new(28);
+const MEM_LP_TRANSFER_DEDUP: MemoryId = MemoryId::new(29);
+const MEM_LP_TRANSFER_DEDUP_CUTOVER: MemoryId = MemoryId::new(30);
+const MEM_LP_TRANSFER_DEDUP_EXPIRY: MemoryId = MemoryId::new(31);
+const MEM_LP_ACCOUNT_BALANCES: MemoryId = MemoryId::new(32);
+const MEM_LP_ACCOUNT_ALLOWANCES: MemoryId = MemoryId::new(33);
+pub(crate) const MAX_INTENT_OWNERS: u64 = 100_000;
 
 // ─── SlimState ───────────────────────────────────────────────────────────────
 //
@@ -190,6 +212,89 @@ pub struct AllowanceKey {
     pub spender: Principal,
 }
 
+/// Full ICRC account key. A missing subaccount is canonicalized to 32 zero
+/// bytes, matching the ICRC account identity rule.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct AccountKey {
+    pub owner: Principal,
+    pub subaccount: [u8; 32],
+}
+
+impl AccountKey {
+    pub fn new(account: &Account) -> Self {
+        Self {
+            owner: account.owner,
+            subaccount: account.subaccount.unwrap_or([0; 32]),
+        }
+    }
+
+    pub fn account(&self) -> Account {
+        Account {
+            owner: self.owner,
+            subaccount: (self.subaccount != [0; 32]).then_some(self.subaccount),
+        }
+    }
+
+    fn append_to(&self, out: &mut Vec<u8>) {
+        let principal = self.owner.as_slice();
+        out.push(principal.len() as u8);
+        out.extend_from_slice(principal);
+        out.extend_from_slice(&self.subaccount);
+    }
+}
+
+impl Storable for AccountKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut out = Vec::with_capacity(62);
+        self.append_to(&mut out);
+        Cow::Owned(out)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let b = bytes.as_ref();
+        let len = b[0] as usize;
+        let owner = Principal::from_slice(&b[1..1 + len]);
+        let mut subaccount = [0; 32];
+        subaccount.copy_from_slice(&b[1 + len..1 + len + 32]);
+        Self { owner, subaccount }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 62,
+        is_fixed_size: false,
+    };
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct AccountAllowanceKey {
+    pub owner: AccountKey,
+    pub spender: AccountKey,
+}
+
+impl Storable for AccountAllowanceKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut out = Vec::with_capacity(124);
+        self.owner.append_to(&mut out);
+        self.spender.append_to(&mut out);
+        Cow::Owned(out)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let b = bytes.as_ref();
+        let first_len = b[0] as usize;
+        let first_size = 1 + first_len + 32;
+        Self {
+            owner: AccountKey::from_bytes(Cow::Borrowed(&b[..first_size])),
+            spender: AccountKey::from_bytes(Cow::Borrowed(&b[first_size..])),
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 124,
+        is_fixed_size: false,
+    };
+}
+
 impl Storable for AllowanceKey {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
         let owner = self.owner.as_slice();
@@ -263,6 +368,127 @@ impl Storable for StorableHash {
     };
 }
 
+/// Original transfer timestamp and block for an exact ICRC-1/2 retry.
+/// Stable storage preserves the dedup window across canister upgrades.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LpTransferDedupEntry {
+    pub created_at_time: u64,
+    pub block_index: u64,
+}
+
+/// Expiry-ordered secondary key for bounded stable retry pruning.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct LpTransferExpiryKey {
+    pub expires_at: u64,
+    pub hash: StorableHash,
+}
+
+impl Storable for LpTransferExpiryKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut bytes = [0u8; 40];
+        bytes[..8].copy_from_slice(&self.expires_at.to_le_bytes());
+        bytes[8..].copy_from_slice(&self.hash.0);
+        Cow::Owned(bytes.to_vec())
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let raw: &[u8; 40] = bytes
+            .as_ref()
+            .try_into()
+            .expect("invalid LP dedup expiry key");
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&raw[8..]);
+        Self {
+            expires_at: u64::from_le_bytes(raw[..8].try_into().unwrap()),
+            hash: StorableHash(hash),
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 40,
+        is_fixed_size: true,
+    };
+}
+
+#[cfg(test)]
+mod lp_transfer_dedup_storage_tests {
+    use super::{LpTransferDedupEntry, LpTransferExpiryKey, StorableHash, StorableU128, Unit};
+    use ic_stable_structures::{StableBTreeMap, StableCell, VectorMemory};
+
+    #[test]
+    fn exact_transfer_identity_and_block_survive_map_reinitialization() {
+        let memory = VectorMemory::default();
+        let identity = StorableHash([0x5a; 32]);
+        let original = LpTransferDedupEntry {
+            created_at_time: 1_700_000_000_000_000_000,
+            block_index: 1234,
+        };
+        {
+            let mut first: StableBTreeMap<StorableHash, LpTransferDedupEntry, _> =
+                StableBTreeMap::init(memory.clone());
+            first.insert(identity, original);
+        }
+        let reopened: StableBTreeMap<StorableHash, LpTransferDedupEntry, _> =
+            StableBTreeMap::init(memory);
+        assert_eq!(reopened.get(&identity), Some(original));
+    }
+
+    #[test]
+    fn legacy_dedup_cutover_survives_cell_reinitialization() {
+        let memory = VectorMemory::default();
+        let cutover_ns = 1_700_000_000_000_000_000u64;
+        {
+            let mut first = StableCell::init(memory.clone(), StorableU128(0)).unwrap();
+            first.set(StorableU128(cutover_ns as u128)).unwrap();
+        }
+        let reopened = StableCell::init(memory, StorableU128(0)).unwrap();
+        assert_eq!(reopened.get(), &StorableU128(cutover_ns as u128));
+    }
+
+    #[test]
+    fn expiry_index_order_and_keys_survive_map_reinitialization() {
+        let memory = VectorMemory::default();
+        let early = LpTransferExpiryKey {
+            expires_at: 100,
+            hash: StorableHash([1; 32]),
+        };
+        let late = LpTransferExpiryKey {
+            expires_at: 200,
+            hash: StorableHash([2; 32]),
+        };
+        {
+            let mut first: StableBTreeMap<LpTransferExpiryKey, Unit, _> =
+                StableBTreeMap::init(memory.clone());
+            first.insert(late, Unit);
+            first.insert(early, Unit);
+        }
+        let reopened: StableBTreeMap<LpTransferExpiryKey, Unit, _> = StableBTreeMap::init(memory);
+        assert_eq!(reopened.iter().next().map(|(key, _)| key), Some(early));
+    }
+}
+
+impl Storable for LpTransferDedupEntry {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&self.created_at_time.to_le_bytes());
+        bytes[8..].copy_from_slice(&self.block_index.to_le_bytes());
+        Cow::Owned(bytes.to_vec())
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let raw: &[u8; 16] = bytes.as_ref().try_into().expect("invalid LP dedup entry");
+        Self {
+            created_at_time: u64::from_le_bytes(raw[..8].try_into().unwrap()),
+            block_index: u64::from_le_bytes(raw[8..].try_into().unwrap()),
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 16,
+        is_fixed_size: true,
+    };
+}
+
 /// Empty marker for set-style BTreeMaps (`BTreeMap<K, ()>` isn't supported
 /// directly because `()` would need a Storable impl we don't control).
 #[derive(Clone, Copy, Debug, Default)]
@@ -311,6 +537,9 @@ impl_storable_candid_unbounded!(Icrc3Block);
 impl_storable_candid_unbounded!(LpAllowance);
 impl_storable_candid_unbounded!(ThreePoolPendingClaim);
 impl_storable_candid_unbounded!(crate::receipts::SwapReceiptV1);
+impl_storable_candid_unbounded!(crate::receipts::ThreePoolDonationReceipt);
+impl_storable_candid_unbounded!(crate::transfers::PendingPayoutState);
+impl_storable_candid_unbounded!(crate::receipts::IngressReceiptV1);
 
 // ─── MemoryManager + stable structures (thread-local) ────────────────────────
 //
@@ -327,6 +556,23 @@ thread_local! {
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_SWAP_RECEIPT_CLIENTS))));
     pub(crate) static SWAP_RECEIPTS: RefCell<StableBTreeMap<Vec<u8>, crate::receipts::SwapReceiptV1, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_SWAP_RECEIPTS_V1))));
+    pub(crate) static THREE_POOL_DONATION_RECEIPTS: RefCell<StableBTreeMap<Vec<u8>, crate::receipts::ThreePoolDonationReceipt, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_THREE_POOL_DONATION_RECEIPTS))));
+    pub(crate) static INGRESS_RECEIPTS: RefCell<StableBTreeMap<Vec<u8>, crate::receipts::IngressReceiptV1, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_INGRESS_RECEIPTS))));
+    pub(crate) static INTENT_HIGH_WATER: RefCell<StableBTreeMap<StorablePrincipal, StorableU128, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_INTENT_HIGH_WATER))));
+    pub(crate) static LP_TRANSFER_DEDUP: RefCell<StableBTreeMap<StorableHash, LpTransferDedupEntry, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_LP_TRANSFER_DEDUP))));
+    pub(crate) static LP_TRANSFER_DEDUP_EXPIRY: RefCell<StableBTreeMap<LpTransferExpiryKey, Unit, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_LP_TRANSFER_DEDUP_EXPIRY))));
+    pub(crate) static LP_TRANSFER_DEDUP_CUTOVER: RefCell<StableCell<StorableU128, Memory>> = RefCell::new(
+        StableCell::init(
+            MM.with(|m| m.borrow().get(MEM_LP_TRANSFER_DEDUP_CUTOVER)),
+            StorableU128(0),
+        )
+        .expect("init LP transfer dedup cutover cell"),
+    );
     pub(crate) static SWAP_RECEIPT_FENCE: RefCell<StableCell<u8, Memory>> = RefCell::new(
         StableCell::init(MM.with(|m| m.borrow().get(MEM_SWAP_RECEIPT_FENCE)), 0)
             .expect("init swap receipt fence"));
@@ -341,6 +587,11 @@ thread_local! {
 
     pub(crate) static LP_ALLOWANCES: RefCell<StableBTreeMap<AllowanceKey, LpAllowance, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_LP_ALLOWANCES))));
+
+    static LP_ACCOUNT_BALANCES: RefCell<StableBTreeMap<AccountKey, StorableU128, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_LP_ACCOUNT_BALANCES))));
+    static LP_ACCOUNT_ALLOWANCES: RefCell<StableBTreeMap<AccountAllowanceKey, LpAllowance, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_LP_ACCOUNT_ALLOWANCES))));
 
     pub(crate) static BURN_CALLERS: RefCell<StableBTreeMap<StorablePrincipal, Unit, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_BURN_CALLERS))));
@@ -428,6 +679,32 @@ thread_local! {
         StableCell::init(MM.with(|m| m.borrow().get(MEM_NEXT_CLAIM_ID)), StorableU128(0))
             .expect("init next_claim_id cell"),
     );
+    /// Exact first-dispatch tuple for every new claim. Legacy claims have no
+    /// entry and are intentionally held rather than blindly retried.
+    pub(crate) static PENDING_PAYOUTS: RefCell<StableBTreeMap<StorableU128, crate::transfers::PendingPayoutState, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_PENDING_PAYOUTS))));
+}
+
+/// Record the first post-upgrade time at which the stable LP transfer dedup
+/// map exists. Zero is reserved as the uninitialized sentinel (IC time is
+/// nonzero); later upgrades preserve the original value.
+pub(crate) fn initialize_lp_transfer_dedup_cutover(now_ns: u64) {
+    LP_TRANSFER_DEDUP_CUTOVER.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if cell.get().0 == 0 {
+            cell.set(StorableU128(u128::from(now_ns.max(1))))
+                .expect("write LP transfer dedup cutover");
+        }
+    });
+}
+
+/// Timestamp before which retry identities may have existed only in the old
+/// heap map and therefore cannot be proven duplicate after an upgrade.
+pub(crate) fn lp_transfer_dedup_cutover() -> Option<u64> {
+    LP_TRANSFER_DEDUP_CUTOVER.with(|cell| {
+        let value = cell.borrow().get().0;
+        (value != 0).then(|| u64::try_from(value).expect("cutover timestamp fits u64"))
+    })
 }
 
 // ─── Public API: SlimState cell ──────────────────────────────────────────────
@@ -452,64 +729,181 @@ pub fn set_slim(slim: SlimState) {
 // ─── Public API: lp_balances ─────────────────────────────────────────────────
 
 pub fn lp_balance_get(p: &Principal) -> u128 {
-    LP_BALANCES.with(|m| {
-        m.borrow()
-            .get(&StorablePrincipal(*p))
-            .map(|v| v.0)
-            .unwrap_or(0)
+    lp_account_balance_get(&Account {
+        owner: *p,
+        subaccount: None,
     })
 }
 
 pub fn lp_balance_set(p: Principal, amount: u128) {
-    LP_BALANCES.with(|m| {
+    lp_account_balance_set(
+        &Account {
+            owner: p,
+            subaccount: None,
+        },
+        amount,
+    )
+}
+
+pub fn lp_account_balance_get(account: &Account) -> u128 {
+    let key = AccountKey::new(account);
+    if key.subaccount == [0; 32] {
+        return LP_BALANCES.with(|m| {
+            m.borrow()
+                .get(&StorablePrincipal(key.owner))
+                .map(|v| v.0)
+                .unwrap_or(0)
+        });
+    }
+    LP_ACCOUNT_BALANCES.with(|m| m.borrow().get(&key).map(|v| v.0).unwrap_or(0))
+}
+
+pub fn lp_account_balance_set(account: &Account, amount: u128) {
+    let key = AccountKey::new(account);
+    if key.subaccount == [0; 32] {
+        LP_BALANCES.with(|m| {
+            let mut map = m.borrow_mut();
+            if amount == 0 {
+                map.remove(&StorablePrincipal(key.owner));
+            } else {
+                map.insert(StorablePrincipal(key.owner), StorableU128(amount));
+            }
+        });
+        return;
+    }
+    LP_ACCOUNT_BALANCES.with(|m| {
+        let mut map = m.borrow_mut();
         if amount == 0 {
-            m.borrow_mut().remove(&StorablePrincipal(p));
+            map.remove(&key);
         } else {
-            m.borrow_mut()
-                .insert(StorablePrincipal(p), StorableU128(amount));
+            map.insert(key.clone(), StorableU128(amount));
         }
     });
 }
 
 pub fn lp_balance_len() -> u64 {
-    LP_BALANCES.with(|m| m.borrow().len())
+    LP_BALANCES.with(|m| m.borrow().len()) + LP_ACCOUNT_BALANCES.with(|m| m.borrow().len())
 }
 
 /// Iterate every (principal, balance) pair. Used by explorer holders endpoint.
 pub fn lp_balance_iter() -> Vec<(Principal, u128)> {
+    let mut totals = std::collections::BTreeMap::<Principal, u128>::new();
     LP_BALANCES.with(|m| {
-        m.borrow()
-            .iter()
-            .map(|(k, v)| (k.0, v.0))
-            .collect()
-    })
+        for (k, v) in m.borrow().iter() {
+            let total = totals.entry(k.0).or_default();
+            *total = total
+                .checked_add(v.0)
+                .expect("3USD holder aggregate exceeds u128");
+        }
+    });
+    LP_ACCOUNT_BALANCES.with(|m| {
+        for (k, v) in m.borrow().iter() {
+            let total = totals.entry(k.owner).or_default();
+            *total = total
+                .checked_add(v.0)
+                .expect("3USD holder aggregate exceeds u128");
+        }
+    });
+    totals.into_iter().collect()
 }
 
 // ─── Public API: lp_allowances ───────────────────────────────────────────────
 
 pub fn allowance_get(owner: &Principal, spender: &Principal) -> Option<LpAllowance> {
-    LP_ALLOWANCES.with(|m| {
-        m.borrow().get(&AllowanceKey {
+    allowance_account_get(
+        &Account {
             owner: *owner,
-            spender: *spender,
-        })
-    })
+            subaccount: None,
+        },
+        &Account {
+            owner: *spender,
+            subaccount: None,
+        },
+    )
 }
 
 pub fn allowance_set(owner: Principal, spender: Principal, allowance: LpAllowance) {
-    LP_ALLOWANCES.with(|m| {
-        m.borrow_mut()
-            .insert(AllowanceKey { owner, spender }, allowance);
-    });
+    allowance_account_set(
+        &Account {
+            owner,
+            subaccount: None,
+        },
+        &Account {
+            owner: spender,
+            subaccount: None,
+        },
+        allowance,
+    )
 }
 
 pub fn allowance_remove(owner: &Principal, spender: &Principal) {
-    LP_ALLOWANCES.with(|m| {
-        m.borrow_mut().remove(&AllowanceKey {
+    allowance_account_remove(
+        &Account {
             owner: *owner,
-            spender: *spender,
+            subaccount: None,
+        },
+        &Account {
+            owner: *spender,
+            subaccount: None,
+        },
+    )
+}
+
+pub fn allowance_account_get(owner: &Account, spender: &Account) -> Option<LpAllowance> {
+    let key = AccountAllowanceKey {
+        owner: AccountKey::new(owner),
+        spender: AccountKey::new(spender),
+    };
+    if key.owner.subaccount == [0; 32] && key.spender.subaccount == [0; 32] {
+        return LP_ALLOWANCES.with(|m| {
+            m.borrow().get(&AllowanceKey {
+                owner: key.owner.owner,
+                spender: key.spender.owner,
+            })
         });
-    });
+    }
+    LP_ACCOUNT_ALLOWANCES.with(|m| m.borrow().get(&key))
+}
+
+pub fn allowance_account_set(owner: &Account, spender: &Account, allowance: LpAllowance) {
+    let key = AccountAllowanceKey {
+        owner: AccountKey::new(owner),
+        spender: AccountKey::new(spender),
+    };
+    if key.owner.subaccount == [0; 32] && key.spender.subaccount == [0; 32] {
+        LP_ALLOWANCES.with(|m| {
+            m.borrow_mut().insert(
+                AllowanceKey {
+                    owner: key.owner.owner,
+                    spender: key.spender.owner,
+                },
+                allowance,
+            );
+        });
+    } else {
+        LP_ACCOUNT_ALLOWANCES.with(|m| {
+            m.borrow_mut().insert(key, allowance);
+        });
+    }
+}
+
+pub fn allowance_account_remove(owner: &Account, spender: &Account) {
+    let key = AccountAllowanceKey {
+        owner: AccountKey::new(owner),
+        spender: AccountKey::new(spender),
+    };
+    if key.owner.subaccount == [0; 32] && key.spender.subaccount == [0; 32] {
+        LP_ALLOWANCES.with(|m| {
+            m.borrow_mut().remove(&AllowanceKey {
+                owner: key.owner.owner,
+                spender: key.spender.owner,
+            });
+        });
+    } else {
+        LP_ACCOUNT_ALLOWANCES.with(|m| {
+            m.borrow_mut().remove(&key);
+        });
+    }
 }
 
 // ─── Public API: burn_callers ────────────────────────────────────────────────
@@ -613,14 +1007,33 @@ pub mod pending_claims {
     /// Insert a pending claim under its id.
     pub fn insert(claim: ThreePoolPendingClaim) {
         PENDING_CLAIMS.with(|m| {
-            m.borrow_mut()
-                .insert(StorableU128(claim.id as u128), claim);
+            m.borrow_mut().insert(StorableU128(claim.id as u128), claim);
         });
     }
 
     /// Remove and return the claim with `id`, if present.
     pub fn remove(id: u64) -> Option<ThreePoolPendingClaim> {
         PENDING_CLAIMS.with(|m| m.borrow_mut().remove(&StorableU128(id as u128)))
+    }
+
+    pub fn get(id: u64) -> Option<ThreePoolPendingClaim> {
+        PENDING_CLAIMS.with(|m| m.borrow().get(&StorableU128(id as u128)))
+    }
+
+    pub fn set_payout_state(id: u64, state: crate::transfers::PendingPayoutState) {
+        PENDING_PAYOUTS.with(|m| {
+            m.borrow_mut().insert(StorableU128(id as u128), state);
+        });
+    }
+
+    pub fn payout_state(id: u64) -> Option<crate::transfers::PendingPayoutState> {
+        PENDING_PAYOUTS.with(|m| m.borrow().get(&StorableU128(id as u128)))
+    }
+
+    pub fn remove_payout(id: u64) {
+        PENDING_PAYOUTS.with(|m| {
+            m.borrow_mut().remove(&StorableU128(id as u128));
+        });
     }
 
     /// Number of outstanding pending claims.
@@ -639,6 +1052,100 @@ pub mod pending_claims {
                 .collect()
         })
     }
+}
+
+/// Accept a new caller-scoped intent sequence. The first eight bytes of every
+/// 32-byte ID are a big-endian, strictly increasing per-caller counter. Older
+/// terminal receipts may then be pruned safely: a delayed duplicate is below
+/// the durable high-water mark and cannot dispatch again.
+pub(crate) fn accept_intent_sequence(owner: Principal, intent_id: &[u8]) -> bool {
+    if intent_id.len() != 32 {
+        return false;
+    }
+    let Ok(seq_bytes) = <[u8; 8]>::try_from(&intent_id[..8]) else {
+        return false;
+    };
+    let seq = u64::from_be_bytes(seq_bytes);
+    if seq == 0 {
+        return false;
+    }
+    let owner_key = StorablePrincipal(owner);
+    let (old, new_owner, owners) = INTENT_HIGH_WATER.with(|m| {
+        let map = m.borrow();
+        (
+            map.get(&owner_key).map(|n| n.0 as u64).unwrap_or(0),
+            !map.contains_key(&owner_key),
+            map.len(),
+        )
+    });
+    if new_owner && owners >= MAX_INTENT_OWNERS {
+        return false;
+    }
+    if seq <= old {
+        return false;
+    }
+
+    INTENT_HIGH_WATER.with(|m| {
+        m.borrow_mut().insert(owner_key, StorableU128(seq as u128));
+    });
+    let remove_swap_keys = SWAP_RECEIPTS.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|(_, r)| {
+                r.owner == owner
+                    && matches!(
+                        r.status,
+                        crate::receipts::SwapReceiptStatusV1::Completed
+                            | crate::receipts::SwapReceiptStatusV1::Refunded
+                            | crate::receipts::SwapReceiptStatusV1::Failed
+                    )
+            })
+            .map(|(key, _)| key)
+            .collect::<Vec<_>>()
+    });
+    SWAP_RECEIPTS.with(|m| {
+        let mut m = m.borrow_mut();
+        for key in remove_swap_keys {
+            m.remove(&key);
+        }
+    });
+    let remove_ingress_keys = INGRESS_RECEIPTS.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|(_, r)| {
+                r.owner == owner
+                    && matches!(
+                        r.status,
+                        crate::receipts::IngressStatusV1::Completed
+                            | crate::receipts::IngressStatusV1::Failed
+                    )
+            })
+            .map(|(key, _)| key)
+            .collect::<Vec<_>>()
+    });
+    INGRESS_RECEIPTS.with(|m| {
+        let mut m = m.borrow_mut();
+        for key in remove_ingress_keys {
+            m.remove(&key);
+        }
+    });
+    true
+}
+
+pub(crate) fn intent_sequence_floor(owner: Principal) -> u64 {
+    INTENT_HIGH_WATER.with(|m| {
+        m.borrow()
+            .get(&StorablePrincipal(owner))
+            .map(|n| n.0 as u64)
+            .unwrap_or(0)
+    })
+}
+
+pub(crate) fn intent_owner_capacity_available(owner: Principal) -> bool {
+    INTENT_HIGH_WATER.with(|m| {
+        let map = m.borrow();
+        map.contains_key(&StorablePrincipal(owner)) || map.len() < MAX_INTENT_OWNERS
+    })
 }
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
@@ -716,8 +1223,8 @@ pub mod migration {
 
     use super::*;
     use crate::types::{
-        Icrc3Block, LiquidityEventV1, LiquidityEventV2, LpAllowance, PoolConfig,
-        SwapEventV1, SwapEventV2, ThreePoolAdminEvent, VirtualPriceSnapshot,
+        Icrc3Block, LiquidityEventV1, LiquidityEventV2, LpAllowance, PoolConfig, SwapEventV1,
+        SwapEventV2, ThreePoolAdminEvent, VirtualPriceSnapshot,
     };
     use candid::{CandidType, Decode};
     use serde::{Deserialize, Serialize};
@@ -926,8 +1433,7 @@ pub mod migration {
         };
 
         for i in start..blocks_len {
-            let block = crate::storage::blocks::get(i)
-                .expect("block present below blocks_len");
+            let block = crate::storage::blocks::get(i).expect("block present below blocks_len");
             let encoded = crate::icrc3::encode_block_with_phash(&block, prev_hash.as_ref());
             let block_hash = crate::certification::hash_value(&encoded);
             crate::storage::block_hashes::push(crate::storage::StorableHash(block_hash));
@@ -978,7 +1484,9 @@ mod tests {
         assert!(before >= 1);
 
         let listed = pending_claims::list(0, 100);
-        assert!(listed.iter().any(|c| c.id == id0 && c.amount == 5_000_000 && c.token_index == 1));
+        assert!(listed
+            .iter()
+            .any(|c| c.id == id0 && c.amount == 5_000_000 && c.token_index == 1));
 
         // Removing returns the stored claim and shrinks the set.
         let removed = pending_claims::remove(id0).expect("claim must be present");
@@ -1009,6 +1517,96 @@ mod tests {
         let back = AllowanceKey::from_bytes(bytes);
         assert_eq!(back.owner, owner);
         assert_eq!(back.spender, spender);
+    }
+
+    #[test]
+    fn account_keys_roundtrip_and_canonicalize_zero_subaccount() {
+        let owner = Principal::from_text("2vxsx-fae").unwrap();
+        let no_subaccount = AccountKey::new(&Account {
+            owner,
+            subaccount: None,
+        });
+        let zero_subaccount = AccountKey::new(&Account {
+            owner,
+            subaccount: Some([0; 32]),
+        });
+        assert_eq!(no_subaccount, zero_subaccount);
+        assert_eq!(
+            AccountKey::from_bytes(no_subaccount.to_bytes()),
+            no_subaccount
+        );
+
+        let key = AccountAllowanceKey {
+            owner: AccountKey {
+                owner,
+                subaccount: [7; 32],
+            },
+            spender: AccountKey {
+                owner: Principal::anonymous(),
+                subaccount: [9; 32],
+            },
+        };
+        assert_eq!(AccountAllowanceKey::from_bytes(key.to_bytes()), key);
+    }
+
+    #[test]
+    fn legacy_balance_and_allowance_remain_default_account_only() {
+        let owner = Principal::self_authenticating(b"account migration owner");
+        let spender = Principal::self_authenticating(b"account migration spender");
+        let default = Account {
+            owner,
+            subaccount: None,
+        };
+        let zero_alias = Account {
+            owner,
+            subaccount: Some([0; 32]),
+        };
+        let nondefault = Account {
+            owner,
+            subaccount: Some([3; 32]),
+        };
+        let spender_default = Account {
+            owner: spender,
+            subaccount: None,
+        };
+        let spender_nondefault = Account {
+            owner: spender,
+            subaccount: Some([4; 32]),
+        };
+
+        // Simulate an entry in the pre-separation stable map. It remains the
+        // owner's default account and is neither copied nor split.
+        lp_balance_set(owner, 120);
+        assert_eq!(lp_account_balance_get(&default), 120);
+        assert_eq!(lp_account_balance_get(&zero_alias), 120);
+        assert_eq!(lp_account_balance_get(&nondefault), 0);
+
+        lp_account_balance_set(&nondefault, 25);
+        assert_eq!(lp_account_balance_get(&default), 120);
+        assert_eq!(lp_account_balance_get(&nondefault), 25);
+        assert_eq!(
+            lp_balance_iter()
+                .into_iter()
+                .find(|(p, _)| *p == owner)
+                .unwrap()
+                .1,
+            145
+        );
+
+        let legacy = LpAllowance {
+            amount: 60,
+            expires_at: None,
+        };
+        allowance_set(owner, spender, legacy.clone());
+        let read_legacy = allowance_account_get(&default, &spender_default).unwrap();
+        assert_eq!(read_legacy.amount, 60);
+        assert_eq!(read_legacy.expires_at, None);
+        assert!(allowance_account_get(&nondefault, &spender_default).is_none());
+        assert!(allowance_account_get(&default, &spender_nondefault).is_none());
+
+        lp_balance_set(owner, 0);
+        lp_account_balance_set(&nondefault, 0);
+        allowance_remove(&owner, &spender);
     }
 
     #[test]
@@ -1045,9 +1643,9 @@ mod tests {
     fn legacy_state_candid_roundtrip_with_v2_events() {
         use crate::storage::migration::LegacyThreePoolState;
         use crate::types::{
-            Icrc3Block, Icrc3Transaction, LiquidityAction, LiquidityEventV1,
-            LiquidityEventV2, LpAllowance, SwapEventV1, SwapEventV2,
-            ThreePoolAdminAction, ThreePoolAdminEvent, VirtualPriceSnapshot,
+            Icrc3Block, Icrc3Transaction, LiquidityAction, LiquidityEventV1, LiquidityEventV2,
+            LpAllowance, SwapEventV1, SwapEventV2, ThreePoolAdminAction, ThreePoolAdminEvent,
+            VirtualPriceSnapshot,
         };
         use candid::{Decode, Encode};
 
@@ -1059,41 +1657,64 @@ mod tests {
         let mut allowances = std::collections::BTreeMap::new();
         allowances.insert(
             (p, Principal::anonymous()),
-            LpAllowance { amount: 999, expires_at: Some(123) },
+            LpAllowance {
+                amount: 999,
+                expires_at: Some(123),
+            },
         );
 
         let mut burn = std::collections::BTreeSet::new();
         burn.insert(p);
 
         let swap_v1 = SwapEventV1 {
-            id: 0, timestamp: 1, caller: p,
-            token_in: 0, token_out: 1,
-            amount_in: 10, amount_out: 9, fee: 1,
+            id: 0,
+            timestamp: 1,
+            caller: p,
+            token_in: 0,
+            token_out: 1,
+            amount_in: 10,
+            amount_out: 9,
+            fee: 1,
         };
         let swap_v2 = SwapEventV2 {
-            id: 0, timestamp: 1, caller: p,
-            token_in: 0, token_out: 1,
-            amount_in: 10, amount_out: 9, fee: 1,
+            id: 0,
+            timestamp: 1,
+            caller: p,
+            token_in: 0,
+            token_out: 1,
+            amount_in: 10,
+            amount_out: 9,
+            fee: 1,
             fee_bps: 4,
-            imbalance_before: 0, imbalance_after: 0,
+            imbalance_before: 0,
+            imbalance_after: 0,
             is_rebalancing: false,
             pool_balances_after: [1, 2, 3],
             virtual_price_after: 1_000_000_000_000_000_000,
             migrated: false,
         };
         let liq_v1 = LiquidityEventV1 {
-            id: 0, timestamp: 1, caller: p,
+            id: 0,
+            timestamp: 1,
+            caller: p,
             action: LiquidityAction::AddLiquidity,
-            amounts: [1, 2, 3], lp_amount: 5,
-            coin_index: None, fee: None,
+            amounts: [1, 2, 3],
+            lp_amount: 5,
+            coin_index: None,
+            fee: None,
         };
         let liq_v2 = LiquidityEventV2 {
-            id: 0, timestamp: 1, caller: p,
+            id: 0,
+            timestamp: 1,
+            caller: p,
             action: LiquidityAction::RemoveLiquidity,
-            amounts: [1, 2, 3], lp_amount: 5,
-            coin_index: None, fee: None,
+            amounts: [1, 2, 3],
+            lp_amount: 5,
+            coin_index: None,
+            fee: None,
             fee_bps: None,
-            imbalance_before: 0, imbalance_after: 0,
+            imbalance_before: 0,
+            imbalance_after: 0,
             is_rebalancing: false,
             pool_balances_after: [1, 2, 3],
             virtual_price_after: 1_000_000_000_000_000_000,
@@ -1115,7 +1736,11 @@ mod tests {
             blocks: Some(vec![Icrc3Block {
                 id: 0,
                 timestamp: 1,
-                tx: Icrc3Transaction::Mint { to: p, amount: 1, to_subaccount: None },
+                tx: Icrc3Transaction::Mint {
+                    to: p,
+                    amount: 1,
+                    to_subaccount: None,
+                },
             }]),
             last_block_hash: Some([7u8; 32]),
             admin_fees: [4, 5, 6],
@@ -1310,7 +1935,10 @@ mod tests {
         }
         assert!(admin_ev::len() >= MAX_EVENT_PAGE + 100);
         assert_eq!(admin_ev::range(0, u64::MAX).len() as u64, MAX_EVENT_PAGE);
-        assert_eq!(admin_ev::range(0, MAX_EVENT_PAGE + 1).len() as u64, MAX_EVENT_PAGE);
+        assert_eq!(
+            admin_ev::range(0, MAX_EVENT_PAGE + 1).len() as u64,
+            MAX_EVENT_PAGE
+        );
         // In-cap requests are unaffected.
         assert_eq!(admin_ev::range(0, 5).len(), 5);
     }

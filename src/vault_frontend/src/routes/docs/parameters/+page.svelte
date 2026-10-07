@@ -558,7 +558,7 @@
         <rect x="55" y="135" width="385" height="12" rx="6" fill="url(#meter-rmr)" />
 
         <!-- Tick marks for endpoints -->
-        {#each [[rmrCeilingCrPct, 'Stressed'], [rmrFloorCrPct, 'Healthy']] as [crVal, _label]}
+        {#each [{ crVal: rmrCeilingCrPct, label: 'Stressed' }, { crVal: rmrFloorCrPct, label: 'Healthy' }] as { crVal, label: _label }}
           <line x1={rmrX(crVal)} y1="133" x2={rmrX(crVal)} y2="149" stroke="var(--rumi-text-primary, #eee)" stroke-width="1.5" opacity="0.6" />
           <circle cx={rmrX(crVal)} cy="141" r="2.5" fill="var(--rumi-text-primary, #eee)" opacity="0.8" />
           <text x={rmrX(crVal)} y="165" text-anchor="middle" fill="var(--rumi-text-secondary, #b0b0c0)" font-size="10" font-family="Inter, sans-serif">{crVal.toFixed(0)}%</text>

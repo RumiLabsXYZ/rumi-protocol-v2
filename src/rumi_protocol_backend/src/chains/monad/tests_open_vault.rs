@@ -66,7 +66,10 @@ fn cr_computed_from_collateral_price_and_debt() {
 
 #[test]
 fn cr_is_max_when_debt_zero() {
-    assert_eq!(collateral_ratio_e4(5 * ONE_MON_E18, 18, PRICE_2_USD_E8, 0), u64::MAX);
+    assert_eq!(
+        collateral_ratio_e4(5 * ONE_MON_E18, 18, PRICE_2_USD_E8, 0),
+        u64::MAX
+    );
 }
 
 // 1b. Degenerate open: zero debt is rejected (would enqueue a wasted 0-mint).
@@ -112,9 +115,16 @@ fn open_rejects_below_min_cr() {
         0,
         1,
     );
-    assert!(matches!(res, Err(OpenVaultError::BelowMinCr { .. })), "got {res:?}");
+    assert!(
+        matches!(res, Err(OpenVaultError::BelowMinCr { .. })),
+        "got {res:?}"
+    );
     assert!(s.chain_vaults.is_empty(), "no vault should be created");
-    assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0, "queue must stay empty");
+    assert_eq!(
+        s.settlement_queues[&CHAIN].pending_len(),
+        0,
+        "queue must stay empty"
+    );
 }
 
 // 3. open creates AwaitingDeposit + does NOT enqueue a mint (the core deviation)
@@ -138,13 +148,29 @@ fn open_creates_awaiting_deposit_vault_and_enqueues_nothing() {
     );
     assert!(res.is_ok(), "open should succeed: {res:?}");
     let v = s.chain_vaults.get(&7).expect("vault 7 created");
-    assert!(matches!(v.status, ChainVaultStatus::AwaitingDeposit), "status {:?}", v.status);
-    assert_eq!(v.pending_mint_e8s, 100_00000000, "intended mint stored in pending");
-    assert_eq!(v.debt_e8s, 0, "no debt until verified deposit + confirmed mint");
-    assert_eq!(v.collateral_amount_native, declared, "declared collateral recorded");
+    assert!(
+        matches!(v.status, ChainVaultStatus::AwaitingDeposit),
+        "status {:?}",
+        v.status
+    );
+    assert_eq!(
+        v.pending_mint_e8s, 100_00000000,
+        "intended mint stored in pending"
+    );
+    assert_eq!(
+        v.debt_e8s, 0,
+        "no debt until verified deposit + confirmed mint"
+    );
+    assert_eq!(
+        v.collateral_amount_native, declared,
+        "declared collateral recorded"
+    );
     assert_eq!(v.owner, owner());
     assert_eq!(v.custody_address, "0xcustody");
-    assert_eq!(v.mint_recipient, "0x000000000000000000000000000000000000c0de");
+    assert_eq!(
+        v.mint_recipient,
+        "0x000000000000000000000000000000000000c0de"
+    );
     assert_eq!(v.opened_at_ns, 12345);
     // THE CORE DEVIATION: nothing enqueued at open.
     assert_eq!(
@@ -160,8 +186,16 @@ fn insufficient_deposit_does_not_enqueue() {
     let mut s = setup(PRICE_100_USD_E8);
     let declared = 100 * ONE_MON_E18;
     open_chain_vault_in_state(
-        &mut s, CHAIN, owner(), "0xcustody".into(), declared, 100_00000000,
-        "0x000000000000000000000000000000000000c0de".into(), 13000, 0, 7,
+        &mut s,
+        CHAIN,
+        owner(),
+        "0xcustody".into(),
+        declared,
+        100_00000000,
+        "0x000000000000000000000000000000000000c0de".into(),
+        13000,
+        0,
+        7,
     )
     .expect("open");
 
@@ -173,7 +207,11 @@ fn insufficient_deposit_does_not_enqueue() {
         matches!(s.chain_vaults[&7].status, ChainVaultStatus::AwaitingDeposit),
         "must stay AwaitingDeposit"
     );
-    assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0, "queue must stay empty");
+    assert_eq!(
+        s.settlement_queues[&CHAIN].pending_len(),
+        0,
+        "queue must stay empty"
+    );
 }
 
 // 5. sufficient deposit transitions to MintPending and enqueues the mint
@@ -182,8 +220,16 @@ fn sufficient_deposit_transitions_and_enqueues_mint() {
     let mut s = setup(PRICE_100_USD_E8);
     let declared = 100 * ONE_MON_E18;
     open_chain_vault_in_state(
-        &mut s, CHAIN, owner(), "0xcustody".into(), declared, 100_00000000,
-        "0x000000000000000000000000000000000000c0de".into(), 13000, 0, 7,
+        &mut s,
+        CHAIN,
+        owner(),
+        "0xcustody".into(),
+        declared,
+        100_00000000,
+        "0x000000000000000000000000000000000000c0de".into(),
+        13000,
+        0,
+        7,
     )
     .expect("open");
 
@@ -198,7 +244,11 @@ fn sufficient_deposit_transitions_and_enqueues_mint() {
     assert_eq!(q.pending_len(), 1, "exactly one Mint enqueued");
     let op = q.pending.values().next().expect("op present");
     match &op.kind {
-        SettlementOpKind::Mint { recipient, amount_e8s, vault_id } => {
+        SettlementOpKind::Mint {
+            recipient,
+            amount_e8s,
+            vault_id,
+        } => {
             assert_eq!(recipient, "0x000000000000000000000000000000000000c0de");
             assert_eq!(*amount_e8s, 100_00000000);
             assert_eq!(*vault_id, 7);
@@ -214,8 +264,16 @@ fn reverify_after_transition_is_noop() {
     let mut s = setup(PRICE_100_USD_E8);
     let declared = 100 * ONE_MON_E18;
     open_chain_vault_in_state(
-        &mut s, CHAIN, owner(), "0xcustody".into(), declared, 100_00000000,
-        "0x000000000000000000000000000000000000c0de".into(), 13000, 0, 7,
+        &mut s,
+        CHAIN,
+        owner(),
+        "0xcustody".into(),
+        declared,
+        100_00000000,
+        "0x000000000000000000000000000000000000c0de".into(),
+        13000,
+        0,
+        7,
     )
     .expect("open");
     // First verify transitions + enqueues.
@@ -233,7 +291,10 @@ fn reverify_after_transition_is_noop() {
         1,
         "must NOT double-enqueue on re-verify"
     );
-    assert!(matches!(s.chain_vaults[&7].status, ChainVaultStatus::MintPending));
+    assert!(matches!(
+        s.chain_vaults[&7].status,
+        ChainVaultStatus::MintPending
+    ));
 }
 
 // 7. verify unknown vault errors
@@ -241,7 +302,10 @@ fn reverify_after_transition_is_noop() {
 fn verify_unknown_vault_errors() {
     let mut s = setup(PRICE_100_USD_E8);
     let res = verify_deposit_and_enqueue_mint_in_state(&mut s, 999, 100 * ONE_MON_E18, 0);
-    assert!(matches!(res, Err(OpenVaultError::UnknownVault)), "got {res:?}");
+    assert!(
+        matches!(res, Err(OpenVaultError::UnknownVault)),
+        "got {res:?}"
+    );
 }
 
 // 8. open rejects an unregistered chain
@@ -249,10 +313,21 @@ fn verify_unknown_vault_errors() {
 fn open_rejects_unknown_chain() {
     let mut s = MultiChainState::default(); // no chain registered
     let res = open_chain_vault_in_state(
-        &mut s, CHAIN, owner(), "0xcustody".into(), 100 * ONE_MON_E18, 100_00000000,
-        "0x000000000000000000000000000000000000c0de".into(), 13000, 0, 7,
+        &mut s,
+        CHAIN,
+        owner(),
+        "0xcustody".into(),
+        100 * ONE_MON_E18,
+        100_00000000,
+        "0x000000000000000000000000000000000000c0de".into(),
+        13000,
+        0,
+        7,
     );
-    assert!(matches!(res, Err(OpenVaultError::UnknownChain)), "got {res:?}");
+    assert!(
+        matches!(res, Err(OpenVaultError::UnknownChain)),
+        "got {res:?}"
+    );
     assert!(s.chain_vaults.is_empty());
 }
 
@@ -277,8 +352,14 @@ fn open_rejects_invalid_recipient() {
         12345,
         7,
     );
-    assert!(matches!(res, Err(OpenVaultError::InvalidAddress(_))), "got {res:?}");
-    assert!(s.chain_vaults.is_empty(), "no vault should be created on a bad recipient");
+    assert!(
+        matches!(res, Err(OpenVaultError::InvalidAddress(_))),
+        "got {res:?}"
+    );
+    assert!(
+        s.chain_vaults.is_empty(),
+        "no vault should be created on a bad recipient"
+    );
     assert_eq!(
         s.settlement_queues[&CHAIN].pending_len(),
         0,
@@ -298,7 +379,10 @@ fn open_rejects_invalid_recipient() {
         12345,
         8,
     );
-    assert!(matches!(res, Err(OpenVaultError::InvalidAddress(_))), "got {res:?}");
+    assert!(
+        matches!(res, Err(OpenVaultError::InvalidAddress(_))),
+        "got {res:?}"
+    );
     assert!(s.chain_vaults.is_empty(), "still no vault");
     assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0, "still empty");
 }
@@ -313,14 +397,25 @@ fn open_rejects_when_no_price() {
         display_name: "MonadTestnet".into(),
         rpc_endpoints: vec!["https://rpc".into()],
         finality_depth: 1,
-        gas_strategy: GasStrategy::EvmEip1559 { max_priority_fee_gwei: 2, max_fee_gwei_ceiling: 500 },
+        gas_strategy: GasStrategy::EvmEip1559 {
+            max_priority_fee_gwei: 2,
+            max_fee_gwei_ceiling: 500,
+        },
         chain_native_decimals: 18,
         min_quorum_providers: None,
     };
     crate::chains::admin::register_chain_in_state(&mut s, arg, 0).expect("register chain");
     let res = open_chain_vault_in_state(
-        &mut s, CHAIN, owner(), "0xcustody".into(), 100 * ONE_MON_E18, 100_00000000,
-        "0x000000000000000000000000000000000000c0de".into(), 13000, 0, 7,
+        &mut s,
+        CHAIN,
+        owner(),
+        "0xcustody".into(),
+        100 * ONE_MON_E18,
+        100_00000000,
+        "0x000000000000000000000000000000000000c0de".into(),
+        13000,
+        0,
+        7,
     );
     assert!(matches!(res, Err(OpenVaultError::NoPrice)), "got {res:?}");
     assert!(s.chain_vaults.is_empty());

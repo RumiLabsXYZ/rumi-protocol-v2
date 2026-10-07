@@ -7,10 +7,17 @@
 mod common;
 
 use candid::{decode_one, encode_args, encode_one, Nat, Principal};
-use common::{deploy_pool_with_liquidity_and_swaps, ThreePoolHarness};
+use common::{
+    deploy_pool_with_liquidity_and_swaps_test_endpoints, three_pool_wasm, ThreePoolHarness,
+};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
+use pocket_ic::PocketIcBuilder;
 use pocket_ic::WasmResult;
+use rumi_3pool::receipts::{
+    IngressReceiptErrorV1, IngressReceiptV1, SwapReceiptErrorV1, SwapReceiptStatusV1,
+    SwapReceiptV1, SwapRequestV1,
+};
 use rumi_3pool::types::{PoolStatus, QuoteSwapResult, ThreePoolError};
 
 const ICUSD_1M: u128 = 100_000_000_000_000;
@@ -78,18 +85,22 @@ fn add_quote(h: &ThreePoolHarness, amounts: [u128; 3]) -> Result<Nat, ThreePoolE
     .expect("decode calc_add_liquidity_query")
 }
 
-fn add_update(h: &ThreePoolHarness, amounts: [u128; 3]) -> Result<Nat, ThreePoolError> {
-    decode_one(&reply_bytes(
+fn add_update(
+    h: &ThreePoolHarness,
+    amounts: [u128; 3],
+) -> Result<Nat, IngressReceiptErrorV1> {
+    let result: Result<IngressReceiptV1, IngressReceiptErrorV1> = decode_one(&reply_bytes(
         h.pic
             .update_call(
                 h.three_pool,
                 h.user,
-                "add_liquidity",
-                encode_args((amounts.to_vec(), 0u128)).unwrap(),
+                "add_liquidity_with_receipt_v1",
+                encode_args((vec![42u8; 32], amounts.to_vec(), 0u128)).unwrap(),
             )
             .expect("add_liquidity failed"),
     ))
-    .expect("decode add_liquidity")
+    .expect("decode add_liquidity_with_receipt_v1");
+    result.map(|receipt| Nat::from(receipt.result_lp.expect("successful receipt LP amount")))
 }
 
 fn assert_policy_reject_error(label: &str, error: impl std::fmt::Debug) {
@@ -126,17 +137,83 @@ fn swap_update(
     amount_in: u128,
     min_out: u128,
 ) -> Result<Nat, ThreePoolError> {
-    decode_one(&reply_bytes(
+    let result: Result<SwapReceiptV1, SwapReceiptErrorV1> = decode_one(&reply_bytes(
         h.pic
             .update_call(
                 h.three_pool,
                 h.user,
-                "swap",
-                encode_args((token_in, token_out, amount_in, min_out)).unwrap(),
+                "swap_with_receipt_v1",
+                encode_one(SwapRequestV1 {
+                    intent_id: vec![43u8; 32],
+                    i: token_in,
+                    j: token_out,
+                    dx: amount_in,
+                    min_dy: min_out,
+                })
+                .unwrap(),
             )
             .expect("swap failed"),
     ))
-    .expect("decode swap")
+    .expect("decode swap_with_receipt_v1");
+    result
+        .map(|receipt| {
+            assert_eq!(receipt.status, SwapReceiptStatusV1::Completed);
+            Nat::from(receipt.gross_output.expect("completed swap gross output"))
+        })
+        .map_err(|_| ThreePoolError::TransferFailed {
+            token: "swap".to_string(),
+            reason: "receipt-backed test swap failed".to_string(),
+        })
+}
+
+#[test]
+fn production_wasm_keeps_receipt_ingress_pool_locked() {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let admin = Principal::self_authenticating(&[5, 6, 7, 8]);
+    let ledgers = [
+        pic.create_canister(),
+        pic.create_canister(),
+        pic.create_canister(),
+    ];
+    let pool = pic.create_canister();
+    pic.add_cycles(pool, 2_000_000_000_000);
+    let init_args = rumi_3pool::types::ThreePoolInitArgs {
+        tokens: [
+            (ledgers[0], "icUSD", 8, 10_000_000_000),
+            (ledgers[1], "ckUSDT", 6, 1_000_000_000_000),
+            (ledgers[2], "ckUSDC", 6, 1_000_000_000_000),
+        ]
+        .map(|(ledger_id, symbol, decimals, precision_mul)| {
+            rumi_3pool::types::TokenConfig {
+                ledger_id,
+                symbol: symbol.to_string(),
+                decimals,
+                precision_mul,
+            }
+        }),
+        initial_a: 100,
+        swap_fee_bps: 4,
+        admin_fee_bps: 5000,
+        admin,
+    };
+    pic.install_canister(
+        pool,
+        three_pool_wasm(),
+        encode_one(init_args).unwrap(),
+        None,
+    );
+
+    let result: Result<IngressReceiptV1, IngressReceiptErrorV1> = decode_one(&reply_bytes(
+        pic.update_call(
+            pool,
+            Principal::self_authenticating(&[1, 2, 3, 4]),
+            "add_liquidity_with_receipt_v1",
+            encode_args((vec![1u8; 32], vec![1u128, 1, 1], 0u128)).unwrap(),
+        )
+        .expect("production ingress guard call failed at transport"),
+    ))
+    .expect("decode production ingress guard result");
+    assert!(matches!(result, Err(IngressReceiptErrorV1::PoolLocked)));
 }
 
 fn record_donation(h: &ThreePoolHarness, token_index: usize, amount: u128) {
@@ -205,7 +282,7 @@ fn move_to_exact_cap(h: &ThreePoolHarness) {
 
 #[test]
 fn icusd_deposit_crossing_cap_is_rejected_before_any_ledger_pull() {
-    let h = deploy_pool_with_liquidity_and_swaps(0);
+    let h = deploy_pool_with_liquidity_and_swaps_test_endpoints(0);
     let before_status = pool_status(&h);
     let before_user = user_balances(&h);
     let before_pool_ledgers = pool_ledger_balances(&h);
@@ -225,16 +302,11 @@ fn icusd_deposit_crossing_cap_is_rejected_before_any_ledger_pull() {
         .expect_err("cap-crossing quote should reject before returning a value");
     assert_policy_reject_error("cap-crossing quote", quote_error);
 
-    let updated = h
-        .pic
-        .update_call(
-            h.three_pool,
-            h.user,
-            "add_liquidity",
-            encode_args((amounts.to_vec(), 0u128)).unwrap(),
-        )
-        .expect_err("cap-crossing update should reject before pulling tokens");
-    assert_policy_reject_error("cap-crossing update", updated);
+    let updated = add_update(&h, amounts);
+    assert!(
+        matches!(&updated, Err(IngressReceiptErrorV1::InvalidRequest)),
+        "cap-crossing update returned an unexpected result: {updated:?}"
+    );
 
     let after_status = pool_status(&h);
     assert_eq!(after_status.balances, before_status.balances);
@@ -252,8 +324,37 @@ fn icusd_deposit_crossing_cap_is_rejected_before_any_ledger_pull() {
 }
 
 #[test]
+fn legacy_add_liquidity_route_rejects_without_pulling_tokens() {
+    let h = deploy_pool_with_liquidity_and_swaps_test_endpoints(0);
+    let before_user = user_balances(&h);
+    let before_pool = pool_ledger_balances(&h);
+    let result: Result<Nat, ThreePoolError> = decode_one(&reply_bytes(
+        h.pic
+            .update_call(
+                h.three_pool,
+                h.user,
+                "add_liquidity",
+                encode_args((vec![1_000_000u128; 3], 0u128)).unwrap(),
+            )
+            .expect("legacy add_liquidity call failed at transport"),
+    ))
+    .expect("decode legacy add_liquidity");
+    assert!(matches!(result, Err(ThreePoolError::TransferFailed { .. })));
+    assert_eq!(
+        user_balances(&h),
+        before_user,
+        "legacy route pulled user funds"
+    );
+    assert_eq!(
+        pool_ledger_balances(&h),
+        before_pool,
+        "legacy route changed pool ledger balances"
+    );
+}
+
+#[test]
 fn below_cap_200_plus_100_deposit_is_allowed_when_result_stays_below_cap() {
-    let h = deploy_pool_with_liquidity_and_swaps(0);
+    let h = deploy_pool_with_liquidity_and_swaps_test_endpoints(0);
 
     // The incoming pair is approximately 2/3 icUSD, but the existing pool is
     // only 1/3 icUSD, so the resulting pool remains well below 666/1000.
@@ -268,7 +369,7 @@ fn below_cap_200_plus_100_deposit_is_allowed_when_result_stays_below_cap() {
 
 #[test]
 fn exact_cap_proportional_deposit_is_accepted() {
-    let h = deploy_pool_with_liquidity_and_swaps(0);
+    let h = deploy_pool_with_liquidity_and_swaps_test_endpoints(0);
     move_to_exact_cap(&h);
 
     // Add 1% of every normalized leg.  The resulting pool remains exactly at
@@ -290,7 +391,7 @@ fn exact_cap_proportional_deposit_is_accepted() {
 
 #[test]
 fn above_cap_icusd_plus_one_stable_is_accepted_and_quote_matches_update() {
-    let h = deploy_pool_with_liquidity_and_swaps(0);
+    let h = deploy_pool_with_liquidity_and_swaps_test_endpoints(0);
     move_above_cap(&h);
 
     // Equal normalized icUSD and ckUSDT makes the concentration fall from
@@ -309,7 +410,7 @@ fn above_cap_icusd_plus_one_stable_is_accepted_and_quote_matches_update() {
 
 #[test]
 fn above_cap_70_percent_icusd_deposit_is_rejected_before_any_ledger_pull() {
-    let h = deploy_pool_with_liquidity_and_swaps(0);
+    let h = deploy_pool_with_liquidity_and_swaps_test_endpoints(0);
     move_above_cap(&h);
     let before_status = pool_status(&h);
     let before_user = user_balances(&h);
@@ -328,16 +429,11 @@ fn above_cap_70_percent_icusd_deposit_is_rejected_before_any_ledger_pull() {
         )
         .expect_err("70/30 quote should reject before returning a value");
     assert_policy_reject_error("70/30 quote", quote_error);
-    let updated = h
-        .pic
-        .update_call(
-            h.three_pool,
-            h.user,
-            "add_liquidity",
-            encode_args((amounts.to_vec(), 0u128)).unwrap(),
-        )
-        .expect_err("70/30 update should reject before pulling tokens");
-    assert_policy_reject_error("70/30 update", updated);
+    let updated = add_update(&h, amounts);
+    assert!(
+        matches!(&updated, Err(IngressReceiptErrorV1::InvalidRequest)),
+        "70/30 update returned an unexpected result: {updated:?}"
+    );
     assert_eq!(pool_status(&h).balances, before_status.balances);
     assert_eq!(
         pool_status(&h).lp_total_supply,
@@ -349,7 +445,7 @@ fn above_cap_70_percent_icusd_deposit_is_rejected_before_any_ledger_pull() {
 
 #[test]
 fn above_cap_666_334_icusd_deposit_is_accepted() {
-    let h = deploy_pool_with_liquidity_and_swaps(0);
+    let h = deploy_pool_with_liquidity_and_swaps_test_endpoints(0);
     move_above_cap(&h);
 
     // The incoming deposit is exactly 666/1000 normalized icUSD and is
@@ -365,7 +461,7 @@ fn above_cap_666_334_icusd_deposit_is_accepted() {
 
 #[test]
 fn above_cap_icusd_plus_both_stables_is_accepted_and_quote_matches_update() {
-    let h = deploy_pool_with_liquidity_and_swaps(0);
+    let h = deploy_pool_with_liquidity_and_swaps_test_endpoints(0);
     move_above_cap(&h);
 
     // Both stable legs together equal the normalized icUSD leg.  This keeps
@@ -391,7 +487,7 @@ fn above_cap_icusd_plus_both_stables_is_accepted_and_quote_matches_update() {
 
 #[test]
 fn above_cap_stable_only_correction_is_accepted() {
-    let h = deploy_pool_with_liquidity_and_swaps(0);
+    let h = deploy_pool_with_liquidity_and_swaps_test_endpoints(0);
     move_above_cap(&h);
 
     let amounts = [0, STABLE_1M, 0];
@@ -408,7 +504,7 @@ fn above_cap_stable_only_correction_is_accepted() {
 
 #[test]
 fn above_cap_swap_quote_and_update_remain_unchanged() {
-    let h = deploy_pool_with_liquidity_and_swaps(0);
+    let h = deploy_pool_with_liquidity_and_swaps_test_endpoints(0);
     move_above_cap(&h);
 
     // A corrective ckUSDT -> icUSD swap remains available while the pool is

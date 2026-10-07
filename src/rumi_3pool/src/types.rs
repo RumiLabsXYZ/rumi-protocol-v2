@@ -1,5 +1,5 @@
 use candid::{CandidType, Principal};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 // ─── Constants ───
 
@@ -128,18 +128,15 @@ pub struct Icrc3Block {
 ///
 /// Each role's subaccount is stored alongside the principal so the ICRC-3
 /// block encoding can emit the full `[owner, subaccount]` Account shape
-/// required by external verifiers (e.g. the protocol_backend's SP writedown
-/// proof verification path). Subaccount fields are `Option<Vec<u8>>` and use
-/// `#[serde(default)]` so blocks written before this change still decode
-/// (their subaccount fields are `None`, and the encoder falls back to the
-/// legacy `[owner]`-only encoding for those blocks — preserving the existing
-/// ICRC-3 hash chain).
+/// required by external verifiers. Transfer and approval records also retain
+/// optional memo, creation-time, and transaction-fee metadata for exact
+/// receipt proofs. All added fields use `#[serde(default)]`; historical
+/// blocks decode with `None`, and the encoder omits absent fields so their
+/// original ICRC-3 hash preimages remain unchanged.
 ///
-/// Note: the 3pool's per-balance bookkeeping is still keyed by `Principal`
-/// only (subaccounts are accepted on the API surface but ignored for balance
-/// lookups — see icrc_token.rs). This change only fixes the *block log* so
-/// it correctly reflects the destination Account that ICRC-3 consumers need
-/// to see.
+/// Balances now use full ICRC accounts. Principal-keyed legacy balances are
+/// preserved as default-account balances; historical blocks keep their
+/// original account tuples and hashes.
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub enum Icrc3Transaction {
     Mint {
@@ -165,6 +162,18 @@ pub enum Icrc3Transaction {
         to_subaccount: Option<Vec<u8>>,
         #[serde(default)]
         spender_subaccount: Option<Vec<u8>>,
+        /// Transaction memo. `None` on historical blocks preserves their
+        /// original ICRC-3 encoding and hash.
+        #[serde(default)]
+        memo: Option<Vec<u8>>,
+        /// Caller-supplied ICRC dedup timestamp, distinct from block `ts`.
+        /// `None` on historical blocks preserves their original encoding.
+        #[serde(default)]
+        created_at_time: Option<u64>,
+        /// Actual transaction fee evidence. ICRC-1 transfers record the
+        /// effective zero fee; ICRC-2 records the explicitly supplied fee.
+        #[serde(default)]
+        transaction_fee: Option<u128>,
     },
     Approve {
         from: Principal,
@@ -175,6 +184,18 @@ pub enum Icrc3Transaction {
         from_subaccount: Option<Vec<u8>>,
         #[serde(default)]
         spender_subaccount: Option<Vec<u8>>,
+        /// Transaction memo. `None` on historical blocks preserves their
+        /// original ICRC-3 encoding and hash.
+        #[serde(default)]
+        memo: Option<Vec<u8>>,
+        /// Caller-supplied ICRC dedup timestamp, distinct from block `ts`.
+        /// `None` on historical blocks preserves their original encoding.
+        #[serde(default)]
+        created_at_time: Option<u64>,
+        /// Explicit approval fee. The top-level block fee remains present for
+        /// all blocks; this field is absent when the caller omitted the fee.
+        #[serde(default)]
+        transaction_fee: Option<u128>,
     },
 }
 
@@ -324,15 +345,35 @@ pub struct ForwardLiquidityEventsV2 {
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub enum ThreePoolAdminAction {
-    RampA { future_a: u64, future_a_time: u64 },
-    StopRampA { frozen_a: u64 },
-    WithdrawAdminFees { amounts: [u128; 3] },
-    SetPaused { paused: bool },
-    SetSwapFee { fee_bps: u64 },
-    SetAdminFee { fee_bps: u64 },
-    AddAuthorizedBurnCaller { canister: Principal },
-    RemoveAuthorizedBurnCaller { canister: Principal },
-    FeeCurveParamsUpdated { old: Option<FeeCurveParams>, new: FeeCurveParams },
+    RampA {
+        future_a: u64,
+        future_a_time: u64,
+    },
+    StopRampA {
+        frozen_a: u64,
+    },
+    WithdrawAdminFees {
+        amounts: [u128; 3],
+    },
+    SetPaused {
+        paused: bool,
+    },
+    SetSwapFee {
+        fee_bps: u64,
+    },
+    SetAdminFee {
+        fee_bps: u64,
+    },
+    AddAuthorizedBurnCaller {
+        canister: Principal,
+    },
+    RemoveAuthorizedBurnCaller {
+        canister: Principal,
+    },
+    FeeCurveParamsUpdated {
+        old: Option<FeeCurveParams>,
+        new: FeeCurveParams,
+    },
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -391,12 +432,18 @@ pub enum ThreePoolError {
     InvariantNotConverged,
     /// Pool is paused by admin.
     PoolPaused,
+    /// A retained donation operation ID was reused with different arguments.
+    DonationIntentConflict,
     /// Caller is not in the authorized burn callers set.
     NotAuthorizedBurnCaller,
     /// LP/token ratio exceeds max slippage tolerance.
     BurnSlippageExceeded { max_bps: u16, actual_bps: u16 },
     /// Insufficient pool balance of the target token.
-    InsufficientPoolBalance { token: String, required: u128, available: u128 },
+    InsufficientPoolBalance {
+        token: String,
+        required: u128,
+        available: u128,
+    },
     /// Insufficient LP balance for the caller.
     InsufficientLpBalance { required: u128, available: u128 },
     /// The token burn on the ledger failed.
@@ -405,6 +452,8 @@ pub enum ThreePoolError {
     /// should retry. Audit fence B-01 (Wave 14a): prevents two concurrent
     /// callers from pricing against the same pre-state across an `await`.
     PoolLocked,
+    /// Pending-claim storage is full; no input transfer or LP debit was made.
+    PendingClaimCapacityReached,
     /// No pending claim exists with the requested id (already resolved, or
     /// never recorded). Audit 2026-06-05 (3P-01/02/03): pending-claim recovery.
     ClaimNotFound,

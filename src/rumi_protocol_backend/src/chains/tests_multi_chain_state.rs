@@ -1,5 +1,5 @@
-use super::multi_chain_state::MultiChainStateV1;
 use super::config::ChainId;
+use super::multi_chain_state::MultiChainStateV1;
 use candid::{Decode, Encode};
 
 #[test]
@@ -71,7 +71,8 @@ fn pre_m2_snapshot_decodes_with_defaulted_evm_fields() {
 
     let mut s = MultiChainStateV4::default();
     s.chain_supplies.insert(ChainId(71), 100_000_000);
-    s.evm_owner_nonces.insert(Principal::from_slice(&[7, 7, 7]), 3);
+    s.evm_owner_nonces
+        .insert(Principal::from_slice(&[7, 7, 7]), 3);
     s.chain_vaults.insert(
         1,
         ChainVaultV1 {
@@ -87,7 +88,8 @@ fn pre_m2_snapshot_decodes_with_defaulted_evm_fields() {
             opened_at_ns: 42,
             last_interest_accrual_ns: 0,
             pending_interest_mint_e8s: 0,
-            pending_liquidation: None,            owner_evm: Some("0xfeed".into()),
+            pending_liquidation: None,
+            owner_evm: Some("0xfeed".into()),
         },
     );
 
@@ -100,9 +102,15 @@ fn pre_m2_snapshot_decodes_with_defaulted_evm_fields() {
 
     // The pre-M2 bytes MUST decode into the current struct (proves serde-default).
     let back: MultiChainStateV4 = ciborium::de::from_reader(pre_m2.as_slice()).unwrap();
-    assert_eq!(back.chain_supplies.get(&ChainId(71)).copied(), Some(100_000_000));
+    assert_eq!(
+        back.chain_supplies.get(&ChainId(71)).copied(),
+        Some(100_000_000)
+    );
     let v = back.chain_vaults.get(&1).expect("vault survived");
     assert_eq!(v.debt_e8s, 100_000_000);
     assert_eq!(v.owner_evm, None, "stripped owner_evm must default to None");
-    assert!(back.evm_owner_nonces.is_empty(), "stripped evm_owner_nonces must default to empty");
+    assert!(
+        back.evm_owner_nonces.is_empty(),
+        "stripped evm_owner_nonces must default to empty"
+    );
 }

@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => {
     },
     isOisy: false,
     queryResult: { Ok: 100n } as any,
-    updateResult: { Ok: 100n } as any,
+    updateResult: { Ok: { status: { Completed: null }, result_lp: [100n] } } as any,
     queryCalls: 0,
     approvalCalls: [] as string[],
     poolCalls: 0,
@@ -28,6 +28,11 @@ const mocks = vi.hoisted(() => {
       }),
     },
     poolActor: {
+      get_next_intent_sequence_v1: vi.fn(async () => [1n]),
+      add_liquidity_with_receipt_v1: vi.fn(async () => {
+        mocks.poolCalls += 1;
+        return mocks.updateResult;
+      }),
       add_liquidity: vi.fn(async () => {
         mocks.poolCalls += 1;
         return mocks.updateResult;
@@ -45,7 +50,9 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('@dfinity/agent', () => ({
   Actor: { createActor: vi.fn(() => mocks.queryActor) },
-  HttpAgent: vi.fn(() => ({ fetchRootKey: vi.fn() })),
+  HttpAgent: vi.fn(class MockHttpAgent {
+    fetchRootKey = vi.fn().mockResolvedValue(undefined);
+  }),
   AnonymousIdentity: vi.fn(),
 }));
 
@@ -105,10 +112,12 @@ describe('threePoolService deposit policy preflight', () => {
     mocks.walletState.principal = mocks.principalA;
     mocks.isOisy = false;
     mocks.queryResult = { Ok: 100n };
-    mocks.updateResult = { Ok: 100n };
+    mocks.updateResult = { Ok: { status: { Completed: null }, result_lp: [100n] } };
     mocks.queryCalls = 0;
     mocks.approvalCalls.length = 0;
     mocks.poolCalls = 0;
+    mocks.poolActor.get_next_intent_sequence_v1.mockClear();
+    mocks.poolActor.add_liquidity_with_receipt_v1.mockClear();
     mocks.queryActor.calc_add_liquidity_query.mockClear();
     mocks.ledgerActor.icrc2_approve.mockClear();
     mocks.poolActor.add_liquidity.mockClear();

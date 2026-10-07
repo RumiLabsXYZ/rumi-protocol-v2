@@ -11,8 +11,62 @@
   import PointsCallout from '../points/PointsCallout.svelte';
   import { spMultiplier } from '$lib/utils/pointsRules';
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
+  import { captureActionBoundContext, type ActionBoundContext } from '../../services/protocol/walletOperations';
+  import {
+    clearPendingStabilityPoolDepositAfterReconciliation,
+    readPendingStabilityPoolDeposit,
+    type PendingStabilityPoolDeposit,
+  } from '../../utils/stabilityPoolDepositLock';
 
-  onMount(() => { seasonStore.ensureLoaded(); });
+  let pendingRefresh = 0;
+  let pendingDeposit: PendingStabilityPoolDeposit | null = null;
+  let pendingDepositStorageError = '';
+
+  function readSelectedPendingDeposit() {
+    if (!selectedToken || !$walletStore.principal) {
+      pendingDeposit = null;
+      pendingDepositStorageError = '';
+      return;
+    }
+    try {
+      pendingDeposit = readPendingStabilityPoolDeposit(
+        $walletStore.principal.toText(), selectedToken.ledger_id.toText(),
+      );
+      pendingDepositStorageError = '';
+    } catch (err) {
+      pendingDeposit = null;
+      pendingDepositStorageError = err instanceof Error ? err.message : 'A Stability Pool deposit recovery record needs review.';
+    }
+  }
+
+  async function clearPendingDepositAfterReconciliation() {
+    if (!pendingDeposit) return;
+    const prompt = pendingDeposit.status === 'accepted'
+      ? `The ${selectedToken?.symbol ?? 'token'} deposit response confirmed success. Clear its local retry lock only after checking that the Stability Pool position reflects the deposit.`
+      : `Only clear this ${selectedToken?.symbol ?? 'token'} deposit lock after checking the token ledger transfer history and Stability Pool position and confirming the deposit did not complete. Clearing it before reconciliation could deposit the amount twice.`;
+    if (!window.confirm(prompt)) return;
+    try {
+      await clearPendingStabilityPoolDepositAfterReconciliation(
+        pendingDeposit.owner,
+        pendingDeposit.ledger,
+        pendingDeposit.attemptId,
+        typeof navigator !== 'undefined' ? navigator.locks : undefined,
+      );
+      error = '';
+      pendingRefresh += 1;
+    } catch (err) {
+      pendingDepositStorageError = err instanceof Error ? err.message : 'Could not clear the recovery record.';
+    }
+  }
+
+  onMount(() => {
+    seasonStore.ensureLoaded();
+    const onStorage = (event: StorageEvent) => {
+      if (!event.key || event.key.startsWith('rumi:stability-pool:pending-deposit:')) pendingRefresh += 1;
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  });
 
   $: spMult = spMultiplier(selectedToken?.symbol);
 
@@ -39,6 +93,12 @@
   $: isConnected = $walletStore.isConnected;
   $: activeStablecoins = poolStatus?.stablecoin_registry?.filter(s => s.is_active) ?? [];
   $: selectedToken = activeStablecoins[selectedTokenIndex] ?? null;
+  $: {
+    pendingRefresh;
+    selectedToken;
+    $walletStore.principal;
+    readSelectedPendingDeposit();
+  }
 
   // Map wallet balance keys to ledger IDs
   const LEDGER_TO_WALLET_KEY: Record<string, string> = {
@@ -189,6 +249,7 @@
       const rawAmount = parseTokenAmount(amount, selectedToken.decimals);
 
       if (activeTab === 'deposit') {
+        const actionContext: ActionBoundContext = captureActionBoundContext();
         const oneUnit = BigInt(Math.pow(10, selectedToken.decimals));
         if (rawAmount < oneUnit) {
           error = `Minimum deposit is 1 ${selectedToken.symbol}`;
@@ -204,7 +265,7 @@
           error = 'Insufficient balance (amount + fees)';
           return;
         }
-        await stabilityPoolService.deposit(selectedToken.ledger_id, rawAmount);
+        await stabilityPoolService.deposit(selectedToken.ledger_id, rawAmount, actionContext);
         dispatch('success', { action: 'deposit' });
       } else {
         const ledgerFee = getCachedLedgerFee(ledgerRefFor(selectedToken));
@@ -224,6 +285,7 @@
       error = err.message || `Failed to ${activeTab}`;
     } finally {
       loading = false;
+      pendingRefresh += 1;
     }
   }
 </script>
@@ -328,11 +390,21 @@
       </div>
     {/if}
 
+    {#if activeTab === 'deposit' && pendingDeposit}
+      <div class="error-bar pending-deposit-warning">
+        {#if pendingDeposit.status === 'accepted'}The {selectedToken?.symbol ?? 'token'} deposit of {selectedToken ? formatTokenAmount(BigInt(pendingDeposit.amount), selectedToken.decimals) : pendingDeposit.amount} was confirmed, but its local retry lock remains. Check the updated Stability Pool position before clearing the lock.{:else}A {selectedToken?.symbol ?? 'token'} deposit of {selectedToken ? formatTokenAmount(BigInt(pendingDeposit.amount), selectedToken.decimals) : pendingDeposit.amount} has no confirmed result. Check this token ledger’s transfer history and your Stability Pool position before retrying. The deposit is locked across reloads and tabs.{/if}
+        <button type="button" class="recovery-button" on:click={clearPendingDepositAfterReconciliation}>Clear lock after reconciliation</button>
+      </div>
+    {/if}
+    {#if activeTab === 'deposit' && pendingDepositStorageError}
+      <div class="error-bar pending-deposit-warning">{pendingDepositStorageError} Deposits remain disabled until recovery can be verified.</div>
+    {/if}
+
     <!-- Submit -->
     <button
       class="submit-btn" class:withdraw={activeTab === 'withdraw'}
       on:click={handleSubmit}
-      disabled={loading || !amount || parseFloat(amount) <= 0}
+      disabled={loading || (activeTab === 'deposit' && (!!pendingDeposit || !!pendingDepositStorageError)) || !amount || parseFloat(amount) <= 0}
     >
       {#if loading}
         <span class="spinner"></span>

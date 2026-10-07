@@ -12,11 +12,15 @@ pub mod config;
 // Generic EVM logic now lives in chains::evm; re-export so existing
 // crate::chains::monad::{tx,tecdsa,...} paths keep resolving (mirrors the
 // chains/vault.rs <- chains/monad/chain_vault.rs hoist).
-pub use crate::chains::evm::{adapter, burn_proof, deposit_watch, evm_rpc, hardening, settlement, tecdsa, tx};
+pub use crate::chains::evm::{
+    adapter, burn_proof, deposit_watch, evm_rpc, hardening, settlement, tecdsa, tx,
+};
 
 pub use adapter::MonadAdapter;
 pub use chain_vault::{ChainVaultStatus, ChainVaultV1};
-pub use config::{monad_default_register_arg, monad_ecdsa_key_name, MONAD_CHAIN_ID, MONAD_ICUSD_DECIMALS};
+pub use config::{
+    monad_default_register_arg, monad_ecdsa_key_name, MONAD_CHAIN_ID, MONAD_ICUSD_DECIMALS,
+};
 
 #[cfg(test)]
 mod tests_config;

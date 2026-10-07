@@ -4,8 +4,8 @@
 //! state-shape rules without spinning up PocketIC.
 
 use super::config::{
-    ChainAdminError, ChainConfigV3, ChainId, ChainStatus, GasStrategy, RegisterChainArg,
-    UpdateChainConfigArg,
+    BurnProofAdmissionMode, ChainAdminError, ChainConfigV3, ChainId, ChainStatus, GasStrategy,
+    RegisterChainArg, UpdateChainConfigArg,
 };
 use super::multi_chain_state::MultiChainState;
 use super::settlement_queue::SettlementQueueV1;
@@ -100,6 +100,9 @@ pub fn register_chain_in_state(
         min_quorum_providers: arg.min_quorum_providers,
     };
     state.chain_configs.insert(arg.chain_id, cfg.clone());
+    state
+        .burn_proof_admission_mode_by_chain
+        .insert(arg.chain_id, BurnProofAdmissionMode::OperatorOnly);
     state.chain_supplies.insert(arg.chain_id, 0);
     state
         .settlement_queues
@@ -219,8 +222,19 @@ pub fn delete_chain_in_state(
             chain_id.0
         )));
     }
+    if state
+        .pending_evm_burn_replay_ids
+        .keys()
+        .any(|(pending_chain, _)| *pending_chain == chain_id)
+    {
+        return Err(ChainAdminError::InvalidConfig(format!(
+            "chain {} has burn proofs awaiting observer coverage; advance its burn-proof floor before deleting",
+            chain_id.0
+        )));
+    }
     // Remove from EVERY per-chain map (a stale entry in any of these is a leak).
     state.chain_configs.remove(&chain_id);
+    state.burn_proof_admission_mode_by_chain.remove(&chain_id);
     state.chain_supplies.remove(&chain_id);
     state.settlement_queues.remove(&chain_id);
     state.chain_contracts.remove(&chain_id);

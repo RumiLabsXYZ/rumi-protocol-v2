@@ -7,6 +7,7 @@ import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
 import { getOisySignerAgent, createOisyActor } from './oisySigner';
 import { fetchLedgerFee, getCachedLedgerFee } from './ledgerFeeService';
+import { assertPlugPrincipal, currentWalletType, walletSessionGeneration, WALLET_TYPES } from './auth';
 
 // ──────────────────────────────────────────────────────────────
 // Types — mirrors the AMM Candid interface
@@ -30,9 +31,50 @@ export interface SwapResult {
   fee: bigint;
 }
 
+export interface SwapPayoutResult extends SwapResult {
+  /** Exact output credited after the AMM's pinned ICRC-1 payout fee. */
+  amount_out_net: bigint;
+}
+
 // ── Analytics window variants (mirrors Candid AmmStatsWindow) ──
 
 export type AmmStatsWindow = 'Hour' | 'Day' | 'Week' | 'Month' | 'All';
+
+type AmmIntent = { id: Uint8Array; fingerprint: string };
+
+function ammIntentFingerprint(kind: string, args: unknown[]): string {
+  return JSON.stringify([kind, ...args.map(value => typeof value === 'bigint' ? value.toString() : value)]);
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBytes(hex: string): Uint8Array | null {
+  if (!/^[0-9a-f]{64}$/i.test(hex)) return null;
+  return Uint8Array.from(hex.match(/.{2}/g)!, byte => parseInt(byte, 16));
+}
+
+function onChainFingerprint(operation: any): string | null {
+  if (!operation?.kind || !operation.pool_id) return null;
+  if ('Swap' in operation.kind) {
+    const x = operation.kind.Swap;
+    return ammIntentFingerprint('swap', [operation.pool_id, x.token_in.toText(), BigInt(x.amount_in), BigInt(x.min_amount_out)]);
+  }
+  if ('AddLiquidity' in operation.kind) {
+    const x = operation.kind.AddLiquidity;
+    return ammIntentFingerprint('add', [operation.pool_id, BigInt(x.amount_a), BigInt(x.amount_b), BigInt(x.min_lp_shares)]);
+  }
+  if ('RemoveLiquidity' in operation.kind) {
+    const x = operation.kind.RemoveLiquidity;
+    return ammIntentFingerprint('remove', [operation.pool_id, BigInt(x.lp_shares), BigInt(x.min_amount_a), BigInt(x.min_amount_b)]);
+  }
+  return null;
+}
+
+function unwrapCandidOpt<T>(value: any): T | null {
+  return Array.isArray(value) ? ((value[0] as T | undefined) ?? null) : ((value as T | undefined) ?? null);
+}
 
 function windowToVariant(window: AmmStatsWindow): Record<string, null> {
   return { [window]: null };
@@ -188,7 +230,144 @@ export function formatTokenAmount(amount: bigint, decimals: number): string {
 
 const AMM_CANISTER_ID = CANISTER_IDS.RUMI_AMM;
 
+export function captureAmmWalletContext(principal: Principal): () => void {
+  const expectedPrincipalText = principal.toText();
+  const expectedWalletType = get(currentWalletType);
+  const expectedGeneration = get(walletSessionGeneration);
+
+  return () => {
+    const liveWallet = get(walletStore);
+    const oisyModeMatchesSession = expectedWalletType === null
+      || isOisyWallet() === (expectedWalletType === WALLET_TYPES.OISY);
+    if (!liveWallet.isConnected
+      || liveWallet.principal?.toText() !== expectedPrincipalText
+      || get(currentWalletType) !== expectedWalletType
+      || get(walletSessionGeneration) !== expectedGeneration
+      || !oisyModeMatchesSession) {
+      throw new Error('Wallet changed during the AMM operation. Reconnect and retry.');
+    }
+    if (expectedWalletType === WALLET_TYPES.PLUG) {
+      try {
+        assertPlugPrincipal(expectedPrincipalText);
+      } catch {
+        throw new Error('Plug account changed during the AMM operation. Reconnect and retry.');
+      }
+    }
+  };
+}
+
 class AmmService {
+  async swapWithPreapprovedActor(
+    actor: any,
+    principal: Principal,
+    poolId: string,
+    tokenIn: Principal,
+    amountIn: bigint,
+    minAmountOut: bigint,
+  ): Promise<SwapPayoutResult> {
+    const assertWalletContextCurrent = captureAmmWalletContext(principal);
+    assertWalletContextCurrent();
+    const fingerprint = ammIntentFingerprint('swap', [poolId, tokenIn.toText(), amountIn, minAmountOut]);
+    const requestId = await this.resolveIntentId(actor, principal, fingerprint);
+    assertWalletContextCurrent();
+    const result = await actor.swap_v2(requestId, poolId, tokenIn, amountIn, minAmountOut);
+    assertWalletContextCurrent();
+    if ('Err' in result) {
+      await this.clearTerminalIntent(actor, principal, fingerprint);
+      throw new Error(this.formatError(result.Err));
+    }
+    const operation = unwrapCandidOpt<any>(await actor.get_my_amm_operation());
+    assertWalletContextCurrent();
+    const fee = operation?.computed_values?.[3] !== undefined ? BigInt(operation.computed_values[3]) : 0n;
+    const payoutResult = { ...result.Ok, amount_out_net: result.Ok.amount_out > fee ? result.Ok.amount_out - fee : 0n };
+    this.clearIntentId(principal, fingerprint);
+    return payoutResult;
+  }
+
+  /**
+   * Reject an unresolved AMM operation before a multi-hop route performs an
+   * earlier approval or value-moving hop. Exact retry matching still happens
+   * in swapWithPreapprovedActor once the route knows the actual hop amount.
+   */
+  async assertNoUnresolvedOperation(
+    actor: any,
+    principal: Principal,
+    assertWalletContextCurrent: () => void = captureAmmWalletContext(principal),
+  ): Promise<void> {
+    assertWalletContextCurrent();
+    const pending = unwrapCandidOpt<any>(await actor.get_my_amm_operation());
+    assertWalletContextCurrent();
+    if (pending && !(pending.phase && 'Complete' in pending.phase)) {
+      throw new Error('A prior AMM operation is unresolved. Resume it with its original arguments before starting another operation.');
+    }
+  }
+
+  private async resolveIntentId(actor: any, principal: Principal, fingerprint: string): Promise<Uint8Array> {
+    const storageKey = `rumi-amm-v2:${principal.toText()}`;
+    let cached: { fingerprint: string; id: string } | null = null;
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) cached = JSON.parse(raw);
+    } catch {
+      throw new Error('AMM retry identity storage is unavailable; refusing a request that could not be safely resumed');
+    }
+    const pending = unwrapCandidOpt<any>(await actor.get_my_amm_operation());
+    const pendingId = pending ? Uint8Array.from(pending.request_id) : null;
+    const complete = pending?.phase && 'Complete' in pending.phase;
+
+    if (pending && !complete) {
+      const exact = onChainFingerprint(pending);
+      if (exact !== fingerprint) {
+        throw new Error('A prior AMM operation is unresolved. Resume it with its original arguments before starting another operation.');
+      }
+      const id = pendingId!;
+      try { localStorage.setItem(storageKey, JSON.stringify({ fingerprint, id: bytesToHex(id) })); }
+      catch { throw new Error('Could not persist the AMM retry identity; refusing to proceed'); }
+      return id;
+    }
+
+    if (cached?.fingerprint === fingerprint) {
+      const id = hexToBytes(cached.id);
+      // A typed first-dispatch no-effect is discarded on-chain because no
+      // value moved. With no row present, safely reuse the cached caller ID.
+      if (id && !pending) return id;
+      if (id && pendingId && bytesToHex(id) === bytesToHex(pendingId) && onChainFingerprint(pending) === fingerprint) return id;
+    }
+
+    let previous = 0n;
+    if (pendingId?.length === 32) {
+      for (const byte of pendingId.slice(0, 8)) previous = (previous << 8n) | BigInt(byte);
+    }
+    if (previous >= 0xffffffffffffffffn) throw new Error('AMM request identity space is exhausted for this wallet');
+    const id = new Uint8Array(32);
+    let sequence = previous + 1n;
+    for (let i = 7; i >= 0; i--) { id[i] = Number(sequence & 0xffn); sequence >>= 8n; }
+    crypto.getRandomValues(id.subarray(8));
+    try { localStorage.setItem(storageKey, JSON.stringify({ fingerprint, id: bytesToHex(id) })); }
+    catch { throw new Error('Could not persist the AMM retry identity; refusing to proceed'); }
+    return id;
+  }
+
+  private clearIntentId(principal: Principal, fingerprint: string): void {
+    const key = `rumi-amm-v2:${principal.toText()}`;
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw && JSON.parse(raw).fingerprint === fingerprint) localStorage.removeItem(key);
+    } catch { /* Keep the durable request ID if browser storage is unreadable. */ }
+  }
+
+  private async clearTerminalIntent(actor: any, principal: Principal, fingerprint: string): Promise<void> {
+    try {
+      const op = unwrapCandidOpt<any>(await actor.get_my_amm_operation());
+      if (op?.phase && 'Complete' in op.phase) {
+        const error = op.last_error;
+        if ((Array.isArray(error) && error.length > 0) || (typeof error === 'string' && error.length > 0)) {
+          this.clearIntentId(principal, fingerprint);
+        }
+      }
+    } catch { /* retain the identity if terminal state cannot be confirmed */ }
+  }
+
   private _anonAgent: HttpAgent | null = null;
 
   private async getQueryActor(): Promise<any> {
@@ -205,6 +384,48 @@ class AmmService {
       agent: this._anonAgent,
       canisterId: AMM_CANISTER_ID,
     });
+  }
+
+  async getMyAmmOperation(): Promise<any | null> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected || !wallet.principal) throw new Error('Wallet not connected');
+    const actor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+    const operation = await actor.get_my_amm_operation();
+    return unwrapCandidOpt<any>(operation);
+  }
+
+  async reconcileMyAmmIngress(requestId: Uint8Array): Promise<boolean> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected || !wallet.principal) throw new Error('Wallet not connected');
+    const actor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+    const result = await actor.reconcile_amm_ingress(requestId);
+    if ('Err' in result) throw new Error(this.formatError(result.Err));
+    return result.Ok;
+  }
+
+  async getMyPendingAmmPayouts(): Promise<any[]> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected || !wallet.principal) throw new Error('Wallet not connected');
+    const actor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+    return await actor.get_pending_amm_payouts();
+  }
+
+  async retryAmmPayout(payoutId: bigint): Promise<bigint> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected || !wallet.principal) throw new Error('Wallet not connected');
+    const actor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+    const result = await actor.retry_amm_payout(payoutId);
+    if ('Err' in result) throw new Error(this.formatError(result.Err));
+    return result.Ok;
+  }
+
+  async reconcileAmmPayout(payoutId: bigint): Promise<boolean> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected || !wallet.principal) throw new Error('Wallet not connected');
+    const actor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+    const result = await actor.reconcile_amm_payout(payoutId);
+    if ('Err' in result) throw new Error(this.formatError(result.Err));
+    return result.Ok;
   }
 
   // ── Queries (anonymous) ──
@@ -329,15 +550,25 @@ class AmmService {
   ): Promise<SwapResult> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
+    if (!wallet.principal) throw new Error('Connected wallet principal is unavailable');
+    const assertWalletContextCurrent = captureAmmWalletContext(wallet.principal);
+    assertWalletContextCurrent();
 
     const oisyDetected = isOisyWallet();
     const approveAmt = await approvalAmount(amountIn, inputToken);
+    assertWalletContextCurrent();
 
     if (oisyDetected && wallet.principal) {
       console.log(`[Oisy] Sequential approve + AMM swap via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
+      assertWalletContextCurrent();
       const ledgerActor = createOisyActor(inputToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
       const ammActor = createOisyActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm, signerAgent);
+      const fingerprint = ammIntentFingerprint('swap', [poolId, tokenIn.toText(), amountIn, minAmountOut]);
+      // Query the AMM before requesting an approval so a pending conflicting
+      // operation cannot leave a fresh allowance behind.
+      const requestId = await this.resolveIntentId(ammActor, wallet.principal, fingerprint);
+      assertWalletContextCurrent();
 
       // 1) Approve (first Oisy consent screen, Tier 1 native).
       const approveResult = await ledgerActor.icrc2_approve({
@@ -349,13 +580,26 @@ class AmmService {
       if (approveResult && 'Err' in approveResult) {
         throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
       }
+      assertWalletContextCurrent();
 
       // 2) AMM swap (second Oisy consent screen).
-      const swapResult = await ammActor.swap(poolId, tokenIn, amountIn, minAmountOut);
-      if ('Err' in swapResult) throw new Error(this.formatError(swapResult.Err));
+      const swapResult = await ammActor.swap_v2(requestId, poolId, tokenIn, amountIn, minAmountOut);
+      assertWalletContextCurrent();
+      if ('Err' in swapResult) {
+        await this.clearTerminalIntent(ammActor, wallet.principal, fingerprint);
+        throw new Error(this.formatError(swapResult.Err));
+      }
+      this.clearIntentId(wallet.principal, fingerprint);
       return swapResult.Ok;
     } else {
+      const ammActor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+      const fingerprint = ammIntentFingerprint('swap', [poolId, tokenIn.toText(), amountIn, minAmountOut]);
+      // Reject a conflicting unresolved operation before prompting for token approval.
+      const requestId = await this.resolveIntentId(ammActor, wallet.principal, fingerprint);
+      assertWalletContextCurrent();
+
       const ledgerActor = await walletStore.getActor(inputToken.ledgerId, CONFIG.icusd_ledgerIDL) as any;
+      assertWalletContextCurrent();
       const approveResult = await ledgerActor.icrc2_approve({
         amount: approveAmt,
         spender: { owner: Principal.fromText(AMM_CANISTER_ID), subaccount: [] },
@@ -366,12 +610,17 @@ class AmmService {
       if (approveResult && 'Err' in approveResult) {
         throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
       }
+      assertWalletContextCurrent();
 
       await new Promise(r => setTimeout(r, 2000));
 
-      const ammActor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
-      const result = await ammActor.swap(poolId, tokenIn, amountIn, minAmountOut);
-      if ('Err' in result) throw new Error(this.formatError(result.Err));
+      assertWalletContextCurrent();
+      const result = await ammActor.swap_v2(requestId, poolId, tokenIn, amountIn, minAmountOut);
+      if ('Err' in result) {
+        await this.clearTerminalIntent(ammActor, wallet.principal, fingerprint);
+        throw new Error(this.formatError(result.Err));
+      }
+      this.clearIntentId(wallet.principal, fingerprint);
       return result.Ok;
     }
   }
@@ -386,6 +635,9 @@ class AmmService {
   ): Promise<bigint> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
+    if (!wallet.principal) throw new Error('Connected wallet principal is unavailable');
+    const assertWalletContextCurrent = captureAmmWalletContext(wallet.principal);
+    assertWalletContextCurrent();
 
     const oisyDetected = isOisyWallet();
 
@@ -396,10 +648,17 @@ class AmmService {
     // AmmLiquidityPanel warms the fee cache on mount.
     const approveA = amountA > 0n ? amountA + tokenFeeCached(tokenA) : 0n;
     const approveB = amountB > 0n ? amountB + tokenFeeCached(tokenB) : 0n;
+    assertWalletContextCurrent();
 
     if (oisyDetected && wallet.principal) {
       console.log(`[Oisy] Sequential approve(s) + AMM add_liquidity via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
+      assertWalletContextCurrent();
+      const ammActor = createOisyActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm, signerAgent);
+      const fingerprint = ammIntentFingerprint('add', [poolId, amountA, amountB, minLpShares]);
+      // Check retry state before either token approval can be granted.
+      const requestId = await this.resolveIntentId(ammActor, wallet.principal, fingerprint);
+      assertWalletContextCurrent();
 
       // 1) Approve token A (first Oisy consent screen, if needed).
       if (amountA > 0n) {
@@ -413,6 +672,7 @@ class AmmService {
         if (approveResultA && 'Err' in approveResultA) {
           throw new Error(`Approval failed for ${tokenA.symbol}: ${JSON.stringify(approveResultA.Err)}`);
         }
+        assertWalletContextCurrent();
       }
 
       // 2) Approve token B (second consent screen, if needed).
@@ -427,41 +687,62 @@ class AmmService {
         if (approveResultB && 'Err' in approveResultB) {
           throw new Error(`Approval failed for ${tokenB.symbol}: ${JSON.stringify(approveResultB.Err)}`);
         }
+        assertWalletContextCurrent();
       }
 
       // 3) add_liquidity (final consent screen).
-      const ammActor = createOisyActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm, signerAgent);
-      const addResult = await ammActor.add_liquidity(poolId, amountA, amountB, minLpShares);
-      if ('Err' in addResult) throw new Error(this.formatError(addResult.Err));
+      assertWalletContextCurrent();
+      const addResult = await ammActor.add_liquidity_v2(requestId, poolId, amountA, amountB, minLpShares);
+      assertWalletContextCurrent();
+      if ('Err' in addResult) {
+        await this.clearTerminalIntent(ammActor, wallet.principal, fingerprint);
+        throw new Error(this.formatError(addResult.Err));
+      }
+      this.clearIntentId(wallet.principal, fingerprint);
       return addResult.Ok;
     } else {
       const spender = { owner: Principal.fromText(AMM_CANISTER_ID), subaccount: [] };
+      const ammActor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+      const fingerprint = ammIntentFingerprint('add', [poolId, amountA, amountB, minLpShares]);
+      // Reject a conflicting unresolved operation before prompting for token approvals.
+      const requestId = await this.resolveIntentId(ammActor, wallet.principal, fingerprint);
+      assertWalletContextCurrent();
 
       if (amountA > 0n) {
         const ledgerA = await walletStore.getActor(tokenA.ledgerId, CONFIG.icusd_ledgerIDL) as any;
+        assertWalletContextCurrent();
         const r = await ledgerA.icrc2_approve({
           amount: approveA, spender,
           expires_at: [], expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: [],
         });
         if (r && 'Err' in r) throw new Error(`Approval failed for ${tokenA.symbol}: ${JSON.stringify(r.Err)}`);
+        assertWalletContextCurrent();
         await new Promise(r => setTimeout(r, 2000));
+        assertWalletContextCurrent();
       }
 
       if (amountB > 0n) {
         const ledgerB = await walletStore.getActor(tokenB.ledgerId, CONFIG.icusd_ledgerIDL) as any;
+        assertWalletContextCurrent();
         const r = await ledgerB.icrc2_approve({
           amount: approveB, spender,
           expires_at: [], expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: [],
         });
         if (r && 'Err' in r) throw new Error(`Approval failed for ${tokenB.symbol}: ${JSON.stringify(r.Err)}`);
+        assertWalletContextCurrent();
         await new Promise(r => setTimeout(r, 2000));
+        assertWalletContextCurrent();
       }
 
-      const ammActor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
-      const result = await ammActor.add_liquidity(poolId, amountA, amountB, minLpShares);
-      if ('Err' in result) throw new Error(this.formatError(result.Err));
+      assertWalletContextCurrent();
+      const result = await ammActor.add_liquidity_v2(requestId, poolId, amountA, amountB, minLpShares);
+      if ('Err' in result) {
+        await this.clearTerminalIntent(ammActor, wallet.principal, fingerprint);
+        throw new Error(this.formatError(result.Err));
+      }
+      this.clearIntentId(wallet.principal, fingerprint);
       return result.Ok;
     }
   }
@@ -474,10 +755,21 @@ class AmmService {
   ): Promise<{ amountA: bigint; amountB: bigint }> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
+    if (!wallet.principal) throw new Error('Connected wallet principal is unavailable');
+    const assertWalletContextCurrent = captureAmmWalletContext(wallet.principal);
+    assertWalletContextCurrent();
 
     const ammActor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
-    const result = await ammActor.remove_liquidity(poolId, lpShares, minAmountA, minAmountB);
-    if ('Err' in result) throw new Error(this.formatError(result.Err));
+    assertWalletContextCurrent();
+    const fingerprint = ammIntentFingerprint('remove', [poolId, lpShares, minAmountA, minAmountB]);
+    const requestId = await this.resolveIntentId(ammActor, wallet.principal, fingerprint);
+    assertWalletContextCurrent();
+    const result = await ammActor.remove_liquidity_v2(requestId, poolId, lpShares, minAmountA, minAmountB);
+    if ('Err' in result) {
+      await this.clearTerminalIntent(ammActor, wallet.principal, fingerprint);
+      throw new Error(this.formatError(result.Err));
+    }
+    this.clearIntentId(wallet.principal, fingerprint);
     const [amountA, amountB] = result.Ok;
     return { amountA, amountB };
   }

@@ -3,7 +3,10 @@
 //! keeps reserve mutations fenced even after an upgrade.
 mod common;
 use candid::{decode_one, encode_args, encode_one, Nat, Principal};
-use common::{deploy_pool_with_liquidity_fee_and_swaps, three_pool_wasm, ThreePoolHarness};
+use common::{
+    deploy_pool_with_archive_cycles, deploy_pool_with_liquidity_fee_and_swaps,
+    three_pool_test_endpoints_wasm, ThreePoolHarness,
+};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use pocket_ic::WasmResult;
@@ -111,14 +114,9 @@ fn enable(h: &ThreePoolHarness) {
     r.unwrap();
 }
 #[test]
-fn receipts_bind_ledger_economics_and_replay_survives_upgrade() {
+fn wallet_receipts_bind_ledger_economics_and_replay_survives_upgrade() {
     let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);
-    assert_eq!(
-        submit(&h, request()).unwrap_err(),
-        SwapReceiptErrorV1::Unauthorized
-    );
     assert!(query(&h, h.user).is_none());
-    enable(&h);
     let before_in = balance(&h, h.ledgers[0], h.user);
     let before_out = balance(&h, h.ledgers[1], h.user);
     let r = submit(&h, request()).unwrap();
@@ -169,7 +167,7 @@ fn receipts_bind_ledger_economics_and_replay_survives_upgrade() {
     h.pic
         .upgrade_canister(
             h.three_pool,
-            three_pool_wasm(),
+            three_pool_test_endpoints_wasm(),
             encode_args(()).unwrap(),
             None,
         )
@@ -190,7 +188,9 @@ fn stopped_output_ledger_never_refunds_or_replays_and_fence_survives_upgrade() {
     let r = submit(&h, request()).unwrap();
     assert_eq!(r.status, SwapReceiptStatusV1::Unresolved);
     assert!(r.input.as_ref().unwrap().block_index.is_some());
-    assert!(r.output.as_ref().unwrap().block_index.is_none());
+    // A stopped output ledger can trap the fee lookup before the output
+    // identity is prepared. The already-confirmed input remains fenced.
+    assert!(r.output.as_ref().map_or(true, |output| output.block_index.is_none()));
     assert!(r.refund.is_none());
     assert_eq!(
         before - balance(&h, h.ledgers[0], h.user),
@@ -199,13 +199,21 @@ fn stopped_output_ledger_never_refunds_or_replays_and_fence_survives_upgrade() {
     h.pic
         .upgrade_canister(
             h.three_pool,
-            three_pool_wasm(),
+            three_pool_test_endpoints_wasm(),
             encode_args(()).unwrap(),
             None,
         )
         .unwrap();
     h.pic.start_canister(h.ledgers[1], None).unwrap();
-    assert_eq!(submit(&h, request()).unwrap(), r);
+    let resumed = submit(&h, request()).unwrap();
+    assert_eq!(resumed.status, SwapReceiptStatusV1::Completed);
+    assert_eq!(resumed.input, r.input, "resume must preserve the original input identity");
+    assert!(resumed.output.as_ref().unwrap().block_index.is_some());
+    assert_eq!(
+        before - balance(&h, h.ledgers[0], h.user),
+        request().dx + 10_000,
+        "resuming after upgrade must not debit input again",
+    );
     let blocked: Result<u128, ThreePoolError> = decode_one(&bytes(
         h.pic
             .update_call(
@@ -217,12 +225,499 @@ fn stopped_output_ledger_never_refunds_or_replays_and_fence_survives_upgrade() {
             .unwrap(),
     ))
     .unwrap();
-    assert!(matches!(blocked, Err(ThreePoolError::PoolLocked)));
+    assert!(matches!(blocked, Err(ThreePoolError::TransferFailed { .. })));
     assert_eq!(
         before - balance(&h, h.ledgers[0], h.user),
         request().dx + 10_000
     );
 }
+
+#[test]
+fn too_old_after_ambiguous_no_effect_rotates_only_after_complete_fixed_tip_scan() {
+    let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);
+    let seeded: () = decode_one(&bytes(
+        h.pic.update_call(
+            h.three_pool,
+            h.user,
+            "test_seed_absent_swap_input_v1",
+            encode_one(request()).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    let _ = seeded;
+
+    // The persisted identity is now older than the ledger's transaction
+    // window. Its first exact retry returns typed TooOld; that alone does not
+    // rotate the identity or release the fence.
+    h.pic.advance_time(std::time::Duration::from_secs(30 * 60 * 60));
+    let aged = submit(&h, request()).unwrap();
+    let aged_input = aged.input.as_ref().unwrap();
+    assert_eq!(aged.status, SwapReceiptStatusV1::Unresolved);
+    assert_eq!(aged_input.dispatch_count, Some(2));
+    assert_eq!(aged_input.too_old_after_ambiguity, Some(true));
+    assert!(aged_input.absence_scan.is_none());
+
+    // The bounded scan's fixed tip equals the pre-dispatch baseline here.
+    // An empty complete interval is still persisted, checked, and tombstoned
+    // before the replacement identity can be sent.
+    let scanned: Result<SwapReceiptV1, SwapReceiptErrorV1> = decode_one(&bytes(
+        h.pic.update_call(
+            h.three_pool,
+            h.user,
+            "advance_swap_absence_scan_v1",
+            encode_args((request().intent_id.clone(), 0u8)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    let scanned = scanned.unwrap();
+    let replacement = scanned.input.as_ref().unwrap();
+    assert_eq!(replacement.status, SwapTransferStatusV1::Unresolved);
+    assert_eq!(replacement.ready_to_dispatch, Some(true));
+    assert_eq!(replacement.generation, Some(1));
+    assert!(replacement.retired_identity_hash.is_some());
+    assert!(!replacement.too_old_after_ambiguity.unwrap_or(false));
+
+    let completed = submit(&h, request()).unwrap();
+    assert_eq!(completed.status, SwapReceiptStatusV1::Completed);
+    assert_eq!(completed.input.as_ref().unwrap().generation, Some(1));
+}
+
+#[test]
+fn archived_nonmatching_history_is_scanned_and_cursor_survives_upgrade() {
+    use icrc_ledger_types::icrc1::transfer::TransferArg;
+    use rumi_3pool::icrc3::{GetBlocksArgs, GetBlocksResult};
+    use std::time::UNIX_EPOCH;
+
+    let h = deploy_pool_with_archive_cycles(0, 10_000, Some(1_000_000_000_000));
+    let _: () = decode_one(&bytes(
+        h.pic
+            .update_call(
+                h.three_pool,
+                h.user,
+                "test_seed_absent_swap_input_v1",
+                encode_one(request()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    let baseline = query(&h, h.user)
+        .unwrap()
+        .input
+        .unwrap()
+        .history_start
+        .unwrap();
+    let baseline: u64 = baseline.0.try_into().unwrap();
+
+    // The harness ledger archives after 1,000 blocks. Create an archived run
+    // of valid, timestamped ICRC-3 transfers after the seeded receipt baseline;
+    // none can match the caller-to-pool receipt tuple.
+    let recipient = Principal::self_authenticating(b"archive-absence-recipient");
+    let timestamp = h
+        .pic
+        .get_time()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    for n in 0..1_100u64 {
+        let arg = TransferArg {
+            from_subaccount: None,
+            to: Account {
+                owner: recipient,
+                subaccount: None,
+            },
+            amount: Nat::from(1_000_000u64),
+            fee: Some(Nat::from(10_000u64)),
+            memo: Some(n.to_be_bytes().to_vec().into()),
+            created_at_time: Some(timestamp),
+        };
+        let result: Result<Nat, TransferError> = decode_one(&bytes(
+            h.pic
+                .update_call(
+                    h.ledgers[0],
+                    h.user,
+                    "icrc1_transfer",
+                    encode_one(arg).unwrap(),
+                )
+                .unwrap(),
+        ))
+        .unwrap();
+        result.expect("archive filler transfer should succeed");
+    }
+
+    let query_args = vec![GetBlocksArgs {
+        start: Nat::from(baseline),
+        length: Nat::from(100u64),
+    }];
+    let response: GetBlocksResult = decode_one(&bytes(
+        h.pic
+            .query_call(
+                h.ledgers[0],
+                h.user,
+                "icrc3_get_blocks",
+                encode_one(query_args.clone()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(
+        !response.archived_blocks.is_empty(),
+        "ledger should route this history page to its archive"
+    );
+    let archive = &response.archived_blocks[0];
+    let archived: GetBlocksResult = decode_one(&bytes(
+        h.pic
+            .query_call(
+                archive.callback.canister_id,
+                h.user,
+                &archive.callback.method,
+                encode_one(archive.args.clone()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(
+        !archived.blocks.is_empty(),
+        "archive response must contain the requested nonempty history"
+    );
+
+    h.pic
+        .advance_time(std::time::Duration::from_secs(30 * 60 * 60));
+    let aged = submit(&h, request()).unwrap();
+    assert_eq!(aged.status, SwapReceiptStatusV1::Unresolved);
+    assert_eq!(
+        aged.input.as_ref().unwrap().too_old_after_ambiguity,
+        Some(true)
+    );
+
+    // One page must consume the nonempty archive response and persist its
+    // cursor. An upgrade between pages must not restart at the old baseline.
+    let mut scanned = advance_absence_page(&h);
+    let first_scan = scanned
+        .input
+        .as_ref()
+        .unwrap()
+        .absence_scan
+        .as_ref()
+        .unwrap()
+        .clone();
+    assert!(first_scan.cursor > Nat::from(baseline));
+    h.pic
+        .upgrade_canister(
+            h.three_pool,
+            three_pool_test_endpoints_wasm(),
+            encode_args(()).unwrap(),
+            None,
+        )
+        .unwrap();
+    scanned = query(&h, h.user).expect("receipt survives upgrade");
+    assert_eq!(
+        scanned.input.as_ref().unwrap().absence_scan.as_ref(),
+        Some(&first_scan)
+    );
+
+    for _ in 0..20 {
+        if scanned.input.as_ref().unwrap().ready_to_dispatch == Some(true) {
+            break;
+        }
+        scanned = advance_absence_page(&h);
+    }
+    let replacement = scanned.input.as_ref().unwrap();
+    assert_eq!(replacement.ready_to_dispatch, Some(true));
+    assert_eq!(replacement.generation, Some(1));
+    assert!(replacement.retired_identity_hash.is_some());
+}
+
+fn advance_absence_page(h: &ThreePoolHarness) -> SwapReceiptV1 {
+    let result: Result<SwapReceiptV1, SwapReceiptErrorV1> = decode_one(&bytes(
+        h.pic
+            .update_call(
+                h.three_pool,
+                h.user,
+                "advance_swap_absence_scan_v1",
+                encode_args((request().intent_id, 0u8)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    result.expect("complete contiguous ledger/archive page")
+}
+
+#[test]
+fn ingress_archived_absence_scan_rotates_after_nonempty_final_page() {
+    use icrc_ledger_types::icrc1::transfer::TransferArg;
+    use rumi_3pool::icrc3::{GetBlocksArgs, GetBlocksResult};
+    use rumi_3pool::receipts::{IngressReceiptErrorV1, IngressReceiptV1};
+    use std::time::UNIX_EPOCH;
+
+    let h = deploy_pool_with_archive_cycles(0, 10_000, Some(1_000_000_000_000));
+    let intent_id = vec![9; 32];
+    let _: () = decode_one(&bytes(
+        h.pic
+            .update_call(
+                h.three_pool,
+                h.user,
+                "test_seed_absent_ingress_pull_v1",
+                encode_args((intent_id.clone(), 0u8)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    let baseline = query_ingress(&h, &intent_id)
+        .expect("seeded ingress receipt")
+        .pulls[0]
+        .history_start
+        .clone()
+        .unwrap();
+    let baseline: u64 = baseline.0.try_into().unwrap();
+
+    let recipient = Principal::self_authenticating(b"ingress-archive-absence-recipient");
+    let timestamp = h
+        .pic
+        .get_time()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    for n in 0..1_100u64 {
+        let arg = TransferArg {
+            from_subaccount: None,
+            to: Account {
+                owner: recipient,
+                subaccount: None,
+            },
+            amount: Nat::from(1_000_000u64),
+            fee: Some(Nat::from(10_000u64)),
+            memo: Some(n.to_be_bytes().to_vec().into()),
+            created_at_time: Some(timestamp),
+        };
+        let result: Result<Nat, TransferError> = decode_one(&bytes(
+            h.pic
+                .update_call(
+                    h.ledgers[0],
+                    h.user,
+                    "icrc1_transfer",
+                    encode_one(arg).unwrap(),
+                )
+                .unwrap(),
+        ))
+        .unwrap();
+        result.expect("archive filler transfer should succeed");
+    }
+
+    let response: GetBlocksResult = decode_one(&bytes(
+        h.pic
+            .query_call(
+                h.ledgers[0],
+                h.user,
+                "icrc3_get_blocks",
+                encode_one(vec![GetBlocksArgs {
+                    start: Nat::from(baseline),
+                    length: Nat::from(100u64),
+                }])
+                .unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(!response.archived_blocks.is_empty());
+    let archive = &response.archived_blocks[0];
+    let archived: GetBlocksResult = decode_one(&bytes(
+        h.pic
+            .query_call(
+                archive.callback.canister_id,
+                h.user,
+                &archive.callback.method,
+                encode_one(archive.args.clone()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(!archived.blocks.is_empty());
+
+    let mut receipt = query_ingress(&h, &intent_id).expect("seeded ingress receipt");
+    for _ in 0..20 {
+        let transfer = &receipt.pulls[0];
+        if transfer.ready_to_dispatch == Some(true) {
+            break;
+        }
+        let result: Result<IngressReceiptV1, IngressReceiptErrorV1> = decode_one(&bytes(
+            h.pic
+                .update_call(
+                    h.three_pool,
+                    h.user,
+                    "advance_ingress_absence_scan_v1",
+                    encode_args((intent_id.clone(), 0u8)).unwrap(),
+                )
+                .unwrap(),
+        ))
+        .unwrap();
+        receipt = result.expect("complete archived ingress page");
+    }
+    let transfer = &receipt.pulls[0];
+    assert_eq!(transfer.ready_to_dispatch, Some(true));
+    assert_eq!(transfer.generation, Some(1));
+    assert!(transfer.retired_identity_hash.is_some());
+}
+
+fn query_ingress(h: &ThreePoolHarness, intent_id: &[u8]) -> Option<IngressReceiptV1> {
+    decode_one(&bytes(
+        h.pic
+            .query_call(
+                h.three_pool,
+                h.user,
+                "get_ingress_receipt_v1",
+                encode_one(intent_id.to_vec()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap()
+}
+
+fn seed_prepared_ingress(h: &ThreePoolHarness, intent_id: Vec<u8>, request: IngressRequestV1) {
+    let _: () = decode_one(&bytes(
+        h.pic
+            .update_call(
+                h.three_pool,
+                h.user,
+                "test_seed_prepared_ingress_v1",
+                encode_args((intent_id, request)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+}
+
+fn submit_ingress(
+    h: &ThreePoolHarness,
+    method: &str,
+    args: impl candid::utils::ArgumentEncoder,
+) -> Result<IngressReceiptV1, IngressReceiptErrorV1> {
+    decode_one(&bytes(
+        h.pic
+            .update_call(h.three_pool, h.user, method, encode_args(args).unwrap())
+            .unwrap(),
+    ))
+    .unwrap()
+}
+
+#[test]
+fn prepared_add_replay_persists_facts_and_confirms_every_pull_before_credit() {
+    let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);
+    let intent = vec![71; 32];
+    let amounts = [100_000_000, 100_000_000, 100_000_000];
+    let request = IngressRequestV1::AddLiquidity { amounts, min_lp: 0 };
+    let before = [0, 1, 2].map(|i| balance(&h, h.ledgers[i], h.user));
+    seed_prepared_ingress(&h, intent.clone(), request);
+
+    let receipt = submit_ingress(
+        &h,
+        "add_liquidity_with_receipt_v1",
+        (intent.clone(), amounts.to_vec(), 0u128),
+    )
+    .unwrap();
+    assert_eq!(receipt.status, IngressStatusV1::Completed);
+    assert_eq!(receipt.pulls.len(), 3);
+    assert!(receipt.add_facts.is_some());
+    assert!(receipt
+        .pulls
+        .iter()
+        .all(|pull| pull.status == SwapTransferStatusV1::Confirmed && pull.block_index.is_some()));
+    for i in 0..3 {
+        assert_eq!(
+            before[i] - balance(&h, h.ledgers[i], h.user),
+            amounts[i] + 10_000
+        );
+    }
+    assert_eq!(query_ingress(&h, &intent), Some(receipt.clone()));
+    let replay = submit_ingress(
+        &h,
+        "add_liquidity_with_receipt_v1",
+        (intent, amounts.to_vec(), 0u128),
+    )
+    .unwrap();
+    assert_eq!(replay, receipt);
+}
+
+#[test]
+fn prepared_donation_replay_never_credits_without_a_confirmed_pull() {
+    let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);
+    let intent = vec![72; 32];
+    let amount = 100_000_000u128;
+    let request = IngressRequestV1::Donate {
+        token_index: 0,
+        amount,
+    };
+    let before_user = balance(&h, h.ledgers[0], h.user);
+    let before_pool = decode_one::<rumi_3pool::types::PoolStatus>(&bytes(
+        h.pic
+            .query_call(
+                h.three_pool,
+                h.user,
+                "get_pool_status",
+                encode_args(()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap()
+    .balances[0];
+    seed_prepared_ingress(&h, intent.clone(), request);
+
+    let receipt =
+        submit_ingress(&h, "donate_with_receipt_v1", (intent.clone(), 0u8, amount)).unwrap();
+    assert_eq!(receipt.status, IngressStatusV1::Completed);
+    assert_eq!(receipt.pulls.len(), 1);
+    assert_eq!(receipt.pulls[0].status, SwapTransferStatusV1::Confirmed);
+    assert!(receipt.pulls[0].block_index.is_some());
+    assert_eq!(
+        before_user - balance(&h, h.ledgers[0], h.user),
+        amount + 10_000
+    );
+    let after_pool = decode_one::<rumi_3pool::types::PoolStatus>(&bytes(
+        h.pic
+            .query_call(
+                h.three_pool,
+                h.user,
+                "get_pool_status",
+                encode_args(()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap()
+    .balances[0];
+    assert_eq!(after_pool - before_pool, amount);
+
+    let failed_intent = vec![73; 32];
+    let too_much = before_user * 2;
+    seed_prepared_ingress(
+        &h,
+        failed_intent.clone(),
+        IngressRequestV1::Donate {
+            token_index: 0,
+            amount: too_much,
+        },
+    );
+    let failed = submit_ingress(
+        &h,
+        "donate_with_receipt_v1",
+        (failed_intent.clone(), 0u8, too_much),
+    )
+    .unwrap();
+    assert_eq!(failed.status, IngressStatusV1::Unresolved);
+    assert_eq!(failed.pulls.len(), 1);
+    assert_eq!(failed.pulls[0].status, SwapTransferStatusV1::Rejected);
+    assert_eq!(query_ingress(&h, &failed_intent), Some(failed));
+    let final_pool = decode_one::<rumi_3pool::types::PoolStatus>(&bytes(
+        h.pic
+            .query_call(
+                h.three_pool,
+                h.user,
+                "get_pool_status",
+                encode_args(()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap()
+    .balances[0];
+    assert_eq!(final_pool, after_pool);
+}
+
 #[test]
 fn definitive_output_rejection_records_exact_refund_block_and_fees() {
     let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);
@@ -310,7 +805,7 @@ fn concurrent_identical_requests_share_one_attempt() {
 }
 
 #[test]
-fn receipt_client_enablement_requires_admin_and_revocation_retains_history() {
+fn receipt_client_management_requires_admin_and_receipts_remain_owner_scoped() {
     let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);
     let unauthorized: Result<(), SwapReceiptErrorV1> = decode_one(&bytes(
         h.pic
@@ -324,7 +819,6 @@ fn receipt_client_enablement_requires_admin_and_revocation_retains_history() {
     ))
     .unwrap();
     assert_eq!(unauthorized, Err(SwapReceiptErrorV1::Unauthorized));
-    enable(&h);
     let mut invalid = request();
     invalid.dx = 0;
     assert_eq!(
@@ -333,22 +827,9 @@ fn receipt_client_enablement_requires_admin_and_revocation_retains_history() {
     );
     assert!(query(&h, h.user).is_none());
     let r = submit(&h, request()).unwrap();
-    let revoked: Result<(), SwapReceiptErrorV1> = decode_one(&bytes(
-        h.pic
-            .update_call(
-                h.three_pool,
-                h.admin,
-                "set_swap_receipt_client_v1",
-                encode_args((h.user, false)).unwrap(),
-            )
-            .unwrap(),
-    ))
-    .unwrap();
-    revoked.unwrap();
-    assert_eq!(
-        submit(&h, request()).unwrap_err(),
-        SwapReceiptErrorV1::Unauthorized
-    );
+    // Receipt V1 is caller-scoped for wallet callers; the operator list is
+    // informational and cannot revoke an owner's idempotent replay access.
+    assert_eq!(submit(&h, request()).unwrap(), r);
     assert_eq!(query(&h, h.user), Some(r));
 }
 

@@ -221,10 +221,7 @@ fn verify_receipt_tx_hash(
     }
 }
 
-fn stable_native_to_e8s(
-    amount_native: u128,
-    decimals: u8,
-) -> Result<u128, SettlementProofError> {
+fn stable_native_to_e8s(amount_native: u128, decimals: u8) -> Result<u128, SettlementProofError> {
     match decimals.cmp(&8) {
         core::cmp::Ordering::Equal => Ok(amount_native),
         core::cmp::Ordering::Greater => {

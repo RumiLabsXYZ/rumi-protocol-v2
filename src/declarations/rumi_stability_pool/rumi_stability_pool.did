@@ -28,6 +28,15 @@ type CollateralInfo = record {
   status : CollateralStatus;
 };
 
+type LedgerReconciliationEntry = record {
+  ledger : principal;
+  symbol : text;
+  recorded_e8s : nat64;
+  live_e8s : nat64;
+  delta_e8s : int64;
+  healthy : bool;
+};
+
 type CollateralStatus = variant {
   Active;
   Paused;
@@ -43,6 +52,22 @@ type PoolConfiguration = record {
   max_liquidations_per_batch : nat64;
   emergency_pause : bool;
   authorized_admins : vec principal;
+};
+
+type CycleManagerCyclesStatus = record {
+  balance : nat;
+  low_watermark : nat;
+  healthy : bool;
+  freeze_threshold_secs : nat64;
+  stable_memory_bytes : opt nat64;
+  heap_memory_bytes : opt nat64;
+  idle_burn_cycles_per_day : opt nat;
+};
+type CycleManagerMetric = record {
+  key : text;
+  count : nat64;
+  value : nat;
+  label : opt text;
 };
 
 // ── Pool status / user position ──
@@ -180,6 +205,7 @@ type ChainSpAbsorbIntent = record {
   icusd_to_burn_e8s : nat64;
   stables_consumed : vec record { principal; nat64 };
   burn_created_at_time_ns : nat64;
+  burn_attempted : opt bool;
   status : ChainSpAbsorbIntentStatus;
   burn_proof : opt SpWritedownProof;
   backend_result : opt ChainStabilityPoolLiquidationResult;
@@ -245,6 +271,68 @@ type PendingRefund = record {
   amount : nat64;
   reason : text;
   created_at : nat64;
+  transfer_attempted : opt bool;
+  transfer_created_at_time_ns : opt nat64;
+  transfer_fee : opt nat64;
+  transfer_memo : opt vec nat8;
+  transfer_attempt_no : opt nat32;
+  transfer_too_old_rejected : opt bool;
+  transfer_history_scan_cursor : opt nat64;
+  transfer_history_scan_tip : opt nat64;
+  protocol_fee_reserved : opt nat64;
+};
+
+type OutboundPayoutKind = variant { Withdraw; CollateralClaim };
+type PendingOutboundPayoutStatus = record {
+  ledger : principal;
+  kind : OutboundPayoutKind;
+  request_amount : nat64;
+  gross_amount : nat64;
+  transfer_amount : nat64;
+  transfer_fee : nat64;
+  transfer_created_at_time_ns : nat64;
+  transfer_memo : vec nat8;
+  dispatch_in_flight : bool;
+  ambiguous_seen : bool;
+  last_error : opt text;
+};
+
+type SpLiquidationToken = variant { IcUsd; CKUSDT; CKUSDC };
+type SpLiquidationV2LocalPhase = variant {
+  ApprovalPending;
+  BackendPending;
+  CollateralPending;
+  StableDebited;
+  Complete;
+  Rejected;
+};
+type SpLiquidationV2LocalStatus = record {
+  request_id : nat64;
+  vault_id : nat64;
+  amount : nat64;
+  token : SpLiquidationToken;
+  stablecoin_ledger : principal;
+  collateral_type : principal;
+  phase : SpLiquidationV2LocalPhase;
+  approval_fee_accounted : bool;
+  approval_receipt_block_index : opt nat64;
+  stable_debit_applied : bool;
+  backend_acknowledged : bool;
+  last_error : opt text;
+};
+
+type UnallocatedInterestForwardBatch = record {
+  id : nat64;
+  source_mint_blocks : vec nat64;
+  token_ledger : principal;
+  treasury : opt principal;
+  gross_amount : nat64;
+  fee : opt nat64;
+  transfer_created_at_ns : opt nat64;
+  transfer_block_index : opt nat64;
+  treasury_recorded : bool;
+  created_at_ns : nat64;
+  last_error : opt text;
 };
 
 // ── Error type ──
@@ -318,6 +406,17 @@ type Icrc21ConsentInfo = record {
 
 type Icrc21ErrorInfo = record { description : text };
 
+type SpBurnRefundReceipt = record {
+  refund_memo : blob;
+  recipient : principal;
+  vault_id : nat64;
+  amount_e8s : nat64;
+  burn_block_index : nat64;
+  ledger : principal;
+  refund_block_index : nat64;
+  refund_created_at_time : nat64;
+};
+
 type Icrc21Error = variant {
   UnsupportedCanisterCall : Icrc21ErrorInfo;
   ConsentMessageUnavailable : Icrc21ErrorInfo;
@@ -382,9 +481,14 @@ service : (StabilityPoolInitArgs) -> {
   deposit_as_3usd : (principal, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_collateral : (principal) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_all_collateral : () -> (variant { Ok : vec record { principal; nat64 }; Err : StabilityPoolError });
+  reconcile_pending_outbound_payout : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
   claim_pending_refund : (nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
+  reconcile_pending_refund : (nat64, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
+  reconcile_pending_refund_history : (nat64) -> (variant { Ok; Err : StabilityPoolError });
+  fund_pending_refund_fee_reserve : (principal, nat64, nat64, nat64, vec nat8) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_cfx : (principal, text) -> (variant { Ok : nat; Err : StabilityPoolError });
   recredit_failed_cfx_claim_payout : (CfxClaimPayoutRecovery) -> (variant { Ok : bool; Err : StabilityPoolError });
+  recover_three_usd_absorb_v2 : (nat64, opt nat64, opt nat64, opt nat64) -> (variant { Ok; Err : StabilityPoolError });
 
   // ── Opt-in / Opt-out ──
   opt_out_collateral : (principal) -> (variant { Ok; Err : StabilityPoolError });
@@ -397,13 +501,25 @@ service : (StabilityPoolInitArgs) -> {
 
   // ── Liquidation ──
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> (vec LiquidationResult);
+  // Existing entrypoint; 3USD reserve-ingress V2 admission is default-off and can be enabled only in explicit test builds.
   execute_liquidation : (nat64) -> (variant { Ok : LiquidationResult; Err : StabilityPoolError });
+  has_legacy_liquidation_in_flight : (nat64) -> (variant { Ok : bool; Err : StabilityPoolError });
+  execute_liquidation_v2 : (nat64, SpLiquidationToken, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
+  retry_sp_liquidation_v2 : (nat64) -> (variant { Ok; Err : StabilityPoolError });
+  reconcile_sp_liquidation_v2_approval : (nat64, nat64) -> (variant { Ok; Err : StabilityPoolError });
+  reconcile_sp_liquidation_v2_stable_pull : (nat64, nat64, nat64) -> (variant { Ok; Err : StabilityPoolError });
   sp_absorb_chain_vault : (nat64) -> (variant { Ok : ChainSpAbsorbResult; Err : StabilityPoolError });
   scan_chain_absorb_candidates : (opt nat64) -> (variant { Ok : vec ChainSpAbsorbCandidate; Err : StabilityPoolError });
+  reconcile_pending_icusd_burn : (nat64, nat64) -> (variant { Ok; Err : StabilityPoolError });
+  scan_pending_icusd_burn_history : (nat64, nat64, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
+  retry_pending_icusd_burn_refund : (nat64) -> (variant { Ok : SpBurnRefundReceipt; Err : StabilityPoolError });
+  reconcile_pending_icusd_burn_refund : (nat64, nat64) -> (variant { Ok : SpBurnRefundReceipt; Err : StabilityPoolError });
+  reconcile_pending_icusd_burn_refund_from_history : (nat64) -> (variant { Ok : SpBurnRefundReceipt; Err : StabilityPoolError });
   set_chain_absorb_auto_config : (ChainAbsorbAutoConfig) -> (variant { Ok; Err : StabilityPoolError });
 
   // ── Interest Revenue ──
   receive_interest_revenue : (principal, nat64, opt principal) -> (variant { Ok; Err : StabilityPoolError });
+  receive_interest_revenue_v2 : (principal, nat64, opt principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
 
   // ── Admin: Registry ──
   register_stablecoin : (StablecoinConfig) -> (variant { Ok; Err : StabilityPoolError });
@@ -412,6 +528,9 @@ service : (StabilityPoolInitArgs) -> {
 
   // ── Admin: Configuration ──
   update_pool_configuration : (PoolConfiguration) -> (variant { Ok; Err : StabilityPoolError });
+  set_interest_treasury : (opt principal) -> (variant { Ok; Err : StabilityPoolError });
+  retry_unallocated_interest_forward : (nat64) -> (variant { Ok; Err : StabilityPoolError });
+  confirm_unallocated_interest_forward_transfer : (nat64, nat64) -> (variant { Ok; Err : StabilityPoolError });
   emergency_pause : () -> (variant { Ok; Err : StabilityPoolError });
   resume_operations : () -> (variant { Ok; Err : StabilityPoolError });
   admin_correct_balance : (principal, principal, nat64) -> (variant { Ok : text; Err : StabilityPoolError });
@@ -424,17 +543,24 @@ service : (StabilityPoolInitArgs) -> {
   icrc10_supported_standards : () -> (vec Icrc10SupportedStandard) query;
 
   // ── Queries ──
+  cycles_status : () -> (CycleManagerCyclesStatus) query;
+  cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   get_pool_status : () -> (StabilityPoolStatus) query;
   get_user_position : (opt principal) -> (opt UserStabilityPosition) query;
   get_liquidation_history : (opt nat64) -> (vec PoolLiquidationRecord) query;
   check_pool_capacity : (principal, nat64) -> (bool) query;
   check_chain_absorb_capacity : (principal, nat64) -> (bool) query;
   validate_pool_state : () -> (variant { Ok : text; Err : text }) query;
-  get_suspended_tokens : () -> (vec record { principal; nat32 }) query;
+  get_ledger_reconciliation : () -> (
+      variant { Ok : vec LedgerReconciliationEntry; Err : StabilityPoolError },
+    );
   get_pool_events : (nat64, nat64) -> (vec PoolEvent) query;
   get_pool_event_count : () -> (nat64) query;
   list_depositor_principals : () -> (vec principal) query;
   get_pending_refunds : (opt principal) -> (vec PendingRefund) query;
+  get_pending_outbound_payouts : () -> (vec PendingOutboundPayoutStatus) query;
+  get_sp_liquidation_v2_status : (nat64) -> (opt SpLiquidationV2LocalStatus) query;
+  get_pending_unallocated_interest_forwards : () -> (vec UnallocatedInterestForwardBatch) query;
   get_my_native_xrp_payouts : () -> (vec NativeXrpPendingPayout) query;
   get_pending_chain_absorbs : () -> (vec ChainSpAbsorbIntent) query;
   get_completed_chain_absorbs : (opt nat64) -> (vec ChainSpAbsorbCompletion) query;

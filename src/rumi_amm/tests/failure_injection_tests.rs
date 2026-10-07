@@ -824,6 +824,177 @@ fn full_withdrawal_succeeds_after_fee_drift() {
         "reserve_b should drain to the locked minimum, got {}", pool_after.reserve_b);
 }
 
+#[test]
+fn stale_cached_fee_badfee_refresh_preserves_amm_protocol_fee_claim() {
+    let env = setup_flaky();
+    set_fee(&env, env.token_a_id, 10_000);
+    set_fee(&env, env.token_b_id, 10_000);
+
+    let pool_id = create_pool(&env);
+    let _: () = decode_ok(
+        env.pic
+            .update_call(
+                env.amm_id,
+                env.admin,
+                "set_protocol_fee",
+                encode_args((pool_id.clone(), 5_000u16)).unwrap(),
+            )
+            .expect("set_protocol_fee call failed"),
+    );
+    add_initial_liquidity(&env, &pool_id, 50_000_000_000_000);
+
+    let pool = get_pool_info(&env, &pool_id).unwrap();
+    swap_exact(&env, &pool_id, pool.token_a, 10_000_000_000_000);
+    swap_exact(&env, &pool_id, pool.token_b, 10_000_000_000_000);
+
+    // Both cache entries were warmed at 10,000. The first withdrawal must
+    // receive BadFee for token A, refresh the cache, and restore that debt.
+    set_fee(&env, pool.token_a, 20_000);
+    let first: Result<(u128, u128), AmmError> = match env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.admin,
+            "withdraw_protocol_fees",
+            encode_one(pool_id.clone()).unwrap(),
+        )
+        .expect("withdraw_protocol_fees call failed")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode withdrawal result"),
+        WasmResult::Reject(message) => panic!("withdrawal rejected: {message}"),
+    };
+    assert!(matches!(first, Err(AmmError::TransferFailed { .. })));
+
+    let second: Result<(u128, u128), AmmError> = match env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.admin,
+            "withdraw_protocol_fees",
+            encode_one(pool_id.clone()).unwrap(),
+        )
+        .expect("withdraw_protocol_fees retry failed")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode retry result"),
+        WasmResult::Reject(message) => panic!("withdrawal retry rejected: {message}"),
+    };
+    let (paid_a, _) = second.expect("the retry must use the refreshed fee");
+    assert!(paid_a > 20_000, "restored token-A fee claim was not paid: {paid_a}");
+}
+
+#[test]
+fn full_claim_store_rejects_new_liquidity_without_moving_tokens_or_dropping_claim() {
+    let env = setup_flaky();
+    let pool_id = create_pool(&env);
+    add_initial_liquidity(&env, &pool_id, 10_000_000_000_000);
+
+    let cap = env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.admin,
+            "test_set_pending_claim_limit",
+            encode_one(1u64).unwrap(),
+        )
+        .expect("set test claim limit failed");
+    let _: () = decode_ok(cap);
+
+    let insert = env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.admin,
+            "test_insert_pending_claim",
+            encode_args((pool_id.clone(), 777u128)).unwrap(),
+        )
+        .expect("insert test claim failed");
+    let first_id: u64 = match insert {
+        WasmResult::Reply(bytes) => decode_one::<Result<u64, AmmError>>(&bytes)
+            .expect("decode inserted claim")
+            .expect("claim insertion should fit under the cap"),
+        WasmResult::Reject(message) => panic!("claim insertion rejected: {message}"),
+    };
+
+    let before_a = get_flaky_balance(&env, env.token_a_id, env.user, None);
+    let before_b = get_flaky_balance(&env, env.token_b_id, env.user, None);
+    let rejected = env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.user,
+            "add_liquidity",
+            encode_args((pool_id, 1_000_000u128, 1_000_000u128, 0u128)).unwrap(),
+        )
+        .expect("add_liquidity call failed");
+    let result: Result<Nat, AmmError> = match rejected {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode add_liquidity result"),
+        WasmResult::Reject(message) => panic!("add_liquidity rejected: {message}"),
+    };
+    assert!(matches!(result, Err(AmmError::PendingClaimCapacityReached)));
+    assert_eq!(get_flaky_balance(&env, env.token_a_id, env.user, None), before_a);
+    assert_eq!(get_flaky_balance(&env, env.token_b_id, env.user, None), before_b);
+
+    let claims = pending_claims(&env);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].id, first_id);
+    assert_eq!(claims[0].amount, 777);
+}
+
+#[test]
+fn two_leg_withdrawal_reserves_all_claim_slots_before_lp_burn() {
+    let env = setup_flaky();
+    let pool_id = create_pool(&env);
+    add_initial_liquidity(&env, &pool_id, 10_000_000_000_000);
+
+    let cap = env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.admin,
+            "test_set_pending_claim_limit",
+            encode_one(2u64).unwrap(),
+        )
+        .expect("set test claim limit failed");
+    let _: () = decode_ok(cap);
+    let insert = env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.admin,
+            "test_insert_pending_claim",
+            encode_args((pool_id.clone(), 777u128)).unwrap(),
+        )
+        .expect("insert test claim failed");
+    let first_id: u64 = match insert {
+        WasmResult::Reply(bytes) => decode_one::<Result<u64, AmmError>>(&bytes)
+            .expect("decode inserted claim")
+            .expect("claim insertion should fit under the cap"),
+        WasmResult::Reject(message) => panic!("claim insertion rejected: {message}"),
+    };
+    let lp_before = get_user_lp_balance(&env, &pool_id);
+
+    let rejected = env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.user,
+            "remove_liquidity",
+            encode_args((pool_id.clone(), lp_before, 0u128, 0u128)).unwrap(),
+        )
+        .expect("remove_liquidity call failed");
+    let result: Result<(Nat, Nat), AmmError> = match rejected {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode remove_liquidity result"),
+        WasmResult::Reject(message) => panic!("remove_liquidity rejected: {message}"),
+    };
+    assert!(matches!(result, Err(AmmError::PendingClaimCapacityReached)));
+    assert_eq!(get_user_lp_balance(&env, &pool_id), lp_before, "LP shares must remain unburned");
+
+    let claims = pending_claims(&env);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].id, first_id);
+    assert_eq!(claims[0].amount, 777);
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // Test: slippage (`min_amount_out`) is enforced against the NET amount the
 // taker actually receives (gross output minus the ledger fee), not the gross
@@ -1266,4 +1437,25 @@ fn reward_claims_succeed_after_fee_drift() {
         "reward subaccount should not strand more than dust (less than one ledger fee), got {}",
         reward_balance_after,
     );
+}
+
+#[test]
+fn overlapping_unacknowledged_donations_advance_only_credited_liability() {
+    let env = setup_flaky_with_rewards();
+    let pool_id = create_pool_rw(&env);
+    let first = 2_000_000u128;
+    let second = 3_000_000u128;
+
+    // Both source mints land before either destination receipt. A receiver
+    // that snapshots the total live balance after the first ack would absorb
+    // the second, still-unacknowledged donation and reject its exact amount.
+    mint_icusd_to_reward_subaccount_rw(&env, &pool_id, first);
+    mint_icusd_to_reward_subaccount_rw(&env, &pool_id, second);
+    notify_reward_rw(&env, &pool_id, first, 8001)
+        .expect("first donation receipt should credit its own liability");
+    notify_reward_rw(&env, &pool_id, second, 8002)
+        .expect("second donation receipt should see only credited liability");
+
+    // Exact retry remains a no-op after later donations have been accepted.
+    notify_reward_rw(&env, &pool_id, first, 8001).expect("old exact receipt should deduplicate");
 }

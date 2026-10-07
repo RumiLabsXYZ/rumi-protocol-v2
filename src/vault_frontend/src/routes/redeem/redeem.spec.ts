@@ -37,7 +37,8 @@ const mocks = vi.hoisted(() => {
     getRedemptionPreview: vi.fn(),
     prepareRedemptionOffer: vi.fn(),
 		getRedemptionPreflight: vi.fn(),
-		redeemQuoted: vi.fn(),
+    redeemQuoted: vi.fn(),
+    getOisySignerAgent: vi.fn(),
 		resolveRoute: vi.fn().mockResolvedValue({ estimatedOutput: 0n }),
 		formatProtocolError: vi.fn((error: unknown) => String(error)),
 	};
@@ -61,6 +62,7 @@ vi.mock('$lib/components/dashboard/ProtocolStats.svelte', async () => ({
 	default: (await vi.importActual<typeof import('./ProtocolStatsStub.svelte')>('./ProtocolStatsStub.svelte')).default,
 }));
 vi.mock('$lib/services/swapRouter', () => ({ resolveRoute: mocks.resolveRoute }));
+vi.mock('$lib/services/oisySigner', () => ({ getOisySignerAgent: mocks.getOisySignerAgent }));
 vi.mock('$lib/services/ammService', () => ({
 	AMM_TOKENS: ['icUSD', 'ckUSDT', 'ckUSDC', 'ICP'].map((symbol) => ({ symbol })),
 }));
@@ -191,6 +193,20 @@ async function checkLiveOffer() {
   await settle();
 }
 
+function expectPausedWithoutSubmission() {
+	expect(host.textContent).toContain('Redemption submissions are paused while transfer recovery is added.');
+	const submit = host.querySelector<HTMLButtonElement>('.submit-btn')!;
+	if (submit.textContent?.includes('Redemptions paused')) {
+		expect(submit.disabled).toBe(true);
+	} else {
+		// A stale offer may be replaced by the read-only live-check action after
+		// wallet/session invalidation; it cannot dispatch redemption either.
+		expect(submit.id).toBe('check-live-offer');
+	}
+	expect(mocks.redeemQuoted).not.toHaveBeenCalled();
+	expect(mocks.walletStore.refreshBalance).not.toHaveBeenCalled();
+}
+
 beforeEach(() => {
 	vi.useFakeTimers();
 	nowNs = BigInt(Date.now()) * 1_000_000n;
@@ -199,6 +215,7 @@ beforeEach(() => {
 	mocks.walletStore.setState(connectedWallet());
 	mocks.currentWalletType.set(null);
 	mocks.walletSessionGeneration.set(0);
+	mocks.getOisySignerAgent.mockReset().mockResolvedValue({});
 	mocks.walletStore.refreshBalance.mockReset().mockResolvedValue(undefined);
   mocks.getRedemptionPreview.mockReset().mockImplementation(async (amount: bigint) => makePreview(amount));
   mocks.prepareRedemptionOffer.mockReset().mockImplementation(async (amount: bigint) => makePreparedOffer(amount));
@@ -247,7 +264,7 @@ describe('redemption route quote and queue safety', () => {
 		expect(mocks.prepareRedemptionOffer).toHaveBeenCalledWith(100_000_000n);
 		expect(mocks.redeemQuoted).not.toHaveBeenCalled();
 		expect(host.textContent).toContain('Live offer · not yet accepted');
-		expect(host.textContent).toContain('Accept and redeem');
+		expectPausedWithoutSubmission();
 	});
 
 	it('labels cached estimates with source-price age, not quote calculation time', async () => {
@@ -288,12 +305,11 @@ describe('redemption route quote and queue safety', () => {
 		await settle();
 		await setAmount('10');
 		await checkLiveOffer();
-		expect(host.textContent).toContain('Accept and redeem');
+		expectPausedWithoutSubmission();
 		mocks.walletStore.setState(connectedWallet('w7x7r-cok77-xa'));
 		flushSync();
-		expect(host.textContent).not.toContain('Accept and redeem');
 		expect(host.textContent).toContain('Wallet changed. Check a live offer again');
-		expect(mocks.redeemQuoted).not.toHaveBeenCalled();
+		expectPausedWithoutSubmission();
 	});
 
 	it('invalidates wallet checks after a same-principal reconnect generation change', async () => {
@@ -301,12 +317,11 @@ describe('redemption route quote and queue safety', () => {
 		await settle();
 		await setAmount('10');
 		await checkLiveOffer();
-		expect(host.textContent).toContain('Accept and redeem');
+		expectPausedWithoutSubmission();
 		mocks.walletSessionGeneration.set(1);
 		flushSync();
-		expect(host.textContent).not.toContain('Accept and redeem');
 		expect(host.textContent).toContain('Wallet checks expired. Refresh them before redeeming.');
-		expect(mocks.redeemQuoted).not.toHaveBeenCalled();
+		expectPausedWithoutSubmission();
 	});
 
 	it('declining retains the fresh queue snapshot and never calls redemption', async () => {
@@ -390,49 +405,93 @@ describe('redemption route quote and queue safety', () => {
 		expect(mocks.redeemQuoted).not.toHaveBeenCalled();
 	});
 
-	it('binds the exact quoted token, amount and minimum payout; typed Queued is not shown as delivered', async () => {
+	it('keeps a prepared offer read-only while redemption submissions are paused', async () => {
 		render();
 		await settle();
 		await setAmount('10');
 		await checkLiveOffer();
-		host.querySelector<HTMLButtonElement>('.submit-btn')!.click();
-		await settle();
-		expect(mocks.redeemQuoted.mock.calls[0][0]).toEqual({
-			amount_e8s: 1_000_000_000n,
-			expected_collateral_type: ICP,
-			min_net_collateral_raw: 805_823_333n,
-		});
-		expect(mocks.redeemQuoted.mock.calls[0][1]).toMatchObject({
-			principalText: '2vxsx-fae',
-			ledgerId: CONFIG.currentIcusdLedgerId,
-			allowanceRaw: 0n,
-			balanceRaw: 10_000_000_000n,
-			feeRaw: 100_000n,
-		});
-		expect(mocks.redeemQuoted.mock.calls[0][2]).toMatchObject({
-			amountE8s: 1_000_000_000n,
-			collateralTypeText: ICP.toText(),
-			minimumNetCollateralRaw: 805_823_333n,
-			validUntilNs: nowNs + 60_000_000_000n,
-		});
-		expect(host.textContent).toContain('Queued: 8.05823333 ICP queued for delivery. The payout has not been credited yet.');
+		expect(mocks.prepareRedemptionOffer).toHaveBeenCalledWith(1_000_000_000n);
+		expect(host.textContent).toContain('Live offer · not yet accepted');
+		expectPausedWithoutSubmission();
 	});
 
-	it('keeps a reply-lost submission ambiguous and requires deliberate refresh before retry', async () => {
+	it('waits for the current Oisy signer prewarm before marking the wallet ready', async () => {
+		const warming = deferred<any>();
+		mocks.getOisySignerAgent.mockReturnValueOnce(warming.promise);
+		mocks.currentWalletType.set('oisy');
+		render();
+		await settle();
+		expect(mocks.getOisySignerAgent).toHaveBeenCalledWith(mocks.walletStore.getState().principal);
+		expect(host.textContent).toContain('Preparing the Oisy signer for this wallet session');
+		warming.resolve({ agent: 'ready' });
+		await settle();
+		expect(host.textContent).not.toContain('Preparing the Oisy signer for this wallet session');
+		expect(host.textContent).not.toContain('Oisy signer preparation failed');
+	});
+
+	it('does not require an Oisy prewarm for other wallet types', async () => {
+		mocks.currentWalletType.set('plug');
+		render();
+		await settle();
+		expect(mocks.getOisySignerAgent).not.toHaveBeenCalled();
+		expect(host.textContent).not.toContain('Oisy signer preparation failed');
+	});
+
+	it('keeps Oisy readiness closed after prewarm failure and opens it after explicit retry', async () => {
+		mocks.getOisySignerAgent.mockRejectedValueOnce(new Error('signer transport offline'));
+		mocks.currentWalletType.set('oisy');
+		render();
+		await settle();
+		expect(host.textContent).toContain('signer transport offline');
+		const retry = host.querySelector<HTMLButtonElement>('button') && Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent?.includes('Retry Oisy signer preparation'));
+		expect(retry).toBeTruthy();
+		retry!.click();
+		await settle();
+		expect(mocks.getOisySignerAgent).toHaveBeenCalledTimes(2);
+		expect(host.textContent).not.toContain('Oisy signer preparation failed');
+	});
+
+	it('does not let an old identity prewarm satisfy the new Oisy wallet session', async () => {
+		const first = deferred<any>();
+		const second = deferred<any>();
+		mocks.getOisySignerAgent.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+		mocks.currentWalletType.set('oisy');
+		render();
+		await settle();
+		mocks.walletStore.setState(connectedWallet('w7x7r-cok77-xa'));
+		flushSync();
+		await settle();
+		expect(mocks.getOisySignerAgent).toHaveBeenCalledTimes(2);
+		expect(mocks.getOisySignerAgent.mock.calls[1][0].toText()).toBe('w7x7r-cok77-xa');
+		first.resolve({ agent: 'old wallet' });
+		await settle();
+		expect(host.textContent).toContain('Preparing the Oisy signer for this wallet session');
+		second.resolve({ agent: 'new wallet' });
+		await settle();
+		expect(host.textContent).not.toContain('Preparing the Oisy signer for this wallet session');
+	});
+
+	it('rewarms Oisy after a same-principal wallet session generation change', async () => {
+		mocks.currentWalletType.set('oisy');
+		render();
+		await settle();
+		expect(mocks.getOisySignerAgent).toHaveBeenCalledTimes(1);
+		mocks.walletSessionGeneration.set(1);
+		flushSync();
+		await settle();
+		expect(mocks.getOisySignerAgent).toHaveBeenCalledTimes(2);
+	});
+
+	it('does not dispatch a prepared offer into a reply-lost submission path while paused', async () => {
 		mocks.redeemQuoted.mockResolvedValue({ success: false, ambiguous: true, ambiguityStage: 'submission', error: 'Payout result is unknown.' });
 		render();
 		await settle();
 		await setAmount('10');
 		await checkLiveOffer();
-		host.querySelector<HTMLButtonElement>('.submit-btn')!.click();
-		await settle();
-		expect(host.textContent).toContain('Payout result is unknown.');
-		expect(host.textContent).not.toContain('queued for delivery');
-		expect(host.querySelector('.submit-btn')!.hasAttribute('disabled')).toBe(true);
-		expect(host.textContent).toContain('Refresh balances and quote');
+		expectPausedWithoutSubmission();
 	});
 
-	it('keeps a typed queued receipt tied to the previous wallet session after reconnect', async () => {
+	it('does not dispatch a prepared offer when the wallet session later reconnects', async () => {
 		mocks.redeemQuoted.mockResolvedValue({
 			success: true,
 			blockIndex: 322,
@@ -444,25 +503,19 @@ describe('redemption route quote and queue safety', () => {
 		await settle();
 		await setAmount('10');
 		await checkLiveOffer();
-		host.querySelector<HTMLButtonElement>('.submit-btn')!.click();
-		await settle();
-		expect(host.textContent).toContain('Queued: 8.05823333 ICP queued for delivery. The payout has not been credited yet.');
-		expect(host.textContent).toContain('Check the previous wallet session queue.');
-		expect(host.querySelector<HTMLInputElement>('#icusd-amount')!.value).toBe('10');
-		expect(mocks.walletStore.refreshBalance).not.toHaveBeenCalled();
+		expectPausedWithoutSubmission();
+		mocks.walletStore.setState(connectedWallet('w7x7r-cok77-xa'));
+		flushSync();
+		expectPausedWithoutSubmission();
 	});
 
-	it('does not describe a lost approval reply as a submitted redemption', async () => {
+	it('does not request approval or submit after an approval-loss response is configured', async () => {
 		mocks.redeemQuoted.mockResolvedValue({ success: false, ambiguous: true, ambiguityStage: 'approval', error: 'Approval response lost.' });
 		render();
 		await settle();
 		await setAmount('10');
 		await checkLiveOffer();
-		host.querySelector<HTMLButtonElement>('.submit-btn')!.click();
-		await settle();
-		expect(host.textContent).toContain('The approval response was lost. The redemption call was not sent.');
-		expect(host.textContent).not.toContain('The payout is unconfirmed.');
-		expect(host.querySelector('.submit-btn')!.hasAttribute('disabled')).toBe(true);
+		expectPausedWithoutSubmission();
 	});
 
 	it('unwraps a legacy ProtocolError carried by the redemption-specific error variant', async () => {

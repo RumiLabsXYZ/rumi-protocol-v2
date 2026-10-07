@@ -141,7 +141,10 @@ fn async_002_full_liquidation_expect_panics_on_removed_vault() {
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         // Exact shape of the live `.get(..).cloned().expect(..)`.
-        let _v = vaults.get(&vault_id).cloned().expect("bug: vault not found");
+        let _v = vaults
+            .get(&vault_id)
+            .cloned()
+            .expect("bug: vault not found");
     }));
 
     assert!(
@@ -249,10 +252,12 @@ fn liquidator_b() -> Principal {
 #[test]
 fn async_003_recover_pending_transfer_reuses_persisted_nonce_and_guards() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
-    let m = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
-    let hdr = "async fn recover_pending_transfer(";
-    let start = m.find(hdr).expect("recover_pending_transfer not found in main.rs");
+    let m =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    let hdr = "async fn recover_pending_payout_for_caller(";
+    let start = m
+        .find(hdr)
+        .expect("recover_pending_payout_for_caller not found in main.rs");
     let after = start + hdr.len();
     let end = ["\nasync fn ", "\nfn ", "\npub async fn "]
         .iter()
@@ -261,17 +266,17 @@ fn async_003_recover_pending_transfer_reuses_persisted_nonce_and_guards() {
         .unwrap_or(m.len());
     let body = &m[start..end];
     assert!(
-        body.contains("transfer_collateral_with_nonce") && body.contains("op_nonce"),
-        "recover_pending_transfer must pay via transfer_collateral_with_nonce(.., transfer.op_nonce) \
+        body.contains("transfer_collateral_with_nonce") && body.contains("transfer.op_nonce"),
+        "recover_pending_payout_for_caller must pay via transfer_collateral_with_nonce(.., transfer.op_nonce) \
          so it shares the ledger dedup tuple with process_pending_transfer's timer retry (audit \
          ASYNC-003); a fresh-nonce transfer_collateral double-pays.\n\n{}",
         body
     );
     assert!(
-        body.contains("GuardPrincipal"),
-        "recover_pending_transfer must hold a GuardPrincipal(caller) so two concurrent manual \
-         recoveries cannot both pay the same entry (audit ASYNC-003).\n\n{}",
-        body
+        m[start..].contains("transfer_collateral_with_nonce")
+            && m[..start].contains("GuardPrincipal::new(caller, \"recover_pending_transfer\")")
+            && m[..start].contains("GuardPrincipal::new(caller, \"recover_pending_payout\")"),
+        "public recovery entrypoints must guard the caller and the exact recovery helper must reuse the persisted nonce (audit ASYNC-003)."
     );
 }
 
@@ -286,13 +291,20 @@ fn async_002_liquidate_vault_presence_checks_and_does_not_trap() {
 
     // State::liquidate_vault must not trap on a missing vault.
     let sl_hdr = "pub fn liquidate_vault(";
-    let sl_start = state_rs.find(sl_hdr).expect("State::liquidate_vault not found");
+    let sl_start = state_rs
+        .find(sl_hdr)
+        .expect("State::liquidate_vault not found");
     let sl_after = sl_start + sl_hdr.len();
-    let sl_end = ["\n    pub fn ", "\n    fn ", "\n    pub async fn ", "\n    async fn "]
-        .iter()
-        .filter_map(|m| state_rs[sl_after..].find(m).map(|i| sl_after + i))
-        .min()
-        .unwrap_or(state_rs.len());
+    let sl_end = [
+        "\n    pub fn ",
+        "\n    fn ",
+        "\n    pub async fn ",
+        "\n    async fn ",
+    ]
+    .iter()
+    .filter_map(|m| state_rs[sl_after..].find(m).map(|i| sl_after + i))
+    .min()
+    .unwrap_or(state_rs.len());
     let sl_body = &state_rs[sl_start..sl_end];
     assert!(
         !sl_body.contains(".expect(\"bug: vault not found\")"),
@@ -304,7 +316,9 @@ fn async_002_liquidate_vault_presence_checks_and_does_not_trap() {
     // vault::liquidate_vault must presence-check inside the critical section and
     // refund the liquidator's icUSD if a concurrent op already removed the vault.
     let vl_hdr = "pub async fn liquidate_vault(";
-    let vl_start = vault_rs.find(vl_hdr).expect("vault::liquidate_vault not found");
+    let vl_start = vault_rs
+        .find(vl_hdr)
+        .expect("vault::liquidate_vault not found");
     let vl_after = vl_start + vl_hdr.len();
     let vl_end = ["\npub async fn ", "\npub fn ", "\nasync fn ", "\nfn "]
         .iter()
@@ -313,7 +327,8 @@ fn async_002_liquidate_vault_presence_checks_and_does_not_trap() {
         .unwrap_or(vault_rs.len());
     let vl_body = &vault_rs[vl_start..vl_end];
     assert!(
-        vl_body.contains("contains_key(&vault_id)") && vl_body.contains("transfer_icusd_with_nonce"),
+        vl_body.contains("contains_key(&vault_id)")
+            && vl_body.contains("transfer_icusd_with_nonce"),
         "vault::liquidate_vault must presence-check the vault inside the critical section and \
          refund the liquidator's icUSD on the concurrent-liquidation race (audit ASYNC-002).\n\n{}",
         vl_body

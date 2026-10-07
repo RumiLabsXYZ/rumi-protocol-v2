@@ -76,6 +76,7 @@ export type AmmError = {
   { 'MaintenanceMode' : null } |
   { 'BelowMinClaim' : { 'min' : bigint, 'claimable' : bigint } } |
   { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
+  { 'PendingClaimCapacityReached' : null } |
   { 'ClaimNotFound' : null } |
   { 'RewardLedgerTransferFailed' : { 'reason' : string } };
 export interface AmmEventsByPrincipalQuery {
@@ -95,6 +96,64 @@ export interface AmmFeePoint {
   'fees_a_e8s' : bigint,
   'fees_b_e8s' : bigint,
 }
+export type AmmIngressKind = {
+    'AddLiquidity' : {
+      'amount_a' : bigint,
+      'amount_b' : bigint,
+      'min_lp_shares' : bigint,
+    }
+  } |
+  {
+    'Swap' : {
+      'min_amount_out' : bigint,
+      'token_in' : Principal,
+      'amount_in' : bigint,
+    }
+  } |
+  {
+    'RemoveLiquidity' : {
+      'min_amount_a' : bigint,
+      'min_amount_b' : bigint,
+      'lp_shares' : bigint,
+    }
+  };
+export interface AmmIngressLeg {
+  'block_index' : [] | [bigint],
+  'receipt_scan_end' : [] | [bigint],
+  'transfer_fee' : [] | [bigint],
+  'to_subaccount' : Uint8Array | number[],
+  'from' : Principal,
+  'memo' : Uint8Array | number[],
+  'dispatch_count' : number,
+  'receipt_scan_cursor' : bigint,
+  'ledger' : Principal,
+  'receipt_scan_start' : [] | [bigint],
+  'attempt_generation' : number,
+  'created_at_time' : bigint,
+  'amount' : bigint,
+}
+export interface AmmIngressOperation {
+  'id' : bigint,
+  'request_id' : Uint8Array | number[],
+  'last_error' : [] | [string],
+  'result' : [] | [Uint8Array | number[]],
+  'kind' : AmmIngressKind,
+  'legs' : Array<AmmIngressLeg>,
+  'caller' : Principal,
+  'phase' : AmmIngressPhase,
+  'confirmed_payout_ids' : BigUint64Array | bigint[],
+  'pool_id' : string,
+  'computed_values' : Array<bigint>,
+  'payout_ids' : BigUint64Array | bigint[],
+}
+export type AmmIngressPhase = { 'HeldUnknown' : { 'leg_index' : number } } |
+  { 'Pulling' : { 'leg_index' : number } } |
+  { 'Complete' : null } |
+  { 'Settling' : null } |
+  { 'HeldTooOld' : { 'leg_index' : number } } |
+  { 'Prepared' : null } |
+  { 'Rejected' : { 'leg_index' : number } } |
+  { 'Pulled' : null };
 export interface AmmInitArgs { 'admin' : Principal }
 export type AmmLiquidityAction = { 'AddLiquidity' : null } |
   { 'RemoveLiquidity' : null };
@@ -110,6 +169,34 @@ export interface AmmLiquidityEvent {
   'caller' : Principal,
   'pool_id' : string,
 }
+export interface AmmPayoutAttempt {
+  'id' : bigint,
+  'send_amount' : [] | [bigint],
+  'fee' : [] | [bigint],
+  'last_error' : [] | [string],
+  'receipt_scan_end' : [] | [bigint],
+  'claimant' : Principal,
+  'memo' : Uint8Array | number[],
+  'dispatch_count' : number,
+  'subaccount' : Uint8Array | number[],
+  'operation_id' : bigint,
+  'receipt_scan_cursor' : bigint,
+  'ledger' : Principal,
+  'receipt_scan_start' : [] | [bigint],
+  'attempt_generation' : number,
+  'phase' : AmmPayoutPhase,
+  'created_at_time' : bigint,
+  'pool_id' : string,
+  'gross_amount' : bigint,
+}
+export type AmmPayoutPhase = { 'HeldUnknown' : null } |
+  { 'Staged' : null } |
+  { 'HeldTooOld' : null } |
+  { 'Ready' : null } |
+  { 'ReadyForReprice' : null } |
+  { 'LegacyUnknown' : null } |
+  { 'Submitted' : null } |
+  { 'AwaitingFee' : null };
 export interface AmmPoolStats {
   'volume_b_e8s' : bigint,
   'fees_a_e8s' : bigint,
@@ -275,6 +362,11 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : AmmError }
   >,
+  'add_liquidity_v2' : ActorMethod<
+    [Uint8Array | number[], string, bigint, bigint, bigint],
+    { 'Ok' : bigint } |
+      { 'Err' : AmmError }
+  >,
   'admin_burn_subaccount_balance' : ActorMethod<
     [Principal, Uint8Array | number[]],
     { 'Ok' : bigint } |
@@ -297,6 +389,11 @@ export interface _SERVICE {
   >,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
+  'get_3usd_account_migration_blockers' : ActorMethod<
+    [],
+    { 'Ok' : Array<string> } |
+      { 'Err' : AmmError }
+  >,
   'get_amm_admin_event_count' : ActorMethod<[], bigint>,
   'get_amm_admin_events' : ActorMethod<[bigint, bigint], Array<AmmAdminEvent>>,
   'get_amm_balance_series' : ActorMethod<
@@ -348,6 +445,8 @@ export interface _SERVICE {
   >,
   'get_latest_holder_snapshot' : ActorMethod<[string], [] | [HolderSnapshot]>,
   'get_lp_balance' : ActorMethod<[string, Principal], bigint>,
+  'get_my_amm_operation' : ActorMethod<[], [] | [AmmIngressOperation]>,
+  'get_pending_amm_payouts' : ActorMethod<[], Array<AmmPayoutAttempt>>,
   'get_pending_claims' : ActorMethod<[], Array<PendingClaim>>,
   'get_pending_rewards' : ActorMethod<[string, Principal], bigint>,
   'get_pool' : ActorMethod<[string], [] | [PoolInfo]>,
@@ -374,14 +473,34 @@ export interface _SERVICE {
       { 'Err' : AmmError }
   >,
   'pause_pool' : ActorMethod<[string], { 'Ok' : null } | { 'Err' : AmmError }>,
+  'reconcile_amm_ingress' : ActorMethod<
+    [Uint8Array | number[]],
+    { 'Ok' : boolean } |
+      { 'Err' : AmmError }
+  >,
+  'reconcile_amm_payout' : ActorMethod<
+    [bigint],
+    { 'Ok' : boolean } |
+      { 'Err' : AmmError }
+  >,
   'remove_liquidity' : ActorMethod<
     [string, bigint, bigint, bigint],
+    { 'Ok' : [bigint, bigint] } |
+      { 'Err' : AmmError }
+  >,
+  'remove_liquidity_v2' : ActorMethod<
+    [Uint8Array | number[], string, bigint, bigint, bigint],
     { 'Ok' : [bigint, bigint] } |
       { 'Err' : AmmError }
   >,
   'resolve_pending_claim' : ActorMethod<
     [bigint],
     { 'Ok' : null } |
+      { 'Err' : AmmError }
+  >,
+  'retry_amm_payout' : ActorMethod<
+    [bigint],
+    { 'Ok' : bigint } |
       { 'Err' : AmmError }
   >,
   'set_admin' : ActorMethod<
@@ -416,6 +535,11 @@ export interface _SERVICE {
   >,
   'swap' : ActorMethod<
     [string, Principal, bigint, bigint],
+    { 'Ok' : SwapResult } |
+      { 'Err' : AmmError }
+  >,
+  'swap_v2' : ActorMethod<
+    [Uint8Array | number[], string, Principal, bigint, bigint],
     { 'Ok' : SwapResult } |
       { 'Err' : AmmError }
   >,

@@ -6,7 +6,7 @@
   import { tweened } from 'svelte/motion';
   import { cubicOut } from 'svelte/easing';
   import type { CandidVault } from '$lib/services/types';
-  import { walletOperations, isOisyWallet } from "$lib/services/protocol/walletOperations";
+  import { walletOperations, isOisyWallet, operationApprovalExpiry } from "$lib/services/protocol/walletOperations";
   import { CONFIG, CANISTER_IDS } from "$lib/config";
   import { collateralStore } from '$lib/stores/collateralStore';
   import { getLiquidationCR, getMinimumCR } from '$lib/protocol';
@@ -440,12 +440,11 @@
       const spenderCanisterId = CONFIG.currentCanisterId;
       const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
       if (currentAllowance < amountE8s) {
-        const LARGE_APPROVAL = BigInt(100_000_000_000_000_000);
-        const approvalResult = await walletOperations.approveIcusdTransfer(LARGE_APPROVAL, spenderCanisterId);
+        const approvalResult = await walletOperations.approveIcusdTransfer(amountE8s, spenderCanisterId, operationApprovalExpiry());
         if (!approvalResult.success) { liquidationError = approvalResult.error || "Failed to approve icUSD transfer"; return false; }
 
         if (isOisyWallet()) {
-          liquidationSuccess = "Approved! Click Liquidate again to complete.";
+          liquidationSuccess = 'icUSD approval succeeded; liquidation was not submitted. Click Liquidate to review and submit it.';
           return false;
         }
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -562,7 +561,7 @@
       } else {
         const msg = result.error || "Liquidation failed";
         if (msg.includes('Click Liquidate again')) {
-          liquidationSuccess = 'Approved! Click Liquidate again to complete.';
+          liquidationSuccess = 'icUSD approval succeeded; liquidation was not submitted. Click Liquidate to review and submit it.';
         } else if (isXrp && isAmbiguousLiquidationError(msg)) {
           const recovered = await recoverXrpClaimsForVault(vault);
           if (recovered.length > 0) {

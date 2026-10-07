@@ -733,4 +733,3 @@ mod tests {
         assert!(state::get_principal_state(&p).unwrap().repayment_events.is_empty());
     }
 }
-

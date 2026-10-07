@@ -698,7 +698,9 @@ fn proof_backed_settlement_rejects_duplicate_without_mutating_accounting() {
 
     assert_eq!(
         settle_pending_chain_burn_with_verified_proof(&mut s, CHAIN, proof.clone(), 1_701),
-        Err(ProofBackedSettlementError::DuplicateProof(proof.proof_id.clone()))
+        Err(ProofBackedSettlementError::DuplicateProof(
+            proof.proof_id.clone()
+        ))
     );
     assert_eq!(s.chain_supplies[&CHAIN], supply_after_first);
     assert_eq!(s.pending_chain_burn_e8s[&CHAIN], pending_after_first);
@@ -727,7 +729,9 @@ fn proof_backed_settlement_rejects_duplicate_reserve_proof_without_mutating_acco
 
     assert_eq!(
         settle_reserve_burn_with_verified_proof(&mut s, CHAIN, proof.clone(), 1_801),
-        Err(ProofBackedSettlementError::DuplicateProof(proof.proof_id.clone()))
+        Err(ProofBackedSettlementError::DuplicateProof(
+            proof.proof_id.clone()
+        ))
     );
     assert_eq!(s.chain_supplies[&CHAIN], supply_after_first);
     assert_eq!(s.reserve_backing_e8s[&CHAIN], reserve_after_first);
@@ -756,8 +760,7 @@ fn proof_backed_settlement_rejects_reserve_transfer_over_consumption_without_mut
     second.burn_log_index = 2;
     second.reserve_transfer_amount_e8s = 15;
 
-    settle_reserve_burn_with_verified_proof(&mut s, CHAIN, first, 1_800)
-        .expect("first settlement");
+    settle_reserve_burn_with_verified_proof(&mut s, CHAIN, first, 1_800).expect("first settlement");
     let supply_after_first = s.chain_supplies[&CHAIN];
     let reserve_after_first = s.reserve_backing_e8s[&CHAIN];
     let proof_count_after_first = s.settled_reserve_burn_proofs.len();
@@ -768,10 +771,7 @@ fn proof_backed_settlement_rejects_reserve_transfer_over_consumption_without_mut
     ));
     assert_eq!(s.chain_supplies[&CHAIN], supply_after_first);
     assert_eq!(s.reserve_backing_e8s[&CHAIN], reserve_after_first);
-    assert_eq!(
-        s.settled_reserve_burn_proofs.len(),
-        proof_count_after_first
-    );
+    assert_eq!(s.settled_reserve_burn_proofs.len(), proof_count_after_first);
 }
 
 #[test]
@@ -805,6 +805,186 @@ fn proof_backed_settlement_rejects_burn_log_reuse_across_pending_and_reserve_dom
     assert_eq!(s.chain_supplies[&CHAIN], supply_after_pending);
     assert_eq!(s.reserve_backing_e8s[&CHAIN], reserve_backing_before);
     assert_eq!(s.settled_reserve_burn_proofs.len(), reserve_count_before);
+}
+
+#[test]
+fn proof_backed_settlements_reject_legacy_observer_burn_keys() {
+    let mut pending_state = fixture_state();
+    pending_state.chain_vaults.insert(1, vault_with(70, 0));
+    pending_state.chain_supplies.insert(CHAIN, 100);
+    pending_state.pending_chain_burn_e8s.insert(CHAIN, 30);
+    let pending = verified_pending("pending:legacy", 10);
+    pending_state
+        .processed_burn_keys
+        .entry(pending.block_number)
+        .or_default()
+        .insert(crate::chains::evm::deposit_watch::evm_burn_consumption_key(
+            CHAIN,
+            &pending.tx_hash,
+            pending.log_index,
+        ));
+    assert!(matches!(
+        settle_pending_chain_burn_with_verified_proof(&mut pending_state, CHAIN, pending, 1_700),
+        Err(ProofBackedSettlementError::DuplicateBurnLog { .. })
+    ));
+    assert_eq!(pending_state.chain_supplies[&CHAIN], 100);
+    assert_eq!(pending_state.pending_chain_burn_e8s[&CHAIN], 30);
+
+    let mut reserve_state = fixture_state();
+    reserve_state.chain_vaults.insert(1, vault_with(70, 0));
+    reserve_state.chain_supplies.insert(CHAIN, 100);
+    reserve_state.reserve_backing_e8s.insert(CHAIN, 30);
+    let reserve = verified_reserve("reserve:legacy", 10);
+    reserve_state
+        .processed_burn_keys
+        .entry(reserve.burn_block_number)
+        .or_default()
+        .insert(crate::chains::evm::deposit_watch::evm_burn_consumption_key(
+            CHAIN,
+            &reserve.burn_tx_hash,
+            reserve.burn_log_index,
+        ));
+    assert!(matches!(
+        settle_reserve_burn_with_verified_proof(&mut reserve_state, CHAIN, reserve, 1_800),
+        Err(ProofBackedSettlementError::DuplicateBurnLog { .. })
+    ));
+    assert_eq!(reserve_state.chain_supplies[&CHAIN], 100);
+    assert_eq!(reserve_state.reserve_backing_e8s[&CHAIN], 30);
+}
+
+#[test]
+fn proof_backed_settlements_reject_same_block_canonical_consumer_keys() {
+    let mut pending_state = fixture_state();
+    pending_state.chain_vaults.insert(1, vault_with(70, 0));
+    pending_state.chain_supplies.insert(CHAIN, 100);
+    pending_state.pending_chain_burn_e8s.insert(CHAIN, 30);
+    let pending = verified_pending("pending:canonical", 10);
+    pending_state
+        .processed_burn_keys
+        .entry(pending.block_number)
+        .or_default()
+        .insert(crate::chains::evm::deposit_watch::evm_burn_consumption_key(
+            CHAIN,
+            &pending.tx_hash,
+            pending.log_index,
+        ));
+    assert!(matches!(
+        settle_pending_chain_burn_with_verified_proof(&mut pending_state, CHAIN, pending, 1_700),
+        Err(ProofBackedSettlementError::DuplicateBurnLog { .. })
+    ));
+    assert_eq!(pending_state.chain_supplies[&CHAIN], 100);
+    assert_eq!(pending_state.pending_chain_burn_e8s[&CHAIN], 30);
+
+    let mut reserve_state = fixture_state();
+    reserve_state.chain_vaults.insert(1, vault_with(70, 0));
+    reserve_state.chain_supplies.insert(CHAIN, 100);
+    reserve_state.reserve_backing_e8s.insert(CHAIN, 30);
+    let reserve = verified_reserve("reserve:canonical", 10);
+    reserve_state
+        .processed_burn_keys
+        .entry(reserve.burn_block_number)
+        .or_default()
+        .insert(crate::chains::evm::deposit_watch::evm_burn_consumption_key(
+            CHAIN,
+            &reserve.burn_tx_hash,
+            reserve.burn_log_index,
+        ));
+    assert!(matches!(
+        settle_reserve_burn_with_verified_proof(&mut reserve_state, CHAIN, reserve, 1_800),
+        Err(ProofBackedSettlementError::DuplicateBurnLog { .. })
+    ));
+    assert_eq!(reserve_state.chain_supplies[&CHAIN], 100);
+    assert_eq!(reserve_state.reserve_backing_e8s[&CHAIN], 30);
+}
+
+#[test]
+fn proof_backed_settlements_reject_old_logs_after_observer_prune() {
+    let mut pending_state = fixture_state();
+    pending_state.chain_vaults.insert(1, vault_with(70, 0));
+    pending_state.chain_supplies.insert(CHAIN, 100);
+    pending_state.pending_chain_burn_e8s.insert(CHAIN, 30);
+    let pending = verified_pending("pending:pruned", 10);
+    pending_state
+        .processed_burn_keys
+        .entry(pending.block_number)
+        .or_default()
+        .insert(crate::chains::evm::deposit_watch::evm_burn_consumption_key(
+            CHAIN,
+            &pending.tx_hash,
+            pending.log_index,
+        ));
+    crate::chains::evm::deposit_watch::advance_cursor_and_prune(&mut pending_state, CHAIN, 100);
+    assert!(!pending_state
+        .processed_burn_keys
+        .contains_key(&pending.block_number));
+    assert_eq!(
+        pending_state.evm_burn_proof_floor_by_chain.get(&CHAIN),
+        Some(&100)
+    );
+    assert!(matches!(
+        settle_pending_chain_burn_with_verified_proof(&mut pending_state, CHAIN, pending, 1_700),
+        Err(ProofBackedSettlementError::DuplicateBurnLog { .. })
+    ));
+    assert_eq!(pending_state.chain_supplies[&CHAIN], 100);
+    assert_eq!(pending_state.pending_chain_burn_e8s[&CHAIN], 30);
+
+    let mut reserve_state = fixture_state();
+    reserve_state.chain_vaults.insert(1, vault_with(70, 0));
+    reserve_state.chain_supplies.insert(CHAIN, 100);
+    reserve_state.reserve_backing_e8s.insert(CHAIN, 30);
+    let reserve = verified_reserve("reserve:pruned", 10);
+    reserve_state
+        .processed_burn_keys
+        .entry(reserve.burn_block_number)
+        .or_default()
+        .insert(crate::chains::evm::deposit_watch::evm_burn_consumption_key(
+            CHAIN,
+            &reserve.burn_tx_hash,
+            reserve.burn_log_index,
+        ));
+    crate::chains::evm::deposit_watch::advance_cursor_and_prune(&mut reserve_state, CHAIN, 100);
+    assert!(!reserve_state
+        .processed_burn_keys
+        .contains_key(&reserve.burn_block_number));
+    assert!(matches!(
+        settle_reserve_burn_with_verified_proof(&mut reserve_state, CHAIN, reserve, 1_800),
+        Err(ProofBackedSettlementError::DuplicateBurnLog { .. })
+    ));
+    assert_eq!(reserve_state.chain_supplies[&CHAIN], 100);
+    assert_eq!(reserve_state.reserve_backing_e8s[&CHAIN], 30);
+}
+
+#[test]
+fn proof_backed_settlements_hold_legacy_cursor_history_without_floor() {
+    let mut pending_state = fixture_state();
+    pending_state.chain_vaults.insert(1, vault_with(70, 0));
+    pending_state.chain_supplies.insert(CHAIN, 100);
+    pending_state.pending_chain_burn_e8s.insert(CHAIN, 30);
+    pending_state.last_observed_block.insert(CHAIN, 100);
+    let pending = verified_pending("pending:legacy-cursor", 10);
+    assert!(matches!(
+        settle_pending_chain_burn_with_verified_proof(&mut pending_state, CHAIN, pending, 1_700),
+        Err(ProofBackedSettlementError::DuplicateBurnLog { .. })
+    ));
+    assert_eq!(
+        pending_state.evm_burn_proof_legacy_hold_through.get(&CHAIN),
+        Some(&100)
+    );
+
+    let mut reserve_state = fixture_state();
+    reserve_state.chain_vaults.insert(1, vault_with(70, 0));
+    reserve_state.chain_supplies.insert(CHAIN, 100);
+    reserve_state.reserve_backing_e8s.insert(CHAIN, 30);
+    reserve_state.last_observed_block.insert(CHAIN, 100);
+    let reserve = verified_reserve("reserve:legacy-cursor", 10);
+    assert!(matches!(
+        settle_reserve_burn_with_verified_proof(&mut reserve_state, CHAIN, reserve, 1_800),
+        Err(ProofBackedSettlementError::DuplicateBurnLog { .. })
+    ));
+    assert_eq!(
+        reserve_state.evm_burn_proof_legacy_hold_through.get(&CHAIN),
+        Some(&100)
+    );
 }
 
 #[test]

@@ -62,12 +62,7 @@ fn owner() -> Principal {
 /// state with confirmed debt, so the withdraw tests exercise a live vault. (The
 /// open helper records `pending_mint_e8s` and `debt_e8s == 0`; we set the
 /// fields directly here to skip the deposit-watch + settlement round trip.)
-fn open_and_fund(
-    s: &mut MultiChainState,
-    vault_id: u64,
-    collateral_e18: u128,
-    debt_e8s: u128,
-) {
+fn open_and_fund(s: &mut MultiChainState, vault_id: u64, collateral_e18: u128, debt_e8s: u128) {
     // Use a debt large enough that the open CR check passes regardless, then
     // overwrite the fields to the desired live shape.
     open_chain_vault_in_state(
@@ -100,7 +95,10 @@ const NANOS_PER_YEAR: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
 fn withdraw_blocked_while_interest_mint_in_flight() {
     let mut s = setup(PRICE_100_USD_E8);
     open_and_fund(&mut s, 7, 5 * ONE_MON_E18, 100_0000_0000); // 5 MON, debt 100 icUSD
-    s.chain_vaults.get_mut(&7).unwrap().pending_interest_mint_e8s = 50_000_000; // in flight
+    s.chain_vaults
+        .get_mut(&7)
+        .unwrap()
+        .pending_interest_mint_e8s = 50_000_000; // in flight
     let res = withdraw_collateral_in_state(
         &mut s,
         7,
@@ -140,9 +138,15 @@ fn withdraw_cr_counts_accrued_interest() {
     // (b) the SAME vault + withdrawal with zero elapsed interest -> succeeds.
     let mut s2 = setup(PRICE_100_USD_E8);
     open_and_fund(&mut s2, 7, 2 * ONE_MON_E18, debt);
-    s2.chain_vaults.get_mut(&7).unwrap().last_interest_accrual_ns = now; // elapsed 0
+    s2.chain_vaults
+        .get_mut(&7)
+        .unwrap()
+        .last_interest_accrual_ns = now; // elapsed 0
     let res2 = withdraw_collateral_in_state(&mut s2, 7, withdraw_amt, dest, MIN_CR_E4, now);
-    assert!(res2.is_ok(), "same withdrawal succeeds without accrued interest: {res2:?}");
+    assert!(
+        res2.is_ok(),
+        "same withdrawal succeeds without accrued interest: {res2:?}"
+    );
 }
 
 // 1. full withdraw of a debt-free vault closes it (Closing) + enqueues one
@@ -160,10 +164,16 @@ fn full_withdraw_when_debt_free_sets_closing_and_enqueues() {
         MIN_CR_E4,
         555,
     );
-    assert!(res.is_ok(), "full debt-free withdraw should succeed: {res:?}");
+    assert!(
+        res.is_ok(),
+        "full debt-free withdraw should succeed: {res:?}"
+    );
 
     let v = s.chain_vaults.get(&7).expect("vault present");
-    assert_eq!(v.collateral_amount_native, 0, "collateral fully reserved out");
+    assert_eq!(
+        v.collateral_amount_native, 0,
+        "collateral fully reserved out"
+    );
     assert!(
         matches!(v.status, ChainVaultStatus::Closing),
         "empty + debt-free vault flips to Closing, got {:?}",
@@ -174,14 +184,21 @@ fn full_withdraw_when_debt_free_sets_closing_and_enqueues() {
     assert_eq!(q.pending_len(), 1, "exactly one NativeWithdrawal enqueued");
     let op = q.pending.values().next().expect("op present");
     match &op.kind {
-        SettlementOpKind::NativeWithdrawal { recipient, amount_e18, vault_id } => {
+        SettlementOpKind::NativeWithdrawal {
+            recipient,
+            amount_e18,
+            vault_id,
+        } => {
             assert_eq!(recipient, "0x000000000000000000000000000000000000dead");
             assert_eq!(*amount_e18, 5 * ONE_MON_E18);
             assert_eq!(*vault_id, 7, "op carries the real vault_id");
         }
         other => panic!("expected NativeWithdrawal op, got {other:?}"),
     }
-    assert_eq!(op.idempotency_key, format!("withdraw-{}-{}-{}", CHAIN.0, 7, 555));
+    assert_eq!(
+        op.idempotency_key,
+        format!("withdraw-{}-{}-{}", CHAIN.0, 7, 555)
+    );
 }
 
 // 2. partial withdraw keeping CR above min stays Open.
@@ -192,18 +209,62 @@ fn partial_withdraw_keeping_cr_above_min_is_allowed() {
     open_and_fund(&mut s, 7, 5 * ONE_MON_E18, 100_00000000);
 
     // withdraw 1 MON -> 4 MON ($400) / $100 = 400% CR -> well above 130%.
-    let res =
-        withdraw_collateral_in_state(&mut s, 7, ONE_MON_E18, "0x000000000000000000000000000000000000dead".into(), MIN_CR_E4, 100);
-    assert!(res.is_ok(), "partial withdraw above min CR should succeed: {res:?}");
+    let res = withdraw_collateral_in_state(
+        &mut s,
+        7,
+        ONE_MON_E18,
+        "0x000000000000000000000000000000000000dead".into(),
+        MIN_CR_E4,
+        100,
+    );
+    assert!(
+        res.is_ok(),
+        "partial withdraw above min CR should succeed: {res:?}"
+    );
 
     let v = s.chain_vaults.get(&7).expect("vault present");
-    assert_eq!(v.collateral_amount_native, 4 * ONE_MON_E18, "1 MON reserved out");
+    assert_eq!(
+        v.collateral_amount_native,
+        4 * ONE_MON_E18,
+        "1 MON reserved out"
+    );
     assert!(
         matches!(v.status, ChainVaultStatus::Open),
         "vault with remaining debt + collateral stays Open, got {:?}",
         v.status
     );
-    assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 1, "one withdrawal enqueued");
+    assert_eq!(
+        s.settlement_queues[&CHAIN].pending_len(),
+        1,
+        "one withdrawal enqueued"
+    );
+}
+
+#[test]
+fn zero_withdraw_is_rejected_without_reserving_collateral_or_enqueuing() {
+    let mut s = setup(PRICE_100_USD_E8);
+    open_and_fund(&mut s, 7, 5 * ONE_MON_E18, 0);
+
+    let res = withdraw_collateral_in_state(
+        &mut s,
+        7,
+        0,
+        "0x000000000000000000000000000000000000dead".into(),
+        MIN_CR_E4,
+        555,
+    );
+
+    assert_eq!(res, Err(WithdrawError::ZeroAmount));
+    let vault = s.chain_vaults.get(&7).expect("vault present");
+    assert_eq!(vault.collateral_amount_native, 5 * ONE_MON_E18);
+    assert_eq!(vault.status, ChainVaultStatus::Open);
+    assert_eq!(
+        s.settlement_queues
+            .get(&CHAIN)
+            .map(|q| q.pending_len())
+            .unwrap_or(0),
+        0
+    );
 }
 
 // 3. withdraw that would break min CR is rejected, no mutation, no enqueue.
@@ -215,14 +276,34 @@ fn withdraw_breaking_min_cr_is_rejected() {
 
     // withdraw 4.9 MON -> 0.1 MON ($10) left -> CR 10% < 130% -> reject.
     let withdraw_amt = 4 * ONE_MON_E18 + ONE_MON_E18 * 9 / 10; // 4.9 MON
-    let res =
-        withdraw_collateral_in_state(&mut s, 7, withdraw_amt, "0x000000000000000000000000000000000000dead".into(), MIN_CR_E4, 0);
-    assert!(matches!(res, Err(WithdrawError::BelowMinCr { .. })), "got {res:?}");
+    let res = withdraw_collateral_in_state(
+        &mut s,
+        7,
+        withdraw_amt,
+        "0x000000000000000000000000000000000000dead".into(),
+        MIN_CR_E4,
+        0,
+    );
+    assert!(
+        matches!(res, Err(WithdrawError::BelowMinCr { .. })),
+        "got {res:?}"
+    );
 
     let v = s.chain_vaults.get(&7).expect("vault present");
-    assert_eq!(v.collateral_amount_native, 5 * ONE_MON_E18, "collateral unchanged on reject");
-    assert!(matches!(v.status, ChainVaultStatus::Open), "status unchanged");
-    assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0, "queue must stay empty");
+    assert_eq!(
+        v.collateral_amount_native,
+        5 * ONE_MON_E18,
+        "collateral unchanged on reject"
+    );
+    assert!(
+        matches!(v.status, ChainVaultStatus::Open),
+        "status unchanged"
+    );
+    assert_eq!(
+        s.settlement_queues[&CHAIN].pending_len(),
+        0,
+        "queue must stay empty"
+    );
 }
 
 // 4. withdraw exceeding balance is rejected, unchanged.
@@ -239,10 +320,16 @@ fn withdraw_exceeding_balance_is_rejected() {
         MIN_CR_E4,
         0,
     );
-    assert!(matches!(res, Err(WithdrawError::InsufficientCollateral)), "got {res:?}");
+    assert!(
+        matches!(res, Err(WithdrawError::InsufficientCollateral)),
+        "got {res:?}"
+    );
 
     let v = s.chain_vaults.get(&7).expect("vault present");
-    assert_eq!(v.collateral_amount_native, ONE_MON_E18, "collateral unchanged");
+    assert_eq!(
+        v.collateral_amount_native, ONE_MON_E18,
+        "collateral unchanged"
+    );
     assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0, "queue empty");
 }
 
@@ -250,9 +337,18 @@ fn withdraw_exceeding_balance_is_rejected() {
 #[test]
 fn withdraw_unknown_vault_errors() {
     let mut s = setup(PRICE_100_USD_E8);
-    let res =
-        withdraw_collateral_in_state(&mut s, 999, ONE_MON_E18, "0x000000000000000000000000000000000000dead".into(), MIN_CR_E4, 0);
-    assert!(matches!(res, Err(WithdrawError::UnknownVault)), "got {res:?}");
+    let res = withdraw_collateral_in_state(
+        &mut s,
+        999,
+        ONE_MON_E18,
+        "0x000000000000000000000000000000000000dead".into(),
+        MIN_CR_E4,
+        0,
+    );
+    assert!(
+        matches!(res, Err(WithdrawError::UnknownVault)),
+        "got {res:?}"
+    );
 }
 
 // 6. close requires debt == 0: a vault with debt is rejected with HasDebt, no
@@ -262,7 +358,13 @@ fn close_with_debt_is_rejected() {
     let mut s = setup(PRICE_100_USD_E8);
     open_and_fund(&mut s, 7, 5 * ONE_MON_E18, 100_00000000); // has debt
 
-    let res = close_chain_vault_in_state(&mut s, 7, "0x000000000000000000000000000000000000dead".into(), MIN_CR_E4, 0);
+    let res = close_chain_vault_in_state(
+        &mut s,
+        7,
+        "0x000000000000000000000000000000000000dead".into(),
+        MIN_CR_E4,
+        0,
+    );
     assert!(matches!(res, Err(WithdrawError::HasDebt)), "got {res:?}");
 
     let v = s.chain_vaults.get(&7).expect("vault present");
@@ -277,11 +379,20 @@ fn close_debt_free_withdraws_full_and_sets_closing() {
     let mut s = setup(PRICE_100_USD_E8);
     open_and_fund(&mut s, 7, 3 * ONE_MON_E18, 0); // 3 MON, debt-free
 
-    let res = close_chain_vault_in_state(&mut s, 7, "0x000000000000000000000000000000000000dead".into(), MIN_CR_E4, 999);
+    let res = close_chain_vault_in_state(
+        &mut s,
+        7,
+        "0x000000000000000000000000000000000000dead".into(),
+        MIN_CR_E4,
+        999,
+    );
     assert!(res.is_ok(), "debt-free close should succeed: {res:?}");
 
     let v = s.chain_vaults.get(&7).expect("vault present");
-    assert_eq!(v.collateral_amount_native, 0, "full collateral reserved out");
+    assert_eq!(
+        v.collateral_amount_native, 0,
+        "full collateral reserved out"
+    );
     assert!(
         matches!(v.status, ChainVaultStatus::Closing),
         "close flips to Closing, got {:?}",
@@ -291,7 +402,11 @@ fn close_debt_free_withdraws_full_and_sets_closing() {
     assert_eq!(q.pending_len(), 1, "one NativeWithdrawal enqueued");
     let op = q.pending.values().next().expect("op present");
     match &op.kind {
-        SettlementOpKind::NativeWithdrawal { recipient, amount_e18, vault_id } => {
+        SettlementOpKind::NativeWithdrawal {
+            recipient,
+            amount_e18,
+            vault_id,
+        } => {
             assert_eq!(recipient, "0x000000000000000000000000000000000000dead");
             assert_eq!(*amount_e18, 3 * ONE_MON_E18, "full remaining collateral");
             assert_eq!(*vault_id, 7);
@@ -338,7 +453,9 @@ fn withdraw_from_awaiting_deposit_is_rejected() {
     assert!(
         matches!(
             res,
-            Err(WithdrawError::WrongStatus { status: ChainVaultStatus::AwaitingDeposit })
+            Err(WithdrawError::WrongStatus {
+                status: ChainVaultStatus::AwaitingDeposit
+            })
         ),
         "withdraw from AwaitingDeposit must reject with WrongStatus, got {res:?}"
     );
@@ -354,7 +471,11 @@ fn withdraw_from_awaiting_deposit_is_rejected() {
         "status unchanged"
     );
     assert!(
-        s.settlement_queues.get(&CHAIN).map(|q| q.pending_len()).unwrap_or(0) == 0,
+        s.settlement_queues
+            .get(&CHAIN)
+            .map(|q| q.pending_len())
+            .unwrap_or(0)
+            == 0,
         "settlement queue must be EMPTY — no payout enqueued"
     );
 }
@@ -380,16 +501,28 @@ fn withdraw_from_mint_pending_is_rejected() {
     assert!(
         matches!(
             res,
-            Err(WithdrawError::WrongStatus { status: ChainVaultStatus::MintPending })
+            Err(WithdrawError::WrongStatus {
+                status: ChainVaultStatus::MintPending
+            })
         ),
         "withdraw from MintPending must reject with WrongStatus, got {res:?}"
     );
 
     let v = s.chain_vaults.get(&7).expect("vault present");
-    assert_eq!(v.collateral_amount_native, 5 * ONE_MON_E18, "collateral UNCHANGED");
-    assert!(matches!(v.status, ChainVaultStatus::MintPending), "status unchanged");
     assert_eq!(
-        s.settlement_queues.get(&CHAIN).map(|q| q.pending_len()).unwrap_or(0),
+        v.collateral_amount_native,
+        5 * ONE_MON_E18,
+        "collateral UNCHANGED"
+    );
+    assert!(
+        matches!(v.status, ChainVaultStatus::MintPending),
+        "status unchanged"
+    );
+    assert_eq!(
+        s.settlement_queues
+            .get(&CHAIN)
+            .map(|q| q.pending_len())
+            .unwrap_or(0),
         0,
         "settlement queue must be EMPTY"
     );
@@ -404,22 +537,40 @@ fn withdraw_from_mint_pending_is_rejected() {
 fn close_from_closing_is_rejected_via_gate() {
     let mut s = setup(PRICE_100_USD_E8);
     open_and_fund(&mut s, 7, 3 * ONE_MON_E18, 0); // debt-free
-    // Force Closing directly (a vault mid-withdrawal). debt is still 0.
+                                                  // Force Closing directly (a vault mid-withdrawal). debt is still 0.
     s.chain_vaults.get_mut(&7).unwrap().status = ChainVaultStatus::Closing;
 
-    let res = close_chain_vault_in_state(&mut s, 7, "0x000000000000000000000000000000000000dead".into(), MIN_CR_E4, 777);
+    let res = close_chain_vault_in_state(
+        &mut s,
+        7,
+        "0x000000000000000000000000000000000000dead".into(),
+        MIN_CR_E4,
+        777,
+    );
     assert!(
         matches!(
             res,
-            Err(WithdrawError::WrongStatus { status: ChainVaultStatus::Closing })
+            Err(WithdrawError::WrongStatus {
+                status: ChainVaultStatus::Closing
+            })
         ),
         "close on a Closing vault must reject with WrongStatus, got {res:?}"
     );
     let v = s.chain_vaults.get(&7).expect("vault present");
-    assert_eq!(v.collateral_amount_native, 3 * ONE_MON_E18, "collateral unchanged");
-    assert!(matches!(v.status, ChainVaultStatus::Closing), "status unchanged");
     assert_eq!(
-        s.settlement_queues.get(&CHAIN).map(|q| q.pending_len()).unwrap_or(0),
+        v.collateral_amount_native,
+        3 * ONE_MON_E18,
+        "collateral unchanged"
+    );
+    assert!(
+        matches!(v.status, ChainVaultStatus::Closing),
+        "status unchanged"
+    );
+    assert_eq!(
+        s.settlement_queues
+            .get(&CHAIN)
+            .map(|q| q.pending_len())
+            .unwrap_or(0),
         0,
         "queue empty",
     );
@@ -432,7 +583,13 @@ fn close_zero_collateral_short_circuits_to_closed_no_enqueue() {
     let mut s = setup(PRICE_100_USD_E8);
     open_and_fund(&mut s, 7, 0, 0); // Open, debt-free, zero collateral
 
-    let res = close_chain_vault_in_state(&mut s, 7, "0x000000000000000000000000000000000000dead".into(), MIN_CR_E4, 888);
+    let res = close_chain_vault_in_state(
+        &mut s,
+        7,
+        "0x000000000000000000000000000000000000dead".into(),
+        MIN_CR_E4,
+        888,
+    );
     assert!(res.is_ok(), "zero-collateral close should succeed: {res:?}");
 
     let v = s.chain_vaults.get(&7).expect("vault present");
@@ -443,7 +600,10 @@ fn close_zero_collateral_short_circuits_to_closed_no_enqueue() {
         v.status
     );
     assert_eq!(
-        s.settlement_queues.get(&CHAIN).map(|q| q.pending_len()).unwrap_or(0),
+        s.settlement_queues
+            .get(&CHAIN)
+            .map(|q| q.pending_len())
+            .unwrap_or(0),
         0,
         "NO zero-value NativeWithdrawal enqueued",
     );
@@ -465,13 +625,26 @@ fn withdraw_rejects_invalid_dest() {
 
     // "0x123" is 0x-prefixed but only 3 hex digits (not 40) — a realistic typo.
     let res = withdraw_collateral_in_state(&mut s, 7, ONE_MON_E18, "0x123".into(), MIN_CR_E4, 100);
-    assert!(matches!(res, Err(WithdrawError::InvalidAddress(_))), "got {res:?}");
+    assert!(
+        matches!(res, Err(WithdrawError::InvalidAddress(_))),
+        "got {res:?}"
+    );
 
     let v = s.chain_vaults.get(&7).expect("vault present");
-    assert_eq!(v.collateral_amount_native, 5 * ONE_MON_E18, "collateral UNCHANGED on reject");
-    assert!(matches!(v.status, ChainVaultStatus::Open), "status unchanged");
     assert_eq!(
-        s.settlement_queues.get(&CHAIN).map(|q| q.pending_len()).unwrap_or(0),
+        v.collateral_amount_native,
+        5 * ONE_MON_E18,
+        "collateral UNCHANGED on reject"
+    );
+    assert!(
+        matches!(v.status, ChainVaultStatus::Open),
+        "status unchanged"
+    );
+    assert_eq!(
+        s.settlement_queues
+            .get(&CHAIN)
+            .map(|q| q.pending_len())
+            .unwrap_or(0),
         0,
         "settlement queue must be EMPTY — nothing enqueued",
     );
@@ -479,11 +652,21 @@ fn withdraw_rejects_invalid_dest() {
     // A non-hex body is rejected too (still no mutation, still no enqueue).
     let res =
         withdraw_collateral_in_state(&mut s, 7, ONE_MON_E18, "0xnothex".into(), MIN_CR_E4, 101);
-    assert!(matches!(res, Err(WithdrawError::InvalidAddress(_))), "got {res:?}");
+    assert!(
+        matches!(res, Err(WithdrawError::InvalidAddress(_))),
+        "got {res:?}"
+    );
     let v = s.chain_vaults.get(&7).expect("vault present");
-    assert_eq!(v.collateral_amount_native, 5 * ONE_MON_E18, "still unchanged");
     assert_eq!(
-        s.settlement_queues.get(&CHAIN).map(|q| q.pending_len()).unwrap_or(0),
+        v.collateral_amount_native,
+        5 * ONE_MON_E18,
+        "still unchanged"
+    );
+    assert_eq!(
+        s.settlement_queues
+            .get(&CHAIN)
+            .map(|q| q.pending_len())
+            .unwrap_or(0),
         0,
         "still empty",
     );

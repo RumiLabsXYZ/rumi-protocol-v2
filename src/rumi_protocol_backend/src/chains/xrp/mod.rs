@@ -16,18 +16,18 @@
 //! into the backend and is fully unit-tested, but nothing calls into it from the
 //! production endpoints yet. See the banner in `chains::mod`.
 
-pub mod address;
 pub mod adapter;
+pub mod address;
 pub mod codec;
 pub mod config;
 pub mod sign;
 pub mod ted25519;
 pub mod xrp_rpc;
 
+pub use adapter::XrpAdapter;
 pub use address::{
     account_id_from_classic_address, classic_address_from_ed25519_pubkey, is_valid_classic_address,
 };
-pub use adapter::XrpAdapter;
 pub use codec::{serialize_signed, serialize_unsigned, Payment};
 pub use config::{XRP_CHAIN_ID, XRP_NATIVE_DECIMALS};
 pub use sign::{ed25519_signing_pubkey, signing_message, tx_hash};

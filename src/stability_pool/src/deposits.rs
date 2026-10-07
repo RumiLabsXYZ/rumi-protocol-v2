@@ -9,38 +9,205 @@ use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Conservative fallback for a stablecoin ledger's transfer fee (native units),
 /// used when the live `icrc1_fee` query fails. Known stablecoin registry values
 /// are normalized on registration/upgrade; for unknown ledgers, erring high
 /// keeps the pool solvent rather than risking an over-send.
 const DEFAULT_LEDGER_FEE: u64 = 10_000;
+const MAX_PENDING_REFUND_HISTORY_BLOCKS_PER_CALL: u64 = 64;
+const MAX_PENDING_DEPOSIT_HISTORY_BLOCKS_PER_CALL: u64 = 64;
 
 thread_local! {
     /// Per-ledger transfer-fee cache for transfer/refund math, populated lazily from
     /// `icrc1_fee`. Heap-only (not persisted), so it is simply re-warmed after
     /// an upgrade. Mirrors rumi_3pool::transfers::LEDGER_FEES.
     static LEDGER_FEES: RefCell<HashMap<Principal, u64>> = RefCell::new(HashMap::new());
+    static PENDING_REFUND_CLAIMS: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
 }
 
-fn record_deposit_credit_after_async(
+struct PendingRefundClaimGuard(u64);
+
+impl PendingRefundClaimGuard {
+    fn new(refund_id: u64) -> Result<Self, StabilityPoolError> {
+        PENDING_REFUND_CLAIMS.with(|active| {
+            if !active.borrow_mut().insert(refund_id) {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            Ok(Self(refund_id))
+        })
+    }
+}
+
+impl Drop for PendingRefundClaimGuard {
+    fn drop(&mut self) {
+        PENDING_REFUND_CLAIMS.with(|active| {
+            active.borrow_mut().remove(&self.0);
+        });
+    }
+}
+
+fn complete_deposit_credit_after_async(
     caller: Principal,
     token_ledger: Principal,
     amount: u64,
+    timestamp: u64,
 ) -> Result<(), StabilityPoolError> {
-    crate::ensure_pool_balance_mutation_allowed()?;
-    mutate_state(|s| {
-        s.add_deposit(caller, token_ledger, amount);
-        s.push_event(
-            caller,
-            PoolEventType::Deposit {
-                token_ledger,
-                amount,
-            },
-        );
-    });
+    crate::ensure_pool_balance_mutation_allowed_for_ledger(token_ledger)?;
+    complete_deposit_credit_after_async_at(
+        caller,
+        token_ledger,
+        amount,
+        timestamp,
+        ic_cdk::api::time(),
+    )
+}
+
+fn complete_deposit_credit_after_async_at(
+    caller: Principal,
+    token_ledger: Principal,
+    amount: u64,
+    timestamp: u64,
+    now_ns: u64,
+) -> Result<(), StabilityPoolError> {
+    crate::ensure_pool_balance_mutation_allowed_for_ledger(token_ledger)?;
+    // A retry may receive Duplicate after an earlier concurrent callback has
+    // already completed this exact intent. In that case, leave the credited
+    // balance and event untouched.
+    mutate_state(|s| s.complete_deposit_intent(caller, token_ledger, amount, timestamp, now_ns));
     Ok(())
+}
+
+fn complete_saved_deposit_receipt_before_admission(
+    caller: Principal,
+    token_ledger: Principal,
+    amount: u64,
+    now_ns: u64,
+) -> Result<Option<()>, StabilityPoolError> {
+    let receipt = read_state(|s| {
+        s.pending_deposit_intents
+            .as_ref()
+            .and_then(|intents| intents.get(&caller))
+            .filter(|intent| intent.token_ledger == token_ledger && intent.amount == amount)
+            .and_then(|intent| {
+                intent
+                    .transfer_block_index
+                    .map(|_| intent.transfer_created_at_time_ns)
+            })
+    });
+    let Some(timestamp) = receipt else {
+        return Ok(None);
+    };
+
+    // A recorded ledger receipt proves the pull already happened. Finalize
+    // that exact credit before applying admission policy to a new deposit,
+    // while still respecting accounting guards.
+    crate::ensure_pool_balance_mutation_allowed_for_ledger(token_ledger)?;
+    let completed = mutate_state(|s| {
+        s.complete_deposit_intent(caller, token_ledger, amount, timestamp, now_ns)
+    });
+    if completed {
+        Ok(Some(()))
+    } else {
+        Err(StabilityPoolError::SystemBusy)
+    }
+}
+
+fn validate_pending_deposit_block(
+    caller: Principal,
+    pool: Principal,
+    intent: &PendingDepositIntent,
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+) -> Result<(), String> {
+    if !matches!(block.btype.as_deref(), Some("2xfer") | None)
+        || (block.btype.is_none() && block.spender.is_none())
+        || (block.op != "xfer" && block.op != "transfer")
+        || !block.from.as_ref().is_some_and(|actual| {
+            rumi_protocol_backend::icrc3_proof::accounts_match(
+                actual,
+                &Account {
+                    owner: caller,
+                    subaccount: None,
+                },
+            )
+        })
+        || !block.to.as_ref().is_some_and(|actual| {
+            rumi_protocol_backend::icrc3_proof::accounts_match(
+                actual,
+                &Account {
+                    owner: pool,
+                    subaccount: None,
+                },
+            )
+        })
+        || !block.spender.as_ref().is_some_and(|actual| {
+            rumi_protocol_backend::icrc3_proof::accounts_match(
+                actual,
+                &Account {
+                    owner: pool,
+                    subaccount: None,
+                },
+            )
+        })
+        || block.amount != u128::from(intent.amount)
+        || block.memo.is_some()
+        || block.created_at_time != Some(intent.transfer_created_at_time_ns)
+        || block.expected_allowance.is_some()
+        || block.expires_at.is_some()
+    {
+        return Err(
+            "ICRC-3 block does not prove this exact fee-unspecified transfer_from intent".into(),
+        );
+    }
+    // The persisted ICRC-2 argument intentionally used fee=None, so the
+    // ledger chose the fee. decode_block rejects conflicting tx/top-level fee
+    // evidence; do not substitute today's fee for the historical ledger value.
+    Ok(())
+}
+
+fn pending_deposit_block_identity_may_match(
+    caller: Principal,
+    pool: Principal,
+    intent: &PendingDepositIntent,
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+) -> bool {
+    (block.op == "xfer" || block.op == "transfer")
+        && block.from.as_ref().is_some_and(|actual| {
+            rumi_protocol_backend::icrc3_proof::accounts_match(
+                actual,
+                &Account {
+                    owner: caller,
+                    subaccount: None,
+                },
+            )
+        })
+        && block.to.as_ref().is_some_and(|actual| {
+            rumi_protocol_backend::icrc3_proof::accounts_match(
+                actual,
+                &Account {
+                    owner: pool,
+                    subaccount: None,
+                },
+            )
+        })
+        && block.amount == u128::from(intent.amount)
+        && block.created_at_time == Some(intent.transfer_created_at_time_ns)
+}
+
+fn pending_deposit_admission_error(
+    error: StabilityPoolError,
+    pending_without_receipt: bool,
+) -> StabilityPoolError {
+    if pending_without_receipt {
+        StabilityPoolError::LedgerTransferFailed {
+            reason: format!(
+                "pending deposit has no saved receipt; admission policy now rejects retry ({error:?}); exact ledger reconciliation required"
+            ),
+        }
+    } else {
+        error
+    }
 }
 
 fn record_deposit_as_3usd_credit_after_async(
@@ -50,7 +217,7 @@ fn record_deposit_as_3usd_credit_after_async(
     three_usd_ledger: Principal,
     lp_amount: u64,
 ) -> Result<(), StabilityPoolError> {
-    crate::ensure_pool_balance_mutation_allowed()?;
+    crate::ensure_pool_balance_mutation_allowed_for_ledger(three_usd_ledger)?;
     mutate_state(|s| {
         s.add_deposit(caller, three_usd_ledger, lp_amount);
         s.push_event(
@@ -77,6 +244,24 @@ fn fallback_ledger_fee(ledger: Principal) -> u64 {
     })
 }
 
+fn invalidate_cached_ledger_fee(ledger: Principal) {
+    LEDGER_FEES.with(|fees| {
+        fees.borrow_mut().remove(&ledger);
+    });
+}
+
+fn invalidate_fee_cache_after_transfer_error(ledger: Principal, error: &TransferError) {
+    if matches!(error, TransferError::BadFee { .. }) {
+        invalidate_cached_ledger_fee(ledger);
+    }
+}
+
+/// Convert a ledger-reported Nat without silently turning an unrepresentable
+/// fee into zero or truncating it to a smaller fee.
+fn nat_fee_to_u64(fee: candid::Nat) -> Result<u64, ()> {
+    fee.0.try_into().map_err(|_| ())
+}
+
 /// Fetch a stablecoin ledger's transfer fee, caching successful lookups per
 /// ledger. On query failure, falls back to normalized registry metadata without
 /// caching so the next transfer re-queries.
@@ -86,7 +271,16 @@ pub(crate) async fn ledger_transfer_fee(ledger: Principal) -> u64 {
     }
     match call::<(), (candid::Nat,)>(ledger, "icrc1_fee", ()).await {
         Ok((fee_nat,)) => {
-            let fee: u64 = fee_nat.0.try_into().unwrap_or(DEFAULT_LEDGER_FEE);
+            // An unrepresentable fee is not a valid successful lookup. Keep
+            // callers from underpaying and do not poison the fee cache.
+            let Ok(fee) = nat_fee_to_u64(fee_nat) else {
+                log!(
+                    INFO,
+                    "icrc1_fee returned a value exceeding u64 for {}; transfer held",
+                    ledger
+                );
+                return u64::MAX;
+            };
             LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, fee));
             fee
         }
@@ -102,6 +296,47 @@ pub(crate) async fn ledger_transfer_fee(ledger: Principal) -> u64 {
             fallback
         }
     }
+}
+
+/// Query the ledger directly instead of trusting the process-local fee cache.
+/// Liquidation approvals use an explicit `fee` and must book the exact value
+/// offered to the ledger; a cache hit here could silently under-book after a
+/// fee change. `None` means the query failed or returned an unrepresentable fee
+/// and callers must hold the operation.
+pub(crate) async fn fresh_ledger_transfer_fee(ledger: Principal) -> Option<u64> {
+    match call::<(), (candid::Nat,)>(ledger, "icrc1_fee", ()).await {
+        Ok((fee_nat,)) => cache_fresh_ledger_fee(ledger, fee_nat),
+        Err(error) => {
+            invalidate_cached_ledger_fee(ledger);
+            log!(
+                INFO,
+                "Fresh icrc1_fee query failed for {}: {:?}; liquidation held",
+                ledger,
+                error
+            );
+            None
+        }
+    }
+}
+
+fn cache_fresh_ledger_fee(ledger: Principal, fee_nat: candid::Nat) -> Option<u64> {
+    let Ok(fee) = nat_fee_to_u64(fee_nat) else {
+        invalidate_cached_ledger_fee(ledger);
+        log!(
+            INFO,
+            "icrc1_fee returned a value exceeding u64 for {}; liquidation held",
+            ledger
+        );
+        return None;
+    };
+    LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, fee));
+    Some(fee)
+}
+
+/// A typed `BadFee` guarantees the approve had no ledger effect. Evict a
+/// potentially stale fee so a later liquidation must obtain a fresh quote.
+pub(crate) fn invalidate_cached_ledger_fee_after_approve_bad_fee(ledger: Principal) {
+    invalidate_cached_ledger_fee(ledger);
 }
 
 /// Result of an unallocated-interest transfer attempt. A `BadFee` is known not
@@ -128,6 +363,7 @@ pub async fn transfer_unallocated_interest_to_treasury(
     created_at_time: u64,
     memo: Vec<u8>,
 ) -> Result<UnallocatedInterestTransferResult, StabilityPoolError> {
+    crate::ensure_pool_balance_mutation_allowed_for_ledger(token_ledger)?;
     let transfer_args = TransferArg {
         from_subaccount: None,
         to: Account {
@@ -186,7 +422,13 @@ pub(crate) async fn ledger_pool_balance(ledger: Principal) -> Option<u64> {
         subaccount: None,
     };
     match call::<(Account,), (candid::Nat,)>(ledger, "icrc1_balance_of", (account,)).await {
-        Ok((balance_nat,)) => Some(balance_nat.0.try_into().unwrap_or(u64::MAX)),
+        Ok((balance_nat,)) => match balance_nat.0.try_into() {
+            Ok(balance) => Some(balance),
+            Err(_) => {
+                log!(INFO, "icrc1_balance_of returned a balance exceeding u64 for {}; skipping shortfall reconciliation", ledger);
+                None
+            }
+        },
         Err(e) => {
             log!(
                 INFO,
@@ -205,8 +447,19 @@ fn prepare_withdrawal_after_ledger_check(
     requested_amount: u64,
     ledger_balance: Option<u64>,
     ledger_fee: u64,
-) -> Result<(u64, Option<String>), StabilityPoolError> {
+    transfer_created_at_time_ns: u64,
+    transfer_memo: Vec<u8>,
+) -> Result<(PendingOutboundPayout, Option<String>), StabilityPoolError> {
     mutate_state(|s| {
+        let payouts = s
+            .pending_outbound_payouts
+            .as_ref()
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        if payouts.contains_key(&(caller, token_ledger))
+            || payouts.len() >= crate::state::MAX_PENDING_OUTBOUND_PAYOUTS
+        {
+            return Err(StabilityPoolError::SystemBusy);
+        }
         let mut withdrawal_amount = requested_amount;
         let mut correction_msg = None;
 
@@ -225,7 +478,7 @@ fn prepare_withdrawal_after_ledger_check(
             if live_balance < aggregate_balance {
                 if live_balance <= ledger_fee {
                     return Err(StabilityPoolError::AmountTooLow {
-                        minimum_e8s: ledger_fee + 1,
+                        minimum_e8s: ledger_fee.saturating_add(1),
                     });
                 }
 
@@ -253,43 +506,216 @@ fn prepare_withdrawal_after_ledger_check(
             }
         }
 
+        if withdrawal_amount <= ledger_fee {
+            return Err(StabilityPoolError::AmountTooLow {
+                minimum_e8s: ledger_fee.saturating_add(1),
+            });
+        }
+        let payout = PendingOutboundPayout {
+            kind: OutboundPayoutKind::Withdraw,
+            request_amount: requested_amount,
+            gross_amount: withdrawal_amount,
+            transfer_amount: withdrawal_amount - ledger_fee,
+            transfer_fee: ledger_fee,
+            transfer_created_at_time_ns,
+            transfer_memo,
+            dispatch_in_flight: true,
+            ambiguous_seen: false,
+            last_error: None,
+        };
         s.process_withdrawal(caller, token_ledger, withdrawal_amount)?;
-        Ok((withdrawal_amount, correction_msg))
+        s.pending_outbound_payouts
+            .as_mut()
+            .ok_or(StabilityPoolError::SystemBusy)?
+            .insert((caller, token_ledger), payout.clone());
+        Ok((payout, correction_msg))
     })
+}
+
+fn outbound_payout_memo(caller: Principal, ledger: Principal, created_at_time_ns: u64) -> Vec<u8> {
+    // ICRC ledgers may cap memos at 64 bytes, so keep this identity fixed at
+    // SHA-256's 32-byte output while binding all fields with explicit lengths.
+    // Existing pending rows retain their saved memo and continue retrying the
+    // exact previously dispatched tuple.
+    use sha2::Digest;
+
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"rumi-sp-payout-v2\0");
+    hasher.update((caller.as_slice().len() as u64).to_be_bytes());
+    hasher.update(caller.as_slice());
+    hasher.update((ledger.as_slice().len() as u64).to_be_bytes());
+    hasher.update(ledger.as_slice());
+    hasher.update(created_at_time_ns.to_be_bytes());
+    hasher.finalize().to_vec()
+}
+
+fn outbound_transfer_args(caller: Principal, payout: &PendingOutboundPayout) -> TransferArg {
+    TransferArg {
+        to: Account {
+            owner: caller,
+            subaccount: None,
+        },
+        amount: payout.transfer_amount.into(),
+        fee: Some(payout.transfer_fee.into()),
+        memo: Some(payout.transfer_memo.clone().into()),
+        created_at_time: Some(payout.transfer_created_at_time_ns),
+        from_subaccount: None,
+    }
+}
+
+fn recover_stale_outbound_dispatch(caller: Principal, ledger: Principal) {
+    let dispatch_pending = read_state(|s| {
+        s.pending_outbound_payout(&caller, &ledger)
+            .is_some_and(|payout| payout.dispatch_in_flight)
+    });
+    if dispatch_pending && !crate::pool_guard::balance_async_in_flight() {
+        mutate_state(|s| s.recover_interrupted_outbound_payout(caller, ledger));
+    }
+}
+
+async fn dispatch_outbound_payout(
+    caller: Principal,
+    ledger: Principal,
+    payout: PendingOutboundPayout,
+) -> Result<(), StabilityPoolError> {
+    let result: Result<(Result<candid::Nat, TransferError>,), _> = call(
+        ledger,
+        "icrc1_transfer",
+        (outbound_transfer_args(caller, &payout),),
+    )
+    .await;
+    match result {
+        Ok((Ok(_block),)) => {
+            mutate_state(|s| s.complete_outbound_payout(caller, ledger, ic_cdk::api::time()));
+            Ok(())
+        }
+        Ok((Err(TransferError::Duplicate { .. }),)) => {
+            mutate_state(|s| s.complete_outbound_payout(caller, ledger, ic_cdk::api::time()));
+            Ok(())
+        }
+        Ok((Err(
+            error @ (TransferError::BadFee { .. }
+            | TransferError::BadBurn { .. }
+            | TransferError::InsufficientFunds { .. }
+            | TransferError::CreatedInFuture { .. }
+            | TransferError::TooOld),
+        ),)) => {
+            // A successful fee query can become stale before dispatch. Evict
+            // it even when an earlier attempt was ambiguous so the held tuple
+            // can be reviewed/retried with current ledger data.
+            invalidate_fee_cache_after_transfer_error(ledger, &error);
+            let restored = mutate_state(|s| {
+                s.reject_outbound_payout_without_effect(
+                    caller,
+                    ledger,
+                    format!("{:?}", error),
+                    ic_cdk::api::time(),
+                )
+            })?;
+            if restored {
+                Err(StabilityPoolError::LedgerTransferFailed {
+                    reason: format!("{:?}", error),
+                })
+            } else {
+                Err(StabilityPoolError::SystemBusy)
+            }
+        }
+        Ok((Err(error),)) => {
+            // TemporarilyUnavailable and GenericError do not establish a
+            // no-effect result. Retain the exact tuple and do not restore.
+            mutate_state(|s| {
+                s.mark_outbound_payout_ambiguous(caller, ledger, format!("{:?}", error))
+            });
+            Err(StabilityPoolError::LedgerTransferFailed {
+                reason: "outbound payout outcome unresolved; exact transfer tuple retained".into(),
+            })
+        }
+        Err(error) => {
+            mutate_state(|s| {
+                s.mark_outbound_payout_ambiguous(caller, ledger, format!("{:?}", error))
+            });
+            Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", ledger),
+                method: "icrc1_transfer".into(),
+            })
+        }
+    }
 }
 
 /// Deposit a stablecoin into the pool. User must have pre-approved the pool canister.
 pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
     // SP-102: refuse balance-mutating ops while a liquidation is apportioning.
-    if crate::pool_balance_mutation_blocked() {
-        return Err(StabilityPoolError::SystemBusy);
-    }
+    crate::ensure_pool_balance_mutation_allowed_for_ledger(token_ledger)?;
     let caller = ic_cdk::api::caller();
 
+    if complete_saved_deposit_receipt_before_admission(
+        caller,
+        token_ledger,
+        amount,
+        ic_cdk::api::time(),
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+
+    let pending_without_receipt = read_state(|s| {
+        s.pending_deposit_intents
+            .as_ref()
+            .and_then(|intents| intents.get(&caller))
+            .is_some_and(|intent| {
+                intent.token_ledger == token_ledger
+                    && intent.amount == amount
+                    && intent.transfer_block_index.is_none()
+            })
+    });
+    if read_state(|s| {
+        s.pending_deposit_intents
+            .as_ref()
+            .and_then(|intents| intents.get(&caller))
+            .is_some_and(|intent| {
+                intent.token_ledger == token_ledger
+                    && intent.amount == amount
+                    && intent.too_old_rejected == Some(true)
+            })
+    }) {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "this exact deposit identity was rejected as TooOld; reconcile its receipt or complete its history scan before retrying".into(),
+        });
+    }
     // Validate token is accepted
-    let config = read_state(|s| s.get_stablecoin_config(&token_ledger).cloned()).ok_or(
-        StabilityPoolError::TokenNotAccepted {
+    let config = read_state(|s| s.get_stablecoin_config(&token_ledger).cloned())
+        .ok_or(StabilityPoolError::TokenNotAccepted {
             ledger: token_ledger,
-        },
-    )?;
+        })
+        .map_err(|error| pending_deposit_admission_error(error, pending_without_receipt))?;
 
     if !config.is_active {
-        return Err(StabilityPoolError::TokenNotActive {
-            ledger: token_ledger,
-        });
+        return Err(pending_deposit_admission_error(
+            StabilityPoolError::TokenNotActive {
+                ledger: token_ledger,
+            },
+            pending_without_receipt,
+        ));
     }
 
     // Validate minimum deposit (normalize to e8s for comparison)
     let amount_e8s = normalize_to_e8s(amount, config.decimals);
     let min_deposit = read_state(|s| s.configuration.min_deposit_e8s);
     if amount_e8s < min_deposit {
-        return Err(StabilityPoolError::AmountTooLow {
-            minimum_e8s: min_deposit,
-        });
+        return Err(pending_deposit_admission_error(
+            StabilityPoolError::AmountTooLow {
+                minimum_e8s: min_deposit,
+            },
+            pending_without_receipt,
+        ));
     }
 
     if read_state(|s| s.configuration.emergency_pause) {
-        return Err(StabilityPoolError::EmergencyPaused);
+        return Err(pending_deposit_admission_error(
+            StabilityPoolError::EmergencyPaused,
+            pending_without_receipt,
+        ));
     }
 
     log!(
@@ -300,6 +726,31 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
         token_ledger,
         caller
     );
+
+    // Persist the exact transfer identity before dispatch. Same-caller retries
+    // reuse this identity; a distinct request gets a strictly newer timestamp.
+    let (transfer_timestamp, prior_receipt) = mutate_state(|s| {
+        let timestamp =
+            s.begin_deposit_intent(caller, token_ledger, amount, ic_cdk::api::time())?;
+        let receipt = s
+            .pending_deposit_intents
+            .as_ref()
+            .and_then(|intents| intents.get(&caller))
+            .and_then(|intent| intent.transfer_block_index);
+        Ok::<_, ()>((timestamp, receipt))
+    })
+    .map_err(|_| StabilityPoolError::LedgerTransferFailed {
+        reason: "a pending deposit identity is fenced for reconciliation".into(),
+    })?;
+
+    if prior_receipt.is_some() {
+        return complete_deposit_credit_after_async(
+            caller,
+            token_ledger,
+            amount,
+            transfer_timestamp,
+        );
+    }
 
     // ICRC-2 transfer_from: pull tokens from user to pool canister
     let transfer_args = TransferFromArgs {
@@ -314,7 +765,7 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
         amount: amount.into(),
         fee: None,
         memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
+        created_at_time: Some(transfer_timestamp),
         spender_subaccount: None,
     };
 
@@ -324,47 +775,117 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
     match result {
         Ok((Ok(block_index),)) => {
             log!(INFO, "Transfer succeeded, block: {}", block_index);
-            if let Err(error) = record_deposit_credit_after_async(caller, token_ledger, amount) {
-                refund_user(
+            let block_index: u64 =
+                block_index
+                    .0
+                    .try_into()
+                    .map_err(|_| StabilityPoolError::LedgerTransferFailed {
+                        reason: "deposit transfer block index exceeds u64; intent retained"
+                            .to_string(),
+                    })?;
+            let recorded = mutate_state(|s| {
+                s.record_deposit_receipt(
                     caller,
                     token_ledger,
                     amount,
-                    "deposit: pool balance mutation blocked after transfer",
+                    transfer_timestamp,
+                    block_index,
                 )
-                .await;
-                return Err(error);
+            });
+            if !recorded {
+                return Err(StabilityPoolError::SystemBusy);
             }
+            complete_deposit_credit_after_async(caller, token_ledger, amount, transfer_timestamp)?;
             log!(INFO, "Deposit recorded for {}", caller);
             Ok(())
         }
-        // Audit Wave-3 (ICRC-003): Duplicate from the ledger means the
-        // previous transfer landed; the tokens are already in the pool.
-        // Credit the deposit and treat as success.
+        // Duplicate is success only for the exact persisted intent. Completion
+        // removes that intent atomically, so concurrent replies cannot credit
+        // this one ledger transfer twice.
         Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => {
             log!(
                 INFO,
-                "Deposit transfer Duplicate (block {}); previous attempt landed, crediting deposit",
+                "Deposit transfer Duplicate (block {}); completing exact pending intent",
                 duplicate_of
             );
-            if let Err(error) = record_deposit_credit_after_async(caller, token_ledger, amount) {
-                refund_user(
+            let block_index: u64 = duplicate_of.0.try_into().map_err(|_| {
+                StabilityPoolError::LedgerTransferFailed {
+                    reason: "duplicate deposit block index exceeds u64; intent retained"
+                        .to_string(),
+                }
+            })?;
+            let recorded = mutate_state(|s| {
+                s.record_deposit_receipt(
                     caller,
                     token_ledger,
                     amount,
-                    "deposit: pool balance mutation blocked after duplicate transfer",
+                    transfer_timestamp,
+                    block_index,
                 )
-                .await;
-                return Err(error);
+            });
+            if !recorded {
+                return Err(StabilityPoolError::SystemBusy);
             }
-            Ok(())
+            complete_deposit_credit_after_async(caller, token_ledger, amount, transfer_timestamp)
         }
-        Ok((Err(transfer_error),)) => {
+        Ok((Err(transfer_error),))
+            if matches!(
+                &transfer_error,
+                TransferFromError::BadFee { .. }
+                    | TransferFromError::BadBurn { .. }
+                    | TransferFromError::InsufficientFunds { .. }
+                    | TransferFromError::InsufficientAllowance { .. }
+                    | TransferFromError::CreatedInFuture { .. }
+            ) =>
+        {
+            let cleared = mutate_state(|s| {
+                s.clear_deposit_intent_after_no_effect(
+                    caller,
+                    token_ledger,
+                    amount,
+                    transfer_timestamp,
+                )
+            });
+            if !cleared {
+                return Err(StabilityPoolError::LedgerTransferFailed {
+                    reason: "deposit intent retained because another dispatch is in flight or an earlier outcome was ambiguous"
+                        .to_string(),
+                });
+            }
             log!(INFO, "Transfer failed: {:?}", transfer_error);
             Err(StabilityPoolError::LedgerTransferFailed {
                 reason: format!("{:?}", transfer_error),
             })
         }
+        Ok((Err(TransferFromError::TooOld),)) => {
+            let marked = mutate_state(|s| {
+                s.mark_deposit_intent_too_old(caller, token_ledger, amount, transfer_timestamp)
+            });
+            Err(StabilityPoolError::LedgerTransferFailed {
+                reason: if marked {
+                    "the exact deposit identity was rejected as TooOld; it remains held until exact receipt or complete archive-aware history reconciliation".into()
+                } else {
+                    "the ledger returned TooOld but the exact deposit intent could not be marked; it remains held".into()
+                },
+            })
+        }
+        Ok((Err(transfer_error),)) => {
+            // TemporarilyUnavailable and GenericError do not prove whether
+            // this or a prior dispatch committed. Keep the identity for exact
+            // retry or positive ICRC-3 receipt reconciliation.
+            mutate_state(|s| {
+                s.mark_deposit_intent_ambiguous(caller, token_ledger, amount, transfer_timestamp)
+            });
+            log!(INFO, "Transfer failed: {:?}", transfer_error);
+            Err(StabilityPoolError::LedgerTransferFailed {
+                reason: "deposit outcome unresolved; original transfer identity retained"
+                    .to_string(),
+            })
+        }
         Err(call_error) => {
+            mutate_state(|s| {
+                s.mark_deposit_intent_ambiguous(caller, token_ledger, amount, transfer_timestamp)
+            });
             log!(INFO, "Inter-canister call failed: {:?}", call_error);
             Err(StabilityPoolError::InterCanisterCallFailed {
                 target: format!("{}", token_ledger),
@@ -374,184 +895,283 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
     }
 }
 
+fn commit_reconciled_deposit(
+    caller: Principal,
+    intent: &PendingDepositIntent,
+    block_index: u64,
+    reconciliation_generation: u64,
+) -> Result<(), StabilityPoolError> {
+    crate::ensure_pool_balance_mutation_allowed_for_ledger(intent.token_ledger)?;
+    let now_ns = ic_cdk::api::time();
+    let completed = mutate_state(|state| {
+        state.complete_reconciled_deposit(
+            caller,
+            intent.token_ledger,
+            intent.amount,
+            intent.transfer_created_at_time_ns,
+            block_index,
+            now_ns,
+            reconciliation_generation,
+        )
+    });
+    if completed {
+        Ok(())
+    } else {
+        Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "exact deposit receipt verified but the pending intent changed; deposit remains held".into(),
+        })
+    }
+}
+
+/// Complete a user's exact ambiguous deposit only after an archive-aware
+/// ICRC-3 block proves the persisted ICRC-2 transfer_from tuple.
+pub async fn reconcile_pending_deposit(block_index: u64) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let intent = mutate_state(|state| {
+        state.claim_pending_deposit_reconciliation(caller, ic_cdk::api::time())
+    })
+    .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+        reason: reason.into(),
+    })?;
+    let reconciliation_generation = intent.reconciliation_generation.ok_or_else(|| {
+        StabilityPoolError::LedgerTransferFailed {
+            reason: "deposit reconciliation generation is missing".into(),
+        }
+    })?;
+    let result = async {
+        let block =
+            rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(intent.token_ledger, block_index)
+                .await
+                .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                    reason: format!(
+                        "deposit receipt history is incomplete; intent remains held: {reason}"
+                    ),
+                })?;
+        validate_pending_deposit_block(caller, ic_cdk::id(), &intent, &block).map_err(
+            |reason| StabilityPoolError::LedgerTransferFailed {
+                reason: format!("block is not the exact pending deposit: {reason}"),
+            },
+        )?;
+        commit_reconciled_deposit(caller, &intent, block_index, reconciliation_generation)
+    }
+    .await;
+    if result.is_err() {
+        mutate_state(|state| {
+            state.release_deposit_history_scan(
+                caller,
+                reconciliation_generation,
+                ic_cdk::api::time(),
+            )
+        });
+    }
+    result
+}
+
+/// Scan the caller's fixed ICRC-3 log prefix in bounded archive-aware pages
+/// after an exact TooOld response. A matching transfer is credited once; a
+/// new transfer identity is admitted only after every block below the pinned
+/// tip is fetched and proves absence.
+pub async fn reconcile_pending_deposit_history() -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let intent =
+        mutate_state(|state| state.claim_deposit_history_scan(caller, ic_cdk::api::time()))
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: reason.into(),
+            })?;
+    let reconciliation_generation = intent.reconciliation_generation.unwrap_or_default();
+    let result = reconcile_pending_deposit_history_page(caller, intent).await;
+    if result.is_err() {
+        mutate_state(|state| {
+            state.release_deposit_history_scan(
+                caller,
+                reconciliation_generation,
+                ic_cdk::api::time(),
+            )
+        });
+    }
+    result
+}
+
+async fn reconcile_pending_deposit_history_page(
+    caller: Principal,
+    mut intent: PendingDepositIntent,
+) -> Result<(), StabilityPoolError> {
+    let reconciliation_generation = intent.reconciliation_generation.ok_or_else(|| {
+        StabilityPoolError::LedgerTransferFailed {
+            reason: "deposit reconciliation generation is missing; intent remains held".into(),
+        }
+    })?;
+    if intent.history_scan_cursor.is_none() && intent.history_scan_tip.is_none() {
+        let tip = rumi_protocol_backend::icrc3_proof::icrc3_log_length(intent.token_ledger)
+            .await
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: format!(
+                    "could not establish deposit history tip; intent remains held: {reason}"
+                ),
+            })?;
+        intent = mutate_state(|state| {
+            state.start_deposit_history_scan(caller, tip, reconciliation_generation)
+        })
+        .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+            reason: format!("could not persist deposit history scan: {reason}"),
+        })?;
+    }
+    let cursor =
+        intent
+            .history_scan_cursor
+            .ok_or_else(|| StabilityPoolError::LedgerTransferFailed {
+                reason: "deposit history scan cursor is missing; intent remains held".into(),
+            })?;
+    let tip = intent
+        .history_scan_tip
+        .ok_or_else(|| StabilityPoolError::LedgerTransferFailed {
+            reason: "deposit history scan tip is missing; intent remains held".into(),
+        })?;
+    if cursor > tip {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "deposit history cursor exceeds its fixed tip; intent remains held".into(),
+        });
+    }
+    let end = cursor
+        .saturating_add(MAX_PENDING_DEPOSIT_HISTORY_BLOCKS_PER_CALL)
+        .min(tip);
+    for index in cursor..end {
+        let block =
+            rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(intent.token_ledger, index)
+                .await
+                .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                    reason: format!(
+                "deposit history is incomplete at block {index}; intent remains held: {reason}"
+            ),
+                })?;
+        if validate_pending_deposit_block(caller, ic_cdk::id(), &intent, &block).is_ok() {
+            return commit_reconciled_deposit(caller, &intent, index, reconciliation_generation);
+        }
+        if pending_deposit_block_identity_may_match(caller, ic_cdk::id(), &intent, &block) {
+            return Err(StabilityPoolError::LedgerTransferFailed {
+                reason: format!("deposit-like ledger block {index} conflicts with the persisted transfer tuple; intent remains held"),
+            });
+        }
+    }
+    mutate_state(|state| {
+        state.advance_deposit_history_scan(
+            caller,
+            cursor,
+            tip,
+            end,
+            ic_cdk::api::time(),
+            reconciliation_generation,
+        )
+    })
+    .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+        reason: format!("could not persist deposit history scan progress: {reason}"),
+    })?;
+    if end == tip {
+        mutate_state(|state| state.rotate_deposit_after_no_effect(caller, ic_cdk::api::time()))
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: format!("complete archive-aware deposit history proves no effect; intent remains held: {reason}"),
+            })?;
+    }
+    Ok(())
+}
+
 /// Withdraw a stablecoin from the pool (only unconsumed balances).
 ///
-/// Uses deduct-before-transfer pattern to prevent TOCTOU double-spend:
-/// 1. Deduct balance from state (prevents concurrent withdrawals from passing balance check)
-/// 2. Transfer tokens to user
-/// 3. If transfer fails, rollback the deduction
+/// Persists an exact payout row atomically with the debit before dispatch.
+/// Ambiguous outcomes keep the row and debit fenced until the same tuple resolves.
 pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
     // SP-102: refuse balance-mutating ops while a liquidation is apportioning,
     // so a withdraw cannot land between a liquidation's snapshot and its burn
     // apportionment and escape the depositor's share of the loss.
-    if crate::pool_balance_mutation_blocked() {
-        return Err(StabilityPoolError::SystemBusy);
-    }
     let caller = ic_cdk::api::caller();
+    crate::ensure_outbound_retry_allowed(token_ledger, caller)?;
 
     if read_state(|s| s.configuration.emergency_pause) {
         return Err(StabilityPoolError::EmergencyPaused);
     }
 
-    // The ledger debits `transfer_amount + fee` from the pool. Query the live
-    // fee first so a max withdrawal drains the user's recorded position without
-    // overdrawing the pool ledger account.
-    let ledger_fee = ledger_transfer_fee(token_ledger).await;
-    let pool_ledger_balance = ledger_pool_balance(token_ledger).await;
+    recover_stale_outbound_dispatch(caller, token_ledger);
 
-    if amount <= ledger_fee {
-        return Err(StabilityPoolError::AmountTooLow {
-            minimum_e8s: ledger_fee + 1,
-        });
+    // Hold the shared balance-operation admission guard across fee/balance
+    // queries and the transfer await. A liquidation cannot start after the
+    // initial policy check but before this withdrawal reaches the ledger.
+    let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new()?;
+
+    if let Some(existing) = read_state(|s| s.pending_outbound_payout(&caller, &token_ledger)) {
+        if existing.kind != OutboundPayoutKind::Withdraw || existing.request_amount != amount {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        let payout = mutate_state(|s| s.begin_outbound_payout_retry(caller, token_ledger))?;
+        dispatch_outbound_payout(caller, token_ledger, payout).await?;
+        return Ok(());
     }
 
-    // Deduct full amount from state BEFORE transfer to prevent double-spend.
-    // If the transfer fails, we rollback below.
-    let (withdrawal_amount, correction_msg) = prepare_withdrawal_after_ledger_check(
+    // Complete every query before changing depositor state. The exact tuple is
+    // then persisted atomically with the debit before the outbound await.
+    let ledger_fee = ledger_transfer_fee(token_ledger).await;
+    let pool_ledger_balance = ledger_pool_balance(token_ledger).await;
+    if amount <= ledger_fee {
+        return Err(StabilityPoolError::AmountTooLow {
+            minimum_e8s: ledger_fee.saturating_add(1),
+        });
+    }
+    let created_at_time_ns =
+        mutate_state(|s| s.allocate_outbound_payout_timestamp(ic_cdk::api::time()))?;
+    let memo = outbound_payout_memo(caller, token_ledger, created_at_time_ns);
+    let (payout, correction_msg) = prepare_withdrawal_after_ledger_check(
         caller,
         token_ledger,
         amount,
         pool_ledger_balance,
         ledger_fee,
+        created_at_time_ns,
+        memo,
     )?;
     if let Some(msg) = correction_msg {
         log!(INFO, "Withdrawal reconciled ledger shortfall: {}", msg);
     }
-    let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new();
-
-    // User receives amount minus fee; pool pays amount total (transfer + fee)
-    let transfer_amount = withdrawal_amount - ledger_fee;
-    log!(
-        INFO,
-        "Withdraw: {} (transfer {} - fee {}) from {} by {}",
-        withdrawal_amount,
-        transfer_amount,
-        ledger_fee,
-        token_ledger,
-        caller
-    );
-
-    let transfer_args = TransferArg {
-        to: Account {
-            owner: caller,
-            subaccount: None,
-        },
-        amount: transfer_amount.into(),
-        fee: None,
-        memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
-        from_subaccount: None,
-    };
-
-    let result: Result<(Result<candid::Nat, TransferError>,), _> =
-        call(token_ledger, "icrc1_transfer", (transfer_args,)).await;
-
-    match result {
-        Ok((Ok(block_index),)) => {
-            log!(
-                INFO,
-                "Withdrawal transfer succeeded, block: {}",
-                block_index
-            );
-            mutate_state(|s| {
-                s.push_event(
-                    caller,
-                    PoolEventType::Withdraw {
-                        token_ledger,
-                        amount: withdrawal_amount,
-                    },
-                )
-            });
-            Ok(())
-        }
-        // Audit Wave-3 (ICRC-003): Duplicate means the previous withdrawal
-        // attempt already paid the user. Don't restore — that would double-spend.
-        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
-            log!(
-                INFO,
-                "Withdrawal Duplicate (block {}); previous attempt landed, NOT restoring balance",
-                duplicate_of
-            );
-            mutate_state(|s| {
-                s.push_event(
-                    caller,
-                    PoolEventType::Withdraw {
-                        token_ledger,
-                        amount: withdrawal_amount,
-                    },
-                )
-            });
-            Ok(())
-        }
-        Ok((Err(transfer_error),)) => {
-            log!(
-                INFO,
-                "Withdrawal transfer failed, rolling back deduction: {:?}",
-                transfer_error
-            );
-            // Rollback: re-credit the user's balance (clear ledger rejection,
-            // tokens did NOT leave the pool).
-            mutate_state(|s| s.add_deposit(caller, token_ledger, withdrawal_amount));
-            Err(StabilityPoolError::LedgerTransferFailed {
-                reason: format!("{:?}", transfer_error),
-            })
-        }
-        Err(call_error) => {
-            log!(
-                INFO,
-                "Inter-canister call failed, rolling back deduction: {:?}",
-                call_error
-            );
-            // Rollback: re-credit the user's balance.
-            // NOTE: this is the audit ICRC-002 risk pattern — if the ledger
-            // committed but the reply was lost, restoring creates a phantom
-            // credit. The dedup hash (created_at_time) makes the user's
-            // immediate retry land as Duplicate (handled above), so no
-            // double-spend in practice; lose-then-don't-retry leaves the
-            // deduction restored AND the tokens transferred — a known
-            // operational risk that requires manual reconciliation.
-            mutate_state(|s| s.add_deposit(caller, token_ledger, withdrawal_amount));
-            Err(StabilityPoolError::InterCanisterCallFailed {
-                target: format!("{}", token_ledger),
-                method: "icrc1_transfer".to_string(),
-            })
-        }
-    }
+    dispatch_outbound_payout(caller, token_ledger, payout).await?;
+    Ok(())
 }
 
 /// Claim collateral gains for a single collateral type.
 ///
-/// Uses deduct-before-transfer pattern to prevent TOCTOU double-claim:
-/// 1. Deduct gains from state (prevents concurrent claims from reading same gains)
-/// 2. Transfer collateral to user
-/// 3. If transfer fails, rollback the deduction
+/// Persists an exact payout row atomically with the gain reservation before
+/// dispatch. Ambiguous outcomes keep the row and reservation fenced.
 pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, StabilityPoolError> {
     // SP-102: refuse balance-mutating ops while a liquidation is apportioning.
-    if crate::pool_balance_mutation_blocked() {
-        return Err(StabilityPoolError::SystemBusy);
-    }
     let caller = ic_cdk::api::caller();
+    crate::ensure_outbound_retry_allowed(collateral_ledger, caller)?;
 
     if read_state(|s| s.configuration.emergency_pause) {
         return Err(StabilityPoolError::EmergencyPaused);
     }
 
     read_state(|s| s.ensure_icrc_claimable_collateral(&collateral_ledger))?;
+    recover_stale_outbound_dispatch(caller, collateral_ledger);
+    let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new()?;
 
-    // Read and deduct gains atomically BEFORE transfer.
-    // mark_gains_claimed uses saturating_sub and cleans up zero entries.
-    let gains = mutate_state(|s| {
-        let amount = s
-            .deposits
+    if let Some(existing) = read_state(|s| s.pending_outbound_payout(&caller, &collateral_ledger)) {
+        if existing.kind != OutboundPayoutKind::CollateralClaim {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        let payout = mutate_state(|s| s.begin_outbound_payout_retry(caller, collateral_ledger))?;
+        dispatch_outbound_payout(caller, collateral_ledger, payout).await?;
+        return Ok(existing.transfer_amount);
+    }
+
+    let gains = read_state(|s| {
+        s.deposits
             .get(&caller)
             .and_then(|pos| pos.collateral_gains.get(&collateral_ledger).copied())
-            .unwrap_or(0);
-        if amount > 0 {
-            s.mark_gains_claimed(&caller, &collateral_ledger, amount);
-        }
-        amount
+            .unwrap_or(0)
     });
-
     if gains == 0 {
         return Ok(0);
     }
@@ -561,8 +1181,10 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
     let ledger_fee: u64 = match call::<(), (candid::Nat,)>(collateral_ledger, "icrc1_fee", ()).await
     {
         Ok((fee_nat,)) => {
-            let fee_u128: u128 = fee_nat.0.try_into().unwrap_or(0);
-            fee_u128 as u64
+            nat_fee_to_u64(fee_nat).map_err(|()| StabilityPoolError::LedgerTransferFailed {
+                reason: "collateral ledger fee exceeds supported u64 range; claim not dispatched"
+                    .into(),
+            })?
         }
         Err(e) => {
             // ICRC-004 / SP-203: do NOT fall back to fee=0. The transfer still
@@ -576,19 +1198,26 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
     };
 
     if gains <= ledger_fee {
-        // Gains too small to cover the fee — rollback and return 0
-        mutate_state(|s| {
-            if let Some(pos) = s.deposits.get_mut(&caller) {
-                *pos.collateral_gains.entry(collateral_ledger).or_insert(0) += gains;
-                if let Some(claimed) = pos.total_claimed_gains.get_mut(&collateral_ledger) {
-                    *claimed = claimed.saturating_sub(gains);
-                }
-            }
-        });
+        // Too small to cover the fee; no state was reserved or changed.
         return Ok(0);
     }
 
-    let transfer_amount = gains - ledger_fee;
+    let created_at_time_ns =
+        mutate_state(|s| s.allocate_outbound_payout_timestamp(ic_cdk::api::time()))?;
+    let memo = outbound_payout_memo(caller, collateral_ledger, created_at_time_ns);
+    let Some(payout) = mutate_state(|s| {
+        s.prepare_collateral_payout(
+            caller,
+            collateral_ledger,
+            ledger_fee,
+            created_at_time_ns,
+            memo,
+        )
+    })?
+    else {
+        return Ok(0);
+    };
+    let transfer_amount = payout.transfer_amount;
     log!(
         INFO,
         "Claim: {} of collateral {} (transfer {} - fee {}) by {}",
@@ -599,99 +1228,126 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
         caller
     );
 
-    let transfer_args = TransferArg {
-        to: Account {
-            owner: caller,
-            subaccount: None,
-        },
-        amount: transfer_amount.into(),
-        fee: None,
-        memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
-        from_subaccount: None,
+    dispatch_outbound_payout(caller, collateral_ledger, payout).await?;
+    Ok(transfer_amount)
+}
+
+#[cfg(test)]
+mod nat_fee_conversion_tests {
+    use super::{
+        cache_fresh_ledger_fee, invalidate_cached_ledger_fee_after_approve_bad_fee,
+        invalidate_fee_cache_after_transfer_error, nat_fee_to_u64, outbound_payout_memo,
+        outbound_transfer_args, LEDGER_FEES,
     };
+    use candid::Nat;
+    use candid::Principal;
+    use icrc_ledger_types::icrc1::transfer::TransferError;
 
-    let result: Result<(Result<candid::Nat, TransferError>,), _> =
-        call(collateral_ledger, "icrc1_transfer", (transfer_args,)).await;
+    #[test]
+    fn ledger_fee_conversion_rejects_values_above_u64() {
+        assert_eq!(nat_fee_to_u64(Nat::from(u64::MAX)), Ok(u64::MAX));
+        assert!(nat_fee_to_u64(Nat::from(u128::from(u64::MAX) + 1)).is_err());
+    }
 
-    match result {
-        Ok((Ok(block_index),)) => {
-            log!(
-                INFO,
-                "Collateral claim transfer succeeded, block: {}",
-                block_index
-            );
-            mutate_state(|s| {
-                s.push_event(
-                    caller,
-                    PoolEventType::ClaimCollateral {
-                        collateral_ledger,
-                        amount: transfer_amount,
-                    },
-                )
-            });
-            Ok(transfer_amount)
-        }
-        // Audit Wave-3 (ICRC-003): Duplicate means the previous claim already
-        // paid the user. Don't restore — that would let them claim again.
-        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
-            log!(
-                INFO,
-                "Collateral claim Duplicate (block {}); previous attempt landed, NOT restoring",
-                duplicate_of
-            );
-            mutate_state(|s| {
-                s.push_event(
-                    caller,
-                    PoolEventType::ClaimCollateral {
-                        collateral_ledger,
-                        amount: transfer_amount,
-                    },
-                )
-            });
-            Ok(transfer_amount)
-        }
-        Ok((Err(transfer_error),)) => {
-            log!(
-                INFO,
-                "Collateral claim failed, rolling back: {:?}",
-                transfer_error
-            );
-            // Rollback: restore the gains (clear ledger rejection — tokens
-            // did NOT leave the pool).
-            mutate_state(|s| {
-                if let Some(pos) = s.deposits.get_mut(&caller) {
-                    *pos.collateral_gains.entry(collateral_ledger).or_insert(0) += gains;
-                    if let Some(claimed) = pos.total_claimed_gains.get_mut(&collateral_ledger) {
-                        *claimed = claimed.saturating_sub(gains);
-                    }
-                }
-            });
-            Err(StabilityPoolError::LedgerTransferFailed {
-                reason: format!("{:?}", transfer_error),
-            })
-        }
-        Err(call_error) => {
-            log!(
-                INFO,
-                "Inter-canister call failed, rolling back: {:?}",
-                call_error
-            );
-            // Rollback: restore the gains. See withdraw() for the same
-            // ICRC-002 caveat about transport-error-then-no-retry.
-            mutate_state(|s| {
-                if let Some(pos) = s.deposits.get_mut(&caller) {
-                    *pos.collateral_gains.entry(collateral_ledger).or_insert(0) += gains;
-                    if let Some(claimed) = pos.total_claimed_gains.get_mut(&collateral_ledger) {
-                        *claimed = claimed.saturating_sub(gains);
-                    }
-                }
-            });
-            Err(StabilityPoolError::InterCanisterCallFailed {
-                target: format!("{}", collateral_ledger),
-                method: "icrc1_transfer".to_string(),
-            })
-        }
+    #[test]
+    fn outbound_retry_arguments_use_the_saved_exact_tuple() {
+        let caller = Principal::from_slice(&[1]);
+        let payout = crate::types::PendingOutboundPayout {
+            kind: crate::types::OutboundPayoutKind::Withdraw,
+            request_amount: 100,
+            gross_amount: 100,
+            transfer_amount: 90,
+            transfer_fee: 10,
+            transfer_created_at_time_ns: 123,
+            transfer_memo: b"stable-payout".to_vec(),
+            dispatch_in_flight: true,
+            ambiguous_seen: true,
+            last_error: None,
+        };
+        let args = outbound_transfer_args(caller, &payout);
+        assert_eq!(args.amount, Nat::from(90u64));
+        assert_eq!(args.fee, Some(Nat::from(10u64)));
+        assert_eq!(
+            args.memo.map(|memo| memo.0.to_vec()),
+            Some(b"stable-payout".to_vec())
+        );
+        assert_eq!(args.created_at_time, Some(123));
+    }
+
+    #[test]
+    fn outbound_payout_memo_is_fixed_length_and_binds_its_identity() {
+        let caller = Principal::from_slice(&[1, 2, 3]);
+        let ledger = Principal::from_slice(&[4, 5, 6, 7]);
+        let memo = outbound_payout_memo(caller, ledger, 123);
+
+        assert_eq!(memo.len(), 32);
+        assert_eq!(memo, outbound_payout_memo(caller, ledger, 123));
+        assert_ne!(
+            memo,
+            outbound_payout_memo(Principal::from_slice(&[1, 2, 3, 4]), ledger, 123)
+        );
+        assert_ne!(
+            memo,
+            outbound_payout_memo(caller, Principal::from_slice(&[4, 5, 6, 8]), 123)
+        );
+        assert_ne!(memo, outbound_payout_memo(caller, ledger, 124));
+    }
+
+    #[test]
+    fn bad_fee_retry_evicts_the_cached_fee_for_a_fresh_request() {
+        let ledger = Principal::from_slice(&[9]);
+        LEDGER_FEES.with(|fees| {
+            fees.borrow_mut().insert(ledger, 10);
+        });
+        invalidate_fee_cache_after_transfer_error(
+            ledger,
+            &TransferError::BadFee {
+                expected_fee: candid::Nat::from(11u64),
+            },
+        );
+        assert!(LEDGER_FEES.with(|fees| !fees.borrow().contains_key(&ledger)));
+    }
+
+    #[test]
+    fn changed_approve_fee_invalidates_cache_without_authorizing_a_stale_book_debit() {
+        let ledger = Principal::from_slice(&[11]);
+        LEDGER_FEES.with(|fees| {
+            fees.borrow_mut().insert(ledger, 10);
+        });
+
+        // The explicit fee on the approve can be rejected after the ledger's
+        // fee changes. The typed BadFee has no effect; invalidate 10 so a later
+        // attempt must query the current value instead of booking it.
+        invalidate_cached_ledger_fee_after_approve_bad_fee(ledger);
+        assert_eq!(
+            LEDGER_FEES.with(|fees| fees.borrow().get(&ledger).copied()),
+            None
+        );
+
+        // A fresh query replaces the stale cache rather than returning it.
+        assert_eq!(cache_fresh_ledger_fee(ledger, Nat::from(13u64)), Some(13));
+        assert_eq!(
+            LEDGER_FEES.with(|fees| fees.borrow().get(&ledger).copied()),
+            Some(13)
+        );
+    }
+
+    #[test]
+    fn non_bad_fee_transfer_errors_preserve_the_cached_fee() {
+        let ledger = Principal::from_slice(&[10]);
+        LEDGER_FEES.with(|fees| {
+            fees.borrow_mut().insert(ledger, 10);
+        });
+        invalidate_fee_cache_after_transfer_error(
+            ledger,
+            &TransferError::InsufficientFunds {
+                balance: candid::Nat::from(0u64),
+            },
+        );
+        assert_eq!(
+            LEDGER_FEES.with(|fees| fees.borrow().get(&ledger).copied()),
+            Some(10)
+        );
     }
 }
 
@@ -705,6 +1361,19 @@ pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, Stabilit
 
     if read_state(|s| s.configuration.emergency_pause) {
         return Err(StabilityPoolError::EmergencyPaused);
+    }
+
+    // Retry any persisted collateral payout first. Its gain has already been
+    // removed from the position, so deriving work only from claimable gains
+    // would incorrectly report an empty successful claim_all result.
+    let pending = read_state(|s| s.pending_collateral_payouts_for(&caller));
+    if !pending.is_empty() {
+        let mut resolved = BTreeMap::new();
+        for (ledger, _) in pending {
+            let amount = claim_collateral(ledger).await?;
+            resolved.insert(ledger, amount);
+        }
+        return Ok(resolved);
     }
 
     let all_gains = read_state(|s| s.get_claimable_icrc_collateral_gains(&caller));
@@ -724,12 +1393,13 @@ pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, Stabilit
             Err(e) => {
                 log!(
                     INFO,
-                    "Failed to claim {} from {}: {:?}",
-                    amount,
+                    "Claim from {} is unresolved or failed: {:?}; stopping claim_all",
                     collateral_ledger,
                     e
                 );
-                // Continue claiming others — partial success is fine
+                // A held payout is durable state and must be visible to the
+                // caller; do not return a successful-looking partial result.
+                return Err(e);
             }
         }
     }
@@ -737,16 +1407,42 @@ pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, Stabilit
     Ok(claimed)
 }
 
-/// Convenience deposit: user sends icUSD (or ckUSDT/ckUSDC) and the pool
-/// deposits it into the 3pool on their behalf, crediting the resulting 3USD.
+/// Keep the 3USD conversion entry point closed until the 3pool supports a
+/// durable add-liquidity receipt. The legacy flow below remains available for
+/// reference while the cross-canister receipt API is coordinated, but this
+/// wrapper never enters it and therefore performs no ledger call.
 pub async fn deposit_as_3usd(
     token_ledger: Principal,
     amount: u64,
 ) -> Result<u64, StabilityPoolError> {
+    let continue_conversion =
+        require_receipt_backed_3usd_conversion(|| deposit_as_3usd_inner(token_ledger, amount))?;
+    continue_conversion.await
+}
+
+fn require_receipt_backed_3usd_conversion<T>(
+    _continue_conversion: impl FnOnce() -> T,
+) -> Result<T, StabilityPoolError> {
+    // Method availability alone does not prove that the 3pool pull and LP mint
+    // can be reconciled across lost replies. Keep this before the input-token
+    // pull until the 3pool exposes a durable receipt for that operation.
+    Err(StabilityPoolError::InterCanisterCallFailed {
+        method:
+            "deposit_as_3usd: receipt-backed conversion unavailable; no input tokens were pulled"
+                .to_string(),
+        target: "3pool add-liquidity recovery".to_string(),
+    })
+}
+
+/// Legacy financial path retained until it can be replaced with the complete
+/// receipt-backed saga. It is reachable only through the fail-closed wrapper
+/// above, whose operation closure is never invoked.
+async fn deposit_as_3usd_inner(
+    token_ledger: Principal,
+    amount: u64,
+) -> Result<u64, StabilityPoolError> {
     // SP-102: refuse balance-mutating ops while a liquidation is apportioning.
-    if crate::pool_balance_mutation_blocked() {
-        return Err(StabilityPoolError::SystemBusy);
-    }
+    crate::ensure_pool_balance_mutation_allowed_for_ledger(token_ledger)?;
     let caller = ic_cdk::api::caller();
 
     let config = read_state(|s| s.get_stablecoin_config(&token_ledger).cloned()).ok_or(
@@ -789,6 +1485,7 @@ pub async fn deposit_as_3usd(
                 ledger: token_ledger,
             })
     })?;
+    crate::ensure_pool_balance_mutation_allowed_for_ledger(three_usd_ledger)?;
 
     log!(
         INFO,
@@ -797,6 +1494,13 @@ pub async fn deposit_as_3usd(
         amount,
         token_ledger
     );
+
+    // Share the timestamp allocator with ordinary deposits. Otherwise these
+    // distinct workflows can submit identical ICRC-2 arguments in one IC time
+    // round and have one physical pull satisfy both accounting paths.
+    let transfer_timestamp =
+        mutate_state(|s| s.reserve_deposit_transfer_timestamp(ic_cdk::api::time()))
+            .map_err(|_| StabilityPoolError::SystemBusy)?;
 
     // Step 1: Pull tokens from user
     let transfer_args = TransferFromArgs {
@@ -811,7 +1515,7 @@ pub async fn deposit_as_3usd(
         amount: amount.into(),
         fee: None,
         memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
+        created_at_time: Some(transfer_timestamp),
         spender_subaccount: None,
     };
 
@@ -989,110 +1693,125 @@ pub async fn deposit_as_3usd(
 
 /// Refund the pulled tokens to the user after a failed deposit_as_3usd.
 ///
-/// IC-S-001: the refund sends `amount` NET of the ledger transfer fee so the
-/// pool's ledger balance drops by exactly `amount` (a gross refund cost
-/// amount+fee, drifting the pool one fee below its tracked deposits per
-/// refund). If the refund transfer itself fails, the amount is persisted as a
-/// pending refund recoverable via `claim_pending_refund` instead of being
-/// silently stranded.
+/// The full principal obligation is journaled before any transfer attempt.
+/// Protocol-funded fee capacity is reserved separately; without it, the row
+/// remains pending and no user principal is netted to pay the ledger fee.
 async fn refund_user(user: Principal, token_ledger: Principal, amount: u64, reason: &str) {
-    let fee = ledger_transfer_fee(token_ledger).await;
-    if amount <= fee {
-        // Nothing transferable once the ledger fee is covered; the dust stays
-        // in the pool (solvency-safe, mirrors rumi_3pool::transfer_to_user).
-        log!(
-            INFO,
-            "refund_user: {} of {} for {} not refundable (<= ledger fee {}); leaving as pool dust",
-            amount,
-            token_ledger,
+    let id = mutate_state(|s| {
+        s.record_pending_refund(
             user,
-            fee
-        );
-        return;
-    }
-    let transfer_args = TransferArg {
-        to: Account {
-            owner: user,
-            subaccount: None,
-        },
-        amount: (amount - fee).into(),
-        fee: None,
-        memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
-        from_subaccount: None,
-    };
-    let result: Result<(Result<candid::Nat, TransferError>,), _> =
-        call(token_ledger, "icrc1_transfer", (transfer_args,)).await;
-    let failure = match result {
-        Ok((Ok(_),)) => None,
-        // Duplicate: a previous refund attempt already paid the user.
-        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
-            log!(
-                INFO,
-                "refund_user: Duplicate (block {}); previous refund landed",
-                duplicate_of
-            );
-            None
-        }
-        Ok((Err(e),)) => Some(format!("{}; refund transfer failed: {:?}", reason, e)),
-        Err(e) => Some(format!("{}; refund call failed: {:?}", reason, e)),
-    };
-    if let Some(why) = failure {
-        let id = mutate_state(|s| {
-            s.record_pending_refund(user, token_ledger, amount, why.clone(), ic_cdk::api::time())
-        });
-        log!(
-            INFO,
-            "refund_user: refund of {} {} to {} failed ({}); recorded pending refund #{}",
-            amount,
             token_ledger,
+            amount,
+            reason.to_string(),
+            ic_cdk::api::time(),
+        )
+    });
+    match claim_pending_refund(id).await {
+        Ok(paid) => log!(
+            INFO,
+            "refund_user: refund #{} paid full principal {} to {}",
+            id,
+            paid,
+            user
+        ),
+        Err(error) => log!(
+            INFO,
+            "refund_user: full-principal refund #{} remains journaled for {} on {}: {:?}",
+            id,
             user,
-            why,
-            id
-        );
+            token_ledger,
+            error
+        ),
     }
 }
 
 /// Recover tokens the pool owes after a failed deposit_as_3usd refund
-/// (IC-S-001). Callable by the original user or a pool admin. The record is
-/// removed BEFORE the async transfer (so two concurrent claims cannot both pay
-/// out) and re-inserted if the transfer fails. Returns the net amount sent
-/// (gross minus the ledger fee). Mirrors rumi_3pool::claim_pending.
+/// (IC-S-001). Callable by the original user or a pool admin. The durable
+/// obligation and exact tuple remain stored across the await. Returns the full
+/// principal only after an exact ICRC-3 receipt is verified.
 pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolError> {
     // SP-102: refuse balance-mutating ops while a liquidation is apportioning.
     if crate::pool_balance_mutation_blocked() {
         return Err(StabilityPoolError::SystemBusy);
     }
+    let _refund_guard = PendingRefundClaimGuard::new(refund_id)?;
+    let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new()?;
     let caller = ic_cdk::api::caller();
 
-    let refund = mutate_state(|s| s.take_pending_refund(refund_id))
-        .ok_or(StabilityPoolError::RefundClaimNotFound)?;
+    let refund = read_state(|s| {
+        s.pending_refunds
+            .as_ref()
+            .and_then(|refunds| refunds.get(&refund_id).cloned())
+    })
+    .ok_or(StabilityPoolError::RefundClaimNotFound)?;
 
     if caller != refund.user && !read_state(|s| s.is_admin(&caller)) {
-        // Not authorized; re-insert before returning so the record is not lost.
-        mutate_state(|s| s.put_pending_refund(refund));
         return Err(StabilityPoolError::Unauthorized);
     }
 
-    let fee = ledger_transfer_fee(refund.token_ledger).await;
-    if refund.amount <= fee {
-        // Nothing transferable once the fee is covered; drop the record and
-        // leave the dust in the pool (solvency-safe).
-        log!(INFO, "claim_pending_refund: refund #{} of {} {} not payable (<= ledger fee {}); record dropped",
-            refund_id, refund.amount, refund.token_ledger, fee);
-        return Ok(0);
+    // Missing markers belong to legacy state and cannot establish whether an
+    // earlier transfer committed. Keep the full obligation held for evidence.
+    if refund.transfer_attempted.is_none() {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "legacy refund has unknown transfer history and remains held".into(),
+        });
     }
-    let net = refund.amount - fee;
+    if refund.transfer_too_old_rejected == Some(true) {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "this exact refund tuple was rejected as TooOld; reconcile its receipt or complete the audited icUSD history scan before retrying".into(),
+        });
+    }
+    let refund = if refund.transfer_attempted == Some(true) {
+        mutate_state(|s| {
+            s.prepare_pending_refund_transfer(
+                refund_id,
+                refund.transfer_fee.unwrap_or(0),
+                refund.transfer_created_at_time_ns.unwrap_or(0),
+                refund.transfer_memo.clone().unwrap_or_default(),
+            )
+        })
+        .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+            reason: reason.to_string(),
+        })?
+    } else {
+        let fee = ledger_transfer_fee(refund.token_ledger).await;
+        let timestamp = ic_cdk::api::time().max(refund.created_at);
+        let attempt_no = refund.transfer_attempt_no.unwrap_or(0);
+        let mut memo = b"rumi-sp-refund-v1:".to_vec();
+        memo.extend_from_slice(&refund.id.to_be_bytes());
+        memo.extend_from_slice(&attempt_no.to_be_bytes());
+        mutate_state(|s| s.prepare_pending_refund_transfer(refund_id, fee, timestamp, memo))
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: reason.to_string(),
+            })?
+    };
+    let fee = refund
+        .transfer_fee
+        .ok_or_else(|| StabilityPoolError::LedgerTransferFailed {
+            reason: "pending refund fee is missing from its transfer journal".into(),
+        })?;
+    let timestamp = refund.transfer_created_at_time_ns.ok_or_else(|| {
+        StabilityPoolError::LedgerTransferFailed {
+            reason: "pending refund timestamp is missing from its transfer journal".into(),
+        }
+    })?;
+    let memo =
+        refund
+            .transfer_memo
+            .clone()
+            .ok_or_else(|| StabilityPoolError::LedgerTransferFailed {
+                reason: "pending refund memo is missing from its transfer journal".into(),
+            })?;
 
     let transfer_args = TransferArg {
         to: Account {
             owner: refund.user,
             subaccount: None,
         },
-        amount: net.into(),
-        fee: None,
-        memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
+        amount: refund.amount.into(),
+        fee: Some(fee.into()),
+        memo: Some(memo.clone().into()),
+        created_at_time: Some(timestamp),
         from_subaccount: None,
     };
     let result: Result<(Result<candid::Nat, TransferError>,), _> =
@@ -1100,27 +1819,116 @@ pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolEr
 
     match result {
         Ok((Ok(block_index),)) => {
+            let block_index: u64 =
+                block_index
+                    .0
+                    .try_into()
+                    .map_err(|_| StabilityPoolError::LedgerTransferFailed {
+                        reason: "refund block index exceeds u64".into(),
+                    })?;
+            rumi_protocol_backend::icrc3_proof::verify_icrc3_transfer_block_with_fee(
+                refund.token_ledger,
+                block_index,
+                Account {
+                    owner: ic_cdk::id(),
+                    subaccount: None,
+                },
+                Account {
+                    owner: refund.user,
+                    subaccount: None,
+                },
+                refund.amount,
+                fee,
+                Some(&memo),
+                Some(timestamp),
+            )
+            .await
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: format!("refund receipt did not verify; obligation remains held: {reason}"),
+            })?;
             log!(
                 INFO,
-                "claim_pending_refund: refund #{} paid {} (net of fee {}) of {} to {}, block {}",
+                "claim_pending_refund: refund #{} paid full principal {} (protocol fee {}) of {} to {}, block {}",
                 refund_id,
-                net,
+                refund.amount,
                 fee,
                 refund.token_ledger,
                 refund.user,
                 block_index
             );
-            Ok(net)
+            mutate_state(|s| {
+                s.complete_pending_refund(refund_id);
+            });
+            Ok(refund.amount)
         }
         // Duplicate: a previous claim attempt already paid the user.
         Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            let block_index: u64 = duplicate_of.0.try_into().map_err(|_| {
+                StabilityPoolError::LedgerTransferFailed {
+                    reason: "duplicate refund block index exceeds u64".into(),
+                }
+            })?;
+            rumi_protocol_backend::icrc3_proof::verify_icrc3_transfer_block_with_fee(
+                refund.token_ledger,
+                block_index,
+                Account {
+                    owner: ic_cdk::id(),
+                    subaccount: None,
+                },
+                Account {
+                    owner: refund.user,
+                    subaccount: None,
+                },
+                refund.amount,
+                fee,
+                Some(&memo),
+                Some(timestamp),
+            )
+            .await
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: format!(
+                    "duplicate refund receipt did not verify; obligation remains held: {reason}"
+                ),
+            })?;
             log!(
                 INFO,
                 "claim_pending_refund: refund #{} Duplicate (block {}); previous attempt landed",
                 refund_id,
-                duplicate_of
+                block_index
             );
-            Ok(net)
+            mutate_state(|s| {
+                s.complete_pending_refund(refund_id);
+            });
+            Ok(refund.amount)
+        }
+        Ok((Err(TransferError::BadFee { expected_fee }),)) => {
+            let corrected_fee: u64 = expected_fee.0.try_into().map_err(|_| {
+                StabilityPoolError::LedgerTransferFailed {
+                    reason: "ledger's corrected refund fee exceeds u64".into(),
+                }
+            })?;
+            mutate_state(|s| {
+                s.refresh_pending_refund_fee_after_bad_fee(refund_id, corrected_fee)
+            })
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: format!(
+                    "ledger proved the prior refund had no effect, but corrected fee remains held: {reason}"
+                ),
+            })?;
+            Err(StabilityPoolError::LedgerTransferFailed {
+                reason: format!(
+                    "ledger proved prior refund had no effect; corrected fee {corrected_fee} is journaled for an explicit retry"
+                ),
+            })
+        }
+        Ok((Err(TransferError::TooOld),)) => {
+            mutate_state(|s| s.mark_pending_refund_too_old(refund_id))
+                .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                    reason: format!("ledger returned TooOld but its refund identity could not be marked: {reason}"),
+                })?;
+            Err(StabilityPoolError::LedgerTransferFailed {
+                reason: "the exact refund tuple was rejected as TooOld and remains held; reconcile a positive ledger receipt or complete the audited icUSD history scan before a new identity".into(),
+            })
         }
         Ok((Err(transfer_error),)) => {
             log!(
@@ -1130,7 +1938,6 @@ pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolEr
                 transfer_error
             );
             let reason = format!("{:?}", transfer_error);
-            mutate_state(|s| s.put_pending_refund(refund));
             Err(StabilityPoolError::LedgerTransferFailed { reason })
         }
         Err(call_error) => {
@@ -1141,7 +1948,6 @@ pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolEr
                 call_error
             );
             let target = format!("{}", refund.token_ledger);
-            mutate_state(|s| s.put_pending_refund(refund));
             Err(StabilityPoolError::InterCanisterCallFailed {
                 target,
                 method: "icrc1_transfer".to_string(),
@@ -1150,13 +1956,355 @@ pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolEr
     }
 }
 
+/// Reconcile a refund whose transfer reply was lost using one exact positive
+/// ICRC-3 receipt. The original user or an admin may supply the block index;
+/// no new transfer is sent by this endpoint.
+pub async fn reconcile_pending_refund(
+    refund_id: u64,
+    block_index: u64,
+) -> Result<u64, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    let refund = read_state(|s| {
+        s.pending_refunds
+            .as_ref()
+            .and_then(|refunds| refunds.get(&refund_id).cloned())
+    })
+    .ok_or(StabilityPoolError::RefundClaimNotFound)?;
+    if caller != refund.user && !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let _refund_guard = PendingRefundClaimGuard::new(refund_id)?;
+    validate_pending_refund_journal(&refund)?;
+    let block =
+        rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(refund.token_ledger, block_index)
+            .await
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: format!(
+                    "refund receipt history is incomplete; obligation remains held: {reason}"
+                ),
+            })?;
+    validate_pending_refund_block(&refund, &block).map_err(|reason| {
+        StabilityPoolError::LedgerTransferFailed {
+            reason: format!("supplied refund block is not the exact journaled payout: {reason}"),
+        }
+    })?;
+    let completed = mutate_state(|state| {
+        let Some(refunds) = state.pending_refunds.as_mut() else {
+            return false;
+        };
+        if refunds.get(&refund_id) != Some(&refund) {
+            return false;
+        }
+        refunds.remove(&refund_id).is_some()
+    });
+    if !completed {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "exact refund receipt verified but the pending refund changed; obligation remains held".into(),
+        });
+    }
+    Ok(refund.amount)
+}
+
+/// Advance an archive-aware, bounded history scan after the configured icUSD
+/// ledger returned typed TooOld for this refund's exact persisted tuple. A new
+/// tuple is permitted only after the complete log prefix contains no match.
+pub async fn reconcile_pending_refund_history(refund_id: u64) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    let refund = read_state(|s| {
+        s.pending_refunds
+            .as_ref()
+            .and_then(|refunds| refunds.get(&refund_id).cloned())
+    })
+    .ok_or(StabilityPoolError::RefundClaimNotFound)?;
+    if caller != refund.user && !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let _refund_guard = PendingRefundClaimGuard::new(refund_id)?;
+    validate_pending_refund_journal(&refund)?;
+    if refund.transfer_too_old_rejected != Some(true) {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason:
+                "a typed TooOld response for the exact transfer tuple is required before scanning"
+                    .into(),
+        });
+    }
+    if read_state(|s| s.icusd_ledger()) != Some(refund.token_ledger) {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "automatic identity rotation is restricted to the configured icUSD ledger; this ledger remains held for exact receipt evidence".into(),
+        });
+    }
+
+    let refund = if refund.transfer_history_scan_cursor.is_none()
+        && refund.transfer_history_scan_tip.is_none()
+    {
+        let log_length = rumi_protocol_backend::icrc3_proof::icrc3_log_length(refund.token_ledger)
+            .await
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: format!(
+                    "could not establish the icUSD history tip; refund remains held: {reason}"
+                ),
+            })?;
+        mutate_state(|s| s.start_pending_refund_history_scan(refund_id, log_length)).map_err(
+            |reason| StabilityPoolError::LedgerTransferFailed {
+                reason: format!("could not persist refund history scan: {reason}"),
+            },
+        )?
+    } else {
+        refund
+    };
+    let cursor = refund.transfer_history_scan_cursor.ok_or_else(|| {
+        StabilityPoolError::LedgerTransferFailed {
+            reason: "refund history scan cursor is missing; obligation remains held".into(),
+        }
+    })?;
+    let tip = refund.transfer_history_scan_tip.ok_or_else(|| {
+        StabilityPoolError::LedgerTransferFailed {
+            reason: "refund history scan tip is missing; obligation remains held".into(),
+        }
+    })?;
+    if cursor > tip {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "refund history scan cursor exceeds its fixed tip; obligation remains held"
+                .into(),
+        });
+    }
+    let end = cursor
+        .saturating_add(MAX_PENDING_REFUND_HISTORY_BLOCKS_PER_CALL)
+        .min(tip);
+    for index in cursor..end {
+        let block =
+            rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(refund.token_ledger, index)
+                .await
+                .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                    reason: format!(
+                "icUSD history is incomplete at block {index}; refund remains held: {reason}"
+            ),
+                })?;
+        match validate_pending_refund_block(&refund, &block) {
+            Ok(()) => {
+                let completed = mutate_state(|state| {
+                    let Some(refunds) = state.pending_refunds.as_mut() else {
+                        return false;
+                    };
+                    if refunds.get(&refund_id) != Some(&refund) {
+                        return false;
+                    }
+                    refunds.remove(&refund_id).is_some()
+                });
+                return if completed {
+                    Ok(())
+                } else {
+                    Err(StabilityPoolError::LedgerTransferFailed {
+                        reason: "exact refund receipt found but the pending row changed; obligation remains held".into(),
+                    })
+                };
+            }
+            Err(reason) if refund_block_identity_may_match(&refund, &block) => {
+                return Err(StabilityPoolError::LedgerTransferFailed {
+                    reason: format!("refund-like ledger block {index} conflicts with the exact fee identity: {reason}; obligation remains held"),
+                });
+            }
+            Err(_) => {}
+        }
+    }
+    if end < tip {
+        mutate_state(|s| s.advance_pending_refund_history_scan(refund_id, cursor, tip, end))
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: format!("could not persist refund history scan progress: {reason}"),
+            })?;
+        return Ok(());
+    }
+    mutate_state(|s| s.advance_pending_refund_history_scan(refund_id, cursor, tip, end)).map_err(
+        |reason| StabilityPoolError::LedgerTransferFailed {
+            reason: format!("could not persist complete refund history scan: {reason}"),
+        },
+    )?;
+    // Configuration may have changed while archive callbacks were awaited.
+    // Recheck immediately before identity rotation so only the still-configured
+    // audited icUSD ledger can authorize this no-effect path.
+    if read_state(|s| s.icusd_ledger()) != Some(refund.token_ledger) {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "configured icUSD ledger changed during history scan; refund remains held for exact receipt evidence".into(),
+        });
+    }
+    mutate_state(|s| s.rotate_pending_refund_after_no_effect(refund_id))
+        .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+            reason: format!("complete icUSD history proves no refund mint; retry identity remains held: {reason}"),
+        })?;
+    Ok(())
+}
+
+fn validate_pending_refund_journal(refund: &PendingRefund) -> Result<(), StabilityPoolError> {
+    if refund.transfer_attempted != Some(true)
+        || refund.transfer_created_at_time_ns.is_none()
+        || refund.transfer_fee.is_none()
+        || refund.transfer_memo.is_none()
+        || refund.protocol_fee_reserved != refund.transfer_fee
+    {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "pending refund has no complete exact transfer identity; legacy ambiguity remains held".into(),
+        });
+    }
+    Ok(())
+}
+
+fn refund_block_identity_may_match(
+    refund: &PendingRefund,
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+) -> bool {
+    let source = Account {
+        owner: ic_cdk::id(),
+        subaccount: None,
+    };
+    let destination = Account {
+        owner: refund.user,
+        subaccount: None,
+    };
+    rumi_protocol_backend::icrc3_proof::validate_icrc3_transfer_block(
+        block,
+        Some(source),
+        destination,
+        refund.amount,
+        refund.transfer_memo.as_deref(),
+        refund.transfer_created_at_time_ns,
+    )
+    .is_ok()
+}
+
+fn validate_pending_refund_block(
+    refund: &PendingRefund,
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+) -> Result<(), String> {
+    validate_pending_refund_block_from(
+        refund,
+        block,
+        Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },
+    )
+}
+
+fn validate_pending_refund_block_from(
+    refund: &PendingRefund,
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+    source: Account,
+) -> Result<(), String> {
+    rumi_protocol_backend::icrc3_proof::validate_icrc3_direct_transfer_block(
+        block,
+        source,
+        Account {
+            owner: refund.user,
+            subaccount: None,
+        },
+        refund.amount,
+        refund.transfer_memo.as_deref(),
+        refund.transfer_created_at_time_ns,
+    )?;
+    let expected_fee = refund
+        .transfer_fee
+        .ok_or_else(|| "refund fee is missing from its exact transfer journal".to_string())?;
+    if block.fee != Some(expected_fee as u128) {
+        return Err("refund block fee does not match the journaled source-paid fee".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rumi_protocol_backend::chains::config::ChainId;
 
+    #[test]
+    fn pending_refund_receipt_requires_exact_direct_full_principal_tuple() {
+        let user = principal(44);
+        let memo = b"rumi-sp-refund-v1:exact".to_vec();
+        let refund = PendingRefund {
+            id: 9,
+            user,
+            token_ledger: principal(10),
+            amount: 1_000_000,
+            reason: "failed deposit".into(),
+            created_at: 7,
+            transfer_attempted: Some(true),
+            transfer_created_at_time_ns: Some(123),
+            transfer_fee: Some(10_000),
+            transfer_memo: Some(memo.clone()),
+            transfer_attempt_no: Some(0),
+            transfer_too_old_rejected: Some(true),
+            transfer_history_scan_cursor: None,
+            transfer_history_scan_tip: None,
+            protocol_fee_reserved: Some(10_000),
+        };
+        let exact = rumi_protocol_backend::icrc3_proof::DecodedBlock {
+            btype: Some("1xfer".into()),
+            op: "xfer".into(),
+            from: Some(Account {
+                owner: Principal::anonymous(),
+                subaccount: None,
+            }),
+            to: Some(Account {
+                owner: user,
+                subaccount: None,
+            }),
+            spender: None,
+            amount: refund.amount as u128,
+            transaction_fee: None,
+            fee: Some(10_000),
+            memo: Some(memo),
+            created_at_time: Some(123),
+            expected_allowance: None,
+            expires_at: None,
+        };
+        let source = Account {
+            owner: Principal::anonymous(),
+            subaccount: None,
+        };
+        let mut exact = exact;
+        exact.from = Some(source.clone());
+        assert!(validate_pending_refund_block_from(&refund, &exact, source.clone()).is_ok());
+
+        let mut wrong_fee = exact.clone();
+        wrong_fee.fee = Some(9_999);
+        assert!(validate_pending_refund_block_from(&refund, &wrong_fee, source.clone()).is_err());
+        let mut transfer_from = exact;
+        transfer_from.btype = Some("2xfer".into());
+        transfer_from.spender = Some(Account {
+            owner: principal(55),
+            subaccount: None,
+        });
+        assert!(validate_pending_refund_block_from(&refund, &transfer_from, source).is_err());
+    }
+
     fn principal(byte: u8) -> Principal {
         Principal::from_slice(&[byte])
+    }
+
+    #[test]
+    fn public_3usd_conversion_fails_before_entering_legacy_pull_path() {
+        let mut operation_entered = false;
+        let result = require_receipt_backed_3usd_conversion(|| {
+            operation_entered = true;
+        });
+
+        assert!(matches!(
+            result,
+            Err(StabilityPoolError::InterCanisterCallFailed { method, target })
+                if method.contains("receipt-backed conversion unavailable")
+                    && method.contains("no input tokens were pulled")
+                    && target.contains("3pool")
+        ));
+        assert!(
+            !operation_entered,
+            "legacy conversion closure must not run while 3pool lacks durable receipts"
+        );
+
+        let public_result = futures::executor::block_on(deposit_as_3usd(principal(10), 100));
+        assert!(matches!(
+            public_result,
+            Err(StabilityPoolError::InterCanisterCallFailed { method, .. })
+                if method.contains("receipt-backed conversion unavailable")
+        ));
     }
 
     fn pending_intent() -> ChainSpAbsorbIntent {
@@ -1174,6 +2322,7 @@ mod tests {
             icusd_to_burn_e8s: 100_00000000,
             stables_consumed,
             burn_created_at_time_ns: 123,
+            burn_attempted: Some(true),
             status: ChainSpAbsorbIntentStatus::Burned,
             burn_proof: Some(rumi_protocol_backend::icrc3_proof::SpWritedownProof {
                 block_index: 44,
@@ -1188,11 +2337,17 @@ mod tests {
     }
 
     #[test]
-    fn post_await_deposit_credit_rechecks_pending_chain_absorbs() {
+    fn post_transfer_system_busy_keeps_receipt_for_local_retry() {
         crate::state::replace_state(crate::state::StabilityPoolState::default());
-        mutate_state(|s| s.put_pending_chain_absorb(pending_intent()).unwrap());
-
-        let result = record_deposit_credit_after_async(principal(1), principal(10), 50_00000000);
+        mutate_state(|s| {
+            s.deposits.insert(principal(1), DepositPosition::new(0));
+            s.begin_deposit_intent(principal(1), principal(10), 50_00000000, 1)
+                .unwrap();
+            assert!(s.record_deposit_receipt(principal(1), principal(10), 50_00000000, 1, 9,));
+            s.put_pending_chain_absorb(pending_intent()).unwrap();
+        });
+        let result =
+            complete_deposit_credit_after_async_at(principal(1), principal(10), 50_00000000, 1, 2);
 
         assert!(
             matches!(result, Err(StabilityPoolError::SystemBusy)),
@@ -1207,13 +2362,152 @@ mod tests {
             0,
             "blocked post-await credit must not mutate the SP denominator",
         );
+        assert_eq!(
+            read_state(|s| s
+                .pending_deposit_intents
+                .as_ref()
+                .and_then(|intents| intents.get(&principal(1)))
+                .and_then(|intent| intent.transfer_block_index)),
+            Some(9),
+            "verified ledger receipt must survive the post-transfer guard",
+        );
+        mutate_state(|s| {
+            s.take_pending_chain_absorb(77).expect("remove test guard");
+        });
+        complete_deposit_credit_after_async_at(principal(1), principal(10), 50_00000000, 1, 3)
+            .expect("retry finalizes from the saved receipt");
+        assert_eq!(
+            read_state(|s| s.total_stablecoin_balances.get(&principal(10)).copied()),
+            Some(50_00000000),
+        );
+        assert!(read_state(|s| s
+            .pending_deposit_intents
+            .as_ref()
+            .map_or(true, |intents| intents.is_empty())));
         crate::state::replace_state(crate::state::StabilityPoolState::default());
     }
 
     #[test]
-    fn post_await_deposit_as_3usd_credit_rechecks_pending_chain_absorbs() {
+    fn saved_receipt_completes_even_after_deposit_policy_changes() {
         crate::state::replace_state(crate::state::StabilityPoolState::default());
-        mutate_state(|s| s.put_pending_chain_absorb(pending_intent()).unwrap());
+        mutate_state(|s| {
+            let user = principal(1);
+            let ledger = principal(10);
+            s.deposits.insert(user, DepositPosition::new(0));
+            s.stablecoin_registry.insert(
+                ledger,
+                StablecoinConfig {
+                    ledger_id: ledger,
+                    symbol: "TEST".to_string(),
+                    decimals: 8,
+                    priority: 1,
+                    is_active: false,
+                    transfer_fee: None,
+                    is_lp_token: None,
+                    underlying_pool: None,
+                },
+            );
+            s.configuration.min_deposit_e8s = 90_00000000;
+            s.configuration.emergency_pause = true;
+            s.begin_deposit_intent(user, ledger, 50_00000000, 1)
+                .unwrap();
+            assert!(s.record_deposit_receipt(user, ledger, 50_00000000, 1, 9));
+        });
+
+        assert!(
+            matches!(
+                complete_saved_deposit_receipt_before_admission(
+                    principal(1),
+                    principal(10),
+                    50_00000000,
+                    2,
+                ),
+                Ok(Some(()))
+            ),
+            "a proven transfer must complete despite changed admission policy"
+        );
+        assert_eq!(
+            read_state(|s| s.total_stablecoin_balances.get(&principal(10)).copied()),
+            Some(50_00000000),
+        );
+        assert!(read_state(|s| s
+            .pending_deposit_intents
+            .as_ref()
+            .map_or(true, |intents| intents.is_empty())));
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+    }
+
+    #[test]
+    fn blocked_admission_with_unreceipted_intent_requires_reconciliation() {
+        let error = pending_deposit_admission_error(StabilityPoolError::EmergencyPaused, true);
+        assert!(matches!(
+            error,
+            StabilityPoolError::LedgerTransferFailed { reason }
+                if reason.contains("exact ledger reconciliation required")
+        ));
+        assert!(matches!(
+            pending_deposit_admission_error(StabilityPoolError::EmergencyPaused, false),
+            StabilityPoolError::EmergencyPaused
+        ));
+    }
+
+    #[test]
+    fn pending_deposit_receipt_binds_transfer_from_tuple_and_fee_none_semantics() {
+        let caller = principal(1);
+        let pool = principal(2);
+        let intent = PendingDepositIntent {
+            token_ledger: principal(10),
+            amount: 50_000_000,
+            transfer_created_at_time_ns: 123,
+            transfer_block_index: None,
+            in_flight_attempts: Some(0),
+            ambiguous_seen: true,
+            too_old_rejected: None,
+            history_scan_cursor: None,
+            history_scan_tip: None,
+            reconciliation_in_progress: Some(false),
+            reconciliation_generation: Some(0),
+            reconciliation_started_at_ns: None,
+            reconciliation_next_allowed_at_ns: None,
+            attempt_no: Some(0),
+        };
+        let account = |owner| Account {
+            owner,
+            subaccount: None,
+        };
+        let block = rumi_protocol_backend::icrc3_proof::DecodedBlock {
+            btype: Some("2xfer".into()),
+            op: "transfer".into(),
+            from: Some(account(caller)),
+            to: Some(account(pool)),
+            spender: Some(account(pool)),
+            amount: u128::from(intent.amount),
+            transaction_fee: Some(10_000),
+            fee: Some(10_000),
+            memo: None,
+            created_at_time: Some(intent.transfer_created_at_time_ns),
+            expected_allowance: None,
+            expires_at: None,
+        };
+
+        assert!(validate_pending_deposit_block(caller, pool, &intent, &block).is_ok());
+        let mut wrong_spender = block.clone();
+        wrong_spender.spender = Some(account(principal(3)));
+        assert!(validate_pending_deposit_block(caller, pool, &intent, &wrong_spender).is_err());
+        let mut wrong_timestamp = block.clone();
+        wrong_timestamp.created_at_time = Some(124);
+        assert!(validate_pending_deposit_block(caller, pool, &intent, &wrong_timestamp).is_err());
+        let mut unexpected_memo = block;
+        unexpected_memo.memo = Some(vec![9]);
+        assert!(validate_pending_deposit_block(caller, pool, &intent, &unexpected_memo).is_err());
+    }
+
+    #[test]
+    fn post_await_deposit_as_3usd_credit_is_blocked_when_lp_ledger_is_pending() {
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+        let mut intent = pending_intent();
+        intent.stables_consumed.insert(principal(30), 1);
+        mutate_state(|s| s.put_pending_chain_absorb(intent).unwrap());
 
         let result = record_deposit_as_3usd_credit_after_async(
             principal(1),
@@ -1222,19 +2516,10 @@ mod tests {
             principal(30),
             49_00000000,
         );
-
-        assert!(
-            matches!(result, Err(StabilityPoolError::SystemBusy)),
-            "post-await 3USD credit must stop when chain absorb is pending",
-        );
+        assert!(matches!(result, Err(StabilityPoolError::SystemBusy)));
         assert_eq!(
-            read_state(|s| s
-                .total_stablecoin_balances
-                .get(&principal(30))
-                .copied()
-                .unwrap_or(0)),
-            0,
-            "blocked post-await LP credit must not mutate the SP denominator",
+            read_state(|s| s.total_stablecoin_balances.get(&principal(30)).copied()),
+            None,
         );
         crate::state::replace_state(crate::state::StabilityPoolState::default());
     }

@@ -31,6 +31,7 @@ export const idlFactory = ({ IDL }) => {
     'MaintenanceMode' : IDL.Null,
     'BelowMinClaim' : IDL.Record({ 'min' : IDL.Nat, 'claimable' : IDL.Nat }),
     'TransferFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
+    'PendingClaimCapacityReached' : IDL.Null,
     'ClaimNotFound' : IDL.Null,
     'RewardLedgerTransferFailed' : IDL.Record({ 'reason' : IDL.Text }),
   });
@@ -210,6 +211,92 @@ export const idlFactory = ({ IDL }) => {
     'timestamp' : IDL.Nat64,
     'total_supply' : IDL.Nat,
   });
+  const AmmIngressKind = IDL.Variant({
+    'AddLiquidity' : IDL.Record({
+      'amount_a' : IDL.Nat,
+      'amount_b' : IDL.Nat,
+      'min_lp_shares' : IDL.Nat,
+    }),
+    'Swap' : IDL.Record({
+      'min_amount_out' : IDL.Nat,
+      'token_in' : IDL.Principal,
+      'amount_in' : IDL.Nat,
+    }),
+    'RemoveLiquidity' : IDL.Record({
+      'min_amount_a' : IDL.Nat,
+      'min_amount_b' : IDL.Nat,
+      'lp_shares' : IDL.Nat,
+    }),
+  });
+  const AmmIngressLeg = IDL.Record({
+    'block_index' : IDL.Opt(IDL.Nat64),
+    'receipt_scan_end' : IDL.Opt(IDL.Nat64),
+    'transfer_fee' : IDL.Opt(IDL.Nat),
+    'to_subaccount' : IDL.Vec(IDL.Nat8),
+    'from' : IDL.Principal,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'dispatch_count' : IDL.Nat32,
+    'receipt_scan_cursor' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'receipt_scan_start' : IDL.Opt(IDL.Nat64),
+    'attempt_generation' : IDL.Nat32,
+    'created_at_time' : IDL.Nat64,
+    'amount' : IDL.Nat,
+  });
+  const AmmIngressPhase = IDL.Variant({
+    'HeldUnknown' : IDL.Record({ 'leg_index' : IDL.Nat32 }),
+    'Pulling' : IDL.Record({ 'leg_index' : IDL.Nat32 }),
+    'Complete' : IDL.Null,
+    'Settling' : IDL.Null,
+    'HeldTooOld' : IDL.Record({ 'leg_index' : IDL.Nat32 }),
+    'Prepared' : IDL.Null,
+    'Rejected' : IDL.Record({ 'leg_index' : IDL.Nat32 }),
+    'Pulled' : IDL.Null,
+  });
+  const AmmIngressOperation = IDL.Record({
+    'id' : IDL.Nat64,
+    'request_id' : IDL.Vec(IDL.Nat8),
+    'last_error' : IDL.Opt(IDL.Text),
+    'result' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'kind' : AmmIngressKind,
+    'legs' : IDL.Vec(AmmIngressLeg),
+    'caller' : IDL.Principal,
+    'phase' : AmmIngressPhase,
+    'confirmed_payout_ids' : IDL.Vec(IDL.Nat64),
+    'pool_id' : IDL.Text,
+    'computed_values' : IDL.Vec(IDL.Nat),
+    'payout_ids' : IDL.Vec(IDL.Nat64),
+  });
+  const AmmPayoutPhase = IDL.Variant({
+    'HeldUnknown' : IDL.Null,
+    'Staged' : IDL.Null,
+    'HeldTooOld' : IDL.Null,
+    'Ready' : IDL.Null,
+    'ReadyForReprice' : IDL.Null,
+    'LegacyUnknown' : IDL.Null,
+    'Submitted' : IDL.Null,
+    'AwaitingFee' : IDL.Null,
+  });
+  const AmmPayoutAttempt = IDL.Record({
+    'id' : IDL.Nat64,
+    'send_amount' : IDL.Opt(IDL.Nat),
+    'fee' : IDL.Opt(IDL.Nat),
+    'last_error' : IDL.Opt(IDL.Text),
+    'receipt_scan_end' : IDL.Opt(IDL.Nat64),
+    'claimant' : IDL.Principal,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'dispatch_count' : IDL.Nat32,
+    'subaccount' : IDL.Vec(IDL.Nat8),
+    'operation_id' : IDL.Nat64,
+    'receipt_scan_cursor' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'receipt_scan_start' : IDL.Opt(IDL.Nat64),
+    'attempt_generation' : IDL.Nat32,
+    'phase' : AmmPayoutPhase,
+    'created_at_time' : IDL.Nat64,
+    'pool_id' : IDL.Text,
+    'gross_amount' : IDL.Nat,
+  });
   const PendingClaim = IDL.Record({
     'id' : IDL.Nat64,
     'token' : IDL.Principal,
@@ -292,6 +379,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : AmmError })],
         [],
       ),
+    'add_liquidity_v2' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Text, IDL.Nat, IDL.Nat, IDL.Nat],
+        [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : AmmError })],
+        [],
+      ),
     'admin_burn_subaccount_balance' : IDL.Func(
         [IDL.Principal, IDL.Vec(IDL.Nat8)],
         [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : AmmError })],
@@ -318,6 +410,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
+    'get_3usd_account_migration_blockers' : IDL.Func(
+        [],
+        [IDL.Variant({ 'Ok' : IDL.Vec(IDL.Text), 'Err' : AmmError })],
+        ['query'],
+      ),
     'get_amm_admin_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_amm_admin_events' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
@@ -403,6 +500,16 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Nat],
         ['query'],
       ),
+    'get_my_amm_operation' : IDL.Func(
+        [],
+        [IDL.Opt(AmmIngressOperation)],
+        ['query'],
+      ),
+    'get_pending_amm_payouts' : IDL.Func(
+        [],
+        [IDL.Vec(AmmPayoutAttempt)],
+        ['query'],
+      ),
     'get_pending_claims' : IDL.Func([], [IDL.Vec(PendingClaim)], ['query']),
     'get_pending_rewards' : IDL.Func(
         [IDL.Text, IDL.Principal],
@@ -445,14 +552,34 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],
         [],
       ),
+    'reconcile_amm_ingress' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [IDL.Variant({ 'Ok' : IDL.Bool, 'Err' : AmmError })],
+        [],
+      ),
+    'reconcile_amm_payout' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Bool, 'Err' : AmmError })],
+        [],
+      ),
     'remove_liquidity' : IDL.Func(
         [IDL.Text, IDL.Nat, IDL.Nat, IDL.Nat],
+        [IDL.Variant({ 'Ok' : IDL.Tuple(IDL.Nat, IDL.Nat), 'Err' : AmmError })],
+        [],
+      ),
+    'remove_liquidity_v2' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Text, IDL.Nat, IDL.Nat, IDL.Nat],
         [IDL.Variant({ 'Ok' : IDL.Tuple(IDL.Nat, IDL.Nat), 'Err' : AmmError })],
         [],
       ),
     'resolve_pending_claim' : IDL.Func(
         [IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],
+        [],
+      ),
+    'retry_amm_payout' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : AmmError })],
         [],
       ),
     'set_admin' : IDL.Func(
@@ -487,6 +614,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'swap' : IDL.Func(
         [IDL.Text, IDL.Principal, IDL.Nat, IDL.Nat],
+        [IDL.Variant({ 'Ok' : SwapResult, 'Err' : AmmError })],
+        [],
+      ),
+    'swap_v2' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Text, IDL.Principal, IDL.Nat, IDL.Nat],
         [IDL.Variant({ 'Ok' : SwapResult, 'Err' : AmmError })],
         [],
       ),

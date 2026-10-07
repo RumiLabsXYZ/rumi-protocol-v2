@@ -24,7 +24,10 @@ use super::tx::{
 
 fn hex_to_bytes(s: &str) -> Vec<u8> {
     let s = s.strip_prefix("0x").unwrap_or(s);
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 // Build the exact same RLP-encoded signed payload from scratch using raw
@@ -36,7 +39,7 @@ fn reference_encode_eip1559(
     max_priority_fee_per_gas: u128,
     max_fee_per_gas: u128,
     gas_limit: u64,
-    to_hex: &str,   // "0x…" 20-byte hex
+    to_hex: &str, // "0x…" 20-byte hex
     value: u128,
     data: &[u8],
     // sig: None => unsigned payload; Some((r, s, y_parity)) => signed
@@ -142,9 +145,13 @@ fn minimal_bytes_for(mut n: usize) -> Vec<u8> {
 #[test]
 fn mint_calldata_has_correct_selector() {
     // mint(address,uint256,uint64,uint64): 4-byte selector + 4*32-byte args = 132 bytes.
-    let calldata =
-        encode_mint_calldata("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf", 10_000_000_000, 42, 1234)
-            .expect("valid address");
+    let calldata = encode_mint_calldata(
+        "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+        10_000_000_000,
+        42,
+        1234,
+    )
+    .expect("valid address");
     assert_eq!(calldata.len(), 4 + 32 * 4);
     // Selector for "mint(address,uint256,uint64,uint64)" (cast sig).
     assert_eq!(&calldata[0..4], &[0x31, 0x23, 0x9e, 0x64]);
@@ -197,7 +204,10 @@ fn raw_tx_hash_matches_assembled_tx() {
     let signed = assemble_signed_tx(&fields, &[0x11u8; 32], &[0x22u8; 32], 0).expect("assemble");
     let hex_str = format!("0x{}", hex::encode(&signed));
     let expected: [u8; 32] = Keccak256::digest(&signed).into();
-    assert_eq!(raw_tx_hash(&hex_str).unwrap(), format!("0x{}", hex::encode(expected)));
+    assert_eq!(
+        raw_tx_hash(&hex_str).unwrap(),
+        format!("0x{}", hex::encode(expected))
+    );
 }
 
 #[test]
@@ -263,7 +273,8 @@ fn signing_hash_matches_reference_byte_for_byte() {
     let our_hash = signing_hash(&fields).expect("valid address");
 
     assert_eq!(
-        our_hash, ref_hash,
+        our_hash,
+        ref_hash,
         "signing hash mismatch\nours:      {}\nreference: {}",
         hex::encode(our_hash),
         hex::encode(ref_hash)
@@ -316,7 +327,8 @@ fn signed_tx_matches_reference_with_leading_zero_r_and_s() {
     );
 
     assert_eq!(
-        our_signed, ref_signed,
+        our_signed,
+        ref_signed,
         "signed tx mismatch (leading-zero r/s)\nours:      {}\nreference: {}",
         hex::encode(&our_signed),
         hex::encode(&ref_signed)
@@ -332,7 +344,10 @@ fn signed_tx_matches_reference_with_leading_zero_r_and_s() {
     // And confirm 0x00 0x00 0x11 does NOT appear (leading zeros stripped).
     let bad_prefix = &[0x00u8, 0x00u8, 0x11u8];
     let not_found = !our_signed.windows(3).any(|w| w == bad_prefix);
-    assert!(not_found, "leading zeros found in r encoding — they were not stripped");
+    assert!(
+        not_found,
+        "leading zeros found in r encoding — they were not stripped"
+    );
 }
 
 /// Full round-trip: sign with a fixed k256 key, run recover_y_parity, then
@@ -340,9 +355,9 @@ fn signed_tx_matches_reference_with_leading_zero_r_and_s() {
 /// EVM address.
 #[test]
 fn round_trip_sign_and_recover() {
-    use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
-    use super::tx::recover_y_parity;
     use super::tecdsa::evm_address_from_pubkey;
+    use super::tx::recover_y_parity;
+    use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
 
     // Fixed signing key (private key scalar = 1, the canonical test vector).
     let sk_bytes = {
@@ -358,7 +373,10 @@ fn round_trip_sign_and_recover() {
     };
     let expected_addr = evm_address_from_pubkey(&pk_uncompressed).expect("addr");
     // Should be the canonical k=1 address.
-    assert_eq!(expected_addr.to_lowercase(), "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf");
+    assert_eq!(
+        expected_addr.to_lowercase(),
+        "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
+    );
 
     let fields = Eip1559Fields {
         chain_id: 10143,
@@ -381,7 +399,10 @@ fn round_trip_sign_and_recover() {
 
     // Recover y_parity using our implementation.
     let parity = recover_y_parity(&hash, &r, &s, &expected_addr).expect("recover parity");
-    assert!(parity == 0 || parity == 1, "parity must be 0 or 1, got {parity}");
+    assert!(
+        parity == 0 || parity == 1,
+        "parity must be 0 or 1, got {parity}"
+    );
 
     // Assemble the signed tx.
     let signed = assemble_signed_tx(&fields, &r, &s, parity).expect("assemble");
@@ -390,8 +411,7 @@ fn round_trip_sign_and_recover() {
     // Independent ecrecover: parse r, s, parity from the assembled tx and verify.
     let sig2 = k256::ecdsa::Signature::from_scalars(r, s).expect("sig from scalars");
     let rid = k256::ecdsa::RecoveryId::new(parity == 1, false);
-    let recovered_vk =
-        VerifyingKey::recover_from_prehash(&hash, &sig2, rid).expect("ecrecover");
+    let recovered_vk = VerifyingKey::recover_from_prehash(&hash, &sig2, rid).expect("ecrecover");
     let recovered_pk = {
         use k256::elliptic_curve::sec1::ToEncodedPoint;
         recovered_vk.to_encoded_point(false).as_bytes().to_vec()
@@ -450,9 +470,8 @@ fn known_vector_signing_hash_matches_geth() {
     //   2. Python coincurve.PublicKey.from_signature_and_message(sig, hash, hasher=None) => same address.
     //   Unsigned payload hex: 02e90180843b9aca00843b9aca008252089435353535353535353535353535353535353535358203e880c0
     //   keccak256(above) = cc270e91ffb8f5a6c2eed711e9a59eb128d857e90ca31600ec51a7dad621178f
-    let expected_hash = hex_to_bytes(
-        "cc270e91ffb8f5a6c2eed711e9a59eb128d857e90ca31600ec51a7dad621178f",
-    );
+    let expected_hash =
+        hex_to_bytes("cc270e91ffb8f5a6c2eed711e9a59eb128d857e90ca31600ec51a7dad621178f");
 
     let our_hash = signing_hash(&fields).expect("valid address");
     assert_eq!(
@@ -524,21 +543,30 @@ fn signing_hash_returns_err_on_malformed_to() {
         data: vec![],
     };
     let result = signing_hash(&fields);
-    assert!(result.is_err(), "expected Err for malformed to address, got Ok");
+    assert!(
+        result.is_err(),
+        "expected Err for malformed to address, got Ok"
+    );
 }
 
 /// `encode_mint_calldata` surfaces `Err` on a malformed recipient (no panic).
 #[test]
 fn encode_mint_calldata_returns_err_on_malformed_address() {
     let result = encode_mint_calldata("0xbadhex!", 1_000_000, 1, 1);
-    assert!(result.is_err(), "expected Err for bad hex recipient, got Ok");
+    assert!(
+        result.is_err(),
+        "expected Err for bad hex recipient, got Ok"
+    );
 }
 
 /// `encode_transfer_calldata` surfaces `Err` on a malformed recipient (no panic).
 #[test]
 fn encode_transfer_calldata_returns_err_on_malformed_address() {
     let result = encode_transfer_calldata("0xbadhex!", 1_000_000);
-    assert!(result.is_err(), "expected Err for bad hex recipient, got Ok");
+    assert!(
+        result.is_err(),
+        "expected Err for bad hex recipient, got Ok"
+    );
 }
 
 // ─── Increment 3 / Task 3: dynamic address[] swap calldata encoder ───
@@ -577,7 +605,13 @@ fn swap_exact_eth_for_tokens_calldata_matches_reference() {
 fn swap_calldata_rejects_malformed_address() {
     let path = ["0xnothex", "0x6963efed0ab40f6c3d7bda44a05dcf1437c44372"];
     assert!(
-        super::tx::encode_swap_exact_eth_for_tokens_calldata(1, &path, "0x000000000000000000000000000000000000c0de", 1).is_err(),
+        super::tx::encode_swap_exact_eth_for_tokens_calldata(
+            1,
+            &path,
+            "0x000000000000000000000000000000000000c0de",
+            1
+        )
+        .is_err(),
         "malformed path address must Err, never panic"
     );
 }

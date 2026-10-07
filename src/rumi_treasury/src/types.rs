@@ -15,6 +15,9 @@ pub enum DepositType {
     /// Interest revenue accrued on vault debt
     #[serde(alias = "StabilityFee")]
     InterestRevenue,
+    /// Stable evidence for a record whose historical Candid variant is not
+    /// recognized by this binary. The value is raw-wire hex, not an amount.
+    LegacyUnknown { candid_hex: String },
 }
 
 /// Asset types that can be held in treasury
@@ -30,6 +33,10 @@ pub enum AssetType {
     CKUSDT,
     /// ckUSDC stablecoin (for vault repayment/liquidation)
     CKUSDC,
+    /// Other ICRC asset, identified by its ledger canister principal.
+    /// The ledger address is part of the identity so balances from different
+    /// collateral ledgers cannot be combined or withdrawn from the wrong one.
+    Other(Principal),
 }
 
 /// A record of a deposit to the treasury
@@ -51,6 +58,75 @@ pub struct DepositRecord {
     pub memo: Option<String>,
 }
 
+/// Version-one query projection. Its variants stay frozen for existing Candid
+/// clients; unknown stable records are returned by the V2 evidence endpoint.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum DepositTypeV1 {
+    BorrowingFee,
+    RedemptionFee,
+    LiquidationFee,
+    InterestRevenue,
+}
+
+/// Asset labels returned by legacy V1 query methods. Keep this variant set
+/// frozen; extensible ledger-addressed assets are available from V2 methods.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum AssetTypeV1 {
+    ICUSD,
+    ICP,
+    CKBTC,
+    CKUSDT,
+    CKUSDC,
+}
+
+impl TryFrom<AssetType> for AssetTypeV1 {
+    type Error = AssetType;
+
+    fn try_from(asset: AssetType) -> Result<Self, Self::Error> {
+        match asset {
+            AssetType::ICUSD => Ok(Self::ICUSD),
+            AssetType::ICP => Ok(Self::ICP),
+            AssetType::CKBTC => Ok(Self::CKBTC),
+            AssetType::CKUSDT => Ok(Self::CKUSDT),
+            AssetType::CKUSDC => Ok(Self::CKUSDC),
+            other @ AssetType::Other(_) => Err(other),
+        }
+    }
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct DepositRecordV1 {
+    pub id: u64,
+    pub deposit_type: DepositTypeV1,
+    pub asset_type: AssetTypeV1,
+    pub amount: u64,
+    pub block_index: u64,
+    pub timestamp: u64,
+    pub memo: Option<String>,
+}
+
+impl From<DepositRecord> for DepositRecordV1 {
+    fn from(record: DepositRecord) -> Self {
+        let deposit_type = match record.deposit_type {
+            DepositType::BorrowingFee => DepositTypeV1::BorrowingFee,
+            DepositType::RedemptionFee => DepositTypeV1::RedemptionFee,
+            DepositType::LiquidationFee => DepositTypeV1::LiquidationFee,
+            DepositType::InterestRevenue => DepositTypeV1::InterestRevenue,
+            DepositType::LegacyUnknown { .. } => unreachable!("unknown records are filtered"),
+        };
+        Self {
+            id: record.id,
+            deposit_type,
+            asset_type: AssetTypeV1::try_from(record.asset_type)
+                .expect("V1 projection filters extensible asset types"),
+            amount: record.amount,
+            block_index: record.block_index,
+            timestamp: record.timestamp,
+            memo: record.memo,
+        }
+    }
+}
+
 /// Treasury balance for a specific asset
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
 pub struct AssetBalance {
@@ -68,7 +144,7 @@ pub struct TreasuryStatus {
     /// Total number of deposits
     pub total_deposits: u64,
     /// Balances by asset type
-    pub balances: Vec<(AssetType, AssetBalance)>,
+    pub balances: Vec<(AssetTypeV1, AssetBalance)>,
     /// Controller principal (pre-SNS) or governance canister (post-SNS)
     pub controller: Principal,
     /// Whether treasury is paused
@@ -163,6 +239,11 @@ pub enum TreasuryAction {
     SetPaused {
         paused: bool,
     },
+    /// Preserves stable audit evidence for an unrecognized future/legacy
+    /// action without mislabeling it as a known financial event.
+    LegacyUnknown {
+        candid_value: String,
+    },
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -171,4 +252,215 @@ pub struct TreasuryEvent {
     pub timestamp: u64,
     pub caller: Principal,
     pub action: TreasuryAction,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub enum TreasuryActionV1 {
+    Deposit {
+        deposit_type: DepositTypeV1,
+        asset_type: AssetTypeV1,
+        amount: u64,
+    },
+    Withdraw {
+        asset_type: AssetTypeV1,
+        amount: u64,
+        to: Principal,
+    },
+    SetPaused {
+        paused: bool,
+    },
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct TreasuryEventV1 {
+    pub id: u64,
+    pub timestamp: u64,
+    pub caller: Principal,
+    pub action: TreasuryActionV1,
+}
+
+impl From<TreasuryEvent> for TreasuryEventV1 {
+    fn from(event: TreasuryEvent) -> Self {
+        let action = match event.action {
+            TreasuryAction::Deposit {
+                deposit_type,
+                asset_type,
+                amount,
+            } => TreasuryActionV1::Deposit {
+                deposit_type: match deposit_type {
+                    DepositType::BorrowingFee => DepositTypeV1::BorrowingFee,
+                    DepositType::RedemptionFee => DepositTypeV1::RedemptionFee,
+                    DepositType::LiquidationFee => DepositTypeV1::LiquidationFee,
+                    DepositType::InterestRevenue => DepositTypeV1::InterestRevenue,
+                    DepositType::LegacyUnknown { .. } => {
+                        unreachable!("unknown events are filtered")
+                    }
+                },
+                asset_type: AssetTypeV1::try_from(asset_type)
+                    .expect("V1 projection filters extensible asset types"),
+                amount,
+            },
+            TreasuryAction::Withdraw {
+                asset_type,
+                amount,
+                to,
+            } => TreasuryActionV1::Withdraw {
+                asset_type: AssetTypeV1::try_from(asset_type)
+                    .expect("V1 projection filters extensible asset types"),
+                amount,
+                to,
+            },
+            TreasuryAction::SetPaused { paused } => TreasuryActionV1::SetPaused { paused },
+            TreasuryAction::LegacyUnknown { .. } => unreachable!("unknown events are filtered"),
+        };
+        Self {
+            id: event.id,
+            timestamp: event.timestamp,
+            caller: event.caller,
+            action,
+        }
+    }
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct UnknownTreasuryEvidenceV2 {
+    pub record_kind: String,
+    pub id: u64,
+    pub raw_candid_hex: String,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct UnknownTreasuryEvidencePageV2 {
+    pub deposits: Vec<UnknownTreasuryEvidenceV2>,
+    pub events: Vec<UnknownTreasuryEvidenceV2>,
+}
+
+/// Full treasury balance projection with exact ledger-addressed asset IDs.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct TreasuryStatusV2 {
+    pub total_deposits: u64,
+    pub balances: Vec<(AssetType, AssetBalance)>,
+    pub controller: Principal,
+    pub is_paused: bool,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PendingWithdrawalV2 {
+    pub request_id: u64,
+    pub caller: Principal,
+    pub asset_type: AssetTypeV1,
+    pub ledger: Principal,
+    pub amount: u64,
+    pub to: Principal,
+    pub memo: Option<String>,
+    pub created_at_time: u64,
+    pub send_amount: u64,
+    pub fee: u64,
+    pub dispatch_attempts: Option<u32>,
+    /// "pending" or "legacy_unknown"; completed rows are omitted.
+    pub status: String,
+}
+
+/// Full pending withdrawal projection. V3 adds ledger-addressed assets while
+/// the existing V2 method keeps its original five-variant response contract.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PendingWithdrawalV3 {
+    pub request_id: u64,
+    pub caller: Principal,
+    pub asset_type: AssetType,
+    pub ledger: Principal,
+    pub amount: u64,
+    pub to: Principal,
+    pub memo: Option<String>,
+    pub created_at_time: u64,
+    pub send_amount: u64,
+    pub fee: u64,
+    pub dispatch_attempts: Option<u32>,
+    pub status: String,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PendingWithdrawalsPageV2 {
+    pub withdrawals: Vec<PendingWithdrawalV2>,
+    /// First stable request key to inspect on the next page.
+    pub next_start: Option<u64>,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PendingWithdrawalsPageV3 {
+    pub withdrawals: Vec<PendingWithdrawalV3>,
+    pub next_start: Option<u64>,
+}
+
+#[cfg(test)]
+mod v1_wire_compat_tests {
+    use super::*;
+
+    #[derive(CandidType, Deserialize)]
+    enum OldDepositType {
+        BorrowingFee,
+        RedemptionFee,
+        LiquidationFee,
+        InterestRevenue,
+    }
+
+    #[derive(CandidType, Deserialize)]
+    struct OldDepositRecord {
+        id: u64,
+        deposit_type: OldDepositType,
+        asset_type: AssetTypeV1,
+        amount: u64,
+        block_index: u64,
+        timestamp: u64,
+        memo: Option<String>,
+    }
+
+    #[test]
+    fn v1_deposit_projection_decodes_with_predecessor_variant_set() {
+        let response = vec![DepositRecordV1 {
+            id: 7,
+            deposit_type: DepositTypeV1::BorrowingFee,
+            asset_type: AssetTypeV1::ICP,
+            amount: 123,
+            block_index: 456,
+            timestamp: 789,
+            memo: None,
+        }];
+        let bytes = candid::encode_one(response).unwrap();
+        let decoded: Vec<OldDepositRecord> = candid::decode_one(&bytes).unwrap();
+        assert_eq!(decoded[0].id, 7);
+        assert_eq!(decoded[0].amount, 123);
+        assert!(matches!(
+            decoded[0].deposit_type,
+            OldDepositType::BorrowingFee
+        ));
+    }
+
+    #[test]
+    fn v1_event_projection_decodes_with_predecessor_action_set() {
+        #[derive(CandidType, Deserialize)]
+        enum OldAction {
+            SetPaused { paused: bool },
+        }
+        #[derive(CandidType, Deserialize)]
+        struct OldEvent {
+            id: u64,
+            timestamp: u64,
+            caller: Principal,
+            action: OldAction,
+        }
+        let bytes = candid::encode_one(TreasuryEventV1 {
+            id: 9,
+            timestamp: 10,
+            caller: Principal::from_slice(&[1]),
+            action: TreasuryActionV1::SetPaused { paused: true },
+        })
+        .unwrap();
+        let decoded: OldEvent = candid::decode_one(&bytes).unwrap();
+        assert_eq!(decoded.id, 9);
+        assert!(matches!(
+            decoded.action,
+            OldAction::SetPaused { paused: true }
+        ));
+    }
 }

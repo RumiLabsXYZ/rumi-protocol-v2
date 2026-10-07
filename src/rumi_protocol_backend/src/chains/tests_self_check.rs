@@ -19,7 +19,10 @@ fn check_invariant_fails_on_drift() {
     s.chain_supplies.insert(ChainId(1), 100);
     s.chain_supplies.insert(ChainId(2), 200);
     let err = check_invariant(&s, 299).expect_err("drift must be caught");
-    assert!(matches!(err, super::supply::SupplyInvariantError::Divergence { .. }));
+    assert!(matches!(
+        err,
+        super::supply::SupplyInvariantError::Divergence { .. }
+    ));
 }
 
 #[test]

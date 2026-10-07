@@ -55,8 +55,24 @@ pub async fn run() {
         }
     };
 
-    let mut processed = 0u64;
+    if cursors::amm_liquidity::get() != cursor {
+        return;
+    }
+
+    if events.is_empty() {
+        state::mutate_state(|s| update_cursor_error(
+            s, cursors::CURSOR_ID_AMM_LIQUIDITY,
+            format!("AMM reports {count} liquidity events but returned no row at cursor {cursor}"),
+        ));
+        return;
+    }
+    let mut next_cursor = cursor;
+    let mut evicted = 0u64;
     for evt in &events {
+        if evt.id < next_cursor {
+            continue;
+        }
+        evicted = evicted.saturating_add(evt.id.saturating_sub(next_cursor));
         evt_amm_liquidity::push(AnalyticsAmmLiquidityEvent {
             timestamp_ns: evt.timestamp,
             source_event_id: evt.id,
@@ -65,13 +81,19 @@ pub async fn run() {
             action: convert_action(&evt.action),
             lp_shares: nat_to_u64(&evt.lp_shares),
         });
-        processed += 1;
+        next_cursor = evt.id.saturating_add(1);
     }
 
-    if processed > 0 {
-        cursors::amm_liquidity::set(cursor + processed);
+    if next_cursor > cursor {
+        cursors::amm_liquidity::set(next_cursor);
         state::mutate_state(|s| {
-            update_cursor_success(s, cursors::CURSOR_ID_AMM_LIQUIDITY, ic_cdk::api::time());
+            if evicted > 0 {
+                s.error_counters.amm = s.error_counters.amm.saturating_add(1);
+                update_cursor_error(s, cursors::CURSOR_ID_AMM_LIQUIDITY,
+                    format!("AMM liquidity history gap: {evicted} events evicted before analytics read them"));
+            } else {
+                update_cursor_success(s, cursors::CURSOR_ID_AMM_LIQUIDITY, ic_cdk::api::time());
+            }
         });
     }
 }

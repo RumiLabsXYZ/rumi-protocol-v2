@@ -325,7 +325,8 @@ pub fn parse_account_info(body: &[u8]) -> Result<XrpAccountInfo, String> {
         let ledger_index = as_u64(v.get("ledger_current_index").unwrap_or(&Value::Null))
             .or_else(|| as_u64(v.get("ledger_index").unwrap_or(&Value::Null)))
             .ok_or_else(|| "actNotFound without a ledger index".to_string())?
-            as u32;
+            .try_into()
+            .map_err(|_| "account_info ledger_index exceeds u32".to_string())?;
         return Ok(XrpAccountInfo {
             exists: false,
             sequence: 0,
@@ -337,11 +338,15 @@ pub fn parse_account_info(body: &[u8]) -> Result<XrpAccountInfo, String> {
         return Err(format!("account_info error: {e}"));
     }
     let sequence = as_u64(v.get("sequence").unwrap_or(&Value::Null))
-        .ok_or_else(|| "missing Sequence".to_string())? as u32;
+        .ok_or_else(|| "missing Sequence".to_string())?
+        .try_into()
+        .map_err(|_| "account_info sequence exceeds u32".to_string())?;
     let balance_drops = as_u128(v.get("balance").unwrap_or(&Value::Null))
         .ok_or_else(|| "missing Balance".to_string())?;
     let ledger_index = as_u64(v.get("ledger_index").unwrap_or(&Value::Null))
-        .ok_or_else(|| "missing ledger_index".to_string())? as u32;
+        .ok_or_else(|| "missing ledger_index".to_string())?
+        .try_into()
+        .map_err(|_| "account_info ledger_index exceeds u32".to_string())?;
     Ok(XrpAccountInfo {
         exists: true,
         sequence,
@@ -443,7 +448,7 @@ fn is_transient(code: RejectionCode, msg: &str) -> bool {
 }
 
 const READ_QUORUM: usize = 2;
-const RESERVE_READ_MIN_RESPONSES: usize = 1;
+const RESERVE_READ_MIN_RESPONSES: usize = READ_QUORUM;
 
 fn require_minimum_provider_set(
     provider_bodies: &[Vec<u8>],
@@ -470,20 +475,24 @@ fn quorum_account_info(provider_bodies: &[Vec<u8>]) -> Result<XrpAccountInfo, St
 
     for (_, candidate) in &parsed {
         let mut votes = 0usize;
-        let mut latest = candidate.clone();
+        // An index used to prove a pending transaction expired must be
+        // attested conservatively. One provider may agree on the account's
+        // sequence and balance while lying about a far-future ledger index;
+        // taking its maximum could clear a still-live payout reservation.
+        let mut conservative = candidate.clone();
         for (_, info) in &parsed {
             if info.exists == candidate.exists
                 && info.sequence == candidate.sequence
                 && info.balance_drops == candidate.balance_drops
             {
                 votes += 1;
-                if info.ledger_index > latest.ledger_index {
-                    latest.ledger_index = info.ledger_index;
+                if info.ledger_index < conservative.ledger_index {
+                    conservative.ledger_index = info.ledger_index;
                 }
             }
         }
         if votes >= READ_QUORUM {
-            return Ok(latest);
+            return Ok(conservative);
         }
     }
 
@@ -503,15 +512,6 @@ fn quorum_reserve_base(provider_bodies: &[Vec<u8>]) -> Result<u128, String> {
             Ok(reserve) => parsed.push((idx, reserve)),
             Err(e) => parse_errors.push(format!("provider {idx}: {e}")),
         }
-    }
-
-    // `reserve_base` is a network-wide XRPL parameter and the only field consumed
-    // by this read. Prefer the normal two-provider semantic quorum when two
-    // providers answer; allow a single successfully-consensed provider when the
-    // secondary public endpoint is temporarily unreachable so vault setup does not
-    // depend on a hardcoded reserve.
-    if parsed.len() == 1 && provider_bodies.len() == 1 {
-        return Ok(parsed[0].1);
     }
 
     for (_, candidate) in &parsed {
@@ -1051,9 +1051,29 @@ mod tests {
         assert_eq!(info.sequence, 42);
         assert_eq!(info.balance_drops, 25_000_000);
         assert_eq!(
-            info.ledger_index, 9_000_001,
-            "return the freshest ledger index among agreeing providers"
+            info.ledger_index, 9_000_000,
+            "expiry decisions must use a conservative index from agreeing providers"
         );
+    }
+
+    #[test]
+    fn one_agreeing_provider_cannot_inflate_expiry_index() {
+        let honest =
+            br#"{"sequence":42,"balance":"25000000","ledger_index":9000000,"error":null}"#.to_vec();
+        let inflated =
+            br#"{"sequence":42,"balance":"25000000","ledger_index":99999999,"error":null}"#
+                .to_vec();
+        let info = quorum_account_info(&[honest, inflated]).unwrap();
+        assert_eq!(info.ledger_index, 9_000_000);
+    }
+
+    #[test]
+    fn out_of_range_account_index_is_not_wrapped() {
+        let body =
+            br#"{"sequence":42,"balance":"25000000","ledger_index":4294967296,"error":null}"#;
+        assert!(parse_account_info(body)
+            .unwrap_err()
+            .contains("exceeds u32"));
     }
 
     #[test]
@@ -1083,9 +1103,9 @@ mod tests {
     }
 
     #[test]
-    fn reserve_quorum_accepts_single_success_when_secondary_provider_is_unavailable() {
+    fn reserve_quorum_holds_when_only_one_provider_answers() {
         let provider_a = br#"{"reserve_base":1250000,"error":null}"#.to_vec();
-        assert_eq!(quorum_reserve_base(&[provider_a]).unwrap(), 1_250_000);
+        assert!(quorum_reserve_base(&[provider_a]).is_err());
     }
 
     #[test]

@@ -25,6 +25,7 @@ export const idlFactory = ({ IDL }) => {
       'actual_bps' : IDL.Nat16,
       'max_bps' : IDL.Nat16,
     }),
+    'DonationIntentConflict' : IDL.Null,
     'NotAuthorizedBurnCaller' : IDL.Null,
     'ZeroAmount' : IDL.Null,
     'InsufficientLpBalance' : IDL.Record({
@@ -38,6 +39,7 @@ export const idlFactory = ({ IDL }) => {
     'InvariantNotConverged' : IDL.Null,
     'InsufficientLiquidity' : IDL.Null,
     'TransferFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
+    'PendingClaimCapacityReached' : IDL.Null,
     'SlippageExceeded' : IDL.Null,
     'ClaimNotFound' : IDL.Null,
     'PoolEmpty' : IDL.Null,
@@ -46,6 +48,132 @@ export const idlFactory = ({ IDL }) => {
       'available' : IDL.Nat,
       'required' : IDL.Nat,
     }),
+  });
+  const IngressStatusV1 = IDL.Variant({
+    'Failed' : IDL.Null,
+    'Pulling' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'Unresolved' : IDL.Null,
+    'Completed' : IDL.Null,
+  });
+  const IngressRequestV1 = IDL.Variant({
+    'AddLiquidity' : IDL.Record({
+      'min_lp' : IDL.Nat,
+      'amounts' : IDL.Vec(IDL.Nat),
+    }),
+    'Donate' : IDL.Record({ 'token_index' : IDL.Nat8, 'amount' : IDL.Nat }),
+  });
+  const AddLiquidityFactsV1 = IDL.Record({
+    'imbalance_after' : IDL.Nat64,
+    'is_rebalancing' : IDL.Bool,
+    'fee_bps_used' : IDL.Nat16,
+    'imbalance_before' : IDL.Nat64,
+    'fees_native' : IDL.Vec(IDL.Nat),
+    'lp_minted' : IDL.Nat,
+  });
+  const Account = IDL.Record({
+    'owner' : IDL.Principal,
+    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+  });
+  const SwapTransferStatusV1 = IDL.Variant({
+    'SkippedDust' : IDL.Null,
+    'Confirmed' : IDL.Null,
+    'Rejected' : IDL.Null,
+    'Unresolved' : IDL.Null,
+    'Submitted' : IDL.Null,
+  });
+  const AbsenceScanV1 = IDL.Record({
+    'fixed_tip' : IDL.Nat,
+    'cursor' : IDL.Nat,
+    'generation' : IDL.Nat32,
+  });
+  const SwapTransferV1 = IDL.Record({
+    'to' : Account,
+    'fee' : IDL.Nat,
+    'status' : SwapTransferStatusV1,
+    'block_index' : IDL.Opt(IDL.Nat),
+    'from' : Account,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'dispatch_count' : IDL.Opt(IDL.Nat32),
+    'generation' : IDL.Opt(IDL.Nat32),
+    'too_old_after_ambiguity' : IDL.Opt(IDL.Bool),
+    'history_start' : IDL.Opt(IDL.Nat),
+    'ledger' : IDL.Principal,
+    'retired_identity_hash' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'created_at_time' : IDL.Nat64,
+    'amount' : IDL.Nat,
+    'absence_scan' : IDL.Opt(AbsenceScanV1),
+    'ready_to_dispatch' : IDL.Opt(IDL.Bool),
+  });
+  const IngressReceiptV1 = IDL.Record({
+    'status' : IngressStatusV1,
+    'owner' : IDL.Principal,
+    'request' : IngressRequestV1,
+    'result_lp' : IDL.Opt(IDL.Nat),
+    'error' : IDL.Opt(IDL.Text),
+    'add_facts' : IDL.Opt(AddLiquidityFactsV1),
+    'version' : IDL.Nat16,
+    'pulls' : IDL.Vec(SwapTransferV1),
+    'intent_id' : IDL.Vec(IDL.Nat8),
+  });
+  const IngressReceiptErrorV1 = IDL.Variant({
+    'CapacityExceeded' : IDL.Null,
+    'IntentConflict' : IDL.Null,
+    'ProofUnavailable' : IDL.Null,
+    'PoolLocked' : IDL.Null,
+    'StaleIntentSequence' : IDL.Null,
+    'Unauthorized' : IDL.Null,
+    'ProofMismatch' : IDL.Null,
+    'InvalidRequest' : IDL.Null,
+    'InvalidIntentId' : IDL.Null,
+  });
+  const IngressReceiptResultV1 = IDL.Variant({
+    'Ok' : IngressReceiptV1,
+    'Err' : IngressReceiptErrorV1,
+  });
+  const SwapReceiptStatusV1 = IDL.Variant({
+    'InputSubmitted' : IDL.Null,
+    'Failed' : IDL.Null,
+    'OutputSubmitted' : IDL.Null,
+    'Refunded' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'Unresolved' : IDL.Null,
+    'RefundSubmitted' : IDL.Null,
+    'Completed' : IDL.Null,
+  });
+  const SwapRequestV1 = IDL.Record({
+    'i' : IDL.Nat8,
+    'j' : IDL.Nat8,
+    'dx' : IDL.Nat,
+    'min_dy' : IDL.Nat,
+    'intent_id' : IDL.Vec(IDL.Nat8),
+  });
+  const SwapReceiptV1 = IDL.Record({
+    'status' : SwapReceiptStatusV1,
+    'output' : IDL.Opt(SwapTransferV1),
+    'gross_output' : IDL.Opt(IDL.Nat),
+    'owner' : IDL.Principal,
+    'request' : SwapRequestV1,
+    'error' : IDL.Opt(IDL.Text),
+    'version' : IDL.Nat16,
+    'input' : IDL.Opt(SwapTransferV1),
+    'pool_fee' : IDL.Opt(IDL.Nat),
+    'refund' : IDL.Opt(SwapTransferV1),
+  });
+  const SwapReceiptErrorV1 = IDL.Variant({
+    'CapacityExceeded' : IDL.Null,
+    'IntentConflict' : IDL.Null,
+    'ProofUnavailable' : IDL.Null,
+    'PoolLocked' : IDL.Null,
+    'StaleIntentSequence' : IDL.Null,
+    'Unauthorized' : IDL.Null,
+    'ProofMismatch' : IDL.Null,
+    'InvalidRequest' : IDL.Null,
+    'InvalidIntentId' : IDL.Null,
+  });
+  const SwapReceiptResultV1 = IDL.Variant({
+    'Ok' : SwapReceiptV1,
+    'Err' : SwapReceiptErrorV1,
   });
   const AuthorizedRedeemAndBurnArgs = IDL.Record({
     'token_amount' : IDL.Nat,
@@ -255,57 +383,6 @@ export const idlFactory = ({ IDL }) => {
     'amount_in' : IDL.Nat,
     'token_out' : IDL.Nat8,
   });
-  const SwapReceiptStatusV1 = IDL.Variant({
-    'InputSubmitted' : IDL.Null,
-    'Failed' : IDL.Null,
-    'OutputSubmitted' : IDL.Null,
-    'Refunded' : IDL.Null,
-    'Prepared' : IDL.Null,
-    'Unresolved' : IDL.Null,
-    'RefundSubmitted' : IDL.Null,
-    'Completed' : IDL.Null,
-  });
-  const Account = IDL.Record({
-    'owner' : IDL.Principal,
-    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
-  });
-  const SwapTransferStatusV1 = IDL.Variant({
-    'SkippedDust' : IDL.Null,
-    'Confirmed' : IDL.Null,
-    'Rejected' : IDL.Null,
-    'Unresolved' : IDL.Null,
-    'Submitted' : IDL.Null,
-  });
-  const SwapTransferV1 = IDL.Record({
-    'to' : Account,
-    'fee' : IDL.Nat,
-    'status' : SwapTransferStatusV1,
-    'block_index' : IDL.Opt(IDL.Nat),
-    'from' : Account,
-    'memo' : IDL.Vec(IDL.Nat8),
-    'ledger' : IDL.Principal,
-    'created_at_time' : IDL.Nat64,
-    'amount' : IDL.Nat,
-  });
-  const SwapRequestV1 = IDL.Record({
-    'i' : IDL.Nat8,
-    'j' : IDL.Nat8,
-    'dx' : IDL.Nat,
-    'min_dy' : IDL.Nat,
-    'intent_id' : IDL.Vec(IDL.Nat8),
-  });
-  const SwapReceiptV1 = IDL.Record({
-    'status' : SwapReceiptStatusV1,
-    'output' : IDL.Opt(SwapTransferV1),
-    'gross_output' : IDL.Opt(IDL.Nat),
-    'owner' : IDL.Principal,
-    'request' : SwapRequestV1,
-    'error' : IDL.Opt(IDL.Text),
-    'version' : IDL.Nat16,
-    'input' : IDL.Opt(SwapTransferV1),
-    'pool_fee' : IDL.Opt(IDL.Nat),
-    'refund' : IDL.Opt(SwapTransferV1),
-  });
   const VirtualPricePoint = IDL.Record({
     'virtual_price' : IDL.Nat,
     'timestamp' : IDL.Nat64,
@@ -509,19 +586,19 @@ export const idlFactory = ({ IDL }) => {
     'token_out' : IDL.Nat8,
     'fee_native' : IDL.Nat,
   });
-  const SwapReceiptErrorV1 = IDL.Variant({
-    'CapacityExceeded' : IDL.Null,
-    'IntentConflict' : IDL.Null,
+  const ClaimProofErrorV1 = IDL.Variant({
+    'ProofUnavailable' : IDL.Null,
+    'NotFound' : IDL.Null,
+    'LegacyIdentityUnavailable' : IDL.Null,
     'Unauthorized' : IDL.Null,
-    'InvalidRequest' : IDL.Null,
-    'InvalidIntentId' : IDL.Null,
+    'ProofMismatch' : IDL.Null,
+  });
+  const ClaimProofResultV1 = IDL.Variant({
+    'Ok' : IDL.Null,
+    'Err' : ClaimProofErrorV1,
   });
   const SwapReceiptClientResultV1 = IDL.Variant({
     'Ok' : IDL.Null,
-    'Err' : SwapReceiptErrorV1,
-  });
-  const SwapReceiptResultV1 = IDL.Variant({
-    'Ok' : SwapReceiptV1,
     'Err' : SwapReceiptErrorV1,
   });
   return IDL.Service({
@@ -533,6 +610,21 @@ export const idlFactory = ({ IDL }) => {
     'add_liquidity' : IDL.Func(
         [IDL.Vec(IDL.Nat), IDL.Nat],
         [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : ThreePoolError })],
+        [],
+      ),
+    'add_liquidity_with_receipt_v1' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat), IDL.Nat],
+        [IngressReceiptResultV1],
+        [],
+      ),
+    'advance_ingress_absence_scan_v1' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Nat8],
+        [IngressReceiptResultV1],
+        [],
+      ),
+    'advance_swap_absence_scan_v1' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Nat8],
+        [SwapReceiptResultV1],
         [],
       ),
     'authorized_redeem_and_burn' : IDL.Func(
@@ -576,6 +668,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
         [],
       ),
+    'donate_with_receipt_v1' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Nat8, IDL.Nat],
+        [IngressReceiptResultV1],
+        [],
+      ),
     'get_admin_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_admin_events' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
@@ -615,6 +712,11 @@ export const idlFactory = ({ IDL }) => {
         [ImbalanceStats],
         ['query'],
       ),
+    'get_ingress_receipt_v1' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [IDL.Opt(IngressReceiptV1)],
+        ['query'],
+      ),
     'get_liquidity_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_liquidity_event_count_v2' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_liquidity_events' : IDL.Func(
@@ -641,6 +743,11 @@ export const idlFactory = ({ IDL }) => {
     'get_lp_holders' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat))],
+        ['query'],
+      ),
+    'get_next_intent_sequence_v1' : IDL.Func(
+        [],
+        [IDL.Opt(IDL.Nat64)],
         ['query'],
       ),
     'get_pending_claim_count' : IDL.Func([], [IDL.Nat64], ['query']),
@@ -792,6 +899,31 @@ export const idlFactory = ({ IDL }) => {
     'ramp_a' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
+        [],
+      ),
+    'receive_donation' : IDL.Func(
+        [IDL.Nat8, IDL.Nat],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
+        [],
+      ),
+    'receive_donation_with_id' : IDL.Func(
+        [IDL.Nat, IDL.Nat8, IDL.Nat],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
+        [],
+      ),
+    'reconcile_ingress_pull_v1' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Nat8, IDL.Nat],
+        [IngressReceiptResultV1],
+        [],
+      ),
+    'reconcile_pending_claim_v1' : IDL.Func(
+        [IDL.Nat64, IDL.Nat],
+        [ClaimProofResultV1],
+        [],
+      ),
+    'reconcile_swap_leg_v1' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Nat8, IDL.Nat],
+        [SwapReceiptResultV1],
         [],
       ),
     'remove_authorized_burn_caller' : IDL.Func(

@@ -1,6 +1,6 @@
 import { Principal } from '@dfinity/principal';
 import { threePoolService, POOL_TOKENS } from './threePoolService';
-import { ammService, AMM_TOKENS, approvalAmount, tokenFeeCached, type AmmToken } from './ammService';
+import { ammService, AMM_TOKENS, approvalAmount, captureAmmWalletContext, tokenFeeCached, type AmmToken } from './ammService';
 import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
 import { getOisySignerAgent, createOisyActor } from './oisySigner';
@@ -658,7 +658,7 @@ export async function executeRoute(
 
   if (AMM1_ROUTING_PAUSED) {
     const winner = route.providerQuote?.provider ?? route.hopProviderQuote?.provider;
-    if (winner === 'rumi_amm' || route.type === 'stable_to_icp' || route.type === 'icp_to_stable') {
+    if (winner === 'rumi_amm') {
       throw new Error('AMM1 routing is currently paused. Please refresh the quote and try again.');
     }
   }
@@ -1005,10 +1005,9 @@ export async function preWarmOisyFees(): Promise<void> {
 // window — any pre-popup `await` would burn that window and trip Oisy's
 // "Signer window should not be opened outside of click handler" guard.
 //
-// CRITICAL: These functions must NOT make any async canister calls
-// before the first Oisy consent screen. All estimates and pool IDs come
-// pre-computed from resolveRoute() (stored on the SwapRoute object). The
-// signer agent is pre-warmed during the quote phase.
+// Estimates and pool IDs come pre-computed from resolveRoute(). AMM-backed
+// routes also check for unresolved caller operations before any approval or
+// earlier hop can move value; the signer agent is pre-warmed during quoting.
 // ──────────────────────────────────────────────────────────────
 
 const THREEPOOL_ID = CANISTER_IDS.THREEPOOL;
@@ -1017,14 +1016,13 @@ const ICP_LEDGER_ID = CANISTER_IDS.ICP_LEDGER;
 
 /**
  * Stablecoin → ICP (Oisy sequential, v5):
- * 1. Approve stablecoin → 3pool
+ * 1. 3pool.add_liquidity (approves the stablecoin and mints 3USD)
  * 2. Approve 3USD → AMM (pre-approve estimated amount)
- * 3. 3pool.add_liquidity
- * 4. AMM.swap (using estimated 3USD amount)
+ * 3. AMM.swap using the actual 3USD amount returned by the first hop
  *
  * Each step is its own Oisy consent screen. All estimates come from
  * route.intermediateOutput / route.estimatedOutput which were computed
- * during resolveRoute(). No canister queries here before the first popup.
+ * during resolveRoute(). An AMM pending-operation check runs before approvals.
  */
 async function executeStableToIcpOisy(
   route: SwapRoute,
@@ -1034,6 +1032,8 @@ async function executeStableToIcpOisy(
 ): Promise<bigint> {
   const wallet = get(walletStore);
   if (!wallet.principal) throw new Error('Wallet not connected');
+  const assertWalletContextCurrent = captureAmmWalletContext(wallet.principal);
+  assertWalletContextCurrent();
 
   const hopQuote = route.hopProviderQuote;
   if (!hopQuote) throw new Error('stable_to_icp Oisy route missing hopProviderQuote');
@@ -1060,38 +1060,35 @@ async function executeStableToIcpOisy(
   // Signer agent was pre-warmed during quote phase — cached, no popup
   console.log('[Oisy] Sequential stable→ICP route (3pool + AMM) via @icp-sdk/signer v5');
   const signerAgent = await getOisySignerAgent(wallet.principal);
+  assertWalletContextCurrent();
 
-  const stableLedger = createOisyActor(fromPoolToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
-  const threeUsdLedger = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
+  const threeUsdPoolActor = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
   const ammActor = createOisyActor(AMM_ID, canisterIDLs.rumi_amm, signerAgent);
+  await ammService.assertNoUnresolvedOperation(ammActor, wallet.principal, assertWalletContextCurrent);
 
-  // Step 1: Approve stablecoin → 3pool (first consent screen, Tier 1 native)
-  const r1 = await stableLedger.icrc2_approve({
-    amount: amountIn + fromFee * 2n,
-    spender: { owner: Principal.fromText(THREEPOOL_ID), subaccount: [] },
-    expires_at: [], expected_allowance: [], memo: [], fee: [],
-    from_subaccount: [], created_at_time: [],
-  });
-  if (r1 && 'Err' in r1) throw new Error(`Stablecoin approval failed: ${JSON.stringify(r1.Err)}`);
+  // Step 1: Approve stablecoin and add liquidity through the durable 3pool V1 intent.
+  const threeUsdReceived = await threePoolService.addLiquidity(amounts, threeUsdMinOutput);
+  assertWalletContextCurrent();
+  if (typeof threeUsdReceived !== 'bigint') throw new Error('3pool deposit did not return a confirmed LP amount');
 
-  // Step 2: Approve 3USD → AMM (generous: estimate + 1% buffer)
-  const threeUsdApprovalAmt = threeUsdEstimate * 101n / 100n;
-  const r2 = await threeUsdLedger.icrc2_approve({
+  // Step 2: Approve the actual 3USD output plus its cached ICRC transfer fee.
+  const threeUsdToken = AMM_TOKENS.find(token => token.is3USD)!;
+  const threeUsdApprovalAmt = threeUsdReceived + tokenFeeCached(threeUsdToken);
+  const r2 = await threeUsdPoolActor.icrc2_approve({
     amount: threeUsdApprovalAmt,
     spender: { owner: Principal.fromText(AMM_ID), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
   });
+  assertWalletContextCurrent();
   if (r2 && 'Err' in r2) throw new Error(`3USD approval failed: ${JSON.stringify(r2.Err)}`);
 
-  // Step 3: 3pool deposit (mints 3USD into caller's account)
-  const r3 = await threeUsdLedger.add_liquidity(amounts, threeUsdMinOutput);
-  if ('Err' in r3) throw new Error(`3pool deposit failed: ${JSON.stringify(r3.Err)}`);
-
-  // Step 4: AMM swap (use estimated 3USD amount — slippage protection via minOutput)
-  const r4 = await ammActor.swap(poolId, Principal.fromText(THREEPOOL_ID), threeUsdEstimate, icpMinOutput);
-  if ('Err' in r4) throw new Error(`AMM swap failed: ${JSON.stringify(r4.Err)}`);
-  return r4.Ok.amount_out;
+  // Step 3: AMM swap the actual 3USD minted by the first hop.
+  const r4 = await ammService.swapWithPreapprovedActor(
+    ammActor, wallet.principal, poolId, Principal.fromText(THREEPOOL_ID), threeUsdReceived, icpMinOutput,
+  );
+  assertWalletContextCurrent();
+  return r4.amount_out;
 }
 
 /**
@@ -1101,8 +1098,8 @@ async function executeStableToIcpOisy(
  * 3. 3pool.remove_one_coin (burns 3USD LP, no approval needed)
  *
  * Each step is its own Oisy consent screen. All estimates come from
- * route.intermediateOutput / route.estimatedOutput. No canister queries
- * before the first popup.
+ * route.intermediateOutput / route.estimatedOutput. An AMM pending-operation
+ * check runs before the first approval.
  */
 async function executeIcpToStableOisy(
   route: SwapRoute,
@@ -1112,6 +1109,8 @@ async function executeIcpToStableOisy(
 ): Promise<bigint> {
   const wallet = get(walletStore);
   if (!wallet.principal) throw new Error('Wallet not connected');
+  const assertWalletContextCurrent = captureAmmWalletContext(wallet.principal);
+  assertWalletContextCurrent();
 
   const hopQuote = route.hopProviderQuote;
   if (!hopQuote) throw new Error('icp_to_stable Oisy route missing hopProviderQuote');
@@ -1139,10 +1138,12 @@ async function executeIcpToStableOisy(
   // Signer agent was pre-warmed during quote phase — cached, no popup
   console.log('[Oisy] Sequential ICP→stable route (AMM + 3pool) via @icp-sdk/signer v5');
   const signerAgent = await getOisySignerAgent(wallet.principal);
+  assertWalletContextCurrent();
 
   const icpLedger = createOisyActor(ICP_LEDGER_ID, CONFIG.icusd_ledgerIDL, signerAgent);
   const ammActor = createOisyActor(AMM_ID, canisterIDLs.rumi_amm, signerAgent);
   const poolActor = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
+  await ammService.assertNoUnresolvedOperation(ammActor, wallet.principal, assertWalletContextCurrent);
 
   // Step 1: Approve ICP → AMM (first consent screen, Tier 1 native)
   const r1 = await icpLedger.icrc2_approve({
@@ -1151,17 +1152,21 @@ async function executeIcpToStableOisy(
     expires_at: [], expected_allowance: [], memo: [], fee: [],
     from_subaccount: [], created_at_time: [],
   });
+  assertWalletContextCurrent();
   if (r1 && 'Err' in r1) throw new Error(`ICP approval failed: ${JSON.stringify(r1.Err)}`);
 
   // Step 2: AMM swap ICP → 3USD
-  const r2 = await ammActor.swap(poolId, Principal.fromText(ICP_LEDGER_ID), amountIn, threeUsdMinOutput);
-  if ('Err' in r2) throw new Error(`AMM swap failed: ${JSON.stringify(r2.Err)}`);
+  const r2 = await ammService.swapWithPreapprovedActor(
+    ammActor, wallet.principal, poolId, Principal.fromText(ICP_LEDGER_ID), amountIn, threeUsdMinOutput,
+  );
+  assertWalletContextCurrent();
 
   // Step 3: 3pool redeem 3USD → stablecoin (no approval: burns caller's LP tokens).
   // Burn the NET 3USD the AMM actually paid out (gross - ledger_fee). Burning the
   // gross threeUsdEstimate would exceed the caller's balance and trip
   // remove_one_coin's InsufficientLiquidity check (or silently eat prior 3USD dust).
-  const r3 = await poolActor.remove_one_coin(threeUsdNetEstimate, to.threePoolIndex, stableMinOutput);
+  const r3 = await poolActor.remove_one_coin(r2.amount_out_net, to.threePoolIndex, stableMinOutput);
+  assertWalletContextCurrent();
   if ('Err' in r3) throw new Error(`3pool redeem failed: ${JSON.stringify(r3.Err)}`);
   return r3.Ok;
 }
@@ -1219,26 +1224,16 @@ async function executeStableToIcpOisyIcpswap(
   console.log('[Oisy] Sequential stable→ICP via ICPswap (6 hops) via @icp-sdk/signer v5');
   const signerAgent = await getOisySignerAgent(wallet.principal);
 
-  const stableLedger = createOisyActor(fromPoolToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
-  const threeUsdLedger = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
+  const threeUsdPoolActor = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
   const icpswapPool = createOisyActor(icpswapPoolId, canisterIDLs.icpswap_pool, signerAgent);
 
-  // Step 1: approve stablecoin → 3pool (first consent screen, Tier 1 native)
-  const r1 = await stableLedger.icrc2_approve({
-    amount: amountIn + fromFee * 2n,
-    spender: { owner: Principal.fromText(THREEPOOL_ID), subaccount: [] },
-    expires_at: [], expected_allowance: [], memo: [], fee: [],
-    from_subaccount: [], created_at_time: [],
-  });
-  if (r1 && 'Err' in r1) throw new Error(`Stablecoin approval failed: ${JSON.stringify(r1.Err)}`);
+  // Step 1: approve stablecoin and add liquidity through the durable 3pool V1 intent.
+  const threeUsdReceived = await threePoolService.addLiquidity(amounts, threeUsdMinOutput);
+  if (typeof threeUsdReceived !== 'bigint') throw new Error('3pool deposit did not return a confirmed LP amount');
 
-  // Step 2: 3pool deposit (burns stablecoin, mints 3USD)
-  const r2 = await threeUsdLedger.add_liquidity(amounts, threeUsdMinOutput);
-  if ('Err' in r2) throw new Error(`3pool deposit failed: ${JSON.stringify(r2.Err)}`);
-
-  // Step 3: approve 3USD → ICPswap pool (depositFrom is ICRC-2 pull)
+  // Step 2: approve 3USD → ICPswap pool (depositFrom is ICRC-2 pull)
   const threeUsdApprovalAmt = threeUsdEstimate * 101n / 100n;
-  const r3 = await threeUsdLedger.icrc2_approve({
+  const r3 = await threeUsdPoolActor.icrc2_approve({
     amount: threeUsdApprovalAmt,
     spender: { owner: Principal.fromText(icpswapPoolId), subaccount: [] },
     expires_at: [], expected_allowance: [], memo: [], fee: [],
@@ -1401,29 +1396,16 @@ async function executeStableToIcpViaIcUsdOisy(
   }
   const icUsdMinOutput = icUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
   const icpGrossMinOutput = route.grossOutput * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
-  const fromFee = tokenFeeCached(from);
   const icUsdFee = tokenFeeCached(icUsdToken);
   const icpToken = AMM_TOKENS.find(t => t.symbol === 'ICP')!;
   const icpFee = tokenFeeCached(icpToken);
 
   console.log('[Oisy] Sequential stable→icUSD→ICP route (3pool + ICPswap)');
   const signerAgent = await getOisySignerAgent(wallet.principal);
-  const fromLedger = createOisyActor(from.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
   const icUsdLedger = createOisyActor(icUsdToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
-  const threePoolActor = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
   const icpswapPool = createOisyActor(icpswapPoolId, canisterIDLs.icpswap_pool, signerAgent);
 
-  const r1 = await fromLedger.icrc2_approve({
-    amount: amountIn + fromFee * 2n,
-    spender: { owner: Principal.fromText(THREEPOOL_ID), subaccount: [] },
-    expires_at: [], expected_allowance: [], memo: [], fee: [],
-    from_subaccount: [], created_at_time: [],
-  });
-  if (r1 && 'Err' in r1) throw new Error(`${from.symbol} approval failed: ${JSON.stringify(r1.Err)}`);
-
-  const r2 = await threePoolActor.swap(from.threePoolIndex, icUsdToken.threePoolIndex, amountIn, icUsdMinOutput);
-  if ('Err' in r2) throw new Error(`3pool swap failed: ${JSON.stringify(r2.Err)}`);
-  const icUsdReceived = r2.Ok;
+  const icUsdReceived = await threePoolService.swap(from.threePoolIndex, icUsdToken.threePoolIndex, amountIn, icUsdMinOutput);
 
   const r3 = await icUsdLedger.icrc2_approve({
     amount: icUsdReceived + icUsdFee * 2n,
@@ -1481,9 +1463,7 @@ async function executeIcpToStableViaIcUsdOisy(
   console.log('[Oisy] Sequential ICP→icUSD→stable route (ICPswap + 3pool)');
   const signerAgent = await getOisySignerAgent(wallet.principal);
   const fromLedger = createOisyActor(from.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
-  const icUsdLedger = createOisyActor(icUsdToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
   const icpswapPool = createOisyActor(icpswapPoolId, canisterIDLs.icpswap_pool, signerAgent);
-  const threePoolActor = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
 
   const r1 = await fromLedger.icrc2_approve({
     amount: amountIn + fromFee * 2n,
@@ -1507,17 +1487,7 @@ async function executeIcpToStableViaIcUsdOisy(
   if ('err' in r4) throw new Error(`ICPswap withdraw failed: ${JSON.stringify(r4.err)}`);
   const icUsdReceived = (r4 as { ok: bigint }).ok;
 
-  const r5 = await icUsdLedger.icrc2_approve({
-    amount: icUsdReceived + icUsdFee * 2n,
-    spender: { owner: Principal.fromText(THREEPOOL_ID), subaccount: [] },
-    expires_at: [], expected_allowance: [], memo: [], fee: [],
-    from_subaccount: [], created_at_time: [],
-  });
-  if (r5 && 'Err' in r5) throw new Error(`icUSD approval failed: ${JSON.stringify(r5.Err)}`);
-
-  const r6 = await threePoolActor.swap(icUsdToken.threePoolIndex, to.threePoolIndex, icUsdReceived, stableMinOutput);
-  if ('Err' in r6) throw new Error(`3pool swap failed: ${JSON.stringify(r6.Err)}`);
-  return r6.Ok;
+  return await threePoolService.swap(icUsdToken.threePoolIndex, to.threePoolIndex, icUsdReceived, stableMinOutput);
 }
 
 /**

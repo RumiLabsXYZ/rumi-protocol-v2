@@ -4,7 +4,24 @@ import { pnp, canisterIDLs } from './pnp';
 import { walletStore } from '../stores/wallet';
 import { get } from 'svelte/store';
 import { CANISTER_IDS, CONFIG } from '../config';
-import { isOisyWallet } from './protocol/walletOperations';
+import {
+  assertActionBoundContextCurrent,
+  captureActionBoundContext,
+  isOisyWallet,
+  StaleActionSessionError,
+  type ActionBoundContext,
+} from './protocol/walletOperations';
+import { SignerError } from '@icp-sdk/signer';
+import {
+  clearPendingStabilityPoolDeposit,
+  isDefinitiveNoDeposit,
+  isKnownSignerAbort,
+  markPendingStabilityPoolDepositAccepted,
+  PendingStabilityPoolDepositError,
+  readPendingStabilityPoolDeposit,
+  savePendingStabilityPoolDeposit,
+  withStabilityPoolDepositLock,
+} from '../utils/stabilityPoolDepositLock';
 import { getOisySignerAgent, createOisyActor } from './oisySigner';
 import {
   ackNativeXrpPayoutSettledWithActor,
@@ -267,71 +284,108 @@ class StabilityPoolService {
 
   // ── Mutations ──
 
-  async deposit(tokenLedger: Principal, amount: bigint): Promise<void> {
-    const wallet = get(walletStore);
-    if (!wallet.isConnected) throw new Error('Wallet not connected');
+  async deposit(tokenLedger: Principal, amount: bigint, actionContext: ActionBoundContext = captureActionBoundContext()): Promise<void> {
+    const owner = actionContext.expectedPrincipalText;
+    const ledger = tokenLedger.toText();
+    const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
 
-    const oisyDetected = isOisyWallet();
+    return withStabilityPoolDepositLock(locks, owner, ledger, async () => {
+      if (readPendingStabilityPoolDeposit(owner, ledger)) throw new PendingStabilityPoolDepositError();
+      assertActionBoundContextCurrent(actionContext);
+      const wallet = get(walletStore);
+      if (!wallet.isConnected || wallet.principal?.toText() !== owner) throw new StaleActionSessionError();
 
-    if (oisyDetected && wallet.principal) {
-      // ─── Oisy sequential path (v5: no batch concept) ───
-      console.log(`[Oisy] Sequential approve + SP deposit via @icp-sdk/signer v5`);
-      const signerAgent = await getOisySignerAgent(wallet.principal);
+      const submitDeposit = async (poolActor: any, oisy: boolean) => {
+        const record = {
+          owner,
+          ledger,
+          amount: amount.toString(),
+          status: 'submitting' as const,
+          attemptId: typeof crypto !== 'undefined' && 'randomUUID' in crypto
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          createdAt: Date.now(),
+        };
+        savePendingStabilityPoolDeposit(record);
+        try { assertActionBoundContextCurrent(actionContext); }
+        catch (err) {
+          clearPendingStabilityPoolDeposit(owner, ledger, record.attemptId);
+          throw err;
+        }
 
-      const ledgerActor = createOisyActor(
-        tokenLedger.toText(), CONFIG.icusd_ledgerIDL, signerAgent
-      );
-      const poolActor = createOisyActor(
-        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
-      );
+        let result: { Ok?: null; Err?: any };
+        try {
+          result = await poolActor.deposit(tokenLedger, amount) as { Ok: null } | { Err: any };
+        } catch (err) {
+          if (oisy && err instanceof SignerError && isKnownSignerAbort(err)) {
+            clearPendingStabilityPoolDeposit(owner, ledger, record.attemptId);
+            throw new Error('The wallet canceled the Stability Pool deposit before submission. You can retry.');
+          }
+          throw new PendingStabilityPoolDepositError(
+            'The Stability Pool deposit was submitted but no confirmed response arrived. Check this token ledger’s transfer history and your Stability Pool position before retrying.',
+          );
+        }
 
-      const requestedAllowance = amount * 105n / 100n;
+        if (result && 'Ok' in result) {
+          try {
+            markPendingStabilityPoolDepositAccepted(record);
+            clearPendingStabilityPoolDeposit(owner, ledger, record.attemptId);
+          } catch {
+            throw new PendingStabilityPoolDepositError(
+              'The Stability Pool confirmed the deposit, but its local recovery lock could not be cleared. Check the updated position before clearing the lock.',
+            );
+          }
+          try { assertActionBoundContextCurrent(actionContext); }
+          catch {
+            throw new Error('The Stability Pool deposit may have completed under the previous wallet. Check that wallet’s position before retrying.');
+          }
+          return;
+        }
+        if (result && 'Err' in result && isDefinitiveNoDeposit(result.Err)) {
+          clearPendingStabilityPoolDeposit(owner, ledger, record.attemptId);
+          throw new Error(this.formatError(result.Err));
+        }
+        throw new PendingStabilityPoolDepositError(
+          'The Stability Pool returned an error after submission that may follow a ledger transfer. Check this token ledger’s transfer history and your pool position before retrying.',
+        );
+      };
 
-      // 1) Approve (first Oisy consent screen, Tier 1 native).
-      const approveResult = await ledgerActor.icrc2_approve({
-        amount: requestedAllowance,
-        spender: { owner: Principal.fromText(STABILITY_POOL_CANISTER_ID), subaccount: [] },
-        expires_at: [], expected_allowance: [], memo: [], fee: [],
-        from_subaccount: [], created_at_time: []
-      });
-      if (approveResult && 'Err' in approveResult) {
-        throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
+      if (isOisyWallet() && wallet.principal) {
+        console.log('[Oisy] Sequential approve + SP deposit via @icp-sdk/signer v5');
+        const signerAgent = await getOisySignerAgent(Principal.fromText(owner));
+        assertActionBoundContextCurrent(actionContext);
+        const ledgerActor = createOisyActor(tokenLedger.toText(), CONFIG.icusd_ledgerIDL, signerAgent);
+        const poolActor = createOisyActor(STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent);
+        assertActionBoundContextCurrent(actionContext);
+        const approveResult = await ledgerActor.icrc2_approve({
+          amount: amount * 105n / 100n,
+          spender: { owner: Principal.fromText(STABILITY_POOL_CANISTER_ID), subaccount: [] },
+          expires_at: [], expected_allowance: [], memo: [], fee: [],
+          from_subaccount: [], created_at_time: [],
+        });
+        assertActionBoundContextCurrent(actionContext);
+        if (approveResult && 'Err' in approveResult) throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
+        assertActionBoundContextCurrent(actionContext);
+        await submitDeposit(poolActor, true);
+        return;
       }
 
-      // 2) Deposit (second Oisy consent screen, Tier 3 blind-request).
-      const result = await poolActor.deposit(tokenLedger, amount);
-      if ('Err' in result) {
-        throw new Error(this.formatError(result.Err));
-      }
-    } else {
-      // ─── Non-Oisy path (Plug, II, etc.) ───
-      // Approve first, then deposit.
-      const ledgerActor = await walletStore.getActor(
-        tokenLedger.toText(), CONFIG.icusd_ledgerIDL
-      ) as any;
-
+      const ledgerActor = await walletStore.getActor(tokenLedger.toText(), CONFIG.icusd_ledgerIDL) as any;
+      assertActionBoundContextCurrent(actionContext);
       const approveResult = await ledgerActor.icrc2_approve({
         amount: amount * 105n / 100n,
         spender: { owner: Principal.fromText(STABILITY_POOL_CANISTER_ID), subaccount: [] },
         expires_at: [], expected_allowance: [], memo: [], fee: [],
-        from_subaccount: [], created_at_time: []
+        from_subaccount: [], created_at_time: [],
       });
-
-      if (approveResult && 'Err' in approveResult) {
-        throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
-      }
-
-      // Small delay for ledger sync
-      await new Promise(r => setTimeout(r, 2000));
-
-      const poolActor = await walletStore.getActor(
-        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool
-      ) as any;
-      const result = await poolActor.deposit(tokenLedger, amount) as { Ok: null } | { Err: any };
-      if ('Err' in result) {
-        throw new Error(this.formatError(result.Err));
-      }
-    }
+      assertActionBoundContextCurrent(actionContext);
+      if (approveResult && 'Err' in approveResult) throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      assertActionBoundContextCurrent(actionContext);
+      const poolActor = await walletStore.getActor(STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool) as any;
+      assertActionBoundContextCurrent(actionContext);
+      await submitDeposit(poolActor, false);
+    });
   }
 
   async withdraw(tokenLedger: Principal, amount: bigint): Promise<void> {

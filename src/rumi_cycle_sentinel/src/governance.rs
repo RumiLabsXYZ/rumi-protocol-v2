@@ -62,7 +62,7 @@
 
 use candid::{CandidType, Principal};
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::state::alarms::AlarmError;
 use crate::state::{self, GlobalConfig, RemoveTargetError};
@@ -219,6 +219,20 @@ fn check_targets_fit_global_cap(new_policy: &GlobalPolicy) -> Result<(), Governa
 
 fn insert_new_proposal(record: ProposalRecord) -> Result<u64, GovernanceError> {
     let id = record.id;
+    let signer_count = state::global_config().signers.len().max(1);
+    // MAX_PROPOSALS is the global hard bound. Once there are more signers
+    // than proposal slots, a one-proposal floor keeps governance usable; the
+    // global store still enforces the absolute memory bound.
+    let per_signer_limit = (types::MAX_PROPOSALS / signer_count).max(1);
+    let open_proposals = state::list_proposals_after(None, types::MAX_PROPOSALS)
+        .into_iter()
+        .filter(|proposal| {
+            proposal.status == ProposalStatus::Open && proposal.proposer == record.proposer
+        })
+        .count();
+    if open_proposals >= per_signer_limit {
+        return Err(GovernanceError::TooManyOpenProposals);
+    }
     state::insert_proposal(record).map_err(|_| GovernanceError::TooManyOpenProposals)?;
     Ok(id)
 }
@@ -468,7 +482,11 @@ pub(crate) fn approve_proposal_at(caller: Principal, id: u64) -> Result<bool, Go
 pub(crate) fn cancel_proposal_at(caller: Principal, id: u64) -> Result<(), GovernanceError> {
     require_signer(caller)?;
     let mut proposal = state::get_proposal(id).ok_or(GovernanceError::ProposalNotFound)?;
-    if proposal.status != ProposalStatus::Open {
+    // Cancellation is a proposer control, not a one-signer veto over the
+    // threshold-governed proposals of other signers. Reuse ProposalNotOpen
+    // for non-proposers so this hardening does not change the public Candid
+    // error variant set.
+    if proposal.status != ProposalStatus::Open || proposal.proposer != caller {
         return Err(GovernanceError::ProposalNotOpen);
     }
     proposal.status = ProposalStatus::Cancelled;
@@ -596,6 +614,20 @@ fn apply_payload(
             if config.signers.contains(&signer) {
                 return Err(GovernanceError::DuplicateSigner(signer));
             }
+            let next_signer_count = config.signers.len().saturating_add(1);
+            let next_per_signer_limit = (types::MAX_PROPOSALS / next_signer_count).max(1);
+            let mut open_counts = BTreeMap::<Principal, usize>::new();
+            for open in state::list_proposals_after(None, types::MAX_PROPOSALS) {
+                if open.status == ProposalStatus::Open && open.id != proposal_id {
+                    *open_counts.entry(open.proposer).or_default() += 1;
+                }
+            }
+            if open_counts
+                .values()
+                .any(|count| *count > next_per_signer_limit)
+            {
+                return Err(GovernanceError::TooManyOpenProposals);
+            }
             let mut signers = config.signers.clone();
             signers.push(signer);
             state::set_global_config(GlobalConfig {
@@ -660,16 +692,19 @@ fn apply_payload(
 }
 
 /// Cancels every OTHER `Open` proposal (`proposal.id != exclude_proposal_id`)
-/// that already carries an approval from `removed_signer`. `MAX_PROPOSALS`
-/// (256) bounds the store, so one unpaginated scan is sufficient — see the
-/// module doc's "Signer removal and open proposals" section for why this
-/// must happen synchronously, in the same call that removes the signer.
+/// proposed by or already carrying an approval from `removed_signer`.
+/// `MAX_PROPOSALS` (256) bounds the store, so one unpaginated scan is
+/// sufficient — see the module doc's "Signer removal and open proposals"
+/// section for why this must happen synchronously, in the same call that
+/// removes the signer.
 fn cancel_open_proposals_approved_by(removed_signer: Principal, exclude_proposal_id: u64) {
     for mut proposal in state::list_proposals_after(None, types::MAX_PROPOSALS) {
         if proposal.id == exclude_proposal_id {
             continue;
         }
-        if proposal.status == ProposalStatus::Open && proposal.has_approved(removed_signer) {
+        if proposal.status == ProposalStatus::Open
+            && (proposal.proposer == removed_signer || proposal.has_approved(removed_signer))
+        {
             proposal.status = ProposalStatus::Cancelled;
             state::insert_proposal(proposal).expect(
                 "rumi_cycle_sentinel: cascading cancel of an existing proposal id never exceeds MAX_PROPOSALS",
@@ -1761,6 +1796,71 @@ mod tests {
         assert!(!state::global_config().signers.contains(&signer(2)));
     }
 
+    #[test]
+    fn signer_cannot_cancel_another_signers_open_proposal() {
+        init_governed(vec![signer(1), signer(2), signer(3), signer(4)], 2, 1_000);
+        let id = propose_set_signer_threshold_at(signer(1), 0, 2).unwrap();
+
+        assert_eq!(
+            cancel_proposal_at(signer(2), id),
+            Err(GovernanceError::ProposalNotOpen)
+        );
+        assert_eq!(
+            state::get_proposal(id).unwrap().status,
+            ProposalStatus::Open
+        );
+    }
+
+    #[test]
+    fn one_signer_cannot_fill_the_bounded_proposal_store() {
+        init_governed(vec![signer(1), signer(2), signer(3), signer(4)], 2, 1_000);
+        let per_signer_limit = types::MAX_PROPOSALS / 4;
+        for _ in 0..per_signer_limit {
+            propose_set_signer_threshold_at(signer(1), 0, 2).unwrap();
+        }
+
+        assert_eq!(
+            propose_set_signer_threshold_at(signer(1), 0, 2),
+            Err(GovernanceError::TooManyOpenProposals)
+        );
+        assert_eq!(state::proposal_count(), per_signer_limit as u64);
+        assert!(propose_set_signer_threshold_at(signer(2), 0, 2).is_ok());
+    }
+
+    #[test]
+    fn signer_count_above_proposal_capacity_keeps_governance_usable() {
+        let signers = (1u16..=257)
+            .map(|index| Principal::from_slice(&[10, (index >> 8) as u8, index as u8]))
+            .collect();
+        init_governed(signers, 1, 1_000);
+
+        // The per-signer allowance bottoms out at one. The global proposal
+        // store remains the hard bound; governance never enters a zero-cap
+        // state that prevents signer-removal proposals.
+        assert!(propose_set_signer_threshold_at(Principal::from_slice(&[10, 0, 1]), 0, 1).is_ok());
+        assert!(propose_set_signer_threshold_at(Principal::from_slice(&[10, 1, 1]), 0, 1).is_ok());
+    }
+
+    #[test]
+    fn adding_signer_is_rejected_if_it_would_shrink_existing_proposer_capacity() {
+        init_governed(vec![signer(1)], 1, 1_000);
+        let add_signer = propose_add_signer_at(signer(1), 0, signer(2)).unwrap();
+        approve_proposal_at(signer(1), add_signer).unwrap();
+        for _ in 1..types::MAX_PROPOSALS {
+            propose_set_signer_threshold_at(signer(1), 0, 1).unwrap();
+        }
+
+        assert_eq!(
+            execute_proposal_at(signer(1), 300, sentinel_id(), add_signer),
+            Err(GovernanceError::TooManyOpenProposals)
+        );
+        assert_eq!(
+            state::get_proposal(add_signer).unwrap().status,
+            ProposalStatus::Open
+        );
+        assert_eq!(state::global_config().signers, vec![signer(1)]);
+    }
+
     // ── signer removal cascades to open proposals ──
 
     #[test]
@@ -1802,6 +1902,23 @@ mod tests {
         assert_eq!(
             state::get_proposal(untouched).unwrap().status,
             ProposalStatus::Open
+        );
+    }
+
+    #[test]
+    fn remove_signer_cancels_open_proposals_they_proposed_without_approving() {
+        init_governed(vec![signer(1), signer(2), signer(3)], 2, 1_000);
+        let orphan = propose_set_signer_threshold_at(signer(2), 0, 1).unwrap();
+        assert!(!state::get_proposal(orphan).unwrap().has_approved(signer(2)));
+
+        let remove_id = propose_remove_signer_at(signer(1), 0, signer(2)).unwrap();
+        approve_proposal_at(signer(1), remove_id).unwrap();
+        approve_proposal_at(signer(3), remove_id).unwrap();
+        execute_proposal_at(signer(1), 300, sentinel_id(), remove_id).unwrap();
+
+        assert_eq!(
+            state::get_proposal(orphan).unwrap().status,
+            ProposalStatus::Cancelled
         );
     }
 

@@ -15,7 +15,7 @@ use super::evm_rpc::{parse_hex_quantity, BurnLog};
 #[cfg(test)]
 mod ic_error_round_trip {
     use candid::{CandidType, Deserialize};
-    use candid::{Encode, Decode};
+    use candid::{Decode, Encode};
 
     // ── "Real" (wire-shape) types — independent mirror of the live .did ──────
 
@@ -93,7 +93,7 @@ mod ic_error_round_trip {
 
     // ── Production types (import from the module under test) ─────────────────
     use super::super::evm_rpc::{
-        HttpOutcallError, IcErrorRecord, RejectionCode, RpcError, RequestResult,
+        HttpOutcallError, IcErrorRecord, RejectionCode, RequestResult, RpcError,
     };
 
     /// Encode a real-wire-shaped `IcError { code: SysTransient }` and decode
@@ -113,12 +113,12 @@ mod ic_error_round_trip {
         let decoded = Decode!(&bytes, RequestResult)
             .expect("decode production RequestResult from real-wire bytes");
 
-        let expected = RequestResult::Err(RpcError::HttpOutcallError(
-            HttpOutcallError::IcError(IcErrorRecord {
+        let expected = RequestResult::Err(RpcError::HttpOutcallError(HttpOutcallError::IcError(
+            IcErrorRecord {
                 code: RejectionCode::SysTransient,
                 message: "no consensus".to_string(),
-            }),
-        ));
+            },
+        )));
 
         assert_eq!(decoded, expected);
     }
@@ -140,7 +140,7 @@ mod ic_error_round_trip {
 #[cfg(test)]
 mod block_by_number_round_trip {
     use candid::{CandidType, Deserialize};
-    use candid::{Encode, Decode};
+    use candid::{Decode, Encode};
 
     // ── "Real" (wire-shape) types — independent mirror of the live .did ──────
     //
@@ -230,9 +230,7 @@ mod block_by_number_round_trip {
     }
 
     // ── Production types (import from the module under test) ─────────────────
-    use super::super::evm_rpc::{
-        Block, GetBlockByNumberResult, MultiGetBlockByNumberResult,
-    };
+    use super::super::evm_rpc::{Block, GetBlockByNumberResult, MultiGetBlockByNumberResult};
 
     /// Encode a real-wire-shaped `Consistent(Ok(RealBlock{ number: 12345, ...}))`
     /// (richer than production `Block`) and decode it into the production
@@ -241,8 +239,8 @@ mod block_by_number_round_trip {
     /// fields cleanly.
     #[test]
     fn typed_block_result_round_trips_with_subtyping() {
-        let wire = RealMultiGetBlockByNumberResult::Consistent(
-            RealGetBlockByNumberResult::Ok(RealBlock {
+        let wire = RealMultiGetBlockByNumberResult::Consistent(RealGetBlockByNumberResult::Ok(
+            RealBlock {
                 miner: "0xabc".to_string(),
                 total_difficulty: Some(candid::Nat::from(0u64)),
                 receipts_root: "0xrr".to_string(),
@@ -264,8 +262,8 @@ mod block_by_number_round_trip {
                 parent_hash: "0xparent".to_string(),
                 gas_used: candid::Nat::from(21_000u64),
                 mix_hash: "0xmix".to_string(),
-            }),
-        );
+            },
+        ));
 
         let bytes = Encode!(&wire).expect("encode real MultiGetBlockByNumberResult");
 
@@ -287,7 +285,10 @@ mod block_by_number_round_trip {
 fn parses_hex_quantity() {
     assert_eq!(parse_hex_quantity("0x0").unwrap(), 0u128);
     assert_eq!(parse_hex_quantity("0x10").unwrap(), 16u128);
-    assert_eq!(parse_hex_quantity("0x2540be400").unwrap(), 10_000_000_000u128); // 100 icUSD @ 8dp
+    assert_eq!(
+        parse_hex_quantity("0x2540be400").unwrap(),
+        10_000_000_000u128
+    ); // 100 icUSD @ 8dp
     assert!(parse_hex_quantity("not-hex").is_err());
 }
 
@@ -300,8 +301,13 @@ fn decodes_burn_log() {
     let vault_id_topic = format!("0x{:064x}", 7u64);
     let burner_topic = format!("0x{:064x}", 0u8);
     let amount_data = format!("0x{:064x}", 10_000_000_000u128);
-    let log = BurnLog::from_raw(&[topic0, vault_id_topic, burner_topic], &amount_data, "0xtxhash", 110)
-        .expect("decode burn");
+    let log = BurnLog::from_raw(
+        &[topic0, vault_id_topic, burner_topic],
+        &amount_data,
+        "0xtxhash",
+        110,
+    )
+    .expect("decode burn");
     assert_eq!(log.vault_id, 7);
     assert_eq!(log.amount_e8s, 10_000_000_000);
     assert_eq!(log.block_number, 110);
@@ -312,8 +318,7 @@ fn burn_log_with_burner_decodes_indexed_burner_address() {
     let topics = vec![
         super::evm_rpc::BURN_EVENT_TOPIC0.to_string(),
         format!("0x{:064x}", 7u64),
-        "0x0000000000000000000000001234567890abcdef1234567890abcdef12345678"
-            .to_string(),
+        "0x0000000000000000000000001234567890abcdef1234567890abcdef12345678".to_string(),
     ];
     let burn = super::evm_rpc::decode_burn_log_with_burner(
         &topics,
@@ -330,8 +335,15 @@ fn burn_log_with_burner_decodes_indexed_burner_address() {
 #[test]
 fn rejects_log_with_wrong_topic0() {
     let res = BurnLog::from_raw(
-        &["0xdeadbeef".into(), format!("0x{:064x}", 1u64), format!("0x{:064x}", 0u8)],
-        &format!("0x{:064x}", 1u128), "0xtx", 1);
+        &[
+            "0xdeadbeef".into(),
+            format!("0x{:064x}", 1u64),
+            format!("0x{:064x}", 0u8),
+        ],
+        &format!("0x{:064x}", 1u128),
+        "0xtx",
+        1,
+    );
     assert!(res.is_err());
 }
 
@@ -366,7 +378,10 @@ fn parse_eth_call_u128_decodes_padded_word() {
     let word = format!("0x{:064x}", 1_000_000u128);
     assert_eq!(parse_eth_call_u128(&word).unwrap(), 1_000_000u128);
     // Zero supply.
-    assert_eq!(parse_eth_call_u128(&format!("0x{:064x}", 0u128)).unwrap(), 0u128);
+    assert_eq!(
+        parse_eth_call_u128(&format!("0x{:064x}", 0u128)).unwrap(),
+        0u128
+    );
     // Empty result ("0x") -> error, NOT 0.
     assert!(parse_eth_call_u128("0x").is_err());
     // Non-hex -> error.
@@ -398,7 +413,10 @@ fn parse_eth_call_address_decodes_padded_word() {
         "0x0000000000000000000000000000000000000000000000000000000000000000"
     )
     .is_err());
-    assert!(parse_eth_call_address("0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_err());
+    assert!(parse_eth_call_address(
+        "0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+    )
+    .is_err());
 }
 
 #[test]
@@ -410,8 +428,14 @@ fn encode_get_pair_calldata_matches_uniswap_v2_factory_shape() {
     let calldata = encode_get_pair_calldata(a, b).unwrap();
     assert!(calldata.starts_with(GET_PAIR_SELECTOR));
     assert_eq!(calldata.len(), 2 + 8 + 64 + 64);
-    assert_eq!(&calldata[10..74], &format!("{:0>64}", a.trim_start_matches("0x")));
-    assert_eq!(&calldata[74..138], &format!("{:0>64}", b.trim_start_matches("0x")));
+    assert_eq!(
+        &calldata[10..74],
+        &format!("{:0>64}", a.trim_start_matches("0x"))
+    );
+    assert_eq!(
+        &calldata[74..138],
+        &format!("{:0>64}", b.trim_start_matches("0x"))
+    );
     assert!(encode_get_pair_calldata("0x1234", b).is_err());
 }
 
@@ -421,7 +445,10 @@ fn parse_two_uint112_splits_getreserves() {
     use super::evm_rpc::parse_two_uint112;
     // ABI return (uint112, uint112, uint32) = THREE full 32-byte words (each value
     // left-padded), 192 hex chars. parse reads word0 + word1.
-    let hex = format!("0x{:064x}{:064x}{:064x}", 1_000_000u128, 90_900u128, 12_345u128);
+    let hex = format!(
+        "0x{:064x}{:064x}{:064x}",
+        1_000_000u128, 90_900u128, 12_345u128
+    );
     assert_eq!(parse_two_uint112(&hex).unwrap(), (1_000_000, 90_900));
     // Too-short result fails closed.
     assert!(parse_two_uint112("0x1234").is_err());
@@ -466,7 +493,10 @@ mod evm_rpc_principal_resolution {
             default_evm_rpc_principal(),
             Principal::from_text(DEFAULT_EVM_RPC_PRINCIPAL_TEXT).unwrap()
         );
-        assert_eq!(DEFAULT_EVM_RPC_PRINCIPAL_TEXT, "7hfb6-caaaa-aaaar-qadga-cai");
+        assert_eq!(
+            DEFAULT_EVM_RPC_PRINCIPAL_TEXT,
+            "7hfb6-caaaa-aaaar-qadga-cai"
+        );
     }
 
     #[test]

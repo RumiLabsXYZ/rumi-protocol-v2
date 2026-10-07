@@ -10,6 +10,7 @@ use ic_xrc_types::{Asset, AssetClass, GetExchangeRateRequest, GetExchangeRateRes
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal_macros::dec;
 use std::time::Duration;
+use std::{cell::RefCell, collections::BTreeMap};
 
 /// Wave-14a CDP-14: minimum number of CEX sources that must contribute to
 /// an XRC `metadata.num_sources_used` for the protocol to accept the
@@ -28,6 +29,21 @@ pub fn xrc_metadata_meets_source_floor(num_sources_used: u32, min_required: u32)
         return true;
     }
     num_sources_used >= min_required
+}
+
+/// Classify a finite positive candidate against the same band used by
+/// `State::check_price_sanity_band`, before consuming source-time evidence.
+pub(crate) fn price_is_outside_sanity_band(stored: Option<f64>, candidate: f64) -> bool {
+    match stored {
+        Some(stored)
+            if stored.is_finite() && stored > 0.0 && candidate.is_finite() && candidate > 0.0 =>
+        {
+            let ratio = candidate / stored;
+            ratio < crate::state::PRICE_SANITY_BAND_RATIO
+                || ratio > 1.0 / crate::state::PRICE_SANITY_BAND_RATIO
+        }
+        _ => false,
+    }
 }
 
 /// Wave-14a CDP-01: maximum number of consecutive XRC fetch failures the
@@ -73,12 +89,17 @@ pub fn note_xrc_failure_at(state: &mut State, now_ns: u64) -> Option<Event> {
 
 /// Wave-14a CDP-01: record an XRC fetch success. Resets the consecutive-
 /// failure counter to 0. If ReadOnly was triggered by the oracle path,
-/// clears it back to `GeneralAvailability`. Operator-set ReadOnly is
-/// preserved.
+/// clears it back to `GeneralAvailability` unless an explicit manual hold is
+/// active. Recovery-exit uses that hold while refreshing every price input to
+/// TCR, then clears the latch synchronously after all inputs pass.
 pub fn note_xrc_success(state: &mut State) {
     state.consecutive_xrc_failures = 0;
 
-    if state.mode == Mode::ReadOnly && state.mode_triggered_by_oracle {
+    if state.mode == Mode::ReadOnly
+        && state.mode_triggered_by_oracle
+        && !state.manual_mode_override
+        && state.deficit_readonly_latched_at_e8s.is_none()
+    {
         state.mode = Mode::GeneralAvailability;
         state.mode_triggered_by_oracle = false;
     }
@@ -247,20 +268,462 @@ pub fn register_collateral_price_timer(ledger_id: Principal) {
 /// Each XRC call costs ~1B cycles. The 480s cadence is background-only;
 /// price-sensitive operations still fetch on demand when their cache is stale.
 /// Price-sensitive operations will fetch on-demand if the cached price is older
-/// than `PRICE_FRESHNESS_THRESHOLD_NANOS` (60s as of Wave-5 F-004), so this
-/// timer is just a lazy background refresh for display/query purposes.
+/// than `PRICE_FRESHNESS_THRESHOLD_NANOS` (120s including XRC's 60s bar
+/// margin), so this timer is just a lazy background refresh for display/query
+/// purposes.
 pub const FETCHING_ICP_RATE_INTERVAL: Duration = Duration::from_secs(480);
 
 /// Maximum age (in nanoseconds) of a cached price before a price-sensitive
 /// operation triggers an on-demand XRC fetch.
 ///
-/// Audit Wave-5 F-004: bumped from 30s to 60s. The XRC `timestamp` field is
-/// the CEX bar time, populated as `(now - XRC_MARGIN_SEC=60)`, so a freshly
-/// fetched price already starts 60s "old" from this canister's clock. A 30s
-/// threshold therefore meant every call refetched, defeating the cache and
-/// burning roughly 300M cycles/day. 60s matches the stables-side threshold
-/// and lets bursts of activity within the same fetch window hit the cache.
-pub const PRICE_FRESHNESS_THRESHOLD_NANOS: u64 = 60 * 1_000_000_000;
+/// The XRC `timestamp` field is the CEX bar time, populated as
+/// `(now - XRC_MARGIN_SEC=60)`, so a freshly
+/// fetched price already starts 60s "old" from this canister's clock. The
+/// 120s threshold allows one additional minute of reuse while rejecting
+/// future timestamps.
+pub const PRICE_FRESHNESS_THRESHOLD_NANOS: u64 = 120 * 1_000_000_000;
+
+/// An XRC source timestamp is usable only when it is not in the future and
+/// falls within the cache window (which includes XRC's 60-second bar margin).
+pub(crate) fn source_timestamp_is_fresh(timestamp_ns: u64, now_ns: u64) -> bool {
+    timestamp_ns <= now_ns && now_ns - timestamp_ns <= PRICE_FRESHNESS_THRESHOLD_NANOS
+}
+
+/// Outlier confirmations must correspond to distinct source observations,
+/// not repeated fetches of the same source bar. Source identity is included
+/// so a collateral reconfiguration cannot combine confirmations from feeds.
+pub const MIN_OUTLIER_SOURCE_INTERVAL_SECS: u64 = 300;
+
+thread_local! {
+    static LAST_OUTLIER_SOURCE_SAMPLE: RefCell<BTreeMap<Principal, (crate::state::PriceSource, u64)>> =
+        RefCell::new(BTreeMap::new());
+}
+
+/// Admit a source observation for outlier confirmation. After an upgrade the
+/// runtime-only timestamp is unknown, so any persisted candidate is discarded
+/// and the first new observation starts a fresh confirmation sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OutlierSourceAdmission {
+    pub admitted: bool,
+    pub reset_candidate: bool,
+}
+
+pub(crate) fn admit_outlier_source_timestamp(
+    collateral_type: &Principal,
+    source: &crate::state::PriceSource,
+    source_timestamp_ns: u64,
+    has_persisted_candidate: bool,
+) -> OutlierSourceAdmission {
+    let (admitted, reset_candidate) = LAST_OUTLIER_SOURCE_SAMPLE.with(|samples| {
+        let mut samples = samples.borrow_mut();
+        match samples.get(collateral_type) {
+            None => {
+                samples.insert(*collateral_type, (source.clone(), source_timestamp_ns));
+                (true, has_persisted_candidate)
+            }
+            Some((previous_source, _)) if previous_source != source => {
+                samples.insert(*collateral_type, (source.clone(), source_timestamp_ns));
+                (true, has_persisted_candidate)
+            }
+            Some((_, previous_timestamp))
+                if source_timestamp_ns > *previous_timestamp
+                    && source_timestamp_ns.saturating_sub(*previous_timestamp)
+                        >= MIN_OUTLIER_SOURCE_INTERVAL_SECS * crate::SEC_NANOS =>
+            {
+                samples.insert(*collateral_type, (source.clone(), source_timestamp_ns));
+                (true, false)
+            }
+            _ => (false, false),
+        }
+    });
+    OutlierSourceAdmission {
+        admitted,
+        reset_candidate,
+    }
+}
+
+/// Run the persisted sanity counter only after a distinct source observation
+/// has been admitted. This function accepts the state borrow from its caller,
+/// so clearing a candidate never attempts a nested `mutate_state` borrow.
+pub(crate) fn check_price_sanity_band_at_source(
+    state: &mut State,
+    collateral_type: &Principal,
+    source: Option<&crate::state::PriceSource>,
+    source_timestamp_ns: u64,
+    candidate_price: f64,
+) -> bool {
+    let stored_price = state
+        .get_collateral_config(collateral_type)
+        .and_then(|config| config.last_price);
+    if price_is_outside_sanity_band(stored_price, candidate_price) {
+        let Some(source) = source else {
+            return false;
+        };
+        let admission = admit_outlier_source_timestamp(
+            collateral_type,
+            source,
+            source_timestamp_ns,
+            state.pending_outlier_prices.contains_key(collateral_type),
+        );
+        if !admission.admitted {
+            return false;
+        }
+        if admission.reset_candidate {
+            state.pending_outlier_prices.remove(collateral_type);
+        }
+    }
+    state.check_price_sanity_band(collateral_type, candidate_price)
+}
+
+pub(crate) fn accept_price_at_source(
+    state: &mut State,
+    collateral_type: &Principal,
+    expected_source: Option<&crate::state::PriceSource>,
+    source_timestamp_ns: u64,
+    candidate_price: f64,
+    now_ns: u64,
+) -> bool {
+    let Some(config) = state.get_collateral_config(collateral_type) else {
+        return expected_source.is_none()
+            && source_timestamp_is_fresh(source_timestamp_ns, now_ns)
+            && check_price_sanity_band_at_source(
+                state,
+                collateral_type,
+                None,
+                source_timestamp_ns,
+                candidate_price,
+            );
+    };
+    if Some(&config.price_source) != expected_source
+        || config
+            .last_price_timestamp
+            .is_some_and(|last_timestamp_ns| source_timestamp_ns <= last_timestamp_ns)
+        || !source_timestamp_is_fresh(source_timestamp_ns, now_ns)
+    {
+        return false;
+    }
+    if !check_price_sanity_band_at_source(
+        state,
+        collateral_type,
+        expected_source,
+        source_timestamp_ns,
+        candidate_price,
+    ) {
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod oracle_cache_and_outlier_timestamp_tests {
+    use super::{
+        accept_price_at_source, check_price_sanity_band_at_source, source_timestamp_is_fresh,
+        MIN_OUTLIER_SOURCE_INTERVAL_SECS, PRICE_FRESHNESS_THRESHOLD_NANOS,
+        STABLE_PRICE_FRESHNESS_NANOS,
+    };
+    use crate::state::{PriceSource, State, XrcAssetClass};
+    use crate::{InitArg, UsdIcp};
+    use candid::Principal;
+    use rust_decimal::Decimal;
+
+    fn state_with_price(collateral: Principal, price: Option<f64>) -> State {
+        let mut state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = state.icp_collateral_type();
+        let mut config = state.get_collateral_config(&icp).unwrap().clone();
+        config.ledger_canister_id = collateral;
+        config.last_price = price;
+        state.collateral_configs.insert(collateral, config);
+        state.set_icp_rate(UsdIcp::from(Decimal::ONE), Some(1));
+        state
+    }
+
+    fn xrc_source(asset: &str) -> PriceSource {
+        PriceSource::Xrc {
+            base_asset: asset.to_string(),
+            base_asset_class: XrcAssetClass::Cryptocurrency,
+            quote_asset: "USD".to_string(),
+            quote_asset_class: XrcAssetClass::FiatCurrency,
+        }
+    }
+
+    #[test]
+    fn cache_window_includes_xrc_margin_and_rejects_old_or_future_samples() {
+        let now = 10_000_000_000_000;
+        assert_eq!(PRICE_FRESHNESS_THRESHOLD_NANOS, 120_000_000_000);
+        assert_eq!(
+            STABLE_PRICE_FRESHNESS_NANOS,
+            PRICE_FRESHNESS_THRESHOLD_NANOS
+        );
+        assert!(source_timestamp_is_fresh(now - 60_000_000_000, now));
+        assert!(source_timestamp_is_fresh(
+            now - PRICE_FRESHNESS_THRESHOLD_NANOS,
+            now
+        ));
+        assert!(!source_timestamp_is_fresh(
+            now - PRICE_FRESHNESS_THRESHOLD_NANOS - 1,
+            now
+        ));
+        assert!(!source_timestamp_is_fresh(now + 1, now));
+    }
+
+    #[test]
+    fn missing_source_does_not_block_in_band_sample_but_cannot_confirm_outlier() {
+        let collateral = Principal::from_slice(&[251, 1]);
+        let mut state = state_with_price(collateral, None);
+        assert!(check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            None,
+            30_000_000_000,
+            1.0,
+        ));
+
+        let mut state = state_with_price(collateral, Some(100.0));
+        assert!(!check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            None,
+            30_000_000_000,
+            150.0,
+        ));
+        assert!(!state.pending_outlier_prices.contains_key(&collateral));
+    }
+
+    #[test]
+    fn outlier_confirmation_requires_distinct_observations_from_the_same_feed() {
+        let collateral = Principal::from_slice(&[251, 2]);
+        let mut state = state_with_price(collateral, Some(100.0));
+        let first = 30_000_000_000_000;
+        let xrc = xrc_source("BTC");
+
+        assert!(!check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&xrc),
+            first,
+            150.0
+        ));
+        assert_eq!(
+            state.pending_outlier_prices.get(&collateral),
+            Some(&(150.0, 1))
+        );
+        assert!(!check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&xrc),
+            first,
+            150.0
+        ));
+        assert_eq!(
+            state.pending_outlier_prices.get(&collateral),
+            Some(&(150.0, 1))
+        );
+        assert!(!check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&xrc),
+            first + (MIN_OUTLIER_SOURCE_INTERVAL_SECS - 1) * crate::SEC_NANOS,
+            150.0,
+        ));
+        assert_eq!(
+            state.pending_outlier_prices.get(&collateral),
+            Some(&(150.0, 1))
+        );
+
+        let eth = xrc_source("ETH");
+        let first_eth = first + crate::SEC_NANOS;
+        assert!(!check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&eth),
+            first_eth,
+            150.0
+        ));
+        assert_eq!(
+            state.pending_outlier_prices.get(&collateral),
+            Some(&(150.0, 1))
+        );
+        assert!(!check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&eth),
+            first_eth,
+            150.0
+        ));
+        assert_eq!(
+            state.pending_outlier_prices.get(&collateral),
+            Some(&(150.0, 1))
+        );
+        assert!(!check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&eth),
+            first_eth + MIN_OUTLIER_SOURCE_INTERVAL_SECS * crate::SEC_NANOS,
+            150.0,
+        ));
+        assert_eq!(
+            state.pending_outlier_prices.get(&collateral),
+            Some(&(150.0, 2))
+        );
+        let accepted = check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&eth),
+            first_eth + 2 * MIN_OUTLIER_SOURCE_INTERVAL_SECS * crate::SEC_NANOS,
+            150.0,
+        );
+        assert!(accepted);
+        state.on_collateral_price_change(&collateral, 150.0);
+        assert_eq!(
+            state.get_collateral_config(&collateral).unwrap().last_price,
+            Some(150.0)
+        );
+    }
+
+    #[test]
+    fn persisted_candidate_is_reset_after_runtime_timestamp_state_is_lost() {
+        let collateral = Principal::from_slice(&[251, 3]);
+        let mut state = state_with_price(collateral, Some(100.0));
+        state.pending_outlier_prices.insert(collateral, (150.0, 2));
+        let source = xrc_source("BTC");
+
+        assert!(!check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&source),
+            40_000_000_000_000,
+            150.0,
+        ));
+        assert_eq!(
+            state.pending_outlier_prices.get(&collateral),
+            Some(&(150.0, 1))
+        );
+    }
+
+    #[test]
+    fn coingecko_outlier_confirmations_use_provider_time_despite_legacy_local_cache_time() {
+        let collateral = Principal::from_slice(&[251, 4]);
+        let mut state = state_with_price(collateral, Some(100.0));
+        let source = PriceSource::CoinGecko {
+            coin_id: "example-token".to_string(),
+            vs_currency: "usd".to_string(),
+        };
+        let first_observation_ns = 50_000_000_000_000;
+
+        // Previous versions stored local acceptance time. It can be later
+        // than CoinGecko's source update time and is not used for the
+        // distinct-observation counter.
+        let config = state.collateral_configs.get_mut(&collateral).unwrap();
+        config.last_price_timestamp = Some(first_observation_ns + 10_000_000_000);
+
+        assert!(!check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&source),
+            first_observation_ns,
+            150.0,
+        ));
+        assert!(!check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&source),
+            first_observation_ns + MIN_OUTLIER_SOURCE_INTERVAL_SECS * crate::SEC_NANOS,
+            150.0,
+        ));
+        assert!(check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&source),
+            first_observation_ns + 2 * MIN_OUTLIER_SOURCE_INTERVAL_SECS * crate::SEC_NANOS,
+            150.0,
+        ));
+    }
+
+    #[test]
+    fn delayed_reply_from_reconfigured_source_cannot_mutate_candidate_or_price() {
+        let collateral = Principal::from_slice(&[251, 5]);
+        let mut state = state_with_price(collateral, Some(100.0));
+        let requested_source = xrc_source("BTC");
+        let new_source = xrc_source("ETH");
+        state
+            .collateral_configs
+            .get_mut(&collateral)
+            .unwrap()
+            .price_source = new_source;
+        let timestamp_ns = 60_000_000_000_000;
+
+        assert!(!accept_price_at_source(
+            &mut state,
+            &collateral,
+            Some(&requested_source),
+            timestamp_ns,
+            150.0,
+            timestamp_ns,
+        ));
+        assert_eq!(state.pending_outlier_prices.get(&collateral), None);
+        assert_eq!(
+            state.get_collateral_config(&collateral).unwrap().last_price,
+            Some(100.0),
+        );
+    }
+
+    #[test]
+    fn older_coin_gecko_reply_cannot_overwrite_newer_provider_sample() {
+        let collateral = Principal::from_slice(&[251, 6]);
+        let mut state = state_with_price(collateral, Some(100.0));
+        let source = PriceSource::CoinGecko {
+            coin_id: "example-token".to_string(),
+            vs_currency: "usd".to_string(),
+        };
+        state
+            .collateral_configs
+            .get_mut(&collateral)
+            .unwrap()
+            .price_source = source.clone();
+        let now_ns = 80_000_000_000_000;
+        let older_timestamp_ns = now_ns - 20 * crate::SEC_NANOS;
+        let newer_timestamp_ns = now_ns - 10 * crate::SEC_NANOS;
+
+        assert!(accept_price_at_source(
+            &mut state,
+            &collateral,
+            Some(&source),
+            newer_timestamp_ns,
+            101.0,
+            now_ns,
+        ));
+        state.on_collateral_price_change(&collateral, 101.0);
+        state
+            .collateral_configs
+            .get_mut(&collateral)
+            .unwrap()
+            .last_price_timestamp = Some(newer_timestamp_ns);
+
+        assert!(!accept_price_at_source(
+            &mut state,
+            &collateral,
+            Some(&source),
+            older_timestamp_ns,
+            99.0,
+            now_ns,
+        ));
+        assert_eq!(
+            state.get_collateral_config(&collateral).unwrap().last_price,
+            Some(101.0),
+        );
+        assert_eq!(state.pending_outlier_prices.get(&collateral), None);
+    }
+}
 
 pub async fn fetch_icp_rate() {
     let _guard = match crate::guard::FetchXrcGuard::new() {
@@ -273,6 +736,15 @@ pub async fn fetch_icp_rate() {
     // path AFTER source-floor / sanity-band acceptance.
     let mut xrc_call_succeeded = false;
     let mut accepted_icp_timestamp_ns = None;
+    let (icp_ct, requested_price_source) = read_state(|state| {
+        let icp_ct = state.icp_collateral_type();
+        (
+            icp_ct,
+            state
+                .get_collateral_config(&icp_ct)
+                .map(|config| config.price_source.clone()),
+        )
+    });
 
     match crate::management::fetch_icp_price().await {
         Ok(call_result) => match call_result {
@@ -320,7 +792,7 @@ pub async fn fetch_icp_rate() {
                     let rate = Decimal::from_u64(exchange_rate_result.rate).unwrap()
                         / Decimal::from_u64(10_u64.pow(exchange_rate_result.metadata.decimals))
                             .unwrap();
-                    let ts_nanos = exchange_rate_result.timestamp * 1_000_000_000;
+                    let ts_nanos = xrc_timestamp_secs_to_ns(exchange_rate_result.timestamp);
 
                     // Wave-5 LIQ-007 / ORACLE-009: gate every accepted price through the
                     // sanity band. Pre-Wave-5 the ReadOnly latch fired on `rate < $0.01`
@@ -328,10 +800,8 @@ pub async fn fetch_icp_rate() {
                     // freeze the protocol. Now we (1) reject samples older than the
                     // stored timestamp, (2) apply the sanity band, then (3) only latch
                     // ReadOnly when a sub-$0.01 sample was actually accepted.
-                    let should_update = read_state(|s| match s.last_icp_timestamp {
-                        Some(last_ts) => last_ts < ts_nanos,
-                        None => true,
-                    });
+                    let should_update = ts_nanos
+                        .is_some_and(|ts| source_timestamp_is_fresh(ts, ic_cdk::api::time()));
                     if !should_update {
                         log!(
                         TRACE_XRC,
@@ -339,10 +809,28 @@ pub async fn fetch_icp_rate() {
                         exchange_rate_result.timestamp
                     );
                     } else {
-                        let icp_ct = read_state(|s| s.icp_collateral_type());
                         let rate_f64 = rate.to_f64().unwrap_or(0.0);
-                        let accepted =
-                            mutate_state(|s| s.check_price_sanity_band(&icp_ct, rate_f64));
+                        let ts_nanos = ts_nanos.expect("fresh timestamp must be converted");
+                        let accepted = mutate_state(|s| {
+                            if s.last_icp_timestamp
+                                .is_some_and(|last_ts| last_ts >= ts_nanos)
+                            {
+                                return false;
+                            }
+                            if !accept_price_at_source(
+                                s,
+                                &icp_ct,
+                                requested_price_source.as_ref(),
+                                ts_nanos,
+                                rate_f64,
+                                ic_cdk::api::time(),
+                            ) {
+                                return false;
+                            }
+                            s.set_icp_rate(UsdIcp::from(rate), Some(ts_nanos));
+                            crate::event::record_price_update(icp_ct, rate, ts_nanos);
+                            true
+                        });
                         if !accepted {
                             log!(
                             TRACE_XRC,
@@ -365,11 +853,6 @@ pub async fn fetch_icp_rate() {
                                 "[FetchPrice] fetched new ICP rate: {rate} with timestamp: {}",
                                 exchange_rate_result.timestamp
                             );
-                            mutate_state(|s| {
-                                s.set_icp_rate(UsdIcp::from(rate), Some(ts_nanos));
-                                let icp_ct = s.icp_collateral_type();
-                                crate::event::record_price_update(icp_ct, rate, ts_nanos);
-                            });
                             xrc_call_succeeded = true;
                             accepted_icp_timestamp_ns = Some(ts_nanos);
                         }
@@ -406,16 +889,17 @@ pub async fn fetch_icp_rate() {
         crate::storage::record_event(&ev);
     }
     if let Some(last_icp_rate) = read_state(|s| s.last_icp_rate) {
-        mutate_state(|s| s.update_total_collateral_ratio_and_mode(last_icp_rate));
+        mutate_state(|s| {
+            s.update_total_collateral_ratio_and_mode_at(last_icp_rate, ic_cdk::api::time())
+        });
     }
     // Do not serialize future ICP publications behind an LST rate-canister
     // await. The LST helper has its own per-collateral guard and verifies the
     // captured ICP timestamp again before publishing.
     drop(_guard);
     if let Some(timestamp_ns) = accepted_icp_timestamp_ns {
-        let lst_candidates = read_state(|state| {
-            lst_redemption_refresh_candidates(state, timestamp_ns)
-        });
+        let lst_candidates =
+            read_state(|state| lst_redemption_refresh_candidates(state, timestamp_ns));
         match lst_candidates {
             Some(collateral_types) => {
                 for collateral_type in collateral_types {
@@ -471,12 +955,15 @@ pub async fn interest_and_treasury_tick() {
 
     // Drain pending treasury interest/collateral accumulated from sync
     // liquidations.
+    crate::treasury::process_pending_stability_pool_interest_mints().await;
+    crate::treasury::process_pending_treasury_payments().await;
     crate::treasury::drain_pending_treasury_interest().await;
     crate::treasury::drain_pending_treasury_collateral().await;
 
     // Flush accumulated interest to pools/treasury when threshold is reached.
     crate::treasury::flush_pending_interest().await;
     crate::treasury::flush_pending_stability_pool_interest_notifications().await;
+    crate::treasury::flush_pending_three_pool_donations().await;
     crate::treasury::flush_pending_amm1_donations().await;
 
     // Phase 1b foreign-chain-only supply-invariant self-check. Runs on every
@@ -563,14 +1050,11 @@ pub async fn ensure_fresh_price_for(
     if *collateral_type == icp_ledger {
         ensure_fresh_price().await
     } else {
+        let now = ic_cdk::api::time();
         let needs_refresh = read_state(|s| match s.get_collateral_config(collateral_type) {
-            Some(config) => match config.last_price_timestamp {
-                None => true,
-                Some(ts) => {
-                    let age = ic_cdk::api::time().saturating_sub(ts);
-                    age > PRICE_FRESHNESS_THRESHOLD_NANOS
-                }
-            },
+            Some(config) => config
+                .last_price_timestamp
+                .is_none_or(|ts| !source_timestamp_is_fresh(ts, now)),
             None => true,
         });
 
@@ -601,7 +1085,7 @@ pub async fn ensure_fresh_price_for(
         let fresh = read_state(|s| match s.get_collateral_config(collateral_type) {
             Some(c) => match (c.last_price, c.last_price_timestamp) {
                 (Some(price), Some(ts)) if price.is_finite() && price > 0.0 => {
-                    now.saturating_sub(ts) <= MAX_NON_ICP_PRICE_AGE_NANOS
+                    ts <= now && now - ts <= MAX_NON_ICP_PRICE_AGE_NANOS
                 }
                 _ => false,
             },
@@ -625,19 +1109,14 @@ pub async fn ensure_fresh_price_for(
 /// and no cached price exists.
 pub async fn ensure_fresh_price() -> Result<(), crate::ProtocolError> {
     let needs_refresh = read_state(|s| {
-        match s.last_icp_timestamp {
-            None => true, // No price at all, definitely need one
-            Some(ts) => {
-                let age = ic_cdk::api::time().saturating_sub(ts);
-                age > PRICE_FRESHNESS_THRESHOLD_NANOS
-            }
-        }
+        s.last_icp_timestamp
+            .is_none_or(|ts| !source_timestamp_is_fresh(ts, ic_cdk::api::time()))
     });
 
     if needs_refresh {
         log!(
             TRACE_XRC,
-            "[ensure_fresh_price] Cached price is stale (>30s), fetching on-demand"
+            "[ensure_fresh_price] Cached price is stale or future (>120s), fetching on-demand"
         );
         fetch_icp_rate().await;
 
@@ -654,8 +1133,8 @@ const DEPEG_LOWER_BOUND: Decimal = dec!(0.95);
 const DEPEG_UPPER_BOUND: Decimal = dec!(1.05);
 
 /// Maximum age for cached ckstable prices before re-fetching.
-/// More lenient than ICP (60s vs 30s) since stablecoin prices move slowly.
-const STABLE_PRICE_FRESHNESS_NANOS: u64 = 60 * 1_000_000_000;
+/// XRC bars start 60s behind canister time, so allow another minute for reuse.
+const STABLE_PRICE_FRESHNESS_NANOS: u64 = PRICE_FRESHNESS_THRESHOLD_NANOS;
 
 /// Ensures the given ckstable token is not depegged before allowing an operation.
 /// On-demand only — fetches from XRC if cached price is stale or missing.
@@ -667,17 +1146,15 @@ pub async fn ensure_stable_not_depegged(
         let now = ic_cdk::api::time();
         match token_type {
             crate::StableTokenType::CKUSDT => {
-                let stale = match s.last_ckusdt_timestamp {
-                    None => true,
-                    Some(ts) => now.saturating_sub(ts) > STABLE_PRICE_FRESHNESS_NANOS,
-                };
+                let stale = s
+                    .last_ckusdt_timestamp
+                    .is_none_or(|ts| ts > now || now - ts > STABLE_PRICE_FRESHNESS_NANOS);
                 ("USDT".to_string(), stale)
             }
             crate::StableTokenType::CKUSDC => {
-                let stale = match s.last_ckusdc_timestamp {
-                    None => true,
-                    Some(ts) => now.saturating_sub(ts) > STABLE_PRICE_FRESHNESS_NANOS,
-                };
+                let stale = s
+                    .last_ckusdc_timestamp
+                    .is_none_or(|ts| ts > now || now - ts > STABLE_PRICE_FRESHNESS_NANOS);
                 ("USDC".to_string(), stale)
             }
         }
@@ -693,6 +1170,14 @@ pub async fn ensure_stable_not_depegged(
         match crate::management::fetch_stable_price(&symbol).await {
             Ok(call_result) => match call_result {
                 GetExchangeRateResult::Ok(exchange_rate_result) => {
+                    let Some(ts_nanos) = xrc_timestamp_secs_to_ns(exchange_rate_result.timestamp)
+                        .filter(|ts| source_timestamp_is_fresh(*ts, ic_cdk::api::time()))
+                    else {
+                        return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                            "Cannot verify {} price: XRC timestamp is stale, future, or invalid",
+                            symbol
+                        )));
+                    };
                     let rate = Decimal::from_u64(exchange_rate_result.rate).unwrap()
                         / Decimal::from_u64(10_u64.pow(exchange_rate_result.metadata.decimals))
                             .unwrap();
@@ -705,7 +1190,6 @@ pub async fn ensure_stable_not_depegged(
                         exchange_rate_result.timestamp
                     );
 
-                    let ts_nanos = exchange_rate_result.timestamp * 1_000_000_000;
                     mutate_state(|s| match token_type {
                         crate::StableTokenType::CKUSDT => {
                             s.last_ckusdt_rate = Some(rate);
@@ -838,7 +1322,10 @@ use crate::chains::config::ChainId;
 /// `register_chain`.
 pub fn chain_is_xrc_managed(state: &State, chain: ChainId) -> bool {
     state.multi_chain.chain_is_registered(chain)
-        && state.multi_chain.chain_liquidation_configs.contains_key(&chain)
+        && state
+            .multi_chain
+            .chain_liquidation_configs
+            .contains_key(&chain)
 }
 
 /// The exact-pair form `set_manual_collateral_price` (main.rs) reads: true
@@ -995,7 +1482,7 @@ fn price_is_within_sanity_band(stored_price_e8: u64, candidate_price_e8: u64) ->
 /// 2554 and beyond) is rejected rather than wrapped into a small number, which
 /// would otherwise read as an ancient timestamp and pass the monotonicity rule
 /// backwards.
-fn xrc_timestamp_secs_to_ns(timestamp_secs: u64) -> Option<u64> {
+pub(crate) fn xrc_timestamp_secs_to_ns(timestamp_secs: u64) -> Option<u64> {
     timestamp_secs.checked_mul(crate::SEC_NANOS)
 }
 
@@ -1125,7 +1612,8 @@ async fn fetch_one_chain_price(chain: ChainId, symbol: String) {
             // conversion): out-of-range or overflowing input is rejected
             // (log-and-skip, nothing written), the same fail-closed posture
             // as every other rejection branch in this function.
-            let Some(price_e8) = xrc_rate_to_price_e8(rate_result.rate, rate_result.metadata.decimals)
+            let Some(price_e8) =
+                xrc_rate_to_price_e8(rate_result.rate, rate_result.metadata.decimals)
             else {
                 log!(
                     TRACE_XRC,
@@ -1234,9 +1722,15 @@ mod xrc_rate_to_price_e8_tests {
     #[test]
     fn decimals_18_computes_the_expected_price() {
         // rate = 1_000_000_000_000_000_000 (1.0 at 18 decimals) -> $1.00 at e8.
-        assert_eq!(xrc_rate_to_price_e8(1_000_000_000_000_000_000, 18), Some(100_000_000));
+        assert_eq!(
+            xrc_rate_to_price_e8(1_000_000_000_000_000_000, 18),
+            Some(100_000_000)
+        );
         // A plausible CFX/USD-style rate: $0.15 at 18 decimals.
-        assert_eq!(xrc_rate_to_price_e8(150_000_000_000_000_000, 18), Some(15_000_000));
+        assert_eq!(
+            xrc_rate_to_price_e8(150_000_000_000_000_000, 18),
+            Some(15_000_000)
+        );
     }
 
     #[test]
@@ -1249,7 +1743,11 @@ mod xrc_rate_to_price_e8_tests {
     fn decimals_above_18_is_rejected() {
         assert_eq!(xrc_rate_to_price_e8(1, 19), None);
         assert_eq!(xrc_rate_to_price_e8(1, 20), None);
-        assert_eq!(xrc_rate_to_price_e8(1, u32::MAX), None, "must reject, not overflow, an absurd decimals value");
+        assert_eq!(
+            xrc_rate_to_price_e8(1, u32::MAX),
+            None,
+            "must reject, not overflow, an absurd decimals value"
+        );
     }
 
     #[test]
@@ -1357,7 +1855,9 @@ mod cycle_cadence_tests {
         state.collateral_price_fetch_interval_secs.insert(icp, 900);
         assert_eq!(effective_collateral_price_fetch_secs(&state, &icp), 480);
         assert_eq!(effective_collateral_price_fetch_secs(&state, &ckbtc()), 300);
-        state.collateral_price_fetch_interval_secs.insert(ckbtc(), 900);
+        state
+            .collateral_price_fetch_interval_secs
+            .insert(ckbtc(), 900);
         assert_eq!(effective_collateral_price_fetch_secs(&state, &ckbtc()), 900);
     }
 
@@ -1387,7 +1887,10 @@ mod cycle_cadence_tests {
         state.collateral_configs.insert(lst, config);
         state.open_vault(vault(77, lst, 100_000_000, 100_000_000));
 
-        assert_eq!(lst_redemption_refresh_candidates(&state, 200), Some(vec![lst]));
+        assert_eq!(
+            lst_redemption_refresh_candidates(&state, 200),
+            Some(vec![lst])
+        );
         assert_eq!(lst_redemption_refresh_candidates(&state, 100), Some(vec![]));
     }
 

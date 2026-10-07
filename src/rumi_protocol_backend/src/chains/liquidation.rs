@@ -63,7 +63,7 @@ pub fn sized_repay_e8s(
     }
     let deficit = numerator - collateral_value_e8s;
     let denom_e4 = (target_cr_e4 - bonus_e4) as u128; // >= 1 (target > bonus checked above)
-    // Floor division (round down), capped at full debt: never over-seize.
+                                                      // Floor division (round down), capped at full debt: never over-seize.
     (deficit.saturating_mul(10_000) / denom_e4).min(eff_debt_e8s)
 }
 
@@ -127,7 +127,9 @@ pub fn fresh_chain_price_e8(
     now_ns: u64,
     max_price_age_ns: u64,
 ) -> Result<u64, PriceError> {
-    let (price_e8, set_at_ns) = state.get_manual_price(chain, symbol).ok_or(PriceError::NoPrice)?;
+    let (price_e8, set_at_ns) = state
+        .get_manual_price(chain, symbol)
+        .ok_or(PriceError::NoPrice)?;
     if price_e8 == 0 {
         return Err(PriceError::ZeroPrice);
     }
@@ -237,7 +239,9 @@ pub fn escalate_timed_out_bot_liquidations_in_state(
                 marker.op_id == op_id && marker.tier == LiquidationTier::Bot
             });
             if marker_owned_by_op {
-                vault.collateral_amount_native = vault.collateral_amount_native.saturating_add(reserved_native);
+                vault.collateral_amount_native = vault
+                    .collateral_amount_native
+                    .saturating_add(reserved_native);
                 vault.pending_liquidation = None;
             }
         }
@@ -256,7 +260,11 @@ pub fn escalate_timed_out_bot_liquidations_in_state(
         }
         state.bot_pending_chain_vaults.remove(&vault_id);
         state.sp_attempted_chain_vaults.insert(vault_id);
-        escalated.push(ChainBotSpEscalation { vault_id, op_id, reason });
+        escalated.push(ChainBotSpEscalation {
+            vault_id,
+            op_id,
+            reason,
+        });
     }
     escalated
 }
@@ -307,8 +315,12 @@ pub fn prune_recovered_chain_routing_state(
                     apr_bps,
                     now_ns.saturating_sub(v.last_interest_accrual_ns),
                 );
-                crate::chains::vault::collateral_ratio_e4(v.collateral_amount_native, native_decimals, p, eff)
-                    >= liquidation_threshold_e4
+                crate::chains::vault::collateral_ratio_e4(
+                    v.collateral_amount_native,
+                    native_decimals,
+                    p,
+                    eff,
+                ) >= liquidation_threshold_e4
             }
             Err(_) => false, // no fresh price -> do not prune on CR
         };
@@ -341,7 +353,13 @@ pub fn detect_and_route_chain_liquidations_in_state(
     max_per_tick: usize,
 ) -> usize {
     // Unconditional prune (findings #26/#36) — even on quiet ticks.
-    prune_recovered_chain_routing_state(state, chain, price_symbol, liquidation_threshold_e4, now_ns);
+    prune_recovered_chain_routing_state(
+        state,
+        chain,
+        price_symbol,
+        liquidation_threshold_e4,
+        now_ns,
+    );
 
     // Master gate: a config row that is enabled (spec §9).
     let enabled = state
@@ -392,7 +410,12 @@ pub fn detect_and_route_chain_liquidations_in_state(
             apr_bps,
             now_ns.saturating_sub(v.last_interest_accrual_ns),
         );
-        let cr = crate::chains::vault::collateral_ratio_e4(v.collateral_amount_native, native_decimals, price_e8, eff);
+        let cr = crate::chains::vault::collateral_ratio_e4(
+            v.collateral_amount_native,
+            native_decimals,
+            price_e8,
+            eff,
+        );
         if cr < liquidation_threshold_e4 {
             candidates.push(vid);
             if candidates.len() >= max_per_tick {
@@ -494,8 +517,9 @@ pub fn oracle_corroborated(
     max_divergence_bps: u32,
 ) -> bool {
     let expected_out_e8 = stable_native_to_e8s(expected_out_native, settle_decimals);
-    let floor =
-        oracle_value_e8.saturating_mul(10_000u128.saturating_sub(max_divergence_bps as u128)) / 10_000;
+    let floor = oracle_value_e8
+        .saturating_mul(10_000u128.saturating_sub(max_divergence_bps as u128))
+        / 10_000;
     expected_out_e8 >= floor
 }
 
@@ -573,7 +597,10 @@ mod tests {
                 checked += 1;
             }
         }
-        assert!(checked > 100, "property exercised on a meaningful grid ({checked})");
+        assert!(
+            checked > 100,
+            "property exercised on a meaningful grid ({checked})"
+        );
     }
 
     #[test]
@@ -607,37 +634,56 @@ mod tests {
     fn state_with_price(price: u64, set_at_ns: u64) -> MultiChainState {
         let mut s = MultiChainState::default();
         s.manual_prices.insert((ChainId(71), "CFX".into()), price);
-        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), set_at_ns);
+        s.manual_price_set_at_ns
+            .insert((ChainId(71), "CFX".into()), set_at_ns);
         s
     }
 
     #[test]
     fn fresh_price_ok_within_window() {
         let s = state_with_price(15_000_000, 1_000);
-        assert_eq!(fresh_chain_price_e8(&s, ChainId(71), "CFX", 1_500, 1_000), Ok(15_000_000));
+        assert_eq!(
+            fresh_chain_price_e8(&s, ChainId(71), "CFX", 1_500, 1_000),
+            Ok(15_000_000)
+        );
     }
     #[test]
     fn fresh_price_rejects_missing() {
         let s = MultiChainState::default();
-        assert_eq!(fresh_chain_price_e8(&s, ChainId(71), "CFX", 1, 1_000), Err(PriceError::NoPrice));
+        assert_eq!(
+            fresh_chain_price_e8(&s, ChainId(71), "CFX", 1, 1_000),
+            Err(PriceError::NoPrice)
+        );
     }
     #[test]
     fn fresh_price_rejects_zero() {
         let s = state_with_price(0, 1_000);
-        assert_eq!(fresh_chain_price_e8(&s, ChainId(71), "CFX", 1_500, 1_000), Err(PriceError::ZeroPrice));
+        assert_eq!(
+            fresh_chain_price_e8(&s, ChainId(71), "CFX", 1_500, 1_000),
+            Err(PriceError::ZeroPrice)
+        );
     }
     #[test]
     fn fresh_price_rejects_no_timestamp() {
         // pre-V5 price (set_at == 0) -> fail closed.
         let s = state_with_price(15_000_000, 0);
-        assert_eq!(fresh_chain_price_e8(&s, ChainId(71), "CFX", 1_500, 1_000), Err(PriceError::NoTimestamp));
+        assert_eq!(
+            fresh_chain_price_e8(&s, ChainId(71), "CFX", 1_500, 1_000),
+            Err(PriceError::NoTimestamp)
+        );
     }
     #[test]
     fn fresh_price_rejects_stale_and_accepts_boundary() {
         let s = state_with_price(15_000_000, 1_000);
         // exactly at the age ceiling -> OK; one ns past -> Stale.
-        assert_eq!(fresh_chain_price_e8(&s, ChainId(71), "CFX", 2_000, 1_000), Ok(15_000_000));
-        assert_eq!(fresh_chain_price_e8(&s, ChainId(71), "CFX", 2_001, 1_000), Err(PriceError::Stale));
+        assert_eq!(
+            fresh_chain_price_e8(&s, ChainId(71), "CFX", 2_000, 1_000),
+            Ok(15_000_000)
+        );
+        assert_eq!(
+            fresh_chain_price_e8(&s, ChainId(71), "CFX", 2_001, 1_000),
+            Err(PriceError::Stale)
+        );
     }
 
     // ─── Task 7: escalation predicate + routing-state prune (findings #10/#26/#36) ───
@@ -667,7 +713,13 @@ mod tests {
         );
     }
 
-    fn insert_vault_liq(s: &mut MultiChainState, vault_id: u64, cfx_units: u128, debt_units: u128, status: ChainVaultStatus) {
+    fn insert_vault_liq(
+        s: &mut MultiChainState,
+        vault_id: u64,
+        cfx_units: u128,
+        debt_units: u128,
+        status: ChainVaultStatus,
+    ) {
         s.chain_vaults.insert(
             vault_id,
             ChainVaultV1 {
@@ -806,14 +858,21 @@ mod tests {
 
         assert!(escalated.is_empty());
         assert_eq!(s.bot_pending_chain_vaults, before.bot_pending_chain_vaults);
-        assert_eq!(s.sp_attempted_chain_vaults, before.sp_attempted_chain_vaults);
+        assert_eq!(
+            s.sp_attempted_chain_vaults,
+            before.sp_attempted_chain_vaults
+        );
         assert_eq!(
             s.chain_vaults.get(&7).unwrap().pending_liquidation,
             before.chain_vaults.get(&7).unwrap().pending_liquidation
         );
         assert_eq!(
             s.chain_vaults.get(&7).unwrap().collateral_amount_native,
-            before.chain_vaults.get(&7).unwrap().collateral_amount_native
+            before
+                .chain_vaults
+                .get(&7)
+                .unwrap()
+                .collateral_amount_native
         );
     }
 
@@ -844,10 +903,17 @@ mod tests {
         assert!(!s.sp_attempted_chain_vaults.contains(&7));
         assert!(s.bot_pending_chain_vaults.contains_key(&7));
         assert!(
-            s.chain_vaults.get(&7).unwrap().pending_liquidation.is_some(),
+            s.chain_vaults
+                .get(&7)
+                .unwrap()
+                .pending_liquidation
+                .is_some(),
             "do not double-restore an already-succeeded op; leave for manual repair"
         );
-        assert_eq!(s.chain_vaults.get(&7).unwrap().collateral_amount_native, 1_300 * E18);
+        assert_eq!(
+            s.chain_vaults.get(&7).unwrap().collateral_amount_native,
+            1_300 * E18
+        );
     }
 
     #[test]
@@ -877,10 +943,17 @@ mod tests {
         assert!(!s.sp_attempted_chain_vaults.contains(&7));
         assert!(s.bot_pending_chain_vaults.contains_key(&7));
         assert!(
-            s.chain_vaults.get(&7).unwrap().pending_liquidation.is_some(),
+            s.chain_vaults
+                .get(&7)
+                .unwrap()
+                .pending_liquidation
+                .is_some(),
             "settlement worker confirm-timeout owns inflight swap cleanup"
         );
-        assert_eq!(s.chain_vaults.get(&7).unwrap().collateral_amount_native, 1_300 * E18);
+        assert_eq!(
+            s.chain_vaults.get(&7).unwrap().collateral_amount_native,
+            1_300 * E18
+        );
     }
 
     #[test]
@@ -899,9 +972,9 @@ mod tests {
             .get_mut(&op_id)
             .unwrap()
             .status = SettlementOpStatus::Failed {
-                reason: "manual recovery".into(),
-                failed_ns: 20,
-            };
+            reason: "manual recovery".into(),
+            failed_ns: 20,
+        };
         s.settlement_queues
             .get_mut(&ChainId(71))
             .unwrap()
@@ -921,16 +994,26 @@ mod tests {
         assert!(escalated[0].reason.contains("missing"));
         assert!(s.sp_attempted_chain_vaults.contains(&7));
         assert!(!s.bot_pending_chain_vaults.contains_key(&7));
-        assert!(s.chain_vaults.get(&7).unwrap().pending_liquidation.is_none());
-        assert_eq!(s.chain_vaults.get(&7).unwrap().collateral_amount_native, 1_400 * E18);
+        assert!(s
+            .chain_vaults
+            .get(&7)
+            .unwrap()
+            .pending_liquidation
+            .is_none());
+        assert_eq!(
+            s.chain_vaults.get(&7).unwrap().collateral_amount_native,
+            1_400 * E18
+        );
     }
 
     #[test]
     fn prune_keeps_sp_attempted_on_recovery_until_absorb_or_resolution() {
         let mut s = MultiChainState::default();
         seed_cfg_unchecked(&mut s);
-        s.manual_prices.insert((ChainId(71), "CFX".into()), 15_000_000); // $0.15
-        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), 1_000);
+        s.manual_prices
+            .insert((ChainId(71), "CFX".into()), 15_000_000); // $0.15
+        s.manual_price_set_at_ns
+            .insert((ChainId(71), "CFX".into()), 1_000);
         // Vault 7 recovered above threshold (1400 CFX @ $0.15 = $210 vs 100 -> 210%).
         insert_vault_liq(&mut s, 7, 1_400, 100, ChainVaultStatus::Open);
         // Vault 8 closed (resolved).
@@ -941,8 +1024,14 @@ mod tests {
 
         prune_recovered_chain_routing_state(&mut s, ChainId(71), "CFX", 13_300, 5_000);
 
-        assert!(!s.bot_pending_chain_vaults.contains_key(&7), "recovered vault cleared");
-        assert!(!s.bot_pending_chain_vaults.contains_key(&8), "resolved vault cleared");
+        assert!(
+            !s.bot_pending_chain_vaults.contains_key(&7),
+            "recovered vault cleared"
+        );
+        assert!(
+            !s.bot_pending_chain_vaults.contains_key(&8),
+            "resolved vault cleared"
+        );
         assert!(
             s.sp_attempted_chain_vaults.contains(&7),
             "sp-attempted must survive CR recovery so a just-burned SP absorb cannot be pruned before backend finalization",
@@ -960,33 +1049,84 @@ mod tests {
     fn detect_routes_liquidatable_and_caps_per_tick() {
         let mut s = MultiChainState::default();
         seed_cfg_unchecked(&mut s);
-        s.manual_prices.insert((ChainId(71), "CFX".into()), 8_000_000); // $0.08 -> CR 112%
-        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), 1_000);
+        s.manual_prices
+            .insert((ChainId(71), "CFX".into()), 8_000_000); // $0.08 -> CR 112%
+        s.manual_price_set_at_ns
+            .insert((ChainId(71), "CFX".into()), 1_000);
         for vid in 1..=4u64 {
             insert_vault_liq(&mut s, vid, 1_400, 100, ChainVaultStatus::Open);
         }
-        let routed = detect_and_route_chain_liquidations_in_state(&mut s, ChainId(71), "CFX", 13_300, 2_000, 2);
+        let routed = detect_and_route_chain_liquidations_in_state(
+            &mut s,
+            ChainId(71),
+            "CFX",
+            13_300,
+            2_000,
+            2,
+        );
         assert_eq!(routed, 2, "capped at 2 per tick");
-        let marked = s.chain_vaults.values().filter(|v| v.pending_liquidation.is_some()).count();
+        let marked = s
+            .chain_vaults
+            .values()
+            .filter(|v| v.pending_liquidation.is_some())
+            .count();
         assert_eq!(marked, 2, "exactly the routed vaults are marked");
         // Design B: debt untouched at trigger.
-        assert!(s.chain_vaults.values().all(|v| v.debt_e8s == 100 * 100_000_000));
+        assert!(s
+            .chain_vaults
+            .values()
+            .all(|v| v.debt_e8s == 100 * 100_000_000));
     }
 
     #[test]
     fn detect_skips_when_disabled_or_no_config() {
         let mut s = MultiChainState::default();
-        s.manual_prices.insert((ChainId(71), "CFX".into()), 8_000_000);
-        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), 1_000);
+        s.manual_prices
+            .insert((ChainId(71), "CFX".into()), 8_000_000);
+        s.manual_price_set_at_ns
+            .insert((ChainId(71), "CFX".into()), 1_000);
         insert_vault_liq(&mut s, 1, 1_400, 100, ChainVaultStatus::Open);
         // No config row -> no routing (master gate, spec §9).
-        assert_eq!(detect_and_route_chain_liquidations_in_state(&mut s, ChainId(71), "CFX", 13_300, 2_000, 3), 0);
-        assert!(s.chain_vaults.get(&1).unwrap().pending_liquidation.is_none());
+        assert_eq!(
+            detect_and_route_chain_liquidations_in_state(
+                &mut s,
+                ChainId(71),
+                "CFX",
+                13_300,
+                2_000,
+                3
+            ),
+            0
+        );
+        assert!(s
+            .chain_vaults
+            .get(&1)
+            .unwrap()
+            .pending_liquidation
+            .is_none());
         // Disabled config -> still no routing.
         seed_cfg_unchecked(&mut s);
-        s.chain_liquidation_configs.get_mut(&ChainId(71)).unwrap().enabled = false;
-        assert_eq!(detect_and_route_chain_liquidations_in_state(&mut s, ChainId(71), "CFX", 13_300, 2_000, 3), 0);
-        assert!(s.chain_vaults.get(&1).unwrap().pending_liquidation.is_none());
+        s.chain_liquidation_configs
+            .get_mut(&ChainId(71))
+            .unwrap()
+            .enabled = false;
+        assert_eq!(
+            detect_and_route_chain_liquidations_in_state(
+                &mut s,
+                ChainId(71),
+                "CFX",
+                13_300,
+                2_000,
+                3
+            ),
+            0
+        );
+        assert!(s
+            .chain_vaults
+            .get(&1)
+            .unwrap()
+            .pending_liquidation
+            .is_none());
     }
 
     #[test]
@@ -995,39 +1135,77 @@ mod tests {
         // re-routed to the bot (no retry loop), even while still liquidatable.
         let mut s = MultiChainState::default();
         seed_cfg_unchecked(&mut s);
-        s.manual_prices.insert((ChainId(71), "CFX".into()), 8_000_000);
-        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), 1_000);
+        s.manual_prices
+            .insert((ChainId(71), "CFX".into()), 8_000_000);
+        s.manual_price_set_at_ns
+            .insert((ChainId(71), "CFX".into()), 1_000);
         insert_vault_liq(&mut s, 1, 1_400, 100, ChainVaultStatus::Open); // underwater
         s.sp_attempted_chain_vaults.insert(1);
-        let routed = detect_and_route_chain_liquidations_in_state(&mut s, ChainId(71), "CFX", 13_300, 2_000, 10);
+        let routed = detect_and_route_chain_liquidations_in_state(
+            &mut s,
+            ChainId(71),
+            "CFX",
+            13_300,
+            2_000,
+            10,
+        );
         assert_eq!(routed, 0, "bot-failed vault not re-routed");
-        assert!(s.chain_vaults.get(&1).unwrap().pending_liquidation.is_none());
+        assert!(s
+            .chain_vaults
+            .get(&1)
+            .unwrap()
+            .pending_liquidation
+            .is_none());
     }
 
     #[test]
     fn detect_skips_healthy_and_marked_vaults() {
         let mut s = MultiChainState::default();
         seed_cfg_unchecked(&mut s);
-        s.manual_prices.insert((ChainId(71), "CFX".into()), 8_000_000);
-        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), 1_000);
+        s.manual_prices
+            .insert((ChainId(71), "CFX".into()), 8_000_000);
+        s.manual_price_set_at_ns
+            .insert((ChainId(71), "CFX".into()), 1_000);
         insert_vault_liq(&mut s, 1, 1_400, 100, ChainVaultStatus::Open); // underwater
         insert_vault_liq(&mut s, 2, 5_000, 100, ChainVaultStatus::Open); // healthy (CR 400%)
-        let routed = detect_and_route_chain_liquidations_in_state(&mut s, ChainId(71), "CFX", 13_300, 2_000, 10);
+        let routed = detect_and_route_chain_liquidations_in_state(
+            &mut s,
+            ChainId(71),
+            "CFX",
+            13_300,
+            2_000,
+            10,
+        );
         assert_eq!(routed, 1, "only the underwater vault routes");
-        assert!(s.chain_vaults.get(&1).unwrap().pending_liquidation.is_some());
-        assert!(s.chain_vaults.get(&2).unwrap().pending_liquidation.is_none());
+        assert!(s
+            .chain_vaults
+            .get(&1)
+            .unwrap()
+            .pending_liquidation
+            .is_some());
+        assert!(s
+            .chain_vaults
+            .get(&2)
+            .unwrap()
+            .pending_liquidation
+            .is_none());
     }
 
     #[test]
     fn prune_keeps_still_liquidatable_marked_vault() {
         let mut s = MultiChainState::default();
         seed_cfg_unchecked(&mut s);
-        s.manual_prices.insert((ChainId(71), "CFX".into()), 8_000_000); // $0.08 -> CR 112%
-        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), 1_000);
+        s.manual_prices
+            .insert((ChainId(71), "CFX".into()), 8_000_000); // $0.08 -> CR 112%
+        s.manual_price_set_at_ns
+            .insert((ChainId(71), "CFX".into()), 1_000);
         insert_vault_liq(&mut s, 7, 1_400, 100, ChainVaultStatus::Open); // still underwater
         s.bot_pending_chain_vaults.insert(7, 10);
         prune_recovered_chain_routing_state(&mut s, ChainId(71), "CFX", 13_300, 5_000);
-        assert!(s.bot_pending_chain_vaults.contains_key(&7), "still-liquidatable vault NOT cleared");
+        assert!(
+            s.bot_pending_chain_vaults.contains_key(&7),
+            "still-liquidatable vault NOT cleared"
+        );
     }
 
     // ─── Increment 3 / Task 2: pure swap min-out + oracle cross-check ───
@@ -1068,8 +1246,18 @@ mod tests {
         // expected_out 95 USDC (18-dec) vs oracle-implied 100 USD: exactly 5% below.
         let oracle_value_e8 = 100 * E8;
         let expected_out_native = 95u128 * E18;
-        assert!(oracle_corroborated(expected_out_native, 18, oracle_value_e8, 500)); // at the edge: OK
-        assert!(!oracle_corroborated(expected_out_native, 18, oracle_value_e8, 499)); // one bp tighter: reject
+        assert!(oracle_corroborated(
+            expected_out_native,
+            18,
+            oracle_value_e8,
+            500
+        )); // at the edge: OK
+        assert!(!oracle_corroborated(
+            expected_out_native,
+            18,
+            oracle_value_e8,
+            499
+        )); // one bp tighter: reject
     }
 
     #[test]

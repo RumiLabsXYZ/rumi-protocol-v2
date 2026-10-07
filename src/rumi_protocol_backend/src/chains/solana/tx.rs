@@ -269,9 +269,12 @@ pub fn first_signature_base58(wire_tx: &[u8]) -> Result<String, String> {
     let sig_end = consumed
         .checked_add(64)
         .ok_or_else(|| "signature offset overflow".to_string())?;
-    let sig = wire_tx
-        .get(consumed..sig_end)
-        .ok_or_else(|| format!("wire tx too short for a 64-byte signature: len {}", wire_tx.len()))?;
+    let sig = wire_tx.get(consumed..sig_end).ok_or_else(|| {
+        format!(
+            "wire tx too short for a 64-byte signature: len {}",
+            wire_tx.len()
+        )
+    })?;
     Ok(bs58::encode(sig).into_string())
 }
 
@@ -333,7 +336,12 @@ pub fn build_transfer_message(
 ///   data:     [ tag: u8 = 7 (MintTo) ][ amount: u64 LE ]   (9 bytes)
 ///
 /// `amount` is in the mint's base units (no decimal scaling here).
-pub fn mint_to_ix(mint: &Pubkey, dest_ata: &Pubkey, authority: &Pubkey, amount: u64) -> Instruction {
+pub fn mint_to_ix(
+    mint: &Pubkey,
+    dest_ata: &Pubkey,
+    authority: &Pubkey,
+    amount: u64,
+) -> Instruction {
     let mut data = Vec::with_capacity(9);
     data.push(SPL_TOKEN_MINT_TO_TAG);
     data.extend_from_slice(&amount.to_le_bytes());
@@ -456,10 +464,7 @@ pub fn create_account_instruction(
     data.extend_from_slice(owner.as_ref());
     Instruction {
         program_id: system_program_id(),
-        accounts: vec![
-            AccountMeta::new(*from, true),
-            AccountMeta::new(*new, true),
-        ],
+        accounts: vec![AccountMeta::new(*from, true), AccountMeta::new(*new, true)],
         data,
     }
 }
@@ -506,7 +511,13 @@ pub fn build_create_nonce_account_message(
     lamports: u64,
     recent_blockhash: Hash,
 ) -> Message {
-    let create = create_account_instruction(from, nonce, lamports, NONCE_STATE_SIZE, &system_program_id());
+    let create = create_account_instruction(
+        from,
+        nonce,
+        lamports,
+        NONCE_STATE_SIZE,
+        &system_program_id(),
+    );
     let init = initialize_nonce_instruction(nonce, authority);
     Message::new_with_blockhash(&[create, init], Some(from), &recent_blockhash)
 }
@@ -548,7 +559,11 @@ pub fn build_mint_message_with_nonce(
     let dest_ata = derive_ata(recipient_owner, mint);
     let create_ata = create_ata_idempotent_ix(authority, recipient_owner, mint);
     let mint_to = mint_to_ix(mint, &dest_ata, authority, amount);
-    Message::new_with_blockhash(&[advance, create_ata, mint_to], Some(authority), &durable_nonce)
+    Message::new_with_blockhash(
+        &[advance, create_ata, mint_to],
+        Some(authority),
+        &durable_nonce,
+    )
 }
 
 /// Build a transfer message, serialize it, threshold-Ed25519 sign the serialized
@@ -677,8 +692,7 @@ pub async fn bootstrap_nonce_account(
     let (settlement_pk_bytes, _settlement_addr) =
         ted25519::derive_solana_address(settlement_path.clone()).await?;
     let nonce_path = ted25519::nonce_derivation_path(chain);
-    let (nonce_pk_bytes, nonce_addr) =
-        ted25519::derive_solana_address(nonce_path.clone()).await?;
+    let (nonce_pk_bytes, nonce_addr) = ted25519::derive_solana_address(nonce_path.clone()).await?;
 
     // Idempotency: if the nonce already reads back as Initialized, we are done.
     if sol_rpc::get_durable_nonce(&nonce_addr).await.is_ok() {

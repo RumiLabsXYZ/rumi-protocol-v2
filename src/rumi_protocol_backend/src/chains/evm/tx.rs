@@ -43,9 +43,18 @@ pub enum MonadTxKind<'a> {
     /// is the settlement queue's unique-per-chain op id and is the on-chain
     /// idempotency discriminator (per-op, not per-vault), so a vault can be
     /// minted to more than once (borrow).
-    Mint { contract: &'a str, recipient: &'a str, amount_e8s: u128, vault_id: u64, op_id: u64 },
+    Mint {
+        contract: &'a str,
+        recipient: &'a str,
+        amount_e8s: u128,
+        vault_id: u64,
+        op_id: u64,
+    },
     /// A native MON transfer (`amount_wei` carried in the EIP-1559 `value`).
-    NativeWithdrawal { recipient: &'a str, amount_wei: u128 },
+    NativeWithdrawal {
+        recipient: &'a str,
+        amount_wei: u128,
+    },
     /// UniswapV2 `swapExactETHForTokens`: native collateral carried in the
     /// EIP-1559 `value`, sold for the settle-stable to `to` (the reserve address).
     /// `path = [wrapped_collateral, settle_stable]`. Bot-liquidation swap (spec §4.8).
@@ -91,7 +100,13 @@ pub fn build_eip1559_fields(
     max_fee: u128,
 ) -> Result<Eip1559Fields, String> {
     match kind {
-        MonadTxKind::Mint { contract, recipient, amount_e8s, vault_id, op_id } => {
+        MonadTxKind::Mint {
+            contract,
+            recipient,
+            amount_e8s,
+            vault_id,
+            op_id,
+        } => {
             let data = encode_mint_calldata(recipient, amount_e8s, vault_id, op_id)?;
             Ok(Eip1559Fields {
                 chain_id,
@@ -110,7 +125,10 @@ pub fn build_eip1559_fields(
                 data,
             })
         }
-        MonadTxKind::NativeWithdrawal { recipient, amount_wei } => Ok(Eip1559Fields {
+        MonadTxKind::NativeWithdrawal {
+            recipient,
+            amount_wei,
+        } => Ok(Eip1559Fields {
             chain_id,
             nonce,
             max_priority_fee_per_gas: prio,
@@ -120,8 +138,16 @@ pub fn build_eip1559_fields(
             value: amount_wei,
             data: vec![],
         }),
-        MonadTxKind::Swap { router, amount_in, amount_out_min, path, to, deadline } => {
-            let data = encode_swap_exact_eth_for_tokens_calldata(amount_out_min, &path, to, deadline)?;
+        MonadTxKind::Swap {
+            router,
+            amount_in,
+            amount_out_min,
+            path,
+            to,
+            deadline,
+        } => {
+            let data =
+                encode_swap_exact_eth_for_tokens_calldata(amount_out_min, &path, to, deadline)?;
             Ok(Eip1559Fields {
                 chain_id,
                 nonce,
@@ -226,11 +252,10 @@ pub fn recover_y_parity(
     s: &[u8; 32],
     expected_addr: &str,
 ) -> Result<u8, String> {
-    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
     use super::tecdsa::evm_address_from_pubkey;
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 
-    let sig = Signature::from_scalars(*r, *s)
-        .map_err(|e| format!("invalid (r,s): {e}"))?;
+    let sig = Signature::from_scalars(*r, *s).map_err(|e| format!("invalid (r,s): {e}"))?;
 
     for parity in 0u8..=1 {
         let rid = RecoveryId::new(parity == 1, false);
@@ -394,7 +419,10 @@ fn keccak_selector(sig: &str) -> [u8; 4] {
 ///
 /// Returns `Err` if `addr` is not valid hex or not exactly 20 bytes.
 fn abi_word_address(addr: &str) -> Result<[u8; 32], String> {
-    let addr_str = addr.strip_prefix("0x").or_else(|| addr.strip_prefix("0X")).unwrap_or(addr);
+    let addr_str = addr
+        .strip_prefix("0x")
+        .or_else(|| addr.strip_prefix("0X"))
+        .unwrap_or(addr);
     let addr_bytes = hex::decode(addr_str)
         .map_err(|e| format!("abi_word_address: invalid hex in '{}': {}", addr, e))?;
     if addr_bytes.len() != 20 {
@@ -460,11 +488,18 @@ pub fn encode_swap_exact_eth_for_tokens_calldata(
 ///
 /// Returns `Err` if `addr` is not valid hex or not exactly 20 bytes.
 fn parse_address(addr: &str) -> Result<[u8; 20], String> {
-    let hex_str = addr.strip_prefix("0x").or_else(|| addr.strip_prefix("0X")).unwrap_or(addr);
+    let hex_str = addr
+        .strip_prefix("0x")
+        .or_else(|| addr.strip_prefix("0X"))
+        .unwrap_or(addr);
     let bytes = hex::decode(hex_str)
         .map_err(|e| format!("parse_address: invalid hex in '{}': {}", addr, e))?;
     bytes.try_into().map_err(|v: Vec<u8>| {
-        format!("parse_address: '{}' is {} bytes, expected 20", addr, v.len())
+        format!(
+            "parse_address: '{}' is {} bytes, expected 20",
+            addr,
+            v.len()
+        )
     })
 }
 

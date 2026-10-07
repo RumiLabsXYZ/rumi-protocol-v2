@@ -14,13 +14,447 @@ use num_traits::ToPrimitive;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use std::cell::RefCell;
+use std::collections::BTreeSet;
 
 /// Maximum number of automatic retries before a failed obligation is held for
 /// manual recovery. At 5-second intervals, 60 retries = 5 minutes of attempts.
 pub const MAX_PENDING_RETRIES: u8 = 60;
+/// Bound automatic ICRC-3 proof attempts for retained Redemption V2 refund candidates.
+pub const MAX_REDEMPTION_V2_REFUND_RECEIPT_ATTEMPTS: u8 = 3;
+
+thread_local! {
+    static THREE_USD_REFUND_IN_FLIGHT: RefCell<BTreeSet<u128>> = RefCell::new(BTreeSet::new());
+}
+
+/// Shared per-child exclusion used by both automatic dispatch and explicit
+/// receipt-candidate recovery. The guard spans every ledger await so the two
+/// paths cannot independently commit or dispatch the same refund.
+pub struct ThreeUsdRefundDispatchGuard(u128);
+
+impl ThreeUsdRefundDispatchGuard {
+    pub fn try_acquire(op_nonce: u128) -> Option<Self> {
+        let inserted =
+            THREE_USD_REFUND_IN_FLIGHT.with(|in_flight| in_flight.borrow_mut().insert(op_nonce));
+        inserted.then_some(Self(op_nonce))
+    }
+}
+
+impl Drop for ThreeUsdRefundDispatchGuard {
+    fn drop(&mut self) {
+        THREE_USD_REFUND_IN_FLIGHT.with(|in_flight| {
+            in_flight.borrow_mut().remove(&self.0);
+        });
+    }
+}
 
 fn pending_refund_is_automatically_retryable(retry_count: u8) -> bool {
     retry_count < MAX_PENDING_RETRIES
+}
+
+fn redemption_v2_refund_receipt_work_exists(state: &crate::state::State) -> bool {
+    let has_candidate = |journal: &crate::state::RedemptionV2Journal| {
+        journal.refund_block_index.is_some()
+            && !journal.refund_receipt_verified
+            && journal.refund_receipt_verification_attempts
+                < MAX_REDEMPTION_V2_REFUND_RECEIPT_ATTEMPTS
+    };
+    state.redemption_v2_active.values().any(has_candidate)
+        || state.redemption_v2_latest_result.values().any(has_candidate)
+}
+
+fn pending_transfer_work_exists(state: &crate::state::State) -> bool {
+    state.pending_margin_transfers.iter().any(|(_, transfer)| {
+        !state
+            .three_usd_reserve_payout_parents
+            .contains_key(&transfer.op_nonce)
+            && !transfer.held_for_manual_retry
+            && !transfer.reconciliation_required
+    }) || state
+        .pending_excess_transfers
+        .values()
+        .any(|transfer| !transfer.held_for_manual_retry && !transfer.reconciliation_required)
+        || state.pending_redemption_transfer.values().any(|transfer| {
+            pending_refund_is_automatically_retryable(transfer.retry_count)
+                && !transfer.held_for_manual_retry
+                && !transfer.reconciliation_required
+        })
+        || state.pending_refunds.iter().any(|(burn_block, refund)| {
+            pending_refund_is_automatically_retryable(refund.retry_count)
+                && matches!(
+                    crate::state::redemption_v2_refund_candidate_status(
+                        state,
+                        *burn_block,
+                        *refund,
+                    ),
+                    crate::state::RedemptionV2RefundCandidateStatus::Legacy
+                        | crate::state::RedemptionV2RefundCandidateStatus::NeedsReceipt
+                )
+        })
+        || redemption_v2_refund_receipt_work_exists(state)
+        || state.pending_3usd_refunds.iter().any(|(nonce, refund)| {
+            pending_refund_is_automatically_retryable(refund.retry_count)
+                && three_usd_refund_dispatch_is_retryable(
+                    state.pending_3usd_refund_journals.get(nonce),
+                )
+        })
+        || pending_three_usd_reserve_payout_is_retryable(state)
+        || state.pending_collateral_withdrawals.values().any(|row| {
+            !matches!(
+                row.phase,
+                crate::state::CollateralWithdrawalPhase::Held
+                    | crate::state::CollateralWithdrawalPhase::NoEffect
+            ) && row.dispatch_attempts < 60
+                && ic_cdk::api::time().saturating_sub(row.created_at_time_ns)
+                    <= crate::vault::COLLATERAL_WITHDRAWAL_DEDUP_WINDOW_NS
+        })
+}
+
+fn pending_three_usd_reserve_payout_is_retryable(state: &crate::state::State) -> bool {
+    state
+        .three_usd_reserve_payout_parents
+        .iter()
+        .any(|(nonce, key)| {
+            let Some(tuple) = state
+                .three_usd_reserve_ingress_journals
+                .get(key)
+                .and_then(|journal| journal.payout.as_ref())
+                .map(|payout| &payout.tuple)
+            else {
+                return false;
+            };
+            let Some(transfer) = state.pending_margin_transfers.get(nonce) else {
+                return false;
+            };
+            tuple.op_nonce == *nonce
+                && transfer.op_nonce == *nonce
+                && !transfer.held_for_manual_retry
+                && !transfer.reconciliation_required
+        })
+}
+
+/// Whether the durable transfer worker has an obligation eligible for
+/// automatic processing. Used at startup and after each pass so held rows do
+/// not cause an endless timer loop.
+pub fn has_retryable_pending_transfer_work() -> bool {
+    read_state(pending_transfer_work_exists)
+}
+
+#[cfg(test)]
+mod pending_transfer_restart_tests {
+    use super::{pending_transfer_work_exists, MAX_PENDING_RETRIES, MAX_REDEMPTION_V2_REFUND_RECEIPT_ATTEMPTS};
+    use crate::numeric::ICP;
+    use crate::state::{
+        PayoutProofKind, PendingMarginTransfer, PendingRefund, State,
+        ThreeUsdReserveIngressJournal, ThreeUsdReserveIngressKey, ThreeUsdReserveIngressPayout,
+        ThreeUsdReserveIngressPayoutTuple, ThreeUsdReserveIngressPhase,
+        ThreeUsdReserveIngressRequest, RedemptionV2Journal, RedemptionV2Phase,
+        RedemptionV2Request,
+    };
+    use candid::Principal;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    #[test]
+    fn restart_predicate_tracks_only_automatically_retryable_obligations() {
+        let mut state = State::default();
+        assert!(!pending_transfer_work_exists(&state));
+
+        state.pending_refunds.insert(
+            42,
+            PendingRefund {
+                user: Principal::anonymous(),
+                amount_e8s: 100,
+                retry_count: 0,
+                op_nonce: 7,
+            },
+        );
+        assert!(pending_transfer_work_exists(&state));
+
+        state.pending_refunds.get_mut(&42).unwrap().retry_count = MAX_PENDING_RETRIES;
+        assert!(!pending_transfer_work_exists(&state));
+    }
+
+    #[test]
+    fn restart_predicate_rearms_bounded_v2_refund_receipt_proofs() {
+        let owner = Principal::from_slice(&[0x71]);
+        let mut state = State::default();
+        state.pending_refunds.insert(
+            42,
+            PendingRefund {
+                user: owner,
+                amount_e8s: 100,
+                retry_count: MAX_PENDING_RETRIES,
+                op_nonce: 7,
+            },
+        );
+        state.redemption_v2_latest_result.insert(
+            owner,
+            RedemptionV2Journal {
+                owner,
+                request: RedemptionV2Request {
+                    request_id: 1,
+                    amount_e8s: 500,
+                    expected_collateral_type: Principal::from_slice(&[0x73]),
+                    min_net_collateral_raw: 1,
+                },
+                tuple: crate::SpLiquidationStablePullTuple {
+                    op_nonce: 6,
+                    ledger: Principal::from_slice(&[0x74]),
+                    from: Account { owner, subaccount: None },
+                    spender: Account { owner, subaccount: None },
+                    to: Account { owner, subaccount: None },
+                    amount_raw: 500,
+                    fee_raw: 0,
+                    memo: vec![],
+                    created_at_time_ns: 6,
+                },
+                phase: RedemptionV2Phase::Committed,
+                block_index: Some(42),
+                refund_amount_e8s: Some(100),
+                refund_op_nonce: Some(7),
+                refund_block_index: Some(99),
+                refund_receipt_verified: false,
+                refund_receipt_verification_attempts: 0,
+                result: None,
+                last_error: None,
+            },
+        );
+        assert!(pending_transfer_work_exists(&state));
+        state
+            .redemption_v2_latest_result
+            .get_mut(&owner)
+            .unwrap()
+            .refund_receipt_verification_attempts = MAX_REDEMPTION_V2_REFUND_RECEIPT_ATTEMPTS;
+        assert!(!pending_transfer_work_exists(&state));
+        state
+            .redemption_v2_latest_result
+            .get_mut(&owner)
+            .unwrap()
+            .refund_receipt_verified = true;
+        assert!(!pending_transfer_work_exists(&state));
+    }
+
+    #[test]
+    fn restart_predicate_recognizes_only_linked_unheld_reserve_payouts() {
+        let pool = Principal::from_slice(&[1]);
+        let ledger = Principal::from_slice(&[2]);
+        let nonce = 9;
+        let key = ThreeUsdReserveIngressKey {
+            stability_pool: pool,
+            vault_id: 3,
+            absorb_id: 4,
+        };
+        let mut state = State::default();
+        state.pending_margin_transfers.insert(
+            nonce,
+            PendingMarginTransfer {
+                vault_id: 3,
+                owner: pool,
+                margin: ICP::from(100),
+                collateral_type: ledger,
+                retry_count: 0,
+                op_nonce: nonce,
+                ledger: Some(ledger),
+                transfer_amount_raw: Some(90),
+                redemption_transfer: None,
+                held_for_manual_retry: false,
+                reconciliation_required: false,
+                min_net_collateral_raw: None,
+            },
+        );
+        state
+            .three_usd_reserve_payout_parents
+            .insert(nonce, key.clone());
+        assert!(!pending_transfer_work_exists(&state));
+        state.three_usd_reserve_ingress_journals.insert(
+            key,
+            ThreeUsdReserveIngressJournal {
+                request: ThreeUsdReserveIngressRequest {
+                    icusd_debt_covered_e8s: 100,
+                    three_usd_amount_e8s: 100,
+                    ledger,
+                },
+                phase: ThreeUsdReserveIngressPhase::AdmissionPending,
+                refund: None,
+                payout: Some(ThreeUsdReserveIngressPayout {
+                    tuple: ThreeUsdReserveIngressPayoutTuple {
+                        op_nonce: nonce,
+                        ledger,
+                        proof_kind: PayoutProofKind::Icrc3,
+                        source: Account {
+                            owner: Principal::anonymous(),
+                            subaccount: None,
+                        },
+                        destination: Account {
+                            owner: pool,
+                            subaccount: None,
+                        },
+                        gross_amount_e8s: 100,
+                        net_amount_e8s: 90,
+                        fee_e8s: 10,
+                        memo: [0; 16],
+                        created_at_time_ns: 0,
+                        collateral_type: ledger,
+                    },
+                    receipt: None,
+                }),
+                refund_fee_reserved_e8s: None,
+            },
+        );
+
+        assert!(pending_transfer_work_exists(&state));
+        state
+            .pending_margin_transfers
+            .get_mut(&nonce)
+            .unwrap()
+            .held_for_manual_retry = true;
+        assert!(!pending_transfer_work_exists(&state));
+    }
+}
+
+fn three_usd_refund_dispatch_is_retryable(
+    dispatch: Option<&crate::state::ThreeUsdRefundDispatchState>,
+) -> bool {
+    matches!(
+        dispatch,
+        Some(crate::state::ThreeUsdRefundDispatchState::NeverDispatched { .. })
+            | Some(crate::state::ThreeUsdRefundDispatchState::NeverDispatchedDefault { .. })
+            | Some(crate::state::ThreeUsdRefundDispatchState::SubmittedOrUnknown { .. })
+    )
+}
+
+fn hold_legacy_3usd_refund_for_protocol_paid_policy(
+    dispatch: crate::state::ThreeUsdRefundDispatchState,
+    gross_amount_e8s: u64,
+) -> Option<crate::state::ThreeUsdRefundDispatchState> {
+    use crate::state::ThreeUsdRefundDispatchState as Dispatch;
+    match dispatch {
+        Dispatch::NeverDispatched { .. } | Dispatch::Unpayable { .. } => {
+            Some(Dispatch::HeldLegacyProtocolPaid {
+                gross_amount_e8s,
+                tuple: None,
+            })
+        }
+        Dispatch::SubmittedOrUnknown { tuple } if tuple.source_subaccount.is_some() => {
+            Some(Dispatch::HeldLegacyProtocolPaid {
+                gross_amount_e8s,
+                tuple: Some(tuple),
+            })
+        }
+        _ => None,
+    }
+}
+
+pub fn hold_pending_legacy_3usd_refunds_for_protocol_paid_policy() -> usize {
+    mutate_state(|state| {
+        let keys = state
+            .pending_3usd_refund_journals
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let mut held = 0;
+        for nonce in keys {
+            let Some(refund) = state.pending_3usd_refunds.get(&nonce).copied() else {
+                continue;
+            };
+            let Some(dispatch) = state.pending_3usd_refund_journals.get(&nonce).copied() else {
+                continue;
+            };
+            if let Some(next) =
+                hold_legacy_3usd_refund_for_protocol_paid_policy(dispatch, refund.amount_e8s)
+            {
+                state.pending_3usd_refund_journals.insert(nonce, next);
+                held += 1;
+            }
+        }
+        held
+    })
+}
+
+fn three_usd_refund_net_amount(gross: u64, fee: u64) -> Option<u64> {
+    gross.checked_sub(fee).filter(|net| *net > 0)
+}
+
+fn three_usd_refund_transfer_amount(
+    gross_principal: u64,
+    fee: u64,
+    source_subaccount: Option<[u8; 32]>,
+) -> Option<u64> {
+    if source_subaccount.is_none() {
+        Some(gross_principal)
+    } else {
+        three_usd_refund_net_amount(gross_principal, fee)
+    }
+}
+
+pub fn initial_three_usd_refund_dispatch_state(
+    source_subaccount: Option<[u8; 32]>,
+    gross_amount_e8s: u64,
+) -> crate::state::ThreeUsdRefundDispatchState {
+    match source_subaccount {
+        Some(_) => crate::state::ThreeUsdRefundDispatchState::NeverDispatched { gross_amount_e8s },
+        None => {
+            crate::state::ThreeUsdRefundDispatchState::NeverDispatchedDefault { gross_amount_e8s }
+        }
+    }
+}
+
+fn first_bad_fee_retry_state(
+    current: crate::state::ThreeUsdRefundDispatchState,
+    attempted: crate::state::ThreeUsdRefundTransferTuple,
+    first_dispatch: bool,
+    gross_amount_e8s: u64,
+) -> Option<crate::state::ThreeUsdRefundDispatchState> {
+    (first_dispatch
+        && current
+            == (crate::state::ThreeUsdRefundDispatchState::SubmittedOrUnknown { tuple: attempted }))
+    .then_some(if attempted.source_subaccount.is_some() {
+        crate::state::ThreeUsdRefundDispatchState::NeverDispatched { gross_amount_e8s }
+    } else {
+        crate::state::ThreeUsdRefundDispatchState::NeverDispatchedDefault { gross_amount_e8s }
+    })
+}
+
+fn first_bad_fee_retry_transition(
+    current: crate::state::ThreeUsdRefundDispatchState,
+    attempted: crate::state::ThreeUsdRefundTransferTuple,
+    first_dispatch: bool,
+    gross_amount_e8s: u64,
+    retry_count: &mut u8,
+) -> Option<(crate::state::ThreeUsdRefundDispatchState, bool)> {
+    let next = first_bad_fee_retry_state(current, attempted, first_dispatch, gross_amount_e8s)?;
+    let retryable = advance_pending_retry_count(retry_count);
+    Some((next, retryable))
+}
+
+thread_local! {
+    static THREE_USD_DEFAULT_ACCOUNT_IN_FLIGHT: RefCell<BTreeSet<Principal>> = RefCell::new(BTreeSet::new());
+}
+
+/// Serializes outgoing transfers from the 3pool default account against the
+/// refund worker's balance/obligation check.
+pub struct ThreeUsdDefaultAccountTransferGuard(Principal);
+
+impl ThreeUsdDefaultAccountTransferGuard {
+    pub fn try_acquire(ledger: Principal) -> Option<Self> {
+        if !read_state(|state| state.three_pool_canister == Some(ledger)) {
+            return None;
+        }
+        THREE_USD_DEFAULT_ACCOUNT_IN_FLIGHT
+            .with(|set| set.borrow_mut().insert(ledger).then_some(Self(ledger)))
+    }
+
+    pub fn protects(&self, ledger: Principal) -> bool {
+        self.0 == ledger && read_state(|state| state.three_pool_canister == Some(ledger))
+    }
+}
+
+impl Drop for ThreeUsdDefaultAccountTransferGuard {
+    fn drop(&mut self) {
+        THREE_USD_DEFAULT_ACCOUNT_IN_FLIGHT.with(|set| {
+            set.borrow_mut().remove(&self.0);
+        });
+    }
 }
 
 fn redemption_transfer_meets_minimum(
@@ -36,6 +470,8 @@ fn redemption_transfer_meets_minimum(
         .unwrap_or(true)
 }
 
+pub mod bot_claim_return;
+pub mod bot_payment;
 pub mod chains;
 pub mod dashboard;
 pub mod event;
@@ -46,6 +482,7 @@ pub mod liquidity_pool;
 pub mod logs;
 pub mod management;
 pub mod numeric;
+pub mod sp_burn_refund;
 pub mod state;
 pub mod storage;
 pub mod treasury;
@@ -86,6 +523,23 @@ pub const DUST_THRESHOLD: ICUSD = ICUSD::new(100); // 0.000001 icUSD - dust thre
 pub const RECOVERY_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.5)); // 150%
 pub const MINIMUM_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.33)); // 133%
 /// Default protocol share of liquidator's bonus profit (3%).
+/// Unique escrow account for a bot claim's returned-collateral receipt.
+pub fn bot_claim_return_subaccount(vault_id: u64, claim_timestamp: u64) -> [u8; 32] {
+    let mut subaccount = [0u8; 32];
+    subaccount[..8].copy_from_slice(&vault_id.to_be_bytes());
+    subaccount[8..16].copy_from_slice(&claim_timestamp.to_be_bytes());
+    subaccount[16..24].copy_from_slice(b"BOTRET01");
+    subaccount
+}
+
+/// Isolated ckUSDC source account for one bot claim generation.
+pub fn bot_claim_payment_subaccount(vault_id: u64, claim_timestamp: u64) -> [u8; 32] {
+    let mut subaccount = [0u8; 32];
+    subaccount[..16].copy_from_slice(b"RUMI-CLAIM-PAY01");
+    subaccount[16..24].copy_from_slice(&vault_id.to_be_bytes());
+    subaccount[24..32].copy_from_slice(&claim_timestamp.to_be_bytes());
+    subaccount
+}
 pub const DEFAULT_LIQUIDATION_PROTOCOL_SHARE: Ratio = Ratio::new(dec!(0.03));
 
 /// Wave-9c DOS-005: default alert band (in basis points) above each
@@ -124,6 +578,571 @@ pub enum StableTokenType {
     CKUSDT,
     /// ckUSDC stablecoin
     CKUSDC,
+}
+
+/// Stablecoin selected by the Stability Pool for a receipt-backed liquidation.
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpLiquidationToken {
+    IcUsd,
+    CKUSDT,
+    CKUSDC,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationApprovalTuple {
+    pub ledger: Principal,
+    pub owner: icrc_ledger_types::icrc1::account::Account,
+    pub spender: icrc_ledger_types::icrc1::account::Account,
+    pub allowance_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub expires_at_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationApprovalReceipt {
+    pub block_index: u64,
+    pub tuple: SpLiquidationApprovalTuple,
+}
+
+/// Caller-persisted identity for one SP liquidation. `request_id` is unique
+/// and monotonic within the registered SP; it is not a ledger dedup nonce.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2Request {
+    pub request_id: u64,
+    pub vault_id: u64,
+    pub amount: u64,
+    pub token: SpLiquidationToken,
+    /// Exact, already-proven allowance approval required for the stable pull.
+    pub approval: SpLiquidationApprovalReceipt,
+}
+
+/// Exact ICRC-2 transfer_from tuple pinned before dispatch and reused on every
+/// retry. `spender` is explicit because the ICRC-3 receipt must bind it.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationStablePullTuple {
+    pub op_nonce: u128,
+    pub ledger: Principal,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub spender: icrc_ledger_types::icrc1::account::Account,
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    pub amount_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationStablePullReceipt {
+    pub block_index: u64,
+    pub tuple: SpLiquidationStablePullTuple,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InboundCollateralOperationKind {
+    Open { collateral_type: Principal },
+    AddMargin { vault_id: u64 },
+}
+
+/// Owner-only view of a pending caller-funded collateral transfer. This is a
+/// reconciliation surface; it cannot attach arbitrary block indices or clear a
+/// liability.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundCollateralStatusView {
+    pub owner: Principal,
+    pub ledger: Principal,
+    pub request_id: u128,
+    pub operation: InboundCollateralOperationKind,
+    pub phase: InboundCollateralPhase,
+    pub amount_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub candidate_block_index: Option<u64>,
+    pub result: Option<InboundCollateralResultView>,
+    pub had_ambiguous_attempt: bool,
+    pub last_error: Option<String>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InboundCollateralPhase {
+    Pending,
+    Held,
+    Complete,
+    Rejected,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InboundCollateralResultView {
+    Open { vault_id: u64, block_index: u64 },
+    AddMargin { block_index: u64 },
+    Rejected { message: String },
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundCollateralRequestState {
+    pub next_request_id: u128,
+    pub active_request: Option<InboundCollateralStatusView>,
+    pub latest_result: Option<InboundCollateralStatusView>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PushDepositSweepOperationKind {
+    Open { collateral_type: Principal },
+    AddMargin { vault_id: u64 },
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PushDepositSweepPhase {
+    Pending,
+    Held,
+    Complete,
+    Rejected,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PushDepositSweepResultView {
+    Open { vault_id: u64, block_index: u64 },
+    AddMargin { block_index: u64 },
+    Rejected { message: String },
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushDepositSweepStatusView {
+    pub owner: Principal,
+    pub ledger: Principal,
+    pub request_id: u128,
+    pub operation: PushDepositSweepOperationKind,
+    pub phase: PushDepositSweepPhase,
+    pub amount_raw: u64,
+    pub fee_raw: Option<u64>,
+    pub expected_fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub candidate_block_index: Option<u64>,
+    pub result: Option<PushDepositSweepResultView>,
+    pub had_ambiguous_attempt: bool,
+    pub last_error: Option<String>,
+}
+
+/// Exact request identity for an icUSD repayment. Replays use this same
+/// transfer_from tuple and can never create a second debt retirement.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepaymentV2PullTuple {
+    pub op_nonce: u128,
+    pub ledger: Principal,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub spender: icrc_ledger_types::icrc1::account::Account,
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    pub amount_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepaymentV2Phase {
+    PendingPull,
+    HeldPull,
+    RepayCommitted,
+    ClosePending,
+    /// The repayment burned and retired its pinned amount, but new accrued
+    /// interest left debt above the close threshold. The receipt is final;
+    /// use a fresh request ID to repay the remaining debt before closing.
+    CloseNeedsAdditionalRepayment,
+    Complete,
+    Rejected,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepaymentV2Result {
+    pub repay_block_index: u64,
+    pub collateral_return_block_index: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepaymentV2StatusView {
+    pub owner: Principal,
+    pub request_id: u128,
+    pub vault_id: u64,
+    pub requested_amount_raw: u64,
+    pub effective_amount_raw: u64,
+    pub close_after_repay: bool,
+    pub ledger: Principal,
+    pub tuple: Option<RepaymentV2PullTuple>,
+    pub phase: RepaymentV2Phase,
+    pub candidate_block_index: Option<u64>,
+    pub result: Option<RepaymentV2Result>,
+    pub had_ambiguous_attempt: bool,
+    pub last_error: Option<String>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepaymentV2RequestState {
+    pub next_request_id: u128,
+    pub active_request: Option<RepaymentV2StatusView>,
+    pub latest_result: Option<RepaymentV2StatusView>,
+}
+
+/// Exact CKUSDT/CKUSDC repayment transfer_from is persisted before dispatch.
+/// The ledger-local block index in a result is always paired with `ledger`.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StableRepaymentV2Phase {
+    PendingPull,
+    HeldPull,
+    Complete,
+    Rejected,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StableRepaymentV2Result {
+    pub ledger: Principal,
+    pub block_index: u64,
+    pub effective_debt_reduction_e8: u64,
+    pub interest_share_e8: u64,
+    pub surcharge_payment_id: Option<u128>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StableRepaymentV2StatusView {
+    pub owner: Principal,
+    pub request_id: u128,
+    pub vault_id: u64,
+    pub token_type: StableTokenType,
+    pub requested_amount_e8: u64,
+    pub effective_debt_reduction_e8: u64,
+    pub principal_pull_e6: u64,
+    pub surcharge_e6: u64,
+    pub ledger: Principal,
+    pub tuple: Option<SpLiquidationStablePullTuple>,
+    pub phase: StableRepaymentV2Phase,
+    pub candidate_block_index: Option<u64>,
+    pub result: Option<StableRepaymentV2Result>,
+    pub had_ambiguous_attempt: bool,
+    pub last_error: Option<String>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StableRepaymentV2RequestState {
+    pub next_request_id: u128,
+    pub active_request: Option<StableRepaymentV2StatusView>,
+    pub latest_result: Option<StableRepaymentV2StatusView>,
+}
+
+/// Caller-funded, permissionless liquidation routes covered by the durable
+/// manual liquidation request journal.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManualLiquidationRoute {
+    FullIcusd,
+    PartialIcusd,
+    PartialStable { token_type: StableTokenType },
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManualLiquidationV2Phase {
+    PendingPull,
+    HeldPull,
+    RefundPending,
+    Refunded,
+    /// Debt and collateral accounting committed from the inbound receipt;
+    /// collateral payout remains a durable queued obligation, not proof of receipt.
+    CommittedPayoutQueued,
+    Rejected,
+}
+
+/// Compensation rail for a proved manual-liquidation pull that cannot be
+/// committed against its pinned vault plan.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManualLiquidationV2RefundKind {
+    /// The inbound icUSD pull was a burn, so compensation is a fee-free mint.
+    IcusdMint { burn_block_index: u64 },
+    /// Other stable assets return through an exact ICRC-1 transfer.
+    StableTransfer { pull_block_index: u64, fee_raw: u64 },
+}
+
+/// Persisted response evidence for a ledger rejection that guarantees the
+/// corresponding refund tuple had no effect. Ambiguous replies never produce
+/// this record and therefore cannot authorize another dispatch.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManualLiquidationV2RefundNoEffect {
+    pub dispatch_attempt: u8,
+    pub fee_raw: Option<u64>,
+    pub op_nonce: u128,
+    pub created_at_time_ns: u64,
+    pub memo: Vec<u8>,
+    pub expected_fee_raw: Option<u64>,
+    pub error: String,
+}
+
+pub(crate) const MAX_MANUAL_LIQUIDATION_REFUND_DISPATCHES: u8 = 3;
+
+/// Exact compensation identity and evidence for one paid manual-liquidation
+/// request. The explicit parent identity prevents a refund receipt from being
+/// detached from its caller, request, vault, or original ledger debit.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManualLiquidationV2Refund {
+    pub caller: Principal,
+    pub request_id: u128,
+    pub vault_id: u64,
+    pub kind: ManualLiquidationV2RefundKind,
+    pub ledger: Principal,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub recipient: Principal,
+    pub amount_e8s: u64,
+    /// `None` means the fee-free icUSD mint rail; `Some` pins the fee paid by
+    /// the protocol default account on a stable-token transfer refund.
+    pub fee_raw: Option<u64>,
+    pub op_nonce: u128,
+    pub created_at_time_ns: u64,
+    pub memo: Vec<u8>,
+    pub history_cursor: u64,
+    pub history_end_exclusive: Option<u64>,
+    pub dispatch_attempts: u8,
+    #[serde(default)]
+    pub no_effect_attempts: Vec<ManualLiquidationV2RefundNoEffect>,
+    pub candidate_block_index: Option<u64>,
+    pub last_error: Option<String>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManualLiquidationV2Result {
+    pub ledger: Principal,
+    pub block_index: u64,
+    pub debt_liquidated_e8s: u64,
+    pub collateral_to_liquidator_raw: u64,
+    pub collateral_to_seize_raw: u64,
+    pub liquidator_xrp_claim_id: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManualLiquidationV2StatusView {
+    pub owner: Principal,
+    pub request_id: u128,
+    pub vault_id: u64,
+    pub route: ManualLiquidationRoute,
+    pub requested_amount_e8s: u64,
+    pub pull_amount_raw: u64,
+    pub ledger: Principal,
+    pub tuple: Option<SpLiquidationStablePullTuple>,
+    pub phase: ManualLiquidationV2Phase,
+    pub candidate_block_index: Option<u64>,
+    pub result: Option<ManualLiquidationV2Result>,
+    pub refund: Option<ManualLiquidationV2Refund>,
+    pub commit_started: bool,
+    pub had_ambiguous_attempt: bool,
+    pub last_error: Option<String>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManualLiquidationV2RequestState {
+    pub next_request_id: u128,
+    pub active_request: Option<ManualLiquidationV2StatusView>,
+    pub latest_result: Option<ManualLiquidationV2StatusView>,
+}
+
+/// Protocol-paid exact icUSD mint after a proven SP approval/pull debit that
+/// could not be committed safely. `amount_raw` is the full SP debit restored;
+/// `fee_raw` is zero because the ICRC mint operation is fee-free.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationStableRefundTuple {
+    pub op_nonce: u128,
+    pub ledger: Principal,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub principal_refund_raw: u64,
+    pub approval_fee_refund_raw: u64,
+    pub pull_fee_refund_raw: u64,
+    /// Checked sum of the three reimbursed SP debits above.
+    pub amount_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationStableRefundReceipt {
+    pub block_index: u64,
+    pub tuple: SpLiquidationStableRefundTuple,
+}
+
+/// Exact backend-to-SP collateral payout tuple. This is retained in the
+/// request journal after the queue row is removed.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationPayoutTuple {
+    pub op_nonce: u128,
+    pub ledger: Principal,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub gross_amount_raw: u64,
+    pub net_amount_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub collateral_type: Principal,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationPayoutReceipt {
+    pub block_index: u64,
+    pub tuple: SpLiquidationPayoutTuple,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpLiquidationPayoutNoEffectEvidence {
+    BadFee { expected_fee_raw: u64 },
+    InsufficientFunds { reported_balance_raw: u64 },
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpLiquidationV2Status {
+    /// No admission is visible; retry the exact same request ID and payload.
+    Unseen,
+    StablePullPending {
+        tuple: SpLiquidationStablePullTuple,
+        candidate_block_index: Option<u64>,
+        last_error: Option<String>,
+    },
+    StablePullRefundPending {
+        stable_pull_receipt: Option<SpLiquidationStablePullReceipt>,
+        tuple: SpLiquidationStableRefundTuple,
+        candidate_block_index: Option<u64>,
+        last_error: Option<String>,
+    },
+    StablePullRefunded {
+        stable_pull_receipt: Option<SpLiquidationStablePullReceipt>,
+        refund_receipt: SpLiquidationStableRefundReceipt,
+        reason: String,
+    },
+    CollateralPayoutPending {
+        stable_pull_receipt: SpLiquidationStablePullReceipt,
+        result: SuccessWithFee,
+        tuple: SpLiquidationPayoutTuple,
+        candidate_block_index: Option<u64>,
+        last_error: Option<String>,
+    },
+    /// A first typed BadFee proves the predecessor tuple had no effect. The
+    /// registered SP must durably adopt this exact successor before the
+    /// backend will dispatch it.
+    CollateralPayoutSupersessionPending {
+        stable_pull_receipt: SpLiquidationStablePullReceipt,
+        result: SuccessWithFee,
+        predecessor: SpLiquidationPayoutTuple,
+        replacement: SpLiquidationPayoutTuple,
+        evidence: SpLiquidationPayoutNoEffectEvidence,
+        generation: u32,
+    },
+    Complete {
+        stable_pull_receipt: SpLiquidationStablePullReceipt,
+        result: SuccessWithFee,
+        payout_receipt: SpLiquidationPayoutReceipt,
+    },
+    Rejected {
+        reason: String,
+    },
+    Acknowledged,
+}
+
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpLiquidationV2ReceiptKind {
+    StablePull,
+    Refund,
+    CollateralPayout,
+}
+
+/// Exact Candid mirror of the Stability Pool error variant returned by its
+/// authenticated legacy-in-flight fence update. Keep aligned with
+/// `stability_pool/src/types.rs::StabilityPoolError`; unknown variants must
+/// fail closed before a V2 pull.
+#[derive(CandidType, serde::Deserialize, Debug)]
+pub enum SpLegacyFenceError {
+    InsufficientBalance {
+        token: Principal,
+        required: u64,
+        available: u64,
+    },
+    AmountTooLow {
+        minimum_e8s: u64,
+    },
+    NoPositionFound,
+    InsufficientPoolBalance,
+    Unauthorized,
+    TokenNotAccepted {
+        ledger: Principal,
+    },
+    TokenNotActive {
+        ledger: Principal,
+    },
+    CollateralNotFound {
+        ledger: Principal,
+    },
+    LedgerTransferFailed {
+        reason: String,
+    },
+    InterCanisterCallFailed {
+        target: String,
+        method: String,
+    },
+    LiquidationFailed {
+        vault_id: u64,
+        reason: String,
+    },
+    EmergencyPaused,
+    SystemBusy,
+    AlreadyOptedOut {
+        collateral: Principal,
+    },
+    AlreadyOptedIn {
+        collateral: Principal,
+    },
+    PayoutAddressRequired {
+        collateral: Principal,
+    },
+    InvalidPayoutAddress {
+        reason: String,
+    },
+    XrpClaimStillOutstanding {
+        claim_id: u64,
+    },
+    XrpClaimStatusCheckFailed {
+        reason: String,
+    },
+    RefundClaimNotFound,
+}
+
+#[cfg(test)]
+mod sp_legacy_fence_candid_tests {
+    use super::SpLegacyFenceError;
+    use candid::CandidType;
+
+    #[derive(CandidType)]
+    enum NewerSpError {
+        NewVariant,
+    }
+
+    #[test]
+    fn exact_legacy_fence_reply_decodes() {
+        let bytes = candid::encode_one(Ok::<bool, SpLegacyFenceError>(false)).unwrap();
+        let decoded: Result<bool, SpLegacyFenceError> = candid::decode_one(&bytes).unwrap();
+        assert!(matches!(decoded, Ok(false)));
+    }
+
+    #[test]
+    fn unknown_sp_error_variant_fails_closed() {
+        let bytes =
+            candid::encode_one(Err::<bool, NewerSpError>(NewerSpError::NewVariant)).unwrap();
+        assert!(candid::decode_one::<Result<bool, SpLegacyFenceError>>(&bytes).is_err());
+    }
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2StatusView {
+    pub stability_pool: Principal,
+    pub request_id: u64,
+    /// The immutable request payload, when one was admitted. Acknowledged
+    /// tombstones may omit the payload only after the caller has confirmed it.
+    pub request: Option<SpLiquidationV2Request>,
+    pub status: SpLiquidationV2Status,
 }
 
 /// Arguments for repaying vault with a stable token
@@ -281,7 +1300,7 @@ pub struct Fees {
     pub redemption_fee: f64,
 }
 
-#[derive(CandidType, Deserialize, Debug)]
+#[derive(CandidType, Deserialize, Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SuccessWithFee {
     pub block_index: u64,
     pub fee_amount_paid: u64,
@@ -394,10 +1413,16 @@ pub struct PreparedRedemptionOffer {
 pub enum RedemptionOfferRefreshError {
     /// Another bounded candidate refresh is in flight. `retry_after_ns` is a
     /// duration, not an absolute timestamp.
-    RefreshInProgress { retry_after_ns: u64 },
+    RefreshInProgress {
+        retry_after_ns: u64,
+    },
     /// A previous stale-price batch is still in its global cooldown.
-    RefreshCooldown { retry_after_ns: u64 },
-    CandidateLimitExceeded { max_candidates: u64 },
+    RefreshCooldown {
+        retry_after_ns: u64,
+    },
+    CandidateLimitExceeded {
+        max_candidates: u64,
+    },
     RefreshUnavailable {
         message: String,
         retry_after_ns: u64,
@@ -429,7 +1454,7 @@ pub enum RedemptionPayoutStatus {
 }
 
 /// Result from stability pool liquidation (both standard and debt-already-burned paths).
-#[derive(CandidType, Deserialize, Debug)]
+#[derive(CandidType, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct StabilityPoolLiquidationResult {
     pub success: bool,
     pub vault_id: u64,
@@ -439,6 +1464,79 @@ pub struct StabilityPoolLiquidationResult {
     pub block_index: u64,
     pub fee: u64,
     pub collateral_price_e8s: u64,
+}
+
+/// Backend-owned status contract for one Stability Pool V2 3USD reserve
+/// ingress. Shared with the SP crate so both canisters consume the same typed
+/// recovery status and receipt variants.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ThreeUsdReserveIngressV2PendingStage {
+    TransferSubmittedOrUnknown {
+        tuple: crate::state::ThreeUsdReserveIngressTuple,
+    },
+    TransferConfirmed {
+        tuple: crate::state::ThreeUsdReserveIngressTuple,
+        transfer_block_index: u64,
+    },
+    AbsorbCommittedRefundPending {
+        tuple: crate::state::ThreeUsdReserveIngressTuple,
+        transfer_block_index: u64,
+        proof: crate::icrc3_proof::SpWritedownProof,
+        result: StabilityPoolLiquidationResult,
+        refund_amount_e8s: u64,
+    },
+    AbsorbCommittedPayoutPending {
+        tuple: crate::state::ThreeUsdReserveIngressTuple,
+        transfer_block_index: u64,
+        proof: crate::icrc3_proof::SpWritedownProof,
+        result: StabilityPoolLiquidationResult,
+        payout_tuple: crate::state::ThreeUsdReserveIngressPayoutTuple,
+    },
+    FailedRefundPending {
+        tuple: crate::state::ThreeUsdReserveIngressTuple,
+        transfer_block_index: u64,
+        error: String,
+        refund_amount_e8s: u64,
+    },
+    ReconciliationRequired {
+        reason: String,
+    },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ThreeUsdReserveIngressV2Status {
+    Unseen,
+    AdmissionPending,
+    PreTransferRejected {
+        reason: String,
+    },
+    TransferPending {
+        stage: ThreeUsdReserveIngressV2PendingStage,
+    },
+    Absorbed {
+        transfer_block_index: u64,
+        transfer_tuple: crate::state::ThreeUsdReserveIngressTuple,
+        proof: crate::icrc3_proof::SpWritedownProof,
+        result: StabilityPoolLiquidationResult,
+        proportional_refund: Option<crate::state::ThreeUsdReserveIngressRefundReceipt>,
+        collateral_payout_receipt: crate::state::ThreeUsdReserveIngressPayoutReceipt,
+    },
+    FailedAfterTransfer {
+        transfer_block_index: u64,
+        transfer_tuple: crate::state::ThreeUsdReserveIngressTuple,
+        proof: crate::icrc3_proof::SpWritedownProof,
+        error: String,
+        full_refund: crate::state::ThreeUsdReserveIngressRefundReceipt,
+    },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ThreeUsdReserveIngressV2StatusView {
+    pub stability_pool: Principal,
+    pub vault_id: u64,
+    pub absorb_id: u64,
+    pub request: Option<crate::state::ThreeUsdReserveIngressRequest>,
+    pub status: ThreeUsdReserveIngressV2Status,
 }
 
 pub const MAX_XRP_SP_PAYOUT_ALLOCATIONS: usize = 500;
@@ -486,6 +1584,15 @@ pub struct XrpSpAbsorbResult {
     pub payout_claims: Vec<XrpSpPayoutClaim>,
     pub block_index: u64,
     pub collateral_price_e8s: u64,
+}
+
+/// Reconciliation status for one exact native-XRP Stability Pool absorb.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum XrpSpAbsorbStatus {
+    Accepted(XrpSpAbsorbResult),
+    RefundJournaled,
+    Unseen,
+    ConsumedWithoutResult,
 }
 
 /// Coarse classification of an `Event` for the explorer's type facet.
@@ -683,6 +1790,44 @@ pub struct LiquidityStatus {
     pub total_available_returns: u64,
 }
 
+/// Shared monotonic request-ID namespace for public liquidity mutations.
+#[derive(CandidType, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum LiquidityV2Kind {
+    Provide,
+    Withdraw,
+    ClaimReturns,
+}
+
+#[derive(CandidType, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum LiquidityV2Phase {
+    Pending,
+    Held,
+    Complete,
+    Rejected,
+}
+
+#[derive(CandidType, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LiquidityV2StatusView {
+    pub owner: Principal,
+    pub request_id: u128,
+    pub kind: LiquidityV2Kind,
+    pub amount_raw: u64,
+    pub ledger: Principal,
+    pub phase: LiquidityV2Phase,
+    pub candidate_block_index: Option<u64>,
+    pub result_block_index: Option<u64>,
+    pub had_ambiguous_attempt: bool,
+    pub last_error: Option<String>,
+    pub created_at_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LiquidityV2RequestState {
+    pub next_request_id: u128,
+    pub active_request: Option<LiquidityV2StatusView>,
+    pub latest_result: Option<LiquidityV2StatusView>,
+}
+
 /// Read-only dump of all admin-settable protocol parameters in one call.
 /// Returned by `get_protocol_config()` so operators can eyeball every threshold,
 /// fee, ceiling, and collateral setting without multiple queries.
@@ -870,9 +2015,7 @@ pub enum RedemptionError {
     /// A truthful vault-collateral redemption quote could not be produced.
     RedemptionQuoteUnavailable(String),
     /// Requested input exceeds the first globally ordered collateral run.
-    RedemptionCapacityExceeded {
-        max_input_icusd_e8s: u64,
-    },
+    RedemptionCapacityExceeded { max_input_icusd_e8s: u64 },
     /// The globally first collateral changed after the quote was observed.
     RedemptionPriorityChanged {
         expected: Principal,
@@ -944,6 +2087,29 @@ pub struct LiquidatableVaultInfo {
     pub collateral_amount: u64,
     pub recommended_liquidation_amount: u64,
     pub collateral_price_e8s: u64,
+}
+
+/// Build the enriched payload used by the bot and Stability Pool from the
+/// backend's current cached collateral price and liquidation sizing logic.
+pub fn liquidatable_vault_info(
+    state: &crate::state::State,
+    vault: &Vault,
+) -> LiquidatableVaultInfo {
+    let collateral_price_usd = state
+        .get_collateral_price_decimal(&vault.collateral_type)
+        .map(UsdIcp::from)
+        .unwrap_or(UsdIcp::from(Decimal::ZERO));
+    let recommended_liquidation_amount =
+        state.recommended_liquidation_amount_for(vault, collateral_price_usd);
+
+    LiquidatableVaultInfo {
+        vault_id: vault.vault_id,
+        collateral_type: vault.collateral_type,
+        debt_amount: vault.borrowed_icusd_amount.to_u64(),
+        collateral_amount: vault.collateral_amount,
+        recommended_liquidation_amount: recommended_liquidation_amount.to_u64(),
+        collateral_price_e8s: collateral_price_usd.to_e8s(),
+    }
 }
 
 /// Wave-14a CDP-10: post-spawn handler for the stability_pool
@@ -1056,29 +2222,54 @@ pub fn record_per_collateral_redemption_fee(
 ) {
     if let Some(config) = state.collateral_configs.get_mut(collateral_type) {
         config.current_base_rate = base_fee;
-        config.last_redemption_time = now_ns;
+        config.last_redemption_time = redemption_timestamp_after_update(
+            config.last_redemption_time,
+            now_ns,
+        );
+    }
+}
+
+fn redemption_timestamp_after_update(previous_ns: u64, now_ns: u64) -> u64 {
+    // The redemption base rate decays in whole-hour intervals. Do not let a
+    // smaller redemption inside that interval restart its decay clock.
+    const DECAY_INTERVAL_NS: u64 = 3_600_000_000_000;
+    let elapsed_ns = now_ns.saturating_sub(previous_ns);
+    let completed_intervals = elapsed_ns / DECAY_INTERVAL_NS;
+    previous_ns.saturating_add(completed_intervals.saturating_mul(DECAY_INTERVAL_NS))
+}
+
+#[cfg(test)]
+mod redemption_fee_timestamp_tests {
+    use super::redemption_timestamp_after_update;
+
+    #[test]
+    fn frequent_redemptions_do_not_restart_decay_clock_each_time() {
+        const HOUR_NS: u64 = 3_600_000_000_000;
+        let initial = 1_000;
+        let mut last_redemption_time = initial;
+        let mut now = initial;
+        for _ in 0..24 {
+            now += HOUR_NS - 1_000_000_000;
+            last_redemption_time = redemption_timestamp_after_update(last_redemption_time, now);
+        }
+        assert_eq!(last_redemption_time, initial + 23 * HOUR_NS);
+        assert!(now - last_redemption_time < HOUR_NS);
+        assert_eq!(redemption_timestamp_after_update(9_000, 1_000), 9_000);
     }
 }
 
 pub async fn check_vaults() {
-    // Auto-cancel bot claims that have been pending too long (10 minutes).
-    // This prevents vaults from being permanently locked if the bot crashes.
-    //
-    // Wave-11 BOT-001: gate the auto-cancel on the protocol's collateral
-    // balance having returned to (>=) `claim.collateral_amount - ledger_fee`.
-    // Without this, a CLAIM → SWAP-ok → TRANSFER-fail → admin-AFK-10min
-    // sequence would clear the claim while the bot still holds the
-    // collateral, leaving the vault permanently underwater. Mirrors the
-    // subaccount + fee derivation used by `bot_cancel_liquidation`. On a
-    // shortfall we leave the claim in place and emit
-    // `BotClaimReconciliationNeeded` so admin can reconcile manually.
-    //
-    // The guard re-emits the event on every tick the gate fires (no
-    // per-claim "already emitted" flag, since a state-shape change is
-    // out of scope for this wave). The explorer can group by `vault_id`
-    // to dedupe; operator action is unchanged regardless of count.
+    // Expired bot claims are deliberately retained for reconciliation.
+    // `check_vaults` does not infer return from the pooled backend balance:
+    // that balance cannot prove which claim's collateral was returned.
+    // Reconciliation events are rate-limited per vault in stable state.
     const BOT_CLAIM_TIMEOUT_NS: u64 = 600_000_000_000; // 10 minutes
     let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        let active_claims: std::collections::BTreeSet<u64> = s.bot_claims.keys().copied().collect();
+        s.bot_claim_reconciliation_last_emitted
+            .retain(|vault_id, _| active_claims.contains(vault_id));
+    });
 
     let expired_claims: Vec<(u64, crate::state::BotClaim)> = read_state(|s| {
         s.bot_claims
@@ -1088,87 +2279,21 @@ pub async fn check_vaults() {
             .collect()
     });
 
-    let backend_id = ic_cdk::id();
     for (vault_id, claim) in &expired_claims {
         let required = read_state(|s| {
-            let fee = s
-                .get_collateral_config(&claim.collateral_type)
+            s.get_collateral_config(&claim.collateral_type)
                 .map(|c| c.ledger_fee)
-                .unwrap_or(0);
-            claim.collateral_amount.saturating_sub(fee)
+                .unwrap_or(0)
         });
-
-        let balance_result: Result<(candid::Nat,), _> = ic_cdk::call(
-            claim.collateral_type,
-            "icrc1_balance_of",
-            (icrc_ledger_types::icrc1::account::Account {
-                owner: backend_id,
-                subaccount: None,
-            },),
-        )
-        .await;
-
-        let observed = match balance_result {
-            Ok((bal,)) => bal.0.to_u64().unwrap_or(0),
-            Err((code, msg)) => {
-                log!(
-                    INFO,
-                    "[BOT-001] auto-cancel balance query failed for vault #{}: {:?} {}; deferring this tick",
-                    vault_id,
-                    code,
-                    msg
-                );
-                continue;
-            }
-        };
-
-        if observed < required {
-            log!(
-                INFO,
-                "[BOT-001] auto-cancel skipped for vault #{}: balance {} < required {} (collateral_amount {})",
-                vault_id,
-                observed,
-                required,
-                claim.collateral_amount
-            );
-            mutate_state(|s| {
-                // TOCTOU re-check: between collecting expired_claims and
-                // awaiting the balance query, the bot may have called
-                // `bot_cancel_liquidation` itself and cleared the claim.
-                // Avoid emitting a misleading reconciliation event for a
-                // vault that no longer needs reconciliation.
-                if !s.bot_claims.contains_key(vault_id) {
-                    return;
-                }
-                crate::event::record_bot_claim_reconciliation_needed(
-                    s, *vault_id, observed, required,
-                );
-            });
-            continue;
-        }
-
-        log!(
-            INFO,
-            "[check_vaults] Auto-cancelling stuck bot claim for vault #{} (claimed {}s ago, balance {} >= required {})",
-            vault_id,
-            (now - claim.claimed_at) / 1_000_000_000,
-            observed,
-            required
-        );
-
         mutate_state(|s| {
-            // TOCTOU re-check: skip the budget restore if the claim was
-            // already cleared during the await window (e.g., bot raced us
-            // by calling `bot_cancel_liquidation`). Without this guard the
-            // budget would be double-credited.
-            if !s.bot_claims.contains_key(vault_id) {
-                return;
+            if s.bot_claims.get(vault_id) == Some(claim) {
+                crate::event::record_bot_claim_reconciliation_needed(
+                    s,
+                    *vault_id,
+                    0,
+                    claim.collateral_amount.saturating_sub(required),
+                );
             }
-            if let Some(vault) = s.vault_id_to_vaults.get_mut(vault_id) {
-                vault.bot_processing = false;
-            }
-            s.bot_budget_remaining_e8s += claim.debt_amount;
-            s.bot_claims.remove(vault_id);
         });
     }
 
@@ -1276,21 +2401,7 @@ pub async fn check_vaults() {
         let vault_notifications: Vec<LiquidatableVaultInfo> = read_state(|s| {
             unhealthy_vaults
                 .iter()
-                .map(|v| {
-                    let collateral_price_usd = s
-                        .get_collateral_price_decimal(&v.collateral_type)
-                        .map(|p| UsdIcp::from(p))
-                        .unwrap_or(UsdIcp::from(rust_decimal::Decimal::ZERO));
-                    let optimal_liq = s.recommended_liquidation_amount_for(v, collateral_price_usd);
-                    LiquidatableVaultInfo {
-                        vault_id: v.vault_id,
-                        collateral_type: v.collateral_type,
-                        debt_amount: v.borrowed_icusd_amount.to_u64(),
-                        collateral_amount: v.collateral_amount,
-                        recommended_liquidation_amount: optimal_liq.to_u64(),
-                        collateral_price_e8s: collateral_price_usd.to_e8s(),
-                    }
-                })
+                .map(|v| liquidatable_vault_info(s, v))
                 .collect()
         });
 
@@ -1303,9 +2414,8 @@ pub async fn check_vaults() {
         // for the unconditional `prune_recovered_routing_state` call;
         // re-used here for the cascade decisions.
 
-        let (bot_canister, pool_canister) = read_state(|s| {
-            (s.liquidation_bot_principal, s.stability_pool_canister)
-        });
+        let (bot_canister, pool_canister) =
+            read_state(|s| (s.liquidation_bot_principal, s.stability_pool_canister));
 
         let mut for_bot: Vec<LiquidatableVaultInfo> = Vec::new();
         let mut for_pool: Vec<LiquidatableVaultInfo> = Vec::new();
@@ -1466,17 +2576,447 @@ pub fn compute_collateral_ratio(vault: &Vault, _rate: UsdIcp, state: &state::Sta
     margin_value / vault.borrowed_icusd_amount
 }
 
-/// Drop a single pending-transfer entry from its owning map. Wave-4 ICC-005:
-/// after LIQ-001's `(vault_id, owner)` re-keying, every pending entry has a
-/// unique key, so abandon-paths are uniform across margin / excess / redemption.
-/// This helper exists to make that uniformity legible (and to stop callers
-/// from ever drifting back to `retain` over a vault_id range, which would
-/// over-remove sibling liquidators' entries).
+/// Remove a single pending-transfer row by its operation id.
 fn drop_pending<K: std::cmp::Ord>(
     map: &mut std::collections::BTreeMap<K, crate::state::PendingMarginTransfer>,
     key: &K,
 ) {
     map.remove(key);
+}
+
+fn record_3usd_refund_retry_failure(
+    pending: &mut std::collections::BTreeMap<u128, crate::state::PendingThreeUsdRefund>,
+    nonce: &u128,
+) -> (u8, bool) {
+    let Some(refund) = pending.get_mut(nonce) else {
+        return (0, false);
+    };
+    refund.retry_count = refund.retry_count.saturating_add(1);
+    let count = refund.retry_count;
+    (count, count < MAX_PENDING_RETRIES)
+}
+
+fn advance_pending_retry_count(retry_count: &mut u8) -> bool {
+    *retry_count = retry_count.saturating_add(1);
+    *retry_count < MAX_PENDING_RETRIES
+}
+
+fn hold_pending_redemption_for_reconciliation(
+    pending: &mut std::collections::BTreeMap<u64, PendingMarginTransfer>,
+    burn_block_index: u64,
+) -> bool {
+    let Some(payout) = pending.get_mut(&burn_block_index) else {
+        return false;
+    };
+    payout.held_for_manual_retry = true;
+    payout.reconciliation_required = true;
+    true
+}
+
+/// Process one journaled 3USD refund. Legacy rows have no journal entry and
+/// remain visible but are never dispatched automatically.
+pub async fn dispatch_pending_3usd_refund(op_nonce: u128) {
+    use crate::state::{ThreeUsdRefundDispatchState as Dispatch, ThreeUsdRefundTransferTuple};
+    use icrc_ledger_types::icrc1::account::Account;
+
+    let Some(_dispatch_guard) = ThreeUsdRefundDispatchGuard::try_acquire(op_nonce) else {
+        return;
+    };
+
+    let Some((refund, dispatch)) = read_state(|state| {
+        let refund = state.pending_3usd_refunds.get(&op_nonce).copied()?;
+        let dispatch = state.pending_3usd_refund_journals.get(&op_nonce).copied()?;
+        Some((refund, dispatch))
+    }) else {
+        return;
+    };
+    if let Some(held) =
+        hold_legacy_3usd_refund_for_protocol_paid_policy(dispatch, refund.amount_e8s)
+    {
+        mutate_state(|state| {
+            if state.pending_3usd_refunds.get(&op_nonce) == Some(&refund)
+                && state.pending_3usd_refund_journals.get(&op_nonce) == Some(&dispatch)
+            {
+                state.pending_3usd_refund_journals.insert(op_nonce, held);
+            }
+        });
+        return;
+    }
+    if !pending_refund_is_automatically_retryable(refund.retry_count) {
+        return;
+    }
+
+    let mut default_account_guard = None;
+    let (tuple, first_dispatch, gross_amount_e8s) = match dispatch {
+        Dispatch::NeverDispatched { gross_amount_e8s }
+        | Dispatch::NeverDispatchedDefault { gross_amount_e8s } => {
+            let source_subaccount = match dispatch {
+                Dispatch::NeverDispatched { .. } => {
+                    Some(crate::management::protocol_3usd_reserves_subaccount())
+                }
+                Dispatch::NeverDispatchedDefault { .. } => None,
+                _ => unreachable!(),
+            };
+            if source_subaccount.is_none() {
+                default_account_guard =
+                    crate::ThreeUsdDefaultAccountTransferGuard::try_acquire(refund.ledger);
+                if default_account_guard.is_none() {
+                    return;
+                }
+            }
+            let fee = match crate::management::get_or_refresh_fee(refund.ledger).await {
+                Ok(fee) => fee,
+                Err(error) => {
+                    log!(INFO,
+                        "[refunding] 3USD refund fee lookup failed for SP {} (vault {}): {}. Gross liability remains journaled.",
+                        refund.stability_pool, refund.vault_id, error
+                    );
+                    return;
+                }
+            };
+            let amount = if source_subaccount.is_none() {
+                let balance = match crate::management::get_icrc1_reserve_balance(
+                    refund.ledger,
+                    Account {
+                        owner: ic_cdk::id(),
+                        subaccount: None,
+                    },
+                )
+                .await
+                {
+                    Ok(balance) => balance,
+                    Err(error) => {
+                        log!(INFO, "[refunding] 3USD default-account balance is uncertain for SP {} (vault {}): {}. Refund remains unsubmitted.", refund.stability_pool, refund.vault_id, error);
+                        return;
+                    }
+                };
+                let Some(commitment) = read_state(|state| {
+                    state.three_usd_default_account_refund_commitment(refund.ledger, fee)
+                }) else {
+                    log!(INFO, "[refunding] 3USD default-account obligations are uncertain for SP {} (vault {}). Refund remains unsubmitted.", refund.stability_pool, refund.vault_id);
+                    return;
+                };
+                if balance < commitment {
+                    log!(INFO, "[refunding] 3USD default account lacks refund capacity for SP {} (vault {}): balance {}, committed {}. Refund remains unsubmitted.", refund.stability_pool, refund.vault_id, balance, commitment);
+                    return;
+                }
+                three_usd_refund_transfer_amount(gross_amount_e8s, fee, None)
+                    .expect("default-account refund amount is the full principal")
+            } else {
+                let Some(net_amount) =
+                    three_usd_refund_transfer_amount(gross_amount_e8s, fee, source_subaccount)
+                else {
+                    mutate_state(|state| {
+                        let current = state.pending_3usd_refund_journals.get(&op_nonce).copied();
+                        let next = match current {
+                            Some(Dispatch::NeverDispatched {
+                                gross_amount_e8s: current,
+                            }) if current == gross_amount_e8s => Some(Dispatch::Unpayable {
+                                gross_amount_e8s,
+                                fee_e8s: fee,
+                            }),
+                            Some(Dispatch::NeverDispatchedDefault {
+                                gross_amount_e8s: current,
+                            }) if current == gross_amount_e8s => Some(Dispatch::UnpayableDefault {
+                                gross_amount_e8s,
+                                fee_e8s: fee,
+                            }),
+                            _ => None,
+                        };
+                        if let Some(next) = next {
+                            state.pending_3usd_refund_journals.insert(op_nonce, next);
+                        }
+                    });
+                    log!(INFO,
+                    "[refunding] CRITICAL: 3USD refund gross amount {} for SP {} (vault {}) cannot cover current fee {}; retained for reconciliation.",
+                    gross_amount_e8s, refund.stability_pool, refund.vault_id, fee
+                );
+                    return;
+                };
+                net_amount
+            };
+            let tuple = ThreeUsdRefundTransferTuple {
+                source_owner: ic_cdk::id(),
+                // New reserve ingress lands in the backend's default account.
+                // SubmittedOrUnknown legacy tuples retain their persisted old
+                // source above and are never rebuilt through this branch.
+                source_subaccount,
+                destination: Account {
+                    owner: refund.stability_pool,
+                    subaccount: None,
+                },
+                amount_e8s: amount,
+                fee_e8s: fee,
+                memo: crate::management::nonce_to_memo(op_nonce)
+                    .0
+                    .as_slice()
+                    .try_into()
+                    .expect("nonce memo is 16 bytes"),
+                created_at_time_ns: crate::management::nonce_to_created_at_time(op_nonce),
+            };
+            if (tuple.source_subaccount.is_none() && tuple.amount_e8s != gross_amount_e8s)
+                || (tuple.source_subaccount.is_some()
+                    && tuple.amount_e8s.checked_add(tuple.fee_e8s) != Some(gross_amount_e8s))
+            {
+                return;
+            }
+            let committed = mutate_state(|state| {
+                if state.pending_3usd_refund_journals.get(&op_nonce) != Some(&dispatch) {
+                    return false;
+                }
+                state
+                    .pending_3usd_refund_journals
+                    .insert(op_nonce, Dispatch::SubmittedOrUnknown { tuple });
+                true
+            });
+            if !committed {
+                return;
+            }
+            (tuple, true, gross_amount_e8s)
+        }
+        Dispatch::SubmittedOrUnknown { tuple } => {
+            if tuple.source_subaccount.is_none() {
+                default_account_guard =
+                    crate::ThreeUsdDefaultAccountTransferGuard::try_acquire(refund.ledger);
+                if default_account_guard.is_none() {
+                    return;
+                }
+            }
+            (tuple, false, 0)
+        }
+        Dispatch::Unpayable { .. }
+        | Dispatch::UnpayableDefault { .. }
+        | Dispatch::HeldLegacyProtocolPaid { .. } => return,
+    };
+
+    if tuple.source_owner != ic_cdk::id() {
+        log!(INFO,
+            "[refunding] CRITICAL: 3USD refund source owner {} does not match this canister {}; retaining journal.",
+            tuple.source_owner, ic_cdk::id()
+        );
+        return;
+    }
+
+    // The journal above is committed before this await. The account path,
+    // transfer amount, fee, memo, and timestamp are replayed verbatim.
+    let transfer_result = if let Some(guard) = default_account_guard.as_ref() {
+        crate::management::transfer_idempotent_exact_with_three_usd_guard(
+            guard,
+            refund.ledger,
+            tuple.source_subaccount,
+            tuple.destination,
+            tuple.amount_e8s as u128,
+            tuple.fee_e8s,
+            icrc_ledger_types::icrc1::transfer::Memo::from(tuple.memo.to_vec()),
+            tuple.created_at_time_ns,
+        )
+        .await
+    } else {
+        crate::management::transfer_idempotent_exact(
+            refund.ledger,
+            tuple.source_subaccount,
+            tuple.destination,
+            tuple.amount_e8s as u128,
+            tuple.fee_e8s,
+            icrc_ledger_types::icrc1::transfer::Memo::from(tuple.memo.to_vec()),
+            tuple.created_at_time_ns,
+        )
+        .await
+    };
+    drop(default_account_guard);
+    match transfer_result {
+        Ok(block_index) => {
+            // Read the reported block back before clearing the obligation.
+            // New V2 refunds spend the backend default account and require the
+            // exact memo, caller timestamp, and explicit request fee. Legacy
+            // hashed-subaccount rows retain their historical visible-fields
+            // proof because old 3pool blocks omitted those fields.
+            let receipt = crate::icrc3_proof::fetch_icrc3_block(refund.ledger, block_index)
+                .await
+                .and_then(|block| {
+                    if tuple.source_subaccount.is_none() {
+                        crate::icrc3_proof::validate_three_usd_default_source_refund_block(
+                            &block, &tuple,
+                        )?;
+                    } else {
+                        crate::icrc3_proof::validate_icrc3_transfer_block(
+                            &block,
+                            Some(Account {
+                                owner: tuple.source_owner,
+                                subaccount: tuple.source_subaccount,
+                            }),
+                            tuple.destination,
+                            tuple.amount_e8s,
+                            None,
+                            None,
+                        )?;
+                        if block.spender.is_some() {
+                            return Err(
+                                "refund receipt unexpectedly has an ICRC-2 spender".to_string()
+                            );
+                        }
+                        if block.fee.is_some_and(|fee| fee != tuple.fee_e8s as u128) {
+                            return Err("refund receipt fee does not match the pinned ICRC-1 fee"
+                                .to_string());
+                        }
+                    }
+                    Ok(())
+                });
+            match receipt {
+                Ok(()) => {
+                    let settlement = mutate_state(|state| -> Result<(), String> {
+                        let Some(current) = state.pending_3usd_refunds.get(&op_nonce).copied()
+                        else {
+                            return Err(
+                                "refund queue row disappeared before verified receipt commit"
+                                    .into(),
+                            );
+                        };
+                        if current.stability_pool != refund.stability_pool
+                            || current.ledger != refund.ledger
+                            || current.vault_id != refund.vault_id
+                            || current.op_nonce != refund.op_nonce
+                            || current.parent_absorb_id != refund.parent_absorb_id
+                        {
+                            return Err(
+                                "refund queue identity changed before verified receipt commit"
+                                    .into(),
+                            );
+                        }
+                        if !matches!(
+                            state.pending_3usd_refund_journals.get(&op_nonce),
+                            Some(Dispatch::SubmittedOrUnknown { tuple: submitted }) if *submitted == tuple
+                        ) {
+                            return Err(
+                                "refund tuple journal changed before verified receipt commit"
+                                    .into(),
+                            );
+                        }
+                        if let Some(absorb_id) = refund.parent_absorb_id {
+                            let key = crate::state::ThreeUsdReserveIngressKey {
+                                stability_pool: refund.stability_pool,
+                                vault_id: refund.vault_id,
+                                absorb_id,
+                            };
+                            let Some(parent) =
+                                state.three_usd_reserve_ingress_journals.get_mut(&key)
+                            else {
+                                return Err("linked reserve ingress parent is missing; refund obligation retained".into());
+                            };
+                            if parent.request.ledger != refund.ledger {
+                                return Err("linked refund ledger does not match its parent; obligation retained".into());
+                            }
+                            let Some(child) = parent.refund.as_mut() else {
+                                return Err("linked reserve ingress refund child is missing; obligation retained".into());
+                            };
+                            if child.op_nonce != op_nonce
+                                || child.gross_amount_e8s != current.amount_e8s
+                                || child.source_subaccount != tuple.source_subaccount
+                                || tuple.source_owner != ic_cdk::id()
+                                || tuple.destination.owner != refund.stability_pool
+                                || tuple.destination.subaccount.is_some()
+                                || (if tuple.source_subaccount.is_none() {
+                                    tuple.amount_e8s != child.gross_amount_e8s
+                                } else {
+                                    tuple.amount_e8s.checked_add(tuple.fee_e8s)
+                                        != Some(child.gross_amount_e8s)
+                                })
+                                || tuple.memo.as_slice()
+                                    != crate::management::nonce_to_memo(op_nonce).0.as_slice()
+                                || tuple.created_at_time_ns
+                                    != crate::management::nonce_to_created_at_time(op_nonce)
+                            {
+                                return Err("verified refund tuple does not match the linked parent child; obligation retained".into());
+                            }
+                            let receipt = crate::state::ThreeUsdReserveIngressRefundReceipt {
+                                block_index,
+                                tuple,
+                            };
+                            if child.settled_receipt.is_some() {
+                                return Err("linked refund already has settlement evidence while queue rows remain".into());
+                            }
+                            child.settled_receipt = Some(receipt);
+                        }
+                        state.pending_3usd_refunds.remove(&op_nonce);
+                        state.pending_3usd_refund_journals.remove(&op_nonce);
+                        Ok(())
+                    });
+                    match settlement {
+                        Ok(()) => log!(INFO,
+                            "[refunding] 3USD reserve refund receipt verified for SP {} (vault {}, block {}, net {}, fee {})",
+                            refund.stability_pool, refund.vault_id, block_index, tuple.amount_e8s, tuple.fee_e8s
+                        ),
+                        Err(error) => {
+                            let (retries, retryable) = mutate_state(|state| {
+                                record_3usd_refund_retry_failure(&mut state.pending_3usd_refunds, &op_nonce)
+                            });
+                            log!(INFO,
+                                "[refunding] verified 3USD refund block {} could not be committed to its linked parent for SP {} (vault {}): {}; obligation and tuple retained at retry {} (retryable={})",
+                                block_index, refund.stability_pool, refund.vault_id, error, retries, retryable
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    let (retries, retryable) = mutate_state(|state| {
+                        record_3usd_refund_retry_failure(&mut state.pending_3usd_refunds, &op_nonce)
+                    });
+                    log!(INFO,
+                        "[refunding] 3USD refund reply block {} did not prove the exact visible receipt for SP {} (vault {}): {}; obligation and tuple retained at retry {} (retryable={}).",
+                        block_index, refund.stability_pool, refund.vault_id, error, retries, retryable
+                    );
+                }
+            }
+        }
+        Err(TransferError::BadFee { expected_fee }) if first_dispatch => {
+            // This is the very first transfer call for this journal, and the
+            // per-nonce in-flight guard excludes a competing dispatcher. A
+            // typed BadFee guarantees this attempt had no effect, so it is the
+            // only result that permits discarding this tuple and requoting.
+            let expected_fee = expected_fee.0.to_u64();
+            if let Some(expected_fee) = expected_fee {
+                crate::management::set_cached_fee(refund.ledger, expected_fee);
+                let (retries, retryable) = mutate_state(|state| {
+                    let Some(refund) = state.pending_3usd_refunds.get_mut(&op_nonce) else {
+                        return (0, false);
+                    };
+                    let Some(next) = state
+                        .pending_3usd_refund_journals
+                        .get(&op_nonce)
+                        .copied()
+                        .and_then(|current| {
+                            first_bad_fee_retry_transition(
+                                current,
+                                tuple,
+                                first_dispatch,
+                                gross_amount_e8s,
+                                &mut refund.retry_count,
+                            )
+                        })
+                    else {
+                        return (refund.retry_count, false);
+                    };
+                    state.pending_3usd_refund_journals.insert(op_nonce, next.0);
+                    (refund.retry_count, next.1)
+                });
+                log!(INFO,
+                    "[refunding] first 3USD refund attempt was rejected with BadFee {}; gross liability remains unsubmitted for a fresh tuple at retry {} (retryable={}).",
+                    expected_fee, retries, retryable
+                );
+            }
+        }
+        Err(error) => {
+            // Includes TooOld and transport/ledger errors after a tuple was
+            // submitted. Preserve the exact tuple; never allocate a new nonce.
+            let (retries, retryable) = mutate_state(|state| {
+                record_3usd_refund_retry_failure(&mut state.pending_3usd_refunds, &op_nonce)
+            });
+            log!(INFO,
+                "[refunding] 3USD reserve refund for SP {} (vault {}) failed: {:?}; exact tuple retained at retry {} (retryable={}).",
+                refund.stability_pool, refund.vault_id, error, retries, retryable
+            );
+        }
+    }
 }
 
 pub async fn process_pending_transfer() {
@@ -1488,16 +3028,17 @@ pub async fn process_pending_transfer() {
         }
     };
 
+    crate::vault::process_pending_three_usd_reserve_payouts().await;
+    crate::vault::process_pending_collateral_withdrawals().await;
+
     // Process pending margin transfers
     //
     // Wave-3 + Wave-4 cleanup contract:
-    //   * Success: `record_margin_transfer` writes a MarginTransfer event AND
-    //     removes the entry by `(vault_id, owner)` (event.rs).
-    //   * Skipped (margin <= fee): `drop_pending` drops the entry inline.
-    //   * Abandon (>= MAX_PENDING_RETRIES): `drop_pending` drops the entry inline.
-    //   * BadFee: refresh fee cache, do NOT drop. The next tick retries.
-    // Excess and redemption loops follow the same contract; redemption uses
-    // its own event recorder with the same removal semantics.
+    //   * Success/hold/rearm are event-sourced by operation id.
+    //   * Retry-cap and ambiguous outcomes remain queued; they are never dropped.
+    //   * TooOld/BadFee: keep pinned args and hold for reconciliation rather
+    //     than changing the dedup tuple or silently retrying ambiguously.
+    // Redemption uses its own CL14 pinned-transfer outbox and receipt checks.
     let pending_transfers = read_state(|s| {
         // Log for visibility
         if !s.pending_margin_transfers.is_empty() {
@@ -1510,34 +3051,38 @@ pub async fn process_pending_transfer() {
 
         s.pending_margin_transfers
             .iter()
-            .map(|(key, margin_transfer)| (*key, *margin_transfer))
-            .collect::<Vec<((u64, candid::Principal), PendingMarginTransfer)>>()
+            .filter(|(_, margin_transfer)| {
+                !s.three_usd_reserve_payout_parents
+                    .contains_key(&margin_transfer.op_nonce)
+            })
+            .map(|(id, margin_transfer)| (*id, *margin_transfer))
+            .collect::<Vec<(u128, PendingMarginTransfer)>>()
     });
-    for (key, transfer) in pending_transfers {
-        let (vault_id, _key_owner) = key;
-        // Look up per-collateral config for ledger and fee; fall back to global ICP defaults
-        let (ledger, transfer_fee) =
-            read_state(
-                |s| match s.get_collateral_config(&transfer.collateral_type) {
-                    Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
-                    None => (s.icp_ledger_principal, s.icp_ledger_fee),
-                },
-            );
-
-        if transfer.margin <= transfer_fee {
-            log!(
-                INFO,
-                "[transfering_margins] Skipping vault {} owner {} - margin {} <= fee {}, removing",
-                vault_id,
-                transfer.owner,
-                transfer.margin,
-                transfer_fee
-            );
-            mutate_state(|s| drop_pending(&mut s.pending_margin_transfers, &key));
+    for (operation_id, transfer) in pending_transfers {
+        let vault_id = transfer.vault_id;
+        if transfer.held_for_manual_retry || transfer.reconciliation_required {
             continue;
         }
+        let (ledger, amount) = match (transfer.ledger, transfer.transfer_amount_raw) {
+            (Some(ledger), Some(amount)) if transfer.op_nonce != 0 && amount > 0 => {
+                (ledger, amount)
+            }
+            _ => {
+                mutate_state(|s| {
+                    if let Some(p) = s.pending_margin_transfers.get_mut(&operation_id) {
+                        crate::event::record_pending_payout_held(
+                            operation_id,
+                            crate::event::PendingPayoutKind::Margin,
+                            p,
+                            true,
+                        );
+                    }
+                });
+                continue;
+            }
+        };
         match crate::management::transfer_collateral_with_nonce(
-            (transfer.margin - transfer_fee).to_u64(),
+            amount,
             transfer.owner,
             ledger,
             transfer.op_nonce,
@@ -1553,7 +3098,13 @@ pub async fn process_pending_transfer() {
                     ledger
                 );
                 mutate_state(|s| {
-                    crate::event::record_margin_transfer(s, vault_id, transfer.owner, block_index)
+                    crate::event::record_pending_payout_settled(
+                        s,
+                        operation_id,
+                        crate::event::PendingPayoutKind::Margin,
+                        vault_id,
+                        block_index,
+                    )
                 });
             }
             Err(error) => {
@@ -1567,40 +3118,23 @@ pub async fn process_pending_transfer() {
                     error
                 );
 
-                // If there was a transfer fee error, update the fee in collateral config
-                if let TransferError::BadFee { expected_fee } = error {
-                    log!(
-                        INFO,
-                        "[transfering_margins] Updating transfer fee to: {:?}",
-                        expected_fee
-                    );
+                // A changed fee would change the transfer arguments under the
+                // same nonce. Keep the exact row held for reconciliation.
+                if matches!(&error, TransferError::TooOld | TransferError::BadFee { .. }) {
                     mutate_state(|s| {
-                        let expected_fee_u64: u64 = expected_fee
-                            .0
-                            .try_into()
-                            .expect("failed to convert Nat to u64");
-                        if let Some(config) = s.get_collateral_config_mut(&transfer.collateral_type)
-                        {
-                            config.ledger_fee = expected_fee_u64;
-                        }
-                        // Also update global icp_ledger_fee if this is the ICP collateral
-                        let icp_ct = s.icp_collateral_type();
-                        let resolved_ct =
-                            if transfer.collateral_type == candid::Principal::anonymous() {
-                                icp_ct
-                            } else {
-                                transfer.collateral_type
-                            };
-                        if resolved_ct == icp_ct {
-                            s.icp_ledger_fee = ICP::from(expected_fee_u64);
+                        if let Some(p) = s.pending_margin_transfers.get_mut(&operation_id) {
+                            crate::event::record_pending_payout_held(
+                                operation_id,
+                                crate::event::PendingPayoutKind::Margin,
+                                p,
+                                true,
+                            );
                         }
                     });
-
-                    // After updating the fee, we should retry this transfer next time
                 } else {
                     // Increment retry count; abandon after MAX_PENDING_RETRIES
                     let retries = mutate_state(|s| {
-                        if let Some(t) = s.pending_margin_transfers.get_mut(&key) {
+                        if let Some(t) = s.pending_margin_transfers.get_mut(&operation_id) {
                             t.retry_count = t.retry_count.saturating_add(1);
                             t.retry_count
                         } else {
@@ -1613,9 +3147,18 @@ pub async fn process_pending_transfer() {
                              after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
                             vault_id, retries, transfer.owner, transfer.margin
                         );
-                        mutate_state(|s| drop_pending(&mut s.pending_margin_transfers, &key));
+                        mutate_state(|s| {
+                            if let Some(t) = s.pending_margin_transfers.get_mut(&operation_id) {
+                                crate::event::record_pending_payout_held(
+                                    operation_id,
+                                    crate::event::PendingPayoutKind::Margin,
+                                    t,
+                                    false,
+                                );
+                            }
+                        });
                     } else {
-                        log!(INFO, "[transfering_margins] Will retry transfer for vault {} owner {} (attempt {}/{})",
+                        log!(INFO, "[transfering_margins] Will retry pinned transfer for vault {} owner {} (attempt {}/{})",
                             vault_id, transfer.owner, retries, MAX_PENDING_RETRIES);
                     }
                 }
@@ -1627,41 +3170,42 @@ pub async fn process_pending_transfer() {
     let pending_excess = read_state(|s| {
         s.pending_excess_transfers
             .iter()
-            .map(|(key, transfer)| (*key, *transfer))
-            .collect::<Vec<((u64, candid::Principal), PendingMarginTransfer)>>()
+            .map(|(id, transfer)| (*id, *transfer))
+            .collect::<Vec<(u128, PendingMarginTransfer)>>()
     });
 
-    for (key, transfer) in pending_excess {
-        let (vault_id, _key_owner) = key;
-        let (ledger, transfer_fee) =
-            read_state(
-                |s| match s.get_collateral_config(&transfer.collateral_type) {
-                    Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
-                    None => (s.icp_ledger_principal, s.icp_ledger_fee),
-                },
-            );
-
-        if transfer.margin <= transfer_fee {
-            log!(
-                INFO,
-                "[transfering_excess] Skipping vault {} owner {} - margin {} <= fee {}, removing",
-                vault_id,
-                transfer.owner,
-                transfer.margin,
-                transfer_fee
-            );
-            mutate_state(|s| drop_pending(&mut s.pending_excess_transfers, &key));
+    for (operation_id, transfer) in pending_excess {
+        let vault_id = transfer.vault_id;
+        if transfer.held_for_manual_retry || transfer.reconciliation_required {
             continue;
         }
+        let (ledger, amount) = match (transfer.ledger, transfer.transfer_amount_raw) {
+            (Some(ledger), Some(amount)) if transfer.op_nonce != 0 && amount > 0 => {
+                (ledger, amount)
+            }
+            _ => {
+                mutate_state(|s| {
+                    if let Some(p) = s.pending_excess_transfers.get_mut(&operation_id) {
+                        crate::event::record_pending_payout_held(
+                            operation_id,
+                            crate::event::PendingPayoutKind::Excess,
+                            p,
+                            true,
+                        );
+                    }
+                });
+                continue;
+            }
+        };
         match crate::management::transfer_collateral_with_nonce(
-            (transfer.margin - transfer_fee).to_u64(),
+            amount,
             transfer.owner,
             ledger,
             transfer.op_nonce,
         )
         .await
         {
-            Ok(_block_index) => {
+            Ok(block_index) => {
                 log!(
                     INFO,
                     "[transfering_excess] successfully transferred excess collateral: {} to {} via ledger {}",
@@ -1669,7 +3213,15 @@ pub async fn process_pending_transfer() {
                     transfer.owner,
                     ledger
                 );
-                mutate_state(|s| drop_pending(&mut s.pending_excess_transfers, &key));
+                mutate_state(|s| {
+                    crate::event::record_pending_payout_settled(
+                        s,
+                        operation_id,
+                        crate::event::PendingPayoutKind::Excess,
+                        vault_id,
+                        block_index,
+                    )
+                });
             }
             Err(error) => {
                 log!(
@@ -1680,36 +3232,20 @@ pub async fn process_pending_transfer() {
                     ledger,
                     error
                 );
-                if let TransferError::BadFee { expected_fee } = error {
-                    log!(
-                        INFO,
-                        "[transfering_excess] Updating transfer fee to: {:?}",
-                        expected_fee
-                    );
+                if matches!(&error, TransferError::TooOld | TransferError::BadFee { .. }) {
                     mutate_state(|s| {
-                        let expected_fee_u64: u64 = expected_fee
-                            .0
-                            .try_into()
-                            .expect("failed to convert Nat to u64");
-                        if let Some(config) = s.get_collateral_config_mut(&transfer.collateral_type)
-                        {
-                            config.ledger_fee = expected_fee_u64;
-                        }
-                        let icp_ct = s.icp_collateral_type();
-                        let resolved_ct =
-                            if transfer.collateral_type == candid::Principal::anonymous() {
-                                icp_ct
-                            } else {
-                                transfer.collateral_type
-                            };
-                        if resolved_ct == icp_ct {
-                            s.icp_ledger_fee = ICP::from(expected_fee_u64);
+                        if let Some(p) = s.pending_excess_transfers.get_mut(&operation_id) {
+                            crate::event::record_pending_payout_held(
+                                operation_id,
+                                crate::event::PendingPayoutKind::Excess,
+                                p,
+                                true,
+                            );
                         }
                     });
-                    // Don't increment retry counter on BadFee — refresh fee, retry next tick.
                 } else {
                     let retries = mutate_state(|s| {
-                        if let Some(t) = s.pending_excess_transfers.get_mut(&key) {
+                        if let Some(t) = s.pending_excess_transfers.get_mut(&operation_id) {
                             t.retry_count = t.retry_count.saturating_add(1);
                             t.retry_count
                         } else {
@@ -1722,7 +3258,16 @@ pub async fn process_pending_transfer() {
                              after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
                             vault_id, retries, transfer.owner, transfer.margin
                         );
-                        mutate_state(|s| drop_pending(&mut s.pending_excess_transfers, &key));
+                        mutate_state(|s| {
+                            if let Some(t) = s.pending_excess_transfers.get_mut(&operation_id) {
+                                crate::event::record_pending_payout_held(
+                                    operation_id,
+                                    crate::event::PendingPayoutKind::Excess,
+                                    t,
+                                    false,
+                                );
+                            }
+                        });
                     }
                 }
             }
@@ -1738,118 +3283,93 @@ pub async fn process_pending_transfer() {
     });
 
     for (icusd_block_index, pending_transfer) in pending_redemptions {
-        let (ledger, transfer_fee) =
-            read_state(
-                |s| match s.get_collateral_config(&pending_transfer.collateral_type) {
-                    Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
-                    None => (s.icp_ledger_principal, s.icp_ledger_fee),
-                },
-            );
-
-        let gross_raw = pending_transfer.margin.to_u64();
-        let fee_raw = transfer_fee.to_u64();
-        let net_amount = ICP::from(gross_raw.saturating_sub(fee_raw));
-        if !redemption_transfer_meets_minimum(
-            gross_raw,
-            fee_raw,
-            pending_transfer.min_net_collateral_raw,
-        ) {
-            let minimum_net = pending_transfer.min_net_collateral_raw.unwrap_or(0);
-            log!(INFO,
-                "[transfering_redemptions] Holding quoted redemption {}: current net {} is below bound {}; collateral {} remains pending",
-                icusd_block_index, net_amount, minimum_net, pending_transfer.collateral_type
-            );
+        if pending_transfer.held_for_manual_retry || pending_transfer.reconciliation_required {
             continue;
         }
-        if pending_transfer.margin <= transfer_fee {
-            log!(
-                INFO,
-                "[transfering_redemptions] Skipping redemption {} - margin {} <= fee {}, removing",
-                icusd_block_index,
-                pending_transfer.margin,
-                transfer_fee
-            );
-            mutate_state(|s| drop_pending(&mut s.pending_redemption_transfer, &icusd_block_index));
+        let pinned = pending_transfer.redemption_transfer;
+        let valid = pinned.is_some_and(|tuple| tuple.matches_pending(&pending_transfer));
+        if !valid {
+            mutate_state(|s| {
+                hold_pending_redemption_for_reconciliation(
+                    &mut s.pending_redemption_transfer,
+                    icusd_block_index,
+                )
+            });
             continue;
         }
-        match crate::management::transfer_collateral_with_nonce(
-            net_amount.to_u64(),
-            pending_transfer.owner,
-            ledger,
-            pending_transfer.op_nonce,
-        )
-        .await
+        let pinned = pinned.expect("validated pinned redemption tuple");
+        if pending_transfer
+            .min_net_collateral_raw
+            .is_some_and(|minimum| pinned.amount_raw < minimum)
         {
+            mutate_state(|s| {
+                hold_pending_redemption_for_reconciliation(
+                    &mut s.pending_redemption_transfer,
+                    icusd_block_index,
+                )
+            });
+            continue;
+        }
+        match crate::management::transfer_pinned_redemption(pinned).await {
             Ok(block_index) => {
-                log!(
-                    INFO,
-                    "[transfering_redemptions] successfully transferred: {} to {} via ledger {}",
-                    pending_transfer.margin,
-                    pending_transfer.owner,
-                    ledger
-                );
-                mutate_state(|s| {
-                    crate::event::record_redemption_transfered(s, icusd_block_index, block_index)
-                });
+                match crate::management::verify_pinned_redemption_receipt(pinned, block_index).await
+                {
+                    Ok(()) => mutate_state(|s| {
+                        if s.pending_redemption_transfer
+                            .get(&icusd_block_index)
+                            .is_some_and(|row| row.redemption_transfer == Some(pinned))
+                        {
+                            crate::event::record_redemption_transfered(
+                                s,
+                                icusd_block_index,
+                                block_index,
+                            )
+                        }
+                    }),
+                    Err(reason) => {
+                        log!(INFO, "[transfering_redemptions] receipt verification failed for {} block {}: {}", icusd_block_index, block_index, reason);
+                        mutate_state(|s| {
+                            hold_pending_redemption_for_reconciliation(
+                                &mut s.pending_redemption_transfer,
+                                icusd_block_index,
+                            )
+                        });
+                    }
+                }
             }
             Err(error) => {
                 log!(
                     INFO,
-                    "[transfering_redemptions] failed to transfer margin: {}, to principal: {}, via ledger: {}, with error: {}",
+                    "[transfering_redemptions] failed exact pinned transfer: {}, to principal: {}, via ledger: {}, with error: {}",
                     pending_transfer.margin,
-                    pending_transfer.owner,
-                    ledger,
+                    pinned.recipient,
+                    pinned.ledger,
                     error
                 );
-                if let TransferError::BadFee { expected_fee } = error {
-                    log!(
-                        INFO,
-                        "[transfering_redemptions] Updating transfer fee to: {:?}",
-                        expected_fee
-                    );
+                if matches!(&error, TransferError::TooOld | TransferError::BadFee { .. }) {
                     mutate_state(|s| {
-                        let expected_fee_u64: u64 = expected_fee
-                            .0
-                            .try_into()
-                            .expect("failed to convert Nat to u64");
-                        if let Some(config) =
-                            s.get_collateral_config_mut(&pending_transfer.collateral_type)
-                        {
-                            config.ledger_fee = expected_fee_u64;
-                        }
-                        let icp_ct = s.icp_collateral_type();
-                        let resolved_ct =
-                            if pending_transfer.collateral_type == candid::Principal::anonymous() {
-                                icp_ct
-                            } else {
-                                pending_transfer.collateral_type
-                            };
-                        if resolved_ct == icp_ct {
-                            s.icp_ledger_fee = ICP::from(expected_fee_u64);
-                        }
+                        hold_pending_redemption_for_reconciliation(
+                            &mut s.pending_redemption_transfer,
+                            icusd_block_index,
+                        )
                     });
-                    // Don't increment retry counter on BadFee — refresh fee, retry next tick.
-                } else {
-                    let retries = mutate_state(|s| {
-                        if let Some(t) = s.pending_redemption_transfer.get_mut(&icusd_block_index) {
-                            t.retry_count = t.retry_count.saturating_add(1);
-                            t.retry_count
-                        } else {
-                            0
-                        }
-                    });
-                    if retries >= MAX_PENDING_RETRIES
-                        && pending_transfer.min_net_collateral_raw.is_none()
-                    {
-                        log!(INFO,
-                            "[transfering_redemptions] CRITICAL: abandoning redemption transfer {} \
-                             after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
-                            icusd_block_index, retries, pending_transfer.owner, pending_transfer.margin
-                        );
-                        mutate_state(|s| {
-                            drop_pending(&mut s.pending_redemption_transfer, &icusd_block_index)
-                        });
+                    continue;
+                }
+                let retries = mutate_state(|s| {
+                    if let Some(row) = s.pending_redemption_transfer.get_mut(&icusd_block_index) {
+                        row.retry_count = row.retry_count.saturating_add(1);
+                        row.retry_count
+                    } else {
+                        0
                     }
+                });
+                if retries >= MAX_PENDING_RETRIES {
+                    mutate_state(|s| {
+                        hold_pending_redemption_for_reconciliation(
+                            &mut s.pending_redemption_transfer,
+                            icusd_block_index,
+                        )
+                    });
                 }
             }
         }
@@ -1862,7 +3382,18 @@ pub async fn process_pending_transfer() {
     let pending_refunds = read_state(|s| {
         s.pending_refunds
             .iter()
-            .filter(|(_, refund)| pending_refund_is_automatically_retryable(refund.retry_count))
+            .filter(|(burn_block, refund)| {
+                pending_refund_is_automatically_retryable(refund.retry_count)
+                    && matches!(
+                        crate::state::redemption_v2_refund_candidate_status(
+                            s,
+                            **burn_block,
+                            **refund,
+                        ),
+                        crate::state::RedemptionV2RefundCandidateStatus::Legacy
+                            | crate::state::RedemptionV2RefundCandidateStatus::NeedsReceipt
+                    )
+            })
             .map(|(k, v)| (*k, *v))
             .collect::<Vec<(u64, crate::state::PendingRefund)>>()
     });
@@ -1880,14 +3411,53 @@ pub async fn process_pending_transfer() {
                     "[refunding] icUSD refund settled for {} (burn block {}, refund block {}, amount {})",
                     refund.user, icusd_block_index, block_index, refund.amount_e8s
                 );
-                mutate_state(|s| {
-                    s.pending_refunds.remove(&icusd_block_index);
+                let outcome = mutate_state(|s| {
+                    if s.pending_refunds.get(&icusd_block_index) != Some(&refund) {
+                        return "changed";
+                    }
+                    match crate::state::redemption_v2_refund_candidate_status(
+                        s,
+                        icusd_block_index,
+                        refund,
+                    ) {
+                        crate::state::RedemptionV2RefundCandidateStatus::NeedsReceipt
+                        | crate::state::RedemptionV2RefundCandidateStatus::CandidatePending
+                            if crate::state::record_redemption_v2_refund_candidate(
+                                s,
+                                icusd_block_index,
+                                refund,
+                                block_index,
+                            ) =>
+                        {
+                            // This is only a candidate transfer block. Keep the
+                            // refund row until V2 verifies the exact ICRC-3 mint.
+                            crate::storage::save_state_to_stable(s);
+                            "candidate"
+                        }
+                        crate::state::RedemptionV2RefundCandidateStatus::Legacy => {
+                            s.pending_refunds.remove(&icusd_block_index);
+                            crate::storage::save_state_to_stable(s);
+                            "legacy"
+                        }
+                        _ => {
+                            // Missing/mismatched pre-dispatch identity must not
+                            // be guessed after an external transfer succeeded.
+                            if let Some(row) = s.pending_refunds.get_mut(&icusd_block_index) {
+                                row.retry_count = MAX_PENDING_RETRIES;
+                            }
+                            crate::storage::save_state_to_stable(s);
+                            "held"
+                        }
+                    }
                 });
+                if outcome == "held" {
+                    log!(INFO, "[refunding] successful transfer for burn block {} lacks a matching persisted Redemption V2 refund identity; row held for reconciliation", icusd_block_index);
+                }
             }
             Err(error) => {
                 log!(
                     INFO,
-                    "[refunding] icUSD refund failed for {} (burn block {}): {}. Will retry.",
+                    "[refunding] icUSD refund outcome unresolved for {} (burn block {}): {}",
                     refund.user,
                     icusd_block_index,
                     error
@@ -1898,6 +3468,27 @@ pub async fn process_pending_transfer() {
                         let icusd_ledger = read_state(|s| s.icusd_ledger_principal);
                         crate::management::set_cached_fee(icusd_ledger, expected_fee_u64);
                     }
+                } else if matches!(error, TransferError::TooOld)
+                    && matches!(
+                        read_state(|s| crate::state::redemption_v2_refund_candidate_status(
+                            s,
+                            icusd_block_index,
+                            refund,
+                        )),
+                        crate::state::RedemptionV2RefundCandidateStatus::NeedsReceipt
+                    )
+                {
+                    // A lost reply can hide an accepted mint. Once this exact
+                    // tuple is TooOld, retries add no evidence; the owner can
+                    // attach an exact ledger block through V2 reconciliation.
+                    mutate_state(|s| {
+                        if let Some(row) = s.pending_refunds.get_mut(&icusd_block_index) {
+                            if *row == refund {
+                                row.retry_count = MAX_PENDING_RETRIES;
+                                crate::storage::save_state_to_stable(s);
+                            }
+                        }
+                    });
                 } else {
                     let retries = mutate_state(|s| {
                         if let Some(r) = s.pending_refunds.get_mut(&icusd_block_index) {
@@ -1923,7 +3514,9 @@ pub async fn process_pending_transfer() {
         }
     }
 
-    // Durable retry queue for stranded 3USD reserve refunds
+    // Durable retry queue for stranded 3USD reserve refunds. Entries at the
+    // automatic retry cap remain visible for manual reconciliation but are
+    // excluded here so they do not generate repeated ledger calls.
     // (`stability_pool_liquidate_with_reserves`). Each entry is keyed by its
     // `op_nonce`, reused on every retry so the 3USD ledger deduplicates a
     // previously-committed-but-reply-lost transfer. Without this, a failed refund
@@ -1932,86 +3525,26 @@ pub async fn process_pending_transfer() {
     let pending_3usd_refunds = read_state(|s| {
         s.pending_3usd_refunds
             .iter()
-            .map(|(k, v)| (*k, *v))
-            .collect::<Vec<(u128, crate::state::PendingThreeUsdRefund)>>()
+            .filter(|(nonce, refund)| {
+                pending_refund_is_automatically_retryable(refund.retry_count)
+                    && three_usd_refund_dispatch_is_retryable(
+                        s.pending_3usd_refund_journals.get(nonce),
+                    )
+            })
+            .map(|(k, _)| *k)
+            .collect::<Vec<u128>>()
     });
 
-    for (nonce_key, refund) in pending_3usd_refunds {
-        match crate::management::transfer_idempotent(
-            refund.ledger,
-            Some(crate::management::protocol_3usd_reserves_subaccount()),
-            icrc_ledger_types::icrc1::account::Account {
-                owner: refund.stability_pool,
-                subaccount: None,
-            },
-            refund.amount_e8s as u128,
-            refund.op_nonce,
-            None,
-        )
-        .await
-        {
-            Ok(block_index) => {
-                log!(INFO,
-                    "[refunding] 3USD reserve refund settled for SP {} (vault {}, refund block {}, amount {})",
-                    refund.stability_pool, refund.vault_id, block_index, refund.amount_e8s
-                );
-                mutate_state(|s| {
-                    s.pending_3usd_refunds.remove(&nonce_key);
-                });
-            }
-            Err(error) => {
-                log!(
-                    INFO,
-                    "[refunding] 3USD reserve refund failed for SP {} (vault {}): {:?}. Will retry.",
-                    refund.stability_pool,
-                    refund.vault_id,
-                    error
-                );
-                if let TransferError::BadFee { expected_fee } = error {
-                    // Refresh fee cache; do NOT increment retry count on BadFee.
-                    if let Ok(expected_fee_u64) = expected_fee.0.clone().try_into() {
-                        crate::management::set_cached_fee(refund.ledger, expected_fee_u64);
-                    }
-                } else {
-                    let retries = mutate_state(|s| {
-                        if let Some(r) = s.pending_3usd_refunds.get_mut(&nonce_key) {
-                            r.retry_count = r.retry_count.saturating_add(1);
-                            r.retry_count
-                        } else {
-                            0
-                        }
-                    });
-                    if retries >= MAX_PENDING_RETRIES {
-                        log!(
-                            INFO,
-                            "[refunding] CRITICAL: abandoning 3USD reserve refund for SP {} (vault {}) \
-                             after {} retries. Amount: {}. Manual reconciliation required.",
-                            refund.stability_pool,
-                            refund.vault_id,
-                            retries,
-                            refund.amount_e8s
-                        );
-                        mutate_state(|s| {
-                            s.pending_3usd_refunds.remove(&nonce_key);
-                        });
-                    }
-                }
-            }
-        }
+    for nonce_key in pending_3usd_refunds {
+        dispatch_pending_3usd_refund(nonce_key).await;
     }
 
+    // Verify and finalize retained Redemption V2 refund candidates, bounded
+    // to a fixed page so timer work cannot grow with historical refund rows.
+    crate::vault::process_pending_redemption_v2_refund_receipts(100).await;
+
     // Schedule another run if needed, but with better timing
-    if read_state(|s| {
-        !s.pending_margin_transfers.is_empty()
-            || !s.pending_excess_transfers.is_empty()
-            || s.pending_redemption_transfer
-                .values()
-                .any(|transfer| transfer.retry_count < MAX_PENDING_RETRIES)
-            || s.pending_refunds
-                .values()
-                .any(|refund| pending_refund_is_automatically_retryable(refund.retry_count))
-            || !s.pending_3usd_refunds.is_empty()
-    }) {
+    if has_retryable_pending_transfer_work() {
         // Schedule another check in 5 seconds
         log!(
             INFO,
@@ -2024,3 +3557,7 @@ pub async fn process_pending_transfer() {
         log!(INFO, "[process_pending_transfer] No more pending transfers");
     }
 }
+/// Release gate for the unshipped Stability Pool liquidation V2 executor.
+/// Keep false until the backend/SP wire, full proof/recovery tests, and release
+/// review are complete.
+pub const SP_LIQUIDATION_V2_ENABLED: bool = false;

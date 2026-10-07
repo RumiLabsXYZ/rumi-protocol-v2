@@ -16,6 +16,9 @@ const mocks = vi.hoisted(() => ({
   logout: vi.fn().mockResolvedValue(undefined),
   getTokenBalance: vi.fn(),
   fetchRootKey: vi.fn().mockResolvedValue(undefined),
+  connectPlug: vi.fn(),
+  plugActor: vi.fn(),
+  plugMethod: vi.fn().mockResolvedValue('ok'),
 }));
 
 vi.mock('@dfinity/auth-client', () => ({
@@ -33,7 +36,9 @@ vi.mock('@dfinity/agent', async () => {
   const actual = await vi.importActual<typeof import('@dfinity/agent')>('@dfinity/agent');
   return {
     ...actual,
-    HttpAgent: vi.fn(() => ({ fetchRootKey: mocks.fetchRootKey })),
+    HttpAgent: vi.fn(class MockHttpAgent {
+      fetchRootKey = mocks.fetchRootKey;
+    }),
   };
 });
 
@@ -45,9 +50,9 @@ vi.mock('./tokenService', () => ({
 }));
 
 vi.mock('./pnp', () => ({
-  pnp: {},
+  pnp: { getActor: mocks.plugActor },
   canisterIDLs: {},
-  connectWithComprehensivePermissions: vi.fn(),
+  connectWithComprehensivePermissions: mocks.connectPlug,
   getPnpInstance: vi.fn(),
   silentPlugReconnect: vi.fn(),
 }));
@@ -85,6 +90,14 @@ describe('II session persistence (auth.ts)', () => {
     vi.clearAllMocks();
     mocks.logout.mockResolvedValue(undefined);
     mocks.getIdentity.mockReturnValue({ getPrincipal: () => TEST_PRINCIPAL });
+    mocks.connectPlug.mockResolvedValue({ owner: TEST_PRINCIPAL });
+    mocks.getTokenBalance.mockResolvedValue(0n);
+    mocks.plugMethod.mockResolvedValue('ok');
+    mocks.plugActor.mockResolvedValue({ readValue: mocks.plugMethod });
+    Object.defineProperty(window, 'ic', {
+      configurable: true,
+      value: { plug: { principalId: TEST_PRINCIPAL.toText(), disconnect: vi.fn().mockResolvedValue(undefined) } },
+    });
   });
 
   afterEach(async () => {
@@ -200,5 +213,15 @@ describe('II session persistence (auth.ts)', () => {
     const finalState = get(auth);
     expect(finalState.account?.owner.toString()).toBe(OTHER_PRINCIPAL.toString());
     expect(finalState.account?.balance).toBe(99n);
+  });
+
+  it('refuses to call an already-acquired Plug actor after the extension account changes', async () => {
+    await auth.connect(WALLET_TYPES.PLUG);
+    const actor = await auth.getActor<{ readValue: () => Promise<string> }>('canister', {});
+
+    expect(await actor.readValue()).toBe('ok');
+    window.ic!.plug!.principalId = OTHER_PRINCIPAL.toText();
+    expect(() => actor.readValue()).toThrow(/Plug account changed/);
+    expect(mocks.plugMethod).toHaveBeenCalledTimes(1);
   });
 });

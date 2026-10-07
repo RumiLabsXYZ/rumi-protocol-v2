@@ -1,8 +1,8 @@
 use super::config::ChainId;
 use super::multi_chain_state::{
     ChainLiqClaimV1, MultiChainState, MultiChainStateV1, MultiChainStateV2, MultiChainStateV3,
-    MultiChainStateV4, MultiChainStateV5, MultiChainStateV6, MultiChainStateV7,
-    SettlementProofRecord,
+    MultiChainStateV4, MultiChainStateV5, MultiChainStateV6, MultiChainStateV7, MultiChainStateV8,
+    MultiChainStateV9, SettlementProofRecord,
 };
 use super::supply::migrate_multi_chain_state;
 
@@ -135,10 +135,87 @@ fn migration_preserves_v1_fields_and_defaults_new_ones() {
 }
 
 #[test]
-fn active_alias_points_at_v7() {
-    fn _check(x: MultiChainState) -> MultiChainStateV7 {
+fn active_alias_points_at_v9() {
+    fn _check(x: MultiChainState) -> MultiChainStateV9 {
         x
     }
+}
+
+#[test]
+fn v8_snapshot_migrates_to_v9_operator_only_and_legacy_public_is_closed() {
+    use super::config::BurnProofAdmissionMode;
+    let chain = ChainId(1030);
+    let mut v8 = MultiChainStateV8::default();
+    v8.chain_supplies.insert(chain, 42);
+    v8.evm_burn_proof_floor_by_chain.insert(chain, 777);
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&v8, &mut bytes).expect("encode V8");
+    let mut v9: MultiChainStateV9 =
+        ciborium::de::from_reader(bytes.as_slice()).expect("V8 snapshot must decode into V9");
+    assert_eq!(v9.chain_supplies.get(&chain), Some(&42));
+    assert_eq!(v9.evm_burn_proof_floor_by_chain.get(&chain), Some(&777));
+    assert!(v9.burn_proof_admission_mode_by_chain.is_empty());
+    assert_eq!(
+        v9.burn_proof_admission_mode(chain),
+        BurnProofAdmissionMode::OperatorOnly
+    );
+
+    // Snapshots from the staged public-policy rollout remain decodable but
+    // cannot restore public admission.
+    v9.burn_proof_admission_mode_by_chain
+        .insert(chain, BurnProofAdmissionMode::Public);
+    let mut staged_bytes = Vec::new();
+    ciborium::ser::into_writer(&v9, &mut staged_bytes).expect("encode staged Public snapshot");
+    let staged: MultiChainStateV9 = ciborium::de::from_reader(staged_bytes.as_slice())
+        .expect("legacy Public snapshot remains decodable");
+    assert_eq!(
+        staged.burn_proof_admission_mode(chain),
+        BurnProofAdmissionMode::OperatorOnly
+    );
+    let mut staged = staged;
+    assert_eq!(staged.hold_legacy_public_burn_proof_admission(), 1);
+    assert_eq!(
+        staged.burn_proof_admission_mode_by_chain.get(&chain),
+        Some(&BurnProofAdmissionMode::OperatorOnly)
+    );
+}
+
+#[test]
+fn v7_snapshot_decodes_into_v8_and_holds_ambiguous_legacy_cursor_history() {
+    let chain = ChainId(1030);
+    let mut v7 = MultiChainStateV7::default();
+    v7.chain_supplies.insert(chain, 42);
+    v7.last_observed_block.insert(chain, 777);
+    v7.processed_burn_keys
+        .insert(777, std::collections::BTreeSet::from(["0xold:1".into()]));
+
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&v7, &mut bytes).expect("encode V7");
+    let mut decoded: MultiChainStateV8 = ciborium::de::from_reader(bytes.as_slice())
+        .expect("V7 snapshot must decode into V8 without wiping state");
+
+    assert_eq!(decoded.chain_supplies.get(&chain), Some(&42));
+    assert_eq!(decoded.last_observed_block.get(&chain), Some(&777));
+    assert!(decoded.pending_evm_burn_replay_ids.is_empty());
+    assert_eq!(decoded.ensure_evm_burn_proof_floor(chain), 0);
+    assert_eq!(
+        decoded.evm_burn_proof_legacy_hold_through.get(&chain),
+        Some(&777),
+        "legacy cursor does not prove that burn logs were scanned"
+    );
+    decoded.accept_evm_burn_proof_baseline(chain, 776);
+    assert_eq!(
+        decoded.evm_burn_proof_legacy_hold_through.get(&chain),
+        Some(&777)
+    );
+    decoded.accept_evm_burn_proof_baseline(chain, 777);
+    assert!(!decoded
+        .evm_burn_proof_legacy_hold_through
+        .contains_key(&chain));
+    assert_eq!(
+        decoded.evm_burn_proof_floor_by_chain.get(&chain),
+        Some(&777)
+    );
 }
 
 #[test]

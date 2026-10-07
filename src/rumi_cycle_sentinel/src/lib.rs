@@ -72,6 +72,30 @@ fn post_upgrade() {
     sampler::setup_timer();
 }
 
+const MAX_ANONYMOUS_CONSENT_INGRESS_BYTES: usize = 16 * 1024;
+
+fn sentinel_ingress_allowed(caller: Principal, method: &str, argument_bytes: usize) -> bool {
+    if caller != Principal::anonymous() {
+        return true;
+    }
+    method == "icrc21_canister_call_consent_message"
+        && argument_bytes <= MAX_ANONYMOUS_CONSENT_INGRESS_BYTES
+}
+
+/// Reject anonymous update ingress before Candid decoding, except for the
+/// bounded standard consent-message request. Method bodies retain their own auth.
+#[ic_cdk::inspect_message]
+fn inspect_message() {
+    let allowed = sentinel_ingress_allowed(
+        ic_cdk::caller(),
+        &ic_cdk::api::call::method_name(),
+        ic_cdk::api::call::arg_data_raw_size(),
+    );
+    if allowed {
+        ic_cdk::api::call::accept_message();
+    }
+}
+
 #[ic_cdk::query(guard = "require_telemetry_viewer")]
 fn cycles_status() -> CycleManagerCyclesStatus {
     self_cycles_status(
@@ -270,10 +294,9 @@ async fn manual_top_up_with_amount(
     .await
 }
 
-/// Resolve an ambiguous operation conservatively.  Both rails retain their
-/// immutable snapshots and reservations until this signer-gated call has
-/// completed; self-recovery refuses the spent-only path and still requires a
-/// delivery proof.
+/// Refuse evidence-free signer resolution. Ambiguous ICP/CMC and Cycles Ledger
+/// operations remain held until their rail-specific proof path verifies evidence.
+
 #[ic_cdk::update]
 fn resolve_unknown_as_spent(operation_id: u64) -> Result<types::FundingOperation, String> {
     if !state::is_signer(ic_cdk::caller()) {
@@ -360,6 +383,22 @@ fn test_inject_operation(
 #[ic_cdk::query]
 fn test_get_operation(operation_id: u64) -> Option<test_support::TestOperationView> {
     test_support::operation_view(operation_id)
+}
+
+/// Read-only test projection of an immutable ICP call snapshot. This endpoint
+/// exists only in the opt-in integration Wasm and is absent from production.
+#[cfg(feature = "test_endpoints")]
+#[ic_cdk::query]
+fn test_get_icp_snapshot(operation_id: u64) -> Result<Option<types::IcpCmcSnapshot>, String> {
+    if !state::is_signer(ic_cdk::caller()) {
+        return Err(format!("{:?}", governance::GovernanceError::NotSigner));
+    }
+    let snapshot =
+        state::get_operation(operation_id).and_then(|operation| match operation.rail_arguments() {
+            types::FundingRailArguments::Icp(snapshot) => Some(snapshot.clone()),
+            types::FundingRailArguments::Cycles(_) => None,
+        });
+    Ok(snapshot)
 }
 
 /// Read-only test projection for asserting bootstrap safety defaults.  The
@@ -552,5 +591,36 @@ mod maintenance_authorization_tests {
             require_maintenance_signer(Principal::from_slice(&[7]), || true),
             Ok(())
         );
+    }
+}
+
+#[cfg(test)]
+mod ingress_filter_tests {
+    use super::{sentinel_ingress_allowed, MAX_ANONYMOUS_CONSENT_INGRESS_BYTES};
+    use candid::Principal;
+
+    #[test]
+    fn anonymous_ingress_is_limited_to_bounded_consent_requests() {
+        let anonymous = Principal::anonymous();
+        assert!(sentinel_ingress_allowed(
+            anonymous,
+            "icrc21_canister_call_consent_message",
+            MAX_ANONYMOUS_CONSENT_INGRESS_BYTES
+        ));
+        assert!(!sentinel_ingress_allowed(
+            anonymous,
+            "icrc21_canister_call_consent_message",
+            MAX_ANONYMOUS_CONSENT_INGRESS_BYTES + 1
+        ));
+        assert!(!sentinel_ingress_allowed(
+            anonymous,
+            "run_maintenance_now",
+            0
+        ));
+        assert!(sentinel_ingress_allowed(
+            Principal::from_slice(&[42]),
+            "run_maintenance_now",
+            usize::MAX
+        ));
     }
 }

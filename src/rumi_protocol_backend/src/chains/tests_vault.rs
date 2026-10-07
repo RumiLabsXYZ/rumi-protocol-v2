@@ -577,6 +577,182 @@ fn borrow_rejects_when_mint_in_flight() {
 }
 
 #[test]
+fn borrow_rejects_when_interest_mint_is_in_flight_without_mutating_state() {
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
+    s.chain_vaults
+        .get_mut(&7)
+        .unwrap()
+        .pending_interest_mint_e8s = 1;
+    let queue_before = s.settlement_queues.get(&CHAIN).map(|q| q.pending_len());
+
+    let r = borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        50_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1,
+    );
+
+    assert_eq!(r, Err(BorrowError::InterestRealizationPending));
+    assert_eq!(s.chain_vaults[&7].pending_mint_e8s, 0);
+    assert_eq!(s.chain_vaults[&7].pending_interest_mint_e8s, 1);
+    assert_eq!(
+        s.settlement_queues.get(&CHAIN).map(|q| q.pending_len()),
+        queue_before
+    );
+}
+
+#[test]
+fn borrow_rejects_unrepresentable_interest_projection_without_mutation() {
+    use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+
+    let chain = ChainId(71); // Configured with nonzero interest APR.
+    let mut s = MultiChainState::default();
+    crate::chains::admin::register_chain_in_state(
+        &mut s,
+        RegisterChainArg {
+            chain_id: chain,
+            display_name: "Conflux test chain".into(),
+            rpc_endpoints: vec!["https://rpc".into()],
+            finality_depth: 1,
+            gas_strategy: GasStrategy::EvmEip1559 {
+                max_priority_fee_gwei: 1,
+                max_fee_gwei_ceiling: 10,
+            },
+            chain_native_decimals: 18,
+            min_quorum_providers: None,
+        },
+        0,
+    )
+    .expect("register Conflux test chain");
+    s.manual_prices.insert((chain, "CFX".into()), 100_000000);
+    s.chain_vaults.insert(
+        7,
+        ChainVaultV1 {
+            vault_id: 7,
+            owner: Principal::anonymous(),
+            collateral_chain: chain,
+            custody_address: "custody".into(),
+            collateral_amount_native: 1,
+            debt_e8s: u128::MAX,
+            mint_recipient: "good-address".into(),
+            pending_mint_e8s: 0,
+            status: ChainVaultStatus::Open,
+            opened_at_ns: 0,
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
+            pending_liquidation: None,
+            owner_evm: Some("0xowner".into()),
+        },
+    );
+    let queue_before = s.settlement_queues.get(&chain).map(|q| q.pending_len());
+
+    let r = borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        1,
+        "good-address".into(),
+        only_good,
+        "CFX",
+        15_000,
+        0,
+        None,
+        crate::numeric::NANOS_PER_YEAR,
+    );
+
+    assert_eq!(r, Err(BorrowError::InterestProjectionFailed));
+    assert_eq!(s.chain_vaults[&7].pending_mint_e8s, 0);
+    assert_eq!(
+        s.settlement_queues.get(&chain).map(|q| q.pending_len()),
+        queue_before
+    );
+}
+
+#[test]
+fn borrow_cr_includes_interest_accrued_through_risk_check_time() {
+    use super::config::ChainStatus;
+    use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+
+    let chain = ChainId(71); // Conflux eSpace, configured at 2% APR.
+    let mut s = MultiChainState::default();
+    crate::chains::admin::register_chain_in_state(
+        &mut s,
+        RegisterChainArg {
+            chain_id: chain,
+            display_name: "Conflux test chain".into(),
+            rpc_endpoints: vec!["https://rpc".into()],
+            finality_depth: 1,
+            gas_strategy: GasStrategy::EvmEip1559 {
+                max_priority_fee_gwei: 1,
+                max_fee_gwei_ceiling: 10,
+            },
+            chain_native_decimals: 18,
+            min_quorum_providers: None,
+        },
+        0,
+    )
+    .expect("register Conflux test chain");
+    assert_eq!(s.chain_configs[&chain].status, ChainStatus::Registered);
+    s.manual_prices.insert((chain, "CFX".into()), 100_000000);
+    let debt = 100_00000000u128;
+    s.chain_vaults.insert(
+        7,
+        ChainVaultV1 {
+            vault_id: 7,
+            owner: Principal::anonymous(),
+            collateral_chain: chain,
+            custody_address: "custody".into(),
+            collateral_amount_native: 160 * 10u128.pow(18), // $160 at $1/CFX.
+            debt_e8s: debt,
+            mint_recipient: "good-address".into(),
+            pending_mint_e8s: 0,
+            status: ChainVaultStatus::Open,
+            opened_at_ns: 0,
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
+            pending_liquidation: None,
+            owner_evm: Some("0xowner".into()),
+        },
+    );
+    s.chain_supplies.insert(chain, debt);
+    let queue_before = s.settlement_queues.get(&chain).map(|q| q.pending_len());
+
+    // Without accrued interest this amount lands at the 150% floor. Interest
+    // accrued over one month lowers the ratio below the floor and must reject.
+    let r = borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        666666666,
+        "good-address".into(),
+        only_good,
+        "CFX",
+        15_000,
+        0,
+        None,
+        crate::numeric::NANOS_PER_YEAR / 12,
+    );
+
+    assert!(matches!(r, Err(BorrowError::BelowMinCr { cr_e4, min_e4: 15_000 }) if cr_e4 < 15_000));
+    assert_eq!(s.chain_vaults[&7].pending_mint_e8s, 0);
+    assert_eq!(
+        s.settlement_queues.get(&chain).map(|q| q.pending_len()),
+        queue_before
+    );
+}
+
+#[test]
 fn borrow_rejects_non_open_vault() {
     use super::monad::chain_vault::ChainVaultStatus;
     let mut s = setup(PRICE_150_USD_E8);
@@ -1209,6 +1385,37 @@ fn gc_skips_stale_vaults_when_observer_inactive() {
 // ─── M2 review finding A: collateral release blocked while a borrow mint pends ─
 
 use super::vault::{close_chain_vault_in_state, withdraw_collateral_in_state, WithdrawError};
+
+#[test]
+fn zero_value_withdrawal_does_not_consume_settlement_queue_capacity() {
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 0);
+    let collateral_before = s.chain_vaults.get(&7).unwrap().collateral_amount_native;
+
+    assert_eq!(
+        withdraw_collateral_in_state(
+            &mut s,
+            7,
+            0,
+            "good-address".into(),
+            only_good,
+            "SOL",
+            13_000,
+            1,
+        ),
+        Err(WithdrawError::ZeroAmount)
+    );
+    assert_eq!(
+        s.chain_vaults.get(&7).unwrap().collateral_amount_native,
+        collateral_before,
+        "rejected zero withdrawal must not reserve collateral"
+    );
+    assert_eq!(
+        s.settlement_queues.get(&CHAIN).unwrap().pending_len(),
+        0,
+        "rejected zero withdrawal must not consume a queue slot"
+    );
+}
 
 #[test]
 fn withdraw_and_close_reject_while_borrow_mint_in_flight() {

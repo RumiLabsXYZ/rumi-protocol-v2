@@ -45,7 +45,8 @@ fn solana_vault_pending(s: &mut MultiChainState, vault_id: u64, pending_e8s: u12
             owner_evm: None,
             last_interest_accrual_ns: 0,
             pending_interest_mint_e8s: 0,
-            pending_liquidation: None,        },
+            pending_liquidation: None,
+        },
     );
 }
 
@@ -72,7 +73,10 @@ fn solana_confirm_mint_rejects_amount_mismatch_no_mutation() {
     assert!(res.is_err());
     assert_eq!(s.chain_vaults[&1].pending_mint_e8s, 10_000_000_000);
     assert_eq!(s.chain_vaults[&1].debt_e8s, 0);
-    assert!(matches!(s.chain_vaults[&1].status, ChainVaultStatus::MintPending));
+    assert!(matches!(
+        s.chain_vaults[&1].status,
+        ChainVaultStatus::MintPending
+    ));
     assert_eq!(s.chain_supplies[&SOL], 0);
 }
 
@@ -106,7 +110,8 @@ fn solana_confirm_mint_second_vault_uses_running_total() {
             owner_evm: None,
             last_interest_accrual_ns: 0,
             pending_interest_mint_e8s: 0,
-            pending_liquidation: None,        },
+            pending_liquidation: None,
+        },
     );
     solana_vault_pending(&mut s, 2, 5_000_000_000);
     let pre_total = s.total_chain_vault_debt_e8s(); // == 10e8
@@ -142,8 +147,10 @@ fn solana_select_next_op_submits_queued_then_confirms_inflight() {
     }
 
     // Put op0 Inflight: now only the Confirm of op0 is actionable (one-in-flight).
-    q.pending.get_mut(&id0).unwrap().status =
-        SettlementOpStatus::Inflight { tries: 1, last_attempt_ns: 0 };
+    q.pending.get_mut(&id0).unwrap().status = SettlementOpStatus::Inflight {
+        tries: 1,
+        last_attempt_ns: 0,
+    };
     match select_next_op(&q) {
         Some((oid, OpAction::Confirm)) => assert_eq!(oid, id0),
         other => panic!("expected Confirm of inflight op 0, got {other:?}"),

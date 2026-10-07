@@ -43,10 +43,42 @@ export interface DepositRecord {
   'timestamp' : bigint,
   'amount' : bigint,
 }
+export interface DepositRecordV1 {
+  'id' : bigint,
+  'asset_type' : AssetType,
+  'block_index' : bigint,
+  'deposit_type' : DepositTypeV1,
+  'memo' : [] | [string],
+  'timestamp' : bigint,
+  'amount' : bigint,
+}
 export type DepositType = { 'BorrowingFee' : null } |
   { 'LiquidationFee' : null } |
   { 'RedemptionFee' : null } |
+  { 'InterestRevenue' : null } |
+  { 'LegacyUnknown' : { 'candid_hex' : string } };
+export type DepositTypeV1 = { 'BorrowingFee' : null } |
+  { 'LiquidationFee' : null } |
+  { 'RedemptionFee' : null } |
   { 'InterestRevenue' : null };
+export interface PendingWithdrawalV2 {
+  'to' : Principal,
+  'send_amount' : bigint,
+  'fee' : bigint,
+  'request_id' : bigint,
+  'status' : string,
+  'asset_type' : AssetType,
+  'memo' : [] | [string],
+  'ledger' : Principal,
+  'caller' : Principal,
+  'dispatch_attempts' : [] | [number],
+  'created_at_time' : bigint,
+  'amount' : bigint,
+}
+export interface PendingWithdrawalsPageV2 {
+  'next_start' : [] | [bigint],
+  'withdrawals' : Array<PendingWithdrawalV2>,
+}
 export type TreasuryAction = {
     'Withdraw' : {
       'to' : Principal,
@@ -57,7 +89,7 @@ export type TreasuryAction = {
   {
     'Deposit' : {
       'asset_type' : AssetType,
-      'deposit_type' : DepositType,
+      'deposit_type' : DepositTypeV1,
       'amount' : bigint,
     }
   } |
@@ -82,6 +114,15 @@ export interface TreasuryStatus {
   'is_paused' : boolean,
   'balances' : Array<[AssetType, AssetBalance]>,
 }
+export interface UnknownTreasuryEvidencePageV2 {
+  'events' : Array<UnknownTreasuryEvidenceV2>,
+  'deposits' : Array<UnknownTreasuryEvidenceV2>,
+}
+export interface UnknownTreasuryEvidenceV2 {
+  'id' : bigint,
+  'record_kind' : string,
+  'raw_candid_hex' : string,
+}
 export interface WithdrawArgs {
   'to' : Principal,
   'request_id' : [] | [bigint],
@@ -104,14 +145,29 @@ export interface _SERVICE {
   >,
   'get_deposits' : ActorMethod<
     [[] | [bigint], [] | [bigint]],
-    Array<DepositRecord>
+    Array<DepositRecordV1>
   >,
   'get_event_count' : ActorMethod<[], bigint>,
   'get_events' : ActorMethod<
     [[] | [bigint], [] | [bigint]],
     Array<TreasuryEvent>
   >,
+  'get_pending_withdrawals_v2' : ActorMethod<
+    [[] | [bigint], [] | [bigint]],
+    { 'Ok' : PendingWithdrawalsPageV2 } |
+      { 'Err' : string }
+  >,
   'get_status' : ActorMethod<[], TreasuryStatus>,
+  'get_unknown_evidence_v2' : ActorMethod<
+    [[] | [bigint], [] | [bigint]],
+    { 'Ok' : UnknownTreasuryEvidencePageV2 } |
+      { 'Err' : string }
+  >,
+  'reconcile_withdrawal_receipt_v2' : ActorMethod<
+    [bigint, bigint],
+    { 'Ok' : WithdrawResult } |
+      { 'Err' : string }
+  >,
   'record_stability_pool_unallocated_interest' : ActorMethod<
     [bigint, bigint, BigUint64Array | bigint[]],
     { 'Ok' : bigint } |

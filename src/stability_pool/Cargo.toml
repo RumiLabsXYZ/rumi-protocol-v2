@@ -7,8 +7,14 @@ edition = "2021"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+# Explicitly opt-in only for source-matched PocketIC admission tests.
+test-three-usd-reserve-ingress-v2-admission = []
+test_endpoints = []
+
 [dependencies]
-candid = "0.10.6"
+candid = { version = "0.10.6", features = ["value"] }
 ic-stable-structures = "0.6.5"
 ic-cdk = "0.12.0"
 ic-cdk-timers = "0.10.0"

@@ -48,7 +48,10 @@ pub fn nonce_derivation_path(chain: ChainId) -> Vec<Vec<u8>> {
 /// A Solana address is the base58 of the 32-byte Ed25519 public key (no hashing).
 pub fn solana_address_from_pubkey(pubkey: &[u8]) -> Result<String, String> {
     if pubkey.len() != 32 {
-        return Err(format!("expected 32-byte Ed25519 pubkey, got {}", pubkey.len()));
+        return Err(format!(
+            "expected 32-byte Ed25519 pubkey, got {}",
+            pubkey.len()
+        ));
     }
     Ok(bs58::encode(pubkey).into_string())
 }
@@ -105,7 +108,10 @@ pub struct SchnorrPublicKeyResponse {
 }
 
 fn key_id() -> SchnorrKeyId {
-    SchnorrKeyId { algorithm: SchnorrAlgorithm::Ed25519, name: solana_schnorr_key_name() }
+    SchnorrKeyId {
+        algorithm: SchnorrAlgorithm::Ed25519,
+        name: solana_schnorr_key_name(),
+    }
 }
 
 /// Async: derive the Ed25519 public key from the management canister and return

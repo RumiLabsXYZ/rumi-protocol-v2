@@ -204,13 +204,21 @@ pub(crate) fn build_withdrawal_payment(
             acct.balance_drops, amount_drops, XRP_FEE_DROPS, reserve_drops
         )));
     }
+    let last_ledger_sequence = acct
+        .ledger_index
+        .checked_add(LAST_LEDGER_BUFFER)
+        .ok_or_else(|| {
+            ChainAdapterError::InvalidPayload(
+                "validated XRP ledger index is too large for LastLedgerSequence".to_string(),
+            )
+        })?;
     Ok(codec::Payment {
         account: sender_id,
         destination: dest_id,
         amount_drops,
         fee_drops: XRP_FEE_DROPS,
         sequence: acct.sequence,
-        last_ledger_sequence: acct.ledger_index + LAST_LEDGER_BUFFER,
+        last_ledger_sequence,
         destination_tag,
         signing_pub_key: sign::ed25519_signing_pubkey(pubkey),
     })
@@ -375,6 +383,17 @@ mod tests {
         assert_eq!(p.fee_drops, XRP_FEE_DROPS);
         assert_eq!(p.destination_tag, Some(99));
         assert_eq!(p.signing_pub_key[0], 0xED);
+    }
+
+    #[test]
+    fn build_payment_rejects_ledger_index_overflow() {
+        let (s, d, pk) = ids();
+        let mut inflated = acct(42, 50_000_000);
+        inflated.ledger_index = u32::MAX;
+        assert!(matches!(
+            build_withdrawal_payment(s, d, &pk, &inflated, 1_000_000, 1_000_000, None),
+            Err(ChainAdapterError::InvalidPayload(_))
+        ));
     }
 
     #[test]

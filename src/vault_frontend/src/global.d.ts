@@ -2,6 +2,7 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorSubclass } from '@dfinity/agent';
 
 interface PlugWindow {
+  principalId?: string;
   disconnect(): unknown;
   requestBalance(): unknown;
   createActor: <T>(args: {

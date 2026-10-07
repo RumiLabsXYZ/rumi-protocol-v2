@@ -132,6 +132,13 @@ export function getCachedLedgerFee(ref: LedgerFeeRef): bigint {
   return fallbackFee(ref);
 }
 
+/** Return only a live cached fee; never substitute a metadata fallback. */
+export function getFreshCachedLedgerFee(ref: LedgerFeeRef): bigint | null {
+  const cached = cache.get(ref.ledgerId);
+  if (!cached || Date.now() - cached.fetchedAt >= TTL_MS) return null;
+  return cached.fee;
+}
+
 /** Test hook. Resets the cache so tests are deterministic. */
 export function _clearLedgerFeeCache(): void {
   cache.clear();

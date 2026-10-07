@@ -11,6 +11,7 @@ type DepositType = variant {
   RedemptionFee;
   LiquidationFee;
   InterestRevenue;
+  LegacyUnknown : record { candid_hex : text };
 };
 
 type AssetBalance = record {
@@ -29,11 +30,43 @@ type DepositRecord = record {
   memo: opt text;
 };
 
+type DepositTypeV1 = variant {
+  BorrowingFee;
+  RedemptionFee;
+  LiquidationFee;
+  InterestRevenue;
+};
+type DepositRecordV1 = record {
+  id: nat64;
+  deposit_type: DepositTypeV1;
+  asset_type: AssetType;
+  amount: nat64;
+  block_index: nat64;
+  timestamp: nat64;
+  memo: opt text;
+};
+
 type TreasuryStatus = record {
   total_deposits: nat64;
   balances: vec record { AssetType; AssetBalance };
   controller: principal;
   is_paused: bool;
+};
+
+type CycleManagerCyclesStatus = record {
+  balance : nat;
+  low_watermark : nat;
+  healthy : bool;
+  freeze_threshold_secs : nat64;
+  stable_memory_bytes : opt nat64;
+  heap_memory_bytes : opt nat64;
+  idle_burn_cycles_per_day : opt nat;
+};
+type CycleManagerMetric = record {
+  key : text;
+  count : nat64;
+  value : nat;
+  label : opt text;
 };
 
 type TreasuryInitArgs = record {
@@ -68,7 +101,7 @@ type WithdrawResult = record {
 };
 
 type TreasuryAction = variant {
-  Deposit : record { deposit_type : DepositType; asset_type : AssetType; amount : nat64 };
+  Deposit : record { deposit_type : DepositTypeV1; asset_type : AssetType; amount : nat64 };
   Withdraw : record { asset_type : AssetType; amount : nat64; to : principal };
   SetPaused : record { paused : bool };
 };
@@ -79,13 +112,47 @@ type TreasuryEvent = record {
   caller : principal;
   action : TreasuryAction;
 };
+type UnknownTreasuryEvidenceV2 = record {
+  record_kind: text;
+  id: nat64;
+  raw_candid_hex: text;
+};
+type UnknownTreasuryEvidencePageV2 = record {
+  deposits: vec UnknownTreasuryEvidenceV2;
+  events: vec UnknownTreasuryEvidenceV2;
+};
+type PendingWithdrawalV2 = record {
+  request_id: nat64;
+  caller: principal;
+  asset_type: AssetType;
+  ledger: principal;
+  amount: nat64;
+  to: principal;
+  memo: opt text;
+  created_at_time: nat64;
+  send_amount: nat64;
+  fee: nat64;
+  dispatch_attempts: opt nat32;
+  status: text;
+};
+type PendingWithdrawalsPageV2 = record {
+  withdrawals: vec PendingWithdrawalV2;
+  next_start: opt nat64;
+};
 
 service : (TreasuryInitArgs) -> {
   deposit: (DepositArgs) -> (variant { Ok : nat64; Err : text });
+  record_stability_pool_unallocated_interest: (nat64, nat64, vec nat64) -> (variant { Ok : nat64; Err : text });
+  set_stability_pool_reporter: (opt principal) -> (variant { Ok; Err : text });
   withdraw: (WithdrawArgs) -> (variant { Ok : WithdrawResult; Err : text });
+  reconcile_withdrawal_receipt_v2: (nat64, nat64) -> (variant { Ok : WithdrawResult; Err : text });
+  cycles_status: () -> (CycleManagerCyclesStatus) query;
+  cycle_manager_metrics: () -> (vec CycleManagerMetric) query;
   get_status: () -> (TreasuryStatus) query;
-  get_deposits: (opt nat64, opt nat64) -> (vec DepositRecord) query;
+  get_deposits: (opt nat64, opt nat64) -> (vec DepositRecordV1) query;
   get_events: (opt nat64, opt nat64) -> (vec TreasuryEvent) query;
+  get_unknown_evidence_v2: (opt nat64, opt nat64) -> (variant { Ok : UnknownTreasuryEvidencePageV2; Err : text }) query;
+  get_pending_withdrawals_v2: (opt nat64, opt nat64) -> (variant { Ok : PendingWithdrawalsPageV2; Err : text }) query;
   get_event_count: () -> (nat64) query;
   set_paused: (bool) -> (variant { Ok; Err : text });
 }

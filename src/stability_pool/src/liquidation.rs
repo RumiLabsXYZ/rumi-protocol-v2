@@ -6,11 +6,1352 @@ use icrc_ledger_types::icrc1::transfer::{Memo, TransferArg, TransferError};
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 use num_traits::ToPrimitive;
 use rumi_protocol_backend::chains::config::ChainId;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use crate::logs::INFO;
 use crate::state::{mutate_state, read_state, StabilityPoolState};
 use crate::types::*;
+
+thread_local! {
+    /// Runtime-only cursor for bounded exact-proof burn recovery.
+    static CHAIN_BURN_RECOVERY_CURSOR: Cell<u64> = const { Cell::new(0) };
+}
+
+// Keep new SP V2 approvals disabled until the coordinated backend/SP end-to-end
+// path passes with the official ledger. The ledger operation shapes are now
+// covered by PIC evidence; recovery of existing rows remains available.
+const SP_LIQUIDATION_V2_ADMISSION_ENABLED: bool = false;
+// Keep 3USD reserve ingress closed until coordinated cross-canister tests and
+// refund candidate recovery are complete. Existing-row reconciliation remains
+// available while this new-row admission switch is false.
+#[cfg(feature = "test-three-usd-reserve-ingress-v2-admission")]
+const THREE_USD_RESERVE_INGRESS_V2_ADMISSION_ENABLED: bool = true;
+#[cfg(not(feature = "test-three-usd-reserve-ingress-v2-admission"))]
+const THREE_USD_RESERVE_INGRESS_V2_ADMISSION_ENABLED: bool = false;
+
+const THREE_USD_E8S_SCALE: u128 = 1_000_000_000_000_000_000;
+
+fn bounded_three_usd_absorb_amounts(
+    debt_target_e8s: u64,
+    opted_in_available_e8s: u64,
+    draw_cap_e8s: u64,
+    virtual_price_e18: u128,
+) -> Result<(u64, u64), StabilityPoolError> {
+    if debt_target_e8s == 0
+        || opted_in_available_e8s == 0
+        || draw_cap_e8s == 0
+        || virtual_price_e18 == 0
+    {
+        return Err(StabilityPoolError::InsufficientPoolBalance);
+    }
+    let target_lp = (u128::from(debt_target_e8s))
+        .checked_mul(THREE_USD_E8S_SCALE)
+        .ok_or(StabilityPoolError::SystemBusy)?
+        / virtual_price_e18;
+    let target_lp = u64::try_from(target_lp).map_err(|_| StabilityPoolError::SystemBusy)?;
+    let lp_amount = target_lp.min(opted_in_available_e8s).min(draw_cap_e8s);
+    let debt_covered = u64::try_from(
+        u128::from(lp_amount)
+            .checked_mul(virtual_price_e18)
+            .ok_or(StabilityPoolError::SystemBusy)?
+            / THREE_USD_E8S_SCALE,
+    )
+    .map_err(|_| StabilityPoolError::SystemBusy)?;
+    if lp_amount == 0 || debt_covered == 0 || debt_covered > debt_target_e8s {
+        return Err(StabilityPoolError::InsufficientPoolBalance);
+    }
+    Ok((lp_amount, debt_covered))
+}
+
+fn three_usd_terminal_outcome(
+    terminal: Option<&SpThreeUsdTerminalEvidence>,
+) -> Result<(bool, Option<String>), StabilityPoolError> {
+    match terminal {
+        Some(SpThreeUsdTerminalEvidence::Absorbed { .. }) => Ok((true, None)),
+        Some(SpThreeUsdTerminalEvidence::PreTransferRejected { reason, .. }) => Ok((
+            false,
+            Some(format!("backend rejected before 3USD transfer: {reason}")),
+        )),
+        Some(SpThreeUsdTerminalEvidence::FailedAfterTransfer { error, .. }) => Ok((
+            false,
+            Some(format!("backend refunded failed 3USD liquidation: {error}")),
+        )),
+        None => Err(StabilityPoolError::SystemBusy),
+    }
+}
+
+fn sp_liquidation_v2_token_supported(token: SpLiquidationToken) -> bool {
+    // Backend's current V2 executor only supports the verified icUSD minter
+    // burn/mint path. CK-stable routes remain rejected before approval.
+    token == SpLiquidationToken::IcUsd
+}
+
+fn sp_v2_approval_preflight_amounts(
+    principal_cap: u64,
+    approval_fee: u64,
+    pull_fee: u64,
+) -> Option<(u64, u64)> {
+    let allowance = principal_cap.checked_add(pull_fee)?;
+    let required_balance = allowance.checked_add(approval_fee)?;
+    Some((allowance, required_balance))
+}
+
+/// Acknowledge backend V2 state only after the local journal contains a
+/// completed row. Local completion is written only after independently
+/// validating the collateral ICRC-3 receipt, so backend status alone can never
+/// release its replay fence.
+pub(crate) async fn acknowledge_completed_sp_liquidation_v2(
+    request_id: u64,
+) -> Result<(), StabilityPoolError> {
+    let row = read_state(|state| {
+        state
+            .completed_sp_liquidations_v2
+            .as_ref()
+            .and_then(|rows| rows.get(&request_id))
+            .cloned()
+    })
+    .ok_or(StabilityPoolError::SystemBusy)?;
+    let payout_completed = row.phase == SpLiquidationV2LocalPhase::Complete
+        && row.payout_receipt.is_some()
+        && row.stable_debit_applied;
+    let refund_completed = row.phase == SpLiquidationV2LocalPhase::Rejected
+        && row.stable_refund_applied
+        && row.stable_refund_receipt.is_some();
+    if !payout_completed && !refund_completed {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let protocol = read_state(|state| state.protocol_canister_id);
+    let (status,): (Result<SpLiquidationV2StatusView, rumi_protocol_backend::ProtocolError>,) =
+        call(
+            protocol,
+            "get_stability_pool_liquidation_v2_status",
+            (request_id,),
+        )
+        .await
+        .map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+            target: "Protocol".into(),
+            method: "get_stability_pool_liquidation_v2_status".into(),
+        })?;
+    let view = status.map_err(|_| StabilityPoolError::SystemBusy)?;
+    if view.stability_pool != ic_cdk::api::id()
+        || view.request_id != request_id
+        || row.backend_request.is_none()
+        || view
+            .request
+            .as_ref()
+            .is_some_and(|request| row.backend_request.as_ref() != Some(request))
+    {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    match view.status {
+        SpLiquidationV2Status::Complete {
+            stable_pull_receipt,
+            result,
+            payout_receipt,
+        } => {
+            if !payout_completed || view.request.as_ref() != row.backend_request.as_ref() {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            if row.stable_pull_receipt.as_ref() != Some(&stable_pull_receipt)
+                || row.result.as_ref() != Some(&result)
+                || row.payout_receipt.as_ref() != Some(&payout_receipt)
+            {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            let (result,): (Result<(), rumi_protocol_backend::ProtocolError>,) =
+                call(protocol, "ack_stability_pool_liquidation_v2", (request_id,))
+                    .await
+                    .map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+                        target: "Protocol".into(),
+                        method: "ack_stability_pool_liquidation_v2".into(),
+                    })?;
+            result.map_err(|_| StabilityPoolError::SystemBusy)?;
+        }
+        SpLiquidationV2Status::StablePullRefunded {
+            stable_pull_receipt,
+            refund_receipt,
+            ..
+        } => {
+            if !refund_completed
+                || view.request.as_ref() != row.backend_request.as_ref()
+                || row.stable_pull_receipt != stable_pull_receipt
+                || row.stable_refund_receipt.as_ref() != Some(&refund_receipt)
+            {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            let (result,): (Result<(), rumi_protocol_backend::ProtocolError>,) =
+                call(protocol, "ack_stability_pool_liquidation_v2", (request_id,))
+                    .await
+                    .map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+                        target: "Protocol".into(),
+                        method: "ack_stability_pool_liquidation_v2".into(),
+                    })?;
+            result.map_err(|_| StabilityPoolError::SystemBusy)?;
+        }
+        SpLiquidationV2Status::Acknowledged => {
+            if view.request.is_some() {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+        }
+        _ => return Err(StabilityPoolError::SystemBusy),
+    }
+    mutate_state(|state| state.acknowledge_sp_liquidation_v2(request_id))
+}
+
+pub(crate) async fn verify_sp_liquidation_v2_approval_receipt(
+    receipt: &SpLiquidationApprovalReceipt,
+) -> Result<(), StabilityPoolError> {
+    let backend_receipt = rumi_protocol_backend::SpLiquidationApprovalReceipt {
+        block_index: receipt.block_index,
+        tuple: rumi_protocol_backend::SpLiquidationApprovalTuple {
+            ledger: receipt.tuple.ledger,
+            owner: receipt.tuple.owner.clone(),
+            spender: receipt.tuple.spender.clone(),
+            allowance_raw: receipt.tuple.allowance_raw,
+            fee_raw: receipt.tuple.fee_raw,
+            memo: receipt.tuple.memo.clone(),
+            created_at_time_ns: receipt.tuple.created_at_time_ns,
+            expires_at_ns: receipt.tuple.expires_at_ns,
+        },
+    };
+    rumi_protocol_backend::icrc3_proof::verify_icrc3_approval_block(&backend_receipt)
+        .await
+        .map_err(|reason| StabilityPoolError::LedgerTransferFailed { reason })
+}
+
+fn backend_sp_pull_tuple(
+    tuple: &SpLiquidationStablePullTuple,
+) -> rumi_protocol_backend::SpLiquidationStablePullTuple {
+    rumi_protocol_backend::SpLiquidationStablePullTuple {
+        op_nonce: tuple.op_nonce,
+        ledger: tuple.ledger,
+        from: tuple.from.clone(),
+        spender: tuple.spender.clone(),
+        to: tuple.to.clone(),
+        amount_raw: tuple.amount_raw,
+        fee_raw: tuple.fee_raw,
+        memo: tuple.memo.clone(),
+        created_at_time_ns: tuple.created_at_time_ns,
+    }
+}
+
+fn backend_sp_payout_tuple(
+    tuple: &SpLiquidationPayoutTuple,
+) -> rumi_protocol_backend::SpLiquidationPayoutTuple {
+    rumi_protocol_backend::SpLiquidationPayoutTuple {
+        op_nonce: tuple.op_nonce,
+        ledger: tuple.ledger,
+        source: tuple.source.clone(),
+        destination: tuple.destination.clone(),
+        gross_amount_raw: tuple.gross_amount_raw,
+        net_amount_raw: tuple.net_amount_raw,
+        fee_raw: tuple.fee_raw,
+        memo: tuple.memo.clone(),
+        created_at_time_ns: tuple.created_at_time_ns,
+        collateral_type: tuple.collateral_type,
+    }
+}
+
+async fn accept_sp_liquidation_v2_payout_supersession(
+    request_id: u64,
+    generation: u32,
+    predecessor: &SpLiquidationPayoutTuple,
+    replacement: &SpLiquidationPayoutTuple,
+) -> Result<(), StabilityPoolError> {
+    let protocol = read_state(|state| state.protocol_canister_id);
+    let result: Result<(Result<(), rumi_protocol_backend::ProtocolError>,), _> = call(
+        protocol,
+        "accept_stability_pool_liquidation_v2_payout_supersession",
+        (
+            request_id,
+            generation,
+            backend_sp_payout_tuple(predecessor),
+            backend_sp_payout_tuple(replacement),
+        ),
+    )
+    .await;
+    match result {
+        Ok((Ok(()),)) => Ok(()),
+        Ok((Err(_),)) => Err(StabilityPoolError::SystemBusy),
+        Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
+            target: "Protocol".into(),
+            method: "accept_stability_pool_liquidation_v2_payout_supersession".into(),
+        }),
+    }
+}
+
+async fn verify_sp_liquidation_v2_stable_receipt(
+    receipt: &SpLiquidationStablePullReceipt,
+    token: SpLiquidationToken,
+) -> Result<(), StabilityPoolError> {
+    let tuple = backend_sp_pull_tuple(&receipt.tuple);
+    let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(
+        receipt.tuple.ledger,
+        receipt.block_index,
+    )
+    .await
+    .map_err(|reason| StabilityPoolError::LedgerTransferFailed { reason })?;
+    let proof = match token {
+        SpLiquidationToken::IcUsd => validate_sp_v2_icusd_burn_block(&block, &tuple),
+        // The current backend V2 executor only supports icUSD. Do not infer
+        // CK-stable minting or burn semantics from a configured token symbol.
+        SpLiquidationToken::CKUSDT | SpLiquidationToken::CKUSDC => {
+            Err("CK stable V2 pull proof is not enabled".to_string())
+        }
+    };
+    proof.map_err(|reason| StabilityPoolError::LedgerTransferFailed { reason })
+}
+
+fn validate_sp_v2_icusd_burn_block(
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+    tuple: &rumi_protocol_backend::SpLiquidationStablePullTuple,
+) -> Result<(), String> {
+    if tuple.fee_raw != 0
+        || block.op != "burn"
+        || block.btype.as_deref().is_some_and(|kind| kind != "1burn")
+        || !block.from.as_ref().is_some_and(|actual| {
+            rumi_protocol_backend::icrc3_proof::accounts_match(actual, &tuple.from)
+        })
+        || !block.spender.as_ref().is_some_and(|actual| {
+            rumi_protocol_backend::icrc3_proof::accounts_match(actual, &tuple.spender)
+        })
+        || block.to.is_some()
+        || block.amount != u128::from(tuple.amount_raw)
+        || block.transaction_fee.is_some()
+        || block.fee.is_some()
+        || block.memo.as_deref() != Some(tuple.memo.as_slice())
+        || block.created_at_time != Some(tuple.created_at_time_ns)
+        || block.expected_allowance.is_some()
+        || block.expires_at.is_some()
+    {
+        return Err(
+            "ICRC-3 block does not prove the exact fee-free SP-to-minter burn tuple".into(),
+        );
+    }
+    Ok(())
+}
+
+async fn verify_sp_liquidation_v2_payout_receipt(
+    receipt: &SpLiquidationPayoutReceipt,
+) -> Result<(), StabilityPoolError> {
+    let tuple = &receipt.tuple;
+    let total = tuple
+        .net_amount_raw
+        .checked_add(tuple.fee_raw)
+        .ok_or(StabilityPoolError::SystemBusy)?;
+    if total != tuple.gross_amount_raw {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let block =
+        rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(tuple.ledger, receipt.block_index)
+            .await
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed { reason })?;
+    rumi_protocol_backend::icrc3_proof::validate_icrc3_transfer_block_with_fee(
+        &block,
+        tuple.source.clone(),
+        tuple.destination.clone(),
+        tuple.net_amount_raw,
+        tuple.fee_raw,
+        &tuple.memo,
+        tuple.created_at_time_ns,
+    )
+    .map_err(|reason| StabilityPoolError::LedgerTransferFailed { reason })
+}
+
+async fn verify_sp_liquidation_v2_refund_receipt(
+    receipt: &SpLiquidationStableRefundReceipt,
+    token: SpLiquidationToken,
+) -> Result<(), StabilityPoolError> {
+    let tuple = &receipt.tuple;
+    let components = tuple
+        .principal_refund_raw
+        .checked_add(tuple.approval_fee_refund_raw)
+        .and_then(|value| value.checked_add(tuple.pull_fee_refund_raw))
+        .ok_or(StabilityPoolError::SystemBusy)?;
+    if components != tuple.amount_raw {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    if token != SpLiquidationToken::IcUsd {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "CK stable V2 refund proof is not enabled".into(),
+        });
+    }
+    let block =
+        rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(tuple.ledger, receipt.block_index)
+            .await
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed { reason })?;
+    validate_sp_v2_icusd_mint_refund_block(&block, tuple)
+        .map_err(|reason| StabilityPoolError::LedgerTransferFailed { reason })
+}
+
+fn validate_sp_v2_icusd_mint_refund_block(
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+    tuple: &SpLiquidationStableRefundTuple,
+) -> Result<(), String> {
+    if tuple.fee_raw != 0
+        || block.op != "mint"
+        || block.btype.as_deref().is_some_and(|kind| kind != "1mint")
+        || block.from.is_some()
+        || block.spender.is_some()
+        || !block.to.as_ref().is_some_and(|actual| {
+            rumi_protocol_backend::icrc3_proof::accounts_match(actual, &tuple.destination)
+        })
+        || block.amount != u128::from(tuple.amount_raw)
+        || block.transaction_fee.is_some()
+        || block.fee.is_some()
+        || block.memo.as_deref() != Some(tuple.memo.as_slice())
+        || block.created_at_time != Some(tuple.created_at_time_ns)
+        || block.expected_allowance.is_some()
+        || block.expires_at.is_some()
+    {
+        return Err(
+            "ICRC-3 block does not prove the exact fee-free icUSD mint refund tuple".into(),
+        );
+    }
+    Ok(())
+}
+
+fn default_account(owner: Principal) -> Account {
+    Account {
+        owner,
+        subaccount: None,
+    }
+}
+
+async fn dispatch_or_resume_sp_liquidation_v2(
+    request: SpLiquidationV2Request,
+) -> Result<(), StabilityPoolError> {
+    let protocol = read_state(|state| state.protocol_canister_id);
+    let result: Result<
+        (Result<SpLiquidationV2StatusView, rumi_protocol_backend::ProtocolError>,),
+        _,
+    > = call(protocol, "stability_pool_liquidate_v2", (request.clone(),)).await;
+    match result {
+        Ok((Ok(view),))
+            if view.stability_pool == ic_cdk::api::id()
+                && view.request_id == request.request_id
+                && view.request.as_ref() == Some(&request) =>
+        {
+            Ok(())
+        }
+        Ok((Ok(_),)) => Err(StabilityPoolError::SystemBusy),
+        Ok((Err(_),)) | Err(_) => {
+            mutate_state(|state| {
+                state.mark_sp_liquidation_v2_error(
+                    request.request_id,
+                    "backend liquidation call is ambiguous; durable request retained".into(),
+                )
+            })?;
+            Err(StabilityPoolError::InterCanisterCallFailed {
+                target: "Protocol".into(),
+                method: "stability_pool_liquidate_v2".into(),
+            })
+        }
+    }
+}
+
+/// Advance one durable V2 request by querying the authenticated backend
+/// journal, proving any candidate blocks locally, and applying each accounting
+/// transition once. All ambiguous paths retain the row and its balance fence.
+pub(crate) async fn recover_sp_liquidation_v2(request_id: u64) -> Result<(), StabilityPoolError> {
+    let Some(mut row) = read_state(|state| state.pending_sp_liquidation_v2(request_id)) else {
+        return acknowledge_completed_sp_liquidation_v2(request_id).await;
+    };
+    let request = if let Some(request) = row.backend_request.clone() {
+        request
+    } else {
+        if let Some(block_index) = row.approval_candidate_block_index {
+            let receipt = approval_receipt_for_row(&row, block_index);
+            if let Err(error) = verify_sp_liquidation_v2_approval_receipt(&receipt).await {
+                let _ = mutate_state(|state| {
+                    state.mark_sp_liquidation_v2_approval_dispatch(request_id, false, true, None)
+                });
+                let _ = mutate_state(|state| {
+                    state.mark_sp_liquidation_v2_error(
+                        request_id,
+                        format!("approval candidate did not prove the exact tuple: {error:?}"),
+                    )
+                });
+                return Err(error);
+            }
+            mutate_state(|state| {
+                state.account_sp_liquidation_v2_approval_fee(request_id, receipt)
+            })?;
+            row = read_state(|state| state.pending_sp_liquidation_v2(request_id))
+                .ok_or(StabilityPoolError::SystemBusy)?;
+            row.backend_request
+                .clone()
+                .ok_or(StabilityPoolError::SystemBusy)?
+        } else if row.approval_ambiguous_seen {
+            // No candidate index means the approval outcome cannot be cleared
+            // from absence. The public exact-block reconciliation path is
+            // required before any retry.
+            return Err(StabilityPoolError::SystemBusy);
+        } else {
+            let request = submit_sp_v2_approval(request_id).await?;
+            dispatch_or_resume_sp_liquidation_v2(request.clone()).await?;
+            return Ok(());
+        }
+    };
+    let protocol = read_state(|state| state.protocol_canister_id);
+    let (response,): (Result<SpLiquidationV2StatusView, rumi_protocol_backend::ProtocolError>,) =
+        call(
+            protocol,
+            "get_stability_pool_liquidation_v2_status",
+            (request_id,),
+        )
+        .await
+        .map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+            target: "Protocol".into(),
+            method: "get_stability_pool_liquidation_v2_status".into(),
+        })?;
+    let view = response.map_err(|_| StabilityPoolError::SystemBusy)?;
+    if view.stability_pool != ic_cdk::api::id() || view.request_id != request_id {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    match view.status {
+        SpLiquidationV2Status::Unseen => {
+            if view.request.is_some() {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            dispatch_or_resume_sp_liquidation_v2(request).await
+        }
+        SpLiquidationV2Status::StablePullPending {
+            tuple,
+            candidate_block_index,
+            last_error: _,
+        } => {
+            if view.request.as_ref() != Some(&request)
+                || tuple.to != tuple.spender
+                || tuple.ledger != row.stablecoin_ledger
+                || tuple.from != row.approval.owner
+                || tuple.spender != row.approval.spender
+                || tuple.amount_raw > row.request.amount
+                || tuple
+                    .amount_raw
+                    .checked_add(tuple.fee_raw)
+                    .is_none_or(|total| total > request.approval.tuple.allowance_raw)
+            {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            mutate_state(|state| {
+                state.record_sp_liquidation_v2_stable_pull_candidate(
+                    request_id,
+                    tuple.clone(),
+                    candidate_block_index,
+                )
+            })?;
+            if let Some(block_index) = candidate_block_index {
+                let receipt = SpLiquidationStablePullReceipt { block_index, tuple };
+                verify_sp_liquidation_v2_stable_receipt(&receipt, request.token).await?;
+            }
+            dispatch_or_resume_sp_liquidation_v2(request).await
+        }
+        SpLiquidationV2Status::CollateralPayoutSupersessionPending {
+            stable_pull_receipt,
+            result,
+            predecessor,
+            replacement,
+            evidence,
+            generation,
+        } => {
+            validate_sp_v2_collateral_tuple(&row, &predecessor, protocol)?;
+            validate_sp_v2_collateral_tuple(&row, &replacement, protocol)?;
+            if view.request.as_ref() != Some(&request)
+                || generation != 1
+                || replacement.gross_amount_raw != predecessor.gross_amount_raw
+                || result.collateral_amount_received != Some(predecessor.gross_amount_raw)
+                || row.payout_candidate_block_index.is_some()
+                || row.payout_receipt.is_some()
+                || row.payout_supersession_generation.is_none()
+            {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+
+            // Prove the already-committed stable pull before recording its
+            // accounting effect alongside the local tuple transition.
+            verify_sp_liquidation_v2_stable_receipt(&stable_pull_receipt, request.token).await?;
+            mutate_state(|state| {
+                state.adopt_sp_liquidation_v2_payout_supersession(
+                    request_id,
+                    &stable_pull_receipt,
+                    predecessor.clone(),
+                    replacement.clone(),
+                    &result,
+                    evidence.clone(),
+                    generation,
+                )
+            })?;
+
+            // Adoption is durable before this await. A lost accept reply is
+            // recovered by replaying the same generation and exact tuple pair.
+            accept_sp_liquidation_v2_payout_supersession(
+                request_id,
+                generation,
+                &predecessor,
+                &replacement,
+            )
+            .await?;
+            dispatch_or_resume_sp_liquidation_v2(request).await
+        }
+        SpLiquidationV2Status::CollateralPayoutPending {
+            stable_pull_receipt,
+            result,
+            tuple,
+            candidate_block_index,
+            last_error: _,
+        } => {
+            validate_sp_v2_collateral_tuple(&row, &tuple, protocol)?;
+            if view.request.as_ref() != Some(&request)
+                || result.collateral_amount_received != Some(tuple.gross_amount_raw)
+            {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            mutate_state(|state| {
+                state.record_sp_liquidation_v2_backend_receipts(
+                    request_id,
+                    stable_pull_receipt.clone(),
+                    tuple.clone(),
+                    candidate_block_index,
+                    result.clone(),
+                )
+            })?;
+            verify_sp_liquidation_v2_stable_receipt(&stable_pull_receipt, request.token).await?;
+            mutate_state(|state| {
+                state.apply_sp_liquidation_v2_stable_receipt(
+                    request_id,
+                    stable_pull_receipt,
+                    tuple.clone(),
+                    result,
+                )
+            })?;
+            let Some(block_index) = candidate_block_index else {
+                return dispatch_or_resume_sp_liquidation_v2(request).await;
+            };
+            let receipt = SpLiquidationPayoutReceipt { block_index, tuple };
+            mutate_state(|state| {
+                state.record_sp_liquidation_v2_payout_receipt(request_id, receipt.clone())
+            })?;
+            verify_sp_liquidation_v2_payout_receipt(&receipt).await?;
+            mutate_state(|state| {
+                state.finalize_sp_liquidation_v2_payout(request_id, ic_cdk::api::time())
+            })?;
+            acknowledge_completed_sp_liquidation_v2(request_id).await
+        }
+        SpLiquidationV2Status::Complete {
+            stable_pull_receipt,
+            result,
+            payout_receipt,
+        } => {
+            validate_sp_v2_collateral_tuple(&row, &payout_receipt.tuple, protocol)?;
+            if view.request.as_ref() != Some(&request)
+                || result.collateral_amount_received != Some(payout_receipt.tuple.gross_amount_raw)
+            {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            mutate_state(|state| {
+                state.record_sp_liquidation_v2_backend_receipts(
+                    request_id,
+                    stable_pull_receipt.clone(),
+                    payout_receipt.tuple.clone(),
+                    Some(payout_receipt.block_index),
+                    result.clone(),
+                )
+            })?;
+            verify_sp_liquidation_v2_stable_receipt(&stable_pull_receipt, request.token).await?;
+            mutate_state(|state| {
+                state.apply_sp_liquidation_v2_stable_receipt(
+                    request_id,
+                    stable_pull_receipt,
+                    payout_receipt.tuple.clone(),
+                    result,
+                )
+            })?;
+            verify_sp_liquidation_v2_payout_receipt(&payout_receipt).await?;
+            mutate_state(|state| {
+                state.record_sp_liquidation_v2_payout_receipt(request_id, payout_receipt)
+            })?;
+            mutate_state(|state| {
+                state.finalize_sp_liquidation_v2_payout(request_id, ic_cdk::api::time())
+            })?;
+            acknowledge_completed_sp_liquidation_v2(request_id).await
+        }
+        SpLiquidationV2Status::StablePullRefundPending {
+            stable_pull_receipt,
+            tuple,
+            candidate_block_index,
+            last_error: _,
+        } => {
+            validate_sp_v2_refund_tuple(&row, stable_pull_receipt.as_ref(), &tuple, protocol)?;
+            if view.request.as_ref() != Some(&request) {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            if let Some(pull) = &stable_pull_receipt {
+                mutate_state(|state| {
+                    state.record_sp_liquidation_v2_stable_pull_candidate(
+                        request_id,
+                        pull.tuple.clone(),
+                        Some(pull.block_index),
+                    )
+                })?;
+                verify_sp_liquidation_v2_stable_receipt(pull, request.token).await?;
+                mutate_state(|state| {
+                    state.apply_sp_liquidation_v2_refundable_stable_pull(request_id, pull.clone())
+                })?;
+            }
+            mutate_state(|state| {
+                state.record_sp_liquidation_v2_refund_tuple(
+                    request_id,
+                    tuple.clone(),
+                    candidate_block_index,
+                )
+            })?;
+            let Some(block_index) = candidate_block_index else {
+                return dispatch_or_resume_sp_liquidation_v2(request).await;
+            };
+            let receipt = SpLiquidationStableRefundReceipt { block_index, tuple };
+            verify_sp_liquidation_v2_refund_receipt(&receipt, request.token).await?;
+            mutate_state(|state| {
+                state.apply_sp_liquidation_v2_refund_receipt(request_id, receipt)
+            })?;
+            acknowledge_completed_sp_liquidation_v2(request_id).await
+        }
+        SpLiquidationV2Status::StablePullRefunded {
+            stable_pull_receipt,
+            refund_receipt,
+            ..
+        } => {
+            validate_sp_v2_refund_tuple(
+                &row,
+                stable_pull_receipt.as_ref(),
+                &refund_receipt.tuple,
+                protocol,
+            )?;
+            if view.request.as_ref() != Some(&request) {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            if let Some(pull) = &stable_pull_receipt {
+                mutate_state(|state| {
+                    state.record_sp_liquidation_v2_stable_pull_candidate(
+                        request_id,
+                        pull.tuple.clone(),
+                        Some(pull.block_index),
+                    )
+                })?;
+                verify_sp_liquidation_v2_stable_receipt(pull, request.token).await?;
+                mutate_state(|state| {
+                    state.apply_sp_liquidation_v2_refundable_stable_pull(request_id, pull.clone())
+                })?;
+            }
+            mutate_state(|state| {
+                state.record_sp_liquidation_v2_refund_tuple(
+                    request_id,
+                    refund_receipt.tuple.clone(),
+                    Some(refund_receipt.block_index),
+                )
+            })?;
+            verify_sp_liquidation_v2_refund_receipt(&refund_receipt, request.token).await?;
+            mutate_state(|state| {
+                state.apply_sp_liquidation_v2_refund_receipt(request_id, refund_receipt)
+            })?;
+            acknowledge_completed_sp_liquidation_v2(request_id).await
+        }
+        SpLiquidationV2Status::Rejected { reason } => {
+            mutate_state(|state| state.mark_sp_liquidation_v2_error(request_id, reason))?;
+            Err(StabilityPoolError::SystemBusy)
+        }
+        SpLiquidationV2Status::Acknowledged => Err(StabilityPoolError::SystemBusy),
+    }
+}
+
+fn validate_sp_v2_collateral_tuple(
+    row: &PendingSpLiquidationV2,
+    tuple: &SpLiquidationPayoutTuple,
+    protocol: Principal,
+) -> Result<(), StabilityPoolError> {
+    if tuple.ledger != row.collateral_type
+        || tuple.collateral_type != row.collateral_type
+        || tuple.source != default_account(protocol)
+        || tuple.destination != default_account(ic_cdk::api::id())
+        || tuple.gross_amount_raw
+            != tuple
+                .net_amount_raw
+                .checked_add(tuple.fee_raw)
+                .ok_or(StabilityPoolError::SystemBusy)?
+    {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(())
+}
+
+fn validate_sp_v2_refund_tuple(
+    row: &PendingSpLiquidationV2,
+    pull: Option<&SpLiquidationStablePullReceipt>,
+    tuple: &SpLiquidationStableRefundTuple,
+    protocol: Principal,
+) -> Result<(), StabilityPoolError> {
+    let principal = pull.map_or(0, |receipt| receipt.tuple.amount_raw);
+    let pull_fee = pull.map_or(0, |receipt| receipt.tuple.fee_raw);
+    let expected = principal
+        .checked_add(pull_fee)
+        .and_then(|amount| amount.checked_add(row.approval.fee_raw))
+        .ok_or(StabilityPoolError::SystemBusy)?;
+    if tuple.ledger != row.stablecoin_ledger
+        || tuple.source != default_account(protocol)
+        || tuple.destination != default_account(ic_cdk::api::id())
+        || tuple.principal_refund_raw != principal
+        || tuple.pull_fee_refund_raw != pull_fee
+        || tuple.approval_fee_refund_raw != row.approval.fee_raw
+        || tuple.amount_raw != expected
+    {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(())
+}
+
+async fn query_exact_ledger_fee(ledger: Principal) -> Result<u64, StabilityPoolError> {
+    let (fee,): (Nat,) = call(ledger, "icrc1_fee", ()).await.map_err(|_| {
+        StabilityPoolError::LedgerTransferFailed {
+            reason: "could not query exact ICRC-1 fee before SP V2 approval".into(),
+        }
+    })?;
+    fee.0
+        .to_u64()
+        .ok_or_else(|| StabilityPoolError::LedgerTransferFailed {
+            reason: "ICRC-1 fee exceeds the supported u64 accounting range".into(),
+        })
+}
+
+fn make_sp_v2_approval_tuple(
+    ledger: Principal,
+    pool: Principal,
+    protocol: Principal,
+    allowance_raw: u64,
+    fee_raw: u64,
+    vault_id: u64,
+    created_at_time_ns: u64,
+    expires_at_ns: u64,
+) -> SpLiquidationV2ApprovalTuple {
+    let memo = format!("sp-v2-approval/{vault_id}/{created_at_time_ns}").into_bytes();
+    SpLiquidationV2ApprovalTuple {
+        ledger,
+        owner: default_account(pool),
+        spender: default_account(protocol),
+        allowance_raw,
+        fee_raw,
+        memo,
+        created_at_time_ns,
+        expires_at_ns,
+        fee_accounted: false,
+    }
+}
+
+async fn submit_sp_v2_approval(
+    request_id: u64,
+) -> Result<SpLiquidationV2Request, StabilityPoolError> {
+    let mut row = read_state(|state| state.pending_sp_liquidation_v2(request_id))
+        .ok_or(StabilityPoolError::SystemBusy)?;
+    if row.backend_request.is_some() {
+        return Ok(row.backend_request.unwrap());
+    }
+    if row.approval_proven_no_effect {
+        let fee = query_exact_ledger_fee(row.stablecoin_ledger).await?;
+        let pull_fee = match row.request.token {
+            SpLiquidationToken::IcUsd => 0,
+            SpLiquidationToken::CKUSDT | SpLiquidationToken::CKUSDC => {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+        };
+        let (allowance, required_pool_balance) =
+            sp_v2_approval_preflight_amounts(row.request.amount, fee, pull_fee)
+                .ok_or(StabilityPoolError::SystemBusy)?;
+        let available = read_state(|state| {
+            state.available_stablecoin_for_collateral(row.stablecoin_ledger, &row.collateral_type)
+        })?;
+        if available < required_pool_balance {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+        let now =
+            mutate_state(|state| state.allocate_outbound_payout_timestamp(ic_cdk::api::time()))?;
+        let expires = now
+            .checked_add(300_000_000_000)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        let approval = make_sp_v2_approval_tuple(
+            row.stablecoin_ledger,
+            ic_cdk::api::id(),
+            read_state(|state| state.protocol_canister_id),
+            allowance,
+            fee,
+            row.request.vault_id,
+            now,
+            expires,
+        );
+        mutate_state(|state| {
+            state.reprice_sp_liquidation_v2_approval_after_no_effect(request_id, approval)
+        })?;
+        row = read_state(|state| state.pending_sp_liquidation_v2(request_id))
+            .ok_or(StabilityPoolError::SystemBusy)?;
+    }
+    let tuple = &row.approval;
+    let args = ApproveArgs {
+        from_subaccount: None,
+        spender: tuple.spender.clone(),
+        amount: Nat::from(tuple.allowance_raw),
+        expected_allowance: None,
+        expires_at: Some(tuple.expires_at_ns),
+        fee: Some(Nat::from(tuple.fee_raw)),
+        memo: Some(Memo::from(tuple.memo.clone())),
+        created_at_time: Some(tuple.created_at_time_ns),
+    };
+    mutate_state(|state| {
+        state.mark_sp_liquidation_v2_approval_dispatch(request_id, true, false, None)
+    })?;
+    let result: Result<(Result<Nat, ApproveError>,), _> =
+        call(tuple.ledger, "icrc2_approve", (args,)).await;
+    let block_index = match result {
+        Ok((Ok(index),)) => match index.0.to_u64() {
+            Some(index) => index,
+            None => {
+                mutate_state(|state| {
+                    state.mark_sp_liquidation_v2_approval_dispatch(request_id, false, true, None)
+                })?;
+                return Err(StabilityPoolError::SystemBusy);
+            }
+        },
+        Ok((Err(ApproveError::Duplicate { duplicate_of }),)) => {
+            let index = duplicate_of.0.to_u64();
+            mutate_state(|state| {
+                state.mark_sp_liquidation_v2_approval_dispatch(request_id, false, true, None)
+            })?;
+            let Some(index) = index else {
+                return Err(StabilityPoolError::SystemBusy);
+            };
+            index
+        }
+        Ok((Err(error),)) => {
+            let no_effect = matches!(
+                error,
+                ApproveError::BadFee { .. }
+                    | ApproveError::InsufficientFunds { .. }
+                    | ApproveError::AllowanceChanged { .. }
+                    | ApproveError::Expired { .. }
+                    | ApproveError::TooOld
+                    | ApproveError::CreatedInFuture { .. }
+            );
+            if no_effect {
+                mutate_state(|state| {
+                    state.mark_sp_liquidation_v2_approval_no_effect(
+                        request_id,
+                        format!("approval had typed no-effect result: {error:?}"),
+                    )
+                })?;
+            } else {
+                mutate_state(|state| {
+                    state.mark_sp_liquidation_v2_approval_dispatch(request_id, false, true, None)
+                })?;
+            }
+            return Err(StabilityPoolError::LedgerTransferFailed {
+                reason: format!("ICRC-2 approval failed: {error:?}"),
+            });
+        }
+        Err(_) => {
+            mutate_state(|state| {
+                state.mark_sp_liquidation_v2_approval_dispatch(request_id, false, true, None)
+            })?;
+            return Err(StabilityPoolError::InterCanisterCallFailed {
+                target: tuple.ledger.to_text(),
+                method: "icrc2_approve".into(),
+            });
+        }
+    };
+    let receipt = SpLiquidationApprovalReceipt {
+        block_index,
+        tuple: SpLiquidationApprovalTuple {
+            ledger: tuple.ledger,
+            owner: tuple.owner.clone(),
+            spender: tuple.spender.clone(),
+            allowance_raw: tuple.allowance_raw,
+            fee_raw: tuple.fee_raw,
+            memo: tuple.memo.clone(),
+            created_at_time_ns: tuple.created_at_time_ns,
+            expires_at_ns: tuple.expires_at_ns,
+        },
+    };
+    if let Err(error) = verify_sp_liquidation_v2_approval_receipt(&receipt).await {
+        mutate_state(|state| {
+            state.mark_sp_liquidation_v2_approval_dispatch(request_id, false, true, None)
+        })?;
+        mutate_state(|state| {
+            state.mark_sp_liquidation_v2_error(
+                request_id,
+                format!("approval receipt proof failed: {error:?}"),
+            )
+        })?;
+        return Err(error);
+    }
+    mutate_state(|state| state.account_sp_liquidation_v2_approval_fee(request_id, receipt))?;
+    read_state(|state| {
+        state
+            .pending_sp_liquidation_v2(request_id)
+            .and_then(|row| row.backend_request)
+    })
+    .ok_or(StabilityPoolError::SystemBusy)
+}
+
+fn approval_receipt_for_row(
+    row: &PendingSpLiquidationV2,
+    block_index: u64,
+) -> SpLiquidationApprovalReceipt {
+    SpLiquidationApprovalReceipt {
+        block_index,
+        tuple: SpLiquidationApprovalTuple {
+            ledger: row.approval.ledger,
+            owner: row.approval.owner.clone(),
+            spender: row.approval.spender.clone(),
+            allowance_raw: row.approval.allowance_raw,
+            fee_raw: row.approval.fee_raw,
+            memo: row.approval.memo.clone(),
+            created_at_time_ns: row.approval.created_at_time_ns,
+            expires_at_ns: row.approval.expires_at_ns,
+        },
+    }
+}
+
+/// Additive ICRC-collateral liquidation entrypoint. The SP chooses a monotonic
+/// local request ID and persists its exact intent before approval; retries
+/// resume that same ID and payload.
+pub async fn execute_liquidation_v2(
+    vault_id: u64,
+    token: SpLiquidationToken,
+    max_principal_pull_raw: u64,
+) -> Result<u64, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    if read_state(|state| state.configuration.emergency_pause) {
+        return Err(StabilityPoolError::EmergencyPaused);
+    }
+    if max_principal_pull_raw == 0 {
+        return Err(StabilityPoolError::InsufficientPoolBalance);
+    }
+    if let Some(existing) = read_state(|state| state.pending_sp_liquidation_v2_for_vault(vault_id))
+    {
+        if existing.request.amount != max_principal_pull_raw || existing.request.token != token {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        let _guard =
+            crate::pool_guard::SpLiquidationGuard::new_v2_resume(existing.request.request_id)?;
+        let request = if let Some(request) = existing.backend_request.clone() {
+            request
+        } else if let Some(block_index) = existing.approval_candidate_block_index {
+            let receipt = approval_receipt_for_row(&existing, block_index);
+            verify_sp_liquidation_v2_approval_receipt(&receipt).await?;
+            mutate_state(|state| {
+                state.account_sp_liquidation_v2_approval_fee(existing.request.request_id, receipt)
+            })?;
+            read_state(|state| {
+                state
+                    .pending_sp_liquidation_v2(existing.request.request_id)
+                    .and_then(|row| row.backend_request)
+            })
+            .ok_or(StabilityPoolError::SystemBusy)?
+        } else if existing.approval_ambiguous_seen {
+            return Err(StabilityPoolError::SystemBusy);
+        } else {
+            match submit_sp_v2_approval(existing.request.request_id).await {
+                Ok(request) => request,
+                Err(_) => return Ok(existing.request.request_id),
+            }
+        };
+        let _ = dispatch_or_resume_sp_liquidation_v2(request.clone()).await;
+        let _ = recover_sp_liquidation_v2(request.request_id).await;
+        return Ok(request.request_id);
+    }
+
+    if !sp_liquidation_v2_token_supported(token) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+
+    // An old V1 marker survives upgrades and has no V2 receipt binding. Do not
+    // admit a second liquidation for that vault while it remains unresolved.
+    if read_state(|state| state.in_flight_liquidations.contains(&vault_id)) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    // The backend executor is fail-closed pending real-ledger receipt proof.
+    // This gate is deliberately after the existing-row branch so recovery,
+    // status, and ACK handling for durable rows continue to work.
+    if !SP_LIQUIDATION_V2_ADMISSION_ENABLED {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+
+    let _guard = crate::pool_guard::SpLiquidationGuard::new()?;
+    let protocol = read_state(|state| state.protocol_canister_id);
+    let (vaults,): (Vec<rumi_protocol_backend::vault::CandidVault>,) =
+        call(protocol, "get_liquidatable_vaults", ())
+            .await
+            .map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+                target: "Protocol".into(),
+                method: "get_liquidatable_vaults".into(),
+            })?;
+    let vault = vaults
+        .into_iter()
+        .find(|vault| vault.vault_id == vault_id)
+        .ok_or(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "vault is not currently liquidatable".into(),
+        })?;
+    let (collateral_ok, token_ledger, stable_config) = read_state(|state| {
+        let collateral_ok = !state.collateral_requires_payout_address(&vault.collateral_type)
+            && !state.is_chain_collateral_sentinel(&vault.collateral_type)
+            && state
+                .collateral_registry
+                .get(&vault.collateral_type)
+                .is_some_and(|collateral| collateral.status == CollateralStatus::Active);
+        let expected_symbol = match token {
+            SpLiquidationToken::IcUsd => "icUSD",
+            SpLiquidationToken::CKUSDT => "ckUSDT",
+            SpLiquidationToken::CKUSDC => "ckUSDC",
+        };
+        let stable = state
+            .stablecoin_registry
+            .values()
+            .find(|config| {
+                config.symbol == expected_symbol
+                    && config.is_active
+                    && !config.is_lp_token.unwrap_or(false)
+            })
+            .cloned();
+        (
+            collateral_ok,
+            stable.as_ref().map(|config| config.ledger_id),
+            stable,
+        )
+    });
+    if !collateral_ok {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let config = stable_config.ok_or(StabilityPoolError::SystemBusy)?;
+    let ledger = token_ledger.ok_or(StabilityPoolError::SystemBusy)?;
+    if crate::pool_balance_mutation_blocked_for_ledger(ledger) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let fee = query_exact_ledger_fee(ledger).await?;
+    let (allowance, required_pool_balance) = sp_v2_approval_preflight_amounts(
+        max_principal_pull_raw,
+        fee,
+        0, // verified icUSD minting-account pull is a fee-free burn
+    )
+    .ok_or(StabilityPoolError::SystemBusy)?;
+    let available = read_state(|state| {
+        state.available_stablecoin_for_collateral(ledger, &vault.collateral_type)
+    })?;
+    if available < required_pool_balance {
+        return Err(StabilityPoolError::InsufficientPoolBalance);
+    }
+    let created_at =
+        mutate_state(|state| state.allocate_outbound_payout_timestamp(ic_cdk::api::time()))?;
+    let expires_at = created_at
+        .checked_add(300_000_000_000)
+        .ok_or(StabilityPoolError::SystemBusy)?;
+    let approval = make_sp_v2_approval_tuple(
+        ledger,
+        ic_cdk::api::id(),
+        protocol,
+        allowance,
+        fee,
+        vault_id,
+        created_at,
+        expires_at,
+    );
+    let request_id = mutate_state(|state| {
+        state
+            .prepare_sp_liquidation_v2(
+                vault_id,
+                vault.collateral_type,
+                0,
+                ledger,
+                max_principal_pull_raw,
+                token,
+                approval,
+            )
+            .map(|row| row.request.request_id)
+    })?;
+    let request = match submit_sp_v2_approval(request_id).await {
+        Ok(request) => request,
+        Err(_) => return Ok(request_id),
+    };
+    let _ = dispatch_or_resume_sp_liquidation_v2(request.clone()).await;
+    let _ = recover_sp_liquidation_v2(request_id).await;
+    Ok(request_id)
+}
+
+pub async fn retry_sp_liquidation_v2(request_id: u64) -> Result<(), StabilityPoolError> {
+    if ic_cdk::api::caller() == Principal::anonymous() {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    if let Some(row) = read_state(|state| state.pending_sp_liquidation_v2(request_id)) {
+        execute_liquidation_v2(row.request.vault_id, row.request.token, row.request.amount)
+            .await
+            .map(|_| ())
+    } else {
+        recover_sp_liquidation_v2(request_id).await
+    }
+}
+
+pub async fn reconcile_sp_liquidation_v2_approval(
+    request_id: u64,
+    block_index: u64,
+) -> Result<(), StabilityPoolError> {
+    if ic_cdk::api::caller() == Principal::anonymous() {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let _guard = crate::pool_guard::SpLiquidationGuard::new_v2_resume(request_id)?;
+    let row = read_state(|state| state.pending_sp_liquidation_v2(request_id))
+        .ok_or(StabilityPoolError::SystemBusy)?;
+    if row.backend_request.is_some()
+        || row.approval.fee_accounted
+        || row.approval_dispatch_in_flight
+        || !row.approval_ambiguous_seen
+        || row
+            .approval_candidate_block_index
+            .is_some_and(|saved| saved != block_index)
+    {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let receipt = approval_receipt_for_row(&row, block_index);
+    verify_sp_liquidation_v2_approval_receipt(&receipt).await?;
+    // Candidate indexes are caller supplied. Persist/account one only after
+    // the ledger has proved the exact immutable approval tuple, and ensure the
+    // row did not change while the archive-aware proof was fetched.
+    if read_state(|state| state.pending_sp_liquidation_v2(request_id)) != Some(row) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    mutate_state(|state| state.account_sp_liquidation_v2_approval_fee(request_id, receipt))?;
+    let request = read_state(|state| {
+        state
+            .pending_sp_liquidation_v2(request_id)
+            .and_then(|saved| saved.backend_request)
+    })
+    .ok_or(StabilityPoolError::SystemBusy)?;
+    dispatch_or_resume_sp_liquidation_v2(request).await?;
+    recover_sp_liquidation_v2(request_id).await
+}
+
+/// Attach an operator-discovered ICRC-3 block to a stable pull whose dispatch
+/// had an ambiguous outcome. The backend remains the authoritative verifier;
+/// this canister independently checks the same exact tuple before persisting
+/// the candidate so a lost backend reply can be retried idempotently.
+pub async fn reconcile_sp_liquidation_v2_stable_pull(
+    request_id: u64,
+    vault_id: u64,
+    block_index: u64,
+) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let _guard = crate::pool_guard::SpLiquidationGuard::new_v2_resume(request_id)?;
+    let row = read_state(|state| state.pending_sp_liquidation_v2(request_id))
+        .ok_or(StabilityPoolError::SystemBusy)?;
+    if row.request.vault_id != vault_id
+        || !row.ambiguous_seen
+        || row.stable_debit_applied
+        || row.stable_pull_receipt.is_some()
+        || row
+            .stable_pull_candidate_block_index
+            .is_some_and(|saved| saved != block_index)
+    {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let request = row
+        .backend_request
+        .clone()
+        .ok_or(StabilityPoolError::SystemBusy)?;
+    let protocol = read_state(|state| state.protocol_canister_id);
+    let (status,): (Result<SpLiquidationV2StatusView, rumi_protocol_backend::ProtocolError>,) =
+        call(
+            protocol,
+            "get_stability_pool_liquidation_v2_status",
+            (request_id,),
+        )
+        .await
+        .map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+            target: "Protocol".into(),
+            method: "get_stability_pool_liquidation_v2_status".into(),
+        })?;
+    let view = status.map_err(|_| StabilityPoolError::SystemBusy)?;
+    let tuple = match view.status {
+        SpLiquidationV2Status::StablePullPending {
+            tuple,
+            candidate_block_index,
+            ..
+        } if view.stability_pool == ic_cdk::api::id()
+            && view.request_id == request_id
+            && view.request.as_ref() == Some(&request)
+            && candidate_block_index.is_none_or(|saved| saved == block_index) =>
+        {
+            tuple
+        }
+        _ => return Err(StabilityPoolError::SystemBusy),
+    };
+    if tuple.ledger != row.stablecoin_ledger
+        || tuple.from != row.approval.owner
+        || tuple.spender != row.approval.spender
+        || tuple.to != tuple.spender
+        || tuple.amount_raw == 0
+        || tuple.amount_raw > row.request.amount
+        || tuple
+            .amount_raw
+            .checked_add(tuple.fee_raw)
+            .is_none_or(|total| total > request.approval.tuple.allowance_raw)
+    {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let receipt = SpLiquidationStablePullReceipt {
+        block_index,
+        tuple: SpLiquidationStablePullTuple {
+            op_nonce: tuple.op_nonce,
+            ledger: tuple.ledger,
+            from: tuple.from.clone(),
+            spender: tuple.spender.clone(),
+            to: tuple.to.clone(),
+            amount_raw: tuple.amount_raw,
+            fee_raw: tuple.fee_raw,
+            memo: tuple.memo.clone(),
+            created_at_time_ns: tuple.created_at_time_ns,
+        },
+    };
+    verify_sp_liquidation_v2_stable_receipt(&receipt, request.token).await?;
+    if read_state(|state| state.pending_sp_liquidation_v2(request_id)) != Some(row.clone()) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    mutate_state(|state| {
+        state.record_sp_liquidation_v2_stable_pull_candidate(
+            request_id,
+            receipt.tuple.clone(),
+            Some(block_index),
+        )
+    })?;
+
+    let (attached,): (Result<(), rumi_protocol_backend::ProtocolError>,) = call(
+        protocol,
+        "attach_stability_pool_liquidation_v2_receipt",
+        (
+            request_id,
+            rumi_protocol_backend::SpLiquidationV2ReceiptKind::StablePull,
+            block_index,
+        ),
+    )
+    .await
+    .map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+        target: "Protocol".into(),
+        method: "attach_stability_pool_liquidation_v2_receipt".into(),
+    })?;
+    attached.map_err(|_| StabilityPoolError::SystemBusy)?;
+    recover_sp_liquidation_v2(request_id).await
+}
 
 /// Conservative fallback for a collateral ledger's transfer fee, used only when
 /// the live `icrc1_fee` query fails (SP-104). Set to the common ICRC fee
@@ -19,6 +1360,39 @@ use crate::types::*;
 /// them as a fee=0 fallback would. The next successful liquidation reconciles.
 /// Shared with `claim_collateral`'s fee lookup (ICRC-004 / SP-203).
 pub(crate) const FALLBACK_COLLATERAL_FEE_E8S: u64 = 10_000;
+
+#[derive(Clone, Debug)]
+pub(crate) struct IcusdBurnAttemptError {
+    pub error: StabilityPoolError,
+    pub definitive_no_effect: bool,
+}
+
+impl IcusdBurnAttemptError {
+    fn definite(error: StabilityPoolError) -> Self {
+        Self {
+            error,
+            definitive_no_effect: true,
+        }
+    }
+
+    fn ambiguous(error: StabilityPoolError) -> Self {
+        Self {
+            error,
+            definitive_no_effect: false,
+        }
+    }
+}
+
+fn ledger_transfer_error_proves_no_effect(error: &TransferError) -> bool {
+    matches!(
+        error,
+        TransferError::BadFee { .. }
+            | TransferError::BadBurn { .. }
+            | TransferError::InsufficientFunds { .. }
+            | TransferError::CreatedInFuture { .. }
+            | TransferError::TooOld
+    )
+}
 
 pub(crate) const CHAIN_WRITEDOWN_MEMO_PREFIX: &[u8] = b"RUMI-LIQ-004:";
 
@@ -56,6 +1430,157 @@ pub fn build_icusd_burn_proof(
     }
 }
 
+/// Validate a ledger-history hit against the complete persisted burn identity.
+/// The canonical icUSD ledger exposes ICRC-1 burns as `1burn`; requiring that
+/// type prevents a transfer or ICRC-2 operation from being mistaken for the
+/// pool's burn.
+pub(crate) fn validate_icusd_burn_reconciliation_block(
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+    sp_principal: Principal,
+    minting_account: Account,
+    amount_e8s: u64,
+    vault_id: u64,
+    created_at_time_ns: u64,
+) -> Result<(), String> {
+    // The pinned icUSD ledger's ICRC-3 blocks use the legacy `op=burn`
+    // shape without top-level `btype`; standard ledgers use `1burn`. Both
+    // identify a burn, while any other explicit block type remains rejected.
+    if block.op != "burn" || block.btype.as_deref().is_some_and(|btype| btype != "1burn") {
+        return Err(format!(
+            "block is not a canonical ICRC-1 burn (btype={:?}, op={})",
+            block.btype, block.op
+        ));
+    }
+    if block.from.as_ref().map_or(true, |account| {
+        account.owner != sp_principal || account.subaccount.unwrap_or([0; 32]) != [0; 32]
+    }) {
+        return Err("burn source is not the stability pool default account".into());
+    }
+    if block.to.is_some() || block.spender.is_some() {
+        return Err("burn has an unexpected destination or spender".into());
+    }
+    if block.amount != amount_e8s as u128 {
+        return Err("burn amount does not match the pending intent".into());
+    }
+    if block.memo.as_deref() != Some(encode_chain_writedown_memo(vault_id).as_slice()) {
+        return Err("burn memo does not match the pending vault".into());
+    }
+    if block.created_at_time != Some(created_at_time_ns) {
+        return Err("burn timestamp does not match the pending intent".into());
+    }
+    // The minting account is accepted as part of the caller's captured
+    // identity for symmetry with ledger configuration, but an ICRC-1 burn
+    // block has no destination to compare against it.
+    let _ = minting_account;
+    Ok(())
+}
+
+fn expected_sp_burn_refund_memo(burn_block_index: u64, vault_id: u64) -> Vec<u8> {
+    let mut memo = b"RSPRFND:".to_vec();
+    memo.extend_from_slice(&burn_block_index.to_be_bytes());
+    memo.extend_from_slice(&vault_id.to_be_bytes());
+    memo
+}
+
+/// Accept the original refund identity and backend retry identities derived
+/// from it. The backend appends a nonzero big-endian ordinal after a proven
+/// TooOld rejection; all other memo shapes remain invalid.
+fn sp_burn_refund_memo_matches(memo: &[u8], burn_block_index: u64, vault_id: u64) -> bool {
+    let expected = expected_sp_burn_refund_memo(burn_block_index, vault_id);
+    if memo == expected {
+        return true;
+    }
+    if memo.len() != expected.len() + 8 || !memo.starts_with(&expected) {
+        return false;
+    }
+    u64::from_be_bytes(
+        memo[expected.len()..]
+            .try_into()
+            .expect("validated eight-byte retry ordinal"),
+    ) != 0
+}
+
+fn validate_sp_burn_refund_receipt(
+    intent: &ChainSpAbsorbIntent,
+    receipt: &rumi_protocol_backend::sp_burn_refund::SpBurnRefundReceipt,
+    sp_principal: Principal,
+) -> Result<(), StabilityPoolError> {
+    let proof = intent.burn_proof.as_ref();
+    if receipt.vault_id != intent.vault_id
+        || receipt.amount_e8s != intent.icusd_to_burn_e8s
+        || receipt.ledger != intent.icusd_ledger
+        || receipt.recipient != sp_principal
+        || receipt.burn_block_index != proof.map(|proof| proof.block_index).unwrap_or(u64::MAX)
+        || !sp_burn_refund_memo_matches(
+            &receipt.refund_memo,
+            receipt.burn_block_index,
+            intent.vault_id,
+        )
+    {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "backend burn refund receipt does not match the exact pending chain intent"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) async fn refund_and_verify_sp_burn(
+    protocol_id: Principal,
+    vault_id: u64,
+    amount_e8s: u64,
+    ledger: Principal,
+    proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+) -> Result<rumi_protocol_backend::sp_burn_refund::SpBurnRefundReceipt, StabilityPoolError> {
+    let (result,): (
+        Result<
+            rumi_protocol_backend::sp_burn_refund::SpBurnRefundReceipt,
+            rumi_protocol_backend::ProtocolError,
+        >,
+    ) = call(
+        protocol_id,
+        "refund_stability_pool_burn",
+        (vault_id, amount_e8s, proof.clone()),
+    )
+    .await
+    .map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+        target: protocol_id.to_string(),
+        method: "refund_stability_pool_burn".into(),
+    })?;
+    let receipt = result.map_err(|error| StabilityPoolError::LiquidationFailed {
+        vault_id,
+        reason: format!("backend rejected exact icUSD burn refund: {error:?}"),
+    })?;
+    if receipt.vault_id != vault_id
+        || receipt.amount_e8s != amount_e8s
+        || receipt.ledger != ledger
+        || receipt.recipient != ic_cdk::id()
+        || receipt.burn_block_index != proof.block_index
+        || !sp_burn_refund_memo_matches(&receipt.refund_memo, proof.block_index, vault_id)
+    {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "backend burn refund receipt does not match original icUSD burn".into(),
+        });
+    }
+    rumi_protocol_backend::icrc3_proof::verify_icrc3_transfer_block(
+        ledger,
+        receipt.refund_block_index,
+        None,
+        Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },
+        amount_e8s,
+        Some(&receipt.refund_memo),
+        Some(receipt.refund_created_at_time),
+    )
+    .await
+    .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+        reason: format!("icUSD refund block failed independent verification: {reason}"),
+    })?;
+    Ok(receipt)
+}
+
 pub async fn fetch_icusd_minting_account(
     icusd_ledger: Principal,
 ) -> Result<Account, StabilityPoolError> {
@@ -71,15 +1596,17 @@ pub async fn fetch_icusd_minting_account(
     }
 }
 
-pub async fn burn_icusd_for_chain_writedown_with_account(
+pub(crate) async fn burn_icusd_for_chain_writedown_with_account(
     icusd_ledger: Principal,
     minting_account: Account,
     amount_e8s: u64,
     vault_id: u64,
     created_at_time: u64,
-) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, StabilityPoolError> {
+) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, IcusdBurnAttemptError> {
     if amount_e8s == 0 {
-        return Err(StabilityPoolError::AmountTooLow { minimum_e8s: 1 });
+        return Err(IcusdBurnAttemptError::definite(
+            StabilityPoolError::AmountTooLow { minimum_e8s: 1 },
+        ));
     }
     let transfer_arg =
         build_icusd_burn_transfer_arg(minting_account, amount_e8s, vault_id, created_at_time);
@@ -88,32 +1615,43 @@ pub async fn burn_icusd_for_chain_writedown_with_account(
         call(icusd_ledger, "icrc1_transfer", (transfer_arg,)).await;
 
     let block_index = match result {
-        Ok((Ok(block_index),)) => nat_block_index_to_u64(block_index)?,
+        Ok((Ok(block_index),)) => {
+            nat_block_index_to_u64(block_index).map_err(IcusdBurnAttemptError::ambiguous)?
+        }
         Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
-            nat_block_index_to_u64(duplicate_of)?
+            nat_block_index_to_u64(duplicate_of).map_err(IcusdBurnAttemptError::ambiguous)?
         }
         Ok((Err(error),)) => {
-            return Err(StabilityPoolError::LedgerTransferFailed {
+            let failure = StabilityPoolError::LedgerTransferFailed {
                 reason: format!("{:?}", error),
+            };
+            return Err(if ledger_transfer_error_proves_no_effect(&error) {
+                IcusdBurnAttemptError::definite(failure)
+            } else {
+                IcusdBurnAttemptError::ambiguous(failure)
             });
         }
         Err(_) => {
-            return Err(StabilityPoolError::InterCanisterCallFailed {
-                target: format!("{}", icusd_ledger),
-                method: "icrc1_transfer".to_string(),
-            });
+            return Err(IcusdBurnAttemptError::ambiguous(
+                StabilityPoolError::InterCanisterCallFailed {
+                    target: format!("{}", icusd_ledger),
+                    method: "icrc1_transfer".to_string(),
+                },
+            ));
         }
     };
 
     Ok(build_icusd_burn_proof(block_index, vault_id))
 }
 
-pub async fn burn_icusd_for_chain_writedown(
+pub(crate) async fn burn_icusd_for_chain_writedown(
     icusd_ledger: Principal,
     amount_e8s: u64,
     vault_id: u64,
-) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, StabilityPoolError> {
-    let minting_account = fetch_icusd_minting_account(icusd_ledger).await?;
+) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, IcusdBurnAttemptError> {
+    let minting_account = fetch_icusd_minting_account(icusd_ledger)
+        .await
+        .map_err(IcusdBurnAttemptError::definite)?;
     burn_icusd_for_chain_writedown_with_account(
         icusd_ledger,
         minting_account,
@@ -287,7 +1825,7 @@ fn native_xrp_intent_matches_plan(
         && intent.allocations == plan.allocations
 }
 
-fn native_xrp_request_from_intent(
+pub(crate) fn native_xrp_request_from_intent(
     intent: &NativeXrpAbsorbIntent,
     proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
 ) -> XrpSpAbsorbRequest {
@@ -325,6 +1863,7 @@ pub(crate) fn prepare_or_reuse_native_xrp_absorb_intent_in_state(
         collateral_price_e8s: plan.collateral_price_e8s,
         allocations: plan.allocations.clone(),
         burn_created_at_time_ns: now_ns,
+        burn_attempted: Some(false),
         status: NativeXrpAbsorbIntentStatus::Prepared,
         burn_proof: None,
         backend_result: None,
@@ -420,11 +1959,14 @@ async fn abandon_unburned_native_xrp_absorb(
     vault_id: u64,
     icusd_burn_e8s: u64,
 ) {
-    mutate_state(|s| {
-        clear_unburned_native_xrp_absorb_intent_in_state(s, vault_id);
+    let safe_to_release = mutate_state(|s| match s.get_pending_native_xrp_absorb(vault_id) {
+        None => true,
+        Some(_) => clear_unburned_native_xrp_absorb_intent_in_state(s, vault_id),
     });
-    io.release_xrp_absorb_preflight(protocol_id, vault_id, icusd_burn_e8s)
-        .await;
+    if safe_to_release {
+        io.release_xrp_absorb_preflight(protocol_id, vault_id, icusd_burn_e8s)
+            .await;
+    }
 }
 
 pub(crate) fn clear_unburned_native_xrp_absorb_intent_in_state(
@@ -435,6 +1977,7 @@ pub(crate) fn clear_unburned_native_xrp_absorb_intent_in_state(
         return false;
     };
     if intent.status == NativeXrpAbsorbIntentStatus::Prepared
+        && intent.burn_attempted == Some(false)
         && intent.burn_proof.is_none()
         && intent.backend_result.is_none()
     {
@@ -442,6 +1985,75 @@ pub(crate) fn clear_unburned_native_xrp_absorb_intent_in_state(
         return true;
     }
     false
+}
+
+pub(crate) fn mark_native_xrp_absorb_burn_attempted_in_state(
+    state: &mut StabilityPoolState,
+    vault_id: u64,
+    now_ns: u64,
+) -> Result<NativeXrpAbsorbIntent, StabilityPoolError> {
+    let mut intent = state
+        .get_pending_native_xrp_absorb(vault_id)
+        .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "missing pending native XRP intent".into(),
+        })?;
+    match intent.burn_attempted {
+        Some(false) => intent.burn_attempted = Some(true),
+        Some(true) => {},
+        None => return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "legacy prepared native XRP burn has unknown dispatch history; held for ledger evidence".into(),
+        }),
+    }
+    intent.updated_at_ns = now_ns;
+    state.put_pending_native_xrp_absorb(intent.clone())?;
+    Ok(intent)
+}
+
+fn cancel_first_definitive_native_burn_failure_in_state(
+    state: &mut StabilityPoolState,
+    expected: &NativeXrpAbsorbIntent,
+) -> bool {
+    let Some(mut current) = state.get_pending_native_xrp_absorb(expected.vault_id) else {
+        return false;
+    };
+    let same_first_attempt = expected.burn_attempted == Some(false)
+        && current.burn_attempted == Some(true)
+        && current.burn_proof.is_none()
+        && current.backend_result.is_none()
+        && current.icusd_ledger == expected.icusd_ledger
+        && current.icusd_to_burn_e8s == expected.icusd_to_burn_e8s
+        && current.burn_created_at_time_ns == expected.burn_created_at_time_ns;
+    if !same_first_attempt {
+        return false;
+    }
+    current.burn_attempted = Some(false);
+    if state.put_pending_native_xrp_absorb(current).is_err() {
+        return false;
+    }
+    clear_unburned_native_xrp_absorb_intent_in_state(state, expected.vault_id)
+}
+
+pub(crate) fn clear_refunded_native_xrp_absorb_in_state(
+    state: &mut StabilityPoolState,
+    expected: &NativeXrpAbsorbIntent,
+) -> bool {
+    let Some(current) = state.get_pending_native_xrp_absorb(expected.vault_id) else {
+        return false;
+    };
+    let matches = current.vault_id == expected.vault_id
+        && current.icusd_ledger == expected.icusd_ledger
+        && current.icusd_to_burn_e8s == expected.icusd_to_burn_e8s
+        && current.burn_created_at_time_ns == expected.burn_created_at_time_ns
+        && current.burn_proof == expected.burn_proof
+        && current.backend_result.is_none();
+    if matches && current.burn_proof.is_some() {
+        state.take_pending_native_xrp_absorb(expected.vault_id);
+        true
+    } else {
+        false
+    }
 }
 
 pub(crate) fn apply_native_xrp_absorb_success_in_state_at(
@@ -525,13 +2137,25 @@ pub(crate) trait NativeXrpAbsorbIo {
         amount_e8s: u64,
         vault_id: u64,
         created_at_time: u64,
-    ) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, StabilityPoolError>;
+    ) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, IcusdBurnAttemptError>;
 
     async fn submit_xrp_absorb(
         &mut self,
         protocol_id: Principal,
         request: XrpSpAbsorbRequest,
     ) -> Result<XrpSpAbsorbResult, StabilityPoolError>;
+
+    async fn refund_and_verify_burn(
+        &mut self,
+        intent: &NativeXrpAbsorbIntent,
+    ) -> Result<rumi_protocol_backend::sp_burn_refund::SpBurnRefundReceipt, StabilityPoolError>
+    {
+        let _ = intent;
+        Err(StabilityPoolError::LiquidationFailed {
+            vault_id: 0,
+            reason: "exact SP burn refund is unavailable in this driver".into(),
+        })
+    }
 
     /// Hand an unburned reservation back to the backend. Best-effort: the
     /// caller is already on a failure path, and the reservation expires on its
@@ -620,7 +2244,8 @@ pub(crate) async fn run_native_xrp_settle_sweep_with_io(
     if read_state(|s| s.configuration.emergency_pause) {
         return summary;
     }
-    let (protocol, all) = read_state(|s| (s.protocol_canister_id, s.all_native_xrp_pending_payouts()));
+    let (protocol, all) =
+        read_state(|s| (s.protocol_canister_id, s.all_native_xrp_pending_payouts()));
     if all.is_empty() {
         return summary;
     }
@@ -808,7 +2433,7 @@ impl NativeXrpAbsorbIo for CdkNativeXrpAbsorbIo {
         amount_e8s: u64,
         vault_id: u64,
         created_at_time: u64,
-    ) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, StabilityPoolError> {
+    ) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, IcusdBurnAttemptError> {
         burn_icusd_for_chain_writedown_with_account(
             icusd_ledger,
             minting_account,
@@ -846,6 +2471,29 @@ impl NativeXrpAbsorbIo for CdkNativeXrpAbsorbIo {
                 method: "stability_pool_liquidate_xrp_vault".to_string(),
             }),
         }
+    }
+
+    async fn refund_and_verify_burn(
+        &mut self,
+        intent: &NativeXrpAbsorbIntent,
+    ) -> Result<rumi_protocol_backend::sp_burn_refund::SpBurnRefundReceipt, StabilityPoolError>
+    {
+        let proof =
+            intent
+                .burn_proof
+                .clone()
+                .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+                    vault_id: intent.vault_id,
+                    reason: "cannot refund a burn without its exact proof".into(),
+                })?;
+        refund_and_verify_sp_burn(
+            read_state(|s| s.protocol_canister_id),
+            intent.vault_id,
+            intent.icusd_to_burn_e8s,
+            intent.icusd_ledger,
+            proof,
+        )
+        .await
     }
 
     async fn release_xrp_absorb_preflight(
@@ -895,7 +2543,7 @@ fn xrp_claims_match_allocations(
             })
 }
 
-fn validate_xrp_absorb_backend_result(
+pub(crate) fn validate_xrp_absorb_backend_result(
     vault_id: u64,
     icusd_burned_e8s: u64,
     collateral_received_drops: u64,
@@ -948,6 +2596,10 @@ fn liquidation_failure(
         success: false,
         error_message: Some(format!("{:?}", error)),
     }
+}
+
+fn collateral_fee_from_nat(fee: candid::Nat) -> Result<u64, ()> {
+    fee.0.try_into().map_err(|_| ())
 }
 
 async fn submit_native_xrp_absorb_to_backend(
@@ -1015,6 +2667,54 @@ async fn submit_native_xrp_absorb_to_backend(
     }
 }
 
+async fn compensate_rejected_native_xrp_absorb(
+    intent: &NativeXrpAbsorbIntent,
+    absorb_error: StabilityPoolError,
+    io: &mut dyn NativeXrpAbsorbIo,
+) -> StabilityPoolError {
+    match io.refund_and_verify_burn(intent).await {
+        Ok(receipt) => {
+            let proof = intent.burn_proof.as_ref();
+            let matches = receipt.vault_id == intent.vault_id
+                && receipt.amount_e8s == intent.icusd_to_burn_e8s
+                && receipt.ledger == intent.icusd_ledger
+                && receipt.recipient == ic_cdk::id()
+                && receipt.burn_block_index == proof.map(|proof| proof.block_index).unwrap_or(u64::MAX)
+                && sp_burn_refund_memo_matches(
+                    &receipt.refund_memo,
+                    receipt.burn_block_index,
+                    intent.vault_id,
+                );
+            if !matches {
+                return StabilityPoolError::LiquidationFailed {
+                    vault_id: intent.vault_id,
+                    reason: "verified refund receipt does not match original native XRP burn; intent remains held".into(),
+                };
+            }
+            if mutate_state(|s| clear_refunded_native_xrp_absorb_in_state(s, intent)) {
+                StabilityPoolError::LiquidationFailed {
+                    vault_id: intent.vault_id,
+                    reason: format!(
+                        "icUSD burn was refunded in verified ledger block {}; no liquidation or depositor loss was applied (absorb result: {:?})",
+                        receipt.refund_block_index, absorb_error
+                    ),
+                }
+            } else {
+                StabilityPoolError::LiquidationFailed {
+                    vault_id: intent.vault_id,
+                    reason: "refund was verified but pending native XRP intent changed; reconciliation required".into(),
+                }
+            }
+        }
+        Err(refund_error) => StabilityPoolError::LiquidationFailed {
+            vault_id: intent.vault_id,
+            reason: format!(
+                "native XRP absorb failed ({absorb_error:?}) and exact burn refund remains pending ({refund_error:?})"
+            ),
+        },
+    }
+}
+
 pub(crate) async fn execute_native_xrp_absorb_with_io(
     vault_info: &LiquidatableVaultInfo,
     io: &mut dyn NativeXrpAbsorbIo,
@@ -1039,7 +2739,11 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
             let accepted = match submit_native_xrp_absorb_to_backend(protocol_id, &intent, io).await
             {
                 Ok(intent) => intent,
-                Err(error) => return liquidation_failure(vault_info, error),
+                Err(error) => {
+                    let compensated =
+                        compensate_rejected_native_xrp_absorb(&intent, error, io).await;
+                    return liquidation_failure(vault_info, compensated);
+                }
             };
             return match mutate_state(|s| {
                 apply_native_xrp_absorb_success_in_state_at(s, &accepted, io.now_ns())
@@ -1047,6 +2751,12 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
                 Ok(result) => result,
                 Err(error) => liquidation_failure(vault_info, error),
             };
+        }
+        if intent.burn_attempted.is_none() {
+            return liquidation_failure(vault_info, StabilityPoolError::LiquidationFailed {
+                vault_id: vault_info.vault_id,
+                reason: "legacy prepared native XRP burn has unknown dispatch history; held for exact ledger evidence".into(),
+            });
         }
     }
 
@@ -1109,13 +2819,8 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
         }
     };
     if preflight.vault_id != vault_info.vault_id || preflight.icusd_burn_e8s != icusd_to_burn_e8s {
-        abandon_unburned_native_xrp_absorb(
-            io,
-            protocol_id,
-            vault_info.vault_id,
-            icusd_to_burn_e8s,
-        )
-        .await;
+        abandon_unburned_native_xrp_absorb(io, protocol_id, vault_info.vault_id, icusd_to_burn_e8s)
+            .await;
         return liquidation_failure(
             vault_info,
             StabilityPoolError::LiquidationFailed {
@@ -1203,6 +2908,14 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
     let proof = if let Some(proof) = intent.burn_proof.clone() {
         proof
     } else {
+        let first_attempt = intent.burn_attempted == Some(false);
+        let attempt_identity = intent.clone();
+        intent = match mutate_state(|s| {
+            mark_native_xrp_absorb_burn_attempted_in_state(s, vault_info.vault_id, io.now_ns())
+        }) {
+            Ok(intent) => intent,
+            Err(error) => return liquidation_failure(vault_info, error),
+        };
         match io
             .burn_icusd(
                 intent.icusd_ledger,
@@ -1227,18 +2940,32 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
                 };
                 proof
             }
-            Err(error) => {
-                // The burn call returned an error, which the local clear
-                // already treats as "no icUSD left the pool"; release the
-                // reservation on the same assumption.
-                abandon_unburned_native_xrp_absorb(
-                    io,
-                    protocol_id,
-                    vault_info.vault_id,
-                    icusd_to_burn_e8s,
-                )
-                .await;
-                return liquidation_failure(vault_info, error);
+            Err(failure) => {
+                let cleared = if first_attempt && failure.definitive_no_effect {
+                    mutate_state(|s| {
+                        cancel_first_definitive_native_burn_failure_in_state(s, &attempt_identity)
+                    })
+                } else {
+                    mutate_state(|s| {
+                        mark_native_xrp_absorb_error_in_state(
+                            s,
+                            vault_info.vault_id,
+                            NativeXrpAbsorbIntentStatus::Prepared,
+                            format!("ambiguous icUSD burn result: {:?}", failure.error),
+                            io.now_ns(),
+                        )
+                    });
+                    false
+                };
+                if cleared {
+                    io.release_xrp_absorb_preflight(
+                        protocol_id,
+                        vault_info.vault_id,
+                        icusd_to_burn_e8s,
+                    )
+                    .await;
+                }
+                return liquidation_failure(vault_info, failure.error);
             }
         }
     };
@@ -1246,7 +2973,10 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
 
     let accepted = match submit_native_xrp_absorb_to_backend(protocol_id, &intent, io).await {
         Ok(intent) => intent,
-        Err(error) => return liquidation_failure(vault_info, error),
+        Err(error) => {
+            let compensated = compensate_rejected_native_xrp_absorb(&intent, error, io).await;
+            return liquidation_failure(vault_info, compensated);
+        }
     };
     match mutate_state(|s| apply_native_xrp_absorb_success_in_state_at(s, &accepted, io.now_ns())) {
         Ok(result) => result,
@@ -1289,6 +3019,7 @@ pub(crate) fn prepare_or_reuse_chain_absorb_intent_in_state(
         icusd_to_burn_e8s: plan.icusd_to_burn_e8s,
         stables_consumed: plan.stables_consumed.clone(),
         burn_created_at_time_ns: now_ns,
+        burn_attempted: Some(false),
         status: ChainSpAbsorbIntentStatus::Prepared,
         burn_proof: None,
         backend_result: None,
@@ -1380,6 +3111,7 @@ pub(crate) fn clear_unburned_chain_absorb_intent_in_state(
         return false;
     };
     if intent.status == ChainSpAbsorbIntentStatus::Prepared
+        && intent.burn_attempted == Some(false)
         && intent.burn_proof.is_none()
         && intent.backend_result.is_none()
     {
@@ -1387,6 +3119,77 @@ pub(crate) fn clear_unburned_chain_absorb_intent_in_state(
         return true;
     }
     false
+}
+
+pub(crate) fn mark_chain_absorb_burn_attempted_in_state(
+    state: &mut StabilityPoolState,
+    vault_id: u64,
+    now_ns: u64,
+) -> Result<ChainSpAbsorbIntent, StabilityPoolError> {
+    let mut intent = state.get_pending_chain_absorb(vault_id).ok_or_else(|| {
+        StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "missing pending chain absorb intent".into(),
+        }
+    })?;
+    match intent.burn_attempted {
+        Some(false) => intent.burn_attempted = Some(true),
+        Some(true) => {}
+        None => return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason:
+                "legacy prepared chain burn has unknown dispatch history; held for ledger evidence"
+                    .into(),
+        }),
+    }
+    intent.updated_at_ns = now_ns;
+    state.put_pending_chain_absorb(intent.clone())?;
+    Ok(intent)
+}
+
+fn cancel_first_definitive_chain_burn_failure_in_state(
+    state: &mut StabilityPoolState,
+    expected: &ChainSpAbsorbIntent,
+) -> bool {
+    let Some(mut current) = state.get_pending_chain_absorb(expected.vault_id) else {
+        return false;
+    };
+    let same_first_attempt = expected.burn_attempted == Some(false)
+        && current.burn_attempted == Some(true)
+        && current.burn_proof.is_none()
+        && current.backend_result.is_none()
+        && current.icusd_ledger == expected.icusd_ledger
+        && current.icusd_to_burn_e8s == expected.icusd_to_burn_e8s
+        && current.burn_created_at_time_ns == expected.burn_created_at_time_ns;
+    if !same_first_attempt {
+        return false;
+    }
+    current.burn_attempted = Some(false);
+    if state.put_pending_chain_absorb(current).is_err() {
+        return false;
+    }
+    clear_unburned_chain_absorb_intent_in_state(state, expected.vault_id)
+}
+
+pub(crate) fn clear_refunded_chain_absorb_in_state(
+    state: &mut StabilityPoolState,
+    expected: &ChainSpAbsorbIntent,
+) -> bool {
+    let Some(current) = state.get_pending_chain_absorb(expected.vault_id) else {
+        return false;
+    };
+    let matches = current.vault_id == expected.vault_id
+        && current.icusd_ledger == expected.icusd_ledger
+        && current.icusd_to_burn_e8s == expected.icusd_to_burn_e8s
+        && current.burn_created_at_time_ns == expected.burn_created_at_time_ns
+        && current.burn_proof == expected.burn_proof
+        && current.backend_result.is_none();
+    if matches && current.burn_proof.is_some() {
+        state.take_pending_chain_absorb(expected.vault_id);
+        true
+    } else {
+        false
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1476,6 +3279,11 @@ pub(crate) fn prepare_chain_absorb_plan_in_state(
     if stables_consumed.get(&icusd_ledger).copied().unwrap_or(0) != debt_e8s {
         return Err(StabilityPoolError::InsufficientPoolBalance);
     }
+    if !state
+        .can_process_chain_liquidation_debits(vault.chain_collateral_sentinel, &stables_consumed)
+    {
+        return Err(StabilityPoolError::InsufficientPoolBalance);
+    }
 
     Ok(ChainAbsorbPlan {
         vault_id: vault.vault_id,
@@ -1512,11 +3320,6 @@ pub(crate) fn apply_chain_absorb_success_in_state_at(
         });
     }
 
-    state.record_chain_claim_source(
-        plan.chain_sentinel,
-        absorbed.claim_id,
-        absorbed.collateral_received_native,
-    );
     state.process_chain_liquidation_gains_at(
         plan.vault_id,
         plan.chain_sentinel,
@@ -1524,6 +3327,11 @@ pub(crate) fn apply_chain_absorb_success_in_state_at(
         absorbed.collateral_received_native,
         absorbed.collateral_price_e8s,
         timestamp,
+    )?;
+    state.record_chain_claim_source(
+        plan.chain_sentinel,
+        absorbed.claim_id,
+        absorbed.collateral_received_native,
     );
     state.take_pending_chain_absorb(plan.vault_id);
     state.record_completed_chain_absorb(ChainSpAbsorbCompletion {
@@ -1823,35 +3631,28 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
     // apportion so deposit/withdraw/claim cannot race the apportionment.
     let _liq_guard = crate::pool_guard::SpLiquidationGuard::new()?;
 
-    // Fetch vault info from backend
+    // Fetch the backend-priced and backend-sized liquidation payload. The
+    // public CandidVault listing omits both fields and cannot safely supply
+    // them to receipt-bound absorb paths.
     let protocol_id = read_state(|s| s.protocol_canister_id);
-
-    let (vaults,): (Vec<rumi_protocol_backend::vault::CandidVault>,) =
-        call(protocol_id, "get_liquidatable_vaults", ())
+    let (target_info,): (Option<rumi_protocol_backend::LiquidatableVaultInfo>,) =
+        call(protocol_id, "get_liquidatable_vault_info", (vault_id,))
             .await
             .map_err(|_e| StabilityPoolError::InterCanisterCallFailed {
                 target: "Protocol".to_string(),
-                method: "get_liquidatable_vaults".to_string(),
+                method: "get_liquidatable_vault_info".to_string(),
             })?;
-    let target_vault = vaults.into_iter().find(|v| v.vault_id == vault_id);
-
-    let vault = match target_vault {
-        Some(v) => v,
-        None => {
-            return Err(StabilityPoolError::LiquidationFailed {
-                vault_id,
-                reason: "Vault not found in liquidatable list".to_string(),
-            })
-        }
-    };
-
+    let target_info = target_info.ok_or_else(|| StabilityPoolError::LiquidationFailed {
+        vault_id,
+        reason: "Vault not found in liquidatable list".to_string(),
+    })?;
     let vault_info = LiquidatableVaultInfo {
-        vault_id: vault.vault_id,
-        collateral_type: vault.collateral_type,
-        debt_amount: vault.borrowed_icusd_amount,
-        collateral_amount: vault.icp_margin_amount,
-        recommended_liquidation_amount: 0,
-        collateral_price_e8s: 0,
+        vault_id: target_info.vault_id,
+        collateral_type: target_info.collateral_type,
+        debt_amount: target_info.debt_amount,
+        collateral_amount: target_info.collateral_amount,
+        recommended_liquidation_amount: target_info.recommended_liquidation_amount,
+        collateral_price_e8s: target_info.collateral_price_e8s,
     };
 
     // Check pool coverage
@@ -1996,6 +3797,57 @@ async fn submit_chain_absorb_to_backend(
     }
 }
 
+async fn compensate_rejected_chain_absorb(
+    intent: &ChainSpAbsorbIntent,
+    absorb_error: StabilityPoolError,
+) -> StabilityPoolError {
+    let Some(proof) = intent.burn_proof.clone() else {
+        return StabilityPoolError::LiquidationFailed {
+            vault_id: intent.vault_id,
+            reason: "chain absorb failed without a persisted burn proof; intent remains held"
+                .into(),
+        };
+    };
+    match refund_and_verify_sp_burn(
+        read_state(|s| s.protocol_canister_id),
+        intent.vault_id,
+        intent.icusd_to_burn_e8s,
+        intent.icusd_ledger,
+        proof,
+    )
+    .await
+    {
+        Ok(receipt) => {
+            if validate_sp_burn_refund_receipt(intent, &receipt, ic_cdk::id()).is_err() {
+                return StabilityPoolError::LiquidationFailed {
+                    vault_id: intent.vault_id,
+                    reason: "verified refund receipt does not match pending chain intent; obligation remains held".into(),
+                };
+            }
+            if mutate_state(|s| clear_refunded_chain_absorb_in_state(s, intent)) {
+                StabilityPoolError::LiquidationFailed {
+                    vault_id: intent.vault_id,
+                    reason: format!(
+                        "icUSD burn was refunded in verified ledger block {}; no liquidation or depositor loss was applied (absorb result: {:?})",
+                        receipt.refund_block_index, absorb_error
+                    ),
+                }
+            } else {
+                StabilityPoolError::LiquidationFailed {
+                    vault_id: intent.vault_id,
+                    reason: "refund verified but pending chain intent changed; reconciliation required".into(),
+                }
+            }
+        }
+        Err(refund_error) => StabilityPoolError::LiquidationFailed {
+            vault_id: intent.vault_id,
+            reason: format!(
+                "chain absorb failed ({absorb_error:?}) and exact burn refund remains pending ({refund_error:?})"
+            ),
+        },
+    }
+}
+
 async fn preflight_chain_absorb_with_backend(
     protocol_id: Principal,
     vault_id: u64,
@@ -2051,9 +3903,19 @@ async fn sp_absorb_chain_vault_core(
         }
         if let Some((plan, proof)) = burned_chain_absorb_replay_plan(&intent) {
             let protocol_id = read_state(|s| s.protocol_canister_id);
-            let result =
-                submit_chain_absorb_to_backend(protocol_id, vault_id, &plan, proof).await?;
+            let result = match submit_chain_absorb_to_backend(protocol_id, vault_id, &plan, proof)
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => return Err(compensate_rejected_chain_absorb(&intent, error).await),
+            };
             return mutate_state(|s| apply_chain_absorb_success_in_state(s, &plan, result));
+        }
+        if intent.burn_attempted.is_none() {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "legacy prepared chain burn has unknown dispatch history; held for exact ledger evidence".into(),
+            });
         }
 
         if read_state(|s| s.configuration.emergency_pause) {
@@ -2072,6 +3934,11 @@ async fn sp_absorb_chain_vault_core(
             return Err(StabilityPoolError::EmergencyPaused);
         }
 
+        let first_attempt = intent.burn_attempted == Some(false);
+        let attempt_identity = intent.clone();
+        let intent = mutate_state(|s| {
+            mark_chain_absorb_burn_attempted_in_state(s, vault_id, ic_cdk::api::time())
+        })?;
         let proof = match burn_icusd_for_chain_writedown_with_account(
             intent.icusd_ledger,
             intent.icusd_minting_account,
@@ -2092,15 +3959,41 @@ async fn sp_absorb_chain_vault_core(
                 })?;
                 proof
             }
-            Err(error) => {
-                mutate_state(|s| {
-                    clear_unburned_chain_absorb_intent_in_state(s, vault_id);
-                });
-                return Err(error);
+            Err(failure) => {
+                if first_attempt && failure.definitive_no_effect {
+                    mutate_state(|s| {
+                        cancel_first_definitive_chain_burn_failure_in_state(s, &attempt_identity);
+                    });
+                } else {
+                    mutate_state(|s| {
+                        mark_chain_absorb_error_in_state(
+                            s,
+                            vault_id,
+                            ChainSpAbsorbIntentStatus::Prepared,
+                            format!("ambiguous icUSD burn result: {:?}", failure.error),
+                            ic_cdk::api::time(),
+                        )
+                    });
+                }
+                let _ = attempt_identity;
+                return Err(failure.error);
             }
         };
 
-        let result = submit_chain_absorb_to_backend(protocol_id, vault_id, &plan, proof).await?;
+        let result = match submit_chain_absorb_to_backend(protocol_id, vault_id, &plan, proof).await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let intent =
+                    read_state(|s| s.get_pending_chain_absorb(vault_id)).ok_or_else(|| {
+                        StabilityPoolError::LiquidationFailed {
+                            vault_id,
+                            reason: "chain absorb failed and exact burn intent disappeared".into(),
+                        }
+                    })?;
+                return Err(compensate_rejected_chain_absorb(&intent, error).await);
+            }
+        };
         return mutate_state(|s| apply_chain_absorb_success_in_state(s, &plan, result));
     }
 
@@ -2166,6 +4059,17 @@ async fn sp_absorb_chain_vault_core(
     let proof = if let Some(proof) = intent.burn_proof.clone() {
         proof
     } else {
+        if intent.burn_attempted.is_none() {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "legacy prepared chain burn has unknown dispatch history; held for exact ledger evidence".into(),
+            });
+        }
+        let first_attempt = intent.burn_attempted == Some(false);
+        let attempt_identity = intent.clone();
+        intent = mutate_state(|s| {
+            mark_chain_absorb_burn_attempted_in_state(s, vault_id, ic_cdk::api::time())
+        })?;
         match burn_icusd_for_chain_writedown_with_account(
             intent.icusd_ledger,
             intent.icusd_minting_account,
@@ -2186,11 +4090,24 @@ async fn sp_absorb_chain_vault_core(
                 })?;
                 proof
             }
-            Err(error) => {
-                mutate_state(|s| {
-                    clear_unburned_chain_absorb_intent_in_state(s, vault_id);
-                });
-                return Err(error);
+            Err(failure) => {
+                if first_attempt && failure.definitive_no_effect {
+                    mutate_state(|s| {
+                        cancel_first_definitive_chain_burn_failure_in_state(s, &attempt_identity);
+                    });
+                } else {
+                    mutate_state(|s| {
+                        mark_chain_absorb_error_in_state(
+                            s,
+                            vault_id,
+                            ChainSpAbsorbIntentStatus::Prepared,
+                            format!("ambiguous icUSD burn result: {:?}", failure.error),
+                            ic_cdk::api::time(),
+                        )
+                    });
+                }
+                let _ = attempt_identity;
+                return Err(failure.error);
             }
         }
     };
@@ -2301,6 +4218,62 @@ pub async fn run_chain_absorb_auto_tick(
     Ok(Some(tick))
 }
 
+/// Retry only retained chain intents with an exact burn proof. The normal
+/// core path reuses that proof for absorption or proof-backed compensation;
+/// no new burn can be dispatched by this recovery tick.
+pub(crate) async fn run_chain_burn_recovery_tick(max_per_tick: usize) -> usize {
+    let pending = read_state(|state| state.pending_chain_absorbs());
+    let cursor = CHAIN_BURN_RECOVERY_CURSOR.with(Cell::get);
+    let batch = select_chain_burn_recovery_batch(&pending, cursor, max_per_tick);
+    if let Some(last) = batch.last().copied() {
+        CHAIN_BURN_RECOVERY_CURSOR.with(|value| value.set(last));
+    }
+
+    for vault_id in &batch {
+        if let Err(error) = sp_absorb_chain_vault_core(*vault_id).await {
+            log!(
+                INFO,
+                "chain burn recovery {} remains pending: {:?}",
+                vault_id,
+                error
+            );
+        }
+    }
+    batch.len()
+}
+
+fn select_chain_burn_recovery_batch(
+    pending: &[ChainSpAbsorbIntent],
+    cursor: u64,
+    limit: usize,
+) -> Vec<u64> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut eligible = pending
+        .iter()
+        .filter(|intent| intent.burn_proof.is_some())
+        .map(|intent| intent.vault_id)
+        .collect::<Vec<_>>();
+    eligible.sort_unstable();
+    let mut batch = eligible
+        .iter()
+        .copied()
+        .filter(|vault_id| *vault_id > cursor)
+        .take(limit)
+        .collect::<Vec<_>>();
+    if batch.len() < limit {
+        batch.extend(
+            eligible
+                .iter()
+                .copied()
+                .filter(|vault_id| *vault_id <= cursor)
+                .take(limit - batch.len()),
+        );
+    }
+    batch
+}
+
 pub async fn claim_cfx(
     chain_sentinel: Principal,
     dest_evm: String,
@@ -2362,6 +4335,210 @@ pub async fn claim_cfx(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegacyLiquidationDispatch {
+    NativeXrpAbsorb,
+    DedicatedChainAbsorb,
+    DisabledGenericIcrc,
+}
+
+fn legacy_liquidation_dispatch(
+    state: &StabilityPoolState,
+    collateral: &Principal,
+) -> LegacyLiquidationDispatch {
+    if state.collateral_requires_payout_address(collateral) {
+        LegacyLiquidationDispatch::NativeXrpAbsorb
+    } else if state.is_chain_collateral_sentinel(collateral) {
+        LegacyLiquidationDispatch::DedicatedChainAbsorb
+    } else {
+        LegacyLiquidationDispatch::DisabledGenericIcrc
+    }
+}
+
+fn legacy_generic_icrc_liquidation_enabled() -> bool {
+    // Re-enable only after the receipt-bound allocation path is deployed and
+    // its official-ledger proof tests pass.
+    false
+}
+
+async fn submit_legacy_approval_with_receipt(
+    vault_id: u64,
+    ledger: Principal,
+    amount: u64,
+    protocol: Principal,
+) -> Result<u64, StabilityPoolError> {
+    let existing = read_state(|state| state.pending_sp_legacy_approval_fee(vault_id, ledger));
+    let row = if let Some(row) = existing {
+        row
+    } else {
+        ensure_ledger_has_icrc3_approval_blocks(ledger).await?;
+        let fee = crate::deposits::fresh_ledger_transfer_fee(ledger)
+            .await
+            .ok_or_else(|| StabilityPoolError::LedgerTransferFailed {
+                reason: "could not query a representable fresh fee before legacy SP approval"
+                    .into(),
+            })?;
+        let allowance = amount
+            .checked_mul(2)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        if !read_state(|state| state.can_deduct_fee_from_pool(ledger, fee)) {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+        let created_at_time_ns =
+            mutate_state(|state| state.allocate_outbound_payout_timestamp(ic_cdk::api::time()))?;
+        let expires_at_ns = created_at_time_ns
+            .checked_add(300_000_000_000)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        let memo = format!("sp-legacy-approval/{vault_id}/{created_at_time_ns}").into_bytes();
+        let row = PendingSpLegacyApprovalFee {
+            vault_id,
+            approval: SpLiquidationApprovalTuple {
+                ledger,
+                owner: default_account(ic_cdk::api::id()),
+                spender: default_account(protocol),
+                allowance_raw: allowance,
+                fee_raw: fee,
+                memo,
+                created_at_time_ns,
+                expires_at_ns,
+            },
+            dispatch_in_flight: false,
+            ambiguous_seen: false,
+        };
+        mutate_state(|state| state.begin_sp_legacy_approval_fee(row))?
+    };
+    let tuple = &row.approval;
+    if tuple.ledger != ledger
+        || tuple.owner != default_account(ic_cdk::api::id())
+        || tuple.spender != default_account(protocol)
+        || tuple.allowance_raw
+            != amount
+                .checked_mul(2)
+                .ok_or(StabilityPoolError::SystemBusy)?
+    {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    if !read_state(|state| state.can_deduct_fee_from_pool(ledger, tuple.fee_raw)) {
+        return Err(StabilityPoolError::InsufficientPoolBalance);
+    }
+
+    let previously_ambiguous = row.ambiguous_seen || row.dispatch_in_flight;
+    let args = ApproveArgs {
+        from_subaccount: None,
+        spender: tuple.spender.clone(),
+        amount: Nat::from(tuple.allowance_raw),
+        expected_allowance: None,
+        expires_at: Some(tuple.expires_at_ns),
+        fee: Some(Nat::from(tuple.fee_raw)),
+        memo: Some(Memo::from(tuple.memo.clone())),
+        created_at_time: Some(tuple.created_at_time_ns),
+    };
+    mutate_state(|state| state.mark_sp_legacy_approval_dispatch(vault_id, ledger, true, false))?;
+    let result: Result<(Result<Nat, ApproveError>,), _> =
+        call(ledger, "icrc2_approve", (args,)).await;
+    let block_index = match result {
+        Ok((Ok(index),)) => index.0.to_u64().ok_or(StabilityPoolError::SystemBusy)?,
+        Ok((Err(ApproveError::Duplicate { duplicate_of }),)) => duplicate_of
+            .0
+            .to_u64()
+            .ok_or(StabilityPoolError::SystemBusy)?,
+        Ok((Err(error),)) => {
+            let typed_no_effect = matches!(
+                error,
+                ApproveError::BadFee { .. }
+                    | ApproveError::InsufficientFunds { .. }
+                    | ApproveError::AllowanceChanged { .. }
+                    | ApproveError::Expired { .. }
+                    | ApproveError::TooOld
+                    | ApproveError::CreatedInFuture { .. }
+            );
+            if matches!(&error, ApproveError::BadFee { .. }) {
+                crate::deposits::invalidate_cached_ledger_fee_after_approve_bad_fee(ledger);
+            }
+            if typed_no_effect && !previously_ambiguous {
+                mutate_state(|state| {
+                    state.mark_sp_legacy_approval_dispatch(vault_id, ledger, false, false)?;
+                    state.clear_sp_legacy_approval_fee_after_no_effect(vault_id, ledger)
+                })?;
+            } else {
+                mutate_state(|state| {
+                    state.mark_sp_legacy_approval_dispatch(vault_id, ledger, false, true)
+                })?;
+            }
+            return Err(StabilityPoolError::LedgerTransferFailed {
+                reason: format!("legacy ICRC-2 approval had unresolved result: {error:?}"),
+            });
+        }
+        Err(error) => {
+            mutate_state(|state| {
+                state.mark_sp_legacy_approval_dispatch(vault_id, ledger, false, true)
+            })?;
+            return Err(StabilityPoolError::InterCanisterCallFailed {
+                target: ledger.to_text(),
+                method: format!("icrc2_approve ({error:?})"),
+            });
+        }
+    };
+
+    let receipt = SpLiquidationApprovalReceipt {
+        block_index,
+        tuple: tuple.clone(),
+    };
+    // Keep the row durable until the exact ledger block is verified and fee
+    // accounting is committed atomically. A lost reply retries this exact tuple;
+    // Duplicate supplies the original block index.
+    mutate_state(|state| state.mark_sp_legacy_approval_dispatch(vault_id, ledger, false, true))?;
+    verify_sp_liquidation_v2_approval_receipt(&receipt).await?;
+    mutate_state(|state| state.account_sp_legacy_approval_fee(vault_id, receipt))?;
+    Ok(tuple.fee_raw)
+}
+
+#[derive(candid::CandidType, serde::Deserialize)]
+struct Icrc3SupportedBlockType {
+    block_type: String,
+}
+
+async fn ensure_ledger_has_icrc3_approval_blocks(
+    ledger: Principal,
+) -> Result<(), StabilityPoolError> {
+    let supported: Result<(Vec<Icrc3SupportedBlockType>,), _> =
+        call(ledger, "icrc3_supported_block_types", ()).await;
+    let (supported,) = supported.map_err(|_| StabilityPoolError::LedgerTransferFailed {
+        reason: format!("ledger {ledger} does not expose queryable ICRC-3 approval block support"),
+    })?;
+    if supported.iter().any(|block| block.block_type == "2approve") {
+        rumi_protocol_backend::icrc3_proof::icrc3_log_length(ledger)
+            .await
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: format!(
+                    "ledger {ledger} advertises 2approve blocks but ICRC-3 history query failed: {reason}"
+                ),
+            })?;
+        return Ok(());
+    }
+    Err(StabilityPoolError::LedgerTransferFailed {
+        reason: format!("ledger {ledger} does not advertise ICRC-3 2approve blocks"),
+    })
+}
+
+pub(crate) async fn recover_sp_legacy_approval_fee(
+    vault_id: u64,
+    ledger: Principal,
+) -> Result<(), StabilityPoolError> {
+    let row = read_state(|state| state.pending_sp_legacy_approval_fee(vault_id, ledger))
+        .ok_or(StabilityPoolError::SystemBusy)?;
+    let amount = row
+        .approval
+        .allowance_raw
+        .checked_div(2)
+        .filter(|amount| amount.checked_mul(2) == Some(row.approval.allowance_raw))
+        .ok_or(StabilityPoolError::SystemBusy)?;
+    let protocol = read_state(|state| state.protocol_canister_id);
+    submit_legacy_approval_with_receipt(vault_id, ledger, amount, protocol)
+        .await
+        .map(|_| ())
+}
+
 /// Core liquidation logic for a single vault.
 ///
 /// Strategy:
@@ -2372,10 +4549,21 @@ pub async fn claim_cfx(
 /// No circuit breaker / suspension mechanism — if a token fails, we skip it and try the
 /// next one. If they all fail, the liquidation simply doesn't happen this round.
 async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> LiquidationResult {
-    if read_state(|s| s.collateral_requires_payout_address(&vault_info.collateral_type)) {
+    let dispatch =
+        read_state(|state| legacy_liquidation_dispatch(state, &vault_info.collateral_type));
+    if dispatch == LegacyLiquidationDispatch::NativeXrpAbsorb {
         return execute_native_xrp_absorb_with_io(vault_info, &mut CdkNativeXrpAbsorbIo).await;
     }
-
+    if dispatch == LegacyLiquidationDispatch::DedicatedChainAbsorb {
+        return liquidation_failure(
+            vault_info,
+            StabilityPoolError::LiquidationFailed {
+                vault_id: vault_info.vault_id,
+                reason: "chain collateral must use the dedicated receipt-reconciled absorb route"
+                    .into(),
+            },
+        );
+    }
     let protocol_id = read_state(|s| s.protocol_canister_id);
 
     // Step 1: Compute token draw
@@ -2398,6 +4586,39 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         };
     }
 
+    let stablecoin_configs: BTreeMap<Principal, StablecoinConfig> =
+        read_state(|s| s.stablecoin_registry.clone());
+    if let Some(ledger) = disabled_lp_reserve_route_ledger(&token_draw, &stablecoin_configs) {
+        let draw_cap = token_draw.get(&ledger).copied().unwrap_or(0);
+        return start_three_usd_absorb_v2(vault_info, ledger, draw_cap).await;
+    }
+
+    if !legacy_generic_icrc_liquidation_enabled() {
+        return liquidation_failure(
+            vault_info,
+            StabilityPoolError::LiquidationFailed {
+                vault_id: vault_info.vault_id,
+                reason: "legacy generic ICRC liquidation is disabled until receipt-bound collateral allocation is available".into(),
+            },
+        );
+    }
+
+    if let Some(ledger) = token_draw
+        .keys()
+        .find(|ledger| crate::pool_balance_mutation_blocked_for_ledger(**ledger))
+    {
+        return liquidation_failure(
+            vault_info,
+            StabilityPoolError::LiquidationFailed {
+                vault_id: vault_info.vault_id,
+                reason: format!(
+                    "stable ledger {} is fenced by an unresolved obligation",
+                    ledger
+                ),
+            },
+        );
+    }
+
     log!(
         INFO,
         "Token draw for vault {}: {:?}",
@@ -2409,8 +4630,38 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
     let mut total_collateral_gained: u64 = 0;
     let mut actual_consumed: BTreeMap<Principal, u64> = BTreeMap::new();
 
-    let stablecoin_configs: BTreeMap<Principal, StablecoinConfig> =
-        read_state(|s| s.stablecoin_registry.clone());
+    // Query the collateral fee before any approve or backend liquidation call.
+    // If the fee is outside our accounting range, no stablecoin may be consumed
+    // until a durable collateral-liability journal exists for that receipt.
+    let collateral_fee = match call::<(), (candid::Nat,)>(
+        vault_info.collateral_type,
+        "icrc1_fee",
+        (),
+    )
+    .await
+    {
+        Ok((fee_nat,)) => match collateral_fee_from_nat(fee_nat) {
+            Ok(fee) => fee,
+            Err(_) => {
+                return liquidation_failure(
+                    vault_info,
+                    StabilityPoolError::LiquidationFailed {
+                        vault_id: vault_info.vault_id,
+                        reason: "collateral ledger fee exceeds supported u64 range; liquidation held before any ledger or backend mutation".into(),
+                    },
+                );
+            }
+        },
+        Err(e) => {
+            // Preserve the existing conservative fallback when the query is
+            // unavailable. This exact value is reused for accounting after the
+            // backend call instead of querying a potentially different fee.
+            log!(INFO, "icrc1_fee query failed for collateral {} before liquidation: {:?}; using conservative fallback {} e8s",
+                vault_info.collateral_type, e, FALLBACK_COLLATERAL_FEE_E8S);
+            FALLBACK_COLLATERAL_FEE_E8S
+        }
+    };
+
     let icusd_ledger = stablecoin_configs
         .iter()
         .find(|(_, c)| c.symbol == "icUSD")
@@ -2449,50 +4700,19 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             continue;
         }
 
-        // The pool pays the LIVE ledger fee twice per liquidated token: once on
-        // the `icrc2_approve` below, and again when the backend's
-        // `icrc2_transfer_from` pulls the tokens (both are charged to the pool as
-        // the `from`/approver account). Use the live `icrc1_fee` rather than the
-        // (possibly stale) registry `transfer_fee` so the book decrement matches
-        // exactly what the ledger charges.
-        let ledger_fee = crate::deposits::ledger_transfer_fee(*token_ledger).await;
-
-        // Approve backend to spend this token
-        let approve_args = ApproveArgs {
-            from_subaccount: None,
-            spender: Account {
-                owner: protocol_id,
-                subaccount: None,
-            },
-            amount: candid::Nat::from(*amount as u128 * 2), // 2x buffer for fees
-            expected_allowance: None,
-            expires_at: Some(ic_cdk::api::time() + 300_000_000_000), // 5 min
-            fee: None,
-            memo: None,
-            created_at_time: Some(ic_cdk::api::time()),
+        // The exact approval tuple is persisted before dispatch and remains
+        // fenced until a verified ICRC-3 receipt accounts its fee.
+        let ledger_fee = match submit_legacy_approval_with_receipt(
+            vault_info.vault_id,
+            *token_ledger,
+            *amount,
+            protocol_id,
+        )
+        .await
+        {
+            Ok(fee) => fee,
+            Err(error) => return liquidation_failure(vault_info, error),
         };
-
-        let approve_result: Result<(Result<candid::Nat, ApproveError>,), _> =
-            call(*token_ledger, "icrc2_approve", (approve_args,)).await;
-
-        match approve_result {
-            Ok((Ok(_),)) => {
-                // Deduct the approve fee from tracked balances. The matching
-                // transfer_from fee is deducted only on a successful pull below
-                // (a failed backend call charges no transfer_from fee).
-                if ledger_fee > 0 {
-                    mutate_state(|s| s.deduct_fee_from_pool(*token_ledger, ledger_fee));
-                }
-            }
-            Ok((Err(e),)) => {
-                log!(INFO, "Approve failed for {}: {:?}", token_ledger, e);
-                continue;
-            }
-            Err(e) => {
-                log!(INFO, "Approve call failed for {}: {:?}", token_ledger, e);
-                continue;
-            }
-        }
 
         // No pre-deduct of depositor balances: `process_liquidation_gains` is the
         // single point of truth for stablecoin bookkeeping on a successful
@@ -2501,6 +4721,18 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         // and the aggregate total to be decremented twice per liquidation — once
         // pre-call, once inside `process_liquidation_gains_at` — leaving phantom
         // tokens in the pool account per liquidation.
+
+        let principal_draw = BTreeMap::from([(*token_ledger, *amount)]);
+        let post_approve_fee_reserve = amount.checked_add(ledger_fee);
+        if !read_state(|s| {
+            s.can_process_liquidation_debits(vault_info.collateral_type, &principal_draw)
+                && post_approve_fee_reserve
+                    .map(|reserve| s.can_deduct_fee_from_pool(*token_ledger, reserve))
+                    .unwrap_or(false)
+        }) {
+            log!(INFO, "Skipping backend liquidation for {}: exact principal and transfer fee are not covered by tracked balances", token_ledger);
+            continue;
+        }
 
         // Call the appropriate backend endpoint
         let liq_result = if is_icusd {
@@ -2598,7 +4830,11 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 // trips the withdraw guard for non-sole holders (SP live-vs-ledger
                 // drift, 2026-07-16).
                 if ledger_fee > 0 {
-                    mutate_state(|s| s.deduct_fee_from_pool(*token_ledger, ledger_fee));
+                    if let Err(error) =
+                        mutate_state(|s| s.deduct_fee_from_pool(*token_ledger, ledger_fee))
+                    {
+                        return liquidation_failure(vault_info, error);
+                    }
                 }
                 total_collateral_gained += collateral;
                 // Bug 7: one token per vault per round — vault state changed, remaining draws are stale
@@ -2637,10 +4873,10 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
 
     // --- LP tokens (3USD): approve + backend pull (atomic) ---
     for (token_ledger, amount) in &token_draw {
-        let config = match stablecoin_configs.get(token_ledger) {
-            Some(c) if c.is_lp_token.unwrap_or(false) => c,
+        match stablecoin_configs.get(token_ledger) {
+            Some(c) if c.is_lp_token.unwrap_or(false) => (),
             _ => continue,
-        };
+        }
 
         // Calculate icUSD equivalent using cached virtual price
         let vp = read_state(|s| {
@@ -2661,51 +4897,17 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             continue;
         }
 
-        // Step A: Approve backend to pull 3USD (same pattern as non-LP tokens)
-        let approve_args = ApproveArgs {
-            from_subaccount: None,
-            spender: Account {
-                owner: protocol_id,
-                subaccount: None,
-            },
-            amount: candid::Nat::from(*amount as u128 * 2), // 2x buffer for fees
-            expected_allowance: None,
-            expires_at: Some(ic_cdk::api::time() + 300_000_000_000), // 5 min
-            fee: None,
-            memo: None,
-            created_at_time: Some(ic_cdk::api::time()),
-        };
-
-        let approve_result: Result<(Result<candid::Nat, ApproveError>,), _> =
-            call(*token_ledger, "icrc2_approve", (approve_args,)).await;
-
-        match approve_result {
-            Ok((Ok(_),)) => {
-                // Deduct the approve fee from tracked balances
-                if let Some(fee) = config.transfer_fee {
-                    if fee > 0 {
-                        mutate_state(|s| s.deduct_fee_from_pool(*token_ledger, fee));
-                    }
-                }
-            }
-            Ok((Err(e),)) => {
-                log!(
-                    INFO,
-                    "3USD approve failed for vault {}: {:?}",
-                    vault_info.vault_id,
-                    e
-                );
-                continue;
-            }
-            Err(e) => {
-                log!(
-                    INFO,
-                    "3USD approve call failed for vault {}: {:?}",
-                    vault_info.vault_id,
-                    e
-                );
-                continue;
-            }
+        // Step A: approve backend to pull 3USD with the same durable receipt
+        // protocol used by the non-LP legacy path.
+        if let Err(error) = submit_legacy_approval_with_receipt(
+            vault_info.vault_id,
+            *token_ledger,
+            *amount,
+            protocol_id,
+        )
+        .await
+        {
+            return liquidation_failure(vault_info, error);
         }
 
         // Step B: Ask backend to pull 3USD + write down debt atomically.
@@ -2793,39 +4995,22 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
     if !actual_consumed.is_empty() && total_collateral_gained > 0 {
         // Deduct the collateral ledger's transfer fee from gains — the backend reports
         // gross collateral but the transfer to the SP deducts one fee.
-        let collateral_fee: u64 = match call::<(), (candid::Nat,)>(
-            vault_info.collateral_type,
-            "icrc1_fee",
-            (),
-        )
-        .await
-        {
-            Ok((fee_nat,)) => {
-                let fee: u128 = fee_nat.0.try_into().unwrap_or(0);
-                fee as u64
-            }
-            Err(e) => {
-                // SP-104 (audit 2026-06-05): do NOT fall back to fee=0. The actual
-                // payout transfer deducts the real ledger fee, so crediting the full
-                // gross over-credits depositors and leaves the pool short by one fee.
-                // Use a conservative fallback so we under- rather than over-credit
-                // (solvency-safe); the next successful interaction reconciles.
-                log!(INFO, "icrc1_fee query failed for collateral {}: {:?}; using conservative fallback {} e8s",
-                    vault_info.collateral_type, e, FALLBACK_COLLATERAL_FEE_E8S);
-                FALLBACK_COLLATERAL_FEE_E8S
-            }
-        };
+        // This is the preflight fee used before dispatch. Never turn an
+        // unrepresentable post-dispatch fee into zero collateral credit: the
+        // preflight rejects that state before irreversible backend work.
         let net_collateral = total_collateral_gained.saturating_sub(collateral_fee);
 
-        mutate_state(|s| {
+        if let Err(error) = mutate_state(|s| {
             s.process_liquidation_gains(
                 vault_info.vault_id,
                 vault_info.collateral_type,
                 &actual_consumed,
                 net_collateral,
                 vault_info.collateral_price_e8s,
-            );
-        });
+            )
+        }) {
+            return liquidation_failure(vault_info, error);
+        }
 
         LiquidationResult {
             vault_id: vault_info.vault_id,
@@ -2845,6 +5030,158 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             error_message: Some("All liquidation calls failed".to_string()),
         }
     }
+}
+
+fn disabled_lp_reserve_route_ledger(
+    token_draw: &BTreeMap<Principal, u64>,
+    configs: &BTreeMap<Principal, StablecoinConfig>,
+) -> Option<Principal> {
+    token_draw.keys().find_map(|ledger| {
+        configs
+            .get(ledger)
+            .is_some_and(|config| {
+                config.is_lp_token.unwrap_or(false)
+                    || config.symbol == "3USD"
+                    || canonical_three_usd_ledger() == Some(*ledger)
+            })
+            .then_some(*ledger)
+    })
+}
+
+/// Start one bounded 3USD reserve ingress. The entire allocation input is
+/// durably pinned before the first approval call; no legacy mutable allocator
+/// is used for this route.
+async fn start_three_usd_absorb_v2(
+    vault_info: &LiquidatableVaultInfo,
+    ledger: Principal,
+    draw_cap_e8s: u64,
+) -> LiquidationResult {
+    if !THREE_USD_RESERVE_INGRESS_V2_ADMISSION_ENABLED {
+        return liquidation_failure(
+            vault_info,
+            StabilityPoolError::LiquidationFailed {
+                vault_id: vault_info.vault_id,
+                reason: "3USD reserve-ingress V2 admission is default-off pending coordinated cross-canister evidence".into(),
+            },
+        );
+    }
+
+    let result = async {
+        if vault_info.collateral_price_e8s == 0
+            || !crate::pool_guard::liquidation_in_progress()
+            || !read_state(|state| state.in_flight_liquidations.contains(&vault_info.vault_id))
+        {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+
+        let (virtual_price, available) = read_state(|state| {
+            let config = state
+                .stablecoin_registry
+                .get(&ledger)
+                .ok_or(StabilityPoolError::SystemBusy)?;
+            if ledger != canonical_three_usd_ledger().ok_or(StabilityPoolError::SystemBusy)?
+                || config.symbol != "3USD"
+                || config.is_lp_token != Some(true)
+                || !config.is_active
+            {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            let virtual_price = state
+                .virtual_prices()
+                .get(&ledger)
+                .copied()
+                .filter(|price| *price > 0)
+                .ok_or(StabilityPoolError::SystemBusy)?;
+            let available =
+                state.available_stablecoin_for_collateral(ledger, &vault_info.collateral_type)?;
+            Ok((virtual_price, available))
+        })?;
+
+        let debt_target = if vault_info.recommended_liquidation_amount > 0 {
+            vault_info
+                .recommended_liquidation_amount
+                .min(vault_info.debt_amount)
+        } else {
+            vault_info.debt_amount
+        };
+        let (three_usd_amount, debt_covered) =
+            bounded_three_usd_absorb_amounts(debt_target, available, draw_cap_e8s, virtual_price)?;
+        if debt_covered < 10_000_000 {
+            return Err(StabilityPoolError::AmountTooLow {
+                minimum_e8s: 10_000_000,
+            });
+        }
+
+        let approval_fee = query_exact_ledger_fee(ledger).await?;
+        let created_at =
+            mutate_state(|state| state.allocate_outbound_payout_timestamp(ic_cdk::api::time()))?;
+        let expires_at = created_at
+            .checked_add(300_000_000_000)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        let mut memo = Vec::with_capacity(16);
+        memo.extend_from_slice(&vault_info.vault_id.to_be_bytes());
+        memo.extend_from_slice(&created_at.to_be_bytes());
+        let approval = SpThreeUsdApprovalIntent {
+            ledger,
+            allowance: three_usd_amount,
+            fee: approval_fee,
+            memo,
+            created_at_time_ns: created_at,
+            expires_at_ns: expires_at,
+        };
+        let absorb = mutate_state(|state| {
+            state.prepare_sp_three_usd_absorb(
+                vault_info.vault_id,
+                ic_cdk::api::id(),
+                ledger,
+                vault_info.collateral_type,
+                vault_info.collateral_price_e8s,
+                created_at,
+                debt_covered,
+                three_usd_amount,
+                virtual_price,
+                approval,
+            )
+        })?;
+
+        // Approval ambiguity remains attached to this absorb ID. Recovery
+        // candidate attachment is the only continuation after a lost reply.
+        crate::three_usd_v2::submit_three_usd_approval_inner(absorb.absorb_id).await?;
+        let _ = crate::three_usd_v2::dispatch_three_usd_absorb_inner(absorb.absorb_id).await;
+        crate::three_usd_v2::reconcile_three_usd_absorb_inner(absorb.absorb_id).await?;
+
+        let completed = read_state(|state| {
+            state
+                .completed_sp_three_usd_absorbs
+                .as_ref()
+                .and_then(|rows| rows.get(&absorb.absorb_id))
+                .filter(|row| row.phase == SpThreeUsdAbsorbPhase::Complete)
+                .cloned()
+        })
+        .ok_or(StabilityPoolError::SystemBusy)?;
+        let allocation = completed.allocation.ok_or(StabilityPoolError::SystemBusy)?;
+        let (success, error_message) = three_usd_terminal_outcome(completed.terminal.as_ref())?;
+        let stables_consumed = if allocation.principal_consumed > 0 {
+            BTreeMap::from([(ledger, allocation.principal_consumed)])
+        } else {
+            BTreeMap::new()
+        };
+        Ok(LiquidationResult {
+            vault_id: vault_info.vault_id,
+            stables_consumed,
+            collateral_gained: allocation.collateral_received,
+            collateral_type: vault_info.collateral_type,
+            success,
+            error_message,
+        })
+    }
+    .await;
+
+    result.unwrap_or_else(|error| liquidation_failure(vault_info, error))
+}
+
+fn canonical_three_usd_ledger() -> Option<Principal> {
+    Principal::from_text("fohh4-yyaaa-aaaap-qtkpa-cai").ok()
 }
 
 /// Thin translation layer: map a ledger principal to the backend's StableTokenType enum.
@@ -2908,6 +5245,183 @@ mod tests {
         Principal::from_slice(&[2])
     }
 
+    fn decoded_icrc3_block(op: &str) -> rumi_protocol_backend::icrc3_proof::DecodedBlock {
+        rumi_protocol_backend::icrc3_proof::DecodedBlock {
+            btype: None,
+            op: op.into(),
+            from: None,
+            to: None,
+            spender: None,
+            amount: 5,
+            transaction_fee: None,
+            fee: None,
+            memo: Some(vec![7]),
+            created_at_time: Some(8),
+            expected_allowance: None,
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn sp_burn_refund_memo_accepts_legacy_and_nonzero_rotated_identity() {
+        let burn_block = 17;
+        let vault_id = 44;
+        let legacy = expected_sp_burn_refund_memo(burn_block, vault_id);
+        assert!(sp_burn_refund_memo_matches(&legacy, burn_block, vault_id));
+
+        let mut rotated = legacy.clone();
+        rotated.extend_from_slice(&1u64.to_be_bytes());
+        assert!(sp_burn_refund_memo_matches(&rotated, burn_block, vault_id));
+
+        assert!(!sp_burn_refund_memo_matches(
+            &legacy,
+            burn_block + 1,
+            vault_id
+        ));
+        assert!(!sp_burn_refund_memo_matches(
+            &legacy,
+            burn_block,
+            vault_id + 1
+        ));
+
+        let mut zero_ordinal = legacy.clone();
+        zero_ordinal.extend_from_slice(&0u64.to_be_bytes());
+        assert!(!sp_burn_refund_memo_matches(
+            &zero_ordinal,
+            burn_block,
+            vault_id
+        ));
+
+        let mut malformed_prefix = rotated;
+        malformed_prefix[0] ^= 1;
+        assert!(!sp_burn_refund_memo_matches(
+            &malformed_prefix,
+            burn_block,
+            vault_id
+        ));
+    }
+
+    #[test]
+    fn v2_new_admission_only_accepts_currently_supported_icusd_route() {
+        assert!(sp_liquidation_v2_token_supported(SpLiquidationToken::IcUsd));
+        assert!(!sp_liquidation_v2_token_supported(
+            SpLiquidationToken::CKUSDT
+        ));
+        assert!(!sp_liquidation_v2_token_supported(
+            SpLiquidationToken::CKUSDC
+        ));
+    }
+
+    #[test]
+    fn v2_ic_usd_preflight_reserves_principal_and_one_approval_fee_only() {
+        let cap = 200_000_000;
+        let approval_fee = 10_000;
+        assert_eq!(
+            sp_v2_approval_preflight_amounts(cap, approval_fee, 0),
+            Some((cap, cap + approval_fee)),
+        );
+        assert_eq!(
+            sp_v2_approval_preflight_amounts(cap, approval_fee, 3),
+            Some((cap + 3, cap + 3 + approval_fee)),
+        );
+        assert_eq!(sp_v2_approval_preflight_amounts(u64::MAX, 1, 0), None);
+    }
+
+    #[test]
+    fn v2_icusd_burn_proof_binds_legacy_icrc3_operation_and_every_tuple_field() {
+        let pool = principal(40);
+        let protocol = principal(41);
+        let account = |owner| Account {
+            owner,
+            subaccount: None,
+        };
+        let tuple = rumi_protocol_backend::SpLiquidationStablePullTuple {
+            op_nonce: 1,
+            ledger: icusd_ledger(),
+            from: account(pool),
+            spender: account(protocol),
+            to: account(protocol),
+            amount_raw: 5,
+            fee_raw: 0,
+            memo: vec![7],
+            created_at_time_ns: 8,
+        };
+        let mut valid = decoded_icrc3_block("burn");
+        valid.from = Some(account(pool));
+        valid.spender = Some(account(protocol));
+        assert!(validate_sp_v2_icusd_burn_block(&valid, &tuple).is_ok());
+
+        let mut wrong = valid.clone();
+        wrong.op = "xfer".into();
+        assert!(validate_sp_v2_icusd_burn_block(&wrong, &tuple).is_err());
+        let mut wrong = valid.clone();
+        wrong.spender = Some(account(principal(42)));
+        assert!(validate_sp_v2_icusd_burn_block(&wrong, &tuple).is_err());
+        let mut wrong = valid.clone();
+        wrong.memo = Some(vec![9]);
+        assert!(validate_sp_v2_icusd_burn_block(&wrong, &tuple).is_err());
+        let mut wrong = valid.clone();
+        wrong.created_at_time = Some(9);
+        assert!(validate_sp_v2_icusd_burn_block(&wrong, &tuple).is_err());
+        let mut wrong = valid.clone();
+        wrong.fee = Some(0);
+        assert!(validate_sp_v2_icusd_burn_block(&wrong, &tuple).is_err());
+        let mut wrong = valid;
+        wrong.btype = Some("2xfer".into());
+        assert!(validate_sp_v2_icusd_burn_block(&wrong, &tuple).is_err());
+    }
+
+    #[test]
+    fn v2_icusd_mint_refund_proof_binds_mint_and_exact_reimbursement() {
+        let pool = principal(40);
+        let account = |owner| Account {
+            owner,
+            subaccount: None,
+        };
+        let tuple = SpLiquidationStableRefundTuple {
+            op_nonce: 2,
+            ledger: icusd_ledger(),
+            source: account(principal(41)),
+            destination: account(pool),
+            principal_refund_raw: 5,
+            approval_fee_refund_raw: 10,
+            pull_fee_refund_raw: 0,
+            amount_raw: 15,
+            fee_raw: 0,
+            memo: vec![7],
+            created_at_time_ns: 8,
+        };
+        let mut valid = decoded_icrc3_block("mint");
+        valid.amount = 15;
+        valid.to = Some(account(pool));
+        assert!(validate_sp_v2_icusd_mint_refund_block(&valid, &tuple).is_ok());
+
+        let mut wrong = valid.clone();
+        wrong.op = "xfer".into();
+        assert!(validate_sp_v2_icusd_mint_refund_block(&wrong, &tuple).is_err());
+        let mut wrong = valid.clone();
+        wrong.spender = Some(account(principal(42)));
+        assert!(validate_sp_v2_icusd_mint_refund_block(&wrong, &tuple).is_err());
+        let mut wrong = valid.clone();
+        wrong.memo = Some(vec![9]);
+        assert!(validate_sp_v2_icusd_mint_refund_block(&wrong, &tuple).is_err());
+        let mut wrong = valid.clone();
+        wrong.created_at_time = Some(9);
+        assert!(validate_sp_v2_icusd_mint_refund_block(&wrong, &tuple).is_err());
+        let mut wrong = valid.clone();
+        wrong.transaction_fee = Some(0);
+        assert!(validate_sp_v2_icusd_mint_refund_block(&wrong, &tuple).is_err());
+        let mut wrong = valid;
+        wrong.btype = Some("1xfer".into());
+        assert!(validate_sp_v2_icusd_mint_refund_block(&wrong, &tuple).is_err());
+    }
+
+    #[test]
+    fn collateral_fee_nat_overflow_is_rejected_before_liquidation_dispatch() {
+        assert_eq!(collateral_fee_from_nat(Nat::from(u64::MAX)), Ok(u64::MAX));
+        assert!(collateral_fee_from_nat(Nat::from(u128::from(u64::MAX) + 1)).is_err());
+    }
+
     fn test_state() -> StabilityPoolState {
         let mut state = StabilityPoolState::default();
         state.register_stablecoin(StablecoinConfig {
@@ -2937,6 +5451,160 @@ mod tests {
             status: CollateralStatus::Active,
         });
         state
+    }
+
+    #[test]
+    fn legacy_generic_icrc_route_is_blocked_before_approval_but_special_routes_remain_routed() {
+        let mut state = test_state();
+        let ordinary_icrc_collateral = principal(50);
+        let chain_sentinel = principal(51);
+        state.register_chain_collateral_sentinel(chain_sentinel);
+
+        assert_eq!(
+            legacy_liquidation_dispatch(&state, &ordinary_icrc_collateral),
+            LegacyLiquidationDispatch::DisabledGenericIcrc,
+        );
+        assert!(!legacy_generic_icrc_liquidation_enabled());
+        assert_eq!(
+            legacy_liquidation_dispatch(&state, &xrp_ledger()),
+            LegacyLiquidationDispatch::NativeXrpAbsorb,
+        );
+        assert_eq!(
+            legacy_liquidation_dispatch(&state, &chain_sentinel),
+            LegacyLiquidationDispatch::DedicatedChainAbsorb,
+        );
+    }
+
+    #[test]
+    fn mixed_draw_with_lp_reserve_selects_the_dedicated_pre_effect_route() {
+        let icusd = icusd_ledger();
+        let lp = principal(12);
+        let mut configs = BTreeMap::new();
+        configs.insert(
+            icusd,
+            StablecoinConfig {
+                ledger_id: icusd,
+                symbol: "icUSD".into(),
+                decimals: 8,
+                priority: 1,
+                is_active: true,
+                transfer_fee: Some(100_000),
+                is_lp_token: None,
+                underlying_pool: None,
+            },
+        );
+        configs.insert(
+            lp,
+            StablecoinConfig {
+                ledger_id: lp,
+                symbol: "3USD".into(),
+                decimals: 8,
+                priority: 2,
+                is_active: true,
+                transfer_fee: Some(0),
+                is_lp_token: Some(true),
+                underlying_pool: None,
+            },
+        );
+        let draw = BTreeMap::from([(icusd, 10_000_000), (lp, 10_000_000)]);
+
+        // execute_single_liquidation routes LP-containing draws before the
+        // generic legacy gate and before any token approval.
+        assert_eq!(disabled_lp_reserve_route_ledger(&draw, &configs), Some(lp));
+        assert_eq!(
+            disabled_lp_reserve_route_ledger(&BTreeMap::from([(lp, 10_000_000)]), &configs),
+            Some(lp)
+        );
+        let misconfigured_symbol = principal(13);
+        let canonical = canonical_three_usd_ledger().expect("canonical 3USD principal");
+        configs.insert(
+            misconfigured_symbol,
+            StablecoinConfig {
+                ledger_id: misconfigured_symbol,
+                symbol: "3USD".into(),
+                decimals: 8,
+                priority: 3,
+                is_active: true,
+                transfer_fee: Some(0),
+                is_lp_token: None,
+                underlying_pool: None,
+            },
+        );
+        configs.insert(
+            canonical,
+            StablecoinConfig {
+                ledger_id: canonical,
+                symbol: "legacy-stable".into(),
+                decimals: 8,
+                priority: 4,
+                is_active: true,
+                transfer_fee: Some(0),
+                is_lp_token: Some(false),
+                underlying_pool: None,
+            },
+        );
+        assert_eq!(
+            disabled_lp_reserve_route_ledger(
+                &BTreeMap::from([(misconfigured_symbol, 10_000_000)]),
+                &configs
+            ),
+            Some(misconfigured_symbol),
+            "the 3USD symbol must be fail-closed when LP metadata is absent"
+        );
+        assert_eq!(
+            disabled_lp_reserve_route_ledger(&BTreeMap::from([(canonical, 10_000_000)]), &configs),
+            Some(canonical),
+            "the canonical ledger must be fail-closed even with conflicting registry metadata"
+        );
+        assert_eq!(
+            disabled_lp_reserve_route_ledger(&BTreeMap::from([(icusd, 10_000_000)]), &configs),
+            None
+        );
+    }
+
+    #[test]
+    fn three_usd_v2_admission_gate_and_amounts_are_explicit() {
+        #[cfg(not(feature = "test-three-usd-reserve-ingress-v2-admission"))]
+        assert!(!THREE_USD_RESERVE_INGRESS_V2_ADMISSION_ENABLED);
+        #[cfg(feature = "test-three-usd-reserve-ingress-v2-admission")]
+        assert!(THREE_USD_RESERVE_INGRESS_V2_ADMISSION_ENABLED);
+        assert_eq!(
+            bounded_three_usd_absorb_amounts(100, 1_000, 1_000, THREE_USD_E8S_SCALE).unwrap(),
+            (100, 100)
+        );
+        assert_eq!(
+            bounded_three_usd_absorb_amounts(100, 50, 1_000, THREE_USD_E8S_SCALE).unwrap(),
+            (50, 50)
+        );
+        // Flooring the LP amount never asks the backend to write down more
+        // debt than the pinned request's target.
+        let (lp, covered) =
+            bounded_three_usd_absorb_amounts(100, 1_000, 1_000, THREE_USD_E8S_SCALE * 3 / 2)
+                .unwrap();
+        assert_eq!(lp, 66);
+        assert_eq!(covered, 99);
+        assert_eq!(
+            bounded_three_usd_absorb_amounts(100, 1_000, 25, THREE_USD_E8S_SCALE).unwrap(),
+            (25, 25)
+        );
+        assert!(bounded_three_usd_absorb_amounts(100, 100, 100, 0).is_err());
+    }
+
+    #[test]
+    fn three_usd_pretransfer_rejection_is_reported_as_no_liquidation() {
+        let terminal = SpThreeUsdTerminalEvidence::PreTransferRejected {
+            backend_vault_id: 77,
+            backend_absorb_id: 1,
+            request: rumi_protocol_backend::state::ThreeUsdReserveIngressRequest {
+                icusd_debt_covered_e8s: 600,
+                three_usd_amount_e8s: 600,
+                ledger: principal(43),
+            },
+            reason: "vault recovered".into(),
+        };
+        let (success, reason) = three_usd_terminal_outcome(Some(&terminal)).unwrap();
+        assert!(!success);
+        assert!(reason.unwrap().contains("vault recovered"));
     }
 
     fn add_deposit_direct(
@@ -3044,7 +5712,7 @@ mod tests {
             amount_e8s: u64,
             vault_id: u64,
             created_at_time: u64,
-        ) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, StabilityPoolError>
+        ) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, IcusdBurnAttemptError>
         {
             self.events
                 .push(format!("burn:{vault_id}:{amount_e8s}:{created_at_time}"));
@@ -4703,6 +7371,7 @@ mod tests {
         NativeXrpPendingPayout {
             claim_id,
             collateral_type: xrp_ledger(),
+            collateral_price_e8s: 0,
             vault_id: 195,
             drops,
             payout_address: valid_xrp_address(),
@@ -4765,7 +7434,9 @@ mod tests {
         }
     }
 
-    fn sweep_state_with_payouts(payouts: Vec<(Principal, NativeXrpPendingPayout)>) -> StabilityPoolState {
+    fn sweep_state_with_payouts(
+        payouts: Vec<(Principal, NativeXrpPendingPayout)>,
+    ) -> StabilityPoolState {
         let mut state = test_state();
         for (user, p) in payouts {
             add_deposit_direct(&mut state, user, icusd_ledger(), 1_00000000);
@@ -4785,9 +7456,8 @@ mod tests {
         replace_state(state);
         let mut io = FakeSettleSweepIo::default();
 
-        let summary = futures::executor::block_on(run_native_xrp_settle_sweep_with_io(
-            &mut io, None, 2,
-        ));
+        let summary =
+            futures::executor::block_on(run_native_xrp_settle_sweep_with_io(&mut io, None, 2));
 
         assert_eq!(summary.examined, 1);
         assert_eq!(summary.submitted, 1);
@@ -4813,13 +7483,14 @@ mod tests {
         let mut io = FakeSettleSweepIo::default();
         io.outstanding.insert(3, false);
 
-        let summary = futures::executor::block_on(run_native_xrp_settle_sweep_with_io(
-            &mut io, None, 2,
-        ));
+        let summary =
+            futures::executor::block_on(run_native_xrp_settle_sweep_with_io(&mut io, None, 2));
 
         assert_eq!(summary.acked, 1);
         assert!(io.settle_calls.is_empty());
-        assert!(read_state(|s| s.native_xrp_pending_payouts_for(&user_a()).is_empty()));
+        assert!(read_state(|s| s
+            .native_xrp_pending_payouts_for(&user_a())
+            .is_empty()));
     }
 
     #[test]
@@ -4834,9 +7505,8 @@ mod tests {
         replace_state(state);
         let mut io = FakeSettleSweepIo::default();
 
-        let first = futures::executor::block_on(run_native_xrp_settle_sweep_with_io(
-            &mut io, None, 2,
-        ));
+        let first =
+            futures::executor::block_on(run_native_xrp_settle_sweep_with_io(&mut io, None, 2));
         assert_eq!(first.examined, 2);
         assert_eq!(first.last_claim_id, Some(2));
         assert_eq!(
@@ -4864,9 +7534,8 @@ mod tests {
         replace_state(state);
         let mut io = FakeSettleSweepIo::default();
 
-        let summary = futures::executor::block_on(run_native_xrp_settle_sweep_with_io(
-            &mut io, None, 2,
-        ));
+        let summary =
+            futures::executor::block_on(run_native_xrp_settle_sweep_with_io(&mut io, None, 2));
 
         assert_eq!(summary.examined, 0);
         assert!(io.settle_calls.is_empty() && io.outstanding_calls.is_empty());
@@ -4894,11 +7563,13 @@ mod tests {
                 .to_string(),
         );
 
-        let summary = futures::executor::block_on(run_native_xrp_settle_sweep_with_io(
-            &mut io, None, 2,
-        ));
+        let summary =
+            futures::executor::block_on(run_native_xrp_settle_sweep_with_io(&mut io, None, 2));
 
-        assert_eq!(summary.failed, 0, "a landed-but-noisy submit is not a failure");
+        assert_eq!(
+            summary.failed, 0,
+            "a landed-but-noisy submit is not a failure"
+        );
         assert_eq!(
             summary.pending_confirmation, 1,
             "tefPAST_SEQ submits must be counted as awaiting confirmation"
@@ -4924,14 +7595,16 @@ mod tests {
         io.outstanding_errors.insert(1);
         io.settle_errors.insert(2);
 
-        let summary = futures::executor::block_on(run_native_xrp_settle_sweep_with_io(
-            &mut io, None, 3,
-        ));
+        let summary =
+            futures::executor::block_on(run_native_xrp_settle_sweep_with_io(&mut io, None, 3));
 
         assert_eq!(summary.examined, 3);
         assert_eq!(summary.failed, 2);
         assert_eq!(summary.submitted, 1);
-        assert_eq!(io.settle_calls.iter().map(|c| c.0).collect::<Vec<_>>(), vec![2, 4]);
+        assert_eq!(
+            io.settle_calls.iter().map(|c| c.0).collect::<Vec<_>>(),
+            vec![2, 4]
+        );
         assert_eq!(
             read_state(|s| s.native_xrp_pending_payouts_for(&user_a()).len())
                 + read_state(|s| s.native_xrp_pending_payouts_for(&user_b()).len()),

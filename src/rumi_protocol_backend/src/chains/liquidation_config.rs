@@ -101,7 +101,10 @@ pub enum LiquidationConfigError {
     /// build). Disabled configs may carry placeholder/empty addresses.
     MissingAddress(&'static str),
     /// A non-empty address is not an EVM `0x` + 40 hex digit address.
-    InvalidAddress { field: &'static str, address: String },
+    InvalidAddress {
+        field: &'static str,
+        address: String,
+    },
     /// An `enabled` config left the depth cap at 0 (spec §4.7): no swap could be
     /// sized. Disabled configs may carry 0.
     ZeroDepthCap,
@@ -135,7 +138,11 @@ impl ChainLiquidationConfigV1 {
         validate_evm_address_field("factory", &self.factory, self.enabled)?;
         validate_evm_address_field("pair", &self.pair, self.enabled)?;
         validate_evm_address_field("collateral_token", &self.collateral_token, self.enabled)?;
-        validate_evm_address_field("settle_stable_token", &self.settle_stable_token, self.enabled)?;
+        validate_evm_address_field(
+            "settle_stable_token",
+            &self.settle_stable_token,
+            self.enabled,
+        )?;
         if self.enabled {
             if self.max_swap_value_e8s == 0 {
                 return Err(LiquidationConfigError::ZeroDepthCap);
@@ -166,10 +173,12 @@ fn validate_evm_address_field(
             Ok(())
         };
     }
-    canonical_evm_address(address).map(|_| ()).map_err(|_| LiquidationConfigError::InvalidAddress {
-        field,
-        address: address.to_string(),
-    })
+    canonical_evm_address(address)
+        .map(|_| ())
+        .map_err(|_| LiquidationConfigError::InvalidAddress {
+            field,
+            address: address.to_string(),
+        })
 }
 
 /// Normalize an EVM address for equality checks after a value has passed the same
@@ -255,7 +264,9 @@ mod tests {
         c.slippage_cap_bps = 10_001;
         assert_eq!(
             c.validate(),
-            Err(LiquidationConfigError::SlippageCapTooHigh { slippage_cap_bps: 10_001 })
+            Err(LiquidationConfigError::SlippageCapTooHigh {
+                slippage_cap_bps: 10_001
+            })
         );
     }
 
@@ -265,7 +276,9 @@ mod tests {
         c.restore_target_cr_e4 = 10_000;
         assert_eq!(
             c.validate(),
-            Err(LiquidationConfigError::RestoreTargetTooLow { restore_target_cr_e4: 10_000 })
+            Err(LiquidationConfigError::RestoreTargetTooLow {
+                restore_target_cr_e4: 10_000
+            })
         );
     }
 
@@ -273,7 +286,10 @@ mod tests {
     fn enabled_config_with_empty_address_rejected() {
         let mut c = enabled_cfg();
         c.pair = String::new();
-        assert_eq!(c.validate(), Err(LiquidationConfigError::MissingAddress("pair")));
+        assert_eq!(
+            c.validate(),
+            Err(LiquidationConfigError::MissingAddress("pair"))
+        );
     }
 
     #[test]
@@ -320,7 +336,13 @@ mod tests {
     #[test]
     fn enabled_config_rejects_zero_addresses_for_all_evm_fields() {
         let zero = "0x0000000000000000000000000000000000000000".to_string();
-        for field in ["router", "factory", "pair", "collateral_token", "settle_stable_token"] {
+        for field in [
+            "router",
+            "factory",
+            "pair",
+            "collateral_token",
+            "settle_stable_token",
+        ] {
             let mut c = enabled_cfg();
             match field {
                 "router" => c.router = zero.clone(),

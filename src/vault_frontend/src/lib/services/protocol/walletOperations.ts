@@ -3,6 +3,7 @@ import { Actor, HttpAgent, AnonymousIdentity } from "@dfinity/agent";
 import { get } from 'svelte/store';
 import { walletStore } from '../../stores/wallet';
 import { CONFIG } from '../../config';
+import { assertPlugPrincipal, currentWalletType, WALLET_TYPES, walletSessionGeneration } from '../auth';
 import { permissionManager } from '../PermissionManager';
 import type { UserBalances } from '../types';
 
@@ -71,6 +72,11 @@ const THIRTY_DAYS_NS = 30n * 24n * 60n * 60n * 1_000_000_000n;
  */
 export function largeApprovalExpiry(): [bigint] {
   return [BigInt(Date.now()) * 1_000_000n + THIRTY_DAYS_NS];
+}
+
+/** Short expiry for one manual liquidation approval. */
+export function operationApprovalExpiry(): [bigint] {
+  return [BigInt(Date.now() + 10 * 60 * 1000) * 1_000_000n];
 }
 
 /**
@@ -159,6 +165,29 @@ export function assertActionBoundContextCurrent(ctx: ActionBoundContext): void {
   if (livePrincipalText !== ctx.expectedPrincipalText) {
     throw new StaleActionSessionError();
   }
+  if (get(currentWalletType) === WALLET_TYPES.PLUG) {
+    try {
+      assertPlugPrincipal(ctx.expectedPrincipalText);
+    } catch {
+      throw new StaleActionSessionError('Plug account changed during this action. Nothing further was submitted.');
+    }
+  }
+}
+
+/** Capture the connected identity and generation for one wallet action. */
+export function captureActionBoundContext(): ActionBoundContext {
+  const wallet = get(walletStore);
+  const expectedPrincipalText = wallet.principal?.toText() ?? '';
+  const walletType = get(currentWalletType);
+  const generation = get(walletSessionGeneration);
+  const context: ActionBoundContext = {
+    expectedPrincipalText,
+    assertCurrent: () => get(walletStore).isConnected
+      && get(currentWalletType) === walletType
+      && get(walletSessionGeneration) === generation,
+  };
+  assertActionBoundContextCurrent(context);
+  return context;
 }
 
 /**
@@ -307,11 +336,48 @@ export class walletOperations {
       return BigInt(0);
     }
   }
+
+  static async checkIcusdAllowanceBound(ctx: ActionBoundContext, spenderCanisterId: string): Promise<bigint> {
+    assertActionBoundContextCurrent(ctx);
+    const allowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
+    assertActionBoundContextCurrent(ctx);
+    return allowance;
+  }
+
+  /** One non-retrying icUSD approval pinned to the initiating wallet session. */
+  static async approveIcusdTransferBound(
+    ctx: ActionBoundContext,
+    amount: bigint,
+    spenderCanisterId: string
+  ): Promise<{ success: boolean; error?: string }> {
+    assertActionBoundContextCurrent(ctx);
+    const actor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
+    assertActionBoundContextCurrent(ctx);
+    const result = await actor.icrc2_approve({
+      amount,
+      spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
+      expires_at: largeApprovalExpiry(),
+      expected_allowance: [],
+      memo: [],
+      fee: [],
+      from_subaccount: [],
+      created_at_time: []
+    });
+    if ('Ok' in result) return { success: true };
+    return {
+      success: false,
+      error: `icUSD approval failed: ${String(result.Err && typeof result.Err === 'object' ? Object.keys(result.Err)[0] : result.Err)}`
+    };
+  }
   
   /**
    * Approve icUSD transfer - now streamlined with retry on stale actor
    */
-  static async approveIcusdTransfer(amount: bigint, spenderCanisterId: string): Promise<{success: boolean, error?: string}> {
+  static async approveIcusdTransfer(
+    amount: bigint,
+    spenderCanisterId: string,
+    expiresAt: [bigint] = largeApprovalExpiry()
+  ): Promise<{success: boolean, error?: string}> {
     const maxRetries = 2;
     
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -337,8 +403,7 @@ export class walletOperations {
             owner: Principal.fromText(spenderCanisterId),
             subaccount: []
           },
-          // FE-001: bound the large allowance to 30 days
-          expires_at: largeApprovalExpiry(),
+          expires_at: expiresAt,
           expected_allowance: [],
           memo: [],
           fee: [],
@@ -484,6 +549,34 @@ export class walletOperations {
       console.error(`${tokenType} allowance check failed:`, error);
       return BigInt(0);
     }
+  }
+
+  /** Session-pinned stable approval used by the legacy repayment hold flow. */
+  static async approveStableTransferBound(
+    ctx: ActionBoundContext,
+    amount: bigint,
+    spenderCanisterId: string,
+    tokenType: 'CKUSDT' | 'CKUSDC'
+  ): Promise<{ success: boolean; error?: string }> {
+    assertActionBoundContextCurrent(ctx);
+    const ledgerId = CONFIG.getStableLedgerId(tokenType);
+    const stableActor = await walletStore.getActor(ledgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
+    assertActionBoundContextCurrent(ctx);
+    const result = await stableActor.icrc2_approve({
+      amount,
+      spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
+      expires_at: largeApprovalExpiry(),
+      expected_allowance: [],
+      memo: [],
+      fee: [],
+      from_subaccount: [],
+      created_at_time: []
+    });
+    if ('Ok' in result) return { success: true };
+    return {
+      success: false,
+      error: `${tokenType} approval failed: ${String(result.Err && typeof result.Err === 'object' ? Object.keys(result.Err)[0] : result.Err)}`
+    };
   }
 
   // ── Generic collateral approve/allowance (multi-collateral) ──────────

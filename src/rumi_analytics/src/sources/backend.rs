@@ -514,7 +514,8 @@ impl BackendEvent {
 /// total_fetched)` pair using per-element decoding.
 ///
 /// `cursor_start` is the absolute event index of the first element in this
-/// batch; it is used only for log messages.
+/// batch; it is retained with each decoded event so unknown variants do not
+/// shift later source IDs.
 ///
 /// Exposed as `pub(crate)` so unit tests can drive it without a live IC
 /// runtime.  The async `get_events_resilient` wrapper is the only production
@@ -522,7 +523,7 @@ impl BackendEvent {
 pub(crate) fn decode_events_resilient(
     raw_bytes: &[u8],
     cursor_start: u64,
-) -> Result<(Vec<BackendEvent>, u64), String> {
+) -> Result<(Vec<(u64, BackendEvent)>, u64), String> {
     // Decode the response as generic IDLArgs so that unknown variant hashes
     // do not abort the parse.  The response is a 1-tuple whose single arg is
     // a vec of variants.
@@ -559,7 +560,7 @@ pub(crate) fn decode_events_resilient(
             }
         };
         match candid::decode_one::<BackendEvent>(&elem_bytes) {
-            Ok(event) => decoded.push(event),
+            Ok(event) => decoded.push((abs_idx, event)),
             Err(e) => {
                 ic_cdk::println!(
                     "[tail_backend] event idx={} unknown/undecodable variant (skipping): {}",
@@ -576,8 +577,8 @@ pub(crate) fn decode_events_resilient(
 /// Fetch a batch of backend events and decode each element individually.
 ///
 /// Returns `(decoded, total_fetched)` where:
-/// - `decoded` is the list of events that could be decoded as a known
-///   `BackendEvent` variant; elements that fail to decode are skipped.
+/// - `decoded` contains each known event paired with its absolute source ID;
+///   elements that fail to decode are skipped without shifting later IDs.
 /// - `total_fetched` is the number of elements the backend actually returned
 ///   in the batch, including any that were skipped due to unknown/undecodable
 ///   variants.
@@ -590,7 +591,7 @@ pub async fn get_events_resilient(
     backend: Principal,
     start: u64,
     length: u64,
-) -> Result<(Vec<BackendEvent>, u64), String> {
+) -> Result<(Vec<(u64, BackendEvent)>, u64), String> {
     let arg = GetEventsArg { start, length };
     let arg_bytes = candid::encode_one(&arg)
         .map_err(|e| format!("get_events_resilient encode: {}", e))?;
@@ -674,6 +675,7 @@ mod tests {
         let (decoded, total) = decode_events_resilient(&raw, 0).expect("should not error");
         assert_eq!(total, 2, "total_fetched must equal elements in batch");
         assert_eq!(decoded.len(), 2, "all known events must be decoded");
+        assert_eq!(decoded.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![0, 1]);
     }
 
     /// (b) A batch with one unknown variant in the middle does not fail the
@@ -704,14 +706,18 @@ mod tests {
             2,
             "known events on either side of unknown variant must be decoded"
         );
+        assert_eq!(
+            decoded.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![100, 102]
+        );
 
         // Verify the known events decode to the expected variants
         assert!(
-            matches!(decoded[0], BackendEvent::PriceUpdate {}),
+            matches!(&decoded[0].1, BackendEvent::PriceUpdate {}),
             "first event must decode as PriceUpdate"
         );
         assert!(
-            matches!(decoded[1], BackendEvent::Init {}),
+            matches!(&decoded[1].1, BackendEvent::Init {}),
             "third event must decode as Init"
         );
     }

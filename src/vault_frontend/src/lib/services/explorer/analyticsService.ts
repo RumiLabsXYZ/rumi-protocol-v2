@@ -28,6 +28,7 @@ import type {
 	PriceSeriesResponse,
 	ThreePoolSeriesResponse,
 	CycleSeriesResponse,
+	RangeQuery,
 	TopHoldersResponse,
 	TopCounterpartiesResponse,
 	TopSpDepositorsResponse,
@@ -102,7 +103,7 @@ function getActor(): AnalyticsService {
 
 // ── RangeQuery helper ────────────────────────────────────────────────────────
 
-function rangeQuery(from?: bigint, to?: bigint, limit?: number) {
+function rangeQuery(from?: bigint, to?: bigint, limit?: number): RangeQuery {
 	return {
 		from_ts: from !== undefined ? [from] : [],
 		to_ts: to !== undefined ? [to] : [],

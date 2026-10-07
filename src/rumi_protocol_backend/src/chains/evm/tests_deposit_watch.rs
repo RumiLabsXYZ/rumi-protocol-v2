@@ -1,8 +1,10 @@
-use super::deposit_watch::{advance_cursor_and_prune, apply_burn_to_state, credit_deposit_to_state, BurnApplyError};
-use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+use super::deposit_watch::{
+    advance_cursor_and_prune, apply_burn_to_state, credit_deposit_to_state, BurnApplyError,
+};
 use crate::chains::config::ChainId;
-use crate::chains::multi_chain_state::MultiChainState;
+use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use crate::chains::monad::evm_rpc::BurnLog;
+use crate::chains::multi_chain_state::MultiChainState;
 use crate::chains::supply::SupplyInvariantError;
 use crate::chains::vault::{LiquidationTier, PendingLiquidationV1};
 use candid::Principal;
@@ -10,15 +12,25 @@ use candid::Principal;
 fn seeded() -> MultiChainState {
     let mut s = MultiChainState::default();
     s.chain_supplies.insert(ChainId(10143), 0);
-    s.chain_vaults.insert(1, ChainVaultV1 {
-        vault_id: 1, owner: Principal::anonymous(), collateral_chain: ChainId(10143),
-        custody_address: "0xcustody".into(), collateral_amount_native: 0, debt_e8s: 0,
-        mint_recipient: "0xr".into(), pending_mint_e8s: 0,
-        status: ChainVaultStatus::Open, opened_at_ns: 0,
-        owner_evm: None,
-        last_interest_accrual_ns: 0,
-        pending_interest_mint_e8s: 0,
-        pending_liquidation: None,    });
+    s.chain_vaults.insert(
+        1,
+        ChainVaultV1 {
+            vault_id: 1,
+            owner: Principal::anonymous(),
+            collateral_chain: ChainId(10143),
+            custody_address: "0xcustody".into(),
+            collateral_amount_native: 0,
+            debt_e8s: 0,
+            mint_recipient: "0xr".into(),
+            pending_mint_e8s: 0,
+            status: ChainVaultStatus::Open,
+            opened_at_ns: 0,
+            owner_evm: None,
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
+            pending_liquidation: None,
+        },
+    );
     s
 }
 
@@ -26,7 +38,10 @@ fn seeded() -> MultiChainState {
 fn credit_deposit_increments_collateral() {
     let mut s = seeded();
     credit_deposit_to_state(&mut s, 1, 5_000_000_000_000_000_000).expect("credit");
-    assert_eq!(s.chain_vaults[&1].collateral_amount_native, 5_000_000_000_000_000_000);
+    assert_eq!(
+        s.chain_vaults[&1].collateral_amount_native,
+        5_000_000_000_000_000_000
+    );
 }
 
 #[test]
@@ -35,8 +50,13 @@ fn burn_decrements_supply_and_debt_preserving_invariant() {
     s.chain_vaults.get_mut(&1).unwrap().debt_e8s = 10_000_000_000;
     s.chain_supplies.insert(ChainId(10143), 10_000_000_000);
     let total_debt = 10_000_000_000u128;
-    let burn = BurnLog { vault_id: 1, amount_e8s: 4_000_000_000, tx_hash: "0xb".into(), block_number: 110 };
-    apply_burn_to_state(&mut s, &burn, total_debt).expect("burn");
+    let burn = BurnLog {
+        vault_id: 1,
+        amount_e8s: 4_000_000_000,
+        tx_hash: "0xb".into(),
+        block_number: 110,
+    };
+    apply_burn_to_state(&mut s, ChainId(10143), &burn, total_debt).expect("burn");
     assert_eq!(s.chain_vaults[&1].debt_e8s, 6_000_000_000);
     assert_eq!(s.chain_supplies[&ChainId(10143)], 6_000_000_000);
 }
@@ -46,10 +66,18 @@ fn burn_exceeding_debt_is_rejected_without_mutation() {
     let mut s = seeded();
     s.chain_vaults.get_mut(&1).unwrap().debt_e8s = 1_000_000_000;
     s.chain_supplies.insert(ChainId(10143), 1_000_000_000);
-    let burn = BurnLog { vault_id: 1, amount_e8s: 9_999_999_999, tx_hash: "0xb".into(), block_number: 1 };
-    let res = apply_burn_to_state(&mut s, &burn, 1_000_000_000);
+    let burn = BurnLog {
+        vault_id: 1,
+        amount_e8s: 9_999_999_999,
+        tx_hash: "0xb".into(),
+        block_number: 1,
+    };
+    let res = apply_burn_to_state(&mut s, ChainId(10143), &burn, 1_000_000_000);
     // Over-repay is a PERMANENT-INVALID burn → InvalidBurn (skippable).
-    assert!(matches!(res, Err(BurnApplyError::InvalidBurn(_))), "got {res:?}");
+    assert!(
+        matches!(res, Err(BurnApplyError::InvalidBurn(_))),
+        "got {res:?}"
+    );
     assert_eq!(s.chain_vaults[&1].debt_e8s, 1_000_000_000); // unchanged
     assert_eq!(s.chain_supplies[&ChainId(10143)], 1_000_000_000); // unchanged
 }
@@ -57,10 +85,18 @@ fn burn_exceeding_debt_is_rejected_without_mutation() {
 #[test]
 fn burn_for_unknown_vault_is_rejected_as_invalid() {
     let mut s = seeded();
-    let burn = BurnLog { vault_id: 999, amount_e8s: 1, tx_hash: "0xb".into(), block_number: 1 };
-    let res = apply_burn_to_state(&mut s, &burn, 0);
+    let burn = BurnLog {
+        vault_id: 999,
+        amount_e8s: 1,
+        tx_hash: "0xb".into(),
+        block_number: 1,
+    };
+    let res = apply_burn_to_state(&mut s, ChainId(10143), &burn, 0);
     // Unknown vault is a PERMANENT-INVALID burn → InvalidBurn (skippable).
-    assert!(matches!(res, Err(BurnApplyError::InvalidBurn(_))), "got {res:?}");
+    assert!(
+        matches!(res, Err(BurnApplyError::InvalidBurn(_))),
+        "got {res:?}"
+    );
 }
 
 #[test]
@@ -73,12 +109,19 @@ fn burn_returns_supply_invariant_when_already_halted_without_mutation() {
     s.chain_vaults.get_mut(&1).unwrap().debt_e8s = 5_000_000_000;
     s.chain_supplies.insert(ChainId(10143), 5_000_000_000);
     s.invariant_halted = true;
-    let burn = BurnLog { vault_id: 1, amount_e8s: 4_000_000_000, tx_hash: "0xb".into(), block_number: 1 };
-    let res = apply_burn_to_state(&mut s, &burn, 5_000_000_000);
+    let burn = BurnLog {
+        vault_id: 1,
+        amount_e8s: 4_000_000_000,
+        tx_hash: "0xb".into(),
+        block_number: 1,
+    };
+    let res = apply_burn_to_state(&mut s, ChainId(10143), &burn, 5_000_000_000);
     assert!(
         matches!(
             res,
-            Err(BurnApplyError::SupplyInvariant(SupplyInvariantError::HaltedAfterSelfCheckFailure))
+            Err(BurnApplyError::SupplyInvariant(
+                SupplyInvariantError::HaltedAfterSelfCheckFailure
+            ))
         ),
         "got {res:?}"
     );
@@ -97,10 +140,20 @@ fn burn_returns_supply_invariant_on_supply_divergence_without_mutation() {
     s.chain_vaults.get_mut(&1).unwrap().debt_e8s = 4_000_000_000;
     // Deliberately mismatched supply (3e9) vs the total_debt we pass (4e9).
     s.chain_supplies.insert(ChainId(10143), 3_000_000_000);
-    let burn = BurnLog { vault_id: 1, amount_e8s: 1_000_000_000, tx_hash: "0xb".into(), block_number: 1 };
-    let res = apply_burn_to_state(&mut s, &burn, 4_000_000_000);
+    let burn = BurnLog {
+        vault_id: 1,
+        amount_e8s: 1_000_000_000,
+        tx_hash: "0xb".into(),
+        block_number: 1,
+    };
+    let res = apply_burn_to_state(&mut s, ChainId(10143), &burn, 4_000_000_000);
     assert!(
-        matches!(res, Err(BurnApplyError::SupplyInvariant(SupplyInvariantError::Divergence { .. }))),
+        matches!(
+            res,
+            Err(BurnApplyError::SupplyInvariant(
+                SupplyInvariantError::Divergence { .. }
+            ))
+        ),
         "got {res:?}"
     );
     assert_eq!(s.chain_vaults[&1].debt_e8s, 4_000_000_000); // unchanged
@@ -114,18 +167,59 @@ fn advance_cursor_and_prune_sets_cursor_and_drops_keys_at_or_below_finalized() {
     // Seed processed_burn_keys at three blocks: 100, 150, 250.
     for b in [100u64, 150, 250] {
         let mut set = BTreeSet::new();
-        set.insert(format!("0xtx{b}:0"));
+        set.insert(format!("{}:0xtx{b}:0", ChainId(10143).0));
         s.processed_burn_keys.insert(b, set);
     }
 
     advance_cursor_and_prune(&mut s, ChainId(10143), 200);
 
     // Cursor advanced to finalized.
-    assert_eq!(s.last_observed_block.get(&ChainId(10143)).copied(), Some(200));
+    assert_eq!(
+        s.last_observed_block.get(&ChainId(10143)).copied(),
+        Some(200)
+    );
     // Keys at block <= 200 pruned (100, 150 gone); keys above 200 retained (250).
-    assert!(!s.processed_burn_keys.contains_key(&100), "block 100 pruned");
-    assert!(!s.processed_burn_keys.contains_key(&150), "block 150 pruned");
-    assert!(s.processed_burn_keys.contains_key(&250), "block 250 > finalized retained");
+    assert!(
+        !s.processed_burn_keys.contains_key(&100),
+        "block 100 pruned"
+    );
+    assert!(
+        !s.processed_burn_keys.contains_key(&150),
+        "block 150 pruned"
+    );
+    assert!(
+        s.processed_burn_keys.contains_key(&250),
+        "block 250 > finalized retained"
+    );
+}
+
+#[test]
+fn pruning_one_chain_preserves_other_chain_and_legacy_burn_markers() {
+    use std::collections::BTreeSet;
+    let mut s = seeded();
+    let mut keys = BTreeSet::new();
+    keys.insert(crate::chains::evm::deposit_watch::evm_burn_consumption_key(
+        ChainId(10143),
+        "0xaaa",
+        1,
+    ));
+    keys.insert(crate::chains::evm::deposit_watch::evm_burn_consumption_key(
+        ChainId(84532),
+        "0xbbb",
+        2,
+    ));
+    keys.insert("0xlegacy:3".to_string());
+    s.processed_burn_keys.insert(100, keys);
+
+    advance_cursor_and_prune(&mut s, ChainId(10143), 200);
+
+    let remaining = s
+        .processed_burn_keys
+        .get(&100)
+        .expect("uncovered keys remain");
+    assert!(remaining.iter().any(|key| key.starts_with("84532:")));
+    assert!(remaining.contains("0xlegacy:3"));
+    assert!(!remaining.iter().any(|key| key.starts_with("10143:")));
 }
 
 #[test]
@@ -163,6 +257,73 @@ fn no_debt_fast_path_stays_active_with_pending_chain_burn() {
     assert!(
         !burn_watch_can_skip_for_no_supply_obligation(42, 0),
         "live debt means user burns can still repay a vault"
+    );
+}
+
+#[test]
+fn settlement_consumption_is_skipped_by_the_observer() {
+    use super::deposit_watch::apply_burn_log_window_and_advance;
+
+    let mut s = seeded();
+    s.chain_vaults.get_mut(&1).unwrap().debt_e8s = 100;
+    s.chain_supplies.insert(ChainId(10143), 100);
+    s.settled_settlement_burn_logs.insert("10143:0xtx:3".into());
+    let logs = vec![(
+        vec![
+            crate::chains::evm::evm_rpc::BURN_EVENT_TOPIC0.into(),
+            format!("0x{:064x}", 1),
+            format!("0x{:064x}", 0xdead),
+        ],
+        format!("0x{:064x}", 40),
+        "0xtx".into(),
+        10,
+        3,
+    )];
+
+    let applied = apply_burn_log_window_and_advance(&mut s, ChainId(10143), &logs, 10)
+        .expect("already-consumed event is skipped");
+
+    assert!(applied.is_empty());
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 100);
+    assert_eq!(s.chain_supplies[&ChainId(10143)], 100);
+}
+
+#[test]
+fn same_window_duplicate_log_with_mixed_hash_case_applies_once() {
+    use super::deposit_watch::apply_burn_log_window_and_advance;
+
+    let mut s = seeded();
+    s.chain_vaults.get_mut(&1).unwrap().debt_e8s = 100;
+    s.chain_supplies.insert(ChainId(10143), 100);
+    let topics = vec![
+        crate::chains::evm::evm_rpc::BURN_EVENT_TOPIC0.into(),
+        format!("0x{:064x}", 1),
+        format!("0x{:064x}", 0xdead),
+    ];
+    let logs = vec![
+        (
+            topics.clone(),
+            format!("0x{:064x}", 40),
+            "0xAbCd".into(),
+            10,
+            3,
+        ),
+        (topics, format!("0x{:064x}", 40), "0xaBcD".into(), 10, 3),
+    ];
+
+    let applied = apply_burn_log_window_and_advance(&mut s, ChainId(10143), &logs, 10)
+        .expect("duplicate row is deduped");
+
+    assert_eq!(applied.len(), 1);
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
+    assert_eq!(s.chain_supplies[&ChainId(10143)], 60);
+    assert_eq!(
+        s.evm_burn_proof_floor_by_chain.get(&ChainId(10143)),
+        Some(&10)
+    );
+    assert!(
+        !s.processed_burn_keys.contains_key(&10),
+        "covered block keys pruned"
     );
 }
 
@@ -225,14 +386,21 @@ fn deferred_liquidation_stall_bounds_processed_burn_keys_across_rescans() {
                 continue;
             }
             let current_total = s.total_chain_vault_debt_e8s();
-            match apply_burn_to_state(s, burn, current_total) {
+            match apply_burn_to_state(s, ChainId(10143), burn, current_total) {
                 Ok(()) => {
-                    s.processed_burn_keys.entry(burn.block_number).or_default().insert(key);
+                    s.processed_burn_keys
+                        .entry(burn.block_number)
+                        .or_default()
+                        .insert(key);
                 }
                 Err(BurnApplyError::InvalidBurn(_)) => {
-                    s.processed_burn_keys.entry(burn.block_number).or_default().insert(key);
+                    s.processed_burn_keys
+                        .entry(burn.block_number)
+                        .or_default()
+                        .insert(key);
                 }
-                Err(BurnApplyError::SupplyInvariant(_)) | Err(BurnApplyError::DeferredLiquidation) => {
+                Err(BurnApplyError::SupplyInvariant(_))
+                | Err(BurnApplyError::DeferredLiquidation) => {
                     burn_ok = false;
                     break;
                 }
@@ -242,16 +410,25 @@ fn deferred_liquidation_stall_bounds_processed_burn_keys_across_rescans() {
     }
 
     let mut s = seeded();
-    s.chain_vaults.insert(2, ChainVaultV1 {
-        vault_id: 2, owner: Principal::anonymous(), collateral_chain: ChainId(10143),
-        custody_address: "0xc2".into(), collateral_amount_native: 0, debt_e8s: 1_000_000_000,
-        mint_recipient: "0xr2".into(), pending_mint_e8s: 0,
-        status: ChainVaultStatus::Open, opened_at_ns: 0,
-        owner_evm: None,
-        last_interest_accrual_ns: 0,
-        pending_interest_mint_e8s: 0,
-        pending_liquidation: None,
-    });
+    s.chain_vaults.insert(
+        2,
+        ChainVaultV1 {
+            vault_id: 2,
+            owner: Principal::anonymous(),
+            collateral_chain: ChainId(10143),
+            custody_address: "0xc2".into(),
+            collateral_amount_native: 0,
+            debt_e8s: 1_000_000_000,
+            mint_recipient: "0xr2".into(),
+            pending_mint_e8s: 0,
+            status: ChainVaultStatus::Open,
+            opened_at_ns: 0,
+            owner_evm: None,
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
+            pending_liquidation: None,
+        },
+    );
     {
         let v1 = s.chain_vaults.get_mut(&1).unwrap();
         v1.debt_e8s = 1_000_000_000;
@@ -267,15 +444,38 @@ fn deferred_liquidation_stall_bounds_processed_burn_keys_across_rescans() {
 
     // Block order: vault2 (ok) -> vault1 (mid-liquidation, blocks) -> vault2 (never reached while blocked).
     let burns = vec![
-        BurnLog { vault_id: 2, amount_e8s: 300_000_000, tx_hash: "0xa".into(), block_number: 101 },
-        BurnLog { vault_id: 1, amount_e8s: 200_000_000, tx_hash: "0xb".into(), block_number: 102 },
-        BurnLog { vault_id: 2, amount_e8s: 400_000_000, tx_hash: "0xc".into(), block_number: 103 },
+        BurnLog {
+            vault_id: 2,
+            amount_e8s: 300_000_000,
+            tx_hash: "0xa".into(),
+            block_number: 101,
+        },
+        BurnLog {
+            vault_id: 1,
+            amount_e8s: 200_000_000,
+            tx_hash: "0xb".into(),
+            block_number: 102,
+        },
+        BurnLog {
+            vault_id: 2,
+            amount_e8s: 400_000_000,
+            tx_hash: "0xc".into(),
+            block_number: 103,
+        },
     ];
 
-    let key_count = |s: &MultiChainState| s.processed_burn_keys.values().map(|set| set.len()).sum::<usize>();
+    let key_count = |s: &MultiChainState| {
+        s.processed_burn_keys
+            .values()
+            .map(|set| set.len())
+            .sum::<usize>()
+    };
 
     // Tick 1: blocks at burn[1] (vault1 mid-liquidation). Only burn[0] is keyed.
-    assert!(!run_tick(&mut s, &burns), "burn_ok false: DeferredLiquidation stopped the range");
+    assert!(
+        !run_tick(&mut s, &burns),
+        "burn_ok false: DeferredLiquidation stopped the range"
+    );
     assert_eq!(key_count(&s), 1, "only the pre-blocker burn is keyed");
 
     // Ticks 2..5: the cursor does NOT advance (burn_ok was false), so
@@ -284,18 +484,34 @@ fn deferred_liquidation_stall_bounds_processed_burn_keys_across_rescans() {
     // the DeferredLiquidation stall shape.
     for i in 0..4 {
         assert!(!run_tick(&mut s, &burns), "tick {i}: still blocked");
-        assert_eq!(key_count(&s), 1, "tick {i}: stall does not grow the dedup set");
+        assert_eq!(
+            key_count(&s),
+            1,
+            "tick {i}: stall does not grow the dedup set"
+        );
     }
-    assert_eq!(s.chain_vaults[&1].debt_e8s, 1_000_000_000, "vault1 debt untouched while deferred");
-    assert_eq!(s.chain_vaults[&2].debt_e8s, 700_000_000, "vault2's first burn applied exactly once across all stalled re-scans");
+    assert_eq!(
+        s.chain_vaults[&1].debt_e8s, 1_000_000_000,
+        "vault1 debt untouched while deferred"
+    );
+    assert_eq!(
+        s.chain_vaults[&2].debt_e8s, 700_000_000,
+        "vault2's first burn applied exactly once across all stalled re-scans"
+    );
 
     // The liquidation clears; the next re-scan resolves the blocker AND
     // reaches the remaining burn in the same tick.
     s.chain_vaults.get_mut(&1).unwrap().pending_liquidation = None;
     assert!(run_tick(&mut s, &burns), "range now fully resolved");
     assert_eq!(key_count(&s), 3, "all three burns keyed exactly once");
-    assert_eq!(s.chain_vaults[&1].debt_e8s, 800_000_000, "vault1 debt decremented exactly once (no double-apply from earlier stalled ticks)");
-    assert_eq!(s.chain_vaults[&2].debt_e8s, 300_000_000, "vault2 both its burns applied exactly once");
+    assert_eq!(
+        s.chain_vaults[&1].debt_e8s, 800_000_000,
+        "vault1 debt decremented exactly once (no double-apply from earlier stalled ticks)"
+    );
+    assert_eq!(
+        s.chain_vaults[&2].debt_e8s, 300_000_000,
+        "vault2 both its burns applied exactly once"
+    );
 }
 
 #[test]

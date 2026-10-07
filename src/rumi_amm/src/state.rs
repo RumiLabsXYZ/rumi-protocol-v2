@@ -1,11 +1,11 @@
+use candid::{CandidType, Decode, Encode, Principal};
+use ic_canister_log::log;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use candid::{CandidType, Principal, Decode, Encode};
-use ic_canister_log::log;
-use serde::{Serialize, Deserialize};
 
-use crate::types::*;
 use crate::logs::INFO;
+use crate::types::*;
 
 // ─── Event log caps ───
 // Prevents unbounded heap growth that could brick the canister by causing
@@ -17,8 +17,14 @@ pub const MAX_LIQUIDITY_EVENTS: usize = 50_000;
 pub const MAX_ADMIN_EVENTS: usize = 10_000;
 pub const MAX_HOLDER_SNAPSHOTS: usize = 1_000; // ~500 days at 2/day
 pub const MAX_PENDING_CLAIMS: usize = 1_000;
+/// Permanent per-principal high-water rows prevent old V2 request IDs from
+/// becoming replayable after successful settlement. New principals fail closed
+/// when this bounded replay-defense table is full.
+pub const MAX_INGRESS_OPERATIONS: usize = 10_000;
 pub const MAX_REWARD_EVENTS: usize = 50_000;
 pub const MAX_CLAIM_EVENTS: usize = 50_000;
+/// Historical compatibility constant. Donation receipt identities are no
+/// longer pruned at this boundary because backend retries are durable.
 pub const MAX_PROCESSED_NONCES: usize = 1024;
 pub const REWARD_SCALE: u128 = 1_000_000_000_000; // 1e12 fixed-point for acc_reward_per_share
 /// Minimum claimable amount: 10x the live icUSD ledger fee (100_000 e8s =
@@ -45,6 +51,19 @@ pub struct AmmState {
     pub pending_claims: Vec<PendingClaim>,
     #[serde(default)]
     pub next_claim_id: u64,
+    /// Exact, lossless outbound obligations. Unlike legacy `pending_claims`,
+    /// these contain the original ledger transfer identity and are never
+    /// evicted to make room for a new payout.
+    #[serde(default)]
+    pub pending_payouts: Vec<AmmPayoutAttempt>,
+    #[serde(default)]
+    pub next_payout_id: u64,
+    /// Active/completed V2 requests are retained by caller until superseded by
+    /// a strictly newer request id, preventing a lost reply from pulling twice.
+    #[serde(default)]
+    pub ingress_operations: Vec<AmmIngressOperation>,
+    #[serde(default)]
+    pub next_operation_id: u64,
     #[serde(default)]
     pub swap_events: Vec<AmmSwapEvent>,
     #[serde(default)]
@@ -85,6 +104,10 @@ impl Default for AmmState {
             maintenance_mode: false,
             pending_claims: Vec::new(),
             next_claim_id: 0,
+            pending_payouts: Vec::new(),
+            next_payout_id: 0,
+            ingress_operations: Vec::new(),
+            next_operation_id: 0,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
             liquidity_events: Vec::new(),
@@ -107,7 +130,16 @@ impl AmmState {
         self.admin = args.admin;
     }
 
-    pub fn record_swap_event(&mut self, caller: Principal, pool_id: PoolId, token_in: Principal, amount_in: u128, token_out: Principal, amount_out: u128, fee: u128) {
+    pub fn record_swap_event(
+        &mut self,
+        caller: Principal,
+        pool_id: PoolId,
+        token_in: Principal,
+        amount_in: u128,
+        token_out: Principal,
+        amount_out: u128,
+        fee: u128,
+    ) {
         if self.swap_events.len() >= MAX_SWAP_EVENTS {
             self.swap_events.remove(0);
         }
@@ -191,12 +223,7 @@ impl AmmState {
         self.next_reward_event_id += 1;
     }
 
-    pub fn record_claim_event(
-        &mut self,
-        pool_id: PoolId,
-        claimant: Principal,
-        amount: u128,
-    ) {
+    pub fn record_claim_event(&mut self, pool_id: PoolId, claimant: Principal, amount: u128) {
         if self.claim_events.len() >= MAX_CLAIM_EVENTS {
             self.claim_events.remove(0);
         }
@@ -345,7 +372,18 @@ struct AmmStateV1 {
 /// in order (current, V4, V3, V2, V1). Returns `None` if no version decodes.
 pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
     if let Ok(state) = Decode!(bytes, AmmState) {
+        if !current_journal_options_match_wire(bytes, &state) {
+            return None;
+        }
         return Some(state);
+    }
+    // Candid permits decoding a record into a smaller record type, dropping
+    // fields that the smaller type does not know. Do not enter that migration
+    // chain for any wire record that contains a financial journal introduced
+    // after V5; a nested type mismatch must leave the upgrade un-restored,
+    // never silently clear those obligations.
+    if !legacy_fallback_has_no_new_journals(bytes) {
+        return None;
     }
     // V5: the frozen snapshot of the current shape. This is what protects a
     // future non-Option field addition from silently falling through to V4 and
@@ -358,6 +396,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             maintenance_mode: v5.maintenance_mode,
             pending_claims: v5.pending_claims,
             next_claim_id: v5.next_claim_id,
+            pending_payouts: Vec::new(),
+            next_payout_id: 0,
+            ingress_operations: Vec::new(),
+            next_operation_id: 0,
             swap_events: v5.swap_events,
             next_swap_event_id: v5.next_swap_event_id,
             liquidity_events: v5.liquidity_events,
@@ -381,6 +423,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             maintenance_mode: v4.maintenance_mode,
             pending_claims: v4.pending_claims,
             next_claim_id: v4.next_claim_id,
+            pending_payouts: Vec::new(),
+            next_payout_id: 0,
+            ingress_operations: Vec::new(),
+            next_operation_id: 0,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
             liquidity_events: Vec::new(),
@@ -404,6 +450,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             maintenance_mode: v3.maintenance_mode,
             pending_claims: Vec::new(),
             next_claim_id: 0,
+            pending_payouts: Vec::new(),
+            next_payout_id: 0,
+            ingress_operations: Vec::new(),
+            next_operation_id: 0,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
             liquidity_events: Vec::new(),
@@ -427,6 +477,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             maintenance_mode: false,
             pending_claims: Vec::new(),
             next_claim_id: 0,
+            pending_payouts: Vec::new(),
+            next_payout_id: 0,
+            ingress_operations: Vec::new(),
+            next_operation_id: 0,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
             liquidity_events: Vec::new(),
@@ -450,6 +504,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             maintenance_mode: false,
             pending_claims: Vec::new(),
             next_claim_id: 0,
+            pending_payouts: Vec::new(),
+            next_payout_id: 0,
+            ingress_operations: Vec::new(),
+            next_operation_id: 0,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
             liquidity_events: Vec::new(),
@@ -466,6 +524,150 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
         });
     }
     None
+}
+
+fn legacy_fallback_has_no_new_journals(bytes: &[u8]) -> bool {
+    use candid::{IDLArgs, IDLValue};
+
+    let Ok(args) = IDLArgs::from_bytes(bytes) else {
+        return false;
+    };
+    let [IDLValue::Record(fields)] = args.args.as_slice() else {
+        return false;
+    };
+    const NEW_FINANCIAL_JOURNALS: &[&str] = &["pending_payouts", "ingress_operations"];
+    !fields.iter().any(|field| {
+        NEW_FINANCIAL_JOURNALS
+            .iter()
+            .any(|name| field.id.get_id() == candid::idl_hash(name))
+    })
+}
+
+fn current_journal_options_match_wire(bytes: &[u8], state: &AmmState) -> bool {
+    use candid::IDLValue;
+
+    let Some(args) = candid::IDLArgs::from_bytes(bytes).ok() else {
+        return false;
+    };
+    let Some(fields) = state_record_fields(&args) else {
+        return false;
+    };
+    let Some(payout_values) = record_vec_field(&fields, "pending_payouts") else {
+        return false;
+    };
+    if payout_values.len() != state.pending_payouts.len()
+        || !payout_values
+            .iter()
+            .zip(&state.pending_payouts)
+            .all(|(wire, payout)| {
+                let IDLValue::Record(fields) = wire else {
+                    return false;
+                };
+                payout_options_match_wire(fields, payout)
+            })
+    {
+        return false;
+    }
+
+    let Some(ingress_values) = record_vec_field(&fields, "ingress_operations") else {
+        return false;
+    };
+    ingress_values.len() == state.ingress_operations.len()
+        && ingress_values
+            .iter()
+            .zip(&state.ingress_operations)
+            .all(|(wire, operation)| {
+                let IDLValue::Record(fields) = wire else {
+                    return false;
+                };
+                if !optional_field_matches(fields, "result", operation.result.is_some())
+                    || !optional_field_matches(fields, "last_error", operation.last_error.is_some())
+                {
+                    return false;
+                }
+                let Some(legs) = record_vec_field(fields, "legs") else {
+                    return false;
+                };
+                legs.len() == operation.legs.len()
+                    && legs.iter().zip(&operation.legs).all(|(wire_leg, leg)| {
+                        let IDLValue::Record(fields) = wire_leg else {
+                            return false;
+                        };
+                        optional_field_matches(fields, "transfer_fee", leg.transfer_fee.is_some())
+                            && optional_field_matches(
+                                fields,
+                                "block_index",
+                                leg.block_index.is_some(),
+                            )
+                            && optional_field_matches(
+                                fields,
+                                "receipt_scan_start",
+                                leg.receipt_scan_start.is_some(),
+                            )
+                            && optional_field_matches(
+                                fields,
+                                "receipt_scan_end",
+                                leg.receipt_scan_end.is_some(),
+                            )
+                    })
+            })
+}
+
+fn payout_options_match_wire(
+    fields: &[candid::types::value::IDLField],
+    payout: &AmmPayoutAttempt,
+) -> bool {
+    optional_field_matches(fields, "send_amount", payout.send_amount.is_some())
+        && optional_field_matches(fields, "fee", payout.fee.is_some())
+        && optional_field_matches(
+            fields,
+            "receipt_scan_start",
+            payout.receipt_scan_start.is_some(),
+        )
+        && optional_field_matches(
+            fields,
+            "receipt_scan_end",
+            payout.receipt_scan_end.is_some(),
+        )
+        && optional_field_matches(fields, "last_error", payout.last_error.is_some())
+}
+
+fn optional_field_matches(
+    fields: &[candid::types::value::IDLField],
+    name: &str,
+    decoded_has_value: bool,
+) -> bool {
+    let Some(field) = fields
+        .iter()
+        .find(|field| field.id.get_id() == candid::idl_hash(name))
+    else {
+        return !decoded_has_value;
+    };
+    match &field.val {
+        candid::IDLValue::None => !decoded_has_value,
+        candid::IDLValue::Opt(_) => decoded_has_value,
+        _ => false,
+    }
+}
+
+fn record_vec_field<'a>(
+    fields: &'a [candid::types::value::IDLField],
+    name: &str,
+) -> Option<&'a [candid::IDLValue]> {
+    let field = fields
+        .iter()
+        .find(|field| field.id.get_id() == candid::idl_hash(name))?;
+    match &field.val {
+        candid::IDLValue::Vec(values) => Some(values),
+        _ => None,
+    }
+}
+
+fn state_record_fields(args: &candid::IDLArgs) -> Option<&[candid::types::value::IDLField]> {
+    match args.args.as_slice() {
+        [candid::IDLValue::Record(fields)] => Some(fields),
+        _ => None,
+    }
 }
 
 /// Restore state from stable memory (called from post_upgrade).
@@ -519,4 +721,262 @@ pub fn load_from_stable_memory() {
         "AMM post_upgrade: stable state did not decode under any known schema version \
          (current, V5, V4, V3, V2, V1); refusing to wipe live pools — see CRITICAL log",
     );
+}
+
+#[cfg(test)]
+mod payout_state_migration_tests {
+    use super::*;
+
+    #[test]
+    fn incompatible_nested_payout_option_is_not_accepted_as_none() {
+        use candid::types::{value::IDLField, Label};
+
+        let wire_field = IDLField {
+            id: Label::Named("send_amount".into()),
+            val: candid::IDLValue::Text("wrong wire type".into()),
+        };
+        assert!(!optional_field_matches(&[wire_field], "send_amount", false));
+
+        let wire_none = IDLField {
+            id: Label::Named("send_amount".into()),
+            val: candid::IDLValue::None,
+        };
+        assert!(optional_field_matches(&[wire_none], "send_amount", false));
+    }
+
+    #[test]
+    fn current_snapshot_with_coerced_nested_payout_option_is_rejected() {
+        #[derive(CandidType)]
+        struct PayoutWithWrongSendAmount {
+            id: u64,
+            operation_id: u64,
+            pool_id: PoolId,
+            claimant: Principal,
+            ledger: Principal,
+            subaccount: [u8; 32],
+            gross_amount: u128,
+            send_amount: String,
+            fee: Option<u128>,
+            memo: Vec<u8>,
+            created_at_time: u64,
+            attempt_generation: u32,
+            dispatch_count: u32,
+            phase: AmmPayoutPhase,
+            receipt_scan_start: Option<u64>,
+            receipt_scan_cursor: u64,
+            receipt_scan_end: Option<u64>,
+            last_error: Option<String>,
+        }
+
+        #[derive(CandidType)]
+        struct StateWithWrongPayoutOption {
+            admin: Principal,
+            pools: BTreeMap<PoolId, Pool>,
+            pool_creation_open: bool,
+            maintenance_mode: bool,
+            pending_claims: Vec<PendingClaim>,
+            next_claim_id: u64,
+            pending_payouts: Vec<PayoutWithWrongSendAmount>,
+            next_payout_id: u64,
+            ingress_operations: Vec<AmmIngressOperation>,
+            next_operation_id: u64,
+            swap_events: Vec<AmmSwapEvent>,
+            next_swap_event_id: u64,
+            liquidity_events: Vec<AmmLiquidityEvent>,
+            next_liquidity_event_id: u64,
+            admin_events: Vec<AmmAdminEvent>,
+            next_admin_event_id: u64,
+            holder_snapshots: Vec<HolderSnapshot>,
+            reward_events: Vec<AmmRewardEvent>,
+            next_reward_event_id: u64,
+            claim_events: Vec<AmmClaimEvent>,
+            next_claim_event_id: u64,
+            protocol_backend_principal: Option<Principal>,
+            tvl_samples: Vec<TvlSample>,
+        }
+
+        let mut state = AmmState::default();
+        state.pending_payouts.push(AmmPayoutAttempt {
+            id: 1,
+            operation_id: 1,
+            pool_id: "pool".into(),
+            claimant: Principal::self_authenticating(b"claimant"),
+            ledger: Principal::self_authenticating(b"ledger"),
+            subaccount: [0; 32],
+            gross_amount: 1,
+            send_amount: None,
+            fee: None,
+            memo: Vec::new(),
+            created_at_time: 1,
+            attempt_generation: 0,
+            dispatch_count: 0,
+            phase: AmmPayoutPhase::Staged,
+            receipt_scan_start: None,
+            receipt_scan_cursor: 0,
+            receipt_scan_end: None,
+            last_error: None,
+        });
+        let wrong_payout = PayoutWithWrongSendAmount {
+            id: 1,
+            operation_id: 1,
+            pool_id: "pool".into(),
+            claimant: state.pending_payouts[0].claimant,
+            ledger: state.pending_payouts[0].ledger,
+            subaccount: [0; 32],
+            gross_amount: 1,
+            send_amount: "wrong type coerced to None".into(),
+            fee: None,
+            memo: Vec::new(),
+            created_at_time: 1,
+            attempt_generation: 0,
+            dispatch_count: 0,
+            phase: AmmPayoutPhase::Staged,
+            receipt_scan_start: None,
+            receipt_scan_cursor: 0,
+            receipt_scan_end: None,
+            last_error: None,
+        };
+        let newer = StateWithWrongPayoutOption {
+            admin: state.admin,
+            pools: state.pools,
+            pool_creation_open: state.pool_creation_open,
+            maintenance_mode: state.maintenance_mode,
+            pending_claims: state.pending_claims,
+            next_claim_id: state.next_claim_id,
+            pending_payouts: vec![wrong_payout],
+            next_payout_id: state.next_payout_id,
+            ingress_operations: state.ingress_operations,
+            next_operation_id: state.next_operation_id,
+            swap_events: state.swap_events,
+            next_swap_event_id: state.next_swap_event_id,
+            liquidity_events: state.liquidity_events,
+            next_liquidity_event_id: state.next_liquidity_event_id,
+            admin_events: state.admin_events,
+            next_admin_event_id: state.next_admin_event_id,
+            holder_snapshots: state.holder_snapshots,
+            reward_events: state.reward_events,
+            next_reward_event_id: state.next_reward_event_id,
+            claim_events: state.claim_events,
+            next_claim_event_id: state.next_claim_event_id,
+            protocol_backend_principal: state.protocol_backend_principal,
+            tvl_samples: state.tvl_samples,
+        };
+        let bytes = Encode!(&newer).expect("encode current snapshot with bad nested option");
+        let decoded = Decode!(&bytes, AmmState).expect("Candid opt coercion should decode");
+        assert!(decoded.pending_payouts[0].send_amount.is_none());
+        assert!(try_decode_state(&bytes).is_none());
+    }
+
+    #[test]
+    fn incompatible_new_journal_never_falls_back_to_v5() {
+        #[derive(CandidType)]
+        struct NewerSnapshotWithIncompatiblePayoutJournal {
+            admin: Principal,
+            pools: BTreeMap<PoolId, Pool>,
+            pool_creation_open: bool,
+            maintenance_mode: bool,
+            pending_claims: Vec<PendingClaim>,
+            next_claim_id: u64,
+            swap_events: Vec<AmmSwapEvent>,
+            next_swap_event_id: u64,
+            liquidity_events: Vec<AmmLiquidityEvent>,
+            next_liquidity_event_id: u64,
+            admin_events: Vec<AmmAdminEvent>,
+            next_admin_event_id: u64,
+            holder_snapshots: Vec<HolderSnapshot>,
+            reward_events: Vec<AmmRewardEvent>,
+            next_reward_event_id: u64,
+            claim_events: Vec<AmmClaimEvent>,
+            next_claim_event_id: u64,
+            protocol_backend_principal: Option<Principal>,
+            tvl_samples: Vec<TvlSample>,
+            pending_payouts: String,
+        }
+
+        let snapshot = AmmStateV5 {
+            admin: Principal::self_authenticating(b"test admin"),
+            pools: BTreeMap::new(),
+            pool_creation_open: true,
+            maintenance_mode: false,
+            pending_claims: Vec::new(),
+            next_claim_id: 1,
+            swap_events: Vec::new(),
+            next_swap_event_id: 2,
+            liquidity_events: Vec::new(),
+            next_liquidity_event_id: 3,
+            admin_events: Vec::new(),
+            next_admin_event_id: 4,
+            holder_snapshots: Vec::new(),
+            reward_events: Vec::new(),
+            next_reward_event_id: 5,
+            claim_events: Vec::new(),
+            next_claim_event_id: 6,
+            protocol_backend_principal: Some(Principal::self_authenticating(b"test backend")),
+            tvl_samples: Vec::new(),
+        };
+        let newer = NewerSnapshotWithIncompatiblePayoutJournal {
+            admin: snapshot.admin,
+            pools: snapshot.pools,
+            pool_creation_open: snapshot.pool_creation_open,
+            maintenance_mode: snapshot.maintenance_mode,
+            pending_claims: snapshot.pending_claims,
+            next_claim_id: snapshot.next_claim_id,
+            swap_events: snapshot.swap_events,
+            next_swap_event_id: snapshot.next_swap_event_id,
+            liquidity_events: snapshot.liquidity_events,
+            next_liquidity_event_id: snapshot.next_liquidity_event_id,
+            admin_events: snapshot.admin_events,
+            next_admin_event_id: snapshot.next_admin_event_id,
+            holder_snapshots: snapshot.holder_snapshots,
+            reward_events: snapshot.reward_events,
+            next_reward_event_id: snapshot.next_reward_event_id,
+            claim_events: snapshot.claim_events,
+            next_claim_event_id: snapshot.next_claim_event_id,
+            protocol_backend_principal: snapshot.protocol_backend_principal,
+            tvl_samples: snapshot.tvl_samples,
+            pending_payouts: "incompatible journal shape".into(),
+        };
+        let incompatible = Encode!(&newer).expect("encode newer incompatible snapshot");
+
+        assert!(Decode!(&incompatible, AmmState).is_err());
+        assert!(Decode!(&incompatible, AmmStateV5).is_ok());
+        assert!(try_decode_state(&incompatible).is_none());
+    }
+
+    #[test]
+    fn pre_v6_v5_snapshot_migrates_with_empty_journals_and_preserved_state() {
+        let admin = Principal::self_authenticating(b"v5 admin");
+        let backend = Principal::self_authenticating(b"v5 backend");
+        let old = AmmStateV5 {
+            admin,
+            pools: BTreeMap::new(),
+            pool_creation_open: true,
+            maintenance_mode: false,
+            pending_claims: Vec::new(),
+            next_claim_id: 17,
+            swap_events: Vec::new(),
+            next_swap_event_id: 23,
+            liquidity_events: Vec::new(),
+            next_liquidity_event_id: 29,
+            admin_events: Vec::new(),
+            next_admin_event_id: 31,
+            holder_snapshots: Vec::new(),
+            reward_events: Vec::new(),
+            next_reward_event_id: 37,
+            claim_events: Vec::new(),
+            next_claim_event_id: 41,
+            protocol_backend_principal: Some(backend),
+            tvl_samples: Vec::new(),
+        };
+        let bytes = Encode!(&old).expect("encode exact pre-candidate V5 snapshot");
+        let migrated = try_decode_state(&bytes).expect("V5 state remains decodable");
+        assert_eq!(migrated.admin, admin);
+        assert_eq!(migrated.protocol_backend_principal, Some(backend));
+        assert_eq!(migrated.next_claim_id, 17);
+        assert_eq!(migrated.next_swap_event_id, 23);
+        assert!(migrated.pending_payouts.is_empty());
+        assert_eq!(migrated.next_payout_id, 0);
+        assert!(migrated.ingress_operations.is_empty());
+        assert_eq!(migrated.next_operation_id, 0);
+    }
 }

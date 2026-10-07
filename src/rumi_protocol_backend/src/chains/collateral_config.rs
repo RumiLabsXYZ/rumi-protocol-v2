@@ -7,10 +7,9 @@
 //! fields are fractions x 10^-4 (30 == 0.0030 == 0.30%). Values reflect ICP's
 //! live dashboard (reconfirm against `get_protocol_config()` before mainnet).
 //!
-//! Currently the open/borrow/withdraw rail consumes only `min_cr_e4`. The other
-//! fields are forward-looking: `interest_apr_bps` is consumed by interest
-//! accrual (later task), and the liquidation/fee fields by the deferred
-//! liquidation + fee work. They are carried here so the params live in one place.
+//! The open/borrow/withdraw rail consumes `min_cr_e4`; borrow also uses
+//! `interest_apr_bps` to project accrued debt through its risk check. The
+//! liquidation/fee fields are carried here for their respective risk paths.
 
 use candid::{CandidType, Deserialize};
 use serde::Serialize;

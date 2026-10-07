@@ -48,7 +48,7 @@
   const trustSignals = [
     { title: 'Open Source', desc: 'Every line of code is public and verifiable on GitHub.' },
     { title: 'ICP-native Core', desc: 'The CDP backend, ledger, and core protocol services run in Internet Computer canisters.' },
-    { title: 'Security reviews', desc: 'Internal reviews and an AVAI automated pre-audit are published with a dated report on current source and release status.' },
+    { title: 'Security reviews', desc: 'Read the published review history, current remediation status, and dated reports on our security page.' },
     { title: 'Path to Decentralization', desc: 'All canisters are currently under dev control. The plan is to hand governance to an SNS DAO.' },
   ];
 </script>

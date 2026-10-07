@@ -85,7 +85,11 @@ mod tests {
         // A fresh entry (acquired just now) => a live tick holds it => skip.
         let now = 1_000_000_000_000u64;
         let acquired = now - 1; // 1 ns ago, far below the 10-min threshold
-        assert!(!inflight_should_acquire(Some(acquired), now, INFLIGHT_STALE_NS));
+        assert!(!inflight_should_acquire(
+            Some(acquired),
+            now,
+            INFLIGHT_STALE_NS
+        ));
     }
 
     #[test]
@@ -93,7 +97,11 @@ mod tests {
         // Exactly at the threshold (>= is the boundary) => reclaim.
         let acquired = 5_000_000_000_000u64;
         let now = acquired + INFLIGHT_STALE_NS;
-        assert!(inflight_should_acquire(Some(acquired), now, INFLIGHT_STALE_NS));
+        assert!(inflight_should_acquire(
+            Some(acquired),
+            now,
+            INFLIGHT_STALE_NS
+        ));
     }
 
     #[test]
@@ -101,7 +109,11 @@ mod tests {
         // Well past the threshold (the trapped-holder case) => reclaim.
         let acquired = 5_000_000_000_000u64;
         let now = acquired + INFLIGHT_STALE_NS + 1;
-        assert!(inflight_should_acquire(Some(acquired), now, INFLIGHT_STALE_NS));
+        assert!(inflight_should_acquire(
+            Some(acquired),
+            now,
+            INFLIGHT_STALE_NS
+        ));
     }
 
     #[test]
@@ -110,7 +122,11 @@ mod tests {
         // which is < stale_ns, so DON'T reclaim (treat as fresh, skip the tick).
         let now = 1_000u64;
         let acquired = now + 10_000; // in the future
-        assert!(!inflight_should_acquire(Some(acquired), now, INFLIGHT_STALE_NS));
+        assert!(!inflight_should_acquire(
+            Some(acquired),
+            now,
+            INFLIGHT_STALE_NS
+        ));
     }
 
     #[test]

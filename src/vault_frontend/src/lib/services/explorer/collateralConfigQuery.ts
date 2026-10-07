@@ -29,5 +29,5 @@ export async function fetchLegacyCollateralConfigs<T>(
 			}
 		})
 	);
-	return configs.filter((config): config is T => config !== null);
+	return configs.filter((config) => config !== null) as T[];
 }
