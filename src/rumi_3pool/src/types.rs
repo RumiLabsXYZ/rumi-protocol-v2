@@ -1,5 +1,5 @@
 use candid::{CandidType, Principal};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 // ─── Constants ───
 
@@ -134,11 +134,9 @@ pub struct Icrc3Block {
 /// blocks decode with `None`, and the encoder omits absent fields so their
 /// original ICRC-3 hash preimages remain unchanged.
 ///
-/// Note: the 3pool's per-balance bookkeeping is still keyed by `Principal`
-/// only (subaccounts are accepted on the API surface but ignored for balance
-/// lookups — see icrc_token.rs). This change only fixes the *block log* so
-/// it correctly reflects the destination Account that ICRC-3 consumers need
-/// to see.
+/// Balances now use full ICRC accounts. Principal-keyed legacy balances are
+/// preserved as default-account balances; historical blocks keep their
+/// original account tuples and hashes.
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub enum Icrc3Transaction {
     Mint {
@@ -347,15 +345,35 @@ pub struct ForwardLiquidityEventsV2 {
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub enum ThreePoolAdminAction {
-    RampA { future_a: u64, future_a_time: u64 },
-    StopRampA { frozen_a: u64 },
-    WithdrawAdminFees { amounts: [u128; 3] },
-    SetPaused { paused: bool },
-    SetSwapFee { fee_bps: u64 },
-    SetAdminFee { fee_bps: u64 },
-    AddAuthorizedBurnCaller { canister: Principal },
-    RemoveAuthorizedBurnCaller { canister: Principal },
-    FeeCurveParamsUpdated { old: Option<FeeCurveParams>, new: FeeCurveParams },
+    RampA {
+        future_a: u64,
+        future_a_time: u64,
+    },
+    StopRampA {
+        frozen_a: u64,
+    },
+    WithdrawAdminFees {
+        amounts: [u128; 3],
+    },
+    SetPaused {
+        paused: bool,
+    },
+    SetSwapFee {
+        fee_bps: u64,
+    },
+    SetAdminFee {
+        fee_bps: u64,
+    },
+    AddAuthorizedBurnCaller {
+        canister: Principal,
+    },
+    RemoveAuthorizedBurnCaller {
+        canister: Principal,
+    },
+    FeeCurveParamsUpdated {
+        old: Option<FeeCurveParams>,
+        new: FeeCurveParams,
+    },
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -421,7 +439,11 @@ pub enum ThreePoolError {
     /// LP/token ratio exceeds max slippage tolerance.
     BurnSlippageExceeded { max_bps: u16, actual_bps: u16 },
     /// Insufficient pool balance of the target token.
-    InsufficientPoolBalance { token: String, required: u128, available: u128 },
+    InsufficientPoolBalance {
+        token: String,
+        required: u128,
+        available: u128,
+    },
     /// Insufficient LP balance for the caller.
     InsufficientLpBalance { required: u128, available: u128 },
     /// The token burn on the ledger failed.

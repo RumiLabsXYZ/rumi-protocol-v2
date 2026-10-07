@@ -74,6 +74,11 @@ export function largeApprovalExpiry(): [bigint] {
   return [BigInt(Date.now()) * 1_000_000n + THIRTY_DAYS_NS];
 }
 
+/** Short expiry for one manual liquidation approval. */
+export function operationApprovalExpiry(): [bigint] {
+  return [BigInt(Date.now() + 10 * 60 * 1000) * 1_000_000n];
+}
+
 /**
  * Helper to check if an error is a stale actor/read state error
  */
@@ -368,7 +373,11 @@ export class walletOperations {
   /**
    * Approve icUSD transfer - now streamlined with retry on stale actor
    */
-  static async approveIcusdTransfer(amount: bigint, spenderCanisterId: string): Promise<{success: boolean, error?: string}> {
+  static async approveIcusdTransfer(
+    amount: bigint,
+    spenderCanisterId: string,
+    expiresAt: [bigint] = largeApprovalExpiry()
+  ): Promise<{success: boolean, error?: string}> {
     const maxRetries = 2;
     
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -394,8 +403,7 @@ export class walletOperations {
             owner: Principal.fromText(spenderCanisterId),
             subaccount: []
           },
-          // FE-001: bound the large allowance to 30 days
-          expires_at: largeApprovalExpiry(),
+          expires_at: expiresAt,
           expected_allowance: [],
           memo: [],
           fee: [],

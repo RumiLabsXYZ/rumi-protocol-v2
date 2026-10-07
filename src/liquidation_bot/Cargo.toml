@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 test_endpoints = []
+bot_driver_test = []
 
 [dependencies]
 candid = "0.10.6"
@@ -24,3 +25,7 @@ rumi_cycle_manager = { path = "../rumi_cycle_manager" }
 
 [dev-dependencies]
 candid_parser = "0.1"
+pocket-ic = "6.0.0"
+num-traits = "0.2"
+sha2 = "0.10"
+rumi_protocol_backend = { path = "../rumi_protocol_backend" }

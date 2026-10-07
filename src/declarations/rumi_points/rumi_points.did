@@ -48,6 +48,15 @@ type IngestStatus = record {
   poll_interval_secs : nat64;
   poll_enabled : bool;
   sources : vec SourceStatus;
+  decode_failure_count : nat64;
+  last_decode_failure : opt text;
+  blocked_decodes : vec DecodeFailureBlock;
+  last_decode_resolution : opt text;
+};
+type DecodeFailureBlock = record {
+  diagnostic : text;
+  source_tag : nat8;
+  event_id : nat64;
 };
 type InitArgs = record {
   admin : opt principal;
@@ -70,6 +79,10 @@ type OpenEpoch = record {
   a_cursor : opt principal;
   b_complete : bool;
   b_cursor : opt principal;
+  a_capture_error_count : nat8;
+  a_capture_error_principal : opt principal;
+  b_capture_error_count : nat8;
+  b_capture_error_principal : opt principal;
   close_started : bool;
   a_complete : bool;
   snapshot_a_ns : nat64;
@@ -193,6 +206,7 @@ service : (opt InitArgs) -> {
   is_registered : (principal) -> (bool) query;
   register_test_principal : (principal) -> (Result);
   remove_excluded_principal : (principal) -> (Result);
+  resolve_ingest_decode_failure : (nat8, nat64, bool) -> (Result_2);
   set_asset_ledger : (nat8, principal) -> (Result);
   set_epoch_driver_enabled : (bool) -> (Result);
   set_epoch_driver_interval_secs : (nat64) -> (Result);

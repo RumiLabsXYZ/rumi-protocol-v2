@@ -380,6 +380,47 @@ pub(crate) async fn reconcile_three_usd_absorb(absorb_id: u64) -> Result<(), Sta
     reconcile_three_usd_absorb_inner(absorb_id).await
 }
 
+/// Timer recovery for rows whose exact approval receipt is already stored.
+/// The timer can repeat the immutable backend request and reconcile backend
+/// status, but it never submits or infers an approval receipt.
+pub(crate) async fn recover_proven_three_usd_absorb(
+    absorb_id: u64,
+) -> Result<(), StabilityPoolError> {
+    let eligible = read_state(|state| {
+        state
+            .pending_sp_three_usd_absorbs
+            .as_ref()
+            .and_then(|rows| rows.get(&absorb_id))
+            .is_some_and(|row| {
+                row.approval_receipt_block_index.is_some()
+                    && matches!(
+                        row.phase,
+                        SpThreeUsdAbsorbPhase::ApprovalProven
+                            | SpThreeUsdAbsorbPhase::BackendPending
+                            | SpThreeUsdAbsorbPhase::Held
+                    )
+            })
+    });
+    if !eligible {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let dispatch_result = dispatch_three_usd_absorb(absorb_id).await;
+    match reconcile_three_usd_absorb(absorb_id).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if let Err(dispatch_error) = dispatch_result {
+                ic_cdk::println!(
+                    "3USD absorb {} timer recovery remains held: dispatch {:?}, reconciliation {:?}",
+                    absorb_id,
+                    dispatch_error,
+                    error
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
 /// Reconcile while the caller already holds the pool liquidation guard.
 pub(crate) async fn reconcile_three_usd_absorb_inner(
     absorb_id: u64,

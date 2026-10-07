@@ -1,6 +1,6 @@
 use candid::{CandidType, Deserialize, Nat, Principal};
-use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
 use ic_canister_log::{declare_log_buffer, log};
+use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
 use icrc_ledger_types::icrc1::account::Account;
 use std::cell::RefCell;
 
@@ -40,7 +40,10 @@ impl ProcessingGuard {
 
     pub(crate) fn set_vault_id(vault_id: u64) {
         PROCESSING_VAULT_ID.with(|id| *id.borrow_mut() = Some(vault_id));
-        state::mutate_state(|s| s.pending_vaults.retain(|queued| queued.vault_id != vault_id));
+        state::mutate_state(|s| {
+            s.pending_vaults
+                .retain(|queued| queued.vault_id != vault_id)
+        });
     }
 }
 
@@ -50,8 +53,7 @@ fn exported_rust_service_matches_checked_in_did() {
     use candid_parser::utils::{service_equal, CandidSource};
 
     let rust_service = __export_service();
-    let did_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("liquidation_bot.did");
+    let did_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("liquidation_bot.did");
 
     if let Err(error) = service_equal(
         CandidSource::Text(&rust_service),
@@ -149,7 +151,11 @@ fn post_upgrade() {
     if let Some(ref state) = legacy_state {
         if !state.migrated_to_stable_structures {
             // First upgrade after migration: move legacy events into stable map
-            log!(INFO, "Migrating {} legacy events to stable map", state.liquidation_events.len());
+            log!(
+                INFO,
+                "Migrating {} legacy events to stable map",
+                state.liquidation_events.len()
+            );
             history::migrate_legacy_events(&state.liquidation_events);
         }
     }
@@ -174,10 +180,28 @@ fn post_upgrade() {
 }
 
 fn setup_timer() {
-    ic_cdk_timers::set_timer_interval(
-        std::time::Duration::from_secs(30),
-        || ic_cdk::spawn(process::process_pending()),
-    );
+    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(30), || {
+        ic_cdk::spawn(process::process_pending())
+    });
+}
+
+/// Test-only seam that runs the production claim worker with a one-shot fake
+/// pool quote and output credit. The compiled production Wasm has no such
+/// method and keeps `AUTOMATIC_CLAIM_SWAP_ENABLED` false.
+#[cfg(feature = "bot_driver_test")]
+#[update]
+async fn test_drive_liquidation_worker(
+    vault: LiquidatableVaultInfo,
+    quoted_output_e6: u64,
+    delivered_output_e6: u64,
+) -> Result<(), String> {
+    require_admin();
+    let guard =
+        ProcessingGuard::acquire().map_err(|_| "Another operation is in progress".to_string())?;
+    ProcessingGuard::set_vault_id(vault.vault_id);
+    process::process_specific_vault_for_test(vault, guard, quoted_output_e6, delivered_output_e6)
+        .await;
+    Ok(())
 }
 
 // ---- Inspect message (cycle optimization, NOT a security boundary) ----
@@ -200,15 +224,22 @@ fn accept_ingress(method: &str, caller: Principal, admin: Option<Principal>) -> 
         return false;
     }
     match method {
-        "set_config" | "admin_resolve_pool_ordering" | "admin_approve_pool"
-        | "admin_sweep_ckusdc" | "admin_retry_stuck_claim"
+        "set_config"
+        | "admin_resolve_pool_ordering"
+        | "admin_approve_pool"
+        | "admin_sweep_ckusdc"
+        | "admin_retry_stuck_claim"
         | "admin_recover_ckusdc_shortfall"
         | "admin_submit_paused_claim_ckusdc_payment"
         | "admin_requeue_pending_bot_claim"
         | "admin_retry_claim_return"
-        | "admin_retry_icp_treasury_bonus" | "admin_reconcile_icp_treasury_bonus"
-        | "admin_quarantine_icp_treasury_bonus" | "admin_refresh_fees"
+        | "admin_retry_icp_treasury_bonus"
+        | "admin_reconcile_icp_treasury_bonus"
+        | "admin_quarantine_icp_treasury_bonus"
+        | "admin_refresh_fees"
         | "admin_test_swap" => admin == Some(caller),
+        #[cfg(feature = "bot_driver_test")]
+        "test_drive_liquidation_worker" => admin == Some(caller),
         #[cfg(feature = "test_endpoints")]
         "test_seed_ckusdc_payment_recovery"
         | "test_submit_native_icp_transfer"
@@ -227,7 +258,11 @@ fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) {
     let caller = ic_cdk::api::caller();
     let backend = state::read_state(|s| s.config.as_ref().map(|c| c.backend_principal));
     if Some(caller) != backend {
-        log!(INFO, "Rejected notification from unauthorized caller: {}", caller);
+        log!(
+            INFO,
+            "Rejected notification from unauthorized caller: {}",
+            caller
+        );
         return;
     }
     let count = vaults.len();
@@ -241,7 +276,9 @@ fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) {
             if !notification_may_enqueue(
                 vault.vault_id,
                 intent.as_ref().map(|intent| intent.phase.clone()),
-                intent.as_ref().is_some_and(|intent| intent.return_transfer.is_some()),
+                intent
+                    .as_ref()
+                    .is_some_and(|intent| intent.return_transfer.is_some()),
                 processing,
                 active_vault_id,
             ) || !seen.insert(vault.vault_id)
@@ -271,7 +308,11 @@ fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) {
                         | history::BotClaimIntentPhase::Claimed(_)
                 )
             });
-            if recoverable && !merged.iter().any(|item: &LiquidatableVaultInfo| item.vault_id == queued.vault_id) {
+            if recoverable
+                && !merged
+                    .iter()
+                    .any(|item: &LiquidatableVaultInfo| item.vault_id == queued.vault_id)
+            {
                 merged.push(queued);
             }
         }
@@ -280,7 +321,9 @@ fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) {
         s.admin_events.push(BotAdminEvent {
             timestamp: ic_cdk::api::time(),
             caller: caller.to_text(),
-            action: BotAdminAction::VaultsNotified { count: count as u64 },
+            action: BotAdminAction::VaultsNotified {
+                count: count as u64,
+            },
         });
         trim_admin_events(&mut s.admin_events);
     });
@@ -298,13 +341,17 @@ fn notification_may_enqueue(
         return false;
     }
     match phase {
-        Some(history::BotClaimIntentPhase::SwapStarted(_)
-        | history::BotClaimIntentPhase::Acquired { .. }) => false,
+        Some(
+            history::BotClaimIntentPhase::SwapStarted(_)
+            | history::BotClaimIntentPhase::Acquired { .. },
+        ) => false,
         Some(history::BotClaimIntentPhase::Claimed(_)) if has_return_transfer => false,
-        Some(history::BotClaimIntentPhase::ClaimRequested
-        | history::BotClaimIntentPhase::AwaitingReceipt
-        | history::BotClaimIntentPhase::NoEffectAcknowledgementPending { .. }
-        | history::BotClaimIntentPhase::Claimed(_)) => !processing,
+        Some(
+            history::BotClaimIntentPhase::ClaimRequested
+            | history::BotClaimIntentPhase::AwaitingReceipt
+            | history::BotClaimIntentPhase::NoEffectAcknowledgementPending { .. }
+            | history::BotClaimIntentPhase::Claimed(_),
+        ) => !processing,
         None => true,
     }
 }
@@ -385,9 +432,8 @@ fn set_config(config: BotConfig) {
     require_admin();
     let _guard = ProcessingGuard::acquire()
         .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
-    let current_backend = state::read_state(|s| {
-        s.config.as_ref().map(|current| current.backend_principal)
-    });
+    let current_backend =
+        state::read_state(|s| s.config.as_ref().map(|current| current.backend_principal));
     if !backend_identity_change_allowed(
         current_backend,
         config.backend_principal,
@@ -426,9 +472,7 @@ fn get_liquidation_count() -> u64 {
 #[update]
 fn backend_claim_request_id_floor() -> Result<u64, String> {
     let caller = ic_cdk::api::caller();
-    let backend = state::read_state(|s| {
-        s.config.as_ref().map(|config| config.backend_principal)
-    });
+    let backend = state::read_state(|s| s.config.as_ref().map(|config| config.backend_principal));
     let processing = PROCESSING.with(|p| *p.borrow());
     let has_claim_intents = history::has_claim_intents();
     backend_claim_request_id_floor_result(
@@ -473,16 +517,18 @@ fn get_paused_claim_ckusdc_payment_account(vault_id: u64) -> Option<Account> {
     let config = state::read_state(|s| s.config.clone())?;
     let record = history::get_latest_record_for_vault(vault_id)?;
     let intent = history::get_claim_intent(vault_id)?;
-    let (receipt, minimum, is_initial) = paused_claim_payment_context(
-        &config, vault_id, &record, &intent,
-    ).ok()?;
+    let (receipt, minimum, is_initial) =
+        paused_claim_payment_context(&config, vault_id, &record, &intent).ok()?;
     if !is_initial || intent.ckusdc_payment_transfer.is_some() {
         return None;
     }
     let _ = minimum;
     Some(Account {
         owner: ic_cdk::id(),
-        subaccount: Some(process::claim_payment_subaccount(vault_id, receipt.claim_timestamp)),
+        subaccount: Some(process::claim_payment_subaccount(
+            vault_id,
+            receipt.claim_timestamp,
+        )),
     })
 }
 
@@ -501,7 +547,10 @@ fn require_admin() {
         ic_cdk::trap("Anonymous caller not allowed");
     }
     let is_admin = state::read_state(|s| {
-        s.config.as_ref().map(|c| c.admin == caller).unwrap_or(false)
+        s.config
+            .as_ref()
+            .map(|c| c.admin == caller)
+            .unwrap_or(false)
     });
     if !is_admin {
         ic_cdk::trap("Unauthorized: only admin can call this function");
@@ -518,16 +567,23 @@ fn shortfall_payment_tuple_matches(
     minimum_payment_e6: u64,
 ) -> bool {
     let amount = transfer.args.amount.0.to_string().parse::<u64>().ok();
-    let fee = transfer.args.fee.as_ref()
+    let fee = transfer
+        .args
+        .fee
+        .as_ref()
         .and_then(|value| value.0.to_string().parse::<u64>().ok());
     transfer.ledger == ledger
         && transfer.args.to.owner == backend
         && transfer.args.to.subaccount.is_none()
-        && transfer.args.from_subaccount == Some(process::claim_payment_subaccount(vault_id, claim_timestamp))
+        && transfer.args.from_subaccount
+            == Some(process::claim_payment_subaccount(vault_id, claim_timestamp))
         && amount == Some(minimum_payment_e6)
         && fee.is_some()
         && transfer.args.memo.as_ref().map(|memo| memo.0.as_ref()) == Some(payment_memo)
-        && transfer.args.created_at_time.is_some_and(|time| time >= claim_timestamp)
+        && transfer
+            .args
+            .created_at_time
+            .is_some_and(|time| time >= claim_timestamp)
 }
 
 fn paused_claim_payment_context(
@@ -538,7 +594,10 @@ fn paused_claim_payment_context(
 ) -> Result<(history::BotClaimReceipt, u64, bool), String> {
     let history::LiquidationRecordVersioned::V1(record) = record;
     if record.vault_id != vault_id
-        || !matches!(&record.status, history::LiquidationStatus::SwapFailed | history::LiquidationStatus::ConfirmFailed)
+        || !matches!(
+            &record.status,
+            history::LiquidationStatus::SwapFailed | history::LiquidationStatus::ConfirmFailed
+        )
         || record.collateral_claimed_e8s == 0
         || record.debt_to_cover_e8s == 0
         || record.icp_swapped_e8s != 0
@@ -551,8 +610,13 @@ fn paused_claim_payment_context(
         history::BotClaimIntentPhase::Claimed(receipt) => receipt.clone(),
         _ => return Err("claim intent is not in the pre-swap Claimed phase".into()),
     };
-    let claim_timestamp = record.claim_timestamp.ok_or("claim generation timestamp is missing")?;
-    let payment_memo = record.payment_memo.as_deref().filter(|memo| !memo.is_empty())
+    let claim_timestamp = record
+        .claim_timestamp
+        .ok_or("claim generation timestamp is missing")?;
+    let payment_memo = record
+        .payment_memo
+        .as_deref()
+        .filter(|memo| !memo.is_empty())
         .ok_or("claim payment memo is missing")?;
     if intent.vault_id != vault_id
         || intent.backend_principal != Some(config.backend_principal)
@@ -561,15 +625,17 @@ fn paused_claim_payment_context(
         || receipt.debt_covered != record.debt_to_cover_e8s
         || receipt.collateral_amount != record.collateral_claimed_e8s
         || receipt.collateral_price_e8s != record.oracle_price_e8s
-        || !receipt.claim_transfer.as_ref().is_some_and(|proof| process::claim_transfer_receipt_is_complete(
-            config.backend_principal,
-            ic_cdk::id(),
-            config.icp_ledger,
-            vault_id,
-            claim_timestamp,
-            record.collateral_claimed_e8s,
-            proof,
-        ))
+        || !receipt.claim_transfer.as_ref().is_some_and(|proof| {
+            process::claim_transfer_receipt_is_complete(
+                config.backend_principal,
+                ic_cdk::id(),
+                config.icp_ledger,
+                vault_id,
+                claim_timestamp,
+                record.collateral_claimed_e8s,
+                proof,
+            )
+        })
         || intent.return_transfer.is_some()
         || intent.ckusdc_top_up_transfer.is_some()
         || intent.shortfall_eligibility.is_some()
@@ -586,16 +652,20 @@ fn paused_claim_payment_context(
         && record.ckusdc_transferred_e6 == minimum
         && record.ckusdc_payment_block_index.is_some()
         && record.ckusdc_payment_amount_e6 == Some(minimum)
-        && intent.ckusdc_payment_transfer.as_ref().is_some_and(|transfer|
-            transfer.block_index == record.ckusdc_payment_block_index
-        );
+        && intent
+            .ckusdc_payment_transfer
+            .as_ref()
+            .is_some_and(|transfer| transfer.block_index == record.ckusdc_payment_block_index);
     let is_exact_transfer_replay = matches!(&record.status, history::LiquidationStatus::SwapFailed)
         && record.ckusdc_transferred_e6 == 0
         && record.ckusdc_payment_block_index.is_none()
         && record.ckusdc_payment_amount_e6.is_none()
         && intent.ckusdc_payment_transfer.is_some();
     if !is_initial && !is_confirmation_retry && !is_exact_transfer_replay {
-        return Err("claim payment was already attempted or is not in a recoverable confirmation state".into());
+        return Err(
+            "claim payment was already attempted or is not in a recoverable confirmation state"
+                .into(),
+        );
     }
     Ok((receipt, minimum, is_initial))
 }
@@ -608,24 +678,38 @@ fn paused_claim_payment_tuple_matches(
     minimum_payment_e6: u64,
 ) -> bool {
     let amount = transfer.args.amount.0.to_string().parse::<u64>().ok();
-    let fee = transfer.args.fee.as_ref()
+    let fee = transfer
+        .args
+        .fee
+        .as_ref()
         .and_then(|value| value.0.to_string().parse::<u64>().ok());
     transfer.ledger == config.ckusdc_ledger
-        && transfer.args.from_subaccount == Some(process::claim_payment_subaccount(vault_id, receipt.claim_timestamp))
-        && transfer.args.to == Account { owner: config.backend_principal, subaccount: None }
+        && transfer.args.from_subaccount
+            == Some(process::claim_payment_subaccount(
+                vault_id,
+                receipt.claim_timestamp,
+            ))
+        && transfer.args.to
+            == Account {
+                owner: config.backend_principal,
+                subaccount: None,
+            }
         && amount == Some(minimum_payment_e6)
         && fee.is_some_and(|fee| fee > 0)
-        && transfer.args.memo.as_ref().map(|memo| memo.0.as_ref()) == Some(receipt.payment_memo.as_slice())
-        && transfer.args.created_at_time.is_some_and(|time| time >= receipt.claim_timestamp)
+        && transfer.args.memo.as_ref().map(|memo| memo.0.as_ref())
+            == Some(receipt.payment_memo.as_slice())
+        && transfer
+            .args
+            .created_at_time
+            .is_some_and(|time| time >= receipt.claim_timestamp)
 }
 
 async fn backend_claim_is_active(config: &BotConfig, vault_id: u64) -> Result<bool, String> {
-    let result: Result<(Vec<u64>,), _> = ic_cdk::call(
-        config.backend_principal, "get_bot_claim_vault_ids", (),
-    ).await;
-    let (active_claims,) = result.map_err(|(code, message)|
+    let result: Result<(Vec<u64>,), _> =
+        ic_cdk::call(config.backend_principal, "get_bot_claim_vault_ids", ()).await;
+    let (active_claims,) = result.map_err(|(code, message)| {
         format!("unable to verify active backend claim: {code:?}: {message}")
-    )?;
+    })?;
     Ok(active_claims.contains(&vault_id))
 }
 
@@ -635,8 +719,8 @@ async fn backend_claim_is_active(config: &BotConfig, vault_id: u64) -> Result<bo
 #[update]
 async fn admin_submit_paused_claim_ckusdc_payment(vault_id: u64) -> Result<(), String> {
     require_admin();
-    let _guard = ProcessingGuard::acquire()
-        .map_err(|_| "Another operation is in progress".to_string())?;
+    let _guard =
+        ProcessingGuard::acquire().map_err(|_| "Another operation is in progress".to_string())?;
     ProcessingGuard::set_vault_id(vault_id);
     let config = state::read_state(|s| s.config.clone()).ok_or("Config not set".to_string())?;
     let record = history::get_latest_record_for_vault(vault_id)
@@ -653,26 +737,45 @@ async fn admin_submit_paused_claim_ckusdc_payment(vault_id: u64) -> Result<(), S
     let mut transfer = match intent.ckusdc_payment_transfer.clone() {
         Some(saved) => {
             if !paused_claim_payment_tuple_matches(
-                &saved, &config, vault_id, &receipt, minimum_payment_e6,
+                &saved,
+                &config,
+                vault_id,
+                &receipt,
+                minimum_payment_e6,
             ) {
                 return Err("persisted payment tuple is not bound to this claim generation".into());
             }
             reprice_first_typed_claim_payment_rejection(
-                &config, vault_id, receipt.claim_timestamp, &receipt.payment_memo,
-                minimum_payment_e6, &intent, record_id(&record), &saved,
-            ).await?.unwrap_or(saved)
+                &config,
+                vault_id,
+                receipt.claim_timestamp,
+                &receipt.payment_memo,
+                minimum_payment_e6,
+                &intent,
+                record_id(&record),
+                &saved,
+            )
+            .await?
+            .unwrap_or(saved)
         }
         None => {
             let history::LiquidationRecordVersioned::V1(record) = &record;
             if !matches!(&record.status, history::LiquidationStatus::SwapFailed) {
-                return Err("new payment tuple can only be prepared for an unpaid paused-swap record".into());
+                return Err(
+                    "new payment tuple can only be prepared for an unpaid paused-swap record"
+                        .into(),
+                );
             }
             let fee_e6 = swap::fetch_ledger_fee(config.ckusdc_ledger).await?;
             let source = Account {
                 owner: ic_cdk::id(),
-                subaccount: Some(process::claim_payment_subaccount(vault_id, receipt.claim_timestamp)),
+                subaccount: Some(process::claim_payment_subaccount(
+                    vault_id,
+                    receipt.claim_timestamp,
+                )),
             };
-            let required_balance = minimum_payment_e6.checked_add(fee_e6)
+            let required_balance = minimum_payment_e6
+                .checked_add(fee_e6)
                 .ok_or("claim payment plus live fee overflows".to_string())?;
             let balance = swap::balance_of_ckusdc_account(config.ckusdc_ledger, source).await?;
             if balance < required_balance {
@@ -699,7 +802,8 @@ async fn admin_submit_paused_claim_ckusdc_payment(vault_id: u64) -> Result<(), S
                 return Err("paused claim changed during isolated-account preflight".into());
             }
 
-            let gross_required = minimum_payment_e6.checked_add(fee_e6)
+            let gross_required = minimum_payment_e6
+                .checked_add(fee_e6)
                 .ok_or("claim payment plus live fee overflows".to_string())?;
             let prepared = swap::prepare_ckusdc_payment_transfer_from_subaccount(
                 &config,
@@ -707,10 +811,17 @@ async fn admin_submit_paused_claim_ckusdc_payment(vault_id: u64) -> Result<(), S
                 &receipt.payment_memo,
                 fee_e6,
                 ic_cdk::api::time().max(receipt.claim_timestamp),
-                Some(process::claim_payment_subaccount(vault_id, receipt.claim_timestamp)),
+                Some(process::claim_payment_subaccount(
+                    vault_id,
+                    receipt.claim_timestamp,
+                )),
             )?;
             if !paused_claim_payment_tuple_matches(
-                &prepared, &config, vault_id, &receipt, minimum_payment_e6,
+                &prepared,
+                &config,
+                vault_id,
+                &receipt,
+                minimum_payment_e6,
             ) || !history::update_ckusdc_payment_transfer(vault_id, prepared.clone())
             {
                 return Err("could not persist exact generation-bound ckUSDC payment tuple; no transfer dispatched".into());
@@ -720,16 +831,26 @@ async fn admin_submit_paused_claim_ckusdc_payment(vault_id: u64) -> Result<(), S
     };
 
     if !backend_claim_is_active(&config, vault_id).await? {
-        return Err("backend claim is no longer active; persisted payment tuple remains held".into());
+        return Err(
+            "backend claim is no longer active; persisted payment tuple remains held".into(),
+        );
     }
     let paid = process::dispatch_and_verify_ckusdc_payment(
-        &config, vault_id, receipt.claim_timestamp, &receipt.payment_memo, &mut transfer,
-    ).await?;
+        &config,
+        vault_id,
+        receipt.claim_timestamp,
+        &receipt.payment_memo,
+        &mut transfer,
+    )
+    .await?;
     if paid.amount_e6 != minimum_payment_e6 {
         return Err("exact ckUSDC block does not pay the full claim minimum".into());
     }
     if !backend_claim_is_active(&config, vault_id).await? {
-        return Err("payment is proven but backend claim is no longer active; retain for reconciliation".into());
+        return Err(
+            "payment is proven but backend claim is no longer active; retain for reconciliation"
+                .into(),
+        );
     }
 
     // Save a replayable backend-confirmation record before the inter-canister
@@ -743,14 +864,17 @@ async fn admin_submit_paused_claim_ckusdc_payment(vault_id: u64) -> Result<(), S
     paid_record.ckusdc_transferred_e6 = paid.amount_e6;
     paid_record.ckusdc_payment_block_index = Some(paid.block_index);
     paid_record.ckusdc_payment_amount_e6 = Some(paid.amount_e6);
-    paid_record.error_message = Some(
-        "claim-bound ckUSDC payment proven; backend confirmation pending".into(),
-    );
+    paid_record.error_message =
+        Some("claim-bound ckUSDC payment proven; backend confirmation pending".into());
     history::insert_record(history::LiquidationRecordVersioned::V1(paid_record.clone()));
 
     process::call_bot_confirm_liquidation(
-        &config, vault_id, receipt.claim_timestamp, paid.block_index,
-    ).await?;
+        &config,
+        vault_id,
+        receipt.claim_timestamp,
+        paid.block_index,
+    )
+    .await?;
 
     if !history::update_record_status_and_error(
         paid_record.id,
@@ -760,9 +884,18 @@ async fn admin_submit_paused_claim_ckusdc_payment(vault_id: u64) -> Result<(), S
         return Err("backend confirmed payment but liquidation record could not be marked admin-resolved".into());
     }
     state::mutate_state(|s| {
-        s.stats.total_debt_covered_e8s = s.stats.total_debt_covered_e8s.saturating_add(receipt.debt_covered);
-        s.stats.total_collateral_received_e8s = s.stats.total_collateral_received_e8s.saturating_add(receipt.collateral_amount);
-        s.stats.total_ckusdc_deposited_e6 = s.stats.total_ckusdc_deposited_e6.saturating_add(paid.amount_e6);
+        s.stats.total_debt_covered_e8s = s
+            .stats
+            .total_debt_covered_e8s
+            .saturating_add(receipt.debt_covered);
+        s.stats.total_collateral_received_e8s = s
+            .stats
+            .total_collateral_received_e8s
+            .saturating_add(receipt.collateral_amount);
+        s.stats.total_ckusdc_deposited_e6 = s
+            .stats
+            .total_ckusdc_deposited_e6
+            .saturating_add(paid.amount_e6);
         s.stats.events_count = s.stats.events_count.saturating_add(1);
     });
     log!(INFO, "admin_submit_paused_claim_ckusdc_payment: vault #{} paid from its generation account at ckUSDC block {}; collateral remains held", vault_id, paid.block_index);
@@ -770,7 +903,9 @@ async fn admin_submit_paused_claim_ckusdc_payment(vault_id: u64) -> Result<(), S
 }
 
 fn record_id(record: &history::LiquidationRecordVersioned) -> u64 {
-    match record { history::LiquidationRecordVersioned::V1(record) => record.id }
+    match record {
+        history::LiquidationRecordVersioned::V1(record) => record.id,
+    }
 }
 
 /// A typed first-dispatch BadFee or InsufficientFunds is direct no-effect
@@ -790,29 +925,45 @@ async fn reprice_first_typed_claim_payment_rejection(
     if saved.dispatch_attempt_count != Some(1)
         || saved.block_index.is_some()
         || saved.history_scan.is_some()
-        || !matches!(saved.dispatch_observation,
-            Some(history::BotCkUsdcPaymentDispatchObservation::BadFee { .. }
-                | history::BotCkUsdcPaymentDispatchObservation::InsufficientFunds { .. }))
+        || !matches!(
+            saved.dispatch_observation,
+            Some(
+                history::BotCkUsdcPaymentDispatchObservation::BadFee { .. }
+                    | history::BotCkUsdcPaymentDispatchObservation::InsufficientFunds { .. }
+            )
+        )
     {
         return Ok(None);
     }
     let source_subaccount = process::claim_payment_subaccount(vault_id, claim_timestamp);
     if saved.ledger != config.ckusdc_ledger
         || saved.args.from_subaccount != Some(source_subaccount)
-        || saved.args.to != (Account { owner: config.backend_principal, subaccount: None })
+        || saved.args.to
+            != (Account {
+                owner: config.backend_principal,
+                subaccount: None,
+            })
         || saved.args.memo.as_ref().map(|memo| memo.0.as_ref()) != Some(payment_memo)
         || saved.args.amount.0.to_string().parse::<u64>().ok() != Some(minimum_payment_e6)
     {
-        return Err("typed no-effect payment is not bound to the exact claim generation and full principal".into());
+        return Err(
+            "typed no-effect payment is not bound to the exact claim generation and full principal"
+                .into(),
+        );
     }
 
     let fee_e6 = swap::fetch_ledger_fee(config.ckusdc_ledger).await?;
-    let gross_required = minimum_payment_e6.checked_add(fee_e6)
+    let gross_required = minimum_payment_e6
+        .checked_add(fee_e6)
         .ok_or("claim payment plus refreshed fee overflows".to_string())?;
     let balance = swap::balance_of_ckusdc_account(
         config.ckusdc_ledger,
-        Account { owner: ic_cdk::id(), subaccount: Some(source_subaccount) },
-    ).await?;
+        Account {
+            owner: ic_cdk::id(),
+            subaccount: Some(source_subaccount),
+        },
+    )
+    .await?;
     if balance < gross_required {
         return Err(format!(
             "generation account has {balance} e6; refreshed full-principal payment requires {gross_required} e6"
@@ -836,9 +987,12 @@ async fn reprice_first_typed_claim_payment_rejection(
         return Err("claim generation, record, or backend active claim changed during typed no-effect fee/balance preflight".into());
     }
 
-    let old_created_at = saved.args.created_at_time
+    let old_created_at = saved
+        .args
+        .created_at_time
         .ok_or("rejected payment tuple lacks created_at_time".to_string())?;
-    let next_created_at = old_created_at.checked_add(1)
+    let next_created_at = old_created_at
+        .checked_add(1)
         .ok_or("payment timestamp is exhausted; typed no-effect tuple remains held".to_string())?
         .max(ic_cdk::api::time())
         .max(claim_timestamp);
@@ -851,15 +1005,20 @@ async fn reprice_first_typed_claim_payment_rejection(
         Some(source_subaccount),
     )?;
     if !paused_claim_payment_tuple_matches(
-        &replacement, config, vault_id,
+        &replacement,
+        config,
+        vault_id,
         &match &current_intent.phase {
             history::BotClaimIntentPhase::Claimed(receipt)
             | history::BotClaimIntentPhase::SwapStarted(receipt) => receipt.clone(),
             _ => return Err("claim phase changed during typed no-effect preflight".into()),
         },
         minimum_payment_e6,
-    ) || !history::replace_ckusdc_payment_after_first_no_effect(vault_id, saved, replacement.clone())
-    {
+    ) || !history::replace_ckusdc_payment_after_first_no_effect(
+        vault_id,
+        saved,
+        replacement.clone(),
+    ) {
         return Err("could not persist the replacement tuple and prior typed no-effect tombstone; no transfer dispatched".into());
     }
     Ok(Some(replacement))
@@ -902,7 +1061,10 @@ fn test_seed_ckusdc_payment_recovery(
     if record.status != history::LiquidationStatus::TransferFailed
         || record.vault_id != intent.vault_id
         || record.claim_timestamp.is_none()
-        || record.payment_memo.as_ref().is_none_or(|memo| memo.is_empty())
+        || record
+            .payment_memo
+            .as_ref()
+            .is_none_or(|memo| memo.is_empty())
     {
         return Err("fixture record is not a matching unresolved payment attempt".into());
     }
@@ -910,9 +1072,13 @@ fn test_seed_ckusdc_payment_recovery(
         history::BotClaimIntentPhase::SwapStarted(receipt) => receipt,
         _ => return Err("fixture intent must be in SwapStarted phase".into()),
     };
-    let transfer = intent.ckusdc_payment_transfer.as_ref()
+    let transfer = intent
+        .ckusdc_payment_transfer
+        .as_ref()
         .ok_or("fixture intent lacks the original payment tuple")?;
-    let scan = transfer.history_scan.as_ref()
+    let scan = transfer
+        .history_scan
+        .as_ref()
         .ok_or("fixture tuple must begin in history reconciliation")?;
     let invalid_binding = if intent.backend_principal != Some(config.backend_principal) {
         Some("backend principal mismatch")
@@ -926,10 +1092,12 @@ fn test_seed_ckusdc_payment_recovery(
         Some("ledger mismatch")
     } else if transfer.block_index.is_some() {
         Some("block index must be unresolved")
-    } else if transfer.args.from_subaccount != Some(process::claim_payment_subaccount(
-        intent.vault_id,
-        receipt.claim_timestamp,
-    )) {
+    } else if transfer.args.from_subaccount
+        != Some(process::claim_payment_subaccount(
+            intent.vault_id,
+            receipt.claim_timestamp,
+        ))
+    {
         Some("from subaccount must match the exact claim generation")
     } else if transfer.args.to.owner != config.backend_principal {
         Some("payment recipient mismatch")
@@ -937,9 +1105,15 @@ fn test_seed_ckusdc_payment_recovery(
         Some("recipient subaccount must be absent")
     } else if transfer.args.fee.is_none() {
         Some("payment fee must be explicit")
-    } else if transfer.args.memo.as_ref().map(|memo| memo.0.as_ref()) != record.payment_memo.as_deref() {
+    } else if transfer.args.memo.as_ref().map(|memo| memo.0.as_ref())
+        != record.payment_memo.as_deref()
+    {
         Some("payment tuple memo mismatch")
-    } else if transfer.args.created_at_time.is_none_or(|created| created < receipt.claim_timestamp) {
+    } else if transfer
+        .args
+        .created_at_time
+        .is_none_or(|created| created < receipt.claim_timestamp)
+    {
         Some("payment tuple timestamp predates claim")
     } else if scan.next_index > scan.snapshot_log_length {
         Some("history cursor exceeds fixed snapshot")
@@ -1035,10 +1209,7 @@ fn admin_claim_resolution_is_terminal(status: &history::LiquidationStatus) -> bo
     matches!(status, history::LiquidationStatus::Completed)
 }
 
-fn clear_claim_intent_if_terminal_admin_status(
-    vault_id: u64,
-    status: &history::LiquidationStatus,
-) {
+fn clear_claim_intent_if_terminal_admin_status(vault_id: u64, status: &history::LiquidationStatus) {
     if admin_claim_resolution_is_terminal(status) {
         history::remove_claim_intent(vault_id);
     }
@@ -1051,28 +1222,26 @@ fn clear_claim_intent_if_terminal_admin_status(
 #[update]
 fn admin_requeue_pending_bot_claim(vault_id: u64) -> Result<(), String> {
     require_admin();
-    let _guard = ProcessingGuard::acquire()
-        .map_err(|_| "Another operation is in progress".to_string())?;
-    let backend_principal = state::read_state(|s| {
-        s.config.as_ref().map(|config| config.backend_principal)
-    })
-    .ok_or_else(|| "Config not set".to_string())?;
+    let _guard =
+        ProcessingGuard::acquire().map_err(|_| "Another operation is in progress".to_string())?;
+    let backend_principal =
+        state::read_state(|s| s.config.as_ref().map(|config| config.backend_principal))
+            .ok_or_else(|| "Config not set".to_string())?;
     let intent = history::get_claim_intent(vault_id);
     // While swap output cannot be attributed to a claim, this admin recovery
     // endpoint must not turn an uncertain or pre-dispatch request into a fresh
     // collateral claim. Exact no-effect ACK remains callable here; existing
     // claimed collateral has a separate explicit return/payment recovery.
-    if !process::AUTOMATIC_CLAIM_SWAP_ENABLED
-        && !paused_claim_requeue_allowed(intent.as_ref())
-    {
-        return Err("Bot claim dispatch is paused; only an exact pending no-effect ACK can be requeued".into());
+    if !process::AUTOMATIC_CLAIM_SWAP_ENABLED && !paused_claim_requeue_allowed(intent.as_ref()) {
+        return Err(
+            "Bot claim dispatch is paused; only an exact pending no-effect ACK can be requeued"
+                .into(),
+        );
     }
-    if !is_pending_receipt_intent(
-        intent,
-        vault_id,
-        backend_principal,
-    ) {
-        return Err("No resumable claim-requested or pre-swap claimed receipt matches this backend".into());
+    if !is_pending_receipt_intent(intent, vault_id, backend_principal) {
+        return Err(
+            "No resumable claim-requested or pre-swap claimed receipt matches this backend".into(),
+        );
     }
 
     ProcessingGuard::set_vault_id(vault_id);
@@ -1091,11 +1260,11 @@ fn admin_requeue_pending_bot_claim(vault_id: u64) -> Result<(), String> {
 #[update]
 async fn admin_retry_claim_return(vault_id: u64) -> Result<(), String> {
     require_admin();
-    let _guard = ProcessingGuard::acquire()
-        .map_err(|_| "Another operation is in progress".to_string())?;
+    let _guard =
+        ProcessingGuard::acquire().map_err(|_| "Another operation is in progress".to_string())?;
     ProcessingGuard::set_vault_id(vault_id);
-    let config = state::read_state(|s| s.config.clone())
-        .ok_or_else(|| "Config not set".to_string())?;
+    let config =
+        state::read_state(|s| s.config.clone()).ok_or_else(|| "Config not set".to_string())?;
     process::retry_claim_collateral_return(&config, vault_id).await
 }
 
@@ -1147,7 +1316,12 @@ async fn admin_approve_pool() {
         .await
         .unwrap_or_else(|e| ic_cdk::trap(&format!("Approve failed: {}", e)));
 
-    log!(INFO, "Infinite approve set: ICP ledger {} -> pool {}", icp_ledger, pool);
+    log!(
+        INFO,
+        "Infinite approve set: ICP ledger {} -> pool {}",
+        icp_ledger,
+        pool
+    );
 }
 
 /// Emergency: transfer all bot ckUSDC to a target principal.
@@ -1157,9 +1331,8 @@ async fn admin_sweep_ckusdc(target: Principal, record_id: Option<u64>) {
     require_admin();
     let _guard = ProcessingGuard::acquire()
         .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
-    let ckusdc_ledger = state::read_state(|s| {
-        s.config.as_ref().expect("Config not set").ckusdc_ledger
-    });
+    let ckusdc_ledger =
+        state::read_state(|s| s.config.as_ref().expect("Config not set").ckusdc_ledger);
 
     let balance_result: Result<(Nat,), _> = ic_cdk::call(
         ckusdc_ledger,
@@ -1203,14 +1376,18 @@ async fn admin_sweep_ckusdc(target: Principal, record_id: Option<u64>) {
         created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let result: Result<
-        (Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,),
-        _,
-    > = ic_cdk::call(ckusdc_ledger, "icrc1_transfer", (transfer_args,)).await;
+    let result: Result<(Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,), _> =
+        ic_cdk::call(ckusdc_ledger, "icrc1_transfer", (transfer_args,)).await;
 
     match result {
         Ok((Ok(block),)) => {
-            log!(INFO, "Swept {} ckUSDC e6 to {}, block {}", send_amount, target, block);
+            log!(
+                INFO,
+                "Swept {} ckUSDC e6 to {}, block {}",
+                send_amount,
+                target,
+                block
+            );
             if let Some(id) = record_id {
                 history::update_record_status(id, history::LiquidationStatus::AdminResolved);
                 log!(INFO, "Marked record #{} as AdminResolved", id);
@@ -1271,12 +1448,16 @@ async fn admin_refresh_fees() -> (u64, u64) {
 #[update]
 async fn admin_test_swap(amount_e8s: u64) -> Result<swap::SwapResult, String> {
     require_admin();
-    let _guard = ProcessingGuard::acquire()
-        .map_err(|_| "Another operation is in progress".to_string())?;
-    let config = state::read_state(|s| s.config.clone())
-        .ok_or_else(|| "Config not set".to_string())?;
+    let _guard =
+        ProcessingGuard::acquire().map_err(|_| "Another operation is in progress".to_string())?;
+    let config =
+        state::read_state(|s| s.config.clone()).ok_or_else(|| "Config not set".to_string())?;
 
-    log!(INFO, "admin_test_swap: attempting to swap {} ICP e8s", amount_e8s);
+    log!(
+        INFO,
+        "admin_test_swap: attempting to swap {} ICP e8s",
+        amount_e8s
+    );
     let result = swap::swap_icp_for_ckusdc(&config, amount_e8s).await;
     match &result {
         Ok(r) => log!(
@@ -1324,22 +1505,31 @@ async fn admin_retry_stuck_claim(vault_id: u64) {
     // transfer identity here.
     let transfer_failed_record = match &record {
         history::LiquidationRecordVersioned::V1(r)
-            if r.vault_id == vault_id && r.status == history::LiquidationStatus::TransferFailed => Some(r.clone()),
+            if r.vault_id == vault_id && r.status == history::LiquidationStatus::TransferFailed =>
+        {
+            Some(r.clone())
+        }
         _ => None,
     };
     if let Some(r) = transfer_failed_record {
         if active_claim_ids.contains(&vault_id) {
-            let claim_timestamp = r.claim_timestamp
-                .unwrap_or_else(|| ic_cdk::trap("TransferFailed claim lacks a generation timestamp"));
-            let payment_memo = r.payment_memo.clone()
+            let claim_timestamp = r.claim_timestamp.unwrap_or_else(|| {
+                ic_cdk::trap("TransferFailed claim lacks a generation timestamp")
+            });
+            let payment_memo = r
+                .payment_memo
+                .clone()
                 .filter(|memo| !memo.is_empty())
                 .unwrap_or_else(|| ic_cdk::trap("TransferFailed claim lacks its payment memo"));
-            let intent = history::get_claim_intent(vault_id)
-                .unwrap_or_else(|| ic_cdk::trap("TransferFailed claim has no durable claim intent"));
+            let intent = history::get_claim_intent(vault_id).unwrap_or_else(|| {
+                ic_cdk::trap("TransferFailed claim has no durable claim intent")
+            });
             if intent.vault_id != vault_id
                 || intent.backend_principal.as_ref() != Some(&config.backend_principal)
             {
-                ic_cdk::trap("TransferFailed claim intent is bound to a different vault or backend");
+                ic_cdk::trap(
+                    "TransferFailed claim intent is bound to a different vault or backend",
+                );
             }
             let receipt_matches = match &intent.phase {
                 history::BotClaimIntentPhase::SwapStarted(receipt) => {
@@ -1350,19 +1540,33 @@ async fn admin_retry_stuck_claim(vault_id: u64) {
                 _ => false,
             };
             if !receipt_matches {
-                ic_cdk::trap("TransferFailed record does not match the durable SwapStarted generation");
+                ic_cdk::trap(
+                    "TransferFailed record does not match the durable SwapStarted generation",
+                );
             }
-            let mut transfer = intent.ckusdc_payment_transfer
-                .unwrap_or_else(|| ic_cdk::trap("TransferFailed claim has no persisted original ckUSDC tuple"));
+            let mut transfer = intent.ckusdc_payment_transfer.unwrap_or_else(|| {
+                ic_cdk::trap("TransferFailed claim has no persisted original ckUSDC tuple")
+            });
             let paid = match process::dispatch_and_verify_ckusdc_payment(
-                &config, vault_id, claim_timestamp, &payment_memo, &mut transfer,
-            ).await {
+                &config,
+                vault_id,
+                claim_timestamp,
+                &payment_memo,
+                &mut transfer,
+            )
+            .await
+            {
                 Ok(paid) => paid,
                 Err(error) => {
                     // Reconciliation may have durably advanced one bounded
                     // ICRC-3 page. Return normally so those stable cursor
                     // writes commit; trapping here would roll the page back.
-                    log!(INFO, "Original ckUSDC transfer remains held for vault #{}: {}", vault_id, error);
+                    log!(
+                        INFO,
+                        "Original ckUSDC transfer remains held for vault #{}: {}",
+                        vault_id,
+                        error
+                    );
                     return;
                 }
             };
@@ -1372,18 +1576,33 @@ async fn admin_retry_stuck_claim(vault_id: u64) {
             recovered.ckusdc_payment_block_index = Some(paid.block_index);
             recovered.ckusdc_payment_amount_e6 = Some(paid.amount_e6);
             recovered.confirm_retry_count = 0;
-            recovered.error_message = Some("original ckUSDC payment authenticated; backend confirmation pending".into());
+            recovered.error_message =
+                Some("original ckUSDC payment authenticated; backend confirmation pending".into());
             history::insert_record(history::LiquidationRecordVersioned::V1(recovered));
-            record = history::get_record(r.id)
-                .unwrap_or_else(|| ic_cdk::trap("Recovered liquidation history record disappeared"));
+            record = history::get_record(r.id).unwrap_or_else(|| {
+                ic_cdk::trap("Recovered liquidation history record disappeared")
+            });
         }
     }
     let active_claim_or_committed_top_up = active_claim_ids.contains(&vault_id)
         || history::get_claim_intent(vault_id).is_some_and(|intent| {
-            intent.ckusdc_top_up_transfer.as_ref().is_some_and(|transfer| transfer.block_index.is_some())
-                || intent.ckusdc_payment_transfer.as_ref().is_some_and(|transfer| transfer.block_index.is_some())
+            intent
+                .ckusdc_top_up_transfer
+                .as_ref()
+                .is_some_and(|transfer| transfer.block_index.is_some())
+                || intent
+                    .ckusdc_payment_transfer
+                    .as_ref()
+                    .is_some_and(|transfer| transfer.block_index.is_some())
         });
-    let (record_id, claim_timestamp, payment_block_index, debt_to_cover, expected_payment_amount, payment_memo) = match &record {
+    let (
+        record_id,
+        claim_timestamp,
+        payment_block_index,
+        debt_to_cover,
+        expected_payment_amount,
+        payment_memo,
+    ) = match &record {
         history::LiquidationRecordVersioned::V1(r)
             if r.vault_id == vault_id
                 && history::is_paid_confirm_failure(r)
@@ -1392,9 +1611,11 @@ async fn admin_retry_stuck_claim(vault_id: u64) {
             (
                 r.id,
                 r.claim_timestamp.expect("validated claim timestamp"),
-                r.ckusdc_payment_block_index.expect("validated payment block"),
+                r.ckusdc_payment_block_index
+                    .expect("validated payment block"),
                 r.debt_to_cover_e8s,
-                r.ckusdc_payment_amount_e6.expect("validated payment amount"),
+                r.ckusdc_payment_amount_e6
+                    .expect("validated payment amount"),
                 r.payment_memo.clone().expect("validated payment memo"),
             )
         }
@@ -1406,21 +1627,34 @@ async fn admin_retry_stuck_claim(vault_id: u64) {
     // including fee and timestamp, before confirmation or top-up recovery.
     let pinned_payment = history::get_claim_intent(vault_id)
         .and_then(|intent| intent.ckusdc_payment_transfer)
-        .unwrap_or_else(|| ic_cdk::trap("Paid claim has no exact original ckUSDC transfer journal"));
+        .unwrap_or_else(|| {
+            ic_cdk::trap("Paid claim has no exact original ckUSDC transfer journal")
+        });
     let expected_source = Account {
         owner: ic_cdk::id(),
         subaccount: Some(process::claim_payment_subaccount(vault_id, claim_timestamp)),
     };
-    let expected_destination = Account { owner: config.backend_principal, subaccount: None };
+    let expected_destination = Account {
+        owner: config.backend_principal,
+        subaccount: None,
+    };
     let pinned_amount = pinned_payment.args.amount.0.to_string().parse::<u64>().ok();
-    let pinned_fee = pinned_payment.args.fee.as_ref()
+    let pinned_fee = pinned_payment
+        .args
+        .fee
+        .as_ref()
         .and_then(|fee| fee.0.to_string().parse::<u64>().ok());
     let pinned_time = pinned_payment.args.created_at_time;
     if pinned_payment.ledger != config.ckusdc_ledger
         || pinned_payment.block_index != Some(payment_block_index)
         || pinned_payment.args.from_subaccount != expected_source.subaccount
         || pinned_payment.args.to != expected_destination
-        || pinned_payment.args.memo.as_ref().map(|memo| memo.0.as_ref()) != Some(payment_memo.as_slice())
+        || pinned_payment
+            .args
+            .memo
+            .as_ref()
+            .map(|memo| memo.0.as_ref())
+            != Some(payment_memo.as_slice())
         || pinned_amount != Some(expected_payment_amount)
         || pinned_fee.is_none()
         || pinned_time.is_none_or(|time| time < claim_timestamp)
@@ -1433,15 +1667,21 @@ async fn admin_retry_stuck_claim(vault_id: u64) {
         expected_source,
         expected_destination,
         &payment_memo,
-    ).await.unwrap_or_else(|error| ic_cdk::trap(&format!(
-        "Cannot authenticate original ckUSDC block {} for vault #{}: {}",
-        payment_block_index, vault_id, error
-    )));
+    )
+    .await
+    .unwrap_or_else(|error| {
+        ic_cdk::trap(&format!(
+            "Cannot authenticate original ckUSDC block {} for vault #{}: {}",
+            payment_block_index, vault_id, error
+        ))
+    });
     if original_payment.amount_e6 != expected_payment_amount
         || Some(original_payment.fee_e6) != pinned_fee
         || Some(original_payment.created_at_time) != pinned_time
     {
-        ic_cdk::trap("Original ckUSDC block does not match the exact persisted claim payment tuple");
+        ic_cdk::trap(
+            "Original ckUSDC block does not match the exact persisted claim payment tuple",
+        );
     }
     // This is the fee passed to the pool for this exact swap, not today's
     // configured ICP fee. Older intents lack the pin and cannot safely create
@@ -1454,15 +1694,21 @@ async fn admin_retry_stuck_claim(vault_id: u64) {
     let minimum_payment = process::ckusdc_minimum_payment_e6(debt_to_cover);
     if original_payment.amount_e6 < minimum_payment {
         let history::LiquidationRecordVersioned::V1(r) = &record;
-        let recovered = match process::recover_short_ckusdc_payment(&config, r, &original_payment).await {
-            Ok(recovered) => recovered,
-            Err(error) => {
-                // Preserve any exact tuple or scan cursor written before a
-                // ledger ambiguity; trapping would roll that evidence back.
-                log!(INFO, "ckUSDC short-payment recovery held for vault #{}: {}", vault_id, error);
-                return;
-            }
-        };
+        let recovered =
+            match process::recover_short_ckusdc_payment(&config, r, &original_payment).await {
+                Ok(recovered) => recovered,
+                Err(error) => {
+                    // Preserve any exact tuple or scan cursor written before a
+                    // ledger ambiguity; trapping would roll that evidence back.
+                    log!(
+                        INFO,
+                        "ckUSDC short-payment recovery held for vault #{}: {}",
+                        vault_id,
+                        error
+                    );
+                    return;
+                }
+            };
         if !recovered {
             log!(INFO, "ckUSDC short-payment recovery did not finish the required multi-block confirmation for vault #{}", vault_id);
             return;
@@ -1473,8 +1719,12 @@ async fn admin_retry_stuck_claim(vault_id: u64) {
         Ok(())
     } else {
         process::call_bot_confirm_liquidation(
-            &config, vault_id, claim_timestamp, payment_block_index,
-        ).await
+            &config,
+            vault_id,
+            claim_timestamp,
+            payment_block_index,
+        )
+        .await
     };
 
     match confirm_result {
@@ -1483,18 +1733,28 @@ async fn admin_retry_stuck_claim(vault_id: u64) {
                 .unwrap_or_else(|| ic_cdk::trap("Liquidation history record disappeared"));
             let history::LiquidationRecordVersioned::V1(mut r) = current;
             let obligation = process::icp_treasury_bonus_gross_after_swap(
-                r.collateral_claimed_e8s, r.icp_swapped_e8s, pool_input_fee_e8s,
+                r.collateral_claimed_e8s,
+                r.icp_swapped_e8s,
+                pool_input_fee_e8s,
             );
             state::mutate_state(|s| {
-                s.stats.total_debt_covered_e8s =
-                    s.stats.total_debt_covered_e8s.saturating_add(r.debt_to_cover_e8s);
-                s.stats.total_collateral_received_e8s =
-                    s.stats.total_collateral_received_e8s.saturating_add(r.collateral_claimed_e8s);
+                s.stats.total_debt_covered_e8s = s
+                    .stats
+                    .total_debt_covered_e8s
+                    .saturating_add(r.debt_to_cover_e8s);
+                s.stats.total_collateral_received_e8s = s
+                    .stats
+                    .total_collateral_received_e8s
+                    .saturating_add(r.collateral_claimed_e8s);
                 s.stats.events_count = s.stats.events_count.saturating_add(1);
             });
             if obligation == 0 {
                 history::update_record_status(record_id, history::LiquidationStatus::Completed);
-                log!(INFO, "admin_retry_stuck_claim: confirmed vault #{} with no ICP bonus", vault_id);
+                log!(
+                    INFO,
+                    "admin_retry_stuck_claim: confirmed vault #{} with no ICP bonus",
+                    vault_id
+                );
                 clear_claim_intent_if_terminal_admin_status(
                     vault_id,
                     &history::LiquidationStatus::Completed,
@@ -1509,23 +1769,34 @@ async fn admin_retry_stuck_claim(vault_id: u64) {
                     r.icp_treasury_bonus_state = Some(history::IcpTreasuryBonusState::Prepared);
                     r.status = history::LiquidationStatus::TransferFailed;
                     r.error_message = Some(
-                        "Backend claim confirmed; ICP treasury bonus transfer prepared and pending".into(),
+                        "Backend claim confirmed; ICP treasury bonus transfer prepared and pending"
+                            .into(),
                     );
                     history::insert_record(history::LiquidationRecordVersioned::V1(r));
                     match swap::transfer_icp_treasury_bonus_exact(&transfer).await {
                         Ok(block_index) => {
                             transfer.block_index = Some(block_index);
                             if !history::update_icp_treasury_bonus(
-                                record_id, Some(transfer), history::IcpTreasuryBonusState::Paid,
-                                history::LiquidationStatus::Completed, None,
+                                record_id,
+                                Some(transfer),
+                                history::IcpTreasuryBonusState::Paid,
+                                history::LiquidationStatus::Completed,
+                                None,
                             ) {
                                 ic_cdk::trap("ICP treasury transfer accepted but its history record disappeared");
                             }
                             state::mutate_state(|s| {
-                                s.stats.total_collateral_to_treasury_e8s =
-                                    s.stats.total_collateral_to_treasury_e8s.saturating_add(obligation);
+                                s.stats.total_collateral_to_treasury_e8s = s
+                                    .stats
+                                    .total_collateral_to_treasury_e8s
+                                    .saturating_add(obligation);
                             });
-                            log!(INFO, "admin_retry_stuck_claim: vault #{} confirmed; ICP bonus block {}", vault_id, block_index);
+                            log!(
+                                INFO,
+                                "admin_retry_stuck_claim: vault #{} confirmed; ICP bonus block {}",
+                                vault_id,
+                                block_index
+                            );
                             clear_claim_intent_if_terminal_admin_status(
                                 vault_id,
                                 &history::LiquidationStatus::Completed,
@@ -1533,9 +1804,13 @@ async fn admin_retry_stuck_claim(vault_id: u64) {
                         }
                         Err(error) => {
                             history::update_icp_treasury_bonus(
-                                record_id, Some(transfer), history::IcpTreasuryBonusState::Prepared,
+                                record_id,
+                                Some(transfer),
+                                history::IcpTreasuryBonusState::Prepared,
                                 history::LiquidationStatus::TransferFailed,
-                                Some(format!("Backend claim confirmed; ICP treasury bonus pending: {error}")),
+                                Some(format!(
+                                    "Backend claim confirmed; ICP treasury bonus pending: {error}"
+                                )),
                             );
                             log!(INFO, "admin_retry_stuck_claim: vault #{} confirmed; ICP bonus remains pending: {}", vault_id, error);
                         }
@@ -1550,7 +1825,12 @@ async fn admin_retry_stuck_claim(vault_id: u64) {
                         "Backend claim confirmed; ICP treasury bonus quarantined because no transfer could be prepared: {error}"
                     ));
                     history::insert_record(history::LiquidationRecordVersioned::V1(r));
-                    log!(INFO, "admin_retry_stuck_claim: vault #{} confirmed; ICP bonus quarantined: {}", vault_id, error);
+                    log!(
+                        INFO,
+                        "admin_retry_stuck_claim: vault #{} confirmed; ICP bonus quarantined: {}",
+                        vault_id,
+                        error
+                    );
                 }
             }
         }
@@ -1568,10 +1848,13 @@ async fn admin_retry_stuck_claim(vault_id: u64) {
 /// `maximum_subsidy_e6` caps the amount needed to reach the claim minimum;
 /// the exact full-minimum transfer identity is persisted before dispatch.
 #[update]
-async fn admin_recover_ckusdc_shortfall(vault_id: u64, maximum_subsidy_e6: u64) -> Result<(), String> {
+async fn admin_recover_ckusdc_shortfall(
+    vault_id: u64,
+    maximum_subsidy_e6: u64,
+) -> Result<(), String> {
     require_admin();
-    let _guard = ProcessingGuard::acquire()
-        .map_err(|_| "Another operation is in progress".to_string())?;
+    let _guard =
+        ProcessingGuard::acquire().map_err(|_| "Another operation is in progress".to_string())?;
     ProcessingGuard::set_vault_id(vault_id);
     let config = state::read_state(|s| s.config.clone()).ok_or("Config not set".to_string())?;
 
@@ -1579,11 +1862,19 @@ async fn admin_recover_ckusdc_shortfall(vault_id: u64, maximum_subsidy_e6: u64) 
         .ok_or("No liquidation history for this vault".to_string())?;
     let r = match &record {
         history::LiquidationRecordVersioned::V1(r)
-            if r.vault_id == vault_id && r.status == history::LiquidationStatus::TransferFailed => r,
+            if r.vault_id == vault_id && r.status == history::LiquidationStatus::TransferFailed =>
+        {
+            r
+        }
         _ => return Err("latest vault record is not an eligible TransferFailed shortfall".into()),
     };
-    let claim_timestamp = r.claim_timestamp.ok_or("shortfall record lacks claim timestamp".to_string())?;
-    let payment_memo = r.payment_memo.clone().filter(|memo| !memo.is_empty())
+    let claim_timestamp = r
+        .claim_timestamp
+        .ok_or("shortfall record lacks claim timestamp".to_string())?;
+    let payment_memo = r
+        .payment_memo
+        .clone()
+        .filter(|memo| !memo.is_empty())
         .ok_or("shortfall record lacks payment memo".to_string())?;
     if r.ckusdc_transferred_e6 != 0
         || r.ckusdc_payment_block_index.is_some()
@@ -1597,7 +1888,9 @@ async fn admin_recover_ckusdc_shortfall(vault_id: u64, maximum_subsidy_e6: u64) 
         history::BotClaimIntentPhase::SwapStarted(receipt) => receipt.clone(),
         _ => return Err("shortfall intent is not in SwapStarted phase".into()),
     };
-    let marker = intent.shortfall_eligibility.clone()
+    let marker = intent
+        .shortfall_eligibility
+        .clone()
         .ok_or("claim has no durable shortfall eligibility marker".to_string())?;
     if intent.vault_id != vault_id
         || intent.backend_principal != Some(config.backend_principal)
@@ -1613,12 +1906,15 @@ async fn admin_recover_ckusdc_shortfall(vault_id: u64, maximum_subsidy_e6: u64) 
         || intent.return_transfer.is_some()
         || intent.ckusdc_top_up_transfer.is_some()
     {
-        return Err("shortfall marker, record, claim generation, or configured ledger do not match".into());
+        return Err(
+            "shortfall marker, record, claim generation, or configured ledger do not match".into(),
+        );
     }
     let active_claims: Result<(Vec<u64>,), _> =
         ic_cdk::call(config.backend_principal, "get_bot_claim_vault_ids", ()).await;
-    let (active_claim_ids,) = active_claims.map_err(|(code, msg)|
-        format!("unable to verify active backend claim: {:?}: {}", code, msg))?;
+    let (active_claim_ids,) = active_claims.map_err(|(code, msg)| {
+        format!("unable to verify active backend claim: {:?}: {}", code, msg)
+    })?;
     if !active_claim_ids.contains(&vault_id) {
         return Err("backend no longer has this claim active".into());
     }
@@ -1636,17 +1932,29 @@ async fn admin_recover_ckusdc_shortfall(vault_id: u64, maximum_subsidy_e6: u64) 
         let available_net = marker.measured_reserved_output_e6.saturating_sub(fee_e6);
         let subsidy_e6 = marker.minimum_payment_e6.saturating_sub(available_net);
         if subsidy_e6 == 0 || subsidy_e6 > maximum_subsidy_e6 {
-            return Err(format!("required subsidy {} e6 is zero or exceeds the admin cap {} e6", subsidy_e6, maximum_subsidy_e6));
+            return Err(format!(
+                "required subsidy {} e6 is zero or exceeds the admin cap {} e6",
+                subsidy_e6, maximum_subsidy_e6
+            ));
         }
-        let gross_required = marker.minimum_payment_e6.checked_add(fee_e6)
+        let gross_required = marker
+            .minimum_payment_e6
+            .checked_add(fee_e6)
             .ok_or("full-minimum payment plus live fee overflows".to_string())?;
         let source_subaccount = process::claim_payment_subaccount(vault_id, claim_timestamp);
         let balance_e6 = swap::balance_of_ckusdc_account(
             config.ckusdc_ledger,
-            Account { owner: ic_cdk::id(), subaccount: Some(source_subaccount) },
-        ).await?;
+            Account {
+                owner: ic_cdk::id(),
+                subaccount: Some(source_subaccount),
+            },
+        )
+        .await?;
         if balance_e6 < gross_required {
-            return Err(format!("bot ckUSDC balance {} e6 is below required gross payment {} e6", balance_e6, gross_required));
+            return Err(format!(
+                "bot ckUSDC balance {} e6 is below required gross payment {} e6",
+                balance_e6, gross_required
+            ));
         }
         live_fee_for_new_tuple = Some(fee_e6);
     }
@@ -1672,39 +1980,59 @@ async fn admin_recover_ckusdc_shortfall(vault_id: u64, maximum_subsidy_e6: u64) 
     }
 
     let typed_no_effect_replacement = match current_intent.ckusdc_payment_transfer.as_ref() {
-        Some(saved) => reprice_first_typed_claim_payment_rejection(
-            &config,
-            vault_id,
-            claim_timestamp,
-            &payment_memo,
-            marker.minimum_payment_e6,
-            &current_intent,
-            r.id,
-            saved,
-        ).await?,
+        Some(saved) => {
+            reprice_first_typed_claim_payment_rejection(
+                &config,
+                vault_id,
+                claim_timestamp,
+                &payment_memo,
+                marker.minimum_payment_e6,
+                &current_intent,
+                r.id,
+                saved,
+            )
+            .await?
+        }
         None => None,
     };
 
     let mut transfer = if let Some(replacement) = typed_no_effect_replacement {
         if !shortfall_payment_tuple_matches(
-            &replacement, config.ckusdc_ledger, config.backend_principal,
-            vault_id, claim_timestamp, &payment_memo, marker.minimum_payment_e6,
+            &replacement,
+            config.ckusdc_ledger,
+            config.backend_principal,
+            vault_id,
+            claim_timestamp,
+            &payment_memo,
+            marker.minimum_payment_e6,
         ) {
-            return Err("replacement full-minimum tuple differs from this shortfall generation".into());
+            return Err(
+                "replacement full-minimum tuple differs from this shortfall generation".into(),
+            );
         }
         replacement
     } else if let Some(saved) = current_intent.ckusdc_payment_transfer.clone() {
         if !shortfall_payment_tuple_matches(
-            &saved, config.ckusdc_ledger, config.backend_principal,
-            vault_id, claim_timestamp, &payment_memo, marker.minimum_payment_e6,
+            &saved,
+            config.ckusdc_ledger,
+            config.backend_principal,
+            vault_id,
+            claim_timestamp,
+            &payment_memo,
+            marker.minimum_payment_e6,
         ) {
-            return Err("prepared full-minimum payment tuple does not match this shortfall generation".into());
+            return Err(
+                "prepared full-minimum payment tuple does not match this shortfall generation"
+                    .into(),
+            );
         }
         saved
     } else {
         let fee_e6 = live_fee_for_new_tuple
             .ok_or("live ckUSDC fee was not verified for new payment tuple".to_string())?;
-        let gross_required = marker.minimum_payment_e6.checked_add(fee_e6)
+        let gross_required = marker
+            .minimum_payment_e6
+            .checked_add(fee_e6)
             .ok_or("full-minimum payment plus live fee overflows".to_string())?;
         let prepared = swap::prepare_ckusdc_payment_transfer_from_subaccount(
             &config,
@@ -1715,13 +2043,23 @@ async fn admin_recover_ckusdc_shortfall(vault_id: u64, maximum_subsidy_e6: u64) 
             Some(process::claim_payment_subaccount(vault_id, claim_timestamp)),
         )?;
         if !shortfall_payment_tuple_matches(
-            &prepared, config.ckusdc_ledger, config.backend_principal,
-            vault_id, claim_timestamp, &payment_memo, marker.minimum_payment_e6,
+            &prepared,
+            config.ckusdc_ledger,
+            config.backend_principal,
+            vault_id,
+            claim_timestamp,
+            &payment_memo,
+            marker.minimum_payment_e6,
         ) {
-            return Err("prepared shortfall payment is not bound to the claim-specific account".into());
+            return Err(
+                "prepared shortfall payment is not bound to the claim-specific account".into(),
+            );
         }
         if !history::update_ckusdc_payment_transfer(vault_id, prepared.clone()) {
-            return Err("could not persist exact full-minimum ckUSDC payment tuple; no transfer attempted".into());
+            return Err(
+                "could not persist exact full-minimum ckUSDC payment tuple; no transfer attempted"
+                    .into(),
+            );
         }
         prepared
     };
@@ -1731,16 +2069,31 @@ async fn admin_recover_ckusdc_shortfall(vault_id: u64, maximum_subsidy_e6: u64) 
     // cursor writes made by dispatch_and_verify are retained.
     let active_again: Result<(Vec<u64>,), _> =
         ic_cdk::call(config.backend_principal, "get_bot_claim_vault_ids", ()).await;
-    let (active_again,) = active_again.map_err(|(code, msg)|
-        format!("unable to revalidate active backend claim before payment: {:?}: {}", code, msg))?;
+    let (active_again,) = active_again.map_err(|(code, msg)| {
+        format!(
+            "unable to revalidate active backend claim before payment: {:?}: {}",
+            code, msg
+        )
+    })?;
     if !active_again.contains(&vault_id) {
         return Err("backend claim ceased to be active before payment dispatch".into());
     }
     let paid = match process::dispatch_and_verify_ckusdc_payment(
-        &config, vault_id, claim_timestamp, &payment_memo, &mut transfer,
-    ).await {
+        &config,
+        vault_id,
+        claim_timestamp,
+        &payment_memo,
+        &mut transfer,
+    )
+    .await
+    {
         Ok(paid) => paid,
-        Err(error) => return Err(format!("full-minimum payment remains unresolved: {}", error)),
+        Err(error) => {
+            return Err(format!(
+                "full-minimum payment remains unresolved: {}",
+                error
+            ))
+        }
     };
 
     // The payment is now proven. Persist a new paid ConfirmFailed record before
@@ -1754,7 +2107,9 @@ async fn admin_recover_ckusdc_shortfall(vault_id: u64, maximum_subsidy_e6: u64) 
     paid_record.ckusdc_payment_block_index = Some(paid.block_index);
     paid_record.ckusdc_payment_amount_e6 = Some(paid.amount_e6);
     paid_record.confirm_retry_count = 0;
-    paid_record.error_message = Some("admin shortfall recovery paid full claim minimum; backend confirmation pending".into());
+    paid_record.error_message = Some(
+        "admin shortfall recovery paid full claim minimum; backend confirmation pending".into(),
+    );
     history::insert_record(history::LiquidationRecordVersioned::V1(paid_record));
     Ok(())
 }

@@ -6,7 +6,8 @@
 //! the windowing/filter/ingest core is pure and tested below. Every call result
 //! is handled (no `unwrap`/trap); the single-poll `state::PollGuard` is RAII
 //! (AR-S-001), so even a trap releases it. One source failing is logged and
-//! skipped without advancing its cursor, so it does not block the others.
+//! held at the first unknown event for admin/code review, while other sources
+//! continue polling independently.
 //!
 //! Cursor model (see `events.rs`): every persisted cursor is ID-based (the next
 //! event id we want).
@@ -28,8 +29,8 @@
 use std::cell::RefCell;
 use std::time::Duration;
 
-use candid::Principal;
-use ic_cdk::api::call::RejectionCode;
+use candid::{Encode, Principal};
+use ic_cdk::api::call::{call_raw, RejectionCode};
 use ic_cdk_timers::TimerId;
 
 use crate::events::{self, IngestedEvent, SourceId};
@@ -100,16 +101,39 @@ async fn poll_backend() -> usize {
         None => return 0,
     };
     let tag = SourceId::Backend.tag();
+    if state::decode_source_is_blocked(tag) {
+        return 0;
+    }
     let cursor = state::get_cursor(tag);
-    let res: CallResult<(backend::ForwardFilteredEventsResponse,)> = ic_cdk::call(
-        canister,
-        "get_events_forward_filtered",
-        (cursor, BACKEND_SCAN, Some(backend::points_event_filter())),
+    let args = Encode!(
+        &cursor,
+        &BACKEND_SCAN,
+        &Some(backend::points_event_filter())
     )
-    .await;
+    .expect("encode backend forward poll arguments");
+    let res = call_raw(canister, "get_events_forward_filtered", args, 0).await;
     match res {
-        Ok((resp,)) => {
-            let (events, next_start, _reached_end) = backend::normalize_forward(resp);
+        Ok(bytes) => {
+            let (events, next_start, _reached_end, failures) =
+                match backend::normalize_forward_resilient(&bytes) {
+                Ok(decoded) => decoded,
+                Err(error) => {
+                    ic_cdk::println!("[poll] backend forward response decode failed: {}", error);
+                    return 0;
+                }
+            };
+            if let Some((event_id, error)) = failures.into_iter().min_by_key(|(id, _)| *id) {
+                let safe_events = events_before_decode_failure(events, event_id);
+                let n = safe_events.len();
+                events::apply_events(&safe_events);
+                state::set_cursor(tag, event_id);
+                state::hold_decode_failure(tag, event_id, &error);
+                ic_cdk::println!(
+                    "[poll] backend cursor held at event {} for operator/code review: {}",
+                    event_id, error
+                );
+                return n;
+            }
             let n = events.len();
             events::apply_events(&events);
             state::set_cursor(tag, next_start);
@@ -179,12 +203,22 @@ fn ingest_window(source: SourceId, window: Vec<IngestedEvent>, cursor: u64) -> u
     events::ingest_batch(source, &events)
 }
 
+fn events_before_decode_failure(
+    events: Vec<IngestedEvent>,
+    failed_id: u64,
+) -> Vec<IngestedEvent> {
+    events.into_iter().filter(|event| event.event_id < failed_id).collect()
+}
+
 async fn poll_stability_pool() -> usize {
     let canister = match source_canister(SourceId::StabilityPool) {
         Some(c) => c,
         None => return 0,
     };
     let cursor = state::get_cursor(SourceId::StabilityPool.tag());
+    if state::decode_source_is_blocked(SourceId::StabilityPool.tag()) {
+        return 0;
+    }
     let count: u64 = match ic_cdk::call::<_, (u64,)>(canister, "get_pool_event_count", ()).await {
         Ok((c,)) => c,
         Err((code, msg)) => {
@@ -193,12 +227,16 @@ async fn poll_stability_pool() -> usize {
         }
     };
     // Probe the oldest retained event to learn the id/index offset (PTS-001).
-    let probe: CallResult<(Vec<stability_pool::PoolEvent>,)> =
-        ic_cdk::call(canister, "get_pool_events", (0u64, 1u64)).await;
+    let probe_args = Encode!(&0u64, &1u64).expect("encode SP event probe arguments");
+    let probe = call_raw(canister, "get_pool_events", probe_args, 0).await;
     let first_id = match probe {
-        Ok((evs,)) => match evs.first() {
-            Some(e) => e.id,
-            None => return 0, // emptied between the two calls
+        Ok(bytes) => match stability_pool::decode_first_event_id(&bytes) {
+            Ok(Some(id)) => id,
+            Ok(None) => return 0, // emptied between the two calls
+            Err(error) => {
+                ic_cdk::println!("[poll] SP event probe response decode failed: {}", error);
+                return 0;
+            }
         },
         Err((code, msg)) => {
             ic_cdk::println!("[poll] SP get_pool_events probe failed: {:?} {}", code, msg);
@@ -209,11 +247,28 @@ async fn poll_stability_pool() -> usize {
         Some(w) => w,
         None => return 0,
     };
-    let res: CallResult<(Vec<stability_pool::PoolEvent>,)> =
-        ic_cdk::call(canister, "get_pool_events", (start, length)).await;
+    let args = Encode!(&start, &length).expect("encode SP event page arguments");
+    let res = call_raw(canister, "get_pool_events", args, 0).await;
     match res {
-        Ok((raw,)) => {
-            let events: Vec<_> = raw.into_iter().map(stability_pool::normalize).collect();
+        Ok(bytes) => {
+            let (events, failures) = match stability_pool::decode_events_resilient(&bytes) {
+                Ok(decoded) => decoded,
+                Err(error) => {
+                    ic_cdk::println!("[poll] SP event page response decode failed: {}", error);
+                    return 0;
+                }
+            };
+            if let Some((event_id, error)) = failures.into_iter().min_by_key(|(id, _)| *id) {
+                let safe_events = events_before_decode_failure(events, event_id);
+                let applied = ingest_window(SourceId::StabilityPool, safe_events, cursor);
+                state::set_cursor(SourceId::StabilityPool.tag(), event_id);
+                state::hold_decode_failure(SourceId::StabilityPool.tag(), event_id, &error);
+                ic_cdk::println!(
+                    "[poll] SP cursor held at event {} for operator/code review: {}",
+                    event_id, error
+                );
+                return applied;
+            }
             ingest_window(SourceId::StabilityPool, events, cursor)
         }
         Err((code, msg)) => {
@@ -407,6 +462,31 @@ mod tests {
         assert_eq!(state::get_cursor(SourceId::StabilityPool.tag()), 150);
         assert_eq!(state::registered_count(), 50);
         assert_eq!(poll_sim(&log, 20), 0);
+    }
+
+    #[test]
+    fn unknown_sp_variant_holds_cursor_and_keeps_later_rows_unapplied() {
+        init();
+        let known = |event_id| IngestedEvent {
+            source: SourceId::StabilityPool,
+            event_id,
+            caller: Some(Principal::from_slice(&[5])),
+            timestamp_ns: event_id,
+            kind: IngestKind::SpDeposit {
+                token_ledger: Principal::from_slice(&[9]),
+                amount_e8s: 100,
+            },
+        };
+        let before = events_before_decode_failure(vec![known(13), known(15)], 14);
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].event_id, 13);
+        assert!(events_before_decode_failure(vec![known(15)], 14).is_empty());
+
+        state::set_cursor(SourceId::StabilityPool.tag(), 14);
+        state::hold_decode_failure(2, 14, "unknown future event variant");
+        assert_eq!(state::get_cursor(SourceId::StabilityPool.tag()), 14);
+        assert!(state::decode_source_is_blocked(2));
+        assert_eq!(state::registered_count(), 0);
     }
 
     #[test]

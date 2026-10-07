@@ -97,12 +97,15 @@ macro_rules! fast_accessors {
                 $log.with(|log| {
                     let log = log.borrow();
                     let n = log.len();
+                    if limit == 0 || n == 0 {
+                        return;
+                    }
+                    // Collectors can finish asynchronously, so an older
+                    // invocation may append after a newer timestamp. Scan the
+                    // full log instead of stopping at the first `to_ts` row.
                     for i in 0..n {
                         if let Some(row) = log.get(i) {
-                            if row.timestamp_ns >= to_ts {
-                                break;
-                            }
-                            if row.timestamp_ns >= from_ts {
+                            if row.timestamp_ns >= from_ts && row.timestamp_ns < to_ts {
                                 out.push(row);
                                 if out.len() >= limit {
                                     break;
@@ -111,6 +114,29 @@ macro_rules! fast_accessors {
                         }
                     }
                 });
+                out
+            }
+
+            /// Return the most recently appended rows in `[from_ts, to_ts)`,
+            /// in chronological order. Unlike `range`, this is a bounded tail
+            /// read for callers that need current history after the log grows
+            /// beyond their per-query cap.
+            pub fn tail_range(from_ts: u64, to_ts: u64, limit: usize) -> Vec<$row_type> {
+                let mut out = Vec::new();
+                $log.with(|log| {
+                    let log = log.borrow();
+                    let mut i = log.len();
+                    while i > 0 && out.len() < limit {
+                        i -= 1;
+                        if let Some(row) = log.get(i) {
+                            if row.timestamp_ns >= from_ts && row.timestamp_ns < to_ts {
+                                out.push(row);
+                            }
+                        }
+                    }
+                });
+                out.reverse();
+                out.sort_by_key(|row| row.timestamp_ns);
                 out
             }
         }
@@ -203,5 +229,30 @@ mod tests {
         assert!(rows
             .iter()
             .any(|r| r.timestamp_ns == 200 && r.decimals.as_deref() == Some(&[8, 8, 8][..])));
+    }
+
+    #[test]
+    fn price_tail_range_keeps_recent_rows_in_timestamp_order() {
+        let first_ts = u64::MAX - 100;
+        let second_ts = u64::MAX - 300;
+        let third_ts = u64::MAX - 200;
+        for timestamp_ns in [first_ts, second_ts, third_ts] {
+            fast_prices::push(FastPriceSnapshot {
+                timestamp_ns,
+                prices: Vec::new(),
+            });
+        }
+
+        let ranged = fast_prices::range(u64::MAX - 250, u64::MAX, 10);
+        assert_eq!(
+            ranged.iter().map(|row| row.timestamp_ns).collect::<Vec<_>>(),
+            vec![first_ts, third_ts]
+        );
+
+        let rows = fast_prices::tail_range(u64::MAX - 500, u64::MAX, 2);
+        assert_eq!(
+            rows.iter().map(|row| row.timestamp_ns).collect::<Vec<_>>(),
+            vec![second_ts, third_ts]
+        );
     }
 }

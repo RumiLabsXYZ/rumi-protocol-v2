@@ -10,8 +10,8 @@ use super::config::ChainId;
 use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use super::multi_chain_state::MultiChainState;
 use super::recovery::{
-    apply_recover_vault_in_state, apply_resolve_reversal_in_state, precheck_recover_vault_in_state,
-    RecoveryError,
+    apply_recover_vault_in_state, apply_resolve_reversal_if_candidates_unchanged_in_state,
+    apply_resolve_reversal_in_state, precheck_recover_vault_in_state, RecoveryError,
 };
 use super::settlement_queue::{SettlementOp, SettlementOpKind, SettlementOpStatus};
 use candid::Principal;
@@ -136,6 +136,49 @@ fn resolve_reversal_is_idempotent_cas() {
 }
 
 #[test]
+fn stale_recovery_candidate_snapshot_cannot_reverse_during_replacement_broadcast() {
+    let mut op = inflight_op(
+        0,
+        SettlementOpKind::NativeWithdrawal {
+            recipient: "0xr".into(),
+            amount_e18: 10,
+            vault_id: 1,
+        },
+        Some("0xold"),
+    );
+    op.submit_nonce = Some(9);
+    op.tx_hash_candidates = vec!["0xold".into()];
+    let mut s = state_with_op(op);
+    s.chain_vaults
+        .insert(1, vault(1, ChainVaultStatus::Closing, 0, 10));
+    let verified_snapshot = vec!["0xold".to_string()];
+
+    // A replacement claim records its hash before awaiting broadcast.
+    s.settlement_queues
+        .get_mut(&CHAIN)
+        .unwrap()
+        .pending
+        .get_mut(&0)
+        .unwrap()
+        .record_tx_hash_candidate("0xreplacement".into());
+
+    let error = apply_resolve_reversal_if_candidates_unchanged_in_state(
+        &mut s,
+        CHAIN,
+        0,
+        100,
+        Some(&verified_snapshot),
+    )
+    .expect_err("stale receipt snapshot must not reverse");
+    assert!(matches!(error, RecoveryError::VerificationUnavailable(_)));
+    assert_eq!(s.chain_vaults[&1].collateral_amount_native, 10);
+    assert!(matches!(
+        s.settlement_queues[&CHAIN].pending[&0].status,
+        SettlementOpStatus::Inflight { .. }
+    ));
+}
+
+#[test]
 fn resolve_reversal_rejects_chain_collateral_payout_without_mutation() {
     let mut s = state_with_op(inflight_op(
         0,
@@ -187,6 +230,42 @@ fn precheck_recover_returns_terminal_mint_tx_hashes() {
 
     let hashes = precheck_recover_vault_in_state(&s, CHAIN, 1).expect("precheck ok");
     assert_eq!(hashes, vec!["0xmint_tx".to_string()]);
+}
+
+#[test]
+fn precheck_recover_keeps_every_same_nonce_candidate_after_snapshot_roundtrip() {
+    let mut op = SettlementOp::new(
+        SettlementOpKind::Mint {
+            recipient: "0xr".into(),
+            amount_e8s: 5,
+            vault_id: 1,
+        },
+        "key-candidates".into(),
+        0,
+    );
+    op.op_id = 0;
+    op.status = SettlementOpStatus::Failed {
+        reason: "resolved".into(),
+        failed_ns: 1,
+    };
+    op.submit_nonce = Some(9);
+    op.tx_hash_candidates = vec!["0xfirst".into(), "0xreplacement".into()];
+    op.last_tx_hash = Some("0xreplacement".into());
+    let bytes = candid::encode_one(&op).expect("snapshot encode");
+    let decoded: SettlementOp = candid::decode_one(&bytes).expect("snapshot decode");
+    let mut s = state_with_op(decoded);
+    s.chain_vaults
+        .insert(1, vault(1, ChainVaultStatus::MintPending, 0, 9));
+
+    assert_eq!(
+        precheck_recover_vault_in_state(&s, CHAIN, 1).expect("precheck ok"),
+        vec!["0xreplacement".to_string(), "0xfirst".to_string()],
+        "recovery must inspect the replacement and original hash after state restoration"
+    );
+    assert_eq!(
+        s.settlement_queues[&CHAIN].pending[&0].submit_nonce,
+        Some(9)
+    );
 }
 
 #[test]

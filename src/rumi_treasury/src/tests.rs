@@ -459,7 +459,10 @@ mod tests {
         assert_eq!(before.amount, after.amount);
 
         // A cache miss allows the next ID to use a fresh query result.
-        assert_eq!(crate::remember_queried_ledger_fee(ledger, Some(25_000)), 25_000);
+        assert_eq!(
+            crate::remember_queried_ledger_fee(ledger, Some(25_000)),
+            25_000
+        );
     }
 
     #[test]
@@ -625,7 +628,7 @@ mod tests {
             controller: Principal::from_slice(&[1]),
             icusd_ledger: Principal::from_slice(&[2]),
             icp_ledger: Principal::from_slice(&[3]),
-            ckbtc_ledger: Some(Principal::from_slice(&[4])),
+            ckbtc_ledger: Some(Principal::from_slice(&[6])),
             ckusdt_ledger: Some(Principal::from_slice(&[5])),
             ckusdc_ledger: Some(Principal::from_slice(&[3])),
         };
@@ -637,7 +640,7 @@ mod tests {
         let config = crate::state::TreasuryConfig {
             icusd_ledger: Principal::from_slice(&[2]),
             icp_ledger: Principal::from_slice(&[2]),
-            ckbtc_ledger: Some(Principal::from_slice(&[4])),
+            ckbtc_ledger: Some(Principal::from_slice(&[6])),
             ckusdt_ledger: None,
             ckusdc_ledger: None,
             is_paused: false,
@@ -657,7 +660,11 @@ mod tests {
             let balances = s
                 .balances
                 .iter()
-                .map(|(asset_type, balance)| (asset_type.clone(), balance.clone()))
+                .filter_map(|(asset_type, balance)| {
+                    AssetTypeV1::try_from(asset_type.clone())
+                        .ok()
+                        .map(|asset_type| (asset_type, balance.clone()))
+                })
                 .collect();
 
             TreasuryStatus {
@@ -724,6 +731,79 @@ mod tests {
         crate::state::with_state(|s| {
             assert_eq!(s.balances[&AssetType::ICUSD].total, 1_000);
             assert_eq!(s.get_deposits_count(), 1);
+        });
+    }
+
+    #[test]
+    fn other_ledger_deposits_are_distinct_withdrawable_assets() {
+        init_test_treasury();
+        let first_ledger = Principal::from_slice(&[31]);
+        let second_ledger = Principal::from_slice(&[32]);
+        let make_record = |ledger| DepositRecord {
+            id: 0,
+            deposit_type: DepositType::LiquidationFee,
+            asset_type: AssetType::Other(ledger),
+            amount: 2_000,
+            block_index: 77,
+            timestamp: 10,
+            memo: None,
+        };
+
+        let (_, first_new) = crate::state::with_state_mut(|s| {
+            s.add_deposit_once(make_record(first_ledger)).unwrap()
+        });
+        let (_, second_new) = crate::state::with_state_mut(|s| {
+            s.add_deposit_once(make_record(second_ledger)).unwrap()
+        });
+        assert!(first_new && second_new);
+        crate::state::with_state_mut(|s| {
+            for ledger in [first_ledger, second_ledger] {
+                let id = s.next_event_id;
+                s.events.insert(
+                    id,
+                    TreasuryEvent {
+                        id,
+                        timestamp: 10,
+                        caller: Principal::from_slice(&[9]),
+                        action: TreasuryAction::Deposit {
+                            deposit_type: DepositType::LiquidationFee,
+                            asset_type: AssetType::Other(ledger),
+                            amount: 2_000,
+                        },
+                    },
+                );
+                s.next_event_id += 1;
+            }
+        });
+
+        let first_asset = AssetType::Other(first_ledger);
+        let second_asset = AssetType::Other(second_ledger);
+        crate::state::with_state(|s| {
+            assert_eq!(s.balances[&first_asset].available, 2_000);
+            assert_eq!(s.balances[&second_asset].available, 2_000);
+        });
+        assert!(crate::get_deposits(None, None).is_empty());
+        assert_eq!(crate::get_deposits_v2(None, None).len(), 2);
+        let all_balances = crate::state::with_state(|s| s.balances.clone());
+        let legacy_balances = crate::legacy_asset_balances(&all_balances);
+        assert_eq!(legacy_balances.len(), 5);
+        assert!(legacy_balances
+            .iter()
+            .any(|(asset, _)| matches!(asset, AssetTypeV1::ICP)));
+        assert!(all_balances.contains_key(&first_asset));
+        assert!(crate::get_events(None, None).is_empty());
+        assert_eq!(crate::get_events_v2(None, None).len(), 2);
+
+        let config = crate::state::with_state(|s| s.get_config());
+        assert_eq!(
+            crate::configured_asset_ledger(&config, &first_asset),
+            Some(first_ledger)
+        );
+        assert!(crate::validate_configured_asset_ledger(&config, &first_asset).is_ok());
+        crate::state::with_state_mut(|s| s.withdraw(first_asset.clone(), 1_000).unwrap());
+        crate::state::with_state(|s| {
+            assert_eq!(s.balances[&first_asset].available, 1_000);
+            assert_eq!(s.balances[&second_asset].available, 2_000);
         });
     }
 

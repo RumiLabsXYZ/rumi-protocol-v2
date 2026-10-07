@@ -137,7 +137,7 @@ fn post_upgrade() {
             storage::set_slim(slim);
 
             log!(INFO, "Rumi 3pool post-upgrade: drain complete. \
-                LP supply: {}, holders: {}, blocks: {}, swap_v2: {}",
+                LP supply: {}, accounts: {}, blocks: {}, swap_v2: {}",
                 read_state(|s| s.lp_total_supply),
                 storage::lp_balance_len(),
                 storage::blocks::len(),
@@ -149,7 +149,7 @@ fn post_upgrade() {
             let slim = storage::get_slim();
             state::hydrate_from_slim(&slim);
             log!(INFO, "Rumi 3pool post-upgrade: loaded from SlimState. \
-                LP supply: {}, holders: {}, blocks: {}",
+                LP supply: {}, accounts: {}, blocks: {}",
                 slim.lp_total_supply,
                 storage::lp_balance_len(),
                 storage::blocks::len());
@@ -2189,10 +2189,10 @@ pub fn cycle_manager_metrics() -> Vec<rumi_cycle_manager::CycleManagerMetric> {
     read_state(|s| {
         vec![
             rumi_cycle_manager::metric(
-                "op:lp_holder:count",
+                "op:lp_account:count",
                 storage::lp_balance_len() as u64,
                 storage::lp_balance_len() as u64,
-                Some("3pool LP holder records"),
+                Some("3pool LP account records"),
             ),
             rumi_cycle_manager::metric(
                 "op:swap:count",

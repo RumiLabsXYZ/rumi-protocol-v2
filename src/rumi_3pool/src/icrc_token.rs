@@ -4,11 +4,15 @@
 // This module exposes them as a proper ICRC-1/ICRC-2 compliant token.
 //
 // Token: 3USD | Decimals: 8 | Fee: 0
-// Subaccounts: balances are tracked by owner principal only — subaccounts are
-// accepted on all fields (from, to, spender) but effectively ignored for
-// balance lookups. This allows DEX canisters that use per-pool subaccounts
-// (e.g. the Rumi AMM) to hold and transfer 3USD without issues.
+// Subaccounts are tracked as full ICRC accounts. Existing principal-only
+// balances and allowances are interpreted as the default (zero) account.
 
+use crate::state::{mutate_state, read_state};
+use crate::storage::{
+    lp_transfer_dedup_cutover, LpTransferDedupEntry, LpTransferExpiryKey, StorableHash, Unit,
+    LP_TRANSFER_DEDUP, LP_TRANSFER_DEDUP_EXPIRY,
+};
+use crate::types::{Icrc3Transaction, LpAllowance};
 use candid::{Nat, Principal};
 use icrc_ledger_types::icrc::generic_metadata_value::MetadataValue;
 use icrc_ledger_types::icrc1::account::Account;
@@ -16,12 +20,6 @@ use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::allowance::{Allowance, AllowanceArgs};
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
-use crate::state::{mutate_state, read_state};
-use crate::storage::{
-    lp_transfer_dedup_cutover, LpTransferDedupEntry, LpTransferExpiryKey, StorableHash, Unit,
-    LP_TRANSFER_DEDUP, LP_TRANSFER_DEDUP_EXPIRY,
-};
-use crate::types::{LpAllowance, Icrc3Transaction};
 
 // ─── Transaction deduplication (audit 2026-06-09, ICRC-001) ───
 //
@@ -95,9 +93,8 @@ fn dedup_check_with_cutover(
     // current time. Hold the whole possible range as TooOld until its normal
     // window expires. Check the stable map first so transactions recorded by
     // this version still return their original block across the first upgrade.
-    if cutover.is_some_and(|first_upgrade| {
-        cat <= first_upgrade.saturating_add(PERMITTED_DRIFT_NS)
-    }) {
+    if cutover.is_some_and(|first_upgrade| cat <= first_upgrade.saturating_add(PERMITTED_DRIFT_NS))
+    {
         return Err(DedupReject::TooOld);
     }
     Ok(())
@@ -206,7 +203,10 @@ fn hash_icrc2_transfer_from(caller: &Principal, args: &TransferFromArgs) -> [u8;
     let mut h = sha2::Sha256::new();
     h.update(b"3usd.icrc2_transfer_from");
     hash_part(&mut h, Some(caller.as_slice()));
-    hash_part(&mut h, args.spender_subaccount.as_ref().map(|s| s.as_slice()));
+    hash_part(
+        &mut h,
+        args.spender_subaccount.as_ref().map(|s| s.as_slice()),
+    );
     hash_part(&mut h, Some(args.from.owner.as_slice()));
     hash_part(&mut h, args.from.subaccount.as_ref().map(|s| s.as_slice()));
     hash_part(&mut h, Some(args.to.owner.as_slice()));
@@ -233,7 +233,10 @@ fn hash_icrc2_approve(caller: &Principal, args: &ApproveArgs) -> [u8; 32] {
     hash_part(&mut h, Some(caller.as_slice()));
     hash_part(&mut h, args.from_subaccount.as_ref().map(|s| s.as_slice()));
     hash_part(&mut h, Some(args.spender.owner.as_slice()));
-    hash_part(&mut h, args.spender.subaccount.as_ref().map(|s| s.as_slice()));
+    hash_part(
+        &mut h,
+        args.spender.subaccount.as_ref().map(|s| s.as_slice()),
+    );
     let amount_bytes = args.amount.0.to_bytes_be();
     hash_part(&mut h, Some(&amount_bytes));
     let expected_bytes = args.expected_allowance.as_ref().map(|n| n.0.to_bytes_be());
@@ -298,17 +301,28 @@ pub fn icrc1_minting_account() -> Option<Account> {
 }
 
 pub fn icrc1_balance_of(account: Account) -> Nat {
-    let p = account.owner;
-    Nat::from(crate::storage::lp_balance_get(&p))
+    Nat::from(crate::storage::lp_account_balance_get(&account))
 }
 
 pub fn icrc1_metadata() -> Vec<(String, MetadataValue)> {
     vec![
-        ("icrc1:name".to_string(), MetadataValue::Text("3USD".to_string())),
-        ("icrc1:symbol".to_string(), MetadataValue::Text("3USD".to_string())),
-        ("icrc1:decimals".to_string(), MetadataValue::Nat(Nat::from(8u64))),
+        (
+            "icrc1:name".to_string(),
+            MetadataValue::Text("3USD".to_string()),
+        ),
+        (
+            "icrc1:symbol".to_string(),
+            MetadataValue::Text("3USD".to_string()),
+        ),
+        (
+            "icrc1:decimals".to_string(),
+            MetadataValue::Nat(Nat::from(8u64)),
+        ),
         ("icrc1:fee".to_string(), MetadataValue::Nat(Nat::from(0u64))),
-        ("icrc1:logo".to_string(), MetadataValue::Text(logo_data_uri())),
+        (
+            "icrc1:logo".to_string(),
+            MetadataValue::Text(logo_data_uri()),
+        ),
     ]
 }
 
@@ -343,11 +357,11 @@ pub fn icrc1_transfer(caller: Principal, args: TransferArg) -> Result<Nat, Trans
         }
     }
 
-    // Both from_subaccount and to accept any subaccount — balances are keyed
-    // by owner principal only, so subaccounts are effectively ignored for
-    // *balance* lookups. The subaccounts ARE preserved into the ICRC-3 block
-    // log so external consumers (e.g. the protocol_backend's SP writedown
-    // proof verifier) see the actual destination Account the caller chose.
+    let from_account = Account {
+        owner: caller,
+        subaccount: args.from_subaccount,
+    };
+    let to_account = args.to.clone();
     let to_principal = args.to.owner;
     let from_subaccount = args.from_subaccount.map(|s| s.to_vec());
     let to_subaccount = args.to.subaccount.map(|s| s.to_vec());
@@ -364,29 +378,32 @@ pub fn icrc1_transfer(caller: Principal, args: TransferArg) -> Result<Nat, Trans
         });
     }
 
-    // NOTE (audit 2026-06-05, SAT-007): a previous over-broad guard rejected
-    // every transfer where `caller == to.owner`, which broke legitimate wallet
-    // flows (notably the "3USD send with Internet Identity" bug) whenever a
-    // wallet routed a send to the same owning principal under a different
-    // subaccount. Because balances are keyed by owner principal only, a
-    // same-owner transfer is a self-cancelling no-op on the balance (debit then
-    // credit the same key, net zero), so allowing it is safe and matches the
-    // ICP/ICRC-1 ledger convention of permitting self-transfers.
-
     let result = mutate_state(|s| {
-        let from_balance = crate::storage::lp_balance_get(&caller);
+        let from_balance = crate::storage::lp_account_balance_get(&from_account);
         if from_balance < amount {
             return Err(TransferError::InsufficientFunds {
                 balance: Nat::from(from_balance),
             });
         }
 
-        // Debit (set-to-0 removes the entry from stable storage)
-        crate::storage::lp_balance_set(caller, from_balance - amount);
+        let same_account = crate::storage::AccountKey::new(&from_account)
+            == crate::storage::AccountKey::new(&to_account);
+        let credited = if same_account {
+            from_balance
+        } else {
+            crate::storage::lp_account_balance_get(&to_account)
+                .checked_add(amount)
+                .ok_or(TransferError::GenericError {
+                    error_code: Nat::from(4u64),
+                    message: "balance overflow".to_string(),
+                })?
+        };
 
-        // Credit
-        let to_balance = crate::storage::lp_balance_get(&to_principal);
-        crate::storage::lp_balance_set(to_principal, to_balance + amount);
+        // Debit (set-to-0 removes the entry from stable storage)
+        if !same_account {
+            crate::storage::lp_account_balance_set(&from_account, from_balance - amount);
+            crate::storage::lp_account_balance_set(&to_account, credited);
+        }
 
         let id = s.log_block(Icrc3Transaction::Transfer {
             from: caller,
@@ -445,9 +462,11 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
         }
     }
 
-    // Subaccounts accepted but ignored for balance/allowance keying — the
-    // 3pool tracks balances per principal only. Block log preserves the
-    // subaccounts the caller chose for ICRC-3 consumers.
+    let owner_account = Account {
+        owner: caller,
+        subaccount: args.from_subaccount,
+    };
+    let spender_account = args.spender.clone();
     let spender_principal = args.spender.owner;
     let from_subaccount = args.from_subaccount.map(|s| s.to_vec());
     let spender_subaccount = args.spender.subaccount.map(|s| s.to_vec());
@@ -467,7 +486,7 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
     let result = mutate_state(|s| {
         // CAS: check expected_allowance
         if let Some(ref expected) = args.expected_allowance {
-            let current = crate::storage::allowance_get(&caller, &spender_principal)
+            let current = crate::storage::allowance_account_get(&owner_account, &spender_account)
                 .map(|a| effective_allowance(&a))
                 .unwrap_or(0);
             let expected_u128 = nat_to_u128(expected).unwrap_or(u128::MAX);
@@ -479,9 +498,9 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
         }
 
         // Set allowance
-        crate::storage::allowance_set(
-            caller,
-            spender_principal,
+        crate::storage::allowance_account_set(
+            &owner_account,
+            &spender_account,
             LpAllowance {
                 amount,
                 expires_at: args.expires_at,
@@ -510,10 +529,7 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
 // ─── ICRC-2 Allowance Query ───
 
 pub fn icrc2_allowance(args: AllowanceArgs) -> Allowance {
-    let owner = args.account.owner;
-    let spender = args.spender.owner;
-
-    match crate::storage::allowance_get(&owner, &spender) {
+    match crate::storage::allowance_account_get(&args.account, &args.spender) {
         Some(a) => {
             let eff = effective_allowance(&a);
             Allowance {
@@ -562,8 +578,12 @@ pub fn icrc2_transfer_from(
         }
     }
 
-    // Subaccounts accepted but ignored for balance keying — block log
-    // preserves them for ICRC-3 consumers (see icrc1_transfer comment).
+    let from_account = args.from.clone();
+    let to_account = args.to.clone();
+    let spender_account = Account {
+        owner: caller,
+        subaccount: args.spender_subaccount,
+    };
     let from_principal = args.from.owner;
     let to_principal = args.to.owner;
     let from_subaccount = args.from.subaccount.map(|s| s.to_vec());
@@ -585,8 +605,10 @@ pub fn icrc2_transfer_from(
     let result = mutate_state(|s| {
         // Preflight the allowance (unless self-transfer); do not mutate it
         // until the sender's balance has also passed validation.
-        let allowance_after = if caller != from_principal {
-            let existing = crate::storage::allowance_get(&from_principal, &caller);
+        let allowance_after = if crate::storage::AccountKey::new(&spender_account)
+            != crate::storage::AccountKey::new(&from_account)
+        {
+            let existing = crate::storage::allowance_account_get(&from_account, &spender_account);
             let current_allowance = existing
                 .as_ref()
                 .map(|a| effective_allowance(a))
@@ -608,30 +630,42 @@ pub fn icrc2_transfer_from(
         };
 
         // Check balance
-        let from_balance = crate::storage::lp_balance_get(&from_principal);
+        let from_balance = crate::storage::lp_account_balance_get(&from_account);
         if from_balance < amount {
             return Err(TransferFromError::InsufficientFunds {
                 balance: Nat::from(from_balance),
             });
         }
 
+        let same_account = crate::storage::AccountKey::new(&from_account)
+            == crate::storage::AccountKey::new(&to_account);
+        let credited = if same_account {
+            from_balance
+        } else {
+            crate::storage::lp_account_balance_get(&to_account)
+                .checked_add(amount)
+                .ok_or(TransferFromError::GenericError {
+                    error_code: Nat::from(4u64),
+                    message: "balance overflow".to_string(),
+                })?
+        };
+
         // All rejecting preconditions have now passed. Mutate allowance only
         // alongside a transfer that can commit, so InsufficientFunds cannot
         // consume an approved spender's allowance.
         if let Some(entry) = allowance_after {
             if entry.amount == 0 {
-                crate::storage::allowance_remove(&from_principal, &caller);
+                crate::storage::allowance_account_remove(&from_account, &spender_account);
             } else {
-                crate::storage::allowance_set(from_principal, caller, entry);
+                crate::storage::allowance_account_set(&from_account, &spender_account, entry);
             }
         }
 
         // Debit (set-to-0 removes the entry from stable storage)
-        crate::storage::lp_balance_set(from_principal, from_balance - amount);
-
-        // Credit
-        let to_balance = crate::storage::lp_balance_get(&to_principal);
-        crate::storage::lp_balance_set(to_principal, to_balance + amount);
+        if !same_account {
+            crate::storage::lp_account_balance_set(&from_account, from_balance - amount);
+            crate::storage::lp_account_balance_set(&to_account, credited);
+        }
 
         let id = s.log_block(Icrc3Transaction::Transfer {
             from: from_principal,
@@ -813,7 +847,12 @@ mod icrc_001_dedup_tests {
         // A transaction already recorded in stable memory under the new
         // version must take precedence over the legacy hold on first upgrade.
         let stable_before_first_upgrade = [0x33u8; 32];
-        dedup_record(cutover - 1, Some(cutover - 1), stable_before_first_upgrade, 92);
+        dedup_record(
+            cutover - 1,
+            Some(cutover - 1),
+            stable_before_first_upgrade,
+            92,
+        );
         assert_eq!(
             dedup_check_with_cutover(
                 cutover,
@@ -844,7 +883,10 @@ mod icrc_001_dedup_tests {
         // Inserting after the old entry expired must prune it.
         let later = NOW + TRANSACTION_WINDOW_NS + PERMITTED_DRIFT_NS + 1;
         dedup_record(later, Some(later), h_new, 2);
-        assert!(seen_txs_len() <= before, "expired entries must be pruned on insert");
+        assert!(
+            seen_txs_len() <= before,
+            "expired entries must be pruned on insert"
+        );
         assert_eq!(
             dedup_check(later, Some(later), &h_new),
             Err(DedupReject::Duplicate { duplicate_of: 2 })

@@ -428,6 +428,7 @@ service : (AmmInitArgs) -> {
   claim_pending : (nat64) -> (variant { Ok; Err : AmmError });
   get_pending_claims : () -> (vec PendingClaim) query;
   get_pending_amm_payouts : () -> (vec AmmPayoutAttempt) query;
+  get_3usd_account_migration_blockers : () -> (variant { Ok : vec text; Err : AmmError }) query;
   get_my_amm_operation : () -> (opt AmmIngressOperation) query;
   retry_amm_payout : (nat64) -> (variant { Ok : nat64; Err : AmmError });
   reconcile_amm_payout : (nat64) -> (variant { Ok : bool; Err : AmmError });

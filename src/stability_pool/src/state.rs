@@ -396,6 +396,10 @@ pub struct StabilityPoolState {
     pub next_sp_three_usd_absorb_id: Option<u64>,
     #[serde(default)]
     pub pending_sp_three_usd_absorbs: Option<BTreeMap<u64, PendingSpThreeUsdAbsorb>>,
+    /// Round-robin cursor for autonomous recovery of 3USD rows whose approval
+    /// has already been proven. Ambiguous approvals remain controller-only.
+    #[serde(default)]
+    pub sp_three_usd_recovery_cursor: Option<u64>,
     #[serde(default)]
     pub completed_sp_three_usd_absorbs: Option<BTreeMap<u64, PendingSpThreeUsdAbsorb>>,
     #[serde(default)]
@@ -470,6 +474,7 @@ impl Default for StabilityPoolState {
             completed_sp_liquidation_request_floor: Some(1),
             next_sp_three_usd_absorb_id: Some(1),
             pending_sp_three_usd_absorbs: Some(BTreeMap::new()),
+            sp_three_usd_recovery_cursor: None,
             completed_sp_three_usd_absorbs: Some(BTreeMap::new()),
             completed_sp_three_usd_absorb_floor: Some(1),
             processed_interest_mint_blocks: Some(BTreeSet::new()),
@@ -2253,6 +2258,55 @@ impl StabilityPoolState {
         }
         if let Some(last) = selected.last().copied() {
             self.sp_liquidation_v2_recovery_cursor = Some(last);
+        }
+        selected
+    }
+
+    /// Select only rows whose exact approval receipt was already verified.
+    /// The timer may repeat the pinned backend identity and query its status,
+    /// but must never guess an approval block after an ambiguous ledger reply.
+    pub fn take_sp_three_usd_recovery_batch(&mut self, limit: usize) -> Vec<u64> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let keys = self
+            .pending_sp_three_usd_absorbs
+            .as_ref()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|(id, row)| {
+                        (row.approval_receipt_block_index.is_some()
+                            && matches!(
+                                row.phase,
+                                SpThreeUsdAbsorbPhase::ApprovalProven
+                                    | SpThreeUsdAbsorbPhase::BackendPending
+                                    | SpThreeUsdAbsorbPhase::Held
+                            ))
+                        .then_some(*id)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if keys.is_empty() {
+            return Vec::new();
+        }
+        let cursor = self.sp_three_usd_recovery_cursor;
+        let mut selected: Vec<u64> = keys
+            .iter()
+            .copied()
+            .filter(|id| cursor.map_or(true, |after| *id > after))
+            .take(limit)
+            .collect();
+        if selected.len() < limit {
+            selected.extend(
+                keys.iter()
+                    .copied()
+                    .filter(|id| cursor.is_some_and(|after| *id <= after))
+                    .take(limit - selected.len()),
+            );
+        }
+        if let Some(last) = selected.last().copied() {
+            self.sp_three_usd_recovery_cursor = Some(last);
         }
         selected
     }
@@ -6484,6 +6538,7 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             completed_sp_liquidation_request_floor: Some(0),
             next_sp_three_usd_absorb_id: Some(1),
             pending_sp_three_usd_absorbs: Some(BTreeMap::new()),
+            sp_three_usd_recovery_cursor: None,
             completed_sp_three_usd_absorbs: Some(BTreeMap::new()),
             completed_sp_three_usd_absorb_floor: Some(1),
             processed_interest_mint_blocks: Some(BTreeSet::new()),
@@ -6506,13 +6561,113 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
 pub fn try_decode_state(bytes: &[u8]) -> Option<StabilityPoolState> {
     // v-current.
     if let Ok(state) = Decode!(bytes, StabilityPoolState) {
+        if !current_financial_journals_match_wire(bytes, &state) {
+            return None;
+        }
         return Some(state);
+    }
+    // A legacy Candid record is a structural supertype of newer records: it
+    // can decode while silently ignoring fields it does not know. Only allow
+    // the V1 migration when the wire record has none of the financial journal
+    // fields introduced after V1. This also catches a current snapshot whose
+    // nested journal type no longer decodes under the current Rust schema.
+    if !legacy_fallback_has_no_new_journals(bytes) {
+        return None;
     }
     // v1: pre-IC-S-001 (no pending_refunds / next_pending_refund_id).
     if let Ok(prev) = Decode!(bytes, StabilityPoolStateV1) {
         return Some(prev.into());
     }
     None
+}
+
+fn legacy_fallback_has_no_new_journals(bytes: &[u8]) -> bool {
+    const NEW_FINANCIAL_JOURNALS: &[&str] = &[
+        "pending_chain_absorbs",
+        "pending_native_xrp_absorbs",
+        "completed_cfx_claim_payout_recoveries",
+        "pending_refunds",
+        "pending_outbound_payouts",
+        "pending_sp_liquidations_v2",
+        "pending_sp_three_usd_absorbs",
+        "unallocated_interest_forward_batches",
+    ];
+    let Some(args) = parse_state_record(bytes) else {
+        return false;
+    };
+    let Some(fields) = state_record_fields(&args) else {
+        return false;
+    };
+    !fields.iter().any(|field| {
+        NEW_FINANCIAL_JOURNALS
+            .iter()
+            .any(|name| field.id.get_id() == candid::idl_hash(name))
+    })
+}
+
+fn current_financial_journals_match_wire(bytes: &[u8], state: &StabilityPoolState) -> bool {
+    let Some(args) = parse_state_record(bytes) else {
+        return false;
+    };
+    let Some(fields) = state_record_fields(&args) else {
+        return false;
+    };
+    [
+        (
+            "pending_chain_absorbs",
+            state.pending_chain_absorbs.is_some(),
+        ),
+        (
+            "pending_native_xrp_absorbs",
+            state.pending_native_xrp_absorbs.is_some(),
+        ),
+        (
+            "completed_cfx_claim_payout_recoveries",
+            state.completed_cfx_claim_payout_recoveries.is_some(),
+        ),
+        ("pending_refunds", state.pending_refunds.is_some()),
+        (
+            "pending_outbound_payouts",
+            state.pending_outbound_payouts.is_some(),
+        ),
+        (
+            "pending_sp_liquidations_v2",
+            state.pending_sp_liquidations_v2.is_some(),
+        ),
+        (
+            "pending_sp_three_usd_absorbs",
+            state.pending_sp_three_usd_absorbs.is_some(),
+        ),
+        (
+            "unallocated_interest_forward_batches",
+            state.unallocated_interest_forward_batches.is_some(),
+        ),
+    ]
+    .iter()
+    .all(|(name, decoded_has_value)| {
+        let field = fields
+            .iter()
+            .find(|field| field.id.get_id() == candid::idl_hash(name));
+        match field {
+            None => true, // A genuine historical snapshot omitted the field.
+            Some(field) => match &field.val {
+                candid::IDLValue::None => !decoded_has_value,
+                candid::IDLValue::Opt(_) => *decoded_has_value,
+                _ => false,
+            },
+        }
+    })
+}
+
+fn parse_state_record(bytes: &[u8]) -> Option<candid::IDLArgs> {
+    candid::IDLArgs::from_bytes(bytes).ok()
+}
+
+fn state_record_fields(args: &candid::IDLArgs) -> Option<&[candid::types::value::IDLField]> {
+    match args.args.as_slice() {
+        [candid::IDLValue::Record(fields)] => Some(fields),
+        _ => None,
+    }
 }
 
 /// Restore state from stable memory (called from post_upgrade).
@@ -10141,6 +10296,40 @@ mod tests {
     }
 
     #[test]
+    fn three_usd_recovery_batch_excludes_ambiguous_approval_and_is_bounded() {
+        let (mut state, absorb_id, _, _) = prepare_test_three_usd_absorb();
+        let mut second = state.pending_sp_three_usd_absorbs.as_ref().unwrap()[&absorb_id].clone();
+        second.absorb_id = absorb_id + 1;
+        second.vault_id += 1;
+        state
+            .pending_sp_three_usd_absorbs
+            .as_mut()
+            .unwrap()
+            .insert(second.absorb_id, second);
+        assert!(state.take_sp_three_usd_recovery_batch(2).is_empty());
+        state
+            .mark_sp_three_usd_approval_dispatch(absorb_id)
+            .unwrap();
+        // An attempted approval without its exact receipt remains controller-only.
+        assert!(state.take_sp_three_usd_recovery_batch(2).is_empty());
+        state
+            .record_sp_three_usd_approval_receipt(absorb_id, 5, 3)
+            .unwrap();
+        assert_eq!(state.take_sp_three_usd_recovery_batch(1), vec![absorb_id]);
+        state
+            .mark_sp_three_usd_approval_dispatch(absorb_id + 1)
+            .unwrap();
+        state
+            .record_sp_three_usd_approval_receipt(absorb_id + 1, 6, 3)
+            .unwrap();
+        assert_eq!(
+            state.take_sp_three_usd_recovery_batch(1),
+            vec![absorb_id + 1]
+        );
+        assert!(state.take_sp_three_usd_recovery_batch(0).is_empty());
+    }
+
+    #[test]
     fn three_usd_absorb_admission_snapshots_while_its_vault_is_in_flight() {
         let (mut state, _, pool, _) = prepare_test_three_usd_absorb();
         state.pending_sp_three_usd_absorbs.as_mut().unwrap().clear();
@@ -10774,6 +10963,85 @@ mod tests {
             restored.take_sp_liquidation_v2_recovery_batch(1),
             vec![request_id]
         );
+    }
+
+    #[test]
+    fn legacy_fallback_guard_recognizes_new_journal_on_option_wire_mismatch() {
+        #[derive(CandidType)]
+        struct NewerSnapshotWithIncompatibleChainAbsorbJournal {
+            deposits: BTreeMap<Principal, DepositPosition>,
+            total_stablecoin_balances: BTreeMap<Principal, u64>,
+            stablecoin_registry: BTreeMap<Principal, StablecoinConfig>,
+            collateral_registry: BTreeMap<Principal, CollateralInfo>,
+            protocol_canister_id: Principal,
+            configuration: PoolConfiguration,
+            liquidation_history: Vec<PoolLiquidationRecord>,
+            in_flight_liquidations: BTreeSet<u64>,
+            total_liquidations_executed: u64,
+            pool_creation_timestamp: u64,
+            total_interest_received_e8s: Option<u64>,
+            token_consecutive_failures: Option<BTreeMap<Principal, u32>>,
+            cached_virtual_prices: Option<BTreeMap<Principal, u128>>,
+            protocol_reserve_address: Option<Principal>,
+            is_initialized: bool,
+            pool_events: Option<Vec<PoolEvent>>,
+            next_event_id: Option<u64>,
+            pending_chain_absorbs: String,
+        }
+
+        let current = test_state();
+        let legacy = StabilityPoolStateV1 {
+            deposits: current.deposits,
+            total_stablecoin_balances: current.total_stablecoin_balances,
+            stablecoin_registry: current.stablecoin_registry,
+            collateral_registry: current.collateral_registry,
+            protocol_canister_id: current.protocol_canister_id,
+            configuration: current.configuration,
+            liquidation_history: current.liquidation_history,
+            in_flight_liquidations: current.in_flight_liquidations,
+            total_liquidations_executed: current.total_liquidations_executed,
+            pool_creation_timestamp: current.pool_creation_timestamp,
+            total_interest_received_e8s: current.total_interest_received_e8s,
+            token_consecutive_failures: current.token_consecutive_failures,
+            cached_virtual_prices: current.cached_virtual_prices,
+            protocol_reserve_address: current.protocol_reserve_address,
+            is_initialized: current.is_initialized,
+            pool_events: current.pool_events,
+            next_event_id: current.next_event_id,
+        };
+        let newer = NewerSnapshotWithIncompatibleChainAbsorbJournal {
+            deposits: legacy.deposits,
+            total_stablecoin_balances: legacy.total_stablecoin_balances,
+            stablecoin_registry: legacy.stablecoin_registry,
+            collateral_registry: legacy.collateral_registry,
+            protocol_canister_id: legacy.protocol_canister_id,
+            configuration: legacy.configuration,
+            liquidation_history: legacy.liquidation_history,
+            in_flight_liquidations: legacy.in_flight_liquidations,
+            total_liquidations_executed: legacy.total_liquidations_executed,
+            pool_creation_timestamp: legacy.pool_creation_timestamp,
+            total_interest_received_e8s: legacy.total_interest_received_e8s,
+            token_consecutive_failures: legacy.token_consecutive_failures,
+            cached_virtual_prices: legacy.cached_virtual_prices,
+            protocol_reserve_address: legacy.protocol_reserve_address,
+            is_initialized: legacy.is_initialized,
+            pool_events: legacy.pool_events,
+            next_event_id: legacy.next_event_id,
+            pending_chain_absorbs: "incompatible journal shape".into(),
+        };
+        let incompatible = Encode!(&newer).expect("encode newer incompatible snapshot");
+
+        // Candid's `opt` accepts a value of an unrelated wire type as None,
+        // so this exact malformed nested journal shape is consumed by the
+        // current decoder as None. The wire/state consistency check must
+        // reject that lossy current decode before it can be accepted.
+        assert!(Decode!(&incompatible, StabilityPoolState).is_ok());
+        assert!(Decode!(&incompatible, StabilityPoolStateV1).is_ok());
+        assert!(!current_financial_journals_match_wire(
+            &incompatible,
+            &Decode!(&incompatible, StabilityPoolState).unwrap()
+        ));
+        assert!(try_decode_state(&incompatible).is_none());
     }
 
     #[test]

@@ -3170,6 +3170,753 @@ pub async fn redeem_quoted(
     }
 }
 
+/// Request-ID redemption path. The exact fee-free pull tuple and high-water
+/// mark are stable before the first await. Reply loss is retried with that
+/// exact tuple; successful burns require an exact ICRC-3 burn receipt before
+/// any vault accounting can change.
+pub async fn redeem_quoted_v2(
+    request: crate::state::RedemptionV2Request,
+) -> Result<RedemptionResult, RedemptionError> {
+    let caller = ic_cdk::api::caller();
+    let _guard = GuardPrincipal::new(caller, "redeem_quoted_v2")?;
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed.into());
+    }
+
+    let existing = read_state(|state| {
+        if let Some(row) = state.redemption_v2_latest_result.get(&caller) {
+            if row.request.request_id == request.request_id {
+                return Some((true, row.clone()));
+            }
+        }
+        state
+            .redemption_v2_active
+            .get(&caller)
+            .map(|row| (false, row.clone()))
+    });
+    if let Some((completed, row)) = existing.as_ref() {
+        if row.request != request {
+            return Err(ProtocolError::GenericError(
+                "redemption request ID is bound to a different payload".into(),
+            )
+            .into());
+        }
+        if *completed {
+            if let Some(result) = row.result.clone() {
+                return Ok(redemption_v2_result_to_public(result));
+            }
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "this redemption request was already refunded".into(),
+            )
+            .into());
+        }
+        if row.phase == crate::state::RedemptionV2Phase::RefundPending {
+            return resume_redemption_v2_refund(caller, request, row.clone()).await;
+        }
+    }
+
+    // Admission policy may change after an exact pull was submitted. It must
+    // stop new requests, but must not make an existing request unrecoverable.
+    if existing.is_none() {
+        let (mode, frozen, minimum_amount) = read_state(|state| {
+            (state.mode, state.frozen, state.min_icusd_amount.to_u64())
+        });
+        if mode == Mode::ReadOnly || frozen {
+            return Err(ProtocolError::read_only_mode().into());
+        }
+        if request.amount_e8s < minimum_amount {
+            return Err(ProtocolError::AmountTooLow { minimum_amount }.into());
+        }
+    }
+
+    // Admission itself is synchronous. This includes the exact operation
+    // nonce, memo, timestamp, accounts, fee and amount used for every retry.
+    let tuple = if let Some((false, row)) = existing.as_ref() {
+        row.tuple.clone()
+    } else {
+        let tuple = mutate_state(|state| {
+            let nonce = state.next_op_nonce();
+            let backend = ic_cdk::id();
+            crate::SpLiquidationStablePullTuple {
+                op_nonce: nonce,
+                ledger: state.icusd_ledger_principal,
+                from: Account {
+                    owner: caller,
+                    subaccount: None,
+                },
+                spender: Account {
+                    owner: backend,
+                    subaccount: None,
+                },
+                to: Account {
+                    owner: backend,
+                    subaccount: None,
+                },
+                amount_raw: request.amount_e8s,
+                fee_raw: 0,
+                memo: management::nonce_to_memo(nonce).0.to_vec(),
+                created_at_time_ns: management::nonce_to_created_at_time(nonce),
+            }
+        });
+        mutate_state(|state| {
+            crate::state::admit_redemption_v2(state, caller, request.clone(), tuple.clone())
+        })
+        .map_err(|message| RedemptionError::from(ProtocolError::TemporarilyUnavailable(message)))?;
+        tuple
+    };
+
+    // A failed/ambiguous ledger reply is never treated as proof of no effect.
+    // Re-entering with the same request resubmits only the persisted tuple.
+    let block_index = match management::transfer_from_with_exact_tuple(&tuple).await {
+        Ok(index) => index,
+        Err(error) => {
+            mutate_state(|state| {
+                if let Some(row) = state.redemption_v2_active.get_mut(&caller) {
+                    row.last_error = Some(format!("exact icUSD pull unresolved: {error:?}"));
+                }
+                crate::storage::save_state_to_stable(state);
+            });
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "the icUSD burn outcome is unresolved; retry this same request ID".into(),
+            )
+            .into());
+        }
+    };
+    mutate_state(|state| {
+        if let Some(row) = state.redemption_v2_active.get_mut(&caller) {
+            row.block_index = Some(block_index);
+            row.phase = crate::state::RedemptionV2Phase::BurnProven;
+            row.last_error = None;
+        }
+        crate::storage::save_state_to_stable(state);
+    });
+    if let Err(error) =
+        crate::icrc3_proof::verify_sp_liquidation_icusd_burn_block(&tuple, block_index).await
+    {
+        mutate_state(|state| {
+            if let Some(row) = state.redemption_v2_active.get_mut(&caller) {
+                row.last_error = Some(format!("exact ICRC-3 burn proof unresolved: {error}"));
+            }
+            crate::storage::save_state_to_stable(state);
+        });
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "the icUSD burn is held pending exact ledger proof; retry this same request ID".into(),
+        )
+        .into());
+    }
+
+    if read_state(|state| state.mode == Mode::ReadOnly || state.frozen) {
+        return compensate_redemption_v2(
+            caller,
+            request,
+            block_index,
+            ProtocolError::read_only_mode().into(),
+        )
+        .await;
+    }
+
+    if let Err(error) = refresh_redemption_candidate_prices().await {
+        return compensate_redemption_v2(caller, request, block_index, error.into()).await;
+    }
+    let post_quote = match get_redemption_quote(request.amount_e8s) {
+        Ok(quote) => quote,
+        Err(error) => return compensate_redemption_v2(caller, request, block_index, error).await,
+    };
+    if post_quote.collateral_type != request.expected_collateral_type {
+        return compensate_redemption_v2(
+            caller,
+            request.clone(),
+            block_index,
+            RedemptionError::RedemptionPriorityChanged {
+                expected: request.expected_collateral_type,
+                actual: post_quote.collateral_type,
+            },
+        )
+        .await;
+    }
+    if post_quote.net_collateral_raw < request.min_net_collateral_raw {
+        return compensate_redemption_v2(
+            caller,
+            request.clone(),
+            block_index,
+            RedemptionError::RedemptionMinimumNotMet {
+                minimum_net_raw: request.min_net_collateral_raw,
+                actual_net_raw: post_quote.net_collateral_raw,
+            },
+        )
+        .await;
+    }
+
+    let committed = mutate_state(|state| {
+        if state.mode == Mode::ReadOnly || state.frozen {
+            return Err(ProtocolError::read_only_mode().into());
+        }
+        let journal_matches = state.redemption_v2_active.get(&caller).is_some_and(|row| {
+            row.request == request
+                && row.tuple == tuple
+                && row.block_index == Some(block_index)
+                && row.phase == crate::state::RedemptionV2Phase::BurnProven
+        });
+        if !journal_matches {
+            return Err(RedemptionError::RedemptionQuoteUnavailable(
+                "the proven burn request is no longer the active redemption intent".into(),
+            ));
+        }
+        let run = state.redemption_runs().into_iter().next().ok_or_else(|| {
+            RedemptionError::RedemptionQuoteUnavailable(
+                "Eligible collateral run disappeared.".into(),
+            )
+        })?;
+        if run.collateral_type != request.expected_collateral_type {
+            return Err(RedemptionError::RedemptionPriorityChanged {
+                expected: request.expected_collateral_type,
+                actual: run.collateral_type,
+            });
+        }
+        if request.amount_e8s > max_input_for_run(state, &run) {
+            return Err(RedemptionError::RedemptionCapacityExceeded {
+                max_input_icusd_e8s: max_input_for_run(state, &run),
+            });
+        }
+        let amount = ICUSD::from(request.amount_e8s);
+        let fee_ratio = state.get_redemption_fee_for(&run.collateral_type, amount);
+        let fee = amount * fee_ratio;
+        let rmr = state.get_redemption_margin_ratio();
+        let effective = (amount - fee) * rmr;
+        let price = UsdIcp::from(Decimal::from_f64_retain(run.price_usd).ok_or_else(|| {
+            RedemptionError::RedemptionQuoteUnavailable("Collateral price is unavailable.".into())
+        })?);
+        let config = state
+            .get_collateral_config(&run.collateral_type)
+            .ok_or_else(|| {
+                RedemptionError::RedemptionQuoteUnavailable(
+                    "Collateral configuration disappeared.".into(),
+                )
+            })?;
+        let simulated = state
+            .try_simulate_redemption_for_vault_ids(
+                effective,
+                price,
+                &run.collateral_type,
+                &run.vault_ids,
+            )
+            .ok_or_else(|| {
+                RedemptionError::RedemptionQuoteUnavailable("Payout is not representable.".into())
+            })?;
+        let gross = simulated_collateral_total_raw(&simulated).ok_or_else(|| {
+            RedemptionError::RedemptionQuoteUnavailable("Payout is not representable.".into())
+        })?;
+        let net = gross.saturating_sub(config.ledger_fee);
+        if net < request.min_net_collateral_raw {
+            return Err(RedemptionError::RedemptionMinimumNotMet {
+                minimum_net_raw: request.min_net_collateral_raw,
+                actual_net_raw: net,
+            });
+        }
+        let ct = run.collateral_type;
+        let symbol = run.symbol;
+        let decimals = run.decimals;
+        let outcome = crate::event::record_redemption_on_vault_run(
+            state,
+            caller,
+            effective,
+            fee,
+            price,
+            block_index,
+            ct,
+            &run.vault_ids,
+            Some(request.min_net_collateral_raw),
+        )
+        .map_err(redemption_record_error_to_protocol)?;
+        crate::record_per_collateral_redemption_fee(state, &ct, fee_ratio, ic_cdk::api::time());
+        let refund_e8s = redemption_raw_refund(
+            (amount - fee).to_u64(),
+            outcome.consumed.to_u64(),
+            rmr,
+            (amount - fee).to_u64(),
+        );
+        let mut residual_refund = None;
+        if refund_e8s > 0 {
+            let refund_nonce = state.next_op_nonce();
+            state.pending_refunds.insert(
+                block_index,
+                crate::state::PendingRefund {
+                    user: caller,
+                    amount_e8s: refund_e8s,
+                    retry_count: 0,
+                    op_nonce: refund_nonce,
+                },
+            );
+            residual_refund = Some((refund_e8s, refund_nonce));
+        }
+        let _ =
+            crate::treasury::plan_fee_routing(state, fee, crate::event::FeeSource::RedemptionFee);
+        let saved = crate::state::RedemptionV2Result {
+            icusd_block_index: block_index,
+            fee_paid_e8s: fee.to_u64(),
+            collateral_type: ct,
+            symbol,
+            decimals,
+            net_collateral_raw: net,
+            payout_queued: true,
+        };
+        let mut row = state.redemption_v2_active.remove(&caller).ok_or_else(|| {
+            RedemptionError::RedemptionQuoteUnavailable(
+                "redemption journal disappeared before commit".into(),
+            )
+        })?;
+        row.phase = crate::state::RedemptionV2Phase::Committed;
+        row.result = Some(saved.clone());
+        row.block_index = Some(block_index);
+        if let Some((refund_amount, refund_nonce)) = residual_refund {
+            row.refund_amount_e8s = Some(refund_amount);
+            row.refund_op_nonce = Some(refund_nonce);
+        }
+        state.redemption_v2_latest_result.insert(caller, row);
+        crate::storage::save_state_to_stable(state);
+        Ok((saved, outcome))
+    });
+    let (saved, _) = match committed {
+        Ok(value) => value,
+        Err(error) => return compensate_redemption_v2(caller, request, block_index, error).await,
+    };
+    ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), || {
+        ic_cdk::spawn(crate::process_pending_transfer())
+    });
+    Ok(redemption_v2_result_to_public(saved))
+}
+
+fn redemption_v2_result_to_public(saved: crate::state::RedemptionV2Result) -> RedemptionResult {
+    RedemptionResult {
+        icusd_block_index: saved.icusd_block_index,
+        fee_paid_e8s: saved.fee_paid_e8s,
+        collateral_type: saved.collateral_type,
+        symbol: saved.symbol,
+        decimals: saved.decimals,
+        net_collateral_raw: saved.net_collateral_raw,
+        payout_status: RedemptionPayoutStatus::Queued,
+    }
+}
+
+async fn compensate_redemption_v2(
+    caller: Principal,
+    request: crate::state::RedemptionV2Request,
+    block_index: u64,
+    reason: RedemptionError,
+) -> Result<RedemptionResult, RedemptionError> {
+    let nonce = mutate_state(|state| {
+        if !state.redemption_v2_active.get(&caller).is_some_and(|row| {
+            row.request == request
+                && row.block_index == Some(block_index)
+                && row.phase == crate::state::RedemptionV2Phase::BurnProven
+        }) {
+            return None;
+        }
+        let existing = state.pending_refunds.get(&block_index).copied();
+        if existing
+            .is_some_and(|refund| refund.user != caller || refund.amount_e8s != request.amount_e8s)
+        {
+            return None;
+        }
+        let nonce = existing
+            .map(|refund| refund.op_nonce)
+            .unwrap_or_else(|| state.next_op_nonce());
+        state
+            .pending_refunds
+            .entry(block_index)
+            .or_insert(crate::state::PendingRefund {
+                user: caller,
+                amount_e8s: request.amount_e8s,
+                retry_count: 0,
+                op_nonce: nonce,
+            });
+        if let Some(row) = state.redemption_v2_active.get_mut(&caller) {
+            row.phase = crate::state::RedemptionV2Phase::RefundPending;
+            row.block_index = Some(block_index);
+            row.refund_amount_e8s = Some(request.amount_e8s);
+            row.refund_op_nonce = Some(nonce);
+            row.last_error = Some(format!(
+                "redemption rejected; exact compensation queued: {reason:?}"
+            ));
+        }
+        crate::storage::save_state_to_stable(state);
+        Some(nonce)
+    });
+    let Some(nonce) = nonce else {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "an existing refund record does not match this redemption; request remains held".into(),
+        )
+        .into());
+    };
+    // The generic worker may also dispatch this exact tuple. A ledger result
+    // is only a candidate; the request is terminal after an exact ICRC-3 mint
+    // receipt is verified and retained in the journal.
+    if let Ok(candidate) =
+        management::transfer_icusd_with_nonce(ICUSD::from(request.amount_e8s), caller, nonce).await
+    {
+        mutate_state(|state| {
+            let refund = state.pending_refunds.get(&block_index).copied();
+            if let Some(refund) = refund {
+                if crate::state::record_redemption_v2_refund_candidate(
+                    state,
+                    block_index,
+                    refund,
+                    candidate,
+                ) {
+                    crate::storage::save_state_to_stable(state);
+                }
+            }
+        });
+        if let Some(row) = read_state(|state| state.redemption_v2_active.get(&caller).cloned()) {
+            let _ = resume_redemption_v2_refund(caller, request, row).await;
+        }
+    }
+    Err(reason)
+}
+
+async fn resume_redemption_v2_refund(
+    caller: Principal,
+    request: crate::state::RedemptionV2Request,
+    _row: crate::state::RedemptionV2Journal,
+) -> Result<RedemptionResult, RedemptionError> {
+    let row = read_state(|state| state.redemption_v2_active.get(&caller).cloned())
+        .ok_or_else(|| ProtocolError::TemporarilyUnavailable(
+            "redemption compensation journal is missing; held for reconciliation".into(),
+        ))?;
+    let block_index = row.block_index.ok_or_else(|| ProtocolError::TemporarilyUnavailable(
+        "compensation burn block is unresolved; request remains held".into(),
+    ))?;
+    let (Some(amount), Some(nonce)) = (row.refund_amount_e8s, row.refund_op_nonce) else {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "compensation identity is incomplete; request remains held".into(),
+        ).into());
+    };
+    if row.request != request
+        || row.phase != crate::state::RedemptionV2Phase::RefundPending
+        || amount != request.amount_e8s
+    {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "compensation journal differs from this request; held for reconciliation".into(),
+        ).into());
+    }
+    let pending = read_state(|state| state.pending_refunds.get(&block_index).copied());
+    if pending.is_some_and(|refund| {
+        refund.user != caller || refund.amount_e8s != amount || refund.op_nonce != nonce
+    }) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "pending compensation tuple differs from its journal; held for reconciliation".into(),
+        ).into());
+    }
+    if row.refund_block_index.is_none() {
+        // A missing queue row is not proof of delivery. Only an existing exact
+        // tuple may be dispatched, and an unknown reply keeps it pending.
+        let Some(refund) = pending else {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "compensation queue row is missing without a receipt; held for reconciliation".into(),
+            ).into());
+        };
+        if refund.retry_count >= crate::MAX_PENDING_RETRIES {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "exact compensation tuple is held; inspect the owner refund status and reconcile a proven ledger block".into(),
+            ).into());
+        }
+        let candidate = match management::transfer_icusd_with_nonce(
+            ICUSD::from(amount), caller, nonce,
+        ).await {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                if matches!(error, icrc_ledger_types::icrc1::transfer::TransferError::TooOld) {
+                    mutate_state(|state| {
+                        if state.pending_refunds.get(&block_index) == Some(&refund) {
+                            if let Some(current) = state.pending_refunds.get_mut(&block_index) {
+                                current.retry_count = crate::MAX_PENDING_RETRIES;
+                            }
+                            crate::storage::save_state_to_stable(state);
+                        }
+                    });
+                }
+                return Err(ProtocolError::TemporarilyUnavailable(format!(
+                    "exact compensation remains queued for request {}: {error:?}", request.request_id
+                )).into());
+            }
+        };
+        let recorded = mutate_state(|state| {
+            let current = state.pending_refunds.get(&block_index).copied();
+            if current != Some(refund)
+                || !crate::state::record_redemption_v2_refund_candidate(
+                    state, block_index, refund, candidate,
+                )
+            {
+                return false;
+            }
+            crate::storage::save_state_to_stable(state);
+            true
+        });
+        if !recorded {
+            // The timer may have proved and finalized the same exact refund
+            // while this ledger call was suspended. Report that terminal
+            // outcome rather than a false unresolved conflict.
+            if read_state(|state| state.redemption_v2_latest_result.get(&caller).is_some_and(|done| {
+                done.request == request
+                    && done.block_index == Some(block_index)
+                    && done.phase == crate::state::RedemptionV2Phase::Refunded
+                    && done.refund_receipt_verified
+                    && done.refund_amount_e8s == Some(amount)
+                    && done.refund_op_nonce == Some(nonce)
+            })) {
+                return Err(ProtocolError::TemporarilyUnavailable(
+                    "this redemption request was refunded".into(),
+                ).into());
+            }
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "compensation changed after ledger dispatch; held for reconciliation".into(),
+            ).into());
+        }
+    }
+    verify_redemption_v2_refund_candidate(caller, block_index, false)
+        .await
+        .map_err(|error| ProtocolError::TemporarilyUnavailable(error))?;
+    Err(ProtocolError::TemporarilyUnavailable("this redemption request was refunded".into()).into())
+}
+
+/// A ledger reply is a candidate, not settlement. Both a full compensation
+/// and the residual refund of a committed partial redemption use the same
+/// exact mint proof before the queue entry may be removed.
+async fn verify_redemption_v2_refund_candidate(
+    owner: Principal,
+    burn_block: u64,
+    automatic: bool,
+) -> Result<(), String> {
+    let snapshot = mutate_state(|state| -> Result<_, String> {
+        let row = state
+            .redemption_v2_active
+            .get_mut(&owner)
+            .filter(|row| {
+                row.phase == crate::state::RedemptionV2Phase::RefundPending
+                    && row.block_index == Some(burn_block)
+            })
+            .or_else(|| {
+                state.redemption_v2_latest_result.get_mut(&owner).filter(|row| {
+                    row.phase == crate::state::RedemptionV2Phase::Committed
+                        && row.block_index == Some(burn_block)
+                })
+            })
+            .ok_or_else(|| "V2 refund journal is missing or has changed".to_string())?;
+        if row.refund_receipt_verified {
+            return Ok(None);
+        }
+        let (Some(amount), Some(nonce), Some(candidate)) = (
+            row.refund_amount_e8s,
+            row.refund_op_nonce,
+            row.refund_block_index,
+        ) else {
+            return Err("V2 refund lacks a pinned amount, nonce, or candidate block".into());
+        };
+        if automatic {
+            if row.refund_receipt_verification_attempts >= 3 {
+                return Err("automatic V2 refund proof retries are exhausted".into());
+            }
+            row.refund_receipt_verification_attempts =
+                row.refund_receipt_verification_attempts.saturating_add(1);
+        }
+        let snapshot = (row.clone(), amount, nonce, candidate);
+        if automatic {
+            crate::storage::save_state_to_stable(state);
+        }
+        Ok(Some(snapshot))
+    })?;
+    let Some((row, amount, nonce, candidate)) = snapshot else {
+        return Ok(());
+    };
+    let receipt = crate::SpLiquidationStableRefundTuple {
+        op_nonce: nonce,
+        ledger: row.tuple.ledger,
+        source: Account { owner: ic_cdk::id(), subaccount: None },
+        destination: Account { owner, subaccount: None },
+        principal_refund_raw: amount,
+        approval_fee_refund_raw: 0,
+        pull_fee_refund_raw: 0,
+        amount_raw: amount,
+        fee_raw: 0,
+        memo: management::nonce_to_memo(nonce).0.to_vec(),
+        created_at_time_ns: management::nonce_to_created_at_time(nonce),
+    };
+    crate::icrc3_proof::verify_sp_liquidation_refund_block(&receipt, candidate)
+        .await
+        .map_err(|error| format!(
+            "V2 refund candidate lacks exact ICRC-3 proof; held for reconciliation: {error}"
+        ))?;
+    mutate_state(|state| -> Result<(), String> {
+        let active = state.redemption_v2_active.get(&owner).is_some_and(|current| {
+            current.phase == crate::state::RedemptionV2Phase::RefundPending
+                && current.block_index == Some(burn_block)
+        });
+        let current = if active {
+            state.redemption_v2_active.get(&owner)
+        } else {
+            state.redemption_v2_latest_result.get(&owner)
+        }
+        .ok_or_else(|| "V2 refund journal disappeared before receipt commit".to_string())?;
+        if current.request != row.request
+            || current.tuple != row.tuple
+            || current.phase != row.phase
+            || current.block_index != Some(burn_block)
+            || current.refund_amount_e8s != Some(amount)
+            || current.refund_op_nonce != Some(nonce)
+            || current.refund_block_index != Some(candidate)
+            || current.refund_receipt_verified
+        {
+            return Err("V2 refund journal changed before receipt commit".into());
+        }
+        if state.pending_refunds.get(&burn_block).is_some_and(|refund| {
+            refund.user != owner || refund.amount_e8s != amount || refund.op_nonce != nonce
+        }) {
+            return Err("pending V2 refund tuple changed before receipt commit".into());
+        }
+        state.pending_refunds.remove(&burn_block);
+        if active {
+            let mut completed = state.redemption_v2_active.remove(&owner)
+                .ok_or_else(|| "V2 refund journal disappeared".to_string())?;
+            completed.phase = crate::state::RedemptionV2Phase::Refunded;
+            completed.refund_receipt_verified = true;
+            completed.last_error = Some("exact compensation receipt verified".into());
+            state.redemption_v2_latest_result.insert(owner, completed);
+        } else {
+            let completed = state.redemption_v2_latest_result.get_mut(&owner)
+                .ok_or_else(|| "V2 residual refund journal disappeared".to_string())?;
+            completed.refund_receipt_verified = true;
+        }
+        crate::storage::save_state_to_stable(state);
+        Ok(())
+    })
+}
+
+pub(crate) async fn process_pending_redemption_v2_refund_receipts(limit: usize) {
+    let candidates = read_state(|state| {
+        state.redemption_v2_active.iter()
+            .chain(state.redemption_v2_latest_result.iter())
+            .filter_map(|(owner, row)| {
+                let eligible_phase = matches!(
+                    row.phase,
+                    crate::state::RedemptionV2Phase::RefundPending
+                        | crate::state::RedemptionV2Phase::Committed
+                );
+                (eligible_phase
+                    && !row.refund_receipt_verified
+                    && row.refund_receipt_verification_attempts < 3
+                    && row.refund_block_index.is_some())
+                    .then(|| row.block_index.map(|block| (*owner, block)))
+                    .flatten()
+            })
+            .take(limit.min(8))
+            .collect::<Vec<_>>()
+    });
+    for (owner, burn_block) in candidates {
+        if let Err(error) = verify_redemption_v2_refund_candidate(owner, burn_block, true).await {
+            log!(INFO, "[redemption_v2_refund] exact receipt remains unverified for burn block {}: {}", burn_block, error);
+        }
+    }
+}
+
+/// Attach a ledger block discovered after the original refund tuple became
+/// too old to resubmit. The owner cannot nominate an arbitrary mint: its
+/// exact ledger, source, destination, amount, fee, memo, and timestamp are
+/// proved before the candidate is pinned or any obligation is cleared.
+pub async fn reconcile_redemption_v2_refund(
+    owner: Principal,
+    request_id: u128,
+    burn_block: u64,
+    refund_block: u64,
+) -> Result<bool, ProtocolError> {
+    let row = read_state(|state| {
+        state.redemption_v2_active.get(&owner)
+            .filter(|row| row.phase == crate::state::RedemptionV2Phase::RefundPending
+                && row.block_index == Some(burn_block))
+            .or_else(|| state.redemption_v2_latest_result.get(&owner).filter(|row| {
+                row.phase == crate::state::RedemptionV2Phase::Committed
+                    && row.block_index == Some(burn_block)
+            }))
+            .cloned()
+    }).ok_or_else(|| ProtocolError::TemporarilyUnavailable(
+        "no matching unresolved V2 refund obligation exists".into(),
+    ))?;
+    let (Some(amount), Some(nonce)) = (row.refund_amount_e8s, row.refund_op_nonce) else {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "the V2 refund obligation has no exact persisted identity".into(),
+        ));
+    };
+    if row.request.request_id != request_id
+        || row.refund_receipt_verified
+        || row.refund_block_index.is_some_and(|candidate| candidate != refund_block)
+    {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "V2 refund identity differs or has already settled".into(),
+        ));
+    }
+    if read_state(|state| state.pending_refunds.get(&burn_block).copied()).is_some_and(|pending| {
+        pending.user != owner || pending.amount_e8s != amount || pending.op_nonce != nonce
+    }) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "the V2 refund queue differs from its persisted identity".into(),
+        ));
+    }
+    let receipt = crate::SpLiquidationStableRefundTuple {
+        op_nonce: nonce,
+        ledger: row.tuple.ledger,
+        source: Account { owner: ic_cdk::id(), subaccount: None },
+        destination: Account { owner, subaccount: None },
+        principal_refund_raw: amount,
+        approval_fee_refund_raw: 0,
+        pull_fee_refund_raw: 0,
+        amount_raw: amount,
+        fee_raw: 0,
+        memo: management::nonce_to_memo(nonce).0.to_vec(),
+        created_at_time_ns: management::nonce_to_created_at_time(nonce),
+    };
+    crate::icrc3_proof::verify_sp_liquidation_refund_block(&receipt, refund_block)
+        .await
+        .map_err(|error| ProtocolError::TemporarilyUnavailable(format!(
+            "ledger block does not prove the exact V2 refund: {error}"
+        )))?;
+    mutate_state(|state| -> Result<(), ProtocolError> {
+        let current = state.redemption_v2_active.get_mut(&owner)
+            .filter(|current| current.phase == crate::state::RedemptionV2Phase::RefundPending
+                && current.block_index == Some(burn_block))
+            .or_else(|| state.redemption_v2_latest_result.get_mut(&owner).filter(|current| {
+                current.phase == crate::state::RedemptionV2Phase::Committed
+                    && current.block_index == Some(burn_block)
+            }))
+            .ok_or_else(|| ProtocolError::TemporarilyUnavailable(
+                "V2 refund changed during receipt verification".into(),
+            ))?;
+        if current.request != row.request
+            || current.tuple != row.tuple
+            || current.refund_amount_e8s != Some(amount)
+            || current.refund_op_nonce != Some(nonce)
+            || current.refund_receipt_verified
+            || current.refund_block_index.is_some_and(|candidate| candidate != refund_block)
+        {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "V2 refund identity changed during receipt verification".into(),
+            ));
+        }
+        if state.pending_refunds.get(&burn_block).is_some_and(|pending| {
+            pending.user != owner || pending.amount_e8s != amount || pending.op_nonce != nonce
+        }) {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "V2 refund queue changed during receipt verification".into(),
+            ));
+        }
+        current.refund_block_index = Some(refund_block);
+        crate::storage::save_state_to_stable(state);
+        Ok(())
+    })?;
+    verify_redemption_v2_refund_candidate(owner, burn_block, false)
+        .await
+        .map_err(ProtocolError::TemporarilyUnavailable)?;
+    Ok(true)
+}
+
 async fn refund_rejected_quoted_redemption<E>(
     caller: Principal,
     amount_e8s: u64,
@@ -8760,10 +9507,22 @@ fn same_push_deposit_intent(
     requested: &crate::state::PushDepositSweepOperation,
 ) -> bool {
     match (saved, requested) {
-        (crate::state::PushDepositSweepOperation::Open { collateral_type: a, borrow_amount_raw: ab, .. },
-         crate::state::PushDepositSweepOperation::Open { collateral_type: b, borrow_amount_raw: bb, .. }) => a == b && ab == bb,
-        (crate::state::PushDepositSweepOperation::AddMargin { vault_id: a, .. },
-         crate::state::PushDepositSweepOperation::AddMargin { vault_id: b, .. }) => a == b,
+        (
+            crate::state::PushDepositSweepOperation::Open {
+                collateral_type: a,
+                borrow_amount_raw: ab,
+                ..
+            },
+            crate::state::PushDepositSweepOperation::Open {
+                collateral_type: b,
+                borrow_amount_raw: bb,
+                ..
+            },
+        ) => a == b && ab == bb,
+        (
+            crate::state::PushDepositSweepOperation::AddMargin { vault_id: a, .. },
+            crate::state::PushDepositSweepOperation::AddMargin { vault_id: b, .. },
+        ) => a == b,
         _ => false,
     }
 }
@@ -8806,45 +9565,75 @@ async fn settle_push_deposit_sweep(
 ) -> Result<(crate::state::PushDepositSweepResult, bool), ProtocolError> {
     let key = (owner, ledger);
     if let Some(done) = read_state(|s| s.completed_push_deposit_sweeps.get(&key).cloned()) {
-        if request_id == Some(done.request_id) && same_push_deposit_intent(&done.operation, &operation) {
+        if request_id == Some(done.request_id)
+            && same_push_deposit_intent(&done.operation, &operation)
+        {
             return match done.result {
-                crate::state::PushDepositSweepResult::Rejected { message } => Err(ProtocolError::TemporarilyUnavailable(message)),
+                crate::state::PushDepositSweepResult::Rejected { message } => {
+                    Err(ProtocolError::TemporarilyUnavailable(message))
+                }
                 result => Ok((result, false)),
             };
         }
     }
 
     let row = if let Some(row) = read_state(|s| s.pending_push_deposit_sweeps.get(&key).cloned()) {
-        if request_id != Some(row.request_id) || !same_push_deposit_intent(&row.operation, &operation) {
-            return Err(ProtocolError::TemporarilyUnavailable("another push-deposit sweep is unresolved; recover its exact request first".into()));
+        if request_id != Some(row.request_id)
+            || !same_push_deposit_intent(&row.operation, &operation)
+        {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "another push-deposit sweep is unresolved; recover its exact request first".into(),
+            ));
         }
         row
     } else {
         let Some(request_id) = request_id else {
-            return Err(ProtocolError::TemporarilyUnavailable("legacy push-deposit calls cannot start a sweep; use the request-ID V2 endpoint".into()));
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "legacy push-deposit calls cannot start a sweep; use the request-ID V2 endpoint"
+                    .into(),
+            ));
         };
-        let high_water = read_state(|s| s.push_deposit_sweep_high_water.get(&key).copied().unwrap_or(0));
-        let expected_id = high_water.checked_add(1).ok_or_else(|| ProtocolError::GenericError("push-deposit request ID sequence exhausted".into()))?;
+        let high_water = read_state(|s| {
+            s.push_deposit_sweep_high_water
+                .get(&key)
+                .copied()
+                .unwrap_or(0)
+        });
+        let expected_id = high_water.checked_add(1).ok_or_else(|| {
+            ProtocolError::GenericError("push-deposit request ID sequence exhausted".into())
+        })?;
         if request_id != expected_id {
-            return Err(ProtocolError::GenericError(format!("push-deposit request ID must be {expected_id}")));
+            return Err(ProtocolError::GenericError(format!(
+                "push-deposit request ID must be {expected_id}"
+            )));
         }
         check_push_deposit_minimum_before_sweep(&owner, ledger, ledger_fee, min_deposit).await?;
         let from = management::get_deposit_account_for(&owner);
-        let balance = management::get_balance_of(from.clone(), ledger).await
-            .map_err(|e| ProtocolError::GenericError(format!("Push-deposit balance check failed: {e}")))?;
+        let balance = management::get_balance_of(from.clone(), ledger)
+            .await
+            .map_err(|e| {
+                ProtocolError::GenericError(format!("Push-deposit balance check failed: {e}"))
+            })?;
         if balance == 0 || balance <= ledger_fee {
-            return Err(ProtocolError::GenericError(format!("Deposit balance ({balance}) is not enough to cover ledger fee ({ledger_fee})")));
+            return Err(ProtocolError::GenericError(format!(
+                "Deposit balance ({balance}) is not enough to cover ledger fee ({ledger_fee})"
+            )));
         }
         let amount_raw = balance - ledger_fee;
         if min_deposit > 0 && amount_raw < min_deposit {
-            return Err(ProtocolError::GenericError(format!("Net push-deposit amount ({amount_raw}) is below minimum ({min_deposit})")));
+            return Err(ProtocolError::GenericError(format!(
+                "Net push-deposit amount ({amount_raw}) is below minimum ({min_deposit})"
+            )));
         }
         let op_nonce = mutate_state(|s| s.next_op_nonce());
         let tuple = crate::state::PushDepositSweepTuple {
             op_nonce,
             ledger,
             from,
-            to: icrc_ledger_types::icrc1::account::Account { owner: ic_cdk::id(), subaccount: None },
+            to: icrc_ledger_types::icrc1::account::Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            },
             amount_raw,
             fee_raw: Some(ledger_fee),
             expected_fee_raw: ledger_fee,
@@ -8853,63 +9642,125 @@ async fn settle_push_deposit_sweep(
             created_at_time_ns: management::nonce_to_created_at_time(op_nonce),
         };
         let mut operation = operation;
-        if let crate::state::PushDepositSweepOperation::Open { reserved_vault_id, .. } = &mut operation { *reserved_vault_id = 0; }
+        if let crate::state::PushDepositSweepOperation::Open {
+            reserved_vault_id, ..
+        } = &mut operation
+        {
+            *reserved_vault_id = 0;
+        }
         mutate_state(|s| {
-            if s.frozen { return Err("protocol is frozen; no new push-deposit transfer may be admitted".to_string()); }
+            if s.frozen {
+                return Err(
+                    "protocol is frozen; no new push-deposit transfer may be admitted".to_string(),
+                );
+            }
             let collateral_type = match &operation {
-                crate::state::PushDepositSweepOperation::Open { collateral_type, .. } => *collateral_type,
-                crate::state::PushDepositSweepOperation::AddMargin { vault_snapshot, .. } => vault_snapshot.collateral_type,
+                crate::state::PushDepositSweepOperation::Open {
+                    collateral_type, ..
+                } => *collateral_type,
+                crate::state::PushDepositSweepOperation::AddMargin { vault_snapshot, .. } => {
+                    vault_snapshot.collateral_type
+                }
             };
-            if matches!(&operation, crate::state::PushDepositSweepOperation::Open { .. }) && s.mode == crate::state::Mode::ReadOnly {
+            if matches!(
+                &operation,
+                crate::state::PushDepositSweepOperation::Open { .. }
+            ) && s.mode == crate::state::Mode::ReadOnly
+            {
                 return Err("protocol is read-only; no new vault may be opened".to_string());
             }
-            let current_config = s.get_collateral_config(&collateral_type)
-                .ok_or_else(|| "collateral configuration changed before sweep admission".to_string())?;
-            if current_config.ledger_canister_id != ledger || current_config.ledger_fee != ledger_fee {
+            let current_config = s.get_collateral_config(&collateral_type).ok_or_else(|| {
+                "collateral configuration changed before sweep admission".to_string()
+            })?;
+            if current_config.ledger_canister_id != ledger
+                || current_config.ledger_fee != ledger_fee
+            {
                 return Err("collateral ledger or fee changed before sweep admission".to_string());
             }
             if tuple.proof_kind != Some(s.payout_proof_kind_for_ledger(ledger)) {
                 return Err("ledger receipt adapter changed before sweep admission".to_string());
             }
-            if matches!(&operation, crate::state::PushDepositSweepOperation::Open { .. }) && !current_config.status.allows_open() {
+            if matches!(
+                &operation,
+                crate::state::PushDepositSweepOperation::Open { .. }
+            ) && !current_config.status.allows_open()
+            {
                 return Err("collateral status no longer allows opening a vault".to_string());
             }
-            if matches!(&operation, crate::state::PushDepositSweepOperation::AddMargin { .. })
-                && s.get_collateral_status(&collateral_type).is_some_and(|status| !status.allows_add_collateral())
+            if matches!(
+                &operation,
+                crate::state::PushDepositSweepOperation::AddMargin { .. }
+            ) && s
+                .get_collateral_status(&collateral_type)
+                .is_some_and(|status| !status.allows_add_collateral())
             {
                 return Err("collateral status no longer allows adding collateral".to_string());
             }
-            if let crate::state::PushDepositSweepOperation::AddMargin { vault_id, .. } = &operation {
-                let current = s.vault_id_to_vaults.get(vault_id).ok_or_else(|| "vault closed before sweep admission".to_string())?;
+            if let crate::state::PushDepositSweepOperation::AddMargin { vault_id, .. } = &operation
+            {
+                let current = s
+                    .vault_id_to_vaults
+                    .get(vault_id)
+                    .ok_or_else(|| "vault closed before sweep admission".to_string())?;
                 if current.owner != owner || current.collateral_type != collateral_type {
-                    return Err("vault owner or collateral changed before sweep admission".to_string());
+                    return Err(
+                        "vault owner or collateral changed before sweep admission".to_string()
+                    );
                 }
                 if current.bot_processing
                     || s.pending_collateral_withdrawals.contains_key(vault_id)
                     || s.vault_has_pending_inbound_margin(*vault_id)
-                    || s.pending_borrow_mints.values().any(|row| row.vault_id == *vault_id)
-                    || s.sp_liquidation_v2_journals.values().any(|journal| journal.request.vault_id == *vault_id)
-                    || s.repayment_v2_active.values().any(|row| row.vault_id == *vault_id)
-                    || s.stable_repayment_v2_active.values().any(|row| row.vault_id == *vault_id)
+                    || s.pending_borrow_mints
+                        .values()
+                        .any(|row| row.vault_id == *vault_id)
+                    || s.sp_liquidation_v2_journals
+                        .values()
+                        .any(|journal| journal.request.vault_id == *vault_id)
+                    || s.repayment_v2_active
+                        .values()
+                        .any(|row| row.vault_id == *vault_id)
+                    || s.stable_repayment_v2_active
+                        .values()
+                        .any(|row| row.vault_id == *vault_id)
                 {
-                    return Err("vault acquired an unresolved processing fence before sweep admission".to_string());
+                    return Err(
+                        "vault acquired an unresolved processing fence before sweep admission"
+                            .to_string(),
+                    );
                 }
             }
-            crate::state::admit_push_deposit_sweep(s, crate::state::PushDepositSweepJournal {
-                owner, request_id, operation, tuple, observed_balance_raw: balance,
-                had_ambiguous_attempt: false, candidate_block_index: None, last_error: None,
-            }).map(|_| ())
-        }).map_err(ProtocolError::GenericError)?;
-        read_state(|s| s.pending_push_deposit_sweeps.get(&key).cloned())
-            .ok_or_else(|| ProtocolError::GenericError("push-deposit journal failed to persist".into()))?
+            crate::state::admit_push_deposit_sweep(
+                s,
+                crate::state::PushDepositSweepJournal {
+                    owner,
+                    request_id,
+                    operation,
+                    tuple,
+                    observed_balance_raw: balance,
+                    had_ambiguous_attempt: false,
+                    candidate_block_index: None,
+                    last_error: None,
+                },
+            )
+            .map(|_| ())
+        })
+        .map_err(ProtocolError::GenericError)?;
+        read_state(|s| s.pending_push_deposit_sweeps.get(&key).cloned()).ok_or_else(|| {
+            ProtocolError::GenericError("push-deposit journal failed to persist".into())
+        })?
     };
 
     let mut candidate = row.candidate_block_index;
     if candidate.is_none() {
         let prior_ambiguity = mutate_state(|s| -> Result<bool, String> {
-            if s.frozen { return Err("protocol is frozen; push-deposit recovery resumes after unfreeze".into()); }
-            let current = s.pending_push_deposit_sweeps.get_mut(&key)
-                .ok_or_else(|| "pending push-deposit journal disappeared before dispatch".to_string())?;
+            if s.frozen {
+                return Err(
+                    "protocol is frozen; push-deposit recovery resumes after unfreeze".into(),
+                );
+            }
+            let current = s.pending_push_deposit_sweeps.get_mut(&key).ok_or_else(|| {
+                "pending push-deposit journal disappeared before dispatch".to_string()
+            })?;
             if current.owner != owner
                 || current.request_id != row.request_id
                 || current.tuple != row.tuple
@@ -8921,49 +9772,97 @@ async fn settle_push_deposit_sweep(
             current.had_ambiguous_attempt = true;
             crate::storage::save_state_to_stable(s);
             Ok(prior_ambiguity)
-        }).map_err(ProtocolError::GenericError)?;
+        })
+        .map_err(ProtocolError::GenericError)?;
         match management::transfer_push_deposit_with_exact_tuple(&row.tuple).await {
             management::ExactPushDepositTransferOutcome::Applied(block) => {
                 candidate = Some(block);
-                mutate_state(|s| { if let Some(current) = s.pending_push_deposit_sweeps.get_mut(&key) {
-                    current.candidate_block_index = Some(block); current.last_error = None; crate::storage::save_state_to_stable(s);
-                }});
+                mutate_state(|s| {
+                    if let Some(current) = s.pending_push_deposit_sweeps.get_mut(&key) {
+                        current.candidate_block_index = Some(block);
+                        current.last_error = None;
+                        crate::storage::save_state_to_stable(s);
+                    }
+                });
             }
-            management::ExactPushDepositTransferOutcome::ProvenNoEffect(error) if !prior_ambiguity => {
+            management::ExactPushDepositTransferOutcome::ProvenNoEffect(error)
+                if !prior_ambiguity =>
+            {
                 let message = format!("typed ICRC-1 no-effect: {error:?}");
                 mutate_state(|s| {
                     s.pending_push_deposit_sweeps.remove(&key);
-                    s.completed_push_deposit_sweeps.insert(key, crate::state::CompletedPushDepositSweep { request_id: row.request_id, operation: row.operation.clone(), tuple: row.tuple.clone(), result: crate::state::PushDepositSweepResult::Rejected { message } });
+                    s.completed_push_deposit_sweeps.insert(
+                        key,
+                        crate::state::CompletedPushDepositSweep {
+                            request_id: row.request_id,
+                            operation: row.operation.clone(),
+                            tuple: row.tuple.clone(),
+                            result: crate::state::PushDepositSweepResult::Rejected { message },
+                        },
+                    );
                     crate::storage::save_state_to_stable(s);
                 });
                 return Err(ProtocolError::TransferError(error));
             }
             management::ExactPushDepositTransferOutcome::ProvenNoEffect(error) => {
                 let message = format!("typed no-effect after earlier ambiguous sweep: {error:?}");
-                mutate_state(|s| { if let Some(current) = s.pending_push_deposit_sweeps.get_mut(&key) { current.had_ambiguous_attempt = true; current.last_error = Some(message.clone()); crate::storage::save_state_to_stable(s); }});
+                mutate_state(|s| {
+                    if let Some(current) = s.pending_push_deposit_sweeps.get_mut(&key) {
+                        current.had_ambiguous_attempt = true;
+                        current.last_error = Some(message.clone());
+                        crate::storage::save_state_to_stable(s);
+                    }
+                });
                 return Err(ProtocolError::TemporarilyUnavailable(message));
             }
             management::ExactPushDepositTransferOutcome::AmbiguousLedgerError(error) => {
                 let message = format!("ambiguous ICRC-1 response: {error:?}");
-                mutate_state(|s| { if let Some(current) = s.pending_push_deposit_sweeps.get_mut(&key) { current.had_ambiguous_attempt = true; current.last_error = Some(message.clone()); crate::storage::save_state_to_stable(s); }});
+                mutate_state(|s| {
+                    if let Some(current) = s.pending_push_deposit_sweeps.get_mut(&key) {
+                        current.had_ambiguous_attempt = true;
+                        current.last_error = Some(message.clone());
+                        crate::storage::save_state_to_stable(s);
+                    }
+                });
                 return Err(ProtocolError::TemporarilyUnavailable(message));
             }
             management::ExactPushDepositTransferOutcome::CallRejected { code, message } => {
                 let detail = format!("ICRC-1 call rejected after dispatch ({code}): {message}");
-                mutate_state(|s| { if let Some(current) = s.pending_push_deposit_sweeps.get_mut(&key) { current.had_ambiguous_attempt = true; current.last_error = Some(detail.clone()); crate::storage::save_state_to_stable(s); }});
+                mutate_state(|s| {
+                    if let Some(current) = s.pending_push_deposit_sweeps.get_mut(&key) {
+                        current.had_ambiguous_attempt = true;
+                        current.last_error = Some(detail.clone());
+                        crate::storage::save_state_to_stable(s);
+                    }
+                });
                 return Err(ProtocolError::TemporarilyUnavailable(detail));
             }
             management::ExactPushDepositTransferOutcome::InvalidBlockIndex => {
                 let message = "ledger returned an unrepresentable block index".to_string();
-                mutate_state(|s| { if let Some(current) = s.pending_push_deposit_sweeps.get_mut(&key) { current.had_ambiguous_attempt = true; current.last_error = Some(message.clone()); crate::storage::save_state_to_stable(s); }});
+                mutate_state(|s| {
+                    if let Some(current) = s.pending_push_deposit_sweeps.get_mut(&key) {
+                        current.had_ambiguous_attempt = true;
+                        current.last_error = Some(message.clone());
+                        crate::storage::save_state_to_stable(s);
+                    }
+                });
                 return Err(ProtocolError::TemporarilyUnavailable(message));
             }
         }
     }
-    let block = candidate.ok_or_else(|| ProtocolError::TemporarilyUnavailable("push-deposit candidate receipt missing".into()))?;
+    let block = candidate.ok_or_else(|| {
+        ProtocolError::TemporarilyUnavailable("push-deposit candidate receipt missing".into())
+    })?;
     if let Err(error) = verify_push_deposit_sweep_receipt(&row.tuple, block).await {
         let message = format!("exact push-deposit receipt proof pending: {error}");
-        mutate_state(|s| { if let Some(current) = s.pending_push_deposit_sweeps.get_mut(&key) { current.candidate_block_index = Some(block); current.had_ambiguous_attempt = true; current.last_error = Some(message.clone()); crate::storage::save_state_to_stable(s); }});
+        mutate_state(|s| {
+            if let Some(current) = s.pending_push_deposit_sweeps.get_mut(&key) {
+                current.candidate_block_index = Some(block);
+                current.had_ambiguous_attempt = true;
+                current.last_error = Some(message.clone());
+                crate::storage::save_state_to_stable(s);
+            }
+        });
         return Err(ProtocolError::TemporarilyUnavailable(message));
     }
 
@@ -9001,37 +9900,98 @@ pub fn get_push_deposit_sweep_status(
     read_state(|s| {
         if let Some(row) = s.pending_push_deposit_sweeps.get(&(owner, ledger)) {
             let operation = match &row.operation {
-                crate::state::PushDepositSweepOperation::Open { collateral_type, .. } => crate::PushDepositSweepOperationKind::Open { collateral_type: *collateral_type },
-                crate::state::PushDepositSweepOperation::AddMargin { vault_id, .. } => crate::PushDepositSweepOperationKind::AddMargin { vault_id: *vault_id },
+                crate::state::PushDepositSweepOperation::Open {
+                    collateral_type, ..
+                } => crate::PushDepositSweepOperationKind::Open {
+                    collateral_type: *collateral_type,
+                },
+                crate::state::PushDepositSweepOperation::AddMargin { vault_id, .. } => {
+                    crate::PushDepositSweepOperationKind::AddMargin {
+                        vault_id: *vault_id,
+                    }
+                }
             };
             return Some(crate::PushDepositSweepStatusView {
-                owner, ledger, request_id: row.request_id, operation,
-                phase: if row.had_ambiguous_attempt || row.candidate_block_index.is_some() { crate::PushDepositSweepPhase::Held } else { crate::PushDepositSweepPhase::Pending },
-                amount_raw: row.tuple.amount_raw, fee_raw: row.tuple.fee_raw,
-                expected_fee_raw: row.tuple.expected_fee_raw, memo: row.tuple.memo.clone(),
+                owner,
+                ledger,
+                request_id: row.request_id,
+                operation,
+                phase: if row.had_ambiguous_attempt || row.candidate_block_index.is_some() {
+                    crate::PushDepositSweepPhase::Held
+                } else {
+                    crate::PushDepositSweepPhase::Pending
+                },
+                amount_raw: row.tuple.amount_raw,
+                fee_raw: row.tuple.fee_raw,
+                expected_fee_raw: row.tuple.expected_fee_raw,
+                memo: row.tuple.memo.clone(),
                 created_at_time_ns: row.tuple.created_at_time_ns,
-                candidate_block_index: row.candidate_block_index, result: None,
-                had_ambiguous_attempt: row.had_ambiguous_attempt, last_error: row.last_error.clone(),
+                candidate_block_index: row.candidate_block_index,
+                result: None,
+                had_ambiguous_attempt: row.had_ambiguous_attempt,
+                last_error: row.last_error.clone(),
             });
         }
         let done = s.completed_push_deposit_sweeps.get(&(owner, ledger))?;
         let operation = match &done.operation {
-            crate::state::PushDepositSweepOperation::Open { collateral_type, .. } => crate::PushDepositSweepOperationKind::Open { collateral_type: *collateral_type },
-            crate::state::PushDepositSweepOperation::AddMargin { vault_id, .. } => crate::PushDepositSweepOperationKind::AddMargin { vault_id: *vault_id },
+            crate::state::PushDepositSweepOperation::Open {
+                collateral_type, ..
+            } => crate::PushDepositSweepOperationKind::Open {
+                collateral_type: *collateral_type,
+            },
+            crate::state::PushDepositSweepOperation::AddMargin { vault_id, .. } => {
+                crate::PushDepositSweepOperationKind::AddMargin {
+                    vault_id: *vault_id,
+                }
+            }
         };
         let result = match &done.result {
-            crate::state::PushDepositSweepResult::Open { vault_id, block_index } => crate::PushDepositSweepResultView::Open { vault_id: *vault_id, block_index: *block_index },
-            crate::state::PushDepositSweepResult::AddMargin { block_index } => crate::PushDepositSweepResultView::AddMargin { block_index: *block_index },
-            crate::state::PushDepositSweepResult::Rejected { message } => crate::PushDepositSweepResultView::Rejected { message: message.clone() },
+            crate::state::PushDepositSweepResult::Open {
+                vault_id,
+                block_index,
+            } => crate::PushDepositSweepResultView::Open {
+                vault_id: *vault_id,
+                block_index: *block_index,
+            },
+            crate::state::PushDepositSweepResult::AddMargin { block_index } => {
+                crate::PushDepositSweepResultView::AddMargin {
+                    block_index: *block_index,
+                }
+            }
+            crate::state::PushDepositSweepResult::Rejected { message } => {
+                crate::PushDepositSweepResultView::Rejected {
+                    message: message.clone(),
+                }
+            }
         };
         Some(crate::PushDepositSweepStatusView {
-            owner, ledger, request_id: done.request_id, operation,
-            phase: if matches!(&done.result, crate::state::PushDepositSweepResult::Rejected { .. }) { crate::PushDepositSweepPhase::Rejected } else { crate::PushDepositSweepPhase::Complete },
-            amount_raw: done.tuple.amount_raw, fee_raw: done.tuple.fee_raw,
-            expected_fee_raw: done.tuple.expected_fee_raw, memo: done.tuple.memo.clone(),
+            owner,
+            ledger,
+            request_id: done.request_id,
+            operation,
+            phase: if matches!(
+                &done.result,
+                crate::state::PushDepositSweepResult::Rejected { .. }
+            ) {
+                crate::PushDepositSweepPhase::Rejected
+            } else {
+                crate::PushDepositSweepPhase::Complete
+            },
+            amount_raw: done.tuple.amount_raw,
+            fee_raw: done.tuple.fee_raw,
+            expected_fee_raw: done.tuple.expected_fee_raw,
+            memo: done.tuple.memo.clone(),
             created_at_time_ns: done.tuple.created_at_time_ns,
-            candidate_block_index: match &done.result { crate::state::PushDepositSweepResult::Open { block_index, .. } | crate::state::PushDepositSweepResult::AddMargin { block_index } => Some(*block_index), crate::state::PushDepositSweepResult::Rejected { .. } => None },
-            result: Some(result), had_ambiguous_attempt: false, last_error: None,
+            candidate_block_index: match &done.result {
+                crate::state::PushDepositSweepResult::Open { block_index, .. }
+                | crate::state::PushDepositSweepResult::AddMargin { block_index } => {
+                    Some(*block_index)
+                }
+                crate::state::PushDepositSweepResult::Rejected { .. } => None,
+            },
+            result: Some(result),
+            had_ambiguous_attempt: false,
+            last_error: None,
         })
     })
 }
@@ -9049,59 +10009,128 @@ pub fn list_push_deposit_sweep_statuses(
         let mut statuses = std::collections::BTreeMap::new();
         let lower = after_ledger
             .map(|ledger| std::ops::Bound::Excluded((owner, ledger)))
-            .unwrap_or_else(|| std::ops::Bound::Included((owner, Principal::management_canister())));
-        for ((_, ledger), row) in s.pending_push_deposit_sweeps
+            .unwrap_or_else(|| {
+                std::ops::Bound::Included((owner, Principal::management_canister()))
+            });
+        for ((_, ledger), row) in s
+            .pending_push_deposit_sweeps
             .range((lower.clone(), std::ops::Bound::Unbounded))
             .take_while(|((pending_owner, _), _)| *pending_owner == owner)
             .take(limit)
         {
             let operation = match &row.operation {
-                crate::state::PushDepositSweepOperation::Open { collateral_type, .. } => crate::PushDepositSweepOperationKind::Open { collateral_type: *collateral_type },
-                crate::state::PushDepositSweepOperation::AddMargin { vault_id, .. } => crate::PushDepositSweepOperationKind::AddMargin { vault_id: *vault_id },
+                crate::state::PushDepositSweepOperation::Open {
+                    collateral_type, ..
+                } => crate::PushDepositSweepOperationKind::Open {
+                    collateral_type: *collateral_type,
+                },
+                crate::state::PushDepositSweepOperation::AddMargin { vault_id, .. } => {
+                    crate::PushDepositSweepOperationKind::AddMargin {
+                        vault_id: *vault_id,
+                    }
+                }
             };
-            statuses.insert(*ledger, crate::PushDepositSweepStatusView {
-                owner, ledger: *ledger, request_id: row.request_id, operation,
-                phase: if row.had_ambiguous_attempt || row.candidate_block_index.is_some() { crate::PushDepositSweepPhase::Held } else { crate::PushDepositSweepPhase::Pending },
-                amount_raw: row.tuple.amount_raw, fee_raw: row.tuple.fee_raw,
-                expected_fee_raw: row.tuple.expected_fee_raw, memo: row.tuple.memo.clone(),
-                created_at_time_ns: row.tuple.created_at_time_ns,
-                candidate_block_index: row.candidate_block_index, result: None,
-                had_ambiguous_attempt: row.had_ambiguous_attempt, last_error: row.last_error.clone(),
-            });
+            statuses.insert(
+                *ledger,
+                crate::PushDepositSweepStatusView {
+                    owner,
+                    ledger: *ledger,
+                    request_id: row.request_id,
+                    operation,
+                    phase: if row.had_ambiguous_attempt || row.candidate_block_index.is_some() {
+                        crate::PushDepositSweepPhase::Held
+                    } else {
+                        crate::PushDepositSweepPhase::Pending
+                    },
+                    amount_raw: row.tuple.amount_raw,
+                    fee_raw: row.tuple.fee_raw,
+                    expected_fee_raw: row.tuple.expected_fee_raw,
+                    memo: row.tuple.memo.clone(),
+                    created_at_time_ns: row.tuple.created_at_time_ns,
+                    candidate_block_index: row.candidate_block_index,
+                    result: None,
+                    had_ambiguous_attempt: row.had_ambiguous_attempt,
+                    last_error: row.last_error.clone(),
+                },
+            );
         }
-        for ((_, ledger), done) in s.completed_push_deposit_sweeps
+        for ((_, ledger), done) in s
+            .completed_push_deposit_sweeps
             .range((lower, std::ops::Bound::Unbounded))
             .take_while(|((done_owner, _), _)| *done_owner == owner)
             .take(limit)
         {
-            if statuses.contains_key(ledger) { continue; }
+            if statuses.contains_key(ledger) {
+                continue;
+            }
             let operation = match &done.operation {
-                crate::state::PushDepositSweepOperation::Open { collateral_type, .. } => crate::PushDepositSweepOperationKind::Open { collateral_type: *collateral_type },
-                crate::state::PushDepositSweepOperation::AddMargin { vault_id, .. } => crate::PushDepositSweepOperationKind::AddMargin { vault_id: *vault_id },
+                crate::state::PushDepositSweepOperation::Open {
+                    collateral_type, ..
+                } => crate::PushDepositSweepOperationKind::Open {
+                    collateral_type: *collateral_type,
+                },
+                crate::state::PushDepositSweepOperation::AddMargin { vault_id, .. } => {
+                    crate::PushDepositSweepOperationKind::AddMargin {
+                        vault_id: *vault_id,
+                    }
+                }
             };
             let result = match &done.result {
-                crate::state::PushDepositSweepResult::Open { vault_id, block_index } => crate::PushDepositSweepResultView::Open { vault_id: *vault_id, block_index: *block_index },
-                crate::state::PushDepositSweepResult::AddMargin { block_index } => crate::PushDepositSweepResultView::AddMargin { block_index: *block_index },
-                crate::state::PushDepositSweepResult::Rejected { message } => crate::PushDepositSweepResultView::Rejected { message: message.clone() },
+                crate::state::PushDepositSweepResult::Open {
+                    vault_id,
+                    block_index,
+                } => crate::PushDepositSweepResultView::Open {
+                    vault_id: *vault_id,
+                    block_index: *block_index,
+                },
+                crate::state::PushDepositSweepResult::AddMargin { block_index } => {
+                    crate::PushDepositSweepResultView::AddMargin {
+                        block_index: *block_index,
+                    }
+                }
+                crate::state::PushDepositSweepResult::Rejected { message } => {
+                    crate::PushDepositSweepResultView::Rejected {
+                        message: message.clone(),
+                    }
+                }
             };
             let block_index = match &done.result {
                 crate::state::PushDepositSweepResult::Open { block_index, .. }
                 | crate::state::PushDepositSweepResult::AddMargin { block_index } => *block_index,
                 crate::state::PushDepositSweepResult::Rejected { .. } => 0,
             };
-            statuses.insert(*ledger, crate::PushDepositSweepStatusView {
-                owner, ledger: *ledger, request_id: done.request_id, operation,
-                phase: if matches!(&done.result, crate::state::PushDepositSweepResult::Rejected { .. }) { crate::PushDepositSweepPhase::Rejected } else { crate::PushDepositSweepPhase::Complete },
-                amount_raw: done.tuple.amount_raw, fee_raw: done.tuple.fee_raw,
-                expected_fee_raw: done.tuple.expected_fee_raw, memo: done.tuple.memo.clone(),
-                created_at_time_ns: done.tuple.created_at_time_ns,
-                candidate_block_index: match &done.result {
-                    crate::state::PushDepositSweepResult::Open { block_index, .. }
-                    | crate::state::PushDepositSweepResult::AddMargin { block_index } => Some(*block_index),
-                    crate::state::PushDepositSweepResult::Rejected { .. } => None,
-                }, result: Some(result),
-                had_ambiguous_attempt: false, last_error: None,
-            });
+            statuses.insert(
+                *ledger,
+                crate::PushDepositSweepStatusView {
+                    owner,
+                    ledger: *ledger,
+                    request_id: done.request_id,
+                    operation,
+                    phase: if matches!(
+                        &done.result,
+                        crate::state::PushDepositSweepResult::Rejected { .. }
+                    ) {
+                        crate::PushDepositSweepPhase::Rejected
+                    } else {
+                        crate::PushDepositSweepPhase::Complete
+                    },
+                    amount_raw: done.tuple.amount_raw,
+                    fee_raw: done.tuple.fee_raw,
+                    expected_fee_raw: done.tuple.expected_fee_raw,
+                    memo: done.tuple.memo.clone(),
+                    created_at_time_ns: done.tuple.created_at_time_ns,
+                    candidate_block_index: match &done.result {
+                        crate::state::PushDepositSweepResult::Open { block_index, .. }
+                        | crate::state::PushDepositSweepResult::AddMargin { block_index } => {
+                            Some(*block_index)
+                        }
+                        crate::state::PushDepositSweepResult::Rejected { .. } => None,
+                    },
+                    result: Some(result),
+                    had_ambiguous_attempt: false,
+                    last_error: None,
+                },
+            );
         }
         statuses.into_values().take(limit).collect()
     })
@@ -9123,22 +10152,42 @@ async fn recover_push_deposit_sweep_inner(
 ) -> Result<crate::state::PushDepositSweepResult, ProtocolError> {
     let row = read_state(|s| s.pending_push_deposit_sweeps.get(&(owner, ledger)).cloned());
     let Some(row) = row else {
-        return match read_state(|s| s.completed_push_deposit_sweeps.get(&(owner, ledger)).cloned()) {
+        return match read_state(|s| {
+            s.completed_push_deposit_sweeps
+                .get(&(owner, ledger))
+                .cloned()
+        }) {
             Some(done) if done.request_id == request_id => match done.result {
-                crate::state::PushDepositSweepResult::Rejected { message } => Err(ProtocolError::TemporarilyUnavailable(message)),
+                crate::state::PushDepositSweepResult::Rejected { message } => {
+                    Err(ProtocolError::TemporarilyUnavailable(message))
+                }
                 result => Ok(result),
             },
-            _ => Err(ProtocolError::GenericError("no push-deposit request with that ID is pending or retained".into())),
+            _ => Err(ProtocolError::GenericError(
+                "no push-deposit request with that ID is pending or retained".into(),
+            )),
         };
     };
     if row.request_id != request_id {
-        return Err(ProtocolError::GenericError("request ID does not match the pending push-deposit tuple".into()));
+        return Err(ProtocolError::GenericError(
+            "request ID does not match the pending push-deposit tuple".into(),
+        ));
     }
     let _vault_op_guard = match &row.operation {
-        crate::state::PushDepositSweepOperation::AddMargin { vault_id, .. } => Some(VaultLiquidationGuard::new(*vault_id)?),
+        crate::state::PushDepositSweepOperation::AddMargin { vault_id, .. } => {
+            Some(VaultLiquidationGuard::new(*vault_id)?)
+        }
         crate::state::PushDepositSweepOperation::Open { .. } => None,
     };
-    let (result, _) = settle_push_deposit_sweep(owner, ledger, row.tuple.expected_fee_raw, 0, Some(request_id), row.operation).await?;
+    let (result, _) = settle_push_deposit_sweep(
+        owner,
+        ledger,
+        row.tuple.expected_fee_raw,
+        0,
+        Some(request_id),
+        row.operation,
+    )
+    .await?;
     Ok(result)
 }
 
@@ -9150,19 +10199,29 @@ pub async fn attach_push_deposit_sweep_receipt(
 ) -> Result<crate::state::PushDepositSweepResult, ProtocolError> {
     let _deposit_sweep_guard = PushDepositSweepGuard::new(owner)?;
     let row = read_state(|s| s.pending_push_deposit_sweeps.get(&(owner, ledger)).cloned())
-        .ok_or_else(|| ProtocolError::GenericError("no pending push-deposit sweep exists".into()))?;
+        .ok_or_else(|| {
+            ProtocolError::GenericError("no pending push-deposit sweep exists".into())
+        })?;
     if row.request_id != request_id {
-        return Err(ProtocolError::GenericError("request ID does not match the pending push-deposit tuple".into()));
+        return Err(ProtocolError::GenericError(
+            "request ID does not match the pending push-deposit tuple".into(),
+        ));
     }
     verify_push_deposit_sweep_receipt(&row.tuple, block_index)
-        .await.map_err(ProtocolError::TemporarilyUnavailable)?;
+        .await
+        .map_err(ProtocolError::TemporarilyUnavailable)?;
     mutate_state(|s| {
-        let current = s.pending_push_deposit_sweeps.get_mut(&(owner, ledger))
+        let current = s
+            .pending_push_deposit_sweeps
+            .get_mut(&(owner, ledger))
             .ok_or_else(|| "pending push-deposit sweep disappeared".to_string())?;
         if current.request_id != request_id || current.tuple != row.tuple {
             return Err("pending push-deposit tuple changed before receipt attachment".to_string());
         }
-        if current.candidate_block_index.is_some_and(|saved| saved != block_index) {
+        if current
+            .candidate_block_index
+            .is_some_and(|saved| saved != block_index)
+        {
             return Err("a different candidate receipt is already pinned".to_string());
         }
         current.candidate_block_index = Some(block_index);
@@ -9170,7 +10229,8 @@ pub async fn attach_push_deposit_sweep_receipt(
         current.last_error = None;
         crate::storage::save_state_to_stable(s);
         Ok(())
-    }).map_err(ProtocolError::GenericError)?;
+    })
+    .map_err(ProtocolError::GenericError)?;
     recover_push_deposit_sweep_inner(owner, ledger, request_id).await
 }
 
@@ -9267,16 +10327,39 @@ async fn open_vault_with_deposit_inner(
         borrow_amount_raw,
     };
     let (sweep_result, newly_credited) = match settle_push_deposit_sweep(
-        caller, config_ledger, config_fee, min_deposit, request_id, operation,
-    ).await {
+        caller,
+        config_ledger,
+        config_fee,
+        min_deposit,
+        request_id,
+        operation,
+    )
+    .await
+    {
         Ok(result) => result,
-        Err(error) => { guard_principal.fail(); return Err(error); }
+        Err(error) => {
+            guard_principal.fail();
+            return Err(error);
+        }
     };
     let (vault_id, sweep_block_index) = match sweep_result {
-        crate::state::PushDepositSweepResult::Open { vault_id, block_index } => (vault_id, block_index),
-        _ => { guard_principal.fail(); return Err(ProtocolError::GenericError("push-deposit request result kind mismatch".into())); }
+        crate::state::PushDepositSweepResult::Open {
+            vault_id,
+            block_index,
+        } => (vault_id, block_index),
+        _ => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "push-deposit request result kind mismatch".into(),
+            ));
+        }
     };
-    let collateral_amount = read_state(|s| s.vault_id_to_vaults.get(&vault_id).map(|v| v.collateral_amount).unwrap_or(0));
+    let collateral_amount = read_state(|s| {
+        s.vault_id_to_vaults
+            .get(&vault_id)
+            .map(|v| v.collateral_amount)
+            .unwrap_or(0)
+    });
 
     log!(INFO, "[open_vault_with_deposit] opened vault {} for {} with {} collateral via push-deposit (sweep block {})",
         vault_id, caller, collateral_amount, sweep_block_index);
@@ -9326,11 +10409,17 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
     add_margin_with_deposit_inner(vault_id, None).await
 }
 
-pub async fn add_margin_with_deposit_v2(vault_id: u64, request_id: u128) -> Result<u64, ProtocolError> {
+pub async fn add_margin_with_deposit_v2(
+    vault_id: u64,
+    request_id: u128,
+) -> Result<u64, ProtocolError> {
     add_margin_with_deposit_inner(vault_id, Some(request_id)).await
 }
 
-async fn add_margin_with_deposit_inner(vault_id: u64, request_id: Option<u128>) -> Result<u64, ProtocolError> {
+async fn add_margin_with_deposit_inner(
+    vault_id: u64,
+    request_id: Option<u128>,
+) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("add_margin_deposit_{}", vault_id))?;
     let _deposit_sweep_guard = match PushDepositSweepGuard::new(caller) {
@@ -9424,16 +10513,36 @@ async fn add_margin_with_deposit_inner(vault_id: u64, request_id: Option<u128>) 
         vault_snapshot: vault.clone(),
     };
     let (sweep_result, _newly_credited) = match settle_push_deposit_sweep(
-        caller, config_ledger, config_fee, min_deposit, request_id, operation,
-    ).await {
+        caller,
+        config_ledger,
+        config_fee,
+        min_deposit,
+        request_id,
+        operation,
+    )
+    .await
+    {
         Ok(result) => result,
-        Err(error) => { guard_principal.fail(); return Err(error); }
+        Err(error) => {
+            guard_principal.fail();
+            return Err(error);
+        }
     };
     let sweep_block_index = match sweep_result {
         crate::state::PushDepositSweepResult::AddMargin { block_index } => block_index,
-        _ => { guard_principal.fail(); return Err(ProtocolError::GenericError("push-deposit request result kind mismatch".into())); }
+        _ => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "push-deposit request result kind mismatch".into(),
+            ));
+        }
     };
-    let collateral_amount = read_state(|s| s.vault_id_to_vaults.get(&vault_id).map(|v| v.collateral_amount.saturating_sub(vault.collateral_amount)).unwrap_or(0));
+    let collateral_amount = read_state(|s| {
+        s.vault_id_to_vaults
+            .get(&vault_id)
+            .map(|v| v.collateral_amount.saturating_sub(vault.collateral_amount))
+            .unwrap_or(0)
+    });
 
     log!(INFO, "[add_margin_with_deposit] added {} collateral to vault {} via push-deposit (sweep block {})",
         collateral_amount, vault_id, sweep_block_index);
@@ -9569,8 +10678,14 @@ mod p01_vault_regression_tests {
         let tuple = crate::state::PushDepositSweepTuple {
             op_nonce: 1,
             ledger: ledger_b,
-            from: Account { owner: backend, subaccount: Some([1; 32]) },
-            to: Account { owner: backend, subaccount: None },
+            from: Account {
+                owner: backend,
+                subaccount: Some([1; 32]),
+            },
+            to: Account {
+                owner: backend,
+                subaccount: None,
+            },
             amount_raw: 50,
             fee_raw: Some(10),
             expected_fee_raw: 10,
@@ -9590,7 +10705,9 @@ mod p01_vault_regression_tests {
         };
         let mut state = crate::state::State::default();
         state.vault_id_to_vaults.insert(7, vault);
-        state.pending_push_deposit_sweeps.insert((owner, ledger_b), journal);
+        state
+            .pending_push_deposit_sweeps
+            .insert((owner, ledger_b), journal);
         state.completed_push_deposit_sweeps.insert(
             (owner, ledger_a),
             crate::state::CompletedPushDepositSweep {
@@ -9600,8 +10717,14 @@ mod p01_vault_regression_tests {
                     reserved_vault_id: 3,
                     borrow_amount_raw: 0,
                 },
-                tuple: crate::state::PushDepositSweepTuple { ledger: ledger_a, ..tuple.clone() },
-                result: crate::state::PushDepositSweepResult::Open { vault_id: 3, block_index: 4 },
+                tuple: crate::state::PushDepositSweepTuple {
+                    ledger: ledger_a,
+                    ..tuple.clone()
+                },
+                result: crate::state::PushDepositSweepResult::Open {
+                    vault_id: 3,
+                    block_index: 4,
+                },
             },
         );
         state.pending_push_deposit_sweeps.insert(
@@ -9614,7 +10737,10 @@ mod p01_vault_regression_tests {
                     reserved_vault_id: 4,
                     borrow_amount_raw: 0,
                 },
-                tuple: crate::state::PushDepositSweepTuple { ledger: ledger_a, ..tuple.clone() },
+                tuple: crate::state::PushDepositSweepTuple {
+                    ledger: ledger_a,
+                    ..tuple.clone()
+                },
                 observed_balance_raw: 60,
                 had_ambiguous_attempt: true,
                 candidate_block_index: None,
@@ -9623,32 +10749,49 @@ mod p01_vault_regression_tests {
         );
 
         let mut encoded = Vec::new();
-        ciborium::ser::into_writer(&state, &mut encoded).expect("serialize state with held push margin");
+        ciborium::ser::into_writer(&state, &mut encoded)
+            .expect("serialize state with held push margin");
         let restored: crate::state::State = ciborium::de::from_reader(encoded.as_slice())
             .expect("restore state with held push margin");
         assert!(restored.vault_has_pending_inbound_margin(7));
         let mut query_encoded = Vec::new();
         ciborium::ser::into_writer(&restored, &mut query_encoded).expect("serialize query fixture");
-        let query_state: crate::state::State = ciborium::de::from_reader(query_encoded.as_slice())
-            .expect("restore query fixture");
+        let query_state: crate::state::State =
+            ciborium::de::from_reader(query_encoded.as_slice()).expect("restore query fixture");
         crate::state::replace_state(query_state);
         let first_page = list_push_deposit_sweep_statuses(owner, None, 1);
         assert_eq!(first_page.len(), 1);
         assert_eq!(first_page[0].ledger, ledger_a);
         assert_eq!(first_page[0].request_id, 1);
-        assert!(matches!(first_page[0].phase, crate::PushDepositSweepPhase::Complete));
+        assert!(matches!(
+            first_page[0].phase,
+            crate::PushDepositSweepPhase::Complete
+        ));
         let second_page = list_push_deposit_sweep_statuses(owner, Some(ledger_a), 1);
         assert_eq!(second_page.len(), 1);
         assert_eq!(second_page[0].ledger, ledger_b);
         assert_eq!(second_page[0].request_id, 2);
-        assert!(matches!(second_page[0].phase, crate::PushDepositSweepPhase::Held));
+        assert!(matches!(
+            second_page[0].phase,
+            crate::PushDepositSweepPhase::Held
+        ));
 
         let mut restored = restored;
-        let close = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| restored.remove_vault_and_unindex(7)));
-        assert!(close.is_err(), "canonical removal must be fenced while push margin is pending");
-        restored.pending_push_deposit_sweeps.remove(&(owner, ledger_b));
+        let close = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            restored.remove_vault_and_unindex(7)
+        }));
+        assert!(
+            close.is_err(),
+            "canonical removal must be fenced while push margin is pending"
+        );
+        restored
+            .pending_push_deposit_sweeps
+            .remove(&(owner, ledger_b));
         assert!(!restored.vault_has_pending_inbound_margin(7));
-        assert!(restored.remove_vault_and_unindex(7).is_some(), "exact settlement clears the durable fence");
+        assert!(
+            restored.remove_vault_and_unindex(7).is_some(),
+            "exact settlement clears the durable fence"
+        );
     }
 
     #[test]

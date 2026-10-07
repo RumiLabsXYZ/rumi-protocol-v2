@@ -222,8 +222,20 @@ pub struct OpenEpoch {
     pub snapshot_b_ns: u64,
     pub a_cursor: Option<Principal>,
     pub a_complete: bool,
+    /// Consecutive per-principal read failures for snapshot A. After the retry
+    /// bound, automatic capture pauses for operator action instead of retrying
+    /// forever or recording a false zero.
+    #[serde(default)]
+    pub a_capture_error_count: u8,
+    #[serde(default)]
+    pub a_capture_error_principal: Option<Principal>,
     pub b_cursor: Option<Principal>,
     pub b_complete: bool,
+    /// Same fail-closed retry alarm for snapshot B.
+    #[serde(default)]
+    pub b_capture_error_count: u8,
+    #[serde(default)]
+    pub b_capture_error_principal: Option<Principal>,
     /// Whether the chunked close pass has begun. Distinguishes "close not started"
     /// (`false`) from "close in progress with no principal yet closed"
     /// (`true`, `close_cursor == None`).
@@ -311,33 +323,33 @@ pub struct PublicEpochStatus {
 }
 
 /// Public view of the open epoch: its bounds, plus each snapshot time only AFTER
-/// that moment has passed (PTS-002). A FUTURE snapshot time is exactly when a
-/// flash deposit must land to game the `min(A,B)` anti-snipe defense, so it stays
-/// `None` until `now >= time`; once fired it is history and safe to show. The
-/// capture/close cursors and completion flags are not exposed at all (POINTS-001).
+/// the corresponding capture is complete. A timestamp alone does not mean the
+/// balance reads have happened yet, so revealing it earlier lets a user deposit
+/// before their principal is captured. The capture/close cursors and completion
+/// flags are not exposed at all (POINTS-001).
 /// Admins keep full visibility via `get_epoch_status_admin`.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PublicOpenEpoch {
     pub epoch_index: u64,
     pub epoch_start_ns: u64,
     pub epoch_end_ns: u64,
-    /// `None` while the snapshot time is still in the future (PTS-002).
+    /// `None` until this snapshot's balance reads are complete (PTS-002).
     pub snapshot_a_ns: Option<u64>,
-    /// `None` while the snapshot time is still in the future (PTS-002).
+    /// `None` until this snapshot's balance reads are complete (PTS-002).
     pub snapshot_b_ns: Option<u64>,
 }
 
 impl PublicOpenEpoch {
-    /// Reduce the full open epoch to its public view as of `now_ns`, revealing
-    /// each snapshot time only once it has fired.
-    pub fn redacted(o: &OpenEpoch, now_ns: u64) -> Self {
-        let fired = |t: u64| if now_ns >= t { Some(t) } else { None };
+    /// Reduce the full open epoch to its public view, revealing a snapshot time
+    /// only once all principal balance reads for that snapshot are complete.
+    pub fn redacted(o: &OpenEpoch) -> Self {
+        let completed = |t: u64, complete: bool| if complete { Some(t) } else { None };
         PublicOpenEpoch {
             epoch_index: o.epoch_index,
             epoch_start_ns: o.epoch_start_ns,
             epoch_end_ns: o.epoch_end_ns,
-            snapshot_a_ns: fired(o.snapshot_a_ns),
-            snapshot_b_ns: fired(o.snapshot_b_ns),
+            snapshot_a_ns: completed(o.snapshot_a_ns, o.a_complete),
+            snapshot_b_ns: completed(o.snapshot_b_ns, o.b_complete),
         }
     }
 }
@@ -360,6 +372,23 @@ pub struct IngestStatus {
     /// Whether the periodic poll timer is running (Phase 2b).
     pub poll_enabled: bool,
     pub poll_interval_secs: u64,
+    /// Unknown source events placed on hold for operator/code review.
+    pub decode_failure_count: u64,
+    /// Most recent unknown event, for operator diagnosis.
+    pub last_decode_failure: Option<String>,
+    /// Unknown event currently holding a source cursor for operator/code review.
+    pub blocked_decodes: Vec<DecodeFailureBlock>,
+    /// Most recent explicit admin action resolving a decode hold.
+    pub last_decode_resolution: Option<String>,
+}
+
+/// A source event that could not be interpreted. Its source cursor remains at
+/// this id until an admin retries after a code/source repair or explicitly skips.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DecodeFailureBlock {
+    pub source_tag: u8,
+    pub event_id: u64,
+    pub diagnostic: String,
 }
 
 /// Error surface for the admin / registration update endpoints.

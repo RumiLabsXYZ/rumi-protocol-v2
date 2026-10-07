@@ -17,9 +17,11 @@
 //! surface a caveat. Follow-ups: add an ICRC-3 per-delta log and an AMM
 //! liquidity tailer to promote those sources to full historical reconstruction.
 //!
-//! Performance: per-query cost is dominated by loading up to 50k events per
-//! source type. The response is cached for 5 minutes per (principal, window,
-//! resolution) tuple.
+//! Performance: per-query cost is dominated by loading a bounded recent tail
+//! (up to 50k rows) per source type. Older rows can be omitted when a source log
+//! exceeds that cap, so historical positions opened before the retained tail may
+//! not be reconstructible. The response is cached for 5 minutes per
+//! (principal, window, resolution) tuple.
 
 use candid::Principal;
 use std::cell::RefCell;
@@ -130,19 +132,19 @@ pub fn get_address_value_series(query: types::AddressValueSeriesQuery) -> types:
 
     let from = now.saturating_sub(window_ns);
 
-    // Load all event sources once. We load across the full log for vault
-    // events because a vault Opened BEFORE the window still contributes
-    // collateral during the window — we need that state to reconstruct it.
-    // SP and 3pool LP balances work the same way: you can still hold a
-    // position you acquired years ago, and events before `from` are needed
-    // to reconstruct the running balance.
-    let vault_evs = storage::events::evt_vaults::range(0, now, MAX_EVENT_LOAD);
-    let liq_evs = storage::events::evt_liquidations::range(0, now, MAX_EVENT_LOAD);
-    let sp_evs = storage::events::evt_stability::range(0, now, MAX_EVENT_LOAD);
-    let liquidity_evs = storage::events::evt_liquidity::range(0, now, MAX_EVENT_LOAD);
-    let amm_liq_evs = storage::events::evt_amm_liquidity::range(0, now, MAX_EVENT_LOAD);
-    let price_snaps = storage::fast::fast_prices::range(0, now, MAX_EVENT_LOAD);
-    let three_pool_snaps = storage::fast::fast_3pool::range(0, now, MAX_EVENT_LOAD);
+    // Use bounded recent tails so a busy, append-only log does not make the
+    // query return only its oldest 50k rows. Timestamp ordering is restored by
+    // the accessors, while event timestamps themselves are not assumed to be
+    // monotonic at append time. This remains a bounded-history approximation:
+    // if a principal's opening/deposit predates the retained tail, the query
+    // cannot reconstruct that carried position without a per-principal rollup.
+    let vault_evs = storage::events::evt_vaults::tail_range(0, now, MAX_EVENT_LOAD);
+    let liq_evs = storage::events::evt_liquidations::tail_range(0, now, MAX_EVENT_LOAD);
+    let sp_evs = storage::events::evt_stability::tail_range(0, now, MAX_EVENT_LOAD);
+    let liquidity_evs = storage::events::evt_liquidity::tail_range(0, now, MAX_EVENT_LOAD);
+    let amm_liq_evs = storage::events::evt_amm_liquidity::tail_range(0, now, MAX_EVENT_LOAD);
+    let price_snaps = storage::fast::fast_prices::tail_range(0, now, MAX_EVENT_LOAD);
+    let three_pool_snaps = storage::fast::fast_3pool::tail_range(0, now, MAX_EVENT_LOAD);
 
     let (icusd_ledger, three_pool, collateral_decimals, amm_pools) = state::read_state(|s| {
         (
@@ -191,7 +193,7 @@ pub fn get_address_value_series(query: types::AddressValueSeriesQuery) -> types:
         &amm_pools,
     );
 
-    let approximate_sources = vec![
+    let mut approximate_sources = vec![
         SRC_ICUSD.to_string(),
         SRC_THREEUSD.to_string(),
         // Vault equity is also approximate: the timeline skips per-vault
@@ -207,6 +209,11 @@ pub fn get_address_value_series(query: types::AddressValueSeriesQuery) -> types:
         // pools it's negligible, for volatile pools it can be material.
         SRC_AMM_LP.to_string(),
     ];
+    if storage::events::evt_stability::len() as usize > MAX_EVENT_LOAD {
+        // The retained tail may omit an old SP deposit/withdrawal needed to
+        // seed the running balance at the start of the displayed window.
+        approximate_sources.push(SRC_SP_DEPOSIT.to_string());
+    }
 
     let resp = types::AddressValueSeriesResponse {
         principal: query.principal,

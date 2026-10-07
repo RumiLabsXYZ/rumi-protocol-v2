@@ -164,6 +164,7 @@ thread_local! {
 /// Principals captured per driver tick. Season-1 scale fits one tick; larger
 /// seasons span several (the cursor in `OpenEpoch` resumes between ticks).
 const CAPTURE_CHUNK: u64 = 100;
+const CAPTURE_READ_RETRY_LIMIT: u8 = 3;
 
 /// Decide the snapshot's next resume cursor and completion flag from one chunk's
 /// outcome. Pure, so the capture book-keeping is unit-testable:
@@ -318,8 +319,12 @@ fn open_epoch_at(
         snapshot_b_ns: b_ns,
         a_cursor: None,
         a_complete: false,
+        a_capture_error_count: 0,
+        a_capture_error_principal: None,
         b_cursor: None,
         b_complete: false,
+        b_capture_error_count: 0,
+        b_capture_error_principal: None,
         close_started: false,
         close_cursor: None,
         close_points_accrued: 0,
@@ -590,6 +595,17 @@ async fn capture(which: Snapshot) {
         Some(o) => o,
         None => return,
     };
+    let (error_count, error_principal) = match which {
+        Snapshot::A => (open.a_capture_error_count, open.a_capture_error_principal),
+        Snapshot::B => (open.b_capture_error_count, open.b_capture_error_principal),
+    };
+    if capture_retry_paused(error_count, error_principal, |p| state::is_excluded(&p)) {
+        // Stop automatic retries after a bounded number of identical failures.
+        // Admin epoch status exposes the principal/count; force_epoch_tick is an
+        // explicit retry, while add_excluded_principal lets the driver skip it
+        // under the existing operator exclusion policy.
+        return;
+    }
     let ctx = match fetch_context().await {
         Some(c) => c,
         None => return, // a snapshot-wide source was unreachable; retry next tick
@@ -613,6 +629,7 @@ async fn capture(which: Snapshot) {
         if state::is_excluded(p) {
             // Excluded principals are not captured but still advance the cursor
             // past themselves (they are skipped again at close).
+            clear_capture_error(&mut open, which, *p);
             last_captured = Some(*p);
             continue;
         }
@@ -624,10 +641,12 @@ async fn capture(which: Snapshot) {
                 // min() would otherwise lock that 0 in and zero a held position
                 // for the whole epoch. Resume from the last success next tick and
                 // retry this principal.
+                record_capture_error(&mut open, which, *p);
                 hit_error = true;
                 break;
             }
         };
+        clear_capture_error(&mut open, which, *p);
         let weights = accrual::snapshot_weights(&accrual::build_snapshot_inputs(&raw, &ctx.prices));
         match which {
             Snapshot::A => state::snapshot_buffer_put(*p, weights),
@@ -647,6 +666,69 @@ async fn capture(which: Snapshot) {
         }
     }
     state::set_open_epoch(Some(open));
+}
+
+fn capture_retry_paused(
+    error_count: u8,
+    error_principal: Option<Principal>,
+    is_excluded: impl FnOnce(Principal) -> bool,
+) -> bool {
+    error_count >= CAPTURE_READ_RETRY_LIMIT
+        && error_principal
+            .map(|principal| !is_excluded(principal))
+            .unwrap_or(false)
+}
+
+fn record_capture_error(open: &mut OpenEpoch, which: Snapshot, principal: Principal) {
+    let (count, failed_principal) = match which {
+        Snapshot::A => (&mut open.a_capture_error_count, &mut open.a_capture_error_principal),
+        Snapshot::B => (&mut open.b_capture_error_count, &mut open.b_capture_error_principal),
+    };
+    if *failed_principal == Some(principal) {
+        *count = count.saturating_add(1);
+    } else {
+        *failed_principal = Some(principal);
+        *count = 1;
+    }
+    if *count == CAPTURE_READ_RETRY_LIMIT {
+        log_capture_stalled(which, *count, principal);
+    }
+}
+
+fn log_capture_stalled(which: Snapshot, count: u8, principal: Principal) {
+    #[cfg(target_arch = "wasm32")]
+    ic_cdk::println!(
+        "[epoch] snapshot {:?} paused after {} failed reads for principal {}; admin retry or exclusion required",
+        match which { Snapshot::A => "A", Snapshot::B => "B" },
+        count,
+        principal
+    );
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (which, count, principal);
+}
+
+fn clear_capture_error(open: &mut OpenEpoch, which: Snapshot, principal: Principal) {
+    let (count, failed_principal) = match which {
+        Snapshot::A => (&mut open.a_capture_error_count, &mut open.a_capture_error_principal),
+        Snapshot::B => (&mut open.b_capture_error_count, &mut open.b_capture_error_principal),
+    };
+    if *failed_principal == Some(principal) {
+        *count = 0;
+        *failed_principal = None;
+    }
+}
+
+/// An explicit admin tick resets the capture circuit so one controlled retry is
+/// possible after inspecting the alarm or repairing/excluding the failed source.
+pub fn prepare_admin_capture_retry() {
+    state::with_state_mut(|s| {
+        if let Some(open) = s.open_epoch.as_mut() {
+            open.a_capture_error_count = 0;
+            open.a_capture_error_principal = None;
+            open.b_capture_error_count = 0;
+            open.b_capture_error_principal = None;
+        }
+    });
 }
 
 // ── Epoch close (chunked, POINTS-002) ──
@@ -1382,8 +1464,12 @@ mod tests {
             snapshot_b_ns: 500,
             a_cursor: None,
             a_complete,
+            a_capture_error_count: 0,
+            a_capture_error_principal: None,
             b_cursor: None,
             b_complete,
+            b_capture_error_count: 0,
+            b_capture_error_principal: None,
             close_started: false,
             close_cursor: None,
             close_points_accrued: 0,
@@ -1508,10 +1594,51 @@ mod tests {
     #[test]
     fn next_capture_cursor_holds_position_when_first_principal_errors() {
         // No principal captured (first one errored): leave the cursor unchanged so
-        // the same chunk is retried from the start next tick.
+        // the same chunk is retried from the start next tick, until the retry
+        // circuit reaches its explicit operator-action threshold.
         let (cursor, done) = next_capture_cursor(3, None, Some(pr(9)), true);
         assert!(!done);
         assert_eq!(cursor, Some(pr(9)));
+    }
+
+    #[test]
+    fn capture_error_alarm_is_bounded_and_clears_after_success() {
+        let mut open = oe(false, false);
+        for attempt in 1..=CAPTURE_READ_RETRY_LIMIT {
+            record_capture_error(&mut open, Snapshot::A, pr(4));
+            assert_eq!(open.a_capture_error_count, attempt);
+            assert_eq!(open.a_capture_error_principal, Some(pr(4)));
+        }
+        assert_eq!(open.a_capture_error_count, CAPTURE_READ_RETRY_LIMIT);
+        assert_eq!(open.b_capture_error_count, 0);
+
+        clear_capture_error(&mut open, Snapshot::A, pr(4));
+        assert_eq!(open.a_capture_error_count, 0);
+        assert_eq!(open.a_capture_error_principal, None);
+    }
+
+    #[test]
+    fn capture_retry_circuit_only_pauses_at_limit_until_principal_is_excluded() {
+        assert!(!capture_retry_paused(
+            CAPTURE_READ_RETRY_LIMIT - 1,
+            Some(pr(4)),
+            |_| false
+        ));
+        assert!(capture_retry_paused(
+            CAPTURE_READ_RETRY_LIMIT,
+            Some(pr(4)),
+            |_| false
+        ));
+        assert!(!capture_retry_paused(
+            CAPTURE_READ_RETRY_LIMIT,
+            Some(pr(4)),
+            |p| p == pr(4)
+        ));
+        assert!(!capture_retry_paused(
+            CAPTURE_READ_RETRY_LIMIT,
+            None,
+            |_| false
+        ));
     }
 
     // ── start_season requires a committed H0 (commit-reveal integrity) ──

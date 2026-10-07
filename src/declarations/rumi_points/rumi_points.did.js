@@ -57,16 +57,20 @@ export const idlFactory = ({ IDL }) => {
     'close_active' : IDL.Nat64,
     'close_cursor' : IDL.Opt(IDL.Principal),
     'epoch_index' : IDL.Nat64,
+    'b_capture_error_count' : IDL.Nat8,
     'epoch_start_ns' : IDL.Nat64,
     'a_cursor' : IDL.Opt(IDL.Principal),
     'b_complete' : IDL.Bool,
     'b_cursor' : IDL.Opt(IDL.Principal),
     'close_started' : IDL.Bool,
     'a_complete' : IDL.Bool,
+    'a_capture_error_principal' : IDL.Opt(IDL.Principal),
+    'b_capture_error_principal' : IDL.Opt(IDL.Principal),
     'snapshot_a_ns' : IDL.Nat64,
     'snapshot_b_ns' : IDL.Nat64,
     'close_points_accrued' : IDL.Nat,
     'epoch_end_ns' : IDL.Nat64,
+    'a_capture_error_count' : IDL.Nat8,
   });
   const EpochStatus = IDL.Record({
     'legacy_transition_held' : IDL.Bool,
@@ -78,16 +82,25 @@ export const idlFactory = ({ IDL }) => {
     'current_epoch_index' : IDL.Nat64,
     'driver_enabled' : IDL.Bool,
   });
+  const DecodeFailureBlock = IDL.Record({
+    'diagnostic' : IDL.Text,
+    'source_tag' : IDL.Nat8,
+    'event_id' : IDL.Nat64,
+  });
   const SourceStatus = IDL.Record({
     'tag' : IDL.Nat8,
     'cursor' : IDL.Nat64,
     'canister' : IDL.Principal,
   });
   const IngestStatus = IDL.Record({
+    'blocked_decodes' : IDL.Vec(DecodeFailureBlock),
     'registered_count' : IDL.Nat64,
     'poll_interval_secs' : IDL.Nat64,
     'poll_enabled' : IDL.Bool,
     'sources' : IDL.Vec(SourceStatus),
+    'last_decode_resolution' : IDL.Opt(IDL.Text),
+    'decode_failure_count' : IDL.Nat64,
+    'last_decode_failure' : IDL.Opt(IDL.Text),
   });
   const LeaderboardEntry = IDL.Record({
     'principal' : IDL.Principal,
@@ -250,6 +263,11 @@ export const idlFactory = ({ IDL }) => {
     'is_registered' : IDL.Func([IDL.Principal], [IDL.Bool], ['query']),
     'register_test_principal' : IDL.Func([IDL.Principal], [Result], []),
     'remove_excluded_principal' : IDL.Func([IDL.Principal], [Result], []),
+    'resolve_ingest_decode_failure' : IDL.Func(
+        [IDL.Nat8, IDL.Nat64, IDL.Bool],
+        [Result_2],
+        [],
+      ),
     'set_asset_ledger' : IDL.Func([IDL.Nat8, IDL.Principal], [Result], []),
     'set_epoch_driver_enabled' : IDL.Func([IDL.Bool], [Result], []),
     'set_epoch_driver_interval_secs' : IDL.Func([IDL.Nat64], [Result], []),

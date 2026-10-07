@@ -389,6 +389,11 @@ export interface _SERVICE {
   >,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
+  'get_3usd_account_migration_blockers' : ActorMethod<
+    [],
+    { 'Ok' : Array<string> } |
+      { 'Err' : AmmError }
+  >,
   'get_amm_admin_event_count' : ActorMethod<[], bigint>,
   'get_amm_admin_events' : ActorMethod<[bigint, bigint], Array<AmmAdminEvent>>,
   'get_amm_balance_series' : ActorMethod<

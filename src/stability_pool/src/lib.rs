@@ -238,6 +238,12 @@ fn setup_sp_liquidation_v2_recovery_timer() {
                 for request_id in ids {
                     let _ = crate::liquidation::recover_sp_liquidation_v2(request_id).await;
                 }
+                let absorb_ids = mutate_state(|state| {
+                    state.take_sp_three_usd_recovery_batch(SP_LIQUIDATION_V2_RECOVERY_MAX_PER_TICK)
+                });
+                for absorb_id in absorb_ids {
+                    let _ = crate::three_usd_v2::recover_proven_three_usd_absorb(absorb_id).await;
+                }
             });
         },
     );

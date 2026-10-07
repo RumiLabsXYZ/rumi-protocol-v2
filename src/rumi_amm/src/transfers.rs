@@ -38,8 +38,7 @@ pub async fn ledger_fee(ledger: Principal) -> u128 {
     if let Some(fee) = LEDGER_FEES.with(|c| c.borrow().get(&ledger).copied()) {
         return fee;
     }
-    let result: Result<(candid::Nat,), _> =
-        ic_cdk::call(ledger, "icrc1_fee", ()).await;
+    let result: Result<(candid::Nat,), _> = ic_cdk::call(ledger, "icrc1_fee", ()).await;
     let fee: u128 = match result {
         Ok((f,)) => f.0.try_into().unwrap_or(DEFAULT_LEDGER_FEE_E8S),
         Err(_) => DEFAULT_LEDGER_FEE_E8S,
@@ -54,8 +53,7 @@ pub async fn ledger_fee(ledger: Principal) -> u128 {
 pub async fn ledger_fee_for_amount(ledger: Principal, amount: u128) -> u128 {
     let cached = ledger_fee(ledger).await;
     if amount <= cached {
-        let result: Result<(candid::Nat,), _> =
-            ic_cdk::call(ledger, "icrc1_fee", ()).await;
+        let result: Result<(candid::Nat,), _> = ic_cdk::call(ledger, "icrc1_fee", ()).await;
         if let Ok((fee,)) = result {
             if let Ok(fee) = fee.0.try_into() {
                 LEDGER_FEES.with(|cache| cache.borrow_mut().insert(ledger, fee));
@@ -81,7 +79,11 @@ pub async fn transfer_from_user(
         },
         to: Account {
             owner: ic_cdk::id(),
-            subaccount: Some(to_subaccount),
+            subaccount: if crate::is_threeusd_ledger(ledger) {
+                None
+            } else {
+                Some(to_subaccount)
+            },
         },
         amount: candid::Nat::from(amount),
         fee: None,
@@ -134,7 +136,11 @@ pub async fn transfer_from_user_exact(
         },
         to: Account {
             owner: ic_cdk::id(),
-            subaccount: Some(leg.to_subaccount),
+            subaccount: if crate::is_threeusd_ledger(leg.ledger) && leg.to_subaccount == [0; 32] {
+                None
+            } else {
+                Some(leg.to_subaccount)
+            },
         },
         amount: candid::Nat::from(leg.amount),
         fee: Some(candid::Nat::from(leg.transfer_fee.ok_or_else(|| {
@@ -217,7 +223,11 @@ pub async fn transfer_to_user(
     }
     let send = amount - fee;
     let args = TransferArg {
-        from_subaccount: Some(from_subaccount),
+        from_subaccount: if crate::is_threeusd_ledger(ledger) {
+            None
+        } else {
+            Some(from_subaccount)
+        },
         to: Account {
             owner: to,
             subaccount: None,
@@ -286,8 +296,8 @@ pub async fn transfer_reward_icusd(
     to: Principal,
     amount: u128,
 ) -> Result<u64, String> {
-    let icusd_ledger = Principal::from_text(crate::ICUSD_LEDGER)
-        .expect("invalid icUSD ledger principal");
+    let icusd_ledger =
+        Principal::from_text(crate::ICUSD_LEDGER).expect("invalid icUSD ledger principal");
     let fee = ledger_fee_for_amount(icusd_ledger, amount).await;
     if amount <= fee {
         return Err(format!(

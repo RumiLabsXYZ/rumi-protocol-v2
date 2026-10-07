@@ -13,7 +13,7 @@
 
 #![allow(dead_code)] // request types + normalize are consumed by the poll layer next
 
-use candid::{CandidType, Principal};
+use candid::{CandidType, IDLArgs, IDLValue, Principal};
 use serde::Deserialize;
 
 use crate::events::{IngestedEvent, IngestKind, SourceId};
@@ -24,6 +24,45 @@ fn to_amounts3(v: &[u128]) -> [u128; 3] {
         v.get(1).copied().unwrap_or(0),
         v.get(2).copied().unwrap_or(0),
     ]
+}
+
+fn record_field<'a>(value: &'a IDLValue, name: &str) -> Result<&'a IDLValue, String> {
+    let IDLValue::Record(fields) = value else {
+        return Err("expected Candid record".to_string());
+    };
+    fields
+        .iter()
+        .find(|field| field.id.get_id() == candid::idl_hash(name))
+        .map(|field| &field.val)
+        .ok_or_else(|| format!("missing Candid record field {name}"))
+}
+
+fn tuple_values(value: &IDLValue) -> Result<&[candid::types::value::IDLField], String> {
+    match value {
+        IDLValue::Record(fields) => Ok(fields),
+        _ => Err("expected Candid tuple".to_string()),
+    }
+}
+
+fn nat64_value(value: &IDLValue) -> Result<u64, String> {
+    match value {
+        IDLValue::Nat64(value) => Ok(*value),
+        other => Err(format!("expected nat64, received {}", other)),
+    }
+}
+
+fn principal_value(value: &IDLValue) -> Result<Principal, String> {
+    match value {
+        IDLValue::Principal(value) => Ok(*value),
+        other => Err(format!("expected principal, received {}", other)),
+    }
+}
+
+fn decode_single<T: for<'de> Deserialize<'de> + CandidType>(value: IDLValue) -> Result<T, String> {
+    IDLArgs::new(&[value])
+        .to_bytes()
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| candid::decode_one::<T>(&bytes).map_err(|e| e.to_string()))
 }
 
 // ── rumi_protocol_backend ───────────────────────────────────────────────────
@@ -244,6 +283,39 @@ pub mod backend {
         pub reached_end: bool,
     }
 
+    pub fn normalize_forward_resilient(
+        bytes: &[u8],
+    ) -> Result<(Vec<IngestedEvent>, u64, bool, Vec<(u64, String)>), String> {
+        // Decode the reply without a static Candid type. IDLArgs retains unknown
+        // variant labels, allowing the batch cursor to advance past one future
+        // event while known neighbors still normalize.
+        let args = IDLArgs::from_bytes(bytes).map_err(|e| e.to_string())?;
+        let response = args.args.first().ok_or("empty backend response")?;
+        let raw_events = record_field(response, "events")?;
+        let IDLValue::Vec(raw_events) = raw_events else {
+            return Err("backend events field is not a vector".to_string());
+        };
+        let next_start = nat64_value(record_field(response, "next_start")?)?;
+        let reached_end = match record_field(response, "reached_end")? {
+            IDLValue::Bool(value) => *value,
+            _ => return Err("backend reached_end field is not bool".to_string()),
+        };
+        let mut events = Vec::with_capacity(raw_events.len());
+        let mut failures = Vec::new();
+        for pair in raw_events {
+            let fields = tuple_values(pair)?;
+            if fields.len() != 2 {
+                return Err("backend event tuple has unexpected arity".to_string());
+            }
+            let id = nat64_value(&fields[0].val)?;
+            match decode_single::<BackendEvent>(fields[1].val.clone()) {
+                Ok(event) => events.push(normalize(id, event)),
+                Err(error) => failures.push((id, error)),
+            }
+        }
+        Ok((events, next_start, reached_end, failures))
+    }
+
     /// Normalize a forward batch, returning the events plus `(next_start, reached_end)`.
     pub fn normalize_forward(
         resp: ForwardFilteredEventsResponse,
@@ -355,6 +427,56 @@ pub mod stability_pool {
         pub timestamp: u64,
         pub caller: Principal,
         pub event_type: PoolEventType,
+    }
+
+    pub struct DynamicPoolEvent {
+        pub id: u64,
+        pub timestamp: u64,
+        pub caller: Principal,
+        pub event_type: IDLValue,
+    }
+
+    pub fn normalize_resilient(
+        ev: DynamicPoolEvent,
+    ) -> Result<IngestedEvent, (u64, String)> {
+        let event_type = decode_single::<PoolEventType>(ev.event_type)
+            .map_err(|e| (ev.id, e))?;
+        Ok(normalize(PoolEvent {
+            id: ev.id,
+            timestamp: ev.timestamp,
+            caller: ev.caller,
+            event_type,
+        }))
+    }
+
+    pub fn decode_first_event_id(bytes: &[u8]) -> Result<Option<u64>, String> {
+        let args = IDLArgs::from_bytes(bytes).map_err(|e| e.to_string())?;
+        let Some(IDLValue::Vec(events)) = args.args.first() else {
+            return Err("SP event response is not a vector".to_string());
+        };
+        events.first().map(|event| nat64_value(record_field(event, "id")?)).transpose()
+    }
+
+    pub fn decode_events_resilient(
+        bytes: &[u8],
+    ) -> Result<(Vec<IngestedEvent>, Vec<(u64, String)>), String> {
+        let args = IDLArgs::from_bytes(bytes).map_err(|e| e.to_string())?;
+        let Some(IDLValue::Vec(raw_events)) = args.args.first() else {
+            return Err("SP event response is not a vector".to_string());
+        };
+        let mut accepted = Vec::with_capacity(raw_events.len());
+        let mut failures = Vec::new();
+        for raw in raw_events {
+            let id = nat64_value(record_field(raw, "id")?)?;
+            let timestamp = nat64_value(record_field(raw, "timestamp")?)?;
+            let caller = principal_value(record_field(raw, "caller")?)?;
+            let event_type = record_field(raw, "event_type")?.clone();
+            match normalize_resilient(DynamicPoolEvent { id, timestamp, caller, event_type }) {
+                Ok(event) => accepted.push(event),
+                Err(failure) => failures.push(failure),
+            }
+        }
+        Ok((accepted, failures))
     }
 
     pub fn normalize(ev: PoolEvent) -> IngestedEvent {
@@ -617,6 +739,7 @@ mod balances_tests {
 mod normalize_tests {
     use super::*;
     use crate::events::{IngestKind, SourceId};
+    use candid::types::{TypeEnv, TypeInner};
     use candid::{Decode, Encode};
 
     fn p(n: u8) -> Principal {
@@ -628,6 +751,31 @@ mod normalize_tests {
     fn roundtrip<T: CandidType + for<'de> Deserialize<'de>>(v: &T) -> T {
         let bytes = Encode!(v).unwrap();
         Decode!(&bytes, T).unwrap()
+    }
+
+    #[test]
+    fn stability_pool_event_mirror_matches_committed_source_candid() {
+        fn labels(ty: &candid::types::Type) -> std::collections::BTreeSet<String> {
+            match ty.as_ref() {
+                TypeInner::Variant(fields) => {
+                    fields.iter().map(|field| field.id.to_string()).collect()
+                }
+                other => panic!("expected variant type, got {other:?}"),
+            }
+        }
+
+        let source_did = std::fs::read_to_string("../stability_pool/stability_pool.did")
+            .expect("read Stability Pool Candid");
+        let prog = source_did.parse::<candid_parser::IDLProg>().unwrap();
+        let mut env = TypeEnv::new();
+        candid_parser::check_prog(&mut env, &prog).unwrap();
+        let source = env.find_type("PoolEventType").unwrap();
+        let mirror = stability_pool::PoolEventType::ty();
+        assert_eq!(
+            labels(source),
+            labels(&mirror),
+            "points must mirror every Stability Pool event variant because its log endpoint is unfiltered"
+        );
     }
 
     #[test]
@@ -695,6 +843,91 @@ mod normalize_tests {
             backend::normalize(0, ev).kind,
             IngestKind::VaultBorrow { vault_id: 5, amount_e8s: 250 }
         );
+    }
+
+    #[test]
+    fn backend_resilient_decoder_keeps_known_events_and_reports_unknown_items() {
+        #[derive(CandidType, Deserialize)]
+        enum FutureBackendEvent {
+            #[serde(rename = "borrow_from_vault")]
+            BorrowFromVault {
+                vault_id: u64,
+                caller: Option<Principal>,
+                borrowed_amount: u64,
+                timestamp: Option<u64>,
+            },
+            #[serde(rename = "future_borrow_event")]
+            FutureBorrowEvent { vault_id: u64 },
+        }
+        #[derive(CandidType)]
+        struct WireResponse {
+            events: Vec<(u64, FutureBackendEvent)>,
+            next_start: u64,
+            reached_end: bool,
+        }
+        let bytes = Encode!(&WireResponse {
+            events: vec![
+                (
+                    7,
+                    FutureBackendEvent::BorrowFromVault {
+                        vault_id: 1,
+                        caller: Some(p(3)),
+                        borrowed_amount: 100,
+                        timestamp: Some(9),
+                    },
+                ),
+                (8, FutureBackendEvent::FutureBorrowEvent { vault_id: 2 }),
+            ],
+            next_start: 9,
+            reached_end: true,
+        })
+        .unwrap();
+        let (events, next_start, reached_end, failures) =
+            backend::normalize_forward_resilient(&bytes).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_id, 7);
+        assert_eq!(events[0].kind, IngestKind::VaultBorrow { vault_id: 1, amount_e8s: 100 });
+        assert_eq!(next_start, 9);
+        assert!(reached_end);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, 8);
+    }
+
+    #[test]
+    fn stability_pool_resilient_decoder_reports_unknown_event_without_losing_neighbors() {
+        #[derive(CandidType)]
+        enum FuturePoolEvent {
+            Deposit { token_ledger: Principal, amount: u64 },
+            FutureVariant { amount: u64 },
+        }
+        #[derive(CandidType)]
+        struct WirePoolEvent {
+            id: u64,
+            timestamp: u64,
+            caller: Principal,
+            event_type: FuturePoolEvent,
+        }
+        let bytes = Encode!(&vec![
+            WirePoolEvent {
+                id: 10,
+                timestamp: 3,
+                caller: p(4),
+                event_type: FuturePoolEvent::Deposit { token_ledger: p(5), amount: 50 },
+            },
+            WirePoolEvent {
+                id: 11,
+                timestamp: 4,
+                caller: p(4),
+                event_type: FuturePoolEvent::FutureVariant { amount: 1 },
+            },
+        ])
+        .unwrap();
+        let (accepted, failures) = stability_pool::decode_events_resilient(&bytes).unwrap();
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].event_id, 10);
+        assert_eq!(accepted[0].kind, IngestKind::SpDeposit { token_ledger: p(5), amount_e8s: 50 });
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, 11);
     }
 
     /// Regression: the backend's `CloseVault` and `Redemption` type filters ALSO

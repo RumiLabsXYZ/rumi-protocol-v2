@@ -26,7 +26,7 @@ path = "src/lib.rs"
 test_endpoints = []
 
 [dependencies]
-candid = "0.10.6"
+candid = { version = "0.10.6", features = ["value"] }
 ic-stable-structures = "0.6.5"
 ic-cdk = "0.12.0"
 ic-cdk-timers = "0.10.0"

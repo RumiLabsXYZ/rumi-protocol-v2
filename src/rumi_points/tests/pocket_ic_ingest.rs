@@ -132,7 +132,12 @@ fn poll_ingests_backend_event_and_auto_registers() {
 
     // Point the backend source (tag 0) at the mock (admin-gated).
     let set_res = pic
-        .update_call(rp, admin(), "set_source_canister", Encode!(&0u8, &mock).unwrap())
+        .update_call(
+            rp,
+            admin(),
+            "set_source_canister",
+            Encode!(&0u8, &mock).unwrap(),
+        )
         .expect("set_source_canister call failed");
     match set_res {
         WasmResult::Reply(b) => {
@@ -173,7 +178,10 @@ fn poll_ingests_backend_event_and_auto_registers() {
         WasmResult::Reject(m) => panic!("second trigger_poll rejected: {m}"),
     };
     assert_eq!(applied2, Ok(0), "second poll ingests nothing (caught up)");
-    assert!(is_registered(&pic, rp, synthetic_caller()), "still registered");
+    assert!(
+        is_registered(&pic, rp, synthetic_caller()),
+        "still registered"
+    );
 }
 
 /// Phase 2b: the periodic timer (not a manual trigger) drives ingestion. Enable
@@ -196,9 +204,19 @@ fn poll_timer_drives_ingestion() {
         season_end_ns: None,
         snapshot_seed_commit: None,
     };
-    pic.install_canister(rp, RUMI_POINTS_WASM.to_vec(), Encode!(&Some(init)).unwrap(), None);
+    pic.install_canister(
+        rp,
+        RUMI_POINTS_WASM.to_vec(),
+        Encode!(&Some(init)).unwrap(),
+        None,
+    );
 
-    admin_ok(&pic, rp, "set_source_canister", Encode!(&0u8, &mock).unwrap());
+    admin_ok(
+        &pic,
+        rp,
+        "set_source_canister",
+        Encode!(&0u8, &mock).unwrap(),
+    );
 
     // Timer off by default; nobody registered, no manual poll.
     assert!(!is_registered(&pic, rp, synthetic_caller()));
@@ -221,7 +239,9 @@ fn poll_timer_drives_ingestion() {
 
 /// Call an admin update returning `Result<(), PointsError>` and assert Ok.
 fn admin_ok(pic: &pocket_ic::PocketIc, rp: Principal, method: &str, args: Vec<u8>) {
-    let res = pic.update_call(rp, admin(), method, args).expect("admin call failed");
+    let res = pic
+        .update_call(rp, admin(), method, args)
+        .expect("admin call failed");
     match res {
         WasmResult::Reply(b) => {
             let r: Result<(), PointsError> = Decode!(&b, Result<(), PointsError>).unwrap();
@@ -233,7 +253,12 @@ fn admin_ok(pic: &pocket_ic::PocketIc, rp: Principal, method: &str, args: Vec<u8
 
 fn is_registered(pic: &pocket_ic::PocketIc, rp: Principal, who: Principal) -> bool {
     let res = pic
-        .query_call(rp, Principal::anonymous(), "is_registered", Encode!(&who).unwrap())
+        .query_call(
+            rp,
+            Principal::anonymous(),
+            "is_registered",
+            Encode!(&who).unwrap(),
+        )
         .expect("is_registered call failed");
     match res {
         WasmResult::Reply(b) => Decode!(&b, bool).unwrap(),
@@ -267,7 +292,12 @@ fn install_points(pic: &pocket_ic::PocketIc) -> Principal {
         // (commit-reveal anti-sniping) and verifies S0 against this.
         snapshot_seed_commit: Some(rumi_points::snapshot_seed::commitment(&SEASON_SEED)),
     };
-    pic.install_canister(rp, RUMI_POINTS_WASM.to_vec(), Encode!(&Some(init)).unwrap(), None);
+    pic.install_canister(
+        rp,
+        RUMI_POINTS_WASM.to_vec(),
+        Encode!(&Some(init)).unwrap(),
+        None,
+    );
     rp
 }
 
@@ -278,23 +308,43 @@ fn set_time_ns(pic: &pocket_ic::PocketIc, ns: u64) {
 /// Point all four source tags (backend/3pool/SP/AMM) at the single mock.
 fn set_all_sources(pic: &pocket_ic::PocketIc, rp: Principal, mock: Principal) {
     for tag in 0u8..4 {
-        admin_ok(pic, rp, "set_source_canister", Encode!(&tag, &mock).unwrap());
+        admin_ok(
+            pic,
+            rp,
+            "set_source_canister",
+            Encode!(&tag, &mock).unwrap(),
+        );
     }
 }
 
 fn set_vault_debt(pic: &pocket_ic::PocketIc, mock: Principal, owner: Principal, debt: u64) {
-    pic.update_call(mock, Principal::anonymous(), "set_vault_debt", Encode!(&owner, &debt).unwrap())
-        .expect("set_vault_debt failed");
+    pic.update_call(
+        mock,
+        Principal::anonymous(),
+        "set_vault_debt",
+        Encode!(&owner, &debt).unwrap(),
+    )
+    .expect("set_vault_debt failed");
 }
 
 fn set_fail_get_vaults(pic: &pocket_ic::PocketIc, mock: Principal, fail: bool) {
-    pic.update_call(mock, Principal::anonymous(), "set_fail_get_vaults", Encode!(&fail).unwrap())
-        .expect("set_fail_get_vaults failed");
+    pic.update_call(
+        mock,
+        Principal::anonymous(),
+        "set_fail_get_vaults",
+        Encode!(&fail).unwrap(),
+    )
+    .expect("set_fail_get_vaults failed");
 }
 
 fn start_season_ok(pic: &pocket_ic::PocketIc, rp: Principal, seed: [u8; 32]) {
     let res = pic
-        .update_call(rp, admin(), "start_season", Encode!(&seed.to_vec()).unwrap())
+        .update_call(
+            rp,
+            admin(),
+            "start_season",
+            Encode!(&seed.to_vec()).unwrap(),
+        )
         .expect("start_season call failed");
     match res {
         WasmResult::Reply(b) => {
@@ -334,7 +384,12 @@ fn epoch_status(pic: &pocket_ic::PocketIc, rp: Principal) -> TEpochStatus {
 /// the cursors are NOT exposed (POINTS-001).
 fn public_epoch_status(pic: &pocket_ic::PocketIc, rp: Principal) -> TPublicEpochStatus {
     let res = pic
-        .query_call(rp, Principal::anonymous(), "get_epoch_status", Encode!().unwrap())
+        .query_call(
+            rp,
+            Principal::anonymous(),
+            "get_epoch_status",
+            Encode!().unwrap(),
+        )
         .expect("get_epoch_status call failed");
     match res {
         WasmResult::Reply(b) => Decode!(&b, TPublicEpochStatus).unwrap(),
@@ -344,7 +399,12 @@ fn public_epoch_status(pic: &pocket_ic::PocketIc, rp: Principal) -> TPublicEpoch
 
 fn total_points(pic: &pocket_ic::PocketIc, rp: Principal, who: Principal) -> u128 {
     let res = pic
-        .query_call(rp, Principal::anonymous(), "get_principal_state", Encode!(&who).unwrap())
+        .query_call(
+            rp,
+            Principal::anonymous(),
+            "get_principal_state",
+            Encode!(&who).unwrap(),
+        )
         .expect("get_principal_state call failed");
     let st: Option<TPrincipalState> = match res {
         WasmResult::Reply(b) => Decode!(&b, Option<TPrincipalState>).unwrap(),
@@ -380,7 +440,12 @@ fn epoch_accrues_points_for_a_held_position() {
     // Open epoch 0 (S0 verified against the committed H0), then disable the timer
     // so only force_tick drives the state machine.
     start_season_ok(&pic, rp, SEASON_SEED);
-    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
+    admin_ok(
+        &pic,
+        rp,
+        "set_epoch_driver_enabled",
+        Encode!(&false).unwrap(),
+    );
 
     let oe = epoch_status(&pic, rp)
         .open_epoch
@@ -427,7 +492,12 @@ fn between_snapshot_withdrawal_earns_zero() {
 
     set_vault_debt(&pic, mock, p, 100_000_000); // position present at snapshot A
     start_season_ok(&pic, rp, SEASON_SEED);
-    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
+    admin_ok(
+        &pic,
+        rp,
+        "set_epoch_driver_enabled",
+        Encode!(&false).unwrap(),
+    );
     let oe = epoch_status(&pic, rp).open_epoch.unwrap();
 
     set_time_ns(&pic, oe.snapshot_a_ns);
@@ -469,7 +539,12 @@ fn transient_fetch_error_does_not_zero_a_held_position() {
     set_vault_debt(&pic, mock, p, DEBT);
 
     start_season_ok(&pic, rp, SEASON_SEED);
-    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
+    admin_ok(
+        &pic,
+        rp,
+        "set_epoch_driver_enabled",
+        Encode!(&false).unwrap(),
+    );
     let oe = epoch_status(&pic, rp).open_epoch.unwrap();
 
     // Snapshot A while the backend `get_vaults` call is failing (forced trap).
@@ -519,29 +594,47 @@ fn public_epoch_status_hides_cursors_and_admin_view_is_gated() {
     admin_ok(&pic, rp, "register_test_principal", Encode!(&p).unwrap());
     set_vault_debt(&pic, mock, p, 100_000_000);
     start_season_ok(&pic, rp, SEASON_SEED);
-    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
+    admin_ok(
+        &pic,
+        rp,
+        "set_epoch_driver_enabled",
+        Encode!(&false).unwrap(),
+    );
 
     let oe = epoch_status(&pic, rp).open_epoch.unwrap();
 
     // PTS-002: while both snapshot times are in the FUTURE the public view hides
     // them (a future time IS the flash-deposit snipe target).
-    let poe = public_epoch_status(&pic, rp).open_epoch.expect("epoch 0 is open");
+    let poe = public_epoch_status(&pic, rp)
+        .open_epoch
+        .expect("epoch 0 is open");
     assert_eq!(poe.epoch_index, 0);
     assert_eq!(poe.snapshot_a_ns, None, "future snapshot A must be hidden");
     assert_eq!(poe.snapshot_b_ns, None, "future snapshot B must be hidden");
 
-    // Capture A so the admin view has a non-trivial cursor to expose.
+    // Pass A's scheduled time while the backend read is failing. The public
+    // timestamp must stay hidden until the balances have actually been read.
     set_time_ns(&pic, oe.snapshot_a_ns);
+    set_fail_get_vaults(&pic, mock, true);
+    force_tick(&pic, rp);
+    let poe = public_epoch_status(&pic, rp).open_epoch.unwrap();
+    assert_eq!(poe.snapshot_a_ns, None, "incomplete capture stays hidden");
+
+    set_fail_get_vaults(&pic, mock, false);
     force_tick(&pic, rp);
 
     // The PUBLIC query (anonymous caller) decodes into PublicEpochStatus, whose
     // open epoch has bounds but NO cursor/complete fields. The decode itself
-    // proves the wire shape carries no cursors. A has fired (now >= a) so it is
-    // revealed; B is still in the future and stays hidden (PTS-002).
+    // proves the wire shape carries no cursors. A is revealed only after its
+    // balance reads complete; B is still in the future and stays hidden.
     let pub_status = public_epoch_status(&pic, rp);
     let poe = pub_status.open_epoch.expect("epoch 0 is open");
     assert_eq!(poe.epoch_index, 0);
-    assert_eq!(poe.snapshot_a_ns, Some(oe.snapshot_a_ns), "fired snapshot A is revealed");
+    assert_eq!(
+        poe.snapshot_a_ns,
+        Some(oe.snapshot_a_ns),
+        "fired snapshot A is revealed"
+    );
     assert_eq!(poe.snapshot_b_ns, None, "future snapshot B stays hidden");
 
     // The ADMIN query is admin-gated: an anonymous caller is rejected (trap).
@@ -552,7 +645,7 @@ fn public_epoch_status_hides_cursors_and_admin_view_is_gated() {
         Encode!().unwrap(),
     );
     match denied {
-        Err(_) => {} // rejected at the call layer
+        Err(_) => {}                    // rejected at the call layer
         Ok(WasmResult::Reject(_)) => {} // trapped: unauthorized
         Ok(WasmResult::Reply(_)) => {
             panic!("get_epoch_status_admin must reject a non-admin caller")
@@ -590,7 +683,12 @@ fn chunked_close_completes_over_many_principals_end_to_end() {
     const DEBT: u64 = 100_000_000; // $1
     let who = |i: u32| Principal::from_slice(&i.to_be_bytes());
     for i in 0..N {
-        admin_ok(&pic, rp, "register_test_principal", Encode!(&who(i)).unwrap());
+        admin_ok(
+            &pic,
+            rp,
+            "register_test_principal",
+            Encode!(&who(i)).unwrap(),
+        );
     }
     // One held principal (the mock returns debt for a single owner). Pick one near
     // the end so it is processed in a LATE close batch, exercising resume.
@@ -598,7 +696,12 @@ fn chunked_close_completes_over_many_principals_end_to_end() {
     set_vault_debt(&pic, mock, held, DEBT);
 
     start_season_ok(&pic, rp, SEASON_SEED);
-    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
+    admin_ok(
+        &pic,
+        rp,
+        "set_epoch_driver_enabled",
+        Encode!(&false).unwrap(),
+    );
     let oe = epoch_status(&pic, rp).open_epoch.unwrap();
 
     // Drive snapshot A to completion (capture is chunked at 100/principals tick).
@@ -609,7 +712,10 @@ fn chunked_close_completes_over_many_principals_end_to_end() {
         }
         force_tick(&pic, rp);
     }
-    assert!(epoch_status(&pic, rp).open_epoch.unwrap().a_complete, "snapshot A completes");
+    assert!(
+        epoch_status(&pic, rp).open_epoch.unwrap().a_complete,
+        "snapshot A completes"
+    );
 
     // Drive snapshot B to completion.
     set_time_ns(&pic, oe.snapshot_b_ns);
@@ -619,7 +725,10 @@ fn chunked_close_completes_over_many_principals_end_to_end() {
         }
         force_tick(&pic, rp);
     }
-    assert!(epoch_status(&pic, rp).open_epoch.unwrap().b_complete, "snapshot B completes");
+    assert!(
+        epoch_status(&pic, rp).open_epoch.unwrap().b_complete,
+        "snapshot B completes"
+    );
 
     // Drive the CHUNKED close to completion. It spans several ticks (130 principals
     // / 50 per close chunk = 3 batches); each tick stays in the open state until
@@ -637,7 +746,10 @@ fn chunked_close_completes_over_many_principals_end_to_end() {
 
     let after = epoch_status(&pic, rp);
     assert!(after.open_epoch.is_none(), "epoch closed");
-    assert_eq!(after.current_epoch_index, 1, "epoch index advanced exactly once");
+    assert_eq!(
+        after.current_epoch_index, 1,
+        "epoch index advanced exactly once"
+    );
 
     // The held principal is credited EXACTLY once: $1 of debt over the full week.
     // (Pre-fix, the unchunked close over 130 principals could trap before reaching

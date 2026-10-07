@@ -70,9 +70,15 @@ pub struct IngestedEvent {
 pub enum IngestKind {
     // ── rumi_protocol_backend (vault) ──
     /// Opened a vault; `borrowed_e8s` is the icUSD minted at open (may be 0).
-    VaultOpen { vault_id: u64, borrowed_e8s: u64 },
+    VaultOpen {
+        vault_id: u64,
+        borrowed_e8s: u64,
+    },
     /// Borrowed (minted) more icUSD from an existing vault.
-    VaultBorrow { vault_id: u64, amount_e8s: u64 },
+    VaultBorrow {
+        vault_id: u64,
+        amount_e8s: u64,
+    },
     /// Repaid vault debt. `repayment_asset` is the ledger the debt was repaid with,
     /// needed to tell a qualifying ckUSDC/ckUSDT repayment (5x window, spec Section
     /// 6) from an icUSD burn or collateral closure. The upstream backend field is
@@ -83,21 +89,43 @@ pub enum IngestKind {
         amount_e8s: u64,
         repayment_asset: Option<candid::Principal>,
     },
-    VaultClose { vault_id: u64 },
-    VaultLiquidated { vault_id: u64 },
-    VaultRedeemed { amount_e8s: u64 },
+    VaultClose {
+        vault_id: u64,
+    },
+    VaultLiquidated {
+        vault_id: u64,
+    },
+    VaultRedeemed {
+        amount_e8s: u64,
+    },
 
     // ── rumi_3pool ── amounts are [icUSD, ckUSDT, ckUSDC] (3pool ordering).
-    ThreePoolAdd { amounts: [u128; 3] },
-    ThreePoolRemove { amounts: [u128; 3] },
+    ThreePoolAdd {
+        amounts: [u128; 3],
+    },
+    ThreePoolRemove {
+        amounts: [u128; 3],
+    },
 
     // ── rumi_stability_pool ── `token_ledger` identifies the deposited asset.
-    SpDeposit { token_ledger: Principal, amount_e8s: u64 },
-    SpWithdraw { token_ledger: Principal, amount_e8s: u64 },
+    SpDeposit {
+        token_ledger: Principal,
+        amount_e8s: u64,
+    },
+    SpWithdraw {
+        token_ledger: Principal,
+        amount_e8s: u64,
+    },
 
     // ── rumi_amm ──
-    AmmAddLiquidity { pool_id: String, lp_shares: u128 },
-    AmmRemoveLiquidity { pool_id: String, lp_shares: u128 },
+    AmmAddLiquidity {
+        pool_id: String,
+        lp_shares: u128,
+    },
+    AmmRemoveLiquidity {
+        pool_id: String,
+        lp_shares: u128,
+    },
 
     /// Ingested but not acted on in any current phase (e.g. a 3pool `Donate`, an
     /// SP config event). Kept so the cursor still advances past it.
@@ -150,9 +178,11 @@ pub fn apply_ingested_event(ev: &IngestedEvent) {
         IngestKind::ThreePoolRemove { amounts } => {
             apply_3pool(caller, amounts, false, ev.timestamp_ns)
         }
-        IngestKind::VaultRepay { repayment_asset, amount_e8s, .. } => {
-            apply_repayment(caller, *repayment_asset, *amount_e8s, ev.timestamp_ns)
-        }
+        IngestKind::VaultRepay {
+            repayment_asset,
+            amount_e8s,
+            ..
+        } => apply_repayment(caller, *repayment_asset, *amount_e8s, ev.timestamp_ns),
         // Vault debt, SP, and AMM positions are read live at each snapshot (the
         // hybrid model), so their events only register; they are not tracked here.
         _ => {}
@@ -252,7 +282,10 @@ fn apply_repayment(
         }
     };
     if let Some(asset @ (AssetType::CkUsdc | AssetType::CkUsdt)) = state::classify_ledger(&ledger) {
-        let usd = valuation::value_stable_usd_e8s(asset, amount_e8s as u128);
+        // Backend RepayToVault.repayed_amount is ICUSD e8s ($1 == 1e8), not
+        // the native 6-decimal units of the repayment asset. The asset gates
+        // eligibility only; converting it as ckUSDC/ckUSDT would inflate by 100x.
+        let usd = amount_e8s as u128;
         state::record_repayment(caller, asset, usd, now_ns);
     }
 }
@@ -308,7 +341,10 @@ mod tests {
     fn recorded_3pool(p: &Principal, asset: AssetType) -> Option<u128> {
         state::get_principal_state(p)?
             .active_deposits
-            .get(&DepositKey { venue: Venue::ThreePool, asset })
+            .get(&DepositKey {
+                venue: Venue::ThreePool,
+                asset,
+            })
             .map(|r| r.recorded_value_usd)
     }
 
@@ -330,7 +366,13 @@ mod tests {
         );
     }
 
-    fn ev(source: SourceId, id: u64, caller: Option<Principal>, ts: u64, kind: IngestKind) -> IngestedEvent {
+    fn ev(
+        source: SourceId,
+        id: u64,
+        caller: Option<Principal>,
+        ts: u64,
+        kind: IngestKind,
+    ) -> IngestedEvent {
         IngestedEvent {
             source,
             event_id: id,
@@ -343,20 +385,37 @@ mod tests {
     #[test]
     fn qualifying_action_maps_the_five_triggers() {
         assert_eq!(
-            IngestKind::VaultBorrow { vault_id: 1, amount_e8s: 5 }.qualifying_action(),
+            IngestKind::VaultBorrow {
+                vault_id: 1,
+                amount_e8s: 5
+            }
+            .qualifying_action(),
             Some(QualifyingAction::MintIcUsd)
         );
         assert_eq!(
-            IngestKind::VaultOpen { vault_id: 1, borrowed_e8s: 5 }.qualifying_action(),
+            IngestKind::VaultOpen {
+                vault_id: 1,
+                borrowed_e8s: 5
+            }
+            .qualifying_action(),
             Some(QualifyingAction::MintIcUsd)
         );
         // Opening a vault without minting is not a qualifying action.
         assert_eq!(
-            IngestKind::VaultOpen { vault_id: 1, borrowed_e8s: 0 }.qualifying_action(),
+            IngestKind::VaultOpen {
+                vault_id: 1,
+                borrowed_e8s: 0
+            }
+            .qualifying_action(),
             None
         );
         assert_eq!(
-            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 5, repayment_asset: None }.qualifying_action(),
+            IngestKind::VaultRepay {
+                vault_id: 1,
+                amount_e8s: 5,
+                repayment_asset: None
+            }
+            .qualifying_action(),
             Some(QualifyingAction::RepayVault)
         );
         assert_eq!(
@@ -364,16 +423,30 @@ mod tests {
             Some(QualifyingAction::Deposit3Pool)
         );
         assert_eq!(
-            IngestKind::SpDeposit { token_ledger: tp(1), amount_e8s: 5 }.qualifying_action(),
+            IngestKind::SpDeposit {
+                token_ledger: tp(1),
+                amount_e8s: 5
+            }
+            .qualifying_action(),
             Some(QualifyingAction::DepositStabilityPool)
         );
         assert_eq!(
-            IngestKind::AmmAddLiquidity { pool_id: "3usd-icp".into(), lp_shares: 5 }.qualifying_action(),
+            IngestKind::AmmAddLiquidity {
+                pool_id: "3usd-icp".into(),
+                lp_shares: 5
+            }
+            .qualifying_action(),
             Some(QualifyingAction::ProvideAmmLiquidity)
         );
         // Non-triggers.
-        assert_eq!(IngestKind::ThreePoolRemove { amounts: [0, 1, 0] }.qualifying_action(), None);
-        assert_eq!(IngestKind::VaultClose { vault_id: 1 }.qualifying_action(), None);
+        assert_eq!(
+            IngestKind::ThreePoolRemove { amounts: [0, 1, 0] }.qualifying_action(),
+            None
+        );
+        assert_eq!(
+            IngestKind::VaultClose { vault_id: 1 }.qualifying_action(),
+            None
+        );
         assert_eq!(IngestKind::Other.qualifying_action(), None);
     }
 
@@ -386,7 +459,9 @@ mod tests {
             0,
             Some(p),
             in_season_ts(),
-            IngestKind::ThreePoolAdd { amounts: [100, 0, 0] },
+            IngestKind::ThreePoolAdd {
+                amounts: [100, 0, 0],
+            },
         ));
         assert!(state::is_registered(&p));
         let st = state::get_principal_state(&p).unwrap();
@@ -403,7 +478,9 @@ mod tests {
             0,
             Some(p),
             in_season_ts(),
-            IngestKind::ThreePoolRemove { amounts: [100, 0, 0] },
+            IngestKind::ThreePoolRemove {
+                amounts: [100, 0, 0],
+            },
         ));
         assert!(!state::is_registered(&p));
     }
@@ -418,7 +495,10 @@ mod tests {
             0,
             Some(p),
             before_season,
-            IngestKind::VaultBorrow { vault_id: 1, amount_e8s: 100 },
+            IngestKind::VaultBorrow {
+                vault_id: 1,
+                amount_e8s: 100,
+            },
         ));
         assert!(!state::is_registered(&p));
     }
@@ -432,7 +512,10 @@ mod tests {
             0,
             Some(backend),
             in_season_ts(),
-            IngestKind::VaultBorrow { vault_id: 1, amount_e8s: 100 },
+            IngestKind::VaultBorrow {
+                vault_id: 1,
+                amount_e8s: 100,
+            },
         ));
         assert!(!state::is_registered(&backend));
     }
@@ -455,9 +538,27 @@ mod tests {
     fn ingest_batch_applies_all_and_advances_cursor() {
         init();
         let evs = vec![
-            ev(SourceId::ThreePool, 5, Some(tp(20)), in_season_ts(), IngestKind::ThreePoolAdd { amounts: [1, 0, 0] }),
-            ev(SourceId::ThreePool, 6, Some(tp(21)), in_season_ts(), IngestKind::ThreePoolAdd { amounts: [1, 0, 0] }),
-            ev(SourceId::ThreePool, 7, Some(tp(22)), in_season_ts(), IngestKind::ThreePoolRemove { amounts: [1, 0, 0] }),
+            ev(
+                SourceId::ThreePool,
+                5,
+                Some(tp(20)),
+                in_season_ts(),
+                IngestKind::ThreePoolAdd { amounts: [1, 0, 0] },
+            ),
+            ev(
+                SourceId::ThreePool,
+                6,
+                Some(tp(21)),
+                in_season_ts(),
+                IngestKind::ThreePoolAdd { amounts: [1, 0, 0] },
+            ),
+            ev(
+                SourceId::ThreePool,
+                7,
+                Some(tp(22)),
+                in_season_ts(),
+                IngestKind::ThreePoolRemove { amounts: [1, 0, 0] },
+            ),
         ];
         let n = ingest_batch(SourceId::ThreePool, &evs);
         assert_eq!(n, 3);
@@ -484,7 +585,10 @@ mod tests {
             0,
             Some(tp(30)),
             in_season_ts(),
-            IngestKind::VaultBorrow { vault_id: 1, amount_e8s: 100 },
+            IngestKind::VaultBorrow {
+                vault_id: 1,
+                amount_e8s: 100,
+            },
         )];
         ingest_batch(SourceId::Backend, &evs);
         let first = state::get_principal_state(&tp(30)).unwrap();
@@ -507,7 +611,9 @@ mod tests {
             0,
             Some(p),
             in_season_ts(),
-            IngestKind::ThreePoolAdd { amounts: [100_000_000, 2_000_000, 3_000_000] },
+            IngestKind::ThreePoolAdd {
+                amounts: [100_000_000, 2_000_000, 3_000_000],
+            },
         ));
         assert_eq!(recorded_3pool(&p, AssetType::IcUsd), Some(100_000_000)); // 8-dec, x1
         assert_eq!(recorded_3pool(&p, AssetType::CkUsdt), Some(200_000_000)); // 6-dec, x100
@@ -523,14 +629,18 @@ mod tests {
             0,
             Some(p),
             in_season_ts(),
-            IngestKind::ThreePoolAdd { amounts: [0, 0, 5_000_000] }, // $5 ckUSDC
+            IngestKind::ThreePoolAdd {
+                amounts: [0, 0, 5_000_000],
+            }, // $5 ckUSDC
         ));
         apply_ingested_event(&ev(
             SourceId::ThreePool,
             1,
             Some(p),
             in_season_ts(),
-            IngestKind::ThreePoolRemove { amounts: [0, 0, 2_000_000] }, // remove $2
+            IngestKind::ThreePoolRemove {
+                amounts: [0, 0, 2_000_000],
+            }, // remove $2
         ));
         assert_eq!(recorded_3pool(&p, AssetType::CkUsdc), Some(300_000_000)); // $3 left
     }
@@ -552,7 +662,9 @@ mod tests {
             0,
             Some(p),
             in_season_ts(),
-            IngestKind::ThreePoolAdd { amounts: [10_000_000_000, 100_000_000, 100_000_000] },
+            IngestKind::ThreePoolAdd {
+                amounts: [10_000_000_000, 100_000_000, 100_000_000],
+            },
         ));
         // RemoveOneCoin taking $300 out as icUSD. This burns the ENTIRE LP
         // position, so all three recorded legs must go to zero.
@@ -561,9 +673,15 @@ mod tests {
             1,
             Some(p),
             in_season_ts(),
-            IngestKind::ThreePoolRemove { amounts: [30_000_000_000, 0, 0] },
+            IngestKind::ThreePoolRemove {
+                amounts: [30_000_000_000, 0, 0],
+            },
         ));
-        assert_eq!(recorded_3pool(&p, AssetType::IcUsd), None, "icUSD leg drained");
+        assert_eq!(
+            recorded_3pool(&p, AssetType::IcUsd),
+            None,
+            "icUSD leg drained"
+        );
         // These two are what actually break: the LP backing them is gone, but
         // the recorded value survives and keeps earning at 10x.
         assert_eq!(
@@ -594,14 +712,18 @@ mod tests {
             0,
             Some(p),
             in_season_ts(),
-            IngestKind::ThreePoolAdd { amounts: [0, 0, 1_000_000] }, // $1 ckUSDC
+            IngestKind::ThreePoolAdd {
+                amounts: [0, 0, 1_000_000],
+            }, // $1 ckUSDC
         ));
         apply_ingested_event(&ev(
             SourceId::ThreePool,
             1,
             Some(p),
             in_season_ts(),
-            IngestKind::ThreePoolRemove { amounts: [0, 500_000_000, 0] }, // $500 ckUSDT out
+            IngestKind::ThreePoolRemove {
+                amounts: [0, 500_000_000, 0],
+            }, // $500 ckUSDT out
         ));
         // The withdrawal drains whatever IS recorded rather than vanishing,
         // otherwise later adds would accumulate from an inflated floor.
@@ -622,7 +744,9 @@ mod tests {
             0,
             Some(p),
             in_season_ts(),
-            IngestKind::ThreePoolAdd { amounts: [10_000_000_000, 200_000_000, 100_000_000] },
+            IngestKind::ThreePoolAdd {
+                amounts: [10_000_000_000, 200_000_000, 100_000_000],
+            },
         ));
         // RemoveOneCoin paying out $100 of icUSD = 25% of the position, so every
         // leg scales down by 25%, preserving the composition mix.
@@ -631,7 +755,9 @@ mod tests {
             1,
             Some(p),
             in_season_ts(),
-            IngestKind::ThreePoolRemove { amounts: [10_000_000_000, 0, 0] },
+            IngestKind::ThreePoolRemove {
+                amounts: [10_000_000_000, 0, 0],
+            },
         ));
         assert_eq!(recorded_3pool(&p, AssetType::IcUsd), Some(7_500_000_000)); // $75
         assert_eq!(recorded_3pool(&p, AssetType::CkUsdt), Some(15_000_000_000)); // $150
@@ -651,7 +777,9 @@ mod tests {
                 0,
                 Some(p),
                 in_season_ts(),
-                IngestKind::ThreePoolRemove { amounts: [0, 100_000_000, 0] },
+                IngestKind::ThreePoolRemove {
+                    amounts: [0, 100_000_000, 0],
+                },
             ),
             // Registration + $100/$100/$100 position.
             ev(
@@ -659,7 +787,9 @@ mod tests {
                 1,
                 Some(p),
                 in_season_ts() + 10,
-                IngestKind::ThreePoolAdd { amounts: [10_000_000_000, 100_000_000, 100_000_000] },
+                IngestKind::ThreePoolAdd {
+                    amounts: [10_000_000_000, 100_000_000, 100_000_000],
+                },
             ),
             // RemoveOneCoin $150 icUSD out = half the position.
             ev(
@@ -667,7 +797,9 @@ mod tests {
                 2,
                 Some(p),
                 in_season_ts() + 20,
-                IngestKind::ThreePoolRemove { amounts: [15_000_000_000, 0, 0] },
+                IngestKind::ThreePoolRemove {
+                    amounts: [15_000_000_000, 0, 0],
+                },
             ),
         ];
         // Register at event 1's timestamp (as the original ingest did), then
@@ -694,12 +826,17 @@ mod tests {
             0,
             Some(p),
             in_season_ts(),
-            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 1_000_000, repayment_asset: Some(ckusdc()) },
+            // Backend event amount is ICUSD e8s: $1 == 100_000_000.
+            IngestKind::VaultRepay {
+                vault_id: 1,
+                amount_e8s: 100_000_000,
+                repayment_asset: Some(ckusdc()),
+            },
         ));
         let st = state::get_principal_state(&p).unwrap();
         assert_eq!(st.repayment_events.len(), 1);
         assert_eq!(st.repayment_events[0].asset, AssetType::CkUsdc);
-        assert_eq!(st.repayment_events[0].amount_usd, 100_000_000); // $1, 6-dec x100
+        assert_eq!(st.repayment_events[0].amount_usd, 100_000_000); // $1, already in USD e8s
     }
 
     #[test]
@@ -711,10 +848,17 @@ mod tests {
             0,
             Some(p),
             in_season_ts(),
-            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 1_000_000, repayment_asset: None },
+            IngestKind::VaultRepay {
+                vault_id: 1,
+                amount_e8s: 1_000_000,
+                repayment_asset: None,
+            },
         ));
         assert!(state::is_registered(&p)); // repay is a qualifying action
-        assert!(state::get_principal_state(&p).unwrap().repayment_events.is_empty());
+        assert!(state::get_principal_state(&p)
+            .unwrap()
+            .repayment_events
+            .is_empty());
     }
 
     #[test]
@@ -726,11 +870,17 @@ mod tests {
             0,
             Some(p),
             in_season_ts(),
-            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 1_000_000, repayment_asset: Some(icusd()) },
+            IngestKind::VaultRepay {
+                vault_id: 1,
+                amount_e8s: 1_000_000,
+                repayment_asset: Some(icusd()),
+            },
         ));
         assert!(state::is_registered(&p));
         // An icUSD-burn repayment does not qualify for the 5x window (spec Section 6).
-        assert!(state::get_principal_state(&p).unwrap().repayment_events.is_empty());
+        assert!(state::get_principal_state(&p)
+            .unwrap()
+            .repayment_events
+            .is_empty());
     }
 }
-

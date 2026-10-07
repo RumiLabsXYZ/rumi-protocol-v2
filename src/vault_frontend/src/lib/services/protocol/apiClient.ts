@@ -2414,7 +2414,7 @@ static async repayToVaultWithStable(
         if (isOisyWallet()) {
           const snap = ApiClient.getCachedRawSnapshot(vaultId);
           if (!snap) {
-            return { success: true, message: `Vault #${vaultId} is already closed.`, vaultId };
+            return { success: false, error: `Vault #${vaultId} status is not loaded. Refresh your vaults and try again.` };
           }
           actor = await ApiClient.getAuthenticatedActor();
           isEmpty = snap.icpMargin === 0n && snap.borrowedIcusd === 0n;

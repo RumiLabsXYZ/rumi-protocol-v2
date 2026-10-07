@@ -116,6 +116,33 @@ pub const ICUSD_LEDGER: &str = "t6bor-paaaa-aaaap-qrd5q-cai";
 /// 3pool canister ID on mainnet (also the 3USD token ledger).
 const THREEPOOL: &str = "fohh4-yyaaa-aaaap-qtkpa-cai";
 
+fn is_threeusd_ledger(ledger: Principal) -> bool {
+    Principal::from_text(THREEPOOL)
+        .map(|id| id == ledger)
+        .unwrap_or(false)
+}
+
+/// Physical account used for 3USD transfers after the 3pool ledger begins
+/// enforcing subaccounts. Pool accounting remains isolated in AMM state.
+fn transfer_account_subaccount(ledger: Principal, pool_subaccount: [u8; 32]) -> [u8; 32] {
+    if is_threeusd_ledger(ledger) {
+        [0; 32]
+    } else {
+        pool_subaccount
+    }
+}
+
+fn transfer_account_subaccount_opt(
+    ledger: Principal,
+    persisted_subaccount: [u8; 32],
+) -> Option<[u8; 32]> {
+    if is_threeusd_ledger(ledger) && persisted_subaccount == [0; 32] {
+        None
+    } else {
+        Some(persisted_subaccount)
+    }
+}
+
 /// Per-pool subaccount where reward icUSD is held until claimed.
 /// Derived deterministically from the pool ID so the backend can
 /// compute it client-side and target the correct subaccount in its
@@ -651,7 +678,7 @@ fn record_pending_claim(
             token,
             subaccount,
             amount,
-            reason: reason.to_string(),
+            reason: bounded_reason(reason),
             created_at: ic_cdk::api::time() / 1_000_000_000,
         });
         log!(
@@ -665,6 +692,51 @@ fn record_pending_claim(
         );
         id
     })
+}
+
+/// Keep ledger-controlled error text from expanding the stable payout journal.
+const MAX_PERSISTED_REASON_BYTES: usize = 512;
+
+fn bounded_reason(reason: &str) -> String {
+    let mut end = reason.len().min(MAX_PERSISTED_REASON_BYTES);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    reason[..end].to_string()
+}
+
+#[cfg(test)]
+mod persisted_reason_tests {
+    use super::{
+        bounded_reason, transfer_account_subaccount, transfer_account_subaccount_opt,
+        MAX_PERSISTED_REASON_BYTES,
+    };
+
+    #[test]
+    fn ledger_error_text_is_bounded_and_utf8_safe() {
+        let huge = format!("{}終", "x".repeat(MAX_PERSISTED_REASON_BYTES));
+        let stored = bounded_reason(&huge);
+        assert_eq!(stored.len(), MAX_PERSISTED_REASON_BYTES);
+        assert!(stored.is_char_boundary(stored.len()));
+    }
+
+    #[test]
+    fn threeusd_bridge_uses_default_account_and_preserves_old_identity() {
+        let threeusd = candid::Principal::from_text("fohh4-yyaaa-aaaap-qtkpa-cai").unwrap();
+        let another_ledger = candid::Principal::self_authenticating(b"other ledger");
+        let old_pool_account = [7; 32];
+        assert_eq!(transfer_account_subaccount(threeusd, old_pool_account), [0; 32]);
+        assert_eq!(transfer_account_subaccount_opt(threeusd, [0; 32]), None);
+        assert_eq!(
+            transfer_account_subaccount_opt(threeusd, old_pool_account),
+            Some(old_pool_account),
+            "receipt matching must retain the exact account from old transfer records"
+        );
+        assert_eq!(
+            transfer_account_subaccount(another_ledger, old_pool_account),
+            old_pool_account
+        );
+    }
 }
 
 /// Persist an outbound obligation before any ledger call. Exact transfer
@@ -778,7 +850,7 @@ fn new_payout_row(
         pool_id: pool_id.clone(),
         claimant,
         ledger,
-        subaccount,
+        subaccount: transfer_account_subaccount(ledger, subaccount),
         gross_amount,
         send_amount: None,
         fee: None,
@@ -978,7 +1050,7 @@ fn begin_swap_operation(
         let leg = AmmIngressLeg {
             ledger: token_in,
             from: caller,
-            to_subaccount: sub_in,
+            to_subaccount: transfer_account_subaccount(token_in, sub_in),
             amount: amount_in,
             memo: ingress_memo,
             created_at_time: ic_cdk::api::time(),
@@ -1116,7 +1188,7 @@ fn begin_add_operation(
                 AmmIngressLeg {
                     ledger: token_a,
                     from: caller,
-                    to_subaccount: sub_a,
+                    to_subaccount: transfer_account_subaccount(token_a, sub_a),
                     amount: amount_a,
                     memo: memo_a,
                     created_at_time: ic_cdk::api::time(),
@@ -1131,7 +1203,7 @@ fn begin_add_operation(
                 AmmIngressLeg {
                     ledger: token_b,
                     from: caller,
-                    to_subaccount: sub_b,
+                    to_subaccount: transfer_account_subaccount(token_b, sub_b),
                     amount: amount_b,
                     memo: memo_b,
                     created_at_time: ic_cdk::api::time(),
@@ -1449,7 +1521,7 @@ async fn process_ingress_leg(operation_id: u64, leg_index: usize) -> Result<u64,
                     .find(|op| op.id == operation_id)
                 {
                     op.phase = phase;
-                    op.last_error = Some(reason.clone());
+                    op.last_error = Some(bounded_reason(&reason));
                 }
             });
             Err(AmmError::TransferFailed {
@@ -1801,7 +1873,7 @@ pub(crate) async fn process_payout_attempt(payout_id: u64) -> Result<u64, String
                 );
                 mutate_state(|s| {
                     if let Some(row) = s.pending_payouts.iter_mut().find(|p| p.id == payout_id) {
-                        row.last_error = Some(reason.clone());
+                        row.last_error = Some(bounded_reason(&reason));
                     }
                 });
                 return Err(reason);
@@ -1871,7 +1943,7 @@ pub(crate) async fn process_payout_attempt(payout_id: u64) -> Result<u64, String
         }
     });
     let args = icrc_ledger_types::icrc1::transfer::TransferArg {
-        from_subaccount: Some(current.subaccount),
+        from_subaccount: transfer_account_subaccount_opt(current.ledger, current.subaccount),
         to: icrc_ledger_types::icrc1::account::Account {
             owner: current.claimant,
             subaccount: None,
@@ -1905,7 +1977,7 @@ pub(crate) async fn process_payout_attempt(payout_id: u64) -> Result<u64, String
             mutate_state(|s| {
                 if let Some(row) = s.pending_payouts.iter_mut().find(|p| p.id == payout_id) {
                     row.phase = AmmPayoutPhase::HeldTooOld;
-                    row.last_error = Some(reason.clone());
+                    row.last_error = Some(bounded_reason(&reason));
                 }
             });
             return Err(reason);
@@ -1927,7 +1999,7 @@ pub(crate) async fn process_payout_attempt(payout_id: u64) -> Result<u64, String
                         row.send_amount = None;
                         row.phase = AmmPayoutPhase::AwaitingFee;
                     }
-                    row.last_error = Some(reason.clone());
+                    row.last_error = Some(bounded_reason(&reason));
                 }
             });
             return Err(reason);
@@ -1946,7 +2018,7 @@ pub(crate) async fn process_payout_attempt(payout_id: u64) -> Result<u64, String
                         } if !had_prior_ambiguity => AmmPayoutPhase::Ready,
                         _ => AmmPayoutPhase::HeldUnknown,
                     };
-                    row.last_error = Some(reason.clone());
+                    row.last_error = Some(bounded_reason(&reason));
                 }
             });
             return Err(reason);
@@ -1956,7 +2028,7 @@ pub(crate) async fn process_payout_attempt(payout_id: u64) -> Result<u64, String
             mutate_state(|s| {
                 if let Some(row) = s.pending_payouts.iter_mut().find(|p| p.id == payout_id) {
                     row.phase = AmmPayoutPhase::HeldUnknown;
-                    row.last_error = Some(reason.clone());
+                    row.last_error = Some(bounded_reason(&reason));
                 }
             });
             return Err(reason);
@@ -2174,6 +2246,12 @@ pub async fn claim_rewards(pool_id: PoolId) -> Result<u128, AmmError> {
         let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
         let shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
         let acc = pool.acc_reward_per_share;
+        if shares == 0 && !pool.lp_rewards.contains_key(&caller) {
+            return Err(AmmError::BelowMinClaim {
+                claimable: 0,
+                min: crate::state::MIN_CLAIM_E8S,
+            });
+        }
         let entry = pool.lp_rewards.entry(caller).or_default();
 
         crate::rewards::settle(entry, shares, acc);
@@ -2321,6 +2399,42 @@ fn get_pending_amm_payouts() -> Vec<AmmPayoutAttempt> {
     })
 }
 
+/// Enumerate persisted 3USD operations whose exact transfer tuple still names
+/// a nondefault account. Operators should resolve every listed identity before
+/// the 3pool begins enforcing account-specific balances.
+#[query]
+fn get_3usd_account_migration_blockers() -> Result<Vec<String>, AmmError> {
+    caller_is_admin()?;
+    let threeusd = Principal::from_text(THREEPOOL).expect("invalid 3pool principal");
+    Ok(read_state(|s| {
+        let mut blockers = Vec::new();
+        for payout in &s.pending_payouts {
+            if payout.ledger == threeusd && payout.subaccount != [0; 32] {
+                blockers.push(format!("payout:{}", payout.id));
+            }
+        }
+        for claim in &s.pending_claims {
+            if claim.token == threeusd && claim.subaccount != [0; 32] {
+                blockers.push(format!("legacy_claim:{}", claim.id));
+            }
+        }
+        for operation in &s.ingress_operations {
+            if operation.phase == AmmIngressPhase::Complete {
+                continue;
+            }
+            for (leg_index, leg) in operation.legs.iter().enumerate() {
+                if leg.ledger == threeusd
+                    && leg.to_subaccount != [0; 32]
+                    && leg.block_index.is_none()
+                {
+                    blockers.push(format!("ingress:{}:{}", operation.id, leg_index));
+                }
+            }
+        }
+        blockers
+    }))
+}
+
 /// Return the caller's last durable request so another device/session can
 /// resume the exact request after local browser storage is lost.
 #[query]
@@ -2383,7 +2497,7 @@ async fn reconcile_amm_payout(payout_id: u64) -> Result<bool, AmmError> {
     }
     let expected = ExactTransferReceipt {
         from: ic_cdk::id(),
-        from_subaccount: Some(payout.subaccount),
+        from_subaccount: transfer_account_subaccount_opt(payout.ledger, payout.subaccount),
         to: payout.claimant,
         to_subaccount: None,
         amount: payout.send_amount.ok_or(AmmError::ClaimNotFound)?,
@@ -2502,7 +2616,7 @@ async fn reconcile_amm_payout(payout_id: u64) -> Result<bool, AmmError> {
                     .iter_mut()
                     .find(|row| row.id == payout_id && **row == payout)
                 {
-                    row.last_error = Some(reason.clone());
+                    row.last_error = Some(bounded_reason(&reason));
                 }
             });
             Err(AmmError::TransferFailed {
@@ -2549,7 +2663,7 @@ async fn reconcile_amm_ingress(request_id: Vec<u8>) -> Result<bool, AmmError> {
         from: leg.from,
         from_subaccount: None,
         to: ic_cdk::id(),
-        to_subaccount: Some(leg.to_subaccount),
+        to_subaccount: transfer_account_subaccount_opt(leg.ledger, leg.to_subaccount),
         amount: leg.amount,
         fee: leg.transfer_fee,
         memo: leg.memo.clone(),
@@ -3146,7 +3260,7 @@ async fn add_liquidity_v2(
                 .find(|op| op.id == operation_id)
             {
                 saved.phase = AmmIngressPhase::Complete;
-                saved.last_error = Some(reason.clone());
+                saved.last_error = Some(bounded_reason(&reason));
             }
         });
         return Err(AmmError::TransferFailed {
@@ -3465,7 +3579,7 @@ async fn remove_liquidity_v2(
         }
     }
 
-    let (token_a, token_b, reserve_a, reserve_b, total_shares, sub_a, sub_b, user_shares, paused) =
+    let (token_a, token_b, reserve_a, reserve_b, total_shares, sub_a, sub_b, user_shares) =
         read_state(|s| {
             let pool = s.pools.get(&pool_id).ok_or(AmmError::PoolNotFound)?;
             let user_shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
@@ -3478,13 +3592,8 @@ async fn remove_liquidity_v2(
                 pool.subaccount_a,
                 pool.subaccount_b,
                 user_shares,
-                pool.paused,
             ))
         })?;
-
-    if paused {
-        return Err(AmmError::PoolPaused);
-    }
 
     if lp_shares > user_shares {
         return Err(AmmError::InsufficientLpShares {
@@ -3832,9 +3941,12 @@ fn get_amm_swap_events(start: u64, length: u64) -> Vec<AmmSwapEvent> {
         // `start` is the lifetime event id, not an index into the bounded
         // retained Vec. Clamp an evicted cursor to the oldest retained row so
         // tailers can detect and report the gap from that row's id.
-        let oldest = s.swap_events.first().map(|event| event.id).unwrap_or(s.next_swap_event_id);
-        let start = usize::try_from(start.max(oldest).saturating_sub(oldest))
-            .unwrap_or(usize::MAX);
+        let oldest = s
+            .swap_events
+            .first()
+            .map(|event| event.id)
+            .unwrap_or(s.next_swap_event_id);
+        let start = usize::try_from(start.max(oldest).saturating_sub(oldest)).unwrap_or(usize::MAX);
         let length = length.min(MAX_EVENT_PAGE) as usize;
         if start >= s.swap_events.len() {
             return vec![];
@@ -3854,9 +3966,12 @@ fn get_amm_swap_event_count() -> u64 {
 #[query]
 fn get_amm_liquidity_events(start: u64, length: u64) -> Vec<AmmLiquidityEvent> {
     read_state(|s| {
-        let oldest = s.liquidity_events.first().map(|event| event.id).unwrap_or(s.next_liquidity_event_id);
-        let start = usize::try_from(start.max(oldest).saturating_sub(oldest))
-            .unwrap_or(usize::MAX);
+        let oldest = s
+            .liquidity_events
+            .first()
+            .map(|event| event.id)
+            .unwrap_or(s.next_liquidity_event_id);
+        let start = usize::try_from(start.max(oldest).saturating_sub(oldest)).unwrap_or(usize::MAX);
         let length = length.min(MAX_EVENT_PAGE) as usize;
         if start >= s.liquidity_events.len() {
             return vec![];
@@ -4158,29 +4273,69 @@ mod retained_amm_event_cursor_tests {
     fn event_feeds_use_lifetime_ids_after_old_rows_are_evicted() {
         let who = Principal::anonymous();
         mutate_state(|s| {
-            s.swap_events = (50_000..50_003).map(|id| AmmSwapEvent {
-                id, caller: who, pool_id: "p".into(), token_in: who,
-                amount_in: 1, token_out: who, amount_out: 1, fee: 0,
-                timestamp: id,
-            }).collect();
+            s.swap_events = (50_000..50_003)
+                .map(|id| AmmSwapEvent {
+                    id,
+                    caller: who,
+                    pool_id: "p".into(),
+                    token_in: who,
+                    amount_in: 1,
+                    token_out: who,
+                    amount_out: 1,
+                    fee: 0,
+                    timestamp: id,
+                })
+                .collect();
             s.next_swap_event_id = 50_003;
-            s.liquidity_events = (60_000..60_003).map(|id| AmmLiquidityEvent {
-                id, caller: who, pool_id: "p".into(),
-                action: AmmLiquidityAction::AddLiquidity,
-                token_a: who, amount_a: 1, token_b: who, amount_b: 1,
-                lp_shares: 1, timestamp: id,
-            }).collect();
+            s.liquidity_events = (60_000..60_003)
+                .map(|id| AmmLiquidityEvent {
+                    id,
+                    caller: who,
+                    pool_id: "p".into(),
+                    action: AmmLiquidityAction::AddLiquidity,
+                    token_a: who,
+                    amount_a: 1,
+                    token_b: who,
+                    amount_b: 1,
+                    lp_shares: 1,
+                    timestamp: id,
+                })
+                .collect();
             s.next_liquidity_event_id = 60_003;
         });
 
         assert_eq!(get_amm_swap_event_count(), 50_003);
-        assert_eq!(get_amm_swap_events(0, 2).iter().map(|e| e.id).collect::<Vec<_>>(), vec![50_000, 50_001]);
-        assert_eq!(get_amm_swap_events(50_002, 2).iter().map(|e| e.id).collect::<Vec<_>>(), vec![50_002]);
+        assert_eq!(
+            get_amm_swap_events(0, 2)
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![50_000, 50_001]
+        );
+        assert_eq!(
+            get_amm_swap_events(50_002, 2)
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![50_002]
+        );
         assert!(get_amm_swap_events(50_003, 2).is_empty());
 
         assert_eq!(get_amm_liquidity_event_count(), 60_003);
-        assert_eq!(get_amm_liquidity_events(0, 2).iter().map(|e| e.id).collect::<Vec<_>>(), vec![60_000, 60_001]);
-        assert_eq!(get_amm_liquidity_events(60_002, 2).iter().map(|e| e.id).collect::<Vec<_>>(), vec![60_002]);
+        assert_eq!(
+            get_amm_liquidity_events(0, 2)
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![60_000, 60_001]
+        );
+        assert_eq!(
+            get_amm_liquidity_events(60_002, 2)
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![60_002]
+        );
         assert!(get_amm_liquidity_events(60_003, 2).is_empty());
     }
 }

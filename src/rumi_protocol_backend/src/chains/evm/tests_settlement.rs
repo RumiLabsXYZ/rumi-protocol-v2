@@ -2417,3 +2417,131 @@ mod chain_claim_tests {
         assert_eq!(claim.pending_native, 0);
     }
 }
+
+#[cfg(test)]
+mod ambiguous_broadcast_claim_tests {
+    use super::super::settlement::{
+        claim_settlement_submit_in_state, record_settlement_replacement_in_state, select_next_op,
+        select_next_evm_op_with_submit_filter, ClaimSettlementSubmitError, OpAction,
+    };
+    use crate::chains::config::ChainId;
+    use crate::chains::multi_chain_state::MultiChainState;
+    use crate::chains::settlement_queue::{SettlementOp, SettlementOpKind, SettlementOpStatus};
+
+    const CHAIN: ChainId = ChainId(71);
+
+    fn state_with_queued_mint() -> (MultiChainState, u64) {
+        let mut state = MultiChainState::default();
+        let op_id = state
+            .settlement_queues
+            .entry(CHAIN)
+            .or_default()
+            .enqueue(SettlementOp::new(
+                SettlementOpKind::Mint {
+                    recipient: "0xrecipient".into(),
+                    amount_e8s: 7,
+                    vault_id: 4,
+                },
+                "mint-4".into(),
+                1,
+            ))
+            .expect("enqueue mint");
+        (state, op_id)
+    }
+
+    #[test]
+    fn ambiguous_mint_broadcast_is_claimed_before_reply_and_cannot_allocate_a_new_nonce() {
+        let (mut state, op_id) = state_with_queued_mint();
+        claim_settlement_submit_in_state(&mut state, CHAIN, op_id, 10, "0xlocal".into(), 9)
+            .expect("persist exact signed hash and nonce before send");
+
+        // Model provider acceptance followed by a lost reply, then a worker
+        // restart: the durable op is Inflight, so the submit CAS rejects a
+        // fresh nonce and recovery/confirm can inspect the saved hash.
+        let replay =
+            claim_settlement_submit_in_state(&mut state, CHAIN, op_id, 20, "0xsecond".into(), 10)
+                .expect_err("must not sign/broadcast this op at a new nonce");
+        assert_eq!(replay, ClaimSettlementSubmitError::NotQueued);
+        let op = &state.settlement_queues[&CHAIN].pending[&op_id];
+        assert_eq!(op.submit_nonce, Some(9));
+        assert_eq!(op.receipt_tx_hash_candidates(), vec!["0xlocal"]);
+        assert!(matches!(op.status, SettlementOpStatus::Inflight { .. }));
+
+        record_settlement_replacement_in_state(
+            &mut state,
+            CHAIN,
+            op_id,
+            30,
+            "0xreplacement".into(),
+        )
+        .expect("same-nonce replacement hash recorded before broadcast");
+        let op = &state.settlement_queues[&CHAIN].pending[&op_id];
+        assert_eq!(op.submit_nonce, Some(9));
+        assert_eq!(
+            op.receipt_tx_hash_candidates(),
+            vec!["0xreplacement", "0xlocal"]
+        );
+    }
+
+    #[test]
+    fn legacy_queued_ambiguous_op_holds_evm_chain_until_reconciled() {
+        let mut queue = crate::chains::settlement_queue::SettlementQueueV1::default();
+        let mut legacy = SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xlegacy".into(),
+                amount_e8s: 5,
+                vault_id: 1,
+            },
+            "legacy-mint".into(),
+            1,
+        );
+        let mut value = serde_json::to_value(&legacy).expect("encode legacy-shaped op");
+        value.as_object_mut().unwrap().remove("evm_submit_claimed");
+        legacy = serde_json::from_value(value).expect("decode old persisted op");
+        assert_eq!(legacy.evm_submit_claimed, None);
+        let legacy_id = queue.enqueue(legacy).expect("legacy row");
+        let fresh_id = queue
+            .enqueue(SettlementOp::new(
+                SettlementOpKind::NativeWithdrawal {
+                    recipient: "0xfresh".into(),
+                    amount_e18: 3,
+                    vault_id: 2,
+                },
+                "fresh-withdrawal".into(),
+                2,
+            ))
+            .expect("fresh row");
+
+        assert_eq!(
+            select_next_evm_op_with_submit_filter(&queue, |_, _| false),
+            None,
+            "unknown legacy submit state blocks every new EVM send on this chain"
+        );
+        assert_eq!(
+            select_next_op(&queue),
+            Some((legacy_id, OpAction::Submit)),
+            "shared chain-agnostic selector remains unchanged for Solana"
+        );
+        let mut state = MultiChainState::default();
+        state.settlement_queues.insert(CHAIN, queue);
+        let err =
+            claim_settlement_submit_in_state(&mut state, CHAIN, legacy_id, 3, "0xnew".into(), 8)
+                .expect_err("missing legacy marker is never treated as proof of unsubmitted");
+        assert_eq!(err, ClaimSettlementSubmitError::NotQueued);
+
+        // Once independent evidence has reconciled the legacy row to a
+        // terminal state, the EVM queue can safely submit later work.
+        state
+            .settlement_queues
+            .get_mut(&CHAIN)
+            .unwrap()
+            .pending
+            .get_mut(&legacy_id)
+            .unwrap()
+            .mark_failed("operator evidence reconciliation".into(), 4);
+        assert_eq!(
+            select_next_evm_op_with_submit_filter(&state.settlement_queues[&CHAIN], |_, _| false),
+            Some((fresh_id, OpAction::Submit))
+        );
+    }
+}

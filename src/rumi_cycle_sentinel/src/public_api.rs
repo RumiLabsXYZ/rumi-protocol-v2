@@ -473,15 +473,15 @@ fn governance_proposal_page(
     PublicPage::try_new(proposals, next_cursor).map_err(|_| AuthenticatedQueryError::TooManyItems)
 }
 
-/// Signer-only funding-operation inventory. `resolve_unknown_as_spent` and
-/// `attach_block_proof` both require an `operation_id`, but the anonymous
-/// public telemetry projections (`list_public_topups_at`,
-/// `list_public_samples_at`, ...) intentionally omit operation ids and any
-/// in-flight/quarantined detail. This is the only surface that gives a
-/// signer the exact id plus full immutable snapshot and current state of
-/// every live unresolved/quarantined `FundingOperation`, so reconciliation
-/// never has to guess an id. Cursor encoding is shared with the other
-/// bounded history queries but remains opaque to callers.
+/// Signer-only bounded reconciliation inventory. The anonymous public
+/// telemetry projections intentionally omit operation ids and unresolved
+/// state; this page gives a signer each exact id, immutable snapshot, and
+/// current state without permitting any mutation. For Cycles Ledger
+/// quarantines, this is visibility only: a withdrawal block or `Duplicate`
+/// response does not establish management-canister delivery, and the
+/// inventory must not be treated as authority to release the held
+/// reservation. Cursor encoding is shared with the other bounded history
+/// queries but remains opaque to callers.
 pub fn list_unresolved_funding_operations_at(
     caller: Principal,
     cursor: Option<String>,
@@ -1047,6 +1047,44 @@ mod tests {
         assert_eq!(page.items[0].id(), 1);
         assert_eq!(page.items[0].target(), target);
         assert_eq!(page.items[0].state(), op.state());
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn list_unresolved_inventory_exposes_quarantined_cycles_without_claiming_delivery() {
+        let global = test_global_policy();
+        let signer = test_signer(6);
+        set_only_signer(signer, global.clone());
+        let target = register_test_target(3, &global);
+        let submitted = test_operation(7, target, &global)
+            .record_attempt(
+                types::FundingOperationState::Cycles(types::CyclesFundingState::Submitted),
+                11,
+                types::FundingAttemptResultClass::Indeterminate,
+            )
+            .unwrap();
+        let quarantined = submitted
+            .record_attempt(
+                types::FundingOperationState::Cycles(types::CyclesFundingState::Quarantined),
+                12,
+                types::FundingAttemptResultClass::Indeterminate,
+            )
+            .unwrap();
+        state::insert_operation(quarantined.clone()).unwrap();
+
+        let page = list_unresolved_funding_operations_at(signer, None, 1).unwrap();
+        assert_eq!(page.items.len(), 1);
+        let visible = &page.items[0];
+        assert_eq!(visible.id(), quarantined.id());
+        assert_eq!(visible.state(), quarantined.state());
+        assert_eq!(visible.rail(), types::FundingRail::CyclesLedger);
+        assert_eq!(visible.rail_arguments().embedded_destination(), target);
+        assert_eq!(visible.reserved_amount_cycles(), 10);
+        assert_eq!(visible.confirmed_block_index(), None);
+        assert_eq!(
+            visible.attempts().as_slice().last().unwrap().result_class,
+            types::FundingAttemptResultClass::Indeterminate
+        );
         assert_eq!(page.next_cursor, None);
     }
 

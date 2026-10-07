@@ -20,6 +20,8 @@ use std::collections::BTreeSet;
 /// Maximum number of automatic retries before a failed obligation is held for
 /// manual recovery. At 5-second intervals, 60 retries = 5 minutes of attempts.
 pub const MAX_PENDING_RETRIES: u8 = 60;
+/// Bound automatic ICRC-3 proof attempts for retained Redemption V2 refund candidates.
+pub const MAX_REDEMPTION_V2_REFUND_RECEIPT_ATTEMPTS: u8 = 3;
 
 thread_local! {
     static THREE_USD_REFUND_IN_FLIGHT: RefCell<BTreeSet<u128>> = RefCell::new(BTreeSet::new());
@@ -50,6 +52,17 @@ fn pending_refund_is_automatically_retryable(retry_count: u8) -> bool {
     retry_count < MAX_PENDING_RETRIES
 }
 
+fn redemption_v2_refund_receipt_work_exists(state: &crate::state::State) -> bool {
+    let has_candidate = |journal: &crate::state::RedemptionV2Journal| {
+        journal.refund_block_index.is_some()
+            && !journal.refund_receipt_verified
+            && journal.refund_receipt_verification_attempts
+                < MAX_REDEMPTION_V2_REFUND_RECEIPT_ATTEMPTS
+    };
+    state.redemption_v2_active.values().any(has_candidate)
+        || state.redemption_v2_latest_result.values().any(has_candidate)
+}
+
 fn pending_transfer_work_exists(state: &crate::state::State) -> bool {
     state.pending_margin_transfers.iter().any(|(_, transfer)| {
         !state
@@ -66,10 +79,19 @@ fn pending_transfer_work_exists(state: &crate::state::State) -> bool {
                 && !transfer.held_for_manual_retry
                 && !transfer.reconciliation_required
         })
-        || state
-            .pending_refunds
-            .values()
-            .any(|refund| pending_refund_is_automatically_retryable(refund.retry_count))
+        || state.pending_refunds.iter().any(|(burn_block, refund)| {
+            pending_refund_is_automatically_retryable(refund.retry_count)
+                && matches!(
+                    crate::state::redemption_v2_refund_candidate_status(
+                        state,
+                        *burn_block,
+                        *refund,
+                    ),
+                    crate::state::RedemptionV2RefundCandidateStatus::Legacy
+                        | crate::state::RedemptionV2RefundCandidateStatus::NeedsReceipt
+                )
+        })
+        || redemption_v2_refund_receipt_work_exists(state)
         || state.pending_3usd_refunds.iter().any(|(nonce, refund)| {
             pending_refund_is_automatically_retryable(refund.retry_count)
                 && three_usd_refund_dispatch_is_retryable(
@@ -120,13 +142,14 @@ pub fn has_retryable_pending_transfer_work() -> bool {
 
 #[cfg(test)]
 mod pending_transfer_restart_tests {
-    use super::{pending_transfer_work_exists, MAX_PENDING_RETRIES};
+    use super::{pending_transfer_work_exists, MAX_PENDING_RETRIES, MAX_REDEMPTION_V2_REFUND_RECEIPT_ATTEMPTS};
     use crate::numeric::ICP;
     use crate::state::{
         PayoutProofKind, PendingMarginTransfer, PendingRefund, State,
         ThreeUsdReserveIngressJournal, ThreeUsdReserveIngressKey, ThreeUsdReserveIngressPayout,
         ThreeUsdReserveIngressPayoutTuple, ThreeUsdReserveIngressPhase,
-        ThreeUsdReserveIngressRequest,
+        ThreeUsdReserveIngressRequest, RedemptionV2Journal, RedemptionV2Phase,
+        RedemptionV2Request,
     };
     use candid::Principal;
     use icrc_ledger_types::icrc1::account::Account;
@@ -148,6 +171,66 @@ mod pending_transfer_restart_tests {
         assert!(pending_transfer_work_exists(&state));
 
         state.pending_refunds.get_mut(&42).unwrap().retry_count = MAX_PENDING_RETRIES;
+        assert!(!pending_transfer_work_exists(&state));
+    }
+
+    #[test]
+    fn restart_predicate_rearms_bounded_v2_refund_receipt_proofs() {
+        let owner = Principal::from_slice(&[0x71]);
+        let mut state = State::default();
+        state.pending_refunds.insert(
+            42,
+            PendingRefund {
+                user: owner,
+                amount_e8s: 100,
+                retry_count: MAX_PENDING_RETRIES,
+                op_nonce: 7,
+            },
+        );
+        state.redemption_v2_latest_result.insert(
+            owner,
+            RedemptionV2Journal {
+                owner,
+                request: RedemptionV2Request {
+                    request_id: 1,
+                    amount_e8s: 500,
+                    expected_collateral_type: Principal::from_slice(&[0x73]),
+                    min_net_collateral_raw: 1,
+                },
+                tuple: crate::SpLiquidationStablePullTuple {
+                    op_nonce: 6,
+                    ledger: Principal::from_slice(&[0x74]),
+                    from: Account { owner, subaccount: None },
+                    spender: Account { owner, subaccount: None },
+                    to: Account { owner, subaccount: None },
+                    amount_raw: 500,
+                    fee_raw: 0,
+                    memo: vec![],
+                    created_at_time_ns: 6,
+                },
+                phase: RedemptionV2Phase::Committed,
+                block_index: Some(42),
+                refund_amount_e8s: Some(100),
+                refund_op_nonce: Some(7),
+                refund_block_index: Some(99),
+                refund_receipt_verified: false,
+                refund_receipt_verification_attempts: 0,
+                result: None,
+                last_error: None,
+            },
+        );
+        assert!(pending_transfer_work_exists(&state));
+        state
+            .redemption_v2_latest_result
+            .get_mut(&owner)
+            .unwrap()
+            .refund_receipt_verification_attempts = MAX_REDEMPTION_V2_REFUND_RECEIPT_ATTEMPTS;
+        assert!(!pending_transfer_work_exists(&state));
+        state
+            .redemption_v2_latest_result
+            .get_mut(&owner)
+            .unwrap()
+            .refund_receipt_verified = true;
         assert!(!pending_transfer_work_exists(&state));
     }
 
@@ -262,7 +345,7 @@ fn hold_legacy_3usd_refund_for_protocol_paid_policy(
     }
 }
 
-fn hold_pending_legacy_3usd_refunds_for_protocol_paid_policy() -> usize {
+pub fn hold_pending_legacy_3usd_refunds_for_protocol_paid_policy() -> usize {
     mutate_state(|state| {
         let keys = state
             .pending_3usd_refund_journals
@@ -2139,7 +2222,39 @@ pub fn record_per_collateral_redemption_fee(
 ) {
     if let Some(config) = state.collateral_configs.get_mut(collateral_type) {
         config.current_base_rate = base_fee;
-        config.last_redemption_time = now_ns;
+        config.last_redemption_time = redemption_timestamp_after_update(
+            config.last_redemption_time,
+            now_ns,
+        );
+    }
+}
+
+fn redemption_timestamp_after_update(previous_ns: u64, now_ns: u64) -> u64 {
+    // The redemption base rate decays in whole-hour intervals. Do not let a
+    // smaller redemption inside that interval restart its decay clock.
+    const DECAY_INTERVAL_NS: u64 = 3_600_000_000_000;
+    let elapsed_ns = now_ns.saturating_sub(previous_ns);
+    let completed_intervals = elapsed_ns / DECAY_INTERVAL_NS;
+    previous_ns.saturating_add(completed_intervals.saturating_mul(DECAY_INTERVAL_NS))
+}
+
+#[cfg(test)]
+mod redemption_fee_timestamp_tests {
+    use super::redemption_timestamp_after_update;
+
+    #[test]
+    fn frequent_redemptions_do_not_restart_decay_clock_each_time() {
+        const HOUR_NS: u64 = 3_600_000_000_000;
+        let initial = 1_000;
+        let mut last_redemption_time = initial;
+        let mut now = initial;
+        for _ in 0..24 {
+            now += HOUR_NS - 1_000_000_000;
+            last_redemption_time = redemption_timestamp_after_update(last_redemption_time, now);
+        }
+        assert_eq!(last_redemption_time, initial + 23 * HOUR_NS);
+        assert!(now - last_redemption_time < HOUR_NS);
+        assert_eq!(redemption_timestamp_after_update(9_000, 1_000), 9_000);
     }
 }
 
@@ -3267,7 +3382,18 @@ pub async fn process_pending_transfer() {
     let pending_refunds = read_state(|s| {
         s.pending_refunds
             .iter()
-            .filter(|(_, refund)| pending_refund_is_automatically_retryable(refund.retry_count))
+            .filter(|(burn_block, refund)| {
+                pending_refund_is_automatically_retryable(refund.retry_count)
+                    && matches!(
+                        crate::state::redemption_v2_refund_candidate_status(
+                            s,
+                            **burn_block,
+                            **refund,
+                        ),
+                        crate::state::RedemptionV2RefundCandidateStatus::Legacy
+                            | crate::state::RedemptionV2RefundCandidateStatus::NeedsReceipt
+                    )
+            })
             .map(|(k, v)| (*k, *v))
             .collect::<Vec<(u64, crate::state::PendingRefund)>>()
     });
@@ -3285,14 +3411,53 @@ pub async fn process_pending_transfer() {
                     "[refunding] icUSD refund settled for {} (burn block {}, refund block {}, amount {})",
                     refund.user, icusd_block_index, block_index, refund.amount_e8s
                 );
-                mutate_state(|s| {
-                    s.pending_refunds.remove(&icusd_block_index);
+                let outcome = mutate_state(|s| {
+                    if s.pending_refunds.get(&icusd_block_index) != Some(&refund) {
+                        return "changed";
+                    }
+                    match crate::state::redemption_v2_refund_candidate_status(
+                        s,
+                        icusd_block_index,
+                        refund,
+                    ) {
+                        crate::state::RedemptionV2RefundCandidateStatus::NeedsReceipt
+                        | crate::state::RedemptionV2RefundCandidateStatus::CandidatePending
+                            if crate::state::record_redemption_v2_refund_candidate(
+                                s,
+                                icusd_block_index,
+                                refund,
+                                block_index,
+                            ) =>
+                        {
+                            // This is only a candidate transfer block. Keep the
+                            // refund row until V2 verifies the exact ICRC-3 mint.
+                            crate::storage::save_state_to_stable(s);
+                            "candidate"
+                        }
+                        crate::state::RedemptionV2RefundCandidateStatus::Legacy => {
+                            s.pending_refunds.remove(&icusd_block_index);
+                            crate::storage::save_state_to_stable(s);
+                            "legacy"
+                        }
+                        _ => {
+                            // Missing/mismatched pre-dispatch identity must not
+                            // be guessed after an external transfer succeeded.
+                            if let Some(row) = s.pending_refunds.get_mut(&icusd_block_index) {
+                                row.retry_count = MAX_PENDING_RETRIES;
+                            }
+                            crate::storage::save_state_to_stable(s);
+                            "held"
+                        }
+                    }
                 });
+                if outcome == "held" {
+                    log!(INFO, "[refunding] successful transfer for burn block {} lacks a matching persisted Redemption V2 refund identity; row held for reconciliation", icusd_block_index);
+                }
             }
             Err(error) => {
                 log!(
                     INFO,
-                    "[refunding] icUSD refund failed for {} (burn block {}): {}. Will retry.",
+                    "[refunding] icUSD refund outcome unresolved for {} (burn block {}): {}",
                     refund.user,
                     icusd_block_index,
                     error
@@ -3303,6 +3468,27 @@ pub async fn process_pending_transfer() {
                         let icusd_ledger = read_state(|s| s.icusd_ledger_principal);
                         crate::management::set_cached_fee(icusd_ledger, expected_fee_u64);
                     }
+                } else if matches!(error, TransferError::TooOld)
+                    && matches!(
+                        read_state(|s| crate::state::redemption_v2_refund_candidate_status(
+                            s,
+                            icusd_block_index,
+                            refund,
+                        )),
+                        crate::state::RedemptionV2RefundCandidateStatus::NeedsReceipt
+                    )
+                {
+                    // A lost reply can hide an accepted mint. Once this exact
+                    // tuple is TooOld, retries add no evidence; the owner can
+                    // attach an exact ledger block through V2 reconciliation.
+                    mutate_state(|s| {
+                        if let Some(row) = s.pending_refunds.get_mut(&icusd_block_index) {
+                            if *row == refund {
+                                row.retry_count = MAX_PENDING_RETRIES;
+                                crate::storage::save_state_to_stable(s);
+                            }
+                        }
+                    });
                 } else {
                     let retries = mutate_state(|s| {
                         if let Some(r) = s.pending_refunds.get_mut(&icusd_block_index) {
@@ -3352,6 +3538,10 @@ pub async fn process_pending_transfer() {
     for nonce_key in pending_3usd_refunds {
         dispatch_pending_3usd_refund(nonce_key).await;
     }
+
+    // Verify and finalize retained Redemption V2 refund candidates, bounded
+    // to a fixed page so timer work cannot grow with historical refund rows.
+    crate::vault::process_pending_redemption_v2_refund_receipts(100).await;
 
     // Schedule another run if needed, but with better timing
     if has_retryable_pending_transfer_work() {

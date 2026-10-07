@@ -33,6 +33,10 @@ pub enum AssetType {
     CKUSDT,
     /// ckUSDC stablecoin (for vault repayment/liquidation)
     CKUSDC,
+    /// Other ICRC asset, identified by its ledger canister principal.
+    /// The ledger address is part of the identity so balances from different
+    /// collateral ledgers cannot be combined or withdrawn from the wrong one.
+    Other(Principal),
 }
 
 /// A record of a deposit to the treasury
@@ -64,11 +68,37 @@ pub enum DepositTypeV1 {
     InterestRevenue,
 }
 
+/// Asset labels returned by legacy V1 query methods. Keep this variant set
+/// frozen; extensible ledger-addressed assets are available from V2 methods.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum AssetTypeV1 {
+    ICUSD,
+    ICP,
+    CKBTC,
+    CKUSDT,
+    CKUSDC,
+}
+
+impl TryFrom<AssetType> for AssetTypeV1 {
+    type Error = AssetType;
+
+    fn try_from(asset: AssetType) -> Result<Self, Self::Error> {
+        match asset {
+            AssetType::ICUSD => Ok(Self::ICUSD),
+            AssetType::ICP => Ok(Self::ICP),
+            AssetType::CKBTC => Ok(Self::CKBTC),
+            AssetType::CKUSDT => Ok(Self::CKUSDT),
+            AssetType::CKUSDC => Ok(Self::CKUSDC),
+            other @ AssetType::Other(_) => Err(other),
+        }
+    }
+}
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct DepositRecordV1 {
     pub id: u64,
     pub deposit_type: DepositTypeV1,
-    pub asset_type: AssetType,
+    pub asset_type: AssetTypeV1,
     pub amount: u64,
     pub block_index: u64,
     pub timestamp: u64,
@@ -87,7 +117,8 @@ impl From<DepositRecord> for DepositRecordV1 {
         Self {
             id: record.id,
             deposit_type,
-            asset_type: record.asset_type,
+            asset_type: AssetTypeV1::try_from(record.asset_type)
+                .expect("V1 projection filters extensible asset types"),
             amount: record.amount,
             block_index: record.block_index,
             timestamp: record.timestamp,
@@ -113,7 +144,7 @@ pub struct TreasuryStatus {
     /// Total number of deposits
     pub total_deposits: u64,
     /// Balances by asset type
-    pub balances: Vec<(AssetType, AssetBalance)>,
+    pub balances: Vec<(AssetTypeV1, AssetBalance)>,
     /// Controller principal (pre-SNS) or governance canister (post-SNS)
     pub controller: Principal,
     /// Whether treasury is paused
@@ -227,11 +258,11 @@ pub struct TreasuryEvent {
 pub enum TreasuryActionV1 {
     Deposit {
         deposit_type: DepositTypeV1,
-        asset_type: AssetType,
+        asset_type: AssetTypeV1,
         amount: u64,
     },
     Withdraw {
-        asset_type: AssetType,
+        asset_type: AssetTypeV1,
         amount: u64,
         to: Principal,
     },
@@ -265,7 +296,8 @@ impl From<TreasuryEvent> for TreasuryEventV1 {
                         unreachable!("unknown events are filtered")
                     }
                 },
-                asset_type,
+                asset_type: AssetTypeV1::try_from(asset_type)
+                    .expect("V1 projection filters extensible asset types"),
                 amount,
             },
             TreasuryAction::Withdraw {
@@ -273,7 +305,8 @@ impl From<TreasuryEvent> for TreasuryEventV1 {
                 amount,
                 to,
             } => TreasuryActionV1::Withdraw {
-                asset_type,
+                asset_type: AssetTypeV1::try_from(asset_type)
+                    .expect("V1 projection filters extensible asset types"),
                 amount,
                 to,
             },
@@ -302,11 +335,20 @@ pub struct UnknownTreasuryEvidencePageV2 {
     pub events: Vec<UnknownTreasuryEvidenceV2>,
 }
 
+/// Full treasury balance projection with exact ledger-addressed asset IDs.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct TreasuryStatusV2 {
+    pub total_deposits: u64,
+    pub balances: Vec<(AssetType, AssetBalance)>,
+    pub controller: Principal,
+    pub is_paused: bool,
+}
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct PendingWithdrawalV2 {
     pub request_id: u64,
     pub caller: Principal,
-    pub asset_type: AssetType,
+    pub asset_type: AssetTypeV1,
     pub ledger: Principal,
     pub amount: u64,
     pub to: Principal,
@@ -319,10 +361,34 @@ pub struct PendingWithdrawalV2 {
     pub status: String,
 }
 
+/// Full pending withdrawal projection. V3 adds ledger-addressed assets while
+/// the existing V2 method keeps its original five-variant response contract.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PendingWithdrawalV3 {
+    pub request_id: u64,
+    pub caller: Principal,
+    pub asset_type: AssetType,
+    pub ledger: Principal,
+    pub amount: u64,
+    pub to: Principal,
+    pub memo: Option<String>,
+    pub created_at_time: u64,
+    pub send_amount: u64,
+    pub fee: u64,
+    pub dispatch_attempts: Option<u32>,
+    pub status: String,
+}
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct PendingWithdrawalsPageV2 {
     pub withdrawals: Vec<PendingWithdrawalV2>,
     /// First stable request key to inspect on the next page.
+    pub next_start: Option<u64>,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PendingWithdrawalsPageV3 {
+    pub withdrawals: Vec<PendingWithdrawalV3>,
     pub next_start: Option<u64>,
 }
 
@@ -342,7 +408,7 @@ mod v1_wire_compat_tests {
     struct OldDepositRecord {
         id: u64,
         deposit_type: OldDepositType,
-        asset_type: AssetType,
+        asset_type: AssetTypeV1,
         amount: u64,
         block_index: u64,
         timestamp: u64,
@@ -354,7 +420,7 @@ mod v1_wire_compat_tests {
         let response = vec![DepositRecordV1 {
             id: 7,
             deposit_type: DepositTypeV1::BorrowingFee,
-            asset_type: AssetType::ICP,
+            asset_type: AssetTypeV1::ICP,
             amount: 123,
             block_index: 456,
             timestamp: 789,

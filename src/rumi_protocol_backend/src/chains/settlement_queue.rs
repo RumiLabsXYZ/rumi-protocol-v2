@@ -107,6 +107,12 @@ pub struct SettlementOp {
     pub idempotency_key: String,
     pub enqueued_at_ns: u64,
     pub status: SettlementOpStatus,
+    /// EVM submit claim marker. New ops start as `Some(false)` and transition
+    /// to `Some(true)` atomically with the pre-broadcast hash/nonce claim.
+    /// `None` identifies legacy snapshots that may contain an ambiguous send
+    /// while still Queued; EVM must hold those for operator reconciliation.
+    #[serde(default)]
+    pub evm_submit_claimed: Option<bool>,
     /// Hash of the most recent on-chain submission for this op, set by the
     /// Phase-1b Timer-D worker when the op goes Inflight. Read back on the
     /// Confirm path to fetch the receipt. `#[serde(default)]` keeps any
@@ -144,6 +150,7 @@ impl SettlementOp {
             idempotency_key,
             enqueued_at_ns: now_ns,
             status: SettlementOpStatus::Queued,
+            evm_submit_claimed: Some(false),
             last_tx_hash: None,
             submit_nonce: None,
             tx_hash_candidates: Vec::new(),
@@ -402,6 +409,42 @@ mod tests {
             .values()
             .find(|o| matches!(o.status, SettlementOpStatus::Queued));
         assert!(live.is_some());
+    }
+
+    #[test]
+    fn legacy_operation_decode_has_no_evm_submit_claim() {
+        #[derive(serde::Serialize)]
+        struct LegacySettlementOp {
+            op_id: u64,
+            kind: SettlementOpKind,
+            idempotency_key: String,
+            enqueued_at_ns: u64,
+            status: SettlementOpStatus,
+            last_tx_hash: Option<String>,
+            submit_nonce: Option<u64>,
+            tx_hash_candidates: Vec<String>,
+            chain_payout_uses_pending_reservation: Option<bool>,
+        }
+        let op = mint_op("legacy");
+        let legacy = LegacySettlementOp {
+            op_id: op.op_id,
+            kind: op.kind,
+            idempotency_key: op.idempotency_key,
+            enqueued_at_ns: op.enqueued_at_ns,
+            status: op.status,
+            last_tx_hash: op.last_tx_hash,
+            submit_nonce: op.submit_nonce,
+            tx_hash_candidates: op.tx_hash_candidates,
+            chain_payout_uses_pending_reservation: op.chain_payout_uses_pending_reservation,
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut bytes).expect("encode legacy CBOR op");
+        let decoded: SettlementOp =
+            ciborium::de::from_reader(bytes.as_slice()).expect("decode legacy op");
+        assert_eq!(decoded.evm_submit_claimed, None);
+
+        let fresh = mint_op("fresh");
+        assert_eq!(fresh.evm_submit_claimed, Some(false));
     }
 
     #[test]

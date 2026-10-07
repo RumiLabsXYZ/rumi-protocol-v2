@@ -1,7 +1,8 @@
 use crate::types::{
     AssetBalance, AssetType, BalancesSnapshot, DepositRecord, DepositRecordV1, DepositType,
-    PendingWithdrawalV2, PendingWithdrawalsPageV2, TreasuryAction, TreasuryEvent, TreasuryEventV1,
-    TreasuryInitArgs, UnknownTreasuryEvidencePageV2, UnknownTreasuryEvidenceV2,
+    PendingWithdrawalV2, PendingWithdrawalV3, PendingWithdrawalsPageV2, PendingWithdrawalsPageV3,
+    TreasuryAction, TreasuryEvent, TreasuryEventV1, TreasuryInitArgs,
+    UnknownTreasuryEvidencePageV2, UnknownTreasuryEvidenceV2,
 };
 use candid::Principal;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
@@ -10,6 +11,16 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 type Memory = VirtualMemory<DefaultMemoryImpl>;
+
+fn event_has_other_asset(event: &TreasuryEvent) -> bool {
+    match &event.action {
+        TreasuryAction::Deposit { asset_type, .. }
+        | TreasuryAction::Withdraw { asset_type, .. } => {
+            matches!(asset_type, crate::types::AssetType::Other(_))
+        }
+        TreasuryAction::SetPaused { .. } | TreasuryAction::LegacyUnknown { .. } => false,
+    }
+}
 
 // Stable memory layout.
 //
@@ -73,21 +84,52 @@ const MEMORY_LAYOUT: &[(u8, &str)] = &[
 struct DepositReceiptKey {
     asset_tag: u8,
     block_index: u64,
+    /// Present only for `Other` assets. Optional so keys written before this
+    /// field was introduced continue to decode from stable memory.
+    #[serde(default)]
+    other_ledger: Option<Principal>,
 }
 
 impl DepositReceiptKey {
     fn new(asset_type: &AssetType, block_index: u64) -> Self {
-        let asset_tag = match asset_type {
-            AssetType::ICUSD => 0,
-            AssetType::ICP => 1,
-            AssetType::CKBTC => 2,
-            AssetType::CKUSDT => 3,
-            AssetType::CKUSDC => 4,
+        let (asset_tag, other_ledger) = match asset_type {
+            AssetType::ICUSD => (0, None),
+            AssetType::ICP => (1, None),
+            AssetType::CKBTC => (2, None),
+            AssetType::CKUSDT => (3, None),
+            AssetType::CKUSDC => (4, None),
+            AssetType::Other(ledger) => (5, Some(*ledger)),
         };
         Self {
             asset_tag,
             block_index,
+            other_ledger,
         }
+    }
+}
+
+#[cfg(test)]
+mod deposit_receipt_key_compat_tests {
+    use super::DepositReceiptKey;
+    use candid::{CandidType, Deserialize};
+
+    #[derive(CandidType, Deserialize)]
+    struct PreviousDepositReceiptKey {
+        asset_tag: u8,
+        block_index: u64,
+    }
+
+    #[test]
+    fn previous_receipt_key_decodes_with_no_other_ledger() {
+        let old = PreviousDepositReceiptKey {
+            asset_tag: 4,
+            block_index: 99,
+        };
+        let bytes = candid::encode_one(old).unwrap();
+        let decoded: DepositReceiptKey = candid::decode_one(&bytes).unwrap();
+        assert_eq!(decoded.asset_tag, 4);
+        assert_eq!(decoded.block_index, 99);
+        assert_eq!(decoded.other_ledger, None);
     }
 }
 
@@ -550,9 +592,23 @@ impl TreasuryState {
         let start_key = start.unwrap_or(0);
         self.events
             .range(start_key..)
-            .filter(|(_, event)| !matches!(event.action, TreasuryAction::LegacyUnknown { .. }))
+            .filter(|(_, event)| {
+                !matches!(event.action, TreasuryAction::LegacyUnknown { .. })
+                    && !event_has_other_asset(event)
+            })
             .take(limit)
             .map(|(_, event)| TreasuryEventV1::from(event))
+            .collect()
+    }
+
+    /// Full event projection for callers that support address-bound assets.
+    pub fn get_events_v2(&self, start: Option<u64>, limit: usize) -> Vec<TreasuryEvent> {
+        let start_key = start.unwrap_or(0);
+        self.events
+            .range(start_key..)
+            .filter(|(_, event)| !matches!(event.action, TreasuryAction::LegacyUnknown { .. }))
+            .take(limit)
+            .map(|(_, event)| event)
             .collect()
     }
 
@@ -582,10 +638,9 @@ impl TreasuryState {
         };
 
         // Update balance for this asset type
-        if let Some(balance) = self.balances.get_mut(&record.asset_type) {
-            balance.total += record.amount;
-            balance.available += record.amount;
-        }
+        let balance = self.balances.entry(record.asset_type.clone()).or_default();
+        balance.total += record.amount;
+        balance.available += record.amount;
 
         // Store the deposit record
         let mut final_record = record;
@@ -704,10 +759,12 @@ impl TreasuryState {
     }
 
     fn has_ambiguous_deposit_receipt(&self, asset_type: &AssetType) -> bool {
-        let asset_tag = DepositReceiptKey::new(asset_type, 0).asset_tag;
-        self.deposit_receipts
-            .iter()
-            .any(|(key, receipt)| key.asset_tag == asset_tag && receipt.ambiguous_conflict)
+        let key = DepositReceiptKey::new(asset_type, 0);
+        self.deposit_receipts.iter().any(|(candidate, receipt)| {
+            candidate.asset_tag == key.asset_tag
+                && candidate.other_ledger == key.other_ledger
+                && receipt.ambiguous_conflict
+        })
     }
 
     fn has_unrecognized_deposit(&self) -> bool {
@@ -987,9 +1044,23 @@ impl TreasuryState {
         let start_key = start.unwrap_or(0);
         self.deposits
             .range(start_key..)
-            .filter(|(_, record)| !matches!(record.deposit_type, DepositType::LegacyUnknown { .. }))
+            .filter(|(_, record)| {
+                !matches!(record.deposit_type, DepositType::LegacyUnknown { .. })
+                    && !matches!(record.asset_type, crate::types::AssetType::Other(_))
+            })
             .take(limit)
             .map(|(_, record)| DepositRecordV1::from(record))
+            .collect()
+    }
+
+    /// Full deposit projection for callers that support address-bound assets.
+    pub fn get_deposits_v2(&self, start: Option<u64>, limit: usize) -> Vec<DepositRecord> {
+        let start_key = start.unwrap_or(0);
+        self.deposits
+            .range(start_key..)
+            .filter(|(_, record)| !matches!(record.deposit_type, DepositType::LegacyUnknown { .. }))
+            .take(limit)
+            .map(|(_, record)| record)
             .collect()
     }
 
@@ -1060,7 +1131,7 @@ impl TreasuryState {
                 Some(PendingWithdrawalV2 {
                     request_id,
                     caller: record.caller,
-                    asset_type: record.asset_type,
+                    asset_type: crate::types::AssetTypeV1::try_from(record.asset_type).ok()?,
                     ledger: record.ledger,
                     amount: record.amount,
                     to: record.to,
@@ -1074,6 +1145,48 @@ impl TreasuryState {
             })
             .collect();
         PendingWithdrawalsPageV2 {
+            withdrawals,
+            next_start,
+        }
+    }
+
+    pub fn get_pending_withdrawals_v3(
+        &self,
+        start: Option<u64>,
+        limit: usize,
+    ) -> PendingWithdrawalsPageV3 {
+        let start_key = start.unwrap_or(0);
+        let scanned: Vec<_> = self
+            .withdrawal_requests
+            .range(start_key..)
+            .take(limit)
+            .collect();
+        let next_start = scanned.last().and_then(|(key, _)| key.checked_add(1));
+        let withdrawals = scanned
+            .into_iter()
+            .filter_map(|(request_id, record)| {
+                let status = match record.status {
+                    WithdrawalRequestStatus::Pending => "pending",
+                    WithdrawalRequestStatus::LegacyUnknown => "legacy_unknown",
+                    WithdrawalRequestStatus::Complete { .. } => return None,
+                };
+                Some(PendingWithdrawalV3 {
+                    request_id,
+                    caller: record.caller,
+                    asset_type: record.asset_type,
+                    ledger: record.ledger,
+                    amount: record.amount,
+                    to: record.to,
+                    memo: record.memo,
+                    created_at_time: record.created_at_time,
+                    send_amount: record.send_amount,
+                    fee: record.fee,
+                    dispatch_attempts: record.dispatch_attempts,
+                    status: status.into(),
+                })
+            })
+            .collect();
+        PendingWithdrawalsPageV3 {
             withdrawals,
             next_start,
         }
@@ -1196,10 +1309,9 @@ pub fn restore_state() {
                 // since treasury has had no withdrawals yet).
                 let mut b = empty_balances();
                 for (_id, record) in deposits.iter() {
-                    if let Some(balance) = b.get_mut(&record.asset_type) {
-                        balance.total += record.amount;
-                        balance.available += record.amount;
-                    }
+                    let balance = b.entry(record.asset_type).or_default();
+                    balance.total += record.amount;
+                    balance.available += record.amount;
                 }
                 b
             } else {

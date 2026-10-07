@@ -410,6 +410,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
+    'get_3usd_account_migration_blockers' : IDL.Func(
+        [],
+        [IDL.Variant({ 'Ok' : IDL.Vec(IDL.Text), 'Err' : AmmError })],
+        ['query'],
+      ),
     'get_amm_admin_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_amm_admin_events' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],

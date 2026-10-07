@@ -26,19 +26,17 @@ use rumi_protocol_backend::{
     vault::{CandidVault, OpenVaultSuccess, VaultArg},
     CollateralInterestInfo, CollateralSnapshot, CollateralTotals, EventTypeFilter,
     EventsByPrincipalPagedResponse, Fees, ForwardFilteredEventsResponse, GetEventsArg,
-    GetEventsFilteredResponse, GetSnapshotsArg, InterestSplitArg, PerCollateralRateCurve,
-    PreparedRedemptionOffer, ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus,
-    RedeemQuotedRequest, RedemptionError, RedemptionOfferRefreshError, RedemptionPreview,
-    RedemptionQueue, RedemptionQuote, RedemptionResult, ReserveBalance, ReserveRedemptionResult,
-    LiquidatableVaultInfo, StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee,
-    SupplyAudit, SupplyAuditEntry,
-    ThreeUsdReserveIngressV2PendingStage, ThreeUsdReserveIngressV2Status,
-    ThreeUsdReserveIngressV2StatusView,
-    VaultArgWithToken, VaultHistoryPagedResponse, VaultsPageResponse, XrpSpAbsorbPreflight,
-    XrpSpAbsorbRequest, XrpSpAbsorbResult, MAX_EVENTS_BY_PRINCIPAL_LEGACY,
-    MAX_EVENTS_BY_PRINCIPAL_OUTPUT, MAX_EVENTS_BY_PRINCIPAL_SCAN, MAX_VAULTS_LEGACY_PAGE,
-    MAX_VAULTS_PAGE_LIMIT, MAX_VAULT_HISTORY, PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS,
-    TREASURY_STATS_SNAPSHOT_TTL_NANOS,
+    GetEventsFilteredResponse, GetSnapshotsArg, InterestSplitArg, LiquidatableVaultInfo,
+    PerCollateralRateCurve, PreparedRedemptionOffer, ProtocolArg, ProtocolError, ProtocolSnapshot,
+    ProtocolStatus, RedeemQuotedRequest, RedemptionError, RedemptionOfferRefreshError,
+    RedemptionPreview, RedemptionQueue, RedemptionQuote, RedemptionResult, ReserveBalance,
+    ReserveRedemptionResult, StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee,
+    SupplyAudit, SupplyAuditEntry, ThreeUsdReserveIngressV2PendingStage,
+    ThreeUsdReserveIngressV2Status, ThreeUsdReserveIngressV2StatusView, VaultArgWithToken,
+    VaultHistoryPagedResponse, VaultsPageResponse, XrpSpAbsorbPreflight, XrpSpAbsorbRequest,
+    XrpSpAbsorbResult, MAX_EVENTS_BY_PRINCIPAL_LEGACY, MAX_EVENTS_BY_PRINCIPAL_OUTPUT,
+    MAX_EVENTS_BY_PRINCIPAL_SCAN, MAX_VAULTS_LEGACY_PAGE, MAX_VAULTS_PAGE_LIMIT, MAX_VAULT_HISTORY,
+    PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS, TREASURY_STATS_SNAPSHOT_TTL_NANOS,
 };
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::prelude::ToPrimitive;
@@ -70,6 +68,21 @@ pub struct PendingIcusdRefundView {
     pub amount_e8s: u64,
     pub retry_count: u8,
     pub held_for_manual_retry: bool,
+}
+
+/// Exact owner-visible identity for locating an unresolved V2 refund mint in
+/// ledger history after the deduplication window has expired.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RedemptionV2RefundStatusV1 {
+    pub request_id: u128,
+    pub burn_block_index: u64,
+    pub ledger: Principal,
+    pub amount_e8s: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub candidate_block_index: Option<u64>,
+    pub receipt_verified: bool,
+    pub automatic_proof_attempts: u8,
 }
 
 #[derive(
@@ -142,7 +155,41 @@ pub struct PendingTreasuryPaymentCursor {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum TreasuryAssetTypeV1 {
+    ICP,
+    CKUSDC,
+    CKUSDT,
+    ICUSD,
+    CKBTC,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PendingTreasuryPaymentView {
+    pub operation_id: u128,
+    pub kind: rumi_protocol_backend::state::TreasuryPaymentKind,
+    pub phase: rumi_protocol_backend::state::TreasuryPaymentPhase,
+    pub ledger: Principal,
+    pub recipient: Principal,
+    pub amount_e8s: u64,
+    pub fee_e8s: Option<u64>,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub deposit_type: rumi_protocol_backend::treasury::DepositType,
+    /// Frozen V1 projection. New treasury asset identities are exposed only
+    /// by the V2 inventory endpoint to preserve old Candid clients.
+    pub asset_type: TreasuryAssetTypeV1,
+    pub dispatch_attempts: u8,
+    pub last_dispatch_at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingTreasuryPaymentPage {
+    pub items: Vec<PendingTreasuryPaymentView>,
+    pub next_cursor: Option<PendingTreasuryPaymentCursor>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingTreasuryPaymentViewV2 {
     pub operation_id: u128,
     pub kind: rumi_protocol_backend::state::TreasuryPaymentKind,
     pub phase: rumi_protocol_backend::state::TreasuryPaymentPhase,
@@ -159,8 +206,8 @@ pub struct PendingTreasuryPaymentView {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct PendingTreasuryPaymentPage {
-    pub items: Vec<PendingTreasuryPaymentView>,
+pub struct PendingTreasuryPaymentPageV2 {
+    pub items: Vec<PendingTreasuryPaymentViewV2>,
     pub next_cursor: Option<PendingTreasuryPaymentCursor>,
 }
 
@@ -310,6 +357,84 @@ fn pending_treasury_payment_page_in_state(
             .collect(),
     };
     let truncated = rows.len() > MAX_PENDING_TREASURY_SCAN;
+    let mut items = Vec::new();
+    let mut last_scanned = None;
+    let mut stopped_before_batch_end = false;
+    for (index, (operation_id, payment)) in rows
+        .iter()
+        .take(MAX_PENDING_TREASURY_SCAN)
+        .enumerate()
+    {
+        last_scanned = Some(*operation_id);
+        let Some(asset_type) = treasury_asset_type_v1(&payment.asset_type) else {
+            continue;
+        };
+        items.push(PendingTreasuryPaymentView {
+            operation_id: *operation_id,
+            kind: payment.kind,
+            phase: payment.phase.clone(),
+            ledger: payment.ledger,
+            recipient: payment.recipient.owner,
+            amount_e8s: payment.amount_e8s,
+            fee_e8s: payment.fee_e8s,
+            memo: payment.memo.clone(),
+            created_at_time_ns: payment.created_at_time_ns,
+            deposit_type: payment.deposit_type.clone(),
+            asset_type,
+            dispatch_attempts: payment.dispatch_attempts,
+            last_dispatch_at_ns: payment.last_dispatch_at_ns,
+        });
+        if items.len() == limit {
+            stopped_before_batch_end = index + 1 < rows.len().min(MAX_PENDING_TREASURY_SCAN);
+            break;
+        }
+    }
+    let next_cursor = if truncated || stopped_before_batch_end {
+        last_scanned.map(|operation_id| PendingTreasuryPaymentCursor { operation_id })
+    } else {
+        None
+    };
+    PendingTreasuryPaymentPage { items, next_cursor }
+}
+
+fn treasury_asset_type_v1(
+    asset_type: &rumi_protocol_backend::treasury::AssetType,
+) -> Option<TreasuryAssetTypeV1> {
+    use rumi_protocol_backend::treasury::AssetType;
+    Some(match asset_type {
+        AssetType::ICP => TreasuryAssetTypeV1::ICP,
+        AssetType::CKUSDC => TreasuryAssetTypeV1::CKUSDC,
+        AssetType::CKUSDT => TreasuryAssetTypeV1::CKUSDT,
+        AssetType::ICUSD => TreasuryAssetTypeV1::ICUSD,
+        AssetType::CKBTC => TreasuryAssetTypeV1::CKBTC,
+        AssetType::Other(_) => return None,
+    })
+}
+
+fn pending_treasury_payment_page_v2_in_state(
+    state: &State,
+    cursor: Option<PendingTreasuryPaymentCursor>,
+    limit: u16,
+) -> PendingTreasuryPaymentPageV2 {
+    let limit = limit.clamp(1, MAX_PENDING_TREASURY_PAGE_SIZE) as usize;
+    let rows: Vec<_> = match cursor {
+        Some(cursor) => state
+            .pending_treasury_payments
+            .range((
+                std::ops::Bound::Excluded(cursor.operation_id),
+                std::ops::Bound::Unbounded,
+            ))
+            .take(MAX_PENDING_TREASURY_SCAN + 1)
+            .map(|(id, payment)| (*id, payment.clone()))
+            .collect(),
+        None => state
+            .pending_treasury_payments
+            .iter()
+            .take(MAX_PENDING_TREASURY_SCAN + 1)
+            .map(|(id, payment)| (*id, payment.clone()))
+            .collect(),
+    };
+    let truncated = rows.len() > MAX_PENDING_TREASURY_SCAN;
     let visible = rows
         .iter()
         .take(limit)
@@ -317,7 +442,7 @@ fn pending_treasury_payment_page_in_state(
         .collect::<Vec<_>>();
     let items = visible
         .iter()
-        .map(|(operation_id, payment)| PendingTreasuryPaymentView {
+        .map(|(operation_id, payment)| PendingTreasuryPaymentViewV2 {
             operation_id: *operation_id,
             kind: payment.kind,
             phase: payment.phase.clone(),
@@ -334,15 +459,78 @@ fn pending_treasury_payment_page_in_state(
         })
         .collect();
     let next_cursor = if truncated || rows.len() > limit {
-        visible
-            .last()
-            .map(|(operation_id, _)| PendingTreasuryPaymentCursor {
-                operation_id: *operation_id,
-            })
+        visible.last().map(|(operation_id, _)| PendingTreasuryPaymentCursor {
+            operation_id: *operation_id,
+        })
     } else {
         None
     };
-    PendingTreasuryPaymentPage { items, next_cursor }
+    PendingTreasuryPaymentPageV2 { items, next_cursor }
+}
+
+#[cfg(test)]
+mod pending_treasury_asset_compat_tests {
+    use super::*;
+    use icrc_ledger_types::icrc1::account::Account;
+    use rumi_protocol_backend::state::{PendingTreasuryPayment, TreasuryPaymentKind, TreasuryPaymentPhase};
+    use rumi_protocol_backend::treasury::{AssetType, DepositType};
+
+    fn payment(operation_id: u128, asset_type: AssetType) -> PendingTreasuryPayment {
+        let principal = Principal::from_slice(&[1]);
+        PendingTreasuryPayment {
+            operation_id,
+            transfer_nonce: operation_id,
+            kind: TreasuryPaymentKind::InterestStablecoinTransfer,
+            ledger: Principal::from_slice(&[2]),
+            from_owner: principal,
+            from_subaccount: None,
+            recipient: Account { owner: Principal::from_slice(&[3]), subaccount: None },
+            amount_e8s: 500,
+            fee_e8s: None,
+            memo: vec![4],
+            created_at_time_ns: 5,
+            deposit_type: DepositType::InterestRevenue,
+            asset_type,
+            deposit_memo: None,
+            phase: TreasuryPaymentPhase::TransferPending,
+            dispatch_attempts: 1,
+            last_dispatch_at_ns: 6,
+        }
+    }
+
+    #[test]
+    fn v1_skips_other_assets_without_skipping_later_supported_rows() {
+        let mut state = State::default();
+        state.pending_treasury_payments.insert(1, payment(1, AssetType::ICP));
+        state.pending_treasury_payments.insert(2, payment(2, AssetType::Other(Principal::from_slice(&[9]))));
+        state.pending_treasury_payments.insert(3, payment(3, AssetType::Other(Principal::from_slice(&[10]))));
+        state.pending_treasury_payments.insert(4, payment(4, AssetType::CKUSDC));
+
+        let first = pending_treasury_payment_page_in_state(&state, None, 1);
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].operation_id, 1);
+        assert_eq!(first.next_cursor.unwrap().operation_id, 1);
+
+        let second = pending_treasury_payment_page_in_state(&state, first.next_cursor, 1);
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].operation_id, 4);
+        assert_eq!(second.items[0].asset_type, TreasuryAssetTypeV1::CKUSDC);
+        assert_eq!(second.next_cursor, None);
+    }
+
+    #[test]
+    fn v2_retains_other_ledger_identity_while_v1_omits_it() {
+        let mut state = State::default();
+        let ledger = Principal::from_slice(&[9]);
+        state.pending_treasury_payments.insert(7, payment(7, AssetType::Other(ledger)));
+
+        let v1 = pending_treasury_payment_page_in_state(&state, None, 10);
+        assert!(v1.items.is_empty());
+        assert_eq!(v1.next_cursor, None);
+        let v2 = pending_treasury_payment_page_v2_in_state(&state, None, 10);
+        assert_eq!(v2.items.len(), 1);
+        assert_eq!(v2.items[0].asset_type, AssetType::Other(ledger));
+    }
 }
 
 fn hold_unpinned_redemption_payouts(
@@ -1391,6 +1579,15 @@ fn post_upgrade(arg: ProtocolArg) {
     validate_collateral_state(&state);
 
     replace_state(state);
+    let held_legacy_3usd_refunds =
+        rumi_protocol_backend::hold_pending_legacy_3usd_refunds_for_protocol_paid_policy();
+    if held_legacy_3usd_refunds > 0 {
+        log!(
+            INFO,
+            "[post_upgrade] held {} legacy 3USD refunds pending owner-scoped reconciliation",
+            held_legacy_3usd_refunds
+        );
+    }
 
     // CoinGecko snapshots before provider-time caching used local fetch time,
     // which could overstate source freshness. Force a provider-timestamped
@@ -2075,6 +2272,75 @@ fn enable_chain(
     }
 }
 
+fn chain_has_live_rail_state(
+    state: &rumi_protocol_backend::chains::multi_chain_state::MultiChainState,
+    chain_id: rumi_protocol_backend::chains::config::ChainId,
+) -> bool {
+    state.chain_supplies.get(&chain_id).copied().unwrap_or(0) > 0
+        || state.chain_vaults.values().any(|vault| {
+            vault.collateral_chain == chain_id
+                && vault.status
+                    != rumi_protocol_backend::chains::vault::ChainVaultStatus::Closed
+        })
+        || state
+            .settlement_queues
+            .get(&chain_id)
+            .is_some_and(|queue| !queue.pending.is_empty())
+}
+
+fn chain_config_update_is_idempotent(
+    config: &rumi_protocol_backend::chains::config::ChainConfig,
+    update: &rumi_protocol_backend::chains::config::UpdateChainConfigArg,
+) -> bool {
+    use rumi_protocol_backend::chains::config::GasStrategy;
+
+    fn same_gas_strategy(left: &GasStrategy, right: &GasStrategy) -> bool {
+        match (left, right) {
+            (
+                GasStrategy::EvmEip1559 {
+                    max_priority_fee_gwei: lp,
+                    max_fee_gwei_ceiling: lf,
+                },
+                GasStrategy::EvmEip1559 {
+                    max_priority_fee_gwei: rp,
+                    max_fee_gwei_ceiling: rf,
+                },
+            ) => lp == rp && lf == rf,
+            (
+                GasStrategy::EvmLegacy { gas_price_gwei_ceiling: left },
+                GasStrategy::EvmLegacy { gas_price_gwei_ceiling: right },
+            ) => left == right,
+            (
+                GasStrategy::SolanaPriorityFee { lamports_per_cu_ceiling: left },
+                GasStrategy::SolanaPriorityFee { lamports_per_cu_ceiling: right },
+            ) => left == right,
+            (GasStrategy::NotApplicable, GasStrategy::NotApplicable) => true,
+            _ => false,
+        }
+    }
+
+    let endpoints_match = update.rpc_endpoints.as_ref().is_none_or(|endpoints| {
+        let mut seen = std::collections::BTreeSet::new();
+        let normalized: Vec<_> = endpoints
+            .iter()
+            .filter(|endpoint| seen.insert(endpoint.as_str()))
+            .cloned()
+            .collect();
+        normalized == config.rpc_endpoints
+    });
+    update.display_name.as_ref().is_none_or(|name| name == &config.display_name)
+        && endpoints_match
+        && update.finality_depth.is_none_or(|depth| depth == config.finality_depth)
+        && update
+            .gas_strategy
+            .as_ref()
+            .is_none_or(|gas| same_gas_strategy(gas, &config.gas_strategy))
+        && update
+            .min_quorum_providers
+            .as_ref()
+            .is_none_or(|value| value == &config.min_quorum_providers)
+}
+
 #[candid_method(update)]
 #[update]
 fn set_chain_config(
@@ -2087,6 +2353,17 @@ fn set_chain_config(
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
     let result = mutate_state(|s| {
+        if chain_has_live_rail_state(&s.multi_chain, chain_id)
+            && !s
+                .multi_chain
+                .chain_configs
+                .get(&chain_id)
+                .is_some_and(|config| chain_config_update_is_idempotent(config, &update))
+        {
+            return Err(rumi_protocol_backend::chains::config::ChainAdminError::InvalidConfig(
+                "cannot change chain configuration while vaults, supply, or settlement work is live; disable the chain and drain it first".into(),
+            ));
+        }
         rumi_protocol_backend::chains::admin::update_chain_config_in_state(
             &mut s.multi_chain,
             chain_id,
@@ -3009,6 +3286,170 @@ fn chain_has_active_settlement_op(chain: rumi_protocol_backend::chains::config::
             .map(|q| q.has_active_op())
             .unwrap_or(false)
     })
+}
+
+const MAX_LEGACY_EVM_SETTLEMENT_BLOCKERS_PAGE: u16 = 100;
+const MAX_LEGACY_EVM_SETTLEMENT_HASHES_PER_OP: usize = 16;
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LegacyEvmSettlementBlockerV1 {
+    pub op_id: u64,
+    pub kind: String,
+    pub status: String,
+    pub known_tx_hashes: Vec<String>,
+    pub hashes_truncated: bool,
+    pub submit_nonce: Option<u64>,
+    pub evm_submit_claimed: Option<bool>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LegacyEvmSettlementBlockersPageV1 {
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub blockers: Vec<LegacyEvmSettlementBlockerV1>,
+    pub next_cursor: Option<u64>,
+}
+
+fn legacy_evm_settlement_blockers_page_in_state(
+    state: &rumi_protocol_backend::chains::multi_chain_state::MultiChainState,
+    chain_id: rumi_protocol_backend::chains::config::ChainId,
+    after_op_id: Option<u64>,
+    limit: u16,
+) -> LegacyEvmSettlementBlockersPageV1 {
+    use rumi_protocol_backend::chains::settlement_queue::{SettlementOpKind, SettlementOpStatus};
+
+    let page_limit = limit.clamp(1, MAX_LEGACY_EVM_SETTLEMENT_BLOCKERS_PAGE) as usize;
+    let queue = state.settlement_queues.get(&chain_id);
+    let mut legacy = queue
+        .into_iter()
+        .flat_map(|q| q.pending.iter())
+        .filter(|(op_id, op)| {
+            after_op_id.map_or(true, |cursor| **op_id > cursor)
+                && matches!(op.status, SettlementOpStatus::Queued)
+                && op.evm_submit_claimed.is_none()
+        })
+        .take(page_limit + 1)
+        .map(|(&op_id, op)| {
+            let kind = match &op.kind {
+                SettlementOpKind::Mint { .. } => "Mint",
+                SettlementOpKind::InterestMint { .. } => "InterestMint",
+                SettlementOpKind::NativeWithdrawal { .. } => "NativeWithdrawal",
+                SettlementOpKind::Burn { .. } => "Burn",
+                SettlementOpKind::LiquidationSwap { .. } => "LiquidationSwap",
+                SettlementOpKind::ChainCollateralPayout { .. } => "ChainCollateralPayout",
+            };
+            let mut known_tx_hashes = Vec::with_capacity(MAX_LEGACY_EVM_SETTLEMENT_HASHES_PER_OP);
+            if let Some(hash) = &op.last_tx_hash {
+                known_tx_hashes.push(hash.clone());
+            }
+            for hash in op.tx_hash_candidates.iter().rev() {
+                if known_tx_hashes.len() >= MAX_LEGACY_EVM_SETTLEMENT_HASHES_PER_OP {
+                    break;
+                }
+                if !known_tx_hashes.iter().any(|known| known == hash) {
+                    known_tx_hashes.push(hash.clone());
+                }
+            }
+            let hashes_truncated = op.tx_hash_candidates.len()
+                + usize::from(op.last_tx_hash.is_some())
+                > MAX_LEGACY_EVM_SETTLEMENT_HASHES_PER_OP;
+            LegacyEvmSettlementBlockerV1 {
+                op_id,
+                kind: kind.to_string(),
+                status: "Queued".to_string(),
+                known_tx_hashes,
+                hashes_truncated,
+                submit_nonce: op.submit_nonce,
+                evm_submit_claimed: op.evm_submit_claimed,
+            }
+        });
+    let blockers: Vec<_> = legacy.by_ref().take(page_limit).collect();
+    let has_more = legacy.next().is_some();
+    let next_cursor = has_more
+        .then(|| blockers.last().map(|entry| entry.op_id))
+        .flatten();
+    LegacyEvmSettlementBlockersPageV1 {
+        chain_id,
+        blockers,
+        next_cursor,
+    }
+}
+
+/// Controller-only inventory of hashless/ambiguous legacy queued EVM rows.
+/// These rows hold every new settlement send for their chain until independent
+/// transaction evidence is reconciled. Returns at most 100 operations and at
+/// most 16 candidate hashes per operation; `next_cursor` pages by op ID.
+#[candid_method(query)]
+#[query]
+fn get_legacy_evm_settlement_blockers(
+    chain_id: rumi_protocol_backend::chains::config::ChainId,
+    after_op_id: Option<u64>,
+    limit: u16,
+) -> Result<LegacyEvmSettlementBlockersPageV1, ProtocolError> {
+    require_controller()?;
+    Ok(read_state(|s| {
+        legacy_evm_settlement_blockers_page_in_state(&s.multi_chain, chain_id, after_op_id, limit)
+    }))
+}
+
+#[cfg(test)]
+mod legacy_evm_settlement_blocker_query_tests {
+    use super::legacy_evm_settlement_blockers_page_in_state;
+    use rumi_protocol_backend::chains::config::ChainId;
+    use rumi_protocol_backend::chains::multi_chain_state::MultiChainState;
+    use rumi_protocol_backend::chains::settlement_queue::{
+        SettlementOp, SettlementOpKind, SettlementQueueV1,
+    };
+
+    #[test]
+    fn blocker_inventory_is_bounded_paginated_and_contains_reconciliation_fields() {
+        let chain = ChainId(10143);
+        let mut state = MultiChainState::default();
+        let mut queue = SettlementQueueV1::default();
+        for (key, kind) in [
+            (
+                "legacy-mint",
+                SettlementOpKind::Mint {
+                    recipient: "0xrecipient".into(),
+                    amount_e8s: 10,
+                    vault_id: 7,
+                },
+            ),
+            (
+                "legacy-withdrawal",
+                SettlementOpKind::NativeWithdrawal {
+                    recipient: "0xrecipient".into(),
+                    amount_e18: 20,
+                    vault_id: 8,
+                },
+            ),
+        ] {
+            let mut op = SettlementOp::new(kind, key.to_string(), 1);
+            op.evm_submit_claimed = None;
+            op.submit_nonce = Some(9);
+            op.tx_hash_candidates = vec!["0xolder".into(), "0xlatest".into()];
+            op.last_tx_hash = Some("0xlatest".into());
+            queue.enqueue(op).expect("enqueue fixture");
+        }
+        state.settlement_queues.insert(chain, queue);
+
+        let first = legacy_evm_settlement_blockers_page_in_state(&state, chain, None, 1);
+        assert_eq!(first.blockers.len(), 1);
+        assert_eq!(first.blockers[0].kind, "Mint");
+        assert_eq!(first.blockers[0].status, "Queued");
+        assert_eq!(
+            first.blockers[0].known_tx_hashes,
+            vec!["0xlatest", "0xolder"]
+        );
+        assert_eq!(first.blockers[0].submit_nonce, Some(9));
+        assert_eq!(first.blockers[0].evm_submit_claimed, None);
+        assert_eq!(first.next_cursor, Some(first.blockers[0].op_id));
+
+        let second =
+            legacy_evm_settlement_blockers_page_in_state(&state, chain, first.next_cursor, 1);
+        assert_eq!(second.blockers.len(), 1);
+        assert_eq!(second.blockers[0].kind, "NativeWithdrawal");
+        assert_eq!(second.next_cursor, None);
+    }
 }
 
 /// Public, derived-only readiness projection for a foreign EVM chain.
@@ -4054,9 +4495,20 @@ fn set_chain_contract(
             "invalid EVM address: {address}"
         )));
     }
-    mutate_state(|s| {
+    let bind_result = mutate_state(|s| {
+        let current = s.multi_chain.chain_contracts.get(&chain);
+        if current.is_some_and(|current| current == &address) {
+            return Ok(());
+        }
+        if chain_has_live_rail_state(&s.multi_chain, chain) {
+            return Err(ProtocolError::ChainAdmin(
+                "cannot change the bound contract while vaults, supply, or settlement work is live; drain the chain first".into(),
+            ));
+        }
         s.multi_chain.chain_contracts.insert(chain, address.clone());
+        Ok(())
     });
+    bind_result?;
     log!(
         INFO,
         "[set_chain_contract] chain={:?} address={}",
@@ -6814,6 +7266,32 @@ fn get_my_pending_icusd_refunds() -> Vec<PendingIcusdRefundView> {
     })
 }
 
+#[candid_method(query)]
+#[query]
+fn get_my_redemption_v2_refund_status() -> Option<RedemptionV2RefundStatusV1> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous() {
+        return None;
+    }
+    read_state(|state| {
+        state.redemption_v2_active.get(&caller)
+            .or_else(|| state.redemption_v2_latest_result.get(&caller))
+            .and_then(|row| {
+                Some(RedemptionV2RefundStatusV1 {
+                    request_id: row.request.request_id,
+                    burn_block_index: row.block_index?,
+                    ledger: row.tuple.ledger,
+                    amount_e8s: row.refund_amount_e8s?,
+                    memo: rumi_protocol_backend::management::nonce_to_memo(row.refund_op_nonce?).0.to_vec(),
+                    created_at_time_ns: rumi_protocol_backend::management::nonce_to_created_at_time(row.refund_op_nonce?),
+                    candidate_block_index: row.refund_block_index,
+                    receipt_verified: row.refund_receipt_verified,
+                    automatic_proof_attempts: row.refund_receipt_verification_attempts,
+                })
+            })
+    })
+}
+
 #[cfg(test)]
 mod pending_icusd_refund_visibility_tests {
     use super::pending_refund_visible_to;
@@ -6835,7 +7313,41 @@ mod pending_icusd_refund_visibility_tests {
 async fn redeem_quoted(_request: RedeemQuotedRequest) -> Result<RedemptionResult, RedemptionError> {
     Err(ProtocolError::TemporarilyUnavailable(
         "Redemptions are paused until transfer recovery is available; no icUSD was pulled".into(),
-    ).into())
+    )
+    .into())
+}
+
+/// Request-ID-bound redemption. Replays must submit the same payload and ID;
+/// unresolved burns are recovered against the stored ledger tuple.
+#[candid_method(update)]
+#[update]
+async fn redeem_quoted_v2(
+    request: rumi_protocol_backend::state::RedemptionV2Request,
+) -> Result<RedemptionResult, RedemptionError> {
+    rumi_protocol_backend::vault::redeem_quoted_v2(request).await
+}
+
+/// Settle an unresolved V2 compensation from an exact ledger mint block.
+/// This never dispatches a new transfer and remains available after dedup expiry.
+#[candid_method(update)]
+#[update]
+async fn reconcile_redemption_v2_refund(
+    request_id: u128,
+    burn_block_index: u64,
+    refund_block_index: u64,
+) -> Result<bool, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let _guard = rumi_protocol_backend::guard::GuardPrincipal::new(
+        caller,
+        "reconcile_redemption_v2_refund",
+    )?;
+    rumi_protocol_backend::vault::reconcile_redemption_v2_refund(
+        caller,
+        request_id,
+        burn_block_index,
+        refund_block_index,
+    )
+    .await
 }
 
 #[candid_method(update)]
@@ -7223,7 +7735,8 @@ async fn repay_to_vault_with_stable_v2(
 ) -> Result<rumi_protocol_backend::StableRepaymentV2StatusView, ProtocolError> {
     let owner = ic_cdk::api::caller();
     let replay = rumi_protocol_backend::state::read_state(|s| {
-        s.stable_repayment_v2_active.get(&owner)
+        s.stable_repayment_v2_active
+            .get(&owner)
             .or_else(|| s.stable_repayment_v2_latest_result.get(&owner))
             .is_some_and(|row| row.request_id == request_id)
     });
@@ -7239,13 +7752,25 @@ fn get_my_stable_repayment_v2_request_state(
 ) -> Result<rumi_protocol_backend::StableRepaymentV2RequestState, ProtocolError> {
     let owner = ic_cdk::api::caller();
     rumi_protocol_backend::state::read_state(|s| {
-        let next_request_id = s.stable_repayment_v2_high_water.get(&owner).copied().unwrap_or(0)
+        let next_request_id = s
+            .stable_repayment_v2_high_water
+            .get(&owner)
+            .copied()
+            .unwrap_or(0)
             .checked_add(1)
-            .ok_or_else(|| ProtocolError::GenericError("stable repayment request ID sequence exhausted".into()))?;
+            .ok_or_else(|| {
+                ProtocolError::GenericError("stable repayment request ID sequence exhausted".into())
+            })?;
         Ok(rumi_protocol_backend::StableRepaymentV2RequestState {
             next_request_id,
-            active_request: s.stable_repayment_v2_active.get(&owner).map(|row| row.status_view()),
-            latest_result: s.stable_repayment_v2_latest_result.get(&owner).map(|row| row.status_view()),
+            active_request: s
+                .stable_repayment_v2_active
+                .get(&owner)
+                .map(|row| row.status_view()),
+            latest_result: s
+                .stable_repayment_v2_latest_result
+                .get(&owner)
+                .map(|row| row.status_view()),
         })
     })
 }
@@ -7256,10 +7781,17 @@ fn get_my_stable_repayment_v2_status(
     request_id: u128,
 ) -> Option<rumi_protocol_backend::StableRepaymentV2StatusView> {
     let owner = ic_cdk::api::caller();
-    rumi_protocol_backend::state::read_state(|s| s.stable_repayment_v2_active.get(&owner)
-        .filter(|row| row.request_id == request_id)
-        .or_else(|| s.stable_repayment_v2_latest_result.get(&owner).filter(|row| row.request_id == request_id))
-        .map(|row| row.status_view()))
+    rumi_protocol_backend::state::read_state(|s| {
+        s.stable_repayment_v2_active
+            .get(&owner)
+            .filter(|row| row.request_id == request_id)
+            .or_else(|| {
+                s.stable_repayment_v2_latest_result
+                    .get(&owner)
+                    .filter(|row| row.request_id == request_id)
+            })
+            .map(|row| row.status_view())
+    })
 }
 
 #[candid_method(update)]
@@ -7268,7 +7800,8 @@ async fn attach_my_stable_repayment_v2_candidate(
     request_id: u128,
     block_index: u64,
 ) -> Result<rumi_protocol_backend::StableRepaymentV2StatusView, ProtocolError> {
-    rumi_protocol_backend::vault::attach_stable_repayment_v2_candidate(request_id, block_index).await
+    rumi_protocol_backend::vault::attach_stable_repayment_v2_candidate(request_id, block_index)
+        .await
 }
 
 #[candid_method(query)]
@@ -7495,26 +8028,32 @@ async fn open_vault_with_deposit_v2(
     validate_call().await?;
     validate_mode()?;
     validate_freshness_for_collateral(collateral_type).await?;
-    check_postcondition(rumi_protocol_backend::vault::open_vault_with_deposit_v2(
-        borrow_amount, collateral_type, request_id,
-    ).await)
+    check_postcondition(
+        rumi_protocol_backend::vault::open_vault_with_deposit_v2(
+            borrow_amount,
+            collateral_type,
+            request_id,
+        )
+        .await,
+    )
 }
 
 /// Add margin from the caller's observed aggregate deposit balance with a
 /// caller-stable request ID for retry and recovery.
 #[candid_method(update)]
 #[update]
-async fn add_margin_with_deposit_v2(
-    vault_id: u64,
-    request_id: u128,
-) -> Result<u64, ProtocolError> {
+async fn add_margin_with_deposit_v2(vault_id: u64, request_id: u128) -> Result<u64, ProtocolError> {
     validate_call().await?;
-    check_postcondition(rumi_protocol_backend::vault::add_margin_with_deposit_v2(vault_id, request_id).await)
+    check_postcondition(
+        rumi_protocol_backend::vault::add_margin_with_deposit_v2(vault_id, request_id).await,
+    )
 }
 
 #[candid_method(query)]
 #[query]
-fn get_my_push_deposit_sweep(ledger: Principal) -> Option<rumi_protocol_backend::PushDepositSweepStatusView> {
+fn get_my_push_deposit_sweep(
+    ledger: Principal,
+) -> Option<rumi_protocol_backend::PushDepositSweepStatusView> {
     rumi_protocol_backend::vault::get_push_deposit_sweep_status(ic_cdk::api::caller(), ledger)
 }
 
@@ -7524,7 +8063,11 @@ fn list_my_push_deposit_sweeps(
     after_ledger: Option<Principal>,
     limit: u16,
 ) -> Vec<rumi_protocol_backend::PushDepositSweepStatusView> {
-    rumi_protocol_backend::vault::list_push_deposit_sweep_statuses(ic_cdk::api::caller(), after_ledger, limit)
+    rumi_protocol_backend::vault::list_push_deposit_sweep_statuses(
+        ic_cdk::api::caller(),
+        after_ledger,
+        limit,
+    )
 }
 
 #[candid_method(query)]
@@ -7547,9 +8090,14 @@ async fn recover_my_push_deposit_sweep(
     request_id: u128,
 ) -> Result<rumi_protocol_backend::state::PushDepositSweepResult, ProtocolError> {
     validate_frozen_only_recovery_call()?;
-    check_postcondition(rumi_protocol_backend::vault::recover_push_deposit_sweep(
-        ic_cdk::api::caller(), ledger, request_id,
-    ).await)
+    check_postcondition(
+        rumi_protocol_backend::vault::recover_push_deposit_sweep(
+            ic_cdk::api::caller(),
+            ledger,
+            request_id,
+        )
+        .await,
+    )
 }
 
 #[candid_method(update)]
@@ -7560,9 +8108,15 @@ async fn attach_my_push_deposit_sweep_receipt(
     block_index: u64,
 ) -> Result<rumi_protocol_backend::state::PushDepositSweepResult, ProtocolError> {
     validate_frozen_only_recovery_call()?;
-    check_postcondition(rumi_protocol_backend::vault::attach_push_deposit_sweep_receipt(
-        ic_cdk::api::caller(), ledger, request_id, block_index,
-    ).await)
+    check_postcondition(
+        rumi_protocol_backend::vault::attach_push_deposit_sweep_receipt(
+            ic_cdk::api::caller(),
+            ledger,
+            request_id,
+            block_index,
+        )
+        .await,
+    )
 }
 
 #[candid_method(update)]
@@ -7621,8 +8175,7 @@ async fn repay_and_close_vault(
 #[update]
 async fn liquidate_vault(_vault_id: u64) -> Result<SuccessWithFee, ProtocolError> {
     Err(ProtocolError::TemporarilyUnavailable(
-        "Manual liquidation is temporarily unavailable pending receipt-backed V2 admission"
-            .into(),
+        "Manual liquidation is temporarily unavailable pending receipt-backed V2 admission".into(),
     ))
 }
 
@@ -7642,8 +8195,7 @@ async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
 #[update]
 async fn liquidate_vault_partial(_arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     Err(ProtocolError::TemporarilyUnavailable(
-        "Manual liquidation is temporarily unavailable pending receipt-backed V2 admission"
-            .into(),
+        "Manual liquidation is temporarily unavailable pending receipt-backed V2 admission".into(),
     ))
 }
 
@@ -7674,9 +8226,11 @@ async fn liquidate_vault_v2(
         s.manual_liquidation_v2_active
             .get(&caller)
             .or_else(|| s.manual_liquidation_v2_latest_result.get(&caller))
-            .is_some_and(|row| row.request_id == request_id
-                && row.vault_id == vault_id
-                && row.route == rumi_protocol_backend::ManualLiquidationRoute::FullIcusd)
+            .is_some_and(|row| {
+                row.request_id == request_id
+                    && row.vault_id == vault_id
+                    && row.route == rumi_protocol_backend::ManualLiquidationRoute::FullIcusd
+            })
     });
     if !replay {
         validate_call().await?;
@@ -7698,10 +8252,12 @@ async fn liquidate_vault_partial_v2(
         s.manual_liquidation_v2_active
             .get(&caller)
             .or_else(|| s.manual_liquidation_v2_latest_result.get(&caller))
-            .is_some_and(|row| row.request_id == request_id
-                && row.vault_id == arg.vault_id
-                && row.requested_amount_e8s == arg.amount
-                && row.route == rumi_protocol_backend::ManualLiquidationRoute::PartialIcusd)
+            .is_some_and(|row| {
+                row.request_id == request_id
+                    && row.vault_id == arg.vault_id
+                    && row.requested_amount_e8s == arg.amount
+                    && row.route == rumi_protocol_backend::ManualLiquidationRoute::PartialIcusd
+            })
     });
     if !replay {
         validate_call().await?;
@@ -7723,12 +8279,15 @@ async fn liquidate_vault_partial_with_stable_v2(
         s.manual_liquidation_v2_active
             .get(&caller)
             .or_else(|| s.manual_liquidation_v2_latest_result.get(&caller))
-            .is_some_and(|row| row.request_id == request_id
-                && row.vault_id == arg.vault_id
-                && row.requested_amount_e8s == arg.amount
-                && row.route == (rumi_protocol_backend::ManualLiquidationRoute::PartialStable {
-                    token_type: arg.token_type.clone(),
-                }))
+            .is_some_and(|row| {
+                row.request_id == request_id
+                    && row.vault_id == arg.vault_id
+                    && row.requested_amount_e8s == arg.amount
+                    && row.route
+                        == (rumi_protocol_backend::ManualLiquidationRoute::PartialStable {
+                            token_type: arg.token_type.clone(),
+                        })
+            })
     });
     if !replay {
         validate_call().await?;
@@ -7745,13 +8304,27 @@ fn get_my_manual_liquidation_v2_request_state(
 ) -> Result<rumi_protocol_backend::ManualLiquidationV2RequestState, ProtocolError> {
     let owner = ic_cdk::api::caller();
     rumi_protocol_backend::state::read_state(|s| {
-        let next_request_id = s.manual_liquidation_v2_high_water.get(&owner).copied().unwrap_or(0)
+        let next_request_id = s
+            .manual_liquidation_v2_high_water
+            .get(&owner)
+            .copied()
+            .unwrap_or(0)
             .checked_add(1)
-            .ok_or_else(|| ProtocolError::GenericError("manual liquidation request ID sequence exhausted".into()))?;
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "manual liquidation request ID sequence exhausted".into(),
+                )
+            })?;
         Ok(rumi_protocol_backend::ManualLiquidationV2RequestState {
             next_request_id,
-            active_request: s.manual_liquidation_v2_active.get(&owner).map(|row| row.status_view()),
-            latest_result: s.manual_liquidation_v2_latest_result.get(&owner).map(|row| row.status_view()),
+            active_request: s
+                .manual_liquidation_v2_active
+                .get(&owner)
+                .map(|row| row.status_view()),
+            latest_result: s
+                .manual_liquidation_v2_latest_result
+                .get(&owner)
+                .map(|row| row.status_view()),
         })
     })
 }
@@ -7762,10 +8335,17 @@ fn get_my_manual_liquidation_v2_status(
     request_id: u128,
 ) -> Option<rumi_protocol_backend::ManualLiquidationV2StatusView> {
     let owner = ic_cdk::api::caller();
-    rumi_protocol_backend::state::read_state(|s| s.manual_liquidation_v2_active.get(&owner)
-        .filter(|row| row.request_id == request_id)
-        .or_else(|| s.manual_liquidation_v2_latest_result.get(&owner).filter(|row| row.request_id == request_id))
-        .map(|row| row.status_view()))
+    rumi_protocol_backend::state::read_state(|s| {
+        s.manual_liquidation_v2_active
+            .get(&owner)
+            .filter(|row| row.request_id == request_id)
+            .or_else(|| {
+                s.manual_liquidation_v2_latest_result
+                    .get(&owner)
+                    .filter(|row| row.request_id == request_id)
+            })
+            .map(|row| row.status_view())
+    })
 }
 
 #[candid_method(update)]
@@ -7774,7 +8354,8 @@ async fn attach_my_manual_liquidation_v2_candidate(
     request_id: u128,
     block_index: u64,
 ) -> Result<rumi_protocol_backend::ManualLiquidationV2StatusView, ProtocolError> {
-    rumi_protocol_backend::vault::attach_manual_liquidation_v2_candidate(request_id, block_index).await
+    rumi_protocol_backend::vault::attach_manual_liquidation_v2_candidate(request_id, block_index)
+        .await
 }
 
 // Stability Pool Integration - allows stability pool to execute liquidations
@@ -7788,8 +8369,7 @@ async fn stability_pool_liquidate(
     // receipt-backed V2 replacement remains closed until the coordinated
     // release gates pass, so refuse before validation, ledger calls, or pulls.
     let gate: Result<(), ProtocolError> = Err(ProtocolError::TemporarilyUnavailable(
-        "Legacy Stability Pool liquidation is disabled pending receipt-backed V2 admission"
-            .into(),
+        "Legacy Stability Pool liquidation is disabled pending receipt-backed V2 admission".into(),
     ));
     gate?;
     validate_call().await?;
@@ -8593,9 +9173,7 @@ async fn cl07_recovered_vault_after_pull_test_gate() -> Result<(), ProtocolError
 /// race. The dedicated fixture reserves vault ID 3 for its second, paused
 /// absorption; all other vaults pass through without an outcall.
 #[cfg(feature = "three-usd-proportional-refund-test-gate")]
-async fn three_usd_proportional_refund_test_gate(
-    vault_id: u64,
-) -> Result<(), ProtocolError> {
+async fn three_usd_proportional_refund_test_gate(vault_id: u64) -> Result<(), ProtocolError> {
     if vault_id != 3 {
         return Ok(());
     }
@@ -8753,8 +9331,7 @@ fn three_usd_ingress_tuple_matches_request(
             })
         && tuple.amount_e8s == request.three_usd_amount_e8s
         && tuple.fee_e8s.is_none()
-        && tuple.memo.as_slice()
-            == management::nonce_to_memo(tuple.op_nonce).0.as_slice()
+        && tuple.memo.as_slice() == management::nonce_to_memo(tuple.op_nonce).0.as_slice()
         && tuple.created_at_time_ns == management::nonce_to_created_at_time(tuple.op_nonce)
         && tuple.parent_absorb_id == Some(key.absorb_id)
 }
@@ -8788,6 +9365,7 @@ fn three_usd_ingress_candidate_transition(
 
 #[cfg(test)]
 mod three_usd_ingress_candidate_transition_tests {
+    use super::management;
     use super::{
         three_usd_ingress_candidate_transition as transition,
         three_usd_ingress_refund_tuple_matches_for_backend,
@@ -8796,7 +9374,6 @@ mod three_usd_ingress_candidate_transition_tests {
     };
     use candid::Principal;
     use icrc_ledger_types::icrc1::account::Account;
-    use super::management;
     use rumi_protocol_backend::state::{
         ThreeUsdReserveIngressKey, ThreeUsdReserveIngressPhase as Phase,
         ThreeUsdReserveIngressRequest, ThreeUsdReserveIngressTuple as Tuple,
@@ -8837,15 +9414,14 @@ mod three_usd_ingress_candidate_transition_tests {
             tuple: tuple.clone(),
             block_index: 11,
         };
-        assert_eq!(transition(&pending, &tuple, 11), Ok(Some(confirmed.clone())));
+        assert_eq!(
+            transition(&pending, &tuple, 11),
+            Ok(Some(confirmed.clone()))
+        );
         assert_eq!(transition(&confirmed, &tuple, 11), Ok(None));
         assert!(transition(&confirmed, &tuple, 12).is_err());
         assert_eq!(
-            transition(
-                &pending,
-                &tuple,
-                0,
-            ),
+            transition(&pending, &tuple, 0,),
             Ok(Some(Phase::TransferConfirmed {
                 tuple: tuple.clone(),
                 block_index: 0,
@@ -8926,8 +9502,7 @@ mod three_usd_ingress_candidate_transition_tests {
     #[test]
     fn only_canonical_parent_linked_default_source_refund_tuples_match() {
         use rumi_protocol_backend::state::{
-            ThreeUsdReserveIngressKey, ThreeUsdReserveIngressRefund,
-            ThreeUsdRefundTransferTuple,
+            ThreeUsdRefundTransferTuple, ThreeUsdReserveIngressKey, ThreeUsdReserveIngressRefund,
         };
         let key = ThreeUsdReserveIngressKey {
             stability_pool: Principal::from_slice(&[2]),
@@ -8970,7 +9545,9 @@ mod three_usd_ingress_candidate_transition_tests {
 
     #[test]
     fn default_source_refund_receipt_rejects_spender_on_typed_and_legacy_blocks() {
-        use rumi_protocol_backend::{icrc3_proof::DecodedBlock, state::ThreeUsdRefundTransferTuple};
+        use rumi_protocol_backend::{
+            icrc3_proof::DecodedBlock, state::ThreeUsdRefundTransferTuple,
+        };
 
         let source = Account {
             owner: Principal::from_slice(&[3]),
@@ -9004,11 +9581,7 @@ mod three_usd_ingress_candidate_transition_tests {
             expires_at: None,
         };
 
-        assert!(validate_refund_candidate(
-            &block(Some("1xfer"), None),
-            &tuple,
-        )
-        .is_ok());
+        assert!(validate_refund_candidate(&block(Some("1xfer"), None), &tuple,).is_ok());
         for btype in [Some("2xfer"), None] {
             let with_spender = block(
                 btype,
@@ -9042,7 +9615,12 @@ fn build_three_usd_reserve_ingress_v2_status(
     };
     let journal = rumi_protocol_backend::management::three_usd_reserve_ingress_journal(&key);
     let registered = read_state(|state| state.stability_pool_canister);
-    if !three_usd_ingress_key_access_allowed(caller, registered, key.stability_pool, journal.is_some()) {
+    if !three_usd_ingress_key_access_allowed(
+        caller,
+        registered,
+        key.stability_pool,
+        journal.is_some(),
+    ) {
         return Err(ProtocolError::GenericError(
             "Caller is not authorized for this Stability Pool ingress key".into(),
         ));
@@ -9455,9 +10033,8 @@ async fn attach_my_three_usd_reserve_ingress_v2_candidate(
     let _guard = management::ThreeUsdReserveIngressGuard::try_acquire(&key).ok_or_else(|| {
         ProtocolError::GenericError("3USD ingress recovery is already in progress".into())
     })?;
-    let journal = management::three_usd_reserve_ingress_journal(&key).ok_or_else(|| {
-        ProtocolError::GenericError("3USD ingress journal is unseen".into())
-    })?;
+    let journal = management::three_usd_reserve_ingress_journal(&key)
+        .ok_or_else(|| ProtocolError::GenericError("3USD ingress journal is unseen".into()))?;
     if !three_usd_ingress_key_access_allowed(
         caller,
         read_state(|state| state.stability_pool_canister),
@@ -9567,7 +10144,9 @@ async fn attach_my_three_usd_reserve_ingress_v2_refund_candidate(
         child_nonce,
     )
     .ok_or_else(|| {
-        ProtocolError::GenericError("3USD refund dispatch or recovery is already in progress".into())
+        ProtocolError::GenericError(
+            "3USD refund dispatch or recovery is already in progress".into(),
+        )
     })?;
 
     let snapshot = read_state(|state| -> Result<Option<_>, String> {
@@ -9605,9 +10184,13 @@ async fn attach_my_three_usd_reserve_ingress_v2_refund_candidate(
                 parent.request.ledger,
                 &receipt.tuple,
             ) || state.pending_3usd_refunds.contains_key(&child_nonce)
-                || state.pending_3usd_refund_journals.contains_key(&child_nonce)
+                || state
+                    .pending_3usd_refund_journals
+                    .contains_key(&child_nonce)
             {
-                return Err("settled 3USD refund child has inconsistent queue or receipt state".into());
+                return Err(
+                    "settled 3USD refund child has inconsistent queue or receipt state".into(),
+                );
             }
             return Ok(None);
         }
@@ -9632,7 +10215,10 @@ async fn attach_my_three_usd_reserve_ingress_v2_refund_candidate(
                     child,
                     parent.request.ledger,
                     tuple,
-                ) => *tuple,
+                ) =>
+            {
+                *tuple
+            }
             _ => {
                 return Err(
                     "3USD refund child has not been dispatched with a canonical tuple".into(),
@@ -9651,12 +10237,10 @@ async fn attach_my_three_usd_reserve_ingress_v2_refund_candidate(
         return Ok(());
     };
 
-    let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(
-        expected_request.ledger,
-        block_index,
-    )
-    .await
-    .map_err(ProtocolError::GenericError)?;
+    let block =
+        rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(expected_request.ledger, block_index)
+            .await
+            .map_err(ProtocolError::GenericError)?;
     validate_three_usd_default_source_refund_candidate_block(&block, &tuple)
         .map_err(ProtocolError::GenericError)?;
 
@@ -9687,7 +10271,9 @@ async fn attach_my_three_usd_reserve_ingress_v2_refund_candidate(
         if let Some(receipt) = child.settled_receipt.as_ref() {
             if receipt.block_index == block_index && receipt.tuple == tuple {
                 if state.pending_3usd_refunds.contains_key(&child_nonce)
-                    || state.pending_3usd_refund_journals.contains_key(&child_nonce)
+                    || state
+                        .pending_3usd_refund_journals
+                        .contains_key(&child_nonce)
                 {
                     return Err("settled refund receipt still has pending queue state".into());
                 }
@@ -9700,12 +10286,7 @@ async fn attach_my_three_usd_reserve_ingress_v2_refund_candidate(
                 state.pending_3usd_refund_journals.get(&child_nonce),
                 Some(Dispatch::SubmittedOrUnknown { tuple: submitted }) if *submitted == tuple
             )
-            || !three_usd_ingress_refund_tuple_matches(
-                &key,
-                child,
-                expected_request.ledger,
-                &tuple,
-            )
+            || !three_usd_ingress_refund_tuple_matches(&key, child, expected_request.ledger, &tuple)
         {
             return Err("refund queue or submitted tuple changed during proof".into());
         }
@@ -9713,10 +10294,7 @@ async fn attach_my_three_usd_reserve_ingress_v2_refund_candidate(
             .three_usd_reserve_ingress_journals
             .get_mut(&key)
             .expect("parent was checked above");
-        let child = parent
-            .refund
-            .as_mut()
-            .expect("child was checked above");
+        let child = parent.refund.as_mut().expect("child was checked above");
         child.settled_receipt = Some(
             rumi_protocol_backend::state::ThreeUsdReserveIngressRefundReceipt {
                 block_index,
@@ -9734,7 +10312,9 @@ fn validate_three_usd_default_source_refund_candidate_block(
     block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
     tuple: &rumi_protocol_backend::state::ThreeUsdRefundTransferTuple,
 ) -> Result<(), String> {
-    rumi_protocol_backend::icrc3_proof::validate_three_usd_default_source_refund_block(block, tuple)?;
+    rumi_protocol_backend::icrc3_proof::validate_three_usd_default_source_refund_block(
+        block, tuple,
+    )?;
     if block.fee != Some(u128::from(tuple.fee_e8s)) {
         return Err("3USD refund receipt block fee does not match its persisted ICRC-1 fee".into());
     }
@@ -11218,8 +11798,7 @@ fn get_stability_pool_config() -> StabilityPoolConfig {
 #[update]
 async fn partial_liquidate_vault(_arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     Err(ProtocolError::TemporarilyUnavailable(
-        "Manual liquidation is temporarily unavailable pending receipt-backed V2 admission"
-            .into(),
+        "Manual liquidation is temporarily unavailable pending receipt-backed V2 admission".into(),
     ))
 }
 
@@ -11367,28 +11946,43 @@ fn get_my_liquidity_v2_request_state() -> rumi_protocol_backend::LiquidityV2Requ
 #[update]
 async fn provide_liquidity_v2(request_id: u128, amount: u64) -> Result<u64, ProtocolError> {
     validate_call().await?;
-    check_postcondition(rumi_protocol_backend::liquidity_pool::provide_liquidity_v2(request_id, amount).await)
+    check_postcondition(
+        rumi_protocol_backend::liquidity_pool::provide_liquidity_v2(request_id, amount).await,
+    )
 }
 
 #[candid_method(update)]
 #[update]
 async fn withdraw_liquidity_v2(request_id: u128, amount: u64) -> Result<u64, ProtocolError> {
     validate_call().await?;
-    check_postcondition(rumi_protocol_backend::liquidity_pool::withdraw_liquidity_v2(request_id, amount).await)
+    check_postcondition(
+        rumi_protocol_backend::liquidity_pool::withdraw_liquidity_v2(request_id, amount).await,
+    )
 }
 
 #[candid_method(update)]
 #[update]
 async fn claim_liquidity_returns_v2(request_id: u128) -> Result<u64, ProtocolError> {
     validate_call().await?;
-    check_postcondition(rumi_protocol_backend::liquidity_pool::claim_liquidity_returns_v2(request_id).await)
+    check_postcondition(
+        rumi_protocol_backend::liquidity_pool::claim_liquidity_returns_v2(request_id).await,
+    )
 }
 
 #[candid_method(update)]
 #[update]
-async fn attach_my_liquidity_v2_candidate(request_id: u128, block_index: u64) -> Result<u64, ProtocolError> {
+async fn attach_my_liquidity_v2_candidate(
+    request_id: u128,
+    block_index: u64,
+) -> Result<u64, ProtocolError> {
     validate_call().await?;
-    check_postcondition(rumi_protocol_backend::liquidity_pool::attach_liquidity_v2_candidate(request_id, block_index).await)
+    check_postcondition(
+        rumi_protocol_backend::liquidity_pool::attach_liquidity_v2_candidate(
+            request_id,
+            block_index,
+        )
+        .await,
+    )
 }
 
 /// PocketIC-only setup: add one reward and trap the following ClaimReturns
@@ -12242,6 +12836,20 @@ fn list_pending_treasury_payments(
     }))
 }
 
+/// V2 controller inventory preserves the exact identity of nonstandard
+/// treasury assets, including the source ledger principal.
+#[candid_method(query)]
+#[query]
+fn list_pending_treasury_payments_v2(
+    cursor: Option<PendingTreasuryPaymentCursor>,
+    limit: u16,
+) -> Result<PendingTreasuryPaymentPageV2, ProtocolError> {
+    require_controller()?;
+    Ok(read_state(|state| {
+        pending_treasury_payment_page_v2_in_state(state, cursor, limit)
+    }))
+}
+
 /// Settle a held or retryable transfer only after its supplied source-ledger
 /// block proves the exact persisted transfer identity. This endpoint never
 /// creates a replacement transfer tuple.
@@ -12342,11 +12950,7 @@ fn list_held_legacy_stability_pool_interest(
 ) -> Result<rumi_protocol_backend::state::HeldLegacyStabilityPoolInterestPage, ProtocolError> {
     require_controller()?;
     Ok(read_state(|state| {
-        held_legacy_stability_pool_interest_page_in_state(
-            state,
-            start_after_collateral,
-            limit,
-        )
+        held_legacy_stability_pool_interest_page_in_state(state, start_after_collateral, limit)
     }))
 }
 
@@ -12356,8 +12960,7 @@ fn held_legacy_stability_pool_interest_page_in_state(
     limit: u16,
 ) -> rumi_protocol_backend::state::HeldLegacyStabilityPoolInterestPage {
     use rumi_protocol_backend::state::{
-        HeldLegacyStabilityPoolInterestEntry as Entry,
-        HeldLegacyStabilityPoolInterestPage as Page,
+        HeldLegacyStabilityPoolInterestEntry as Entry, HeldLegacyStabilityPoolInterestPage as Page,
     };
     use std::ops::Bound::{Excluded, Unbounded};
 
@@ -12393,8 +12996,8 @@ fn held_legacy_stability_pool_interest_page_in_state(
 #[cfg(test)]
 mod held_legacy_stability_pool_interest_page_tests {
     use super::held_legacy_stability_pool_interest_page_in_state;
-    use rumi_protocol_backend::state::State;
     use candid::Principal;
+    use rumi_protocol_backend::state::State;
 
     #[test]
     fn inventory_pages_preserve_exact_rows_and_repeat_global_totals() {
@@ -12403,7 +13006,9 @@ mod held_legacy_stability_pool_interest_page_tests {
         let b = Principal::from_slice(&[2]);
         let c = Principal::from_slice(&[3]);
         state.held_legacy_stability_pool_interest.insert(a, 11);
-        state.held_legacy_stability_pool_interest.insert(b, u64::MAX);
+        state
+            .held_legacy_stability_pool_interest
+            .insert(b, u64::MAX);
         state.held_legacy_stability_pool_interest.insert(c, 17);
         let before = state.held_legacy_stability_pool_interest.clone();
 
@@ -12417,11 +13022,8 @@ mod held_legacy_stability_pool_interest_page_tests {
         assert_eq!(first.total_entry_count, 3);
         assert_eq!(first.total_amount_e8s, u128::from(u64::MAX) + 28);
 
-        let second = held_legacy_stability_pool_interest_page_in_state(
-            &state,
-            first.next_start_after,
-            2,
-        );
+        let second =
+            held_legacy_stability_pool_interest_page_in_state(&state, first.next_start_after, 2);
         assert_eq!(second.entries.len(), 1);
         assert_eq!(second.entries[0].collateral_type, c);
         assert_eq!(second.entries[0].amount_e8s, 17);
@@ -12429,8 +13031,7 @@ mod held_legacy_stability_pool_interest_page_tests {
         assert_eq!(second.total_entry_count, first.total_entry_count);
         assert_eq!(second.total_amount_e8s, first.total_amount_e8s);
         assert_eq!(
-            state.held_legacy_stability_pool_interest,
-            before,
+            state.held_legacy_stability_pool_interest, before,
             "inventory must not mutate held balances",
         );
     }
@@ -23441,9 +24042,7 @@ mod pending_payout_page_tests {
 mod redemption_ingress_paused_tests {
     use super::{redeem_collateral, redeem_icp, redeem_quoted, redeem_reserves};
     use candid::Principal;
-    use rumi_protocol_backend::{
-        ProtocolError, RedeemQuotedRequest, RedemptionError,
-    };
+    use rumi_protocol_backend::{ProtocolError, RedeemQuotedRequest, RedemptionError};
 
     fn is_paused(error: &ProtocolError) -> bool {
         matches!(error, ProtocolError::TemporarilyUnavailable(message)
@@ -23455,10 +24054,7 @@ mod redemption_ingress_paused_tests {
         let icp = futures::executor::block_on(redeem_icp(1));
         assert!(is_paused(&icp.unwrap_err()));
 
-        let collateral = futures::executor::block_on(redeem_collateral(
-            Principal::anonymous(),
-            1,
-        ));
+        let collateral = futures::executor::block_on(redeem_collateral(Principal::anonymous(), 1));
         assert!(is_paused(&collateral.unwrap_err()));
 
         let quoted = futures::executor::block_on(redeem_quoted(RedeemQuotedRequest {
@@ -23470,5 +24066,87 @@ mod redemption_ingress_paused_tests {
 
         let reserves = futures::executor::block_on(redeem_reserves(1, None));
         assert!(is_paused(&reserves.unwrap_err()));
+    }
+}
+
+
+#[cfg(test)]
+mod chain_rail_mutation_guard_tests {
+    use super::{chain_config_update_is_idempotent, chain_has_live_rail_state};
+    use candid::Principal;
+    use rumi_protocol_backend::chains::config::{
+        ChainConfigV3, ChainId, ChainStatus, GasStrategy, UpdateChainConfigArg,
+    };
+    use rumi_protocol_backend::chains::multi_chain_state::MultiChainState;
+    use rumi_protocol_backend::chains::vault::{ChainVaultStatus, ChainVaultV1};
+
+    const CHAIN: ChainId = ChainId(71);
+
+    fn config() -> ChainConfigV3 {
+        ChainConfigV3 {
+            chain_id: CHAIN,
+            display_name: "Conflux".into(),
+            rpc_endpoints: vec!["https://rpc.example".into()],
+            finality_depth: 12,
+            gas_strategy: GasStrategy::EvmEip1559 {
+                max_priority_fee_gwei: 1,
+                max_fee_gwei_ceiling: 100,
+            },
+            chain_native_decimals: 18,
+            registered_at_ns: 0,
+            status: ChainStatus::Registered,
+            burn_watch_poll_enabled: false,
+            min_quorum_providers: None,
+        }
+    }
+
+    #[test]
+    fn live_rail_detects_supply_vault_and_pending_settlement() {
+        let mut state = MultiChainState::default();
+        assert!(!chain_has_live_rail_state(&state, CHAIN));
+        state.chain_supplies.insert(CHAIN, 1);
+        assert!(chain_has_live_rail_state(&state, CHAIN));
+        state.chain_supplies.insert(CHAIN, 0);
+        state.chain_vaults.insert(
+            1,
+            ChainVaultV1 {
+                vault_id: 1,
+                owner: Principal::anonymous(),
+                collateral_chain: CHAIN,
+                custody_address: "custody".into(),
+                collateral_amount_native: 1,
+                debt_e8s: 0,
+                mint_recipient: "recipient".into(),
+                pending_mint_e8s: 0,
+                status: ChainVaultStatus::Open,
+                opened_at_ns: 0,
+                owner_evm: None,
+                last_interest_accrual_ns: 0,
+                pending_interest_mint_e8s: 0,
+                pending_liquidation: None,
+            },
+        );
+        assert!(chain_has_live_rail_state(&state, CHAIN));
+    }
+
+    #[test]
+    fn live_config_accepts_only_effectively_identical_updates() {
+        let config = config();
+        let same = UpdateChainConfigArg {
+            display_name: Some("Conflux".into()),
+            rpc_endpoints: Some(vec!["https://rpc.example".into(), "https://rpc.example".into()]),
+            finality_depth: Some(12),
+            gas_strategy: Some(GasStrategy::EvmEip1559 {
+                max_priority_fee_gwei: 1,
+                max_fee_gwei_ceiling: 100,
+            }),
+            min_quorum_providers: Some(None),
+        };
+        assert!(chain_config_update_is_idempotent(&config, &same));
+        let changed = UpdateChainConfigArg {
+            finality_depth: Some(6),
+            ..UpdateChainConfigArg::default()
+        };
+        assert!(!chain_config_update_is_idempotent(&config, &changed));
     }
 }

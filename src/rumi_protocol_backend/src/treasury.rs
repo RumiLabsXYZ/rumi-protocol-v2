@@ -160,14 +160,26 @@ pub async fn verify_native_icp_direct_account_transfer_receipt(
     let block = fetch_native_icp_block(ledger, block_index).await?;
     let (source_id,): (Vec<u8>,) = ic_cdk::call(ledger, "account_identifier", (source.clone(),))
         .await
-        .map_err(|(code, message)| format!("native ICP source account_identifier failed: {code:?} {message}"))?;
-    let (destination_id,): (Vec<u8>,) = ic_cdk::call(ledger, "account_identifier", (destination.clone(),))
-        .await
-        .map_err(|(code, message)| format!("native ICP destination account_identifier failed: {code:?} {message}"))?;
+        .map_err(|(code, message)| {
+            format!("native ICP source account_identifier failed: {code:?} {message}")
+        })?;
+    let (destination_id,): (Vec<u8>,) =
+        ic_cdk::call(ledger, "account_identifier", (destination.clone(),))
+            .await
+            .map_err(|(code, message)| {
+                format!("native ICP destination account_identifier failed: {code:?} {message}")
+            })?;
     if source_id.len() != 32 || destination_id.len() != 32 {
         return Err("native ICP account_identifier returned malformed account bytes".into());
     }
-    let Some(NativeIcpOperation::Transfer { from, to, spender, amount: actual_amount, fee: actual_fee }) = block.transaction.operation.as_ref() else {
+    let Some(NativeIcpOperation::Transfer {
+        from,
+        to,
+        spender,
+        amount: actual_amount,
+        fee: actual_fee,
+    }) = block.transaction.operation.as_ref()
+    else {
         return Err("native ICP block is not a transfer".into());
     };
     if spender.is_some()
@@ -237,8 +249,7 @@ async fn native_icp_account_identifier(
     ledger: Principal,
     account: &Account,
 ) -> Result<Vec<u8>, String> {
-    let (identifier,): (Vec<u8>,) =
-        ic_cdk::call(ledger, "account_identifier", (account.clone(),))
+    let (identifier,): (Vec<u8>,) = ic_cdk::call(ledger, "account_identifier", (account.clone(),))
         .await
         .map_err(|(code, message)| {
             format!("native ICP account_identifier failed: {code:?} {message}")
@@ -508,6 +519,10 @@ pub enum AssetType {
     CKBTC,
     CKUSDT,
     CKUSDC,
+    /// Exact ledger identity for any other collateral revenue. Older
+    /// treasury rows retain their existing variant; this is additive on the
+    /// input path to the treasury canister.
+    Other(Principal),
 }
 
 /// The stable pool's Candid result is intentionally mirrored without taking a
@@ -677,26 +692,27 @@ pub fn plan_fee_routing(
 // ---------------------------------------------------------------------------
 
 /// Map a collateral ledger principal to the treasury's AssetType enum.
-/// Uses known ckStable ledger principals from state config, plus ICP ledger.
+/// Uses known ckStable ledger principals from state config, plus ICP ledger;
+/// every other collateral keeps its exact ledger identity.
 pub fn collateral_to_asset_type(ct: &Principal) -> Option<AssetType> {
-    read_state(|s| {
-        if *ct == s.icp_ledger_principal {
-            return Some(AssetType::ICP);
-        }
-        if let Some(ckusdt) = s.ckusdt_ledger_principal {
-            if *ct == ckusdt {
-                return Some(AssetType::CKUSDT);
-            }
-        }
-        if let Some(ckusdc) = s.ckusdc_ledger_principal {
-            if *ct == ckusdc {
-                return Some(AssetType::CKUSDC);
-            }
-        }
-        // A different collateral must not be reported as ICP. Keep its
-        // pending fee held until a correctly typed treasury route exists.
+    read_state(|s| collateral_asset_type_in_state(s, *ct))
+}
+
+fn collateral_asset_type_in_state(
+    state: &crate::state::State,
+    ledger: Principal,
+) -> Option<AssetType> {
+    if ledger == Principal::anonymous() {
         None
-    })
+    } else if ledger == state.icp_ledger_principal {
+        Some(AssetType::ICP)
+    } else if state.ckusdt_ledger_principal == Some(ledger) {
+        Some(AssetType::CKUSDT)
+    } else if state.ckusdc_ledger_principal == Some(ledger) {
+        Some(AssetType::CKUSDC)
+    } else {
+        Some(AssetType::Other(ledger))
+    }
 }
 
 /// Persist a V2 liquidation fee obligation inside the same State transition as
@@ -710,15 +726,7 @@ pub(crate) fn queue_liquidation_fee_obligation_in_state(
     if amount_raw == 0 {
         return None;
     }
-    let asset_type = if collateral_ledger == state.icp_ledger_principal {
-        Some(AssetType::ICP)
-    } else if state.ckusdt_ledger_principal == Some(collateral_ledger) {
-        Some(AssetType::CKUSDT)
-    } else if state.ckusdc_ledger_principal == Some(collateral_ledger) {
-        Some(AssetType::CKUSDC)
-    } else {
-        None
-    };
+    let asset_type = collateral_asset_type_in_state(state, collateral_ledger);
     let Some(asset_type) = asset_type else {
         state
             .pending_treasury_collateral
@@ -1131,6 +1139,7 @@ async fn process_pending_treasury_payment(operation_id: u128) {
                     AssetType::CKBTC => None,
                     AssetType::CKUSDT => state.ckusdt_ledger_principal,
                     AssetType::CKUSDC => state.ckusdc_ledger_principal,
+                    AssetType::Other(ledger) => (*ledger != Principal::anonymous()).then_some(*ledger),
                 }
             };
             (state.treasury_principal, ledger)
@@ -1753,7 +1762,11 @@ fn validate_sp_interest_mint_block(
         .ok_or_else(|| "ICRC-3 1mint omitted destination".to_string())?;
     if !matches!(block.btype.as_deref(), None | Some("1mint"))
         || block.op != "mint"
-        || to != &(Account { owner: payment.pool, subaccount: None })
+        || to
+            != &(Account {
+                owner: payment.pool,
+                subaccount: None,
+            })
         || block.from.is_some()
         || block.spender.is_some()
         || block.amount != payment.amount_e8s as u128
@@ -2429,7 +2442,11 @@ pub async fn distribute_stablecoin_interest(
             Err(error) => {
                 // Preflight failures happen before any recipient row is added.
                 // Retain the complete allocation for reviewed reconciliation.
-                log!(INFO, "[treasury] stablecoin interest remains held: {}", error);
+                log!(
+                    INFO,
+                    "[treasury] stablecoin interest remains held: {}",
+                    error
+                );
                 let operation_nonce = state.next_op_nonce();
                 crate::event::record_interest_distribution_share_held(
                     state,
@@ -2618,7 +2635,9 @@ pub(crate) fn pin_stablecoin_interest_distribution_in_state_at(
                         .get(&stable_ledger)
                         .unwrap_or(&0),
                 );
-                state.stable_interest_conversion_remainders.insert(stable_ledger, residue);
+                state
+                    .stable_interest_conversion_remainders
+                    .insert(stable_ledger, residue);
                 if amount_e6 > 0 {
                     let asset = match token_type {
                         crate::StableTokenType::CKUSDT => AssetType::CKUSDT,
@@ -3506,7 +3525,11 @@ mod interest_distribution_batch_tests {
             assert!(state.pending_three_pool_donations.is_empty());
             assert!(state.pending_amm_donations.is_empty());
             assert!(state.op_nonce_counter > nonce_before);
-            let held = state.held_interest_distribution_shares.values().next().unwrap();
+            let held = state
+                .held_interest_distribution_shares
+                .values()
+                .next()
+                .unwrap();
             assert_eq!(held.amount_e8s, 100);
             assert_eq!(held.collateral_type, candid::Principal::from_slice(&[7]));
             assert_eq!(
@@ -3549,12 +3572,13 @@ mod interest_distribution_batch_tests {
 
         assert!(deliveries.is_empty());
         assert!(state.pending_treasury_payments.is_empty());
-        let held = state.held_interest_distribution_shares.values().next().unwrap();
+        let held = state
+            .held_interest_distribution_shares
+            .values()
+            .next()
+            .unwrap();
         assert_eq!(held.amount_e8s, 1_234);
-        assert_eq!(
-            held.destination,
-            Some(InterestDestination::Treasury)
-        );
+        assert_eq!(held.destination, Some(InterestDestination::Treasury));
     }
 }
 
@@ -3618,6 +3642,34 @@ pub async fn drain_pending_treasury_collateral() {
             amount,
             ledger
         );
+    }
+}
+
+#[cfg(test)]
+mod collateral_asset_identity_tests {
+    use super::{collateral_asset_type_in_state, AssetType};
+    use crate::state::State;
+    use candid::Principal;
+
+    #[test]
+    fn unknown_collateral_keeps_its_exact_ledger_identity() {
+        let mut state = State::default();
+        let icp = Principal::from_slice(&[1]);
+        let ckusdt = Principal::from_slice(&[2]);
+        let ckusdc = Principal::from_slice(&[3]);
+        let other = Principal::from_slice(&[5]);
+        state.icp_ledger_principal = icp;
+        state.ckusdt_ledger_principal = Some(ckusdt);
+        state.ckusdc_ledger_principal = Some(ckusdc);
+
+        assert_eq!(collateral_asset_type_in_state(&state, icp), Some(AssetType::ICP));
+        assert_eq!(collateral_asset_type_in_state(&state, ckusdt), Some(AssetType::CKUSDT));
+        assert_eq!(collateral_asset_type_in_state(&state, ckusdc), Some(AssetType::CKUSDC));
+        assert_eq!(
+            collateral_asset_type_in_state(&state, other),
+            Some(AssetType::Other(other)),
+        );
+        assert_eq!(collateral_asset_type_in_state(&state, Principal::anonymous()), None);
     }
 }
 

@@ -270,20 +270,46 @@ macro_rules! evt_accessors {
                 $log.with(|log| {
                     let log = log.borrow();
                     let n = log.len();
+                    if limit == 0 {
+                        return;
+                    }
                     for i in 0..n {
                         if let Some(row) = log.get(i) {
-                            if row.timestamp_ns >= to_ts {
-                                break;
-                            }
                             if row.timestamp_ns >= from_ts {
-                                out.push(row);
-                                if out.len() >= limit {
-                                    break;
+                                if row.timestamp_ns < to_ts {
+                                    out.push(row);
+                                    if out.len() >= limit {
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
                 });
+                out
+            }
+
+            /// Return the most recently appended rows in `[from_ts, to_ts)`,
+            /// preserving their chronological timestamp order. Event source
+            /// timestamps may be delayed or out of order, so this deliberately
+            /// scans the bounded tail rather than binary-searching by timestamp.
+            /// If more than `limit` matching rows exist, older rows are omitted.
+            pub fn tail_range(from_ts: u64, to_ts: u64, limit: usize) -> Vec<$row_type> {
+                let mut out = Vec::new();
+                $log.with(|log| {
+                    let log = log.borrow();
+                    let mut i = log.len();
+                    while i > 0 && out.len() < limit {
+                        i -= 1;
+                        if let Some(row) = log.get(i) {
+                            if row.timestamp_ns >= from_ts && row.timestamp_ns < to_ts {
+                                out.push(row);
+                            }
+                        }
+                    }
+                });
+                out.reverse();
+                out.sort_by_key(|row| row.timestamp_ns);
                 out
             }
         }
@@ -463,6 +489,44 @@ mod tests {
         let decoded = AnalyticsStabilityEvent::from_bytes(bytes);
         assert_eq!(decoded.amount, 123_456_789);
         assert!(matches!(decoded.action, StabilityAction::Deposit));
+    }
+
+    #[test]
+    fn tail_range_uses_recent_rows_and_returns_timestamp_order() {
+        let first_id = u64::MAX - 2;
+        let second_id = u64::MAX - 1;
+        let third_id = u64::MAX;
+        for (timestamp_ns, source_event_id) in [
+            (u64::MAX - 100, first_id),
+            (u64::MAX - 300, second_id),
+            (u64::MAX - 200, third_id),
+        ] {
+            evt_stability::push(AnalyticsStabilityEvent {
+                timestamp_ns,
+                source_event_id,
+                caller: Principal::anonymous(),
+                action: StabilityAction::Deposit,
+                amount: 1,
+            });
+        }
+
+        // A time-range read still finds the earlier-timestamp event appended
+        // after a later one; the tail read keeps the final two appended rows,
+        // then restores chronological timestamp order.
+        let ranged = evt_stability::range(u64::MAX - 250, u64::MAX, 10);
+        assert_eq!(
+            ranged
+                .iter()
+                .map(|row| row.source_event_id)
+                .collect::<Vec<_>>(),
+            vec![first_id, third_id]
+        );
+
+        let rows = evt_stability::tail_range(u64::MAX - 500, u64::MAX, 2);
+        assert_eq!(
+            rows.iter().map(|row| row.source_event_id).collect::<Vec<_>>(),
+            vec![second_id, third_id]
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use types::{
     AssetType, DepositArgs, DepositRecord, DepositRecordV1, PendingWithdrawalsPageV2,
-    TreasuryAction, TreasuryEventV1, TreasuryInitArgs, TreasuryStatus,
+    TreasuryAction, TreasuryEventV1, TreasuryInitArgs, TreasuryStatus, TreasuryStatusV2,
     UnknownTreasuryEvidencePageV2, WithdrawArgs, WithdrawResult,
 };
 
@@ -321,13 +321,7 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
     // bound to this exact ledger as well as the caller-supplied tuple.
     let (config, configured_ledger) = with_state(|s| {
         let config = s.get_config();
-        let ledger = match args.asset_type {
-            AssetType::ICUSD => Some(config.icusd_ledger),
-            AssetType::ICP => Some(config.icp_ledger),
-            AssetType::CKBTC => config.ckbtc_ledger,
-            AssetType::CKUSDT => config.ckusdt_ledger,
-            AssetType::CKUSDC => config.ckusdc_ledger,
-        };
+        let ledger = configured_asset_ledger(&config, &args.asset_type);
         (config, ledger)
     });
     let ledger_principal = configured_ledger.ok_or("Ledger not configured for this asset type")?;
@@ -505,14 +499,11 @@ fn validate_configured_asset_ledger(
     config: &state::TreasuryConfig,
     asset: &AssetType,
 ) -> Result<(), String> {
-    let selected = match asset {
-        AssetType::ICUSD => Some(config.icusd_ledger),
-        AssetType::ICP => Some(config.icp_ledger),
-        AssetType::CKBTC => config.ckbtc_ledger,
-        AssetType::CKUSDT => config.ckusdt_ledger,
-        AssetType::CKUSDC => config.ckusdc_ledger,
+    let selected = configured_asset_ledger(config, asset)
+        .ok_or("Ledger not configured for this asset type")?;
+    if selected == Principal::anonymous() {
+        return Err("Asset ledger cannot be anonymous".into());
     }
-    .ok_or("Ledger not configured for this asset type")?;
     let configured = [
         ("icUSD", Some(config.icusd_ledger)),
         ("ICP", Some(config.icp_ledger)),
@@ -526,6 +517,7 @@ fn validate_configured_asset_ledger(
         AssetType::CKBTC => "ckBTC",
         AssetType::CKUSDT => "ckUSDT",
         AssetType::CKUSDC => "ckUSDC",
+        AssetType::Other(_) => "other asset",
     };
     if let Some((other, _)) = configured
         .iter()
@@ -537,6 +529,17 @@ fn validate_configured_asset_ledger(
         ));
     }
     Ok(())
+}
+
+fn configured_asset_ledger(config: &state::TreasuryConfig, asset: &AssetType) -> Option<Principal> {
+    match asset {
+        AssetType::ICUSD => Some(config.icusd_ledger),
+        AssetType::ICP => Some(config.icp_ledger),
+        AssetType::CKBTC => config.ckbtc_ledger,
+        AssetType::CKUSDT => config.ckusdt_ledger,
+        AssetType::CKUSDC => config.ckusdc_ledger,
+        AssetType::Other(ledger) => Some(*ledger),
+    }
 }
 
 /// Derive a stable request_id from withdrawal args when the caller doesn't
@@ -590,16 +593,44 @@ fn is_definitive_no_effect_transfer_error(error: &TransferError) -> bool {
 fn get_status() -> TreasuryStatus {
     with_state(|s| {
         let config = s.get_config();
-        let balances = s
-            .balances
-            .iter()
-            .map(|(asset_type, balance)| (asset_type.clone(), balance.clone()))
-            .collect();
+        let balances = legacy_asset_balances(&s.balances);
 
         TreasuryStatus {
             total_deposits: s.get_deposits_count(),
             balances,
             controller: ic_cdk::api::id(), // show canister's own principal
+            is_paused: config.is_paused,
+        }
+    })
+}
+
+fn legacy_asset_balances(
+    balances: &HashMap<AssetType, types::AssetBalance>,
+) -> Vec<(types::AssetTypeV1, types::AssetBalance)> {
+    balances
+        .iter()
+        .filter_map(|(asset_type, balance)| {
+            types::AssetTypeV1::try_from(asset_type.clone())
+                .ok()
+                .map(|asset_type| (asset_type, balance.clone()))
+        })
+        .collect()
+}
+
+/// Full treasury status, including balances for address-bound collateral ledgers.
+#[query]
+#[candid_method(query)]
+fn get_status_v2() -> TreasuryStatusV2 {
+    with_state(|s| {
+        let config = s.get_config();
+        TreasuryStatusV2 {
+            total_deposits: s.get_deposits_count(),
+            balances: s
+                .balances
+                .iter()
+                .map(|(asset_type, balance)| (asset_type.clone(), balance.clone()))
+                .collect(),
+            controller: ic_cdk::api::id(),
             is_paused: config.is_paused,
         }
     })
@@ -651,12 +682,28 @@ fn get_deposits(start: Option<u64>, limit: Option<usize>) -> Vec<DepositRecordV1
     with_state(|s| s.get_deposits(start, limit))
 }
 
+/// Full deposit history, including address-bound collateral asset identities.
+#[query]
+#[candid_method(query)]
+fn get_deposits_v2(start: Option<u64>, limit: Option<usize>) -> Vec<DepositRecord> {
+    let limit = limit.unwrap_or(100).min(1000);
+    with_state(|s| s.get_deposits_v2(start, limit))
+}
+
 /// Get treasury events (paginated)
 #[query]
 #[candid_method(query)]
 fn get_events(start: Option<u64>, limit: Option<usize>) -> Vec<TreasuryEventV1> {
     let limit = limit.unwrap_or(100).min(1000);
     with_state(|s| s.get_events(start, limit))
+}
+
+/// Full event history, including address-bound collateral asset identities.
+#[query]
+#[candid_method(query)]
+fn get_events_v2(start: Option<u64>, limit: Option<usize>) -> Vec<types::TreasuryEvent> {
+    let limit = limit.unwrap_or(100).min(1000);
+    with_state(|s| s.get_events_v2(start, limit))
 }
 
 /// Raw stable records that could not be interpreted by the current schema.
@@ -684,6 +731,18 @@ fn get_pending_withdrawals_v2(
     ensure_controller()?;
     let limit = limit.unwrap_or(100).clamp(1, 100);
     Ok(with_state(|s| s.get_pending_withdrawals_v2(start, limit)))
+}
+
+/// Full pending withdrawals, including address-bound collateral asset IDs.
+#[query]
+#[candid_method(query)]
+fn get_pending_withdrawals_v3(
+    start: Option<u64>,
+    limit: Option<usize>,
+) -> Result<types::PendingWithdrawalsPageV3, String> {
+    ensure_controller()?;
+    let limit = limit.unwrap_or(100).min(500);
+    Ok(with_state(|s| s.get_pending_withdrawals_v3(start, limit)))
 }
 
 /// Verify and complete one held withdrawal using positive ledger history

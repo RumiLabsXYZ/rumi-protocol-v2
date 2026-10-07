@@ -240,6 +240,34 @@ pub fn select_next_op(q: &SettlementQueueV1) -> Option<(u64, OpAction)> {
     select_next_op_with_submit_filter(q, |_, _| false)
 }
 
+/// EVM selector: a legacy queued send with no pre-broadcast claim may have
+/// crossed the old ambiguous send boundary. Hold the entire EVM queue until
+/// that row is explicitly reconciled; submitting a later op could consume a
+/// new nonce while the legacy transaction remains able to land.
+pub fn select_next_evm_op_with_submit_filter<F>(
+    q: &SettlementQueueV1,
+    mut submit_blocked: F,
+) -> Option<(u64, OpAction)>
+where
+    F: FnMut(u64, &SettlementOp) -> bool,
+{
+    if let Some((&id, _)) = q
+        .pending
+        .iter()
+        .find(|(_, op)| matches!(op.status, SettlementOpStatus::Inflight { .. }))
+    {
+        return Some((id, OpAction::Confirm));
+    }
+    if q.pending.values().any(|op| {
+        matches!(op.status, SettlementOpStatus::Queued) && op.evm_submit_claimed.is_none()
+    }) {
+        return None;
+    }
+    select_next_op_with_submit_filter(q, |id, op| {
+        op.evm_submit_claimed != Some(false) || submit_blocked(id, op)
+    })
+}
+
 /// Pick the next op to act on, treating queued ops for which
 /// `submit_blocked(id, op)` is true as temporarily non-actionable. Inflight ops
 /// are never skipped: one-in-flight-per-queue remains the first rule.
@@ -1113,7 +1141,7 @@ pub async fn run_settlement(chain: ChainId) {
     // swaps, and claim payouts can still reconcile.
     let selected = read_state(|s| {
         let q = s.multi_chain.settlement_queues.get(&chain)?;
-        let (op_id, action) = select_next_op_with_submit_filter(q, |_, op| {
+        let (op_id, action) = select_next_evm_op_with_submit_filter(q, |_, op| {
             s.multi_chain
                 .bad_debt_circuit_blocks_settlement_op(chain, &op.kind)
         })?;
@@ -1122,7 +1150,28 @@ pub async fn run_settlement(chain: ChainId) {
     });
     let (op_id, action, op) = match selected {
         Some(selected) => selected,
-        None => return, // chain not registered / no queue
+        None => {
+            let held = read_state(|s| {
+                s.multi_chain
+                    .settlement_queues
+                    .get(&chain)
+                    .map(|q| {
+                        q.pending
+                            .iter()
+                            .filter_map(|(&id, op)| {
+                                (matches!(op.status, SettlementOpStatus::Queued)
+                                    && op.evm_submit_claimed.is_none())
+                                .then_some(id)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            });
+            if !held.is_empty() {
+                log!(INFO, "[settlement chain={:?}] holding all new sends for legacy queued op(s) {:?}; hash/nonce evidence is required before reconciliation", chain, held);
+            }
+            return; // chain not registered / no queue / legacy ambiguity hold
+        }
     };
 
     match action {
@@ -1680,10 +1729,70 @@ pub(crate) enum ClaimChainPayoutSubmitError {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ClaimSettlementSubmitError {
+    MissingOp,
+    NotQueued,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RecordChainPayoutReplacementError {
     MissingOp,
     WrongOpKind,
     NotInflight,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RecordSettlementReplacementError {
+    MissingOp,
+    NotInflight,
+}
+
+/// Claim any ordinary settlement op and persist its exact signed transaction
+/// hash and nonce before crossing the ambiguous RPC broadcast boundary.
+pub(crate) fn claim_settlement_submit_in_state(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    op_id: u64,
+    now_ns: u64,
+    tx_hash: String,
+    nonce: u64,
+) -> Result<(), ClaimSettlementSubmitError> {
+    let op = state
+        .settlement_queues
+        .get_mut(&chain)
+        .and_then(|q| q.pending.get_mut(&op_id))
+        .ok_or(ClaimSettlementSubmitError::MissingOp)?;
+    if !matches!(op.status, SettlementOpStatus::Queued) || op.evm_submit_claimed != Some(false) {
+        return Err(ClaimSettlementSubmitError::NotQueued);
+    }
+    op.mark_inflight(now_ns);
+    op.record_tx_hash_candidate(tx_hash);
+    op.submit_nonce = Some(nonce);
+    op.evm_submit_claimed = Some(true);
+    Ok(())
+}
+
+/// Retain every locally computed same-nonce replacement hash before rebroadcast.
+pub(crate) fn record_settlement_replacement_in_state(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    op_id: u64,
+    now_ns: u64,
+    tx_hash: String,
+) -> Result<(), RecordSettlementReplacementError> {
+    let op = state
+        .settlement_queues
+        .get_mut(&chain)
+        .and_then(|q| q.pending.get_mut(&op_id))
+        .ok_or(RecordSettlementReplacementError::MissingOp)?;
+    match &mut op.status {
+        SettlementOpStatus::Inflight {
+            last_attempt_ns, ..
+        } => *last_attempt_ns = now_ns,
+        _ => return Err(RecordSettlementReplacementError::NotInflight),
+    }
+    op.record_tx_hash_candidate(tx_hash);
+    Ok(())
 }
 
 /// Atomically claim a queued liquidation swap immediately before broadcast.
@@ -1741,6 +1850,7 @@ pub(crate) fn claim_liquidation_swap_submit_in_state(
     op.mark_inflight(now_ns);
     op.record_tx_hash_candidate(tx_hash);
     op.submit_nonce = Some(nonce);
+    op.evm_submit_claimed = Some(true);
     Ok(())
 }
 
@@ -1767,13 +1877,14 @@ pub(crate) fn claim_chain_collateral_payout_submit_in_state(
     if !matches!(op.kind, SettlementOpKind::ChainCollateralPayout { .. }) {
         return Err(ClaimChainPayoutSubmitError::WrongOpKind);
     }
-    if !matches!(op.status, SettlementOpStatus::Queued) {
+    if !matches!(op.status, SettlementOpStatus::Queued) || op.evm_submit_claimed != Some(false) {
         return Err(ClaimChainPayoutSubmitError::NotQueued);
     }
 
     op.mark_inflight(now_ns);
     op.record_tx_hash_candidate(tx_hash);
     op.submit_nonce = Some(nonce);
+    op.evm_submit_claimed = Some(true);
     Ok(())
 }
 
@@ -2166,38 +2277,47 @@ async fn submit_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_que
         );
         return;
     }
-    let chain_payout_local_tx_hash = if kind == TxPlanKind::ChainCollateralPayout {
-        match tx::raw_tx_hash(&raw_hex) {
-            Ok(h) => Some(h),
-            Err(e) => {
-                log!(
-                    INFO,
-                    "[settlement chain={:?}] signed tx hash failed for claim payout op {}: {}; will retry",
-                    chain,
-                    op_id,
-                    e
-                );
-                return;
-            }
-        }
-    } else {
-        None
-    };
-    if let Some(local_tx_hash) = &chain_payout_local_tx_hash {
-        let claim = mutate_state(|s| {
-            claim_chain_collateral_payout_submit_in_state(
-                &mut s.multi_chain,
+    let local_tx_hash = match tx::raw_tx_hash(&raw_hex) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            log!(
+                INFO,
+                "[settlement chain={:?}] signed tx hash failed for op {}: {}; will retry",
                 chain,
                 op_id,
-                ic_cdk::api::time(),
-                local_tx_hash.clone(),
-                nonce,
-            )
+                e
+            );
+            return;
+        }
+    };
+    if let Some(local_tx_hash) = &local_tx_hash {
+        let claim = mutate_state(|s| {
+            if kind == TxPlanKind::ChainCollateralPayout {
+                claim_chain_collateral_payout_submit_in_state(
+                    &mut s.multi_chain,
+                    chain,
+                    op_id,
+                    ic_cdk::api::time(),
+                    local_tx_hash.clone(),
+                    nonce,
+                )
+                .map_err(|_| ())
+            } else {
+                claim_settlement_submit_in_state(
+                    &mut s.multi_chain,
+                    chain,
+                    op_id,
+                    ic_cdk::api::time(),
+                    local_tx_hash.clone(),
+                    nonce,
+                )
+                .map_err(|_| ())
+            }
         });
         if let Err(e) = claim {
             log!(
                 INFO,
-                "[settlement chain={:?}] claim payout op {}: submit CAS aborted before broadcast ({:?})",
+                "[settlement chain={:?}] claim op {}: submit CAS aborted before broadcast ({:?})",
                 chain,
                 op_id,
                 e
@@ -2206,19 +2326,9 @@ async fn submit_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_que
         }
     }
 
-    // 7. Broadcast. A transient send error is logged and retried next tick. For
-    //    ChainCollateralPayout, the op is already Inflight with its local hash
-    //    and nonce recorded, so an ambiguous RPC error cannot lead to a fresh
-    //    nonce duplicate payout.
-    //
-    //    ON-CHAIN DOUBLE-MINT DEPENDENCY: if send_raw_transaction returns Err but
-    //    a Mint actually landed (an RPC false negative), the mint op stays
-    //    Queued with no submit_nonce recorded, so the next tick can re-read
-    //    "latest" and sign a NEW tx at nonce+1. The canister's supply accounting
-    //    stays correct (confirm requires observed_e8s == pending_mint_e8s and
-    //    credits exactly once), but on-chain icUSD could be minted twice unless
-    //    IcUSD.mint guards per op/vault id. Plain CFX claim payouts cannot rely
-    //    on that contract guard, so they are claimed Inflight before broadcast.
+    // 7. The queued op is already Inflight with its local hash and nonce
+    //    durably recorded. If an RPC accepted the bytes but lost its reply, the
+    //    next tick can only inspect/rebroadcast the same nonce.
     let tx_hash = match evm_rpc::send_raw_transaction(chain, &raw_hex).await {
         Ok(h) => h,
         Err(e) => {
@@ -2237,28 +2347,19 @@ async fn submit_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_que
         }
     };
 
-    // 8. Mark Inflight + record the tx hash AND the submit nonce. Emit
-    //    ChainMintSubmitted for mints.
+    // 8. Preserve the RPC-reported hash as an additional receipt candidate.
+    //    Emit ChainMintSubmitted for mints.
     let now = ic_cdk::api::time();
-    if kind == TxPlanKind::ChainCollateralPayout {
-        mutate_state(|s| {
-            if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
-                if let Some(o) = q.pending.get_mut(&op_id) {
-                    o.record_tx_hash_candidate(tx_hash.clone());
-                }
-            }
-        });
-    } else {
-        mutate_state(|s| {
-            if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
-                if let Some(o) = q.pending.get_mut(&op_id) {
-                    o.mark_inflight(now);
-                    o.last_tx_hash = Some(tx_hash.clone());
-                    o.submit_nonce = Some(nonce);
-                }
-            }
-        });
-    }
+    mutate_state(|s| {
+        if let Some(o) = s
+            .multi_chain
+            .settlement_queues
+            .get_mut(&chain)
+            .and_then(|q| q.pending.get_mut(&op_id))
+        {
+            o.record_tx_hash_candidate(tx_hash.clone());
+        }
+    });
 
     match kind {
         TxPlanKind::Mint => {
@@ -3652,32 +3753,37 @@ async fn resubmit_if_stuck(
     if ensure_submit_still_allowed(chain, &op.kind, ic_cdk::api::time()).is_err() {
         return;
     }
-    let chain_payout_replacement_hash = if matches!(
-        op.kind,
-        SettlementOpKind::ChainCollateralPayout { .. }
-    ) {
-        match tx::raw_tx_hash(&raw_hex) {
-            Ok(h) => Some(h),
-            Err(e) => {
-                log!(INFO, "[settlement chain={:?}] resubmit signed tx hash failed for claim payout op {}: {}; leaving Inflight", chain, op_id, e);
-                return;
-            }
+    let replacement_hash = match tx::raw_tx_hash(&raw_hex) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            log!(INFO, "[settlement chain={:?}] resubmit signed tx hash failed for op {}: {}; leaving Inflight", chain, op_id, e);
+            return;
         }
-    } else {
-        None
     };
-    if let Some(local_tx_hash) = &chain_payout_replacement_hash {
+    if let Some(local_tx_hash) = &replacement_hash {
         let recorded = mutate_state(|s| {
-            record_chain_collateral_payout_replacement_in_state(
-                &mut s.multi_chain,
-                chain,
-                op_id,
-                ic_cdk::api::time(),
-                local_tx_hash.clone(),
-            )
+            if matches!(op.kind, SettlementOpKind::ChainCollateralPayout { .. }) {
+                record_chain_collateral_payout_replacement_in_state(
+                    &mut s.multi_chain,
+                    chain,
+                    op_id,
+                    ic_cdk::api::time(),
+                    local_tx_hash.clone(),
+                )
+                .map_err(|_| ())
+            } else {
+                record_settlement_replacement_in_state(
+                    &mut s.multi_chain,
+                    chain,
+                    op_id,
+                    ic_cdk::api::time(),
+                    local_tx_hash.clone(),
+                )
+                .map_err(|_| ())
+            }
         });
         if let Err(e) = recorded {
-            log!(INFO, "[settlement chain={:?}] resubmit claim payout op {}: replacement record aborted before broadcast ({:?})", chain, op_id, e);
+            log!(INFO, "[settlement chain={:?}] resubmit op {}: replacement record aborted before broadcast ({:?})", chain, op_id, e);
             return;
         }
     }
@@ -3704,11 +3810,7 @@ async fn resubmit_if_stuck(
     mutate_state(|s| {
         if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
             if let Some(o) = q.pending.get_mut(&op_id) {
-                if matches!(o.kind, SettlementOpKind::ChainCollateralPayout { .. }) {
-                    o.record_tx_hash_candidate(new_tx_hash.clone());
-                } else {
-                    o.last_tx_hash = Some(new_tx_hash.clone());
-                }
+                o.record_tx_hash_candidate(new_tx_hash.clone());
                 if let SettlementOpStatus::Inflight {
                     last_attempt_ns, ..
                 } = &mut o.status
