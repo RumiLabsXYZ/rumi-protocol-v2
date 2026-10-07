@@ -47,8 +47,8 @@
 
   const trustSignals = [
     { title: 'Open Source', desc: 'Every line of code is public and verifiable on GitHub.' },
-    { title: 'Fully On-Chain', desc: 'No bridges, no off-chain oracles, no custodians. Frontend, backend, ledger, price feeds: all canisters.' },
-    { title: 'Audited', desc: 'Internal three-pass security review and external pre-audit by AVAI, both fully remediated and published on the security page.' },
+    { title: 'ICP-native Core', desc: 'The CDP backend, ledger, and core protocol services run in Internet Computer canisters.' },
+    { title: 'Security reviews', desc: 'Internal reviews and an AVAI automated pre-audit are published with a dated report on current source and release status.' },
     { title: 'Path to Decentralization', desc: 'All canisters are currently under dev control. The plan is to hand governance to an SNS DAO.' },
   ];
 </script>
@@ -66,7 +66,7 @@
     </h1>
     <p class="text-lg md:text-xl max-w-2xl mx-auto mb-10 animate-in"
        style="color: var(--rumi-text-secondary); animation-delay: 0.4s; line-height: 1.7;">
-      Mint icUSD against your crypto. No bridges, no intermediaries, everything on-chain.
+      Mint icUSD against supported collateral through Rumi's canister-based lending protocol.
     </p>
     <div class="flex flex-col sm:flex-row gap-4 justify-center animate-in" style="animation-delay: 0.55s;">
       <a href={appUrl} target="_blank" rel="noopener" class="cta-primary">Launch App</a>
@@ -94,7 +94,7 @@
       </div>
       <span class="trust-strip-divider"></span>
       <div class="trust-strip-signals">
-        <a href="/security" style="color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor;">Independently Audited</a>
+        <a href="/security" style="color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor;">Security Reviews</a>
         <span class="trust-sep">·</span>
         <span>Open Source</span>
         <span class="trust-sep">·</span>
@@ -154,13 +154,12 @@
     <p class="text-sm mb-4" style="color: var(--rumi-text-secondary); max-width: 560px; line-height: 1.7;">
       ICP can do things most blockchains can't: serve full web applications, run autonomous
       canister logic on timers, and provide native price feeds through the Exchange Rate
-      Canister. That makes it possible to build a complete CDP protocol with zero off-chain
-      infrastructure.
+      Canister. These capabilities support Rumi's CDP core on ICP.
     </p>
     <p class="text-sm" style="color: var(--rumi-text-secondary); max-width: 560px; line-height: 1.7;">
-      Rumi runs entirely inside canisters. The frontend, backend, ledger, and price feeds
-      are all on-chain. No bridges, no external oracles, no custodians. The protocol is
-      served directly from the blockchain to your browser.
+      Rumi's core backend, ledger, and website run in canisters. Supported collateral can involve
+      external networks and market data sources, each with its own risks. This website is served
+      from an ICP asset canister.
     </p>
   </div>
 </section>
