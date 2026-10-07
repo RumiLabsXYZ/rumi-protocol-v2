@@ -6,13 +6,13 @@
 use candid::Principal;
 use ic_canister_log::{declare_log_buffer, log};
 
-use rumi_points::events::SourceId;
 use rumi_points::snapshot_seed::RevealedSeed;
-use rumi_points::source_types::three_pool;
 use rumi_points::types::{
     EpochStatus, EpochSummary, IngestStatus, InitArgs, LeaderboardEntry, PointEntryPage,
     PointsConfig, PointsError, PrincipalState, PublicEpochStatus, RegistrationInfo, SourceStatus,
 };
+use rumi_points::events::SourceId;
+use rumi_points::source_types::three_pool;
 use rumi_points::{epoch, events, poll, state};
 
 // Canister debug-log buffer (retrievable in later phases; for now feeds the
@@ -48,9 +48,9 @@ fn pre_upgrade() {
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     state::restore_from_stable_or_trap();
-    // Fence old public-seed schedules and expired unopened epochs synchronously
-    // before either timer or update ingress can resume. Their state remains
-    // intact for admin review; a nonexpired legacy epoch waits for secure reseeding.
+    // Fence old public-seed schedules synchronously before either timer or
+    // update ingress can resume. Active/expired legacy windows remain intact
+    // for admin review; a nonexpired unopened epoch waits for secure reseeding.
     epoch::prepare_legacy_state_after_upgrade(ic_cdk::api::time());
     // Timers do not survive upgrades: re-register both from the persisted config.
     poll::setup_poll_timer();
@@ -248,10 +248,7 @@ async fn admin_rebuild_3pool_recorded() -> Result<u64, String> {
         let resp = match res {
             Ok((r,)) => r,
             Err((code, msg)) => {
-                return Err(format!(
-                    "3pool fetch at {} failed: {:?} {}",
-                    start, code, msg
-                ))
+                return Err(format!("3pool fetch at {} failed: {:?} {}", start, code, msg))
             }
         };
         let (page, next_start, reached_end) = three_pool::normalize_forward(resp);
@@ -262,12 +259,7 @@ async fn admin_rebuild_3pool_recorded() -> Result<u64, String> {
         start = next_start;
     }
     let applied = events::rebuild_3pool_recorded(&all) as u64;
-    log!(
-        INFO,
-        "admin_rebuild_3pool_recorded: replayed {} events (cursor {})",
-        applied,
-        cursor
-    );
+    log!(INFO, "admin_rebuild_3pool_recorded: replayed {} events (cursor {})", applied, cursor);
     Ok(applied)
 }
 
@@ -290,8 +282,6 @@ fn set_poll_interval_secs(secs: u64) -> Result<(), PointsError> {
 
 #[ic_cdk::query]
 fn get_ingest_status() -> IngestStatus {
-    let (decode_failure_count, last_decode_failure, blocked_decodes, last_decode_resolution) =
-        state::decode_failure_status();
     let sources = state::source_canisters()
         .into_iter()
         .map(|(tag, canister)| SourceStatus {
@@ -305,23 +295,7 @@ fn get_ingest_status() -> IngestStatus {
         registered_count: state::registered_count(),
         poll_enabled: state::poll_enabled(),
         poll_interval_secs: state::poll_interval_secs(),
-        decode_failure_count,
-        last_decode_failure,
-        blocked_decodes,
-        last_decode_resolution,
     }
-}
-
-/// Admin-only resolution for an unknown source event holding ingestion. Set
-/// `skip` false to retry the same event after a code/source repair; set it true
-/// only to explicitly accept losing any points semantics carried by that row.
-#[ic_cdk::update]
-fn resolve_ingest_decode_failure(
-    source_tag: u8,
-    event_id: u64,
-    skip: bool,
-) -> Result<(), String> {
-    state::resolve_decode_failure(ic_cdk::caller(), source_tag, event_id, skip)
 }
 
 // ── Phase 5: epoch driver + commit-reveal audit ─────────────────────────────
@@ -376,7 +350,6 @@ async fn force_epoch_tick() -> Result<(), PointsError> {
     if !state::is_admin(ic_cdk::caller()) {
         return Err(PointsError::Unauthorized);
     }
-    epoch::prepare_admin_capture_retry();
     epoch::run_tick().await;
     Ok(())
 }
@@ -396,13 +369,13 @@ fn get_asset_ledgers() -> Vec<(u8, Principal)> {
 /// PUBLIC epoch status (POINTS-001 / PTS-002). Returns the open epoch's bounds
 /// only; the in-flight capture/close cursors and completion flags are withheld so
 /// a not-yet-captured principal cannot watch the cursor and time a flash deposit
-/// to beat the `min(A,B)` anti-snipe defense. Each snapshot time stays hidden
-/// (`null`) until its balance reads have completed, because the scheduled time
-/// passing does not mean the capture has happened. Admins use
-/// `get_epoch_status_admin` for the full view.
+/// to beat the `min(A,B)` anti-snipe defense, and each snapshot time is withheld
+/// (`null`) until it has fired, since a future snapshot time is precisely the
+/// snipe target the commit-reveal seed hides. Admins use `get_epoch_status_admin`
+/// for the full view.
 #[ic_cdk::query]
 fn get_epoch_status() -> PublicEpochStatus {
-    state::public_epoch_status()
+    state::public_epoch_status(ic_cdk::api::time())
 }
 
 /// ADMIN-ONLY full epoch status, including the capture/close cursors and

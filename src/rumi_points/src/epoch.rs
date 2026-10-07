@@ -67,35 +67,6 @@ fn legacy_open_epoch_requires_review(
     }
 }
 
-fn hold_expired_unopened_epoch(
-    index: u64,
-    now_ns: u64,
-    season_start_ns: u64,
-    season_end_ns: u64,
-    review_uncommitted_epoch_zero: bool,
-) -> bool {
-    // Runtime epoch zero on a fresh uncommitted install has no scheduled work.
-    // After an upgrade, however, even that configured window must be reviewed
-    // if it has expired before the epoch was opened.
-    if index == 0 && !state::snapshot_seed_committed() && !review_uncommitted_epoch_zero {
-        return false;
-    }
-    let (_, epoch_end_ns) = epoch_bounds(index, season_start_ns, season_end_ns);
-    if legacy_reseed_window_allowed(epoch_end_ns, now_ns) {
-        return false;
-    }
-
-    // Do not synthesize a zero-point close or silently advance the epoch index;
-    // an operator must review the missed reward interval and explicitly resume.
-    state::set_legacy_transition_held(true);
-    state::set_legacy_reseed_pending(false);
-    ic_cdk::println!(
-        "[epoch] held expired unopened epoch {} for admin review without advancing rewards",
-        index
-    );
-    true
-}
-
 /// Bounds of epoch `index`: `[season_start + index*EPOCH, min(start + EPOCH,
 /// season_end)]`. The last epoch is partial (truncated at season end).
 pub fn epoch_bounds(index: u64, season_start_ns: u64, season_end_ns: u64) -> (u64, u64) {
@@ -164,7 +135,6 @@ thread_local! {
 /// Principals captured per driver tick. Season-1 scale fits one tick; larger
 /// seasons span several (the cursor in `OpenEpoch` resumes between ticks).
 const CAPTURE_CHUNK: u64 = 100;
-const CAPTURE_READ_RETRY_LIMIT: u8 = 3;
 
 /// Decide the snapshot's next resume cursor and completion flag from one chunk's
 /// outcome. Pure, so the capture book-keeping is unit-testable:
@@ -319,12 +289,8 @@ fn open_epoch_at(
         snapshot_b_ns: b_ns,
         a_cursor: None,
         a_complete: false,
-        a_capture_error_count: 0,
-        a_capture_error_principal: None,
         b_cursor: None,
         b_complete: false,
-        b_capture_error_count: 0,
-        b_capture_error_principal: None,
         close_started: false,
         close_cursor: None,
         close_points_accrued: 0,
@@ -371,12 +337,22 @@ pub fn prepare_legacy_state_after_upgrade(now_ns: u64) {
     }
 
     let index = state::current_epoch_index();
-    let (season_start, season_end) = state::season_bounds();
-    if hold_expired_unopened_epoch(index, now_ns, season_start, season_end, true) {
+    if index == 0 || state::current_epoch_entropy().is_some() {
         return;
     }
-    let (scheduled_start, _) = epoch_bounds(index, season_start, season_end);
-    if now_ns >= scheduled_start && index > 0 && state::current_epoch_entropy().is_none() {
+    let (season_start, season_end) = state::season_bounds();
+    let (scheduled_start, epoch_end) = epoch_bounds(index, season_start, season_end);
+    if now_ns < scheduled_start {
+        return;
+    }
+    if !legacy_reseed_window_allowed(epoch_end, now_ns) {
+        state::set_legacy_transition_held(true);
+        state::set_legacy_reseed_pending(false);
+        ic_cdk::println!(
+            "[epoch] post_upgrade held expired legacy epoch {} for admin review without advancing rewards",
+            index
+        );
+    } else {
         state::set_legacy_reseed_pending(true);
     }
 }
@@ -525,10 +501,10 @@ pub async fn run_tick() {
         Some(g) => g,
         None => return, // a tick is already in flight
     };
+    let now = ic_cdk::api::time();
     if state::legacy_transition_held() {
         return;
     }
-    let now = ic_cdk::api::time();
     if state::legacy_reseed_pending() {
         resume_legacy_reseed().await;
         return;
@@ -549,11 +525,6 @@ pub async fn run_tick() {
     let (season_start, season_end) = state::season_bounds();
     let open = state::get_open_epoch();
     let index = state::current_epoch_index();
-    if open.is_none()
-        && hold_expired_unopened_epoch(index, now, season_start, season_end, false)
-    {
-        return;
-    }
     match next_action(&open, now, season_start, season_end, index) {
         DriverAction::Idle => {}
         DriverAction::Start => {
@@ -595,17 +566,6 @@ async fn capture(which: Snapshot) {
         Some(o) => o,
         None => return,
     };
-    let (error_count, error_principal) = match which {
-        Snapshot::A => (open.a_capture_error_count, open.a_capture_error_principal),
-        Snapshot::B => (open.b_capture_error_count, open.b_capture_error_principal),
-    };
-    if capture_retry_paused(error_count, error_principal, |p| state::is_excluded(&p)) {
-        // Stop automatic retries after a bounded number of identical failures.
-        // Admin epoch status exposes the principal/count; force_epoch_tick is an
-        // explicit retry, while add_excluded_principal lets the driver skip it
-        // under the existing operator exclusion policy.
-        return;
-    }
     let ctx = match fetch_context().await {
         Some(c) => c,
         None => return, // a snapshot-wide source was unreachable; retry next tick
@@ -629,7 +589,6 @@ async fn capture(which: Snapshot) {
         if state::is_excluded(p) {
             // Excluded principals are not captured but still advance the cursor
             // past themselves (they are skipped again at close).
-            clear_capture_error(&mut open, which, *p);
             last_captured = Some(*p);
             continue;
         }
@@ -641,12 +600,10 @@ async fn capture(which: Snapshot) {
                 // min() would otherwise lock that 0 in and zero a held position
                 // for the whole epoch. Resume from the last success next tick and
                 // retry this principal.
-                record_capture_error(&mut open, which, *p);
                 hit_error = true;
                 break;
             }
         };
-        clear_capture_error(&mut open, which, *p);
         let weights = accrual::snapshot_weights(&accrual::build_snapshot_inputs(&raw, &ctx.prices));
         match which {
             Snapshot::A => state::snapshot_buffer_put(*p, weights),
@@ -666,69 +623,6 @@ async fn capture(which: Snapshot) {
         }
     }
     state::set_open_epoch(Some(open));
-}
-
-fn capture_retry_paused(
-    error_count: u8,
-    error_principal: Option<Principal>,
-    is_excluded: impl FnOnce(Principal) -> bool,
-) -> bool {
-    error_count >= CAPTURE_READ_RETRY_LIMIT
-        && error_principal
-            .map(|principal| !is_excluded(principal))
-            .unwrap_or(false)
-}
-
-fn record_capture_error(open: &mut OpenEpoch, which: Snapshot, principal: Principal) {
-    let (count, failed_principal) = match which {
-        Snapshot::A => (&mut open.a_capture_error_count, &mut open.a_capture_error_principal),
-        Snapshot::B => (&mut open.b_capture_error_count, &mut open.b_capture_error_principal),
-    };
-    if *failed_principal == Some(principal) {
-        *count = count.saturating_add(1);
-    } else {
-        *failed_principal = Some(principal);
-        *count = 1;
-    }
-    if *count == CAPTURE_READ_RETRY_LIMIT {
-        log_capture_stalled(which, *count, principal);
-    }
-}
-
-fn log_capture_stalled(which: Snapshot, count: u8, principal: Principal) {
-    #[cfg(target_arch = "wasm32")]
-    ic_cdk::println!(
-        "[epoch] snapshot {:?} paused after {} failed reads for principal {}; admin retry or exclusion required",
-        match which { Snapshot::A => "A", Snapshot::B => "B" },
-        count,
-        principal
-    );
-    #[cfg(not(target_arch = "wasm32"))]
-    let _ = (which, count, principal);
-}
-
-fn clear_capture_error(open: &mut OpenEpoch, which: Snapshot, principal: Principal) {
-    let (count, failed_principal) = match which {
-        Snapshot::A => (&mut open.a_capture_error_count, &mut open.a_capture_error_principal),
-        Snapshot::B => (&mut open.b_capture_error_count, &mut open.b_capture_error_principal),
-    };
-    if *failed_principal == Some(principal) {
-        *count = 0;
-        *failed_principal = None;
-    }
-}
-
-/// An explicit admin tick resets the capture circuit so one controlled retry is
-/// possible after inspecting the alarm or repairing/excluding the failed source.
-pub fn prepare_admin_capture_retry() {
-    state::with_state_mut(|s| {
-        if let Some(open) = s.open_epoch.as_mut() {
-            open.a_capture_error_count = 0;
-            open.a_capture_error_principal = None;
-            open.b_capture_error_count = 0;
-            open.b_capture_error_principal = None;
-        }
-    });
 }
 
 // ── Epoch close (chunked, POINTS-002) ──
@@ -1134,26 +1028,8 @@ mod tests {
         assert!(status.legacy_transition_held);
         assert!(!status.legacy_reseed_pending);
         assert_eq!(status.current_epoch_index, 4);
-        assert_eq!(status.open_epoch, Some(open.clone()));
+        assert_eq!(status.open_epoch, Some(open));
         assert!(state::try_poll_guard().is_none());
-
-        // A due driver tick after upgrade must not sample or settle this
-        // predictable legacy epoch while the review hold is active.
-        let seed_before = state::with_state(|s| s.snapshot_seed.clone());
-        struct NoopWake;
-        impl std::task::Wake for NoopWake {
-            fn wake(self: std::sync::Arc<Self>) {}
-        }
-        let waker = std::task::Waker::from(std::sync::Arc::new(NoopWake));
-        let mut context = std::task::Context::from_waker(&waker);
-        let mut tick = Box::pin(run_tick());
-        assert!(std::future::Future::poll(tick.as_mut(), &mut context).is_ready());
-        drop(tick);
-        assert_eq!(state::get_open_epoch(), Some(open));
-        assert_eq!(state::current_epoch_index(), 4);
-        assert!(state::epoch_history(0, u64::MAX).is_empty());
-        assert_eq!(state::revealed_seed_count(), 0);
-        assert_eq!(state::with_state(|s| s.snapshot_seed.clone()), seed_before);
 
         // Older singleton blobs default the scheme marker to false. Even an
         // already-open epoch zero is held; fresh init sets the marker true.
@@ -1172,7 +1048,7 @@ mod tests {
     }
 
     #[test]
-    fn post_upgrade_fences_nonexpired_legacy_and_holds_any_expired_unopened_epoch() {
+    fn post_upgrade_fences_nonexpired_and_holds_expired_unopened_legacy_epoch() {
         state::init_state(
             Some(crate::types::InitArgs {
                 season_start_ns: Some(0),
@@ -1216,140 +1092,6 @@ mod tests {
         assert!(state::epoch_history(0, u64::MAX).is_empty());
         assert_eq!(state::revealed_seed_count(), 0);
         assert!(state::try_poll_guard().is_none());
-
-        // Expiry is independently a review condition; it applies even when
-        // the epoch already has secure entropy and needs no legacy reseed.
-        state::init_state(
-            Some(crate::types::InitArgs {
-                season_start_ns: Some(0),
-                season_end_ns: Some(3 * E),
-                ..Default::default()
-            }),
-            Principal::anonymous(),
-        );
-        state::with_state_mut(|s| {
-            s.current_epoch_index = 1;
-            s.snapshot_seed.current_seed = Some([8; 32]);
-            s.snapshot_seed.current_entropy = Some([9; 32]);
-        });
-        prepare_legacy_state_after_upgrade(2 * E);
-        let status = state::epoch_status();
-        assert!(status.legacy_transition_held);
-        assert!(!status.legacy_reseed_pending);
-        assert_eq!(status.current_epoch_index, 1);
-        assert!(status.open_epoch.is_none());
-        assert!(state::epoch_history(0, u64::MAX).is_empty());
-        assert_eq!(state::revealed_seed_count(), 0);
-        assert!(state::try_poll_guard().is_none());
-    }
-
-    #[test]
-    fn expired_unopened_epoch_zero_requires_review_even_without_commit() {
-        // An upgrade with a configured but unopened epoch-zero window must pause
-        // for review after that window expires, even when S0 was never committed.
-        state::init_state(
-            Some(crate::types::InitArgs {
-                season_start_ns: Some(0),
-                season_end_ns: Some(E),
-                ..Default::default()
-            }),
-            Principal::anonymous(),
-        );
-        assert!(!hold_expired_unopened_epoch(0, E, 0, E, false));
-        prepare_legacy_state_after_upgrade(E);
-        assert!(state::legacy_transition_held());
-        assert!(!state::legacy_reseed_pending());
-        assert_eq!(state::current_epoch_index(), 0);
-        assert!(state::get_open_epoch().is_none());
-        assert!(state::epoch_history(0, u64::MAX).is_empty());
-        assert_eq!(state::revealed_seed_count(), 0);
-        assert!(state::try_poll_guard().is_none());
-
-        let seed = [10; 32];
-        state::init_state(
-            Some(crate::types::InitArgs {
-                snapshot_seed_commit: Some(crate::snapshot_seed::commitment(&seed)),
-                season_start_ns: Some(0),
-                season_end_ns: Some(3 * E),
-                ..Default::default()
-            }),
-            Principal::anonymous(),
-        );
-        prepare_legacy_state_after_upgrade(3 * E);
-        let status = state::epoch_status();
-        assert!(status.legacy_transition_held);
-        assert!(!status.legacy_reseed_pending);
-        assert_eq!(status.current_epoch_index, 0);
-        assert!(status.open_epoch.is_none());
-        assert!(state::epoch_history(0, u64::MAX).is_empty());
-        assert_eq!(state::revealed_seed_count(), 0);
-
-        // A committed epoch zero whose window is still in the future remains
-        // available for the normal operator bootstrap when its start arrives.
-        state::init_state(
-            Some(crate::types::InitArgs {
-                snapshot_seed_commit: Some(crate::snapshot_seed::commitment(&seed)),
-                season_start_ns: Some(2 * E),
-                season_end_ns: Some(4 * E),
-                ..Default::default()
-            }),
-            Principal::anonymous(),
-        );
-        prepare_legacy_state_after_upgrade(2 * E - 1);
-        assert!(!state::legacy_transition_held());
-        assert!(!state::legacy_reseed_pending());
-        assert_eq!(state::current_epoch_index(), 0);
-        assert!(state::get_open_epoch().is_none());
-    }
-
-    #[test]
-    fn runtime_holds_expired_unopened_epoch_after_season_shortening() {
-        state::init_state(
-            Some(crate::types::InitArgs {
-                season_start_ns: Some(0),
-                season_end_ns: Some(3 * E),
-                ..Default::default()
-            }),
-            Principal::anonymous(),
-        );
-        state::with_state_mut(|s| {
-            s.current_epoch_index = 1;
-            s.snapshot_seed.current_seed = Some([8; 32]);
-            s.snapshot_seed.current_entropy = Some([9; 32]);
-            // The admin shortens the season so it ends before epoch 1 starts.
-            s.season_end_ns = E / 2;
-        });
-
-        let (season_start, season_end) = state::season_bounds();
-        assert_eq!(epoch_bounds(1, season_start, season_end), (E, E / 2));
-        assert_eq!(
-            next_action(&None, E / 2, season_start, season_end, 1),
-            DriverAction::Idle,
-            "the ordinary start action is unreachable after the schedule is clipped"
-        );
-        assert!(!hold_expired_unopened_epoch(
-            1,
-            E / 2 - 1,
-            season_start,
-            season_end,
-            false
-        ));
-        assert!(!state::legacy_transition_held());
-
-        assert!(hold_expired_unopened_epoch(
-            1,
-            E / 2,
-            season_start,
-            season_end,
-            false
-        ));
-        let status = state::epoch_status();
-        assert!(status.legacy_transition_held);
-        assert!(!status.legacy_reseed_pending);
-        assert_eq!(status.current_epoch_index, 1);
-        assert!(status.open_epoch.is_none());
-        assert!(state::epoch_history(0, u64::MAX).is_empty());
-        assert_eq!(state::revealed_seed_count(), 0);
     }
 
     #[test]
@@ -1464,12 +1206,8 @@ mod tests {
             snapshot_b_ns: 500,
             a_cursor: None,
             a_complete,
-            a_capture_error_count: 0,
-            a_capture_error_principal: None,
             b_cursor: None,
             b_complete,
-            b_capture_error_count: 0,
-            b_capture_error_principal: None,
             close_started: false,
             close_cursor: None,
             close_points_accrued: 0,
@@ -1594,51 +1332,10 @@ mod tests {
     #[test]
     fn next_capture_cursor_holds_position_when_first_principal_errors() {
         // No principal captured (first one errored): leave the cursor unchanged so
-        // the same chunk is retried from the start next tick, until the retry
-        // circuit reaches its explicit operator-action threshold.
+        // the same chunk is retried from the start next tick.
         let (cursor, done) = next_capture_cursor(3, None, Some(pr(9)), true);
         assert!(!done);
         assert_eq!(cursor, Some(pr(9)));
-    }
-
-    #[test]
-    fn capture_error_alarm_is_bounded_and_clears_after_success() {
-        let mut open = oe(false, false);
-        for attempt in 1..=CAPTURE_READ_RETRY_LIMIT {
-            record_capture_error(&mut open, Snapshot::A, pr(4));
-            assert_eq!(open.a_capture_error_count, attempt);
-            assert_eq!(open.a_capture_error_principal, Some(pr(4)));
-        }
-        assert_eq!(open.a_capture_error_count, CAPTURE_READ_RETRY_LIMIT);
-        assert_eq!(open.b_capture_error_count, 0);
-
-        clear_capture_error(&mut open, Snapshot::A, pr(4));
-        assert_eq!(open.a_capture_error_count, 0);
-        assert_eq!(open.a_capture_error_principal, None);
-    }
-
-    #[test]
-    fn capture_retry_circuit_only_pauses_at_limit_until_principal_is_excluded() {
-        assert!(!capture_retry_paused(
-            CAPTURE_READ_RETRY_LIMIT - 1,
-            Some(pr(4)),
-            |_| false
-        ));
-        assert!(capture_retry_paused(
-            CAPTURE_READ_RETRY_LIMIT,
-            Some(pr(4)),
-            |_| false
-        ));
-        assert!(!capture_retry_paused(
-            CAPTURE_READ_RETRY_LIMIT,
-            Some(pr(4)),
-            |p| p == pr(4)
-        ));
-        assert!(!capture_retry_paused(
-            CAPTURE_READ_RETRY_LIMIT,
-            None,
-            |_| false
-        ));
     }
 
     // ── start_season requires a committed H0 (commit-reveal integrity) ──

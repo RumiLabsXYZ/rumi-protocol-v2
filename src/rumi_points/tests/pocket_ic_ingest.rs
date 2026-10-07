@@ -68,9 +68,8 @@ struct TEpochStatus {
     snapshot_seed_committed: bool,
 }
 
-// The post-upgrade admin view has two transition flags that do not exist in
-// the pre-randomness canister's Candid response. Decode the old response with
-// TEpochStatus above, and the new response with this width-subtyped projection.
+// Admin status additions on the current Wasm that are absent from the legacy
+// pre-randomness canister's Candid response.
 #[derive(CandidType, Deserialize, Debug)]
 struct THeldEpochStatus {
     current_epoch_index: u64,
@@ -80,9 +79,10 @@ struct THeldEpochStatus {
     legacy_reseed_pending: bool,
 }
 
-#[derive(CandidType, Deserialize)]
+#[derive(CandidType, Deserialize, Debug, PartialEq)]
 struct TSourceCursor {
     tag: u8,
+    canister: Principal,
     cursor: u64,
 }
 
@@ -156,12 +156,7 @@ fn poll_ingests_backend_event_and_auto_registers() {
 
     // Point the backend source (tag 0) at the mock (admin-gated).
     let set_res = pic
-        .update_call(
-            rp,
-            admin(),
-            "set_source_canister",
-            Encode!(&0u8, &mock).unwrap(),
-        )
+        .update_call(rp, admin(), "set_source_canister", Encode!(&0u8, &mock).unwrap())
         .expect("set_source_canister call failed");
     match set_res {
         WasmResult::Reply(b) => {
@@ -202,10 +197,7 @@ fn poll_ingests_backend_event_and_auto_registers() {
         WasmResult::Reject(m) => panic!("second trigger_poll rejected: {m}"),
     };
     assert_eq!(applied2, Ok(0), "second poll ingests nothing (caught up)");
-    assert!(
-        is_registered(&pic, rp, synthetic_caller()),
-        "still registered"
-    );
+    assert!(is_registered(&pic, rp, synthetic_caller()), "still registered");
 }
 
 /// Phase 2b: the periodic timer (not a manual trigger) drives ingestion. Enable
@@ -228,19 +220,9 @@ fn poll_timer_drives_ingestion() {
         season_end_ns: None,
         snapshot_seed_commit: None,
     };
-    pic.install_canister(
-        rp,
-        RUMI_POINTS_WASM.to_vec(),
-        Encode!(&Some(init)).unwrap(),
-        None,
-    );
+    pic.install_canister(rp, RUMI_POINTS_WASM.to_vec(), Encode!(&Some(init)).unwrap(), None);
 
-    admin_ok(
-        &pic,
-        rp,
-        "set_source_canister",
-        Encode!(&0u8, &mock).unwrap(),
-    );
+    admin_ok(&pic, rp, "set_source_canister", Encode!(&0u8, &mock).unwrap());
 
     // Timer off by default; nobody registered, no manual poll.
     assert!(!is_registered(&pic, rp, synthetic_caller()));
@@ -263,9 +245,7 @@ fn poll_timer_drives_ingestion() {
 
 /// Call an admin update returning `Result<(), PointsError>` and assert Ok.
 fn admin_ok(pic: &pocket_ic::PocketIc, rp: Principal, method: &str, args: Vec<u8>) {
-    let res = pic
-        .update_call(rp, admin(), method, args)
-        .expect("admin call failed");
+    let res = pic.update_call(rp, admin(), method, args).expect("admin call failed");
     match res {
         WasmResult::Reply(b) => {
             let r: Result<(), PointsError> = Decode!(&b, Result<(), PointsError>).unwrap();
@@ -277,12 +257,7 @@ fn admin_ok(pic: &pocket_ic::PocketIc, rp: Principal, method: &str, args: Vec<u8
 
 fn is_registered(pic: &pocket_ic::PocketIc, rp: Principal, who: Principal) -> bool {
     let res = pic
-        .query_call(
-            rp,
-            Principal::anonymous(),
-            "is_registered",
-            Encode!(&who).unwrap(),
-        )
+        .query_call(rp, Principal::anonymous(), "is_registered", Encode!(&who).unwrap())
         .expect("is_registered call failed");
     match res {
         WasmResult::Reply(b) => Decode!(&b, bool).unwrap(),
@@ -316,9 +291,28 @@ fn install_points(pic: &pocket_ic::PocketIc) -> Principal {
         // (commit-reveal anti-sniping) and verifies S0 against this.
         snapshot_seed_commit: Some(rumi_points::snapshot_seed::commitment(&SEASON_SEED)),
     };
+    pic.install_canister(rp, RUMI_POINTS_WASM.to_vec(), Encode!(&Some(init)).unwrap(), None);
+    rp
+}
+
+fn install_legacy_points(
+    pic: &pocket_ic::PocketIc,
+    legacy_wasm: &[u8],
+    season_start_ns: u64,
+    season_end_ns: u64,
+) -> Principal {
+    let rp = pic.create_canister();
+    pic.add_cycles(rp, 4_000_000_000_000);
+    let init = InitArgs {
+        admin: Some(admin()),
+        excluded_principals: None,
+        season_start_ns: Some(season_start_ns),
+        season_end_ns: Some(season_end_ns),
+        snapshot_seed_commit: Some(rumi_points::snapshot_seed::commitment(&SEASON_SEED)),
+    };
     pic.install_canister(
         rp,
-        RUMI_POINTS_WASM.to_vec(),
+        legacy_wasm.to_vec(),
         Encode!(&Some(init)).unwrap(),
         None,
     );
@@ -332,43 +326,23 @@ fn set_time_ns(pic: &pocket_ic::PocketIc, ns: u64) {
 /// Point all four source tags (backend/3pool/SP/AMM) at the single mock.
 fn set_all_sources(pic: &pocket_ic::PocketIc, rp: Principal, mock: Principal) {
     for tag in 0u8..4 {
-        admin_ok(
-            pic,
-            rp,
-            "set_source_canister",
-            Encode!(&tag, &mock).unwrap(),
-        );
+        admin_ok(pic, rp, "set_source_canister", Encode!(&tag, &mock).unwrap());
     }
 }
 
 fn set_vault_debt(pic: &pocket_ic::PocketIc, mock: Principal, owner: Principal, debt: u64) {
-    pic.update_call(
-        mock,
-        Principal::anonymous(),
-        "set_vault_debt",
-        Encode!(&owner, &debt).unwrap(),
-    )
-    .expect("set_vault_debt failed");
+    pic.update_call(mock, Principal::anonymous(), "set_vault_debt", Encode!(&owner, &debt).unwrap())
+        .expect("set_vault_debt failed");
 }
 
 fn set_fail_get_vaults(pic: &pocket_ic::PocketIc, mock: Principal, fail: bool) {
-    pic.update_call(
-        mock,
-        Principal::anonymous(),
-        "set_fail_get_vaults",
-        Encode!(&fail).unwrap(),
-    )
-    .expect("set_fail_get_vaults failed");
+    pic.update_call(mock, Principal::anonymous(), "set_fail_get_vaults", Encode!(&fail).unwrap())
+        .expect("set_fail_get_vaults failed");
 }
 
 fn start_season_ok(pic: &pocket_ic::PocketIc, rp: Principal, seed: [u8; 32]) {
     let res = pic
-        .update_call(
-            rp,
-            admin(),
-            "start_season",
-            Encode!(&seed.to_vec()).unwrap(),
-        )
+        .update_call(rp, admin(), "start_season", Encode!(&seed.to_vec()).unwrap())
         .expect("start_season call failed");
     match res {
         WasmResult::Reply(b) => {
@@ -414,7 +388,7 @@ fn held_epoch_status(pic: &pocket_ic::PocketIc, rp: Principal) -> THeldEpochStat
     }
 }
 
-fn source_cursor(pic: &pocket_ic::PocketIc, rp: Principal, tag: u8) -> u64 {
+fn source_status(pic: &pocket_ic::PocketIc, rp: Principal, tag: u8) -> TSourceCursor {
     let res = pic
         .query_call(rp, admin(), "get_ingest_status", Encode!().unwrap())
         .expect("get_ingest_status call failed");
@@ -426,8 +400,7 @@ fn source_cursor(pic: &pocket_ic::PocketIc, rp: Principal, tag: u8) -> u64 {
         .sources
         .into_iter()
         .find(|source| source.tag == tag)
-        .map(|source| source.cursor)
-        .unwrap_or(0)
+        .unwrap_or_else(|| panic!("get_ingest_status omitted configured source tag {tag}"))
 }
 
 fn trigger_poll_count(pic: &pocket_ic::PocketIc, rp: Principal) -> u64 {
@@ -442,40 +415,11 @@ fn trigger_poll_count(pic: &pocket_ic::PocketIc, rp: Principal) -> u64 {
     }
 }
 
-fn install_legacy_points(
-    pic: &pocket_ic::PocketIc,
-    legacy_wasm: &[u8],
-    season_start_ns: u64,
-    season_end_ns: u64,
-) -> Principal {
-    let rp = pic.create_canister();
-    pic.add_cycles(rp, 4_000_000_000_000);
-    let init = InitArgs {
-        admin: Some(admin()),
-        excluded_principals: None,
-        season_start_ns: Some(season_start_ns),
-        season_end_ns: Some(season_end_ns),
-        snapshot_seed_commit: Some(rumi_points::snapshot_seed::commitment(&SEASON_SEED)),
-    };
-    pic.install_canister(
-        rp,
-        legacy_wasm.to_vec(),
-        Encode!(&Some(init)).unwrap(),
-        None,
-    );
-    rp
-}
-
 /// Public epoch status (anonymous caller), via `get_epoch_status`. Used to assert
 /// the cursors are NOT exposed (POINTS-001).
 fn public_epoch_status(pic: &pocket_ic::PocketIc, rp: Principal) -> TPublicEpochStatus {
     let res = pic
-        .query_call(
-            rp,
-            Principal::anonymous(),
-            "get_epoch_status",
-            Encode!().unwrap(),
-        )
+        .query_call(rp, Principal::anonymous(), "get_epoch_status", Encode!().unwrap())
         .expect("get_epoch_status call failed");
     match res {
         WasmResult::Reply(b) => Decode!(&b, TPublicEpochStatus).unwrap(),
@@ -485,220 +429,13 @@ fn public_epoch_status(pic: &pocket_ic::PocketIc, rp: Principal) -> TPublicEpoch
 
 fn total_points(pic: &pocket_ic::PocketIc, rp: Principal, who: Principal) -> u128 {
     let res = pic
-        .query_call(
-            rp,
-            Principal::anonymous(),
-            "get_principal_state",
-            Encode!(&who).unwrap(),
-        )
+        .query_call(rp, Principal::anonymous(), "get_principal_state", Encode!(&who).unwrap())
         .expect("get_principal_state call failed");
     let st: Option<TPrincipalState> = match res {
         WasmResult::Reply(b) => Decode!(&b, Option<TPrincipalState>).unwrap(),
         WasmResult::Reject(m) => panic!("get_principal_state rejected: {m}"),
     };
     st.map(|s| nat_to_u128(&s.total_points)).unwrap_or(0)
-}
-
-/// Real stable-memory upgrade regression for the 2026-10 seed-transition
-/// policy. Build the default Wasm at pre-randomness commit
-/// `5a20bd6a1b724dec10778630dcff1570c175b7da` and pass its path in
-/// `RUMI_POINTS_LEGACY_WASM`; a pinned SHA-256 ensures the runtime artifact has
-/// the expected source provenance. This test does not synthesize CBOR.
-///
-/// Run only after building the legacy and current default Wasms:
-/// `RUMI_POINTS_LEGACY_WASM=/path/to/legacy.wasm POCKET_IC_BIN=/path/to/pocket-ic \
-///   cargo test -p rumi_points --test pocket_ic_ingest \
-///   legacy_points_upgrade_preserves_open_state_and_holds_expired_window -- --ignored`
-#[test]
-#[ignore = "requires a default rumi_points Wasm built from pre-randomness commit 5a20bd6"]
-fn legacy_points_upgrade_preserves_open_state_and_holds_expired_window() {
-    let legacy_path = std::env::var_os("RUMI_POINTS_LEGACY_WASM")
-        .expect("set RUMI_POINTS_LEGACY_WASM to the Wasm built from commit 5a20bd6");
-    let legacy_wasm = std::fs::read(&legacy_path)
-        .unwrap_or_else(|e| panic!("failed to read legacy Wasm at {:?}: {e}", legacy_path));
-    assert!(!legacy_wasm.is_empty(), "legacy Wasm must not be empty");
-    assert_eq!(
-        format!("{:x}", Sha256::digest(&legacy_wasm)),
-        "d3fc3919ab50d75f245c2ad9539fb5c83a8da38a25c22d36b8f97e82ba0a3fbc",
-        "expected the default Wasm built from pre-randomness commit 5a20bd6 with the pinned toolchain/dependencies"
-    );
-
-    // Populate a real open legacy epoch through the old canister's Candid API.
-    // Its old stable blob has no entropy/scheme marker, so the current
-    // post_upgrade hook must retain the epoch and fence its automatic driver.
-    {
-        let pic = PocketIcBuilder::new().with_application_subnet().build();
-        let season_start_ns = 1_700_000_000_000_000_000;
-        set_time_ns(&pic, season_start_ns);
-        let rp = install_legacy_points(
-            &pic,
-            &legacy_wasm,
-            season_start_ns,
-            1_800_000_000_000_000_000,
-        );
-        let registered = Principal::from_slice(&[77; 10]);
-        admin_ok(
-            &pic,
-            rp,
-            "register_test_principal",
-            Encode!(&registered).unwrap(),
-        );
-        start_season_ok(&pic, rp, SEASON_SEED);
-
-        let before = epoch_status(&pic, rp);
-        assert!(before.driver_enabled);
-        let reward_before = total_points(&pic, rp, registered);
-        let before_open = before
-            .open_epoch
-            .expect("legacy start_season must open epoch 0");
-        assert_eq!(before_open.epoch_index, 0);
-        assert!(is_registered(&pic, rp, registered));
-
-        pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None)
-            .expect("upgrade from pre-randomness Wasm should succeed");
-
-        // start_season persisted the enabled timer. Advance to the due close
-        // boundary so the re-registered periodic driver gets an opportunity to
-        // run, then also exercise the admin force path directly.
-        set_time_ns(&pic, before_open.epoch_end_ns);
-        pic.advance_time(Duration::from_secs(301));
-        pic.tick();
-        admin_ok(&pic, rp, "force_epoch_tick", Encode!().unwrap());
-
-        let after = held_epoch_status(&pic, rp);
-        assert!(after.driver_enabled);
-        assert!(
-            after.legacy_transition_held,
-            "open legacy epoch must pause for review"
-        );
-        assert!(!after.legacy_reseed_pending);
-        assert_eq!(after.current_epoch_index, before.current_epoch_index);
-        assert_eq!(after.open_epoch, Some(before_open.clone()));
-        assert_eq!(
-            epoch_status(&pic, rp).revealed_seed_count,
-            before.revealed_seed_count
-        );
-        assert_eq!(total_points(&pic, rp, registered), reward_before);
-        assert!(
-            is_registered(&pic, rp, registered),
-            "registered state survives upgrade"
-        );
-
-        // The mock responds with an in-season event that would advance the
-        // backend cursor and auto-register its caller if ingestion were allowed.
-        let mock = install_mock(&pic);
-        admin_ok(
-            &pic,
-            rp,
-            "set_source_canister",
-            Encode!(&0u8, &mock).unwrap(),
-        );
-        assert_eq!(source_cursor(&pic, rp, 0), 0);
-        assert_eq!(trigger_poll_count(&pic, rp), 0);
-        assert_eq!(source_cursor(&pic, rp, 0), 0);
-        assert!(
-            !is_registered(&pic, rp, synthetic_caller()),
-            "the held epoch must block poll-driven auto-registration"
-        );
-
-        // Confirm that the review hold survives another actual stable-memory
-        // upgrade and still fences the force and poll entry points.
-        pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None)
-            .expect("second current Wasm upgrade should succeed");
-        let after_second_upgrade = held_epoch_status(&pic, rp);
-        assert!(after_second_upgrade.legacy_transition_held);
-        assert!(after_second_upgrade.driver_enabled);
-        assert!(!after_second_upgrade.legacy_reseed_pending);
-        assert_eq!(
-            after_second_upgrade.current_epoch_index,
-            before.current_epoch_index
-        );
-        assert_eq!(after_second_upgrade.open_epoch, Some(before_open));
-        admin_ok(&pic, rp, "force_epoch_tick", Encode!().unwrap());
-        assert!(held_epoch_status(&pic, rp).legacy_transition_held);
-        assert_eq!(source_cursor(&pic, rp, 0), 0);
-        assert_eq!(total_points(&pic, rp, registered), reward_before);
-    }
-
-    // A separate old canister with an unopened epoch-zero window that has
-    // elapsed must also pause without inventing an epoch or advancing its index.
-    {
-        let pic = PocketIcBuilder::new().with_application_subnet().build();
-        let expired_at_ns = 1_700_000_000_000_000_000;
-        set_time_ns(&pic, expired_at_ns);
-        let rp = install_legacy_points(&pic, &legacy_wasm, 0, expired_at_ns);
-        let registered = Principal::from_slice(&[78; 10]);
-        admin_ok(
-            &pic,
-            rp,
-            "register_test_principal",
-            Encode!(&registered).unwrap(),
-        );
-        admin_ok(
-            &pic,
-            rp,
-            "set_epoch_driver_enabled",
-            Encode!(&true).unwrap(),
-        );
-
-        let before = epoch_status(&pic, rp);
-        assert!(before.driver_enabled);
-        let reward_before = total_points(&pic, rp, registered);
-        assert_eq!(before.current_epoch_index, 0);
-        assert!(before.open_epoch.is_none());
-        assert_eq!(before.revealed_seed_count, 0);
-
-        pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None)
-            .expect("upgrade from pre-randomness Wasm should succeed");
-
-        let mock = install_mock(&pic);
-        admin_ok(
-            &pic,
-            rp,
-            "set_source_canister",
-            Encode!(&0u8, &mock).unwrap(),
-        );
-        assert_eq!(source_cursor(&pic, rp, 0), 0);
-        assert_eq!(trigger_poll_count(&pic, rp), 0);
-        assert_eq!(source_cursor(&pic, rp, 0), 0);
-        // Let the enabled, re-registered timer become due; the expired window
-        // must remain held even when the timer and admin force path both run.
-        set_time_ns(&pic, expired_at_ns + 301_000_000_000);
-        pic.advance_time(Duration::from_secs(301));
-        pic.tick();
-        admin_ok(&pic, rp, "force_epoch_tick", Encode!().unwrap());
-
-        let after = held_epoch_status(&pic, rp);
-        assert!(after.driver_enabled);
-        assert!(
-            after.legacy_transition_held,
-            "expired unopened window must pause for review"
-        );
-        assert!(!after.legacy_reseed_pending);
-        assert_eq!(after.current_epoch_index, before.current_epoch_index);
-        assert!(after.open_epoch.is_none());
-        assert_eq!(epoch_status(&pic, rp).revealed_seed_count, 0);
-        assert_eq!(total_points(&pic, rp, registered), reward_before);
-        assert!(
-            is_registered(&pic, rp, registered),
-            "registered state survives upgrade"
-        );
-
-        pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None)
-            .expect("second current Wasm upgrade should succeed");
-        let after_second_upgrade = held_epoch_status(&pic, rp);
-        assert!(after_second_upgrade.legacy_transition_held);
-        assert!(after_second_upgrade.driver_enabled);
-        assert!(!after_second_upgrade.legacy_reseed_pending);
-        assert_eq!(
-            after_second_upgrade.current_epoch_index,
-            before.current_epoch_index
-        );
-        assert!(after_second_upgrade.open_epoch.is_none());
-        assert_eq!(epoch_status(&pic, rp).revealed_seed_count, 0);
-        assert_eq!(source_cursor(&pic, rp, 0), 0);
-        assert_eq!(total_points(&pic, rp, registered), reward_before);
-    }
 }
 
 /// Exercise the live-observed partially captured epoch shape against the
@@ -715,7 +452,7 @@ fn legacy_points_upgrade_preserves_open_state_and_holds_expired_window() {
 #[ignore = "requires a default rumi_points Wasm built from pre-randomness commit 5a20bd6"]
 fn legacy_points_upgrade_holds_epoch_18_between_snapshots() {
     let legacy_path = std::env::var_os("RUMI_POINTS_LEGACY_WASM")
-        .expect("set RUMI_POINTS_LEGACY_WASM to the Wasm built from commit 5a20bd6");
+        .expect("set RUMI_POINTS_LEGACY_WASM to a Wasm built from commit 5a20bd6");
     let legacy_wasm = std::fs::read(&legacy_path)
         .unwrap_or_else(|e| panic!("failed to read legacy Wasm at {:?}: {e}", legacy_path));
     assert!(!legacy_wasm.is_empty(), "legacy Wasm must not be empty");
@@ -743,6 +480,9 @@ fn legacy_points_upgrade_holds_epoch_18_between_snapshots() {
     );
     let mock = install_mock(&pic);
     set_all_sources(&pic, rp, mock);
+    let source_before_upgrade = source_status(&pic, rp, 0);
+    assert_eq!(source_before_upgrade.canister, mock);
+    assert_eq!(source_before_upgrade.cursor, 0);
     set_vault_debt(&pic, mock, registered, 100_000_000);
     start_season_ok(&pic, rp, SEASON_SEED);
 
@@ -819,23 +559,26 @@ fn legacy_points_upgrade_holds_epoch_18_between_snapshots() {
 
     // The installed mock would advance the backend ingest cursor and register
     // its synthetic caller if poll fencing failed.
-    assert_eq!(source_cursor(&pic, rp, 0), 0);
+    assert_eq!(source_status(&pic, rp, 0), source_before_upgrade);
     assert_eq!(trigger_poll_count(&pic, rp), 0);
-    assert_eq!(source_cursor(&pic, rp, 0), 0);
+    assert_eq!(source_status(&pic, rp, 0), source_before_upgrade);
     assert!(!is_registered(&pic, rp, synthetic_caller()));
 
-    // Let the persisted timer become due after snapshot B, then exercise the
-    // admin force path. Both must leave the legacy epoch and reward state fixed.
+    // Move past the persisted timer deadline and deliver enough PocketIC ticks
+    // for the re-registered driver to have a chance to run; then exercise the
+    // admin force path explicitly.
     set_time_ns(&pic, partial_open.snapshot_b_ns);
     pic.advance_time(Duration::from_secs(301));
-    pic.tick();
+    for _ in 0..15 {
+        pic.tick();
+    }
     admin_ok(&pic, rp, "force_epoch_tick", Encode!().unwrap());
     let after_drivers = held_epoch_status(&pic, rp);
     assert!(after_drivers.legacy_transition_held);
     assert_eq!(after_drivers.current_epoch_index, 18);
     assert_eq!(after_drivers.open_epoch, Some(partial_open.clone()));
     assert_eq!(total_points(&pic, rp, registered), partial_reward);
-    assert_eq!(source_cursor(&pic, rp, 0), 0);
+    assert_eq!(source_status(&pic, rp, 0), source_before_upgrade);
 
     // Repeat the real upgrade to prove the review marker remains durable.
     pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None)
@@ -848,7 +591,7 @@ fn legacy_points_upgrade_holds_epoch_18_between_snapshots() {
     assert_eq!(after_second_upgrade.open_epoch, Some(partial_open));
     admin_ok(&pic, rp, "force_epoch_tick", Encode!().unwrap());
     assert_eq!(total_points(&pic, rp, registered), partial_reward);
-    assert_eq!(source_cursor(&pic, rp, 0), 0);
+    assert_eq!(source_status(&pic, rp, 0), source_before_upgrade);
 }
 
 fn nat_to_u128(n: &candid::Nat) -> u128 {
@@ -878,12 +621,7 @@ fn epoch_accrues_points_for_a_held_position() {
     // Open epoch 0 (S0 verified against the committed H0), then disable the timer
     // so only force_tick drives the state machine.
     start_season_ok(&pic, rp, SEASON_SEED);
-    admin_ok(
-        &pic,
-        rp,
-        "set_epoch_driver_enabled",
-        Encode!(&false).unwrap(),
-    );
+    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
 
     let oe = epoch_status(&pic, rp)
         .open_epoch
@@ -930,12 +668,7 @@ fn between_snapshot_withdrawal_earns_zero() {
 
     set_vault_debt(&pic, mock, p, 100_000_000); // position present at snapshot A
     start_season_ok(&pic, rp, SEASON_SEED);
-    admin_ok(
-        &pic,
-        rp,
-        "set_epoch_driver_enabled",
-        Encode!(&false).unwrap(),
-    );
+    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
     let oe = epoch_status(&pic, rp).open_epoch.unwrap();
 
     set_time_ns(&pic, oe.snapshot_a_ns);
@@ -977,12 +710,7 @@ fn transient_fetch_error_does_not_zero_a_held_position() {
     set_vault_debt(&pic, mock, p, DEBT);
 
     start_season_ok(&pic, rp, SEASON_SEED);
-    admin_ok(
-        &pic,
-        rp,
-        "set_epoch_driver_enabled",
-        Encode!(&false).unwrap(),
-    );
+    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
     let oe = epoch_status(&pic, rp).open_epoch.unwrap();
 
     // Snapshot A while the backend `get_vaults` call is failing (forced trap).
@@ -1032,47 +760,29 @@ fn public_epoch_status_hides_cursors_and_admin_view_is_gated() {
     admin_ok(&pic, rp, "register_test_principal", Encode!(&p).unwrap());
     set_vault_debt(&pic, mock, p, 100_000_000);
     start_season_ok(&pic, rp, SEASON_SEED);
-    admin_ok(
-        &pic,
-        rp,
-        "set_epoch_driver_enabled",
-        Encode!(&false).unwrap(),
-    );
+    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
 
     let oe = epoch_status(&pic, rp).open_epoch.unwrap();
 
     // PTS-002: while both snapshot times are in the FUTURE the public view hides
     // them (a future time IS the flash-deposit snipe target).
-    let poe = public_epoch_status(&pic, rp)
-        .open_epoch
-        .expect("epoch 0 is open");
+    let poe = public_epoch_status(&pic, rp).open_epoch.expect("epoch 0 is open");
     assert_eq!(poe.epoch_index, 0);
     assert_eq!(poe.snapshot_a_ns, None, "future snapshot A must be hidden");
     assert_eq!(poe.snapshot_b_ns, None, "future snapshot B must be hidden");
 
-    // Pass A's scheduled time while the backend read is failing. The public
-    // timestamp must stay hidden until the balances have actually been read.
+    // Capture A so the admin view has a non-trivial cursor to expose.
     set_time_ns(&pic, oe.snapshot_a_ns);
-    set_fail_get_vaults(&pic, mock, true);
-    force_tick(&pic, rp);
-    let poe = public_epoch_status(&pic, rp).open_epoch.unwrap();
-    assert_eq!(poe.snapshot_a_ns, None, "incomplete capture stays hidden");
-
-    set_fail_get_vaults(&pic, mock, false);
     force_tick(&pic, rp);
 
     // The PUBLIC query (anonymous caller) decodes into PublicEpochStatus, whose
     // open epoch has bounds but NO cursor/complete fields. The decode itself
-    // proves the wire shape carries no cursors. A is revealed only after its
-    // balance reads complete; B is still in the future and stays hidden.
+    // proves the wire shape carries no cursors. A has fired (now >= a) so it is
+    // revealed; B is still in the future and stays hidden (PTS-002).
     let pub_status = public_epoch_status(&pic, rp);
     let poe = pub_status.open_epoch.expect("epoch 0 is open");
     assert_eq!(poe.epoch_index, 0);
-    assert_eq!(
-        poe.snapshot_a_ns,
-        Some(oe.snapshot_a_ns),
-        "fired snapshot A is revealed"
-    );
+    assert_eq!(poe.snapshot_a_ns, Some(oe.snapshot_a_ns), "fired snapshot A is revealed");
     assert_eq!(poe.snapshot_b_ns, None, "future snapshot B stays hidden");
 
     // The ADMIN query is admin-gated: an anonymous caller is rejected (trap).
@@ -1083,7 +793,7 @@ fn public_epoch_status_hides_cursors_and_admin_view_is_gated() {
         Encode!().unwrap(),
     );
     match denied {
-        Err(_) => {}                    // rejected at the call layer
+        Err(_) => {} // rejected at the call layer
         Ok(WasmResult::Reject(_)) => {} // trapped: unauthorized
         Ok(WasmResult::Reply(_)) => {
             panic!("get_epoch_status_admin must reject a non-admin caller")
@@ -1121,12 +831,7 @@ fn chunked_close_completes_over_many_principals_end_to_end() {
     const DEBT: u64 = 100_000_000; // $1
     let who = |i: u32| Principal::from_slice(&i.to_be_bytes());
     for i in 0..N {
-        admin_ok(
-            &pic,
-            rp,
-            "register_test_principal",
-            Encode!(&who(i)).unwrap(),
-        );
+        admin_ok(&pic, rp, "register_test_principal", Encode!(&who(i)).unwrap());
     }
     // One held principal (the mock returns debt for a single owner). Pick one near
     // the end so it is processed in a LATE close batch, exercising resume.
@@ -1134,12 +839,7 @@ fn chunked_close_completes_over_many_principals_end_to_end() {
     set_vault_debt(&pic, mock, held, DEBT);
 
     start_season_ok(&pic, rp, SEASON_SEED);
-    admin_ok(
-        &pic,
-        rp,
-        "set_epoch_driver_enabled",
-        Encode!(&false).unwrap(),
-    );
+    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
     let oe = epoch_status(&pic, rp).open_epoch.unwrap();
 
     // Drive snapshot A to completion (capture is chunked at 100/principals tick).
@@ -1150,10 +850,7 @@ fn chunked_close_completes_over_many_principals_end_to_end() {
         }
         force_tick(&pic, rp);
     }
-    assert!(
-        epoch_status(&pic, rp).open_epoch.unwrap().a_complete,
-        "snapshot A completes"
-    );
+    assert!(epoch_status(&pic, rp).open_epoch.unwrap().a_complete, "snapshot A completes");
 
     // Drive snapshot B to completion.
     set_time_ns(&pic, oe.snapshot_b_ns);
@@ -1163,10 +860,7 @@ fn chunked_close_completes_over_many_principals_end_to_end() {
         }
         force_tick(&pic, rp);
     }
-    assert!(
-        epoch_status(&pic, rp).open_epoch.unwrap().b_complete,
-        "snapshot B completes"
-    );
+    assert!(epoch_status(&pic, rp).open_epoch.unwrap().b_complete, "snapshot B completes");
 
     // Drive the CHUNKED close to completion. It spans several ticks (130 principals
     // / 50 per close chunk = 3 batches); each tick stays in the open state until
@@ -1184,10 +878,7 @@ fn chunked_close_completes_over_many_principals_end_to_end() {
 
     let after = epoch_status(&pic, rp);
     assert!(after.open_epoch.is_none(), "epoch closed");
-    assert_eq!(
-        after.current_epoch_index, 1,
-        "epoch index advanced exactly once"
-    );
+    assert_eq!(after.current_epoch_index, 1, "epoch index advanced exactly once");
 
     // The held principal is credited EXACTLY once: $1 of debt over the full week.
     // (Pre-fix, the unchunked close over 130 principals could trap before reaching

@@ -22,11 +22,6 @@ export interface CycleManagerMetric {
   'count' : bigint,
   'label' : [] | [string],
 }
-export interface DecodeFailureBlock {
-  'diagnostic' : string,
-  'source_tag' : number,
-  'event_id' : bigint,
-}
 export interface DepositKey { 'asset' : AssetType, 'venue' : Venue }
 export interface DepositRecord {
   'asset' : AssetType,
@@ -57,14 +52,10 @@ export interface EpochSummary {
   'epoch_end_ns' : bigint,
 }
 export interface IngestStatus {
-  'blocked_decodes' : Array<DecodeFailureBlock>,
   'registered_count' : bigint,
   'poll_interval_secs' : bigint,
   'poll_enabled' : boolean,
   'sources' : Array<SourceStatus>,
-  'last_decode_resolution' : [] | [string],
-  'decode_failure_count' : bigint,
-  'last_decode_failure' : [] | [string],
 }
 export interface InitArgs {
   'admin' : [] | [Principal],
@@ -83,20 +74,16 @@ export interface OpenEpoch {
   'close_active' : bigint,
   'close_cursor' : [] | [Principal],
   'epoch_index' : bigint,
-  'b_capture_error_count' : number,
   'epoch_start_ns' : bigint,
   'a_cursor' : [] | [Principal],
   'b_complete' : boolean,
   'b_cursor' : [] | [Principal],
   'close_started' : boolean,
   'a_complete' : boolean,
-  'a_capture_error_principal' : [] | [Principal],
-  'b_capture_error_principal' : [] | [Principal],
   'snapshot_a_ns' : bigint,
   'snapshot_b_ns' : bigint,
   'close_points_accrued' : bigint,
   'epoch_end_ns' : bigint,
-  'a_capture_error_count' : number,
 }
 export interface PointEntry {
   'principal' : Principal,
@@ -223,10 +210,6 @@ export interface _SERVICE {
   'is_registered' : ActorMethod<[Principal], boolean>,
   'register_test_principal' : ActorMethod<[Principal], Result>,
   'remove_excluded_principal' : ActorMethod<[Principal], Result>,
-  'resolve_ingest_decode_failure' : ActorMethod<
-    [number, bigint, boolean],
-    Result_2
-  >,
   'set_asset_ledger' : ActorMethod<[number, Principal], Result>,
   'set_epoch_driver_enabled' : ActorMethod<[boolean], Result>,
   'set_epoch_driver_interval_secs' : ActorMethod<[bigint], Result>,

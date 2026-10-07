@@ -53,8 +53,8 @@ use crate::snapshot_seed::{RevealedSeed, SnapshotSeedSingleton};
 use crate::types::{
     AssetType, DepositKey, DepositRecord, EpochStatus, EpochSummary, InitArgs, LeaderboardEntry,
     OpenEpoch, PointEntry, PointEntryPage, PointSource, PointsConfig, PointsError, PrincipalState,
-    DecodeFailureBlock, PublicEpochStatus, PublicOpenEpoch, QualifyingAction, RegistrationInfo,
-    RepaymentEvent, Venue,
+    PublicEpochStatus,
+    PublicOpenEpoch, QualifyingAction, RegistrationInfo, RepaymentEvent, Venue,
 };
 
 // ── Memory ids (never reuse) ────────────────────────────────────────────────
@@ -203,12 +203,8 @@ impl From<OpenEpochV2> for OpenEpoch {
             snapshot_b_ns: v.snapshot_b_ns,
             a_cursor: v.a_cursor,
             a_complete: v.a_complete,
-            a_capture_error_count: 0,
-            a_capture_error_principal: None,
             b_cursor: v.b_cursor,
             b_complete: v.b_complete,
-            b_capture_error_count: 0,
-            b_capture_error_principal: None,
             // The chunked close had not started in the V2 layout. Default to a
             // fresh (not-started) close; if the upgrade lands after both snapshots,
             // the close re-runs from the start, which is idempotent.
@@ -234,78 +230,6 @@ pub struct StateV2 {
     pub open_epoch: Option<OpenEpochV2>,
 }
 
-/// Frozen V3 epoch layout written before unreadable-capture alarms were added.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct OpenEpochV3 {
-    pub epoch_index: u64,
-    pub epoch_start_ns: u64,
-    pub epoch_end_ns: u64,
-    pub snapshot_a_ns: u64,
-    pub snapshot_b_ns: u64,
-    pub a_cursor: Option<Principal>,
-    pub a_complete: bool,
-    pub b_cursor: Option<Principal>,
-    pub b_complete: bool,
-    pub close_started: bool,
-    pub close_cursor: Option<Principal>,
-    pub close_points_accrued: u128,
-    pub close_active: u64,
-}
-
-impl From<OpenEpochV3> for OpenEpoch {
-    fn from(v: OpenEpochV3) -> Self {
-        Self {
-            epoch_index: v.epoch_index,
-            epoch_start_ns: v.epoch_start_ns,
-            epoch_end_ns: v.epoch_end_ns,
-            snapshot_a_ns: v.snapshot_a_ns,
-            snapshot_b_ns: v.snapshot_b_ns,
-            a_cursor: v.a_cursor,
-            a_complete: v.a_complete,
-            a_capture_error_count: 0,
-            a_capture_error_principal: None,
-            b_cursor: v.b_cursor,
-            b_complete: v.b_complete,
-            b_capture_error_count: 0,
-            b_capture_error_principal: None,
-            close_started: v.close_started,
-            close_cursor: v.close_cursor,
-            close_points_accrued: v.close_points_accrued,
-            close_active: v.close_active,
-        }
-    }
-}
-
-/// Frozen V3 singleton layout from deployed blobs, before decode diagnostics.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct StateV3 {
-    pub admin: Principal,
-    pub excluded_principals: BTreeSet<Principal>,
-    pub season_start_ns: u64,
-    pub season_end_ns: u64,
-    pub current_epoch_index: u64,
-    pub snapshot_seed: SnapshotSeedSingleton,
-    pub open_epoch: Option<OpenEpochV3>,
-}
-
-impl From<StateV3> for State {
-    fn from(v: StateV3) -> Self {
-        Self {
-            admin: v.admin,
-            excluded_principals: v.excluded_principals,
-            season_start_ns: v.season_start_ns,
-            season_end_ns: v.season_end_ns,
-            current_epoch_index: v.current_epoch_index,
-            snapshot_seed: v.snapshot_seed,
-            open_epoch: v.open_epoch.map(Into::into),
-            decode_failure_count: 0,
-            last_decode_failure: None,
-            blocked_decodes: Vec::new(),
-            last_decode_resolution: None,
-        }
-    }
-}
-
 impl From<StateV2> for State {
     fn from(v: StateV2) -> Self {
         State {
@@ -316,10 +240,6 @@ impl From<StateV2> for State {
             current_epoch_index: v.current_epoch_index,
             snapshot_seed: v.snapshot_seed,
             open_epoch: v.open_epoch.map(Into::into),
-            decode_failure_count: 0,
-            last_decode_failure: None,
-            blocked_decodes: Vec::new(),
-            last_decode_resolution: None,
         }
     }
 }
@@ -339,14 +259,6 @@ pub struct State {
     /// Phase 5: in-flight open epoch (periodic-driver state). `None` between
     /// epochs and before the season starts.
     pub open_epoch: Option<OpenEpoch>,
-    /// Count of source events that triggered an unknown-event cursor hold.
-    #[serde(default)]
-    pub decode_failure_count: u64,
-    /// Most recent decode failure, kept short and operator-visible.
-    #[serde(default)]
-    pub last_decode_failure: Option<String>,
-    pub blocked_decodes: Vec<DecodeFailureBlock>,
-    pub last_decode_resolution: Option<String>,
 }
 
 impl From<StateV1> for State {
@@ -359,83 +271,15 @@ impl From<StateV1> for State {
             current_epoch_index: v.current_epoch_index,
             snapshot_seed: v.snapshot_seed,
             open_epoch: None,
-            decode_failure_count: 0,
-            last_decode_failure: None,
-            blocked_decodes: Vec::new(),
-            last_decode_resolution: None,
         }
     }
-}
-
-pub fn hold_decode_failure(source_tag: u8, event_id: u64, error: &str) {
-    with_state_mut(|s| {
-        if s.blocked_decodes.iter().any(|b| b.source_tag == source_tag) {
-            return;
-        }
-        s.decode_failure_count = s.decode_failure_count.saturating_add(1);
-        let summary: String = error.chars().take(160).collect();
-        let diagnostic = format!(
-            "source={} event={} decode={}",
-            source_tag, event_id, summary
-        );
-        s.last_decode_failure = Some(diagnostic.clone());
-        s.blocked_decodes.push(DecodeFailureBlock { source_tag, event_id, diagnostic });
-    });
-}
-
-pub fn decode_failure_status() -> (
-    u64,
-    Option<String>,
-    Vec<DecodeFailureBlock>,
-    Option<String>,
-) {
-    with_state(|s| (
-        s.decode_failure_count,
-        s.last_decode_failure.clone(),
-        s.blocked_decodes.clone(),
-        s.last_decode_resolution.clone(),
-    ))
-}
-
-pub fn decode_source_is_blocked(source_tag: u8) -> bool {
-    with_state(|s| s.blocked_decodes.iter().any(|b| b.source_tag == source_tag))
-}
-
-pub fn resolve_decode_failure(
-    caller: Principal,
-    source_tag: u8,
-    event_id: u64,
-    skip: bool,
-) -> Result<(), String> {
-    if !is_admin(caller) {
-        return Err("unauthorized".to_string());
-    }
-    with_state_mut(|s| {
-        let index = s.blocked_decodes.iter().position(|b| {
-            b.source_tag == source_tag && b.event_id == event_id
-        }).ok_or("source/event does not match an active ingestion hold")?;
-        if skip {
-            let next = event_id.checked_add(1).ok_or("event id cannot be advanced")?;
-            CURSORS.with(|c| c.borrow_mut().insert(source_tag, next));
-        }
-        s.last_decode_resolution = Some(format!(
-            "source={} event={} action={} admin={}",
-            source_tag,
-            event_id,
-            if skip { "explicit_skip" } else { "retry" },
-            caller
-        ));
-        s.blocked_decodes.remove(index);
-        Ok(())
-    })
 }
 
 #[derive(Serialize, Deserialize)]
 pub enum StoredState {
     V1(StateV1),
     V2(StateV2),
-    V3(StateV3),
-    V4(State),
+    V3(State),
 }
 
 impl StoredState {
@@ -443,8 +287,7 @@ impl StoredState {
         match self {
             StoredState::V1(old) => old.into(),
             StoredState::V2(old) => old.into(),
-            StoredState::V3(old) => old.into(),
-            StoredState::V4(s) => s,
+            StoredState::V3(s) => s,
         }
     }
 }
@@ -655,17 +498,11 @@ pub fn init_state(args: Option<InitArgs>, caller: Principal) {
     let state = State {
         admin,
         excluded_principals,
-        season_start_ns: args
-            .season_start_ns
-            .unwrap_or(crate::DEFAULT_SEASON_START_NS),
+        season_start_ns: args.season_start_ns.unwrap_or(crate::DEFAULT_SEASON_START_NS),
         season_end_ns: args.season_end_ns.unwrap_or(crate::DEFAULT_SEASON_END_NS),
         current_epoch_index: 0,
         snapshot_seed,
         open_epoch: None,
-        decode_failure_count: 0,
-        last_decode_failure: None,
-        blocked_decodes: Vec::new(),
-        last_decode_resolution: None,
     };
     STATE.with(|cell| *cell.borrow_mut() = Some(state));
 
@@ -837,7 +674,7 @@ pub fn epoch_history(offset: u64, limit: u64) -> Vec<EpochSummary> {
 pub fn save_state_to_stable() {
     let bytes = with_state(|s| {
         let mut buf = Vec::new();
-        ciborium::ser::into_writer(&StoredState::V4(s.clone()), &mut buf)
+        ciborium::ser::into_writer(&StoredState::V3(s.clone()), &mut buf)
             .expect("failed to serialize State to CBOR");
         buf
     });
@@ -908,19 +745,13 @@ pub fn restore_from_stable_or_trap() {
 // ── Thin accessors (plumbing exercised by the behavioral tests) ─────────────
 
 pub fn get_principal_state(p: &Principal) -> Option<PrincipalState> {
-    PRINCIPALS.with(|m| {
-        m.borrow()
-            .get(&StorablePrincipal(*p))
-            .map(|s| s.into_current())
-    })
+    PRINCIPALS.with(|m| m.borrow().get(&StorablePrincipal(*p)).map(|s| s.into_current()))
 }
 
 fn put_principal_state(ps: PrincipalState) {
     PRINCIPALS.with(|m| {
-        m.borrow_mut().insert(
-            StorablePrincipal(ps.principal),
-            StoredPrincipalState::from_current(ps),
-        );
+        m.borrow_mut()
+            .insert(StorablePrincipal(ps.principal), StoredPrincipalState::from_current(ps));
     });
 }
 
@@ -978,7 +809,11 @@ pub fn principal_point_entries(principal: Principal, offset: u64, limit: u32) ->
     read_ledger_page(offset, limit, |e| e.principal == principal)
 }
 
-fn read_ledger_page(offset: u64, limit: u32, keep: impl Fn(&PointEntry) -> bool) -> PointEntryPage {
+fn read_ledger_page(
+    offset: u64,
+    limit: u32,
+    keep: impl Fn(&PointEntry) -> bool,
+) -> PointEntryPage {
     let limit = limit.min(MAX_LEDGER_LIMIT) as usize;
     POINT_LEDGER.with(|l| {
         let log = l.borrow();
@@ -996,11 +831,7 @@ fn read_ledger_page(offset: u64, limit: u32, keep: impl Fn(&PointEntry) -> bool)
             i += 1;
             scanned += 1;
         }
-        PointEntryPage {
-            entries,
-            next_offset: i,
-            reached_end: i >= len,
-        }
+        PointEntryPage { entries, next_offset: i, reached_end: i >= len }
     })
 }
 
@@ -1054,14 +885,17 @@ pub fn epoch_status() -> EpochStatus {
 
 /// PUBLIC epoch-driver status for the ops dashboard (POINTS-001). Same as
 /// `epoch_status` but the open epoch is reduced to its public window: the bounds,
-/// with the capture/close cursors and completion flags OMITTED. A snapshot time
-/// remains hidden until all balance reads for it are complete.
-pub fn public_epoch_status() -> PublicEpochStatus {
+/// with the capture/close cursors and completion flags OMITTED (exposing capture
+/// progress would let a not-yet-captured principal time a flash deposit to land
+/// in a snapshot it has not been captured into yet) and each snapshot time hidden
+/// until it has fired at `now_ns` (PTS-002: a future snapshot time IS the snipe
+/// target the commit-reveal seed exists to hide).
+pub fn public_epoch_status(now_ns: u64) -> PublicEpochStatus {
     with_state(|s| PublicEpochStatus {
         current_epoch_index: s.current_epoch_index,
         driver_enabled: epoch_driver_enabled(),
         driver_interval_secs: epoch_driver_interval_secs(),
-        open_epoch: s.open_epoch.as_ref().map(PublicOpenEpoch::redacted),
+        open_epoch: s.open_epoch.as_ref().map(|o| PublicOpenEpoch::redacted(o, now_ns)),
         revealed_seed_count: revealed_seed_count(),
         snapshot_seed_committed: s.snapshot_seed.is_committed(),
     })
@@ -1092,12 +926,7 @@ pub fn source_canister_seed() -> Vec<(u8, Principal)> {
         (3u8, "ijlzs-2yaaa-aaaap-quaaq-cai"), // rumi_amm
     ]
     .iter()
-    .map(|(tag, s)| {
-        (
-            *tag,
-            Principal::from_text(s).expect("invalid source principal literal"),
-        )
-    })
+    .map(|(tag, s)| (*tag, Principal::from_text(s).expect("invalid source principal literal")))
     .collect()
 }
 
@@ -1114,8 +943,7 @@ pub fn set_source_canister(
 ) -> Result<(), PointsError> {
     require_admin(caller)?;
     SOURCE_CANISTERS.with(|m| {
-        m.borrow_mut()
-            .insert(source_tag, StorablePrincipal(canister));
+        m.borrow_mut().insert(source_tag, StorablePrincipal(canister));
     });
     Ok(())
 }
@@ -1261,11 +1089,7 @@ pub fn snapshot_buffer_put(p: Principal, w: SnapshotWeights) {
 
 /// Read a principal's buffered weights, if any.
 pub fn snapshot_buffer_get(p: &Principal) -> Option<SnapshotWeights> {
-    SNAPSHOT_BUFFER.with(|b| {
-        b.borrow()
-            .get(&StorablePrincipal(*p))
-            .map(|s| s.into_current())
-    })
+    SNAPSHOT_BUFFER.with(|b| b.borrow().get(&StorablePrincipal(*p)).map(|s| s.into_current()))
 }
 
 /// Drop a principal's buffered weights.
@@ -1348,12 +1172,7 @@ pub fn asset_ledger_seed() -> Vec<(u8, Principal)> {
         (4u8, "ryjl3-tyaaa-aaaaa-aaaba-cai"), // ICP
     ]
     .iter()
-    .map(|(t, s)| {
-        (
-            *t,
-            Principal::from_text(s).expect("invalid asset ledger literal"),
-        )
-    })
+    .map(|(t, s)| (*t, Principal::from_text(s).expect("invalid asset ledger literal")))
     .collect()
 }
 
@@ -1402,11 +1221,7 @@ pub fn epoch_driver_enabled() -> bool {
 }
 
 pub fn epoch_driver_interval_secs() -> u64 {
-    EPOCH_CONFIG.with(|c| {
-        c.borrow()
-            .get(&1)
-            .unwrap_or(DEFAULT_EPOCH_DRIVER_INTERVAL_SECS)
-    })
+    EPOCH_CONFIG.with(|c| c.borrow().get(&1).unwrap_or(DEFAULT_EPOCH_DRIVER_INTERVAL_SECS))
 }
 
 pub fn set_epoch_driver_enabled(caller: Principal, enabled: bool) -> Result<(), PointsError> {
@@ -1443,20 +1258,14 @@ pub fn credit_3pool_recorded(
         Some(p) => p,
         None => return,
     };
-    let key = DepositKey {
-        venue: Venue::ThreePool,
+    let key = DepositKey { venue: Venue::ThreePool, asset };
+    let rec = ps.active_deposits.entry(key).or_insert_with(|| DepositRecord {
         asset,
-    };
-    let rec = ps
-        .active_deposits
-        .entry(key)
-        .or_insert_with(|| DepositRecord {
-            asset,
-            venue: Venue::ThreePool,
-            recorded_value_usd: 0,
-            deposited_at: now_ns,
-            last_verified_at: now_ns,
-        });
+        venue: Venue::ThreePool,
+        recorded_value_usd: 0,
+        deposited_at: now_ns,
+        last_verified_at: now_ns,
+    });
     rec.recorded_value_usd = rec.recorded_value_usd.saturating_add(amount_usd_e8s);
     rec.last_verified_at = now_ns;
     put_principal_state(ps);
@@ -1518,8 +1327,7 @@ pub fn clear_all_3pool_recorded() {
             None => continue,
         };
         let before = ps.active_deposits.len();
-        ps.active_deposits
-            .retain(|k, _| k.venue != Venue::ThreePool);
+        ps.active_deposits.retain(|k, _| k.venue != Venue::ThreePool);
         if ps.active_deposits.len() != before {
             put_principal_state(ps);
         }
@@ -1539,9 +1347,7 @@ pub fn record_repayment(
         None => return,
     };
     let season_end = with_state(|s| s.season_end_ns);
-    let window_end = repaid_at
-        .saturating_add(REPAYMENT_WINDOW_NS)
-        .min(season_end);
+    let window_end = repaid_at.saturating_add(REPAYMENT_WINDOW_NS).min(season_end);
     ps.repayment_events.push(RepaymentEvent {
         asset,
         amount_usd: amount_usd_e8s,
@@ -1663,12 +1469,8 @@ pub fn run_close_accrual_chunk(now_ns: u64) -> CloseStep {
         // drained incrementally across the close batches instead of in one O(N)
         // sweep at the end (PTS-002, which would compound POINTS-002's budget).
         snapshot_buffer_remove(p);
-        let (entries, delta) = accrual::accrue_principal(
-            min_weights,
-            &ps.repayment_events,
-            epoch_start,
-            epoch_end_capped,
-        );
+        let (entries, delta) =
+            accrual::accrue_principal(min_weights, &ps.repayment_events, epoch_start, epoch_end_capped);
         for (source, pts) in entries {
             append_point_entry(PointEntry {
                 principal: *p,
@@ -1685,8 +1487,7 @@ pub fn run_close_accrual_chunk(now_ns: u64) -> CloseStep {
         ps.last_epoch_processed = epoch_index;
         // Drop repayment windows that can no longer overlap any future epoch, so
         // the per-principal vec stays bounded (no unbounded growth in the value).
-        ps.repayment_events
-            .retain(|r| r.window_end > epoch_end_capped);
+        ps.repayment_events.retain(|r| r.window_end > epoch_end_capped);
         put_principal_state(ps);
         open.close_points_accrued = open.close_points_accrued.saturating_add(delta);
     }
@@ -1712,9 +1513,9 @@ pub fn run_close_accrual_chunk(now_ns: u64) -> CloseStep {
     // Buffer drained and accrual complete: compute the season-wide total for the
     // summary and finalize.
     let total_points_all = PRINCIPALS.with(|m| {
-        m.borrow().iter().fold(0u128, |acc, (_, v)| {
-            acc.saturating_add(v.into_current().total_points)
-        })
+        m.borrow()
+            .iter()
+            .fold(0u128, |acc, (_, v)| acc.saturating_add(v.into_current().total_points))
     });
     let registered_principals = registered_count();
     CloseStep::Done(CloseStats {
@@ -1850,18 +1651,11 @@ pub fn recorded_3pool_composition(p: &Principal) -> (u128, u128, u128) {
         Some(ps) => {
             let leg = |asset| {
                 ps.active_deposits
-                    .get(&DepositKey {
-                        venue: Venue::ThreePool,
-                        asset,
-                    })
+                    .get(&DepositKey { venue: Venue::ThreePool, asset })
                     .map(|r| r.recorded_value_usd)
                     .unwrap_or(0)
             };
-            (
-                leg(AssetType::IcUsd),
-                leg(AssetType::CkUsdc),
-                leg(AssetType::CkUsdt),
-            )
+            (leg(AssetType::IcUsd), leg(AssetType::CkUsdc), leg(AssetType::CkUsdt))
         }
         None => (0, 0, 0),
     }
@@ -1962,50 +1756,8 @@ mod tests {
 
         // A non-admin is rejected and the set is unchanged.
         let intruder = tp(8);
-        assert_eq!(
-            add_excluded(intruder, tp(6)),
-            Err(PointsError::Unauthorized)
-        );
+        assert_eq!(add_excluded(intruder, tp(6)), Err(PointsError::Unauthorized));
         assert!(!is_excluded(&tp(6)));
-    }
-
-    #[test]
-    fn decode_failure_status_counts_and_bounds_the_diagnostic() {
-        init_default(tp(99));
-        hold_decode_failure(2, 41, &"x".repeat(300));
-        let (count, message, blocked, resolution) = decode_failure_status();
-        assert_eq!(count, 1);
-        let message = message.unwrap();
-        assert!(message.starts_with("source=2 event=41 decode="));
-        assert!(message.len() < 200);
-        assert_eq!(blocked.len(), 1);
-        assert_eq!(blocked[0].event_id, 41);
-        assert!(resolution.is_none());
-    }
-
-    #[test]
-    fn decode_failure_resolution_retries_or_explicitly_skips_exact_event() {
-        let admin = tp(99);
-        init_default(admin);
-        set_cursor(2, 41);
-        hold_decode_failure(2, 41, "unknown event variant");
-        hold_decode_failure(3, 8, "second source unknown event");
-        assert!(decode_source_is_blocked(2));
-        assert!(decode_source_is_blocked(3));
-        assert_eq!(resolve_decode_failure(tp(1), 2, 41, true), Err("unauthorized".into()));
-        assert_eq!(resolve_decode_failure(admin, 3, 41, true), Err("source/event does not match an active ingestion hold".into()));
-        assert_eq!(resolve_decode_failure(admin, 2, 41, false), Ok(()));
-        assert_eq!(get_cursor(2), 41, "retry preserves the held id");
-        assert!(!decode_source_is_blocked(2));
-        assert!(decode_source_is_blocked(3), "other source hold remains active");
-
-        hold_decode_failure(2, 41, "still unknown after retry");
-        assert_eq!(resolve_decode_failure(admin, 2, 41, true), Ok(()));
-        assert_eq!(get_cursor(2), 42, "skip is an explicit admin resolution");
-        assert!(!decode_source_is_blocked(2));
-        assert!(decode_source_is_blocked(3));
-        let (_, _, _, resolution) = decode_failure_status();
-        assert!(resolution.unwrap().contains("action=explicit_skip"));
     }
 
     #[test]
@@ -2065,10 +1817,7 @@ mod tests {
 
         let created = register(p, 1_000, QualifyingAction::Deposit3Pool).unwrap();
         assert_eq!(created.registered_at_ns, 1_000);
-        assert_eq!(
-            created.first_qualifying_action,
-            QualifyingAction::Deposit3Pool
-        );
+        assert_eq!(created.first_qualifying_action, QualifyingAction::Deposit3Pool);
         assert!(is_registered(&p));
         assert_eq!(registered_count(), 1);
         // One zero-point registration marker in the audit ledger.
@@ -2077,10 +1826,7 @@ mod tests {
         // Re-register with a different timestamp: idempotent, no overwrite, no new marker.
         let again = register(p, 9_999, QualifyingAction::MintIcUsd).unwrap();
         assert_eq!(again.registered_at_ns, 1_000);
-        assert_eq!(
-            again.first_qualifying_action,
-            QualifyingAction::Deposit3Pool
-        );
+        assert_eq!(again.first_qualifying_action, QualifyingAction::Deposit3Pool);
         assert_eq!(registered_count(), 1);
         assert_eq!(point_ledger_len(), 1);
     }
@@ -2109,10 +1855,7 @@ mod tests {
         );
         assert!(!is_registered(&p));
 
-        assert_eq!(
-            register_test_principal(admin, p, 1, PollGuard::new().unwrap()),
-            Ok(())
-        );
+        assert_eq!(register_test_principal(admin, p, 1, PollGuard::new().unwrap()), Ok(()));
         assert!(is_registered(&p));
     }
 
@@ -2368,10 +2111,6 @@ mod tests {
         assert_eq!(oe.epoch_index, 5);
         assert_eq!(oe.a_cursor, Some(tp(9)));
         assert!(oe.a_complete);
-        assert_eq!(oe.a_capture_error_count, 0);
-        assert_eq!(oe.a_capture_error_principal, None);
-        assert_eq!(oe.b_capture_error_count, 0);
-        assert_eq!(oe.b_capture_error_principal, None);
         // The new chunked-close fields default to a fresh (not-started) close.
         assert!(!oe.close_started);
         assert_eq!(oe.close_cursor, None);
@@ -2380,7 +2119,7 @@ mod tests {
     }
 
     #[test]
-    fn state_v4_blob_round_trips_with_open_epoch_and_decode_hold() {
+    fn state_v3_blob_round_trips_with_open_epoch() {
         let state = State {
             admin: tp(1),
             excluded_principals: BTreeSet::new(),
@@ -2388,14 +2127,6 @@ mod tests {
             season_end_ns: 0,
             current_epoch_index: 5,
             snapshot_seed: SnapshotSeedSingleton::default(),
-            decode_failure_count: 1,
-            last_decode_failure: Some("source=2 event=41 decode=unknown event variant".into()),
-            blocked_decodes: vec![DecodeFailureBlock {
-                source_tag: 2,
-                event_id: 41,
-                diagnostic: "unknown event variant".into(),
-            }],
-            last_decode_resolution: Some("source=1 event=7 action=retry admin=principal".into()),
             open_epoch: Some(OpenEpoch {
                 epoch_index: 5,
                 epoch_start_ns: 10,
@@ -2404,12 +2135,8 @@ mod tests {
                 snapshot_b_ns: 18,
                 a_cursor: Some(tp(9)),
                 a_complete: true,
-                a_capture_error_count: 0,
-                a_capture_error_principal: None,
                 b_cursor: None,
                 b_complete: false,
-                b_capture_error_count: 0,
-                b_capture_error_principal: None,
                 close_started: true,
                 close_cursor: Some(tp(4)),
                 close_points_accrued: 123,
@@ -2417,44 +2144,8 @@ mod tests {
             }),
         };
         let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&StoredState::V4(state.clone()), &mut bytes).unwrap();
+        ciborium::ser::into_writer(&StoredState::V3(state.clone()), &mut bytes).unwrap();
         assert_eq!(decode_stored_state(&bytes), Some(state));
-    }
-
-    #[test]
-    fn deployed_v3_blob_migrates_without_losing_open_epoch() {
-        let v3 = StateV3 {
-            admin: tp(1),
-            excluded_principals: BTreeSet::new(),
-            season_start_ns: 0,
-            season_end_ns: 0,
-            current_epoch_index: 5,
-            snapshot_seed: SnapshotSeedSingleton::default(),
-            open_epoch: Some(OpenEpochV3 {
-                epoch_index: 5,
-                epoch_start_ns: 10,
-                epoch_end_ns: 20,
-                snapshot_a_ns: 12,
-                snapshot_b_ns: 18,
-                a_cursor: Some(tp(9)),
-                a_complete: true,
-                b_cursor: None,
-                b_complete: false,
-                close_started: true,
-                close_cursor: Some(tp(4)),
-                close_points_accrued: 123,
-                close_active: 2,
-            }),
-        };
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&StoredState::V3(v3), &mut bytes).unwrap();
-        let migrated = decode_stored_state(&bytes).expect("deployed V3 blob must migrate");
-        let open = migrated.open_epoch.expect("the in-flight epoch survives");
-        assert!(open.a_complete && open.close_started);
-        assert_eq!(open.a_capture_error_count, 0);
-        assert_eq!(open.close_points_accrued, 123);
-        assert_eq!(migrated.decode_failure_count, 0);
-        assert!(migrated.blocked_decodes.is_empty());
     }
 
     #[test]
@@ -2488,14 +2179,8 @@ mod tests {
     fn non_admin_cannot_change_poll_config() {
         init_default(tp(99));
         let intruder = tp(8);
-        assert_eq!(
-            set_poll_enabled(intruder, true),
-            Err(PointsError::Unauthorized)
-        );
-        assert_eq!(
-            set_poll_interval(intruder, 120),
-            Err(PointsError::Unauthorized)
-        );
+        assert_eq!(set_poll_enabled(intruder, true), Err(PointsError::Unauthorized));
+        assert_eq!(set_poll_interval(intruder, 120), Err(PointsError::Unauthorized));
         assert!(!poll_enabled());
         assert_eq!(poll_interval_secs(), DEFAULT_POLL_INTERVAL_SECS);
     }
@@ -2503,10 +2188,7 @@ mod tests {
     // ── Phase 5: snapshot buffer ──
 
     fn sw(debt: u128) -> SnapshotWeights {
-        SnapshotWeights {
-            icusd_debt: debt,
-            ..Default::default()
-        }
+        SnapshotWeights { icusd_debt: debt, ..Default::default() }
     }
 
     #[test]
@@ -2568,10 +2250,7 @@ mod tests {
         assert_eq!(get_asset_ledger(AssetType::CkUsdc), Some(local));
         assert_eq!(classify_ledger(&local), Some(AssetType::CkUsdc));
         // Non-admin rejected.
-        assert_eq!(
-            set_asset_ledger(tp(8), 0, tp(7)),
-            Err(PointsError::Unauthorized)
-        );
+        assert_eq!(set_asset_ledger(tp(8), 0, tp(7)), Err(PointsError::Unauthorized));
     }
 
     // ── Phase 5: epoch-driver config ──
@@ -2580,10 +2259,7 @@ mod tests {
     fn epoch_driver_defaults_off_at_300s() {
         init_default(tp(99));
         assert!(!epoch_driver_enabled());
-        assert_eq!(
-            epoch_driver_interval_secs(),
-            DEFAULT_EPOCH_DRIVER_INTERVAL_SECS
-        );
+        assert_eq!(epoch_driver_interval_secs(), DEFAULT_EPOCH_DRIVER_INTERVAL_SECS);
     }
 
     #[test]
@@ -2603,10 +2279,7 @@ mod tests {
     // ── Phase 5/4: ingestion-driven state ──
 
     fn key_3pool(asset: AssetType) -> DepositKey {
-        DepositKey {
-            venue: Venue::ThreePool,
-            asset,
-        }
+        DepositKey { venue: Venue::ThreePool, asset }
     }
 
     #[test]
@@ -2617,30 +2290,17 @@ mod tests {
         let key = key_3pool(AssetType::CkUsdc);
 
         credit_3pool_recorded(p, AssetType::CkUsdc, 100, 5);
-        assert_eq!(
-            get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd,
-            100
-        );
+        assert_eq!(get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd, 100);
 
         credit_3pool_recorded(p, AssetType::CkUsdc, 50, 6);
-        assert_eq!(
-            get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd,
-            150
-        );
+        assert_eq!(get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd, 150);
 
         debit_3pool_recorded(p, 60, 7);
-        assert_eq!(
-            get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd,
-            90
-        );
+        assert_eq!(get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd, 90);
 
         // Debiting past zero drops the record entirely.
         debit_3pool_recorded(p, 1_000, 8);
-        assert!(get_principal_state(&p)
-            .unwrap()
-            .active_deposits
-            .get(&key)
-            .is_none());
+        assert!(get_principal_state(&p).unwrap().active_deposits.get(&key).is_none());
     }
 
     #[test]
@@ -2655,18 +2315,9 @@ mod tests {
         // 25% out -> every leg scales by 25%, preserving the mix.
         debit_3pool_recorded(p, 100, 2);
         let deposits = get_principal_state(&p).unwrap().active_deposits;
-        assert_eq!(
-            deposits[&key_3pool(AssetType::IcUsd)].recorded_value_usd,
-            75
-        );
-        assert_eq!(
-            deposits[&key_3pool(AssetType::CkUsdt)].recorded_value_usd,
-            150
-        );
-        assert_eq!(
-            deposits[&key_3pool(AssetType::CkUsdc)].recorded_value_usd,
-            75
-        );
+        assert_eq!(deposits[&key_3pool(AssetType::IcUsd)].recorded_value_usd, 75);
+        assert_eq!(deposits[&key_3pool(AssetType::CkUsdt)].recorded_value_usd, 150);
+        assert_eq!(deposits[&key_3pool(AssetType::CkUsdc)].recorded_value_usd, 75);
 
         // A withdrawal of exactly the remaining total clears every leg, floor
         // division notwithstanding.
@@ -2741,12 +2392,8 @@ mod tests {
             snapshot_b_ns: 2,
             a_cursor: None,
             a_complete: true,
-            a_capture_error_count: 0,
-            a_capture_error_principal: None,
             b_cursor: None,
             b_complete: true,
-            b_capture_error_count: 0,
-            b_capture_error_principal: None,
             close_started: false,
             close_cursor: None,
             close_points_accrued: 0,
@@ -2782,13 +2429,7 @@ mod tests {
         register(p2, 1, QualifyingAction::RepayVault).unwrap();
 
         // p1: a balance position captured into the snapshot buffer.
-        snapshot_buffer_put(
-            p1,
-            SnapshotWeights {
-                icusd_debt: 100,
-                ..Default::default()
-            },
-        );
+        snapshot_buffer_put(p1, SnapshotWeights { icusd_debt: 100, ..Default::default() });
         // p2: an open repayment window, no balance position.
         record_repayment(p2, AssetType::CkUsdc, 1_000 * 100_000_000, 0);
 
@@ -2823,19 +2464,9 @@ mod tests {
         let mut ps = get_principal_state(&p).unwrap();
         ps.repayment_events = vec![
             // Expires within epoch 0 (window_end 3d <= epoch end 7d): drop after close.
-            RepaymentEvent {
-                asset: AssetType::CkUsdc,
-                amount_usd: 100,
-                repaid_at: 0,
-                window_end: 3 * crate::NANOS_PER_DAY,
-            },
+            RepaymentEvent { asset: AssetType::CkUsdc, amount_usd: 100, repaid_at: 0, window_end: 3 * crate::NANOS_PER_DAY },
             // Still open past epoch 0: keep.
-            RepaymentEvent {
-                asset: AssetType::CkUsdc,
-                amount_usd: 100,
-                repaid_at: 0,
-                window_end: 50 * crate::NANOS_PER_DAY,
-            },
+            RepaymentEvent { asset: AssetType::CkUsdc, amount_usd: 100, repaid_at: 0, window_end: 50 * crate::NANOS_PER_DAY },
         ];
         put_principal_state(ps);
 
@@ -2844,15 +2475,8 @@ mod tests {
         run_close_accrual_to_completion(1);
 
         let after = get_principal_state(&p).unwrap();
-        assert_eq!(
-            after.repayment_events.len(),
-            1,
-            "the expired window is pruned"
-        );
-        assert_eq!(
-            after.repayment_events[0].window_end,
-            50 * crate::NANOS_PER_DAY
-        );
+        assert_eq!(after.repayment_events.len(), 1, "the expired window is pruned");
+        assert_eq!(after.repayment_events[0].window_end, 50 * crate::NANOS_PER_DAY);
     }
 
     #[test]
@@ -2861,13 +2485,7 @@ mod tests {
         init_default(admin);
         let p = tp(62);
         register(p, 1, QualifyingAction::MintIcUsd).unwrap();
-        snapshot_buffer_put(
-            p,
-            SnapshotWeights {
-                icusd_debt: 100,
-                ..Default::default()
-            },
-        );
+        snapshot_buffer_put(p, SnapshotWeights { icusd_debt: 100, ..Default::default() });
         add_excluded(admin, p).unwrap();
 
         let week = 7 * crate::NANOS_PER_DAY;
@@ -2880,37 +2498,13 @@ mod tests {
     #[test]
     fn snapshot_buffer_merge_min_keeps_smaller_total() {
         let p = tp(70);
-        snapshot_buffer_put(
-            p,
-            SnapshotWeights {
-                icusd_debt: 100,
-                ..Default::default()
-            },
-        ); // A total 100
-        snapshot_buffer_merge_min(
-            p,
-            SnapshotWeights {
-                icusd_debt: 40,
-                ..Default::default()
-            },
-        ); // B total 40
+        snapshot_buffer_put(p, SnapshotWeights { icusd_debt: 100, ..Default::default() }); // A total 100
+        snapshot_buffer_merge_min(p, SnapshotWeights { icusd_debt: 40, ..Default::default() }); // B total 40
         assert_eq!(snapshot_buffer_get(&p).unwrap().icusd_debt, 40);
 
         let q = tp(71);
-        snapshot_buffer_put(
-            q,
-            SnapshotWeights {
-                icusd_debt: 30,
-                ..Default::default()
-            },
-        ); // A 30
-        snapshot_buffer_merge_min(
-            q,
-            SnapshotWeights {
-                icusd_debt: 90,
-                ..Default::default()
-            },
-        ); // B 90
+        snapshot_buffer_put(q, SnapshotWeights { icusd_debt: 30, ..Default::default() }); // A 30
+        snapshot_buffer_merge_min(q, SnapshotWeights { icusd_debt: 90, ..Default::default() }); // B 90
         assert_eq!(snapshot_buffer_get(&q).unwrap().icusd_debt, 30); // keeps A
     }
 
@@ -2918,13 +2512,7 @@ mod tests {
     fn snapshot_buffer_merge_min_skips_principal_absent_at_a() {
         let p = tp(72);
         // No A entry: a B-only principal (registered between snapshots) earns nothing.
-        snapshot_buffer_merge_min(
-            p,
-            SnapshotWeights {
-                icusd_debt: 100,
-                ..Default::default()
-            },
-        );
+        snapshot_buffer_merge_min(p, SnapshotWeights { icusd_debt: 100, ..Default::default() });
         assert_eq!(snapshot_buffer_get(&p), None);
     }
 
@@ -2936,10 +2524,7 @@ mod tests {
         register(tp(3), 1, QualifyingAction::MintIcUsd).unwrap();
         assert_eq!(registered_chunk_after(None, 2), vec![tp(1), tp(2)]);
         assert_eq!(registered_chunk_after(Some(tp(2)), 2), vec![tp(3)]);
-        assert_eq!(
-            registered_chunk_after(Some(tp(3)), 2),
-            Vec::<Principal>::new()
-        );
+        assert_eq!(registered_chunk_after(Some(tp(3)), 2), Vec::<Principal>::new());
     }
 
     #[test]
@@ -2999,10 +2584,7 @@ mod tests {
         open.close_started = true;
         set_open_epoch(Some(open));
         let close_waiting_on_entropy = PollGuard::new().expect("close holds poll guard");
-        assert!(
-            try_poll_guard().is_none(),
-            "the update wrapper cannot acquire its required write guard after close cutoff"
-        );
+        assert!(try_poll_guard().is_none(), "the update wrapper cannot acquire its required write guard after close cutoff");
         assert!(!is_registered(&tp(12)));
         assert!(
             try_poll_guard().is_none(),
@@ -3044,7 +2626,7 @@ mod tests {
         // path must preserve it across serialization/reopen.
         let snapshot = with_state(|s| s.clone());
         let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&StoredState::V4(snapshot), &mut bytes).unwrap();
+        ciborium::ser::into_writer(&StoredState::V3(snapshot), &mut bytes).unwrap();
         let decoded = decode_stored_state(&bytes).expect("current snapshot must decode");
         assert!(decoded.snapshot_seed.legacy_transition_held);
         assert_eq!(decoded.current_epoch_index, 1);
@@ -3113,13 +2695,7 @@ mod tests {
         for i in 1..=n {
             let p = tp(i);
             register(p, 1, QualifyingAction::MintIcUsd).unwrap();
-            snapshot_buffer_put(
-                p,
-                SnapshotWeights {
-                    icusd_debt: 100,
-                    ..Default::default()
-                },
-            );
+            snapshot_buffer_put(p, SnapshotWeights { icusd_debt: 100, ..Default::default() });
         }
     }
 
@@ -3162,10 +2738,7 @@ mod tests {
         };
 
         // It took multiple batches (the whole point of chunking).
-        assert!(
-            more_ticks >= 2,
-            "expected several More ticks, got {more_ticks}"
-        );
+        assert!(more_ticks >= 2, "expected several More ticks, got {more_ticks}");
         // Each principal accrued exactly $1 over 7 days, exactly once.
         for i in 1..=n {
             assert_eq!(
@@ -3180,11 +2753,7 @@ mod tests {
         assert_eq!(stats.points_accrued, 700 * n as u128);
         assert_eq!(stats.total_points_all, 700 * n as u128);
         // PTS-002: the snapshot buffer is fully drained by close completion.
-        assert_eq!(
-            snapshot_buffer_len(),
-            0,
-            "buffer drained across the chunked close"
-        );
+        assert_eq!(snapshot_buffer_len(), 0, "buffer drained across the chunked close");
     }
 
     #[test]
@@ -3215,10 +2784,7 @@ mod tests {
         assert_eq!(run_close_accrual_chunk(1), CloseStep::More);
         let after_first = get_open_epoch().unwrap();
         assert!(after_first.close_started);
-        assert!(
-            after_first.close_cursor.is_some(),
-            "cursor advanced past batch 1"
-        );
+        assert!(after_first.close_cursor.is_some(), "cursor advanced past batch 1");
 
         // Finish the close.
         let stats = run_close_accrual_to_completion(1);
@@ -3235,10 +2801,7 @@ mod tests {
     fn chunked_close_on_no_open_epoch_is_a_noop_done() {
         init_default(tp(99));
         assert_eq!(get_open_epoch(), None);
-        assert_eq!(
-            run_close_accrual_chunk(1),
-            CloseStep::Done(CloseStats::default())
-        );
+        assert_eq!(run_close_accrual_chunk(1), CloseStep::Done(CloseStats::default()));
     }
 
     // ── PTS-002: bounded snapshot-buffer clear ──
@@ -3263,10 +2826,7 @@ mod tests {
         // The convenience full-clear finishes the rest in bounded chunks.
         snapshot_buffer_clear();
         assert_eq!(snapshot_buffer_len(), 0);
-        assert!(
-            snapshot_buffer_clear_chunk(),
-            "clearing an empty buffer reports empty"
-        );
+        assert!(snapshot_buffer_clear_chunk(), "clearing an empty buffer reports empty");
     }
 
     // ── PTS-001: bounded leaderboard ──
@@ -3337,12 +2897,8 @@ mod tests {
             snapshot_b_ns: 18,
             a_cursor: Some(tp(7)),
             a_complete: true,
-            a_capture_error_count: 0,
-            a_capture_error_principal: None,
             b_cursor: Some(tp(3)),
             b_complete: false,
-            b_capture_error_count: 0,
-            b_capture_error_principal: None,
             close_started: true,
             close_cursor: Some(tp(5)),
             close_points_accrued: 99,
@@ -3353,15 +2909,15 @@ mod tests {
         let foe = full.open_epoch.unwrap();
         assert_eq!(foe.a_cursor, Some(tp(7)));
         assert!(foe.a_complete);
-        // The public status reveals each timestamp only after its capture
-        // finishes; B remains in progress.
-        let pub_status = public_epoch_status();
+        // The public status reduces the open epoch to bounds + FIRED snapshot
+        // times only (both have passed at now=20).
+        let pub_status = public_epoch_status(20);
         let poe = pub_status.open_epoch.unwrap();
         assert_eq!(poe.epoch_index, 2);
         assert_eq!(poe.epoch_start_ns, 10);
         assert_eq!(poe.epoch_end_ns, 20);
         assert_eq!(poe.snapshot_a_ns, Some(12));
-        assert_eq!(poe.snapshot_b_ns, None);
+        assert_eq!(poe.snapshot_b_ns, Some(18));
         // PublicOpenEpoch has NO cursor/complete fields at all (compile-time), so
         // there is nothing for an attacker to read; assert the public/full views
         // agree on the non-sensitive window.
@@ -3369,10 +2925,10 @@ mod tests {
         assert_eq!(poe.snapshot_a_ns, Some(foe.snapshot_a_ns));
     }
 
-    // ── PTS-002: snapshot times stay hidden until balance reads complete ──
+    // ── PTS-002: future snapshot times stay hidden from the public status ──
 
     #[test]
-    fn pts_002_public_status_hides_snapshot_times_until_capture_completes() {
+    fn pts_002_public_status_hides_future_snapshot_times() {
         init_default(tp(99));
         set_open_epoch(Some(OpenEpoch {
             epoch_index: 0,
@@ -3382,28 +2938,27 @@ mod tests {
             snapshot_b_ns: 18,
             a_cursor: None,
             a_complete: false,
-            a_capture_error_count: 0,
-            a_capture_error_principal: None,
             b_cursor: None,
             b_complete: false,
-            b_capture_error_count: 0,
-            b_capture_error_principal: None,
             close_started: false,
             close_cursor: None,
             close_points_accrued: 0,
             close_active: 0,
         }));
-        // Before capture, both timestamps are withheld regardless of wall time.
-        let poe = public_epoch_status().open_epoch.unwrap();
+        // Before snapshot A fires, BOTH times are withheld (revealing a future
+        // time hands an attacker the exact flash-deposit moment).
+        let poe = public_epoch_status(11).open_epoch.unwrap();
         assert_eq!(poe.snapshot_a_ns, None);
         assert_eq!(poe.snapshot_b_ns, None);
-        // Timestamp visibility follows completed reads, not the wall clock.
-        with_state_mut(|s| s.open_epoch.as_mut().unwrap().a_complete = true);
-        let poe = public_epoch_status().open_epoch.unwrap();
+        // Once A fires (now >= a) it is history and revealed; B stays hidden.
+        let poe = public_epoch_status(12).open_epoch.unwrap();
         assert_eq!(poe.snapshot_a_ns, Some(12));
         assert_eq!(poe.snapshot_b_ns, None);
-        with_state_mut(|s| s.open_epoch.as_mut().unwrap().b_complete = true);
-        let poe = public_epoch_status().open_epoch.unwrap();
+        let poe = public_epoch_status(17).open_epoch.unwrap();
+        assert_eq!(poe.snapshot_a_ns, Some(12));
+        assert_eq!(poe.snapshot_b_ns, None);
+        // After B fires, both are revealed.
+        let poe = public_epoch_status(18).open_epoch.unwrap();
         assert_eq!(poe.snapshot_a_ns, Some(12));
         assert_eq!(poe.snapshot_b_ns, Some(18));
         // The ADMIN view is unredacted regardless of time.
@@ -3432,21 +2987,12 @@ mod tests {
         assert_eq!(order_a.len(), 10);
         let mut sorted_a = order_a.clone();
         sorted_a.sort();
-        assert_eq!(
-            sorted_a, principal_order,
-            "shuffle covers exactly the same set"
-        );
+        assert_eq!(sorted_a, principal_order, "shuffle covers exactly the same set");
 
         // The shuffled order differs from principal order, and two seeds differ
         // from each other (unpredictability).
-        assert_ne!(
-            order_a, principal_order,
-            "capture order is not principal order"
-        );
-        assert_ne!(
-            order_a, order_b,
-            "different seeds produce different capture orders"
-        );
+        assert_ne!(order_a, principal_order, "capture order is not principal order");
+        assert_ne!(order_a, order_b, "different seeds produce different capture orders");
     }
 
     #[test]
@@ -3471,9 +3017,6 @@ mod tests {
             cursor = page.last().copied();
             paged.extend(page);
         }
-        assert_eq!(
-            paged, full,
-            "cursor-paged shuffle equals the full shuffle, once each"
-        );
+        assert_eq!(paged, full, "cursor-paged shuffle equals the full shuffle, once each");
     }
 }
