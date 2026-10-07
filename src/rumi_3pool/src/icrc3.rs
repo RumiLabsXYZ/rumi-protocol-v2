@@ -4,6 +4,7 @@
 // transactions (mint, burn, transfer, approve) by polling icrc3_get_blocks.
 
 use candid::{CandidType, Nat, Principal};
+use icrc_ledger_types::icrc3::archive::QueryArchiveFn;
 use serde::{Deserialize, Serialize};
 
 use crate::state::read_state;
@@ -53,8 +54,7 @@ pub struct ArchivedBlocks {
 /// ICRC-3 archive callbacks are Candid function references. Keeping the
 /// signature in the type matters: a record containing `canister_id` and
 /// `method` has a different wire shape and cannot decode a real ledger reply.
-pub type ArchivedBlocksCallback =
-    icrc_ledger_types::icrc3::archive::QueryArchiveFn<Vec<GetBlocksArgs>, GetBlocksResult>;
+pub type ArchivedBlocksCallback = QueryArchiveFn<Vec<GetBlocksArgs>, GetBlocksResult>;
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub struct GetArchivesArgs {

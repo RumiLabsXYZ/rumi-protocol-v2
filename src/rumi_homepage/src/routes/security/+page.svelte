@@ -170,6 +170,22 @@
     </div>
   </section>
 
+  <section class="section page-width" aria-labelledby="october-report-title">
+    <article class="report-card featured october-report-card">
+      <div class="report-card-top">
+        <span class="report-kind">Status report · October 7, 2026</span>
+        <span class="latest-tag">Current update</span>
+      </div>
+      <h2 id="october-report-title">October security review status</h2>
+      <p class="report-description">
+        Read the public summary of what is merged, what remains draft source work, what has not
+        been installed, and why the Points pause policy is not a live safeguard.
+      </p>
+      <div class="report-links">
+        <a href="/security/october-2026">Read the October status report <span aria-hidden="true">↗</span></a>
+      </div>
+    </article>
+  </section>
   <section class="release-section" aria-labelledby="release-evidence-title">
     <div class="page-width release-inner">
       <div class="section-heading release-heading">
@@ -233,14 +249,15 @@
         <p class="section-kicker">Help us protect users</p>
         <h2 id="disclosure-title">Report a vulnerability privately</h2>
         <p>
-          Please do not post suspected vulnerabilities in a public issue. Send a private report
-          with the affected component, impact, and enough detail for us to investigate safely.
-          Avoid including real user balances or secrets in the report.
+          If you believe you have found a vulnerability in a Rumi Protocol canister or frontend,
+          please report it privately rather than disclosing it publicly. Include the affected
+          component and enough detail for us to investigate safely; do not include user balances
+          or secrets.
         </p>
       </div>
       <div class="disclosure-card">
-        <p class="disclosure-response">We aim to acknowledge reports within 72 hours.</p>
-        <a class="disclosure-link" href="mailto:vector.iso@gmail.com">
+        <p class="disclosure-response">We aim to acknowledge reports within 48 hours.</p>
+        <a class="disclosure-link" href="mailto:info@rumiprotocol.com">
           Email the security contact <span aria-hidden="true">↗</span>
         </a>
         <a

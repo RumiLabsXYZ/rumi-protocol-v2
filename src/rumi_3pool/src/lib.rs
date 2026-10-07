@@ -31,7 +31,8 @@ use crate::state::{mutate_state, read_state, ThreePoolState};
 use crate::math::{get_a, virtual_price};
 use crate::swap::calc_swap_output;
 use crate::liquidity::{
-    calc_add_liquidity, calc_remove_liquidity, calc_remove_one_coin, preflight_lp_burn,
+    calc_add_liquidity, calc_remove_liquidity, calc_remove_one_coin, AddLiquidityError,
+    preflight_lp_burn, DEPOSIT_CONCENTRATION_REJECT_MESSAGE,
 };
 use crate::transfers::transfer_from_user;
 use crate::logs::INFO;
@@ -1112,6 +1113,18 @@ async fn swap_inner(
 
 // ─── Add Liquidity ───
 
+/// Convert internal add-liquidity failures to the legacy public error type.
+/// Concentration denials reject with an explicit message so the public Candid
+/// variant set remains compatible with already-installed clients.
+fn public_add_liquidity_error(error: AddLiquidityError) -> ThreePoolError {
+    match error {
+        AddLiquidityError::DepositConcentrationLimitExceeded => {
+            ic_cdk::trap(DEPOSIT_CONCENTRATION_REJECT_MESSAGE)
+        }
+        AddLiquidityError::Pool(error) => error,
+    }
+}
+
 #[update]
 pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, ThreePoolError> {
     let _ = (amounts, min_lp);
@@ -1417,7 +1430,8 @@ async fn add_liquidity_legacy_unreachable(amounts: Vec<u128>, min_lp: u128) -> R
         lp_total_supply,
         amp,
         &fee_curve,
-    )?;
+    )
+    .map_err(public_add_liquidity_error)?;
     let lp_minted = liq_outcome.lp_minted;
 
     // 7. Slippage check
@@ -2373,7 +2387,8 @@ pub fn calc_add_liquidity_query(amounts: Vec<u128>, min_lp: u128) -> Result<u128
     });
     let outcome = calc_add_liquidity(
         &amounts_arr, &old_balances, &precision_muls, lp_total_supply, amp, &fee_curve,
-    )?;
+    )
+    .map_err(public_add_liquidity_error)?;
     let _ = min_lp; // reserved for future use
     Ok(outcome.lp_minted)
 }

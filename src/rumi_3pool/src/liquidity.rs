@@ -5,6 +5,23 @@ use ethnum::U256;
 use crate::math::*;
 use crate::types::*;
 
+/// Internal add-liquidity failure. Policy denial stays outside
+/// `ThreePoolError`, whose variant set is part of the deployed Candid contract.
+#[derive(Clone, Debug)]
+pub enum AddLiquidityError {
+    DepositConcentrationLimitExceeded,
+    Pool(ThreePoolError),
+}
+
+impl From<ThreePoolError> for AddLiquidityError {
+    fn from(error: ThreePoolError) -> Self {
+        Self::Pool(error)
+    }
+}
+
+pub const DEPOSIT_CONCENTRATION_REJECT_MESSAGE: &str =
+    "Deposit rejected: icUSD concentration exceeds the 66.6% limit";
+
 /// Outcome of an `add_liquidity` computation (dynamic-fee schema).
 ///
 /// `fees_native` are per-token fees retained in the pool (in native decimals),
@@ -65,7 +82,7 @@ fn validate_deposit_concentration(
     old_balances: &[u128; 3],
     amounts: &[u128; 3],
     precision_muls: &[u64; 3],
-) -> Result<(), ThreePoolError> {
+) -> Result<(), AddLiquidityError> {
     let old_xp = normalize_all(old_balances, precision_muls);
     let deposit_xp = normalize_all(amounts, precision_muls);
     let new_xp = [
@@ -113,7 +130,7 @@ fn validate_deposit_concentration(
             .checked_mul(cap_num)
             .ok_or(ThreePoolError::MathOverflow)?;
         if new_coin0_cap_lhs > new_coin0_cap_rhs {
-            return Err(ThreePoolError::DepositConcentrationLimitExceeded);
+            return Err(AddLiquidityError::DepositConcentrationLimitExceeded);
         }
         return Ok(());
     }
@@ -136,7 +153,7 @@ fn validate_deposit_concentration(
         .checked_mul(cap_num)
         .ok_or(ThreePoolError::MathOverflow)?;
     if deposit_coin0_cap_lhs > deposit_coin0_cap_rhs {
-        return Err(ThreePoolError::DepositConcentrationLimitExceeded);
+        return Err(AddLiquidityError::DepositConcentrationLimitExceeded);
     }
 
     Ok(())
@@ -155,10 +172,10 @@ pub fn calc_add_liquidity(
     lp_total_supply: u128,
     amp: u64,
     fee_curve: &FeeCurveParams,
-) -> Result<AddLiquidityOutcome, ThreePoolError> {
+) -> Result<AddLiquidityOutcome, AddLiquidityError> {
     // At least one amount must be > 0
     if amounts.iter().all(|&a| a == 0) {
-        return Err(ThreePoolError::ZeroAmount);
+        return Err(ThreePoolError::ZeroAmount.into());
     }
 
     // Compute new balances.  Admission and invariant math must never wrap a
@@ -194,7 +211,7 @@ pub fn calc_add_liquidity(
     let d1 = get_d(&new_xp, amp).ok_or(ThreePoolError::InvariantNotConverged)?;
 
     if d1 <= d0 {
-        return Err(ThreePoolError::ZeroAmount);
+        return Err(ThreePoolError::ZeroAmount.into());
     }
 
     // First deposit: mint D1 / 10^10 LP tokens (D is 18-decimal, LP is 8-decimal), no fees.
@@ -546,7 +563,10 @@ mod tests {
         let result = calc_add_liquidity(
             &[0, 0, 0], &test_balances(), &test_precision_muls(), 1000, 100, &curve,
         );
-        assert!(matches!(result, Err(ThreePoolError::ZeroAmount)));
+        assert!(matches!(
+            result,
+            Err(AddLiquidityError::Pool(ThreePoolError::ZeroAmount))
+        ));
     }
 
     #[test]
@@ -570,7 +590,7 @@ mod tests {
         ];
         assert!(matches!(
             calc_add_liquidity(&over_cap, &[0; 3], &precision_muls, 0, 100, &curve),
-            Err(ThreePoolError::DepositConcentrationLimitExceeded)
+            Err(AddLiquidityError::DepositConcentrationLimitExceeded)
         ));
     }
 
@@ -604,7 +624,7 @@ mod tests {
         let over = [exact[0] + 1, 0, 0];
         assert!(matches!(
             calc_add_liquidity(&over, &old_balances, &precision_muls, lp_supply, 100, &curve),
-            Err(ThreePoolError::DepositConcentrationLimitExceeded)
+            Err(AddLiquidityError::DepositConcentrationLimitExceeded)
         ));
     }
 
@@ -629,7 +649,7 @@ mod tests {
                 100,
                 &curve
             ),
-            Err(ThreePoolError::DepositConcentrationLimitExceeded)
+            Err(AddLiquidityError::DepositConcentrationLimitExceeded)
         ));
 
         // One stablecoin or both stablecoins can provide the corrective amount;
@@ -683,7 +703,7 @@ mod tests {
         let curve = default_curve();
         assert!(matches!(
             calc_add_liquidity(&[1, 0, 0], &[u128::MAX, 0, 0], &[1, 1, 1], 1, 100, &curve),
-            Err(ThreePoolError::MathOverflow)
+            Err(AddLiquidityError::Pool(ThreePoolError::MathOverflow))
         ));
     }
 

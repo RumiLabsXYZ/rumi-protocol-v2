@@ -127,7 +127,9 @@ describe('threePoolService deposit policy preflight', () => {
   });
 
   it('rejects a query cap error before any non-Oisy approval', async () => {
-    mocks.queryResult = { Err: { DepositConcentrationLimitExceeded: null } };
+    mocks.queryActor.calc_add_liquidity_query.mockRejectedValueOnce(
+      new Error('Canister trapped: Deposit rejected: icUSD concentration exceeds the 66.6% limit'),
+    );
 
     await expect(threePoolService.addLiquidity(AMOUNTS, 1n)).rejects.toThrow(
       '66.6% icUSD concentration cap',
@@ -188,7 +190,9 @@ describe('threePoolService deposit policy preflight', () => {
 
   it('clears a successful Oisy cache when the next quote fails', async () => {
     await threePoolService.preflightAddLiquidity(AMOUNTS);
-    mocks.queryResult = { Err: { DepositConcentrationLimitExceeded: null } };
+    mocks.queryActor.calc_add_liquidity_query.mockRejectedValueOnce(
+      new Error('Canister trapped: Deposit rejected: icUSD concentration exceeds the 66.6% limit'),
+    );
     await expect(threePoolService.preflightAddLiquidity(AMOUNTS)).rejects.toThrow(
       '66.6% icUSD concentration cap',
     );
@@ -201,13 +205,15 @@ describe('threePoolService deposit policy preflight', () => {
 
   it('formats a cap error returned by the update after approvals', async () => {
     await threePoolService.preflightAddLiquidity(AMOUNTS);
-    mocks.updateResult = { Err: { DepositConcentrationLimitExceeded: null } };
+    mocks.poolActor.add_liquidity.mockRejectedValueOnce(
+      new Error('Canister trapped: Deposit rejected: icUSD concentration exceeds the 66.6% limit'),
+    );
 
     await expect(threePoolService.addLiquidity(AMOUNTS, 1n)).rejects.toThrow(
       '66.6% icUSD concentration cap',
     );
 
     expect(mocks.approvalCalls).toEqual(['approve']);
-    expect(mocks.poolCalls).toBe(1);
+    expect(mocks.poolActor.add_liquidity).toHaveBeenCalledOnce();
   });
 });

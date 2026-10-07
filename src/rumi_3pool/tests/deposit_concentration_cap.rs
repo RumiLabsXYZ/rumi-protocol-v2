@@ -100,6 +100,14 @@ fn add_update(
     result.map(|receipt| Nat::from(receipt.result_lp.expect("successful receipt LP amount")))
 }
 
+fn assert_policy_reject_error(label: &str, error: impl std::fmt::Debug) {
+    let description = format!("{error:?}");
+    assert!(
+        description.contains("Deposit rejected: icUSD concentration exceeds the 66.6% limit"),
+        "{label} should explain the concentration policy rejection, got: {description}"
+    );
+}
+
 fn swap_quote(
     h: &ThreePoolHarness,
     token_in: u8,
@@ -230,14 +238,16 @@ fn icusd_deposit_crossing_cap_is_rejected_before_any_ledger_pull() {
     // icUSD share above 666/1000.  The quote and update must agree that it is
     // invalid, and the update must fail before transfer_from is attempted.
     let amounts = [4 * ICUSD_1M, 0, 0];
-    let quoted = add_quote(&h, amounts);
-    assert!(
-        matches!(
-            &quoted,
-            Err(ThreePoolError::DepositConcentrationLimitExceeded)
-        ),
-        "cap-crossing quote returned an unexpected result: {quoted:?}"
-    );
+    let quote_error = h
+        .pic
+        .query_call(
+            h.three_pool,
+            Principal::anonymous(),
+            "calc_add_liquidity_query",
+            encode_args((amounts.to_vec(), 0u128)).unwrap(),
+        )
+        .expect_err("cap-crossing quote should reject before returning a value");
+    assert_policy_reject_error("cap-crossing quote", quote_error);
 
     let updated = add_update(&h, amounts);
     assert!(
@@ -355,15 +365,17 @@ fn above_cap_70_percent_icusd_deposit_is_rejected_before_any_ledger_pull() {
 
     // The 700/300 normalized deposit is non-worsening relative to the old
     // pool share, but its own share exceeds 666/1000 and must be rejected.
-    let amounts = [700_000 * 100_000_000, 300_000 * 1_000_000, 0];
-    let quoted = add_quote(&h, amounts);
-    assert!(
-        matches!(
-            &quoted,
-            Err(ThreePoolError::DepositConcentrationLimitExceeded)
-        ),
-        "70/30 quote returned an unexpected result: {quoted:?}"
-    );
+    let amounts = [700_000u128 * 100_000_000, 300_000u128 * 1_000_000, 0];
+    let quote_error = h
+        .pic
+        .query_call(
+            h.three_pool,
+            Principal::anonymous(),
+            "calc_add_liquidity_query",
+            encode_args((amounts.to_vec(), 0u128)).unwrap(),
+        )
+        .expect_err("70/30 quote should reject before returning a value");
+    assert_policy_reject_error("70/30 quote", quote_error);
     let updated = add_update(&h, amounts);
     assert!(
         matches!(&updated, Err(IngressReceiptErrorV1::InvalidRequest)),

@@ -386,7 +386,12 @@ class ThreePoolService {
     // longer known to satisfy the current pool admission policy.
     this._addPreflight = null;
     const actor = await this.getQueryActor();
-    const result = await actor.calc_add_liquidity_query(amounts, BigInt(0)) as { Ok: bigint } | { Err: any };
+    let result: { Ok: bigint } | { Err: any };
+    try {
+      result = await actor.calc_add_liquidity_query(amounts, BigInt(0)) as { Ok: bigint } | { Err: any };
+    } catch (error) {
+      throw new Error(this.formatError(error));
+    }
     if ('Err' in result) throw new Error(this.formatError(result.Err));
     const principal = get(walletStore).principal;
     this._addPreflight = {
@@ -890,9 +895,28 @@ class ThreePoolService {
 
   // ── Error formatting ──
 
+  private async callAddLiquidity(actor: any, amounts: bigint[], minLp: bigint): Promise<bigint> {
+    try {
+      const result = await actor.add_liquidity(amounts, minLp) as { Ok: bigint } | { Err: any };
+      if ('Err' in result) throw new Error(this.formatError(result.Err));
+      return result.Ok;
+    } catch (error) {
+      throw new Error(this.formatError(error));
+    }
+  }
+
   private formatError(err: any): string {
-    if ('DepositConcentrationLimitExceeded' in err) {
-      return 'Deposit exceeds the 66.6% icUSD concentration cap';
+    const rejectionText = typeof err === 'string' ? err : err?.message;
+    if (typeof rejectionText === 'string' && rejectionText.toLowerCase().includes(
+      'deposit rejected: icusd concentration exceeds the 66.6% limit',
+    )) {
+      return 'Deposit exceeds the 66.6% icUSD concentration cap. Change the token amounts to get a new quote.';
+    }
+    if (typeof rejectionText === 'string' && err instanceof Error) {
+      return rejectionText;
+    }
+    if (!err || typeof err !== 'object') {
+      return typeof rejectionText === 'string' ? rejectionText : 'Unknown error';
     }
     if ('InsufficientOutput' in err) {
       return `Insufficient output: expected at least ${err.InsufficientOutput.expected_min}, got ${err.InsufficientOutput.actual}`;
