@@ -169,6 +169,45 @@ describe('LiquidityInterface deposit concentration UX', () => {
     expect(host.querySelector<HTMLButtonElement>('.submit-btn')?.disabled).toBe(false);
   });
 
+  it('shows a server policy rejection and preserves the entered deposit amounts', async () => {
+    mocks.threePoolService.calcAddLiquidity.mockRejectedValue(
+      new Error('Deposit exceeds the 66.6% icUSD concentration cap. Change the token amounts to get a new quote.'),
+    );
+    instance = mount(LiquidityInterface, { target: host });
+    const inputs = host.querySelectorAll<HTMLInputElement>('.amount-input');
+    inputs[1].value = '1';
+    inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    await settleQuote();
+
+    expect(host.textContent).toContain('Deposit exceeds the 66.6% icUSD concentration cap');
+    expect(inputs[0].value).toBe('');
+    expect(inputs[1].value).toBe('1');
+    expect(inputs[2].value).toBe('');
+    expect(host.querySelector<HTMLButtonElement>('.submit-btn')?.disabled).toBe(true);
+  });
+
+  it('shows an update policy rejection and preserves the entered deposit amounts', async () => {
+    mocks.threePoolService.addLiquidity.mockRejectedValue(
+      new Error('Deposit exceeds the 66.6% icUSD concentration cap. Change the token amounts to get a new quote.'),
+    );
+    instance = mount(LiquidityInterface, { target: host });
+    const inputs = host.querySelectorAll<HTMLInputElement>('.amount-input');
+    inputs[1].value = '1';
+    inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    await settleQuote();
+
+    host.querySelector<HTMLButtonElement>('.submit-btn')?.click();
+    await tick();
+    flushSync();
+
+    expect(host.textContent).toContain('Deposit exceeds the 66.6% icUSD concentration cap');
+    expect(inputs[0].value).toBe('');
+    expect(inputs[1].value).toBe('1');
+    expect(inputs[2].value).toBe('');
+  });
+
   it('offers a quote refresh after a stale preflight without changing amounts', async () => {
     instance = mount(LiquidityInterface, { target: host });
     const inputs = host.querySelectorAll<HTMLInputElement>('.amount-input');

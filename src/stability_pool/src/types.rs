@@ -838,8 +838,6 @@ pub enum ThreePoolErrorRemote {
     ZeroAmount,
     PoolEmpty,
     SlippageExceeded,
-    /// Deposit admission rejected before any 3pool token pull.
-    DepositConcentrationLimitExceeded,
     TransferFailed {
         token: String,
         reason: String,
@@ -1066,20 +1064,8 @@ mod icusd_value_tests {
 }
 
 #[cfg(test)]
-mod three_pool_deposit_error_compatibility_tests {
+mod three_pool_error_compatibility_tests {
     use super::ThreePoolErrorRemote;
-
-    #[test]
-    fn decodes_three_pool_concentration_rejection() {
-        let remote: Result<u128, rumi_3pool::types::ThreePoolError> =
-            Err(rumi_3pool::types::ThreePoolError::DepositConcentrationLimitExceeded);
-        let bytes = candid::encode_one(remote).unwrap();
-        let decoded: Result<u128, ThreePoolErrorRemote> = candid::decode_one(&bytes).unwrap();
-        assert!(matches!(
-            decoded,
-            Err(ThreePoolErrorRemote::DepositConcentrationLimitExceeded)
-        ));
-    }
 
     #[test]
     fn still_decodes_successful_three_pool_mint() {
