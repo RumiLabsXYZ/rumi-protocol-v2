@@ -4,6 +4,7 @@
 // transactions (mint, burn, transfer, approve) by polling icrc3_get_blocks.
 
 use candid::{CandidType, Nat, Principal};
+use icrc_ledger_types::icrc3::archive::QueryArchiveFn;
 use serde::{Deserialize, Serialize};
 
 use crate::state::read_state;
@@ -50,13 +51,9 @@ pub struct ArchivedBlocks {
     pub callback: ArchivedBlocksCallback,
 }
 
-/// Candid `func` reference — we never actually use archives, but the type
-/// must be present in the response for Candid compatibility.
-#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
-pub struct ArchivedBlocksCallback {
-    pub canister_id: Principal,
-    pub method: String,
-}
+/// Candid `func` reference — archives are not used, but the callback still
+/// needs the standard function-reference type for interface compatibility.
+pub type ArchivedBlocksCallback = QueryArchiveFn<Vec<GetBlocksArgs>, GetBlocksResult>;
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub struct GetArchivesArgs {

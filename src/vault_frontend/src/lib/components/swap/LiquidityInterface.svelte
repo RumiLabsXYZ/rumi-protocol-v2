@@ -155,6 +155,7 @@
     const hasAmount = addAmounts.some(a => a && parseFloat(a) > 0);
     addLpEstimate = null;
     addPolicy = null;
+    addError = '';
     if (hasAmount) {
       debouncedAddQuote(version);
     } else {
@@ -210,10 +211,13 @@
         if (version !== addQuoteVersion) return;
         addBeforeLp = beforeLp;
       }
-    } catch {
+    } catch (error: any) {
       if (version === addQuoteVersion) {
         addLpEstimate = null;
         addPolicy = null;
+        if (error?.message?.toLowerCase().includes('66.6% icusd concentration cap')) {
+          addError = error.message;
+        }
       }
     } finally {
       if (version === addQuoteVersion) addQuoting = false;
