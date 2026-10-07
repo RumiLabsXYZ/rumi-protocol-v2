@@ -3290,3 +3290,6 @@ mod explorer_tests {
         );
     }
 }
+
+// Keep the canonical Candid interface extractable from the compiled canister.
+ic_cdk::export_candid!();

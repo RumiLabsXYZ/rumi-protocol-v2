@@ -12,6 +12,11 @@ import {
   type OisyLandedSentinel,
 } from './protocol/oisyResilience';
 import { TokenService } from './tokenService';
+export {
+  evaluateThreePoolDepositPolicy,
+  THREE_POOL_CAP_DENOMINATOR,
+  THREE_POOL_CAP_NUMERATOR,
+} from './depositPolicy';
 
 // ──────────────────────────────────────────────────────────────
 // Types — mirrors the Candid interface
@@ -242,9 +247,16 @@ export function calculateTheoreticalApy(
 // ──────────────────────────────────────────────────────────────
 
 const THREEPOOL_CANISTER_ID = CANISTER_IDS.THREEPOOL;
+const ADD_PREFLIGHT_TTL_MS = 30_000;
 
 class ThreePoolService {
   private _anonAgent: HttpAgent | null = null;
+  private _addPreflight: {
+    amountsKey: string;
+    principalKey: string;
+    quote: bigint;
+    capturedAtMs: number;
+  } | null = null;
 
   private async getQueryActor(): Promise<any> {
     if (!this._anonAgent) {
@@ -293,10 +305,43 @@ class ThreePoolService {
   }
 
   async calcAddLiquidity(amounts: bigint[]): Promise<bigint> {
+    // A failed query must invalidate any earlier quote, including one for the
+    // same amounts. Otherwise an Oisy click could reuse a quote that is no
+    // longer known to satisfy the current pool admission policy.
+    this._addPreflight = null;
     const actor = await this.getQueryActor();
     const result = await actor.calc_add_liquidity_query(amounts, BigInt(0)) as { Ok: bigint } | { Err: any };
     if ('Err' in result) throw new Error(this.formatError(result.Err));
+    const principal = get(walletStore).principal;
+    this._addPreflight = {
+      amountsKey: amounts.join(','),
+      principalKey: principal?.toText() ?? '',
+      quote: result.Ok,
+      capturedAtMs: Date.now(),
+    };
     return result.Ok;
+  }
+
+  /**
+   * Fresh quote/admission preflight. The canister repeats this policy under
+   * its update lock; callers use this immediately before approvals so a
+   * debounced quote cannot authorize a stale deposit.
+   */
+  async preflightAddLiquidity(amounts: bigint[]): Promise<bigint> {
+    return this.calcAddLiquidity(amounts);
+  }
+
+  private requireCachedAddPreflight(amounts: bigint[], principal: Principal): bigint {
+    const cached = this._addPreflight;
+    if (
+      !cached ||
+      Date.now() - cached.capturedAtMs > ADD_PREFLIGHT_TTL_MS ||
+      cached.amountsKey !== amounts.join(',') ||
+      cached.principalKey !== principal.toText()
+    ) {
+      throw new Error('Deposit quote is stale. Refresh the quote before opening wallet approvals.');
+    }
+    return cached.quote;
   }
 
   async calcRemoveLiquidity(lpBurn: bigint): Promise<bigint[]> {
@@ -530,6 +575,19 @@ class ThreePoolService {
       amt > 0n ? approvalAmountCached(amt, POOL_TOKENS[k]) : 0n,
     );
 
+    // Oisy's first signer call must stay inside the click handler. Its quote
+    // preflight is captured during the debounced quote phase and checked
+    // synchronously here against the exact amounts, wallet, and short TTL;
+    // this prevents a stale quote from opening an approval popup. Non-Oisy
+    // wallets can run the authoritative query immediately before approvals.
+    let signerAgent: any = null;
+    if (oisyDetected && wallet.principal) {
+      this.requireCachedAddPreflight(amounts, wallet.principal);
+      signerAgent = await getOisySignerAgent(wallet.principal);
+    } else {
+      await this.preflightAddLiquidity(amounts);
+    }
+
     // LP balance snapshot for the Oisy false-negative verifier. For Oisy it is
     // captured pre-click (passed in as `beforeLp` by LiquidityInterface during
     // the quote step) so we never await a balance query inside the gesture
@@ -549,7 +607,6 @@ class ThreePoolService {
     if (oisyDetected && wallet.principal) {
       // ─── Oisy sequential path (v5: no batch concept) ───
       console.log(`[Oisy] Sequential approve(s) + 3pool add_liquidity via @icp-sdk/signer v5`);
-      const signerAgent = await getOisySignerAgent(wallet.principal);
 
       // 1) Approve each non-zero token sequentially (Tier 1 native consent screens).
       for (let k = 0; k < 3; k++) {
@@ -711,6 +768,9 @@ class ThreePoolService {
   // ── Error formatting ──
 
   private formatError(err: any): string {
+    if ('DepositConcentrationLimitExceeded' in err) {
+      return 'Deposit exceeds the 66.6% icUSD concentration cap';
+    }
     if ('InsufficientOutput' in err) {
       return `Insufficient output: expected at least ${err.InsufficientOutput.expected_min}, got ${err.InsufficientOutput.actual}`;
     }

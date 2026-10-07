@@ -103,6 +103,7 @@
     <h2 class="doc-heading">Adding Liquidity</h2>
     <p>You can add liquidity by depositing one, two, or all three stablecoins. The pool mints 3USD LP tokens proportional to the value you add relative to the total pool. Approve each token (ICRC-2) before calling <code>add_liquidity</code>.</p>
     <p>Deposits that are proportional to the current pool balances incur no additional fee. Imbalanced deposits (e.g., adding only one token) may incur a small imbalance penalty because they shift the pool away from equilibrium. This penalty is typically very small for stablecoin pools.</p>
+    <p>Deposits follow a 66.6% icUSD concentration limit; swaps and withdrawals can still move the pool above it. When the pool is at or below the cap, a deposit cannot move the resulting icUSD share above it. If the pool is already above the cap, an icUSD-containing deposit must itself contain enough ckUSDT and/or ckUSDC to stay at or below 66.6%; stable-only corrective deposits remain allowed. The deposit form calculates the exact rounded stable amount and checks the current pool before opening wallet approvals.</p>
   </section>
 
   <section class="doc-section">

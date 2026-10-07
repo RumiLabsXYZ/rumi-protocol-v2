@@ -7,6 +7,10 @@
     parseTokenAmount,
     formatTokenAmount,
   } from '../../services/threePoolService';
+  import {
+    evaluateThreePoolDepositPolicy,
+    type DepositPolicyResult,
+  } from '../../services/depositPolicy';
   import { fetchLedgerFee, getCachedLedgerFee } from '../../services/ledgerFeeService';
   import { formatStableTokenDisplay } from '../../utils/format';
   import { isOisyLandedSentinel } from '../../services/protocol/oisyResilience';
@@ -55,6 +59,8 @@
   let addError = '';
   let addNotice = '';
   let addLpEstimate: bigint | null = null;
+  let addPolicy: DepositPolicyResult | null = null;
+  let addQuoteVersion = 0;
   let addSlippageBps = 50;
   let showAddSlippage = false;
 
@@ -145,20 +151,25 @@
 
   // ── Add: debounced quote ──
   $: {
+    const version = ++addQuoteVersion;
     const hasAmount = addAmounts.some(a => a && parseFloat(a) > 0);
+    addLpEstimate = null;
+    addPolicy = null;
     if (hasAmount) {
-      debouncedAddQuote();
+      debouncedAddQuote(version);
     } else {
-      addLpEstimate = null;
+      if (addQuoteTimer) clearTimeout(addQuoteTimer);
+      addQuoteTimer = null;
+      addQuoting = false;
     }
   }
 
-  function debouncedAddQuote() {
+  function debouncedAddQuote(version: number) {
     if (addQuoteTimer) clearTimeout(addQuoteTimer);
-    addQuoteTimer = setTimeout(fetchAddQuote, 400);
+    addQuoteTimer = setTimeout(() => fetchAddQuote(version), 400);
   }
 
-  async function fetchAddQuote() {
+  async function fetchAddQuote(version: number) {
     try {
       addQuoting = true;
       const amounts = addAmounts.map((a, i) => {
@@ -167,15 +178,45 @@
         return parseTokenAmount(a, POOL_TOKENS[i].decimals);
       });
       if (amounts.every(a => a === 0n)) { addLpEstimate = null; return; }
-      addLpEstimate = await threePoolService.calcAddLiquidity(amounts);
+      const status = await threePoolService.getPoolStatus();
+      if (version !== addQuoteVersion) return;
+      const currentBalances: [bigint, bigint, bigint] = [
+        status.balances[0] ?? 0n,
+        status.balances[1] ?? 0n,
+        status.balances[2] ?? 0n,
+      ];
+      const decimals: [number, number, number] = [
+        Number(status.tokens[0]?.decimals ?? POOL_TOKENS[0].decimals),
+        Number(status.tokens[1]?.decimals ?? POOL_TOKENS[1].decimals),
+        Number(status.tokens[2]?.decimals ?? POOL_TOKENS[2].decimals),
+      ];
+      const policy = evaluateThreePoolDepositPolicy(
+        currentBalances,
+        amounts as [bigint, bigint, bigint],
+        decimals,
+      );
+      if (version !== addQuoteVersion) return;
+      addPolicy = policy;
+      if (!policy.allowed) {
+        addLpEstimate = null;
+        return;
+      }
+      const quotedLp = await threePoolService.calcAddLiquidity(amounts);
+      if (version !== addQuoteVersion) return;
+      addLpEstimate = quotedLp;
       // Capture the verifier snapshot here (pre-click async context) for Oisy.
       if (isOisyWallet() && $walletStore.principal) {
-        addBeforeLp = await threePoolService.captureLpSnapshot($walletStore.principal);
+        const beforeLp = await threePoolService.captureLpSnapshot($walletStore.principal);
+        if (version !== addQuoteVersion) return;
+        addBeforeLp = beforeLp;
       }
     } catch {
-      addLpEstimate = null;
+      if (version === addQuoteVersion) {
+        addLpEstimate = null;
+        addPolicy = null;
+      }
     } finally {
-      addQuoting = false;
+      if (version === addQuoteVersion) addQuoting = false;
     }
   }
 
@@ -261,6 +302,10 @@
     }
     if (addLpEstimate === null) {
       addError = 'Waiting for quote';
+      return;
+    }
+    if (!addPolicy?.allowed) {
+      addError = 'This deposit does not satisfy the 66.6% icUSD cap';
       return;
     }
 
@@ -349,6 +394,66 @@
   function closeDropdowns() {
     showSingleDropdown = false;
   }
+
+  function ceilDivUi(value: bigint, divisor: bigint): bigint {
+    return value === 0n ? 0n : (value + divisor - 1n) / divisor;
+  }
+
+  function normalizedToTokenAmount(value: bigint, tokenDecimals: number, normalizedDecimals: number): bigint {
+    if (tokenDecimals >= normalizedDecimals) {
+      return value * (10n ** BigInt(tokenDecimals - normalizedDecimals));
+    }
+    return ceilDivUi(value, 10n ** BigInt(normalizedDecimals - tokenDecimals));
+  }
+
+  function formatTokenInput(raw: bigint, decimals: number): string {
+    const scale = 10n ** BigInt(decimals);
+    const whole = raw / scale;
+    if (decimals === 0) return whole.toString();
+    const fraction = (raw % scale).toString().padStart(decimals, '0');
+    return `${whole}.${fraction}`;
+  }
+
+  function formatMissingStable(policy: DepositPolicyResult): string {
+    const decimals = POOL_TOKENS[1].decimals;
+    const nativeAmount = normalizedToTokenAmount(policy.missingStableNormalized, decimals, policy.normalizationDecimals);
+    return formatTokenInput(nativeAmount, decimals);
+  }
+
+  function applyCapFriendlyExample() {
+    if (!addPolicy || addPolicy.allowed || addPolicy.missingStableNormalized <= 0n) return;
+
+    // Preserve the user's icUSD and stablecoin entries. Split the exact
+    // missing normalized value across both stable legs, rounding each leg up
+    // to its native precision so the combined amount still satisfies policy.
+    const firstMissingNormalized = ceilDivUi(addPolicy.missingStableNormalized, 2n);
+    const firstExisting = parseTokenAmount(addAmounts[1] || '0', POOL_TOKENS[1].decimals);
+    const secondExisting = parseTokenAmount(addAmounts[2] || '0', POOL_TOKENS[2].decimals);
+    const firstAdd = normalizedToTokenAmount(firstMissingNormalized, POOL_TOKENS[1].decimals, addPolicy.normalizationDecimals);
+    const firstProvidedNormalized = firstAdd * (10n ** BigInt(addPolicy.normalizationDecimals - POOL_TOKENS[1].decimals));
+    const secondMissingNormalized = addPolicy.missingStableNormalized > firstProvidedNormalized
+      ? addPolicy.missingStableNormalized - firstProvidedNormalized
+      : 0n;
+    const secondAdd = normalizedToTokenAmount(secondMissingNormalized, POOL_TOKENS[2].decimals, addPolicy.normalizationDecimals);
+    addAmounts = [
+      addAmounts[0],
+      formatTokenInput(firstExisting + firstAdd, POOL_TOKENS[1].decimals),
+      formatTokenInput(secondExisting + secondAdd, POOL_TOKENS[2].decimals),
+    ];
+    addError = '';
+  }
+
+  function refreshAddQuote() {
+    if (!addAmounts.some(a => a && parseFloat(a) > 0)) return;
+    if (addQuoteTimer) clearTimeout(addQuoteTimer);
+    addQuoteTimer = null;
+    const version = ++addQuoteVersion;
+    addLpEstimate = null;
+    addPolicy = null;
+    addError = '';
+    addQuoting = true;
+    void fetchAddQuote(version);
+  }
 </script>
 
 <svelte:window on:click={closeDropdowns} />
@@ -409,6 +514,28 @@
       </div>
     {/each}
 
+    <div class="deposit-cap-note">
+      <div>
+        <strong>icUSD concentration cap: 66.6%</strong>
+        <span>Deposits are checked against the current pool. If icUSD is already above the cap, the incoming deposit's icUSD share must be at or below 66.6%; the stable side can be split across ckUSDT and/or ckUSDC. Stable-only deposits remain available.</span>
+      </div>
+      <button class="preset-btn" type="button" on:click={applyCapFriendlyExample} disabled={addLoading || !addPolicy || addPolicy.allowed}>
+        Add minimum stable
+      </button>
+    </div>
+
+    {#if addPolicy && !addPolicy.allowed}
+      <div class="policy-error" role="status">
+        {#if addPolicy.reason === 'overcap_icusd_requires_stables'}
+          Add at least {formatMissingStable(addPolicy)} more stablecoin value alongside this icUSD deposit. Either ckUSDT or ckUSDC qualifies.
+        {:else if addPolicy.reason === 'cap_exceeded'}
+          This deposit would put icUSD above 66.6%. Add at least {formatMissingStable(addPolicy)} more stablecoin value, or reduce the icUSD amount.
+        {:else}
+          Enter at least one token amount.
+        {/if}
+      </div>
+    {/if}
+
     <!-- Inline estimate + slippage row -->
     <div class="inline-info-row">
       <span class="inline-estimate">
@@ -464,7 +591,7 @@
     <button
       class="submit-btn"
       on:click={handleAdd}
-      disabled={addLoading || addAmounts.every(a => !a || parseFloat(a) <= 0) || addLpEstimate === null || addExceedsBalance}
+      disabled={addLoading || addAmounts.every(a => !a || parseFloat(a) <= 0) || addLpEstimate === null || addPolicy === null || !addPolicy.allowed || addExceedsBalance}
     >
       {#if addLoading}
         <span class="spinner"></span>
@@ -480,6 +607,9 @@
           <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 10.5a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zM8.75 8a.75.75 0 0 1-1.5 0V5a.75.75 0 0 1 1.5 0v3z"/>
         </svg>
         {addError}
+        {#if addError.toLowerCase().includes('quote is stale')}
+          <button class="refresh-quote-btn" type="button" on:click={refreshAddQuote} disabled={addLoading || addQuoting}>Refresh quote</button>
+        {/if}
       </div>
     {/if}
     {#if addNotice}
@@ -706,6 +836,81 @@
   /* ── Token input groups ── */
   .token-input-group {
     margin-bottom: 0.75rem;
+  }
+
+  .deposit-cap-note {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin: 0.75rem 0;
+    padding: 0.75rem;
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.5rem;
+    background: var(--rumi-bg-surface2);
+    color: var(--rumi-text-secondary);
+    font-size: 0.72rem;
+    line-height: 1.45;
+  }
+
+  .deposit-cap-note strong,
+  .deposit-cap-note span {
+    display: block;
+  }
+
+  .deposit-cap-note strong {
+    margin-bottom: 0.2rem;
+    color: var(--rumi-text-primary);
+    font-size: 0.75rem;
+  }
+
+  .preset-btn {
+    flex: 0 0 auto;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.35rem;
+    background: transparent;
+    color: var(--rumi-text-secondary);
+    font-size: 0.68rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .preset-btn:hover:not(:disabled) {
+    border-color: var(--rumi-accent);
+    color: var(--rumi-text-primary);
+  }
+
+  .preset-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .policy-error {
+    margin: 0 0 0.75rem;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid rgba(248, 113, 113, 0.45);
+    border-radius: 0.5rem;
+    background: rgba(127, 29, 29, 0.2);
+    color: #fca5a5;
+    font-size: 0.75rem;
+    line-height: 1.45;
+  }
+
+  .refresh-quote-btn {
+    margin-left: 0.5rem;
+    padding: 0.25rem 0.45rem;
+    border: 1px solid currentColor;
+    border-radius: 0.3rem;
+    background: transparent;
+    color: inherit;
+    font-size: 0.7rem;
+    cursor: pointer;
+  }
+
+  .refresh-quote-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
   }
 
   .token-input-header {

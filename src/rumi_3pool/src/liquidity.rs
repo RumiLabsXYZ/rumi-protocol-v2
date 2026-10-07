@@ -31,6 +31,101 @@ pub struct RemoveOneCoinOutcome {
     pub is_rebalancing: bool,
 }
 
+// The cap is represented as a ratio so admission does not depend on a
+// rounded percentage or on native token decimal places.
+const ICUSD_CAP_NUMERATOR: u64 = 666;
+const ICUSD_CAP_DENOMINATOR: u64 = 1_000;
+
+/// Validate the 3pool icUSD concentration policy for a prospective deposit.
+///
+/// All comparisons use normalized (18-decimal) values and cross multiplication
+/// with U256.  At or below the cap, the resulting share must remain at or
+/// below 666/1000.  Once a pool is above the cap, an icUSD-containing deposit
+/// must itself have an icUSD share at or below 666/1000; because the current
+/// share is strictly above the cap, this necessarily reduces concentration.
+/// Stable-only deposits are corrective by definition and are accepted while
+/// above the cap.
+fn validate_deposit_concentration(
+    old_balances: &[u128; 3],
+    amounts: &[u128; 3],
+    precision_muls: &[u64; 3],
+) -> Result<(), ThreePoolError> {
+    let old_xp = normalize_all(old_balances, precision_muls);
+    let deposit_xp = normalize_all(amounts, precision_muls);
+    let new_xp = [
+        old_xp[0]
+            .checked_add(deposit_xp[0])
+            .ok_or(ThreePoolError::MathOverflow)?,
+        old_xp[1]
+            .checked_add(deposit_xp[1])
+            .ok_or(ThreePoolError::MathOverflow)?,
+        old_xp[2]
+            .checked_add(deposit_xp[2])
+            .ok_or(ThreePoolError::MathOverflow)?,
+    ];
+
+    let old_stables = old_xp[1]
+        .checked_add(old_xp[2])
+        .ok_or(ThreePoolError::MathOverflow)?;
+    let old_total = old_xp[0]
+        .checked_add(old_stables)
+        .ok_or(ThreePoolError::MathOverflow)?;
+    let deposit_stables = deposit_xp[1]
+        .checked_add(deposit_xp[2])
+        .ok_or(ThreePoolError::MathOverflow)?;
+    let new_stables = new_xp[1]
+        .checked_add(new_xp[2])
+        .ok_or(ThreePoolError::MathOverflow)?;
+    let new_total = new_xp[0]
+        .checked_add(new_stables)
+        .ok_or(ThreePoolError::MathOverflow)?;
+
+    let cap_num = U256::from(ICUSD_CAP_NUMERATOR);
+    let cap_den = U256::from(ICUSD_CAP_DENOMINATOR);
+    let old_at_or_below_cap = old_xp[0]
+        .checked_mul(cap_den)
+        .ok_or(ThreePoolError::MathOverflow)?
+        <= old_total
+            .checked_mul(cap_num)
+            .ok_or(ThreePoolError::MathOverflow)?;
+
+    if old_total == U256::ZERO || old_at_or_below_cap {
+        let new_coin0_cap_lhs = new_xp[0]
+            .checked_mul(cap_den)
+            .ok_or(ThreePoolError::MathOverflow)?;
+        let new_coin0_cap_rhs = new_total
+            .checked_mul(cap_num)
+            .ok_or(ThreePoolError::MathOverflow)?;
+        if new_coin0_cap_lhs > new_coin0_cap_rhs {
+            return Err(ThreePoolError::DepositConcentrationLimitExceeded);
+        }
+        return Ok(());
+    }
+
+    // Above the cap, a coin0-containing deposit must itself be at or below
+    // the cap. This rejects deposits proportional to the over-cap current
+    // pool, while equal normalized pairing remains valid. The deposit-share
+    // rule proves the resulting share strictly decreases without a wide
+    // old/new cross-product. Stable-only deposits are corrective.
+    if deposit_xp[0] == U256::ZERO {
+        return Ok(());
+    }
+    let deposit_total = deposit_xp[0]
+        .checked_add(deposit_stables)
+        .ok_or(ThreePoolError::MathOverflow)?;
+    let deposit_coin0_cap_lhs = deposit_xp[0]
+        .checked_mul(cap_den)
+        .ok_or(ThreePoolError::MathOverflow)?;
+    let deposit_coin0_cap_rhs = deposit_total
+        .checked_mul(cap_num)
+        .ok_or(ThreePoolError::MathOverflow)?;
+    if deposit_coin0_cap_lhs > deposit_coin0_cap_rhs {
+        return Err(ThreePoolError::DepositConcentrationLimitExceeded);
+    }
+
+    Ok(())
+}
+
 /// Calculate LP tokens to mint for a deposit using the dynamic fee curve.
 ///
 /// The imbalance fee applies per-token to the non-proportional portion of the
@@ -50,12 +145,23 @@ pub fn calc_add_liquidity(
         return Err(ThreePoolError::ZeroAmount);
     }
 
-    // Compute new balances
+    // Compute new balances.  Admission and invariant math must never wrap a
+    // native balance before the token pulls begin.
     let new_balances: [u128; 3] = [
-        old_balances[0] + amounts[0],
-        old_balances[1] + amounts[1],
-        old_balances[2] + amounts[2],
+        old_balances[0]
+            .checked_add(amounts[0])
+            .ok_or(ThreePoolError::MathOverflow)?,
+        old_balances[1]
+            .checked_add(amounts[1])
+            .ok_or(ThreePoolError::MathOverflow)?,
+        old_balances[2]
+            .checked_add(amounts[2])
+            .ok_or(ThreePoolError::MathOverflow)?,
     ];
+
+    // This check is shared by update and query paths because both call this
+    // pure calculation before any ledger transfer is attempted.
+    validate_deposit_concentration(old_balances, amounts, precision_muls)?;
 
     // Normalize
     let old_xp = normalize_all(old_balances, precision_muls);
@@ -416,6 +522,144 @@ mod tests {
         assert!(matches!(result, Err(ThreePoolError::ZeroAmount)));
     }
 
+    #[test]
+    fn test_deposit_cap_exact_boundary_and_initial_liquidity() {
+        let precision_muls = test_precision_muls();
+        let curve = default_curve();
+        let cap_deposit = [
+            666 * 100_000_000u128,
+            167 * 1_000_000u128,
+            167 * 1_000_000u128,
+        ];
+
+        // 666 / (666 + 167 + 167) is exactly the 666/1000 cap.
+        calc_add_liquidity(&cap_deposit, &[0; 3], &precision_muls, 0, 100, &curve)
+            .expect("initial liquidity exactly at the cap should be accepted");
+
+        let over_cap = [
+            666 * 100_000_000u128 + 1,
+            167 * 1_000_000u128,
+            167 * 1_000_000u128,
+        ];
+        assert!(matches!(
+            calc_add_liquidity(&over_cap, &[0; 3], &precision_muls, 0, 100, &curve),
+            Err(ThreePoolError::DepositConcentrationLimitExceeded)
+        ));
+    }
+
+    #[test]
+    fn test_deposit_cap_crossing_from_below_is_exact() {
+        let old_balances = [
+            167 * 100_000_000u128,
+            167 * 1_000_000u128,
+            167 * 1_000_000u128,
+        ];
+        let precision_muls = test_precision_muls();
+        let curve = default_curve();
+        // This state can exist after an imbalance-producing operation even
+        // though initial liquidity is capped; use a representative nonzero LP
+        // supply to exercise the admission path.
+        let lp_supply = 1_000_000_000_000_000u128;
+
+        // Starting from (167, 167, 167), adding 499 icUSD gives (666, 167,
+        // 167), exactly 666/1000. One additional native unit must fail.
+        let exact = [499 * 100_000_000u128, 0, 0];
+        calc_add_liquidity(
+            &exact,
+            &old_balances,
+            &precision_muls,
+            lp_supply,
+            100,
+            &curve,
+        )
+        .expect("deposit ending exactly at the cap should be accepted");
+
+        let over = [exact[0] + 1, 0, 0];
+        assert!(matches!(
+            calc_add_liquidity(&over, &old_balances, &precision_muls, lp_supply, 100, &curve),
+            Err(ThreePoolError::DepositConcentrationLimitExceeded)
+        ));
+    }
+
+    #[test]
+    fn test_above_cap_requires_cap_compliant_deposit_and_accepts_correction() {
+        let old_balances = [
+            3_000_000 * 100_000_000u128,
+            500_000 * 1_000_000u128,
+            500_000 * 1_000_000u128,
+        ];
+        let precision_muls = test_precision_muls();
+        let curve = default_curve();
+        let lp_supply = 1_000_000_000_000_000u128;
+
+        let single_coin0 = [100_000 * 100_000_000u128, 0, 0];
+        assert!(matches!(
+            calc_add_liquidity(
+                &single_coin0,
+                &old_balances,
+                &precision_muls,
+                lp_supply,
+                100,
+                &curve
+            ),
+            Err(ThreePoolError::DepositConcentrationLimitExceeded)
+        ));
+
+        // One stablecoin or both stablecoins can provide the corrective amount;
+        // equal pairing is comfortably below the 666/1000 deposit cap.
+        for paired in [
+            [100_000 * 100_000_000u128, 100_000 * 1_000_000u128, 0],
+            [100_000 * 100_000_000u128, 50_000 * 1_000_000u128, 50_000 * 1_000_000u128],
+            [666_000 * 100_000_000u128, 334_000 * 1_000_000u128, 0],
+        ] {
+            calc_add_liquidity(
+                &paired,
+                &old_balances,
+                &precision_muls,
+                lp_supply,
+                100,
+                &curve,
+            )
+            .expect("cap-compliant deposit should reduce concentration");
+        }
+
+        let stable_only = [0, 100_000 * 1_000_000u128, 0];
+        calc_add_liquidity(
+            &stable_only,
+            &old_balances,
+            &precision_muls,
+            lp_supply,
+            100,
+            &curve,
+        )
+        .expect("stable-only deposits should correct an over-cap pool");
+    }
+
+    #[test]
+    fn test_deposit_cap_handles_tiny_and_huge_normalized_values() {
+        let precision_muls = test_precision_muls();
+        let old_balances = [
+            3_000_000 * 100_000_000u128,
+            500_000 * 1_000_000u128,
+            500_000 * 1_000_000u128,
+        ];
+
+        // Native decimals differ, so one raw icUSD unit is still safely
+        // corrective when paired with one raw ckUSDT unit after normalization.
+        validate_deposit_concentration(&old_balances, &[1, 1, 0], &precision_muls)
+        .expect("tiny normalized corrective deposit should be accepted");
+
+        // U256 policy arithmetic handles values beyond u128 after decimal
+        // normalization without truncating the cap comparison.
+        let huge = [u128::MAX / 2, u128::MAX / 2, u128::MAX / 2];
+        assert!(validate_deposit_concentration(&[0; 3], &huge, &[1, 1, 1]).is_ok());
+        let curve = default_curve();
+        assert!(matches!(
+            calc_add_liquidity(&[1, 0, 0], &[u128::MAX, 0, 0], &[1, 1, 1], 1, 100, &curve),
+            Err(ThreePoolError::MathOverflow)
+        ));
+    }
+
     // ─── Task 11 tests: remove_liquidity ───
 
     #[test]
@@ -489,9 +733,9 @@ mod tests {
     /// Build an imbalanced pool: icUSD heavy, ckUSDT/ckUSDC light.
     fn imbalanced_balances() -> [u128; 3] {
         [
-            2_000_000 * 100_000_000, // 2M icUSD
-            500_000 * 1_000_000,     // 0.5M ckUSDT
-            500_000 * 1_000_000,     // 0.5M ckUSDC
+            1_800_000 * 100_000_000, // 1.8M icUSD
+            600_000 * 1_000_000,     // 0.6M ckUSDT
+            600_000 * 1_000_000,     // 0.6M ckUSDC
         ]
     }
 
@@ -563,7 +807,7 @@ mod tests {
             &old_balances, &[0u128; 3], &precision_muls, 0, amp, &curve,
         ).unwrap().lp_minted;
 
-        // Huge icUSD-only deposit: large imbalance shift.
+        // A large imbalancing deposit that remains below the concentration cap.
         let amounts = [1_000_000 * 100_000_000u128, 0, 0];
         let out = calc_add_liquidity(
             &amounts, &old_balances, &precision_muls, lp_supply, amp, &curve,

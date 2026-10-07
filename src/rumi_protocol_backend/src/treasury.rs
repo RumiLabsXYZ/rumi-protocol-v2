@@ -640,6 +640,7 @@ enum ThreePoolDonateError {
     ZeroAmount,
     PoolEmpty,
     SlippageExceeded,
+    DepositConcentrationLimitExceeded,
     TransferFailed {
         token: String,
         reason: String,

@@ -46,6 +46,7 @@ export const idlFactory = ({ IDL }) => {
       'available' : IDL.Nat,
       'required' : IDL.Nat,
     }),
+    'DepositConcentrationLimitExceeded' : IDL.Null,
   });
   const AuthorizedRedeemAndBurnArgs = IDL.Record({
     'token_amount' : IDL.Nat,
