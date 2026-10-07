@@ -381,6 +381,8 @@ pub enum ThreePoolError {
     PoolEmpty,
     /// Slippage tolerance exceeded.
     SlippageExceeded,
+    /// The deposit's normalized icUSD share exceeds the 666/1000 admission cap.
+    DepositConcentrationLimitExceeded,
     /// ICRC-1 ledger transfer failed.
     TransferFailed { token: String, reason: String },
     /// Caller is not authorized for this operation.
