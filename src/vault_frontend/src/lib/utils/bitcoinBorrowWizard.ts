@@ -1,4 +1,6 @@
 import { interpolateMultiplier } from './interpolate';
+import { collateralSequenceLockName } from './collateralSequenceLock';
+import type { InboundCollateralStatusView } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
 
 /**
  * Pure, storage/wallet-agnostic logic for the /bitcoin/borrow guided flow:
@@ -57,6 +59,10 @@ export interface BitcoinBorrowIntentRecord {
   submittedIcusdAmountRaw?: string | null;
   /** True only after the backend explicitly acknowledged vault creation with zero debt. */
   partialBorrowAcknowledged?: boolean;
+  /** Exact backend-issued Nat for the durable collateral open; never rotate on an uncertain reply. */
+  openRequestId?: string | null;
+  /** Once true, a zero-debt recheck cannot authorize another borrow submission. */
+  borrowDispatchStarted?: boolean;
 }
 
 /** Default network scope for callers that don't need to distinguish environments (e.g. tests). */
@@ -96,6 +102,8 @@ export function createInitialIntent(
     submittedIcusdAmount: null,
     submittedIcusdAmountRaw: null,
     partialBorrowAcknowledged: false,
+    openRequestId: null,
+    borrowDispatchStarted: false,
   };
 }
 
@@ -134,6 +142,8 @@ export function isValidIntentRecord(value: unknown): value is BitcoinBorrowInten
     (r.submittedIcusdAmount === null || isFiniteNumber(r.submittedIcusdAmount)) &&
     (r.submittedIcusdAmountRaw === undefined || r.submittedIcusdAmountRaw === null || isDecimalBigIntString(r.submittedIcusdAmountRaw))
     && (r.partialBorrowAcknowledged === undefined || typeof r.partialBorrowAcknowledged === 'boolean')
+    && (r.openRequestId === undefined || r.openRequestId === null || isDecimalBigIntString(r.openRequestId))
+    && (r.borrowDispatchStarted === undefined || typeof r.borrowDispatchStarted === 'boolean')
   );
 }
 
@@ -327,6 +337,7 @@ export function beginPendingAction(
     submittedIcusdAmount: updates.submittedIcusdAmount !== undefined ? updates.submittedIcusdAmount : record.submittedIcusdAmount,
     submittedIcusdAmountRaw: updates.submittedIcusdAmountRaw !== undefined ? updates.submittedIcusdAmountRaw : record.submittedIcusdAmountRaw,
     partialBorrowAcknowledged: action === 'finish_borrow' ? false : record.partialBorrowAcknowledged,
+    borrowDispatchStarted: action === 'finish_borrow' ? true : record.borrowDispatchStarted,
     updatedAt: now,
   };
 }
@@ -360,12 +371,16 @@ export function nextPendingActionForOutcome(
  * True only for backend/pre-call rejections that are provably safe to retry
  * without risking a duplicate mutation. Verified against the actual backend
  * source (src/rumi_protocol_backend/src/vault.rs): in both open_vault_and_borrow
- * and borrow_from_vault_internal, every Err-returning check happens strictly
- * before the one state-changing step in each function (the ICRC2 collateral
- * pull + vault creation, and mint_icusd, respectively) — EXCEPT the borrow
- * sub-call failing after a vault was already created, which is always
- * embedded in the vault.rs "Vault created (id=...)" GenericError text and is
- * handled separately by extractPartialFailureVaultId, never reaching here.
+ * and borrow_from_vault_internal. A dispatched borrow Err is not proof that the
+ * mint did not land: the backend may retain a durable pending-mint journal and
+ * fence the operation while reconciling its receipt. Only narrowly recognized
+ * pre-mutation errors are deterministic. A dispatched collateral-pull error
+ * cannot be marked no-effect from its variant or text alone: after an earlier
+ * ambiguous dispatch, a durable inbound journal may surface a later typed
+ * transfer error, and this client boundary has no journal terminality proof.
+ * In particular, a wrapped
+ * "Vault created (id=...)" error is partial only when its inner reason proves
+ * the borrow never reached mint dispatch.
  * A message that does NOT match one of these known backend/pre-call shapes
  * (e.g. a bare thrown network/timeout exception, where no typed answer was
  * ever received at all) defaults to false — never guess mutation didn't
@@ -380,13 +395,9 @@ export function isDeterministicNoMutationError(message: string | null): boolean 
     'minimum required', // apiClient's own pre-call min-deposit check
     'minimum borrowing amount', // apiClient's own pre-call check in borrowFromVault
     'invalid borrowing amount', // apiClient's own pre-call finite/positive check
-    'insufficient', // InsufficientAllowance / InsufficientFunds from the collateral pull, before vault creation
-    'unexpected fee', // BadFee from the collateral pull or fee-ledger step, before vault creation / mint
-    'transfer error', // mint_icusd's Err path in borrow_from_vault_internal — mint never landed
     'you must connect your wallet', // AnonymousCallerNotAllowed
     'you do not have permission', // CallerNotOwner, checked before mint_icusd
     'this operation is already in progress', // AlreadyProcessing, the very first guard check
-    'service temporarily unavailable', // StaleOperation, before any mutation
     'collateral type not supported', // GenericError, before the collateral pull
     'not accepting new vaults', // GenericError, before the collateral pull
     'native-xrp collateral uses', // GenericError, before the collateral pull
@@ -474,6 +485,39 @@ export interface OpenAndBorrowOutcome {
   message: string;
 }
 
+/** Classifies only the request-ID journal's exact Open result; vault-list similarity never attributes an open. */
+export function classifyOpenVaultV2Status(params: {
+  status: InboundCollateralStatusView | null;
+  ownerText: string;
+  ledgerText: string;
+  expectedRequestId: bigint;
+  collateralPrincipal: string;
+  expectedCollateralRaw: bigint;
+  vaults: VaultLite[];
+}): OpenAndBorrowOutcome {
+  const { status, ownerText, ledgerText, expectedRequestId, collateralPrincipal, expectedCollateralRaw, vaults } = params;
+  if (!status || status.owner.toText() !== ownerText || status.ledger.toText() !== ledgerText ||
+      status.request_id !== expectedRequestId ||
+      status.amount_raw !== expectedCollateralRaw || !('Open' in status.operation) ||
+      status.operation.Open.collateral_type.toText() !== collateralPrincipal) {
+    return { kind: 'ambiguous_pending', vaultId: null, message: 'The collateral open is not yet attributable to this request. Recheck the same request before continuing.' };
+  }
+  if ('Rejected' in status.phase) {
+    const message = status.result[0] && 'Rejected' in status.result[0] ? status.result[0].Rejected.message : status.last_error[0];
+    return { kind: 'failed', vaultId: null, message: message || 'The backend recorded this collateral request as rejected.' };
+  }
+  if (!('Complete' in status.phase) || !status.result[0] || !('Open' in status.result[0])) {
+    return { kind: 'ambiguous_pending', vaultId: null, message: status.last_error[0] || 'Collateral is still pending or held. Recheck before borrowing.' };
+  }
+  const vaultId = Number(status.result[0].Open.vault_id);
+  const vault = vaults.find((candidate) => candidate.vaultId === vaultId);
+  if (!Number.isSafeInteger(vaultId) || !vault || vault.collateralPrincipal !== collateralPrincipal ||
+      vault.collateralAmount !== expectedCollateralRaw || vault.borrowedIcusd !== 0n) {
+    return { kind: 'ambiguous_pending', vaultId, message: 'The journal confirms an open, but the exact zero-debt vault could not be verified. Recheck before borrowing.' };
+  }
+  return { kind: 'partial_zero_debt', vaultId, message: `Vault #${vaultId} is open with collateral; borrowing has not been submitted.` };
+}
+
 /** The exact raw wire amounts THIS specific attempt submitted (or is about to submit), used to require an exact debt/collateral match rather than trusting any positive number. */
 export interface ExpectedWire {
   collateralAmountRaw: bigint;
@@ -501,11 +545,11 @@ function classifyVaultAgainstExpected(vault: VaultLite, expected: ExpectedWire):
  * Classifies the outcome of the LIVE `open_vault_and_borrow` (or `borrow_from_vault` finish-step)
  * call's OWN resolution — the only place `partial_zero_debt` may ever originate, because only
  * here do we have the call's own explicit signal: either a direct vault id from a successful
- * response, or the backend's own "Vault created (id=X) but borrow of Y failed" text (an explicit
- * terminal partial acknowledgment). A LATER recheck/reconcile query — even one that finds the
- * SAME vault still at zero debt — must call classifyRecheckOutcome instead, never this function:
- * a query alone is never "explicit terminal backend partial acknowledgment," so it can confirm
- * success but must never manufacture a fresh partial_zero_debt or failed.
+ * response, or the backend's own "Vault created (id=X) but borrow of Y failed" text. The latter
+ * only permits partial recovery when the inner error independently proves mint dispatch never
+ * began; otherwise the durable journal may still be pending. A LATER recheck/reconcile query —
+ * even one that finds the SAME vault still at zero debt — must call classifyRecheckOutcome
+ * instead, never this function: a query alone cannot manufacture partial_zero_debt or failed.
  *
  * A query-only match (no attributed id from this call's own response) is accepted as evidence
  * ONLY when it is the unique new ckBTC vault at the exact expected collateral amount — an
@@ -523,8 +567,8 @@ export function classifyLiveOpenAndBorrowOutcome(params: {
 }): OpenAndBorrowOutcome {
   const { apiSuccess, apiVaultId, apiErrorMessage, vaults, beforeIds, ckbtcPrincipal, expected, apiErrorIsDeterministic = false } = params;
 
-  // The explicit partial-failure text is the strongest, most direct signal — checked first,
-  // regardless of apiSuccess (it can only appear inside an error message).
+  // The explicit vault id attributes collateral to this call, but does not by itself prove that
+  // the subsequent durable mint did not commit. Check its inner error before offering recovery.
   const partialId = apiErrorMessage ? extractPartialFailureVaultId(apiErrorMessage) : null;
   if (partialId !== null) {
     const seen = vaults.find((v) => v.vaultId === partialId) ?? null;
@@ -537,8 +581,17 @@ export function classifyLiveOpenAndBorrowOutcome(params: {
         return { kind: 'ambiguous_pending', vaultId: partialId, message: 'The vault does not exactly match the expected amount — recheck before continuing.' };
       }
     }
-    // Not yet visible (replica lag) or confirmed still zero-debt: the backend told us directly
-    // this exact vault was created by THIS call, so this is genuine explicit acknowledgment.
+    // A vault id proves collateral and the vault were created by this call, but the wrapped
+    // borrow error may leave a durable mint journal pending. Do not expose a retryable
+    // finish-borrow state unless the inner error proves mint dispatch never began.
+    if (!apiErrorIsDeterministic) {
+      return {
+        kind: 'ambiguous_pending',
+        vaultId: partialId,
+        message: `${apiErrorMessage ?? 'The vault was created, but the borrow result is unresolved.'} Recheck before trying again.`,
+      };
+    }
+    // The exact vault is attributed and the backend error is a known pre-mint rejection.
     return {
       kind: 'partial_zero_debt',
       vaultId: partialId,
@@ -554,9 +607,9 @@ export function classifyLiveOpenAndBorrowOutcome(params: {
     if (verdict === 'success') return { kind: 'success', vaultId: attributedVault.vaultId, message: 'Vault opened and icUSD borrowed.' };
     if (verdict === 'zero_debt') {
       return {
-        kind: 'partial_zero_debt',
+        kind: 'ambiguous_pending',
         vaultId: attributedVault.vaultId,
-        message: 'Your BTC collateral is locked in a vault, but the borrow step did not complete. Borrow separately to finish.',
+        message: 'The backend confirmed the borrow, but the latest vault query still shows zero debt. Recheck before trying again.',
       };
     }
     return { kind: 'ambiguous_pending', vaultId: attributedVault.vaultId, message: 'The vault does not exactly match the expected amount — recheck before continuing.' };
@@ -649,11 +702,9 @@ export interface BoundOpenAndBorrowSignal {
 
 /**
  * Adapts the shared boundary layer's typed result into classifyLiveOpenAndBorrowOutcome's
- * params. Per the boundary interface's "Coordinator acceptance clarification": 'dispatched_err'
- * (a typed Err actually returned by the canister) is now source-proven deterministic evidence —
- * vault.rs guarantees every Err-returning check runs strictly before the one state-changing step,
- * except the partial-failure shape, which classifyLiveOpenAndBorrowOutcome already detects via
- * extractPartialFailureVaultId on the (identically-formatted) error text. 'predispatch_aborted'
+ * params. A typed 'dispatched_err' is not automatically deterministic: borrow mint dispatch can
+ * leave a durable journal pending even when the update returns Err. Only narrowly recognized
+ * pre-mutation error text is deterministic. 'predispatch_aborted'
  * means the mutating call was never dispatched at all — also deterministic no-vault/no-borrow
  * mutation (though the caller must still separately disclose approvalMayHaveMutated in the
  * message, since an ICRC-2 approve is a distinct mutation this classification does not cover).
@@ -676,7 +727,8 @@ export function classifyLiveOpenAndBorrowOutcomeFromBound(params: {
     beforeIds,
     ckbtcPrincipal,
     expected,
-    apiErrorIsDeterministic: signal.kind === 'predispatch_aborted' || signal.kind === 'dispatched_err',
+    apiErrorIsDeterministic: signal.kind === 'predispatch_aborted' ||
+      (signal.kind === 'dispatched_err' && isDeterministicNoMutationError(signal.errorMessage)),
   });
 }
 
@@ -689,10 +741,9 @@ export interface BoundFinishBorrowSignal {
 
 /**
  * Adapts the shared boundary layer's typed borrow_from_vault result into
- * classifyFinishBorrowOutcome's params. Same deterministic-evidence reasoning as
- * classifyLiveOpenAndBorrowOutcomeFromBound: 'predispatch_aborted' and 'dispatched_err' are both
- * proof no borrow mutation occurred (there is no separate approval sub-step on this leg, so
- * 'predispatch_aborted' here always means nothing at all was submitted); 'ambiguous_transport'
+ * classifyFinishBorrowOutcome's params. 'predispatch_aborted' proves no borrow was submitted;
+ * a dispatched Err is deterministic only when its message matches a known pre-mutation error.
+ * 'ambiguous_transport'
  * never is.
  */
 export function classifyFinishBorrowOutcomeFromBound(params: {
@@ -706,7 +757,8 @@ export function classifyFinishBorrowOutcomeFromBound(params: {
     vaultId: signal.vaultId,
     vaultAfter,
     expectedBorrowedRaw,
-    apiErrorIsDeterministic: signal.kind === 'predispatch_aborted' || signal.kind === 'dispatched_err',
+    apiErrorIsDeterministic: signal.kind === 'predispatch_aborted' ||
+      (signal.kind === 'dispatched_err' && isDeterministicNoMutationError(signal.errorMessage)),
   });
 }
 
@@ -931,8 +983,8 @@ export interface ExclusiveLocksLike {
 }
 
 /** One lock per (principal, network/canister) pair — matches the intent's own storage-key scoping. */
-export function bitcoinBorrowActionLockName(principalText: string, networkScope: string): string {
-  return `rumi_bitcoin_borrow_action_lock_${networkScope}_${principalText}`;
+export function bitcoinBorrowActionLockName(principalText: string, networkScope: string, ledgerText: string): string {
+  return collateralSequenceLockName(principalText, networkScope, ledgerText);
 }
 
 export type ExclusiveActionResult<T> = { ran: true; result: T } | { ran: false; reason: 'locked' | 'unsupported' };

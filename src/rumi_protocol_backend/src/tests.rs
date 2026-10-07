@@ -39,6 +39,39 @@ fn exhausted_icusd_refunds_are_held_without_being_auto_retried() {
     assert!(!crate::pending_refund_is_automatically_retryable(u8::MAX));
 }
 
+#[test]
+fn retry_capped_redemption_remains_queued_and_held_for_reconciliation() {
+    let owner = Principal::from_slice(&[1]);
+    let mut pending = BTreeMap::from([(
+        77,
+        crate::state::PendingMarginTransfer {
+            vault_id: 0,
+            owner,
+            margin: ICP::new(1_000_000),
+            collateral_type: Principal::anonymous(),
+            retry_count: crate::MAX_PENDING_RETRIES,
+            op_nonce: 88,
+            ledger: None,
+            transfer_amount_raw: None,
+            redemption_transfer: None,
+            held_for_manual_retry: false,
+            reconciliation_required: false,
+            min_net_collateral_raw: None,
+        },
+    )]);
+
+    assert!(crate::hold_pending_redemption_for_reconciliation(
+        &mut pending,
+        77
+    ));
+    assert_eq!(pending.len(), 1);
+    let payout = &pending[&77];
+    assert_eq!(payout.owner, owner);
+    assert_eq!(payout.margin, ICP::new(1_000_000));
+    assert!(payout.held_for_manual_retry);
+    assert!(payout.reconciliation_required);
+}
+
 fn arb_vault() -> impl Strategy<Value = Vault> {
     (arb_principal(), any::<u64>(), arb_amount()).prop_map(|(owner, borrowed_icusd, icp_margin)| {
         Vault {

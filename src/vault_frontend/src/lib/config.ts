@@ -57,7 +57,7 @@ export const CANISTER_IDS = {
 
 /** The /points airdrop section is shown only once the rumi_points canister id
  *  is configured above. Flip on by filling RUMI_POINTS at deploy time. */
-export const POINTS_ENABLED: boolean = CANISTER_IDS.RUMI_POINTS !== "";
+export const POINTS_ENABLED: boolean = Boolean(CANISTER_IDS.RUMI_POINTS);
 
 /**
  * AMM1 (3USD/ICP) liquidity deposits are paused (2026-07-23): the pool card is

@@ -72,17 +72,21 @@ const {
 } = mocks;
 
 vi.mock('./providers/rumiAmmProvider', () => ({
-  RumiAmmProvider: vi.fn(() => mocks.rumiAmmMock),
+  RumiAmmProvider: vi.fn(class MockRumiAmmProvider {
+    constructor() { return mocks.rumiAmmMock as any; }
+  }),
 }));
 
 vi.mock('./providers/icpswapProvider', () => ({
-  IcpswapProvider: vi.fn((config: { id: string }) => {
+  IcpswapProvider: vi.fn(class MockIcpswapProvider {
+    constructor(config: { id: string }) {
     switch (config.id) {
       case 'icpswap_icusd_icp': return mocks.icpswapIcUsdMock;
       case 'icpswap_ckusdt_icusd': return mocks.stableCkusdtIcusdMock;
       case 'icpswap_icusd_ckusdc': return mocks.stableIcusdCkusdcMock;
       case 'icpswap_ckusdt_ckusdc': return mocks.stableCkusdtCkusdcMock;
       default: return mocks.icpswapMock;
+    }
     }
   }),
 }));
@@ -106,6 +110,8 @@ vi.mock('./ammService', async () => {
       getPools: vi.fn(),
       getQuote: vi.fn(),
       swap: vi.fn(),
+      assertNoUnresolvedOperation: vi.fn().mockResolvedValue(undefined),
+      swapWithPreapprovedActor: vi.fn().mockResolvedValue({ amount_out: 90n, amount_out_net: 80n }),
     },
     // approvalAmount and tokenFee are async since the live-fee migration —
     // override with deterministic stubs so swapRouter's pre-batch awaits
@@ -136,14 +142,17 @@ vi.mock('./oisySigner', () => ({
   getOisySignerAgent: vi.fn(),
   createOisyActor: vi.fn(),
 }));
-vi.mock('./pnp', () => ({ canisterIDLs: {} }));
+vi.mock('./pnp', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./pnp')>();
+  return { ...actual, canisterIDLs: {} };
+});
 vi.mock('../stores/wallet', () => ({
   walletStore: {
     // svelte/store's `get()` calls subscribe(set) and reads back synchronously,
     // so we must invoke `set` with a value. Oisy branches need a truthy
     // principal to clear the "Wallet not connected" guard.
     subscribe: (set: (v: any) => void) => {
-      set({ principal: { toText: () => 'aaaaa-aa' } });
+      set({ isConnected: true, principal: { toText: () => 'aaaaa-aa' } });
       return () => {};
     },
     // Non-Oisy ICPswap branches call walletStore.getActor to build an
@@ -285,6 +294,7 @@ function stableIcpswapQuote(
 describe('swapRouter — provider registry integration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    threePoolMock.addLiquidity.mockReset().mockResolvedValue(1_000n);
     // restore the default supports() after clearAllMocks
     rumiAmmMock.supports.mockReturnValue(true);
     icpswapMock.supports.mockReturnValue(true);
@@ -303,6 +313,72 @@ describe('swapRouter — provider registry integration', () => {
     // test that runs afterward. Re-assert the non-Oisy default explicitly,
     // same as the supports() resets above.
     isOisyWalletMock.mockReturnValue(false);
+  });
+
+  it('blocks a quoted Oisy Rumi AMM route before any pool action while AMM1 is paused', async () => {
+    isOisyWalletMock.mockReturnValue(true);
+    const events: string[] = [];
+    threePoolMock.addLiquidity.mockImplementation(async () => {
+      events.push('3pool-add');
+      return 100n;
+    });
+    const ammModule = await import('./ammService');
+    vi.mocked(ammModule.ammService.assertNoUnresolvedOperation).mockImplementationOnce(async () => {
+      events.push('amm-preflight');
+      throw new Error('A prior AMM operation is unresolved');
+    });
+    const oisySigner = await import('./oisySigner');
+    vi.mocked(oisySigner.getOisySignerAgent).mockResolvedValue({} as any);
+
+    const route: SwapRoute = {
+      type: 'stable_to_icp',
+      pathDisplay: 'stable → 3USD → ICP',
+      hops: 2,
+      estimatedOutput: 90n,
+      grossOutput: 100n,
+      feeDisplay: '0.30%',
+      poolId: 'rumi-pool-1',
+      intermediateOutput: 100n,
+      hopProviderQuote: rumiQuote(100n),
+    };
+
+    await expect(executeRoute(route, ckUsdt, icp, 1_000n, 50))
+      .rejects.toThrow('AMM1 routing is currently paused');
+
+    expect(events).toEqual([]);
+    expect(threePoolMock.addLiquidity).not.toHaveBeenCalled();
+  });
+
+  it('does not approve or dispatch a quoted Oisy Rumi AMM route while AMM1 is paused', async () => {
+    isOisyWalletMock.mockReturnValue(true);
+    threePoolMock.addLiquidity.mockResolvedValue(123n);
+    const ammModule = await import('./ammService');
+    const ammApprove = vi.fn().mockResolvedValue({ Ok: 1n });
+    const oisySigner = await import('./oisySigner');
+    vi.mocked(oisySigner.getOisySignerAgent).mockResolvedValue({} as any);
+    vi.mocked(oisySigner.createOisyActor).mockImplementation(((canisterId: string) =>
+      canisterId === 'fohh4-yyaaa-aaaap-qtkpa-cai'
+        ? { icrc2_approve: ammApprove }
+        : {}) as any);
+
+    const route: SwapRoute = {
+      type: 'stable_to_icp',
+      pathDisplay: 'stable → 3USD → ICP',
+      hops: 2,
+      estimatedOutput: 90n,
+      grossOutput: 100n,
+      feeDisplay: '0.30%',
+      poolId: 'rumi-pool-1',
+      intermediateOutput: 100n,
+      hopProviderQuote: rumiQuote(100n),
+    };
+
+    await expect(executeRoute(route, ckUsdt, icp, 1_000n, 50))
+      .rejects.toThrow('AMM1 routing is currently paused');
+
+    expect(threePoolMock.addLiquidity).not.toHaveBeenCalled();
+    expect(ammApprove).not.toHaveBeenCalled();
+    expect(ammModule.ammService.swapWithPreapprovedActor).not.toHaveBeenCalled();
   });
 
   // ──────────────────────────────────────────────────────────────
@@ -741,12 +817,11 @@ describe('swapRouter — provider registry integration', () => {
         swap: vi.fn().mockResolvedValue({ ok: 0n }),
         withdraw: vi.fn().mockResolvedValue({ ok: 2_485n }),
       };
-      const fakeThreePool = { swap: vi.fn().mockResolvedValue({ Ok: 2_280n }) };
+      threePoolMock.swap.mockResolvedValue(2_280n);
       const oisySigner = await import('./oisySigner');
       vi.mocked(oisySigner.getOisySignerAgent).mockResolvedValue(fakeSignerAgent as any);
       vi.mocked(oisySigner.createOisyActor).mockImplementation(((canisterId: string) => {
         if (canisterId === 'nqxwe-hiaaa-aaaar-qb5yq-cai') return fakeIcpswapPool;
-        if (canisterId === 'fohh4-yyaaa-aaaap-qtkpa-cai') return fakeThreePool;
         if (canisterId === 't6bor-paaaa-aaaap-qrd5q-cai') return fakeIcUsdLedger;
         return fakeIcpLedger;
       }) as any);
@@ -757,8 +832,7 @@ describe('swapRouter — provider registry integration', () => {
       expect(fakeIcpswapPool.depositFrom).toHaveBeenCalledWith(expect.objectContaining({ token: icp.ledgerId }));
       expect(fakeIcpswapPool.swap).toHaveBeenCalledWith(expect.objectContaining({ amountIn: '10000' }));
       expect(fakeIcpswapPool.withdraw).toHaveBeenCalledWith(expect.objectContaining({ token: icUsd.ledgerId }));
-      expect(fakeIcUsdLedger.icrc2_approve).toHaveBeenCalledTimes(1);
-      expect(fakeThreePool.swap).toHaveBeenCalledWith(0, ckUsdt.threePoolIndex, 2_485n, 2_390n * 9_975n / 10_000n);
+      expect(threePoolMock.swap).toHaveBeenCalledWith(0, ckUsdt.threePoolIndex, 2_485n, 2_390n * 9_975n / 10_000n);
       expect(rumiAmmMock.swap).not.toHaveBeenCalled();
       expect(out).toBe(2_280n);
     });

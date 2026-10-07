@@ -73,11 +73,12 @@ vi.mock('@dfinity/agent', async () => {
   return {
     ...actual,
     Actor: { ...actual.Actor, createActor },
-    HttpAgent: vi.fn((options: any) => ({
-      __kind: 'http-agent',
-      __identity: options.identity,
-      fetchRootKey: mocks.fetchRootKey,
-    })),
+    HttpAgent: vi.fn(class MockHttpAgent {
+      __kind = 'http-agent';
+      __identity: any;
+      fetchRootKey = mocks.fetchRootKey;
+      constructor(options: any) { this.__identity = options.identity; }
+    }),
   };
 });
 

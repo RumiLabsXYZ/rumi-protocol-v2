@@ -260,7 +260,9 @@ fn construct_collateral_types_table() -> String {
                 let total_raw = s.total_collateral_for(ct);
                 let total_debt = s.total_debt_for_collateral(ct);
                 let vault_count = s.collateral_to_vault_ids.get(ct).map_or(0, |ids| ids.len());
-                let price_str = config.last_price.map_or("N/A".to_string(), |p| format!("{:.4}", p));
+                let price_str = config
+                    .last_price
+                    .map_or("N/A".to_string(), |p| format!("{:.4}", p));
                 let ceiling_str = if config.debt_ceiling == u64::MAX {
                     "unlimited".to_string()
                 } else {

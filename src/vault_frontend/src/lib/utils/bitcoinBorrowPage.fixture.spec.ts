@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync, mount, unmount } from 'svelte';
+import { Principal } from '@dfinity/principal';
 import {
   CKBTC_LEDGER_TEXT, PRINCIPAL_A, PRINCIPAL_B, deferred, fakeCollateralInfo, fakeMinterInfo, fakeMinted,
   fakeRawVault, settle, setInputValue,
@@ -19,8 +20,9 @@ const fx = vi.hoisted(() => {
     wallet, collateral, app, derived,
     connect: vi.fn(async () => {}), disconnect: vi.fn(async () => {}), refreshBalance: vi.fn(async () => {}),
     fetchCollateral: vi.fn(async () => {}), fetchStatus: vi.fn(async () => {}), refreshAll: vi.fn(async () => {}), fetchVaults: vi.fn(async () => []),
-    open: vi.fn(async () => ({ kind: 'dispatched_err', vaultId: null, blockIndex: null, partialZeroDebtVaultId: null,
-      errorMessage: 'unset', approvalMayHaveMutated: false, submittedCollateralRaw: 0n, submittedIcusdRaw: 0n })),
+    openV2: vi.fn(async () => ({ kind: 'ambiguous_transport', status: null, errorMessage: 'unset', approvalMayHaveMutated: false })),
+    getIngressState: vi.fn(async () => ({ next_request_id: 1n, active_request: [], latest_result: [] })),
+    getIngress: vi.fn(async () => null),
     borrow: vi.fn(async () => ({})), getVaults: vi.fn(async () => []),
     getActor: vi.fn(async () => ({ get_btc_address: vi.fn(async () => 'bc1qfixtureaddress000000000000000000000000000000'), get_minter_info: vi.fn(async () => fakeMinterInfo()) })),
     update: vi.fn(async () => ({ Ok: [] })), qr: vi.fn(async () => 'data:image/png;base64,fake'),
@@ -32,7 +34,12 @@ vi.mock('$lib/stores/wallet', () => ({ walletStore: { subscribe: fx.wallet.subsc
 vi.mock('$lib/stores/collateralStore', () => ({ collateralStore: { subscribe: fx.collateral.subscribe, fetchSupportedCollateral: fx.fetchCollateral } }));
 vi.mock('$lib/stores/appDataStore', () => ({ appDataStore: { subscribe: fx.app.subscribe, fetchProtocolStatus: fx.fetchStatus, refreshAll: fx.refreshAll,
   fetchUserVaults: fx.fetchVaults }, protocolStatus: fx.derived(fx.app, (s: any) => s.protocolStatus), userVaults: fx.derived(fx.app, (s: any) => s.userVaults) }));
-vi.mock('$lib/services/protocol', () => ({ protocolService: { openVaultAndBorrowBound: fx.open, borrowFromVaultBound: fx.borrow } }));
+vi.mock('$lib/services/protocol', () => ({ protocolService: {
+  openVaultV2Bound: fx.openV2,
+  getCollateralIngressStateBound: fx.getIngressState,
+  getCollateralIngressBound: fx.getIngress,
+  borrowFromVaultBound: fx.borrow,
+} }));
 vi.mock('$lib/services/protocol/apiClient', () => ({ publicActor: { get_vaults: fx.getVaults } }));
 vi.mock('$lib/services/auth', () => ({ WALLET_TYPES: { INTERNET_IDENTITY: 'internet-identity', OISY: 'oisy' } }));
 vi.mock('$lib/services/ckbtcMinterActors', () => ({ getPublicCkbtcMinterActor: fx.getActor, updateBtcBalanceForOwner: fx.update }));
@@ -48,14 +55,33 @@ function render() { instance = mount(Page, { target: host }); flushSync(); }
 function installLocks() {
   Object.defineProperty(navigator, 'locks', { configurable: true, value: { request: async (_name: string, _opts: unknown, fn: (lock: unknown) => Promise<unknown>) => fn({}) } });
 }
+function completeOpenStatus(vaultId: number, amountRaw: bigint, requestId = 1n) {
+  return {
+    request_id: requestId,
+    owner: Principal.fromText(PRINCIPAL_A.toText()),
+    ledger: Principal.fromText(CKBTC_LEDGER_TEXT),
+    operation: { Open: { collateral_type: Principal.fromText(CKBTC_LEDGER_TEXT) } },
+    phase: { Complete: null },
+    amount_raw: amountRaw,
+    fee_raw: 10_000n,
+    memo: [],
+    created_at_time_ns: 1n,
+    candidate_block_index: [9n],
+    result: [{ Open: { vault_id: BigInt(vaultId), block_index: 9n } }],
+    had_ambiguous_attempt: false,
+    last_error: [],
+  };
+}
 function reset() {
   fx.wallet.set({ isConnected: false, principal: null, balance: null, error: null, loading: false, icon: '', tokenBalances: {} });
   fx.collateral.set({ collaterals: [fakeCollateralInfo()], loading: false, lastFetch: Date.now(), error: null });
   fx.app.set({ protocolStatus: { globalIcusdMintCap: 1_000_000, borrowingFeeCurveResolved: [] }, userVaults: [] });
-  for (const fn of [fx.connect, fx.disconnect, fx.refreshBalance, fx.fetchCollateral, fx.fetchStatus, fx.refreshAll, fx.fetchVaults, fx.open, fx.borrow, fx.getVaults, fx.getActor, fx.update, fx.qr]) fn.mockReset();
+  for (const fn of [fx.connect, fx.disconnect, fx.refreshBalance, fx.fetchCollateral, fx.fetchStatus, fx.refreshAll, fx.fetchVaults, fx.openV2, fx.getIngressState, fx.getIngress, fx.borrow, fx.getVaults, fx.getActor, fx.update, fx.qr]) fn.mockReset();
   fx.connect.mockResolvedValue(undefined); fx.refreshBalance.mockResolvedValue(undefined); fx.fetchCollateral.mockResolvedValue(undefined);
   fx.fetchStatus.mockResolvedValue(undefined); fx.refreshAll.mockResolvedValue(undefined); fx.fetchVaults.mockResolvedValue([]); fx.getVaults.mockResolvedValue([]);
-  fx.open.mockResolvedValue({ kind: 'dispatched_err', vaultId: null, blockIndex: null, partialZeroDebtVaultId: null, errorMessage: 'uncertain', approvalMayHaveMutated: true, submittedCollateralRaw: 0n, submittedIcusdRaw: 0n });
+  fx.openV2.mockResolvedValue({ kind: 'ambiguous_transport', status: null, errorMessage: 'uncertain', approvalMayHaveMutated: true });
+  fx.getIngressState.mockResolvedValue({ next_request_id: 1n, active_request: [], latest_result: [] });
+  fx.getIngress.mockResolvedValue(null);
   fx.getActor.mockResolvedValue({ get_btc_address: vi.fn(async () => 'bc1qfixtureaddress000000000000000000000000000000'), get_minter_info: vi.fn(async () => fakeMinterInfo()) });
   fx.update.mockResolvedValue({ Ok: [] }); fx.qr.mockResolvedValue('data:image/png;base64,fake');
   localStorage.clear(); installLocks();
@@ -77,7 +103,7 @@ describe('/bitcoin/borrow mounted boundary', () => {
 
   it('uses the public ckBTC minter address/info boundary with the connected owner and displays four confirmations', async () => {
     connect();
-    const getAddress = vi.fn(async (account: unknown) => { expect(account).toEqual({ owner: [PRINCIPAL_A], subaccount: [] }); return 'bc1qfixtureaddress000000000000000000000000000000'; });
+    const getAddress = vi.fn(async (account?: unknown) => { expect(account).toEqual({ owner: [PRINCIPAL_A], subaccount: [] }); return 'bc1qfixtureaddress000000000000000000000000000000'; });
     fx.getActor.mockResolvedValue({ get_btc_address: getAddress, get_minter_info: vi.fn(async () => ({ min_confirmations: 4, deposit_btc_min_amount: [10_000n], retrieve_btc_min_amount: 10_000n })) });
     render(); await settle();
     button('Continue with this loan')!.click(); await settle();
@@ -88,41 +114,55 @@ describe('/bitcoin/borrow mounted boundary', () => {
     expect(fx.update).not.toHaveBeenCalled();
   });
 
-  it('passes exact minted satoshi minus two ledger fees and exact icUSD e8s to the bound open call', async () => {
+  it('opens with exact ckBTC raw amount, then borrows only after a separate explicit click', async () => {
     connect();
     fx.getActor.mockResolvedValue({ get_btc_address: vi.fn(async () => 'bc1qfixtureaddress000000000000000000000000000000'), get_minter_info: vi.fn(async () => fakeMinterInfo()) });
     fx.update.mockResolvedValue(fakeMinted(1_000_000n, 77n) as any);
-    fx.getVaults.mockResolvedValueOnce([] as any).mockResolvedValueOnce([fakeRawVault(41, 999_980n, 5_000_000_000n)] as any);
-    fx.open.mockResolvedValue({ kind: 'dispatched_ok', vaultId: 41, blockIndex: 9, partialZeroDebtVaultId: null, errorMessage: null,
-      approvalMayHaveMutated: true, submittedCollateralRaw: 999_980n, submittedIcusdRaw: 5_000_000_000n } as any);
+    fx.getVaults.mockResolvedValueOnce([] as any)
+      .mockResolvedValueOnce([] as any)
+      .mockResolvedValueOnce([fakeRawVault(41, 999_980n, 0n)] as any)
+      .mockResolvedValueOnce([fakeRawVault(41, 999_980n, 0n)] as any)
+      .mockResolvedValueOnce([fakeRawVault(41, 999_980n, 5_000_000_000n)] as any);
+    fx.openV2.mockResolvedValue({ kind: 'dispatched_ok', status: completeOpenStatus(41, 999_980n), errorMessage: null,
+      approvalMayHaveMutated: true } as any);
     render(); await settle(); button('Continue with this loan')!.click(); await settle();
     button('I sent the BTC')!.click(); await settle();
     expect(fx.update).toHaveBeenCalledWith(PRINCIPAL_A, expect.any(Function));
     expect(host.textContent).toContain('Minted 0.01 BTC worth of ckBTC');
     button('Continue to confirm borrow')!.click(); await settle();
-    const confirm = button('Confirm and borrow'); expect(confirm).toBeTruthy();
+    const confirm = button('Confirm and open vault'); expect(confirm).toBeTruthy();
     confirm!.click(); await settle();
-    expect(fx.open).toHaveBeenCalledTimes(1);
-    const [, satoshi, rawDebt, collateralPrincipal] = fx.open.mock.calls[0] as unknown as [unknown, bigint, bigint, string];
+    expect(fx.openV2).toHaveBeenCalledTimes(1);
+    expect(fx.borrow).not.toHaveBeenCalled();
+    const [, requestId, satoshi, collateralPrincipal] = fx.openV2.mock.calls[0] as unknown as [unknown, bigint, bigint, string];
+    expect(requestId).toBe(1n);
     expect(satoshi).toBe(999_980n);
-    expect(rawDebt).toBe(5_000_000_000n);
     expect(collateralPrincipal).toBe(CKBTC_LEDGER_TEXT);
     expect(host.textContent).toContain('Vault #41');
+    const borrow = button('Finish borrowing 50 icUSD'); expect(borrow).toBeTruthy();
+    fx.borrow.mockResolvedValue({ kind: 'dispatched_ok', vaultId: 41, blockIndex: 10, feePaidRaw: 1n,
+      errorMessage: null, submittedIcusdRaw: 5_000_000_000n } as any);
+    borrow!.click(); await settle();
+    expect(fx.borrow).toHaveBeenCalledWith(expect.anything(), 41, 5_000_000_000n);
+    expect(host.textContent).toContain('Vault #41 opened');
+    expect(host.textContent).toContain('Debt on the vault is');
   });
 
   it('does not redispatch after an ambiguous open response and retains its principal-scoped pending intent', async () => {
     connect();
     fx.getActor.mockResolvedValue({ get_btc_address: vi.fn(async () => 'bc1qfixtureaddress000000000000000000000000000000'), get_minter_info: vi.fn(async () => fakeMinterInfo()) });
     fx.update.mockResolvedValue(fakeMinted(1_000_000n, 88n) as any);
-    fx.open.mockResolvedValue({ kind: 'ambiguous_transport', vaultId: null, blockIndex: null, partialZeroDebtVaultId: null,
-      errorMessage: 'response lost', approvalMayHaveMutated: true, submittedCollateralRaw: 999_980n, submittedIcusdRaw: 5_000_000_000n });
+    fx.openV2.mockResolvedValue({ kind: 'ambiguous_transport', status: null,
+      errorMessage: 'response lost', approvalMayHaveMutated: true });
     render(); await settle(); button('Continue with this loan')!.click(); await settle(); button('I sent the BTC')!.click(); await settle();
-    button('Continue to confirm borrow')!.click(); await settle(); button('Confirm and borrow')!.click(); await settle();
-    expect(fx.open).toHaveBeenCalledTimes(1);
+    button('Continue to confirm borrow')!.click(); await settle(); button('Confirm and open vault')!.click(); await settle();
+    expect(fx.openV2).toHaveBeenCalledTimes(1);
     const entries = Object.keys(localStorage).filter((key) => key.includes(PRINCIPAL_A.toText()));
     expect(entries).toHaveLength(1);
     expect(JSON.parse(localStorage.getItem(entries[0])!).pendingAction).toBe('open_and_borrow');
-    expect(button('Confirm and borrow')).toBeNull();
+    expect(JSON.parse(localStorage.getItem(entries[0])!).openRequestId).toBe('1');
+    expect(button('Confirm and open vault')).toBeNull();
+    expect(fx.borrow).not.toHaveBeenCalled();
     expect(host.textContent).toMatch(/uncertain|recheck|check/i);
   });
 
@@ -148,9 +188,10 @@ describe('/bitcoin/borrow mounted boundary', () => {
     connect(PRINCIPAL_A, { ckBTC: { raw: walletBalance, formatted: '0.02', usdValue: 1200 } });
     fx.getActor.mockResolvedValue({ get_btc_address: vi.fn(async () => 'bc1qfixtureaddress000000000000000000000000000000'), get_minter_info: vi.fn(async () => fakeMinterInfo()) });
     fx.update.mockResolvedValue({ Err: { NoNewUtxos: { current_confirmations: [0], required_confirmations: 4, pending_utxos: [[]] } } } as any);
-    fx.getVaults.mockResolvedValueOnce([] as any).mockResolvedValueOnce([fakeRawVault(62, 1_999_980n, 5_000_000_000n)] as any);
-    fx.open.mockResolvedValue({ kind: 'dispatched_ok', vaultId: 62, blockIndex: 10, partialZeroDebtVaultId: null, errorMessage: null,
-      approvalMayHaveMutated: true, submittedCollateralRaw: 1_999_980n, submittedIcusdRaw: 5_000_000_000n } as any);
+    fx.getVaults.mockResolvedValueOnce([] as any).mockResolvedValueOnce([] as any)
+      .mockResolvedValueOnce([fakeRawVault(62, 1_999_980n, 0n)] as any);
+    fx.openV2.mockResolvedValue({ kind: 'dispatched_ok', status: completeOpenStatus(62, 1_999_980n), errorMessage: null,
+      approvalMayHaveMutated: true } as any);
     render(); await settle(); button('Continue with this loan')!.click(); await settle();
     button('I sent the BTC')!.click(); await settle();
     expect(host.textContent).not.toContain('Collateral ready for borrowing:');
@@ -160,30 +201,31 @@ describe('/bitcoin/borrow mounted boundary', () => {
     expect(host.textContent).toContain('0.0199998 ckBTC');
     button('Continue to confirm borrow')!.click(); await settle();
     const ack = button('I see the updated terms, continue'); if (ack) { ack.click(); await settle(); }
-    button('Confirm and borrow')!.click(); await settle();
-    expect(fx.open).toHaveBeenCalledTimes(1);
-    const [, submittedCollateral] = fx.open.mock.calls[0] as unknown as [unknown, bigint];
+    button('Confirm and open vault')!.click(); await settle();
+    expect(fx.openV2).toHaveBeenCalledTimes(1);
+    const [, , submittedCollateral] = fx.openV2.mock.calls[0] as unknown as [unknown, bigint, bigint];
     expect(submittedCollateral).toBe(walletBalance - 20n);
   });
 
-  it('reconciles an explicitly reported zero-debt vault without reopening it', async () => {
+  it('keeps a zero-debt vault ambiguous when the borrow error does not prove mint dispatch was skipped', async () => {
     connect();
     fx.getActor.mockResolvedValue({ get_btc_address: vi.fn(async () => 'bc1qfixtureaddress000000000000000000000000000000'), get_minter_info: vi.fn(async () => fakeMinterInfo()) });
     fx.update.mockResolvedValue(fakeMinted(1_000_000n, 99n) as any);
-    fx.getVaults.mockResolvedValueOnce([] as any).mockResolvedValueOnce([fakeRawVault(53, 999_980n, 0n)] as any);
-    fx.open.mockResolvedValue({ kind: 'dispatched_err', vaultId: null, blockIndex: null, partialZeroDebtVaultId: null,
-      errorMessage: 'Vault created (id=53) but borrow failed', approvalMayHaveMutated: true,
-      submittedCollateralRaw: 999_980n, submittedIcusdRaw: 5_000_000_000n } as any);
+    fx.getVaults.mockResolvedValueOnce([] as any).mockResolvedValueOnce([] as any)
+      .mockResolvedValueOnce([fakeRawVault(53, 999_980n, 0n)] as any);
+    fx.openV2.mockResolvedValue({ kind: 'ambiguous_transport', status: null,
+      errorMessage: 'response lost', approvalMayHaveMutated: true } as any);
     render(); await settle(); button('Continue with this loan')!.click(); await settle();
     button('I sent the BTC')!.click(); await settle(); button('Continue to confirm borrow')!.click(); await settle();
-    button('Confirm and borrow')!.click(); await settle();
-    expect(fx.open).toHaveBeenCalledTimes(1);
-    expect(host.textContent).toMatch(/vault #53/i);
-    expect(host.textContent).toMatch(/borrow separately|zero debt|finish borrowing/i);
+    button('Confirm and open vault')!.click(); await settle();
+    expect(fx.openV2).toHaveBeenCalledTimes(1);
+    expect(host.textContent).toMatch(/recheck|uncertain|confirm/i);
     const persisted = Object.values(localStorage).map((raw) => JSON.parse(String(raw))).find((r: any) => r?.principal === PRINCIPAL_A.toText());
-    expect(persisted.vaultId).toBe(53);
-    expect(persisted.pendingAction).toBe('finish_borrow');
-    expect(persisted.partialBorrowAcknowledged).toBe(true);
+    expect(persisted.vaultId).toBeNull();
+    expect(persisted.pendingAction).toBe('open_and_borrow');
+    expect(persisted.partialBorrowAcknowledged).toBe(false);
+    expect(button('Finish borrowing')).toBeNull();
+    expect(fx.borrow).not.toHaveBeenCalled();
   });
 
   it('does not commit a delayed minter address or QR result after page teardown', async () => {

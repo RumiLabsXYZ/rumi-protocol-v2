@@ -12,7 +12,7 @@
 //     first time on the new wasm (one-shot drain from the legacy blob) or
 //     subsequent times (load `SlimState` from its cell).
 //
-// Memory ID layout (29 IDs used; 255 available):
+// Memory ID layout (32 IDs used; 255 available):
 //
 //   0       SlimState cell              — bounded residual heap
 //   1       lp_balances                 — BTreeMap<Principal, u128>
@@ -32,10 +32,13 @@
 //   22      swap_receipts_v1            — bounded caller-scoped active attempts
 //   23      swap_receipt_fence          — durable reserve mutation fence
 //   24      swap_receipt_clients        — bounded admin-managed capability set
-//   25      pending_payouts              — exact idempotency tuples for claims
-//   26      ingress_receipts             — caller-scoped durable input operations
-//   27      intent_high_water            — persistent per-caller replay floor
-//   28      donation_receipts            — permanent backend donation dedup receipts
+//   25      three_pool_donation_receipts — permanent backend donation receipts
+//   26      pending_payouts              — exact idempotency tuples for claims
+//   27      ingress_receipts             — caller-scoped durable input operations
+//   28      intent_high_water            — per-owner intent monotonicity
+//   29      lp_transfer_dedup            — ICRC-1/2 transfer retry identities
+//   30      lp_transfer_dedup_cutover    — first-upgrade timestamp for legacy retries
+//   31      lp_transfer_dedup_expiry     — ordered expiry index for retry identities
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -94,6 +97,9 @@ const MEM_THREE_POOL_DONATION_RECEIPTS: MemoryId = MemoryId::new(25);
 const MEM_PENDING_PAYOUTS: MemoryId = MemoryId::new(26);
 const MEM_INGRESS_RECEIPTS: MemoryId = MemoryId::new(27);
 const MEM_INTENT_HIGH_WATER: MemoryId = MemoryId::new(28);
+const MEM_LP_TRANSFER_DEDUP: MemoryId = MemoryId::new(29);
+const MEM_LP_TRANSFER_DEDUP_CUTOVER: MemoryId = MemoryId::new(30);
+const MEM_LP_TRANSFER_DEDUP_EXPIRY: MemoryId = MemoryId::new(31);
 pub(crate) const MAX_INTENT_OWNERS: u64 = 100_000;
 
 // ─── SlimState ───────────────────────────────────────────────────────────────
@@ -274,6 +280,127 @@ impl Storable for StorableHash {
     };
 }
 
+/// Original transfer timestamp and block for an exact ICRC-1/2 retry.
+/// Stable storage preserves the dedup window across canister upgrades.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LpTransferDedupEntry {
+    pub created_at_time: u64,
+    pub block_index: u64,
+}
+
+/// Expiry-ordered secondary key for bounded stable retry pruning.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct LpTransferExpiryKey {
+    pub expires_at: u64,
+    pub hash: StorableHash,
+}
+
+impl Storable for LpTransferExpiryKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut bytes = [0u8; 40];
+        bytes[..8].copy_from_slice(&self.expires_at.to_le_bytes());
+        bytes[8..].copy_from_slice(&self.hash.0);
+        Cow::Owned(bytes.to_vec())
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let raw: &[u8; 40] = bytes.as_ref().try_into().expect("invalid LP dedup expiry key");
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&raw[8..]);
+        Self {
+            expires_at: u64::from_le_bytes(raw[..8].try_into().unwrap()),
+            hash: StorableHash(hash),
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 40,
+        is_fixed_size: true,
+    };
+}
+
+#[cfg(test)]
+mod lp_transfer_dedup_storage_tests {
+    use super::{
+        LpTransferDedupEntry, LpTransferExpiryKey, StorableHash, StorableU128, Unit,
+    };
+    use ic_stable_structures::{StableBTreeMap, StableCell, VectorMemory};
+
+    #[test]
+    fn exact_transfer_identity_and_block_survive_map_reinitialization() {
+        let memory = VectorMemory::default();
+        let identity = StorableHash([0x5a; 32]);
+        let original = LpTransferDedupEntry {
+            created_at_time: 1_700_000_000_000_000_000,
+            block_index: 1234,
+        };
+        {
+            let mut first: StableBTreeMap<StorableHash, LpTransferDedupEntry, _> =
+                StableBTreeMap::init(memory.clone());
+            first.insert(identity, original);
+        }
+        let reopened: StableBTreeMap<StorableHash, LpTransferDedupEntry, _> =
+            StableBTreeMap::init(memory);
+        assert_eq!(reopened.get(&identity), Some(original));
+    }
+
+    #[test]
+    fn legacy_dedup_cutover_survives_cell_reinitialization() {
+        let memory = VectorMemory::default();
+        let cutover_ns = 1_700_000_000_000_000_000u64;
+        {
+            let mut first = StableCell::init(memory.clone(), StorableU128(0)).unwrap();
+            first.set(StorableU128(cutover_ns as u128)).unwrap();
+        }
+        let reopened = StableCell::init(memory, StorableU128(0)).unwrap();
+        assert_eq!(reopened.get(), &StorableU128(cutover_ns as u128));
+    }
+
+    #[test]
+    fn expiry_index_order_and_keys_survive_map_reinitialization() {
+        let memory = VectorMemory::default();
+        let early = LpTransferExpiryKey {
+            expires_at: 100,
+            hash: StorableHash([1; 32]),
+        };
+        let late = LpTransferExpiryKey {
+            expires_at: 200,
+            hash: StorableHash([2; 32]),
+        };
+        {
+            let mut first: StableBTreeMap<LpTransferExpiryKey, Unit, _> =
+                StableBTreeMap::init(memory.clone());
+            first.insert(late, Unit);
+            first.insert(early, Unit);
+        }
+        let reopened: StableBTreeMap<LpTransferExpiryKey, Unit, _> =
+            StableBTreeMap::init(memory);
+        assert_eq!(reopened.iter().next().map(|(key, _)| key), Some(early));
+    }
+}
+
+impl Storable for LpTransferDedupEntry {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&self.created_at_time.to_le_bytes());
+        bytes[8..].copy_from_slice(&self.block_index.to_le_bytes());
+        Cow::Owned(bytes.to_vec())
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let raw: &[u8; 16] = bytes.as_ref().try_into().expect("invalid LP dedup entry");
+        Self {
+            created_at_time: u64::from_le_bytes(raw[..8].try_into().unwrap()),
+            block_index: u64::from_le_bytes(raw[8..].try_into().unwrap()),
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 16,
+        is_fixed_size: true,
+    };
+}
+
 /// Empty marker for set-style BTreeMaps (`BTreeMap<K, ()>` isn't supported
 /// directly because `()` would need a Storable impl we don't control).
 #[derive(Clone, Copy, Debug, Default)]
@@ -347,6 +474,17 @@ thread_local! {
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_INGRESS_RECEIPTS))));
     pub(crate) static INTENT_HIGH_WATER: RefCell<StableBTreeMap<StorablePrincipal, StorableU128, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_INTENT_HIGH_WATER))));
+    pub(crate) static LP_TRANSFER_DEDUP: RefCell<StableBTreeMap<StorableHash, LpTransferDedupEntry, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_LP_TRANSFER_DEDUP))));
+    pub(crate) static LP_TRANSFER_DEDUP_EXPIRY: RefCell<StableBTreeMap<LpTransferExpiryKey, Unit, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_LP_TRANSFER_DEDUP_EXPIRY))));
+    pub(crate) static LP_TRANSFER_DEDUP_CUTOVER: RefCell<StableCell<StorableU128, Memory>> = RefCell::new(
+        StableCell::init(
+            MM.with(|m| m.borrow().get(MEM_LP_TRANSFER_DEDUP_CUTOVER)),
+            StorableU128(0),
+        )
+        .expect("init LP transfer dedup cutover cell"),
+    );
     pub(crate) static SWAP_RECEIPT_FENCE: RefCell<StableCell<u8, Memory>> = RefCell::new(
         StableCell::init(MM.with(|m| m.borrow().get(MEM_SWAP_RECEIPT_FENCE)), 0)
             .expect("init swap receipt fence"));
@@ -452,6 +590,28 @@ thread_local! {
     /// entry and are intentionally held rather than blindly retried.
     pub(crate) static PENDING_PAYOUTS: RefCell<StableBTreeMap<StorableU128, crate::transfers::PendingPayoutState, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_PENDING_PAYOUTS))));
+}
+
+/// Record the first post-upgrade time at which the stable LP transfer dedup
+/// map exists. Zero is reserved as the uninitialized sentinel (IC time is
+/// nonzero); later upgrades preserve the original value.
+pub(crate) fn initialize_lp_transfer_dedup_cutover(now_ns: u64) {
+    LP_TRANSFER_DEDUP_CUTOVER.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if cell.get().0 == 0 {
+            cell.set(StorableU128(u128::from(now_ns.max(1))))
+                .expect("write LP transfer dedup cutover");
+        }
+    });
+}
+
+/// Timestamp before which retry identities may have existed only in the old
+/// heap map and therefore cannot be proven duplicate after an upgrade.
+pub(crate) fn lp_transfer_dedup_cutover() -> Option<u64> {
+    LP_TRANSFER_DEDUP_CUTOVER.with(|cell| {
+        let value = cell.borrow().get().0;
+        (value != 0).then(|| u64::try_from(value).expect("cutover timestamp fits u64"))
+    })
 }
 
 // ─── Public API: SlimState cell ──────────────────────────────────────────────

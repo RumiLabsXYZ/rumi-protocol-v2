@@ -5,8 +5,7 @@
 
 use super::config::{
     BurnProofAdmissionMode, ChainAdminError, ChainConfigV3, ChainId, ChainStatus, GasStrategy,
-    RegisterChainArg,
-    UpdateChainConfigArg,
+    RegisterChainArg, UpdateChainConfigArg,
 };
 use super::multi_chain_state::MultiChainState;
 use super::settlement_queue::SettlementQueueV1;
@@ -101,7 +100,8 @@ pub fn register_chain_in_state(
         min_quorum_providers: arg.min_quorum_providers,
     };
     state.chain_configs.insert(arg.chain_id, cfg.clone());
-    state.burn_proof_admission_mode_by_chain
+    state
+        .burn_proof_admission_mode_by_chain
         .insert(arg.chain_id, BurnProofAdmissionMode::OperatorOnly);
     state.chain_supplies.insert(arg.chain_id, 0);
     state

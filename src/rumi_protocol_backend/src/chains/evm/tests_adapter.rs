@@ -18,12 +18,18 @@ fn adapter_is_trait_object_safe() {
 
 #[test]
 fn burn_topic0_matches_canonical_signature() {
-    let expected = format!("0x{}", hex::encode(Keccak256::digest(b"Burn(uint256,address,uint256)")));
+    let expected = format!(
+        "0x{}",
+        hex::encode(Keccak256::digest(b"Burn(uint256,address,uint256)"))
+    );
     assert_eq!(BURN_EVENT_TOPIC0.to_lowercase(), expected);
 }
 
 #[test]
 fn mint_topic0_matches_canonical_signature() {
-    let expected = format!("0x{}", hex::encode(Keccak256::digest(b"Mint(uint256,address,uint256)")));
+    let expected = format!(
+        "0x{}",
+        hex::encode(Keccak256::digest(b"Mint(uint256,address,uint256)"))
+    );
     assert_eq!(MINT_EVENT_TOPIC0.to_lowercase(), expected);
 }

@@ -128,12 +128,11 @@ pub struct Icrc3Block {
 ///
 /// Each role's subaccount is stored alongside the principal so the ICRC-3
 /// block encoding can emit the full `[owner, subaccount]` Account shape
-/// required by external verifiers (e.g. the protocol_backend's SP writedown
-/// proof verification path). Subaccount fields are `Option<Vec<u8>>` and use
-/// `#[serde(default)]` so blocks written before this change still decode
-/// (their subaccount fields are `None`, and the encoder falls back to the
-/// legacy `[owner]`-only encoding for those blocks — preserving the existing
-/// ICRC-3 hash chain).
+/// required by external verifiers. Transfer and approval records also retain
+/// optional memo, creation-time, and transaction-fee metadata for exact
+/// receipt proofs. All added fields use `#[serde(default)]`; historical
+/// blocks decode with `None`, and the encoder omits absent fields so their
+/// original ICRC-3 hash preimages remain unchanged.
 ///
 /// Note: the 3pool's per-balance bookkeeping is still keyed by `Principal`
 /// only (subaccounts are accepted on the API surface but ignored for balance
@@ -165,6 +164,18 @@ pub enum Icrc3Transaction {
         to_subaccount: Option<Vec<u8>>,
         #[serde(default)]
         spender_subaccount: Option<Vec<u8>>,
+        /// Transaction memo. `None` on historical blocks preserves their
+        /// original ICRC-3 encoding and hash.
+        #[serde(default)]
+        memo: Option<Vec<u8>>,
+        /// Caller-supplied ICRC dedup timestamp, distinct from block `ts`.
+        /// `None` on historical blocks preserves their original encoding.
+        #[serde(default)]
+        created_at_time: Option<u64>,
+        /// Actual transaction fee evidence. ICRC-1 transfers record the
+        /// effective zero fee; ICRC-2 records the explicitly supplied fee.
+        #[serde(default)]
+        transaction_fee: Option<u128>,
     },
     Approve {
         from: Principal,
@@ -175,6 +186,18 @@ pub enum Icrc3Transaction {
         from_subaccount: Option<Vec<u8>>,
         #[serde(default)]
         spender_subaccount: Option<Vec<u8>>,
+        /// Transaction memo. `None` on historical blocks preserves their
+        /// original ICRC-3 encoding and hash.
+        #[serde(default)]
+        memo: Option<Vec<u8>>,
+        /// Caller-supplied ICRC dedup timestamp, distinct from block `ts`.
+        /// `None` on historical blocks preserves their original encoding.
+        #[serde(default)]
+        created_at_time: Option<u64>,
+        /// Explicit approval fee. The top-level block fee remains present for
+        /// all blocks; this field is absent when the caller omitted the fee.
+        #[serde(default)]
+        transaction_fee: Option<u128>,
     },
 }
 

@@ -69,13 +69,18 @@ fn recovers_eth_account_golden_signature() {
 
 #[test]
 fn round_trip_sign_and_recover_with_k256() {
-    use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, SigningKey, VerifyingKey};
+    use k256::ecdsa::{
+        signature::hazmat::PrehashSigner, RecoveryId, Signature, SigningKey, VerifyingKey,
+    };
     use k256::elliptic_curve::sec1::ToEncodedPoint;
     let mut b = [0u8; 32];
     b[31] = 1;
     let sk = SigningKey::from_bytes(&b.into()).unwrap();
     let addr = crate::chains::evm::tecdsa::evm_address_from_pubkey(
-        &VerifyingKey::from(&sk).to_encoded_point(false).as_bytes().to_vec(),
+        &VerifyingKey::from(&sk)
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec(),
     )
     .unwrap();
     let dsep = domain_separator(71, GOLDEN_CONTRACT).unwrap();
@@ -148,7 +153,10 @@ fn synthetic_owner_is_opaque_deterministic_and_distinct() {
     let bytes = p1.as_slice();
     assert_eq!(bytes.len(), 29);
     assert_eq!(bytes[28], 0x01, "opaque class tag");
-    assert_ne!(bytes[28], 0x02, "must never be a self-authenticating principal");
+    assert_ne!(
+        bytes[28], 0x02,
+        "must never be a self-authenticating principal"
+    );
     // Distinct per chain (same address on Monad differs).
     assert_ne!(p1, synthetic_owner(ChainId(10143), GOLDEN_OWNER).unwrap());
 }
@@ -178,7 +186,10 @@ fn verify_intent_happy_path_returns_owner_and_synthetic() {
     let (owner, synthetic) =
         verify_intent(&intent, &sig, IntentAction::Open, GOLDEN_CONTRACT, 1000).unwrap();
     assert_eq!(owner, GOLDEN_OWNER);
-    assert_eq!(synthetic, synthetic_owner(ChainId(71), GOLDEN_OWNER).unwrap());
+    assert_eq!(
+        synthetic,
+        synthetic_owner(ChainId(71), GOLDEN_OWNER).unwrap()
+    );
 }
 
 #[test]
@@ -259,9 +270,8 @@ fn verify_intent_rejects_chain_id_above_u32() {
 /// signature-malleability companion `(r, n - s, flipped v)` of a valid
 /// signature `(r, s, v)`.
 const SECP256K1_ORDER: [u8; 32] = [
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36,
-    0x41, 0x41,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+    0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
 ];
 
 /// `n - s`, exact for any `0 < s < n` (true of any `s` a real ECDSA signature
@@ -374,7 +384,13 @@ fn high_s_malleated_signature_is_rejected_and_nonce_replay_is_independently_bloc
     // the malleated form too, for the same reason: it never gets past the
     // ecrecover step to reach the signer-match check.
     assert!(matches!(
-        verify_intent(&intent, &malleated_sig65, IntentAction::Open, GOLDEN_CONTRACT, 1000),
+        verify_intent(
+            &intent,
+            &malleated_sig65,
+            IntentAction::Open,
+            GOLDEN_CONTRACT,
+            1000
+        ),
         Err(VerifyError::Recover(_))
     ));
 
@@ -383,9 +399,14 @@ fn high_s_malleated_signature_is_rejected_and_nonce_replay_is_independently_bloc
     //    change ever relaxed part 1's high-S rejection. Consuming a nonce
     //    twice (same owner, same nonce) is rejected regardless of which
     //    signature carried the first submission.
-    let (_owner, synthetic) =
-        verify_intent(&intent, &original_sig65, IntentAction::Open, GOLDEN_CONTRACT, 1000)
-            .expect("original signature verifies");
+    let (_owner, synthetic) = verify_intent(
+        &intent,
+        &original_sig65,
+        IntentAction::Open,
+        GOLDEN_CONTRACT,
+        1000,
+    )
+    .expect("original signature verifies");
     let mut state = crate::chains::multi_chain_state::MultiChainState::default();
     state
         .consume_evm_nonce(&synthetic, intent.nonce)

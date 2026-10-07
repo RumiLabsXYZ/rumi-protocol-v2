@@ -79,7 +79,10 @@ pub fn hot_wallet_ok(balance_e18: u128) -> bool {
 
 /// Bump EIP-1559 fees by 25% (EVM RBF floor is +10%; 25% is a safe margin).
 pub fn bump_gas(prio: u128, max_fee: u128) -> (u128, u128) {
-    (prio.saturating_mul(125) / 100, max_fee.saturating_mul(125) / 100)
+    (
+        prio.saturating_mul(125) / 100,
+        max_fee.saturating_mul(125) / 100,
+    )
 }
 
 // ─── Inflight guard self-heal ────────────────────────────────────────────────

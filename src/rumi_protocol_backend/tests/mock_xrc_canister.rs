@@ -1,5 +1,5 @@
-use candid::{CandidType, Deserialize, Principal, encode_one};
-use ic_xrc_types::{Asset, AssetClass, GetExchangeRateRequest, ExchangeRate};
+use candid::{encode_one, CandidType, Deserialize, Principal};
+use ic_xrc_types::{Asset, AssetClass, ExchangeRate, GetExchangeRateRequest};
 use std::collections::HashMap;
 
 /// A simple mock implementation for the XRC canister
@@ -31,15 +31,15 @@ impl MockXRC {
         let base_symbol = req.base_asset.symbol.to_uppercase();
         let quote_symbol = req.quote_asset.symbol.to_uppercase();
         let key = format!("{}/{}", base_symbol, quote_symbol);
-        
+
         // Default timestamp is now
-        let timestamp = req.timestamp.unwrap_or_else(|| 
+        let timestamp = req.timestamp.unwrap_or_else(|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs()
-        );
-        
+        });
+
         if let Some(rate) = self.rates.get(&key) {
             // Return successful result
             Ok(ExchangeRate {
@@ -68,10 +68,10 @@ impl MockXRC {
 pub fn prepare_mock_xrc() -> Vec<u8> {
     // Create a default mock with predefined rates
     let mut mock = MockXRC::default();
-    
+
     // Use a higher rate for ICP to ensure sufficient collateral
     mock.set_rate("ICP", "USD", 1000000000); // $10.00
-    
+
     // Encode for canister installation
     match encode_one(mock) {
         Ok(bytes) => bytes,

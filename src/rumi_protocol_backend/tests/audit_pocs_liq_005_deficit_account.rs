@@ -437,10 +437,42 @@ fn liq_005_admin_event_set_readonly_threshold_round_trip() {
     let e = Event::SetDeficitReadonlyThresholdE8s {
         threshold_e8s: 1_000_000_000,
         timestamp: 1_001,
+        clear_latched_threshold_e8s: None,
     };
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&e, &mut bytes).expect("encode");
     let decoded: Event =
         ciborium::de::from_reader(bytes.as_slice()).expect("decode");
     assert_eq!(decoded, e);
+}
+
+#[test]
+fn liq_005_legacy_threshold_event_decodes_without_clear_field() {
+    // Historical event-log records predate the optional clear marker. Decode
+    // the exact old externally-tagged serde shape to protect replay upgrades.
+    let legacy = ciborium::Value::Map(vec![(
+        ciborium::Value::Text("set_deficit_readonly_threshold_e8s".to_string()),
+        ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("threshold_e8s".to_string()),
+                ciborium::Value::from(1_000_000_000_u64),
+            ),
+            (
+                ciborium::Value::Text("timestamp".to_string()),
+                ciborium::Value::from(1_001_u64),
+            ),
+        ]),
+    )]);
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&legacy, &mut bytes).expect("encode legacy event");
+    let decoded: Event = ciborium::de::from_reader(bytes.as_slice())
+        .expect("legacy event without optional clear marker must decode");
+    assert_eq!(
+        decoded,
+        Event::SetDeficitReadonlyThresholdE8s {
+            threshold_e8s: 1_000_000_000,
+            timestamp: 1_001,
+            clear_latched_threshold_e8s: None,
+        }
+    );
 }

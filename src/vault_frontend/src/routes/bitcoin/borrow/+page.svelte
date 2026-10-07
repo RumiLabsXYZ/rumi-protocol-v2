@@ -46,6 +46,7 @@
     icusdAmountToRawE8s,
     hasVaultAlreadyBorrowed,
     classifyLiveOpenAndBorrowOutcomeFromBound,
+    classifyOpenVaultV2Status,
     classifyFinishBorrowOutcomeFromBound,
     classifyRecheckOutcome,
     runExclusiveAction,
@@ -582,6 +583,7 @@
   let finalTermsRefreshToken = 0;
   let actionInProgress = false;
   let confirmError = '';
+  let ingressRecoveryWarning = '';
   let outcome: OpenAndBorrowOutcome | null = null;
 
   async function refreshFinalTerms() {
@@ -679,6 +681,7 @@
     !!finalRisk &&
     finalRisk.isValidCr &&
     !hasUnresolvedPendingAction &&
+    !ingressRecoveryWarning &&
     canSubmitBorrow({ actionInProgress, isConnected, principalMatchesIntent, termsConfirmed });
 
   async function fetchVaultLites(owner: Principal): Promise<VaultLite[]> {
@@ -699,7 +702,7 @@
   }
 
   type ConfirmAndBorrowRun =
-    | { aborted: true; reason: 'other_tab_pending' | 'session_changed' | 'durability_failed' }
+    | { aborted: true; reason: 'other_tab_pending' | 'preflight_unavailable' | 'session_changed' | 'durability_failed' }
     | { aborted: false; classified: OpenAndBorrowOutcome; resolvedIntent: BitcoinBorrowIntentRecord; approvalMayHaveMutated: boolean };
 
   async function confirmAndBorrow() {
@@ -712,7 +715,7 @@
     const baseIntent = intent;
 
     const locks = getLocks();
-    const lockName = bitcoinBorrowActionLockName(actionOwnerText, NETWORK_SCOPE);
+    const lockName = bitcoinBorrowActionLockName(actionOwnerText, NETWORK_SCOPE, CANISTER_IDS.CKBTC_LEDGER);
 
     const exec = await runExclusiveAction<ConfirmAndBorrowRun>(locks, lockName, async () => {
       // Re-read persisted state now that the lock is held, in case another tab already started
@@ -726,8 +729,12 @@
       }
 
       let beforeIds = new Set<number>();
+      let beforeVaults: VaultLite[] = [];
+      let beforeVaultsLoaded = false;
       try {
         const before = await fetchVaultLites(actionOwner);
+        beforeVaults = before;
+        beforeVaultsLoaded = true;
         beforeIds = new Set(before.map((v) => v.vaultId));
       } catch {
         // proceed with an empty before-set; reconciliation below still filters by collateral type + amount.
@@ -742,12 +749,42 @@
       // after a reload/crash, even if this tab never sees the call resolve.
       const submittedCollateralRaw = collateralResolution.satoshiAmount;
       const submittedIcusdRaw = icusdAmountToRawE8s(confirmIcusdAmount);
-      const pendingIntent = beginPendingAction(baseIntent, 'open_and_borrow', Date.now(), {
+      if (!beforeVaultsLoaded) return { aborted: true, reason: 'preflight_unavailable' };
+      const ctx: ActionBoundContext = {
+        expectedPrincipalText: actionOwnerText,
+        assertCurrent: () => isLiveIntentSession(session, baseIntent.createdAt),
+      };
+      const ingressState = await protocolService.getCollateralIngressStateBound(ctx, CANISTER_IDS.CKBTC_LEDGER);
+      if (!isLiveIntentSession(session, baseIntent.createdAt)) return { aborted: true, reason: 'session_changed' };
+      const activeIngress = ingressState.active_request[0];
+      const latestIngress = ingressState.latest_result[0];
+      const savedRequestId = baseIntent.openRequestId ? BigInt(baseIntent.openRequestId) : null;
+      if (savedRequestId === null && beforeVaults.some((vault) => vault.collateralPrincipal === CKBTC_PRINCIPAL && vault.borrowedIcusd === 0n)) {
+        return { aborted: true, reason: 'other_tab_pending' };
+      }
+      const matchingSavedIngress = [activeIngress, latestIngress].find((view) =>
+        view && savedRequestId !== null && view.request_id === savedRequestId &&
+        view.owner.toText() === actionOwnerText && view.ledger.toText() === CANISTER_IDS.CKBTC_LEDGER &&
+        view.amount_raw === submittedCollateralRaw && 'Open' in view.operation &&
+        view.operation.Open.collateral_type.toText() === CKBTC_PRINCIPAL
+      );
+      if (activeIngress && !matchingSavedIngress) return { aborted: true, reason: 'other_tab_pending' };
+      const requestId = savedRequestId ?? ingressState.next_request_id;
+      if (requestId <= 0n || (!savedRequestId && requestId !== ingressState.next_request_id) ||
+          (savedRequestId !== null && savedRequestId < ingressState.next_request_id && !matchingSavedIngress)) {
+        return { aborted: true, reason: 'other_tab_pending' };
+      }
+
+      const pendingIntent = {
+        ...beginPendingAction(baseIntent, 'open_and_borrow', Date.now(), {
         preActionVaultIds: Array.from(beforeIds),
         submittedCollateralSatoshi: submittedCollateralRaw.toString(),
         submittedIcusdAmount: confirmIcusdAmount,
         submittedIcusdAmountRaw: submittedIcusdRaw.toString(),
-      });
+        }),
+        openRequestId: requestId.toString(),
+        borrowDispatchStarted: false,
+      };
       if (isLiveIntentSession(session, baseIntent.createdAt)) {
         intent = pendingIntent;
         if (!persistIntent()) {
@@ -762,15 +799,10 @@
         }
       }
 
-      const ctx: ActionBoundContext = {
-        expectedPrincipalText: actionOwnerText,
-        assertCurrent: () => isLiveIntentSession(session, baseIntent.createdAt),
-      };
-
-      const result = await protocolService.openVaultAndBorrowBound(
+      const result = await protocolService.openVaultV2Bound(
         ctx,
+        requestId,
         submittedCollateralRaw,
-        submittedIcusdRaw,
         CKBTC_PRINCIPAL
       );
 
@@ -782,20 +814,25 @@
         // classification below handles an empty after-fetch gracefully (stays ambiguous_pending).
       }
 
-      const classified = classifyLiveOpenAndBorrowOutcomeFromBound({
-        signal: { kind: result.kind, vaultId: result.vaultId, errorMessage: result.errorMessage },
+      const classified = result.kind === 'predispatch_aborted' && !result.status
+        ? { kind: 'failed' as const, vaultId: null, message: result.errorMessage || 'Collateral approval was not completed.' }
+        : classifyOpenVaultV2Status({
+        status: result.status,
+        ownerText: actionOwnerText,
+        ledgerText: CANISTER_IDS.CKBTC_LEDGER,
+        expectedRequestId: requestId,
+        collateralPrincipal: CKBTC_PRINCIPAL,
+        expectedCollateralRaw: submittedCollateralRaw,
         vaults: vaultsAfter,
-        beforeIds,
-        ckbtcPrincipal: CKBTC_PRINCIPAL,
-        expected: { collateralAmountRaw: submittedCollateralRaw, borrowedAmountRaw: submittedIcusdRaw },
       });
 
       const resolvedIntent: BitcoinBorrowIntentRecord = {
         ...pendingIntent,
+        openRequestId: classified.kind === 'failed' ? null : pendingIntent.openRequestId,
         vaultId: classified.vaultId,
-        borrowConfirmed: classified.kind === 'success',
+        borrowConfirmed: false,
         partialBorrowAcknowledged: classified.kind === 'partial_zero_debt',
-        step: classified.kind === 'success' ? 'done' : 'confirm',
+        step: 'confirm',
         pendingAction: nextPendingActionForOutcome(classified.kind, pendingIntent.pendingAction ?? null),
         updatedAt: Date.now(),
       };
@@ -884,7 +921,7 @@
     }
 
     const locks = getLocks();
-    const lockName = bitcoinBorrowActionLockName(actionOwnerText, NETWORK_SCOPE);
+    const lockName = bitcoinBorrowActionLockName(actionOwnerText, NETWORK_SCOPE, CANISTER_IDS.CKBTC_LEDGER);
 
     const exec = await runExclusiveAction<FinishBorrowRun>(locks, lockName, async () => {
       const latest = loadIntent(localStorage, actionOwnerText, Date.now(), NETWORK_SCOPE);
@@ -946,17 +983,23 @@
         // classification below handles a null vaultAfter gracefully.
       }
 
-      const finalOutcome = classifyFinishBorrowOutcomeFromBound({
+      const classifiedBorrowOutcome = classifyFinishBorrowOutcomeFromBound({
         signal: { kind: result.kind, vaultId, errorMessage: result.errorMessage },
         vaultAfter,
         expectedBorrowedRaw: submittedIcusdRaw,
       });
+      const borrowReceiptMatches = result.kind === 'dispatched_ok' && result.blockIndex !== null &&
+        result.submittedIcusdRaw === submittedIcusdRaw;
+      const finalOutcome = classifiedBorrowOutcome.kind === 'success' && !borrowReceiptMatches
+        ? { kind: 'ambiguous_pending' as const, vaultId, message: 'The vault has the expected debt, but this borrow reply did not provide an attributable receipt. Recheck before taking further action.' }
+        : classifiedBorrowOutcome;
 
       const resolvedIntent: BitcoinBorrowIntentRecord = {
         ...pendingIntent,
         vaultId,
         borrowConfirmed: finalOutcome.kind === 'success',
         partialBorrowAcknowledged: finalOutcome.kind === 'partial_zero_debt',
+        borrowDispatchStarted: finalOutcome.kind === 'ambiguous_pending',
         step: finalOutcome.kind === 'success' ? 'done' : pendingIntent.step,
         pendingAction: nextPendingActionForOutcome(finalOutcome.kind, pendingIntent.pendingAction ?? null),
         updatedAt: Date.now(),
@@ -1016,13 +1059,30 @@
       const after = await fetchVaultLites(actionOwner);
       // A query-only reconciliation can confirm success but can NEVER manufacture
       // partial_zero_debt or failed — see classifyRecheckOutcome's doc comment.
-      const reclassified = classifyRecheckOutcome({
-        knownVaultId,
-        vaults: after,
-        beforeIds: new Set(baseIntent.preActionVaultIds ?? []),
-        ckbtcPrincipal: CKBTC_PRINCIPAL,
-        expected: expectedWireFromIntent(baseIntent),
-      });
+      const reclassified = baseIntent.pendingAction === 'finish_borrow' && baseIntent.borrowDispatchStarted !== false
+        ? { kind: 'ambiguous_pending' as const, vaultId: knownVaultId, message: 'Vault debt alone cannot attribute a borrow whose reply was lost. Continue to recheck; do not retry.' }
+        : baseIntent.openRequestId &&
+        (baseIntent.pendingAction === 'open_and_borrow' ||
+          (baseIntent.pendingAction === 'finish_borrow' && baseIntent.borrowDispatchStarted === false))
+        ? classifyOpenVaultV2Status({
+            status: await protocolService.getCollateralIngressBound({
+              expectedPrincipalText: actionOwner.toText(),
+              assertCurrent: () => isLiveIntentSession(session, baseIntent.createdAt),
+            }, CANISTER_IDS.CKBTC_LEDGER, BigInt(baseIntent.openRequestId)),
+            ownerText: actionOwner.toText(),
+            ledgerText: CANISTER_IDS.CKBTC_LEDGER,
+            expectedRequestId: BigInt(baseIntent.openRequestId),
+            collateralPrincipal: CKBTC_PRINCIPAL,
+            expectedCollateralRaw: expectedWireFromIntent(baseIntent).collateralAmountRaw,
+            vaults: after,
+          })
+        : classifyRecheckOutcome({
+            knownVaultId,
+            vaults: after,
+            beforeIds: new Set(baseIntent.preActionVaultIds ?? []),
+            ckbtcPrincipal: CKBTC_PRINCIPAL,
+            expected: expectedWireFromIntent(baseIntent),
+          });
 
       const resolvedIntent: BitcoinBorrowIntentRecord = {
         ...baseIntent,
@@ -1121,8 +1181,40 @@
       // A reconcile started before this tab created its first intent must not erase that newer
       // in-memory draft when its empty read finally returns.
       if (!intent || intent.principal !== key) intent = null;
+      ingressRecoveryWarning = '';
+      if (ownerPrincipal) {
+        try {
+          const ctx: ActionBoundContext = {
+            expectedPrincipalText: key,
+            assertCurrent: () => isSessionStillLive(capturedSession),
+          };
+          const state = await protocolService.getCollateralIngressStateBound(ctx, CANISTER_IDS.CKBTC_LEDGER);
+          if (!isSessionStillLive(capturedSession) || intent?.principal === key) return;
+          if (state.active_request[0]) {
+            ingressRecoveryWarning = 'A collateral request is already pending for this account. Recheck the collateral request before opening another vault.';
+          } else {
+            const latest = state.latest_result[0];
+            if (latest && 'Complete' in latest.phase && latest.result[0] && 'Open' in latest.result[0]) {
+              const vaultId = Number(latest.result[0].Open.vault_id);
+              const vault = (await fetchVaultLites(ownerPrincipal)).find((candidate) => candidate.vaultId === vaultId);
+              if (!isSessionStillLive(capturedSession) || intent?.principal === key) return;
+              if (!vault || vault.borrowedIcusd === 0n) {
+                ingressRecoveryWarning = `The latest collateral request opened vault #${vaultId}, but no saved borrow intent is available. Inspect your vaults before starting another open.`;
+              }
+            }
+          }
+          const priorZeroDebtVault = (await fetchVaultLites(ownerPrincipal)).find((vault) =>
+            vault.collateralPrincipal === CKBTC_PRINCIPAL && vault.borrowedIcusd === 0n
+          );
+          if (!isSessionStillLive(capturedSession) || intent?.principal === key) return;
+          if (priorZeroDebtVault) ingressRecoveryWarning = `Vault #${priorZeroDebtVault.vaultId} has no debt and may match a prior open whose local request was lost. Inspect it before opening another.`;
+        } catch {
+          ingressRecoveryWarning = 'Collateral request history could not be checked. Opening is paused until the account journal can be read safely.';
+        }
+      }
       return;
     }
+    ingressRecoveryWarning = '';
     intent = loaded;
     collateralAmountInput = String(loaded.collateralAmountBitcoin);
     icusdAmount = loaded.icusdAmount;
@@ -1143,26 +1235,37 @@
         const vaults = await fetchVaultLites(ownerPrincipal);
         if (!isStillLiveSession(capturedSession, captureSession()) || !isStillSamePrincipal(key, principalKey(ownerPrincipal))) return;
         if (intent && intent.createdAt !== loaded.createdAt) return;
-        let classified = classifyRecheckOutcome({
-          knownVaultId: loaded.vaultId,
-          vaults,
-          beforeIds: new Set(loaded.preActionVaultIds ?? []),
-          ckbtcPrincipal: CKBTC_PRINCIPAL,
-          expected: expectedWireFromIntent(loaded),
-        });
-        // A finish marker with this durable flag came from an earlier explicit backend partial
-        // acknowledgment. A reload can therefore restore the Finish action while still using
-        // the fresh query only to decide whether the borrow has since landed.
-        if (loaded.partialBorrowAcknowledged && loaded.pendingAction === 'finish_borrow' && classified.kind === 'ambiguous_pending') {
-          classified = {
-            kind: 'partial_zero_debt',
-            vaultId: classified.vaultId ?? loaded.vaultId,
-            message: 'Your BTC collateral is safely locked in this vault. Finish borrowing when you are ready.',
-          };
-        }
+        let classified = loaded.pendingAction === 'finish_borrow' && loaded.borrowDispatchStarted !== false
+          ? { kind: 'ambiguous_pending' as const, vaultId: loaded.vaultId, message: 'Vault debt alone cannot attribute a borrow whose reply was lost. Continue to recheck; do not retry.' }
+          : loaded.openRequestId &&
+          (loaded.pendingAction === 'open_and_borrow' ||
+            (loaded.pendingAction === 'finish_borrow' && loaded.borrowDispatchStarted === false))
+          ? classifyOpenVaultV2Status({
+              status: await protocolService.getCollateralIngressBound({
+                expectedPrincipalText: key,
+                assertCurrent: () => isLiveIntentSession(capturedSession, loaded.createdAt),
+              }, CANISTER_IDS.CKBTC_LEDGER, BigInt(loaded.openRequestId)),
+              ownerText: key,
+              ledgerText: CANISTER_IDS.CKBTC_LEDGER,
+              expectedRequestId: BigInt(loaded.openRequestId),
+              collateralPrincipal: CKBTC_PRINCIPAL,
+              expectedCollateralRaw: expectedWireFromIntent(loaded).collateralAmountRaw,
+              vaults,
+            })
+          : classifyRecheckOutcome({
+              knownVaultId: loaded.vaultId,
+              vaults,
+              beforeIds: new Set(loaded.preActionVaultIds ?? []),
+              ckbtcPrincipal: CKBTC_PRINCIPAL,
+              expected: expectedWireFromIntent(loaded),
+            });
+        // A previously persisted partial marker is not enough to authorize a new mint attempt.
+        // The current backend may retain a pending mint after returning an error, so a recheck
+        // that cannot confirm the borrow must remain ambiguous across reloads.
         outcome = classified;
         const resolved: BitcoinBorrowIntentRecord = {
           ...loaded,
+          openRequestId: classified.kind === 'failed' ? null : loaded.openRequestId,
           vaultId: classified.vaultId,
           borrowConfirmed: classified.kind === 'success',
           step: classified.kind === 'success' ? 'done' : 'confirm',
@@ -1590,9 +1693,10 @@
         {/if}
 
         {#if confirmError}<p class="dbw-error" role="alert">{confirmError}</p>{/if}
+        {#if ingressRecoveryWarning}<p class="dbw-error" role="alert">{ingressRecoveryWarning}</p>{/if}
 
         <button class="dbw-btn dbw-btn--primary dbw-btn--full" type="button" disabled={!canConfirm} on:click={confirmAndBorrow}>
-          {actionInProgress ? 'Confirming…' : 'Confirm and borrow'}
+          {actionInProgress ? 'Opening vault…' : 'Confirm and open vault'}
         </button>
       {/if}
     {:else if step === 'done'}

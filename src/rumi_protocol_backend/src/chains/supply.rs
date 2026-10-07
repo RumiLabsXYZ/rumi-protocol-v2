@@ -12,6 +12,7 @@
 //! can call it without inventing the invariant under deadline pressure.
 
 use super::config::ChainId;
+use super::evm::deposit_watch::{evm_burn_consumption_key, evm_burn_consumption_key_matches};
 use super::evm::settlement_proof::{VerifiedBurnSettlementProof, VerifiedReserveSettlementProof};
 use super::multi_chain_state::{
     MultiChainState, MultiChainStateV1, MultiChainStateV2, SettlementProofRecord,
@@ -379,8 +380,41 @@ pub enum ProofBackedSettlementError {
     BackingSettlement(BackingSettlementError),
 }
 
-fn settlement_burn_key(tx_hash: &str, log_index: u64) -> String {
-    format!("{}:{}", tx_hash.to_ascii_lowercase(), log_index)
+fn settlement_burn_already_consumed(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    block_number: u64,
+    tx_hash: &str,
+    log_index: u64,
+) -> bool {
+    // Settlement proofs can be submitted after the observer has pruned its
+    // block-scoped replay keys. The monotonic floor makes that pruning safe for
+    // every proof ingress; an upgraded legacy cursor is also held until an
+    // explicit baseline resolves its ambiguous history.
+    let floor = state.ensure_evm_burn_proof_floor(chain);
+    let legacy_hold_through = state
+        .evm_burn_proof_legacy_hold_through
+        .get(&chain)
+        .copied()
+        .unwrap_or(0);
+    if block_number <= floor || block_number <= legacy_hold_through {
+        return true;
+    }
+
+    state.has_evm_burn_replay_id(chain, block_number, tx_hash, log_index)
+        || state.settled_settlement_burn_logs.iter().any(|key| {
+            evm_burn_consumption_key_matches(key, chain, tx_hash, log_index)
+        })
+        // V7 and earlier states can contain an observer key above the cursor
+        // without a chain-qualified replay ID or a settlement-set entry.
+        || state
+            .processed_burn_keys
+            .get(&block_number)
+            .is_some_and(|keys| {
+                keys.iter().any(|key| {
+                    evm_burn_consumption_key_matches(key, chain, tx_hash, log_index)
+                })
+            })
 }
 
 fn reserve_transfer_key(tx_hash: &str, log_index: u64) -> String {
@@ -399,8 +433,14 @@ pub fn settle_pending_chain_burn_with_verified_proof(
     {
         return Err(ProofBackedSettlementError::DuplicateProof(proof.proof_id));
     }
-    let burn_key = settlement_burn_key(&proof.tx_hash, proof.log_index);
-    if state.settled_settlement_burn_logs.contains(&burn_key) {
+    let burn_key = evm_burn_consumption_key(chain, &proof.tx_hash, proof.log_index);
+    if settlement_burn_already_consumed(
+        state,
+        chain,
+        proof.block_number,
+        &proof.tx_hash,
+        proof.log_index,
+    ) {
         return Err(ProofBackedSettlementError::DuplicateBurnLog { burn_key });
     }
 
@@ -436,8 +476,14 @@ pub fn settle_reserve_burn_with_verified_proof(
     {
         return Err(ProofBackedSettlementError::DuplicateProof(proof.proof_id));
     }
-    let burn_key = settlement_burn_key(&proof.burn_tx_hash, proof.burn_log_index);
-    if state.settled_settlement_burn_logs.contains(&burn_key) {
+    let burn_key = evm_burn_consumption_key(chain, &proof.burn_tx_hash, proof.burn_log_index);
+    if settlement_burn_already_consumed(
+        state,
+        chain,
+        proof.burn_block_number,
+        &proof.burn_tx_hash,
+        proof.burn_log_index,
+    ) {
         return Err(ProofBackedSettlementError::DuplicateBurnLog { burn_key });
     }
     let transfer_key =
@@ -449,9 +495,11 @@ pub fn settle_reserve_burn_with_verified_proof(
         .unwrap_or(0);
     let next_transfer_consumed = current_transfer_consumed
         .checked_add(proof.amount_e8s)
-        .ok_or_else(|| ProofBackedSettlementError::ReserveTransferConsumptionOverflow {
-            transfer_key: transfer_key.clone(),
-        })?;
+        .ok_or_else(
+            || ProofBackedSettlementError::ReserveTransferConsumptionOverflow {
+                transfer_key: transfer_key.clone(),
+            },
+        )?;
     if next_transfer_consumed > proof.reserve_transfer_amount_e8s {
         return Err(ProofBackedSettlementError::ReserveTransferOverConsumed {
             transfer_key,
@@ -564,11 +612,17 @@ pub enum PendingBurnShiftError {
     /// No such chain vault.
     UnknownVault(u64),
     /// The vault's `collateral_chain` does not match the requested `chain`.
-    WrongChain { vault_chain: ChainId, requested: ChainId },
+    WrongChain {
+        vault_chain: ChainId,
+        requested: ChainId,
+    },
     /// `burned_e8s` exceeds the vault's live `debt_e8s` (IC icUSD cannot be
     /// un-burned and there is no proportional refund — over-burn would be
     /// un-refundable bad debt against SP depositors).
-    ClearExceedsDebt { cleared_e8s: u128, vault_debt_e8s: u128 },
+    ClearExceedsDebt {
+        cleared_e8s: u128,
+        vault_debt_e8s: u128,
+    },
     /// The post-move unified invariant would not hold. The move conserves
     /// debt+pending, so this only fires if the invariant was ALREADY diverged
     /// before the call (defensive; no mutation).
@@ -621,13 +675,20 @@ pub fn apply_debt_to_pending_burn_shift(
     // same, so the RHS is invariant. A divergence here means the invariant was
     // ALREADY broken before the call.
     let sum_supplies = state.total_supply_all_chains_e8s();
-    let post_debt_total = state.total_chain_vault_debt_e8s().saturating_sub(burned_e8s);
-    let post_pending_total = state.total_pending_chain_burn_e8s().saturating_add(burned_e8s);
+    let post_debt_total = state
+        .total_chain_vault_debt_e8s()
+        .saturating_sub(burned_e8s);
+    let post_pending_total = state
+        .total_pending_chain_burn_e8s()
+        .saturating_add(burned_e8s);
     let post_rhs = post_debt_total
         .saturating_add(state.total_reserve_backing_e8s())
         .saturating_add(post_pending_total);
     if sum_supplies != post_rhs {
-        return Err(PendingBurnShiftError::InvariantBroken { sum_supplies, rhs: post_rhs });
+        return Err(PendingBurnShiftError::InvariantBroken {
+            sum_supplies,
+            rhs: post_rhs,
+        });
     }
 
     // Apply atomically (every reject above happened before any mutation).
@@ -648,9 +709,17 @@ pub enum PendingBurnSupplyShiftError {
     /// No `chain_supplies` entry for the chain.
     UnknownChain(ChainId),
     /// `amount_e8s` exceeds the chain's booked `pending_chain_burn_e8s`.
-    PendingBurnUnderflow { chain: ChainId, booked: u128, attempted: u128 },
+    PendingBurnUnderflow {
+        chain: ChainId,
+        booked: u128,
+        attempted: u128,
+    },
     /// `amount_e8s` exceeds the chain's live `chain_supplies`.
-    SupplyUnderflow { chain: ChainId, current: u128, attempted: u128 },
+    SupplyUnderflow {
+        chain: ChainId,
+        current: u128,
+        attempted: u128,
+    },
     /// The post-move unified invariant would not hold (defensive; only fires if
     /// the invariant was already diverged — the move conserves supply+pending).
     InvariantBroken { sum_supplies: u128, rhs: u128 },
@@ -675,7 +744,11 @@ pub fn apply_pending_burn_to_supply_shift(
         Some(v) => *v,
         None => return Err(PendingBurnSupplyShiftError::UnknownChain(chain)),
     };
-    let booked = state.pending_chain_burn_e8s.get(&chain).copied().unwrap_or(0);
+    let booked = state
+        .pending_chain_burn_e8s
+        .get(&chain)
+        .copied()
+        .unwrap_or(0);
     if amount_e8s > booked {
         return Err(PendingBurnSupplyShiftError::PendingBurnUnderflow {
             chain,
@@ -693,20 +766,31 @@ pub fn apply_pending_burn_to_supply_shift(
 
     // Pre-validate the post-move unified invariant WITHOUT mutating. supply and
     // pending both drop by amount_e8s; debt + reserve are untouched.
-    let sum_after = state.total_supply_all_chains_e8s().saturating_sub(amount_e8s);
-    let post_pending_total = state.total_pending_chain_burn_e8s().saturating_sub(amount_e8s);
+    let sum_after = state
+        .total_supply_all_chains_e8s()
+        .saturating_sub(amount_e8s);
+    let post_pending_total = state
+        .total_pending_chain_burn_e8s()
+        .saturating_sub(amount_e8s);
     let post_rhs = state
         .total_chain_vault_debt_e8s()
         .saturating_add(state.total_reserve_backing_e8s())
         .saturating_add(post_pending_total);
     if sum_after != post_rhs {
-        return Err(PendingBurnSupplyShiftError::InvariantBroken { sum_supplies: sum_after, rhs: post_rhs });
+        return Err(PendingBurnSupplyShiftError::InvariantBroken {
+            sum_supplies: sum_after,
+            rhs: post_rhs,
+        });
     }
 
     // Apply atomically. Keep the pending entry at 0 (audit), mirroring how
     // apply_supply_delta keeps a drained chain_supplies entry.
-    state.pending_chain_burn_e8s.insert(chain, booked - amount_e8s);
-    state.chain_supplies.insert(chain, current_supply - amount_e8s);
+    state
+        .pending_chain_burn_e8s
+        .insert(chain, booked - amount_e8s);
+    state
+        .chain_supplies
+        .insert(chain, current_supply - amount_e8s);
     Ok(())
 }
 

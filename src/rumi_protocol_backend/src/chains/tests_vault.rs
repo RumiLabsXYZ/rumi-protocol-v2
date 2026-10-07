@@ -1387,6 +1387,37 @@ fn gc_skips_stale_vaults_when_observer_inactive() {
 use super::vault::{close_chain_vault_in_state, withdraw_collateral_in_state, WithdrawError};
 
 #[test]
+fn zero_value_withdrawal_does_not_consume_settlement_queue_capacity() {
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 0);
+    let collateral_before = s.chain_vaults.get(&7).unwrap().collateral_amount_native;
+
+    assert_eq!(
+        withdraw_collateral_in_state(
+            &mut s,
+            7,
+            0,
+            "good-address".into(),
+            only_good,
+            "SOL",
+            13_000,
+            1,
+        ),
+        Err(WithdrawError::ZeroAmount)
+    );
+    assert_eq!(
+        s.chain_vaults.get(&7).unwrap().collateral_amount_native,
+        collateral_before,
+        "rejected zero withdrawal must not reserve collateral"
+    );
+    assert_eq!(
+        s.settlement_queues.get(&CHAIN).unwrap().pending_len(),
+        0,
+        "rejected zero withdrawal must not consume a queue slot"
+    );
+}
+
+#[test]
 fn withdraw_and_close_reject_while_borrow_mint_in_flight() {
     let mut s = setup(PRICE_150_USD_E8);
     // Open vault, 100 SOL collateral, debt 100e8; borrow 50 more (pending=50e8).

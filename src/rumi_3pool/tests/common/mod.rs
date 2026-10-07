@@ -319,7 +319,10 @@ pub fn deploy_pool_with_liquidity_fee_and_swaps(
         )
         .expect("add_liquidity failed");
     if let WasmResult::Reply(bytes) = res {
-        let r: Result<rumi_3pool::receipts::IngressReceiptV1, rumi_3pool::receipts::IngressReceiptErrorV1> = decode_one(&bytes).unwrap();
+        let r: Result<
+            rumi_3pool::receipts::IngressReceiptV1,
+            rumi_3pool::receipts::IngressReceiptErrorV1,
+        > = decode_one(&bytes).unwrap();
         r.expect("add_liquidity_with_receipt_v1 err");
     }
 
@@ -358,10 +361,8 @@ pub fn deploy_pool_with_liquidity_fee_and_swaps(
             )
             .expect("icrc1_transfer failed");
         if let WasmResult::Reply(bytes) = res {
-            let r: Result<
-                candid::Nat,
-                icrc_ledger_types::icrc1::transfer::TransferError,
-            > = decode_one(&bytes).unwrap();
+            let r: Result<candid::Nat, icrc_ledger_types::icrc1::transfer::TransferError> =
+                decode_one(&bytes).unwrap();
             r.expect("icrc1_transfer returned err");
         }
     }

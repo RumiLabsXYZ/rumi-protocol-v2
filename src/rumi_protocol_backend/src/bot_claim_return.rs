@@ -12,9 +12,11 @@ use sha2::{Digest, Sha256};
 /// Derive the bot's fee-buffered return credit and the exact backend
 /// consolidation debit/credit for a claim generation.
 pub fn fee_buffered_return_budget(collateral_amount: u64, fee: u64) -> Result<(u64, u64), String> {
-    let escrow_credit = collateral_amount.checked_add(fee)
+    let escrow_credit = collateral_amount
+        .checked_add(fee)
         .ok_or_else(|| "fee-buffered return credit overflows".to_string())?;
-    let backend_credit = escrow_credit.checked_sub(fee)
+    let backend_credit = escrow_credit
+        .checked_sub(fee)
         .ok_or_else(|| "return escrow cannot pay the pinned consolidation fee".to_string())?;
     if backend_credit != collateral_amount {
         return Err("fee-buffered return does not preserve claim collateral".into());
@@ -89,19 +91,44 @@ pub async fn verify_topup_block(
     native_icp: bool,
 ) -> Result<(), String> {
     if expected_amount == 0 || created_at_time < claim_timestamp {
-        return Err("top-up amount must be positive and timestamp must match the claim generation".into());
+        return Err(
+            "top-up amount must be positive and timestamp must match the claim generation".into(),
+        );
     }
-    let memo = topup_memo(vault_id, claim_timestamp, topup_sequence, expected_amount, created_at_time);
-    let destination = Account { owner: backend, subaccount: Some(return_subaccount) };
+    let memo = topup_memo(
+        vault_id,
+        claim_timestamp,
+        topup_sequence,
+        expected_amount,
+        created_at_time,
+    );
+    let destination = Account {
+        owner: backend,
+        subaccount: Some(return_subaccount),
+    };
     if native_icp {
         let block = fetch_native_icp_block(ledger, block_index).await?;
         return validate_native_icp_topup_block(
-            ledger, bot, destination, expected_amount, expected_fee, &memo, created_at_time, &block,
-        ).await;
+            ledger,
+            bot,
+            destination,
+            expected_amount,
+            expected_fee,
+            &memo,
+            created_at_time,
+            &block,
+        )
+        .await;
     }
     let decoded = crate::icrc3_proof::fetch_icrc3_block(ledger, block_index).await?;
     validate_icrc3_topup_block(
-        &decoded, bot, destination, expected_amount, expected_fee, &memo, created_at_time,
+        &decoded,
+        bot,
+        destination,
+        expected_amount,
+        expected_fee,
+        &memo,
+        created_at_time,
     )
 }
 
@@ -137,7 +164,11 @@ pub fn validate_icrc3_topup_block(
     if block.op != "transfer" && block.op != "xfer" {
         return Err("top-up receipt is not a transfer block".into());
     }
-    if block.from.as_ref() != Some(&Account { owner: bot, subaccount: None })
+    if block.from.as_ref()
+        != Some(&Account {
+            owner: bot,
+            subaccount: None,
+        })
         || block.to.as_ref() != Some(&destination)
         || block.spender.is_some()
         || block.amount != u128::from(amount)
@@ -161,8 +192,13 @@ async fn validate_native_icp_topup_block(
     created_at_time: u64,
     block: &NativeBlock,
 ) -> Result<(), String> {
-    let Some(NativeOperation::Transfer { from, to, spender, amount, fee }) =
-        block.transaction.operation.as_ref()
+    let Some(NativeOperation::Transfer {
+        from,
+        to,
+        spender,
+        amount,
+        fee,
+    }) = block.transaction.operation.as_ref()
     else {
         return Err("native ICP top-up receipt is not a transfer".into());
     };
@@ -170,18 +206,34 @@ async fn validate_native_icp_topup_block(
         return Err("native ICP top-up has unexpected spender or malformed account IDs".into());
     }
     let (source_id,): (Vec<u8>,) = ic_cdk::call(
-        ledger, "account_identifier", (Account { owner: bot, subaccount: None },),
-    ).await.map_err(|(code, message)| format!("native ICP bot account lookup failed: {code:?} {message}"))?;
-    let (destination_id,): (Vec<u8>,) = ic_cdk::call(
-        ledger, "account_identifier", (destination,),
-    ).await.map_err(|(code, message)| format!("native ICP return account lookup failed: {code:?} {message}"))?;
-    if source_id.len() != 32 || destination_id.len() != 32
-        || *from != source_id || *to != destination_id
-        || amount.e8s != amount_e8s || fee.e8s != fee_e8s
+        ledger,
+        "account_identifier",
+        (Account {
+            owner: bot,
+            subaccount: None,
+        },),
+    )
+    .await
+    .map_err(|(code, message)| {
+        format!("native ICP bot account lookup failed: {code:?} {message}")
+    })?;
+    let (destination_id,): (Vec<u8>,) = ic_cdk::call(ledger, "account_identifier", (destination,))
+        .await
+        .map_err(|(code, message)| {
+            format!("native ICP return account lookup failed: {code:?} {message}")
+        })?;
+    if source_id.len() != 32
+        || destination_id.len() != 32
+        || *from != source_id
+        || *to != destination_id
+        || amount.e8s != amount_e8s
+        || fee.e8s != fee_e8s
         || block.transaction.icrc1_memo.as_deref() != Some(memo)
         || block.transaction.created_at_time.timestamp_nanos != created_at_time
     {
-        return Err("native ICP top-up block differs from its exact generation-bound transfer tuple".into());
+        return Err(
+            "native ICP top-up block differs from its exact generation-bound transfer tuple".into(),
+        );
     }
     Ok(())
 }
@@ -234,7 +286,8 @@ pub fn validate_icrc3_return_block(
     {
         return Err("return receipt requested and charged fees differ".into());
     }
-    let expected_amount = collateral_amount.checked_add(expected_fee)
+    let expected_amount = collateral_amount
+        .checked_add(expected_fee)
         .ok_or("expected return amount plus fee overflows")?;
     if fee != u128::from(expected_fee) || block.amount != u128::from(expected_amount) {
         return Err(
@@ -449,9 +502,7 @@ async fn validate_native_icp_block(
                 .into(),
         );
     }
-    if fee.e8s != expected_fee
-        || collateral_amount.checked_add(expected_fee) != Some(amount.e8s)
-    {
+    if fee.e8s != expected_fee || collateral_amount.checked_add(expected_fee) != Some(amount.e8s) {
         return Err(
             "native ICP return amount and fee do not match the fee-buffered claim tuple".into(),
         );
@@ -504,10 +555,16 @@ mod tests {
             expected_allowance: None,
             expires_at: None,
         };
-        assert!(
-            validate_icrc3_return_block(&valid, bot, destination.clone(), 1_000, 10, &memo, 501)
-                .is_ok()
-        );
+        assert!(validate_icrc3_return_block(
+            &valid,
+            bot,
+            destination.clone(),
+            1_000,
+            10,
+            &memo,
+            501
+        )
+        .is_ok());
         assert!(validate_icrc3_return_block(
             &valid,
             Principal::from_slice(&[4]),
@@ -528,43 +585,106 @@ mod tests {
             501
         )
         .is_err());
-        assert!(
-            validate_icrc3_return_block(&valid, bot, destination.clone(), 1_000, 10, &memo, 502)
-                .is_err()
-        );
-        assert!(validate_icrc3_return_block(&valid, bot, destination.clone(), 1_001, 10, &memo, 501).is_err());
-        assert!(validate_icrc3_return_block(&valid, bot, destination.clone(), 1_000, 9, &memo, 501).is_err());
+        assert!(validate_icrc3_return_block(
+            &valid,
+            bot,
+            destination.clone(),
+            1_000,
+            10,
+            &memo,
+            502
+        )
+        .is_err());
+        assert!(validate_icrc3_return_block(
+            &valid,
+            bot,
+            destination.clone(),
+            1_001,
+            10,
+            &memo,
+            501
+        )
+        .is_err());
+        assert!(validate_icrc3_return_block(
+            &valid,
+            bot,
+            destination.clone(),
+            1_000,
+            9,
+            &memo,
+            501
+        )
+        .is_err());
         let mut donation_like = valid.clone();
         donation_like.amount = 1_000;
-        assert!(validate_icrc3_return_block(&donation_like, bot, destination, 1_000, 10, &memo, 501).is_err());
+        assert!(validate_icrc3_return_block(
+            &donation_like,
+            bot,
+            destination,
+            1_000,
+            10,
+            &memo,
+            501
+        )
+        .is_err());
         let mut delegated = valid.clone();
         delegated.btype = Some("2xfer".into());
-        delegated.spender = Some(Account { owner: Principal::from_slice(&[5]), subaccount: None });
+        delegated.spender = Some(Account {
+            owner: Principal::from_slice(&[5]),
+            subaccount: None,
+        });
         assert!(validate_icrc3_return_block(
-            &delegated, bot, valid.to.clone().unwrap(), 1_000, 10, &memo, 501,
-        ).is_err());
+            &delegated,
+            bot,
+            valid.to.clone().unwrap(),
+            1_000,
+            10,
+            &memo,
+            501,
+        )
+        .is_err());
         delegated.btype = Some("1xfer".into());
         assert!(validate_icrc3_return_block(
-            &delegated, bot, valid.to.clone().unwrap(), 1_000, 10, &memo, 501,
-        ).is_err());
+            &delegated,
+            bot,
+            valid.to.clone().unwrap(),
+            1_000,
+            10,
+            &memo,
+            501,
+        )
+        .is_err());
         delegated.spender = None;
         delegated.btype = None;
         assert!(validate_icrc3_return_block(
-            &delegated, bot, valid.to.clone().unwrap(), 1_000, 10, &memo, 501,
-        ).is_err());
+            &delegated,
+            bot,
+            valid.to.clone().unwrap(),
+            1_000,
+            10,
+            &memo,
+            501,
+        )
+        .is_err());
     }
 
     #[test]
     fn topup_receipt_binds_generation_sequence_credit_fee_and_timestamp() {
         let bot = Principal::from_slice(&[1]);
         let backend = Principal::from_slice(&[2]);
-        let destination = Account { owner: backend, subaccount: Some([3; 32]) };
+        let destination = Account {
+            owner: backend,
+            subaccount: Some([3; 32]),
+        };
         let memo = topup_memo(7, 500, 0, 6, 501);
         assert_eq!(memo.len(), 32);
         let valid = DecodedBlock {
             btype: Some("1xfer".into()),
             op: "transfer".into(),
-            from: Some(Account { owner: bot, subaccount: None }),
+            from: Some(Account {
+                owner: bot,
+                subaccount: None,
+            }),
             to: Some(destination.clone()),
             spender: None,
             amount: 6,
@@ -575,46 +695,81 @@ mod tests {
             expected_allowance: None,
             expires_at: None,
         };
-        assert!(validate_icrc3_topup_block(&valid, bot, destination.clone(), 6, 2, &memo, 501).is_ok());
-        assert!(validate_icrc3_topup_block(&valid, Principal::from_slice(&[4]), destination.clone(), 6, 2, &memo, 501).is_err());
-        assert!(validate_icrc3_topup_block(&valid, bot, destination.clone(), 7, 2, &memo, 501).is_err());
-        assert!(validate_icrc3_topup_block(&valid, bot, destination.clone(), 6, 3, &memo, 501).is_err());
-        assert!(validate_icrc3_topup_block(&valid, bot, destination.clone(), 6, 2, &memo, 502).is_err());
+        assert!(
+            validate_icrc3_topup_block(&valid, bot, destination.clone(), 6, 2, &memo, 501).is_ok()
+        );
+        assert!(validate_icrc3_topup_block(
+            &valid,
+            Principal::from_slice(&[4]),
+            destination.clone(),
+            6,
+            2,
+            &memo,
+            501
+        )
+        .is_err());
+        assert!(
+            validate_icrc3_topup_block(&valid, bot, destination.clone(), 7, 2, &memo, 501).is_err()
+        );
+        assert!(
+            validate_icrc3_topup_block(&valid, bot, destination.clone(), 6, 3, &memo, 501).is_err()
+        );
+        assert!(
+            validate_icrc3_topup_block(&valid, bot, destination.clone(), 6, 2, &memo, 502).is_err()
+        );
         let other_generation = topup_memo(8, 500, 0, 6, 501);
-        assert!(validate_icrc3_topup_block(&valid, bot, destination, 6, 2, &other_generation, 501).is_err());
+        assert!(
+            validate_icrc3_topup_block(&valid, bot, destination, 6, 2, &other_generation, 501)
+                .is_err()
+        );
         let mut delegated = valid;
-        delegated.spender = Some(Account { owner: Principal::from_slice(&[5]), subaccount: None });
+        delegated.spender = Some(Account {
+            owner: Principal::from_slice(&[5]),
+            subaccount: None,
+        });
         assert!(validate_icrc3_topup_block(
             &delegated,
             bot,
-            Account { owner: backend, subaccount: Some([3; 32]) },
+            Account {
+                owner: backend,
+                subaccount: Some([3; 32])
+            },
             6,
             2,
             &memo,
             501,
-        ).is_err());
+        )
+        .is_err());
         let mut untyped = delegated.clone();
         untyped.spender = None;
         untyped.btype = None;
         assert!(validate_icrc3_topup_block(
             &untyped,
             bot,
-            Account { owner: backend, subaccount: Some([3; 32]) },
+            Account {
+                owner: backend,
+                subaccount: Some([3; 32])
+            },
             6,
             2,
             &memo,
             501,
-        ).is_err());
+        )
+        .is_err());
         let mut delegated_type = untyped.clone();
         delegated_type.btype = Some("2xfer".into());
         assert!(validate_icrc3_topup_block(
             &delegated_type,
             bot,
-            Account { owner: backend, subaccount: Some([3; 32]) },
+            Account {
+                owner: backend,
+                subaccount: Some([3; 32])
+            },
             6,
             2,
             &memo,
             501,
-        ).is_err());
+        )
+        .is_err());
     }
 }

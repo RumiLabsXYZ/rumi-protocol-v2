@@ -47,8 +47,9 @@ vi.mock('@dfinity/agent', async () => {
         prepare_redemption_offer: mocks.prepareRedemptionOffer,
       })),
     },
-    HttpAgent: vi.fn(() => ({ fetchRootKey: vi.fn().mockResolvedValue(undefined) })),
-    AnonymousIdentity: vi.fn(() => ({})),
+    HttpAgent: vi.fn(class MockHttpAgent {
+      fetchRootKey = vi.fn().mockResolvedValue(undefined);
+    }),
   };
 });
 
@@ -107,6 +108,10 @@ const PRINCIPAL_B = Principal.fromUint8Array(new Uint8Array([2, 2, 2, 2])).toTex
 function setLivePrincipal(text: string | null) {
   mocks.walletState.principal = text ? Principal.fromText(text) : null;
   mocks.walletState.isConnected = !!text;
+  Object.defineProperty(window, 'ic', {
+    configurable: true,
+    value: text ? { plug: { principalId: text } } : {},
+  });
 }
 
 function acceptedOfferFor(request: {
@@ -139,8 +144,15 @@ function makeCtx(expectedPrincipalText: string, assertCurrent: () => boolean = (
 
 let backendActor: {
   open_vault_and_borrow: ReturnType<typeof vi.fn>;
+  open_vault_v2: ReturnType<typeof vi.fn>;
+  add_margin_v2: ReturnType<typeof vi.fn>;
+  get_my_collateral_ingress_state: ReturnType<typeof vi.fn>;
+  get_my_collateral_ingress: ReturnType<typeof vi.fn>;
   borrow_from_vault: ReturnType<typeof vi.fn>;
   redeem_quoted: ReturnType<typeof vi.fn>;
+  get_my_repayment_v2_status: ReturnType<typeof vi.fn>;
+  get_my_repayment_v2_request_state: ReturnType<typeof vi.fn>;
+  repay_to_vault_v2: ReturnType<typeof vi.fn>;
 };
 let ledgerActor: { icrc2_approve: ReturnType<typeof vi.fn> };
 
@@ -155,6 +167,12 @@ beforeEach(() => {
 
   backendActor = {
     open_vault_and_borrow: vi.fn().mockResolvedValue({ Ok: { vault_id: 7n, block_index: 99n } }),
+    open_vault_v2: vi.fn().mockResolvedValue({ Err: { CallerNotOwner: null } }),
+    add_margin_v2: vi.fn().mockResolvedValue({ Err: { CallerNotOwner: null } }),
+    get_my_collateral_ingress_state: vi.fn().mockResolvedValue({ Ok: {
+      next_request_id: 7n, active_request: [], latest_result: [],
+    } }),
+    get_my_collateral_ingress: vi.fn().mockResolvedValue([]),
     borrow_from_vault: vi.fn().mockResolvedValue({ Ok: { block_index: 55n, fee_amount_paid: 1_000n } }),
     redeem_quoted: vi.fn().mockResolvedValue({ Ok: {
       icusd_block_index: 88n,
@@ -165,6 +183,25 @@ beforeEach(() => {
       net_collateral_raw: 123_000n,
       payout_status: 'queued',
     } }),
+    get_my_repayment_v2_status: vi.fn().mockResolvedValue({ Ok: [] }),
+    get_my_repayment_v2_request_state: vi.fn().mockResolvedValue({ Ok: {
+      next_request_id: 7n, active_request: [], latest_result: [],
+    } }),
+    repay_to_vault_v2: vi.fn().mockImplementation(async (requestId: bigint, arg: { vault_id: bigint; amount: bigint }) => ({ Ok: {
+      request_id: requestId,
+      last_error: [],
+      result: [],
+      tuple: [],
+      had_ambiguous_attempt: false,
+      effective_amount_raw: arg.amount,
+      owner: Principal.fromText(PRINCIPAL_A),
+      vault_id: arg.vault_id,
+      ledger: Principal.fromText(CONFIG.currentIcusdLedgerId),
+      candidate_block_index: [],
+      close_after_repay: false,
+      phase: { PendingPull: null },
+      requested_amount_raw: arg.amount,
+    } })),
   };
   ledgerActor = {
     icrc2_approve: vi.fn().mockResolvedValue({ Ok: 1n }),
@@ -183,6 +220,104 @@ beforeEach(() => {
   mocks.getSignerAgent.mockResolvedValue(null);
 
   setLivePrincipal(PRINCIPAL_A);
+});
+
+describe('ApiClient.repayV2Bound approval amount', () => {
+  const amountRaw = 25_000_000n;
+  const requiredAllowance = amountRaw + 2n * 100_000n;
+  const intent = () => ({
+    version: 1 as const,
+    owner: PRINCIPAL_A,
+    network: `${CONFIG.host}|${CONFIG.currentCanisterId}`,
+    requestId: '7',
+    vaultId: '12',
+    requestedAmountRaw: amountRaw.toString(),
+    closeAfterRepay: false,
+    approvalAttempted: false,
+    backendDispatchAttempted: false,
+  });
+
+  it.each([
+    { wallet: 'Plug', isOisy: false },
+    { wallet: 'Oisy', isOisy: true },
+  ])('approves only amount plus two ledger fees for $wallet', async ({ isOisy }) => {
+    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
+    if (isOisy) {
+      currentWalletType.set(WALLET_TYPES.OISY);
+      localStorage.setItem('rumi_last_wallet', 'oisy');
+      mocks.getSignerAgent.mockResolvedValue({ id: 'fake-signer' });
+    }
+
+    await ApiClient.repayV2Bound(
+      makeCtx(PRINCIPAL_A), intent(), vi.fn(), () => false, vi.fn(),
+    );
+
+    expect(ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
+    expect(ledgerActor.icrc2_approve).toHaveBeenCalledWith(expect.objectContaining({ amount: requiredAllowance }));
+    expect(ledgerActor.icrc2_approve.mock.calls[0][0].amount).toBeLessThan(100_000_000_000_000_000n);
+    expect(backendActor.repay_to_vault_v2).toHaveBeenCalledOnce();
+  });
+});
+
+describe('ApiClient.openVaultV2Bound — request journal before approval', () => {
+  const ledger = CKDOGE_LEDGER_ID;
+  const amount = 123_456_789n;
+  const requestId = 7n;
+  const openStatus = (phase: object, result: object[] = []) => ({
+    request_id: requestId,
+    owner: Principal.fromText(PRINCIPAL_A),
+    ledger: Principal.fromText(ledger),
+    operation: { Open: { collateral_type: Principal.fromText(ledger) } },
+    phase,
+    amount_raw: amount,
+    fee_raw: 10_000n,
+    memo: [],
+    created_at_time_ns: 1n,
+    candidate_block_index: [],
+    result,
+    had_ambiguous_attempt: false,
+    last_error: [],
+  });
+
+  it('replays an exact completed open without requesting another approval', async () => {
+    const completed = openStatus({ Complete: null }, [{ Open: { vault_id: 42n, block_index: 88n } }]);
+    backendActor.get_my_collateral_ingress_state.mockResolvedValue({ Ok: {
+      next_request_id: 8n, active_request: [], latest_result: [completed],
+    } });
+    const result = await ApiClient.openVaultV2Bound(makeCtx(PRINCIPAL_A), requestId, amount, ledger);
+
+    expect(result).toMatchObject({ kind: 'dispatched_ok', status: completed });
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.open_vault_v2).not.toHaveBeenCalled();
+  });
+
+  it('replays an exact Pending/Held request without approving again', async () => {
+    const pending = openStatus({ Held: null });
+    backendActor.get_my_collateral_ingress_state.mockResolvedValue({ Ok: {
+      next_request_id: 8n, active_request: [pending], latest_result: [],
+    } });
+    backendActor.open_vault_v2.mockResolvedValue({ Ok: pending });
+
+    const result = await ApiClient.openVaultV2Bound(makeCtx(PRINCIPAL_A), requestId, amount, ledger);
+
+    expect(result.kind).toBe('dispatched_ok');
+    expect(backendActor.open_vault_v2).toHaveBeenCalledOnce();
+    expect(backendActor.open_vault_v2).toHaveBeenCalledWith(requestId, amount, [Principal.fromText(ledger)]);
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+  });
+
+  it('returns a terminal Rejected request as an error before approval or replay', async () => {
+    const rejected = openStatus({ Rejected: null }, [{ Rejected: { message: 'source paused' } }]);
+    backendActor.get_my_collateral_ingress_state.mockResolvedValue({ Ok: {
+      next_request_id: 8n, active_request: [], latest_result: [rejected],
+    } });
+
+    const result = await ApiClient.openVaultV2Bound(makeCtx(PRINCIPAL_A), requestId, amount, ledger);
+
+    expect(result).toMatchObject({ kind: 'predispatch_aborted', status: rejected, errorMessage: 'source paused' });
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.open_vault_v2).not.toHaveBeenCalled();
+  });
 });
 
 describe('ApiClient.openVaultAndBorrowBound — standard ICRC-2 path (Internet Identity, Plug)', () => {
@@ -333,6 +468,32 @@ describe('ApiClient.openVaultAndBorrowBound — standard ICRC-2 path (Internet I
     expect(result.errorMessage).toContain('Vault created (id=42)');
   });
 
+  it('returns a typed collateral BadFee once without upgrading it to a retry-safe result', async () => {
+    backendActor.open_vault_and_borrow.mockResolvedValue({
+      Err: { TransferFromError: [{ BadFee: { expected_fee: 10_000n } }, false] },
+    });
+    const ctx = makeCtx(PRINCIPAL_A);
+
+    const result = await ApiClient.openVaultAndBorrowBound(ctx, COLLATERAL_RAW, ICUSD_RAW, CKDOGE_LEDGER_ID);
+
+    expect(result.kind).toBe('dispatched_err');
+    expect(result.errorMessage).toContain('Unexpected fee');
+    expect(backendActor.open_vault_and_borrow).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not label a generic collateral transfer_from error as proven no-effect', async () => {
+    backendActor.open_vault_and_borrow.mockResolvedValue({
+      Err: { TransferFromError: [{ GenericError: { message: 'ledger call outcome unknown', error_code: 1n } }, false] },
+    });
+    const ctx = makeCtx(PRINCIPAL_A);
+
+    const result = await ApiClient.openVaultAndBorrowBound(ctx, COLLATERAL_RAW, ICUSD_RAW, CKDOGE_LEDGER_ID);
+
+    expect(result.kind).toBe('dispatched_err');
+    expect(result.errorMessage).toContain('Transfer error:');
+    expect(backendActor.open_vault_and_borrow).toHaveBeenCalledTimes(1);
+  });
+
   it('a typed Err with no partial-vault text leaves partialZeroDebtVaultId null', async () => {
     backendActor.open_vault_and_borrow.mockResolvedValue({ Err: { CallerNotOwner: null } });
     const ctx = makeCtx(PRINCIPAL_A);
@@ -355,272 +516,36 @@ describe('ApiClient.openVaultAndBorrowBound — standard ICRC-2 path (Internet I
   });
 });
 
-describe('ApiClient.redeemQuoted — bounded ICRC-2 allowance and submission outcome', () => {
+describe('redemption submission is paused before wallet approval', () => {
   const request = {
     amount_e8s: 12_345_678n,
     expected_collateral_type: Principal.fromText(CKDOGE_LEDGER_ID),
     min_net_collateral_raw: 100_000n,
   };
 
-  it('loads cached advisory preview through the generated public query without ledger or wallet actions', async () => {
-    const preview = { queue: { entries: [] }, estimate: { Err: { RedemptionQuoteUnavailable: 'stale price' } } };
-    mocks.getRedemptionPreview.mockResolvedValue(preview);
-
-    const result = await ApiClient.getRedemptionPreview(request.amount_e8s);
-
-    expect(result).toEqual(preview);
-    expect(mocks.getRedemptionPreview).toHaveBeenCalledWith(request.amount_e8s);
-    expect(mocks.prepareRedemptionOffer).not.toHaveBeenCalled();
-    expect(mocks.anonAllowance).not.toHaveBeenCalled();
-    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
-    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
-  });
-
-  it('prepares a live offer through the anonymous update without reading allowance or submitting', async () => {
-    const response = { Ok: { queue: { entries: [] }, quote: { Err: { RedemptionCapacityExceeded: { max_input_icusd_e8s: 1n } } } } };
-    mocks.prepareRedemptionOffer.mockResolvedValue(response);
-
-    const result = await ApiClient.prepareRedemptionOffer(request.amount_e8s);
-
-    expect(result).toEqual(response);
-    expect(mocks.prepareRedemptionOffer).toHaveBeenCalledWith(request.amount_e8s);
-    expect(mocks.getRedemptionPreview).not.toHaveBeenCalled();
-    expect(mocks.anonAllowance).not.toHaveBeenCalled();
-    expect(mocks.anonBalance).not.toHaveBeenCalled();
-    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
-    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
-  });
-
-  it('fails before any ledger read, approval, or submit when no accepted offer is provided', async () => {
-    const result = await ApiClient.redeemQuoted(request, undefined, null as unknown as AcceptedRedemptionOffer);
-
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('Accept a fresh live offer');
-    expect(mocks.anonAllowance).not.toHaveBeenCalled();
-    expect(mocks.anonBalance).not.toHaveBeenCalled();
-    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
-    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
-  });
-
-  it('fails before any ledger read when accepted amount, collateral, or minimum differs from the request', async () => {
-    const accepted = acceptedOfferFor(request);
-    const result = await ApiClient.redeemQuoted(request, undefined, {
-      ...accepted,
-      minimumNetCollateralRaw: request.min_net_collateral_raw + 1n,
-    });
-
-    expect(result.success).toBe(false);
-    expect(mocks.anonAllowance).not.toHaveBeenCalled();
-    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
-    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
-  });
-
-  it('approves the exact requested icUSD amount before submission when allowance is absent', async () => {
-    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
-
-    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
-
-    expect(ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
-    expect(ledgerActor.icrc2_approve).toHaveBeenCalledWith(expect.objectContaining({
-      amount: request.amount_e8s + 100_000n,
-      spender: { owner: Principal.fromText(BACKEND_ID), subaccount: [] },
-    }));
-    expect(typeof ledgerActor.icrc2_approve.mock.calls[0][0].expires_at[0]).toBe('bigint');
-    expect(backendActor.redeem_quoted).toHaveBeenCalledOnce();
-    expect(ledgerActor.icrc2_approve.mock.invocationCallOrder[0])
-      .toBeLessThan(backendActor.redeem_quoted.mock.invocationCallOrder[0]);
-    expect(result).toMatchObject({ success: true, blockIndex: 88, redemption: { payoutStatus: 'queued' } });
-  });
-
-  it('skips approval when the existing allowance covers the quoted amount', async () => {
-    mocks.anonAllowance.mockResolvedValue({ allowance: request.amount_e8s + 100_000n });
-
-    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
-
-    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
-    expect(backendActor.redeem_quoted).toHaveBeenCalledOnce();
-    expect(result.success).toBe(true);
-  });
-
-  it('does not dispatch redemption when the wallet switches during approval', async () => {
-    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
-    ledgerActor.icrc2_approve.mockImplementation(async () => {
-      setLivePrincipal(PRINCIPAL_B);
-      return { Ok: 3n };
-    });
-
-    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
-
-    expect(ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
-    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
-    expect(result.success).toBe(false);
-    expect(result.ambiguous).toBeUndefined();
-  });
-
-  it('does not dispatch redemption after a same-principal wallet session transition during approval', async () => {
-    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
-    ledgerActor.icrc2_approve.mockImplementation(async () => {
-      walletSessionGeneration.update((generation) => generation + 1);
-      return { Ok: 3n };
-    });
-
-    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
-
-    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
-    expect(result.success).toBe(false);
-    expect(result.ambiguous).toBeUndefined();
-  });
-
-  it('does not dispatch after approval finishes if the accepted offer expired during the approval await', async () => {
-    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
-    ledgerActor.icrc2_approve.mockImplementation(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      return { Ok: 3n };
-    });
-    const accepted = acceptedOfferFor(request, BigInt(Date.now() + 5) * 1_000_000n);
-
-    const result = await ApiClient.redeemQuoted(request, undefined, accepted);
-
-    expect(ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
-    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('offer expired');
-  });
-
-  it('preserves the approval fee when checking a first-use maximum balance', async () => {
-    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
-    mocks.anonBalance.mockResolvedValue(request.amount_e8s + 100_000n);
-
-    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
-
-    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
-    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
-    expect(result.success).toBe(false);
-    expect(result.error).toContain(`${request.amount_e8s + 200_000n} raw units`);
-  });
-
-  it('reports a lost approval reply at the approval stage and never submits redemption', async () => {
-    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
-    ledgerActor.icrc2_approve.mockRejectedValue(new Error('approval reply timed out'));
-
-    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
-
-    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ success: false, ambiguous: true, ambiguityStage: 'approval' });
-  });
-
-  it('fails closed on missing or stale Oisy preflight before acquiring a signer', async () => {
+  it('refuses a quoted redemption before ledger reads, signer access, approval, or backend dispatch', async () => {
     localStorage.setItem('rumi_last_wallet', 'oisy');
     currentWalletType.set(WALLET_TYPES.OISY);
-
-    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
-
-    expect(mocks.getSignerAgent).not.toHaveBeenCalled();
-    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
-    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('check is missing or stale');
-  });
-
-  it('fails closed when an Oisy preflight snapshot contains invalid fee or balance data', async () => {
-    localStorage.setItem('rumi_last_wallet', 'oisy');
-    currentWalletType.set(WALLET_TYPES.OISY);
-    const preparedPreflight = {
-      principalText: PRINCIPAL_A,
-      walletType: WALLET_TYPES.OISY,
-      sessionGeneration: 0,
-      ledgerId: CONFIG.currentIcusdLedgerId,
-      observedAtMs: Date.now(),
-      allowanceRaw: 0n,
-      balanceRaw: request.amount_e8s + 200_000n,
-      feeRaw: -1n,
-    };
-
-    const result = await ApiClient.redeemQuoted(request, preparedPreflight, acceptedOfferFor(request));
-
-    expect(mocks.getSignerAgent).not.toHaveBeenCalled();
-    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
-    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
-    expect(result.success).toBe(false);
-  });
-
-  it('uses the Oisy preflight when wallet storage is absent but the active wallet type is Oisy', async () => {
-    currentWalletType.set(WALLET_TYPES.OISY);
-    mocks.getSignerAgent.mockResolvedValue({});
-    const preparedPreflight = {
-      principalText: PRINCIPAL_A,
-      walletType: WALLET_TYPES.OISY,
-      sessionGeneration: 0,
-      ledgerId: CONFIG.currentIcusdLedgerId,
-      observedAtMs: Date.now(),
-      allowanceRaw: request.amount_e8s + 100_000n,
-      balanceRaw: request.amount_e8s + 100_000n,
-      feeRaw: 100_000n,
-    };
-
-    const result = await ApiClient.redeemQuoted(request, preparedPreflight, acceptedOfferFor(request));
-
-    expect(mocks.getSignerAgent).toHaveBeenCalledOnce();
-    expect(mocks.anonAllowance).not.toHaveBeenCalled();
-    expect(mocks.anonBalance).not.toHaveBeenCalled();
-    expect(mocks.ledgerFee).not.toHaveBeenCalled();
-    expect(backendActor.redeem_quoted).toHaveBeenCalledOnce();
-    expect(result.success).toBe(true);
-  });
-
-  it('does not use a balance change to upgrade a lost Oisy submission reply', async () => {
-    localStorage.setItem('rumi_last_wallet', 'oisy');
-    currentWalletType.set(WALLET_TYPES.OISY);
-    mocks.getSignerAgent.mockResolvedValue({});
-    ledgerActor.icrc2_approve.mockResolvedValue({ Ok: 3n });
-    backendActor.redeem_quoted.mockRejectedValue(new Error("Cannot read properties of undefined (reading '_arr')"));
-    const preparedPreflight = {
-      principalText: PRINCIPAL_A,
-      walletType: WALLET_TYPES.OISY,
-      sessionGeneration: 0,
-      ledgerId: CONFIG.currentIcusdLedgerId,
-      observedAtMs: Date.now(),
-      allowanceRaw: 0n,
-      balanceRaw: request.amount_e8s + 200_000n,
-      feeRaw: 100_000n,
-    };
-
-    const result = await ApiClient.redeemQuoted(request, preparedPreflight, acceptedOfferFor(request));
-
-    expect(backendActor.redeem_quoted).toHaveBeenCalledOnce();
-    expect(mocks.anonBalance).not.toHaveBeenCalled();
-    expect(result).toMatchObject({
-      success: false,
-      ambiguous: true,
-      ambiguityStage: 'submission',
-    });
-    expect(result.redemption).toBeUndefined();
-  });
-
-  it('rechecks session after submit and labels a typed queued result from the previous session', async () => {
-    backendActor.redeem_quoted.mockImplementation(async () => {
-      walletSessionGeneration.update((generation) => generation + 1);
-      return {
-        Ok: {
-          icusd_block_index: 88n,
-          fee_paid_e8s: 1_000n,
-          collateral_type: Principal.fromText(CKDOGE_LEDGER_ID),
-          symbol: 'ckDOGE',
-          decimals: 8,
-          net_collateral_raw: 123_000n,
-          payout_status: 'queued',
-        },
-      };
-    });
-
     const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
 
     expect(result).toMatchObject({
-      success: true,
-      sessionChangedAfterSubmission: true,
-      message: expect.stringContaining('previous wallet session'),
-      redemption: { payoutStatus: 'queued' },
+      success: false,
+      error: expect.stringContaining('paused until transfer recovery'),
     });
+    expect(mocks.getSignerAgent).not.toHaveBeenCalled();
+    expect(mocks.anonAllowance).not.toHaveBeenCalled();
+    expect(mocks.anonBalance).not.toHaveBeenCalled();
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
+  });
+
+  it('refuses reserve redemption before signer or approval actions', async () => {
+    const result = await ApiClient.redeemReserves(1);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('paused until transfer recovery');
+    expect(mocks.getSignerAgent).not.toHaveBeenCalled();
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
   });
 });
 
@@ -669,6 +594,182 @@ describe('ApiClient.openVaultAndBorrowBound — Oisy ICRC-112 batched path', () 
     expect(result.kind).toBe('predispatch_aborted');
     expect((result as BoundOpenVaultAndBorrowResult).approvalMayHaveMutated).toBe(true);
     expect(backendActor.open_vault_and_borrow).not.toHaveBeenCalled();
+  });
+});
+
+describe('ApiClient.addMarginV2Bound — journal before approval', () => {
+  const ledger = CKDOGE_LEDGER_ID;
+  const amount = 123_456_789n;
+  const vaultId = 44n;
+  const requestId = 7n;
+  const marginStatus = (phase: object, result: object[] = []) => ({
+    request_id: requestId,
+    owner: Principal.fromText(PRINCIPAL_A),
+    ledger: Principal.fromText(ledger),
+    operation: { AddMargin: { vault_id: vaultId } },
+    phase,
+    amount_raw: amount,
+    fee_raw: 10_000n,
+    memo: [],
+    created_at_time_ns: 1n,
+    candidate_block_index: [],
+    result,
+    had_ambiguous_attempt: false,
+    last_error: [],
+  });
+
+  it('returns an exact completed result without another approval or update', async () => {
+    const completed = marginStatus({ Complete: null }, [{ AddMargin: { block_index: 99n } }]);
+    backendActor.get_my_collateral_ingress_state.mockResolvedValue({ Ok: {
+      next_request_id: 8n, active_request: [], latest_result: [completed],
+    } });
+
+    const result = await ApiClient.addMarginV2Bound(makeCtx(PRINCIPAL_A), requestId, Number(vaultId), amount, ledger);
+
+    expect(result).toMatchObject({ kind: 'dispatched_ok', status: completed });
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.add_margin_v2).not.toHaveBeenCalled();
+  });
+
+  it('replays exact Pending/Held status without approving again', async () => {
+    const held = marginStatus({ Held: null });
+    backendActor.get_my_collateral_ingress_state.mockResolvedValue({ Ok: {
+      next_request_id: 8n, active_request: [held], latest_result: [],
+    } });
+    backendActor.add_margin_v2.mockResolvedValue({ Ok: held });
+
+    const result = await ApiClient.addMarginV2Bound(makeCtx(PRINCIPAL_A), requestId, Number(vaultId), amount, ledger);
+
+    expect(result).toMatchObject({ kind: 'dispatched_ok', status: held });
+    expect(backendActor.add_margin_v2).toHaveBeenCalledWith(requestId, { vault_id: vaultId, amount });
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the request ID resolves to a different amount', async () => {
+    const mismatched = { ...marginStatus({ Held: null }), amount_raw: amount + 1n };
+    backendActor.get_my_collateral_ingress_state.mockResolvedValue({ Ok: {
+      next_request_id: 8n, active_request: [mismatched], latest_result: [],
+    } });
+
+    const result = await ApiClient.addMarginV2Bound(makeCtx(PRINCIPAL_A), requestId, Number(vaultId), amount, ledger);
+
+    expect(result.kind).toBe('predispatch_aborted');
+    expect(result.errorMessage).toMatch(/different collateral arguments/i);
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.add_margin_v2).not.toHaveBeenCalled();
+  });
+
+  it('persists approval ambiguity before dispatch and sends one exact V2 update', async () => {
+    const completed = marginStatus({ Complete: null }, [{ AddMargin: { block_index: 101n } }]);
+    backendActor.get_my_collateral_ingress_state.mockResolvedValue({ Ok: {
+      next_request_id: requestId, active_request: [], latest_result: [],
+    } });
+    backendActor.add_margin_v2.mockResolvedValue({ Ok: completed });
+    mocks.anonAllowance.mockResolvedValueOnce({ allowance: 0n }).mockResolvedValueOnce({ allowance: amount + 10_000n });
+    const order: string[] = [];
+    ledgerActor.icrc2_approve.mockImplementation(async () => { order.push('approve'); return { Ok: 1n }; });
+    backendActor.add_margin_v2.mockImplementation(async (...args: unknown[]) => {
+      order.push('add_margin_v2');
+      expect(args).toEqual([requestId, { vault_id: vaultId, amount }]);
+      return { Ok: completed };
+    });
+
+    const result = await ApiClient.addMarginV2Bound(
+      makeCtx(PRINCIPAL_A), requestId, Number(vaultId), amount, ledger, false,
+      () => order.push('persist-approval-marker'),
+    );
+
+    expect(result).toMatchObject({ kind: 'dispatched_ok', status: completed, approvalMayHaveMutated: true });
+    expect(order).toEqual(['persist-approval-marker', 'approve', 'add_margin_v2']);
+    expect(ledgerActor.icrc2_approve).toHaveBeenCalledTimes(1);
+    expect(ledgerActor.icrc2_approve.mock.calls[0][0].amount).toBe(amount + 20_000n);
+  });
+
+  it('does not repeat an ambiguous approval when allowance is still low', async () => {
+    backendActor.get_my_collateral_ingress_state.mockResolvedValue({ Ok: {
+      next_request_id: requestId, active_request: [], latest_result: [],
+    } });
+    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
+
+    const result = await ApiClient.addMarginV2Bound(makeCtx(PRINCIPAL_A), requestId, Number(vaultId), amount, ledger, true);
+
+    expect(result.kind).toBe('predispatch_aborted');
+    expect(result.errorMessage).toMatch(/confirm an approval retry to continue/i);
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.add_margin_v2).not.toHaveBeenCalled();
+  });
+
+  it('retries an ambiguous approval only after explicit confirmation, reusing the same request ID', async () => {
+    const completed = marginStatus({ Complete: null }, [{ AddMargin: { block_index: 103n } }]);
+    backendActor.get_my_collateral_ingress_state.mockResolvedValue({ Ok: {
+      next_request_id: requestId, active_request: [], latest_result: [],
+    } });
+    mocks.anonAllowance.mockResolvedValueOnce({ allowance: 0n })
+      .mockResolvedValueOnce({ allowance: 0n })
+      .mockResolvedValueOnce({ allowance: amount + 10_000n });
+    backendActor.add_margin_v2.mockResolvedValue({ Ok: completed });
+    const confirmRetry = vi.fn(() => true);
+    const order: string[] = [];
+    ledgerActor.icrc2_approve.mockImplementation(async () => { order.push('approve'); return { Ok: 2n }; });
+
+    const result = await ApiClient.addMarginV2Bound(
+      makeCtx(PRINCIPAL_A), requestId, Number(vaultId), amount, ledger, true,
+      () => order.push('persist-marker'), confirmRetry,
+    );
+
+    expect(confirmRetry).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['persist-marker', 'approve']);
+    expect(ledgerActor.icrc2_approve).toHaveBeenCalledTimes(1);
+    expect(backendActor.add_margin_v2).toHaveBeenCalledWith(requestId, { vault_id: vaultId, amount });
+    expect(result).toMatchObject({ kind: 'dispatched_ok', status: completed, approvalMayHaveMutated: true });
+  });
+
+  it('replays a matching row that appears during the retry confirmation without a second approval', async () => {
+    const held = marginStatus({ Held: null });
+    backendActor.get_my_collateral_ingress_state
+      .mockResolvedValueOnce({ Ok: { next_request_id: requestId, active_request: [], latest_result: [] } })
+      .mockResolvedValueOnce({ Ok: { next_request_id: requestId + 1n, active_request: [held], latest_result: [] } });
+    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
+    backendActor.add_margin_v2.mockResolvedValue({ Ok: held });
+
+    const result = await ApiClient.addMarginV2Bound(
+      makeCtx(PRINCIPAL_A), requestId, Number(vaultId), amount, ledger, true, undefined, () => true,
+    );
+
+    expect(result).toMatchObject({ kind: 'dispatched_ok', status: held });
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.add_margin_v2).toHaveBeenCalledWith(requestId, { vault_id: vaultId, amount });
+  });
+
+  it('reuses a sufficient reconciled allowance after a prior approval attempt without approving again', async () => {
+    const completed = marginStatus({ Complete: null }, [{ AddMargin: { block_index: 102n } }]);
+    backendActor.get_my_collateral_ingress_state.mockResolvedValue({ Ok: {
+      next_request_id: requestId, active_request: [], latest_result: [],
+    } });
+    mocks.anonAllowance.mockResolvedValue({ allowance: amount + 10_000n });
+    backendActor.add_margin_v2.mockResolvedValue({ Ok: completed });
+
+    const result = await ApiClient.addMarginV2Bound(makeCtx(PRINCIPAL_A), requestId, Number(vaultId), amount, ledger, true);
+
+    expect(result).toMatchObject({ kind: 'dispatched_ok', status: completed, approvalMayHaveMutated: true });
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.add_margin_v2).toHaveBeenCalledWith(requestId, { vault_id: vaultId, amount });
+  });
+
+  it('rechecks the bound session after allowance read and stops before approval on account switch', async () => {
+    backendActor.get_my_collateral_ingress_state.mockResolvedValue({ Ok: {
+      next_request_id: requestId, active_request: [], latest_result: [],
+    } });
+    mocks.anonAllowance.mockImplementationOnce(async () => {
+      setLivePrincipal(PRINCIPAL_B);
+      return { allowance: 0n };
+    });
+
+    const result = await ApiClient.addMarginV2Bound(makeCtx(PRINCIPAL_A), requestId, Number(vaultId), amount, ledger);
+
+    expect(result.kind).toBe('predispatch_aborted');
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.add_margin_v2).not.toHaveBeenCalled();
   });
 });
 

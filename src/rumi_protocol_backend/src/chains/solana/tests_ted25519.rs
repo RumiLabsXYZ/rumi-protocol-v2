@@ -49,7 +49,9 @@ fn is_valid_solana_address_accepts_32_byte_base58() {
 
 #[test]
 fn is_valid_solana_address_rejects_evm_and_junk() {
-    assert!(!is_valid_solana_address("0x0000000000000000000000000000000000000000"));
+    assert!(!is_valid_solana_address(
+        "0x0000000000000000000000000000000000000000"
+    ));
     assert!(!is_valid_solana_address("not base58 !!!"));
     // base58 of 31 bytes -> wrong length
     let short = bs58::encode([1u8; 31]).into_string();
@@ -73,7 +75,10 @@ fn decode_solana_address_roundtrips_and_rejects_bad_input() {
     let short = bs58::encode([1u8; 31]).into_string();
     assert!(decode_solana_address(&short).is_err());
     // is_valid_solana_address agrees with the decoder on each case.
-    assert_eq!(is_valid_solana_address(&addr), decode_solana_address(&addr).is_ok());
+    assert_eq!(
+        is_valid_solana_address(&addr),
+        decode_solana_address(&addr).is_ok()
+    );
     assert_eq!(
         is_valid_solana_address("not base58 !!!"),
         decode_solana_address("not base58 !!!").is_ok()
@@ -105,11 +110,22 @@ fn nonce_path_is_distinct_from_settlement_and_custody() {
 
     // Structure: [chain_id LE, b"nonce"].
     assert_eq!(nonce.len(), 2);
-    assert_eq!(nonce[0], 501u32.to_le_bytes().to_vec(), "first component is the chain id LE");
-    assert_eq!(nonce[1], b"nonce".to_vec(), "second component is the b\"nonce\" tag");
+    assert_eq!(
+        nonce[0],
+        501u32.to_le_bytes().to_vec(),
+        "first component is the chain id LE"
+    );
+    assert_eq!(
+        nonce[1],
+        b"nonce".to_vec(),
+        "second component is the b\"nonce\" tag"
+    );
 
     // Same chain-id prefix as settlement, but a different second component, which
     // is exactly what makes the derived key distinct.
     assert_eq!(nonce[0], settle[0], "both share the chain-id prefix");
-    assert_ne!(nonce[1], settle[1], "the tag distinguishes nonce from settlement");
+    assert_ne!(
+        nonce[1], settle[1],
+        "the tag distinguishes nonce from settlement"
+    );
 }

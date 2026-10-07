@@ -127,6 +127,7 @@ pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> 
         Icrc3Transaction::Transfer {
             from, to, amount, spender,
             from_subaccount, to_subaccount, spender_subaccount,
+            memo, created_at_time, transaction_fee,
         } => {
             let mut fields = vec![
                 ("op".to_string(), Icrc3Value::Text("xfer".to_string())),
@@ -134,6 +135,15 @@ pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> 
                 ("to".to_string(), account_to_value(*to, to_subaccount.as_deref())),
                 ("amt".to_string(), Icrc3Value::Nat(Nat::from(*amount))),
             ];
+            if let Some(fee) = transaction_fee {
+                fields.push(("fee".to_string(), Icrc3Value::Nat(Nat::from(*fee))));
+            }
+            if let Some(memo) = memo {
+                fields.push(("memo".to_string(), Icrc3Value::Blob(memo.clone())));
+            }
+            if let Some(created_at_time) = created_at_time {
+                fields.push(("ts".to_string(), Icrc3Value::Nat(Nat::from(*created_at_time))));
+            }
             if let Some(s) = spender {
                 fields.push((
                     "spender".to_string(),
@@ -145,6 +155,7 @@ pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> 
         Icrc3Transaction::Approve {
             from, spender, amount, expires_at,
             from_subaccount, spender_subaccount,
+            memo, created_at_time, transaction_fee,
         } => {
             // Cap approve amounts to u64::MAX for index-ng compatibility.
             // The standard index-ng deserializes amounts as u64 and rejects
@@ -156,6 +167,15 @@ pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> 
                 ("spender".to_string(), account_to_value(*spender, spender_subaccount.as_deref())),
                 ("amt".to_string(), Icrc3Value::Nat(Nat::from(capped))),
             ];
+            if let Some(fee) = transaction_fee {
+                fields.push(("fee".to_string(), Icrc3Value::Nat(Nat::from(*fee))));
+            }
+            if let Some(memo) = memo {
+                fields.push(("memo".to_string(), Icrc3Value::Blob(memo.clone())));
+            }
+            if let Some(created_at_time) = created_at_time {
+                fields.push(("ts".to_string(), Icrc3Value::Nat(Nat::from(*created_at_time))));
+            }
             // index-ng expects "expected_allowance" and "expires_at" (full names, not abbreviated)
             if let Some(exp) = expires_at {
                 fields.push(("expires_at".to_string(), Icrc3Value::Nat(Nat::from(*exp))));
@@ -252,6 +272,158 @@ pub fn icrc3_get_blocks(args: Vec<GetBlocksArgs>) -> GetBlocksResult {
         log_length: Nat::from(log_length),
         blocks: result_blocks,
         archived_blocks: vec![],
+    }
+}
+
+#[cfg(test)]
+mod transfer_metadata_compatibility_tests {
+    use super::*;
+    use candid::{Decode, Encode};
+    use crate::types::Icrc3Block;
+
+    #[derive(CandidType)]
+    struct LegacyBlock {
+        id: u64,
+        timestamp: u64,
+        tx: LegacyTransaction,
+    }
+
+    #[derive(CandidType)]
+    enum LegacyTransaction {
+        Transfer {
+            from: Principal,
+            to: Principal,
+            amount: u128,
+            spender: Option<Principal>,
+            from_subaccount: Option<Vec<u8>>,
+            to_subaccount: Option<Vec<u8>>,
+            spender_subaccount: Option<Vec<u8>>,
+        },
+        Approve {
+            from: Principal,
+            spender: Principal,
+            amount: u128,
+            expires_at: Option<u64>,
+            from_subaccount: Option<Vec<u8>>,
+            spender_subaccount: Option<Vec<u8>>,
+        },
+    }
+
+    #[test]
+    fn old_transfer_blocks_decode_and_keep_their_original_encoding() {
+        let legacy = LegacyBlock {
+            id: 7,
+            timestamp: 123,
+            tx: LegacyTransaction::Transfer {
+                from: Principal::anonymous(),
+                to: Principal::management_canister(),
+                amount: 42,
+                spender: None,
+                from_subaccount: None,
+                to_subaccount: None,
+                spender_subaccount: None,
+            },
+        };
+        let encoded = Encode!(&legacy).expect("encode old stable block schema");
+        let decoded = Decode!(&encoded, Icrc3Block)
+            .expect("new block schema must decode pre-metadata stable block");
+        let Icrc3Transaction::Transfer {
+            memo,
+            created_at_time,
+            transaction_fee,
+            ..
+        } = &decoded.tx
+        else {
+            panic!("legacy transfer variant changed")
+        };
+        assert!(memo.is_none());
+        assert!(created_at_time.is_none());
+        assert!(transaction_fee.is_none());
+
+        let expected = Icrc3Value::Map(vec![
+            ("ts".into(), Icrc3Value::Nat(Nat::from(123u64))),
+            ("fee".into(), Icrc3Value::Nat(Nat::from(0u64))),
+            (
+                "tx".into(),
+                Icrc3Value::Map(vec![
+                    ("op".into(), Icrc3Value::Text("xfer".into())),
+                    (
+                        "from".into(),
+                        account_to_value(Principal::anonymous(), None),
+                    ),
+                    (
+                        "to".into(),
+                        account_to_value(Principal::management_canister(), None),
+                    ),
+                    ("amt".into(), Icrc3Value::Nat(Nat::from(42u64))),
+                ]),
+            ),
+        ]);
+        assert_eq!(
+            encode_block_with_phash(&decoded, None),
+            expected,
+            "legacy tx block must retain its exact pre-metadata hash preimage"
+        );
+    }
+
+    #[test]
+    fn old_approval_blocks_decode_and_keep_their_original_encoding() {
+        let legacy = LegacyBlock {
+            id: 8,
+            timestamp: 124,
+            tx: LegacyTransaction::Approve {
+                from: Principal::anonymous(),
+                spender: Principal::management_canister(),
+                amount: 43,
+                expires_at: Some(999),
+                from_subaccount: None,
+                spender_subaccount: None,
+            },
+        };
+        let encoded = Encode!(&legacy).expect("encode old approval block schema");
+        let decoded = Decode!(&encoded, Icrc3Block)
+            .expect("new block schema must decode pre-metadata approval block");
+        let Icrc3Transaction::Approve {
+            memo,
+            created_at_time,
+            transaction_fee,
+            ..
+        } = &decoded.tx
+        else {
+            panic!("legacy approval variant changed")
+        };
+        assert!(memo.is_none());
+        assert!(created_at_time.is_none());
+        assert!(transaction_fee.is_none());
+
+        let expected = Icrc3Value::Map(vec![
+            ("ts".into(), Icrc3Value::Nat(Nat::from(124u64))),
+            ("fee".into(), Icrc3Value::Nat(Nat::from(0u64))),
+            (
+                "tx".into(),
+                Icrc3Value::Map(vec![
+                    ("op".into(), Icrc3Value::Text("approve".into())),
+                    (
+                        "from".into(),
+                        account_to_value(Principal::anonymous(), None),
+                    ),
+                    (
+                        "spender".into(),
+                        account_to_value(Principal::management_canister(), None),
+                    ),
+                    ("amt".into(), Icrc3Value::Nat(Nat::from(43u64))),
+                    (
+                        "expires_at".into(),
+                        Icrc3Value::Nat(Nat::from(999u64)),
+                    ),
+                ]),
+            ),
+        ]);
+        assert_eq!(
+            encode_block_with_phash(&decoded, None),
+            expected,
+            "legacy approval block must retain its exact pre-metadata hash preimage"
+        );
     }
 }
 

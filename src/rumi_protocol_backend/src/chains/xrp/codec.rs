@@ -96,7 +96,8 @@ mod tests {
 
     fn kat_payment() -> (Payment, serde_json::Value) {
         let v: serde_json::Value = serde_json::from_str(KAT).unwrap();
-        let acct = account_id_from_classic_address(v["payment"]["account"].as_str().unwrap()).unwrap();
+        let acct =
+            account_id_from_classic_address(v["payment"]["account"].as_str().unwrap()).unwrap();
         let dest =
             account_id_from_classic_address(v["payment"]["destination"].as_str().unwrap()).unwrap();
         let spk = hex::decode(v["keypair"]["signing_pubkey_hex"].as_str().unwrap()).unwrap();

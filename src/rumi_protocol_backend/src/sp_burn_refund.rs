@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use crate::icrc3_proof::{ProofExpectations, SpProofLedger, SpWritedownProof};
 use crate::state::{
     mutate_state, read_state, StoredSpBurnRefund, StoredSpBurnRefundHistoryScan,
-    StoredSpBurnRefundNoEffectEvidence, MAX_SP_BURN_REFUND_ATTEMPTS,
+    StoredSpBurnRefundNoEffectEvidence,
 };
 use crate::ProtocolError;
 
@@ -28,6 +28,9 @@ const REFUND_MEMO_PREFIX: &[u8; 8] = b"RSPRFND:";
 const MAX_REFUND_HISTORY_BLOCKS: u64 = 64;
 const MAX_REFUND_ARCHIVE_CALLBACKS: usize = 32;
 const MAX_REFUND_ARCHIVE_RANGES_PER_CALLBACK: usize = 32;
+// Each invocation performs at most one identity rotation; continued recovery
+// requires another bounded admin/timer invocation instead of a hot loop.
+const MAX_REFUND_ROTATIONS_PER_CALL: usize = 1;
 
 thread_local! {
     /// Runtime-only exclusion for the proof-specific async saga. The durable
@@ -436,7 +439,7 @@ fn refund_matches(
         && record.burn_block_index == proof.block_index
 }
 
-async fn verify_mint_authority(ledger: Principal) -> Result<(), ProtocolError> {
+pub(crate) async fn verify_mint_authority(ledger: Principal) -> Result<(), ProtocolError> {
     let result: Result<(Option<Account>,), _> =
         ic_cdk::call(ledger, "icrc1_minting_account", ()).await;
     let (minting_account,) = result.map_err(|(code, msg)| {
@@ -476,6 +479,7 @@ async fn execute_stored_refund(
             "SP refund authorization or journal changed before mint".into(),
         ));
     }
+    let mut rotations_this_call = 0usize;
     let block = loop {
         let transfer = crate::management::transfer_idempotent(
             record.ledger,
@@ -489,9 +493,17 @@ async fn execute_stored_refund(
         match transfer {
             Ok(block) => break block,
             Err(icrc_ledger_types::icrc1::transfer::TransferError::TooOld) => {
+                if rotations_this_call >= MAX_REFUND_ROTATIONS_PER_CALL {
+                    return Err(ProtocolError::GenericError(
+                        "SP refund reached its per-call safe identity-rotation budget; retry the same operation later".into(),
+                    ));
+                }
                 match recover_too_old_refund(key, record).await? {
                     TooOldRecovery::Confirmed(receipt) => return Ok(receipt),
-                    TooOldRecovery::Retry(updated) => record = updated,
+                    TooOldRecovery::Retry(updated) => {
+                        record = updated;
+                        rotations_this_call += 1;
+                    }
                 }
             }
             Err(error) => return Err(ProtocolError::TransferError(error)),
@@ -688,25 +700,24 @@ fn rotate_refund_identity(
     now: u64,
 ) -> Result<StoredSpBurnRefund, ProtocolError> {
     let evidence = record.no_effect_evidence.as_ref().ok_or_else(|| {
-        ProtocolError::GenericError("SP refund identity rotation requires persisted no-effect evidence".into())
+        ProtocolError::GenericError(
+            "SP refund identity rotation requires persisted no-effect evidence".into(),
+        )
     })?;
     if !evidence.too_old_rejected || !no_effect_evidence_matches(&record, evidence) {
         return Err(ProtocolError::GenericError(
             "SP refund identity rotation requires TooOld from the pinned ledger and complete exact-history absence".into(),
         ));
     }
-    if refund_retry_cap_exhausted(&record) {
-        return Err(ProtocolError::GenericError(
-            "SP refund retry identity cap reached after confirmed no-effect; obligation remains held for operator review".into(),
-        ));
-    }
+    let attempt_number = next_refund_attempt_number(&record)?;
     mutate_state(|s| {
         if s.stability_pool_canister != Some(record.caller)
             || s.icusd_ledger_principal != record.ledger
             || s.sp_burn_refunds_by_proof.get(&key) != Some(&record)
         {
             return Err(ProtocolError::GenericError(
-                "SP refund journal or ledger configuration changed before safe identity rotation".into(),
+                "SP refund journal or ledger configuration changed before safe identity rotation"
+                    .into(),
             ));
         }
         let next_nonce = s.next_op_nonce_at(now);
@@ -716,9 +727,6 @@ fn rotate_refund_identity(
                 "backend clock has not advanced beyond the expired refund tuple; obligation remains held".into(),
             ));
         }
-        let attempt_number = u64::try_from(record.attempt_history.len() + 1).map_err(|_| {
-            ProtocolError::GenericError("SP refund attempt number exceeds u64".into())
-        })?;
         let mut next_memo = Vec::with_capacity(32);
         next_memo.extend_from_slice(REFUND_MEMO_PREFIX);
         next_memo.extend_from_slice(&record.burn_block_index.to_be_bytes());
@@ -729,12 +737,11 @@ fn rotate_refund_identity(
             .sp_burn_refunds_by_proof
             .get_mut(&key)
             .expect("checked above");
-        current.attempt_history.push((
-            current.op_nonce,
-            current.refund_created_at_time,
-            current.refund_memo.clone(),
-        ));
-        current.attempt_no_effect_evidence.push(evidence.clone());
+        // Typed TooOld plus complete exact-prefix absence proves the old tuple
+        // cannot commit later on the official ledger. Compact legacy vectors
+        // only after that proof; the ordinal remains in the current memo.
+        current.attempt_history.clear();
+        current.attempt_no_effect_evidence.clear();
         current.op_nonce = next_nonce;
         current.refund_created_at_time = next_timestamp;
         current.refund_memo = next_memo;
@@ -779,15 +786,45 @@ fn mark_refund_too_old_rejected(
             )
         })?;
         if evidence != expected_evidence {
-            return Err(ProtocolError::GenericError("SP refund history evidence changed before TooOld was recorded".into()));
+            return Err(ProtocolError::GenericError(
+                "SP refund history evidence changed before TooOld was recorded".into(),
+            ));
         }
         evidence.too_old_rejected = true;
         Ok(current.clone())
     })
 }
 
-fn refund_retry_cap_exhausted(record: &StoredSpBurnRefund) -> bool {
-    record.attempt_history.len() >= MAX_SP_BURN_REFUND_ATTEMPTS
+fn next_refund_attempt_number(record: &StoredSpBurnRefund) -> Result<u64, ProtocolError> {
+    let mut expected_memo_base = Vec::with_capacity(24);
+    expected_memo_base.extend_from_slice(REFUND_MEMO_PREFIX);
+    expected_memo_base.extend_from_slice(&record.burn_block_index.to_be_bytes());
+    expected_memo_base.extend_from_slice(&record.vault_id.to_be_bytes());
+    if record.refund_memo.get(..24) != Some(expected_memo_base.as_slice()) {
+        return Err(ProtocolError::GenericError(
+            "SP refund memo does not bind the persisted burn and vault identity".into(),
+        ));
+    }
+    let memo_ordinal = match record.refund_memo.len() {
+        24 => 0,
+        32 => u64::from_be_bytes(
+            record.refund_memo[24..32]
+                .try_into()
+                .expect("eight-byte memo ordinal slice"),
+        ),
+        _ => {
+            return Err(ProtocolError::GenericError(
+                "SP refund memo does not contain a supported retry ordinal".into(),
+            ));
+        }
+    };
+    let legacy_ordinal = u64::try_from(record.attempt_history.len()).map_err(|_| {
+        ProtocolError::GenericError("legacy SP refund attempt history exceeds u64".into())
+    })?;
+    memo_ordinal
+        .max(legacy_ordinal)
+        .checked_add(1)
+        .ok_or_else(|| ProtocolError::GenericError("SP refund retry ordinal exhausted".into()))
 }
 
 fn no_effect_evidence_matches(
@@ -1427,11 +1464,10 @@ mod tests {
     }
 
     #[test]
-    fn four_prior_retry_identities_allow_five_total_and_block_a_sixth() {
+    fn legacy_attempt_history_provides_a_migration_safe_next_ordinal() {
         let mut record = stored(Principal::from_slice(&[2]), Principal::from_slice(&[3]), 44);
-        assert!(!refund_retry_cap_exhausted(&record));
-        for index in 0..MAX_SP_BURN_REFUND_ATTEMPTS {
-            let timestamp = record.refund_created_at_time + index as u64 + 1;
+        for index in 0..5u64 {
+            let timestamp = record.refund_created_at_time + index + 1;
             let mut memo = record.refund_memo.clone();
             memo[8] ^= (index + 1) as u8;
             record.attempt_history.push((
@@ -1439,13 +1475,12 @@ mod tests {
                 timestamp,
                 memo,
             ));
-            assert_eq!(
-                refund_retry_cap_exhausted(&record),
-                index + 1 == MAX_SP_BURN_REFUND_ATTEMPTS
-            );
         }
-        assert_eq!(record.attempt_history.len(), MAX_SP_BURN_REFUND_ATTEMPTS);
-        assert!(refund_retry_cap_exhausted(&record));
+        assert_eq!(next_refund_attempt_number(&record).unwrap(), 6);
+
+        let mut malformed = stored(Principal::from_slice(&[2]), Principal::from_slice(&[3]), 44);
+        malformed.refund_memo[8] ^= 1;
+        assert!(next_refund_attempt_number(&malformed).is_err());
     }
 
     #[test]
@@ -1745,7 +1780,9 @@ mod tests {
         state.sp_burn_refunds_by_proof.insert(key, record.clone());
         crate::state::replace_state(state);
 
-        assert!(rotate_refund_identity(key, record.clone(), record.refund_created_at_time + 1).is_err());
+        assert!(
+            rotate_refund_identity(key, record.clone(), record.refund_created_at_time + 1).is_err()
+        );
         assert_eq!(
             read_state(|s| s.sp_burn_refunds_by_proof[&key].clone()),
             record
@@ -1761,7 +1798,9 @@ mod tests {
             log_length: 0,
             too_old_rejected: false,
         });
-        assert!(rotate_refund_identity(key, record.clone(), record.refund_created_at_time + 1).is_err());
+        assert!(
+            rotate_refund_identity(key, record.clone(), record.refund_created_at_time + 1).is_err()
+        );
         crate::state::mutate_state(|s| {
             s.sp_burn_refunds_by_proof.insert(key, record.clone());
         });
@@ -1772,17 +1811,17 @@ mod tests {
             record.refund_created_at_time + 1,
         )
         .unwrap();
-        assert_eq!(rotated.attempt_history.len(), 1);
-        assert_eq!(rotated.attempt_history[0].0, record.op_nonce);
-        assert_eq!(rotated.attempt_history[0].1, record.refund_created_at_time);
-        assert_eq!(rotated.attempt_history[0].2, record.refund_memo);
-        assert_eq!(rotated.attempt_no_effect_evidence.len(), 1);
-        assert!(rotated.attempt_no_effect_evidence[0].too_old_rejected);
+        assert!(rotated.attempt_history.is_empty());
+        assert!(rotated.attempt_no_effect_evidence.is_empty());
         assert!(rotated.refund_created_at_time > record.refund_created_at_time);
         assert_eq!(rotated.refund_memo.len(), 32);
+        assert_eq!(
+            u64::from_be_bytes(rotated.refund_memo[24..32].try_into().unwrap()),
+            1
+        );
 
-        // The previous identity is tombstoned and remains part of history
-        // matching, so a late indexed mint is still recognized as an outcome.
+        // The old tuple has typed TooOld plus complete exact-prefix absence;
+        // the official ledger rejects any delayed delivery of that identity.
         let old_match = (
             0,
             record.op_nonce,
@@ -1791,23 +1830,38 @@ mod tests {
         );
         assert!(!refund_match_is_current_attempt(&rotated, &old_match));
 
+        // Repeated proven expiries increment only the memo ordinal. Persisted
+        // state stays bounded instead of retaining one tuple per expiry.
         record = rotated;
-        for index in 0..MAX_SP_BURN_REFUND_ATTEMPTS {
-            let timestamp = record.refund_created_at_time + index as u64 + 10;
-            let nonce = ((timestamp as u128) << 64) | index as u128;
-            let mut memo = record.refund_memo.clone();
-            memo[8] ^= (index + 1) as u8;
-            record.attempt_history.push((nonce, timestamp, memo));
+        for expected_ordinal in 2..=12u64 {
+            record.no_effect_evidence = Some(StoredSpBurnRefundNoEffectEvidence {
+                ledger,
+                recipient: caller,
+                amount_e8s: record.amount_e8s,
+                op_nonce: record.op_nonce,
+                created_at_time: record.refund_created_at_time,
+                memo: record.refund_memo.clone(),
+                log_length: expected_ordinal,
+                too_old_rejected: false,
+            });
+            crate::state::mutate_state(|s| {
+                s.sp_burn_refunds_by_proof.insert(key, record.clone());
+            });
+            let expired = mark_refund_too_old_rejected(key, record.clone()).unwrap();
+            record =
+                rotate_refund_identity(key, expired, record.refund_created_at_time + 1).unwrap();
+            assert_eq!(
+                u64::from_be_bytes(record.refund_memo[24..32].try_into().unwrap()),
+                expected_ordinal
+            );
+            assert!(record.attempt_history.is_empty());
+            assert!(record.attempt_no_effect_evidence.is_empty());
+            assert_eq!(
+                next_refund_attempt_number(&record).unwrap(),
+                expected_ordinal + 1
+            );
         }
-        crate::state::mutate_state(|s| {
-            s.sp_burn_refunds_by_proof.insert(key, record.clone());
-        });
-        assert!(refund_retry_cap_exhausted(&record));
-        assert!(rotate_refund_identity(key, record.clone(), record.refund_created_at_time + 1).is_err());
-        assert_eq!(
-            read_state(|s| s.sp_burn_refunds_by_proof[&key].clone()),
-            record
-        );
+        assert_eq!(record.refund_memo.len(), 32);
     }
 
     #[test]
@@ -1961,31 +2015,10 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_attempt_history_still_allows_positive_current_receipt_only() {
+    fn legacy_attempt_history_provides_a_migration_safe_next_ordinal_with_rotated_memo() {
         let mut record = stored(Principal::from_slice(&[2]), Principal::from_slice(&[3]), 44);
-        for index in 0..MAX_SP_BURN_REFUND_ATTEMPTS {
-            let timestamp = record.refund_created_at_time + index as u64 + 1;
-            record.attempt_history.push((
-                ((timestamp as u128) << 64) | index as u128,
-                timestamp,
-                [record.refund_memo.as_slice(), &[index as u8]].concat(),
-            ));
-        }
-        assert!(refund_retry_cap_exhausted(&record));
-        let current = (
-            11,
-            record.op_nonce,
-            record.refund_created_at_time,
-            record.refund_memo.clone(),
-        );
-        assert!(refund_match_is_current_attempt(&record, &current));
-        let old = (
-            10,
-            record.attempt_history[0].0,
-            record.attempt_history[0].1,
-            record.attempt_history[0].2.clone(),
-        );
-        assert!(!refund_match_is_current_attempt(&record, &old));
+        record.refund_memo.extend_from_slice(&5u64.to_be_bytes());
+        assert_eq!(next_refund_attempt_number(&record).unwrap(), 6);
     }
 
     #[test]

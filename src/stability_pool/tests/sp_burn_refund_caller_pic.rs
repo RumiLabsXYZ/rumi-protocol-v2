@@ -612,6 +612,22 @@ fn run_native_xrp_refund_case(
     let position_before = position_before.expect("depositor position");
     let ledger_balance_before = ledger_balance(&pic, ledger, sp);
     assert_eq!(ledger_balance_before, deposited);
+    let initial_log: icrc_ledger_types::icrc3::blocks::GetBlocksResult = query_reply(
+        &pic,
+        ledger,
+        Principal::anonymous(),
+        "icrc3_get_blocks",
+        encode_one(vec![icrc_ledger_types::icrc3::blocks::GetBlocksRequest {
+            start: Nat::from(0u64),
+            length: Nat::from(0u64),
+        }])
+        .expect("encode initial ledger log-length query"),
+    );
+    let initial_log_length: u64 = initial_log
+        .log_length
+        .0
+        .try_into()
+        .expect("initial log length fits u64");
 
     let vault_id = 81_004;
     let debt = 250_000_000u64;
@@ -720,7 +736,7 @@ fn run_native_xrp_refund_case(
         "rejected absorb must not create native collateral claims"
     );
 
-    if use_lost_reply_scan {
+    if use_lost_reply_scan && !recover_via_timer {
         let log_result: icrc_ledger_types::icrc3::blocks::GetBlocksResult = query_reply(
             &pic,
             ledger,
@@ -784,6 +800,82 @@ fn run_native_xrp_refund_case(
             Err(StabilityPoolError::LiquidationFailed { .. })
         ));
         assert_eq!(ledger_balance(&pic, ledger, sp), balance_after_lost_reply);
+        return;
+    }
+
+    if use_lost_reply_scan && recover_via_timer {
+        let balance_after_lost_reply = ledger_balance(&pic, ledger, sp);
+        assert_eq!(balance_after_lost_reply, ledger_balance_before - debt);
+        let original_burn_block: Option<u64> = query_reply(
+            &pic,
+            mock_backend,
+            Principal::anonymous(),
+            "get_mock_burn_block_index",
+            encode_args(()).expect("encode burn-block query"),
+        );
+        assert!(original_burn_block.is_none(), "lost transfer reply must leave the SP without a block proof");
+
+        // This mock has no liquidatable-vault feed. The public fallback also
+        // cannot recover the vault after it disappears from that feed.
+        let stale_retry: Result<LiquidationResult, StabilityPoolError> = call_reply(
+            &pic,
+            sp,
+            user,
+            "execute_liquidation",
+            encode_one(vault_id).expect("encode stale liquidation retry"),
+        );
+        assert!(stale_retry.is_err(), "feed-based retry must not recover the vault");
+
+        pic.upgrade_canister(
+            sp,
+            stability_pool_wasm(),
+            encode_one(init).expect("encode SP upgrade"),
+            None,
+        )
+        .expect("upgrade with proofless attempted burn intent pending");
+        pic.tick();
+        pic.advance_time(std::time::Duration::from_secs(601));
+        for _ in 0..10 {
+            pic.tick();
+        }
+
+        assert_eq!(
+            ledger_balance(&pic, ledger, sp),
+            ledger_balance_before,
+            "timer must recover the exact duplicate block and compensate once"
+        );
+        let refund_block: Option<u64> = query_reply(
+            &pic,
+            mock_backend,
+            Principal::anonymous(),
+            "get_mock_refund_block_index",
+            encode_args(()).expect("encode refund-block query"),
+        );
+        assert!(refund_block.is_some(), "recovery must complete the exact refund");
+        let log_result: icrc_ledger_types::icrc3::blocks::GetBlocksResult = query_reply(
+            &pic,
+            ledger,
+            Principal::anonymous(),
+            "icrc3_get_blocks",
+            encode_one(vec![icrc_ledger_types::icrc3::blocks::GetBlocksRequest {
+                start: Nat::from(0u64),
+                length: Nat::from(0u64),
+            }])
+            .expect("encode ledger log-length query"),
+        );
+        assert_eq!(
+            log_result.log_length,
+            Nat::from(initial_log_length + 2u64),
+            "one burn and one refund after the initial log; replay must not burn twice"
+        );
+        let final_status: StabilityPoolStatus = query_reply(
+            &pic,
+            sp,
+            Principal::anonymous(),
+            "get_pool_status",
+            encode_args(()).expect("encode recovered status query"),
+        );
+        assert_eq!(final_status.total_deposits_e8s, status_before.total_deposits_e8s);
         return;
     }
 
@@ -1091,6 +1183,11 @@ fn admin_can_recover_a_lost_refund_index_from_positive_history_proof() {
 #[test]
 fn admin_scans_history_to_reconcile_prepared_lost_reply_burn() {
     run_native_xrp_refund_case(false, false, true, false, false, false, false);
+}
+
+#[test]
+fn timer_recovers_proofless_native_xrp_burn_after_vault_leaves_feed() {
+    run_native_xrp_refund_case(false, false, true, false, false, true, false);
 }
 
 #[test]

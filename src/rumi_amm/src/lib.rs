@@ -3829,7 +3829,12 @@ fn cycle_manager_metrics() -> Vec<rumi_cycle_manager::CycleManagerMetric> {
 #[query]
 fn get_amm_swap_events(start: u64, length: u64) -> Vec<AmmSwapEvent> {
     read_state(|s| {
-        let start = start as usize;
+        // `start` is the lifetime event id, not an index into the bounded
+        // retained Vec. Clamp an evicted cursor to the oldest retained row so
+        // tailers can detect and report the gap from that row's id.
+        let oldest = s.swap_events.first().map(|event| event.id).unwrap_or(s.next_swap_event_id);
+        let start = usize::try_from(start.max(oldest).saturating_sub(oldest))
+            .unwrap_or(usize::MAX);
         let length = length.min(MAX_EVENT_PAGE) as usize;
         if start >= s.swap_events.len() {
             return vec![];
@@ -3841,7 +3846,7 @@ fn get_amm_swap_events(start: u64, length: u64) -> Vec<AmmSwapEvent> {
 
 #[query]
 fn get_amm_swap_event_count() -> u64 {
-    read_state(|s| s.swap_events.len() as u64)
+    read_state(|s| s.next_swap_event_id)
 }
 
 // ─── Liquidity Event History ───
@@ -3849,7 +3854,9 @@ fn get_amm_swap_event_count() -> u64 {
 #[query]
 fn get_amm_liquidity_events(start: u64, length: u64) -> Vec<AmmLiquidityEvent> {
     read_state(|s| {
-        let start = start as usize;
+        let oldest = s.liquidity_events.first().map(|event| event.id).unwrap_or(s.next_liquidity_event_id);
+        let start = usize::try_from(start.max(oldest).saturating_sub(oldest))
+            .unwrap_or(usize::MAX);
         let length = length.min(MAX_EVENT_PAGE) as usize;
         if start >= s.liquidity_events.len() {
             return vec![];
@@ -3861,7 +3868,7 @@ fn get_amm_liquidity_events(start: u64, length: u64) -> Vec<AmmLiquidityEvent> {
 
 #[query]
 fn get_amm_liquidity_event_count() -> u64 {
-    read_state(|s| s.liquidity_events.len() as u64)
+    read_state(|s| s.next_liquidity_event_id)
 }
 
 // ─── Admin Event History ───
@@ -4140,6 +4147,41 @@ mod dos_001_tests {
             limit: u64::MAX,
         });
         assert_eq!(by_time.len() as u64, MAX_EVENT_PAGE);
+    }
+}
+
+#[cfg(test)]
+mod retained_amm_event_cursor_tests {
+    use super::*;
+
+    #[test]
+    fn event_feeds_use_lifetime_ids_after_old_rows_are_evicted() {
+        let who = Principal::anonymous();
+        mutate_state(|s| {
+            s.swap_events = (50_000..50_003).map(|id| AmmSwapEvent {
+                id, caller: who, pool_id: "p".into(), token_in: who,
+                amount_in: 1, token_out: who, amount_out: 1, fee: 0,
+                timestamp: id,
+            }).collect();
+            s.next_swap_event_id = 50_003;
+            s.liquidity_events = (60_000..60_003).map(|id| AmmLiquidityEvent {
+                id, caller: who, pool_id: "p".into(),
+                action: AmmLiquidityAction::AddLiquidity,
+                token_a: who, amount_a: 1, token_b: who, amount_b: 1,
+                lp_shares: 1, timestamp: id,
+            }).collect();
+            s.next_liquidity_event_id = 60_003;
+        });
+
+        assert_eq!(get_amm_swap_event_count(), 50_003);
+        assert_eq!(get_amm_swap_events(0, 2).iter().map(|e| e.id).collect::<Vec<_>>(), vec![50_000, 50_001]);
+        assert_eq!(get_amm_swap_events(50_002, 2).iter().map(|e| e.id).collect::<Vec<_>>(), vec![50_002]);
+        assert!(get_amm_swap_events(50_003, 2).is_empty());
+
+        assert_eq!(get_amm_liquidity_event_count(), 60_003);
+        assert_eq!(get_amm_liquidity_events(0, 2).iter().map(|e| e.id).collect::<Vec<_>>(), vec![60_000, 60_001]);
+        assert_eq!(get_amm_liquidity_events(60_002, 2).iter().map(|e| e.id).collect::<Vec<_>>(), vec![60_002]);
+        assert!(get_amm_liquidity_events(60_003, 2).is_empty());
     }
 }
 

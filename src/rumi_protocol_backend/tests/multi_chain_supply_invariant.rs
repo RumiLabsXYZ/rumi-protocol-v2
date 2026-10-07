@@ -256,6 +256,7 @@ proptest! {
                     }
                     let vid = open_vaults[(vault_id as usize) % open_vaults.len()];
                     let debt = state.chain_vaults[&vid].debt_e8s;
+                    let observed_chain = state.chain_vaults[&vid].collateral_chain;
                     if debt == 0 {
                         continue;
                     }
@@ -271,7 +272,7 @@ proptest! {
                         tx_hash: "0xb".to_string(),
                         block_number: 1,
                     };
-                    if apply_burn_to_state(&mut state, &burn, total_debt).is_ok() {
+                    if apply_burn_to_state(&mut state, observed_chain, &burn, total_debt).is_ok() {
                         total_debt -= amount;
                     }
                 }

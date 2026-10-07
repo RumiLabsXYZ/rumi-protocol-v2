@@ -5,6 +5,10 @@
   import { vaultStore } from '../../stores/vaultStore';
   import { protocolManager } from '../../services/ProtocolManager';
   import { CONFIG, CANISTER_IDS } from '../../config';
+  import { collateralSequenceLockName } from '../../utils/collateralSequenceLock';
+  import { repaymentActionLockName } from '../../utils/repaymentActionLock';
+  import { legacyStableRepayIntentKey, legacyStableRepayIntentPrefix, parseLegacyStableRepayIntent, type LegacyStableRepayIntent } from '../../utils/legacyStableRepayIntent';
+  import { repaymentV2IntentKey, parseRepaymentV2Intent, repaymentV2Disposition, repaymentV2StatusMatchesIntent, type RepaymentV2Intent } from '../../utils/repaymentV2Intent';
   import { createEventDispatcher, onDestroy, onMount } from 'svelte';
   import { interpolateMultiplier, computeProjectedRate } from '../../utils/interpolate';
   import { walletStore } from '../../stores/wallet';
@@ -15,8 +19,6 @@
   import {
     captureActionBoundContext,
     assertActionBoundContextCurrent,
-    isOisyWallet,
-    walletOperations,
   } from '../../services/protocol/walletOperations';
   import { ApiClient } from '../../services/protocol/apiClient';
   import MultiplierBadge from '../points/MultiplierBadge.svelte';
@@ -263,7 +265,7 @@
       tickingDebt = vault.borrowedIcusd * (1 + vaultInterestRate * elapsed / SECONDS_PER_YEAR);
     }
   }, 1000);
-  onDestroy(() => clearInterval(tickInterval));
+  onDestroy(() => { componentActive = false; clearInterval(tickInterval); });
 
   // ── Borrowing fee curve for dynamic multiplier ──
   let borrowingFeeCurve: [number, number][] = [];
@@ -273,6 +275,9 @@
   let recoveryMultiplier: number = 1;
   let ckstableRepayFee = 0; // Protocol repay fee rate for ckStables (e.g., 0.01 = 1%)
   onMount(async () => {
+    restoreSavedAddMarginIntent();
+    refreshStableRepayRecoveryNotice();
+    restoreSavedRepaymentV2Intent();
     seasonStore.ensureLoaded();
     // Populate the stores the borrow-cap math reads from ($protocolStatus for the
     // global mint cap, $collateralTotals for per-collateral aggregate debt). Both
@@ -399,6 +404,11 @@
   let borrowAmount = '';
   let repayAmount = '';
   let isProcessing = false;
+  let componentActive = true;
+  let addMarginRecoveryNotice = '';
+  let stableRepayRecoveryNotice = '';
+  let repaymentV2RecoveryNotice = '';
+  let repaymentV2RecoveryCloseAction = false;
   let isWithdrawingAndClosing = false;
   let showTokenDropdown = false;
   let hasChangedToken = false;
@@ -411,7 +421,8 @@
     if (isProcessing) return;
     if (activeAction === action) return; // already selected — do nothing
     clearMessages();
-    addCollateralAmount = ''; withdrawAmount = ''; borrowAmount = ''; repayAmount = '';
+    if (!addMarginRecoveryNotice) addCollateralAmount = '';
+    withdrawAmount = ''; borrowAmount = ''; repayAmount = '';
     closeOnFullRepay = true; // reset full-repay choice to the default (close)
     activeAction = action;
   }
@@ -427,6 +438,8 @@
     hasChangedToken = true;
     showTokenDropdown = false;
     onTokenChange();
+    refreshStableRepayRecoveryNotice();
+    if (token === 'icUSD') restoreSavedRepaymentV2Intent();
   }
 
   $: if (bitcoinOnly && repayTokenType !== 'icUSD') {
@@ -638,50 +651,562 @@
     return null;
   })();
 
-  async function handleAddCollateral() {
-    const amount = parseFloat(addCollateralAmount);
-    if (!amount || amount <= 0) { toastStore.error(`Enter a valid ${collateralSymbol} amount`, 8000); return; }
-    if (addOverMax) { toastStore.error(`Exceeds wallet balance (${formatNumber(maxAddCollateral, 4)} ${collateralSymbol})`, 8000); return; }
-    clearMessages(); isProcessing = true;
+  type AddMarginIntent = {
+    version: 1;
+    owner: string;
+    network: string;
+    ledger: string;
+    vaultId: string;
+    requestId: string;
+    amountRaw: string;
+    approvalAttempted: boolean;
+  };
+
+  type StableRepaymentIntent = {
+    version: 2; owner: string; network: string; requestId: string; vaultId: string;
+    token: 'CKUSDT' | 'CKUSDC'; amountRawE6: string;
+    approvalAttempted: boolean; backendDispatchAttempted: boolean;
+  };
+  const stableRepaymentIntentKey = (owner: string, network: string) =>
+    `rumi_stable_repayment_v2_${encodeURIComponent(network)}_${encodeURIComponent(owner)}`;
+  function parseStableRepaymentIntent(raw: string | null): StableRepaymentIntent | null {
+    if (!raw) return null;
     try {
-      const actionContext = captureActionBoundContext();
-      // Oisy: skip pre-approval — ApiClient handles approve+add_margin as two
-      // sequential consent screens. Any async work here burns the browser user
-      // gesture context before the first Oisy popup opens.
-      if (!isOisyWallet()) {
-        const ledgerCanisterId = vaultCollateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
-        const amountRaw = BigInt(Math.floor(amount * collateralDecimalsFactor));
-        const spenderCanisterId = CONFIG.currentCanisterId;
-        const currentAllowance = await walletOperations.checkCollateralAllowanceBound(actionContext, spenderCanisterId, ledgerCanisterId);
-        assertActionBoundContextCurrent(actionContext);
-        if (currentAllowance < amountRaw) {
-          const bufferAmount = amountRaw * BigInt(120) / BigInt(100);
-          const approvalResult = await walletOperations.approveCollateralTransferBound(actionContext, bufferAmount, spenderCanisterId, ledgerCanisterId);
-          assertActionBoundContextCurrent(actionContext);
-          if (!approvalResult.success) { toastStore.error(approvalResult.error || 'Approval failed', 8000); return; }
-          await new Promise(r => setTimeout(r, 2000));
-          assertActionBoundContextCurrent(actionContext);
-        }
-      }
-      assertActionBoundContextCurrent(actionContext);
-      const result = await protocolService.addMarginToVault(vault.vaultId, amount, vaultCollateralType, actionContext);
-      try { assertActionBoundContextCurrent(actionContext); }
-      catch {
-        toastStore.error(result.success
-          ? 'The top-up may have completed under the previous wallet. Check that wallet’s vault before retrying.'
-          : result.error || 'Wallet changed. Check the original wallet before retrying.', 10000);
+      const value = JSON.parse(raw);
+      if (value?.version !== 2 || typeof value.owner !== 'string' || typeof value.network !== 'string' ||
+          !/^\d+$/.test(value.requestId) || BigInt(value.requestId) <= 0n || !/^\d+$/.test(value.vaultId) ||
+          !['CKUSDT', 'CKUSDC'].includes(value.token) || !/^\d+$/.test(value.amountRawE6) || BigInt(value.amountRawE6) <= 0n ||
+          typeof value.approvalAttempted !== 'boolean' || typeof value.backendDispatchAttempted !== 'boolean') return null;
+      return value as StableRepaymentIntent;
+    } catch { return null; }
+  }
+
+  function parseExactTokenAmountRaw(input: string, decimals: number): bigint | null {
+    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 30) return null;
+    const match = /^(\d+)(?:\.(\d*))?$/.exec(input.trim());
+    if (!match) return null;
+    const fraction = match[2] ?? '';
+    if (fraction.length > decimals) return null;
+    const scale = 10n ** BigInt(decimals);
+    const whole = BigInt(match[1]);
+    const fractionalRaw = fraction.length ? BigInt(fraction.padEnd(decimals, '0') || '0') : 0n;
+    const raw = whole * scale + fractionalRaw;
+    return raw > 0n ? raw : null;
+  }
+
+  function parseAddMarginIntent(raw: string | null): AddMarginIntent | null {
+    if (!raw) return null;
+    try {
+      const value = JSON.parse(raw);
+      if (value?.version !== 1 || typeof value.owner !== 'string' || typeof value.network !== 'string' ||
+          typeof value.ledger !== 'string' || !/^\d+$/.test(value.vaultId) || !/^\d+$/.test(value.requestId) ||
+          !/^\d+$/.test(value.amountRaw) || typeof value.approvalAttempted !== 'boolean') return null;
+      return value as AddMarginIntent;
+    } catch { return null; }
+  }
+
+  function exactRawToTokenAmount(raw: string, decimals: number): string {
+    const value = BigInt(raw);
+    const scale = 10n ** BigInt(decimals);
+    const whole = value / scale;
+    const fraction = decimals > 0 ? (value % scale).toString().padStart(decimals, '0').replace(/0+$/, '') : '';
+    return fraction ? `${whole}.${fraction}` : whole.toString();
+  }
+
+  function restoreSavedAddMarginIntent() {
+    const owner = $walletStore.principal?.toText();
+    if (!owner || typeof localStorage === 'undefined') return;
+    const ledgerCanisterId = vaultCollateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
+    const networkKey = `${CONFIG.host}|${CONFIG.currentCanisterId}`;
+    const storageKey = `rumi:add-margin-v2:${encodeURIComponent(owner)}:${encodeURIComponent(networkKey)}:${encodeURIComponent(ledgerCanisterId)}:${vault.vaultId}`;
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) return;
+      const intent = parseAddMarginIntent(raw);
+      if (!intent || intent.owner !== owner || intent.network !== networkKey || intent.ledger !== ledgerCanisterId ||
+          intent.vaultId !== String(vault.vaultId) || BigInt(intent.amountRaw) <= 0n) {
+        addMarginRecoveryNotice = 'A saved top-up request could not be validated. Reconcile the exact backend journal before starting another top-up.';
         return;
       }
-      if (result.success) {
-        const msg = result.oisyResilient
-          ? `Added ${amount} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`
-          : `Added ${amount} ${collateralSymbol}`;
-        toastStore.success(msg, 8000); addCollateralAmount = '';
-        await vaultStore.refreshVault(vault.vaultId);
-        walletStore.refreshBalance({ skipCache: true });
-        dispatch('updated');
-      } else { toastStore.error(result.error || 'Failed', 8000); }
-    } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
+      addCollateralAmount = exactRawToTokenAmount(intent.amountRaw, collateralDecimals);
+      addMarginRecoveryNotice = `Saved top-up request #${intent.requestId} will be checked against the backend journal before any new approval or request.`;
+    } catch {
+      addMarginRecoveryNotice = 'A saved top-up request is unreadable. Reconcile the exact backend journal before starting another top-up.';
+    }
+  }
+
+  function stableRepayIdentity() {
+    const owner = $walletStore.principal?.toText();
+    if (!owner) return null;
+    return {
+      owner,
+      network: `${CONFIG.host}|${CONFIG.currentCanisterId}`,
+      lockScope: CONFIG.isLocal ? 'local' : 'mainnet',
+    };
+  }
+
+  function repaymentV2Identity() {
+    const owner = $walletStore.principal?.toText();
+    if (!owner) return null;
+    return {
+      owner,
+      network: `${CONFIG.host}|${CONFIG.currentCanisterId}`,
+      lockScope: CONFIG.isLocal ? 'local' : 'mainnet',
+    };
+  }
+
+  function restoreSavedRepaymentV2Intent() {
+    repaymentV2RecoveryCloseAction = false;
+    const identity = repaymentV2Identity();
+    if (!identity || typeof localStorage === 'undefined') return;
+    try {
+      const raw = localStorage.getItem(repaymentV2IntentKey(identity.owner, identity.network));
+      if (!raw) { repaymentV2RecoveryNotice = ''; return; }
+      const intent = parseRepaymentV2Intent(raw);
+      if (!intent || intent.owner !== identity.owner || intent.network !== identity.network) {
+        repaymentV2RecoveryNotice = 'A saved icUSD repayment request could not be validated. Reconcile the owner repayment journal before starting another repayment.';
+        return;
+      }
+      if (intent.vaultId === String(vault.vaultId)) {
+        repayAmount = exactRawToTokenAmount(intent.requestedAmountRaw, 8);
+        closeOnFullRepay = intent.closeAfterRepay;
+        repaymentV2RecoveryCloseAction = intent.closeAfterRepay;
+        repaymentV2RecoveryNotice = `Saved icUSD repayment request #${intent.requestId} will be checked against the exact backend status before approval or replay.`;
+      } else {
+        repaymentV2RecoveryNotice = `Owner repayment request #${intent.requestId} is bound to vault #${intent.vaultId}. Reconcile it there before starting another icUSD repayment.`;
+      }
+    } catch {
+      repaymentV2RecoveryNotice = 'A saved icUSD repayment request is unreadable. Reconcile the owner repayment journal before starting another repayment.';
+    }
+  }
+
+  function makeRepaymentV2Intent(
+    owner: string,
+    network: string,
+    requestId: bigint,
+    targetVaultId: bigint,
+    requestedAmountRaw: bigint,
+    closeAfterRepay: boolean,
+    approvalAttempted = false,
+  ): RepaymentV2Intent {
+    return {
+      version: 1, owner, network, requestId: requestId.toString(), vaultId: targetVaultId.toString(),
+      requestedAmountRaw: requestedAmountRaw.toString(), closeAfterRepay, approvalAttempted,
+      backendDispatchAttempted: false,
+    };
+  }
+
+  async function handleIcusdRepay(amount: number, closeAfterRepay: boolean): Promise<void> {
+    const requestedAmountRaw = parseExactTokenAmountRaw(repayAmount, 8);
+    if (requestedAmountRaw === null) { toastStore.error('Enter an exact icUSD amount with no more than 8 decimal places.', 8000); return; }
+    const identity = repaymentV2Identity();
+    if (!identity) { toastStore.error('Connect the wallet before repaying.', 8000); return; }
+    if (!navigator.locks?.request) { toastStore.error('This browser cannot coordinate repayment requests safely. No repayment was submitted.', 10000); return; }
+    const storageKey = repaymentV2IntentKey(identity.owner, identity.network);
+    const targetVaultId = BigInt(vault.vaultId);
+    clearMessages();
+    isProcessing = true;
+    try {
+      await navigator.locks.request(repaymentActionLockName(identity.owner, identity.lockScope), async () => {
+        const actionContext = captureActionBoundContext();
+        assertActionBoundContextCurrent(actionContext);
+        const stablePrefix = legacyStableRepayIntentPrefix(identity.owner, identity.network);
+        for (let i = 0; i < localStorage.length; i++) {
+          const candidate = localStorage.key(i);
+          if (candidate?.startsWith(stablePrefix)) {
+            repaymentV2RecoveryNotice = 'A legacy stablecoin repayment is unresolved for this owner. Inspect that repayment before starting an icUSD repayment.';
+            return;
+          }
+        }
+        let intent: RepaymentV2Intent | null = null;
+        const localRaw = localStorage.getItem(storageKey);
+        if (localRaw) {
+          intent = parseRepaymentV2Intent(localRaw);
+          if (!intent || intent.owner !== identity.owner || intent.network !== identity.network) {
+            repaymentV2RecoveryNotice = 'A saved icUSD repayment request could not be validated. Do not allocate another ID; reconcile the owner journal first.';
+            return;
+          }
+          if (intent.vaultId !== targetVaultId.toString() || intent.requestedAmountRaw !== requestedAmountRaw.toString() ||
+              intent.closeAfterRepay !== closeAfterRepay) {
+            repaymentV2RecoveryNotice = `Request #${intent.requestId} is saved for vault #${intent.vaultId}, ${exactRawToTokenAmount(intent.requestedAmountRaw, 8)} icUSD, ${intent.closeAfterRepay ? 'repay and close' : 'repay only'}. Keep those exact arguments while reconciling it.`;
+            return;
+          }
+        } else {
+          let state: Awaited<ReturnType<typeof ApiClient.getRepaymentV2RequestStateBound>>;
+          try {
+            state = await ApiClient.getRepaymentV2RequestStateBound(actionContext);
+            assertActionBoundContextCurrent(actionContext);
+          } catch (error) {
+            repaymentV2RecoveryNotice = `Could not read the owner repayment sequence. No new request was submitted. ${error instanceof Error ? error.message : ''}`;
+            return;
+          }
+          const active = state.active_request[0] ?? null;
+          if (active) {
+            if (active.owner.toText() !== identity.owner || active.ledger.toText() !== CONFIG.currentIcusdLedgerId) {
+              repaymentV2RecoveryNotice = 'The backend reports an active owner repayment with an unexpected identity or ledger. No new request was submitted.';
+              return;
+            }
+            intent = makeRepaymentV2Intent(identity.owner, identity.network, active.request_id, active.vault_id,
+              active.requested_amount_raw, active.close_after_repay, false);
+            localStorage.setItem(storageKey, JSON.stringify(intent));
+            restoreSavedRepaymentV2Intent();
+            repaymentV2RecoveryNotice = `Recovered active owner repayment #${intent.requestId} for vault #${intent.vaultId}. Review the exact amount and click again to check/replay that request.`;
+            return;
+          }
+          const latest = state.latest_result[0] ?? null;
+          if (latest && latest.owner.toText() === identity.owner && latest.ledger.toText() === CONFIG.currentIcusdLedgerId) {
+            const needsMore = 'CloseNeedsAdditionalRepayment' in latest.phase;
+            const sameRequest = latest.vault_id === targetVaultId &&
+              latest.requested_amount_raw === requestedAmountRaw && latest.close_after_repay === closeAfterRepay;
+            if (needsMore || sameRequest) {
+              const explanation = needsMore
+                ? `The previous repayment #${latest.request_id} has a receipt, but accrued interest left residual debt and the vault remains open. A new request will make another pull for ${exactRawToTokenAmount(requestedAmountRaw.toString(), 8)} icUSD.`
+                : `The exact prior repayment #${latest.request_id} completed with a receipt. A new request for the same amount will make another pull of ${exactRawToTokenAmount(requestedAmountRaw.toString(), 8)} icUSD.`;
+              repaymentV2RecoveryNotice = explanation;
+              if (typeof window === 'undefined' || !window.confirm(`${explanation}\n\nReview the current vault debt before continuing. Start a distinct repayment with the next request ID?`)) return;
+            }
+          }
+          intent = makeRepaymentV2Intent(identity.owner, identity.network, state.next_request_id,
+            targetVaultId, requestedAmountRaw, closeAfterRepay);
+          // Reserve and persist the exact owner-global ID and arguments before
+          // any allowance approval or mutating backend call.
+          localStorage.setItem(storageKey, JSON.stringify(intent));
+        }
+        if (!intent) return;
+        const activeIntent = intent;
+        const persistIntent = () => localStorage.setItem(storageKey, JSON.stringify(activeIntent));
+        const result = await ApiClient.repayV2Bound(
+          actionContext,
+          activeIntent,
+          () => { assertActionBoundContextCurrent(actionContext); activeIntent.approvalAttempted = true; persistIntent(); },
+          () => typeof window !== 'undefined' && window.confirm(
+            'The previous icUSD approval may have succeeded, but the live allowance is still insufficient and the exact backend journal has no request row. Retrying approval may charge another ledger fee. The same repayment request ID will be retained. Continue?'
+          ),
+          () => { assertActionBoundContextCurrent(actionContext); activeIntent.backendDispatchAttempted = true; persistIntent(); },
+        );
+        try { assertActionBoundContextCurrent(actionContext); }
+        catch {
+          repaymentV2RecoveryNotice = `Repayment request #${activeIntent.requestId} may still be pending for the previous wallet. Reconcile that exact owner request before retrying.`;
+          return;
+        }
+        const status = result.status;
+        if (!status || !repaymentV2StatusMatchesIntent(status, activeIntent, CONFIG.currentIcusdLedgerId)) {
+          repaymentV2RecoveryNotice = `Repayment request #${activeIntent.requestId} is unresolved. Its exact status did not match or could not be read; do not create a replacement request.`;
+          return;
+        }
+        const disposition = repaymentV2Disposition(status);
+        if (disposition === 'complete') {
+          localStorage.removeItem(storageKey);
+          repaymentV2RecoveryNotice = '';
+          repaymentV2RecoveryCloseAction = false;
+          const completionMessage = closeAfterRepay
+            ? isNativeXrp
+              ? `Repaid all debt and queued your withdrawable XRP for settlement. ${nativeXrpKeepOpenCloseCopy()}`
+              : 'icUSD repayment completed and vault closed.'
+            : 'icUSD repayment completed.';
+          toastStore.success(completionMessage, 8000);
+          repayAmount = '';
+          if (closeAfterRepay && !isNativeXrp) await vaultStore.refreshVaults();
+          else await vaultStore.refreshVault(vault.vaultId);
+          appDataStore.fetchCollateralTotals(true).catch(() => {});
+          walletStore.refreshBalance({ skipCache: true });
+          dispatch('updated');
+          return;
+        }
+        if (disposition === 'rejected') {
+          localStorage.removeItem(storageKey);
+          repaymentV2RecoveryNotice = '';
+          repaymentV2RecoveryCloseAction = false;
+          toastStore.error(status.last_error[0] || result.errorMessage || 'The repayment request was rejected with no effect.', 10000);
+          return;
+        }
+        if (disposition === 'needs_additional_repayment') {
+          localStorage.removeItem(storageKey);
+          repaymentV2RecoveryCloseAction = false;
+          repaymentV2RecoveryNotice = 'The repayment receipt is recorded, but accrued interest left residual debt and the vault remains open. Review the refreshed debt, then deliberately submit a new repayment with a fresh request ID; do not retry the completed request.';
+          repayAmount = '';
+          await vaultStore.refreshVault(vault.vaultId);
+          appDataStore.fetchCollateralTotals(true).catch(() => {});
+          walletStore.refreshBalance({ skipCache: true });
+          dispatch('updated');
+          toastStore.info(repaymentV2RecoveryNotice, 12000);
+          return;
+        }
+        repaymentV2RecoveryNotice = `Repayment request #${activeIntent.requestId} is ${Object.keys(status.phase)[0]}. Its exact request ID is retained; retry only this same request after reviewing its journal status. ${result.errorMessage || ''}`;
+        toastStore.info(repaymentV2RecoveryNotice, 12000);
+      });
+    } catch (error) {
+      restoreSavedRepaymentV2Intent();
+      toastStore.error(`icUSD repayment remains unresolved. Reconcile the exact owner request before retrying. ${error instanceof Error ? error.message : ''}`, 12000);
+    } finally {
+      isProcessing = false;
+    }
+  }
+
+  function refreshStableRepayRecoveryNotice() {
+    stableRepayRecoveryNotice = '';
+    if (typeof localStorage === 'undefined') return;
+    const identity = stableRepayIdentity();
+    if (!identity) return;
+    const current = localStorage.getItem(stableRepaymentIntentKey(identity.owner, identity.network));
+    if (current) {
+      const intent = parseStableRepaymentIntent(current);
+      stableRepayRecoveryNotice = intent && intent.owner === identity.owner && intent.network === identity.network
+        ? `Stable repayment request #${intent.requestId} is saved for ${intent.token}, vault #${intent.vaultId}, amount ${intent.amountRawE6} raw units. Reconcile or replay only those exact arguments.`
+        : 'A saved stable repayment request could not be validated. Do not start another stable repayment; reconcile the owner journal first.';
+      return;
+    }
+    // A pre-V2 stable intent has no backend request ID or exact status journal.
+    // Keep it as a hold across the migration instead of silently forgetting it.
+    for (let i = 0; i < localStorage.length; i++) {
+      const candidate = localStorage.key(i);
+      if (candidate?.startsWith(legacyStableRepayIntentPrefix(identity.owner, identity.network))) {
+        stableRepayRecoveryNotice = 'A pre-V2 stable repayment is unresolved and has no exact status journal. Inspect ledger and vault activity before starting another stable repayment.';
+        return;
+      }
+    }
+    for (const token of ['CKUSDT', 'CKUSDC'] as const) {
+      const key = legacyStableRepayIntentKey(identity.owner, identity.network, vault.vaultId, token);
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        const intent = parseLegacyStableRepayIntent(raw);
+        if (!intent || intent.owner !== identity.owner || intent.network !== identity.network ||
+            intent.vaultId !== String(vault.vaultId) || intent.token !== token) {
+          stableRepayRecoveryNotice = 'A saved stablecoin repayment attempt could not be validated. Do not retry it; inspect the ledger and vault activity first.';
+        } else {
+          stableRepayRecoveryNotice = `A prior ${token} repayment attempt for this vault is unresolved (${intent.stage}). This legacy route has no exact status journal. Inspect ledger and vault activity; do not submit another stable repayment from this card.`;
+        }
+        return;
+      } catch {
+        stableRepayRecoveryNotice = 'A saved stablecoin repayment attempt could not be read. Do not retry it; inspect the ledger and vault activity first.';
+        return;
+      }
+    }
+  }
+
+  async function handleStableRepay(amount: number, token: 'CKUSDT' | 'CKUSDC'): Promise<{ success: boolean; error?: string }> {
+    const exactAmountRawE6 = parseExactTokenAmountRaw(repayAmount, 6);
+    if (exactAmountRawE6 === null) {
+      toastStore.error(`Enter a valid ${token} amount with no more than 6 decimal places`, 8000);
+      return { success: false, error: 'Invalid stable repayment amount.' };
+    }
+    const identity = stableRepayIdentity();
+    if (!identity) { toastStore.error('Connect the wallet before repaying.', 8000); return { success: false, error: 'Connect the wallet before repaying.' }; }
+    if (!navigator.locks?.request) {
+      toastStore.error('This browser cannot safely coordinate repayment attempts. No stable repayment was submitted.', 10000);
+      return { success: false, error: 'This browser cannot safely coordinate repayment attempts.' };
+    }
+    const storageKey = stableRepaymentIntentKey(identity.owner, identity.network);
+    clearMessages();
+    isProcessing = true;
+    let outcome: { success: boolean; error?: string } = { success: false, error: 'Stable repayment was not submitted.' };
+    try {
+      const lockName = repaymentActionLockName(identity.owner, identity.lockScope);
+      await navigator.locks.request(lockName, async () => {
+        const actionContext = captureActionBoundContext();
+        assertActionBoundContextCurrent(actionContext);
+        if (localStorage.getItem(repaymentV2IntentKey(identity.owner, identity.network))) {
+          refreshStableRepayRecoveryNotice();
+          toastStore.error('An icUSD repayment request for this owner is unresolved. Reconcile that exact request before submitting a stablecoin repayment.', 12000);
+          return;
+        }
+        const key = stableRepaymentIntentKey(identity.owner, identity.network);
+        const oldLegacyPrefix = legacyStableRepayIntentPrefix(identity.owner, identity.network);
+        for (let i = 0; i < localStorage.length; i++) {
+          const candidate = localStorage.key(i);
+          if (candidate?.startsWith(oldLegacyPrefix)) throw new Error('A pre-V2 stable repayment is unresolved and has no exact status journal. Inspect ledger and vault activity before proceeding.');
+        }
+        let intent = parseStableRepaymentIntent(localStorage.getItem(key));
+        if (localStorage.getItem(key) && !intent) throw new Error('Saved stable repayment intent is unreadable. Reconcile the owner journal before proceeding.');
+        if (intent && (intent.owner !== identity.owner || intent.network !== identity.network || intent.vaultId !== String(vault.vaultId) ||
+            intent.token !== token || intent.amountRawE6 !== exactAmountRawE6.toString())) {
+          throw new Error(`Stable repayment #${intent.requestId} is bound to ${intent.token}, vault #${intent.vaultId}, amount ${intent.amountRawE6} raw units. Keep those exact arguments while reconciling it.`);
+        }
+        if (!intent) {
+          const state = await ApiClient.getStableRepaymentV2RequestStateBound(actionContext);
+          assertActionBoundContextCurrent(actionContext);
+          const active = state.active_request[0] ?? null;
+          if (active) {
+            if (active.owner.toText() !== identity.owner || active.ledger.toText() !== CONFIG.getStableLedgerId(token))
+              throw new Error('An active stable repayment has an unexpected owner or ledger. No approval was submitted.');
+            intent = { version: 2, owner: identity.owner, network: identity.network, requestId: active.request_id.toString(),
+              vaultId: active.vault_id.toString(), token: ('CKUSDT' in active.token_type ? 'CKUSDT' : 'CKUSDC'),
+              amountRawE6: (active.requested_amount_e8 / 100n).toString(), approvalAttempted: true, backendDispatchAttempted: true };
+            localStorage.setItem(key, JSON.stringify(intent));
+            refreshStableRepayRecoveryNotice();
+            throw new Error(`Recovered active stable repayment #${intent.requestId}. Re-enter its exact token, vault, and amount, then replay that request.`);
+          }
+          intent = { version: 2, owner: identity.owner, network: identity.network, requestId: state.next_request_id.toString(),
+            vaultId: String(vault.vaultId), token, amountRawE6: exactAmountRawE6.toString(), approvalAttempted: false, backendDispatchAttempted: false };
+          if (state.next_request_id <= 0n) throw new Error('Backend returned an invalid stable repayment request ID.');
+        }
+        const persist = () => localStorage.setItem(key, JSON.stringify(intent));
+        // Reserve and persist owner-global monotonic ID and exact arguments before allowance approval.
+        persist();
+        const result = await protocolManager.repayToVaultWithStableV2(actionContext, intent,
+          () => { assertActionBoundContextCurrent(actionContext); intent!.approvalAttempted = true; persist(); },
+          () => typeof window !== 'undefined' && window.confirm('The prior stablecoin approval may have succeeded, but allowance remains insufficient. Retrying approval may charge another ledger fee. Keep the same repayment request ID?'),
+          () => { assertActionBoundContextCurrent(actionContext); intent!.backendDispatchAttempted = true; persist(); });
+        assertActionBoundContextCurrent(actionContext);
+        if (result.status && (result.kind === 'dispatched_ok' || result.kind === 'dispatched_err')) {
+          localStorage.removeItem(key);
+          stableRepayRecoveryNotice = '';
+          if (result.kind === 'dispatched_ok') {
+            outcome = { success: true };
+            toastStore.success(`${token} repayment completed.`, 8000);
+            repayAmount = '';
+            await vaultStore.refreshVault(vault.vaultId);
+            appDataStore.fetchCollateralTotals(true).catch(() => {});
+            walletStore.refreshBalance({ skipCache: true });
+            dispatch('updated');
+          } else outcome = { success: false, error: result.errorMessage ?? 'Stable repayment was rejected.' };
+          return;
+        }
+        stableRepayRecoveryNotice = `Stable repayment request #${intent.requestId} is pending or held. Replay only this exact request after checking its journal.`;
+        outcome = { success: false, error: result.errorMessage ?? stableRepayRecoveryNotice };
+      });
+      return outcome;
+    } catch (err) {
+      refreshStableRepayRecoveryNotice();
+      toastStore.error(`Stable repayment outcome is unresolved. Do not retry until you inspect ledger and vault activity. ${err instanceof Error ? err.message : 'Unknown error'}`, 12000);
+      return { success: false, error: err instanceof Error ? err.message : 'Stable repayment outcome is unresolved.' };
+    } finally {
+      isProcessing = false;
+    }
+  }
+
+  async function handleAddCollateral() {
+    const amountRaw = parseExactTokenAmountRaw(addCollateralAmount, collateralDecimals);
+    if (amountRaw === null) { toastStore.error(`Enter a valid ${collateralSymbol} amount with no more than ${collateralDecimals} decimal places`, 8000); return; }
+    if (!navigator.locks?.request) { toastStore.error('This browser does not support the safety lock required for a collateral top-up.', 10000); return; }
+    clearMessages(); isProcessing = true;
+    const amountText = addCollateralAmount.trim();
+    const targetVaultId = vault.vaultId;
+    const ledgerCanisterId = vaultCollateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
+    const networkKey = `${CONFIG.host}|${CONFIG.currentCanisterId}`;
+    try {
+      const baseContext = captureActionBoundContext();
+      const actionContext = {
+        ...baseContext,
+        assertCurrent: () => baseContext.assertCurrent() && componentActive && vault.vaultId === targetVaultId &&
+          CONFIG.host === networkKey.split('|')[0] && CONFIG.currentCanisterId === networkKey.split('|')[1],
+      };
+      // Share the per-owner/per-ledger sequence lock with root, BTC, and DOGE opens.
+      const rootNetworkScope = CONFIG.isLocal ? 'local' : 'mainnet';
+      const lockName = collateralSequenceLockName(baseContext.expectedPrincipalText, rootNetworkScope, ledgerCanisterId);
+      await navigator.locks.request(lockName, { mode: 'exclusive' }, async () => {
+        assertActionBoundContextCurrent(actionContext);
+        const owner = actionContext.expectedPrincipalText;
+        if (!owner) throw new Error('Connect the wallet for this vault before adding collateral.');
+        const storageKey = `rumi:add-margin-v2:${encodeURIComponent(owner)}:${encodeURIComponent(networkKey)}:${encodeURIComponent(ledgerCanisterId)}:${targetVaultId}`;
+        const ledgerState = await protocolService.getCollateralIngressStateBound(actionContext, ledgerCanisterId);
+        assertActionBoundContextCurrent(actionContext);
+        let intent = parseAddMarginIntent(localStorage.getItem(storageKey));
+        if (localStorage.getItem(storageKey) && !intent) {
+          throw new Error('A saved top-up intent is unreadable. Do not create another request; inspect the collateral journal first.');
+        }
+        if (intent && (intent.owner !== owner || intent.network !== networkKey || intent.ledger !== ledgerCanisterId || intent.vaultId !== String(targetVaultId))) {
+          throw new Error('A saved top-up intent belongs to a different wallet, network, ledger, or vault. Reconcile it before continuing.');
+        }
+        if (intent && intent.amountRaw !== amountRaw.toString()) {
+          throw new Error(`A top-up request for ${intent.amountRaw} raw units is unresolved. Enter that exact amount and reconcile it before starting another top-up.`);
+        }
+
+        const active = ledgerState.active_request[0] ?? null;
+        const latest = ledgerState.latest_result[0] ?? null;
+        if (!intent && active) {
+          const isSameVault = 'AddMargin' in active.operation && active.operation.AddMargin.vault_id === BigInt(targetVaultId);
+          if (!isSameVault || active.amount_raw !== amountRaw) {
+            throw new Error('Another collateral request is active for this ledger. Reconcile it before starting a top-up.');
+          }
+          intent = {
+            version: 1, owner, network: networkKey, ledger: ledgerCanisterId, vaultId: String(targetVaultId),
+            requestId: active.request_id.toString(), amountRaw: active.amount_raw.toString(), approvalAttempted: true,
+          };
+        }
+        if (!intent && !active && addOverMax) {
+          throw new Error(`Exceeds wallet balance (${formatNumber(maxAddCollateral, 4)} ${collateralSymbol}).`);
+        }
+        if (!intent) {
+          const requestId = ledgerState.next_request_id;
+          if (requestId <= 0n) throw new Error('The backend returned an invalid collateral request ID.');
+          intent = {
+            version: 1, owner, network: networkKey, ledger: ledgerCanisterId, vaultId: String(targetVaultId),
+            requestId: requestId.toString(), amountRaw: amountRaw.toString(), approvalAttempted: false,
+          };
+        }
+        const persistIntent = (next: AddMarginIntent) => {
+          localStorage.setItem(storageKey, JSON.stringify(next));
+          intent = next;
+        };
+        // This durable local binding is written before the API may request an approval.
+        persistIntent(intent);
+        let status = [active, latest].find((view) => view?.request_id === BigInt(intent!.requestId)) ?? null;
+        if (!status && BigInt(intent.requestId) < ledgerState.next_request_id) {
+          try { status = await protocolService.getCollateralIngressBound(actionContext, ledgerCanisterId, BigInt(intent.requestId)); }
+          catch { /* unknown remains a hard hold */ }
+          assertActionBoundContextCurrent(actionContext);
+          if (!status) throw new Error('The saved request is older than the current journal and its exact result is unavailable. Do not retry with a new request ID.');
+        }
+        if (status && (status.owner.toText() !== owner || status.ledger.toText() !== ledgerCanisterId ||
+            status.request_id !== BigInt(intent.requestId) || status.amount_raw !== amountRaw ||
+            !('AddMargin' in status.operation) || status.operation.AddMargin.vault_id !== BigInt(targetVaultId))) {
+          throw new Error('The saved request does not match this wallet, vault, ledger, and amount. No new approval or top-up was submitted.');
+        }
+        if (active && active.request_id !== BigInt(intent.requestId)) {
+          throw new Error('Another collateral request became active. Reconcile it before retrying this top-up.');
+        }
+
+        const result = await protocolService.addMarginV2Bound(
+          actionContext,
+          BigInt(intent.requestId),
+          targetVaultId,
+          amountRaw,
+          vaultCollateralType,
+          intent.approvalAttempted,
+          () => persistIntent({ ...intent!, approvalAttempted: true }),
+          () => typeof window !== 'undefined' && window.confirm(
+            `The earlier ${collateralSymbol} approval result was uncertain and the live allowance is still too low. Retrying approval may charge another ledger fee (${exactRawToTokenAmount(String(vaultCollateralInfo?.ledgerFee ?? 10_000), collateralDecimals)} ${collateralSymbol}). The same top-up request ID will be kept. No collateral transfer will be submitted unless the required allowance is confirmed. Continue?`,
+          ),
+        );
+        try { assertActionBoundContextCurrent(actionContext); }
+        catch {
+          toastStore.error('The top-up may still be pending under the previous wallet. Check its exact collateral request before retrying.', 10000);
+          return;
+        }
+
+        const finalStatus = result.status;
+        const isComplete = !!finalStatus && finalStatus.owner.toText() === owner && finalStatus.ledger.toText() === ledgerCanisterId &&
+          finalStatus.request_id === BigInt(intent.requestId) && finalStatus.amount_raw === amountRaw &&
+          'AddMargin' in finalStatus.operation && finalStatus.operation.AddMargin.vault_id === BigInt(targetVaultId) &&
+          'Complete' in finalStatus.phase && finalStatus.result[0] !== undefined && 'AddMargin' in finalStatus.result[0];
+        const rejectionMessage = finalStatus && finalStatus.owner.toText() === owner && finalStatus.ledger.toText() === ledgerCanisterId &&
+          finalStatus.request_id === BigInt(intent.requestId) && finalStatus.amount_raw === amountRaw &&
+          'AddMargin' in finalStatus.operation && finalStatus.operation.AddMargin.vault_id === BigInt(targetVaultId) &&
+          'Rejected' in finalStatus.phase && finalStatus.result[0] !== undefined && 'Rejected' in finalStatus.result[0]
+          ? finalStatus.result[0].Rejected.message : null;
+        const isRejected = rejectionMessage !== null;
+        if (isComplete) {
+          try { localStorage.removeItem(storageKey); } catch { /* exact completed journal remains safe to reconcile next time */ }
+          addMarginRecoveryNotice = '';
+          toastStore.success(`Added ${amountText} ${collateralSymbol}`, 8000);
+          addCollateralAmount = '';
+          await vaultStore.refreshVault(targetVaultId);
+          assertActionBoundContextCurrent(actionContext);
+          walletStore.refreshBalance({ skipCache: true });
+          dispatch('updated');
+        } else if (isRejected) {
+          try { localStorage.removeItem(storageKey); } catch { /* the durable rejected row prevents a duplicate pull */ }
+          addMarginRecoveryNotice = '';
+          toastStore.error(rejectionMessage || 'The backend rejected this top-up.', 10000);
+        } else {
+          if (result.approvalMayHaveMutated && !intent!.approvalAttempted) persistIntent({ ...intent!, approvalAttempted: true });
+          addMarginRecoveryNotice = `Top-up request #${intent.requestId} is pending or unresolved. Recheck this exact request before retrying.`;
+          toastStore.error(`${addMarginRecoveryNotice} No wallet balance change is used as proof. ${result.errorMessage || ''}`, 12000);
+        }
+      });
+    } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 10000);
     } finally { isProcessing = false; }
   }
 
@@ -747,55 +1272,51 @@
   async function handleRepay() {
     const amount = parseFloat(repayAmount);
     if (!amount || amount <= 0) { toastStore.error('Enter a valid amount', 8000); return; }
+    let requestedCloseAfterRepay = isRepayAndClose;
+    let exactSavedRepaymentReplay = false;
+    if (repayTokenType === 'icUSD') {
+      const identity = repaymentV2Identity();
+      const rawAmount = parseExactTokenAmountRaw(repayAmount, 8);
+      if (identity && rawAmount !== null && typeof localStorage !== 'undefined') {
+        try {
+          const saved = parseRepaymentV2Intent(localStorage.getItem(repaymentV2IntentKey(identity.owner, identity.network)));
+          if (saved && saved.owner === identity.owner && saved.network === identity.network &&
+              saved.vaultId === String(vault.vaultId) && saved.requestedAmountRaw === rawAmount.toString()) {
+            requestedCloseAfterRepay = saved.closeAfterRepay;
+            exactSavedRepaymentReplay = true;
+            repaymentV2RecoveryCloseAction = saved.closeAfterRepay;
+          }
+        } catch { /* handler below will preserve fail-closed storage behavior */ }
+      }
+    }
     // MIN_ICUSD floor still applies to partial repays (anti-spam guarantee on
     // the backend). The compound `repay_and_close_vault` path bypasses it so
     // stuck-zone vaults can be cleared — match that here.
-    if (!isRepayAndClose && amount < MIN_ICUSD) { toastStore.error(`Minimum repay amount is ${MIN_ICUSD} icUSD`, 8000); return; }
-    if (repayOverMax) { toastStore.error(`Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); return; }
-    clearMessages(); isProcessing = true;
-    try {
-      let result;
-      if (isRepayAndClose) {
-        // Compound: repay full debt + withdraw all collateral + close vault in
-        // one backend call (one Oisy consent screen instead of three).
-        result = await protocolManager.repayAndCloseVault(vault.vaultId, amount);
-      } else if (repayTokenType === 'icUSD') {
-        result = await protocolManager.repayToVault(vault.vaultId, amount);
-      } else {
-        result = await protocolManager.repayToVaultWithStable(vault.vaultId, amount, repayTokenType);
+    if (!exactSavedRepaymentReplay && !requestedCloseAfterRepay && amount < MIN_ICUSD) { toastStore.error(`Minimum repay amount is ${MIN_ICUSD} icUSD`, 8000); return; }
+    if (!exactSavedRepaymentReplay && repayOverMax) { toastStore.error(`Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); return; }
+    if (repayTokenType === 'CKUSDT' || repayTokenType === 'CKUSDC') {
+      if (requestedCloseAfterRepay) {
+        toastStore.error('Stablecoin repayment cannot close the vault. Choose icUSD to repay and close.', 8000);
+        return;
       }
+      const result = await handleStableRepay(amount, repayTokenType);
       if (result.success) {
-        const actionLabel = isRepayAndClose
-          ? (isNativeXrp
-              ? `Repaid all debt and queued your withdrawable XRP for settlement. ${nativeXrpKeepOpenCloseCopy()}`
-              : 'Repaid and closed vault')
-          : `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`;
-        const msg = result.oisyResilient
-          ? `${actionLabel} (wallet glitch ignored — operation confirmed on-chain).`
-          : actionLabel;
-        toastStore.success(msg, 8000); repayAmount = '';
+        toastStore.success(`Repaid ${amount} ${repayTokenType}`, 8000);
+        repayAmount = '';
         await new Promise(r => setTimeout(r, 1000));
-        // For non-XRP repay-and-close, refresh the full vault list because the
-        // vault is gone. Native-XRP vaults remain open.
-        if (isRepayAndClose && !isNativeXrp) {
-          await vaultStore.refreshVaults();
-        } else {
-          await vaultStore.refreshVault(vault.vaultId);
-        }
-        // Repaying lowers this collateral's aggregate debt: refresh ceiling headroom.
+        await vaultStore.refreshVault(vault.vaultId);
         appDataStore.fetchCollateralTotals(true).catch(() => {});
         walletStore.refreshBalance({ skipCache: true });
         dispatch('updated');
-      } else { toastStore.error(result.error || 'Failed', 8000); }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      // Oisy two-step flow: approval succeeded, user just needs to click again
-      if (msg.includes('click Repay again')) {
-        toastStore.info('Approved! Click Repay again to complete.', 8000);
-      } else {
-        toastStore.error(msg, 8000);
+      } else if (!stableRepayRecoveryNotice) {
+        toastStore.error(result.error || 'Stable repayment was not completed.', 8000);
       }
-    } finally { isProcessing = false; }
+      return;
+    }
+    if (repayTokenType === 'icUSD') {
+      await handleIcusdRepay(amount, requestedCloseAfterRepay);
+      return;
+    }
   }
 
   async function handleWithdrawAndClose() {
@@ -1003,13 +1524,16 @@
               <div class="input-header">
                 <span class="input-label">Deposit Collateral</span>
                 {#if maxAddCollateral > 0}
-                  <button class="max-text" on:click={setMaxAddCollateral}>Max: {floorTo(maxAddCollateral, collateralFloorDigits)}</button>
+                  <button class="max-text" on:click={setMaxAddCollateral} disabled={!!addMarginRecoveryNotice}>Max: {floorTo(maxAddCollateral, collateralFloorDigits)}</button>
                 {/if}
               </div>
+              {#if addMarginRecoveryNotice}
+                <p class="add-margin-recovery" role="status">{addMarginRecoveryNotice}</p>
+              {/if}
               <div class="action-input-row">
                 <input type="number" class="action-input" bind:value={addCollateralAmount}
                   on:blur={() => clampInput('add')}
-                  placeholder="0.00" min="0.001" step="0.01" disabled={isProcessing} />
+                  placeholder="0.00" min="0.001" step="0.01" disabled={isProcessing} readonly={!!addMarginRecoveryNotice} />
                 <span class="input-suffix">{collateralSymbol}</span>
               </div>
               <div class="input-submit-row">
@@ -1017,7 +1541,7 @@
                   <span class="input-usd-hint">≈ ${formatNumber(parseFloat(addCollateralAmount) * vaultCollateralPrice, 2)}</span>
                 {/if}
                 <button class="btn-submit btn-submit-collateral" on:click={handleAddCollateral}
-                  disabled={isProcessing || !addCollateralAmount || addOverMax}>
+                  disabled={isProcessing || !addCollateralAmount}>
                   {isProcessing ? '...' : 'Deposit'}
                 </button>
               </div>
@@ -1158,17 +1682,23 @@
                   Repays all debt, queues your withdrawable XRP for settlement, and keeps the vault open because the XRP account reserve remains locked.
                 </span>
               {/if}
+              {#if isCkStableRepay && stableRepayRecoveryNotice}
+                <p class="add-margin-recovery" role="status">{stableRepayRecoveryNotice}</p>
+              {/if}
+              {#if repayTokenType === 'icUSD' && repaymentV2RecoveryNotice}
+                <p class="add-margin-recovery" role="status">{repaymentV2RecoveryNotice}</p>
+              {/if}
               <div class="input-submit-row">
                 {#if !bitcoinOnly && !hasChangedToken}
                   <span class="token-hint">Click token name to pay with ckUSDT or ckUSDC</span>
                 {/if}
                 <button class="btn-submit btn-submit-debt" on:click={handleRepay}
-                  disabled={isProcessing || !repayAmount || repayOverMax}>
+                  disabled={isProcessing || !repayAmount || (repayTokenType !== 'icUSD' && repayOverMax) || (isCkStableRepay && !!stableRepayRecoveryNotice)}>
                   {#if isProcessing}
                     ...
-                  {:else if isNativeXrp && isRepayAndClose}
+                  {:else if repayTokenType === 'icUSD' && isNativeXrp && (isRepayAndClose || repaymentV2RecoveryCloseAction)}
                     Repay &amp; Keep Open
-                  {:else if isRepayAndClose}
+                  {:else if repayTokenType === 'icUSD' && (isRepayAndClose || repaymentV2RecoveryCloseAction)}
                     Repay &amp; Close
                   {:else}
                     Repay
@@ -1360,6 +1890,7 @@
   }
   .input-label { font-size: 0.75rem; font-weight: 500; color: var(--rumi-text-secondary); }
   .input-hint { font-size: 0.6875rem; color: var(--rumi-text-muted); margin-top: -0.125rem; }
+  .add-margin-recovery { margin: 0; font-size: 0.6875rem; line-height: 1.4; color: var(--rumi-caution); }
 
   .action-input-row { position: relative; }
   .action-input {

@@ -162,9 +162,8 @@ fn parse_latest_blockhash_reports_rpc_error() {
 fn parse_latest_blockhash_rejects_non_32_byte_decode() {
     // A base58 string that decodes to the wrong length is rejected.
     let short = bs58::encode([1u8; 31]).into_string();
-    let json = format!(
-        r#"{{"jsonrpc":"2.0","result":{{"value":{{"blockhash":"{short}"}}}},"id":1}}"#
-    );
+    let json =
+        format!(r#"{{"jsonrpc":"2.0","result":{{"value":{{"blockhash":"{short}"}}}},"id":1}}"#);
     assert!(parse_latest_blockhash(&json).is_err());
 }
 
@@ -174,7 +173,10 @@ fn parse_latest_blockhash_rejects_non_32_byte_decode() {
 fn send_payload_embeds_b64_and_base64_encoding() {
     let payload = build_send_transaction_payload("AQID");
     assert!(payload.contains(r#""method":"sendTransaction""#));
-    assert!(payload.contains(r#""AQID""#), "base64 tx is the first param");
+    assert!(
+        payload.contains(r#""AQID""#),
+        "base64 tx is the first param"
+    );
     assert!(payload.contains(r#""encoding":"base64""#));
     assert!(payload.contains(r#""skipPreflight":false"#));
 }
@@ -182,7 +184,8 @@ fn send_payload_embeds_b64_and_base64_encoding() {
 #[test]
 fn parse_send_signature_extracts_result_string() {
     // sendTransaction returns the signature as `result` (a top-level base58 string).
-    let sig = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW";
+    let sig =
+        "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW";
     let json = format!(r#"{{"jsonrpc":"2.0","result":"{sig}","id":1}}"#);
     assert_eq!(parse_send_transaction_signature(&json).unwrap(), sig);
 }
@@ -233,7 +236,8 @@ fn parse_get_transaction_failed_meta_is_failed() {
 
 #[test]
 fn parse_get_transaction_reports_rpc_error() {
-    let json = r#"{"jsonrpc":"2.0","error":{"code":-32004,"message":"Block not available"},"id":1}"#;
+    let json =
+        r#"{"jsonrpc":"2.0","error":{"code":-32004,"message":"Block not available"},"id":1}"#;
     assert!(parse_get_transaction(json).is_err());
 }
 

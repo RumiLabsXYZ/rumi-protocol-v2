@@ -10,7 +10,7 @@ use ic_canister_log::log;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::btree_map::Entry::{Occupied, Vacant};
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,7 +50,18 @@ mod three_usd_v2_migration_tests {
                     || name == "three_usd_reserve_payout_parents"
                     || name == "three_usd_reserve_ingress_enabled"
                     || name == "sp_three_usd_reserve_absorb_results_by_proof"
-                    || name == "sp_burn_refunds_by_proof")
+                    || name == "sp_burn_refunds_by_proof"
+                    || name == "pending_treasury_payments"
+                    || name == "pending_stability_pool_interest_mints"
+                    || name == "pending_collateral_withdrawals"
+                    || name == "consumed_collateral_withdrawal_ids"
+                    || name == "pending_borrow_mints"
+                    || name == "borrow_mint_retry_cursor"
+                    || name == "stability_pool_interest_mint_retry_cursor"
+                    || name == "held_legacy_stability_pool_interest"
+                    || name == "held_interest_distribution_shares"
+                    || name == "released_interest_distribution_shares"
+                    || name == "stability_pool_interest_outbox_version")
         });
         let mut legacy = Vec::new();
         ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut legacy).unwrap();
@@ -60,9 +71,89 @@ mod three_usd_v2_migration_tests {
         assert!(restored.pending_3usd_refund_journals.is_empty());
         assert!(restored.three_usd_reserve_ingress_journals.is_empty());
         assert!(restored.three_usd_reserve_payout_parents.is_empty());
-        assert!(restored.sp_three_usd_reserve_absorb_results_by_proof.is_empty());
+        assert!(restored
+            .sp_three_usd_reserve_absorb_results_by_proof
+            .is_empty());
         assert!(restored.sp_burn_refunds_by_proof.is_empty());
+        assert!(restored.pending_treasury_payments.is_empty());
+        assert!(restored.pending_stability_pool_interest_mints.is_empty());
+        assert!(restored.pending_collateral_withdrawals.is_empty());
+        assert!(restored.consumed_collateral_withdrawal_ids.is_empty());
+        assert!(restored.pending_borrow_mints.is_empty());
+        assert_eq!(restored.borrow_mint_retry_cursor, None);
+        assert_eq!(restored.stability_pool_interest_mint_retry_cursor, None);
+        assert!(restored.held_legacy_stability_pool_interest.is_empty());
+        assert!(restored.held_interest_distribution_shares.is_empty());
+        assert!(restored.released_interest_distribution_shares.is_empty());
+        assert_eq!(restored.stability_pool_interest_outbox_version, 0);
         assert!(!restored.three_usd_reserve_ingress_enabled);
+    }
+
+    #[test]
+    fn pending_borrow_mint_roundtrips_and_reserves_caps() {
+        let mut state = State::default();
+        let collateral = Principal::from_slice(&[0x61]);
+        state.pending_borrow_mints.insert(
+            7,
+            PendingBorrowMint {
+                op_nonce: 7,
+                vault_id: 8,
+                owner: Principal::from_slice(&[0x62]),
+                collateral_type: collateral,
+                ledger: Principal::from_slice(&[0x63]),
+                gross_amount_e8s: 500,
+                fee_e8s: 5,
+                net_amount_e8s: 495,
+                created_at_time_ns: 10,
+                created_at_ns: 10,
+                attempts: 1,
+                last_attempt_at_ns: 11,
+                held_reason: Some("ambiguous".into()),
+            },
+        );
+        assert_eq!(state.pending_borrow_reserved_for(&collateral), 500);
+        assert_eq!(state.pending_borrow_reserved_global(), 500);
+        assert!(state.vault_has_unresolved_borrow_mint(8));
+        assert!(!state.vault_has_unresolved_borrow_mint(9));
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&state, &mut encoded).unwrap();
+        let restored: State = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        assert_eq!(
+            restored.pending_borrow_mints.get(&7),
+            state.pending_borrow_mints.get(&7)
+        );
+        assert_eq!(restored.pending_borrow_reserved_for(&collateral), 500);
+    }
+
+    #[test]
+    fn pending_borrow_retry_batch_round_robins_past_repeated_failures() {
+        let mut state = State::default();
+        for nonce in 1..=18u128 {
+            state.pending_borrow_mints.insert(
+                nonce,
+                PendingBorrowMint {
+                    op_nonce: nonce,
+                    vault_id: nonce as u64,
+                    owner: Principal::from_slice(&[0x62]),
+                    collateral_type: Principal::from_slice(&[0x61]),
+                    ledger: Principal::from_slice(&[0x63]),
+                    gross_amount_e8s: 100,
+                    fee_e8s: 1,
+                    net_amount_e8s: 99,
+                    created_at_time_ns: nonce as u64,
+                    created_at_ns: nonce as u64,
+                    attempts: 0,
+                    last_attempt_at_ns: 0,
+                    held_reason: (nonce == 1).then(|| "held".into()),
+                },
+            );
+        }
+        let first = state.next_pending_borrow_mint_batch(16);
+        assert_eq!(first.first().unwrap().op_nonce, 2);
+        assert_eq!(first.last().unwrap().op_nonce, 17);
+        let second = state.next_pending_borrow_mint_batch(16);
+        assert!(second.iter().any(|row| row.op_nonce == 18));
+        assert_eq!(second.len(), 16);
     }
 
     #[test]
@@ -136,19 +227,36 @@ mod three_usd_v2_migration_tests {
         };
         let mut state = State::default();
         let mut journal = ingress_journal(ThreeUsdReserveIngressPhase::AdmissionPending);
-        state.three_usd_reserve_ingress_journals.insert(key.clone(), journal.clone());
-        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), Some(7));
+        state
+            .three_usd_reserve_ingress_journals
+            .insert(key.clone(), journal.clone());
+        assert_eq!(
+            state.three_usd_default_account_refund_commitment(ledger, 7),
+            Some(7)
+        );
 
-        journal.phase = ThreeUsdReserveIngressPhase::SubmittedOrUnknown { tuple: ingress_tuple() };
-        state.three_usd_reserve_ingress_journals.insert(key.clone(), journal.clone());
-        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), Some(107));
+        journal.phase = ThreeUsdReserveIngressPhase::SubmittedOrUnknown {
+            tuple: ingress_tuple(),
+        };
+        state
+            .three_usd_reserve_ingress_journals
+            .insert(key.clone(), journal.clone());
+        assert_eq!(
+            state.three_usd_default_account_refund_commitment(ledger, 7),
+            Some(107)
+        );
 
         journal.phase = ThreeUsdReserveIngressPhase::TransferConfirmed {
             tuple: ingress_tuple(),
             block_index: 10,
         };
-        state.three_usd_reserve_ingress_journals.insert(key.clone(), journal.clone());
-        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), Some(107));
+        state
+            .three_usd_reserve_ingress_journals
+            .insert(key.clone(), journal.clone());
+        assert_eq!(
+            state.three_usd_default_account_refund_commitment(ledger, 7),
+            Some(107)
+        );
 
         journal.phase = ThreeUsdReserveIngressPhase::Absorbed {
             tuple: ingress_tuple(),
@@ -164,8 +272,13 @@ mod three_usd_v2_migration_tests {
                 collateral_price_e8s: 1,
             },
         };
-        state.three_usd_reserve_ingress_journals.insert(key.clone(), journal.clone());
-        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), None);
+        state
+            .three_usd_reserve_ingress_journals
+            .insert(key.clone(), journal.clone());
+        assert_eq!(
+            state.three_usd_default_account_refund_commitment(ledger, 7),
+            None
+        );
 
         journal.phase = ThreeUsdReserveIngressPhase::Absorbed {
             tuple: ingress_tuple(),
@@ -181,8 +294,13 @@ mod three_usd_v2_migration_tests {
                 collateral_price_e8s: 1,
             },
         };
-        state.three_usd_reserve_ingress_journals.insert(key, journal);
-        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), Some(0));
+        state
+            .three_usd_reserve_ingress_journals
+            .insert(key, journal);
+        assert_eq!(
+            state.three_usd_default_account_refund_commitment(ledger, 7),
+            Some(0)
+        );
     }
 
     #[test]
@@ -202,14 +320,21 @@ mod three_usd_v2_migration_tests {
                 error: "failed".into(),
             }),
         );
-        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), Some(107));
+        assert_eq!(
+            state.three_usd_default_account_refund_commitment(ledger, 7),
+            Some(107)
+        );
     }
 
     #[test]
     fn v2_refund_child_is_counted_once_by_its_exact_default_dispatch() {
         let ledger = Principal::from_slice(&[0x43]);
         let pool = Principal::from_slice(&[0x41]);
-        let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 3, absorb_id: 9 };
+        let key = ThreeUsdReserveIngressKey {
+            stability_pool: pool,
+            vault_id: 3,
+            absorb_id: 9,
+        };
         let nonce = 7;
         let mut state = State::default();
         let mut journal = ingress_journal(ThreeUsdReserveIngressPhase::TransferConfirmed {
@@ -222,28 +347,42 @@ mod three_usd_v2_migration_tests {
             source_subaccount: None,
             settled_receipt: None,
         });
-        state.three_usd_reserve_ingress_journals.insert(key, journal);
-        state.pending_3usd_refunds.insert(nonce, PendingThreeUsdRefund {
-            stability_pool: pool,
-            ledger,
-            amount_e8s: 100,
-            vault_id: 3,
-            retry_count: 0,
-            op_nonce: nonce,
-            parent_absorb_id: Some(9),
-        });
+        state
+            .three_usd_reserve_ingress_journals
+            .insert(key, journal);
+        state.pending_3usd_refunds.insert(
+            nonce,
+            PendingThreeUsdRefund {
+                stability_pool: pool,
+                ledger,
+                amount_e8s: 100,
+                vault_id: 3,
+                retry_count: 0,
+                op_nonce: nonce,
+                parent_absorb_id: Some(9),
+            },
+        );
         state.pending_3usd_refund_journals.insert(
             nonce,
-            ThreeUsdRefundDispatchState::NeverDispatchedDefault { gross_amount_e8s: 100 },
+            ThreeUsdRefundDispatchState::NeverDispatchedDefault {
+                gross_amount_e8s: 100,
+            },
         );
-        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), Some(107));
+        assert_eq!(
+            state.three_usd_default_account_refund_commitment(ledger, 7),
+            Some(107)
+        );
     }
 
     #[test]
     fn v2_partial_refund_child_uses_committed_proof_before_parent_terminalizes() {
         let ledger = Principal::from_slice(&[0x43]);
         let pool = Principal::from_slice(&[0x41]);
-        let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 3, absorb_id: 9 };
+        let key = ThreeUsdReserveIngressKey {
+            stability_pool: pool,
+            vault_id: 3,
+            absorb_id: 9,
+        };
         let nonce = 7;
         let proof = crate::icrc3_proof::SpWritedownProof {
             block_index: 10,
@@ -252,42 +391,81 @@ mod three_usd_v2_migration_tests {
         };
         let mut state = State::default();
         let mut journal = ingress_journal(ThreeUsdReserveIngressPhase::TransferConfirmed {
-            tuple: ingress_tuple(), block_index: 10,
+            tuple: ingress_tuple(),
+            block_index: 10,
         });
         journal.refund = Some(ThreeUsdReserveIngressRefund {
-            op_nonce: nonce, gross_amount_e8s: 50, source_subaccount: None,
+            op_nonce: nonce,
+            gross_amount_e8s: 50,
+            source_subaccount: None,
             settled_receipt: None,
         });
-        state.three_usd_reserve_ingress_journals.insert(key.clone(), journal);
-        state.pending_3usd_refunds.insert(nonce, PendingThreeUsdRefund {
-            stability_pool: pool, ledger, amount_e8s: 50, vault_id: 3,
-            retry_count: 0, op_nonce: nonce, parent_absorb_id: Some(9),
-        });
-        state.pending_3usd_refund_journals.insert(
-            nonce, ThreeUsdRefundDispatchState::NeverDispatchedDefault { gross_amount_e8s: 50 },
-        );
-        let result = crate::StabilityPoolLiquidationResult {
-            success: true, vault_id: 3, liquidated_debt: 100,
-            collateral_received: 50, collateral_type: "ICP".into(),
-            block_index: 0, fee: 0, collateral_price_e8s: 1,
-        };
-        state.sp_three_usd_reserve_absorb_results_by_proof.insert(
-            (proof.ledger_kind, proof.block_index), StoredThreeUsdReserveAbsorbResult {
-                caller: pool, vault_id: 3, icusd_debt_covered_e8s: 200,
-                three_usd_amount_e8s: 100, ledger, proof: proof.clone(), result,
+        state
+            .three_usd_reserve_ingress_journals
+            .insert(key.clone(), journal);
+        state.pending_3usd_refunds.insert(
+            nonce,
+            PendingThreeUsdRefund {
+                stability_pool: pool,
+                ledger,
+                amount_e8s: 50,
+                vault_id: 3,
+                retry_count: 0,
+                op_nonce: nonce,
+                parent_absorb_id: Some(9),
             },
         );
-        state.consumed_writedown_proofs.insert((proof.ledger_kind, proof.block_index));
-        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), Some(57));
+        state.pending_3usd_refund_journals.insert(
+            nonce,
+            ThreeUsdRefundDispatchState::NeverDispatchedDefault {
+                gross_amount_e8s: 50,
+            },
+        );
+        let result = crate::StabilityPoolLiquidationResult {
+            success: true,
+            vault_id: 3,
+            liquidated_debt: 100,
+            collateral_received: 50,
+            collateral_type: "ICP".into(),
+            block_index: 0,
+            fee: 0,
+            collateral_price_e8s: 1,
+        };
+        state.sp_three_usd_reserve_absorb_results_by_proof.insert(
+            (proof.ledger_kind, proof.block_index),
+            StoredThreeUsdReserveAbsorbResult {
+                caller: pool,
+                vault_id: 3,
+                icusd_debt_covered_e8s: 200,
+                three_usd_amount_e8s: 100,
+                ledger,
+                proof: proof.clone(),
+                result,
+            },
+        );
+        state
+            .consumed_writedown_proofs
+            .insert((proof.ledger_kind, proof.block_index));
+        assert_eq!(
+            state.three_usd_default_account_refund_commitment(ledger, 7),
+            Some(57)
+        );
         state.sp_three_usd_reserve_absorb_results_by_proof.clear();
-        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), None);
+        assert_eq!(
+            state.three_usd_default_account_refund_commitment(ledger, 7),
+            None
+        );
     }
 
     #[test]
     fn cl07_pending_payout_invariant_uses_operation_id_and_exact_identity() {
         let pool = Principal::from_slice(&[0x41]);
         let ledger = Principal::from_slice(&[0x43]);
-        let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 3, absorb_id: 9 };
+        let key = ThreeUsdReserveIngressKey {
+            stability_pool: pool,
+            vault_id: 3,
+            absorb_id: 9,
+        };
         let nonce = 77;
         let mut state = State::default();
         let mut journal = ingress_journal(ThreeUsdReserveIngressPhase::AdmissionPending);
@@ -296,8 +474,14 @@ mod three_usd_v2_migration_tests {
                 op_nonce: nonce,
                 ledger,
                 proof_kind: PayoutProofKind::Icrc3,
-                source: icrc_ledger_types::icrc1::account::Account { owner: Principal::anonymous(), subaccount: None },
-                destination: icrc_ledger_types::icrc1::account::Account { owner: pool, subaccount: None },
+                source: icrc_ledger_types::icrc1::account::Account {
+                    owner: Principal::anonymous(),
+                    subaccount: None,
+                },
+                destination: icrc_ledger_types::icrc1::account::Account {
+                    owner: pool,
+                    subaccount: None,
+                },
                 gross_amount_e8s: 100,
                 net_amount_e8s: 90,
                 fee_e8s: 10,
@@ -307,24 +491,37 @@ mod three_usd_v2_migration_tests {
             },
             receipt: None,
         });
-        state.three_usd_reserve_ingress_journals.insert(key.clone(), journal);
+        state
+            .three_usd_reserve_ingress_journals
+            .insert(key.clone(), journal);
         state.three_usd_reserve_payout_parents.insert(nonce, key);
-        state.pending_margin_transfers.insert(nonce, PendingMarginTransfer {
-            vault_id: 3,
-            owner: pool,
-            margin: ICP::new(100),
-            collateral_type: ledger,
-            retry_count: 0,
-            op_nonce: nonce,
-            ledger: Some(ledger),
-            transfer_amount_raw: Some(90),
-            held_for_manual_retry: false,
-            reconciliation_required: false,
-            min_net_collateral_raw: None,
-        });
+        state.pending_margin_transfers.insert(
+            nonce,
+            PendingMarginTransfer {
+                vault_id: 3,
+                owner: pool,
+                margin: ICP::new(100),
+                collateral_type: ledger,
+                retry_count: 0,
+                op_nonce: nonce,
+                ledger: Some(ledger),
+                transfer_amount_raw: Some(90),
+                redemption_transfer: None,
+                held_for_manual_retry: false,
+                reconciliation_required: false,
+                min_net_collateral_raw: None,
+            },
+        );
         assert!(state.check_invariants().is_ok());
-        state.pending_margin_transfers.get_mut(&nonce).unwrap().vault_id = 4;
-        assert!(state.check_invariants().unwrap_err().contains("lost its pending margin row"));
+        state
+            .pending_margin_transfers
+            .get_mut(&nonce)
+            .unwrap()
+            .vault_id = 4;
+        assert!(state
+            .check_invariants()
+            .unwrap_err()
+            .contains("lost its pending margin row"));
     }
 }
 
@@ -503,6 +700,25 @@ impl RedemptionSimulationPlan {
         }
         results
     }
+
+    /// Checked preview for live redemption decisions. Historical replay keeps
+    /// using `simulate`, whose zero fallback is part of the legacy event path.
+    /// A live payout must reject if even one selected vault's conversion cannot
+    /// be represented; otherwise that row could retire debt with no collateral.
+    pub(crate) fn try_simulate(
+        &self,
+        icusd_amount: ICUSD,
+    ) -> Option<Vec<crate::event::VaultRedemption>> {
+        let simulated = self.simulate(icusd_amount);
+        for redemption in &simulated {
+            crate::numeric::try_icusd_to_collateral_amount(
+                ICUSD::new(redemption.icusd_redeemed_e8s),
+                self.price,
+                self.decimals,
+            )?;
+        }
+        Some(simulated)
+    }
 }
 
 pub const DEFAULT_BORROW_FEE: Ratio = Ratio::new(dec!(0.005));
@@ -558,6 +774,66 @@ pub struct PendingThreePoolDonation {
     pub phase: ThreePoolDonationPhase,
 }
 
+/// Exact icUSD mint and Stability Pool notification identity, durably pinned
+/// before dispatch. A queued row owns its interest share through recovery.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PendingStabilityPoolInterestMint {
+    pub operation_nonce: u128,
+    pub ledger: Principal,
+    pub pool: Principal,
+    pub amount_e8s: u64,
+    pub collateral_type: Principal,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub phase: StabilityPoolInterestMintPhase,
+    #[serde(default)]
+    pub attempts: u8,
+    #[serde(default)]
+    pub last_attempt_at_ns: u64,
+}
+
+/// Interest share whose configured Stability Pool destination was unavailable
+/// when a complete distribution batch was pinned. It remains held with its
+/// original collateral and amount; it is never re-split automatically.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct HeldInterestDistributionShare {
+    pub operation_nonce: u128,
+    pub amount_e8s: u64,
+    pub collateral_type: Principal,
+    /// None denotes an invalid historical split; Some retains the configured
+    /// recipient whose required endpoint was unavailable.
+    pub destination: Option<InterestDestination>,
+    pub reason: String,
+}
+
+/// Read-only inventory row for aggregate Stability Pool interest retained
+/// from a pre-outbox snapshot. The source snapshot did not preserve a
+/// per-operation mint tuple, so this row is intentionally only an amount and
+/// collateral identity.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct HeldLegacyStabilityPoolInterestEntry {
+    pub collateral_type: Principal,
+    pub amount_e8s: u64,
+}
+
+/// Bounded controller inventory page plus exact aggregate status for legacy
+/// Stability Pool interest. `next_start_after` is absent when this is the last
+/// page.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct HeldLegacyStabilityPoolInterestPage {
+    pub entries: Vec<HeldLegacyStabilityPoolInterestEntry>,
+    pub next_start_after: Option<Principal>,
+    pub total_entry_count: u64,
+    pub total_amount_e8s: u128,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum StabilityPoolInterestMintPhase {
+    MintPending,
+    NotificationPending { mint_block: u64 },
+    Held { reason: String },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum ThreePoolDonationPhase {
     MintPending,
@@ -578,11 +854,73 @@ pub struct PendingAmmDonation {
     pub phase: AmmDonationPhase,
 }
 
+/// Source fee class for an exact treasury payment.
+#[derive(
+    candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize,
+)]
+pub enum TreasuryPaymentKind {
+    BorrowingFeeMint,
+    LiquidationCollateralTransfer,
+    LiquidationStablecoinSurcharge,
+    InterestIcusdMint,
+    InterestStablecoinTransfer,
+    StablecoinRepaySurcharge,
+}
+
+/// Lifecycle for a pinned treasury payment. A confirmed ledger receipt moves
+/// the row to notification-only work; a held row is never dispatched again.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum TreasuryPaymentPhase {
+    /// The obligation is durable but its destination or ledger was missing.
+    /// It has never been dispatched and can be pinned once when configured.
+    AwaitingDestination,
+    TransferPending,
+    NotificationPending {
+        block_index: u64,
+    },
+    Held {
+        reason: String,
+    },
+}
+
+/// Exact source transfer and destination notification identity, persisted
+/// before the first ledger await. Both fee paths currently use fee=None; the
+/// optional field preserves that exact ICRC-1 tuple shape.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PendingTreasuryPayment {
+    pub operation_id: u128,
+    /// Transfer identity nonce. Zero on older rows means `operation_id`; a
+    /// no-dispatch obligation receives a fresh nonce only when its route pins.
+    #[serde(default)]
+    pub transfer_nonce: u128,
+    pub kind: TreasuryPaymentKind,
+    pub ledger: Principal,
+    pub from_owner: Principal,
+    pub from_subaccount: Option<[u8; 32]>,
+    pub recipient: icrc_ledger_types::icrc1::account::Account,
+    pub amount_e8s: u64,
+    pub fee_e8s: Option<u64>,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub deposit_type: crate::treasury::DepositType,
+    pub asset_type: crate::treasury::AssetType,
+    pub deposit_memo: Option<String>,
+    pub phase: TreasuryPaymentPhase,
+    /// Number of exact-tuple source-transfer calls durably recorded before
+    /// dispatch. Defaults preserve snapshots written before retry tracking.
+    #[serde(default)]
+    pub dispatch_attempts: u8,
+    #[serde(default)]
+    pub last_dispatch_at_ns: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum AmmDonationPhase {
     AwaitingPoolConfig,
     MintPending,
-    NotifyPending { mint_block: u64 },
+    NotifyPending {
+        mint_block: u64,
+    },
     /// Exact transfer tuple is outside the ledger dedup horizon; never retry
     /// under a new identity absent a complete history proof.
     MintHeldAfterTooOld,
@@ -1196,7 +1534,9 @@ pub struct BotPaymentReceipt {
     pub aggregate_complete: bool,
 }
 
-fn legacy_bot_payment_receipt_complete() -> bool { true }
+fn legacy_bot_payment_receipt_complete() -> bool {
+    true
+}
 
 /// Immutable, amount-bearing confirmation for one settled claim generation.
 /// The exact canonical block set is retained for reply-loss idempotency.
@@ -1857,6 +2197,35 @@ impl Default for Mode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy, candid::CandidType)]
+pub struct PinnedRedemptionTransfer {
+    pub op_nonce: u128,
+    pub ledger: Principal,
+    pub recipient: Principal,
+    pub amount_raw: u64,
+    pub fee_raw: u64,
+    pub fee_is_explicit: bool,
+    /// The 16-byte memo encoded as a big-endian u128.
+    pub memo: u128,
+    pub created_at_time_ns: u64,
+}
+
+impl PinnedRedemptionTransfer {
+    pub fn matches_pending(&self, payout: &PendingMarginTransfer) -> bool {
+        self.op_nonce != 0
+            && self.op_nonce == payout.op_nonce
+            && self.ledger != Principal::anonymous()
+            && Some(self.ledger) == payout.ledger
+            && Some(self.amount_raw) == payout.transfer_amount_raw
+            && self.recipient == payout.owner
+            && self.amount_raw > 0
+            && self.amount_raw.checked_add(self.fee_raw) == Some(payout.margin.to_u64())
+            && self.fee_is_explicit
+            && self.memo == self.op_nonce
+            && self.created_at_time_ns == (self.op_nonce >> 64) as u64
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy, candid::CandidType)]
 pub struct PendingMarginTransfer {
     #[serde(default)]
     pub vault_id: u64,
@@ -1884,6 +2253,10 @@ pub struct PendingMarginTransfer {
     pub ledger: Option<Principal>,
     #[serde(default)]
     pub transfer_amount_raw: Option<u64>,
+    /// Full ICRC transfer tuple for redemption claims. Other payout kinds
+    /// keep their established nonce-based transfer path.
+    #[serde(default)]
+    pub redemption_transfer: Option<PinnedRedemptionTransfer>,
     /// Retry-cap holds are safe to rearm only when exact args and nonce exist.
     #[serde(default)]
     pub held_for_manual_retry: bool,
@@ -1894,6 +2267,621 @@ pub struct PendingMarginTransfer {
     /// Absent on older snapshots/events, which preserves their prior behavior.
     #[serde(default)]
     pub min_net_collateral_raw: Option<u64>,
+}
+
+/// Business effect pinned to a durable inbound ICRC-2 collateral pull.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum InboundCollateralOperation {
+    Open {
+        collateral_type: Principal,
+        reserved_vault_id: u64,
+    },
+    AddMargin {
+        vault_id: u64,
+        vault_snapshot: Vault,
+    },
+}
+
+/// Exact transfer_from identity is written before dispatch. A row remains
+/// present through ambiguous replies and receipt verification; it is removed
+/// only in the same state mutation that applies the corresponding business
+/// effect (or after an owner-visible reconciliation decision).
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct InboundCollateralJournal {
+    pub owner: Principal,
+    /// Caller-stable sequence identity. High-water state prevents an old ID
+    /// from becoming executable after bounded result compaction.
+    #[serde(default)]
+    pub request_id: u128,
+    pub operation: InboundCollateralOperation,
+    pub tuple: crate::SpLiquidationStablePullTuple,
+    #[serde(default)]
+    pub candidate_block_index: Option<u64>,
+    #[serde(default)]
+    pub candidate_attach_window_start_ns: u64,
+    #[serde(default)]
+    pub candidate_attach_attempts: u8,
+    #[serde(default)]
+    pub had_ambiguous_attempt: bool,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum InboundCollateralResult {
+    Open { vault_id: u64, block_index: u64 },
+    AddMargin { block_index: u64 },
+    Rejected { message: String },
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct CompletedInboundCollateral {
+    pub request_id: u128,
+    pub operation: InboundCollateralOperation,
+    pub tuple: crate::SpLiquidationStablePullTuple,
+    pub amount_raw: u64,
+    pub result: InboundCollateralResult,
+}
+
+/// Business effect pinned to a push-deposit sweep. The sweep source is a
+/// backend-owned caller subaccount, so its exact ICRC-1 tuple must survive a
+/// lost inter-canister reply before collateral can be credited.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum PushDepositSweepOperation {
+    Open {
+        collateral_type: Principal,
+        reserved_vault_id: u64,
+        borrow_amount_raw: u64,
+    },
+    AddMargin {
+        vault_id: u64,
+        vault_snapshot: Vault,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct PushDepositSweepTuple {
+    pub op_nonce: u128,
+    pub ledger: Principal,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    pub amount_raw: u64,
+    /// Exact fee supplied to ICRC-1. New sweeps always pin this to prevent
+    /// fee drift from committing a transfer that cannot pass receipt proof.
+    pub fee_raw: Option<u64>,
+    pub expected_fee_raw: u64,
+    /// Proof adapter captured at admission so ledger configuration rotation
+    /// cannot change how an already-dispatched receipt is interpreted.
+    #[serde(default)]
+    pub proof_kind: Option<PayoutProofKind>,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct PushDepositSweepJournal {
+    pub owner: Principal,
+    pub request_id: u128,
+    pub operation: PushDepositSweepOperation,
+    pub tuple: PushDepositSweepTuple,
+    pub observed_balance_raw: u64,
+    #[serde(default)]
+    pub had_ambiguous_attempt: bool,
+    #[serde(default)]
+    pub candidate_block_index: Option<u64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum PushDepositSweepResult {
+    Open { vault_id: u64, block_index: u64 },
+    AddMargin { block_index: u64 },
+    Rejected { message: String },
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct CompletedPushDepositSweep {
+    pub request_id: u128,
+    pub operation: PushDepositSweepOperation,
+    pub tuple: PushDepositSweepTuple,
+    pub result: PushDepositSweepResult,
+}
+
+pub fn admit_push_deposit_sweep(
+    state: &mut State,
+    mut journal: PushDepositSweepJournal,
+) -> Result<(Principal, Principal), String> {
+    let key = (journal.owner, journal.tuple.ledger);
+    let expected_id = state
+        .push_deposit_sweep_high_water
+        .get(&key)
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| "push-deposit request ID sequence is exhausted".to_string())?;
+    if journal.request_id != expected_id {
+        return Err(format!("push-deposit request ID must be {expected_id}"));
+    }
+    if state.pending_push_deposit_sweeps.contains_key(&key) {
+        return Err("a push-deposit sweep for this owner and ledger is unresolved".into());
+    }
+    if state.pending_push_deposit_sweeps.values().any(|pending| {
+        matches!(&pending.operation, PushDepositSweepOperation::AddMargin { vault_id: id, .. }
+            if matches!(&journal.operation, PushDepositSweepOperation::AddMargin { vault_id, .. } if id == vault_id))
+    }) {
+        return Err("a push-deposit sweep for this vault is unresolved".into());
+    }
+    if journal.tuple.from.owner != ic_cdk::id()
+        || journal.tuple.from.subaccount.is_none()
+        || journal.tuple.from != crate::management::get_deposit_account_for(&journal.owner)
+        || journal.tuple.ledger != key.1
+        || journal.tuple.to.owner != ic_cdk::id()
+        || journal.tuple.to.subaccount.is_some()
+        || journal.tuple.amount_raw == 0
+        || journal.tuple.memo.is_empty()
+    {
+        return Err("push-deposit sweep tuple does not bind the backend accounts".into());
+    }
+    if let PushDepositSweepOperation::Open { reserved_vault_id, .. } = &mut journal.operation {
+        if *reserved_vault_id != 0 {
+            return Err("new push-deposit open must not preselect a vault ID".into());
+        }
+        *reserved_vault_id = state.increment_vault_id();
+    }
+    state.pending_push_deposit_sweeps.insert(key, journal);
+    state.push_deposit_sweep_high_water.insert(key, expected_id);
+    crate::storage::save_state_to_stable(state);
+    Ok(key)
+}
+
+/// Durable ordinary icUSD repayment. The exact pull receipt gates the one-time
+/// debt/event mutation; close intent resumes the collateral withdrawal saga.
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct RepaymentV2Journal {
+    pub owner: Principal,
+    pub request_id: u128,
+    pub vault_id: u64,
+    pub requested_amount_raw: u64,
+    pub effective_amount_raw: u64,
+    pub pinned_debt_raw: u64,
+    pub close_after_repay: bool,
+    pub collateral_type: Principal,
+    pub ledger: Principal,
+    pub tuple: crate::RepaymentV2PullTuple,
+    pub phase: crate::RepaymentV2Phase,
+    #[serde(default)]
+    pub candidate_block_index: Option<u64>,
+    #[serde(default)]
+    pub candidate_attach_window_start_ns: u64,
+    #[serde(default)]
+    pub candidate_attach_attempts: u8,
+    #[serde(default)]
+    pub had_ambiguous_attempt: bool,
+    #[serde(default)]
+    pub dispatch_attempts: u8,
+    #[serde(default)]
+    pub repay_block_index: Option<u64>,
+    #[serde(default)]
+    pub collateral_return_block_index: Option<u64>,
+    #[serde(default)]
+    pub interest_share_raw: u64,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+/// Durable stablecoin repayment ingress. The stable-ledger principal is stored
+/// separately from its block index so downstream readers cannot mistake a
+/// stable ICRC-3 receipt for an icUSD burn.
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct StableRepaymentV2Journal {
+    pub owner: Principal,
+    pub request_id: u128,
+    pub vault_id: u64,
+    pub token_type: crate::StableTokenType,
+    pub requested_amount_e8: u64,
+    pub effective_debt_reduction_e8: u64,
+    pub principal_pull_e6: u64,
+    pub surcharge_e6: u64,
+    pub pinned_debt_e8: u64,
+    pub collateral_type: Principal,
+    pub ledger: Principal,
+    #[serde(default)]
+    pub interest_routing_plan: Option<StableRepaymentV2InterestRoutingPlan>,
+    pub tuple: crate::SpLiquidationStablePullTuple,
+    pub phase: crate::StableRepaymentV2Phase,
+    #[serde(default)]
+    pub candidate_block_index: Option<u64>,
+    #[serde(default)]
+    pub candidate_attach_window_start_ns: u64,
+    #[serde(default)]
+    pub candidate_attach_attempts: u8,
+    #[serde(default)]
+    pub had_ambiguous_attempt: bool,
+    #[serde(default)]
+    pub dispatch_attempts: u8,
+    #[serde(default)]
+    pub result: Option<crate::StableRepaymentV2Result>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+/// The exact quote and vault generation selected before the inbound ledger
+/// pull. Settlement may apply this plan only while the full vault snapshot is
+/// unchanged; a proven payment against a changed vault remains held.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManualLiquidationPinnedPlan {
+    pub vault: Vault,
+    pub mode: Mode,
+    pub collateral_price: Decimal,
+    pub collateral_decimals: u8,
+    pub debt_liquidated_e8s: u64,
+    pub collateral_to_liquidator_raw: u64,
+    pub collateral_to_seize_raw: u64,
+    pub protocol_cut_raw: u64,
+    pub excess_collateral_raw: u64,
+    pub interest_share_e8s: u64,
+    pub stable_surcharge_e6s: u64,
+    /// Interest recipients and downstream canisters frozen before the inbound
+    /// payment. Settlement creates every interest outbox row synchronously.
+    #[serde(default)]
+    pub interest_routing_plan: Option<StableRepaymentV2InterestRoutingPlan>,
+}
+
+/// Durable caller-scoped request for a manual liquidation inbound payment.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManualLiquidationV2Journal {
+    pub owner: Principal,
+    pub request_id: u128,
+    pub vault_id: u64,
+    pub route: crate::ManualLiquidationRoute,
+    pub requested_amount_e8s: u64,
+    pub pull_amount_raw: u64,
+    pub ledger: Principal,
+    pub tuple: crate::SpLiquidationStablePullTuple,
+    pub created_at_ns: u64,
+    pub plan: ManualLiquidationPinnedPlan,
+    pub phase: crate::ManualLiquidationV2Phase,
+    #[serde(default)]
+    pub candidate_block_index: Option<u64>,
+    #[serde(default)]
+    pub candidate_attach_window_start_ns: u64,
+    #[serde(default)]
+    pub candidate_attach_attempts: u8,
+    #[serde(default)]
+    pub had_ambiguous_attempt: bool,
+    #[serde(default)]
+    pub dispatch_attempts: u8,
+    #[serde(default)]
+    pub result: Option<crate::ManualLiquidationV2Result>,
+    #[serde(default)]
+    pub refund: Option<crate::ManualLiquidationV2Refund>,
+    /// Set before any receipt-backed outbox or vault write. A failed commit
+    /// after this marker stays held for reconciliation and is never refunded.
+    #[serde(default)]
+    pub commit_started: bool,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+impl ManualLiquidationV2Journal {
+    pub fn status_view(&self) -> crate::ManualLiquidationV2StatusView {
+        crate::ManualLiquidationV2StatusView {
+            owner: self.owner,
+            request_id: self.request_id,
+            vault_id: self.vault_id,
+            route: self.route.clone(),
+            requested_amount_e8s: self.requested_amount_e8s,
+            pull_amount_raw: self.pull_amount_raw,
+            ledger: self.ledger,
+            tuple: Some(self.tuple.clone()),
+            phase: self.phase.clone(),
+            candidate_block_index: self.candidate_block_index,
+            result: self.result.clone(),
+            refund: self.refund.clone(),
+            commit_started: self.commit_started,
+            had_ambiguous_attempt: self.had_ambiguous_attempt,
+            last_error: self.last_error.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct StableRepaymentV2InterestRoutingPlan {
+    pub split: Vec<InterestRecipient>,
+    pub stable_treasury: Option<Principal>,
+    pub icusd_ledger: Principal,
+    pub stability_pool: Option<Principal>,
+    pub three_pool: Option<Principal>,
+    pub amm1: Option<Principal>,
+    pub amm1_pool_id: Option<String>,
+}
+
+/// Durable request identity for the public liquidity endpoints. The tuple is
+/// pinned before dispatch and survives reply loss so every replay uses the
+/// ledger's identical deduplication identity.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct LiquidityV2Tuple {
+    pub kind: crate::LiquidityV2Kind,
+    pub ledger: Principal,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    pub spender: Option<icrc_ledger_types::icrc1::account::Account>,
+    pub amount_raw: u64,
+    pub fee: Option<u64>,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct LiquidityV2Journal {
+    pub owner: Principal,
+    pub request_id: u128,
+    pub tuple: LiquidityV2Tuple,
+    pub created_at_ns: u64,
+    #[serde(default)]
+    pub candidate_block_index: Option<u64>,
+    #[serde(default)]
+    pub candidate_block_indices: Vec<u64>,
+    #[serde(default)]
+    pub candidate_scan_cursor: u64,
+    /// Archive-aware ICRC-3 recovery scan. `None` on older rows starts at
+    /// block zero and is populated before any archive await.
+    #[serde(default)]
+    pub history_scan: Option<LiquidityV2HistoryScan>,
+    #[serde(default)]
+    pub candidate_attach_window_start_ns: u64,
+    #[serde(default)]
+    pub candidate_attach_attempts: u8,
+    #[serde(default)]
+    pub had_ambiguous_attempt: bool,
+    #[serde(default)]
+    pub dispatch_attempts: u8,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    pub outcome: LiquidityV2Outcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct LiquidityV2HistoryScan {
+    pub next_index: u64,
+    pub end_exclusive: u64,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub enum LiquidityV2Outcome {
+    Pending,
+    Held,
+    Complete { block_index: u64 },
+    Rejected { message: String },
+}
+
+impl StableRepaymentV2Journal {
+    pub fn status_view(&self) -> crate::StableRepaymentV2StatusView {
+        crate::StableRepaymentV2StatusView {
+            owner: self.owner,
+            request_id: self.request_id,
+            vault_id: self.vault_id,
+            token_type: self.token_type.clone(),
+            requested_amount_e8: self.requested_amount_e8,
+            effective_debt_reduction_e8: self.effective_debt_reduction_e8,
+            principal_pull_e6: self.principal_pull_e6,
+            surcharge_e6: self.surcharge_e6,
+            ledger: self.ledger,
+            tuple: Some(self.tuple.clone()),
+            phase: self.phase.clone(),
+            candidate_block_index: self.candidate_block_index,
+            result: self.result.clone(),
+            had_ambiguous_attempt: self.had_ambiguous_attempt,
+            last_error: self.last_error.clone(),
+        }
+    }
+}
+
+pub fn next_inbound_collateral_request_id(high_water: Option<u128>) -> Option<u128> {
+    high_water.unwrap_or(0).checked_add(1)
+}
+
+pub fn completed_inbound_collateral(
+    state: &State,
+    owner: Principal,
+    ledger: Principal,
+    request_id: u128,
+) -> Option<CompletedInboundCollateral> {
+    state
+        .inbound_collateral_latest_result
+        .get(&(owner, ledger))
+        .filter(|row| row.request_id == request_id)
+        .cloned()
+}
+
+#[cfg(test)]
+mod inbound_collateral_request_id_tests {
+    use super::{
+        completed_inbound_collateral, next_inbound_collateral_request_id,
+        CompletedInboundCollateral, InboundCollateralOperation, InboundCollateralResult, State,
+    };
+    use candid::Principal;
+
+    #[test]
+    fn sequence_starts_at_one_and_advances_monotonically() {
+        assert_eq!(next_inbound_collateral_request_id(None), Some(1));
+        assert_eq!(next_inbound_collateral_request_id(Some(1)), Some(2));
+        assert_eq!(next_inbound_collateral_request_id(Some(u128::MAX)), None);
+    }
+
+    #[test]
+    fn same_sequence_value_on_two_ledgers_does_not_alias_completed_result() {
+        let owner = Principal::self_authenticating(b"ingress-owner");
+        let backend = Principal::self_authenticating(b"backend");
+        let ledger_a = Principal::self_authenticating(b"ledger-a");
+        let ledger_b = Principal::self_authenticating(b"ledger-b");
+        let make_row = |ledger, block_index| CompletedInboundCollateral {
+            request_id: 1,
+            operation: InboundCollateralOperation::Open {
+                collateral_type: Principal::self_authenticating(b"collateral"),
+                reserved_vault_id: 1,
+            },
+            tuple: crate::SpLiquidationStablePullTuple {
+                op_nonce: block_index as u128,
+                ledger,
+                from: icrc_ledger_types::icrc1::account::Account {
+                    owner,
+                    subaccount: None,
+                },
+                spender: icrc_ledger_types::icrc1::account::Account {
+                    owner: backend,
+                    subaccount: None,
+                },
+                to: icrc_ledger_types::icrc1::account::Account {
+                    owner: backend,
+                    subaccount: None,
+                },
+                amount_raw: 10,
+                fee_raw: 1,
+                memo: vec![block_index as u8],
+                created_at_time_ns: block_index,
+            },
+            amount_raw: 10,
+            result: InboundCollateralResult::Open {
+                vault_id: block_index,
+                block_index,
+            },
+        };
+        let mut state = State::default();
+        state
+            .inbound_collateral_latest_result
+            .insert((owner, ledger_a), make_row(ledger_a, 11));
+        state
+            .inbound_collateral_latest_result
+            .insert((owner, ledger_b), make_row(ledger_b, 22));
+        assert!(matches!(
+            completed_inbound_collateral(&state, owner, ledger_a, 1)
+                .unwrap()
+                .result,
+            InboundCollateralResult::Open { vault_id: 11, .. }
+        ));
+        assert!(matches!(
+            completed_inbound_collateral(&state, owner, ledger_b, 1)
+                .unwrap()
+                .result,
+            InboundCollateralResult::Open { vault_id: 22, .. }
+        ));
+        assert!(completed_inbound_collateral(&state, owner, ledger_a, 2).is_none());
+    }
+}
+
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollateralWithdrawalAction {
+    Partial,
+    Full,
+    Close,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollateralWithdrawalPhase {
+    Reserved,
+    Dispatching,
+    Held,
+    Ambiguous,
+    /// A typed ledger rejection proves the exact transfer had no effect.
+    /// The owner may retry this same tuple, or a first-attempt BadFee may be
+    /// safely re-pinned with the ledger's reported fee.
+    NoEffect,
+}
+
+/// Durable exact transfer tuple for an ordinary ICRC collateral withdrawal.
+/// `gross_amount_raw` is the vault debit; the ledger receives `net_amount_raw`
+/// and charges the explicit `fee_raw` from the protocol account.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCollateralWithdrawal {
+    pub operation_id: u128,
+    pub vault_id: u64,
+    pub owner: Principal,
+    pub ledger: Principal,
+    pub action: CollateralWithdrawalAction,
+    pub gross_amount_raw: u64,
+    pub net_amount_raw: u64,
+    pub fee_raw: u64,
+    pub memo: u128,
+    pub created_at_time_ns: u64,
+    pub phase: CollateralWithdrawalPhase,
+    pub dispatch_attempts: u8,
+    pub last_error: Option<String>,
+    pub forgive_dust_debt: bool,
+    #[serde(default)]
+    pub repay_block_index: Option<u64>,
+}
+
+/// Durable, request-ID keyed SP liquidation journal. Admission and every
+/// externally visible phase are persisted before an inter-canister await.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2Journal {
+    pub request: crate::SpLiquidationV2Request,
+    pub status: crate::SpLiquidationV2Status,
+    /// Hash of the exact vault snapshot admitted before the pull. The whole
+    /// snapshot is also retained in `plan` and compared at settlement.
+    pub pinned_vault_fingerprint: [u8; 32],
+    /// Once true, a callback/ledger result may have been lost after dispatch.
+    /// Typed errors from a later retry cannot clear this without exact proof.
+    #[serde(default)]
+    pub had_ambiguous_stable_pull_attempt: bool,
+    #[serde(default)]
+    pub plan: Option<SpLiquidationV2PinnedPlan>,
+    /// True means a payout dispatch was persisted before an await and its
+    /// result may have been lost. Legacy rows default conservatively to true:
+    /// older backend versions could dispatch payouts without this marker.
+    #[serde(default = "legacy_sp_v2_payout_dispatch_started")]
+    pub payout_dispatch_started: bool,
+    #[serde(default)]
+    pub had_ambiguous_payout_dispatch: bool,
+    #[serde(default)]
+    pub payout_dispatch_attempts: u8,
+    /// At most one accepted successor is currently supported. This bounded
+    /// tombstone makes acceptance idempotent if the SP loses the reply.
+    #[serde(default)]
+    pub accepted_payout_supersession: Option<SpLiquidationV2AcceptedPayoutSupersession>,
+}
+
+fn legacy_sp_v2_payout_dispatch_started() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2AcceptedPayoutSupersession {
+    pub generation: u32,
+    pub predecessor: crate::SpLiquidationPayoutTuple,
+    pub replacement: crate::SpLiquidationPayoutTuple,
+    pub evidence: crate::SpLiquidationPayoutNoEffectEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2PinnedPlan {
+    pub vault: Vault,
+    pub collateral_price: Decimal,
+    pub collateral_decimals: u8,
+    pub collateral_ledger: Principal,
+    pub collateral_ledger_fee_raw: u64,
+    pub mode: Mode,
+    pub liquidation_ratio: Ratio,
+    pub liquidation_bonus: Ratio,
+    pub protocol_share: Ratio,
+    pub collateral_status: Option<CollateralStatus>,
+    pub stable_token_ledger: Principal,
+    /// Live-confirmed minting account at admission; for V2 this is required
+    /// to equal the backend default account before any pull can be dispatched.
+    #[serde(default)]
+    pub stable_token_minting_account: Option<icrc_ledger_types::icrc1::account::Account>,
+    pub stable_token_enabled: bool,
+    pub stable_repay_fee: Ratio,
+    pub debt_liquidated_e8s: u64,
+    pub collateral_to_liquidator_raw: u64,
+    pub collateral_to_seize_raw: u64,
+    pub protocol_cut_raw: u64,
+    pub interest_share_e8s: u64,
+    pub pinned_at_ns: u64,
 }
 
 /// Wave-4 ICC-007: durable refund record for `redeem_reserves` failures.
@@ -1968,6 +2956,29 @@ pub struct PendingThreeUsdRefund {
     pub parent_absorb_id: Option<u64>,
 }
 
+/// Durable reservation for the icUSD mint that precedes a user vault borrow.
+/// A row is created before dispatch and remains until the exact mint receipt
+/// is proven and the corresponding debt/event are applied atomically.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, candid::CandidType)]
+pub struct PendingBorrowMint {
+    pub op_nonce: u128,
+    pub vault_id: u64,
+    pub owner: Principal,
+    pub collateral_type: Principal,
+    pub ledger: Principal,
+    pub gross_amount_e8s: u64,
+    pub fee_e8s: u64,
+    pub net_amount_e8s: u64,
+    pub created_at_time_ns: u64,
+    pub created_at_ns: u64,
+    #[serde(default)]
+    pub attempts: u8,
+    #[serde(default)]
+    pub last_attempt_at_ns: u64,
+    #[serde(default)]
+    pub held_reason: Option<String>,
+}
+
 /// Additive private journal for 3USD refunds. A missing map entry denotes a
 /// legacy row whose amount may be gross or net; such rows are held unchanged.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
@@ -1975,12 +2986,24 @@ pub enum ThreeUsdRefundDispatchState {
     /// Legacy reserve-account source, preserving the old endpoint's hashed
     /// backend subaccount. Existing snapshots and old endpoint refunds keep
     /// this meaning.
-    NeverDispatched { gross_amount_e8s: u64 },
+    NeverDispatched {
+        gross_amount_e8s: u64,
+    },
     /// New V2 ingress source: the backend's default account.
-    NeverDispatchedDefault { gross_amount_e8s: u64 },
-    SubmittedOrUnknown { tuple: ThreeUsdRefundTransferTuple },
-    Unpayable { gross_amount_e8s: u64, fee_e8s: u64 },
-    UnpayableDefault { gross_amount_e8s: u64, fee_e8s: u64 },
+    NeverDispatchedDefault {
+        gross_amount_e8s: u64,
+    },
+    SubmittedOrUnknown {
+        tuple: ThreeUsdRefundTransferTuple,
+    },
+    Unpayable {
+        gross_amount_e8s: u64,
+        fee_e8s: u64,
+    },
+    UnpayableDefault {
+        gross_amount_e8s: u64,
+        fee_e8s: u64,
+    },
     /// Legacy hashed-source refund held because its fee cannot safely be
     /// charged to the principal owed. An optional old tuple is retained
     /// unchanged for owner-scoped reconciliation; this is not terminal.
@@ -2011,7 +3034,9 @@ pub struct ThreeUsdRefundTransferTuple {
 /// Canonical identity for one SP reserve absorption request. The ID is
 /// allocated durably by the Stability Pool before approval and reused across
 /// unknown-outcome retries.
-#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, Serialize)]
+#[derive(
+    candid::CandidType, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, Serialize,
+)]
 pub struct ThreeUsdReserveIngressKey {
     pub stability_pool: Principal,
     pub vault_id: u64,
@@ -2070,7 +3095,10 @@ pub enum ThreeUsdReserveIngressPhase {
     /// Written durably before the first transferFrom await. This includes a
     /// trap or reply-loss boundary and therefore always replays the same tuple.
     SubmittedOrUnknown { tuple: ThreeUsdReserveIngressTuple },
-    TransferConfirmed { tuple: ThreeUsdReserveIngressTuple, block_index: u64 },
+    TransferConfirmed {
+        tuple: ThreeUsdReserveIngressTuple,
+        block_index: u64,
+    },
     Absorbed {
         tuple: ThreeUsdReserveIngressTuple,
         block_index: u64,
@@ -2108,9 +3136,9 @@ impl ThreeUsdReserveIngressJournal {
     /// It remains authoritative even after its queue row is removed on payout
     /// and before the parent phase can be terminalized.
     pub fn has_full_refund_child(&self) -> bool {
-        self.refund.as_ref().is_some_and(|refund| {
-            refund.gross_amount_e8s >= self.request.three_usd_amount_e8s
-        })
+        self.refund
+            .as_ref()
+            .is_some_and(|refund| refund.gross_amount_e8s >= self.request.three_usd_amount_e8s)
     }
 
     /// The only refund amount compatible with a committed proportional V2
@@ -2134,7 +3162,12 @@ impl ThreeUsdReserveIngressJournal {
     /// the authoritative proof index. `result.block_index == 0` is the
     /// established production result shape for this liquidation API.
     pub fn absorbed_result_matches_parent(&self, vault_id: u64, proof_block_index: u64) -> bool {
-        let ThreeUsdReserveIngressPhase::Absorbed { result, block_index, .. } = &self.phase else {
+        let ThreeUsdReserveIngressPhase::Absorbed {
+            result,
+            block_index,
+            ..
+        } = &self.phase
+        else {
             return false;
         };
         let Some(expected_refund) = self.expected_absorbed_refund_e8s() else {
@@ -2147,7 +3180,6 @@ impl ThreeUsdReserveIngressJournal {
                 == (expected_refund > 0).then_some(expected_refund)
     }
 }
-
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct ThreeUsdReserveIngressRefund {
@@ -2252,7 +3284,9 @@ where
                 type Value = EitherKey;
 
                 fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                    f.write_str("a u128 operation id, legacy vault id, or (vault id, principal) tuple")
+                    f.write_str(
+                        "a u128 operation id, legacy vault id, or (vault id, principal) tuple",
+                    )
                 }
 
                 fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
@@ -2273,9 +3307,11 @@ where
                 where
                     A: serde::de::SeqAccess<'de>,
                 {
-                    let vault_id = seq.next_element::<VaultId>()?
+                    let vault_id = seq
+                        .next_element::<VaultId>()?
                         .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
-                    let owner = seq.next_element::<Principal>()?
+                    let owner = seq
+                        .next_element::<Principal>()?
                         .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
                     if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
                         return Err(serde::de::Error::invalid_length(3, &self));
@@ -2314,9 +3350,7 @@ where
                     // their upper 64 bits. Treat every u64-range key as a
                     // possible legacy vault id even when its value happens to
                     // equal the key; low-ID ambiguity must fail closed.
-                    EitherKey::Operation(id)
-                        if id > u64::MAX as u128 && id == value.op_nonce =>
-                    {
+                    EitherKey::Operation(id) if id > u64::MAX as u128 && id == value.op_nonce => {
                         if out.insert(id, value).is_some() {
                             return Err(serde::de::Error::custom("duplicate pending payout id"));
                         }
@@ -2385,6 +3419,94 @@ pub struct State {
     #[serde(deserialize_with = "deserialize_pending_keyed")]
     pub pending_excess_transfers: BTreeMap<u128, PendingMarginTransfer>,
     pub pending_redemption_transfer: BTreeMap<u64, PendingMarginTransfer>,
+    /// Exact ICRC collateral withdrawal obligations, keyed by their vault.
+    /// A row remains present until an exact ledger receipt has been verified;
+    /// its presence is also the durable per-vault mutation fence.
+    #[serde(default)]
+    pub pending_collateral_withdrawals: BTreeMap<u64, PendingCollateralWithdrawal>,
+    /// In-flight exact ICRC-2 collateral deposits. Keyed by caller and ledger
+    /// so one ambiguous ingress fences conflicting opens/margins across awaits
+    /// and upgrades. A transfer already in flight under an older Wasm has no
+    /// reconstructible tuple here; rollout must drain old calls and reconcile
+    /// historical unbooked credits before this implementation is activated.
+    #[serde(default)]
+    pub pending_inbound_collateral: BTreeMap<(Principal, Principal), InboundCollateralJournal>,
+    /// Exact push-deposit ICRC-1 sweeps, keyed by caller and ledger.
+    #[serde(default)]
+    pub pending_push_deposit_sweeps: BTreeMap<(Principal, Principal), PushDepositSweepJournal>,
+    /// Latest terminal push-deposit result, retained for lost ingress replies.
+    #[serde(default)]
+    pub completed_push_deposit_sweeps:
+        BTreeMap<(Principal, Principal), CompletedPushDepositSweep>,
+    #[serde(default)]
+    pub push_deposit_sweep_high_water: BTreeMap<(Principal, Principal), u128>,
+    /// Per-owner+ledger request sequence high-water; persists even when only
+    /// the latest result is retained, so compacted IDs can never pull again.
+    #[serde(default)]
+    pub inbound_collateral_high_water: BTreeMap<(Principal, Principal), u128>,
+    #[serde(default)]
+    pub inbound_collateral_latest_result:
+        BTreeMap<(Principal, Principal), CompletedInboundCollateral>,
+    #[serde(default)]
+    pub inbound_collateral_resume_cursor: Option<(Principal, Principal)>,
+    /// One active caller-supplied repayment request per owner. IDs are
+    /// monotonic; only the latest terminal result is retained, while the
+    /// high-water mark permanently fences compacted IDs.
+    #[serde(default)]
+    pub repayment_v2_active: BTreeMap<Principal, RepaymentV2Journal>,
+    #[serde(default)]
+    pub repayment_v2_latest_result: BTreeMap<Principal, RepaymentV2Journal>,
+    #[serde(default)]
+    pub repayment_v2_high_water: BTreeMap<Principal, u128>,
+    /// One active caller-scoped CKUSDT/CKUSDC repayment and its latest result.
+    #[serde(default)]
+    pub stable_repayment_v2_active: BTreeMap<Principal, StableRepaymentV2Journal>,
+    #[serde(default)]
+    pub stable_repayment_v2_latest_result: BTreeMap<Principal, StableRepaymentV2Journal>,
+    #[serde(default)]
+    pub stable_repayment_v2_high_water: BTreeMap<Principal, u128>,
+    /// Caller-scoped journals for permissionless manual liquidation pulls.
+    #[serde(default)]
+    pub manual_liquidation_v2_active: BTreeMap<Principal, ManualLiquidationV2Journal>,
+    #[serde(default)]
+    pub manual_liquidation_v2_latest_result: BTreeMap<Principal, ManualLiquidationV2Journal>,
+    #[serde(default)]
+    pub manual_liquidation_v2_high_water: BTreeMap<Principal, u128>,
+    /// Unconverted e8 stable-interest residues keyed by stable ledger. Each
+    /// value is below 100 and remains backed until a later share forms e6.
+    #[serde(default)]
+    pub stable_interest_conversion_remainders: BTreeMap<Principal, u8>,
+    /// Permanent operation tombstones prevent journal replay or nonce reuse
+    /// from admitting a completed payout identity a second time. This grows
+    /// by one u128 per successful collateral withdrawal; it is deliberately
+    /// not pruned because this state does not yet have a proven nonce-reuse
+    /// horizon.
+    #[serde(default)]
+    pub consumed_collateral_withdrawal_ids: BTreeSet<u128>,
+    /// V2 SP liquidation request identities and exact transfer receipts.
+    #[serde(default)]
+    pub sp_liquidation_v2_journals: BTreeMap<(Principal, u64), SpLiquidationV2Journal>,
+    /// Per-SP monotonic allocation prevents an acknowledged ID from ever
+    /// becoming Unseen and executable again after its detailed row is compacted.
+    #[serde(default)]
+    pub sp_liquidation_v2_acknowledged_through: BTreeMap<Principal, u64>,
+    /// Last key visited by the bounded V2 recovery worker. This stable cursor
+    /// prevents the first held rows from starving later requests across ticks
+    /// and upgrades.
+    #[serde(default)]
+    pub sp_liquidation_v2_resume_cursor: Option<(Principal, u64)>,
+    /// Burn identities already applied by redemption. Rows leave the pending
+    /// map after settlement, so retain permanent tombstones to reject replay
+    /// or duplicate processing of a previously paid burn block.
+    #[serde(default)]
+    pub consumed_redemption_burn_blocks: BTreeSet<u64>,
+    /// Stable-snapshot upgrades must scan the historical event log because
+    /// older snapshots have no burn tombstones. Redemptions remain closed
+    /// until the bounded scan reaches the log tail.
+    #[serde(default)]
+    pub redemption_tombstone_backfill_cursor: u64,
+    #[serde(default)]
+    pub redemption_tombstone_backfill_complete: bool,
     /// Wave-4 ICC-007: durable refund queue for `redeem_reserves` failures,
     /// keyed by the burn icUSD block index. Empty for pre-Wave-4 snapshots.
     #[serde(default)]
@@ -2422,6 +3544,11 @@ pub struct State {
     /// treated as operator-set, which is the safe default).
     #[serde(default)]
     pub mode_triggered_by_oracle: bool,
+    /// Threshold captured when accumulated protocol deficit latched ReadOnly.
+    /// `None` means no deficit latch is active. Keeping the trip threshold
+    /// prevents later threshold changes from silently clearing the safety latch.
+    #[serde(default)]
+    pub deficit_readonly_latched_at_e8s: Option<u64>,
     /// Wave-14a CDP-14: minimum number of CEX sources that must contribute
     /// to an XRC `metadata.base_asset_num_received_rates` for the protocol
     /// to accept the resulting price. 0 disables the gate (operator
@@ -2527,6 +3654,14 @@ pub struct State {
     pub last_redemption_time: u64,
     pub liquidity_pool: BTreeMap<Principal, ICUSD>,
     pub liquidity_returns: BTreeMap<Principal, ICP>,
+    /// One active durable V2 liquidity request per owner, with a retained
+    /// latest terminal result and monotonic request-ID high-water mark.
+    #[serde(default)]
+    pub liquidity_v2_active: BTreeMap<Principal, LiquidityV2Journal>,
+    #[serde(default)]
+    pub liquidity_v2_latest_result: BTreeMap<Principal, LiquidityV2Journal>,
+    #[serde(default)]
+    pub liquidity_v2_high_water: BTreeMap<Principal, u128>,
     pub xrc_principal: Principal,
     pub icusd_ledger_principal: Principal,
     pub icp_ledger_principal: Principal,
@@ -2670,12 +3805,39 @@ pub struct State {
     /// Accumulated interest per collateral type, waiting to be flushed to pools.
     /// Key = collateral_type Principal, Value = total interest in e8s.
     pub pending_interest_for_pools: BTreeMap<Principal, u64>,
+    /// Pre-outbox aggregate balances migrated from old snapshots are held for
+    /// reconciliation because the original mint tuple cannot be reconstructed.
+    #[serde(default)]
+    pub held_legacy_stability_pool_interest: BTreeMap<Principal, u64>,
+    #[serde(default)]
+    pub stability_pool_interest_outbox_version: u8,
     /// Post-mint delivery receipts keyed by the icUSD mint block. Unlike
     /// `pending_interest_for_pools`, these funds are already minted and must
     /// never be re-minted on retry.
     #[serde(default)]
     pub pending_stability_pool_interest_notifications:
         BTreeMap<u64, PendingStabilityPoolInterestNotification>,
+    /// Pre-mint obligations for Stability Pool interest; these rows own their
+    /// aggregate share until the exact mint and receipt are both confirmed.
+    #[serde(default)]
+    pub pending_stability_pool_interest_mints: BTreeMap<u128, PendingStabilityPoolInterestMint>,
+    /// Exact shares pinned to an unavailable Stability Pool destination.
+    /// `serde(default)` keeps pre-upgrade snapshots compatible.
+    #[serde(default)]
+    pub held_interest_distribution_shares: BTreeMap<u128, HeldInterestDistributionShare>,
+    /// Stable link from a held-share ID to the one mint operation allocated
+    /// when an operator releases it. Retries must reuse this exact nonce.
+    #[serde(default)]
+    pub released_interest_distribution_shares: BTreeMap<u128, u128>,
+    /// Borrow mints dispatched before vault debt can be committed. Pending
+    /// rows reserve both per-collateral and global mint headroom across traps
+    /// and upgrades. Old snapshots decode to an empty map.
+    #[serde(default)]
+    pub pending_borrow_mints: BTreeMap<u128, PendingBorrowMint>,
+    #[serde(default)]
+    pub borrow_mint_retry_cursor: Option<u128>,
+    #[serde(default)]
+    pub stability_pool_interest_mint_retry_cursor: Option<u128>,
 
     /// Legacy AMM1 tuple rows retained for stable-state compatibility.
     /// They are deliberately not auto-retried: this representation does not
@@ -2705,6 +3867,13 @@ pub struct State {
     /// Collateral fees from sync liquidations, transferred to treasury in next timer tick.
     /// Each entry is (amount_e8s, collateral_ledger_principal).
     pub pending_treasury_collateral: Vec<(u64, Principal)>,
+    /// Exact durable treasury fee transfers and their receipt-notification
+    /// phases. Legacy aggregate/tuple rows above remain held because they do
+    /// not preserve a ledger operation identity.
+    #[serde(default)]
+    pub pending_treasury_payments: BTreeMap<u128, PendingTreasuryPayment>,
+    #[serde(default)]
+    pub treasury_payment_retry_cursor: Option<u128>,
     /// Global fraction of the liquidation bonus (liquidator's profit) that goes to the protocol treasury.
     /// e.g., 0.03 = protocol gets 3% of the bonus, liquidator keeps 97%.
     pub liquidation_protocol_share: Ratio,
@@ -2839,7 +4008,6 @@ pub struct State {
     /// Immutable settlement receipts keyed by (bot, vault, claim generation).
     #[serde(default)]
     pub bot_payment_aggregate_receipts: BTreeMap<(Principal, u64, u64), BotPaymentAggregateReceipt>,
-
 
     /// Monotonic counter for ICRC transfer idempotency nonces (audit Wave-3).
     /// Combined with `ic_cdk::api::time()` in `next_op_nonce` to mint a u128
@@ -3312,8 +4480,6 @@ pub struct StoredSpBurnRefundNoEffectEvidence {
     pub too_old_rejected: bool,
 }
 
-pub const MAX_SP_BURN_REFUND_ATTEMPTS: usize = 4;
-
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
 /// old CBOR snapshots. Never used for actual State construction (use From<InitArg>).
 impl Default for State {
@@ -3324,6 +4490,31 @@ impl Default for State {
             pending_margin_transfers: BTreeMap::new(),
             pending_excess_transfers: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            pending_collateral_withdrawals: BTreeMap::new(),
+            pending_inbound_collateral: BTreeMap::new(),
+            pending_push_deposit_sweeps: BTreeMap::new(),
+            completed_push_deposit_sweeps: BTreeMap::new(),
+            push_deposit_sweep_high_water: BTreeMap::new(),
+            inbound_collateral_high_water: BTreeMap::new(),
+            inbound_collateral_latest_result: BTreeMap::new(),
+            inbound_collateral_resume_cursor: None,
+            repayment_v2_active: BTreeMap::new(),
+            repayment_v2_latest_result: BTreeMap::new(),
+            repayment_v2_high_water: BTreeMap::new(),
+            stable_repayment_v2_active: BTreeMap::new(),
+            stable_repayment_v2_latest_result: BTreeMap::new(),
+            stable_repayment_v2_high_water: BTreeMap::new(),
+            manual_liquidation_v2_active: BTreeMap::new(),
+            manual_liquidation_v2_latest_result: BTreeMap::new(),
+            manual_liquidation_v2_high_water: BTreeMap::new(),
+            stable_interest_conversion_remainders: BTreeMap::new(),
+            consumed_collateral_withdrawal_ids: BTreeSet::new(),
+            sp_liquidation_v2_journals: BTreeMap::new(),
+            sp_liquidation_v2_acknowledged_through: BTreeMap::new(),
+            sp_liquidation_v2_resume_cursor: None,
+            consumed_redemption_burn_blocks: BTreeSet::new(),
+            redemption_tombstone_backfill_cursor: 0,
+            redemption_tombstone_backfill_complete: false,
             bot_claim_reconciliation_last_emitted: BTreeMap::new(),
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
@@ -3334,6 +4525,7 @@ impl Default for State {
             mode: Mode::default(),
             consecutive_xrc_failures: 0,
             mode_triggered_by_oracle: false,
+            deficit_readonly_latched_at_e8s: None,
             min_xrc_sources_used: default_min_xrc_sources_used(),
             xrc_fetch_interval_secs: default_xrc_fetch_interval_secs(),
             interest_treasury_tick_interval_secs: default_interest_treasury_tick_interval_secs(),
@@ -3355,6 +4547,9 @@ impl Default for State {
             last_redemption_time: 0,
             liquidity_pool: BTreeMap::new(),
             liquidity_returns: BTreeMap::new(),
+            liquidity_v2_active: BTreeMap::new(),
+            liquidity_v2_latest_result: BTreeMap::new(),
+            liquidity_v2_high_water: BTreeMap::new(),
             xrc_principal: Principal::anonymous(),
             icusd_ledger_principal: Principal::anonymous(),
             icp_ledger_principal: Principal::anonymous(),
@@ -3408,7 +4603,15 @@ impl Default for State {
             weighted_avg_healthy_cr: Ratio::from(Decimal::ZERO),
             borrowing_fee_curve: None,
             pending_interest_for_pools: BTreeMap::new(),
+            held_legacy_stability_pool_interest: BTreeMap::new(),
+            stability_pool_interest_outbox_version: 1,
             pending_stability_pool_interest_notifications: BTreeMap::new(),
+            pending_stability_pool_interest_mints: BTreeMap::new(),
+            held_interest_distribution_shares: BTreeMap::new(),
+            released_interest_distribution_shares: BTreeMap::new(),
+            pending_borrow_mints: BTreeMap::new(),
+            borrow_mint_retry_cursor: None,
+            stability_pool_interest_mint_retry_cursor: None,
             pending_amm1_donations: std::collections::VecDeque::new(),
             pending_amm_donations: BTreeMap::new(),
             pending_three_pool_donations: BTreeMap::new(),
@@ -3417,6 +4620,8 @@ impl Default for State {
             interest_flush_threshold_e8s: default_flush_threshold(),
             pending_treasury_interest: ICUSD::new(0),
             pending_treasury_collateral: Vec::new(),
+            pending_treasury_payments: BTreeMap::new(),
+            treasury_payment_retry_cursor: None,
             liquidation_protocol_share: Ratio::from(Decimal::ZERO),
             interest_pool_share: DEFAULT_INTEREST_POOL_SHARE,
             interest_split: Vec::new(),
@@ -3516,11 +4721,12 @@ impl State {
                 {
                     refund.amount_e8s.checked_add(current_fee_e8s)?
                 }
-                Some(Dispatch::UnpayableDefault { gross_amount_e8s, fee_e8s })
-                    if *gross_amount_e8s == refund.amount_e8s =>
-                {
-                    refund.amount_e8s.checked_add(current_fee_e8s.max(*fee_e8s))?
-                }
+                Some(Dispatch::UnpayableDefault {
+                    gross_amount_e8s,
+                    fee_e8s,
+                }) if *gross_amount_e8s == refund.amount_e8s => refund
+                    .amount_e8s
+                    .checked_add(current_fee_e8s.max(*fee_e8s))?,
                 Some(Dispatch::SubmittedOrUnknown { tuple })
                     if tuple.source_subaccount.is_none()
                         && tuple.amount_e8s == refund.amount_e8s
@@ -3559,7 +4765,10 @@ impl State {
                             crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault,
                             *block_index,
                         );
-                        match self.sp_three_usd_reserve_absorb_results_by_proof.get(&proof_key) {
+                        match self
+                            .sp_three_usd_reserve_absorb_results_by_proof
+                            .get(&proof_key)
+                        {
                             Some(committed)
                                 if committed.caller == key.stability_pool
                                     && committed.vault_id == key.vault_id
@@ -3575,11 +4784,14 @@ impl State {
                                     && committed.result.vault_id == key.vault_id
                                     && committed.result.liquidated_debt
                                         <= journal.request.icusd_debt_covered_e8s
-                                    && journal.request.icusd_debt_covered_e8s > 0 => {
+                                    && journal.request.icusd_debt_covered_e8s > 0 =>
+                            {
                                 let realized = (journal.request.three_usd_amount_e8s as u128)
                                     .checked_mul(committed.result.liquidated_debt as u128)?
                                     / journal.request.icusd_debt_covered_e8s as u128;
-                                journal.request.three_usd_amount_e8s
+                                journal
+                                    .request
+                                    .three_usd_amount_e8s
                                     .checked_sub(u64::try_from(realized).ok()?)
                             }
                             Some(_) => None,
@@ -3616,9 +4828,12 @@ impl State {
                         return None;
                     };
                     match dispatch {
-                        ThreeUsdRefundDispatchState::NeverDispatchedDefault { gross_amount_e8s }
-                        | ThreeUsdRefundDispatchState::UnpayableDefault { gross_amount_e8s, .. }
-                            if *gross_amount_e8s == child.gross_amount_e8s => {}
+                        ThreeUsdRefundDispatchState::NeverDispatchedDefault {
+                            gross_amount_e8s,
+                        }
+                        | ThreeUsdRefundDispatchState::UnpayableDefault {
+                            gross_amount_e8s, ..
+                        } if *gross_amount_e8s == child.gross_amount_e8s => {}
                         ThreeUsdRefundDispatchState::SubmittedOrUnknown { tuple }
                             if tuple.source_subaccount.is_none()
                                 && tuple.amount_e8s == child.gross_amount_e8s
@@ -3687,13 +4902,40 @@ impl From<InitArg> for State {
             price_pusher_allowed: std::collections::BTreeSet::new(),
             principal_to_vault_ids: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            pending_collateral_withdrawals: BTreeMap::new(),
+            pending_inbound_collateral: BTreeMap::new(),
+            pending_push_deposit_sweeps: BTreeMap::new(),
+            completed_push_deposit_sweeps: BTreeMap::new(),
+            push_deposit_sweep_high_water: BTreeMap::new(),
+            inbound_collateral_high_water: BTreeMap::new(),
+            inbound_collateral_latest_result: BTreeMap::new(),
+            inbound_collateral_resume_cursor: None,
+            repayment_v2_active: BTreeMap::new(),
+            repayment_v2_latest_result: BTreeMap::new(),
+            repayment_v2_high_water: BTreeMap::new(),
+            stable_repayment_v2_active: BTreeMap::new(),
+            stable_repayment_v2_latest_result: BTreeMap::new(),
+            stable_repayment_v2_high_water: BTreeMap::new(),
+            manual_liquidation_v2_active: BTreeMap::new(),
+            manual_liquidation_v2_latest_result: BTreeMap::new(),
+            manual_liquidation_v2_high_water: BTreeMap::new(),
+            stable_interest_conversion_remainders: BTreeMap::new(),
+            consumed_collateral_withdrawal_ids: BTreeSet::new(),
+            sp_liquidation_v2_journals: BTreeMap::new(),
+            sp_liquidation_v2_acknowledged_through: BTreeMap::new(),
+            sp_liquidation_v2_resume_cursor: None,
+            consumed_redemption_burn_blocks: BTreeSet::new(),
+            redemption_tombstone_backfill_cursor: 0,
+            redemption_tombstone_backfill_complete: true,
             bot_claim_reconciliation_last_emitted: BTreeMap::new(),
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             pending_3usd_refund_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
             three_usd_reserve_payout_parents: BTreeMap::new(),
-            three_usd_reserve_ingress_enabled: false,
+            three_usd_reserve_ingress_enabled: cfg!(
+                feature = "three-usd-reserve-v2-test-admission"
+            ),
             vault_id_to_vaults: BTreeMap::new(),
             xrc_principal: args.xrc_principal,
             icusd_ledger_principal: args.icusd_ledger_principal,
@@ -3702,6 +4944,7 @@ impl From<InitArg> for State {
             mode: Mode::GeneralAvailability,
             consecutive_xrc_failures: 0,
             mode_triggered_by_oracle: false,
+            deficit_readonly_latched_at_e8s: None,
             min_xrc_sources_used: default_min_xrc_sources_used(),
             xrc_fetch_interval_secs: default_xrc_fetch_interval_secs(),
             interest_treasury_tick_interval_secs: default_interest_treasury_tick_interval_secs(),
@@ -3723,6 +4966,9 @@ impl From<InitArg> for State {
             operation_names: BTreeMap::new(),
             liquidity_pool: BTreeMap::new(),
             liquidity_returns: BTreeMap::new(),
+            liquidity_v2_active: BTreeMap::new(),
+            liquidity_v2_latest_result: BTreeMap::new(),
+            liquidity_v2_high_water: BTreeMap::new(),
             pending_margin_transfers: BTreeMap::new(),
             pending_excess_transfers: BTreeMap::new(),
             is_timer_running: false,
@@ -3886,7 +5132,15 @@ impl From<InitArg> for State {
 
             // Periodic interest distribution
             pending_interest_for_pools: BTreeMap::new(),
+            held_legacy_stability_pool_interest: BTreeMap::new(),
+            stability_pool_interest_outbox_version: 1,
             pending_stability_pool_interest_notifications: BTreeMap::new(),
+            pending_stability_pool_interest_mints: BTreeMap::new(),
+            held_interest_distribution_shares: BTreeMap::new(),
+            released_interest_distribution_shares: BTreeMap::new(),
+            pending_borrow_mints: BTreeMap::new(),
+            borrow_mint_retry_cursor: None,
+            stability_pool_interest_mint_retry_cursor: None,
             pending_amm1_donations: std::collections::VecDeque::new(),
             pending_amm_donations: BTreeMap::new(),
             pending_three_pool_donations: BTreeMap::new(),
@@ -3897,6 +5151,8 @@ impl From<InitArg> for State {
             // Treasury fee routing
             pending_treasury_interest: ICUSD::new(0),
             pending_treasury_collateral: Vec::new(),
+            pending_treasury_payments: BTreeMap::new(),
+            treasury_payment_retry_cursor: None,
             liquidation_protocol_share: crate::DEFAULT_LIQUIDATION_PROTOCOL_SHARE,
             interest_pool_share: DEFAULT_INTEREST_POOL_SHARE,
             interest_split: default_interest_split(),
@@ -4124,9 +5380,7 @@ impl State {
                 ))
             }
         };
-        if last_icp_timestamp > current_time
-            || current_time - last_icp_timestamp > TEN_MINS_NANOS
-        {
+        if last_icp_timestamp > current_time || current_time - last_icp_timestamp > TEN_MINS_NANOS {
             return Err(ProtocolError::TemporarilyUnavailable(
                 "Last known ICP price too old".to_string(),
             ));
@@ -4263,6 +5517,89 @@ impl State {
             .values()
             .map(|vault| vault.borrowed_icusd_amount)
             .sum()
+    }
+
+    pub fn pending_borrow_reserved_for(&self, collateral_type: &Principal) -> u64 {
+        self.pending_borrow_mints
+            .values()
+            .filter(|row| &row.collateral_type == collateral_type)
+            .fold(0u128, |sum, row| {
+                sum.saturating_add(row.gross_amount_e8s as u128)
+            })
+            .min(u64::MAX as u128) as u64
+    }
+
+    pub fn pending_borrow_reserved_global(&self) -> u64 {
+        self.pending_borrow_mints
+            .values()
+            .fold(0u128, |sum, row| {
+                sum.saturating_add(row.gross_amount_e8s as u128)
+            })
+            .min(u64::MAX as u128) as u64
+    }
+
+    /// Shared preflight for any writer that can change a vault while a
+    /// non-replayable financial operation is unresolved. Rows are keyed by
+    /// operation identity, so callers fence by vault rather than transient
+    /// caller. The historical name is retained for source compatibility.
+    pub fn vault_has_unresolved_borrow_mint(&self, vault_id: u64) -> bool {
+        self.pending_borrow_mints
+            .values()
+            .any(|row| row.vault_id == vault_id)
+            || self
+                .repayment_v2_active
+                .values()
+                .any(|row| row.vault_id == vault_id)
+            || self
+                .stable_repayment_v2_active
+                .values()
+                .any(|row| row.vault_id == vault_id)
+    }
+
+    pub fn vault_has_pending_inbound_margin(&self, vault_id: u64) -> bool {
+        self.pending_inbound_collateral.values().any(|row| {
+            matches!(
+                &row.operation,
+                InboundCollateralOperation::AddMargin { vault_id: pending, .. }
+                    if *pending == vault_id
+            )
+        }) || self.pending_push_deposit_sweeps.values().any(|row| {
+            matches!(
+                &row.operation,
+                PushDepositSweepOperation::AddMargin { vault_id: pending, .. }
+                    if *pending == vault_id
+            )
+        })
+    }
+
+    pub fn next_pending_borrow_mint_batch(&mut self, limit: usize) -> Vec<PendingBorrowMint> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        if limit == 0 {
+            return Vec::new();
+        }
+        let cursor = self.borrow_mint_retry_cursor;
+        let mut rows = cursor.map_or_else(Vec::new, |cursor| {
+            self.pending_borrow_mints
+                .range((Excluded(cursor), Unbounded))
+                .filter(|(_, row)| row.held_reason.is_none())
+                .take(limit)
+                .map(|(_, row)| row.clone())
+                .collect()
+        });
+        if rows.len() < limit {
+            let remaining = limit - rows.len();
+            rows.extend(
+                self.pending_borrow_mints
+                    .range(..=cursor.unwrap_or(u128::MAX))
+                    .filter(|(_, row)| row.held_reason.is_none())
+                    .take(remaining)
+                    .map(|(_, row)| row.clone()),
+            );
+        }
+        if let Some(row) = rows.last() {
+            self.borrow_mint_retry_cursor = Some(row.op_nonce);
+        }
+        rows
     }
 
     /// Deprecated: use `total_collateral_for(&icp_ledger)` for ICP specifically,
@@ -4490,6 +5827,8 @@ impl State {
         for vault in self.vault_id_to_vaults.values() {
             if vault.borrowed_icusd_amount == 0
                 || vault.bot_processing
+                || self.vault_has_unresolved_borrow_mint(vault.vault_id)
+                || self.vault_has_pending_inbound_margin(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
             {
                 continue;
@@ -4977,6 +6316,9 @@ impl State {
     /// Re-keying inside passive accrual would be O(N log N) per timer tick for
     /// zero ordering benefit at the band tolerance scale (default 1% CR).
     pub fn accrue_single_vault(&mut self, vault_id: u64, now_nanos: u64) {
+        if self.pending_collateral_withdrawals.contains_key(&vault_id) {
+            return;
+        }
         // Phase 1: compute rate (immutable borrow of self)
         let rate_and_elapsed = {
             let s: &State = &*self;
@@ -5044,7 +6386,11 @@ impl State {
                 .unwrap_or(UsdIcp::from(rust_decimal_macros::dec!(1.0)));
             s.vault_id_to_vaults
                 .iter()
-                .filter(|(_, v)| v.borrowed_icusd_amount.0 > 0 && v.last_accrual_time < now_nanos)
+                .filter(|(id, v)| {
+                    !s.pending_collateral_withdrawals.contains_key(id)
+                        && v.borrowed_icusd_amount.0 > 0
+                        && v.last_accrual_time < now_nanos
+                })
                 .map(|(id, vault)| {
                     let cr = crate::compute_collateral_ratio(vault, dummy_rate, s);
                     let rate = s.get_dynamic_interest_rate_for(&vault.collateral_type, cr);
@@ -5412,6 +6758,14 @@ impl State {
     /// historically inconsistent state heals on removal rather than bricking
     /// event replay.
     pub fn remove_vault_and_unindex(&mut self, vault_id: u64) -> Option<Vault> {
+        assert!(
+            !self.pending_collateral_withdrawals.contains_key(&vault_id),
+            "cannot remove a vault with an unresolved collateral withdrawal"
+        );
+        assert!(
+            !self.vault_has_pending_inbound_margin(vault_id),
+            "cannot remove a vault with unresolved inbound collateral"
+        );
         let vault = self.vault_id_to_vaults.remove(&vault_id)?;
         if let Some(vault_ids) = self.principal_to_vault_ids.get_mut(&vault.owner) {
             vault_ids.remove(&vault_id);
@@ -5888,6 +7242,14 @@ impl State {
             return;
         }
 
+        // A deficit-triggered ReadOnly is a distinct persistent safety latch.
+        // Price recovery may update the cached TCR, but only the controller's
+        // explicit recovery-exit path may clear this latch.
+        if self.deficit_readonly_latched_at_e8s.is_some() {
+            self.mode = Mode::ReadOnly;
+            return;
+        }
+
         // If an admin has manually set the mode, don't override it automatically.
         // Exception: if collateral ratio drops below 100%, always go ReadOnly for safety.
         if self.manual_mode_override {
@@ -5975,6 +7337,10 @@ impl State {
     }
 
     pub fn close_vault(&mut self, vault_id: u64) {
+        assert!(
+            !self.pending_collateral_withdrawals.contains_key(&vault_id),
+            "cannot close a vault with an unresolved collateral withdrawal"
+        );
         // NOTE: We intentionally do NOT create a pending_margin_transfer here.
         // CloseVault requires collateral=0, and WithdrawAndCloseVault already
         // transferred collateral directly before calling this. Inserting a
@@ -5986,9 +7352,27 @@ impl State {
         }
     }
 
-    pub fn borrow_from_vault(&mut self, vault_id: u64, borrowed_amount: ICUSD) {
+    pub fn borrow_from_vault(
+        &mut self,
+        vault_id: u64,
+        borrowed_amount: ICUSD,
+        borrowed_at_ns: Option<u64>,
+    ) {
+        assert!(
+            !self.pending_collateral_withdrawals.contains_key(&vault_id),
+            "cannot borrow from a vault with an unresolved collateral withdrawal"
+        );
         match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
+                // A debt-free vault accrues no interest. Start its clock when
+                // the new debt is recorded, not when the vault was opened or
+                // last fully repaid. Old events without a timestamp retain
+                // their historical replay behavior.
+                if vault.borrowed_icusd_amount == 0 && borrowed_amount > ICUSD::new(0) {
+                    if let Some(timestamp) = borrowed_at_ns {
+                        vault.last_accrual_time = timestamp;
+                    }
+                }
                 vault.borrowed_icusd_amount += borrowed_amount;
             }
             None => ic_cdk::trap("borrowing from unknown vault"),
@@ -5998,9 +7382,18 @@ impl State {
     }
 
     pub fn add_margin_to_vault(&mut self, vault_id: u64, add_margin: ICP) {
+        assert!(
+            !self.pending_collateral_withdrawals.contains_key(&vault_id),
+            "cannot add margin while a collateral withdrawal is unresolved"
+        );
         match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
-                vault.collateral_amount += add_margin.to_u64();
+                vault.collateral_amount = vault
+                    .collateral_amount
+                    .checked_add(add_margin.to_u64())
+                    .unwrap_or_else(|| {
+                        ic_cdk::trap("collateral amount overflow while adding margin")
+                    });
             }
             None => ic_cdk::trap("adding margin to unknown vault"),
         }
@@ -6009,6 +7402,10 @@ impl State {
     }
 
     pub fn remove_margin_from_vault(&mut self, vault_id: u64, amount: ICP) {
+        assert!(
+            !self.pending_collateral_withdrawals.contains_key(&vault_id),
+            "cannot remove margin while a collateral withdrawal is unresolved"
+        );
         match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
                 // AR-B-003: this commit runs AFTER the collateral transfer's
@@ -6038,6 +7435,10 @@ impl State {
     /// Repay debt to a vault. Returns `(interest_share, principal_share)` of the repayment.
     /// The interest share is proportional to how much of the vault's current debt is accrued interest.
     pub fn repay_to_vault(&mut self, vault_id: u64, repayed_amount: ICUSD) -> (ICUSD, ICUSD) {
+        assert!(
+            !self.pending_collateral_withdrawals.contains_key(&vault_id),
+            "cannot repay a vault with an unresolved collateral withdrawal"
+        );
         let result = match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
                 // AR-B-003: this commit runs AFTER the icUSD pull's `await`;
@@ -6049,11 +7450,13 @@ impl State {
                 let repayed_amount = repayed_amount.min(vault.borrowed_icusd_amount);
                 let interest_share =
                     if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
-                        let share = (rust_decimal::Decimal::from(repayed_amount.0)
-                            * rust_decimal::Decimal::from(vault.accrued_interest.0)
-                            / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                        .to_u64()
-                        .unwrap_or(0);
+                        // Both factors are u64. Their product fits in u128, so
+                        // exact integer arithmetic avoids Decimal overflow on
+                        // the post-receipt repayment commit path.
+                        let share = ((repayed_amount.0 as u128)
+                            .saturating_mul(vault.accrued_interest.0 as u128)
+                            / vault.borrowed_icusd_amount.0 as u128)
+                            .min(u64::MAX as u128) as u64;
                         // INT-001: also cap by `repayed_amount` so the saturating
                         // subtraction below cannot lose principal silently. The
                         // deduct-side clamp keeps `accrued <= borrowed`, but defense
@@ -6349,18 +7752,51 @@ impl State {
     }
 
     /// If `deficit_readonly_threshold_e8s > 0` and the current deficit has
-    /// reached the threshold, force `mode = Mode::ReadOnly` and return
-    /// `true`. Returns `false` otherwise. The latch is one-shot per
-    /// crossing — the admin must call `exit_recovery_mode` to clear it.
+    /// reached the threshold, persist the threshold that caused the latch,
+    /// force `mode = Mode::ReadOnly`, and return `true` once. The controller
+    /// can clear it through `exit_recovery_mode` after deficit falls below the
+    /// captured threshold.
     pub fn check_deficit_readonly_latch(&mut self) -> bool {
+        if self.deficit_readonly_latched_at_e8s.is_some() {
+            self.mode = Mode::ReadOnly;
+            return false;
+        }
         if self.deficit_readonly_threshold_e8s == 0 {
             return false;
         }
         if self.protocol_deficit_icusd.0 < self.deficit_readonly_threshold_e8s {
             return false;
         }
+        self.deficit_readonly_latched_at_e8s = Some(self.deficit_readonly_threshold_e8s);
         self.mode = Mode::ReadOnly;
         true
+    }
+
+    /// Clear an active deficit latch after the controller has verified that
+    /// the deficit is below the threshold captured at the original trip.
+    /// Leaves mode ReadOnly until a fresh accepted price recomputes safety.
+    pub fn clear_deficit_readonly_latch(&mut self) -> Result<bool, String> {
+        let Some(threshold) = self.deficit_readonly_latched_at_e8s else {
+            return Ok(false);
+        };
+        if self.protocol_deficit_icusd.0 >= threshold {
+            return Err(format!(
+                "deficit {} has not fallen below latched ReadOnly threshold {}",
+                self.protocol_deficit_icusd.0, threshold
+            ));
+        }
+        if self.deficit_readonly_threshold_e8s > 0
+            && self.protocol_deficit_icusd.0 >= self.deficit_readonly_threshold_e8s
+        {
+            return Err(format!(
+                "deficit {} has not fallen below current ReadOnly threshold {}",
+                self.protocol_deficit_icusd.0, self.deficit_readonly_threshold_e8s
+            ));
+        }
+        self.deficit_readonly_latched_at_e8s = None;
+        self.mode = Mode::ReadOnly;
+        self.manual_mode_override = false;
+        Ok(true)
     }
 
     /// Wave-9b DOS-006: compute the heavy aggregates that
@@ -6597,6 +8033,10 @@ impl State {
         repay_amount: Option<ICUSD>,
         pinned_collateral_seized: Option<u64>,
     ) -> ICUSD {
+        assert!(
+            !self.pending_collateral_withdrawals.contains_key(&vault_id),
+            "cannot liquidate a vault with an unresolved collateral withdrawal"
+        );
         // ASYNC-002 defense-in-depth: never trap on a missing vault. The
         // vault-level `vault::liquidate_vault` now presence-checks and refunds
         // the liquidator before reaching here, but a concurrent liquidation
@@ -6764,7 +8204,11 @@ impl State {
             // Replay stays exact because `RedemptionOnVaults` replay applies
             // the event's stored `vault_redemptions` instead of re-running
             // this scan (see `apply_vault_redemptions`).
-            if vault.bot_processing || crate::guard::is_vault_liquidating(vault.vault_id) {
+            if vault.bot_processing
+                || self.vault_has_unresolved_borrow_mint(vault.vault_id)
+                || self.vault_has_pending_inbound_margin(vault.vault_id)
+                || crate::guard::is_vault_liquidating(vault.vault_id)
+            {
                 continue;
             }
             let vault_ct = if vault.collateral_type == Principal::anonymous() {
@@ -7003,7 +8447,11 @@ impl State {
             // Replay stays exact because `RedemptionOnVaults` replay applies
             // the event's stored `vault_redemptions` instead of re-running
             // this scan (see `apply_vault_redemptions`).
-            if vault.bot_processing || crate::guard::is_vault_liquidating(vault.vault_id) {
+            if vault.bot_processing
+                || (retain_price_precision && self.vault_has_unresolved_borrow_mint(vault.vault_id))
+                || self.vault_has_pending_inbound_margin(vault.vault_id)
+                || crate::guard::is_vault_liquidating(vault.vault_id)
+            {
                 continue;
             }
             let vault_ct = if vault.collateral_type == Principal::anonymous() {
@@ -7192,6 +8640,8 @@ impl State {
             };
             if vault.borrowed_icusd_amount == 0
                 || vault.bot_processing
+                || self.vault_has_unresolved_borrow_mint(vault.vault_id)
+                || self.vault_has_pending_inbound_margin(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
             {
                 continue;
@@ -7239,6 +8689,26 @@ impl State {
             allowed_ids,
         )
         .simulate(icusd_amount)
+    }
+
+    /// Checked preview for live redemption admission and mutation preflight.
+    /// The unchecked compatibility method above remains for historical replay.
+    pub(crate) fn try_simulate_redemption_for_vault_ids(
+        &self,
+        icusd_amount: ICUSD,
+        collateral_price: UsdIcp,
+        collateral_type: &CollateralType,
+        allowed_ids: &[VaultId],
+    ) -> Option<Vec<crate::event::VaultRedemption>> {
+        if icusd_amount == 0 {
+            return Some(Vec::new());
+        }
+        self.prepare_redemption_simulation_for_vault_ids(
+            collateral_price,
+            collateral_type,
+            allowed_ids,
+        )
+        .try_simulate(icusd_amount)
     }
 
     /// Distribute a redemption amount proportionally across a band of vaults by debt size.
@@ -7329,7 +8799,11 @@ impl State {
             if vault.borrowed_icusd_amount == 0 {
                 continue;
             }
-            if vault.bot_processing || crate::guard::is_vault_liquidating(vault.vault_id) {
+            if vault.bot_processing
+                || self.vault_has_unresolved_borrow_mint(vault.vault_id)
+                || self.vault_has_pending_inbound_margin(vault.vault_id)
+                || crate::guard::is_vault_liquidating(vault.vault_id)
+            {
                 continue;
             }
             let vault_ct = if vault.collateral_type == Principal::anonymous() {
@@ -7420,6 +8894,11 @@ impl State {
             self.pending_excess_transfers,
             other.pending_excess_transfers,
             "pending_excess_transfers does not match"
+        );
+        ensure_eq!(
+            self.pending_treasury_payments,
+            other.pending_treasury_payments,
+            "pending_treasury_payments does not match"
         );
         ensure_eq!(
             self.principal_to_vault_ids,
@@ -7532,12 +9011,16 @@ impl State {
                 || payout.tuple.destination.owner != key.stability_pool
                 || payout.tuple.gross_amount_e8s == 0
             {
-                return Err(format!("3USD payout {nonce} differs from its parent identity"));
+                return Err(format!(
+                    "3USD payout {nonce} differs from its parent identity"
+                ));
             }
             let pending = self.pending_margin_transfers.get(nonce);
             if payout.receipt.is_some() {
                 if pending.is_some() {
-                    return Err(format!("settled 3USD payout {nonce} still has a pending margin row"));
+                    return Err(format!(
+                        "settled 3USD payout {nonce} still has a pending margin row"
+                    ));
                 }
             } else if !pending.is_some_and(|transfer| {
                 transfer.op_nonce == *nonce
@@ -7548,8 +9031,31 @@ impl State {
                     && transfer.ledger == Some(payout.tuple.ledger)
                     && transfer.transfer_amount_raw == Some(payout.tuple.net_amount_e8s)
             }) {
-                return Err(format!("unsettled 3USD payout {nonce} lost its pending margin row"));
+                return Err(format!(
+                    "unsettled 3USD payout {nonce} lost its pending margin row"
+                ));
             }
+        }
+
+        for (vault_id, withdrawal) in &self.pending_collateral_withdrawals {
+            ensure_eq!(
+                *vault_id,
+                withdrawal.vault_id,
+                "collateral withdrawal map key differs from vault id"
+            );
+            ensure!(
+                crate::event::collateral_withdrawal_is_well_formed(withdrawal),
+                "collateral withdrawal {} is not an exact valid tuple",
+                withdrawal.operation_id
+            );
+            ensure!(
+                self.vault_id_to_vaults.get(vault_id).is_some_and(|vault| {
+                    vault.owner == withdrawal.owner
+                        && vault.collateral_amount >= withdrawal.gross_amount_raw
+                }),
+                "collateral withdrawal {} no longer matches its vault",
+                withdrawal.operation_id
+            );
         }
 
         Ok(())
@@ -7704,6 +9210,1617 @@ where
     F: FnOnce(&mut State) -> R,
 {
     __STATE.with(|s| f(s.borrow_mut().as_mut().expect("State not initialized!")))
+}
+
+/// Persist an exact ordinary collateral pull before calling the ledger.
+pub fn admit_inbound_collateral(
+    state: &mut State,
+    mut journal: InboundCollateralJournal,
+) -> Result<(Principal, Principal), String> {
+    let key = (journal.owner, journal.tuple.ledger);
+    let expected_id =
+        next_inbound_collateral_request_id(state.inbound_collateral_high_water.get(&key).copied())
+            .ok_or_else(|| "collateral request ID sequence is exhausted".to_string())?;
+    if journal.request_id != expected_id {
+        return Err(format!(
+            "collateral request ID must be the next sequence value ({expected_id})"
+        ));
+    }
+    if state.pending_inbound_collateral.contains_key(&key) {
+        return Err(
+            "an inbound collateral transfer for this owner and ledger is unresolved".into(),
+        );
+    }
+    if let InboundCollateralOperation::AddMargin { vault_id, .. } = &journal.operation {
+        if state.pending_inbound_collateral.values().any(|pending| {
+            matches!(&pending.operation, InboundCollateralOperation::AddMargin { vault_id: id, .. } if id == vault_id)
+        }) {
+            return Err("a collateral ingress for this vault is unresolved".into());
+        }
+    }
+    if journal.tuple.from.owner != journal.owner
+        || journal.tuple.from.subaccount.is_some()
+        || journal.tuple.spender.owner != ic_cdk::id()
+        || journal.tuple.spender.subaccount.is_some()
+        || journal.tuple.to.owner != ic_cdk::id()
+        || journal.tuple.to.subaccount.is_some()
+        || journal.tuple.amount_raw == 0
+        || journal.tuple.memo.is_empty()
+    {
+        return Err(
+            "inbound collateral tuple does not bind the caller and backend accounts".into(),
+        );
+    }
+    if let InboundCollateralOperation::Open {
+        reserved_vault_id, ..
+    } = &mut journal.operation
+    {
+        if *reserved_vault_id != 0 {
+            return Err("new open-vault ingress must not preselect a vault ID".into());
+        }
+        *reserved_vault_id = state.increment_vault_id();
+    }
+    crate::storage::mark_inbound_collateral_journal_used()?;
+    state.pending_inbound_collateral.insert(key, journal);
+    state.inbound_collateral_high_water.insert(key, expected_id);
+    crate::storage::save_state_to_stable(state);
+    Ok(key)
+}
+
+pub fn inbound_collateral_journal(
+    state: &State,
+    owner: Principal,
+    ledger: Principal,
+) -> Option<InboundCollateralJournal> {
+    state
+        .pending_inbound_collateral
+        .get(&(owner, ledger))
+        .cloned()
+}
+
+pub fn set_inbound_collateral_attempt(
+    state: &mut State,
+    owner: Principal,
+    ledger: Principal,
+    tuple: &crate::SpLiquidationStablePullTuple,
+    candidate_block_index: Option<u64>,
+    ambiguous: bool,
+    last_error: Option<String>,
+) -> Result<(), String> {
+    let row = state
+        .pending_inbound_collateral
+        .get_mut(&(owner, ledger))
+        .ok_or_else(|| "inbound collateral journal row is missing".to_string())?;
+    if &row.tuple != tuple {
+        return Err("inbound collateral tuple changed during settlement".into());
+    }
+    row.candidate_block_index = candidate_block_index;
+    row.had_ambiguous_attempt = ambiguous;
+    row.last_error = last_error;
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+pub fn reserve_inbound_candidate_verification_attempt(
+    state: &mut State,
+    owner: Principal,
+    ledger: Principal,
+    request_id: u128,
+    tuple: &crate::SpLiquidationStablePullTuple,
+    now_ns: u64,
+) -> Result<(), String> {
+    const WINDOW_NS: u64 = 60_000_000_000;
+    const MAX_ATTEMPTS: u8 = 8;
+    let row = state
+        .pending_inbound_collateral
+        .get_mut(&(owner, ledger))
+        .ok_or_else(|| "pending collateral request is missing".to_string())?;
+    if row.request_id != request_id || &row.tuple != tuple {
+        return Err("pending collateral request identity changed".into());
+    }
+    if row.candidate_block_index.is_some() {
+        return Err("a verified candidate is already attached".into());
+    }
+    if row.candidate_attach_window_start_ns == 0
+        || now_ns.saturating_sub(row.candidate_attach_window_start_ns) >= WINDOW_NS
+    {
+        row.candidate_attach_window_start_ns = now_ns;
+        row.candidate_attach_attempts = 0;
+    }
+    if row.candidate_attach_attempts >= MAX_ATTEMPTS {
+        return Err(
+            "candidate verification rate limit reached; retry after the 60-second window".into(),
+        );
+    }
+    row.candidate_attach_attempts += 1;
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+pub fn manual_liquidation_v2_active(
+    state: &State,
+    owner: Principal,
+) -> Option<ManualLiquidationV2Journal> {
+    state.manual_liquidation_v2_active.get(&owner).cloned()
+}
+
+pub fn latest_manual_liquidation_v2(
+    state: &State,
+    owner: Principal,
+) -> Option<ManualLiquidationV2Journal> {
+    state
+        .manual_liquidation_v2_latest_result
+        .get(&owner)
+        .cloned()
+}
+
+pub fn admit_manual_liquidation_v2(
+    state: &mut State,
+    journal: ManualLiquidationV2Journal,
+) -> Result<(), String> {
+    if journal.request_id == 0 || journal.pull_amount_raw == 0 {
+        return Err("manual liquidation request ID and pull amount must be nonzero".into());
+    }
+    if state
+        .manual_liquidation_v2_active
+        .contains_key(&journal.owner)
+    {
+        return Err("caller already has an unresolved manual liquidation request".into());
+    }
+    let expected_id = state
+        .manual_liquidation_v2_high_water
+        .get(&journal.owner)
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| "manual liquidation request ID sequence exhausted".to_string())?;
+    if journal.request_id != expected_id {
+        return Err(format!(
+            "manual liquidation request ID must be the next sequence value {expected_id}"
+        ));
+    }
+    if journal.owner != journal.tuple.from.owner
+        || journal.ledger != journal.tuple.ledger
+        || journal.pull_amount_raw != journal.tuple.amount_raw
+        || journal.tuple.to.owner != ic_cdk::id()
+        || journal.tuple.spender.owner != ic_cdk::id()
+        || journal.tuple.to.subaccount.is_some()
+        || journal.tuple.spender.subaccount.is_some()
+        || journal.tuple.from.subaccount.is_some()
+    {
+        return Err(
+            "manual liquidation tuple does not bind caller, ledger, amount, and backend".into(),
+        );
+    }
+    crate::storage::mark_inbound_collateral_journal_used()?;
+    state
+        .manual_liquidation_v2_high_water
+        .insert(journal.owner, expected_id);
+    state
+        .manual_liquidation_v2_active
+        .insert(journal.owner, journal);
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+pub fn save_manual_liquidation_v2(
+    state: &mut State,
+    journal: ManualLiquidationV2Journal,
+) -> Result<(), String> {
+    let row = state
+        .manual_liquidation_v2_active
+        .get(&journal.owner)
+        .ok_or_else(|| "manual liquidation journal row is missing".to_string())?;
+    if row.request_id != journal.request_id || row.tuple != journal.tuple {
+        return Err("manual liquidation request identity or tuple changed".into());
+    }
+    if row.commit_started && !journal.commit_started {
+        return Err("manual liquidation commit-start marker cannot be cleared".into());
+    }
+    if journal.phase == crate::ManualLiquidationV2Phase::RefundPending && journal.commit_started {
+        return Err("a possible partial financial commit cannot enter automatic refund".into());
+    }
+    match (&row.refund, &journal.refund) {
+        (Some(old), Some(new)) => {
+            let same_refund_rail = match (&old.kind, &new.kind) {
+                (
+                    crate::ManualLiquidationV2RefundKind::IcusdMint {
+                        burn_block_index: old_index,
+                    },
+                    crate::ManualLiquidationV2RefundKind::IcusdMint {
+                        burn_block_index: new_index,
+                    },
+                ) => old_index == new_index,
+                (
+                    crate::ManualLiquidationV2RefundKind::StableTransfer {
+                        pull_block_index: old_index,
+                        ..
+                    },
+                    crate::ManualLiquidationV2RefundKind::StableTransfer {
+                        pull_block_index: new_index,
+                        ..
+                    },
+                ) => old_index == new_index,
+                _ => false,
+            };
+            if old.caller != new.caller
+                || old.request_id != new.request_id
+                || old.vault_id != new.vault_id
+                || !same_refund_rail
+                || old.ledger != new.ledger
+                || old.source != new.source
+                || old.recipient != new.recipient
+                || old.amount_e8s != new.amount_e8s
+                || old.history_cursor > new.history_cursor
+                || old.dispatch_attempts > new.dispatch_attempts
+                || old.no_effect_attempts.len() > new.no_effect_attempts.len()
+                || !new.no_effect_attempts.starts_with(&old.no_effect_attempts)
+                || (journal.phase == crate::ManualLiquidationV2Phase::Refunded
+                    && old
+                        .candidate_block_index
+                        .is_some_and(|index| new.candidate_block_index != Some(index)))
+            {
+                return Err(
+                    "manual liquidation refund identity or recovery cursor changed unsafely".into(),
+                );
+            }
+            let rail_fee_matches = match (&new.kind, new.fee_raw) {
+                (crate::ManualLiquidationV2RefundKind::IcusdMint { .. }, None) => true,
+                (
+                    crate::ManualLiquidationV2RefundKind::StableTransfer { fee_raw, .. },
+                    Some(fee),
+                ) => *fee_raw == fee,
+                _ => false,
+            };
+            if !rail_fee_matches {
+                return Err("manual liquidation refund rail and pinned fee diverged".into());
+            }
+            if new.dispatch_attempts > crate::MAX_MANUAL_LIQUIDATION_REFUND_DISPATCHES
+                || new.dispatch_attempts > old.dispatch_attempts.saturating_add(1)
+                || new.no_effect_attempts.len() > old.no_effect_attempts.len() + 1
+            {
+                return Err(
+                    "manual liquidation refund exceeded its bounded dispatch or evidence count"
+                        .into(),
+                );
+            }
+            let appended_evidence =
+                new.no_effect_attempts.len() == old.no_effect_attempts.len() + 1;
+            if appended_evidence {
+                let evidence = new.no_effect_attempts.last().expect("length checked above");
+                if new.dispatch_attempts != old.dispatch_attempts
+                    || old.dispatch_attempts == 0
+                    || evidence.dispatch_attempt != old.dispatch_attempts
+                    || evidence.fee_raw != old.fee_raw
+                    || evidence.op_nonce != old.op_nonce
+                    || evidence.created_at_time_ns != old.created_at_time_ns
+                    || evidence.memo != old.memo
+                {
+                    return Err("manual liquidation no-effect evidence does not bind the prior dispatch tuple".into());
+                }
+            }
+            if new.dispatch_attempts == old.dispatch_attempts.saturating_add(1) {
+                let dispatch_authorized = old.dispatch_attempts == 0
+                    || old.no_effect_attempts.last().is_some_and(|evidence| {
+                        evidence.dispatch_attempt == old.dispatch_attempts
+                            && ((evidence.fee_raw == old.fee_raw
+                                && evidence.op_nonce == old.op_nonce
+                                && evidence.created_at_time_ns == old.created_at_time_ns
+                                && evidence.memo == old.memo)
+                                || (evidence.expected_fee_raw == new.fee_raw
+                                    && new.fee_raw != old.fee_raw))
+                    });
+                if !dispatch_authorized {
+                    return Err(
+                        "manual liquidation refund retry lacks exact typed no-effect evidence"
+                            .into(),
+                    );
+                }
+            }
+            let identity_changed = old.kind != new.kind
+                || old.fee_raw != new.fee_raw
+                || old.op_nonce != new.op_nonce
+                || old.created_at_time_ns != new.created_at_time_ns
+                || old.memo != new.memo;
+            if identity_changed {
+                let Some(evidence) = new.no_effect_attempts.last() else {
+                    return Err(
+                        "manual liquidation refund identity rotated without no-effect evidence"
+                            .into(),
+                    );
+                };
+                let fee_rotation_matches = match (&old.kind, &new.kind) {
+                    (
+                        crate::ManualLiquidationV2RefundKind::StableTransfer {
+                            pull_block_index: old_index,
+                            ..
+                        },
+                        crate::ManualLiquidationV2RefundKind::StableTransfer {
+                            pull_block_index: new_index,
+                            fee_raw,
+                        },
+                    ) => old_index == new_index && new.fee_raw == Some(*fee_raw),
+                    _ => false,
+                };
+                if !appended_evidence
+                    || !fee_rotation_matches
+                    || evidence.dispatch_attempt != old.dispatch_attempts
+                    || evidence.fee_raw != old.fee_raw
+                    || evidence.op_nonce != old.op_nonce
+                    || evidence.created_at_time_ns != old.created_at_time_ns
+                    || evidence.memo != old.memo
+                    || evidence.expected_fee_raw.is_none()
+                    || evidence.expected_fee_raw == old.fee_raw
+                    || new.fee_raw != evidence.expected_fee_raw
+                    || new.op_nonce == old.op_nonce
+                    || new.created_at_time_ns == old.created_at_time_ns
+                    || new.memo == old.memo
+                    || new.candidate_block_index.is_some()
+                {
+                    return Err(
+                        "manual liquidation refund fee rotation lacks exact BadFee evidence".into(),
+                    );
+                }
+            }
+        }
+        (Some(_), None) => {
+            return Err("manual liquidation refund obligation cannot be removed".into())
+        }
+        (None, Some(_)) if journal.phase != crate::ManualLiquidationV2Phase::RefundPending => {
+            return Err("manual liquidation refund must enter RefundPending atomically".into());
+        }
+        (None, Some(new)) => {
+            let pull_block_index = row.candidate_block_index.ok_or_else(|| {
+                "manual liquidation refund requires a proved pull block".to_string()
+            })?;
+            if new.caller != row.owner
+                || new.request_id != row.request_id
+                || new.vault_id != row.vault_id
+                || new.ledger != row.ledger
+                || new.recipient != row.owner
+                || new.amount_e8s != row.pull_amount_raw
+                || new.source.owner != ic_cdk::id()
+                || new.source.subaccount.is_some()
+            {
+                return Err(
+                    "manual liquidation refund identity does not match its paid request".into(),
+                );
+            }
+            match (&new.kind, &row.route) {
+                (
+                    crate::ManualLiquidationV2RefundKind::IcusdMint { burn_block_index },
+                    crate::ManualLiquidationRoute::FullIcusd
+                    | crate::ManualLiquidationRoute::PartialIcusd,
+                ) if *burn_block_index == pull_block_index && new.fee_raw.is_none() => {}
+                (
+                    crate::ManualLiquidationV2RefundKind::StableTransfer {
+                        pull_block_index: index,
+                        fee_raw,
+                    },
+                    crate::ManualLiquidationRoute::PartialStable { .. },
+                ) if *index == pull_block_index && new.fee_raw == Some(*fee_raw) => {}
+                _ => {
+                    return Err(
+                        "manual liquidation refund kind does not match the paid route".into(),
+                    )
+                }
+            }
+        }
+        _ => {}
+    }
+    if journal.phase == crate::ManualLiquidationV2Phase::Refunded
+        && (journal.commit_started
+            || journal
+                .refund
+                .as_ref()
+                .is_none_or(|refund| refund.candidate_block_index.is_none()))
+    {
+        return Err(
+            "manual liquidation refund cannot be terminal without a receipt candidate".into(),
+        );
+    }
+    crate::storage::mark_inbound_collateral_journal_used()?;
+    state
+        .manual_liquidation_v2_active
+        .insert(journal.owner, journal);
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+pub fn finish_manual_liquidation_v2(
+    state: &mut State,
+    owner: Principal,
+    request_id: u128,
+) -> Result<(), String> {
+    let row = state
+        .manual_liquidation_v2_active
+        .get(&owner)
+        .filter(|row| row.request_id == request_id)
+        .cloned()
+        .ok_or_else(|| "manual liquidation completion row is missing".to_string())?;
+    if !matches!(
+        row.phase,
+        crate::ManualLiquidationV2Phase::CommittedPayoutQueued
+            | crate::ManualLiquidationV2Phase::Refunded
+            | crate::ManualLiquidationV2Phase::Rejected
+    ) {
+        return Err("manual liquidation row is not terminal".into());
+    }
+    state.manual_liquidation_v2_active.remove(&owner);
+    state.manual_liquidation_v2_latest_result.insert(owner, row);
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+impl RepaymentV2Journal {
+    pub fn status_view(&self) -> crate::RepaymentV2StatusView {
+        crate::RepaymentV2StatusView {
+            owner: self.owner,
+            request_id: self.request_id,
+            vault_id: self.vault_id,
+            requested_amount_raw: self.requested_amount_raw,
+            effective_amount_raw: self.effective_amount_raw,
+            close_after_repay: self.close_after_repay,
+            ledger: self.ledger,
+            tuple: Some(self.tuple.clone()),
+            phase: self.phase.clone(),
+            candidate_block_index: self.candidate_block_index,
+            result: self
+                .repay_block_index
+                .map(|repay_block_index| crate::RepaymentV2Result {
+                    repay_block_index,
+                    collateral_return_block_index: self.collateral_return_block_index,
+                }),
+            had_ambiguous_attempt: self.had_ambiguous_attempt,
+            last_error: self.last_error.clone(),
+        }
+    }
+}
+
+pub fn repayment_v2_journal(state: &State, owner: Principal) -> Option<RepaymentV2Journal> {
+    state.repayment_v2_active.get(&owner).cloned()
+}
+
+pub fn latest_repayment_v2(state: &State, owner: Principal) -> Option<RepaymentV2Journal> {
+    state.repayment_v2_latest_result.get(&owner).cloned()
+}
+
+pub fn admit_repayment_v2(
+    state: &mut State,
+    journal: RepaymentV2Journal,
+    backend: Principal,
+) -> Result<(), String> {
+    if journal.request_id == 0 || journal.effective_amount_raw == 0 {
+        return Err("repayment request ID and effective amount must be nonzero".into());
+    }
+    let owner = journal.owner;
+    let next_id = state
+        .repayment_v2_high_water
+        .get(&owner)
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| "repayment request ID sequence is exhausted".to_string())?;
+    if journal.request_id != next_id {
+        return Err(format!(
+            "repayment request ID must be the next sequence value ({next_id})"
+        ));
+    }
+    if state.repayment_v2_active.contains_key(&owner) {
+        return Err("an earlier repayment request is unresolved".into());
+    }
+    if journal.tuple.from.owner != owner
+        || journal.tuple.from.subaccount.is_some()
+        || journal.tuple.to.owner != backend
+        || journal.tuple.to.subaccount.is_some()
+        || journal.tuple.spender.owner != backend
+        || journal.tuple.spender.subaccount.is_some()
+        || journal.tuple.ledger != journal.ledger
+        || journal.tuple.amount_raw != journal.effective_amount_raw
+        || journal.tuple.fee_raw != 0
+        || journal.tuple.memo.is_empty()
+    {
+        return Err(
+            "repayment tuple does not bind the exact owner, ledger, amount, and backend accounts"
+                .into(),
+        );
+    }
+    crate::storage::mark_inbound_collateral_journal_used()?;
+    state
+        .repayment_v2_high_water
+        .insert(owner, journal.request_id);
+    state.repayment_v2_active.insert(owner, journal);
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+#[cfg(test)]
+mod repayment_v2_journal_tests {
+    use super::*;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn row(owner: Principal, backend: Principal, request_id: u128) -> RepaymentV2Journal {
+        let ledger = Principal::from_slice(&[3]);
+        RepaymentV2Journal {
+            owner,
+            request_id,
+            vault_id: 77,
+            requested_amount_raw: 100,
+            effective_amount_raw: 100,
+            pinned_debt_raw: 500,
+            close_after_repay: false,
+            collateral_type: Principal::from_slice(&[4]),
+            ledger,
+            tuple: crate::RepaymentV2PullTuple {
+                op_nonce: 9,
+                ledger,
+                from: Account {
+                    owner,
+                    subaccount: None,
+                },
+                spender: Account {
+                    owner: backend,
+                    subaccount: None,
+                },
+                to: Account {
+                    owner: backend,
+                    subaccount: None,
+                },
+                amount_raw: 100,
+                fee_raw: 0,
+                memo: vec![9],
+                created_at_time_ns: 8,
+            },
+            phase: crate::RepaymentV2Phase::PendingPull,
+            candidate_block_index: None,
+            candidate_attach_window_start_ns: 0,
+            candidate_attach_attempts: 0,
+            had_ambiguous_attempt: false,
+            dispatch_attempts: 0,
+            repay_block_index: None,
+            collateral_return_block_index: None,
+            interest_share_raw: 0,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn request_id_admission_fences_different_id_until_terminal_and_replay_is_exact() {
+        let owner = Principal::from_slice(&[1]);
+        let backend = Principal::from_slice(&[2]);
+        let mut state = State::default();
+        admit_repayment_v2(&mut state, row(owner, backend, 1), backend).unwrap();
+        assert!(admit_repayment_v2(&mut state, row(owner, backend, 2), backend).is_err());
+
+        let active = state.repayment_v2_active.get_mut(&owner).unwrap();
+        active.phase = crate::RepaymentV2Phase::Complete;
+        active.repay_block_index = Some(42);
+        finish_repayment_v2(&mut state, owner, 1).unwrap();
+        assert_eq!(
+            state.repayment_v2_latest_result[&owner].repay_block_index,
+            Some(42)
+        );
+        assert!(admit_repayment_v2(&mut state, row(owner, backend, 1), backend).is_err());
+        assert!(admit_repayment_v2(&mut state, row(owner, backend, 2), backend).is_ok());
+    }
+
+    #[test]
+    fn close_repayment_with_new_interest_is_terminal_and_releases_next_id() {
+        let owner = Principal::from_slice(&[1]);
+        let backend = Principal::from_slice(&[2]);
+        let mut state = State::default();
+        let mut committed = row(owner, backend, 1);
+        committed.close_after_repay = true;
+        committed.phase = crate::RepaymentV2Phase::CloseNeedsAdditionalRepayment;
+        committed.repay_block_index = Some(77);
+        admit_repayment_v2(&mut state, committed, backend).unwrap();
+
+        finish_repayment_v2(&mut state, owner, 1).unwrap();
+        let saved = &state.repayment_v2_latest_result[&owner];
+        assert_eq!(
+            saved.phase,
+            crate::RepaymentV2Phase::CloseNeedsAdditionalRepayment
+        );
+        assert_eq!(saved.repay_block_index, Some(77));
+        assert!(!state.repayment_v2_active.contains_key(&owner));
+        assert!(admit_repayment_v2(&mut state, row(owner, backend, 2), backend).is_ok());
+    }
+
+    #[test]
+    fn journal_serde_defaults_support_pre_v2_state_snapshots() {
+        let serialized =
+            serde_json::to_value(row(Principal::anonymous(), Principal::from_slice(&[2]), 1))
+                .unwrap();
+        let mut legacy = serialized.as_object().unwrap().clone();
+        legacy.remove("candidate_attach_window_start_ns");
+        legacy.remove("candidate_attach_attempts");
+        legacy.remove("dispatch_attempts");
+        legacy.remove("had_ambiguous_attempt");
+        legacy.remove("candidate_block_index");
+        legacy.remove("repay_block_index");
+        legacy.remove("collateral_return_block_index");
+        legacy.remove("interest_share_raw");
+        legacy.remove("last_error");
+        let migrated: RepaymentV2Journal =
+            serde_json::from_value(serde_json::Value::Object(legacy)).unwrap();
+        assert_eq!(migrated.dispatch_attempts, 0);
+        assert!(!migrated.had_ambiguous_attempt);
+        assert!(migrated.candidate_block_index.is_none());
+    }
+}
+
+pub fn save_repayment_v2(state: &mut State, journal: RepaymentV2Journal) -> Result<(), String> {
+    let row = state
+        .repayment_v2_active
+        .get(&journal.owner)
+        .ok_or_else(|| "active repayment journal is missing".to_string())?;
+    if row.request_id != journal.request_id || row.tuple != journal.tuple {
+        return Err("repayment journal identity changed".into());
+    }
+    state.repayment_v2_active.insert(journal.owner, journal);
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+pub fn finish_repayment_v2(
+    state: &mut State,
+    owner: Principal,
+    request_id: u128,
+) -> Result<(), String> {
+    let row = state
+        .repayment_v2_active
+        .get(&owner)
+        .filter(|row| row.request_id == request_id)
+        .cloned()
+        .ok_or_else(|| "active repayment journal is missing".to_string())?;
+    if !matches!(
+        row.phase,
+        crate::RepaymentV2Phase::Complete
+            | crate::RepaymentV2Phase::Rejected
+            | crate::RepaymentV2Phase::CloseNeedsAdditionalRepayment
+    ) {
+        return Err("only a terminal repayment request can be compacted".into());
+    }
+    state.repayment_v2_active.remove(&owner);
+    state.repayment_v2_latest_result.insert(owner, row);
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+pub fn reserve_repayment_v2_candidate_attempt(
+    state: &mut State,
+    owner: Principal,
+    request_id: u128,
+    now_ns: u64,
+) -> Result<RepaymentV2Journal, String> {
+    const WINDOW_NS: u64 = 60_000_000_000;
+    const MAX_ATTEMPTS: u8 = 8;
+    let row = state
+        .repayment_v2_active
+        .get_mut(&owner)
+        .filter(|row| row.request_id == request_id)
+        .ok_or_else(|| "active repayment request is missing".to_string())?;
+    if !row.had_ambiguous_attempt
+        || row.repay_block_index.is_some()
+        || row.candidate_block_index.is_some()
+    {
+        return Err(
+            "candidate attachment is only available for an unresolved ambiguous pull".into(),
+        );
+    }
+    if row.candidate_attach_window_start_ns == 0
+        || now_ns.saturating_sub(row.candidate_attach_window_start_ns) >= WINDOW_NS
+    {
+        row.candidate_attach_window_start_ns = now_ns;
+        row.candidate_attach_attempts = 0;
+    }
+    if row.candidate_attach_attempts >= MAX_ATTEMPTS {
+        return Err(
+            "candidate verification rate limit reached; retry after the 60-second window".into(),
+        );
+    }
+    row.candidate_attach_attempts += 1;
+    let snapshot = row.clone();
+    crate::storage::save_state_to_stable(state);
+    Ok(snapshot)
+}
+
+pub fn admit_stable_repayment_v2(
+    state: &mut State,
+    journal: StableRepaymentV2Journal,
+    backend: Principal,
+) -> Result<(), String> {
+    let owner = journal.owner;
+    let next = state
+        .stable_repayment_v2_high_water
+        .get(&owner)
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| "stable repayment request ID sequence is exhausted".to_string())?;
+    if journal.request_id == 0 || journal.request_id != next {
+        return Err(format!(
+            "stable repayment request ID must be the next sequence value ({next})"
+        ));
+    }
+    if state.stable_repayment_v2_active.contains_key(&owner) {
+        return Err("an earlier stable repayment request is unresolved".into());
+    }
+    if journal.tuple.ledger != journal.ledger
+        || journal.tuple.from.owner != owner
+        || journal.tuple.from.subaccount.is_some()
+        || journal.tuple.spender.owner != backend
+        || journal.tuple.spender.subaccount.is_some()
+        || journal.tuple.to.owner != backend
+        || journal.tuple.to.subaccount.is_some()
+        || journal.tuple.amount_raw
+            != journal
+                .principal_pull_e6
+                .checked_add(journal.surcharge_e6)
+                .ok_or_else(|| "stable pull amount overflow".to_string())?
+        || journal.tuple.memo.is_empty()
+    {
+        return Err(
+            "stable repayment tuple does not bind the exact request and backend accounts".into(),
+        );
+    }
+    crate::storage::mark_inbound_collateral_journal_used()?;
+    state
+        .stable_repayment_v2_high_water
+        .insert(owner, journal.request_id);
+    state.stable_repayment_v2_active.insert(owner, journal);
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+pub fn save_stable_repayment_v2(
+    state: &mut State,
+    journal: StableRepaymentV2Journal,
+) -> Result<(), String> {
+    let row = state
+        .stable_repayment_v2_active
+        .get(&journal.owner)
+        .ok_or_else(|| "active stable repayment journal is missing".to_string())?;
+    if row.request_id != journal.request_id || row.tuple != journal.tuple {
+        return Err("stable repayment journal identity changed".into());
+    }
+    state
+        .stable_repayment_v2_active
+        .insert(journal.owner, journal);
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+pub fn finish_stable_repayment_v2(
+    state: &mut State,
+    owner: Principal,
+    request_id: u128,
+) -> Result<(), String> {
+    let row = state
+        .stable_repayment_v2_active
+        .get(&owner)
+        .filter(|row| row.request_id == request_id)
+        .cloned()
+        .ok_or_else(|| "active stable repayment journal is missing".to_string())?;
+    if !matches!(
+        row.phase,
+        crate::StableRepaymentV2Phase::Complete | crate::StableRepaymentV2Phase::Rejected
+    ) {
+        return Err("only a terminal stable repayment request can be compacted".into());
+    }
+    state.stable_repayment_v2_active.remove(&owner);
+    state.stable_repayment_v2_latest_result.insert(owner, row);
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+pub fn reserve_stable_repayment_candidate_attempt(
+    state: &mut State,
+    owner: Principal,
+    request_id: u128,
+    now_ns: u64,
+) -> Result<StableRepaymentV2Journal, String> {
+    const WINDOW_NS: u64 = 60_000_000_000;
+    const MAX_ATTEMPTS: u8 = 8;
+    let row = state
+        .stable_repayment_v2_active
+        .get_mut(&owner)
+        .filter(|row| row.request_id == request_id)
+        .ok_or_else(|| "active stable repayment request is missing".to_string())?;
+    if !row.had_ambiguous_attempt || row.candidate_block_index.is_some() || row.result.is_some() {
+        return Err(
+            "candidate attachment is only available for an unresolved ambiguous stable pull".into(),
+        );
+    }
+    if row.candidate_attach_window_start_ns == 0
+        || now_ns.saturating_sub(row.candidate_attach_window_start_ns) >= WINDOW_NS
+    {
+        row.candidate_attach_window_start_ns = now_ns;
+        row.candidate_attach_attempts = 0;
+    }
+    if row.candidate_attach_attempts >= MAX_ATTEMPTS {
+        return Err(
+            "candidate verification rate limit reached; retry after the 60-second window".into(),
+        );
+    }
+    row.candidate_attach_attempts += 1;
+    let snapshot = row.clone();
+    crate::storage::save_state_to_stable(state);
+    Ok(snapshot)
+}
+
+#[cfg(test)]
+mod stable_repayment_v2_journal_tests {
+    use super::*;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn row(owner: Principal, backend: Principal, request_id: u128) -> StableRepaymentV2Journal {
+        let ledger = Principal::from_slice(&[3]);
+        StableRepaymentV2Journal {
+            owner,
+            request_id,
+            vault_id: 42,
+            token_type: crate::StableTokenType::CKUSDT,
+            requested_amount_e8: 10_000,
+            effective_debt_reduction_e8: 10_000,
+            principal_pull_e6: 100,
+            surcharge_e6: 1,
+            pinned_debt_e8: 50_000,
+            collateral_type: Principal::from_slice(&[4]),
+            ledger,
+            interest_routing_plan: Some(StableRepaymentV2InterestRoutingPlan {
+                split: Vec::new(),
+                stable_treasury: None,
+                icusd_ledger: Principal::from_slice(&[5]),
+                stability_pool: None,
+                three_pool: None,
+                amm1: None,
+                amm1_pool_id: None,
+            }),
+            tuple: crate::SpLiquidationStablePullTuple {
+                op_nonce: 99,
+                ledger,
+                from: Account {
+                    owner,
+                    subaccount: None,
+                },
+                spender: Account {
+                    owner: backend,
+                    subaccount: None,
+                },
+                to: Account {
+                    owner: backend,
+                    subaccount: None,
+                },
+                amount_raw: 101,
+                fee_raw: 10,
+                memo: vec![1, 2, 3],
+                created_at_time_ns: 98,
+            },
+            phase: crate::StableRepaymentV2Phase::PendingPull,
+            candidate_block_index: None,
+            candidate_attach_window_start_ns: 0,
+            candidate_attach_attempts: 0,
+            had_ambiguous_attempt: false,
+            dispatch_attempts: 0,
+            result: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn stable_request_id_high_water_and_ledger_bound_receipt_survive_compaction() {
+        let owner = Principal::from_slice(&[1]);
+        let backend = Principal::from_slice(&[2]);
+        let ledger = Principal::from_slice(&[3]);
+        let mut state = State::default();
+        admit_stable_repayment_v2(&mut state, row(owner, backend, 1), backend).unwrap();
+        assert!(admit_stable_repayment_v2(&mut state, row(owner, backend, 2), backend).is_err());
+        let active = state.stable_repayment_v2_active.get_mut(&owner).unwrap();
+        active.phase = crate::StableRepaymentV2Phase::Complete;
+        active.result = Some(crate::StableRepaymentV2Result {
+            ledger,
+            block_index: 7,
+            effective_debt_reduction_e8: 10_000,
+            interest_share_e8: 1_000,
+            surcharge_payment_id: Some(5),
+        });
+        finish_stable_repayment_v2(&mut state, owner, 1).unwrap();
+        let view = state.stable_repayment_v2_latest_result[&owner].status_view();
+        assert_eq!(view.result.unwrap().ledger, ledger);
+        assert!(admit_stable_repayment_v2(&mut state, row(owner, backend, 1), backend).is_err());
+        assert!(admit_stable_repayment_v2(&mut state, row(owner, backend, 2), backend).is_ok());
+    }
+
+    #[test]
+    fn stable_request_admission_rejects_cross_ledger_or_account_tuple() {
+        let owner = Principal::from_slice(&[1]);
+        let backend = Principal::from_slice(&[2]);
+        let mut bad = row(owner, backend, 1);
+        bad.tuple.ledger = Principal::from_slice(&[9]);
+        let mut state = State::default();
+        assert!(admit_stable_repayment_v2(&mut state, bad, backend).is_err());
+        assert!(state.stable_repayment_v2_active.is_empty());
+    }
+
+    #[test]
+    fn stable_journal_additive_fields_default_on_older_rows() {
+        let value = serde_json::to_value(row(
+            Principal::from_slice(&[1]),
+            Principal::from_slice(&[2]),
+            1,
+        ))
+        .unwrap();
+        let mut object = value.as_object().unwrap().clone();
+        object.remove("candidate_attach_window_start_ns");
+        object.remove("candidate_attach_attempts");
+        object.remove("had_ambiguous_attempt");
+        object.remove("dispatch_attempts");
+        object.remove("candidate_block_index");
+        object.remove("result");
+        object.remove("last_error");
+        object.remove("interest_routing_plan");
+        let migrated: StableRepaymentV2Journal =
+            serde_json::from_value(serde_json::Value::Object(object)).unwrap();
+        assert!(migrated.candidate_block_index.is_none());
+        assert!(migrated.result.is_none());
+        assert!(migrated.interest_routing_plan.is_none());
+    }
+}
+
+/// Admit and synchronously persist an exact V2 request before any stable
+/// ledger call. Repeating the same request ID/payload is idempotent; payload
+/// changes, skipped IDs, and a second unacknowledged request are rejected.
+pub fn admit_sp_liquidation_v2(
+    state: &mut State,
+    stability_pool: Principal,
+    backend: Principal,
+    now_ns: u64,
+    request: crate::SpLiquidationV2Request,
+    plan: SpLiquidationV2PinnedPlan,
+    stable_pull_tuple: crate::SpLiquidationStablePullTuple,
+) -> Result<(), String> {
+    let key = (stability_pool, request.request_id);
+    if let Some(existing) = state.sp_liquidation_v2_journals.get(&key) {
+        return if existing.request == request {
+            Ok(())
+        } else {
+            Err("request ID is already bound to a different liquidation payload".into())
+        };
+    }
+    let acknowledged_through = state
+        .sp_liquidation_v2_acknowledged_through
+        .get(&stability_pool)
+        .copied()
+        .unwrap_or(0);
+    if request.request_id == 0 || request.request_id != acknowledged_through.saturating_add(1) {
+        return Err("request ID is not the next unacknowledged SP liquidation ID".into());
+    }
+    if state
+        .sp_liquidation_v2_journals
+        .keys()
+        .any(|(pool, _)| *pool == stability_pool)
+    {
+        return Err("an earlier SP liquidation request is still unacknowledged".into());
+    }
+    if stable_pull_tuple.amount_raw == 0
+        || stable_pull_tuple.fee_raw != 0
+        || stable_pull_tuple.ledger == Principal::anonymous()
+        || stable_pull_tuple.from.owner != stability_pool
+        || stable_pull_tuple.spender.owner != backend
+        || stable_pull_tuple.to.owner != backend
+        || stable_pull_tuple.from.subaccount.is_some()
+        || stable_pull_tuple.spender.subaccount.is_some()
+        || stable_pull_tuple.to.subaccount.is_some()
+        || request.approval.tuple.ledger != stable_pull_tuple.ledger
+        || request.token != crate::SpLiquidationToken::IcUsd
+        || plan.stable_token_ledger != stable_pull_tuple.ledger
+        || plan.debt_liquidated_e8s != stable_pull_tuple.amount_raw
+        || plan.debt_liquidated_e8s > request.amount
+        || plan
+            .stable_token_minting_account
+            .as_ref()
+            .is_none_or(|account| account.owner != backend || account.subaccount.is_some())
+        || request.approval.tuple.owner.owner != stability_pool
+        || request.approval.tuple.owner.subaccount.is_some()
+        || request.approval.tuple.spender.owner != backend
+        || request.approval.tuple.spender.subaccount.is_some()
+        || stable_pull_tuple.fee_raw != 0
+        || request.approval.tuple.allowance_raw < request.amount
+        || request.approval.tuple.expires_at_ns <= request.approval.tuple.created_at_time_ns
+        || request.approval.tuple.created_at_time_ns > now_ns
+        || request.approval.tuple.expires_at_ns <= now_ns
+        || request.approval.tuple.expires_at_ns - request.approval.tuple.created_at_time_ns
+            > crate::vault::COLLATERAL_WITHDRAWAL_DEDUP_WINDOW_NS
+    {
+        return Err("approval or stable pull tuple does not bind the exact SP/backend ledger accounts and sufficient allowance".into());
+    }
+    state.sp_liquidation_v2_journals.insert(
+        key,
+        SpLiquidationV2Journal {
+            request,
+            status: crate::SpLiquidationV2Status::StablePullPending {
+                tuple: stable_pull_tuple,
+                candidate_block_index: None,
+                last_error: None,
+            },
+            pinned_vault_fingerprint: sp_liquidation_v2_vault_fingerprint(&plan.vault),
+            had_ambiguous_stable_pull_attempt: false,
+            plan: Some(plan),
+            payout_dispatch_started: false,
+            had_ambiguous_payout_dispatch: false,
+            payout_dispatch_attempts: 0,
+            accepted_payout_supersession: None,
+        },
+    );
+    crate::storage::mark_sp_liquidation_v2_used()
+        .expect("persist SP liquidation V2 used marker before stable pull");
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+/// Persist an approval-fee-only refund obligation when pre-pull validation
+/// fails after the SP's approval has been positively proven. No debt mutation
+/// or stable pull is permitted for this journal row.
+pub fn admit_sp_liquidation_v2_refund(
+    state: &mut State,
+    stability_pool: Principal,
+    request: crate::SpLiquidationV2Request,
+    refund_tuple: crate::SpLiquidationStableRefundTuple,
+    reason: String,
+) -> Result<(), String> {
+    let key = (stability_pool, request.request_id);
+    if let Some(existing) = state.sp_liquidation_v2_journals.get(&key) {
+        return if existing.request == request {
+            Ok(())
+        } else {
+            Err("request ID is already bound to a different liquidation payload".into())
+        };
+    }
+    let floor = state
+        .sp_liquidation_v2_acknowledged_through
+        .get(&stability_pool)
+        .copied()
+        .unwrap_or(0);
+    if request.request_id == 0 || request.request_id != floor.saturating_add(1) {
+        return Err("request ID is not the next unacknowledged SP liquidation ID".into());
+    }
+    if state
+        .sp_liquidation_v2_journals
+        .keys()
+        .any(|(pool, _)| *pool == stability_pool)
+    {
+        return Err("an earlier SP liquidation request is still unacknowledged".into());
+    }
+    let expected_amount = refund_tuple
+        .principal_refund_raw
+        .checked_add(refund_tuple.approval_fee_refund_raw)
+        .and_then(|amount| amount.checked_add(refund_tuple.pull_fee_refund_raw));
+    if refund_tuple.ledger != request.approval.tuple.ledger
+        || refund_tuple.source.owner != ic_cdk::id()
+        || refund_tuple.source.subaccount.is_some()
+        || refund_tuple.destination.owner != stability_pool
+        || refund_tuple.destination.subaccount.is_some()
+        || refund_tuple.principal_refund_raw != 0
+        || refund_tuple.pull_fee_refund_raw != 0
+        || refund_tuple.approval_fee_refund_raw != request.approval.tuple.fee_raw
+        || expected_amount != Some(refund_tuple.amount_raw)
+        || refund_tuple.fee_raw != 0
+    {
+        return Err("approval-only refund tuple does not match the proven approval fee".into());
+    }
+    state.sp_liquidation_v2_journals.insert(
+        key,
+        SpLiquidationV2Journal {
+            request,
+            status: crate::SpLiquidationV2Status::StablePullRefundPending {
+                stable_pull_receipt: None,
+                tuple: refund_tuple,
+                candidate_block_index: None,
+                last_error: Some(reason),
+            },
+            pinned_vault_fingerprint: [0; 32],
+            had_ambiguous_stable_pull_attempt: false,
+            plan: None,
+            payout_dispatch_started: false,
+            had_ambiguous_payout_dispatch: false,
+            payout_dispatch_attempts: 0,
+            accepted_payout_supersession: None,
+        },
+    );
+    crate::storage::mark_sp_liquidation_v2_used()
+        .expect("persist SP V2 marker before approval fee refund dispatch");
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+pub fn set_sp_liquidation_v2_status(
+    state: &mut State,
+    stability_pool: Principal,
+    request_id: u64,
+    status: crate::SpLiquidationV2Status,
+) -> Result<(), String> {
+    let row = state
+        .sp_liquidation_v2_journals
+        .get_mut(&(stability_pool, request_id))
+        .ok_or_else(|| "SP liquidation request journal row is missing".to_string())?;
+    row.status = status;
+    if matches!(
+        &row.status,
+        crate::SpLiquidationV2Status::CollateralPayoutPending {
+            candidate_block_index: Some(_),
+            ..
+        } | crate::SpLiquidationV2Status::Complete { .. }
+    ) {
+        row.payout_dispatch_started = false;
+    }
+    crate::storage::mark_sp_liquidation_v2_used()
+        .expect("persist SP liquidation V2 used marker before external settlement");
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+/// Persist payout dispatch provenance before the transfer call. The return
+/// value is true only for the first dispatch of an unambiguous original tuple.
+/// Old snapshots with no provenance default to dispatch-started and therefore
+/// can never authorize a tuple successor.
+pub fn begin_sp_liquidation_v2_payout_dispatch(
+    state: &mut State,
+    stability_pool: Principal,
+    request_id: u64,
+) -> Result<bool, String> {
+    let row = state
+        .sp_liquidation_v2_journals
+        .get_mut(&(stability_pool, request_id))
+        .ok_or_else(|| "SP liquidation payout journal row is missing".to_string())?;
+    if !matches!(
+        &row.status,
+        crate::SpLiquidationV2Status::CollateralPayoutPending {
+            candidate_block_index: None,
+            ..
+        }
+    ) {
+        return Err("SP liquidation payout is no longer dispatchable".into());
+    }
+    if row.payout_dispatch_started {
+        row.had_ambiguous_payout_dispatch = true;
+    }
+    let first_unambiguous_dispatch = row.payout_dispatch_attempts == 0
+        && !row.had_ambiguous_payout_dispatch
+        && row.accepted_payout_supersession.is_none();
+    row.payout_dispatch_attempts = row.payout_dispatch_attempts.saturating_add(1);
+    row.payout_dispatch_started = true;
+    crate::storage::mark_sp_liquidation_v2_used()
+        .expect("persist payout dispatch provenance before ledger await");
+    crate::storage::save_state_to_stable(state);
+    Ok(first_unambiguous_dispatch)
+}
+
+/// Record a typed first-dispatch BadFee and its exact fee-adjusted successor.
+/// This does not dispatch the successor; the SP must adopt it and call the
+/// authenticated acceptance endpoint first.
+pub fn record_sp_liquidation_v2_payout_supersession(
+    state: &mut State,
+    stability_pool: Principal,
+    request_id: u64,
+    predecessor: crate::SpLiquidationPayoutTuple,
+    replacement: crate::SpLiquidationPayoutTuple,
+    evidence: crate::SpLiquidationPayoutNoEffectEvidence,
+    generation: u32,
+) -> Result<(), String> {
+    let row = state
+        .sp_liquidation_v2_journals
+        .get_mut(&(stability_pool, request_id))
+        .ok_or_else(|| "SP liquidation payout journal row is missing".to_string())?;
+    let (stable_pull_receipt, result, current_tuple, candidate_block_index) = match &row.status {
+        crate::SpLiquidationV2Status::CollateralPayoutPending {
+            stable_pull_receipt,
+            result,
+            tuple,
+            candidate_block_index,
+            ..
+        } => (
+            stable_pull_receipt.clone(),
+            result.clone(),
+            tuple.clone(),
+            *candidate_block_index,
+        ),
+        _ => return Err("SP liquidation payout is not awaiting a tuple successor".into()),
+    };
+    let entitlement = result.collateral_amount_received;
+    if row.payout_dispatch_attempts != 1
+        || !row.payout_dispatch_started
+        || row.had_ambiguous_payout_dispatch
+        || row.accepted_payout_supersession.is_some()
+        || candidate_block_index.is_some()
+        || generation != 1
+        || predecessor != current_tuple
+        || predecessor.gross_amount_raw == 0
+        || entitlement != Some(predecessor.gross_amount_raw)
+        || replacement.ledger != predecessor.ledger
+        || replacement.source != predecessor.source
+        || replacement.destination != predecessor.destination
+        || replacement.collateral_type != predecessor.collateral_type
+        || replacement.gross_amount_raw != predecessor.gross_amount_raw
+        || !match &evidence {
+            crate::SpLiquidationPayoutNoEffectEvidence::BadFee { expected_fee_raw } => {
+                replacement.fee_raw == *expected_fee_raw
+            }
+            crate::SpLiquidationPayoutNoEffectEvidence::InsufficientFunds {
+                reported_balance_raw,
+            } => {
+                replacement.fee_raw == predecessor.fee_raw
+                    && replacement.net_amount_raw == predecessor.net_amount_raw
+                    && *reported_balance_raw < predecessor.gross_amount_raw
+            }
+        }
+        || replacement.net_amount_raw == 0
+        || replacement.net_amount_raw.checked_add(replacement.fee_raw)
+            != Some(replacement.gross_amount_raw)
+        || replacement.op_nonce <= predecessor.op_nonce
+        || replacement.memo
+            != crate::management::nonce_to_memo(replacement.op_nonce)
+                .0
+                .to_vec()
+        || replacement.created_at_time_ns
+            != crate::management::nonce_to_created_at_time(replacement.op_nonce)
+    {
+        return Err(
+            "payout successor does not match first-dispatch BadFee evidence or gross entitlement"
+                .into(),
+        );
+    }
+    row.status = crate::SpLiquidationV2Status::CollateralPayoutSupersessionPending {
+        stable_pull_receipt,
+        result,
+        predecessor,
+        replacement,
+        evidence,
+        generation,
+    };
+    row.payout_dispatch_started = false;
+    crate::storage::mark_sp_liquidation_v2_used()
+        .expect("persist payout supersession evidence before SP adoption");
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+/// Accept one SP-adopted payout successor. The exact accepted edge is retained
+/// in stable state so a lost reply can be retried idempotently, including after
+/// the successor payout itself completes.
+pub fn accept_sp_liquidation_v2_payout_supersession(
+    state: &mut State,
+    stability_pool: Principal,
+    request_id: u64,
+    generation: u32,
+    predecessor: crate::SpLiquidationPayoutTuple,
+    replacement: crate::SpLiquidationPayoutTuple,
+) -> Result<(), String> {
+    let row = state
+        .sp_liquidation_v2_journals
+        .get_mut(&(stability_pool, request_id))
+        .ok_or_else(|| "SP liquidation payout journal row is missing".to_string())?;
+    if let Some(accepted) = &row.accepted_payout_supersession {
+        if accepted.generation == generation
+            && accepted.predecessor == predecessor
+            && accepted.replacement == replacement
+        {
+            let still_same_successor = match &row.status {
+                crate::SpLiquidationV2Status::CollateralPayoutPending { tuple, .. } => {
+                    tuple == &replacement
+                }
+                crate::SpLiquidationV2Status::Complete { payout_receipt, .. } => {
+                    payout_receipt.tuple == replacement
+                }
+                _ => false,
+            };
+            if still_same_successor {
+                return Ok(());
+            }
+        }
+        return Err("a different payout successor has already been accepted".into());
+    }
+    let (
+        stable_pull_receipt,
+        result,
+        pending_predecessor,
+        pending_replacement,
+        pending_evidence,
+        pending_generation,
+    ) = match &row.status {
+        crate::SpLiquidationV2Status::CollateralPayoutSupersessionPending {
+            stable_pull_receipt,
+            result,
+            predecessor,
+            replacement,
+            evidence,
+            generation,
+        } => (
+            stable_pull_receipt.clone(),
+            result.clone(),
+            predecessor.clone(),
+            replacement.clone(),
+            evidence.clone(),
+            *generation,
+        ),
+        _ => return Err("payout successor is not awaiting SP acceptance".into()),
+    };
+    if row.payout_dispatch_started
+        || row.had_ambiguous_payout_dispatch
+        || row.payout_dispatch_attempts != 1
+        || generation != pending_generation
+        || predecessor != pending_predecessor
+        || replacement != pending_replacement
+        || !match &pending_evidence {
+            crate::SpLiquidationPayoutNoEffectEvidence::BadFee { expected_fee_raw } => {
+                replacement.fee_raw == *expected_fee_raw
+            }
+            crate::SpLiquidationPayoutNoEffectEvidence::InsufficientFunds {
+                reported_balance_raw,
+            } => {
+                replacement.fee_raw == predecessor.fee_raw
+                    && replacement.net_amount_raw == predecessor.net_amount_raw
+                    && *reported_balance_raw < predecessor.gross_amount_raw
+            }
+        }
+        || replacement.net_amount_raw.checked_add(replacement.fee_raw)
+            != Some(replacement.gross_amount_raw)
+        || result.collateral_amount_received != Some(replacement.gross_amount_raw)
+    {
+        return Err(
+            "SP payout successor acceptance does not match the durable BadFee transition".into(),
+        );
+    }
+    row.status = crate::SpLiquidationV2Status::CollateralPayoutPending {
+        stable_pull_receipt,
+        result,
+        tuple: replacement.clone(),
+        candidate_block_index: None,
+        last_error: None,
+    };
+    row.accepted_payout_supersession = Some(SpLiquidationV2AcceptedPayoutSupersession {
+        generation,
+        predecessor,
+        replacement,
+        evidence: pending_evidence,
+    });
+    row.payout_dispatch_started = false;
+    crate::storage::mark_sp_liquidation_v2_used()
+        .expect("persist SP-accepted payout successor before dispatch");
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+pub fn record_sp_liquidation_v2_payout_dispatch_failure(
+    state: &mut State,
+    stability_pool: Principal,
+    request_id: u64,
+    tuple: &crate::SpLiquidationPayoutTuple,
+    reason: String,
+    ambiguous: bool,
+) -> Result<(), String> {
+    let row = state
+        .sp_liquidation_v2_journals
+        .get_mut(&(stability_pool, request_id))
+        .ok_or_else(|| "SP liquidation payout journal row is missing".to_string())?;
+    let (stable_pull_receipt, result, current_tuple, candidate_block_index) = match &row.status {
+        crate::SpLiquidationV2Status::CollateralPayoutPending {
+            stable_pull_receipt,
+            result,
+            tuple,
+            candidate_block_index,
+            ..
+        } => (
+            stable_pull_receipt.clone(),
+            result.clone(),
+            tuple.clone(),
+            *candidate_block_index,
+        ),
+        _ => return Err("SP liquidation payout is no longer pending".into()),
+    };
+    if &current_tuple != tuple || candidate_block_index.is_some() || !row.payout_dispatch_started {
+        return Err("SP payout row changed during dispatch".into());
+    }
+    row.payout_dispatch_started = false;
+    row.had_ambiguous_payout_dispatch |= ambiguous;
+    row.status = crate::SpLiquidationV2Status::CollateralPayoutPending {
+        stable_pull_receipt,
+        result,
+        tuple: current_tuple,
+        candidate_block_index: None,
+        last_error: Some(reason),
+    };
+    crate::storage::mark_sp_liquidation_v2_used()
+        .expect("persist payout outcome provenance before retry");
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+pub fn set_sp_liquidation_v2_status_and_pull_ambiguity(
+    state: &mut State,
+    stability_pool: Principal,
+    request_id: u64,
+    status: crate::SpLiquidationV2Status,
+    had_ambiguous_attempt: bool,
+) -> Result<(), String> {
+    let row = state
+        .sp_liquidation_v2_journals
+        .get_mut(&(stability_pool, request_id))
+        .ok_or_else(|| "SP liquidation request journal row is missing".to_string())?;
+    row.status = status;
+    row.had_ambiguous_stable_pull_attempt = had_ambiguous_attempt;
+    crate::storage::mark_sp_liquidation_v2_used()
+        .expect("persist SP liquidation V2 used marker before external settlement");
+    crate::storage::save_state_to_stable(state);
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpLiquidationPrePullFailureDisposition {
+    ApprovalFeeRefundPending,
+    ExactPullHeld,
+}
+
+/// Record a pre-dispatch failure without discarding principal risk from an
+/// earlier ambiguous transfer_from attempt. Only a row that has never had a
+/// potentially effective pull may transition to the approval-fee-only refund.
+pub fn record_sp_liquidation_v2_pre_pull_failure(
+    state: &mut State,
+    stability_pool: Principal,
+    request_id: u64,
+    approval_fee_refund: crate::SpLiquidationStableRefundTuple,
+    reason: String,
+) -> Result<SpLiquidationPrePullFailureDisposition, String> {
+    let row = state
+        .sp_liquidation_v2_journals
+        .get_mut(&(stability_pool, request_id))
+        .ok_or_else(|| "SP liquidation request journal row is missing".to_string())?;
+    let (pull_tuple, candidate) = match &row.status {
+        crate::SpLiquidationV2Status::StablePullPending {
+            tuple,
+            candidate_block_index,
+            ..
+        } => (tuple.clone(), *candidate_block_index),
+        _ => return Err("SP liquidation is no longer in stable-pull-pending state".into()),
+    };
+    if candidate.is_some() {
+        return Err("a stable-pull candidate receipt is already attached".into());
+    }
+    let disposition = if row.had_ambiguous_stable_pull_attempt {
+        row.status = crate::SpLiquidationV2Status::StablePullPending {
+            tuple: pull_tuple,
+            candidate_block_index: None,
+            last_error: Some(reason),
+        };
+        SpLiquidationPrePullFailureDisposition::ExactPullHeld
+    } else {
+        row.status = crate::SpLiquidationV2Status::StablePullRefundPending {
+            stable_pull_receipt: None,
+            tuple: approval_fee_refund,
+            candidate_block_index: None,
+            last_error: Some(reason),
+        };
+        SpLiquidationPrePullFailureDisposition::ApprovalFeeRefundPending
+    };
+    crate::storage::mark_sp_liquidation_v2_used()
+        .expect("persist SP V2 pre-pull failure before resuming settlement");
+    crate::storage::save_state_to_stable(state);
+    Ok(disposition)
+}
+
+pub fn sp_liquidation_v2_payout_covers_fee(gross: u64, fee: u64) -> bool {
+    gross > fee
+}
+
+pub fn sp_liquidation_v2_approval_expired(now_ns: u64, expires_at_ns: u64) -> bool {
+    expires_at_ns <= now_ns
+}
+
+pub fn sp_liquidation_v2_plan_is_current(state: &State, journal: &SpLiquidationV2Journal) -> bool {
+    let Some(plan) = journal.plan.as_ref() else {
+        return false;
+    };
+    let Some(vault) = state.vault_id_to_vaults.get(&journal.request.vault_id) else {
+        return false;
+    };
+    let live_price = state.get_collateral_price_decimal(&vault.collateral_type);
+    let current_collateral_config = state.get_collateral_config(&vault.collateral_type);
+    let live_decimals = current_collateral_config
+        .map(|config| config.decimals)
+        .unwrap_or(8);
+    !state.frozen
+        && !state.liquidation_frozen
+        && !state.sp_writedown_disabled
+        && state.stability_pool_canister == Some(journal.request.approval.tuple.owner.owner)
+        && vault == &plan.vault
+        && journal.pinned_vault_fingerprint == sp_liquidation_v2_vault_fingerprint(vault)
+        && live_price == Some(plan.collateral_price)
+        && live_decimals == plan.collateral_decimals
+        && current_collateral_config.is_some_and(|config| {
+            config.ledger_canister_id == plan.collateral_ledger
+                && config.ledger_fee == plan.collateral_ledger_fee_raw
+                && !config.is_native_xrp()
+        })
+        && state.mode == plan.mode
+        && state.get_min_liquidation_ratio_for(&vault.collateral_type) == plan.liquidation_ratio
+        && state.get_liquidation_bonus_for(&vault.collateral_type) == plan.liquidation_bonus
+        && state.get_liquidation_protocol_share() == plan.protocol_share
+        && state.get_collateral_status(&vault.collateral_type) == plan.collateral_status
+        && plan
+            .stable_token_minting_account
+            .as_ref()
+            .is_some_and(|account| account.owner == ic_cdk::id() && account.subaccount.is_none())
+        && plan.stable_token_enabled
+        && plan.debt_liquidated_e8s <= journal.request.amount
+        && plan.debt_liquidated_e8s > 0
+        && state
+            .get_collateral_status(&vault.collateral_type)
+            .is_none_or(|status| status.allows_liquidation())
+        && (match journal.request.token {
+            crate::SpLiquidationToken::IcUsd => {
+                state.icusd_ledger_principal == plan.stable_token_ledger
+                    && journal.request.approval.tuple.ledger == plan.stable_token_ledger
+            }
+            crate::SpLiquidationToken::CKUSDT => {
+                state.ckusdt_ledger_principal == Some(plan.stable_token_ledger)
+                    && state.ckusdt_enabled == plan.stable_token_enabled
+                    && state.ckstable_repay_fee == plan.stable_repay_fee
+            }
+            crate::SpLiquidationToken::CKUSDC => {
+                state.ckusdc_ledger_principal == Some(plan.stable_token_ledger)
+                    && state.ckusdc_enabled == plan.stable_token_enabled
+                    && state.ckstable_repay_fee == plan.stable_repay_fee
+            }
+        })
+}
+
+fn sp_liquidation_v2_vault_fingerprint(vault: &Vault) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(vault, &mut bytes)
+        .expect("Vault serialization for liquidation fingerprint");
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).into()
+}
+
+/// Compact one terminal row after caller acknowledgement while retaining a
+/// monotonic per-pool floor. Duplicate ACKs are successful, and no skipped ID
+/// can move the floor past an unresolved request.
+pub fn ack_sp_liquidation_v2(
+    state: &mut State,
+    stability_pool: Principal,
+    request_id: u64,
+) -> Result<(), String> {
+    let floor = state
+        .sp_liquidation_v2_acknowledged_through
+        .get(&stability_pool)
+        .copied()
+        .unwrap_or(0);
+    if request_id != 0 && request_id <= floor {
+        return Ok(());
+    }
+    if request_id == 0 || request_id != floor.saturating_add(1) {
+        return Err("SP liquidation acknowledgements must advance contiguously from ID 1".into());
+    }
+    let key = (stability_pool, request_id);
+    let row = state
+        .sp_liquidation_v2_journals
+        .get(&key)
+        .ok_or_else(|| "Unknown SP liquidation request ID".to_string())?;
+    if !matches!(
+        row.status,
+        crate::SpLiquidationV2Status::Complete { .. }
+            | crate::SpLiquidationV2Status::StablePullRefunded { .. }
+    ) {
+        return Err("SP liquidation cannot be acknowledged before a terminal status".into());
+    }
+    state.sp_liquidation_v2_journals.remove(&key);
+    state
+        .sp_liquidation_v2_acknowledged_through
+        .insert(stability_pool, request_id);
+    crate::storage::mark_sp_liquidation_v2_used()
+        .expect("persist SP liquidation V2 marker before compacting terminal row");
+    crate::storage::save_state_to_stable(state);
+    Ok(())
 }
 
 /// Read (part of) the current state using `f`.
@@ -8226,6 +11343,7 @@ mod tests {
         crate::event::record_borrow_from_vault(
             &mut state,
             1,
+            Principal::anonymous(),
             ICUSD::new(100_000_000),
             ICUSD::new(500_000),
             0,
@@ -8647,6 +11765,56 @@ mod tests {
         assert_eq!(vault_after.borrowed_icusd_amount.0, 0);
         // last_accrual_time should NOT be updated (no-op)
         assert_eq!(vault_after.last_accrual_time, 0);
+    }
+
+    #[test]
+    fn first_borrow_after_zero_debt_starts_interest_clock_at_borrow() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+        state.vault_id_to_vaults.insert(
+            1,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id: 1,
+                collateral_amount: 500_000_000,
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_type: icp,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+
+        let borrow_time = crate::numeric::NANOS_PER_YEAR * 3;
+        state.accrue_single_vault(1, borrow_time);
+        state.borrow_from_vault(1, ICUSD::new(500_000_000), Some(borrow_time));
+        assert_eq!(state.vault_id_to_vaults[&1].last_accrual_time, borrow_time);
+
+        state.accrue_single_vault(1, borrow_time + crate::numeric::NANOS_PER_YEAR);
+        let vault = &state.vault_id_to_vaults[&1];
+        assert!((525_000_000..=525_000_001).contains(&vault.borrowed_icusd_amount.0));
+        assert!((25_000_000..=25_000_001).contains(&vault.accrued_interest.0));
+    }
+
+    #[test]
+    fn legacy_borrow_without_timestamp_preserves_replay_clock() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+        state.vault_id_to_vaults.insert(
+            1,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id: 1,
+                collateral_amount: 500_000_000,
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_type: icp,
+                last_accrual_time: 123,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+        state.borrow_from_vault(1, ICUSD::new(100_000_000), None);
+        assert_eq!(state.vault_id_to_vaults[&1].last_accrual_time, 123);
     }
 
     #[test]
@@ -9239,6 +12407,7 @@ mod tests {
         state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
         state.open_vault(audit_vault(2, icp_ct, 800_000_000, 500_000_000));
 
+        replace_state(State::default());
         let guard = crate::guard::VaultLiquidationGuard::new(1).expect("lock vault 1");
         let price = UsdIcp::from(rust_decimal_macros::dec!(5.0));
         let results = state.redeem_on_vaults(ICUSD::new(100_000_000), price, &icp_ct);
@@ -9290,6 +12459,7 @@ mod tests {
         state.open_vault(audit_vault(2, icp_ct, 800_000_000, 500_000_000));
         state.open_vault(audit_vault(3, icp_ct, 100_000_000, 200_000_000));
         state.vault_id_to_vaults.get_mut(&1).unwrap().bot_processing = true;
+        replace_state(State::default());
         let _guard = crate::guard::VaultLiquidationGuard::new(2).expect("lock vault 2");
 
         assert_eq!(
@@ -9411,6 +12581,86 @@ mod tests {
             );
             assert_eq!(v.last_accrual_time, one_second);
         }
+    }
+
+    #[test]
+    fn deficit_readonly_latch_survives_healthy_tcr_and_clears_only_below_trip_level() {
+        let mut state = test_state();
+        state.deficit_readonly_threshold_e8s = 100;
+        state.protocol_deficit_icusd = ICUSD::new(100);
+
+        assert!(state.check_deficit_readonly_latch());
+        assert_eq!(state.deficit_readonly_latched_at_e8s, Some(100));
+        assert_eq!(state.mode, Mode::ReadOnly);
+
+        // Empty protocol has a healthy/max TCR. Normal price-driven mode
+        // recalculation must not erase the deficit latch.
+        state.update_total_collateral_ratio_and_mode(UsdIcp::from(dec!(5.0)));
+        assert_eq!(state.mode, Mode::ReadOnly);
+        assert!(!state.check_deficit_readonly_latch());
+
+        assert!(state.clear_deficit_readonly_latch().is_err());
+        state.protocol_deficit_icusd = ICUSD::new(99);
+        assert_eq!(state.clear_deficit_readonly_latch(), Ok(true));
+        assert_eq!(state.deficit_readonly_latched_at_e8s, None);
+        // Clearing the latch itself stays fail-closed until a later fresh
+        // price update recomputes the automatic safety mode.
+        assert_eq!(state.mode, Mode::ReadOnly);
+        state.update_total_collateral_ratio_and_mode(UsdIcp::from(dec!(5.0)));
+        assert_eq!(state.mode, Mode::GeneralAvailability);
+    }
+
+    #[test]
+    fn pre_latch_ciborium_snapshot_decodes_with_no_latch() {
+        let mut state = test_state();
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&state, &mut encoded).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        let mut entries = match value {
+            ciborium::Value::Map(entries) => entries,
+            other => panic!("expected CBOR map, got {other:?}"),
+        };
+        let before = entries.len();
+        entries.retain(|(key, _)| {
+            !matches!(key, ciborium::Value::Text(name) if name == "deficit_readonly_latched_at_e8s")
+        });
+        assert_eq!(entries.len(), before - 1);
+        let mut legacy_bytes = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut legacy_bytes).unwrap();
+
+        // This is the predecessor snapshot shape with the newly introduced
+        // field absent, decoded through the same serde/ciborium path as upgrade.
+        state = ciborium::de::from_reader(legacy_bytes.as_slice())
+            .expect("pre-latch snapshot must decode");
+        assert_eq!(state.deficit_readonly_latched_at_e8s, None);
+    }
+
+    #[test]
+    fn deficit_latch_clear_preserves_oracle_latch_and_respects_lowered_threshold() {
+        let mut state = test_state();
+        state.deficit_readonly_threshold_e8s = 100;
+        state.protocol_deficit_icusd = ICUSD::new(100);
+        state.mode_triggered_by_oracle = true;
+        assert!(state.check_deficit_readonly_latch());
+
+        // Lowering the configured threshold must not let an exit clear the
+        // latch while the deficit remains above that stricter current value.
+        state.deficit_readonly_threshold_e8s = 50;
+        state.protocol_deficit_icusd = ICUSD::new(75);
+        assert!(state.clear_deficit_readonly_latch().is_err());
+
+        state.protocol_deficit_icusd = ICUSD::new(49);
+        assert_eq!(state.clear_deficit_readonly_latch(), Ok(true));
+        assert!(state.mode_triggered_by_oracle);
+        assert_eq!(state.mode, Mode::ReadOnly);
+        state.update_total_collateral_ratio_and_mode(UsdIcp::from(dec!(5.0)));
+        assert_eq!(state.mode, Mode::ReadOnly);
+
+        // Only the oracle's successful-recovery path clears its independent
+        // latch; then normal TCR mode selection can resume.
+        crate::xrc::note_xrc_success(&mut state);
+        state.update_total_collateral_ratio_and_mode(UsdIcp::from(dec!(5.0)));
+        assert_eq!(state.mode, Mode::GeneralAvailability);
     }
 
     #[test]
@@ -10609,6 +13859,88 @@ mod tests {
     }
 
     #[test]
+    fn live_redemption_water_fill_fences_unresolved_borrow_but_replay_stays_exact() {
+        let mut state = test_state();
+        let icp = state.icp_collateral_type();
+        state.collateral_configs.get_mut(&icp).unwrap().last_price = Some(5.0);
+        state.open_vault(audit_vault(914, icp, 800_000_000, 500_000_000));
+        state.pending_borrow_mints.insert(
+            77,
+            PendingBorrowMint {
+                op_nonce: 77,
+                vault_id: 914,
+                owner: Principal::anonymous(),
+                collateral_type: icp,
+                ledger: state.icusd_ledger_principal,
+                gross_amount_e8s: 10_000_000,
+                fee_e8s: 100_000,
+                net_amount_e8s: 9_900_000,
+                created_at_time_ns: 77,
+                created_at_ns: 77,
+                attempts: 0,
+                last_attempt_at_ns: 0,
+                held_reason: None,
+            },
+        );
+
+        assert_eq!(state.total_redeemable_debt_for(&icp), ICUSD::new(0));
+        let rate = UsdIcp::from(rust_decimal_macros::dec!(5.0));
+        assert!(state
+            .redeem_on_vaults_for_vault_ids(ICUSD::new(50_000_000), rate, &icp, &[914])
+            .is_empty());
+
+        // Event replay uses stored outcomes and intentionally ignores live
+        // pending rows; the false precision flag selects that replay path.
+        let replayed = state.redeem_on_vaults_with_vault_ids(
+            ICUSD::new(50_000_000),
+            rate,
+            &icp,
+            &[914],
+            false,
+        );
+        assert!(!replayed.is_empty());
+    }
+
+    #[test]
+    fn checked_redemption_preview_matches_live_execution_with_unresolved_sibling() {
+        let mut state = test_state();
+        let icp = state.icp_collateral_type();
+        state.collateral_configs.get_mut(&icp).unwrap().last_price = Some(5.0);
+        state.open_vault(audit_vault(920, icp, 800_000_000, 500_000_000));
+        state.open_vault(audit_vault(921, icp, 800_000_000, 500_000_000));
+        state.pending_borrow_mints.insert(
+            78,
+            PendingBorrowMint {
+                op_nonce: 78,
+                vault_id: 920,
+                owner: Principal::anonymous(),
+                collateral_type: icp,
+                ledger: state.icusd_ledger_principal,
+                gross_amount_e8s: 10_000_000,
+                fee_e8s: 100_000,
+                net_amount_e8s: 9_900_000,
+                created_at_time_ns: 78,
+                created_at_ns: 78,
+                attempts: 0,
+                last_attempt_at_ns: 0,
+                held_reason: None,
+            },
+        );
+
+        let amount = ICUSD::new(50_000_000);
+        let price = UsdIcp::from(rust_decimal_macros::dec!(5.0));
+        let preview = state
+            .try_simulate_redemption_for_vault_ids(amount, price, &icp, &[920, 921])
+            .expect("representable sibling payout");
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].vault_id, 921);
+        assert_eq!(
+            state.redeem_on_vaults_for_vault_ids(amount, price, &icp, &[920, 921]),
+            preview,
+        );
+    }
+
+    #[test]
     fn redemption_simulation_matches_clamped_execution_without_mutating_state() {
         let mut s = test_state();
         let icp = s.icp_collateral_type();
@@ -10752,6 +14084,7 @@ mod tests {
         s.open_vault(audit_vault(924, xrp, 150_000_000, 100_000_000));
         s.open_vault(audit_vault(925, icp, 160_000_000, 100_000_000));
         s.vault_id_to_vaults.get_mut(&925).unwrap().bot_processing = true;
+        replace_state(State::default());
         let lock = crate::guard::VaultLiquidationGuard::new(921).expect("lock vault 921");
 
         let runs = s.redemption_runs();
@@ -10794,6 +14127,7 @@ mod tests {
             op_nonce: 42,
             ledger: None,
             transfer_amount_raw: None,
+            redemption_transfer: None,
             held_for_manual_retry: false,
             reconciliation_required: false,
             min_net_collateral_raw: Some(100),
@@ -11028,6 +14362,34 @@ mod tests {
         } else {
             panic!("expected CBOR map");
         }
+    }
+
+    #[test]
+    fn consumed_redemption_tombstones_default_empty_on_pre_cl14_snapshot() {
+        let mut state = test_state();
+        state.consumed_redemption_burn_blocks.insert(42);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let mut entries = match value {
+            ciborium::Value::Map(entries) => entries,
+            other => panic!("expected CBOR map, got {other:?}"),
+        };
+        let before = entries.len();
+        entries.retain(|(key, _)| {
+            !matches!(key, ciborium::Value::Text(name)
+                if name == "consumed_redemption_burn_blocks"
+                    || name == "redemption_tombstone_backfill_cursor"
+                    || name == "redemption_tombstone_backfill_complete")
+        });
+        assert_eq!(entries.len(), before - 3);
+        let mut legacy_bytes = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut legacy_bytes).unwrap();
+        let restored: State = ciborium::de::from_reader(legacy_bytes.as_slice())
+            .expect("pre-CL14 state without tombstones must decode");
+        assert!(restored.consumed_redemption_burn_blocks.is_empty());
+        assert_eq!(restored.redemption_tombstone_backfill_cursor, 0);
+        assert!(!restored.redemption_tombstone_backfill_complete);
     }
 
     #[test]
@@ -11763,10 +15125,12 @@ mod tests {
         ];
         for field in fields {
             let before = entries.len();
-            entries.retain(|(key, _)| {
-                !matches!(key, ciborium::Value::Text(name) if name == field)
-            });
-            assert_eq!(entries.len(), before - 1, "expected field {field} in new snapshot");
+            entries.retain(|(key, _)| !matches!(key, ciborium::Value::Text(name) if name == field));
+            assert_eq!(
+                entries.len(),
+                before - 1,
+                "expected field {field} in new snapshot"
+            );
         }
         let mut legacy_bytes = Vec::new();
         ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut legacy_bytes).unwrap();
@@ -11776,7 +15140,10 @@ mod tests {
         assert!(restored.pending_three_pool_donations.is_empty());
         assert_eq!(restored.amm_donation_retry_cursor, None);
         assert_eq!(restored.three_pool_donation_retry_cursor, None);
-        assert_eq!(restored.pending_amm1_donations, state.pending_amm1_donations);
+        assert_eq!(
+            restored.pending_amm1_donations,
+            state.pending_amm1_donations
+        );
     }
 
     #[test]
@@ -11804,7 +15171,10 @@ mod tests {
         assert_eq!(row.notify_nonce, notify_nonce);
         assert_eq!(row.mint_op_nonce, Some(mint_op_nonce));
         assert_ne!(row.notify_nonce as u128, mint_op_nonce);
-        assert_eq!(row.phase, AmmDonationPhase::NotifyPending { mint_block: 88 });
+        assert_eq!(
+            row.phase,
+            AmmDonationPhase::NotifyPending { mint_block: 88 }
+        );
         assert_eq!(row.amm_canister, Principal::from_slice(b"amm-donation"));
         assert_eq!(row.pool_id.as_deref(), Some("pool-a"));
         assert_eq!(row.reward_subaccount, Some([7; 32]));
@@ -11986,12 +15356,9 @@ mod tests {
         state.open_vault(liq0xx_vault(902, ct, u64::MAX, 200_000_000));
 
         let repaid = ICUSD::new(180_000_000);
-        let pinned_seizure = crate::numeric::try_icusd_to_collateral_amount(
-            repaid * bonus,
-            dec!(5.0),
-            18,
-        )
-        .expect("pre-await collateral amount is representable");
+        let pinned_seizure =
+            crate::numeric::try_icusd_to_collateral_amount(repaid * bonus, dec!(5.0), 18)
+                .expect("pre-await collateral amount is representable");
         assert!(pinned_seizure > 0);
         state.collateral_configs.get_mut(&ct).unwrap().last_price = Some(0.05);
         assert_eq!(
@@ -12209,5 +15576,736 @@ mod tests {
             ICUSD::new(1_000_000_000 - 222_222_222),
             "PartialLiquidateVault replay must reduce debt by exactly the recorded liquidator_payment"
         );
+    }
+}
+
+#[cfg(test)]
+mod sp_liquidation_v2_admission_tests {
+    use super::*;
+    use crate::{SpLiquidationToken, SpLiquidationV2Request};
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn request(id: u64, amount: u64, pool: Principal) -> SpLiquidationV2Request {
+        SpLiquidationV2Request {
+            request_id: id,
+            vault_id: 7,
+            amount,
+            token: SpLiquidationToken::IcUsd,
+            approval: crate::SpLiquidationApprovalReceipt {
+                block_index: 7,
+                tuple: crate::SpLiquidationApprovalTuple {
+                    ledger: Principal::from_slice(&[3]),
+                    owner: Account {
+                        owner: pool,
+                        subaccount: None,
+                    },
+                    spender: Account {
+                        owner: Principal::anonymous(),
+                        subaccount: None,
+                    },
+                    allowance_raw: 60,
+                    fee_raw: 2,
+                    memo: vec![7],
+                    created_at_time_ns: 100,
+                    expires_at_ns: 999,
+                },
+            },
+        }
+    }
+
+    fn plan(pool: Principal) -> SpLiquidationV2PinnedPlan {
+        SpLiquidationV2PinnedPlan {
+            vault: Vault {
+                owner: pool,
+                borrowed_icusd_amount: ICUSD::new(100),
+                collateral_amount: 1000,
+                vault_id: 7,
+                collateral_type: Principal::from_slice(&[2]),
+                last_accrual_time: 44,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+            collateral_price: Decimal::ONE,
+            collateral_decimals: 8,
+            collateral_ledger: Principal::from_slice(&[4]),
+            collateral_ledger_fee_raw: 10,
+            mode: Mode::GeneralAvailability,
+            liquidation_ratio: Ratio::from(Decimal::ONE),
+            liquidation_bonus: Ratio::from(Decimal::ONE),
+            protocol_share: Ratio::from(Decimal::ZERO),
+            collateral_status: None,
+            stable_token_ledger: Principal::from_slice(&[3]),
+            stable_token_minting_account: Some(icrc_ledger_types::icrc1::account::Account {
+                owner: Principal::anonymous(),
+                subaccount: None,
+            }),
+            stable_token_enabled: true,
+            stable_repay_fee: Ratio::from(Decimal::ZERO),
+            debt_liquidated_e8s: 50,
+            collateral_to_liquidator_raw: 60,
+            collateral_to_seize_raw: 60,
+            protocol_cut_raw: 0,
+            interest_share_e8s: 0,
+            pinned_at_ns: 1,
+        }
+    }
+
+    fn pull(pool: Principal) -> crate::SpLiquidationStablePullTuple {
+        let backend = Principal::anonymous();
+        crate::SpLiquidationStablePullTuple {
+            op_nonce: 123,
+            ledger: Principal::from_slice(&[3]),
+            from: Account {
+                owner: pool,
+                subaccount: None,
+            },
+            spender: Account {
+                owner: backend,
+                subaccount: None,
+            },
+            to: Account {
+                owner: backend,
+                subaccount: None,
+            },
+            amount_raw: 50,
+            fee_raw: 0,
+            memo: vec![1, 2, 3],
+            created_at_time_ns: 123,
+        }
+    }
+
+    fn approval_fee_refund(pool: Principal) -> crate::SpLiquidationStableRefundTuple {
+        crate::SpLiquidationStableRefundTuple {
+            op_nonce: 9,
+            ledger: Principal::from_slice(&[3]),
+            source: Account {
+                owner: Principal::anonymous(),
+                subaccount: None,
+            },
+            destination: Account {
+                owner: pool,
+                subaccount: None,
+            },
+            principal_refund_raw: 0,
+            approval_fee_refund_raw: 2,
+            pull_fee_refund_raw: 0,
+            amount_raw: 2,
+            fee_raw: 0,
+            memo: vec![4],
+            created_at_time_ns: 150,
+        }
+    }
+
+    fn payout(
+        pool: Principal,
+        nonce: u128,
+        gross: u64,
+        fee: u64,
+    ) -> crate::SpLiquidationPayoutTuple {
+        crate::SpLiquidationPayoutTuple {
+            op_nonce: nonce,
+            ledger: Principal::from_slice(&[4]),
+            source: Account {
+                owner: Principal::from_slice(&[9]),
+                subaccount: None,
+            },
+            destination: Account {
+                owner: pool,
+                subaccount: None,
+            },
+            gross_amount_raw: gross,
+            net_amount_raw: gross - fee,
+            fee_raw: fee,
+            memo: crate::management::nonce_to_memo(nonce).0.to_vec(),
+            created_at_time_ns: crate::management::nonce_to_created_at_time(nonce),
+            collateral_type: Principal::from_slice(&[2]),
+        }
+    }
+
+    fn payout_row(pool: Principal) -> (State, crate::SpLiquidationPayoutTuple) {
+        let mut state = State::default();
+        admit_sp_liquidation_v2(
+            &mut state,
+            pool,
+            Principal::anonymous(),
+            200,
+            request(1, 50, pool),
+            plan(pool),
+            pull(pool),
+        )
+        .unwrap();
+        let original = payout(pool, 200, 60, 10);
+        state
+            .sp_liquidation_v2_journals
+            .get_mut(&(pool, 1))
+            .unwrap()
+            .status = crate::SpLiquidationV2Status::CollateralPayoutPending {
+            stable_pull_receipt: crate::SpLiquidationStablePullReceipt {
+                block_index: 8,
+                tuple: pull(pool),
+            },
+            result: crate::SuccessWithFee {
+                block_index: 8,
+                fee_amount_paid: 0,
+                collateral_amount_received: Some(original.gross_amount_raw),
+                debt_liquidated_e8s: Some(50),
+                stable_pulled_e6s: None,
+                xrp_claim_id: None,
+            },
+            tuple: original.clone(),
+            candidate_block_index: None,
+            last_error: None,
+        };
+        (state, original)
+    }
+
+    fn replacement_for(
+        predecessor: &crate::SpLiquidationPayoutTuple,
+        fee: u64,
+    ) -> crate::SpLiquidationPayoutTuple {
+        payout(
+            predecessor.destination.owner,
+            predecessor.op_nonce + 1,
+            predecessor.gross_amount_raw,
+            fee,
+        )
+    }
+
+    #[test]
+    fn approval_expiring_during_admission_awaits_selects_fee_refund_path() {
+        let before_await = 999;
+        let after_await = 1_001;
+        let expires_at = 1_000;
+
+        assert!(!sp_liquidation_v2_approval_expired(
+            before_await,
+            expires_at
+        ));
+        assert!(sp_liquidation_v2_approval_expired(after_await, expires_at));
+        assert!(sp_liquidation_v2_approval_expired(expires_at, expires_at));
+    }
+
+    #[test]
+    fn collateral_payout_dust_is_rejected_before_stable_pull_admission() {
+        assert!(!sp_liquidation_v2_payout_covers_fee(10, 10));
+        assert!(!sp_liquidation_v2_payout_covers_fee(9, 10));
+        assert!(sp_liquidation_v2_payout_covers_fee(11, 10));
+    }
+
+    #[test]
+    fn prior_ambiguous_pull_stays_pending_across_all_preflight_failures() {
+        let pool = Principal::from_slice(&[1]);
+        let mut state = State::default();
+        admit_sp_liquidation_v2(
+            &mut state,
+            pool,
+            Principal::anonymous(),
+            200,
+            request(1, 50, pool),
+            plan(pool),
+            pull(pool),
+        )
+        .unwrap();
+        set_sp_liquidation_v2_status_and_pull_ambiguity(
+            &mut state,
+            pool,
+            1,
+            crate::SpLiquidationV2Status::StablePullPending {
+                tuple: pull(pool),
+                candidate_block_index: None,
+                last_error: Some("earlier dispatch ambiguous".into()),
+            },
+            true,
+        )
+        .unwrap();
+        for reason in [
+            "legacy fence",
+            "mint authority",
+            "pinned plan",
+            "expired approval before dispatch",
+        ] {
+            assert_eq!(
+                record_sp_liquidation_v2_pre_pull_failure(
+                    &mut state,
+                    pool,
+                    1,
+                    approval_fee_refund(pool),
+                    reason.into(),
+                )
+                .unwrap(),
+                SpLiquidationPrePullFailureDisposition::ExactPullHeld,
+            );
+            let row = &state.sp_liquidation_v2_journals[&(pool, 1)];
+            assert!(row.had_ambiguous_stable_pull_attempt);
+            assert!(matches!(
+                &row.status,
+                crate::SpLiquidationV2Status::StablePullPending { tuple, .. }
+                    if tuple == &pull(pool)
+            ));
+        }
+    }
+
+    #[test]
+    fn expired_approval_refunds_fee_only_when_no_pull_attempt_was_ambiguous() {
+        let pool = Principal::from_slice(&[1]);
+        let mut state = State::default();
+        admit_sp_liquidation_v2(
+            &mut state,
+            pool,
+            Principal::anonymous(),
+            200,
+            request(1, 50, pool),
+            plan(pool),
+            pull(pool),
+        )
+        .unwrap();
+
+        assert_eq!(
+            record_sp_liquidation_v2_pre_pull_failure(
+                &mut state,
+                pool,
+                1,
+                approval_fee_refund(pool),
+                "approval expired after await".into(),
+            )
+            .unwrap(),
+            SpLiquidationPrePullFailureDisposition::ApprovalFeeRefundPending,
+        );
+        assert!(matches!(
+            &state.sp_liquidation_v2_journals[&(pool, 1)].status,
+            crate::SpLiquidationV2Status::StablePullRefundPending { tuple, .. }
+                if tuple.amount_raw == 2 && tuple.approval_fee_refund_raw == 2
+        ));
+    }
+
+    #[test]
+    fn payout_successor_requires_first_unambiguous_dispatch_and_preserves_gross() {
+        let pool = Principal::from_slice(&[1]);
+        let (mut state, predecessor) = payout_row(pool);
+        assert!(begin_sp_liquidation_v2_payout_dispatch(&mut state, pool, 1).unwrap());
+        let replacement = replacement_for(&predecessor, 12);
+        record_sp_liquidation_v2_payout_supersession(
+            &mut state,
+            pool,
+            1,
+            predecessor.clone(),
+            replacement.clone(),
+            crate::SpLiquidationPayoutNoEffectEvidence::BadFee {
+                expected_fee_raw: 12,
+            },
+            1,
+        )
+        .unwrap();
+        assert!(matches!(
+            &state.sp_liquidation_v2_journals[&(pool, 1)].status,
+            crate::SpLiquidationV2Status::CollateralPayoutSupersessionPending {
+                predecessor: old,
+                replacement: next,
+                evidence: crate::SpLiquidationPayoutNoEffectEvidence::BadFee {
+                    expected_fee_raw: 12,
+                },
+                generation: 1,
+                ..
+            } if old == &predecessor && next == &replacement
+                && old.gross_amount_raw == next.gross_amount_raw
+                && next.net_amount_raw + next.fee_raw == next.gross_amount_raw
+        ));
+        assert!(begin_sp_liquidation_v2_payout_dispatch(&mut state, pool, 1).is_err());
+
+        accept_sp_liquidation_v2_payout_supersession(
+            &mut state,
+            pool,
+            1,
+            1,
+            predecessor.clone(),
+            replacement.clone(),
+        )
+        .unwrap();
+        // The acceptance reply may be lost; an exact repeat remains safe even
+        // after backend state has advanced to the successor tuple.
+        accept_sp_liquidation_v2_payout_supersession(
+            &mut state,
+            pool,
+            1,
+            1,
+            predecessor,
+            replacement.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            &state.sp_liquidation_v2_journals[&(pool, 1)].status,
+            crate::SpLiquidationV2Status::CollateralPayoutPending { tuple, .. }
+                if tuple == &replacement
+        ));
+    }
+
+    #[test]
+    fn payout_successor_is_blocked_after_ambiguous_dispatch() {
+        let pool = Principal::from_slice(&[1]);
+        let (mut state, predecessor) = payout_row(pool);
+        assert!(begin_sp_liquidation_v2_payout_dispatch(&mut state, pool, 1).unwrap());
+        record_sp_liquidation_v2_payout_dispatch_failure(
+            &mut state,
+            pool,
+            1,
+            &predecessor,
+            "transport rejected after possible commit".into(),
+            true,
+        )
+        .unwrap();
+        assert!(!begin_sp_liquidation_v2_payout_dispatch(&mut state, pool, 1).unwrap());
+        assert!(record_sp_liquidation_v2_payout_supersession(
+            &mut state,
+            pool,
+            1,
+            predecessor.clone(),
+            replacement_for(&predecessor, 12),
+            crate::SpLiquidationPayoutNoEffectEvidence::BadFee {
+                expected_fee_raw: 12,
+            },
+            1,
+        )
+        .is_err());
+        assert!(state.sp_liquidation_v2_journals[&(pool, 1)].had_ambiguous_payout_dispatch);
+    }
+
+    #[test]
+    fn insufficient_funds_successor_preserves_fee_and_net() {
+        let pool = Principal::from_slice(&[1]);
+        let (mut state, predecessor) = payout_row(pool);
+        assert!(begin_sp_liquidation_v2_payout_dispatch(&mut state, pool, 1).unwrap());
+        let replacement = replacement_for(&predecessor, predecessor.fee_raw);
+        record_sp_liquidation_v2_payout_supersession(
+            &mut state,
+            pool,
+            1,
+            predecessor.clone(),
+            replacement.clone(),
+            crate::SpLiquidationPayoutNoEffectEvidence::InsufficientFunds {
+                reported_balance_raw: 1,
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(replacement.gross_amount_raw, predecessor.gross_amount_raw);
+        assert_eq!(replacement.net_amount_raw, predecessor.net_amount_raw);
+        assert_eq!(replacement.fee_raw, predecessor.fee_raw);
+    }
+
+    #[test]
+    fn legacy_pending_payout_snapshot_defaults_to_ambiguous_dispatch() {
+        #[derive(serde::Serialize)]
+        struct LegacyJournal {
+            request: crate::SpLiquidationV2Request,
+            status: crate::SpLiquidationV2Status,
+            pinned_vault_fingerprint: [u8; 32],
+            had_ambiguous_stable_pull_attempt: bool,
+            plan: Option<SpLiquidationV2PinnedPlan>,
+        }
+
+        let pool = Principal::from_slice(&[1]);
+        let (state, _) = payout_row(pool);
+        let row = state.sp_liquidation_v2_journals.get(&(pool, 1)).unwrap();
+        let legacy = LegacyJournal {
+            request: row.request.clone(),
+            status: row.status.clone(),
+            pinned_vault_fingerprint: row.pinned_vault_fingerprint,
+            had_ambiguous_stable_pull_attempt: row.had_ambiguous_stable_pull_attempt,
+            plan: row.plan.clone(),
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut bytes).unwrap();
+        let migrated: SpLiquidationV2Journal = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert!(migrated.payout_dispatch_started);
+        assert!(!migrated.had_ambiguous_payout_dispatch);
+        assert_eq!(migrated.payout_dispatch_attempts, 0);
+        assert!(migrated.accepted_payout_supersession.is_none());
+    }
+
+    #[test]
+    fn request_admission_is_payload_bound_and_blocks_a_second_unacked_request() {
+        let pool = Principal::from_slice(&[1]);
+        let mut state = State::default();
+        let req = request(1, 50, pool);
+        admit_sp_liquidation_v2(
+            &mut state,
+            pool,
+            Principal::anonymous(),
+            200,
+            req.clone(),
+            plan(pool),
+            pull(pool),
+        )
+        .unwrap();
+        assert!(admit_sp_liquidation_v2(
+            &mut state,
+            pool,
+            Principal::anonymous(),
+            200,
+            req.clone(),
+            plan(pool),
+            pull(pool)
+        )
+        .is_ok());
+        assert!(admit_sp_liquidation_v2(
+            &mut state,
+            pool,
+            Principal::anonymous(),
+            200,
+            request(1, 51, pool),
+            plan(pool),
+            pull(pool)
+        )
+        .is_err());
+        assert!(admit_sp_liquidation_v2(
+            &mut state,
+            pool,
+            Principal::anonymous(),
+            200,
+            request(2, 50, pool),
+            plan(pool),
+            pull(pool)
+        )
+        .is_err());
+        assert_eq!(state.sp_liquidation_v2_journals[&(pool, 1)].request, req);
+    }
+
+    #[test]
+    fn acknowledgement_requires_receipt_bearing_terminal_and_keeps_replay_floor() {
+        let pool = Principal::from_slice(&[1]);
+        let mut state = State::default();
+        admit_sp_liquidation_v2(
+            &mut state,
+            pool,
+            Principal::anonymous(),
+            200,
+            request(1, 50, pool),
+            plan(pool),
+            pull(pool),
+        )
+        .unwrap();
+        set_sp_liquidation_v2_status(
+            &mut state,
+            pool,
+            1,
+            crate::SpLiquidationV2Status::Rejected {
+                reason: "preflight test rejection".into(),
+            },
+        )
+        .unwrap();
+        assert!(ack_sp_liquidation_v2(&mut state, pool, 1).is_err());
+        assert!(state.sp_liquidation_v2_journals.contains_key(&(pool, 1)));
+        let refund_tuple = crate::SpLiquidationStableRefundTuple {
+            op_nonce: 9,
+            ledger: Principal::from_slice(&[3]),
+            source: Account {
+                owner: Principal::anonymous(),
+                subaccount: None,
+            },
+            destination: Account {
+                owner: pool,
+                subaccount: None,
+            },
+            principal_refund_raw: 0,
+            approval_fee_refund_raw: 2,
+            pull_fee_refund_raw: 0,
+            amount_raw: 2,
+            fee_raw: 0,
+            memo: vec![4],
+            created_at_time_ns: 150,
+        };
+        set_sp_liquidation_v2_status(
+            &mut state,
+            pool,
+            1,
+            crate::SpLiquidationV2Status::StablePullRefunded {
+                stable_pull_receipt: None,
+                refund_receipt: crate::SpLiquidationStableRefundReceipt {
+                    block_index: 99,
+                    tuple: refund_tuple,
+                },
+                reason: "approval fee returned".into(),
+            },
+        )
+        .unwrap();
+        ack_sp_liquidation_v2(&mut state, pool, 1).unwrap();
+        ack_sp_liquidation_v2(&mut state, pool, 1).unwrap();
+        assert!(!state.sp_liquidation_v2_journals.contains_key(&(pool, 1)));
+        assert_eq!(state.sp_liquidation_v2_acknowledged_through[&pool], 1);
+        assert!(
+            admit_sp_liquidation_v2(
+                &mut state,
+                pool,
+                Principal::anonymous(),
+                200,
+                request(3, 50, pool),
+                plan(pool),
+                pull(pool),
+            )
+            .is_err(),
+            "a skipped request ID cannot advance the floor"
+        );
+    }
+}
+
+#[cfg(test)]
+mod inbound_collateral_redemption_fence_tests {
+    use super::*;
+    use crate::vault::Vault;
+
+    #[test]
+    fn redeemable_debt_excludes_vault_with_pending_add_margin_ingress() {
+        let owner = Principal::from_slice(&[61]);
+        let ledger = Principal::from_slice(&[62]);
+        let backend = Principal::from_slice(&[63]);
+        let vault = Vault {
+            owner,
+            borrowed_icusd_amount: ICUSD::new(100),
+            collateral_amount: 1_000,
+            vault_id: 7,
+            collateral_type: ledger,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        };
+        let mut state = State::default();
+        state.icp_ledger_principal = ledger;
+        state.vault_id_to_vaults.insert(7, vault.clone());
+        assert_eq!(state.total_redeemable_debt_for(&ledger), ICUSD::new(100));
+        state.pending_inbound_collateral.insert(
+            (owner, ledger),
+            InboundCollateralJournal {
+                owner,
+                request_id: 1,
+                operation: InboundCollateralOperation::AddMargin {
+                    vault_id: 7,
+                    vault_snapshot: vault,
+                },
+                tuple: crate::SpLiquidationStablePullTuple {
+                    op_nonce: 1,
+                    ledger,
+                    from: icrc_ledger_types::icrc1::account::Account {
+                        owner,
+                        subaccount: None,
+                    },
+                    spender: icrc_ledger_types::icrc1::account::Account {
+                        owner: backend,
+                        subaccount: None,
+                    },
+                    to: icrc_ledger_types::icrc1::account::Account {
+                        owner: backend,
+                        subaccount: None,
+                    },
+                    amount_raw: 10,
+                    fee_raw: 1,
+                    memo: vec![1],
+                    created_at_time_ns: 1,
+                },
+                candidate_block_index: None,
+                candidate_attach_window_start_ns: 0,
+                candidate_attach_attempts: 0,
+                had_ambiguous_attempt: true,
+                last_error: None,
+            },
+        );
+        assert!(state.vault_has_pending_inbound_margin(7));
+        assert_eq!(state.total_redeemable_debt_for(&ledger), ICUSD::new(0));
+    }
+
+    #[test]
+    fn held_interest_distribution_share_survives_snapshot_roundtrip() {
+        let mut state = State::default();
+        let nonce = 123;
+        let share = HeldInterestDistributionShare {
+            operation_nonce: nonce,
+            amount_e8s: 17,
+            collateral_type: Principal::from_slice(&[0x61]),
+            destination: Some(InterestDestination::StabilityPool),
+            reason: "destination unavailable".into(),
+        };
+        state
+            .held_interest_distribution_shares
+            .insert(nonce, share.clone());
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&state, &mut encoded).unwrap();
+        let restored: State = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        assert_eq!(
+            restored.held_interest_distribution_shares.get(&nonce),
+            Some(&share)
+        );
+    }
+
+    #[test]
+    fn releasing_old_held_share_pins_fresh_nonce_without_changing_value() {
+        let mut state = State::default();
+        let held_nonce = (1u128 << 64) | 7;
+        let collateral = Principal::from_slice(&[0x61]);
+        state.held_interest_distribution_shares.insert(
+            held_nonce,
+            HeldInterestDistributionShare {
+                operation_nonce: held_nonce,
+                amount_e8s: 73,
+                collateral_type: collateral,
+                destination: Some(InterestDestination::StabilityPool),
+                reason: "destination unavailable".into(),
+            },
+        );
+        let released_at_ns = 3 * 86_400_000_000_000u64;
+        let mint_nonce = crate::event::record_interest_distribution_share_released_to_sp(
+            &mut state,
+            held_nonce,
+            Principal::from_slice(&[0x62]),
+            Principal::from_slice(&[0x63]),
+            released_at_ns,
+        )
+        .unwrap();
+
+        assert_ne!(mint_nonce, held_nonce);
+        assert_eq!(
+            crate::management::nonce_to_created_at_time(mint_nonce),
+            released_at_ns,
+            "release after 24h must use a fresh ledger dedup timestamp"
+        );
+        assert_eq!(
+            state.released_interest_distribution_shares[&held_nonce],
+            mint_nonce
+        );
+        assert!(!state
+            .held_interest_distribution_shares
+            .contains_key(&held_nonce));
+        let payment = &state.pending_stability_pool_interest_mints[&mint_nonce];
+        assert_eq!(payment.amount_e8s, 73);
+        assert_eq!(payment.collateral_type, collateral);
+        assert_eq!(payment.operation_nonce, mint_nonce);
+    }
+
+    #[test]
+    fn invalid_split_hold_cannot_be_auto_released_to_stability_pool() {
+        let mut state = State::default();
+        let nonce = 91;
+        let share = HeldInterestDistributionShare {
+            operation_nonce: nonce,
+            amount_e8s: 73,
+            collateral_type: Principal::from_slice(&[0x61]),
+            destination: None,
+            reason: "invalid persisted split".into(),
+        };
+        state
+            .held_interest_distribution_shares
+            .insert(nonce, share.clone());
+        let result = crate::event::record_interest_distribution_share_released_to_sp(
+            &mut state,
+            nonce,
+            Principal::from_slice(&[0x62]),
+            Principal::from_slice(&[0x63]),
+            10_000,
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            state.held_interest_distribution_shares.get(&nonce),
+            Some(&share)
+        );
+        assert!(state.pending_stability_pool_interest_mints.is_empty());
+        assert!(state.released_interest_distribution_shares.is_empty());
     }
 }

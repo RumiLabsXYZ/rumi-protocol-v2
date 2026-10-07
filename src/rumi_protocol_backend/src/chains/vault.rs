@@ -211,6 +211,9 @@ pub enum WithdrawError {
     StalePrice,
     /// A staleness-gated price is zero.
     ZeroPrice,
+    /// A zero-value withdrawal would enqueue a settlement transaction with no
+    /// user benefit while consuming queue capacity and worker cycles.
+    ZeroAmount,
     /// Requested amount exceeds the vault's `collateral_amount_native`.
     InsufficientCollateral,
     /// The post-withdrawal collateral ratio would fall below `min_cr_e4`.
@@ -746,6 +749,9 @@ pub fn withdraw_collateral_in_state(
         // residual debt. Reject until the marker clears (mirrors MintInFlight).
         if v.pending_liquidation.is_some() {
             return Err(WithdrawError::LiquidationInFlight);
+        }
+        if amount_e18 == 0 {
+            return Err(WithdrawError::ZeroAmount);
         }
         if amount_e18 > v.collateral_amount_native {
             return Err(WithdrawError::InsufficientCollateral);

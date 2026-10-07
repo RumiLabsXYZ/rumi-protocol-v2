@@ -41,7 +41,109 @@ impl SpLiquidationGuard {
             let mut held = f.borrow_mut();
             let balance_async_in_flight =
                 BALANCE_ASYNC_IN_FLIGHT.with(|active| *active.borrow() > 0);
-            if *held || balance_async_in_flight {
+            // Heap guards disappear on upgrade. A durable outbound withdrawal
+            // must therefore also block liquidation until its exact payout row
+            // resolves, or the debited share can evade a later loss.
+            let pending_withdrawal =
+                crate::state::read_state(|s| s.has_pending_outbound_withdrawals());
+            let pending_v2_liquidation = crate::state::read_state(|s| {
+                s.pending_sp_liquidations_v2
+                    .as_ref()
+                    .is_some_and(|rows| !rows.is_empty())
+                    || s.pending_sp_three_usd_absorbs
+                        .as_ref()
+                        .is_some_and(|rows| !rows.is_empty())
+                    || s.completed_sp_liquidations_v2
+                        .as_ref()
+                        .is_some_and(|rows| rows.values().any(|row| !row.backend_acknowledged))
+            });
+            if *held || balance_async_in_flight || pending_withdrawal || pending_v2_liquidation {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            *held = true;
+            Ok(Self)
+        })
+    }
+
+    /// Re-enter the driver for the single persisted V2 request after a lost
+    /// reply or upgrade. It permits that exact row while keeping all other
+    /// balance mutations and liquidation IDs fenced.
+    pub fn new_v2_resume(request_id: u64) -> Result<Self, StabilityPoolError> {
+        LIQUIDATION_ACTIVE.with(|active| {
+            let mut held = active.borrow_mut();
+            let async_balance_op = BALANCE_ASYNC_IN_FLIGHT.with(|count| *count.borrow() > 0);
+            let allowed = crate::state::read_state(|state| {
+                let pending_conflict = state
+                    .pending_sp_liquidations_v2
+                    .as_ref()
+                    .is_some_and(|rows| rows.keys().any(|id| *id != request_id));
+                let completion_conflict =
+                    state
+                        .completed_sp_liquidations_v2
+                        .as_ref()
+                        .is_some_and(|rows| {
+                            rows.iter()
+                                .any(|(id, row)| *id != request_id && !row.backend_acknowledged)
+                        });
+                let has_exact_row = state.pending_sp_liquidation_v2(request_id).is_some()
+                    || state
+                        .completed_sp_liquidations_v2
+                        .as_ref()
+                        .is_some_and(|rows| {
+                            rows.get(&request_id)
+                                .is_some_and(|row| !row.backend_acknowledged)
+                        });
+                let three_usd_conflict = state
+                    .pending_sp_three_usd_absorbs
+                    .as_ref()
+                    .is_some_and(|rows| !rows.is_empty());
+                !pending_conflict && !completion_conflict && !three_usd_conflict && has_exact_row
+            });
+            if *held || async_balance_op || !allowed {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            *held = true;
+            Ok(Self)
+        })
+    }
+
+    /// Resume exactly one persisted 3USD absorb while retaining the pool-wide
+    /// mutation fence. No other pending saga may coexist with this resume.
+    pub fn new_three_usd_resume(absorb_id: u64) -> Result<Self, StabilityPoolError> {
+        LIQUIDATION_ACTIVE.with(|active| {
+            let mut held = active.borrow_mut();
+            let async_balance_op = BALANCE_ASYNC_IN_FLIGHT.with(|count| *count.borrow() > 0);
+            let allowed = crate::state::read_state(|state| {
+                let pending = state.pending_sp_three_usd_absorbs.as_ref()?;
+                let exact = pending.contains_key(&absorb_id);
+                let other_pending = pending.keys().any(|id| *id != absorb_id);
+                let generic_pending = state
+                    .pending_sp_liquidations_v2
+                    .as_ref()
+                    .is_none_or(|rows| !rows.is_empty());
+                let pending_outbound = state
+                    .pending_outbound_payouts
+                    .as_ref()
+                    .is_none_or(|rows| !rows.is_empty());
+                let generic_completion = state
+                    .completed_sp_liquidations_v2
+                    .as_ref()
+                    .is_none_or(|rows| rows.values().any(|row| !row.backend_acknowledged));
+                let pending_refund = state
+                    .pending_refunds
+                    .as_ref()
+                    .is_none_or(|rows| !rows.is_empty());
+                Some(
+                    exact
+                        && !other_pending
+                        && !generic_pending
+                        && !generic_completion
+                        && !pending_outbound
+                        && !pending_refund,
+                )
+            })
+            .unwrap_or(false);
+            if *held || async_balance_op || !allowed {
                 return Err(StabilityPoolError::SystemBusy);
             }
             *held = true;

@@ -67,6 +67,35 @@ fn legacy_open_epoch_requires_review(
     }
 }
 
+fn hold_expired_unopened_epoch(
+    index: u64,
+    now_ns: u64,
+    season_start_ns: u64,
+    season_end_ns: u64,
+    review_uncommitted_epoch_zero: bool,
+) -> bool {
+    // Runtime epoch zero on a fresh uncommitted install has no scheduled work.
+    // After an upgrade, however, even that configured window must be reviewed
+    // if it has expired before the epoch was opened.
+    if index == 0 && !state::snapshot_seed_committed() && !review_uncommitted_epoch_zero {
+        return false;
+    }
+    let (_, epoch_end_ns) = epoch_bounds(index, season_start_ns, season_end_ns);
+    if legacy_reseed_window_allowed(epoch_end_ns, now_ns) {
+        return false;
+    }
+
+    // Do not synthesize a zero-point close or silently advance the epoch index;
+    // an operator must review the missed reward interval and explicitly resume.
+    state::set_legacy_transition_held(true);
+    state::set_legacy_reseed_pending(false);
+    ic_cdk::println!(
+        "[epoch] held expired unopened epoch {} for admin review without advancing rewards",
+        index
+    );
+    true
+}
+
 /// Bounds of epoch `index`: `[season_start + index*EPOCH, min(start + EPOCH,
 /// season_end)]`. The last epoch is partial (truncated at season end).
 pub fn epoch_bounds(index: u64, season_start_ns: u64, season_end_ns: u64) -> (u64, u64) {
@@ -337,22 +366,12 @@ pub fn prepare_legacy_state_after_upgrade(now_ns: u64) {
     }
 
     let index = state::current_epoch_index();
-    if index == 0 || state::current_epoch_entropy().is_some() {
-        return;
-    }
     let (season_start, season_end) = state::season_bounds();
-    let (scheduled_start, epoch_end) = epoch_bounds(index, season_start, season_end);
-    if now_ns < scheduled_start {
+    if hold_expired_unopened_epoch(index, now_ns, season_start, season_end, true) {
         return;
     }
-    if !legacy_reseed_window_allowed(epoch_end, now_ns) {
-        state::set_legacy_transition_held(true);
-        state::set_legacy_reseed_pending(false);
-        ic_cdk::println!(
-            "[epoch] post_upgrade held expired legacy epoch {} for admin review without advancing rewards",
-            index
-        );
-    } else {
+    let (scheduled_start, _) = epoch_bounds(index, season_start, season_end);
+    if now_ns >= scheduled_start && index > 0 && state::current_epoch_entropy().is_none() {
         state::set_legacy_reseed_pending(true);
     }
 }
@@ -501,10 +520,10 @@ pub async fn run_tick() {
         Some(g) => g,
         None => return, // a tick is already in flight
     };
-    let now = ic_cdk::api::time();
     if state::legacy_transition_held() {
         return;
     }
+    let now = ic_cdk::api::time();
     if state::legacy_reseed_pending() {
         resume_legacy_reseed().await;
         return;
@@ -525,6 +544,11 @@ pub async fn run_tick() {
     let (season_start, season_end) = state::season_bounds();
     let open = state::get_open_epoch();
     let index = state::current_epoch_index();
+    if open.is_none()
+        && hold_expired_unopened_epoch(index, now, season_start, season_end, false)
+    {
+        return;
+    }
     match next_action(&open, now, season_start, season_end, index) {
         DriverAction::Idle => {}
         DriverAction::Start => {
@@ -1028,8 +1052,26 @@ mod tests {
         assert!(status.legacy_transition_held);
         assert!(!status.legacy_reseed_pending);
         assert_eq!(status.current_epoch_index, 4);
-        assert_eq!(status.open_epoch, Some(open));
+        assert_eq!(status.open_epoch, Some(open.clone()));
         assert!(state::try_poll_guard().is_none());
+
+        // A due driver tick after upgrade must not sample or settle this
+        // predictable legacy epoch while the review hold is active.
+        let seed_before = state::with_state(|s| s.snapshot_seed.clone());
+        struct NoopWake;
+        impl std::task::Wake for NoopWake {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        let waker = std::task::Waker::from(std::sync::Arc::new(NoopWake));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut tick = Box::pin(run_tick());
+        assert!(std::future::Future::poll(tick.as_mut(), &mut context).is_ready());
+        drop(tick);
+        assert_eq!(state::get_open_epoch(), Some(open));
+        assert_eq!(state::current_epoch_index(), 4);
+        assert!(state::epoch_history(0, u64::MAX).is_empty());
+        assert_eq!(state::revealed_seed_count(), 0);
+        assert_eq!(state::with_state(|s| s.snapshot_seed.clone()), seed_before);
 
         // Older singleton blobs default the scheme marker to false. Even an
         // already-open epoch zero is held; fresh init sets the marker true.
@@ -1048,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn post_upgrade_fences_nonexpired_and_holds_expired_unopened_legacy_epoch() {
+    fn post_upgrade_fences_nonexpired_legacy_and_holds_any_expired_unopened_epoch() {
         state::init_state(
             Some(crate::types::InitArgs {
                 season_start_ns: Some(0),
@@ -1092,6 +1134,140 @@ mod tests {
         assert!(state::epoch_history(0, u64::MAX).is_empty());
         assert_eq!(state::revealed_seed_count(), 0);
         assert!(state::try_poll_guard().is_none());
+
+        // Expiry is independently a review condition; it applies even when
+        // the epoch already has secure entropy and needs no legacy reseed.
+        state::init_state(
+            Some(crate::types::InitArgs {
+                season_start_ns: Some(0),
+                season_end_ns: Some(3 * E),
+                ..Default::default()
+            }),
+            Principal::anonymous(),
+        );
+        state::with_state_mut(|s| {
+            s.current_epoch_index = 1;
+            s.snapshot_seed.current_seed = Some([8; 32]);
+            s.snapshot_seed.current_entropy = Some([9; 32]);
+        });
+        prepare_legacy_state_after_upgrade(2 * E);
+        let status = state::epoch_status();
+        assert!(status.legacy_transition_held);
+        assert!(!status.legacy_reseed_pending);
+        assert_eq!(status.current_epoch_index, 1);
+        assert!(status.open_epoch.is_none());
+        assert!(state::epoch_history(0, u64::MAX).is_empty());
+        assert_eq!(state::revealed_seed_count(), 0);
+        assert!(state::try_poll_guard().is_none());
+    }
+
+    #[test]
+    fn expired_unopened_epoch_zero_requires_review_even_without_commit() {
+        // An upgrade with a configured but unopened epoch-zero window must pause
+        // for review after that window expires, even when S0 was never committed.
+        state::init_state(
+            Some(crate::types::InitArgs {
+                season_start_ns: Some(0),
+                season_end_ns: Some(E),
+                ..Default::default()
+            }),
+            Principal::anonymous(),
+        );
+        assert!(!hold_expired_unopened_epoch(0, E, 0, E, false));
+        prepare_legacy_state_after_upgrade(E);
+        assert!(state::legacy_transition_held());
+        assert!(!state::legacy_reseed_pending());
+        assert_eq!(state::current_epoch_index(), 0);
+        assert!(state::get_open_epoch().is_none());
+        assert!(state::epoch_history(0, u64::MAX).is_empty());
+        assert_eq!(state::revealed_seed_count(), 0);
+        assert!(state::try_poll_guard().is_none());
+
+        let seed = [10; 32];
+        state::init_state(
+            Some(crate::types::InitArgs {
+                snapshot_seed_commit: Some(crate::snapshot_seed::commitment(&seed)),
+                season_start_ns: Some(0),
+                season_end_ns: Some(3 * E),
+                ..Default::default()
+            }),
+            Principal::anonymous(),
+        );
+        prepare_legacy_state_after_upgrade(3 * E);
+        let status = state::epoch_status();
+        assert!(status.legacy_transition_held);
+        assert!(!status.legacy_reseed_pending);
+        assert_eq!(status.current_epoch_index, 0);
+        assert!(status.open_epoch.is_none());
+        assert!(state::epoch_history(0, u64::MAX).is_empty());
+        assert_eq!(state::revealed_seed_count(), 0);
+
+        // A committed epoch zero whose window is still in the future remains
+        // available for the normal operator bootstrap when its start arrives.
+        state::init_state(
+            Some(crate::types::InitArgs {
+                snapshot_seed_commit: Some(crate::snapshot_seed::commitment(&seed)),
+                season_start_ns: Some(2 * E),
+                season_end_ns: Some(4 * E),
+                ..Default::default()
+            }),
+            Principal::anonymous(),
+        );
+        prepare_legacy_state_after_upgrade(2 * E - 1);
+        assert!(!state::legacy_transition_held());
+        assert!(!state::legacy_reseed_pending());
+        assert_eq!(state::current_epoch_index(), 0);
+        assert!(state::get_open_epoch().is_none());
+    }
+
+    #[test]
+    fn runtime_holds_expired_unopened_epoch_after_season_shortening() {
+        state::init_state(
+            Some(crate::types::InitArgs {
+                season_start_ns: Some(0),
+                season_end_ns: Some(3 * E),
+                ..Default::default()
+            }),
+            Principal::anonymous(),
+        );
+        state::with_state_mut(|s| {
+            s.current_epoch_index = 1;
+            s.snapshot_seed.current_seed = Some([8; 32]);
+            s.snapshot_seed.current_entropy = Some([9; 32]);
+            // The admin shortens the season so it ends before epoch 1 starts.
+            s.season_end_ns = E / 2;
+        });
+
+        let (season_start, season_end) = state::season_bounds();
+        assert_eq!(epoch_bounds(1, season_start, season_end), (E, E / 2));
+        assert_eq!(
+            next_action(&None, E / 2, season_start, season_end, 1),
+            DriverAction::Idle,
+            "the ordinary start action is unreachable after the schedule is clipped"
+        );
+        assert!(!hold_expired_unopened_epoch(
+            1,
+            E / 2 - 1,
+            season_start,
+            season_end,
+            false
+        ));
+        assert!(!state::legacy_transition_held());
+
+        assert!(hold_expired_unopened_epoch(
+            1,
+            E / 2,
+            season_start,
+            season_end,
+            false
+        ));
+        let status = state::epoch_status();
+        assert!(status.legacy_transition_held);
+        assert!(!status.legacy_reseed_pending);
+        assert_eq!(status.current_epoch_index, 1);
+        assert!(status.open_epoch.is_none());
+        assert!(state::epoch_history(0, u64::MAX).is_empty());
+        assert_eq!(state::revealed_seed_count(), 0);
     }
 
     #[test]

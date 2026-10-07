@@ -1,6 +1,7 @@
 import type { Principal } from '@dfinity/principal';
 import { ApiClient } from './protocol/apiClient';
-import { walletOperations, isOisyWallet } from './protocol/walletOperations';
+import { walletOperations, isOisyWallet, assertActionBoundContextCurrent } from './protocol/walletOperations';
+import type { ActionBoundContext } from './protocol/walletOperations';
 import { QueryOperations } from './protocol/queryOperations';
 import type { VaultOperationResult } from './types';
 import { processingStore, ProcessingStage } from '$lib/stores/processingStore';
@@ -466,155 +467,39 @@ export class ProtocolManager {
    * Repay icUSD to a vault
    */
   async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOperationResult> {
-    // Oisy: bypass executeOperation entirely — its async overhead burns the browser
-    // user gesture context needed for the ICRC-112 signer popup.
-    if (isOisyWallet()) {
-      return ApiClient.repayToVault(vaultId, icusdAmount);
-    }
-    return this.executeOperation(
-      `repayToVault:${vaultId}`,
-      () => ApiClient.repayToVault(vaultId, icusdAmount),
-      async () => {
-        await walletOperations.checkSufficientBalance(icusdAmount);
-
-        const amountE8s = BigInt(Math.floor(icusdAmount * 100_000_000));
-        const spenderCanisterId = CONFIG.currentCanisterId;
-
-        try {
-          const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
-          console.log(`💰 Repay pre-check: icUSD allowance: ${Number(currentAllowance) / 100_000_000}, need: ${icusdAmount}`);
-
-          const ICUSD_LEDGER_FEE = BigInt(100_000);
-          const requiredAllowance = amountE8s + ICUSD_LEDGER_FEE + ICUSD_LEDGER_FEE;
-
-          if (currentAllowance < requiredAllowance) {
-            processingStore.setStage(ProcessingStage.APPROVING);
-
-            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
-            console.log(`🔐 Approving large icUSD allowance (1B) to avoid future popups...`);
-
-            const approvalResult = await walletOperations.approveIcusdTransfer(LARGE_APPROVAL, spenderCanisterId);
-
-            if (!approvalResult.success) {
-              throw new Error(approvalResult.error || 'Failed to approve icUSD transfer');
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 500));
-          } else {
-            console.log(`✅ Sufficient icUSD allowance already exists`);
-          }
-        } catch (err) {
-          console.error('❌ icUSD allowance check/approval failed:', err);
-          throw new Error(`Failed to ensure icUSD allowance for repayment: ${err instanceof Error ? err.message : 'Unknown error'}`);
-        }
-      }
-    );
+    // The no-ID compatibility route is disabled. Delegate directly so this
+    // wrapper cannot perform an allowance approval before the API rejects it.
+    return ApiClient.repayToVault(vaultId, icusdAmount);
   }
 
-  /**
-   * Compound repay + close: pulls icUSD, zeroes debt, returns all collateral,
-   * removes vault — all in one backend call. Saves one Oisy consent screen
-   * vs. the separate repay → withdraw_and_close sequence.
-   */
+  /** Compatibility wrapper for the disabled no-ID legacy route. */
   async repayAndCloseVault(vaultId: number, icusdAmount: number): Promise<VaultOperationResult> {
-    // Oisy: bypass executeOperation entirely — its async overhead burns the browser
-    // user gesture context needed for the signer popup.
-    if (isOisyWallet()) {
-      return ApiClient.repayAndCloseVault(vaultId, icusdAmount);
-    }
-    return this.executeOperation(
-      `repayAndCloseVault:${vaultId}`,
-      () => ApiClient.repayAndCloseVault(vaultId, icusdAmount),
-      async () => {
-        await walletOperations.checkSufficientBalance(icusdAmount);
-
-        const amountE8s = BigInt(Math.floor(icusdAmount * 100_000_000));
-        const spenderCanisterId = CONFIG.currentCanisterId;
-
-        try {
-          const currentAllowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
-          const ICUSD_LEDGER_FEE = BigInt(100_000);
-          const requiredAllowance = amountE8s + ICUSD_LEDGER_FEE + ICUSD_LEDGER_FEE;
-
-          if (currentAllowance < requiredAllowance) {
-            processingStore.setStage(ProcessingStage.APPROVING);
-            const LARGE_APPROVAL = BigInt(100_000_000_000_000_000); // 1B icUSD in e8s
-            const approvalResult = await walletOperations.approveIcusdTransfer(LARGE_APPROVAL, spenderCanisterId);
-            if (!approvalResult.success) {
-              throw new Error(approvalResult.error || 'Failed to approve icUSD transfer');
-            }
-            await new Promise(resolve => setTimeout(resolve, 500));
-          }
-        } catch (err) {
-          console.error('icUSD allowance check/approval failed for repay_and_close:', err);
-          throw new Error(`Failed to ensure icUSD allowance: ${err instanceof Error ? err.message : 'Unknown error'}`);
-        }
-      }
-    );
+    // Keep the legacy wrapper fail-closed before any approval work.
+    return ApiClient.repayAndCloseVault(vaultId, icusdAmount);
   }
 
-  /**
-   * Repay vault debt using ckUSDT or ckUSDC with proper ICRC-2 approval flow.
-   * Mirrors the icUSD repay flow: check allowance → approve if needed → call backend.
-   * Amount is in human-readable terms (e.g., 100.0 = 100 USDT).
-   * Uses 6-decimal (e6s) amounts for stable tokens.
-   */
+  /** Disabled compatibility wrapper for the legacy stable repayment endpoint. */
   async repayToVaultWithStable(
     vaultId: number,
     amount: number,
-    tokenType: 'CKUSDT' | 'CKUSDC'
+    tokenType: 'CKUSDT' | 'CKUSDC',
+    onStage?: (stage: 'approval_attempted' | 'backend_dispatch_attempted') => void,
+    actionContext?: ActionBoundContext,
+    exactAmountRawE6?: bigint
   ): Promise<VaultOperationResult> {
-    // Oisy: bypass executeOperation entirely — its async overhead burns the browser
-    // user gesture context needed for the ICRC-112 signer popup.
-    if (isOisyWallet()) {
-      return ApiClient.repayToVaultWithStable(vaultId, amount, tokenType);
-    }
-    return this.executeOperation(
-      `repayVaultStable:${vaultId}`,
-      async () => {
+    void vaultId; void amount; void tokenType; void onStage; void actionContext; void exactAmountRawE6;
+    return ApiClient.legacyStableRepaymentDisabled();
+  }
 
-        const E6S = 1_000_000;
-        const amountE6s = BigInt(Math.floor(amount * E6S));
-        const spenderCanisterId = CONFIG.currentCanisterId;
-
-        const STABLE_LEDGER_FEE = BigInt(10_000); // 0.01 USDT/USDC
-        // Fetch the admin-settable repay fee rate from protocol status
-        const status = await QueryOperations.getProtocolStatus();
-        const feeRate = status.ckstableRepayFee || 0;
-        const protocolFee = BigInt(Math.ceil(Number(amountE6s) * feeRate));
-        const requiredAllowance = amountE6s + protocolFee + STABLE_LEDGER_FEE + STABLE_LEDGER_FEE;
-
-        try {
-          // Check current allowance (anonymous actor, no popup)
-          const currentAllowance = await walletOperations.checkStableAllowance(spenderCanisterId, tokenType);
-          console.log(`💰 Stable repay: ${tokenType} allowance: ${Number(currentAllowance) / E6S}, need: ${amount}`);
-
-          if (currentAllowance < requiredAllowance) {
-            processingStore.setStage(ProcessingStage.APPROVING);
-
-            const LARGE_APPROVAL = BigInt(1_000_000_000_000_000); // 1B in e6s
-            console.log(`🔐 Approving large ${tokenType} allowance to avoid future popups...`);
-
-            const approvalResult = await walletOperations.approveStableTransfer(LARGE_APPROVAL, spenderCanisterId, tokenType);
-
-            if (!approvalResult.success) {
-              throw new Error(approvalResult.error || `Failed to approve ${tokenType} transfer`);
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 500));
-          } else {
-            console.log(`✅ Sufficient ${tokenType} allowance already exists`);
-          }
-        } catch (err) {
-          console.error(`❌ ${tokenType} allowance check/approval failed:`, err);
-          throw new Error(`Failed to ensure ${tokenType} allowance for repayment: ${err instanceof Error ? err.message : 'Unknown error'}`);
-        }
-
-        // Now execute the actual repayment via the backend
-        processingStore.setStage(ProcessingStage.CREATING);
-        return await ApiClient.repayToVaultWithStable(vaultId, amount, tokenType);
-      }
-    );
+  async repayToVaultWithStableV2(
+    actionContext: ActionBoundContext,
+    intent: Parameters<typeof ApiClient.repayStableV2Bound>[1],
+    beforeApprovalDispatch: () => void,
+    confirmAmbiguousApprovalRetry: () => boolean,
+    beforeBackendDispatch: () => void,
+  ) {
+    assertActionBoundContextCurrent(actionContext);
+    return ApiClient.repayStableV2Bound(actionContext, intent, beforeApprovalDispatch, confirmAmbiguousApprovalRetry, beforeBackendDispatch);
   }
 
   /**

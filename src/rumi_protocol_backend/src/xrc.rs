@@ -35,7 +35,9 @@ pub fn xrc_metadata_meets_source_floor(num_sources_used: u32, min_required: u32)
 /// `State::check_price_sanity_band`, before consuming source-time evidence.
 pub(crate) fn price_is_outside_sanity_band(stored: Option<f64>, candidate: f64) -> bool {
     match stored {
-        Some(stored) if stored.is_finite() && stored > 0.0 && candidate.is_finite() && candidate > 0.0 => {
+        Some(stored)
+            if stored.is_finite() && stored > 0.0 && candidate.is_finite() && candidate > 0.0 =>
+        {
             let ratio = candidate / stored;
             ratio < crate::state::PRICE_SANITY_BAND_RATIO
                 || ratio > 1.0 / crate::state::PRICE_SANITY_BAND_RATIO
@@ -92,7 +94,10 @@ pub fn note_xrc_failure_at(state: &mut State, now_ns: u64) -> Option<Event> {
 pub fn note_xrc_success(state: &mut State) {
     state.consecutive_xrc_failures = 0;
 
-    if state.mode == Mode::ReadOnly && state.mode_triggered_by_oracle {
+    if state.mode == Mode::ReadOnly
+        && state.mode_triggered_by_oracle
+        && state.deficit_readonly_latched_at_e8s.is_none()
+    {
         state.mode = Mode::GeneralAvailability;
         state.mode_triggered_by_oracle = false;
     }
@@ -329,7 +334,10 @@ pub(crate) fn admit_outlier_source_timestamp(
             _ => (false, false),
         }
     });
-    OutlierSourceAdmission { admitted, reset_candidate }
+    OutlierSourceAdmission {
+        admitted,
+        reset_candidate,
+    }
 }
 
 /// Run the persisted sanity counter only after a distinct source observation
@@ -450,10 +458,19 @@ mod oracle_cache_and_outlier_timestamp_tests {
     fn cache_window_includes_xrc_margin_and_rejects_old_or_future_samples() {
         let now = 10_000_000_000_000;
         assert_eq!(PRICE_FRESHNESS_THRESHOLD_NANOS, 120_000_000_000);
-        assert_eq!(STABLE_PRICE_FRESHNESS_NANOS, PRICE_FRESHNESS_THRESHOLD_NANOS);
+        assert_eq!(
+            STABLE_PRICE_FRESHNESS_NANOS,
+            PRICE_FRESHNESS_THRESHOLD_NANOS
+        );
         assert!(source_timestamp_is_fresh(now - 60_000_000_000, now));
-        assert!(source_timestamp_is_fresh(now - PRICE_FRESHNESS_THRESHOLD_NANOS, now));
-        assert!(!source_timestamp_is_fresh(now - PRICE_FRESHNESS_THRESHOLD_NANOS - 1, now));
+        assert!(source_timestamp_is_fresh(
+            now - PRICE_FRESHNESS_THRESHOLD_NANOS,
+            now
+        ));
+        assert!(!source_timestamp_is_fresh(
+            now - PRICE_FRESHNESS_THRESHOLD_NANOS - 1,
+            now
+        ));
         assert!(!source_timestamp_is_fresh(now + 1, now));
     }
 
@@ -462,12 +479,20 @@ mod oracle_cache_and_outlier_timestamp_tests {
         let collateral = Principal::from_slice(&[251, 1]);
         let mut state = state_with_price(collateral, None);
         assert!(check_price_sanity_band_at_source(
-            &mut state, &collateral, None, 30_000_000_000, 1.0,
+            &mut state,
+            &collateral,
+            None,
+            30_000_000_000,
+            1.0,
         ));
 
         let mut state = state_with_price(collateral, Some(100.0));
         assert!(!check_price_sanity_band_at_source(
-            &mut state, &collateral, None, 30_000_000_000, 150.0,
+            &mut state,
+            &collateral,
+            None,
+            30_000_000_000,
+            150.0,
         ));
         assert!(!state.pending_outlier_prices.contains_key(&collateral));
     }
@@ -479,34 +504,88 @@ mod oracle_cache_and_outlier_timestamp_tests {
         let first = 30_000_000_000_000;
         let xrc = xrc_source("BTC");
 
-        assert!(!check_price_sanity_band_at_source(&mut state, &collateral, Some(&xrc), first, 150.0));
-        assert_eq!(state.pending_outlier_prices.get(&collateral), Some(&(150.0, 1)));
-        assert!(!check_price_sanity_band_at_source(&mut state, &collateral, Some(&xrc), first, 150.0));
-        assert_eq!(state.pending_outlier_prices.get(&collateral), Some(&(150.0, 1)));
         assert!(!check_price_sanity_band_at_source(
-            &mut state, &collateral, Some(&xrc),
-            first + (MIN_OUTLIER_SOURCE_INTERVAL_SECS - 1) * crate::SEC_NANOS, 150.0,
+            &mut state,
+            &collateral,
+            Some(&xrc),
+            first,
+            150.0
         ));
-        assert_eq!(state.pending_outlier_prices.get(&collateral), Some(&(150.0, 1)));
+        assert_eq!(
+            state.pending_outlier_prices.get(&collateral),
+            Some(&(150.0, 1))
+        );
+        assert!(!check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&xrc),
+            first,
+            150.0
+        ));
+        assert_eq!(
+            state.pending_outlier_prices.get(&collateral),
+            Some(&(150.0, 1))
+        );
+        assert!(!check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&xrc),
+            first + (MIN_OUTLIER_SOURCE_INTERVAL_SECS - 1) * crate::SEC_NANOS,
+            150.0,
+        ));
+        assert_eq!(
+            state.pending_outlier_prices.get(&collateral),
+            Some(&(150.0, 1))
+        );
 
         let eth = xrc_source("ETH");
         let first_eth = first + crate::SEC_NANOS;
-        assert!(!check_price_sanity_band_at_source(&mut state, &collateral, Some(&eth), first_eth, 150.0));
-        assert_eq!(state.pending_outlier_prices.get(&collateral), Some(&(150.0, 1)));
-        assert!(!check_price_sanity_band_at_source(&mut state, &collateral, Some(&eth), first_eth, 150.0));
-        assert_eq!(state.pending_outlier_prices.get(&collateral), Some(&(150.0, 1)));
         assert!(!check_price_sanity_band_at_source(
-            &mut state, &collateral, Some(&eth),
-            first_eth + MIN_OUTLIER_SOURCE_INTERVAL_SECS * crate::SEC_NANOS, 150.0,
+            &mut state,
+            &collateral,
+            Some(&eth),
+            first_eth,
+            150.0
         ));
-        assert_eq!(state.pending_outlier_prices.get(&collateral), Some(&(150.0, 2)));
+        assert_eq!(
+            state.pending_outlier_prices.get(&collateral),
+            Some(&(150.0, 1))
+        );
+        assert!(!check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&eth),
+            first_eth,
+            150.0
+        ));
+        assert_eq!(
+            state.pending_outlier_prices.get(&collateral),
+            Some(&(150.0, 1))
+        );
+        assert!(!check_price_sanity_band_at_source(
+            &mut state,
+            &collateral,
+            Some(&eth),
+            first_eth + MIN_OUTLIER_SOURCE_INTERVAL_SECS * crate::SEC_NANOS,
+            150.0,
+        ));
+        assert_eq!(
+            state.pending_outlier_prices.get(&collateral),
+            Some(&(150.0, 2))
+        );
         let accepted = check_price_sanity_band_at_source(
-            &mut state, &collateral, Some(&eth),
-            first_eth + 2 * MIN_OUTLIER_SOURCE_INTERVAL_SECS * crate::SEC_NANOS, 150.0,
+            &mut state,
+            &collateral,
+            Some(&eth),
+            first_eth + 2 * MIN_OUTLIER_SOURCE_INTERVAL_SECS * crate::SEC_NANOS,
+            150.0,
         );
         assert!(accepted);
         state.on_collateral_price_change(&collateral, 150.0);
-        assert_eq!(state.get_collateral_config(&collateral).unwrap().last_price, Some(150.0));
+        assert_eq!(
+            state.get_collateral_config(&collateral).unwrap().last_price,
+            Some(150.0)
+        );
     }
 
     #[test]
@@ -517,9 +596,16 @@ mod oracle_cache_and_outlier_timestamp_tests {
         let source = xrc_source("BTC");
 
         assert!(!check_price_sanity_band_at_source(
-            &mut state, &collateral, Some(&source), 40_000_000_000_000, 150.0,
+            &mut state,
+            &collateral,
+            Some(&source),
+            40_000_000_000_000,
+            150.0,
         ));
-        assert_eq!(state.pending_outlier_prices.get(&collateral), Some(&(150.0, 1)));
+        assert_eq!(
+            state.pending_outlier_prices.get(&collateral),
+            Some(&(150.0, 1))
+        );
     }
 
     #[test]
@@ -539,7 +625,11 @@ mod oracle_cache_and_outlier_timestamp_tests {
         config.last_price_timestamp = Some(first_observation_ns + 10_000_000_000);
 
         assert!(!check_price_sanity_band_at_source(
-            &mut state, &collateral, Some(&source), first_observation_ns, 150.0,
+            &mut state,
+            &collateral,
+            Some(&source),
+            first_observation_ns,
+            150.0,
         ));
         assert!(!check_price_sanity_band_at_source(
             &mut state,
@@ -720,7 +810,9 @@ pub async fn fetch_icp_rate() {
                         let rate_f64 = rate.to_f64().unwrap_or(0.0);
                         let ts_nanos = ts_nanos.expect("fresh timestamp must be converted");
                         let accepted = mutate_state(|s| {
-                            if s.last_icp_timestamp.is_some_and(|last_ts| last_ts >= ts_nanos) {
+                            if s.last_icp_timestamp
+                                .is_some_and(|last_ts| last_ts >= ts_nanos)
+                            {
                                 return false;
                             }
                             if !accept_price_at_source(
@@ -802,9 +894,8 @@ pub async fn fetch_icp_rate() {
     // captured ICP timestamp again before publishing.
     drop(_guard);
     if let Some(timestamp_ns) = accepted_icp_timestamp_ns {
-        let lst_candidates = read_state(|state| {
-            lst_redemption_refresh_candidates(state, timestamp_ns)
-        });
+        let lst_candidates =
+            read_state(|state| lst_redemption_refresh_candidates(state, timestamp_ns));
         match lst_candidates {
             Some(collateral_types) => {
                 for collateral_type in collateral_types {
@@ -860,6 +951,8 @@ pub async fn interest_and_treasury_tick() {
 
     // Drain pending treasury interest/collateral accumulated from sync
     // liquidations.
+    crate::treasury::process_pending_stability_pool_interest_mints().await;
+    crate::treasury::process_pending_treasury_payments().await;
     crate::treasury::drain_pending_treasury_interest().await;
     crate::treasury::drain_pending_treasury_collateral().await;
 
@@ -1049,15 +1142,15 @@ pub async fn ensure_stable_not_depegged(
         let now = ic_cdk::api::time();
         match token_type {
             crate::StableTokenType::CKUSDT => {
-                let stale = s.last_ckusdt_timestamp.is_none_or(|ts| {
-                    ts > now || now - ts > STABLE_PRICE_FRESHNESS_NANOS
-                });
+                let stale = s
+                    .last_ckusdt_timestamp
+                    .is_none_or(|ts| ts > now || now - ts > STABLE_PRICE_FRESHNESS_NANOS);
                 ("USDT".to_string(), stale)
             }
             crate::StableTokenType::CKUSDC => {
-                let stale = s.last_ckusdc_timestamp.is_none_or(|ts| {
-                    ts > now || now - ts > STABLE_PRICE_FRESHNESS_NANOS
-                });
+                let stale = s
+                    .last_ckusdc_timestamp
+                    .is_none_or(|ts| ts > now || now - ts > STABLE_PRICE_FRESHNESS_NANOS);
                 ("USDC".to_string(), stale)
             }
         }
@@ -1225,7 +1318,10 @@ use crate::chains::config::ChainId;
 /// `register_chain`.
 pub fn chain_is_xrc_managed(state: &State, chain: ChainId) -> bool {
     state.multi_chain.chain_is_registered(chain)
-        && state.multi_chain.chain_liquidation_configs.contains_key(&chain)
+        && state
+            .multi_chain
+            .chain_liquidation_configs
+            .contains_key(&chain)
 }
 
 /// The exact-pair form `set_manual_collateral_price` (main.rs) reads: true
@@ -1512,7 +1608,8 @@ async fn fetch_one_chain_price(chain: ChainId, symbol: String) {
             // conversion): out-of-range or overflowing input is rejected
             // (log-and-skip, nothing written), the same fail-closed posture
             // as every other rejection branch in this function.
-            let Some(price_e8) = xrc_rate_to_price_e8(rate_result.rate, rate_result.metadata.decimals)
+            let Some(price_e8) =
+                xrc_rate_to_price_e8(rate_result.rate, rate_result.metadata.decimals)
             else {
                 log!(
                     TRACE_XRC,
@@ -1621,9 +1718,15 @@ mod xrc_rate_to_price_e8_tests {
     #[test]
     fn decimals_18_computes_the_expected_price() {
         // rate = 1_000_000_000_000_000_000 (1.0 at 18 decimals) -> $1.00 at e8.
-        assert_eq!(xrc_rate_to_price_e8(1_000_000_000_000_000_000, 18), Some(100_000_000));
+        assert_eq!(
+            xrc_rate_to_price_e8(1_000_000_000_000_000_000, 18),
+            Some(100_000_000)
+        );
         // A plausible CFX/USD-style rate: $0.15 at 18 decimals.
-        assert_eq!(xrc_rate_to_price_e8(150_000_000_000_000_000, 18), Some(15_000_000));
+        assert_eq!(
+            xrc_rate_to_price_e8(150_000_000_000_000_000, 18),
+            Some(15_000_000)
+        );
     }
 
     #[test]
@@ -1636,7 +1739,11 @@ mod xrc_rate_to_price_e8_tests {
     fn decimals_above_18_is_rejected() {
         assert_eq!(xrc_rate_to_price_e8(1, 19), None);
         assert_eq!(xrc_rate_to_price_e8(1, 20), None);
-        assert_eq!(xrc_rate_to_price_e8(1, u32::MAX), None, "must reject, not overflow, an absurd decimals value");
+        assert_eq!(
+            xrc_rate_to_price_e8(1, u32::MAX),
+            None,
+            "must reject, not overflow, an absurd decimals value"
+        );
     }
 
     #[test]
@@ -1744,7 +1851,9 @@ mod cycle_cadence_tests {
         state.collateral_price_fetch_interval_secs.insert(icp, 900);
         assert_eq!(effective_collateral_price_fetch_secs(&state, &icp), 480);
         assert_eq!(effective_collateral_price_fetch_secs(&state, &ckbtc()), 300);
-        state.collateral_price_fetch_interval_secs.insert(ckbtc(), 900);
+        state
+            .collateral_price_fetch_interval_secs
+            .insert(ckbtc(), 900);
         assert_eq!(effective_collateral_price_fetch_secs(&state, &ckbtc()), 900);
     }
 
@@ -1774,7 +1883,10 @@ mod cycle_cadence_tests {
         state.collateral_configs.insert(lst, config);
         state.open_vault(vault(77, lst, 100_000_000, 100_000_000));
 
-        assert_eq!(lst_redemption_refresh_candidates(&state, 200), Some(vec![lst]));
+        assert_eq!(
+            lst_redemption_refresh_candidates(&state, 200),
+            Some(vec![lst])
+        );
         assert_eq!(lst_redemption_refresh_candidates(&state, 100), Some(vec![]));
     }
 

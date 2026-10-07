@@ -1,6 +1,8 @@
 use crate::numeric::{Ratio, UsdIcp, ICP, ICUSD};
 use crate::state::{
-    CollateralConfig, CollateralStatus, CollateralType, PendingMarginTransfer, RateCurveV2, State,
+    CollateralConfig, CollateralStatus, CollateralType, PendingCollateralWithdrawal,
+    PendingMarginTransfer, PendingTreasuryPayment, PinnedRedemptionTransfer, RateCurveV2, State,
+    TreasuryPaymentPhase,
 };
 use crate::storage::record_event;
 use crate::vault::Vault;
@@ -64,10 +66,74 @@ pub enum PendingPayoutKind {
 /// variant would break decoding for clients built against the legacy Candid.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingPayoutEvent {
-    Queued { operation_id: u128, kind: PendingPayoutKind, transfer: PendingMarginTransfer, timestamp: u64 },
-    Held { operation_id: u128, kind: PendingPayoutKind, retry_count: u8, reconciliation_required: bool, timestamp: u64 },
-    Rearmed { operation_id: u128, kind: PendingPayoutKind, timestamp: u64 },
-    Settled { operation_id: u128, kind: PendingPayoutKind, vault_id: u64, block_index: u64, timestamp: u64 },
+    Queued {
+        operation_id: u128,
+        kind: PendingPayoutKind,
+        transfer: PendingMarginTransfer,
+        timestamp: u64,
+    },
+    Held {
+        operation_id: u128,
+        kind: PendingPayoutKind,
+        retry_count: u8,
+        reconciliation_required: bool,
+        timestamp: u64,
+    },
+    Rearmed {
+        operation_id: u128,
+        kind: PendingPayoutKind,
+        timestamp: u64,
+    },
+    Settled {
+        operation_id: u128,
+        kind: PendingPayoutKind,
+        vault_id: u64,
+        block_index: u64,
+        timestamp: u64,
+    },
+    // Ordinary user collateral exits. Keep appended: this private journal is
+    // persisted as CBOR and existing variant order is part of compatibility.
+    CollateralWithdrawalQueued {
+        transfer: PendingCollateralWithdrawal,
+        timestamp: u64,
+    },
+    CollateralWithdrawalDispatching {
+        vault_id: u64,
+        operation_id: u128,
+        attempts: u8,
+        timestamp: u64,
+    },
+    CollateralWithdrawalHeld {
+        vault_id: u64,
+        operation_id: u128,
+        reason: String,
+        timestamp: u64,
+    },
+    CollateralWithdrawalSettled {
+        vault_id: u64,
+        operation_id: u128,
+        block_index: u64,
+        forgive_dust_debt: bool,
+        timestamp: u64,
+    },
+    CollateralWithdrawalAmbiguous {
+        vault_id: u64,
+        operation_id: u128,
+        reason: String,
+        timestamp: u64,
+    },
+    CollateralWithdrawalRepriced {
+        vault_id: u64,
+        old_operation_id: u128,
+        transfer: PendingCollateralWithdrawal,
+        timestamp: u64,
+    },
+    CollateralWithdrawalNoEffect {
+        vault_id: u64,
+        operation_id: u128,
+        reason: String,
+        timestamp: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +141,172 @@ pub struct PendingPayoutJournalEntry {
     /// Number of legacy public Event records that precede this operation.
     pub after_legacy_event_count: u64,
     pub event: PendingPayoutEvent,
+}
+
+/// Private durable lifecycle journal for treasury fee transfers. Kept apart
+/// from the public Event enum so the public Candid contract stays unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TreasuryPaymentEvent {
+    Queued {
+        payment: crate::state::PendingTreasuryPayment,
+        timestamp: u64,
+    },
+    TransferConfirmed {
+        operation_id: u128,
+        block_index: u64,
+        timestamp: u64,
+    },
+    Held {
+        operation_id: u128,
+        reason: String,
+        timestamp: u64,
+    },
+    NotificationAcknowledged {
+        operation_id: u128,
+        deposit_id: u64,
+        timestamp: u64,
+    },
+    // New private events must remain appended after legacy variants for stable
+    // CBOR enum compatibility.
+    TransferAttempted {
+        operation_id: u128,
+        dispatch_attempts: u8,
+        timestamp: u64,
+    },
+    DestinationPinned {
+        operation_id: u128,
+        recipient: Principal,
+        ledger: Principal,
+        transfer_nonce: u128,
+        timestamp: u64,
+    },
+    TransferFailed {
+        operation_id: u128,
+        reason: String,
+        timestamp: u64,
+    },
+    ReceiptReconciled {
+        operation_id: u128,
+        block_index: u64,
+        timestamp: u64,
+    },
+    StabilityPoolInterestMintQueued {
+        payment: crate::state::PendingStabilityPoolInterestMint,
+        timestamp: u64,
+    },
+    StabilityPoolInterestMintAttempted {
+        operation_nonce: u128,
+        attempts: u8,
+        timestamp: u64,
+    },
+    StabilityPoolInterestMintConfirmed {
+        operation_nonce: u128,
+        block_index: u64,
+        timestamp: u64,
+    },
+    StabilityPoolInterestMintHeld {
+        operation_nonce: u128,
+        reason: String,
+        timestamp: u64,
+    },
+    StabilityPoolInterestMintAcknowledged {
+        operation_nonce: u128,
+        timestamp: u64,
+    },
+    InterestShareHeld {
+        share: crate::state::HeldInterestDistributionShare,
+        timestamp: u64,
+    },
+    InterestShareReleasedToStabilityPool {
+        held_operation_nonce: u128,
+        payment: crate::state::PendingStabilityPoolInterestMint,
+        timestamp: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreasuryPaymentJournalEntry {
+    pub after_legacy_event_count: u64,
+    pub event: TreasuryPaymentEvent,
+}
+
+pub(crate) fn treasury_payment_is_well_formed(
+    payment: &PendingTreasuryPayment,
+    operation_id: u128,
+) -> bool {
+    let kind_matches_deposit = match payment.kind {
+        crate::state::TreasuryPaymentKind::BorrowingFeeMint => {
+            payment.deposit_type == crate::treasury::DepositType::BorrowingFee
+                && payment.asset_type == crate::treasury::AssetType::ICUSD
+        }
+        crate::state::TreasuryPaymentKind::LiquidationCollateralTransfer => {
+            payment.deposit_type == crate::treasury::DepositType::LiquidationFee
+        }
+        crate::state::TreasuryPaymentKind::LiquidationStablecoinSurcharge => {
+            payment.deposit_type == crate::treasury::DepositType::LiquidationFee
+                && matches!(
+                    &payment.asset_type,
+                    crate::treasury::AssetType::CKUSDT | crate::treasury::AssetType::CKUSDC
+                )
+        }
+        crate::state::TreasuryPaymentKind::StablecoinRepaySurcharge => {
+            payment.deposit_type == crate::treasury::DepositType::LiquidationFee
+                && matches!(
+                    &payment.asset_type,
+                    crate::treasury::AssetType::CKUSDT | crate::treasury::AssetType::CKUSDC
+                )
+        }
+        crate::state::TreasuryPaymentKind::InterestIcusdMint => {
+            payment.deposit_type == crate::treasury::DepositType::InterestRevenue
+                && payment.asset_type == crate::treasury::AssetType::ICUSD
+        }
+        crate::state::TreasuryPaymentKind::InterestStablecoinTransfer => {
+            payment.deposit_type == crate::treasury::DepositType::InterestRevenue
+                && matches!(
+                    &payment.asset_type,
+                    crate::treasury::AssetType::CKUSDT | crate::treasury::AssetType::CKUSDC
+                )
+        }
+    };
+    let destination_valid = match &payment.phase {
+        crate::state::TreasuryPaymentPhase::AwaitingDestination => {
+            (payment.kind == crate::state::TreasuryPaymentKind::BorrowingFeeMint
+                || payment.kind == crate::state::TreasuryPaymentKind::LiquidationCollateralTransfer
+                || payment.kind == crate::state::TreasuryPaymentKind::StablecoinRepaySurcharge
+                || payment.kind
+                    == crate::state::TreasuryPaymentKind::LiquidationStablecoinSurcharge)
+                && (payment.recipient.owner == Principal::anonymous()
+                    || payment.ledger == Principal::anonymous())
+        }
+        _ => {
+            payment.recipient.owner != Principal::anonymous()
+                && payment.ledger != Principal::anonymous()
+        }
+    };
+    let transfer_nonce = if payment.transfer_nonce == 0 {
+        payment.operation_id
+    } else {
+        payment.transfer_nonce
+    };
+    operation_id != 0
+        && payment.operation_id == operation_id
+        && payment.amount_e8s > 0
+        && payment.from_owner != Principal::anonymous()
+        && payment.from_subaccount.is_none()
+        && payment.recipient.subaccount.is_none()
+        && destination_valid
+        && payment.fee_e8s.is_none()
+        && payment.deposit_memo.is_none()
+        && payment.created_at_time_ns == crate::management::nonce_to_created_at_time(transfer_nonce)
+        && payment.memo.as_slice()
+            == crate::management::nonce_to_memo(transfer_nonce)
+                .0
+                .as_slice()
+        && kind_matches_deposit
+        && matches!(
+            &payment.phase,
+            TreasuryPaymentPhase::TransferPending | TreasuryPaymentPhase::AwaitingDestination
+        )
 }
 
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +410,10 @@ pub enum Event {
         /// Minimum net native-unit payout consented to by the redeemer.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         min_net_collateral_raw: Option<u64>,
+        /// Exact ICRC tuple for new redemption payouts. Missing on historical
+        /// events, which must remain held for evidence-based reconciliation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redemption_transfer: Option<PinnedRedemptionTransfer>,
     },
 
     #[serde(rename = "redemption_transfered")]
@@ -702,7 +938,15 @@ pub enum Event {
     /// Wave-8e LIQ-005: admin sets the deficit-driven ReadOnly auto-latch
     /// threshold. 0 disables the latch.
     #[serde(rename = "set_deficit_readonly_threshold_e8s")]
-    SetDeficitReadonlyThresholdE8s { threshold_e8s: u64, timestamp: u64 },
+    SetDeficitReadonlyThresholdE8s {
+        threshold_e8s: u64,
+        timestamp: u64,
+        /// Present only when this legacy-shaped event records the controller
+        /// clearing a previously tripped latch. Kept in the existing variant
+        /// so public Event Candid remains backward compatible.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clear_latched_threshold_e8s: Option<u64>,
+    },
 
     /// Wave-10 LIQ-008: circuit breaker auto-tripped because the rolling-
     /// window cumulative liquidation debt crossed the configured ceiling.
@@ -1250,6 +1494,10 @@ impl Event {
             Event::SetCollateralMinDeposit { .. } => Some("SetCollateralMinDeposit"),
             Event::SetCollateralDisplayColor { .. } => Some("SetCollateralDisplayColor"),
             Event::SetDeficitRepaymentFraction { .. } => Some("SetDeficitRepaymentFraction"),
+            Event::SetDeficitReadonlyThresholdE8s {
+                clear_latched_threshold_e8s: Some(_),
+                ..
+            } => Some("DeficitReadonlyLatchCleared"),
             Event::SetDeficitReadonlyThresholdE8s { .. } => Some("SetDeficitReadonlyThresholdE8s"),
             // Wave-10 LIQ-008
             Event::BreakerCleared { .. } => Some("BreakerCleared"),
@@ -1316,6 +1564,7 @@ impl Event {
             Event::SetBotBudget {
                 start_timestamp, ..
             } => Some(*start_timestamp),
+            Event::SetDeficitReadonlyThresholdE8s { timestamp, .. } => Some(*timestamp),
             // Wave-10 LIQ-008: surface breaker events in time-range queries so
             // operators can audit "every trip in the last 24h" and admin sets.
             Event::BreakerTripped { timestamp, .. } => Some(*timestamp),
@@ -1570,7 +1819,15 @@ pub fn replay_with_pending_payout_journal(
     events: impl Iterator<Item = Event>,
     payout_events: impl Iterator<Item = PendingPayoutJournalEntry>,
 ) -> Result<State, ReplayLogError> {
-    replay_with_journal_and_nonce_time(events, payout_events, ic_cdk::api::time)
+    replay_with_journal_and_nonce_time(events, payout_events, std::iter::empty(), ic_cdk::api::time)
+}
+
+pub fn replay_with_treasury_payment_journal(
+    events: impl Iterator<Item = Event>,
+    payout_events: impl Iterator<Item = PendingPayoutJournalEntry>,
+    treasury_events: impl Iterator<Item = TreasuryPaymentJournalEntry>,
+) -> Result<State, ReplayLogError> {
+    replay_with_journal_and_nonce_time(events, payout_events, treasury_events, ic_cdk::api::time)
 }
 
 /// Stable snapshots already include current payout queue state. Only the
@@ -1586,19 +1843,38 @@ pub fn restore_snapshot_or_replay(
     }
 }
 
+pub fn restore_snapshot_or_replay_with_treasury_payments(
+    snapshot: Option<State>,
+    events: impl Iterator<Item = Event>,
+    payout_events: impl Iterator<Item = PendingPayoutJournalEntry>,
+    treasury_events: impl Iterator<Item = TreasuryPaymentJournalEntry>,
+) -> Result<State, ReplayLogError> {
+    match snapshot {
+        Some(state) => Ok(state),
+        None => replay_with_treasury_payment_journal(events, payout_events, treasury_events),
+    }
+}
+
 fn replay_with_nonce_time(
     events: impl Iterator<Item = Event>,
     mut nonce_time: impl FnMut() -> u64,
 ) -> Result<State, ReplayLogError> {
-    replay_with_journal_and_nonce_time(events, std::iter::empty(), &mut nonce_time)
+    replay_with_journal_and_nonce_time(
+        events,
+        std::iter::empty(),
+        std::iter::empty(),
+        &mut nonce_time,
+    )
 }
 
 fn replay_with_journal_and_nonce_time(
     mut events: impl Iterator<Item = Event>,
     payout_events: impl Iterator<Item = PendingPayoutJournalEntry>,
+    treasury_events: impl Iterator<Item = TreasuryPaymentJournalEntry>,
     mut nonce_time: impl FnMut() -> u64,
 ) -> Result<State, ReplayLogError> {
     let mut payout_events = payout_events.peekable();
+    let mut treasury_events = treasury_events.peekable();
     let mut state = match events.next() {
         Some(Event::Init(args)) => State::from(args),
         Some(evt) => {
@@ -1611,7 +1887,19 @@ fn replay_with_journal_and_nonce_time(
     };
     let mut legacy_event_count = 1u64;
     let mut last_payout_boundary = 0u64;
-    apply_payout_events_through(&mut state, &mut payout_events, legacy_event_count, &mut last_payout_boundary)?;
+    let mut last_treasury_boundary = 0u64;
+    apply_payout_events_through(
+        &mut state,
+        &mut payout_events,
+        legacy_event_count,
+        &mut last_payout_boundary,
+    )?;
+    apply_treasury_payment_events_through(
+        &mut state,
+        &mut treasury_events,
+        legacy_event_count,
+        &mut last_treasury_boundary,
+    )?;
     let mut vault_id = 0;
     for event in events {
         match event {
@@ -1705,10 +1993,11 @@ fn replay_with_journal_and_nonce_time(
             Event::BorrowFromVault {
                 vault_id,
                 borrowed_amount,
+                timestamp,
                 ..
             } => {
                 // Fee was phantom (never minted) in old events; now routed to treasury in async caller.
-                state.borrow_from_vault(vault_id, borrowed_amount)
+                state.borrow_from_vault(vault_id, borrowed_amount, timestamp)
             }
             Event::RedemptionOnVaults {
                 owner,
@@ -1720,8 +2009,17 @@ fn replay_with_journal_and_nonce_time(
                 ref vault_redemptions,
                 payout_collateral_raw,
                 min_net_collateral_raw,
+                redemption_transfer,
                 ..
             } => {
+                if !state
+                    .consumed_redemption_burn_blocks
+                    .insert(icusd_block_index)
+                {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "duplicate redemption burn block {icusd_block_index}"
+                    )));
+                }
                 state.provide_liquidity(fee_amount, state.developer_principal);
                 let redeem_ct = collateral_type
                     .unwrap_or_else(|| state.icp_collateral_type());
@@ -1751,17 +2049,29 @@ fn replay_with_journal_and_nonce_time(
                     .map(ICP::from)
                     .unwrap_or(historical_margin);
                 if margin.to_u64() > 0 {
-                    let nonce = state.next_op_nonce_at(nonce_time());
-                    state.pending_redemption_transfer.insert(
-                        icusd_block_index,
-                        PendingMarginTransfer {
+                    let pinned = redemption_transfer;
+                    if let Some(tuple) = pinned {
+                        state.observe_op_nonce(tuple.op_nonce);
+                    }
+                    let nonce = pinned
+                        .map(|tuple| tuple.op_nonce)
+                        .unwrap_or_else(|| state.next_op_nonce_at(nonce_time()));
+                    let mut payout = PendingMarginTransfer {
                             vault_id: 0,
                             owner, margin, collateral_type: redeem_ct, retry_count: 0,
-                            op_nonce: nonce, ledger: None, transfer_amount_raw: None,
-                            held_for_manual_retry: false, reconciliation_required: false,
+                            op_nonce: nonce,
+                            ledger: pinned.map(|tuple| tuple.ledger),
+                            transfer_amount_raw: pinned.map(|tuple| tuple.amount_raw),
+                            redemption_transfer: pinned,
+                            held_for_manual_retry: pinned.is_none(),
+                            reconciliation_required: pinned.is_none(),
                             min_net_collateral_raw,
-                        },
-                    );
+                        };
+                    if pinned.is_some_and(|tuple| !tuple.matches_pending(&payout)) {
+                        payout.held_for_manual_retry = true;
+                        payout.reconciliation_required = true;
+                    }
+                    state.pending_redemption_transfer.entry(icusd_block_index).or_insert(payout);
                 }
             }
             Event::RedemptionTransfered {
@@ -1824,11 +2134,14 @@ fn replay_with_journal_and_nonce_time(
                 amount,
                 ..
             } => {
-                // Cap at vault's actual collateral to survive replay drift
-                if let Some(vault) = state.vault_id_to_vaults.get(&vault_id) {
-                    let capped = ICP::new(amount.to_u64().min(vault.collateral_amount));
-                    state.remove_margin_from_vault(vault_id, capped);
+                // Replay may have a withdrawal fence reconstructed from the
+                // private journal immediately before its settlement event.
+                // Apply the historical debit directly; the live recorder
+                // removes the fence atomically before using the guarded helper.
+                if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                    vault.collateral_amount = vault.collateral_amount.saturating_sub(amount.to_u64());
                 }
+                state.reindex_vault_cr(vault_id);
             }
             // In the match statement inside replay function
             Event::VaultWithdrawnAndClosed {
@@ -1843,8 +2156,23 @@ fn replay_with_journal_and_nonce_time(
             // Add this case:
             Event::WithdrawAndCloseVault {
                 vault_id,
+                amount,
+                block_index,
+                caller,
                 ..
             } => {
+                if let Some(row) = state.pending_collateral_withdrawals.get(&vault_id) {
+                    if row.action != crate::state::CollateralWithdrawalAction::Close
+                        || row.gross_amount_raw != amount.to_u64()
+                        || caller.as_ref() != Some(&row.owner)
+                        || block_index.is_none()
+                    {
+                        return Err(ReplayLogError::InconsistentLog(
+                            "withdraw-and-close event does not match its pending exact payout".into(),
+                        ));
+                    }
+                    state.pending_collateral_withdrawals.remove(&vault_id);
+                }
                 // Close the vault during replay
                 state.close_vault(vault_id);
             },
@@ -2230,8 +2558,25 @@ fn replay_with_journal_and_nonce_time(
             Event::SetDeficitRepaymentFraction { fraction, .. } => {
                 state.deficit_repayment_fraction = fraction;
             },
-            Event::SetDeficitReadonlyThresholdE8s { threshold_e8s, .. } => {
+            Event::SetDeficitReadonlyThresholdE8s {
+                threshold_e8s,
+                clear_latched_threshold_e8s,
+                ..
+            } => {
                 state.deficit_readonly_threshold_e8s = threshold_e8s;
+                if let Some(latched_threshold_e8s) = clear_latched_threshold_e8s {
+                    if state.deficit_readonly_latched_at_e8s != Some(latched_threshold_e8s) {
+                        return Err(ReplayLogError::InconsistentLog(format!(
+                            "deficit ReadOnly latch clear references threshold {}, state latch is {:?}",
+                            latched_threshold_e8s, state.deficit_readonly_latched_at_e8s
+                        )));
+                    }
+                    state
+                        .clear_deficit_readonly_latch()
+                        .map_err(ReplayLogError::InconsistentLog)?;
+                } else {
+                    let _ = state.check_deficit_readonly_latch();
+                }
             },
             // Wave-10 LIQ-008: rebuild the breaker latch + admin tunables from
             // the event log. `recent_liquidations` is intentionally NOT
@@ -2304,11 +2649,28 @@ fn replay_with_journal_and_nonce_time(
             | Event::ChainHotWalletLow { .. } => {},
         }
         legacy_event_count = legacy_event_count.saturating_add(1);
-        apply_payout_events_through(&mut state, &mut payout_events, legacy_event_count, &mut last_payout_boundary)?;
+        apply_payout_events_through(
+            &mut state,
+            &mut payout_events,
+            legacy_event_count,
+            &mut last_payout_boundary,
+        )?;
+        apply_treasury_payment_events_through(
+            &mut state,
+            &mut treasury_events,
+            legacy_event_count,
+            &mut last_treasury_boundary,
+        )?;
     }
     if payout_events.peek().is_some() {
         return Err(ReplayLogError::InconsistentLog(format!(
             "pending payout journal boundary exceeds public event count {}",
+            legacy_event_count
+        )));
+    }
+    if treasury_events.peek().is_some() {
+        return Err(ReplayLogError::InconsistentLog(format!(
+            "treasury payment journal boundary exceeds public event count {}",
             legacy_event_count
         )));
     }
@@ -2325,7 +2687,10 @@ fn apply_payout_events_through<I>(
 where
     I: Iterator<Item = PendingPayoutJournalEntry>,
 {
-    while events.peek().is_some_and(|entry| entry.after_legacy_event_count <= legacy_event_count) {
+    while events
+        .peek()
+        .is_some_and(|entry| entry.after_legacy_event_count <= legacy_event_count)
+    {
         let entry = events.next().expect("peeked payout journal entry");
         if entry.after_legacy_event_count == 0 || entry.after_legacy_event_count < *last_boundary {
             return Err(ReplayLogError::InconsistentLog(
@@ -2334,7 +2699,12 @@ where
         }
         *last_boundary = entry.after_legacy_event_count;
         match entry.event {
-            PendingPayoutEvent::Queued { operation_id, kind, transfer, .. } => {
+            PendingPayoutEvent::Queued {
+                operation_id,
+                kind,
+                transfer,
+                ..
+            } => {
                 if operation_id == 0 || operation_id != transfer.op_nonce {
                     return Err(ReplayLogError::InconsistentLog(
                         "pending payout id does not match its nonzero nonce".to_string(),
@@ -2343,20 +2713,38 @@ where
                 if state.pending_margin_transfers.contains_key(&operation_id)
                     || state.pending_excess_transfers.contains_key(&operation_id)
                 {
-                    return Err(ReplayLogError::InconsistentLog(
-                        format!("duplicate pending payout operation id {operation_id}"),
-                    ));
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "duplicate pending payout operation id {operation_id}"
+                    )));
                 }
                 state.observe_op_nonce(operation_id);
                 match kind {
-                    PendingPayoutKind::Margin => { state.pending_margin_transfers.insert(operation_id, transfer); }
-                    PendingPayoutKind::Excess => { state.pending_excess_transfers.insert(operation_id, transfer); }
+                    PendingPayoutKind::Margin => {
+                        state
+                            .pending_margin_transfers
+                            .insert(operation_id, transfer);
+                    }
+                    PendingPayoutKind::Excess => {
+                        state
+                            .pending_excess_transfers
+                            .insert(operation_id, transfer);
+                    }
                 }
             }
-            PendingPayoutEvent::Held { operation_id, kind, retry_count, reconciliation_required, .. } => {
+            PendingPayoutEvent::Held {
+                operation_id,
+                kind,
+                retry_count,
+                reconciliation_required,
+                ..
+            } => {
                 let payout = match kind {
-                    PendingPayoutKind::Margin => state.pending_margin_transfers.get_mut(&operation_id),
-                    PendingPayoutKind::Excess => state.pending_excess_transfers.get_mut(&operation_id),
+                    PendingPayoutKind::Margin => {
+                        state.pending_margin_transfers.get_mut(&operation_id)
+                    }
+                    PendingPayoutKind::Excess => {
+                        state.pending_excess_transfers.get_mut(&operation_id)
+                    }
                 };
                 if let Some(payout) = payout {
                     payout.retry_count = retry_count;
@@ -2364,28 +2752,561 @@ where
                     payout.reconciliation_required = reconciliation_required;
                 }
             }
-            PendingPayoutEvent::Rearmed { operation_id, kind, .. } => {
+            PendingPayoutEvent::Rearmed {
+                operation_id, kind, ..
+            } => {
                 let payout = match kind {
-                    PendingPayoutKind::Margin => state.pending_margin_transfers.get_mut(&operation_id),
-                    PendingPayoutKind::Excess => state.pending_excess_transfers.get_mut(&operation_id),
+                    PendingPayoutKind::Margin => {
+                        state.pending_margin_transfers.get_mut(&operation_id)
+                    }
+                    PendingPayoutKind::Excess => {
+                        state.pending_excess_transfers.get_mut(&operation_id)
+                    }
                 };
                 if let Some(payout) = payout {
-                    if !payout.reconciliation_required && payout.op_nonce == operation_id
-                        && payout.ledger.is_some() && payout.transfer_amount_raw.unwrap_or(0) > 0
+                    if !payout.reconciliation_required
+                        && payout.op_nonce == operation_id
+                        && payout.ledger.is_some()
+                        && payout.transfer_amount_raw.unwrap_or(0) > 0
                     {
                         payout.held_for_manual_retry = false;
                     }
                 }
             }
-            PendingPayoutEvent::Settled { operation_id, kind, .. } => match kind {
-                PendingPayoutKind::Margin => { state.pending_margin_transfers.remove(&operation_id); }
-                PendingPayoutKind::Excess => { state.pending_excess_transfers.remove(&operation_id); }
+            PendingPayoutEvent::Settled {
+                operation_id, kind, ..
+            } => match kind {
+                PendingPayoutKind::Margin => {
+                    state.pending_margin_transfers.remove(&operation_id);
+                }
+                PendingPayoutKind::Excess => {
+                    state.pending_excess_transfers.remove(&operation_id);
+                }
             },
+            PendingPayoutEvent::CollateralWithdrawalQueued { transfer, .. } => {
+                if !collateral_withdrawal_is_well_formed(&transfer)
+                    || state
+                        .pending_collateral_withdrawals
+                        .contains_key(&transfer.vault_id)
+                    || state
+                        .consumed_collateral_withdrawal_ids
+                        .contains(&transfer.operation_id)
+                {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "invalid or duplicate collateral withdrawal journal row".to_string(),
+                    ));
+                }
+                state.observe_op_nonce(transfer.operation_id);
+                state
+                    .pending_collateral_withdrawals
+                    .insert(transfer.vault_id, transfer);
+            }
+            PendingPayoutEvent::CollateralWithdrawalDispatching {
+                vault_id,
+                operation_id,
+                attempts,
+                ..
+            } => {
+                if let Some(row) = state.pending_collateral_withdrawals.get_mut(&vault_id) {
+                    if row.operation_id != operation_id || attempts < row.dispatch_attempts {
+                        return Err(ReplayLogError::InconsistentLog(
+                            "collateral withdrawal dispatch identity changed".to_string(),
+                        ));
+                    }
+                    row.dispatch_attempts = attempts;
+                    row.phase = crate::state::CollateralWithdrawalPhase::Dispatching;
+                }
+            }
+            PendingPayoutEvent::CollateralWithdrawalHeld {
+                vault_id,
+                operation_id,
+                reason,
+                ..
+            } => {
+                if let Some(row) = state.pending_collateral_withdrawals.get_mut(&vault_id) {
+                    if row.operation_id != operation_id {
+                        return Err(ReplayLogError::InconsistentLog(
+                            "collateral withdrawal hold identity changed".to_string(),
+                        ));
+                    }
+                    row.phase = crate::state::CollateralWithdrawalPhase::Held;
+                    row.last_error = Some(reason);
+                }
+            }
+            PendingPayoutEvent::CollateralWithdrawalAmbiguous {
+                vault_id,
+                operation_id,
+                reason,
+                ..
+            } => {
+                if let Some(row) = state.pending_collateral_withdrawals.get_mut(&vault_id) {
+                    if row.operation_id != operation_id {
+                        return Err(ReplayLogError::InconsistentLog(
+                            "collateral withdrawal ambiguity identity changed".to_string(),
+                        ));
+                    }
+                    row.phase = crate::state::CollateralWithdrawalPhase::Ambiguous;
+                    row.last_error = Some(reason);
+                }
+            }
+            PendingPayoutEvent::CollateralWithdrawalRepriced {
+                vault_id,
+                old_operation_id,
+                transfer,
+                ..
+            } => {
+                if transfer.vault_id != vault_id
+                    || transfer.operation_id == old_operation_id
+                    || !collateral_withdrawal_is_well_formed(&transfer)
+                    || !state
+                        .pending_collateral_withdrawals
+                        .get(&vault_id)
+                        .is_some_and(|row| {
+                            row.operation_id == old_operation_id
+                                && row.phase == crate::state::CollateralWithdrawalPhase::Dispatching
+                                && row.dispatch_attempts == 1
+                        })
+                {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "invalid first-attempt collateral withdrawal repricing".into(),
+                    ));
+                }
+                state
+                    .consumed_collateral_withdrawal_ids
+                    .insert(old_operation_id);
+                state.observe_op_nonce(transfer.operation_id);
+                state
+                    .pending_collateral_withdrawals
+                    .insert(vault_id, transfer);
+            }
+            PendingPayoutEvent::CollateralWithdrawalNoEffect {
+                vault_id,
+                operation_id,
+                reason,
+                ..
+            } => {
+                if let Some(row) = state.pending_collateral_withdrawals.get_mut(&vault_id) {
+                    if row.operation_id != operation_id
+                        || row.phase != crate::state::CollateralWithdrawalPhase::Dispatching
+                        || row.dispatch_attempts != 1
+                    {
+                        return Err(ReplayLogError::InconsistentLog(
+                            "invalid no-effect collateral withdrawal transition".into(),
+                        ));
+                    }
+                    row.phase = crate::state::CollateralWithdrawalPhase::NoEffect;
+                    row.last_error = Some(reason);
+                }
+            }
+            PendingPayoutEvent::CollateralWithdrawalSettled {
+                vault_id,
+                operation_id,
+                forgive_dust_debt,
+                ..
+            } => {
+                if state
+                    .pending_collateral_withdrawals
+                    .get(&vault_id)
+                    .is_some_and(|row| row.operation_id != operation_id)
+                {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "collateral withdrawal settlement identity changed".to_string(),
+                    ));
+                }
+                state.pending_collateral_withdrawals.remove(&vault_id);
+                state
+                    .consumed_collateral_withdrawal_ids
+                    .insert(operation_id);
+                if forgive_dust_debt {
+                    if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                        vault.borrowed_icusd_amount = ICUSD::new(0);
+                        vault.accrued_interest = ICUSD::new(0);
+                    }
+                    state.reindex_vault_cr(vault_id);
+                }
+            }
         }
     }
-    if events.peek().is_some_and(|entry| entry.after_legacy_event_count < legacy_event_count) {
+    if events
+        .peek()
+        .is_some_and(|entry| entry.after_legacy_event_count < legacy_event_count)
+    {
         return Err(ReplayLogError::InconsistentLog(
             "pending payout journal boundary is out of order".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn collateral_withdrawal_is_well_formed(transfer: &PendingCollateralWithdrawal) -> bool {
+    transfer.operation_id != 0
+        && transfer.operation_id == transfer.memo
+        && transfer.vault_id != 0
+        && transfer.owner != Principal::anonymous()
+        && transfer.ledger != Principal::anonymous()
+        && transfer.gross_amount_raw > 0
+        && transfer.net_amount_raw > 0
+        && transfer.net_amount_raw.checked_add(transfer.fee_raw) == Some(transfer.gross_amount_raw)
+        && transfer.created_at_time_ns
+            == crate::management::nonce_to_created_at_time(transfer.operation_id)
+}
+
+fn apply_treasury_payment_events_through<I>(
+    state: &mut State,
+    events: &mut std::iter::Peekable<I>,
+    legacy_event_count: u64,
+    last_boundary: &mut u64,
+) -> Result<(), ReplayLogError>
+where
+    I: Iterator<Item = TreasuryPaymentJournalEntry>,
+{
+    while events
+        .peek()
+        .is_some_and(|entry| entry.after_legacy_event_count <= legacy_event_count)
+    {
+        let entry = events
+            .next()
+            .expect("peeked treasury payment journal entry");
+        if entry.after_legacy_event_count == 0 || entry.after_legacy_event_count < *last_boundary {
+            return Err(ReplayLogError::InconsistentLog(
+                "treasury payment journal boundary is zero or out of order".into(),
+            ));
+        }
+        *last_boundary = entry.after_legacy_event_count;
+        match entry.event {
+            TreasuryPaymentEvent::Queued { payment, .. } => {
+                let operation_id = payment.operation_id;
+                if !treasury_payment_is_well_formed(&payment, operation_id) {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "treasury payment queue has an invalid pinned ledger identity".into(),
+                    ));
+                }
+                if state.pending_treasury_payments.contains_key(&operation_id) {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "duplicate treasury payment operation id {operation_id}"
+                    )));
+                }
+                state.observe_op_nonce(operation_id);
+                state
+                    .pending_treasury_payments
+                    .insert(operation_id, payment);
+            }
+            TreasuryPaymentEvent::TransferConfirmed {
+                operation_id,
+                block_index,
+                ..
+            } => {
+                let Some(payment) = state.pending_treasury_payments.get_mut(&operation_id) else {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "treasury payment {operation_id} confirmed without a queue record"
+                    )));
+                };
+                if payment.phase != TreasuryPaymentPhase::TransferPending {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "treasury payment {operation_id} confirmed from a non-pending phase"
+                    )));
+                }
+                payment.phase = TreasuryPaymentPhase::NotificationPending { block_index };
+            }
+            TreasuryPaymentEvent::TransferAttempted {
+                operation_id,
+                dispatch_attempts,
+                timestamp,
+            } => {
+                let Some(payment) = state.pending_treasury_payments.get_mut(&operation_id) else {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "treasury payment {operation_id} attempted without a queue record"
+                    )));
+                };
+                if payment.phase != TreasuryPaymentPhase::TransferPending
+                    || dispatch_attempts != payment.dispatch_attempts.saturating_add(1)
+                {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "treasury payment {operation_id} has an invalid dispatch-attempt transition"
+                    )));
+                }
+                payment.dispatch_attempts = dispatch_attempts;
+                payment.last_dispatch_at_ns = timestamp;
+            }
+            TreasuryPaymentEvent::DestinationPinned {
+                operation_id,
+                recipient,
+                ledger,
+                transfer_nonce,
+                ..
+            } => {
+                let Some(payment) = state.pending_treasury_payments.get_mut(&operation_id) else {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "treasury payment {operation_id} destination pinned without a queue record"
+                    )));
+                };
+                if payment.phase != TreasuryPaymentPhase::AwaitingDestination
+                    || recipient == Principal::anonymous()
+                    || ledger == Principal::anonymous()
+                    || (payment.ledger != Principal::anonymous() && payment.ledger != ledger)
+                    || payment.dispatch_attempts != 0
+                    || payment.last_dispatch_at_ns != 0
+                    || transfer_nonce == 0
+                {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "treasury payment {operation_id} has an invalid destination-pin transition"
+                    )));
+                }
+                payment.recipient.owner = recipient;
+                payment.ledger = ledger;
+                payment.transfer_nonce = transfer_nonce;
+                payment.memo = crate::management::nonce_to_memo(transfer_nonce).0.to_vec();
+                payment.created_at_time_ns =
+                    crate::management::nonce_to_created_at_time(transfer_nonce);
+                payment.phase = TreasuryPaymentPhase::TransferPending;
+                state.observe_op_nonce(transfer_nonce);
+            }
+            TreasuryPaymentEvent::TransferFailed {
+                operation_id,
+                reason,
+                ..
+            } => {
+                let Some(payment) = state.pending_treasury_payments.get_mut(&operation_id) else {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "treasury payment {operation_id} failed without a queue record"
+                    )));
+                };
+                if payment.phase != TreasuryPaymentPhase::TransferPending {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "treasury payment {operation_id} failed from an invalid phase"
+                    )));
+                }
+                let _ = reason;
+            }
+            TreasuryPaymentEvent::ReceiptReconciled {
+                operation_id,
+                block_index,
+                ..
+            } => {
+                let Some(payment) = state.pending_treasury_payments.get_mut(&operation_id) else {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "treasury payment {operation_id} reconciled without a queue record"
+                    )));
+                };
+                if !matches!(
+                    payment.phase,
+                    TreasuryPaymentPhase::Held { .. } | TreasuryPaymentPhase::TransferPending
+                ) {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "treasury payment {operation_id} reconciled from an invalid phase"
+                    )));
+                }
+                payment.phase = TreasuryPaymentPhase::NotificationPending { block_index };
+            }
+            TreasuryPaymentEvent::Held {
+                operation_id,
+                reason,
+                ..
+            } => {
+                let Some(payment) = state.pending_treasury_payments.get_mut(&operation_id) else {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "treasury payment {operation_id} held without a queue record"
+                    )));
+                };
+                payment.phase = TreasuryPaymentPhase::Held { reason };
+            }
+            TreasuryPaymentEvent::NotificationAcknowledged { operation_id, .. } => {
+                let Some(payment) = state.pending_treasury_payments.get(&operation_id) else {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "treasury payment {operation_id} acknowledged without a queue record"
+                    )));
+                };
+                if !matches!(
+                    &payment.phase,
+                    TreasuryPaymentPhase::NotificationPending { .. }
+                ) {
+                    return Err(ReplayLogError::InconsistentLog(format!(
+                        "treasury payment {operation_id} acknowledged before transfer confirmation"
+                    )));
+                }
+                state.pending_treasury_payments.remove(&operation_id);
+            }
+            TreasuryPaymentEvent::StabilityPoolInterestMintQueued { payment, .. } => {
+                let nonce = payment.operation_nonce;
+                if nonce == 0
+                    || payment.ledger == Principal::anonymous()
+                    || payment.pool == Principal::anonymous()
+                    || payment.amount_e8s == 0
+                    || payment.memo != crate::management::nonce_to_memo(nonce).0.to_vec()
+                    || payment.created_at_time_ns
+                        != crate::management::nonce_to_created_at_time(nonce)
+                    || payment.phase != crate::state::StabilityPoolInterestMintPhase::MintPending
+                    || state
+                        .pending_stability_pool_interest_mints
+                        .contains_key(&nonce)
+                {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "invalid or duplicate Stability Pool interest mint identity".into(),
+                    ));
+                }
+                state.observe_op_nonce(nonce);
+                state
+                    .pending_stability_pool_interest_mints
+                    .insert(nonce, payment);
+            }
+            TreasuryPaymentEvent::StabilityPoolInterestMintAttempted {
+                operation_nonce,
+                attempts,
+                timestamp,
+            } => {
+                let Some(payment) = state
+                    .pending_stability_pool_interest_mints
+                    .get_mut(&operation_nonce)
+                else {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "Stability Pool interest attempt without queued mint".into(),
+                    ));
+                };
+                if payment.phase != crate::state::StabilityPoolInterestMintPhase::MintPending
+                    || attempts != payment.attempts.saturating_add(1)
+                {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "invalid Stability Pool interest attempt transition".into(),
+                    ));
+                }
+                payment.attempts = attempts;
+                payment.last_attempt_at_ns = timestamp;
+            }
+            TreasuryPaymentEvent::StabilityPoolInterestMintConfirmed {
+                operation_nonce,
+                block_index,
+                ..
+            } => {
+                let Some(payment) = state
+                    .pending_stability_pool_interest_mints
+                    .get_mut(&operation_nonce)
+                else {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "Stability Pool interest confirmation without queued mint".into(),
+                    ));
+                };
+                if !matches!(
+                    &payment.phase,
+                    crate::state::StabilityPoolInterestMintPhase::MintPending
+                        | crate::state::StabilityPoolInterestMintPhase::Held { .. }
+                ) {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "invalid Stability Pool interest confirmation transition".into(),
+                    ));
+                }
+                payment.phase = crate::state::StabilityPoolInterestMintPhase::NotificationPending {
+                    mint_block: block_index,
+                };
+            }
+            TreasuryPaymentEvent::StabilityPoolInterestMintHeld {
+                operation_nonce,
+                reason,
+                ..
+            } => {
+                let Some(payment) = state
+                    .pending_stability_pool_interest_mints
+                    .get_mut(&operation_nonce)
+                else {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "held Stability Pool interest mint without queued row".into(),
+                    ));
+                };
+                payment.phase = crate::state::StabilityPoolInterestMintPhase::Held { reason };
+            }
+            TreasuryPaymentEvent::StabilityPoolInterestMintAcknowledged {
+                operation_nonce, ..
+            } => {
+                let Some(payment) = state
+                    .pending_stability_pool_interest_mints
+                    .get(&operation_nonce)
+                else {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "acknowledged Stability Pool interest mint without queued row".into(),
+                    ));
+                };
+                if !matches!(
+                    payment.phase,
+                    crate::state::StabilityPoolInterestMintPhase::NotificationPending { .. }
+                ) {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "Stability Pool interest acknowledged before mint confirmation".into(),
+                    ));
+                }
+                state
+                    .pending_stability_pool_interest_mints
+                    .remove(&operation_nonce);
+            }
+            TreasuryPaymentEvent::InterestShareHeld { share, .. } => {
+                if share.operation_nonce == 0
+                    || share.amount_e8s == 0
+                    || state
+                        .held_interest_distribution_shares
+                        .contains_key(&share.operation_nonce)
+                {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "held interest share has invalid or duplicate identity".into(),
+                    ));
+                }
+                state.observe_op_nonce(share.operation_nonce);
+                state
+                    .held_interest_distribution_shares
+                    .insert(share.operation_nonce, share);
+            }
+            TreasuryPaymentEvent::InterestShareReleasedToStabilityPool {
+                held_operation_nonce,
+                payment,
+                ..
+            } => {
+                let Some(held) = state
+                    .held_interest_distribution_shares
+                    .get(&held_operation_nonce)
+                else {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "released interest share has no held source row".into(),
+                    ));
+                };
+                if payment.operation_nonce == 0
+                    || payment.amount_e8s != held.amount_e8s
+                    || payment.collateral_type != held.collateral_type
+                    || payment.pool == Principal::anonymous()
+                    || payment.ledger == Principal::anonymous()
+                    || payment.phase != crate::state::StabilityPoolInterestMintPhase::MintPending
+                    || payment.memo
+                        != crate::management::nonce_to_memo(payment.operation_nonce)
+                            .0
+                            .to_vec()
+                    || payment.created_at_time_ns
+                        != crate::management::nonce_to_created_at_time(payment.operation_nonce)
+                    || state
+                        .pending_stability_pool_interest_mints
+                        .contains_key(&payment.operation_nonce)
+                    || state
+                        .released_interest_distribution_shares
+                        .contains_key(&held_operation_nonce)
+                {
+                    return Err(ReplayLogError::InconsistentLog(
+                        "released interest share changed its pinned amount or identity".into(),
+                    ));
+                }
+                state
+                    .held_interest_distribution_shares
+                    .remove(&held_operation_nonce);
+                state.observe_op_nonce(payment.operation_nonce);
+                state
+                    .released_interest_distribution_shares
+                    .insert(held_operation_nonce, payment.operation_nonce);
+                state
+                    .pending_stability_pool_interest_mints
+                    .insert(payment.operation_nonce, payment);
+            }
+        }
+    }
+    if events
+        .peek()
+        .is_some_and(|entry| entry.after_legacy_event_count < legacy_event_count)
+    {
+        return Err(ReplayLogError::InconsistentLog(
+            "treasury payment journal boundary is out of order".into(),
         ));
     }
     Ok(())
@@ -2537,9 +3458,15 @@ pub fn record_pending_payout_queued(
                 || state.pending_margin_transfers.contains_key(&operation_id)
         }
     };
-    assert!(!duplicate, "refusing to overwrite pending payout operation id {operation_id}");
+    assert!(
+        !duplicate,
+        "refusing to overwrite pending payout operation id {operation_id}"
+    );
     crate::storage::record_pending_payout_event(&PendingPayoutEvent::Queued {
-        operation_id, kind, transfer, timestamp: now(),
+        operation_id,
+        kind,
+        transfer,
+        timestamp: now(),
     });
     state.observe_op_nonce(transfer.op_nonce);
     match kind {
@@ -2565,7 +3492,11 @@ pub fn record_pending_payout_held(
     transfer.held_for_manual_retry = true;
     transfer.reconciliation_required = reconciliation_required;
     crate::storage::record_pending_payout_event(&PendingPayoutEvent::Held {
-        operation_id, kind, retry_count: transfer.retry_count, reconciliation_required, timestamp: now(),
+        operation_id,
+        kind,
+        retry_count: transfer.retry_count,
+        reconciliation_required,
+        timestamp: now(),
     });
 }
 
@@ -2584,7 +3515,11 @@ pub fn record_pending_payout_rearmed(
         return;
     }
     transfer.held_for_manual_retry = false;
-    crate::storage::record_pending_payout_event(&PendingPayoutEvent::Rearmed { operation_id, kind, timestamp: now() });
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::Rearmed {
+        operation_id,
+        kind,
+        timestamp: now(),
+    });
 }
 
 pub fn record_pending_payout_settled(
@@ -2595,7 +3530,11 @@ pub fn record_pending_payout_settled(
     block_index: u64,
 ) {
     crate::storage::record_pending_payout_event(&PendingPayoutEvent::Settled {
-        operation_id, kind, vault_id, block_index, timestamp: now(),
+        operation_id,
+        kind,
+        vault_id,
+        block_index,
+        timestamp: now(),
     });
     match kind {
         PendingPayoutKind::Margin => {
@@ -2605,6 +3544,782 @@ pub fn record_pending_payout_settled(
             state.pending_excess_transfers.remove(&operation_id);
         }
     }
+}
+
+pub fn record_collateral_withdrawal_queued(
+    state: &mut State,
+    transfer: PendingCollateralWithdrawal,
+) {
+    assert!(
+        collateral_withdrawal_is_well_formed(&transfer),
+        "collateral withdrawal must be pinned to one exact nonzero transfer tuple"
+    );
+    assert!(
+        !state
+            .pending_collateral_withdrawals
+            .contains_key(&transfer.vault_id)
+            && !state
+                .consumed_collateral_withdrawal_ids
+                .contains(&transfer.operation_id),
+        "vault already has an unresolved collateral withdrawal"
+    );
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::CollateralWithdrawalQueued {
+        transfer: transfer.clone(),
+        timestamp: now(),
+    });
+    state.observe_op_nonce(transfer.operation_id);
+    state
+        .pending_collateral_withdrawals
+        .insert(transfer.vault_id, transfer);
+}
+
+pub fn record_collateral_withdrawal_dispatching(
+    state: &mut State,
+    vault_id: u64,
+    operation_id: u128,
+) -> Option<PendingCollateralWithdrawal> {
+    let row = state.pending_collateral_withdrawals.get_mut(&vault_id)?;
+    if row.operation_id != operation_id
+        || row.dispatch_attempts >= 60
+        || row.phase == crate::state::CollateralWithdrawalPhase::Held
+    {
+        return None;
+    }
+    row.dispatch_attempts = row.dispatch_attempts.saturating_add(1);
+    row.phase = crate::state::CollateralWithdrawalPhase::Dispatching;
+    row.last_error = None;
+    let copy = row.clone();
+    crate::storage::record_pending_payout_event(
+        &PendingPayoutEvent::CollateralWithdrawalDispatching {
+            vault_id,
+            operation_id,
+            attempts: row.dispatch_attempts,
+            timestamp: now(),
+        },
+    );
+    Some(copy)
+}
+
+pub fn record_collateral_withdrawal_held(
+    state: &mut State,
+    vault_id: u64,
+    operation_id: u128,
+    reason: String,
+) {
+    let Some(row) = state.pending_collateral_withdrawals.get_mut(&vault_id) else {
+        return;
+    };
+    if row.operation_id != operation_id {
+        return;
+    }
+    row.phase = crate::state::CollateralWithdrawalPhase::Held;
+    row.last_error = Some(reason.clone());
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::CollateralWithdrawalHeld {
+        vault_id,
+        operation_id,
+        reason,
+        timestamp: now(),
+    });
+}
+
+pub fn record_collateral_withdrawal_ambiguous(
+    state: &mut State,
+    vault_id: u64,
+    operation_id: u128,
+    reason: String,
+) {
+    let Some(row) = state.pending_collateral_withdrawals.get_mut(&vault_id) else {
+        return;
+    };
+    if row.operation_id != operation_id {
+        return;
+    }
+    row.phase = crate::state::CollateralWithdrawalPhase::Ambiguous;
+    row.last_error = Some(reason.clone());
+    crate::storage::record_pending_payout_event(
+        &PendingPayoutEvent::CollateralWithdrawalAmbiguous {
+            vault_id,
+            operation_id,
+            reason,
+            timestamp: now(),
+        },
+    );
+}
+
+pub fn record_collateral_withdrawal_repriced(
+    state: &mut State,
+    vault_id: u64,
+    old_operation_id: u128,
+    new_fee_raw: u64,
+) -> Option<PendingCollateralWithdrawal> {
+    record_collateral_withdrawal_repriced_at(state, vault_id, old_operation_id, new_fee_raw, now())
+}
+
+pub fn record_collateral_withdrawal_repriced_at(
+    state: &mut State,
+    vault_id: u64,
+    old_operation_id: u128,
+    new_fee_raw: u64,
+    timestamp: u64,
+) -> Option<PendingCollateralWithdrawal> {
+    let old = state.pending_collateral_withdrawals.get(&vault_id)?.clone();
+    if old.operation_id != old_operation_id
+        || old.phase != crate::state::CollateralWithdrawalPhase::Dispatching
+        || old.dispatch_attempts != 1
+        || new_fee_raw >= old.gross_amount_raw
+    {
+        return None;
+    }
+    let new_operation_id = state.next_op_nonce_at(timestamp);
+    let transfer = PendingCollateralWithdrawal {
+        operation_id: new_operation_id,
+        net_amount_raw: old.gross_amount_raw - new_fee_raw,
+        fee_raw: new_fee_raw,
+        memo: new_operation_id,
+        created_at_time_ns: crate::management::nonce_to_created_at_time(new_operation_id),
+        phase: crate::state::CollateralWithdrawalPhase::Reserved,
+        dispatch_attempts: 0,
+        last_error: Some(format!(
+            "first attempt proved no effect; re-pinned fee to {new_fee_raw}"
+        )),
+        ..old.clone()
+    };
+    crate::storage::record_pending_payout_event(
+        &PendingPayoutEvent::CollateralWithdrawalRepriced {
+            vault_id,
+            old_operation_id,
+            transfer: transfer.clone(),
+            timestamp,
+        },
+    );
+    state
+        .consumed_collateral_withdrawal_ids
+        .insert(old_operation_id);
+    state.observe_op_nonce(new_operation_id);
+    state
+        .pending_collateral_withdrawals
+        .insert(vault_id, transfer.clone());
+    Some(transfer)
+}
+
+pub fn record_collateral_withdrawal_no_effect(
+    state: &mut State,
+    vault_id: u64,
+    operation_id: u128,
+    reason: String,
+) -> bool {
+    let Some(row) = state.pending_collateral_withdrawals.get_mut(&vault_id) else {
+        return false;
+    };
+    if row.operation_id != operation_id
+        || row.phase != crate::state::CollateralWithdrawalPhase::Dispatching
+        || row.dispatch_attempts != 1
+    {
+        return false;
+    }
+    row.phase = crate::state::CollateralWithdrawalPhase::NoEffect;
+    row.last_error = Some(reason.clone());
+    crate::storage::record_pending_payout_event(
+        &PendingPayoutEvent::CollateralWithdrawalNoEffect {
+            vault_id,
+            operation_id,
+            reason,
+            timestamp: now(),
+        },
+    );
+    true
+}
+
+pub fn record_collateral_withdrawal_settled(
+    state: &mut State,
+    vault_id: u64,
+    operation_id: u128,
+    block_index: u64,
+) -> bool {
+    let Some(row) = state.pending_collateral_withdrawals.get(&vault_id).cloned() else {
+        return false;
+    };
+    if row.operation_id != operation_id {
+        return false;
+    }
+    let Some(vault) = state.vault_id_to_vaults.get(&vault_id) else {
+        record_collateral_withdrawal_held(
+            state,
+            vault_id,
+            operation_id,
+            "exact receipt verified but source vault is absent; operator reconciliation required"
+                .into(),
+        );
+        return false;
+    };
+    if vault.owner != row.owner || vault.collateral_amount < row.gross_amount_raw {
+        record_collateral_withdrawal_held(
+            state,
+            vault_id,
+            operation_id,
+            "exact receipt verified but vault ownership/collateral no longer matches reservation"
+                .into(),
+        );
+        return false;
+    }
+    // Remove the fence in the same synchronous state transition that applies
+    // the verified debit/close; a trap rolls the entire message back.
+    state.pending_collateral_withdrawals.remove(&vault_id);
+    if row.forgive_dust_debt {
+        if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+            vault.borrowed_icusd_amount = ICUSD::new(0);
+            vault.accrued_interest = ICUSD::new(0);
+        }
+        state.reindex_vault_cr(vault_id);
+    }
+    match row.action {
+        crate::state::CollateralWithdrawalAction::Partial => {
+            record_partial_collateral_withdrawn(
+                state,
+                vault_id,
+                ICP::new(row.gross_amount_raw),
+                block_index,
+            );
+        }
+        crate::state::CollateralWithdrawalAction::Full => {
+            if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                vault.collateral_amount -= row.gross_amount_raw;
+            }
+            state.reindex_vault_cr(vault_id);
+            record_collateral_withdrawn(
+                state,
+                vault_id,
+                ICP::new(row.gross_amount_raw),
+                block_index,
+            );
+        }
+        crate::state::CollateralWithdrawalAction::Close => {
+            record_withdraw_and_close_vault(
+                state,
+                vault_id,
+                ICP::new(row.gross_amount_raw),
+                Some(block_index),
+            );
+            // A repayment V2 close may be completed by the standalone
+            // collateral-withdrawal retry/reconcile path after the original
+            // repayment reply is lost. Tie that receipt to its exact repay
+            // block before compacting the V2 request result.
+            if let Some(repay_block_index) = row.repay_block_index {
+                let repayment_request = state
+                    .repayment_v2_active
+                    .get(&row.owner)
+                    .filter(|repayment| {
+                        repayment.vault_id == vault_id
+                            && repayment.close_after_repay
+                            && repayment.repay_block_index == Some(repay_block_index)
+                    })
+                    .map(|repayment| repayment.request_id);
+                if let Some(request_id) = repayment_request {
+                    if let Some(repayment) = state.repayment_v2_active.get_mut(&row.owner) {
+                        repayment.phase = crate::RepaymentV2Phase::Complete;
+                        repayment.collateral_return_block_index = Some(block_index);
+                        repayment.last_error = None;
+                    }
+                    // This callback also commits the vault close. If the V2
+                    // terminal snapshot cannot be compacted, trap the whole
+                    // message so the close and its journal transition roll
+                    // back together instead of leaving an unqueryable active
+                    // request after collateral has moved.
+                    crate::state::finish_repayment_v2(state, row.owner, request_id)
+                        .expect("verified repayment close must terminalize its exact request");
+                }
+            }
+        }
+    }
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::CollateralWithdrawalSettled {
+        vault_id,
+        operation_id,
+        block_index,
+        forgive_dust_debt: row.forgive_dust_debt,
+        timestamp: now(),
+    });
+    state
+        .consumed_collateral_withdrawal_ids
+        .insert(operation_id);
+    true
+}
+
+pub fn record_treasury_payment_queued(state: &mut State, payment: PendingTreasuryPayment) {
+    record_treasury_payment_queued_at(state, payment, now());
+}
+
+pub fn record_treasury_payment_queued_at(
+    state: &mut State,
+    payment: PendingTreasuryPayment,
+    timestamp: u64,
+) {
+    assert!(
+        treasury_payment_is_well_formed(&payment, payment.operation_id),
+        "treasury payment must be queued with one exact nonzero ledger identity"
+    );
+    assert!(
+        !state
+            .pending_treasury_payments
+            .contains_key(&payment.operation_id),
+        "refusing to overwrite treasury payment operation {}",
+        payment.operation_id
+    );
+    crate::storage::record_treasury_payment_event(&TreasuryPaymentEvent::Queued {
+        payment: payment.clone(),
+        timestamp,
+    });
+    state.observe_op_nonce(payment.operation_id);
+    state
+        .pending_treasury_payments
+        .insert(payment.operation_id, payment);
+}
+
+pub fn record_sp_interest_mint_queued(
+    state: &mut State,
+    payment: crate::state::PendingStabilityPoolInterestMint,
+) {
+    record_sp_interest_mint_queued_at(state, payment, now());
+}
+
+pub fn record_sp_interest_mint_queued_at(
+    state: &mut State,
+    payment: crate::state::PendingStabilityPoolInterestMint,
+    timestamp: u64,
+) {
+    assert!(payment.operation_nonce != 0 && payment.amount_e8s > 0);
+    assert_eq!(
+        payment.phase,
+        crate::state::StabilityPoolInterestMintPhase::MintPending
+    );
+    assert!(!state
+        .pending_stability_pool_interest_mints
+        .contains_key(&payment.operation_nonce));
+    crate::storage::record_treasury_payment_event(
+        &TreasuryPaymentEvent::StabilityPoolInterestMintQueued {
+            payment: payment.clone(),
+            timestamp,
+        },
+    );
+    state.observe_op_nonce(payment.operation_nonce);
+    state
+        .pending_stability_pool_interest_mints
+        .insert(payment.operation_nonce, payment);
+}
+
+pub fn record_interest_distribution_share_held(
+    state: &mut State,
+    share: crate::state::HeldInterestDistributionShare,
+) {
+    record_interest_distribution_share_held_at(state, share, now());
+}
+
+pub fn record_interest_distribution_share_held_at(
+    state: &mut State,
+    share: crate::state::HeldInterestDistributionShare,
+    timestamp: u64,
+) {
+    assert!(share.operation_nonce != 0 && share.amount_e8s > 0);
+    assert!(!state
+        .held_interest_distribution_shares
+        .contains_key(&share.operation_nonce));
+    crate::storage::record_treasury_payment_event(&TreasuryPaymentEvent::InterestShareHeld {
+        share: share.clone(),
+        timestamp,
+    });
+    state.observe_op_nonce(share.operation_nonce);
+    state
+        .held_interest_distribution_shares
+        .insert(share.operation_nonce, share);
+}
+
+pub fn record_interest_distribution_share_released_to_sp(
+    state: &mut State,
+    held_operation_nonce: u128,
+    pool: Principal,
+    ledger: Principal,
+    now_ns: u64,
+) -> Result<u128, String> {
+    let held = state
+        .held_interest_distribution_shares
+        .get(&held_operation_nonce)
+        .cloned()
+        .ok_or_else(|| format!("held interest share {held_operation_nonce} not found"))?;
+    if held.destination != Some(crate::state::InterestDestination::StabilityPool) {
+        return Err(
+            "held share is not pinned to the Stability Pool; reviewed allocation required".into(),
+        );
+    }
+    if pool == Principal::anonymous() || ledger == Principal::anonymous() {
+        return Err("Stability Pool and icUSD ledger must be configured".into());
+    }
+    if state
+        .released_interest_distribution_shares
+        .contains_key(&held_operation_nonce)
+    {
+        return Err("held share already has a pinned Stability Pool mint".into());
+    }
+    // Held rows have never been dispatched, but their creation-time nonce may
+    // be outside the ledger's safe retry window. Allocate a fresh identity now.
+    let operation_nonce = state.next_op_nonce_at(now_ns);
+    let payment = crate::state::PendingStabilityPoolInterestMint {
+        operation_nonce,
+        ledger,
+        pool,
+        amount_e8s: held.amount_e8s,
+        collateral_type: held.collateral_type,
+        memo: crate::management::nonce_to_memo(operation_nonce).0.to_vec(),
+        created_at_time_ns: crate::management::nonce_to_created_at_time(operation_nonce),
+        phase: crate::state::StabilityPoolInterestMintPhase::MintPending,
+        attempts: 0,
+        last_attempt_at_ns: 0,
+    };
+    crate::storage::record_treasury_payment_event(
+        &TreasuryPaymentEvent::InterestShareReleasedToStabilityPool {
+            held_operation_nonce,
+            payment: payment.clone(),
+            timestamp: now_ns,
+        },
+    );
+    state
+        .held_interest_distribution_shares
+        .remove(&held_operation_nonce);
+    state.observe_op_nonce(operation_nonce);
+    state
+        .released_interest_distribution_shares
+        .insert(held_operation_nonce, operation_nonce);
+    state
+        .pending_stability_pool_interest_mints
+        .insert(operation_nonce, payment);
+    Ok(operation_nonce)
+}
+
+pub fn record_sp_interest_mint_attempted(
+    state: &mut State,
+    operation_nonce: u128,
+) -> Result<u8, String> {
+    let payment = state
+        .pending_stability_pool_interest_mints
+        .get(&operation_nonce)
+        .ok_or_else(|| format!("SP interest mint {operation_nonce} is missing"))?;
+    if !matches!(
+        &payment.phase,
+        crate::state::StabilityPoolInterestMintPhase::MintPending
+            | crate::state::StabilityPoolInterestMintPhase::Held { .. }
+    ) {
+        return Err(format!(
+            "SP interest mint {operation_nonce} is not dispatchable"
+        ));
+    }
+    let attempts = payment.attempts.saturating_add(1);
+    let timestamp = now();
+    crate::storage::record_treasury_payment_event(
+        &TreasuryPaymentEvent::StabilityPoolInterestMintAttempted {
+            operation_nonce,
+            attempts,
+            timestamp,
+        },
+    );
+    let payment = state
+        .pending_stability_pool_interest_mints
+        .get_mut(&operation_nonce)
+        .expect("checked SP interest mint row");
+    payment.attempts = attempts;
+    payment.last_attempt_at_ns = timestamp;
+    Ok(attempts)
+}
+
+pub fn record_sp_interest_mint_confirmed(
+    state: &mut State,
+    operation_nonce: u128,
+    block_index: u64,
+) -> Result<(), String> {
+    let payment = state
+        .pending_stability_pool_interest_mints
+        .get(&operation_nonce)
+        .ok_or_else(|| format!("SP interest mint {operation_nonce} is missing"))?;
+    if !matches!(
+        &payment.phase,
+        crate::state::StabilityPoolInterestMintPhase::MintPending
+            | crate::state::StabilityPoolInterestMintPhase::Held { .. }
+    ) {
+        return Err(format!("SP interest mint {operation_nonce} is not pending"));
+    }
+    crate::storage::record_treasury_payment_event(
+        &TreasuryPaymentEvent::StabilityPoolInterestMintConfirmed {
+            operation_nonce,
+            block_index,
+            timestamp: now(),
+        },
+    );
+    state
+        .pending_stability_pool_interest_mints
+        .get_mut(&operation_nonce)
+        .expect("checked SP interest mint row")
+        .phase = crate::state::StabilityPoolInterestMintPhase::NotificationPending {
+        mint_block: block_index,
+    };
+    Ok(())
+}
+
+pub fn record_sp_interest_mint_held(
+    state: &mut State,
+    operation_nonce: u128,
+    reason: String,
+) -> Result<(), String> {
+    if !state
+        .pending_stability_pool_interest_mints
+        .contains_key(&operation_nonce)
+    {
+        return Err(format!("SP interest mint {operation_nonce} is missing"));
+    }
+    crate::storage::record_treasury_payment_event(
+        &TreasuryPaymentEvent::StabilityPoolInterestMintHeld {
+            operation_nonce,
+            reason: reason.clone(),
+            timestamp: now(),
+        },
+    );
+    state
+        .pending_stability_pool_interest_mints
+        .get_mut(&operation_nonce)
+        .expect("checked SP interest mint row")
+        .phase = crate::state::StabilityPoolInterestMintPhase::Held { reason };
+    Ok(())
+}
+
+pub fn record_sp_interest_mint_acknowledged(
+    state: &mut State,
+    operation_nonce: u128,
+) -> Result<(), String> {
+    let payment = state
+        .pending_stability_pool_interest_mints
+        .get(&operation_nonce)
+        .ok_or_else(|| format!("SP interest mint {operation_nonce} is missing"))?;
+    let mint_block = match &payment.phase {
+        crate::state::StabilityPoolInterestMintPhase::NotificationPending { mint_block } => {
+            *mint_block
+        }
+        _ => {
+            return Err(format!(
+                "SP interest mint {operation_nonce} is not awaiting notification"
+            ));
+        }
+    };
+    crate::storage::record_treasury_payment_event(
+        &TreasuryPaymentEvent::StabilityPoolInterestMintAcknowledged {
+            operation_nonce,
+            timestamp: now(),
+        },
+    );
+    state
+        .pending_stability_pool_interest_mints
+        .remove(&operation_nonce);
+    state
+        .pending_stability_pool_interest_notifications
+        .remove(&mint_block);
+    Ok(())
+}
+
+pub fn record_treasury_payment_transfer_confirmed(
+    state: &mut State,
+    operation_id: u128,
+    block_index: u64,
+) -> Result<(), String> {
+    let payment = state
+        .pending_treasury_payments
+        .get(&operation_id)
+        .ok_or_else(|| format!("treasury payment {operation_id} is missing"))?;
+    if payment.phase != TreasuryPaymentPhase::TransferPending {
+        return Err(format!(
+            "treasury payment {operation_id} is not awaiting source transfer"
+        ));
+    }
+    crate::storage::record_treasury_payment_event(&TreasuryPaymentEvent::TransferConfirmed {
+        operation_id,
+        block_index,
+        timestamp: now(),
+    });
+    state
+        .pending_treasury_payments
+        .get_mut(&operation_id)
+        .expect("checked treasury payment row")
+        .phase = TreasuryPaymentPhase::NotificationPending { block_index };
+    Ok(())
+}
+
+pub fn record_treasury_payment_attempted(
+    state: &mut State,
+    operation_id: u128,
+    timestamp: u64,
+) -> Result<u8, String> {
+    let payment = state
+        .pending_treasury_payments
+        .get(&operation_id)
+        .ok_or_else(|| format!("treasury payment {operation_id} is missing"))?;
+    if payment.phase != TreasuryPaymentPhase::TransferPending {
+        return Err(format!(
+            "treasury payment {operation_id} is not dispatchable"
+        ));
+    }
+    let dispatch_attempts = payment
+        .dispatch_attempts
+        .checked_add(1)
+        .ok_or_else(|| format!("treasury payment {operation_id} attempt counter overflow"))?;
+    crate::storage::record_treasury_payment_event(&TreasuryPaymentEvent::TransferAttempted {
+        operation_id,
+        dispatch_attempts,
+        timestamp,
+    });
+    let payment = state
+        .pending_treasury_payments
+        .get_mut(&operation_id)
+        .expect("checked treasury payment row");
+    payment.dispatch_attempts = dispatch_attempts;
+    payment.last_dispatch_at_ns = timestamp;
+    Ok(dispatch_attempts)
+}
+
+pub fn record_treasury_payment_destination_pinned(
+    state: &mut State,
+    operation_id: u128,
+    recipient: Principal,
+    ledger: Principal,
+) -> Result<(), String> {
+    let payment = state
+        .pending_treasury_payments
+        .get(&operation_id)
+        .ok_or_else(|| format!("treasury payment {operation_id} is missing"))?;
+    if payment.phase != TreasuryPaymentPhase::AwaitingDestination
+        || recipient == Principal::anonymous()
+        || ledger == Principal::anonymous()
+        || (payment.ledger != Principal::anonymous() && payment.ledger != ledger)
+        || payment.dispatch_attempts != 0
+        || payment.last_dispatch_at_ns != 0
+    {
+        return Err(format!(
+            "treasury payment {operation_id} cannot pin destination"
+        ));
+    }
+    let transfer_nonce = state.next_op_nonce();
+    crate::storage::record_treasury_payment_event(&TreasuryPaymentEvent::DestinationPinned {
+        operation_id,
+        recipient,
+        ledger,
+        transfer_nonce,
+        timestamp: now(),
+    });
+    let payment = state
+        .pending_treasury_payments
+        .get_mut(&operation_id)
+        .expect("checked treasury payment row");
+    payment.recipient.owner = recipient;
+    payment.ledger = ledger;
+    payment.transfer_nonce = transfer_nonce;
+    payment.memo = crate::management::nonce_to_memo(transfer_nonce).0.to_vec();
+    payment.created_at_time_ns = crate::management::nonce_to_created_at_time(transfer_nonce);
+    payment.phase = TreasuryPaymentPhase::TransferPending;
+    Ok(())
+}
+
+pub fn record_treasury_payment_transfer_failed(
+    state: &mut State,
+    operation_id: u128,
+    reason: String,
+) -> Result<(), String> {
+    let payment = state
+        .pending_treasury_payments
+        .get(&operation_id)
+        .ok_or_else(|| format!("treasury payment {operation_id} is missing"))?;
+    if payment.phase != TreasuryPaymentPhase::TransferPending {
+        return Err(format!(
+            "treasury payment {operation_id} is not transfer-pending"
+        ));
+    }
+    crate::storage::record_treasury_payment_event(&TreasuryPaymentEvent::TransferFailed {
+        operation_id,
+        reason,
+        timestamp: now(),
+    });
+    Ok(())
+}
+
+pub fn record_treasury_payment_receipt_reconciled(
+    state: &mut State,
+    operation_id: u128,
+    block_index: u64,
+) -> Result<(), String> {
+    let payment = state
+        .pending_treasury_payments
+        .get(&operation_id)
+        .ok_or_else(|| format!("treasury payment {operation_id} is missing"))?;
+    if !matches!(
+        payment.phase,
+        TreasuryPaymentPhase::Held { .. } | TreasuryPaymentPhase::TransferPending
+    ) {
+        return Err(format!(
+            "treasury payment {operation_id} cannot be reconciled"
+        ));
+    }
+    crate::storage::record_treasury_payment_event(&TreasuryPaymentEvent::ReceiptReconciled {
+        operation_id,
+        block_index,
+        timestamp: now(),
+    });
+    state
+        .pending_treasury_payments
+        .get_mut(&operation_id)
+        .expect("checked treasury payment row")
+        .phase = TreasuryPaymentPhase::NotificationPending { block_index };
+    Ok(())
+}
+
+pub fn record_treasury_payment_held(
+    state: &mut State,
+    operation_id: u128,
+    reason: String,
+) -> Result<(), String> {
+    if !state.pending_treasury_payments.contains_key(&operation_id) {
+        return Err(format!("treasury payment {operation_id} is missing"));
+    }
+    crate::storage::record_treasury_payment_event(&TreasuryPaymentEvent::Held {
+        operation_id,
+        reason: reason.clone(),
+        timestamp: now(),
+    });
+    state
+        .pending_treasury_payments
+        .get_mut(&operation_id)
+        .expect("checked treasury payment row")
+        .phase = TreasuryPaymentPhase::Held { reason };
+    Ok(())
+}
+
+pub fn record_treasury_payment_notification_acknowledged(
+    state: &mut State,
+    operation_id: u128,
+    deposit_id: u64,
+) -> Result<(), String> {
+    let payment = state
+        .pending_treasury_payments
+        .get(&operation_id)
+        .ok_or_else(|| format!("treasury payment {operation_id} is missing"))?;
+    if !matches!(
+        &payment.phase,
+        TreasuryPaymentPhase::NotificationPending { .. }
+    ) {
+        return Err(format!(
+            "treasury payment {operation_id} is not awaiting deposit notification"
+        ));
+    }
+    crate::storage::record_treasury_payment_event(
+        &TreasuryPaymentEvent::NotificationAcknowledged {
+            operation_id,
+            deposit_id,
+            timestamp: now(),
+        },
+    );
+    state.pending_treasury_payments.remove(&operation_id);
+    Ok(())
 }
 
 // ─── Wave-8e LIQ-005: deficit-account event recorders ───
@@ -2681,6 +4396,7 @@ pub fn record_set_deficit_readonly_threshold_e8s(state: &mut State, threshold_e8
     record_event(&Event::SetDeficitReadonlyThresholdE8s {
         threshold_e8s,
         timestamp: now(),
+        clear_latched_threshold_e8s: None,
     });
 }
 
@@ -2765,20 +4481,22 @@ pub fn record_bot_claim_reconciliation_needed(
 pub fn record_borrow_from_vault(
     state: &mut State,
     vault_id: u64,
+    borrower: Principal,
     borrowed_amount: ICUSD,
     fee_amount: ICUSD,
     block_index: u64,
 ) {
+    let timestamp = now();
     record_event(&Event::BorrowFromVault {
         vault_id,
         block_index,
         fee_amount,
         borrowed_amount,
-        caller: Some(ic_cdk::caller()),
-        timestamp: Some(now()),
+        caller: Some(borrower),
+        timestamp: Some(timestamp),
     });
-    state.borrow_from_vault(vault_id, borrowed_amount);
-    // Fee is now minted to treasury in the async caller — no longer credited to liquidity pool.
+    state.borrow_from_vault(vault_id, borrowed_amount, Some(timestamp));
+    // The fee obligation is queued atomically with debt settlement by the caller.
 }
 
 /// Record a repayment event and update vault state.
@@ -2806,11 +4524,21 @@ pub fn record_add_margin_to_vault(
     margin_added: ICP,
     block_index: u64,
 ) {
+    record_add_margin_to_vault_for(state, vault_id, margin_added, block_index, ic_cdk::caller());
+}
+
+pub fn record_add_margin_to_vault_for(
+    state: &mut State,
+    vault_id: u64,
+    margin_added: ICP,
+    block_index: u64,
+    caller: Principal,
+) {
     record_event(&Event::AddMarginToVault {
         vault_id,
         margin_added,
         block_index,
-        caller: Some(ic_cdk::caller()),
+        caller: Some(caller),
         timestamp: Some(now()),
     });
     state.add_margin_to_vault(vault_id, margin_added);
@@ -2828,6 +4556,11 @@ pub struct RedemptionOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RedemptionRecordError {
     PayoutUnrepresentable,
+    PayoutAlreadyPending,
+    VaultIngressPending,
+    PayoutFeeConsumesGross,
+    PayoutConsumesDebtWithoutCollateral,
+    IdentityBackfillPending,
     MinimumNotMet {
         minimum_net_raw: u64,
         actual_net_raw: u64,
@@ -2904,6 +4637,33 @@ fn record_redemption_on_vault_run_with(
     timestamp: impl FnOnce() -> u64,
     mut persist_event: impl FnMut(&Event),
 ) -> Result<RedemptionOutcome, RedemptionRecordError> {
+    if allowed_vault_ids
+        .iter()
+        .any(|vault_id| state.pending_collateral_withdrawals.contains_key(vault_id))
+    {
+        return Err(RedemptionRecordError::PayoutAlreadyPending);
+    }
+    if allowed_vault_ids
+        .iter()
+        .any(|vault_id| state.vault_has_pending_inbound_margin(*vault_id))
+    {
+        return Err(RedemptionRecordError::VaultIngressPending);
+    }
+    if !state.redemption_tombstone_backfill_complete {
+        return Err(RedemptionRecordError::IdentityBackfillPending);
+    }
+    // The icUSD burn block is the stable identity for this legacy queue. A
+    // duplicate must fail before applying vault mutations or replacing the
+    // existing payout claim.
+    if state
+        .consumed_redemption_burn_blocks
+        .contains(&icusd_block_index)
+        || state
+            .pending_redemption_transfer
+            .contains_key(&icusd_block_index)
+    {
+        return Err(RedemptionRecordError::PayoutAlreadyPending);
+    }
     // Fee is already deducted from icusd_amount before calling redeem_on_vaults,
     // so vault owners effectively keep the fee (less collateral seized for their debt).
     // The fee portion of icUSD stays in the protocol canister (burned).
@@ -2938,24 +4698,36 @@ fn record_redemption_on_vault_run_with(
             (p, c.decimals)
         })
         .unwrap_or((ct_price.0, 8));
+    let (payout_ledger, payout_fee_raw) = state
+        .get_collateral_config(&redeem_ct)
+        .map(|config| (config.ledger_canister_id, config.ledger_fee))
+        .unwrap_or((state.icp_ledger_principal, state.icp_ledger_fee.to_u64()));
 
     // Preflight the exact selected-ID execution without mutating state. This
     // checked total is required before any debt, collateral, fee, event, or
     // pending-transfer mutation so an unrepresentable payout can be refunded.
-    let simulated = state.simulate_redemption_for_vault_ids(
-        icusd_amount,
-        ct_price,
-        &redeem_ct,
-        allowed_vault_ids,
-    );
+    let simulated = state
+        .try_simulate_redemption_for_vault_ids(
+            icusd_amount,
+            ct_price,
+            &redeem_ct,
+            allowed_vault_ids,
+        )
+        .ok_or(RedemptionRecordError::PayoutUnrepresentable)?;
     let payout_collateral_raw = total_actual_collateral_seized(&simulated)
         .ok_or(RedemptionRecordError::PayoutUnrepresentable)?;
+    let simulated_consumed_raw: u64 = simulated
+        .iter()
+        .map(|redemption| redemption.icusd_redeemed_e8s)
+        .sum();
+    if simulated_consumed_raw > 0 && payout_collateral_raw == 0 {
+        return Err(RedemptionRecordError::PayoutConsumesDebtWithoutCollateral);
+    }
+    if payout_collateral_raw > 0 && payout_collateral_raw <= payout_fee_raw {
+        return Err(RedemptionRecordError::PayoutFeeConsumesGross);
+    }
     if let Some(minimum_net_raw) = min_net_collateral_raw {
-        let ledger_fee = state
-            .get_collateral_config(&redeem_ct)
-            .map(|config| config.ledger_fee)
-            .unwrap_or(0);
-        let actual_net_raw = payout_collateral_raw.saturating_sub(ledger_fee);
+        let actual_net_raw = payout_collateral_raw.saturating_sub(payout_fee_raw);
         if actual_net_raw < minimum_net_raw {
             return Err(RedemptionRecordError::MinimumNotMet {
                 minimum_net_raw,
@@ -2971,6 +4743,24 @@ fn record_redemption_on_vault_run_with(
         "simulated redemption payout must remain representable during synchronous execution",
     );
     debug_assert_eq!(actual_payout_raw, payout_collateral_raw);
+    state
+        .consumed_redemption_burn_blocks
+        .insert(icusd_block_index);
+    let redemption_transfer = if actual_payout_raw > 0 {
+        let op_nonce = state.next_op_nonce_at(event_timestamp);
+        Some(PinnedRedemptionTransfer {
+            op_nonce,
+            ledger: payout_ledger,
+            recipient: owner,
+            amount_raw: actual_payout_raw - payout_fee_raw,
+            fee_raw: payout_fee_raw,
+            fee_is_explicit: true,
+            memo: op_nonce,
+            created_at_time_ns: crate::management::nonce_to_created_at_time(op_nonce),
+        })
+    } else {
+        None
+    };
     persist_event(&Event::RedemptionOnVaults {
         owner,
         current_icp_rate: ct_price,
@@ -2984,6 +4774,7 @@ fn record_redemption_on_vault_run_with(
         vault_redemptions: Some(vault_redemptions.clone()),
         payout_collateral_raw: Some(actual_payout_raw),
         min_net_collateral_raw,
+        redemption_transfer,
     });
 
     // RED-001 (audit 2026-06-09): the payout is derived from the icUSD the
@@ -3019,23 +4810,25 @@ fn record_redemption_on_vault_run_with(
 
     let margin = ICP::from(actual_payout_raw);
     if margin.to_u64() > 0 {
-        let op_nonce = state.next_op_nonce_at(event_timestamp);
-        state.pending_redemption_transfer.insert(
-            icusd_block_index,
-            PendingMarginTransfer {
+        let pinned =
+            redemption_transfer.expect("positive redemption payout has pinned transfer tuple");
+        state
+            .pending_redemption_transfer
+            .entry(icusd_block_index)
+            .or_insert(PendingMarginTransfer {
                 vault_id: 0,
                 owner,
                 margin,
                 collateral_type: redeem_ct,
                 retry_count: 0,
-                op_nonce,
-                ledger: None,
-                transfer_amount_raw: None,
-                held_for_manual_retry: false,
-                reconciliation_required: false,
+                op_nonce: pinned.op_nonce,
+                ledger: Some(pinned.ledger),
+                transfer_amount_raw: Some(pinned.amount_raw),
+                redemption_transfer: Some(pinned),
+                held_for_manual_retry: pinned.amount_raw == 0,
+                reconciliation_required: pinned.amount_raw == 0,
                 min_net_collateral_raw,
-            },
-        );
+            });
     }
     Ok(RedemptionOutcome { consumed, margin })
 }
@@ -4467,7 +6260,7 @@ mod filter_tests {
 #[cfg(test)]
 mod redemption_replay_tests {
     use super::*;
-    use crate::state::State;
+    use crate::state::{Mode, State};
     use crate::vault::Vault;
     use rust_decimal::prelude::FromPrimitive;
     use rust_decimal_macros::dec;
@@ -4522,6 +6315,79 @@ mod redemption_replay_tests {
         }
     }
 
+    #[test]
+    fn redemption_commit_rejects_vault_with_pending_inbound_margin() {
+        let icp = principal(41);
+        let owner = principal(42);
+        let mut state = State::from(init_args(icp));
+        let vault = Vault {
+            owner,
+            borrowed_icusd_amount: ICUSD::new(100_000_000),
+            collateral_amount: 500_000_000,
+            vault_id: 1,
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        };
+        state.open_vault(vault.clone());
+        let backend = principal(43);
+        state.pending_inbound_collateral.insert(
+            (owner, icp),
+            crate::state::InboundCollateralJournal {
+                owner,
+                request_id: 1,
+                operation: crate::state::InboundCollateralOperation::AddMargin {
+                    vault_id: 1,
+                    vault_snapshot: vault,
+                },
+                tuple: crate::SpLiquidationStablePullTuple {
+                    op_nonce: 77,
+                    ledger: icp,
+                    from: icrc_ledger_types::icrc1::account::Account {
+                        owner,
+                        subaccount: None,
+                    },
+                    spender: icrc_ledger_types::icrc1::account::Account {
+                        owner: backend,
+                        subaccount: None,
+                    },
+                    to: icrc_ledger_types::icrc1::account::Account {
+                        owner: backend,
+                        subaccount: None,
+                    },
+                    amount_raw: 10,
+                    fee_raw: 1,
+                    memo: vec![1],
+                    created_at_time_ns: 77,
+                },
+                candidate_block_index: None,
+                candidate_attach_window_start_ns: 0,
+                candidate_attach_attempts: 0,
+                had_ambiguous_attempt: true,
+                last_error: Some("ambiguous ingress".into()),
+            },
+        );
+        let before = state.vault_id_to_vaults.clone();
+        let result = record_redemption_on_vault_run(
+            &mut state,
+            owner,
+            ICUSD::new(10_000_000),
+            ICUSD::new(0),
+            UsdIcp::new(Decimal::ONE),
+            999,
+            icp,
+            &[1],
+            None,
+        );
+        assert!(matches!(
+            result,
+            Err(RedemptionRecordError::VaultIngressPending)
+        ));
+        assert_eq!(state.vault_id_to_vaults, before);
+        assert!(state.pending_inbound_collateral.contains_key(&(owner, icp)));
+    }
+
     fn redemption_event(
         owner: Principal,
         block: u64,
@@ -4543,6 +6409,7 @@ mod redemption_replay_tests {
             vault_redemptions: redemptions,
             payout_collateral_raw: payout_raw,
             min_net_collateral_raw: minimum_net_raw,
+            redemption_transfer: None,
         }
     }
 
@@ -4568,8 +6435,10 @@ mod redemption_replay_tests {
             vec![Event::Init(args), partial(u64::MAX), partial(1)].into_iter(),
             || 2,
         );
-        assert!(matches!(result, Err(ReplayLogError::InconsistentLog(message))
-            if message.contains("3USD reserve total overflows")));
+        assert!(
+            matches!(result, Err(ReplayLogError::InconsistentLog(message))
+            if message.contains("3USD reserve total overflows"))
+        );
     }
 
     fn remove_v2_fields(event: Event) -> Event {
@@ -4581,6 +6450,7 @@ mod redemption_replay_tests {
             .expect("event payload");
         payload.remove("payout_collateral_raw");
         payload.remove("min_net_collateral_raw");
+        payload.remove("redemption_transfer");
         serde_json::from_value(value).expect("legacy redemption event defaults new fields")
     }
 
@@ -4661,6 +6531,131 @@ mod redemption_replay_tests {
         let pending = state.pending_redemption_transfer.get(&88).unwrap();
         assert_eq!(pending.margin.to_u64(), 15_000_000);
         assert_eq!(pending.min_net_collateral_raw, None);
+    }
+
+    #[test]
+    fn replay_rejects_duplicate_redemption_block_before_overwriting_claim() {
+        let icp = principal(25);
+        let owner = principal(26);
+        let args = init_args(icp);
+        let first = redemption_event(
+            owner,
+            89,
+            Some(icp),
+            UsdIcp::new(Decimal::ONE),
+            10_000_000,
+            Some(vec![VaultRedemption {
+                vault_id: 1,
+                icusd_redeemed_e8s: 10_000_000,
+                collateral_seized: 100,
+            }]),
+            Some(100),
+            None,
+        );
+        let duplicate = redemption_event(
+            owner,
+            89,
+            Some(icp),
+            UsdIcp::new(Decimal::ONE),
+            20_000_000,
+            Some(vec![VaultRedemption {
+                vault_id: 2,
+                icusd_redeemed_e8s: 20_000_000,
+                collateral_seized: 200,
+            }]),
+            Some(200),
+            None,
+        );
+        let events = vec![
+            Event::Init(args),
+            open_vault(1, owner, icp, 1_000_000, 100_000_000),
+            open_vault(2, owner, icp, 1_000_000, 100_000_000),
+            first,
+            Event::RedemptionTransfered {
+                icusd_block_index: 89,
+                icp_block_index: 7,
+                timestamp: Some(3),
+            },
+            duplicate,
+        ];
+
+        let result = super::replay_with_nonce_time(events.into_iter(), || 2);
+        assert!(
+            matches!(result, Err(ReplayLogError::InconsistentLog(message)) if message.contains("duplicate redemption burn block 89"))
+        );
+    }
+
+    #[test]
+    fn replay_keeps_burn_tombstone_after_redemption_transfer_settlement() {
+        let icp = principal(31);
+        let owner = principal(32);
+        let settled = redemption_event(
+            owner,
+            903,
+            Some(icp),
+            UsdIcp::new(Decimal::ONE),
+            1,
+            Some(Vec::new()),
+            Some(0),
+            None,
+        );
+        let state = replay(vec![
+            Event::Init(init_args(icp)),
+            settled,
+            Event::RedemptionTransfered {
+                icusd_block_index: 903,
+                icp_block_index: 8,
+                timestamp: Some(3),
+            },
+        ]);
+        assert!(state.consumed_redemption_burn_blocks.contains(&903));
+        assert!(!state.pending_redemption_transfer.contains_key(&903));
+    }
+
+    #[test]
+    fn replay_restores_pinned_redemption_transfer_and_observes_nonce() {
+        let icp = principal(27);
+        let owner = principal(28);
+        let args = init_args(icp);
+        let op_nonce = (2u128 << 64) | 9;
+        let tuple = PinnedRedemptionTransfer {
+            op_nonce,
+            ledger: icp,
+            recipient: owner,
+            amount_raw: 90,
+            fee_raw: 10,
+            fee_is_explicit: true,
+            memo: op_nonce,
+            created_at_time_ns: 2,
+        };
+        let event = Event::RedemptionOnVaults {
+            owner,
+            current_icp_rate: UsdIcp::new(Decimal::ONE),
+            icusd_amount: ICUSD::new(10_000_000),
+            fee_amount: ICUSD::new(0),
+            icusd_block_index: 901,
+            collateral_type: Some(icp),
+            timestamp: Some(2),
+            vault_redemptions: Some(vec![VaultRedemption {
+                vault_id: 1,
+                icusd_redeemed_e8s: 10_000_000,
+                collateral_seized: 100,
+            }]),
+            payout_collateral_raw: Some(100),
+            min_net_collateral_raw: Some(90),
+            redemption_transfer: Some(tuple),
+        };
+        let mut state = replay(vec![
+            Event::Init(args),
+            open_vault(1, owner, icp, 100_000, 100_000_000),
+            event,
+        ]);
+        let pending = state.pending_redemption_transfer.get(&901).unwrap();
+        assert_eq!(pending.redemption_transfer, Some(tuple));
+        assert!(!pending.held_for_manual_retry);
+        assert!(!pending.reconciliation_required);
+        state.observe_op_nonce(op_nonce);
+        assert!(state.op_nonce_counter > op_nonce as u64);
     }
 
     #[test]
@@ -4805,6 +6800,82 @@ mod redemption_replay_tests {
     }
 
     #[test]
+    fn recorder_rejects_unrepresentable_mixed_row_before_mutating_any_vault() {
+        let icp = principal(111);
+        let owner = principal(112);
+        let mut state = State::from(init_args(icp));
+        let mut config = state.collateral_configs[&icp].clone();
+        config.decimals = 18;
+        config.last_price = Some(2_174.0);
+        config.ledger_fee = 0;
+        state.collateral_configs.insert(icp, config);
+
+        // Equal CR puts these rows in the same water-fill band. The first
+        // vault's proportional debt share converts above u64::MAX at 18
+        // decimals; the sibling's share remains representable and would make
+        // the old aggregate-only payout guard accept the mixed result.
+        let large_collateral = 18_000_000_000_000_000_000;
+        let small_collateral = 3_600_000_000_000_000_000;
+        for (vault_id, debt_e8s, collateral_raw) in [
+            (1, 5_000_000_000_000, large_collateral),
+            (2, 1_000_000_000_000, small_collateral),
+        ] {
+            state.open_vault(Vault {
+                owner,
+                borrowed_icusd_amount: ICUSD::new(debt_e8s),
+                collateral_amount: collateral_raw,
+                vault_id,
+                collateral_type: icp,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            });
+        }
+
+        let price = UsdIcp::new(Decimal::from(2_174));
+        let legacy_preview = state.simulate_redemption_for_vault_ids(
+            ICUSD::new(5_000_000_000_000),
+            price,
+            &icp,
+            &[1, 2],
+        );
+        assert!(legacy_preview.iter().any(|row| {
+            row.vault_id == 1 && row.icusd_redeemed_e8s > 0 && row.collateral_seized == 0
+        }), "legacy preview: {legacy_preview:?}");
+        assert!(legacy_preview
+            .iter()
+            .any(|row| row.vault_id == 2 && row.collateral_seized > 0));
+        assert!(state
+            .try_simulate_redemption_for_vault_ids(
+                ICUSD::new(5_000_000_000_000),
+                price,
+                &icp,
+                &[1, 2],
+            )
+            .is_none());
+
+        let before = state.vault_id_to_vaults.clone();
+        let result = record_redemption_on_vault_run(
+            &mut state,
+            owner,
+            ICUSD::new(5_000_000_000_000),
+            ICUSD::new(0),
+            price,
+            224,
+            icp,
+            &[1, 2],
+            None,
+        );
+        assert!(matches!(
+            result,
+            Err(RedemptionRecordError::PayoutUnrepresentable)
+        ));
+        assert_eq!(state.vault_id_to_vaults, before);
+        assert!(state.pending_redemption_transfer.is_empty());
+        assert!(!state.consumed_redemption_burn_blocks.contains(&224));
+    }
+
+    #[test]
     fn recorder_rejects_minimum_before_mutating_debt_or_collateral() {
         let icp = principal(13);
         let owner = principal(14);
@@ -4850,6 +6921,227 @@ mod redemption_replay_tests {
         assert!(state.pending_redemption_transfer.is_empty());
         assert_eq!(state.protocol_deficit_icusd, ICUSD::new(0));
         assert_eq!(crate::storage::count_events(), events_before);
+    }
+
+    #[test]
+    fn recorder_rejects_duplicate_burn_block_without_replacing_pending_claim() {
+        let icp = principal(23);
+        let owner = principal(24);
+        let mut state = State::from(init_args(icp));
+        state.open_vault(Vault {
+            owner,
+            borrowed_icusd_amount: ICUSD::new(100_000_000),
+            collateral_amount: 500_000_000,
+            vault_id: 1,
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+        let retained = PendingMarginTransfer {
+            vault_id: 0,
+            owner,
+            margin: ICP::new(7_654_321),
+            collateral_type: icp,
+            retry_count: 4,
+            op_nonce: 123,
+            ledger: None,
+            transfer_amount_raw: None,
+            redemption_transfer: None,
+            held_for_manual_retry: true,
+            reconciliation_required: true,
+            min_net_collateral_raw: None,
+        };
+        state.pending_redemption_transfer.insert(224, retained);
+        let before = state.vault_id_to_vaults.clone();
+        let events_before = crate::storage::count_events();
+
+        let result = record_redemption_on_vault_run(
+            &mut state,
+            owner,
+            ICUSD::new(10_000_000),
+            ICUSD::new(0),
+            UsdIcp::new(Decimal::ONE),
+            224,
+            icp,
+            &[1],
+            None,
+        );
+
+        assert!(matches!(
+            result,
+            Err(RedemptionRecordError::PayoutAlreadyPending)
+        ));
+        assert_eq!(state.pending_redemption_transfer[&224], retained);
+        assert_eq!(state.vault_id_to_vaults, before);
+        assert_eq!(crate::storage::count_events(), events_before);
+    }
+
+    #[test]
+    fn recorder_rejects_duplicate_burn_block_after_claim_settlement() {
+        let icp = principal(29);
+        let owner = principal(30);
+        let mut state = State::from(init_args(icp));
+        state.open_vault(Vault {
+            owner,
+            borrowed_icusd_amount: ICUSD::new(100_000_000),
+            collateral_amount: 500_000_000,
+            vault_id: 1,
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+        let mut events = Vec::new();
+        record_redemption_on_vault_run_at(
+            &mut state,
+            owner,
+            ICUSD::new(10_000_000),
+            ICUSD::new(0),
+            UsdIcp::new(Decimal::ONE),
+            902,
+            icp,
+            &[1],
+            None,
+            2,
+            &mut events,
+        )
+        .expect("initial redemption records");
+        assert!(state.consumed_redemption_burn_blocks.contains(&902));
+        state.pending_redemption_transfer.remove(&902);
+        let vaults_after_first = state.vault_id_to_vaults.clone();
+        let events_after_first = events.len();
+
+        let duplicate = record_redemption_on_vault_run_at(
+            &mut state,
+            owner,
+            ICUSD::new(10_000_000),
+            ICUSD::new(0),
+            UsdIcp::new(Decimal::ONE),
+            902,
+            icp,
+            &[1],
+            None,
+            3,
+            &mut events,
+        );
+        assert!(matches!(
+            duplicate,
+            Err(RedemptionRecordError::PayoutAlreadyPending)
+        ));
+        assert_eq!(state.vault_id_to_vaults, vaults_after_first);
+        assert_eq!(events.len(), events_after_first);
+    }
+
+    #[test]
+    fn recorder_refuses_gross_redemption_payout_at_or_below_ledger_fee_before_mutation() {
+        let icp = principal(33);
+        let owner = principal(34);
+        for (vault_id, collateral_raw) in [(1, 10), (2, 9)] {
+            let mut state = State::from(init_args(icp));
+            let mut config = state.collateral_configs[&icp].clone();
+            config.decimals = 8;
+            config.last_price = Some(1.0);
+            config.ledger_fee = 10;
+            state.collateral_configs.insert(icp, config);
+            state.open_vault(Vault {
+                owner,
+                borrowed_icusd_amount: ICUSD::new(100_000_000),
+                collateral_amount: collateral_raw,
+                vault_id,
+                collateral_type: icp,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            });
+            let vaults_before = state.vault_id_to_vaults.clone();
+            let mut persisted_events = Vec::new();
+            let result = record_redemption_on_vault_run_at(
+                &mut state,
+                owner,
+                ICUSD::new(10_000_000),
+                ICUSD::new(0),
+                UsdIcp::new(Decimal::ONE),
+                910 + vault_id,
+                icp,
+                &[vault_id],
+                None,
+                5,
+                &mut persisted_events,
+            );
+            assert!(matches!(
+                result,
+                Err(RedemptionRecordError::PayoutFeeConsumesGross)
+            ));
+            assert_eq!(state.vault_id_to_vaults, vaults_before);
+            assert!(persisted_events.is_empty());
+            assert!(!state
+                .consumed_redemption_burn_blocks
+                .contains(&(910 + vault_id)));
+            assert!(!state
+                .pending_redemption_transfer
+                .contains_key(&(910 + vault_id)));
+        }
+    }
+
+    #[test]
+    fn recorder_refuses_positive_debt_consumption_with_zero_gross_payout() {
+        let icp = principal(35);
+        let owner = principal(36);
+        let mut state = State::from(init_args(icp));
+        let mut config = state.collateral_configs[&icp].clone();
+        config.decimals = 8;
+        config.last_price = Some(1.0);
+        config.ledger_fee = 0;
+        state.collateral_configs.insert(icp, config);
+        state.open_vault(Vault {
+            owner,
+            borrowed_icusd_amount: ICUSD::new(100_000_000),
+            collateral_amount: 0,
+            vault_id: 1,
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+        let simulated = state.simulate_redemption_for_vault_ids(
+            ICUSD::new(10_000_000),
+            UsdIcp::new(Decimal::ONE),
+            &icp,
+            &[1],
+        );
+        assert!(
+            simulated
+                .iter()
+                .map(|redemption| redemption.icusd_redeemed_e8s)
+                .sum::<u64>()
+                > 0
+        );
+        assert_eq!(total_actual_collateral_seized(&simulated), Some(0));
+
+        let before = state.vault_id_to_vaults.clone();
+        let mut persisted_events = Vec::new();
+        let result = record_redemption_on_vault_run_at(
+            &mut state,
+            owner,
+            ICUSD::new(10_000_000),
+            ICUSD::new(0),
+            UsdIcp::new(Decimal::ONE),
+            915,
+            icp,
+            &[1],
+            None,
+            6,
+            &mut persisted_events,
+        );
+        assert!(matches!(
+            result,
+            Err(RedemptionRecordError::PayoutConsumesDebtWithoutCollateral)
+        ));
+        assert_eq!(state.vault_id_to_vaults, before);
+        assert!(persisted_events.is_empty());
+        assert!(state.consumed_redemption_burn_blocks.is_empty());
+        assert!(state.pending_redemption_transfer.is_empty());
     }
 
     #[test]
@@ -4914,6 +7206,7 @@ mod redemption_replay_tests {
                     payout_collateral_raw,
                     min_net_collateral_raw,
                     timestamp,
+                    redemption_transfer,
                     ..
                 } => {
                     let records = vault_redemptions.expect("new event pins outcomes");
@@ -4921,12 +7214,21 @@ mod redemption_replay_tests {
                     assert_eq!(payout_collateral_raw, Some(gross));
                     assert_eq!(min_net_collateral_raw, Some(expected_net));
                     assert_eq!(timestamp, Some(123));
+                    let tuple = redemption_transfer.expect("new claim persists exact ICRC tuple");
+                    assert_eq!(tuple.ledger, icp);
+                    assert_eq!(tuple.recipient, owner);
+                    assert_eq!(tuple.amount_raw, expected_net);
+                    assert_eq!(tuple.fee_is_explicit, true);
+                    assert_eq!(tuple.memo, tuple.op_nonce);
+                    assert_eq!(tuple.created_at_time_ns, 123);
+                    assert_eq!(tuple.amount_raw + tuple.fee_raw, gross);
                 }
                 _ => panic!("recorder persisted the wrong event variant"),
             }
             let pending = state.pending_redemption_transfer.get(&block).unwrap();
             assert_eq!(pending.margin.to_u64(), gross);
             assert_eq!(pending.min_net_collateral_raw, Some(expected_net));
+            assert!(pending.redemption_transfer.is_some());
         }
     }
 
@@ -4992,6 +7294,77 @@ mod redemption_replay_tests {
         assert_eq!(min_net_collateral_raw, Some(min_net_raw));
         assert_eq!(50_000_000u64 - 10_000, min_net_raw);
     }
+
+    #[test]
+    fn deficit_readonly_latch_clear_replays_only_after_deficit_recovery() {
+        let icp = principal(31);
+        let mut events = vec![Event::Init(init_args(icp))];
+        events.push(Event::SetDeficitReadonlyThresholdE8s {
+            threshold_e8s: 100,
+            timestamp: 1,
+            clear_latched_threshold_e8s: None,
+        });
+        events.push(Event::DeficitAccrued {
+            vault_id: 7,
+            amount: ICUSD::new(100),
+            new_deficit: ICUSD::new(100),
+            timestamp: 2,
+            source: Some(DeficitSource::Liquidation { vault_id: 7 }),
+        });
+        events.push(Event::DeficitRepaid {
+            amount: ICUSD::new(1),
+            source: FeeSource::BorrowingFee,
+            remaining_deficit: ICUSD::new(99),
+            anchor_block_index: None,
+            timestamp: 3,
+        });
+        events.push(Event::SetDeficitReadonlyThresholdE8s {
+            threshold_e8s: 100,
+            timestamp: 4,
+            clear_latched_threshold_e8s: Some(100),
+        });
+
+        let state = replay(events);
+        assert_eq!(state.protocol_deficit_icusd, ICUSD::new(99));
+        assert_eq!(state.deficit_readonly_latched_at_e8s, None);
+        // Replay remains fail-closed until an accepted price recomputes mode.
+        assert_eq!(state.mode, Mode::ReadOnly);
+
+        let mut invalid = vec![Event::Init(init_args(icp))];
+        invalid.push(Event::SetDeficitReadonlyThresholdE8s {
+            threshold_e8s: 100,
+            timestamp: 1,
+            clear_latched_threshold_e8s: None,
+        });
+        invalid.push(Event::DeficitAccrued {
+            vault_id: 7,
+            amount: ICUSD::new(100),
+            new_deficit: ICUSD::new(100),
+            timestamp: 2,
+            source: Some(DeficitSource::Liquidation { vault_id: 7 }),
+        });
+        invalid.push(Event::SetDeficitReadonlyThresholdE8s {
+            threshold_e8s: 50,
+            timestamp: 3,
+            clear_latched_threshold_e8s: None,
+        });
+        invalid.push(Event::DeficitRepaid {
+            amount: ICUSD::new(25),
+            source: FeeSource::BorrowingFee,
+            remaining_deficit: ICUSD::new(75),
+            anchor_block_index: None,
+            timestamp: 4,
+        });
+        invalid.push(Event::SetDeficitReadonlyThresholdE8s {
+            threshold_e8s: 50,
+            timestamp: 5,
+            clear_latched_threshold_e8s: Some(100),
+        });
+        assert!(matches!(
+            super::replay_with_nonce_time(invalid.into_iter(), || 5),
+            Err(ReplayLogError::InconsistentLog(_))
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -5013,14 +7386,21 @@ mod payout_operation_replay_tests {
             op_nonce: nonce,
             ledger: Some(principal(10)),
             transfer_amount_raw: Some(99_990_000),
+            redemption_transfer: None,
             held_for_manual_retry: false,
             reconciliation_required: false,
             min_net_collateral_raw: None,
         }
     }
 
-    fn journal(after_legacy_event_count: u64, event: PendingPayoutEvent) -> PendingPayoutJournalEntry {
-        PendingPayoutJournalEntry { after_legacy_event_count, event }
+    fn journal(
+        after_legacy_event_count: u64,
+        event: PendingPayoutEvent,
+    ) -> PendingPayoutJournalEntry {
+        PendingPayoutJournalEntry {
+            after_legacy_event_count,
+            event,
+        }
     }
 
     #[test]
@@ -5048,11 +7428,52 @@ mod payout_operation_replay_tests {
             },
         ];
         let journal = vec![
-            journal(1, PendingPayoutEvent::Queued { operation_id: 101, kind: PendingPayoutKind::Margin, transfer: payout(owner, 101), timestamp: 1 }),
-            journal(1, PendingPayoutEvent::Queued { operation_id: 102, kind: PendingPayoutKind::Margin, transfer: payout(owner, 102), timestamp: 2 }),
-            journal(1, PendingPayoutEvent::Held { operation_id: 102, kind: PendingPayoutKind::Margin, retry_count: 5, reconciliation_required: false, timestamp: 3 }),
-            journal(2, PendingPayoutEvent::Rearmed { operation_id: 102, kind: PendingPayoutKind::Margin, timestamp: 5 }),
-            journal(2, PendingPayoutEvent::Settled { operation_id: 101, kind: PendingPayoutKind::Margin, vault_id: 42, block_index: 901, timestamp: 6 }),
+            journal(
+                1,
+                PendingPayoutEvent::Queued {
+                    operation_id: 101,
+                    kind: PendingPayoutKind::Margin,
+                    transfer: payout(owner, 101),
+                    timestamp: 1,
+                },
+            ),
+            journal(
+                1,
+                PendingPayoutEvent::Queued {
+                    operation_id: 102,
+                    kind: PendingPayoutKind::Margin,
+                    transfer: payout(owner, 102),
+                    timestamp: 2,
+                },
+            ),
+            journal(
+                1,
+                PendingPayoutEvent::Held {
+                    operation_id: 102,
+                    kind: PendingPayoutKind::Margin,
+                    retry_count: 5,
+                    reconciliation_required: false,
+                    timestamp: 3,
+                },
+            ),
+            journal(
+                2,
+                PendingPayoutEvent::Rearmed {
+                    operation_id: 102,
+                    kind: PendingPayoutKind::Margin,
+                    timestamp: 5,
+                },
+            ),
+            journal(
+                2,
+                PendingPayoutEvent::Settled {
+                    operation_id: 101,
+                    kind: PendingPayoutKind::Margin,
+                    vault_id: 42,
+                    block_index: 901,
+                    timestamp: 6,
+                },
+            ),
         ];
 
         let restored = replay_with_pending_payout_journal(events.into_iter(), journal.into_iter())
@@ -5083,9 +7504,33 @@ mod payout_operation_replay_tests {
         };
         let events = vec![Event::Init(args)];
         let journal = vec![
-            journal(1, PendingPayoutEvent::Queued { operation_id: 201, kind: PendingPayoutKind::Margin, transfer: payout(principal(1), 201), timestamp: 1 }),
-            journal(1, PendingPayoutEvent::Held { operation_id: 201, kind: PendingPayoutKind::Margin, retry_count: 60, reconciliation_required: false, timestamp: 2 }),
-            journal(1, PendingPayoutEvent::Rearmed { operation_id: 201, kind: PendingPayoutKind::Margin, timestamp: 3 }),
+            journal(
+                1,
+                PendingPayoutEvent::Queued {
+                    operation_id: 201,
+                    kind: PendingPayoutKind::Margin,
+                    transfer: payout(principal(1), 201),
+                    timestamp: 1,
+                },
+            ),
+            journal(
+                1,
+                PendingPayoutEvent::Held {
+                    operation_id: 201,
+                    kind: PendingPayoutKind::Margin,
+                    retry_count: 60,
+                    reconciliation_required: false,
+                    timestamp: 2,
+                },
+            ),
+            journal(
+                1,
+                PendingPayoutEvent::Rearmed {
+                    operation_id: 201,
+                    kind: PendingPayoutKind::Margin,
+                    timestamp: 3,
+                },
+            ),
         ];
 
         let restored = replay_with_pending_payout_journal(events.into_iter(), journal.into_iter())
@@ -5113,13 +7558,18 @@ mod payout_operation_replay_tests {
         let operation_id = (1u128 << 64) | 303;
         let owner = principal(1);
         let mut snapshot = State::from(args.clone());
-        snapshot.pending_margin_transfers.insert(operation_id, payout(owner, operation_id));
-        let journal = vec![journal(1, PendingPayoutEvent::Queued {
-            operation_id,
-            kind: PendingPayoutKind::Margin,
-            transfer: payout(owner, operation_id),
-            timestamp: 1,
-        })];
+        snapshot
+            .pending_margin_transfers
+            .insert(operation_id, payout(owner, operation_id));
+        let journal = vec![journal(
+            1,
+            PendingPayoutEvent::Queued {
+                operation_id,
+                kind: PendingPayoutKind::Margin,
+                transfer: payout(owner, operation_id),
+                timestamp: 1,
+            },
+        )];
 
         let restored = restore_snapshot_or_replay(
             Some(snapshot),
@@ -5128,7 +7578,418 @@ mod payout_operation_replay_tests {
         )
         .expect("snapshot path should not replay the journal");
         assert_eq!(restored.pending_margin_transfers.len(), 1);
-        assert_eq!(restored.pending_margin_transfers[&operation_id].owner, owner);
+        assert_eq!(
+            restored.pending_margin_transfers[&operation_id].owner,
+            owner
+        );
+    }
+}
+
+#[cfg(test)]
+mod treasury_payment_replay_tests {
+    use super::*;
+    use crate::state::{TreasuryPaymentKind, TreasuryPaymentPhase};
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn principal(seed: u8) -> Principal {
+        Principal::self_authenticating([seed; 32])
+    }
+
+    fn payment(operation_id: u128) -> PendingTreasuryPayment {
+        payment_with(
+            operation_id,
+            TreasuryPaymentKind::BorrowingFeeMint,
+            crate::treasury::DepositType::BorrowingFee,
+            crate::treasury::AssetType::ICUSD,
+            1_000,
+        )
+    }
+
+    fn payment_with(
+        operation_id: u128,
+        kind: TreasuryPaymentKind,
+        deposit_type: crate::treasury::DepositType,
+        asset_type: crate::treasury::AssetType,
+        amount_e8s: u64,
+    ) -> PendingTreasuryPayment {
+        PendingTreasuryPayment {
+            operation_id,
+            kind,
+            ledger: principal(1),
+            from_owner: principal(99),
+            from_subaccount: None,
+            recipient: Account {
+                owner: principal(2),
+                subaccount: None,
+            },
+            amount_e8s,
+            fee_e8s: None,
+            memo: crate::management::nonce_to_memo(operation_id).0.to_vec(),
+            created_at_time_ns: crate::management::nonce_to_created_at_time(operation_id),
+            deposit_type,
+            asset_type,
+            deposit_memo: None,
+            phase: TreasuryPaymentPhase::TransferPending,
+            dispatch_attempts: 0,
+            last_dispatch_at_ns: 0,
+            transfer_nonce: operation_id,
+        }
+    }
+
+    fn args() -> InitArg {
+        InitArg {
+            xrc_principal: principal(3),
+            icusd_ledger_principal: principal(1),
+            icp_ledger_principal: principal(4),
+            fee_e8s: 0,
+            developer_principal: principal(5),
+            treasury_principal: Some(principal(2)),
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        }
+    }
+
+    fn entry(event: TreasuryPaymentEvent) -> TreasuryPaymentJournalEntry {
+        TreasuryPaymentJournalEntry {
+            after_legacy_event_count: 1,
+            event,
+        }
+    }
+
+    #[test]
+    fn lost_notification_replay_keeps_receipt_phase_without_replaying_mint() {
+        let operation_id = (123u128 << 64) | 7;
+        let events = vec![Event::Init(args())];
+        let journal = vec![
+            entry(TreasuryPaymentEvent::Queued {
+                payment: payment(operation_id),
+                timestamp: 1,
+            }),
+            entry(TreasuryPaymentEvent::TransferConfirmed {
+                operation_id,
+                block_index: 88,
+                timestamp: 2,
+            }),
+        ];
+
+        let restored = replay_with_treasury_payment_journal(
+            events.into_iter(),
+            std::iter::empty(),
+            journal.into_iter(),
+        )
+        .expect("private treasury journal replays");
+        let pending = &restored.pending_treasury_payments[&operation_id];
+        assert_eq!(pending.ledger, principal(1));
+        assert_eq!(pending.amount_e8s, 1_000);
+        assert_eq!(
+            pending.memo,
+            crate::management::nonce_to_memo(operation_id).0.to_vec()
+        );
+        assert_eq!(pending.fee_e8s, None);
+        assert_eq!(
+            pending.phase,
+            TreasuryPaymentPhase::NotificationPending { block_index: 88 }
+        );
+    }
+
+    #[test]
+    fn interest_mint_and_stablecoin_transfer_replay_with_exact_receipt_identity() {
+        for (operation_id, kind, asset_type, amount) in [
+            (
+                (123u128 << 64) | 9,
+                TreasuryPaymentKind::InterestIcusdMint,
+                crate::treasury::AssetType::ICUSD,
+                12_345,
+            ),
+            (
+                (123u128 << 64) | 10,
+                TreasuryPaymentKind::InterestStablecoinTransfer,
+                crate::treasury::AssetType::CKUSDT,
+                123,
+            ),
+        ] {
+            let pinned = payment_with(
+                operation_id,
+                kind,
+                crate::treasury::DepositType::InterestRevenue,
+                asset_type.clone(),
+                amount,
+            );
+            let restored = replay_with_treasury_payment_journal(
+                vec![Event::Init(args())].into_iter(),
+                std::iter::empty(),
+                vec![
+                    entry(TreasuryPaymentEvent::Queued {
+                        payment: pinned.clone(),
+                        timestamp: 1,
+                    }),
+                    entry(TreasuryPaymentEvent::TransferConfirmed {
+                        operation_id,
+                        block_index: 700 + operation_id as u64,
+                        timestamp: 2,
+                    }),
+                ]
+                .into_iter(),
+            )
+            .expect("interest payment journal replays");
+            let replayed = &restored.pending_treasury_payments[&operation_id];
+            assert_eq!(replayed.kind, kind);
+            assert_eq!(replayed.asset_type, asset_type);
+            assert_eq!(replayed.amount_e8s, amount);
+            assert_eq!(replayed.memo, pinned.memo);
+            assert_eq!(
+                replayed.phase,
+                TreasuryPaymentPhase::NotificationPending {
+                    block_index: 700 + operation_id as u64
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn interest_transfer_kind_rejects_non_interest_or_wrong_asset_rows() {
+        let mut invalid = payment_with(
+            (123u128 << 64) | 11,
+            TreasuryPaymentKind::InterestStablecoinTransfer,
+            crate::treasury::DepositType::InterestRevenue,
+            crate::treasury::AssetType::ICUSD,
+            100,
+        );
+        assert!(!treasury_payment_is_well_formed(
+            &invalid,
+            invalid.operation_id
+        ));
+        invalid.asset_type = crate::treasury::AssetType::CKUSDC;
+        invalid.deposit_type = crate::treasury::DepositType::BorrowingFee;
+        assert!(!treasury_payment_is_well_formed(
+            &invalid,
+            invalid.operation_id
+        ));
+    }
+
+    #[test]
+    fn acknowledged_treasury_receipt_replays_as_settled() {
+        let operation_id = (123u128 << 64) | 8;
+        let events = vec![Event::Init(args())];
+        let journal = vec![
+            entry(TreasuryPaymentEvent::Queued {
+                payment: payment(operation_id),
+                timestamp: 1,
+            }),
+            entry(TreasuryPaymentEvent::TransferConfirmed {
+                operation_id,
+                block_index: 89,
+                timestamp: 2,
+            }),
+            entry(TreasuryPaymentEvent::NotificationAcknowledged {
+                operation_id,
+                deposit_id: 4,
+                timestamp: 3,
+            }),
+        ];
+
+        let restored = replay_with_treasury_payment_journal(
+            events.into_iter(),
+            std::iter::empty(),
+            journal.into_iter(),
+        )
+        .expect("completed private treasury journal replays");
+        assert!(restored.pending_treasury_payments.is_empty());
+        assert!(restored.op_nonce_counter > operation_id as u64);
+    }
+
+    #[test]
+    fn late_destination_pin_replays_a_fresh_first_dispatch_identity() {
+        let operation_id = (123u128 << 64) | 12;
+        let fresh_nonce = operation_id + 1;
+        let mut awaiting = payment(operation_id);
+        awaiting.ledger = Principal::anonymous();
+        awaiting.recipient.owner = Principal::anonymous();
+        awaiting.transfer_nonce = 0;
+        awaiting.phase = TreasuryPaymentPhase::AwaitingDestination;
+        let restored = replay_with_treasury_payment_journal(
+            vec![Event::Init(args())].into_iter(),
+            std::iter::empty(),
+            vec![
+                entry(TreasuryPaymentEvent::Queued {
+                    payment: awaiting,
+                    timestamp: 1,
+                }),
+                entry(TreasuryPaymentEvent::DestinationPinned {
+                    operation_id,
+                    recipient: principal(2),
+                    ledger: principal(1),
+                    transfer_nonce: fresh_nonce,
+                    timestamp: 25 * 60 * 60 * 1_000_000_000,
+                }),
+            ]
+            .into_iter(),
+        )
+        .expect("late route pin replays");
+        let payment = &restored.pending_treasury_payments[&operation_id];
+        assert_eq!(payment.phase, TreasuryPaymentPhase::TransferPending);
+        assert_eq!(payment.transfer_nonce, fresh_nonce);
+        assert_eq!(
+            payment.memo,
+            crate::management::nonce_to_memo(fresh_nonce).0.to_vec()
+        );
+        assert_eq!(
+            payment.created_at_time_ns,
+            crate::management::nonce_to_created_at_time(fresh_nonce)
+        );
+        assert!(treasury_payment_is_well_formed(payment, operation_id));
+    }
+
+    #[test]
+    fn ambiguous_retry_and_too_old_hold_keep_the_original_transfer_tuple() {
+        let operation_id = (123u128 << 64) | 14;
+        let pinned = payment(operation_id);
+        let restored = replay_with_treasury_payment_journal(
+            vec![Event::Init(args())].into_iter(),
+            std::iter::empty(),
+            vec![
+                entry(TreasuryPaymentEvent::Queued {
+                    payment: pinned.clone(),
+                    timestamp: 1,
+                }),
+                entry(TreasuryPaymentEvent::TransferAttempted {
+                    operation_id,
+                    dispatch_attempts: 1,
+                    timestamp: 2,
+                }),
+                entry(TreasuryPaymentEvent::TransferFailed {
+                    operation_id,
+                    reason: "transport outcome ambiguous; exact retry remains open".into(),
+                    timestamp: 3,
+                }),
+                entry(TreasuryPaymentEvent::TransferAttempted {
+                    operation_id,
+                    dispatch_attempts: 2,
+                    timestamp: 4,
+                }),
+                entry(TreasuryPaymentEvent::Held {
+                    operation_id,
+                    reason: "ledger returned TooOld; receipt reconciliation required".into(),
+                    timestamp: 5,
+                }),
+            ]
+            .into_iter(),
+        )
+        .expect("retry and hold lifecycle replays");
+        let replayed = &restored.pending_treasury_payments[&operation_id];
+        assert_eq!(replayed.memo, pinned.memo);
+        assert_eq!(replayed.created_at_time_ns, pinned.created_at_time_ns);
+        assert_eq!(replayed.ledger, pinned.ledger);
+        assert_eq!(replayed.recipient, pinned.recipient);
+        assert_eq!(replayed.amount_e8s, pinned.amount_e8s);
+        assert_eq!(replayed.dispatch_attempts, 2);
+        assert_eq!(replayed.last_dispatch_at_ns, 4);
+        assert!(matches!(replayed.phase, TreasuryPaymentPhase::Held { .. }));
+    }
+
+    #[test]
+    fn sp_interest_mint_lost_reply_replays_exact_identity_and_notification_phase() {
+        let nonce = (123u128 << 64) | 51;
+        let mint = crate::state::PendingStabilityPoolInterestMint {
+            operation_nonce: nonce,
+            ledger: principal(1),
+            pool: principal(2),
+            amount_e8s: 987_654,
+            collateral_type: principal(3),
+            memo: crate::management::nonce_to_memo(nonce).0.to_vec(),
+            created_at_time_ns: crate::management::nonce_to_created_at_time(nonce),
+            phase: crate::state::StabilityPoolInterestMintPhase::MintPending,
+            attempts: 0,
+            last_attempt_at_ns: 0,
+        };
+        let journal = vec![
+            entry(TreasuryPaymentEvent::StabilityPoolInterestMintQueued {
+                payment: mint.clone(),
+                timestamp: 1,
+            }),
+            entry(TreasuryPaymentEvent::StabilityPoolInterestMintAttempted {
+                operation_nonce: nonce,
+                attempts: 1,
+                timestamp: 2,
+            }),
+            entry(TreasuryPaymentEvent::StabilityPoolInterestMintAttempted {
+                operation_nonce: nonce,
+                attempts: 2,
+                timestamp: 3,
+            }),
+            entry(TreasuryPaymentEvent::StabilityPoolInterestMintConfirmed {
+                operation_nonce: nonce,
+                block_index: 812,
+                timestamp: 4,
+            }),
+        ];
+        let restored = replay_with_treasury_payment_journal(
+            vec![Event::Init(args())].into_iter(),
+            std::iter::empty(),
+            journal.into_iter(),
+        )
+        .expect("SP interest lifecycle replays after upgrade");
+        let recovered = &restored.pending_stability_pool_interest_mints[&nonce];
+        assert_eq!(recovered.ledger, mint.ledger);
+        assert_eq!(recovered.pool, mint.pool);
+        assert_eq!(recovered.amount_e8s, mint.amount_e8s);
+        assert_eq!(recovered.memo, mint.memo);
+        assert_eq!(recovered.created_at_time_ns, mint.created_at_time_ns);
+        assert_eq!(recovered.attempts, 2);
+        assert_eq!(recovered.last_attempt_at_ns, 3);
+        assert_eq!(
+            recovered.phase,
+            crate::state::StabilityPoolInterestMintPhase::NotificationPending { mint_block: 812 }
+        );
+    }
+
+    #[test]
+    fn held_sp_interest_mint_can_only_advance_to_notification_after_reconciliation() {
+        let nonce = (123u128 << 64) | 52;
+        let mint = crate::state::PendingStabilityPoolInterestMint {
+            operation_nonce: nonce,
+            ledger: principal(1),
+            pool: principal(2),
+            amount_e8s: 88,
+            collateral_type: principal(3),
+            memo: crate::management::nonce_to_memo(nonce).0.to_vec(),
+            created_at_time_ns: crate::management::nonce_to_created_at_time(nonce),
+            phase: crate::state::StabilityPoolInterestMintPhase::MintPending,
+            attempts: 1,
+            last_attempt_at_ns: 2,
+        };
+        let restored = replay_with_treasury_payment_journal(
+            vec![Event::Init(args())].into_iter(),
+            std::iter::empty(),
+            vec![
+                entry(TreasuryPaymentEvent::StabilityPoolInterestMintQueued {
+                    payment: mint,
+                    timestamp: 1,
+                }),
+                entry(TreasuryPaymentEvent::StabilityPoolInterestMintHeld {
+                    operation_nonce: nonce,
+                    reason: "TooOld".into(),
+                    timestamp: 3,
+                }),
+                entry(TreasuryPaymentEvent::StabilityPoolInterestMintConfirmed {
+                    operation_nonce: nonce,
+                    block_index: 99,
+                    timestamp: 4,
+                }),
+            ]
+            .into_iter(),
+        )
+        .expect("positive receipt reconciliation lifecycle replays");
+        let row = &restored.pending_stability_pool_interest_mints[&nonce];
+        assert_eq!(
+            row.attempts, 1,
+            "reconciliation must not dispatch another mint"
+        );
+        assert_eq!(
+            row.phase,
+            crate::state::StabilityPoolInterestMintPhase::NotificationPending { mint_block: 99 }
+        );
     }
 }
 
@@ -5207,12 +8068,9 @@ mod liquidation_event_pin_tests {
 
         let repaid = ICUSD::new(180_000_000);
         let bonus = configured.get_liquidation_bonus_for(&ct);
-        let pinned_seizure = crate::numeric::try_icusd_to_collateral_amount(
-            repaid * bonus,
-            Decimal::new(5, 0),
-            18,
-        )
-        .expect("pre-await collateral amount is representable");
+        let pinned_seizure =
+            crate::numeric::try_icusd_to_collateral_amount(repaid * bonus, Decimal::new(5, 0), 18)
+                .expect("pre-await collateral amount is representable");
         assert_eq!(
             crate::numeric::try_icusd_to_collateral_amount(repaid * bonus, Decimal::new(5, 2), 18),
             None,
@@ -5254,5 +8112,272 @@ mod liquidation_event_pin_tests {
         let remaining = replayed.vault_id_to_vaults.get(&12).unwrap();
         assert_eq!(remaining.borrowed_icusd_amount, ICUSD::new(20_000_000));
         assert_eq!(remaining.collateral_amount, u64::MAX - pinned_seizure);
+    }
+}
+
+#[cfg(test)]
+mod collateral_withdrawal_outbox_replay_tests {
+    use super::*;
+    use crate::state::{CollateralWithdrawalAction, CollateralWithdrawalPhase};
+    use crate::vault::Vault;
+
+    fn principal(byte: u8) -> Principal {
+        Principal::from_slice(&[byte])
+    }
+    fn init_args(ledger: Principal) -> InitArg {
+        InitArg {
+            xrc_principal: principal(1),
+            icusd_ledger_principal: principal(2),
+            icp_ledger_principal: ledger,
+            fee_e8s: 0,
+            developer_principal: principal(3),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        }
+    }
+    fn vault(owner: Principal, ledger: Principal) -> Vault {
+        Vault {
+            owner,
+            borrowed_icusd_amount: ICUSD::new(0),
+            collateral_amount: 100,
+            vault_id: 1,
+            collateral_type: ledger,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        }
+    }
+    fn transfer(owner: Principal, ledger: Principal) -> PendingCollateralWithdrawal {
+        let nonce = (123u128 << 64) | 9;
+        PendingCollateralWithdrawal {
+            operation_id: nonce,
+            vault_id: 1,
+            owner,
+            ledger,
+            action: CollateralWithdrawalAction::Full,
+            gross_amount_raw: 20,
+            net_amount_raw: 18,
+            fee_raw: 2,
+            memo: nonce,
+            created_at_time_ns: crate::management::nonce_to_created_at_time(nonce),
+            phase: CollateralWithdrawalPhase::Reserved,
+            dispatch_attempts: 0,
+            last_error: None,
+            forgive_dust_debt: false,
+            repay_block_index: None,
+        }
+    }
+
+    #[test]
+    fn lost_snapshot_replay_restores_withdrawal_fence_until_exact_settlement_event() {
+        let ledger = principal(10);
+        let owner = principal(5);
+        let args = init_args(ledger);
+        let tuple = transfer(owner, ledger);
+        assert!(
+            collateral_withdrawal_is_well_formed(&tuple),
+            "{tuple:?}, ts_valid={}, sums={:?}",
+            tuple.created_at_time_ns
+                == crate::management::nonce_to_created_at_time(tuple.operation_id),
+            tuple.net_amount_raw.checked_add(tuple.fee_raw)
+        );
+        let events = vec![
+            Event::Init(args),
+            Event::OpenVault {
+                vault: vault(owner, ledger),
+                block_index: 1,
+                timestamp: Some(1),
+            },
+        ];
+        let journal = vec![
+            PendingPayoutJournalEntry {
+                after_legacy_event_count: 2,
+                event: PendingPayoutEvent::CollateralWithdrawalQueued {
+                    transfer: tuple.clone(),
+                    timestamp: 123,
+                },
+            },
+            PendingPayoutJournalEntry {
+                after_legacy_event_count: 2,
+                event: PendingPayoutEvent::CollateralWithdrawalDispatching {
+                    vault_id: 1,
+                    operation_id: tuple.operation_id,
+                    attempts: 1,
+                    timestamp: 124,
+                },
+            },
+        ];
+        let restored = replay_with_pending_payout_journal(
+            events.clone().into_iter(),
+            journal.clone().into_iter(),
+        )
+        .unwrap();
+        let pending = restored.pending_collateral_withdrawals.get(&1).unwrap();
+        assert_eq!(pending.operation_id, tuple.operation_id);
+        assert_eq!(pending.phase, CollateralWithdrawalPhase::Dispatching);
+        assert_eq!(restored.vault_id_to_vaults[&1].collateral_amount, 100);
+
+        let mut completed_events = events.clone();
+        completed_events.push(Event::CollateralWithdrawn {
+            vault_id: 1,
+            amount: ICP::new(20),
+            block_index: 77,
+            caller: Some(owner),
+            timestamp: Some(456),
+        });
+        let mut completed_journal = journal;
+        completed_journal.push(PendingPayoutJournalEntry {
+            after_legacy_event_count: 3,
+            event: PendingPayoutEvent::CollateralWithdrawalSettled {
+                vault_id: 1,
+                operation_id: tuple.operation_id,
+                block_index: 77,
+                forgive_dust_debt: false,
+                timestamp: 457,
+            },
+        });
+        let settled = replay_with_pending_payout_journal(
+            completed_events.into_iter(),
+            completed_journal.into_iter(),
+        )
+        .unwrap();
+        assert!(!settled.pending_collateral_withdrawals.contains_key(&1));
+        assert_eq!(settled.vault_id_to_vaults[&1].collateral_amount, 80);
+    }
+
+    #[test]
+    fn replay_refuses_same_vault_second_pending_withdrawal() {
+        let ledger = principal(6);
+        let owner = principal(7);
+        let first = transfer(owner, ledger);
+        let mut second = first.clone();
+        second.operation_id += 1;
+        second.memo = second.operation_id;
+        second.created_at_time_ns =
+            crate::management::nonce_to_created_at_time(second.operation_id);
+        let journals = vec![
+            PendingPayoutJournalEntry {
+                after_legacy_event_count: 2,
+                event: PendingPayoutEvent::CollateralWithdrawalQueued {
+                    transfer: first,
+                    timestamp: 1,
+                },
+            },
+            PendingPayoutJournalEntry {
+                after_legacy_event_count: 2,
+                event: PendingPayoutEvent::CollateralWithdrawalQueued {
+                    transfer: second,
+                    timestamp: 2,
+                },
+            },
+        ];
+        let events = vec![
+            Event::Init(init_args(ledger)),
+            Event::OpenVault {
+                vault: vault(owner, ledger),
+                block_index: 1,
+                timestamp: Some(1),
+            },
+        ];
+        assert!(
+            replay_with_pending_payout_journal(events.into_iter(), journals.into_iter()).is_err()
+        );
+    }
+
+    #[test]
+    fn overlapping_timer_and_caller_retries_keep_one_exact_transfer_tuple() {
+        let ledger = principal(8);
+        let owner = principal(9);
+        let tuple = transfer(owner, ledger);
+        // The shared per-vault guard serializes caller/timer dispatch in
+        // production. Replaying overlapping retry records also proves neither
+        // path can replace any pinned ledger tuple field.
+        let journal = vec![
+            PendingPayoutJournalEntry {
+                after_legacy_event_count: 2,
+                event: PendingPayoutEvent::CollateralWithdrawalQueued {
+                    transfer: tuple.clone(),
+                    timestamp: 1,
+                },
+            },
+            PendingPayoutJournalEntry {
+                after_legacy_event_count: 2,
+                event: PendingPayoutEvent::CollateralWithdrawalDispatching {
+                    vault_id: tuple.vault_id,
+                    operation_id: tuple.operation_id,
+                    attempts: 1,
+                    timestamp: 2,
+                },
+            },
+            PendingPayoutJournalEntry {
+                after_legacy_event_count: 2,
+                event: PendingPayoutEvent::CollateralWithdrawalDispatching {
+                    vault_id: tuple.vault_id,
+                    operation_id: tuple.operation_id,
+                    attempts: 2,
+                    timestamp: 3,
+                },
+            },
+        ];
+        let state = replay_with_pending_payout_journal(
+            vec![
+                Event::Init(init_args(ledger)),
+                Event::OpenVault {
+                    vault: vault(owner, ledger),
+                    block_index: 1,
+                    timestamp: Some(1),
+                },
+            ]
+            .into_iter(),
+            journal.into_iter(),
+        )
+        .expect("both retries replay against one exact obligation");
+        let recovered = &state.pending_collateral_withdrawals[&tuple.vault_id];
+        assert_eq!(recovered.operation_id, tuple.operation_id);
+        assert_eq!(recovered.ledger, tuple.ledger);
+        assert_eq!(recovered.owner, tuple.owner);
+        assert_eq!(recovered.gross_amount_raw, tuple.gross_amount_raw);
+        assert_eq!(recovered.net_amount_raw, tuple.net_amount_raw);
+        assert_eq!(recovered.fee_raw, tuple.fee_raw);
+        assert_eq!(recovered.memo, tuple.memo);
+        assert_eq!(recovered.created_at_time_ns, tuple.created_at_time_ns);
+        assert_eq!(recovered.dispatch_attempts, 2);
+    }
+
+    #[test]
+    fn first_typed_bad_fee_reprices_only_after_proven_no_effect_dispatch() {
+        let ledger = principal(10);
+        let owner = principal(5);
+        let mut state = State::from(init_args(ledger));
+        let mut original = transfer(owner, ledger);
+        original.phase = CollateralWithdrawalPhase::Dispatching;
+        original.dispatch_attempts = 1;
+        state
+            .pending_collateral_withdrawals
+            .insert(1, original.clone());
+        let repriced =
+            record_collateral_withdrawal_repriced_at(&mut state, 1, original.operation_id, 3, 456)
+                .expect("first typed BadFee can be safely re-pinned");
+        assert_ne!(repriced.operation_id, original.operation_id);
+        assert_eq!(repriced.gross_amount_raw, original.gross_amount_raw);
+        assert_eq!(repriced.fee_raw, 3);
+        assert_eq!(repriced.net_amount_raw, 17);
+        assert_eq!(repriced.phase, CollateralWithdrawalPhase::Reserved);
+        assert_eq!(repriced.dispatch_attempts, 0);
+        assert!(state
+            .consumed_collateral_withdrawal_ids
+            .contains(&original.operation_id));
+
+        let mut later = repriced.clone();
+        later.phase = CollateralWithdrawalPhase::Dispatching;
+        later.dispatch_attempts = 2;
+        state.pending_collateral_withdrawals.insert(1, later);
+        assert!(
+            record_collateral_withdrawal_repriced_at(&mut state, 1, repriced.operation_id, 4, 789,)
+                .is_none(),
+            "later dispatches may not mint a new transfer identity"
+        );
     }
 }

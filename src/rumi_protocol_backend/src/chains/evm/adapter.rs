@@ -20,8 +20,8 @@ use async_trait::async_trait;
 use candid::Principal;
 
 use crate::chains::adapter::{
-    ChainAdapter, ChainAdapterError, DepositRecord, FinalitySnapshot, MintInstruction,
-    SignedBurn, SignedMint, SignedWithdrawal, WithdrawalRequest,
+    ChainAdapter, ChainAdapterError, DepositRecord, FinalitySnapshot, MintInstruction, SignedBurn,
+    SignedMint, SignedWithdrawal, WithdrawalRequest,
 };
 use crate::chains::config::ChainId;
 use crate::state::read_state;

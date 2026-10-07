@@ -13,7 +13,11 @@ vi.mock('@dfinity/agent', async () => {
   const actual = await vi.importActual<typeof import('@dfinity/agent')>('@dfinity/agent');
   return {
     ...actual,
-    HttpAgent: vi.fn((options: any) => ({ identity: options.identity, fetchRootKey: vi.fn() })),
+    HttpAgent: vi.fn(class MockHttpAgent {
+      identity: any;
+      fetchRootKey = vi.fn();
+      constructor(options: any) { this.identity = options.identity; }
+    }),
     Actor: {
       ...actual.Actor,
       createActor: vi.fn((_idl: any, { agent, canisterId }: any) => ({

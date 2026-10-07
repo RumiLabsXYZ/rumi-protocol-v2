@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import { get } from 'svelte/store';
+  import { Principal } from '@dfinity/principal';
   import { developerAccess } from '../lib/stores/developer';
   import { formatNumber, formatStableTx } from '$lib/utils/format';
   import { interpolateMultiplier, computeProjectedRate } from '$lib/utils/interpolate';
@@ -8,10 +10,14 @@
   import { appDataStore, protocolStatus, isLoadingProtocol } from '$lib/stores/appDataStore';
   import { walletStore, isConnected, principal } from '$lib/stores/wallet';
   import { protocolService } from '$lib/services/protocol';
+  import type { ActionBoundContext } from '$lib/services/protocol';
+  import { publicActor } from '$lib/services/protocol/apiClient';
   import { MINIMUM_CR, LIQUIDATION_CR } from '$lib/protocol';
   import { collateralStore, activeCollateralTypes } from '$lib/stores/collateralStore';
   import { newVaultCollateralTypes, isHiddenForNewVaults } from '$lib/utils/newVaultCollateralPolicy';
-  import { CANISTER_IDS } from '$lib/config';
+  import { collateralSequenceLockName } from '$lib/utils/collateralSequenceLock';
+  import { CANISTER_IDS, CONFIG } from '$lib/config';
+  import { walletSessionGeneration } from '$lib/services/auth';
   import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
   import MultiplierBadge from '$lib/components/points/MultiplierBadge.svelte';
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
@@ -28,6 +34,17 @@
   let errorMessage = '';
   let successMessage = '';
   let actionInProgress = false;
+  type RootOpenStage = 'opening' | 'borrow_ready' | 'borrow_pending' | 'ambiguous' | 'done';
+  type RootOpenIntent = {
+    version: 1; principal: string; network: string; ledger: string; collateralPrincipal: string;
+    requestId: string; collateralRaw: string; borrowRaw: string; collateralAmount: number;
+    createdAt: number;
+    icusdAmount: number; vaultId: number | null; stage: RootOpenStage;
+  };
+  const ROOT_OPEN_PREFIX = 'rumi_root_open_intent_';
+  const ROOT_NETWORK = CONFIG.isLocal ? 'local' : 'mainnet';
+  let rootOpenIntent: RootOpenIntent | null = null;
+  let rootIngressWarning = '';
   let showDevInput = false;
   let xrpBorrowIntent: {
     collateralAmount: number;
@@ -202,14 +219,367 @@
     if (maxBorrow > 0) icusdAmount = maxBorrow;
   }
 
+  function rootOpenKey(principalText: string) {
+    return `${ROOT_OPEN_PREFIX}${ROOT_NETWORK}_${principalText}`;
+  }
+
+  function sameRootOpenLineage(left: Partial<RootOpenIntent> | null, right: RootOpenIntent) {
+    return !!left && left.principal === right.principal && left.network === right.network &&
+      left.ledger === right.ledger && left.requestId === right.requestId &&
+      left.collateralRaw === right.collateralRaw && left.borrowRaw === right.borrowRaw &&
+      left.collateralPrincipal === right.collateralPrincipal && left.createdAt === right.createdAt;
+  }
+
+  function persistRootOpenIntent(record: RootOpenIntent | null, ownerText = record?.principal, expectedCurrent?: RootOpenIntent) {
+    if (!ownerText) return false;
+    try {
+      if (record) {
+        const existing = localStorage.getItem(rootOpenKey(ownerText));
+        if (existing) {
+          const current = JSON.parse(existing) as Partial<RootOpenIntent>;
+          if (!sameRootOpenLineage(current, record)) return false;
+        }
+        localStorage.setItem(rootOpenKey(ownerText), JSON.stringify(record));
+      }
+      else {
+        if (expectedCurrent) {
+          const existing = localStorage.getItem(rootOpenKey(ownerText));
+          if (!existing || !sameRootOpenLineage(JSON.parse(existing) as Partial<RootOpenIntent>, expectedCurrent)) return false;
+        }
+        localStorage.removeItem(rootOpenKey(ownerText));
+      }
+      return true;
+    } catch { return false; }
+  }
+
+  function updateRootOpenIntent(record: RootOpenIntent): boolean {
+    if (!persistRootOpenIntent(record)) return false;
+    if ($principal?.toText() === record.principal) rootOpenIntent = record;
+    return true;
+  }
+
+  function parseRootOpenIntent(ownerText: string): RootOpenIntent | null {
+    try {
+      const value = JSON.parse(localStorage.getItem(rootOpenKey(ownerText)) || 'null');
+      if (!value || value.version !== 1 || value.principal !== ownerText || value.network !== ROOT_NETWORK ||
+          typeof value.ledger !== 'string' || typeof value.collateralPrincipal !== 'string' ||
+          typeof value.requestId !== 'string' || !/^\d+$/.test(value.requestId) ||
+          typeof value.collateralRaw !== 'string' || !/^\d+$/.test(value.collateralRaw) ||
+          typeof value.borrowRaw !== 'string' || !/^\d+$/.test(value.borrowRaw) ||
+          typeof value.createdAt !== 'number' || !Number.isFinite(value.createdAt) ||
+          typeof value.collateralAmount !== 'number' || !Number.isFinite(value.collateralAmount) || value.collateralAmount <= 0 ||
+          typeof value.icusdAmount !== 'number' || !Number.isFinite(value.icusdAmount) || value.icusdAmount <= 0 ||
+          !(value.vaultId === null || (typeof value.vaultId === 'number' && Number.isSafeInteger(value.vaultId))) ||
+          !['opening', 'borrow_ready', 'borrow_pending', 'ambiguous', 'done'].includes(value.stage)) return null;
+      return value as RootOpenIntent;
+    } catch { return null; }
+  }
+
+  function makeRootActionContext(ownerText: string): ActionBoundContext {
+    const session = get(walletSessionGeneration);
+    return {
+      expectedPrincipalText: ownerText,
+      assertCurrent: () => {
+        if ($principal?.toText() !== ownerText || get(walletSessionGeneration) !== session) {
+          throw new Error('Wallet session changed. Reconnect and recheck the saved operation.');
+        }
+        return true;
+      },
+    };
+  }
+
+  async function rootVaultSnapshot(ownerText: string): Promise<Array<{ vaultId: number; collateralPrincipal: string; collateralAmount: bigint; borrowedIcusd: bigint }>> {
+    const owner = Principal.fromText(ownerText);
+    const vaults = await publicActor.get_vaults([owner]);
+    return vaults.map((vault: any) => ({
+      vaultId: Number(vault.vault_id),
+      collateralPrincipal: vault.collateral_type.toText(),
+      collateralAmount: BigInt(vault.collateral_amount),
+      borrowedIcusd: BigInt(vault.borrowed_icusd_amount),
+    }));
+  }
+
+  function rootStatusMatches(record: RootOpenIntent, status: any): boolean {
+    return !!status && status.owner.toText() === record.principal && status.ledger.toText() === record.ledger &&
+      status.request_id.toString() === record.requestId && status.amount_raw.toString() === record.collateralRaw &&
+      'Open' in status.operation && status.operation.Open.collateral_type.toText() === record.collateralPrincipal;
+  }
+
+  async function reconcileRootOpen(ownerText: string) {
+    const ctx = makeRootActionContext(ownerText);
+    let stored = parseRootOpenIntent(ownerText);
+    rootIngressWarning = '';
+    rootOpenIntent = stored;
+    if (stored) {
+      if (stored.stage === 'done') return;
+      try {
+        const savedCollateralInfo = collateralStore.getCollateralInfo(stored.collateralPrincipal);
+        if (!savedCollateralInfo && stored.collateralPrincipal !== CANISTER_IDS.ICP_LEDGER) {
+          rootIngressWarning = 'Collateral settings are still loading. The saved request remains held until its ledger can be verified.';
+          return;
+        }
+        if (stored.ledger !== (savedCollateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId)) {
+          rootIngressWarning = 'The saved collateral ledger no longer matches this asset. Open is paused for safety.';
+          return;
+        }
+        const status = await protocolService.getCollateralIngressBound(ctx, stored.ledger, BigInt(stored.requestId));
+        ctx.assertCurrent();
+        if (!rootStatusMatches(stored, status)) {
+          stored = { ...stored, stage: 'ambiguous' };
+          rootOpenIntent = stored; persistRootOpenIntent(stored);
+          rootIngressWarning = 'The saved collateral request is not present in the retained journal. Do not create another vault until you inspect your account and resolve this request.';
+          return;
+        }
+        if (status && 'Rejected' in status.phase) {
+          const message = status.result[0] && 'Rejected' in status.result[0] ? status.result[0].Rejected.message : 'The backend recorded this collateral request as rejected.';
+          if (!persistRootOpenIntent(null, ownerText, stored)) {
+            rootIngressWarning = 'A newer collateral intent replaced this request in another tab. The older result was not allowed to clear it.';
+            rootOpenIntent = parseRootOpenIntent(ownerText);
+            return;
+          }
+          rootOpenIntent = null;
+          errorMessage = message;
+          return;
+        }
+        const vaults = await rootVaultSnapshot(ownerText);
+        ctx.assertCurrent();
+        if (status && 'Complete' in status.phase && status.result[0] && 'Open' in status.result[0]) {
+          const vaultId = Number(status.result[0].Open.vault_id);
+          const vault = vaults.find((candidate) => candidate.vaultId === vaultId);
+          if (!vault || vault.collateralAmount.toString() !== stored.collateralRaw || vault.collateralPrincipal !== stored.collateralPrincipal) {
+            stored = { ...stored, vaultId, stage: 'ambiguous' };
+          } else if (stored.stage === 'borrow_pending') {
+            // The vault balance can show that debt exists, but it cannot attribute that debt to
+            // the borrow whose reply was lost (another tab/action may have borrowed the same amount).
+            // Keep the operation unresolved unless the original bound call returned its typed receipt.
+            stored = { ...stored, vaultId, stage: 'ambiguous' };
+          } else if (stored.stage === 'opening' || stored.stage === 'ambiguous') {
+            stored = { ...stored, vaultId, stage: vault.borrowedIcusd === 0n ? 'borrow_ready' : 'ambiguous' };
+          } else if (stored.stage === 'borrow_ready' && vault.borrowedIcusd !== 0n) {
+            stored = { ...stored, vaultId, stage: 'ambiguous' };
+          }
+          if (!updateRootOpenIntent(stored)) {
+            rootIngressWarning = 'A newer collateral intent replaced this request in another tab. The older result was not allowed to overwrite it.';
+            rootOpenIntent = parseRootOpenIntent(ownerText);
+            return;
+          }
+          if (stored.stage === 'borrow_ready') successMessage = `Vault #${vaultId} is open with collateral. Borrowing is a separate confirmation.`;
+          else if (stored.stage === 'done') successMessage = `Vault #${vaultId} opened and ${stored.icusdAmount} icUSD borrowing is confirmed.`;
+          else rootIngressWarning = `Vault #${vaultId} exists, but its borrow outcome is unresolved. Recheck before any further action.`;
+        } else {
+          stored = { ...stored, stage: 'ambiguous' };
+          if (!updateRootOpenIntent(stored)) {
+            rootIngressWarning = 'A newer collateral intent replaced this request in another tab. The older result was not allowed to overwrite it.';
+            rootOpenIntent = parseRootOpenIntent(ownerText);
+            return;
+          }
+          rootIngressWarning = status?.last_error[0] || 'Collateral is pending or held. Do not create another vault; recheck this request later.';
+        }
+      } catch {
+        rootIngressWarning = 'The saved collateral request could not be checked safely. No new open or borrow will be submitted.';
+      }
+      return;
+    }
+    try {
+      if (localStorage.getItem(rootOpenKey(ownerText)) !== null) {
+        rootIngressWarning = 'A saved collateral request record is unreadable. No new open will be submitted until the record is resolved manually.';
+        return;
+      }
+    } catch {
+      rootIngressWarning = 'Local collateral request storage is unavailable. Opening is paused until it can be checked safely.';
+      return;
+    }
+
+    // Storage can be lost after a successful open. The owner-scoped journal is checked before
+    // offering a fresh ID; an unresolved active request or unborrowed latest open blocks new opens.
+    try {
+      const ledger = selectedCollateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
+      const state = await protocolService.getCollateralIngressStateBound(ctx, ledger);
+      ctx.assertCurrent();
+      if (state.active_request[0]) {
+        rootIngressWarning = 'A collateral request is already active for this account. Inspect or reconcile it before opening another vault.';
+        return;
+      }
+      const latest = state.latest_result[0];
+      if (latest && 'Complete' in latest.phase && latest.result[0] && 'Open' in latest.result[0]) {
+        const vaultId = Number(latest.result[0].Open.vault_id);
+        const vault = (await rootVaultSnapshot(ownerText)).find((candidate) => candidate.vaultId === vaultId);
+        ctx.assertCurrent();
+        if (!vault || vault.borrowedIcusd === 0n) {
+          rootIngressWarning = `The collateral journal shows an open unborrowed vault #${vaultId}, but its local borrow intent is missing. Inspect your vaults before opening another.`;
+        }
+      }
+      const existingZeroDebtVault = (await rootVaultSnapshot(ownerText)).find((vault) =>
+        vault.collateralPrincipal === selectedCollateralPrincipal && vault.borrowedIcusd === 0n
+      );
+      ctx.assertCurrent();
+      if (existingZeroDebtVault) {
+        rootIngressWarning = `Vault #${existingZeroDebtVault.vaultId} has no debt and may be the result of an earlier open with lost local state. Inspect it before opening another.`;
+      }
+    } catch {
+      rootIngressWarning = 'Collateral request history could not be checked. Opening is paused until the account journal can be read safely.';
+    }
+  }
+
+  async function runRootOpen(ownerText: string) {
+    const locks = typeof navigator !== 'undefined' ? (navigator as any).locks : null;
+    if (!locks?.request) throw new Error('This browser cannot safely coordinate collateral opens across tabs. Use one tab and try again when Web Locks are available.');
+    // Freeze the exact terms before waiting for the lock; all routes using this
+    // owner/ledger request sequence share the same Web Lock name.
+    const submittedCollateralPrincipal = selectedCollateralPrincipal;
+    const submittedCollateralInfo = collateralStore.getCollateralInfo(submittedCollateralPrincipal);
+    const submittedCollateralAmount = collateralAmount;
+    const submittedIcusdAmount = icusdAmount;
+    const ledger = submittedCollateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
+    return locks.request(collateralSequenceLockName(ownerText, ROOT_NETWORK, ledger), async () => {
+      const ctx = makeRootActionContext(ownerText);
+      const decimals = submittedCollateralInfo?.decimals ?? 8;
+      const collateralRaw = BigInt(Math.floor(submittedCollateralAmount * Math.pow(10, decimals)));
+      const borrowRaw = BigInt(Math.floor(submittedIcusdAmount * 100_000_000));
+      const statusState = await protocolService.getCollateralIngressStateBound(ctx, ledger);
+      ctx.assertCurrent();
+      if (statusState.active_request[0]) throw new Error('A collateral request is already active for this account. Recheck it before opening another vault.');
+      const latest = statusState.latest_result[0];
+      if (latest && 'Complete' in latest.phase && latest.result[0] && 'Open' in latest.result[0]) {
+        const latestVaultId = Number(latest.result[0].Open.vault_id);
+        const latestVault = (await rootVaultSnapshot(ownerText)).find((vault) => vault.vaultId === latestVaultId);
+        ctx.assertCurrent();
+        if (!latestVault || latestVault.borrowedIcusd === 0n) {
+          throw new Error(`The latest request opened unborrowed vault #${latestVaultId}. Inspect your vaults before creating another.`);
+        }
+      }
+      const existingZeroDebtVault = (await rootVaultSnapshot(ownerText)).find((vault) =>
+        vault.collateralPrincipal === submittedCollateralPrincipal && vault.borrowedIcusd === 0n
+      );
+      ctx.assertCurrent();
+      if (existingZeroDebtVault) {
+        throw new Error(`Vault #${existingZeroDebtVault.vaultId} has no debt and may be an earlier open with lost local state. Inspect it before creating another.`);
+      }
+      const requestId = statusState.next_request_id;
+      if (requestId <= 0n) throw new Error('The backend returned an invalid collateral request ID.');
+      const record: RootOpenIntent = {
+        version: 1, principal: ownerText, network: ROOT_NETWORK, ledger,
+        collateralPrincipal: submittedCollateralPrincipal, requestId: requestId.toString(),
+        collateralRaw: collateralRaw.toString(), borrowRaw: borrowRaw.toString(),
+        collateralAmount: submittedCollateralAmount, icusdAmount: submittedIcusdAmount,
+        createdAt: Date.now(), vaultId: null, stage: 'opening',
+      };
+      // This durable write is before any approval or open call; the Nat and exact inputs survive reload.
+      if (!persistRootOpenIntent(record)) throw new Error('The operation could not be saved safely, so no approval or open was submitted.');
+      if ($principal?.toText() === ownerText) rootOpenIntent = record;
+
+      const result = await protocolService.openVaultV2Bound(ctx, requestId, collateralRaw, submittedCollateralPrincipal);
+      let status = result.status;
+      if (!status) {
+        try { status = await protocolService.getCollateralIngressBound(ctx, ledger, requestId); } catch { /* leave unresolved */ }
+      }
+      ctx.assertCurrent();
+      if (rootStatusMatches(record, status) && status && 'Rejected' in status.phase) {
+        if (!persistRootOpenIntent(null, ownerText, record)) {
+          rootIngressWarning = 'A newer collateral intent replaced this request in another tab. The older result was not allowed to clear it.';
+          rootOpenIntent = parseRootOpenIntent(ownerText);
+          return;
+        }
+        if ($principal?.toText() === ownerText) rootOpenIntent = null;
+        const message = status.result[0] && 'Rejected' in status.result[0] ? status.result[0].Rejected.message : 'The backend recorded this collateral request as rejected.';
+        throw new Error(message);
+      }
+      if (result.kind === 'predispatch_aborted') {
+        if (!persistRootOpenIntent(null, ownerText, record)) {
+          rootIngressWarning = 'A newer collateral intent replaced this request in another tab. The older result was not allowed to clear it.';
+          rootOpenIntent = parseRootOpenIntent(ownerText);
+          return;
+        }
+        if ($principal?.toText() === ownerText) rootOpenIntent = null;
+        throw new Error(`${result.errorMessage || 'Collateral approval was not completed.'}${result.approvalMayHaveMutated ? ' A token approval may have changed; collateral was not opened.' : ''}`);
+      }
+      const vaults = await rootVaultSnapshot(ownerText);
+      ctx.assertCurrent();
+      if (rootStatusMatches(record, status) && status && 'Complete' in status.phase && status.result[0] && 'Open' in status.result[0]) {
+        const vaultId = Number(status.result[0].Open.vault_id);
+        const vault = vaults.find((candidate) => candidate.vaultId === vaultId);
+        if (vault && vault.collateralAmount === collateralRaw && vault.collateralPrincipal === submittedCollateralPrincipal && vault.borrowedIcusd === 0n) {
+          const ready = { ...record, vaultId, stage: 'borrow_ready' as const };
+          if (!updateRootOpenIntent(ready)) throw new Error('Vault open was confirmed, but local state changed. Reconcile the saved request before borrowing.');
+          successMessage = `Vault #${vaultId} is open with collateral. Review and click Borrow separately to continue.`;
+          return;
+        }
+      }
+      const unresolved = { ...record, stage: 'ambiguous' as const };
+      updateRootOpenIntent(unresolved);
+      rootIngressWarning = `${status?.last_error[0] || 'The open is pending or unresolved. The same saved request is held; do not start another open.'}${result.approvalMayHaveMutated ? ' A token approval may also have changed.' : ''}`;
+    });
+  }
+
+  async function borrowRootVault() {
+    const record = rootOpenIntent;
+    if (!record || record.stage !== 'borrow_ready' || record.vaultId === null) return;
+    const locks = typeof navigator !== 'undefined' ? (navigator as any).locks : null;
+    if (!locks?.request) { errorMessage = 'This browser cannot safely coordinate the borrow across tabs. Use one tab and try again when Web Locks are available.'; return; }
+    actionInProgress = true; errorMessage = ''; rootIngressWarning = '';
+    try {
+      await locks.request(collateralSequenceLockName(record.principal, ROOT_NETWORK, record.ledger), async () => {
+        const current = parseRootOpenIntent(record.principal);
+        if (!current || current.requestId !== record.requestId || current.stage !== 'borrow_ready') throw new Error('The saved open intent changed in another tab. Recheck before borrowing.');
+        const ctx = makeRootActionContext(record.principal);
+        const status = await protocolService.getCollateralIngressBound(ctx, record.ledger, BigInt(record.requestId));
+        if (!rootStatusMatches(record, status) || !status || !('Complete' in status.phase) || !status.result[0] || !('Open' in status.result[0])) {
+          throw new Error('The exact collateral open is not confirmed in the backend journal. Borrowing is paused.');
+        }
+        const before = (await rootVaultSnapshot(record.principal)).find((vault) => vault.vaultId === record.vaultId);
+        ctx.assertCurrent();
+        if (!before || before.collateralAmount.toString() !== record.collateralRaw || before.borrowedIcusd !== 0n) {
+          throw new Error('The vault is missing, changed, or already has debt. Recheck before borrowing.');
+        }
+        if (collateralAmount !== record.collateralAmount || icusdAmount !== record.icusdAmount || !isValidCollateralRatio) {
+          throw new Error('The saved borrow terms changed or no longer satisfy the displayed collateral ratio. Review the terms and open a new vault only after resolving this saved operation.');
+        }
+        const pending = { ...record, stage: 'borrow_pending' as const };
+        if (!updateRootOpenIntent(pending)) throw new Error('The borrow could not be saved safely, so nothing was submitted.');
+        const result = await protocolService.borrowFromVaultBound(ctx, record.vaultId!, BigInt(record.borrowRaw));
+        const after = (await rootVaultSnapshot(record.principal)).find((vault) => vault.vaultId === record.vaultId);
+        ctx.assertCurrent();
+        if (result.kind === 'dispatched_ok' && result.submittedIcusdRaw === BigInt(record.borrowRaw) &&
+            result.blockIndex !== null && after?.borrowedIcusd.toString() === record.borrowRaw) {
+          updateRootOpenIntent({ ...pending, stage: 'done' });
+          successMessage = `Successfully created vault #${record.vaultId} and borrowed ${record.icusdAmount} icUSD.`;
+          if ($principal) await appDataStore.refreshAll($principal);
+        } else if (result.kind === 'predispatch_aborted') {
+          updateRootOpenIntent({ ...record, stage: 'borrow_ready' });
+          errorMessage = `${result.errorMessage || 'Borrow was not submitted.'} The vault remains open; use the separate borrow action after rechecking.`;
+        } else {
+          updateRootOpenIntent({ ...pending, stage: 'ambiguous' });
+          rootIngressWarning = 'Borrow was submitted or may have reached the backend, but exact debt is not confirmed. Do not retry until the vault state is resolved.';
+        }
+      });
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : 'Borrow result is unresolved.';
+    } finally { actionInProgress = false; }
+  }
+
+  async function recheckRootOpen() {
+    const record = rootOpenIntent;
+    if (!record || !['opening', 'borrow_pending', 'ambiguous'].includes(record.stage)) return;
+    actionInProgress = true;
+    try { await reconcileRootOpen(record.principal); }
+    finally { actionInProgress = false; }
+  }
+
   onMount(() => {
     loadProtocolData();
     refreshPrice();
     seasonStore.ensureLoaded();
     // Ensure collateral configs are loaded (provides per-asset CR, fees, etc.)
-    collateralStore.fetchSupportedCollateral();
+    void collateralStore.fetchSupportedCollateral().then(() => {
+      const connectedPrincipal = get(principal);
+      if (connectedPrincipal) void reconcileRootOpen(connectedPrincipal.toText());
+    }).catch(() => {});
+    const unsubscribePrincipal = principal.subscribe((value) => {
+      if (value) void reconcileRootOpen(value.toText());
+      else { rootOpenIntent = null; rootIngressWarning = ''; }
+    });
     priceRefreshInterval = setInterval(refreshPrice, 30000);
-    return () => { if (priceRefreshInterval) clearInterval(priceRefreshInterval); };
+    return () => { unsubscribePrincipal(); if (priceRefreshInterval) clearInterval(priceRefreshInterval); };
   });
 
   onDestroy(() => { if (priceRefreshInterval) clearInterval(priceRefreshInterval); });
@@ -230,6 +600,7 @@
   async function createVault() {
     if (xrpBorrowFlowActive) return;
     if (!$isConnected) { errorMessage = 'Please connect your wallet first'; return; }
+    if (rootIngressWarning) { errorMessage = rootIngressWarning; return; }
     if (collateralAmount <= 0) { errorMessage = 'Please enter a valid collateral amount'; return; }
     // Native XRP: the reserve comes OUT of the sent amount, so anything at or
     // below the reserve credits zero collateral and the backend rejects it.
@@ -249,20 +620,24 @@
       };
       return;
     }
+    if (rootOpenIntent && rootOpenIntent.stage !== 'done') {
+      errorMessage = rootOpenIntent.stage === 'borrow_ready'
+        ? `Vault #${rootOpenIntent.vaultId} is already open. Use the separate Borrow confirmation below.`
+        : 'A previous collateral request is unresolved. Recheck it before starting another open.';
+      return;
+    }
+    if (rootOpenIntent?.stage === 'done') {
+      if (!persistRootOpenIntent(null, rootOpenIntent.principal, rootOpenIntent)) {
+        rootIngressWarning = 'A newer collateral intent replaced this completed record in another tab. Recheck account state before opening again.';
+        return;
+      }
+      rootOpenIntent = null;
+    }
     actionInProgress = true; errorMessage = ''; successMessage = '';
     try {
-      // Compound: open vault + borrow in one backend call.
-      // For Oisy this batches approve + open_vault_and_borrow into a single popup.
-      const result = await protocolService.openVaultAndBorrow(collateralAmount, icusdAmount, selectedCollateralPrincipal);
-
-      if (result.success) {
-        const vaultLabel = result.vaultId !== undefined ? `vault #${result.vaultId}` : 'vault';
-        successMessage = result.oisyResilient
-          ? `Submitted: created ${vaultLabel} and borrowed ${icusdAmount} icUSD. (Wallet glitch ignored — confirmed on-chain.)`
-          : `Successfully created ${vaultLabel} and borrowed ${icusdAmount} icUSD!`;
-        if ($principal) await appDataStore.refreshAll($principal);
-        collateralAmount = 1; icusdAmount = 5;
-      } else { errorMessage = result.error || 'Failed to create vault'; }
+      const ownerText = $principal?.toText();
+      if (!ownerText) throw new Error('Please connect your wallet first.');
+      await runRootOpen(ownerText);
     } catch (error) {
       console.error('Error creating vault:', error);
       errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
@@ -397,6 +772,20 @@
 
             {#if errorMessage}<div class="msg-error">{errorMessage}</div>{/if}
             {#if successMessage}<div class="msg-success">{successMessage}</div>{/if}
+            {#if rootIngressWarning}
+              <div class="msg-error" role="alert">{rootIngressWarning}</div>
+              {#if rootOpenIntent && ['opening', 'borrow_pending', 'ambiguous'].includes(rootOpenIntent.stage)}
+                <button class="btn-primary cta-button" type="button" disabled={actionInProgress} on:click={recheckRootOpen}>
+                  {actionInProgress ? 'Rechecking…' : 'Recheck saved request'}
+                </button>
+              {/if}
+            {/if}
+            {#if rootOpenIntent?.stage === 'borrow_ready'}
+              <div class="msg-success">Vault #{rootOpenIntent.vaultId} is open. Borrowing requires this separate confirmation.</div>
+              <button class="btn-primary cta-button" type="button" disabled={actionInProgress || !$isConnected} on:click={borrowRootVault}>
+                {actionInProgress ? 'Borrowing…' : `Borrow ${rootOpenIntent.icusdAmount} icUSD from vault #${rootOpenIntent.vaultId}`}
+              </button>
+            {/if}
 
             {#if $earningActive}
               <div class="points-hint">
@@ -408,12 +797,12 @@
             <button
               class="btn-primary cta-button"
               on:click={createVault}
-              disabled={actionInProgress || xrpBorrowFlowActive || !$isConnected}
+              disabled={actionInProgress || xrpBorrowFlowActive || !$isConnected || Boolean(rootIngressWarning) || (Boolean(rootOpenIntent) && rootOpenIntent?.stage !== 'done')}
             >
               {#if !$isConnected}Connect Wallet to Continue
-              {:else if actionInProgress}Creating Vault…
+              {:else if actionInProgress}Opening Vault…
               {:else if xrpBorrowFlowActive}Preparing XRP vault...
-              {:else}Create Vault & Borrow icUSD{/if}
+              {:else}Create Vault (Borrow Separately){/if}
             </button>
           </div>
         {:else}

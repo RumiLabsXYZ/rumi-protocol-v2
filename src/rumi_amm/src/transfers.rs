@@ -13,6 +13,18 @@ use std::collections::HashMap;
 /// solvent (we send slightly less) rather than risking an over-send.
 const DEFAULT_LEDGER_FEE_E8S: u128 = 10_000;
 
+/// Convert a ledger block index without turning an unrepresentable committed
+/// transfer into block zero. Callers must reconcile the same operation before
+/// retrying when this error is returned.
+fn checked_block_index(value: candid::Nat, source: &str) -> Result<u64, String> {
+    value.0.try_into().map_err(|_| {
+        format!(
+            "{} confirmed a transfer, but its block index exceeds u64; outcome is committed and must be reconciled before retry",
+            source
+        )
+    })
+}
+
 thread_local! {
     /// Per-ledger transfer-fee cache, populated lazily from `icrc1_fee` on the
     /// first outbound transfer to a ledger. Heap-only (not persisted), so it is
@@ -84,18 +96,11 @@ pub async fn transfer_from_user(
         ic_cdk::call(ledger, "icrc2_transfer_from", (args,)).await;
 
     match result {
-        Ok((Ok(block_index),)) => {
-            let idx: u64 = block_index.0.try_into().unwrap_or_else(|_| {
-                ic_cdk::println!("WARN: block index exceeds u64::MAX, returning 0");
-                0
-            });
-            Ok(idx)
-        }
+        Ok((Ok(block_index),)) => checked_block_index(block_index, "icrc2_transfer_from"),
         // Audit Wave-3 (ICRC-003): Duplicate means the previous attempt's
         // transfer landed at `duplicate_of`. Treat as success.
         Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => {
-            let idx: u64 = duplicate_of.0.try_into().unwrap_or(0);
-            Ok(idx)
+            checked_block_index(duplicate_of, "icrc2_transfer_from Duplicate")
         }
         Ok((Err(e),)) => Err(format!("icrc2_transfer_from error: {:?}", e)),
         Err((code, msg)) => Err(format!("inter-canister call failed: {:?} - {}", code, msg)),
@@ -230,16 +235,9 @@ pub async fn transfer_to_user(
         ic_cdk::call(ledger, "icrc1_transfer", (args,)).await;
 
     match result {
-        Ok((Ok(block_index),)) => {
-            let idx: u64 = block_index.0.try_into().unwrap_or_else(|_| {
-                ic_cdk::println!("WARN: block index exceeds u64::MAX, returning 0");
-                0
-            });
-            Ok(idx)
-        }
+        Ok((Ok(block_index),)) => checked_block_index(block_index, "icrc1_transfer"),
         Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
-            let idx: u64 = duplicate_of.0.try_into().unwrap_or(0);
-            Ok(idx)
+            checked_block_index(duplicate_of, "icrc1_transfer Duplicate")
         }
         Ok((Err(TransferError::BadFee { expected_fee }),)) => {
             if let Ok(expected) = expected_fee.0.clone().try_into() {
@@ -317,17 +315,10 @@ pub async fn transfer_reward_icusd(
         ic_cdk::call(icusd_ledger, "icrc1_transfer", (args,)).await;
 
     match result {
-        Ok((Ok(block_index),)) => {
-            let idx: u64 = block_index.0.try_into().unwrap_or_else(|_| {
-                ic_cdk::println!("WARN: block index exceeds u64::MAX, returning 0");
-                0
-            });
-            Ok(idx)
-        }
+        Ok((Ok(block_index),)) => checked_block_index(block_index, "icrc1_transfer reward payout"),
         // Treat duplicates as success — the prior attempt landed.
         Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
-            let idx: u64 = duplicate_of.0.try_into().unwrap_or(0);
-            Ok(idx)
+            checked_block_index(duplicate_of, "icrc1_transfer reward payout Duplicate")
         }
         Ok((Err(TransferError::BadFee { expected_fee }),)) => {
             if let Ok(expected) = expected_fee.0.clone().try_into() {
@@ -340,5 +331,29 @@ pub async fn transfer_reward_icusd(
         }
         Ok((Err(e),)) => Err(format!("icrc1_transfer error: {:?}", e)),
         Err((code, msg)) => Err(format!("inter-canister call failed: {:?} - {}", code, msg)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_block_index;
+    use candid::Nat;
+
+    #[test]
+    fn checked_block_index_accepts_u64_max() {
+        assert_eq!(
+            checked_block_index(Nat::from(u64::MAX), "ledger").unwrap(),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn checked_block_index_rejects_values_above_u64_without_zero_fallback() {
+        let error = checked_block_index(Nat::from(u128::from(u64::MAX) + 1), "ledger")
+            .expect_err("oversized committed block index must fail closed");
+        assert!(error.contains("confirmed a transfer"));
+        assert!(error.contains("exceeds u64"));
+        assert!(error.contains("committed"));
+        assert!(error.contains("reconciled before retry"));
     }
 }

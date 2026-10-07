@@ -309,7 +309,8 @@ fn delete_chain_removes_zero_supply_chain() {
     s.last_observed_block.insert(c, 42);
     s.evm_burn_proof_floor_by_chain.insert(c, 42);
     s.evm_burn_proof_legacy_hold_through.insert(c, 41);
-    s.reserve_evm_burn_replay_id(c, 43, "0xabc", 7).expect("reserve direct proof identity");
+    s.reserve_evm_burn_replay_id(c, 43, "0xabc", 7)
+        .expect("reserve direct proof identity");
     s.hot_wallet_balance_e18.insert(c, 1_000);
     s.reorg_halted.insert(c, true);
     s.reorg_suspect_streak.insert(c, 2);
@@ -328,9 +329,15 @@ fn delete_chain_removes_zero_supply_chain() {
     s.manual_price_set_at_ns
         .insert((ChainId(7), "MON".to_string()), 456);
 
-    let err = delete_chain_in_state(&mut s, c).expect_err("pending replay tombstones pin the chain");
-    assert!(matches!(err, ChainAdminError::InvalidConfig(message) if message.contains("burn proofs awaiting observer coverage")));
-    assert!(s.chain_configs.contains_key(&c), "failed delete must preserve registration");
+    let err =
+        delete_chain_in_state(&mut s, c).expect_err("pending replay tombstones pin the chain");
+    assert!(
+        matches!(err, ChainAdminError::InvalidConfig(message) if message.contains("burn proofs awaiting observer coverage"))
+    );
+    assert!(
+        s.chain_configs.contains_key(&c),
+        "failed delete must preserve registration"
+    );
     assert!(s.has_evm_burn_replay_id(c, 43, "0xabc", 7));
     // A completed coverage window safely retires the tombstone, after which
     // the ordinary zero-supply deletion path can proceed.
@@ -358,12 +365,20 @@ fn delete_chain_removes_zero_supply_chain() {
         !s.last_observed_block.contains_key(&c),
         "last_observed_block retained"
     );
-    assert_eq!(s.evm_burn_proof_floor_by_chain.get(&c), Some(&43),
-        "deleting registration must not reopen covered burn history");
-    assert_eq!(s.evm_burn_proof_legacy_hold_through.get(&c), Some(&41),
-        "chain deletion must not erase ambiguous legacy history");
-    assert!(!s.has_evm_burn_replay_id(c, 43, "0xabc", 7),
-        "covered direct-proof identity is retired before deletion");
+    assert_eq!(
+        s.evm_burn_proof_floor_by_chain.get(&c),
+        Some(&43),
+        "deleting registration must not reopen covered burn history"
+    );
+    assert_eq!(
+        s.evm_burn_proof_legacy_hold_through.get(&c),
+        Some(&41),
+        "chain deletion must not erase ambiguous legacy history"
+    );
+    assert!(
+        !s.has_evm_burn_replay_id(c, 43, "0xabc", 7),
+        "covered direct-proof identity is retired before deletion"
+    );
     assert!(
         !s.hot_wallet_balance_e18.contains_key(&c),
         "hot_wallet_balance_e18 retained"
@@ -567,7 +582,11 @@ fn disable_then_enable_preserves_every_per_chain_state_entry() {
     assert_eq!(s.chain_supplies[&c], 100 * 100_000_000, "supply");
     assert!(s.chain_vaults.contains_key(&1), "vaults");
     assert_eq!(s.chain_contracts[&c], "0xabc", "bound contract");
-    assert_eq!(s.manual_prices[&(c, "MON".to_string())], 15_000_000, "price");
+    assert_eq!(
+        s.manual_prices[&(c, "MON".to_string())],
+        15_000_000,
+        "price"
+    );
     assert_eq!(
         s.manual_price_set_at_ns[&(c, "MON".to_string())],
         1_700_000_000_000_000_000,
@@ -602,9 +621,11 @@ fn disable_enable_can_be_cycled_repeatedly() {
     let mut s = MultiChainState::default();
     register_chain_in_state(&mut s, arg(), 0).expect("register");
     for round in 0..3 {
-        disable_chain_in_state(&mut s, ChainId(101)).unwrap_or_else(|e| panic!("disable {round}: {e:?}"));
+        disable_chain_in_state(&mut s, ChainId(101))
+            .unwrap_or_else(|e| panic!("disable {round}: {e:?}"));
         assert!(!s.chain_is_registered(ChainId(101)));
-        enable_chain_in_state(&mut s, ChainId(101)).unwrap_or_else(|e| panic!("enable {round}: {e:?}"));
+        enable_chain_in_state(&mut s, ChainId(101))
+            .unwrap_or_else(|e| panic!("enable {round}: {e:?}"));
         assert!(s.chain_is_registered(ChainId(101)));
     }
 }

@@ -309,6 +309,16 @@ pub(crate) fn rotate_queued_op_to_tail(q: &mut SettlementQueueV1, op_id: u64) {
     q.drain_order = normalized;
 }
 
+/// Reap terminal rows for one chain queue. This runs before selection as well
+/// as after a worker action: a queue with only terminal rows (or terminal rows
+/// plus ops blocked by a submit gate) otherwise has no selectable op and would
+/// return before releasing its bounded admission capacity.
+pub(super) fn prune_terminal_settlement_ops(state: &mut MultiChainState, chain: ChainId) {
+    if let Some(q) = state.settlement_queues.get_mut(&chain) {
+        q.prune_terminal();
+    }
+}
+
 /// On a confirmed on-chain mint: move `pending_mint_e8s` into `debt_e8s`, flip
 /// the vault to `Open`, and increment the chain supply.
 ///
@@ -772,6 +782,16 @@ pub fn claim_chain_collateral_in_state(
             crate::chains::settlement_queue::SettlementQueueError::OpIdSpaceExhausted => {
                 "Chain collateral claim payout operation ID space exhausted".to_string()
             }
+            crate::chains::settlement_queue::SettlementQueueError::QueueCapacityReached {
+                limit,
+            } => format!(
+                "Chain collateral claim payout queue is full (limit {limit}); retry after settlement progresses"
+            ),
+            crate::chains::settlement_queue::SettlementQueueError::ReplayProtectionCapacityReached {
+                limit,
+            } => format!(
+                "Chain collateral claim payout replay protection reached its permanent capacity (limit {limit}); operator intervention is required before new payouts can be admitted"
+            ),
         })?;
 
     let claim = state
@@ -1083,6 +1103,11 @@ pub async fn run_settlement(chain: ChainId) {
         return;
     }
 
+    // Terminal rows can be produced by observer/recovery paths outside this
+    // worker. Prune before selection so a queue with no actionable op still
+    // releases bounded admission capacity on every eligible tick.
+    mutate_state(|s| prune_terminal_settlement_ops(&mut s.multi_chain, chain));
+
     // Snapshot this chain's next actionable op. A tripped bad-debt circuit skips
     // queued risk-increasing ops at selection time so later burns, liquidation
     // swaps, and claim payouts can still reconcile.
@@ -1119,9 +1144,7 @@ pub async fn run_settlement(chain: ChainId) {
     // next tick's `select_next_op` is unaffected; `seen_idempotency_keys` is
     // preserved as the dup guard.
     mutate_state(|s| {
-        if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
-            q.prune_terminal();
-        }
+        prune_terminal_settlement_ops(&mut s.multi_chain, chain);
     });
 }
 
@@ -1551,6 +1574,72 @@ pub(crate) fn fundable_withdrawal_value(
     amount_e18.min(custody_balance.saturating_sub(gas_reserve))
 }
 
+/// Fail a queued withdrawal when the custody account cannot fund even the
+/// transaction gas. The reserve was taken at enqueue, so restore it and mark
+/// the op terminal in the same state mutation. A CAS on Queued makes retries
+/// and overlapping worker snapshots restore collateral at most once.
+pub(crate) fn fail_unfundable_queued_withdrawal_in_state(
+    state: &mut crate::chains::multi_chain_state::MultiChainState,
+    chain: ChainId,
+    op_id: u64,
+    reason: String,
+    now_ns: u64,
+) -> bool {
+    let Some(kind) = state
+        .settlement_queues
+        .get(&chain)
+        .and_then(|q| q.pending.get(&op_id))
+        .filter(|op| matches!(op.status, SettlementOpStatus::Queued))
+        .map(|op| op.kind.clone())
+    else {
+        return false;
+    };
+    let SettlementOpKind::NativeWithdrawal {
+        vault_id,
+        amount_e18,
+        ..
+    } = kind
+    else {
+        return false;
+    };
+    if amount_e18 == 0 {
+        return false;
+    }
+
+    let Some(vault) = state.chain_vaults.get_mut(&vault_id) else {
+        // Do not terminalize an op if its reserved collateral cannot be
+        // restored. A missing vault requires operator recovery.
+        return false;
+    };
+    if vault.collateral_chain != chain
+        || !matches!(
+            vault.status,
+            ChainVaultStatus::Open | ChainVaultStatus::Closing
+        )
+    {
+        // A mismatched chain or already-closed vault cannot safely receive
+        // the reserved collateral. Leave the queued row for reconciliation.
+        return false;
+    }
+    let Some(restored) = vault.collateral_amount_native.checked_add(amount_e18) else {
+        return false;
+    };
+    vault.collateral_amount_native = restored;
+    if vault.status == ChainVaultStatus::Closing {
+        vault.status = ChainVaultStatus::Open;
+    }
+
+    let Some(op) = state
+        .settlement_queues
+        .get_mut(&chain)
+        .and_then(|q| q.pending.get_mut(&op_id))
+    else {
+        unreachable!("queued withdrawal was synchronously checked above")
+    };
+    op.mark_failed(reason, now_ns);
+    true
+}
+
 pub(crate) fn exact_native_transfer_is_funded(
     amount_e18: u128,
     custody_balance: u128,
@@ -1918,7 +2007,37 @@ async fn submit_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_que
     let withdrawal_value = match &op.kind {
         SettlementOpKind::NativeWithdrawal { amount_e18, .. } => {
             match evm_rpc::get_balance(chain, &signer_addr).await {
-                Ok(bal) => Some(fundable_withdrawal_value(*amount_e18, bal, max_fee)),
+                Ok(bal) => {
+                    let value = fundable_withdrawal_value(*amount_e18, bal, max_fee);
+                    if *amount_e18 > 0 && value == 0 {
+                        let now = ic_cdk::api::time();
+                        let reason = format!(
+                            "custody balance {bal} cannot fund withdrawal gas at max fee {max_fee}"
+                        );
+                        let failed = mutate_state(|s| {
+                            fail_unfundable_queued_withdrawal_in_state(
+                                &mut s.multi_chain,
+                                chain,
+                                op_id,
+                                reason.clone(),
+                                now,
+                            )
+                        });
+                        if failed {
+                            crate::storage::record_event(
+                                &crate::event::Event::ChainSettlementFailed {
+                                    chain_id: chain,
+                                    op_id,
+                                    reason,
+                                    timestamp: now,
+                                },
+                            );
+                            log!(INFO, "[settlement chain={:?}] withdrawal op {} failed before signing because custody balance {} cannot fund transaction gas", chain, op_id, bal);
+                        }
+                        return;
+                    }
+                    Some(value)
+                }
                 Err(e) => {
                     log!(
                         INFO,

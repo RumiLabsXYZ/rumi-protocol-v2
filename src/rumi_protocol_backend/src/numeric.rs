@@ -21,7 +21,9 @@ pub const NANOS_PER_YEAR: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
 
 /// Exact floor of proportional accrued interest, without Decimal overflow.
 pub fn proportional_interest_share(repaid_e8s: u64, accrued_e8s: u64, debt_e8s: u64) -> u64 {
-    if debt_e8s == 0 || accrued_e8s == 0 || repaid_e8s == 0 { return 0; }
+    if debt_e8s == 0 || accrued_e8s == 0 || repaid_e8s == 0 {
+        return 0;
+    }
     let share = u128::from(repaid_e8s) * u128::from(accrued_e8s) / u128::from(debt_e8s);
     share.min(u128::from(accrued_e8s)) as u64
 }
@@ -159,7 +161,6 @@ impl<T> PartialEq<Token<T>> for u64 {
     }
 }
 
-
 // Keep enums instead of structs
 #[derive(PartialEq, Eq, Debug, Ord, PartialOrd, Serialize, Deserialize, Clone, Copy)]
 pub enum IcusdTag {}
@@ -174,12 +175,10 @@ pub enum UsdIcpTag {}
 pub enum RatioTag {}
 
 // Type definitions using enum tags
-pub type ICUSD = Token<IcusdTag>;    // Integer token amounts
-pub type ICP = Token<IcpTag>;        // Integer token amounts
+pub type ICUSD = Token<IcusdTag>; // Integer token amounts
+pub type ICP = Token<IcpTag>; // Integer token amounts
 pub type UsdIcp = Amount<UsdIcpTag>; // Decimal exchange rate
-pub type Ratio = Amount<RatioTag>;   // Decimal ratios
-
-
+pub type Ratio = Amount<RatioTag>; // Decimal ratios
 
 impl<T> Sum for Token<T> {
     fn sum<I>(iter: I) -> Self
@@ -240,7 +239,6 @@ impl From<u64> for ICUSD {
     }
 }
 
-
 impl ICUSD {
     pub const fn new(value: u64) -> Self {
         Token(value, PhantomData::<IcusdTag>)
@@ -277,7 +275,6 @@ impl From<Decimal> for UsdIcp {
     }
 }
 
-
 impl Ratio {
     pub const fn new(value: Decimal) -> Self {
         Amount(value, PhantomData::<RatioTag>)
@@ -293,13 +290,13 @@ impl Ratio {
 
     pub fn pow(self, rhs: u64) -> Self {
         if rhs == 0 {
-            return Amount(Decimal::ONE, PhantomData::<RatioTag>); 
+            return Amount(Decimal::ONE, PhantomData::<RatioTag>);
         }
         let mut result = Decimal::ONE;
         for _ in 0..rhs {
             result *= self.0;
         }
-        Amount(result, PhantomData::<RatioTag>) 
+        Amount(result, PhantomData::<RatioTag>)
     }
 }
 
@@ -333,7 +330,6 @@ impl<T> SubAssign for Amount<T> {
         self.0 -= rhs.0;
     }
 }
-
 
 impl Mul<UsdIcp> for ICP {
     type Output = ICUSD;
@@ -382,7 +378,7 @@ impl Mul<Ratio> for Ratio {
     type Output = Ratio;
     fn mul(self, other: Ratio) -> Ratio {
         let result = self.0 * other.0;
-        Amount(result, PhantomData::<RatioTag>) 
+        Amount(result, PhantomData::<RatioTag>)
     }
 }
 
@@ -406,15 +402,13 @@ impl Div<ICUSD> for ICUSD {
     }
 }
 
-
-
 impl Div<Ratio> for ICUSD {
     type Output = ICUSD;
     fn div(self, other: Ratio) -> ICUSD {
         assert_ne!(other.0, Decimal::ZERO, "cannot divide {} by 0", self.0);
         let icusd_dec = Decimal::from_u64(self.0).unwrap() / Decimal::from_u64(ICUSD_DEC).unwrap();
         let result = (icusd_dec / other.0) * Decimal::from_u64(ICUSD_DEC).unwrap();
-        Token::<IcusdTag>(result.to_u64().unwrap(), PhantomData) 
+        Token::<IcusdTag>(result.to_u64().unwrap(), PhantomData)
     }
 }
 
@@ -426,14 +420,13 @@ impl Div<Ratio> for UsdIcp {
     }
 }
 
-
 impl Div<ICP> for ICP {
     type Output = Ratio;
     fn div(self, other: ICP) -> Ratio {
         assert_ne!(other.0, 0, "cannot divide {} by 0", self.0);
         let icp_dec = Decimal::from_u64(self.0).unwrap();
         let div_by = Decimal::from_u64(other.0).unwrap();
-        Amount::<RatioTag>(icp_dec / div_by, PhantomData) 
+        Amount::<RatioTag>(icp_dec / div_by, PhantomData)
     }
 }
 

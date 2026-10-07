@@ -21,9 +21,9 @@
 //! large `SupportedProvider` variant. We still surface `JsonRpcError`
 //! (code+message) and `ValidationError` text for diagnostics.
 
+use crate::state::read_state;
 use candid::{CandidType, Deserialize, Principal, Reserved};
 use solana_message::Hash;
-use crate::state::read_state;
 
 /// Serialized byte length of a System nonce account's data (see
 /// `parse_nonce_account_blockhash`). Mirrors `solana_system_interface`'s
@@ -140,7 +140,10 @@ pub fn parse_mint_supply_jsonparsed(json: &str) -> Result<u64, String> {
     if let Some(err) = v.get("error") {
         return Err(format!("json-rpc error: {err}"));
     }
-    if v.pointer("/result/value").map(|x| x.is_null()).unwrap_or(true) {
+    if v.pointer("/result/value")
+        .map(|x| x.is_null())
+        .unwrap_or(true)
+    {
         return Err(format!("mint account not found: {json}"));
     }
     let supply_str = v
@@ -190,7 +193,10 @@ pub fn parse_account_data_base64(json: &str) -> Result<Vec<u8>, String> {
     if let Some(err) = v.get("error") {
         return Err(format!("json-rpc error: {err}"));
     }
-    if v.pointer("/result/value").map(|x| x.is_null()).unwrap_or(true) {
+    if v.pointer("/result/value")
+        .map(|x| x.is_null())
+        .unwrap_or(true)
+    {
         return Err(format!("account not found (value is null): {json}"));
     }
     let b64 = v
@@ -332,8 +338,9 @@ pub fn is_valid_tx_signature(sig: &str) -> bool {
 // ─── Async network calls ─────────────────────────────────────────────────────
 
 fn sol_rpc_principal() -> Principal {
-    read_state(|s| s.sol_rpc_override())
-        .unwrap_or_else(|| Principal::from_text(SOL_RPC_PRINCIPAL).expect("valid SOL RPC principal"))
+    read_state(|s| s.sol_rpc_override()).unwrap_or_else(|| {
+        Principal::from_text(SOL_RPC_PRINCIPAL).expect("valid SOL RPC principal")
+    })
 }
 
 /// Send a JSON-RPC payload via the SOL RPC canister's `jsonRequest` escape hatch

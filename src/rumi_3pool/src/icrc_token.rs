@@ -16,10 +16,11 @@ use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::allowance::{Allowance, AllowanceArgs};
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
-use std::cell::RefCell;
-use std::collections::BTreeMap;
-
 use crate::state::{mutate_state, read_state};
+use crate::storage::{
+    lp_transfer_dedup_cutover, LpTransferDedupEntry, LpTransferExpiryKey, StorableHash, Unit,
+    LP_TRANSFER_DEDUP, LP_TRANSFER_DEDUP_EXPIRY,
+};
 use crate::types::{LpAllowance, Icrc3Transaction};
 
 // ─── Transaction deduplication (audit 2026-06-09, ICRC-001) ───
@@ -30,28 +31,22 @@ use crate::types::{LpAllowance, Icrc3Transaction};
 // `Duplicate { duplicate_of }`. Window constants match the reference ICRC-1
 // ledger used by icUSD/ICP (TRANSACTION_WINDOW = 24h, PERMITTED_DRIFT = 60s).
 //
-// The seen-transaction map is heap-only ON PURPOSE: an upgrade clears the
-// dedup window. This is an accepted tradeoff per ICRC-1 (dedup is a
-// best-effort retry guard, and several production ledgers behave the same
-// way); a stable structure would consume a fresh MemoryId and add upgrade
-// surface for a strictly best-effort guarantee, and the ICRC-3 block log
-// remains the complete audit record either way. The map is BOUNDED: expired
-// entries are pruned on every insert, so it holds at most the deduplicated
-// transfers of the trailing 24h window.
+// The exact transfer hash, original timestamp, and original block are stored
+// in stable memory. A reply-lost retry must stay a Duplicate even if the pool
+// upgrades within the 24h window. Old heap-only identities cannot be
+// reconstructed from ICRC-3 blocks (which omit memo and created_at_time), so
+// pre-cutover timestamps are held as TooOld until their retry window expires.
+// A stable expiry index prunes expired rows in bounded batches on insertion.
 
 pub const TRANSACTION_WINDOW_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 pub const PERMITTED_DRIFT_NS: u64 = 60 * 1_000_000_000;
+const MAX_EXPIRED_DEDUP_ENTRIES_PER_TRANSFER: usize = 512;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DedupReject {
     TooOld,
     CreatedInFuture { ledger_time: u64 },
     Duplicate { duplicate_of: u64 },
-}
-
-thread_local! {
-    /// tx hash -> (created_at_time, block index of the original transaction).
-    static SEEN_TXS: RefCell<BTreeMap<[u8; 32], (u64, u64)>> = RefCell::new(BTreeMap::new());
 }
 
 fn tx_expired(created_at_time: u64, now: u64) -> bool {
@@ -69,6 +64,15 @@ fn dedup_check(
     created_at_time: Option<u64>,
     tx_hash: &[u8; 32],
 ) -> Result<(), DedupReject> {
+    dedup_check_with_cutover(now, created_at_time, tx_hash, lp_transfer_dedup_cutover())
+}
+
+fn dedup_check_with_cutover(
+    now: u64,
+    created_at_time: Option<u64>,
+    tx_hash: &[u8; 32],
+    cutover: Option<u64>,
+) -> Result<(), DedupReject> {
     let Some(cat) = created_at_time else {
         return Ok(());
     };
@@ -78,24 +82,88 @@ fn dedup_check(
     if cat > now.saturating_add(PERMITTED_DRIFT_NS) {
         return Err(DedupReject::CreatedInFuture { ledger_time: now });
     }
-    if let Some((_, block)) = SEEN_TXS.with(|m| m.borrow().get(tx_hash).copied()) {
-        return Err(DedupReject::Duplicate { duplicate_of: block });
+    if let Some(entry) = LP_TRANSFER_DEDUP.with(|m| m.borrow().get(&StorableHash(*tx_hash))) {
+        return Err(DedupReject::Duplicate {
+            duplicate_of: entry.block_index,
+        });
+    }
+    // Before stable dedup was introduced, a still-live retry may have no
+    // identity in this map: transfer identities lived only in heap, while
+    // approval dedup did not exist. Historical ICRC-3 blocks omit memo and
+    // created_at_time, so those transactions cannot be reconstructed. The
+    // old ledger also accepted created_at_time up to PERMITTED_DRIFT_NS beyond
+    // current time. Hold the whole possible range as TooOld until its normal
+    // window expires. Check the stable map first so transactions recorded by
+    // this version still return their original block across the first upgrade.
+    if cutover.is_some_and(|first_upgrade| {
+        cat <= first_upgrade.saturating_add(PERMITTED_DRIFT_NS)
+    }) {
+        return Err(DedupReject::TooOld);
     }
     Ok(())
 }
 
-/// Record an executed deduplicated transaction. Prunes expired entries so the
-/// map stays bounded to the trailing window. No-op when `created_at_time` is
-/// `None` (such transactions are never deduplicated).
+/// Record an executed deduplicated transaction. Prunes a bounded batch of
+/// expired entries from the ordered expiry index. No-op when
+/// `created_at_time` is `None` (such transactions are never deduplicated).
 fn dedup_record(now: u64, created_at_time: Option<u64>, tx_hash: [u8; 32], block_index: u64) {
     let Some(cat) = created_at_time else {
         return;
     };
-    SEEN_TXS.with(|m| {
+    // Walk only the expiry-ordered prefix and bound work per transfer. Any
+    // expired rows left behind are rejected by `dedup_check`'s timestamp
+    // validation, so deferring their physical removal cannot enable replay.
+    let expired_hashes = LP_TRANSFER_DEDUP_EXPIRY.with(|m| {
         let mut m = m.borrow_mut();
-        m.retain(|_, (seen_cat, _)| !tx_expired(*seen_cat, now));
-        m.insert(tx_hash, (cat, block_index));
+        let expired: Vec<_> = m
+            .iter()
+            .take_while(|(key, _)| key.expires_at < now)
+            .take(MAX_EXPIRED_DEDUP_ENTRIES_PER_TRANSFER)
+            .map(|(key, _)| key)
+            .collect();
+        for key in &expired {
+            m.remove(key);
+        }
+        expired.into_iter().map(|key| key.hash).collect::<Vec<_>>()
     });
+    LP_TRANSFER_DEDUP.with(|m| {
+        let mut m = m.borrow_mut();
+        for hash in expired_hashes {
+            m.remove(&hash);
+        }
+
+        let hash = StorableHash(tx_hash);
+        if let Some(previous) = m.get(&hash) {
+            LP_TRANSFER_DEDUP_EXPIRY.with(|expiry| {
+                expiry.borrow_mut().remove(&LpTransferExpiryKey {
+                    expires_at: dedup_expires_at(previous.created_at_time),
+                    hash,
+                });
+            });
+        }
+        m.insert(
+            hash,
+            LpTransferDedupEntry {
+                created_at_time: cat,
+                block_index,
+            },
+        );
+        LP_TRANSFER_DEDUP_EXPIRY.with(|expiry| {
+            expiry.borrow_mut().insert(
+                LpTransferExpiryKey {
+                    expires_at: dedup_expires_at(cat),
+                    hash,
+                },
+                Unit,
+            );
+        });
+    });
+}
+
+fn dedup_expires_at(created_at_time: u64) -> u64 {
+    created_at_time
+        .saturating_add(TRANSACTION_WINDOW_NS)
+        .saturating_add(PERMITTED_DRIFT_NS)
 }
 
 /// Feed an optional length-prefixed field into the hasher. The presence byte
@@ -145,6 +213,33 @@ fn hash_icrc2_transfer_from(caller: &Principal, args: &TransferFromArgs) -> [u8;
     hash_part(&mut h, args.to.subaccount.as_ref().map(|s| s.as_slice()));
     let amount_bytes = args.amount.0.to_bytes_be();
     hash_part(&mut h, Some(&amount_bytes));
+    let fee_bytes = args.fee.as_ref().map(|f| f.0.to_bytes_be());
+    hash_part(&mut h, fee_bytes.as_deref());
+    hash_part(&mut h, args.memo.as_ref().map(|m| m.0.as_slice()));
+    let cat_bytes = args.created_at_time.map(|t| t.to_be_bytes());
+    hash_part(&mut h, cat_bytes.as_ref().map(|b| &b[..]));
+    h.finalize().into()
+}
+
+/// Hash the full (caller, args) identity of an icrc2_approve for dedup.
+///
+/// `expected_allowance` is part of the transaction tuple: it controls whether
+/// the approval may commit, so retries with a different CAS precondition must
+/// not alias an already committed approval.
+fn hash_icrc2_approve(caller: &Principal, args: &ApproveArgs) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(b"3usd.icrc2_approve");
+    hash_part(&mut h, Some(caller.as_slice()));
+    hash_part(&mut h, args.from_subaccount.as_ref().map(|s| s.as_slice()));
+    hash_part(&mut h, Some(args.spender.owner.as_slice()));
+    hash_part(&mut h, args.spender.subaccount.as_ref().map(|s| s.as_slice()));
+    let amount_bytes = args.amount.0.to_bytes_be();
+    hash_part(&mut h, Some(&amount_bytes));
+    let expected_bytes = args.expected_allowance.as_ref().map(|n| n.0.to_bytes_be());
+    hash_part(&mut h, expected_bytes.as_deref());
+    let expires_bytes = args.expires_at.map(|t| t.to_be_bytes());
+    hash_part(&mut h, expires_bytes.as_ref().map(|b| &b[..]));
     let fee_bytes = args.fee.as_ref().map(|f| f.0.to_bytes_be());
     hash_part(&mut h, fee_bytes.as_deref());
     hash_part(&mut h, args.memo.as_ref().map(|m| m.0.as_slice()));
@@ -301,6 +396,9 @@ pub fn icrc1_transfer(caller: Principal, args: TransferArg) -> Result<Nat, Trans
             from_subaccount,
             to_subaccount,
             spender_subaccount: None,
+            memo: args.memo.as_ref().map(|memo| memo.0.to_vec()),
+            created_at_time: args.created_at_time,
+            transaction_fee: Some(0),
         });
         Ok(id)
     });
@@ -324,6 +422,29 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
         }
     }
 
+    // ICRC-2 approval retries must resolve before checking expiry or the
+    // allowance CAS. The first execution may already have changed the
+    // allowance (and the retry may arrive just after expires_at), but an
+    // identical retry still returns the original block rather than applying
+    // the state transition a second time or producing a misleading error.
+    let now = ic_cdk::api::time();
+    let tx_hash = args
+        .created_at_time
+        .map(|_| hash_icrc2_approve(&caller, &args));
+    if let Some(h) = &tx_hash {
+        if let Err(e) = dedup_check(now, args.created_at_time, h) {
+            return Err(match e {
+                DedupReject::TooOld => ApproveError::TooOld,
+                DedupReject::CreatedInFuture { ledger_time } => {
+                    ApproveError::CreatedInFuture { ledger_time }
+                }
+                DedupReject::Duplicate { duplicate_of } => ApproveError::Duplicate {
+                    duplicate_of: Nat::from(duplicate_of),
+                },
+            });
+        }
+    }
+
     // Subaccounts accepted but ignored for balance/allowance keying — the
     // 3pool tracks balances per principal only. Block log preserves the
     // subaccounts the caller chose for ICRC-3 consumers.
@@ -338,13 +459,12 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
 
     // Check expires_at is in the future
     if let Some(expires_at) = args.expires_at {
-        let now = ic_cdk::api::time();
         if expires_at < now {
             return Err(ApproveError::Expired { ledger_time: now });
         }
     }
 
-    mutate_state(|s| {
+    let result = mutate_state(|s| {
         // CAS: check expected_allowance
         if let Some(ref expected) = args.expected_allowance {
             let current = crate::storage::allowance_get(&caller, &spender_principal)
@@ -375,9 +495,16 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
             expires_at: args.expires_at,
             from_subaccount,
             spender_subaccount,
+            memo: args.memo.as_ref().map(|memo| memo.0.to_vec()),
+            created_at_time: args.created_at_time,
+            transaction_fee: args.fee.as_ref().map(|_| 0),
         });
-        Ok(Nat::from(id))
-    })
+        Ok(id)
+    })?;
+    if let Some(h) = tx_hash {
+        dedup_record(now, args.created_at_time, h, result);
+    }
+    Ok(Nat::from(result))
 }
 
 // ─── ICRC-2 Allowance Query ───
@@ -514,6 +641,9 @@ pub fn icrc2_transfer_from(
             from_subaccount,
             to_subaccount,
             spender_subaccount,
+            memo: args.memo.as_ref().map(|memo| memo.0.to_vec()),
+            created_at_time: args.created_at_time,
+            transaction_fee: args.fee.as_ref().map(|_| 0),
         });
         Ok(id)
     });
@@ -529,7 +659,17 @@ pub fn icrc2_transfer_from(
 
 #[cfg(test)]
 fn seen_txs_len() -> usize {
-    SEEN_TXS.with(|m| m.borrow().len())
+    LP_TRANSFER_DEDUP.with(|m| m.borrow().len() as usize)
+}
+
+#[cfg(test)]
+fn seen_txs_expiry_len() -> usize {
+    LP_TRANSFER_DEDUP_EXPIRY.with(|m| m.borrow().len() as usize)
+}
+
+#[cfg(test)]
+fn seen_tx_contains(hash: &[u8; 32]) -> bool {
+    LP_TRANSFER_DEDUP.with(|m| m.borrow().contains_key(&StorableHash(*hash)))
 }
 
 #[cfg(test)]
@@ -551,6 +691,24 @@ mod icrc_001_dedup_tests {
                 serde_bytes::ByteBuf::from(vec![memo_byte]),
             )),
             created_at_time,
+        }
+    }
+
+    fn sample_approve_args() -> ApproveArgs {
+        ApproveArgs {
+            from_subaccount: None,
+            spender: Account {
+                owner: Principal::self_authenticating(&[8, 8, 8]),
+                subaccount: None,
+            },
+            amount: Nat::from(1_000u64),
+            expected_allowance: Some(Nat::from(500u64)),
+            expires_at: Some(NOW + 100),
+            fee: Some(Nat::from(0u64)),
+            memo: Some(icrc_ledger_types::icrc1::transfer::Memo(
+                serde_bytes::ByteBuf::from(b"approval".to_vec()),
+            )),
+            created_at_time: Some(NOW),
         }
     }
 
@@ -593,6 +751,81 @@ mod icrc_001_dedup_tests {
     }
 
     #[test]
+    fn first_upgrade_holds_legacy_window_and_allows_new_transfers() {
+        let cutover = NOW;
+        let legacy_retry = [0x31u8; 32];
+        // The old ledger could accept a timestamp exactly 60 seconds ahead
+        // just before upgrade. It remains inside the ordinary retry window,
+        // but its identity could have lived only in the old heap map.
+        let old_ledger_time = cutover - 1;
+        let predecessor_future_cat = old_ledger_time + PERMITTED_DRIFT_NS;
+        assert_eq!(
+            dedup_check_with_cutover(
+                old_ledger_time,
+                Some(predecessor_future_cat),
+                &legacy_retry,
+                None
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            dedup_check_with_cutover(
+                cutover,
+                Some(predecessor_future_cat),
+                &legacy_retry,
+                Some(cutover)
+            ),
+            Err(DedupReject::TooOld)
+        );
+
+        // The inclusive upper endpoint is held as well; it is valid under
+        // ordinary future-drift validation at cutover.
+        let upper_boundary = cutover + PERMITTED_DRIFT_NS;
+        assert_eq!(
+            dedup_check_with_cutover(cutover, Some(upper_boundary), &legacy_retry, Some(cutover)),
+            Err(DedupReject::TooOld)
+        );
+
+        // Once the legacy timestamp range has passed, current transfers
+        // follow ordinary dedup and retain their block index on retries.
+        let post_upgrade_transfer = [0x32u8; 32];
+        let after_hold = cutover + PERMITTED_DRIFT_NS + 1;
+        assert_eq!(
+            dedup_check_with_cutover(
+                after_hold,
+                Some(after_hold),
+                &post_upgrade_transfer,
+                Some(cutover)
+            ),
+            Ok(())
+        );
+        dedup_record(after_hold, Some(after_hold), post_upgrade_transfer, 91);
+        assert_eq!(
+            dedup_check_with_cutover(
+                after_hold + 1,
+                Some(after_hold),
+                &post_upgrade_transfer,
+                Some(cutover)
+            ),
+            Err(DedupReject::Duplicate { duplicate_of: 91 })
+        );
+
+        // A transaction already recorded in stable memory under the new
+        // version must take precedence over the legacy hold on first upgrade.
+        let stable_before_first_upgrade = [0x33u8; 32];
+        dedup_record(cutover - 1, Some(cutover - 1), stable_before_first_upgrade, 92);
+        assert_eq!(
+            dedup_check_with_cutover(
+                cutover,
+                Some(cutover - 1),
+                &stable_before_first_upgrade,
+                Some(cutover)
+            ),
+            Err(DedupReject::Duplicate { duplicate_of: 92 })
+        );
+    }
+
+    #[test]
     fn icrc_001_none_created_at_time_skips_dedup() {
         let h = [4u8; 32];
         assert_eq!(dedup_check(NOW, None, &h), Ok(()));
@@ -621,6 +854,35 @@ mod icrc_001_dedup_tests {
     }
 
     #[test]
+    fn icrc_001_pruning_is_batched_and_resumes_from_expiry_index() {
+        let initial_count = MAX_EXPIRED_DEDUP_ENTRIES_PER_TRANSFER + 3;
+        let mut hashes = Vec::with_capacity(initial_count);
+        for i in 0..initial_count {
+            let mut hash = [0xa5u8; 32];
+            hash[1..9].copy_from_slice(&(i as u64).to_be_bytes());
+            hashes.push(hash);
+            dedup_record(NOW, Some(NOW), hash, i as u64);
+        }
+        assert_eq!(seen_txs_len(), initial_count);
+        assert_eq!(seen_txs_expiry_len(), initial_count);
+
+        let after_expiry = NOW + TRANSACTION_WINDOW_NS + PERMITTED_DRIFT_NS + 1;
+        let fresh_a = [0xfau8; 32];
+        dedup_record(after_expiry, Some(after_expiry), fresh_a, 10_000);
+        assert_eq!(
+            seen_txs_len(),
+            initial_count - MAX_EXPIRED_DEDUP_ENTRIES_PER_TRANSFER + 1
+        );
+        assert_eq!(seen_txs_len(), seen_txs_expiry_len());
+
+        let fresh_b = [0xfbu8; 32];
+        dedup_record(after_expiry, Some(after_expiry), fresh_b, 10_001);
+        assert_eq!(seen_txs_len(), 2);
+        assert_eq!(seen_txs_len(), seen_txs_expiry_len());
+        assert!(hashes.iter().all(|hash| !seen_tx_contains(hash)));
+    }
+
+    #[test]
     fn icrc_001_tx_hash_covers_caller_and_args() {
         let caller_a = Principal::self_authenticating(&[1]);
         let caller_b = Principal::self_authenticating(&[2]);
@@ -643,6 +905,67 @@ mod icrc_001_dedup_tests {
         assert_ne!(
             hash_icrc1_transfer(&caller_a, &args),
             hash_icrc1_transfer(&caller_a, &sample_transfer_arg(1, Some(NOW + 1)))
+        );
+    }
+
+    #[test]
+    fn icrc2_approve_hash_covers_domain_caller_and_complete_args() {
+        let caller = Principal::self_authenticating(&[1]);
+        let other_caller = Principal::self_authenticating(&[2]);
+        let args = sample_approve_args();
+        let base = hash_icrc2_approve(&caller, &args);
+
+        assert_eq!(base, hash_icrc2_approve(&caller, &args));
+        assert_ne!(base, hash_icrc2_approve(&other_caller, &args));
+        assert_ne!(
+            base,
+            hash_icrc1_transfer(&caller, &sample_transfer_arg(1, Some(NOW))),
+            "approval and transfer hash domains must remain separate"
+        );
+
+        let mut changed = args.clone();
+        changed.from_subaccount = Some([1; 32]);
+        assert_ne!(base, hash_icrc2_approve(&caller, &changed));
+        let mut changed = args.clone();
+        changed.spender.owner = other_caller;
+        assert_ne!(base, hash_icrc2_approve(&caller, &changed));
+        let mut changed = args.clone();
+        changed.spender.subaccount = Some([2; 32]);
+        assert_ne!(base, hash_icrc2_approve(&caller, &changed));
+        let mut changed = args.clone();
+        changed.amount = Nat::from(1_001u64);
+        assert_ne!(base, hash_icrc2_approve(&caller, &changed));
+        let mut changed = args.clone();
+        changed.expected_allowance = Some(Nat::from(501u64));
+        assert_ne!(base, hash_icrc2_approve(&caller, &changed));
+        let mut changed = args.clone();
+        changed.expires_at = Some(NOW + 101);
+        assert_ne!(base, hash_icrc2_approve(&caller, &changed));
+        let mut changed = args.clone();
+        changed.fee = None;
+        assert_ne!(base, hash_icrc2_approve(&caller, &changed));
+        let mut changed = args.clone();
+        changed.memo = Some(icrc_ledger_types::icrc1::transfer::Memo(
+            serde_bytes::ByteBuf::from(b"changed".to_vec()),
+        ));
+        assert_ne!(base, hash_icrc2_approve(&caller, &changed));
+        let mut changed = args;
+        changed.created_at_time = Some(NOW + 1);
+        assert_ne!(base, hash_icrc2_approve(&caller, &changed));
+    }
+
+    #[test]
+    fn pre_cutover_approval_identity_is_held_when_it_cannot_be_recovered() {
+        let caller = Principal::self_authenticating(&[0x71]);
+        let args = sample_approve_args();
+        let hash = hash_icrc2_approve(&caller, &args);
+
+        // Historical ICRC-3 blocks do not carry the complete approval tuple,
+        // and older code did not store approval dedup identities. Do not turn
+        // a still-live historical retry into a fresh approval after upgrade.
+        assert_eq!(
+            dedup_check_with_cutover(NOW + 1, Some(NOW), &hash, Some(NOW)),
+            Err(DedupReject::TooOld)
         );
     }
 }

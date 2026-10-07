@@ -2,8 +2,7 @@ use super::config::ChainId;
 use super::multi_chain_state::{
     ChainLiqClaimV1, MultiChainState, MultiChainStateV1, MultiChainStateV2, MultiChainStateV3,
     MultiChainStateV4, MultiChainStateV5, MultiChainStateV6, MultiChainStateV7, MultiChainStateV8,
-    MultiChainStateV9,
-    SettlementProofRecord,
+    MultiChainStateV9, SettlementProofRecord,
 };
 use super::supply::migrate_multi_chain_state;
 
@@ -151,8 +150,8 @@ fn v8_snapshot_migrates_to_v9_operator_only_and_legacy_public_is_closed() {
     v8.evm_burn_proof_floor_by_chain.insert(chain, 777);
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&v8, &mut bytes).expect("encode V8");
-    let mut v9: MultiChainStateV9 = ciborium::de::from_reader(bytes.as_slice())
-        .expect("V8 snapshot must decode into V9");
+    let mut v9: MultiChainStateV9 =
+        ciborium::de::from_reader(bytes.as_slice()).expect("V8 snapshot must decode into V9");
     assert_eq!(v9.chain_supplies.get(&chain), Some(&42));
     assert_eq!(v9.evm_burn_proof_floor_by_chain.get(&chain), Some(&777));
     assert!(v9.burn_proof_admission_mode_by_chain.is_empty());
@@ -187,7 +186,8 @@ fn v7_snapshot_decodes_into_v8_and_holds_ambiguous_legacy_cursor_history() {
     let mut v7 = MultiChainStateV7::default();
     v7.chain_supplies.insert(chain, 42);
     v7.last_observed_block.insert(chain, 777);
-    v7.processed_burn_keys.insert(777, std::collections::BTreeSet::from(["0xold:1".into()]));
+    v7.processed_burn_keys
+        .insert(777, std::collections::BTreeSet::from(["0xold:1".into()]));
 
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&v7, &mut bytes).expect("encode V7");
@@ -204,10 +204,18 @@ fn v7_snapshot_decodes_into_v8_and_holds_ambiguous_legacy_cursor_history() {
         "legacy cursor does not prove that burn logs were scanned"
     );
     decoded.accept_evm_burn_proof_baseline(chain, 776);
-    assert_eq!(decoded.evm_burn_proof_legacy_hold_through.get(&chain), Some(&777));
+    assert_eq!(
+        decoded.evm_burn_proof_legacy_hold_through.get(&chain),
+        Some(&777)
+    );
     decoded.accept_evm_burn_proof_baseline(chain, 777);
-    assert!(!decoded.evm_burn_proof_legacy_hold_through.contains_key(&chain));
-    assert_eq!(decoded.evm_burn_proof_floor_by_chain.get(&chain), Some(&777));
+    assert!(!decoded
+        .evm_burn_proof_legacy_hold_through
+        .contains_key(&chain));
+    assert_eq!(
+        decoded.evm_burn_proof_floor_by_chain.get(&chain),
+        Some(&777)
+    );
 }
 
 #[test]

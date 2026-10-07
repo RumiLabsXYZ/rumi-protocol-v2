@@ -34,6 +34,7 @@ export const idlFactory = ({ IDL }) => {
     'LiquidationFee' : IDL.Null,
     'RedemptionFee' : IDL.Null,
     'InterestRevenue' : IDL.Null,
+    'LegacyUnknown' : IDL.Record({ 'candid_hex' : IDL.Text }),
   });
   const DepositArgs = IDL.Record({
     'asset_type' : AssetType,
@@ -42,11 +43,17 @@ export const idlFactory = ({ IDL }) => {
     'memo' : IDL.Opt(IDL.Text),
     'amount' : IDL.Nat64,
   });
-  const DepositRecord = IDL.Record({
+  const DepositTypeV1 = IDL.Variant({
+    'BorrowingFee' : IDL.Null,
+    'LiquidationFee' : IDL.Null,
+    'RedemptionFee' : IDL.Null,
+    'InterestRevenue' : IDL.Null,
+  });
+  const DepositRecordV1 = IDL.Record({
     'id' : IDL.Nat64,
     'asset_type' : AssetType,
     'block_index' : IDL.Nat64,
-    'deposit_type' : DepositType,
+    'deposit_type' : DepositTypeV1,
     'memo' : IDL.Opt(IDL.Text),
     'timestamp' : IDL.Nat64,
     'amount' : IDL.Nat64,
@@ -59,7 +66,7 @@ export const idlFactory = ({ IDL }) => {
     }),
     'Deposit' : IDL.Record({
       'asset_type' : AssetType,
-      'deposit_type' : DepositType,
+      'deposit_type' : DepositTypeV1,
       'amount' : IDL.Nat64,
     }),
     'SetPaused' : IDL.Record({ 'paused' : IDL.Bool }),
@@ -69,6 +76,24 @@ export const idlFactory = ({ IDL }) => {
     'action' : TreasuryAction,
     'timestamp' : IDL.Nat64,
     'caller' : IDL.Principal,
+  });
+  const PendingWithdrawalV2 = IDL.Record({
+    'to' : IDL.Principal,
+    'send_amount' : IDL.Nat64,
+    'fee' : IDL.Nat64,
+    'request_id' : IDL.Nat64,
+    'status' : IDL.Text,
+    'asset_type' : AssetType,
+    'memo' : IDL.Opt(IDL.Text),
+    'ledger' : IDL.Principal,
+    'caller' : IDL.Principal,
+    'dispatch_attempts' : IDL.Opt(IDL.Nat32),
+    'created_at_time' : IDL.Nat64,
+    'amount' : IDL.Nat64,
+  });
+  const PendingWithdrawalsPageV2 = IDL.Record({
+    'next_start' : IDL.Opt(IDL.Nat64),
+    'withdrawals' : IDL.Vec(PendingWithdrawalV2),
   });
   const AssetBalance = IDL.Record({
     'total' : IDL.Nat64,
@@ -81,17 +106,26 @@ export const idlFactory = ({ IDL }) => {
     'is_paused' : IDL.Bool,
     'balances' : IDL.Vec(IDL.Tuple(AssetType, AssetBalance)),
   });
+  const UnknownTreasuryEvidenceV2 = IDL.Record({
+    'id' : IDL.Nat64,
+    'record_kind' : IDL.Text,
+    'raw_candid_hex' : IDL.Text,
+  });
+  const UnknownTreasuryEvidencePageV2 = IDL.Record({
+    'events' : IDL.Vec(UnknownTreasuryEvidenceV2),
+    'deposits' : IDL.Vec(UnknownTreasuryEvidenceV2),
+  });
+  const WithdrawResult = IDL.Record({
+    'fee' : IDL.Nat64,
+    'block_index' : IDL.Nat64,
+    'amount_transferred' : IDL.Nat64,
+  });
   const WithdrawArgs = IDL.Record({
     'to' : IDL.Principal,
     'request_id' : IDL.Opt(IDL.Nat64),
     'asset_type' : AssetType,
     'memo' : IDL.Opt(IDL.Text),
     'amount' : IDL.Nat64,
-  });
-  const WithdrawResult = IDL.Record({
-    'fee' : IDL.Nat64,
-    'block_index' : IDL.Nat64,
-    'amount_transferred' : IDL.Nat64,
   });
   return IDL.Service({
     'cycle_manager_metrics' : IDL.Func(
@@ -107,7 +141,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'get_deposits' : IDL.Func(
         [IDL.Opt(IDL.Nat64), IDL.Opt(IDL.Nat64)],
-        [IDL.Vec(DepositRecord)],
+        [IDL.Vec(DepositRecordV1)],
         ['query'],
       ),
     'get_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
@@ -116,7 +150,27 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(TreasuryEvent)],
         ['query'],
       ),
+    'get_pending_withdrawals_v2' : IDL.Func(
+        [IDL.Opt(IDL.Nat64), IDL.Opt(IDL.Nat64)],
+        [IDL.Variant({ 'Ok' : PendingWithdrawalsPageV2, 'Err' : IDL.Text })],
+        ['query'],
+      ),
     'get_status' : IDL.Func([], [TreasuryStatus], ['query']),
+    'get_unknown_evidence_v2' : IDL.Func(
+        [IDL.Opt(IDL.Nat64), IDL.Opt(IDL.Nat64)],
+        [
+          IDL.Variant({
+            'Ok' : UnknownTreasuryEvidencePageV2,
+            'Err' : IDL.Text,
+          }),
+        ],
+        ['query'],
+      ),
+    'reconcile_withdrawal_receipt_v2' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : WithdrawResult, 'Err' : IDL.Text })],
+        [],
+      ),
     'record_stability_pool_unallocated_interest' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, IDL.Vec(IDL.Nat64)],
         [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],

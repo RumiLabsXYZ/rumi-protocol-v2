@@ -1,15 +1,15 @@
-use crate::numeric::{ICUSD, ICP};
+use crate::numeric::{ICP, ICUSD};
 use crate::state::read_state;
 use crate::StableTokenType;
 use candid::{Nat, Principal};
 use ic_xrc_types::{Asset, AssetClass, GetExchangeRateRequest, GetExchangeRateResult};
+use icrc_ledger_client_cdk::{CdkRuntime, ICRC1Client};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{Memo, TransferArg, TransferError};
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
-use icrc_ledger_client_cdk::{CdkRuntime, ICRC1Client};
 use num_traits::ToPrimitive;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 
@@ -73,8 +73,8 @@ where
     if outcome != LstPriceRefreshOutcome::IcpTimestampChanged {
         return outcome;
     }
-    let Some(latest_timestamp_ns) = latest_timestamp()
-        .filter(|latest| *latest > expected_icp_timestamp_ns)
+    let Some(latest_timestamp_ns) =
+        latest_timestamp().filter(|latest| *latest > expected_icp_timestamp_ns)
     else {
         return outcome;
     };
@@ -162,9 +162,9 @@ mod lst_refresh_guard_tests {
         commit_lst_wrapped_price, lst_publication_preflight, lst_refresh_preflight,
         refresh_lst_with_one_catch_up, LstPriceFetchGuard, LstPriceRefreshOutcome,
     };
-    use candid::Principal;
     use crate::state::{PriceSource, State, XrcAssetClass};
     use crate::{InitArg, UsdIcp};
+    use candid::Principal;
     use rust_decimal::Decimal;
 
     fn configured_state() -> State {
@@ -243,7 +243,10 @@ mod lst_refresh_guard_tests {
             lst_publication_preflight(Some(10), 10, true, Some(10)),
             Err(LstPriceRefreshOutcome::AlreadyCurrent)
         );
-        assert_eq!(lst_publication_preflight(Some(10), 10, true, Some(9)), Ok(()));
+        assert_eq!(
+            lst_publication_preflight(Some(10), 10, true, Some(9)),
+            Ok(())
+        );
     }
 
     #[test]
@@ -325,9 +328,9 @@ mod lst_refresh_guard_tests {
         assert_eq!(config.last_price, Some(1.25));
     }
 }
-use std::fmt;
 use crate::log;
 use crate::DEBUG;
+use std::fmt;
 
 // ─── Wave-3 ICRC transfer hygiene helpers ───
 //
@@ -427,19 +430,24 @@ pub async fn transfer_idempotent(
     op_nonce: u128,
     memo: Option<Memo>,
 ) -> Result<u64, TransferError> {
-    let _default_account_guard = acquire_three_usd_default_account_transfer_guard(
-        ledger,
-        from_subaccount,
-    )?;
+    let _default_account_guard =
+        acquire_three_usd_default_account_transfer_guard(ledger, from_subaccount)?;
     if let Some(guard) = _default_account_guard.as_ref() {
-        let fee_before = get_ledger_fee(ledger).await.map_err(default_account_capacity_error)?;
+        let fee_before = get_ledger_fee(ledger)
+            .await
+            .map_err(default_account_capacity_error)?;
         let balance = get_icrc1_reserve_balance(
             ledger,
-            Account { owner: ic_cdk::id(), subaccount: None },
+            Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            },
         )
         .await
         .map_err(default_account_capacity_error)?;
-        let fee = get_ledger_fee(ledger).await.map_err(default_account_capacity_error)?;
+        let fee = get_ledger_fee(ledger)
+            .await
+            .map_err(default_account_capacity_error)?;
         if !default_fee_is_stable_and_legacy_compatible(fee_before, fee) {
             return Err(default_account_capacity_error(
                 "3USD ledger fee is nonzero or changed during preflight; legacy transfer remains held",
@@ -470,6 +478,67 @@ pub async fn transfer_idempotent(
     handle_transfer_outcome(ledger, outer)
 }
 
+/// Dispatch a caller-pinned ICRC-1 tuple without deriving or replacing any
+/// field. Durable treasury payments use this so retries preserve the exact
+/// source account, recipient, amount, fee option, memo, and timestamp.
+pub async fn transfer_idempotent_exact_tuple(
+    ledger: Principal,
+    from_subaccount: Option<[u8; 32]>,
+    to: Account,
+    amount: u128,
+    fee: Option<u64>,
+    memo: Memo,
+    created_at_time: u64,
+) -> Result<u64, TransferError> {
+    let _default_account_guard =
+        acquire_three_usd_default_account_transfer_guard(ledger, from_subaccount)?;
+    if let Some(guard) = _default_account_guard.as_ref() {
+        let fee_before = get_ledger_fee(ledger)
+            .await
+            .map_err(default_account_capacity_error)?;
+        let balance = get_icrc1_reserve_balance(
+            ledger,
+            Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            },
+        )
+        .await
+        .map_err(default_account_capacity_error)?;
+        let current_fee = get_ledger_fee(ledger)
+            .await
+            .map_err(default_account_capacity_error)?;
+        if !default_fee_is_stable_and_legacy_compatible(fee_before, current_fee) {
+            return Err(default_account_capacity_error(
+                "3USD ledger fee is nonzero or changed during exact-tuple preflight",
+            ));
+        }
+        ensure_default_account_spend_with_balance(
+            guard,
+            ledger,
+            amount,
+            fee.unwrap_or(current_fee),
+            balance,
+        )?;
+    }
+
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger,
+    };
+    let outer = client
+        .transfer(TransferArg {
+            from_subaccount,
+            to,
+            amount: Nat::from(amount),
+            fee: fee.map(Nat::from),
+            memo: Some(memo),
+            created_at_time: Some(created_at_time),
+        })
+        .await;
+    handle_transfer_outcome(ledger, outer)
+}
+
 pub async fn transfer_idempotent_exact(
     ledger: Principal,
     from_subaccount: Option<[u8; 32]>,
@@ -483,7 +552,16 @@ pub async fn transfer_idempotent_exact(
     if let Some(guard) = _guard.as_ref() {
         ensure_default_account_spend_preserves_refunds(guard, ledger, amount, fee).await?;
     }
-    transfer_idempotent_exact_inner(ledger, from_subaccount, to, amount, fee, memo, created_at_time).await
+    transfer_idempotent_exact_inner(
+        ledger,
+        from_subaccount,
+        to,
+        amount,
+        fee,
+        memo,
+        created_at_time,
+    )
+    .await
 }
 
 pub async fn transfer_idempotent_exact_with_three_usd_guard(
@@ -499,12 +577,22 @@ pub async fn transfer_idempotent_exact_with_three_usd_guard(
     if from_subaccount.is_some() || !guard.protects(ledger) {
         return Err(TransferError::GenericError {
             error_code: Nat::from(0u64),
-            message: "3USD default-account transfer guard does not match the persisted source".into(),
+            message: "3USD default-account transfer guard does not match the persisted source"
+                .into(),
         });
     }
     // The refund worker capacity-checks the initial tuple before persisting it.
     // Retries replay that exact tuple and verify its receipt before clearing it.
-    transfer_idempotent_exact_inner(ledger, from_subaccount, to, amount, fee, memo, created_at_time).await
+    transfer_idempotent_exact_inner(
+        ledger,
+        from_subaccount,
+        to,
+        amount,
+        fee,
+        memo,
+        created_at_time,
+    )
+    .await
 }
 
 async fn transfer_idempotent_exact_inner(
@@ -516,15 +604,20 @@ async fn transfer_idempotent_exact_inner(
     memo: Memo,
     created_at_time: u64,
 ) -> Result<u64, TransferError> {
-    let client = ICRC1Client { runtime: CdkRuntime, ledger_canister_id: ledger };
-    let outer = client.transfer(TransferArg {
-        from_subaccount,
-        to,
-        fee: Some(Nat::from(fee)),
-        created_at_time: Some(created_at_time),
-        memo: Some(memo),
-        amount: Nat::from(amount),
-    }).await;
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger,
+    };
+    let outer = client
+        .transfer(TransferArg {
+            from_subaccount,
+            to,
+            fee: Some(Nat::from(fee)),
+            created_at_time: Some(created_at_time),
+            memo: Some(memo),
+            amount: Nat::from(amount),
+        })
+        .await;
     handle_transfer_outcome(ledger, outer)
 }
 
@@ -533,15 +626,17 @@ fn acquire_three_usd_default_account_transfer_guard(
     from_subaccount: Option<[u8; 32]>,
 ) -> Result<Option<crate::ThreeUsdDefaultAccountTransferGuard>, TransferError> {
     let is_default_source = from_subaccount.map_or(true, |subaccount| subaccount == [0; 32]);
-    if !is_default_source || !crate::state::read_state(|state| state.three_pool_canister == Some(ledger)) {
+    if !is_default_source
+        || !crate::state::read_state(|state| state.three_pool_canister == Some(ledger))
+    {
         return Ok(None);
     }
-    crate::ThreeUsdDefaultAccountTransferGuard::try_acquire(ledger).map(Some).ok_or_else(|| {
-        TransferError::GenericError {
+    crate::ThreeUsdDefaultAccountTransferGuard::try_acquire(ledger)
+        .map(Some)
+        .ok_or_else(|| TransferError::GenericError {
             error_code: Nat::from(0u64),
             message: "3USD default-account transfer is held by a reserve capacity check".into(),
-        }
-    })
+        })
 }
 
 fn default_account_capacity_error(message: impl Into<String>) -> TransferError {
@@ -570,7 +665,10 @@ async fn ensure_default_account_spend_preserves_refunds(
 ) -> Result<(), TransferError> {
     let balance = get_icrc1_reserve_balance(
         ledger,
-        Account { owner: ic_cdk::id(), subaccount: None },
+        Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },
     )
     .await
     .map_err(default_account_capacity_error)?;
@@ -585,14 +683,19 @@ fn ensure_default_account_spend_with_balance(
     balance: u64,
 ) -> Result<(), TransferError> {
     if !guard.protects(ledger) {
-        return Err(default_account_capacity_error("3USD default-account spend has no matching capacity guard"));
+        return Err(default_account_capacity_error(
+            "3USD default-account spend has no matching capacity guard",
+        ));
     }
     let amount = u64::try_from(amount)
         .map_err(|_| default_account_capacity_error("3USD default-account debit exceeds u64"))?;
-    let commitment = read_state(|state| state.three_usd_default_account_refund_commitment(ledger, fee))
-        .ok_or_else(|| default_account_capacity_error(
-            "3USD default-account refund obligations are uncertain; debit remains held",
-        ))?;
+    let commitment =
+        read_state(|state| state.three_usd_default_account_refund_commitment(ledger, fee))
+            .ok_or_else(|| {
+                default_account_capacity_error(
+                    "3USD default-account refund obligations are uncertain; debit remains held",
+                )
+            })?;
     if !default_account_spend_fits(balance, amount, fee, commitment) {
         return Err(default_account_capacity_error(format!(
             "3USD default-account debit would violate refund commitments (balance {balance}, debit {amount}+{fee}, committed {commitment})",
@@ -603,7 +706,12 @@ fn ensure_default_account_spend_with_balance(
 
 #[cfg(test)]
 mod three_usd_default_spend_capacity_tests {
-    use super::{default_account_spend_fits, default_fee_is_stable_and_legacy_compatible};
+    use super::{
+        default_account_spend_fits, default_fee_is_stable_and_legacy_compatible,
+        three_usd_ingress_first_dispatch_allowed,
+    };
+    use candid::Principal;
+    use crate::state::ThreeUsdReserveIngressPhase as Phase;
 
     #[test]
     fn default_spend_must_leave_all_refunds_funded() {
@@ -619,6 +727,55 @@ mod three_usd_default_spend_capacity_tests {
         assert!(!default_fee_is_stable_and_legacy_compatible(0, 1));
         assert!(!default_fee_is_stable_and_legacy_compatible(1, 1));
     }
+
+    #[test]
+    fn rotation_during_pre_dispatch_wait_blocks_first_pull_but_keeps_submitted_retry() {
+        let pool_a = Principal::from_slice(&[21]);
+        let pool_b = Principal::from_slice(&[22]);
+        assert!(!three_usd_ingress_first_dispatch_allowed(
+            &Phase::AdmissionPending,
+            Some(pool_b),
+            pool_a,
+        ));
+        assert!(three_usd_ingress_first_dispatch_allowed(
+            &Phase::AdmissionPending,
+            Some(pool_a),
+            pool_a,
+        ));
+        assert!(three_usd_ingress_first_dispatch_allowed(
+            &Phase::SubmittedOrUnknown {
+                tuple: crate::state::ThreeUsdReserveIngressTuple {
+                    spender_owner: pool_a,
+                    spender_subaccount: None,
+                    source: icrc_ledger_types::icrc1::account::Account {
+                        owner: pool_a,
+                        subaccount: None,
+                    },
+                    destination: icrc_ledger_types::icrc1::account::Account {
+                        owner: pool_b,
+                        subaccount: None,
+                    },
+                    amount_e8s: 1,
+                    fee_e8s: None,
+                    memo: [0; 16],
+                    created_at_time_ns: 1,
+                    op_nonce: 1,
+                    parent_absorb_id: Some(1),
+                },
+            },
+            Some(pool_b),
+            pool_a,
+        ));
+    }
+}
+
+fn three_usd_ingress_first_dispatch_allowed(
+    phase: &crate::state::ThreeUsdReserveIngressPhase,
+    registered_stability_pool: Option<Principal>,
+    key_stability_pool: Principal,
+) -> bool {
+    !matches!(phase, crate::state::ThreeUsdReserveIngressPhase::AdmissionPending)
+        || registered_stability_pool == Some(key_stability_pool)
 }
 
 /// Idempotent ICRC-2 transfer_from. Same semantics as `transfer_idempotent`
@@ -653,14 +810,292 @@ pub async fn transfer_from_idempotent(
     handle_transfer_from_outcome(ledger, outer)
 }
 
+/// Dispatch the exact persisted ICRC-2 transfer_from tuple used by V2 SP
+/// liquidation. Retries must pass this same tuple; this helper never changes
+/// the fee, memo, timestamp or account fields.
+pub async fn transfer_from_with_exact_tuple(
+    tuple: &crate::SpLiquidationStablePullTuple,
+) -> Result<u64, TransferFromError> {
+    if tuple.spender.owner != ic_cdk::id() {
+        return Err(TransferFromError::GenericError {
+            error_code: Nat::from(0u8),
+            message: "persisted transfer_from spender is not the backend account".into(),
+        });
+    }
+    let args = TransferFromArgs {
+        spender_subaccount: tuple.spender.subaccount.clone(),
+        from: tuple.from.clone(),
+        to: tuple.to.clone(),
+        amount: Nat::from(tuple.amount_raw),
+        fee: Some(Nat::from(tuple.fee_raw)),
+        created_at_time: Some(tuple.created_at_time_ns),
+        memo: Some(Memo::from(tuple.memo.clone())),
+    };
+    let response: Result<(Result<Nat, TransferFromError>,), _> =
+        ic_cdk::call(tuple.ledger, "icrc2_transfer_from", (args,)).await;
+    match response {
+        Ok((Ok(index),)) => index
+            .0
+            .to_u64()
+            .ok_or_else(|| TransferFromError::GenericError {
+                error_code: Nat::from(0u8),
+                message: "transfer_from block index exceeds u64".into(),
+            }),
+        Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => duplicate_of
+            .0
+            .to_u64()
+            .ok_or_else(|| TransferFromError::GenericError {
+                error_code: Nat::from(0u8),
+                message: "duplicate transfer_from block index exceeds u64".into(),
+            }),
+        Ok((Err(error),)) => Err(error),
+        Err((code, message)) => Err(TransferFromError::GenericError {
+            error_code: Nat::from(code as u64),
+            message,
+        }),
+    }
+}
+
+/// Exact ICRC-2 transfer_from result with the transport rejection kept
+/// separate from a typed ledger rejection. A rejected inter-canister call is
+/// ambiguous because the ledger may have committed before its reply was lost.
+pub enum ExactTransferFromOutcome {
+    Applied(u64),
+    ProvenNoEffect(TransferFromError),
+    AmbiguousLedgerError(TransferFromError),
+    CallRejected { code: u64, message: String },
+    InvalidBlockIndex,
+}
+
+/// One dispatch result for a caller-pinned push-deposit ICRC-1 transfer.
+/// Transport rejection and GenericError are ambiguous because the ledger may
+/// have committed before the response was lost.
+pub enum ExactPushDepositTransferOutcome {
+    Applied(u64),
+    ProvenNoEffect(TransferError),
+    AmbiguousLedgerError(TransferError),
+    CallRejected { code: u64, message: String },
+    InvalidBlockIndex,
+}
+
+pub async fn transfer_push_deposit_with_exact_tuple(
+    tuple: &crate::state::PushDepositSweepTuple,
+) -> ExactPushDepositTransferOutcome {
+    if tuple.from.owner != ic_cdk::id()
+        || tuple.from.subaccount.is_none()
+        || tuple.to
+            != (Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            })
+        || tuple.amount_raw == 0
+        || tuple.memo.is_empty()
+    {
+        return ExactPushDepositTransferOutcome::ProvenNoEffect(TransferError::GenericError {
+            error_code: Nat::from(0u8),
+            message: "persisted push-deposit tuple does not bind backend deposit and main accounts".into(),
+        });
+    }
+    let args = TransferArg {
+        from_subaccount: tuple.from.subaccount,
+        to: tuple.to.clone(),
+        amount: Nat::from(tuple.amount_raw),
+        fee: tuple.fee_raw.map(Nat::from),
+        memo: Some(Memo::from(tuple.memo.clone())),
+        created_at_time: Some(tuple.created_at_time_ns),
+    };
+    let response: Result<(Result<Nat, TransferError>,), _> =
+        ic_cdk::call(tuple.ledger, "icrc1_transfer", (args,)).await;
+    match response {
+        Ok((Ok(index),)) => index
+            .0
+            .to_u64()
+            .map(ExactPushDepositTransferOutcome::Applied)
+            .unwrap_or(ExactPushDepositTransferOutcome::InvalidBlockIndex),
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => duplicate_of
+            .0
+            .to_u64()
+            .map(ExactPushDepositTransferOutcome::Applied)
+            .unwrap_or(ExactPushDepositTransferOutcome::InvalidBlockIndex),
+        Ok((Err(error),)) if transfer_error_proves_no_effect(&error) => {
+            ExactPushDepositTransferOutcome::ProvenNoEffect(error)
+        }
+        Ok((Err(error),)) => ExactPushDepositTransferOutcome::AmbiguousLedgerError(error),
+        Err((code, message)) => ExactPushDepositTransferOutcome::CallRejected {
+            code: code as u64,
+            message,
+        },
+    }
+}
+
+fn transfer_from_error_proves_no_effect(error: &TransferFromError) -> bool {
+    matches!(
+        error,
+        TransferFromError::BadFee { .. }
+            | TransferFromError::BadBurn { .. }
+            | TransferFromError::InsufficientFunds { .. }
+            | TransferFromError::InsufficientAllowance { .. }
+            | TransferFromError::TooOld
+            | TransferFromError::CreatedInFuture { .. }
+    )
+}
+
+fn transfer_error_proves_no_effect(error: &TransferError) -> bool {
+    matches!(
+        error,
+        TransferError::BadFee { .. }
+            | TransferError::BadBurn { .. }
+            | TransferError::InsufficientFunds { .. }
+            | TransferError::TooOld
+            | TransferError::CreatedInFuture { .. }
+    )
+}
+
+pub async fn transfer_from_with_exact_tuple_outcome(
+    tuple: &crate::SpLiquidationStablePullTuple,
+) -> ExactTransferFromOutcome {
+    if tuple.spender.owner != ic_cdk::id()
+        || tuple.spender.subaccount.is_some()
+        || tuple.from.subaccount.is_some()
+        || tuple.to
+            != (Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            })
+        || tuple.amount_raw == 0
+        || tuple.memo.is_empty()
+    {
+        return ExactTransferFromOutcome::ProvenNoEffect(TransferFromError::GenericError {
+            error_code: Nat::from(0u8),
+            message: "persisted icUSD burn tuple is incomplete or does not bind the backend minter"
+                .into(),
+        });
+    }
+    let args = TransferFromArgs {
+        spender_subaccount: tuple.spender.subaccount.clone(),
+        from: tuple.from.clone(),
+        to: tuple.to.clone(),
+        amount: Nat::from(tuple.amount_raw),
+        fee: Some(Nat::from(tuple.fee_raw)),
+        created_at_time: Some(tuple.created_at_time_ns),
+        memo: Some(Memo::from(tuple.memo.clone())),
+    };
+    let response: Result<(Result<Nat, TransferFromError>,), _> =
+        ic_cdk::call(tuple.ledger, "icrc2_transfer_from", (args,)).await;
+    match response {
+        Ok((Ok(index),)) => index
+            .0
+            .to_u64()
+            .map(ExactTransferFromOutcome::Applied)
+            .unwrap_or(ExactTransferFromOutcome::InvalidBlockIndex),
+        Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => duplicate_of
+            .0
+            .to_u64()
+            .map(ExactTransferFromOutcome::Applied)
+            .unwrap_or(ExactTransferFromOutcome::InvalidBlockIndex),
+        Ok((Err(error),)) if transfer_from_error_proves_no_effect(&error) => {
+            ExactTransferFromOutcome::ProvenNoEffect(error)
+        }
+        Ok((Err(error),)) => ExactTransferFromOutcome::AmbiguousLedgerError(error),
+        Err((code, message)) => ExactTransferFromOutcome::CallRejected {
+            code: code as u64,
+            message,
+        },
+    }
+}
+
+pub async fn transfer_sp_liquidation_payout(
+    tuple: &crate::SpLiquidationPayoutTuple,
+) -> ExactCollateralTransferOutcome {
+    if tuple.source.owner != ic_cdk::id()
+        || tuple.source.subaccount.is_some()
+        || tuple.destination.subaccount.is_some()
+        || tuple.gross_amount_raw != tuple.net_amount_raw.saturating_add(tuple.fee_raw)
+    {
+        return ExactCollateralTransferOutcome::ProvenNoEffect(TransferError::GenericError {
+            error_code: Nat::from(0u8),
+            message: "persisted SP payout tuple is inconsistent".into(),
+        });
+    }
+    transfer_collateral_with_exact_outcome(
+        tuple.ledger,
+        tuple.destination.owner,
+        tuple.net_amount_raw,
+        tuple.fee_raw,
+        tuple.op_nonce,
+        tuple.created_at_time_ns,
+    )
+    .await
+}
+
+pub async fn transfer_sp_liquidation_refund(
+    tuple: &crate::SpLiquidationStableRefundTuple,
+) -> ExactCollateralTransferOutcome {
+    if tuple.source.owner != ic_cdk::id()
+        || tuple.source.subaccount.is_some()
+        || tuple.destination.subaccount.is_some()
+        || tuple.fee_raw != 0
+        || tuple.amount_raw
+            != tuple
+                .principal_refund_raw
+                .saturating_add(tuple.approval_fee_refund_raw)
+                .saturating_add(tuple.pull_fee_refund_raw)
+    {
+        return ExactCollateralTransferOutcome::ProvenNoEffect(TransferError::GenericError {
+            error_code: Nat::from(0u8),
+            message: "persisted SP refund tuple is inconsistent".into(),
+        });
+    }
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: tuple.ledger,
+    };
+    let response = client
+        .transfer(TransferArg {
+            from_subaccount: None,
+            to: tuple.destination.clone(),
+            amount: Nat::from(tuple.amount_raw),
+            fee: Some(Nat::from(0u8)),
+            memo: Some(Memo::from(tuple.memo.clone())),
+            created_at_time: Some(tuple.created_at_time_ns),
+        })
+        .await;
+    match response {
+        Ok(Ok(block))
+        | Ok(Err(TransferError::Duplicate {
+            duplicate_of: block,
+        })) => block
+            .0
+            .to_u64()
+            .map(ExactCollateralTransferOutcome::Applied)
+            .unwrap_or(ExactCollateralTransferOutcome::InvalidBlockIndex),
+        Ok(Err(error)) if transfer_error_proves_no_effect(&error) => {
+            ExactCollateralTransferOutcome::ProvenNoEffect(error)
+        }
+        Ok(Err(error)) => ExactCollateralTransferOutcome::LedgerError(error),
+        Err((code, message)) => ExactCollateralTransferOutcome::CallRejected {
+            code: code as u64,
+            message,
+        },
+    }
+}
+
 fn handle_transfer_outcome(
     ledger: Principal,
     outer: Result<Result<Nat, TransferError>, (i32, String)>,
 ) -> Result<u64, TransferError> {
     match outer {
-        Ok(Ok(block)) => Ok(block.0.to_u64().unwrap_or(0)),
+        Ok(Ok(block)) => block.0.to_u64().ok_or_else(|| TransferError::GenericError {
+            error_code: Nat::from(0u8),
+            message: "ledger committed transfer but returned a block index outside u64; operation must remain pending for exact reconciliation".into(),
+        }),
         Ok(Err(TransferError::Duplicate { duplicate_of })) => {
-            let block = duplicate_of.0.to_u64().unwrap_or(0);
+            let Some(block) = duplicate_of.0.to_u64() else {
+                return Err(TransferError::GenericError {
+                    error_code: Nat::from(0u8),
+                    message: "ledger duplicate identifies a block outside u64; operation must remain pending for exact reconciliation".into(),
+                });
+            };
             log!(DEBUG,
                 "[transfer_idempotent] ledger {} reported Duplicate; treating as success (block {})",
                 ledger, block
@@ -668,10 +1103,14 @@ fn handle_transfer_outcome(
             Ok(block)
         }
         Ok(Err(TransferError::BadFee { expected_fee })) => {
-            let fee = expected_fee.0.to_u64().unwrap_or(0);
-            log!(DEBUG,
+            let Some(fee) = expected_fee.0.to_u64() else {
+                return Err(TransferError::BadFee { expected_fee });
+            };
+            log!(
+                DEBUG,
                 "[transfer_idempotent] ledger {} returned BadFee (expected {}), refreshing cache",
-                ledger, fee
+                ledger,
+                fee
             );
             set_cached_fee(ledger, fee);
             Err(TransferError::BadFee { expected_fee })
@@ -689,9 +1128,17 @@ fn handle_transfer_from_outcome(
     outer: Result<Result<Nat, TransferFromError>, (i32, String)>,
 ) -> Result<u64, TransferFromError> {
     match outer {
-        Ok(Ok(block)) => Ok(block.0.to_u64().unwrap_or(0)),
+        Ok(Ok(block)) => block.0.to_u64().ok_or_else(|| TransferFromError::GenericError {
+            error_code: Nat::from(0u8),
+            message: "ledger committed transfer_from but returned a block index outside u64; operation must remain pending for exact reconciliation".into(),
+        }),
         Ok(Err(TransferFromError::Duplicate { duplicate_of })) => {
-            let block = duplicate_of.0.to_u64().unwrap_or(0);
+            let Some(block) = duplicate_of.0.to_u64() else {
+                return Err(TransferFromError::GenericError {
+                    error_code: Nat::from(0u8),
+                    message: "ledger duplicate identifies a block outside u64; operation must remain pending for exact reconciliation".into(),
+                });
+            };
             log!(DEBUG,
                 "[transfer_from_idempotent] ledger {} reported Duplicate; treating as success (block {})",
                 ledger, block
@@ -699,7 +1146,9 @@ fn handle_transfer_from_outcome(
             Ok(block)
         }
         Ok(Err(TransferFromError::BadFee { expected_fee })) => {
-            let fee = expected_fee.0.to_u64().unwrap_or(0);
+            let Some(fee) = expected_fee.0.to_u64() else {
+                return Err(TransferFromError::BadFee { expected_fee });
+            };
             log!(DEBUG,
                 "[transfer_from_idempotent] ledger {} returned BadFee (expected {}), refreshing cache",
                 ledger, fee
@@ -783,7 +1232,7 @@ pub async fn fetch_icp_price() -> Result<GetExchangeRateResult, String> {
         class: AssetClass::Cryptocurrency,
     };
     let usd = Asset {
-        symbol: "USD".to_string(), 
+        symbol: "USD".to_string(),
         class: AssetClass::FiatCurrency,
     };
 
@@ -800,7 +1249,7 @@ pub async fn fetch_icp_price() -> Result<GetExchangeRateResult, String> {
     let res_xrc: Result<(GetExchangeRateResult,), _> = ic_cdk::api::call::call_with_payment(
         xrc_principal,
         "get_exchange_rate",
-        (args.clone(),),  // Clone args for logging
+        (args.clone(),), // Clone args for logging
         XRC_CALL_COST_CYCLES,
     )
     .await;
@@ -814,9 +1263,14 @@ pub async fn fetch_icp_price() -> Result<GetExchangeRateResult, String> {
         }
         Err((code, msg)) => {
             log!(DEBUG, "[fetch_icp_price] XRC request args: {:?}", args);
-            log!(DEBUG, "[fetch_icp_price] XRC error code: {:?}, message: {}", code, msg);  // Changed to {:?}
+            log!(
+                DEBUG,
+                "[fetch_icp_price] XRC error code: {:?}, message: {}",
+                code,
+                msg
+            ); // Changed to {:?}
             Err(format!(
-                "Error while calling XRC canister ({:?}): {:?}",  // Changed to {:?}
+                "Error while calling XRC canister ({:?}): {:?}", // Changed to {:?}
                 code, msg
             ))
         }
@@ -858,12 +1312,23 @@ pub async fn fetch_stable_price(symbol: &str) -> Result<GetExchangeRateResult, S
 
     match &res_xrc {
         Ok((xr,)) => {
-            log!(DEBUG, "[fetch_stable_price] XRC request for {}: {:?}", symbol, args);
+            log!(
+                DEBUG,
+                "[fetch_stable_price] XRC request for {}: {:?}",
+                symbol,
+                args
+            );
             log!(DEBUG, "[fetch_stable_price] XRC response: {:?}", xr);
             Ok(xr.clone())
         }
         Err((code, msg)) => {
-            log!(DEBUG, "[fetch_stable_price] XRC error for {}: {:?}, message: {}", symbol, code, msg);
+            log!(
+                DEBUG,
+                "[fetch_stable_price] XRC error for {}: {:?}, message: {}",
+                symbol,
+                code,
+                msg
+            );
             Err(format!(
                 "Error fetching {} price from XRC ({:?}): {:?}",
                 symbol, code, msg
@@ -952,9 +1417,9 @@ async fn refresh_lst_wrapped_price_once(
     collateral_type: Principal,
     expected_icp_timestamp_ns: u64,
 ) -> LstPriceRefreshOutcome {
+    use crate::logs::TRACE_XRC;
     use crate::state::{mutate_state, PriceSource};
     use ic_canister_log::log;
-    use crate::logs::TRACE_XRC;
     use rust_decimal::prelude::FromPrimitive;
 
     let Some(_guard) = LstPriceFetchGuard::try_acquire(collateral_type) else {
@@ -987,7 +1452,13 @@ async fn refresh_lst_wrapped_price_once(
         if base_asset != "ICP" {
             return Err(LstPriceRefreshOutcome::UnsupportedUnderlying);
         }
-        Ok((icp_rate, source.clone(), *rate_canister_id, rate_method.clone(), *haircut))
+        Ok((
+            icp_rate,
+            source.clone(),
+            *rate_canister_id,
+            rate_method.clone(),
+            *haircut,
+        ))
     });
     let (icp_rate, source, rate_canister_id, rate_method, haircut) = match snapshot {
         Ok(snapshot) => snapshot,
@@ -1022,7 +1493,10 @@ async fn refresh_lst_wrapped_price_once(
         return LstPriceRefreshOutcome::InvalidRate;
     };
     use rust_decimal::prelude::ToPrimitive;
-    let Some(final_rate_f64) = final_rate.to_f64().filter(|value| value.is_finite() && *value > 0.0) else {
+    let Some(final_rate_f64) = final_rate
+        .to_f64()
+        .filter(|value| value.is_finite() && *value > 0.0)
+    else {
         return LstPriceRefreshOutcome::InvalidRate;
     };
 
@@ -1063,9 +1537,7 @@ async fn refresh_lst_wrapped_price_once(
         true
     });
     if !published {
-        return if read_state(|state| {
-            state.last_icp_timestamp != Some(expected_icp_timestamp_ns)
-        }) {
+        return if read_state(|state| state.last_icp_timestamp != Some(expected_icp_timestamp_ns)) {
             LstPriceRefreshOutcome::IcpTimestampChanged
         } else if read_state(|state| {
             state
@@ -1085,30 +1557,31 @@ async fn refresh_lst_wrapped_price_once(
         };
     }
 
-    crate::event::record_price_update(
-        collateral_type,
-        final_rate,
-        expected_icp_timestamp_ns,
-    );
+    crate::event::record_price_update(collateral_type, final_rate, expected_icp_timestamp_ns);
     LstPriceRefreshOutcome::Published
 }
 
 /// Generic price fetch for any collateral type using its PriceSource config.
 /// Routes to XRC, CoinGecko HTTPS outcall, or LstWrapped depending on config.
 pub async fn fetch_collateral_price(collateral_type: Principal) {
+    use crate::logs::TRACE_XRC;
     use crate::state::{mutate_state, PriceSource, XrcAssetClass};
     use ic_canister_log::log;
-    use crate::logs::TRACE_XRC;
     use rust_decimal::prelude::FromPrimitive;
 
     let price_source = read_state(|s| {
-        s.get_collateral_config(&collateral_type).map(|c| c.price_source.clone())
+        s.get_collateral_config(&collateral_type)
+            .map(|c| c.price_source.clone())
     });
 
     let price_source = match price_source {
         Some(ps) => ps,
         None => {
-            log!(TRACE_XRC, "[fetch_collateral_price] No config for {}", collateral_type);
+            log!(
+                TRACE_XRC,
+                "[fetch_collateral_price] No config for {}",
+                collateral_type
+            );
             return;
         }
     };
@@ -1117,8 +1590,12 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
     // skips already-current samples before making the LST rate-canister call.
     if matches!(&price_source, PriceSource::LstWrapped { .. }) {
         if let Some(timestamp_ns) = read_state(|s| s.last_icp_timestamp) {
-            let outcome = refresh_lst_wrapped_price_for_icp_timestamp(collateral_type, timestamp_ns).await;
-            if !matches!(outcome, LstPriceRefreshOutcome::Published | LstPriceRefreshOutcome::AlreadyCurrent) {
+            let outcome =
+                refresh_lst_wrapped_price_for_icp_timestamp(collateral_type, timestamp_ns).await;
+            if !matches!(
+                outcome,
+                LstPriceRefreshOutcome::Published | LstPriceRefreshOutcome::AlreadyCurrent
+            ) {
                 log!(
                     TRACE_XRC,
                     "[fetch_collateral_price] LstWrapped refresh for {} did not publish: {:?}",
@@ -1137,7 +1614,11 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
     }
 
     // CoinGecko variant uses HTTPS outcalls — completely separate path from XRC
-    if let PriceSource::CoinGecko { ref coin_id, ref vs_currency } = price_source {
+    if let PriceSource::CoinGecko {
+        ref coin_id,
+        ref vs_currency,
+    } = price_source
+    {
         let result = fetch_coingecko_price(coin_id, vs_currency).await;
         match result {
             Some(sample) => {
@@ -1155,7 +1636,9 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
                 log!(
                     TRACE_XRC,
                     "[fetch_collateral_price] CoinGecko {} price: {} at {}",
-                    coin_id, sample.price, ts_nanos
+                    coin_id,
+                    sample.price,
+                    ts_nanos
                 );
                 // Wave-5 LIQ-007: gate every accepted price through the sanity band
                 // (rejects single outliers, accepts after N consecutive confirmations).
@@ -1192,7 +1675,11 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
                 }
             }
             None => {
-                log!(TRACE_XRC, "[fetch_collateral_price] CoinGecko failed for {}", coin_id);
+                log!(
+                    TRACE_XRC,
+                    "[fetch_collateral_price] CoinGecko failed for {}",
+                    coin_id
+                );
             }
         }
         return;
@@ -1205,11 +1692,19 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
     const XRC_MARGIN_SEC: u64 = 60;
 
     let (base_asset, base_asset_class, quote_asset, quote_asset_class) = match &price_source {
-        PriceSource::Xrc { base_asset, base_asset_class, quote_asset, quote_asset_class } => {
-            (base_asset.clone(), base_asset_class.clone(), quote_asset.clone(), quote_asset_class.clone())
-        }
+        PriceSource::Xrc {
+            base_asset,
+            base_asset_class,
+            quote_asset,
+            quote_asset_class,
+        } => (
+            base_asset.clone(),
+            base_asset_class.clone(),
+            quote_asset.clone(),
+            quote_asset_class.clone(),
+        ),
         PriceSource::LstWrapped { .. } => unreachable!(), // handled above
-        PriceSource::CoinGecko { .. } => unreachable!(), // handled above
+        PriceSource::CoinGecko { .. } => unreachable!(),  // handled above
     };
 
     let base = Asset {
@@ -1254,8 +1749,7 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
             // consecutive-failure counter is intentionally NOT mutated here
             // (it tracks ICP-only). Per-collateral oracle health is observed
             // via the event count rather than a global circuit breaker.
-            let num_sources =
-                exchange_rate_result.metadata.base_asset_num_received_rates as u32;
+            let num_sources = exchange_rate_result.metadata.base_asset_num_received_rates as u32;
             // Wave-14a CDP-14 follow-up: resolve the per-collateral
             // override (defaults to the global floor when unset). For
             // assets with genuinely thin CEX coverage (e.g. XAUT, which
@@ -1285,19 +1779,23 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
                 None
             } else {
                 let rate = rust_decimal::Decimal::from_u64(exchange_rate_result.rate).unwrap()
-                    / rust_decimal::Decimal::from_u64(10_u64.pow(exchange_rate_result.metadata.decimals)).unwrap();
+                    / rust_decimal::Decimal::from_u64(
+                        10_u64.pow(exchange_rate_result.metadata.decimals),
+                    )
+                    .unwrap();
 
                 log!(
                     TRACE_XRC,
                     "[fetch_collateral_price] {} rate: {} at timestamp: {}",
-                    base_asset, rate, exchange_rate_result.timestamp
+                    base_asset,
+                    rate,
+                    exchange_rate_result.timestamp
                 );
 
                 let Some(ts_nanos) = crate::xrc::xrc_timestamp_secs_to_ns(
                     exchange_rate_result.timestamp,
                 )
-                .filter(|ts| crate::xrc::source_timestamp_is_fresh(*ts, ic_cdk::api::time()))
-                else {
+                .filter(|ts| crate::xrc::source_timestamp_is_fresh(*ts, ic_cdk::api::time())) else {
                     log!(
                         TRACE_XRC,
                         "[fetch_collateral_price] rejecting stale, future, or overflowing {} timestamp {}",
@@ -1311,16 +1809,29 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
             }
         }
         Ok((GetExchangeRateResult::Err(error),)) => {
-            log!(TRACE_XRC, "[fetch_collateral_price] XRC error for {}: {:?}", base_asset, error);
+            log!(
+                TRACE_XRC,
+                "[fetch_collateral_price] XRC error for {}: {:?}",
+                base_asset,
+                error
+            );
             None
         }
         Err((code, msg)) => {
-            log!(TRACE_XRC, "[fetch_collateral_price] Call error for {}: {:?} {}", base_asset, code, msg);
+            log!(
+                TRACE_XRC,
+                "[fetch_collateral_price] Call error for {}: {:?} {}",
+                base_asset,
+                code,
+                msg
+            );
             None
         }
     };
 
-    let Some((rate, ts_nanos)) = underlying_rate else { return };
+    let Some((rate, ts_nanos)) = underlying_rate else {
+        return;
+    };
 
     // Only the plain `Xrc` variant reaches here — `LstWrapped` is handled
     // above without re-fetching from XRC, and `CoinGecko` has its own
@@ -1334,7 +1845,8 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
             log!(
                 TRACE_XRC,
                 "[fetch_collateral_price] {}: dropping non-positive/non-finite final rate {}",
-                base_asset, final_rate
+                base_asset,
+                final_rate
             );
             return;
         }
@@ -1344,7 +1856,9 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
             return false;
         };
         if config.price_source != price_source
-            || config.last_price_timestamp.is_some_and(|last_ts| last_ts >= ts_nanos)
+            || config
+                .last_price_timestamp
+                .is_some_and(|last_ts| last_ts >= ts_nanos)
         {
             return false;
         }
@@ -1369,11 +1883,12 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
         log!(
             TRACE_XRC,
             "[fetch_collateral_price] rejecting outlier {} rate {} for {}; awaiting confirmation",
-            base_asset, final_rate_f64, collateral_type
+            base_asset,
+            final_rate_f64,
+            collateral_type
         );
         return;
     }
-
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1397,15 +1912,16 @@ fn parse_coingecko_price_sample(
         .get("last_updated_at")?
         .as_u64()?
         .checked_mul(crate::SEC_NANOS)?;
-    Some(CoinGeckoPriceSample { price, updated_at_ns })
+    Some(CoinGeckoPriceSample {
+        price,
+        updated_at_ns,
+    })
 }
 
 /// Old CoinGecko snapshots recorded local fetch time, while fresh samples now
 /// record provider time. Invalidate only those timestamps on upgrade so the
 /// next price-sensitive operation fetches a provider-timestamped sample.
-pub fn invalidate_legacy_coingecko_cache_timestamps(
-    state: &mut crate::state::State,
-) -> usize {
+pub fn invalidate_legacy_coingecko_cache_timestamps(state: &mut crate::state::State) -> usize {
     state
         .collateral_configs
         .values_mut()
@@ -1422,12 +1938,11 @@ pub fn invalidate_legacy_coingecko_cache_timestamps(
 /// Fetch a token price and provider update time from the CoinGecko
 /// simple/price API via HTTPS outcall.
 async fn fetch_coingecko_price(coin_id: &str, vs_currency: &str) -> Option<CoinGeckoPriceSample> {
-    use ic_cdk::api::management_canister::http_request::{
-        http_request, CanisterHttpRequestArgument, HttpHeader, HttpMethod,
-        TransformContext,
-    };
-    use ic_canister_log::log;
     use crate::logs::TRACE_XRC;
+    use ic_canister_log::log;
+    use ic_cdk::api::management_canister::http_request::{
+        http_request, CanisterHttpRequestArgument, HttpHeader, HttpMethod, TransformContext,
+    };
 
     // Response body is small (~50 bytes) but headers can be large (~2-3 KB).
     // IC counts headers + body against this limit before transform strips headers.
@@ -1445,12 +1960,10 @@ async fn fetch_coingecko_price(coin_id: &str, vs_currency: &str) -> Option<CoinG
         url,
         max_response_bytes: Some(MAX_RESPONSE_BYTES),
         method: HttpMethod::GET,
-        headers: vec![
-            HttpHeader {
-                name: "Accept".to_string(),
-                value: "application/json".to_string(),
-            },
-        ],
+        headers: vec![HttpHeader {
+            name: "Accept".to_string(),
+            value: "application/json".to_string(),
+        }],
         body: None,
         transform: Some(TransformContext::from_name(
             "coingecko_transform".to_string(),
@@ -1472,7 +1985,13 @@ async fn fetch_coingecko_price(coin_id: &str, vs_currency: &str) -> Option<CoinG
             parse_coingecko_price_sample(&body, coin_id, vs_currency)
         }
         Err((code, msg)) => {
-            log!(TRACE_XRC, "[coingecko] Outcall error for {}: {:?} {}", coin_id, code, msg);
+            log!(
+                TRACE_XRC,
+                "[coingecko] Outcall error for {}: {:?} {}",
+                coin_id,
+                code,
+                msg
+            );
             None
         }
     }
@@ -1566,15 +2085,18 @@ mod coingecko_source_timestamp_tests {
             Some(provider_timestamp_ns),
         );
     }
-
 }
 
 pub async fn mint_icusd(amount: ICUSD, to: Principal) -> Result<u64, TransferError> {
-    let (ledger, op_nonce) = crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
+    let (ledger, op_nonce) =
+        crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
     transfer_idempotent(
         ledger,
         None,
-        Account { owner: to, subaccount: None },
+        Account {
+            owner: to,
+            subaccount: None,
+        },
         amount.to_u64() as u128,
         op_nonce,
         None,
@@ -1594,20 +2116,29 @@ pub async fn mint_icusd_with_nonce(
     transfer_idempotent(ledger, None, to, amount.to_u64() as u128, op_nonce, None).await
 }
 
-pub async fn transfer_icusd_from(amount: ICUSD, caller: Principal) -> Result<u64, TransferFromError> {
-    let (ledger, op_nonce) = crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
+pub async fn transfer_icusd_from(
+    amount: ICUSD,
+    caller: Principal,
+) -> Result<u64, TransferFromError> {
+    let (ledger, op_nonce) =
+        crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
     let protocol_id = ic_cdk::id();
     transfer_from_idempotent(
         ledger,
-        Account { owner: caller, subaccount: None },
-        Account { owner: protocol_id, subaccount: None },
+        Account {
+            owner: caller,
+            subaccount: None,
+        },
+        Account {
+            owner: protocol_id,
+            subaccount: None,
+        },
         amount.to_u64() as u128,
         op_nonce,
         None,
     )
     .await
 }
-
 
 /// Thin wrapper around generic transfer_collateral_from for ICP. One-shot
 /// callers; retry-loop callers must use `transfer_collateral_from_with_nonce`.
@@ -1624,11 +2155,15 @@ pub async fn transfer_icp(amount: ICP, to: Principal) -> Result<u64, TransferErr
 }
 
 pub async fn transfer_icusd(amount: ICUSD, to: Principal) -> Result<u64, TransferError> {
-    let (ledger, op_nonce) = crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
+    let (ledger, op_nonce) =
+        crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
     transfer_idempotent(
         ledger,
         None,
-        Account { owner: to, subaccount: None },
+        Account {
+            owner: to,
+            subaccount: None,
+        },
         amount.to_u64() as u128,
         op_nonce,
         None,
@@ -1639,12 +2174,19 @@ pub async fn transfer_icusd(amount: ICUSD, to: Principal) -> Result<u64, Transfe
 /// Idempotent icUSD transfer with a caller-supplied op_nonce. Wave-4 ICC-007:
 /// used by the durable refund queue so retries reuse the same dedup tuple at
 /// the icUSD ledger across canister upgrades.
-pub async fn transfer_icusd_with_nonce(amount: ICUSD, to: Principal, op_nonce: u128) -> Result<u64, TransferError> {
+pub async fn transfer_icusd_with_nonce(
+    amount: ICUSD,
+    to: Principal,
+    op_nonce: u128,
+) -> Result<u64, TransferError> {
     let ledger = crate::state::read_state(|s| s.icusd_ledger_principal);
     transfer_idempotent(
         ledger,
         None,
-        Account { owner: to, subaccount: None },
+        Account {
+            owner: to,
+            subaccount: None,
+        },
         amount.to_u64() as u128,
         op_nonce,
         None,
@@ -1658,8 +2200,13 @@ pub async fn get_ledger_fee(ledger: Principal) -> Result<u64, String> {
         runtime: CdkRuntime,
         ledger_canister_id: ledger,
     };
-    let fee = client.fee().await.map_err(|e| format!("icrc1_fee call failed: {:?}", e))?;
-    fee.0.to_u64().ok_or_else(|| "ledger fee exceeds the supported u64 range".to_string())
+    let fee = client
+        .fee()
+        .await
+        .map_err(|e| format!("icrc1_fee call failed: {:?}", e))?;
+    fee.0
+        .to_u64()
+        .ok_or_else(|| "ledger fee exceeds the supported u64 range".to_string())
 }
 
 /// Generic collateral transfer: move tokens from the protocol canister to a recipient.
@@ -1669,7 +2216,11 @@ pub async fn get_ledger_fee(ledger: Principal) -> Result<u64, String> {
 /// caller-initiated transfers that don't have a persistent retry record.
 /// For pending-transfer retry loops, use `transfer_collateral_with_nonce` and
 /// pass the nonce stored on the pending entry.
-pub async fn transfer_collateral(amount: u64, to: Principal, ledger: Principal) -> Result<u64, TransferError> {
+pub async fn transfer_collateral(
+    amount: u64,
+    to: Principal,
+    ledger: Principal,
+) -> Result<u64, TransferError> {
     let op_nonce = crate::state::mutate_state(|s| s.next_op_nonce());
     transfer_collateral_with_nonce(amount, to, ledger, op_nonce).await
 }
@@ -1687,7 +2238,10 @@ pub async fn transfer_collateral_with_nonce(
     transfer_idempotent(
         ledger,
         None,
-        Account { owner: to, subaccount: None },
+        Account {
+            owner: to,
+            subaccount: None,
+        },
         amount as u128,
         op_nonce,
         None,
@@ -1741,15 +2295,228 @@ pub async fn transfer_collateral_with_exact_tuple(
     }
 }
 
+/// Result of one exact collateral withdrawal dispatch. A call rejection is
+/// kept distinct from a ledger error because a rejected inter-canister call
+/// may have committed before its reply was lost.
+pub enum ExactCollateralTransferOutcome {
+    Applied(u64),
+    /// A typed ledger reply proves that this dispatch had no effect.
+    ProvenNoEffect(TransferError),
+    LedgerError(TransferError),
+    CallRejected {
+        code: u64,
+        message: String,
+    },
+    InvalidBlockIndex,
+}
+
+pub async fn transfer_collateral_with_exact_outcome(
+    ledger: Principal,
+    to: Principal,
+    amount: u64,
+    fee: u64,
+    memo: u128,
+    created_at_time_ns: u64,
+) -> ExactCollateralTransferOutcome {
+    let _default_account_guard =
+        match acquire_three_usd_default_account_transfer_guard(ledger, None) {
+            Ok(guard) => guard,
+            Err(error) => return ExactCollateralTransferOutcome::LedgerError(error),
+        };
+    if let Some(guard) = _default_account_guard.as_ref() {
+        let fee_before = match get_ledger_fee(ledger).await {
+            Ok(fee) => fee,
+            Err(error) => {
+                return ExactCollateralTransferOutcome::LedgerError(default_account_capacity_error(
+                    error,
+                ))
+            }
+        };
+        let balance = match get_icrc1_reserve_balance(
+            ledger,
+            Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            },
+        )
+        .await
+        {
+            Ok(balance) => balance,
+            Err(error) => {
+                return ExactCollateralTransferOutcome::LedgerError(default_account_capacity_error(
+                    error,
+                ))
+            }
+        };
+        let fee_after = match get_ledger_fee(ledger).await {
+            Ok(fee) => fee,
+            Err(error) => {
+                return ExactCollateralTransferOutcome::LedgerError(default_account_capacity_error(
+                    error,
+                ))
+            }
+        };
+        if !default_fee_is_stable_and_legacy_compatible(fee_before, fee_after) {
+            return ExactCollateralTransferOutcome::LedgerError(default_account_capacity_error(
+                "3USD default-account fee changed during withdrawal preflight",
+            ));
+        }
+        if let Err(error) =
+            ensure_default_account_spend_with_balance(guard, ledger, amount as u128, fee, balance)
+        {
+            return ExactCollateralTransferOutcome::LedgerError(error);
+        }
+    }
+    let args = TransferArg {
+        from_subaccount: None,
+        to: Account {
+            owner: to,
+            subaccount: None,
+        },
+        amount: Nat::from(amount),
+        fee: Some(Nat::from(fee)),
+        memo: Some(Memo::from(memo.to_be_bytes().to_vec())),
+        created_at_time: Some(created_at_time_ns),
+    };
+    let response: Result<(Result<Nat, TransferError>,), _> =
+        ic_cdk::call(ledger, "icrc1_transfer", (args,)).await;
+    match response {
+        Ok((Ok(index),)) => match index.0.to_u64() {
+            Some(index) => ExactCollateralTransferOutcome::Applied(index),
+            None => ExactCollateralTransferOutcome::InvalidBlockIndex,
+        },
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => match duplicate_of.0.to_u64() {
+            Some(index) => ExactCollateralTransferOutcome::Applied(index),
+            None => ExactCollateralTransferOutcome::InvalidBlockIndex,
+        },
+        Ok((Err(error),)) if transfer_error_proves_no_effect(&error) => {
+            ExactCollateralTransferOutcome::ProvenNoEffect(error)
+        }
+        Ok((Err(error),)) => ExactCollateralTransferOutcome::LedgerError(error),
+        Err((code, message)) => ExactCollateralTransferOutcome::CallRejected {
+            code: code as u64,
+            message,
+        },
+    }
+}
+
+pub async fn transfer_pinned_redemption(
+    tuple: crate::state::PinnedRedemptionTransfer,
+) -> Result<u64, TransferError> {
+    if tuple.op_nonce == 0
+        || tuple.ledger == Principal::anonymous()
+        || tuple.recipient == Principal::anonymous()
+        || tuple.amount_raw == 0
+        || !tuple.fee_is_explicit
+        || tuple.memo != tuple.op_nonce
+        || tuple.created_at_time_ns != nonce_to_created_at_time(tuple.op_nonce)
+    {
+        return Err(TransferError::GenericError {
+            error_code: Nat::from(0u64),
+            message: "redemption transfer tuple is incomplete or inconsistent".into(),
+        });
+    }
+    let gross = tuple.amount_raw.checked_add(tuple.fee_raw);
+    if gross.is_none() || gross == Some(0) {
+        return Err(TransferError::GenericError {
+            error_code: Nat::from(0u64),
+            message: "redemption transfer tuple gross amount is invalid".into(),
+        });
+    }
+    transfer_collateral_with_exact_tuple(
+        tuple.ledger,
+        Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },
+        Account {
+            owner: tuple.recipient,
+            subaccount: None,
+        },
+        tuple.amount_raw,
+        tuple.fee_raw,
+        tuple.memo.to_be_bytes().to_vec(),
+        tuple.created_at_time_ns,
+    )
+    .await
+}
+
+pub async fn verify_pinned_redemption_receipt(
+    tuple: crate::state::PinnedRedemptionTransfer,
+    block_index: u64,
+) -> Result<(), String> {
+    if tuple.op_nonce == 0
+        || tuple.ledger == Principal::anonymous()
+        || tuple.recipient == Principal::anonymous()
+        || tuple.amount_raw == 0
+        || !tuple.fee_is_explicit
+        || tuple.memo != tuple.op_nonce
+        || tuple.created_at_time_ns != nonce_to_created_at_time(tuple.op_nonce)
+    {
+        return Err("redemption receipt tuple is incomplete or inconsistent".into());
+    }
+    let gross = tuple
+        .amount_raw
+        .checked_add(tuple.fee_raw)
+        .ok_or_else(|| "redemption receipt gross amount overflowed".to_string())?;
+    if gross == 0 {
+        return Err("redemption receipt gross amount is zero".into());
+    }
+    let source = icrc_ledger_types::icrc1::account::Account {
+        owner: ic_cdk::id(),
+        subaccount: None,
+    };
+    let destination = icrc_ledger_types::icrc1::account::Account {
+        owner: tuple.recipient,
+        subaccount: None,
+    };
+    let canonical_icp = Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai")
+        .expect("canonical ICP ledger principal");
+    if tuple.ledger == canonical_icp {
+        crate::treasury::verify_native_icp_transfer_receipt(
+            tuple.ledger,
+            source.owner,
+            destination.owner,
+            tuple.amount_raw,
+            tuple.fee_raw,
+            &tuple.memo.to_be_bytes(),
+            tuple.created_at_time_ns,
+            block_index,
+        )
+        .await
+    } else {
+        let block = crate::icrc3_proof::fetch_icrc3_block(tuple.ledger, block_index).await?;
+        crate::icrc3_proof::validate_icrc3_transfer_block_with_fee(
+            &block,
+            source,
+            destination,
+            tuple.amount_raw,
+            tuple.fee_raw,
+            &tuple.memo.to_be_bytes(),
+            tuple.created_at_time_ns,
+        )
+    }
+}
+
 /// Generic collateral transfer_from: pull tokens from a user into the protocol canister.
 /// The `ledger` parameter is the ICRC-1 ledger canister ID of the collateral token.
-pub async fn transfer_collateral_from(amount: u64, from: Principal, ledger: Principal) -> Result<u64, TransferFromError> {
+pub async fn transfer_collateral_from(
+    amount: u64,
+    from: Principal,
+    ledger: Principal,
+) -> Result<u64, TransferFromError> {
     let op_nonce = crate::state::mutate_state(|s| s.next_op_nonce());
     let protocol_id = ic_cdk::id();
     transfer_from_idempotent(
         ledger,
-        Account { owner: from, subaccount: None },
-        Account { owner: protocol_id, subaccount: None },
+        Account {
+            owner: from,
+            subaccount: None,
+        },
+        Account {
+            owner: protocol_id,
+            subaccount: None,
+        },
         amount as u128,
         op_nonce,
         None,
@@ -1759,11 +2526,16 @@ pub async fn transfer_collateral_from(amount: u64, from: Principal, ledger: Prin
 
 /// Transfer ckUSDT or ckUSDC from a user to the protocol (for vault repayment/liquidation)
 /// Amount is in e6s (6-decimal stable token units)
-pub async fn transfer_stable_from(token_type: StableTokenType, amount_e6s: u64, caller: Principal) -> Result<u64, TransferFromError> {
+pub async fn transfer_stable_from(
+    token_type: StableTokenType,
+    amount_e6s: u64,
+    caller: Principal,
+) -> Result<u64, TransferFromError> {
     let ledger_principal = match token_type {
         StableTokenType::CKUSDT => read_state(|s| s.ckusdt_ledger_principal),
         StableTokenType::CKUSDC => read_state(|s| s.ckusdc_ledger_principal),
-    }.ok_or_else(|| TransferFromError::GenericError {
+    }
+    .ok_or_else(|| TransferFromError::GenericError {
         error_code: Nat::from(0u64),
         message: format!("{:?} ledger not configured", token_type),
     })?;
@@ -1772,8 +2544,14 @@ pub async fn transfer_stable_from(token_type: StableTokenType, amount_e6s: u64, 
     let protocol_id = ic_cdk::id();
     transfer_from_idempotent(
         ledger_principal,
-        Account { owner: caller, subaccount: None },
-        Account { owner: protocol_id, subaccount: None },
+        Account {
+            owner: caller,
+            subaccount: None,
+        },
+        Account {
+            owner: protocol_id,
+            subaccount: None,
+        },
         amount_e6s as u128,
         op_nonce,
         None,
@@ -1794,7 +2572,10 @@ pub async fn get_token_balance(ledger: Principal) -> Result<u64, String> {
     )
     .await;
     match result {
-        Ok((balance,)) => Ok(balance.0.to_u64().unwrap_or(0)),
+        Ok((balance,)) => balance
+            .0
+            .to_u64()
+            .ok_or_else(|| "icrc1_balance_of result exceeds u64 range".to_string()),
         Err((code, msg)) => Err(format!("icrc1_balance_of failed: {:?} {}", code, msg)),
     }
 }
@@ -1821,7 +2602,10 @@ pub async fn transfer_3usd_to_reserves_legacy(
     let protocol_id = ic_cdk::id();
     transfer_from_idempotent(
         ledger,
-        Account { owner: from, subaccount: None },
+        Account {
+            owner: from,
+            subaccount: None,
+        },
         Account {
             owner: protocol_id,
             subaccount: Some(protocol_3usd_reserves_subaccount()),
@@ -1846,7 +2630,9 @@ pub struct ThreeUsdReserveIngressGuard(crate::state::ThreeUsdReserveIngressKey);
 impl ThreeUsdReserveIngressGuard {
     pub fn try_acquire(key: &crate::state::ThreeUsdReserveIngressKey) -> Option<Self> {
         THREE_USD_RESERVE_INGRESS_IN_FLIGHT.with(|keys| {
-            keys.borrow_mut().insert(key.clone()).then(|| Self(key.clone()))
+            keys.borrow_mut()
+                .insert(key.clone())
+                .then(|| Self(key.clone()))
         })
     }
 }
@@ -1872,7 +2658,9 @@ pub fn admit_three_usd_reserve_ingress(
     key: crate::state::ThreeUsdReserveIngressKey,
     request: crate::state::ThreeUsdReserveIngressRequest,
 ) -> Result<crate::state::ThreeUsdReserveIngressJournal, String> {
-    use crate::state::{ThreeUsdReserveIngressJournal as Journal, ThreeUsdReserveIngressPhase as Phase};
+    use crate::state::{
+        ThreeUsdReserveIngressJournal as Journal, ThreeUsdReserveIngressPhase as Phase,
+    };
     crate::state::mutate_state(|state| {
         if key.stability_pool == Principal::anonymous() || key.absorb_id == 0 {
             return Err("invalid 3USD reserve ingress identity".into());
@@ -1890,7 +2678,9 @@ pub fn admit_three_usd_reserve_ingress(
         let journal = Journal {
             request,
             phase: if invalid_request {
-                Phase::PreTransferRejected { reason: "invalid 3USD reserve ingress request".into() }
+                Phase::PreTransferRejected {
+                    reason: "invalid 3USD reserve ingress request".into(),
+                }
             } else {
                 Phase::AdmissionPending
             },
@@ -1898,7 +2688,9 @@ pub fn admit_three_usd_reserve_ingress(
             payout: None,
             refund_fee_reserved_e8s: None,
         };
-        state.three_usd_reserve_ingress_journals.insert(key, journal.clone());
+        state
+            .three_usd_reserve_ingress_journals
+            .insert(key, journal.clone());
         Ok(journal)
     })
 }
@@ -1927,7 +2719,9 @@ pub fn record_three_usd_reserve_ingress_absorbed(
     use crate::state::ThreeUsdReserveIngressPhase as Phase;
     crate::state::mutate_state(|state| {
         let Some(journal) = state.three_usd_reserve_ingress_journals.get_mut(key) else {
-            return Err("reserve ingress journal disappeared before absorption receipt was stored".into());
+            return Err(
+                "reserve ingress journal disappeared before absorption receipt was stored".into(),
+            );
         };
         let realized = if journal.request.icusd_debt_covered_e8s == 0 {
             0
@@ -1936,7 +2730,10 @@ pub fn record_three_usd_reserve_ingress_absorbed(
                 .saturating_mul(result.liquidated_debt as u128)
                 / journal.request.icusd_debt_covered_e8s as u128) as u64
         };
-        let expected_refund = journal.request.three_usd_amount_e8s.saturating_sub(realized);
+        let expected_refund = journal
+            .request
+            .three_usd_amount_e8s
+            .saturating_sub(realized);
         match (expected_refund, journal.refund.as_ref()) {
             (0, None) => {
                 journal.refund_fee_reserved_e8s = None;
@@ -1945,15 +2742,31 @@ pub fn record_three_usd_reserve_ingress_absorbed(
                 if amount > 0
                     && refund.gross_amount_e8s == amount
                     && refund.source_subaccount.is_none() => {}
-            _ => return Err("V2 reserve refund child is not durably linked before absorption terminalization".into()),
+            _ => return Err(
+                "V2 reserve refund child is not durably linked before absorption terminalization"
+                    .into(),
+            ),
         }
         let tuple = match &journal.phase {
-            Phase::TransferConfirmed { tuple, block_index: confirmed }
-                if *confirmed == block_index => tuple.clone(),
-            Phase::Absorbed { block_index: confirmed, .. } if *confirmed == block_index => return Ok(()),
-            _ => return Err("reserve ingress journal is not confirmed for this transfer block".into()),
+            Phase::TransferConfirmed {
+                tuple,
+                block_index: confirmed,
+            } if *confirmed == block_index => tuple.clone(),
+            Phase::Absorbed {
+                block_index: confirmed,
+                ..
+            } if *confirmed == block_index => return Ok(()),
+            _ => {
+                return Err(
+                    "reserve ingress journal is not confirmed for this transfer block".into(),
+                )
+            }
         };
-        journal.phase = Phase::Absorbed { tuple, block_index, result };
+        journal.phase = Phase::Absorbed {
+            tuple,
+            block_index,
+            result,
+        };
         Ok(())
     })
 }
@@ -1966,21 +2779,41 @@ pub fn record_three_usd_reserve_ingress_failed(
     use crate::state::ThreeUsdReserveIngressPhase as Phase;
     crate::state::mutate_state(|state| {
         let Some(journal) = state.three_usd_reserve_ingress_journals.get_mut(key) else {
-            return Err("reserve ingress journal disappeared before failure receipt was stored".into());
+            return Err(
+                "reserve ingress journal disappeared before failure receipt was stored".into(),
+            );
         };
         match journal.refund.as_ref() {
             Some(refund)
                 if refund.gross_amount_e8s == journal.request.three_usd_amount_e8s
                     && refund.source_subaccount.is_none() => {}
-            _ => return Err("V2 full-refund child is not durably linked before failure terminalization".into()),
+            _ => {
+                return Err(
+                    "V2 full-refund child is not durably linked before failure terminalization"
+                        .into(),
+                )
+            }
         }
         let tuple = match &journal.phase {
-            Phase::TransferConfirmed { tuple, block_index: confirmed }
-                if *confirmed == block_index => tuple.clone(),
-            Phase::FailedAfterTransfer { block_index: confirmed, .. } if *confirmed == block_index => return Ok(()),
-            _ => return Err("reserve ingress journal is not confirmed for this transfer block".into()),
+            Phase::TransferConfirmed {
+                tuple,
+                block_index: confirmed,
+            } if *confirmed == block_index => tuple.clone(),
+            Phase::FailedAfterTransfer {
+                block_index: confirmed,
+                ..
+            } if *confirmed == block_index => return Ok(()),
+            _ => {
+                return Err(
+                    "reserve ingress journal is not confirmed for this transfer block".into(),
+                )
+            }
         };
-        journal.phase = Phase::FailedAfterTransfer { tuple, block_index, error };
+        journal.phase = Phase::FailedAfterTransfer {
+            tuple,
+            block_index,
+            error,
+        };
         Ok(())
     })
 }
@@ -1994,63 +2827,106 @@ pub async fn transfer_3usd_to_reserves(
     use crate::state::{ThreeUsdReserveIngressPhase as Phase, ThreeUsdReserveIngressTuple};
     use icrc_ledger_types::icrc2::transfer_from::TransferFromArgs;
 
-    let tuple = crate::state::mutate_state(|state| -> Result<ThreeUsdReserveIngressTuple, String> {
-        if let Some(existing) = state.three_usd_reserve_ingress_journals.get(&key) {
-            if existing.request != request {
-                return Err("SP absorb ID was reused with different 3USD reserve arguments".into());
-            }
-            return match &existing.phase {
-                Phase::AdmissionPending => {
-                    if !THREE_USD_INGRESS_FEE_CAPACITY_PREFLIGHT_READY
-                        || !state.three_usd_reserve_ingress_enabled
-                    {
-                        return Err("new 3USD reserve ingress is held until default-account fee capacity is proven".into());
-                    }
-                    let op_nonce = state.next_op_nonce();
-                    let tuple = ThreeUsdReserveIngressTuple {
-                        spender_owner: ic_cdk::id(),
-                        spender_subaccount: None,
-                        source: Account { owner: key.stability_pool, subaccount: None },
-                        destination: Account { owner: ic_cdk::id(), subaccount: None },
-                        amount_e8s: request.three_usd_amount_e8s,
-                        fee_e8s: None,
-                        memo: nonce_to_memo(op_nonce).0.as_slice().try_into()
-                            .map_err(|_| "operation memo must be 16 bytes".to_string())?,
-                        created_at_time_ns: nonce_to_created_at_time(op_nonce),
-                        op_nonce,
-                        parent_absorb_id: Some(key.absorb_id),
-                    };
-                    let journal = state.three_usd_reserve_ingress_journals.get_mut(&key)
-                        .expect("admission row was observed above");
-                    journal.phase = Phase::SubmittedOrUnknown { tuple: tuple.clone() };
-                    Ok(tuple)
+    let tuple = crate::state::mutate_state(
+        |state| -> Result<ThreeUsdReserveIngressTuple, String> {
+            if let Some(existing) = state.three_usd_reserve_ingress_journals.get(&key) {
+                if existing.request != request {
+                    return Err(
+                        "SP absorb ID was reused with different 3USD reserve arguments".into(),
+                    );
                 }
-                Phase::PreTransferRejected { reason } => Err(format!("SP absorb ID is terminally rejected before transfer: {reason}")),
-                Phase::SubmittedOrUnknown { tuple }
-                | Phase::TransferConfirmed { tuple, .. }
-                | Phase::Absorbed { tuple, .. }
-                | Phase::FailedAfterTransfer { tuple, .. } => Ok(tuple.clone()),
-            };
-        }
-        if !THREE_USD_INGRESS_FEE_CAPACITY_PREFLIGHT_READY
-            || !state.three_usd_reserve_ingress_enabled
-        {
-            return Err("new 3USD reserve ingress is held until default-account fee capacity is proven".into());
-        }
-        if key.stability_pool == Principal::anonymous()
-            || request.ledger == Principal::anonymous()
-            || request.three_usd_amount_e8s == 0
-            || request.icusd_debt_covered_e8s == 0
-        {
-            return Err("invalid 3USD reserve ingress request".into());
-        }
-        Err("3USD reserve ingress ID must be durably admitted before transfer preparation".into())
-    })?;
+                return match &existing.phase {
+                    Phase::AdmissionPending => {
+                        if !three_usd_ingress_first_dispatch_allowed(
+                            &existing.phase,
+                            state.stability_pool_canister,
+                            key.stability_pool,
+                        ) {
+                            return Err(
+                                "only the currently registered stability pool may initiate the first 3USD transfer"
+                                    .into(),
+                            );
+                        }
+                        if !THREE_USD_INGRESS_FEE_CAPACITY_PREFLIGHT_READY
+                            || !state.three_usd_reserve_ingress_enabled
+                        {
+                            return Err("new 3USD reserve ingress is held until default-account fee capacity is proven".into());
+                        }
+                        let op_nonce = state.next_op_nonce();
+                        let tuple = ThreeUsdReserveIngressTuple {
+                            spender_owner: ic_cdk::id(),
+                            spender_subaccount: None,
+                            source: Account {
+                                owner: key.stability_pool,
+                                subaccount: None,
+                            },
+                            destination: Account {
+                                owner: ic_cdk::id(),
+                                subaccount: None,
+                            },
+                            amount_e8s: request.three_usd_amount_e8s,
+                            fee_e8s: None,
+                            memo: nonce_to_memo(op_nonce)
+                                .0
+                                .as_slice()
+                                .try_into()
+                                .map_err(|_| "operation memo must be 16 bytes".to_string())?,
+                            created_at_time_ns: nonce_to_created_at_time(op_nonce),
+                            op_nonce,
+                            parent_absorb_id: Some(key.absorb_id),
+                        };
+                        let journal = state
+                            .three_usd_reserve_ingress_journals
+                            .get_mut(&key)
+                            .expect("admission row was observed above");
+                        journal.phase = Phase::SubmittedOrUnknown {
+                            tuple: tuple.clone(),
+                        };
+                        Ok(tuple)
+                    }
+                    Phase::PreTransferRejected { reason } => Err(format!(
+                        "SP absorb ID is terminally rejected before transfer: {reason}"
+                    )),
+                    Phase::SubmittedOrUnknown { tuple }
+                    | Phase::TransferConfirmed { tuple, .. }
+                    | Phase::Absorbed { tuple, .. }
+                    | Phase::FailedAfterTransfer { tuple, .. } => Ok(tuple.clone()),
+                };
+            }
+            if !THREE_USD_INGRESS_FEE_CAPACITY_PREFLIGHT_READY
+                || !state.three_usd_reserve_ingress_enabled
+            {
+                return Err(
+                    "new 3USD reserve ingress is held until default-account fee capacity is proven"
+                        .into(),
+                );
+            }
+            if key.stability_pool == Principal::anonymous()
+                || request.ledger == Principal::anonymous()
+                || request.three_usd_amount_e8s == 0
+                || request.icusd_debt_covered_e8s == 0
+            {
+                return Err("invalid 3USD reserve ingress request".into());
+            }
+            Err(
+                "3USD reserve ingress ID must be durably admitted before transfer preparation"
+                    .into(),
+            )
+        },
+    )?;
 
     if tuple.spender_owner != ic_cdk::id()
         || tuple.spender_subaccount.is_some()
-        || tuple.source != (Account { owner: key.stability_pool, subaccount: None })
-        || tuple.destination != (Account { owner: ic_cdk::id(), subaccount: None })
+        || tuple.source
+            != (Account {
+                owner: key.stability_pool,
+                subaccount: None,
+            })
+        || tuple.destination
+            != (Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            })
         || tuple.amount_e8s != request.three_usd_amount_e8s
         || tuple.fee_e8s.is_some()
         || tuple.memo.as_slice() != nonce_to_memo(tuple.op_nonce).0.as_slice()
@@ -2061,34 +2937,59 @@ pub async fn transfer_3usd_to_reserves(
     crate::storage::mark_three_usd_reserve_ingress_v2_used()?;
 
     match crate::state::read_state(|state| {
-        state.three_usd_reserve_ingress_journals.get(&key).map(|journal| journal.phase.clone())
+        state
+            .three_usd_reserve_ingress_journals
+            .get(&key)
+            .map(|journal| journal.phase.clone())
     }) {
         Some(Phase::TransferConfirmed { block_index, .. })
         | Some(Phase::Absorbed { block_index, .. })
         | Some(Phase::FailedAfterTransfer { block_index, .. }) => return Ok(block_index),
-        Some(Phase::AdmissionPending) => return Err("3USD reserve ingress admission must be transferred to a submitted tuple first".into()),
-        Some(Phase::PreTransferRejected { reason }) => return Err(format!("SP absorb ID is terminally rejected before transfer: {reason}")),
-        Some(Phase::SubmittedOrUnknown { .. }) => {},
+        Some(Phase::AdmissionPending) => {
+            return Err(
+                "3USD reserve ingress admission must be transferred to a submitted tuple first"
+                    .into(),
+            )
+        }
+        Some(Phase::PreTransferRejected { reason }) => {
+            return Err(format!(
+                "SP absorb ID is terminally rejected before transfer: {reason}"
+            ))
+        }
+        Some(Phase::SubmittedOrUnknown { .. }) => {}
         None => return Err("3USD reserve ingress journal disappeared before dispatch".into()),
     }
 
-    let client = ICRC1Client { runtime: CdkRuntime, ledger_canister_id: request.ledger };
-    let outer = client.transfer_from(TransferFromArgs {
-        spender_subaccount: tuple.spender_subaccount,
-        from: tuple.source,
-        to: tuple.destination,
-        amount: Nat::from(tuple.amount_e8s),
-        fee: tuple.fee_e8s.map(Nat::from),
-        created_at_time: Some(tuple.created_at_time_ns),
-        memo: Some(Memo::from(tuple.memo.to_vec())),
-    }).await;
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: request.ledger,
+    };
+    let outer = client
+        .transfer_from(TransferFromArgs {
+            spender_subaccount: tuple.spender_subaccount,
+            from: tuple.source,
+            to: tuple.destination,
+            amount: Nat::from(tuple.amount_e8s),
+            fee: tuple.fee_e8s.map(Nat::from),
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(Memo::from(tuple.memo.to_vec())),
+        })
+        .await;
     let block_index = match outer {
-        Ok(Ok(block)) => block.0.to_u64()
-            .ok_or_else(|| "3USD reserve transfer block exceeds u64; reconcile stored tuple".to_string())?,
-        Ok(Err(TransferFromError::Duplicate { duplicate_of })) => duplicate_of.0.to_u64()
-            .ok_or_else(|| "3USD reserve duplicate block exceeds u64; reconcile stored tuple".to_string())?,
+        Ok(Ok(block)) => block.0.to_u64().ok_or_else(|| {
+            "3USD reserve transfer block exceeds u64; reconcile stored tuple".to_string()
+        })?,
+        Ok(Err(TransferFromError::Duplicate { duplicate_of })) => {
+            duplicate_of.0.to_u64().ok_or_else(|| {
+                "3USD reserve duplicate block exceeds u64; reconcile stored tuple".to_string()
+            })?
+        }
         Ok(Err(error)) => return Err(format!("3USD reserve transferFrom failed: {error:?}")),
-        Err((code, message)) => return Err(format!("3USD reserve transferFrom call failed ({code:?}): {message}")),
+        Err((code, message)) => {
+            return Err(format!(
+                "3USD reserve transferFrom call failed ({code:?}): {message}"
+            ))
+        }
     };
 
     crate::state::mutate_state(|state| -> Result<(), String> {
@@ -2100,9 +3001,18 @@ pub async fn transfer_3usd_to_reserves(
                 journal.phase = Phase::TransferConfirmed { tuple, block_index };
                 Ok(())
             }
-            Phase::TransferConfirmed { block_index: existing, .. }
-            | Phase::Absorbed { block_index: existing, .. }
-            | Phase::FailedAfterTransfer { block_index: existing, .. } if *existing == block_index => Ok(()),
+            Phase::TransferConfirmed {
+                block_index: existing,
+                ..
+            }
+            | Phase::Absorbed {
+                block_index: existing,
+                ..
+            }
+            | Phase::FailedAfterTransfer {
+                block_index: existing,
+                ..
+            } if *existing == block_index => Ok(()),
             _ => Err("3USD reserve ingress journal changed during transfer dispatch".into()),
         }
     })?;
@@ -2131,14 +3041,12 @@ pub fn get_deposit_account_for(caller: &Principal) -> Account {
 
 /// Query the ICRC-1 balance of a specific account on a ledger.
 pub async fn get_balance_of(account: Account, ledger: Principal) -> Result<u64, String> {
-    let result: Result<(Nat,), _> = ic_cdk::call(
-        ledger,
-        "icrc1_balance_of",
-        (account,),
-    )
-    .await;
+    let result: Result<(Nat,), _> = ic_cdk::call(ledger, "icrc1_balance_of", (account,)).await;
     match result {
-        Ok((balance,)) => Ok(balance.0.to_u64().unwrap_or(0)),
+        Ok((balance,)) => balance
+            .0
+            .to_u64()
+            .ok_or_else(|| "icrc1_balance_of result exceeds u64 range".to_string()),
         Err((code, msg)) => Err(format!("icrc1_balance_of failed: {:?} {}", code, msg)),
     }
 }
@@ -2149,7 +3057,9 @@ pub async fn get_icrc1_reserve_balance(ledger: Principal, account: Account) -> R
     }
     let result: Result<(Nat,), _> = ic_cdk::call(ledger, "icrc1_balance_of", (account,)).await;
     match result {
-        Ok((balance,)) => balance.0.to_u64()
+        Ok((balance,)) => balance
+            .0
+            .to_u64()
             .ok_or_else(|| "ICRC-1 reserve balance exceeds u64 range".to_string()),
         Err((code, message)) => Err(format!("icrc1_balance_of failed: {code:?} {message}")),
     }
@@ -2199,9 +3109,13 @@ pub async fn sweep_deposit(
     .await
     .map_err(|e| format!("sweep transfer error: {:?}", e))?;
 
-    log!(DEBUG,
+    log!(
+        DEBUG,
         "[sweep_deposit] Swept {} from subaccount for {} on ledger {} (block {})",
-        transfer_amount, caller, ledger, block_index_u64
+        transfer_amount,
+        caller,
+        ledger,
+        block_index_u64
     );
 
     Ok((transfer_amount, block_index_u64))
@@ -2214,7 +3128,8 @@ pub async fn sweep_deposit(
 /// treats `ApproveError::Duplicate { duplicate_of }` as success (the approve
 /// already landed at that block — same effective allowance).
 pub async fn approve_icusd(spender: Principal, amount: u64) -> Result<u64, ApproveError> {
-    let (ledger, op_nonce) = crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
+    let (ledger, op_nonce) =
+        crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
     let created_at_time = nonce_to_created_at_time(op_nonce);
     let memo = nonce_to_memo(op_nonce);
 
@@ -2223,7 +3138,10 @@ pub async fn approve_icusd(spender: Principal, amount: u64) -> Result<u64, Appro
         "icrc2_approve",
         (ApproveArgs {
             from_subaccount: None,
-            spender: Account { owner: spender, subaccount: None },
+            spender: Account {
+                owner: spender,
+                subaccount: None,
+            },
             amount: Nat::from(amount),
             expected_allowance: None,
             expires_at: None,
@@ -2231,18 +3149,38 @@ pub async fn approve_icusd(spender: Principal, amount: u64) -> Result<u64, Appro
             created_at_time: Some(created_at_time),
             memo: Some(memo),
         },),
-    ).await;
+    )
+    .await;
     match result {
-        Ok((Ok(block_index),)) => Ok(block_index.0.to_u64().unwrap_or(0)),
+        Ok((Ok(block_index),)) => {
+            block_index
+                .0
+                .to_u64()
+                .ok_or_else(|| ApproveError::GenericError {
+                    error_code: Nat::from(0u8),
+                    message: "ledger committed approval but returned a block index outside u64"
+                        .into(),
+                })
+        }
         Ok((Err(ApproveError::Duplicate { duplicate_of }),)) => {
-            log!(DEBUG,
+            log!(
+                DEBUG,
                 "[approve_icusd] ledger {} reported Duplicate; treating as success (block {})",
-                ledger, duplicate_of
+                ledger,
+                duplicate_of
             );
-            Ok(duplicate_of.0.to_u64().unwrap_or(0))
+            duplicate_of
+                .0
+                .to_u64()
+                .ok_or_else(|| ApproveError::GenericError {
+                    error_code: Nat::from(0u8),
+                    message: "ledger duplicate approval block index is outside u64".into(),
+                })
         }
         Ok((Err(ApproveError::BadFee { expected_fee }),)) => {
-            let fee = expected_fee.0.to_u64().unwrap_or(0);
+            let Some(fee) = expected_fee.0.to_u64() else {
+                return Err(ApproveError::BadFee { expected_fee });
+            };
             set_cached_fee(ledger, fee);
             Err(ApproveError::BadFee { expected_fee })
         }
@@ -2251,5 +3189,44 @@ pub async fn approve_icusd(spender: Principal, amount: u64) -> Result<u64, Appro
             error_code: Nat::from(code as u64),
             message: msg,
         }),
+    }
+}
+
+#[cfg(test)]
+mod ledger_nat_overflow_tests {
+    use super::{handle_transfer_from_outcome, handle_transfer_outcome};
+    use candid::{Nat, Principal};
+    use icrc_ledger_types::icrc1::transfer::TransferError;
+    use icrc_ledger_types::icrc2::transfer_from::TransferFromError;
+
+    #[test]
+    fn oversized_committed_block_indices_fail_closed_instead_of_becoming_zero() {
+        let ledger = Principal::from_slice(&[0x71]);
+        let oversized = Nat::from(u128::from(u64::MAX) + 1);
+        for outer in [
+            Ok(Ok(oversized.clone())),
+            Ok(Err(TransferError::Duplicate {
+                duplicate_of: oversized.clone(),
+            })),
+        ] {
+            let result = handle_transfer_outcome(ledger, outer);
+            assert!(matches!(result, Err(TransferError::GenericError { .. })));
+        }
+        for outer in [
+            Ok(Ok(oversized.clone())),
+            Ok(Err(TransferFromError::Duplicate {
+                duplicate_of: oversized.clone(),
+            })),
+        ] {
+            let result = handle_transfer_from_outcome(ledger, outer);
+            assert!(matches!(
+                result,
+                Err(TransferFromError::GenericError { .. })
+            ));
+        }
+        assert_eq!(
+            handle_transfer_outcome(ledger, Ok(Ok(Nat::from(0u8)))),
+            Ok(0)
+        );
     }
 }

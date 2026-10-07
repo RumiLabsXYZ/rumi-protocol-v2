@@ -282,6 +282,45 @@ type PendingRefund = record {
   protocol_fee_reserved : opt nat64;
 };
 
+type OutboundPayoutKind = variant { Withdraw; CollateralClaim };
+type PendingOutboundPayoutStatus = record {
+  ledger : principal;
+  kind : OutboundPayoutKind;
+  request_amount : nat64;
+  gross_amount : nat64;
+  transfer_amount : nat64;
+  transfer_fee : nat64;
+  transfer_created_at_time_ns : nat64;
+  transfer_memo : vec nat8;
+  dispatch_in_flight : bool;
+  ambiguous_seen : bool;
+  last_error : opt text;
+};
+
+type SpLiquidationToken = variant { IcUsd; CKUSDT; CKUSDC };
+type SpLiquidationV2LocalPhase = variant {
+  ApprovalPending;
+  BackendPending;
+  CollateralPending;
+  StableDebited;
+  Complete;
+  Rejected;
+};
+type SpLiquidationV2LocalStatus = record {
+  request_id : nat64;
+  vault_id : nat64;
+  amount : nat64;
+  token : SpLiquidationToken;
+  stablecoin_ledger : principal;
+  collateral_type : principal;
+  phase : SpLiquidationV2LocalPhase;
+  approval_fee_accounted : bool;
+  approval_receipt_block_index : opt nat64;
+  stable_debit_applied : bool;
+  backend_acknowledged : bool;
+  last_error : opt text;
+};
+
 type UnallocatedInterestForwardBatch = record {
   id : nat64;
   source_mint_blocks : vec nat64;
@@ -442,12 +481,14 @@ service : (StabilityPoolInitArgs) -> {
   deposit_as_3usd : (principal, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_collateral : (principal) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_all_collateral : () -> (variant { Ok : vec record { principal; nat64 }; Err : StabilityPoolError });
+  reconcile_pending_outbound_payout : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
   claim_pending_refund : (nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
   reconcile_pending_refund : (nat64, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
   reconcile_pending_refund_history : (nat64) -> (variant { Ok; Err : StabilityPoolError });
   fund_pending_refund_fee_reserve : (principal, nat64, nat64, nat64, vec nat8) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_cfx : (principal, text) -> (variant { Ok : nat; Err : StabilityPoolError });
   recredit_failed_cfx_claim_payout : (CfxClaimPayoutRecovery) -> (variant { Ok : bool; Err : StabilityPoolError });
+  recover_three_usd_absorb_v2 : (nat64, opt nat64, opt nat64, opt nat64) -> (variant { Ok; Err : StabilityPoolError });
 
   // ── Opt-in / Opt-out ──
   opt_out_collateral : (principal) -> (variant { Ok; Err : StabilityPoolError });
@@ -460,7 +501,13 @@ service : (StabilityPoolInitArgs) -> {
 
   // ── Liquidation ──
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> (vec LiquidationResult);
+  // Existing entrypoint; 3USD reserve-ingress V2 admission is default-off and can be enabled only in explicit test builds.
   execute_liquidation : (nat64) -> (variant { Ok : LiquidationResult; Err : StabilityPoolError });
+  has_legacy_liquidation_in_flight : (nat64) -> (variant { Ok : bool; Err : StabilityPoolError });
+  execute_liquidation_v2 : (nat64, SpLiquidationToken, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
+  retry_sp_liquidation_v2 : (nat64) -> (variant { Ok; Err : StabilityPoolError });
+  reconcile_sp_liquidation_v2_approval : (nat64, nat64) -> (variant { Ok; Err : StabilityPoolError });
+  reconcile_sp_liquidation_v2_stable_pull : (nat64, nat64, nat64) -> (variant { Ok; Err : StabilityPoolError });
   sp_absorb_chain_vault : (nat64) -> (variant { Ok : ChainSpAbsorbResult; Err : StabilityPoolError });
   scan_chain_absorb_candidates : (opt nat64) -> (variant { Ok : vec ChainSpAbsorbCandidate; Err : StabilityPoolError });
   reconcile_pending_icusd_burn : (nat64, nat64) -> (variant { Ok; Err : StabilityPoolError });
@@ -511,6 +558,8 @@ service : (StabilityPoolInitArgs) -> {
   get_pool_event_count : () -> (nat64) query;
   list_depositor_principals : () -> (vec principal) query;
   get_pending_refunds : (opt principal) -> (vec PendingRefund) query;
+  get_pending_outbound_payouts : () -> (vec PendingOutboundPayoutStatus) query;
+  get_sp_liquidation_v2_status : (nat64) -> (opt SpLiquidationV2LocalStatus) query;
   get_pending_unallocated_interest_forwards : () -> (vec UnallocatedInterestForwardBatch) query;
   get_my_native_xrp_payouts : () -> (vec NativeXrpPendingPayout) query;
   get_pending_chain_absorbs : () -> (vec ChainSpAbsorbIntent) query;

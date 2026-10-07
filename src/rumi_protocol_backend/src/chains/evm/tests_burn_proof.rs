@@ -1,4 +1,4 @@
-use crate::chains::config::ChainId;
+use crate::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
 use crate::chains::monad::burn_proof::{apply_receipt_burns_to_state, ApplyBurnsError};
 use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use crate::chains::monad::evm_rpc::{TxReceiptWithLogs, BURN_EVENT_TOPIC0};
@@ -28,9 +28,28 @@ fn state_with_open_vault(debt: u128) -> MultiChainState {
             owner_evm: None,
             last_interest_accrual_ns: 0,
             pending_interest_mint_e8s: 0,
-            pending_liquidation: None,        },
+            pending_liquidation: None,
+        },
     );
     s
+}
+
+fn chain_config(status: ChainStatus) -> ChainConfigV3 {
+    ChainConfigV3 {
+        chain_id: ChainId(10143),
+        display_name: "MonadTestnet".into(),
+        rpc_endpoints: vec!["https://rpc.example".into()],
+        finality_depth: 1,
+        gas_strategy: GasStrategy::EvmEip1559 {
+            max_priority_fee_gwei: 2,
+            max_fee_gwei_ceiling: 500,
+        },
+        chain_native_decimals: 18,
+        registered_at_ns: 0,
+        status,
+        burn_watch_poll_enabled: false,
+        min_quorum_providers: Some(1),
+    }
 }
 
 #[test]
@@ -48,19 +67,33 @@ fn applies_burn_log_from_correct_contract_and_dedups() {
             3,
         )],
     };
-    let applied =
-        apply_receipt_burns_to_state(&mut s, ChainId(10143), contract, "0xtx", &receipt)
-            .expect("apply");
+    let applied = apply_receipt_burns_to_state(&mut s, ChainId(10143), contract, "0xtx", &receipt)
+        .expect("apply");
     assert_eq!(applied.len(), 1);
     assert_eq!(applied[0].vault_id, 1);
     assert_eq!(applied[0].amount_e8s, 40);
     assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
     // Re-apply same receipt → deduped, no change.
-    let again =
-        apply_receipt_burns_to_state(&mut s, ChainId(10143), contract, "0xtx", &receipt)
-            .expect("apply again");
+    let again = apply_receipt_burns_to_state(&mut s, ChainId(10143), contract, "0xtx", &receipt)
+        .expect("apply again");
     assert_eq!(again.len(), 0);
     assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
+}
+
+#[test]
+fn disabled_chain_still_applies_verified_repayment_burn() {
+    let chain = ChainId(10143);
+    let mut s = state_with_open_vault(100);
+    s.chain_configs
+        .insert(chain, chain_config(ChainStatus::Disabled));
+    let receipt = halted_receipt("0xcafe");
+
+    let applied = apply_receipt_burns_to_state(&mut s, chain, "0xcafe", "0xtx", &receipt)
+        .expect("a verified repayment proof remains available while disabled");
+
+    assert_eq!(applied.len(), 1);
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
+    assert_eq!(s.chain_supplies[&chain], 60);
 }
 
 #[test]
@@ -93,13 +126,121 @@ fn proof_replay_is_rejected_after_observer_covers_and_prunes_its_block() {
     // Removing/reseeding the observer cursor cannot reopen the covered history.
     s.last_observed_block.remove(&chain);
     let replay = apply_receipt_burns_to_state(&mut s, chain, contract, "0xtx", &receipt);
-    assert_eq!(replay, Err(ApplyBurnsError::StaleProof { block: 10, floor: 20 }));
+    assert_eq!(
+        replay,
+        Err(ApplyBurnsError::StaleProof {
+            block: 10,
+            floor: 20
+        })
+    );
     assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
     assert_eq!(s.chain_supplies[&chain], 60);
 }
 
 #[test]
-fn replay_tombstone_survives_another_chains_global_legacy_key_prune() {
+fn observer_coverage_floor_blocks_late_burn_proof_after_pruning() {
+    use super::deposit_watch::apply_burn_log_window_and_advance;
+
+    let mut s = state_with_open_vault(100);
+    let chain = ChainId(10143);
+    let contract = "0xcafe";
+    let topics = vec![BURN_EVENT_TOPIC0.to_string(), word(1), word(0xdead)];
+    apply_burn_log_window_and_advance(
+        &mut s,
+        chain,
+        &[(topics.clone(), word(40), "0xtx".into(), 10, 3)],
+        10,
+    )
+    .expect("observer applies the finalized burn");
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
+    assert_eq!(s.evm_burn_proof_floor_by_chain.get(&chain), Some(&10));
+    assert!(!s.processed_burn_keys.contains_key(&10));
+
+    // Once the observer prunes the block-scoped key, the monotonic floor
+    // rejects every pull-proof ingress for that covered block.
+    let receipt = TxReceiptWithLogs {
+        tx_hash: None,
+        success: true,
+        block_number: 10,
+        logs: vec![(contract.into(), topics, word(40), 3)],
+    };
+    assert_eq!(
+        apply_receipt_burns_to_state(&mut s, chain, contract, "0xtx", &receipt),
+        Err(ApplyBurnsError::StaleProof {
+            block: 10,
+            floor: 10
+        })
+    );
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
+    assert_eq!(s.chain_supplies[&chain], 60);
+}
+
+#[test]
+fn settlement_consumption_blocks_burn_proof() {
+    let mut s = state_with_open_vault(100);
+    let chain = ChainId(10143);
+    s.settled_settlement_burn_logs.insert("10143:0xtx:3".into());
+    let receipt = TxReceiptWithLogs {
+        tx_hash: None,
+        success: true,
+        block_number: 10,
+        logs: vec![(
+            "0xcafe".into(),
+            vec![BURN_EVENT_TOPIC0.into(), word(1), word(0xdead)],
+            word(40),
+            3,
+        )],
+    };
+    let applied = apply_receipt_burns_to_state(&mut s, chain, "0xcafe", "0xtx", &receipt)
+        .expect("settlement-consumed burn is skipped");
+    assert!(applied.is_empty());
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 100);
+    assert_eq!(s.chain_supplies[&chain], 100);
+}
+
+#[test]
+fn burn_proof_consumption_blocks_pending_settlement_proof() {
+    use crate::chains::evm::settlement_proof::VerifiedBurnSettlementProof;
+
+    let mut s = state_with_open_vault(100);
+    let chain = ChainId(10143);
+    let receipt = TxReceiptWithLogs {
+        tx_hash: None,
+        success: true,
+        block_number: 10,
+        logs: vec![(
+            "0xcafe".into(),
+            vec![BURN_EVENT_TOPIC0.into(), word(1), word(0xdead)],
+            word(40),
+            3,
+        )],
+    };
+    apply_receipt_burns_to_state(&mut s, chain, "0xcafe", "0xtx", &receipt)
+        .expect("receipt proof consumes burn first");
+    let supply_after_proof = s.chain_supplies[&chain];
+    let debt_after_proof = s.chain_vaults[&1].debt_e8s;
+    let settlement = VerifiedBurnSettlementProof {
+        proof_id: "pending:0xtx:3".into(),
+        tx_hash: "0xtx".into(),
+        log_index: 3,
+        block_number: 10,
+        vault_id: 1,
+        burner: "0xoperator".into(),
+        amount_e8s: 40,
+    };
+
+    assert!(matches!(
+        crate::chains::supply::settle_pending_chain_burn_with_verified_proof(
+            &mut s, chain, settlement, 1_700
+        ),
+        Err(crate::chains::supply::ProofBackedSettlementError::DuplicateBurnLog { .. })
+    ));
+    assert_eq!(s.chain_supplies[&chain], supply_after_proof);
+    assert_eq!(s.chain_vaults[&1].debt_e8s, debt_after_proof);
+}
+
+#[test]
+fn another_chains_cursor_cannot_prune_a_proof_chains_burn_marker() {
     use super::deposit_watch::{advance_cursor_and_prune, observer_burn_was_already_consumed};
 
     let mut s = state_with_open_vault(100);
@@ -122,22 +263,33 @@ fn replay_tombstone_survives_another_chains_global_legacy_key_prune() {
     assert!(s.processed_burn_keys.contains_key(&10));
     assert!(s.has_evm_burn_replay_id(proof_chain, 10, "0xtx", 3));
 
-    // The legacy processed map is global and another chain's cursor can prune
-    // its block key. The chain-qualified tombstone must still suppress replay.
+    // The processed map is globally block-keyed, but a chain's cursor cannot
+    // prune another chain's marker before that marker's own proof floor covers
+    // the block. This keeps both observer and proof consumers replay-safe.
     advance_cursor_and_prune(&mut s, other_chain, 20);
-    assert!(!s.processed_burn_keys.contains_key(&10));
+    assert!(s.processed_burn_keys.contains_key(&10));
     assert!(s.has_evm_burn_replay_id(proof_chain, 10, "0xtx", 3));
-    assert!(observer_burn_was_already_consumed(&s, proof_chain, 10, "0xtx", 3));
-    assert!(!observer_burn_was_already_consumed(&s, other_chain, 10, "0xtx", 3));
+    assert!(observer_burn_was_already_consumed(
+        &s,
+        proof_chain,
+        10,
+        "0xtx",
+        3
+    ));
+    assert!(!observer_burn_was_already_consumed(
+        &s,
+        other_chain,
+        10,
+        "0xtx",
+        3
+    ));
     assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
     assert_eq!(s.chain_supplies[&proof_chain], 60);
 }
 
 #[test]
 fn pending_replay_ids_drain_only_after_bounded_coverage_windows() {
-    use super::deposit_watch::{
-        burn_proof_coverage_window, replay_catchup_is_required,
-    };
+    use super::deposit_watch::{burn_proof_coverage_window, replay_catchup_is_required};
 
     let chain = ChainId(10143);
     let mut s = state_with_open_vault(100);
@@ -338,9 +490,8 @@ fn rejects_log_from_wrong_contract() {
             0,
         )],
     };
-    let applied =
-        apply_receipt_burns_to_state(&mut s, ChainId(10143), "0xcafe", "0xtx", &receipt)
-            .expect("apply");
+    let applied = apply_receipt_burns_to_state(&mut s, ChainId(10143), "0xcafe", "0xtx", &receipt)
+        .expect("apply");
     assert_eq!(applied.len(), 0, "log from a non-icUSD contract is ignored");
     assert_eq!(s.chain_vaults[&1].debt_e8s, 100);
 }
@@ -382,16 +533,21 @@ fn reorg_halted_before_call_is_rejected_with_zero_mutation() {
     s.reorg_halted.insert(ChainId(10143), true);
     let receipt = halted_receipt("0xcafe");
 
-    let result =
-        apply_receipt_burns_to_state(&mut s, ChainId(10143), "0xcafe", "0xtx", &receipt);
+    let result = apply_receipt_burns_to_state(&mut s, ChainId(10143), "0xcafe", "0xtx", &receipt);
 
     assert_eq!(result, Err(ApplyBurnsError::ReorgHalted));
     assert_eq!(
-        s.processed_burn_keys.values().map(|set| set.len()).sum::<usize>(),
+        s.processed_burn_keys
+            .values()
+            .map(|set| set.len())
+            .sum::<usize>(),
         0,
         "no processed_burn_key inserted while halted"
     );
-    assert_eq!(s.chain_vaults[&1].debt_e8s, 100, "no debt mutation while halted");
+    assert_eq!(
+        s.chain_vaults[&1].debt_e8s, 100,
+        "no debt mutation while halted"
+    );
     assert_eq!(
         s.chain_supplies[&ChainId(10143)],
         100,
@@ -400,30 +556,29 @@ fn reorg_halted_before_call_is_rejected_with_zero_mutation() {
 }
 
 #[test]
-fn reorg_halted_set_immediately_before_the_synchronous_apply_is_also_refused() {
-    // (b) halt-during-await-equivalent: the guard is the first statement of
-    // the synchronous fn that `mutate_state` invokes, so driving the guard
-    // directly (rather than through the async `verify_and_apply_burn_proof`
-    // wrapper, which would need a live RPC canister to reach this point) is
-    // the deterministic way to prove a halt raised anywhere before this
-    // synchronous call refuses the apply. This models a halt landing between
-    // the finality check and the apply: whatever set the flag, the guard
-    // sees it and refuses before touching state.
+fn reorg_halt_after_receipt_lookup_is_rechecked_before_mutation() {
+    // Model the state after receipt/finality awaits: the chain becomes
+    // reorg-halted before the synchronous mutate_state closure runs. The first
+    // statement in that closure's apply function is the authoritative guard.
     let mut s = state_with_open_vault(100);
+    let chain = ChainId(10143);
+    s.chain_configs
+        .insert(chain, chain_config(ChainStatus::Disabled));
     let receipt = halted_receipt("0xcafe");
-    // Simulate the halt arriving "during the preceding awaits", i.e. it is
-    // already visible by the time the synchronous mutate_state body runs.
-    s.reorg_halted.insert(ChainId(10143), true);
+    // Simulate the halt arriving during the preceding RPC/finality awaits.
+    s.reorg_halted.insert(chain, true);
 
-    let result =
-        apply_receipt_burns_to_state(&mut s, ChainId(10143), "0xcafe", "0xtx", &receipt);
+    let result = apply_receipt_burns_to_state(&mut s, chain, "0xcafe", "0xtx", &receipt);
 
     assert_eq!(result, Err(ApplyBurnsError::ReorgHalted));
     assert!(
         s.processed_burn_keys.is_empty(),
         "no key inserted when the halt is visible at apply time"
     );
-    assert_eq!(s.chain_vaults[&1].debt_e8s, 100, "no mutation when halted at apply time");
+    assert_eq!(
+        s.chain_vaults[&1].debt_e8s, 100,
+        "no mutation when halted at apply time"
+    );
 }
 
 #[test]
@@ -436,21 +591,28 @@ fn clear_reorg_halt_then_retry_applies_the_same_proof_exactly_once() {
     let receipt = halted_receipt(contract);
 
     s.reorg_halted.insert(ChainId(10143), true);
-    let rejected =
-        apply_receipt_burns_to_state(&mut s, ChainId(10143), contract, "0xtx", &receipt);
+    let rejected = apply_receipt_burns_to_state(&mut s, ChainId(10143), contract, "0xtx", &receipt);
     assert_eq!(rejected, Err(ApplyBurnsError::ReorgHalted));
-    assert_eq!(s.chain_vaults[&1].debt_e8s, 100, "still untouched after the rejection");
+    assert_eq!(
+        s.chain_vaults[&1].debt_e8s, 100,
+        "still untouched after the rejection"
+    );
 
     s.reorg_halted.remove(&ChainId(10143)); // mirrors clear_reorg_halt
 
-    let applied =
-        apply_receipt_burns_to_state(&mut s, ChainId(10143), contract, "0xtx", &receipt)
-            .expect("apply after clear");
+    let applied = apply_receipt_burns_to_state(&mut s, ChainId(10143), contract, "0xtx", &receipt)
+        .expect("apply after clear");
     assert_eq!(applied.len(), 1, "the same proof now applies");
     assert_eq!(applied[0].amount_e8s, 40);
-    assert_eq!(s.chain_vaults[&1].debt_e8s, 60, "debt decremented exactly once");
     assert_eq!(
-        s.processed_burn_keys.values().map(|set| set.len()).sum::<usize>(),
+        s.chain_vaults[&1].debt_e8s, 60,
+        "debt decremented exactly once"
+    );
+    assert_eq!(
+        s.processed_burn_keys
+            .values()
+            .map(|set| set.len())
+            .sum::<usize>(),
         1,
         "exactly one key recorded, from the post-clear apply"
     );
@@ -468,16 +630,14 @@ fn resubmitting_after_clear_and_apply_is_a_dedup_noop_no_double_decrement() {
     apply_receipt_burns_to_state(&mut s, ChainId(10143), contract, "0xtx", &receipt)
         .expect_err("rejected while halted");
     s.reorg_halted.remove(&ChainId(10143));
-    let first =
-        apply_receipt_burns_to_state(&mut s, ChainId(10143), contract, "0xtx", &receipt)
-            .expect("first apply after clear");
+    let first = apply_receipt_burns_to_state(&mut s, ChainId(10143), contract, "0xtx", &receipt)
+        .expect("first apply after clear");
     assert_eq!(first.len(), 1);
     assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
 
     // Re-submit the identical proof again (no further halt in between).
-    let second =
-        apply_receipt_burns_to_state(&mut s, ChainId(10143), contract, "0xtx", &receipt)
-            .expect("second apply is not an error, just a no-op");
+    let second = apply_receipt_burns_to_state(&mut s, ChainId(10143), contract, "0xtx", &receipt)
+        .expect("second apply is not an error, just a no-op");
     assert_eq!(second.len(), 0, "deduped: nothing newly applied");
     assert_eq!(s.chain_vaults[&1].debt_e8s, 60, "no double-decrement");
 }
@@ -498,17 +658,18 @@ fn anonymous_and_multiple_distinct_principals_never_enter_burn_proof_work() {
     ];
     let calls = Cell::new(0);
     for caller in callers {
-        let admitted = operator_may_submit_burn_proof(
-            caller,
-            operator,
-            BurnProofAdmissionMode::OperatorOnly,
-        );
+        let admitted =
+            operator_may_submit_burn_proof(caller, operator, BurnProofAdmissionMode::OperatorOnly);
         assert!(
             run_if_operator_admitted(admitted, || calls.set(calls.get() + 1)).is_none(),
             "caller {caller} must be rejected before lookup work"
         );
     }
-    assert_eq!(calls.get(), 0, "unauthorized callers trigger no receipt lookup");
+    assert_eq!(
+        calls.get(),
+        0,
+        "unauthorized callers trigger no receipt lookup"
+    );
 }
 
 #[test]
@@ -526,11 +687,7 @@ fn only_non_anonymous_operator_reaches_work_and_public_mode_stays_closed() {
         BurnProofAdmissionMode::Public,
     ));
     assert!(run_if_operator_admitted(
-        operator_may_submit_burn_proof(
-            operator,
-            operator,
-            BurnProofAdmissionMode::OperatorOnly,
-        ),
+        operator_may_submit_burn_proof(operator, operator, BurnProofAdmissionMode::OperatorOnly,),
         || calls.set(calls.get() + 1),
     )
     .is_some());

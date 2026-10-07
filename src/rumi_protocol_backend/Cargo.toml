@@ -17,6 +17,14 @@ self_check = []
 test_endpoints = []
 three-usd-reserve-v2-test-admission = []
 cl07-recovered-vault-after-pull-test-gate = []
+three-usd-proportional-refund-test-gate = []
+test-manual-liquidation-v2-admission = []
+liquidity-returns-pic-test = []
+
+[[bin]]
+name = "rumi_protocol_backend_liquidity_returns_test"
+path = "src/main.rs"
+required-features = ["liquidity-returns-pic-test"]
 
 [dependencies]
 candid = "0.10.6"

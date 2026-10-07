@@ -1,4 +1,7 @@
 <script lang="ts">
+  function redemptionSubmissionPaused(): boolean {
+    return true;
+  }
   import { onMount } from 'svelte';
   import { walletStore as wallet } from '$lib/stores/wallet';
   import { protocolService } from '$lib/services/protocol';
@@ -434,6 +437,10 @@
   $: swapIsBetter = swapAdvantageUsd > 0;
 
   async function acceptAndRedeem() {
+    if (redemptionSubmissionPaused()) {
+      errorMessage = 'Redemption submissions are paused until transfer recovery is available. No icUSD was approved or submitted.';
+      return;
+    }
     const accepted = acceptPreparedRedemptionOffer(
       preparedQuote,
       preparedQueue,
@@ -685,6 +692,9 @@
           {#if liveOfferNotice}
             <div class="msg msg-info" role="status">{liveOfferNotice}</div>
           {/if}
+          {#if redemptionSubmissionPaused()}
+            <div class="msg msg-info" role="status">Redemption submissions are paused while transfer recovery is added. Checking offers does not approve or move icUSD.</div>
+          {/if}
           {#if ambiguousMessage}
             <div class="msg msg-info" role="status">
               {ambiguousMessage}
@@ -744,10 +754,12 @@
               <button
                 class="submit-btn"
                 on:click={acceptAndRedeem}
-                disabled={actionInProgress || !isConnected || amountE8s <= 0n || exceedsFreshBalance || !canAcceptOffer}
+                disabled={redemptionSubmissionPaused() || actionInProgress || !isConnected || amountE8s <= 0n || exceedsFreshBalance || !canAcceptOffer}
               >
                 {#if actionInProgress}
                   Processing accepted offer…
+                {:else if redemptionSubmissionPaused()}
+                  Redemptions paused
                 {:else if !isConnected}
                   Connect Wallet to Accept
                 {:else if preflightLoading || !preflightFresh}

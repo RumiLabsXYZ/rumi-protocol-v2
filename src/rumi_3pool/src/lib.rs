@@ -89,6 +89,10 @@ fn post_upgrade() {
     // already ran on a previous upgrade. If it has, the legacy bytes (if
     // any) are stale and we discard them.
     let already_drained = storage::get_slim().storage_migrated;
+    // Old heap-only ICRC identities cannot be rebuilt from ICRC-3 blocks.
+    // Persist the first cutover once so timestamps submitted before it fail
+    // closed while their normal dedup window is still live.
+    storage::initialize_lp_transfer_dedup_cutover(ic_cdk::api::time());
 
     match legacy {
         Some(legacy_state) if !already_drained => {
@@ -3319,7 +3323,7 @@ async fn authorized_redeem_and_burn_legacy_unreachable(
     let burn_result = burn_token_on_ledger(args.token_ledger, args.token_amount).await;
 
     match burn_result {
-        Ok(block_index) => {
+        Ok(BurnTokenOutcome::Committed(block_index)) => {
             // Log ICRC-3 block for the LP burn
             mutate_state(|s| {
                 s.log_block(Icrc3Transaction::Burn {
@@ -3336,6 +3340,25 @@ async fn authorized_redeem_and_burn_legacy_unreachable(
                 token_amount_burned: args.token_amount,
                 lp_amount_burned: args.lp_amount,
                 burn_block_index: block_index,
+            })
+        }
+        Ok(BurnTokenOutcome::CommittedBlockIndexOutOfRange {
+            block_index,
+            created_at_time,
+        }) => {
+            // The ledger confirmed a committed transfer, but its block index
+            // cannot be represented by this API. Keep the pre-call debit and
+            // fail closed: rolling it back would restore claims over tokens
+            // that have already been burned. The transfer's created_at_time
+            // remains the ledger deduplication identity for reconciliation.
+            let reason = format!(
+                "ledger committed burn but returned out-of-range block index {}; state retained for reconciliation (ledger {}, amount {}, created_at_time {})",
+                block_index, args.token_ledger, args.token_amount, created_at_time,
+            );
+            log!(INFO, "AuthorizedRedeemAndBurn: {}", reason);
+            Err(ThreePoolError::BurnFailed {
+                token: token_symbol,
+                reason,
             })
         }
         Err(reason) => {
@@ -3357,8 +3380,30 @@ async fn authorized_redeem_and_burn_legacy_unreachable(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum BurnTokenOutcome {
+    Committed(u64),
+    CommittedBlockIndexOutOfRange {
+        block_index: candid::Nat,
+        created_at_time: u64,
+    },
+}
+
+fn burn_outcome_from_block_index(
+    block_index: candid::Nat,
+    created_at_time: u64,
+) -> BurnTokenOutcome {
+    match block_index.0.clone().try_into() {
+        Ok(idx) => BurnTokenOutcome::Committed(idx),
+        Err(_) => BurnTokenOutcome::CommittedBlockIndexOutOfRange {
+            block_index,
+            created_at_time,
+        },
+    }
+}
+
 /// Burn tokens by transferring to the minting account (ICRC-1 burn standard).
-async fn burn_token_on_ledger(ledger: Principal, amount: u128) -> Result<u64, String> {
+async fn burn_token_on_ledger(ledger: Principal, amount: u128) -> Result<BurnTokenOutcome, String> {
     use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
     use icrc_ledger_types::icrc1::account::Account;
 
@@ -3377,12 +3422,13 @@ async fn burn_token_on_ledger(ledger: Principal, amount: u128) -> Result<u64, St
         }
     };
 
+    let created_at_time = ic_cdk::api::time();
     let transfer_args = TransferArg {
         to: minting_account,
         amount: amount.into(),
         fee: None,
         memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
+        created_at_time: Some(created_at_time),
         from_subaccount: None,
     };
 
@@ -3392,18 +3438,42 @@ async fn burn_token_on_ledger(ledger: Principal, amount: u128) -> Result<u64, St
 
     match result {
         Ok((Ok(block_index),)) => {
-            let idx: u64 = block_index.0.try_into().unwrap_or(0);
-            Ok(idx)
+            Ok(burn_outcome_from_block_index(block_index, created_at_time))
         }
         Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
             // Audit Wave-3: a Duplicate from the ledger means the burn already
             // landed at `duplicate_of`. The corresponding tokens are already
             // out of supply, so return success.
-            let idx: u64 = duplicate_of.0.try_into().unwrap_or(0);
-            Ok(idx)
+            Ok(burn_outcome_from_block_index(duplicate_of, created_at_time))
         }
         Ok((Err(e),)) => Err(format!("Transfer error: {:?}", e)),
         Err(e) => Err(format!("Call error: {:?}", e)),
+    }
+}
+
+#[cfg(test)]
+mod burn_block_index_tests {
+    use super::{burn_outcome_from_block_index, BurnTokenOutcome};
+    use candid::Nat;
+
+    #[test]
+    fn burn_block_index_accepts_u64_max() {
+        assert_eq!(
+            burn_outcome_from_block_index(Nat::from(u64::MAX), 17),
+            BurnTokenOutcome::Committed(u64::MAX),
+        );
+    }
+
+    #[test]
+    fn oversized_committed_block_keeps_index_and_dedup_timestamp() {
+        let oversized = Nat::from(u64::MAX) + Nat::from(1u8);
+        assert_eq!(
+            burn_outcome_from_block_index(oversized.clone(), 42),
+            BurnTokenOutcome::CommittedBlockIndexOutOfRange {
+                block_index: oversized,
+                created_at_time: 42,
+            },
+        );
     }
 }
 

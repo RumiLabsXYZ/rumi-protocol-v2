@@ -7395,6 +7395,7 @@ dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
+ "sha2",
 ]
 
 [[package]]

@@ -34,6 +34,7 @@ fn pending(vault_id: u64, who: Principal, margin_e8s: u64, nonce: u128) -> Pendi
         op_nonce: nonce,
         ledger: Some(owner(9)),
         transfer_amount_raw: Some(margin_e8s.saturating_sub(10_000)),
+        redemption_transfer: None,
         held_for_manual_retry: false,
         reconciliation_required: false,
         min_net_collateral_raw: None,

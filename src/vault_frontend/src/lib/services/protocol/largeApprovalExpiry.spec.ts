@@ -30,13 +30,16 @@ describe('largeApprovalExpiry (FE-001)', () => {
   it('FE-001: every inline LARGE_APPROVAL approve in apiClient.ts carries the bounded expiry', () => {
     const src = readFileSync(path.join(here, 'apiClient.ts'), 'utf8');
 
-    // The 7 Oisy vault flows share this single-line option block. The
-    // unbounded form must not reappear.
+    // All inline approval flows use a bounded expiry. The request-ID-backed
+    // collateral journal flows are included alongside the original routes.
     expect(src).not.toContain('expires_at: [], expected_allowance: [], memo: [], fee: [],');
     const bounded = src.match(
       /expires_at: largeApprovalExpiry\(\), expected_allowance: \[\], memo: \[\], fee: \[\],/g,
     );
-    expect(bounded).toHaveLength(7);
+    // The legacy manual-liquidation approvals were removed when their unsafe
+    // no-request-ID routes were closed. The remaining inline approvals stay
+    // bounded; those removed routes must not prompt a wallet at all.
+    expect(bounded).toHaveLength(5);
   });
 
   it('FE-001: the LARGE_APPROVAL helper paths in walletOperations.ts carry the bounded expiry', () => {

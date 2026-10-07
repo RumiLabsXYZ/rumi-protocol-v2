@@ -203,6 +203,21 @@ export interface NativeXrpPendingPayout {
   'payout_address' : string,
   'drops' : bigint,
 }
+export type OutboundPayoutKind = { 'Withdraw' : null } |
+  { 'CollateralClaim' : null };
+export interface PendingOutboundPayoutStatus {
+  'last_error' : [] | [string],
+  'ambiguous_seen' : boolean,
+  'transfer_fee' : bigint,
+  'kind' : OutboundPayoutKind,
+  'transfer_amount' : bigint,
+  'transfer_created_at_time_ns' : bigint,
+  'ledger' : Principal,
+  'dispatch_in_flight' : boolean,
+  'transfer_memo' : Uint8Array | number[],
+  'gross_amount' : bigint,
+  'request_amount' : bigint,
+}
 export interface PendingRefund {
   'id' : bigint,
   'transfer_attempted' : [] | [boolean],
@@ -296,6 +311,29 @@ export interface SpBurnRefundReceipt {
   'ledger' : Principal,
   'refund_block_index' : bigint,
   'refund_created_at_time' : bigint,
+}
+export type SpLiquidationToken = { 'CKUSDC' : null } |
+  { 'CKUSDT' : null } |
+  { 'IcUsd' : null };
+export type SpLiquidationV2LocalPhase = { 'ApprovalPending' : null } |
+  { 'CollateralPending' : null } |
+  { 'Complete' : null } |
+  { 'Rejected' : null } |
+  { 'StableDebited' : null } |
+  { 'BackendPending' : null };
+export interface SpLiquidationV2LocalStatus {
+  'request_id' : bigint,
+  'last_error' : [] | [string],
+  'token' : SpLiquidationToken,
+  'approval_receipt_block_index' : [] | [bigint],
+  'vault_id' : bigint,
+  'approval_fee_accounted' : boolean,
+  'phase' : SpLiquidationV2LocalPhase,
+  'stablecoin_ledger' : Principal,
+  'collateral_type' : Principal,
+  'amount' : bigint,
+  'stable_debit_applied' : boolean,
+  'backend_acknowledged' : boolean,
 }
 export type SpProofLedger = { 'IcusdBurn' : null } |
   { 'ThreePoolTransfer' : null };
@@ -450,6 +488,11 @@ export interface _SERVICE {
     { 'Ok' : LiquidationResult } |
       { 'Err' : StabilityPoolError }
   >,
+  'execute_liquidation_v2' : ActorMethod<
+    [bigint, SpLiquidationToken, bigint],
+    { 'Ok' : bigint } |
+      { 'Err' : StabilityPoolError }
+  >,
   'fund_pending_refund_fee_reserve' : ActorMethod<
     [Principal, bigint, bigint, bigint, Uint8Array | number[]],
     { 'Ok' : bigint } |
@@ -472,6 +515,10 @@ export interface _SERVICE {
   >,
   'get_my_native_xrp_payouts' : ActorMethod<[], Array<NativeXrpPendingPayout>>,
   'get_pending_chain_absorbs' : ActorMethod<[], Array<ChainSpAbsorbIntent>>,
+  'get_pending_outbound_payouts' : ActorMethod<
+    [],
+    Array<PendingOutboundPayoutStatus>
+  >,
   'get_pending_refunds' : ActorMethod<[[] | [Principal]], Array<PendingRefund>>,
   'get_pending_unallocated_interest_forwards' : ActorMethod<
     [],
@@ -480,9 +527,18 @@ export interface _SERVICE {
   'get_pool_event_count' : ActorMethod<[], bigint>,
   'get_pool_events' : ActorMethod<[bigint, bigint], Array<PoolEvent>>,
   'get_pool_status' : ActorMethod<[], StabilityPoolStatus>,
+  'get_sp_liquidation_v2_status' : ActorMethod<
+    [bigint],
+    [] | [SpLiquidationV2LocalStatus]
+  >,
   'get_user_position' : ActorMethod<
     [[] | [Principal]],
     [] | [UserStabilityPosition]
+  >,
+  'has_legacy_liquidation_in_flight' : ActorMethod<
+    [bigint],
+    { 'Ok' : boolean } |
+      { 'Err' : StabilityPoolError }
   >,
   'icrc10_supported_standards' : ActorMethod<
     [],
@@ -552,6 +608,11 @@ export interface _SERVICE {
     { 'Ok' : SpBurnRefundReceipt } |
       { 'Err' : StabilityPoolError }
   >,
+  'reconcile_pending_outbound_payout' : ActorMethod<
+    [Principal, bigint],
+    { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
   'reconcile_pending_refund' : ActorMethod<
     [bigint, bigint],
     { 'Ok' : bigint } |
@@ -559,6 +620,21 @@ export interface _SERVICE {
   >,
   'reconcile_pending_refund_history' : ActorMethod<
     [bigint],
+    { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'reconcile_sp_liquidation_v2_approval' : ActorMethod<
+    [bigint, bigint],
+    { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'reconcile_sp_liquidation_v2_stable_pull' : ActorMethod<
+    [bigint, bigint, bigint],
+    { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'recover_three_usd_absorb_v2' : ActorMethod<
+    [bigint, [] | [bigint], [] | [bigint], [] | [bigint]],
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
@@ -590,6 +666,11 @@ export interface _SERVICE {
   'retry_pending_icusd_burn_refund' : ActorMethod<
     [bigint],
     { 'Ok' : SpBurnRefundReceipt } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'retry_sp_liquidation_v2' : ActorMethod<
+    [bigint],
+    { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
   'retry_unallocated_interest_forward' : ActorMethod<

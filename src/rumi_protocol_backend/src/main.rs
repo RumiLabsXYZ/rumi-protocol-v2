@@ -30,7 +30,10 @@ use rumi_protocol_backend::{
     PreparedRedemptionOffer, ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus,
     RedeemQuotedRequest, RedemptionError, RedemptionOfferRefreshError, RedemptionPreview,
     RedemptionQueue, RedemptionQuote, RedemptionResult, ReserveBalance, ReserveRedemptionResult,
-    StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee, SupplyAudit, SupplyAuditEntry,
+    LiquidatableVaultInfo, StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee,
+    SupplyAudit, SupplyAuditEntry,
+    ThreeUsdReserveIngressV2PendingStage, ThreeUsdReserveIngressV2Status,
+    ThreeUsdReserveIngressV2StatusView,
     VaultArgWithToken, VaultHistoryPagedResponse, VaultsPageResponse, XrpSpAbsorbPreflight,
     XrpSpAbsorbRequest, XrpSpAbsorbResult, MAX_EVENTS_BY_PRINCIPAL_LEGACY,
     MAX_EVENTS_BY_PRINCIPAL_OUTPUT, MAX_EVENTS_BY_PRINCIPAL_SCAN, MAX_VAULTS_LEGACY_PAGE,
@@ -106,8 +109,261 @@ pub struct PendingPayoutPage {
     pub next_cursor: Option<PendingPayoutCursor>,
 }
 
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingRedemptionCursor {
+    pub burn_block_index: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingRedemptionView {
+    pub burn_block_index: u64,
+    pub recipient: Principal,
+    pub gross_amount_raw: u64,
+    pub collateral_type: Principal,
+    pub op_nonce: u128,
+    pub ledger: Option<Principal>,
+    pub transfer_amount_raw: Option<u64>,
+    pub retry_count: u8,
+    pub held_for_manual_retry: bool,
+    pub reconciliation_required: bool,
+    pub minimum_net_amount_raw: Option<u64>,
+    pub pinned_transfer: Option<rumi_protocol_backend::state::PinnedRedemptionTransfer>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingRedemptionPage {
+    pub items: Vec<PendingRedemptionView>,
+    pub next_cursor: Option<PendingRedemptionCursor>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingTreasuryPaymentCursor {
+    pub operation_id: u128,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingTreasuryPaymentView {
+    pub operation_id: u128,
+    pub kind: rumi_protocol_backend::state::TreasuryPaymentKind,
+    pub phase: rumi_protocol_backend::state::TreasuryPaymentPhase,
+    pub ledger: Principal,
+    pub recipient: Principal,
+    pub amount_e8s: u64,
+    pub fee_e8s: Option<u64>,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub deposit_type: rumi_protocol_backend::treasury::DepositType,
+    pub asset_type: rumi_protocol_backend::treasury::AssetType,
+    pub dispatch_attempts: u8,
+    pub last_dispatch_at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingTreasuryPaymentPage {
+    pub items: Vec<PendingTreasuryPaymentView>,
+    pub next_cursor: Option<PendingTreasuryPaymentCursor>,
+}
+
 const MAX_PENDING_PAYOUT_PAGE_SIZE: u16 = 100;
 const MAX_PENDING_PAYOUT_SCAN_PER_QUEUE: usize = 256;
+const MAX_PENDING_TREASURY_PAGE_SIZE: u16 = 100;
+const MAX_PENDING_TREASURY_SCAN: usize = 256;
+const REDEMPTION_TOMBSTONE_BACKFILL_BATCH: usize = 512;
+
+fn redemption_burn_ids_from_events(
+    history: impl IntoIterator<Item = Event>,
+) -> std::collections::BTreeSet<u64> {
+    history
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::RedemptionOnVaults {
+                icusd_block_index, ..
+            } => Some(icusd_block_index),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Advances an upgrade migration in bounded batches. New redemption admission
+/// stays disabled until every historical event has been scanned; live events
+/// are tombstoned synchronously by the recorder after the scan completes.
+fn advance_redemption_tombstone_backfill() -> bool {
+    let (cursor, complete) = read_state(|s| {
+        (
+            s.redemption_tombstone_backfill_cursor,
+            s.redemption_tombstone_backfill_complete,
+        )
+    });
+    if complete {
+        return true;
+    }
+    let event_count = rumi_protocol_backend::storage::count_events();
+    let start = usize::try_from(cursor).unwrap_or(usize::MAX);
+    let batch: Vec<Event> = events()
+        .skip(start)
+        .take(REDEMPTION_TOMBSTONE_BACKFILL_BATCH)
+        .collect();
+    let scanned = batch.len() as u64;
+    let ids = redemption_burn_ids_from_events(batch);
+    mutate_state(|s| {
+        s.consumed_redemption_burn_blocks.extend(ids);
+        s.redemption_tombstone_backfill_cursor = cursor.saturating_add(scanned);
+        s.redemption_tombstone_backfill_complete =
+            s.redemption_tombstone_backfill_cursor >= event_count;
+        s.redemption_tombstone_backfill_complete
+    })
+}
+
+fn schedule_redemption_tombstone_backfill() {
+    if advance_redemption_tombstone_backfill() {
+        return;
+    }
+    ic_cdk_timers::set_timer(std::time::Duration::from_millis(100), || {
+        schedule_redemption_tombstone_backfill()
+    });
+}
+
+fn pending_redemption_page_in_state(
+    state: &State,
+    caller: Principal,
+    cursor: Option<PendingRedemptionCursor>,
+    limit: u16,
+) -> PendingRedemptionPage {
+    let limit = limit.clamp(1, MAX_PENDING_PAYOUT_PAGE_SIZE) as usize;
+    let rows: Vec<_> = match cursor {
+        Some(cursor) => state
+            .pending_redemption_transfer
+            .range((
+                std::ops::Bound::Excluded(cursor.burn_block_index),
+                std::ops::Bound::Unbounded,
+            ))
+            .take(MAX_PENDING_PAYOUT_SCAN_PER_QUEUE + 1)
+            .map(|(id, payout)| (*id, *payout))
+            .collect(),
+        None => state
+            .pending_redemption_transfer
+            .iter()
+            .take(MAX_PENDING_PAYOUT_SCAN_PER_QUEUE + 1)
+            .map(|(id, payout)| (*id, *payout))
+            .collect(),
+    };
+    let truncated = rows.len() > MAX_PENDING_PAYOUT_SCAN_PER_QUEUE;
+    let mut items = Vec::new();
+    let mut last_scanned = None;
+    let mut more_in_batch = false;
+    for (index, (burn_block_index, payout)) in rows
+        .iter()
+        .take(MAX_PENDING_PAYOUT_SCAN_PER_QUEUE)
+        .enumerate()
+    {
+        last_scanned = Some(*burn_block_index);
+        if payout.owner == caller {
+            items.push(PendingRedemptionView {
+                burn_block_index: *burn_block_index,
+                recipient: payout.owner,
+                gross_amount_raw: payout.margin.to_u64(),
+                collateral_type: payout.collateral_type,
+                op_nonce: payout.op_nonce,
+                ledger: payout.ledger,
+                transfer_amount_raw: payout.transfer_amount_raw,
+                retry_count: payout.retry_count,
+                held_for_manual_retry: payout.held_for_manual_retry,
+                reconciliation_required: payout.reconciliation_required,
+                minimum_net_amount_raw: payout.min_net_collateral_raw,
+                pinned_transfer: payout.redemption_transfer,
+            });
+            if items.len() == limit {
+                more_in_batch = index + 1 < rows.len().min(MAX_PENDING_PAYOUT_SCAN_PER_QUEUE);
+                break;
+            }
+        }
+    }
+    let next_cursor = if truncated || more_in_batch {
+        last_scanned.map(|burn_block_index| PendingRedemptionCursor { burn_block_index })
+    } else {
+        None
+    };
+    PendingRedemptionPage { items, next_cursor }
+}
+
+fn pending_treasury_payment_page_in_state(
+    state: &State,
+    cursor: Option<PendingTreasuryPaymentCursor>,
+    limit: u16,
+) -> PendingTreasuryPaymentPage {
+    let limit = limit.clamp(1, MAX_PENDING_TREASURY_PAGE_SIZE) as usize;
+    let rows: Vec<_> = match cursor {
+        Some(cursor) => state
+            .pending_treasury_payments
+            .range((
+                std::ops::Bound::Excluded(cursor.operation_id),
+                std::ops::Bound::Unbounded,
+            ))
+            .take(MAX_PENDING_TREASURY_SCAN + 1)
+            .map(|(id, payment)| (*id, payment.clone()))
+            .collect(),
+        None => state
+            .pending_treasury_payments
+            .iter()
+            .take(MAX_PENDING_TREASURY_SCAN + 1)
+            .map(|(id, payment)| (*id, payment.clone()))
+            .collect(),
+    };
+    let truncated = rows.len() > MAX_PENDING_TREASURY_SCAN;
+    let visible = rows
+        .iter()
+        .take(limit)
+        .map(|(id, payment)| (*id, payment.clone()))
+        .collect::<Vec<_>>();
+    let items = visible
+        .iter()
+        .map(|(operation_id, payment)| PendingTreasuryPaymentView {
+            operation_id: *operation_id,
+            kind: payment.kind,
+            phase: payment.phase.clone(),
+            ledger: payment.ledger,
+            recipient: payment.recipient.owner,
+            amount_e8s: payment.amount_e8s,
+            fee_e8s: payment.fee_e8s,
+            memo: payment.memo.clone(),
+            created_at_time_ns: payment.created_at_time_ns,
+            deposit_type: payment.deposit_type.clone(),
+            asset_type: payment.asset_type.clone(),
+            dispatch_attempts: payment.dispatch_attempts,
+            last_dispatch_at_ns: payment.last_dispatch_at_ns,
+        })
+        .collect();
+    let next_cursor = if truncated || rows.len() > limit {
+        visible
+            .last()
+            .map(|(operation_id, _)| PendingTreasuryPaymentCursor {
+                operation_id: *operation_id,
+            })
+    } else {
+        None
+    };
+    PendingTreasuryPaymentPage { items, next_cursor }
+}
+
+fn hold_unpinned_redemption_payouts(
+    pending: &mut std::collections::BTreeMap<
+        u64,
+        rumi_protocol_backend::state::PendingMarginTransfer,
+    >,
+) -> u64 {
+    pending
+        .values_mut()
+        .filter(|payout| {
+            payout
+                .redemption_transfer
+                .map_or(true, |tuple| !tuple.matches_pending(payout))
+        })
+        .map(|payout| {
+            payout.held_for_manual_retry = true;
+            payout.reconciliation_required = true;
+        })
+        .count() as u64
+}
 
 fn pending_payout_view(
     kind: PendingPayoutQueueKind,
@@ -160,17 +416,19 @@ fn pending_payout_page_in_state(
             .map(|(id, payout)| (*id, *payout))
             .collect();
         has_more |= rows.len() > MAX_PENDING_PAYOUT_SCAN_PER_QUEUE;
-        candidates.extend(rows.into_iter().take(MAX_PENDING_PAYOUT_SCAN_PER_QUEUE).map(
-            |(id, payout)| {
-                (
-                    PendingPayoutCursor {
-                        operation_id: id,
-                        kind,
-                    },
-                    payout,
-                )
-            },
-        ));
+        candidates.extend(
+            rows.into_iter()
+                .take(MAX_PENDING_PAYOUT_SCAN_PER_QUEUE)
+                .map(|(id, payout)| {
+                    (
+                        PendingPayoutCursor {
+                            operation_id: id,
+                            kind,
+                        },
+                        payout,
+                    )
+                }),
+        );
     }
     candidates.sort_by_key(|(key, _)| *key);
     let mut items = Vec::new();
@@ -250,16 +508,17 @@ fn ok_or_die(result: Result<(), String>) {
 /// Checks that Elliptic Core Canister state is internally consistent.
 #[cfg(feature = "self_check")]
 fn check_invariants() -> Result<(), String> {
-    use rumi_protocol_backend::event::restore_snapshot_or_replay;
+    use rumi_protocol_backend::event::restore_snapshot_or_replay_with_treasury_payments;
 
     read_state(|s| {
         s.check_invariants()?;
 
         let events: Vec<_> = rumi_protocol_backend::storage::events().collect();
-        let recovered_state = restore_snapshot_or_replay(
+        let recovered_state = restore_snapshot_or_replay_with_treasury_payments(
             None,
             events.clone().into_iter(),
             rumi_protocol_backend::storage::pending_payout_events(),
+            rumi_protocol_backend::storage::treasury_payment_events(),
         )
         .unwrap_or_else(|e| panic!("failed to replay log {:?}: {:?}", events, e));
 
@@ -308,6 +567,20 @@ async fn validate_call() -> Result<(), ProtocolError> {
         ));
     }
     rumi_protocol_backend::xrc::ensure_fresh_price().await
+}
+
+/// Reconciliation endpoints must remain reachable when the oracle is stale;
+/// preserve identity and the protocol-wide emergency freeze policy.
+fn validate_frozen_only_recovery_call() -> Result<(), ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    if read_state(|s| s.frozen) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_mode() -> Result<(), ProtocolError> {
@@ -736,6 +1009,11 @@ fn register_conflux_hot_wallet_refresh_timer() {
 }
 
 fn setup_timers() {
+    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(30), || {
+        ic_cdk::spawn(async {
+            rumi_protocol_backend::vault::resume_pending_inbound_collateral().await;
+        });
+    });
     // ── Immediate price fetch (fire on the very next execution round) ───────
     // Prices are ephemeral and not stored as events, so after an upgrade
     // the collateral configs have stale or missing prices.  An immediate
@@ -828,6 +1106,52 @@ fn setup_timers() {
     // any canister with no chain configured, so it is safe to register everywhere.
     register_chains_price_timer();
     register_conflux_hot_wallet_refresh_timer();
+
+    // Borrow mints are journaled before dispatch. Reconcile exact persisted
+    // tuples independently of user retries, including after canister upgrades.
+    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(60), || {
+        ic_cdk::spawn(rumi_protocol_backend::vault::process_pending_borrow_mints())
+    });
+
+    // The SP V2 journal can hold ambiguous ledger pulls, refunds, or payouts
+    // across upgrades. Keep a bounded rotating recovery pass alive while any
+    // row is pending; the cursor is stable-state-backed and survives upgrades.
+    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(30), || {
+        if rumi_protocol_backend::vault::has_retryable_stability_pool_liquidation_v2() {
+            ic_cdk::spawn(async {
+                rumi_protocol_backend::vault::resume_stability_pool_liquidations_v2().await;
+            });
+        }
+    });
+    if rumi_protocol_backend::vault::has_retryable_stability_pool_liquidation_v2() {
+        rumi_protocol_backend::vault::schedule_stability_pool_liquidation_v2_resume();
+    }
+
+    // Canister timers do not survive an upgrade. Resume the durable payout
+    // worker once when queued obligations remain; TimerLogicGuard serializes
+    // this pass with any payout triggered by a concurrent update call.
+    if rumi_protocol_backend::has_retryable_pending_transfer_work() {
+        ic_cdk_timers::set_timer(std::time::Duration::ZERO, || {
+            ic_cdk::spawn(rumi_protocol_backend::process_pending_transfer())
+        });
+    }
+    if rumi_protocol_backend::treasury::has_retryable_pinned_treasury_payments() {
+        ic_cdk_timers::set_timer(std::time::Duration::ZERO, || {
+            ic_cdk::spawn(rumi_protocol_backend::treasury::process_pending_treasury_payments())
+        });
+    }
+    if rumi_protocol_backend::treasury::has_retryable_sp_interest_mints() {
+        ic_cdk_timers::set_timer(std::time::Duration::ZERO, || {
+            ic_cdk::spawn(
+                rumi_protocol_backend::treasury::process_pending_stability_pool_interest_mints(),
+            )
+        });
+    }
+    if rumi_protocol_backend::vault::has_pending_borrow_mints() {
+        ic_cdk_timers::set_timer(std::time::Duration::ZERO, || {
+            ic_cdk::spawn(rumi_protocol_backend::vault::process_pending_borrow_mints())
+        });
+    }
 }
 
 /// M2 anti-spam backstop: hourly GC of stale `AwaitingDeposit` chain vaults
@@ -931,6 +1255,7 @@ fn init(arg: ProtocolArg) {
         ProtocolArg::Upgrade(_) => ic_cdk::trap("expected Init got Upgrade"),
     }
     setup_timers();
+    schedule_redemption_tombstone_backfill();
 }
 
 #[pre_upgrade]
@@ -944,10 +1269,24 @@ fn pre_upgrade() {
     log!(INFO, "[pre_upgrade]: state serialized to stable memory");
 }
 
+fn migrate_legacy_deficit_readonly_latch(state: &mut State) -> bool {
+    if state.deficit_readonly_latched_at_e8s.is_some()
+        || state.deficit_readonly_threshold_e8s == 0
+        || state.protocol_deficit_icusd.0 < state.deficit_readonly_threshold_e8s
+    {
+        return false;
+    }
+    state.deficit_readonly_latched_at_e8s = Some(state.deficit_readonly_threshold_e8s);
+    state.mode = Mode::ReadOnly;
+    true
+}
+
 #[post_upgrade]
 fn post_upgrade(arg: ProtocolArg) {
-    use rumi_protocol_backend::event::restore_snapshot_or_replay;
-    use rumi_protocol_backend::storage::{count_events, events, pending_payout_events, record_event};
+    use rumi_protocol_backend::event::restore_snapshot_or_replay_with_treasury_payments;
+    use rumi_protocol_backend::storage::{
+        count_events, events, pending_payout_events, record_event, treasury_payment_events,
+    };
 
     let start = ic_cdk::api::instruction_counter();
 
@@ -964,7 +1303,12 @@ fn post_upgrade(arg: ProtocolArg) {
     // Try to restore from stable memory (fast path, no drift)
     let snapshot = rumi_protocol_backend::storage::load_state_from_stable();
     let has_snapshot = snapshot.is_some();
-    let mut state = match restore_snapshot_or_replay(snapshot, events(), pending_payout_events()) {
+    let mut state = match restore_snapshot_or_replay_with_treasury_payments(
+        snapshot,
+        events(),
+        pending_payout_events(),
+        treasury_payment_events(),
+    ) {
         Ok(mut state) if has_snapshot => {
             log!(
                 INFO,
@@ -985,15 +1329,35 @@ fn post_upgrade(arg: ProtocolArg) {
             );
             state
         }
-        Err(e) => {
-            ic_cdk::trap(&format!("[upgrade]: failed to replay the event log: {:?}", e))
-        }
+        Err(e) => ic_cdk::trap(&format!(
+            "[upgrade]: failed to replay the event log: {:?}",
+            e
+        )),
     };
+    if has_snapshot && state.stability_pool_interest_outbox_version == 0 {
+        let legacy = std::mem::take(&mut state.pending_interest_for_pools);
+        for (collateral, amount) in legacy {
+            let held = state
+                .held_legacy_stability_pool_interest
+                .entry(collateral)
+                .or_default();
+            *held = held.saturating_add(amount);
+        }
+        state.stability_pool_interest_outbox_version = 1;
+        let total: u128 = state
+            .held_legacy_stability_pool_interest
+            .values()
+            .map(|amount| *amount as u128)
+            .sum();
+        log!(
+            INFO,
+            "[upgrade]: held {} e8s of legacy aggregate Stability Pool interest for reconciliation",
+            total
+        );
+    }
     // CL11: any chain marked Public by the staged rollout is closed before
     // replacing the live state. The resolver also fails closed during decode.
-    let held_public_burn_proof_modes = state
-        .multi_chain
-        .hold_legacy_public_burn_proof_admission();
+    let held_public_burn_proof_modes = state.multi_chain.hold_legacy_public_burn_proof_admission();
     if held_public_burn_proof_modes > 0 {
         log!(
             INFO,
@@ -1008,6 +1372,18 @@ fn post_upgrade(arg: ProtocolArg) {
             INFO,
             "[upgrade]: froze XRP collateral status from {:?} because the configured Schnorr key is not production",
             previous
+        );
+    }
+
+    // Older snapshots stored the deficit-triggered ReadOnly only in `mode`.
+    // Reconstruct the latch whenever the configured threshold is still
+    // crossed, including snapshots where an earlier mode refresh already
+    // overwrote ReadOnly, so a post-upgrade price tick cannot preserve bypass.
+    if migrate_legacy_deficit_readonly_latch(&mut state) {
+        log!(
+            INFO,
+            "[post_upgrade] restored deficit ReadOnly latch at threshold {}",
+            state.deficit_readonly_threshold_e8s
         );
     }
 
@@ -1119,6 +1495,14 @@ fn post_upgrade(arg: ProtocolArg) {
                 redemption_backfilled += 1;
             }
         }
+        // Existing pending keys may come from a pre-tombstone snapshot. Seed
+        // them before payout settlement removes the rows so a repeated burn
+        // identity cannot be processed a second time after this upgrade.
+        let restored_redemption_ids: Vec<u64> =
+            s.pending_redemption_transfer.keys().copied().collect();
+        s.consumed_redemption_burn_blocks
+            .extend(restored_redemption_ids);
+        let redemptions_held = hold_unpinned_redemption_payouts(&mut s.pending_redemption_transfer);
         if held > 0 {
             log!(
                 INFO,
@@ -1127,7 +1511,17 @@ fn post_upgrade(arg: ProtocolArg) {
             );
         }
         if redemption_backfilled > 0 {
-            log!(INFO, "[upgrade]: backfilled {} legacy redemption operation nonces", redemption_backfilled);
+            log!(
+                INFO,
+                "[upgrade]: backfilled {} legacy redemption operation nonces",
+                redemption_backfilled
+            );
+        }
+        if redemptions_held > 0 {
+            log!(INFO,
+                "[upgrade]: held {} redemption payouts without an exact pinned transfer tuple for reconciliation",
+                redemptions_held
+            );
         }
     });
 
@@ -5035,11 +5429,12 @@ fn get_last_observed_block(chain: rumi_protocol_backend::chains::config::ChainId
 
 /// Phase 1c notify-then-verify: submit a burn transaction hash for verification.
 ///
-/// PERMISSIONLESS: anyone may submit a REAL on-chain tx hash. The verify path
-/// (`verify_and_apply_burn_proof`) fetches the receipt via ONE
-/// `eth_getTransactionReceipt`, rejects forgeries (only Burn logs emitted by the
-/// configured icUSD contract count, and the amount/vault come FROM the log, never
-/// from the caller), requires finality, and dedups by chain-qualified replay IDs
+/// OPERATOR-ONLY: the configured non-anonymous operator may submit an on-chain
+/// transaction hash. The verify path (`verify_and_apply_burn_proof`) fetches
+/// the receipt via one `eth_getTransactionReceipt`, and rejects forgeries: only
+/// Burn logs from the configured icUSD contract count; amount and vault come
+/// from the log, never from the caller. It requires finality and dedups by
+/// chain-qualified replay IDs
 /// until the observer advances a monotonic finalized-coverage floor. Covered
 /// historical replays are rejected, so pruning observer cache entries cannot
 /// make an old burn eligible again. Returns newly applied burns. This replaces
@@ -5062,8 +5457,8 @@ async fn submit_burn_proof(
     tx_hash: String,
 ) -> Result<u32, ProtocolError> {
     use rumi_protocol_backend::chains::monad::burn_proof::{
-        operator_may_submit_burn_proof, run_if_operator_admitted,
-        verify_and_apply_burn_proof, BurnProofError,
+        operator_may_submit_burn_proof, run_if_operator_admitted, verify_and_apply_burn_proof,
+        BurnProofError,
     };
     let caller = ic_cdk::caller();
     let (operator, mode) = read_state(|s| {
@@ -5073,9 +5468,8 @@ async fn submit_burn_proof(
         )
     });
     let allowed = operator_may_submit_burn_proof(caller, operator, mode);
-    let verification = run_if_operator_admitted(allowed, || {
-        verify_and_apply_burn_proof(chain_id, &tx_hash)
-    });
+    let verification =
+        run_if_operator_admitted(allowed, || verify_and_apply_burn_proof(chain_id, &tx_hash));
     let Some(verification) = verification else {
         return Err(ProtocolError::ChainAdmin(
             "submit_burn_proof is restricted to the configured non-anonymous operator".into(),
@@ -6333,15 +6727,10 @@ fn get_vault_count() -> u64 {
 // Vault related operations
 #[candid_method(update)]
 #[update]
-async fn redeem_icp(icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
-    validate_call().await?;
-    // Wave-9 RED-003 / RED-101: gate the ICP redemption path on protocol mode,
-    // matching redeem_collateral. This endpoint was the RED-003 fix's blind spot
-    // (it reaches the same collateral-seizing path via vault::redeem_icp ->
-    // vault::redeem_collateral). Defense in depth alongside the shared
-    // vault-module gate now in vault::redeem_collateral.
-    validate_mode()?;
-    check_postcondition(rumi_protocol_backend::vault::redeem_icp(icusd_amount).await)
+async fn redeem_icp(_icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
+    Err(ProtocolError::TemporarilyUnavailable(
+        "Redemptions are paused until transfer recovery is available; no icUSD was pulled".into(),
+    ))
 }
 
 /// Generic collateral redemption: burn icUSD and receive any collateral type.
@@ -6349,23 +6738,12 @@ async fn redeem_icp(icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> 
 #[candid_method(update)]
 #[update]
 async fn redeem_collateral(
-    collateral_type: Principal,
-    icusd_amount: u64,
+    _collateral_type: Principal,
+    _icusd_amount: u64,
 ) -> Result<SuccessWithFee, ProtocolError> {
-    validate_call().await?;
-    // Wave-9 RED-003: gate redemption on protocol mode. ReadOnly auto-latches
-    // when total collateral ratio drops below 100% (Wave-1) or when the
-    // deficit account crosses the configured threshold (Wave-8e LIQ-005);
-    // both are insolvency signals where further redemption would deepen the
-    // bad-debt position by extracting collateral from a protocol that
-    // already owes more than it holds.
-    validate_mode()?;
-    // The vault path refreshes and validates every eligible collateral that
-    // participates in the global health sort. Refreshing only the caller's
-    // requested type here could leave a stale competing asset at the front.
-    check_postcondition(
-        rumi_protocol_backend::vault::redeem_collateral(collateral_type, icusd_amount).await,
-    )
+    Err(ProtocolError::TemporarilyUnavailable(
+        "Redemptions are paused until transfer recovery is available; no icUSD was pulled".into(),
+    ))
 }
 
 #[candid_method(query)]
@@ -6450,14 +6828,14 @@ mod pending_icusd_refund_visibility_tests {
     }
 }
 
-/// Redeem against one collateral run with an explicit expected token and strict
-/// minimum net payout. The reply says payout is queued, not ledger-delivered.
+/// Redemption submission remains closed until the inbound icUSD pull has a
+/// durable request identity and recovery path.
 #[candid_method(update)]
 #[update]
-async fn redeem_quoted(request: RedeemQuotedRequest) -> Result<RedemptionResult, RedemptionError> {
-    validate_call().await.map_err(RedemptionError::from)?;
-    validate_mode().map_err(RedemptionError::from)?;
-    check_postcondition(rumi_protocol_backend::vault::redeem_quoted(request).await)
+async fn redeem_quoted(_request: RedeemQuotedRequest) -> Result<RedemptionResult, RedemptionError> {
+    Err(ProtocolError::TemporarilyUnavailable(
+        "Redemptions are paused until transfer recovery is available; no icUSD was pulled".into(),
+    ).into())
 }
 
 #[candid_method(update)]
@@ -6470,6 +6848,543 @@ async fn open_vault(
     check_postcondition(
         rumi_protocol_backend::vault::open_vault(collateral_amount, collateral_type).await,
     )
+}
+
+fn inbound_collateral_view(
+    owner: Principal,
+    ledger: Principal,
+    operation: &rumi_protocol_backend::state::InboundCollateralOperation,
+    tuple: &rumi_protocol_backend::SpLiquidationStablePullTuple,
+    candidate_block_index: Option<u64>,
+    had_ambiguous_attempt: bool,
+    last_error: Option<String>,
+    result: Option<rumi_protocol_backend::state::InboundCollateralResult>,
+) -> rumi_protocol_backend::InboundCollateralStatusView {
+    use rumi_protocol_backend::{
+        InboundCollateralOperationKind as Kind, InboundCollateralPhase as Phase,
+        InboundCollateralResultView as ResultView,
+    };
+    let operation = match operation {
+        rumi_protocol_backend::state::InboundCollateralOperation::Open {
+            collateral_type, ..
+        } => Kind::Open {
+            collateral_type: *collateral_type,
+        },
+        rumi_protocol_backend::state::InboundCollateralOperation::AddMargin {
+            vault_id, ..
+        } => Kind::AddMargin {
+            vault_id: *vault_id,
+        },
+    };
+    let (phase, result) = match result {
+        Some(rumi_protocol_backend::state::InboundCollateralResult::Open {
+            vault_id,
+            block_index,
+        }) => (
+            Phase::Complete,
+            Some(ResultView::Open {
+                vault_id,
+                block_index,
+            }),
+        ),
+        Some(rumi_protocol_backend::state::InboundCollateralResult::AddMargin { block_index }) => {
+            (Phase::Complete, Some(ResultView::AddMargin { block_index }))
+        }
+        Some(rumi_protocol_backend::state::InboundCollateralResult::Rejected { message }) => {
+            (Phase::Rejected, Some(ResultView::Rejected { message }))
+        }
+        None if had_ambiguous_attempt || last_error.is_some() => (Phase::Held, None),
+        None => (Phase::Pending, None),
+    };
+    rumi_protocol_backend::InboundCollateralStatusView {
+        owner,
+        ledger,
+        request_id: 0,
+        operation,
+        phase,
+        amount_raw: tuple.amount_raw,
+        fee_raw: tuple.fee_raw,
+        memo: tuple.memo.clone(),
+        created_at_time_ns: tuple.created_at_time_ns,
+        candidate_block_index,
+        result,
+        had_ambiguous_attempt,
+        last_error,
+    }
+}
+
+#[candid_method(update)]
+#[update]
+async fn open_vault_v2(
+    request_id: u128,
+    collateral_amount: u64,
+    collateral_type: Option<Principal>,
+) -> Result<rumi_protocol_backend::InboundCollateralStatusView, ProtocolError> {
+    validate_call().await?;
+    let owner = ic_cdk::api::caller();
+    let effective_type = collateral_type
+        .unwrap_or_else(|| rumi_protocol_backend::state::read_state(|s| s.icp_collateral_type()));
+    let ledger = rumi_protocol_backend::state::read_state(|s| {
+        s.get_collateral_config(&effective_type)
+            .map(|config| config.ledger_canister_id)
+    })
+    .ok_or_else(|| ProtocolError::GenericError("Collateral type not supported.".into()))?;
+    let result = rumi_protocol_backend::vault::open_vault_with_request_id(
+        request_id,
+        collateral_amount,
+        Some(effective_type),
+    )
+    .await;
+    if let Some(view) = rumi_protocol_backend::state::read_state(|s| {
+        let key = (owner, ledger);
+        if let Some(row) = s
+            .pending_inbound_collateral
+            .get(&key)
+            .filter(|r| r.request_id == request_id && r.tuple.amount_raw == collateral_amount
+                && matches!(&r.operation, rumi_protocol_backend::state::InboundCollateralOperation::Open { collateral_type, .. } if collateral_type == &effective_type))
+        {
+            let mut view = inbound_collateral_view(
+                owner,
+                key.1,
+                &row.operation,
+                &row.tuple,
+                row.candidate_block_index,
+                row.had_ambiguous_attempt,
+                row.last_error.clone(),
+                None,
+            );
+            view.request_id = request_id;
+            return Some(view);
+        }
+        let done = s
+            .inbound_collateral_latest_result
+            .get(&key)
+            .filter(|r| r.request_id == request_id && r.amount_raw == collateral_amount
+                && matches!(&r.operation, rumi_protocol_backend::state::InboundCollateralOperation::Open { collateral_type, .. } if collateral_type == &effective_type))?;
+        let mut view = inbound_collateral_view(
+            owner,
+            key.1,
+            &done.operation,
+            &done.tuple,
+            match &done.result {
+                rumi_protocol_backend::state::InboundCollateralResult::Open {
+                    block_index, ..
+                }
+                | rumi_protocol_backend::state::InboundCollateralResult::AddMargin {
+                    block_index,
+                } => Some(*block_index),
+                rumi_protocol_backend::state::InboundCollateralResult::Rejected { .. } => None,
+            },
+            false,
+            None,
+            Some(done.result.clone()),
+        );
+        view.request_id = request_id;
+        Some(view)
+    }) {
+        return Ok(view);
+    }
+    match result {
+        Err(error) => Err(error),
+        Ok(_) => Err(ProtocolError::TemporarilyUnavailable(
+            "settlement completed but saved status could not be loaded; query request status"
+                .into(),
+        )),
+    }
+}
+
+#[candid_method(update)]
+#[update]
+async fn add_margin_v2(
+    request_id: u128,
+    arg: VaultArg,
+) -> Result<rumi_protocol_backend::InboundCollateralStatusView, ProtocolError> {
+    validate_call().await?;
+    let owner = ic_cdk::api::caller();
+    let requested_vault_id = arg.vault_id;
+    let requested_amount = arg.amount;
+    let ledger = rumi_protocol_backend::state::read_state(|s| {
+        let vault = s.vault_id_to_vaults.get(&requested_vault_id)?;
+        Some(
+            s.get_collateral_config(&vault.collateral_type)?
+                .ledger_canister_id,
+        )
+    })
+    .ok_or_else(|| ProtocolError::GenericError("Vault or collateral type not found".into()))?;
+    let result = rumi_protocol_backend::vault::add_margin_with_request_id(request_id, arg).await;
+    if let Some(view) = rumi_protocol_backend::state::read_state(|s| {
+        let key = (owner, ledger);
+        if let Some(row) = s
+            .pending_inbound_collateral
+            .get(&key)
+            .filter(|r| r.request_id == request_id && r.tuple.amount_raw == requested_amount
+                && matches!(&r.operation, rumi_protocol_backend::state::InboundCollateralOperation::AddMargin { vault_id, .. } if *vault_id == requested_vault_id))
+        {
+            let mut view = inbound_collateral_view(
+                owner,
+                ledger,
+                &row.operation,
+                &row.tuple,
+                row.candidate_block_index,
+                row.had_ambiguous_attempt,
+                row.last_error.clone(),
+                None,
+            );
+            view.request_id = request_id;
+            return Some(view);
+        }
+        let done = s
+            .inbound_collateral_latest_result
+            .get(&key)
+            .filter(|r| r.request_id == request_id && r.amount_raw == requested_amount
+                && matches!(&r.operation, rumi_protocol_backend::state::InboundCollateralOperation::AddMargin { vault_id, .. } if *vault_id == requested_vault_id))?;
+        let mut view = inbound_collateral_view(
+            owner,
+            ledger,
+            &done.operation,
+            &done.tuple,
+            match &done.result {
+                rumi_protocol_backend::state::InboundCollateralResult::Open {
+                    block_index, ..
+                }
+                | rumi_protocol_backend::state::InboundCollateralResult::AddMargin {
+                    block_index,
+                } => Some(*block_index),
+                rumi_protocol_backend::state::InboundCollateralResult::Rejected { .. } => None,
+            },
+            false,
+            None,
+            Some(done.result.clone()),
+        );
+        view.request_id = request_id;
+        Some(view)
+    }) {
+        return Ok(view);
+    }
+    match result {
+        Err(error) => Err(error),
+        Ok(_) => Err(ProtocolError::TemporarilyUnavailable(
+            "settlement completed but saved status could not be loaded; query request status"
+                .into(),
+        )),
+    }
+}
+
+#[candid_method(query)]
+#[query]
+fn get_my_collateral_ingress_state(
+    ledger: Principal,
+) -> Result<rumi_protocol_backend::InboundCollateralRequestState, ProtocolError> {
+    let owner = ic_cdk::api::caller();
+    rumi_protocol_backend::state::read_state(|s| {
+        let high = s
+            .inbound_collateral_high_water
+            .get(&(owner, ledger))
+            .copied()
+            .unwrap_or(0);
+        let next_request_id = high.checked_add(1).ok_or_else(|| {
+            ProtocolError::GenericError("collateral request ID sequence exhausted".into())
+        })?;
+        let active_request = s
+            .pending_inbound_collateral
+            .get(&(owner, ledger))
+            .map(|row| {
+                let mut view = inbound_collateral_view(
+                    owner,
+                    ledger,
+                    &row.operation,
+                    &row.tuple,
+                    row.candidate_block_index,
+                    row.had_ambiguous_attempt,
+                    row.last_error.clone(),
+                    None,
+                );
+                view.request_id = row.request_id;
+                view
+            });
+        let latest_result = s
+            .inbound_collateral_latest_result
+            .get(&(owner, ledger))
+            .map(|done| {
+                let block = match &done.result {
+                    rumi_protocol_backend::state::InboundCollateralResult::Open {
+                        block_index,
+                        ..
+                    }
+                    | rumi_protocol_backend::state::InboundCollateralResult::AddMargin {
+                        block_index,
+                    } => Some(*block_index),
+                    rumi_protocol_backend::state::InboundCollateralResult::Rejected { .. } => None,
+                };
+                let mut view = inbound_collateral_view(
+                    owner,
+                    ledger,
+                    &done.operation,
+                    &done.tuple,
+                    block,
+                    false,
+                    None,
+                    Some(done.result.clone()),
+                );
+                view.request_id = done.request_id;
+                view
+            });
+        Ok(rumi_protocol_backend::InboundCollateralRequestState {
+            next_request_id,
+            active_request,
+            latest_result,
+        })
+    })
+}
+
+#[candid_method(update)]
+#[update]
+async fn repay_to_vault_v2(
+    request_id: u128,
+    arg: VaultArg,
+) -> Result<rumi_protocol_backend::RepaymentV2StatusView, ProtocolError> {
+    validate_call().await?;
+    rumi_protocol_backend::vault::repay_v2(request_id, arg, false).await
+}
+
+#[candid_method(update)]
+#[update]
+async fn repay_and_close_vault_v2(
+    request_id: u128,
+    arg: VaultArg,
+) -> Result<rumi_protocol_backend::RepaymentV2StatusView, ProtocolError> {
+    validate_call().await?;
+    rumi_protocol_backend::vault::repay_v2(request_id, arg, true).await
+}
+
+#[candid_method(query)]
+#[query]
+fn get_my_repayment_v2_request_state(
+) -> Result<rumi_protocol_backend::RepaymentV2RequestState, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    rumi_protocol_backend::state::read_state(|s| {
+        let next_request_id = s
+            .repayment_v2_high_water
+            .get(&caller)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| {
+                ProtocolError::GenericError("repayment request ID sequence exhausted".into())
+            })?;
+        Ok(rumi_protocol_backend::RepaymentV2RequestState {
+            next_request_id,
+            active_request: s
+                .repayment_v2_active
+                .get(&caller)
+                .map(|row| row.status_view()),
+            latest_result: s
+                .repayment_v2_latest_result
+                .get(&caller)
+                .map(|row| row.status_view()),
+        })
+    })
+}
+
+#[candid_method(query)]
+#[query]
+fn get_my_repayment_v2_status(
+    request_id: u128,
+) -> Result<Option<rumi_protocol_backend::RepaymentV2StatusView>, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    Ok(rumi_protocol_backend::state::read_state(|s| {
+        s.repayment_v2_active
+            .get(&caller)
+            .filter(|row| row.request_id == request_id)
+            .or_else(|| {
+                s.repayment_v2_latest_result
+                    .get(&caller)
+                    .filter(|row| row.request_id == request_id)
+            })
+            .map(|row| row.status_view())
+    }))
+}
+
+#[candid_method(update)]
+#[update]
+async fn attach_my_repayment_v2_candidate(
+    request_id: u128,
+    block_index: u64,
+) -> Result<rumi_protocol_backend::RepaymentV2StatusView, ProtocolError> {
+    validate_call().await?;
+    rumi_protocol_backend::vault::attach_repayment_v2_candidate(request_id, block_index).await
+}
+
+#[candid_method(update)]
+#[update]
+async fn repay_to_vault_with_stable_v2(
+    request_id: u128,
+    arg: VaultArgWithToken,
+) -> Result<rumi_protocol_backend::StableRepaymentV2StatusView, ProtocolError> {
+    let owner = ic_cdk::api::caller();
+    let replay = rumi_protocol_backend::state::read_state(|s| {
+        s.stable_repayment_v2_active.get(&owner)
+            .or_else(|| s.stable_repayment_v2_latest_result.get(&owner))
+            .is_some_and(|row| row.request_id == request_id)
+    });
+    if !replay {
+        validate_call().await?;
+    }
+    rumi_protocol_backend::vault::repay_to_vault_with_stable_v2(request_id, arg).await
+}
+
+#[candid_method(query)]
+#[query]
+fn get_my_stable_repayment_v2_request_state(
+) -> Result<rumi_protocol_backend::StableRepaymentV2RequestState, ProtocolError> {
+    let owner = ic_cdk::api::caller();
+    rumi_protocol_backend::state::read_state(|s| {
+        let next_request_id = s.stable_repayment_v2_high_water.get(&owner).copied().unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| ProtocolError::GenericError("stable repayment request ID sequence exhausted".into()))?;
+        Ok(rumi_protocol_backend::StableRepaymentV2RequestState {
+            next_request_id,
+            active_request: s.stable_repayment_v2_active.get(&owner).map(|row| row.status_view()),
+            latest_result: s.stable_repayment_v2_latest_result.get(&owner).map(|row| row.status_view()),
+        })
+    })
+}
+
+#[candid_method(query)]
+#[query]
+fn get_my_stable_repayment_v2_status(
+    request_id: u128,
+) -> Option<rumi_protocol_backend::StableRepaymentV2StatusView> {
+    let owner = ic_cdk::api::caller();
+    rumi_protocol_backend::state::read_state(|s| s.stable_repayment_v2_active.get(&owner)
+        .filter(|row| row.request_id == request_id)
+        .or_else(|| s.stable_repayment_v2_latest_result.get(&owner).filter(|row| row.request_id == request_id))
+        .map(|row| row.status_view()))
+}
+
+#[candid_method(update)]
+#[update]
+async fn attach_my_stable_repayment_v2_candidate(
+    request_id: u128,
+    block_index: u64,
+) -> Result<rumi_protocol_backend::StableRepaymentV2StatusView, ProtocolError> {
+    rumi_protocol_backend::vault::attach_stable_repayment_v2_candidate(request_id, block_index).await
+}
+
+#[candid_method(query)]
+#[query]
+fn get_my_collateral_ingress(
+    ledger: Principal,
+    request_id: u128,
+) -> Option<rumi_protocol_backend::InboundCollateralStatusView> {
+    let owner = ic_cdk::api::caller();
+    rumi_protocol_backend::state::read_state(|s| {
+        if let Some(row) = s
+            .pending_inbound_collateral
+            .get(&(owner, ledger))
+            .filter(|r| r.request_id == request_id)
+        {
+            let mut view = inbound_collateral_view(
+                owner,
+                ledger,
+                &row.operation,
+                &row.tuple,
+                row.candidate_block_index,
+                row.had_ambiguous_attempt,
+                row.last_error.clone(),
+                None,
+            );
+            view.request_id = request_id;
+            return Some(view);
+        }
+        let done = s
+            .inbound_collateral_latest_result
+            .get(&(owner, ledger))
+            .filter(|r| r.request_id == request_id)?;
+        let block = match &done.result {
+            rumi_protocol_backend::state::InboundCollateralResult::Open { block_index, .. }
+            | rumi_protocol_backend::state::InboundCollateralResult::AddMargin { block_index } => {
+                Some(*block_index)
+            }
+            rumi_protocol_backend::state::InboundCollateralResult::Rejected { .. } => None,
+        };
+        let mut view = inbound_collateral_view(
+            owner,
+            ledger,
+            &done.operation,
+            &done.tuple,
+            block,
+            false,
+            None,
+            Some(done.result.clone()),
+        );
+        view.request_id = request_id;
+        Some(view)
+    })
+}
+
+#[candid_method(update)]
+#[update]
+async fn attach_my_collateral_ingress_receipt(
+    ledger: Principal,
+    request_id: u128,
+    block_index: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    rumi_protocol_backend::vault::attach_inbound_collateral_receipt_candidate(
+        caller,
+        ledger,
+        request_id,
+        block_index,
+    )
+    .await
+}
+
+#[candid_method(query)]
+#[query]
+fn get_my_pending_collateral_ingress(
+    ledger: Principal,
+) -> Option<rumi_protocol_backend::InboundCollateralStatusView> {
+    let caller = ic_cdk::api::caller();
+    rumi_protocol_backend::state::read_state(|s| {
+        let row = s.pending_inbound_collateral.get(&(caller, ledger))?;
+        let operation = match &row.operation {
+            rumi_protocol_backend::state::InboundCollateralOperation::Open {
+                collateral_type,
+                ..
+            } => rumi_protocol_backend::InboundCollateralOperationKind::Open {
+                collateral_type: *collateral_type,
+            },
+            rumi_protocol_backend::state::InboundCollateralOperation::AddMargin {
+                vault_id,
+                ..
+            } => rumi_protocol_backend::InboundCollateralOperationKind::AddMargin {
+                vault_id: *vault_id,
+            },
+        };
+        Some(rumi_protocol_backend::InboundCollateralStatusView {
+            owner: caller,
+            ledger,
+            request_id: row.request_id,
+            operation,
+            phase: if row.had_ambiguous_attempt || row.last_error.is_some() {
+                rumi_protocol_backend::InboundCollateralPhase::Held
+            } else {
+                rumi_protocol_backend::InboundCollateralPhase::Pending
+            },
+            amount_raw: row.tuple.amount_raw,
+            fee_raw: row.tuple.fee_raw,
+            memo: row.tuple.memo.clone(),
+            created_at_time_ns: row.tuple.created_at_time_ns,
+            candidate_block_index: row.candidate_block_index,
+            result: None,
+            had_ambiguous_attempt: row.had_ambiguous_attempt,
+            last_error: row.last_error.clone(),
+        })
+    })
 }
 
 /// Compound open vault + borrow in a single canister call.
@@ -6508,16 +7423,20 @@ async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolErro
 #[candid_method(update)]
 #[update]
 async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
-    validate_call().await?;
-    check_postcondition(rumi_protocol_backend::vault::repay_to_vault(arg).await)
+    let _ = arg;
+    Err(ProtocolError::GenericError(
+        "Legacy icUSD repayment has no request ID and is disabled; use repay_to_vault_v2.".into(),
+    ))
 }
 
 /// Repay vault debt using ckUSDT or ckUSDC (1:1 with icUSD)
 #[candid_method(update)]
 #[update]
 async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, ProtocolError> {
-    validate_call().await?;
-    check_postcondition(rumi_protocol_backend::vault::repay_to_vault_with_stable(arg).await)
+    let _ = arg;
+    Err(ProtocolError::GenericError(
+        "Legacy stable repayment has no request ID and is disabled; use repay_to_vault_with_stable_v2.".into(),
+    ))
 }
 
 #[candid_method(update)]
@@ -6540,30 +7459,110 @@ fn get_deposit_account(
     rumi_protocol_backend::management::get_deposit_account_for(&caller)
 }
 
-/// Open a vault using funds already deposited to the caller's deposit account.
-/// Use this instead of open_vault when the wallet cannot do ICRC-2 approve (e.g., Oisy).
+/// Legacy no-ID entry point. New sweeps require an explicit request ID through
+/// `open_vault_with_deposit_v2`; unresolved requests use the recovery endpoint.
 #[candid_method(update)]
 #[update]
-async fn open_vault_with_deposit(
+fn open_vault_with_deposit(
+    borrow_amount: u64,
+    _collateral_type: Option<Principal>,
+) -> Result<OpenVaultSuccess, ProtocolError> {
+    let _ = borrow_amount;
+    Err(ProtocolError::GenericError(
+        "request-ID push-deposit V2 is required; use open_vault_with_deposit_v2".into(),
+    ))
+}
+
+/// Legacy no-ID entry point. New sweeps require an explicit request ID through
+/// `add_margin_with_deposit_v2`; unresolved requests use the recovery endpoint.
+#[candid_method(update)]
+#[update]
+fn add_margin_with_deposit(_vault_id: u64) -> Result<u64, ProtocolError> {
+    Err(ProtocolError::GenericError(
+        "request-ID push-deposit V2 is required; use add_margin_with_deposit_v2".into(),
+    ))
+}
+
+/// Open a vault using the caller's observed aggregate deposit balance. The
+/// caller-supplied request ID makes retries return the original sweep result.
+#[candid_method(update)]
+#[update]
+async fn open_vault_with_deposit_v2(
     borrow_amount: u64,
     collateral_type: Option<Principal>,
+    request_id: u128,
 ) -> Result<OpenVaultSuccess, ProtocolError> {
     validate_call().await?;
     validate_mode()?;
-    // ORACLE-001: refresh the (possibly non-ICP) collateral price before minting.
     validate_freshness_for_collateral(collateral_type).await?;
-    check_postcondition(
-        rumi_protocol_backend::vault::open_vault_with_deposit(borrow_amount, collateral_type).await,
-    )
+    check_postcondition(rumi_protocol_backend::vault::open_vault_with_deposit_v2(
+        borrow_amount, collateral_type, request_id,
+    ).await)
 }
 
-/// Add margin to a vault using funds already deposited to the caller's deposit account.
-/// Use this instead of add_margin_to_vault when the wallet cannot do ICRC-2 approve.
+/// Add margin from the caller's observed aggregate deposit balance with a
+/// caller-stable request ID for retry and recovery.
 #[candid_method(update)]
 #[update]
-async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
+async fn add_margin_with_deposit_v2(
+    vault_id: u64,
+    request_id: u128,
+) -> Result<u64, ProtocolError> {
     validate_call().await?;
-    check_postcondition(rumi_protocol_backend::vault::add_margin_with_deposit(vault_id).await)
+    check_postcondition(rumi_protocol_backend::vault::add_margin_with_deposit_v2(vault_id, request_id).await)
+}
+
+#[candid_method(query)]
+#[query]
+fn get_my_push_deposit_sweep(ledger: Principal) -> Option<rumi_protocol_backend::PushDepositSweepStatusView> {
+    rumi_protocol_backend::vault::get_push_deposit_sweep_status(ic_cdk::api::caller(), ledger)
+}
+
+#[candid_method(query)]
+#[query]
+fn list_my_push_deposit_sweeps(
+    after_ledger: Option<Principal>,
+    limit: u16,
+) -> Vec<rumi_protocol_backend::PushDepositSweepStatusView> {
+    rumi_protocol_backend::vault::list_push_deposit_sweep_statuses(ic_cdk::api::caller(), after_ledger, limit)
+}
+
+#[candid_method(query)]
+#[query]
+fn get_my_push_deposit_sweep_next_request_id(ledger: Principal) -> Option<u128> {
+    let caller = ic_cdk::api::caller();
+    rumi_protocol_backend::state::read_state(|s| {
+        s.push_deposit_sweep_high_water
+            .get(&(caller, ledger))
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+    })
+}
+
+#[candid_method(update)]
+#[update]
+async fn recover_my_push_deposit_sweep(
+    ledger: Principal,
+    request_id: u128,
+) -> Result<rumi_protocol_backend::state::PushDepositSweepResult, ProtocolError> {
+    validate_frozen_only_recovery_call()?;
+    check_postcondition(rumi_protocol_backend::vault::recover_push_deposit_sweep(
+        ic_cdk::api::caller(), ledger, request_id,
+    ).await)
+}
+
+#[candid_method(update)]
+#[update]
+async fn attach_my_push_deposit_sweep_receipt(
+    ledger: Principal,
+    request_id: u128,
+    block_index: u64,
+) -> Result<rumi_protocol_backend::state::PushDepositSweepResult, ProtocolError> {
+    validate_frozen_only_recovery_call()?;
+    check_postcondition(rumi_protocol_backend::vault::attach_push_deposit_sweep_receipt(
+        ic_cdk::api::caller(), ledger, request_id, block_index,
+    ).await)
 }
 
 #[candid_method(update)]
@@ -6610,60 +7609,172 @@ async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Protocol
 async fn repay_and_close_vault(
     arg: VaultArg,
 ) -> Result<rumi_protocol_backend::vault::RepayAndCloseSuccess, ProtocolError> {
-    validate_call().await?;
-    check_postcondition(rumi_protocol_backend::vault::repay_and_close_vault(arg).await)
+    let _ = arg;
+    Err(ProtocolError::GenericError(
+        "Legacy icUSD repay-and-close has no request ID and is disabled; use repay_and_close_vault_v2."
+            .into(),
+    ))
 }
 
 // Add the new liquidate vault endpoint
 #[candid_method(update)]
 #[update]
-async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolError> {
-    validate_call().await?;
-    validate_liquidation_not_frozen()?;
-    validate_price_for_liquidation()?;
-    validate_freshness_for_vault(vault_id).await?;
-    check_postcondition(rumi_protocol_backend::vault::liquidate_vault(vault_id).await)
+async fn liquidate_vault(_vault_id: u64) -> Result<SuccessWithFee, ProtocolError> {
+    Err(ProtocolError::TemporarilyUnavailable(
+        "Manual liquidation is temporarily unavailable pending receipt-backed V2 admission"
+            .into(),
+    ))
 }
 
 // Add the new partial repay vault endpoint
 #[candid_method(update)]
 #[update]
 async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
-    validate_call().await?;
-    check_postcondition(rumi_protocol_backend::vault::partial_repay_to_vault(arg).await)
+    let _ = arg;
+    Err(ProtocolError::GenericError(
+        "Legacy partial icUSD repayment has no request ID and is disabled; use repay_to_vault_v2."
+            .into(),
+    ))
 }
 
 // Partial liquidation with icUSD
 #[candid_method(update)]
 #[update]
-async fn liquidate_vault_partial(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
-    validate_call().await?;
-    validate_liquidation_not_frozen()?;
-    validate_price_for_liquidation()?;
-    validate_freshness_for_vault(arg.vault_id).await?;
-    check_postcondition(
-        rumi_protocol_backend::vault::liquidate_vault_partial(arg.vault_id, arg.amount).await,
-    )
+async fn liquidate_vault_partial(_arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
+    Err(ProtocolError::TemporarilyUnavailable(
+        "Manual liquidation is temporarily unavailable pending receipt-backed V2 admission"
+            .into(),
+    ))
 }
 
 /// Liquidate a vault using ckUSDT or ckUSDC (1:1 with icUSD)
 #[update]
 #[candid_method(update)]
 async fn liquidate_vault_partial_with_stable(
-    arg: VaultArgWithToken,
+    _arg: VaultArgWithToken,
 ) -> Result<SuccessWithFee, ProtocolError> {
-    validate_call().await?;
-    validate_liquidation_not_frozen()?;
-    validate_price_for_liquidation()?;
-    validate_freshness_for_vault(arg.vault_id).await?;
-    check_postcondition(
-        rumi_protocol_backend::vault::liquidate_vault_partial_with_stable(
-            arg.vault_id,
-            arg.amount,
-            arg.token_type,
-        )
-        .await,
-    )
+    // The no-ID route can pull ckStable before recording any durable operation.
+    // A committed transfer with a lost reply cannot be safely retried or
+    // credited. Keep the Candid method for compatibility, but close admission
+    // until the receipt-backed V2 route has passed its release gates.
+    Err(ProtocolError::TemporarilyUnavailable(
+        "Stablecoin liquidation is temporarily unavailable pending receipt-backed V2 admission"
+            .into(),
+    ))
+}
+
+#[candid_method(update)]
+#[update]
+async fn liquidate_vault_v2(
+    request_id: u128,
+    vault_id: u64,
+) -> Result<rumi_protocol_backend::ManualLiquidationV2StatusView, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let replay = rumi_protocol_backend::state::read_state(|s| {
+        s.manual_liquidation_v2_active
+            .get(&caller)
+            .or_else(|| s.manual_liquidation_v2_latest_result.get(&caller))
+            .is_some_and(|row| row.request_id == request_id
+                && row.vault_id == vault_id
+                && row.route == rumi_protocol_backend::ManualLiquidationRoute::FullIcusd)
+    });
+    if !replay {
+        validate_call().await?;
+        validate_liquidation_not_frozen()?;
+        validate_price_for_liquidation()?;
+        validate_freshness_for_vault(vault_id).await?;
+    }
+    rumi_protocol_backend::vault::liquidate_vault_v2(request_id, vault_id).await
+}
+
+#[candid_method(update)]
+#[update]
+async fn liquidate_vault_partial_v2(
+    request_id: u128,
+    arg: VaultArg,
+) -> Result<rumi_protocol_backend::ManualLiquidationV2StatusView, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let replay = rumi_protocol_backend::state::read_state(|s| {
+        s.manual_liquidation_v2_active
+            .get(&caller)
+            .or_else(|| s.manual_liquidation_v2_latest_result.get(&caller))
+            .is_some_and(|row| row.request_id == request_id
+                && row.vault_id == arg.vault_id
+                && row.requested_amount_e8s == arg.amount
+                && row.route == rumi_protocol_backend::ManualLiquidationRoute::PartialIcusd)
+    });
+    if !replay {
+        validate_call().await?;
+        validate_liquidation_not_frozen()?;
+        validate_price_for_liquidation()?;
+        validate_freshness_for_vault(arg.vault_id).await?;
+    }
+    rumi_protocol_backend::vault::liquidate_vault_partial_v2(request_id, arg).await
+}
+
+#[candid_method(update)]
+#[update]
+async fn liquidate_vault_partial_with_stable_v2(
+    request_id: u128,
+    arg: VaultArgWithToken,
+) -> Result<rumi_protocol_backend::ManualLiquidationV2StatusView, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let replay = rumi_protocol_backend::state::read_state(|s| {
+        s.manual_liquidation_v2_active
+            .get(&caller)
+            .or_else(|| s.manual_liquidation_v2_latest_result.get(&caller))
+            .is_some_and(|row| row.request_id == request_id
+                && row.vault_id == arg.vault_id
+                && row.requested_amount_e8s == arg.amount
+                && row.route == (rumi_protocol_backend::ManualLiquidationRoute::PartialStable {
+                    token_type: arg.token_type.clone(),
+                }))
+    });
+    if !replay {
+        validate_call().await?;
+        validate_liquidation_not_frozen()?;
+        validate_price_for_liquidation()?;
+        validate_freshness_for_vault(arg.vault_id).await?;
+    }
+    rumi_protocol_backend::vault::liquidate_vault_partial_with_stable_v2(request_id, arg).await
+}
+
+#[candid_method(query)]
+#[query]
+fn get_my_manual_liquidation_v2_request_state(
+) -> Result<rumi_protocol_backend::ManualLiquidationV2RequestState, ProtocolError> {
+    let owner = ic_cdk::api::caller();
+    rumi_protocol_backend::state::read_state(|s| {
+        let next_request_id = s.manual_liquidation_v2_high_water.get(&owner).copied().unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| ProtocolError::GenericError("manual liquidation request ID sequence exhausted".into()))?;
+        Ok(rumi_protocol_backend::ManualLiquidationV2RequestState {
+            next_request_id,
+            active_request: s.manual_liquidation_v2_active.get(&owner).map(|row| row.status_view()),
+            latest_result: s.manual_liquidation_v2_latest_result.get(&owner).map(|row| row.status_view()),
+        })
+    })
+}
+
+#[candid_method(query)]
+#[query]
+fn get_my_manual_liquidation_v2_status(
+    request_id: u128,
+) -> Option<rumi_protocol_backend::ManualLiquidationV2StatusView> {
+    let owner = ic_cdk::api::caller();
+    rumi_protocol_backend::state::read_state(|s| s.manual_liquidation_v2_active.get(&owner)
+        .filter(|row| row.request_id == request_id)
+        .or_else(|| s.manual_liquidation_v2_latest_result.get(&owner).filter(|row| row.request_id == request_id))
+        .map(|row| row.status_view()))
+}
+
+#[candid_method(update)]
+#[update]
+async fn attach_my_manual_liquidation_v2_candidate(
+    request_id: u128,
+    block_index: u64,
+) -> Result<rumi_protocol_backend::ManualLiquidationV2StatusView, ProtocolError> {
+    rumi_protocol_backend::vault::attach_manual_liquidation_v2_candidate(request_id, block_index).await
 }
 
 // Stability Pool Integration - allows stability pool to execute liquidations
@@ -6673,6 +7784,14 @@ async fn stability_pool_liquidate(
     vault_id: u64,
     max_debt_to_liquidate: u64,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    // This legacy route pulls icUSD without a durable request journal. Its
+    // receipt-backed V2 replacement remains closed until the coordinated
+    // release gates pass, so refuse before validation, ledger calls, or pulls.
+    let gate: Result<(), ProtocolError> = Err(ProtocolError::TemporarilyUnavailable(
+        "Legacy Stability Pool liquidation is disabled pending receipt-backed V2 admission"
+            .into(),
+    ));
+    gate?;
     validate_call().await?;
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
@@ -6774,6 +7893,24 @@ async fn stability_pool_liquidate(
     })
 }
 
+#[cfg(test)]
+mod legacy_stability_pool_liquidation_tests {
+    use super::{stability_pool_liquidate, ProtocolError};
+
+    #[test]
+    fn legacy_registered_pool_route_refuses_before_any_liquidation_work() {
+        let result = futures::executor::block_on(stability_pool_liquidate(7, 100_000_000));
+
+        match result {
+            Err(ProtocolError::TemporarilyUnavailable(message)) => {
+                assert!(message.contains("Legacy Stability Pool liquidation is disabled"));
+                assert!(message.contains("receipt-backed V2 admission"));
+            }
+            other => panic!("expected a fail-closed legacy route, got {other:?}"),
+        }
+    }
+}
+
 /// Called by the stability pool after it has already burned icUSD (via 3pool atomic burn).
 /// Writes down the vault's debt and releases proportional collateral to the caller.
 /// Only callable by the registered stability pool canister.
@@ -6789,6 +7926,17 @@ async fn stability_pool_liquidate_debt_burned(
     icusd_burned_e8s: u64,
     proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    // A valid external burn proof is not enough to make this write-down
+    // retry-safe: if the mutation commits and the inter-canister reply is
+    // lost, replay sees a consumed proof but no cached result. Keep this
+    // ingress closed until it journals and replays the exact result. Burned
+    // obligations remain recoverable through the proof-bound refund and
+    // reconciliation endpoints below.
+    let gate: Result<(), ProtocolError> = Err(ProtocolError::TemporarilyUnavailable(
+        "Stability Pool burn-first write-down is disabled pending durable result replay; use the proof-bound refund or reconciliation route for an existing burn"
+            .to_string(),
+    ));
+    gate?;
     validate_call().await?;
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
@@ -6822,6 +7970,34 @@ async fn stability_pool_liquidate_debt_burned(
         proof,
     )
     .await
+}
+
+#[cfg(test)]
+mod legacy_burn_first_writedown_tests {
+    use super::{stability_pool_liquidate_debt_burned, ProtocolError};
+    use rumi_protocol_backend::icrc3_proof::{SpProofLedger, SpWritedownProof};
+
+    #[test]
+    fn legacy_burn_first_writedown_refuses_before_any_liquidation_work() {
+        let proof = SpWritedownProof {
+            block_index: 7,
+            ledger_kind: SpProofLedger::IcusdBurn,
+            vault_id_memo: 9,
+        };
+        let result = futures::executor::block_on(stability_pool_liquidate_debt_burned(
+            9,
+            100_000_000,
+            proof,
+        ));
+
+        match result {
+            Err(ProtocolError::TemporarilyUnavailable(message)) => {
+                assert!(message.contains("disabled pending durable result replay"));
+                assert!(message.contains("proof-bound refund or reconciliation route"));
+            }
+            other => panic!("expected a fail-closed legacy route, got {other:?}"),
+        }
+    }
 }
 
 /// Compensate an authenticated Stability Pool burn if absorption cannot
@@ -7399,9 +8575,11 @@ async fn cl07_recovered_vault_after_pull_test_gate() -> Result<(), ProtocolError
     };
     let (response,) = http_request(request, 1_000_000_000)
         .await
-        .map_err(|error| ProtocolError::GenericError(format!(
-            "CL07 test gate outcall failed after 3USD pull: {error:?}"
-        )))?;
+        .map_err(|error| {
+            ProtocolError::GenericError(format!(
+                "CL07 test gate outcall failed after 3USD pull: {error:?}"
+            ))
+        })?;
     if response.status.0 != 200u8.into() {
         return Err(ProtocolError::GenericError(format!(
             "CL07 test gate returned HTTP status {} after 3USD pull",
@@ -7411,9 +8589,49 @@ async fn cl07_recovered_vault_after_pull_test_gate() -> Result<(), ProtocolError
     Ok(())
 }
 
+/// Test-only successful barrier for a deterministic 3USD proportional-refund
+/// race. The dedicated fixture reserves vault ID 3 for its second, paused
+/// absorption; all other vaults pass through without an outcall.
+#[cfg(feature = "three-usd-proportional-refund-test-gate")]
+async fn three_usd_proportional_refund_test_gate(
+    vault_id: u64,
+) -> Result<(), ProtocolError> {
+    if vault_id != 3 {
+        return Ok(());
+    }
+    use ic_cdk::api::management_canister::http_request::{
+        http_request, CanisterHttpRequestArgument, HttpMethod,
+    };
+    let request = CanisterHttpRequestArgument {
+        url: "https://three-usd-proportional-refund.test/after-pull".into(),
+        max_response_bytes: Some(1),
+        method: HttpMethod::GET,
+        headers: vec![],
+        body: None,
+        transform: None,
+    };
+    let (response,) = http_request(request, 1_000_000_000)
+        .await
+        .map_err(|error| {
+            ProtocolError::GenericError(format!(
+                "proportional-refund test gate outcall failed after 3USD pull: {error:?}"
+            ))
+        })?;
+    if response.status.0 != 200u8.into() {
+        return Err(ProtocolError::GenericError(format!(
+            "proportional-refund test gate returned HTTP status {} after 3USD pull",
+            response.status.0
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod legacy_three_usd_reserve_endpoint_tests {
-    use super::{stability_pool_liquidate_with_reserves, v2_committed_refund_child_compatible, ProtocolError};
+    use super::{
+        stability_pool_liquidate_with_reserves, v2_committed_absorb_refund_amount,
+        v2_committed_refund_child_compatible, ProtocolError,
+    };
     use candid::Principal;
 
     #[test]
@@ -7442,6 +8660,29 @@ mod legacy_three_usd_reserve_endpoint_tests {
         assert!(v2_committed_refund_child_compatible(None, 0));
         assert!(!v2_committed_refund_child_compatible(Some(1), 0));
     }
+
+    #[test]
+    fn committed_v2_absorb_refund_amount_matches_proportional_realization() {
+        assert_eq!(v2_committed_absorb_refund_amount(100, 100, 75), Some(25));
+        assert_eq!(v2_committed_absorb_refund_amount(100, 100, 100), Some(0));
+        assert_eq!(v2_committed_absorb_refund_amount(0, 100, 0), None);
+        assert_eq!(v2_committed_absorb_refund_amount(100, 100, 101), None);
+    }
+
+    #[test]
+    fn committed_v2_absorb_with_missing_refund_child_remains_pending() {
+        let expected_refund = v2_committed_absorb_refund_amount(100, 100, 75).unwrap();
+        assert_eq!(expected_refund, 25);
+        assert!(v2_committed_refund_child_compatible(None, expected_refund));
+        assert!(v2_committed_refund_child_compatible(
+            Some(expected_refund),
+            expected_refund
+        ));
+        assert!(!v2_committed_refund_child_compatible(
+            Some(expected_refund - 1),
+            expected_refund
+        ));
+    }
 }
 
 fn v2_committed_refund_child_compatible(existing: Option<u64>, expected: u64) -> bool {
@@ -7451,81 +8692,342 @@ fn v2_committed_refund_child_compatible(existing: Option<u64>, expected: u64) ->
     }
 }
 
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum ThreeUsdReserveIngressV2PendingStage {
-    TransferSubmittedOrUnknown {
-        tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
-    },
-    TransferConfirmed {
-        tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
-        transfer_block_index: u64,
-    },
-    AbsorbCommittedRefundPending {
-        tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
-        transfer_block_index: u64,
-        proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
-        result: StabilityPoolLiquidationResult,
-        refund_amount_e8s: u64,
-    },
-    AbsorbCommittedPayoutPending {
-        tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
-        transfer_block_index: u64,
-        proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
-        result: StabilityPoolLiquidationResult,
-        payout_tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressPayoutTuple,
-    },
-    FailedRefundPending {
-        tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
-        transfer_block_index: u64,
-        error: String,
-        refund_amount_e8s: u64,
-    },
-    ReconciliationRequired { reason: String },
-}
-
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum ThreeUsdReserveIngressV2Status {
-    /// No backend admission is currently visible. This is deliberately
-    /// nonterminal: callers must retry the exact same ID/request.
-    Unseen,
-    AdmissionPending,
-    PreTransferRejected { reason: String },
-    TransferPending { stage: ThreeUsdReserveIngressV2PendingStage },
-    Absorbed {
-        transfer_block_index: u64,
-        transfer_tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
-        proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
-        result: StabilityPoolLiquidationResult,
-        proportional_refund: Option<rumi_protocol_backend::state::ThreeUsdReserveIngressRefundReceipt>,
-        collateral_payout_receipt: rumi_protocol_backend::state::ThreeUsdReserveIngressPayoutReceipt,
-    },
-    FailedAfterTransfer {
-        transfer_block_index: u64,
-        transfer_tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
-        proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
-        error: String,
-        full_refund: rumi_protocol_backend::state::ThreeUsdReserveIngressRefundReceipt,
-    },
-}
-
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ThreeUsdReserveIngressV2StatusView {
-    pub stability_pool: Principal,
-    pub vault_id: u64,
-    pub absorb_id: u64,
-    pub request: Option<rumi_protocol_backend::state::ThreeUsdReserveIngressRequest>,
-    pub status: ThreeUsdReserveIngressV2Status,
+fn v2_committed_absorb_refund_amount(
+    debt_covered_e8s: u64,
+    three_usd_amount_e8s: u64,
+    liquidated_debt_e8s: u64,
+) -> Option<u64> {
+    if debt_covered_e8s == 0 || liquidated_debt_e8s > debt_covered_e8s {
+        return None;
+    }
+    let realized_3usd = (three_usd_amount_e8s as u128).checked_mul(liquidated_debt_e8s as u128)?
+        / debt_covered_e8s as u128;
+    three_usd_amount_e8s.checked_sub(u64::try_from(realized_3usd).ok()?)
 }
 
 fn bounded_three_usd_ingress_diagnostic(message: &str) -> String {
     message.chars().take(512).collect()
 }
 
+fn three_usd_ingress_key_access_allowed(
+    caller: Principal,
+    registered: Option<Principal>,
+    key_stability_pool: Principal,
+    exact_journal_exists: bool,
+) -> bool {
+    caller != Principal::anonymous()
+        && caller == key_stability_pool
+        && (registered == Some(caller) || exact_journal_exists)
+}
+
+fn three_usd_ingress_phase_has_dispatched(
+    phase: &rumi_protocol_backend::state::ThreeUsdReserveIngressPhase,
+) -> bool {
+    use rumi_protocol_backend::state::ThreeUsdReserveIngressPhase as Phase;
+    matches!(
+        phase,
+        Phase::SubmittedOrUnknown { .. }
+            | Phase::TransferConfirmed { .. }
+            | Phase::Absorbed { .. }
+            | Phase::FailedAfterTransfer { .. }
+    )
+}
+
+fn three_usd_ingress_tuple_matches_request(
+    key: &rumi_protocol_backend::state::ThreeUsdReserveIngressKey,
+    request: &rumi_protocol_backend::state::ThreeUsdReserveIngressRequest,
+    tuple: &rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
+    backend: Principal,
+) -> bool {
+    tuple.spender_owner == backend
+        && tuple.spender_subaccount.is_none()
+        && tuple.source
+            == (icrc_ledger_types::icrc1::account::Account {
+                owner: key.stability_pool,
+                subaccount: None,
+            })
+        && tuple.destination
+            == (icrc_ledger_types::icrc1::account::Account {
+                owner: backend,
+                subaccount: None,
+            })
+        && tuple.amount_e8s == request.three_usd_amount_e8s
+        && tuple.fee_e8s.is_none()
+        && tuple.memo.as_slice()
+            == management::nonce_to_memo(tuple.op_nonce).0.as_slice()
+        && tuple.created_at_time_ns == management::nonce_to_created_at_time(tuple.op_nonce)
+        && tuple.parent_absorb_id == Some(key.absorb_id)
+}
+
+fn three_usd_ingress_candidate_transition(
+    phase: &rumi_protocol_backend::state::ThreeUsdReserveIngressPhase,
+    expected_tuple: &rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
+    candidate_block_index: u64,
+) -> Result<Option<rumi_protocol_backend::state::ThreeUsdReserveIngressPhase>, String> {
+    use rumi_protocol_backend::state::ThreeUsdReserveIngressPhase as Phase;
+    match phase {
+        Phase::SubmittedOrUnknown { tuple } if tuple == expected_tuple => {
+            Ok(Some(Phase::TransferConfirmed {
+                tuple: tuple.clone(),
+                block_index: candidate_block_index,
+            }))
+        }
+        Phase::SubmittedOrUnknown { .. } => {
+            Err("3USD ingress tuple changed while candidate proof was checked".into())
+        }
+        Phase::TransferConfirmed { tuple, block_index } if tuple == expected_tuple => {
+            if *block_index == candidate_block_index {
+                Ok(None)
+            } else {
+                Err("3USD ingress already has a different confirmed block".into())
+            }
+        }
+        _ => Err("3USD ingress is not awaiting a transfer receipt candidate".into()),
+    }
+}
+
+#[cfg(test)]
+mod three_usd_ingress_candidate_transition_tests {
+    use super::{
+        three_usd_ingress_candidate_transition as transition,
+        three_usd_ingress_refund_tuple_matches_for_backend,
+        three_usd_ingress_tuple_matches_request,
+        validate_three_usd_default_source_refund_candidate_block as validate_refund_candidate,
+    };
+    use candid::Principal;
+    use icrc_ledger_types::icrc1::account::Account;
+    use super::management;
+    use rumi_protocol_backend::state::{
+        ThreeUsdReserveIngressKey, ThreeUsdReserveIngressPhase as Phase,
+        ThreeUsdReserveIngressRequest, ThreeUsdReserveIngressTuple as Tuple,
+    };
+
+    fn tuple() -> Tuple {
+        Tuple {
+            spender_owner: Principal::from_slice(&[3]),
+            spender_subaccount: None,
+            source: Account {
+                owner: Principal::from_slice(&[2]),
+                subaccount: None,
+            },
+            destination: Account {
+                owner: Principal::from_slice(&[3]),
+                subaccount: None,
+            },
+            amount_e8s: 42,
+            fee_e8s: None,
+            memo: management::nonce_to_memo(5)
+                .0
+                .as_ref()
+                .try_into()
+                .expect("canonical ingress memo is 16 bytes"),
+            created_at_time_ns: management::nonce_to_created_at_time(5),
+            op_nonce: 5,
+            parent_absorb_id: Some(7),
+        }
+    }
+
+    #[test]
+    fn candidate_transition_confirms_exact_pending_tuple_and_is_idempotent() {
+        let tuple = tuple();
+        let pending = Phase::SubmittedOrUnknown {
+            tuple: tuple.clone(),
+        };
+        let confirmed = Phase::TransferConfirmed {
+            tuple: tuple.clone(),
+            block_index: 11,
+        };
+        assert_eq!(transition(&pending, &tuple, 11), Ok(Some(confirmed.clone())));
+        assert_eq!(transition(&confirmed, &tuple, 11), Ok(None));
+        assert!(transition(&confirmed, &tuple, 12).is_err());
+        assert_eq!(
+            transition(
+                &pending,
+                &tuple,
+                0,
+            ),
+            Ok(Some(Phase::TransferConfirmed {
+                tuple: tuple.clone(),
+                block_index: 0,
+            }))
+        );
+
+        let mut changed = tuple.clone();
+        changed.amount_e8s += 1;
+        assert!(transition(&pending, &changed, 11).is_err());
+        assert!(transition(&Phase::AdmissionPending, &tuple, 11).is_err());
+    }
+
+    #[test]
+    fn candidate_must_match_the_journaled_key_and_transfer_request() {
+        let tuple = tuple();
+        let key = ThreeUsdReserveIngressKey {
+            stability_pool: Principal::from_slice(&[2]),
+            vault_id: 8,
+            absorb_id: 7,
+        };
+        let request = ThreeUsdReserveIngressRequest {
+            icusd_debt_covered_e8s: 100,
+            three_usd_amount_e8s: 42,
+            ledger: Principal::from_slice(&[6]),
+        };
+        assert!(three_usd_ingress_tuple_matches_request(
+            &key,
+            &request,
+            &tuple,
+            Principal::from_slice(&[3]),
+        ));
+        let mut wrong = tuple;
+        wrong.parent_absorb_id = Some(9);
+        assert!(!three_usd_ingress_tuple_matches_request(
+            &key,
+            &request,
+            &wrong,
+            Principal::from_slice(&[3]),
+        ));
+    }
+
+    #[test]
+    fn rotated_pool_can_recover_only_its_existing_exact_ingress_key() {
+        let pool_a = Principal::from_slice(&[21]);
+        let pool_b = Principal::from_slice(&[22]);
+        let registered = Some(pool_b);
+
+        assert!(super::three_usd_ingress_key_access_allowed(
+            pool_a, registered, pool_a, true,
+        ));
+        assert!(!super::three_usd_ingress_key_access_allowed(
+            pool_b, registered, pool_a, true,
+        ));
+        assert!(!super::three_usd_ingress_key_access_allowed(
+            pool_a, registered, pool_a, false,
+        ));
+        assert!(super::three_usd_ingress_key_access_allowed(
+            pool_b, registered, pool_b, false,
+        ));
+        assert!(!super::three_usd_ingress_phase_has_dispatched(
+            &Phase::AdmissionPending,
+        ));
+        assert!(super::three_usd_ingress_phase_has_dispatched(
+            &Phase::SubmittedOrUnknown { tuple: tuple() },
+        ));
+    }
+
+    #[test]
+    fn explicit_refund_recovery_shares_dispatchers_per_nonce_lock() {
+        let first = rumi_protocol_backend::ThreeUsdRefundDispatchGuard::try_acquire(55)
+            .expect("first child operation acquires its nonce lock");
+        assert!(rumi_protocol_backend::ThreeUsdRefundDispatchGuard::try_acquire(55).is_none());
+        assert!(rumi_protocol_backend::ThreeUsdRefundDispatchGuard::try_acquire(56).is_some());
+        drop(first);
+        assert!(rumi_protocol_backend::ThreeUsdRefundDispatchGuard::try_acquire(55).is_some());
+    }
+
+    #[test]
+    fn only_canonical_parent_linked_default_source_refund_tuples_match() {
+        use rumi_protocol_backend::state::{
+            ThreeUsdReserveIngressKey, ThreeUsdReserveIngressRefund,
+            ThreeUsdRefundTransferTuple,
+        };
+        let key = ThreeUsdReserveIngressKey {
+            stability_pool: Principal::from_slice(&[2]),
+            vault_id: 8,
+            absorb_id: 7,
+        };
+        let ledger = Principal::from_slice(&[6]);
+        let backend = Principal::from_slice(&[3]);
+        let child = ThreeUsdReserveIngressRefund {
+            op_nonce: 5,
+            gross_amount_e8s: 42,
+            source_subaccount: None,
+            settled_receipt: None,
+        };
+        let tuple = ThreeUsdRefundTransferTuple {
+            source_owner: backend,
+            source_subaccount: None,
+            destination: Account {
+                owner: key.stability_pool,
+                subaccount: None,
+            },
+            amount_e8s: child.gross_amount_e8s,
+            fee_e8s: 3,
+            memo: management::nonce_to_memo(child.op_nonce)
+                .0
+                .as_ref()
+                .try_into()
+                .expect("canonical refund memo is 16 bytes"),
+            created_at_time_ns: management::nonce_to_created_at_time(child.op_nonce),
+        };
+        assert!(three_usd_ingress_refund_tuple_matches_for_backend(
+            &key, &child, ledger, &tuple, backend
+        ));
+        let mut wrong = tuple;
+        wrong.destination.owner = Principal::from_slice(&[9]);
+        assert!(!three_usd_ingress_refund_tuple_matches_for_backend(
+            &key, &child, ledger, &wrong, backend
+        ));
+    }
+
+    #[test]
+    fn default_source_refund_receipt_rejects_spender_on_typed_and_legacy_blocks() {
+        use rumi_protocol_backend::{icrc3_proof::DecodedBlock, state::ThreeUsdRefundTransferTuple};
+
+        let source = Account {
+            owner: Principal::from_slice(&[3]),
+            subaccount: None,
+        };
+        let destination = Account {
+            owner: Principal::from_slice(&[2]),
+            subaccount: None,
+        };
+        let tuple = ThreeUsdRefundTransferTuple {
+            source_owner: source.owner,
+            source_subaccount: source.subaccount,
+            destination,
+            amount_e8s: 42,
+            fee_e8s: 3,
+            memo: [4; 16],
+            created_at_time_ns: 9,
+        };
+        let block = |btype: Option<&str>, spender| DecodedBlock {
+            btype: btype.map(str::to_string),
+            op: "xfer".into(),
+            from: Some(source.clone()),
+            to: Some(destination.clone()),
+            spender,
+            amount: 42,
+            transaction_fee: Some(3),
+            fee: Some(3),
+            memo: Some(tuple.memo.to_vec()),
+            created_at_time: Some(9),
+            expected_allowance: None,
+            expires_at: None,
+        };
+
+        assert!(validate_refund_candidate(
+            &block(Some("1xfer"), None),
+            &tuple,
+        )
+        .is_ok());
+        for btype in [Some("2xfer"), None] {
+            let with_spender = block(
+                btype,
+                Some(Account {
+                    owner: Principal::from_slice(&[8]),
+                    subaccount: None,
+                }),
+            );
+            assert!(validate_refund_candidate(&with_spender, &tuple).is_err());
+        }
+        let mut wrong_fee = block(Some("1xfer"), None);
+        wrong_fee.fee = Some(0);
+        assert!(validate_refund_candidate(&wrong_fee, &tuple).is_err());
+    }
+}
+
 /// Machine-readable recovery status for one exact SP absorb identity. A
 /// missing row is `Unseen`, never proof of no effect.
-#[query]
-#[candid_method(query)]
-fn get_three_usd_reserve_ingress_v2_status(
+fn build_three_usd_reserve_ingress_v2_status(
     vault_id: u64,
     absorb_id: u64,
 ) -> Result<ThreeUsdReserveIngressV2StatusView, ProtocolError> {
@@ -7533,13 +9035,18 @@ fn get_three_usd_reserve_ingress_v2_status(
         ThreeUsdReserveIngressKey, ThreeUsdReserveIngressPhase as Phase,
     };
     let caller = ic_cdk::api::caller();
-    if caller == Principal::anonymous() || !read_state(|s| s.stability_pool_canister == Some(caller)) {
+    let key = ThreeUsdReserveIngressKey {
+        stability_pool: caller,
+        vault_id,
+        absorb_id,
+    };
+    let journal = rumi_protocol_backend::management::three_usd_reserve_ingress_journal(&key);
+    let registered = read_state(|state| state.stability_pool_canister);
+    if !three_usd_ingress_key_access_allowed(caller, registered, key.stability_pool, journal.is_some()) {
         return Err(ProtocolError::GenericError(
-            "Caller is not the registered stability pool canister".into(),
+            "Caller is not authorized for this Stability Pool ingress key".into(),
         ));
     }
-    let key = ThreeUsdReserveIngressKey { stability_pool: caller, vault_id, absorb_id };
-    let journal = rumi_protocol_backend::management::three_usd_reserve_ingress_journal(&key);
     let Some(journal) = journal else {
         return Ok(ThreeUsdReserveIngressV2StatusView {
             stability_pool: caller,
@@ -7551,32 +9058,127 @@ fn get_three_usd_reserve_ingress_v2_status(
     };
     let status = match &journal.phase {
         Phase::AdmissionPending => ThreeUsdReserveIngressV2Status::AdmissionPending,
-        Phase::PreTransferRejected { reason } => ThreeUsdReserveIngressV2Status::PreTransferRejected {
-            reason: bounded_three_usd_ingress_diagnostic(reason),
-        },
+        Phase::PreTransferRejected { reason } => {
+            ThreeUsdReserveIngressV2Status::PreTransferRejected {
+                reason: bounded_three_usd_ingress_diagnostic(reason),
+            }
+        }
         Phase::SubmittedOrUnknown { tuple } => ThreeUsdReserveIngressV2Status::TransferPending {
-            stage: ThreeUsdReserveIngressV2PendingStage::TransferSubmittedOrUnknown { tuple: tuple.clone() },
-        },
-        Phase::TransferConfirmed { tuple, block_index } => ThreeUsdReserveIngressV2Status::TransferPending {
-            stage: ThreeUsdReserveIngressV2PendingStage::TransferConfirmed {
+            stage: ThreeUsdReserveIngressV2PendingStage::TransferSubmittedOrUnknown {
                 tuple: tuple.clone(),
-                transfer_block_index: *block_index,
             },
         },
-        Phase::Absorbed { tuple, block_index, result } => {
+        Phase::TransferConfirmed { tuple, block_index } => {
             let proof = rumi_protocol_backend::icrc3_proof::SpWritedownProof {
                 block_index: *block_index,
-                ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransferDefault,
+                ledger_kind:
+                    rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransferDefault,
                 vault_id_memo: vault_id,
             };
-            let committed = read_state(|state| state.sp_three_usd_reserve_absorb_results_by_proof
-                .get(&(proof.ledger_kind, proof.block_index)).cloned());
+            let proof_key = (proof.ledger_kind, proof.block_index);
+            let (committed, consumed) = read_state(|state| {
+                (
+                    state
+                        .sp_three_usd_reserve_absorb_results_by_proof
+                        .get(&proof_key)
+                        .cloned(),
+                    state.consumed_writedown_proofs.contains(&proof_key),
+                )
+            });
+            match (committed, consumed) {
+                (None, false) => ThreeUsdReserveIngressV2Status::TransferPending {
+                    stage: ThreeUsdReserveIngressV2PendingStage::TransferConfirmed {
+                        tuple: tuple.clone(),
+                        transfer_block_index: *block_index,
+                    },
+                },
+                (Some(committed), true) => {
+                    let result = &committed.result;
+                    let tuple_valid = tuple.spender_owner == ic_cdk::id()
+                        && tuple.spender_subaccount.is_none()
+                        && tuple.source.owner == caller
+                        && tuple.source.subaccount.is_none()
+                        && tuple.destination.owner == ic_cdk::id()
+                        && tuple.destination.subaccount.is_none()
+                        && tuple.amount_e8s == journal.request.three_usd_amount_e8s
+                        && tuple.fee_e8s.is_none()
+                        && tuple.memo.as_slice() == management::nonce_to_memo(tuple.op_nonce).0.as_slice()
+                        && tuple.created_at_time_ns == management::nonce_to_created_at_time(tuple.op_nonce);
+                    let expected_refund = v2_committed_absorb_refund_amount(
+                        journal.request.icusd_debt_covered_e8s,
+                        journal.request.three_usd_amount_e8s,
+                        result.liquidated_debt,
+                    );
+                    let result_valid = tuple_valid
+                        && committed.caller == caller
+                        && committed.vault_id == vault_id
+                        && committed.icusd_debt_covered_e8s == journal.request.icusd_debt_covered_e8s
+                        && committed.three_usd_amount_e8s == journal.request.three_usd_amount_e8s
+                        && committed.ledger == journal.request.ledger
+                        && committed.proof == proof
+                        && result.success
+                        && result.vault_id == vault_id
+                        && journal.request.icusd_debt_covered_e8s > 0
+                        && result.liquidated_debt <= journal.request.icusd_debt_covered_e8s
+                        && (result.block_index == 0 || result.block_index == *block_index)
+                        && expected_refund.is_some()
+                        && v2_committed_refund_child_compatible(
+                            journal.refund.as_ref().map(|refund| refund.gross_amount_e8s),
+                            expected_refund.unwrap_or(u64::MAX),
+                        );
+                    if result_valid {
+                        let refund_amount_e8s = expected_refund.unwrap_or(0);
+                        ThreeUsdReserveIngressV2Status::TransferPending {
+                            stage: ThreeUsdReserveIngressV2PendingStage::AbsorbCommittedRefundPending {
+                                tuple: tuple.clone(),
+                                transfer_block_index: *block_index,
+                                proof,
+                                result: result.clone(),
+                                refund_amount_e8s,
+                            },
+                        }
+                    } else {
+                        ThreeUsdReserveIngressV2Status::TransferPending {
+                            stage: ThreeUsdReserveIngressV2PendingStage::ReconciliationRequired {
+                                reason: "transfer-confirmed journal disagrees with its consumed proof-keyed absorb result".into(),
+                            },
+                        }
+                    }
+                }
+                _ => ThreeUsdReserveIngressV2Status::TransferPending {
+                    stage: ThreeUsdReserveIngressV2PendingStage::ReconciliationRequired {
+                        reason: "transfer-confirmed proof is consumed without a matching committed result, or has an unconsumed result".into(),
+                    },
+                },
+            }
+        }
+        Phase::Absorbed {
+            tuple,
+            block_index,
+            result,
+        } => {
+            let proof = rumi_protocol_backend::icrc3_proof::SpWritedownProof {
+                block_index: *block_index,
+                ledger_kind:
+                    rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransferDefault,
+                vault_id_memo: vault_id,
+            };
+            let committed = read_state(|state| {
+                state
+                    .sp_three_usd_reserve_absorb_results_by_proof
+                    .get(&(proof.ledger_kind, proof.block_index))
+                    .cloned()
+            });
             let Some(committed) = committed else {
                 return Ok(ThreeUsdReserveIngressV2StatusView {
-                    stability_pool: caller, vault_id, absorb_id, request: Some(journal.request.clone()),
+                    stability_pool: caller,
+                    vault_id,
+                    absorb_id,
+                    request: Some(journal.request.clone()),
                     status: ThreeUsdReserveIngressV2Status::TransferPending {
                         stage: ThreeUsdReserveIngressV2PendingStage::ReconciliationRequired {
-                            reason: "absorbed journal lacks its proof-keyed committed result".into(),
+                            reason: "absorbed journal lacks its proof-keyed committed result"
+                                .into(),
                         },
                     },
                 });
@@ -7617,8 +9219,11 @@ fn get_three_usd_reserve_ingress_v2_status(
                 let expected_refund = journal.expected_absorbed_refund_e8s().unwrap_or(u64::MAX);
                 let refund_settled = match journal.refund.as_ref() {
                     None => expected_refund == 0,
-                    Some(refund) if refund.gross_amount_e8s == expected_refund && expected_refund > 0 => {
-                        three_usd_ingress_refund_is_settled(&key, journal.request.ledger, refund).unwrap_or(false)
+                    Some(refund)
+                        if refund.gross_amount_e8s == expected_refund && expected_refund > 0 =>
+                    {
+                        three_usd_ingress_refund_is_settled(&key, journal.request.ledger, refund)
+                            .unwrap_or(false)
                     }
                     _ => false,
                 };
@@ -7645,8 +9250,13 @@ fn get_three_usd_reserve_ingress_v2_status(
                     let payout_settled = journal.payout.as_ref().and_then(|payout| {
                         let receipt = payout.receipt.as_ref()?;
                         read_state(|state| {
-                            (state.three_usd_reserve_payout_parents.get(&payout.tuple.op_nonce) == Some(&key)
-                                && !state.pending_margin_transfers.contains_key(&payout.tuple.op_nonce)
+                            (state
+                                .three_usd_reserve_payout_parents
+                                .get(&payout.tuple.op_nonce)
+                                == Some(&key)
+                                && !state
+                                    .pending_margin_transfers
+                                    .contains_key(&payout.tuple.op_nonce)
                                 && receipt.tuple == payout.tuple
                                 && payout.tuple.op_nonce != 0
                                 && payout.tuple.source.owner == ic_cdk::id()
@@ -7654,56 +9264,67 @@ fn get_three_usd_reserve_ingress_v2_status(
                                 && payout.tuple.destination.owner == caller
                                 && payout.tuple.destination.subaccount.is_none()
                                 && payout.tuple.ledger != Principal::anonymous()
-                                && payout.tuple.proof_kind == state.payout_proof_kind_for_ledger(payout.tuple.ledger)
+                                && payout.tuple.proof_kind
+                                    == state.payout_proof_kind_for_ledger(payout.tuple.ledger)
                                 && payout.tuple.gross_amount_e8s > 0
                                 && payout.tuple.net_amount_e8s > 0
-                                && payout.tuple.net_amount_e8s.checked_add(payout.tuple.fee_e8s)
+                                && payout
+                                    .tuple
+                                    .net_amount_e8s
+                                    .checked_add(payout.tuple.fee_e8s)
                                     == Some(payout.tuple.gross_amount_e8s)
                                 && payout.tuple.memo.as_slice()
-                                    == management::nonce_to_memo(payout.tuple.op_nonce).0.as_slice()
+                                    == management::nonce_to_memo(payout.tuple.op_nonce)
+                                        .0
+                                        .as_slice()
                                 && payout.tuple.created_at_time_ns
                                     == management::nonce_to_created_at_time(payout.tuple.op_nonce)
                                 && payout.tuple.gross_amount_e8s == result.collateral_received
-                                && payout.tuple.collateral_type.to_string() == result.collateral_type)
+                                && payout.tuple.collateral_type.to_string()
+                                    == result.collateral_type)
                                 .then_some(receipt.clone())
                         })
                     });
                     if let Some(collateral_payout_receipt) = payout_settled {
                         ThreeUsdReserveIngressV2Status::Absorbed {
-                        transfer_block_index: *block_index,
-                        transfer_tuple: tuple.clone(),
-                        proof,
-                        result: StabilityPoolLiquidationResult {
-                            success: result.success,
-                            vault_id: result.vault_id,
-                            liquidated_debt: result.liquidated_debt,
-                            collateral_received: result.collateral_received,
-                            collateral_type: result.collateral_type.clone(),
-                            block_index: result.block_index,
-                            fee: result.fee,
-                            collateral_price_e8s: result.collateral_price_e8s,
-                        },
-                        proportional_refund: journal.refund.as_ref().and_then(|refund| refund.settled_receipt),
-                        collateral_payout_receipt,
+                            transfer_block_index: *block_index,
+                            transfer_tuple: tuple.clone(),
+                            proof,
+                            result: StabilityPoolLiquidationResult {
+                                success: result.success,
+                                vault_id: result.vault_id,
+                                liquidated_debt: result.liquidated_debt,
+                                collateral_received: result.collateral_received,
+                                collateral_type: result.collateral_type.clone(),
+                                block_index: result.block_index,
+                                fee: result.fee,
+                                collateral_price_e8s: result.collateral_price_e8s,
+                            },
+                            proportional_refund: journal
+                                .refund
+                                .as_ref()
+                                .and_then(|refund| refund.settled_receipt),
+                            collateral_payout_receipt,
                         }
                     } else if let Some(payout) = journal.payout.as_ref() {
                         ThreeUsdReserveIngressV2Status::TransferPending {
-                            stage: ThreeUsdReserveIngressV2PendingStage::AbsorbCommittedPayoutPending {
-                                tuple: tuple.clone(),
-                                transfer_block_index: *block_index,
-                                proof,
-                                result: StabilityPoolLiquidationResult {
-                                    success: result.success,
-                                    vault_id: result.vault_id,
-                                    liquidated_debt: result.liquidated_debt,
-                                    collateral_received: result.collateral_received,
-                                    collateral_type: result.collateral_type.clone(),
-                                    block_index: result.block_index,
-                                    fee: result.fee,
-                                    collateral_price_e8s: result.collateral_price_e8s,
+                            stage:
+                                ThreeUsdReserveIngressV2PendingStage::AbsorbCommittedPayoutPending {
+                                    tuple: tuple.clone(),
+                                    transfer_block_index: *block_index,
+                                    proof,
+                                    result: StabilityPoolLiquidationResult {
+                                        success: result.success,
+                                        vault_id: result.vault_id,
+                                        liquidated_debt: result.liquidated_debt,
+                                        collateral_received: result.collateral_received,
+                                        collateral_type: result.collateral_type.clone(),
+                                        block_index: result.block_index,
+                                        fee: result.fee,
+                                        collateral_price_e8s: result.collateral_price_e8s,
+                                    },
+                                    payout_tuple: payout.tuple.clone(),
                                 },
-                                payout_tuple: payout.tuple.clone(),
-                            },
                         }
                     } else {
                         ThreeUsdReserveIngressV2Status::TransferPending {
@@ -7715,15 +9336,23 @@ fn get_three_usd_reserve_ingress_v2_status(
                 }
             }
         }
-        Phase::FailedAfterTransfer { tuple, block_index, error } => {
+        Phase::FailedAfterTransfer {
+            tuple,
+            block_index,
+            error,
+        } => {
             let proof = rumi_protocol_backend::icrc3_proof::SpWritedownProof {
                 block_index: *block_index,
-                ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransferDefault,
+                ledger_kind:
+                    rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransferDefault,
                 vault_id_memo: vault_id,
             };
             let proof_unresolved = read_state(|state| {
-                state.consumed_writedown_proofs.contains(&(proof.ledger_kind, proof.block_index))
-                    || state.sp_three_usd_reserve_absorb_results_by_proof
+                state
+                    .consumed_writedown_proofs
+                    .contains(&(proof.ledger_kind, proof.block_index))
+                    || state
+                        .sp_three_usd_reserve_absorb_results_by_proof
                         .contains_key(&(proof.ledger_kind, proof.block_index))
             });
             let full_refund = journal.refund.as_ref().filter(|refund| {
@@ -7777,6 +9406,651 @@ fn get_three_usd_reserve_ingress_v2_status(
     })
 }
 
+/// Query-only projection for dashboards and read visibility. State-changing
+/// SP reconciliation must use the update companion below.
+#[query]
+#[candid_method(query)]
+fn get_three_usd_reserve_ingress_v2_status(
+    vault_id: u64,
+    absorb_id: u64,
+) -> Result<ThreeUsdReserveIngressV2StatusView, ProtocolError> {
+    build_three_usd_reserve_ingress_v2_status(vault_id, absorb_id)
+}
+
+/// Update-call projection for SP recovery decisions. It reads the exact same
+/// durable journal as the query method but is not served from a query replica.
+#[update]
+#[candid_method(update)]
+fn get_three_usd_reserve_ingress_v2_status_for_reconciliation(
+    vault_id: u64,
+    absorb_id: u64,
+) -> Result<ThreeUsdReserveIngressV2StatusView, ProtocolError> {
+    build_three_usd_reserve_ingress_v2_status(vault_id, absorb_id)
+}
+
+/// Attach a permissionlessly discovered ICRC3 block to this registered
+/// Stability Pool's exact pending V2 ingress. The request key and transfer
+/// tuple are taken from the durable journal, never supplied by the caller.
+#[candid_method(update)]
+#[update]
+async fn attach_my_three_usd_reserve_ingress_v2_candidate(
+    vault_id: u64,
+    absorb_id: u64,
+    block_index: u64,
+) -> Result<(), ProtocolError> {
+    use rumi_protocol_backend::state::{
+        ThreeUsdReserveIngressKey, ThreeUsdReserveIngressPhase as Phase,
+    };
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::GenericError(
+            "Anonymous caller cannot attach a 3USD ingress candidate".into(),
+        ));
+    }
+    let key = ThreeUsdReserveIngressKey {
+        stability_pool: caller,
+        vault_id,
+        absorb_id,
+    };
+    let _guard = management::ThreeUsdReserveIngressGuard::try_acquire(&key).ok_or_else(|| {
+        ProtocolError::GenericError("3USD ingress recovery is already in progress".into())
+    })?;
+    let journal = management::three_usd_reserve_ingress_journal(&key).ok_or_else(|| {
+        ProtocolError::GenericError("3USD ingress journal is unseen".into())
+    })?;
+    if !three_usd_ingress_key_access_allowed(
+        caller,
+        read_state(|state| state.stability_pool_canister),
+        key.stability_pool,
+        true,
+    ) {
+        return Err(ProtocolError::GenericError(
+            "Caller is not authorized for this Stability Pool ingress key".into(),
+        ));
+    }
+    let (tuple, already_confirmed) = match &journal.phase {
+        Phase::SubmittedOrUnknown { tuple } => (tuple.clone(), false),
+        Phase::TransferConfirmed {
+            block_index: confirmed,
+            tuple,
+        } if *confirmed == block_index => (tuple.clone(), true),
+        Phase::TransferConfirmed { .. } => {
+            return Err(ProtocolError::GenericError(
+                "3USD ingress already has a different confirmed block".into(),
+            ));
+        }
+        _ => {
+            return Err(ProtocolError::GenericError(
+                "3USD ingress is not awaiting a transfer receipt candidate".into(),
+            ));
+        }
+    };
+    if journal.request.ledger == Principal::anonymous()
+        || !three_usd_ingress_tuple_matches_request(&key, &journal.request, &tuple, ic_cdk::id())
+    {
+        return Err(ProtocolError::GenericError(
+            "3USD ingress journal has an invalid ledger-bound transfer tuple".into(),
+        ));
+    }
+    if already_confirmed {
+        return Ok(());
+    }
+    rumi_protocol_backend::icrc3_proof::verify_three_usd_reserve_ingress_block(
+        journal.request.ledger,
+        block_index,
+        block_index,
+        &tuple,
+    )
+    .await
+    .map_err(ProtocolError::GenericError)?;
+
+    let expected_request = journal.request;
+    mutate_state(|state| -> Result<(), String> {
+        let Some(current) = state.three_usd_reserve_ingress_journals.get_mut(&key) else {
+            return Err("3USD ingress journal disappeared during candidate proof".into());
+        };
+        if current.request != expected_request {
+            return Err("3USD ingress request changed during candidate proof".into());
+        }
+        match three_usd_ingress_candidate_transition(&current.phase, &tuple, block_index)? {
+            Some(phase) => {
+                current.phase = phase;
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    })
+    .map_err(ProtocolError::GenericError)
+}
+
+/// Attach a lost-reply candidate for the already-dispatched, parent-linked
+/// default-source refund child. The child nonce, tuple, and ledger all come
+/// from the durable parent/queue journals.
+#[candid_method(update)]
+#[update]
+async fn attach_my_three_usd_reserve_ingress_v2_refund_candidate(
+    vault_id: u64,
+    absorb_id: u64,
+    block_index: u64,
+) -> Result<(), ProtocolError> {
+    use rumi_protocol_backend::state::{
+        ThreeUsdRefundDispatchState as Dispatch, ThreeUsdReserveIngressKey,
+        ThreeUsdReserveIngressPhase as Phase,
+    };
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::GenericError(
+            "Anonymous caller cannot attach a 3USD refund candidate".into(),
+        ));
+    }
+    let key = ThreeUsdReserveIngressKey {
+        stability_pool: caller,
+        vault_id,
+        absorb_id,
+    };
+    let child_nonce = management::three_usd_reserve_ingress_journal(&key)
+        .and_then(|journal| journal.refund.map(|refund| refund.op_nonce))
+        .ok_or_else(|| {
+            ProtocolError::GenericError("3USD ingress has no linked refund child".into())
+        })?;
+    if !three_usd_ingress_key_access_allowed(
+        caller,
+        read_state(|state| state.stability_pool_canister),
+        key.stability_pool,
+        true,
+    ) {
+        return Err(ProtocolError::GenericError(
+            "Caller is not authorized for this Stability Pool ingress key".into(),
+        ));
+    }
+    let _dispatch_guard = rumi_protocol_backend::ThreeUsdRefundDispatchGuard::try_acquire(
+        child_nonce,
+    )
+    .ok_or_else(|| {
+        ProtocolError::GenericError("3USD refund dispatch or recovery is already in progress".into())
+    })?;
+
+    let snapshot = read_state(|state| -> Result<Option<_>, String> {
+        let parent = state
+            .three_usd_reserve_ingress_journals
+            .get(&key)
+            .ok_or_else(|| "3USD ingress parent journal is missing".to_string())?;
+        if parent.request.ledger == Principal::anonymous() {
+            return Err("3USD ingress parent has no configured ledger".into());
+        }
+        if !matches!(
+            &parent.phase,
+            Phase::TransferConfirmed { .. }
+                | Phase::Absorbed { .. }
+                | Phase::FailedAfterTransfer { .. }
+        ) {
+            return Err("3USD refund child has no transfer-confirmed parent".into());
+        }
+        let child = parent
+            .refund
+            .as_ref()
+            .filter(|refund| {
+                refund.op_nonce == child_nonce
+                    && refund.gross_amount_e8s > 0
+                    && refund.source_subaccount.is_none()
+            })
+            .ok_or_else(|| "linked 3USD refund child identity is inconsistent".to_string())?;
+        if let Some(receipt) = child.settled_receipt.as_ref() {
+            if receipt.block_index != block_index {
+                return Err("3USD refund child already has a different receipt block".into());
+            }
+            if !three_usd_ingress_refund_tuple_matches(
+                &key,
+                child,
+                parent.request.ledger,
+                &receipt.tuple,
+            ) || state.pending_3usd_refunds.contains_key(&child_nonce)
+                || state.pending_3usd_refund_journals.contains_key(&child_nonce)
+            {
+                return Err("settled 3USD refund child has inconsistent queue or receipt state".into());
+            }
+            return Ok(None);
+        }
+        let pending = state
+            .pending_3usd_refunds
+            .get(&child_nonce)
+            .copied()
+            .ok_or_else(|| "3USD refund is not awaiting a candidate receipt".to_string())?;
+        if pending.stability_pool != caller
+            || pending.ledger != parent.request.ledger
+            || pending.vault_id != vault_id
+            || pending.amount_e8s != child.gross_amount_e8s
+            || pending.op_nonce != child_nonce
+            || pending.parent_absorb_id != Some(absorb_id)
+        {
+            return Err("queued 3USD refund does not match its linked parent child".into());
+        }
+        let tuple = match state.pending_3usd_refund_journals.get(&child_nonce) {
+            Some(Dispatch::SubmittedOrUnknown { tuple })
+                if three_usd_ingress_refund_tuple_matches(
+                    &key,
+                    child,
+                    parent.request.ledger,
+                    tuple,
+                ) => *tuple,
+            _ => {
+                return Err(
+                    "3USD refund child has not been dispatched with a canonical tuple".into(),
+                )
+            }
+        };
+        Ok(Some((
+            parent.request.clone(),
+            child.clone(),
+            pending,
+            tuple,
+        )))
+    })
+    .map_err(ProtocolError::GenericError)?;
+    let Some((expected_request, expected_child, expected_pending, tuple)) = snapshot else {
+        return Ok(());
+    };
+
+    let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(
+        expected_request.ledger,
+        block_index,
+    )
+    .await
+    .map_err(ProtocolError::GenericError)?;
+    validate_three_usd_default_source_refund_candidate_block(&block, &tuple)
+        .map_err(ProtocolError::GenericError)?;
+
+    mutate_state(|state| -> Result<(), String> {
+        let Some(parent) = state.three_usd_reserve_ingress_journals.get(&key) else {
+            return Err("3USD ingress parent disappeared during refund proof".into());
+        };
+        if parent.request != expected_request {
+            return Err("3USD ingress request changed during refund proof".into());
+        }
+        if !matches!(
+            &parent.phase,
+            Phase::TransferConfirmed { .. }
+                | Phase::Absorbed { .. }
+                | Phase::FailedAfterTransfer { .. }
+        ) {
+            return Err("3USD refund parent phase changed during proof".into());
+        }
+        let Some(child) = parent.refund.as_ref() else {
+            return Err("linked 3USD refund child disappeared during proof".into());
+        };
+        if child.op_nonce != expected_child.op_nonce
+            || child.gross_amount_e8s != expected_child.gross_amount_e8s
+            || child.source_subaccount != expected_child.source_subaccount
+        {
+            return Err("linked 3USD refund child changed during proof".into());
+        }
+        if let Some(receipt) = child.settled_receipt.as_ref() {
+            if receipt.block_index == block_index && receipt.tuple == tuple {
+                if state.pending_3usd_refunds.contains_key(&child_nonce)
+                    || state.pending_3usd_refund_journals.contains_key(&child_nonce)
+                {
+                    return Err("settled refund receipt still has pending queue state".into());
+                }
+                return Ok(());
+            }
+            return Err("linked 3USD refund was settled to a conflicting receipt".into());
+        }
+        if state.pending_3usd_refunds.get(&child_nonce) != Some(&expected_pending)
+            || !matches!(
+                state.pending_3usd_refund_journals.get(&child_nonce),
+                Some(Dispatch::SubmittedOrUnknown { tuple: submitted }) if *submitted == tuple
+            )
+            || !three_usd_ingress_refund_tuple_matches(
+                &key,
+                child,
+                expected_request.ledger,
+                &tuple,
+            )
+        {
+            return Err("refund queue or submitted tuple changed during proof".into());
+        }
+        let parent = state
+            .three_usd_reserve_ingress_journals
+            .get_mut(&key)
+            .expect("parent was checked above");
+        let child = parent
+            .refund
+            .as_mut()
+            .expect("child was checked above");
+        child.settled_receipt = Some(
+            rumi_protocol_backend::state::ThreeUsdReserveIngressRefundReceipt {
+                block_index,
+                tuple,
+            },
+        );
+        state.pending_3usd_refunds.remove(&child_nonce);
+        state.pending_3usd_refund_journals.remove(&child_nonce);
+        Ok(())
+    })
+    .map_err(ProtocolError::GenericError)
+}
+
+fn validate_three_usd_default_source_refund_candidate_block(
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+    tuple: &rumi_protocol_backend::state::ThreeUsdRefundTransferTuple,
+) -> Result<(), String> {
+    rumi_protocol_backend::icrc3_proof::validate_three_usd_default_source_refund_block(block, tuple)?;
+    if block.fee != Some(u128::from(tuple.fee_e8s)) {
+        return Err("3USD refund receipt block fee does not match its persisted ICRC-1 fee".into());
+    }
+    Ok(())
+}
+
+#[update]
+#[candid_method(update)]
+async fn stability_pool_liquidate_v2(
+    _request: rumi_protocol_backend::SpLiquidationV2Request,
+) -> Result<rumi_protocol_backend::SpLiquidationV2StatusView, ProtocolError> {
+    Err(ProtocolError::TemporarilyUnavailable(
+        "Stability Pool liquidation V2 is disabled pending exact real-ledger receipt and refund verification".into(),
+    ))
+}
+
+#[update]
+#[candid_method(update)]
+async fn attach_stability_pool_liquidation_v2_receipt(
+    request_id: u64,
+    kind: rumi_protocol_backend::SpLiquidationV2ReceiptKind,
+    block_index: u64,
+) -> Result<(), ProtocolError> {
+    use rumi_protocol_backend::SpLiquidationV2Status as Status;
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous()
+        || !read_state(|state| state.stability_pool_canister == Some(caller))
+    {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".into(),
+        ));
+    }
+    let row = read_state(|state| {
+        state
+            .sp_liquidation_v2_journals
+            .get(&(caller, request_id))
+            .cloned()
+    })
+    .ok_or_else(|| ProtocolError::GenericError("Unknown SP liquidation request ID".into()))?;
+    let proof = match (&row.status, kind) {
+        (
+            Status::StablePullPending { tuple, .. },
+            rumi_protocol_backend::SpLiquidationV2ReceiptKind::StablePull,
+        ) => {
+            rumi_protocol_backend::icrc3_proof::verify_sp_liquidation_icusd_burn_block(
+                tuple,
+                block_index,
+            )
+            .await
+        }
+        (
+            Status::StablePullRefundPending { tuple, .. },
+            rumi_protocol_backend::SpLiquidationV2ReceiptKind::Refund,
+        ) => {
+            rumi_protocol_backend::icrc3_proof::verify_sp_liquidation_refund_block(
+                tuple,
+                block_index,
+            )
+            .await
+        }
+        (
+            Status::CollateralPayoutPending { tuple, .. },
+            rumi_protocol_backend::SpLiquidationV2ReceiptKind::CollateralPayout,
+        ) => {
+            rumi_protocol_backend::icrc3_proof::verify_sp_liquidation_payout_block(
+                tuple,
+                block_index,
+            )
+            .await
+        }
+        _ => {
+            return Err(ProtocolError::GenericError(
+                "Receipt kind does not match the persisted V2 phase".into(),
+            ))
+        }
+    };
+    proof.map_err(|error| {
+        ProtocolError::GenericError(format!(
+            "candidate block does not prove the exact persisted V2 tuple: {error}"
+        ))
+    })?;
+    if !read_state(|state| state.stability_pool_canister == Some(caller)) {
+        return Err(ProtocolError::GenericError(
+            "Stability Pool registration changed during receipt verification".into(),
+        ));
+    }
+    let current = read_state(|state| {
+        state
+            .sp_liquidation_v2_journals
+            .get(&(caller, request_id))
+            .cloned()
+    })
+    .ok_or_else(|| ProtocolError::GenericError("V2 journal disappeared".into()))?;
+    let next = match (current.status, kind) {
+        (
+            Status::StablePullPending {
+                tuple, last_error, ..
+            },
+            rumi_protocol_backend::SpLiquidationV2ReceiptKind::StablePull,
+        ) => Status::StablePullPending {
+            tuple,
+            candidate_block_index: Some(block_index),
+            last_error,
+        },
+        (
+            Status::StablePullRefundPending {
+                stable_pull_receipt,
+                tuple,
+                last_error,
+                ..
+            },
+            rumi_protocol_backend::SpLiquidationV2ReceiptKind::Refund,
+        ) => Status::StablePullRefundPending {
+            stable_pull_receipt,
+            tuple,
+            candidate_block_index: Some(block_index),
+            last_error,
+        },
+        (
+            Status::CollateralPayoutPending {
+                stable_pull_receipt,
+                result,
+                tuple,
+                last_error,
+                ..
+            },
+            rumi_protocol_backend::SpLiquidationV2ReceiptKind::CollateralPayout,
+        ) => Status::CollateralPayoutPending {
+            stable_pull_receipt,
+            result,
+            tuple,
+            candidate_block_index: Some(block_index),
+            last_error,
+        },
+        _ => {
+            return Err(ProtocolError::GenericError(
+                "V2 phase changed during receipt verification".into(),
+            ))
+        }
+    };
+    mutate_state(|state| {
+        rumi_protocol_backend::state::set_sp_liquidation_v2_status(state, caller, request_id, next)
+    })
+    .map_err(ProtocolError::GenericError)?;
+    rumi_protocol_backend::vault::schedule_stability_pool_liquidation_v2_resume();
+    Ok(())
+}
+
+#[update]
+#[candid_method(update)]
+async fn accept_stability_pool_liquidation_v2_payout_supersession(
+    request_id: u64,
+    generation: u32,
+    predecessor: rumi_protocol_backend::SpLiquidationPayoutTuple,
+    replacement: rumi_protocol_backend::SpLiquidationPayoutTuple,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous()
+        || !read_state(|state| state.stability_pool_canister == Some(caller))
+    {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".into(),
+        ));
+    }
+    let snapshot = read_state(|state| {
+        state
+            .sp_liquidation_v2_journals
+            .get(&(caller, request_id))
+            .cloned()
+    })
+    .ok_or_else(|| ProtocolError::GenericError("Unknown SP liquidation request ID".into()))?;
+    let (evidence, replacement_tuple, already_complete) = match &snapshot.status {
+        rumi_protocol_backend::SpLiquidationV2Status::CollateralPayoutSupersessionPending {
+            replacement: pending_replacement,
+            evidence,
+            generation: pending_generation,
+            predecessor: pending_predecessor,
+            ..
+        } if *pending_generation == generation
+            && pending_predecessor == &predecessor
+            && pending_replacement == &replacement =>
+        {
+            (evidence.clone(), pending_replacement.clone(), false)
+        }
+        _ => match snapshot.accepted_payout_supersession.as_ref() {
+            Some(accepted)
+                if accepted.generation == generation
+                    && accepted.predecessor == predecessor
+                    && accepted.replacement == replacement =>
+            {
+                let complete = matches!(
+                    &snapshot.status,
+                    rumi_protocol_backend::SpLiquidationV2Status::Complete {
+                        payout_receipt,
+                        ..
+                    } if payout_receipt.tuple == replacement
+                );
+                (accepted.evidence.clone(), replacement.clone(), complete)
+            }
+            _ => {
+                return Err(ProtocolError::GenericError(
+                    "payout successor does not match the durable pending transition".into(),
+                ))
+            }
+        },
+    };
+    if matches!(
+        evidence,
+        rumi_protocol_backend::SpLiquidationPayoutNoEffectEvidence::InsufficientFunds { .. }
+    ) && !already_complete
+    {
+        let balance = rumi_protocol_backend::management::get_icrc1_reserve_balance(
+            replacement_tuple.ledger,
+            replacement_tuple.source.clone(),
+        )
+        .await
+        .map_err(|error| {
+            ProtocolError::TemporarilyUnavailable(format!(
+                "payout successor remains pending until source balance is verified: {error}"
+            ))
+        })?;
+        if balance < replacement_tuple.gross_amount_raw {
+            return Err(ProtocolError::TemporarilyUnavailable(format!(
+                "payout successor remains pending: source balance {balance} is below gross entitlement {}",
+                replacement_tuple.gross_amount_raw
+            )));
+        }
+        if !read_state(|state| {
+            state.stability_pool_canister == Some(caller)
+                && state.sp_liquidation_v2_journals.get(&(caller, request_id)) == Some(&snapshot)
+        }) {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "payout successor changed during source balance verification".into(),
+            ));
+        }
+    }
+    mutate_state(|state| {
+        rumi_protocol_backend::state::accept_sp_liquidation_v2_payout_supersession(
+            state,
+            caller,
+            request_id,
+            generation,
+            predecessor,
+            replacement,
+        )
+    })
+    .map_err(ProtocolError::GenericError)?;
+    rumi_protocol_backend::vault::schedule_stability_pool_liquidation_v2_resume();
+    Ok(())
+}
+
+#[query]
+#[candid_method(query)]
+fn get_stability_pool_liquidation_v2_status(
+    request_id: u64,
+) -> Result<rumi_protocol_backend::SpLiquidationV2StatusView, ProtocolError> {
+    use rumi_protocol_backend::SpLiquidationV2Status as Status;
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous()
+        || !read_state(|state| state.stability_pool_canister == Some(caller))
+    {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".into(),
+        ));
+    }
+    let row = read_state(|state| {
+        state
+            .sp_liquidation_v2_journals
+            .get(&(caller, request_id))
+            .cloned()
+    });
+    match row {
+        Some(row) => Ok(rumi_protocol_backend::SpLiquidationV2StatusView {
+            stability_pool: caller,
+            request_id,
+            request: (!matches!(row.status, Status::Acknowledged)).then_some(row.request),
+            status: row.status,
+        }),
+        None => {
+            let acknowledged = read_state(|state| {
+                state
+                    .sp_liquidation_v2_acknowledged_through
+                    .get(&caller)
+                    .is_some_and(|floor| request_id <= *floor)
+            });
+            Ok(rumi_protocol_backend::SpLiquidationV2StatusView {
+                stability_pool: caller,
+                request_id,
+                request: None,
+                status: if acknowledged {
+                    Status::Acknowledged
+                } else {
+                    Status::Unseen
+                },
+            })
+        }
+    }
+}
+
+#[update]
+#[candid_method(update)]
+fn ack_stability_pool_liquidation_v2(request_id: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous()
+        || !read_state(|state| state.stability_pool_canister == Some(caller))
+    {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".into(),
+        ));
+    }
+    mutate_state(|state| {
+        rumi_protocol_backend::state::ack_sp_liquidation_v2(state, caller, request_id)
+    })
+    .map_err(ProtocolError::GenericError)
+}
+
 async fn stability_pool_liquidate_with_reserves_inner(
     vault_id: u64,
     absorb_id: Option<u64>,
@@ -7788,9 +10062,42 @@ async fn stability_pool_liquidate_with_reserves_inner(
         ThreeUsdReserveIngressKey, ThreeUsdReserveIngressPhase as IngressPhase,
     };
     let caller = ic_cdk::api::caller();
-    if !read_state(|s| s.stability_pool_canister == Some(caller)) {
+    let registered = read_state(|state| state.stability_pool_canister);
+    let exact_existing_request = absorb_id.is_some_and(|absorb_id| {
+        let key = ThreeUsdReserveIngressKey {
+            stability_pool: caller,
+            vault_id,
+            absorb_id,
+        };
+        let request = rumi_protocol_backend::state::ThreeUsdReserveIngressRequest {
+            icusd_debt_covered_e8s,
+            three_usd_amount_e8s,
+            ledger: three_usd_ledger,
+        };
+        read_state(|state| {
+            state
+                .three_usd_reserve_ingress_journals
+                .get(&key)
+                .is_some_and(|journal| {
+                    journal.request == request
+                        && three_usd_ingress_phase_has_dispatched(&journal.phase)
+                })
+        })
+    });
+    let ingress_key_owner = caller;
+    let authorized = if absorb_id.is_some() {
+        three_usd_ingress_key_access_allowed(
+            caller,
+            registered,
+            ingress_key_owner,
+            exact_existing_request,
+        )
+    } else {
+        caller != Principal::anonymous() && registered == Some(caller)
+    };
+    if !authorized {
         return Err(ProtocolError::GenericError(
-            "Caller is not the registered stability pool canister".to_string(),
+            "Caller is not authorized for this Stability Pool ingress request".to_string(),
         ));
     }
     if absorb_id == Some(0) {
@@ -7799,8 +10106,14 @@ async fn stability_pool_liquidate_with_reserves_inner(
         ));
     }
     let (ingress_key, _ingress_guard, existing_ingress) = if let Some(absorb_id) = absorb_id {
-        let key = ThreeUsdReserveIngressKey { stability_pool: caller, vault_id, absorb_id };
-        let Some(guard) = rumi_protocol_backend::management::ThreeUsdReserveIngressGuard::try_acquire(&key) else {
+        let key = ThreeUsdReserveIngressKey {
+            stability_pool: caller,
+            vault_id,
+            absorb_id,
+        };
+        let Some(guard) =
+            rumi_protocol_backend::management::ThreeUsdReserveIngressGuard::try_acquire(&key)
+        else {
             return Err(ProtocolError::AlreadyProcessing);
         };
         let expected_request = rumi_protocol_backend::state::ThreeUsdReserveIngressRequest {
@@ -7809,12 +10122,20 @@ async fn stability_pool_liquidate_with_reserves_inner(
             ledger: three_usd_ledger,
         };
         // Claim this identity durably before validate_call/freshness can await.
-        let journal = Some(rumi_protocol_backend::management::admit_three_usd_reserve_ingress(
-            key.clone(), expected_request,
-        ).map_err(ProtocolError::GenericError)?);
+        let journal = Some(
+            rumi_protocol_backend::management::admit_three_usd_reserve_ingress(
+                key.clone(),
+                expected_request,
+            )
+            .map_err(ProtocolError::GenericError)?,
+        );
         if let Some(journal) = journal.as_ref() {
             match &journal.phase {
-                IngressPhase::Absorbed { result, block_index, .. } => {
+                IngressPhase::Absorbed {
+                    result,
+                    block_index,
+                    ..
+                } => {
                     if !journal.absorbed_result_matches_parent(vault_id, *block_index) {
                         return Err(ProtocolError::GenericError(
                             "V2 absorbed journal result and proportional refund child disagree; held for reconciliation".into(),
@@ -7826,8 +10147,10 @@ async fn stability_pool_liquidate_with_reserves_inner(
                         vault_id_memo: vault_id,
                     };
                     let committed = read_state(|state| {
-                        state.sp_three_usd_reserve_absorb_results_by_proof
-                            .get(&(proof.ledger_kind, proof.block_index)).cloned()
+                        state
+                            .sp_three_usd_reserve_absorb_results_by_proof
+                            .get(&(proof.ledger_kind, proof.block_index))
+                            .cloned()
                     });
                     let Some(committed) = committed else {
                         return Err(ProtocolError::GenericError(
@@ -7916,7 +10239,8 @@ async fn stability_pool_liquidate_with_reserves_inner(
             let block_index = *block_index;
             let proof = rumi_protocol_backend::icrc3_proof::SpWritedownProof {
                 block_index,
-                ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransferDefault,
+                ledger_kind:
+                    rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransferDefault,
                 vault_id_memo: vault_id,
             };
             if journal.has_full_refund_child() {
@@ -7940,15 +10264,13 @@ async fn stability_pool_liquidate_with_reserves_inner(
                             )));
                         }
                     }
-                    refund_3usd_for_reserve_ingress(
-                        key,
-                        three_usd_ledger,
-                        three_usd_amount_e8s,
-                    )
-                    .await
-                    .map_err(|error| ProtocolError::GenericError(format!(
-                        "V2 full-refund child remains held for exact retry: {error}"
-                    )))?;
+                    refund_3usd_for_reserve_ingress(key, three_usd_ledger, three_usd_amount_e8s)
+                        .await
+                        .map_err(|error| {
+                            ProtocolError::GenericError(format!(
+                                "V2 full-refund child remains held for exact retry: {error}"
+                            ))
+                        })?;
                     rumi_protocol_backend::management::record_three_usd_reserve_ingress_failed(
                         key,
                         block_index,
@@ -7961,36 +10283,41 @@ async fn stability_pool_liquidate_with_reserves_inner(
                 }
             }
 
-            let committed = rumi_protocol_backend::vault::replay_committed_three_usd_reserve_absorb_result(
-                caller,
-                vault_id,
-                icusd_debt_covered_e8s,
-                Some(three_usd_amount_e8s),
-                &proof,
-            )
-            .map_err(|error| ProtocolError::GenericError(format!(
-                "V2 exact retry could not reconcile its committed result: {error:?}"
-            )))?;
+            let committed =
+                rumi_protocol_backend::vault::replay_committed_three_usd_reserve_absorb_result(
+                    caller,
+                    vault_id,
+                    icusd_debt_covered_e8s,
+                    Some(three_usd_amount_e8s),
+                    &proof,
+                )
+                .map_err(|error| {
+                    ProtocolError::GenericError(format!(
+                        "V2 exact retry could not reconcile its committed result: {error:?}"
+                    ))
+                })?;
             if let Some(success) = committed {
-                if icusd_debt_covered_e8s == 0
-                    || success.liquidated_debt > icusd_debt_covered_e8s
-                {
+                if icusd_debt_covered_e8s == 0 || success.liquidated_debt > icusd_debt_covered_e8s {
                     return Err(ProtocolError::GenericError(
                         "V2 committed result has invalid covered or applied debt; held for reconciliation".into(),
                     ));
                 }
                 let realized_3usd = ((three_usd_amount_e8s as u128)
                     .checked_mul(success.liquidated_debt as u128)
-                    .ok_or_else(|| ProtocolError::GenericError(
-                        "V2 committed result proportional calculation overflowed".into(),
-                    ))?
+                    .ok_or_else(|| {
+                        ProtocolError::GenericError(
+                            "V2 committed result proportional calculation overflowed".into(),
+                        )
+                    })?
                     / icusd_debt_covered_e8s as u128) as u64;
                 let expected_refund = three_usd_amount_e8s.saturating_sub(realized_3usd);
                 if !v2_committed_refund_child_compatible(
-                    journal.refund.as_ref().map(|refund| refund.gross_amount_e8s),
+                    journal
+                        .refund
+                        .as_ref()
+                        .map(|refund| refund.gross_amount_e8s),
                     expected_refund,
-                )
-                {
+                ) {
                     return Err(ProtocolError::GenericError(
                         "V2 proportional refund child disagrees with the committed applied result; held for reconciliation".into(),
                     ));
@@ -8006,20 +10333,22 @@ async fn stability_pool_liquidate_with_reserves_inner(
                         "V2 committed result is durable, but its proportional refund child is held: {error}"
                     )))?;
                 }
-                if let Err(error) = rumi_protocol_backend::management::record_three_usd_reserve_ingress_absorbed(
-                    key,
-                    block_index,
-                    rumi_protocol_backend::state::ThreeUsdReserveIngressResult {
-                        success: success.success,
-                        vault_id: success.vault_id,
-                        liquidated_debt: success.liquidated_debt,
-                        collateral_received: success.collateral_received,
-                        collateral_type: success.collateral_type.clone(),
-                        block_index: success.block_index,
-                        fee: success.fee,
-                        collateral_price_e8s: success.collateral_price_e8s,
-                    },
-                ) {
+                if let Err(error) =
+                    rumi_protocol_backend::management::record_three_usd_reserve_ingress_absorbed(
+                        key,
+                        block_index,
+                        rumi_protocol_backend::state::ThreeUsdReserveIngressResult {
+                            success: success.success,
+                            vault_id: success.vault_id,
+                            liquidated_debt: success.liquidated_debt,
+                            collateral_received: success.collateral_received,
+                            collateral_type: success.collateral_type.clone(),
+                            block_index: success.block_index,
+                            fee: success.fee,
+                            collateral_price_e8s: success.collateral_price_e8s,
+                        },
+                    )
+                {
                     return Err(ProtocolError::GenericError(format!(
                         "V2 committed result recovered but parent terminalization is held: {error}"
                     )));
@@ -8033,10 +10362,11 @@ async fn stability_pool_liquidate_with_reserves_inner(
             }
         }
     }
-    // Exact terminal replays above are served from the original durable
-    // ingress even after a later ledger configuration rotation. New or
-    // nonterminal requests still require the configured ledger; the setter
-    // fences rotations while any such saga/refund is unresolved.
+    // Exact terminal replays above use the original durable ingress. The
+    // developer setter may rotate SP registration while a saga is unresolved;
+    // only the original SP can resume its exact key after transfer dispatch.
+    // An AdmissionPending row has not crossed the pull boundary and remains
+    // restricted to the currently registered SP.
     if read_state(|s| s.three_pool_canister) != Some(three_usd_ledger) {
         return Err(ProtocolError::GenericError(
             "3USD ledger does not match the configured 3pool canister".to_string(),
@@ -8053,97 +10383,104 @@ async fn stability_pool_liquidate_with_reserves_inner(
             "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
         ));
     }
-    if ingress_key.is_none() || existing_ingress.as_ref().is_some_and(|journal| {
-        matches!(&journal.phase, IngressPhase::AdmissionPending)
-    }) {
-    if ingress_key.is_some() && !rumi_protocol_backend::management::three_usd_reserve_ingress_is_enabled() {
-        return Err(ProtocolError::GenericError(
-            "New 3USD reserve ingress is held until default-account fee capacity is proven".into(),
-        ));
-    }
-    validate_call().await?;
-    validate_liquidation_not_frozen()?;
-    validate_price_for_liquidation()?;
-    validate_freshness_for_vault(vault_id).await?;
-    // Pre-validate: vault exists, has debt, price available — before pulling any tokens.
-    // This prevents pulling 3USD and then failing on a stale/removed vault.
-    let liquidation_amount: rumi_protocol_backend::numeric::ICUSD = icusd_debt_covered_e8s.into();
-    if liquidation_amount == rumi_protocol_backend::numeric::ICUSD::new(0) {
-        return Err(ProtocolError::GenericError(
-            "Cannot liquidate zero amount".to_string(),
-        ));
-    }
-    let _capped_debt_e8s = read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
-        Some(vault) => {
-            if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
-                if !status.allows_liquidation() {
+    if ingress_key.is_none()
+        || existing_ingress
+            .as_ref()
+            .is_some_and(|journal| matches!(&journal.phase, IngressPhase::AdmissionPending))
+    {
+        if ingress_key.is_some()
+            && !rumi_protocol_backend::management::three_usd_reserve_ingress_is_enabled()
+        {
+            return Err(ProtocolError::GenericError(
+                "New 3USD reserve ingress is held until default-account fee capacity is proven"
+                    .into(),
+            ));
+        }
+        validate_call().await?;
+        validate_liquidation_not_frozen()?;
+        validate_price_for_liquidation()?;
+        validate_freshness_for_vault(vault_id).await?;
+        // Pre-validate: vault exists, has debt, price available — before pulling any tokens.
+        // This prevents pulling 3USD and then failing on a stale/removed vault.
+        let liquidation_amount: rumi_protocol_backend::numeric::ICUSD =
+            icusd_debt_covered_e8s.into();
+        if liquidation_amount == rumi_protocol_backend::numeric::ICUSD::new(0) {
+            return Err(ProtocolError::GenericError(
+                "Cannot liquidate zero amount".to_string(),
+            ));
+        }
+        let _capped_debt_e8s = read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
+            Some(vault) => {
+                if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
+                    if !status.allows_liquidation() {
+                        return Err(ProtocolError::GenericError(
+                            "Liquidation is not allowed for this collateral type".to_string(),
+                        ));
+                    }
+                }
+                if s.get_collateral_price_decimal(&vault.collateral_type)
+                    .is_none()
+                {
                     return Err(ProtocolError::GenericError(
-                        "Liquidation is not allowed for this collateral type".to_string(),
+                        "No price available for collateral. Price feed may be down.".to_string(),
                     ));
                 }
+                let capped = liquidation_amount.min(vault.borrowed_icusd_amount);
+                if capped == rumi_protocol_backend::numeric::ICUSD::new(0) {
+                    return Err(ProtocolError::GenericError(
+                        "Cannot liquidate zero amount — vault has no debt".to_string(),
+                    ));
+                }
+                // LIQ-0XX: min_icusd_amount applies to the FINAL (debt-capped)
+                // amount and is skipped when it closes the vault fully. This
+                // path pulls 3USD from the SP based on `icusd_debt_covered_e8s`
+                // AFTER this check, so a dust vault (full debt below the floor)
+                // must be allowed through here rather than being permanently
+                // unreachable via the SP write-down path.
+                if capped < s.min_icusd_amount && capped != vault.borrowed_icusd_amount {
+                    return Err(ProtocolError::AmountTooLow {
+                        minimum_amount: s.min_icusd_amount.to_u64(),
+                    });
+                }
+                let ratio = rumi_protocol_backend::compute_collateral_ratio(
+                    vault,
+                    s.last_icp_rate.unwrap_or_else(|| UsdIcp::from(dec!(0.0))),
+                    s,
+                );
+                if ratio == rumi_protocol_backend::numeric::Ratio::from(rust_decimal::Decimal::ZERO)
+                    || ratio >= s.get_min_liquidation_ratio_for(&vault.collateral_type)
+                {
+                    return Err(ProtocolError::GenericError(
+                        "Cannot liquidate a healthy vault with 3USD reserves".to_string(),
+                    ));
+                }
+                Ok(capped.to_u64())
             }
-            if s.get_collateral_price_decimal(&vault.collateral_type)
-                .is_none()
-            {
-                return Err(ProtocolError::GenericError(
-                    "No price available for collateral. Price feed may be down.".to_string(),
-                ));
-            }
-            let capped = liquidation_amount.min(vault.borrowed_icusd_amount);
-            if capped == rumi_protocol_backend::numeric::ICUSD::new(0) {
-                return Err(ProtocolError::GenericError(
-                    "Cannot liquidate zero amount — vault has no debt".to_string(),
-                ));
-            }
-            // LIQ-0XX: min_icusd_amount applies to the FINAL (debt-capped)
-            // amount and is skipped when it closes the vault fully. This
-            // path pulls 3USD from the SP based on `icusd_debt_covered_e8s`
-            // AFTER this check, so a dust vault (full debt below the floor)
-            // must be allowed through here rather than being permanently
-            // unreachable via the SP write-down path.
-            if capped < s.min_icusd_amount && capped != vault.borrowed_icusd_amount {
-                return Err(ProtocolError::AmountTooLow {
-                    minimum_amount: s.min_icusd_amount.to_u64(),
-                });
-            }
-            let ratio = rumi_protocol_backend::compute_collateral_ratio(
-                vault,
-                s.last_icp_rate.unwrap_or_else(|| UsdIcp::from(dec!(0.0))),
-                s,
-            );
-            if ratio == rumi_protocol_backend::numeric::Ratio::from(rust_decimal::Decimal::ZERO)
-                || ratio >= s.get_min_liquidation_ratio_for(&vault.collateral_type)
-            {
-                return Err(ProtocolError::GenericError(
-                    "Cannot liquidate a healthy vault with 3USD reserves".to_string(),
-                ));
-            }
-            Ok(capped.to_u64())
+            None => Err(ProtocolError::GenericError(format!(
+                "Vault #{} not found",
+                vault_id
+            ))),
+        })?;
+
+        let configured_3pool = read_state(|s| s.three_pool_canister);
+        if configured_3pool != Some(three_usd_ledger) {
+            return Err(ProtocolError::GenericError(
+                "3USD ledger does not match the configured 3pool canister".to_string(),
+            ));
         }
-        None => Err(ProtocolError::GenericError(format!(
-            "Vault #{} not found",
-            vault_id
-        ))),
-    })?;
 
-    let configured_3pool = read_state(|s| s.three_pool_canister);
-    if configured_3pool != Some(three_usd_ledger) {
-        return Err(ProtocolError::GenericError(
-            "3USD ledger does not match the configured 3pool canister".to_string(),
-        ));
-    }
-
-    // The preflight checks avoid a pull for an already invalid request, but
-    // borrow may still finish while this transfer awaits. The post-pull
-    // liquidation helper takes the shared per-vault guard, snapshots current
-    // state, and rechecks health/value atomically before it commits accounting.
+        // The preflight checks avoid a pull for an already invalid request, but
+        // borrow may still finish while this transfer awaits. The post-pull
+        // liquidation helper takes the shared per-vault guard, snapshots current
+        // state, and rechecks health/value atomically before it commits accounting.
     }
 
     let transfer_block_index = if let Some(key) = ingress_key.as_ref() {
         let first_pull = read_state(|state| {
-            state.three_usd_reserve_ingress_journals.get(key).is_some_and(|journal| {
-                matches!(&journal.phase, IngressPhase::AdmissionPending)
-            })
+            state
+                .three_usd_reserve_ingress_journals
+                .get(key)
+                .is_some_and(|journal| matches!(&journal.phase, IngressPhase::AdmissionPending))
         });
         // Retried SubmittedOrUnknown transfer_from identities also hold this
         // lock: a prior pull may have landed even if its reply was lost, and
@@ -8151,15 +10488,21 @@ async fn stability_pool_liquidate_with_reserves_inner(
         let _default_account_guard =
             rumi_protocol_backend::ThreeUsdDefaultAccountTransferGuard::try_acquire(
                 three_usd_ledger,
-            ).ok_or_else(|| ProtocolError::GenericError(
-                "3USD default-account capacity check is busy; no user pull was submitted".into(),
-            ))?;
+            )
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "3USD default-account capacity check is busy; no user pull was submitted"
+                        .into(),
+                )
+            })?;
         if first_pull {
             let fee = rumi_protocol_backend::management::get_ledger_fee(three_usd_ledger)
                 .await
-                .map_err(|error| ProtocolError::GenericError(format!(
-                    "3USD fee capacity is uncertain; no user pull was submitted: {error}"
-                )))?;
+                .map_err(|error| {
+                    ProtocolError::GenericError(format!(
+                        "3USD fee capacity is uncertain; no user pull was submitted: {error}"
+                    ))
+                })?;
             let balance = rumi_protocol_backend::management::get_icrc1_reserve_balance(
                 three_usd_ledger,
                 icrc_ledger_types::icrc1::account::Account {
@@ -8168,14 +10511,18 @@ async fn stability_pool_liquidate_with_reserves_inner(
                 },
             )
             .await
-            .map_err(|error| ProtocolError::GenericError(format!(
+            .map_err(|error| {
+                ProtocolError::GenericError(format!(
                 "3USD default-account balance is uncertain; no user pull was submitted: {error}"
-            )))?;
+            ))
+            })?;
             let fee_after = rumi_protocol_backend::management::get_ledger_fee(three_usd_ledger)
                 .await
-                .map_err(|error| ProtocolError::GenericError(format!(
-                    "3USD fee recheck failed; no user pull was submitted: {error}"
-                )))?;
+                .map_err(|error| {
+                    ProtocolError::GenericError(format!(
+                        "3USD fee recheck failed; no user pull was submitted: {error}"
+                    ))
+                })?;
             if fee_after != fee {
                 return Err(ProtocolError::GenericError(
                     "3USD fee changed during capacity check; no user pull was submitted".into(),
@@ -8184,11 +10531,16 @@ async fn stability_pool_liquidate_with_reserves_inner(
             let commitment = read_state(|state| {
                 state.three_usd_default_account_refund_commitment(three_usd_ledger, fee)
             })
-            .ok_or_else(|| ProtocolError::GenericError(
-                "3USD default-account obligations are uncertain; no user pull was submitted".into(),
-            ))?;
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "3USD default-account obligations are uncertain; no user pull was submitted"
+                        .into(),
+                )
+            })?;
             let existing_hold = read_state(|state| {
-                state.three_usd_reserve_ingress_journals.get(key)
+                state
+                    .three_usd_reserve_ingress_journals
+                    .get(key)
                     .and_then(|journal| journal.refund_fee_reserved_e8s)
             });
             let additional_fee = fee.saturating_sub(existing_hold.unwrap_or(0));
@@ -8203,20 +10555,24 @@ async fn stability_pool_liquidate_with_reserves_inner(
                 )));
             }
             mutate_state(|state| -> Result<(), ProtocolError> {
-                let journal = state.three_usd_reserve_ingress_journals.get_mut(key)
-                    .ok_or_else(|| ProtocolError::GenericError(
-                        "3USD admission journal disappeared during capacity check".into(),
-                    ))?;
+                let journal = state
+                    .three_usd_reserve_ingress_journals
+                    .get_mut(key)
+                    .ok_or_else(|| {
+                        ProtocolError::GenericError(
+                            "3USD admission journal disappeared during capacity check".into(),
+                        )
+                    })?;
                 if journal.request.ledger != three_usd_ledger
                     || !matches!(&journal.phase, IngressPhase::AdmissionPending)
                 {
                     return Err(ProtocolError::GenericError(
-                        "3USD admission changed during capacity check; no user pull was submitted".into(),
+                        "3USD admission changed during capacity check; no user pull was submitted"
+                            .into(),
                     ));
                 }
-                journal.refund_fee_reserved_e8s = Some(
-                    journal.refund_fee_reserved_e8s.unwrap_or(0).max(fee),
-                );
+                journal.refund_fee_reserved_e8s =
+                    Some(journal.refund_fee_reserved_e8s.unwrap_or(0).max(fee));
                 Ok(())
             })?;
         }
@@ -8237,9 +10593,11 @@ async fn stability_pool_liquidate_with_reserves_inner(
             three_usd_amount_e8s,
         )
         .await
-        .map_err(|error| ProtocolError::GenericError(format!(
-            "Failed to pull 3USD from stability pool: {error:?}"
-        )))?
+        .map_err(|error| {
+            ProtocolError::GenericError(format!(
+                "Failed to pull 3USD from stability pool: {error:?}"
+            ))
+        })?
     };
 
     // Wave-8d LIQ-004 Phase 2: build the writedown proof from the just-
@@ -8268,6 +10626,15 @@ async fn stability_pool_liquidate_with_reserves_inner(
     };
     #[cfg(not(feature = "cl07-recovered-vault-after-pull-test-gate"))]
     let cl07_gate_result: Result<(), ProtocolError> = Ok(());
+    #[cfg(feature = "three-usd-proportional-refund-test-gate")]
+    let proportional_refund_gate_result = if ingress_key.is_some() {
+        three_usd_proportional_refund_test_gate(vault_id).await
+    } else {
+        Ok(())
+    };
+    #[cfg(not(feature = "three-usd-proportional-refund-test-gate"))]
+    let proportional_refund_gate_result: Result<(), ProtocolError> = Ok(());
+    let cl07_gate_result = cl07_gate_result.and(proportional_refund_gate_result);
 
     // 3USD is now in the backend default account, so write down debt and release collateral.
     // Wave-4 ICC-002: if `liquidate_vault_debt_already_burned` returns Err after the
@@ -8277,23 +10644,27 @@ async fn stability_pool_liquidate_with_reserves_inner(
     // bookkeeping stay in sync.
     let liquidation = match cl07_gate_result {
         Err(error) => Err(error),
-        Ok(()) => if let Some(key) = ingress_key.as_ref() {
-            rumi_protocol_backend::vault::liquidate_vault_debt_already_burned_v2(
-                vault_id,
-                icusd_debt_covered_e8s,
-                caller,
-                Some(three_usd_amount_e8s),
-                proof.clone(),
-                key.clone(),
-            ).await
-        } else {
-            rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
-                vault_id,
-                icusd_debt_covered_e8s,
-                caller,
-                Some(three_usd_amount_e8s),
-                proof.clone(),
-            ).await
+        Ok(()) => {
+            if let Some(key) = ingress_key.as_ref() {
+                rumi_protocol_backend::vault::liquidate_vault_debt_already_burned_v2(
+                    vault_id,
+                    icusd_debt_covered_e8s,
+                    caller,
+                    Some(three_usd_amount_e8s),
+                    proof.clone(),
+                    key.clone(),
+                )
+                .await
+            } else {
+                rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
+                    vault_id,
+                    icusd_debt_covered_e8s,
+                    caller,
+                    Some(three_usd_amount_e8s),
+                    proof.clone(),
+                )
+                .await
+            }
         }
     };
     match liquidation {
@@ -8322,12 +10693,8 @@ async fn stability_pool_liquidate_with_reserves_inner(
                         excess
                     );
                     if let Some(key) = ingress_key.as_ref() {
-                        if let Err(error) = refund_3usd_for_reserve_ingress(
-                            key,
-                            three_usd_ledger,
-                            excess,
-                        )
-                        .await
+                        if let Err(error) =
+                            refund_3usd_for_reserve_ingress(key, three_usd_ledger, excess).await
                         {
                             return Err(ProtocolError::GenericError(format!(
                                 "3USD liquidation committed but its excess refund child could not be durably linked: {error}"
@@ -8358,11 +10725,13 @@ async fn stability_pool_liquidate_with_reserves_inner(
                     fee: success.fee,
                     collateral_price_e8s: success.collateral_price_e8s,
                 };
-                if let Err(error) = rumi_protocol_backend::management::record_three_usd_reserve_ingress_absorbed(
-                    key,
-                    transfer_block_index,
-                    stored_result,
-                ) {
+                if let Err(error) =
+                    rumi_protocol_backend::management::record_three_usd_reserve_ingress_absorbed(
+                        key,
+                        transfer_block_index,
+                        stored_result,
+                    )
+                {
                     log!(INFO,
                         "[stability_pool_liquidate_with_reserves_v2] CRITICAL: absorbed vault {} but could not persist reserve ingress result: {}",
                         vault_id, error
@@ -8430,12 +10799,9 @@ async fn stability_pool_liquidate_with_reserves_inner(
                         )));
                     }
                 }
-                if let Err(refund_error) = refund_3usd_for_reserve_ingress(
-                    key,
-                    three_usd_ledger,
-                    three_usd_amount_e8s,
-                )
-                .await
+                if let Err(refund_error) =
+                    refund_3usd_for_reserve_ingress(key, three_usd_ledger, three_usd_amount_e8s)
+                        .await
                 {
                     return Err(ProtocolError::GenericError(format!(
                         "3USD liquidation failed and its refund child could not be durably linked: {refund_error}"
@@ -8474,13 +10840,25 @@ fn three_usd_ingress_refund_tuple_matches(
     ledger: Principal,
     tuple: &rumi_protocol_backend::state::ThreeUsdRefundTransferTuple,
 ) -> bool {
-    tuple.source_owner == ic_cdk::id()
+    three_usd_ingress_refund_tuple_matches_for_backend(key, child, ledger, tuple, ic_cdk::id())
+}
+
+fn three_usd_ingress_refund_tuple_matches_for_backend(
+    key: &rumi_protocol_backend::state::ThreeUsdReserveIngressKey,
+    child: &rumi_protocol_backend::state::ThreeUsdReserveIngressRefund,
+    ledger: Principal,
+    tuple: &rumi_protocol_backend::state::ThreeUsdRefundTransferTuple,
+    backend: Principal,
+) -> bool {
+    tuple.source_owner == backend
         && tuple.source_subaccount.is_none()
         && tuple.destination.owner == key.stability_pool
         && tuple.destination.subaccount.is_none()
         && (tuple.amount_e8s == child.gross_amount_e8s
             || tuple.amount_e8s.checked_add(tuple.fee_e8s) == Some(child.gross_amount_e8s))
-        && rumi_protocol_backend::management::nonce_to_memo(child.op_nonce).0.as_slice()
+        && rumi_protocol_backend::management::nonce_to_memo(child.op_nonce)
+            .0
+            .as_slice()
             == tuple.memo.as_slice()
         && tuple.created_at_time_ns
             == rumi_protocol_backend::management::nonce_to_created_at_time(child.op_nonce)
@@ -8496,12 +10874,18 @@ fn three_usd_ingress_refund_is_settled(
 ) -> Result<bool, String> {
     use rumi_protocol_backend::state::ThreeUsdRefundDispatchState as Dispatch;
     read_state(|state| {
-        let parent = state.three_usd_reserve_ingress_journals.get(key)
-            .ok_or_else(|| "reserve ingress parent disappeared while checking its refund".to_string())?;
+        let parent = state
+            .three_usd_reserve_ingress_journals
+            .get(key)
+            .ok_or_else(|| {
+                "reserve ingress parent disappeared while checking its refund".to_string()
+            })?;
         if parent.request.ledger != ledger {
             return Err("refund ledger does not match the reserve ingress parent".into());
         }
-        let stored_child = parent.refund.as_ref()
+        let stored_child = parent
+            .refund
+            .as_ref()
             .ok_or_else(|| "reserve ingress parent has no linked refund child".to_string())?;
         if stored_child.op_nonce != child.op_nonce
             || stored_child.gross_amount_e8s != child.gross_amount_e8s
@@ -8514,10 +10898,14 @@ fn three_usd_ingress_refund_is_settled(
         let dispatch = state.pending_3usd_refund_journals.get(&child.op_nonce);
         if let Some(receipt) = stored_child.settled_receipt.as_ref() {
             if pending.is_some() || dispatch.is_some() {
-                return Err("settled V2 refund still has a pending queue row or dispatch journal".into());
+                return Err(
+                    "settled V2 refund still has a pending queue row or dispatch journal".into(),
+                );
             }
             if !three_usd_ingress_refund_tuple_matches(key, child, ledger, &receipt.tuple) {
-                return Err("persisted V2 refund receipt tuple does not match its parent child".into());
+                return Err(
+                    "persisted V2 refund receipt tuple does not match its parent child".into(),
+                );
             }
             return Ok(true);
         }
@@ -8535,11 +10923,14 @@ fn three_usd_ingress_refund_is_settled(
         }
         match dispatch {
             Some(Dispatch::NeverDispatchedDefault { gross_amount_e8s })
-            | Some(Dispatch::UnpayableDefault { gross_amount_e8s, .. })
-                if *gross_amount_e8s == child.gross_amount_e8s => {}
+            | Some(Dispatch::UnpayableDefault {
+                gross_amount_e8s, ..
+            }) if *gross_amount_e8s == child.gross_amount_e8s => {}
             Some(Dispatch::SubmittedOrUnknown { tuple })
                 if three_usd_ingress_refund_tuple_matches(key, child, ledger, tuple) => {}
-            _ => return Err("pending V2 refund dispatch identity is missing or inconsistent".into()),
+            _ => {
+                return Err("pending V2 refund dispatch identity is missing or inconsistent".into())
+            }
         }
         Ok(false)
     })
@@ -8563,7 +10954,9 @@ async fn refund_3usd_for_reserve_ingress(
         let existing = state
             .three_usd_reserve_ingress_journals
             .get(key)
-            .ok_or_else(|| "reserve ingress journal is missing before refund child creation".to_string())?;
+            .ok_or_else(|| {
+                "reserve ingress journal is missing before refund child creation".to_string()
+            })?;
         if !matches!(
             &existing.phase,
             IngressPhase::TransferConfirmed { .. }
@@ -8574,7 +10967,10 @@ async fn refund_3usd_for_reserve_ingress(
         }
         if let Some(refund) = existing.refund.as_ref() {
             if refund.gross_amount_e8s != amount_e8s || refund.source_subaccount.is_some() {
-                return Err("reserve ingress refund child was reused with different amount or source".into());
+                return Err(
+                    "reserve ingress refund child was reused with different amount or source"
+                        .into(),
+                );
             }
             if let Some(pending) = state.pending_3usd_refunds.get(&refund.op_nonce) {
                 if pending.stability_pool != key.stability_pool
@@ -8649,7 +11045,6 @@ async fn refund_3usd_for_reserve_ingress(
         Err("exact V2 refund receipt remains pending; retry the same parent absorb ID".into())
     }
 }
-
 
 /// Refund a previously pulled 3USD amount from the protocol's reserves
 /// subaccount back to the stability pool. Used by `stability_pool_liquidate_with_reserves`
@@ -8821,12 +11216,11 @@ fn get_stability_pool_config() -> StabilityPoolConfig {
 // Add the new partial liquidate vault endpoint
 #[candid_method(update)]
 #[update]
-async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
-    validate_call().await?;
-    validate_liquidation_not_frozen()?;
-    validate_price_for_liquidation()?;
-    validate_freshness_for_vault(arg.vault_id).await?;
-    check_postcondition(rumi_protocol_backend::vault::partial_liquidate_vault(arg).await)
+async fn partial_liquidate_vault(_arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
+    Err(ProtocolError::TemporarilyUnavailable(
+        "Manual liquidation is temporarily unavailable pending receipt-backed V2 admission"
+            .into(),
+    ))
 }
 
 /// Legacy entry point used by the layout's at-risk banner and the
@@ -8859,6 +11253,24 @@ fn get_liquidatable_vaults() -> Vec<CandidVault> {
             .cloned()
             .map(CandidVault::from)
             .collect::<Vec<CandidVault>>()
+    })
+}
+
+/// Return the same backend-priced liquidation payload sent to the
+/// Stability Pool, but only while this vault remains currently liquidatable.
+#[candid_method(query)]
+#[query]
+fn get_liquidatable_vault_info(vault_id: u64) -> Option<LiquidatableVaultInfo> {
+    read_state(|s| {
+        let vault = s.vault_id_to_vaults.get(&vault_id)?;
+        let dummy_rate = s.last_icp_rate.unwrap_or(UsdIcp::from(dec!(0.0)));
+        let ratio = rumi_protocol_backend::compute_collateral_ratio(vault, dummy_rate, s);
+        if ratio == Ratio::from(Decimal::ZERO)
+            || ratio >= s.get_min_liquidation_ratio_for(&vault.collateral_type)
+        {
+            return None;
+        }
+        Some(rumi_protocol_backend::liquidatable_vault_info(s, vault))
     })
 }
 
@@ -8925,6 +11337,7 @@ fn get_all_vaults() -> Vec<CandidVault> {
 #[update]
 async fn provide_liquidity(amount: u64) -> Result<u64, ProtocolError> {
     validate_call().await?;
+    rumi_protocol_backend::liquidity_pool::liquidity_v2_legacy_endpoint_guard()?;
     check_postcondition(rumi_protocol_backend::liquidity_pool::provide_liquidity(amount).await)
 }
 
@@ -8932,6 +11345,7 @@ async fn provide_liquidity(amount: u64) -> Result<u64, ProtocolError> {
 #[update]
 async fn withdraw_liquidity(amount: u64) -> Result<u64, ProtocolError> {
     validate_call().await?;
+    rumi_protocol_backend::liquidity_pool::liquidity_v2_legacy_endpoint_guard()?;
     check_postcondition(rumi_protocol_backend::liquidity_pool::withdraw_liquidity(amount).await)
 }
 
@@ -8939,7 +11353,73 @@ async fn withdraw_liquidity(amount: u64) -> Result<u64, ProtocolError> {
 #[update]
 async fn claim_liquidity_returns() -> Result<u64, ProtocolError> {
     validate_call().await?;
+    rumi_protocol_backend::liquidity_pool::liquidity_v2_legacy_endpoint_guard()?;
     check_postcondition(rumi_protocol_backend::liquidity_pool::claim_liquidity_returns().await)
+}
+
+#[candid_method(query)]
+#[query]
+fn get_my_liquidity_v2_request_state() -> rumi_protocol_backend::LiquidityV2RequestState {
+    rumi_protocol_backend::liquidity_pool::liquidity_v2_request_state(ic_cdk::caller())
+}
+
+#[candid_method(update)]
+#[update]
+async fn provide_liquidity_v2(request_id: u128, amount: u64) -> Result<u64, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::liquidity_pool::provide_liquidity_v2(request_id, amount).await)
+}
+
+#[candid_method(update)]
+#[update]
+async fn withdraw_liquidity_v2(request_id: u128, amount: u64) -> Result<u64, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::liquidity_pool::withdraw_liquidity_v2(request_id, amount).await)
+}
+
+#[candid_method(update)]
+#[update]
+async fn claim_liquidity_returns_v2(request_id: u128) -> Result<u64, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::liquidity_pool::claim_liquidity_returns_v2(request_id).await)
+}
+
+#[candid_method(update)]
+#[update]
+async fn attach_my_liquidity_v2_candidate(request_id: u128, block_index: u64) -> Result<u64, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::liquidity_pool::attach_liquidity_v2_candidate(request_id, block_index).await)
+}
+
+/// PocketIC-only setup: add one reward and trap the following ClaimReturns
+/// after its ledger update commits. This endpoint is absent from default Wasm.
+#[cfg(feature = "liquidity-returns-pic-test")]
+#[candid_method(update)]
+#[update]
+fn test_seed_liquidity_return_and_trap(owner: Principal, amount: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    rumi_protocol_backend::state::mutate_state(|state| {
+        if caller != state.developer_principal {
+            return Err(ProtocolError::GenericError(
+                "Only the developer can seed the PocketIC liquidity test".into(),
+            ));
+        }
+        if owner == Principal::anonymous() || amount == 0 {
+            return Err(ProtocolError::GenericError(
+                "Test owner and reward amount must be nonzero".into(),
+            ));
+        }
+        if state.liquidity_returns.contains_key(&owner) {
+            return Err(ProtocolError::GenericError(
+                "Test reward is already seeded".into(),
+            ));
+        }
+        state.liquidity_returns.insert(owner, amount.into());
+        rumi_protocol_backend::storage::save_state_to_stable(state);
+        Ok(())
+    })?;
+    rumi_protocol_backend::liquidity_pool::arm_claim_returns_callback_trap_for_test();
+    Ok(())
 }
 
 /// Transform function for HTTPS outcalls (CoinGecko price fetches).
@@ -9646,11 +12126,515 @@ fn get_pending_payout(
     })
 }
 
+/// Owner/controller-visible exact tuple for a collateral withdrawal still
+/// awaiting receipt or reconciliation. The vault id makes this read bounded.
+#[candid_method(query)]
+#[query]
+fn get_pending_collateral_withdrawal(
+    vault_id: u64,
+) -> Option<rumi_protocol_backend::state::PendingCollateralWithdrawal> {
+    let caller = ic_cdk::caller();
+    let is_controller = ic_cdk::api::is_controller(&caller);
+    read_state(|state| {
+        let row = state.pending_collateral_withdrawals.get(&vault_id)?;
+        (is_controller || row.owner == caller).then(|| row.clone())
+    })
+}
+
+#[derive(candid::CandidType, candid::Deserialize)]
+struct PendingCollateralWithdrawalPage {
+    rows: Vec<rumi_protocol_backend::state::PendingCollateralWithdrawal>,
+    next_cursor: Option<u64>,
+    has_more: bool,
+}
+
+#[candid_method(query)]
+#[query]
+fn list_pending_collateral_withdrawals(
+    cursor: Option<u64>,
+    limit: u16,
+) -> Result<PendingCollateralWithdrawalPage, ProtocolError> {
+    require_controller()?;
+    let limit = usize::from(limit.clamp(1, 100));
+    Ok(read_state(|state| {
+        let start = cursor
+            .map(std::ops::Bound::Excluded)
+            .unwrap_or(std::ops::Bound::Unbounded);
+        let mut rows = state
+            .pending_collateral_withdrawals
+            .range((start, std::ops::Bound::Unbounded))
+            .map(|(_, row)| row.clone())
+            .take(limit + 1)
+            .collect::<Vec<_>>();
+        let has_more = rows.len() > limit;
+        if has_more {
+            rows.pop();
+        }
+        let next_cursor = has_more
+            .then(|| rows.last().map(|row| row.vault_id))
+            .flatten();
+        PendingCollateralWithdrawalPage {
+            rows,
+            next_cursor,
+            has_more,
+        }
+    }))
+}
+
+/// Retry only the persisted tuple, while its ledger deduplication window is
+/// live. No endpoint here can mint a replacement memo, timestamp, fee, or amount.
+#[candid_method(update)]
+#[update]
+async fn retry_pending_collateral_withdrawal(vault_id: u64) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let _guard = rumi_protocol_backend::guard::GuardPrincipal::new(
+        caller,
+        &format!("retry_collateral_withdrawal_{vault_id}"),
+    )?;
+    rumi_protocol_backend::vault::retry_pending_collateral_withdrawal(vault_id).await
+}
+
+/// Settle an existing withdrawal only when the supplied exact ledger block
+/// proves its persisted tuple. This does not dispatch a transfer.
+#[candid_method(update)]
+#[update]
+async fn reconcile_pending_collateral_withdrawal(
+    vault_id: u64,
+    block_index: u64,
+) -> Result<bool, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let _guard = rumi_protocol_backend::guard::GuardPrincipal::new(
+        caller,
+        &format!("reconcile_collateral_withdrawal_{vault_id}"),
+    )?;
+    rumi_protocol_backend::vault::reconcile_pending_collateral_withdrawal(vault_id, block_index)
+        .await
+}
+
 #[candid_method(query)]
 #[query]
 fn list_pending_payouts(cursor: Option<PendingPayoutCursor>, limit: u16) -> PendingPayoutPage {
     let caller = ic_cdk::caller();
     read_state(|s| pending_payout_page_in_state(s, caller, cursor, limit))
+}
+
+#[candid_method(query)]
+#[query]
+fn list_pending_redemptions(
+    cursor: Option<PendingRedemptionCursor>,
+    limit: u16,
+) -> PendingRedemptionPage {
+    let caller = ic_cdk::caller();
+    read_state(|s| pending_redemption_page_in_state(s, caller, cursor, limit))
+}
+
+/// Controller-only inventory of exact treasury transfer obligations. Pages
+/// are bounded so an enlarged queue cannot make a query exceed limits.
+#[candid_method(query)]
+#[query]
+fn list_pending_treasury_payments(
+    cursor: Option<PendingTreasuryPaymentCursor>,
+    limit: u16,
+) -> Result<PendingTreasuryPaymentPage, ProtocolError> {
+    require_controller()?;
+    Ok(read_state(|state| {
+        pending_treasury_payment_page_in_state(state, cursor, limit)
+    }))
+}
+
+/// Settle a held or retryable transfer only after its supplied source-ledger
+/// block proves the exact persisted transfer identity. This endpoint never
+/// creates a replacement transfer tuple.
+#[candid_method(update)]
+#[update]
+async fn reconcile_pending_treasury_payment(
+    operation_id: u128,
+    block_index: u64,
+) -> Result<bool, ProtocolError> {
+    require_controller()?;
+    let payment = read_state(|state| state.pending_treasury_payments.get(&operation_id).cloned())
+        .ok_or_else(|| {
+        ProtocolError::GenericError("No pending treasury payment found".into())
+    })?;
+    if matches!(
+        &payment.phase,
+        rumi_protocol_backend::state::TreasuryPaymentPhase::AwaitingDestination
+            | rumi_protocol_backend::state::TreasuryPaymentPhase::NotificationPending { .. }
+    ) {
+        return Err(ProtocolError::GenericError(
+            "Treasury payment is not awaiting source receipt reconciliation".into(),
+        ));
+    }
+    treasury::verify_treasury_payment_receipt(&payment, block_index)
+        .await
+        .map_err(|reason| {
+            ProtocolError::TemporarilyUnavailable(format!(
+                "Block does not prove the exact treasury transfer: {reason}"
+            ))
+        })?;
+    mutate_state(|state| {
+        if state.pending_treasury_payments.get(&operation_id) != Some(&payment) {
+            return Err(ProtocolError::GenericError(
+                "Treasury payment changed during receipt verification; retry reconciliation".into(),
+            ));
+        }
+        event::record_treasury_payment_receipt_reconciled(state, operation_id, block_index)
+            .map_err(ProtocolError::GenericError)?;
+        Ok(())
+    })?;
+    treasury::dispatch_pending_treasury_payment(operation_id).await;
+    Ok(true)
+}
+
+/// Controller-only, bounded inventory for exact Stability Pool interest mint
+/// identities, including rows held pending receipt reconciliation.
+#[candid_method(query)]
+#[query]
+fn list_pending_sp_interest_mints(
+    start_after_nonce: Option<u128>,
+    limit: u16,
+) -> Result<Vec<rumi_protocol_backend::state::PendingStabilityPoolInterestMint>, ProtocolError> {
+    require_controller()?;
+    let limit = usize::from(limit.clamp(1, 100));
+    Ok(read_state(|state| {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let rows = match start_after_nonce {
+            Some(nonce) => state
+                .pending_stability_pool_interest_mints
+                .range((Excluded(nonce), Unbounded)),
+            None => state.pending_stability_pool_interest_mints.range(..),
+        };
+        rows.take(limit).map(|(_, row)| row.clone()).collect()
+    }))
+}
+
+/// Controller-only inventory of held interest shares. Invalid-split rows have
+/// no recipient and require explicit reviewed allocation; they are never
+/// included in the automatic Stability Pool release path.
+#[candid_method(query)]
+#[query]
+fn list_held_interest_distribution_shares(
+    start_after_nonce: Option<u128>,
+    limit: u16,
+) -> Result<Vec<rumi_protocol_backend::state::HeldInterestDistributionShare>, ProtocolError> {
+    require_controller()?;
+    let limit = usize::from(limit.clamp(1, 100));
+    Ok(read_state(|state| {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let rows = match start_after_nonce {
+            Some(nonce) => state
+                .held_interest_distribution_shares
+                .range((Excluded(nonce), Unbounded)),
+            None => state.held_interest_distribution_shares.range(..),
+        };
+        rows.take(limit).map(|(_, row)| row.clone()).collect()
+    }))
+}
+
+/// Controller-only inventory of aggregate Stability Pool interest preserved
+/// from pre-outbox snapshots. This endpoint reports balances only and does not
+/// assign destinations or create mint obligations.
+#[candid_method(query)]
+#[query]
+fn list_held_legacy_stability_pool_interest(
+    start_after_collateral: Option<Principal>,
+    limit: u16,
+) -> Result<rumi_protocol_backend::state::HeldLegacyStabilityPoolInterestPage, ProtocolError> {
+    require_controller()?;
+    Ok(read_state(|state| {
+        held_legacy_stability_pool_interest_page_in_state(
+            state,
+            start_after_collateral,
+            limit,
+        )
+    }))
+}
+
+fn held_legacy_stability_pool_interest_page_in_state(
+    state: &State,
+    start_after_collateral: Option<Principal>,
+    limit: u16,
+) -> rumi_protocol_backend::state::HeldLegacyStabilityPoolInterestPage {
+    use rumi_protocol_backend::state::{
+        HeldLegacyStabilityPoolInterestEntry as Entry,
+        HeldLegacyStabilityPoolInterestPage as Page,
+    };
+    use std::ops::Bound::{Excluded, Unbounded};
+
+    let held = &state.held_legacy_stability_pool_interest;
+    let total_entry_count = held.len() as u64;
+    let total_amount_e8s = held.values().map(|amount| u128::from(*amount)).sum();
+    let page_limit = usize::from(limit.clamp(1, 100));
+    let rows = match start_after_collateral {
+        Some(collateral) => held.range((Excluded(collateral), Unbounded)),
+        None => held.range(..),
+    };
+    let mut entries: Vec<Entry> = rows
+        .take(page_limit + 1)
+        .map(|(collateral_type, amount_e8s)| Entry {
+            collateral_type: *collateral_type,
+            amount_e8s: *amount_e8s,
+        })
+        .collect();
+    let has_more = entries.len() > page_limit;
+    entries.truncate(page_limit);
+    let next_start_after = has_more
+        .then(|| entries.last().map(|entry| entry.collateral_type))
+        .flatten();
+
+    Page {
+        entries,
+        next_start_after,
+        total_entry_count,
+        total_amount_e8s,
+    }
+}
+
+#[cfg(test)]
+mod held_legacy_stability_pool_interest_page_tests {
+    use super::held_legacy_stability_pool_interest_page_in_state;
+    use rumi_protocol_backend::state::State;
+    use candid::Principal;
+
+    #[test]
+    fn inventory_pages_preserve_exact_rows_and_repeat_global_totals() {
+        let mut state = State::default();
+        let a = Principal::from_slice(&[1]);
+        let b = Principal::from_slice(&[2]);
+        let c = Principal::from_slice(&[3]);
+        state.held_legacy_stability_pool_interest.insert(a, 11);
+        state.held_legacy_stability_pool_interest.insert(b, u64::MAX);
+        state.held_legacy_stability_pool_interest.insert(c, 17);
+        let before = state.held_legacy_stability_pool_interest.clone();
+
+        let first = held_legacy_stability_pool_interest_page_in_state(&state, None, 2);
+        assert_eq!(first.entries.len(), 2);
+        assert_eq!(first.entries[0].collateral_type, a);
+        assert_eq!(first.entries[0].amount_e8s, 11);
+        assert_eq!(first.entries[1].collateral_type, b);
+        assert_eq!(first.entries[1].amount_e8s, u64::MAX);
+        assert_eq!(first.next_start_after, Some(b));
+        assert_eq!(first.total_entry_count, 3);
+        assert_eq!(first.total_amount_e8s, u128::from(u64::MAX) + 28);
+
+        let second = held_legacy_stability_pool_interest_page_in_state(
+            &state,
+            first.next_start_after,
+            2,
+        );
+        assert_eq!(second.entries.len(), 1);
+        assert_eq!(second.entries[0].collateral_type, c);
+        assert_eq!(second.entries[0].amount_e8s, 17);
+        assert_eq!(second.next_start_after, None);
+        assert_eq!(second.total_entry_count, first.total_entry_count);
+        assert_eq!(second.total_amount_e8s, first.total_amount_e8s);
+        assert_eq!(
+            state.held_legacy_stability_pool_interest,
+            before,
+            "inventory must not mutate held balances",
+        );
+    }
+
+    #[test]
+    fn inventory_clamps_page_size_and_reports_empty_status() {
+        let mut state = State::default();
+        for value in 1..=101u8 {
+            state
+                .held_legacy_stability_pool_interest
+                .insert(Principal::from_slice(&[value]), u64::from(value));
+        }
+        let first = held_legacy_stability_pool_interest_page_in_state(&state, None, u16::MAX);
+        assert_eq!(first.entries.len(), 100);
+        assert_eq!(first.total_entry_count, 101);
+        assert_eq!(first.total_amount_e8s, 5_151);
+        assert!(first.next_start_after.is_some());
+
+        state.held_legacy_stability_pool_interest.clear();
+        let empty = held_legacy_stability_pool_interest_page_in_state(&state, None, 0);
+        assert!(empty.entries.is_empty());
+        assert_eq!(empty.next_start_after, None);
+        assert_eq!(empty.total_entry_count, 0);
+        assert_eq!(empty.total_amount_e8s, 0);
+    }
+}
+
+/// Release a held Stability Pool share only after that endpoint and the icUSD
+/// ledger are configured. The held amount/collateral are immutable; malformed
+/// split holds with no destination require separate reviewed allocation.
+#[candid_method(update)]
+#[update]
+async fn release_held_interest_distribution_share(
+    operation_nonce: u128,
+) -> Result<bool, ProtocolError> {
+    require_controller()?;
+    rumi_protocol_backend::treasury::release_held_interest_distribution_share(operation_nonce)
+        .await
+        .map_err(ProtocolError::GenericError)
+}
+
+/// Confirm a held/retryable SP mint only when the supplied ledger block proves
+/// the persisted 1mint tuple. The operation nonce and all mint arguments stay
+/// unchanged; reconciliation never dispatches a replacement mint.
+#[candid_method(update)]
+#[update]
+async fn reconcile_sp_interest_mint_receipt(
+    operation_nonce: u128,
+    block_index: u64,
+) -> Result<bool, ProtocolError> {
+    require_controller()?;
+    rumi_protocol_backend::treasury::reconcile_sp_interest_mint_receipt(
+        operation_nonce,
+        block_index,
+    )
+    .await
+    .map_err(|reason| {
+        ProtocolError::TemporarilyUnavailable(format!(
+            "SP interest mint receipt was not reconciled: {reason}"
+        ))
+    })
+}
+
+/// Apply a borrow mint to vault debt only after the supplied block proves the
+/// exact persisted ledger, owner, amount, memo, and timestamp. Never re-mints.
+#[candid_method(query)]
+#[query]
+fn list_pending_borrow_mints(
+    start_after_nonce: Option<u128>,
+    limit: u16,
+) -> Result<Vec<rumi_protocol_backend::state::PendingBorrowMint>, ProtocolError> {
+    require_controller()?;
+    let limit = usize::from(limit.clamp(1, 100));
+    Ok(read_state(|state| {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let rows = match start_after_nonce {
+            Some(nonce) => state
+                .pending_borrow_mints
+                .range((Excluded(nonce), Unbounded)),
+            None => state.pending_borrow_mints.range(..),
+        };
+        rows.take(limit).map(|(_, row)| row.clone()).collect()
+    }))
+}
+
+#[candid_method(update)]
+#[update]
+async fn reconcile_borrow_mint_receipt(
+    operation_nonce: u128,
+    block_index: u64,
+) -> Result<bool, ProtocolError> {
+    require_controller()?;
+    rumi_protocol_backend::vault::reconcile_pending_borrow_mint_receipt(
+        operation_nonce,
+        block_index,
+    )
+    .await
+    .map_err(|reason| {
+        ProtocolError::TemporarilyUnavailable(format!(
+            "borrow mint receipt was not reconciled: {reason}"
+        ))
+    })
+}
+
+/// Exact-tuple recovery for a held redemption. The ledger dedup identity and
+/// all transfer arguments come from the persisted claim; the claim is removed
+/// only after the returned block proves that same tuple.
+#[candid_method(update)]
+#[update]
+async fn recover_pending_redemption(burn_block_index: u64) -> Result<bool, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let _guard =
+        rumi_protocol_backend::guard::GuardPrincipal::new(caller, "recover_pending_redemption")?;
+    let pending = read_state(|s| {
+        s.pending_redemption_transfer
+            .get(&burn_block_index)
+            .copied()
+    })
+    .ok_or_else(|| ProtocolError::GenericError("No pending redemption found".into()))?;
+    if pending.owner != caller {
+        return Err(ProtocolError::GenericError(
+            "Redemption belongs to another principal".into(),
+        ));
+    }
+    let tuple = pending
+        .redemption_transfer
+        .filter(|tuple| tuple.matches_pending(&pending))
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "Legacy redemption identity is ambiguous; automatic retry is disabled".into(),
+            )
+        })?;
+    let block = management::transfer_pinned_redemption(tuple)
+        .await
+        .map_err(ProtocolError::TransferError)?;
+    management::verify_pinned_redemption_receipt(tuple, block)
+        .await
+        .map_err(|reason| ProtocolError::TemporarilyUnavailable(format!(
+            "Exact redemption transfer returned block {block}, but receipt verification is pending: {reason}"
+        )))?;
+    mutate_state(|s| {
+        if !s
+            .pending_redemption_transfer
+            .get(&burn_block_index)
+            .is_some_and(|current| {
+                current == &pending && current.redemption_transfer == Some(tuple)
+            })
+        {
+            return Err(ProtocolError::GenericError(
+                "Redemption changed after ledger success; exact deduplicated recovery remains available".into(),
+            ));
+        }
+        event::record_redemption_transfered(s, burn_block_index, block);
+        Ok(true)
+    })
+}
+
+/// Settle a held redemption from an externally discovered ledger block. This
+/// route never dispatches; the block must prove the persisted transfer tuple.
+#[candid_method(update)]
+#[update]
+async fn reconcile_pending_redemption(
+    burn_block_index: u64,
+    transfer_block_index: u64,
+) -> Result<bool, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let _guard =
+        rumi_protocol_backend::guard::GuardPrincipal::new(caller, "reconcile_pending_redemption")?;
+    let pending = read_state(|s| {
+        s.pending_redemption_transfer
+            .get(&burn_block_index)
+            .copied()
+    })
+    .ok_or_else(|| ProtocolError::GenericError("No pending redemption found".into()))?;
+    if pending.owner != caller {
+        return Err(ProtocolError::GenericError(
+            "Redemption belongs to another principal".into(),
+        ));
+    }
+    let tuple = pending
+        .redemption_transfer
+        .filter(|tuple| tuple.matches_pending(&pending))
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "Legacy redemption identity is ambiguous; receipt reconciliation is unavailable"
+                    .into(),
+            )
+        })?;
+    management::verify_pinned_redemption_receipt(tuple, transfer_block_index)
+        .await
+        .map_err(|reason| {
+            ProtocolError::TemporarilyUnavailable(format!(
+                "Ledger block does not yet prove the exact redemption tuple: {reason}"
+            ))
+        })?;
+    mutate_state(|s| {
+        if s.pending_redemption_transfer.get(&burn_block_index) != Some(&pending) {
+            return Err(ProtocolError::GenericError(
+                "Redemption changed during receipt verification; retry reconciliation".into(),
+            ));
+        }
+        event::record_redemption_transfered(s, burn_block_index, transfer_block_index);
+        Ok(true)
+    })
 }
 
 #[candid_method(update)]
@@ -9682,7 +12666,10 @@ async fn recover_pending_payout_for_caller(
             "Payout belongs to another principal".to_string(),
         ));
     }
-    if read_state(|s| s.three_usd_reserve_payout_parents.contains_key(&operation_id)) {
+    if read_state(|s| {
+        s.three_usd_reserve_payout_parents
+            .contains_key(&operation_id)
+    }) {
         if kind != PendingPayoutQueueKind::Margin {
             return Err(ProtocolError::GenericError(
                 "Linked V2 reserve payout has an invalid queue kind".to_string(),
@@ -9692,7 +12679,9 @@ async fn recover_pending_payout_for_caller(
         // ledger receipt. The ordinary recovery path must never dispatch a
         // different tuple or clear the queue merely from a transfer reply.
         rumi_protocol_backend::vault::process_pending_three_usd_reserve_payouts().await;
-        return Ok(read_state(|s| !s.pending_margin_transfers.contains_key(&operation_id)));
+        return Ok(read_state(|s| {
+            !s.pending_margin_transfers.contains_key(&operation_id)
+        }));
     }
     if transfer.reconciliation_required || transfer.op_nonce == 0 {
         return Err(ProtocolError::GenericError(
@@ -9964,17 +12953,14 @@ async fn enroll_bot_claim_request_id_floor() -> Result<u64, ProtocolError> {
         Ok((s.developer_principal, bot))
     })?;
 
-    let (bot_response,): (Result<u64, String>,) = ic_cdk::call(
-        bot,
-        "backend_claim_request_id_floor",
-        (),
-    )
-    .await
-    .map_err(|(code, message)| {
-        ProtocolError::TemporarilyUnavailable(format!(
-            "Configured bot did not provide its request-ID floor: {code:?} {message}"
-        ))
-    })?;
+    let (bot_response,): (Result<u64, String>,) =
+        ic_cdk::call(bot, "backend_claim_request_id_floor", ())
+            .await
+            .map_err(|(code, message)| {
+                ProtocolError::TemporarilyUnavailable(format!(
+                    "Configured bot did not provide its request-ID floor: {code:?} {message}"
+                ))
+            })?;
     let floor = bot_response.map_err(|message| {
         ProtocolError::TemporarilyUnavailable(format!(
             "Configured bot refused request-ID floor enrollment: {message}"
@@ -10032,14 +13018,8 @@ async fn acknowledge_bot_claim_no_effect(
         ));
     }
     mutate_state(|s| {
-        acknowledge_bot_claim_no_effect_in_state(
-            s,
-            caller,
-            vault_id,
-            request_id,
-            &transfer_digest,
-        )
-        .map_err(ProtocolError::GenericError)
+        acknowledge_bot_claim_no_effect_in_state(s, caller, vault_id, request_id, &transfer_digest)
+            .map_err(ProtocolError::GenericError)
     })
 }
 
@@ -10170,8 +13150,11 @@ fn bot_payment_capacity_fits(
     block_limit: usize,
     aggregate_limit: usize,
 ) -> bool {
-    used_blocks.checked_add(new_blocks).is_some_and(|total| total <= block_limit)
-        && used_aggregates.checked_add(new_aggregates)
+    used_blocks
+        .checked_add(new_blocks)
+        .is_some_and(|total| total <= block_limit)
+        && used_aggregates
+            .checked_add(new_aggregates)
             .is_some_and(|total| total <= aggregate_limit)
 }
 
@@ -10182,8 +13165,8 @@ fn bot_payment_claim_reservation_fits(
     block_limit: usize,
     aggregate_limit: usize,
 ) -> bool {
-    let Some(block_reserve) = outstanding_claims_after_admission
-        .checked_mul(MAX_BOT_PAYMENT_BLOCKS_PER_CLAIM)
+    let Some(block_reserve) =
+        outstanding_claims_after_admission.checked_mul(MAX_BOT_PAYMENT_BLOCKS_PER_CLAIM)
     else {
         return false;
     };
@@ -10205,7 +13188,9 @@ fn bot_payment_claim_reservation_fits(
 fn bot_payment_receipt_capacity_available_for_new_claim(
     state: &rumi_protocol_backend::state::State,
 ) -> bool {
-    let outstanding_after_admission = state.bot_claims.len()
+    let outstanding_after_admission = state
+        .bot_claims
+        .len()
         .checked_add(state.pending_bot_claim_transfers.len())
         .and_then(|count| count.checked_add(1));
     let Some(outstanding_after_admission) = outstanding_after_admission else {
@@ -10235,20 +13220,27 @@ fn bot_payment_receipt_batch_fits(
     let mut new_blocks = 0usize;
     for index in indexes {
         match state.consumed_bot_payment_blocks.get(&(ledger, *index)) {
-            None => new_blocks = match new_blocks.checked_add(1) {
-                Some(count) => count,
-                None => return false,
-            },
-            Some(existing) if existing.caller == receipt.caller
-                && existing.vault_id == receipt.vault_id
-                && existing.claim_timestamp == receipt.claim_timestamp
-                && existing.payment_memo == receipt.payment_memo => {}
+            None => {
+                new_blocks = match new_blocks.checked_add(1) {
+                    Some(count) => count,
+                    None => return false,
+                }
+            }
+            Some(existing)
+                if existing.caller == receipt.caller
+                    && existing.vault_id == receipt.vault_id
+                    && existing.claim_timestamp == receipt.claim_timestamp
+                    && existing.payment_memo == receipt.payment_memo => {}
             Some(_) => return false,
         }
     }
     let new_aggregates = match aggregate {
         Some(aggregate) => {
-            let key = (aggregate.caller, aggregate.vault_id, aggregate.claim_timestamp);
+            let key = (
+                aggregate.caller,
+                aggregate.vault_id,
+                aggregate.claim_timestamp,
+            );
             match state.bot_payment_aggregate_receipts.get(&key) {
                 None => 1,
                 Some(existing) if existing == aggregate => 0,
@@ -10278,18 +13270,27 @@ fn bot_payment_receipt_batch_allowed_for_generation(
     block_limit: usize,
     aggregate_limit: usize,
 ) -> bool {
-    !state.bot_claim_payment_capacity_reservations.contains(&(vault_id, claim_timestamp))
+    !state
+        .bot_claim_payment_capacity_reservations
+        .contains(&(vault_id, claim_timestamp))
         || bot_payment_receipt_batch_fits(
-            state, ledger, indexes, receipt, aggregate, block_limit, aggregate_limit,
+            state,
+            ledger,
+            indexes,
+            receipt,
+            aggregate,
+            block_limit,
+            aggregate_limit,
         )
 }
 
 fn bot_has_outstanding_claim_reservations(state: &rumi_protocol_backend::state::State) -> bool {
     !state.bot_claims.is_empty()
         || !state.pending_bot_claim_transfers.is_empty()
-        || state.bot_claim_no_effect_tombstones.keys().any(|(bot, _)| {
-            state.liquidation_bot_principal == Some(*bot)
-        })
+        || state
+            .bot_claim_no_effect_tombstones
+            .keys()
+            .any(|(bot, _)| state.liquidation_bot_principal == Some(*bot))
 }
 
 fn bot_claim_request_slots_used(
@@ -10321,17 +13322,15 @@ fn bot_claim_no_effect_proof(
     vault_id: u64,
     request_id: u64,
 ) -> Option<rumi_protocol_backend::state::BotClaimNoEffectProof> {
-    if state
-        .bot_claims
+    if state.bot_claims.get(&vault_id).is_some_and(|claim| {
+        bot_claim_matches_recovery_identity(claim, vault_id, caller, request_id)
+    }) || state
+        .pending_bot_claim_transfers
         .get(&vault_id)
-        .is_some_and(|claim| bot_claim_matches_recovery_identity(claim, vault_id, caller, request_id))
-        || state
-            .pending_bot_claim_transfers
-            .get(&vault_id)
-            .is_some_and(|pending| {
-                pending.bot_principal == caller
-                    && pending_bot_claim_request_matches(pending, Some(request_id))
-            })
+        .is_some_and(|pending| {
+            pending.bot_principal == caller
+                && pending_bot_claim_request_matches(pending, Some(request_id))
+        })
     {
         return None;
     }
@@ -10439,7 +13438,9 @@ fn bot_claim_floor_enrollment_allowed(
     expected_bot: Principal,
 ) -> Result<(), String> {
     if caller != expected_developer || state.developer_principal != caller {
-        return Err("Only the current developer can enroll the liquidation bot request-ID floor".into());
+        return Err(
+            "Only the current developer can enroll the liquidation bot request-ID floor".into(),
+        );
     }
     if state.liquidation_bot_principal != Some(expected_bot) {
         return Err("Configured liquidation bot changed during request-ID floor enrollment".into());
@@ -10447,7 +13448,10 @@ fn bot_claim_floor_enrollment_allowed(
     if bot_has_outstanding_claim_reservations(state) {
         return Err("Cannot enroll a request-ID floor while bot claims, claim transfers, or no-effect receipts are outstanding".into());
     }
-    if state.bot_claim_request_id_floors.contains_key(&expected_bot) {
+    if state
+        .bot_claim_request_id_floors
+        .contains_key(&expected_bot)
+    {
         return Err("Request-ID floor is already enrolled for this bot principal".into());
     }
     if state.bot_claim_request_id_floors.len() >= MAX_ENROLLED_BOT_REQUEST_ID_FLOORS {
@@ -10477,17 +13481,22 @@ fn next_bot_claim_request_id_floor(
     bot: Principal,
     request_id: u64,
 ) -> Result<u64, String> {
-    let floor = state.bot_claim_request_id_floors.get(&bot).copied().ok_or_else(|| {
-        "Liquidation bot request-ID floor is not enrolled; fresh claims are disabled".to_string()
-    })?;
+    let floor = state
+        .bot_claim_request_id_floors
+        .get(&bot)
+        .copied()
+        .ok_or_else(|| {
+            "Liquidation bot request-ID floor is not enrolled; fresh claims are disabled"
+                .to_string()
+        })?;
     if request_id < floor {
         return Err(format!(
             "Bot request ID {request_id} is below the exclusive next allowed ID {floor}"
         ));
     }
-    request_id.checked_add(1).ok_or_else(|| {
-        "Bot request ID is exhausted and cannot advance the durable floor".into()
-    })
+    request_id
+        .checked_add(1)
+        .ok_or_else(|| "Bot request ID is exhausted and cannot advance the durable floor".into())
 }
 
 const MAX_BOT_CANCEL_HISTORY_BLOCKS_PER_CALL: u64 = 16;
@@ -10511,9 +13520,13 @@ fn bot_cancel_block_matches(
 ) -> Result<BotCancelHistoryMatch, String> {
     match (block.btype.as_deref(), block.op.as_str()) {
         (Some("1xfer"), "xfer" | "transfer") => {}
-        (Some("1xfer"), _) => return Err("ICRC-3 1xfer block has an unsupported operation label".into()),
-        (Some("1mint"), "mint") | (Some("1burn"), "burn")
-        | (Some("1approve"), "approve") | (Some("2approve"), "approve")
+        (Some("1xfer"), _) => {
+            return Err("ICRC-3 1xfer block has an unsupported operation label".into())
+        }
+        (Some("1mint"), "mint")
+        | (Some("1burn"), "burn")
+        | (Some("1approve"), "approve")
+        | (Some("2approve"), "approve")
         | (None, "mint" | "burn" | "approve") => return Ok(BotCancelHistoryMatch::Different),
         (Some("2xfer"), "xfer" | "transfer") if block.spender.is_some() => {
             return Ok(BotCancelHistoryMatch::Different);
@@ -10521,26 +13534,50 @@ fn bot_cancel_block_matches(
         (None, "xfer" | "transfer") if block.spender.is_some() => {
             return Ok(BotCancelHistoryMatch::Different);
         }
-        (Some("2xfer"), _) => return Err("ICRC-3 2xfer block has an unsupported or incomplete operation".into()),
+        (Some("2xfer"), _) => {
+            return Err("ICRC-3 2xfer block has an unsupported or incomplete operation".into())
+        }
         (None, "xfer" | "transfer") => {}
-        (Some(kind), _) => return Err(format!("unknown ICRC-3 block type {kind:?} prevents absence proof")),
-        (None, _) => return Err(format!("unknown untyped ICRC-3 operation {:?} prevents absence proof", block.op)),
+        (Some(kind), _) => {
+            return Err(format!(
+                "unknown ICRC-3 block type {kind:?} prevents absence proof"
+            ))
+        }
+        (None, _) => {
+            return Err(format!(
+                "unknown untyped ICRC-3 operation {:?} prevents absence proof",
+                block.op
+            ))
+        }
     }
     if block.spender.is_some() {
         return Err("ICRC-3 1xfer block unexpectedly includes a spender".into());
     }
-    let from = block.from.as_ref().ok_or("ICRC-3 1xfer block lacks source account")?;
-    let to = block.to.as_ref().ok_or("ICRC-3 1xfer block lacks destination account")?;
+    let from = block
+        .from
+        .as_ref()
+        .ok_or("ICRC-3 1xfer block lacks source account")?;
+    let to = block
+        .to
+        .as_ref()
+        .ok_or("ICRC-3 1xfer block lacks destination account")?;
     if !rumi_protocol_backend::icrc3_proof::accounts_match(from, &transfer.from)
         || !rumi_protocol_backend::icrc3_proof::accounts_match(to, &transfer.to)
         || block.amount != u128::from(transfer.amount)
     {
         return Ok(BotCancelHistoryMatch::Different);
     }
-    let transaction_fee = block.transaction_fee.ok_or("candidate ICRC-3 transfer omits transaction fee")?;
+    let transaction_fee = block
+        .transaction_fee
+        .ok_or("candidate ICRC-3 transfer omits transaction fee")?;
     let fee = block.fee.ok_or("candidate ICRC-3 transfer omits fee")?;
-    let memo = block.memo.as_deref().ok_or("candidate ICRC-3 transfer omits memo")?;
-    let created_at_time = block.created_at_time.ok_or("candidate ICRC-3 transfer omits created_at_time")?;
+    let memo = block
+        .memo
+        .as_deref()
+        .ok_or("candidate ICRC-3 transfer omits memo")?;
+    let created_at_time = block
+        .created_at_time
+        .ok_or("candidate ICRC-3 transfer omits created_at_time")?;
     if transaction_fee == u128::from(transfer.fee)
         && fee == u128::from(transfer.fee)
         && memo == transfer.memo.as_slice()
@@ -10565,23 +13602,31 @@ async fn scan_bot_cancel_history_step(
             "Bot cancellation history cursor does not bind its exact transfer tuple".into(),
         ));
     }
-    let end = scan
-        .snapshot_log_length
-        .min(scan.next_index.saturating_add(MAX_BOT_CANCEL_HISTORY_BLOCKS_PER_CALL));
+    let end = scan.snapshot_log_length.min(
+        scan.next_index
+            .saturating_add(MAX_BOT_CANCEL_HISTORY_BLOCKS_PER_CALL),
+    );
     let native_account_ids = if native_icp && scan.next_index < end {
-        Some(bot_cancel_native_account_ids(transfer).await.map_err(|error| {
-            ProtocolError::TemporarilyUnavailable(format!(
-                "Could not derive native ICP cancellation account identifiers: {error}"
-            ))
-        })?)
+        Some(
+            bot_cancel_native_account_ids(transfer)
+                .await
+                .map_err(|error| {
+                    ProtocolError::TemporarilyUnavailable(format!(
+                        "Could not derive native ICP cancellation account identifiers: {error}"
+                    ))
+                })?,
+        )
     } else {
         None
     };
     while scan.next_index < end {
         let index = scan.next_index;
         if native_icp {
-            let (expected_from, expected_to) = native_account_ids.as_ref().expect("derived for nonempty native scan");
-            match bot_cancel_native_block_matches(transfer, index, expected_from, expected_to).await {
+            let (expected_from, expected_to) = native_account_ids
+                .as_ref()
+                .expect("derived for nonempty native scan");
+            match bot_cancel_native_block_matches(transfer, index, expected_from, expected_to).await
+            {
                 Ok(BotCancelHistoryMatch::Exact) => return Ok(BotCancelHistoryStep::Found(index)),
                 Ok(BotCancelHistoryMatch::Different) => {}
                 Err(reason) => {
@@ -10591,14 +13636,14 @@ async fn scan_bot_cancel_history_step(
                 }
             }
         } else {
-            let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(
-                transfer.ledger,
-                index,
-            )
-            .await
-            .map_err(|error| ProtocolError::TemporarilyUnavailable(format!(
-                "Could not prove bot cancellation history at block {index}: {error}"
-            )))?;
+            let block =
+                rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(transfer.ledger, index)
+                    .await
+                    .map_err(|error| {
+                        ProtocolError::TemporarilyUnavailable(format!(
+                            "Could not prove bot cancellation history at block {index}: {error}"
+                        ))
+                    })?;
             match bot_cancel_block_matches(&block, transfer) {
                 Ok(BotCancelHistoryMatch::Exact) => return Ok(BotCancelHistoryStep::Found(index)),
                 Ok(BotCancelHistoryMatch::Different) => {}
@@ -10614,7 +13659,9 @@ async fn scan_bot_cancel_history_step(
         })?;
     }
     if scan.next_index == scan.snapshot_log_length {
-        Ok(BotCancelHistoryStep::CompleteAbsent(scan.snapshot_log_length))
+        Ok(BotCancelHistoryStep::CompleteAbsent(
+            scan.snapshot_log_length,
+        ))
     } else {
         Ok(BotCancelHistoryStep::Progress(scan))
     }
@@ -10646,14 +13693,18 @@ async fn bot_cancel_native_account_ids(
         (transfer.from.clone(),),
     )
     .await
-    .map_err(|(code, message)| format!("native ICP source account_identifier failed: {code:?} {message}"))?;
+    .map_err(|(code, message)| {
+        format!("native ICP source account_identifier failed: {code:?} {message}")
+    })?;
     let (expected_to,): (Vec<u8>,) = ic_cdk::call(
         transfer.ledger,
         "account_identifier",
         (transfer.to.clone(),),
     )
     .await
-    .map_err(|(code, message)| format!("native ICP destination account_identifier failed: {code:?} {message}"))?;
+    .map_err(|(code, message)| {
+        format!("native ICP destination account_identifier failed: {code:?} {message}")
+    })?;
     if expected_from.len() != 32 || expected_to.len() != 32 {
         return Err("native ICP account_identifier did not return 32-byte identifiers".into());
     }
@@ -10675,7 +13726,8 @@ fn classify_native_icp_cancel_block(
         fee_e8s,
         icrc1_memo,
         created_at_time_nanos,
-    } = block else {
+    } = block
+    else {
         return Ok(BotCancelHistoryMatch::Different);
     };
     if spender.is_some() {
@@ -10718,16 +13770,26 @@ fn bot_cancel_transfer_for(
     attempt: usize,
     backend_id: Principal,
 ) -> Result<rumi_protocol_backend::state::BotClaimCancelTransfer, ProtocolError> {
-    let (required, backend_credit) = rumi_protocol_backend::bot_claim_return::fee_buffered_return_budget(
-        claim.collateral_amount, fee,
-    ).map_err(ProtocolError::GenericError)?;
+    let (required, backend_credit) =
+        rumi_protocol_backend::bot_claim_return::fee_buffered_return_budget(
+            claim.collateral_amount,
+            fee,
+        )
+        .map_err(ProtocolError::GenericError)?;
     if backend_credit != claim.collateral_amount {
         return Err(ProtocolError::GenericError(
             "Pinned return-fee budget does not preserve exact claim collateral".into(),
         ));
     }
     bot_cancel_transfer_for_source_balance(
-        claim, ledger, fee, required, created_at_time, history_start_index, attempt, backend_id,
+        claim,
+        ledger,
+        fee,
+        required,
+        created_at_time,
+        history_start_index,
+        attempt,
+        backend_id,
     )
 }
 
@@ -10742,7 +13804,9 @@ fn bot_cancel_transfer_for_source_balance(
     backend_id: Principal,
 ) -> Result<rumi_protocol_backend::state::BotClaimCancelTransfer, ProtocolError> {
     let amount = source_balance.checked_sub(fee).ok_or_else(|| {
-        ProtocolError::GenericError("Returned collateral is too small to consolidate after ledger fee".into())
+        ProtocolError::GenericError(
+            "Returned collateral is too small to consolidate after ledger fee".into(),
+        )
     })?;
     if amount == 0 {
         return Err(ProtocolError::GenericError(
@@ -10799,9 +13863,12 @@ fn bot_cancel_repriced_transfer(
             "Consolidation fee {consolidation_fee} exceeds the authenticated return buffer {available_fee_buffer}; a verified generation-bound top-up is required"
         )));
     }
-    let source_balance = claim.collateral_amount.checked_add(consolidation_fee).ok_or_else(|| {
-        ProtocolError::GenericError("Repriced claim consolidation amount overflows".into())
-    })?;
+    let source_balance = claim
+        .collateral_amount
+        .checked_add(consolidation_fee)
+        .ok_or_else(|| {
+            ProtocolError::GenericError("Repriced claim consolidation amount overflows".into())
+        })?;
     let dust = available_fee_buffer - consolidation_fee;
     let transfer = bot_cancel_transfer_for_source_balance(
         claim,
@@ -10824,30 +13891,40 @@ fn bot_cancel_repriced_transfer(
 fn bot_claim_verified_return_buffer(
     journal: &rumi_protocol_backend::state::BotClaimCancelJournal,
 ) -> Result<u64, ProtocolError> {
-    let return_fee = journal.return_fee_e8s.ok_or_else(|| ProtocolError::GenericError(
-        "Cancellation journal has no authenticated return fee".into(),
-    ))?;
+    let return_fee = journal.return_fee_e8s.ok_or_else(|| {
+        ProtocolError::GenericError("Cancellation journal has no authenticated return fee".into())
+    })?;
     if journal.return_topups.len() > MAX_BOT_RETURN_TOPUPS
-        || journal.return_topups.iter().enumerate().any(|(index, receipt)| {
-            receipt.ledger != journal.claim.collateral_type
-                || receipt.amount_e8s == 0
-                || receipt.sequence != index as u64
-                || receipt.created_at_time < journal.claim.claimed_at
-                || journal.return_topups[..index].iter().any(|previous| {
-                    previous.block_index == receipt.block_index
-                        || previous.created_at_time >= receipt.created_at_time
-                })
-        })
+        || journal
+            .return_topups
+            .iter()
+            .enumerate()
+            .any(|(index, receipt)| {
+                receipt.ledger != journal.claim.collateral_type
+                    || receipt.amount_e8s == 0
+                    || receipt.sequence != index as u64
+                    || receipt.created_at_time < journal.claim.claimed_at
+                    || journal.return_topups[..index].iter().any(|previous| {
+                        previous.block_index == receipt.block_index
+                            || previous.created_at_time >= receipt.created_at_time
+                    })
+            })
     {
         return Err(ProtocolError::GenericError(
-            "Persisted top-up receipts do not form a unique ordered claim-generation proof set".into(),
+            "Persisted top-up receipts do not form a unique ordered claim-generation proof set"
+                .into(),
         ));
     }
-    journal.return_topups.iter().try_fold(return_fee, |total, receipt| {
-        total.checked_add(receipt.amount_e8s).ok_or_else(|| ProtocolError::GenericError(
-            "Verified claim-generation return buffer overflows".into(),
-        ))
-    })
+    journal
+        .return_topups
+        .iter()
+        .try_fold(return_fee, |total, receipt| {
+            total.checked_add(receipt.amount_e8s).ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "Verified claim-generation return buffer overflows".into(),
+                )
+            })
+        })
 }
 
 fn bot_claim_matches_recovery_identity(
@@ -10859,7 +13936,10 @@ fn bot_claim_matches_recovery_identity(
     claim.vault_id == vault_id
         && claim.claiming_bot == Some(caller)
         && claim.request_id == Some(request_id)
-        && claim.payment_memo.as_ref().is_some_and(|memo| !memo.is_empty())
+        && claim
+            .payment_memo
+            .as_ref()
+            .is_some_and(|memo| !memo.is_empty())
 }
 
 fn same_pending_bot_claim_transfer(
@@ -10880,13 +13960,21 @@ fn pending_bot_claim_request_matches(
     pending.request_id == requested
 }
 
-fn proportional_bot_interest_share(debt_e8s: u64, accrued_interest_e8s: u64, payment_e8s: u64) -> u64 {
+fn proportional_bot_interest_share(
+    debt_e8s: u64,
+    accrued_interest_e8s: u64,
+    payment_e8s: u64,
+) -> u64 {
     rumi_protocol_backend::numeric::proportional_interest_share(
-        payment_e8s, accrued_interest_e8s, debt_e8s,
+        payment_e8s,
+        accrued_interest_e8s,
+        debt_e8s,
     )
 }
 
-fn bot_claim_transfer_definitely_rejected(error: &icrc_ledger_types::icrc1::transfer::TransferError) -> bool {
+fn bot_claim_transfer_definitely_rejected(
+    error: &icrc_ledger_types::icrc1::transfer::TransferError,
+) -> bool {
     use icrc_ledger_types::icrc1::transfer::TransferError;
     matches!(
         error,
@@ -10913,7 +14001,9 @@ async fn submit_pending_bot_claim_transfer(
         let pending = s
             .pending_bot_claim_transfers
             .get_mut(&vault_id)
-            .ok_or_else(|| ProtocolError::GenericError("Pending bot transfer disappeared".into()))?;
+            .ok_or_else(|| {
+                ProtocolError::GenericError("Pending bot transfer disappeared".into())
+            })?;
         if pending.bot_principal != caller {
             return Err(ProtocolError::GenericError(
                 "Pending bot transfer belongs to a different bot principal".into(),
@@ -10953,13 +14043,14 @@ async fn submit_pending_bot_claim_transfer(
                 .map_err(|error| ProtocolError::TemporarilyUnavailable(format!(
                     "Collateral transfer returned block {block}, but exact ledger receipt verification is pending: {error}"
                 )))?;
-            let claim_payment_subaccount = rumi_protocol_backend::bot_claim_payment_subaccount(
-                vault_id, attempt.claimed_at,
-            ).to_vec();
+            let claim_payment_subaccount =
+                rumi_protocol_backend::bot_claim_payment_subaccount(vault_id, attempt.claimed_at)
+                    .to_vec();
             let return_account = icrc_ledger_types::icrc1::account::Account {
                 owner: ic_cdk::id(),
                 subaccount: Some(rumi_protocol_backend::bot_claim_return_subaccount(
-                    vault_id, attempt.claimed_at,
+                    vault_id,
+                    attempt.claimed_at,
                 )),
             };
             let claim_transfer = rumi_protocol_backend::state::BotClaimTransferReceipt {
@@ -10975,32 +14066,31 @@ async fn submit_pending_bot_claim_transfer(
             };
             mutate_state(|s| {
                 if !same_pending_bot_claim_transfer(
-                        s.pending_bot_claim_transfers.get(&vault_id),
-                        &attempt,
-                    )
-                    || !s
-                        .vault_id_to_vaults
-                        .get(&vault_id)
-                        .map(|vault| vault.bot_processing)
-                        .unwrap_or(false)
+                    s.pending_bot_claim_transfers.get(&vault_id),
+                    &attempt,
+                ) || !s
+                    .vault_id_to_vaults
+                    .get(&vault_id)
+                    .map(|vault| vault.bot_processing)
+                    .unwrap_or(false)
                 {
                     return Err(ProtocolError::GenericError(
                         "Pending bot transfer changed after ledger success; exact retry remains available".into(),
                     ));
                 }
                 let claim = rumi_protocol_backend::state::BotClaim {
-                        vault_id,
-                        collateral_amount: attempt.collateral_amount,
-                        debt_amount: attempt.debt_amount,
-                        collateral_type: attempt.collateral_type,
-                        claimed_at: attempt.claimed_at,
-                        collateral_price_e8s: attempt.collateral_price_e8s,
-                        payment_memo: Some(attempt.payment_memo.clone()),
-                        request_id: attempt.request_id,
-                        claiming_bot: Some(attempt.bot_principal),
-                        claim_transfer: Some(claim_transfer.clone()),
-                        claim_payment_subaccount: Some(claim_payment_subaccount.clone()),
-                    };
+                    vault_id,
+                    collateral_amount: attempt.collateral_amount,
+                    debt_amount: attempt.debt_amount,
+                    collateral_type: attempt.collateral_type,
+                    claimed_at: attempt.claimed_at,
+                    collateral_price_e8s: attempt.collateral_price_e8s,
+                    payment_memo: Some(attempt.payment_memo.clone()),
+                    request_id: attempt.request_id,
+                    claiming_bot: Some(attempt.bot_principal),
+                    claim_transfer: Some(claim_transfer.clone()),
+                    claim_payment_subaccount: Some(claim_payment_subaccount.clone()),
+                };
                 s.bot_claims.insert(vault_id, claim.clone());
                 s.bot_claim_cancel_journals.insert(
                     vault_id,
@@ -11116,11 +14206,12 @@ async fn verify_pending_bot_claim_transfer_receipt(
             &attempt.transfer_memo,
             attempt.transfer_created_at_time,
             block_index,
-        ).await;
+        )
+        .await;
     }
-    let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(
-        attempt.collateral_type, block_index,
-    ).await?;
+    let block =
+        rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(attempt.collateral_type, block_index)
+            .await?;
     rumi_protocol_backend::icrc3_proof::validate_icrc3_transfer_block_with_fee(
         &block,
         attempt.transfer_from.clone(),
@@ -11132,7 +14223,10 @@ async fn verify_pending_bot_claim_transfer_receipt(
     )
 }
 
-fn reject_unproven_stuck_claim_resolution(vault_id: u64, apply_debt_reduction: bool) -> ProtocolError {
+fn reject_unproven_stuck_claim_resolution(
+    vault_id: u64,
+    apply_debt_reduction: bool,
+) -> ProtocolError {
     let action = if apply_debt_reduction {
         "write down debt and collateral without a configured-ledger payment proof"
     } else {
@@ -11172,17 +14266,17 @@ async fn bot_claim_liquidation_inner(
     allow_exact_receipt_recovery: bool,
 ) -> Result<BotLiquidationResult, ProtocolError> {
     let caller = ic_cdk::api::caller();
-    let has_pending_attempt =
-        read_state(|s| s.pending_bot_claim_transfers.contains_key(&vault_id));
-    let has_exact_receipt_candidate = request_id.is_some()
-        && read_state(|s| s.bot_claims.contains_key(&vault_id));
+    let has_pending_attempt = read_state(|s| s.pending_bot_claim_transfers.contains_key(&vault_id));
+    let has_exact_receipt_candidate =
+        request_id.is_some() && read_state(|s| s.bot_claims.contains_key(&vault_id));
     if has_pending_attempt || has_exact_receipt_candidate {
         if caller == Principal::anonymous() {
             return Err(ProtocolError::AnonymousCallerNotAllowed);
         }
         if read_state(|s| s.frozen) {
             return Err(ProtocolError::TemporarilyUnavailable(
-                "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
+                "Protocol is frozen. All operations are suspended pending admin review."
+                    .to_string(),
             ));
         }
     } else {
@@ -11243,7 +14337,8 @@ async fn bot_claim_liquidation_inner(
             })
         {
             return Err(ProtocolError::GenericError(
-                "Pending bot transfer is quarantined because its owner or vault lock changed".into(),
+                "Pending bot transfer is quarantined because its owner or vault lock changed"
+                    .into(),
             ));
         }
         let claimed_vault = read_state(|s| s.vault_id_to_vaults.get(&vault_id).cloned())
@@ -11268,7 +14363,11 @@ async fn bot_claim_liquidation_inner(
         ));
     }
 
-    if read_state(|s| s.completed_bot_claim_cancellations.keys().any(|(id, _)| *id == vault_id)) {
+    if read_state(|s| {
+        s.completed_bot_claim_cancellations
+            .keys()
+            .any(|(id, _)| *id == vault_id)
+    }) {
         return Err(ProtocolError::TemporarilyUnavailable(
             "Previous claim cancellation is verified but not yet ACKed by the bot; ACK that generation before a new claim".into(),
         ));
@@ -11277,8 +14376,8 @@ async fn bot_claim_liquidation_inner(
     // The historical no-ID method stays in the ABI for compatibility, but it
     // cannot create a fresh claim. Its sole recovery use is the exact legacy
     // pending tuple above, where both persisted and requested IDs are None.
-    let request_id = require_fresh_bot_claim_request_id(request_id)
-        .map_err(ProtocolError::GenericError)?;
+    let request_id =
+        require_fresh_bot_claim_request_id(request_id).map_err(ProtocolError::GenericError)?;
     read_state(|s| next_bot_claim_request_id_floor(s, caller, request_id))
         .map_err(ProtocolError::GenericError)?;
 
@@ -11300,9 +14399,9 @@ async fn bot_claim_liquidation_inner(
 
             rumi_protocol_backend::vault::require_supported_icrc_collateral_source(vault)?;
 
-            if vault.bot_processing {
+            if vault.bot_processing || s.vault_has_unresolved_borrow_mint(vault_id) {
                 return Err(ProtocolError::GenericError(format!(
-                    "Vault #{} is already being processed",
+                    "Vault #{} is already being processed or has an unresolved borrow mint",
                     vault_id
                 )));
             }
@@ -11392,9 +14491,12 @@ async fn bot_claim_liquidation_inner(
             let collateral_raw = rumi_protocol_backend::numeric::try_icusd_to_collateral_amount(
                 actual, price, decimals,
             )
-            .ok_or_else(|| ProtocolError::GenericError(
-                "Required bot-liquidation collateral exceeds the supported raw-token range.".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "Required bot-liquidation collateral exceeds the supported raw-token range."
+                        .to_string(),
+                )
+            })?;
             let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
             let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
             let fee_raw = s
@@ -11465,13 +14567,15 @@ async fn bot_claim_liquidation_inner(
                 vault_id
             )));
         };
-        if vault.bot_processing {
+        if vault.bot_processing || s.vault_has_unresolved_borrow_mint(vault_id) {
             return Err(ProtocolError::GenericError(format!(
-                "Vault #{} is already being processed",
+                "Vault #{} is already being processed or has an unresolved borrow mint",
                 vault_id
             )));
         }
-        if let Err(error) = rumi_protocol_backend::vault::require_supported_icrc_collateral_source(vault) {
+        if let Err(error) =
+            rumi_protocol_backend::vault::require_supported_icrc_collateral_source(vault)
+        {
             return Err(error);
         }
         // `claimed_at` is the return-subaccount identity. Allocate it above
@@ -11494,10 +14598,9 @@ async fn bot_claim_liquidation_inner(
         let claimed_at = next_bot_claim_generation_at(now, known_generation).ok_or_else(|| {
             ProtocolError::GenericError("Bot claim generation timestamp exhausted".into())
         })?;
-        let Some(remaining) = remaining_bot_budget_after_reservation(
-            s.bot_budget_remaining_e8s,
-            reserved_debt,
-        ) else {
+        let Some(remaining) =
+            remaining_bot_budget_after_reservation(s.bot_budget_remaining_e8s, reserved_debt)
+        else {
             return Err(ProtocolError::GenericError(format!(
                 "Bot budget insufficient: {} remaining, need {}",
                 s.bot_budget_remaining_e8s, reserved_debt
@@ -11520,38 +14623,39 @@ async fn bot_claim_liquidation_inner(
             .get_mut(&vault_id)
             .expect("vault existence checked above")
             .bot_processing = true;
-        s.bot_claim_generation_high_water.insert(vault_id, claimed_at);
-        s.bot_claim_payment_capacity_reservations.insert((vault_id, claimed_at));
+        s.bot_claim_generation_high_water
+            .insert(vault_id, claimed_at);
+        s.bot_claim_payment_capacity_reservations
+            .insert((vault_id, claimed_at));
         // Ledger deduplication timestamps remain based on actual IC time;
         // subaccount identity must not push the transfer into the future.
         let op_nonce = s.next_op_nonce_at(now);
         s.pending_bot_claim_transfers.insert(
             vault_id,
-                rumi_protocol_backend::state::PendingBotClaimTransfer {
-                    vault_id,
-                    collateral_amount: collateral_to_seize.to_u64(),
-                    debt_amount: reserved_debt,
-                    collateral_type,
-                    bot_principal: caller,
-                    request_id: Some(request_id),
-                    transfer_from: icrc_ledger_types::icrc1::account::Account {
-                        owner: ic_cdk::id(),
-                        subaccount: None,
-                    },
-                    transfer_to: icrc_ledger_types::icrc1::account::Account {
-                        owner: caller,
-                        subaccount: None,
-                    },
-                    transfer_amount: collateral_to_seize.to_u64(),
-                    transfer_fee: fee_raw,
-                    transfer_memo: op_nonce.to_be_bytes().to_vec(),
-                    transfer_created_at_time:
-                        management::nonce_to_created_at_time(op_nonce),
-                    claimed_at,
-                    collateral_price_e8s: collateral_price_usd.to_e8s(),
-                    payment_memo: payment_memo.clone(),
-                    attempt_count: 0,
+            rumi_protocol_backend::state::PendingBotClaimTransfer {
+                vault_id,
+                collateral_amount: collateral_to_seize.to_u64(),
+                debt_amount: reserved_debt,
+                collateral_type,
+                bot_principal: caller,
+                request_id: Some(request_id),
+                transfer_from: icrc_ledger_types::icrc1::account::Account {
+                    owner: ic_cdk::id(),
+                    subaccount: None,
                 },
+                transfer_to: icrc_ledger_types::icrc1::account::Account {
+                    owner: caller,
+                    subaccount: None,
+                },
+                transfer_amount: collateral_to_seize.to_u64(),
+                transfer_fee: fee_raw,
+                transfer_memo: op_nonce.to_be_bytes().to_vec(),
+                transfer_created_at_time: management::nonce_to_created_at_time(op_nonce),
+                claimed_at,
+                collateral_price_e8s: collateral_price_usd.to_e8s(),
+                payment_memo: payment_memo.clone(),
+                attempt_count: 0,
+            },
         );
         Ok(())
     })?;
@@ -11589,7 +14693,8 @@ async fn bot_confirm_liquidation_with_payment(
     claim_timestamp: u64,
     payment_block_index: u64,
 ) -> Result<(), ProtocolError> {
-    bot_confirm_liquidation_with_payments(vault_id, claim_timestamp, vec![payment_block_index]).await
+    bot_confirm_liquidation_with_payments(vault_id, claim_timestamp, vec![payment_block_index])
+        .await
 }
 
 /// Read the verified ckUSDC amount currently locked to a short claim payment.
@@ -11608,36 +14713,55 @@ fn bot_claim_partial_payment_amount(
                 "Caller is not the registered liquidation bot canister".to_string(),
             ));
         }
-        let active = s.bot_claims.get(&vault_id).ok_or_else(|| ProtocolError::GenericError(
-            "No active bot claim for the requested generation".to_string(),
-        ))?;
+        let active = s.bot_claims.get(&vault_id).ok_or_else(|| {
+            ProtocolError::GenericError(
+                "No active bot claim for the requested generation".to_string(),
+            )
+        })?;
         if active.claimed_at != claim_timestamp || active.payment_memo.is_none() {
             return Err(ProtocolError::GenericError(
-                "Partial payment status requires the active memo-bound claim generation".to_string(),
+                "Partial payment status requires the active memo-bound claim generation"
+                    .to_string(),
             ));
         }
-        let processing = s.vault_id_to_vaults.get(&vault_id)
-            .map(|vault| vault.bot_processing).unwrap_or(false);
+        let processing = s
+            .vault_id_to_vaults
+            .get(&vault_id)
+            .map(|vault| vault.bot_processing)
+            .unwrap_or(false);
         if !processing {
             return Err(ProtocolError::GenericError(
                 "Partial payment status requires the vault to remain in bot processing".to_string(),
             ));
         }
         let active_memo = active.payment_memo.as_deref();
-        let matching = s.consumed_bot_payment_blocks.iter().filter(|(_, receipt)| {
-            receipt.caller == caller
-                && rumi_protocol_backend::bot_payment::partial_receipt_matches_generation(
-                    receipt, vault_id, claim_timestamp, active_memo,
-                )
-        }).map(|((ledger, _), receipt)| (*ledger, receipt.total_amount_e6))
+        let matching = s
+            .consumed_bot_payment_blocks
+            .iter()
+            .filter(|(_, receipt)| {
+                receipt.caller == caller
+                    && rumi_protocol_backend::bot_payment::partial_receipt_matches_generation(
+                        receipt,
+                        vault_id,
+                        claim_timestamp,
+                        active_memo,
+                    )
+            })
+            .map(|((ledger, _), receipt)| (*ledger, receipt.total_amount_e6))
             .collect::<Vec<_>>();
-        if matching.is_empty() { return Ok(None) }
+        if matching.is_empty() {
+            return Ok(None);
+        }
         let Some(configured_ledger) = s.ckusdc_ledger_principal else {
             return Err(ProtocolError::GenericError(
-                "A verified partial payment exists but the configured ckUSDC ledger is unavailable".to_string(),
+                "A verified partial payment exists but the configured ckUSDC ledger is unavailable"
+                    .to_string(),
             ));
         };
-        if matching.iter().any(|(ledger, _)| *ledger != configured_ledger) {
+        if matching
+            .iter()
+            .any(|(ledger, _)| *ledger != configured_ledger)
+        {
             return Err(ProtocolError::GenericError(
                 "A verified partial payment belongs to a prior ckUSDC ledger; recovery is held for operator reconciliation".to_string(),
             ));
@@ -11677,7 +14801,11 @@ fn bot_claim_partial_payment_block_evidence_in_state(
             "Partial payment evidence requires the exact active claim generation".to_string(),
         ));
     }
-    if !state.vault_id_to_vaults.get(&vault_id).is_some_and(|vault| vault.bot_processing) {
+    if !state
+        .vault_id_to_vaults
+        .get(&vault_id)
+        .is_some_and(|vault| vault.bot_processing)
+    {
         return Err(ProtocolError::GenericError(
             "Partial payment evidence requires the vault to remain in bot processing".to_string(),
         ));
@@ -11687,7 +14815,10 @@ fn bot_claim_partial_payment_block_evidence_in_state(
             "ckUSDC ledger is not configured; exact partial-payment evidence is unavailable".into(),
         )
     })?;
-    let Some(receipt) = state.consumed_bot_payment_blocks.get(&(ledger, payment_block_index)) else {
+    let Some(receipt) = state
+        .consumed_bot_payment_blocks
+        .get(&(ledger, payment_block_index))
+    else {
         return Ok(None);
     };
     // Old snapshots default `payment_block_indexes` to empty. Such receipts
@@ -11725,7 +14856,11 @@ fn bot_claim_partial_payment_block_evidence(
     let caller = ic_cdk::api::caller();
     read_state(|state| {
         bot_claim_partial_payment_block_evidence_in_state(
-            state, caller, vault_id, claim_timestamp, payment_block_index,
+            state,
+            caller,
+            vault_id,
+            claim_timestamp,
+            payment_block_index,
         )
     })
 }
@@ -11741,9 +14876,12 @@ async fn bot_confirm_liquidation_with_payments(
     payment_block_indexes: Vec<u64>,
 ) -> Result<(), ProtocolError> {
     validate_call().await?;
-    let payment_block_indexes = rumi_protocol_backend::bot_payment::canonical_payment_block_indexes(
-        payment_block_indexes, MAX_BOT_PAYMENT_BLOCKS_PER_CLAIM,
-    ).map_err(ProtocolError::GenericError)?;
+    let payment_block_indexes =
+        rumi_protocol_backend::bot_payment::canonical_payment_block_indexes(
+            payment_block_indexes,
+            MAX_BOT_PAYMENT_BLOCKS_PER_CLAIM,
+        )
+        .map_err(ProtocolError::GenericError)?;
     let caller = ic_cdk::api::caller();
 
     let (registered_bot, payment_ledger) =
@@ -11764,39 +14902,52 @@ async fn bot_confirm_liquidation_with_payments(
     let _vault_liq_guard = rumi_protocol_backend::guard::VaultLiquidationGuard::new(vault_id)?;
 
     let aggregate_replay = read_state(|s| {
-        let receipt = s.bot_payment_aggregate_receipts
-            .get(&(caller, vault_id, claim_timestamp)).cloned()?;
-        let active_memo = s.bot_claims.get(&vault_id)
+        let receipt = s
+            .bot_payment_aggregate_receipts
+            .get(&(caller, vault_id, claim_timestamp))
+            .cloned()?;
+        let active_memo = s
+            .bot_claims
+            .get(&vault_id)
             .filter(|claim| claim.claimed_at == claim_timestamp)
             .map(|claim| claim.payment_memo.clone());
         Some((receipt, active_memo))
     });
     if let Some((receipt, active_memo)) = aggregate_replay {
         if receipt.payment_block_indexes == payment_block_indexes
-            && active_memo.as_ref().map_or(true, |memo| memo == &receipt.payment_memo)
+            && active_memo
+                .as_ref()
+                .map_or(true, |memo| memo == &receipt.payment_memo)
         {
             return Ok(());
         }
         return Err(ProtocolError::GenericError(
-            "Settled bot claim generation can only be replayed with its exact ckUSDC block set".to_string(),
+            "Settled bot claim generation can only be replayed with its exact ckUSDC block set"
+                .to_string(),
         ));
     }
 
     let settled_replay = read_state(|s| {
-        let receipts = payment_block_indexes.iter().map(|index|
-            s.consumed_bot_payment_blocks.get(&(payment_ledger, *index))
-        ).collect::<Option<Vec<_>>>()?;
+        let receipts = payment_block_indexes
+            .iter()
+            .map(|index| s.consumed_bot_payment_blocks.get(&(payment_ledger, *index)))
+            .collect::<Option<Vec<_>>>()?;
         let first = receipts.first()?;
         (first.aggregate_complete
-            && first.caller == caller && first.vault_id == vault_id
+            && first.caller == caller
+            && first.vault_id == vault_id
             && first.claim_timestamp == claim_timestamp
             && rumi_protocol_backend::bot_payment::exact_block_set_matches(
-                first, &payment_block_indexes, payment_block_indexes[0],
+                first,
+                &payment_block_indexes,
+                payment_block_indexes[0],
             )
             && receipts.iter().all(|receipt| *receipt == *first))
-            .then_some(())
+        .then_some(())
     });
-    if settled_replay.is_some() { return Ok(()); }
+    if settled_replay.is_some() {
+        return Ok(());
+    }
 
     let claim = read_state(|s| {
         let claim = s.bot_claims.get(&vault_id).cloned().ok_or_else(|| {
@@ -11832,35 +14983,57 @@ async fn bot_confirm_liquidation_with_payments(
         ));
     }
     let prior_partial = read_state(|s| {
-        s.consumed_bot_payment_blocks.iter()
-            .filter(|((ledger, _), receipt)| *ledger == payment_ledger
-                && receipt.caller == caller && receipt.vault_id == vault_id
-                && receipt.claim_timestamp == claim_timestamp
-                && receipt.payment_memo == claim.payment_memo && !receipt.aggregate_complete)
+        s.consumed_bot_payment_blocks
+            .iter()
+            .filter(|((ledger, _), receipt)| {
+                *ledger == payment_ledger
+                    && receipt.caller == caller
+                    && receipt.vault_id == vault_id
+                    && receipt.claim_timestamp == claim_timestamp
+                    && receipt.payment_memo == claim.payment_memo
+                    && !receipt.aggregate_complete
+            })
             .map(|((_, index), _)| *index)
             .collect::<Vec<_>>()
     });
-    if prior_partial.iter().any(|index| !payment_block_indexes.contains(index)) {
+    if prior_partial
+        .iter()
+        .any(|index| !payment_block_indexes.contains(index))
+    {
         return Err(ProtocolError::GenericError(
             "Top-up proof must include every previously verified block for this claim".to_string(),
         ));
     }
-    let existing = read_state(|s| payment_block_indexes.iter().map(|index| {
-        (*index, s.consumed_bot_payment_blocks.get(&(payment_ledger, *index)).cloned())
-    }).collect::<Vec<_>>());
+    let existing = read_state(|s| {
+        payment_block_indexes
+            .iter()
+            .map(|index| {
+                (
+                    *index,
+                    s.consumed_bot_payment_blocks
+                        .get(&(payment_ledger, *index))
+                        .cloned(),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
     for (index, receipt) in &existing {
         if let Some(receipt) = receipt {
-            if receipt.caller != caller || receipt.vault_id != vault_id
+            if receipt.caller != caller
+                || receipt.vault_id != vault_id
                 || receipt.claim_timestamp != claim_timestamp
                 || receipt.payment_memo != claim.payment_memo
             {
                 return Err(ProtocolError::GenericError(format!(
-                    "ckUSDC payment block {} was already consumed by another claim generation", index
+                    "ckUSDC payment block {} was already consumed by another claim generation",
+                    index
                 )));
             }
             if receipt.aggregate_complete {
                 if rumi_protocol_backend::bot_payment::exact_block_set_matches(
-                    receipt, &payment_block_indexes, *index,
+                    receipt,
+                    &payment_block_indexes,
+                    *index,
                 ) {
                     return Ok(());
                 }
@@ -11878,16 +15051,33 @@ async fn bot_confirm_liquidation_with_payments(
                 "Could not verify ckUSDC payment block {}: {}. Reconcile this block before retrying; do not send a second payment.", index, error
             )))?;
         let amount = if claim.payment_memo.is_some() {
-            rumi_protocol_backend::bot_payment::validate_memo_payment_block(&block, bot, ic_cdk::id(), &claim)
+            rumi_protocol_backend::bot_payment::validate_memo_payment_block(
+                &block,
+                bot,
+                ic_cdk::id(),
+                &claim,
+            )
         } else {
-            rumi_protocol_backend::bot_payment::validate_payment_block(&block, bot, ic_cdk::id(), &claim)
-        }.map_err(ProtocolError::GenericError)?;
+            rumi_protocol_backend::bot_payment::validate_payment_block(
+                &block,
+                bot,
+                ic_cdk::id(),
+                &claim,
+            )
+        }
+        .map_err(ProtocolError::GenericError)?;
         block_amounts.push(amount);
     }
     let aggregate_total_e6 = if claim.payment_memo.is_some() {
-        block_amounts.iter().try_fold(0u64, |sum, amount| sum.checked_add(*amount))
-            .ok_or_else(|| ProtocolError::GenericError("aggregate ckUSDC payment amount overflow".to_string()))?
-    } else { block_amounts[0] };
+        block_amounts
+            .iter()
+            .try_fold(0u64, |sum, amount| sum.checked_add(*amount))
+            .ok_or_else(|| {
+                ProtocolError::GenericError("aggregate ckUSDC payment amount overflow".to_string())
+            })?
+    } else {
+        block_amounts[0]
+    };
 
     // Recheck after the ledger await. A claim could have been canceled and
     // recreated while the proof was in flight; timestamp plus the stored memo
@@ -11912,13 +15102,16 @@ async fn bot_confirm_liquidation_with_payments(
         ));
     }
 
-    let minimum_payment = rumi_protocol_backend::bot_payment::minimum_ckusdc_e6_for_debt(claim.debt_amount);
+    let minimum_payment =
+        rumi_protocol_backend::bot_payment::minimum_ckusdc_e6_for_debt(claim.debt_amount);
     if aggregate_total_e6 < minimum_payment {
         mutate_state(|s| {
             if s.liquidation_bot_principal != Some(caller)
                 || s.ckusdc_ledger_principal != Some(payment_ledger)
                 || !rumi_protocol_backend::bot_payment::active_claim_matches(
-                    s.bot_claims.get(&vault_id), &claim, claim_timestamp,
+                    s.bot_claims.get(&vault_id),
+                    &claim,
+                    claim_timestamp,
                 )
             {
                 return Err(ProtocolError::GenericError(
@@ -11926,13 +15119,16 @@ async fn bot_confirm_liquidation_with_payments(
                 ));
             }
             for index in &payment_block_indexes {
-                if let Some(existing) = s.consumed_bot_payment_blocks.get(&(payment_ledger, *index)) {
-                    if existing.caller != caller || existing.vault_id != vault_id
+                if let Some(existing) = s.consumed_bot_payment_blocks.get(&(payment_ledger, *index))
+                {
+                    if existing.caller != caller
+                        || existing.vault_id != vault_id
                         || existing.claim_timestamp != claim_timestamp
                         || existing.payment_memo != claim.payment_memo
                     {
                         return Err(ProtocolError::GenericError(
-                            "ckUSDC payment block was consumed concurrently by another claim".to_string(),
+                            "ckUSDC payment block was consumed concurrently by another claim"
+                                .to_string(),
                         ));
                     }
                 }
@@ -11962,7 +15158,8 @@ async fn bot_confirm_liquidation_with_payments(
                 ));
             }
             for index in &payment_block_indexes {
-                s.consumed_bot_payment_blocks.insert((payment_ledger, *index), receipt.clone());
+                s.consumed_bot_payment_blocks
+                    .insert((payment_ledger, *index), receipt.clone());
             }
             Ok::<(), ProtocolError>(())
         })?;
@@ -11991,9 +15188,11 @@ async fn bot_confirm_liquidation_with_payments(
         }
         for index in &payment_block_indexes {
             if let Some(receipt) = s.consumed_bot_payment_blocks.get(&(payment_ledger, *index)) {
-                if receipt.caller != caller || receipt.vault_id != vault_id
+                if receipt.caller != caller
+                    || receipt.vault_id != vault_id
                     || receipt.claim_timestamp != claim_timestamp
-                    || receipt.payment_memo != claim.payment_memo || receipt.aggregate_complete
+                    || receipt.payment_memo != claim.payment_memo
+                    || receipt.aggregate_complete
                 {
                     return Err(ProtocolError::GenericError(
                         "ckUSDC payment block was consumed concurrently; reconcile the existing receipt".to_string(),
@@ -12001,9 +15200,12 @@ async fn bot_confirm_liquidation_with_payments(
                 }
             }
         }
-        if s.bot_payment_aggregate_receipts.contains_key(&(caller, vault_id, claim_timestamp)) {
+        if s.bot_payment_aggregate_receipts
+            .contains_key(&(caller, vault_id, claim_timestamp))
+        {
             return Err(ProtocolError::GenericError(
-                "Bot claim generation already has an immutable payment aggregate receipt".to_string(),
+                "Bot claim generation already has an immutable payment aggregate receipt"
+                    .to_string(),
             ));
         }
         let accrued_interest = s
@@ -12021,9 +15223,11 @@ async fn bot_confirm_liquidation_with_payments(
             let current = s.vault_id_to_vaults.get(&vault_id).expect("checked above");
             (
                 current.borrowed_icusd_amount.to_u64(),
-                current.collateral_amount.to_u64().ok_or_else(|| ProtocolError::GenericError(
-                    "Current vault collateral does not fit u64; settlement is held".to_string(),
-                ))?,
+                current.collateral_amount.to_u64().ok_or_else(|| {
+                    ProtocolError::GenericError(
+                        "Current vault collateral does not fit u64; settlement is held".to_string(),
+                    )
+                })?,
             )
         };
         if borrowed_now < claim.debt_amount || collateral_now < claim.collateral_amount {
@@ -12031,10 +15235,15 @@ async fn bot_confirm_liquidation_with_payments(
                 "Active vault debt or collateral is below the recorded bot claim; settlement is held for reconciliation".to_string(),
             ));
         }
-        let next_bot_total = s.bot_total_debt_covered_e8s.checked_add(claim.debt_amount)
-            .ok_or_else(|| ProtocolError::GenericError(
-                "Bot debt-covered accounting capacity exhausted; settlement is held".to_string(),
-            ))?;
+        let next_bot_total = s
+            .bot_total_debt_covered_e8s
+            .checked_add(claim.debt_amount)
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "Bot debt-covered accounting capacity exhausted; settlement is held"
+                        .to_string(),
+                )
+            })?;
         let aggregate_receipt = rumi_protocol_backend::state::BotPaymentAggregateReceipt {
             caller,
             vault_id,
@@ -12108,15 +15317,15 @@ async fn bot_confirm_liquidation_with_payments(
         rumi_protocol_backend::storage::record_event(&event);
 
         s.bot_total_debt_covered_e8s = next_bot_total;
-        s.bot_payment_aggregate_receipts.insert(
-            (caller, vault_id, claim_timestamp),
-            aggregate_receipt,
-        );
-        s.bot_claim_payment_capacity_reservations.remove(&(vault_id, claim_timestamp));
+        s.bot_payment_aggregate_receipts
+            .insert((caller, vault_id, claim_timestamp), aggregate_receipt);
+        s.bot_claim_payment_capacity_reservations
+            .remove(&(vault_id, claim_timestamp));
         s.bot_claims.remove(&vault_id);
         s.bot_claim_cancel_journals.remove(&vault_id);
         for index in &payment_block_indexes {
-            s.consumed_bot_payment_blocks.insert((payment_ledger, *index), complete_receipt.clone());
+            s.consumed_bot_payment_blocks
+                .insert((payment_ledger, *index), complete_receipt.clone());
         }
         if s.cleanup_if_drained(vault_id) {
             log!(
@@ -12176,7 +15385,8 @@ async fn bot_cancel_liquidation_with_generation(
         Some(return_block_index),
         Some(return_created_at_time),
         Some(return_fee_e8s),
-    ).await
+    )
+    .await
 }
 
 /// Prove a positive fee-buffer top-up into this claim generation's isolated
@@ -12201,7 +15411,9 @@ async fn bot_prove_claim_return_topup(
     let _vault_liq_guard = rumi_protocol_backend::guard::VaultLiquidationGuard::new(vault_id)?;
     let (claim, journal) = read_state(|s| {
         if s.liquidation_bot_principal != Some(caller) {
-            return Err(ProtocolError::GenericError("Bot registration changed".into()));
+            return Err(ProtocolError::GenericError(
+                "Bot registration changed".into(),
+            ));
         }
         let claim = s.bot_claims.get(&vault_id).cloned().ok_or_else(|| {
             ProtocolError::GenericError(format!("No active claim for vault #{vault_id}"))
@@ -12211,26 +15423,40 @@ async fn bot_prove_claim_return_topup(
                 "Top-up proof does not match the active claim generation and bot".into(),
             ));
         }
-        let journal = s.bot_claim_cancel_journals.get(&vault_id).cloned()
+        let journal = s
+            .bot_claim_cancel_journals
+            .get(&vault_id)
+            .cloned()
             .filter(|journal| journal.claim == claim)
-            .ok_or_else(|| ProtocolError::GenericError(
-                "Claim has no current cancellation recovery journal".into(),
-            ))?;
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "Claim has no current cancellation recovery journal".into(),
+                )
+            })?;
         Ok((claim, journal))
     })?;
-    if let Some(existing) = journal.return_topups.iter().find(|receipt| receipt.block_index == block_index) {
+    if let Some(existing) = journal
+        .return_topups
+        .iter()
+        .find(|receipt| receipt.block_index == block_index)
+    {
         return if existing.created_at_time == created_at_time && existing.fee_e8s == fee_e8s {
             Ok(())
         } else {
             Err(ProtocolError::GenericError(
-                "Top-up block is already bound to a different exact claim-generation receipt".into(),
+                "Top-up block is already bound to a different exact claim-generation receipt"
+                    .into(),
             ))
         };
     }
-    let required = journal.return_topup_required_e8s.filter(|amount| *amount > 0)
-        .ok_or_else(|| ProtocolError::GenericError(
-            "Claim generation has no outstanding verified top-up requirement".into(),
-        ))?;
+    let required = journal
+        .return_topup_required_e8s
+        .filter(|amount| *amount > 0)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "Claim generation has no outstanding verified top-up requirement".into(),
+            )
+        })?;
     if journal.transfer.is_some() {
         return Err(ProtocolError::GenericError(
             "Cannot add fee buffer after a consolidation tuple has been prepared".into(),
@@ -12241,10 +15467,14 @@ async fn bot_prove_claim_return_topup(
     })?;
     if journal.return_topups.len() >= MAX_BOT_RETURN_TOPUPS {
         return Err(ProtocolError::TemporarilyUnavailable(
-            "Generation-bound top-up proof limit reached; claim remains held for operator review".into(),
+            "Generation-bound top-up proof limit reached; claim remains held for operator review"
+                .into(),
         ));
     }
-    if journal.return_topups.iter().any(|receipt| receipt.created_at_time >= created_at_time)
+    if journal
+        .return_topups
+        .iter()
+        .any(|receipt| receipt.created_at_time >= created_at_time)
         || created_at_time < claim_timestamp
     {
         return Err(ProtocolError::GenericError(
@@ -12264,19 +15494,24 @@ async fn bot_prove_claim_return_topup(
         block_index,
         created_at_time,
         bot_cancel_uses_native_icp_history(claim.collateral_type),
-    ).await.map_err(|error| ProtocolError::TemporarilyUnavailable(format!(
-        "Exact generation-bound fee-buffer receipt is pending: {error}"
-    )))?;
+    )
+    .await
+    .map_err(|error| {
+        ProtocolError::TemporarilyUnavailable(format!(
+            "Exact generation-bound fee-buffer receipt is pending: {error}"
+        ))
+    })?;
 
     let mut next = journal.clone();
-    next.return_topups.push(rumi_protocol_backend::state::BotClaimReturnTopupReceipt {
-        ledger: claim.collateral_type,
-        block_index,
-        created_at_time,
-        amount_e8s: required,
-        fee_e8s,
-        sequence,
-    });
+    next.return_topups
+        .push(rumi_protocol_backend::state::BotClaimReturnTopupReceipt {
+            ledger: claim.collateral_type,
+            block_index,
+            created_at_time,
+            amount_e8s: required,
+            fee_e8s,
+            sequence,
+        });
     let available_buffer = bot_claim_verified_return_buffer(&next)?;
     let current_fee = management::get_ledger_fee(claim.collateral_type).await.map_err(|error| {
         ProtocolError::TemporarilyUnavailable(format!(
@@ -12285,25 +15520,43 @@ async fn bot_prove_claim_return_topup(
     })?;
     let return_account = icrc_ledger_types::icrc1::account::Account {
         owner: ic_cdk::id(),
-        subaccount: Some(rumi_protocol_backend::bot_claim_return_subaccount(vault_id, claim_timestamp)),
+        subaccount: Some(rumi_protocol_backend::bot_claim_return_subaccount(
+            vault_id,
+            claim_timestamp,
+        )),
     };
     let balance_result: Result<(candid::Nat,), _> = ic_cdk::call(
-        claim.collateral_type, "icrc1_balance_of", (return_account.clone(),),
-    ).await;
-    let balance = balance_result.map_err(|(code, message)| ProtocolError::TemporarilyUnavailable(
-        format!("Could not recheck isolated claim return after top-up proof: {code:?} {message}"),
-    ))?.0.0.to_u64().ok_or_else(|| ProtocolError::GenericError(
-        "Claim-specific collateral balance exceeds supported range".into(),
-    ))?;
+        claim.collateral_type,
+        "icrc1_balance_of",
+        (return_account.clone(),),
+    )
+    .await;
+    let balance = balance_result
+        .map_err(|(code, message)| {
+            ProtocolError::TemporarilyUnavailable(format!(
+                "Could not recheck isolated claim return after top-up proof: {code:?} {message}"
+            ))
+        })?
+        .0
+         .0
+        .to_u64()
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "Claim-specific collateral balance exceeds supported range".into(),
+            )
+        })?;
     if current_fee > available_buffer {
         next.consolidation_fee_e8s = Some(current_fee);
         next.return_topup_required_e8s = Some(current_fee - available_buffer);
         next.return_dust_e8s = 0;
         next.transfer = None;
     } else {
-        let source_budget = claim.collateral_amount.checked_add(current_fee).ok_or_else(|| {
-            ProtocolError::GenericError("Repriced claim consolidation amount overflows".into())
-        })?;
+        let source_budget = claim
+            .collateral_amount
+            .checked_add(current_fee)
+            .ok_or_else(|| {
+                ProtocolError::GenericError("Repriced claim consolidation amount overflows".into())
+            })?;
         if balance < source_budget {
             next.return_topup_required_e8s = None;
             next.consolidation_fee_e8s = Some(current_fee);
@@ -12379,20 +15632,31 @@ async fn bot_cancel_liquidation_impl(
         ));
     }
     if let Some(generation) = requested_generation {
-        if read_state(|s| s.acknowledged_bot_claim_cancellations.contains_key(&(generation, vault_id))) {
+        if read_state(|s| {
+            s.acknowledged_bot_claim_cancellations
+                .contains_key(&(generation, vault_id))
+        }) {
             return Ok(());
         }
-        if read_state(|s| s.completed_bot_claim_cancellations.contains_key(&(vault_id, generation))) {
+        if read_state(|s| {
+            s.completed_bot_claim_cancellations
+                .contains_key(&(vault_id, generation))
+        }) {
             let matches = read_state(|s| {
-                s.bot_claim_return_block_receipts.get(&(vault_id, generation)).is_some_and(|receipt| {
-                    Some(receipt.block_index) == supplied_return_block_index
-                        && Some(receipt.created_at_time) == supplied_return_created_at_time
-                        && Some(receipt.fee_e8s) == supplied_return_fee_e8s
-                })
+                s.bot_claim_return_block_receipts
+                    .get(&(vault_id, generation))
+                    .is_some_and(|receipt| {
+                        Some(receipt.block_index) == supplied_return_block_index
+                            && Some(receipt.created_at_time) == supplied_return_created_at_time
+                            && Some(receipt.fee_e8s) == supplied_return_fee_e8s
+                    })
             });
-            return if matches { Ok(()) } else {
+            return if matches {
+                Ok(())
+            } else {
                 Err(ProtocolError::GenericError(
-                    "Completed cancellation replay does not match its authenticated return block".into(),
+                    "Completed cancellation replay does not match its authenticated return block"
+                        .into(),
                 ))
             };
         }
@@ -12411,11 +15675,16 @@ async fn bot_cancel_liquidation_impl(
             "Legacy claim has no exact outbound transfer receipt; cancellation remains held".into(),
         ));
     }
-    let has_verified_partial_payment = read_state(|s| s.consumed_bot_payment_blocks.values().any(|receipt|
-        rumi_protocol_backend::bot_payment::partial_receipt_matches_generation(
-            receipt, vault_id, claim.claimed_at, claim.payment_memo.as_deref(),
-        )
-    ));
+    let has_verified_partial_payment = read_state(|s| {
+        s.consumed_bot_payment_blocks.values().any(|receipt| {
+            rumi_protocol_backend::bot_payment::partial_receipt_matches_generation(
+                receipt,
+                vault_id,
+                claim.claimed_at,
+                claim.payment_memo.as_deref(),
+            )
+        })
+    });
     if has_verified_partial_payment {
         return Err(ProtocolError::GenericError(
             "Claim has a verified partial ckUSDC payment locked to it; top up and settle the exact aggregate before cancellation".into(),
@@ -12430,37 +15699,57 @@ async fn bot_cancel_liquidation_impl(
     if !read_state(|s| {
         s.liquidation_bot_principal == Some(caller)
             && same_active_bot_claim(s.bot_claims.get(&vault_id), &claim)
-            && s.vault_id_to_vaults.get(&vault_id).map(|v| v.bot_processing).unwrap_or(false)
+            && s.vault_id_to_vaults
+                .get(&vault_id)
+                .map(|v| v.bot_processing)
+                .unwrap_or(false)
     }) {
         return Err(ProtocolError::GenericError(
             "Active claim changed before cancellation recovery".into(),
         ));
     }
 
-    let return_block_index = supplied_return_block_index.ok_or_else(|| ProtocolError::GenericError(
-        "Exact generation-bound collateral return block index is required".into(),
-    ))?;
-    let return_created_at_time = supplied_return_created_at_time.ok_or_else(|| ProtocolError::GenericError(
-        "Exact generation-bound collateral return timestamp is required".into(),
-    ))?;
-    let return_fee_e8s = supplied_return_fee_e8s.ok_or_else(|| ProtocolError::GenericError(
-        "Exact generation-bound collateral return fee is required".into(),
-    ))?;
+    let return_block_index = supplied_return_block_index.ok_or_else(|| {
+        ProtocolError::GenericError(
+            "Exact generation-bound collateral return block index is required".into(),
+        )
+    })?;
+    let return_created_at_time = supplied_return_created_at_time.ok_or_else(|| {
+        ProtocolError::GenericError(
+            "Exact generation-bound collateral return timestamp is required".into(),
+        )
+    })?;
+    let return_fee_e8s = supplied_return_fee_e8s.ok_or_else(|| {
+        ProtocolError::GenericError(
+            "Exact generation-bound collateral return fee is required".into(),
+        )
+    })?;
     let return_account = icrc_ledger_types::icrc1::account::Account {
         owner: ic_cdk::id(),
-        subaccount: Some(rumi_protocol_backend::bot_claim_return_subaccount(vault_id, claim.claimed_at)),
+        subaccount: Some(rumi_protocol_backend::bot_claim_return_subaccount(
+            vault_id,
+            claim.claimed_at,
+        )),
     };
-    let claim_return_account_matches = claim.claim_transfer.as_ref().is_some_and(|receipt| {
-        receipt.return_account == return_account
-    });
+    let claim_return_account_matches = claim
+        .claim_transfer
+        .as_ref()
+        .is_some_and(|receipt| receipt.return_account == return_account);
     if !claim_return_account_matches || claim.claiming_bot != Some(caller) {
         return Err(ProtocolError::GenericError(
             "Claim has no return account bound to this registered bot generation".into(),
         ));
     }
-    match (journal.return_block_index, journal.return_created_at_time, journal.return_fee_e8s) {
+    match (
+        journal.return_block_index,
+        journal.return_created_at_time,
+        journal.return_fee_e8s,
+    ) {
         (Some(saved_index), Some(saved_time), Some(saved_fee)) => {
-            if saved_index != return_block_index || saved_time != return_created_at_time || saved_fee != return_fee_e8s {
+            if saved_index != return_block_index
+                || saved_time != return_created_at_time
+                || saved_fee != return_fee_e8s
+            {
                 return Err(ProtocolError::GenericError(
                     "Return block differs from the durable claim-generation receipt".into(),
                 ));
@@ -12479,9 +15768,13 @@ async fn bot_cancel_liquidation_impl(
                 return_block_index,
                 return_created_at_time,
                 native_icp_history,
-            ).await.map_err(|error| ProtocolError::TemporarilyUnavailable(format!(
-                "Exact claim-generation collateral return proof is pending: {error}"
-            )))?;
+            )
+            .await
+            .map_err(|error| {
+                ProtocolError::TemporarilyUnavailable(format!(
+                    "Exact claim-generation collateral return proof is pending: {error}"
+                ))
+            })?;
             let consumed_key = (claim.collateral_type, return_block_index);
             let mut proved = journal.clone();
             proved.return_block_index = Some(return_block_index);
@@ -12492,32 +15785,51 @@ async fn bot_cancel_liquidation_impl(
                     || s.bot_claim_cancel_journals.get(&vault_id) != Some(&journal)
                 {
                     return Err(ProtocolError::GenericError(
-                        "Bot claim or cancellation journal changed before return proof was saved".into(),
+                        "Bot claim or cancellation journal changed before return proof was saved"
+                            .into(),
                     ));
                 }
                 reserve_bot_claim_return_block_in_state(
-                    s, consumed_key, vault_id, claim.claimed_at, MAX_BOT_RETURN_BLOCK_RECEIPTS,
+                    s,
+                    consumed_key,
+                    vault_id,
+                    claim.claimed_at,
+                    MAX_BOT_RETURN_BLOCK_RECEIPTS,
                 )?;
                 s.bot_claim_cancel_journals.insert(vault_id, proved.clone());
                 Ok(())
             })?;
             journal = proved;
         }
-        _ => return Err(ProtocolError::GenericError(
-            "Incomplete durable return receipt tuple; claim remains held".into(),
-        )),
+        _ => {
+            return Err(ProtocolError::GenericError(
+                "Incomplete durable return receipt tuple; claim remains held".into(),
+            ))
+        }
     }
     if let Some(block_index) = journal.completed_block_index {
         return commit_bot_claim_cancellation(vault_id, caller, &claim, &journal, block_index);
     }
 
     if let Some(scan) = journal.history_scan.clone() {
-        let transfer = journal.transfer.as_ref().ok_or_else(|| ProtocolError::GenericError(
-            "Bot cancellation scan has no exact transfer tuple".into(),
-        ))?.clone();
+        let transfer = journal
+            .transfer
+            .as_ref()
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "Bot cancellation scan has no exact transfer tuple".into(),
+                )
+            })?
+            .clone();
         match scan_bot_cancel_history_step(&transfer, scan, native_icp_history).await? {
             BotCancelHistoryStep::Found(block_index) => {
-                return commit_bot_claim_cancellation(vault_id, caller, &claim, &journal, block_index);
+                return commit_bot_claim_cancellation(
+                    vault_id,
+                    caller,
+                    &claim,
+                    &journal,
+                    block_index,
+                );
             }
             BotCancelHistoryStep::Progress(next_scan) => {
                 let mut next_journal = journal.clone();
@@ -12534,13 +15846,15 @@ async fn bot_cancel_liquidation_impl(
                     Ok(())
                 })?;
                 return Err(ProtocolError::TemporarilyUnavailable(
-                    "Bot cancellation history scan advanced; retry to continue reconciliation".into(),
+                    "Bot cancellation history scan advanced; retry to continue reconciliation"
+                        .into(),
                 ));
             }
             BotCancelHistoryStep::CompleteAbsent(log_length) => {
                 if !transfer.attempted {
                     return Err(ProtocolError::GenericError(
-                        "Unattempted bot cancellation tuple cannot be rotated from history absence".into(),
+                        "Unattempted bot cancellation tuple cannot be rotated from history absence"
+                            .into(),
                     ));
                 }
                 if journal.attempts.len() >= MAX_BOT_CANCEL_ROTATIONS {
@@ -12558,7 +15872,8 @@ async fn bot_cancel_liquidation_impl(
                     claim.collateral_type,
                     "icrc1_balance_of",
                     (transfer.from.clone(),),
-                ).await;
+                )
+                .await;
                 let balance = balance_result.map_err(|(code, message)| {
                     ProtocolError::TemporarilyUnavailable(format!(
                         "Could not recheck claim-specific collateral before safe retry: {code:?} {message}"
@@ -12578,11 +15893,14 @@ async fn bot_cancel_liquidation_impl(
                     ));
                 }
                 let mut next_journal = journal.clone();
-                next_journal.attempts.push(rumi_protocol_backend::state::BotClaimCancelAttempt {
+                next_journal
+                    .attempts
+                    .push(rumi_protocol_backend::state::BotClaimCancelAttempt {
                     transfer: transfer.clone(),
-                    evidence: rumi_protocol_backend::state::BotClaimCancelAttemptEvidence::HistoryAbsent {
-                        through_log_length: log_length,
-                    },
+                    evidence:
+                        rumi_protocol_backend::state::BotClaimCancelAttemptEvidence::HistoryAbsent {
+                            through_log_length: log_length,
+                        },
                 });
                 next_journal.history_scan = None;
                 let (next_transfer, dust) = match bot_cancel_repriced_transfer(
@@ -12599,9 +15917,8 @@ async fn bot_cancel_liquidation_impl(
                     Err(ProtocolError::TemporarilyUnavailable(_)) => {
                         next_journal.transfer = None;
                         next_journal.consolidation_fee_e8s = Some(fee);
-                        next_journal.return_topup_required_e8s = Some(
-                            fee.saturating_sub(available_buffer),
-                        );
+                        next_journal.return_topup_required_e8s =
+                            Some(fee.saturating_sub(available_buffer));
                         next_journal.return_dust_e8s = 0;
                         mutate_state(|s| {
                             if s.bot_claims.get(&vault_id) != Some(&claim)
@@ -12636,7 +15953,8 @@ async fn bot_cancel_liquidation_impl(
                         || s.bot_claim_cancel_journals.get(&vault_id) != Some(&journal)
                     {
                         return Err(ProtocolError::GenericError(
-                            "Bot claim or cancellation journal changed before safe tuple rotation".into(),
+                            "Bot claim or cancellation journal changed before safe tuple rotation"
+                                .into(),
                         ));
                     }
                     s.bot_claim_cancel_journals.insert(vault_id, next_journal);
@@ -12649,28 +15967,45 @@ async fn bot_cancel_liquidation_impl(
         }
     }
 
-    let fee = journal.return_fee_e8s.ok_or_else(|| ProtocolError::GenericError(
-        "Cancellation journal has no authenticated return fee".into(),
-    ))?;
+    let fee = journal.return_fee_e8s.ok_or_else(|| {
+        ProtocolError::GenericError("Cancellation journal has no authenticated return fee".into())
+    })?;
     if journal.transfer.is_none() {
         let expected_before_prepare = journal.clone();
         let available_buffer = bot_claim_verified_return_buffer(&journal)?;
         // No journal row exists for pre-upgrade claims; those returned above.
         // This path is only for a claim promoted by this version.
         let balance_result: Result<(candid::Nat,), _> = ic_cdk::call(
-            claim.collateral_type, "icrc1_balance_of", (return_account.clone(),),
-        ).await;
-        let balance = balance_result.map_err(|(code, message)| ProtocolError::TemporarilyUnavailable(
-            format!("Could not verify claim-specific collateral return: {code:?} {message}"),
-        ))?.0.0.to_u64().ok_or_else(|| ProtocolError::GenericError(
-            "Claim-specific collateral balance exceeds supported range".into(),
-        ))?;
-        let bad_fee_retry = journal.attempts.iter().rev().find_map(|attempt| match &attempt.evidence {
-            rumi_protocol_backend::state::BotClaimCancelAttemptEvidence::BadFee { expected_fee } => {
-                Some((attempt.transfer.clone(), *expected_fee))
-            }
-            _ => None,
-        });
+            claim.collateral_type,
+            "icrc1_balance_of",
+            (return_account.clone(),),
+        )
+        .await;
+        let balance = balance_result
+            .map_err(|(code, message)| {
+                ProtocolError::TemporarilyUnavailable(format!(
+                    "Could not verify claim-specific collateral return: {code:?} {message}"
+                ))
+            })?
+            .0
+             .0
+            .to_u64()
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "Claim-specific collateral balance exceeds supported range".into(),
+                )
+            })?;
+        let bad_fee_retry =
+            journal
+                .attempts
+                .iter()
+                .rev()
+                .find_map(|attempt| match &attempt.evidence {
+                    rumi_protocol_backend::state::BotClaimCancelAttemptEvidence::BadFee {
+                        expected_fee,
+                    } => Some((attempt.transfer.clone(), *expected_fee)),
+                    _ => None,
+                });
         let has_history_absence = journal.attempts.last().is_some_and(|attempt| {
             matches!(
                 attempt.evidence,
@@ -12678,13 +16013,20 @@ async fn bot_cancel_liquidation_impl(
             )
         });
         let fee_recovery_pending = bad_fee_retry.is_some()
-            || journal.return_topup_required_e8s.is_some_and(|required| required > 0)
+            || journal
+                .return_topup_required_e8s
+                .is_some_and(|required| required > 0)
             || journal.consolidation_fee_e8s.is_some()
             || !journal.return_topups.is_empty()
             || has_history_absence;
-        let required = claim.collateral_amount.checked_add(available_buffer).ok_or_else(|| {
-            ProtocolError::GenericError("Fee-buffered collateral return amount overflows".into())
-        })?;
+        let required = claim
+            .collateral_amount
+            .checked_add(available_buffer)
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "Fee-buffered collateral return amount overflows".into(),
+                )
+            })?;
         if let Some((previous, _expected_fee)) = bad_fee_retry.as_ref() {
             if balance < previous.source_balance {
                 return Err(ProtocolError::GenericError(format!(
@@ -12695,7 +16037,8 @@ async fn bot_cancel_liquidation_impl(
             }
             if ic_cdk::api::time() <= previous.created_at_time {
                 return Err(ProtocolError::TemporarilyUnavailable(
-                    "IC time has not advanced beyond the typed BadFee tuple; claim remains held".into(),
+                    "IC time has not advanced beyond the typed BadFee tuple; claim remains held"
+                        .into(),
                 ));
             }
         } else if !fee_recovery_pending && balance < required {
@@ -12704,16 +16047,21 @@ async fn bot_cancel_liquidation_impl(
             )));
         }
         let start = bot_cancel_history_length(claim.collateral_type, native_icp_history)
-            .await.map_err(|error| ProtocolError::TemporarilyUnavailable(format!(
-                "Could not establish cancellation history boundary: {error}"
-            )))?;
-        let now = ic_cdk::api::time();
-        let transfer = if fee_recovery_pending {
-            let current_fee = management::get_ledger_fee(claim.collateral_type).await.map_err(|error| {
+            .await
+            .map_err(|error| {
                 ProtocolError::TemporarilyUnavailable(format!(
-                    "Could not refresh exact consolidation fee during recovery: {error}"
+                    "Could not establish cancellation history boundary: {error}"
                 ))
             })?;
+        let now = ic_cdk::api::time();
+        let transfer = if fee_recovery_pending {
+            let current_fee = management::get_ledger_fee(claim.collateral_type)
+                .await
+                .map_err(|error| {
+                    ProtocolError::TemporarilyUnavailable(format!(
+                        "Could not refresh exact consolidation fee during recovery: {error}"
+                    ))
+                })?;
             if current_fee > available_buffer {
                 let mut held = journal.clone();
                 held.transfer = None;
@@ -12722,10 +16070,12 @@ async fn bot_cancel_liquidation_impl(
                 held.return_dust_e8s = 0;
                 mutate_state(|s| {
                     if s.bot_claims.get(&vault_id) != Some(&claim)
-                        || s.bot_claim_cancel_journals.get(&vault_id) != Some(&expected_before_prepare)
+                        || s.bot_claim_cancel_journals.get(&vault_id)
+                            != Some(&expected_before_prepare)
                     {
                         return Err(ProtocolError::GenericError(
-                            "Bot claim or cancellation journal changed before fee hold was saved".into(),
+                            "Bot claim or cancellation journal changed before fee hold was saved"
+                                .into(),
                         ));
                     }
                     s.bot_claim_cancel_journals.insert(vault_id, held);
@@ -12736,17 +16086,30 @@ async fn bot_cancel_liquidation_impl(
                     current_fee - available_buffer,
                 )));
             }
-            if balance < claim.collateral_amount.checked_add(current_fee).ok_or_else(|| {
-                ProtocolError::GenericError("Repriced claim consolidation amount overflows".into())
-            })? {
+            if balance
+                < claim
+                    .collateral_amount
+                    .checked_add(current_fee)
+                    .ok_or_else(|| {
+                        ProtocolError::GenericError(
+                            "Repriced claim consolidation amount overflows".into(),
+                        )
+                    })?
+            {
                 return Err(ProtocolError::TemporarilyUnavailable(format!(
                     "Verified generation buffer is sufficient, but isolated return balance {balance} is below the exact repriced source budget {}; claim remains held",
                     claim.collateral_amount + current_fee,
                 )));
             }
             let (transfer, dust) = bot_cancel_repriced_transfer(
-                &claim, claim.collateral_type, available_buffer, current_fee, now, start,
-                journal.attempts.len(), ic_cdk::id(),
+                &claim,
+                claim.collateral_type,
+                available_buffer,
+                current_fee,
+                now,
+                start,
+                journal.attempts.len(),
+                ic_cdk::id(),
             )?;
             let mut prepared = journal.clone();
             prepared.consolidation_fee_e8s = Some(current_fee);
@@ -12759,8 +16122,13 @@ async fn bot_cancel_liquidation_impl(
             journal.return_topup_required_e8s = None;
             journal.return_dust_e8s = 0;
             bot_cancel_transfer_for(
-                &claim, claim.collateral_type, fee, now, start,
-                journal.attempts.len(), ic_cdk::id(),
+                &claim,
+                claim.collateral_type,
+                fee,
+                now,
+                start,
+                journal.attempts.len(),
+                ic_cdk::id(),
             )?
         };
         let expected = expected_before_prepare;
@@ -12773,7 +16141,8 @@ async fn bot_cancel_liquidation_impl(
                     "Bot claim or cancellation journal changed before first tuple was saved".into(),
                 ));
             }
-            s.bot_claim_cancel_journals.insert(vault_id, journal.clone());
+            s.bot_claim_cancel_journals
+                .insert(vault_id, journal.clone());
             Ok(())
         })?;
     }
@@ -12781,12 +16150,16 @@ async fn bot_cancel_liquidation_impl(
     let transfer = journal.transfer.as_ref().expect("prepared above").clone();
     if transfer.ledger != claim.collateral_type
         || transfer.from.owner != ic_cdk::id()
-        || transfer.from.subaccount != Some(rumi_protocol_backend::bot_claim_return_subaccount(
-            vault_id, claim.claimed_at,
-        ))
-        || transfer.to != (icrc_ledger_types::icrc1::account::Account {
-            owner: ic_cdk::id(), subaccount: None,
-        })
+        || transfer.from.subaccount
+            != Some(rumi_protocol_backend::bot_claim_return_subaccount(
+                vault_id,
+                claim.claimed_at,
+            ))
+        || transfer.to
+            != (icrc_ledger_types::icrc1::account::Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            })
         || transfer.amount.checked_add(transfer.fee) != Some(transfer.source_balance)
     {
         return Err(ProtocolError::GenericError(
@@ -12812,25 +16185,40 @@ async fn bot_cancel_liquidation_impl(
                 "Bot claim or cancellation journal changed before transfer dispatch".into(),
             ));
         }
-        s.bot_claim_cancel_journals.insert(vault_id, dispatch_journal.clone());
+        s.bot_claim_cancel_journals
+            .insert(vault_id, dispatch_journal.clone());
         Ok(())
     })?;
     journal = dispatch_journal;
 
     match management::transfer_collateral_with_exact_tuple(
-        transfer.ledger, transfer.from.clone(), transfer.to.clone(),
-        transfer.amount, transfer.fee, transfer.memo.clone(), transfer.created_at_time,
-    ).await {
+        transfer.ledger,
+        transfer.from.clone(),
+        transfer.to.clone(),
+        transfer.amount,
+        transfer.fee,
+        transfer.memo.clone(),
+        transfer.created_at_time,
+    )
+    .await
+    {
         Ok(block_index) => {
             commit_bot_claim_cancellation(vault_id, caller, &claim, &journal, block_index)
         }
         Err(icrc_ledger_types::icrc1::transfer::TransferError::TooOld) => {
-            let snapshot_log_length = bot_cancel_history_length(
-                transfer.ledger, native_icp_history,
-            ).await.map_err(|error| ProtocolError::TemporarilyUnavailable(format!(
-                "TooOld consolidation requires exact ICRC-3 reconciliation: {error}"
-            )))?;
-            let dispatched_transfer = journal.transfer.as_ref().expect("dispatch journal has tuple").clone();
+            let snapshot_log_length =
+                bot_cancel_history_length(transfer.ledger, native_icp_history)
+                    .await
+                    .map_err(|error| {
+                        ProtocolError::TemporarilyUnavailable(format!(
+                            "TooOld consolidation requires exact ICRC-3 reconciliation: {error}"
+                        ))
+                    })?;
+            let dispatched_transfer = journal
+                .transfer
+                .as_ref()
+                .expect("dispatch journal has tuple")
+                .clone();
             if dispatched_transfer.history_start_index > snapshot_log_length {
                 return Err(ProtocolError::GenericError(
                     "Bot cancellation history boundary exceeds ledger snapshot".into(),
@@ -12847,33 +16235,44 @@ async fn bot_cancel_liquidation_impl(
                     || s.bot_claim_cancel_journals.get(&vault_id) != Some(&journal)
                 {
                     return Err(ProtocolError::GenericError(
-                        "Bot claim or cancellation journal changed before TooOld scan was saved".into(),
+                        "Bot claim or cancellation journal changed before TooOld scan was saved"
+                            .into(),
                     ));
                 }
                 s.bot_claim_cancel_journals.insert(vault_id, scanning);
                 Ok(())
             })?;
             Err(ProtocolError::TemporarilyUnavailable(
-                "Consolidation returned TooOld; exact ledger-history reconciliation is journaled".into(),
+                "Consolidation returned TooOld; exact ledger-history reconciliation is journaled"
+                    .into(),
             ))
         }
         Err(icrc_ledger_types::icrc1::transfer::TransferError::BadFee { expected_fee }) => {
             let expected_fee = u64::try_from(expected_fee.0).map_err(|_| {
-                ProtocolError::GenericError("Ledger fee exceeds supported cancellation range; claim remains held".into())
+                ProtocolError::GenericError(
+                    "Ledger fee exceeds supported cancellation range; claim remains held".into(),
+                )
             })?;
             if journal.attempts.len() >= MAX_BOT_CANCEL_ROTATIONS {
                 return Err(ProtocolError::TemporarilyUnavailable(
-                    "Bot cancellation retry limit reached after typed BadFee; claim remains held".into(),
+                    "Bot cancellation retry limit reached after typed BadFee; claim remains held"
+                        .into(),
                 ));
             }
             let mut rejected = journal.clone();
-            let dispatched_transfer = journal.transfer.as_ref().expect("dispatch journal has tuple").clone();
-            rejected.attempts.push(rumi_protocol_backend::state::BotClaimCancelAttempt {
-                transfer: dispatched_transfer.clone(),
-                evidence: rumi_protocol_backend::state::BotClaimCancelAttemptEvidence::BadFee {
-                    expected_fee,
-                },
-            });
+            let dispatched_transfer = journal
+                .transfer
+                .as_ref()
+                .expect("dispatch journal has tuple")
+                .clone();
+            rejected
+                .attempts
+                .push(rumi_protocol_backend::state::BotClaimCancelAttempt {
+                    transfer: dispatched_transfer.clone(),
+                    evidence: rumi_protocol_backend::state::BotClaimCancelAttemptEvidence::BadFee {
+                        expected_fee,
+                    },
+                });
             if dispatched_transfer.dispatch_count == 1 {
                 // This exact tuple was dispatched once and returned a typed
                 // no-effect response, so it is safe to prepare a fresh fee.
@@ -12892,11 +16291,12 @@ async fn bot_cancel_liquidation_impl(
                         "Bot cancellation history boundary exceeds ledger snapshot".into(),
                     ));
                 }
-                rejected.history_scan = Some(rumi_protocol_backend::state::BotClaimCancelHistoryScan {
-                    transfer: dispatched_transfer.clone(),
-                    snapshot_log_length,
-                    next_index: dispatched_transfer.history_start_index,
-                });
+                rejected.history_scan =
+                    Some(rumi_protocol_backend::state::BotClaimCancelHistoryScan {
+                        transfer: dispatched_transfer.clone(),
+                        snapshot_log_length,
+                        next_index: dispatched_transfer.history_start_index,
+                    });
             }
             mutate_state(|s| {
                 if s.bot_claims.get(&vault_id) != Some(&claim)
@@ -12937,7 +16337,9 @@ fn reserve_bot_claim_return_block_in_state(
             ))
         }
         None => {
-            state.consumed_bot_claim_return_blocks.insert(key, (vault_id, claim_timestamp));
+            state
+                .consumed_bot_claim_return_blocks
+                .insert(key, (vault_id, claim_timestamp));
             Ok(())
         }
     }
@@ -12981,19 +16383,27 @@ mod bot_claim_return_block_consumption_tests {
     fn return_block_is_idempotent_for_one_generation_but_cannot_be_replayed() {
         let ledger = Principal::from_slice(&[0x21]);
         let mut state = State::default();
-        assert!(reserve_bot_claim_return_block_in_state(&mut state, (ledger, 17), 4, 100, 4).is_ok());
-        assert!(reserve_bot_claim_return_block_in_state(&mut state, (ledger, 17), 4, 100, 4).is_ok());
-        assert!(reserve_bot_claim_return_block_in_state(&mut state, (ledger, 17), 5, 101, 4).is_err());
-        assert!(reserve_bot_claim_return_block_in_state(&mut state, (ledger, 18), 5, 101, 4).is_ok());
+        assert!(
+            reserve_bot_claim_return_block_in_state(&mut state, (ledger, 17), 4, 100, 4).is_ok()
+        );
+        assert!(
+            reserve_bot_claim_return_block_in_state(&mut state, (ledger, 17), 4, 100, 4).is_ok()
+        );
+        assert!(
+            reserve_bot_claim_return_block_in_state(&mut state, (ledger, 17), 5, 101, 4).is_err()
+        );
+        assert!(
+            reserve_bot_claim_return_block_in_state(&mut state, (ledger, 18), 5, 101, 4).is_ok()
+        );
     }
 
     #[test]
     fn lower_consolidation_fee_preserves_claim_and_attributes_generation_dust() {
         let claim = sample_claim();
         let backend = Principal::from_slice(&[0x33]);
-        let (transfer, dust) = bot_cancel_repriced_transfer(
-            &claim, claim.collateral_type, 10, 4, 123, 8, 1, backend,
-        ).expect("fee decrease can use the authenticated return buffer");
+        let (transfer, dust) =
+            bot_cancel_repriced_transfer(&claim, claim.collateral_type, 10, 4, 123, 8, 1, backend)
+                .expect("fee decrease can use the authenticated return buffer");
 
         assert_eq!(transfer.amount, claim.collateral_amount);
         assert_eq!(transfer.fee, 4);
@@ -13005,9 +16415,19 @@ mod bot_claim_return_block_consumption_tests {
     fn higher_consolidation_fee_requires_topup_instead_of_sweeping() {
         let claim = sample_claim();
         let result = bot_cancel_repriced_transfer(
-            &claim, claim.collateral_type, 4, 10, 123, 8, 1, Principal::from_slice(&[0x33]),
+            &claim,
+            claim.collateral_type,
+            4,
+            10,
+            123,
+            8,
+            1,
+            Principal::from_slice(&[0x33]),
         );
-        assert!(matches!(result, Err(ProtocolError::TemporarilyUnavailable(_))));
+        assert!(matches!(
+            result,
+            Err(ProtocolError::TemporarilyUnavailable(_))
+        ));
     }
 
     #[test]
@@ -13026,9 +16446,13 @@ mod bot_claim_return_block_consumption_tests {
             8,
             1,
             Principal::from_slice(&[0x33]),
-        ).expect("exact top-up funds the exact fee");
+        )
+        .expect("exact top-up funds the exact fee");
         assert_eq!(transfer.amount, claim.collateral_amount);
-        assert_eq!(transfer.source_balance, claim.collateral_amount + target_fee);
+        assert_eq!(
+            transfer.source_balance,
+            claim.collateral_amount + target_fee
+        );
         assert_eq!(dust, 0);
     }
 
@@ -13036,7 +16460,7 @@ mod bot_claim_return_block_consumption_tests {
     fn return_buffer_registry_fails_closed_at_capacity_without_evicting_dust() {
         let mut state = State::default();
         let ledger = Principal::from_slice(&[0x31]);
-    for index in 0..MAX_BOT_RETURN_BUFFER_RECORDS as u64 {
+        for index in 0..MAX_BOT_RETURN_BUFFER_RECORDS as u64 {
             state.bot_claim_return_buffer_receipts.insert(
                 (index, index),
                 rumi_protocol_backend::state::BotClaimReturnBufferReceipt {
@@ -13049,10 +16473,25 @@ mod bot_claim_return_block_consumption_tests {
                 },
             );
         }
-        assert!(bot_return_buffer_record_capacity_available(&state, (0, 0), true));
-        assert!(!bot_return_buffer_record_capacity_available(&state, (4_096, 4_096), true));
-        assert!(bot_return_buffer_record_capacity_available(&state, (4_096, 4_096), false));
-        assert_eq!(state.bot_claim_return_buffer_receipts.len(), MAX_BOT_RETURN_BUFFER_RECORDS);
+        assert!(bot_return_buffer_record_capacity_available(
+            &state,
+            (0, 0),
+            true
+        ));
+        assert!(!bot_return_buffer_record_capacity_available(
+            &state,
+            (4_096, 4_096),
+            true
+        ));
+        assert!(bot_return_buffer_record_capacity_available(
+            &state,
+            (4_096, 4_096),
+            false
+        ));
+        assert_eq!(
+            state.bot_claim_return_buffer_receipts.len(),
+            MAX_BOT_RETURN_BUFFER_RECORDS
+        );
     }
 }
 
@@ -13066,9 +16505,15 @@ async fn bot_acknowledge_claim_cancellation(
 ) -> Result<(), ProtocolError> {
     validate_call().await?;
     let caller = ic_cdk::api::caller();
-    mutate_state(|s| acknowledge_bot_claim_cancellation_in_state(
-        s, caller, vault_id, claim_timestamp, ic_cdk::api::time(),
-    ))
+    mutate_state(|s| {
+        acknowledge_bot_claim_cancellation_in_state(
+            s,
+            caller,
+            vault_id,
+            claim_timestamp,
+            ic_cdk::api::time(),
+        )
+    })
 }
 
 fn acknowledge_bot_claim_cancellation_in_state(
@@ -13083,14 +16528,21 @@ fn acknowledge_bot_claim_cancellation_in_state(
             "Caller is not the registered liquidation bot canister".into(),
         ));
     }
-    if s.bot_claims.get(&vault_id).is_some_and(|claim| claim.claimed_at == claim_timestamp) {
+    if s.bot_claims
+        .get(&vault_id)
+        .is_some_and(|claim| claim.claimed_at == claim_timestamp)
+    {
         return Err(ProtocolError::GenericError(
             "Cannot acknowledge cancellation while that claim generation is active".into(),
         ));
     }
     let completed_key = (vault_id, claim_timestamp);
-    let was_completed = s.completed_bot_claim_cancellations.contains_key(&completed_key);
-    let was_acknowledged = s.acknowledged_bot_claim_cancellations.contains_key(&(claim_timestamp, vault_id));
+    let was_completed = s
+        .completed_bot_claim_cancellations
+        .contains_key(&completed_key);
+    let was_acknowledged = s
+        .acknowledged_bot_claim_cancellations
+        .contains_key(&(claim_timestamp, vault_id));
     if !was_completed && !was_acknowledged {
         return Err(ProtocolError::GenericError(
             "No verified cancellation receipt exists for this generation".into(),
@@ -13099,20 +16551,29 @@ fn acknowledge_bot_claim_cancellation_in_state(
     if was_completed {
         s.completed_bot_claim_cancellations.remove(&completed_key);
         if let Some(receipt) = s.bot_claim_return_block_receipts.remove(&completed_key) {
-            s.consumed_bot_claim_return_blocks.remove(&(receipt.ledger, receipt.block_index));
+            s.consumed_bot_claim_return_blocks
+                .remove(&(receipt.ledger, receipt.block_index));
             for topup in receipt.topups {
-                s.consumed_bot_claim_return_blocks.remove(&(topup.ledger, topup.block_index));
+                s.consumed_bot_claim_return_blocks
+                    .remove(&(topup.ledger, topup.block_index));
             }
         }
-        if s.bot_claim_return_buffer_receipts.get(&completed_key)
+        if s.bot_claim_return_buffer_receipts
+            .get(&completed_key)
             .is_some_and(|receipt| receipt.dust_e8s == 0)
         {
             s.bot_claim_return_buffer_receipts.remove(&completed_key);
         }
     }
-    s.acknowledged_bot_claim_cancellations.insert((claim_timestamp, vault_id), acked_at);
+    s.acknowledged_bot_claim_cancellations
+        .insert((claim_timestamp, vault_id), acked_at);
     while s.acknowledged_bot_claim_cancellations.len() > 4096 {
-        if let Some(oldest) = s.acknowledged_bot_claim_cancellations.keys().next().copied() {
+        if let Some(oldest) = s
+            .acknowledged_bot_claim_cancellations
+            .keys()
+            .next()
+            .copied()
+        {
             s.acknowledged_bot_claim_cancellations.remove(&oldest);
         }
     }
@@ -13130,7 +16591,11 @@ fn commit_bot_claim_cancellation(
         if !same_active_bot_claim(s.bot_claims.get(&vault_id), claim)
             || s.liquidation_bot_principal != Some(caller)
             || s.bot_claim_cancel_journals.get(&vault_id) != Some(journal)
-            || !s.vault_id_to_vaults.get(&vault_id).map(|v| v.bot_processing).unwrap_or(false)
+            || !s
+                .vault_id_to_vaults
+                .get(&vault_id)
+                .map(|v| v.bot_processing)
+                .unwrap_or(false)
         {
             return Err(ProtocolError::GenericError(
                 "Bot claim or cancellation journal changed before cancellation commit".into(),
@@ -13138,17 +16603,25 @@ fn commit_bot_claim_cancellation(
         }
         let key = (vault_id, claim.claimed_at);
         let return_block_index = journal.return_block_index.ok_or_else(|| {
-            ProtocolError::GenericError("Cancellation journal has no authenticated return block".into())
+            ProtocolError::GenericError(
+                "Cancellation journal has no authenticated return block".into(),
+            )
         })?;
         let return_created_at_time = journal.return_created_at_time.ok_or_else(|| {
-            ProtocolError::GenericError("Cancellation journal has no authenticated return timestamp".into())
+            ProtocolError::GenericError(
+                "Cancellation journal has no authenticated return timestamp".into(),
+            )
         })?;
         let return_fee_e8s = journal.return_fee_e8s.ok_or_else(|| {
-            ProtocolError::GenericError("Cancellation journal has no authenticated return fee".into())
+            ProtocolError::GenericError(
+                "Cancellation journal has no authenticated return fee".into(),
+            )
         })?;
         let verified_buffer_e8s = bot_claim_verified_return_buffer(journal)?;
         let transfer = journal.transfer.as_ref().ok_or_else(|| {
-            ProtocolError::GenericError("Completed cancellation has no exact consolidation tuple".into())
+            ProtocolError::GenericError(
+                "Completed cancellation has no exact consolidation tuple".into(),
+            )
         })?;
         if transfer.amount != claim.collateral_amount
             || transfer.amount.checked_add(transfer.fee) != Some(transfer.source_balance)
@@ -13158,14 +16631,19 @@ fn commit_bot_claim_cancellation(
             ));
         }
         let consolidation_fee_e8s = journal.consolidation_fee_e8s.unwrap_or(transfer.fee);
-        let return_dust_e8s = verified_buffer_e8s.checked_sub(transfer.fee).ok_or_else(|| {
-            ProtocolError::GenericError("Consolidation fee exceeds verified generation return buffer".into())
-        })?;
+        let return_dust_e8s = verified_buffer_e8s
+            .checked_sub(transfer.fee)
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "Consolidation fee exceeds verified generation return buffer".into(),
+                )
+            })?;
         if consolidation_fee_e8s != transfer.fee
             || (journal.return_dust_e8s != 0 && journal.return_dust_e8s != return_dust_e8s)
         {
             return Err(ProtocolError::GenericError(
-                "Persisted consolidation fee or dust does not match the exact transfer tuple".into(),
+                "Persisted consolidation fee or dust does not match the exact transfer tuple"
+                    .into(),
             ));
         }
         if !s.completed_bot_claim_cancellations.contains_key(&key)
@@ -13179,7 +16657,8 @@ fn commit_bot_claim_cancellation(
             && s.bot_claim_return_block_receipts.len() >= MAX_BOT_RETURN_BLOCK_RECEIPTS
         {
             return Err(ProtocolError::TemporarilyUnavailable(
-                "Authenticated return receipt capacity is full; claim remains held for bot ACKs".into(),
+                "Authenticated return receipt capacity is full; claim remains held for bot ACKs"
+                    .into(),
             ));
         }
         let verified_topup_e8s = verified_buffer_e8s - return_fee_e8s;
@@ -13208,24 +16687,30 @@ fn commit_bot_claim_cancellation(
             ));
         }
         if needs_buffer_receipt && !s.bot_claim_return_buffer_receipts.contains_key(&key) {
-            s.bot_claim_return_buffer_receipts.insert(key, rumi_protocol_backend::state::BotClaimReturnBufferReceipt {
-                ledger: claim.collateral_type,
-                authenticated_return_fee_e8s: return_fee_e8s,
-                consolidation_fee_e8s,
-                verified_topup_e8s,
-                topup_count: journal.return_topups.len() as u64,
-                dust_e8s: return_dust_e8s,
-            });
+            s.bot_claim_return_buffer_receipts.insert(
+                key,
+                rumi_protocol_backend::state::BotClaimReturnBufferReceipt {
+                    ledger: claim.collateral_type,
+                    authenticated_return_fee_e8s: return_fee_e8s,
+                    consolidation_fee_e8s,
+                    verified_topup_e8s,
+                    topup_count: journal.return_topups.len() as u64,
+                    dust_e8s: return_dust_e8s,
+                },
+            );
         }
-        s.bot_claim_return_block_receipts.insert(key, rumi_protocol_backend::state::BotClaimReturnBlockReceipt {
-            ledger: claim.collateral_type,
-            block_index: return_block_index,
-            created_at_time: return_created_at_time,
-            fee_e8s: return_fee_e8s,
-            consolidation_fee_e8s: Some(consolidation_fee_e8s),
-            return_dust_e8s,
-            topups: journal.return_topups.clone(),
-        });
+        s.bot_claim_return_block_receipts.insert(
+            key,
+            rumi_protocol_backend::state::BotClaimReturnBlockReceipt {
+                ledger: claim.collateral_type,
+                block_index: return_block_index,
+                created_at_time: return_created_at_time,
+                fee_e8s: return_fee_e8s,
+                consolidation_fee_e8s: Some(consolidation_fee_e8s),
+                return_dust_e8s,
+                topups: journal.return_topups.clone(),
+            },
+        );
         s.completed_bot_claim_cancellations.insert(key, block_index);
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             vault.bot_processing = false;
@@ -13236,7 +16721,8 @@ fn commit_bot_claim_cancellation(
             claim.debt_amount,
         );
         s.bot_claims.remove(&vault_id);
-        s.bot_claim_payment_capacity_reservations.remove(&(vault_id, claim.claimed_at));
+        s.bot_claim_payment_capacity_reservations
+            .remove(&(vault_id, claim.claimed_at));
         s.bot_claim_cancel_journals.remove(&vault_id);
         Ok(())
     })?;
@@ -13267,6 +16753,8 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
         ));
     }
 
+    let _vault_liq_guard = rumi_protocol_backend::guard::VaultLiquidationGuard::new(vault_id)?;
+
     let existing_claim = read_state(|s| s.bot_claims.contains_key(&vault_id));
     if existing_claim {
         return Err(ProtocolError::GenericError(format!(
@@ -13284,9 +16772,9 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
 
             rumi_protocol_backend::vault::require_supported_icrc_collateral_source(vault)?;
 
-            if vault.bot_processing {
+            if vault.bot_processing || s.vault_has_unresolved_borrow_mint(vault_id) {
                 return Err(ProtocolError::GenericError(format!(
-                    "Vault #{} is already being processed",
+                    "Vault #{} is already being processed or has an unresolved borrow mint",
                     vault_id
                 )));
             }
@@ -13314,9 +16802,12 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
             let collateral_raw = rumi_protocol_backend::numeric::try_icusd_to_collateral_amount(
                 debt, price, decimals,
             )
-            .ok_or_else(|| ProtocolError::GenericError(
-                "Required bot-liquidation collateral exceeds the supported raw-token range.".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "Required bot-liquidation collateral exceeds the supported raw-token range."
+                        .to_string(),
+                )
+            })?;
             let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
             let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
             let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
@@ -13365,18 +16856,18 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
             vault.bot_processing = true;
         }
         let claim = rumi_protocol_backend::state::BotClaim {
-                vault_id,
-                collateral_amount: collateral_to_seize.to_u64(),
-                debt_amount: debt_to_cover.to_u64(),
-                collateral_type,
-                claimed_at: now,
-                collateral_price_e8s: collateral_price_usd.to_e8s(),
-                payment_memo: None,
-                request_id: None,
-                claiming_bot: Some(caller),
-                claim_transfer: None,
-                claim_payment_subaccount: None,
-            };
+            vault_id,
+            collateral_amount: collateral_to_seize.to_u64(),
+            debt_amount: debt_to_cover.to_u64(),
+            collateral_type,
+            claimed_at: now,
+            collateral_price_e8s: collateral_price_usd.to_e8s(),
+            payment_memo: None,
+            request_id: None,
+            claiming_bot: Some(caller),
+            claim_transfer: None,
+            claim_payment_subaccount: None,
+        };
         s.bot_claims.insert(vault_id, claim.clone());
         s.bot_claim_cancel_journals.insert(
             vault_id,
@@ -13493,9 +16984,12 @@ async fn dev_force_partial_bot_liquidate(
             let collateral_raw = rumi_protocol_backend::numeric::try_icusd_to_collateral_amount(
                 actual, price, decimals,
             )
-            .ok_or_else(|| ProtocolError::GenericError(
-                "Required bot-liquidation collateral exceeds the supported raw-token range.".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "Required bot-liquidation collateral exceeds the supported raw-token range."
+                        .to_string(),
+                )
+            })?;
             let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
             let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
             if collateral_to_seize == ICP::new(0) {
@@ -13543,18 +17037,18 @@ async fn dev_force_partial_bot_liquidate(
             vault.bot_processing = true;
         }
         let claim = rumi_protocol_backend::state::BotClaim {
-                vault_id,
-                collateral_amount: collateral_to_seize.to_u64(),
-                debt_amount: debt_to_cover.to_u64(),
-                collateral_type,
-                claimed_at: now,
-                collateral_price_e8s: collateral_price_usd.to_e8s(),
-                payment_memo: None,
-                request_id: None,
-                claiming_bot: Some(caller),
-                claim_transfer: None,
-                claim_payment_subaccount: None,
-            };
+            vault_id,
+            collateral_amount: collateral_to_seize.to_u64(),
+            debt_amount: debt_to_cover.to_u64(),
+            collateral_type,
+            claimed_at: now,
+            collateral_price_e8s: collateral_price_usd.to_e8s(),
+            payment_memo: None,
+            request_id: None,
+            claiming_bot: Some(caller),
+            claim_transfer: None,
+            claim_payment_subaccount: None,
+        };
         s.bot_claims.insert(vault_id, claim.clone());
         s.bot_claim_cancel_journals.insert(
             vault_id,
@@ -13768,9 +17262,10 @@ fn get_bot_claim_cancel_recovery_status(
                 consolidation_fee_e8s: journal.consolidation_fee_e8s,
                 topup_required_e8s: journal.return_topup_required_e8s,
                 return_dust_e8s: journal.return_dust_e8s,
-                verified_topup_e8s: journal.return_topups.iter().try_fold(0u64, |total, item| {
-                    total.checked_add(item.amount_e8s)
-                })?,
+                verified_topup_e8s: journal
+                    .return_topups
+                    .iter()
+                    .try_fold(0u64, |total, item| total.checked_add(item.amount_e8s))?,
                 next_topup_sequence: u64::try_from(journal.return_topups.len()).ok()?,
             });
         }
@@ -13789,7 +17284,10 @@ fn get_bot_claim_cancel_recovery_status(
             authenticated_return_fee_e8s: receipt.fee_e8s,
             consolidation_fee_e8s: receipt.consolidation_fee_e8s,
             topup_required_e8s: None,
-            return_dust_e8s: s.bot_claim_return_buffer_receipts.get(&key).map(|dust| dust.dust_e8s)
+            return_dust_e8s: s
+                .bot_claim_return_buffer_receipts
+                .get(&key)
+                .map(|dust| dust.dust_e8s)
                 .unwrap_or(receipt.return_dust_e8s),
             verified_topup_e8s: 0,
             next_topup_sequence: 0,
@@ -13802,10 +17300,12 @@ fn get_bot_claim_cancel_recovery_status(
 #[candid_method(query)]
 #[query]
 fn get_bot_claim_return_buffer_capacity() -> (u64, u64) {
-    read_state(|s| (
-        s.bot_claim_return_buffer_receipts.len() as u64,
-        MAX_BOT_RETURN_BUFFER_RECORDS as u64,
-    ))
+    read_state(|s| {
+        (
+            s.bot_claim_return_buffer_receipts.len() as u64,
+            MAX_BOT_RETURN_BUFFER_RECORDS as u64,
+        )
+    })
 }
 
 /// Admin-only: force-resolve a stuck bot claim. Used when the bot's ckUSDC transfer
@@ -14416,6 +17916,11 @@ fn require_controller() -> Result<(), ProtocolError> {
 #[update]
 fn enter_recovery_mode() -> Result<(), ProtocolError> {
     require_controller()?;
+    if read_state(|s| s.deficit_readonly_latched_at_e8s.is_some()) {
+        return Err(ProtocolError::GenericError(
+            "Deficit ReadOnly latch is active; reduce the deficit below its latched threshold and exit recovery first".to_string(),
+        ));
+    }
     mutate_state(|s| {
         s.mode = Mode::Recovery;
         s.manual_mode_override = true;
@@ -14433,14 +17938,35 @@ fn enter_recovery_mode() -> Result<(), ProtocolError> {
 #[update]
 fn exit_recovery_mode() -> Result<(), ProtocolError> {
     require_controller()?;
-    mutate_state(|s| {
+    mutate_state(|s| -> Result<(), ProtocolError> {
+        if let Some(latched_threshold_e8s) = s.deficit_readonly_latched_at_e8s {
+            // Validate both the captured trip threshold and the current
+            // configured threshold before recording a successful clear.
+            // This also prevents the event log from claiming a clear that
+            // state rejected after a threshold was lowered.
+            s.clear_deficit_readonly_latch()
+                .map_err(ProtocolError::GenericError)?;
+            rumi_protocol_backend::storage::record_event(
+                &event::Event::SetDeficitReadonlyThresholdE8s {
+                    threshold_e8s: s.deficit_readonly_threshold_e8s,
+                    timestamp: ic_cdk::api::time(),
+                    clear_latched_threshold_e8s: Some(latched_threshold_e8s),
+                },
+            );
+            log!(INFO,
+                "[admin] cleared deficit ReadOnly latch at deficit {}; automatic mode management restored after fresh price",
+                s.protocol_deficit_icusd.0
+            );
+            return Ok(());
+        }
         s.mode = Mode::GeneralAvailability;
         s.manual_mode_override = false;
         log!(
             INFO,
             "[admin] exited Recovery mode, automatic mode management restored"
         );
-    });
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -14530,8 +18056,7 @@ enum ConsumedWritedownProofLedgerV1 {
 /// below; do not mislabel them as an older ledger kind.
 #[candid_method(query)]
 #[query]
-fn get_consumed_writedown_proofs() -> Vec<(ConsumedWritedownProofLedgerV1, u64)>
-{
+fn get_consumed_writedown_proofs() -> Vec<(ConsumedWritedownProofLedgerV1, u64)> {
     use rumi_protocol_backend::icrc3_proof::SpProofLedger;
     read_state(|s| {
         s.consumed_writedown_proofs
@@ -14539,7 +18064,9 @@ fn get_consumed_writedown_proofs() -> Vec<(ConsumedWritedownProofLedgerV1, u64)>
             .filter_map(|(kind, block)| {
                 let legacy = match kind {
                     SpProofLedger::IcusdBurn => ConsumedWritedownProofLedgerV1::IcusdBurn,
-                    SpProofLedger::ThreePoolTransfer => ConsumedWritedownProofLedgerV1::ThreePoolTransfer,
+                    SpProofLedger::ThreePoolTransfer => {
+                        ConsumedWritedownProofLedgerV1::ThreePoolTransfer
+                    }
                     SpProofLedger::ThreePoolTransferDefault => return None,
                 };
                 Some((legacy, *block))
@@ -14551,8 +18078,8 @@ fn get_consumed_writedown_proofs() -> Vec<(ConsumedWritedownProofLedgerV1, u64)>
 /// Complete proof set, including receipt-backed 3USD default-account ingress.
 #[candid_method(query)]
 #[query]
-fn get_consumed_writedown_proofs_v2() -> Vec<(rumi_protocol_backend::icrc3_proof::SpProofLedger, u64)>
-{
+fn get_consumed_writedown_proofs_v2(
+) -> Vec<(rumi_protocol_backend::icrc3_proof::SpProofLedger, u64)> {
     read_state(|s| s.consumed_writedown_proofs.iter().copied().collect())
 }
 
@@ -14596,19 +18123,17 @@ fn get_liquidation_ordering_tolerance_bps() -> u64 {
 
 // ── End admin safety functions ────────────────────────────────────────────────
 
-/// Redeem icUSD for ckStable tokens from reserves (with vault spillover fallback)
+/// Reserve redemption remains closed until its inbound icUSD pull has a
+/// durable request identity and recovery path.
 #[candid_method(update)]
 #[update]
 async fn redeem_reserves(
-    amount: u64,
-    preferred_token: Option<Principal>,
+    _amount: u64,
+    _preferred_token: Option<Principal>,
 ) -> Result<ReserveRedemptionResult, ProtocolError> {
-    validate_call().await?;
-    // Wave-9 RED-003: reserve redemption walks the same vault cr-index as
-    // redeem_collateral on its spillover branch, so the same ReadOnly gate
-    // applies. See main.rs::redeem_collateral for the rationale.
-    validate_mode()?;
-    rumi_protocol_backend::vault::redeem_reserves(amount, preferred_token).await
+    Err(ProtocolError::TemporarilyUnavailable(
+        "Redemptions are paused until transfer recovery is available; no icUSD was pulled".into(),
+    ))
 }
 
 /// Query available reserve balances
@@ -14837,9 +18362,17 @@ async fn set_deficit_readonly_threshold_e8s(new_threshold: u64) -> Result<(), Pr
             "Only the developer principal can set deficit ReadOnly threshold".to_string(),
         ));
     }
-    mutate_state(|s| {
+    let latched = mutate_state(|s| {
         rumi_protocol_backend::event::record_set_deficit_readonly_threshold_e8s(s, new_threshold);
+        s.check_deficit_readonly_latch()
     });
+    if latched {
+        log!(
+            INFO,
+            "[set_deficit_readonly_threshold_e8s] existing deficit crossed new threshold {}; auto-latched ReadOnly",
+            new_threshold
+        );
+    }
     log!(
         INFO,
         "[set_deficit_readonly_threshold_e8s] Threshold set to: {} e8s ({})",
@@ -16018,9 +19551,7 @@ fn get_amm1_pool_id() -> Option<String> {
 #[candid_method(query)]
 #[query]
 fn get_pending_amm1_donations_count() -> u64 {
-    read_state(|s| {
-        (s.pending_amm1_donations.len() + s.pending_amm_donations.len()) as u64
-    })
+    read_state(|s| (s.pending_amm1_donations.len() + s.pending_amm_donations.len()) as u64)
 }
 
 /// Lightweight payload for the AMM TVL sampler (the latest cached XRC ICP/USD
@@ -16300,9 +19831,7 @@ fn get_pending_stability_pool_interest_notification_count() -> u64 {
 }
 
 fn can_inspect_held_interest_notifications(caller: Principal, developer: Principal) -> bool {
-    caller != Principal::anonymous()
-        && developer != Principal::anonymous()
-        && caller == developer
+    caller != Principal::anonymous() && developer != Principal::anonymous() && caller == developer
 }
 
 /// Page durable pool-interest notifications so operators can inspect legacy
@@ -16313,7 +19842,10 @@ fn can_inspect_held_interest_notifications(caller: Principal, developer: Princip
 fn get_pending_stability_pool_interest_notifications(
     start_after_mint_block: Option<u64>,
     limit: u64,
-) -> Result<Vec<rumi_protocol_backend::state::PendingStabilityPoolInterestNotification>, ProtocolError> {
+) -> Result<
+    Vec<rumi_protocol_backend::state::PendingStabilityPoolInterestNotification>,
+    ProtocolError,
+> {
     let caller = ic_cdk::api::caller();
     if !read_state(|s| can_inspect_held_interest_notifications(caller, s.developer_principal)) {
         return Err(ProtocolError::GenericError(
@@ -16339,7 +19871,9 @@ mod pending_stability_pool_interest_notification_query_tests {
     #[test]
     fn held_interest_rows_are_not_visible_to_anonymous_callers_or_developers() {
         let developer = Principal::from_slice(&[1]);
-        assert!(can_inspect_held_interest_notifications(developer, developer));
+        assert!(can_inspect_held_interest_notifications(
+            developer, developer
+        ));
         assert!(!can_inspect_held_interest_notifications(
             Principal::anonymous(),
             developer,
@@ -18035,6 +21569,17 @@ async fn admin_correct_vault_collateral(
         ));
     }
 
+    let _vault_op_guard = rumi_protocol_backend::guard::VaultLiquidationGuard::new(vault_id)?;
+
+    if read_state(|state| {
+        state.vault_has_unresolved_borrow_mint(vault_id)
+            || state.vault_has_pending_inbound_margin(vault_id)
+    }) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Vault collateral is reserved by an unresolved financial operation".into(),
+        ));
+    }
+
     let old_amount = read_state(|s| {
         s.vault_id_to_vaults
             .get(&vault_id)
@@ -19607,7 +23152,7 @@ mod inc6_settlement_proof_context_tests {
     }
 
     #[test]
-fn settlement_proof_ids_are_sorted_and_domain_separated() {
+    fn settlement_proof_ids_are_sorted_and_domain_separated() {
         let mut s = State::default();
         let pending_a = SettlementProofRecord {
             proof_id: "pending:a".into(),
@@ -19649,18 +23194,57 @@ fn settlement_proof_ids_are_sorted_and_domain_separated() {
         let ids = settlement_proof_ids_from_state(&s);
         assert_eq!(ids.pending, vec!["pending:a", "pending:b"]);
         assert_eq!(ids.reserve, vec!["reserve:a"]);
-}
+    }
+
+    #[cfg(test)]
+    mod deficit_readonly_migration_tests {
+        use super::*;
+        use crate::migrate_legacy_deficit_readonly_latch;
+        use rumi_protocol_backend::numeric::ICUSD;
+        use rumi_protocol_backend::state::Mode;
+
+        #[test]
+        fn legacy_snapshot_at_or_above_threshold_migrates_to_readonly_before_use() {
+            let mut previous = State::default();
+            previous.deficit_readonly_threshold_e8s = 100;
+            previous.protocol_deficit_icusd = ICUSD::new(120);
+            previous.mode = Mode::GeneralAvailability;
+
+            let mut encoded = Vec::new();
+            ciborium::ser::into_writer(&previous, &mut encoded).unwrap();
+            let value: ciborium::Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+            let mut entries = match value {
+                ciborium::Value::Map(entries) => entries,
+                other => panic!("expected CBOR map, got {other:?}"),
+            };
+            entries.retain(|(key, _)| {
+            !matches!(key, ciborium::Value::Text(name) if name == "deficit_readonly_latched_at_e8s")
+        });
+            let mut old_snapshot = Vec::new();
+            ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut old_snapshot).unwrap();
+            let mut restored: State = ciborium::de::from_reader(old_snapshot.as_slice())
+                .expect("pre-latch stable snapshot must decode");
+            assert_eq!(restored.deficit_readonly_latched_at_e8s, None);
+
+            assert!(migrate_legacy_deficit_readonly_latch(&mut restored));
+            assert_eq!(restored.deficit_readonly_latched_at_e8s, Some(100));
+            assert_eq!(restored.mode, Mode::ReadOnly);
+        }
+    }
 }
 
 #[cfg(test)]
 mod pending_payout_page_tests {
     use super::{
-        pending_payout_ids_for_legacy_recovery, pending_payout_page_in_state,
-        PendingPayoutCursor, PendingPayoutQueueKind, MAX_PENDING_PAYOUT_SCAN_PER_QUEUE,
+        hold_unpinned_redemption_payouts, pending_payout_ids_for_legacy_recovery,
+        pending_payout_page_in_state, pending_redemption_page_in_state,
+        redemption_burn_ids_from_events, PendingPayoutCursor, PendingPayoutQueueKind,
+        PendingRedemptionCursor, MAX_PENDING_PAYOUT_SCAN_PER_QUEUE,
     };
-    use rumi_protocol_backend::numeric::ICP;
-    use rumi_protocol_backend::state::{PendingMarginTransfer, State};
     use candid::Principal;
+    use rumi_protocol_backend::event::Event;
+    use rumi_protocol_backend::numeric::{UsdIcp, ICP, ICUSD};
+    use rumi_protocol_backend::state::{PendingMarginTransfer, PinnedRedemptionTransfer, State};
 
     fn payout(owner: Principal, vault_id: u64) -> PendingMarginTransfer {
         PendingMarginTransfer {
@@ -19672,6 +23256,7 @@ mod pending_payout_page_tests {
             op_nonce: vault_id as u128,
             ledger: Some(Principal::from_slice(&[9])),
             transfer_amount_raw: Some(90_000),
+            redemption_transfer: None,
             held_for_manual_retry: true,
             reconciliation_required: false,
             min_net_collateral_raw: None,
@@ -19683,18 +23268,25 @@ mod pending_payout_page_tests {
         let caller = Principal::from_slice(&[1]);
         let other = Principal::from_slice(&[2]);
         let mut state = State::default();
-        state.pending_margin_transfers.insert(10, payout(caller, 10));
+        state
+            .pending_margin_transfers
+            .insert(10, payout(caller, 10));
         state.pending_margin_transfers.insert(20, payout(other, 20));
-        state.pending_excess_transfers.insert(15, payout(caller, 15));
+        state
+            .pending_excess_transfers
+            .insert(15, payout(caller, 15));
 
         let first = pending_payout_page_in_state(&state, caller, None, 1);
         assert_eq!(first.items.len(), 1);
         assert_eq!(first.items[0].operation_id, 10);
         assert_eq!(first.items[0].kind, PendingPayoutQueueKind::Margin);
-        assert_eq!(first.next_cursor, Some(PendingPayoutCursor {
-            operation_id: 10,
-            kind: PendingPayoutQueueKind::Margin,
-        }));
+        assert_eq!(
+            first.next_cursor,
+            Some(PendingPayoutCursor {
+                operation_id: 10,
+                kind: PendingPayoutQueueKind::Margin,
+            })
+        );
 
         let second = pending_payout_page_in_state(&state, caller, first.next_cursor, 1);
         assert_eq!(second.items.len(), 1);
@@ -19703,6 +23295,122 @@ mod pending_payout_page_tests {
         assert_eq!(second.items[0].ledger, Some(Principal::from_slice(&[9])));
         assert_eq!(second.items[0].amount_raw, Some(90_000));
         assert_eq!(second.next_cursor, None);
+    }
+
+    #[test]
+    fn redemption_page_is_owner_filtered_and_uses_burn_block_cursor() {
+        let caller = Principal::from_slice(&[1]);
+        let other = Principal::from_slice(&[2]);
+        let mut state = State::default();
+        state
+            .pending_redemption_transfer
+            .insert(0, payout(caller, 0));
+        state
+            .pending_redemption_transfer
+            .insert(10, payout(caller, 10));
+        state
+            .pending_redemption_transfer
+            .insert(20, payout(other, 20));
+        state
+            .pending_redemption_transfer
+            .insert(30, payout(caller, 30));
+
+        let first = pending_redemption_page_in_state(&state, caller, None, 1);
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].burn_block_index, 0);
+        assert_eq!(first.items[0].recipient, caller);
+        assert_eq!(first.items[0].gross_amount_raw, 100_000);
+        assert_eq!(
+            first.next_cursor,
+            Some(PendingRedemptionCursor {
+                burn_block_index: 0
+            })
+        );
+
+        let second = pending_redemption_page_in_state(&state, caller, first.next_cursor, 1);
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].burn_block_index, 10);
+        assert_eq!(
+            second.next_cursor,
+            Some(PendingRedemptionCursor {
+                burn_block_index: 10
+            })
+        );
+
+        let third = pending_redemption_page_in_state(&state, caller, second.next_cursor, 1);
+        assert_eq!(third.items.len(), 1);
+        assert_eq!(third.items[0].burn_block_index, 30);
+        assert_eq!(third.next_cursor, None);
+    }
+
+    #[test]
+    fn upgrade_migration_holds_redemptions_without_complete_transfer_pins() {
+        let caller = Principal::from_slice(&[1]);
+        let mut state = State::default();
+        let mut legacy = payout(caller, 5);
+        legacy.op_nonce = 0;
+        legacy.ledger = None;
+        legacy.transfer_amount_raw = None;
+        legacy.held_for_manual_retry = false;
+        legacy.reconciliation_required = false;
+        state.pending_redemption_transfer.insert(5, legacy);
+        let mut pinned = payout(caller, 6);
+        let op_nonce = pinned.op_nonce;
+        pinned.redemption_transfer = Some(PinnedRedemptionTransfer {
+            op_nonce,
+            ledger: Principal::from_slice(&[9]),
+            recipient: caller,
+            amount_raw: 90_000,
+            fee_raw: 10_000,
+            fee_is_explicit: true,
+            memo: op_nonce,
+            created_at_time_ns: 0,
+        });
+        pinned.held_for_manual_retry = false;
+        state.pending_redemption_transfer.insert(6, pinned);
+
+        assert_eq!(
+            hold_unpinned_redemption_payouts(&mut state.pending_redemption_transfer),
+            1
+        );
+        let held = &state.pending_redemption_transfer[&5];
+        assert!(held.held_for_manual_retry);
+        assert!(held.reconciliation_required);
+        assert!(!state.pending_redemption_transfer[&6].held_for_manual_retry);
+    }
+
+    #[test]
+    fn upgrade_event_scan_restores_completed_burn_tombstone_without_pending_row() {
+        let owner = Principal::from_slice(&[3]);
+        let burn_block = 404;
+        let history = vec![
+            Event::RedemptionOnVaults {
+                owner,
+                current_icp_rate: UsdIcp::new(rust_decimal::Decimal::ONE),
+                icusd_amount: ICUSD::new(1),
+                fee_amount: ICUSD::new(0),
+                icusd_block_index: burn_block,
+                collateral_type: Some(Principal::from_slice(&[4])),
+                timestamp: Some(1),
+                vault_redemptions: Some(Vec::new()),
+                payout_collateral_raw: Some(0),
+                min_net_collateral_raw: None,
+                redemption_transfer: None,
+            },
+            Event::RedemptionTransfered {
+                icusd_block_index: burn_block,
+                icp_block_index: 55,
+                timestamp: Some(2),
+            },
+        ];
+        let mut restored = State::default();
+        restored
+            .consumed_redemption_burn_blocks
+            .extend(redemption_burn_ids_from_events(history));
+        assert!(restored.pending_redemption_transfer.is_empty());
+        assert!(restored
+            .consumed_redemption_burn_blocks
+            .contains(&burn_block));
     }
 
     #[test]
@@ -19720,9 +23428,47 @@ mod pending_payout_page_tests {
             payout(caller, 999),
         );
 
-        let (matches, truncated) =
-            pending_payout_ids_for_legacy_recovery(&state, caller, 999);
+        let (matches, truncated) = pending_payout_ids_for_legacy_recovery(&state, caller, 999);
         assert!(matches.is_empty());
-        assert!(truncated, "compatibility recovery must not claim no payout when its bounded scan is incomplete");
+        assert!(
+            truncated,
+            "compatibility recovery must not claim no payout when its bounded scan is incomplete"
+        );
+    }
+}
+
+#[cfg(test)]
+mod redemption_ingress_paused_tests {
+    use super::{redeem_collateral, redeem_icp, redeem_quoted, redeem_reserves};
+    use candid::Principal;
+    use rumi_protocol_backend::{
+        ProtocolError, RedeemQuotedRequest, RedemptionError,
+    };
+
+    fn is_paused(error: &ProtocolError) -> bool {
+        matches!(error, ProtocolError::TemporarilyUnavailable(message)
+            if message.contains("no icUSD was pulled"))
+    }
+
+    #[test]
+    fn legacy_redemption_wrappers_stop_before_any_ledger_call() {
+        let icp = futures::executor::block_on(redeem_icp(1));
+        assert!(is_paused(&icp.unwrap_err()));
+
+        let collateral = futures::executor::block_on(redeem_collateral(
+            Principal::anonymous(),
+            1,
+        ));
+        assert!(is_paused(&collateral.unwrap_err()));
+
+        let quoted = futures::executor::block_on(redeem_quoted(RedeemQuotedRequest {
+            amount_e8s: 1,
+            expected_collateral_type: Principal::anonymous(),
+            min_net_collateral_raw: 0,
+        }));
+        assert!(matches!(quoted, Err(RedemptionError::Protocol(error)) if is_paused(&error)));
+
+        let reserves = futures::executor::block_on(redeem_reserves(1, None));
+        assert!(is_paused(&reserves.unwrap_err()));
     }
 }

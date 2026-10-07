@@ -45,8 +45,26 @@ pub async fn run() {
         }
     };
 
-    let mut processed = 0u64;
+    // A prior overlapping timer run may have committed this cursor while we
+    // awaited the AMM. Only the first callback may append this batch.
+    if cursors::amm_swaps::get() != cursor {
+        return;
+    }
+
+    if events.is_empty() {
+        state::mutate_state(|s| update_cursor_error(
+            s, cursors::CURSOR_ID_AMM_SWAPS,
+            format!("AMM reports {count} swap events but returned no row at cursor {cursor}"),
+        ));
+        return;
+    }
+    let mut next_cursor = cursor;
+    let mut evicted = 0u64;
     for evt in &events {
+        if evt.id < next_cursor {
+            continue;
+        }
+        evicted = evicted.saturating_add(evt.id.saturating_sub(next_cursor));
         evt_swaps::push(AnalyticsSwapEvent {
             timestamp_ns: evt.timestamp,
             source: SwapSource::Amm,
@@ -58,13 +76,19 @@ pub async fn run() {
             amount_out: nat_to_u64(&evt.amount_out),
             fee: nat_to_u64(&evt.fee),
         });
-        processed += 1;
+        next_cursor = evt.id.saturating_add(1);
     }
 
-    if processed > 0 {
-        cursors::amm_swaps::set(cursor + processed);
+    if next_cursor > cursor {
+        cursors::amm_swaps::set(next_cursor);
         state::mutate_state(|s| {
-            update_cursor_success(s, cursors::CURSOR_ID_AMM_SWAPS, ic_cdk::api::time());
+            if evicted > 0 {
+                s.error_counters.amm = s.error_counters.amm.saturating_add(1);
+                update_cursor_error(s, cursors::CURSOR_ID_AMM_SWAPS,
+                    format!("AMM swap history gap: {evicted} events evicted before analytics read them"));
+            } else {
+                update_cursor_success(s, cursors::CURSOR_ID_AMM_SWAPS, ic_cdk::api::time());
+            }
         });
     }
 }

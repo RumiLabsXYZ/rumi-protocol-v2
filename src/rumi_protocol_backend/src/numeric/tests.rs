@@ -2,6 +2,25 @@ use super::*;
 use rust_decimal_macros::dec;
 
 #[test]
+fn proportional_interest_share_handles_u64_boundary_without_decimal_overflow() {
+    // The former Decimal multiplication overflows before division for these
+    // values. Liquidation accounting must remain defined even after a pull.
+    assert_eq!(
+        proportional_interest_share(u64::MAX, u64::MAX, u64::MAX),
+        u64::MAX
+    );
+    assert_eq!(
+        proportional_interest_share(u64::MAX / 2, u64::MAX, u64::MAX),
+        u64::MAX / 2
+    );
+    assert_eq!(
+        proportional_interest_share(u64::MAX, u64::MAX, 1),
+        u64::MAX
+    );
+    assert_eq!(proportional_interest_share(42, 7, 0), 0);
+}
+
+#[test]
 fn checked_icusd_collateral_conversion_rejects_realistic_18_decimal_overflow() {
     // Required floor: 1 icUSD * 150% / $0.05 * 10^18 = 30e18 raw
     // units, above u64::MAX. Returning zero here lets a debt-bearing

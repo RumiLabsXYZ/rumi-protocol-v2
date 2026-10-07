@@ -331,6 +331,39 @@ export class walletOperations {
       return BigInt(0);
     }
   }
+
+  static async checkIcusdAllowanceBound(ctx: ActionBoundContext, spenderCanisterId: string): Promise<bigint> {
+    assertActionBoundContextCurrent(ctx);
+    const allowance = await walletOperations.checkIcusdAllowance(spenderCanisterId);
+    assertActionBoundContextCurrent(ctx);
+    return allowance;
+  }
+
+  /** One non-retrying icUSD approval pinned to the initiating wallet session. */
+  static async approveIcusdTransferBound(
+    ctx: ActionBoundContext,
+    amount: bigint,
+    spenderCanisterId: string
+  ): Promise<{ success: boolean; error?: string }> {
+    assertActionBoundContextCurrent(ctx);
+    const actor = await walletStore.getActor(CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
+    assertActionBoundContextCurrent(ctx);
+    const result = await actor.icrc2_approve({
+      amount,
+      spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
+      expires_at: largeApprovalExpiry(),
+      expected_allowance: [],
+      memo: [],
+      fee: [],
+      from_subaccount: [],
+      created_at_time: []
+    });
+    if ('Ok' in result) return { success: true };
+    return {
+      success: false,
+      error: `icUSD approval failed: ${String(result.Err && typeof result.Err === 'object' ? Object.keys(result.Err)[0] : result.Err)}`
+    };
+  }
   
   /**
    * Approve icUSD transfer - now streamlined with retry on stale actor
@@ -508,6 +541,34 @@ export class walletOperations {
       console.error(`${tokenType} allowance check failed:`, error);
       return BigInt(0);
     }
+  }
+
+  /** Session-pinned stable approval used by the legacy repayment hold flow. */
+  static async approveStableTransferBound(
+    ctx: ActionBoundContext,
+    amount: bigint,
+    spenderCanisterId: string,
+    tokenType: 'CKUSDT' | 'CKUSDC'
+  ): Promise<{ success: boolean; error?: string }> {
+    assertActionBoundContextCurrent(ctx);
+    const ledgerId = CONFIG.getStableLedgerId(tokenType);
+    const stableActor = await walletStore.getActor(ledgerId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
+    assertActionBoundContextCurrent(ctx);
+    const result = await stableActor.icrc2_approve({
+      amount,
+      spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
+      expires_at: largeApprovalExpiry(),
+      expected_allowance: [],
+      memo: [],
+      fee: [],
+      from_subaccount: [],
+      created_at_time: []
+    });
+    if ('Ok' in result) return { success: true };
+    return {
+      success: false,
+      error: `${tokenType} approval failed: ${String(result.Err && typeof result.Err === 'object' ? Object.keys(result.Err)[0] : result.Err)}`
+    };
   }
 
   // ── Generic collateral approve/allowance (multi-collateral) ──────────

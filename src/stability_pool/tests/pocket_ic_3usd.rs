@@ -199,7 +199,13 @@ fn setup_test_env() -> TestEnv {
         admin,
     };
 
-    let pool_id = pic.create_canister();
+    // The Stability Pool recognizes the canonical 3USD ledger principal.
+    // Allocate that identity in PocketIC so the fixture exercises the real
+    // LP-ledger admission path instead of failing on a synthetic principal.
+    let pool_id = Principal::from_text("fohh4-yyaaa-aaaap-qtkpa-cai")
+        .expect("canonical 3USD ledger principal");
+    pic.create_canister_with_id(None, None, pool_id)
+        .expect("create canonical 3pool canister");
     pic.add_cycles(pool_id, 2_000_000_000_000);
     pic.install_canister(pool_id, three_pool_wasm(), encode_one(pool_init_args).unwrap(), None);
 
@@ -1016,6 +1022,37 @@ fn test_interest_v2_duplicate_receipt_is_idempotent_across_upgrade() {
                 .unwrap().expect("notification acknowledged"),
             WasmResult::Reject(message) => panic!("notification rejected: {message}"),
         }
+    }
+
+    for altered in [
+        encode_args((env.icusd_ledger, 11_00000000u64, None::<Principal>, 42u64)).unwrap(),
+        encode_args((env.icusd_ledger, 10_00000000u64, Some(env.pool_id), 42u64)).unwrap(),
+        encode_args((env.ckusdc_ledger, 10_00000000u64, None::<Principal>, 42u64)).unwrap(),
+    ] {
+        let replay = env.pic.update_call(
+            env.sp_id, env.protocol_id, "receive_interest_revenue_v2", altered,
+        ).expect("altered receipt call");
+        match replay {
+            WasmResult::Reply(bytes) => assert!(matches!(
+                decode_one::<Result<(), StabilityPoolError>>(&bytes).unwrap(),
+                Err(StabilityPoolError::SystemBusy),
+            ), "same mint block with changed ledger/amount/collateral must remain unacknowledged"),
+            WasmResult::Reject(message) => panic!("altered receipt rejected: {message}"),
+        }
+    }
+
+    let non_icusd = env.pic.update_call(
+        env.sp_id,
+        env.protocol_id,
+        "receive_interest_revenue_v2",
+        encode_args((env.ckusdc_ledger, 10_00000000u64, None::<Principal>, 43u64)).unwrap(),
+    ).expect("registered non-icUSD interest call");
+    match non_icusd {
+        WasmResult::Reply(bytes) => assert!(matches!(
+            decode_one::<Result<(), StabilityPoolError>>(&bytes).unwrap(),
+            Err(StabilityPoolError::TokenNotAccepted { .. }),
+        ), "registered non-icUSD ledger must not receive interest"),
+        WasmResult::Reject(message) => panic!("non-icUSD interest rejected: {message}"),
     }
 
     let legacy = env.pic.update_call(

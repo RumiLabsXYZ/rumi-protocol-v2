@@ -1,7 +1,8 @@
 use super::settlement::{
     claim_liquidation_swap_submit_in_state, confirm_interest_mint_in_state, confirm_mint_in_state,
     ensure_liquidation_swap_submit_still_allowed_in_state, exact_native_transfer_is_funded,
-    fundable_withdrawal_value, requires_public_mint_gate, rotate_queued_op_to_tail,
+    fail_unfundable_queued_withdrawal_in_state, fundable_withdrawal_value,
+    prune_terminal_settlement_ops, requires_public_mint_gate, rotate_queued_op_to_tail,
     select_liquidation_swap_output, select_next_op, select_next_op_with_submit_filter,
     ClaimLiquidationSwapSubmitError,
     LiquidationSwapSubmitSnapshot, OpAction,
@@ -10,7 +11,9 @@ use crate::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
 use crate::chains::liquidation_config::{ChainLiquidationConfigV1, DexKind};
 use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use crate::chains::multi_chain_state::MultiChainState;
-use crate::chains::settlement_queue::{SettlementOp, SettlementOpKind, SettlementOpStatus};
+use crate::chains::settlement_queue::{
+    SettlementOp, SettlementOpKind, SettlementOpStatus, MAX_PENDING_SETTLEMENT_OPS_PER_CHAIN,
+};
 use crate::state::State;
 use candid::Principal;
 use std::cell::{Cell, RefCell};
@@ -242,6 +245,86 @@ fn select_next_op_filter_skips_blocked_queued_without_starving_later_allowed_ops
         Some((oid, OpAction::Submit)) => assert_eq!(oid, allowed_id),
         other => panic!("expected later allowed op to submit, got {other:?}"),
     }
+}
+
+#[test]
+fn preselection_prune_releases_saturated_queue_when_only_live_ops_are_blocked() {
+    let chain = ChainId(10143);
+    let mut queue = crate::chains::settlement_queue::SettlementQueueV1::default();
+    for index in 0..MAX_PENDING_SETTLEMENT_OPS_PER_CHAIN - 1 {
+        let id = queue
+            .enqueue(SettlementOp::new(
+                SettlementOpKind::Mint {
+                    recipient: "0xr".into(),
+                    amount_e8s: 1,
+                    vault_id: index as u64,
+                },
+                format!("terminal-{index}"),
+                index as u64,
+            ))
+            .expect("terminal row admitted");
+        queue
+            .pending
+            .get_mut(&id)
+            .expect("new row exists")
+            .mark_succeeded("0xtx".into(), index as u64);
+    }
+    let blocked_id = queue
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xr".into(),
+                amount_e8s: 1,
+                vault_id: 1000,
+            },
+            "blocked-live-mint".into(),
+            1000,
+        ))
+        .expect("last queue slot admitted");
+    let seen_before_prune = queue.seen_idempotency_keys.len();
+    assert_eq!(queue.pending_len(), MAX_PENDING_SETTLEMENT_OPS_PER_CHAIN);
+
+    assert_eq!(
+        select_next_op_with_submit_filter(&queue, |_, op| {
+            matches!(op.kind, SettlementOpKind::Mint { .. })
+        }),
+        None,
+        "the bad-debt gate can leave no actionable op for the worker"
+    );
+    assert!(matches!(
+        queue.enqueue(SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xr".into(),
+                amount_e8s: 1,
+                vault_id: 1001,
+            },
+            "overflow-before-prune".into(),
+            1001,
+        )),
+        Err(crate::chains::settlement_queue::SettlementQueueError::QueueCapacityReached { .. })
+    ));
+
+    let mut state = MultiChainState::default();
+    state.settlement_queues.insert(chain, queue);
+    prune_terminal_settlement_ops(&mut state, chain);
+    let queue = state.settlement_queues.get_mut(&chain).expect("queue retained");
+    assert_eq!(queue.pending_len(), 1);
+    assert!(queue.pending.contains_key(&blocked_id));
+    assert_eq!(
+        queue.seen_idempotency_keys.len(),
+        seen_before_prune,
+        "pruning terminal rows must preserve permanent replay protection"
+    );
+    queue
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xr".into(),
+                amount_e8s: 1,
+                vault_id: 1001,
+            },
+            "admission-after-prune".into(),
+            1002,
+        ))
+        .expect("preselection cleanup releases pending capacity");
 }
 
 #[test]
@@ -1034,10 +1117,122 @@ fn fundable_withdrawal_value_nets_gas_only_when_balance_is_tight() {
     );
 
     // Degenerate: balance below the gas reserve -> saturates to 0 (never panics
-    // / underflows), so the worker sends a 0-value tx rather than trapping.
+    // / underflows), which the worker treats as a terminal unfundable withdrawal.
     assert_eq!(
         fundable_withdrawal_value(amount, gas_reserve / 2, max_fee),
         0
+    );
+}
+
+#[test]
+fn unfundable_queued_withdrawal_fails_once_restores_collateral_and_frees_slot() {
+    let chain = ChainId(10143);
+    let mut s = MultiChainState::default();
+    s.chain_vaults.insert(
+        7,
+        ChainVaultV1 {
+            vault_id: 7,
+            owner: Principal::anonymous(),
+            collateral_chain: chain,
+            custody_address: "0xcustody".into(),
+            // Enqueue reserved the entire withdrawal amount.
+            collateral_amount_native: 0,
+            debt_e8s: 0,
+            mint_recipient: "0xr".into(),
+            pending_mint_e8s: 0,
+            status: ChainVaultStatus::Closing,
+            opened_at_ns: 0,
+            owner_evm: None,
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
+            pending_liquidation: None,
+        },
+    );
+    let q = s.settlement_queues.entry(chain).or_default();
+    let op_id = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::NativeWithdrawal {
+                recipient: "0xrecipient".into(),
+                amount_e18: 5,
+                vault_id: 7,
+            },
+            "unfundable-withdrawal".into(),
+            0,
+        ))
+        .expect("enqueue withdrawal");
+    let amount = 5u128;
+    let max_fee = 100_000_000_000u128;
+    let gas_reserve = super::tx::NATIVE_WITHDRAWAL_GAS_LIMIT as u128 * max_fee;
+    assert_eq!(
+        fundable_withdrawal_value(amount, gas_reserve - 1, max_fee),
+        0
+    );
+
+    s.chain_vaults.get_mut(&7).unwrap().collateral_chain = ChainId(1);
+    assert!(!fail_unfundable_queued_withdrawal_in_state(
+        &mut s,
+        chain,
+        op_id,
+        "wrong chain".into(),
+        9,
+    ));
+    assert_eq!(s.chain_vaults[&7].collateral_amount_native, 0);
+    assert!(matches!(
+        s.settlement_queues[&chain].pending[&op_id].status,
+        SettlementOpStatus::Queued
+    ));
+    s.chain_vaults.get_mut(&7).unwrap().collateral_chain = chain;
+    s.chain_vaults.get_mut(&7).unwrap().collateral_amount_native = u128::MAX;
+    assert!(!fail_unfundable_queued_withdrawal_in_state(
+        &mut s,
+        chain,
+        op_id,
+        "overflow".into(),
+        9,
+    ));
+    assert_eq!(s.chain_vaults[&7].collateral_amount_native, u128::MAX);
+    assert!(matches!(
+        s.settlement_queues[&chain].pending[&op_id].status,
+        SettlementOpStatus::Queued
+    ));
+    s.chain_vaults.get_mut(&7).unwrap().collateral_amount_native = 0;
+
+    assert!(fail_unfundable_queued_withdrawal_in_state(
+        &mut s,
+        chain,
+        op_id,
+        "insufficient gas balance".into(),
+        10,
+    ));
+    assert!(!fail_unfundable_queued_withdrawal_in_state(
+        &mut s,
+        chain,
+        op_id,
+        "duplicate attempt".into(),
+        11,
+    ));
+    let vault = &s.chain_vaults[&7];
+    assert_eq!(vault.collateral_amount_native, amount);
+    assert_eq!(vault.status, ChainVaultStatus::Open);
+    assert!(matches!(
+        s.settlement_queues[&chain].pending[&op_id].status,
+        SettlementOpStatus::Failed { .. }
+    ));
+
+    let q = s.settlement_queues.get_mut(&chain).unwrap();
+    q.prune_terminal();
+    assert_eq!(q.pending_len(), 0, "terminal op releases pending capacity");
+    assert_eq!(
+        q.enqueue(SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xr".into(),
+                amount_e8s: 1,
+                vault_id: 8,
+            },
+            "next-op".into(),
+            12,
+        )),
+        Ok(1)
     );
 }
 
@@ -1424,7 +1619,9 @@ mod chain_claim_tests {
     };
     use crate::chains::config::ChainId;
     use crate::chains::multi_chain_state::{ChainLiqClaimV1, MultiChainState};
-    use crate::chains::settlement_queue::{SettlementOp, SettlementOpKind, SettlementOpStatus};
+    use crate::chains::settlement_queue::{
+        SettlementOp, SettlementOpKind, SettlementOpStatus, MAX_SEEN_IDEMPOTENCY_KEYS_PER_CHAIN,
+    };
     use candid::Principal;
 
     const CFX: ChainId = ChainId(71);
@@ -1504,6 +1701,45 @@ mod chain_claim_tests {
             }
             other => panic!("expected ChainCollateralPayout, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn claim_replay_capacity_error_requires_operator_recovery() {
+        let mut s = state_with_claim();
+        let queue = s.settlement_queues.entry(CFX).or_default();
+        for i in 0..MAX_SEEN_IDEMPOTENCY_KEYS_PER_CHAIN {
+            queue.seen_idempotency_keys.insert(format!("prior-key-{i}"));
+        }
+
+        let err = claim_chain_collateral_in_state(
+            &mut s,
+            7,
+            claimant(),
+            3 * E18,
+            "0x0000000000000000000000000000000000000abc".into(),
+            42,
+            valid_evm_address,
+        )
+        .expect_err("replay-capacity exhaustion must reject before reserving funds");
+
+        assert!(
+            err.contains("permanent capacity"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.contains("operator intervention"),
+            "error must direct operators to recovery: {err}"
+        );
+        assert!(
+            !err.contains("retry after settlement progresses"),
+            "draining pending work cannot recover lifetime replay capacity"
+        );
+        assert_eq!(s.chain_liquidation_claims[&7].pending_native, 0);
+        assert_eq!(s.settlement_queues[&CFX].pending_len(), 0);
+        assert_eq!(
+            s.settlement_queues[&CFX].seen_idempotency_keys.len(),
+            MAX_SEEN_IDEMPOTENCY_KEYS_PER_CHAIN
+        );
     }
 
     #[test]

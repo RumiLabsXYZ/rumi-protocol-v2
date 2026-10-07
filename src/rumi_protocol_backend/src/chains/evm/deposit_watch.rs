@@ -12,8 +12,9 @@
 //! The function enforces a strict no-mutation-on-rejection guarantee:
 //!
 //! 1. Look up vault (reject if unknown — no mutation).
-//! 2. Defer if the vault is locked for liquidation/SP absorb, or reject if
-//!    `burn.amount_e8s > debt_e8s` (no mutation).
+//! 2. Reject if `vault.collateral_chain != observed_chain` before checking
+//!    liquidation/SP locks, then defer a locked vault or reject an over-repay
+//!    (all without mutation).
 //! 3. Call `apply_supply_delta(state, chain, Decrease(amount), new_total_debt)`.
 //!    `apply_supply_delta` validates underflow, divergence, and halt BEFORE
 //!    mutating chain_supplies; on any error it returns `Err` with state
@@ -64,7 +65,11 @@ use crate::chains::monad::chain_vault::{
 pub(crate) const MAX_AWAITING_DEPOSIT_GLOBAL_SCAN_PER_TICK: usize = 500;
 pub(crate) const MAX_AWAITING_DEPOSIT_POLLS_PER_TICK: usize = 25;
 
-pub(crate) fn replay_catchup_is_required(pending_ids: bool, proof_floor: u64, finalized: u64) -> bool {
+pub(crate) fn replay_catchup_is_required(
+    pending_ids: bool,
+    proof_floor: u64,
+    finalized: u64,
+) -> bool {
     pending_ids && proof_floor < finalized
 }
 
@@ -92,9 +97,49 @@ pub(crate) fn observer_burn_was_already_consumed(
 ) -> bool {
     state.has_evm_burn_replay_id(chain, block, tx_hash, log_index)
         || state
-            .processed_burn_keys
-            .get(&block)
-            .is_some_and(|keys| keys.contains(&format!("{}:{}", tx_hash.to_ascii_lowercase(), log_index)))
+            .settled_settlement_burn_logs
+            .iter()
+            .any(|key| evm_burn_consumption_key_matches(key, chain, tx_hash, log_index))
+        || state.processed_burn_keys.get(&block).is_some_and(|keys| {
+            keys.iter()
+                .any(|key| evm_burn_consumption_key_matches(key, chain, tx_hash, log_index))
+        })
+}
+
+/// Chain-qualified identity shared by all EVM burn consumers. It is stored in
+/// block-scoped `processed_burn_keys` while the observer can still rescan that
+/// block; the monotonic proof floor rejects older proofs after cursor pruning.
+pub(crate) fn evm_burn_consumption_key(chain: ChainId, tx_hash: &str, log_index: u64) -> String {
+    format!("{}:{}:{}", chain.0, tx_hash.to_ascii_lowercase(), log_index)
+}
+
+/// Legacy persisted shape used before burn consumption was chain-qualified.
+pub(crate) fn legacy_burn_log_key(tx_hash: &str, log_index: u64) -> String {
+    format!("{}:{}", tx_hash.to_ascii_lowercase(), log_index)
+}
+
+pub(crate) fn evm_burn_consumption_key_matches(
+    key: &str,
+    chain: ChainId,
+    tx_hash: &str,
+    log_index: u64,
+) -> bool {
+    key == evm_burn_consumption_key(chain, tx_hash, log_index)
+        || key.eq_ignore_ascii_case(&legacy_burn_log_key(tx_hash, log_index))
+}
+
+pub(crate) fn record_evm_burn_consumption(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    block: u64,
+    tx_hash: &str,
+    log_index: u64,
+) {
+    state
+        .processed_burn_keys
+        .entry(block)
+        .or_default()
+        .insert(evm_burn_consumption_key(chain, tx_hash, log_index));
 }
 
 pub(crate) fn take_awaiting_deposit_page(
@@ -256,8 +301,9 @@ pub fn credit_deposit_to_state(
 ///
 /// ## Mutation ordering (correctness guarantee)
 ///
-/// 1. Vault lookup — reject (no mutation) if unknown.
-/// 2. Debt-exceeds check — reject (no mutation) if `amount > debt`.
+/// 1. Vault lookup and observed-chain match — reject (no mutation) if unknown
+///    or if the log came from a different chain than the vault.
+/// 2. Liquidation lock and debt-exceeds checks — defer/reject without mutation.
 /// 3. `apply_supply_delta` — validates and mutates `chain_supplies` or
 ///    rejects entirely (no mutation to any field on error).
 /// 4. Only after (3) succeeds: `vault.debt_e8s -= amount_e8s`.
@@ -280,6 +326,7 @@ pub fn credit_deposit_to_state(
 /// concern; for Phase 1b it is accepted.
 pub fn apply_burn_to_state(
     state: &mut MultiChainState,
+    observed_chain: ChainId,
     burn: &super::evm_rpc::BurnLog,
     total_debt_e8s: u128,
 ) -> Result<(), BurnApplyError> {
@@ -290,6 +337,14 @@ pub fn apply_burn_to_state(
         let vault = state.chain_vaults.get(&burn.vault_id).ok_or_else(|| {
             BurnApplyError::InvalidBurn(format!("apply_burn: unknown vault_id {}", burn.vault_id))
         })?;
+        // Classify an authenticated log from the wrong contract chain as
+        // permanently invalid before the liquidation deferral can hide it.
+        if vault.collateral_chain != observed_chain {
+            return Err(BurnApplyError::InvalidBurn(format!(
+                "apply_burn: wrong chain {:?} for vault {} on {:?}",
+                observed_chain, burn.vault_id, vault.collateral_chain
+            )));
+        }
         // Findings #11/#19 + Inc8: never decrement a vault's debt while it is
         // mid-liquidation or after it has escalated to SP absorb. The SP path
         // burns IC-side icUSD before calling the backend; a foreign-chain burn
@@ -973,8 +1028,7 @@ pub async fn run_observer(chain: ChainId) {
     // `eth_getLogs`. Burn coverage must therefore resume from its own
     // contiguous floor, or unscanned gaps would become permanently unprovable.
     let legacy_hold_through = read_state(|s| {
-        s
-            .multi_chain
+        s.multi_chain
             .evm_burn_proof_legacy_hold_through
             .get(&chain)
             .copied()
@@ -986,26 +1040,38 @@ pub async fn run_observer(chain: ChainId) {
         return;
     };
 
-    let raw_burn_logs =
-        match get_logs(chain, &contract, BURN_EVENT_TOPIC0, from_block, coverage_through).await {
-            Ok(logs) => logs,
-            Err(e) => {
-                log!(
-                    INFO,
-                    "[observer chain={:?}] get_logs(burn) failed: {}; will retry on next tick",
-                    chain,
-                    e
-                );
-                return;
-            }
-        };
+    let raw_burn_logs = match get_logs(
+        chain,
+        &contract,
+        BURN_EVENT_TOPIC0,
+        from_block,
+        coverage_through,
+    )
+    .await
+    {
+        Ok(logs) => logs,
+        Err(e) => {
+            log!(
+                INFO,
+                "[observer chain={:?}] get_logs(burn) failed: {}; will retry on next tick",
+                chain,
+                e
+            );
+            return;
+        }
+    };
 
     // Process against live state in one synchronous mutation and commit the
     // coverage floor only if the full returned window is handled. If a later
     // burn halts or defers, restore the touched vault debts and chain supply so
     // a partial prefix cannot survive without a matching replay horizon.
     let result = mutate_state(|s| {
-        apply_burn_log_window_and_advance(&mut s.multi_chain, chain, &raw_burn_logs, coverage_through)
+        apply_burn_log_window_and_advance(
+            &mut s.multi_chain,
+            chain,
+            &raw_burn_logs,
+            coverage_through,
+        )
     });
 
     match result {
@@ -1045,6 +1111,7 @@ pub(crate) fn apply_burn_log_window_and_advance(
     let mut original_vault_debts = std::collections::BTreeMap::new();
     let mut seen_this_scan = std::collections::BTreeSet::new();
     let mut applied_burns = Vec::new();
+    let mut consumed_burn_keys = Vec::new();
 
     for (topics, data, tx_hash, block_number, log_index) in raw_burn_logs {
         let burn = match decode_burn_log(topics, data, tx_hash, *block_number) {
@@ -1054,28 +1121,37 @@ pub(crate) fn apply_burn_log_window_and_advance(
                 continue;
             }
         };
-        let identity = format!("{}:{}", burn.tx_hash, log_index);
+        // RPCs may vary hex-hash casing for the same log; normalize within
+        // this window before applying, not only in the durable cross-consumer
+        // key committed after the loop.
+        let identity = evm_burn_consumption_key(chain, &burn.tx_hash, *log_index);
         if !seen_this_scan.insert((burn.block_number, identity)) {
             continue;
         }
         if observer_burn_was_already_consumed(
-            state, chain, burn.block_number, &burn.tx_hash, *log_index,
+            state,
+            chain,
+            burn.block_number,
+            &burn.tx_hash,
+            *log_index,
         ) {
             continue;
         }
 
         let current_total = state.total_chain_vault_debt_e8s();
         let previous_debt = state.chain_vaults.get(&burn.vault_id).map(|v| v.debt_e8s);
-        match apply_burn_to_state(state, &burn, current_total) {
+        match apply_burn_to_state(state, chain, &burn, current_total) {
             Ok(()) => {
                 if let Some(debt) = previous_debt {
                     original_vault_debts.entry(burn.vault_id).or_insert(debt);
                 }
+                consumed_burn_keys.push((burn.block_number, burn.tx_hash.clone(), *log_index));
                 applied_burns.push(burn);
             }
             Err(BurnApplyError::InvalidBurn(_)) => {
                 // An invalid on-chain burn is permanent and may be skipped,
                 // but the containing window still has to complete.
+                consumed_burn_keys.push((burn.block_number, burn.tx_hash.clone(), *log_index));
             }
             Err(error) => {
                 for (vault_id, debt) in original_vault_debts {
@@ -1084,23 +1160,34 @@ pub(crate) fn apply_burn_log_window_and_advance(
                     }
                 }
                 match original_supply {
-                    Some(supply) => { state.chain_supplies.insert(chain, supply); }
-                    None => { state.chain_supplies.remove(&chain); }
+                    Some(supply) => {
+                        state.chain_supplies.insert(chain, supply);
+                    }
+                    None => {
+                        state.chain_supplies.remove(&chain);
+                    }
                 }
                 return Err(error);
             }
         }
     }
 
+    // Commit block-scoped cross-consumer identities only once this whole window
+    // succeeds; failed windows restore their accounting prefix and leave no
+    // replay markers behind. Cursor pruning is safe because the proof floor
+    // advances in this same state mutation and rejects proofs for covered blocks.
+    for (block, tx_hash, log_index) in consumed_burn_keys {
+        record_evm_burn_consumption(state, chain, block, &tx_hash, log_index);
+    }
     advance_cursor_and_prune(state, chain, coverage_through);
     Ok(applied_burns)
 }
 
 /// Advance the burn-watch cursor for `chain` to `finalized` and prune
-/// `processed_burn_keys` of every entry at `block <= finalized`. Those blocks are
-/// permanently behind the cursor (the next scan starts at `finalized + 1`), so
-/// their dedup keys are no longer needed; pruning keeps the idempotency set
-/// bounded.
+/// `processed_burn_keys` entries whose own chain's proof floor covers their
+/// block. The map is globally block-keyed, so another chain's cursor cannot
+/// safely prune a marker for this chain. Legacy chainless keys are retained
+/// because their chain provenance cannot be reconstructed.
 ///
 /// Called on the no-halt advance path AND the no-debt fast path. It is NOT called
 /// on a halt-break: the un-halt re-scan restarts from the same `last_observed + 1`
@@ -1142,20 +1229,42 @@ pub(crate) fn advance_cursor_and_prune(
     chain: ChainId,
     finalized: u64,
 ) {
+    // Capture only an existing legacy cursor as ambiguous. The cursor written
+    // below is covered by the floor we advance in this same state mutation and
+    // must not initialize a legacy hold for this new coverage window.
+    state.ensure_evm_burn_proof_floor(chain);
     state
         .last_observed_block
         .entry(chain)
         .and_modify(|cursor| *cursor = (*cursor).max(finalized))
         .or_insert(finalized);
     state.advance_evm_burn_proof_floor(chain, finalized);
-    let stale: Vec<u64> = state
-        .processed_burn_keys
-        .range(..=finalized)
-        .map(|(&block, _)| block)
-        .collect();
-    for block in stale {
-        state.processed_burn_keys.remove(&block);
+    // `processed_burn_keys` is shared across chains and indexed only by block.
+    // Prune each chain-qualified key only after that key's own proof floor has
+    // passed its block; another chain can have a shorter (or legacy-held)
+    // cursor at the same height. Keep old chainless keys conservatively because
+    // their provenance cannot be reconstructed from the V7 state shape.
+    let floors = &state.evm_burn_proof_floor_by_chain;
+    for (&block, keys) in state.processed_burn_keys.iter_mut() {
+        keys.retain(|key| {
+            let Some(key_chain) = processed_burn_key_chain(key) else {
+                return true;
+            };
+            floors.get(&key_chain).map_or(true, |floor| block > *floor)
+        });
     }
+    state.processed_burn_keys.retain(|_, keys| !keys.is_empty());
+}
+
+fn processed_burn_key_chain(key: &str) -> Option<ChainId> {
+    let mut parts = key.split(':');
+    let chain = parts.next()?.parse::<u32>().ok()?;
+    let tx_hash = parts.next()?;
+    let _log_index = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() || tx_hash.is_empty() {
+        return None;
+    }
+    Some(ChainId(chain))
 }
 
 /// Advance the shared observer cursor used by settlement finality checks, but
@@ -1752,7 +1861,7 @@ mod liq_defer_tests {
         let mut s = MultiChainState::default();
         s.chain_supplies.insert(CFX, 100);
         s.chain_vaults.insert(7, vault(true));
-        let res = apply_burn_to_state(&mut s, &burn(50), 100);
+        let res = apply_burn_to_state(&mut s, CFX, &burn(50), 100);
         assert!(
             matches!(res, Err(BurnApplyError::DeferredLiquidation)),
             "burn deferred, not applied"
@@ -1770,13 +1879,31 @@ mod liq_defer_tests {
     }
 
     #[test]
+    fn wrong_chain_burn_is_invalid_even_when_vault_is_liquidation_locked() {
+        let mut s = MultiChainState::default();
+        let wrong_chain = ChainId(10143);
+        s.chain_supplies.insert(CFX, 100);
+        s.chain_supplies.insert(wrong_chain, 100);
+        s.chain_vaults.insert(7, vault(true));
+
+        let res = apply_burn_to_state(&mut s, wrong_chain, &burn(50), 100);
+
+        assert!(
+            matches!(res, Err(BurnApplyError::InvalidBurn(msg)) if msg.contains("wrong chain"))
+        );
+        assert_eq!(s.chain_vaults.get(&7).unwrap().debt_e8s, 100);
+        assert_eq!(s.chain_supplies[&CFX], 100);
+        assert_eq!(s.chain_supplies[&wrong_chain], 100);
+    }
+
+    #[test]
     fn burn_deferred_while_sp_absorb_escalated() {
         let mut s = MultiChainState::default();
         s.chain_supplies.insert(CFX, 100);
         s.chain_vaults.insert(7, vault(false));
         s.sp_attempted_chain_vaults.insert(7);
 
-        let res = apply_burn_to_state(&mut s, &burn(50), 100);
+        let res = apply_burn_to_state(&mut s, CFX, &burn(50), 100);
 
         assert!(
             matches!(res, Err(BurnApplyError::DeferredLiquidation)),
@@ -1799,7 +1926,7 @@ mod liq_defer_tests {
         let mut s = MultiChainState::default();
         s.chain_supplies.insert(CFX, 100);
         s.chain_vaults.insert(7, vault(false));
-        apply_burn_to_state(&mut s, &burn(50), 100).expect("applies");
+        apply_burn_to_state(&mut s, CFX, &burn(50), 100).expect("applies");
         assert_eq!(s.chain_vaults.get(&7).unwrap().debt_e8s, 50);
         assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 50);
     }

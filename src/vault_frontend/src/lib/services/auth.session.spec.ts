@@ -36,7 +36,9 @@ vi.mock('@dfinity/agent', async () => {
   const actual = await vi.importActual<typeof import('@dfinity/agent')>('@dfinity/agent');
   return {
     ...actual,
-    HttpAgent: vi.fn(() => ({ fetchRootKey: mocks.fetchRootKey })),
+    HttpAgent: vi.fn(class MockHttpAgent {
+      fetchRootKey = mocks.fetchRootKey;
+    }),
   };
 });
 
@@ -219,7 +221,7 @@ describe('II session persistence (auth.ts)', () => {
 
     expect(await actor.readValue()).toBe('ok');
     window.ic!.plug!.principalId = OTHER_PRINCIPAL.toText();
-    await expect(actor.readValue()).rejects.toThrow(/Plug account changed/);
+    expect(() => actor.readValue()).toThrow(/Plug account changed/);
     expect(mocks.plugMethod).toHaveBeenCalledTimes(1);
   });
 });

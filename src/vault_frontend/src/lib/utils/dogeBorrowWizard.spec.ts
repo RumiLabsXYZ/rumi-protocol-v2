@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { Principal } from '@dfinity/principal';
+import type { InboundCollateralStatusView } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
 import {
   DOGE_BORROW_INTENT_VERSION,
   DOGE_BORROW_INTENT_MAX_AGE_MS,
@@ -23,6 +25,7 @@ import {
   extractPartialFailureVaultId,
   classifyLiveOpenAndBorrowOutcome,
   classifyLiveOpenAndBorrowOutcomeFromBound,
+  classifyOpenVaultV2Status,
   classifyFinishBorrowOutcome,
   classifyFinishBorrowOutcomeFromBound,
   classifyRecheckOutcome,
@@ -42,6 +45,40 @@ const OWNER = 'aaaaa-aa';
 const OTHER_OWNER = 'bbbbb-bb';
 const CKDOGE_PRINCIPAL = 'efmc5-wyaaa-aaaar-qb3wa-cai';
 const ICP_PRINCIPAL = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
+
+describe('request-ID collateral open classification', () => {
+  const completeOpenStatus = (amount = 100_000n): InboundCollateralStatusView => ({
+    owner: Principal.fromText(OWNER), ledger: Principal.fromText(CKDOGE_PRINCIPAL), request_id: 7n,
+    operation: { Open: { collateral_type: Principal.fromText(CKDOGE_PRINCIPAL) } }, phase: { Complete: null },
+    amount_raw: amount, fee_raw: 10_000n, memo: [], created_at_time_ns: 1n, candidate_block_index: [9n],
+    result: [{ Open: { vault_id: 42n, block_index: 9n } }], had_ambiguous_attempt: false, last_error: [],
+  });
+
+  it('exposes a separate borrow step only for a matching completed request and exact zero-debt vault', () => {
+    const status = completeOpenStatus();
+    const vaults: VaultLite[] = [{ vaultId: 42, collateralPrincipal: CKDOGE_PRINCIPAL, collateralAmount: 100_000n, borrowedIcusd: 0n }];
+    expect(classifyOpenVaultV2Status({ status, ownerText: OWNER, ledgerText: CKDOGE_PRINCIPAL, expectedRequestId: 7n,
+      collateralPrincipal: CKDOGE_PRINCIPAL, expectedCollateralRaw: 100_000n, vaults }).kind).toBe('partial_zero_debt');
+    expect(classifyOpenVaultV2Status({ status, ownerText: OWNER, ledgerText: CKDOGE_PRINCIPAL, expectedRequestId: 7n,
+      collateralPrincipal: CKDOGE_PRINCIPAL, expectedCollateralRaw: 100_001n, vaults }).kind).toBe('ambiguous_pending');
+  });
+
+  it('does not attribute a pending or absent request from a similar vault-list match', () => {
+    const pending = { ...completeOpenStatus(), phase: { Held: null }, result: [] as [] };
+    const vaults: VaultLite[] = [{ vaultId: 42, collateralPrincipal: CKDOGE_PRINCIPAL, collateralAmount: 100_000n, borrowedIcusd: 0n }];
+    expect(classifyOpenVaultV2Status({ status: pending, ownerText: OWNER, ledgerText: CKDOGE_PRINCIPAL, expectedRequestId: 7n,
+      collateralPrincipal: CKDOGE_PRINCIPAL, expectedCollateralRaw: 100_000n, vaults }).kind).toBe('ambiguous_pending');
+    expect(classifyOpenVaultV2Status({ status: null, ownerText: OWNER, ledgerText: CKDOGE_PRINCIPAL, expectedRequestId: 7n,
+      collateralPrincipal: CKDOGE_PRINCIPAL, expectedCollateralRaw: 100_000n, vaults }).kind).toBe('ambiguous_pending');
+  });
+
+  it('does not attribute a completed row with a different request ID', () => {
+    const status = completeOpenStatus();
+    const vaults: VaultLite[] = [{ vaultId: 42, collateralPrincipal: CKDOGE_PRINCIPAL, collateralAmount: 100_000n, borrowedIcusd: 0n }];
+    expect(classifyOpenVaultV2Status({ status, ownerText: OWNER, ledgerText: CKDOGE_PRINCIPAL, expectedRequestId: 8n,
+      collateralPrincipal: CKDOGE_PRINCIPAL, expectedCollateralRaw: 100_000n, vaults }).kind).toBe('ambiguous_pending');
+  });
+});
 
 describe('storage key + persisted intent (principal-bound, versioned, safe parse)', () => {
   beforeEach(() => localStorage.clear());
@@ -416,23 +453,23 @@ describe('classifyLiveOpenAndBorrowOutcome (the LIVE call\'s own resolution — 
     expect(outcome.kind).not.toBe('success');
   });
 
-  it('classifies partial_zero_debt when the API reports success but the attributed vault has zero debt (open_vault_and_borrow is not atomic)', () => {
+  it('keeps a successful response with a stale zero-debt query pending instead of allowing a duplicate mint', () => {
     const vault: VaultLite = { vaultId: 7, collateralPrincipal: CKDOGE_PRINCIPAL, collateralAmount: 100_000_000n, borrowedIcusd: 0n };
     const outcome = classifyLiveOpenAndBorrowOutcome({
       apiSuccess: true, apiVaultId: 7, apiErrorMessage: null,
       vaults: [vault], beforeIds: new Set([1]), ckdogePrincipal: CKDOGE_PRINCIPAL, expected: EXPECTED_WIRE,
     });
-    expect(outcome.kind).toBe('partial_zero_debt');
+    expect(outcome.kind).toBe('ambiguous_pending');
     expect(outcome.vaultId).toBe(7);
   });
 
-  it('classifies partial_zero_debt from the backend GenericError text alone, even with no reconciled vault yet (explicit terminal acknowledgment)', () => {
+  it('keeps a vault-created error with an unresolved mint ambiguous, even when its vault id is explicit', () => {
     const outcome = classifyLiveOpenAndBorrowOutcome({
       apiSuccess: false, apiVaultId: null,
       apiErrorMessage: 'Vault created (id=99) but borrow of 5000000000 failed: GenericError. You can borrow separately.',
       vaults: [], beforeIds: new Set([1]), ckdogePrincipal: CKDOGE_PRINCIPAL, expected: EXPECTED_WIRE,
     });
-    expect(outcome.kind).toBe('partial_zero_debt');
+    expect(outcome.kind).toBe('ambiguous_pending');
     expect(outcome.vaultId).toBe(99);
   });
 
@@ -522,21 +559,39 @@ describe('classifyLiveOpenAndBorrowOutcomeFromBound (adapter for the shared boun
     expect(outcome.kind).toBe('failed');
   });
 
-  it('treats a typed dispatched_err as deterministic (no substring whitelist needed) when it is not a partial-failure shape', () => {
+  it('keeps an unrecognized dispatched_err ambiguous because the durable mint journal may be pending', () => {
     const outcome = classifyLiveOpenAndBorrowOutcomeFromBound({
       signal: { kind: 'dispatched_err', vaultId: null, errorMessage: 'Some brand-new backend error text never seen before' },
       vaults: [], beforeIds: new Set([1]), ckdogePrincipal: CKDOGE_PRINCIPAL, expected: EXPECTED_WIRE,
     });
-    expect(outcome.kind).toBe('failed');
+    expect(outcome.kind).toBe('ambiguous_pending');
   });
 
-  it('still routes a dispatched_err partial-failure shape to partial_zero_debt', () => {
+  it('keeps a dispatched partial-failure shape ambiguous when its inner mint result is unproven', () => {
     const outcome = classifyLiveOpenAndBorrowOutcomeFromBound({
       signal: { kind: 'dispatched_err', vaultId: null, errorMessage: 'Vault created (id=42) but borrow of 5000000000 failed: GenericError. You can borrow separately.' },
       vaults: [], beforeIds: new Set([1]), ckdogePrincipal: CKDOGE_PRINCIPAL, expected: EXPECTED_WIRE,
     });
+    expect(outcome.kind).toBe('ambiguous_pending');
+    expect(outcome.vaultId).toBe(42);
+  });
+
+  it('allows finish-borrow only when the wrapped error proves a pre-mint rejection', () => {
+    const outcome = classifyLiveOpenAndBorrowOutcomeFromBound({
+      signal: { kind: 'dispatched_err', vaultId: null, errorMessage: 'Vault created (id=42) but borrow of 5000000000 failed: Borrowing is not allowed for this collateral type.' },
+      vaults: [], beforeIds: new Set([1]), ckdogePrincipal: CKDOGE_PRINCIPAL, expected: EXPECTED_WIRE,
+    });
     expect(outcome.kind).toBe('partial_zero_debt');
     expect(outcome.vaultId).toBe(42);
+  });
+
+  it('keeps a mint TransferError ambiguous instead of declaring the borrow safe to retry', () => {
+    const outcome = classifyFinishBorrowOutcomeFromBound({
+      signal: { kind: 'dispatched_err', vaultId: 42, errorMessage: 'Transfer error: {"BadFee":{}}' },
+      vaultAfter: { vaultId: 42, collateralPrincipal: CKDOGE_PRINCIPAL, collateralAmount: 100_000_000n, borrowedIcusd: 0n },
+      expectedBorrowedRaw: 5_000_000_000n,
+    });
+    expect(outcome.kind).toBe('ambiguous_pending');
   });
 
   it('never treats ambiguous_transport as deterministic — stays ambiguous_pending, never failed', () => {
@@ -558,7 +613,7 @@ describe('classifyFinishBorrowOutcomeFromBound (adapter for the shared boundary 
     expect(outcome.kind).toBe('success');
   });
 
-  it('treats a typed dispatched_err as deterministic partial_zero_debt (safe to retry later)', () => {
+  it('recognizes an explicit pre-mint dispatched rejection as safe to retry later', () => {
     const outcome = classifyFinishBorrowOutcomeFromBound({
       signal: { kind: 'dispatched_err', vaultId: 7, errorMessage: 'Vault not found.' },
       vaultAfter: { vaultId: 7, collateralPrincipal: CKDOGE_PRINCIPAL, collateralAmount: 100_000_000n, borrowedIcusd: 0n },
@@ -734,10 +789,17 @@ describe('isDeterministicNoMutationError (proven no-mutation vs unresolved trans
     expect(isDeterministicNoMutationError('Wallet not connected. Please connect your wallet and try again.')).toBe(true);
     expect(isDeterministicNoMutationError('Amount too low. Minimum required: 5 DOGE')).toBe(true);
     expect(isDeterministicNoMutationError('Invalid borrowing amount: -1. Amount must be a finite positive number.')).toBe(true);
-    expect(isDeterministicNoMutationError('Insufficient allowance (have: 0). Please approve the tokens first.')).toBe(true);
+    // BadFee/Insufficient* prove no effect only for the first pull attempt with no earlier
+    // ambiguous dispatch. This text-only boundary cannot establish that history, and no backend
+    // journal terminality signal reaches it, so later typed errors remain pending too.
+    expect(isDeterministicNoMutationError('Insufficient allowance (have: 0). Please approve the tokens first.')).toBe(false);
+    expect(isDeterministicNoMutationError('Unexpected fee. Expected: 10000')).toBe(false);
+    expect(isDeterministicNoMutationError('Insufficient token funds. Your balance is too low for this amount.')).toBe(false);
     expect(isDeterministicNoMutationError('This operation is already in progress. Please wait.')).toBe(true);
-    expect(isDeterministicNoMutationError('Service temporarily unavailable: cleanup in progress')).toBe(true);
-    expect(isDeterministicNoMutationError('Transfer error: {"BadFee":{}}')).toBe(true);
+    expect(isDeterministicNoMutationError('Service temporarily unavailable: cleanup in progress')).toBe(false);
+    expect(isDeterministicNoMutationError('Transfer error: {"BadFee":{}}')).toBe(false);
+    expect(isDeterministicNoMutationError('Transfer error: {"TemporarilyUnavailable":null}')).toBe(false);
+    expect(isDeterministicNoMutationError('borrow mint receipt unavailable; operation remains fenced')).toBe(false);
     expect(isDeterministicNoMutationError('Collateral type is not accepting new vaults.')).toBe(true);
     expect(isDeterministicNoMutationError('Borrowing is not allowed for this collateral type.')).toBe(true);
     expect(isDeterministicNoMutationError('Vault not found. Please check the vault ID.')).toBe(true);
@@ -990,9 +1052,11 @@ describe('canSubmitBorrow (submit lock + explicit final confirmation, no auto-bo
 
 describe('dogeBorrowActionLockName (per principal + network scope)', () => {
   it('produces distinct names for distinct principals and distinct network scopes', () => {
-    expect(dogeBorrowActionLockName(OWNER, 'mainnet')).not.toBe(dogeBorrowActionLockName(OTHER_OWNER, 'mainnet'));
-    expect(dogeBorrowActionLockName(OWNER, 'mainnet')).not.toBe(dogeBorrowActionLockName(OWNER, 'local'));
-    expect(dogeBorrowActionLockName(OWNER, 'mainnet')).toContain(OWNER);
+    const ledger = 'ckdoge-ledger';
+    expect(dogeBorrowActionLockName(OWNER, 'mainnet', ledger)).not.toBe(dogeBorrowActionLockName(OTHER_OWNER, 'mainnet', ledger));
+    expect(dogeBorrowActionLockName(OWNER, 'mainnet', ledger)).not.toBe(dogeBorrowActionLockName(OWNER, 'local', ledger));
+    expect(dogeBorrowActionLockName(OWNER, 'mainnet', ledger)).not.toBe(dogeBorrowActionLockName(OWNER, 'mainnet', 'ckbtc-ledger'));
+    expect(dogeBorrowActionLockName(OWNER, 'mainnet', ledger)).toContain(OWNER);
   });
 });
 

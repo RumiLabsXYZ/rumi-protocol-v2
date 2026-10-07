@@ -254,8 +254,8 @@ fn submit_burn_proof(
 ) -> Result<u32, ProtocolError> {
     // The `inspect_message` hook silently rejects ANONYMOUS callers for every
     // method except the two consent reads, so submit from a non-anonymous
-    // principal (the endpoint itself is permissionless — any non-anonymous
-    // caller may submit a real tx hash; the verify path rejects forgeries).
+    // principal (the endpoint admits only the configured developer/operator;
+    // the verify path still rejects forged-contract logs).
     let reply = update_dev(
         pic,
         backend,

@@ -12,6 +12,17 @@ use candid::{CandidType, Deserialize, Principal};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+/// Maximum retained pending/terminal operations on one chain queue. The worker
+/// scans and normalizes the pending IDs, so admission must bound that work as
+/// well as the number of live operations awaiting settlement.
+pub const MAX_PENDING_SETTLEMENT_OPS_PER_CHAIN: usize = 256;
+
+/// Maximum lifetime replay keys retained by one chain queue. Keys are never
+/// pruned because a key from a completed operation must remain inadmissible.
+/// Reaching this limit therefore fails closed and requires operator action to
+/// safely migrate the replay ledger before new operations can be accepted.
+pub const MAX_SEEN_IDEMPOTENCY_KEYS_PER_CHAIN: usize = 10_000;
+
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum SettlementOpKind {
     Mint {
@@ -213,6 +224,8 @@ pub struct SettlementQueueV1 {
 #[derive(Debug, PartialEq, Eq)]
 pub enum SettlementQueueError {
     DuplicateIdempotencyKey(String),
+    QueueCapacityReached { limit: usize },
+    ReplayProtectionCapacityReached { limit: usize },
     OpIdSpaceExhausted,
 }
 
@@ -222,6 +235,16 @@ impl SettlementQueueV1 {
             return Err(SettlementQueueError::DuplicateIdempotencyKey(
                 op.idempotency_key,
             ));
+        }
+        if self.pending.len() >= MAX_PENDING_SETTLEMENT_OPS_PER_CHAIN {
+            return Err(SettlementQueueError::QueueCapacityReached {
+                limit: MAX_PENDING_SETTLEMENT_OPS_PER_CHAIN,
+            });
+        }
+        if self.seen_idempotency_keys.len() >= MAX_SEEN_IDEMPOTENCY_KEYS_PER_CHAIN {
+            return Err(SettlementQueueError::ReplayProtectionCapacityReached {
+                limit: MAX_SEEN_IDEMPOTENCY_KEYS_PER_CHAIN,
+            });
         }
         let next_tail = self
             .tail

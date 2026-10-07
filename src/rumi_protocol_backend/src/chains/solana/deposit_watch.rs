@@ -157,7 +157,13 @@ pub async fn run_observer(chain: ChainId) {
                 v.collateral_chain == chain
                     && v.status == crate::chains::vault::ChainVaultStatus::AwaitingDeposit
             })
-            .map(|v| (v.vault_id, v.custody_address.clone(), v.collateral_amount_native))
+            .map(|v| {
+                (
+                    v.vault_id,
+                    v.custody_address.clone(),
+                    v.collateral_amount_native,
+                )
+            })
             .collect()
     });
 
@@ -253,7 +259,13 @@ pub async fn run_observer(chain: ChainId) {
         return;
     }
 
-    let recorded = read_state(|s| s.multi_chain.chain_supplies.get(&chain).copied().unwrap_or(0));
+    let recorded = read_state(|s| {
+        s.multi_chain
+            .chain_supplies
+            .get(&chain)
+            .copied()
+            .unwrap_or(0)
+    });
 
     match super::sol_rpc::get_mint_supply(&mint).await {
         Ok(onchain) => {
@@ -271,7 +283,8 @@ pub async fn run_observer(chain: ChainId) {
             log!(
                 INFO,
                 "[solana observer chain={:?}] supply gate get_mint_supply failed ({}); will retry",
-                chain, e
+                chain,
+                e
             );
         }
     }

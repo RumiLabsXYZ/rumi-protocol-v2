@@ -1,8 +1,8 @@
 //! Adapter-trait shape tests. No production impl; tests use a stub.
 
 use super::adapter::{
-    ChainAdapter, ChainAdapterError, DepositRecord, FinalitySnapshot,
-    MintInstruction, SignedBurn, SignedMint, SignedWithdrawal, WithdrawalRequest,
+    ChainAdapter, ChainAdapterError, DepositRecord, FinalitySnapshot, MintInstruction, SignedBurn,
+    SignedMint, SignedWithdrawal, WithdrawalRequest,
 };
 use super::config::ChainId;
 use async_trait::async_trait;
@@ -22,7 +22,10 @@ impl ChainAdapter for StubAdapter {
         Err(ChainAdapterError::NotImplemented)
     }
 
-    async fn sign_withdrawal(&self, _req: WithdrawalRequest) -> Result<SignedWithdrawal, ChainAdapterError> {
+    async fn sign_withdrawal(
+        &self,
+        _req: WithdrawalRequest,
+    ) -> Result<SignedWithdrawal, ChainAdapterError> {
         Err(ChainAdapterError::NotImplemented)
     }
 
@@ -30,7 +33,11 @@ impl ChainAdapter for StubAdapter {
         Err(ChainAdapterError::NotImplemented)
     }
 
-    async fn sign_burn(&self, _amount_e8s: u128, _burner: Principal) -> Result<SignedBurn, ChainAdapterError> {
+    async fn sign_burn(
+        &self,
+        _amount_e8s: u128,
+        _burner: Principal,
+    ) -> Result<SignedBurn, ChainAdapterError> {
         Err(ChainAdapterError::NotImplemented)
     }
 
@@ -38,14 +45,19 @@ impl ChainAdapter for StubAdapter {
         Err(ChainAdapterError::NotImplemented)
     }
 
-    async fn observe_event(&self, _from_block: u64) -> Result<Vec<DepositRecord>, ChainAdapterError> {
+    async fn observe_event(
+        &self,
+        _from_block: u64,
+    ) -> Result<Vec<DepositRecord>, ChainAdapterError> {
         Err(ChainAdapterError::NotImplemented)
     }
 }
 
 #[test]
 fn adapter_can_be_held_as_trait_object() {
-    let a: Box<dyn ChainAdapter> = Box::new(StubAdapter { chain_id: ChainId(7) });
+    let a: Box<dyn ChainAdapter> = Box::new(StubAdapter {
+        chain_id: ChainId(7),
+    });
     assert_eq!(a.chain_id(), ChainId(7));
 }
 

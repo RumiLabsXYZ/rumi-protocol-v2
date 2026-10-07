@@ -48,9 +48,9 @@ fn pre_upgrade() {
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     state::restore_from_stable_or_trap();
-    // Fence old public-seed schedules synchronously before either timer or
-    // update ingress can resume. Active/expired legacy windows remain intact
-    // for admin review; a nonexpired unopened epoch waits for secure reseeding.
+    // Fence old public-seed schedules and expired unopened epochs synchronously
+    // before either timer or update ingress can resume. Their state remains
+    // intact for admin review; a nonexpired legacy epoch waits for secure reseeding.
     epoch::prepare_legacy_state_after_upgrade(ic_cdk::api::time());
     // Timers do not survive upgrades: re-register both from the persisted config.
     poll::setup_poll_timer();

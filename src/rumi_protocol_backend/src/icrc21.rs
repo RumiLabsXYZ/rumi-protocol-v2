@@ -1,8 +1,8 @@
 // ICRC-21 Consent Message Support for Oisy Wallet Integration
 // This module implements the ICRC-21 standard for human-readable consent messages
 
-use candid::{CandidType, Decode, Deserialize, Principal};
 use crate::vault::VaultArg;
+use candid::{CandidType, Decode, Deserialize, Principal};
 
 /// Metadata about the consent message request
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -92,7 +92,10 @@ pub type Icrc21ConsentMessageResult = Result<ConsentInfo, Icrc21Error>;
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub enum Icrc21Error {
     /// Generic error
-    GenericError { error_code: u64, description: String },
+    GenericError {
+        error_code: u64,
+        description: String,
+    },
     /// Unsupported canister call
     UnsupportedCanisterCall(ErrorInfo),
     /// Consent message unavailable
@@ -141,7 +144,9 @@ fn resolve_collateral_display(collateral_type: Option<Principal>) -> (String, u8
 /// generic fallback if the vault is unknown (e.g. Oisy probing before submit).
 fn resolve_collateral_for_vault(vault_id: u64) -> (String, u8) {
     let ct = crate::state::read_state(|s| {
-        s.vault_id_to_vaults.get(&vault_id).map(|v| v.collateral_type)
+        s.vault_id_to_vaults
+            .get(&vault_id)
+            .map(|v| v.collateral_type)
     });
     match ct {
         Some(ct) => resolve_collateral_display(Some(ct)),
@@ -165,7 +170,11 @@ fn format_collateral_amount(raw: u64, decimals: u8, symbol: &str) -> String {
 
 /// Helper to convert bytes to hex string for debugging
 fn bytes_to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
+    bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Try to decode a u64 from Candid bytes, handling empty args gracefully
@@ -174,12 +183,12 @@ fn try_decode_u64(arg: &[u8], _method_name: &str) -> Result<Option<u64>, String>
     if arg.is_empty() || arg.len() < 6 {
         return Ok(None);
     }
-    
+
     // Check for DIDL magic bytes - if invalid, fall back gracefully
     if arg.len() >= 4 && &arg[0..4] != b"DIDL" {
         return Ok(None);
     }
-    
+
     // Try standard decoding - fall back to None on failure
     match Decode!(arg, u64) {
         Ok(value) => Ok(Some(value)),
@@ -192,7 +201,7 @@ fn try_decode_vault_arg(arg: &[u8], _method_name: &str) -> Result<Option<VaultAr
     if arg.is_empty() || arg.len() < 6 {
         return Ok(None);
     }
-    
+
     match Decode!(arg, VaultArg) {
         Ok(value) => Ok(Some(value)),
         Err(_) => Ok(None), // Graceful fallback - return generic message
@@ -716,12 +725,15 @@ pub fn icrc21_canister_call_consent_message(
         bytes_to_hex(&request.arg),
         request.user_preferences.metadata.language
     );
-    
+
     let message = match generate_consent_message(&request.method, &request.arg) {
         Ok(msg) => {
-            ic_cdk::println!("[ICRC21] Generated message successfully for method: {}", request.method);
+            ic_cdk::println!(
+                "[ICRC21] Generated message successfully for method: {}",
+                request.method
+            );
             msg
-        },
+        }
         Err(description) => {
             ic_cdk::println!("[ICRC21] Error generating message: {}", description);
             return Err(Icrc21Error::ConsentMessageUnavailable(ErrorInfo {
@@ -731,11 +743,14 @@ pub fn icrc21_canister_call_consent_message(
     };
 
     let consent_message = match &request.user_preferences.device_spec {
-        Some(DeviceSpec::LineDisplay { characters_per_line, lines_per_page }) => {
+        Some(DeviceSpec::LineDisplay {
+            characters_per_line,
+            lines_per_page,
+        }) => {
             // Format for line displays (hardware wallets)
             let chars = *characters_per_line as usize;
             let lines = *lines_per_page as usize;
-            
+
             // Simple line breaking - split by newlines first, then wrap long lines
             let all_lines: Vec<String> = message
                 .lines()
@@ -747,7 +762,7 @@ pub fn icrc21_canister_call_consent_message(
                         .replace("*", "")
                         .trim()
                         .to_string();
-                    
+
                     if clean_line.is_empty() {
                         vec![]
                     } else if clean_line.len() <= chars {
@@ -774,7 +789,7 @@ pub fn icrc21_canister_call_consent_message(
                     }
                 })
                 .collect();
-            
+
             // Split into pages
             let pages: Vec<LineDisplayPage> = all_lines
                 .chunks(lines)
@@ -782,7 +797,7 @@ pub fn icrc21_canister_call_consent_message(
                     lines: chunk.to_vec(),
                 })
                 .collect();
-            
+
             ConsentMessage::LineDisplayMessage { pages }
         }
         _ => {
