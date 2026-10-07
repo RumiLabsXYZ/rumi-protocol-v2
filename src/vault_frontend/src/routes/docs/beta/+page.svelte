@@ -25,7 +25,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Security Reviews</h2>
-    <p>The protocol runs a continuing security review program. Recurring internal AI-driven audit cycles cover the full stack (CDP backend, 3pool, AMM, stability pool, treasury, liquidation bot, points engine, and frontends), with every confirmed finding fixed, fence-tested, and re-verified before deployment. The full reports, including the most recent whole-stack re-audit, are published at <a href="https://rumiprotocol.com/security" class="doc-link" target="_blank" rel="noopener">rumiprotocol.com/security</a>.</p>
+    <p>The protocol runs a continuing security review program across its canisters and frontends. The latest published full-protocol report is dated June 9, 2026. A later internal review has led to source changes, but finding adjudication and release evidence remain in progress; source changes do not establish that code has been installed or activated on mainnet. See the <a href="/security" class="doc-link">security page</a> for the current status and published review history.</p>
     <p>Separately, the codebase was reviewed by <a href="https://www.avai.life/" class="doc-link" target="_blank" rel="noopener">AVAI</a>, an autonomous AI-powered security auditing agent, in December 2025. That review covered 68 Rust source files and found no critical or high-severity issues (3 medium, 5 low), with an overall rating of B+ (83.5/100). You can read the <a href="/AVAI_Security_Audit_Rumi_Protocol_Professional.pdf" class="doc-link" target="_blank">full report (PDF)</a>.</p>
     <p>None of these are a traditional third-party audit conducted by a human security firm.</p>
   </section>

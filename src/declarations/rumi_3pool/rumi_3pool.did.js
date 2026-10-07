@@ -48,6 +48,7 @@ export const idlFactory = ({ IDL }) => {
       'available' : IDL.Nat,
       'required' : IDL.Nat,
     }),
+    'DepositConcentrationLimitExceeded' : IDL.Null,
   });
   const IngressStatusV1 = IDL.Variant({
     'Failed' : IDL.Null,

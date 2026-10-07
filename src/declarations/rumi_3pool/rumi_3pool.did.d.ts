@@ -458,7 +458,8 @@ export type ThreePoolError = {
       'available' : bigint,
       'required' : bigint,
     }
-  };
+  } |
+  { 'DepositConcentrationLimitExceeded' : null };
 export interface ThreePoolInitArgs {
   'admin_fee_bps' : bigint,
   'admin' : Principal,

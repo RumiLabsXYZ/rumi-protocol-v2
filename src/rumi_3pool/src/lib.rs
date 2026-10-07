@@ -1130,29 +1130,59 @@ pub async fn add_liquidity_with_receipt_v1(
     if !cfg!(feature = "test_endpoints") {
         return Err(IngressReceiptErrorV1::PoolLocked);
     }
-    if amounts.len() != 3 { return Err(IngressReceiptErrorV1::InvalidRequest); }
+    if amounts.len() != 3 {
+        return Err(IngressReceiptErrorV1::InvalidRequest);
+    }
     let amounts = [amounts[0], amounts[1], amounts[2]];
     let caller = ic_cdk::caller();
     let request = IngressRequestV1::AddLiquidity { amounts, min_lp };
     let existing = receipts::get_ingress(caller, &intent_id);
-    if receipts::fenced() && existing.is_none() { return Err(IngressReceiptErrorV1::PoolLocked); }
+    if receipts::fenced() && existing.is_none() {
+        return Err(IngressReceiptErrorV1::PoolLocked);
+    }
     let _pool_guard = if existing.is_some() && receipts::fenced() {
         pool_guard::PoolGuard::new_for_receipt(caller, &intent_id)
     } else {
         pool_guard::PoolGuard::new()
-    }.map_err(|_| IngressReceiptErrorV1::PoolLocked)?;
-    if read_state(|s| s.is_paused) { return Err(IngressReceiptErrorV1::PoolLocked); }
+    }
+    .map_err(|_| IngressReceiptErrorV1::PoolLocked)?;
+    if read_state(|s| s.is_paused) {
+        return Err(IngressReceiptErrorV1::PoolLocked);
+    }
 
-    let (mut receipt, fresh) = receipts::reserve_ingress(caller, intent_id, request)?;
-    if !fresh && receipt.status == IngressStatusV1::Completed { return Ok(receipt); }
-    if fresh {
-        receipts::set_fence(true);
+    let (mut receipt, _fresh) = receipts::reserve_ingress(caller, intent_id, request)?;
+    if receipt.status == IngressStatusV1::Completed {
+        return Ok(receipt);
+    }
+    if receipt.status == IngressStatusV1::Failed {
+        return Err(IngressReceiptErrorV1::InvalidRequest);
+    }
+
+    // Keep the pool fenced throughout preparation and transfer dispatch. A
+    // retry may resume a Prepared row interrupted before its exact pulls were
+    // persisted, but it must never recompute a tuple after dispatch began.
+    receipts::set_fence(true);
+    if !receipt.pulls.is_empty() && receipt.add_facts.is_none() {
+        return Err(IngressReceiptErrorV1::ProofUnavailable);
+    }
+    if receipt.status == IngressStatusV1::Prepared && receipt.add_facts.is_none() {
         let amp = get_current_a();
         let precision_muls = get_precision_muls();
-        let (old_balances, supply, curve, tokens) = read_state(|s| (
-            s.balances, s.lp_total_supply, s.config.fee_curve.unwrap_or_default(), s.config.tokens.clone()
-        ));
-        let outcome = match calc_add_liquidity(&amounts, &old_balances, &precision_muls, supply, amp, &curve) {
+        let (old_balances, supply, curve) = read_state(|s| {
+            (
+                s.balances,
+                s.lp_total_supply,
+                s.config.fee_curve.unwrap_or_default(),
+            )
+        });
+        let outcome = match calc_add_liquidity(
+            &amounts,
+            &old_balances,
+            &precision_muls,
+            supply,
+            amp,
+            &curve,
+        ) {
             Ok(outcome) => outcome,
             Err(_) => {
                 receipt.status = IngressStatusV1::Failed;
@@ -1169,17 +1199,6 @@ pub async fn add_liquidity_with_receipt_v1(
             receipts::set_fence(false);
             return Err(IngressReceiptErrorV1::InvalidRequest);
         }
-        let mut pulls = Vec::new();
-        for k in 0..3 {
-            if amounts[k] > 0 {
-                let fee = transfers::ledger_fee_for_amount(tokens[k].ledger_id, amounts[k]).await;
-                pulls.push(receipts::ingress_transfer_intent(
-                    caller, &receipt.intent_id, k as u8, tokens[k].ledger_id, caller,
-                    ic_cdk::id(), amounts[k], fee,
-                ));
-            }
-        }
-        receipt.pulls = pulls;
         receipt.add_facts = Some(AddLiquidityFactsV1 {
             lp_minted: outcome.lp_minted,
             fees_native: outcome.fees_native,
@@ -1188,10 +1207,42 @@ pub async fn add_liquidity_with_receipt_v1(
             imbalance_after: outcome.imbalance_after,
             is_rebalancing: outcome.is_rebalancing,
         });
-        receipt.status = IngressStatusV1::Prepared;
+        // Persist economic facts before the first ledger-fee await. On replay,
+        // an empty pull list proves dispatch has not begun, so preparation can
+        // safely resume without changing the original intent.
         receipts::save_ingress(&receipt);
     }
-    receipts::set_fence(true);
+
+    if receipt.pulls.is_empty() {
+        if receipt.status != IngressStatusV1::Prepared || receipt.add_facts.is_none() {
+            return Err(IngressReceiptErrorV1::ProofUnavailable);
+        }
+        let tokens = read_state(|s| s.config.tokens.clone());
+        let mut pulls = Vec::new();
+        for k in 0..3 {
+            if amounts[k] > 0 {
+                let fee = transfers::ledger_fee_for_amount(tokens[k].ledger_id, amounts[k]).await;
+                pulls.push(receipts::ingress_transfer_intent(
+                    caller,
+                    &receipt.intent_id,
+                    k as u8,
+                    tokens[k].ledger_id,
+                    caller,
+                    ic_cdk::id(),
+                    amounts[k],
+                    fee,
+                ));
+            }
+        }
+        receipt.pulls = pulls;
+        receipt.error = None;
+        receipts::save_ingress(&receipt);
+    }
+    if receipt.add_facts.is_none() {
+        // A nonempty pull list proves dispatch may have started. Never
+        // synthesize missing facts or rewrite those transfer identities.
+        return Err(IngressReceiptErrorV1::ProofUnavailable);
+    }
     if let Err(reason) = dispatch_ingress_pulls(&mut receipt).await {
         receipt.status = IngressStatusV1::Unresolved;
         receipt.error = Some(reason);
@@ -1199,26 +1250,50 @@ pub async fn add_liquidity_with_receipt_v1(
         return Ok(receipt);
     }
 
-    let facts = receipt.add_facts.clone().ok_or(IngressReceiptErrorV1::InvalidRequest)?;
+    let facts = receipt
+        .add_facts
+        .clone()
+        .ok_or(IngressReceiptErrorV1::InvalidRequest)?;
+    if receipt.pulls.is_empty()
+        || receipt.pulls.iter().any(|pull| {
+            pull.status != receipts::SwapTransferStatusV1::Confirmed || pull.block_index.is_none()
+        })
+    {
+        return Err(IngressReceiptErrorV1::ProofUnavailable);
+    }
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
     mutate_state(|s| {
-        for k in 0..3 { s.balances[k] += amounts[k]; }
+        for k in 0..3 {
+            s.balances[k] += amounts[k];
+        }
         let current = storage::lp_balance_get(&caller);
         storage::lp_balance_set(caller, current + facts.lp_minted);
         s.lp_total_supply += facts.lp_minted;
         s.is_initialized = true;
-        s.log_block(Icrc3Transaction::Mint { to: caller, amount: facts.lp_minted, to_subaccount: None });
+        s.log_block(Icrc3Transaction::Mint {
+            to: caller,
+            amount: facts.lp_minted,
+            to_subaccount: None,
+        });
         let vp = virtual_price(&s.balances, &precision_muls, amp, s.lp_total_supply).unwrap_or(0);
         let id = storage::liq_v2::len();
         storage::liq_v2::push(LiquidityEventV2 {
-            id, timestamp: ic_cdk::api::time(), caller,
-            action: LiquidityAction::AddLiquidity, amounts,
-            lp_amount: facts.lp_minted, coin_index: None, fee: None,
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: LiquidityAction::AddLiquidity,
+            amounts,
+            lp_amount: facts.lp_minted,
+            coin_index: None,
+            fee: None,
             fee_bps: Some(facts.fee_bps_used),
-            imbalance_before: facts.imbalance_before, imbalance_after: facts.imbalance_after,
-            is_rebalancing: facts.is_rebalancing, pool_balances_after: s.balances,
-            virtual_price_after: vp, migrated: false,
+            imbalance_before: facts.imbalance_before,
+            imbalance_after: facts.imbalance_after,
+            is_rebalancing: facts.is_rebalancing,
+            pool_balances_after: s.balances,
+            virtual_price_after: vp,
+            migrated: false,
         });
     });
     receipt.status = IngressStatusV1::Completed;
@@ -1451,6 +1526,16 @@ async fn add_liquidity_legacy_unreachable(amounts: Vec<u128>, min_lp: u128) -> R
 
 // ─── Remove Liquidity (proportional) ───
 
+/// Prepare the LP debit from balances re-read after an async fee lookup.
+/// Both removal branches use this at their synchronous commit boundary.
+fn checked_lp_burn_debit(
+    current_user_lp: u128,
+    current_supply: u128,
+    lp_burn: u128,
+) -> Result<(u128, u128), ThreePoolError> {
+    preflight_lp_burn(current_user_lp, current_supply, lp_burn)
+}
+
 #[update]
 pub async fn remove_liquidity(
     lp_burn: u128,
@@ -1529,8 +1614,7 @@ pub async fn remove_liquidity(
     //    create wrapped/phantom LP.
     mutate_state(|s| -> Result<(), ThreePoolError> {
         let cur = storage::lp_balance_get(&caller);
-        let (owner_after, supply_after) =
-            preflight_lp_burn(cur, s.lp_total_supply, lp_burn)?;
+        let (owner_after, supply_after) = checked_lp_burn_debit(cur, s.lp_total_supply, lp_burn)?;
         let mut balances_after = s.balances;
         for k in 0..3 {
             balances_after[k] = balances_after[k]
@@ -1699,8 +1783,7 @@ pub async fn remove_one_coin(
     // double-deduct the LP fee.
     mutate_state(|s| -> Result<(), ThreePoolError> {
         let cur = storage::lp_balance_get(&caller);
-        let (owner_after, supply_after) =
-            preflight_lp_burn(cur, s.lp_total_supply, lp_burn)?;
+        let (owner_after, supply_after) = checked_lp_burn_debit(cur, s.lp_total_supply, lp_burn)?;
         let admin_fee_share = fee
             .checked_mul(admin_fee_bps as u128)
             .ok_or(ThreePoolError::MathOverflow)?
@@ -1813,39 +1896,72 @@ pub async fn donate_with_receipt_v1(
         return Err(IngressReceiptErrorV1::InvalidRequest);
     }
     let caller = ic_cdk::caller();
-    let request = IngressRequestV1::Donate { token_index, amount };
+    let request = IngressRequestV1::Donate {
+        token_index,
+        amount,
+    };
     let existing = receipts::get_ingress(caller, &intent_id);
-    if receipts::fenced() && existing.is_none() { return Err(IngressReceiptErrorV1::PoolLocked); }
+    if receipts::fenced() && existing.is_none() {
+        return Err(IngressReceiptErrorV1::PoolLocked);
+    }
     let _pool_guard = if existing.is_some() && receipts::fenced() {
         pool_guard::PoolGuard::new_for_receipt(caller, &intent_id)
     } else {
         pool_guard::PoolGuard::new()
-    }.map_err(|_| IngressReceiptErrorV1::PoolLocked)?;
+    }
+    .map_err(|_| IngressReceiptErrorV1::PoolLocked)?;
     if read_state(|s| s.is_paused || s.lp_total_supply == 0) {
         return Err(IngressReceiptErrorV1::InvalidRequest);
     }
-    let (mut receipt, fresh) = receipts::reserve_ingress(caller, intent_id, request)?;
-    if !fresh && receipt.status == IngressStatusV1::Completed { return Ok(receipt); }
-    if fresh {
-        receipts::set_fence(true);
+    let (mut receipt, _fresh) = receipts::reserve_ingress(caller, intent_id, request)?;
+    if receipt.status == IngressStatusV1::Completed {
+        return Ok(receipt);
+    }
+    if receipt.status == IngressStatusV1::Failed {
+        return Err(IngressReceiptErrorV1::InvalidRequest);
+    }
+    receipts::set_fence(true);
+    if receipt.pulls.is_empty() {
+        if receipt.status != IngressStatusV1::Prepared {
+            return Err(IngressReceiptErrorV1::ProofUnavailable);
+        }
         let ledger = read_state(|s| s.config.tokens[token_index as usize].ledger_id);
         let fee = transfers::ledger_fee_for_amount(ledger, amount).await;
         receipt.pulls = vec![receipts::ingress_transfer_intent(
-            caller, &receipt.intent_id, 0, ledger, caller, ic_cdk::id(), amount, fee,
+            caller,
+            &receipt.intent_id,
+            0,
+            ledger,
+            caller,
+            ic_cdk::id(),
+            amount,
+            fee,
         )];
+        // Persist the exact pull before dispatch. A Prepared row with no pulls
+        // is safe to re-prepare after interruption; a nonempty row is immutable.
         receipts::save_ingress(&receipt);
     }
-    receipts::set_fence(true);
+    if amount > 0 && receipt.pulls.is_empty() {
+        return Err(IngressReceiptErrorV1::ProofUnavailable);
+    }
     if let Err(reason) = dispatch_ingress_pulls(&mut receipt).await {
         receipt.status = IngressStatusV1::Unresolved;
         receipt.error = Some(reason);
         receipts::save_ingress(&receipt);
         return Ok(receipt);
     }
+    if receipt.pulls.is_empty()
+        || receipt.pulls.iter().any(|pull| {
+            pull.status != receipts::SwapTransferStatusV1::Confirmed || pull.block_index.is_none()
+        })
+    {
+        return Err(IngressReceiptErrorV1::ProofUnavailable);
+    }
 
     let precision_muls = get_precision_muls();
     let amp = get_current_a();
-    let imbalance_before = read_state(|s| crate::math::compute_imbalance(&s.balances, &precision_muls));
+    let imbalance_before =
+        read_state(|s| crate::math::compute_imbalance(&s.balances, &precision_muls));
     mutate_state(|s| {
         s.balances[token_index as usize] += amount;
         let lp_supply = s.lp_total_supply;
@@ -1856,11 +1972,21 @@ pub async fn donate_with_receipt_v1(
         amounts[token_index as usize] = amount;
         let id = storage::liq_v2::len();
         storage::liq_v2::push(LiquidityEventV2 {
-            id, timestamp: ic_cdk::api::time(), caller, action: LiquidityAction::Donate,
-            amounts, lp_amount: 0, coin_index: Some(token_index), fee: None, fee_bps: None,
-            imbalance_before, imbalance_after,
+            id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: LiquidityAction::Donate,
+            amounts,
+            lp_amount: 0,
+            coin_index: Some(token_index),
+            fee: None,
+            fee_bps: None,
+            imbalance_before,
+            imbalance_after,
             is_rebalancing: imbalance_after < imbalance_before,
-            pool_balances_after: balances_after, virtual_price_after: vp_after, migrated: false,
+            pool_balances_after: balances_after,
+            virtual_price_after: vp_after,
+            migrated: false,
         });
     });
     receipt.status = IngressStatusV1::Completed;
@@ -3686,6 +3812,22 @@ pub async fn test_seed_absent_ingress_pull_v1(intent_id: Vec<u8>, token_index: u
     receipts::set_fence(true);
 }
 
+/// Seed the exact interruption state after durable intent reservation but
+/// before any pull identity has been persisted. Used to prove that retries
+/// resume preparation without applying an operation without ledger receipts.
+#[cfg(feature = "test_endpoints")]
+#[update]
+pub fn test_seed_prepared_ingress_v1(intent_id: Vec<u8>, request: IngressRequestV1) {
+    let caller = ic_cdk::caller();
+    assert_ne!(caller, Principal::anonymous(), "anonymous caller");
+    let (receipt, _) =
+        receipts::reserve_ingress(caller, intent_id, request).expect("valid test ingress request");
+    assert_eq!(receipt.status, IngressStatusV1::Prepared);
+    assert!(receipt.pulls.is_empty());
+    assert!(receipt.add_facts.is_none());
+    receipts::set_fence(true);
+}
+
 /// Test-only: clear the ICRC-3 hash cache. Used by tests to simulate the
 /// pre-Task-3 mainnet state where blocks exist but the cache is empty.
 /// The post_upgrade hook (Task 5) backfills the cache; this endpoint lets
@@ -4277,3 +4419,48 @@ mod explorer_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod cl_01_post_await_debit_tests {
+    use super::checked_lp_burn_debit;
+    use crate::types::ThreePoolError;
+
+    // Model the same-user ICRC-1 transfer that occurs while the withdrawal is
+    // awaiting a cold fee lookup: initial LP covered the burn, current LP does
+    // not. Both proportional and one-coin removal use this exact commit helper.
+    #[test]
+    fn proportional_remove_rejects_lp_transferred_during_await() {
+        let initial_lp = 1_000;
+        let lp_burn = 400;
+        let transferred_away = 601;
+        assert!(initial_lp >= lp_burn);
+        assert!(matches!(
+            checked_lp_burn_debit(initial_lp - transferred_away, 5_000, lp_burn),
+            Err(ThreePoolError::InsufficientLiquidity)
+        ));
+    }
+
+    #[test]
+    fn one_coin_remove_rejects_lp_transferred_during_await() {
+        let initial_lp = 1_000;
+        let lp_burn = 400;
+        let transferred_away = 601;
+        assert!(initial_lp >= lp_burn);
+        assert!(matches!(
+            checked_lp_burn_debit(initial_lp - transferred_away, 5_000, lp_burn),
+            Err(ThreePoolError::InsufficientLiquidity)
+        ));
+    }
+
+    #[test]
+    fn post_await_lp_debit_uses_current_balance_and_checked_supply() {
+        assert!(matches!(checked_lp_burn_debit(700, 5_000, 400), Ok((300, 4_600))));
+        assert!(matches!(
+            checked_lp_burn_debit(700, 300, 400),
+            Err(ThreePoolError::InsufficientLiquidity)
+        ));
+    }
+}
+
+// Keep the canonical Candid interface extractable from the compiled canister.
+ic_cdk::export_candid!();

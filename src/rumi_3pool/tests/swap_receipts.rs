@@ -570,6 +570,154 @@ fn query_ingress(h: &ThreePoolHarness, intent_id: &[u8]) -> Option<IngressReceip
     .unwrap()
 }
 
+fn seed_prepared_ingress(h: &ThreePoolHarness, intent_id: Vec<u8>, request: IngressRequestV1) {
+    let _: () = decode_one(&bytes(
+        h.pic
+            .update_call(
+                h.three_pool,
+                h.user,
+                "test_seed_prepared_ingress_v1",
+                encode_args((intent_id, request)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+}
+
+fn submit_ingress(
+    h: &ThreePoolHarness,
+    method: &str,
+    args: impl candid::utils::ArgumentEncoder,
+) -> Result<IngressReceiptV1, IngressReceiptErrorV1> {
+    decode_one(&bytes(
+        h.pic
+            .update_call(h.three_pool, h.user, method, encode_args(args).unwrap())
+            .unwrap(),
+    ))
+    .unwrap()
+}
+
+#[test]
+fn prepared_add_replay_persists_facts_and_confirms_every_pull_before_credit() {
+    let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);
+    let intent = vec![71; 32];
+    let amounts = [100_000_000, 100_000_000, 100_000_000];
+    let request = IngressRequestV1::AddLiquidity { amounts, min_lp: 0 };
+    let before = [0, 1, 2].map(|i| balance(&h, h.ledgers[i], h.user));
+    seed_prepared_ingress(&h, intent.clone(), request);
+
+    let receipt = submit_ingress(
+        &h,
+        "add_liquidity_with_receipt_v1",
+        (intent.clone(), amounts.to_vec(), 0u128),
+    )
+    .unwrap();
+    assert_eq!(receipt.status, IngressStatusV1::Completed);
+    assert_eq!(receipt.pulls.len(), 3);
+    assert!(receipt.add_facts.is_some());
+    assert!(receipt
+        .pulls
+        .iter()
+        .all(|pull| pull.status == SwapTransferStatusV1::Confirmed && pull.block_index.is_some()));
+    for i in 0..3 {
+        assert_eq!(
+            before[i] - balance(&h, h.ledgers[i], h.user),
+            amounts[i] + 10_000
+        );
+    }
+    assert_eq!(query_ingress(&h, &intent), Some(receipt.clone()));
+    let replay = submit_ingress(
+        &h,
+        "add_liquidity_with_receipt_v1",
+        (intent, amounts.to_vec(), 0u128),
+    )
+    .unwrap();
+    assert_eq!(replay, receipt);
+}
+
+#[test]
+fn prepared_donation_replay_never_credits_without_a_confirmed_pull() {
+    let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);
+    let intent = vec![72; 32];
+    let amount = 100_000_000u128;
+    let request = IngressRequestV1::Donate {
+        token_index: 0,
+        amount,
+    };
+    let before_user = balance(&h, h.ledgers[0], h.user);
+    let before_pool = decode_one::<rumi_3pool::types::PoolStatus>(&bytes(
+        h.pic
+            .query_call(
+                h.three_pool,
+                h.user,
+                "get_pool_status",
+                encode_args(()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap()
+    .balances[0];
+    seed_prepared_ingress(&h, intent.clone(), request);
+
+    let receipt =
+        submit_ingress(&h, "donate_with_receipt_v1", (intent.clone(), 0u8, amount)).unwrap();
+    assert_eq!(receipt.status, IngressStatusV1::Completed);
+    assert_eq!(receipt.pulls.len(), 1);
+    assert_eq!(receipt.pulls[0].status, SwapTransferStatusV1::Confirmed);
+    assert!(receipt.pulls[0].block_index.is_some());
+    assert_eq!(
+        before_user - balance(&h, h.ledgers[0], h.user),
+        amount + 10_000
+    );
+    let after_pool = decode_one::<rumi_3pool::types::PoolStatus>(&bytes(
+        h.pic
+            .query_call(
+                h.three_pool,
+                h.user,
+                "get_pool_status",
+                encode_args(()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap()
+    .balances[0];
+    assert_eq!(after_pool - before_pool, amount);
+
+    let failed_intent = vec![73; 32];
+    let too_much = before_user * 2;
+    seed_prepared_ingress(
+        &h,
+        failed_intent.clone(),
+        IngressRequestV1::Donate {
+            token_index: 0,
+            amount: too_much,
+        },
+    );
+    let failed = submit_ingress(
+        &h,
+        "donate_with_receipt_v1",
+        (failed_intent.clone(), 0u8, too_much),
+    )
+    .unwrap();
+    assert_eq!(failed.status, IngressStatusV1::Unresolved);
+    assert_eq!(failed.pulls.len(), 1);
+    assert_eq!(failed.pulls[0].status, SwapTransferStatusV1::Rejected);
+    assert_eq!(query_ingress(&h, &failed_intent), Some(failed));
+    let final_pool = decode_one::<rumi_3pool::types::PoolStatus>(&bytes(
+        h.pic
+            .query_call(
+                h.three_pool,
+                h.user,
+                "get_pool_status",
+                encode_args(()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap()
+    .balances[0];
+    assert_eq!(final_pool, after_pool);
+}
+
 #[test]
 fn definitive_output_rejection_records_exact_refund_block_and_fees() {
     let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);

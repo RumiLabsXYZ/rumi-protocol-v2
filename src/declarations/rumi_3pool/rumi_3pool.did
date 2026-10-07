@@ -52,6 +52,7 @@ type ThreePoolError = variant {
   ZeroAmount;
   PoolEmpty;
   SlippageExceeded;
+  DepositConcentrationLimitExceeded;
   TransferFailed : record { token : text; reason : text };
   Unauthorized;
   MathOverflow;
