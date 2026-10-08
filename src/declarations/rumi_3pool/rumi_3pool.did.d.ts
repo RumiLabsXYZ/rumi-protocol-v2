@@ -243,8 +243,8 @@ export type PayoutOutcome = { 'Confirmed' : { 'block' : bigint } } |
   { 'Submitted' : null };
 export interface PayoutSwapContext {
   'amp' : bigint,
-  'admin_fee_bps' : number,
-  'precision_muls' : Array<bigint>,
+  'admin_fee_bps' : bigint,
+  'precision_muls' : BigUint64Array | bigint[],
   'imbalance_after' : bigint,
   'gross_output' : bigint,
   'token_in' : number,

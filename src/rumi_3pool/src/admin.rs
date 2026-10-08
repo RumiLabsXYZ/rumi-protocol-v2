@@ -49,17 +49,6 @@ pub fn ramp_a(
         return Err(ThreePoolError::Unauthorized);
     }
 
-    let claim_slots_needed = fees.iter().filter(|amount| **amount > 0).count() as u64;
-    let mut claim_slots = crate::PendingClaimSlots::reserve(claim_slots_needed)?;
-
-    // Resolve any cold fee queries before clearing the admin liability. The
-    // payout helper then journals its exact tuple without an intervening query.
-    for k in 0..3 {
-        if fees[k] > 0 {
-            let _ = crate::transfers::ledger_fee(tokens[k].ledger_id).await;
-        }
-    }
-
     // Get current effective A
     let current_a = read_state(|s| {
         get_a(
@@ -140,16 +129,28 @@ pub async fn withdraw_admin_fees(caller: Principal) -> Result<[u128; 3], ThreePo
         return Err(ThreePoolError::Unauthorized);
     }
 
-    // Zero out fees first (deduct-before-transfer).
-    mutate_state(|s| {
-        s.admin_fees = [0; 3];
-    });
+    let claim_slots_needed = fees.iter().filter(|amount| **amount > 0).count() as u64;
+    let mut claim_slots = crate::PendingClaimSlots::reserve(claim_slots_needed)?;
 
-    // Transfer each fee through a durable entitlement. Failed or ambiguous
-    // attempts become admin-owned claims and are not reissued as new payouts.
+    // Resolve any cold fee queries before clearing the admin liability. The
+    // payout helper then journals its exact tuple without an intervening query.
+    for k in 0..3 {
+        if fees[k] > 0 {
+            let _ = crate::transfers::ledger_fee(tokens[k].ledger_id).await;
+        }
+    }
+
+    // Each fee liability is cleared immediately before its corresponding
+    // entitlement is dispatched. Later token liabilities remain intact if an
+    // earlier outbound call or canister execution traps between legs.
     let mut withdrawn = [0u128; 3];
     for k in 0..3 {
         if fees[k] > 0 {
+            mutate_state(|s| {
+                s.admin_fees[k] = s.admin_fees[k]
+                    .checked_sub(fees[k])
+                    .expect("admin fee liability changed while pool lock held");
+            });
             match crate::transfers::payout_to_user(
                 crate::payouts::PayoutKind::AdminFeeWithdrawal,
                 k as u8,

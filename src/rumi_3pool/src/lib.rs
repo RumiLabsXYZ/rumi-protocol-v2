@@ -230,6 +230,8 @@ fn setup_timers() {
 
 /// Record a virtual_price snapshot for APY calculations.
 fn take_vp_snapshot() {
+    let precision_muls = get_precision_muls();
+    let amp = get_current_a();
 
     let snapshot = read_state(|s| {
         if s.lp_total_supply == 0 {
@@ -499,7 +501,7 @@ pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
             Ok(compensation_id) => {
                 payouts::mark_settled(claim_id);
                 storage::pending_claims::remove(compensation_id);
-                storage::payouts::set_fence(false);
+                storage::payouts::clear_fence_for(claim_id);
                 storage::pending_claims::remove(claim_id);
                 return Ok(());
             }
@@ -529,14 +531,14 @@ pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
             match current.kind {
                 crate::payouts::PayoutKind::SwapOutput => {
                     settle_recovered_swap(&mut current)?;
-                    storage::payouts::set_fence(false);
+                    storage::payouts::clear_fence_for(claim_id);
                 }
                 crate::payouts::PayoutKind::SwapInputRefund => {
                     if let Some(parent_id) = current.compensation_for {
                         payouts::mark_settled(parent_id);
                         storage::pending_claims::remove(parent_id);
                     }
-                    storage::payouts::set_fence(false);
+                    storage::payouts::clear_fence_for(current.compensation_for.unwrap_or(current.id));
                 }
                 _ => {}
             }
@@ -786,6 +788,7 @@ async fn swap_inner(
     // Refund identities must be constructible without another pre-journal
     // await after the input has been pulled.
     let _refund_fee = crate::transfers::ledger_fee(token_i_ledger).await;
+    let _output_fee = crate::transfers::ledger_fee(token_j_ledger).await;
 
     // Receipt-backed swaps have their own recovery journal. Ordinary swaps
     // reserve one pending-claim slot before pulling input tokens.
@@ -881,7 +884,6 @@ async fn swap_inner(
         // with no accounting and no recourse for the user. Refund the input; if the
         // refund itself fails, record a pending claim so the user can recover it via
         // `claim_pending`. Audit 2026-06-05 (3P-01): mirrors rumi_amm's swap path.
-        storage::payouts::set_fence(true);
         swap_payout_id = Some(match crate::transfers::payout_to_user(
             crate::payouts::PayoutKind::SwapOutput,
             j,
@@ -931,7 +933,7 @@ async fn swap_inner(
                 ).await {
                     Ok(_) => {
                         payouts::mark_settled(failure.id);
-                        storage::payouts::set_fence(false);
+                        storage::payouts::clear_fence_for(failure.id);
                     }
                     Err(refund_failure) => {
                         let refund_err = refund_failure.reason.clone();
@@ -1006,7 +1008,9 @@ async fn swap_inner(
     }
 
     if receipt.is_none() {
-        storage::payouts::set_fence(false);
+        if let Some(payout_id) = swap_payout_id {
+            storage::payouts::clear_fence_for(payout_id);
+        }
     }
 
     if let Some(r) = receipt {

@@ -219,9 +219,9 @@ export const idlFactory = ({ IDL }) => {
     'outcome' : PayoutOutcome,
   });
   const PayoutSwapContext = IDL.Record({
-    'amp' : IDL.Nat,
-    'admin_fee_bps' : IDL.Nat16,
-    'precision_muls' : IDL.Vec(IDL.Nat),
+    'amp' : IDL.Nat64,
+    'admin_fee_bps' : IDL.Nat64,
+    'precision_muls' : IDL.Vec(IDL.Nat64),
     'imbalance_after' : IDL.Nat64,
     'gross_output' : IDL.Nat,
     'token_in' : IDL.Nat8,

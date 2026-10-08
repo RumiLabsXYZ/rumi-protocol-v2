@@ -106,14 +106,14 @@ type PayoutOutcome = variant {
 };
 type PayoutSwapContext = record {
   balances_before : vec nat;
-  amp : nat;
-  precision_muls : vec nat;
+  amp : nat64;
+  precision_muls : vec nat64;
   token_in : nat8;
   token_out : nat8;
   amount_in : nat;
   gross_output : nat;
   pool_fee : nat;
-  admin_fee_bps : nat16;
+  admin_fee_bps : nat64;
   fee_bps : nat16;
   imbalance_before : nat64;
   imbalance_after : nat64;

@@ -605,8 +605,8 @@ thread_local! {
         );
     pub(crate) static PAYOUT_CURRENT: RefCell<StableBTreeMap<StorableU128, crate::payouts::PayoutEntitlement, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_CURRENT))));
-    pub(crate) static PAYOUT_FENCE: RefCell<StableCell<u8, Memory>> = RefCell::new(
-        StableCell::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_FENCE)), 0)
+    pub(crate) static PAYOUT_FENCE: RefCell<StableCell<StorableU128, Memory>> = RefCell::new(
+        StableCell::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_FENCE)), StorableU128(0))
             .expect("init payout fence"),
     );
     pub(crate) static PAYOUT_OWNER_INDEX: RefCell<StableBTreeMap<PayoutOwnerKey, Unit, Memory>> =
@@ -1107,13 +1107,28 @@ pub mod payouts {
     }
 
     pub fn fenced() -> bool {
-        PAYOUT_FENCE.with(|cell| *cell.borrow().get() != 0)
+        PAYOUT_FENCE.with(|cell| cell.borrow().get().0 != 0)
     }
 
-    pub fn set_fence(active: bool) {
+    pub fn set_fence_for(id: u64) {
         PAYOUT_FENCE.with(|cell| {
-            cell.borrow_mut().set(u8::from(active)).expect("persist payout fence");
+            cell.borrow_mut()
+                .set(StorableU128(id as u128 + 1))
+                .expect("persist payout fence identity");
         });
+    }
+
+    /// Clear only the fence owned by this entitlement; stale claims cannot
+    /// unlock a different in-flight swap.
+    pub fn clear_fence_for(id: u64) -> bool {
+        PAYOUT_FENCE.with(|cell| {
+            let mut cell = cell.borrow_mut();
+            if cell.get().0 != id as u128 + 1 {
+                return false;
+            }
+            cell.set(StorableU128(0)).expect("clear payout fence identity");
+            true
+        })
     }
 }
 

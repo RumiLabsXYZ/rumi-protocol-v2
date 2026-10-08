@@ -7,7 +7,6 @@
 
 use candid::Principal;
 use icrc_ledger_types::icrc1::account::Account;
-use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use crate::payouts::{
     PayoutAttempt, PayoutEntitlement, PayoutFailure, PayoutJournalEventKind, PayoutKind,
@@ -327,6 +326,9 @@ async fn execute_payout_attempt(
         replay_count: attempt.replay_count,
     });
     crate::payouts::save(entitlement.clone());
+    if entitlement.kind == PayoutKind::SwapOutput {
+        crate::storage::payouts::set_fence_for(id);
+    }
     let args = TransferArg {
         from_subaccount: transfer.from.subaccount.clone(),
         to: transfer.to,

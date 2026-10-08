@@ -5,7 +5,7 @@ use candid::{decode_one, encode_args, encode_one, Nat, Principal};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc2::approve::ApproveArgs;
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
-use rumi_3pool::payouts::{PayoutEntitlement, PayoutOutcome};
+use rumi_3pool::payouts::{PayoutEntitlement, PayoutKind, PayoutOutcome};
 use rumi_3pool::types::{ThreePoolError, ThreePoolInitArgs, ThreePoolPendingClaim, TokenConfig};
 
 const USER_FUNDS: [u128; 3] = [
@@ -210,7 +210,7 @@ fn claims(h: &Harness) -> Vec<ThreePoolPendingClaim> {
 }
 
 fn payout(h: &Harness, owner: Principal, id: u64) -> PayoutEntitlement {
-    decode_one(&reply(
+    decode_one::<Option<PayoutEntitlement>>(&reply(
         h.pic
             .query_call(
                 h.pool,
@@ -221,6 +221,7 @@ fn payout(h: &Harness, owner: Principal, id: u64) -> PayoutEntitlement {
             .unwrap(),
     ))
     .unwrap()
+    .expect("payout entitlement exists")
 }
 
 fn payouts(h: &Harness, owner: Principal) -> Vec<PayoutEntitlement> {
@@ -560,7 +561,7 @@ fn swap_compensation_identity_survives_upgrade_and_repeated_parent_recovery() {
         PayoutOutcome::Unresolved { .. }
     ));
     let after_lost_refund_reply = balance(&h, h.ledgers[0], h.user);
-    assert_eq!(input_before - after_lost_refund_reply, 20_000);
+    assert_eq!(input_before - after_lost_refund_reply, 0);
 
     h.pic
         .upgrade_canister(
@@ -601,4 +602,56 @@ fn swap_compensation_identity_survives_upgrade_and_repeated_parent_recovery() {
     .unwrap();
     repeated.expect("repeated parent recovery must resolve the same compensation");
     assert_eq!(balance(&h, h.ledgers[0], h.user), after_replay);
+}
+
+#[test]
+fn settled_swap_claim_cannot_clear_another_swaps_payout_fence() {
+    let h = setup();
+    let run_swap = || {
+        decode_one::<Result<u128, ThreePoolError>>(&reply(
+            h.pic
+                .update_call(
+                    h.pool,
+                    h.user,
+                    "swap",
+                    encode_args((0u8, 1u8, 100_000_000u128, 1u128)).unwrap(),
+                )
+                .unwrap(),
+        ))
+        .unwrap()
+    };
+
+    run_swap().expect("first swap succeeds");
+    let old = payouts(&h, h.user)
+        .into_iter()
+        .find(|p| p.kind == PayoutKind::SwapOutput && p.settled)
+        .expect("first swap payout is settled");
+
+    h.pic
+        .update_call(
+            h.ledgers[1],
+            h.user,
+            "set_phantom_failures",
+            encode_one(1u32).unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(run_swap(), Err(ThreePoolError::TransferFailed { .. })));
+    let current = payouts(&h, h.user)
+        .into_iter()
+        .find(|p| p.kind == PayoutKind::SwapOutput && !p.settled)
+        .expect("ambiguous second output remains unresolved");
+
+    let stale_recovery: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(h.pool, h.user, "claim_pending", encode_one(old.id).unwrap())
+            .unwrap(),
+    ))
+    .unwrap();
+    stale_recovery.expect("old confirmed payout may be read idempotently");
+
+    assert!(matches!(run_swap(), Err(ThreePoolError::PoolLocked)));
+    assert!(matches!(
+        &payout(&h, h.user, current.id).attempts.last().unwrap().outcome,
+        PayoutOutcome::Unresolved { .. }
+    ));
 }

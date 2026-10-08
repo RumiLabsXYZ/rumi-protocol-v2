@@ -45,14 +45,14 @@ pub enum PayoutOutcome {
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PayoutSwapContext {
     pub balances_before: [u128; 3],
-    pub amp: u128,
-    pub precision_muls: [u128; 3],
+    pub amp: u64,
+    pub precision_muls: [u64; 3],
     pub token_in: u8,
     pub token_out: u8,
     pub amount_in: u128,
     pub gross_output: u128,
     pub pool_fee: u128,
-    pub admin_fee_bps: u16,
+    pub admin_fee_bps: u64,
     pub fee_bps: u16,
     pub imbalance_before: u64,
     pub imbalance_after: u64,
