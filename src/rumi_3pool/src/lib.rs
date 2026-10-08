@@ -3737,6 +3737,19 @@ pub fn test_get_raw_block(id: u64) -> Option<types::Icrc3Block> {
     storage::blocks::get(id)
 }
 
+/// Test-only, one-shot HTTP barrier before an uncached ledger-fee call. The
+/// CL-01 PocketIC regression releases it only after an LP transfer executes.
+#[cfg(any(feature = "test_endpoints", test))]
+#[update]
+pub fn test_gate_next_fee_lookup() {
+    assert_eq!(
+        ic_cdk::api::caller(),
+        read_state(|s| s.config.admin),
+        "admin only"
+    );
+    transfers::gate_next_fee_lookup();
+}
+
 /// Test-only: clear the ICRC-3 hash cache. Used by tests to simulate the
 /// pre-Task-3 mainnet state where blocks exist but the cache is empty.
 /// The post_upgrade hook (Task 5) backfills the cache; this endpoint lets
