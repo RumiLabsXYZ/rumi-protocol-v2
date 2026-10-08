@@ -17,13 +17,13 @@
   import { isOisyWallet } from '../../services/protocol/walletOperations';
   import PointsCallout from '../points/PointsCallout.svelte';
   import { compute3poolMultiplier, threePoolHeadline } from '$lib/utils/pointsRules';
-  import { LEGACY_FIAT_STABLE_POINTS_POLICY } from '$lib/utils/fiatStablePointsPolicy';
+  import { UNKNOWN_FIAT_STABLE_POINTS_POLICY } from '$lib/utils/fiatStablePointsPolicy';
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
 
   onMount(() => { seasonStore.ensureLoaded(); });
 
   // POOL_TOKENS order is [icUSD, ckUSDT, ckUSDC]. Live multiplier mirrors accrual.rs.
-  $: pointsPolicy = $seasonStore.policy ?? LEGACY_FIAT_STABLE_POINTS_POLICY;
+  $: pointsPolicy = $seasonStore.policy ?? UNKNOWN_FIAT_STABLE_POINTS_POLICY;
   $: addMultiplier = compute3poolMultiplier({
     icusd: parseFloat(addAmounts[0]) || 0,
     ckusdt: parseFloat(addAmounts[1]) || 0,

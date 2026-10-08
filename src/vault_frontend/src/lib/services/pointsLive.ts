@@ -26,6 +26,7 @@ import { ammService, type PoolInfo } from './ammService';
 import { threeUsdPriceFromPoolStatus } from './threeUsdPrice';
 import type { LiveInputs } from '$lib/utils/pointsBreakdown';
 import { getFiatStablePointsPolicy } from './pointsService';
+import { UNKNOWN_FIAT_STABLE_POINTS_POLICY } from '$lib/utils/fiatStablePointsPolicy';
 
 const E8S = 100_000_000;
 
@@ -156,6 +157,6 @@ export async function fetchLiveInputs(
     recorded3pool: recorded3poolFromState(state),
     icpUsd: settled(icpUsd, 'ICP price'),
     virtualPrice: settled(virtualPrice, '3USD virtual price'),
-    pointsPolicy: settled(pointsPolicy, 'fiat-stable points policy') ?? undefined,
+    pointsPolicy: settled(pointsPolicy, 'fiat-stable points policy') ?? UNKNOWN_FIAT_STABLE_POINTS_POLICY,
   };
 }

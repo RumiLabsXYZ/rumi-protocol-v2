@@ -25,6 +25,7 @@ import type {
 import {
   LEGACY_FIAT_STABLE_POINTS_POLICY,
   normalizeFiatStablePointsPolicy,
+  UNKNOWN_FIAT_STABLE_POINTS_POLICY,
   type FiatStablePointsPolicy,
 } from '$lib/utils/fiatStablePointsPolicy';
 
@@ -142,7 +143,7 @@ export async function getFiatStablePointsPolicy(): Promise<FiatStablePointsPolic
       return setCache(key, LEGACY_FIAT_STABLE_POINTS_POLICY);
     }
     console.warn('[pointsService] fiat-stable policy read failed', e);
-    return setCache(key, { ...LEGACY_FIAT_STABLE_POINTS_POLICY, mode: 'unknown', source: 'runtime' });
+    return setCache(key, UNKNOWN_FIAT_STABLE_POINTS_POLICY);
   }
 }
 

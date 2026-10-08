@@ -12,7 +12,7 @@
   import {
     fiatStableMigrationNotice,
     fiatStablePolicyStatus,
-    LEGACY_FIAT_STABLE_POINTS_POLICY,
+    UNKNOWN_FIAT_STABLE_POINTS_POLICY,
   } from '$lib/utils/fiatStablePointsPolicy';
   import { truncatePrincipal } from '$lib/utils/principalHelpers';
   import type { PublicEpochStatus, PointsConfig } from '$declarations/rumi_points/rumi_points.did';
@@ -112,7 +112,7 @@
   const seasonEnded = $derived(
     seasonState(status, config, BigInt(Date.now()) * 1_000_000n) === 'ended',
   );
-  const fiatPolicy = $derived($seasonStore.policy ?? LEGACY_FIAT_STABLE_POINTS_POLICY);
+  const fiatPolicy = $derived($seasonStore.policy ?? UNKNOWN_FIAT_STABLE_POINTS_POLICY);
   const migrationNotice = $derived(fiatStableMigrationNotice(fiatPolicy));
 
   /** Venues with a live earning position — marked "active" in Earn more. */

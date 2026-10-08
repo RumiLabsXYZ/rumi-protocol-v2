@@ -3,7 +3,7 @@
   import { AMM1_LIQUIDITY_PAUSED } from '$lib/config';
   import type { EarnVenue } from '$lib/utils/pointsRules';
   import { seasonStore } from '$lib/stores/seasonStore';
-  import { LEGACY_FIAT_STABLE_POINTS_POLICY } from '$lib/utils/fiatStablePointsPolicy';
+  import { UNKNOWN_FIAT_STABLE_POINTS_POLICY } from '$lib/utils/fiatStablePointsPolicy';
 
   interface Props {
     heading?: string;
@@ -23,7 +23,7 @@
   // Curated, sorted high → low. The 3pool row follows the runtime policy so a
   // pending cutover never pitches pairing both coins for a historical 5× bonus.
   const actions = $derived.by((): Action[] => {
-    const policy = $seasonStore.policy ?? LEGACY_FIAT_STABLE_POINTS_POLICY;
+    const policy = $seasonStore.policy ?? UNKNOWN_FIAT_STABLE_POINTS_POLICY;
     const threePoolMultiplier = policy.mode === 'flat4x' ? 4 : policy.mode === 'unknown' ? null : 5;
     const threePoolDesc =
       policy.mode === 'flat4x'

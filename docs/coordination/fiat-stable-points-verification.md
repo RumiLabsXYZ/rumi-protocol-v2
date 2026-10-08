@@ -5,7 +5,7 @@ Source base: 4b4b1680a89b37ab82641ae1e1cb6addf98dcdb5. Authorized scope: histori
 ## Deterministic evidence
 
 - Rust library: 187 tests passed, including bounded inline corrections, missing-state rejection, and positive future flat-4x accrual.
-- Frontend: 50 focused Vitest tests passed; production build and frontend auth/domain asset verifier passed. Regenerated points Candid/JS/TS agree.
+- Frontend: 53 focused Vitest tests passed; production build and frontend auth/domain asset verifier passed. Regenerated points Candid/JS/TS agree.
 - Python reporting: 15 tests passed; actual live original prefix: 401 rows / 15 principals totals reconcile. Expected uplift: 215174119482 e8s.
 - Full frontend check: 28 errors and 65 warnings in 24 files. All 28 errors are in unchanged files: config, explorer services, old stabilityPool service, docs/parameters and docs/redemptions. No errors in touched points files. This broader baseline debt is deferred.
 - Raw candidate endpoint check passes with an explicit allowlist for existing CDK timer_executor, lifecycle exports, get_candid_pointer and main. No fixture-only seeder endpoint is exported by production.
@@ -46,3 +46,7 @@ The final candidate passed both focused PocketIC gates: populated policy-absent 
 Reviewer A passed the assembled release. Reviewer B identified actor construction outside the policy query error handler: a construction failure could escape and fall back to legacy downstream. The actor/method lookup now runs inside the guarded try, with regression coverage for construction failure, query failure, and confirmed absent method. The final focused frontend suite has 50 passing tests across four files; production build and auth assets pass.
 
 Reviewer A's two advisory limitations are deferred: the singleton frontend store requires a reload to refresh policy at a later epoch boundary, and the reporting tool's current reconciliation is scoped to this held-epoch historical-prefix migration. Valid later inline correction rows require extending the reporter before using it after legacy epoch closure. Neither advisory finding was accepted as a release blocker. The backend inline correction logic and its exactly-once tests are unchanged.
+
+## Independent review round 5
+
+Reviewer A passed the accounting and query-error paths. Reviewer B found the shared season loader discarded a successful policy when an unrelated status/config query failed, allowing consumers to substitute legacy rules. The final runtime flow now preserves settled results independently, uses a shared unknown policy for unset or failed policy reads, and reserves legacy fallback for confirmed missing-method compatibility. The points page, docs, CTA, banner, liquidity UI and live-position input use that same unknown default. Three store regressions bring the final focused frontend suite to 53 passing tests across five files; production build/auth assets pass. Backend, generated declarations, and upgrade evidence remain unchanged.

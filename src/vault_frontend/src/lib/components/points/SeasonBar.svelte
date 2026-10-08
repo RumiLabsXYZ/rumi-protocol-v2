@@ -13,7 +13,7 @@
   import { seasonStore, seasonPhase } from '$lib/stores/seasonStore';
   import { formatPoints, bodyState } from '$lib/utils/points';
   import { MAX_MULTIPLIER } from '$lib/utils/pointsRules';
-  import { LEGACY_FIAT_STABLE_POINTS_POLICY } from '$lib/utils/fiatStablePointsPolicy';
+  import { UNKNOWN_FIAT_STABLE_POINTS_POLICY } from '$lib/utils/fiatStablePointsPolicy';
 
   let loadedFor = $state<string | null>(null);
 
@@ -42,7 +42,7 @@
     bodyState({ connected: $isConnected, excluded: $myPointsStore.excluded, state: $myPointsStore.state }),
   );
   const pts = $derived($myPointsStore.state ? formatPoints($myPointsStore.state.total_points) : null);
-  const fiatStableMode = $derived(($seasonStore.policy ?? LEGACY_FIAT_STABLE_POINTS_POLICY).mode);
+  const fiatStableMode = $derived(($seasonStore.policy ?? UNKNOWN_FIAT_STABLE_POINTS_POLICY).mode);
 </script>
 
 {#if POINTS_ENABLED && phase !== 'unknown' && body !== 'excluded'}

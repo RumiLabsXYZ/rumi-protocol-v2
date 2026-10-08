@@ -45,6 +45,19 @@ export const LEGACY_FIAT_STABLE_POINTS_POLICY: FiatStablePointsPolicy = {
   migration: { status: 'unknown', processed: null, total: null },
 };
 
+export const UNKNOWN_FIAT_STABLE_POINTS_POLICY: FiatStablePointsPolicy = {
+  mode: 'unknown',
+  source: 'runtime',
+  effectiveEpoch: null,
+  legacyEpoch: null,
+  historicalLedgerCutoff: null,
+  inlineTopupRows: null,
+  historicalComplete: null,
+  inlineTopupsComplete: null,
+  pendingCutover: false,
+  migration: { status: 'unknown', processed: null, total: null },
+};
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 }

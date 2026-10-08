@@ -2,10 +2,10 @@
   import { onMount } from 'svelte';
   import { AMM1_LIQUIDITY_PAUSED } from '$lib/config';
   import { seasonStore } from '$lib/stores/seasonStore';
-  import { LEGACY_FIAT_STABLE_POINTS_POLICY } from '$lib/utils/fiatStablePointsPolicy';
+  import { UNKNOWN_FIAT_STABLE_POINTS_POLICY } from '$lib/utils/fiatStablePointsPolicy';
 
   onMount(() => { void seasonStore.ensureLoaded(); });
-  const fiatPolicy = $derived($seasonStore.policy ?? LEGACY_FIAT_STABLE_POINTS_POLICY);
+  const fiatPolicy = $derived($seasonStore.policy ?? UNKNOWN_FIAT_STABLE_POINTS_POLICY);
 </script>
 
 <svelte:head><title>Points &amp; Airdrop | Rumi Docs</title></svelte:head>
