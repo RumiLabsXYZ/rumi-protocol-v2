@@ -367,6 +367,56 @@ pub struct StoredXrpSpAbsorbResult {
     pub accepted_at_ns: u64,
 }
 
+/// Stable backend journal for exact post-burn compensation. A history-prefix
+/// absence only permits tuple rotation when paired with typed ledger TooOld.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StoredSpBurnRefund {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub amount_e8s: u64,
+    pub ledger: Principal,
+    pub burn_block_index: u64,
+    pub op_nonce: u128,
+    pub refund_created_at_time: u64,
+    pub refund_memo: Vec<u8>,
+    pub refund_block_index: Option<u64>,
+    #[serde(default)]
+    pub attempt_history: Vec<(u128, u64, Vec<u8>)>,
+    #[serde(default)]
+    pub history_scan: Option<StoredSpBurnRefundHistoryScan>,
+    #[serde(default)]
+    pub no_effect_evidence: Option<StoredSpBurnRefundNoEffectEvidence>,
+    #[serde(default)]
+    pub attempt_no_effect_evidence: Vec<StoredSpBurnRefundNoEffectEvidence>,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StoredSpBurnRefundHistoryScan {
+    pub ledger: Principal,
+    pub recipient: Principal,
+    pub amount_e8s: u64,
+    pub op_nonce: u128,
+    pub created_at_time: u64,
+    pub memo: Vec<u8>,
+    pub snapshot_log_length: u64,
+    pub next_index: u64,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StoredSpBurnRefundNoEffectEvidence {
+    pub ledger: Principal,
+    pub recipient: Principal,
+    pub amount_e8s: u64,
+    pub op_nonce: u128,
+    pub created_at_time: u64,
+    pub memo: Vec<u8>,
+    pub log_length: u64,
+    #[serde(default)]
+    pub too_old_rejected: bool,
+}
+
+pub const MAX_SP_BURN_REFUND_ATTEMPTS: usize = 4;
+
 /// Wave-8b LIQ-002: default tolerance band (in absolute CR units) above the
 /// worst-CR vault inside which liquidations are accepted. 0.01 = 1% CR. With
 /// the band in basis points, this is 100 bps. Admin-tunable via
@@ -1830,6 +1880,11 @@ pub struct State {
     #[serde(default)]
     pub sp_xrp_absorb_results_by_proof:
         BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredXrpSpAbsorbResult>,
+    /// Durable exact-principal refund obligations, keyed by consumed burn
+    /// proof and committed atomically with the replay tombstone.
+    #[serde(default)]
+    pub sp_burn_refunds_by_proof:
+        BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredSpBurnRefund>,
 
     // ─── Wave-8e LIQ-005: bad-debt deficit account ───
     //
@@ -2267,6 +2322,7 @@ impl Default for State {
             sp_chain_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_results_by_proof: BTreeMap::new(),
+            sp_burn_refunds_by_proof: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),
@@ -2544,6 +2600,7 @@ impl From<InitArg> for State {
             sp_chain_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_results_by_proof: BTreeMap::new(),
+            sp_burn_refunds_by_proof: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),
@@ -6228,6 +6285,28 @@ pub fn replace_state(state: State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pre_cl08_state_snapshot_defaults_refund_journal_to_empty() {
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&State::default(), &mut encoded).expect("encode current state");
+        let mut snapshot: ciborium::value::Value =
+            ciborium::de::from_reader(encoded.as_slice()).expect("decode state map");
+        let entries = match &mut snapshot {
+            ciborium::value::Value::Map(entries) => entries,
+            other => panic!("expected state map, got {other:?}"),
+        };
+        let journal_key = ciborium::value::Value::Text("sp_burn_refunds_by_proof".into());
+        let old_len = entries.len();
+        entries.retain(|(key, _)| key != &journal_key);
+        assert_eq!(entries.len() + 1, old_len, "journal field was present");
+
+        let mut old_snapshot = Vec::new();
+        ciborium::ser::into_writer(&snapshot, &mut old_snapshot).expect("encode old state map");
+        let decoded: State =
+            ciborium::de::from_reader(old_snapshot.as_slice()).expect("decode pre-CL08 snapshot");
+        assert!(decoded.sp_burn_refunds_by_proof.is_empty());
+    }
 
     #[test]
     fn pre_cl10_interest_outbox_snapshot_decodes_as_held_legacy_row() {

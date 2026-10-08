@@ -41,7 +41,7 @@
 //! (`proof: None` with a per-call WARN) has been retired.
 
 use candid::{CandidType, Nat, Principal};
-use icrc_ledger_types::icrc::generic_value::{ICRC3Value, ICRC3Map};
+use icrc_ledger_types::icrc::generic_value::{ICRC3Map, ICRC3Value};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
 use num_traits::ToPrimitive;
@@ -113,11 +113,13 @@ pub fn decode_writedown_memo(memo: &[u8]) -> Result<u64, String> {
 /// (`tx.op`) are accepted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DecodedBlock {
+    pub btype: Option<String>,
     pub op: String,
     pub from: Option<Account>,
     pub to: Option<Account>,
     pub spender: Option<Account>,
     pub amount: u128,
+    pub created_at_time: Option<u64>,
     pub memo: Option<Vec<u8>>,
 }
 
@@ -162,8 +164,9 @@ pub fn decode_block(value: &ICRC3Value) -> Result<DecodedBlock, String> {
             _ => Err("'tx' is not a Map".to_string()),
         })?;
 
-    let op = if let Some(btype) = block_map.get("btype").and_then(text_value) {
-        normalize_op(&btype)
+    let btype = block_map.get("btype").and_then(text_value);
+    let op = if let Some(btype) = &btype {
+        normalize_op(btype)
     } else if let Some(op) = tx_map.get("op").and_then(text_value) {
         normalize_op(&op)
     } else {
@@ -179,6 +182,16 @@ pub fn decode_block(value: &ICRC3Value) -> Result<DecodedBlock, String> {
         .ok_or_else(|| "tx missing 'amt'".to_string())
         .and_then(nat_to_u128)?;
 
+    let created_at_time = tx_map
+        .get("ts")
+        .or_else(|| tx_map.get("created_at_time"))
+        .map(nat_to_u128)
+        .transpose()?
+        .map(|value| {
+            u64::try_from(value).map_err(|_| "block timestamp does not fit in u64".to_string())
+        })
+        .transpose()?;
+
     let memo = match tx_map.get("memo") {
         Some(ICRC3Value::Blob(b)) => Some(b.to_vec()),
         Some(_) => return Err("tx 'memo' is not a Blob".to_string()),
@@ -186,13 +199,134 @@ pub fn decode_block(value: &ICRC3Value) -> Result<DecodedBlock, String> {
     };
 
     Ok(DecodedBlock {
+        btype,
         op,
         from,
         to,
         spender,
         amount,
+        created_at_time,
         memo,
     })
+}
+
+/// Verify an exact ICRC-1 mint/transfer block, resolving a single advertised
+/// archive callback when the ledger has archived the requested index.
+pub async fn verify_icrc3_transfer_block(
+    ledger: Principal,
+    block_index: u64,
+    from: Option<Account>,
+    to: Account,
+    amount_e8s: u64,
+    memo: Option<&[u8]>,
+    created_at_time: Option<u64>,
+) -> Result<(), String> {
+    let block = fetch_icrc3_block(ledger, block_index).await?;
+    let expected_op = if from.is_some() { "transfer" } else { "mint" };
+    let expected_btype = if from.is_some() { "1xfer" } else { "1mint" };
+    if block
+        .btype
+        .as_deref()
+        .is_some_and(|kind| kind != expected_btype)
+        || block.op != expected_op
+        || block.from != from
+        || !block
+            .to
+            .as_ref()
+            .is_some_and(|actual| accounts_match_default_subaccount(actual, &to))
+        || block.amount != u128::from(amount_e8s)
+        || memo.is_some_and(|expected| block.memo.as_deref() != Some(expected))
+        || created_at_time.is_some_and(|expected| block.created_at_time != Some(expected))
+    {
+        return Err("ICRC-3 transfer block does not match the exact expected tuple".into());
+    }
+    Ok(())
+}
+
+fn accounts_match_default_subaccount(actual: &Account, expected: &Account) -> bool {
+    actual.owner == expected.owner
+        && match (&actual.subaccount, &expected.subaccount) {
+            (None, None) => true,
+            (Some(actual), Some(expected)) => actual == expected,
+            (Some(actual), None) | (None, Some(actual)) => *actual == [0; 32],
+        }
+}
+
+/// Fetch an exact ledger-global block. Archive metadata must identify exactly
+/// one bounded callback covering the requested index; nested archives fail
+/// closed.
+pub async fn fetch_icrc3_block(
+    ledger: Principal,
+    block_index: u64,
+) -> Result<DecodedBlock, String> {
+    let request = vec![GetBlocksRequest {
+        start: Nat::from(block_index),
+        length: Nat::from(1u64),
+    }];
+    let result: Result<(GetBlocksResult,), _> =
+        ic_cdk::call(ledger, "icrc3_get_blocks", (request,)).await;
+    let (response,) = result.map_err(|(code, message)| {
+        format!("icrc3_get_blocks call to {ledger} failed: {code:?} {message}")
+    })?;
+    if response.blocks.len() == 1
+        && response.blocks[0].id.0.to_u64() == Some(block_index)
+        && response.archived_blocks.is_empty()
+    {
+        return decode_block(&response.blocks[0].block);
+    }
+    if !response.blocks.is_empty() || response.archived_blocks.len() != 1 {
+        return Err("icrc3_get_blocks returned ambiguous or incomplete archive evidence".into());
+    }
+    let archive = &response.archived_blocks[0];
+    if archive.args.len() > 32
+        || !archive.args.iter().any(|arg| {
+            arg.start
+                .0
+                .to_u64()
+                .zip(arg.length.0.to_u64())
+                .is_some_and(|(start, len)| {
+                    start <= block_index
+                        && start.checked_add(len).is_none_or(|end| block_index < end)
+                })
+        })
+    {
+        return Err("archive callback does not uniquely cover the requested block".into());
+    }
+    let archive_request = vec![GetBlocksRequest {
+        start: Nat::from(block_index),
+        length: Nat::from(1u64),
+    }];
+    let result: Result<(GetBlocksResult,), _> = ic_cdk::call(
+        archive.callback.canister_id,
+        &archive.callback.method,
+        (archive_request,),
+    )
+    .await;
+    let (archived,) = result
+        .map_err(|(code, message)| format!("icrc3 archive call failed: {code:?} {message}"))?;
+    if !archived.archived_blocks.is_empty()
+        || archived.blocks.len() != 1
+        || archived.blocks[0].id.0.to_u64() != Some(block_index)
+    {
+        return Err("archive callback returned malformed exact block response".into());
+    }
+    decode_block(&archived.blocks[0].block)
+}
+
+pub async fn icrc3_log_length(ledger: Principal) -> Result<u64, String> {
+    let request = vec![GetBlocksRequest {
+        start: Nat::from(0u64),
+        length: Nat::from(1u64),
+    }];
+    let result: Result<(GetBlocksResult,), _> =
+        ic_cdk::call(ledger, "icrc3_get_blocks", (request,)).await;
+    let (response,) = result
+        .map_err(|(code, message)| format!("icrc3 log-length query failed: {code:?} {message}"))?;
+    response
+        .log_length
+        .0
+        .to_u64()
+        .ok_or_else(|| "ICRC-3 log length exceeds u64".into())
 }
 
 /// Pure-logic validator. Asserts `block` matches `expected` for the given
@@ -218,10 +352,7 @@ pub fn decode_block(value: &ICRC3Value) -> Result<DecodedBlock, String> {
 ///     backend's code-time construction (`vault_id_memo` is set to the
 ///     call's `vault_id`) plus the consumed-proof set's per-block-index
 ///     replay defense.
-pub fn validate_block(
-    block: &DecodedBlock,
-    expected: &ProofExpectations,
-) -> Result<u64, String> {
+pub fn validate_block(block: &DecodedBlock, expected: &ProofExpectations) -> Result<u64, String> {
     match expected.ledger_kind {
         SpProofLedger::IcusdBurn => {
             if block.op != "burn" {
@@ -388,10 +519,10 @@ fn account_from_value(v: &ICRC3Value) -> Result<Account, String> {
 
 fn nat_to_u128(v: &ICRC3Value) -> Result<u128, String> {
     match v {
-        ICRC3Value::Nat(n) => n
-            .0
-            .to_u128()
-            .ok_or_else(|| format!("Nat {} does not fit in u128", n)),
+        ICRC3Value::Nat(n) => {
+            n.0.to_u128()
+                .ok_or_else(|| format!("Nat {} does not fit in u128", n))
+        }
         _ => Err("expected Nat value".to_string()),
     }
 }
@@ -424,7 +555,14 @@ pub fn make_test_transfer_block(
     memo: &[u8],
     with_btype: bool,
 ) -> ICRC3Value {
-    make_test_block("xfer", Some(from), Some(to), amount_e8s, Some(memo), with_btype)
+    make_test_block(
+        "xfer",
+        Some(from),
+        Some(to),
+        amount_e8s,
+        Some(memo),
+        with_btype,
+    )
 }
 
 fn make_test_block(
@@ -452,10 +590,7 @@ fn make_test_block(
     }
     let mut block: ICRC3Map = std::collections::BTreeMap::new();
     if with_btype {
-        block.insert(
-            "btype".to_string(),
-            ICRC3Value::Text(format!("1{}", op)),
-        );
+        block.insert("btype".to_string(), ICRC3Value::Text(format!("1{}", op)));
     }
     block.insert("ts".to_string(), ICRC3Value::Nat(Nat::from(0u64)));
     block.insert("tx".to_string(), ICRC3Value::Map(tx));
@@ -463,7 +598,9 @@ fn make_test_block(
 }
 
 fn account_to_value(account: Account) -> ICRC3Value {
-    let mut parts = vec![ICRC3Value::Blob(ByteBuf::from(account.owner.as_slice().to_vec()))];
+    let mut parts = vec![ICRC3Value::Blob(ByteBuf::from(
+        account.owner.as_slice().to_vec(),
+    ))];
     if let Some(sub) = account.subaccount {
         parts.push(ICRC3Value::Blob(ByteBuf::from(sub.to_vec())));
     }

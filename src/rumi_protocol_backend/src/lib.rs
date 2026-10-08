@@ -42,6 +42,7 @@ pub mod event;
 pub mod guard;
 pub mod icrc21;
 pub mod icrc3_proof;
+pub mod sp_burn_refund;
 pub mod liquidity_pool;
 pub mod logs;
 pub mod management;
@@ -486,6 +487,15 @@ pub struct XrpSpAbsorbResult {
     pub payout_claims: Vec<XrpSpPayoutClaim>,
     pub block_index: u64,
     pub collateral_price_e8s: u64,
+}
+
+/// Exact backend terminal state for one persisted native-XRP burn intent.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum XrpSpAbsorbStatus {
+    Accepted(XrpSpAbsorbResult),
+    RefundJournaled,
+    Unseen,
+    ConsumedWithoutResult,
 }
 
 /// Coarse classification of an `Event` for the explorer's type facet.

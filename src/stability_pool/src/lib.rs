@@ -22,6 +22,10 @@ const CHAIN_ABSORB_AUTO_TIMER_POLL_SECONDS: u64 = 60;
 /// clears within the hour, and cycle cost stays negligible.
 const NATIVE_XRP_SETTLE_SWEEP_POLL_SECONDS: u64 = 600;
 const NATIVE_XRP_SETTLE_SWEEP_MAX_PER_TICK: usize = 2;
+/// Reconcile exact native-XRP burn intents independently of the liquidatable
+/// vault list. A backend/refund response may have been lost after the burn.
+const NATIVE_XRP_ABSORB_RECOVERY_POLL_SECONDS: u64 = 60;
+const NATIVE_XRP_ABSORB_RECOVERY_MAX_PER_TICK: usize = 2;
 const UNALLOCATED_INTEREST_FORWARD_RETRY_SECONDS: u64 = 60;
 /// How often the pool reconciles its tracked aggregate against live ledger
 /// balances and logs any shortfall. Hourly: a handful of balance queries, so
@@ -35,6 +39,35 @@ pub(crate) fn pool_balance_mutation_blocked() -> bool {
 
 pub(crate) fn ensure_pool_balance_mutation_allowed() -> Result<(), StabilityPoolError> {
     if pool_balance_mutation_blocked() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(())
+}
+
+/// A pending absorb only apportions the exact stablecoin ledgers captured in
+/// its durable intent. Unrelated-token deposits and withdrawals remain safe;
+/// live liquidation and any intersecting ledger stay globally serialized.
+pub(crate) fn pool_token_balance_mutation_blocked(ledgers: &[Principal]) -> bool {
+    crate::pool_guard::liquidation_in_progress()
+        || read_state(|state| {
+            let chain_intersects = state.pending_chain_absorbs().iter().any(|intent| {
+                ledgers
+                    .iter()
+                    .any(|ledger| intent.stables_consumed.contains_key(ledger))
+            });
+            let native_xrp_intersects = state.pending_native_xrp_absorbs().iter().any(|intent| {
+                ledgers
+                    .iter()
+                    .any(|ledger| intent.stables_consumed.contains_key(ledger))
+            });
+            chain_intersects || native_xrp_intersects
+        })
+}
+
+pub(crate) fn ensure_pool_token_balance_mutation_allowed(
+    ledgers: &[Principal],
+) -> Result<(), StabilityPoolError> {
+    if pool_token_balance_mutation_blocked(ledgers) {
         return Err(StabilityPoolError::SystemBusy);
     }
     Ok(())
@@ -69,6 +102,7 @@ fn init(args: StabilityPoolInitArgs) {
         setup_virtual_price_timer();
         setup_chain_absorb_auto_timer();
         setup_native_xrp_settle_sweep_timer();
+        setup_native_xrp_absorb_recovery_timer();
         setup_unallocated_interest_forward_retry_timer();
         setup_ledger_reconciliation_timer();
     });
@@ -124,6 +158,7 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
         setup_virtual_price_timer();
         setup_chain_absorb_auto_timer();
         setup_native_xrp_settle_sweep_timer();
+        setup_native_xrp_absorb_recovery_timer();
         setup_unallocated_interest_forward_retry_timer();
         setup_ledger_reconciliation_timer();
     });
@@ -172,6 +207,48 @@ fn setup_native_xrp_settle_sweep_timer() {
                         summary.failed
                     );
                     SWEEP_CURSOR.with(|c| c.set(summary.last_claim_id));
+                }
+            });
+        },
+    );
+}
+
+/// Resolve proof-bearing pending native-XRP burns by vault id. This is
+/// intentionally separate from liquidation discovery: a vault can disappear
+/// from the live liquidatable list after its burn, while its refund/absorb
+/// outcome still requires reconciliation.
+fn setup_native_xrp_absorb_recovery_timer() {
+    thread_local! {
+        static RECOVERY_CURSOR: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    }
+    ic_cdk_timers::set_timer_interval(
+        Duration::from_secs(NATIVE_XRP_ABSORB_RECOVERY_POLL_SECONDS),
+        || {
+            ic_cdk::spawn(async {
+                let cursor = RECOVERY_CURSOR.with(|c| c.get());
+                let vault_ids = crate::liquidation::pending_native_xrp_recovery_vault_ids(
+                    cursor,
+                    NATIVE_XRP_ABSORB_RECOVERY_MAX_PER_TICK,
+                );
+                let mut last = None;
+                for vault_id in vault_ids {
+                    last = Some(vault_id);
+                    if let Err(error) =
+                        crate::liquidation::reconcile_pending_native_xrp_absorb_from_status(
+                            vault_id,
+                        )
+                        .await
+                    {
+                        log!(
+                            INFO,
+                            "native XRP burn recovery for vault {} remains pending: {:?}",
+                            vault_id,
+                            error
+                        );
+                    }
+                }
+                if let Some(last) = last {
+                    RECOVERY_CURSOR.with(|c| c.set(Some(last)));
                 }
             });
         },

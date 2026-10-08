@@ -270,6 +270,10 @@ pub struct NativeXrpAbsorbIntent {
     pub collateral_price_e8s: u64,
     pub allocations: Vec<XrpSpPayoutAllocation>,
     pub burn_created_at_time_ns: u64,
+    /// `None` on legacy snapshots means the ledger-call dispatch outcome is
+    /// unknown and must remain held. New intents start at `Some(false)`.
+    #[serde(default)]
+    pub burn_attempted: Option<bool>,
     pub status: NativeXrpAbsorbIntentStatus,
     pub burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
     pub backend_result: Option<XrpSpAbsorbResult>,

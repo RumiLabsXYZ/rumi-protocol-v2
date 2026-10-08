@@ -3715,6 +3715,70 @@ pub fn xrp_sp_absorb_cached_replay_result(
     )
 }
 
+/// Resolve the exact persisted outcome of a native-XRP absorb without
+/// repeating proof validation or mutating vault state.
+pub fn xrp_sp_absorb_status_in_state(
+    state: &crate::state::State,
+    caller: Principal,
+    request: &crate::XrpSpAbsorbRequest,
+) -> Result<crate::XrpSpAbsorbStatus, ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+    let proof_key = (request.proof.ledger_kind, request.proof.block_index);
+    let refund = state.sp_burn_refunds_by_proof.get(&proof_key);
+    let absorb = state.sp_xrp_absorb_results_by_proof.get(&proof_key);
+    if refund.is_some() && absorb.is_some() {
+        return Ok(crate::XrpSpAbsorbStatus::ConsumedWithoutResult);
+    }
+    let consumed = state.consumed_writedown_proofs.contains(&proof_key);
+    if let Some(refund) = refund {
+        let exact = consumed
+            && request.proof.ledger_kind == crate::icrc3_proof::SpProofLedger::IcusdBurn
+            && request.proof.vault_id_memo == request.vault_id
+            && refund.caller == caller
+            && refund.vault_id == request.vault_id
+            && refund.amount_e8s == request.icusd_burned_e8s
+            && refund.ledger == state.icusd_ledger_principal
+            && refund.burn_block_index == request.proof.block_index;
+        return Ok(if exact {
+            crate::XrpSpAbsorbStatus::RefundJournaled
+        } else {
+            crate::XrpSpAbsorbStatus::ConsumedWithoutResult
+        });
+    }
+    let Some(stored) = absorb else {
+        return Ok(if consumed {
+            crate::XrpSpAbsorbStatus::ConsumedWithoutResult
+        } else {
+            crate::XrpSpAbsorbStatus::Unseen
+        });
+    };
+    if !consumed
+        || stored.proof_ledger != request.proof.ledger_kind
+        || stored.proof_block_index != request.proof.block_index
+        || !stored.result.success
+        || stored.result.vault_id != request.vault_id
+        || stored.result.block_index != request.proof.block_index
+        || stored.result.liquidated_debt_e8s != request.icusd_burned_e8s
+    {
+        return Ok(crate::XrpSpAbsorbStatus::ConsumedWithoutResult);
+    }
+    let matches = validate_xrp_sp_allocations(
+        &request.allocations,
+        stored.result.collateral_received_drops,
+    )
+    .map(|allocations| {
+        let fingerprint = xrp_sp_allocation_fingerprint(caller, request, &allocations);
+        request.proof.vault_id_memo == request.vault_id
+            && stored_xrp_sp_absorb_matches_retry(stored, caller, request, &fingerprint)
+    })
+    .unwrap_or(false);
+    Ok(if matches {
+        crate::XrpSpAbsorbStatus::Accepted(stored.result.clone())
+    } else {
+        crate::XrpSpAbsorbStatus::ConsumedWithoutResult
+    })
+}
+
 pub fn stability_pool_liquidate_xrp_vault_in_state(
     state: &mut crate::state::State,
     caller: Principal,
@@ -3723,6 +3787,12 @@ pub fn stability_pool_liquidate_xrp_vault_in_state(
 ) -> Result<crate::XrpSpAbsorbResult, ProtocolError> {
     ensure_registered_sp(state, caller)?;
     let proof_key = (request.proof.ledger_kind, request.proof.block_index);
+
+    if state.sp_burn_refunds_by_proof.contains_key(&proof_key) {
+        return Err(ProtocolError::GenericError(
+            "SP burn proof already has a terminal refund obligation".into(),
+        ));
+    }
 
     if let Some(stored) = state.sp_xrp_absorb_results_by_proof.get(&proof_key) {
         let allocations = validate_xrp_sp_allocations(
