@@ -53,13 +53,14 @@ fn ic_s_001_refund_is_net_of_ledger_fee() {
         "refund_user must fetch the current ledger fee rather than use a potentially stale cache \
          (audit IC-S-001).",
     );
+    let tuple_builder = fn_body(&src, "fn build_pending_refund_attempt(");
     assert!(
-        body.contains("amount - fee"),
+        tuple_builder.contains("refund.amount - fee") && body.contains("amount: attempt.amount.into()"),
         "refund_user must send the amount NET of the ledger fee, not gross with fee:None \
          (a gross refund debits amount+fee from the pool) (audit IC-S-001).",
     );
     assert!(
-        body.contains("fee: Some(fee.into())"),
+        body.contains("fee: Some(attempt.fee.into())"),
         "refund_user must pass the quoted fee explicitly so a concurrent fee change fails with BadFee \
          instead of creating an untracked debit (audit IC-S-001).",
     );
@@ -78,6 +79,20 @@ fn ic_s_001_failed_refund_records_pending_recovery() {
         !body.contains("let _ = call"),
         "refund_user must not discard the transfer result (audit IC-S-001).",
     );
+    let row_journal = body
+        .find("record_pending_refund(")
+        .expect("refund liability is journaled before setup awaits");
+    let exact_attempt = body
+        .find("put_pending_refund_attempt(attempt.clone())")
+        .expect("exact payout tuple is persisted before dispatch");
+    let transfer_dispatch = body
+        .find("call(attempt.token_ledger, \"icrc1_transfer\"")
+        .expect("refund transfer dispatch exists");
+    assert!(
+        row_journal < exact_attempt && exact_attempt < transfer_dispatch,
+        "the initial compensation must journal the row and exact tuple before a possibly committed transfer reply is awaited",
+    );
+    assert!(body.contains("attempt.dispatch_started = true"));
 }
 
 #[test]
@@ -102,22 +117,31 @@ fn ic_s_001_recovery_endpoints_exist_and_are_declared() {
 }
 
 #[test]
-fn ic_s_001_claim_removes_record_before_transfer() {
+fn ic_s_001_claim_keeps_record_until_exact_receipt() {
     let src = read("src/deposits.rs");
     let body = fn_body(&src, "pub async fn claim_pending_refund(");
-    let take = body.find("take_pending_refund")
-        .expect("claim_pending_refund must remove the record via take_pending_refund (audit IC-S-001)");
-    let transfer = body.find("icrc1_transfer")
-        .expect("claim_pending_refund must pay out via icrc1_transfer (audit IC-S-001)");
     assert!(
-        take < transfer,
-        "the record must be removed BEFORE the async transfer so two concurrent claims \
-         cannot both pay out (audit IC-S-001).",
+        !body.contains("take_pending_refund"),
+        "claim_pending_refund must keep the liability row during the payout await (audit IC-S-001).",
     );
     assert!(
-        body.contains("put_pending_refund"),
-        "a failed payout must re-insert the record so the user can retry (audit IC-S-001).",
+        body.contains("pending_refund_attempt") && body.contains("update_pending_refund_attempt"),
+        "claim_pending_refund must persist and update a stable exact-tuple attempt (audit IC-S-001).",
     );
+    assert!(
+        body.contains("fetch_icrc3_block") && body.contains("expected_block_index"),
+        "claim_pending_refund must verify ledger history before discharging the liability (audit IC-S-001).",
+    );
+    assert!(
+        body.contains("pending_refund_attempt_initializable")
+            && body.contains("legacy refund has no durable payout identity"),
+        "legacy attemptless refunds must fail closed instead of inventing a fresh payout identity",
+    );
+    let balance_guard = body
+        .find("PoolBalanceAsyncGuard::new()")
+        .expect("refund claim must hold the shared-balance async guard");
+    let first_await = body.find(".await").expect("claim has ledger awaits");
+    assert!(balance_guard < first_await, "guard must span every claim await");
 }
 
 #[test]
