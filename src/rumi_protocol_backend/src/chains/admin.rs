@@ -219,6 +219,16 @@ pub fn delete_chain_in_state(
             chain_id.0
         )));
     }
+    if state
+        .pending_evm_burn_replay_ids
+        .keys()
+        .any(|(pending_chain, _)| *pending_chain == chain_id)
+    {
+        return Err(ChainAdminError::InvalidConfig(format!(
+            "chain {} has burn proofs awaiting observer coverage; advance its burn-proof floor before deleting",
+            chain_id.0
+        )));
+    }
     // Remove from EVERY per-chain map (a stale entry in any of these is a leak).
     state.chain_configs.remove(&chain_id);
     state.chain_supplies.remove(&chain_id);

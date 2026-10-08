@@ -11,7 +11,8 @@ use crate::state::{mutate_state, read_state};
 use ic_canister_log::log;
 
 /// Apply every `Burn` log in `receipt` that was emitted by `contract` to protocol
-/// state, deduped on `(tx_hash, log_index)` via `processed_burn_keys`. Returns the
+/// state, deduped by exact chain-qualified pending IDs and the monotonic
+/// finalized-coverage floor. Returns the
 /// burns newly applied (the caller emits a `ChainBurnObserved` event per entry and
 /// uses the count). Caller MUST have verified `receipt.success` and finality, and
 /// MUST pass a normalized (lowercased) `tx_hash`, before calling. Trust rules:
@@ -54,6 +55,31 @@ pub fn apply_receipt_burns_to_state(
         // exactly once via the existing `processed_burn_keys` dedup.
         return Err(ApplyBurnsError::ReorgHalted);
     }
+    let floor = state.ensure_evm_burn_proof_floor(chain);
+    if let Some(held_through) = state.evm_burn_proof_legacy_hold_through.get(&chain).copied() {
+        if receipt.block_number <= held_through {
+            return Err(ApplyBurnsError::LegacyHistoryHeld { block: receipt.block_number, held_through });
+        }
+    }
+    if receipt.block_number <= floor {
+        return Err(ApplyBurnsError::StaleProof { block: receipt.block_number, floor });
+    }
+    let mut needed = std::collections::BTreeSet::new();
+    for (address, topics, data, log_index) in &receipt.logs {
+        if !address.eq_ignore_ascii_case(contract)
+            || !topics.first().is_some_and(|topic| topic.eq_ignore_ascii_case(BURN_EVENT_TOPIC0))
+        {
+            continue;
+        }
+        if let Ok(burn) = decode_burn_log(topics, data, tx_hash, receipt.block_number) {
+            if !state.has_evm_burn_replay_id(chain, burn.block_number, &burn.tx_hash, *log_index) {
+                needed.insert((burn.block_number, burn.tx_hash, *log_index));
+            }
+        }
+    }
+    if !state.can_reserve_evm_burn_replay_ids(needed.len()) {
+        return Err(ApplyBurnsError::ReplayIndexFull);
+    }
     let mut applied: Vec<BurnLog> = Vec::new();
     for (address, topics, data, log_index) in &receipt.logs {
         if !address.eq_ignore_ascii_case(contract) {
@@ -74,7 +100,8 @@ pub fn apply_receipt_burns_to_state(
             }
         };
         let key = format!("{}:{}", burn.tx_hash, log_index);
-        let seen = state
+        let seen = state.has_evm_burn_replay_id(chain, burn.block_number, &burn.tx_hash, *log_index)
+            || state
             .processed_burn_keys
             .get(&burn.block_number)
             .map(|set| set.contains(&key))
@@ -85,6 +112,8 @@ pub fn apply_receipt_burns_to_state(
         let total = state.total_chain_vault_debt_e8s();
         match apply_burn_to_state(state, &burn, total) {
             Ok(()) => {
+                state.reserve_evm_burn_replay_id(chain, burn.block_number, &burn.tx_hash, *log_index)
+                    .expect("replay capacity preflighted for receipt");
                 state
                     .processed_burn_keys
                     .entry(burn.block_number)
@@ -94,6 +123,8 @@ pub fn apply_receipt_burns_to_state(
             }
             Err(crate::chains::monad::deposit_watch::BurnApplyError::InvalidBurn(msg)) => {
                 log!(INFO, "[burn_proof] invalid burn skipped: {}", msg);
+                state.reserve_evm_burn_replay_id(chain, burn.block_number, &burn.tx_hash, *log_index)
+                    .expect("replay capacity preflighted for receipt");
                 state
                     .processed_burn_keys
                     .entry(burn.block_number)
@@ -129,6 +160,14 @@ pub enum ApplyBurnsError {
     /// Chain is currently `reorg_halted`. Nothing was mutated or recorded.
     /// Retryable: resubmit the identical proof after `clear_reorg_halt`.
     ReorgHalted,
+    /// Receipt is inside already-covered finalized history. Refusing it keeps
+    /// pruning the bounded replay cache from reopening old burns.
+    StaleProof { block: u64, floor: u64 },
+    /// Legacy observer cursor history has unknown log-scan coverage. Refusing
+    /// it is a hold for explicit operator reconciliation, not a coverage claim.
+    LegacyHistoryHeld { block: u64, held_through: u64 },
+    /// Exact replay identities are bounded until observer coverage advances.
+    ReplayIndexFull,
     /// Halt-class invariant failure (e.g. supply invariant violation). Burns
     /// applied earlier in this same receipt, before the failing log, stay
     /// committed (see the doc comment on `apply_receipt_burns_to_state`).
@@ -148,6 +187,9 @@ pub enum BurnProofError {
     /// operator-controlled gate. Nothing was consumed or recorded, so the
     /// caller should retry the identical proof after `clear_reorg_halt`.
     ReorgHalted,
+    StaleProof { block: u64, floor: u64 },
+    LegacyHistoryHeld { block: u64, held_through: u64 },
+    ReplayIndexFull,
 }
 
 /// Fetch the receipt for `tx_hash`, verify success + finality, and apply any Burn
@@ -167,15 +209,11 @@ pub async fn verify_and_apply_burn_proof(
     // dedup key, so mixed casing must not be able to bypass dedup and double-apply.
     let tx = tx_hash.to_ascii_lowercase();
 
-    let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned())
-        .ok_or(BurnProofError::NoContract)?;
+    let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned());
+    let contract = contract.ok_or(BurnProofError::NoContract)?;
     let finality_depth = read_state(|s| {
-        s.multi_chain
-            .chain_configs
-            .get(&chain)
-            .map(|c| c.finality_depth as u64)
-    })
-    .unwrap_or(1);
+        s.multi_chain.chain_configs.get(&chain).map(|c| c.finality_depth as u64)
+    }).unwrap_or(1);
 
     // Cheap fail-fast BEFORE any RPC await: a chain already `reorg_halted`
     // before we spend outcall cycles has no chance of applying anyway (the
@@ -214,6 +252,11 @@ pub async fn verify_and_apply_burn_proof(
     })
     .map_err(|e| match e {
         ApplyBurnsError::ReorgHalted => BurnProofError::ReorgHalted,
+        ApplyBurnsError::StaleProof { block, floor } => BurnProofError::StaleProof { block, floor },
+        ApplyBurnsError::LegacyHistoryHeld { block, held_through } => {
+            BurnProofError::LegacyHistoryHeld { block, held_through }
+        }
+        ApplyBurnsError::ReplayIndexFull => BurnProofError::ReplayIndexFull,
         ApplyBurnsError::Halt(msg) => BurnProofError::Halt(msg),
     })?;
 

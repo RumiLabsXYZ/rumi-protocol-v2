@@ -4770,8 +4770,20 @@ fn set_last_observed_block(
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
     mutate_state(|s| {
+        let floor = s.multi_chain.ensure_evm_burn_proof_floor(chain);
+        if block < floor {
+            return Err(ProtocolError::ChainAdmin(format!(
+                "burn proof floor for chain {} is {}; cursor cannot be seeded below it",
+                chain.0, floor
+            )));
+        }
         s.multi_chain.last_observed_block.insert(chain, block);
-    });
+        // This developer-gated endpoint seeds the observer at an explicitly
+        // asserted activation baseline. It may resolve legacy ambiguous history
+        // only when the supplied baseline reaches/passes its held cursor.
+        s.multi_chain.accept_evm_burn_proof_baseline(chain, block);
+        Ok(())
+    })?;
     log!(
         INFO,
         "[set_last_observed_block] chain={:?} block={}",
@@ -4802,10 +4814,11 @@ fn get_last_observed_block(chain: rumi_protocol_backend::chains::config::ChainId
 /// (`verify_and_apply_burn_proof`) fetches the receipt via ONE
 /// `eth_getTransactionReceipt`, rejects forgeries (only Burn logs emitted by the
 /// configured icUSD contract count, and the amount/vault come FROM the log, never
-/// from the caller), requires finality, and dedups on `(tx_hash, log_index)` via
-/// the existing `processed_burn_keys` set — so a re-submit of an already-applied
-/// burn returns Ok(0) and changes nothing. Returns the number of burns NEWLY
-/// applied from the tx. This replaces the continuous `eth_getLogs` burn-scan as
+/// from the caller), requires finality, and dedups by chain-qualified replay IDs
+/// until the observer advances a monotonic finalized-coverage floor. Covered
+/// historical replays are rejected, so pruning observer cache entries cannot
+/// make an old burn eligible again. Returns newly applied burns. This replaces
+/// the continuous `eth_getLogs` burn-scan as
 /// the PRIMARY burn-observation path (one outcall per actual burn instead of
 /// O(blocks produced)).
 ///
@@ -4867,6 +4880,15 @@ async fn submit_burn_proof(
         Err(BurnProofError::ReorgHalted) => Err(ProtocolError::TemporarilyUnavailable(
             "chain is reorg-halted; retry after the halt clears".into(),
         )),
+        Err(BurnProofError::ReplayIndexFull) => Err(ProtocolError::TemporarilyUnavailable(
+            "burn-proof replay index is full; retry after the observer advances its coverage floor".into(),
+        )),
+        Err(BurnProofError::LegacyHistoryHeld { block, held_through }) => {
+            Err(ProtocolError::TemporarilyUnavailable(format!(
+                "burn proof at block {} is in legacy history with unknown log-scan coverage through {}; explicit operator reconciliation is required",
+                block, held_through
+            )))
+        }
         // Terminal: reverted tx, unknown chain/contract, or a halt-class
         // supply-invariant failure. None of these is fixed by retrying.
         Err(e) => Err(ProtocolError::ChainAdmin(format!(
