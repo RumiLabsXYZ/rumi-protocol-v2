@@ -105,6 +105,73 @@ fn format_icusd_amount(e8s: u64) -> String {
     format!("{:.2} icUSD", icusd)
 }
 
+/// Format XRP drops without floating-point rounding.
+fn format_xrp_drops(drops: u64) -> String {
+    const DROPS_PER_XRP: u64 = 1_000_000;
+    let whole = drops / DROPS_PER_XRP;
+    let fraction = drops % DROPS_PER_XRP;
+    if fraction == 0 {
+        format!("{} XRP", whole)
+    } else {
+        let fraction = format!("{:06}", fraction);
+        format!("{}.{} XRP", whole, fraction.trim_end_matches('0'))
+    }
+}
+
+enum XrpClaimConsentPreview {
+    Ready(String),
+    PriorSettlement {
+        destination: Option<String>,
+        destination_tag: Option<u32>,
+    },
+    Unavailable,
+}
+
+/// Return the settlement amount only when no prior payment's XRPL status can
+/// change the fee-adjusted payout or effective destination.
+fn xrp_claim_consent_preview(claim_id: u64, caller: Principal) -> XrpClaimConsentPreview {
+    let claim = crate::state::read_state(|s| s.xrp_claims.get(&claim_id).cloned());
+    match claim {
+        Some(claim) if caller != Principal::anonymous() && claim.claimant == caller => match claim.settlement {
+            Some(previous) => XrpClaimConsentPreview::PriorSettlement {
+                destination: previous.destination,
+                destination_tag: previous.destination_tag,
+            },
+            None => crate::vault::xrp_claim_send_amount(
+                claim.drops,
+                crate::chains::xrp::adapter::XRP_FEE_DROPS,
+            )
+            .ok()
+            .map(format_xrp_drops)
+            .map(XrpClaimConsentPreview::Ready)
+            .unwrap_or(XrpClaimConsentPreview::Unavailable),
+        },
+        _ => XrpClaimConsentPreview::Unavailable,
+    }
+}
+
+fn describe_prior_xrp_settlement(
+    claim_id: u64,
+    previous_destination: Option<String>,
+    previous_tag: Option<u32>,
+    requested_destination: &str,
+    requested_tag: Option<u32>,
+) -> String {
+    let previous_destination = previous_destination
+        .map(|destination| format!("{:?}", destination))
+        .unwrap_or_else(|| "unknown".to_string());
+    let previous_tag = previous_tag
+        .map(|tag| tag.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let requested_tag = requested_tag
+        .map(|tag| tag.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "A prior settlement exists for XRP claim #{}. The signed destination was {} (tag {}). The requested destination is {:?} (tag {}). XRPL status determines whether the claim is already paid or a replacement payment is sent, and may change the payout after fees. The effective payout cannot be confirmed in this consent preview; reconcile the prior settlement before approving.",
+        claim_id, previous_destination, previous_tag, requested_destination, requested_tag
+    )
+}
+
 /// Human-readable label for a collateral whose symbol is unknown (not yet
 /// backfilled, or a fetch failure). We deliberately do NOT default to "ICP" —
 /// that is the exact bug this module is fixing.
@@ -161,11 +228,6 @@ fn format_collateral_amount(raw: u64, decimals: u8, symbol: &str) -> String {
         s = s.trim_end_matches('0').trim_end_matches('.').to_string();
     }
     format!("{} {}", s, symbol)
-}
-
-/// Helper to convert bytes to hex string for debugging
-fn bytes_to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
 }
 
 /// Try to decode a u64 from Candid bytes, handling empty args gracefully
@@ -268,6 +330,18 @@ fn try_decode_u64_u64_opt_principal(
 
 /// Generate consent message for a specific method and arguments
 fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> {
+    let caller = match method {
+        "settle_xrp_claim" | "settle_xrp_claim_with_tag" => ic_cdk::caller(),
+        _ => Principal::anonymous(),
+    };
+    generate_consent_message_for_caller(method, arg, caller)
+}
+
+fn generate_consent_message_for_caller(
+    method: &str,
+    arg: &[u8],
+    caller: Principal,
+) -> Result<String, String> {
     match method {
         "open_vault" => {
             // Decode argument: (nat64, opt principal) — collateral amount in the
@@ -435,40 +509,40 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
                     "## Close Vault\n\n\
                     You are closing vault #{}.\n\n\
                     **Requirements:**\n\
-                    - All borrowed icUSD must be repaid first\n\n\
-                    Your remaining collateral will be returned to your wallet.",
+                    - Debt must be zero (tiny dust may be forgiven)\n\
+                    - Withdraw all collateral before closing\n\n\
+                    Closing this vault does not transfer collateral.",
                     vault_id
                 )),
                 None => Ok(
                     "## Close Vault\n\n\
                     You are closing your vault.\n\n\
                     **Requirements:**\n\
-                    - All borrowed icUSD must be repaid first\n\n\
-                    Your remaining collateral will be returned to your wallet.".to_string()
+                    - Debt must be zero (tiny dust may be forgiven)\n\
+                    - Withdraw all collateral before closing\n\n\
+                    Closing this vault does not transfer collateral.".to_string()
                 ),
             }
         }
         
         "withdraw_collateral" => {
-            // Argument is the VAULT ID (nat64), not an amount — this endpoint
-            // withdraws all excess collateral and computes the amount itself, so
-            // the consent message references the vault and its collateral token
-            // rather than a (nonexistent) amount.
+            // Argument is the VAULT ID (nat64); withdrawal requires zero debt
+            // and withdraws the vault's entire collateral balance.
             match try_decode_u64(arg, "withdraw_collateral")? {
                 Some(vault_id) => {
                     let (symbol, _decimals) = resolve_collateral_for_vault(vault_id);
                     Ok(format!(
                         "## Withdraw Collateral\n\n\
-                        You are withdrawing excess **{}** collateral from vault #{}.\n\n\
-                        Only collateral above the minimum ratio can be withdrawn.",
+                        You are withdrawing all **{}** collateral from debt-free vault #{}.\n\n\
+                        This action requires the vault to have no outstanding icUSD debt.",
                         symbol,
                         vault_id
                     ))
                 }
                 None => Ok(
                     "## Withdraw Collateral\n\n\
-                    You are withdrawing excess collateral from your vault.\n\n\
-                    Only collateral above the minimum ratio can be withdrawn.".to_string()
+                    You are withdrawing all collateral from your debt-free vault.\n\n\
+                    This action requires the vault to have no outstanding icUSD debt.".to_string()
                 ),
             }
         }
@@ -499,7 +573,7 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
                     "## Liquidate Vault\n\n\
                     You are liquidating vault #{} which is undercollateralized.\n\n\
                     This will:\n\
-                    - Use icUSD from the stability pool to cover the debt\n\
+                    - Use your icUSD balance to cover the debt (the backend determines the amount)\n\
                     - Transfer the vault's collateral to liquidators\n\n\
                     *You will receive a liquidation reward.*",
                     vault_id
@@ -508,7 +582,7 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
                     "## Liquidate Vault\n\n\
                     You are liquidating an undercollateralized vault.\n\n\
                     This will:\n\
-                    - Use icUSD from the stability pool to cover the debt\n\
+                    - Use your icUSD balance to cover the debt (the backend determines the amount)\n\
                     - Transfer the vault's collateral to liquidators\n\n\
                     *You will receive a liquidation reward.*".to_string()
                 ),
@@ -541,21 +615,17 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
         "provide_liquidity" => {
             match try_decode_u64(arg, "provide_liquidity")? {
                 Some(amount) => Ok(format!(
-                    "## Provide Liquidity to Stability Pool\n\n\
-                    You are depositing **{}** to the stability pool.\n\n\
-                    Benefits:\n\
-                    - Earn rewards from liquidations\n\
-                    - Support the protocol's stability\n\n\
-                    *You can withdraw your liquidity at any time.*",
+                    "## Provide Liquidity\n\n\
+                    You are depositing **{}** icUSD into the legacy backend liquidity pool.\n\n\
+                    The icUSD is transferred to the backend's account. No liquidation rewards are credited by this pool.\n\n\
+                    You can request a withdrawal later; the backend mints icUSD for the approved withdrawal amount.",
                     format_icusd_amount(amount)
                 )),
                 None => Ok(
-                    "## Provide Liquidity to Stability Pool\n\n\
-                    You are depositing icUSD to the stability pool.\n\n\
-                    Benefits:\n\
-                    - Earn rewards from liquidations\n\
-                    - Support the protocol's stability\n\n\
-                    *You can withdraw your liquidity at any time.*".to_string()
+                    "## Provide Liquidity\n\n\
+                    You are depositing icUSD into the legacy backend liquidity pool.\n\n\
+                    The icUSD is transferred to the backend's account. No liquidation rewards are credited by this pool.\n\n\
+                    You can request a withdrawal later; the backend mints icUSD for the approved withdrawal amount.".to_string()
                 ),
             }
         }
@@ -563,15 +633,15 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
         "withdraw_liquidity" => {
             match try_decode_u64(arg, "withdraw_liquidity")? {
                 Some(amount) => Ok(format!(
-                    "## Withdraw from Stability Pool\n\n\
-                    You are withdrawing **{}** from the stability pool.\n\n\
-                    Your icUSD will be returned to your wallet.",
+                    "## Withdraw Liquidity\n\n\
+                    You are requesting a **{}** icUSD withdrawal from the legacy backend liquidity pool.\n\n\
+                    If successful, the backend mints icUSD to your wallet; this does not return the deposited tokens.",
                     format_icusd_amount(amount)
                 )),
                 None => Ok(
-                    "## Withdraw from Stability Pool\n\n\
-                    You are withdrawing icUSD from the stability pool.\n\n\
-                    Your icUSD will be returned to your wallet.".to_string()
+                    "## Withdraw Liquidity\n\n\
+                    You are requesting an icUSD withdrawal from the legacy backend liquidity pool.\n\n\
+                    If successful, the backend mints icUSD to your wallet; this does not return the deposited tokens.".to_string()
                 ),
             }
         }
@@ -681,6 +751,41 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
                 No funds will be moved.".to_string())
         }
 
+        "settle_xrp_claim" => match Decode!(arg, u64, String) {
+            Ok((claim_id, destination)) => match xrp_claim_consent_preview(claim_id, caller) {
+                XrpClaimConsentPreview::Ready(amount) => Ok(format!(
+                    "## Settle XRP Claim\n\nYou are paying claim #{}: **{}** from the vault's custody address to destination {:?}. The displayed amount is net of the claimant-paid XRPL network fee.",
+                    claim_id, amount, destination
+                )),
+                XrpClaimConsentPreview::PriorSettlement { destination: previous, destination_tag } => Ok(format!(
+                    "## Settle XRP Claim\n\n{}",
+                    describe_prior_xrp_settlement(claim_id, previous, destination_tag, &destination, None)
+                )),
+                XrpClaimConsentPreview::Unavailable => Ok(format!(
+                    "## Settle XRP Claim\n\nThe payout amount for claim #{} is unavailable in this consent preview. Destination: {:?}. Verify the claim amount in Rumi before approving.",
+                    claim_id, destination
+                )),
+            },
+            Err(_) => Ok("## Settle XRP Claim\n\nThe claim id, payout amount, and destination could not be decoded for this consent preview. Verify them in Rumi before approving.".to_string()),
+        },
+        "settle_xrp_claim_with_tag" => match Decode!(arg, u64, String, u32) {
+            Ok((claim_id, destination, tag)) => match xrp_claim_consent_preview(claim_id, caller) {
+                XrpClaimConsentPreview::Ready(amount) => Ok(format!(
+                    "## Settle XRP Claim\n\nYou are paying claim #{}: **{}** from the vault's custody address to destination {:?} with destination tag {}. The displayed amount is net of the claimant-paid XRPL network fee.",
+                    claim_id, amount, destination, tag
+                )),
+                XrpClaimConsentPreview::PriorSettlement { destination: previous, destination_tag } => Ok(format!(
+                    "## Settle XRP Claim\n\n{}",
+                    describe_prior_xrp_settlement(claim_id, previous, destination_tag, &destination, Some(tag))
+                )),
+                XrpClaimConsentPreview::Unavailable => Ok(format!(
+                    "## Settle XRP Claim\n\nThe payout amount for claim #{} is unavailable in this consent preview. Destination: {:?}, tag {}. Verify the claim amount in Rumi before approving.",
+                    claim_id, destination, tag
+                )),
+            },
+            Err(_) => Ok("## Settle XRP Claim\n\nThe claim id, payout amount, destination, and destination tag could not be decoded for this consent preview. Verify them in Rumi before approving.".to_string()),
+        },
+
         // Query methods don't need consent messages, but we handle them gracefully
         "get_fees" | "get_liquidity_status" | "get_protocol_status" |
         "get_vaults" | "get_vault_history" | "get_events" |
@@ -708,15 +813,6 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
 pub fn icrc21_canister_call_consent_message(
     request: ConsentMessageRequest,
 ) -> Icrc21ConsentMessageResult {
-    // Log the incoming request for debugging
-    ic_cdk::println!(
-        "[ICRC21] Consent message request - method: {}, arg_len: {}, arg_hex: {}, language: {}",
-        request.method,
-        request.arg.len(),
-        bytes_to_hex(&request.arg),
-        request.user_preferences.metadata.language
-    );
-    
     let message = match generate_consent_message(&request.method, &request.arg) {
         Ok(msg) => {
             ic_cdk::println!("[ICRC21] Generated message successfully for method: {}", request.method);
@@ -902,6 +998,108 @@ mod tests {
             try_decode_principal_u64(&arg, "redeem_collateral").unwrap(),
             Some((ct, 750_000u64))
         );
+    }
+
+    #[test]
+    fn consent_text_matches_fund_source_and_effect() {
+        crate::state::replace_state(crate::state::State::default());
+        let liquidation = generate_consent_message("liquidate_vault", &Encode!(&7u64).unwrap()).unwrap();
+        assert!(liquidation.contains("your icUSD balance"));
+        assert!(!liquidation.contains("stability pool"));
+        let provide = generate_consent_message("provide_liquidity", &Encode!(&100_000_000u64).unwrap()).unwrap();
+        assert!(provide.contains("legacy backend liquidity pool"));
+        assert!(provide.contains("No liquidation rewards"));
+        let withdraw = generate_consent_message("withdraw_liquidity", &Encode!(&100_000_000u64).unwrap()).unwrap();
+        assert!(withdraw.contains("backend mints icUSD"));
+        assert!(withdraw.contains("does not return the deposited tokens"));
+        let close = generate_consent_message("close_vault", &Encode!(&7u64).unwrap()).unwrap();
+        assert!(close.contains("does not transfer collateral"));
+        let repay_close = generate_consent_message("repay_and_close_vault", &Encode!(&VaultArg { vault_id: 7, amount: 10 }).unwrap()).unwrap();
+        assert!(repay_close.contains("Return all remaining collateral"));
+        let withdraw_collateral = generate_consent_message("withdraw_collateral", &Encode!(&7u64).unwrap()).unwrap();
+        assert!(withdraw_collateral.contains("all"));
+        assert!(withdraw_collateral.contains("no outstanding icUSD debt"));
+    }
+
+    #[test]
+    fn xrp_settlement_consent_shows_amount_destination_and_tag() {
+        let claimant = Principal::management_canister();
+        let mut state = crate::state::State::default();
+        state.xrp_claims.insert(42, crate::state::XrpClaim {
+            claimant,
+            drops: 1_234_567,
+            custody_owner: Principal::anonymous(),
+            custody_nonce: 1,
+            created_at_ns: 0,
+            settlement: None,
+            quarantine_reason: None,
+        });
+        state.xrp_claims.insert(43, crate::state::XrpClaim {
+            claimant,
+            drops: 2_000_020,
+            custody_owner: Principal::anonymous(),
+            custody_nonce: 2,
+            created_at_ns: 0,
+            settlement: None,
+            quarantine_reason: None,
+        });
+        state.xrp_claims.insert(44, crate::state::XrpClaim {
+            claimant,
+            drops: 3_000_000,
+            custody_owner: Principal::anonymous(),
+            custody_nonce: 3,
+            created_at_ns: 0,
+            settlement: Some(crate::state::XrpSettlement {
+                tx_hash: "DEADBEEF".to_string(),
+                last_ledger_sequence: 100,
+                source_sequence: Some(5),
+                destination: Some("rPriorDestination".to_string()),
+                destination_tag: Some(77),
+            }),
+            quarantine_reason: None,
+        });
+        crate::state::replace_state(state);
+        assert_eq!(format_xrp_drops(2_000_000), "2 XRP");
+        assert_eq!(format_xrp_drops(1_234_547), "1.234547 XRP");
+
+        let destination = "rExampleDestination".to_string();
+        let untagged = generate_consent_message_for_caller(
+            "settle_xrp_claim",
+            &Encode!(&42u64, &destination).unwrap(),
+            claimant,
+        ).unwrap();
+        assert!(untagged.contains("rExampleDestination"));
+        assert!(untagged.contains("claim #42"));
+        assert!(untagged.contains("1.234547 XRP"));
+        let tagged = generate_consent_message_for_caller(
+            "settle_xrp_claim_with_tag",
+            &Encode!(&43u64, &destination, &1234u32).unwrap(),
+            claimant,
+        ).unwrap();
+        assert!(tagged.contains("rExampleDestination"));
+        assert!(tagged.contains("destination tag 1234"));
+        assert!(tagged.contains("2 XRP"));
+        let pending = generate_consent_message_for_caller(
+            "settle_xrp_claim_with_tag",
+            &Encode!(&44u64, &destination, &1234u32).unwrap(),
+            claimant,
+        ).unwrap();
+        assert!(pending.contains("rPriorDestination"));
+        assert!(pending.contains("tag 77"));
+        assert!(pending.contains("rExampleDestination"));
+        assert!(pending.contains("tag 1234"));
+        assert!(pending.contains("reconcile the prior settlement"));
+        assert!(!pending.contains("**"), "pending payout must not claim an exact amount: {pending}");
+
+        let unauthorized = generate_consent_message_for_caller(
+            "settle_xrp_claim_with_tag",
+            &Encode!(&44u64, &destination, &1234u32).unwrap(),
+            Principal::anonymous(),
+        )
+        .unwrap();
+        assert!(unauthorized.contains("payout amount for claim #44 is unavailable"));
+        assert!(!unauthorized.contains("rPriorDestination"));
+        assert!(!unauthorized.contains("tag 77"));
     }
 
     // The generic (empty-arg) fallbacks are what Oisy renders while the user is
