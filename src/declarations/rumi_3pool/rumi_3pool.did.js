@@ -794,6 +794,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
         [],
       ),
+    'receive_donation' : IDL.Func(
+        [IDL.Nat8, IDL.Nat],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
+        [],
+      ),
     'remove_authorized_burn_caller' : IDL.Func(
         [IDL.Principal],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],

@@ -643,6 +643,11 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
   >,
+  'receive_donation' : ActorMethod<
+    [number, bigint],
+    { 'Ok' : null } |
+      { 'Err' : ThreePoolError }
+  >,
   'remove_authorized_burn_caller' : ActorMethod<
     [Principal],
     { 'Ok' : null } |
