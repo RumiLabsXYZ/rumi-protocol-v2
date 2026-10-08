@@ -1089,7 +1089,7 @@ export function formatEvent(event: any, vaultCollateralMap?: Map<number, string>
       }
       const ledgerFee = optValue<bigint>(d.ledger_fee_collateral);
       if (ledgerFee !== undefined) {
-        fields.push(amountField('Ledger Fee Paid by Protocol', ledgerFee, dec, sym));
+        fields.push(amountField('Collateral Transfer Fee', ledgerFee, dec, sym));
         const protocolFee = optValue<bigint>(d.protocol_fee_collateral) ?? 0n;
         const grossRemoved = BigInt(d.icp_to_liquidator) + ledgerFee + protocolFee;
         fields.push(amountField('Gross Collateral Removed', grossRemoved, dec, sym));
