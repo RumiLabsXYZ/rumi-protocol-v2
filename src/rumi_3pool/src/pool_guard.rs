@@ -29,9 +29,22 @@ impl PoolGuard {
     pub fn new() -> Result<Self, ThreePoolError> {
         // Receipt attempts retain this fence across a callback trap/upgrade.
         // Ordinary unpause cannot authorize reserve movement while unresolved.
+        if crate::receipts::fenced() || crate::storage::payouts::fenced() {
+            return Err(ThreePoolError::PoolLocked);
+        }
+        Self::acquire()
+    }
+
+    /// Recovery for an ordinary payout can cross its own durable payout fence,
+    /// but never a receipt-backed swap fence.
+    pub(crate) fn new_payout_recovery() -> Result<Self, ThreePoolError> {
         if crate::receipts::fenced() {
             return Err(ThreePoolError::PoolLocked);
         }
+        Self::acquire()
+    }
+
+    fn acquire() -> Result<Self, ThreePoolError> {
         POOL_LOCK.with(|lock| {
             let mut held = lock.borrow_mut();
             if *held {

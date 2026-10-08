@@ -257,10 +257,10 @@ fn cl_01_proportional_remove_rechecks_lp_after_fee_await() {
 }
 
 #[test]
-fn ic_s_003_claim_of_dust_rejected_at_claim_time() {
+fn legacy_unbound_claim_is_visible_and_held_at_claim_time() {
     let h = deploy_pool_with_liquidity_fee_and_swaps(0, LEDGER_FEE);
 
-    // Inject a pending claim below the ledger fee (test_endpoints build).
+    // Inject an old-format claim without the original transfer identity.
     let res = h
         .pic
         .update_call(
@@ -280,13 +280,9 @@ fn ic_s_003_claim_of_dust_rejected_at_claim_time() {
         .expect("claim_pending call failed");
     let r: Result<(), ThreePoolError> = decode_one(&reply_bytes(res)).unwrap();
     match r {
-        Err(ThreePoolError::TransferFailed { reason, .. }) => {
-            assert!(
-                reason.contains("ledger fee"),
-                "error must explain the dust rejection, got: {reason}"
-            );
-        }
-        other => panic!("dust claim must fail with a clear TransferFailed, got {other:?}"),
+        Err(ThreePoolError::TransferFailed { reason, .. })
+            if reason.contains("legacy claim has no bound transfer identity") => {}
+        other => panic!("legacy claim must remain held without transfer identity, got {other:?}"),
     }
 
     // Nothing was sent and the claim is NOT consumed.

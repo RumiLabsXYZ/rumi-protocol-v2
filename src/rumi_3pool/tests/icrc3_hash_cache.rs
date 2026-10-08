@@ -10,10 +10,49 @@
 
 mod common;
 
-use candid::{encode_one, Nat};
+use candid::{decode_one, encode_one, Nat, Principal};
+use icrc_ledger_types::icrc1::account::Account;
+use icrc_ledger_types::icrc1::transfer::{Memo, TransferArg, TransferError};
+use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
+use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use rumi_3pool::icrc3::{BlockWithId, GetBlocksArgs, Icrc3Value};
+use rumi_3pool::types::{Icrc3Transaction, ThreePoolPendingClaim};
 
 use common::{deploy_pool_with_liquidity_and_swaps, ThreePoolHarness};
+use pocket_ic::WasmResult;
+
+fn reply(result: WasmResult) -> Vec<u8> {
+    match result {
+        WasmResult::Reply(bytes) => bytes,
+        WasmResult::Reject(message) => panic!("canister rejected: {message}"),
+    }
+}
+
+fn assert_block_transaction_metadata(
+    harness: &ThreePoolHarness,
+    block_id: u64,
+    memo: &[u8],
+    created_at_time: u64,
+) {
+    let block = harness.icrc3_get_blocks(block_id, 1);
+    let Icrc3Value::Map(fields) = &block[0].block else {
+        panic!("ICRC-3 block must be a map");
+    };
+    let Icrc3Value::Map(tx) = fields
+        .iter()
+        .find(|(key, _)| key == "tx")
+        .map(|(_, value)| value)
+        .expect("block has tx map")
+    else {
+        panic!("ICRC-3 tx must be a map");
+    };
+    assert!(tx.iter().any(|(key, value)| {
+        key == "memo" && value == &Icrc3Value::Blob(memo.to_vec())
+    }));
+    assert!(tx.iter().any(|(key, value)| {
+        key == "ts" && value == &Icrc3Value::Nat(Nat::from(created_at_time))
+    }));
+}
 
 /// Verify that the WASM running in the harness was built with
 /// `--features test_endpoints`. The two test-only endpoints
@@ -261,5 +300,212 @@ fn post_upgrade_backfills_empty_hash_cache() {
     for (a, b) in pre_upgrade_blocks.iter().zip(post_upgrade_blocks.iter()) {
         assert_eq!(a.id, b.id);
         assert_eq!(a.block, b.block, "block content changed across upgrade with backfill");
+    }
+}
+
+#[test]
+fn transfer_and_approve_blocks_preserve_request_memo_and_timestamp() {
+    let harness = deploy_pool_with_liquidity_and_swaps(0);
+    assert_test_endpoints_built(&harness);
+    let now = harness
+        .pic
+        .get_time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    let memo = vec![0x52, 0x75, 0x6d, 0x69];
+
+    let transfer = TransferArg {
+        from_subaccount: None,
+        to: Account { owner: harness.user, subaccount: None },
+        fee: None,
+        created_at_time: Some(now),
+        memo: Some(Memo(serde_bytes::ByteBuf::from(memo.clone()))),
+        amount: Nat::from(1u64),
+    };
+    let transfer_result: Result<Nat, TransferError> = decode_one(&reply(
+        harness
+            .pic
+            .update_call(
+                harness.three_pool,
+                harness.user,
+                "icrc1_transfer",
+                encode_one(transfer).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    let transfer_id: u64 = transfer_result
+        .expect("timestamped memo transfer succeeds")
+        .0
+        .try_into()
+        .unwrap();
+    let transfer_block = harness.get_raw_block(transfer_id);
+    match transfer_block.tx {
+        Icrc3Transaction::Transfer { memo: actual_memo, created_at_time, .. } => {
+            assert_eq!(actual_memo, Some(memo.clone()));
+            assert_eq!(created_at_time, Some(now));
+        }
+        other => panic!("expected transfer block, got {other:?}"),
+    }
+    assert_block_transaction_metadata(&harness, transfer_id, &memo, now);
+
+    let spender = Principal::self_authenticating(&[0x53, 0x50]);
+    let approve = ApproveArgs {
+        from_subaccount: None,
+        spender: Account {
+            owner: spender,
+            subaccount: None,
+        },
+        amount: Nat::from(123u64),
+        expected_allowance: None,
+        expires_at: None,
+        fee: None,
+        memo: Some(Memo(serde_bytes::ByteBuf::from(memo.clone()))),
+        created_at_time: Some(now),
+    };
+    let approve_result: Result<Nat, ApproveError> = decode_one(&reply(
+        harness
+            .pic
+            .update_call(
+                harness.three_pool,
+                harness.user,
+                "icrc2_approve",
+                encode_one(approve).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    let approve_id: u64 = approve_result
+        .expect("timestamped memo approval succeeds")
+        .0
+        .try_into()
+        .unwrap();
+    let approve_block = harness.get_raw_block(approve_id);
+    match approve_block.tx {
+        Icrc3Transaction::Approve { memo: actual_memo, created_at_time, .. } => {
+            assert_eq!(actual_memo, Some(memo.clone()));
+            assert_eq!(created_at_time, Some(now));
+        }
+        other => panic!("expected approval block, got {other:?}"),
+    }
+    assert_block_transaction_metadata(&harness, approve_id, &memo, now);
+
+    let transfer_from = TransferFromArgs {
+        spender_subaccount: None,
+        from: Account { owner: harness.user, subaccount: None },
+        to: Account { owner: harness.user, subaccount: None },
+        amount: Nat::from(1u64),
+        fee: None,
+        memo: Some(Memo(serde_bytes::ByteBuf::from(memo.clone()))),
+        created_at_time: Some(now),
+    };
+    let transfer_from_result: Result<Nat, TransferFromError> = decode_one(&reply(
+        harness
+            .pic
+            .update_call(
+                harness.three_pool,
+                spender,
+                "icrc2_transfer_from",
+                encode_one(transfer_from).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    let transfer_from_id: u64 = transfer_from_result
+        .expect("timestamped memo transfer_from succeeds")
+        .0
+        .try_into()
+        .unwrap();
+    match harness.get_raw_block(transfer_from_id).tx {
+        Icrc3Transaction::Transfer { memo: actual_memo, created_at_time, .. } => {
+            assert_eq!(actual_memo, Some(memo.clone()));
+            assert_eq!(created_at_time, Some(now));
+        }
+        other => panic!("expected transfer_from block, got {other:?}"),
+    }
+    assert_block_transaction_metadata(&harness, transfer_from_id, &memo, now);
+}
+
+/// Build exact-main with `test_endpoints` and set `RUMI_3POOL_OLD_WASM` to that
+/// Wasm path when running this ignored compatibility test. This makes the
+/// upgrade direction explicit and checks populated LP, ICRC-3, and pending
+/// claim data across the current-main-to-new-source upgrade.
+#[test]
+#[ignore = "requires an old 3pool Wasm at RUMI_3POOL_OLD_WASM"]
+fn populated_old_wasm_upgrade_preserves_icrc3_blocks_and_hash_chain() {
+    let old_wasm_path = std::env::var("RUMI_3POOL_OLD_WASM")
+        .expect("set RUMI_3POOL_OLD_WASM to the pre-metadata 3pool Wasm");
+    let old_wasm = std::fs::read(old_wasm_path).expect("read old 3pool Wasm");
+    let harness = common::deploy_pool_with_liquidity_fee_and_swaps_with_wasm(3, 0, old_wasm);
+
+    let claim_id: u64 = decode_one(&reply(
+        harness
+            .pic
+            .update_call(
+                harness.three_pool,
+                harness.user,
+                "test_insert_pending_claim",
+                candid::encode_args((0u8, 42u128)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+
+    let memo = vec![4, 3, 2, 1];
+    let now = harness
+        .pic
+        .get_time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    let args = TransferArg {
+        from_subaccount: None,
+        to: Account { owner: harness.user, subaccount: None },
+        fee: None,
+        created_at_time: Some(now),
+        memo: Some(Memo(serde_bytes::ByteBuf::from(memo))),
+        amount: Nat::from(1u64),
+    };
+    let transfer: Result<Nat, TransferError> = decode_one(&reply(
+        harness
+            .pic
+            .update_call(harness.three_pool, harness.user, "icrc1_transfer", encode_one(args).unwrap())
+            .unwrap(),
+    ))
+    .unwrap();
+    transfer.expect("old version transfer succeeds");
+
+    let length = harness.icrc3_log_length();
+    let before = harness.icrc3_get_blocks(0, length);
+    let new_wasm = common::three_pool_wasm();
+    harness
+        .pic
+        .upgrade_canister(harness.three_pool, new_wasm, vec![], None)
+        .expect("upgrade from old block schema succeeds");
+    let claims: Vec<ThreePoolPendingClaim> = decode_one(
+        &reply(
+            harness
+                .pic
+                .query_call(
+                    harness.three_pool,
+                    Principal::anonymous(),
+                    "get_pending_claims",
+                    candid::encode_args((0u64, 100u64)).unwrap(),
+                )
+                .unwrap(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].id, claim_id);
+    assert_eq!(claims[0].claimant, harness.user);
+    assert_eq!(claims[0].amount, 42);
+    let after = harness.icrc3_get_blocks(0, length);
+
+    assert_eq!(after.len(), before.len());
+    for (old, upgraded) in before.iter().zip(after.iter()) {
+        assert_eq!(old.id, upgraded.id);
+        assert_eq!(old.block, upgraded.block, "old ICRC-3 block changed across upgrade");
     }
 }

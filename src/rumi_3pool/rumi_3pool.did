@@ -78,6 +78,89 @@ type ThreePoolPendingClaim = record {
   created_at : nat64;
 };
 
+type PayoutKind = variant {
+  SwapOutput;
+  SwapInputRefund;
+  AddLiquidityRefund;
+  RemoveLiquidity;
+  RemoveOneCoin;
+  AdminFeeWithdrawal;
+};
+type PayoutTransfer = record {
+  ledger : principal;
+  from : Account;
+  to : Account;
+  gross : nat;
+  net : nat;
+  fee : nat;
+  memo : blob;
+  created_at_time : nat64;
+};
+type PayoutOutcome = variant {
+  Prepared;
+  Submitted;
+  Confirmed : record { block : nat };
+  RejectedNoTransfer : record { reason : text };
+  Unresolved : record { reason : text };
+  HeldLegacyUnbound;
+};
+type PayoutSwapContext = record {
+  balances_before : vec nat;
+  admin_fees_before : vec nat;
+  amp : nat64;
+  precision_muls : vec nat64;
+  token_in : nat8;
+  token_out : nat8;
+  amount_in : nat;
+  gross_output : nat;
+  pool_fee : nat;
+  admin_fee_bps : nat64;
+  fee_bps : nat16;
+  imbalance_before : nat64;
+  imbalance_after : nat64;
+  is_rebalancing : bool;
+};
+type PayoutAttempt = record {
+  number : nat32;
+  replay_count : nat8;
+  transfer : PayoutTransfer;
+  outcome : PayoutOutcome;
+};
+type PayoutInputTransfer = record {
+  ledger : principal;
+  from : Account;
+  to : Account;
+  amount : nat;
+  memo : opt blob;
+  created_at_time : nat64;
+};
+type PayoutInputOutcome = variant {
+  Prepared;
+  Submitted;
+  Confirmed : record { block : nat };
+  RejectedNoTransfer : record { reason : text };
+  Unresolved : record { reason : text };
+};
+type PayoutInputAction = variant { AddLiquidity; Swap; Donation };
+type PayoutEntitlement = record {
+  id : nat64;
+  owner : principal;
+  token_index : nat8;
+  ledger : principal;
+  symbol : text;
+  gross : nat;
+  kind : PayoutKind;
+  swap_context : opt PayoutSwapContext;
+  compensation_id : opt nat64;
+  compensation_for : opt nat64;
+  dispatch_ready : opt bool;
+  input_transfer : opt PayoutInputTransfer;
+  input_outcome : opt PayoutInputOutcome;
+  input_action : opt PayoutInputAction;
+  settled : bool;
+  attempts : vec PayoutAttempt;
+};
+
 type SwapEvent = record {
   id : nat64;
   timestamp : nat64;
@@ -578,6 +661,8 @@ service : (ThreePoolInitArgs) -> {
   get_all_lp_holders : () -> (vec record { principal; nat }) query;
   get_lp_holders : (nat64, nat64) -> (vec record { principal; nat }) query;
   claim_pending : (nat64) -> (variant { Ok; Err : ThreePoolError });
+  get_payout_entitlement : (nat64) -> (opt PayoutEntitlement) query;
+  get_payout_entitlements : (nat64, nat64) -> (vec PayoutEntitlement) query;
   get_pending_claims : (nat64, nat64) -> (vec ThreePoolPendingClaim) query;
   get_pending_claim_count : () -> (nat64) query;
   calc_swap : (nat8, nat8, nat) -> (variant { Ok : nat; Err : ThreePoolError }) query;
