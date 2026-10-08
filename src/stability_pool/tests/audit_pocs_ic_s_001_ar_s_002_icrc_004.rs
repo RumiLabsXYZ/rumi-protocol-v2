@@ -3,10 +3,10 @@
 //! IC-S-001: `deposit_as_3usd` refunds were best-effort: the GROSS amount was
 //!   sent with fee:None (the ledger debits amount+fee, drifting the pool one
 //!   fee below its tracked deposits per refund) and a failed refund was
-//!   DISCARDED, stranding the user's pulled tokens with no record. The fix
-//!   refunds net of the ledger fee (cached `icrc1_fee` with a conservative
-//!   fallback, mirroring rumi_3pool::transfers) and persists a pending-refund
-//!   record recoverable via `claim_pending_refund` / `get_pending_refunds`
+//!   DISCARDED, stranding the user's pulled tokens with no record. Refunds
+//!   query the current `icrc1_fee`, send the net amount with an explicit fee,
+//!   and persist a pending-refund record recoverable via `claim_pending_refund`
+//!   / `get_pending_refunds`
 //!   (mirroring rumi_3pool's pending-claims pattern).
 //!
 //! AR-S-002: `opt_in_collateral` / `opt_out_collateral` were the only
@@ -49,14 +49,19 @@ fn ic_s_001_refund_is_net_of_ledger_fee() {
     let src = read("src/deposits.rs");
     let body = fn_body(&src, "async fn refund_user(");
     assert!(
-        body.contains("refund_ledger_fee"),
-        "refund_user must look up the ledger fee (cached icrc1_fee, conservative fallback) \
+        body.contains("current_ledger_transfer_fee"),
+        "refund_user must fetch the current ledger fee rather than use a potentially stale cache \
          (audit IC-S-001).",
     );
     assert!(
         body.contains("amount - fee"),
         "refund_user must send the amount NET of the ledger fee, not gross with fee:None \
          (a gross refund debits amount+fee from the pool) (audit IC-S-001).",
+    );
+    assert!(
+        body.contains("fee: Some(fee.into())"),
+        "refund_user must pass the quoted fee explicitly so a concurrent fee change fails with BadFee \
+         instead of creating an untracked debit (audit IC-S-001).",
     );
 }
 
