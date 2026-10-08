@@ -1238,13 +1238,18 @@ pub struct PendingRefund {
 /// A post-mint Stability Pool notification. The icUSD mint has already landed
 /// at the pool, so this receipt must survive a failed callback and be retried
 /// with the original mint block as the pool-side idempotency key.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct PendingStabilityPoolInterestNotification {
     pub pool_principal: Principal,
     pub token_ledger: Principal,
     pub amount_e8s: u64,
     pub collateral_type: Principal,
     pub source_mint_block: u64,
+    /// Receipt protocol used by the target SP. `None` decodes pre-CL-10 rows,
+    /// which may already have been applied before their reply was lost and
+    /// therefore must be held for operator reconciliation after upgrade.
+    #[serde(default)]
+    pub receipt_protocol_version: Option<u8>,
 }
 
 /// Durable refund record for a stranded 3USD reserve refund
@@ -6223,6 +6228,33 @@ pub fn replace_state(state: State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pre_cl10_interest_outbox_snapshot_decodes_as_held_legacy_row() {
+        #[derive(serde::Serialize)]
+        struct LegacyPendingInterestNotification {
+            pool_principal: Principal,
+            token_ledger: Principal,
+            amount_e8s: u64,
+            collateral_type: Principal,
+            source_mint_block: u64,
+        }
+
+        let legacy = LegacyPendingInterestNotification {
+            pool_principal: Principal::from_slice(&[1]),
+            token_ledger: Principal::from_slice(&[2]),
+            amount_e8s: 123,
+            collateral_type: Principal::from_slice(&[3]),
+            source_mint_block: 44,
+        };
+        let mut snapshot = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut snapshot).expect("encode legacy row");
+        let decoded: PendingStabilityPoolInterestNotification =
+            ciborium::de::from_reader(snapshot.as_slice()).expect("decode old row");
+        assert_eq!(decoded.source_mint_block, 44);
+        assert_eq!(decoded.amount_e8s, 123);
+        assert_eq!(decoded.receipt_protocol_version, None);
+    }
 
     #[test]
     fn cached_redemption_fee_rate_matches_full_decay_formula() {
