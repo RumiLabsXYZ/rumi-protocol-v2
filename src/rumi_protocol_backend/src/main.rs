@@ -9571,8 +9571,10 @@ pub struct BotCollateralReturnProofArg {
     pub created_at_time: u64,
 }
 
-const BOT_PAYMENT_MEMO_PREFIX: &[u8] = b"RUMI-BOT-PAYMENT-V1:";
-const BOT_RETURN_MEMO_PREFIX: &[u8] = b"RUMI-BOT-RETURN-V1:";
+// Native ICP ledger ICRC-1 transfers reject memos longer than 32 bytes.
+// Keep the domain tag plus two eight-byte claim identifiers within that cap.
+const BOT_PAYMENT_MEMO_PREFIX: &[u8] = b"RUMI-BPAY-V2:";
+const BOT_RETURN_MEMO_PREFIX: &[u8] = b"RUMI-BRET-V2:";
 
 fn bot_payment_memo(vault_id: u64, generation: u64) -> Vec<u8> {
     let mut memo = BOT_PAYMENT_MEMO_PREFIX.to_vec();
@@ -9984,6 +9986,8 @@ mod bot_payment_proof_tests {
     #[test]
     fn claim_payment_memo_binds_vault_and_generation() {
         let memo = bot_payment_memo(7, 42);
+        assert!(memo.len() <= 32);
+        assert!(bot_collateral_return_memo(7, 42).len() <= 32);
         assert_eq!(memo, bot_payment_memo(7, 42));
         assert_ne!(memo, bot_payment_memo(7, 43));
         assert_ne!(memo, bot_payment_memo(8, 42));

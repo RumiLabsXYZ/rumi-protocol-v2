@@ -773,7 +773,12 @@ fn setup_fixture_with_native_ledger(native_ledger_wasm: Option<Vec<u8>>) -> Fixt
             &pic,
             account(icp_minter),
             10_000,
-            vec![(account(test_user), Nat::from(1_000_000_000_000u64))],
+            vec![
+                (account(test_user), Nat::from(1_000_000_000_000u64)),
+                // The bot must supply the outbound and return fees from its
+                // own balance to return the full gross claim collateral.
+                (account(developer), Nat::from(100_000u64)),
+            ],
             "Internet Computer Protocol",
             "ICP",
             developer,
@@ -1371,7 +1376,7 @@ fn native_icp_bot_claim_and_return_proofs_use_archives_and_conserve_fees() {
         },
     );
     assert!(
-        matches!(under_return, Err(ProtocolError::GenericError(message)) if message.contains("full gross claim amount")),
+        matches!(under_return, Err(ProtocolError::GenericError(ref message)) if message.contains("full gross claim amount")),
         "a return one e8s below the gross claim must fail even when its fee is separately paid, got {under_return:?}"
     );
 
@@ -1397,11 +1402,13 @@ fn native_icp_bot_claim_and_return_proofs_use_archives_and_conserve_fees() {
         },
     );
     assert!(
-        matches!(wrong_memo, Err(ProtocolError::GenericError(message)) if message.contains("memo")),
+        matches!(wrong_memo, Err(ProtocolError::GenericError(ref message)) if message.contains("memo")),
         "wrong return memo must fail, got {wrong_memo:?}"
     );
 
     let return_time = wrong_memo_time + 1;
+    let backend_before_exact_return =
+        icrc1_balance_of_call(&f.pic, f.icp_ledger, f.protocol_id);
     let return_block = icrc1_transfer_tuple_call(
         &f.pic,
         f.icp_ledger,
@@ -1411,8 +1418,6 @@ fn native_icp_bot_claim_and_return_proofs_use_archives_and_conserve_fees() {
         claim.collateral_return_memo.clone(),
         return_time,
     );
-    let backend_before_exact_return =
-        icrc1_balance_of_call(&f.pic, f.icp_ledger, f.protocol_id);
     let mut archived = native_block_is_archived(&f.pic, f.icp_ledger, return_block);
     for index in 0..20u64 {
         if archived {
