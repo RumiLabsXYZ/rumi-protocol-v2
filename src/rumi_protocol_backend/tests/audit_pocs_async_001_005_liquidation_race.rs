@@ -243,11 +243,11 @@ fn liquidator_b() -> Principal {
     Principal::from_slice(&[2])
 }
 
-// ── ASYNC-003 structural fence: recover_pending_transfer must pay with the
-//    entry's PERSISTED op_nonce (ledger dedup vs the timer retry) and hold a
-//    per-caller guard. FAILS on pre-fix main, PASSES post-fix. ──
+// ── CL14/ASYNC-003 structural fence: owner recovery must use the shared
+//    operation-keyed in-flight processor and must never resend quarantined
+//    receipts without ledger-history proof. ──
 #[test]
-fn async_003_recover_pending_transfer_reuses_persisted_nonce_and_guards() {
+fn cl14_owner_recovery_uses_guarded_processor_and_holds_ambiguous_receipts() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
     let m = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
@@ -261,10 +261,13 @@ fn async_003_recover_pending_transfer_reuses_persisted_nonce_and_guards() {
         .unwrap_or(m.len());
     let body = &m[start..end];
     assert!(
-        body.contains("transfer_collateral_with_nonce") && body.contains("op_nonce"),
-        "recover_pending_transfer must pay via transfer_collateral_with_nonce(.., transfer.op_nonce) \
-         so it shares the ledger dedup tuple with process_pending_transfer's timer retry (audit \
-         ASYNC-003); a fresh-nonce transfer_collateral double-pays.\n\n{}",
+        body.contains("process_one_pending_payout") && body.contains("operation_id"),
+        "owner recovery must use the common operation-keyed payout processor\n\n{}",
+        body
+    );
+    assert!(
+        body.contains("reconciliation_required") && body.contains("resent"),
+        "ambiguous payout receipts must remain held until ledger-history reconciliation\n\n{}",
         body
     );
     assert!(

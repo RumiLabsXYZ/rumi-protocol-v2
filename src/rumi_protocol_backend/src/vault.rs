@@ -10,9 +10,9 @@ use crate::management::{
     transfer_stable_from,
 };
 use crate::numeric::{Ratio, UsdIcp, ICP, ICUSD};
+use crate::state::PendingMarginTransfer;
 use crate::state::{compute_redemption_fee_with_rate, Mode, RedemptionSimulationPlan};
 use crate::GuardError;
-use crate::PendingMarginTransfer;
 use crate::DEBUG;
 use crate::{
     mutate_state, read_state, PreparedRedemptionOffer, ProtocolError, RedeemQuotedRequest,
@@ -3228,14 +3228,34 @@ fn queue_collateral_payout(
             now_ns,
         ))
     } else {
-        s.pending_margin_transfers.insert(
-            (vault_id, recipient),
+        let (ledger, fee) = s
+            .get_collateral_config(&collateral_type)
+            .map(|config| (config.ledger_canister_id, config.ledger_fee))
+            .unwrap_or((s.icp_ledger_principal, s.icp_ledger_fee.to_u64()));
+        let transfer_amount_raw = margin.to_u64().checked_sub(fee);
+        let mut operation_id = op_nonce;
+        while operation_id == 0 || s.pending_payout_index.contains_key(&operation_id) {
+            operation_id = s.next_op_nonce();
+        }
+        crate::event::record_pending_payout(
+            s,
             PendingMarginTransfer {
+                vault_id,
+                operation_id,
+                payout_kind: crate::state::PendingPayoutKind::Margin,
                 owner: recipient,
                 margin,
                 collateral_type,
                 retry_count: 0,
-                op_nonce,
+                op_nonce: operation_id,
+                ledger: Some(ledger),
+                transfer_amount_raw,
+                held_for_manual_retry: transfer_amount_raw.map_or(true, |amount| amount == 0),
+                reconciliation_required: transfer_amount_raw.map_or(true, |amount| amount == 0),
+                in_flight: false,
+                too_old_confirmed: false,
+                history_log_length: None,
+                history_cursor: 0,
                 min_net_collateral_raw: None,
             },
         );
@@ -9167,15 +9187,36 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                     ic_cdk::api::time(),
                 );
             } else {
-                let excess_nonce = s.next_op_nonce();
-                s.pending_excess_transfers.insert(
-                    (vault_id, vault.owner),
+                let mut excess_nonce = s.next_op_nonce();
+                while s.pending_payout_index.contains_key(&excess_nonce) {
+                    excess_nonce = s.next_op_nonce();
+                }
+                let (ledger, fee) = s
+                    .get_collateral_config(&vault.collateral_type)
+                    .map(|config| (config.ledger_canister_id, config.ledger_fee))
+                    .unwrap_or((s.icp_ledger_principal, s.icp_ledger_fee.to_u64()));
+                let transfer_amount_raw = excess_pay.to_u64().checked_sub(fee);
+                crate::event::record_pending_payout(
+                    s,
                     PendingMarginTransfer {
+                        vault_id,
+                        operation_id: excess_nonce,
+                        payout_kind: crate::state::PendingPayoutKind::Excess,
                         owner: vault.owner,
                         margin: excess_pay,
                         collateral_type: vault.collateral_type,
                         retry_count: 0,
                         op_nonce: excess_nonce,
+                        ledger: Some(ledger),
+                        transfer_amount_raw,
+                        held_for_manual_retry: transfer_amount_raw
+                            .map_or(true, |amount| amount == 0),
+                        reconciliation_required: transfer_amount_raw
+                            .map_or(true, |amount| amount == 0),
+                        in_flight: false,
+                        too_old_confirmed: false,
+                        history_log_length: None,
+                        history_cursor: 0,
                         min_net_collateral_raw: None,
                     },
                 );
@@ -9352,122 +9393,11 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
 }
 
 // Helper function to attempt immediate transfer processing
-async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, String> {
-    let mut processed_count = 0;
-
-    // Wave-4 LIQ-001: collect every pending margin/excess entry whose key matches
-    // this vault_id. Concurrent liquidators on the same vault each have their own
-    // (vault_id, owner) key, so we iterate rather than do a single point lookup.
-    let transfers_to_process = read_state(|s| {
-        let mut transfers = Vec::new();
-
-        for ((vid, owner), transfer) in s.pending_margin_transfers.iter() {
-            if *vid == vault_id {
-                transfers.push(("margin", *vid, *owner, transfer.clone()));
-            }
-        }
-
-        for ((vid, owner), transfer) in s.pending_excess_transfers.iter() {
-            if *vid == vault_id {
-                transfers.push(("excess", *vid, *owner, transfer.clone()));
-            }
-        }
-
-        transfers
-    });
-
-    // Process each transfer
-    for (transfer_type, transfer_vault_id, transfer_owner, transfer) in transfers_to_process {
-        // Note: native-XRP collateral never reaches this ICRC processor — it is
-        // converted to an XrpClaim at the moment of liquidation/withdrawal (see
-        // `queue_collateral_payout`), so a NativeXrp `collateral_type` cannot appear
-        // in pending_margin_transfers / pending_excess_transfers.
-        // Look up per-collateral ledger fee and canister ID
-        let (ledger_fee, ledger_canister_id) =
-            read_state(
-                |s| match s.get_collateral_config(&transfer.collateral_type) {
-                    Some(config) => (ICP::from(config.ledger_fee), config.ledger_canister_id),
-                    None => (s.icp_ledger_fee, s.icp_ledger_principal),
-                },
-            );
-
-        if transfer.margin <= ledger_fee {
-            log!(INFO, "[immediate_transfer] Skipping {} transfer {} owner {} - margin {} <= fee {}, removing",
-                transfer_type, transfer_vault_id, transfer_owner, transfer.margin.to_u64(), ledger_fee.to_u64());
-            mutate_state(|s| {
-                let key = (transfer_vault_id, transfer_owner);
-                match transfer_type {
-                    "margin" => {
-                        s.pending_margin_transfers.remove(&key);
-                    }
-                    "excess" => {
-                        s.pending_excess_transfers.remove(&key);
-                    }
-                    _ => {}
-                }
-            });
-            processed_count += 1;
-            continue;
-        }
-        let transfer_amount = transfer.margin - ledger_fee;
-
-        log!(
-            INFO,
-            "[immediate_transfer] Processing {} transfer {} of {} collateral to {}",
-            transfer_type,
-            transfer_vault_id,
-            transfer_amount.to_u64(),
-            transfer.owner
-        );
-
-        match management::transfer_collateral_with_nonce(
-            transfer_amount.to_u64(),
-            transfer.owner,
-            ledger_canister_id,
-            transfer.op_nonce,
-        )
-        .await
-        {
-            Ok(block_index) => {
-                log!(
-                    INFO,
-                    "[immediate_transfer] Transfer {} owner {} successful, block: {}",
-                    transfer_vault_id,
-                    transfer_owner,
-                    block_index
-                );
-
-                // Remove from the appropriate pending map
-                mutate_state(|s| {
-                    let key = (transfer_vault_id, transfer_owner);
-                    match transfer_type {
-                        "margin" => {
-                            s.pending_margin_transfers.remove(&key);
-                        }
-                        "excess" => {
-                            s.pending_excess_transfers.remove(&key);
-                        }
-                        _ => {}
-                    }
-                });
-
-                processed_count += 1;
-            }
-            Err(error) => {
-                log!(
-                    INFO,
-                    "[immediate_transfer] Transfer {} owner {} failed: {}. Will retry later",
-                    transfer_vault_id,
-                    transfer_owner,
-                    error
-                );
-                // Leave in pending transfers for retry
-                return Err(format!("Transfer {} failed: {}", transfer_vault_id, error));
-            }
-        }
-    }
-
-    Ok(processed_count)
+async fn try_process_pending_transfers_immediate(_vault_id: u64) -> Result<u32, String> {
+    // Use the same operation-keyed, in-flight guarded processor as the timer.
+    // A second ad-hoc send path can race the timer and overwrite receipt state.
+    crate::process_pending_transfer().await;
+    Ok(0)
 }
 
 // Helper function to schedule transfer retries with exponential backoff
