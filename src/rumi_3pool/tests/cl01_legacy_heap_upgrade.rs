@@ -169,6 +169,19 @@ fn total_supply(h: &ThreePoolHarness, pool: Principal) -> u128 {
     supply.0.try_into().unwrap()
 }
 
+fn admin_fees(h: &ThreePoolHarness, pool: Principal) -> Vec<u128> {
+    reply(
+        h.pic
+            .query_call(
+                pool,
+                Principal::anonymous(),
+                "get_admin_fees",
+                encode_args(()).unwrap(),
+            )
+            .unwrap(),
+    )
+}
+
 fn pool_reserves(h: &ThreePoolHarness, pool: Principal) -> [u128; 3] {
     let status: PoolStatus = reply(
         h.pic
@@ -230,6 +243,23 @@ fn cl01_legacy_heap_upgrade_preserves_lp_then_rechecks_concurrent_transfer() {
     let withdrawer = Principal::self_authenticating(&[68, 68, 68]);
     let recipient = Principal::self_authenticating(&[79, 79, 79]);
 
+    let swap_result: Result<u128, ThreePoolError> = reply(
+        h.pic
+            .update_call(
+                legacy_pool,
+                h.user,
+                "swap",
+                encode_args((0u8, 1u8, 100_000_000_000u128, 0u128)).unwrap(),
+            )
+            .unwrap(),
+    );
+    swap_result.expect("accrue legacy swap admin fee");
+    let admin_fees_before_upgrade = admin_fees(&h, legacy_pool);
+    assert!(
+        admin_fees_before_upgrade.iter().any(|fee| *fee > 0),
+        "legacy swap must accrue a nonzero admin fee: {admin_fees_before_upgrade:?}"
+    );
+
     let transfer: Result<Nat, TransferError> = reply(
         h.pic
             .update_call(
@@ -256,10 +286,16 @@ fn cl01_legacy_heap_upgrade_preserves_lp_then_rechecks_concurrent_transfer() {
     assert_eq!(lp_balance(&h, legacy_pool, withdrawer), LP_AMOUNT);
     assert_eq!(total_supply(&h, legacy_pool), supply_before_upgrade);
     assert_eq!(pool_reserves(&h, legacy_pool), reserves_before_upgrade);
+    assert_eq!(
+        admin_fees(&h, legacy_pool),
+        admin_fees_before_upgrade,
+        "populated admin fees must survive the legacy heap upgrade"
+    );
 
     let supply_before_race = total_supply(&h, legacy_pool);
     let reserves_before_race = pool_reserves(&h, legacy_pool);
     let ledgers_before_race = ledger_reserves(&h, legacy_pool);
+    let admin_fees_before_race = admin_fees(&h, legacy_pool);
     let _: () = reply(
         h.pic
             .update_call(
@@ -319,4 +355,9 @@ fn cl01_legacy_heap_upgrade_preserves_lp_then_rechecks_concurrent_transfer() {
     assert_eq!(total_supply(&h, legacy_pool), supply_before_race);
     assert_eq!(pool_reserves(&h, legacy_pool), reserves_before_race);
     assert_eq!(ledger_reserves(&h, legacy_pool), ledgers_before_race);
+    assert_eq!(
+        admin_fees(&h, legacy_pool),
+        admin_fees_before_race,
+        "failed withdrawal must preserve accrued admin fees"
+    );
 }
