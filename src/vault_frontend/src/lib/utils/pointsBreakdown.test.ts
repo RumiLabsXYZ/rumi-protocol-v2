@@ -152,7 +152,7 @@ describe('buildLivePositions — mirrors accrual.rs snapshot_weights', () => {
       historical_ledger_cutoff: [42n],
       historical_next_offset: 0n,
       historical_complete: false,
-      inline_legacy_topups_complete: false,
+      inline_legacy_topups_complete: true,
       inline_legacy_topup_rows: 0n,
     });
     const live = buildLivePositions(

@@ -107,10 +107,25 @@ export function normalizeFiatStablePointsPolicy(raw: unknown): FiatStablePointsP
   if (!isNat(r.historical_next_offset) || !isNat(r.inline_legacy_topup_rows)) {
     return { ...LEGACY_FIAT_STABLE_POINTS_POLICY, mode: 'unknown', source: 'runtime' };
   }
+  if (
+    cutoverEpoch.value === null &&
+    (legacyEpoch.value !== null ||
+      r.active_for_current_epoch ||
+      ledgerCutoff.value !== null ||
+      r.historical_next_offset !== 0n ||
+      r.historical_complete ||
+      r.inline_legacy_topups_complete ||
+      r.inline_legacy_topup_rows !== 0n)
+  ) {
+    return { ...LEGACY_FIAT_STABLE_POINTS_POLICY, mode: 'unknown', source: 'runtime' };
+  }
   if (r.active_for_current_epoch && cutoverEpoch.value === null) {
     return { ...LEGACY_FIAT_STABLE_POINTS_POLICY, mode: 'unknown', source: 'runtime' };
   }
   if (cutoverEpoch.value !== null && ledgerCutoff.value === null) {
+    return { ...LEGACY_FIAT_STABLE_POINTS_POLICY, mode: 'unknown', source: 'runtime' };
+  }
+  if (cutoverEpoch.value !== null && cutoverEpoch.value === 0n) {
     return { ...LEGACY_FIAT_STABLE_POINTS_POLICY, mode: 'unknown', source: 'runtime' };
   }
   if (ledgerCutoff.value !== null && r.historical_next_offset > ledgerCutoff.value) {
@@ -124,7 +139,14 @@ export function normalizeFiatStablePointsPolicy(raw: unknown): FiatStablePointsP
   }
   if (
     legacyEpoch.value !== null &&
-    (cutoverEpoch.value === null || legacyEpoch.value >= cutoverEpoch.value)
+    (cutoverEpoch.value === null || cutoverEpoch.value !== legacyEpoch.value + 1n)
+  ) {
+    return { ...LEGACY_FIAT_STABLE_POINTS_POLICY, mode: 'unknown', source: 'runtime' };
+  }
+  if (
+    cutoverEpoch.value !== null &&
+    legacyEpoch.value === null &&
+    (!r.inline_legacy_topups_complete || r.inline_legacy_topup_rows !== 0n)
   ) {
     return { ...LEGACY_FIAT_STABLE_POINTS_POLICY, mode: 'unknown', source: 'runtime' };
   }

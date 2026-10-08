@@ -21,8 +21,8 @@ describe('fiat stable points policy', () => {
       historical_ledger_cutoff: [42n],
       historical_next_offset: 3n,
       historical_complete: false,
-      inline_legacy_topups_complete: false,
-      inline_legacy_topup_rows: 2n,
+      inline_legacy_topups_complete: true,
+      inline_legacy_topup_rows: 0n,
     });
     expect(policy.mode).toBe('flat4x');
     expect(policy.effectiveEpoch).toBe(19n);
@@ -152,5 +152,70 @@ describe('fiat stable points policy', () => {
     expect(normalizeFiatStablePointsPolicy({ ...base, legacy_epoch: [20n] }).mode).toBe('unknown');
     expect(normalizeFiatStablePointsPolicy({ ...base, historical_next_offset: 400n }).mode).toBe('unknown');
     expect(normalizeFiatStablePointsPolicy({ ...base, historical_complete: false }).mode).toBe('unknown');
+    expect(normalizeFiatStablePointsPolicy({ ...base, cutover_epoch: [20n] }).mode).toBe('unknown');
+    expect(normalizeFiatStablePointsPolicy({ ...base, cutover_epoch: [0n], legacy_epoch: [] }).mode).toBe('unknown');
+  });
+
+  it('accepts the pristine no-cutover backend default', () => {
+    const policy = normalizeFiatStablePointsPolicy({
+      cutover_epoch: [],
+      legacy_epoch: [],
+      active_for_current_epoch: false,
+      historical_ledger_cutoff: [],
+      historical_next_offset: 0n,
+      historical_complete: false,
+      inline_legacy_topups_complete: false,
+      inline_legacy_topup_rows: 0n,
+    });
+    expect(policy.mode).toBe('legacy');
+    expect(policy.pendingCutover).toBe(false);
+  });
+
+  it('rejects progress or completion flags without a cutover', () => {
+    const pristine = {
+      cutover_epoch: [],
+      legacy_epoch: [],
+      active_for_current_epoch: false,
+      historical_ledger_cutoff: [],
+      historical_next_offset: 0n,
+      historical_complete: false,
+      inline_legacy_topups_complete: false,
+      inline_legacy_topup_rows: 0n,
+    };
+    expect(normalizeFiatStablePointsPolicy({ ...pristine, historical_next_offset: 1n }).mode).toBe('unknown');
+    expect(normalizeFiatStablePointsPolicy({ ...pristine, historical_complete: true }).mode).toBe('unknown');
+    expect(normalizeFiatStablePointsPolicy({ ...pristine, inline_legacy_topups_complete: true }).mode).toBe('unknown');
+    expect(normalizeFiatStablePointsPolicy({ ...pristine, inline_legacy_topup_rows: 1n }).mode).toBe('unknown');
+    expect(normalizeFiatStablePointsPolicy({ ...pristine, historical_ledger_cutoff: [1n] }).mode).toBe('unknown');
+  });
+
+  it('rejects scheduled no-legacy migration with inline work remaining', () => {
+    expect(
+      normalizeFiatStablePointsPolicy({
+        cutover_epoch: [19n],
+        legacy_epoch: [],
+        active_for_current_epoch: false,
+        historical_ledger_cutoff: [401n],
+        historical_next_offset: 0n,
+        historical_complete: false,
+        inline_legacy_topups_complete: false,
+        inline_legacy_topup_rows: 1n,
+      }).mode,
+    ).toBe('unknown');
+  });
+
+  it('accepts a genuine between-epoch activated policy with no legacy epoch', () => {
+    const policy = normalizeFiatStablePointsPolicy({
+      cutover_epoch: [19n],
+      legacy_epoch: [],
+      active_for_current_epoch: true,
+      historical_ledger_cutoff: [401n],
+      historical_next_offset: 200n,
+      historical_complete: false,
+      inline_legacy_topups_complete: true,
+      inline_legacy_topup_rows: 0n,
+    });
+    expect(policy.mode).toBe('flat4x');
+    expect(policy.migration.status).toBe('in_progress');
   });
 });

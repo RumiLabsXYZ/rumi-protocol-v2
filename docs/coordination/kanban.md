@@ -223,3 +223,6 @@ Backend uses Terra because a retry-safe persisted migration must coexist with in
 
 | PS4-REVIEW-2A | Complete | final_review_a | GPT-6 Luna | Fresh independent adversarial review | Completed code and upgrade evidence |
 | PS4-REVIEW-2B | Complete | final_review_b | GPT-6 Luna | Fresh independent adversarial review | Completed code and upgrade evidence |
+
+| PS4-REVIEW-3A | Complete | round3_a | GPT-6 Luna | Independent source review | Consistent unscheduled frontend metadata gap accepted and fixed |
+| PS4-REVIEW-3B | Complete | round3_b | GPT-6 Luna | Independent source review | Same metadata gap independently confirmed |
