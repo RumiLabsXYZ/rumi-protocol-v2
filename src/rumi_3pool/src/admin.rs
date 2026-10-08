@@ -4,7 +4,6 @@ use candid::Principal;
 
 use crate::math::{get_a, IMB_SCALE};
 use crate::state::{mutate_state, read_state};
-use crate::transfers::transfer_to_user;
 use crate::types::{FeeCurveParams, ThreePoolError, ThreePoolAdminEvent, ThreePoolAdminAction};
 
 /// Hard cap on the dynamic fee curve max fee (10% in basis points).
@@ -48,6 +47,17 @@ pub fn ramp_a(
     let admin = read_state(|s| s.config.admin);
     if caller != admin {
         return Err(ThreePoolError::Unauthorized);
+    }
+
+    let claim_slots_needed = fees.iter().filter(|amount| **amount > 0).count() as u64;
+    let mut claim_slots = crate::PendingClaimSlots::reserve(claim_slots_needed)?;
+
+    // Resolve any cold fee queries before clearing the admin liability. The
+    // payout helper then journals its exact tuple without an intervening query.
+    for k in 0..3 {
+        if fees[k] > 0 {
+            let _ = crate::transfers::ledger_fee(tokens[k].ledger_id).await;
+        }
     }
 
     // Get current effective A
@@ -135,24 +145,37 @@ pub async fn withdraw_admin_fees(caller: Principal) -> Result<[u128; 3], ThreePo
         s.admin_fees = [0; 3];
     });
 
-    // Transfer each non-zero fee to admin. If a transfer fails, restore that
-    // token's fee (the tokens are still in the pool's account) and continue
-    // with the rest — never bail mid-loop and silently strand the un-sent
-    // fees by leaving them zeroed. Audit 2026-06-05 (3P-04).
+    // Transfer each fee through a durable entitlement. Failed or ambiguous
+    // attempts become admin-owned claims and are not reissued as new payouts.
     let mut withdrawn = [0u128; 3];
     for k in 0..3 {
         if fees[k] > 0 {
-            match transfer_to_user(tokens[k].ledger_id, admin, fees[k]).await {
-                Ok(()) => {
+            match crate::transfers::payout_to_user(
+                crate::payouts::PayoutKind::AdminFeeWithdrawal,
+                k as u8,
+                tokens[k].ledger_id,
+                &tokens[k].symbol,
+                admin,
+                fees[k],
+                None,
+            ).await {
+                Ok(_) => {
                     withdrawn[k] = fees[k];
                 }
-                Err(reason) => {
-                    mutate_state(|s| {
-                        s.admin_fees[k] = s.admin_fees[k].saturating_add(fees[k]);
-                    });
+                Err(failure) => {
+                    crate::record_pending_claim(
+                        &mut claim_slots,
+                        failure.id,
+                        admin,
+                        k as u8,
+                        tokens[k].ledger_id,
+                        &tokens[k].symbol,
+                        fees[k],
+                        &format!("admin fee payout held ({})", failure.reason),
+                    );
                     ic_cdk::println!(
-                        "[withdraw_admin_fees] token {} transfer failed: {}; fee restored",
-                        tokens[k].symbol, reason
+                        "[withdraw_admin_fees] token {} transfer failed and is held as claim: {}",
+                        tokens[k].symbol, failure.reason
                     );
                 }
             }

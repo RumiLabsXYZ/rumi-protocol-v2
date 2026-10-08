@@ -12,6 +12,7 @@ pub mod swap;
 pub mod liquidity;
 pub mod transfers;
 pub mod receipts;
+pub mod payouts;
 use receipts::{SwapReceiptErrorV1, SwapReceiptStatusV1, SwapReceiptV1, SwapRequestV1};
 pub mod admin;
 pub mod pool_guard;
@@ -30,7 +31,7 @@ use crate::liquidity::{
     calc_add_liquidity, calc_remove_liquidity, calc_remove_one_coin, AddLiquidityError,
     DEPOSIT_CONCENTRATION_REJECT_MESSAGE,
 };
-use crate::transfers::{transfer_from_user, transfer_to_user};
+use crate::transfers::transfer_from_user;
 use crate::logs::INFO;
 
 // ─── Init / Upgrade ───
@@ -229,8 +230,6 @@ fn setup_timers() {
 
 /// Record a virtual_price snapshot for APY calculations.
 fn take_vp_snapshot() {
-    let precision_muls = get_precision_muls();
-    let amp = get_current_a();
 
     let snapshot = read_state(|s| {
         if s.lp_total_supply == 0 {
@@ -352,12 +351,12 @@ fn pending_claim_limit() -> u64 {
 }
 
 /// Hold recovery capacity before an operation can move value.
-struct PendingClaimSlots {
+pub(crate) struct PendingClaimSlots {
     remaining: u64,
 }
 
 impl PendingClaimSlots {
-    fn reserve(slots: u64) -> Result<Self, ThreePoolError> {
+    pub(crate) fn reserve(slots: u64) -> Result<Self, ThreePoolError> {
         let used = storage::pending_claims::len();
         let limit = pending_claim_limit();
         let accepted = RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| {
@@ -400,8 +399,9 @@ impl Drop for PendingClaimSlots {
 
 /// Record tokens the pool owes `claimant` after a failed payout/refund so the
 /// funds can be recovered via `claim_pending` instead of being stranded.
-fn record_pending_claim(
+pub(crate) fn record_pending_claim(
     slots: &mut PendingClaimSlots,
+    id: u64,
     claimant: Principal,
     token_index: u8,
     ledger: Principal,
@@ -410,7 +410,6 @@ fn record_pending_claim(
     reason: &str,
 ) -> u64 {
     slots.consume_one();
-    let id = storage::pending_claims::next_id();
     log!(INFO, "Pending claim #{} recorded: {} owes {} of token {} ({}): {}",
         id, claimant, amount, token_index, symbol, reason);
     storage::pending_claims::insert(crate::types::ThreePoolPendingClaim {
@@ -426,56 +425,192 @@ fn record_pending_claim(
     id
 }
 
-/// Recover tokens the pool owes after a failed payout/refund. The original
-/// claimant or the pool admin may call this. The claim is removed BEFORE the
-/// async transfer (prevents two concurrent calls both paying out) and re-
-/// inserted if the transfer fails. Audit 2026-06-05 (3P-01/02/03).
+/// Recover a bound payout claim by reconciling or replaying its persisted
+/// transfer identity. Legacy claims without one remain visible and held.
 #[update]
 pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
-    let _pool_guard = pool_guard::PoolGuard::new()?;
+    let _pool_guard = pool_guard::PoolGuard::new_payout_recovery()?;
     let caller = ic_cdk::api::caller();
 
-    // Remove first (atomic) to prevent double-claim across the await.
-    let claim = storage::pending_claims::remove(claim_id)
-        .ok_or(ThreePoolError::ClaimNotFound)?;
-
     let admin = read_state(|s| s.config.admin);
-    if caller != claim.claimant && caller != admin {
-        // Not authorized — re-insert before returning so the claim is not lost.
-        storage::pending_claims::insert(claim);
+    let Some(entitlement) = payouts::get(claim_id) else {
+        let claim = storage::pending_claims::get(claim_id).ok_or(ThreePoolError::ClaimNotFound)?;
+        if caller != claim.claimant && caller != admin {
+            return Err(ThreePoolError::Unauthorized);
+        }
+        return Err(ThreePoolError::LegacyClaimHeld);
+    };
+    if caller != entitlement.owner && caller != admin {
         return Err(ThreePoolError::Unauthorized);
     }
-
-    // Audit 2026-06-09 (IC-S-003): transfer_to_user silently skips sends of
-    // amount <= ledger fee, which would consume the claim with nothing
-    // received. Keep the claim and return a clear error; it becomes payable
-    // again if the ledger fee ever drops below the claim amount.
-    let fee = crate::transfers::ledger_fee(claim.ledger).await;
-    if claim.amount <= fee {
-        let err = ThreePoolError::TransferFailed {
-            token: claim.symbol.clone(),
-            reason: format!(
-                "claim amount {} does not exceed the ledger fee {}; nothing would be received",
-                claim.amount, fee
-            ),
-        };
-        storage::pending_claims::insert(claim);
-        return Err(err);
+    let claim = storage::pending_claims::get(claim_id);
+    if let Some(claim) = &claim {
+        if entitlement.owner != claim.claimant
+            || entitlement.token_index != claim.token_index
+            || entitlement.ledger != claim.ledger
+            || entitlement.gross != claim.amount
+        {
+            return Err(ThreePoolError::LegacyClaimHeld);
+        }
     }
 
-    match transfer_to_user(claim.ledger, claim.claimant, claim.amount).await {
+    // A proven no-effect swap output must be compensated by refunding its
+    // input, never by converting the failed output into a second entitlement.
+    if entitlement.kind == crate::payouts::PayoutKind::SwapOutput
+        && matches!(entitlement.attempts.last().map(|a| &a.outcome), Some(crate::payouts::PayoutOutcome::RejectedNoTransfer { .. }))
+    {
+        let context = entitlement.swap_context.as_ref().ok_or(ThreePoolError::LegacyClaimHeld)?;
+        if context.token_in >= 3 {
+            return Err(ThreePoolError::LegacyClaimHeld);
+        }
+        let mut slots = if claim.is_none() { Some(PendingClaimSlots::reserve(1)?) } else { None };
+        let (ledger, symbol) = read_state(|s| {
+            let token = &s.config.tokens[context.token_in as usize];
+            (token.ledger_id, token.symbol.clone())
+        });
+        match crate::transfers::payout_to_user(
+            crate::payouts::PayoutKind::SwapInputRefund,
+            context.token_in,
+            ledger,
+            &symbol,
+            entitlement.owner,
+            context.amount_in,
+            None,
+        ).await {
+            Ok(_) => {
+                storage::payouts::set_fence(false);
+                storage::pending_claims::remove(claim_id);
+                return Ok(());
+            }
+            Err(failure) => {
+                if let Some(slots) = slots.as_mut() {
+                    record_pending_claim(
+                        slots,
+                        failure.id,
+                        entitlement.owner,
+                        context.token_in,
+                        ledger,
+                        &symbol,
+                        context.amount_in,
+                        &format!("swap input refund held ({})", failure.reason),
+                    );
+                }
+                return Err(ThreePoolError::TransferFailed { token: symbol, reason: failure.reason });
+            }
+        }
+    }
+
+    match crate::transfers::retry_payout_claim(claim_id).await {
         Ok(()) => {
-            log!(INFO, "Pending claim #{} resolved: {} received {} of {}",
-                claim_id, claim.claimant, claim.amount, claim.symbol);
+            let mut current = payouts::get(claim_id).ok_or(ThreePoolError::LegacyClaimHeld)?;
+            match current.kind {
+                crate::payouts::PayoutKind::SwapOutput => {
+                    settle_recovered_swap(&mut current)?;
+                    storage::payouts::set_fence(false);
+                }
+                crate::payouts::PayoutKind::SwapInputRefund => {
+                    storage::payouts::set_fence(false);
+                }
+                _ => {}
+            }
+            storage::pending_claims::remove(claim_id);
+            log!(INFO, "Pending claim #{} resolved for {}", claim_id, claim.claimant);
             Ok(())
         }
-        Err(reason) => {
-            // Transfer failed — re-insert so the user can retry.
-            let symbol = claim.symbol.clone();
-            storage::pending_claims::insert(claim);
-            Err(ThreePoolError::TransferFailed { token: symbol, reason })
-        }
+        Err(failure) => Err(ThreePoolError::TransferFailed { token: claim.symbol, reason: failure.reason }),
     }
+}
+
+/// Complete reserve accounting after an ambiguous ordinary swap output is
+/// confirmed by exact replay. The persisted pre-state guards against applying
+/// this transition to a changed pool.
+fn settle_recovered_swap(
+    entitlement: &mut crate::payouts::PayoutEntitlement,
+) -> Result<(), ThreePoolError> {
+    if entitlement.settled {
+        return Ok(());
+    }
+    let context = entitlement
+        .swap_context
+        .as_ref()
+        .ok_or(ThreePoolError::LegacyClaimHeld)?
+        .clone();
+    let admin_fee_share = context
+        .pool_fee
+        .checked_mul(context.admin_fee_bps as u128)
+        .ok_or(ThreePoolError::MathOverflow)?
+        / 10_000;
+    mutate_state(|state| -> Result<(), ThreePoolError> {
+        if state.balances != context.balances_before {
+            return Err(ThreePoolError::PoolLocked);
+        }
+        let i = context.token_in as usize;
+        let j = context.token_out as usize;
+        if i >= 3 || j >= 3 || i == j {
+            return Err(ThreePoolError::LegacyClaimHeld);
+        }
+        let after_in = state.balances[i]
+            .checked_add(context.amount_in)
+            .ok_or(ThreePoolError::MathOverflow)?;
+        let pool_debit = context
+            .gross_output
+            .checked_add(admin_fee_share)
+            .ok_or(ThreePoolError::MathOverflow)?;
+        let after_out = state.balances[j]
+            .checked_sub(pool_debit)
+            .ok_or(ThreePoolError::MathOverflow)?;
+        let admin_fees = state.admin_fees[j]
+            .checked_add(admin_fee_share)
+            .ok_or(ThreePoolError::MathOverflow)?;
+        state.balances[i] = after_in;
+        state.balances[j] = after_out;
+        state.admin_fees[j] = admin_fees;
+        let vp = virtual_price(
+            &state.balances,
+            &context.precision_muls,
+            context.amp,
+            state.lp_total_supply,
+        )
+        .unwrap_or(0);
+        let event_id = storage::swap_v2::len();
+        storage::swap_v2::push(SwapEventV2 {
+            id: event_id,
+            timestamp: ic_cdk::api::time(),
+            caller: entitlement.owner,
+            token_in: context.token_in,
+            token_out: context.token_out,
+            amount_in: context.amount_in,
+            amount_out: context.gross_output,
+            fee: context.pool_fee,
+            fee_bps: context.fee_bps,
+            imbalance_before: context.imbalance_before,
+            imbalance_after: context.imbalance_after,
+            is_rebalancing: context.is_rebalancing,
+            pool_balances_after: state.balances,
+            virtual_price_after: vp,
+            migrated: false,
+        });
+        Ok(())
+    })?;
+    entitlement.settled = true;
+    payouts::save(entitlement.clone());
+    payouts::append(entitlement.id, crate::payouts::PayoutJournalEventKind::Settled);
+    Ok(())
+}
+
+/// Owner/admin-visible exact payout state, including the transfer identity.
+#[query]
+pub fn get_payout_entitlement(id: u64) -> Option<crate::payouts::PayoutEntitlement> {
+    let caller = ic_cdk::api::caller();
+    let admin = read_state(|s| s.config.admin);
+    payouts::get(id).filter(|record| caller == record.owner || caller == admin)
+}
+
+/// Bounded, caller-scoped payout history, including unresolved intents that
+/// have not yet acquired a pending-claim projection.
+#[query]
+pub fn get_payout_entitlements(offset: u64, limit: u64) -> Vec<crate::payouts::PayoutEntitlement> {
+    payouts::list_for_owner(ic_cdk::api::caller(), offset, limit.min(100))
 }
 
 /// View outstanding pending claims (bounded page; `limit` capped at 1000).
@@ -622,6 +757,10 @@ async fn swap_inner(
         return Err(ThreePoolError::SlippageExceeded);
     }
 
+    // Refund identities must be constructible without another pre-journal
+    // await after the input has been pulled.
+    let _refund_fee = crate::transfers::ledger_fee(token_i_ledger).await;
+
     // Receipt-backed swaps have their own recovery journal. Ordinary swaps
     // reserve one pending-claim slot before pulling input tokens.
     let mut claim_slots = if receipt.is_none() {
@@ -715,10 +854,57 @@ async fn swap_inner(
         // with no accounting and no recourse for the user. Refund the input; if the
         // refund itself fails, record a pending claim so the user can recover it via
         // `claim_pending`. Audit 2026-06-05 (3P-01): mirrors rumi_amm's swap path.
-        if let Err(reason) = transfer_to_user(token_j_ledger, caller, output).await {
-            if let Err(refund_err) = transfer_to_user(token_i_ledger, caller, dx).await {
+        storage::payouts::set_fence(true);
+        if let Err(failure) = crate::transfers::payout_to_user(
+            crate::payouts::PayoutKind::SwapOutput,
+            j,
+            token_j_ledger,
+            &token_j_symbol,
+            caller,
+            output,
+            Some(crate::payouts::PayoutSwapContext {
+                balances_before: balances,
+                amp,
+                precision_muls,
+                token_in: i,
+                token_out: j,
+                amount_in: dx,
+                gross_output: output,
+                pool_fee: fee,
+                admin_fee_bps,
+                fee_bps: outcome.fee_bps_used,
+                imbalance_before: outcome.imbalance_before,
+                imbalance_after: outcome.imbalance_after,
+                is_rebalancing: outcome.is_rebalancing,
+            }),
+        ).await {
+            let reason = failure.reason.clone();
+            if failure.ambiguous {
+                record_pending_claim(
+                    claim_slots.as_mut().expect("ordinary swap reserved a claim slot"),
+                    failure.id,
+                    caller,
+                    j,
+                    token_j_ledger,
+                    &token_j_symbol,
+                    output,
+                    &format!("swap output payout is unresolved ({reason}); input refund held"),
+                );
+                return Err(ThreePoolError::TransferFailed { token: token_j_symbol, reason });
+            }
+            if let Err(refund_failure) = crate::transfers::payout_to_user(
+                crate::payouts::PayoutKind::SwapInputRefund,
+                i,
+                token_i_ledger,
+                &token_i_symbol,
+                caller,
+                dx,
+                None,
+            ).await {
+                let refund_err = refund_failure.reason.clone();
                 record_pending_claim(
                 claim_slots.as_mut().expect("ordinary swap reserved a claim slot"),
+                refund_failure.id,
                 caller,
                 i,
                 token_i_ledger,
@@ -727,7 +913,9 @@ async fn swap_inner(
                 &format!(
                     "swap output transfer failed ({reason}), then input refund failed ({refund_err})"
                 ),
-            );
+                );
+            } else {
+                storage::payouts::set_fence(false);
             }
             return Err(ThreePoolError::TransferFailed {
                 token: token_j_symbol,
@@ -777,6 +965,10 @@ async fn swap_inner(
             migrated: false,
         });
     });
+
+    if receipt.is_none() {
+        storage::payouts::set_fence(false);
+    }
 
     if let Some(r) = receipt {
         r.status = SwapReceiptStatusV1::Completed;
@@ -871,6 +1063,11 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
             (s.config.tokens[2].ledger_id, s.config.tokens[2].symbol.clone()),
         ]
     });
+    // Warm every possible refund ledger before the first user pull. A fee
+    // query failure must not strand an already-pulled leg before journaling.
+    for (ledger, _) in &token_meta {
+        let _ = crate::transfers::ledger_fee(*ledger).await;
+    }
     // On failure of the last nonzero pull, every earlier successful pull can
     // independently fail its refund. Reserve that full bound before pulling.
     let possible_refunds = amounts_arr.iter().filter(|amount| **amount > 0).count().saturating_sub(1) as u64;
@@ -883,11 +1080,20 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
                 for r in 0..k {
                     if amounts_arr[r] > 0 {
                         let (r_ledger, r_symbol) = &token_meta[r];
-                        if let Err(refund_err) =
-                            transfer_to_user(*r_ledger, caller, amounts_arr[r]).await
+                        if let Err(refund_failure) = crate::transfers::payout_to_user(
+                            crate::payouts::PayoutKind::AddLiquidityRefund,
+                            r as u8,
+                            *r_ledger,
+                            r_symbol,
+                            caller,
+                            amounts_arr[r],
+                            None,
+                        ).await
                         {
+                            let refund_err = refund_failure.reason.clone();
                             record_pending_claim(
                                 &mut claim_slots,
+                                refund_failure.id,
                                 caller,
                                 r as u8,
                                 *r_ledger,
@@ -1084,9 +1290,19 @@ pub async fn remove_liquidity(
     for k in 0..3 {
         if amounts[k] > 0 {
             let (ledger, symbol) = &token_meta[k];
-            if let Err(reason) = transfer_to_user(*ledger, caller, amounts[k]).await {
+            if let Err(failure) = crate::transfers::payout_to_user(
+                crate::payouts::PayoutKind::RemoveLiquidity,
+                k as u8,
+                *ledger,
+                symbol,
+                caller,
+                amounts[k],
+                None,
+            ).await {
+                let reason = failure.reason.clone();
                 record_pending_claim(
                     &mut claim_slots,
+                    failure.id,
                     caller,
                     k as u8,
                     *ledger,
@@ -1243,9 +1459,19 @@ pub async fn remove_one_coin(
         (s.config.tokens[idx].ledger_id, s.config.tokens[idx].symbol.clone())
     });
 
-    if let Err(reason) = transfer_to_user(ledger, caller, amount).await {
+    if let Err(failure) = crate::transfers::payout_to_user(
+        crate::payouts::PayoutKind::RemoveOneCoin,
+        coin_index,
+        ledger,
+        &symbol,
+        caller,
+        amount,
+        None,
+    ).await {
+        let reason = failure.reason.clone();
         record_pending_claim(
             &mut claim_slots,
+            failure.id,
             caller,
             coin_index,
             ledger,
@@ -2922,7 +3148,8 @@ pub fn test_insert_pending_claim(token_index: u8, amount: u128) -> u64 {
         let t = &s.config.tokens[token_index as usize];
         (t.ledger_id, t.symbol.clone())
     });
-    record_pending_claim(&mut slots, caller, token_index, ledger, &symbol, amount, "test-injected claim")
+    let id = storage::pending_claims::next_id();
+    record_pending_claim(&mut slots, id, caller, token_index, ledger, &symbol, amount, "test-injected claim")
 }
 
 /// Test-only: lower the pending-claim cap to exercise fail-closed behavior.

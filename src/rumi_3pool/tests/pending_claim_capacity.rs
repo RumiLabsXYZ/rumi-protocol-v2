@@ -5,6 +5,7 @@ use candid::{decode_one, encode_args, encode_one, Nat, Principal};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc2::approve::ApproveArgs;
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
+use rumi_3pool::payouts::{PayoutEntitlement, PayoutOutcome};
 use rumi_3pool::types::{ThreePoolError, ThreePoolInitArgs, ThreePoolPendingClaim, TokenConfig};
 
 const USER_FUNDS: [u128; 3] = [
@@ -208,6 +209,32 @@ fn claims(h: &Harness) -> Vec<ThreePoolPendingClaim> {
     .unwrap()
 }
 
+fn payout(h: &Harness, owner: Principal, id: u64) -> PayoutEntitlement {
+    decode_one(&reply(
+        h.pic
+            .query_call(
+                h.pool,
+                owner,
+                "get_payout_entitlement",
+                encode_one(id).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap()
+}
+
+fn call_ledger_flag(h: &Harness, ledger: Principal, method: &str, value: bool) {
+    h.pic
+        .update_call(ledger, h.user, method, encode_one(value).unwrap())
+        .unwrap();
+}
+
+fn call_ledger_nat(h: &Harness, ledger: Principal, method: &str, value: u128) {
+    h.pic
+        .update_call(ledger, h.user, method, encode_one(Nat::from(value)).unwrap())
+        .unwrap();
+}
+
 #[test]
 fn add_liquidity_records_both_failed_refunds_when_two_prior_pulls_succeeded() {
     let h = setup();
@@ -269,6 +296,25 @@ fn add_liquidity_records_both_failed_refunds_when_two_prior_pulls_succeeded() {
         balance(&h, h.ledgers[1], h.user),
         USER_FUNDS[1] - SEED[1] - ADD[1]
     );
+
+    // Mixed recovery: one previously rejected ledger is available again while
+    // the other remains failed. The first claim exact-replays; the second stays.
+    call_ledger_flag(&h, h.ledgers[0], "set_fail_transfers", false);
+    let recovered: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "claim_pending",
+                encode_one(recorded[0].id).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    recovered.expect("first refund should recover with its stored transfer tuple");
+    let remaining = claims(&h);
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, recorded[1].id);
 }
 
 #[test]
@@ -308,4 +354,143 @@ fn insufficient_capacity_rejects_before_any_add_liquidity_pull_and_keeps_old_cla
     assert_eq!(existing.len(), 1);
     assert_eq!(existing[0].id, first_id);
     assert_eq!(existing[0].amount, 777);
+}
+
+#[test]
+fn committed_output_with_lost_reply_replays_exact_identity_once_and_settles_after_upgrade() {
+    let h = setup();
+    let input_before = balance(&h, h.ledgers[0], h.user);
+    let output_before = balance(&h, h.ledgers[1], h.user);
+    h.pic
+        .update_call(
+            h.ledgers[1],
+            h.user,
+            "set_phantom_failures",
+            encode_one(1u32).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<u128, ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "swap",
+                encode_args((0u8, 1u8, 100_000_000u128, 1u128)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(result, Err(ThreePoolError::TransferFailed { .. })));
+    let claim = claims(&h).into_iter().find(|claim| claim.token_index == 1).unwrap();
+    let before_retry = balance(&h, h.ledgers[1], h.user);
+    assert!(before_retry > output_before, "phantom mode must commit before reporting failure");
+    assert_eq!(input_before - balance(&h, h.ledgers[0], h.user), 100_000_000);
+    let first = payout(&h, h.user, claim.id);
+    let identity = &first.attempts[0].transfer;
+    assert_eq!(identity.ledger, h.ledgers[1]);
+    assert_eq!(identity.to.owner, h.user);
+    assert_eq!(identity.gross, first.gross);
+    assert_eq!(identity.net + identity.fee, identity.gross);
+    assert_eq!(identity.memo.len(), 32);
+    assert!(matches!(first.attempts[0].outcome, PayoutOutcome::Unresolved { .. }));
+
+    h.pic
+        .upgrade_canister(
+            h.pool,
+            wasm_artifact("rumi_3pool.wasm"),
+            encode_args(()).unwrap(),
+            None,
+        )
+        .unwrap();
+    let after_upgrade = payout(&h, h.user, claim.id);
+    assert_eq!(after_upgrade.attempts[0].transfer, *identity);
+
+    let retried: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(h.pool, h.user, "claim_pending", encode_one(claim.id).unwrap())
+            .unwrap(),
+    ))
+    .unwrap();
+    retried.expect("exact replay should return Duplicate and settle the swap");
+    assert_eq!(balance(&h, h.ledgers[1], h.user), before_retry);
+    assert_eq!(balance(&h, h.ledgers[0], h.user), input_before - 100_000_000);
+    assert!(claims(&h).iter().all(|pending| pending.id != claim.id));
+    assert!(payout(&h, h.user, claim.id).settled);
+}
+
+#[test]
+fn legacy_claim_survives_upgrade_and_cannot_create_a_fresh_transfer() {
+    let h = setup();
+    let id: u64 = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.admin,
+                "test_insert_pending_claim",
+                encode_args((1u8, 777u128)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    h.pic
+        .upgrade_canister(
+            h.pool,
+            wasm_artifact("rumi_3pool.wasm"),
+            encode_args(()).unwrap(),
+            None,
+        )
+        .unwrap();
+    let before = balance(&h, h.ledgers[1], h.user);
+    let result: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(h.pool, h.admin, "claim_pending", encode_one(id).unwrap())
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(result, Err(ThreePoolError::LegacyClaimHeld)));
+    assert_eq!(balance(&h, h.ledgers[1], h.user), before);
+    assert!(claims(&h).iter().any(|claim| claim.id == id));
+}
+
+#[test]
+fn proven_bad_fee_starts_new_exact_attempt_with_refreshed_fee() {
+    let h = setup();
+    h.pic
+        .update_call(
+            h.ledgers[0],
+            h.user,
+            "set_bad_fee_failures",
+            encode_one(1u32).unwrap(),
+        )
+        .unwrap();
+    call_ledger_nat(&h, h.ledgers[0], "set_fee", 100);
+
+    let result: Result<Vec<Nat>, ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "remove_liquidity",
+                encode_args((100_000_000u128, vec![0u128; 3])).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(result, Err(ThreePoolError::TransferFailed { .. })));
+    let claim = claims(&h).into_iter().find(|claim| claim.token_index == 0).unwrap();
+    let before_retry = balance(&h, h.ledgers[0], h.user);
+    call_ledger_nat(&h, h.ledgers[0], "set_fee", 250);
+    let retried: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(h.pool, h.user, "claim_pending", encode_one(claim.id).unwrap())
+            .unwrap(),
+    ))
+    .unwrap();
+    retried.expect("typed BadFee proves no transfer and allows a new attempt");
+    let updated = payout(&h, h.user, claim.id);
+    assert_eq!(updated.attempts.len(), 2);
+    assert_eq!(updated.attempts[1].transfer.fee, 250);
+    assert_eq!(updated.attempts[1].transfer.net + 250, claim.amount);
+    assert_eq!(balance(&h, h.ledgers[0], h.user) - before_retry, claim.amount - 250);
 }
