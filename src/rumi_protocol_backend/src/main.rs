@@ -1829,6 +1829,10 @@ async fn open_chain_vault_evm(
     intent: rumi_protocol_backend::chains::evm::eip712::VaultIntent,
     signature: Vec<u8>,
 ) -> Result<u64, ProtocolError> {
+    // Anonymous EVM opens remain disabled until a separately reviewed scarce,
+    // economic admission mechanism is implemented. This must run before
+    // signature verification, nonce allocation, vault-id reservation, or tECDSA.
+    ensure_evm_open_admission()?;
     use rumi_protocol_backend::chains::evm::eip712::IntentAction;
     let v = verify_intent_ctx(&intent, &signature, IntentAction::Open)?;
     let pre_await_now_ns = ic_cdk::api::time();
@@ -1903,6 +1907,82 @@ async fn open_chain_vault_evm(
         }
         Ok(vault_id)
     })
+}
+
+/// Default-off release hold for public EVM vault creation. Enabling requires a
+/// reviewed admission mechanism that cannot be exhausted by unfunded opens.
+const EVM_OPEN_ADMISSION_ENABLED: bool = false;
+
+fn ensure_evm_open_admission() -> Result<(), ProtocolError> {
+    if EVM_OPEN_ADMISSION_ENABLED {
+        Ok(())
+    } else {
+        Err(ProtocolError::EvmAuth(
+            "EVM vault opening is disabled pending bounded admission".into(),
+        ))
+    }
+}
+
+/// Reject EVM payouts whose value cannot cover the transaction's worst-case
+/// intrinsic gas reserve. The fee ceiling is taken from the persisted chain
+/// config; missing or non-EVM config fails closed. A legacy Open vault whose
+/// entire balance is at or below this floor has no automatic close path and
+/// requires a separately reviewed recovery disposition before EVM re-enable.
+fn enforce_evm_withdrawal_floor(
+    state: &State,
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    amount_wei: u128,
+) -> Result<(), ProtocolError> {
+    let reserve = evm_withdrawal_gas_reserve(state, chain)?;
+    if amount_wei <= reserve {
+        return Err(ProtocolError::EvmAuth(
+            "withdrawal is zero or below the configured gas-reserve floor".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn evm_withdrawal_gas_reserve(
+    state: &State,
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<u128, ProtocolError> {
+    use rumi_protocol_backend::chains::config::GasStrategy;
+    let config = state
+        .multi_chain
+        .chain_configs
+        .get(&chain)
+        .ok_or_else(|| ProtocolError::EvmAuth("missing EVM chain config".into()))?;
+    let max_fee_gwei = match &config.gas_strategy {
+        GasStrategy::EvmEip1559 {
+            max_fee_gwei_ceiling,
+            ..
+        } => *max_fee_gwei_ceiling,
+        GasStrategy::EvmLegacy {
+            gas_price_gwei_ceiling,
+        } => *gas_price_gwei_ceiling,
+        _ => return Err(ProtocolError::EvmAuth("non-EVM gas strategy".into())),
+    };
+    let reserve = (rumi_protocol_backend::chains::evm::tx::NATIVE_WITHDRAWAL_GAS_LIMIT as u128)
+        .checked_mul(max_fee_gwei as u128)
+        .and_then(|value| value.checked_mul(1_000_000_000))
+        .ok_or_else(|| ProtocolError::EvmAuth("withdrawal gas reserve overflow".into()))?;
+    Ok(reserve)
+}
+
+fn enforce_evm_withdrawal_remainder_floor(
+    state: &State,
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    current_balance_wei: u128,
+    withdrawal_wei: u128,
+) -> Result<(), ProtocolError> {
+    let remaining = current_balance_wei.saturating_sub(withdrawal_wei);
+    let reserve = evm_withdrawal_gas_reserve(state, chain)?;
+    if remaining != 0 && remaining <= reserve {
+        return Err(ProtocolError::EvmAuth(
+            "partial withdrawal would leave collateral below the gas-reserve floor; withdraw the full balance to close".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// EVM-signed `Borrow` (synchronous — no `.await`, so the nonce check + op +
@@ -1990,6 +2070,19 @@ fn withdraw_chain_collateral_evm(
         // queue mutation. Debt-free exits remain available while readiness is
         // degraded or the chain is Disabled.
         enforce_evm_withdraw_public_risk_gate(s, intent.vault_id, v.chain, now)?;
+        enforce_evm_withdrawal_floor(s, v.chain, intent.collateral_wei)?;
+        let current_collateral = s
+            .multi_chain
+            .chain_vaults
+            .get(&intent.vault_id)
+            .map(|vault| vault.collateral_amount_native)
+            .ok_or_else(|| ProtocolError::EvmAuth("unknown vault".into()))?;
+        enforce_evm_withdrawal_remainder_floor(
+            s,
+            v.chain,
+            current_collateral,
+            intent.collateral_wei,
+        )?;
         let expected = s.multi_chain.expected_evm_nonce(&v.synthetic);
         if intent.nonce != expected {
             return Err(ProtocolError::EvmAuth(format!(
@@ -2030,6 +2123,13 @@ fn close_chain_vault_evm(
         if !evm_owns_vault(s, intent.vault_id, &v) {
             return Err(ProtocolError::EvmAuth("not the vault owner".into()));
         }
+        let amount = s
+            .multi_chain
+            .chain_vaults
+            .get(&intent.vault_id)
+            .map(|vault| vault.collateral_amount_native)
+            .ok_or_else(|| ProtocolError::EvmAuth("unknown vault".into()))?;
+        enforce_evm_withdrawal_floor(s, v.chain, amount)?;
         let expected = s.multi_chain.expected_evm_nonce(&v.synthetic);
         if intent.nonce != expected {
             return Err(ProtocolError::EvmAuth(format!(
@@ -14113,7 +14213,10 @@ mod chain_vault_param_tests {
 /// consumption and again after the custody-derivation await.
 #[cfg(test)]
 mod evm_open_public_gate_tests {
-    use super::{replace_state, verify_intent_ctx, State};
+    use super::{
+        enforce_evm_withdrawal_floor, enforce_evm_withdrawal_remainder_floor,
+        ensure_evm_open_admission, replace_state, verify_intent_ctx, State,
+    };
     use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
     use rumi_protocol_backend::chains::evm::eip712::{IntentAction, VaultIntent};
 
@@ -14149,6 +14252,57 @@ mod evm_open_public_gate_tests {
             nonce: 0,
             deadline_secs: u64::MAX,
         }
+    }
+
+    #[test]
+    fn public_evm_open_is_default_off_before_signature_or_state_work() {
+        let error = ensure_evm_open_admission().expect_err("admission remains held");
+        assert!(format!("{error:?}").contains("disabled pending bounded admission"));
+    }
+
+    #[test]
+    fn evm_withdrawal_floor_reserves_configured_intrinsic_gas() {
+        let mut state = State::default();
+        state
+            .multi_chain
+            .chain_configs
+            .insert(CFX_MAINNET, registered_chain_config());
+        let reserve = 21_000u128 * 100 * 1_000_000_000;
+        assert!(enforce_evm_withdrawal_floor(&state, CFX_MAINNET, reserve).is_err());
+        assert!(enforce_evm_withdrawal_floor(&state, CFX_MAINNET, reserve + 1).is_ok());
+        assert!(enforce_evm_withdrawal_floor(&state, CFX_MAINNET, 0).is_err());
+    }
+
+    #[test]
+    fn partial_evm_withdrawal_cannot_leave_unspendable_gas_dust() {
+        let mut state = State::default();
+        state
+            .multi_chain
+            .chain_configs
+            .insert(CFX_MAINNET, registered_chain_config());
+        let reserve = 21_000u128 * 100 * 1_000_000_000;
+        let balance = reserve * 3;
+        assert!(enforce_evm_withdrawal_remainder_floor(
+            &state,
+            CFX_MAINNET,
+            balance,
+            balance - reserve,
+        )
+        .is_err());
+        assert!(enforce_evm_withdrawal_remainder_floor(
+            &state,
+            CFX_MAINNET,
+            balance,
+            balance - reserve - 1,
+        )
+        .is_ok());
+        assert!(enforce_evm_withdrawal_remainder_floor(
+            &state,
+            CFX_MAINNET,
+            balance,
+            balance,
+        )
+        .is_ok());
     }
 
     /// The core pin: chain registered + a fresh manual price present, but NO

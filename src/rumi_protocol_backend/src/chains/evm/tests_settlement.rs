@@ -97,6 +97,36 @@ fn select_next_op_prefers_queued_then_inflight() {
 }
 
 #[test]
+fn settlement_fee_must_stay_within_configured_gas_ceiling() {
+    let chain = ChainId(10143);
+    let mut state = MultiChainState::default();
+    state.chain_configs.insert(
+        chain,
+        ChainConfigV3 {
+            chain_id: chain,
+            display_name: "test EVM".into(),
+            rpc_endpoints: vec![],
+            finality_depth: 1,
+            gas_strategy: GasStrategy::EvmEip1559 {
+                max_priority_fee_gwei: 1,
+                max_fee_gwei_ceiling: 100,
+            },
+            chain_native_decimals: 18,
+            registered_at_ns: 0,
+            status: ChainStatus::Registered,
+            burn_watch_poll_enabled: false,
+            min_quorum_providers: None,
+        },
+    );
+    assert!(
+        super::settlement::ensure_fee_within_chain_ceiling(&state, chain, 100_000_000_000).is_ok()
+    );
+    assert!(
+        super::settlement::ensure_fee_within_chain_ceiling(&state, chain, 100_000_000_001).is_err()
+    );
+}
+
+#[test]
 fn select_next_op_confirms_inflight_before_submitting_new() {
     let mut q = crate::chains::settlement_queue::SettlementQueueV1::default();
     let op0 = SettlementOp::new(
@@ -164,6 +194,109 @@ fn select_next_op_filter_skips_blocked_queued_without_starving_later_allowed_ops
         Some((oid, OpAction::Submit)) => assert_eq!(oid, allowed_id),
         other => panic!("expected later allowed op to submit, got {other:?}"),
     }
+}
+
+#[test]
+fn rotating_a_deferred_head_prevents_head_of_line_starvation() {
+    let mut q = crate::chains::settlement_queue::SettlementQueueV1::default();
+    let blocked_id = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xr".into(),
+                amount_e8s: 10,
+                vault_id: 1,
+            },
+            "deferred-mint".into(),
+            0,
+        ))
+        .unwrap();
+    let later_id = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::NativeWithdrawal {
+                recipient: "0xw".into(),
+                amount_e18: 10,
+                vault_id: 2,
+            },
+            "later-withdrawal".into(),
+            1,
+        ))
+        .unwrap();
+    assert_eq!(
+        select_next_op_with_submit_filter(&q, |id, _| id == blocked_id),
+        Some((later_id, OpAction::Submit))
+    );
+    q.rotate_queued_to_tail(blocked_id);
+    assert_eq!(
+        select_next_op(&q),
+        Some((later_id, OpAction::Submit)),
+        "a still-deferred Mint moves behind later eligible work"
+    );
+}
+
+#[test]
+fn selector_fails_closed_when_persisted_fifo_is_ambiguous() {
+    let mut q = crate::chains::settlement_queue::SettlementQueueV1::default();
+    q.enqueue(SettlementOp::new(
+        SettlementOpKind::NativeWithdrawal {
+            recipient: "0xw".into(),
+            amount_e18: 10,
+            vault_id: 2,
+        },
+        "withdrawal".into(),
+        1,
+    ))
+    .unwrap();
+    q.drain_order.clear();
+    assert_eq!(select_next_op(&q), None);
+}
+
+#[test]
+fn retry_rotation_changes_only_queued_order_and_preserves_inflight_identity() {
+    let mut q = crate::chains::settlement_queue::SettlementQueueV1::default();
+    let deferred = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::NativeWithdrawal {
+                recipient: "0xw".into(),
+                amount_e18: 10,
+                vault_id: 1,
+            },
+            "deferred".into(),
+            0,
+        ))
+        .unwrap();
+    let inflight = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xr".into(),
+                amount_e8s: 10,
+                vault_id: 2,
+            },
+            "broadcast".into(),
+            1,
+        ))
+        .unwrap();
+    let op = q.pending.get_mut(&inflight).unwrap();
+    op.mark_inflight(2);
+    op.submit_nonce = Some(19);
+    op.record_tx_hash_candidate("0xalready-broadcast".into());
+    q.rotate_queued_to_tail(deferred);
+    q.rotate_queued_to_tail(inflight);
+
+    assert_eq!(
+        q.drain_order.iter().copied().collect::<Vec<_>>(),
+        vec![inflight, deferred]
+    );
+    assert_eq!(q.pending[&deferred].op_id, deferred);
+    assert_eq!(q.pending[&inflight].op_id, inflight);
+    assert_eq!(q.pending[&inflight].submit_nonce, Some(19));
+    assert_eq!(
+        q.pending[&inflight].last_tx_hash.as_deref(),
+        Some("0xalready-broadcast")
+    );
+    assert_eq!(
+        q.pending[&inflight].tx_hash_candidates,
+        vec!["0xalready-broadcast"]
+    );
 }
 
 fn liquidation_config() -> ChainLiquidationConfigV1 {

@@ -1,6 +1,7 @@
 use super::settlement_queue::{
     SettlementOp, SettlementOpKind, SettlementOpStatus, SettlementQueueError,
-    SettlementQueueV1,
+    SettlementQueueV1, MAX_ACTIVE_SETTLEMENT_OPS_PER_CHAIN,
+    MAX_ACTIVE_SETTLEMENT_OPS_PER_VAULT, MAX_RISK_INCREASING_SETTLEMENT_OPS_PER_CHAIN,
 };
 use candid::{Decode, Encode};
 
@@ -78,6 +79,134 @@ fn enqueue_rejects_duplicate_idempotency_key() {
     q.enqueue(op_a).expect("first");
     let err = q.enqueue(op_b).expect_err("second must reject");
     assert!(matches!(err, SettlementQueueError::DuplicateIdempotencyKey(_)));
+}
+
+#[test]
+fn enqueue_bounds_active_work_per_chain_and_vault() {
+    let mut per_vault = SettlementQueueV1::default();
+    for i in 0..MAX_ACTIVE_SETTLEMENT_OPS_PER_VAULT {
+        per_vault
+            .enqueue(SettlementOp::new(
+                SettlementOpKind::Mint {
+                    recipient: "0xa".into(),
+                    amount_e8s: 1,
+                    vault_id: 7,
+                },
+                format!("vault-7-{i}"),
+                i as u64,
+            ))
+            .unwrap();
+    }
+    assert_eq!(
+        per_vault.enqueue(SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xa".into(),
+                amount_e8s: 1,
+                vault_id: 7,
+            },
+            "vault-7-overflow".into(),
+            5,
+        )),
+        Err(SettlementQueueError::VaultOutstandingLimit(7))
+    );
+
+    let mut global = SettlementQueueV1::default();
+    for i in 0..MAX_ACTIVE_SETTLEMENT_OPS_PER_CHAIN {
+        global
+            .enqueue(SettlementOp::new(
+                SettlementOpKind::Burn { amount_e8s: 1 },
+                format!("burn-{i}"),
+                i as u64,
+            ))
+            .unwrap();
+    }
+    assert_eq!(
+        global.enqueue(SettlementOp::new(
+            SettlementOpKind::Burn { amount_e8s: 1 },
+            "burn-overflow".into(),
+            999,
+        )),
+        Err(SettlementQueueError::QueueFull)
+    );
+}
+
+#[test]
+fn enqueue_allows_only_one_active_native_withdrawal_per_vault() {
+    let mut q = SettlementQueueV1::default();
+    q.enqueue(SettlementOp::new(
+        SettlementOpKind::NativeWithdrawal {
+            recipient: "0xa".into(),
+            amount_e18: 1,
+            vault_id: 7,
+        },
+        "withdraw-1".into(),
+        1,
+    ))
+    .unwrap();
+    assert_eq!(
+        q.enqueue(SettlementOp::new(
+            SettlementOpKind::NativeWithdrawal {
+                recipient: "0xa".into(),
+                amount_e18: 2,
+                vault_id: 7,
+            },
+            "withdraw-2".into(),
+            2,
+        )),
+        Err(SettlementQueueError::DuplicateVaultWithdrawal(7))
+    );
+}
+
+#[test]
+fn deferred_mints_cannot_consume_capacity_reserved_for_exits_and_payouts() {
+    let mut q = SettlementQueueV1::default();
+    for vault_id in 0..MAX_RISK_INCREASING_SETTLEMENT_OPS_PER_CHAIN as u64 {
+        q.enqueue(SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xa".into(),
+                amount_e8s: 1,
+                vault_id,
+            },
+            format!("mint-{vault_id}"),
+            vault_id,
+        ))
+        .unwrap();
+    }
+    assert_eq!(
+        q.enqueue(SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xa".into(),
+                amount_e8s: 1,
+                vault_id: 10_000,
+            },
+            "mint-overflow".into(),
+            999,
+        )),
+        Err(SettlementQueueError::QueueFull)
+    );
+    assert!(q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::NativeWithdrawal {
+                recipient: "0xa".into(),
+                amount_e18: 1,
+                vault_id: 20_000,
+            },
+            "exit".into(),
+            1_000,
+        ))
+        .is_ok());
+    assert!(q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::ChainCollateralPayout {
+                recipient: "0xa".into(),
+                amount_e18: 1,
+                vault_id: 20_001,
+                claimant: candid::Principal::anonymous(),
+            },
+            "payout".into(),
+            1_001,
+        ))
+        .is_ok());
 }
 
 #[test]
