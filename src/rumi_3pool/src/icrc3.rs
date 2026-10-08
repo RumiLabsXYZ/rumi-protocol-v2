@@ -124,6 +124,7 @@ pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> 
         Icrc3Transaction::Transfer {
             from, to, amount, spender,
             from_subaccount, to_subaccount, spender_subaccount,
+            memo, created_at_time,
         } => {
             let mut fields = vec![
                 ("op".to_string(), Icrc3Value::Text("xfer".to_string())),
@@ -137,11 +138,21 @@ pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> 
                     account_to_value(*s, spender_subaccount.as_deref()),
                 ));
             }
+            if let Some(memo) = memo {
+                fields.push(("memo".to_string(), Icrc3Value::Blob(memo.clone())));
+            }
+            if let Some(created_at_time) = created_at_time {
+                fields.push((
+                    "ts".to_string(),
+                    Icrc3Value::Nat(Nat::from(*created_at_time)),
+                ));
+            }
             ("1xfer", fields)
         }
         Icrc3Transaction::Approve {
             from, spender, amount, expires_at,
             from_subaccount, spender_subaccount,
+            memo, created_at_time,
         } => {
             // Cap approve amounts to u64::MAX for index-ng compatibility.
             // The standard index-ng deserializes amounts as u64 and rejects
@@ -156,6 +167,15 @@ pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> 
             // index-ng expects "expected_allowance" and "expires_at" (full names, not abbreviated)
             if let Some(exp) = expires_at {
                 fields.push(("expires_at".to_string(), Icrc3Value::Nat(Nat::from(*exp))));
+            }
+            if let Some(memo) = memo {
+                fields.push(("memo".to_string(), Icrc3Value::Blob(memo.clone())));
+            }
+            if let Some(created_at_time) = created_at_time {
+                fields.push((
+                    "ts".to_string(),
+                    Icrc3Value::Nat(Nat::from(*created_at_time)),
+                ));
             }
             ("2approve", fields)
         }
@@ -175,6 +195,85 @@ pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> 
     block_map.push(("tx".to_string(), Icrc3Value::Map(tx_map)));
 
     Icrc3Value::Map(block_map)
+}
+
+#[cfg(test)]
+mod transaction_metadata_tests {
+    use super::*;
+
+    #[derive(CandidType, Deserialize)]
+    enum LegacyTransaction {
+        Transfer {
+            from: Principal,
+            to: Principal,
+            amount: u128,
+            spender: Option<Principal>,
+            from_subaccount: Option<Vec<u8>>,
+            to_subaccount: Option<Vec<u8>>,
+            spender_subaccount: Option<Vec<u8>>,
+        },
+    }
+
+    #[derive(CandidType, Deserialize)]
+    struct LegacyBlock {
+        id: u64,
+        timestamp: u64,
+        tx: LegacyTransaction,
+    }
+
+    #[test]
+    fn legacy_candid_transaction_decodes_and_keeps_legacy_encoding() {
+        let legacy = LegacyBlock {
+            id: 7,
+            timestamp: 99,
+            tx: LegacyTransaction::Transfer {
+                from: Principal::anonymous(),
+                to: Principal::management_canister(),
+                amount: 11,
+                spender: None,
+                from_subaccount: None,
+                to_subaccount: None,
+                spender_subaccount: None,
+            },
+        };
+        let bytes = candid::encode_one(&legacy).unwrap();
+        let decoded: Icrc3Block = candid::decode_one(&bytes).unwrap();
+        match &decoded.tx {
+            Icrc3Transaction::Transfer { memo, created_at_time, .. } => {
+                assert!(memo.is_none());
+                assert!(created_at_time.is_none());
+            }
+            other => panic!("expected legacy transfer, got {other:?}"),
+        }
+
+        let legacy_projection = match legacy.tx {
+            LegacyTransaction::Transfer {
+                from,
+                to,
+                amount,
+                spender,
+                from_subaccount,
+                to_subaccount,
+                spender_subaccount,
+            } => Icrc3Transaction::Transfer {
+                from,
+                to,
+                amount,
+                spender,
+                from_subaccount,
+                to_subaccount,
+                spender_subaccount,
+                memo: None,
+                created_at_time: None,
+            },
+        };
+        let expected = Icrc3Block { id: 7, timestamp: 99, tx: legacy_projection };
+        assert_eq!(
+            encode_block_with_phash(&decoded, None),
+            encode_block_with_phash(&expected, None),
+            "missing metadata must leave the historical block value unchanged",
+        );
+    }
 }
 
 

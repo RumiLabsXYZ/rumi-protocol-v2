@@ -277,6 +277,8 @@ pub fn icrc1_transfer(caller: Principal, args: TransferArg) -> Result<Nat, Trans
     let to_principal = args.to.owner;
     let from_subaccount = args.from_subaccount.map(|s| s.to_vec());
     let to_subaccount = args.to.subaccount.map(|s| s.to_vec());
+    let memo = args.memo.map(|memo| memo.0.into_vec());
+    let created_at_time = args.created_at_time;
 
     let amount = nat_to_u128(&args.amount).map_err(|_| TransferError::GenericError {
         error_code: Nat::from(2u64),
@@ -322,6 +324,8 @@ pub fn icrc1_transfer(caller: Principal, args: TransferArg) -> Result<Nat, Trans
             from_subaccount,
             to_subaccount,
             spender_subaccount: None,
+            memo,
+            created_at_time,
         });
         Ok(id)
     });
@@ -372,6 +376,8 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
     let spender_principal = args.spender.owner;
     let from_subaccount = args.from_subaccount.map(|s| s.to_vec());
     let spender_subaccount = args.spender.subaccount.map(|s| s.to_vec());
+    let memo = args.memo.map(|memo| memo.0.into_vec());
+    let created_at_time = args.created_at_time;
 
     let amount = nat_to_u128(&args.amount).map_err(|_| ApproveError::GenericError {
         error_code: Nat::from(2u64),
@@ -417,6 +423,8 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
             expires_at: args.expires_at,
             from_subaccount,
             spender_subaccount,
+            memo,
+            created_at_time,
         });
         Ok(id)
     });
@@ -491,6 +499,8 @@ pub fn icrc2_transfer_from(
     let from_subaccount = args.from.subaccount.map(|s| s.to_vec());
     let to_subaccount = args.to.subaccount.map(|s| s.to_vec());
     let spender_subaccount = args.spender_subaccount.map(|s| s.to_vec());
+    let memo = args.memo.map(|memo| memo.0.into_vec());
+    let created_at_time = args.created_at_time;
 
     let amount = nat_to_u128(&args.amount).map_err(|_| TransferFromError::GenericError {
         error_code: Nat::from(2u64),
@@ -551,6 +561,8 @@ pub fn icrc2_transfer_from(
             from_subaccount,
             to_subaccount,
             spender_subaccount,
+            memo,
+            created_at_time,
         });
         Ok(id)
     });

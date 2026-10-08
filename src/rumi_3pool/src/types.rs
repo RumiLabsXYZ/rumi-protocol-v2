@@ -165,6 +165,12 @@ pub enum Icrc3Transaction {
         to_subaccount: Option<Vec<u8>>,
         #[serde(default)]
         spender_subaccount: Option<Vec<u8>>,
+        /// Original ICRC-1/2 request memo, absent from legacy blocks.
+        #[serde(default)]
+        memo: Option<Vec<u8>>,
+        /// Original request created_at_time, absent from legacy blocks.
+        #[serde(default)]
+        created_at_time: Option<u64>,
     },
     Approve {
         from: Principal,
@@ -175,6 +181,12 @@ pub enum Icrc3Transaction {
         from_subaccount: Option<Vec<u8>>,
         #[serde(default)]
         spender_subaccount: Option<Vec<u8>>,
+        /// Original ICRC-2 approval memo, absent from legacy blocks.
+        #[serde(default)]
+        memo: Option<Vec<u8>>,
+        /// Original request created_at_time, absent from legacy blocks.
+        #[serde(default)]
+        created_at_time: Option<u64>,
     },
 }
 
