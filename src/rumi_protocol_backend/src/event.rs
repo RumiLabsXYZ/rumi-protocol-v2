@@ -978,7 +978,11 @@ pub enum Event {
 /// Compatibility boundary: the paired production DID has never exposed these
 /// variants, so production Event logs do not contain them. A pre-release or
 /// staging log written by a build that stored these variants in the public
-/// Event log needs a one-time migration before upgrading to this layout.
+/// Event log needs a one-time migration before upgrading to this layout. In
+/// particular, source predecessor `50245136` could write these tags, while the
+/// production backend hash `1714712f...07b0ecf1` and its captured DID predate
+/// them. Do not treat a staging canister on that predecessor as upgrade-safe
+/// unless its Event log is known not to contain these records.
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BotProofAuditEvent {
     #[serde(rename = "bot_proof_mode_enabled")]

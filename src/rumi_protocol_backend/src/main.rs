@@ -10060,6 +10060,53 @@ mod bot_payment_proof_tests {
         ));
     }
 
+    /// Source predecessor 50245136 included these tags in the public Event
+    /// enum. Lock the release fence: this build intentionally does not decode
+    /// those records as public Events because doing so would re-expand the
+    /// Candid variant set and break the paired live interface. Staging logs
+    /// containing any such row require an explicit migration before upgrade.
+    #[test]
+    fn predecessor_only_bot_public_events_are_outside_the_supported_decode_fence() {
+        #[derive(serde::Serialize)]
+        enum PredecessorBotEvent {
+            #[serde(rename = "bot_proof_mode_enabled")]
+            ProofModeEnabled,
+            #[serde(rename = "bot_claim_generation_reserved")]
+            ClaimGenerationReserved { generation: u64 },
+            #[serde(rename = "bot_payment_proof_consumed")]
+            PaymentProofConsumed {
+                ledger_principal: Principal,
+                block_index: u64,
+                vault_id: u64,
+                claim_generation: u64,
+            },
+        }
+
+        let predecessor_events = [
+            PredecessorBotEvent::ProofModeEnabled,
+            PredecessorBotEvent::ClaimGenerationReserved { generation: 17 },
+            PredecessorBotEvent::PaymentProofConsumed {
+                ledger_principal: Principal::from_slice(&[4, 5, 6]),
+                block_index: 18,
+                vault_id: 19,
+                claim_generation: 20,
+            },
+        ];
+
+        for event in predecessor_events {
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&event, &mut bytes)
+                .expect("encode predecessor public bot event");
+            assert!(
+                ciborium::de::from_reader::<rumi_protocol_backend::event::Event, _>(
+                    bytes.as_slice()
+                )
+                .is_err(),
+                "the public Event decoder must not accept predecessor-only bot tags"
+            );
+        }
+    }
+
     #[test]
     fn private_bot_audit_query_preserves_scan_cursor_across_payout_entries() {
         use rumi_protocol_backend::event::{BotProofAuditEvent, PendingPayoutEvent};
