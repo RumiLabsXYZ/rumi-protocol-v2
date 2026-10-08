@@ -1,4 +1,4 @@
-use candid::Principal;
+use candid::{candid_method, Principal};
 use ic_cdk::{query, update, init, pre_upgrade, post_upgrade};
 use ic_canister_log::log;
 use std::cell::Cell;

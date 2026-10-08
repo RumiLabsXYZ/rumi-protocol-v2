@@ -8636,9 +8636,9 @@ async fn liquidate_vault_debt_already_burned_inner(
 
     if vault_id != proof.vault_id_memo {
         // For IcusdBurn `validate_block` already enforces this against the
-        // memo. For ThreePoolTransfer there is no memo on the block (3pool
-        // ledger doesn't persist memos into ICRC-3); this assertion is the
-        // single binding point against the call's vault_id, so any internal
+        // memo. For legacy ThreePoolTransfer this assertion is the single
+        // binding point against the call's vault_id; P08 V2 validates its
+        // exact ICRC-2 transfer memo/CAT independently. Any internal
         // misconstruction surfaces with a tight error before mutation.
         guard_principal.fail();
         return Err(ProtocolError::GenericError(format!(

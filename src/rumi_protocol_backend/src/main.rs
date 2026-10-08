@@ -7176,8 +7176,9 @@ fn claim_chain_collateral(
 /// until after the backend's own transfer), so the proof argument has been
 /// retired from the entry point's surface; vault binding is enforced by
 /// `liquidate_vault_debt_already_burned`'s `vault_id_memo == vault_id`
-/// assertion. The 3pool ledger does not persist memos into ICRC-3 blocks,
-/// so the verifier skips the memo check on this path; replay defense via
+/// assertion. This legacy reserve path does not bind transaction metadata;
+/// the default-account P08 V2 path verifies the exact ICRC-2 memo/CAT tuple.
+/// Replay defense via
 /// `consumed_writedown_proofs` and on-chain account/amount validation
 /// remain in force.
 #[update]

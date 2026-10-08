@@ -25,11 +25,10 @@
 //!   * `ThreePoolTransfer` (reserves `_with_reserves` path) — the proof is
 //!     produced by the backend itself after `transfer_3usd_to_reserves`
 //!     succeeds, so vault binding is enforced by code construction at
-//!     proof-build time. The on-chain block has no memo to check (the
-//!     `rumi_3pool` ledger's `Icrc3Transaction::Transfer` variant does not
-//!     persist memos into ICRC-3 blocks; it only consumes them for ICRC-1
-//!     dedup). Verification on this kind asserts op / amount / from / to,
-//!     and the consumed-proof set still blocks block-index replay.
+//!     proof-build time. This legacy proof kind asserts op / amount / from /
+//!     to and the consumed-proof set blocks block-index replay. The P08 V2
+//!     ingress path uses the separate exact tuple validator below, including
+//!     spender, memo, created_at_time, fee, and both accounts.
 //!
 //! Replay within a single vault is blocked by the consumed-proof set on
 //! `State` (see `State::consumed_writedown_proofs`).
@@ -568,13 +567,10 @@ pub async fn icrc3_log_length(ledger: Principal) -> Result<u64, String> {
 /// `ThreePoolTransfer`-specific rules:
 ///   * `op == "xfer"` (or `"transfer"`).
 ///   * `to` must equal `expected.reserves_account`.
-///   * Memo is NOT checked. The `rumi_3pool` ledger does not persist memos
-///     into its ICRC-3 block log (only consumes them for ICRC-1 dedup), and
-///     the proof on this path is constructed by the backend itself rather
-///     than supplied by the SP, so cross-vault replay is prevented by the
-///     backend's code-time construction (`vault_id_memo` is set to the
-///     call's `vault_id`) plus the consumed-proof set's per-block-index
-///     replay defense.
+///   * This legacy proof kind does not validate ICRC-1 transaction metadata;
+///     the P08 V2 route uses `validate_three_usd_reserve_ingress_block` for
+///     its exact ICRC-2 tuple. Here the backend constructs proof after the
+///     transfer, and the consumed-proof set blocks block-index replay.
 pub fn validate_block(block: &DecodedBlock, expected: &ProofExpectations) -> Result<u64, String> {
     match expected.ledger_kind {
         SpProofLedger::IcusdBurn => {
@@ -840,7 +836,7 @@ fn account_to_value(account: Account) -> ICRC3Value {
 
 #[cfg(test)]
 mod three_usd_reserve_ingress_tests {
-    use super::{validate_three_usd_ingress_scan_page, validate_three_usd_reserve_ingress_block, DecodedBlock};
+    use super::{decode_block, validate_three_usd_ingress_scan_page, validate_three_usd_reserve_ingress_block, DecodedBlock};
     use candid::Nat;
     use icrc_ledger_types::icrc3::blocks::{ArchivedBlocks, BlockWithId, GetBlocksRequest, GetBlocksResult};
     use icrc_ledger_types::icrc3::archive::QueryArchiveFn;
@@ -927,6 +923,52 @@ mod three_usd_reserve_ingress_tests {
             }],
         };
         assert!(validate_three_usd_ingress_scan_page(0, 2, 2, &archived, &tuple).is_err());
+    }
+
+    #[test]
+    fn real_3pool_encoder_output_satisfies_backend_exact_transfer_from_verifier() {
+        let tuple = tuple();
+        let block = rumi_3pool::types::Icrc3Block {
+            id: 5,
+            timestamp: 777,
+            tx: rumi_3pool::types::Icrc3Transaction::Transfer {
+                from: tuple.source.owner,
+                to: tuple.destination.owner,
+                amount: u128::from(tuple.amount_e8s),
+                spender: Some(tuple.spender_owner),
+                from_subaccount: tuple.source.subaccount.map(|sub| sub.to_vec()),
+                to_subaccount: tuple.destination.subaccount.map(|sub| sub.to_vec()),
+                spender_subaccount: tuple.spender_subaccount.map(|sub| sub.to_vec()),
+                memo: Some(tuple.memo.to_vec()),
+                created_at_time: Some(tuple.created_at_time_ns),
+            },
+        };
+        let encoded = rumi_3pool::icrc3::encode_block_with_phash(&block, None);
+        let bytes = candid::encode_one(encoded).unwrap();
+        let wire_value: ICRC3Value = candid::decode_one(&bytes).unwrap();
+        let decoded = decode_block(&wire_value).unwrap();
+        assert_eq!(validate_three_usd_reserve_ingress_block(&decoded, &tuple), Ok(0));
+
+        let owner_transfer = rumi_3pool::types::Icrc3Block {
+            id: 6,
+            timestamp: 778,
+            tx: rumi_3pool::types::Icrc3Transaction::Transfer {
+                from: tuple.source.owner,
+                to: tuple.destination.owner,
+                amount: u128::from(tuple.amount_e8s),
+                spender: None,
+                from_subaccount: tuple.source.subaccount.map(|sub| sub.to_vec()),
+                to_subaccount: tuple.destination.subaccount.map(|sub| sub.to_vec()),
+                spender_subaccount: tuple.spender_subaccount.map(|sub| sub.to_vec()),
+                memo: Some(tuple.memo.to_vec()),
+                created_at_time: Some(tuple.created_at_time_ns),
+            },
+        };
+        let owner_wire = rumi_3pool::icrc3::encode_block_with_phash(&owner_transfer, None);
+        let owner_bytes = candid::encode_one(owner_wire).unwrap();
+        let owner_wire_value: ICRC3Value = candid::decode_one(&owner_bytes).unwrap();
+        let decoded_owner_transfer = decode_block(&owner_wire_value).unwrap();
+        assert!(validate_three_usd_reserve_ingress_block(&decoded_owner_transfer, &tuple).is_err());
     }
 
     #[test]
