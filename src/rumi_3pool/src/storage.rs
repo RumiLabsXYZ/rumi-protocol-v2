@@ -938,6 +938,19 @@ pub mod pending_claims {
         PENDING_CLAIMS.with(|m| m.borrow().len())
     }
 
+    /// Sum claims for one token without collecting the stable map into a heap Vec.
+    /// Returns `None` if the total exceeds `u128`.
+    pub fn total_for_token(token_index: u8) -> Option<u128> {
+        PENDING_CLAIMS.with(|m| {
+            m.borrow()
+                .iter()
+                .filter_map(|(_, claim)| {
+                    (claim.token_index == token_index).then_some(claim.amount)
+                })
+                .try_fold(0u128, |total, amount| total.checked_add(amount))
+        })
+    }
+
     /// List a bounded page of pending claims ordered by id.
     pub fn list(offset: u64, limit: u64) -> Vec<ThreePoolPendingClaim> {
         PENDING_CLAIMS.with(|m| {

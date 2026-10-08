@@ -1350,7 +1350,18 @@ pub async fn receive_donation(token_index: u8, amount: u128) -> Result<(), Three
             });
         }
     };
-    let expected_min = read_state(|s| s.balances[idx]) + amount;
+    // The ledger account also holds tokens backing liabilities that are not
+    // included in `balances`: accrued admin fees and failed outbound
+    // transfers/refunds recorded as pending claims. Do not let a donation
+    // acknowledgement reclassify those funds as LP reserves.
+    let (tracked_reserves, admin_fees) = read_state(|s| (s.balances[idx], s.admin_fees[idx]));
+    let pending_claims = storage::pending_claims::total_for_token(token_index)
+        .ok_or(ThreePoolError::MathOverflow)?;
+    let expected_min = tracked_reserves
+        .checked_add(admin_fees)
+        .and_then(|liabilities| liabilities.checked_add(pending_claims))
+        .and_then(|liabilities| liabilities.checked_add(amount))
+        .ok_or(ThreePoolError::MathOverflow)?;
     if on_chain_balance < expected_min {
         log!(INFO, "receive_donation: on-chain balance {} < expected {}", on_chain_balance, expected_min);
         return Err(ThreePoolError::TransferFailed {
