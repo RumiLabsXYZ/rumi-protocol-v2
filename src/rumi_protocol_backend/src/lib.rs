@@ -1140,6 +1140,7 @@ mod bot_claim_return_tests {
     use super::bot_claim_return_is_releasable;
     use crate::state::{
         BotClaim, BotCollateralReturnProof, BotCollateralTransfer, BotCollateralTransferStatus,
+        BotMemoVersion,
     };
     use candid::Principal;
 
@@ -1147,6 +1148,7 @@ mod bot_claim_return_tests {
         BotClaim {
             vault_id: 7,
             generation: 42,
+            memo_version: Some(BotMemoVersion::V2),
             collateral_transfer: Some(BotCollateralTransfer {
                 op_nonce: 1,
                 created_at_time: 1,

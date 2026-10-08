@@ -736,6 +736,12 @@ impl CollateralStatus {
     }
 }
 
+/// Claims created before V2 have no version field and retain their V1 memos.
+#[derive(candid::CandidType, Clone, Debug, serde::Deserialize, Serialize)]
+pub enum BotMemoVersion {
+    V2,
+}
+
 /// Tracks a bot's pending liquidation claim on a vault.
 #[derive(candid::CandidType, Clone, Debug, serde::Deserialize, Serialize)]
 pub struct BotClaim {
@@ -744,6 +750,10 @@ pub struct BotClaim {
     /// Monotonic claim identity; distinguishes a later claim for this vault.
     #[serde(default)]
     pub generation: u64,
+    /// Exact memo format reserved with this claim. Missing on pre-V2 stable
+    /// claims, whose already-dispatched V1 tuples must not be reinterpreted.
+    #[serde(default)]
+    pub memo_version: Option<BotMemoVersion>,
     /// Transfer tuple reserved before dispatch. `None` identifies legacy or
     /// test-only claim records that cannot safely be retried automatically.
     #[serde(default)]
@@ -7344,6 +7354,7 @@ mod tests {
         let claim = BotClaim {
             vault_id: 7,
             generation: 42,
+            memo_version: Some(BotMemoVersion::V2),
             collateral_transfer: Some(BotCollateralTransfer {
                 op_nonce: 7,
                 created_at_time: 1,
@@ -7361,14 +7372,36 @@ mod tests {
             collateral_price_e8s: 1,
             collateral_return_proof: None,
         };
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&claim, &mut encoded).expect("encode claim snapshot");
+        let mut old_cbor: ciborium::value::Value =
+            ciborium::de::from_reader(encoded.as_slice()).expect("decode claim snapshot value");
+        let ciborium::value::Value::Map(fields) = &mut old_cbor else {
+            panic!("claim snapshot must be a map");
+        };
+        fields.retain(|(key, _)| {
+            !matches!(key, ciborium::value::Value::Text(name) if name == "memo_version")
+        });
+        let mut legacy_bytes = Vec::new();
+        ciborium::ser::into_writer(&old_cbor, &mut legacy_bytes)
+            .expect("encode pre-V2 claim snapshot");
+        let decoded_cbor: BotClaim = ciborium::de::from_reader(legacy_bytes.as_slice())
+            .expect("decode pre-V2 CBOR claim snapshot");
+        assert!(decoded_cbor.memo_version.is_none());
+
         let mut old_value = serde_json::to_value(claim).expect("serialize claim");
         old_value
             .as_object_mut()
             .expect("claim serializes as a record")
             .remove("prior_collateral_transfer");
+        old_value
+            .as_object_mut()
+            .expect("claim serializes as a record")
+            .remove("memo_version");
         let decoded: BotClaim =
             serde_json::from_value(old_value).expect("decode legacy claim");
         assert!(decoded.prior_collateral_transfer.is_none());
+        assert!(decoded.memo_version.is_none());
         assert!(decoded
             .collateral_transfer
             .as_ref()

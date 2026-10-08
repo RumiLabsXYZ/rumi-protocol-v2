@@ -9573,21 +9573,44 @@ pub struct BotCollateralReturnProofArg {
 
 // Native ICP ledger ICRC-1 transfers reject memos longer than 32 bytes.
 // Keep the domain tag plus two eight-byte claim identifiers within that cap.
-const BOT_PAYMENT_MEMO_PREFIX: &[u8] = b"RUMI-BPAY-V2:";
-const BOT_RETURN_MEMO_PREFIX: &[u8] = b"RUMI-BRET-V2:";
+const BOT_PAYMENT_MEMO_PREFIX_V1: &[u8] = b"RUMI-BOT-PAYMENT-V1:";
+const BOT_RETURN_MEMO_PREFIX_V1: &[u8] = b"RUMI-BOT-RETURN-V1:";
+const BOT_PAYMENT_MEMO_PREFIX_V2: &[u8] = b"RUMI-BPAY-V2:";
+const BOT_RETURN_MEMO_PREFIX_V2: &[u8] = b"RUMI-BRET-V2:";
 
-fn bot_payment_memo(vault_id: u64, generation: u64) -> Vec<u8> {
-    let mut memo = BOT_PAYMENT_MEMO_PREFIX.to_vec();
+fn bot_memo(prefix: &[u8], vault_id: u64, generation: u64) -> Vec<u8> {
+    let mut memo = prefix.to_vec();
     memo.extend_from_slice(&vault_id.to_be_bytes());
     memo.extend_from_slice(&generation.to_be_bytes());
     memo
 }
 
+fn bot_payment_memo(vault_id: u64, generation: u64) -> Vec<u8> {
+    bot_memo(BOT_PAYMENT_MEMO_PREFIX_V2, vault_id, generation)
+}
+
 fn bot_collateral_return_memo(vault_id: u64, generation: u64) -> Vec<u8> {
-    let mut memo = BOT_RETURN_MEMO_PREFIX.to_vec();
-    memo.extend_from_slice(&vault_id.to_be_bytes());
-    memo.extend_from_slice(&generation.to_be_bytes());
-    memo
+    bot_memo(BOT_RETURN_MEMO_PREFIX_V2, vault_id, generation)
+}
+
+fn bot_payment_memo_for_claim(claim: &rumi_protocol_backend::state::BotClaim) -> Vec<u8> {
+    match claim.memo_version.as_ref() {
+        Some(rumi_protocol_backend::state::BotMemoVersion::V2) => {
+            bot_payment_memo(claim.vault_id, claim.generation)
+        }
+        None => bot_memo(BOT_PAYMENT_MEMO_PREFIX_V1, claim.vault_id, claim.generation),
+    }
+}
+
+fn bot_collateral_return_memo_for_claim(
+    claim: &rumi_protocol_backend::state::BotClaim,
+) -> Vec<u8> {
+    match claim.memo_version.as_ref() {
+        Some(rumi_protocol_backend::state::BotMemoVersion::V2) => {
+            bot_collateral_return_memo(claim.vault_id, claim.generation)
+        }
+        None => bot_memo(BOT_RETURN_MEMO_PREFIX_V1, claim.vault_id, claim.generation),
+    }
 }
 
 fn bot_liquidation_result_from_claim(
@@ -9607,8 +9630,8 @@ fn bot_liquidation_result_from_claim(
         debt_covered: claim.debt_amount,
         collateral_price_e8s: claim.collateral_price_e8s,
         claim_generation: claim.generation,
-        payment_memo: bot_payment_memo(claim.vault_id, claim.generation),
-        collateral_return_memo: bot_collateral_return_memo(claim.vault_id, claim.generation),
+        payment_memo: bot_payment_memo_for_claim(claim),
+        collateral_return_memo: bot_collateral_return_memo_for_claim(claim),
         payment_ledger_principal: claim.payment_ledger_principal,
     }
 }
@@ -9964,6 +9987,7 @@ mod bot_payment_proof_tests {
         rumi_protocol_backend::state::BotClaim {
             vault_id: 7,
             generation: 42,
+            memo_version: Some(rumi_protocol_backend::state::BotMemoVersion::V2),
             collateral_transfer: Some(rumi_protocol_backend::state::BotCollateralTransfer {
                 op_nonce: 1,
                 created_at_time: 1,
@@ -9991,6 +10015,21 @@ mod bot_payment_proof_tests {
         assert_eq!(memo, bot_payment_memo(7, 42));
         assert_ne!(memo, bot_payment_memo(7, 43));
         assert_ne!(memo, bot_payment_memo(8, 42));
+    }
+
+    #[test]
+    fn pre_v2_claim_keeps_its_original_payment_and_return_memos() {
+        let mut claim = claim_with_outbound_terms(100, Some(90), Some(10));
+        claim.memo_version = None;
+        let old_payment = bot_memo(BOT_PAYMENT_MEMO_PREFIX_V1, 7, 42);
+        let old_return = bot_memo(BOT_RETURN_MEMO_PREFIX_V1, 7, 42);
+        let result = bot_liquidation_result_from_claim(&claim);
+        assert_eq!(result.payment_memo, old_payment);
+        assert_eq!(result.collateral_return_memo, old_return);
+        assert_eq!(bot_payment_memo_for_claim(&claim), old_payment);
+        assert_eq!(bot_collateral_return_memo_for_claim(&claim), old_return);
+        assert_ne!(old_payment, bot_payment_memo(7, 42));
+        assert_ne!(old_return, bot_collateral_return_memo(7, 42));
     }
 
     #[test]
@@ -10721,6 +10760,7 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         let claim = rumi_protocol_backend::state::BotClaim {
             vault_id,
             generation,
+            memo_version: Some(rumi_protocol_backend::state::BotMemoVersion::V2),
             collateral_transfer: Some(rumi_protocol_backend::state::BotCollateralTransfer {
                 op_nonce,
                 created_at_time,
@@ -10899,7 +10939,7 @@ async fn bot_confirm_liquidation_with_proof(
             "Bot payment amount is short or created_at_time is missing".into(),
         ));
     }
-    let memo = bot_payment_memo(proof.vault_id, proof.claim_generation);
+    let memo = bot_payment_memo_for_claim(&claim);
     // Validate the canonical ICRC-1 tuple. ICRC-3 records tx.ts only when
     // created_at_time was supplied by the transfer caller.
     rumi_protocol_backend::icrc3_proof::verify_icrc3_transfer_block(
@@ -11022,7 +11062,7 @@ async fn bot_record_collateral_return_proof(
             ))
         };
     }
-    let memo = bot_collateral_return_memo(proof.vault_id, proof.claim_generation);
+    let memo = bot_collateral_return_memo_for_claim(&claim);
     let native_icp_ledger = read_state(|s| s.icp_ledger_principal == claim.collateral_type)
         && rumi_protocol_backend::native_icp_proof::is_native_icp_ledger(claim.collateral_type);
     let _actual_fee = if native_icp_ledger {
@@ -11282,6 +11322,7 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
             rumi_protocol_backend::state::BotClaim {
                 vault_id,
                 generation,
+                memo_version: Some(rumi_protocol_backend::state::BotMemoVersion::V2),
                 collateral_transfer: None,
                 prior_collateral_transfer: None,
                 payment_ledger_principal: None,
@@ -11450,6 +11491,7 @@ async fn dev_force_partial_bot_liquidate(
             rumi_protocol_backend::state::BotClaim {
                 vault_id,
                 generation,
+                memo_version: Some(rumi_protocol_backend::state::BotMemoVersion::V2),
                 collateral_transfer: None,
                 prior_collateral_transfer: None,
                 payment_ledger_principal: None,
