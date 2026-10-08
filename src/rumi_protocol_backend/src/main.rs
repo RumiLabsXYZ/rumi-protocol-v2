@@ -691,16 +691,18 @@ fn capture_protocol_snapshot() {
                 .unwrap_or(0);
             let price = config.last_price.unwrap_or(0.0);
 
-            // Convert collateral to USD value (e8s)
-            let col_decimal =
-                Decimal::from(col_total) / Decimal::from(10u64.pow(config.decimals as u32));
-            let usd_value = (col_decimal * Decimal::try_from(price).unwrap_or_default())
-                * Decimal::from(100_000_000u64);
-            let usd_e8s = usd_value.to_u64().unwrap_or(0);
+            // Convert collateral to USD value (e8s) through the checked
+            // shared conversion; config precision must never trap a snapshot.
+            let usd_e8s = rumi_protocol_backend::numeric::collateral_usd_value(
+                col_total,
+                Decimal::try_from(price).unwrap_or_default(),
+                config.decimals,
+            )
+            .to_u64();
 
-            total_collateral_value_usd += usd_e8s;
-            total_debt += debt;
-            total_vault_count += vault_count;
+            total_collateral_value_usd = total_collateral_value_usd.saturating_add(usd_e8s);
+            total_debt = total_debt.saturating_add(debt);
+            total_vault_count = total_vault_count.saturating_add(vault_count);
 
             collateral_snapshots.push(CollateralSnapshot {
                 collateral_type: *ct,
@@ -815,6 +817,17 @@ fn post_upgrade(arg: ProtocolArg) {
             INFO,
             "[upgrade]: froze XRP collateral status from {:?} because the configured Schnorr key is not production",
             previous
+        );
+    }
+    for (collateral_type, decimals, previous_status) in
+        rumi_protocol_backend::state::freeze_unsupported_collateral_precision(&mut state)
+    {
+        log!(
+            INFO,
+            "[upgrade]: froze collateral {} with unsupported {}-decimal precision from {:?}",
+            collateral_type,
+            decimals,
+            previous_status
         );
     }
 
@@ -8828,8 +8841,13 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
             let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
             let collateral_raw =
                 rumi_protocol_backend::numeric::icusd_to_collateral_amount(actual, price, decimals);
-            let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-            let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+            let collateral_to_seize = ICP::from(
+                rumi_protocol_backend::numeric::collateral_with_bonus_capped(
+                    collateral_raw,
+                    liq_bonus,
+                    vault.collateral_amount,
+                ),
+            );
 
             Ok((
                 collateral_price_usd,
@@ -9144,8 +9162,13 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
             let collateral_raw =
                 rumi_protocol_backend::numeric::icusd_to_collateral_amount(debt, price, decimals);
             let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
-            let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-            let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+            let collateral_to_seize = ICP::from(
+                rumi_protocol_backend::numeric::collateral_with_bonus_capped(
+                    collateral_raw,
+                    liq_bonus,
+                    vault.collateral_amount,
+                ),
+            );
 
             Ok::<_, ProtocolError>((
                 collateral_price_usd,
@@ -9287,8 +9310,13 @@ async fn dev_force_partial_bot_liquidate(
             let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
             let collateral_raw =
                 rumi_protocol_backend::numeric::icusd_to_collateral_amount(actual, price, decimals);
-            let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-            let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+            let collateral_to_seize = ICP::from(
+                rumi_protocol_backend::numeric::collateral_with_bonus_capped(
+                    collateral_raw,
+                    liq_bonus,
+                    vault.collateral_amount,
+                ),
+            );
 
             Ok::<_, ProtocolError>((
                 collateral_price_usd,
@@ -12604,6 +12632,14 @@ async fn register_icrc_collateral_token(
             )));
         }
     };
+    // Rumi's price conversion paths support at most 18 decimals (the same
+    // bound enforced for XRC price normalization). Reject unsupported ledger
+    // metadata before creating a collateral config that could bypass it.
+    if decimals > 18 {
+        return Err(ProtocolError::GenericError(format!(
+            "Unsupported collateral precision: {decimals} decimals (maximum 18)"
+        )));
+    }
 
     // Query icrc1_fee from the ledger
     let fee_result: Result<(candid::Nat,), _> =

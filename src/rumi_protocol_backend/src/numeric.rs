@@ -19,7 +19,6 @@ const ICUSD_DEC: u64 = 100_000_000;
 /// Nanoseconds in a 365-day year. Used for interest accrual.
 pub const NANOS_PER_YEAR: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
 
-
 #[derive(PartialEq, Eq, Debug, Ord, PartialOrd, Clone, Copy)]
 pub struct Amount<T>(pub Decimal, pub PhantomData<T>);
 
@@ -153,7 +152,6 @@ impl<T> PartialEq<Token<T>> for u64 {
     }
 }
 
-
 // Keep enums instead of structs
 #[derive(PartialEq, Eq, Debug, Ord, PartialOrd, Serialize, Deserialize, Clone, Copy)]
 pub enum IcusdTag {}
@@ -168,12 +166,10 @@ pub enum UsdIcpTag {}
 pub enum RatioTag {}
 
 // Type definitions using enum tags
-pub type ICUSD = Token<IcusdTag>;    // Integer token amounts
-pub type ICP = Token<IcpTag>;        // Integer token amounts
+pub type ICUSD = Token<IcusdTag>; // Integer token amounts
+pub type ICP = Token<IcpTag>; // Integer token amounts
 pub type UsdIcp = Amount<UsdIcpTag>; // Decimal exchange rate
-pub type Ratio = Amount<RatioTag>;   // Decimal ratios
-
-
+pub type Ratio = Amount<RatioTag>; // Decimal ratios
 
 impl<T> Sum for Token<T> {
     fn sum<I>(iter: I) -> Self
@@ -234,7 +230,6 @@ impl From<u64> for ICUSD {
     }
 }
 
-
 impl ICUSD {
     pub const fn new(value: u64) -> Self {
         Token(value, PhantomData::<IcusdTag>)
@@ -271,7 +266,6 @@ impl From<Decimal> for UsdIcp {
     }
 }
 
-
 impl Ratio {
     pub const fn new(value: Decimal) -> Self {
         Amount(value, PhantomData::<RatioTag>)
@@ -287,13 +281,13 @@ impl Ratio {
 
     pub fn pow(self, rhs: u64) -> Self {
         if rhs == 0 {
-            return Amount(Decimal::ONE, PhantomData::<RatioTag>); 
+            return Amount(Decimal::ONE, PhantomData::<RatioTag>);
         }
         let mut result = Decimal::ONE;
         for _ in 0..rhs {
             result *= self.0;
         }
-        Amount(result, PhantomData::<RatioTag>) 
+        Amount(result, PhantomData::<RatioTag>)
     }
 }
 
@@ -327,7 +321,6 @@ impl<T> SubAssign for Amount<T> {
         self.0 -= rhs.0;
     }
 }
-
 
 impl Mul<UsdIcp> for ICP {
     type Output = ICUSD;
@@ -376,7 +369,7 @@ impl Mul<Ratio> for Ratio {
     type Output = Ratio;
     fn mul(self, other: Ratio) -> Ratio {
         let result = self.0 * other.0;
-        Amount(result, PhantomData::<RatioTag>) 
+        Amount(result, PhantomData::<RatioTag>)
     }
 }
 
@@ -400,15 +393,13 @@ impl Div<ICUSD> for ICUSD {
     }
 }
 
-
-
 impl Div<Ratio> for ICUSD {
     type Output = ICUSD;
     fn div(self, other: Ratio) -> ICUSD {
         assert_ne!(other.0, Decimal::ZERO, "cannot divide {} by 0", self.0);
         let icusd_dec = Decimal::from_u64(self.0).unwrap() / Decimal::from_u64(ICUSD_DEC).unwrap();
         let result = (icusd_dec / other.0) * Decimal::from_u64(ICUSD_DEC).unwrap();
-        Token::<IcusdTag>(result.to_u64().unwrap(), PhantomData) 
+        Token::<IcusdTag>(result.to_u64().unwrap(), PhantomData)
     }
 }
 
@@ -420,14 +411,13 @@ impl Div<Ratio> for UsdIcp {
     }
 }
 
-
 impl Div<ICP> for ICP {
     type Output = Ratio;
     fn div(self, other: ICP) -> Ratio {
         assert_ne!(other.0, 0, "cannot divide {} by 0", self.0);
         let icp_dec = Decimal::from_u64(self.0).unwrap();
         let div_by = Decimal::from_u64(other.0).unwrap();
-        Amount::<RatioTag>(icp_dec / div_by, PhantomData) 
+        Amount::<RatioTag>(icp_dec / div_by, PhantomData)
     }
 }
 
@@ -474,17 +464,56 @@ impl<T> fmt::Display for Token<T> {
 /// `price_usd` is the USD price per 1 whole token,
 /// `decimals` is the token's decimal precision (e.g. 8 for ICP, 6 for ckUSDC).
 pub fn collateral_usd_value(amount: u64, price_usd: Decimal, decimals: u8) -> ICUSD {
-    let whole_tokens = Decimal::from(amount) / Decimal::from(10u64.pow(decimals as u32));
-    let usd_value = whole_tokens * price_usd;
-    // Convert to ICUSD e8s (8-decimal precision)
-    let e8s = (usd_value * dec!(100_000_000)).to_u64().unwrap_or(0);
+    if price_usd <= Decimal::ZERO {
+        return ICUSD::new(0);
+    }
+    let decimal_scale = checked_decimal_scale(decimals);
+    // Invalid precision beyond Decimal's scale range is treated as zero
+    // collateral. This is conservative for health checks and cannot trap a
+    // post-transfer shortfall calculation.
+    let Some(decimal_scale) = decimal_scale else {
+        return ICUSD::new(0);
+    };
+    let e8s = Decimal::from(amount)
+        .checked_div(decimal_scale)
+        .and_then(|whole_tokens| whole_tokens.checked_mul(price_usd))
+        .and_then(|usd_value| usd_value.checked_mul(Decimal::from(ICUSD_DEC)))
+        .and_then(|value| value.to_u64())
+        .unwrap_or(u64::MAX);
     ICUSD::from(e8s)
+}
+
+/// Compute `part / total * amount` without forming a potentially overflowing
+/// `part * amount` intermediate. The result is bounded by `amount` when
+/// `part <= total`.
+pub fn checked_proportional_amount(part: u64, total: u64, amount: u64) -> Option<u64> {
+    if total == 0 {
+        return None;
+    }
+    let part = Decimal::from(part);
+    let amount = Decimal::from(amount);
+    let total = Decimal::from(total);
+
+    // Preserve the historical `(part * amount) / total` truncation whenever
+    // its intermediate is representable. Divide first only to avoid an
+    // otherwise avoidable overflow; callers cap the result to the source pool.
+    match part.checked_mul(amount) {
+        Some(product) => product.checked_div(total)?.to_u64(),
+        None => part.checked_div(total)?.checked_mul(amount)?.to_u64(),
+    }
+}
+
+fn checked_decimal_scale(decimals: u8) -> Option<Decimal> {
+    (0..decimals).try_fold(Decimal::ONE, |scale, _| scale.checked_mul(Decimal::TEN))
 }
 
 /// Convert raw collateral amount to a Decimal of whole-token units.
 /// Useful for CR calculations that work in decimal ratios.
 pub fn collateral_to_whole_tokens(amount: u64, decimals: u8) -> Decimal {
-    Decimal::from(amount) / Decimal::from(10u64.pow(decimals as u32))
+    match checked_decimal_scale(decimals) {
+        Some(scale) => Decimal::from(amount) / scale,
+        None => Decimal::ZERO,
+    }
 }
 
 /// Convert ICUSD value to raw collateral amount (inverse of collateral_usd_value).
@@ -492,13 +521,85 @@ pub fn collateral_to_whole_tokens(amount: u64, decimals: u8) -> Decimal {
 /// returns the raw token amount in native precision.
 /// Example: 10 icUSD at $5/token with 8 decimals = 2 * 10^8 = 200_000_000 raw units.
 pub fn icusd_to_collateral_amount(icusd_value: ICUSD, price_usd: Decimal, decimals: u8) -> u64 {
+    try_icusd_to_collateral_amount(icusd_value, price_usd, decimals).unwrap_or_else(|| {
+        ic_cdk::trap("ICUSD collateral conversion exceeds the u64 collateral range")
+    })
+}
+
+/// Checked form of [`icusd_to_collateral_amount`]. Returns `None` when the
+/// mathematically required raw collateral amount cannot fit in `u64`.
+/// Callers handling an already-finalized external burn may use
+/// [`icusd_to_collateral_amount_for_burned_debt`] to preserve the write-down.
+pub fn try_icusd_to_collateral_amount(
+    icusd_value: ICUSD,
+    price_usd: Decimal,
+    decimals: u8,
+) -> Option<u64> {
     if price_usd.is_zero() {
-        return 0;
+        return Some(0);
     }
     let usd_value = Decimal::from(icusd_value.to_u64()) / dec!(100_000_000);
-    let whole_tokens = usd_value / price_usd;
-    let raw_amount = whole_tokens * Decimal::from(10u64.pow(decimals as u32));
-    raw_amount.to_u64().unwrap_or(0)
+    let whole_tokens = usd_value.checked_div(price_usd)?;
+    let decimal_scale = 10u64.checked_pow(decimals as u32)?;
+    let raw_amount = whole_tokens.checked_mul(Decimal::from(decimal_scale))?;
+    raw_amount.to_u64()
+}
+
+/// Convert an ICUSD amount including a liquidation bonus without first
+/// narrowing the bonus-adjusted ICUSD e8 amount to u64. Preflight and committed
+/// accounting must use this same calculation so fractional raw units round
+/// identically on both sides of the ledger transfer.
+pub fn try_icusd_to_collateral_amount_with_bonus(
+    icusd_value: ICUSD,
+    price_usd: Decimal,
+    decimals: u8,
+    bonus: Ratio,
+) -> Option<u64> {
+    if price_usd.is_zero() {
+        return Some(0);
+    }
+    let usd_value = Decimal::from(icusd_value.to_u64()) / dec!(100_000_000);
+    let adjusted_usd_value = usd_value.checked_mul(bonus.0)?;
+    let whole_tokens = adjusted_usd_value.checked_div(price_usd)?;
+    let decimal_scale = 10u64.checked_pow(decimals as u32)?;
+    let raw_amount = whole_tokens.checked_mul(Decimal::from(decimal_scale))?;
+    raw_amount.to_u64()
+}
+
+/// Return a saturating collateral requirement for a debt amount already
+/// irreversibly burned by an external ledger. The caller must cap this against
+/// the vault's actual collateral before transferring or recording a seizure.
+/// Saturating to `u64::MAX` ensures an unrepresentable requirement cannot turn
+/// into zero collateral and strand the finalized burn.
+pub fn icusd_to_collateral_amount_for_burned_debt(
+    icusd_value: ICUSD,
+    price_usd: Decimal,
+    decimals: u8,
+) -> u64 {
+    try_icusd_to_collateral_amount(icusd_value, price_usd, decimals).unwrap_or(u64::MAX)
+}
+
+/// Apply a liquidation bonus while capping at the vault's actual collateral.
+/// Decimal arithmetic keeps the intermediate outside the narrower token type;
+/// an unrepresentable product necessarily exceeds every possible u64 vault.
+pub fn collateral_with_bonus_capped(
+    collateral_raw: u64,
+    bonus: Ratio,
+    available_collateral: u64,
+) -> u64 {
+    let required = Decimal::from(collateral_raw).checked_mul(bonus.0);
+    match required {
+        Some(required) if required < Decimal::from(available_collateral) => {
+            required.to_u64().unwrap_or(available_collateral)
+        }
+        _ => available_collateral,
+    }
+}
+
+/// Checked debt addition for borrow paths that must reject overflow before
+/// calling the ledger to mint icUSD.
+pub fn checked_icusd_add(left: ICUSD, right: ICUSD) -> Option<ICUSD> {
+    left.0.checked_add(right.0).map(ICUSD::new)
 }
 
 impl<T> fmt::Display for Amount<T> {
