@@ -823,6 +823,20 @@ fn post_upgrade(arg: ProtocolArg) {
 
     replace_state(state);
 
+    // CoinGecko snapshots before provider-time caching used local fetch time,
+    // which could overstate source freshness. Force a provider-timestamped
+    // sample before a price-sensitive operation reuses each CoinGecko cache.
+    let invalidated_coingecko_caches = mutate_state(|state| {
+        rumi_protocol_backend::management::invalidate_legacy_coingecko_cache_timestamps(state)
+    });
+    if invalidated_coingecko_caches > 0 {
+        log!(
+            INFO,
+            "[post_upgrade] invalidated {} legacy CoinGecko cache timestamps",
+            invalidated_coingecko_caches
+        );
+    }
+
     // Migration: set last_accrual_time for any existing vaults that have it at 0.
     // This avoids a massive retroactive accrual on first tick.
     let now = ic_cdk::api::time();

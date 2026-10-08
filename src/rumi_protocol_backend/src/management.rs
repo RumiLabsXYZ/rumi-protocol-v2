@@ -140,7 +140,13 @@ fn commit_lst_wrapped_price(
     ) {
         return outcome;
     }
-    if !state.check_price_sanity_band(collateral_type, final_rate) {
+    if !crate::xrc::check_price_sanity_band_at_source(
+        state,
+        collateral_type,
+        Some(source),
+        expected_icp_timestamp_ns,
+        final_rate,
+    ) {
         return LstPriceRefreshOutcome::SanityRejected;
     }
     state.on_collateral_price_change(collateral_type, final_rate);
@@ -861,10 +867,20 @@ async fn refresh_lst_wrapped_price_once(
             config.last_price_timestamp,
         )
         .is_err()
+            || !crate::xrc::source_timestamp_is_fresh(
+                expected_icp_timestamp_ns,
+                ic_cdk::api::time(),
+            )
         {
             return false;
         }
-        if !state.check_price_sanity_band(&collateral_type, final_rate_f64) {
+        if !crate::xrc::check_price_sanity_band_at_source(
+            state,
+            &collateral_type,
+            Some(&source),
+            expected_icp_timestamp_ns,
+            final_rate_f64,
+        ) {
             return false;
         }
         state.on_collateral_price_change(&collateral_type, final_rate_f64);
@@ -947,50 +963,74 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
         return;
     }
 
+    let now_ns = ic_cdk::api::time();
+    let Some(_paid_refresh_lease) = crate::xrc::try_acquire_collateral_price_refresh(
+        collateral_type,
+        &price_source,
+        now_ns,
+    ) else {
+        log!(
+            TRACE_XRC,
+            "[fetch_collateral_price] suppressing duplicate paid refresh for {} in this source bar",
+            collateral_type
+        );
+        return;
+    };
+
     // CoinGecko variant uses HTTPS outcalls — completely separate path from XRC
     if let PriceSource::CoinGecko { ref coin_id, ref vs_currency } = price_source {
         let result = fetch_coingecko_price(coin_id, vs_currency).await;
         match result {
-            Some(price) => {
-                let ts_nanos = ic_cdk::api::time();
+            Some(sample) => {
+                let now_ns = ic_cdk::api::time();
+                if !crate::xrc::source_timestamp_is_fresh(sample.updated_at_ns, now_ns) {
+                    log!(
+                        TRACE_XRC,
+                        "[fetch_collateral_price] CoinGecko {} source timestamp {} is stale or future",
+                        coin_id,
+                        sample.updated_at_ns
+                    );
+                    return;
+                }
+                let ts_nanos = sample.updated_at_ns;
                 log!(
                     TRACE_XRC,
                     "[fetch_collateral_price] CoinGecko {} price: {} at {}",
-                    coin_id, price, ts_nanos
+                    coin_id, sample.price, ts_nanos
                 );
-                let should_update = read_state(|s| {
-                    s.get_collateral_config(&collateral_type)
-                        .map(|c| match c.last_price_timestamp {
-                            Some(last_ts) => last_ts < ts_nanos,
-                            None => true,
-                        })
-                        .unwrap_or(false)
-                });
-                if !should_update {
-                    return;
-                }
                 // Wave-5 LIQ-007: gate every accepted price through the sanity band
                 // (rejects single outliers, accepts after N consecutive confirmations).
-                let accepted = mutate_state(|s| s.check_price_sanity_band(&collateral_type, price));
+                // Fresh samples must reach this gate even if the local cache is
+                // younger than its reuse window: outlier confirmations require
+                // source observations spaced at least five minutes apart.
+                let accepted = mutate_state(|s| {
+                    if !crate::xrc::accept_price_at_source(
+                        s,
+                        &collateral_type,
+                        Some(&price_source),
+                        ts_nanos,
+                        sample.price,
+                        ic_cdk::api::time(),
+                    ) {
+                        return false;
+                    }
+                    s.on_collateral_price_change(&collateral_type, sample.price);
+                    if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
+                        config.last_price_timestamp = Some(ts_nanos);
+                    }
+                    if let Some(price_dec) = rust_decimal::Decimal::from_f64(sample.price) {
+                        crate::event::record_price_update(collateral_type, price_dec, ts_nanos);
+                    }
+                    true
+                });
                 if !accepted {
                     log!(
                         TRACE_XRC,
                         "[fetch_collateral_price] rejecting outlier CoinGecko price {} for {}; awaiting confirmation",
-                        price, coin_id
+                        sample.price, coin_id
                     );
                     return;
                 }
-                mutate_state(|s| {
-                    if s.collateral_configs.contains_key(&collateral_type) {
-                        s.on_collateral_price_change(&collateral_type, price);
-                        if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
-                            config.last_price_timestamp = Some(ts_nanos);
-                        }
-                        if let Some(price_dec) = rust_decimal::Decimal::from_f64(price) {
-                            crate::event::record_price_update(collateral_type, price_dec, ts_nanos);
-                        }
-                    }
-                });
             }
             None => {
                 log!(TRACE_XRC, "[fetch_collateral_price] CoinGecko failed for {}", coin_id);
@@ -1085,8 +1125,19 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
                 });
                 None
             } else {
-                let rate = rust_decimal::Decimal::from_u64(exchange_rate_result.rate).unwrap()
-                    / rust_decimal::Decimal::from_u64(10_u64.pow(exchange_rate_result.metadata.decimals)).unwrap();
+                let Some(rate) = crate::xrc::xrc_rate_to_decimal(
+                    exchange_rate_result.rate,
+                    exchange_rate_result.metadata.decimals,
+                ) else {
+                    log!(
+                        TRACE_XRC,
+                        "[fetch_collateral_price] rejecting invalid rate/decimals for {}: rate={} decimals={}",
+                        base_asset,
+                        exchange_rate_result.rate,
+                        exchange_rate_result.metadata.decimals
+                    );
+                    return;
+                };
 
                 log!(
                     TRACE_XRC,
@@ -1094,7 +1145,21 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
                     base_asset, rate, exchange_rate_result.timestamp
                 );
 
-                Some((rate, exchange_rate_result.timestamp * 1_000_000_000))
+                let Some(ts_nanos) = crate::xrc::xrc_timestamp_secs_to_ns(
+                    exchange_rate_result.timestamp,
+                )
+                .filter(|ts| crate::xrc::source_timestamp_is_fresh(*ts, ic_cdk::api::time()))
+                else {
+                    log!(
+                        TRACE_XRC,
+                        "[fetch_collateral_price] rejecting stale, future, or overflowing {} timestamp {}",
+                        base_asset,
+                        exchange_rate_result.timestamp
+                    );
+                    return;
+                };
+
+                Some((rate, ts_nanos))
             }
         }
         Ok((GetExchangeRateResult::Err(error),)) => {
@@ -1114,18 +1179,6 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
     // early-return branch.
     let final_rate = rate;
 
-    let should_update = read_state(|s| {
-        s.get_collateral_config(&collateral_type)
-            .map(|c| match c.last_price_timestamp {
-                Some(last_ts) => last_ts < ts_nanos,
-                None => true,
-            })
-            .unwrap_or(false)
-    });
-    if !should_update {
-        return;
-    }
-
     // Wave-5 LIQ-007: gate every accepted price through the sanity band.
     let final_rate_f64 = match final_rate.to_f64() {
         Some(v) if v.is_finite() && v > 0.0 => v,
@@ -1138,7 +1191,32 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
             return;
         }
     };
-    let accepted = mutate_state(|s| s.check_price_sanity_band(&collateral_type, final_rate_f64));
+    let accepted = mutate_state(|s| {
+        let Some(config) = s.get_collateral_config(&collateral_type) else {
+            return false;
+        };
+        if config.price_source != price_source
+            || config.last_price_timestamp.is_some_and(|last_ts| last_ts >= ts_nanos)
+        {
+            return false;
+        }
+        if !crate::xrc::accept_price_at_source(
+            s,
+            &collateral_type,
+            Some(&price_source),
+            ts_nanos,
+            final_rate_f64,
+            ic_cdk::api::time(),
+        ) {
+            return false;
+        }
+        s.on_collateral_price_change(&collateral_type, final_rate_f64);
+        if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
+            config.last_price_timestamp = Some(ts_nanos);
+        }
+        crate::event::record_price_update(collateral_type, final_rate, ts_nanos);
+        true
+    });
     if !accepted {
         log!(
             TRACE_XRC,
@@ -1148,20 +1226,54 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
         return;
     }
 
-    mutate_state(|s| {
-        if s.collateral_configs.contains_key(&collateral_type) {
-            s.on_collateral_price_change(&collateral_type, final_rate_f64);
-            if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
-                config.last_price_timestamp = Some(ts_nanos);
-            }
-            crate::event::record_price_update(collateral_type, final_rate, ts_nanos);
-        }
-    });
 }
 
-/// Fetch a token price from the CoinGecko simple/price API via HTTPS outcall.
-/// Returns the price as f64, or None on failure.
-async fn fetch_coingecko_price(coin_id: &str, vs_currency: &str) -> Option<f64> {
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CoinGeckoPriceSample {
+    price: f64,
+    updated_at_ns: u64,
+}
+
+fn parse_coingecko_price_sample(
+    body: &str,
+    coin_id: &str,
+    vs_currency: &str,
+) -> Option<CoinGeckoPriceSample> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    let coin = json.get(coin_id)?;
+    let price = coin.get(vs_currency)?.as_f64()?;
+    if !price.is_finite() || price <= 0.0 {
+        return None;
+    }
+    let updated_at_ns = coin
+        .get("last_updated_at")?
+        .as_u64()?
+        .checked_mul(crate::SEC_NANOS)?;
+    Some(CoinGeckoPriceSample { price, updated_at_ns })
+}
+
+/// Old CoinGecko snapshots recorded local fetch time, while fresh samples now
+/// record provider time. Invalidate only those timestamps on upgrade so the
+/// next price-sensitive operation fetches a provider-timestamped sample.
+pub fn invalidate_legacy_coingecko_cache_timestamps(
+    state: &mut crate::state::State,
+) -> usize {
+    state
+        .collateral_configs
+        .values_mut()
+        .filter_map(|config| {
+            (matches!(
+                &config.price_source,
+                crate::state::PriceSource::CoinGecko { .. }
+            ) && config.last_price_timestamp.take().is_some())
+            .then_some(())
+        })
+        .count()
+}
+
+/// Fetch a token price and provider update time from the CoinGecko
+/// simple/price API via HTTPS outcall.
+async fn fetch_coingecko_price(coin_id: &str, vs_currency: &str) -> Option<CoinGeckoPriceSample> {
     use ic_cdk::api::management_canister::http_request::{
         http_request, CanisterHttpRequestArgument, HttpHeader, HttpMethod,
         TransformContext,
@@ -1177,7 +1289,7 @@ async fn fetch_coingecko_price(coin_id: &str, vs_currency: &str) -> Option<f64> 
     const OUTCALL_CYCLES: u128 = 100_000_000;
 
     let url = format!(
-        "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies={}",
+        "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies={}&include_last_updated_at=true",
         coin_id, vs_currency
     );
 
@@ -1209,22 +1321,104 @@ async fn fetch_coingecko_price(coin_id: &str, vs_currency: &str) -> Option<f64> 
             }
 
             let body = String::from_utf8(response.body).ok()?;
-            // Response format: {"bob-3":{"usd":0.0957}}
-            let json: serde_json::Value = serde_json::from_str(&body).ok()?;
-            let price = json.get(coin_id)?.get(vs_currency)?.as_f64()?;
-
-            if price <= 0.0 {
-                log!(TRACE_XRC, "[coingecko] Non-positive price {} for {}", price, coin_id);
-                return None;
-            }
-
-            Some(price)
+            parse_coingecko_price_sample(&body, coin_id, vs_currency)
         }
         Err((code, msg)) => {
             log!(TRACE_XRC, "[coingecko] Outcall error for {}: {:?} {}", coin_id, code, msg);
             None
         }
     }
+}
+
+#[cfg(test)]
+mod coingecko_source_timestamp_tests {
+    use super::{invalidate_legacy_coingecko_cache_timestamps, parse_coingecko_price_sample};
+    use crate::state::{PriceSource, State};
+    use crate::InitArg;
+    use candid::Principal;
+
+    #[test]
+    fn parser_requires_provider_update_time_and_checks_nanosecond_conversion() {
+        let sample = parse_coingecko_price_sample(
+            r#"{"coin":{"usd":150.0,"last_updated_at":1700000000}}"#,
+            "coin",
+            "usd",
+        )
+        .unwrap();
+        assert_eq!(sample.price, 150.0);
+        assert_eq!(sample.updated_at_ns, 1_700_000_000_000_000_000);
+
+        assert!(parse_coingecko_price_sample(r#"{"coin":{"usd":150.0}}"#, "coin", "usd").is_none());
+        assert!(parse_coingecko_price_sample(
+            r#"{"coin":{"usd":150.0,"last_updated_at":18446744074}}"#,
+            "coin",
+            "usd",
+        )
+        .is_none());
+        assert!(parse_coingecko_price_sample(
+            r#"{"coin":{"usd":0.0,"last_updated_at":1700000000}}"#,
+            "coin",
+            "usd",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn upgrade_invalidates_legacy_local_cache_time_that_is_later_than_provider_time() {
+        let now_ns = 1_700_000_100_000_000_000;
+        let provider_timestamp_ns = now_ns - 10_000_000_000;
+        let legacy_local_timestamp_ns = now_ns - 1_000_000_000;
+        assert!(legacy_local_timestamp_ns > provider_timestamp_ns);
+
+        let mut state = State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let collateral = state.icp_collateral_type();
+        let mut config = state.get_collateral_config(&collateral).unwrap().clone();
+        config.price_source = PriceSource::CoinGecko {
+            coin_id: "example-token".to_string(),
+            vs_currency: "usd".to_string(),
+        };
+        config.last_price = Some(150.0);
+        config.last_price_timestamp = Some(legacy_local_timestamp_ns);
+        state.collateral_configs.insert(collateral, config);
+
+        assert_eq!(invalidate_legacy_coingecko_cache_timestamps(&mut state), 1);
+        let config = state.get_collateral_config(&collateral).unwrap();
+        assert_eq!(config.last_price, Some(150.0));
+        assert_eq!(config.last_price_timestamp, None);
+        let source = config.price_source.clone();
+        assert!(crate::xrc::accept_price_at_source(
+            &mut state,
+            &collateral,
+            Some(&source),
+            provider_timestamp_ns,
+            150.0,
+            now_ns,
+        ));
+        state.on_collateral_price_change(&collateral, 150.0);
+        state
+            .collateral_configs
+            .get_mut(&collateral)
+            .unwrap()
+            .last_price_timestamp = Some(provider_timestamp_ns);
+        assert_eq!(
+            state
+                .get_collateral_config(&collateral)
+                .unwrap()
+                .last_price_timestamp,
+            Some(provider_timestamp_ns),
+        );
+    }
+
 }
 
 pub async fn mint_icusd(amount: ICUSD, to: Principal) -> Result<u64, TransferError> {
