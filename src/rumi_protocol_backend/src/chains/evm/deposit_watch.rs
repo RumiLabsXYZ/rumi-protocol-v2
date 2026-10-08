@@ -51,7 +51,7 @@ use crate::Mode;
 
 use super::evm_rpc::{
     decode_burn_log, erc20_total_supply_at, fetch_block_numbers, get_balance, get_logs,
-    BURN_EVENT_TOPIC0,
+    BURN_EVENT_TOPIC0, MAX_BLOCK_SCAN_WINDOW,
 };
 use super::{hardening, public_readiness, tecdsa};
 use crate::chains::monad::chain_vault::{
@@ -63,6 +63,39 @@ use crate::chains::monad::chain_vault::{
 /// RPC outcalls. The stable per-chain cursor makes successive ticks fair.
 pub(crate) const MAX_AWAITING_DEPOSIT_GLOBAL_SCAN_PER_TICK: usize = 500;
 pub(crate) const MAX_AWAITING_DEPOSIT_POLLS_PER_TICK: usize = 25;
+
+pub(crate) fn replay_catchup_is_required(pending_ids: bool, proof_floor: u64, finalized: u64) -> bool {
+    pending_ids && proof_floor < finalized
+}
+
+pub(crate) fn burn_proof_coverage_window(
+    proof_floor: u64,
+    legacy_hold_through: u64,
+    finalized: u64,
+) -> Option<(u64, u64)> {
+    let from = proof_floor.max(legacy_hold_through).checked_add(1)?;
+    if from > finalized {
+        return None;
+    }
+    let through = from
+        .saturating_add(MAX_BLOCK_SCAN_WINDOW.saturating_sub(1))
+        .min(finalized);
+    Some((from, through))
+}
+
+pub(crate) fn observer_burn_was_already_consumed(
+    state: &MultiChainState,
+    chain: ChainId,
+    block: u64,
+    tx_hash: &str,
+    log_index: u64,
+) -> bool {
+    state.has_evm_burn_replay_id(chain, block, tx_hash, log_index)
+        || state
+            .processed_burn_keys
+            .get(&block)
+            .is_some_and(|keys| keys.contains(&format!("{}:{}", tx_hash.to_ascii_lowercase(), log_index)))
+}
 
 pub(crate) fn take_awaiting_deposit_page(
     state: &mut MultiChainState,
@@ -802,7 +835,18 @@ pub async fn run_observer(chain: ChainId) {
     // Not suspected: the streak was reset to 0 above, so a real reorg needs K
     // CONSECUTIVE suspect ticks. Fall through to the normal nothing-new check.
 
-    if finalized <= last_observed {
+    let (proof_floor, replay_ids_pending) = mutate_state(|s| {
+        let floor = s.multi_chain.ensure_evm_burn_proof_floor(chain);
+        let pending = s
+            .multi_chain
+            .pending_evm_burn_replay_ids
+            .keys()
+            .any(|(entry_chain, _)| *entry_chain == chain);
+        (floor, pending)
+    });
+    let replay_catchup = replay_catchup_is_required(replay_ids_pending, proof_floor, finalized);
+
+    if finalized <= last_observed && !replay_catchup {
         // Nothing new to observe (burn-watch). Deposit-watch already ran.
         return;
     }
@@ -823,8 +867,12 @@ pub async fn run_observer(chain: ChainId) {
             s.multi_chain.total_pending_chain_burn_e8s(),
         )
     });
-    if burn_watch_can_skip_for_no_supply_obligation(total_chain_debt, pending_chain_burn) {
-        mutate_state(|s| advance_cursor_and_prune(&mut s.multi_chain, chain, finalized));
+    if burn_watch_can_skip_for_no_supply_obligation(total_chain_debt, pending_chain_burn)
+        && !replay_catchup
+    {
+        mutate_state(|s| {
+            advance_cursor_without_burn_coverage(&mut s.multi_chain, chain, finalized)
+        });
         return;
     }
 
@@ -912,17 +960,34 @@ pub async fn run_observer(chain: ChainId) {
                 }
             }
         };
-        if !should_scan {
-            mutate_state(|s| advance_cursor_and_prune(&mut s.multi_chain, chain, finalized));
+        if !should_scan && !replay_catchup {
+            mutate_state(|s| {
+                advance_cursor_without_burn_coverage(&mut s.multi_chain, chain, finalized)
+            });
             return;
         }
         // diverged: fall through to the catch-up sweep to find the unsubmitted burn.
     }
 
-    let from_block = last_observed + 1;
+    // The observer cursor also advances in cheap paths that do not query
+    // `eth_getLogs`. Burn coverage must therefore resume from its own
+    // contiguous floor, or unscanned gaps would become permanently unprovable.
+    let legacy_hold_through = read_state(|s| {
+        s
+            .multi_chain
+            .evm_burn_proof_legacy_hold_through
+            .get(&chain)
+            .copied()
+            .unwrap_or(0)
+    });
+    let Some((from_block, coverage_through)) =
+        burn_proof_coverage_window(proof_floor, legacy_hold_through, finalized)
+    else {
+        return;
+    };
 
     let raw_burn_logs =
-        match get_logs(chain, &contract, BURN_EVENT_TOPIC0, from_block, finalized).await {
+        match get_logs(chain, &contract, BURN_EVENT_TOPIC0, from_block, coverage_through).await {
             Ok(logs) => logs,
             Err(e) => {
                 log!(
@@ -935,168 +1000,100 @@ pub async fn run_observer(chain: ChainId) {
             }
         };
 
-    // ── Per-burn handling: dedup + skip-poison-and-continue (C-1) ────────────
-    //
-    // `burn_ok` now means ONLY "no halt-class failure occurred" — it gates the
-    // cursor advance. It is NOT cleared by a skippable burn (decode failure or
-    // InvalidBurn): those advance past their offending log so a single poison
-    // burn can never stall the cursor (the silent-double-apply trigger).
-    //
-    // Idempotency: every burn is keyed by its CANONICAL on-chain identity
-    // `format!("{tx_hash}:{log_index}")` and recorded in `processed_burn_keys`
-    // once handled (applied OR permanently skipped). On any re-scan of the same
-    // range, an already-keyed burn is `continue`-d BEFORE `apply_burn_to_state`,
-    // so the already-applied prefix is NEVER re-applied — this is the core fix
-    // for the C-1 supply-divergence (debt_e8s + chain_supplies double-decrement).
-    //
-    // Using `(tx_hash, log_index)` rather than the old `(tx_hash, vault_id,
-    // amount_e8s)` key fixes Minor #1 (review): IcUSD.burn() is permissionless,
-    // so a wrapper contract can emit two identical Burn events in one tx with
-    // the same vault_id and amount. Those two burns have DIFFERENT log indices
-    // and must both be credited. The old key collapsed them into one entry,
-    // silently dropping the second burn and leaving the vault's debt and chain
-    // supply over-stated.
-    let mut burn_ok = true;
-    for (topics, data, tx_hash, block_number, log_index) in &raw_burn_logs {
-        let burn = match decode_burn_log(topics, data, tx_hash, *block_number) {
-            Ok(b) => b,
-            Err(e) => {
-                // SKIP, do not break: in production `get_logs` is topic-filtered
-                // by the real RPC so only Burn logs arrive; a decode failure here
-                // is genuinely anomalous (malformed log) and stalling the cursor
-                // on it would re-introduce the C-1 stall. Log and move past it.
-                // (We cannot dedup-key an undecodable log — it has no parsed
-                // identity — but it is topic-filtered out on re-scan in
-                // production, and even if re-seen it just re-skips harmlessly.)
-                log!(INFO, "[observer chain={:?}] decode_burn_log failed at block {}: {}; skipping (not stalling cursor)", chain, block_number, e);
-                continue;
-            }
-        };
+    // Process against live state in one synchronous mutation and commit the
+    // coverage floor only if the full returned window is handled. If a later
+    // burn halts or defers, restore the touched vault debts and chain supply so
+    // a partial prefix cannot survive without a matching replay horizon.
+    let result = mutate_state(|s| {
+        apply_burn_log_window_and_advance(&mut s.multi_chain, chain, &raw_burn_logs, coverage_through)
+    });
 
-        // Canonical on-chain identity: (tx_hash, log_index). The log_index
-        // uniquely identifies a log within a transaction, so two Burn events
-        // in the same tx (same vault, same amount) are never collapsed.
-        let key = format!("{}:{}", burn.tx_hash, log_index);
-        let already_processed = read_state(|s| {
-            s.multi_chain
-                .processed_burn_keys
-                .get(&burn.block_number)
-                .map(|set| set.contains(&key))
-                .unwrap_or(false)
-        });
-        if already_processed {
-            log!(
-                INFO,
-                "[observer chain={:?}] burn already processed (dedup): vault={} amount_e8s={} block={} tx={}; skipping",
-                chain, burn.vault_id, burn.amount_e8s, burn.block_number, burn.tx_hash
-            );
-            continue;
-        }
-
-        // Snapshot the pre-burn foreign-chain vault debt total (each burn
-        // decrements one vault's debt_e8s, so we re-read before each burn
-        // to get the correct pre-burn total for the invariant check).
-        // total_chain_vault_debt_e8s sums only chain_vaults, which is the
-        // correct pool for the Phase 1b foreign-chain-only supply invariant.
-        // ICP-native total_borrowed_icusd_amount is a separate pool and is
-        // deliberately excluded here.
-        let current_total: u128 = read_state(|s| s.multi_chain.total_chain_vault_debt_e8s());
-
-        let burn_clone = burn.clone();
-        let result =
-            mutate_state(|s| apply_burn_to_state(&mut s.multi_chain, &burn_clone, current_total));
-
-        match result {
-            Ok(()) => {
-                // Record the dedup key. The entire burn loop runs synchronously
-                // (no `.await` between the apply above and here, nor across loop
-                // iterations), so the apply and this record commit in the SAME
-                // atomic message slice — a trap rolls BOTH back together. Thus
-                // the invariant "key present iff debt/supply already decremented"
-                // always holds, and a re-scan can never re-apply a recorded burn.
-                mutate_state(|s| {
-                    s.multi_chain
-                        .processed_burn_keys
-                        .entry(burn.block_number)
-                        .or_default()
-                        .insert(key.clone());
-                });
-                let now = ic_cdk::api::time();
+    match result {
+        Ok(applied_burns) => {
+            let now = ic_cdk::api::time();
+            for burn in applied_burns {
                 crate::storage::record_event(&crate::event::Event::ChainBurnObserved {
                     chain_id: chain,
                     vault_id: burn.vault_id,
                     amount_e8s: burn.amount_e8s,
-                    tx_hash: burn.tx_hash.clone(),
+                    tx_hash: burn.tx_hash,
                     block_number: burn.block_number,
                     timestamp: now,
                 });
-                log!(
-                    INFO,
-                    "[observer chain={:?}] burn applied: vault={} amount_e8s={} block={} tx={}",
-                    chain,
-                    burn.vault_id,
-                    burn.amount_e8s,
-                    burn.block_number,
-                    burn.tx_hash
-                );
             }
-            Err(BurnApplyError::InvalidBurn(msg)) => {
-                // PERMANENT-INVALID (unknown vault / over-repay). It can never
-                // succeed, so record its key as a PERMANENT SKIP and continue —
-                // the cursor advances past it. This is what stops a single
-                // poison burn from stalling the cursor (and thus stops the
-                // re-scan that silently double-applied the good prefix).
-                log!(
-                    INFO,
-                    "[observer chain={:?}] skipping invalid burn (vault={} amount_e8s={} block={} tx={}): {}",
-                    chain, burn.vault_id, burn.amount_e8s, burn.block_number, burn.tx_hash, msg
-                );
-                mutate_state(|s| {
-                    s.multi_chain
-                        .processed_burn_keys
-                        .entry(burn.block_number)
-                        .or_default()
-                        .insert(key.clone());
-                });
+        }
+        Err(error) => log!(
+            INFO,
+            "[observer chain={:?}] burn window not committed; retrying after {:?}",
+            chain,
+            error
+        ),
+    }
+}
+
+/// Apply a complete finalized Burn-log window and advance its replay floor as
+/// one synchronous state mutation. Halt/defer failures restore every touched
+/// debt and the chain supply, leaving the floor unchanged so the window can be
+/// retried without durable observer tombstones.
+pub(crate) fn apply_burn_log_window_and_advance(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    raw_burn_logs: &[(Vec<String>, String, String, u64, u64)],
+    coverage_through: u64,
+) -> Result<Vec<super::evm_rpc::BurnLog>, BurnApplyError> {
+    let original_supply = state.chain_supplies.get(&chain).copied();
+    let mut original_vault_debts = std::collections::BTreeMap::new();
+    let mut seen_this_scan = std::collections::BTreeSet::new();
+    let mut applied_burns = Vec::new();
+
+    for (topics, data, tx_hash, block_number, log_index) in raw_burn_logs {
+        let burn = match decode_burn_log(topics, data, tx_hash, *block_number) {
+            Ok(burn) => burn,
+            Err(e) => {
+                log!(INFO, "[observer chain={:?}] decode_burn_log failed at block {}: {}; skipping (not stalling cursor)", chain, block_number, e);
                 continue;
             }
-            Err(BurnApplyError::SupplyInvariant(e)) => {
-                // HALT-CLASS (underflow / divergence / already-halted): do NOT
-                // advance the cursor and do NOT record the key, so the un-halt
-                // re-scan re-attempts this burn. Stop the range here.
-                log!(
-                    INFO,
-                    "[observer chain={:?}] apply_burn_to_state HALT-CLASS failure for tx {} vault {}: {:?}; not advancing cursor",
-                    chain, burn.tx_hash, burn.vault_id, e
-                );
-                burn_ok = false;
-                break;
+        };
+        let identity = format!("{}:{}", burn.tx_hash, log_index);
+        if !seen_this_scan.insert((burn.block_number, identity)) {
+            continue;
+        }
+        if observer_burn_was_already_consumed(
+            state, chain, burn.block_number, &burn.tx_hash, *log_index,
+        ) {
+            continue;
+        }
+
+        let current_total = state.total_chain_vault_debt_e8s();
+        let previous_debt = state.chain_vaults.get(&burn.vault_id).map(|v| v.debt_e8s);
+        match apply_burn_to_state(state, &burn, current_total) {
+            Ok(()) => {
+                if let Some(debt) = previous_debt {
+                    original_vault_debts.entry(burn.vault_id).or_insert(debt);
+                }
+                applied_burns.push(burn);
             }
-            Err(BurnApplyError::DeferredLiquidation) => {
-                // Vault mid-liquidation (findings #11/#19): do NOT advance the
-                // cursor and do NOT record the key, so this burn re-applies once
-                // the marker clears. NOT a halt (the invariant is untouched). This
-                // stalls this chain's burn-watch for the bounded liquidation window
-                // (head-of-line; finding #14 is a future separate-queue refinement).
-                log!(
-                    INFO,
-                    "[observer chain={:?}] deferring burn for vault {} (mid-liquidation, tx {}); not advancing cursor",
-                    chain, burn.vault_id, burn.tx_hash
-                );
-                burn_ok = false;
-                break;
+            Err(BurnApplyError::InvalidBurn(_)) => {
+                // An invalid on-chain burn is permanent and may be skipped,
+                // but the containing window still has to complete.
+            }
+            Err(error) => {
+                for (vault_id, debt) in original_vault_debts {
+                    if let Some(vault) = state.chain_vaults.get_mut(&vault_id) {
+                        vault.debt_e8s = debt;
+                    }
+                }
+                match original_supply {
+                    Some(supply) => { state.chain_supplies.insert(chain, supply); }
+                    None => { state.chain_supplies.remove(&chain); }
+                }
+                return Err(error);
             }
         }
     }
 
-    // ── Advance cursor (only when no halt-class failure occurred) ────────────
-    //
-    // `burn_ok` is true unless a SupplyInvariant (halt-class) failure broke the
-    // loop. Skippable failures (decode / InvalidBurn) leave it true so the
-    // cursor advances past the poison.
-    if burn_ok {
-        mutate_state(|s| advance_cursor_and_prune(&mut s.multi_chain, chain, finalized));
-    }
+    advance_cursor_and_prune(state, chain, coverage_through);
+    Ok(applied_burns)
 }
 
 /// Advance the burn-watch cursor for `chain` to `finalized` and prune
@@ -1145,7 +1142,12 @@ pub(crate) fn advance_cursor_and_prune(
     chain: ChainId,
     finalized: u64,
 ) {
-    state.last_observed_block.insert(chain, finalized);
+    state
+        .last_observed_block
+        .entry(chain)
+        .and_modify(|cursor| *cursor = (*cursor).max(finalized))
+        .or_insert(finalized);
+    state.advance_evm_burn_proof_floor(chain, finalized);
     let stale: Vec<u64> = state
         .processed_burn_keys
         .range(..=finalized)
@@ -1154,6 +1156,24 @@ pub(crate) fn advance_cursor_and_prune(
     for block in stale {
         state.processed_burn_keys.remove(&block);
     }
+}
+
+/// Advance the shared observer cursor used by settlement finality checks, but
+/// preserve the burn-proof floor and replay tombstones when no Burn `getLogs`
+/// scan covered this range.
+pub(crate) fn advance_cursor_without_burn_coverage(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    finalized: u64,
+) {
+    // Initialize an upgraded legacy cursor before changing it, otherwise the
+    // first later direct proof would mistake this skipped range as its floor.
+    state.ensure_evm_burn_proof_floor(chain);
+    state
+        .last_observed_block
+        .entry(chain)
+        .and_modify(|cursor| *cursor = (*cursor).max(finalized))
+        .or_insert(finalized);
 }
 
 /// A transient owner token makes stale-guard reclamation safe: a late callback

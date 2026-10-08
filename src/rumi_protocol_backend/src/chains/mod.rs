@@ -165,7 +165,7 @@ pub use config::{ChainConfig, ChainId, ChainStatus};
 pub use liquidation_config::{ChainLiquidationConfigV1, DexKind, LiquidationConfigError};
 pub use multi_chain_state::{
     MultiChainState, MultiChainStateV1, MultiChainStateV2, MultiChainStateV3, MultiChainStateV4,
-    MultiChainStateV5, MultiChainStateV6, MultiChainStateV7,
+    MultiChainStateV5, MultiChainStateV6, MultiChainStateV7, MultiChainStateV8,
 };
 pub use settlement_queue::{SettlementOp, SettlementQueueV1};
 pub use supply::{apply_supply_delta, SupplyDelta, SupplyInvariantError};

@@ -1,7 +1,7 @@
 use super::config::ChainId;
 use super::multi_chain_state::{
     ChainLiqClaimV1, MultiChainState, MultiChainStateV1, MultiChainStateV2, MultiChainStateV3,
-    MultiChainStateV4, MultiChainStateV5, MultiChainStateV6, MultiChainStateV7,
+    MultiChainStateV4, MultiChainStateV5, MultiChainStateV6, MultiChainStateV7, MultiChainStateV8,
     SettlementProofRecord,
 };
 use super::supply::migrate_multi_chain_state;
@@ -135,10 +135,39 @@ fn migration_preserves_v1_fields_and_defaults_new_ones() {
 }
 
 #[test]
-fn active_alias_points_at_v7() {
-    fn _check(x: MultiChainState) -> MultiChainStateV7 {
+fn active_alias_points_at_v8() {
+    fn _check(x: MultiChainState) -> MultiChainStateV8 {
         x
     }
+}
+
+#[test]
+fn v7_snapshot_decodes_into_v8_and_holds_ambiguous_legacy_cursor_history() {
+    let chain = ChainId(1030);
+    let mut v7 = MultiChainStateV7::default();
+    v7.chain_supplies.insert(chain, 42);
+    v7.last_observed_block.insert(chain, 777);
+    v7.processed_burn_keys.insert(777, std::collections::BTreeSet::from(["0xold:1".into()]));
+
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&v7, &mut bytes).expect("encode V7");
+    let mut decoded: MultiChainStateV8 = ciborium::de::from_reader(bytes.as_slice())
+        .expect("V7 snapshot must decode into V8 without wiping state");
+
+    assert_eq!(decoded.chain_supplies.get(&chain), Some(&42));
+    assert_eq!(decoded.last_observed_block.get(&chain), Some(&777));
+    assert!(decoded.pending_evm_burn_replay_ids.is_empty());
+    assert_eq!(decoded.ensure_evm_burn_proof_floor(chain), 0);
+    assert_eq!(
+        decoded.evm_burn_proof_legacy_hold_through.get(&chain),
+        Some(&777),
+        "legacy cursor does not prove that burn logs were scanned"
+    );
+    decoded.accept_evm_burn_proof_baseline(chain, 776);
+    assert_eq!(decoded.evm_burn_proof_legacy_hold_through.get(&chain), Some(&777));
+    decoded.accept_evm_burn_proof_baseline(chain, 777);
+    assert!(!decoded.evm_burn_proof_legacy_hold_through.contains_key(&chain));
+    assert_eq!(decoded.evm_burn_proof_floor_by_chain.get(&chain), Some(&777));
 }
 
 #[test]
