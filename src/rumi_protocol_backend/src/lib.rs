@@ -48,6 +48,7 @@ pub mod sp_burn_refund;
 pub mod liquidity_pool;
 pub mod logs;
 pub mod management;
+pub mod native_icp_proof;
 pub mod numeric;
 pub mod payout_history;
 pub mod state;

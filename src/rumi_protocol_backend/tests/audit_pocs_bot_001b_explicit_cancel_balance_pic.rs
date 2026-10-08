@@ -30,9 +30,15 @@
 //! minter (NOT the protocol) so the protocol holds a real balance the
 //! gate can observe.
 
-use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Nat, Principal};
+use candid::{
+    decode_one, encode_args, encode_one, CandidType, Deserialize, IDLArgs, IDLValue, Nat, Principal,
+};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
-use std::time::{Duration, SystemTime};
+use sha2::{Digest, Sha224, Sha256};
+use std::{
+    process::Command,
+    time::{Duration, SystemTime},
+};
 
 use rumi_protocol_backend::ProtocolError;
 
@@ -97,6 +103,60 @@ enum LedgerArg {
     #[serde(rename = "Upgrade")]
     Upgrade(Option<()>),
 }
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct IcpTokens {
+    e8s: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct NativeArchiveOptions {
+    num_blocks_to_archive: u64,
+    max_transactions_per_response: Option<u64>,
+    trigger_threshold: u64,
+    max_message_size_bytes: Option<u64>,
+    cycles_for_archive_creation: Option<u64>,
+    node_max_memory_size_bytes: Option<u64>,
+    controller_id: Principal,
+    more_controller_ids: Option<Vec<Principal>>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct NativeLedgerInitArgs {
+    minting_account: String,
+    icrc1_minting_account: Option<Account>,
+    initial_values: Vec<(String, IcpTokens)>,
+    max_message_size_bytes: Option<u64>,
+    transaction_window: Option<NativeLedgerDuration>,
+    archive_options: Option<NativeArchiveOptions>,
+    send_whitelist: Vec<Principal>,
+    transfer_fee: Option<IcpTokens>,
+    token_symbol: Option<String>,
+    token_name: Option<String>,
+    feature_flags: Option<FeatureFlags>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct NativeLedgerDuration {
+    secs: u64,
+    nanos: u32,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum NativeLedgerArg {
+    #[serde(rename = "Init")]
+    Init(NativeLedgerInitArgs),
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct NativeGetBlocksArgs {
+    start: u64,
+    length: u64,
+}
+
+const NATIVE_ICP_LEDGER_TEXT: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
+const NATIVE_ICP_LEDGER_GZIP_SHA256: &str =
+    "51f4be010f23064137defacd627ffbec024c5133210c68ca3b80ab8f257101d6";
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
 struct ApproveArgs {
@@ -218,6 +278,53 @@ struct BotStatsResponse {
 
 fn icrc1_ledger_wasm() -> Vec<u8> {
     include_bytes!("../../ledger/ic-icrc1-ledger.wasm").to_vec()
+}
+
+fn official_native_icp_ledger_wasm() -> Vec<u8> {
+    let path = std::env::var("RUMI_TEST_NNS_LEDGER_WASM_GZ")
+        .expect("set RUMI_TEST_NNS_LEDGER_WASM_GZ to the pinned official NNS ledger gzip");
+    let gzip = std::fs::read(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&gzip)),
+        NATIVE_ICP_LEDGER_GZIP_SHA256,
+        "pinned official NNS ledger gzip hash"
+    );
+    let output = Command::new("gzip")
+        .args(["-dc", &path])
+        .output()
+        .expect("run gzip to decompress the pinned official NNS ledger");
+    assert!(
+        output.status.success(),
+        "gzip failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+fn native_account_identifier_text(owner: Principal) -> String {
+    let mut hasher = Sha224::new();
+    hasher.update(b"\x0Aaccount-id");
+    hasher.update(owner.as_slice());
+    hasher.update([0; 32]);
+    let hash = hasher.finalize();
+    let mut crc = !0u32;
+    for byte in &hash {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    let mut identifier = Vec::with_capacity(32);
+    identifier.extend_from_slice(&(!crc).to_be_bytes());
+    identifier.extend_from_slice(&hash);
+    identifier
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn protocol_wasm() -> Vec<u8> {
@@ -380,6 +487,13 @@ fn icrc1_transfer_tuple_call(
 }
 
 fn record_return_proof(fixture: &Fixture, proof: BotCollateralReturnProofArg) {
+    record_return_proof_result(fixture, proof).expect("return proof should be accepted");
+}
+
+fn record_return_proof_result(
+    fixture: &Fixture,
+    proof: BotCollateralReturnProofArg,
+) -> Result<(), ProtocolError> {
     let result = fixture
         .pic
         .update_call(
@@ -393,7 +507,64 @@ fn record_return_proof(fixture: &Fixture, proof: BotCollateralReturnProofArg) {
         WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode return proof"),
         WasmResult::Reject(message) => panic!("return proof rejected: {message}"),
     };
-    parsed.expect("return proof should be accepted");
+    parsed
+}
+
+fn record_field<'a>(value: &'a IDLValue, name: &str) -> &'a IDLValue {
+    let IDLValue::Record(fields) = value else {
+        panic!("expected record, got {value:?}")
+    };
+    fields
+        .iter()
+        .find(|field| field.id.get_id() == candid::idl_hash(name))
+        .map(|field| &field.val)
+        .unwrap_or_else(|| panic!("missing {name} in {value:?}"))
+}
+
+fn idl_u64(value: &IDLValue) -> u64 {
+    match value {
+        IDLValue::Nat64(value) => *value,
+        IDLValue::Nat(value) => u64::try_from(value.0.clone()).expect("value fits u64"),
+        other => panic!("expected nat64/nat, got {other:?}"),
+    }
+}
+
+fn native_block_is_archived(pic: &PocketIc, ledger: Principal, block_index: u64) -> bool {
+    let response = pic
+        .query_call(
+            ledger,
+            Principal::anonymous(),
+            "query_blocks",
+            encode_one(NativeGetBlocksArgs {
+                start: block_index,
+                length: 1,
+            })
+            .unwrap(),
+        )
+        .expect("native ICP query_blocks call");
+    let bytes = match response {
+        WasmResult::Reply(bytes) => bytes,
+        WasmResult::Reject(message) => panic!("native query_blocks rejected: {message}"),
+    };
+    let decoded = IDLArgs::from_bytes(&bytes).expect("decode native query_blocks response");
+    let response = &decoded.args[0];
+    let IDLValue::Vec(blocks) = record_field(response, "blocks") else {
+        panic!("native query_blocks blocks is not a vector")
+    };
+    if !blocks.is_empty() {
+        return false;
+    }
+    let IDLValue::Vec(archives) = record_field(response, "archived_blocks") else {
+        panic!("native query_blocks archived_blocks is not a vector")
+    };
+    archives.iter().any(|archive| {
+        let start = idl_u64(record_field(archive, "start"));
+        let length = idl_u64(record_field(archive, "length"));
+        start <= block_index
+            && start
+                .checked_add(length)
+                .is_some_and(|end| block_index < end)
+    })
 }
 
 fn current_ledger_time_ns(pic: &PocketIc) -> u64 {
@@ -531,6 +702,10 @@ struct Fixture {
 }
 
 fn setup_fixture() -> Fixture {
+    setup_fixture_with_native_ledger(None)
+}
+
+fn setup_fixture_with_native_ledger(native_ledger_wasm: Option<Vec<u8>>) -> Fixture {
     let pic = PocketIcBuilder::new().with_nns_subnet().build();
 
     let test_user = Principal::self_authenticating(b"bot_001b_pic_user");
@@ -550,15 +725,60 @@ fn setup_fixture() -> Fixture {
     pic.set_controllers(protocol_id, None, vec![Principal::anonymous(), developer])
         .expect("set_controllers failed");
 
-    let icp_ledger = deploy_icrc1_ledger(
-        &pic,
-        account(icp_minter),
-        10_000,
-        vec![(account(test_user), Nat::from(1_000_000_000_000u64))],
-        "Internet Computer Protocol",
-        "ICP",
-        developer,
-    );
+    let icp_ledger = if let Some(wasm) = native_ledger_wasm {
+        let ledger =
+            Principal::from_text(NATIVE_ICP_LEDGER_TEXT).expect("native ICP ledger principal");
+        pic.create_canister_with_id(None, None, ledger)
+            .expect("create fixed native ICP ledger principal");
+        pic.add_cycles(ledger, 5_000_000_000_000_000);
+        let init = NativeLedgerArg::Init(NativeLedgerInitArgs {
+            minting_account: native_account_identifier_text(Principal::management_canister()),
+            icrc1_minting_account: Some(account(Principal::management_canister())),
+            initial_values: vec![
+                (
+                    native_account_identifier_text(test_user),
+                    IcpTokens {
+                        e8s: 1_000_000_000_000,
+                    },
+                ),
+                (
+                    native_account_identifier_text(developer),
+                    IcpTokens {
+                        e8s: 1_000_000_000_000,
+                    },
+                ),
+            ],
+            max_message_size_bytes: Some(1_048_576),
+            transaction_window: None,
+            archive_options: Some(NativeArchiveOptions {
+                num_blocks_to_archive: 1,
+                max_transactions_per_response: Some(100),
+                trigger_threshold: 2,
+                max_message_size_bytes: Some(1_048_576),
+                cycles_for_archive_creation: Some(1_000_000_000_000),
+                node_max_memory_size_bytes: Some(1_073_741_824),
+                controller_id: developer,
+                more_controller_ids: None,
+            }),
+            send_whitelist: Vec::new(),
+            transfer_fee: Some(IcpTokens { e8s: 10_000 }),
+            token_symbol: Some("ICP".into()),
+            token_name: Some("Internet Computer".into()),
+            feature_flags: Some(FeatureFlags { icrc2: true }),
+        });
+        pic.install_canister(ledger, wasm, encode_args((init,)).unwrap(), None);
+        ledger
+    } else {
+        deploy_icrc1_ledger(
+            &pic,
+            account(icp_minter),
+            10_000,
+            vec![(account(test_user), Nat::from(1_000_000_000_000u64))],
+            "Internet Computer Protocol",
+            "ICP",
+            developer,
+        )
+    };
 
     // icUSD ledger keeps protocol as minter — that's how icUSD actually
     // works (the protocol mints/burns icUSD on borrow/repay). Only the
@@ -1072,6 +1292,142 @@ fn bot_001b_pic_explicit_cancel_succeeds_when_balance_sufficient() {
             other
         ),
     }
+}
+
+/// Exercises both production bot receipt paths against the pinned official
+/// native ICP ledger. The outbound claim block is verified while hot; the
+/// return block is deliberately archived before the backend records it. The
+/// backend fee config is drifted above the real ledger fee, and a return that
+/// is short by one e8s after accounting for the actual block fee is rejected.
+#[test]
+#[ignore = "requires the pinned official NNS ledger gzip and built backend Wasm; set RUMI_TEST_NNS_LEDGER_WASM_GZ"]
+fn native_icp_bot_claim_and_return_proofs_use_archived_blocks_and_actual_fee() {
+    let f = setup_fixture_with_native_ledger(Some(official_native_icp_ledger_wasm()));
+    let (_, claim) = seed_bot_claim(&f);
+
+    // Simulate stale-high mutable backend fee configuration; the official
+    // ledger remains at 10_000 e8s and its block supplies that actual fee.
+    let set_fee = f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "set_collateral_ledger_fee",
+            encode_args((f.icp_ledger, 30_000u64)).unwrap(),
+        )
+        .expect("set stale-high collateral ledger fee");
+    match set_fee {
+        WasmResult::Reply(bytes) => {
+            let result: Result<(), ProtocolError> = decode_one(&bytes).unwrap();
+            result.expect("stale-high fee setting should succeed");
+        }
+        WasmResult::Reject(message) => panic!("set_collateral_ledger_fee rejected: {message}"),
+    }
+
+    let actual_fee = 10_000u64;
+    let under_return_time = current_ledger_time_ns(&f.pic);
+    let under_return_amount = claim
+        .collateral_amount
+        .checked_sub(actual_fee + 1)
+        .expect("claim amount exceeds fee");
+    let under_return_block = icrc1_transfer_tuple_call(
+        &f.pic,
+        f.icp_ledger,
+        f.developer,
+        f.protocol_id,
+        under_return_amount,
+        claim.collateral_return_memo.clone(),
+        under_return_time,
+    );
+    let under_return = record_return_proof_result(
+        &f,
+        BotCollateralReturnProofArg {
+            vault_id: f.vault_id,
+            claim_generation: claim.claim_generation,
+            block_index: under_return_block,
+            amount: under_return_amount,
+            created_at_time: under_return_time,
+        },
+    );
+    assert!(
+        matches!(under_return, Err(ProtocolError::GenericError(message)) if message.contains("below the claimed collateral")),
+        "a return one e8s below the claim after actual fee must fail, got {under_return:?}"
+    );
+
+    let wrong_memo_time = under_return_time + 1;
+    let exact_return_amount = claim
+        .collateral_amount
+        .checked_sub(actual_fee)
+        .expect("claim amount exceeds fee");
+    let wrong_memo_block = icrc1_transfer_tuple_call(
+        &f.pic,
+        f.icp_ledger,
+        f.developer,
+        f.protocol_id,
+        exact_return_amount,
+        b"wrong claim generation".to_vec(),
+        wrong_memo_time,
+    );
+    let wrong_memo = record_return_proof_result(
+        &f,
+        BotCollateralReturnProofArg {
+            vault_id: f.vault_id,
+            claim_generation: claim.claim_generation,
+            block_index: wrong_memo_block,
+            amount: exact_return_amount,
+            created_at_time: wrong_memo_time,
+        },
+    );
+    assert!(
+        matches!(wrong_memo, Err(ProtocolError::GenericError(message)) if message.contains("memo")),
+        "wrong return memo must fail, got {wrong_memo:?}"
+    );
+
+    let return_time = wrong_memo_time + 1;
+    let return_block = icrc1_transfer_tuple_call(
+        &f.pic,
+        f.icp_ledger,
+        f.developer,
+        f.protocol_id,
+        exact_return_amount,
+        claim.collateral_return_memo.clone(),
+        return_time,
+    );
+    let mut archived = native_block_is_archived(&f.pic, f.icp_ledger, return_block);
+    for index in 0..20u64 {
+        if archived {
+            break;
+        }
+        let filler_time = return_time + index + 1;
+        icrc1_transfer_tuple_call(
+            &f.pic,
+            f.icp_ledger,
+            f.test_user,
+            f.developer,
+            1,
+            format!("native-ledger-archive-filler-{index}").into_bytes(),
+            filler_time,
+        );
+        for _ in 0..20 {
+            f.pic.tick();
+        }
+        archived = native_block_is_archived(&f.pic, f.icp_ledger, return_block);
+    }
+    assert!(
+        archived,
+        "official ledger did not archive return block {return_block}"
+    );
+
+    record_return_proof(
+        &f,
+        BotCollateralReturnProofArg {
+            vault_id: f.vault_id,
+            claim_generation: claim.claim_generation,
+            block_index: return_block,
+            amount: exact_return_amount,
+            created_at_time: return_time,
+        },
+    );
 }
 
 /// BOT-10: the legacy admin endpoint keeps its Candid signature but fails closed.

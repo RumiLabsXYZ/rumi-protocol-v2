@@ -9612,6 +9612,24 @@ async fn verify_bot_claim_transfer_receipt(
         return Err("persisted collateral transfer nonce/time mismatch".into());
     }
     let memo = transfer.op_nonce.to_be_bytes();
+    let native_icp_ledger = read_state(|s| s.icp_ledger_principal == claim.collateral_type)
+        && rumi_protocol_backend::native_icp_proof::is_native_icp_ledger(claim.collateral_type);
+    if native_icp_ledger {
+        let block = rumi_protocol_backend::native_icp_proof::query_block(
+            claim.collateral_type,
+            block_index,
+        )
+        .await?;
+        rumi_protocol_backend::native_icp_proof::verify_transfer_block(
+            &block,
+            ic_cdk::id(),
+            bot,
+            claim.collateral_amount,
+            &memo,
+            transfer.created_at_time,
+        )?;
+        return Ok(());
+    }
     rumi_protocol_backend::icrc3_proof::verify_icrc3_transfer_block(
         claim.collateral_type,
         block_index,
@@ -10541,14 +10559,9 @@ async fn bot_record_collateral_return_proof(
             "Collateral return proof claim generation does not match the active claim".into(),
         ));
     }
-    let expected_amount = read_state(|s| {
-        let fee = s.get_collateral_config(&claim.collateral_type)
-            .map(|config| config.ledger_fee).unwrap_or(0);
-        claim.collateral_amount.saturating_sub(fee)
-    });
-    if proof.amount != expected_amount || proof.created_at_time == 0 {
+    if proof.created_at_time == 0 {
         return Err(ProtocolError::GenericError(
-            "Collateral return amount or created_at_time does not match the claim".into(),
+            "Collateral return created_at_time does not match the claim".into(),
         ));
     }
     if let Some(existing) = &claim.collateral_return_proof {
@@ -10563,23 +10576,61 @@ async fn bot_record_collateral_return_proof(
         };
     }
     let memo = bot_collateral_return_memo(proof.vault_id, proof.claim_generation);
-    rumi_protocol_backend::icrc3_proof::verify_icrc3_transfer_block(
-        claim.collateral_type,
-        proof.block_index,
-        Some(icrc_ledger_types::icrc1::account::Account {
-            owner: caller,
-            subaccount: None,
-        }),
-        icrc_ledger_types::icrc1::account::Account {
-            owner: ic_cdk::id(),
-            subaccount: None,
-        },
+    let native_icp_ledger = read_state(|s| s.icp_ledger_principal == claim.collateral_type)
+        && rumi_protocol_backend::native_icp_proof::is_native_icp_ledger(claim.collateral_type);
+    let actual_fee = if native_icp_ledger {
+        let block = rumi_protocol_backend::native_icp_proof::query_block(
+            claim.collateral_type,
+            proof.block_index,
+        )
+        .await
+        .map_err(ProtocolError::GenericError)?;
+        rumi_protocol_backend::native_icp_proof::verify_transfer_block(
+            &block,
+            caller,
+            ic_cdk::id(),
+            proof.amount,
+            &memo,
+            proof.created_at_time,
+        )
+        .map_err(ProtocolError::GenericError)?
+    } else {
+        let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(
+            claim.collateral_type,
+            proof.block_index,
+        )
+        .await
+        .map_err(ProtocolError::GenericError)?;
+        rumi_protocol_backend::icrc3_proof::validate_icrc3_transfer_block(
+            &block,
+            Some(icrc_ledger_types::icrc1::account::Account {
+                owner: caller,
+                subaccount: None,
+            }),
+            icrc_ledger_types::icrc1::account::Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            },
+            proof.amount,
+            Some(&memo),
+            Some(proof.created_at_time),
+        )
+        .map_err(ProtocolError::GenericError)?;
+        block.fee.ok_or_else(|| {
+            "Collateral return block is missing its actual charged fee".to_string()
+        })
+        .map_err(ProtocolError::GenericError)?
+    };
+    if !rumi_protocol_backend::native_icp_proof::return_covers_claim(
         proof.amount,
-        Some(&memo),
-        Some(proof.created_at_time),
-    )
-    .await
-    .map_err(ProtocolError::GenericError)?;
+        actual_fee,
+        claim.collateral_amount,
+    ) {
+        return Err(ProtocolError::GenericError(
+            "Collateral return amount plus the verified ledger fee is below the claimed collateral"
+                .into(),
+        ));
+    }
     mutate_state(|s| {
         let Some(active) = s.bot_claims.get_mut(&proof.vault_id) else {
             return Err("Active bot claim disappeared during return proof verification".to_string());
