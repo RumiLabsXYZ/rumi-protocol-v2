@@ -25,7 +25,8 @@ use rumi_protocol_backend::{
     state::{read_state, replace_state, Mode, RateCurveV2, State},
     vault::{CandidVault, OpenVaultSuccess, VaultArg},
     CollateralInterestInfo, CollateralSnapshot, CollateralTotals, EventTypeFilter,
-    EventsByPrincipalPagedResponse, Fees, ForwardFilteredEventsResponse, GetEventsArg,
+    BotProofAuditEventsResponse, BotProofAuditRecord, EventsByPrincipalPagedResponse, Fees,
+    ForwardFilteredEventsResponse, GetEventsArg,
     GetEventsFilteredResponse, GetSnapshotsArg, InterestSplitArg, PerCollateralRateCurve,
     PreparedRedemptionOffer, ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus,
     RedeemQuotedRequest, RedemptionError, RedemptionOfferRefreshError, RedemptionPreview,
@@ -5710,6 +5711,72 @@ fn get_event_count() -> u64 {
     rumi_protocol_backend::storage::count_events()
 }
 
+const MAX_BOT_PROOF_AUDIT_SCAN_LENGTH: u64 = 500;
+
+fn bot_proof_audit_page(
+    scan_start: u64,
+    scan_length: u64,
+    total_journal_entries: u64,
+    entries: impl Iterator<Item = (u64, rumi_protocol_backend::storage::PendingPayoutJournalEntry)>,
+) -> BotProofAuditEventsResponse {
+    let scan_end = scan_start
+        .saturating_add(scan_length.min(MAX_BOT_PROOF_AUDIT_SCAN_LENGTH))
+        .min(total_journal_entries);
+    let events = entries
+        .filter(|(journal_index, _)| *journal_index >= scan_start && *journal_index < scan_end)
+        .filter_map(|(journal_index, entry)| {
+            match entry.event {
+                rumi_protocol_backend::event::PendingPayoutEvent::BotProofAudit { event } => {
+                    Some(BotProofAuditRecord {
+                        journal_index,
+                        after_event_count: entry.after_event_count,
+                        event,
+                    })
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    BotProofAuditEventsResponse {
+        events,
+        scan_end,
+        exhausted: scan_end >= total_journal_entries,
+        total_journal_entries,
+    }
+}
+
+fn bot_proof_audit_query_authorized(caller: Principal, developer: Principal) -> bool {
+    caller == developer
+}
+
+/// Scans the ordered private journal for bot proof transitions. `scan_start`
+/// and `scan_end` address journal entries, including payout entries, so callers
+/// must resume at `scan_end` even when a page contains no bot audit records.
+#[candid_method(query)]
+#[query]
+fn get_bot_proof_audit_events(
+    scan_start: u64,
+    scan_length: u64,
+) -> Result<BotProofAuditEventsResponse, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let developer = read_state(|s| s.developer_principal);
+    if !bot_proof_audit_query_authorized(caller, developer) {
+        return Err(ProtocolError::GenericError(
+            "Unauthorized: developer only".to_string(),
+        ));
+    }
+
+    let total = rumi_protocol_backend::storage::private_journal_entry_count();
+    let scan_end = scan_start
+        .saturating_add(scan_length.min(MAX_BOT_PROOF_AUDIT_SCAN_LENGTH))
+        .min(total);
+    let entries = (scan_start.min(total)..scan_end).filter_map(|index| {
+        rumi_protocol_backend::storage::private_journal_entry_at(index)
+            .map(|entry| (index, entry))
+    });
+    Ok(bot_proof_audit_page(scan_start, scan_length, total, entries))
+}
+
 /// Recording-time timestamp for `length` consecutive events starting at
 /// `start`. Slots past the end of the side log come back as `0`; the
 /// frontend uses these to fill in a real time on admin/upgrade rows whose
@@ -9979,6 +10046,124 @@ fn bot_payment_meets_claim_minimum(debt_e8s: u64, paid_e6s: u64) -> bool {
 mod bot_payment_proof_tests {
     use super::*;
 
+    #[test]
+    fn bot_audit_query_requires_developer_principal() {
+        let developer = Principal::from_slice(&[23]);
+        assert!(bot_proof_audit_query_authorized(developer, developer));
+        assert!(!bot_proof_audit_query_authorized(
+            Principal::anonymous(),
+            developer,
+        ));
+        assert!(!bot_proof_audit_query_authorized(
+            Principal::from_slice(&[24]),
+            developer,
+        ));
+    }
+
+    #[test]
+    fn private_bot_audit_query_preserves_scan_cursor_across_payout_entries() {
+        use rumi_protocol_backend::event::{BotProofAuditEvent, PendingPayoutEvent};
+        use rumi_protocol_backend::storage::PendingPayoutJournalEntry;
+
+        let entries = vec![
+            PendingPayoutJournalEntry {
+                after_event_count: 4,
+                event: PendingPayoutEvent::TooOld {
+                    operation_id: 1,
+                    attempt_nonce: 1,
+                    owner: Principal::anonymous(),
+                    timestamp: None,
+                },
+            },
+            PendingPayoutJournalEntry {
+                after_event_count: 5,
+                event: PendingPayoutEvent::BotProofAudit {
+                    event: BotProofAuditEvent::ClaimGenerationReserved { generation: 17 },
+                },
+            },
+            PendingPayoutJournalEntry {
+                after_event_count: 6,
+                event: PendingPayoutEvent::BotProofAudit {
+                    event: BotProofAuditEvent::ProofModeEnabled,
+                },
+            },
+        ];
+        let response = bot_proof_audit_page(
+            0,
+            2,
+            entries.len() as u64,
+            entries.into_iter().enumerate().map(|(index, entry)| (index as u64, entry)),
+        );
+
+        assert_eq!(response.scan_end, 2);
+        assert!(!response.exhausted);
+        assert_eq!(response.total_journal_entries, 3);
+        assert_eq!(response.events.len(), 1);
+        assert_eq!(response.events[0].journal_index, 1);
+        assert_eq!(response.events[0].after_event_count, 5);
+        assert!(matches!(
+            response.events[0].event,
+            BotProofAuditEvent::ClaimGenerationReserved { generation: 17 }
+        ));
+    }
+
+    #[test]
+    fn private_bot_audit_query_caps_scan_length_and_marks_exhaustion() {
+        let response = bot_proof_audit_page(
+            0,
+            MAX_BOT_PROOF_AUDIT_SCAN_LENGTH + 1,
+            MAX_BOT_PROOF_AUDIT_SCAN_LENGTH + 1,
+            std::iter::empty(),
+        );
+        assert_eq!(response.scan_end, MAX_BOT_PROOF_AUDIT_SCAN_LENGTH);
+        assert!(!response.exhausted);
+    }
+
+    #[test]
+    fn adding_bot_audit_keeps_existing_private_payout_cbor_unchanged() {
+        #[derive(serde::Serialize)]
+        enum LegacyPayoutEvent {
+            TooOld {
+                operation_id: u128,
+                attempt_nonce: u128,
+                owner: Principal,
+                timestamp: Option<u64>,
+            },
+        }
+
+        #[derive(serde::Serialize)]
+        struct LegacyJournalEntry {
+            after_event_count: u64,
+            event: LegacyPayoutEvent,
+        }
+
+        let owner = Principal::from_slice(&[9, 8, 7]);
+        let legacy = LegacyJournalEntry {
+            after_event_count: 12,
+            event: LegacyPayoutEvent::TooOld {
+                operation_id: 21,
+                attempt_nonce: 22,
+                owner,
+                timestamp: Some(23),
+            },
+        };
+        let current = rumi_protocol_backend::storage::PendingPayoutJournalEntry {
+            after_event_count: 12,
+            event: rumi_protocol_backend::event::PendingPayoutEvent::TooOld {
+                operation_id: 21,
+                attempt_nonce: 22,
+                owner,
+                timestamp: Some(23),
+            },
+        };
+        let mut legacy_bytes = Vec::new();
+        let mut current_bytes = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut legacy_bytes).expect("encode old payout entry");
+        ciborium::ser::into_writer(&current, &mut current_bytes)
+            .expect("encode current payout entry");
+        assert_eq!(current_bytes, legacy_bytes);
+    }
+
     fn claim_with_outbound_terms(
         gross: u64,
         net: Option<u64>,
@@ -10162,20 +10347,32 @@ mod bot_payment_proof_tests {
             ckusdt_ledger_principal: None,
             ckusdc_ledger_principal: Some(ledger),
         };
-        let events = vec![
-            rumi_protocol_backend::event::Event::Init(init),
-            rumi_protocol_backend::event::Event::BotProofModeEnabled,
-            rumi_protocol_backend::event::Event::BotClaimGenerationReserved { generation: 41 },
-            rumi_protocol_backend::event::Event::BotPaymentProofConsumed {
+        let events = vec![rumi_protocol_backend::event::Event::Init(init)];
+        let private_events = [
+            rumi_protocol_backend::event::BotProofAuditEvent::ProofModeEnabled,
+            rumi_protocol_backend::event::BotProofAuditEvent::ClaimGenerationReserved {
+                generation: 41,
+            },
+            rumi_protocol_backend::event::BotProofAuditEvent::PaymentProofConsumed {
                 ledger_principal: ledger,
                 block_index: 9001,
                 vault_id: 77,
                 claim_generation: 41,
             },
-            rumi_protocol_backend::event::Event::BotClaimGenerationReserved { generation: 42 },
-        ];
-        let state = rumi_protocol_backend::event::replay(events.into_iter())
-            .expect("event-only upgrade recovery should replay");
+            rumi_protocol_backend::event::BotProofAuditEvent::ClaimGenerationReserved {
+                generation: 42,
+            },
+        ]
+        .into_iter()
+        .map(|event| rumi_protocol_backend::storage::PendingPayoutJournalEntry {
+            after_event_count: 1,
+            event: rumi_protocol_backend::event::PendingPayoutEvent::BotProofAudit { event },
+        });
+        let state = rumi_protocol_backend::event::replay_with_pending_payout_events(
+            events.into_iter(),
+            private_events,
+        )
+        .expect("event-only upgrade recovery should replay");
 
         assert!(state.bot_confirm_proof_required);
         assert_eq!(state.bot_claim_generation_counter, 42);

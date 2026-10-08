@@ -727,6 +727,26 @@ pub struct EventsByPrincipalPagedResponse {
     pub total_events: u64,
 }
 
+/// A bot proof audit record in the private journal. `journal_index` is the
+/// stable cursor position in that journal; `after_event_count` anchors replay
+/// and relates the transition to the public event log without consuming a
+/// public event index.
+#[derive(candid::CandidType, Clone)]
+pub struct BotProofAuditRecord {
+    pub journal_index: u64,
+    pub after_event_count: u64,
+    pub event: crate::event::BotProofAuditEvent,
+}
+
+/// Bounded scan response for `get_bot_proof_audit_events`.
+#[derive(candid::CandidType, Clone)]
+pub struct BotProofAuditEventsResponse {
+    pub events: Vec<BotProofAuditRecord>,
+    pub scan_end: u64,
+    pub exhausted: bool,
+    pub total_journal_entries: u64,
+}
+
 /// Paginated response for `get_vaults_page` / `get_liquidatable_vaults_page`.
 /// `vaults` is the page slice ordered by ascending `vault_id` starting at
 /// `start_id`. `next_start_id` is `Some(id)` to continue paging, `None`

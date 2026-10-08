@@ -1,4 +1,5 @@
 use crate::event::Event;
+use crate::event::{BotProofAuditEvent, PendingPayoutEvent};
 use ic_stable_structures::{
     log::{Log as StableLog, NoSuchEntry},
     memory_manager::{MemoryId, MemoryManager, VirtualMemory},
@@ -23,8 +24,9 @@ const STATE_MEMORY_ID: MemoryId = MemoryId::new(4);
 // which matches today's behaviour.
 const EVENT_TS_INDEX_MEMORY_ID: MemoryId = MemoryId::new(5);
 const EVENT_TS_DATA_MEMORY_ID: MemoryId = MemoryId::new(6);
-// Private payout-obligation journal. Keeping these records outside `Event`
-// preserves the variant set returned by the long-lived public get_events API.
+// Ordered private journal for payout obligations and bot proof transitions.
+// Keeping these records outside `Event` preserves public log indices and the
+// variant set returned by long-lived public event APIs.
 const PAYOUT_EVENT_INDEX_MEMORY_ID: MemoryId = MemoryId::new(7);
 const PAYOUT_EVENT_DATA_MEMORY_ID: MemoryId = MemoryId::new(8);
 
@@ -91,7 +93,7 @@ pub struct PendingPayoutJournalEntry {
     /// Number of public Event records already appended when this transition
     /// was recorded. Replay uses this to interleave both append-only journals.
     pub after_event_count: u64,
-    pub event: crate::event::PendingPayoutEvent,
+    pub event: PendingPayoutEvent,
 }
 
 pub struct PendingPayoutEventIterator {
@@ -110,7 +112,7 @@ impl Iterator for PendingPayoutEventIterator {
                     self.pos = self.pos.saturating_add(1);
                     Some(
                         ciborium::de::from_reader(&self.buf[..])
-                            .expect("failed to decode private payout event"),
+                            .expect("failed to decode private journal event"),
                     )
                 }
                 Err(NoSuchEntry) => None,
@@ -133,18 +135,40 @@ pub fn record_pending_payout_event(event: &crate::event::PendingPayoutEvent) {
     };
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&entry, &mut bytes)
-        .expect("failed to encode private payout event");
+        .expect("failed to encode private payout journal event");
     PAYOUT_EVENTS.with(|log| {
         log.borrow_mut()
             .append(&bytes)
-            .expect("failed to append private payout event");
+            .expect("failed to append private payout journal event");
     });
+}
+
+pub fn record_bot_proof_audit_event(event: BotProofAuditEvent) {
+    record_pending_payout_event(&PendingPayoutEvent::BotProofAudit { event });
+}
+
+pub fn private_journal_entry_count() -> u64 {
+    PAYOUT_EVENTS.with(|log| log.borrow().len())
+}
+
+pub fn private_journal_entry_at(index: u64) -> Option<PendingPayoutJournalEntry> {
+    PAYOUT_EVENTS.with(|log| {
+        let log = log.borrow();
+        let mut buf = Vec::new();
+        match log.read_entry(index, &mut buf) {
+            Ok(()) => Some(
+                ciborium::de::from_reader(buf.as_slice())
+                    .expect("failed to decode private journal entry"),
+            ),
+            Err(NoSuchEntry) => None,
+        }
+    })
 }
 
 #[cfg(test)]
 mod pending_payout_journal_tests {
     use super::PendingPayoutJournalEntry;
-    use crate::event::PendingPayoutEvent;
+    use crate::event::{BotProofAuditEvent, PendingPayoutEvent};
     use candid::Principal;
 
     #[test]
@@ -162,6 +186,26 @@ mod pending_payout_journal_tests {
         ciborium::ser::into_writer(&entry, &mut bytes).expect("encode private journal entry");
         let decoded: PendingPayoutJournalEntry =
             ciborium::de::from_reader(bytes.as_slice()).expect("decode private journal entry");
+        assert_eq!(decoded, entry);
+    }
+
+    #[test]
+    fn private_bot_audit_entry_round_trips_in_the_shared_ordered_journal() {
+        let entry = PendingPayoutJournalEntry {
+            after_event_count: 13,
+            event: PendingPayoutEvent::BotProofAudit {
+                event: BotProofAuditEvent::PaymentProofConsumed {
+                    ledger_principal: Principal::from_slice(&[4, 5, 6]),
+                    block_index: 17,
+                    vault_id: 19,
+                    claim_generation: 23,
+                },
+            },
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&entry, &mut bytes).expect("encode private audit entry");
+        let decoded: PendingPayoutJournalEntry =
+            ciborium::de::from_reader(bytes.as_slice()).expect("decode private audit entry");
         assert_eq!(decoded, entry);
     }
 }

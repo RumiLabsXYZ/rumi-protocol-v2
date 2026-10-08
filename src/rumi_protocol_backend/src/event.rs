@@ -397,24 +397,6 @@ pub enum Event {
     #[serde(rename = "set_bot_cr_tolerance_bps")]
     SetBotCrToleranceBps { bps: u64 },
 
-    /// Irreversible cutover guard for bot confirmation. This must be in the
-    /// event log because event replay is used when no state snapshot exists.
-    #[serde(rename = "bot_proof_mode_enabled")]
-    BotProofModeEnabled,
-
-    /// Persist claim identity allocations so replay cannot reuse a generation.
-    #[serde(rename = "bot_claim_generation_reserved")]
-    BotClaimGenerationReserved { generation: u64 },
-
-    /// Permanent ledger-scoped tombstone for a successfully consumed payment.
-    #[serde(rename = "bot_payment_proof_consumed")]
-    BotPaymentProofConsumed {
-        ledger_principal: Principal,
-        block_index: u64,
-        vault_id: u64,
-        claim_generation: u64,
-    },
-
     /// Wave-14a CDP-14 follow-up: per-collateral override for the XRC
     /// source-count floor (None = inherit global). Emitted when an admin
     /// tunes the per-asset floor (typically used to lower the gate for
@@ -989,11 +971,37 @@ pub enum Event {
     },
 }
 
+/// Durable bot proof audit transitions. These are kept in the private ordered
+/// journal so old clients of the public `Event` endpoints retain their exact
+/// variant set and index/length behavior.
+///
+/// Compatibility boundary: the paired production DID has never exposed these
+/// variants, so production Event logs do not contain them. A pre-release or
+/// staging log written by a build that stored these variants in the public
+/// Event log needs a one-time migration before upgrading to this layout.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BotProofAuditEvent {
+    #[serde(rename = "bot_proof_mode_enabled")]
+    ProofModeEnabled,
+    #[serde(rename = "bot_claim_generation_reserved")]
+    ClaimGenerationReserved { generation: u64 },
+    #[serde(rename = "bot_payment_proof_consumed")]
+    PaymentProofConsumed {
+        ledger_principal: Principal,
+        block_index: u64,
+        vault_id: u64,
+        claim_generation: u64,
+    },
+}
+
 /// Durable state-transition journal for payout obligations. These records are
 /// kept in a private stable log rather than the public `Event` log because
 /// adding public Event variants would break older clients of `get_events`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingPayoutEvent {
+    /// Internal bot claim proof transitions share the ordered private journal
+    /// so they remain replayable without expanding the public Event variant set.
+    BotProofAudit { event: BotProofAuditEvent },
     Queued {
         kind: PendingPayoutKind,
         operation_id: u128,
@@ -1067,9 +1075,6 @@ impl Event {
             Event::SetBotBudget { .. } => false,
             Event::SetBotAllowedCollateralTypes { .. } => false,
             Event::SetBotCrToleranceBps { .. } => false,
-            Event::BotProofModeEnabled => false,
-            Event::BotClaimGenerationReserved { .. } => false,
-            Event::BotPaymentProofConsumed { .. } => false,
             Event::SetCollateralMinXrcSources { .. } => false,
             Event::SetLiquidationBonus { .. } => false,
             Event::SetBorrowingFee { .. } => false,
@@ -1246,9 +1251,6 @@ impl Event {
             Event::SetBotBudget { .. } => Some("SetBotBudget"),
             Event::SetBotAllowedCollateralTypes { .. } => Some("SetBotAllowedCollateralTypes"),
             Event::SetBotCrToleranceBps { .. } => Some("SetBotCrToleranceBps"),
-            Event::BotProofModeEnabled => Some("BotProofModeEnabled"),
-            Event::BotClaimGenerationReserved { .. } => Some("BotClaimGenerationReserved"),
-            Event::BotPaymentProofConsumed { .. } => Some("BotPaymentProofConsumed"),
             Event::SetCollateralMinXrcSources { .. } => Some("SetCollateralMinXrcSources"),
             Event::SetLiquidationBonus { .. } => Some("SetLiquidationBonus"),
             Event::SetBorrowingFee { .. } => Some("SetBorrowingFee"),
@@ -1606,8 +1608,29 @@ pub enum ReplayLogError {
     InconsistentLog(String),
 }
 
+fn apply_bot_proof_audit_event(state: &mut State, event: BotProofAuditEvent) {
+    match event {
+        BotProofAuditEvent::ProofModeEnabled => state.bot_confirm_proof_required = true,
+        BotProofAuditEvent::ClaimGenerationReserved { generation } => {
+            state.bot_claim_generation_counter = state.bot_claim_generation_counter.max(generation);
+        }
+        BotProofAuditEvent::PaymentProofConsumed {
+            ledger_principal,
+            block_index,
+            vault_id,
+            claim_generation,
+        } => {
+            state.consumed_bot_payment_proofs.insert(
+                format!("{}:{block_index}", ledger_principal.to_text()),
+                (vault_id, claim_generation),
+            );
+        }
+    }
+}
+
 fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
     match event {
+        PendingPayoutEvent::BotProofAudit { event } => apply_bot_proof_audit_event(state, event),
         PendingPayoutEvent::Queued {
             kind,
             operation_id,
@@ -2119,22 +2142,6 @@ fn replay_with_nonce_time_and_payout_events(
             },
             Event::SetBotCrToleranceBps { bps } => {
                 state.bot_cr_tolerance_bps = bps;
-            },
-            Event::BotProofModeEnabled => state.bot_confirm_proof_required = true,
-            Event::BotClaimGenerationReserved { generation } => {
-                state.bot_claim_generation_counter =
-                    state.bot_claim_generation_counter.max(generation);
-            },
-            Event::BotPaymentProofConsumed {
-                ledger_principal,
-                block_index,
-                vault_id,
-                claim_generation,
-            } => {
-                state.consumed_bot_payment_proofs.insert(
-                    format!("{}:{block_index}", ledger_principal.to_text()),
-                    (vault_id, claim_generation),
-                );
             },
             Event::SetCollateralMinXrcSources { collateral_type, min_xrc_sources } => {
                 if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
@@ -3595,14 +3602,16 @@ pub fn record_set_bot_cr_tolerance_bps(state: &mut State, bps: u64) {
 
 pub fn record_bot_proof_mode_enabled(state: &mut State) {
     if !state.bot_confirm_proof_required {
-        record_event(&Event::BotProofModeEnabled);
+        crate::storage::record_bot_proof_audit_event(BotProofAuditEvent::ProofModeEnabled);
         state.bot_confirm_proof_required = true;
     }
 }
 
 pub fn record_bot_claim_generation_reserved(state: &mut State, generation: u64) {
     debug_assert!(generation > state.bot_claim_generation_counter);
-    record_event(&Event::BotClaimGenerationReserved { generation });
+    crate::storage::record_bot_proof_audit_event(BotProofAuditEvent::ClaimGenerationReserved {
+        generation,
+    });
     state.bot_claim_generation_counter = state.bot_claim_generation_counter.max(generation);
 }
 
@@ -3613,7 +3622,7 @@ pub fn record_bot_payment_proof_consumed(
     vault_id: u64,
     claim_generation: u64,
 ) {
-    record_event(&Event::BotPaymentProofConsumed {
+    crate::storage::record_bot_proof_audit_event(BotProofAuditEvent::PaymentProofConsumed {
         ledger_principal,
         block_index,
         vault_id,
@@ -5126,18 +5135,27 @@ mod redemption_replay_tests {
     fn bot_proof_security_state_survives_event_only_replay() {
         let icp = principal(29);
         let payment_ledger = principal(31);
-        let state = replay(vec![
-            Event::Init(init_args(icp)),
-            Event::BotProofModeEnabled,
-            Event::BotClaimGenerationReserved { generation: 41 },
-            Event::BotPaymentProofConsumed {
+        let private_events = [
+            BotProofAuditEvent::ProofModeEnabled,
+            BotProofAuditEvent::ClaimGenerationReserved { generation: 41 },
+            BotProofAuditEvent::PaymentProofConsumed {
                 ledger_principal: payment_ledger,
                 block_index: 9001,
                 vault_id: 77,
                 claim_generation: 41,
             },
-            Event::BotClaimGenerationReserved { generation: 42 },
-        ]);
+            BotProofAuditEvent::ClaimGenerationReserved { generation: 42 },
+        ]
+        .into_iter()
+        .map(|event| crate::storage::PendingPayoutJournalEntry {
+            after_event_count: 1,
+            event: PendingPayoutEvent::BotProofAudit { event },
+        });
+        let state = super::replay_with_pending_payout_events(
+            vec![Event::Init(init_args(icp))].into_iter(),
+            private_events,
+        )
+        .expect("bot proof private journal should replay");
 
         assert!(state.bot_confirm_proof_required);
         assert_eq!(state.bot_claim_generation_counter, 42);
