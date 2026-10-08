@@ -410,8 +410,6 @@ pub enum ThreePoolError {
     ClaimNotFound,
     /// Pending-claim capacity is unavailable; the operation did not move value.
     PendingClaimCapacityReached,
-    /// This claim predates bound payout identities and remains held for review.
-    LegacyClaimHeld,
 }
 
 /// A record of tokens the pool owes a user after a value-moving operation

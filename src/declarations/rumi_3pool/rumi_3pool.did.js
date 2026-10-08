@@ -37,7 +37,6 @@ export const idlFactory = ({ IDL }) => {
     'Unauthorized' : IDL.Null,
     'InvariantNotConverged' : IDL.Null,
     'InsufficientLiquidity' : IDL.Null,
-    'LegacyClaimHeld' : IDL.Null,
     'TransferFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
     'PendingClaimCapacityReached' : IDL.Null,
     'SlippageExceeded' : IDL.Null,

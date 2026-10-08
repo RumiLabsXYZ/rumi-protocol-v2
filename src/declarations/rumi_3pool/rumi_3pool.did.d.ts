@@ -441,7 +441,6 @@ export type ThreePoolError = {
   { 'Unauthorized' : null } |
   { 'InvariantNotConverged' : null } |
   { 'InsufficientLiquidity' : null } |
-  { 'LegacyClaimHeld' : null } |
   { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
   { 'PendingClaimCapacityReached' : null } |
   { 'SlippageExceeded' : null } |

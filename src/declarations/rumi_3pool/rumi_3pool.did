@@ -65,7 +65,6 @@ type ThreePoolError = variant {
   PoolLocked;
   ClaimNotFound;
   PendingClaimCapacityReached;
-  LegacyClaimHeld;
 };
 
 type ThreePoolPendingClaim = record {

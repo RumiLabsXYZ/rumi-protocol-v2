@@ -280,7 +280,8 @@ fn legacy_unbound_claim_is_visible_and_held_at_claim_time() {
         .expect("claim_pending call failed");
     let r: Result<(), ThreePoolError> = decode_one(&reply_bytes(res)).unwrap();
     match r {
-        Err(ThreePoolError::LegacyClaimHeld) => {}
+        Err(ThreePoolError::TransferFailed { reason, .. })
+            if reason.contains("legacy claim has no bound transfer identity") => {}
         other => panic!("legacy claim must remain held without transfer identity, got {other:?}"),
     }
 

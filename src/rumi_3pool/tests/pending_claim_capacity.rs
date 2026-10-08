@@ -462,7 +462,11 @@ fn legacy_claim_survives_upgrade_and_cannot_create_a_fresh_transfer() {
             .unwrap(),
     ))
     .unwrap();
-    assert!(matches!(result, Err(ThreePoolError::LegacyClaimHeld)));
+    assert!(matches!(
+        result,
+        Err(ThreePoolError::TransferFailed { ref reason, .. })
+            if reason.contains("legacy claim has no bound transfer identity")
+    ));
     assert_eq!(balance(&h, h.ledgers[1], h.user), before);
     assert!(claims(&h).iter().any(|claim| claim.id == id));
 }

@@ -427,6 +427,13 @@ pub(crate) fn record_pending_claim(
 
 /// Recover a bound payout claim by reconciling or replaying its persisted
 /// transfer identity. Legacy claims without one remain visible and held.
+fn legacy_payout_held_error() -> ThreePoolError {
+    ThreePoolError::TransferFailed {
+        token: "payout recovery".to_string(),
+        reason: "legacy claim has no bound transfer identity and remains held for adjudication".to_string(),
+    }
+}
+
 #[update]
 pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
     let _pool_guard = pool_guard::PoolGuard::new_payout_recovery()?;
@@ -438,7 +445,7 @@ pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
         if caller != claim.claimant && caller != admin {
             return Err(ThreePoolError::Unauthorized);
         }
-        return Err(ThreePoolError::LegacyClaimHeld);
+        return Err(legacy_payout_held_error());
     };
     if caller != entitlement.owner && caller != admin {
         return Err(ThreePoolError::Unauthorized);
@@ -450,7 +457,7 @@ pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
             || entitlement.ledger != claim.ledger
             || entitlement.gross != claim.amount
         {
-            return Err(ThreePoolError::LegacyClaimHeld);
+            return Err(legacy_payout_held_error());
         }
     }
 
@@ -459,9 +466,9 @@ pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
     if entitlement.kind == crate::payouts::PayoutKind::SwapOutput
         && matches!(entitlement.attempts.last().map(|a| &a.outcome), Some(crate::payouts::PayoutOutcome::RejectedNoTransfer { .. }))
     {
-        let context = entitlement.swap_context.as_ref().ok_or(ThreePoolError::LegacyClaimHeld)?;
+        let context = entitlement.swap_context.as_ref().ok_or_else(legacy_payout_held_error)?;
         if context.token_in >= 3 {
-            return Err(ThreePoolError::LegacyClaimHeld);
+            return Err(legacy_payout_held_error());
         }
         let child_claim_exists = entitlement
             .compensation_id
@@ -518,7 +525,7 @@ pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
 
     match crate::transfers::retry_payout_claim(claim_id).await {
         Ok(()) => {
-            let mut current = payouts::get(claim_id).ok_or(ThreePoolError::LegacyClaimHeld)?;
+            let mut current = payouts::get(claim_id).ok_or_else(legacy_payout_held_error)?;
             match current.kind {
                 crate::payouts::PayoutKind::SwapOutput => {
                     settle_recovered_swap(&mut current)?;
@@ -553,7 +560,7 @@ fn settle_recovered_swap(
     let context = entitlement
         .swap_context
         .as_ref()
-        .ok_or(ThreePoolError::LegacyClaimHeld)?
+        .ok_or_else(legacy_payout_held_error)?
         .clone();
     let admin_fee_share = context
         .pool_fee
@@ -567,7 +574,7 @@ fn settle_recovered_swap(
         let i = context.token_in as usize;
         let j = context.token_out as usize;
         if i >= 3 || j >= 3 || i == j {
-            return Err(ThreePoolError::LegacyClaimHeld);
+            return Err(legacy_payout_held_error());
         }
         let after_in = state.balances[i]
             .checked_add(context.amount_in)
