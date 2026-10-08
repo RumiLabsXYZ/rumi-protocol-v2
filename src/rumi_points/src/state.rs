@@ -845,6 +845,21 @@ pub fn point_ledger_len() -> u64 {
 
 const MAX_FIAT_STABLE_TOPUP_ROWS: u32 = 1_000;
 
+// `scale_by_period` saturates its multiplication before dividing by one day.
+// These values therefore mean the historical original may already have
+// saturated, so a 1/3 correction would assert a precision the ledger cannot
+// prove. They are reconciliation exceptions, never eligible top-ups.
+const SATURATED_SCALE_POINTS: u128 = u128::MAX / crate::NANOS_PER_DAY as u128;
+
+fn fiat_stable_correction_points(original_points: u128, context: &str) -> Result<u128, String> {
+    if original_points == u128::MAX || original_points == SATURATED_SCALE_POINTS {
+        return Err(format!(
+            "fiat stable reconciliation required for saturated legacy unmatched points ({context})"
+        ));
+    }
+    Ok(original_points / 3)
+}
+
 fn fiat_stable_policy_state() -> FiatStablePolicyState {
     FIAT_STABLE_POLICY.with(|cell| cell.borrow().get().clone().into_current())
 }
@@ -973,7 +988,10 @@ fn fiat_stable_corrections(
             {
                 continue;
             }
-            let points = entry.points_delta / 3;
+            let points = fiat_stable_correction_points(
+                entry.points_delta,
+                &format!("historical ledger row {offset}"),
+            )?;
             if points > 0 {
                 corrections.push(FiatStableCorrection { entry, points });
             }
@@ -1740,6 +1758,45 @@ pub enum CloseStep {
 /// does more per-principal work (writes, not just reads).
 pub const CLOSE_CHUNK: u64 = 50;
 
+/// Before a legacy close batch writes any original or adjustment row, reject a
+/// saturated unmatched contribution as a reconciliation exception. This is
+/// deliberately a bounded read-only pass over the same close chunk; a trap
+/// leaves its cursor, snapshots, and ledger unchanged.
+fn preflight_inline_fiat_stable_topups(
+    batch: &[Principal],
+    epoch_index: u64,
+    epoch_start: u64,
+    epoch_end_capped: u64,
+) {
+    if !inline_fiat_stable_topups_required_for_epoch(epoch_index) {
+        return;
+    }
+    for principal in batch {
+        if is_excluded(principal) {
+            continue;
+        }
+        let state = get_principal_state(principal).unwrap_or_else(|| {
+            ic_cdk::trap("missing principal state during fiat stable inline legacy top-up")
+        });
+        let (entries, _) = accrual::accrue_principal_for_policy(
+            snapshot_buffer_get(principal).unwrap_or_default(),
+            &state.repayment_events,
+            epoch_start,
+            epoch_end_capped,
+            false,
+        );
+        for (source, points) in entries {
+            if source == PointSource::CkStable3PoolUnmatched {
+                fiat_stable_correction_points(
+                    points,
+                    &format!("inline legacy epoch {epoch_index} principal {principal}"),
+                )
+                .unwrap_or_else(|error| ic_cdk::trap(&error));
+            }
+        }
+    }
+}
+
 /// Process ONE batch of the chunked epoch close. Reads the resume cursor and
 /// running totals from the open epoch, accrues up to `CLOSE_CHUNK` registered
 /// principals STRICTLY AFTER the cursor, and persists the advanced cursor + totals
@@ -1769,6 +1826,7 @@ pub fn run_close_accrual_chunk(now_ns: u64) -> CloseStep {
     let epoch_end_capped = open.epoch_end_ns;
 
     let batch = registered_chunk_after(open.close_cursor, CLOSE_CHUNK);
+    preflight_inline_fiat_stable_topups(&batch, epoch_index, epoch_start, epoch_end_capped);
     let mut last_closed = open.close_cursor;
     for p in &batch {
         last_closed = Some(*p);
@@ -3545,5 +3603,88 @@ mod tests {
         assert_eq!(point_ledger_len(), len);
         assert_eq!(fiat_stable_points_policy().historical_next_offset, 0);
         assert_eq!(get_principal_state(&principal).unwrap().total_points, u128::MAX);
+    }
+
+    #[test]
+    fn fiat_stable_saturated_evidence_is_a_reconciliation_exception() {
+        assert!(fiat_stable_correction_points(u128::MAX, "test").is_err());
+        assert!(fiat_stable_correction_points(SATURATED_SCALE_POINTS, "test").is_err());
+        assert_eq!(
+            fiat_stable_correction_points(SATURATED_SCALE_POINTS - 1, "test").unwrap(),
+            (SATURATED_SCALE_POINTS - 1) / 3
+        );
+    }
+
+    #[test]
+    fn fiat_stable_saturated_historical_row_aborts_valid_batch_atomically() {
+        let admin = tp(99);
+        init_default(admin);
+        let valid = tp(44);
+        let saturated = tp(45);
+        register(valid, 1, QualifyingAction::Deposit3Pool).unwrap();
+        register(saturated, 1, QualifyingAction::Deposit3Pool).unwrap();
+        let mut valid_state = get_principal_state(&valid).unwrap();
+        valid_state.total_points = 3;
+        put_principal_state(valid_state);
+        let mut saturated_state = get_principal_state(&saturated).unwrap();
+        saturated_state.total_points = SATURATED_SCALE_POINTS;
+        put_principal_state(saturated_state);
+        append_point_entry(PointEntry {
+            principal: valid,
+            epoch_index: 0,
+            points_delta: 3,
+            source: PointSource::CkStable3PoolUnmatched,
+            recorded_at_ns: 2,
+        });
+        append_point_entry(PointEntry {
+            principal: saturated,
+            epoch_index: 0,
+            points_delta: SATURATED_SCALE_POINTS,
+            source: PointSource::CkStable3PoolUnmatched,
+            recorded_at_ns: 3,
+        });
+        set_open_epoch(Some(open_epoch_at(0)));
+        activate_fiat_stable_4x(admin).unwrap();
+
+        // Registration markers are valid rows. The following batch contains a
+        // valid correction and a saturated original, and must commit neither.
+        apply_fiat_stable_topups(admin, 2, 4).unwrap();
+        let before_len = point_ledger_len();
+        let error = apply_fiat_stable_topups(admin, 2, 5).unwrap_err();
+        assert!(error.contains("reconciliation required"));
+        assert_eq!(point_ledger_len(), before_len);
+        assert_eq!(fiat_stable_points_policy().historical_next_offset, 2);
+        assert_eq!(get_principal_state(&valid).unwrap().total_points, 3);
+        assert_eq!(
+            get_principal_state(&saturated).unwrap().total_points,
+            SATURATED_SCALE_POINTS
+        );
+    }
+
+    #[test]
+    fn fiat_stable_inline_saturated_original_traps_before_writes() {
+        let admin = tp(99);
+        let principal = tp(46);
+        init_default(admin);
+        set_open_epoch(Some(open_epoch_at(0)));
+        register(principal, 1, QualifyingAction::Deposit3Pool).unwrap();
+        snapshot_buffer_put(
+            principal,
+            SnapshotWeights {
+                ck_unmatched: u128::MAX,
+                ..Default::default()
+            },
+        );
+        activate_fiat_stable_4x(admin).unwrap();
+        let before_len = point_ledger_len();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_close_accrual_chunk(10)
+        }));
+        assert!(result.is_err());
+        assert_eq!(point_ledger_len(), before_len);
+        assert_eq!(get_principal_state(&principal).unwrap().total_points, 0);
+        assert!(snapshot_buffer_get(&principal).is_some());
+        assert_eq!(get_open_epoch().unwrap().close_cursor, None);
+        assert_eq!(fiat_stable_points_policy().inline_legacy_topup_rows, 0);
     }
 }
