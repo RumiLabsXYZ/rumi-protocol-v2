@@ -117,6 +117,17 @@ pub struct StabilityPoolState {
     pub configuration: PoolConfiguration,
     pub liquidation_history: Vec<PoolLiquidationRecord>,
     pub in_flight_liquidations: BTreeSet<u64>,
+    /// Durable identity for 3USD reserve absorbs. The row is written before
+    /// the backend call so an ambiguous reply retries the same backend request.
+    #[serde(default)]
+    pub pending_three_usd_absorbs: Option<BTreeMap<u64, ThreeUsdReserveAbsorbIntent>>,
+    #[serde(default)]
+    pub next_three_usd_absorb_id: Option<u64>,
+    /// Durable round-robin cursor for bounded terminal-intent recovery.
+    #[serde(default)]
+    pub three_usd_absorb_recovery_cursor: Option<u64>,
+    #[serde(default)]
+    pub completed_three_usd_absorbs: Option<BTreeSet<u64>>,
     pub total_liquidations_executed: u64,
     pub pool_creation_timestamp: u64,
     /// Lifetime interest revenue received from backend (e8s).
@@ -201,6 +212,10 @@ impl Default for StabilityPoolState {
             },
             liquidation_history: Vec::new(),
             in_flight_liquidations: BTreeSet::new(),
+            pending_three_usd_absorbs: Some(BTreeMap::new()),
+            next_three_usd_absorb_id: Some(1),
+            three_usd_absorb_recovery_cursor: None,
+            completed_three_usd_absorbs: Some(BTreeSet::new()),
             total_liquidations_executed: 0,
             pool_creation_timestamp: 0,
             total_interest_received_e8s: Some(0),
@@ -1145,7 +1160,112 @@ impl StabilityPoolState {
     }
 
     pub fn has_pending_pool_absorbs(&self) -> bool {
-        self.has_pending_chain_absorbs() || self.has_pending_native_xrp_absorbs()
+        self.has_pending_chain_absorbs()
+            || self.has_pending_native_xrp_absorbs()
+            || self.pending_three_usd_absorb_count() > 0
+    }
+
+    pub fn pending_three_usd_absorb_count(&self) -> usize {
+        self.pending_three_usd_absorbs
+            .as_ref()
+            .map_or(0, BTreeMap::len)
+    }
+
+    /// Return a fair bounded page of pending 3USD intents and persist the next
+    /// round-robin position so a held low-key prefix cannot starve later rows.
+    pub fn take_pending_three_usd_absorb_page(
+        &mut self,
+        limit: usize,
+    ) -> Vec<ThreeUsdReserveAbsorbIntent> {
+        let Some(rows) = self.pending_three_usd_absorbs.as_ref() else {
+            self.three_usd_absorb_recovery_cursor = None;
+            return Vec::new();
+        };
+        if rows.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let cursor = self.three_usd_absorb_recovery_cursor;
+        let mut selected: Vec<_> = rows.iter()
+            .filter(|(vault_id, _)| cursor.is_none_or(|last| **vault_id > last))
+            .take(limit)
+            .map(|(vault_id, intent)| (*vault_id, intent.clone()))
+            .collect();
+        if selected.len() < limit {
+            let remaining = limit - selected.len();
+            selected.extend(rows.iter().take(remaining).map(|(vault_id, intent)| (*vault_id, intent.clone())));
+        }
+        self.three_usd_absorb_recovery_cursor = selected.last().map(|(vault_id, _)| *vault_id);
+        selected.into_iter().map(|(_, intent)| intent).collect()
+    }
+
+    pub fn get_pending_three_usd_absorb(
+        &self,
+        vault_id: u64,
+    ) -> Option<ThreeUsdReserveAbsorbIntent> {
+        self.pending_three_usd_absorbs
+            .as_ref()
+            .and_then(|pending| pending.get(&vault_id))
+            .cloned()
+    }
+
+    /// Reuse an existing request for this vault or reserve a monotonic id for
+    /// the exact tuple that will be sent to the backend. Existing rows win so
+    /// ambiguous backend replies cannot be retried with freshly calculated
+    /// amount/debt arguments.
+    pub fn prepare_three_usd_absorb(
+        &mut self,
+        vault_id: u64,
+        debt_e8s: u64,
+        amount: u64,
+        ledger: Principal,
+        collateral_type: Principal,
+        collateral_price_e8s: u64,
+    ) -> Result<ThreeUsdReserveAbsorbIntent, StabilityPoolError> {
+        if let Some(existing) = self.get_pending_three_usd_absorb(vault_id) {
+            return Ok(existing);
+        }
+
+        let absorb_id = self.next_three_usd_absorb_id.unwrap_or(1);
+        let next_id = absorb_id
+            .checked_add(1)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        let intent = ThreeUsdReserveAbsorbIntent {
+            absorb_id,
+            vault_id,
+            debt_e8s,
+            amount,
+            ledger,
+            collateral_type: Some(collateral_type),
+            collateral_price_e8s: Some(collateral_price_e8s),
+        };
+        self.pending_three_usd_absorbs
+            .get_or_insert_with(BTreeMap::new)
+            .insert(vault_id, intent.clone());
+        self.next_three_usd_absorb_id = Some(next_id);
+        Ok(intent)
+    }
+
+    pub fn clear_pending_three_usd_absorb(&mut self, vault_id: u64) {
+        if let Some(pending) = self.pending_three_usd_absorbs.as_mut() {
+            pending.remove(&vault_id);
+        }
+    }
+
+    pub fn complete_three_usd_absorb(&mut self, vault_id: u64, absorb_id: u64) {
+        let matches_pending = self
+            .get_pending_three_usd_absorb(vault_id)
+            .is_some_and(|intent| intent.absorb_id == absorb_id);
+        if !matches_pending {
+            return;
+        }
+        self.clear_pending_three_usd_absorb(vault_id);
+        let completed = self.completed_three_usd_absorbs.get_or_insert_with(BTreeSet::new);
+        completed.insert(absorb_id);
+        while completed.len() > 10_000 {
+            if let Some(oldest) = completed.iter().next().copied() {
+                completed.remove(&oldest);
+            }
+        }
     }
 
     pub fn pending_chain_absorb_status(&self, vault_id: u64) -> Option<ChainSpAbsorbIntentStatus> {
@@ -2073,6 +2193,45 @@ impl StabilityPoolState {
         );
     }
 
+    /// Guarded recovery precondition for generic liquidation settlement. The
+    /// processor below intentionally no-ops for native collateral or zero
+    /// eligible consumed value; callers handling a durable terminal identity
+    /// must detect those cases before they clear that identity.
+    pub fn can_process_liquidation_gains(
+        &self,
+        collateral_type: &Principal,
+        stables_consumed: &BTreeMap<Principal, u64>,
+    ) -> bool {
+        if self.collateral_requires_payout_address(collateral_type)
+            || !self.collateral_registry.contains_key(collateral_type)
+            || stables_consumed.is_empty()
+        {
+            return false;
+        }
+        let opted_in_has_balance = self.deposits.iter().any(|(_, position)| {
+            self.position_opted_in_for(position, collateral_type)
+                && stables_consumed.iter().any(|(ledger, _)| {
+                    position.stablecoin_balances.get(ledger).copied().unwrap_or(0) > 0
+                })
+        });
+        if !opted_in_has_balance {
+            return false;
+        }
+        let virtual_prices = self.virtual_prices();
+        stables_consumed.iter().try_fold(0u64, |total, (ledger, amount)| {
+            let Some(config) = self.stablecoin_registry.get(ledger) else {
+                return None;
+            };
+            let value = if config.is_lp_token.unwrap_or(false) {
+                let price = virtual_prices.get(ledger).copied()?;
+                lp_to_usd_e8s(*amount, price)
+            } else {
+                normalize_to_e8s(*amount, config.decimals)
+            };
+            total.checked_add(value)
+        }).is_some_and(|value| value > 0)
+    }
+
     pub fn process_chain_liquidation_gains(
         &mut self,
         vault_id: u64,
@@ -2849,6 +3008,81 @@ impl StabilityPoolState {
         }
     }
 
+    /// Deduct an exact backend-verified ledger fee and allocate proportional
+    /// shares, assigning floor-rounding remainder deterministically so depositor
+    /// balances and the aggregate both fall by the full fee.
+    pub fn deduct_exact_fee_from_pool(
+        &mut self,
+        token_ledger: Principal,
+        fee: u64,
+    ) -> Result<(), StabilityPoolError> {
+        if fee == 0 {
+            return Ok(());
+        }
+        let total = self
+            .total_stablecoin_balances
+            .get(&token_ledger)
+            .copied()
+            .unwrap_or(0);
+        if total < fee {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+
+        let mut allocations = Vec::new();
+        let mut position_total = 0u128;
+        let mut deducted = 0u64;
+        for (principal, position) in &self.deposits {
+            let balance = position
+                .stablecoin_balances
+                .get(&token_ledger)
+                .copied()
+                .unwrap_or(0);
+            position_total = position_total
+                .checked_add(balance as u128)
+                .ok_or(StabilityPoolError::SystemBusy)?;
+            if balance == 0 {
+                continue;
+            }
+            let share = ((fee as u128 * balance as u128) / total as u128) as u64;
+            deducted = deducted
+                .checked_add(share)
+                .ok_or(StabilityPoolError::SystemBusy)?;
+            allocations.push((*principal, balance, share));
+        }
+        if position_total != total as u128 || deducted > fee {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+
+        let mut remainder = fee - deducted;
+        for (_, balance, share) in allocations.iter_mut() {
+            if remainder == 0 {
+                break;
+            }
+            if *share < *balance {
+                *share += 1;
+                remainder -= 1;
+            }
+        }
+        if remainder != 0 {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+
+        for (principal, _, share) in allocations {
+            if let Some(position) = self.deposits.get_mut(&principal) {
+                if let Some(balance) = position.stablecoin_balances.get_mut(&token_ledger) {
+                    *balance -= share;
+                    if *balance == 0 {
+                        position.stablecoin_balances.remove(&token_ledger);
+                    }
+                }
+            }
+        }
+        if let Some(aggregate) = self.total_stablecoin_balances.get_mut(&token_ledger) {
+            *aggregate -= fee;
+        }
+        Ok(())
+    }
+
     // ─── Admin Balance Correction ───
 
     /// Set a depositor's balance for a specific token to `correct_amount`,
@@ -3066,6 +3300,10 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             configuration: v1.configuration,
             liquidation_history: v1.liquidation_history,
             in_flight_liquidations: v1.in_flight_liquidations,
+            pending_three_usd_absorbs: Some(BTreeMap::new()),
+            next_three_usd_absorb_id: Some(1),
+            three_usd_absorb_recovery_cursor: None,
+            completed_three_usd_absorbs: Some(BTreeSet::new()),
             total_liquidations_executed: v1.total_liquidations_executed,
             pool_creation_timestamp: v1.pool_creation_timestamp,
             total_interest_received_e8s: v1.total_interest_received_e8s,
@@ -3350,6 +3588,65 @@ mod tests {
             .or_insert_with(|| DepositPosition::new(0));
         *position.stablecoin_balances.entry(token).or_insert(0) += amount;
         *state.total_stablecoin_balances.entry(token).or_insert(0) += amount;
+    }
+
+    #[test]
+    fn exact_pool_fee_deduction_assigns_rounding_remainder() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 5);
+        add_deposit_direct(&mut state, user_b(), three_usd_ledger(), 5);
+
+        state
+            .deduct_exact_fee_from_pool(three_usd_ledger(), 1)
+            .expect("exact fee is allocated across depositor balances");
+
+        assert_eq!(
+            state.deposits[&user_a()].stablecoin_balances[&three_usd_ledger()],
+            4
+        );
+        assert_eq!(
+            state.deposits[&user_b()].stablecoin_balances[&three_usd_ledger()],
+            5
+        );
+        assert_eq!(state.total_stablecoin_balances[&three_usd_ledger()], 9);
+
+        assert!(state
+            .deduct_exact_fee_from_pool(three_usd_ledger(), 10)
+            .is_err());
+        assert_eq!(state.total_stablecoin_balances[&three_usd_ledger()], 9);
+    }
+
+    #[test]
+    fn ingress_and_refund_fees_conserve_the_exact_pool_balance() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 5);
+        add_deposit_direct(&mut state, user_b(), three_usd_ledger(), 5);
+        let ingress_fee: u64 = 2;
+        let refund_fee: u64 = 3;
+
+        state
+            .deduct_exact_fee_from_pool(
+                three_usd_ledger(),
+                ingress_fee.checked_add(refund_fee).unwrap(),
+            )
+            .expect("both verified transfer fees reduce the tracked pool exactly");
+
+        assert_eq!(
+            state.total_stablecoin_balances[&three_usd_ledger()],
+            10 - ingress_fee - refund_fee
+        );
+        let depositor_total: u64 = state
+            .deposits
+            .values()
+            .map(|position| {
+                position
+                    .stablecoin_balances
+                    .get(&three_usd_ledger())
+                    .copied()
+                    .unwrap_or_default()
+            })
+            .sum();
+        assert_eq!(depositor_total, state.total_stablecoin_balances[&three_usd_ledger()]);
     }
 
     // ─── Test: Deposit and Withdrawal ───
@@ -4605,6 +4902,77 @@ mod tests {
             DEFAULT_CHAIN_ABSORB_AUTO_MAX_SCAN_PER_CHAIN
         );
         assert!(decoded.chain_absorb_auto_last_tick().is_none());
+    }
+
+    #[test]
+    fn three_usd_absorb_reuses_pending_identity_until_terminal_status() {
+        let mut state = StabilityPoolState::default();
+        let ledger = Principal::from_slice(&[77]);
+        let original = state
+            .prepare_three_usd_absorb(42, 500_000_000, 510_000_000, ledger, Principal::from_slice(&[79]), 100_000_000)
+            .expect("first request is persisted");
+
+        // A generic backend error may follow a successful pull, so leaving the
+        // row untouched must make a later scan reuse the original tuple.
+        let retry = state
+            .prepare_three_usd_absorb(42, 300_000_000, 305_000_000, ledger, Principal::from_slice(&[80]), 99_000_000)
+            .expect("pending request is reused after an unresolved result");
+
+        assert_eq!(retry, original);
+        assert_eq!(state.pending_three_usd_absorb_count(), 1);
+        assert!(state.has_pending_pool_absorbs());
+
+        let encoded = Encode!(&state).expect("persist pending absorb identity");
+        let mut restored = try_decode_state(&encoded).expect("restore pending absorb identity");
+        let after_upgrade = restored
+            .prepare_three_usd_absorb(42, 1, 2, Principal::from_slice(&[78]), Principal::from_slice(&[79]), 1)
+            .expect("upgrade retains pending request across retry");
+        assert_eq!(after_upgrade, original);
+    }
+
+    #[test]
+    fn three_usd_recovery_page_rotates_past_held_prefix() {
+        let mut state = StabilityPoolState::default();
+        for vault_id in 1..=9 {
+            state.prepare_three_usd_absorb(
+                vault_id,
+                100,
+                100,
+                Principal::from_slice(&[77]),
+                Principal::from_slice(&[78]),
+                100_000_000,
+            ).unwrap();
+        }
+        let first = state.take_pending_three_usd_absorb_page(8);
+        assert_eq!(first.iter().map(|intent| intent.vault_id).collect::<Vec<_>>(), (1..=8).collect::<Vec<_>>());
+        // Simulate a held prefix: the durable cursor advances regardless of
+        // backend status, so the next timer tick must inspect the ninth row.
+        let second = state.take_pending_three_usd_absorb_page(8);
+        assert_eq!(second.iter().map(|intent| intent.vault_id).collect::<Vec<_>>(), vec![9, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn old_three_usd_intent_candid_decodes_with_missing_recovery_metadata() {
+        #[derive(CandidType)]
+        struct ThreeUsdReserveAbsorbIntentV1 {
+            absorb_id: u64,
+            vault_id: u64,
+            debt_e8s: u64,
+            amount: u64,
+            ledger: Principal,
+        }
+        let old = ThreeUsdReserveAbsorbIntentV1 {
+            absorb_id: 5,
+            vault_id: 42,
+            debt_e8s: 500,
+            amount: 1_000,
+            ledger: Principal::from_slice(&[77]),
+        };
+        let bytes = Encode!(&old).unwrap();
+        let restored = Decode!(&bytes, ThreeUsdReserveAbsorbIntent).unwrap();
+        assert_eq!(restored.absorb_id, 5);
+        assert_eq!(restored.collateral_type, None);
+        assert_eq!(restored.collateral_price_e8s, None);
     }
 
     #[test]

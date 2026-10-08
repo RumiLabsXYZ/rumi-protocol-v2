@@ -62,6 +62,17 @@ pub enum SpProofLedger {
     /// 3USD / 3pool ledger — expect a transfer to the protocol's reserves
     /// subaccount (reserves path).
     ThreePoolTransfer,
+    /// Receipt-backed reserve ingress on the backend's default account.
+    ThreePoolTransferDefault,
+}
+
+/// Stable output shape for the pre-V2 consumed-proof monitoring query. Keep
+/// new V2 proof kinds out of its result; adding an enum arm would break old
+/// generated clients that decode the query response.
+#[derive(CandidType, Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LegacySpProofLedger {
+    IcusdBurn,
+    ThreePoolTransfer,
 }
 
 /// Typed proof argument the SP passes alongside a writedown call.
@@ -119,6 +130,7 @@ pub struct DecodedBlock {
     pub to: Option<Account>,
     pub spender: Option<Account>,
     pub amount: u128,
+    pub fee: Option<u64>,
     pub created_at_time: Option<u64>,
     pub memo: Option<Vec<u8>>,
 }
@@ -182,6 +194,17 @@ pub fn decode_block(value: &ICRC3Value) -> Result<DecodedBlock, String> {
         .ok_or_else(|| "tx missing 'amt'".to_string())
         .and_then(nat_to_u128)?;
 
+    // Standard ICRC-3 places fee in `tx`; the in-tree 3pool ledger currently
+    // emits its (zero) fee at block level. Prefer transaction metadata when
+    // present, then read the ledger's block-level representation.
+    let fee = tx_map
+        .get("fee")
+        .or_else(|| block_map.get("fee"))
+        .map(nat_to_u128)
+        .transpose()?
+        .map(|value| u64::try_from(value).map_err(|_| "block fee does not fit in u64".to_string()))
+        .transpose()?;
+
     let created_at_time = tx_map
         .get("ts")
         .or_else(|| tx_map.get("created_at_time"))
@@ -205,9 +228,126 @@ pub fn decode_block(value: &ICRC3Value) -> Result<DecodedBlock, String> {
         to,
         spender,
         amount,
+        fee,
         created_at_time,
         memo,
     })
+}
+
+/// Validate the exact ICRC-2 transferFrom tuple retained by a V2 ingress.
+/// In particular, a transfer to the legacy hashed subaccount cannot authorize
+/// a write-down under the default-account route.
+pub fn validate_three_usd_reserve_ingress_block(
+    block: &DecodedBlock,
+    tuple: &crate::state::ThreeUsdReserveIngressTuple,
+) -> Result<u64, String> {
+    if (block.op != "xfer" && block.op != "transfer")
+        || block.btype.as_deref().is_some_and(|kind| kind != "2xfer")
+    {
+        return Err("reserve ingress receipt is not a transfer block".into());
+    }
+    let spender = block.spender.as_ref().ok_or("reserve ingress block is missing spender")?;
+    if spender.owner != tuple.spender_owner
+        || spender.subaccount != tuple.spender_subaccount
+        || block.from.as_ref() != Some(&tuple.source)
+        || block.to.as_ref() != Some(&tuple.destination)
+        || block.amount != u128::from(tuple.amount_e8s)
+        || tuple.fee_e8s != Some(tuple.ledger_fee_e8s)
+        || block.fee != Some(tuple.ledger_fee_e8s)
+        || block.memo.as_deref() != Some(tuple.memo.as_slice())
+        || block.created_at_time != Some(tuple.created_at_time_ns)
+    {
+        return Err("reserve ingress receipt does not match the persisted ICRC-2 tuple".into());
+    }
+    block
+        .fee
+        .ok_or_else(|| "reserve ingress block is missing its actual charged fee".into())
+}
+
+pub async fn verify_three_usd_reserve_ingress_block(
+    ledger: Principal,
+    block_index: u64,
+    tuple: &crate::state::ThreeUsdReserveIngressTuple,
+) -> Result<u64, String> {
+    let block = fetch_icrc3_block(ledger, block_index).await?;
+    validate_three_usd_reserve_ingress_block(&block, tuple)
+}
+
+pub fn validate_three_usd_reserve_refund_block(
+    block: &DecodedBlock,
+    tuple: &crate::state::ThreeUsdReserveRefundTuple,
+) -> Result<(), String> {
+    if (block.op != "xfer" && block.op != "transfer")
+        || block.btype.as_deref().is_some_and(|kind| kind != "1xfer")
+        || block.spender.is_some()
+        || block.from.as_ref().map_or(true, |from| {
+            from.owner != tuple.source_owner || from.subaccount != tuple.source_subaccount
+        })
+        || block.to.as_ref() != Some(&tuple.destination)
+        || block.amount != u128::from(tuple.amount_e8s)
+        || block.fee != Some(tuple.charged_fee_e8s)
+        || block.memo.as_deref() != Some(tuple.memo.as_slice())
+        || block.created_at_time != Some(tuple.created_at_time_ns)
+        || tuple.fee_e8s.is_some_and(|fee| fee != tuple.charged_fee_e8s)
+    {
+        return Err("3USD refund receipt block does not match the exact persisted transfer tuple".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod three_usd_reserve_refund_tests {
+    use super::{validate_three_usd_reserve_refund_block, DecodedBlock};
+    use crate::state::ThreeUsdReserveRefundTuple;
+    use candid::Principal;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn tuple() -> ThreeUsdReserveRefundTuple {
+        ThreeUsdReserveRefundTuple {
+            source_owner: Principal::from_slice(&[1]),
+            source_subaccount: None,
+            destination: Account { owner: Principal::from_slice(&[2]), subaccount: None },
+            amount_e8s: 99,
+            charged_fee_e8s: 1,
+            fee_e8s: None,
+            memo: [7; 16],
+            created_at_time_ns: 42,
+        }
+    }
+
+    #[test]
+    fn refund_proof_binds_the_actual_block_fee_when_transfer_argument_omits_fee() {
+        let tuple = tuple();
+        let block = DecodedBlock {
+            btype: Some("1xfer".into()),
+            op: "transfer".into(),
+            from: Some(Account { owner: tuple.source_owner, subaccount: tuple.source_subaccount }),
+            to: Some(tuple.destination.clone()),
+            spender: None,
+            amount: tuple.amount_e8s.into(),
+            fee: Some(1),
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(tuple.memo.to_vec()),
+        };
+        assert!(validate_three_usd_reserve_refund_block(&block, &tuple).is_ok());
+
+        let mut changed_fee = block.clone();
+        changed_fee.fee = Some(2);
+        assert!(validate_three_usd_reserve_refund_block(&changed_fee, &tuple).is_err());
+
+        let mut changed_source = block.clone();
+        changed_source.from.as_mut().unwrap().owner = Principal::from_slice(&[9]);
+        assert!(validate_three_usd_reserve_refund_block(&changed_source, &tuple).is_err());
+    }
+}
+
+pub async fn verify_three_usd_reserve_refund_block(
+    ledger: Principal,
+    block_index: u64,
+    tuple: &crate::state::ThreeUsdReserveRefundTuple,
+) -> Result<(), String> {
+    let block = fetch_icrc3_block(ledger, block_index).await?;
+    validate_three_usd_reserve_refund_block(&block, tuple)
 }
 
 /// Verify an exact ICRC-1 mint/transfer block, resolving a single advertised
@@ -397,6 +537,14 @@ pub fn validate_block(block: &DecodedBlock, expected: &ProofExpectations) -> Res
                 ));
             }
         }
+        SpProofLedger::ThreePoolTransferDefault => {
+            if block.op != "xfer" && block.op != "transfer" {
+                return Err(format!(
+                    "expected default-account transfer block on 3USD ledger, got op={}",
+                    block.op
+                ));
+            }
+        }
     }
 
     let amount_u64 = u64::try_from(block.amount)
@@ -420,7 +568,7 @@ pub fn validate_block(block: &DecodedBlock, expected: &ProofExpectations) -> Res
     }
 
     match expected.ledger_kind {
-        SpProofLedger::ThreePoolTransfer => {
+        SpProofLedger::ThreePoolTransfer | SpProofLedger::ThreePoolTransferDefault => {
             let to = block
                 .to
                 .as_ref()
@@ -632,6 +780,80 @@ fn account_to_value(account: Account) -> ICRC3Value {
         parts.push(ICRC3Value::Blob(ByteBuf::from(sub.to_vec())));
     }
     ICRC3Value::Array(parts)
+}
+
+#[cfg(test)]
+mod three_usd_reserve_ingress_tests {
+    use super::{validate_three_usd_reserve_ingress_block, DecodedBlock};
+    use crate::state::ThreeUsdReserveIngressTuple;
+    use candid::Principal;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn tuple() -> ThreeUsdReserveIngressTuple {
+        ThreeUsdReserveIngressTuple {
+            spender_owner: Principal::from_slice(&[3]),
+            spender_subaccount: None,
+            source: Account { owner: Principal::from_slice(&[2]), subaccount: None },
+            destination: Account { owner: Principal::from_slice(&[3]), subaccount: None },
+            amount_e8s: 42,
+            fee_e8s: Some(0),
+            ledger_fee_e8s: 0,
+            memo: [7; 16],
+            created_at_time_ns: 99,
+            op_nonce: 4,
+            parent_absorb_id: 8,
+        }
+    }
+
+    fn block(tuple: &ThreeUsdReserveIngressTuple) -> DecodedBlock {
+        DecodedBlock {
+            btype: Some("2xfer".into()),
+            op: "transfer".into(),
+            from: Some(tuple.source.clone()),
+            to: Some(tuple.destination.clone()),
+            spender: Some(Account { owner: tuple.spender_owner, subaccount: tuple.spender_subaccount }),
+            amount: tuple.amount_e8s.into(),
+            fee: Some(tuple.ledger_fee_e8s),
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(tuple.memo.to_vec()),
+        }
+    }
+
+    #[test]
+    fn reserve_ingress_proof_binds_the_exact_default_account_tuple() {
+        let tuple = tuple();
+        let exact = block(&tuple);
+        assert_eq!(validate_three_usd_reserve_ingress_block(&exact, &tuple), Ok(0));
+
+        // V2 pins the current 3pool's zero fee in the ICRC-2 tuple. A fee
+        // change between preflight and execution must fail closed instead of
+        // changing tracked pool accounting.
+        let mut fee_drifted = exact.clone();
+        fee_drifted.fee = Some(17);
+        assert!(validate_three_usd_reserve_ingress_block(&fee_drifted, &tuple).is_err());
+
+        let mut wrong = exact.clone();
+        wrong.to.as_mut().unwrap().subaccount = Some([1; 32]);
+        assert!(validate_three_usd_reserve_ingress_block(&wrong, &tuple).is_err());
+        let mut wrong = exact.clone();
+        wrong.spender.as_mut().unwrap().owner = Principal::from_slice(&[9]);
+        assert!(validate_three_usd_reserve_ingress_block(&wrong, &tuple).is_err());
+        let mut wrong = exact.clone();
+        wrong.amount += 1;
+        assert!(validate_three_usd_reserve_ingress_block(&wrong, &tuple).is_err());
+        let mut missing_fee = exact.clone();
+        missing_fee.fee = None;
+        assert!(validate_three_usd_reserve_ingress_block(&missing_fee, &tuple).is_err());
+        let mut wrong = exact.clone();
+        wrong.btype = Some("1xfer".into());
+        assert!(validate_three_usd_reserve_ingress_block(&wrong, &tuple).is_err());
+        let mut wrong = exact.clone();
+        wrong.created_at_time = Some(100);
+        assert!(validate_three_usd_reserve_ingress_block(&wrong, &tuple).is_err());
+        let mut wrong = exact;
+        wrong.memo = Some(vec![0; 16]);
+        assert!(validate_three_usd_reserve_ingress_block(&wrong, &tuple).is_err());
+    }
 }
 
 /// Public helper exported for audit_pocs use: builds a memoless burn block.

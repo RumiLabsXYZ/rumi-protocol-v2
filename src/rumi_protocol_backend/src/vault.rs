@@ -1221,7 +1221,9 @@ fn post_await_sp_liquidation_health_error(
     collateral_price_usd: UsdIcp,
     ledger_kind: crate::icrc3_proof::SpProofLedger,
 ) -> Option<String> {
-    if ledger_kind != crate::icrc3_proof::SpProofLedger::ThreePoolTransfer {
+    if ledger_kind != crate::icrc3_proof::SpProofLedger::ThreePoolTransfer
+        && ledger_kind != crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault
+    {
         return None;
     }
 
@@ -3656,6 +3658,7 @@ fn xrp_sp_allocation_fingerprint(
     let proof_kind = match request.proof.ledger_kind {
         crate::icrc3_proof::SpProofLedger::IcusdBurn => 0u8,
         crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => 1u8,
+        crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault => 2u8,
     };
     hasher.update([proof_kind]);
     hasher.update(request.proof.block_index.to_be_bytes());
@@ -8311,6 +8314,103 @@ pub async fn liquidate_vault_partial_with_stable(
     })
 }
 
+fn replay_three_usd_reserve_absorb_result(
+    state: &crate::state::State,
+    caller: Principal,
+    key: &crate::state::ThreeUsdReserveIngressKey,
+    debt_covered_e8s: u64,
+    amount_e8s: u64,
+    ledger: Principal,
+    proof: &crate::icrc3_proof::SpWritedownProof,
+) -> Result<Option<StabilityPoolLiquidationResult>, ProtocolError> {
+    let Some(stored) = state.sp_three_usd_reserve_absorb_results_by_proof
+        .get(&(proof.ledger_kind, proof.block_index)) else {
+        return Ok(None);
+    };
+    if stored.caller == caller
+        && caller == key.stability_pool
+        && stored.vault_id == key.vault_id
+        && stored.absorb_id == key.absorb_id
+        && stored.icusd_debt_covered_e8s == debt_covered_e8s
+        && stored.three_usd_amount_e8s == amount_e8s
+        && stored.ledger == ledger
+        && stored.proof == *proof
+    {
+        Ok(Some(stored.result.clone()))
+    } else {
+        Err(ProtocolError::GenericError(
+            "V2 reserve proof replay does not match its committed ingress result".into(),
+        ))
+    }
+}
+
+fn sp_liquidation_result_block_index(
+    ingress_key: Option<&crate::state::ThreeUsdReserveIngressKey>,
+    proof: &crate::icrc3_proof::SpWritedownProof,
+) -> u64 {
+    if ingress_key.is_some()
+        && proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault
+    {
+        proof.block_index
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod three_usd_reserve_absorb_replay_tests {
+    use super::replay_three_usd_reserve_absorb_result;
+    use crate::icrc3_proof::{SpProofLedger, SpWritedownProof};
+    use crate::state::{State, StoredThreeUsdReserveAbsorbResult, ThreeUsdReserveIngressKey};
+    use candid::Principal;
+
+    #[test]
+    fn lost_reply_retry_returns_the_committed_result_only_for_the_exact_identity() {
+        let pool = Principal::from_slice(&[1]);
+        let ledger = Principal::from_slice(&[2]);
+        let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 7, absorb_id: 9 };
+        let proof = SpWritedownProof {
+            block_index: 11,
+            ledger_kind: SpProofLedger::ThreePoolTransferDefault,
+            vault_id_memo: 7,
+        };
+        assert_eq!(super::sp_liquidation_result_block_index(Some(&key), &proof), 11);
+        assert_eq!(super::sp_liquidation_result_block_index(None, &proof), 0);
+        let result = crate::StabilityPoolLiquidationResult {
+            success: true,
+            vault_id: 7,
+            liquidated_debt: 100,
+            collateral_received: 88,
+            collateral_type: "ICP".into(),
+            block_index: 0,
+            fee: 0,
+            collateral_price_e8s: 100,
+        };
+        let mut state = State::default();
+        state.sp_three_usd_reserve_absorb_results_by_proof.insert(
+            (proof.ledger_kind, proof.block_index),
+            StoredThreeUsdReserveAbsorbResult {
+                caller: pool,
+                vault_id: 7,
+                absorb_id: 9,
+                icusd_debt_covered_e8s: 100,
+                three_usd_amount_e8s: 110,
+                ledger,
+                proof: proof.clone(),
+                result: result.clone(),
+            },
+        );
+        assert!(matches!(
+            replay_three_usd_reserve_absorb_result(&state, pool, &key, 100, 110, ledger, &proof),
+            Ok(Some(replayed)) if replayed == result,
+        ));
+        let other_key = ThreeUsdReserveIngressKey { absorb_id: 10, ..key };
+        assert!(replay_three_usd_reserve_absorb_result(
+            &state, pool, &other_key, 100, 110, ledger, &proof,
+        ).is_err());
+    }
+}
+
 /// Liquidate a vault when the debt has already been covered externally.
 ///
 /// Two modes:
@@ -8334,6 +8434,54 @@ pub async fn liquidate_vault_debt_already_burned(
     three_usd_ledger: Option<Principal>,
     proof: crate::icrc3_proof::SpWritedownProof,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    liquidate_vault_debt_already_burned_inner(
+        vault_id, icusd_burned_e8s, caller, three_usd_received_e8s, three_usd_ledger, proof, None,
+    ).await
+}
+
+pub async fn liquidate_vault_debt_already_burned_v2(
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    caller: Principal,
+    three_usd_received_e8s: u64,
+    three_usd_ledger: Principal,
+    proof: crate::icrc3_proof::SpWritedownProof,
+    ingress_key: crate::state::ThreeUsdReserveIngressKey,
+) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    liquidate_vault_debt_already_burned_inner(
+        vault_id,
+        icusd_burned_e8s,
+        caller,
+        Some(three_usd_received_e8s),
+        Some(three_usd_ledger),
+        proof,
+        Some(ingress_key),
+    ).await
+}
+
+async fn liquidate_vault_debt_already_burned_inner(
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    caller: Principal,
+    three_usd_received_e8s: Option<u64>,
+    three_usd_ledger: Option<Principal>,
+    proof: crate::icrc3_proof::SpWritedownProof,
+    ingress_key: Option<crate::state::ThreeUsdReserveIngressKey>,
+) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    if proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault {
+        let Some(key) = ingress_key.as_ref() else {
+            return Err(ProtocolError::GenericError("V2 reserve proof requires an ingress identity".into()));
+        };
+        if key.stability_pool != caller || key.vault_id != vault_id {
+            return Err(ProtocolError::GenericError("V2 reserve proof identity does not match caller and vault".into()));
+        }
+        if let Some(result) = read_state(|s| replay_three_usd_reserve_absorb_result(
+            s, caller, key, icusd_burned_e8s, three_usd_received_e8s.unwrap_or(0),
+            three_usd_ledger.unwrap_or(Principal::anonymous()), &proof,
+        ))? {
+            return Ok(result);
+        }
+    }
     // Wave-8b LIQ-002 band gate is deactivated globally as of 2026-05-18.
     // This path was never gated to begin with: it is the stability-pool-
     // triggered writedown, with the caller gated on
@@ -8410,10 +8558,17 @@ pub async fn liquidate_vault_debt_already_burned(
             crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => {
                 s.three_pool_canister.unwrap_or(Principal::anonymous())
             }
+            crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault => {
+                s.three_pool_canister.unwrap_or(Principal::anonymous())
+            }
         };
         let reserves = icrc_ledger_types::icrc1::account::Account {
             owner: ic_cdk::id(),
-            subaccount: Some(crate::management::protocol_3usd_reserves_subaccount()),
+            subaccount: if proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault {
+                None
+            } else {
+                Some(crate::management::protocol_3usd_reserves_subaccount())
+            },
         };
         (ledger, reserves)
     });
@@ -8428,6 +8583,7 @@ pub async fn liquidate_vault_debt_already_burned(
     let expected_amount_e8s = match proof.ledger_kind {
         crate::icrc3_proof::SpProofLedger::IcusdBurn => icusd_burned_e8s,
         crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => three_usd_received_e8s.unwrap_or(0),
+        crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault => three_usd_received_e8s.unwrap_or(0),
     };
 
     let expectations = crate::icrc3_proof::ProofExpectations {
@@ -8438,12 +8594,29 @@ pub async fn liquidate_vault_debt_already_burned(
         vault_id_memo: vault_id,
     };
 
-    if let Err(err) = crate::icrc3_proof::fetch_and_validate_block(
-        ledger_principal,
-        proof.block_index,
-        &expectations,
-    )
-    .await
+    let proof_result = if proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault {
+        let tuple = read_state(|s| {
+            ingress_key.as_ref().and_then(|key| s.three_usd_reserve_ingress_journals.get(key))
+                .and_then(|journal| match &journal.phase {
+                    crate::state::ThreeUsdReserveIngressPhase::TransferConfirmed { tuple, block_index }
+                        if *block_index == proof.block_index => Some(tuple.clone()),
+                    crate::state::ThreeUsdReserveIngressPhase::Absorbed { tuple, block_index, .. }
+                        if *block_index == proof.block_index => Some(tuple.clone()),
+                    _ => None,
+                })
+        });
+        match tuple {
+            Some(tuple) => crate::icrc3_proof::verify_three_usd_reserve_ingress_block(
+                ledger_principal, proof.block_index, &tuple,
+            ).await.map(|_| ()),
+            None => Err("V2 reserve proof has no matching confirmed ingress tuple".into()),
+        }
+    } else {
+            crate::icrc3_proof::fetch_and_validate_block(ledger_principal, proof.block_index, &expectations)
+                .await
+                .map(|_| ())
+    };
+    if let Err(err) = proof_result
     {
         guard_principal.fail();
         log!(
@@ -8477,7 +8650,9 @@ pub async fn liquidate_vault_debt_already_burned(
     // Re-read the configured pool after proof verification. The reserves
     // transfer and proof checks are separate awaits, so value coverage must
     // use the latest pool virtual price immediately before state commit.
-    if proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransfer {
+    if proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransfer
+        || proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault
+    {
         let configured_pool = read_state(|s| s.three_pool_canister);
         let pool = match three_usd_ledger
             .ok_or_else(|| "3USD ledger argument is missing".to_string())
@@ -8527,7 +8702,8 @@ pub async fn liquidate_vault_debt_already_burned(
     ) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
-                if proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransfer
+                if (proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransfer
+                    || proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault)
                     && (s.three_pool_canister.is_none()
                         || s.three_pool_canister != three_usd_ledger)
                 {
@@ -8807,6 +8983,44 @@ pub async fn liquidate_vault_debt_already_burned(
             );
         }
 
+        if let (Some(key), Some(amount), Some(ledger)) = (
+            ingress_key.as_ref(),
+            three_usd_received_e8s,
+            three_usd_ledger,
+        ) {
+            let liquidator_value = crate::numeric::collateral_usd_value(
+                collateral_to_liquidator.to_u64(), collateral_price, config_decimals,
+            );
+            let fee = if liquidator_value > max_liquidatable_debt {
+                liquidator_value - max_liquidatable_debt
+            } else {
+                ICUSD::new(0)
+            };
+            let result = crate::StabilityPoolLiquidationResult {
+                success: true,
+                vault_id,
+                liquidated_debt: max_liquidatable_debt.to_u64(),
+                collateral_received: collateral_to_liquidator.to_u64(),
+                collateral_type: vault.collateral_type.to_string(),
+                block_index: sp_liquidation_result_block_index(ingress_key.as_ref(), &proof),
+                fee: fee.to_u64(),
+                collateral_price_e8s: collateral_price_usd.to_e8s(),
+            };
+            s.sp_three_usd_reserve_absorb_results_by_proof.insert(
+                (proof.ledger_kind, proof.block_index),
+                crate::state::StoredThreeUsdReserveAbsorbResult {
+                    caller,
+                    vault_id,
+                    absorb_id: key.absorb_id,
+                    icusd_debt_covered_e8s: icusd_burned_e8s,
+                    three_usd_amount_e8s: amount,
+                    ledger,
+                    proof: proof.clone(),
+                    result,
+                },
+            );
+        }
+
         interest_share
     });
 
@@ -8907,7 +9121,7 @@ pub async fn liquidate_vault_debt_already_burned(
         liquidated_debt: max_liquidatable_debt.to_u64(),
         collateral_received: collateral_to_liquidator.to_u64(),
         collateral_type: vault.collateral_type.to_string(),
-        block_index: 0, // No ledger block — icUSD was burned in 3pool
+        block_index: sp_liquidation_result_block_index(ingress_key.as_ref(), &proof),
         fee: fee_amount.to_u64(),
         collateral_price_e8s: collateral_price_usd.to_e8s(),
     })

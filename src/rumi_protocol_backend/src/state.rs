@@ -29,6 +29,119 @@ macro_rules! ensure_eq {
     }
 }
 
+#[cfg(test)]
+mod three_usd_reserve_ingress_state_tests {
+    use super::{
+        confirm_three_usd_ingress_candidate_block, PendingThreeUsdRefund,
+        ThreeUsdRefundSource, ThreeUsdReserveIngressJournal,
+        ThreeUsdReserveIngressPhase, ThreeUsdReserveIngressRequest,
+        ThreeUsdReserveIngressTuple,
+    };
+    use candid::Principal;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    #[derive(serde::Serialize)]
+    struct LegacyPendingThreeUsdRefund {
+        stability_pool: Principal,
+        ledger: Principal,
+        amount_e8s: u64,
+        vault_id: u64,
+        retry_count: u8,
+        op_nonce: u128,
+    }
+
+    #[test]
+    fn old_refund_rows_decode_as_legacy_hashed_source() {
+        let legacy = LegacyPendingThreeUsdRefund {
+            stability_pool: Principal::from_slice(&[1]),
+            ledger: Principal::from_slice(&[2]),
+            amount_e8s: 33,
+            vault_id: 4,
+            retry_count: 1,
+            op_nonce: 5,
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut bytes).unwrap();
+        let decoded: PendingThreeUsdRefund = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(decoded.source, ThreeUsdRefundSource::LegacyHashedReserve);
+        assert_eq!(decoded.amount_e8s, 33);
+        assert_eq!(decoded.parent_absorb_id, None);
+        assert_eq!(decoded.dispatch_amount_e8s, None);
+    }
+
+    #[test]
+    fn new_reserve_ingress_admission_is_default_off() {
+        let state = super::State::default();
+        assert!(!state.three_usd_reserve_ingress_enabled);
+        assert!(state.three_usd_reserve_ingress_journals.is_empty());
+    }
+
+    fn submitted_journal() -> (ThreeUsdReserveIngressJournal, ThreeUsdReserveIngressRequest, ThreeUsdReserveIngressTuple) {
+        let pool = Principal::from_slice(&[1]);
+        let backend = Principal::from_slice(&[2]);
+        let ledger = Principal::from_slice(&[3]);
+        let request = ThreeUsdReserveIngressRequest {
+            icusd_debt_covered_e8s: 90,
+            three_usd_amount_e8s: 100,
+            ledger,
+        };
+        let tuple = ThreeUsdReserveIngressTuple {
+            spender_owner: backend,
+            spender_subaccount: None,
+            source: Account { owner: pool, subaccount: None },
+            destination: Account { owner: backend, subaccount: None },
+            amount_e8s: 100,
+            fee_e8s: Some(0),
+            ledger_fee_e8s: 0,
+            memo: [7; 16],
+            created_at_time_ns: 99,
+            op_nonce: 5,
+            parent_absorb_id: 11,
+        };
+        let journal = ThreeUsdReserveIngressJournal {
+            request: request.clone(),
+            phase: ThreeUsdReserveIngressPhase::SubmittedOrUnknown { tuple: tuple.clone() },
+            ingress_proof_verified: false,
+            refund: None,
+            protocol_refund_fee_reserve_e8s: 100,
+        };
+        (journal, request, tuple)
+    }
+
+    #[test]
+    fn older_than_dedup_candidate_receipt_promotes_only_exact_persisted_tuple() {
+        let (mut journal, request, tuple) = submitted_journal();
+
+        // This receipt path is the recovery mechanism after ICRC-2 returns
+        // TooOld: the exact candidate block proves the transfer; no scan
+        // absence or rotated transfer tuple is involved.
+        confirm_three_usd_ingress_candidate_block(&mut journal, &request, &tuple, 44).unwrap();
+        assert_eq!(journal.ingress_proof_verified, true);
+        assert!(matches!(journal.phase,
+            ThreeUsdReserveIngressPhase::TransferConfirmed { block_index: 44, .. }));
+
+        let (mut journal, request, tuple) = submitted_journal();
+        let mut altered_request = request.clone();
+        altered_request.three_usd_amount_e8s += 1;
+        assert!(confirm_three_usd_ingress_candidate_block(
+            &mut journal, &altered_request, &tuple, 44,
+        ).is_err());
+
+        let (mut journal, request, tuple) = submitted_journal();
+        let mut altered_tuple = tuple.clone();
+        altered_tuple.destination.subaccount = Some([9; 32]);
+        assert!(confirm_three_usd_ingress_candidate_block(
+            &mut journal, &request, &altered_tuple, 44,
+        ).is_err());
+
+        let (mut confirmed, request, tuple) = submitted_journal();
+        confirm_three_usd_ingress_candidate_block(&mut confirmed, &request, &tuple, 44).unwrap();
+        assert!(confirm_three_usd_ingress_candidate_block(
+            &mut confirmed, &request, &tuple, 44,
+        ).is_err(), "a terminal/reconciled journal cannot be promoted again");
+    }
+}
+
 macro_rules! ensure {
     ($cond:expr, $msg:expr $(, $args:expr)* $(,)*) => {
         if !$cond {
@@ -1494,6 +1607,157 @@ pub struct PendingThreeUsdRefund {
     /// Wave-3 ICRC dedup nonce. Minted once at first attempt, reused on every
     /// retry so the 3USD ledger deduplicates instead of double-refunding.
     pub op_nonce: u128,
+    /// Old rows default to the historical hashed reserve account. New V2
+    /// refunds explicitly debit the backend default account.
+    #[serde(default)]
+    pub source: ThreeUsdRefundSource,
+    #[serde(default)]
+    pub parent_absorb_id: Option<u64>,
+    /// Pinned transfer amount for a new default-source child. Legacy rows keep
+    /// this absent and retain their historical tuple unchanged.
+    #[serde(default)]
+    pub dispatch_amount_e8s: Option<u64>,
+    #[serde(default)]
+    pub dispatch_fee_e8s: Option<u64>,
+    /// Set before issuing the transfer; without a returned block index, an
+    /// upgrade/retry must hold as ambiguous rather than possibly duplicate it.
+    #[serde(default)]
+    pub dispatch_submitted: bool,
+    #[serde(default)]
+    pub dispatch_block_index: Option<u64>,
+}
+
+#[derive(candid::CandidType, Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum ThreeUsdRefundSource {
+    #[default]
+    LegacyHashedReserve,
+    DefaultAccount,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveIngressKey {
+    pub stability_pool: Principal,
+    pub vault_id: u64,
+    pub absorb_id: u64,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveIngressRequest {
+    pub icusd_debt_covered_e8s: u64,
+    pub three_usd_amount_e8s: u64,
+    pub ledger: Principal,
+}
+
+/// Exact ICRC-2 arguments are retained before dispatch and copied on every
+/// retry so a lost response cannot cause a second transfer.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveIngressTuple {
+    pub spender_owner: Principal,
+    pub spender_subaccount: Option<[u8; 32]>,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub amount_e8s: u64,
+    pub fee_e8s: Option<u64>,
+    /// Fee pinned on the ICRC-2 request and checked against the actual ICRC-3
+    /// receipt. The current 3pool route accepts only zero.
+    pub ledger_fee_e8s: u64,
+    pub memo: [u8; 16],
+    pub created_at_time_ns: u64,
+    pub op_nonce: u128,
+    pub parent_absorb_id: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum ThreeUsdReserveIngressPhase {
+    AdmissionPending,
+    PreTransferRejected { reason: String },
+    SubmittedOrUnknown { tuple: ThreeUsdReserveIngressTuple },
+    TransferConfirmed { tuple: ThreeUsdReserveIngressTuple, block_index: u64 },
+    Absorbed { tuple: ThreeUsdReserveIngressTuple, block_index: u64, result: crate::StabilityPoolLiquidationResult },
+    FailedAfterTransfer { tuple: ThreeUsdReserveIngressTuple, block_index: u64, error: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveIngressJournal {
+    pub request: ThreeUsdReserveIngressRequest,
+    pub phase: ThreeUsdReserveIngressPhase,
+    /// True only after the confirmed ICRC-3 ingress block has matched the
+    /// persisted tuple. Older snapshots default false and cannot prove fees.
+    #[serde(default)]
+    pub ingress_proof_verified: bool,
+    #[serde(default)]
+    pub refund: Option<ThreeUsdReserveIngressRefund>,
+    /// Protocol-owned default-account liquidity reserved to restore the full
+    /// SP principal plus ingress fee and bounded current refund fee if this
+    /// ingress fails. Released only on absorbed no-refund or proven refund.
+    #[serde(default)]
+    pub protocol_refund_fee_reserve_e8s: u64,
+}
+
+/// Promote an ambiguous ingress only after a caller has independently
+/// verified a candidate ICRC-3 block against the journal's exact persisted
+/// ICRC-2 tuple. This helper deliberately does not support block-index search
+/// absence as evidence and refuses every phase except SubmittedOrUnknown.
+pub fn confirm_three_usd_ingress_candidate_block(
+    journal: &mut ThreeUsdReserveIngressJournal,
+    expected_request: &ThreeUsdReserveIngressRequest,
+    expected_tuple: &ThreeUsdReserveIngressTuple,
+    candidate_block_index: u64,
+) -> Result<(), String> {
+    if &journal.request != expected_request {
+        return Err("candidate block request no longer matches the ingress journal".into());
+    }
+    match &journal.phase {
+        ThreeUsdReserveIngressPhase::SubmittedOrUnknown { tuple }
+            if tuple == expected_tuple =>
+        {
+            journal.phase = ThreeUsdReserveIngressPhase::TransferConfirmed {
+                tuple: expected_tuple.clone(),
+                block_index: candidate_block_index,
+            };
+            journal.ingress_proof_verified = true;
+            Ok(())
+        }
+        _ => Err("candidate block cannot promote this ingress journal phase or tuple".into()),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveIngressRefund {
+    pub op_nonce: u128,
+    pub required_net_credit_e8s: u64,
+    #[serde(default)]
+    pub settled_receipt: Option<ThreeUsdReserveRefundReceipt>,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveRefundTuple {
+    pub source_owner: Principal,
+    pub source_subaccount: Option<[u8; 32]>,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub amount_e8s: u64,
+    pub charged_fee_e8s: u64,
+    pub fee_e8s: Option<u64>,
+    pub memo: [u8; 16],
+    pub created_at_time_ns: u64,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveRefundReceipt {
+    pub block_index: u64,
+    pub tuple: ThreeUsdReserveRefundTuple,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct StoredThreeUsdReserveAbsorbResult {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub absorb_id: u64,
+    pub icusd_debt_covered_e8s: u64,
+    pub three_usd_amount_e8s: u64,
+    pub ledger: Principal,
+    pub proof: crate::icrc3_proof::SpWritedownProof,
+    pub result: crate::StabilityPoolLiquidationResult,
 }
 
 thread_local! {
@@ -1600,6 +1864,18 @@ pub struct State {
     /// withdrawals. `serde(default)` keeps older snapshots decoding cleanly.
     #[serde(default)]
     pub pending_3usd_refunds: BTreeMap<u128, PendingThreeUsdRefund>,
+    #[serde(default)]
+    pub three_usd_reserve_ingress_journals:
+        BTreeMap<ThreeUsdReserveIngressKey, ThreeUsdReserveIngressJournal>,
+    #[serde(default)]
+    pub three_usd_reserve_ingress_enabled: bool,
+    /// Set only when the registered SP has called the V2 readiness handshake.
+    /// This prevents an older SP Wasm from continuing V1 ingress after cutover.
+    #[serde(default)]
+    pub three_usd_reserve_v2_client_ready: bool,
+    #[serde(default)]
+    pub sp_three_usd_reserve_absorb_results_by_proof:
+        BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredThreeUsdReserveAbsorbResult>,
     pub mode: Mode,
     /// Wave-14a CDP-01: count of consecutive XRC fetch failures. Reset
     /// to 0 on any successful fetch. When this reaches
@@ -2414,6 +2690,10 @@ impl Default for State {
             payout_history_scan_count: 0,
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
+            three_usd_reserve_ingress_journals: BTreeMap::new(),
+            three_usd_reserve_ingress_enabled: false,
+            three_usd_reserve_v2_client_ready: false,
+            sp_three_usd_reserve_absorb_results_by_proof: BTreeMap::new(),
             mode: Mode::default(),
             consecutive_xrc_failures: 0,
             mode_triggered_by_oracle: false,
@@ -2581,6 +2861,10 @@ impl From<InitArg> for State {
             payout_history_scan_count: 0,
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
+            three_usd_reserve_ingress_journals: BTreeMap::new(),
+            three_usd_reserve_ingress_enabled: false,
+            three_usd_reserve_v2_client_ready: false,
+            sp_three_usd_reserve_absorb_results_by_proof: BTreeMap::new(),
             vault_id_to_vaults: BTreeMap::new(),
             xrc_principal: args.xrc_principal,
             icusd_ledger_principal: args.icusd_ledger_principal,

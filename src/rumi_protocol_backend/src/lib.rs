@@ -433,13 +433,13 @@ pub struct RedemptionResult {
     pub payout_status: RedemptionPayoutStatus,
 }
 
-#[derive(CandidType, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(CandidType, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum RedemptionPayoutStatus {
     Queued,
 }
 
 /// Result from stability pool liquidation (both standard and debt-already-burned paths).
-#[derive(CandidType, Deserialize, Debug)]
+#[derive(CandidType, Deserialize, Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StabilityPoolLiquidationResult {
     pub success: bool,
     pub vault_id: u64,
@@ -449,6 +449,49 @@ pub struct StabilityPoolLiquidationResult {
     pub block_index: u64,
     pub fee: u64,
     pub collateral_price_e8s: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreeUsdReserveIngressV2StatusView {
+    pub stability_pool: Principal,
+    pub vault_id: u64,
+    pub absorb_id: u64,
+    pub status: ThreeUsdReserveIngressV2Status,
+}
+
+/// SP may release an absorb identity only on `PreTransferRejected`, a replayed
+/// exact `Absorbed` result, or an exact `FailedAfterTransferRefunded` receipt.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThreeUsdReserveIngressV2Status {
+    Unseen,
+    AdmissionPending,
+    PreTransferRejected { reason: String },
+    TransferSubmittedOrUnknown,
+    TransferConfirmed { transfer_block_index: u64 },
+    Absorbed {
+        transfer_block_index: u64,
+        ingress_fee_e8s: u64,
+        result: StabilityPoolLiquidationResult,
+        proportional_refund: Option<crate::state::ThreeUsdReserveRefundReceipt>,
+    },
+    AbsorbedRefundPending {
+        transfer_block_index: u64,
+        result: StabilityPoolLiquidationResult,
+        refund_amount_e8s: u64,
+    },
+    FailedRefundPending {
+        transfer_block_index: u64,
+        refund_amount_e8s: u64,
+        error: String,
+    },
+    FailedAfterTransferRefunded {
+        transfer_block_index: u64,
+        ingress_fee_e8s: u64,
+        refund_fee_e8s: u64,
+        error: String,
+        refund_receipt: crate::state::ThreeUsdReserveRefundReceipt,
+    },
+    ReconciliationRequired { reason: String },
 }
 
 pub const MAX_XRP_SP_PAYOUT_ALLOCATIONS: usize = 500;
@@ -1747,31 +1790,254 @@ pub async fn process_pending_transfer() {
     let pending_3usd_refunds = read_state(|s| {
         s.pending_3usd_refunds
             .iter()
+            .filter(|(_, refund)| refund.retry_count < MAX_PENDING_RETRIES)
             .map(|(k, v)| (*k, *v))
             .collect::<Vec<(u128, crate::state::PendingThreeUsdRefund)>>()
     });
 
     for (nonce_key, refund) in pending_3usd_refunds {
-        match crate::management::transfer_idempotent(
-            refund.ledger,
-            Some(crate::management::protocol_3usd_reserves_subaccount()),
-            icrc_ledger_types::icrc1::account::Account {
-                owner: refund.stability_pool,
-                subaccount: None,
-            },
-            refund.amount_e8s as u128,
-            refund.op_nonce,
-            None,
-        )
-        .await
+        let _default_account_guard = if refund.source == crate::state::ThreeUsdRefundSource::DefaultAccount
+            && refund.parent_absorb_id.is_some()
         {
+            match crate::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire() {
+                Some(guard) => Some(guard),
+                None => continue,
+            }
+        } else {
+            None
+        };
+        let destination = icrc_ledger_types::icrc1::account::Account {
+            owner: refund.stability_pool,
+            subaccount: None,
+        };
+        let mut dispatched_amount = None;
+        let mut dispatched_fee = None;
+        let result = match refund.source {
+            // Preserve the historic source and transfer arguments exactly for
+            // rows decoded from old snapshots.
+            crate::state::ThreeUsdRefundSource::LegacyHashedReserve => {
+                crate::management::transfer_idempotent(
+                    refund.ledger,
+                    Some(crate::management::protocol_3usd_reserves_subaccount()),
+                    destination.clone(),
+                    refund.amount_e8s as u128,
+                    refund.op_nonce,
+                    None,
+                ).await
+            }
+            crate::state::ThreeUsdRefundSource::DefaultAccount => {
+                // V2 refund rows promise a net credit to the SP. The protocol
+                // sends that exact amount and pays the ledger fee from its own
+                // default-account liquidity. Legacy rows keep their historical
+                // net-of-fee behavior and persisted dispatch tuple.
+                let protocol_pays_fee = refund.parent_absorb_id.is_some();
+                if protocol_pays_fee {
+                    // A saved block index means the transfer already returned
+                    // successfully. Re-verify that exact receipt after restart;
+                    // never submit the transfer again.
+                    if let (Some(amount), Some(0), Some(block_index)) = (
+                        refund.dispatch_amount_e8s,
+                        refund.dispatch_fee_e8s,
+                        refund.dispatch_block_index,
+                    ) {
+                        dispatched_amount = Some(amount);
+                        dispatched_fee = Some(0);
+                        Ok(block_index)
+                    } else if refund.dispatch_submitted {
+                        // A prior await may have committed while its reply was
+                        // lost. Keep the liability durable and require exact
+                        // status/receipt reconciliation before any re-arm.
+                        Err(TransferError::GenericError {
+                            error_code: candid::Nat::from(0u8),
+                            message: "3USD refund dispatch outcome is ambiguous; manual reconciliation required".into(),
+                        })
+                    } else {
+                        let fee_ok = matches!(crate::management::refresh_fee_cache(refund.ledger).await, Ok(0));
+                        let balance_ok = if fee_ok {
+                            let balance = crate::management::get_balance_of(
+                                icrc_ledger_types::icrc1::account::Account { owner: ic_cdk::id(), subaccount: None },
+                                refund.ledger,
+                            ).await.ok();
+                            let required = crate::management::three_usd_default_account_required_balance(refund.ledger);
+                            matches!((balance, required), (Some(balance), Some(required)) if u128::from(balance) >= required)
+                        } else {
+                            false
+                        };
+                        if !balance_ok {
+                            mutate_state(|s| {
+                                if let Some(row) = s.pending_3usd_refunds.get_mut(&nonce_key) {
+                                    row.retry_count = MAX_PENDING_RETRIES;
+                                }
+                            });
+                            Err(TransferError::GenericError {
+                                error_code: candid::Nat::from(0u8),
+                                message: "3USD refund held: fee or default-account solvency is unverified".into(),
+                            })
+                        } else {
+                            // Persist the immutable transfer tuple and the
+                            // submitted marker before crossing the ledger await.
+                            let persisted = mutate_state(|s| {
+                                if let Some(row) = s.pending_3usd_refunds.get_mut(&nonce_key) {
+                                    if row.parent_absorb_id == refund.parent_absorb_id
+                                        && !row.dispatch_submitted
+                                        && row.dispatch_amount_e8s.is_none()
+                                        && row.dispatch_fee_e8s.is_none()
+                                    {
+                                        row.dispatch_amount_e8s = Some(row.amount_e8s);
+                                        row.dispatch_fee_e8s = Some(0);
+                                        row.dispatch_submitted = true;
+                                        return Some(row.amount_e8s);
+                                    }
+                                }
+                                None
+                            });
+                            if let Some(amount) = persisted {
+                                dispatched_amount = Some(amount);
+                                dispatched_fee = Some(0);
+                                let submitted = crate::management::transfer_idempotent_pinned_fee(
+                                    refund.ledger, None, destination.clone(), amount as u128,
+                                    refund.op_nonce, 0,
+                                ).await;
+                                if let Ok(block_index) = submitted {
+                                    // Save the returned receipt location before
+                                    // any further await or proof decoding.
+                                    mutate_state(|s| {
+                                        if let Some(row) = s.pending_3usd_refunds.get_mut(&nonce_key) {
+                                            if row.dispatch_submitted
+                                                && row.dispatch_amount_e8s == Some(amount)
+                                                && row.dispatch_fee_e8s == Some(0)
+                                            {
+                                                row.dispatch_block_index = Some(block_index);
+                                            }
+                                        }
+                                    });
+                                    Ok(block_index)
+                                } else {
+                                    submitted
+                                }
+                            } else {
+                                Err(TransferError::GenericError {
+                                    error_code: candid::Nat::from(0u8),
+                                    message: "3USD refund dispatch tuple changed before submission".into(),
+                                })
+                            }
+                        }
+                    }
+                } else {
+                let pinned = match (refund.dispatch_amount_e8s, refund.dispatch_fee_e8s) {
+                    (Some(amount), Some(fee)) => Some((amount, fee)),
+                    (None, None) => match crate::management::get_or_refresh_fee(refund.ledger).await {
+                        Ok(fee) if refund.amount_e8s > fee => {
+                            let amount = refund.amount_e8s - fee;
+                            mutate_state(|s| {
+                                if let Some(row) = s.pending_3usd_refunds.get_mut(&nonce_key) {
+                                    if row.source == crate::state::ThreeUsdRefundSource::DefaultAccount
+                                        && row.dispatch_amount_e8s.is_none() {
+                                        row.dispatch_amount_e8s = Some(amount);
+                                        row.dispatch_fee_e8s = Some(fee);
+                                    }
+                                }
+                            });
+                            Some((amount, fee))
+                        }
+                        Ok(_) | Err(_) => None,
+                    },
+                    _ => None,
+                };
+                match pinned {
+                    Some((amount, fee)) => {
+                        dispatched_amount = Some(amount);
+                        dispatched_fee = Some(fee);
+                        crate::management::transfer_idempotent(
+                            refund.ledger, None, destination.clone(), amount as u128,
+                            refund.op_nonce, None,
+                        ).await
+                    },
+                    None => Err(TransferError::GenericError {
+                        error_code: candid::Nat::from(0u8),
+                        message: "default-account refund is below fee or fee is unavailable".into(),
+                    }),
+                }
+                }
+            }
+        };
+        match result {
             Ok(block_index) => {
+                let verified_refund = if refund.source == crate::state::ThreeUsdRefundSource::DefaultAccount {
+                    let verified = async {
+                        let amount = dispatched_amount.ok_or_else(|| "default refund amount was not pinned".to_string())?;
+                        let block = crate::icrc3_proof::fetch_icrc3_block(refund.ledger, block_index).await?;
+                        let charged_fee = block.fee.ok_or_else(|| "refund block omits the charged fee".to_string())?;
+                        let protocol_pays_fee = refund.parent_absorb_id.is_some();
+                        let credited = if protocol_pays_fee { amount } else { amount.checked_add(charged_fee).unwrap_or_default() };
+                        if credited != refund.amount_e8s {
+                            return Err("verified refund net credit does not restore the journaled obligation".to_string());
+                        }
+                        let memo: [u8; 16] = crate::management::nonce_to_memo(refund.op_nonce).0.as_slice()
+                            .try_into().map_err(|_| "refund memo is not 16 bytes".to_string())?;
+                        let tuple = crate::state::ThreeUsdReserveRefundTuple {
+                            source_owner: ic_cdk::id(),
+                            source_subaccount: None,
+                            destination: destination.clone(),
+                            amount_e8s: amount,
+                            charged_fee_e8s: charged_fee,
+                            fee_e8s: dispatched_fee,
+                            memo,
+                            created_at_time_ns: crate::management::nonce_to_created_at_time(refund.op_nonce),
+                        };
+                        crate::icrc3_proof::validate_three_usd_reserve_refund_block(&block, &tuple)?;
+                        Ok::<_, String>(crate::state::ThreeUsdReserveRefundReceipt { block_index, tuple })
+                    }.await;
+                    match verified {
+                        Ok(receipt) => Some(receipt),
+                        Err(reason) => {
+                            log!(INFO,
+                                "[refunding] 3USD default-source transfer returned block {} but exact ICRC-3 proof failed; retaining durable refund for reconciliation: {}",
+                                block_index, reason
+                            );
+                            mutate_state(|s| {
+                                if let Some(row) = s.pending_3usd_refunds.get_mut(&nonce_key) {
+                                    row.retry_count = row.retry_count.saturating_add(1);
+                                }
+                            });
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
                 log!(INFO,
                     "[refunding] 3USD reserve refund settled for SP {} (vault {}, refund block {}, amount {})",
                     refund.stability_pool, refund.vault_id, block_index, refund.amount_e8s
                 );
                 mutate_state(|s| {
+                    if refund.source == crate::state::ThreeUsdRefundSource::DefaultAccount {
+                        if let Some(parent_absorb_id) = refund.parent_absorb_id {
+                            let key = crate::state::ThreeUsdReserveIngressKey {
+                                stability_pool: refund.stability_pool,
+                                vault_id: refund.vault_id,
+                                absorb_id: parent_absorb_id,
+                            };
+                            if let Some(journal) = s.three_usd_reserve_ingress_journals.get_mut(&key) {
+                                if let Some(child) = journal.refund.as_mut() {
+                                    if child.op_nonce == refund.op_nonce {
+                                        child.settled_receipt = verified_refund.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
                     s.pending_3usd_refunds.remove(&nonce_key);
+                    if let Some(parent_absorb_id) = refund.parent_absorb_id {
+                        let key = crate::state::ThreeUsdReserveIngressKey {
+                            stability_pool: refund.stability_pool,
+                            vault_id: refund.vault_id,
+                            absorb_id: parent_absorb_id,
+                        };
+                        if let Some(journal) = s.three_usd_reserve_ingress_journals.get_mut(&key) {
+                            journal.protocol_refund_fee_reserve_e8s = 0;
+                        }
+                    }
                 });
             }
             Err(error) => {
@@ -1782,6 +2048,16 @@ pub async fn process_pending_transfer() {
                     refund.vault_id,
                     error
                 );
+                if refund.parent_absorb_id.is_some() {
+                    // With a submitted V2 tuple, any error or lost response is
+                    // ambiguous unless a typed receipt proves no transfer. Do
+                    // not poll forever or change the dedup tuple.
+                    mutate_state(|s| {
+                        if let Some(row) = s.pending_3usd_refunds.get_mut(&nonce_key) {
+                            row.retry_count = MAX_PENDING_RETRIES;
+                        }
+                    });
+                }
                 if let TransferError::BadFee { expected_fee } = error {
                     // Refresh fee cache; do NOT increment retry count on BadFee.
                     if let Ok(expected_fee_u64) = expected_fee.0.clone().try_into() {
@@ -1806,9 +2082,13 @@ pub async fn process_pending_transfer() {
                             retries,
                             refund.amount_e8s
                         );
-                        mutate_state(|s| {
-                            s.pending_3usd_refunds.remove(&nonce_key);
-                        });
+                        if refund.source == crate::state::ThreeUsdRefundSource::LegacyHashedReserve {
+                            // Preserve the historical worker policy for rows from the old route.
+                            mutate_state(|s| {
+                                s.pending_3usd_refunds.remove(&nonce_key);
+                            });
+                        }
+                        // V2 rows stay durable so their SP can reconcile the exact refund proof.
                     }
                 }
             }
@@ -1829,7 +2109,9 @@ pub async fn process_pending_transfer() {
             .pending_refunds
             .values()
             .any(|refund| pending_refund_is_automatically_retryable(refund.retry_count))
-            || !s.pending_3usd_refunds.is_empty()
+            || s.pending_3usd_refunds
+                .values()
+                .any(|refund| refund.retry_count < MAX_PENDING_RETRIES)
     }) {
         // Schedule another check in 5 seconds
         log!(
