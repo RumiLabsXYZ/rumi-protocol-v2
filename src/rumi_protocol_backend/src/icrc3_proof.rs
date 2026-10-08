@@ -264,6 +264,62 @@ pub fn validate_three_usd_reserve_ingress_block(
         .ok_or_else(|| "reserve ingress block is missing its actual charged fee".into())
 }
 
+/// Validate one complete, contiguous ICRC-3 page for an absence scan. A
+/// positive exact match returns its global block index. Any missing/extra ID,
+/// archive descriptor, short log-length claim, or undecodable block fails
+/// closed; callers may advance a durable cursor only after `Ok(None)`.
+pub fn validate_three_usd_ingress_scan_page(
+    start: u64,
+    end: u64,
+    fixed_tip: u64,
+    response: &GetBlocksResult,
+    tuple: &crate::state::ThreeUsdReserveIngressTuple,
+) -> Result<Option<u64>, String> {
+    if end < start || end > fixed_tip
+        || response.log_length.0.to_u64().is_none_or(|length| length < fixed_tip) {
+        return Err("ICRC-3 page does not cover the pinned ledger prefix".into());
+    }
+    if !response.archived_blocks.is_empty() {
+        return Err("archive-backed prefix pages are unsupported; absence remains unproven".into());
+    }
+    let count = usize::try_from(end - start).map_err(|_| "page length exceeds address space")?;
+    if response.blocks.len() != count {
+        return Err("ICRC-3 page is short or has extra blocks".into());
+    }
+    let mut match_index = None;
+    for (offset, block) in response.blocks.iter().enumerate() {
+        let expected_id = start.checked_add(offset as u64).ok_or("block index overflow")?;
+        if block.id.0.to_u64() != Some(expected_id) {
+            return Err("ICRC-3 page has a gap, duplicate, or out-of-order block ID".into());
+        }
+        let decoded = decode_block(&block.block)?;
+        if validate_three_usd_reserve_ingress_block(&decoded, tuple).is_ok() {
+            if match_index.replace(expected_id).is_some() {
+                return Err("exact ingress tuple appears more than once in scanned prefix".into());
+            }
+        } else if decoded.op == "transfer" || decoded.op == "xfer" {
+            let could_be_tuple = decoded.from.as_ref() == Some(&tuple.source)
+                && decoded.to.as_ref() == Some(&tuple.destination)
+                // No spender means an ordinary owner transfer. It cannot be
+                // accepted as positive ICRC-2 proof, but old/variant ledger
+                // schemas could have omitted this discriminator; keep the
+                // absence scan held on the matching envelope rather than
+                // treating it as proof that the requested transferFrom did
+                // not occur.
+                && decoded.spender.as_ref().is_none_or(|spender|
+                    spender.owner == tuple.spender_owner && spender.subaccount == tuple.spender_subaccount)
+                && decoded.amount == u128::from(tuple.amount_e8s);
+            if could_be_tuple {
+                // Some ledgers omit memo/created_at_time from ICRC-3. Such a
+                // block may be this operation, so it cannot be counted as
+                // absence or promoted as positive evidence.
+                return Err("ledger block matches ingress principals and amount but omits or changes exact tuple metadata".into());
+            }
+        }
+    }
+    Ok(match_index)
+}
+
 pub async fn verify_three_usd_reserve_ingress_block(
     ledger: Principal,
     block_index: u64,
@@ -784,7 +840,12 @@ fn account_to_value(account: Account) -> ICRC3Value {
 
 #[cfg(test)]
 mod three_usd_reserve_ingress_tests {
-    use super::{validate_three_usd_reserve_ingress_block, DecodedBlock};
+    use super::{validate_three_usd_ingress_scan_page, validate_three_usd_reserve_ingress_block, DecodedBlock};
+    use candid::Nat;
+    use icrc_ledger_types::icrc3::blocks::{ArchivedBlocks, BlockWithId, GetBlocksRequest, GetBlocksResult};
+    use icrc_ledger_types::icrc3::archive::QueryArchiveFn;
+    use icrc_ledger_types::icrc::generic_value::{ICRC3Map, ICRC3Value};
+    use serde_bytes::ByteBuf;
     use crate::state::ThreeUsdReserveIngressTuple;
     use candid::Principal;
     use icrc_ledger_types::icrc1::account::Account;
@@ -817,6 +878,55 @@ mod three_usd_reserve_ingress_tests {
             created_at_time: Some(tuple.created_at_time_ns),
             memo: Some(tuple.memo.to_vec()),
         }
+    }
+
+    fn encoded_block(tuple: &ThreeUsdReserveIngressTuple) -> ICRC3Value {
+        let mut tx: ICRC3Map = std::collections::BTreeMap::new();
+        tx.insert("op".into(), ICRC3Value::Text("transfer".into()));
+        tx.insert("from".into(), super::account_to_value(tuple.source.clone()));
+        tx.insert("to".into(), super::account_to_value(tuple.destination.clone()));
+        tx.insert("spender".into(), super::account_to_value(Account { owner: tuple.spender_owner, subaccount: tuple.spender_subaccount }));
+        tx.insert("amt".into(), ICRC3Value::Nat(Nat::from(tuple.amount_e8s)));
+        tx.insert("fee".into(), ICRC3Value::Nat(Nat::from(tuple.ledger_fee_e8s)));
+        tx.insert("ts".into(), ICRC3Value::Nat(Nat::from(tuple.created_at_time_ns)));
+        tx.insert("memo".into(), ICRC3Value::Blob(ByteBuf::from(tuple.memo.to_vec())));
+        let mut outer: ICRC3Map = std::collections::BTreeMap::new();
+        outer.insert("btype".into(), ICRC3Value::Text("2xfer".into()));
+        outer.insert("tx".into(), ICRC3Value::Map(tx));
+        ICRC3Value::Map(outer)
+    }
+
+    fn response(ids: &[u64], log_length: u64, tuple: &ThreeUsdReserveIngressTuple) -> GetBlocksResult {
+        GetBlocksResult {
+            log_length: Nat::from(log_length),
+            blocks: ids.iter().map(|id| BlockWithId { id: Nat::from(*id), block: encoded_block(tuple) }).collect(),
+            archived_blocks: vec![],
+        }
+    }
+
+    #[test]
+    fn full_prefix_pages_require_every_global_id_and_detect_exact_transfer() {
+        let tuple = tuple();
+        assert_eq!(validate_three_usd_ingress_scan_page(0, 1, 3, &response(&[0], 3, &tuple), &tuple), Ok(Some(0)));
+        let mut different_tuple = tuple.clone();
+        different_tuple.amount_e8s += 1;
+        assert_eq!(validate_three_usd_ingress_scan_page(0, 1, 3, &response(&[0], 3, &tuple), &different_tuple), Ok(None));
+        let mut owner_transfer = response(&[0], 3, &tuple);
+        if let ICRC3Value::Map(block) = &mut owner_transfer.blocks[0].block {
+            if let Some(ICRC3Value::Map(tx)) = block.get_mut("tx") { tx.remove("spender"); }
+        }
+        assert!(validate_three_usd_ingress_scan_page(0, 1, 3, &owner_transfer, &tuple).is_err());
+        assert!(validate_three_usd_ingress_scan_page(0, 2, 3, &response(&[0], 3, &tuple), &tuple).is_err());
+        assert!(validate_three_usd_ingress_scan_page(0, 2, 3, &response(&[0, 2], 3, &tuple), &tuple).is_err());
+        assert!(validate_three_usd_ingress_scan_page(0, 2, 3, &response(&[0, 1], 1, &tuple), &tuple).is_err());
+        let archived = GetBlocksResult {
+            log_length: Nat::from(2u64), blocks: vec![],
+            archived_blocks: vec![ArchivedBlocks {
+                args: vec![GetBlocksRequest { start: Nat::from(0u64), length: Nat::from(2u64) }],
+                callback: QueryArchiveFn { canister_id: Principal::from_slice(&[8]), method: "get_blocks".into(), _marker: std::marker::PhantomData },
+            }],
+        };
+        assert!(validate_three_usd_ingress_scan_page(0, 2, 2, &archived, &tuple).is_err());
     }
 
     #[test]

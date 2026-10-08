@@ -33,7 +33,7 @@ macro_rules! ensure_eq {
 mod three_usd_reserve_ingress_state_tests {
     use super::{
         confirm_three_usd_ingress_candidate_block, PendingThreeUsdRefund,
-        ThreeUsdRefundSource, ThreeUsdReserveIngressJournal,
+        ThreeUsdIngressNonInclusionScan, ThreeUsdRefundSource, ThreeUsdReserveIngressJournal,
         ThreeUsdReserveIngressPhase, ThreeUsdReserveIngressRequest,
         ThreeUsdReserveIngressTuple,
     };
@@ -104,6 +104,7 @@ mod three_usd_reserve_ingress_state_tests {
             ingress_proof_verified: false,
             refund: None,
             protocol_refund_fee_reserve_e8s: 100,
+            non_inclusion_scan: None,
         };
         (journal, request, tuple)
     }
@@ -139,6 +140,47 @@ mod three_usd_reserve_ingress_state_tests {
         assert!(confirm_three_usd_ingress_candidate_block(
             &mut confirmed, &request, &tuple, 44,
         ).is_err(), "a terminal/reconciled journal cannot be promoted again");
+    }
+
+    #[test]
+    fn non_inclusion_cursor_survives_snapshot_roundtrip_without_changing_tuple_or_tip() {
+        let (mut journal, _request, tuple) = submitted_journal();
+        journal.non_inclusion_scan = Some(ThreeUsdIngressNonInclusionScan {
+            tuple: tuple.clone(), ledger: journal.request.ledger,
+            tip_log_length: Some(257), next_block_index: 192,
+        });
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&journal, &mut bytes).unwrap();
+        let restored: ThreeUsdReserveIngressJournal = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(restored, journal);
+        let scan = restored.non_inclusion_scan.unwrap();
+        assert_eq!(scan.tuple, tuple);
+        assert_eq!(scan.tip_log_length, Some(257));
+        assert_eq!(scan.next_block_index, 192);
+    }
+
+    #[test]
+    fn old_ingress_snapshot_defaults_the_new_scan_journal_to_none() {
+        #[derive(serde::Serialize)]
+        struct LegacyIngressJournal {
+            request: ThreeUsdReserveIngressRequest,
+            phase: ThreeUsdReserveIngressPhase,
+            ingress_proof_verified: bool,
+            refund: Option<super::ThreeUsdReserveIngressRefund>,
+            protocol_refund_fee_reserve_e8s: u64,
+        }
+        let (journal, _, _) = submitted_journal();
+        let legacy = LegacyIngressJournal {
+            request: journal.request,
+            phase: journal.phase,
+            ingress_proof_verified: journal.ingress_proof_verified,
+            refund: journal.refund,
+            protocol_refund_fee_reserve_e8s: journal.protocol_refund_fee_reserve_e8s,
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut bytes).unwrap();
+        let decoded: ThreeUsdReserveIngressJournal = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(decoded.non_inclusion_scan, None);
     }
 }
 
@@ -1675,6 +1717,9 @@ pub enum ThreeUsdReserveIngressPhase {
     TransferConfirmed { tuple: ThreeUsdReserveIngressTuple, block_index: u64 },
     Absorbed { tuple: ThreeUsdReserveIngressTuple, block_index: u64, result: crate::StabilityPoolLiquidationResult },
     FailedAfterTransfer { tuple: ThreeUsdReserveIngressTuple, block_index: u64, error: String },
+    /// Exact tuple was rejected as TooOld, then the complete ledger prefix
+    /// through an ordered fixed tip was scanned without a matching receipt.
+    NoTransferProven { tuple: ThreeUsdReserveIngressTuple, tip_log_length: u64 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -1692,6 +1737,21 @@ pub struct ThreeUsdReserveIngressJournal {
     /// ingress fails. Released only on absorbed no-refund or proven refund.
     #[serde(default)]
     pub protocol_refund_fee_reserve_e8s: u64,
+    /// Durable full-prefix scan state. Presence implies the exact tuple got
+    /// an inner ledger TooOld response; it is not itself proof of absence.
+    #[serde(default)]
+    pub non_inclusion_scan: Option<ThreeUsdIngressNonInclusionScan>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdIngressNonInclusionScan {
+    pub tuple: ThreeUsdReserveIngressTuple,
+    pub ledger: Principal,
+    /// Fixed by a same-caller ordered update fence after the old transfer
+    /// returned. `None` means the fence has not yet completed.
+    pub tip_log_length: Option<u64>,
+    /// Next global block ID whose exact coverage is still required.
+    pub next_block_index: u64,
 }
 
 /// Promote an ambiguous ingress only after a caller has independently

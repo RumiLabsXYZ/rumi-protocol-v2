@@ -709,6 +709,7 @@ export interface _SERVICE {
   >,
   'icrc3_get_archives' : ActorMethod<[GetArchivesArgs], GetArchivesResult>,
   'icrc3_get_blocks' : ActorMethod<[Array<GetBlocksArgs>], GetBlocksResult>,
+  'icrc3_ordered_log_tip' : ActorMethod<[], bigint>,
   'icrc3_get_tip_certificate' : ActorMethod<[], [] | [Icrc3DataCertificate]>,
   'icrc3_supported_block_types' : ActorMethod<[], Array<SupportedBlockType>>,
   'is_swap_receipt_client_v1' : ActorMethod<[Principal], boolean>,

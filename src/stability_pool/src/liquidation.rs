@@ -2856,6 +2856,7 @@ fn lp_liquidation_equivalent_e8s(
 /// next one. If they all fail, the liquidation simply doesn't happen this round.
 enum ThreeUsdReserveAbsorbStatusResolution {
     Unseen,
+    TransferSubmittedOrUnknown,
     TransferConfirmed,
     Absorbed {
         result: StabilityPoolLiquidationResult,
@@ -2933,6 +2934,7 @@ async fn resolve_three_usd_absorb_status(
 
     match view.status {
         Status::Unseen => ThreeUsdReserveAbsorbStatusResolution::Unseen,
+        Status::TransferSubmittedOrUnknown => ThreeUsdReserveAbsorbStatusResolution::TransferSubmittedOrUnknown,
         Status::TransferConfirmed { .. } => ThreeUsdReserveAbsorbStatusResolution::TransferConfirmed,
         Status::PreTransferRejected { .. } => {
             ThreeUsdReserveAbsorbStatusResolution::PreTransferRejected
@@ -3068,6 +3070,19 @@ pub async fn recover_pending_three_usd_absorbs() {
         mutate_state(|state| state.take_pending_three_usd_absorb_page(MAX_PER_TICK));
     for intent in pending {
         let mut resolution = resolve_three_usd_absorb_status(protocol_id, &intent).await;
+        if matches!(resolution, ThreeUsdReserveAbsorbStatusResolution::TransferSubmittedOrUnknown) {
+            // Resume the same durable identity directly. This call never
+            // performs another approval; the backend replays the exact tuple
+            // or advances its durable TooOld full-prefix scan.
+            let _resume: Result<(
+                Result<StabilityPoolLiquidationResult, rumi_protocol_backend::ProtocolError>,
+            ), _> = call(
+                protocol_id,
+                "stability_pool_liquidate_with_reserves_v2",
+                (intent.vault_id, intent.absorb_id, intent.debt_e8s, intent.amount, intent.ledger),
+            ).await;
+            resolution = resolve_three_usd_absorb_status(protocol_id, &intent).await;
+        }
         if matches!(resolution, ThreeUsdReserveAbsorbStatusResolution::TransferConfirmed) {
             if intent.collateral_type.is_none() || intent.collateral_price_e8s.is_none() {
                 log!(INFO, "Holding legacy 3USD absorb {}: cannot resume a confirmed pull without immutable collateral metadata", intent.absorb_id);
@@ -3131,7 +3146,8 @@ pub async fn recover_pending_three_usd_absorbs() {
                 log!(INFO, "3USD absorb {} remains held for reconciliation: {}", intent.absorb_id, reason);
             }
             ThreeUsdReserveAbsorbStatusResolution::Unseen
-            | ThreeUsdReserveAbsorbStatusResolution::TransferConfirmed => {}
+            | ThreeUsdReserveAbsorbStatusResolution::TransferConfirmed
+            | ThreeUsdReserveAbsorbStatusResolution::TransferSubmittedOrUnknown => {}
         }
     }
 }
@@ -3520,6 +3536,10 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             }
             match existing_status {
                 ThreeUsdReserveAbsorbStatusResolution::Unseen => true,
+                ThreeUsdReserveAbsorbStatusResolution::TransferSubmittedOrUnknown => {
+                    log!(INFO, "Holding ambiguous 3USD absorb {} without re-approval; recovery timer will resume the exact tuple", intent.absorb_id);
+                    continue;
+                }
                 ThreeUsdReserveAbsorbStatusResolution::TransferConfirmed => false,
                 ThreeUsdReserveAbsorbStatusResolution::PreTransferRejected => {
                     mutate_state(|s| s.clear_pending_three_usd_absorb(intent.vault_id));
@@ -3669,6 +3689,9 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         match resolution {
             ThreeUsdReserveAbsorbStatusResolution::Unseen => {
                 log!(INFO, "3USD reserve absorb {} remains unseen after dispatch; preserving identity", intent.absorb_id);
+            }
+            ThreeUsdReserveAbsorbStatusResolution::TransferSubmittedOrUnknown => {
+                log!(INFO, "3USD reserve absorb {} remains ambiguous after one exact-tuple recovery attempt; preserving identity", intent.absorb_id);
             }
             ThreeUsdReserveAbsorbStatusResolution::TransferConfirmed => {
                 log!(INFO, "3USD reserve absorb {} has a verified ingress receipt; preserving identity for backend resume", intent.absorb_id);

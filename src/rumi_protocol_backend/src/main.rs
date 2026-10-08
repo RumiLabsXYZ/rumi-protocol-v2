@@ -7428,6 +7428,7 @@ async fn stability_pool_liquidate_with_reserves_v2(
             ingress_proof_verified: false,
             refund: None,
             protocol_refund_fee_reserve_e8s: 0,
+            non_inclusion_scan: None,
         };
         state.three_usd_reserve_ingress_journals.insert(key.clone(), row.clone());
         Ok(row)
@@ -7437,6 +7438,9 @@ async fn stability_pool_liquidate_with_reserves_v2(
         Phase::Absorbed { result, .. } => return Ok(result.clone()),
         Phase::PreTransferRejected { reason } => return Err(ProtocolError::GenericError(reason.clone())),
         Phase::FailedAfterTransfer { error, .. } => return Err(ProtocolError::GenericError(error.clone())),
+        Phase::NoTransferProven { .. } => return Err(ProtocolError::GenericError(
+            "exact ingress tuple was proven absent; refusing to dispatch it again".into(),
+        )),
         _ => {}
     }
 
@@ -7617,8 +7621,25 @@ async fn stability_pool_liquidate_with_reserves_v2(
         });
     }
 
-    let current = rumi_protocol_backend::management::three_usd_reserve_ingress_journal(&key)
+    let mut current = rumi_protocol_backend::management::three_usd_reserve_ingress_journal(&key)
         .ok_or_else(|| ProtocolError::GenericError("3USD ingress journal disappeared".into()))?;
+    if matches!(current.phase, Phase::SubmittedOrUnknown { .. })
+        && current.non_inclusion_scan.is_some()
+    {
+        advance_three_usd_ingress_non_inclusion_scan(&key, &current).await?;
+        current = rumi_protocol_backend::management::three_usd_reserve_ingress_journal(&key)
+            .ok_or_else(|| ProtocolError::GenericError("3USD ingress journal disappeared after scan".into()))?;
+        if let Phase::NoTransferProven { .. } = current.phase {
+            return Err(ProtocolError::GenericError(
+                "exact ingress tuple is terminally proven absent; a new absorb ID is required".into(),
+            ));
+        }
+        if current.non_inclusion_scan.is_some() {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "ordered full-prefix scan advanced by one bounded page; retry same absorb ID to continue".into(),
+            ));
+        }
+    }
     let (mut tuple, confirmed_block) = match current.phase {
         Phase::TransferConfirmed { tuple, block_index } | Phase::Absorbed { tuple, block_index, .. } => (tuple, Some(block_index)),
         Phase::SubmittedOrUnknown { tuple } => (tuple, None),
@@ -7671,7 +7692,23 @@ async fn stability_pool_liquidate_with_reserves_v2(
                 });
                 block
             }
-            Err(error) => return Err(ProtocolError::GenericError(format!("3USD transfer outcome is unresolved; retry same absorb ID: {error:?}"))),
+            Err(error) => {
+                if matches!(&error, icrc_ledger_types::icrc2::transfer_from::TransferFromError::TooOld) {
+                    mutate_state(|state| {
+                        if let Some(row) = state.three_usd_reserve_ingress_journals.get_mut(&key) {
+                            if row.request == current.request
+                                && matches!(&row.phase, Phase::SubmittedOrUnknown { tuple: stored } if stored == &tuple)
+                            {
+                                row.non_inclusion_scan = Some(rumi_protocol_backend::state::ThreeUsdIngressNonInclusionScan {
+                                    tuple: tuple.clone(), ledger: three_usd_ledger,
+                                    tip_log_length: None, next_block_index: 0,
+                                });
+                            }
+                        }
+                    });
+                }
+                return Err(ProtocolError::GenericError(format!("3USD transfer outcome is unresolved; retry same absorb ID: {error:?}")));
+            },
         },
     };
     let proof = rumi_protocol_backend::icrc3_proof::SpWritedownProof {
@@ -7801,6 +7838,9 @@ fn get_stability_pool_liquidate_with_reserves_v2_status(
             Phase::AdmissionPending => Status::AdmissionPending,
             Phase::PreTransferRejected { reason } => Status::PreTransferRejected { reason },
             Phase::SubmittedOrUnknown { .. } => Status::TransferSubmittedOrUnknown,
+            Phase::NoTransferProven { .. } => Status::PreTransferRejected {
+                reason: "exact ingress tuple was proven absent from the complete ordered ledger prefix".into(),
+            },
             Phase::TransferConfirmed { block_index, .. } => Status::TransferConfirmed { transfer_block_index: block_index },
             Phase::Absorbed { tuple, block_index, result } => {
                 if !journal.ingress_proof_verified {
@@ -7883,6 +7923,101 @@ fn get_stability_pool_liquidate_with_reserves_v2_status(
         }
     } else { Status::Unseen };
     ThreeUsdReserveIngressV2StatusView { stability_pool: caller, vault_id, absorb_id, status }
+}
+
+const THREE_USD_INGRESS_SCAN_PAGE: u64 = 64;
+
+/// Advance at most one bounded page of an ICRC-3 full-prefix absence proof.
+/// The ordered update tip is issued by the backend to the same ledger after
+/// the exact transferFrom returned TooOld, so the ledger has processed that
+/// earlier request before fixing the scan boundary.
+async fn advance_three_usd_ingress_non_inclusion_scan(
+    key: &rumi_protocol_backend::state::ThreeUsdReserveIngressKey,
+    expected: &rumi_protocol_backend::state::ThreeUsdReserveIngressJournal,
+) -> Result<(), ProtocolError> {
+    use rumi_protocol_backend::state::ThreeUsdReserveIngressPhase as Phase;
+    let mut scan = expected.non_inclusion_scan.clone().ok_or_else(|| ProtocolError::GenericError(
+        "non-inclusion scan was not durably initialized by an exact TooOld response".into(),
+    ))?;
+    if scan.ledger != expected.request.ledger || scan.tuple != match &expected.phase {
+        Phase::SubmittedOrUnknown { tuple } => tuple.clone(),
+        _ => return Err(ProtocolError::GenericError("non-inclusion scan phase changed".into())),
+    } {
+        return Err(ProtocolError::GenericError("non-inclusion scan identity differs from submitted ingress".into()));
+    }
+
+    if scan.tip_log_length.is_none() {
+        let result: Result<(u64,), _> = ic_cdk::call(scan.ledger, "icrc3_ordered_log_tip", ()).await;
+        let (tip,) = result.map_err(|(code, message)| ProtocolError::TemporarilyUnavailable(
+            format!("ordered 3pool ledger fence failed ({code:?}): {message}"),
+        ))?;
+        scan.tip_log_length = Some(tip);
+        let persisted = mutate_state(|state| {
+            if state.three_pool_canister != Some(scan.ledger) {
+                return false;
+            }
+            let Some(row) = state.three_usd_reserve_ingress_journals.get_mut(key) else { return false; };
+            if row.request != expected.request || row.phase != expected.phase
+                || row.non_inclusion_scan.as_ref() != expected.non_inclusion_scan.as_ref() { return false; }
+            row.non_inclusion_scan = Some(scan.clone());
+            true
+        });
+        if !persisted { return Err(ProtocolError::TemporarilyUnavailable(
+            "ingress journal changed while committing ordered ledger fence".into(),
+        )); }
+    }
+
+    let tip = scan.tip_log_length.expect("tip was just checked");
+    if scan.next_block_index > tip {
+        return Err(ProtocolError::GenericError("persisted scan cursor exceeds fixed tip".into()));
+    }
+    if scan.next_block_index == tip {
+        mutate_state(|state| {
+            if state.three_pool_canister != Some(scan.ledger) { return false; }
+            let Some(row) = state.three_usd_reserve_ingress_journals.get_mut(key) else { return false; };
+            if row.request != expected.request || row.phase != expected.phase
+                || row.non_inclusion_scan.as_ref() != Some(&scan) { return false; }
+            row.phase = Phase::NoTransferProven { tuple: scan.tuple.clone(), tip_log_length: tip };
+            row.non_inclusion_scan = None;
+            row.protocol_refund_fee_reserve_e8s = 0;
+            true
+        }).then_some(()).ok_or_else(|| ProtocolError::TemporarilyUnavailable(
+            "ingress journal changed before no-transfer proof commit".into(),
+        ))?;
+        return Ok(());
+    }
+    let start = scan.next_block_index;
+    let end = tip.min(start.saturating_add(THREE_USD_INGRESS_SCAN_PAGE));
+    let request = vec![icrc_ledger_types::icrc3::blocks::GetBlocksRequest {
+        start: candid::Nat::from(start), length: candid::Nat::from(end - start),
+    }];
+    let result: Result<(icrc_ledger_types::icrc3::blocks::GetBlocksResult,), _> =
+        ic_cdk::call(scan.ledger, "icrc3_get_blocks", (request,)).await;
+    let (response,) = result.map_err(|(code, message)| ProtocolError::TemporarilyUnavailable(
+        format!("3pool history page [{start}, {end}) unavailable ({code:?}): {message}"),
+    ))?;
+    let found = rumi_protocol_backend::icrc3_proof::validate_three_usd_ingress_scan_page(
+        start, end, tip, &response, &scan.tuple,
+    ).map_err(ProtocolError::TemporarilyUnavailable)?;
+    mutate_state(|state| {
+        if state.three_pool_canister != Some(scan.ledger) { return false; }
+        let Some(row) = state.three_usd_reserve_ingress_journals.get_mut(key) else { return false; };
+        if row.request != expected.request || row.phase != expected.phase
+            || row.non_inclusion_scan.as_ref() != Some(&scan) { return false; }
+        if let Some(block_index) = found {
+            row.phase = Phase::TransferConfirmed { tuple: scan.tuple.clone(), block_index };
+            row.ingress_proof_verified = true;
+            row.non_inclusion_scan = None;
+        } else {
+            let mut next = scan.clone();
+            next.next_block_index = end;
+            row.non_inclusion_scan = Some(next);
+        }
+        true
+    }).then_some(()).ok_or_else(|| ProtocolError::TemporarilyUnavailable(
+        "ingress journal changed before scan progress commit".into(),
+    ))?;
+    Ok(())
 }
 
 /// Promote an ingress whose exact ICRC-2 tuple was submitted but whose reply
