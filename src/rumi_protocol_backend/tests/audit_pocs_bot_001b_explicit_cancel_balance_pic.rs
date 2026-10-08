@@ -15,7 +15,7 @@
 //!   * a balance shortfall (the bot retained the collateral) returns
 //!     `Err(ProtocolError::GenericError(_))` and leaves `bot_claims` and
 //!     `bot_budget_remaining_e8s` UNCHANGED — the bot is forced to retry
-//!     its transfer or escalate via `admin_resolve_stuck_claim`;
+//!     its transfer or follow the exact collateral-return proof flow;
 //!   * a sufficient balance (the bot returned the collateral) succeeds —
 //!     the claim is cleared and the budget restored, preserving the
 //!     pre-Wave-12 happy path.
@@ -34,7 +34,7 @@ use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Nat, 
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 use std::time::{Duration, SystemTime};
 
-use rumi_protocol_backend::ProtocolError;
+use rumi_protocol_backend::{ProtocolError, StableTokenType};
 
 // ─── Local mirrors of ICRC-1 Candid types ───
 
@@ -444,6 +444,23 @@ fn bot_cancel_liquidation_call(
     }
 }
 
+fn set_collateral_price_for_bot10_test(fixture: &Fixture, price_usd: f64) {
+    let result = fixture
+        .pic
+        .update_call(
+            fixture.protocol_id,
+            fixture.developer,
+            "dev_set_collateral_price",
+            encode_args((fixture.icp_ledger, price_usd)).unwrap(),
+        )
+        .expect("dev_set_collateral_price call failed");
+    let response: Result<String, ProtocolError> = match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode dev_set_collateral_price"),
+        WasmResult::Reject(message) => panic!("dev_set_collateral_price rejected: {message}"),
+    };
+    response.expect("dev_set_collateral_price returned error");
+}
+
 // ─── Fixture ───
 
 struct Fixture {
@@ -670,6 +687,122 @@ fn seed_bot_claim(fixture: &Fixture) -> (u64, BotLiquidationResult) {
     (pre_claim_budget, claim)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct StuckClaimObservableState {
+    vaults: Vec<(u64, u64, u64, u64)>,
+    active_claim_ids: Vec<u64>,
+    bot_budget: (u64, u64, u64, u64),
+    vault_events: Vec<(u64, rumi_protocol_backend::event::Event)>,
+}
+
+fn stuck_claim_observable_state(fixture: &Fixture) -> StuckClaimObservableState {
+    let vaults: Vec<rumi_protocol_backend::vault::CandidVault> = match fixture
+        .pic
+        .query_call(
+            fixture.protocol_id,
+            Principal::anonymous(),
+            "get_vaults",
+            encode_args((Some(fixture.test_user),)).unwrap(),
+        )
+        .expect("get_vaults query failed")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode get_vaults"),
+        WasmResult::Reject(message) => panic!("get_vaults rejected: {message}"),
+    };
+    let vaults = vaults
+        .into_iter()
+        .map(|vault| {
+            (
+                vault.vault_id,
+                vault.borrowed_icusd_amount,
+                vault.collateral_amount,
+                vault.accrued_interest,
+            )
+        })
+        .collect();
+
+    let active_claim_ids = match fixture
+        .pic
+        .query_call(
+            fixture.protocol_id,
+            Principal::anonymous(),
+            "get_bot_claim_vault_ids",
+            encode_args(()).unwrap(),
+        )
+        .expect("get_bot_claim_vault_ids query failed")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode active claim ids"),
+        WasmResult::Reject(message) => panic!("get_bot_claim_vault_ids rejected: {message}"),
+    };
+
+    let vault_events = match fixture
+        .pic
+        .query_call(
+            fixture.protocol_id,
+            Principal::anonymous(),
+            "get_vault_history",
+            encode_args((fixture.vault_id,)).unwrap(),
+        )
+        .expect("get_vault_history query failed")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode get_vault_history"),
+        WasmResult::Reject(message) => panic!("get_vault_history rejected: {message}"),
+    };
+
+    let stats = get_bot_stats(&fixture.pic, fixture.protocol_id);
+    StuckClaimObservableState {
+        vaults,
+        active_claim_ids,
+        bot_budget: (
+            stats.budget_total_e8s,
+            stats.budget_remaining_e8s,
+            stats.budget_start_timestamp,
+            stats.total_debt_covered_e8s,
+        ),
+        vault_events,
+    }
+}
+
+fn admin_resolve_stuck_claim_call(
+    fixture: &Fixture,
+    caller: Principal,
+    apply_debt_reduction: bool,
+) -> Result<(), ProtocolError> {
+    let result = fixture
+        .pic
+        .update_call(
+            fixture.protocol_id,
+            caller,
+            "admin_resolve_stuck_claim",
+            encode_args((fixture.vault_id, apply_debt_reduction)).unwrap(),
+        )
+        .expect("admin_resolve_stuck_claim call failed");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode admin resolver result"),
+        WasmResult::Reject(message) => panic!("admin resolver rejected: {message}"),
+    }
+}
+
+fn borrow_claimed_vault_call(fixture: &Fixture) -> Result<SuccessWithFee, ProtocolError> {
+    let result = fixture
+        .pic
+        .update_call(
+            fixture.protocol_id,
+            fixture.test_user,
+            "borrow_from_vault",
+            encode_args((VaultArg {
+                vault_id: fixture.vault_id,
+                amount: 1_000_000_000,
+            },))
+            .unwrap(),
+        )
+        .expect("borrow_from_vault call failed");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode borrow_from_vault result"),
+        WasmResult::Reject(message) => panic!("borrow_from_vault rejected: {message}"),
+    }
+}
+
 // ─── Tests ───
 
 /// BOT-001b PIC #1: when the bot did NOT return the collateral, the
@@ -840,5 +973,80 @@ fn bot_001b_pic_explicit_cancel_succeeds_when_balance_sufficient() {
             "expected GenericError on second cancel, got {:?}",
             other
         ),
+    }
+}
+
+/// BOT-10: the legacy admin endpoint keeps its Candid signature but fails closed.
+/// Neither boolean can clear the active claim or change vault accounting/budget,
+/// regardless of whether the caller is the developer or an ordinary user.
+#[test]
+fn bot_010_pic_proofless_admin_resolution_preserves_claim_state() {
+    let fixture = setup_fixture();
+    let ledger_result = fixture
+        .pic
+        .update_call(
+            fixture.protocol_id,
+            fixture.developer,
+            "set_stable_ledger_principal",
+            encode_args((StableTokenType::CKUSDC, fixture.icusd_ledger)).unwrap(),
+        )
+        .expect("set_stable_ledger_principal call failed");
+    let ledger_result: Result<(), ProtocolError> = match ledger_result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode stable ledger setter"),
+        WasmResult::Reject(message) => panic!("stable ledger setter rejected: {message}"),
+    };
+    ledger_result.expect("ckUSDC ledger configuration should succeed");
+
+    set_liquidation_bot_config_admin(&fixture, fixture.developer, 1_000_000_000_000u64);
+    set_collateral_price_for_bot10_test(&fixture, 2.50);
+    let claim = bot_claim_call(&fixture, fixture.developer, fixture.vault_id)
+        .expect("bot claim should succeed against the underwater vault");
+    assert_eq!(claim.vault_id, fixture.vault_id);
+    let claimed_state = stuck_claim_observable_state(&fixture);
+    assert!(claimed_state.active_claim_ids.contains(&fixture.vault_id));
+    assert!(claimed_state
+        .vaults
+        .iter()
+        .any(|vault| vault.0 == fixture.vault_id));
+
+    for apply_debt_reduction in [false, true] {
+        for (caller, expected_message) in [
+            (fixture.developer, "Unsafe stuck-claim recovery disabled"),
+            (fixture.test_user, "Unauthorized: developer only"),
+        ] {
+            let before = stuck_claim_observable_state(&fixture);
+            assert_eq!(before, claimed_state, "claim state changed before call");
+
+            let error = admin_resolve_stuck_claim_call(&fixture, caller, apply_debt_reduction)
+            .expect_err("proofless legacy resolver must fail closed");
+            match error {
+                ProtocolError::GenericError(message) => assert!(
+                    message.contains(expected_message),
+                    "unexpected error for caller {caller} and apply_debt_reduction={apply_debt_reduction}: {message}"
+                ),
+                other => panic!("unexpected resolver error: {other:?}"),
+            }
+
+            assert_eq!(
+                stuck_claim_observable_state(&fixture),
+                before,
+                "legacy resolver mutated claim, vault, budget, or events for caller {caller} and apply_debt_reduction={apply_debt_reduction}"
+            );
+
+            let borrow_error = borrow_claimed_vault_call(&fixture)
+                .expect_err("user borrowing must stay blocked while the bot claim is active");
+            match borrow_error {
+                ProtocolError::GenericError(message) => assert!(
+                    message.contains("is locked — bot liquidation in progress"),
+                    "expected the vault processing lock after caller {caller} and apply_debt_reduction={apply_debt_reduction}, got: {message}"
+                ),
+                other => panic!("unexpected borrow result while claim is active: {other:?}"),
+            }
+            assert_eq!(
+                stuck_claim_observable_state(&fixture),
+                before,
+                "borrow probe changed claim, vault, budget, or events after caller {caller} and apply_debt_reduction={apply_debt_reduction}"
+            );
+        }
     }
 }

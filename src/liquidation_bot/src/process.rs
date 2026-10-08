@@ -255,8 +255,8 @@ pub(crate) struct SwapFailureOutcome {
     pub status: history::LiquidationStatus,
     pub error_message: String,
     /// Some(line) when the bot is leaving a claim active that the protocol
-    /// will reconcile (Wave-11 auto-cancel after 10 min, or admin via
-    /// `admin_resolve_stuck_claim`). None when both cleanup steps succeeded.
+    /// must be reconciled through its exact payment or collateral-return proof.
+    /// None when both cleanup steps succeeded.
     pub stuck_log: Option<String>,
 }
 
@@ -268,7 +268,7 @@ pub(crate) struct SwapFailureOutcome {
 /// always wrote `SwapFailed`, even when the protocol's claim was still active
 /// (budget unrestored, vault still flagged). With the Wave-12 BOT-001b balance
 /// gate a failed return guarantees the cancel rejects, so the bot record must
-/// reflect that the claim is stuck pending Wave-11 auto-cancel.
+/// reflect that the claim is stuck pending proof-backed reconciliation.
 ///
 /// Status mapping reuses existing variants (no `.did` change):
 ///   * Both cleanup steps OK     -> SwapFailed (happy cleanup)
@@ -289,7 +289,7 @@ pub(crate) fn decide_swap_failure_outcome(
             status: history::LiquidationStatus::TransferFailed,
             error_message: format!("swap: {} | return: {}", swap_err, rerr),
             stuck_log: Some(format!(
-                "STUCK: ICP return failed after swap failure for vault #{}; claim still active. Wave-11 auto-cancel will fire in 10 min, or admin can run admin_resolve_stuck_claim.",
+                "STUCK: ICP return failed after swap failure for vault #{}; claim still active. Retry/reconcile the exact claim-bound return or payment proof; proofless legacy admin recovery is disabled.",
                 vault_id
             )),
         };
@@ -303,7 +303,7 @@ pub(crate) fn decide_swap_failure_outcome(
                 swap_err, attempts, cerr
             ),
             stuck_log: Some(format!(
-                "STUCK: cancel failed after {} attempts for vault #{}; ICP returned but claim still active. Wave-11 auto-cancel will fire in 10 min.",
+                "STUCK: cancel failed after {} attempts for vault #{}; ICP returned but claim still active. Reconcile its exact collateral-return proof and retry proof-backed cancellation.",
                 attempts, vault_id
             )),
         };
@@ -803,7 +803,7 @@ pub async fn process_pending() {
                 None => message,
             };
             log!(crate::INFO,
-            "STUCK: ckUSDC transfer failed for vault #{}. Bot holding {} ckUSDC e6 for this claim, including {} held surplus (router said {}). Error: {}. Needs admin resolution.",
+            "STUCK: ckUSDC transfer failed for vault #{}. Bot holding {} ckUSDC e6 for this claim, including {} held surplus (router said {}). Error: {}. Reconcile this claim's exact ckUSDC payment/transfer evidence; after a confirmed transfer, submit its ledger block via bot_confirm_liquidation_with_proof. The legacy boolean admin endpoint is disabled.",
                 vault.vault_id, payment_allocation.gross_to_transfer_e6.saturating_add(payment_allocation.held_surplus_e6), payment_allocation.held_surplus_e6, router_received, stuck_msg);
             write_record(LiquidationRecordV1 {
                 id: record_id, vault_id: vault.vault_id, timestamp,
@@ -850,7 +850,7 @@ pub async fn process_pending() {
 
     if !confirm_ok {
         log!(crate::INFO,
-            "STUCK: Confirm failed after {} attempts for vault #{}. ckUSDC is in backend but debt not written down. Error: {}. Needs admin resolution.",
+            "STUCK: Confirm failed after {} attempts for vault #{}. ckUSDC is in backend but debt not written down. Error: {}. Retry proof-backed confirmation with this claim's exact ckUSDC transfer ledger block via bot_confirm_liquidation_with_proof. The legacy boolean admin endpoint is disabled.",
             CONFIRM_ATTEMPTS, vault.vault_id, last_confirm_err);
         write_record(LiquidationRecordV1 {
             id: record_id, vault_id: vault.vault_id, timestamp,

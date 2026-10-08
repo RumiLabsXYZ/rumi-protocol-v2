@@ -149,7 +149,7 @@
       total = first.total;
       // The bot's `get_stuck_liquidations` is its permanent history of
       // failed records, but the protocol-side claim may have since been
-      // resolved (Wave-11 BOT-001 auto-cancel, or `admin_resolve_stuck_claim`).
+      // resolved (Wave-11 BOT-001 auto-cancel when eligible, or proof-backed bot confirmation/cancellation).
       // Only surface records whose vault is still in the protocol's
       // active claim set so the banner reflects actionable items.
       stuckRecords = stuck.filter((r) => activeClaims.has(BigInt(r.vault_id)));
@@ -195,7 +195,7 @@
     <div class="stuck-banner">
       <div class="stuck-icon">!</div>
       <div class="stuck-body">
-        <div class="stuck-title">{stuckRecords.length} stuck claim{stuckRecords.length === 1 ? '' : 's'} awaiting admin resolution</div>
+        <div class="stuck-title">{stuckRecords.length} stuck claim{stuckRecords.length === 1 ? '' : 's'} requiring proof-based reconciliation</div>
         <div class="stuck-detail">
           {#each stuckRecords as r, i (r.id)}
             <span>#{r.vault_id} ({statusLabel(r.status)}){i < stuckRecords.length - 1 ? ', ' : ''}</span>
