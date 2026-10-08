@@ -2,8 +2,11 @@
 //! ledgers reproduce two independent add-liquidity refunds failing after two
 //! successful pulls without requiring an outage or external ledger.
 use candid::{decode_args, decode_one, encode_args, encode_one, Nat, Principal};
+use icrc_ledger_types::icrc::generic_value::ICRC3Value;
 use icrc_ledger_types::icrc1::account::Account;
+use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
 use icrc_ledger_types::icrc2::approve::ApproveArgs;
+use num_traits::ToPrimitive;
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 use rumi_3pool::payouts::{PayoutEntitlement, PayoutInputAction, PayoutKind, PayoutOutcome};
 use rumi_3pool::types::{PoolStatus, ThreePoolError, ThreePoolInitArgs, ThreePoolPendingClaim, TokenConfig};
@@ -222,6 +225,35 @@ fn payout(h: &Harness, owner: Principal, id: u64) -> PayoutEntitlement {
     ))
     .unwrap()
     .expect("payout entitlement exists")
+}
+
+fn ledger_block_for_memo(h: &Harness, ledger: Principal, memo: &[u8]) -> u64 {
+    let args = vec![GetBlocksRequest {
+        start: Nat::from(0u64),
+        length: Nat::from(1_000u64),
+    }];
+    let bytes = h
+        .pic
+        .query_call(
+            ledger,
+            Principal::anonymous(),
+            "icrc3_get_blocks",
+            encode_one(args).unwrap(),
+        )
+        .unwrap();
+    let result: GetBlocksResult = decode_one(&reply(bytes)).unwrap();
+    result
+        .blocks
+        .iter()
+        .find_map(|block| {
+            let ICRC3Value::Map(block_map) = &block.block else { return None };
+            let ICRC3Value::Map(tx) = block_map.get("tx")? else { return None };
+            match tx.get("memo")? {
+                ICRC3Value::Blob(actual) if actual.as_ref() == memo => block.id.0.to_u64(),
+                _ => None,
+            }
+        })
+        .expect("exact payout memo must be present in ledger history")
 }
 
 fn payouts(h: &Harness, owner: Principal) -> Vec<PayoutEntitlement> {
@@ -971,6 +1003,116 @@ fn committed_output_with_lost_reply_replays_exact_identity_once_and_settles_afte
     assert_eq!(balance(&h, h.ledgers[0], h.user), input_before - 100_000_000);
     assert!(claims(&h).iter().all(|pending| pending.id != claim.id));
     assert!(payout(&h, h.user, claim.id).settled);
+}
+
+#[test]
+fn aged_ambiguous_payout_accepts_only_exact_positive_block_proof_and_survives_upgrade() {
+    let h = setup();
+    h.pic
+        .update_call(
+            h.ledgers[1],
+            h.user,
+            "set_phantom_failures",
+            encode_one(1u32).unwrap(),
+        )
+        .unwrap();
+    let result: Result<u128, ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "swap",
+                encode_args((0u8, 1u8, 100_000_000u128, 1u128)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(result, Err(ThreePoolError::TransferFailed { .. })));
+
+    let claim = claims(&h).into_iter().find(|claim| claim.token_index == 1).unwrap();
+    let before_reconciliation = balance(&h, h.ledgers[1], h.user);
+    let pending = payout(&h, h.user, claim.id);
+    let attempt = pending.attempts.last().unwrap().clone();
+    assert!(matches!(attempt.outcome, PayoutOutcome::Unresolved { .. }));
+    let block_index = ledger_block_for_memo(&h, h.ledgers[1], &attempt.transfer.memo);
+
+    let unauthorized: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                Principal::anonymous(),
+                "reconcile_aged_payout",
+                encode_args((claim.id, block_index)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(unauthorized, Err(ThreePoolError::Unauthorized)));
+
+    let too_early: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "reconcile_aged_payout",
+                encode_args((claim.id, block_index)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(too_early, Err(ThreePoolError::TransferFailed { .. })));
+
+    let now = h.pic.get_time();
+    h.pic.set_time(
+        now + std::time::Duration::from_nanos(24 * 60 * 60 * 1_000_000_000),
+    );
+    let wrong_block: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "reconcile_aged_payout",
+                encode_args((claim.id, block_index.saturating_sub(1))).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(wrong_block, Err(ThreePoolError::TransferFailed { .. })));
+    assert!(matches!(
+        &payout(&h, h.user, claim.id).attempts.last().unwrap().outcome,
+        PayoutOutcome::Unresolved { .. }
+    ));
+
+    let reconciled: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "reconcile_aged_payout",
+                encode_args((claim.id, block_index)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    reconciled.expect("exact aged positive block proof must settle through claim_pending");
+    assert_eq!(balance(&h, h.ledgers[1], h.user), before_reconciliation);
+    assert!(claims(&h).iter().all(|pending| pending.id != claim.id));
+
+    h.pic
+        .upgrade_canister(
+            h.pool,
+            wasm_artifact("rumi_3pool.wasm"),
+            encode_args(()).unwrap(),
+            None,
+        )
+        .unwrap();
+    let after_upgrade = payout(&h, h.user, claim.id);
+    assert!(after_upgrade.settled);
+    assert_eq!(
+        after_upgrade.attempts.last().unwrap().outcome,
+        PayoutOutcome::Confirmed { block: Nat::from(block_index) },
+    );
+    assert_eq!(balance(&h, h.ledgers[1], h.user), before_reconciliation);
 }
 
 #[test]

@@ -13,6 +13,7 @@ pub mod liquidity;
 pub mod transfers;
 pub mod receipts;
 pub mod payouts;
+mod payout_reconciliation;
 use receipts::{SwapReceiptErrorV1, SwapReceiptStatusV1, SwapReceiptV1, SwapRequestV1};
 pub mod admin;
 pub mod pool_guard;
@@ -951,6 +952,114 @@ pub fn get_pending_claims(offset: u64, limit: u64) -> Vec<crate::types::ThreePoo
 #[query]
 pub fn get_pending_claim_count() -> u64 {
     storage::pending_claims::len()
+}
+
+/// Recover an aged ambiguous payout from positive, exact ICRC-3 block
+/// evidence. The supplied block must match the immutable transfer tuple in
+/// every field. This path never treats absent or incomplete history as proof
+/// of non-payment and never creates a replacement transfer.
+///
+/// Archive-backed responses are deliberately rejected. Archive recovery stays
+/// open until archive-controller governance and certified-chain membership are
+/// verified for the configured ledgers.
+#[update]
+#[candid_method(update)]
+pub async fn reconcile_aged_payout(claim_id: u64, block_index: u64) -> Result<(), ThreePoolError> {
+    const MIN_AMBIGUOUS_AGE_NS: u64 = 23 * 60 * 60 * 1_000_000_000;
+
+    let pool_guard = pool_guard::PoolGuard::new_payout_recovery()?;
+    let caller = ic_cdk::api::caller();
+    let admin = read_state(|s| s.config.admin);
+    let entitlement = payouts::get(claim_id).ok_or(ThreePoolError::ClaimNotFound)?;
+    if caller != entitlement.owner && caller != admin {
+        return Err(ThreePoolError::Unauthorized);
+    }
+    if let Some(claim) = storage::pending_claims::get(claim_id) {
+        if entitlement.owner != claim.claimant
+            || entitlement.token_index != claim.token_index
+            || entitlement.ledger != claim.ledger
+            || entitlement.gross != claim.amount
+        {
+            return Err(legacy_payout_held_error());
+        }
+    }
+    if entitlement.settled || entitlement.attempts.is_empty() {
+        return Err(legacy_payout_held_error());
+    }
+    let attempt = entitlement.attempts.last().cloned().ok_or_else(legacy_payout_held_error)?;
+    if attempt.transfer.ledger != entitlement.ledger
+        || attempt.transfer.from
+            != (icrc_ledger_types::icrc1::account::Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            })
+        || attempt.transfer.to
+            != (icrc_ledger_types::icrc1::account::Account {
+                owner: entitlement.owner,
+                subaccount: None,
+            })
+        || attempt.transfer.gross != entitlement.gross
+        || attempt.transfer.net.checked_add(attempt.transfer.fee) != Some(attempt.transfer.gross)
+    {
+        return Err(legacy_payout_held_error());
+    }
+    if !matches!(attempt.outcome, crate::payouts::PayoutOutcome::Unresolved { .. } | crate::payouts::PayoutOutcome::Submitted) {
+        return Err(ThreePoolError::TransferFailed {
+            token: entitlement.symbol,
+            reason: "only the current ambiguous payout attempt can be reconciled".into(),
+        });
+    }
+    if ic_cdk::api::time().saturating_sub(attempt.transfer.created_at_time) < MIN_AMBIGUOUS_AGE_NS {
+        return Err(ThreePoolError::TransferFailed {
+            token: entitlement.symbol,
+            reason: "ambiguous payout is still inside the conservative ledger deduplication window".into(),
+        });
+    }
+
+    crate::payout_reconciliation::verify_exact_block(
+        attempt.transfer.ledger,
+        block_index,
+        &attempt.transfer,
+    )
+    .await
+    .map_err(|reason| ThreePoolError::TransferFailed {
+        token: entitlement.symbol.clone(),
+        reason,
+    })?;
+
+    // Re-read after the callback and only confirm the same persisted attempt.
+    // The recovery guard excludes competing pool writers while the call is in
+    // flight; this comparison is an additional stale-callback defense.
+    let mut current = payouts::get(claim_id).ok_or(ThreePoolError::ClaimNotFound)?;
+    let Some(current_attempt) = current.attempts.last_mut() else {
+        return Err(legacy_payout_held_error());
+    };
+    if current_attempt.number != attempt.number
+        || current_attempt.transfer != attempt.transfer
+        || current_attempt.replay_count != attempt.replay_count
+        || !matches!(current_attempt.outcome, crate::payouts::PayoutOutcome::Unresolved { .. } | crate::payouts::PayoutOutcome::Submitted)
+    {
+        return Err(ThreePoolError::TransferFailed {
+            token: entitlement.symbol,
+            reason: "payout attempt changed while exact block evidence was being fetched".into(),
+        });
+    }
+    current_attempt.outcome = crate::payouts::PayoutOutcome::Confirmed {
+        block: candid::Nat::from(block_index),
+    };
+    payouts::save(current);
+    payouts::append(
+        claim_id,
+        crate::payouts::PayoutJournalEventKind::Confirmed {
+            attempt_number: attempt.number,
+            block: candid::Nat::from(block_index),
+        },
+    );
+
+    // Reuse claim_pending's kind-specific settlement and compensation logic.
+    // Releasing this guard is required because claim_pending acquires it.
+    drop(pool_guard);
+    claim_pending(claim_id).await
 }
 
 // ─── Swap ───

@@ -661,6 +661,7 @@ service : (ThreePoolInitArgs) -> {
   get_all_lp_holders : () -> (vec record { principal; nat }) query;
   get_lp_holders : (nat64, nat64) -> (vec record { principal; nat }) query;
   claim_pending : (nat64) -> (variant { Ok; Err : ThreePoolError });
+  reconcile_aged_payout : (nat64, nat64) -> (variant { Ok; Err : ThreePoolError });
   get_payout_entitlement : (nat64) -> (opt PayoutEntitlement) query;
   get_payout_entitlements : (nat64, nat64) -> (vec PayoutEntitlement) query;
   get_pending_claims : (nat64, nat64) -> (vec ThreePoolPendingClaim) query;

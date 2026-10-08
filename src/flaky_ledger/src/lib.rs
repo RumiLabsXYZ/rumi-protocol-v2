@@ -25,6 +25,9 @@
 
 use candid::{CandidType, Nat, Principal};
 use ic_cdk::{init, query, update};
+use icrc_ledger_types::icrc::generic_value::{ICRC3Map, ICRC3Value};
+use icrc_ledger_types::icrc3::archive::{GetArchivesArgs, GetArchivesResult};
+use icrc_ledger_types::icrc3::blocks::{BlockWithId, GetBlocksRequest, GetBlocksResult};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -129,6 +132,9 @@ struct LedgerState {
     balances: BTreeMap<Account, u128>,
     allowances: BTreeMap<(Account, Account), u128>,
     block_index: u64,
+    /// ICRC-3 history is passive test evidence. Every successful ledger
+    /// operation appends exactly one block at its normal zero-based index.
+    blocks: Vec<BlockWithId>,
     fee: u128,
     fail_transfers: bool,
     fail_transfer_from: bool,
@@ -165,6 +171,95 @@ fn nat_to_u128(n: &Nat) -> u128 {
 
 fn account_key(owner: Principal, subaccount: Option<[u8; 32]>) -> Account {
     Account { owner, subaccount }
+}
+
+fn append_block(state: &mut LedgerState, block: ICRC3Value) -> u64 {
+    let id = state.block_index;
+    state.block_index = state.block_index.saturating_add(1);
+    let mut block = match block {
+        ICRC3Value::Map(block) => block,
+        _ => unreachable!("test ledger blocks are maps"),
+    };
+    // ICRC-3 requires a block-level timestamp and permits an optional hash of
+    // the preceding block. Keep this fixture's log schema-valid so tests do
+    // not accidentally exercise a more permissive decoder than production.
+    block.insert("ts".into(), ICRC3Value::Nat(Nat::from(ic_cdk::api::time())));
+    if let Some(previous) = state.blocks.last() {
+        block.insert(
+            "phash".into(),
+            ICRC3Value::Blob(previous.block.clone().hash().to_vec().into()),
+        );
+    }
+    state.blocks.push(BlockWithId {
+        id: Nat::from(id),
+        block: ICRC3Value::Map(block),
+    });
+    id
+}
+
+fn account_value(account: &Account) -> ICRC3Value {
+    let mut parts = vec![ICRC3Value::Blob(account.owner.as_slice().to_vec().into())];
+    if let Some(subaccount) = account.subaccount {
+        parts.push(ICRC3Value::Blob(subaccount.to_vec().into()));
+    }
+    ICRC3Value::Array(parts)
+}
+
+fn transfer_block(
+    btype: &str,
+    op: &str,
+    from: Option<&Account>,
+    to: &Account,
+    amount: u128,
+    fee: u128,
+    memo: Option<&[u8]>,
+    created_at_time: Option<u64>,
+    spender: Option<&Account>,
+) -> ICRC3Value {
+    let mut tx = ICRC3Map::new();
+    tx.insert("op".into(), ICRC3Value::Text(op.into()));
+    if let Some(from) = from {
+        tx.insert("from".into(), account_value(from));
+    }
+    tx.insert("to".into(), account_value(to));
+    tx.insert("amt".into(), ICRC3Value::Nat(Nat::from(amount)));
+    tx.insert("fee".into(), ICRC3Value::Nat(Nat::from(fee)));
+    if let Some(memo) = memo {
+        tx.insert("memo".into(), ICRC3Value::Blob(memo.to_vec().into()));
+    }
+    if let Some(created_at_time) = created_at_time {
+        tx.insert("ts".into(), ICRC3Value::Nat(Nat::from(created_at_time)));
+    }
+    if let Some(spender) = spender {
+        tx.insert("spender".into(), account_value(spender));
+    }
+    let mut block = ICRC3Map::new();
+    block.insert("btype".into(), ICRC3Value::Text(btype.into()));
+    block.insert("tx".into(), ICRC3Value::Map(tx));
+    ICRC3Value::Map(block)
+}
+
+fn approve_block(from: &Account, spender: &Account, amount: u128) -> ICRC3Value {
+    let mut tx = ICRC3Map::new();
+    tx.insert("op".into(), ICRC3Value::Text("approve".into()));
+    tx.insert("from".into(), account_value(from));
+    tx.insert("spender".into(), account_value(spender));
+    tx.insert("amt".into(), ICRC3Value::Nat(Nat::from(amount)));
+    let mut block = ICRC3Map::new();
+    block.insert("btype".into(), ICRC3Value::Text("1approve".into()));
+    block.insert("tx".into(), ICRC3Value::Map(tx));
+    ICRC3Value::Map(block)
+}
+
+fn mint_block(to: &Account, amount: u128) -> ICRC3Value {
+    let mut tx = ICRC3Map::new();
+    tx.insert("op".into(), ICRC3Value::Text("mint".into()));
+    tx.insert("to".into(), account_value(to));
+    tx.insert("amt".into(), ICRC3Value::Nat(Nat::from(amount)));
+    let mut block = ICRC3Map::new();
+    block.insert("btype".into(), ICRC3Value::Text("1mint".into()));
+    block.insert("tx".into(), ICRC3Value::Map(tx));
+    ICRC3Value::Map(block)
 }
 
 // ─── Init ───
@@ -269,11 +364,25 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             });
         }
 
-        // Commit balances and bump block index.
-        *state.balances.entry(from).or_insert(0) -= amount + state.fee;
+        // Commit balances and append the same exact transfer to the passive
+        // ICRC-3 fixture log used by positive-proof tests.
+        let charged_fee = state.fee;
+        *state.balances.entry(from.clone()).or_insert(0) -= amount + charged_fee;
         *state.balances.entry(args.to.clone()).or_insert(0) += amount;
-        state.block_index += 1;
-        let landed_block = state.block_index;
+        let landed_block = append_block(
+            &mut state,
+            transfer_block(
+                "1xfer",
+                "xfer",
+                Some(&from),
+                &args.to,
+                amount,
+                charged_fee,
+                args.memo.as_deref(),
+                args.created_at_time,
+                None,
+            ),
+        );
 
         if let Some(t) = args.created_at_time {
             let key = DedupKey {
@@ -301,7 +410,8 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             state.phantom_icrc1_failures_remaining -= 1;
             return Err(TransferError::GenericError {
                 error_code: Nat::from(997u64),
-                message: "Injected ICRC-1 phantom failure (transfer committed, reply lost)".to_string(),
+                message: "Injected ICRC-1 phantom failure (transfer committed, reply lost)"
+                    .to_string(),
             });
         }
 
@@ -320,10 +430,11 @@ fn icrc2_approve(args: ApproveArgs) -> Result<Nat, ApproveError> {
         let spender = args.spender;
         let amount = nat_to_u128(&args.amount);
 
-        state.allowances.insert((from, spender), amount);
-
-        state.block_index += 1;
-        Ok(Nat::from(state.block_index))
+        state
+            .allowances
+            .insert((from.clone(), spender.clone()), amount);
+        let landed_block = append_block(&mut state, approve_block(&from, &spender, amount));
+        Ok(Nat::from(landed_block))
     })
 }
 
@@ -370,7 +481,11 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
             }
         }
 
-        let allowance = state.allowances.get(&(from.clone(), spender_account.clone())).copied().unwrap_or(0);
+        let allowance = state
+            .allowances
+            .get(&(from.clone(), spender_account.clone()))
+            .copied()
+            .unwrap_or(0);
         if amount > allowance {
             return Err(TransferFromError::InsufficientAllowance {
                 allowance: Nat::from(allowance),
@@ -384,14 +499,30 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
             });
         }
 
-        if let Some(a) = state.allowances.get_mut(&(from.clone(), spender_account)) {
+        if let Some(a) = state
+            .allowances
+            .get_mut(&(from.clone(), spender_account.clone()))
+        {
             *a -= amount;
         }
 
-        *state.balances.entry(from.clone()).or_insert(0) -= amount + state.fee;
+        let charged_fee = state.fee;
+        *state.balances.entry(from.clone()).or_insert(0) -= amount + charged_fee;
         *state.balances.entry(args.to.clone()).or_insert(0) += amount;
-        state.block_index += 1;
-        let landed_block = state.block_index;
+        let landed_block = append_block(
+            &mut state,
+            transfer_block(
+                "2xfer",
+                "xfer",
+                Some(&from),
+                &args.to,
+                amount,
+                charged_fee,
+                args.memo.as_deref(),
+                args.created_at_time,
+                Some(&spender_account),
+            ),
+        );
 
         if let Some(t) = args.created_at_time {
             let key = DedupKey {
@@ -410,12 +541,54 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
             state.phantom_failures_remaining -= 1;
             return Err(TransferFromError::GenericError {
                 error_code: Nat::from(998u64),
-                message: "Injected phantom failure (transfer_from committed, reply lost)".to_string(),
+                message: "Injected phantom failure (transfer_from committed, reply lost)"
+                    .to_string(),
             });
         }
 
         Ok(Nat::from(landed_block))
     })
+}
+
+// ─── ICRC-3 (unarchived, fixture-sized history) ───
+
+#[query]
+fn icrc3_get_blocks(args: Vec<GetBlocksRequest>) -> GetBlocksResult {
+    const MAX_BLOCKS_PER_RESPONSE: usize = 100;
+    STATE.with(|s| {
+        let state = s.borrow();
+        let mut blocks = Vec::new();
+        for request in args {
+            let Ok(start) = u64::try_from(request.start.0) else {
+                continue;
+            };
+            let Ok(length) = u64::try_from(request.length.0) else {
+                continue;
+            };
+            let length = length.min((MAX_BLOCKS_PER_RESPONSE - blocks.len()) as u64);
+            let Some(end) = start.checked_add(length) else {
+                continue;
+            };
+            for block_index in start..end.min(state.blocks.len() as u64) {
+                if let Some(block) = state.blocks.get(block_index as usize) {
+                    blocks.push(block.clone());
+                }
+            }
+            if blocks.len() == MAX_BLOCKS_PER_RESPONSE {
+                break;
+            }
+        }
+        GetBlocksResult {
+            log_length: Nat::from(state.blocks.len() as u64),
+            blocks,
+            archived_blocks: vec![],
+        }
+    })
+}
+
+#[query]
+fn icrc3_get_archives(_args: GetArchivesArgs) -> GetArchivesResult {
+    vec![]
 }
 
 // ─── Test Control Methods ───
@@ -426,7 +599,9 @@ fn mint(account: Account, amount: Nat) {
     STATE.with(|s| {
         let mut state = s.borrow_mut();
         let amt = nat_to_u128(&amount);
-        *state.balances.entry(account).or_insert(0) += amt;
+        *state.balances.entry(account.clone()).or_insert(0) += amt;
+        let block = mint_block(&account, amt);
+        append_block(&mut state, block);
     });
 }
 
