@@ -767,8 +767,10 @@ fn pre_upgrade() {
 
 #[post_upgrade]
 fn post_upgrade(arg: ProtocolArg) {
-    use rumi_protocol_backend::event::replay;
-    use rumi_protocol_backend::storage::{count_events, events, record_event};
+    use rumi_protocol_backend::event::replay_with_pending_payout_events;
+    use rumi_protocol_backend::storage::{
+        count_events, events, pending_payout_events, record_event,
+    };
 
     let start = ic_cdk::api::instruction_counter();
 
@@ -802,12 +804,14 @@ fn post_upgrade(arg: ProtocolArg) {
                 "[upgrade]: no stable state found, replaying {} events",
                 count_events()
             );
-            replay(events()).unwrap_or_else(|e| {
-                ic_cdk::trap(&format!(
-                    "[upgrade]: failed to replay the event log: {:?}",
-                    e
-                ))
-            })
+            replay_with_pending_payout_events(events(), pending_payout_events()).unwrap_or_else(
+                |e| {
+                    ic_cdk::trap(&format!(
+                        "[upgrade]: failed to replay the event log: {:?}",
+                        e
+                    ))
+                },
+            )
         }
     };
     let xrp_guardrail_migration =

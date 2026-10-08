@@ -466,59 +466,6 @@ export const idlFactory = ({ IDL }) => {
     'min_size_e8s' : IDL.Opt(IDL.Nat64),
     'admin_labels' : IDL.Opt(IDL.Vec(IDL.Text)),
   });
-  const PendingPayoutKind = IDL.Variant({
-    'Margin' : IDL.Null,
-    'Redemption' : IDL.Null,
-    'Excess' : IDL.Null,
-  });
-  const PendingPayoutNoEffectProof = IDL.Record({
-    'old_attempt_nonce' : IDL.Nat,
-    'payout_kind' : PendingPayoutKind,
-    'new_attempt_nonce' : IDL.Nat,
-    'owner' : IDL.Principal,
-    'operation_id' : IDL.Nat,
-    'snapshot_log_length' : IDL.Nat64,
-    'verified_at_ns' : IDL.Nat64,
-    'amount_raw' : IDL.Nat64,
-    'ledger' : IDL.Principal,
-    'complete_prefix' : IDL.Bool,
-    'start_index' : IDL.Nat64,
-  });
-  const PendingPayoutHistoryScan = IDL.Record({
-    'payout_kind' : PendingPayoutKind,
-    'owner' : IDL.Principal,
-    'next_index' : IDL.Nat64,
-    'operation_id' : IDL.Nat,
-    'snapshot_log_length' : IDL.Nat64,
-    'amount_raw' : IDL.Nat64,
-    'ledger' : IDL.Principal,
-    'attempt_nonce' : IDL.Nat,
-    'start_index' : IDL.Nat64,
-  });
-  const PendingMarginTransfer = IDL.Record({
-    'too_old_confirmed' : IDL.Bool,
-    'payout_kind' : PendingPayoutKind,
-    'no_effect_proof' : IDL.Opt(PendingPayoutNoEffectProof),
-    'history_log_length' : IDL.Opt(IDL.Nat64),
-    'owner' : IDL.Principal,
-    'history_scan' : IDL.Opt(PendingPayoutHistoryScan),
-    'retry_count' : IDL.Nat8,
-    'transfer_amount_raw' : IDL.Opt(IDL.Nat64),
-    'history_start_index' : IDL.Opt(IDL.Nat64),
-    'operation_id' : IDL.Nat,
-    'vault_id' : IDL.Nat64,
-    'rearm_schema_version' : IDL.Nat8,
-    'reconciliation_required' : IDL.Bool,
-    'ledger' : IDL.Opt(IDL.Principal),
-    'history_candidate_seen' : IDL.Bool,
-    'op_nonce' : IDL.Nat,
-    'history_cursor' : IDL.Nat64,
-    'margin' : IDL.Nat64,
-    'in_flight' : IDL.Bool,
-    'collateral_type' : IDL.Principal,
-    'min_net_collateral_raw' : IDL.Opt(IDL.Nat64),
-    'held_for_manual_retry' : IDL.Bool,
-  });
   const StableTokenType = IDL.Variant({
     'CKUSDC' : IDL.Null,
     'CKUSDT' : IDL.Null,
@@ -537,6 +484,11 @@ export const idlFactory = ({ IDL }) => {
     'icusd_redeemed_e8s' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
     'collateral_seized' : IDL.Nat64,
+  });
+  const PendingPayoutKind = IDL.Variant({
+    'Margin' : IDL.Null,
+    'Redemption' : IDL.Null,
+    'Excess' : IDL.Null,
   });
   const FeeSource = IDL.Variant({
     'BorrowingFee' : IDL.Null,
@@ -668,12 +620,6 @@ export const idlFactory = ({ IDL }) => {
       'timestamp' : IDL.Nat64,
       'observed_balance' : IDL.Nat64,
     }),
-    'pending_payout_queued' : IDL.Record({
-      'kind' : PendingPayoutKind,
-      'operation_id' : IDL.Nat,
-      'timestamp' : IDL.Opt(IDL.Nat64),
-      'transfer' : PendingMarginTransfer,
-    }),
     'oracle_circuit_breaker' : IDL.Record({
       'timestamp' : IDL.Nat64,
       'consecutive_failures' : IDL.Nat64,
@@ -723,12 +669,6 @@ export const idlFactory = ({ IDL }) => {
       'recovery_borrowing_fee' : IDL.Opt(IDL.Text),
       'collateral_type' : IDL.Principal,
     }),
-    'pending_payout_too_old' : IDL.Record({
-      'owner' : IDL.Principal,
-      'operation_id' : IDL.Nat,
-      'timestamp' : IDL.Opt(IDL.Nat64),
-      'attempt_nonce' : IDL.Nat,
-    }),
     'set_collateral_borrowing_fee' : IDL.Record({
       'fee' : IDL.Opt(IDL.Text),
       'rate' : IDL.Opt(IDL.Text),
@@ -765,16 +705,6 @@ export const idlFactory = ({ IDL }) => {
       'liquidation_bonus' : IDL.Text,
     }),
     'set_dust_liquidation_threshold' : IDL.Record({ 'amount' : IDL.Text }),
-    'pending_payout_history_boundary' : IDL.Record({
-      'payout_kind' : IDL.Opt(PendingPayoutKind),
-      'owner' : IDL.Principal,
-      'operation_id' : IDL.Nat,
-      'amount_raw' : IDL.Nat64,
-      'ledger' : IDL.Principal,
-      'timestamp' : IDL.Opt(IDL.Nat64),
-      'attempt_nonce' : IDL.Nat,
-      'start_index' : IDL.Opt(IDL.Nat64),
-    }),
     'set_amm1_pool_id' : IDL.Record({ 'pool_id' : IDL.Text }),
     'set_global_icusd_mint_cap' : IDL.Record({
       'cap' : IDL.Opt(IDL.Text),
@@ -1082,13 +1012,6 @@ export const idlFactory = ({ IDL }) => {
       'token_type' : StableTokenType,
     }),
     'set_recovery_cr_multiplier' : IDL.Record({ 'multiplier' : IDL.Text }),
-    'pending_payout_rearmed' : IDL.Record({
-      'owner' : IDL.Opt(IDL.Principal),
-      'operation_id' : IDL.Nat,
-      'timestamp' : IDL.Opt(IDL.Nat64),
-      'attempt_nonce' : IDL.Nat,
-      'proof' : IDL.Opt(PendingPayoutNoEffectProof),
-    }),
   });
   const EventsByPrincipalPagedResponse = IDL.Record({
     'scan_end' : IDL.Nat64,

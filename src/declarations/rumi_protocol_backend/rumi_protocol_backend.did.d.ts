@@ -486,14 +486,6 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   {
-    'pending_payout_queued' : {
-      'kind' : PendingPayoutKind,
-      'operation_id' : bigint,
-      'timestamp' : [] | [bigint],
-      'transfer' : PendingMarginTransfer,
-    }
-  } |
-  {
     'oracle_circuit_breaker' : {
       'timestamp' : bigint,
       'consecutive_failures' : bigint,
@@ -559,14 +551,6 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   {
-    'pending_payout_too_old' : {
-      'owner' : Principal,
-      'operation_id' : bigint,
-      'timestamp' : [] | [bigint],
-      'attempt_nonce' : bigint,
-    }
-  } |
-  {
     'set_collateral_borrowing_fee' : {
       'fee' : [] | [string],
       'rate' : [] | [string],
@@ -614,18 +598,6 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   { 'set_dust_liquidation_threshold' : { 'amount' : string } } |
-  {
-    'pending_payout_history_boundary' : {
-      'payout_kind' : [] | [PendingPayoutKind],
-      'owner' : Principal,
-      'operation_id' : bigint,
-      'amount_raw' : bigint,
-      'ledger' : Principal,
-      'timestamp' : [] | [bigint],
-      'attempt_nonce' : bigint,
-      'start_index' : [] | [bigint],
-    }
-  } |
   { 'set_amm1_pool_id' : { 'pool_id' : string } } |
   {
     'set_global_icusd_mint_cap' : {
@@ -1002,16 +974,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'token_type' : StableTokenType,
     }
   } |
-  { 'set_recovery_cr_multiplier' : { 'multiplier' : string } } |
-  {
-    'pending_payout_rearmed' : {
-      'owner' : [] | [Principal],
-      'operation_id' : bigint,
-      'timestamp' : [] | [bigint],
-      'attempt_nonce' : bigint,
-      'proof' : [] | [PendingPayoutNoEffectProof],
-    }
-  };
+  { 'set_recovery_cr_multiplier' : { 'multiplier' : string } };
 export interface EventTimeRange { 'start_ns' : bigint, 'end_ns' : bigint }
 export type EventTypeFilter = { 'BreakerTripped' : null } |
   { 'StabilityPoolDeposit' : null } |
@@ -1151,57 +1114,9 @@ export interface PendingLiquidationV1 {
   'debt_to_clear_e8s' : bigint,
   'collateral_reserved_native' : bigint,
 }
-export interface PendingMarginTransfer {
-  'too_old_confirmed' : boolean,
-  'payout_kind' : PendingPayoutKind,
-  'no_effect_proof' : [] | [PendingPayoutNoEffectProof],
-  'history_log_length' : [] | [bigint],
-  'owner' : Principal,
-  'history_scan' : [] | [PendingPayoutHistoryScan],
-  'retry_count' : number,
-  'transfer_amount_raw' : [] | [bigint],
-  'history_start_index' : [] | [bigint],
-  'operation_id' : bigint,
-  'vault_id' : bigint,
-  'rearm_schema_version' : number,
-  'reconciliation_required' : boolean,
-  'ledger' : [] | [Principal],
-  'history_candidate_seen' : boolean,
-  'op_nonce' : bigint,
-  'history_cursor' : bigint,
-  'margin' : bigint,
-  'in_flight' : boolean,
-  'collateral_type' : Principal,
-  'min_net_collateral_raw' : [] | [bigint],
-  'held_for_manual_retry' : boolean,
-}
-export interface PendingPayoutHistoryScan {
-  'payout_kind' : PendingPayoutKind,
-  'owner' : Principal,
-  'next_index' : bigint,
-  'operation_id' : bigint,
-  'snapshot_log_length' : bigint,
-  'amount_raw' : bigint,
-  'ledger' : Principal,
-  'attempt_nonce' : bigint,
-  'start_index' : bigint,
-}
 export type PendingPayoutKind = { 'Margin' : null } |
   { 'Redemption' : null } |
   { 'Excess' : null };
-export interface PendingPayoutNoEffectProof {
-  'old_attempt_nonce' : bigint,
-  'payout_kind' : PendingPayoutKind,
-  'new_attempt_nonce' : bigint,
-  'owner' : Principal,
-  'operation_id' : bigint,
-  'snapshot_log_length' : bigint,
-  'verified_at_ns' : bigint,
-  'amount_raw' : bigint,
-  'ledger' : Principal,
-  'complete_prefix' : boolean,
-  'start_index' : bigint,
-}
 export interface PendingPayoutPage {
   'next_cursor' : [] | [bigint],
   'items' : Array<PendingPayoutView>,

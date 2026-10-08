@@ -80,52 +80,6 @@ pub enum Event {
         timestamp: Option<u64>,
     },
 
-    #[serde(rename = "pending_payout_queued")]
-    PendingPayoutQueued {
-        kind: PendingPayoutKind,
-        operation_id: u128,
-        transfer: PendingMarginTransfer,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        timestamp: Option<u64>,
-    },
-
-    #[serde(rename = "pending_payout_history_boundary")]
-    PendingPayoutHistoryBoundary {
-        operation_id: u128,
-        attempt_nonce: u128,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        payout_kind: Option<PendingPayoutKind>,
-        ledger: Principal,
-        owner: Principal,
-        amount_raw: u64,
-        /// `None` permanently disables rearm for this row before dispatch.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        start_index: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        timestamp: Option<u64>,
-    },
-
-    #[serde(rename = "pending_payout_too_old")]
-    PendingPayoutTooOld {
-        operation_id: u128,
-        attempt_nonce: u128,
-        owner: Principal,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        timestamp: Option<u64>,
-    },
-
-    #[serde(rename = "pending_payout_rearmed")]
-    PendingPayoutRearmed {
-        operation_id: u128,
-        attempt_nonce: u128,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        proof: Option<PendingPayoutNoEffectProof>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        timestamp: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        owner: Option<Principal>,
-    },
-
     #[serde(rename = "liquidate_vault")]
     LiquidateVault {
         vault_id: u64,
@@ -1014,6 +968,42 @@ pub enum Event {
     },
 }
 
+/// Durable state-transition journal for payout obligations. These records are
+/// kept in a private stable log rather than the public `Event` log because
+/// adding public Event variants would break older clients of `get_events`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PendingPayoutEvent {
+    Queued {
+        kind: PendingPayoutKind,
+        operation_id: u128,
+        transfer: PendingMarginTransfer,
+        timestamp: Option<u64>,
+    },
+    DispatchBoundary {
+        operation_id: u128,
+        attempt_nonce: u128,
+        payout_kind: Option<PendingPayoutKind>,
+        ledger: Principal,
+        owner: Principal,
+        amount_raw: u64,
+        start_index: Option<u64>,
+        timestamp: Option<u64>,
+    },
+    TooOld {
+        operation_id: u128,
+        attempt_nonce: u128,
+        owner: Principal,
+        timestamp: Option<u64>,
+    },
+    Rearmed {
+        operation_id: u128,
+        attempt_nonce: u128,
+        proof: Option<PendingPayoutNoEffectProof>,
+        timestamp: Option<u64>,
+        owner: Option<Principal>,
+    },
+}
+
 impl Event {
     // Define a method to check if the event contains vault_id
     pub fn is_vault_related(&self, filter_vault_id: &u64) -> bool {
@@ -1030,10 +1020,6 @@ impl Event {
                 }
             }
             Event::RedemptionTransfered { .. } => false,
-            Event::PendingPayoutQueued { transfer, .. } => transfer.vault_id == *filter_vault_id,
-            Event::PendingPayoutHistoryBoundary { .. } => false,
-            Event::PendingPayoutTooOld { .. } => false,
-            Event::PendingPayoutRearmed { .. } => false,
             Event::RedistributeVault { vault_id, .. } => vault_id == filter_vault_id,
             Event::BorrowFromVault { vault_id, .. } => vault_id == filter_vault_id,
             Event::RepayToVault { vault_id, .. } => vault_id == filter_vault_id,
@@ -1177,10 +1163,6 @@ impl Event {
             | Event::CollateralWithdrawn { .. }
             | Event::PartialCollateralWithdrawn { .. }
             | Event::MarginTransfer { .. }
-            | Event::PendingPayoutQueued { .. }
-            | Event::PendingPayoutHistoryBoundary { .. }
-            | Event::PendingPayoutTooOld { .. }
-            | Event::PendingPayoutRearmed { .. }
             | Event::RedistributeVault { .. }
             | Event::DustForgiven { .. }
             | Event::AdminVaultCorrection { .. }
@@ -1327,10 +1309,6 @@ impl Event {
             Event::OpenVault { timestamp, .. }
             | Event::CloseVault { timestamp, .. }
             | Event::MarginTransfer { timestamp, .. }
-            | Event::PendingPayoutQueued { timestamp, .. }
-            | Event::PendingPayoutHistoryBoundary { timestamp, .. }
-            | Event::PendingPayoutTooOld { timestamp, .. }
-            | Event::PendingPayoutRearmed { timestamp, .. }
             | Event::LiquidateVault { timestamp, .. }
             | Event::PartialLiquidateVault { timestamp, .. }
             | Event::RedemptionOnVaults { timestamp, .. }
@@ -1588,10 +1566,6 @@ impl Event {
             Event::WithdrawLiquidity { caller, .. } => caller == p,
             Event::ClaimLiquidityReturns { caller, .. } => caller == p,
             Event::AdminMint { to, .. } => to == p,
-            Event::PendingPayoutQueued { transfer, .. } => &transfer.owner == p,
-            Event::PendingPayoutHistoryBoundary { owner, .. } => owner == p,
-            Event::PendingPayoutTooOld { owner, .. } => owner == p,
-            Event::PendingPayoutRearmed { owner, .. } => owner.as_ref() == Some(p),
             _ => false,
         }
     }
@@ -1605,12 +1579,121 @@ pub enum ReplayLogError {
     InconsistentLog(String),
 }
 
-pub fn replay(events: impl Iterator<Item = Event>) -> Result<State, ReplayLogError> {
-    replay_with_nonce_time(events, ic_cdk::api::time)
+fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
+    match event {
+        PendingPayoutEvent::Queued { kind, operation_id, mut transfer, .. } => {
+            transfer.operation_id = operation_id;
+            transfer.payout_kind = kind;
+            if matches!(kind, PendingPayoutKind::Margin | PendingPayoutKind::Excess) {
+                state.insert_pending_payout(transfer);
+            }
+        }
+        PendingPayoutEvent::DispatchBoundary {
+            operation_id, attempt_nonce, payout_kind, ledger, owner, amount_raw, start_index, ..
+        } => {
+            state.mutate_pending_payout(operation_id, |transfer| {
+                if transfer.rearm_schema_version != 1
+                    || transfer.op_nonce != attempt_nonce
+                    || payout_kind != Some(transfer.payout_kind)
+                    || transfer.ledger != Some(ledger)
+                    || transfer.owner != owner
+                    || transfer.transfer_amount_raw != Some(amount_raw)
+                    || transfer.history_start_index.is_some()
+                {
+                    return;
+                }
+                if let Some(index) = start_index {
+                    transfer.history_start_index = Some(index);
+                } else {
+                    transfer.rearm_schema_version = 0;
+                }
+            });
+        }
+        PendingPayoutEvent::TooOld { operation_id, attempt_nonce, owner, .. } => {
+            state.mutate_pending_payout(operation_id, |transfer| {
+                if transfer.op_nonce == attempt_nonce && transfer.owner == owner {
+                    transfer.in_flight = false;
+                    transfer.held_for_manual_retry = true;
+                    transfer.reconciliation_required = true;
+                    transfer.too_old_confirmed = true;
+                }
+            });
+        }
+        PendingPayoutEvent::Rearmed { operation_id, attempt_nonce, proof, .. } => {
+            let Some((_, mut transfer)) = state.get_pending_payout(operation_id) else {
+                return;
+            };
+            let Some(proof) = proof else {
+                // A historical rearm without its proof must never make an
+                // ambiguous payout retryable.
+                state.mutate_pending_payout(operation_id, |row| {
+                    row.in_flight = false;
+                    row.held_for_manual_retry = true;
+                    row.reconciliation_required = true;
+                });
+                return;
+            };
+            if transfer.rearm_schema_version != 1
+                || transfer.ledger != Some(proof.ledger)
+                || transfer.owner != proof.owner
+                || transfer.transfer_amount_raw != Some(proof.amount_raw)
+                || transfer.op_nonce != proof.old_attempt_nonce
+                || transfer.payout_kind != proof.payout_kind
+                || transfer.history_start_index != Some(proof.start_index)
+                || !transfer.held_for_manual_retry
+                || !transfer.reconciliation_required
+                || !transfer.too_old_confirmed
+                || transfer.in_flight
+                || transfer.no_effect_proof.is_some()
+                || transfer.retry_count >= crate::MAX_PENDING_RETRIES
+                || proof.operation_id != operation_id
+                || proof.new_attempt_nonce != attempt_nonce
+                || proof.new_attempt_nonce == proof.old_attempt_nonce
+                || proof.start_index > proof.snapshot_log_length
+                || !proof.complete_prefix
+            {
+                return;
+            }
+            transfer.op_nonce = attempt_nonce;
+            transfer.held_for_manual_retry = false;
+            transfer.reconciliation_required = false;
+            transfer.too_old_confirmed = false;
+            transfer.history_log_length = None;
+            transfer.history_cursor = 0;
+            transfer.history_scan = None;
+            transfer.history_candidate_seen = false;
+            transfer.history_start_index = None;
+            transfer.no_effect_proof = Some(proof);
+            state.mutate_pending_payout(operation_id, |row| *row = transfer);
+            state.op_nonce_counter = state
+                .op_nonce_counter
+                .max((attempt_nonce as u64).wrapping_add(1));
+        }
+    }
 }
 
+pub fn replay(events: impl Iterator<Item = Event>) -> Result<State, ReplayLogError> {
+    replay_with_pending_payout_events(events, std::iter::empty())
+}
+
+pub fn replay_with_pending_payout_events(
+    events: impl Iterator<Item = Event>,
+    payout_events: impl Iterator<Item = crate::storage::PendingPayoutJournalEntry>,
+) -> Result<State, ReplayLogError> {
+    replay_with_nonce_time_and_payout_events(events, payout_events, ic_cdk::api::time)
+}
+
+#[cfg(test)]
 fn replay_with_nonce_time(
+    events: impl Iterator<Item = Event>,
+    nonce_time: impl FnMut() -> u64,
+) -> Result<State, ReplayLogError> {
+    replay_with_nonce_time_and_payout_events(events, std::iter::empty(), nonce_time)
+}
+
+fn replay_with_nonce_time_and_payout_events(
     mut events: impl Iterator<Item = Event>,
+    payout_events: impl Iterator<Item = crate::storage::PendingPayoutJournalEntry>,
     mut nonce_time: impl FnMut() -> u64,
 ) -> Result<State, ReplayLogError> {
     let mut state = match events.next() {
@@ -1623,8 +1706,19 @@ fn replay_with_nonce_time(
         }
         None => return Err(ReplayLogError::EmptyLog),
     };
+    let mut payout_events = payout_events.peekable();
+    let mut public_event_count = 1u64;
     let mut vault_id = 0;
     for event in events {
+        while payout_events
+            .peek()
+            .is_some_and(|entry| entry.after_event_count <= public_event_count)
+        {
+            apply_pending_payout_event(
+                &mut state,
+                payout_events.next().expect("peeked payout event").event,
+            );
+        }
         match event {
             Event::OpenVault {
                 mut vault,
@@ -1835,92 +1929,6 @@ fn replay_with_nonce_time(
             Event::Init(_) => panic!("should have only one init event"),
             Event::Upgrade(upgrade_args) => {
                 state.upgrade(upgrade_args);
-            }
-            Event::PendingPayoutQueued { kind, operation_id, mut transfer, .. } => {
-                transfer.operation_id = operation_id;
-                transfer.payout_kind = kind;
-                match kind {
-                    PendingPayoutKind::Margin | PendingPayoutKind::Excess => state.insert_pending_payout(transfer),
-                    PendingPayoutKind::Redemption => {}
-                }
-            }
-            Event::PendingPayoutHistoryBoundary { operation_id, attempt_nonce, payout_kind, ledger, owner, amount_raw, start_index, .. } => {
-                state.mutate_pending_payout(operation_id, |transfer| {
-                    if transfer.rearm_schema_version != 1
-                        || transfer.op_nonce != attempt_nonce
-                        || payout_kind != Some(transfer.payout_kind)
-                        || transfer.ledger != Some(ledger)
-                        || transfer.owner != owner
-                        || transfer.transfer_amount_raw != Some(amount_raw)
-                        || transfer.history_start_index.is_some()
-                    {
-                        return;
-                    }
-                    if let Some(index) = start_index {
-                        transfer.history_start_index = Some(index);
-                    } else {
-                        transfer.rearm_schema_version = 0;
-                    }
-                });
-            }
-            Event::PendingPayoutTooOld { operation_id, attempt_nonce, owner, .. } => {
-                state.mutate_pending_payout(operation_id, |transfer| {
-                    if transfer.op_nonce == attempt_nonce && transfer.owner == owner {
-                        transfer.in_flight = false;
-                        transfer.held_for_manual_retry = true;
-                        transfer.reconciliation_required = true;
-                        transfer.too_old_confirmed = true;
-                    }
-                });
-            }
-            Event::PendingPayoutRearmed { operation_id, attempt_nonce, proof, .. } => {
-                if let Some((_, mut transfer)) = state.get_pending_payout(operation_id) {
-                    let Some(proof) = proof else {
-                        // Historical rearm events carried no proof. Replaying
-                        // them must never make an ambiguous payout retryable.
-                        state.mutate_pending_payout(operation_id, |row| {
-                            row.in_flight = false;
-                            row.held_for_manual_retry = true;
-                            row.reconciliation_required = true;
-                        });
-                        continue;
-                    };
-                    if transfer.rearm_schema_version != 1
-                        || transfer.ledger != Some(proof.ledger)
-                        || transfer.owner != proof.owner
-                        || transfer.transfer_amount_raw != Some(proof.amount_raw)
-                        || transfer.op_nonce != proof.old_attempt_nonce
-                        || transfer.payout_kind != proof.payout_kind
-                        || transfer.history_start_index != Some(proof.start_index)
-                        || !transfer.held_for_manual_retry
-                        || !transfer.reconciliation_required
-                        || !transfer.too_old_confirmed
-                        || transfer.in_flight
-                        || transfer.no_effect_proof.is_some()
-                        || transfer.retry_count >= crate::MAX_PENDING_RETRIES
-                        || proof.operation_id != operation_id
-                        || proof.new_attempt_nonce != attempt_nonce
-                        || proof.new_attempt_nonce == proof.old_attempt_nonce
-                        || proof.start_index > proof.snapshot_log_length
-                        || !proof.complete_prefix
-                    {
-                        continue;
-                    }
-                    transfer.op_nonce = attempt_nonce;
-                    transfer.held_for_manual_retry = false;
-                    transfer.reconciliation_required = false;
-                    transfer.too_old_confirmed = false;
-                    transfer.history_log_length = None;
-                    transfer.history_cursor = 0;
-                    transfer.history_scan = None;
-                    transfer.history_candidate_seen = false;
-                    transfer.history_start_index = None;
-                    transfer.no_effect_proof = Some(proof);
-                    state.mutate_pending_payout(operation_id, |row| *row = transfer);
-                    state.op_nonce_counter = state
-                        .op_nonce_counter
-                        .max((attempt_nonce as u64).wrapping_add(1));
-                }
             }
             Event::MarginTransfer { vault_id, operation_id, payout_kind, .. } => {
                 if let Some(operation_id) = operation_id {
@@ -2432,6 +2440,16 @@ fn replay_with_nonce_time(
             | Event::ChainLiquidationDeferred { .. }
             | Event::ChainHotWalletLow { .. } => {},
         }
+        public_event_count = public_event_count.saturating_add(1);
+    }
+    while let Some(entry) = payout_events.next() {
+        if entry.after_event_count > public_event_count {
+            return Err(ReplayLogError::InconsistentLog(format!(
+                "private payout event is anchored beyond the public event log: {} > {}",
+                entry.after_event_count, public_event_count
+            )));
+        }
+        apply_pending_payout_event(&mut state, entry.event);
     }
     state.next_available_vault_id = vault_id;
     Ok(state)
@@ -2561,7 +2579,7 @@ pub fn record_margin_transfer(
 pub fn record_pending_payout(state: &mut State, transfer: PendingMarginTransfer) {
     let mut transfer = transfer;
     transfer.rearm_schema_version = 1;
-    record_event(&Event::PendingPayoutQueued {
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::Queued {
         kind: transfer.payout_kind,
         operation_id: transfer.operation_id,
         transfer,
@@ -2592,7 +2610,7 @@ pub fn record_pending_payout_dispatch_boundary(
     {
         return false;
     }
-    record_event(&Event::PendingPayoutHistoryBoundary {
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::DispatchBoundary {
         operation_id,
         attempt_nonce,
         payout_kind: Some(transfer.payout_kind),
@@ -2623,7 +2641,7 @@ pub fn record_pending_payout_too_old(
     if transfer.op_nonce != attempt_nonce || !transfer.in_flight {
         return false;
     }
-    record_event(&Event::PendingPayoutTooOld {
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::TooOld {
         operation_id,
         attempt_nonce,
         owner: transfer.owner,
@@ -2674,7 +2692,7 @@ pub fn record_pending_payout_rearmed(
     {
         return false;
     }
-    record_event(&Event::PendingPayoutRearmed {
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::Rearmed {
         operation_id: proof.operation_id,
         attempt_nonce: proof.new_attempt_nonce,
         proof: Some(proof.clone()),
@@ -4007,8 +4025,17 @@ mod filter_tests {
         }
     }
 
-    fn replay_payout_events(events: Vec<Event>) -> State {
-        replay_with_nonce_time(events.into_iter(), || 2)
+    fn replay_payout_events(
+        events: Vec<Event>,
+        payout_events: Vec<PendingPayoutEvent>,
+    ) -> State {
+        let journal = payout_events.into_iter().map(|event| {
+            crate::storage::PendingPayoutJournalEntry {
+                after_event_count: 1,
+                event,
+            }
+        });
+        replay_with_nonce_time_and_payout_events(events.into_iter(), journal, || 2)
             .expect("payout replay fixture should be consistent")
     }
 
@@ -4144,53 +4171,6 @@ mod filter_tests {
     }
 
     #[test]
-    fn pending_payout_events_are_visible_in_time_and_principal_queries() {
-        let owner = caller_a();
-        let transfer = PendingMarginTransfer {
-            vault_id: 8,
-            operation_id: 91,
-            payout_kind: PendingPayoutKind::Margin,
-            owner,
-            margin: ICP::new(100),
-            collateral_type: icp_token(),
-            retry_count: 0,
-            op_nonce: 92,
-            ledger: None,
-            transfer_amount_raw: None,
-            held_for_manual_retry: true,
-            reconciliation_required: true,
-            in_flight: false,
-            too_old_confirmed: false,
-                history_start_index: None,
-                rearm_schema_version: 0,
-                history_scan: None,
-                history_candidate_seen: false,
-                no_effect_proof: None,
-            history_log_length: None,
-            history_cursor: 0,
-            min_net_collateral_raw: None,
-        };
-        let queued = Event::PendingPayoutQueued {
-            kind: PendingPayoutKind::Margin,
-            operation_id: 91,
-            transfer,
-            timestamp: Some(123),
-        };
-        assert_eq!(queued.timestamp_ns(), Some(123));
-        assert!(queued.involves_principal(&owner));
-
-        let rearmed = Event::PendingPayoutRearmed {
-            operation_id: 91,
-            attempt_nonce: 93,
-            proof: None,
-            timestamp: Some(124),
-            owner: Some(owner),
-        };
-        assert_eq!(rearmed.timestamp_ns(), Some(124));
-        assert!(rearmed.involves_principal(&owner));
-    }
-
-    #[test]
     fn replayed_rearm_requires_proof_and_preserves_retry_budget_and_operation_id() {
         let owner = p(30);
         let ledger = p(31);
@@ -4221,13 +4201,13 @@ mod filter_tests {
             history_cursor: 0,
             min_net_collateral_raw: None,
         };
-        let queued = Event::PendingPayoutQueued {
+        let queued = PendingPayoutEvent::Queued {
             kind: PendingPayoutKind::Margin,
             operation_id,
             transfer,
             timestamp: Some(1),
         };
-        let boundary = Event::PendingPayoutHistoryBoundary {
+        let boundary = PendingPayoutEvent::DispatchBoundary {
             operation_id,
             attempt_nonce: old_nonce,
             payout_kind: Some(PendingPayoutKind::Margin),
@@ -4237,7 +4217,7 @@ mod filter_tests {
             start_index: Some(10),
             timestamp: Some(2),
         };
-        let too_old = Event::PendingPayoutTooOld {
+        let too_old = PendingPayoutEvent::TooOld {
             operation_id,
             attempt_nonce: old_nonce,
             owner,
@@ -4256,20 +4236,17 @@ mod filter_tests {
             complete_prefix: true,
             verified_at_ns: 4,
         };
-        let rearmed = Event::PendingPayoutRearmed {
+        let rearmed = PendingPayoutEvent::Rearmed {
             operation_id,
             attempt_nonce: new_nonce,
             proof: Some(proof),
             timestamp: Some(4),
             owner: Some(owner),
         };
-        let state = replay_payout_events(vec![
-            Event::Init(payout_init_args(p(32))),
-            queued.clone(),
-            boundary.clone(),
-            too_old.clone(),
-            rearmed,
-        ]);
+        let state = replay_payout_events(
+            vec![Event::Init(payout_init_args(p(32)))],
+            vec![queued.clone(), boundary.clone(), too_old.clone(), rearmed],
+        );
         let (_, recovered) = state.get_pending_payout(operation_id).unwrap();
         assert_eq!(recovered.operation_id, operation_id);
         assert_eq!(recovered.op_nonce, new_nonce);
@@ -4278,20 +4255,17 @@ mod filter_tests {
         assert!(recovered.no_effect_proof.is_some());
         assert_eq!(recovered.history_start_index, None);
 
-        let unproved = Event::PendingPayoutRearmed {
+        let unproved = PendingPayoutEvent::Rearmed {
             operation_id,
             attempt_nonce: new_nonce,
             proof: None,
             timestamp: Some(4),
             owner: Some(owner),
         };
-        let held = replay_payout_events(vec![
-            Event::Init(payout_init_args(p(32))),
-            queued,
-            boundary,
-            too_old,
-            unproved,
-        ]);
+        let held = replay_payout_events(
+            vec![Event::Init(payout_init_args(p(32)))],
+            vec![queued, boundary, too_old, unproved],
+        );
         let (_, held_row) = held.get_pending_payout(operation_id).unwrap();
         assert_eq!(held_row.op_nonce, old_nonce);
         assert!(held_row.held_for_manual_retry);
@@ -4299,28 +4273,83 @@ mod filter_tests {
 
         let mut legacy_transfer = transfer;
         legacy_transfer.rearm_schema_version = 0;
-        let legacy_queued = Event::PendingPayoutQueued {
+        let legacy_queued = PendingPayoutEvent::Queued {
             kind: PendingPayoutKind::Margin,
             operation_id,
             transfer: legacy_transfer,
             timestamp: Some(1),
         };
-        let legacy_rearm = Event::PendingPayoutRearmed {
+        let legacy_rearm = PendingPayoutEvent::Rearmed {
             operation_id,
             attempt_nonce: new_nonce,
             proof: None,
             timestamp: Some(4),
             owner: Some(owner),
         };
-        let legacy = replay_payout_events(vec![
-            Event::Init(payout_init_args(p(32))),
-            legacy_queued,
-            legacy_rearm,
-        ]);
+        let legacy = replay_payout_events(
+            vec![Event::Init(payout_init_args(p(32)))],
+            vec![legacy_queued, legacy_rearm],
+        );
         let (_, legacy_row) = legacy.get_pending_payout(operation_id).unwrap();
         assert_eq!(legacy_row.op_nonce, old_nonce);
         assert!(legacy_row.held_for_manual_retry);
         assert!(legacy_row.reconciliation_required);
+    }
+
+    #[test]
+    fn private_payout_journal_is_interleaved_before_public_settlement() {
+        let owner = p(33);
+        let operation_id = 97;
+        let transfer = PendingMarginTransfer {
+            vault_id: 7,
+            operation_id,
+            payout_kind: PendingPayoutKind::Margin,
+            owner,
+            margin: ICP::new(100),
+            collateral_type: icp_token(),
+            retry_count: 0,
+            op_nonce: 92,
+            ledger: None,
+            transfer_amount_raw: None,
+            held_for_manual_retry: true,
+            reconciliation_required: true,
+            in_flight: false,
+            too_old_confirmed: false,
+            history_start_index: None,
+            rearm_schema_version: 0,
+            history_scan: None,
+            history_candidate_seen: false,
+            no_effect_proof: None,
+            history_log_length: None,
+            history_cursor: 0,
+            min_net_collateral_raw: None,
+        };
+        let state = replay_with_nonce_time_and_payout_events(
+            vec![
+                Event::Init(payout_init_args(p(32))),
+                Event::MarginTransfer {
+                    vault_id: 7,
+                    block_index: 12,
+                    operation_id: Some(operation_id),
+                    payout_kind: Some(PendingPayoutKind::Margin),
+                    timestamp: Some(3),
+                },
+            ]
+            .into_iter(),
+            vec![crate::storage::PendingPayoutJournalEntry {
+                after_event_count: 1,
+                event: PendingPayoutEvent::Queued {
+                    kind: PendingPayoutKind::Margin,
+                    operation_id,
+                    transfer,
+                    timestamp: Some(2),
+                },
+            }]
+            .into_iter(),
+            || 4,
+        )
+        .expect("interleaved payout journal should replay");
+        assert!(state.get_pending_payout(operation_id).is_none());
     }
 
     // ── collateral_token + vault lookup ───────────────────────────────────

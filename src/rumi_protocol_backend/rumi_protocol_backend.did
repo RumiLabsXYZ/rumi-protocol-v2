@@ -440,12 +440,6 @@ type Event = variant {
     timestamp : nat64;
     observed_balance : nat64;
   };
-  pending_payout_queued : record {
-    kind : PendingPayoutKind;
-    operation_id : nat;
-    timestamp : opt nat64;
-    transfer : PendingMarginTransfer;
-  };
   oracle_circuit_breaker : record {
     timestamp : nat64;
     consecutive_failures : nat64;
@@ -495,12 +489,6 @@ type Event = variant {
     recovery_borrowing_fee : opt text;
     collateral_type : principal;
   };
-  pending_payout_too_old : record {
-    owner : principal;
-    operation_id : nat;
-    timestamp : opt nat64;
-    attempt_nonce : nat;
-  };
   set_collateral_borrowing_fee : record {
     fee : opt text;
     rate : opt text;
@@ -537,16 +525,6 @@ type Event = variant {
     liquidation_bonus : text;
   };
   set_dust_liquidation_threshold : record { amount : text };
-  pending_payout_history_boundary : record {
-    payout_kind : opt PendingPayoutKind;
-    owner : principal;
-    operation_id : nat;
-    amount_raw : nat64;
-    ledger : principal;
-    timestamp : opt nat64;
-    attempt_nonce : nat;
-    start_index : opt nat64;
-  };
   set_amm1_pool_id : record { pool_id : text };
   set_global_icusd_mint_cap : record { cap : opt text; amount : opt text };
   upgrade : UpgradeArg;
@@ -826,13 +804,6 @@ type Event = variant {
     token_type : StableTokenType;
   };
   set_recovery_cr_multiplier : record { multiplier : text };
-  pending_payout_rearmed : record {
-    owner : opt principal;
-    operation_id : nat;
-    timestamp : opt nat64;
-    attempt_nonce : nat;
-    proof : opt PendingPayoutNoEffectProof;
-  };
 };
 type EventTimeRange = record { start_ns : nat64; end_ns : nat64 };
 type EventTypeFilter = variant {
@@ -963,55 +934,7 @@ type PendingLiquidationV1 = record {
   debt_to_clear_e8s : nat;
   collateral_reserved_native : nat;
 };
-type PendingMarginTransfer = record {
-  too_old_confirmed : bool;
-  payout_kind : PendingPayoutKind;
-  no_effect_proof : opt PendingPayoutNoEffectProof;
-  history_log_length : opt nat64;
-  owner : principal;
-  history_scan : opt PendingPayoutHistoryScan;
-  retry_count : nat8;
-  transfer_amount_raw : opt nat64;
-  history_start_index : opt nat64;
-  operation_id : nat;
-  vault_id : nat64;
-  rearm_schema_version : nat8;
-  reconciliation_required : bool;
-  ledger : opt principal;
-  history_candidate_seen : bool;
-  op_nonce : nat;
-  history_cursor : nat64;
-  margin : nat64;
-  in_flight : bool;
-  collateral_type : principal;
-  min_net_collateral_raw : opt nat64;
-  held_for_manual_retry : bool;
-};
-type PendingPayoutHistoryScan = record {
-  payout_kind : PendingPayoutKind;
-  owner : principal;
-  next_index : nat64;
-  operation_id : nat;
-  snapshot_log_length : nat64;
-  amount_raw : nat64;
-  ledger : principal;
-  attempt_nonce : nat;
-  start_index : nat64;
-};
 type PendingPayoutKind = variant { Margin; Redemption; Excess };
-type PendingPayoutNoEffectProof = record {
-  old_attempt_nonce : nat;
-  payout_kind : PendingPayoutKind;
-  new_attempt_nonce : nat;
-  owner : principal;
-  operation_id : nat;
-  snapshot_log_length : nat64;
-  verified_at_ns : nat64;
-  amount_raw : nat64;
-  ledger : principal;
-  complete_prefix : bool;
-  start_index : nat64;
-};
 type PendingPayoutPage = record {
   next_cursor : opt nat;
   items : vec PendingPayoutView;
