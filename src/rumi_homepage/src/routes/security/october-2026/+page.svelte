@@ -2,7 +2,7 @@
   const report = {
     date: 'October 8, 2026',
     datetime: '2026-10-08',
-    source: 'origin/main at 50245136d8c2',
+    source: 'origin/main at 8b4951d97576',
     snapshot: 'Mainnet readback · October 8, 2026'
   };
 
@@ -69,6 +69,14 @@
       state: 'Merged · backend not installed',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/460'
+    },
+    {
+      pr: '#468',
+      title: 'Backend release compatibility',
+      summary: 'The backend compatibility change is merged into main. The live backend still reports its earlier module hash shown above; no installation is claimed here.',
+      state: 'Merged · backend not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/468'
     }
   ];
 
@@ -250,9 +258,12 @@
   .page-foot { display: flex; justify-content: space-between; gap: 1rem; padding-block: 1.2rem 2rem; color: var(--report-muted); font-size: .75rem; }
   a:focus-visible { outline: 2px solid var(--rumi-teal-bright); outline-offset: 4px; border-radius: 2px; }
   @media (max-width: 760px) {
-    .page-width { width: min(100% - 2rem, 610px); }
+    :global(.top-bar) { box-sizing: border-box; min-width: 0; }
+    .page-width { box-sizing: border-box; width: calc(100% - 2rem); max-width: 610px; }
     .hero-grid, .limits-inner { grid-template-columns: 1fr; gap: 1.75rem; }
-    .report-stamp { max-width: 480px; }
+    .hero-grid > *, .limits-inner > * { min-width: 0; }
+    .report-stamp { box-sizing: border-box; width: 100%; max-width: 480px; overflow-wrap: anywhere; }
+    .lede, .report-stamp p, .report-stamp strong { overflow-wrap: anywhere; }
     .rule-caption { flex-direction: column; gap: .3rem; }
     .state-key { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .change-row { grid-template-columns: 72px minmax(0, 1fr); gap: .9rem; }
