@@ -20,6 +20,31 @@ pub struct SwapResult {
     pub effective_price_e8s: u64,
 }
 
+/// Whether a swap failure proves the deposit call was never dispatched.
+/// Everything reported by `depositFromAndSwap` itself is outcome-ambiguous.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SwapAttemptError {
+    NoEffect(String),
+    Ambiguous(String),
+}
+
+impl std::fmt::Display for SwapAttemptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoEffect(message) => write!(f, "{message}"),
+            Self::Ambiguous(message) => write!(f, "swap outcome is ambiguous: {message}"),
+        }
+    }
+}
+
+fn classify_deposit_dispatch_error(error: icpswap::DepositAndSwapError) -> SwapAttemptError {
+    SwapAttemptError::Ambiguous(error.to_string())
+}
+
+pub(crate) fn swap_error_allows_return(error: &SwapAttemptError) -> bool {
+    matches!(error, SwapAttemptError::NoEffect(_))
+}
+
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub struct TransferReceipt {
     pub block_index: u64,
@@ -114,17 +139,24 @@ pub async fn quote_icp_for_ckusdc(config: &BotConfig, icp_amount_e8s: u64) -> Re
 pub async fn swap_icp_for_ckusdc(
     config: &BotConfig,
     icp_amount_e8s: u64,
-) -> Result<SwapResult, String> {
-    require_icpswap_pool_set(config)?;
+) -> Result<SwapResult, SwapAttemptError> {
+    require_icpswap_pool_set(config).map_err(SwapAttemptError::NoEffect)?;
     let zero_for_one = config
         .icpswap_zero_for_one
-        .ok_or("Pool ordering not configured. Call admin_resolve_pool_ordering first.")?;
+        .ok_or_else(|| {
+            SwapAttemptError::NoEffect(
+                "Pool ordering not configured. Call admin_resolve_pool_ordering first.".into(),
+            )
+        })?;
 
-    let quoted_output =
-        icpswap::quote(config.icpswap_pool, icp_amount_e8s, zero_for_one).await?;
+    let quoted_output = icpswap::quote(config.icpswap_pool, icp_amount_e8s, zero_for_one)
+        .await
+        .map_err(SwapAttemptError::NoEffect)?;
 
     if quoted_output == 0 {
-        return Err("Quote returned zero output".to_string());
+        return Err(SwapAttemptError::NoEffect(
+            "Quote returned zero output".to_string(),
+        ));
     }
 
     let min_output = apply_slippage(quoted_output, config.max_slippage_bps);
@@ -148,7 +180,8 @@ pub async fn swap_icp_for_ckusdc(
         icp_fee,
         ckusdc_fee,
     )
-    .await?;
+    .await
+    .map_err(classify_deposit_dispatch_error)?;
 
     // Effective price in e8 format: (ckusdc_e6 / icp_e8s) * 1e8
     // = ckusdc_e6 * 1e2 * 1e8 / icp_e8s = ckusdc_e6 * 10_000_000_000 / icp_e8s
@@ -409,6 +442,32 @@ pub async fn transfer_icp_to_treasury(
 #[cfg(test)]
 mod return_transfer_tests {
     use super::*;
+
+    #[test]
+    fn deposit_application_err_is_ambiguous_and_never_unwinds_claim() {
+        let error = classify_deposit_dispatch_error(icpswap::DepositAndSwapError::Application(
+            "InsufficientFunds".into(),
+        ));
+        assert!(matches!(error, SwapAttemptError::Ambiguous(_)));
+        assert!(!swap_error_allows_return(&error));
+    }
+
+    #[test]
+    fn commit_then_call_reject_is_ambiguous_and_never_unwinds_claim() {
+        let error = classify_deposit_dispatch_error(icpswap::DepositAndSwapError::CallRejected(
+            "SysTransient after callee execution".into(),
+        ));
+        assert!(matches!(error, SwapAttemptError::Ambiguous(_)));
+        assert!(!swap_error_allows_return(&error));
+    }
+
+    #[test]
+    fn pre_deposit_errors_are_definitive_and_may_use_gross_return_path() {
+        let error = SwapAttemptError::NoEffect("quote returned zero output".into());
+        assert!(swap_error_allows_return(&error));
+        let error = SwapAttemptError::NoEffect("pool not configured".into());
+        assert!(swap_error_allows_return(&error));
+    }
 
     #[test]
     fn return_transfer_fee_keeps_new_and_legacy_wire_identities_distinct() {
