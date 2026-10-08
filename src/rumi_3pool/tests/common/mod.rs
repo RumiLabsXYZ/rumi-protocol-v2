@@ -182,6 +182,15 @@ pub fn deploy_pool_with_liquidity_fee_and_swaps(
     n_swaps: u64,
     transfer_fee: u128,
 ) -> ThreePoolHarness {
+    deploy_pool_with_liquidity_fee_and_swaps_with_wasm(n_swaps, transfer_fee, three_pool_wasm())
+}
+
+/// Same harness setup with a caller-provided 3pool Wasm, for upgrade tests.
+pub fn deploy_pool_with_liquidity_fee_and_swaps_with_wasm(
+    n_swaps: u64,
+    transfer_fee: u128,
+    pool_wasm: Vec<u8>,
+) -> ThreePoolHarness {
     let pic = PocketIcBuilder::new().with_application_subnet().build();
 
     let minting_account = Principal::self_authenticating(&[100, 100, 100]);
@@ -282,7 +291,7 @@ pub fn deploy_pool_with_liquidity_fee_and_swaps(
     pic.add_cycles(pool_id, 2_000_000_000_000);
     pic.install_canister(
         pool_id,
-        three_pool_wasm(),
+        pool_wasm,
         encode_one(pool_init_args).unwrap(),
         None,
     );

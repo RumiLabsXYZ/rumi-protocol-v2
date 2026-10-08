@@ -15,11 +15,17 @@ mod common;
 use candid::{decode_one, encode_args, encode_one, Nat, Principal};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
+use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
+use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use pocket_ic::WasmResult;
+use rumi_3pool::icrc_token::PERMITTED_DRIFT_NS;
 use rumi_3pool::types::*;
+use sha2::{Digest, Sha256};
 
-use common::{deploy_pool_with_liquidity_and_swaps, deploy_pool_with_liquidity_fee_and_swaps,
-             ThreePoolHarness};
+use common::{
+    deploy_pool_with_liquidity_and_swaps, deploy_pool_with_liquidity_fee_and_swaps,
+    ThreePoolHarness,
+};
 
 const LEDGER_FEE: u128 = 10_000;
 
@@ -316,7 +322,10 @@ fn icrc_001_e2e_dedup_on_3usd_token() {
     // Identical resubmission within the window is a Duplicate of that block.
     match lp_transfer(&h, recipient, 1_000, Some(vec![1]), Some(now)) {
         Err(TransferError::Duplicate { duplicate_of }) => {
-            assert_eq!(duplicate_of, block, "duplicate_of must be the original block index");
+            assert_eq!(
+                duplicate_of, block,
+                "duplicate_of must be the original block index"
+            );
         }
         other => panic!("identical resubmission must be Duplicate, got {other:?}"),
     }
@@ -348,4 +357,311 @@ fn icrc_001_e2e_dedup_on_3usd_token() {
     // None created_at_time keeps the legacy behavior: identical sends all pass.
     lp_transfer(&h, recipient, 1_000, Some(vec![5]), None).expect("first None-cat transfer");
     lp_transfer(&h, recipient, 1_000, Some(vec![5]), None).expect("second None-cat transfer");
+}
+
+#[test]
+fn icrc_001_dedup_survives_upgrade_for_icrc1_and_icrc2() {
+    let h = deploy_pool_with_liquidity_and_swaps(0);
+    let spender = Principal::self_authenticating(&[8, 8, 8]);
+    let recipient = Principal::self_authenticating(&[7, 7, 7]);
+    let now = pic_now_ns(&h);
+
+    let approve_args = ApproveArgs {
+        from_subaccount: None,
+        spender: Account {
+            owner: spender,
+            subaccount: None,
+        },
+        amount: Nat::from(20_000u64),
+        expected_allowance: None,
+        expires_at: None,
+        fee: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo(
+            serde_bytes::ByteBuf::from(vec![10]),
+        )),
+        created_at_time: Some(now),
+    };
+    let approve = h
+        .pic
+        .update_call(
+            h.three_pool,
+            h.user,
+            "icrc2_approve",
+            encode_one(approve_args.clone()).unwrap(),
+        )
+        .expect("icrc2_approve call failed");
+    let approve_block: Result<Nat, ApproveError> = decode_one(&reply_bytes(approve)).unwrap();
+    let approve_block = approve_block.expect("first approve must succeed");
+
+    let transfer_from_args = TransferFromArgs {
+        spender_subaccount: None,
+        from: Account {
+            owner: h.user,
+            subaccount: None,
+        },
+        to: Account {
+            owner: recipient,
+            subaccount: None,
+        },
+        amount: Nat::from(1_000u64),
+        fee: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo(
+            serde_bytes::ByteBuf::from(vec![11]),
+        )),
+        created_at_time: Some(now + 1),
+    };
+    let transfer_from = h
+        .pic
+        .update_call(
+            h.three_pool,
+            spender,
+            "icrc2_transfer_from",
+            encode_one(transfer_from_args.clone()).unwrap(),
+        )
+        .expect("icrc2_transfer_from call failed");
+    let transfer_from_block: Result<Nat, TransferFromError> =
+        decode_one(&reply_bytes(transfer_from)).unwrap();
+    let transfer_from_block = transfer_from_block.expect("first transfer_from must succeed");
+
+    let icrc1_args = TransferArg {
+        from_subaccount: None,
+        to: Account {
+            owner: recipient,
+            subaccount: None,
+        },
+        amount: Nat::from(1_000u64),
+        fee: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo(
+            serde_bytes::ByteBuf::from(vec![12]),
+        )),
+        created_at_time: Some(now + 2),
+    };
+    let icrc1 = h
+        .pic
+        .update_call(
+            h.three_pool,
+            h.user,
+            "icrc1_transfer",
+            encode_one(icrc1_args.clone()).unwrap(),
+        )
+        .expect("icrc1_transfer call failed");
+    let icrc1_block: Result<Nat, TransferError> = decode_one(&reply_bytes(icrc1)).unwrap();
+    let icrc1_block = icrc1_block.expect("first icrc1 transfer must succeed");
+
+    h.pic
+        .upgrade_canister(
+            h.three_pool,
+            common::three_pool_wasm(),
+            encode_args(()).unwrap(),
+            None,
+        )
+        .expect("3pool upgrade failed");
+
+    let approve = h
+        .pic
+        .update_call(
+            h.three_pool,
+            h.user,
+            "icrc2_approve",
+            encode_one(approve_args).unwrap(),
+        )
+        .expect("icrc2_approve retry call failed");
+    let approve_retry: Result<Nat, ApproveError> = decode_one(&reply_bytes(approve)).unwrap();
+    assert_eq!(
+        approve_retry,
+        Err(ApproveError::Duplicate {
+            duplicate_of: approve_block
+        }),
+        "approve duplicate must preserve its original block across upgrade",
+    );
+
+    let transfer_from = h
+        .pic
+        .update_call(
+            h.three_pool,
+            spender,
+            "icrc2_transfer_from",
+            encode_one(transfer_from_args).unwrap(),
+        )
+        .expect("icrc2_transfer_from retry call failed");
+    let transfer_from_retry: Result<Nat, TransferFromError> =
+        decode_one(&reply_bytes(transfer_from)).unwrap();
+    assert_eq!(
+        transfer_from_retry,
+        Err(TransferFromError::Duplicate {
+            duplicate_of: transfer_from_block
+        }),
+        "transfer_from duplicate must preserve its original block across upgrade",
+    );
+
+    let icrc1 = h
+        .pic
+        .update_call(
+            h.three_pool,
+            h.user,
+            "icrc1_transfer",
+            encode_one(icrc1_args).unwrap(),
+        )
+        .expect("icrc1_transfer retry call failed");
+    let icrc1_retry: Result<Nat, TransferError> = decode_one(&reply_bytes(icrc1)).unwrap();
+    assert_eq!(
+        icrc1_retry,
+        Err(TransferError::Duplicate {
+            duplicate_of: icrc1_block
+        }),
+        "icrc1 duplicate must preserve its original block across upgrade",
+    );
+}
+
+#[test]
+#[ignore = "requires RUMI_P08_07_LEGACY_WASM_PATH pointing to the verified f33 Wasm"]
+fn icrc_001_legacy_heap_dedup_is_fenced_on_first_upgrade() {
+    const LEGACY_WASM_SHA256: &str =
+        "f02b8a7ff26b004c2cd4aa9772bbd5077f851bccc23efe7ef4f8e320e8f45d31";
+    let legacy_path = std::env::var("RUMI_P08_07_LEGACY_WASM_PATH")
+        .expect("set RUMI_P08_07_LEGACY_WASM_PATH to the verified f33 3pool Wasm");
+    let legacy_wasm = std::fs::read(legacy_path).expect("read verified f33 3pool Wasm");
+    let actual_sha256 = format!("{:x}", Sha256::digest(&legacy_wasm));
+    assert_eq!(actual_sha256, LEGACY_WASM_SHA256, "unexpected legacy Wasm");
+
+    let h = common::deploy_pool_with_liquidity_fee_and_swaps_with_wasm(0, 0, legacy_wasm);
+    let recipient = Principal::self_authenticating(&[7, 7, 7]);
+    let old_cat = pic_now_ns(&h);
+    let old_args = TransferArg {
+        from_subaccount: None,
+        to: Account {
+            owner: recipient,
+            subaccount: None,
+        },
+        amount: Nat::from(1_000u64),
+        fee: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo(
+            serde_bytes::ByteBuf::from(vec![41]),
+        )),
+        created_at_time: Some(old_cat),
+    };
+    let first = h
+        .pic
+        .update_call(
+            h.three_pool,
+            h.user,
+            "icrc1_transfer",
+            encode_one(old_args.clone()).unwrap(),
+        )
+        .expect("legacy transfer call failed");
+    let old_block: Result<Nat, TransferError> = decode_one(&reply_bytes(first)).unwrap();
+    old_block.expect("legacy timestamped transfer should succeed before upgrade");
+
+    let pre_upgrade_time = pic_now_ns(&h);
+    h.pic.set_time(
+        std::time::UNIX_EPOCH + std::time::Duration::from_nanos(pre_upgrade_time + 1),
+    );
+    h.pic
+        .upgrade_canister(
+            h.three_pool,
+            common::three_pool_wasm(),
+            encode_args(()).unwrap(),
+            None,
+        )
+        .expect("first upgrade from heap-only dedup implementation failed");
+
+    let post_upgrade_time = pic_now_ns(&h);
+    let legacy_cat_cutoff = post_upgrade_time + PERMITTED_DRIFT_NS;
+    let balance_before_replay = lp_balance(&h, h.user);
+    let blocks_before_replay = h.icrc3_log_length();
+    let replay = h
+        .pic
+        .update_call(
+            h.three_pool,
+            h.user,
+            "icrc1_transfer",
+            encode_one(old_args).unwrap(),
+        )
+        .expect("legacy replay call failed");
+    let replay: Result<Nat, TransferError> = decode_one(&reply_bytes(replay)).unwrap();
+    assert_eq!(replay, Err(TransferError::TemporarilyUnavailable));
+    assert_eq!(lp_balance(&h, h.user), balance_before_replay);
+    assert_eq!(h.icrc3_log_length(), blocks_before_replay);
+
+    // A request above the one-time legacy CAT cutoff is valid after the
+    // canister clock advances by 2ns, and is durably deduplicated thereafter.
+    h.pic.set_time(
+        std::time::UNIX_EPOCH + std::time::Duration::from_nanos(post_upgrade_time + 2),
+    );
+    let new_cat = legacy_cat_cutoff + 1;
+    let new_args = TransferArg {
+        from_subaccount: None,
+        to: Account {
+            owner: recipient,
+            subaccount: None,
+        },
+        amount: Nat::from(2_000u64),
+        fee: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo(
+            serde_bytes::ByteBuf::from(vec![42]),
+        )),
+        created_at_time: Some(new_cat),
+    };
+    let new_transfer = h
+        .pic
+        .update_call(
+            h.three_pool,
+            h.user,
+            "icrc1_transfer",
+            encode_one(new_args.clone()).unwrap(),
+        )
+        .expect("new CAT transfer call failed");
+    let new_block: Result<Nat, TransferError> = decode_one(&reply_bytes(new_transfer)).unwrap();
+    let new_block = new_block.expect("new CAT above the legacy cutoff should succeed");
+
+    h.pic
+        .upgrade_canister(
+            h.three_pool,
+            common::three_pool_wasm(),
+            encode_args(()).unwrap(),
+            None,
+        )
+        .expect("second upgrade failed");
+    let new_retry = h
+        .pic
+        .update_call(
+            h.three_pool,
+            h.user,
+            "icrc1_transfer",
+            encode_one(new_args).unwrap(),
+        )
+        .expect("new transfer retry call failed");
+    let new_retry: Result<Nat, TransferError> = decode_one(&reply_bytes(new_retry)).unwrap();
+    assert_eq!(
+        new_retry,
+        Err(TransferError::Duplicate {
+            duplicate_of: new_block
+        })
+    );
+
+    let legacy_retry = h
+        .pic
+        .update_call(
+            h.three_pool,
+            h.user,
+            "icrc1_transfer",
+            encode_one(TransferArg {
+                created_at_time: Some(old_cat),
+                memo: Some(icrc_ledger_types::icrc1::transfer::Memo(
+                    serde_bytes::ByteBuf::from(vec![41]),
+                )),
+                from_subaccount: None,
+                to: Account {
+                    owner: recipient,
+                    subaccount: None,
+                },
+                amount: Nat::from(1_000u64),
+                fee: None,
+            })
+            .unwrap(),
+        )
+        .expect("legacy retry call after second upgrade failed");
+    let legacy_retry: Result<Nat, TransferError> =
+        decode_one(&reply_bytes(legacy_retry)).unwrap();
+    assert_eq!(legacy_retry, Err(TransferError::TemporarilyUnavailable));
 }

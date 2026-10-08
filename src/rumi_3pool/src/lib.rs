@@ -44,17 +44,24 @@ fn init(args: ThreePoolInitArgs) {
         ic_cdk::api::stable::stable64_size() == 0,
         "refusing to init: stable memory non-empty; use upgrade mode not reinstall"
     );
+    storage::dedup::mark_fresh_install();
     mutate_state(|s| s.initialize(args));
     setup_timers();
-    log!(INFO, "Rumi 3pool initialized. Admin: {}, A: {}, swap_fee: {} bps",
+    log!(
+        INFO,
+        "Rumi 3pool initialized. Admin: {}, A: {}, swap_fee: {} bps",
         read_state(|s| s.config.admin),
         read_state(|s| s.config.initial_a),
-        read_state(|s| s.config.swap_fee_bps));
+        read_state(|s| s.config.swap_fee_bps)
+    );
 }
 
 #[pre_upgrade]
 fn pre_upgrade() {
-    log!(INFO, "Rumi 3pool pre-upgrade: flushing SlimState to stable cell");
+    log!(
+        INFO,
+        "Rumi 3pool pre-upgrade: flushing SlimState to stable cell"
+    );
     let slim = state::snapshot_slim();
     storage::set_slim(slim);
 }
@@ -85,6 +92,15 @@ fn post_upgrade() {
     // already ran on a previous upgrade. If it has, the legacy bytes (if
     // any) are stale and we discard them.
     let already_drained = storage::get_slim().storage_migrated;
+
+    // Existing deployments have no marker because the previous dedup index
+    // lived only in heap. Install the conservative first-upgrade CAT fence
+    // before accepting updates; fresh installs mark themselves in `init`.
+    storage::dedup::install_legacy_fence_if_needed(
+        ic_cdk::api::time(),
+        icrc_token::TRANSACTION_WINDOW_NS,
+        icrc_token::PERMITTED_DRIFT_NS,
+    );
 
     match legacy {
         Some(legacy_state) if !already_drained => {
