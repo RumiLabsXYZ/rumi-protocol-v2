@@ -44,6 +44,24 @@ pub(crate) fn ensure_pool_balance_mutation_allowed() -> Result<(), StabilityPool
     Ok(())
 }
 
+fn cache_virtual_price(
+    state: &mut state::StabilityPoolState,
+    lp_ledger: Principal,
+    virtual_price: u128,
+) {
+    let cache = state
+        .cached_virtual_prices
+        .get_or_insert_with(BTreeMap::new);
+    if virtual_price == 0 {
+        // Zero is the 3pool's legacy sentinel for an unavailable VP. Remove
+        // any older value so collateral accounting fails closed until a
+        // valid price is fetched again.
+        cache.remove(&lp_ledger);
+    } else {
+        cache.insert(lp_ledger, virtual_price);
+    }
+}
+
 /// A pending absorb only apportions the exact stablecoin ledgers captured in
 /// its durable intent. Unrelated-token deposits and withdrawals remain safe;
 /// live liquidation and any intersecting ledger stay globally serialized.
@@ -313,10 +331,15 @@ async fn fetch_virtual_prices() {
         match result {
             Ok((status,)) => {
                 mutate_state(|s| {
-                    s.cached_virtual_prices
-                        .get_or_insert_with(BTreeMap::new)
-                        .insert(lp_ledger, status.virtual_price);
+                    cache_virtual_price(s, lp_ledger, status.virtual_price);
                 });
+                if status.virtual_price == 0 {
+                    log!(
+                        INFO,
+                        "Rejected zero virtual price from {}; cache invalidated",
+                        pool_canister
+                    );
+                }
             }
             Err(e) => {
                 log!(
@@ -1492,6 +1515,21 @@ mod tests {
 
     fn principal(byte: u8) -> Principal {
         Principal::from_slice(&[byte])
+    }
+
+    #[test]
+    fn zero_virtual_price_invalidates_cached_pool_value() {
+        let lp_ledger = principal(31);
+        let mut state = state::StabilityPoolState::default();
+
+        cache_virtual_price(&mut state, lp_ledger, 1_000_000_000_000_000_000);
+        assert_eq!(
+            state.virtual_prices().get(&lp_ledger),
+            Some(&1_000_000_000_000_000_000)
+        );
+
+        cache_virtual_price(&mut state, lp_ledger, 0);
+        assert_eq!(state.virtual_prices().get(&lp_ledger), None);
     }
 
     fn pending_intent() -> ChainSpAbsorbIntent {

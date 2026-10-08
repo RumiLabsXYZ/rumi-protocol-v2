@@ -51,6 +51,7 @@ pub fn get_d(xp: &[U256; 3], amp: u64) -> Option<U256> {
     let ann = U256::from(amp) * N_COINS_U256; // A * n
 
     let mut d = s;
+    let mut d_two_ago = None;
     for _ in 0..MAX_ITERATIONS {
         // D_P = D^(n+1) / (n^n * prod(xp))
         // Computed iteratively: D_P = D, then for each x: D_P = D_P * D / (x * N_COINS)
@@ -75,6 +76,17 @@ pub fn get_d(xp: &[U256; 3], amp: u64) -> Option<U256> {
         if diff <= U256::ONE {
             return Some(d);
         }
+
+        // Integer division can make Newton's method alternate between two
+        // fixed-point values without satisfying the one-unit successive-
+        // iteration check. Only accept an exact two-step recurrence; a
+        // near-recurrence may still be part of a longer integer cycle.
+        if let Some(older_d) = d_two_ago {
+            if d == older_d {
+                return Some(if d > d_prev { d } else { d_prev });
+            }
+        }
+        d_two_ago = Some(d_prev);
     }
 
     None // Did not converge
@@ -382,6 +394,36 @@ mod tests {
                 amp
             );
         }
+    }
+
+    #[test]
+    fn get_d_converges_for_reported_extreme_imbalance() {
+        let precision_muls = [10_000_000_000u64, 1_000_000_000_000, 1_000_000_000_000];
+        let balances = [
+            100_000_000_000_000_000_000u128,
+            1_000_000_000_000,
+            1_000_000_000_000,
+        ];
+        let xp = normalize_all(&balances, &precision_muls);
+
+        let d = get_d(&xp, 500)
+            .expect("get_d should resolve the reported 1e6:1 imbalance instead of failing on integer oscillation");
+        assert_eq!(
+            d,
+            U256::from(14_135_764_195_319_664_718_085_964_038u128),
+            "an exact two-cycle returns its larger endpoint"
+        );
+        assert!(d > U256::ZERO, "the imbalanced pool still has a positive invariant");
+        assert!(d <= xp[0] + xp[1] + xp[2], "D cannot exceed the reserve sum");
+    }
+
+    #[test]
+    fn get_d_fails_closed_on_long_integer_cycle_near_recurrence() {
+        // This input reaches D[n] = D[n - 2] - 1 with successive iterations
+        // still moving, then enters a longer cycle. It must not be mistaken
+        // for the exact two-cycle handled above.
+        let xp = [U256::from(1_000u64), U256::from(1_000_000_000_000u64), U256::from(3u64)];
+        assert_eq!(get_d(&xp, 1), None);
     }
 
     // ─── Task 7 tests: get_y, get_y_d ───
