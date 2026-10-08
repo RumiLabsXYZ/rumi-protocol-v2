@@ -787,14 +787,14 @@ fn test_interest_v2_duplicate_receipt_is_idempotent_across_upgrade() {
     assert_eq!(event_count_after_upgrade, event_count_after);
 }
 
-/// The immediate parent predates `pending_three_usd_absorbs`, so it cannot
+/// The pre-P08 source at 9d5f359e predates `pending_three_usd_absorbs`, so it cannot
 /// produce a pending 3USD absorb. This checks populated predecessor deposits
 /// and post-upgrade receipt functionality without fabricating that journal.
 #[test]
-#[ignore = "requires the Stability Pool Wasm built from immediate parent 9d5f359e"]
+#[ignore = "requires the pre-P08 Stability Pool Wasm built from source 9d5f359e"]
 fn p08_upgrade_preserves_parent_populated_deposit_state() {
-    let parent_path = std::env::var("RUMI_P08_PARENT_STABILITY_POOL_WASM")
-        .expect("set RUMI_P08_PARENT_STABILITY_POOL_WASM to the 9d5f359e SP Wasm");
+    let parent_path = std::env::var("RUMI_P08_PRE_P08_STABILITY_POOL_WASM")
+        .expect("set RUMI_P08_PRE_P08_STABILITY_POOL_WASM to source-9d5f359e SP Wasm");
     let parent_wasm = std::fs::read(parent_path).expect("read parent Stability Pool Wasm");
     let parent_sha256 = format!("{:x}", Sha256::digest(&parent_wasm));
     assert_eq!(parent_sha256, "efad428d54d7989be2577940b91b85b533cd99c6a27f1bcb3fa22bc39712c482",

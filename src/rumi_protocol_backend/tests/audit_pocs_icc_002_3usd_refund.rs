@@ -1524,14 +1524,14 @@ fn icc_002_pic_refund_failure_enqueues_durable_retry_and_heals() {
     );
 }
 
-/// A refund row live in the 9d5f359e parent keeps its legacy hashed-reserve
-/// source and exact retry identity when upgraded to P08. Set
-/// `RUMI_P08_PARENT_BACKEND_WASM` to the pinned parent-built artifact.
+/// A refund row created with the pre-P08 backend source at 9d5f359e keeps its
+/// legacy hashed-reserve source and exact retry identity when upgraded to P08.
+/// Set `RUMI_P08_PRE_P08_BACKEND_WASM` to that pinned source-built artifact.
 #[test]
-#[ignore = "requires the backend Wasm built from immediate parent 9d5f359e"]
+#[ignore = "requires the pre-P08 backend Wasm built from source 9d5f359e"]
 fn p08_upgrade_preserves_parent_legacy_refund_identity_and_recovers() {
-    let parent_path = std::env::var("RUMI_P08_PARENT_BACKEND_WASM")
-        .expect("set RUMI_P08_PARENT_BACKEND_WASM to the 9d5f359e backend Wasm");
+    let parent_path = std::env::var("RUMI_P08_PRE_P08_BACKEND_WASM")
+        .expect("set RUMI_P08_PRE_P08_BACKEND_WASM to the source-9d5f359e backend Wasm");
     let parent_wasm = std::fs::read(parent_path).expect("read parent backend Wasm");
     let parent_sha256 = format!("{:x}", Sha256::digest(&parent_wasm));
     assert_eq!(parent_sha256, "1d5f9a5b7980ceab1f2ecc19bfc3ce8900b33efd0428d5bc3e11b6affc9519eb",
@@ -1570,6 +1570,10 @@ fn p08_upgrade_preserves_parent_legacy_refund_identity_and_recovers() {
     });
     f.pic.upgrade_canister(f.protocol_id, protocol_wasm(), encode_args((upgrade,)).unwrap(), None)
         .expect("upgrade parent backend to P08");
+
+    // Run the zero-delay post-upgrade timer explicitly before checking that it
+    // made exactly one retry against the still-failing ledger.
+    f.pic.tick();
 
     let after = get_pending_3usd_refunds(&f.pic, f.protocol_id);
     assert_eq!(after.len(), 1, "P08 must retain the pending refund");
