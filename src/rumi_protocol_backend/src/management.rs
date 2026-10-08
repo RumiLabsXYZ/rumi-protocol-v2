@@ -1663,7 +1663,9 @@ pub async fn get_ledger_fee(ledger: Principal) -> Result<u64, String> {
         ledger_canister_id: ledger,
     };
     let fee = client.fee().await.map_err(|e| format!("icrc1_fee call failed: {:?}", e))?;
-    Ok(fee.0.to_u64().unwrap_or(0))
+    fee.0
+        .to_u64()
+        .ok_or_else(|| "icrc1_fee does not fit in u64".to_string())
 }
 
 /// Generic collateral transfer: move tokens from the protocol canister to a recipient.
@@ -1715,6 +1717,19 @@ pub async fn transfer_collateral_with_nonce_status(
     ledger: Principal,
     op_nonce: u128,
 ) -> Result<u64, DurableTransferError> {
+    transfer_collateral_with_nonce_and_fee_status(amount, None, to, ledger, op_nonce).await
+}
+
+/// Idempotent collateral transfer with a persisted explicit fee. Bot claim
+/// transfers use this to make the gross debit (`amount + fee`) equal the
+/// collateral removed from the vault. Retries must reuse this exact tuple.
+pub async fn transfer_collateral_with_nonce_and_fee_status(
+    amount: u64,
+    fee_e8s: Option<u64>,
+    to: Principal,
+    ledger: Principal,
+    op_nonce: u128,
+) -> Result<u64, DurableTransferError> {
     let client = ICRC1Client {
         runtime: CdkRuntime,
         ledger_canister_id: ledger,
@@ -1723,7 +1738,7 @@ pub async fn transfer_collateral_with_nonce_status(
         .transfer(TransferArg {
             from_subaccount: None,
             to: Account { owner: to, subaccount: None },
-            fee: None,
+            fee: fee_e8s.map(Nat::from),
             created_at_time: Some(nonce_to_created_at_time(op_nonce)),
             memo: Some(nonce_to_memo(op_nonce)),
             amount: Nat::from(amount),
@@ -1737,7 +1752,9 @@ pub async fn transfer_collateral_with_nonce_status(
             ))
         }
         Ok(Err(TransferError::BadFee { expected_fee })) => {
-            set_cached_fee(ledger, expected_fee.0.to_u64().unwrap_or(0));
+            if let Some(fee_e8s) = expected_fee.0.to_u64() {
+                set_cached_fee(ledger, fee_e8s);
+            }
             Err(DurableTransferError::LedgerNoEffect(TransferError::BadFee { expected_fee }))
         }
         Ok(Err(error)) => Err(DurableTransferError::LedgerNoEffect(error)),

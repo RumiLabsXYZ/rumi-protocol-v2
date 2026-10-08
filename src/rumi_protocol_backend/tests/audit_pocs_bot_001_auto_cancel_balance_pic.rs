@@ -4,20 +4,14 @@
 //! shape of the new `BotClaimReconciliationNeeded` event variant. Layer 3
 //! exercises the canister-boundary path that Layer 1 cannot:
 //!
-//!   * `check_vaults` actually queries `icrc1_balance_of` on the collateral
-//!     ledger when an expired `bot_claims` entry is detected;
-//!   * a balance shortfall (the bot retained the collateral) leaves the
+//!   * `check_vaults` holds expired claims unless exact gross-return proof
+//!     and conserving outbound fee terms are persisted;
+//!   * a missing verified gross-return proof leaves the
 //!     claim in place, leaves `bot_budget_remaining_e8s` unchanged, and
 //!     emits `BotClaimReconciliationNeeded`;
-//!   * a sufficient balance (the bot returned the collateral) clears the
-//!     claim and restores the budget — preserving the pre-Wave-11 happy
+//!   * a full-gross return proof clears the claim and restores the budget —
+//!     preserving the pre-Wave-11 happy
 //!     path so we don't regress the original "bot crashed" auto-cancel.
-//!
-//! The "icrc1_balance_of returns an error" branch is exercised in code
-//! review only; reliably injecting a ledger-side error from PocketIC would
-//! require a custom mock ledger that can't transact, which would also
-//! prevent the bot's collateral transfer in setup. The Layer-1 fence
-//! confirms the variant + dispatch are correct.
 //!
 //! Fixture is lifted from `audit_pocs_liq_008_circuit_breaker_pic.rs`. The
 //! breaker is left at its default-disabled state since the BOT-001 path
@@ -186,6 +180,8 @@ struct SuccessWithFee {
 struct BotLiquidationResult {
     vault_id: u64,
     collateral_amount: u64,
+    collateral_received_amount: Option<u64>,
+    collateral_outbound_fee: Option<u64>,
     debt_covered: u64,
     collateral_price_e8s: u64,
     claim_generation: u64,
@@ -939,14 +935,18 @@ fn bot_001_pic_auto_cancel_skipped_when_balance_below_required() {
         post_claim_budget
     );
 
-    // Sanity: the bot now actually holds the collateral (so the BOT-001
-    // gate has something to detect).
+    // Sanity: the bot holds the net collateral after the explicit outbound fee.
     let bot_balance = icrc1_balance_of_call(&f.pic, f.icp_ledger, f.developer);
+    let expected_net = claim
+        .collateral_amount
+        .checked_sub(claim.collateral_outbound_fee.expect("new claim fee"))
+        .expect("claim collateral covers its fee");
+    assert_eq!(claim.collateral_received_amount, Some(expected_net));
     assert!(
-        bot_balance >= claim.collateral_amount.saturating_sub(10_000),
-        "bot must hold the seized collateral; got {} expected ~{}",
+        bot_balance >= expected_net,
+        "bot must hold net collateral; got {} expected at least {}",
         bot_balance,
-        claim.collateral_amount
+        expected_net
     );
 
     // Sanity: no BOT-001 events yet.
@@ -1008,9 +1008,9 @@ fn bot_001_pic_auto_cancel_proceeds_when_balance_sufficient() {
         "bot_claim_liquidation must deduct from budget"
     );
 
-    // Return claim A's exact amount with its generation-bound memo.
-    let icp_fee: u64 = 10_000;
-    let return_amount = claim.collateral_amount.saturating_sub(icp_fee);
+    // Return the full gross claim amount with its generation-bound memo;
+    // the bot pays the return fee separately from its own balance.
+    let return_amount = claim.collateral_amount;
     let return_time = current_ledger_time_ns(&f.pic);
     let return_block = icrc1_transfer_tuple_call(
         &f.pic,
@@ -1036,12 +1036,12 @@ fn bot_001_pic_auto_cancel_proceeds_when_balance_sufficient() {
     .expect("exact return proof should be recorded");
 
     // Sanity: the protocol's main account must now hold AT LEAST the
-    // required collateral so the BOT-001 gate has something to detect on
+    // full gross collateral so the BOT-001 gate has something to detect on
     // the next `check_vaults` tick. If this assertion fires, the rest of
     // the test is moot — the bot return didn't actually credit the
     // protocol.
     let protocol_balance = icrc1_balance_of_call(&f.pic, f.icp_ledger, f.protocol_id);
-    let required = claim.collateral_amount.saturating_sub(icp_fee);
+    let required = claim.collateral_amount;
     assert!(
         protocol_balance >= required,
         "protocol balance {} must cover required {} after bot return",
@@ -1080,7 +1080,7 @@ fn cl_02_pooled_second_vault_balance_cannot_release_claim_without_exact_proof() 
 
     let (budget_before_a, claim_a) = seed_bot_claim(&f);
     let budget_with_a = get_bot_stats(&f.pic, f.protocol_id).budget_remaining_e8s;
-    let required_a = claim_a.collateral_amount.saturating_sub(10_000);
+    let required_a = claim_a.collateral_amount;
     let pooled_balance = icrc1_balance_of_call(&f.pic, f.icp_ledger, f.protocol_id);
     assert!(
         pooled_balance >= required_a,
@@ -1116,7 +1116,7 @@ fn cl_02_pooled_second_vault_balance_cannot_release_claim_without_exact_proof() 
     );
 
     let return_time = current_ledger_time_ns(&f.pic);
-    let returned_a = claim_a.collateral_amount.saturating_sub(10_000);
+    let returned_a = claim_a.collateral_amount;
     let return_block_a = icrc1_transfer_tuple_call(
         &f.pic,
         f.icp_ledger,
@@ -1151,7 +1151,7 @@ fn cl_02_pooled_second_vault_balance_cannot_release_claim_without_exact_proof() 
         .expect("a new claim should be available after exact-proof cancel");
     let budget_with_a2 = get_bot_stats(&f.pic, f.protocol_id).budget_remaining_e8s;
     let return_time_a2 = current_ledger_time_ns(&f.pic);
-    let returned_a2 = claim_a2.collateral_amount.saturating_sub(10_000);
+    let returned_a2 = claim_a2.collateral_amount;
     let return_block_a2 = icrc1_transfer_tuple_call(
         &f.pic,
         f.icp_ledger,
@@ -1197,7 +1197,7 @@ fn bot_claim_payment_and_return_proofs_use_exact_icrc3_ledger_blocks() {
     let first_claim = bot_claim_call(&f, f.developer, f.vault_id)
         .expect("first bot claim should be active");
     let return_time = current_ledger_time_ns(&f.pic);
-    let returned_amount = first_claim.collateral_amount.saturating_sub(10_000);
+    let returned_amount = first_claim.collateral_amount;
     let return_block = icrc1_transfer_tuple_call(
         &f.pic,
         f.icp_ledger,

@@ -748,11 +748,17 @@ pub struct BotClaim {
     /// test-only claim records that cannot safely be retried automatically.
     #[serde(default)]
     pub collateral_transfer: Option<BotCollateralTransfer>,
+    /// One previous tuple replaced only after a typed BadFee proves that the
+    /// current dispatch had no effect. A single slot bounds fee refresh while
+    /// preserving the exact attempt identity for reconciliation.
+    #[serde(default)]
+    pub prior_collateral_transfer: Option<BotCollateralTransfer>,
     /// ckUSDC ledger selected when this claim is created. A later ledger
     /// configuration change must not change which ledger can prove payment.
     #[serde(default)]
     pub payment_ledger_principal: Option<Principal>,
-    /// Amount of collateral transferred to the bot
+    /// Gross collateral removed from the vault. The transfer journal records
+    /// net bot credit plus the explicit outbound ledger fee separately.
     pub collateral_amount: u64,
     /// Debt amount the bot committed to cover
     pub debt_amount: u64,
@@ -772,6 +778,14 @@ pub struct BotCollateralTransfer {
     pub op_nonce: u128,
     pub created_at_time: u64,
     pub block_index: Option<u64>,
+    /// Net amount credited to the bot by the exact outbound transfer.
+    /// Missing on legacy claims; those claims remain held for reconciliation.
+    #[serde(default)]
+    pub net_amount_e8s: Option<u64>,
+    /// Explicit fee debited with the exact outbound transfer. Missing on
+    /// legacy claims; those claims remain held for reconciliation.
+    #[serde(default)]
+    pub fee_e8s: Option<u64>,
     #[serde(default)]
     pub status: BotCollateralTransferStatus,
 }
@@ -781,6 +795,9 @@ pub enum BotCollateralTransferStatus {
     #[default]
     Reserved,
     NoEffect,
+    /// A typed ICRC BadFee result was observed. This permits one bounded fee
+    /// tuple refresh only when no earlier dispatch was ambiguous.
+    FeeMismatchNoEffect,
     Ambiguous,
     Confirmed,
 }
@@ -7301,6 +7318,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_bot_transfer_journal_defaults_missing_fee_terms_to_held_options() {
+        let transfer = BotCollateralTransfer {
+            op_nonce: 7,
+            created_at_time: 1,
+            block_index: Some(3),
+            net_amount_e8s: Some(90),
+            fee_e8s: Some(10),
+            status: BotCollateralTransferStatus::Confirmed,
+        };
+        let mut old_value = serde_json::to_value(transfer).expect("serialize transfer journal");
+        let fields = old_value
+            .as_object_mut()
+            .expect("transfer journal serializes as a record");
+        fields.remove("net_amount_e8s");
+        fields.remove("fee_e8s");
+        let decoded: BotCollateralTransfer =
+            serde_json::from_value(old_value).expect("decode legacy transfer journal");
+        assert_eq!(decoded.net_amount_e8s, None);
+        assert_eq!(decoded.fee_e8s, None);
+    }
+
+    #[test]
+    fn legacy_bot_claim_defaults_missing_fee_refresh_history_to_none() {
+        let claim = BotClaim {
+            vault_id: 7,
+            generation: 42,
+            collateral_transfer: Some(BotCollateralTransfer {
+                op_nonce: 7,
+                created_at_time: 1,
+                block_index: None,
+                net_amount_e8s: None,
+                fee_e8s: None,
+                status: BotCollateralTransferStatus::Reserved,
+            }),
+            prior_collateral_transfer: None,
+            payment_ledger_principal: None,
+            collateral_amount: 100,
+            debt_amount: 1,
+            collateral_type: Principal::from_slice(&[10]),
+            claimed_at: 1,
+            collateral_price_e8s: 1,
+            collateral_return_proof: None,
+        };
+        let mut old_value = serde_json::to_value(claim).expect("serialize claim");
+        old_value
+            .as_object_mut()
+            .expect("claim serializes as a record")
+            .remove("prior_collateral_transfer");
+        let decoded: BotClaim =
+            serde_json::from_value(old_value).expect("decode legacy claim");
+        assert!(decoded.prior_collateral_transfer.is_none());
+        assert!(decoded
+            .collateral_transfer
+            .as_ref()
+            .is_some_and(|transfer| transfer.net_amount_e8s.is_none() && transfer.fee_e8s.is_none()));
+    }
+
+    #[test]
     fn pre_cl08_state_snapshot_defaults_refund_journal_to_empty() {
         let mut encoded = Vec::new();
         ciborium::ser::into_writer(&State::default(), &mut encoded).expect("encode current state");
@@ -12102,10 +12177,11 @@ mod tests {
             crate::event::Event::PartialLiquidateVault {
                 vault_id: 953,
                 liquidator_payment: ICUSD::new(222_222_222),
-                icp_to_liquidator: ICP::new(1),
+                icp_to_liquidator: ICP::new(90),
                 liquidator: None,
                 icp_rate: None,
                 protocol_fee_collateral: None,
+                ledger_fee_collateral: Some(10),
                 timestamp: Some(0),
                 three_usd_reserves_e8s: None,
             },
@@ -12120,6 +12196,11 @@ mod tests {
             remaining.borrowed_icusd_amount,
             ICUSD::new(1_000_000_000 - 222_222_222),
             "PartialLiquidateVault replay must reduce debt by exactly the recorded liquidator_payment"
+        );
+        assert_eq!(
+            remaining.collateral_amount,
+            1_250_000_000 - 90 - 10,
+            "replay must subtract net liquidator receipt plus the separately paid ledger fee"
         );
     }
 }

@@ -10,20 +10,18 @@
 //!
 //! This fence exercises the canister-boundary path:
 //!
-//!   * `bot_cancel_liquidation` actually queries `icrc1_balance_of` on the
-//!     collateral ledger before clearing the claim;
-//!   * a balance shortfall (the bot retained the collateral) returns
+//!   * `bot_cancel_liquidation` requires a verified gross-collateral return
+//!     proof before clearing the claim;
+//!   * a missing or under-sized proof returns
 //!     `Err(ProtocolError::GenericError(_))` and leaves `bot_claims` and
 //!     `bot_budget_remaining_e8s` UNCHANGED — the bot is forced to retry
 //!     its transfer or follow the exact collateral-return proof flow;
-//!   * a sufficient balance (the bot returned the collateral) succeeds —
+//!   * an exact full-gross return (with the bot paying its return fee) succeeds —
 //!     the claim is cleared and the budget restored, preserving the
 //!     pre-Wave-12 happy path.
 //!
-//! The "icrc1_balance_of returns an error" branch is exercised in code
-//! review only; reliably injecting a ledger-side error from PocketIC would
-//! require a custom mock ledger that can't transact, which would also
-//! prevent the bot's collateral transfer in setup.
+//! The native-ledger test below also exercises a return block through the
+//! official ledger's archive callback.
 //!
 //! Fixture is lifted from `audit_pocs_bot_001_auto_cancel_balance_pic.rs`.
 //! As that fixture's comments call out, the ICP ledger uses a dedicated
@@ -250,6 +248,8 @@ struct SuccessWithFee {
 struct BotLiquidationResult {
     vault_id: u64,
     collateral_amount: u64,
+    collateral_received_amount: Option<u64>,
+    collateral_outbound_fee: Option<u64>,
     debt_covered: u64,
     collateral_price_e8s: u64,
     claim_generation: u64,
@@ -956,6 +956,23 @@ fn drop_icp_price(fixture: &Fixture, new_price_e8s: u64) {
     parsed.expect("dev_set_collateral_price returned error");
 }
 
+fn set_collateral_ledger_fee(fixture: &Fixture, fee_e8s: u64) {
+    let result = fixture
+        .pic
+        .update_call(
+            fixture.protocol_id,
+            fixture.developer,
+            "set_collateral_ledger_fee",
+            encode_args((fixture.icp_ledger, fee_e8s)).unwrap(),
+        )
+        .expect("set_collateral_ledger_fee call failed");
+    let parsed: Result<(), ProtocolError> = match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode collateral fee setter"),
+        WasmResult::Reject(message) => panic!("set_collateral_ledger_fee rejected: {message}"),
+    };
+    parsed.expect("set_collateral_ledger_fee returned error");
+}
+
 /// Make `vault_id` underwater AND configure the bot, then have the bot
 /// claim the vault. After this call, the bot principal holds the
 /// collateral and the protocol has a live `bot_claims` entry. Returns
@@ -1099,9 +1116,8 @@ fn borrow_claimed_vault_call(fixture: &Fixture) -> Result<SuccessWithFee, Protoc
 
 /// BOT-001b PIC #1: when the bot did NOT return the collateral, the
 /// explicit `bot_cancel_liquidation` must reject with `GenericError` whose
-/// message references the balance shortfall, leaving `bot_claims` and the
-/// budget UNCHANGED. Without the gate, the bot could clear its claim and
-/// recover its budget while still holding the seized collateral.
+/// message references the missing verified return proof, leaving `bot_claims`
+/// and the budget unchanged while the bot still holds the net collateral.
 #[test]
 fn bot_001b_pic_explicit_cancel_rejected_when_balance_below_required() {
     let f = setup_fixture();
@@ -1117,27 +1133,31 @@ fn bot_001b_pic_explicit_cancel_rejected_when_balance_below_required() {
         post_claim_budget
     );
 
-    // Sanity: the bot now actually holds the seized collateral.
+    // Sanity: the bot now holds the net collateral after the explicit fee.
     let bot_balance = icrc1_balance_of_call(&f.pic, f.icp_ledger, f.developer);
+    let expected_net = claim
+        .collateral_amount
+        .checked_sub(claim.collateral_outbound_fee.expect("new claim fee"))
+        .expect("claim collateral covers its fee");
+    assert_eq!(claim.collateral_received_amount, Some(expected_net));
     assert!(
-        bot_balance >= claim.collateral_amount.saturating_sub(10_000),
-        "bot must hold the seized collateral; got {} expected ~{}",
+        bot_balance >= expected_net,
+        "bot must hold the net collateral; got {} expected at least {}",
         bot_balance,
-        claim.collateral_amount
+        expected_net
     );
 
     // The protocol may still hold some residual collateral (the portion of
     // the vault NOT transferred to the bot). What matters for the gate is
-    // that this residual is BELOW `required = claim.collateral_amount -
-    // ledger_fee` — i.e. the gate has a real shortfall to detect. If this
+    // that this residual is BELOW the gross claim amount — i.e. the proof
+    // gate has a real shortfall to detect. If this
     // assertion ever fires, the bot's claim transfer didn't actually
     // remove enough collateral and the rest of the test is moot.
-    let icp_fee: u64 = 10_000;
-    let required = claim.collateral_amount.saturating_sub(icp_fee);
+    let required = claim.collateral_amount;
     let protocol_balance_before = icrc1_balance_of_call(&f.pic, f.icp_ledger, f.protocol_id);
     assert!(
         protocol_balance_before < required,
-        "protocol balance {} must be below required {} so the BOT-001b gate has a shortfall to reject",
+        "protocol balance {} must be below gross claim {} while the bot retains its net collateral",
         protocol_balance_before,
         required
     );
@@ -1180,7 +1200,7 @@ fn bot_001b_pic_explicit_cancel_rejected_when_balance_below_required() {
     // Probe: a *successful* cancel after the bot returns the collateral
     // confirms the claim was preserved across the rejection (otherwise the
     // follow-up cancel would error with "No active claim").
-    let return_amount = claim.collateral_amount.saturating_sub(icp_fee);
+    let return_amount = claim.collateral_amount;
     let return_time = current_ledger_time_ns(&f.pic);
     let return_block = icrc1_transfer_tuple_call(
         &f.pic,
@@ -1227,12 +1247,9 @@ fn bot_001b_pic_explicit_cancel_succeeds_when_balance_sufficient() {
         "bot_claim_liquidation must deduct from budget"
     );
 
-    // Bot returns the collateral to the protocol's main account, paying
-    // the ICP transfer fee. The BOT-001b gate compares against
-    // `claim.collateral_amount - ledger_fee`, so transferring exactly that
-    // amount is the threshold case where the gate must NOT fire.
-    let icp_fee: u64 = 10_000;
-    let return_amount = claim.collateral_amount.saturating_sub(icp_fee);
+    // Bot returns the full gross claim amount to the protocol, paying the
+    // return fee separately from its own balance.
+    let return_amount = claim.collateral_amount;
     let return_time = current_ledger_time_ns(&f.pic);
     let return_block = icrc1_transfer_tuple_call(
         &f.pic,
@@ -1254,10 +1271,10 @@ fn bot_001b_pic_explicit_cancel_succeeds_when_balance_sufficient() {
         },
     );
 
-    // Sanity: the protocol's main account must now hold AT LEAST the
-    // required collateral so the gate has something to detect.
+    // Sanity: the protocol's main account must now hold AT LEAST the full
+    // gross claim amount so cancellation can restore the vault.
     let protocol_balance = icrc1_balance_of_call(&f.pic, f.icp_ledger, f.protocol_id);
-    let required = claim.collateral_amount.saturating_sub(icp_fee);
+    let required = claim.collateral_amount;
     assert!(
         protocol_balance >= required,
         "protocol balance {} must cover required {} after bot return",
@@ -1298,38 +1315,42 @@ fn bot_001b_pic_explicit_cancel_succeeds_when_balance_sufficient() {
 /// native ICP ledger. The outbound claim block is verified while hot; the
 /// return block is deliberately archived before the backend records it. The
 /// backend fee config is drifted above the real ledger fee, and a return that
-/// is short by one e8s after accounting for the actual block fee is rejected.
+/// is short by one e8s of gross claim collateral is rejected.
 #[test]
 #[ignore = "requires the pinned official NNS ledger gzip and built backend Wasm; set RUMI_TEST_NNS_LEDGER_WASM_GZ"]
-fn native_icp_bot_claim_and_return_proofs_use_archived_blocks_and_actual_fee() {
+fn native_icp_bot_claim_and_return_proofs_use_archives_and_conserve_fees() {
     let f = setup_fixture_with_native_ledger(Some(official_native_icp_ledger_wasm()));
+    // Make mutable backend config stale-high before admission. Claim creation
+    // must refresh the ledger fee and pin the native ledger's real fee.
+    set_collateral_ledger_fee(&f, 30_000);
+    let backend_before = icrc1_balance_of_call(&f.pic, f.icp_ledger, f.protocol_id);
+    let bot_before = icrc1_balance_of_call(&f.pic, f.icp_ledger, f.developer);
     let (_, claim) = seed_bot_claim(&f);
 
-    // Simulate stale-high mutable backend fee configuration; the official
-    // ledger remains at 10_000 e8s and its block supplies that actual fee.
-    let set_fee = f
-        .pic
-        .update_call(
-            f.protocol_id,
-            f.developer,
-            "set_collateral_ledger_fee",
-            encode_args((f.icp_ledger, 30_000u64)).unwrap(),
-        )
-        .expect("set stale-high collateral ledger fee");
-    match set_fee {
-        WasmResult::Reply(bytes) => {
-            let result: Result<(), ProtocolError> = decode_one(&bytes).unwrap();
-            result.expect("stale-high fee setting should succeed");
-        }
-        WasmResult::Reject(message) => panic!("set_collateral_ledger_fee rejected: {message}"),
-    }
-
     let actual_fee = 10_000u64;
-    let under_return_time = current_ledger_time_ns(&f.pic);
-    let under_return_amount = claim
+    let expected_net = claim
         .collateral_amount
-        .checked_sub(actual_fee + 1)
-        .expect("claim amount exceeds fee");
+        .checked_sub(actual_fee)
+        .expect("gross claim exceeds native ledger fee");
+    let backend_after = icrc1_balance_of_call(&f.pic, f.icp_ledger, f.protocol_id);
+    let bot_after = icrc1_balance_of_call(&f.pic, f.icp_ledger, f.developer);
+    assert_eq!(claim.collateral_received_amount, Some(expected_net));
+    assert_eq!(claim.collateral_outbound_fee, Some(actual_fee));
+    assert_eq!(
+        backend_before.checked_sub(backend_after),
+        Some(claim.collateral_amount),
+        "backend total debit must be gross C = transfer amount N + ledger fee F"
+    );
+    assert_eq!(
+        bot_after.checked_sub(bot_before),
+        Some(expected_net),
+        "bot account receives only the transfer amount N"
+    );
+
+    // Keep the stale-high config in place after outbound settlement. Return
+    // proof must use the exact amount credited and ignore this mutable fee.
+    let under_return_time = current_ledger_time_ns(&f.pic);
+    let under_return_amount = claim.collateral_amount - 1;
     let under_return_block = icrc1_transfer_tuple_call(
         &f.pic,
         f.icp_ledger,
@@ -1350,15 +1371,12 @@ fn native_icp_bot_claim_and_return_proofs_use_archived_blocks_and_actual_fee() {
         },
     );
     assert!(
-        matches!(under_return, Err(ProtocolError::GenericError(message)) if message.contains("below the claimed collateral")),
-        "a return one e8s below the claim after actual fee must fail, got {under_return:?}"
+        matches!(under_return, Err(ProtocolError::GenericError(message)) if message.contains("full gross claim amount")),
+        "a return one e8s below the gross claim must fail even when its fee is separately paid, got {under_return:?}"
     );
 
     let wrong_memo_time = under_return_time + 1;
-    let exact_return_amount = claim
-        .collateral_amount
-        .checked_sub(actual_fee)
-        .expect("claim amount exceeds fee");
+    let exact_return_amount = claim.collateral_amount;
     let wrong_memo_block = icrc1_transfer_tuple_call(
         &f.pic,
         f.icp_ledger,
@@ -1393,6 +1411,8 @@ fn native_icp_bot_claim_and_return_proofs_use_archived_blocks_and_actual_fee() {
         claim.collateral_return_memo.clone(),
         return_time,
     );
+    let backend_before_exact_return =
+        icrc1_balance_of_call(&f.pic, f.icp_ledger, f.protocol_id);
     let mut archived = native_block_is_archived(&f.pic, f.icp_ledger, return_block);
     for index in 0..20u64 {
         if archived {
@@ -1427,6 +1447,20 @@ fn native_icp_bot_claim_and_return_proofs_use_archived_blocks_and_actual_fee() {
             amount: exact_return_amount,
             created_at_time: return_time,
         },
+    );
+    let backend_after_exact_return =
+        icrc1_balance_of_call(&f.pic, f.icp_ledger, f.protocol_id);
+    assert_eq!(
+        backend_before_exact_return.checked_add(exact_return_amount),
+        Some(backend_after_exact_return),
+        "the return credits exact gross C; sender-paid return fee is separate"
+    );
+    bot_cancel_liquidation_call(&f, f.developer, f.vault_id)
+        .expect("archived exact gross return proof must permit cancellation");
+    assert_eq!(
+        icrc1_balance_of_call(&f.pic, f.icp_ledger, f.protocol_id),
+        backend_after_exact_return,
+        "cancellation must not debit the returned collateral from backend custody"
     );
 }
 

@@ -17,6 +17,8 @@ type AddCollateralArg = record {
 };
 type BotLiquidationResult = record {
   collateral_amount : nat64;
+  collateral_received_amount : opt nat64;
+  collateral_outbound_fee : opt nat64;
   collateral_price_e8s : nat64;
   vault_id : nat64;
   debt_covered : nat64;
@@ -652,6 +654,7 @@ type Event = variant {
   set_breaker_window_ns : record { window_ns : nat64; timestamp : nat64 };
   partial_liquidate_vault : record {
     protocol_fee_collateral : opt nat64;
+    ledger_fee_collateral : opt nat64;
     icp_rate : opt blob;
     liquidator_payment : nat64;
     vault_id : nat64;

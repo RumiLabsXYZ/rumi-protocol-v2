@@ -146,11 +146,13 @@ export const idlFactory = ({ IDL }) => {
     'collateral_amount' : IDL.Nat64,
     'collateral_price_e8s' : IDL.Nat64,
     'payment_memo' : IDL.Vec(IDL.Nat8),
+    'collateral_outbound_fee' : IDL.Opt(IDL.Nat64),
     'claim_generation' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
     'payment_ledger_principal' : IDL.Opt(IDL.Principal),
     'collateral_return_memo' : IDL.Vec(IDL.Nat8),
     'debt_covered' : IDL.Nat64,
+    'collateral_received_amount' : IDL.Opt(IDL.Nat64),
   });
   const Result_5 = IDL.Variant({
     'Ok' : BotLiquidationResult,
@@ -844,6 +846,7 @@ export const idlFactory = ({ IDL }) => {
       'icp_rate' : IDL.Opt(IDL.Vec(IDL.Nat8)),
       'liquidator_payment' : IDL.Nat64,
       'vault_id' : IDL.Nat64,
+      'ledger_fee_collateral' : IDL.Opt(IDL.Nat64),
       'timestamp' : IDL.Opt(IDL.Nat64),
       'three_usd_reserves_e8s' : IDL.Opt(IDL.Nat64),
       'liquidator' : IDL.Opt(IDL.Principal),

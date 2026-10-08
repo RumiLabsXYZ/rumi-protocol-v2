@@ -227,12 +227,6 @@ pub fn verify_transfer_block(
     Ok(fee.e8s)
 }
 
-pub fn return_covers_claim(amount_e8s: u64, actual_fee_e8s: u64, claim_amount_e8s: u64) -> bool {
-    amount_e8s
-        .checked_add(actual_fee_e8s)
-        .is_some_and(|returned_total| returned_total >= claim_amount_e8s)
-}
-
 /// Derives the legacy ICP Ledger AccountIdentifier for an owner's default
 /// account: CRC32(SHA-224("\x0Aaccount-id" || principal || zero subaccount)).
 pub fn account_identifier(owner: Principal) -> [u8; 32] {
@@ -266,8 +260,8 @@ fn crc32_ieee(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        account_identifier, return_covers_claim, verify_transfer_block, Block, Operation,
-        Timestamp, Tokens, Transaction,
+        account_identifier, verify_transfer_block, Block, Operation, Timestamp, Tokens,
+        Transaction,
     };
     use candid::Principal;
 
@@ -333,11 +327,4 @@ mod tests {
         assert!(verify_transfer_block(&spender, bot, backend, 90, b"claim-return", 123).is_err());
     }
 
-    #[test]
-    fn return_sufficiency_uses_checked_actual_fee_math() {
-        assert!(return_covers_claim(90, 10, 100));
-        assert!(return_covers_claim(100, 10, 100));
-        assert!(!return_covers_claim(89, 10, 100));
-        assert!(!return_covers_claim(u64::MAX, 1, 100));
-    }
 }

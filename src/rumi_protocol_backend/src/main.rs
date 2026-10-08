@@ -9532,7 +9532,14 @@ fn get_stability_pool_principal() -> Option<Principal> {
 #[derive(CandidType, Deserialize, Debug)]
 pub struct BotLiquidationResult {
     pub vault_id: u64,
+    /// Gross collateral removed from the vault and used for claim accounting.
     pub collateral_amount: u64,
+    /// Net collateral credited to the bot by the exact outbound transfer.
+    /// None means this claim predates fee-conserving transfer journaling.
+    pub collateral_received_amount: Option<u64>,
+    /// Explicit outbound ledger fee paid by the backend.
+    /// None means this claim predates fee-conserving transfer journaling.
+    pub collateral_outbound_fee: Option<u64>,
     pub debt_covered: u64,
     pub collateral_price_e8s: u64,
     /// Stable identity of this exact claim; callers must echo it in payment proof.
@@ -9587,6 +9594,14 @@ fn bot_liquidation_result_from_claim(
     BotLiquidationResult {
         vault_id: claim.vault_id,
         collateral_amount: claim.collateral_amount,
+        collateral_received_amount: claim
+            .collateral_transfer
+            .as_ref()
+            .and_then(|transfer| transfer.net_amount_e8s),
+        collateral_outbound_fee: claim
+            .collateral_transfer
+            .as_ref()
+            .and_then(|transfer| transfer.fee_e8s),
         debt_covered: claim.debt_amount,
         collateral_price_e8s: claim.collateral_price_e8s,
         claim_generation: claim.generation,
@@ -9594,6 +9609,216 @@ fn bot_liquidation_result_from_claim(
         collateral_return_memo: bot_collateral_return_memo(claim.vault_id, claim.generation),
         payment_ledger_principal: claim.payment_ledger_principal,
     }
+}
+
+fn bot_claim_outbound_terms(
+    claim: &rumi_protocol_backend::state::BotClaim,
+) -> Result<(u64, u64), String> {
+    let transfer = claim
+        .collateral_transfer
+        .as_ref()
+        .ok_or_else(|| "claim has no persisted collateral transfer tuple".to_string())?;
+    let net_amount = transfer.net_amount_e8s.ok_or_else(|| {
+        "claim has no persisted outbound net amount; manual reconciliation required".to_string()
+    })?;
+    let fee = transfer.fee_e8s.ok_or_else(|| {
+        "claim has no persisted outbound fee; manual reconciliation required".to_string()
+    })?;
+    if net_amount.checked_add(fee) != Some(claim.collateral_amount) {
+        return Err(
+            "persisted outbound net amount plus fee does not equal gross collateral".into(),
+        );
+    }
+    Ok((net_amount, fee))
+}
+
+fn bot_outbound_transfer_amount(gross_amount: u64, fee: u64) -> Option<u64> {
+    gross_amount.checked_sub(fee).filter(|amount| *amount > 0)
+}
+
+fn bot_retry_no_effect_status(
+    prior: &rumi_protocol_backend::state::BotCollateralTransferStatus,
+) -> rumi_protocol_backend::state::BotCollateralTransferStatus {
+    if prior == &rumi_protocol_backend::state::BotCollateralTransferStatus::NoEffect
+        || prior
+            == &rumi_protocol_backend::state::BotCollateralTransferStatus::FeeMismatchNoEffect
+    {
+        rumi_protocol_backend::state::BotCollateralTransferStatus::NoEffect
+    } else {
+        rumi_protocol_backend::state::BotCollateralTransferStatus::Ambiguous
+    }
+}
+
+fn bot_recorded_no_effect_status(
+    prior: &rumi_protocol_backend::state::BotCollateralTransferStatus,
+    error: &icrc_ledger_types::icrc1::transfer::TransferError,
+    first_dispatch: bool,
+    refreshed_tuple: bool,
+) -> rumi_protocol_backend::state::BotCollateralTransferStatus {
+    use rumi_protocol_backend::state::BotCollateralTransferStatus as Status;
+
+    if matches!(error, icrc_ledger_types::icrc1::transfer::TransferError::BadFee { .. })
+        && (first_dispatch
+            || refreshed_tuple
+            || prior == &Status::NoEffect
+            || prior == &Status::FeeMismatchNoEffect)
+    {
+        Status::FeeMismatchNoEffect
+    } else if first_dispatch || refreshed_tuple {
+        Status::NoEffect
+    } else {
+        bot_retry_no_effect_status(prior)
+    }
+}
+
+fn bot_fee_refresh_allowed(
+    claim: &rumi_protocol_backend::state::BotClaim,
+    first_dispatch: bool,
+) -> bool {
+    claim.prior_collateral_transfer.is_none()
+        && (claim
+            .collateral_transfer
+            .as_ref()
+            .is_some_and(|transfer| {
+                transfer.status
+                    == rumi_protocol_backend::state::BotCollateralTransferStatus::FeeMismatchNoEffect
+            })
+            || (first_dispatch
+                && claim.collateral_transfer.as_ref().is_some_and(|transfer| {
+                    transfer.status
+                        == rumi_protocol_backend::state::BotCollateralTransferStatus::Reserved
+                })))
+}
+
+fn replace_bot_claim_transfer_after_bad_fee(
+    vault_id: u64,
+    generation: u64,
+    expected_fee: u64,
+    first_dispatch: bool,
+) -> Result<rumi_protocol_backend::state::BotClaim, String> {
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        let snapshot = s
+            .bot_claims
+            .get(&vault_id)
+            .filter(|claim| claim.generation == generation)
+            .cloned()
+            .ok_or_else(|| "active bot claim changed before fee tuple refresh".to_string())?;
+        if !bot_fee_refresh_allowed(&snapshot, first_dispatch) {
+            return Err("outbound fee tuple is not eligible for a safe refresh".into());
+        }
+        let old_transfer = snapshot
+            .collateral_transfer
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "claim has no persisted outbound transfer tuple".to_string())?;
+        if old_transfer.block_index.is_some() {
+            return Err("outbound transfer already has a block; fee tuple cannot change".into());
+        }
+        let old_fee = old_transfer
+            .fee_e8s
+            .ok_or_else(|| "claim has no persisted outbound fee".to_string())?;
+        if expected_fee == old_fee {
+            return Err("ledger BadFee reported the already persisted fee".into());
+        }
+        let net_amount = bot_outbound_transfer_amount(snapshot.collateral_amount, expected_fee)
+            .ok_or_else(|| "refreshed ledger fee leaves no positive collateral amount".to_string())?;
+        let op_nonce = s.next_op_nonce_at(now);
+        let mut prior = old_transfer;
+        prior.status = rumi_protocol_backend::state::BotCollateralTransferStatus::FeeMismatchNoEffect;
+        let active = s
+            .bot_claims
+            .get_mut(&vault_id)
+            .expect("claim snapshot is still present");
+        active.prior_collateral_transfer = Some(prior);
+        active.collateral_transfer = Some(rumi_protocol_backend::state::BotCollateralTransfer {
+            op_nonce,
+            created_at_time: management::nonce_to_created_at_time(op_nonce),
+            block_index: None,
+            net_amount_e8s: Some(net_amount),
+            fee_e8s: Some(expected_fee),
+            status: rumi_protocol_backend::state::BotCollateralTransferStatus::Reserved,
+        });
+        Ok(active.clone())
+    })
+}
+
+async fn dispatch_bot_claim_transfer(
+    mut claim: rumi_protocol_backend::state::BotClaim,
+    bot: Principal,
+    first_dispatch: bool,
+) -> (
+    rumi_protocol_backend::state::BotClaim,
+    Result<u64, management::DurableTransferError>,
+    bool,
+) {
+    let Some(transfer) = claim.collateral_transfer.as_ref().cloned() else {
+        return (
+            claim,
+            Err(management::DurableTransferError::AmbiguousResponse(
+                "claim has no persisted outbound transfer tuple".into(),
+            )),
+            false,
+        );
+    };
+    let Some(net_amount) = transfer.net_amount_e8s else {
+        return (
+            claim,
+            Err(management::DurableTransferError::AmbiguousResponse(
+                "claim has no persisted outbound net amount".into(),
+            )),
+            false,
+        );
+    };
+    let Some(fee) = transfer.fee_e8s else {
+        return (
+            claim,
+            Err(management::DurableTransferError::AmbiguousResponse(
+                "claim has no persisted outbound fee".into(),
+            )),
+            false,
+        );
+    };
+    let mut result = management::transfer_collateral_with_nonce_and_fee_status(
+        net_amount,
+        Some(fee),
+        bot,
+        claim.collateral_type,
+        transfer.op_nonce,
+    )
+    .await;
+
+    let expected_fee = match &result {
+        Err(management::DurableTransferError::LedgerNoEffect(
+            icrc_ledger_types::icrc1::transfer::TransferError::BadFee { expected_fee },
+        )) if bot_fee_refresh_allowed(&claim, first_dispatch) => expected_fee.0.to_u64(),
+        _ => None,
+    };
+    let mut refreshed_tuple = false;
+    if let Some(expected_fee) = expected_fee {
+        if let Ok(refreshed) = replace_bot_claim_transfer_after_bad_fee(
+            claim.vault_id,
+            claim.generation,
+            expected_fee,
+            first_dispatch,
+        ) {
+            claim = refreshed;
+            let refreshed_transfer = claim
+                .collateral_transfer
+                .as_ref()
+                .expect("refreshed claim transfer exists");
+            result = management::transfer_collateral_with_nonce_and_fee_status(
+                refreshed_transfer.net_amount_e8s.expect("refreshed net amount exists"),
+                refreshed_transfer.fee_e8s,
+                bot,
+                claim.collateral_type,
+                refreshed_transfer.op_nonce,
+            )
+            .await;
+            refreshed_tuple = true;
+        }
+    }
+    (claim, result, refreshed_tuple)
 }
 
 fn bot_proof_cutover_is_safe(active_claims: usize) -> bool {
@@ -9611,10 +9836,11 @@ async fn verify_bot_claim_transfer_receipt(
     if management::nonce_to_created_at_time(transfer.op_nonce) != transfer.created_at_time {
         return Err("persisted collateral transfer nonce/time mismatch".into());
     }
+    let (net_amount, expected_fee) = bot_claim_outbound_terms(claim)?;
     let memo = transfer.op_nonce.to_be_bytes();
     let native_icp_ledger = read_state(|s| s.icp_ledger_principal == claim.collateral_type)
         && rumi_protocol_backend::native_icp_proof::is_native_icp_ledger(claim.collateral_type);
-    if native_icp_ledger {
+    let actual_fee = if native_icp_ledger {
         let block = rumi_protocol_backend::native_icp_proof::query_block(
             claim.collateral_type,
             block_index,
@@ -9624,22 +9850,38 @@ async fn verify_bot_claim_transfer_receipt(
             &block,
             ic_cdk::id(),
             bot,
-            claim.collateral_amount,
+            net_amount,
             &memo,
             transfer.created_at_time,
+        )?
+    } else {
+        let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(
+            claim.collateral_type,
+            block_index,
+        )
+        .await?;
+        rumi_protocol_backend::icrc3_proof::validate_icrc3_transfer_block(
+            &block,
+            Some(icrc_ledger_types::icrc1::account::Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            }),
+            icrc_ledger_types::icrc1::account::Account {
+                owner: bot,
+                subaccount: None,
+            },
+            net_amount,
+            Some(&memo),
+            Some(transfer.created_at_time),
         )?;
-        return Ok(());
+        block
+            .fee
+            .ok_or_else(|| "outbound ICRC-3 block is missing its actual charged fee".to_string())?
+    };
+    if actual_fee != expected_fee {
+        return Err("outbound ledger fee differs from the persisted transfer fee".into());
     }
-    rumi_protocol_backend::icrc3_proof::verify_icrc3_transfer_block(
-        claim.collateral_type,
-        block_index,
-        Some(icrc_ledger_types::icrc1::account::Account { owner: ic_cdk::id(), subaccount: None }),
-        icrc_ledger_types::icrc1::account::Account { owner: bot, subaccount: None },
-        claim.collateral_amount,
-        Some(&memo),
-        Some(transfer.created_at_time),
-    )
-    .await
+    Ok(())
 }
 
 fn bot_payment_replay_status(
@@ -9712,6 +9954,33 @@ fn bot_payment_meets_claim_minimum(debt_e8s: u64, paid_e6s: u64) -> bool {
 mod bot_payment_proof_tests {
     use super::*;
 
+    fn claim_with_outbound_terms(
+        gross: u64,
+        net: Option<u64>,
+        fee: Option<u64>,
+    ) -> rumi_protocol_backend::state::BotClaim {
+        rumi_protocol_backend::state::BotClaim {
+            vault_id: 7,
+            generation: 42,
+            collateral_transfer: Some(rumi_protocol_backend::state::BotCollateralTransfer {
+                op_nonce: 1,
+                created_at_time: 1,
+                block_index: Some(3),
+                net_amount_e8s: net,
+                fee_e8s: fee,
+                status: rumi_protocol_backend::state::BotCollateralTransferStatus::Confirmed,
+            }),
+            prior_collateral_transfer: None,
+            payment_ledger_principal: None,
+            collateral_amount: gross,
+            debt_amount: 1,
+            collateral_type: Principal::from_slice(&[10]),
+            claimed_at: 1,
+            collateral_price_e8s: 1,
+            collateral_return_proof: None,
+        }
+    }
+
     #[test]
     fn claim_payment_memo_binds_vault_and_generation() {
         let memo = bot_payment_memo(7, 42);
@@ -9730,6 +9999,81 @@ mod bot_payment_proof_tests {
         assert_eq!(bot_payment_replay_status(Some((7, 42)), 7, 42), Ok(true));
         assert!(bot_payment_replay_status(Some((7, 42)), 7, 43).is_err());
         assert!(!bot_claim_generation_matches(43, 42));
+    }
+
+    #[test]
+    fn outbound_terms_require_a_persisted_conserving_gross_fee_tuple() {
+        assert_eq!(
+            bot_claim_outbound_terms(&claim_with_outbound_terms(
+                50_000_000,
+                Some(49_990_000),
+                Some(10_000),
+            )),
+            Ok((49_990_000, 10_000))
+        );
+        assert!(bot_claim_outbound_terms(&claim_with_outbound_terms(100, None, Some(10))).is_err());
+        assert!(bot_claim_outbound_terms(&claim_with_outbound_terms(100, Some(90), None)).is_err());
+        assert!(bot_claim_outbound_terms(&claim_with_outbound_terms(100, Some(89), Some(10))).is_err());
+        assert!(
+            bot_claim_outbound_terms(&claim_with_outbound_terms(100, Some(u64::MAX), Some(1))).is_err()
+        );
+        assert_eq!(
+            bot_outbound_transfer_amount(50_000_000, 10_000),
+            Some(49_990_000)
+        );
+        assert_eq!(49_990_000u64.checked_add(10_000), Some(50_000_000));
+        assert_eq!(bot_outbound_transfer_amount(10_000, 10_000), None);
+    }
+
+    #[test]
+    fn replayed_no_effect_never_downgrades_a_maybe_submitted_transfer() {
+        use rumi_protocol_backend::state::BotCollateralTransferStatus as Status;
+
+        assert_eq!(bot_retry_no_effect_status(&Status::NoEffect), Status::NoEffect);
+        assert_eq!(bot_retry_no_effect_status(&Status::Reserved), Status::Ambiguous);
+        assert_eq!(bot_retry_no_effect_status(&Status::Ambiguous), Status::Ambiguous);
+        assert_eq!(bot_retry_no_effect_status(&Status::Confirmed), Status::Ambiguous);
+        assert_eq!(bot_retry_no_effect_status(&Status::FeeMismatchNoEffect), Status::NoEffect);
+    }
+
+    #[test]
+    fn bad_fee_refresh_is_bounded_to_a_proven_no_effect_tuple() {
+        use rumi_protocol_backend::state::{
+            BotCollateralTransferStatus as Status, BotCollateralTransfer,
+        };
+
+        let mut claim = claim_with_outbound_terms(50_000_000, Some(49_990_000), Some(10_000));
+        let transfer = claim.collateral_transfer.as_mut().unwrap();
+        transfer.block_index = None;
+        transfer.status = Status::Reserved;
+        // Only the claim's synchronous first dispatch may refresh a Reserved
+        // tuple: a Reserved retry can represent an earlier ambiguous attempt.
+        assert!(bot_fee_refresh_allowed(&claim, true));
+        assert!(!bot_fee_refresh_allowed(&claim, false));
+
+        // A generic no-effect such as InsufficientFunds does not qualify. Once
+        // a typed BadFee was durably recorded, one retry may use a fresh
+        // fee/timestamp tuple. Its prior attempt stays explicitly retained.
+        claim.collateral_transfer.as_mut().unwrap().status = Status::NoEffect;
+        assert!(!bot_fee_refresh_allowed(&claim, false));
+        claim.collateral_transfer.as_mut().unwrap().status = Status::FeeMismatchNoEffect;
+        assert!(bot_fee_refresh_allowed(&claim, false));
+        claim.prior_collateral_transfer = Some(BotCollateralTransfer {
+            op_nonce: 1,
+            created_at_time: 1,
+            block_index: None,
+            net_amount_e8s: Some(49_990_000),
+            fee_e8s: Some(10_000),
+            status: Status::NoEffect,
+        });
+        assert!(!bot_fee_refresh_allowed(&claim, false));
+
+        // A BadFee after a potentially submitted tuple never authorizes a new
+        // fee or nonce; it remains ambiguous for exact-identity reconciliation.
+        claim.prior_collateral_transfer = None;
+        claim.collateral_transfer.as_mut().unwrap().status = Status::Ambiguous;
+        assert!(!bot_fee_refresh_allowed(&claim, true));
+        assert_eq!(bot_retry_no_effect_status(&Status::Ambiguous), Status::Ambiguous);
     }
 
     #[test]
@@ -10061,7 +10405,7 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
     // A pre-transfer journal is also the admission fence for proof cutover.
     // If the first reply was lost, retry the exact persisted ICRC dedup tuple;
     // never allocate a new transfer or re-claim a different generation.
-    if let Some(claim) = read_state(|s| s.bot_claims.get(&vault_id).cloned()) {
+    if let Some(mut claim) = read_state(|s| s.bot_claims.get(&vault_id).cloned()) {
         if claim.collateral_return_proof.is_some() {
             return Err(ProtocolError::GenericError(
                 "Collateral return is already recorded; retry cancellation instead".into(),
@@ -10072,22 +10416,50 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
                 "This legacy claim has no persisted transfer tuple and requires manual reconciliation".into(),
             ));
         };
-        if transfer.block_index.is_none() {
-            let result = management::transfer_collateral_with_nonce_status(
-                claim.collateral_amount,
-                caller,
-                claim.collateral_type,
-                transfer.op_nonce,
+        let net_amount = transfer.net_amount_e8s.ok_or_else(|| {
+            ProtocolError::GenericError(
+                "This claim lacks its persisted outbound net amount and requires manual reconciliation".into(),
             )
-            .await;
+        })?;
+        let fee_e8s = transfer.fee_e8s.ok_or_else(|| {
+            ProtocolError::GenericError(
+                "This claim lacks its persisted outbound fee and requires manual reconciliation".into(),
+            )
+        })?;
+        if net_amount.checked_add(fee_e8s) != Some(claim.collateral_amount) {
+            return Err(ProtocolError::GenericError(
+                "Persisted outbound net amount plus fee does not equal gross collateral".into(),
+            ));
+        }
+        if transfer.block_index.is_none() {
+            // A persisted Reserved/Ambiguous status may follow an interrupted
+            // dispatch whose call committed before the reply was lost. Only a
+            // previously recorded typed no-effect result proves the old tuple
+            // did not commit; do not downgrade an ambiguous retry on BadFee.
+            let prior_status = transfer.status.clone();
+            let (updated_claim, result, refreshed_tuple) =
+                dispatch_bot_claim_transfer(claim, caller, false).await;
+            claim = updated_claim;
             let block = match result {
                 Ok(block) => block,
                 Err(error) => {
                     let (status, protocol_error) = match error {
-                        management::DurableTransferError::LedgerNoEffect(error) => (
-                            rumi_protocol_backend::state::BotCollateralTransferStatus::NoEffect,
-                            ProtocolError::GenericError(format!("Collateral transfer had definitive no-effect; retry reuses the journaled nonce: {:?}", error)),
-                        ),
+                        management::DurableTransferError::LedgerNoEffect(error) => {
+                            let status = bot_recorded_no_effect_status(
+                                &prior_status,
+                                &error,
+                                false,
+                                refreshed_tuple,
+                            );
+                            let protocol_error = if status
+                                == rumi_protocol_backend::state::BotCollateralTransferStatus::NoEffect
+                            {
+                                ProtocolError::GenericError(format!("Collateral transfer had definitive no-effect; retry reuses the journaled tuple: {:?}", error))
+                            } else {
+                                ProtocolError::TemporarilyUnavailable(format!("A retried collateral transfer returned no-effect, but a prior dispatch may have committed; preserve the original tuple for reconciliation: {:?}", error))
+                            };
+                            (status, protocol_error)
+                        }
                         management::DurableTransferError::AmbiguousCall { code, message } => (
                             rumi_protocol_backend::state::BotCollateralTransferStatus::Ambiguous,
                             ProtocolError::TemporarilyUnavailable(format!("Collateral transfer reply is ambiguous; retry reuses the journaled nonce: {:?} {}", code, message)),
@@ -10128,6 +10500,40 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         return Ok(bot_liquidation_result_from_claim(&claim));
     }
 
+    // Fetch the ICP fee before taking the final economic snapshot. This await
+    // may interleave with vault updates, so all price, debt, collateral, and
+    // eligibility checks are repeated below after it completes. No await is
+    // allowed between that final snapshot and durable reservation.
+    let fee_ledger = read_state(|s| {
+        let vault = s.vault_id_to_vaults.get(&vault_id).ok_or_else(|| {
+            ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
+        })?;
+        if vault.bot_processing || s.bot_claims.contains_key(&vault_id) {
+            return Err(ProtocolError::GenericError(format!(
+                "Vault #{} is already being processed",
+                vault_id
+            )));
+        }
+        if !s
+            .bot_allowed_collateral_types
+            .contains(&vault.collateral_type)
+        {
+            return Err(ProtocolError::GenericError(format!(
+                "Collateral type {} is not in the bot's allowed list.",
+                vault.collateral_type
+            )));
+        }
+        if vault.collateral_type != s.icp_ledger_principal {
+            return Err(ProtocolError::GenericError(
+                "The liquidation bot currently supports ICP collateral only".into(),
+            ));
+        }
+        Ok(vault.collateral_type)
+    })?;
+    let outbound_fee = management::refresh_fee_cache(fee_ledger)
+        .await
+        .map_err(ProtocolError::GenericError)?;
+
     validate_price_for_liquidation()?;
     // ORC-001 (audit 2026-06-09): apply oracle freshness and freeze gates to
     // new admissions. Retries of an already journaled transfer bypass these
@@ -10162,7 +10568,7 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
             // The current liquidation_bot implementation swaps ICP only. An
             // allowlist entry alone does not provide a safe adapter for other
             // collateral ledgers.
-            if vault.collateral_type != s.icp_ledger_principal {
+            if vault.collateral_type != s.icp_ledger_principal || vault.collateral_type != fee_ledger {
                 return Err(ProtocolError::GenericError(
                     "The liquidation bot currently supports ICP collateral only".into(),
                 ));
@@ -10257,13 +10663,28 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
             ))
         })?;
 
+    // Query a fresh ledger fee before reserving a durable intent. The claim's
+    // gross collateral C is split into net delivered N and explicit fee F so
+    // the backend's total ledger debit is exactly C.
+    let gross_amount = collateral_to_seize.to_u64();
+    let outbound_amount = bot_outbound_transfer_amount(gross_amount, outbound_fee).ok_or_else(|| {
+        ProtocolError::GenericError(
+            "Collateral claim is too small to cover its outbound ledger fee".into(),
+        )
+    })?;
+
     // Journal the generation, budget reservation, vault lock, and exact ICRC
     // dedup tuple synchronously before dispatch. This fences proof-mode
     // admission against a suspended transfer and allows reply-loss retries to
     // reuse the same created_at_time + memo. Any error is retained for safe
     // retry/reconciliation because a call rejection may be ambiguous.
     let now = ic_cdk::api::time();
-    let claim = mutate_state(|s| {
+    let mut claim = mutate_state(|s| {
+        if s.liquidation_breaker_tripped {
+            return Err(ProtocolError::GenericError(
+                "Liquidation breaker became active before claim reservation".into(),
+            ));
+        }
         let payment_ledger_principal = s.ckusdc_ledger_principal.ok_or_else(|| {
             ProtocolError::GenericError("ckUSDC ledger is not configured".into())
         })?;
@@ -10300,8 +10721,11 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
                 op_nonce,
                 created_at_time,
                 block_index: None,
+                net_amount_e8s: Some(outbound_amount),
+                fee_e8s: Some(outbound_fee),
                 status: rumi_protocol_backend::state::BotCollateralTransferStatus::Reserved,
             }),
+            prior_collateral_transfer: None,
             payment_ledger_principal: Some(payment_ledger_principal),
             collateral_amount: collateral_to_seize.to_u64(),
             debt_amount: debt,
@@ -10314,21 +10738,31 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         Ok(claim)
     })?;
 
-    let result = rumi_protocol_backend::management::transfer_collateral_with_nonce_status(
-        claim.collateral_amount,
-        caller,
-        claim.collateral_type,
-        claim.collateral_transfer.as_ref().expect("new journal exists").op_nonce,
-    )
-    .await;
+    let prior_transfer_status = claim
+        .collateral_transfer
+        .as_ref()
+        .expect("new journal exists")
+        .status
+        .clone();
+    let (updated_claim, result, refreshed_tuple) =
+        dispatch_bot_claim_transfer(claim, caller, true).await;
+    claim = updated_claim;
     let block = match result {
         Ok(block) => block,
         Err(error) => {
             let (status, protocol_error) = match error {
-                management::DurableTransferError::LedgerNoEffect(error) => (
-                    rumi_protocol_backend::state::BotCollateralTransferStatus::NoEffect,
-                    ProtocolError::GenericError(format!("Collateral transfer had definitive no-effect; claim remains journaled: {:?}", error)),
-                ),
+                management::DurableTransferError::LedgerNoEffect(error) => {
+                    let status = bot_recorded_no_effect_status(
+                        &prior_transfer_status,
+                        &error,
+                        true,
+                        refreshed_tuple,
+                    );
+                    (
+                        status,
+                        ProtocolError::GenericError(format!("Collateral transfer had definitive no-effect; claim remains journaled: {:?}", error)),
+                    )
+                }
                 management::DurableTransferError::AmbiguousCall { code, message } => (
                     rumi_protocol_backend::state::BotCollateralTransferStatus::Ambiguous,
                     ProtocolError::TemporarilyUnavailable(format!("Collateral transfer reply is ambiguous; claim remains journaled for exact retry: {:?} {}", code, message)),
@@ -10374,8 +10808,8 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         collateral_to_seize.to_u64()
     );
 
-    log!(INFO, "[bot_claim_liquidation] Transferred {} collateral ({}) to bot for vault #{}, block {}",
-        claim.collateral_amount, collateral_type, vault_id, block);
+    log!(INFO, "[bot_claim_liquidation] Transferred {} net collateral plus {} fee ({}) to bot for vault #{}, block {}",
+        outbound_amount, outbound_fee, collateral_type, vault_id, block);
     Ok(bot_liquidation_result_from_claim(&claim))
 }
 
@@ -10447,6 +10881,8 @@ async fn bot_confirm_liquidation_with_proof(
             "Collateral claim transfer has not been reconciled from its exact ledger block".into(),
         ));
     }
+    let (outbound_net, outbound_fee) =
+        bot_claim_outbound_terms(&claim).map_err(ProtocolError::GenericError)?;
     if !bot_claim_generation_matches(claim.generation, proof.claim_generation) {
         return Err(ProtocolError::GenericError(
             "Bot payment proof claim generation does not match the active claim".into(),
@@ -10514,12 +10950,13 @@ async fn bot_confirm_liquidation_with_proof(
         let event = rumi_protocol_backend::event::Event::PartialLiquidateVault {
             vault_id: proof.vault_id,
             liquidator_payment: ICUSD::new(claim.debt_amount),
-            icp_to_liquidator: ICP::from(claim.collateral_amount),
+            icp_to_liquidator: ICP::from(outbound_net),
             liquidator: Some(caller),
             icp_rate: Some(UsdIcp::from(
                 Decimal::from(claim.collateral_price_e8s) / dec!(100_000_000),
             )),
             protocol_fee_collateral: None,
+            ledger_fee_collateral: Some(outbound_fee),
             timestamp: Some(ic_cdk::api::time()),
             three_usd_reserves_e8s: None,
         };
@@ -10554,9 +10991,15 @@ async fn bot_record_collateral_return_proof(
             "Collateral claim transfer has not been reconciled from its exact ledger block".into(),
         ));
     }
+    bot_claim_outbound_terms(&claim).map_err(ProtocolError::GenericError)?;
     if !bot_claim_generation_matches(claim.generation, proof.claim_generation) {
         return Err(ProtocolError::GenericError(
             "Collateral return proof claim generation does not match the active claim".into(),
+        ));
+    }
+    if proof.amount != claim.collateral_amount {
+        return Err(ProtocolError::GenericError(
+            "Collateral return proof must show the full gross claim amount credited; return fees are paid separately".into(),
         ));
     }
     if proof.created_at_time == 0 {
@@ -10578,7 +11021,7 @@ async fn bot_record_collateral_return_proof(
     let memo = bot_collateral_return_memo(proof.vault_id, proof.claim_generation);
     let native_icp_ledger = read_state(|s| s.icp_ledger_principal == claim.collateral_type)
         && rumi_protocol_backend::native_icp_proof::is_native_icp_ledger(claim.collateral_type);
-    let actual_fee = if native_icp_ledger {
+    let _actual_fee = if native_icp_ledger {
         let block = rumi_protocol_backend::native_icp_proof::query_block(
             claim.collateral_type,
             proof.block_index,
@@ -10621,16 +11064,6 @@ async fn bot_record_collateral_return_proof(
         })
         .map_err(ProtocolError::GenericError)?
     };
-    if !rumi_protocol_backend::native_icp_proof::return_covers_claim(
-        proof.amount,
-        actual_fee,
-        claim.collateral_amount,
-    ) {
-        return Err(ProtocolError::GenericError(
-            "Collateral return amount plus the verified ledger fee is below the claimed collateral"
-                .into(),
-        ));
-    }
     mutate_state(|s| {
         let Some(active) = s.bot_claims.get_mut(&proof.vault_id) else {
             return Err("Active bot claim disappeared during return proof verification".to_string());
@@ -10681,6 +11114,16 @@ async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
             ),
         ));
     }
+    if claim
+        .collateral_return_proof
+        .as_ref()
+        .is_some_and(|proof| proof.amount != claim.collateral_amount)
+    {
+        return Err(ProtocolError::GenericError(
+            "Legacy collateral return proof does not show the full gross claim amount; manual reconciliation required".into(),
+        ));
+    }
+    bot_claim_outbound_terms(&claim).map_err(ProtocolError::GenericError)?;
 
     mutate_state(|s| {
         let Some(active) = s.bot_claims.get(&vault_id) else {
@@ -10836,6 +11279,7 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
                 vault_id,
                 generation,
                 collateral_transfer: None,
+                prior_collateral_transfer: None,
                 payment_ledger_principal: None,
                 collateral_amount: collateral_to_seize.to_u64(),
                 debt_amount: debt_to_cover.to_u64(),
@@ -10860,6 +11304,8 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
     Ok(BotLiquidationResult {
         vault_id,
         collateral_amount: collateral_to_seize.to_u64(),
+        collateral_received_amount: None,
+        collateral_outbound_fee: None,
         debt_covered: debt_to_cover.to_u64(),
         collateral_price_e8s: collateral_price_usd.to_e8s(),
         claim_generation,
@@ -11001,6 +11447,7 @@ async fn dev_force_partial_bot_liquidate(
                 vault_id,
                 generation,
                 collateral_transfer: None,
+                prior_collateral_transfer: None,
                 payment_ledger_principal: None,
                 collateral_amount: collateral_to_seize.to_u64(),
                 debt_amount: debt_to_cover.to_u64(),
@@ -11025,6 +11472,8 @@ async fn dev_force_partial_bot_liquidate(
     Ok(BotLiquidationResult {
         vault_id,
         collateral_amount: collateral_to_seize.to_u64(),
+        collateral_received_amount: None,
+        collateral_outbound_fee: None,
         debt_covered: debt_to_cover.to_u64(),
         collateral_price_e8s: collateral_price_usd.to_e8s(),
         claim_generation,

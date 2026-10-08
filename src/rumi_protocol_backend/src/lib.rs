@@ -1121,14 +1121,88 @@ pub fn record_per_collateral_redemption_fee(
     }
 }
 
+fn bot_claim_return_is_releasable(claim: &crate::state::BotClaim) -> bool {
+    let conserving_outbound = claim
+        .collateral_transfer
+        .as_ref()
+        .filter(|transfer| transfer.block_index.is_some())
+        .and_then(|transfer| transfer.net_amount_e8s.zip(transfer.fee_e8s))
+        .is_some_and(|(net, fee)| net.checked_add(fee) == Some(claim.collateral_amount));
+    let exact_return = claim
+        .collateral_return_proof
+        .as_ref()
+        .is_some_and(|proof| proof.amount == claim.collateral_amount);
+    conserving_outbound && exact_return
+}
+
+#[cfg(test)]
+mod bot_claim_return_tests {
+    use super::bot_claim_return_is_releasable;
+    use crate::state::{
+        BotClaim, BotCollateralReturnProof, BotCollateralTransfer, BotCollateralTransferStatus,
+    };
+    use candid::Principal;
+
+    fn claim(net: Option<u64>, fee: Option<u64>, returned: Option<u64>) -> BotClaim {
+        BotClaim {
+            vault_id: 7,
+            generation: 42,
+            collateral_transfer: Some(BotCollateralTransfer {
+                op_nonce: 1,
+                created_at_time: 1,
+                block_index: Some(3),
+                net_amount_e8s: net,
+                fee_e8s: fee,
+                status: BotCollateralTransferStatus::Confirmed,
+            }),
+            prior_collateral_transfer: None,
+            payment_ledger_principal: None,
+            collateral_amount: 100,
+            debt_amount: 1,
+            collateral_type: Principal::from_slice(&[10]),
+            claimed_at: 1,
+            collateral_price_e8s: 1,
+            collateral_return_proof: returned.map(|amount| BotCollateralReturnProof {
+                block_index: 4,
+                amount,
+                created_at_time: 2,
+            }),
+        }
+    }
+
+    #[test]
+    fn auto_cancel_requires_conserving_outbound_terms_and_exact_gross_return() {
+        assert!(bot_claim_return_is_releasable(&claim(
+            Some(90),
+            Some(10),
+            Some(100)
+        )));
+        assert!(!bot_claim_return_is_releasable(&claim(
+            Some(90),
+            Some(10),
+            Some(99)
+        )));
+        assert!(!bot_claim_return_is_releasable(&claim(
+            None,
+            None,
+            Some(100)
+        )));
+        assert!(!bot_claim_return_is_releasable(&claim(
+            Some(89),
+            Some(10),
+            Some(100)
+        )));
+    }
+}
+
 pub async fn check_vaults() {
     // Auto-cancel bot claims that have been pending too long (10 minutes).
     // This prevents vaults from being permanently locked if the bot crashes.
     //
     // CL-02: a pooled default-account balance cannot prove that this claim's
-    // collateral was returned. Only the exact ICRC-3 transfer recorded for
-    // this claim generation may release its lock or restore its budget.
-    // Missing legacy proof data is held for operator reconciliation.
+    // collateral was returned. Only an exact return of gross collateral C,
+    // with a conserving persisted outbound net+fee tuple, may release its lock
+    // or restore its budget. Missing legacy proof data is held for reconciliation.
     //
     // The guard re-emits the event on every tick the gate fires (no
     // per-claim "already emitted" flag, since a state-shape change is
@@ -1145,25 +1219,19 @@ pub async fn check_vaults() {
     });
 
     for (vault_id, claim) in &expired_claims {
-        let required = read_state(|s| {
-            let fee = s
-                .get_collateral_config(&claim.collateral_type)
-                .map(|c| c.ledger_fee)
-                .unwrap_or(0);
-            claim.collateral_amount.saturating_sub(fee)
-        });
+        let required = claim.collateral_amount;
 
-        if claim.collateral_return_proof.is_none() {
+        if !bot_claim_return_is_releasable(claim) {
             log!(
                 INFO,
-                "[CL-02] auto-cancel deferred for vault #{}: no verified return block for claim generation {}",
+                "[CL-02] auto-cancel deferred for vault #{}: exact gross return proof or conserving outbound terms missing for claim generation {}",
                 vault_id,
                 claim.generation
             );
             mutate_state(|s| {
                 if s.bot_claims.get(vault_id).is_some_and(|active| {
                     active.generation == claim.generation
-                        && active.collateral_return_proof.is_none()
+                        && !bot_claim_return_is_releasable(active)
                 }) {
                     crate::event::record_bot_claim_reconciliation_needed(
                         s, *vault_id, 0, required,
@@ -1173,13 +1241,14 @@ pub async fn check_vaults() {
             continue;
         }
 
-        // The proof was checked against ICRC-3 and persisted by
-        // bot_record_collateral_return_proof. It is bound to this claim
+        // The proof was checked against native query_blocks or ICRC-3 and
+        // persisted by bot_record_collateral_return_proof. It is bound to this claim
         // generation and must still match before cleanup.
         let still_same_claim = read_state(|s| {
             s.bot_claims.get(vault_id).is_some_and(|active| {
                 active.generation == claim.generation
                     && active.collateral_return_proof == claim.collateral_return_proof
+                    && bot_claim_return_is_releasable(active)
             })
         });
         if !still_same_claim {
@@ -1198,6 +1267,7 @@ pub async fn check_vaults() {
             if !s.bot_claims.get(vault_id).is_some_and(|active| {
                 active.generation == claim.generation
                     && active.collateral_return_proof == claim.collateral_return_proof
+                    && bot_claim_return_is_releasable(active)
             }) {
                 return;
             }
