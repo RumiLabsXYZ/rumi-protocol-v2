@@ -110,8 +110,58 @@ pub async fn payout_to_user(
     to: Principal,
     gross: u128,
     swap_context: Option<crate::payouts::PayoutSwapContext>,
-) -> Result<(), PayoutFailure> {
+) -> Result<u64, PayoutFailure> {
+    payout_to_user_inner(kind, token_index, ledger, symbol, to, gross, swap_context, None).await
+}
+
+/// Create and execute the unique refund entitlement for a proven no-effect
+/// swap output. The parent/child link is stable before the first refund call.
+pub async fn payout_compensation(
+    parent_id: u64,
+    token_index: u8,
+    ledger: Principal,
+    symbol: &str,
+    to: Principal,
+    gross: u128,
+) -> Result<u64, PayoutFailure> {
+    payout_to_user_inner(
+        PayoutKind::SwapInputRefund,
+        token_index,
+        ledger,
+        symbol,
+        to,
+        gross,
+        None,
+        Some(parent_id),
+    )
+    .await
+}
+
+async fn payout_to_user_inner(
+    kind: PayoutKind,
+    token_index: u8,
+    ledger: Principal,
+    symbol: &str,
+    to: Principal,
+    gross: u128,
+    swap_context: Option<crate::payouts::PayoutSwapContext>,
+    compensation_for: Option<u64>,
+) -> Result<u64, PayoutFailure> {
     let fee = ledger_fee(ledger).await;
+    if let Some(parent_id) = compensation_for {
+        let parent = crate::payouts::get(parent_id).ok_or_else(|| PayoutFailure {
+            id: parent_id,
+            reason: "swap output entitlement missing; compensation refused".into(),
+            ambiguous: true,
+        })?;
+        if let Some(existing) = parent.compensation_id {
+            return Err(PayoutFailure {
+                id: existing,
+                reason: "swap compensation already exists; recover its exact identity".into(),
+                ambiguous: true,
+            });
+        }
+    }
     let id = crate::storage::pending_claims::next_id();
     let mut attempt = make_attempt(id, 0, ledger, to, gross, fee);
     let mut entitlement = PayoutEntitlement {
@@ -123,9 +173,21 @@ pub async fn payout_to_user(
         gross,
         kind,
         swap_context,
+        compensation_id: None,
+        compensation_for,
         settled: false,
         attempts: vec![attempt.clone()],
     };
+    if let Some(parent_id) = compensation_for {
+        let mut parent = crate::payouts::get(parent_id).expect("validated compensation parent");
+        parent.compensation_id = Some(id);
+        crate::payouts::append(
+            parent_id,
+            PayoutJournalEventKind::CompensationBound { compensation_id: id },
+        );
+        crate::payouts::save(parent);
+    }
+
     crate::payouts::append(
         id,
         PayoutJournalEventKind::Prepared { attempt: attempt.clone() },
@@ -143,7 +205,12 @@ pub async fn payout_to_user(
         crate::payouts::save(entitlement);
         return Err(PayoutFailure { id, reason, ambiguous: false });
     }
-    execute_payout_attempt(&mut entitlement, 0, false).await
+    let payout_id = entitlement.id;
+    execute_payout_attempt(&mut entitlement, 0, false).await?;
+    if kind != PayoutKind::SwapOutput {
+        crate::payouts::mark_settled(payout_id);
+    }
+    Ok(payout_id)
 }
 
 /// Recover a bound payout claim. Ambiguous attempts replay only the exact same

@@ -223,6 +223,20 @@ fn payout(h: &Harness, owner: Principal, id: u64) -> PayoutEntitlement {
     .unwrap()
 }
 
+fn payouts(h: &Harness, owner: Principal) -> Vec<PayoutEntitlement> {
+    decode_one(&reply(
+        h.pic
+            .query_call(
+                h.pool,
+                owner,
+                "get_payout_entitlements",
+                encode_args((0u64, 100u64)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap()
+}
+
 fn call_ledger_flag(h: &Harness, ledger: Principal, method: &str, value: bool) {
     h.pic
         .update_call(ledger, h.user, method, encode_one(value).unwrap())
@@ -493,4 +507,94 @@ fn proven_bad_fee_starts_new_exact_attempt_with_refreshed_fee() {
     assert_eq!(updated.attempts[1].transfer.fee, 250);
     assert_eq!(updated.attempts[1].transfer.net + 250, claim.amount);
     assert_eq!(balance(&h, h.ledgers[0], h.user) - before_retry, claim.amount - 250);
+}
+
+#[test]
+fn swap_compensation_identity_survives_upgrade_and_repeated_parent_recovery() {
+    let h = setup();
+    let input_before = balance(&h, h.ledgers[0], h.user);
+    h.pic
+        .update_call(
+            h.ledgers[1],
+            h.user,
+            "set_bad_fee_failures",
+            encode_one(1u32).unwrap(),
+        )
+        .unwrap();
+    h.pic
+        .update_call(
+            h.ledgers[0],
+            h.user,
+            "set_phantom_failures",
+            encode_one(1u32).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<u128, ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "swap",
+                encode_args((0u8, 1u8, 100_000_000u128, 1u128)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(result, Err(ThreePoolError::TransferFailed { .. })));
+
+    let before_upgrade = payouts(&h, h.user);
+    let output = before_upgrade
+        .iter()
+        .find(|p| p.kind == PayoutKind::SwapOutput)
+        .unwrap();
+    let compensation_id = output.compensation_id.expect("refund link must be persisted");
+    let compensation = payout(&h, h.user, compensation_id);
+    assert_eq!(compensation.compensation_for, Some(output.id));
+    assert!(matches!(
+        &compensation.attempts[0].outcome,
+        PayoutOutcome::Unresolved { .. }
+    ));
+    let after_lost_refund_reply = balance(&h, h.ledgers[0], h.user);
+    assert_eq!(input_before - after_lost_refund_reply, 10_000);
+
+    h.pic
+        .upgrade_canister(
+            h.pool,
+            wasm_artifact("rumi_3pool.wasm"),
+            encode_args(()).unwrap(),
+            None,
+        )
+        .unwrap();
+    let recovery: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "claim_pending",
+                encode_one(compensation_id).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    recovery.expect("exact refund replay should find the original committed transfer");
+    let after_replay = balance(&h, h.ledgers[0], h.user);
+    assert_eq!(after_replay, after_lost_refund_reply);
+    let closed_output = payout(&h, h.user, output.id);
+    assert!(closed_output.settled);
+    assert_eq!(closed_output.compensation_id, Some(compensation_id));
+
+    let repeated: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "claim_pending",
+                encode_one(output.id).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    repeated.expect("repeated parent recovery must resolve the same compensation");
+    assert_eq!(balance(&h, h.ledgers[0], h.user), after_replay);
 }

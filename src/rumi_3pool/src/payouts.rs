@@ -84,6 +84,11 @@ pub struct PayoutEntitlement {
     pub gross: u128,
     pub kind: PayoutKind,
     pub swap_context: Option<PayoutSwapContext>,
+    /// Exactly one durable input-refund entitlement may compensate a proven
+    /// no-effect swap output. Bound before that refund's ledger call.
+    pub compensation_id: Option<u64>,
+    /// Set on the refund entitlement so recovery can close the output leg.
+    pub compensation_for: Option<u64>,
     pub settled: bool,
     pub attempts: Vec<PayoutAttempt>,
 }
@@ -96,6 +101,7 @@ pub enum PayoutJournalEventKind {
     RejectedNoTransfer { attempt_number: u32, reason: String },
     Unresolved { attempt_number: u32, reason: String },
     Settled,
+    CompensationBound { compensation_id: u64 },
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,6 +136,19 @@ pub fn save(value: PayoutEntitlement) {
     storage::payouts::insert(value);
 }
 
+/// Close an entitlement once its ledger transfer and corresponding pool-side
+/// accounting have both been committed.
+pub fn mark_settled(id: u64) -> bool {
+    let Some(mut value) = get(id) else { return false };
+    if value.settled {
+        return true;
+    }
+    append(id, PayoutJournalEventKind::Settled);
+    value.settled = true;
+    save(value);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +181,10 @@ mod tests {
             symbol: "TKN".into(),
             gross: 12_000,
             kind: PayoutKind::RemoveLiquidity,
+            swap_context: None,
+            compensation_id: None,
+            compensation_for: None,
+            settled: false,
             attempts: vec![attempt],
         };
         let bytes = candid::encode_one(&entitlement).unwrap();
