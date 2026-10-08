@@ -86,6 +86,7 @@ export const idlFactory = ({ IDL }) => {
     'PaymentShortfall' : IDL.Null,
     'SwapMayHaveStarted' : IDL.Null,
     'ReturnFeeQueryPending' : IDL.Null,
+    'ReturnFeeRefreshExhausted' : IDL.Null,
   });
   const BotReturnTransferStatus = IDL.Variant({
     'ReceiptObserved' : IDL.Null,
@@ -122,6 +123,7 @@ export const idlFactory = ({ IDL }) => {
     'collateral_received_amount_e8s' : IDL.Opt(IDL.Nat64),
     'collateral_return_memo' : IDL.Vec(IDL.Nat8),
     'debt_covered_e8s' : IDL.Nat64,
+    'failed_return_attempts' : IDL.Vec(BotReturnTransferJournal),
   });
   const BotPaymentStatus = IDL.Variant({
     'ReceiptObserved' : IDL.Null,

@@ -7,6 +7,9 @@ use crate::swap;
 
 const CONFIRM_ATTEMPTS: u8 = 5;
 const CANCEL_ATTEMPTS: u8 = 3;
+/// Number of fee-refresh tuples permitted after the original first dispatch.
+/// Every typed first-dispatch BadFee is retained before a refresh.
+const MAX_AUTO_RETURN_FEE_REFRESHES: usize = 3;
 
 /// Max number of times the bot will re-attempt `bot_claim_liquidation` for a
 /// single vault before giving up and letting the cascade escalate to the SP.
@@ -460,6 +463,7 @@ pub async fn process_pending() {
                     collateral_price_e8s: r.collateral_price_e8s,
                     payment_memo: r.payment_memo.clone(),
                     collateral_return_memo: r.collateral_return_memo.clone(),
+                    failed_return_attempts: Vec::new(),
                     collateral_return: None,
                     status: state::BotClaimJournalStatus::SwapMayHaveStarted,
                 });
@@ -633,23 +637,27 @@ pub async fn process_pending() {
                             created_at_time: receipt.created_at_time,
                         },
                     ).await
-                }
-                Err(e) => {
-                    state::mutate_state(|s| {
-                        if let Some(intent) = s.pending_claims.get_mut(&vault.vault_id)
-                            .and_then(|claim| claim.collateral_return.as_mut()) {
-                            intent.status = match &e {
-                                swap::TransferAttemptError::NoEffect(_) => {
-                                    state::BotReturnTransferStatus::NoEffect
-                                },
-                                swap::TransferAttemptError::BadFee { .. } => {
-                                    bad_fee_return_status(false)
-                                },
-                                swap::TransferAttemptError::Ambiguous(_) => state::BotReturnTransferStatus::Ambiguous,
-                            };
+            }
+            Err(e) => {
+                    match &e {
+                        swap::TransferAttemptError::BadFee { expected_fee } => {
+                            let refresh_scheduled = record_first_dispatch_bad_fee(vault.vault_id);
+                            log!(crate::INFO, "ICP return for vault #{} received typed first-dispatch BadFee (expected {}). The no-effect tuple was retained; fee refresh scheduled: {}", vault.vault_id, expected_fee, refresh_scheduled == Some(true));
                         }
-                    });
-                    state::save_config_to_stable();
+                        _ => {
+                            state::mutate_state(|s| {
+                                if let Some(intent) = s.pending_claims.get_mut(&vault.vault_id)
+                                    .and_then(|claim| claim.collateral_return.as_mut()) {
+                                    intent.status = match &e {
+                                        swap::TransferAttemptError::NoEffect(_) => state::BotReturnTransferStatus::NoEffect,
+                                        swap::TransferAttemptError::BadFee { .. } => unreachable!(),
+                                        swap::TransferAttemptError::Ambiguous(_) => state::BotReturnTransferStatus::Ambiguous,
+                                    };
+                                }
+                            });
+                            state::save_config_to_stable();
+                        }
+                    }
                     Err(format!("{:?}", e))
                 },
             };
@@ -1108,6 +1116,7 @@ async fn create_and_send_return_intent(
 ) -> Result<swap::TransferReceipt, swap::TransferAttemptError> {
     if claim.status != state::BotClaimJournalStatus::ReturnFeeQueryPending
         || claim.collateral_return.is_some()
+        || claim.failed_return_attempts.len() > MAX_AUTO_RETURN_FEE_REFRESHES
     {
         return Err(swap::TransferAttemptError::NoEffect(
             "new ICP return is not in the fee-query phase".into(),
@@ -1151,6 +1160,15 @@ async fn create_and_send_return_intent(
             available_balance_e8s, required_balance_e8s
         )));
     }
+    let created_at_time = next_return_created_at_time(
+        ic_cdk::api::time(),
+        &claim.failed_return_attempts,
+    )
+    .ok_or_else(|| {
+        swap::TransferAttemptError::NoEffect(
+            "cannot create a unique ICP return timestamp after the prior BadFee attempt".into(),
+        )
+    })?;
     let intent = state::BotReturnTransferJournal {
         ledger_principal: config.icp_ledger,
         backend_principal: config.backend_principal,
@@ -1158,7 +1176,7 @@ async fn create_and_send_return_intent(
         fee_e8s,
         transfer_fee_e8s: Some(fee_e8s),
         memo: claim.collateral_return_memo.clone(),
-        created_at_time: ic_cdk::api::time(),
+        created_at_time,
         receipt: None,
         status: state::BotReturnTransferStatus::Prepared,
     };
@@ -1218,6 +1236,58 @@ fn bad_fee_return_status(prior_dispatch_may_have_committed: bool) -> state::BotR
     }
 }
 
+/// Retain a tuple only when it was dispatched for the first time and the
+/// ledger returned typed BadFee, which proves that tuple had no effect.
+/// ReturnFeeQueryPending authorizes another fee query while the bounded retry
+/// budget remains; exhaustion leaves the complete history operator-held.
+fn archive_first_dispatch_bad_fee(
+    claim: &mut state::BotClaimJournal,
+) -> Option<bool> {
+    if claim.status != state::BotClaimJournalStatus::ReturnPending {
+        return None;
+    }
+    let intent = claim.collateral_return.as_ref()?;
+    if intent.status != state::BotReturnTransferStatus::Prepared
+        || intent.receipt.is_some()
+        || intent.transfer_fee_e8s.is_none()
+    {
+        return None;
+    }
+
+    let mut failed = claim.collateral_return.take()?;
+    failed.status = state::BotReturnTransferStatus::NoEffect;
+    claim.failed_return_attempts.push(failed);
+    let refresh_scheduled = claim.failed_return_attempts.len() <= MAX_AUTO_RETURN_FEE_REFRESHES;
+    claim.status = if refresh_scheduled {
+        state::BotClaimJournalStatus::ReturnFeeQueryPending
+    } else {
+        state::BotClaimJournalStatus::ReturnFeeRefreshExhausted
+    };
+    Some(refresh_scheduled)
+}
+
+fn record_first_dispatch_bad_fee(vault_id: u64) -> Option<bool> {
+    let result = state::mutate_state(|s| {
+        s.pending_claims
+            .get_mut(&vault_id)
+            .and_then(archive_first_dispatch_bad_fee)
+    });
+    if result.is_some() {
+        state::save_config_to_stable();
+    }
+    result
+}
+
+fn next_return_created_at_time(
+    now: u64,
+    failed_attempts: &[state::BotReturnTransferJournal],
+) -> Option<u64> {
+    match failed_attempts.last() {
+        Some(previous) => previous.created_at_time.checked_add(1).map(|next| now.max(next)),
+        None => Some(now),
+    }
+}
+
 /// Resume a claim-bound collateral return with the exact ledger dedup tuple.
 /// Legacy journals without an intent, and intents outside the dedup window,
 /// remain operator-held for exact ledger history reconciliation.
@@ -1237,6 +1307,10 @@ async fn resume_pending_return(config: &BotConfig) -> bool {
             log!(crate::INFO, "STUCK: fee-query phase for vault #{} unexpectedly already has a return tuple", claim.vault_id);
             return true;
         }
+        if claim.failed_return_attempts.len() > MAX_AUTO_RETURN_FEE_REFRESHES {
+            log!(crate::INFO, "STUCK: automatic ICP return fee refresh budget is exhausted for vault #{}", claim.vault_id);
+            return true;
+        }
         match create_and_send_return_intent(config, &claim).await {
             Ok(receipt) => {
                 claim = state::read_state(|s| {
@@ -1251,17 +1325,8 @@ async fn resume_pending_return(config: &BotConfig) -> bool {
                 state::save_config_to_stable();
             }
             Err(swap::TransferAttemptError::BadFee { expected_fee }) => {
-                claim.collateral_return = state::read_state(|s| {
-                    s.pending_claims.get(&claim.vault_id)
-                        .and_then(|active| active.collateral_return.clone())
-                });
-                if let Some(intent) = claim.collateral_return.as_mut() {
-                    intent.status = bad_fee_return_status(false);
-                }
-                claim.status = state::BotClaimJournalStatus::ReturnPending;
-                state::mutate_state(|s| { s.pending_claims.insert(claim.vault_id, claim.clone()); });
-                state::save_config_to_stable();
-                log!(crate::INFO, "STUCK: first ICP return for vault #{} was rejected with BadFee (expected {}); tuple is held for operator reconciliation", claim.vault_id, expected_fee);
+                let refresh_scheduled = record_first_dispatch_bad_fee(claim.vault_id);
+                log!(crate::INFO, "First-dispatch ICP return for vault #{} received typed BadFee (expected {}). The no-effect tuple was retained; fee refresh scheduled: {}", claim.vault_id, expected_fee, refresh_scheduled == Some(true));
                 return true;
             }
             Err(swap::TransferAttemptError::Ambiguous(error)) => {
@@ -1618,6 +1683,126 @@ mod tests {
             bad_fee_return_status(true),
             state::BotReturnTransferStatus::FeeMismatchAmbiguous
         );
+    }
+
+    #[test]
+    fn typed_first_dispatch_bad_fee_refreshes_are_lossless_unique_and_bounded() {
+        let ledger = candid::Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap();
+        let backend = candid::Principal::from_text("tfesu-vyaaa-aaaap-qrd7a-cai").unwrap();
+        let mut claim = state::BotClaimJournal {
+            vault_id: 19,
+            claim_generation: 2,
+            debt_covered_e8s: 100,
+            collateral_amount_e8s: 50,
+            collateral_received_amount_e8s: Some(49),
+            collateral_outbound_fee_e8s: Some(1),
+            collateral_price_e8s: 200,
+            payment_memo: b"payment".to_vec(),
+            collateral_return_memo: b"generation-bound-return-memo".to_vec(),
+            failed_return_attempts: Vec::new(),
+            collateral_return: Some(state::BotReturnTransferJournal {
+                ledger_principal: ledger,
+                backend_principal: backend,
+                amount_e8s: 50,
+                fee_e8s: 10,
+                transfer_fee_e8s: Some(10),
+                memo: b"generation-bound-return-memo".to_vec(),
+                created_at_time: 100,
+                receipt: None,
+                status: state::BotReturnTransferStatus::Prepared,
+            }),
+            status: state::BotClaimJournalStatus::ReturnPending,
+        };
+
+        for prior_bad_fee_count in 1..=MAX_AUTO_RETURN_FEE_REFRESHES + 1 {
+            let failed = claim.collateral_return.as_ref().unwrap().clone();
+            let refresh_scheduled = archive_first_dispatch_bad_fee(&mut claim).unwrap();
+            assert_eq!(
+                refresh_scheduled,
+                prior_bad_fee_count <= MAX_AUTO_RETURN_FEE_REFRESHES
+            );
+            let archived = claim.failed_return_attempts.last().unwrap();
+            assert_eq!(archived.ledger_principal, failed.ledger_principal);
+            assert_eq!(archived.backend_principal, failed.backend_principal);
+            assert_eq!(archived.amount_e8s, failed.amount_e8s);
+            assert_eq!(archived.fee_e8s, failed.fee_e8s);
+            assert_eq!(archived.transfer_fee_e8s, failed.transfer_fee_e8s);
+            assert_eq!(archived.memo, failed.memo);
+            assert_eq!(archived.created_at_time, failed.created_at_time);
+            assert_eq!(archived.status, state::BotReturnTransferStatus::NoEffect);
+            assert!(archived.receipt.is_none());
+
+            if refresh_scheduled {
+                assert_eq!(claim.status, state::BotClaimJournalStatus::ReturnFeeQueryPending);
+                assert!(claim.collateral_return.is_none());
+                let fresh_time = next_return_created_at_time(100, &claim.failed_return_attempts)
+                    .unwrap();
+                assert!(fresh_time > failed.created_at_time);
+                claim.collateral_return = Some(state::BotReturnTransferJournal {
+                    ledger_principal: ledger,
+                    backend_principal: backend,
+                    amount_e8s: 50,
+                    fee_e8s: 11 + prior_bad_fee_count as u64,
+                    transfer_fee_e8s: Some(11 + prior_bad_fee_count as u64),
+                    memo: claim.collateral_return_memo.clone(),
+                    created_at_time: fresh_time,
+                    receipt: None,
+                    status: state::BotReturnTransferStatus::Prepared,
+                });
+                claim.status = state::BotClaimJournalStatus::ReturnPending;
+            }
+        }
+
+        assert_eq!(claim.failed_return_attempts.len(), 4);
+        assert!(claim.collateral_return.is_none());
+        assert_eq!(claim.status, state::BotClaimJournalStatus::ReturnFeeRefreshExhausted);
+        let timestamps = claim
+            .failed_return_attempts
+            .iter()
+            .map(|attempt| attempt.created_at_time)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(timestamps.len(), 4, "each attempted tuple must have a distinct dedup timestamp");
+        assert!(claim.failed_return_attempts.iter().all(|attempt| {
+            attempt.memo == claim.collateral_return_memo
+                && attempt.status == state::BotReturnTransferStatus::NoEffect
+        }));
+    }
+
+    #[test]
+    fn ambiguous_or_legacy_return_attempts_cannot_be_fee_refreshed() {
+        let mut claim = state::BotClaimJournal {
+            vault_id: 19,
+            claim_generation: 2,
+            debt_covered_e8s: 100,
+            collateral_amount_e8s: 50,
+            collateral_received_amount_e8s: Some(49),
+            collateral_outbound_fee_e8s: Some(1),
+            collateral_price_e8s: 200,
+            payment_memo: b"payment".to_vec(),
+            collateral_return_memo: b"generation-bound-return-memo".to_vec(),
+            failed_return_attempts: Vec::new(),
+            collateral_return: Some(state::BotReturnTransferJournal {
+                ledger_principal: candid::Principal::anonymous(),
+                backend_principal: candid::Principal::anonymous(),
+                amount_e8s: 50,
+                fee_e8s: 10,
+                transfer_fee_e8s: Some(10),
+                memo: b"generation-bound-return-memo".to_vec(),
+                created_at_time: 100,
+                receipt: None,
+                status: state::BotReturnTransferStatus::Ambiguous,
+            }),
+            status: state::BotClaimJournalStatus::ReturnPending,
+        };
+        assert_eq!(archive_first_dispatch_bad_fee(&mut claim), None);
+        assert_eq!(claim.failed_return_attempts.len(), 0);
+        assert!(claim.collateral_return.is_some());
+
+        claim.collateral_return.as_mut().unwrap().status = state::BotReturnTransferStatus::Prepared;
+        claim.collateral_return.as_mut().unwrap().transfer_fee_e8s = None;
+        assert_eq!(archive_first_dispatch_bad_fee(&mut claim), None);
+        assert_eq!(claim.failed_return_attempts.len(), 0);
+        assert!(claim.collateral_return.is_some());
     }
 
     #[test]

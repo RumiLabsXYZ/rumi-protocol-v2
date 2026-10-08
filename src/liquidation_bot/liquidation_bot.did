@@ -123,7 +123,7 @@ type BotReturnTransferJournal = record {
   receipt : opt TransferReceipt;
   status : BotReturnTransferStatus;
 };
-type BotClaimJournalStatus = variant { SwapMayHaveStarted; ReturnFeeQueryPending; ReturnPending; PaymentShortfall };
+type BotClaimJournalStatus = variant { SwapMayHaveStarted; ReturnFeeQueryPending; ReturnFeeRefreshExhausted; ReturnPending; PaymentShortfall };
 type BotClaimJournal = record {
   vault_id : nat64;
   claim_generation : nat64;
@@ -134,6 +134,7 @@ type BotClaimJournal = record {
   collateral_price_e8s : nat64;
   payment_memo : blob;
   collateral_return_memo : blob;
+  failed_return_attempts : vec BotReturnTransferJournal;
   collateral_return : opt BotReturnTransferJournal;
   status : BotClaimJournalStatus;
 };

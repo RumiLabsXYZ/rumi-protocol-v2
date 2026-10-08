@@ -172,6 +172,11 @@ pub struct BotClaimJournal {
     pub collateral_price_e8s: u64,
     pub payment_memo: Vec<u8>,
     pub collateral_return_memo: Vec<u8>,
+    /// Exact return tuples rejected with a typed first-dispatch BadFee. These
+    /// are proven no-effect attempts retained so fee refresh never erases an
+    /// earlier dedup identity. Bounded by the automatic refresh limit.
+    #[serde(default)]
+    pub failed_return_attempts: Vec<BotReturnTransferJournal>,
     /// Exact return transfer intent, persisted before dispatch. An ambiguous
     /// reply can therefore be retried with the same ICRC dedup tuple.
     #[serde(default)]
@@ -213,8 +218,13 @@ pub enum BotReturnTransferStatus {
 pub enum BotClaimJournalStatus {
     SwapMayHaveStarted,
     /// A new return is authorized but no transfer tuple exists yet. Querying
-    /// the fee and preparing the tuple is safe because no transfer was sent.
+    /// the fee and preparing the tuple is safe because no transfer was sent,
+    /// or the prior tuple received a typed first-dispatch BadFee.
     ReturnFeeQueryPending,
+    /// The bounded automatic fee refresh attempts were exhausted after
+    /// definitive first-dispatch BadFee responses. Operator reconciliation is
+    /// required before another tuple can be created.
+    ReturnFeeRefreshExhausted,
     ReturnPending,
     PaymentShortfall,
 }
@@ -538,6 +548,7 @@ mod tests {
             collateral_price_e8s: 200_000_000,
             payment_memo: b"RUMI-BOT-PAYMENT-V1:73:42".to_vec(),
             collateral_return_memo: b"RUMI-BOT-RETURN-V1:73:42".to_vec(),
+            failed_return_attempts: Vec::new(),
             collateral_return: Some(BotReturnTransferJournal {
                 ledger_principal: Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap(),
                 backend_principal: Principal::from_text("tfesu-vyaaa-aaaap-qrd7a-cai").unwrap(),
@@ -590,6 +601,10 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("collateral_outbound_fee_e8s");
+        legacy_snapshot["pending_claims"][vault_id.to_string()]
+            .as_object_mut()
+            .unwrap()
+            .remove("failed_return_attempts");
         let legacy_restored: BotState = serde_json::from_value(legacy_snapshot).unwrap();
         assert!(!legacy_restored.pending_payments[&vault_id].shortfall_receipt_observed);
         assert_eq!(
@@ -601,6 +616,7 @@ mod tests {
         let legacy_claim = &legacy_restored.pending_claims[&vault_id];
         assert_eq!(legacy_claim.collateral_received_amount_e8s, None);
         assert_eq!(legacy_claim.collateral_outbound_fee_e8s, None);
+        assert!(legacy_claim.failed_return_attempts.is_empty());
         assert_eq!(
             legacy_restored.pending_payments[&vault_id].collateral_received_amount_e8s,
             None

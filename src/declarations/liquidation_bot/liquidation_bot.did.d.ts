@@ -21,11 +21,13 @@ export interface BotClaimJournal {
   'collateral_received_amount_e8s' : [] | [bigint],
   'collateral_return_memo' : Uint8Array | number[],
   'debt_covered_e8s' : bigint,
+  'failed_return_attempts' : Array<BotReturnTransferJournal>,
 }
 export type BotClaimJournalStatus = { 'ReturnPending' : null } |
   { 'PaymentShortfall' : null } |
   { 'SwapMayHaveStarted' : null } |
-  { 'ReturnFeeQueryPending' : null };
+  { 'ReturnFeeQueryPending' : null } |
+  { 'ReturnFeeRefreshExhausted' : null };
 export interface BotConfig {
   'ckusdt_ledger' : [] | [Principal],
   'icp_fee_e8s' : [] | [bigint],
