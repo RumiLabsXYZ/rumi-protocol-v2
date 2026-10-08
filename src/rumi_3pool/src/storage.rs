@@ -12,7 +12,7 @@
 //     first time on the new wasm (one-shot drain from the legacy blob) or
 //     subsequent times (load `SlimState` from its cell).
 //
-// Memory ID layout (34 IDs used; 255 available):
+// Memory ID layout (37 IDs used; 255 available):
 //
 //   0       SlimState cell              — bounded residual heap
 //   1       lp_balances                 — BTreeMap<Principal, u128>
@@ -40,6 +40,9 @@
 //   31      payout_current              — authoritative exact identity + recovery state
 //   32      payout_fence cell            — unresolved ordinary swap reserves
 //   33      payout_owner_index           — retained per-owner payout listing (no-effect gaps omitted)
+//   34      unsettled_input_index        — (token, payout id) lookup for donation fence
+//   35      payout_input_index_cursor     — resumable bounded index backfill cursor
+//   36      payout_input_index_complete   — backfill completion marker
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -101,6 +104,12 @@ const MEM_NEXT_PAYOUT_EVENT_ID: MemoryId = MemoryId::new(30);
 const MEM_PAYOUT_CURRENT: MemoryId = MemoryId::new(31);
 const MEM_PAYOUT_FENCE: MemoryId = MemoryId::new(32);
 const MEM_PAYOUT_OWNER_INDEX: MemoryId = MemoryId::new(33);
+const MEM_UNSETTLED_INPUT_INDEX: MemoryId = MemoryId::new(34);
+const MEM_PAYOUT_INPUT_INDEX_CURSOR: MemoryId = MemoryId::new(35);
+const MEM_PAYOUT_INPUT_INDEX_COMPLETE: MemoryId = MemoryId::new(36);
+
+const PAYOUT_INPUT_INDEX_CURSOR_START: u128 = u128::MAX;
+const PAYOUT_INPUT_INDEX_BACKFILL_BATCH: usize = 16;
 
 // ─── SlimState ───────────────────────────────────────────────────────────────
 //
@@ -611,6 +620,21 @@ thread_local! {
     );
     pub(crate) static PAYOUT_OWNER_INDEX: RefCell<StableBTreeMap<PayoutOwnerKey, Unit, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_OWNER_INDEX))));
+    pub(crate) static UNSETTLED_INPUT_INDEX: RefCell<StableBTreeMap<StorableU128, Unit, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_UNSETTLED_INPUT_INDEX))));
+    pub(crate) static PAYOUT_INPUT_INDEX_CURSOR: RefCell<StableCell<StorableU128, Memory>> =
+        RefCell::new(StableCell::init(
+            MM.with(|m| m.borrow().get(MEM_PAYOUT_INPUT_INDEX_CURSOR)),
+            StorableU128(PAYOUT_INPUT_INDEX_CURSOR_START),
+        ).expect("init payout input index cursor"));
+    pub(crate) static PAYOUT_INPUT_INDEX_COMPLETE: RefCell<StableCell<StorableU128, Memory>> =
+        RefCell::new(StableCell::init(
+            MM.with(|m| m.borrow().get(MEM_PAYOUT_INPUT_INDEX_COMPLETE)),
+            StorableU128(0),
+        ).expect("init payout input index completion marker"));
+    #[cfg(feature = "test_endpoints")]
+    static TEST_PAYOUT_INPUT_INDEX_BACKFILL_BATCH: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 // ─── Public API: SlimState cell ──────────────────────────────────────────────
@@ -1075,7 +1099,15 @@ pub mod payouts {
     /// append-only node growth.
     pub fn remove_no_effect(id: u64, owner: Principal) -> bool {
         let key = StorableU128(id as u128);
-        let removed = PAYOUT_CURRENT.with(|map| map.borrow_mut().remove(&key).is_some());
+        let removed_value = PAYOUT_CURRENT.with(|map| map.borrow_mut().remove(&key));
+        let removed = removed_value.is_some();
+        if let Some(value) = removed_value.filter(is_unsettled_input) {
+            UNSETTLED_INPUT_INDEX.with(|index| {
+                index
+                    .borrow_mut()
+                    .remove(&unsettled_input_key(value.token_index, value.id));
+            });
+        }
         PAYOUT_OWNER_INDEX.with(|index| {
             index.borrow_mut().remove(&PayoutOwnerKey { owner, id });
         });
@@ -1085,16 +1117,37 @@ pub mod payouts {
     pub fn insert(value: crate::payouts::PayoutEntitlement) {
         PAYOUT_CURRENT.with(|map| {
             let key = StorableU128(value.id as u128);
-            let is_new = !map.borrow().contains_key(&key);
+            let previous = map.borrow().get(&key);
+            let is_new = previous.is_none();
+            if let Some(previous) = previous {
+                if is_unsettled_input(&previous) {
+                    UNSETTLED_INPUT_INDEX.with(|index| {
+                        index
+                            .borrow_mut()
+                            .remove(&unsettled_input_key(previous.token_index, previous.id));
+                    });
+                }
+            }
             if is_new {
                 PAYOUT_OWNER_INDEX.with(|index| {
                     index.borrow_mut().insert(
-                        PayoutOwnerKey { owner: value.owner, id: value.id },
+                        PayoutOwnerKey {
+                            owner: value.owner,
+                            id: value.id,
+                        },
                         Unit,
                     );
                 });
             }
-            map.borrow_mut().insert(StorableU128(value.id as u128), value);
+            if is_unsettled_input(&value) {
+                UNSETTLED_INPUT_INDEX.with(|index| {
+                    index
+                        .borrow_mut()
+                        .insert(unsettled_input_key(value.token_index, value.id), Unit);
+                });
+            }
+            map.borrow_mut()
+                .insert(StorableU128(value.id as u128), value);
         });
     }
 
@@ -1109,9 +1162,16 @@ pub mod payouts {
         })
     }
 
-    pub fn list_for_owner(owner: Principal, offset: u64, limit: u64) -> Vec<crate::payouts::PayoutEntitlement> {
+    pub fn list_for_owner(
+        owner: Principal,
+        offset: u64,
+        limit: u64,
+    ) -> Vec<crate::payouts::PayoutEntitlement> {
         let start = PayoutOwnerKey { owner, id: 0 };
-        let end = PayoutOwnerKey { owner, id: u64::MAX };
+        let end = PayoutOwnerKey {
+            owner,
+            id: u64::MAX,
+        };
         PAYOUT_OWNER_INDEX.with(|index| {
             let ids: Vec<u64> = index
                 .borrow()
@@ -1129,17 +1189,117 @@ pub mod payouts {
         })
     }
 
-    /// True while an inbound tuple for this token has not yet been fully
-    /// accounted or refunded. `receive_donation` uses this to avoid reclassifying
-    /// physically present but still-owned ingress as LP reserve surplus.
+    /// True while the inbound index is backfilling or an inbound tuple for this
+    /// token has not yet been fully accounted or refunded. Backfill is bounded
+    /// and resumable so an upgrade from pre-index payout state cannot make one
+    /// update scan the full retained payout history.
     pub fn has_unsettled_input_for_token(token_index: u8) -> bool {
-        PAYOUT_CURRENT.with(|map| {
-            map.borrow().iter().any(|(_, entitlement)| {
-                entitlement.token_index == token_index
-                    && entitlement.input_transfer.is_some()
-                    && !entitlement.settled
-            })
-        })
+        if !backfill_unsettled_input_index() {
+            return true;
+        }
+        let start = unsettled_input_key(token_index, 0);
+        let end = unsettled_input_key(token_index, u64::MAX);
+        UNSETTLED_INPUT_INDEX.with(|index| index.borrow().range(start..=end).next().is_some())
+    }
+
+    fn is_unsettled_input(value: &crate::payouts::PayoutEntitlement) -> bool {
+        value.input_transfer.is_some() && !value.settled
+    }
+
+    fn unsettled_input_key(token_index: u8, id: u64) -> StorableU128 {
+        StorableU128(((token_index as u128) << 64) | id as u128)
+    }
+
+    fn backfill_unsettled_input_index() -> bool {
+        if PAYOUT_INPUT_INDEX_COMPLETE.with(|complete| complete.borrow().get().0 != 0) {
+            return true;
+        }
+
+        let cursor = PAYOUT_INPUT_INDEX_CURSOR.with(|cell| cell.borrow().get().0);
+        #[cfg(feature = "test_endpoints")]
+        let batch_size = TEST_PAYOUT_INPUT_INDEX_BACKFILL_BATCH
+            .with(|batch| batch.get())
+            .unwrap_or(PAYOUT_INPUT_INDEX_BACKFILL_BATCH);
+        #[cfg(not(feature = "test_endpoints"))]
+        let batch_size = PAYOUT_INPUT_INDEX_BACKFILL_BATCH;
+        let entries: Vec<crate::payouts::PayoutEntitlement> = PAYOUT_CURRENT.with(|map| {
+            let map = map.borrow();
+            if cursor == PAYOUT_INPUT_INDEX_CURSOR_START {
+                map.iter()
+                    .take(batch_size)
+                    .map(|(_, value)| value)
+                    .collect()
+            } else {
+                map.range((
+                    std::ops::Bound::Excluded(StorableU128(cursor)),
+                    std::ops::Bound::Unbounded,
+                ))
+                .take(batch_size)
+                .map(|(_, value)| value)
+                .collect()
+            }
+        });
+
+        if entries.is_empty() {
+            PAYOUT_INPUT_INDEX_COMPLETE.with(|complete| {
+                complete
+                    .borrow_mut()
+                    .set(StorableU128(1))
+                    .expect("mark payout input index complete");
+            });
+            return true;
+        }
+
+        let last_id = entries.last().expect("non-empty backfill batch").id;
+        for value in &entries {
+            if is_unsettled_input(value) {
+                UNSETTLED_INPUT_INDEX.with(|index| {
+                    index
+                        .borrow_mut()
+                        .insert(unsettled_input_key(value.token_index, value.id), Unit);
+                });
+            }
+        }
+        PAYOUT_INPUT_INDEX_CURSOR.with(|cell| {
+            cell.borrow_mut()
+                .set(StorableU128(last_id as u128))
+                .expect("advance payout input index cursor");
+        });
+        if entries.len() < batch_size {
+            PAYOUT_INPUT_INDEX_COMPLETE.with(|complete| {
+                complete
+                    .borrow_mut()
+                    .set(StorableU128(1))
+                    .expect("mark payout input index complete");
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "test_endpoints")]
+    pub fn test_reset_unsettled_input_index_backfill() {
+        UNSETTLED_INPUT_INDEX.with(|index| index.borrow_mut().clear_new());
+        PAYOUT_INPUT_INDEX_CURSOR.with(|cell| {
+            cell.borrow_mut()
+                .set(StorableU128(PAYOUT_INPUT_INDEX_CURSOR_START))
+                .expect("reset payout input index cursor");
+        });
+        PAYOUT_INPUT_INDEX_COMPLETE.with(|complete| {
+            complete
+                .borrow_mut()
+                .set(StorableU128(0))
+                .expect("reset payout input index marker");
+        });
+        TEST_PAYOUT_INPUT_INDEX_BACKFILL_BATCH.with(|batch| batch.set(Some(1)));
+    }
+
+    #[cfg(feature = "test_endpoints")]
+    pub fn test_unsettled_input_index_state() -> (bool, u64) {
+        let complete = PAYOUT_INPUT_INDEX_COMPLETE.with(|cell| cell.borrow().get().0 != 0);
+        let count = UNSETTLED_INPUT_INDEX.with(|index| index.borrow().len());
+        (complete, count)
     }
 
     pub fn fenced() -> bool {

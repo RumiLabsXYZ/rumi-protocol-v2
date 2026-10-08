@@ -3738,6 +3738,23 @@ pub fn test_payout_storage_counts() -> (u64, u64) {
     (storage::payouts::retained_count(), storage::payouts::evidence_count())
 }
 
+#[cfg(feature = "test_endpoints")]
+#[update]
+pub fn test_reset_unsettled_input_index_backfill() {
+    assert_eq!(
+        ic_cdk::api::caller(),
+        read_state(|s| s.config.admin),
+        "admin only"
+    );
+    storage::payouts::test_reset_unsettled_input_index_backfill();
+}
+
+#[cfg(feature = "test_endpoints")]
+#[query]
+pub fn test_unsettled_input_index_state() -> (bool, u64) {
+    storage::payouts::test_unsettled_input_index_state()
+}
+
 #[cfg(test)]
 mod redeem_virtual_price_tests {
     use super::{require_nonzero_virtual_price, ThreePoolError};

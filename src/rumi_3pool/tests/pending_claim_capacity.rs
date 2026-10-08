@@ -811,18 +811,103 @@ fn receive_donation_cannot_reclassify_unresolved_donation_input() {
     .unwrap();
     assert!(matches!(acknowledged, Err(ThreePoolError::PoolLocked)));
     let after: PoolStatus = decode_one(&reply(
-        h.pic.query_call(h.pool, h.user, "get_pool_status", encode_args(()).unwrap()).unwrap(),
-    )).unwrap();
+        h.pic
+            .query_call(h.pool, h.user, "get_pool_status", encode_args(()).unwrap())
+            .unwrap(),
+    ))
+    .unwrap();
     assert_eq!(after.balances, before.balances);
+
+    // Simulate an upgrade from payout data written before the token-scoped
+    // index existed. Backfill is one entry per update in this test: donation
+    // stays locked until the cursor reaches the end, then the index still
+    // detects the unresolved input.
+    h.pic
+        .update_call(
+            h.pool,
+            h.admin,
+            "test_reset_unsettled_input_index_backfill",
+            encode_args(()).unwrap(),
+        )
+        .unwrap();
+    let index_state: (bool, u64) = decode_args(&reply(
+        h.pic
+            .query_call(
+                h.pool,
+                h.admin,
+                "test_unsettled_input_index_state",
+                encode_args(()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(index_state, (false, 0));
+
+    let retained = payout_storage_counts(&h).0;
+    let mut index_state: (bool, u64) = (false, 0);
+    for _ in 0..=retained {
+        let acknowledged: Result<(), ThreePoolError> = decode_one(&reply(
+            h.pic
+                .update_call(
+                    h.pool,
+                    h.admin,
+                    "receive_donation",
+                    encode_args((0u8, amount)).unwrap(),
+                )
+                .unwrap(),
+        ))
+        .unwrap();
+        assert!(matches!(acknowledged, Err(ThreePoolError::PoolLocked)));
+        index_state = decode_args(&reply(
+            h.pic
+                .query_call(
+                    h.pool,
+                    h.admin,
+                    "test_unsettled_input_index_state",
+                    encode_args(()).unwrap(),
+                )
+                .unwrap(),
+        ))
+        .unwrap();
+        if index_state.0 {
+            break;
+        }
+    }
+    assert_eq!(
+        index_state,
+        (true, 1),
+        "bounded backfill reaches and indexes the unresolved input"
+    );
 
     let recovered: Result<(), ThreePoolError> = decode_one(&reply(
         h.pic
-            .update_call(h.pool, h.user, "claim_pending", encode_one(held.id).unwrap())
+            .update_call(
+                h.pool,
+                h.user,
+                "claim_pending",
+                encode_one(held.id).unwrap(),
+            )
             .unwrap(),
     ))
     .unwrap();
     recovered.expect("exact input replay resolves and accounts the donation once");
     assert!(payout(&h, h.user, held.id).settled);
+    let index_state: (bool, u64) = decode_args(&reply(
+        h.pic
+            .query_call(
+                h.pool,
+                h.admin,
+                "test_unsettled_input_index_state",
+                encode_args(()).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(
+        index_state,
+        (true, 0),
+        "settling inbound value removes its index entry"
+    );
 }
 
 #[test]
