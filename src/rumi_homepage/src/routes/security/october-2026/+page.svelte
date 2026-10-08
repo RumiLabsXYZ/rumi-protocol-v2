@@ -2,19 +2,37 @@
   const evidence = [
     {
       state: 'Merged source',
-      title: 'PR #421 is merged',
+      title: 'PR #424 · CL-01 3pool',
       detail:
-        'The CL-01 3pool hotfix is present on main. Merge status describes source history; it does not mean the production canister has been upgraded.',
+        'Source merged to main at f33ca9b6. A valid artifact exists, but it has not been installed.',
       tone: 'merged',
-      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/421',
-      link: 'View PR #421'
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/424',
+      link: 'View PR #424'
     },
     {
-      state: 'Not installed',
-      title: 'The PR #421 artifact is not live',
+      state: 'Merged source',
+      title: 'PR #425 · Points hold',
       detail:
-        'As of October 7, 2026, the artifact had not been installed. This report makes no claim that the corresponding change is active on mainnet.',
-      tone: 'pending'
+        'Source merged to main at f72d1459. Its exact artifact is valid, but no October Wasm installation is confirmed.',
+      tone: 'merged',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/425',
+      link: 'View PR #425'
+    },
+    {
+      state: 'Merged source',
+      title: 'PR #426 · Stability Pool',
+      detail:
+        'The CL-04 duplicate-credit fix merged at 0345ac7f. It has not been installed.',
+      tone: 'merged',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/426',
+      link: 'View PR #426'
+    },
+    {
+      state: 'Live configuration',
+      title: 'Points epoch driver is disabled',
+      detail:
+        'The live set_epoch_driver_enabled(false) call succeeded and driver_enabled is false. Epoch 18 remains open: phase A is complete and phase B is pending.',
+      tone: 'live'
     },
     {
       state: 'Draft source',
@@ -32,7 +50,7 @@
   <title>October 2026 Security Review Status · Rumi Protocol</title>
   <meta
     name="description"
-    content="Public October 7, 2026 update on Rumi Protocol security-review and release status, with source, merge, and mainnet installation clearly separated."
+    content="Public October 7, 2026 update on Rumi Protocol security-review and release status, with merged source, live configuration, and Wasm installation clearly separated."
   />
 </svelte:head>
 
@@ -45,7 +63,8 @@
           <h1>October review.<br /><span>Current status.</span></h1>
           <p class="hero-copy">
             This public update records the state of selected security follow-up and release work
-            on October 7, 2026. It distinguishes code changes from changes installed on mainnet.
+            on October 7, 2026. It distinguishes merged source, live configuration, and Wasm
+            installation on mainnet.
           </p>
           <p class="review-date">Status date <time datetime="2026-10-07">October 7, 2026</time></p>
         </div>
@@ -56,16 +75,16 @@
             <span>Release status</span>
             <span class="status-label">Follow-up ongoing</span>
           </div>
-          <h2 id="status-title">No October remediation is confirmed live</h2>
+          <h2 id="status-title">Merged source; no October Wasm installs confirmed</h2>
           <p>
-            PR #421 is merged, but its artifact was not installed as of this report date. The
-            broader draft PR #422 is unmerged and not deployable. The Points pause policy is not
-            live.
+            PRs #424, #425, and #426 are merged. The valid PR #424 and #425 artifacts are not
+            installed, and no October Wasm installation is confirmed. A separate live Points
+            configuration change disabled the epoch driver; the new pause policy is not live.
           </p>
           <div class="status-divider"></div>
           <p class="status-footnote">
-            Source review, merge, artifact production, canister installation, and live behavior
-            are separate evidence states. This page only claims the states listed below.
+            Source merge, artifact validity, canister installation, and live configuration are
+            separate evidence states. This page only claims the states listed below.
           </p>
         </aside>
       </div>
@@ -92,17 +111,17 @@
   <section class="section page-width" aria-labelledby="evidence-title">
     <div class="section-heading">
       <p class="section-kicker">What is known</p>
-      <h2 id="evidence-title">Three different release states</h2>
+      <h2 id="evidence-title">Source, release, and live configuration</h2>
       <p>
-        Each statement below is limited to the state recorded on the report date. A code change
-        alone does not establish an installed or active safeguard.
+        Each statement below is limited to the state recorded on the report date. A merged code
+        change alone does not establish an installed safeguard.
       </p>
     </div>
 
     <div class="state-grid">
       {#each evidence as item}
-        <article class="state-card" class:state-source={item.tone === 'draft'} class:state-live={item.tone === 'pending'}>
-          <span class="state-icon" aria-hidden="true">{item.tone === 'merged' ? '✓' : item.tone === 'draft' ? '◷' : '—'}</span>
+        <article class="state-card" class:state-source={item.tone === 'draft'} class:state-live={item.tone === 'live'}>
+          <span class="state-icon" aria-hidden="true">{item.tone === 'merged' ? '✓' : item.tone === 'draft' ? '◷' : item.tone === 'live' ? '●' : '—'}</span>
           <p class="state-label">{item.state}</p>
           <h3>{item.title}</h3>
           <p>{item.detail}</p>
@@ -120,15 +139,16 @@
     <div class="page-width release-inner">
       <div class="section-heading release-heading">
         <p class="section-kicker">Points</p>
-        <h2 id="points-title">The pause policy is not live</h2>
+        <h2 id="points-title">Epoch driver disabled; new pause policy not live</h2>
         <p>
-          The proposed Points pause policy must not be treated as an operating control. This
-          report does not claim that Points activity can currently be paused under that policy.
+          The live call to disable the Points epoch driver succeeded, and the current configuration
+          reports driver_enabled=false. This configuration pause is separate from the new Points
+          pause policy, which is not live.
         </p>
       </div>
       <p class="release-note">
-        A policy described in source or review notes is not evidence of an active mainnet
-        safeguard. Live behavior requires separate verification after implementation and release.
+        Epoch 18 remains open, with phase A complete and phase B pending. The disabled driver
+        does not mean that the current epoch is closed or that the new pause policy is active.
       </p>
     </div>
   </section>
@@ -140,9 +160,9 @@
     </div>
     <ul class="limits-list">
       <li>It does not claim that all security findings are fixed or closed.</li>
-      <li>It does not claim that PR #421 has been installed or is active on mainnet.</li>
+      <li>It does not claim that the PR #424, #425, or #426 source changes have been installed as Wasm.</li>
       <li>It does not treat draft PR #422 as merged, release-ready, or deployable.</li>
-      <li>It does not claim that the Points pause policy is live.</li>
+      <li>It does not claim that the new Points pause policy is live or that epoch 18 is closed.</li>
       <li>It is a high-level status summary, not publication of the private audit package or exploit details.</li>
     </ul>
     <p class="source-note">
