@@ -861,16 +861,12 @@ export const idlFactory = ({ IDL }) => {
         [GetBlocksResult],
         ['query'],
       ),
-    'icrc3_ordered_log_tip' : IDL.Func(
-        [],
-        [IDL.Nat64],
-        [],
-      ),
     'icrc3_get_tip_certificate' : IDL.Func(
         [],
         [IDL.Opt(Icrc3DataCertificate)],
         ['query'],
       ),
+    'icrc3_ordered_log_tip' : IDL.Func([], [IDL.Nat64], []),
     'icrc3_supported_block_types' : IDL.Func(
         [],
         [IDL.Vec(SupportedBlockType)],
