@@ -13347,6 +13347,12 @@ async fn set_three_pool_canister(canister_id: Principal) -> Result<(), ProtocolE
             "Only the developer principal can set 3pool canister".to_string(),
         ));
     }
+    let is_collateral = read_state(|s| s.is_registered_collateral_ledger(canister_id));
+    if is_collateral {
+        return Err(ProtocolError::GenericError(
+            "A registered collateral ledger cannot be configured as 3pool".to_string(),
+        ));
+    }
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_three_pool_canister(s, canister_id);
     });
@@ -14325,6 +14331,12 @@ async fn register_icrc_collateral_token(
     arg: rumi_protocol_backend::AddCollateralArg,
     exact_risk_parameters: Option<IcrcCollateralRiskParameters>,
 ) -> Result<(), ProtocolError> {
+    let is_three_pool = read_state(|s| s.is_configured_three_pool_ledger(arg.ledger_canister_id));
+    if is_three_pool {
+        return Err(ProtocolError::GenericError(
+            "The configured 3pool ledger cannot be registered as collateral".to_string(),
+        ));
+    }
     // Check it doesn't already exist
     let already_exists = read_state(|s| s.collateral_configs.contains_key(&arg.ledger_canister_id));
     if already_exists {

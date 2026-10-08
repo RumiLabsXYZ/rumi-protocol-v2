@@ -1033,7 +1033,7 @@ mod bot_payment_proof_tests {
         let block = DecodedBlock {
             btype: Some("1xfer".into()), op: "xfer".into(),
             from: Some(bot.clone()), to: Some(backend.clone()), spender: None,
-            amount: 1_000_000, created_at_time: Some(123), memo: Some(memo.clone()),
+            amount: 1_000_000, fee: None, created_at_time: Some(123), memo: Some(memo.clone()),
         };
         (block, bot, backend, memo)
     }

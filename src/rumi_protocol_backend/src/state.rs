@@ -3195,6 +3195,18 @@ impl From<InitArg> for State {
 }
 
 impl State {
+    /// Prevent the 3pool ledger from being routed through generic collateral
+    /// payouts, which do not preserve the protocol's 3USD reserve floor.
+    pub fn is_configured_three_pool_ledger(&self, ledger: Principal) -> bool {
+        self.three_pool_canister == Some(ledger)
+    }
+
+    /// Prevent configuring a collateral ledger as 3pool, so interest
+    /// donations cannot target an asset ledger with generic collateral flows.
+    pub fn is_registered_collateral_ledger(&self, ledger: Principal) -> bool {
+        self.collateral_configs.contains_key(&ledger)
+    }
+
     /// Enforce an aggregate owner-triggered ICRC-3 query quota.
     pub fn claim_payout_history_scan_slot(&mut self, now: u64) -> bool {
         const WINDOW_NS: u64 = 60_000_000_000;
@@ -8793,6 +8805,32 @@ mod tests {
             ckusdt_ledger_principal: None,
             ckusdc_ledger_principal: None,
         })
+    }
+
+    #[test]
+    fn configured_three_pool_ledger_is_rejected_from_collateral_registration() {
+        let mut state = test_state();
+        let ledger = Principal::from_text("aaaaa-aa").unwrap();
+        state.three_pool_canister = Some(ledger);
+
+        assert!(state.is_configured_three_pool_ledger(ledger));
+        assert!(!state.is_configured_three_pool_ledger(Principal::anonymous()));
+    }
+
+    #[test]
+    fn registered_collateral_ledger_is_rejected_as_three_pool() {
+        let mut state = test_state();
+        let ledger = Principal::from_text("2vxsx-fae").unwrap();
+        let mut config = state
+            .collateral_configs
+            .get(&state.icp_ledger_principal)
+            .unwrap()
+            .clone();
+        config.ledger_canister_id = ledger;
+        state.collateral_configs.insert(ledger, config);
+
+        assert!(state.is_registered_collateral_ledger(ledger));
+        assert!(!state.is_registered_collateral_ledger(Principal::anonymous()));
     }
 
     // ---------------------------------------------------------------
