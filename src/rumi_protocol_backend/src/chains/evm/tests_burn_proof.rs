@@ -5,6 +5,62 @@ use crate::chains::monad::evm_rpc::{TxReceiptWithLogs, BURN_EVENT_TOPIC0};
 use crate::chains::multi_chain_state::MultiChainState;
 use candid::Principal;
 
+#[test]
+fn rotating_principals_and_anonymous_caller_are_rejected_before_burn_proof_work() {
+    use super::burn_proof::run_if_burn_proof_operator;
+    use std::cell::Cell;
+
+    let operator = Principal::from_slice(&[0x77]);
+    let callers = [
+        Principal::anonymous(),
+        Principal::from_slice(&[0x11]),
+        Principal::from_slice(&[0x22]),
+        Principal::from_slice(&[0x33]),
+    ];
+    let calls = Cell::new(0);
+
+    for caller in callers {
+        assert!(
+            run_if_burn_proof_operator(caller, operator, || calls.set(calls.get() + 1))
+                .is_none(),
+            "caller {caller} must be rejected before lookup work"
+        );
+    }
+    assert_eq!(calls.get(), 0, "unauthorized callers trigger no receipt lookup");
+}
+
+#[test]
+fn configured_non_anonymous_operator_retains_burn_proof_access() {
+    use super::burn_proof::run_if_burn_proof_operator;
+    use std::cell::Cell;
+
+    let operator = Principal::from_slice(&[0x77]);
+    let calls = Cell::new(0);
+    assert_eq!(
+        run_if_burn_proof_operator(operator, operator, || {
+            calls.set(calls.get() + 1);
+            7
+        }),
+        Some(7)
+    );
+    assert_eq!(calls.get(), 1, "the configured operator reaches lookup work");
+}
+
+#[test]
+fn anonymous_operator_fails_closed_even_when_caller_matches() {
+    use super::burn_proof::run_if_burn_proof_operator;
+    use std::cell::Cell;
+
+    let calls = Cell::new(0);
+    assert!(
+        run_if_burn_proof_operator(Principal::anonymous(), Principal::anonymous(), || {
+            calls.set(calls.get() + 1)
+        })
+        .is_none()
+    );
+    assert_eq!(calls.get(), 0);
+}
+
 fn word(v: u128) -> String {
     format!("0x{:064x}", v)
 }

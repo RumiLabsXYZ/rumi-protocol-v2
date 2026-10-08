@@ -10,6 +10,22 @@ use crate::logs::INFO;
 use crate::state::{mutate_state, read_state};
 use ic_canister_log::log;
 
+/// Run burn-proof work only for the configured non-anonymous developer.
+/// Keep the work lazy so rejected callers cannot trigger receipt or finality RPCs.
+pub fn run_if_burn_proof_operator<T>(
+    caller: candid::Principal,
+    operator: candid::Principal,
+    work: impl FnOnce() -> T,
+) -> Option<T> {
+    if caller == candid::Principal::anonymous()
+        || operator == candid::Principal::anonymous()
+        || caller != operator
+    {
+        return None;
+    }
+    Some(work())
+}
+
 /// Apply every `Burn` log in `receipt` that was emitted by `contract` to protocol
 /// state, deduped by exact chain-qualified pending IDs and the monotonic
 /// finalized-coverage floor. Returns the

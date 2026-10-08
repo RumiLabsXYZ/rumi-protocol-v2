@@ -169,12 +169,25 @@ enum ProtocolError {
 // ─── Wasm loaders ────────────────────────────────────────────────────────────
 
 fn backend_wasm() -> Vec<u8> {
-    include_bytes!("../../../target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm")
-        .to_vec()
+    built_wasm("rumi_protocol_backend.wasm")
 }
 
 fn mock_wasm() -> Vec<u8> {
-    include_bytes!("../../../target/wasm32-unknown-unknown/release/monad_rpc_mock.wasm").to_vec()
+    built_wasm("monad_rpc_mock.wasm")
+}
+
+fn built_wasm(filename: &str) -> Vec<u8> {
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target")
+        });
+    std::fs::read(
+        target_dir
+            .join("wasm32-unknown-unknown/release")
+            .join(filename),
+    )
+    .unwrap_or_else(|error| panic!("read built Wasm {filename} from {target_dir:?}: {error}"))
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -252,10 +265,8 @@ fn submit_burn_proof(
     chain_id: u32,
     tx_hash: &str,
 ) -> Result<u32, ProtocolError> {
-    // The `inspect_message` hook silently rejects ANONYMOUS callers for every
-    // method except the two consent reads, so submit from a non-anonymous
-    // principal (the endpoint itself is permissionless — any non-anonymous
-    // caller may submit a real tx hash; the verify path rejects forgeries).
+    // The `inspect_message` hook rejects ANONYMOUS callers, and the endpoint
+    // itself now admits only the configured non-anonymous developer/operator.
     let reply = update_dev(
         pic,
         backend,
@@ -672,5 +683,45 @@ fn phase1c_submit_burn_proof_verifies_one_tx_no_poll_scan() {
 
             eprintln!("[phase1c burn-proof] FULL guard PASSED: submit_burn_proof verified one tx, deduped, rejected wrong contract, and worked with eth_getLogs forced-failing");
         }
+    }
+}
+
+#[test]
+fn non_operator_burn_proof_is_rejected_before_receipt_rpc() {
+    let (pic, backend, mock) = boot();
+    configure_chain(&pic, backend, mock, 7_000_000);
+
+    // If the endpoint reaches the receipt lookup, this persistent mock failure
+    // will surface as TemporarilyUnavailable instead of the authorization error.
+    update_any(
+        &pic,
+        mock,
+        "fail_always",
+        Encode!(
+            &"eth_getTransactionReceipt".to_string(),
+            &"unauthorized caller reached receipt RPC".to_string()
+        )
+        .unwrap(),
+    );
+
+    let caller = Principal::from_slice(&[0x22]);
+    let reply = pic
+        .update_call(
+            backend,
+            caller,
+            "submit_burn_proof",
+            Encode!(&ChainId(MONAD_CHAIN_ID), &"0xrandom".to_string()).unwrap(),
+        )
+        .expect("update call should return an authorization result");
+    match reply {
+        WasmResult::Reply(bytes) => match Decode!(&bytes, Result<u32, ProtocolError>)
+            .expect("decode submit_burn_proof Result")
+        {
+            Err(ProtocolError::ChainAdmin(message)) => {
+                assert!(message.contains("restricted to the configured"));
+            }
+            other => panic!("non-operator should be denied before RPC, got {other:?}"),
+        },
+        WasmResult::Reject(message) => panic!("update rejected before returning Result: {message}"),
     }
 }

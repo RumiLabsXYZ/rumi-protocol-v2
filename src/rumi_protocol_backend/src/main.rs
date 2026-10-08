@@ -4810,8 +4810,8 @@ fn get_last_observed_block(chain: rumi_protocol_backend::chains::config::ChainId
 
 /// Phase 1c notify-then-verify: submit a burn transaction hash for verification.
 ///
-/// PERMISSIONLESS: anyone may submit a REAL on-chain tx hash. The verify path
-/// (`verify_and_apply_burn_proof`) fetches the receipt via ONE
+/// OPERATOR-ONLY: only the configured non-anonymous developer may submit a tx
+/// hash. The verify path (`verify_and_apply_burn_proof`) fetches the receipt via ONE
 /// `eth_getTransactionReceipt`, rejects forgeries (only Burn logs emitted by the
 /// configured icUSD contract count, and the amount/vault come FROM the log, never
 /// from the caller), requires finality, and dedups by chain-qualified replay IDs
@@ -4825,16 +4825,10 @@ fn get_last_observed_block(chain: rumi_protocol_backend::chains::config::ChainId
 /// Finality lag is surfaced as `TemporarilyUnavailable` so the caller (the
 /// frontend, per plan Task 7) can poll-and-retry until the receipt is final.
 ///
-/// FUTURE ROBUSTNESS (flagged per Rob 2026-05-31): v1 liveness depends on the
-/// submitter (the dApp). Proper DoS protection (this is a permissionless
-/// endpoint that spends a ~2B-cycle `eth_getTransactionReceipt` outcall per
-/// call) needs the deferred relayer / incentivized-submitter design (audit
-/// FLAG-7). A naive per-caller wall-clock rate-limit was rejected: it both fails
-/// against principal rotation AND wrongly throttles legitimate back-to-back
-/// submissions (e.g. two distinct burns in the same second). The endpoint does
-/// reject the anonymous principal as basic hygiene (ingress anonymous is also
-/// dropped by `inspect_message`; this is belt-and-suspenders, and covers any
-/// future non-ingress entry that skips that hook).
+/// This closes the global admission-budget starvation path: a per-caller limit
+/// cannot prevent attackers rotating principals, while any rejected caller is
+/// stopped before the receipt and finality RPCs. A future permissionless lane
+/// requires a global anti-Sybil admission design.
 #[candid_method(update)]
 #[update]
 async fn submit_burn_proof(
@@ -4842,16 +4836,21 @@ async fn submit_burn_proof(
     tx_hash: String,
 ) -> Result<u32, ProtocolError> {
     use rumi_protocol_backend::chains::monad::burn_proof::{
-        verify_and_apply_burn_proof, BurnProofError,
+        run_if_burn_proof_operator, verify_and_apply_burn_proof, BurnProofError,
     };
 
-    if ic_cdk::caller() == candid::Principal::anonymous() {
+    let caller = ic_cdk::caller();
+    let operator = read_state(|s| s.developer_principal);
+    let verification = run_if_burn_proof_operator(caller, operator, || {
+        verify_and_apply_burn_proof(chain_id, &tx_hash)
+    });
+    let Some(verification) = verification else {
         return Err(ProtocolError::ChainAdmin(
-            "anonymous caller not allowed for submit_burn_proof".into(),
+            "submit_burn_proof is restricted to the configured non-anonymous operator".into(),
         ));
-    }
+    };
 
-    match verify_and_apply_burn_proof(chain_id, &tx_hash).await {
+    match verification.await {
         Ok(n) => {
             if n > 0 {
                 log!(
