@@ -87,9 +87,10 @@ function describeError(err: ProtocolError): string {
 }
 
 /**
- * Anonymous backend actor. `submit_burn_proof` is permissionless (the backend
- * verifies the on-chain receipt and dedups; the caller cannot forge a burn), so
- * an anonymous actor is sufficient and avoids a wallet round-trip per poll.
+ * Anonymous backend actor. `submit_burn_proof` is currently restricted to the
+ * configured non-anonymous developer/operator because each lookup spends canister
+ * cycles. This service remains unwired until a supported operator submission path
+ * is available to the Monad burn UI.
  */
 function getBackendActor(): _SERVICE {
   const agent = new HttpAgent({ host: CONFIG.host });
