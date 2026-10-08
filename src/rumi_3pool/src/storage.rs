@@ -35,11 +35,11 @@
 //   25      icrc_dedup_by_hash          — full ICRC-1/2 transfer identity -> original block
 //   26      icrc_dedup_by_expiry        — ordered expiry index for bounded pruning
 //   27      icrc_dedup_upgrade_fence    — one-time bridge for pre-fix heap-only entries
-//   28,29   payout_journal log          — append-only payout lifecycle evidence
+//   28,29   payout_journal log          — append-only materialized value/ambiguity evidence
 //   30      next_payout_event_id cell    — monotonic journal sequence
-//   31      payout_current              — recovery lookup projection
+//   31      payout_current              — authoritative exact identity + recovery state
 //   32      payout_fence cell            — unresolved ordinary swap reserves
-//   33      payout_owner_index           — bounded per-owner payout listing
+//   33      payout_owner_index           — retained per-owner payout listing (no-effect gaps omitted)
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -1055,8 +1055,31 @@ pub mod payouts {
         });
     }
 
+    pub fn retained_count() -> u64 {
+        PAYOUT_CURRENT.with(|map| map.borrow().len())
+    }
+
+    pub fn evidence_count() -> u64 {
+        PAYOUT_JOURNAL.with(|log| log.borrow().len())
+    }
+
     pub fn get(id: u64) -> Option<crate::payouts::PayoutEntitlement> {
         PAYOUT_CURRENT.with(|map| map.borrow().get(&StorableU128(id as u128)))
+    }
+
+    /// Remove a definitive no-effect identity from the current and owner
+    /// projections. IDs are monotonic and never reused, so its ICRC memo can
+    /// never be replayed by a later operation. StableBTreeMap deallocates
+    /// emptied nodes through its allocator for reuse; stable-memory high-water
+    /// pages do not shrink, but repeated insert/remove cycles do not require
+    /// append-only node growth.
+    pub fn remove_no_effect(id: u64, owner: Principal) -> bool {
+        let key = StorableU128(id as u128);
+        let removed = PAYOUT_CURRENT.with(|map| map.borrow_mut().remove(&key).is_some());
+        PAYOUT_OWNER_INDEX.with(|index| {
+            index.borrow_mut().remove(&PayoutOwnerKey { owner, id });
+        });
+        removed
     }
 
     pub fn insert(value: crate::payouts::PayoutEntitlement) {
@@ -1102,6 +1125,19 @@ pub mod payouts {
                 ids.into_iter()
                     .filter_map(|id| current.get(&StorableU128(id as u128)))
                     .collect()
+            })
+        })
+    }
+
+    /// True while an inbound tuple for this token has not yet been fully
+    /// accounted or refunded. `receive_donation` uses this to avoid reclassifying
+    /// physically present but still-owned ingress as LP reserve surplus.
+    pub fn has_unsettled_input_for_token(token_index: u8) -> bool {
+        PAYOUT_CURRENT.with(|map| {
+            map.borrow().iter().any(|(_, entitlement)| {
+                entitlement.token_index == token_index
+                    && entitlement.input_transfer.is_some()
+                    && !entitlement.settled
             })
         })
     }

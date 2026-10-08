@@ -221,13 +221,33 @@ export interface PayoutEntitlement {
   'settled' : boolean,
   'owner' : Principal,
   'kind' : PayoutKind,
+  'input_action' : [] | [PayoutInputAction],
   'attempts' : Array<PayoutAttempt>,
   'compensation_id' : [] | [bigint],
   'compensation_for' : [] | [bigint],
   'ledger' : Principal,
   'gross' : bigint,
+  'input_transfer' : [] | [PayoutInputTransfer],
+  'input_outcome' : [] | [PayoutInputOutcome],
   'swap_context' : [] | [PayoutSwapContext],
+  'dispatch_ready' : [] | [boolean],
   'symbol' : string,
+}
+export type PayoutInputAction = { 'AddLiquidity' : null } |
+  { 'Swap' : null } |
+  { 'Donation' : null };
+export type PayoutInputOutcome = { 'Confirmed' : { 'block' : bigint } } |
+  { 'Prepared' : null } |
+  { 'Unresolved' : { 'reason' : string } } |
+  { 'RejectedNoTransfer' : { 'reason' : string } } |
+  { 'Submitted' : null };
+export interface PayoutInputTransfer {
+  'to' : Account,
+  'from' : Account,
+  'memo' : [] | [Uint8Array | number[]],
+  'ledger' : Principal,
+  'created_at_time' : bigint,
+  'amount' : bigint,
 }
 export type PayoutKind = { 'RemoveOneCoin' : null } |
   { 'SwapOutput' : null } |
@@ -249,6 +269,7 @@ export interface PayoutSwapContext {
   'gross_output' : bigint,
   'token_in' : number,
   'is_rebalancing' : boolean,
+  'admin_fees_before' : Array<bigint>,
   'fee_bps' : number,
   'imbalance_before' : bigint,
   'amount_in' : bigint,

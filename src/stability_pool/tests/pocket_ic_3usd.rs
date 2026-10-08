@@ -970,7 +970,8 @@ fn test_deposit_as_3usd_rejects_lp_token() {
     }
 }
 
-/// Test 4: authorized_redeem_and_burn on the 3pool works correctly
+/// Test 4: legacy authorized burn route stays fail-closed until it has a
+/// durable exact-transfer recovery journal.
 #[test]
 fn test_3pool_authorized_burn() {
     let env = setup_test_env();
@@ -1070,6 +1071,13 @@ fn test_3pool_authorized_burn() {
     // Now test authorized_redeem_and_burn: burn half the LP tokens, destroying icUSD
     let burn_lp = lp_minted / 2;
     let pool_status = query_3pool_status(&env.pic, env.pool_id);
+    let pool_ledger_balance_before = ledger_balance(&env.pic, env.icusd_ledger, env.pool_id);
+    let supply_before: candid::Nat = decode_one(&match env.pic.query_call(
+        env.pool_id, Principal::anonymous(), "icrc1_total_supply", encode_args(()).unwrap(),
+    ).expect("query LP supply") {
+        WasmResult::Reply(bytes) => bytes,
+        WasmResult::Reject(msg) => panic!("query LP supply rejected: {msg}"),
+    }).expect("decode LP supply");
     let vp = pool_status.virtual_price;
     // icUSD equivalent = burn_lp * vp / 1e18, but in 8-dec
     // vp is in 1e18. burn_lp is in 8-dec.
@@ -1098,19 +1106,8 @@ fn test_3pool_authorized_burn() {
 
     match burn_result {
         WasmResult::Reply(bytes) => {
-            // The result is Result<RedeemAndBurnResult, ThreePoolError>
-            #[derive(CandidType, Deserialize, Debug)]
-            struct RedeemAndBurnResult {
-                token_amount_burned: u128,
-                lp_amount_burned: u128,
-                burn_block_index: u64,
-            }
-            let r: Result<RedeemAndBurnResult, ThreePoolError> = decode_one(&bytes).expect("decode burn result");
-            let result = r.expect("authorized_redeem_and_burn failed");
-            println!("Burn succeeded: {} token burned, {} LP burned, block {}",
-                result.token_amount_burned, result.lp_amount_burned, result.burn_block_index);
-            assert_eq!(result.lp_amount_burned, burn_lp as u128);
-            assert_eq!(result.token_amount_burned, icusd_equiv as u128);
+            let r: Result<candid::Nat, ThreePoolError> = decode_one(&bytes).expect("decode burn result");
+            assert!(matches!(r, Err(ThreePoolError::BurnFailed { .. })), "burn route must fail closed: {r:?}");
         }
         WasmResult::Reject(msg) => panic!("authorized_redeem_and_burn rejected: {}", msg),
     }
@@ -1127,14 +1124,20 @@ fn test_3pool_authorized_burn() {
         }
         WasmResult::Reject(msg) => panic!("get_lp_balance rejected: {}", msg),
     };
-    assert_eq!(sp_lp_after, sp_lp - burn_lp as u128, "SP LP balance should have decreased by burn amount");
+    assert_eq!(sp_lp_after, sp_lp, "fail-closed burn must preserve SP LP balance");
 
-    // Verify 3pool icUSD balance decreased (icUSD was destroyed)
+    // A fail-closed result leaves the ledger and all pool accounting unchanged.
     let pool_after = query_3pool_status(&env.pic, env.pool_id);
-    assert!(
-        pool_after.balances[0] < pool_status.balances[0],
-        "3pool icUSD balance should have decreased after burn"
-    );
+    assert_eq!(pool_after.balances, pool_status.balances, "fail-closed burn must preserve pool reserves");
+    let supply_after: candid::Nat = decode_one(&match env.pic.query_call(
+        env.pool_id, Principal::anonymous(), "icrc1_total_supply", encode_args(()).unwrap(),
+    ).expect("query LP supply after") {
+        WasmResult::Reply(bytes) => bytes,
+        WasmResult::Reject(msg) => panic!("query LP supply after rejected: {msg}"),
+    }).expect("decode LP supply after");
+    assert_eq!(supply_after, supply_before, "fail-closed burn must preserve LP supply");
+    assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.pool_id), pool_ledger_balance_before,
+        "fail-closed burn must preserve ledger balance");
 }
 
 /// Test 5: Mixed icUSD + 3USD deposits both track correctly in pool status

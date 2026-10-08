@@ -1,8 +1,9 @@
 //! Durable evidence for outbound 3pool payout/refund attempts.
 //!
-//! The append-only journal is authoritative. `PAYOUT_CURRENT` is a lookup
-//! projection used by recovery and claim queries; it is never used to invent a
-//! new transfer identity for an old claim.
+//! `PAYOUT_CURRENT` stores the exact pre-call identity and is the recovery
+//! source of truth. The append-only log stores materialized confirmation,
+//! ambiguity, settlement, and compensation evidence. Definitive no-effect
+//! reservations are retired, leaving monotonic ID gaps rather than history.
 use crate::storage;
 use candid::{CandidType, Principal};
 use icrc_ledger_types::icrc1::account::Account;
@@ -33,6 +34,35 @@ pub struct PayoutTransfer {
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PayoutInputTransfer {
+    pub ledger: Principal,
+    pub from: Account,
+    pub to: Account,
+    pub amount: u128,
+    /// Unique deduplication salt derived from this stable entitlement ID.
+    /// Optional only for forward compatibility with early, unreleased saga data.
+    #[serde(default)]
+    pub memo: Option<Vec<u8>>,
+    pub created_at_time: u64,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PayoutInputOutcome {
+    Prepared,
+    Submitted,
+    Confirmed { block: candid::Nat },
+    RejectedNoTransfer { reason: String },
+    Unresolved { reason: String },
+}
+
+#[derive(CandidType, Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PayoutInputAction {
+    AddLiquidity,
+    Swap,
+    Donation,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PayoutOutcome {
     Prepared,
     Submitted,
@@ -45,6 +75,7 @@ pub enum PayoutOutcome {
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PayoutSwapContext {
     pub balances_before: [u128; 3],
+    pub admin_fees_before: [u128; 3],
     pub amp: u64,
     pub precision_muls: [u64; 3],
     pub token_in: u8,
@@ -89,12 +120,23 @@ pub struct PayoutEntitlement {
     pub compensation_id: Option<u64>,
     /// Set on the refund entitlement so recovery can close the output leg.
     pub compensation_for: Option<u64>,
+    /// False while a multi-leg operation has reserved an outbound tuple but
+    /// has not yet established that this leg is owed. Missing legacy values
+    /// are treated as ready because older entitlements were dispatched
+    /// immediately after creation.
+    pub dispatch_ready: Option<bool>,
+    pub input_transfer: Option<PayoutInputTransfer>,
+    pub input_outcome: Option<PayoutInputOutcome>,
+    pub input_action: Option<PayoutInputAction>,
     pub settled: bool,
     pub attempts: Vec<PayoutAttempt>,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PayoutJournalEventKind {
+    // Retained for decoding journal entries created by early saga builds.
+    // New Prepared/Submitted/no-effect transitions live only in PAYOUT_CURRENT
+    // so permissionless no-effect operations do not grow the append-only log.
     Prepared { attempt: PayoutAttempt },
     Submitted { attempt_number: u32, replay_count: u8 },
     Confirmed { attempt_number: u32, block: candid::Nat },
@@ -102,6 +144,10 @@ pub enum PayoutJournalEventKind {
     Unresolved { attempt_number: u32, reason: String },
     Settled,
     CompensationBound { compensation_id: u64 },
+    InputSubmitted,
+    InputConfirmed { block: candid::Nat },
+    InputRejectedNoTransfer { reason: String },
+    InputUnresolved { reason: String },
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -136,6 +182,12 @@ pub fn save(value: PayoutEntitlement) {
     storage::payouts::insert(value);
 }
 
+/// Retire a definitively no-effect reservation. IDs remain monotonic and are
+/// never reused, so discarded tuples cannot become a later operation identity.
+pub fn remove_no_effect(value: &PayoutEntitlement) -> bool {
+    storage::payouts::remove_no_effect(value.id, value.owner)
+}
+
 /// Close an entitlement once its ledger transfer and corresponding pool-side
 /// accounting have both been committed.
 pub fn mark_settled(id: u64) -> bool {
@@ -143,9 +195,9 @@ pub fn mark_settled(id: u64) -> bool {
     if value.settled {
         return true;
     }
-    append(id, PayoutJournalEventKind::Settled);
     value.settled = true;
-    save(value);
+    save(value.clone());
+    append(id, PayoutJournalEventKind::Settled);
     true
 }
 
@@ -184,6 +236,10 @@ mod tests {
             swap_context: None,
             compensation_id: None,
             compensation_for: None,
+            dispatch_ready: Some(true),
+            input_transfer: None,
+            input_outcome: None,
+            input_action: None,
             settled: false,
             attempts: vec![attempt],
         };

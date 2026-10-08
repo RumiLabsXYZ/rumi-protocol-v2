@@ -2,12 +2,10 @@
 //
 // Audit Wave-3 (ICRC-003/004): every transfer now sets `created_at_time`
 // (so the ledger can dedup retries) and treats `Duplicate { duplicate_of }`
-// as success — the previous attempt landed at that block, so the operation
-// already succeeded.
+// as confirmation only when replaying a persisted exact tuple.
 
 use candid::Principal;
 use icrc_ledger_types::icrc1::account::Account;
-use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use crate::payouts::{
     PayoutAttempt, PayoutEntitlement, PayoutFailure, PayoutJournalEventKind, PayoutKind,
     PayoutOutcome, PayoutTransfer,
@@ -35,14 +33,21 @@ pub async fn ledger_fee(ledger: Principal) -> u128 {
     if let Some(fee) = LEDGER_FEES.with(|c| c.borrow().get(&ledger).copied()) {
         return fee;
     }
-    let result: Result<(candid::Nat,), _> =
-        ic_cdk::call(ledger, "icrc1_fee", ()).await;
-    let fee: u128 = match result {
-        Ok((f,)) => f.0.try_into().unwrap_or(DEFAULT_LEDGER_FEE),
-        Err(_) => DEFAULT_LEDGER_FEE,
-    };
+    let fee = current_ledger_fee(ledger).await;
     LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, fee));
     fee
+}
+
+/// Query the live ledger fee without consulting the per-canister cache. Use
+/// this when an exact fee determines whether a persisted liability is cleared;
+/// a stale cached fee must never turn below-fee dust into a dispatchable claim.
+pub async fn current_ledger_fee(ledger: Principal) -> u128 {
+    let result: Result<(candid::Nat,), _> =
+        ic_cdk::call(ledger, "icrc1_fee", ()).await;
+    match result {
+        Ok((fee,)) => fee.0.try_into().unwrap_or(DEFAULT_LEDGER_FEE),
+        Err(_) => DEFAULT_LEDGER_FEE,
+    }
 }
 
 /// Refresh the fee after a proven no-effect rejection. Cached quotes are not
@@ -57,60 +62,290 @@ async fn refresh_ledger_fee(ledger: Principal) -> u128 {
     fee
 }
 
-/// Transfer tokens FROM a user TO this canister (requires prior ICRC-2 approval).
-pub async fn transfer_from_user(
-    ledger: Principal,
-    from: Principal,
-    amount: u128,
-) -> Result<(), String> {
-    let args = TransferFromArgs {
-        spender_subaccount: None,
-        from: Account {
-            owner: from,
-            subaccount: None,
-        },
-        to: Account {
-            owner: ic_cdk::id(),
-            subaccount: None,
-        },
-        amount: candid::Nat::from(amount),
-        fee: None,
-        memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
-    };
-
-    let result: Result<(Result<candid::Nat, TransferFromError>,), _> =
-        ic_cdk::call(ledger, "icrc2_transfer_from", (args,)).await;
-
-    match result {
-        Ok((Ok(_block_index),)) => Ok(()),
-        Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => {
-            ic_cdk::println!(
-                "[transfer_from_user] ledger {} reported Duplicate (block {}); treating as success",
-                ledger, duplicate_of
-            );
-            Ok(())
-        }
-        Ok((Err(e),)) => Err(format!("icrc2_transfer_from error: {:?}", e)),
-        Err((code, msg)) => Err(format!(
-            "inter-canister call failed: {:?} - {}",
-            code, msg
-        )),
-    }
-}
-
-/// Create and execute a newly entitled outbound payment. Its exact ICRC-1
-/// tuple and entitlement are durable before the first transfer call.
-pub async fn payout_to_user(
+/// Persist a payout identity without dispatching it. Multi-leg operations use
+/// this for every leg before their first outbound ledger await.
+pub fn prepare_payout(
     kind: PayoutKind,
     token_index: u8,
     ledger: Principal,
     symbol: &str,
     to: Principal,
     gross: u128,
-    swap_context: Option<crate::payouts::PayoutSwapContext>,
+    fee: u128,
+    dispatch_ready: bool,
 ) -> Result<u64, PayoutFailure> {
-    payout_to_user_inner(kind, token_index, ledger, symbol, to, gross, swap_context, None).await
+    Ok(prepare_payout_with_fee(kind, token_index, ledger, symbol, to, gross, None, None, fee, dispatch_ready)?.id)
+}
+
+pub fn prepare_swap_output(
+    token_index: u8,
+    ledger: Principal,
+    symbol: &str,
+    to: Principal,
+    gross: u128,
+    fee: u128,
+    context: crate::payouts::PayoutSwapContext,
+) -> Result<u64, PayoutFailure> {
+    Ok(prepare_payout_with_fee(
+        PayoutKind::SwapOutput, token_index, ledger, symbol, to, gross,
+        Some(context), None, fee, false,
+    )?.id)
+}
+
+/// Reserve both sides of an add-liquidity leg before its ICRC2 pull. The
+/// inbound tuple is persisted with the held refund so a lost callback can be
+/// reconciled by exact replay before any compensation is authorized.
+pub async fn prepare_add_liquidity_refund(
+    token_index: u8,
+    ledger: Principal,
+    symbol: &str,
+    owner: Principal,
+    gross: u128,
+) -> Result<u64, PayoutFailure> {
+    prepare_input_payout(PayoutKind::AddLiquidityRefund, crate::payouts::PayoutInputAction::AddLiquidity, token_index, ledger, symbol, owner, gross).await
+}
+
+/// Reserve an inbound transfer and its potential outbound recovery before the
+/// inbound call. Used by add-liquidity and ordinary swaps.
+pub async fn prepare_input_payout(
+    kind: PayoutKind,
+    action: crate::payouts::PayoutInputAction,
+    token_index: u8,
+    ledger: Principal,
+    symbol: &str,
+    owner: Principal,
+    gross: u128,
+) -> Result<u64, PayoutFailure> {
+    let fee = ledger_fee(ledger).await;
+    let id = prepare_payout_with_fee(
+        kind, token_index, ledger, symbol, owner, gross,
+        None, None, fee, false,
+    )?.id;
+    // ICRC-2 deduplication can key on (caller, from, to, amount, fee, memo,
+    // created_at_time). IC time is not guaranteed to advance between two
+    // sequential calls in one message round, so persist a per-entitlement memo
+    // to ensure separate same-round operations cannot be mistaken as one pull.
+    use sha2::{Digest, Sha256};
+    let mut input_memo = Sha256::new();
+    input_memo.update(b"rumi-3pool-input-v1");
+    input_memo.update(id.to_be_bytes());
+    let mut entitlement = crate::payouts::get(id).expect("just persisted payout reservation");
+    entitlement.input_transfer = Some(crate::payouts::PayoutInputTransfer {
+        ledger,
+        from: Account { owner, subaccount: None },
+        to: Account { owner: ic_cdk::id(), subaccount: None },
+        amount: gross,
+        memo: Some(input_memo.finalize().to_vec()),
+        created_at_time: ic_cdk::api::time(),
+    });
+    entitlement.input_outcome = Some(crate::payouts::PayoutInputOutcome::Prepared);
+    entitlement.input_action = Some(action);
+    crate::payouts::save(entitlement);
+    Ok(id)
+}
+
+/// Bind one precreated refund to its output entitlement before any dispatch.
+pub fn bind_prepared_compensation(parent_id: u64, child_id: u64) -> Result<(), PayoutFailure> {
+    let mut parent = crate::payouts::get(parent_id).ok_or_else(|| PayoutFailure {
+        id: parent_id, reason: "output entitlement missing".into(), ambiguous: true,
+    })?;
+    let mut child = crate::payouts::get(child_id).ok_or_else(|| PayoutFailure {
+        id: child_id, reason: "refund entitlement missing".into(), ambiguous: true,
+    })?;
+    if parent.compensation_id.is_some() || child.compensation_for.is_some() || parent.owner != child.owner {
+        return Err(PayoutFailure { id: parent_id, reason: "invalid compensation binding".into(), ambiguous: true });
+    }
+    parent.compensation_id = Some(child_id);
+    child.compensation_for = Some(parent_id);
+    crate::payouts::save(parent);
+    crate::payouts::save(child);
+    Ok(())
+}
+
+/// Dispatch one previously pinned ICRC2 pull and persist its exact result.
+pub async fn execute_pinned_input(id: u64) -> Result<(), String> {
+    use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
+    let mut entitlement = crate::payouts::get(id).ok_or_else(|| "input reservation missing".to_string())?;
+    let input = entitlement.input_transfer.clone().ok_or_else(|| "input identity missing".to_string())?;
+    if !matches!(entitlement.input_outcome, Some(crate::payouts::PayoutInputOutcome::Prepared)) {
+        return Err("input request is not in Prepared state".into());
+    }
+    entitlement.input_outcome = Some(crate::payouts::PayoutInputOutcome::Submitted);
+    // PAYOUT_CURRENT is the pre-call durable journal: persist the full exact
+    // tuple and Submitted state before awaiting the ledger. Only confirmed or
+    // ambiguous outcomes need an append-only evidence row.
+    crate::payouts::save(entitlement.clone());
+    let args = TransferFromArgs {
+        spender_subaccount: None,
+        from: input.from,
+        to: input.to,
+        amount: candid::Nat::from(input.amount),
+        fee: None,
+        memo: input.memo.clone().map(Into::into),
+        created_at_time: Some(input.created_at_time),
+    };
+    let result: Result<(Result<candid::Nat, TransferFromError>,), _> =
+        ic_cdk::call(input.ledger, "icrc2_transfer_from", (args,)).await;
+    record_input_result(&mut entitlement, crate::payouts::PayoutInputOutcome::Submitted, result, false)
+}
+
+/// Resolve a submitted exact ICRC2 identity. Duplicate confirms the original
+/// pull. Any error after a prior submission stays held because ledger duplicate
+/// detection order is not a portable proof that the original request had no effect.
+pub async fn reconcile_pinned_input(id: u64) -> Result<(), String> {
+    use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
+    let mut entitlement = crate::payouts::get(id).ok_or_else(|| "input reservation missing".to_string())?;
+    let input = entitlement.input_transfer.clone().ok_or_else(|| "input identity missing".to_string())?;
+    if !matches!(entitlement.input_outcome, Some(crate::payouts::PayoutInputOutcome::Submitted | crate::payouts::PayoutInputOutcome::Unresolved { .. })) {
+        return Err("input request is not unresolved".into());
+    }
+    // Persist that this exact replay is in flight. The callback accepts only
+    // this tuple/outcome pair, preventing a stale callback from overwriting a
+    // newer settled or otherwise reconciled entitlement.
+    entitlement.input_outcome = Some(crate::payouts::PayoutInputOutcome::Submitted);
+    crate::payouts::save(entitlement.clone());
+    let args = TransferFromArgs {
+        spender_subaccount: None,
+        from: input.from,
+        to: input.to,
+        amount: candid::Nat::from(input.amount),
+        fee: None,
+        memo: input.memo.clone().map(Into::into),
+        created_at_time: Some(input.created_at_time),
+    };
+    let result: Result<(Result<candid::Nat, TransferFromError>,), _> =
+        ic_cdk::call(input.ledger, "icrc2_transfer_from", (args,)).await;
+    record_input_result(&mut entitlement, crate::payouts::PayoutInputOutcome::Submitted, result, true)
+}
+
+fn record_input_result(
+    entitlement: &mut PayoutEntitlement,
+    expected_outcome: crate::payouts::PayoutInputOutcome,
+    result: Result<(Result<candid::Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,), (ic_cdk::api::call::RejectionCode, String)>,
+    preserve_ambiguity: bool,
+) -> Result<(), String> {
+    use icrc_ledger_types::icrc2::transfer_from::TransferFromError;
+    let mut current = crate::payouts::get(entitlement.id)
+        .ok_or_else(|| "input identity disappeared while ledger call was in flight".to_string())?;
+    if current.input_transfer != entitlement.input_transfer {
+        return Err("input identity changed while ledger call was in flight".into());
+    }
+    let state = match result {
+        Ok((Ok(block),)) => crate::payouts::PayoutInputOutcome::Confirmed { block },
+        Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => crate::payouts::PayoutInputOutcome::Confirmed { block: duplicate_of },
+        Ok((Err(error),)) if !preserve_ambiguity && !matches!(error, TransferFromError::GenericError { .. }) => crate::payouts::PayoutInputOutcome::RejectedNoTransfer { reason: format!("icrc2_transfer_from error: {error:?}") },
+        Ok((Err(error),)) => crate::payouts::PayoutInputOutcome::Unresolved { reason: format!("icrc2_transfer_from error on unresolved replay: {error:?}") },
+        Err((code, message)) => crate::payouts::PayoutInputOutcome::Unresolved { reason: format!("call failed: {code:?} - {message}") },
+    };
+    let Some(current_outcome) = current.input_outcome.as_ref() else {
+        return Err("input outcome disappeared while ledger call was in flight".into());
+    };
+    if matches!(current_outcome, crate::payouts::PayoutInputOutcome::Prepared) {
+        return Err("stale input callback cannot replace a prepared identity".into());
+    }
+    if current_outcome != &expected_outcome
+        && !matches!(&state, crate::payouts::PayoutInputOutcome::Confirmed { .. } | crate::payouts::PayoutInputOutcome::Unresolved { .. })
+    {
+        return Err("stale no-effect input callback cannot overwrite a newer outcome".into());
+    }
+    let state = merge_input_outcome(current_outcome, state);
+    current.input_outcome = Some(state.clone());
+    match state {
+        crate::payouts::PayoutInputOutcome::Confirmed { block } => {
+            crate::payouts::save(current.clone());
+            crate::payouts::append(current.id, PayoutJournalEventKind::InputConfirmed { block });
+            *entitlement = current;
+            Ok(())
+        }
+        crate::payouts::PayoutInputOutcome::RejectedNoTransfer { reason } => {
+            crate::payouts::save(current.clone());
+            *entitlement = current;
+            Err(reason)
+        }
+        crate::payouts::PayoutInputOutcome::Unresolved { reason } => {
+            crate::payouts::save(current.clone());
+            crate::payouts::append(current.id, PayoutJournalEventKind::InputUnresolved { reason: reason.clone() });
+            *entitlement = current;
+            Err(reason)
+        }
+        _ => Err("invalid input transfer transition".into()),
+    }
+}
+
+fn merge_input_outcome(
+    current: &crate::payouts::PayoutInputOutcome,
+    incoming: crate::payouts::PayoutInputOutcome,
+) -> crate::payouts::PayoutInputOutcome {
+    use crate::payouts::PayoutInputOutcome as Outcome;
+    match (current, incoming) {
+        (Outcome::Confirmed { .. }, _) => current.clone(),
+        (_, confirmed @ Outcome::Confirmed { .. }) => confirmed,
+        (Outcome::Unresolved { .. }, Outcome::RejectedNoTransfer { .. }) => current.clone(),
+        (Outcome::RejectedNoTransfer { .. }, unresolved @ Outcome::Unresolved { .. }) => unresolved,
+        (_, next) => next,
+    }
+}
+
+fn merge_payout_outcome(current: &PayoutOutcome, incoming: PayoutOutcome) -> PayoutOutcome {
+    match (current, incoming) {
+        (PayoutOutcome::Confirmed { .. }, _) => current.clone(),
+        (_, confirmed @ PayoutOutcome::Confirmed { .. }) => confirmed,
+        (PayoutOutcome::Unresolved { .. }, PayoutOutcome::RejectedNoTransfer { .. }) => current.clone(),
+        (PayoutOutcome::RejectedNoTransfer { .. }, unresolved @ PayoutOutcome::Unresolved { .. }) => unresolved,
+        (_, next) => next,
+    }
+}
+
+/// Activate a previously reserved payout only after the operation proves the
+/// leg is owed. Persist the authorization before the ledger call.
+pub fn activate_prepared_payout(id: u64) -> Result<(), PayoutFailure> {
+    let mut entitlement = crate::payouts::get(id).ok_or_else(|| PayoutFailure {
+        id, reason: "reserved payout identity is missing".into(), ambiguous: true,
+    })?;
+    if entitlement.dispatch_ready == Some(true) { return Ok(()); }
+    entitlement.dispatch_ready = Some(true);
+    crate::payouts::save(entitlement);
+    Ok(())
+}
+
+/// Close a reserved payout that the operation proves is not required.
+pub fn cancel_prepared_payout(id: u64, _reason: &str) -> Result<(), PayoutFailure> {
+    let mut entitlement = crate::payouts::get(id).ok_or_else(|| PayoutFailure {
+        id, reason: "reserved payout identity is missing".into(), ambiguous: true,
+    })?;
+    if entitlement.dispatch_ready == Some(true) || entitlement.settled {
+        return Err(PayoutFailure { id, reason: "cannot cancel an activated payout".into(), ambiguous: true });
+    }
+    if matches!(entitlement.input_outcome, Some(crate::payouts::PayoutInputOutcome::Confirmed { .. })) {
+        // A confirmed ingress is value-moving evidence and stays owner-visible,
+        // even when the reserved refund was not required.
+        return if crate::payouts::mark_settled(id) {
+            Ok(())
+        } else {
+            Err(PayoutFailure { id, reason: "could not close confirmed input identity".into(), ambiguous: true })
+        };
+    }
+    if matches!(entitlement.input_outcome, Some(crate::payouts::PayoutInputOutcome::Unresolved { .. } | crate::payouts::PayoutInputOutcome::Submitted)) {
+        return Err(PayoutFailure { id, reason: "cannot discard unresolved input identity".into(), ambiguous: true });
+    }
+    // Definitive no-effect details are intentionally not copied to the
+    // append-only journal; the consumed ID and memo are never reused.
+    crate::payouts::remove_no_effect(&entitlement);
+    Ok(())
+}
+
+/// Dispatch a previously persisted, ready payout tuple.
+pub async fn execute_prepared_payout(id: u64) -> Result<(), PayoutFailure> {
+    let mut entitlement = crate::payouts::get(id).ok_or_else(|| PayoutFailure {
+        id, reason: "prepared payout identity is missing".into(), ambiguous: true,
+    })?;
+    if entitlement.dispatch_ready == Some(false) {
+        return Err(PayoutFailure { id, reason: "payout is reserved but not yet authorized for dispatch".into(), ambiguous: true });
+    }
+    let attempt_number = entitlement.attempts.last().map(|attempt| attempt.number).ok_or_else(|| PayoutFailure {
+        id, reason: "payout has no persisted transfer tuple".into(), ambiguous: true,
+    })?;
+    execute_payout_attempt(&mut entitlement, attempt_number, false).await
 }
 
 /// Create and execute the unique refund entitlement for a proven no-effect
@@ -147,6 +382,26 @@ async fn payout_to_user_inner(
     compensation_for: Option<u64>,
 ) -> Result<u64, PayoutFailure> {
     let fee = ledger_fee(ledger).await;
+    let entitlement = prepare_payout_with_fee(kind, token_index, ledger, symbol, to, gross, swap_context, compensation_for, fee, true)?;
+    execute_prepared_payout(entitlement.id).await?;
+    if kind != PayoutKind::SwapOutput {
+        crate::payouts::mark_settled(entitlement.id);
+    }
+    Ok(entitlement.id)
+}
+
+fn prepare_payout_with_fee(
+    kind: PayoutKind,
+    token_index: u8,
+    ledger: Principal,
+    symbol: &str,
+    to: Principal,
+    gross: u128,
+    swap_context: Option<crate::payouts::PayoutSwapContext>,
+    compensation_for: Option<u64>,
+    fee: u128,
+    dispatch_ready: bool,
+) -> Result<PayoutEntitlement, PayoutFailure> {
     if let Some(parent_id) = compensation_for {
         let parent = crate::payouts::get(parent_id).ok_or_else(|| PayoutFailure {
             id: parent_id,
@@ -174,42 +429,40 @@ async fn payout_to_user_inner(
         swap_context,
         compensation_id: None,
         compensation_for,
+        dispatch_ready: Some(dispatch_ready),
+        input_transfer: None,
+        input_outcome: None,
+        input_action: None,
         settled: false,
         attempts: vec![attempt.clone()],
     };
+    let mut compensation_parent = None;
     if let Some(parent_id) = compensation_for {
         let mut parent = crate::payouts::get(parent_id).expect("validated compensation parent");
         parent.compensation_id = Some(id);
+        compensation_parent = Some((parent_id, parent));
+    }
+
+    // Store the exact tuple in the stable current projection before any call.
+    // Keeping Prepared payloads in StableLog made permissionless rejected
+    // operations permanently consume append-only storage.
+    crate::payouts::save(entitlement.clone());
+    if let Some((parent_id, parent)) = compensation_parent {
+        crate::payouts::save(parent);
         crate::payouts::append(
             parent_id,
             PayoutJournalEventKind::CompensationBound { compensation_id: id },
         );
-        crate::payouts::save(parent);
     }
 
-    crate::payouts::append(
-        id,
-        PayoutJournalEventKind::Prepared { attempt: attempt.clone() },
-    );
-    crate::payouts::save(entitlement.clone());
-
-    if gross <= fee {
+    if gross <= fee && dispatch_ready {
         let reason = format!("gross entitlement {gross} does not exceed ledger fee {fee}");
         attempt.outcome = PayoutOutcome::RejectedNoTransfer { reason: reason.clone() };
         entitlement.attempts[0] = attempt.clone();
-        crate::payouts::append(
-            id,
-            PayoutJournalEventKind::RejectedNoTransfer { attempt_number: 0, reason: reason.clone() },
-        );
         crate::payouts::save(entitlement);
         return Err(PayoutFailure { id, reason, ambiguous: false });
     }
-    let payout_id = entitlement.id;
-    execute_payout_attempt(&mut entitlement, 0, false).await?;
-    if kind != PayoutKind::SwapOutput {
-        crate::payouts::mark_settled(payout_id);
-    }
-    Ok(payout_id)
+    Ok(entitlement)
 }
 
 /// Recover a bound payout claim. Ambiguous attempts replay only the exact same
@@ -221,6 +474,9 @@ pub async fn retry_payout_claim(id: u64) -> Result<(), PayoutFailure> {
         reason: "claim has no bound payout identity; held for manual adjudication".into(),
         ambiguous: true,
     })?;
+    if entitlement.dispatch_ready == Some(false) {
+        return Err(PayoutFailure { id, reason: "payout reservation is not yet authorized for dispatch".into(), ambiguous: true });
+    }
     let latest = entitlement.attempts.last().cloned().ok_or_else(|| PayoutFailure {
         id,
         reason: "payout journal has no transfer attempt".into(),
@@ -260,7 +516,6 @@ pub async fn retry_payout_claim(id: u64) -> Result<(), PayoutFailure> {
     let fee = refresh_ledger_fee(entitlement.ledger).await;
     let attempt = make_attempt(id, number, entitlement.ledger, entitlement.owner, entitlement.gross, fee);
     entitlement.attempts.push(attempt.clone());
-    crate::payouts::append(id, PayoutJournalEventKind::Prepared { attempt });
     crate::payouts::save(entitlement.clone());
     execute_payout_attempt(&mut entitlement, number, false).await
 }
@@ -316,15 +571,10 @@ async fn execute_payout_attempt(
     if transfer.gross <= transfer.fee {
         let reason = format!("gross entitlement {} does not exceed ledger fee {}", transfer.gross, transfer.fee);
         entitlement.attempts[idx].outcome = PayoutOutcome::RejectedNoTransfer { reason: reason.clone() };
-        crate::payouts::append(id, PayoutJournalEventKind::RejectedNoTransfer { attempt_number: number, reason: reason.clone() });
         crate::payouts::save(entitlement.clone());
         return Err(PayoutFailure { id, reason, ambiguous: false });
     }
     entitlement.attempts[idx].outcome = PayoutOutcome::Submitted;
-    crate::payouts::append(id, PayoutJournalEventKind::Submitted {
-        attempt_number: number,
-        replay_count: attempt.replay_count,
-    });
     crate::payouts::save(entitlement.clone());
     if entitlement.kind == PayoutKind::SwapOutput {
         crate::storage::payouts::set_fence_for(id);
@@ -359,24 +609,83 @@ async fn execute_payout_attempt(
             PayoutOutcome::Unresolved { reason }
         }
     };
-    entitlement.attempts[idx].outcome = outcome.clone();
-    match outcome {
+    let mut current = crate::payouts::get(id).ok_or_else(|| PayoutFailure {
+        id, reason: "payout identity disappeared while ledger call was in flight".into(), ambiguous: true,
+    })?;
+    let Some(current_attempt) = current.attempts.get(idx).cloned() else {
+        return Err(PayoutFailure { id, reason: "payout attempt disappeared while ledger call was in flight".into(), ambiguous: true });
+    };
+    if current_attempt.transfer != attempt.transfer {
+        return Err(PayoutFailure { id, reason: "payout identity changed while ledger call was in flight".into(), ambiguous: true });
+    }
+    if current_attempt.replay_count != attempt.replay_count
+        && !matches!(&outcome, PayoutOutcome::Confirmed { .. } | PayoutOutcome::Unresolved { .. })
+    {
+        return Err(PayoutFailure { id, reason: "stale no-effect payout callback cannot overwrite a newer replay".into(), ambiguous: true });
+    }
+    let merged = merge_payout_outcome(&current_attempt.outcome, outcome);
+    current.attempts[idx].outcome = merged.clone();
+    match merged {
         PayoutOutcome::Confirmed { block } => {
-            crate::payouts::append(id, PayoutJournalEventKind::Confirmed { attempt_number: number, block: block.clone() });
-            crate::payouts::save(entitlement.clone());
-            let _ = block;
-            Ok(())
+            crate::payouts::save(current.clone());
+            if !matches!(&current_attempt.outcome, PayoutOutcome::Confirmed { .. }) {
+                crate::payouts::append(id, PayoutJournalEventKind::Confirmed { attempt_number: number, block: block.clone() });
+            }
+            *entitlement = current;
+            if entitlement.attempts.iter().any(|later| {
+                later.number > number
+                    && matches!(&later.outcome, PayoutOutcome::Submitted | PayoutOutcome::Unresolved { .. })
+            }) {
+                Err(PayoutFailure { id, reason: "an earlier payout is confirmed while a newer exact identity remains unresolved".into(), ambiguous: true })
+            } else {
+                Ok(())
+            }
         }
         PayoutOutcome::RejectedNoTransfer { reason } => {
-            crate::payouts::append(id, PayoutJournalEventKind::RejectedNoTransfer { attempt_number: number, reason: reason.clone() });
-            crate::payouts::save(entitlement.clone());
+            crate::payouts::save(current.clone());
+            *entitlement = current;
             Err(PayoutFailure { id, reason, ambiguous: false })
         }
         PayoutOutcome::Unresolved { reason } => {
+            crate::payouts::save(current.clone());
             crate::payouts::append(id, PayoutJournalEventKind::Unresolved { attempt_number: number, reason: reason.clone() });
-            crate::payouts::save(entitlement.clone());
+            *entitlement = current;
             Err(PayoutFailure { id, reason, ambiguous: true })
         }
         _ => Err(PayoutFailure { id, reason: "invalid payout transition".into(), ambiguous: true }),
+    }
+}
+
+#[cfg(test)]
+mod outcome_merge_tests {
+    use super::{merge_input_outcome, merge_payout_outcome};
+    use crate::payouts::{PayoutInputOutcome, PayoutOutcome};
+    use candid::Nat;
+
+    #[test]
+    fn a_late_confirmed_input_callback_upgrades_unresolved_and_is_never_downgraded() {
+        let submitted = PayoutInputOutcome::Submitted;
+        let unresolved = PayoutInputOutcome::Unresolved { reason: "callback B".into() };
+        let confirmed = PayoutInputOutcome::Confirmed { block: Nat::from(7u8) };
+        let after_b = merge_input_outcome(&submitted, unresolved);
+        assert!(matches!(after_b, PayoutInputOutcome::Unresolved { .. }));
+        assert_eq!(merge_input_outcome(&after_b, confirmed.clone()), confirmed);
+
+        let already_confirmed = PayoutInputOutcome::Confirmed { block: Nat::from(8u8) };
+        let late_error = PayoutInputOutcome::Unresolved { reason: "late error".into() };
+        assert_eq!(merge_input_outcome(&already_confirmed, late_error), already_confirmed);
+    }
+
+    #[test]
+    fn a_late_confirmed_payout_replay_upgrades_unresolved_same_tuple() {
+        let submitted = PayoutOutcome::Submitted;
+        let unresolved = PayoutOutcome::Unresolved { reason: "callback B".into() };
+        let confirmed = PayoutOutcome::Confirmed { block: Nat::from(9u8) };
+        let after_b = merge_payout_outcome(&submitted, unresolved);
+        assert!(matches!(after_b, PayoutOutcome::Unresolved { .. }));
+        assert_eq!(merge_payout_outcome(&after_b, confirmed.clone()), confirmed);
+
+        let late_error = PayoutOutcome::Unresolved { reason: "late error".into() };
+        assert_eq!(merge_payout_outcome(&confirmed, late_error), confirmed);
     }
 }

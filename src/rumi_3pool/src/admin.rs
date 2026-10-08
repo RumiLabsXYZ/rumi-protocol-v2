@@ -129,51 +129,95 @@ pub async fn withdraw_admin_fees(caller: Principal) -> Result<[u128; 3], ThreePo
         return Err(ThreePoolError::Unauthorized);
     }
 
-    let claim_slots_needed = fees.iter().filter(|amount| **amount > 0).count() as u64;
-    let mut claim_slots = crate::PendingClaimSlots::reserve(claim_slots_needed)?;
-
-    // Resolve any cold fee queries before clearing the admin liability. The
-    // payout helper then journals its exact tuple without an intervening query.
+    let mut ledger_fees = [0u128; 3];
+    // Resolve all fee queries before creating payout identities or clearing
+    // liabilities. Dust below the current transfer fee stays accrued.
     for k in 0..3 {
         if fees[k] > 0 {
-            let _ = crate::transfers::ledger_fee(tokens[k].ledger_id).await;
+            ledger_fees[k] = crate::transfers::current_ledger_fee(tokens[k].ledger_id).await;
         }
     }
-
-    // Each fee liability is cleared immediately before its corresponding
-    // entitlement is dispatched. Later token liabilities remain intact if an
-    // earlier outbound call or canister execution traps between legs.
-    let mut withdrawn = [0u128; 3];
+    let transferable: [u128; 3] = core::array::from_fn(|k| {
+        if fees[k] > ledger_fees[k] { fees[k] } else { 0 }
+    });
+    let claim_slots_needed = transferable.iter().filter(|amount| **amount > 0).count() as u64;
+    let mut claim_slots = crate::PendingClaimSlots::reserve(claim_slots_needed)?;
+    let mut payout_ids = [None; 3];
+    // Pin every exact outbound tuple before any liability mutation or send.
     for k in 0..3 {
-        if fees[k] > 0 {
-            mutate_state(|s| {
-                s.admin_fees[k] = s.admin_fees[k]
-                    .checked_sub(fees[k])
-                    .expect("admin fee liability changed while pool lock held");
-            });
-            match crate::transfers::payout_to_user(
+        if transferable[k] > 0 {
+            payout_ids[k] = Some(crate::transfers::prepare_payout(
                 crate::payouts::PayoutKind::AdminFeeWithdrawal,
                 k as u8,
                 tokens[k].ledger_id,
                 &tokens[k].symbol,
                 admin,
-                fees[k],
-                None,
-            ).await {
+                transferable[k],
+                ledger_fees[k],
+                false,
+            ).map_err(|failure| ThreePoolError::TransferFailed {
+                token: tokens[k].symbol.clone(), reason: failure.reason,
+            })?);
+        }
+    }
+    let fence_id = payout_ids.iter().flatten().last().copied();
+    if let Some(id) = fence_id {
+        crate::storage::payouts::set_fence_for(id);
+    }
+    // Clear all liabilities in one synchronous state transition. This avoids
+    // an upgrade between legs leaving later liabilities unbound to an intent.
+    if let Err(error) = mutate_state(|s| -> Result<(), ThreePoolError> {
+        if s.admin_fees != fees {
+            return Err(ThreePoolError::PoolLocked);
+        }
+        for k in 0..3 {
+            s.admin_fees[k] = s.admin_fees[k]
+                .checked_sub(transferable[k])
+                .ok_or(ThreePoolError::MathOverflow)?;
+        }
+        Ok(())
+    }) {
+        for id in payout_ids.into_iter().flatten() {
+            let _ = crate::transfers::cancel_prepared_payout(id, "admin fee liability was not cleared");
+        }
+        if let Some(id) = fence_id {
+            crate::storage::payouts::clear_fence_for(id);
+        }
+        return Err(error);
+    }
+
+    // Install every recovery projection and activate every tuple before the
+    // first outbound await, so a trap cannot hide a later leg's obligation.
+    for k in 0..3 {
+        if let Some(id) = payout_ids[k] {
+            crate::record_pending_claim(
+                &mut claim_slots,
+                id,
+                admin,
+                k as u8,
+                tokens[k].ledger_id,
+                &tokens[k].symbol,
+                transferable[k],
+                "admin fee payout is durably reserved",
+            );
+            crate::transfers::activate_prepared_payout(id)
+                .map_err(|failure| ThreePoolError::TransferFailed {
+                    token: tokens[k].symbol.clone(), reason: failure.reason,
+                })?;
+        }
+    }
+
+    let mut withdrawn = [0u128; 3];
+    for k in 0..3 {
+        if let Some(id) = payout_ids[k] {
+            match crate::transfers::execute_prepared_payout(id).await {
                 Ok(_) => {
-                    withdrawn[k] = fees[k];
+                    crate::maybe_trap_after_admin_fee_leg(k);
+                    crate::payouts::mark_settled(id);
+                    crate::storage::pending_claims::remove(id);
+                    withdrawn[k] = transferable[k];
                 }
                 Err(failure) => {
-                    crate::record_pending_claim(
-                        &mut claim_slots,
-                        failure.id,
-                        admin,
-                        k as u8,
-                        tokens[k].ledger_id,
-                        &tokens[k].symbol,
-                        fees[k],
-                        &format!("admin fee payout held ({})", failure.reason),
-                    );
                     ic_cdk::println!(
                         "[withdraw_admin_fees] token {} transfer failed and is held as claim: {}",
                         tokens[k].symbol, failure.reason
@@ -181,6 +225,10 @@ pub async fn withdraw_admin_fees(caller: Principal) -> Result<[u128; 3], ThreePo
                 }
             }
         }
+    }
+
+    if let Some(id) = fence_id {
+        crate::storage::payouts::clear_fence_for(id);
     }
 
     record_admin_event(caller, ThreePoolAdminAction::WithdrawAdminFees { amounts: withdrawn });

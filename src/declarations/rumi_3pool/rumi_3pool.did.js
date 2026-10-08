@@ -190,6 +190,11 @@ export const idlFactory = ({ IDL }) => {
     'SwapInputRefund' : IDL.Null,
     'RemoveLiquidity' : IDL.Null,
   });
+  const PayoutInputAction = IDL.Variant({
+    'AddLiquidity' : IDL.Null,
+    'Swap' : IDL.Null,
+    'Donation' : IDL.Null,
+  });
   const Account = IDL.Record({
     'owner' : IDL.Principal,
     'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
@@ -218,6 +223,21 @@ export const idlFactory = ({ IDL }) => {
     'transfer' : PayoutTransfer,
     'outcome' : PayoutOutcome,
   });
+  const PayoutInputTransfer = IDL.Record({
+    'to' : Account,
+    'from' : Account,
+    'memo' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'ledger' : IDL.Principal,
+    'created_at_time' : IDL.Nat64,
+    'amount' : IDL.Nat,
+  });
+  const PayoutInputOutcome = IDL.Variant({
+    'Confirmed' : IDL.Record({ 'block' : IDL.Nat }),
+    'Prepared' : IDL.Null,
+    'Unresolved' : IDL.Record({ 'reason' : IDL.Text }),
+    'RejectedNoTransfer' : IDL.Record({ 'reason' : IDL.Text }),
+    'Submitted' : IDL.Null,
+  });
   const PayoutSwapContext = IDL.Record({
     'amp' : IDL.Nat64,
     'admin_fee_bps' : IDL.Nat64,
@@ -226,6 +246,7 @@ export const idlFactory = ({ IDL }) => {
     'gross_output' : IDL.Nat,
     'token_in' : IDL.Nat8,
     'is_rebalancing' : IDL.Bool,
+    'admin_fees_before' : IDL.Vec(IDL.Nat),
     'fee_bps' : IDL.Nat16,
     'imbalance_before' : IDL.Nat64,
     'amount_in' : IDL.Nat,
@@ -239,12 +260,16 @@ export const idlFactory = ({ IDL }) => {
     'settled' : IDL.Bool,
     'owner' : IDL.Principal,
     'kind' : PayoutKind,
+    'input_action' : IDL.Opt(PayoutInputAction),
     'attempts' : IDL.Vec(PayoutAttempt),
     'compensation_id' : IDL.Opt(IDL.Nat64),
     'compensation_for' : IDL.Opt(IDL.Nat64),
     'ledger' : IDL.Principal,
     'gross' : IDL.Nat,
+    'input_transfer' : IDL.Opt(PayoutInputTransfer),
+    'input_outcome' : IDL.Opt(PayoutInputOutcome),
     'swap_context' : IDL.Opt(PayoutSwapContext),
+    'dispatch_ready' : IDL.Opt(IDL.Bool),
     'symbol' : IDL.Text,
   });
   const ThreePoolPendingClaim = IDL.Record({

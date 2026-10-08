@@ -1,12 +1,12 @@
 //! Pending-claim capacity must be reserved before value can move. The flaky
 //! ledgers reproduce two independent add-liquidity refunds failing after two
 //! successful pulls without requiring an outage or external ledger.
-use candid::{decode_one, encode_args, encode_one, Nat, Principal};
+use candid::{decode_args, decode_one, encode_args, encode_one, Nat, Principal};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc2::approve::ApproveArgs;
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
-use rumi_3pool::payouts::{PayoutEntitlement, PayoutKind, PayoutOutcome};
-use rumi_3pool::types::{ThreePoolError, ThreePoolInitArgs, ThreePoolPendingClaim, TokenConfig};
+use rumi_3pool::payouts::{PayoutEntitlement, PayoutInputAction, PayoutKind, PayoutOutcome};
+use rumi_3pool::types::{PoolStatus, ThreePoolError, ThreePoolInitArgs, ThreePoolPendingClaim, TokenConfig};
 
 const USER_FUNDS: [u128; 3] = [
     1_000_000_000_000_000,
@@ -238,6 +238,35 @@ fn payouts(h: &Harness, owner: Principal) -> Vec<PayoutEntitlement> {
     .unwrap()
 }
 
+fn payout_storage_counts(h: &Harness) -> (u64, u64) {
+    decode_args(&reply(
+        h.pic.query_call(
+            h.pool,
+            Principal::anonymous(),
+            "test_payout_storage_counts",
+            encode_args(()).unwrap(),
+        ).unwrap(),
+    )).unwrap()
+}
+
+fn set_allowance(h: &Harness, ledger: Principal, amount: u128) {
+    let _ = h.pic.update_call(
+        ledger,
+        h.user,
+        "icrc2_approve",
+        encode_one(ApproveArgs {
+            from_subaccount: None,
+            spender: Account { owner: h.pool, subaccount: None },
+            amount: Nat::from(amount),
+            expected_allowance: None,
+            expires_at: None,
+            fee: None,
+            memo: None,
+            created_at_time: None,
+        }).unwrap(),
+    ).unwrap();
+}
+
 fn call_ledger_flag(h: &Harness, ledger: Principal, method: &str, value: bool) {
     h.pic
         .update_call(ledger, h.user, method, encode_one(value).unwrap())
@@ -253,7 +282,9 @@ fn call_ledger_nat(h: &Harness, ledger: Principal, method: &str, value: u128) {
 #[test]
 fn add_liquidity_records_both_failed_refunds_when_two_prior_pulls_succeeded() {
     let h = setup();
-    set_test_cap(&h, 2);
+    // Admission reserves the maximum three independent late refunds before
+    // the first pull, even though this scenario only produces two claims.
+    set_test_cap(&h, 3);
     for ledger in [h.ledgers[0], h.ledgers[1]] {
         h.pic
             .update_call(
@@ -284,7 +315,7 @@ fn add_liquidity_records_both_failed_refunds_when_two_prior_pulls_succeeded() {
             .unwrap(),
     ))
     .unwrap();
-    assert!(matches!(result, Err(ThreePoolError::TransferFailed { .. })));
+    assert!(matches!(result, Err(ThreePoolError::TransferFailed { .. })), "unexpected add result: {result:?}");
 
     let recorded = claims(&h);
     assert_eq!(recorded.len(), 2, "both failed refunds need durable claims");
@@ -333,6 +364,27 @@ fn add_liquidity_records_both_failed_refunds_when_two_prior_pulls_succeeded() {
 }
 
 #[test]
+fn add_liquidity_reserves_every_possible_late_refund_slot_before_pull() {
+    let h = setup();
+    set_test_cap(&h, 2);
+    let before = h.ledgers.map(|ledger| balance(&h, ledger, h.user));
+    let result: Result<Nat, ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "add_liquidity",
+                encode_args((ADD.to_vec(), 0u128)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(result, Err(ThreePoolError::PendingClaimCapacityReached)));
+    assert_eq!(h.ledgers.map(|ledger| balance(&h, ledger, h.user)), before);
+    assert!(claims(&h).is_empty());
+}
+
+#[test]
 fn insufficient_capacity_rejects_before_any_add_liquidity_pull_and_keeps_old_claim() {
     let h = setup();
     set_test_cap(&h, 1);
@@ -369,6 +421,408 @@ fn insufficient_capacity_rejects_before_any_add_liquidity_pull_and_keeps_old_cla
     assert_eq!(existing.len(), 1);
     assert_eq!(existing[0].id, first_id);
     assert_eq!(existing[0].amount, 777);
+}
+
+#[test]
+fn committed_add_input_with_lost_reply_is_reconciled_before_refund() {
+    let h = setup();
+    let before = balance(&h, h.ledgers[0], h.user);
+    h.pic
+        .update_call(
+            h.ledgers[0],
+            h.user,
+            "set_phantom_failures",
+            encode_one(1u32).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Nat, ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "add_liquidity",
+                encode_args((ADD.to_vec(), 0u128)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(result, Err(ThreePoolError::TransferFailed { .. })));
+    let held = payouts(&h, h.user)
+        .into_iter()
+        .find(|item| {
+            item.kind == PayoutKind::AddLiquidityRefund
+                && item.input_transfer.as_ref().map(|transfer| transfer.amount) == Some(ADD[0])
+        })
+        .expect("prebound refund identity remains visible");
+    assert_eq!(held.input_transfer.as_ref().unwrap().amount, ADD[0]);
+    assert!(balance(&h, h.ledgers[0], h.user) < before);
+    let after_committed_pull = balance(&h, h.ledgers[0], h.user);
+
+    let recovered: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "claim_pending",
+                encode_one(held.id).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    recovered.expect("exact input replay proves the committed pull before refund");
+    assert_eq!(balance(&h, h.ledgers[0], h.user), before);
+    assert!(balance(&h, h.ledgers[0], h.user) > after_committed_pull);
+    assert!(claims(&h).iter().all(|claim| claim.id != held.id));
+}
+
+#[test]
+fn committed_swap_input_with_lost_reply_recovers_same_identity_without_second_pull() {
+    let h = setup();
+    let input_before = balance(&h, h.ledgers[0], h.user);
+    let output_before = balance(&h, h.ledgers[1], h.user);
+    h.pic
+        .update_call(
+            h.ledgers[0],
+            h.user,
+            "set_phantom_failures",
+            encode_one(1u32).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<u128, ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "swap",
+                encode_args((0u8, 1u8, 100_000_000u128, 1u128)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(result, Err(ThreePoolError::TransferFailed { .. })));
+    let output = payouts(&h, h.user)
+        .into_iter()
+        .find(|item| item.kind == PayoutKind::SwapOutput)
+        .expect("output identity must stay bound to the input");
+    let pull = balance(&h, h.ledgers[0], h.user);
+    assert!(pull < input_before, "the fake ledger committed the input pull");
+    assert_eq!(input_before - pull, 100_000_000);
+
+    let recovered: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "claim_pending",
+                encode_one(output.id).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    recovered.expect("same input tuple replays as Duplicate before output dispatch");
+    assert_eq!(balance(&h, h.ledgers[0], h.user), pull);
+    assert!(balance(&h, h.ledgers[1], h.user) > output_before);
+    assert!(payout(&h, h.user, output.id).settled);
+    assert!(claims(&h).iter().all(|claim| claim.id != output.id));
+}
+
+#[test]
+fn repeated_same_amount_inputs_have_distinct_persisted_dedup_memos() {
+    let h = setup();
+    let initial = balance(&h, h.ledgers[0], h.user);
+
+    for _ in 0..2 {
+        let added: Result<Nat, ThreePoolError> = decode_one(&reply(
+            h.pic
+                .update_call(
+                    h.pool,
+                    h.user,
+                    "add_liquidity",
+                    encode_args((ADD.to_vec(), 0u128)).unwrap(),
+                )
+                .unwrap(),
+        ))
+        .unwrap();
+        added.expect("same-amount add should pull each operation once");
+    }
+    for _ in 0..2 {
+        let swapped: Result<u128, ThreePoolError> = decode_one(&reply(
+            h.pic
+                .update_call(
+                    h.pool,
+                    h.user,
+                    "swap",
+                    encode_args((0u8, 1u8, 100_000_000u128, 1u128)).unwrap(),
+                )
+                .unwrap(),
+        ))
+        .unwrap();
+        swapped.expect("same-amount swaps must not deduplicate distinct pulls");
+    }
+    for _ in 0..2 {
+        let donated: Result<(), ThreePoolError> = decode_one(&reply(
+            h.pic
+                .update_call(
+                    h.pool,
+                    h.user,
+                    "donate",
+                    encode_args((0u8, 12_345u128)).unwrap(),
+                )
+                .unwrap(),
+        ))
+        .unwrap();
+        donated.expect("same-amount donations must not deduplicate distinct pulls");
+    }
+
+    let expected_input = 2 * ADD[0] + 2 * 100_000_000 + 2 * 12_345;
+    assert_eq!(initial - balance(&h, h.ledgers[0], h.user), expected_input);
+    let records = payouts(&h, h.user);
+    for action in [PayoutInputAction::AddLiquidity, PayoutInputAction::Swap, PayoutInputAction::Donation] {
+        let expected_gross = match action {
+            PayoutInputAction::AddLiquidity => ADD[0],
+            PayoutInputAction::Swap => 100_000_000,
+            PayoutInputAction::Donation => 12_345,
+        };
+        let pair: Vec<_> = records
+            .iter()
+            .filter(|record| record.input_action == Some(action) && record.gross == expected_gross)
+            .collect();
+        assert_eq!(pair.len(), 2, "both same-amount operations retain their input identities");
+        assert_ne!(pair[0].id, pair[1].id);
+        assert_ne!(
+            pair[0].input_transfer.as_ref().unwrap().memo,
+            pair[1].input_transfer.as_ref().unwrap().memo,
+            "per-operation memo is part of the ICRC2 dedup tuple",
+        );
+    }
+}
+
+#[test]
+fn repeated_no_effect_operations_retire_rows_and_allow_honest_successor() {
+    let h = setup();
+    for ledger in h.ledgers {
+        set_allowance(&h, ledger, 0);
+    }
+    let initial_counts = payout_storage_counts(&h);
+    let initial_balances = h.ledgers.map(|ledger| balance(&h, ledger, h.user));
+
+    for _ in 0..100 {
+        let add: Result<Nat, ThreePoolError> = decode_one(&reply(
+            h.pic.update_call(
+                h.pool, h.user, "add_liquidity",
+                encode_args((ADD.to_vec(), 0u128)).unwrap(),
+            ).unwrap(),
+        )).unwrap();
+        assert!(add.is_err());
+
+        let swap: Result<u128, ThreePoolError> = decode_one(&reply(
+            h.pic.update_call(
+                h.pool, h.user, "swap",
+                encode_args((0u8, 1u8, 100_000_000u128, 1u128)).unwrap(),
+            ).unwrap(),
+        )).unwrap();
+        assert!(swap.is_err());
+
+        let donate: Result<(), ThreePoolError> = decode_one(&reply(
+            h.pic.update_call(
+                h.pool, h.user, "donate",
+                encode_args((0u8, 12_345u128)).unwrap(),
+            ).unwrap(),
+        )).unwrap();
+        assert!(donate.is_err());
+    }
+
+    assert_eq!(payout_storage_counts(&h), initial_counts,
+        "definitive no-effect attempts must not grow retained rows or append-only evidence");
+    assert_eq!(h.ledgers.map(|ledger| balance(&h, ledger, h.user)), initial_balances,
+        "rejected allowance attempts must not debit inputs");
+
+    for ledger in h.ledgers {
+        set_allowance(&h, ledger, u128::MAX);
+    }
+    let honest: Result<Nat, ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool, h.user, "add_liquidity",
+            encode_args((ADD.to_vec(), 0u128)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    honest.expect("an honest approved add after rejected spam must succeed");
+    let after = payout_storage_counts(&h);
+    assert!(after.0 >= initial_counts.0 + 3,
+        "confirmed ingress identities must remain owner-visible after settlement");
+    assert!(after.1 > initial_counts.1,
+        "confirmed ingress receipt evidence must remain append-only");
+}
+
+#[test]
+fn same_time_identical_input_requests_each_debit_once() {
+    let h = setup();
+    let amount = 7_777u128;
+    let before = balance(&h, h.ledgers[0], h.user);
+    let ids: Result<(u64, u64), String> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "test_same_time_input_pair",
+                encode_args((0u8, amount)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    let (first_id, second_id) = ids.expect("test pulls should both commit");
+    let first = payout(&h, h.user, first_id).input_transfer.unwrap();
+    let second = payout(&h, h.user, second_id).input_transfer.unwrap();
+    assert_eq!(first.created_at_time, second.created_at_time);
+    assert_eq!(first.ledger, second.ledger);
+    assert_eq!(first.from, second.from);
+    assert_eq!(first.to, second.to);
+    assert_eq!(first.amount, second.amount);
+    assert_ne!(first.memo, second.memo);
+    assert_eq!(before - balance(&h, h.ledgers[0], h.user), 2 * amount);
+}
+
+#[test]
+fn admin_fee_legs_are_prebound_before_trap_and_recover_after_upgrade() {
+    let h = setup();
+    let fees = [500u128, 600, 700];
+    h.pic
+        .update_call(
+            h.pool,
+            h.admin,
+            "test_seed_admin_fees",
+            encode_one(fees).unwrap(),
+        )
+        .unwrap();
+    h.pic
+        .update_call(
+            h.pool,
+            h.admin,
+            "test_trap_after_admin_fee_first_leg",
+            encode_args(()).unwrap(),
+        )
+        .unwrap();
+
+    let interrupted = h.pic.update_call(
+        h.pool,
+        h.admin,
+        "withdraw_admin_fees",
+        encode_args(()).unwrap(),
+    );
+    assert!(interrupted.is_err(), "test trap must interrupt after leg one: {interrupted:?}");
+    let entitlements: Vec<_> = payouts(&h, h.admin)
+        .into_iter()
+        .filter(|record| record.kind == PayoutKind::AdminFeeWithdrawal)
+        .collect();
+    assert_eq!(entitlements.len(), 3, "all fee legs must be persisted before first dispatch");
+    assert!(entitlements.iter().all(|record| record.attempts.len() == 1));
+    assert_eq!(claims(&h).len(), 3, "each debited liability has a recovery projection");
+    let admin_fees: Vec<u128> = decode_one(&reply(
+        h.pic.query_call(h.pool, h.admin, "get_admin_fees", encode_args(()).unwrap()).unwrap(),
+    )).unwrap();
+    assert_eq!(admin_fees, vec![0, 0, 0]);
+    assert_eq!(balance(&h, h.ledgers[0], h.admin), fees[0]);
+    assert_eq!(balance(&h, h.ledgers[1], h.admin), 0);
+    assert_eq!(balance(&h, h.ledgers[2], h.admin), 0);
+
+    h.pic.upgrade_canister(
+        h.pool,
+        wasm_artifact("rumi_3pool.wasm"),
+        encode_args(()).unwrap(),
+        None,
+    ).unwrap();
+    for claim in claims(&h) {
+        let recovered: Result<(), ThreePoolError> = decode_one(&reply(
+            h.pic.update_call(
+                h.pool,
+                h.admin,
+                "claim_pending",
+                encode_one(claim.id).unwrap(),
+            ).unwrap(),
+        )).unwrap();
+        recovered.expect("every prebound fee leg must recover after upgrade");
+    }
+    for (ledger, fee) in h.ledgers.into_iter().zip(fees) {
+        assert_eq!(balance(&h, ledger, h.admin), fee);
+    }
+}
+
+#[test]
+fn admin_fee_below_ledger_fee_remains_accrued() {
+    let h = setup();
+    h.pic.update_call(
+        h.pool, h.admin, "test_seed_admin_fees", encode_one([100u128, 0, 0]).unwrap(),
+    ).unwrap();
+    call_ledger_nat(&h, h.ledgers[0], "set_fee", 100);
+    let withdrawn: Result<Vec<u128>, ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(h.pool, h.admin, "withdraw_admin_fees", encode_args(()).unwrap()).unwrap(),
+    )).unwrap();
+    assert_eq!(withdrawn.unwrap(), vec![0, 0, 0]);
+    let accrued: Vec<u128> = decode_one(&reply(
+        h.pic.query_call(h.pool, h.admin, "get_admin_fees", encode_args(()).unwrap()).unwrap(),
+    )).unwrap();
+    assert_eq!(accrued, vec![100, 0, 0], "fee dust is not silently written off");
+    assert!(claims(&h).is_empty());
+}
+
+#[test]
+fn receive_donation_cannot_reclassify_unresolved_donation_input() {
+    let h = setup();
+    let amount = 54_321u128;
+    h.pic
+        .update_call(
+            h.ledgers[0],
+            h.user,
+            "set_phantom_failures",
+            encode_one(1u32).unwrap(),
+        )
+        .unwrap();
+    let result: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "donate",
+                encode_args((0u8, amount)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(result, Err(ThreePoolError::TransferFailed { .. })));
+    let held = payouts(&h, h.user)
+        .into_iter()
+        .find(|record| record.input_action == Some(PayoutInputAction::Donation))
+        .expect("committed donation pull remains a recoverable entitlement");
+    let before: PoolStatus = decode_one(&reply(
+        h.pic.query_call(h.pool, h.user, "get_pool_status", encode_args(()).unwrap()).unwrap(),
+    )).unwrap();
+    let acknowledged: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.admin,
+                "receive_donation",
+                encode_args((0u8, amount)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(acknowledged, Err(ThreePoolError::PoolLocked)));
+    let after: PoolStatus = decode_one(&reply(
+        h.pic.query_call(h.pool, h.user, "get_pool_status", encode_args(()).unwrap()).unwrap(),
+    )).unwrap();
+    assert_eq!(after.balances, before.balances);
+
+    let recovered: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(h.pool, h.user, "claim_pending", encode_one(held.id).unwrap())
+            .unwrap(),
+    ))
+    .unwrap();
+    recovered.expect("exact input replay resolves and accounts the donation once");
+    assert!(payout(&h, h.user, held.id).settled);
 }
 
 #[test]
