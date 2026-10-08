@@ -8,8 +8,9 @@ use ic_canister_log::{declare_log_buffer, log};
 
 use rumi_points::snapshot_seed::RevealedSeed;
 use rumi_points::types::{
-    EpochStatus, EpochSummary, IngestStatus, InitArgs, LeaderboardEntry, PointEntryPage,
-    PointsConfig, PointsError, PrincipalState, PublicEpochStatus, RegistrationInfo, SourceStatus,
+    EpochStatus, EpochSummary, FiatStablePointsPolicy, FiatStableTopupProgress, IngestStatus,
+    InitArgs, LeaderboardEntry, PointEntryPage, PointsConfig, PointsError, PrincipalState,
+    PublicEpochStatus, RegistrationInfo, SourceStatus,
 };
 use rumi_points::events::SourceId;
 use rumi_points::source_types::three_pool;
@@ -129,6 +130,14 @@ fn get_points_config() -> PointsConfig {
     state::points_config()
 }
 
+/// Public policy and bounded historical-migration progress for the fiat-backed
+/// 3pool 4x cutover. The active flag is derived from the epoch index, so a held
+/// legacy epoch remains visibly legacy while a later boundary is pending.
+#[ic_cdk::query]
+fn get_fiat_stable_points_policy() -> FiatStablePointsPolicy {
+    state::fiat_stable_points_policy()
+}
+
 #[ic_cdk::query]
 fn cycles_status() -> rumi_cycle_manager::CycleManagerCyclesStatus {
     rumi_cycle_manager::self_cycles_status(
@@ -193,6 +202,22 @@ fn remove_excluded_principal(principal: Principal) -> Result<(), PointsError> {
 #[ic_cdk::update]
 fn set_excluded_principals(principals: Vec<Principal>) -> Result<(), PointsError> {
     state::set_excluded(ic_cdk::caller(), principals)
+}
+
+/// Admin-only: schedule flat 4x ckUSDC/ckUSDT 3pool accrual at the next epoch
+/// boundary. It accepts no multiplier, cutoff, or correction inputs and never
+/// alters the epoch already in progress.
+#[ic_cdk::update]
+fn activate_fiat_stable_4x() -> Result<FiatStablePointsPolicy, String> {
+    state::activate_fiat_stable_4x(ic_cdk::caller())
+}
+
+/// Admin-only: advance the fixed historical unmatched-row uplift by a bounded
+/// number of immutable audit-ledger rows. Retries resume from the durable cursor
+/// and appended correction rows are outside the fixed source prefix.
+#[ic_cdk::update]
+fn apply_fiat_stable_topups(max_rows: u32) -> Result<FiatStableTopupProgress, String> {
+    state::apply_fiat_stable_topups(ic_cdk::caller(), max_rows, ic_cdk::api::time())
 }
 
 // ── Phase 2: ingestion control ──────────────────────────────────────────────

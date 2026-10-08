@@ -37,22 +37,23 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use candid::Principal;
 use ic_stable_structures::{
     log::Log as StableLog,
     memory_manager::{MemoryId, MemoryManager, VirtualMemory},
     storable::{Bound, Storable},
-    DefaultMemoryImpl, Memory, StableBTreeMap,
+    DefaultMemoryImpl, Memory, StableBTreeMap, StableCell,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::accrual::{self, SnapshotWeights};
 use crate::snapshot_seed::{RevealedSeed, SnapshotSeedSingleton};
 use crate::types::{
-    AssetType, DepositKey, DepositRecord, EpochStatus, EpochSummary, InitArgs, LeaderboardEntry,
-    OpenEpoch, PointEntry, PointEntryPage, PointSource, PointsConfig, PointsError, PrincipalState,
+    AssetType, DepositKey, DepositRecord, EpochStatus, EpochSummary, FiatStablePointsPolicy,
+    FiatStableTopupProgress, InitArgs, LeaderboardEntry, OpenEpoch, PointEntry, PointEntryPage,
+    PointSource, PointsConfig, PointsError, PrincipalState,
     PublicEpochStatus,
     PublicOpenEpoch, QualifyingAction, RegistrationInfo, RepaymentEvent, Venue,
 };
@@ -81,6 +82,10 @@ const SNAPSHOT_BUFFER_MEM_ID: MemoryId = MemoryId::new(11);
 const ASSET_LEDGERS_MEM_ID: MemoryId = MemoryId::new(12);
 // Phase 5: epoch-driver config (key 0 = enabled 0/1, key 1 = interval seconds).
 const EPOCH_CONFIG_MEM_ID: MemoryId = MemoryId::new(13);
+// Fiat-stable 3pool 4x cutover/migration singleton.  Kept separate from the
+// frozen State blob so an upgrade neither reshapes nor risks decoding its
+// existing open-epoch state.
+const FIAT_STABLE_POLICY_MEM_ID: MemoryId = MemoryId::new(14);
 
 const WASM_PAGE_SIZE: u64 = 65_536; // 64 KiB
 
@@ -158,6 +163,48 @@ impl StoredSnapshotWeights {
     fn into_current(self) -> SnapshotWeights {
         match self {
             StoredSnapshotWeights::V1(v) => v,
+        }
+    }
+}
+
+/// Durable implementation state for the fiat-backed 3pool cutover.  The
+/// immutable `historical_ledger_cutoff` fences the bounded migration to the
+/// ledger prefix that existed at activation.  The one remaining legacy epoch
+/// is corrected inline at close from rows after that cutoff.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+struct FiatStablePolicyState {
+    cutover_epoch: Option<u64>,
+    legacy_epoch: Option<u64>,
+    historical_ledger_cutoff: Option<u64>,
+    historical_next_offset: u64,
+    historical_complete: bool,
+    inline_legacy_topups_complete: bool,
+    inline_legacy_topup_rows: u64,
+}
+
+impl Default for FiatStablePolicyState {
+    fn default() -> Self {
+        Self {
+            cutover_epoch: None,
+            legacy_epoch: None,
+            historical_ledger_cutoff: None,
+            historical_next_offset: 0,
+            historical_complete: false,
+            inline_legacy_topups_complete: false,
+            inline_legacy_topup_rows: 0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+enum StoredFiatStablePolicy {
+    V1(FiatStablePolicyState),
+}
+
+impl StoredFiatStablePolicy {
+    fn into_current(self) -> FiatStablePolicyState {
+        match self {
+            StoredFiatStablePolicy::V1(value) => value,
         }
     }
 }
@@ -325,6 +372,7 @@ impl_cbor_storable!(StoredPointEntry);
 impl_cbor_storable!(StoredEpochSummary);
 impl_cbor_storable!(StoredRevealedSeed);
 impl_cbor_storable!(StoredSnapshotWeights);
+impl_cbor_storable!(StoredFiatStablePolicy);
 
 /// `StableBTreeMap` key wrapper. ic-stable-structures 0.6.5 does not provide a
 /// `Storable` impl for `Principal`, so we wrap it. A principal is at most 29
@@ -418,6 +466,14 @@ thread_local! {
     /// Mirrors POLL_CONFIG; the driver timer is re-registered in `post_upgrade`.
     static EPOCH_CONFIG: RefCell<StableBTreeMap<u8, u64, VMem>> =
         MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(EPOCH_CONFIG_MEM_ID))));
+
+    static FIAT_STABLE_POLICY: RefCell<StableCell<StoredFiatStablePolicy, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(
+            StableCell::init(
+                m.borrow().get(FIAT_STABLE_POLICY_MEM_ID),
+                StoredFiatStablePolicy::V1(FiatStablePolicyState::default()),
+            ).expect("failed to init fiat stable points policy cell")
+        ));
 }
 
 // ── Excluded-principals seed (spec Section 11) ──────────────────────────────
@@ -461,7 +517,7 @@ pub fn with_state_mut<R>(f: impl FnOnce(&mut State) -> R) -> R {
 
 fn require_admin(caller: Principal) -> Result<(), PointsError> {
     with_state(|s| {
-        if s.admin == caller {
+        if caller != Principal::anonymous() && s.admin == caller {
             Ok(())
         } else {
             Err(PointsError::Unauthorized)
@@ -471,7 +527,7 @@ fn require_admin(caller: Principal) -> Result<(), PointsError> {
 
 /// Public admin predicate, for endpoints that gate on a bool.
 pub fn is_admin(caller: Principal) -> bool {
-    with_state(|s| s.admin == caller)
+    caller != Principal::anonymous() && with_state(|s| s.admin == caller)
 }
 
 // ── Phase 1 logic (TDD targets; implemented after the failing tests) ────────
@@ -785,6 +841,265 @@ pub fn append_point_entry(entry: PointEntry) {
 
 pub fn point_ledger_len() -> u64 {
     POINT_LEDGER.with(|l| l.borrow().len())
+}
+
+const MAX_FIAT_STABLE_TOPUP_ROWS: u32 = 1_000;
+
+fn fiat_stable_policy_state() -> FiatStablePolicyState {
+    FIAT_STABLE_POLICY.with(|cell| cell.borrow().get().clone().into_current())
+}
+
+fn set_fiat_stable_policy_state(policy: FiatStablePolicyState) {
+    FIAT_STABLE_POLICY.with(|cell| {
+        cell.borrow_mut()
+            .set(StoredFiatStablePolicy::V1(policy))
+            .expect("fiat stable points policy fits its stable cell");
+    });
+}
+
+fn public_fiat_stable_policy(policy: FiatStablePolicyState) -> FiatStablePointsPolicy {
+    let current_epoch = current_epoch_index();
+    FiatStablePointsPolicy {
+        active_for_current_epoch: policy
+            .cutover_epoch
+            .is_some_and(|cutover| current_epoch >= cutover),
+        cutover_epoch: policy.cutover_epoch,
+        legacy_epoch: policy.legacy_epoch,
+        historical_ledger_cutoff: policy.historical_ledger_cutoff,
+        historical_next_offset: policy.historical_next_offset,
+        historical_complete: policy.historical_complete,
+        inline_legacy_topups_complete: policy.inline_legacy_topups_complete,
+        inline_legacy_topup_rows: policy.inline_legacy_topup_rows,
+    }
+}
+
+/// Public policy/progress view.  `active_for_current_epoch` is derived at
+/// query time from the durable cutover index, so a held legacy epoch cannot be
+/// reported as 4x merely because a future cutover was scheduled.
+pub fn fiat_stable_points_policy() -> FiatStablePointsPolicy {
+    public_fiat_stable_policy(fiat_stable_policy_state())
+}
+
+/// True only for epochs at or after the durable cutover boundary.  Capture and
+/// close both consult the epoch index so a mid-open-epoch upgrade cannot mix
+/// multiplier policies across its two snapshots.
+pub fn fiat_stable_4x_active_for_epoch(epoch_index: u64) -> bool {
+    fiat_stable_policy_state()
+        .cutover_epoch
+        .is_some_and(|cutover| epoch_index >= cutover)
+}
+
+/// Schedule the flat fiat policy for the next epoch without mutating the
+/// currently open epoch's capture, seed, or close state.  The historical prefix
+/// is fixed at activation; it never expands into future flat-4x rows.
+pub fn activate_fiat_stable_4x(caller: Principal) -> Result<FiatStablePointsPolicy, String> {
+    require_admin(caller).map_err(|_| "unauthorized".to_string())?;
+    let existing = fiat_stable_policy_state();
+    if existing.cutover_epoch.is_some() {
+        return Ok(public_fiat_stable_policy(existing));
+    }
+    let (cutover_epoch, legacy_epoch) = match get_open_epoch() {
+        Some(open) => {
+            if open.epoch_index != current_epoch_index() {
+                return Err("open epoch does not match the current epoch index".to_string());
+            }
+            if open.close_started {
+                return Err("cannot schedule fiat stable cutover after epoch close has started".to_string());
+            }
+            (
+                open
+                    .epoch_index
+                    .checked_add(1)
+                    .ok_or_else(|| "epoch index overflow scheduling fiat stable cutover".to_string())?,
+                Some(open.epoch_index),
+            )
+        }
+        None if current_epoch_index() > 0 && epoch_count() == current_epoch_index() => {
+            // A prior epoch is fully closed and the next has not opened yet:
+            // the current index is a genuine boundary, so no extra legacy week
+            // is necessary.  Do not admit the unstarted-season shape here.
+            (current_epoch_index(), None)
+        }
+        None => {
+            return Err(
+                "an open epoch or a fully closed between-epochs boundary is required to schedule fiat stable 4x"
+                    .to_string(),
+            )
+        }
+    };
+    let historical_cutoff = point_ledger_len();
+    let policy = FiatStablePolicyState {
+        cutover_epoch: Some(cutover_epoch),
+        legacy_epoch,
+        historical_ledger_cutoff: Some(historical_cutoff),
+        historical_next_offset: 0,
+        historical_complete: historical_cutoff == 0,
+        inline_legacy_topups_complete: legacy_epoch.is_none(),
+        inline_legacy_topup_rows: 0,
+    };
+    set_fiat_stable_policy_state(policy.clone());
+    Ok(public_fiat_stable_policy(policy))
+}
+
+#[derive(Clone)]
+struct FiatStableCorrection {
+    entry: PointEntry,
+    points: u128,
+}
+
+/// Read and validate a fixed ledger interval before mutating anything.  This
+/// preflight makes a missing principal or arithmetic overflow an all-or-nothing
+/// error for the entire batch rather than a partially committed correction.
+fn fiat_stable_corrections(
+    start: u64,
+    end: u64,
+    only_epoch: Option<u64>,
+) -> Result<Vec<FiatStableCorrection>, String> {
+    let policy = fiat_stable_policy_state();
+    let cutover = policy
+        .cutover_epoch
+        .ok_or_else(|| "fiat stable policy is not scheduled".to_string())?;
+    let mut corrections = Vec::new();
+    POINT_LEDGER.with(|ledger| {
+        let ledger = ledger.borrow();
+        for offset in start..end {
+            let entry = ledger
+                .get(offset)
+                .ok_or_else(|| format!("missing point ledger row {offset}"))?
+                .into_current();
+            if entry.source != PointSource::CkStable3PoolUnmatched
+                || entry.epoch_index >= cutover
+                || only_epoch.is_some_and(|epoch| entry.epoch_index != epoch)
+            {
+                continue;
+            }
+            let points = entry.points_delta / 3;
+            if points > 0 {
+                corrections.push(FiatStableCorrection { entry, points });
+            }
+        }
+        Ok::<(), String>(())
+    })?;
+
+    let mut by_principal = BTreeMap::<Principal, u128>::new();
+    for correction in &corrections {
+        let total = by_principal.entry(correction.entry.principal).or_default();
+        *total = total
+            .checked_add(correction.points)
+            .ok_or_else(|| "fiat stable correction aggregation overflow".to_string())?;
+    }
+    for (principal, delta) in by_principal {
+        let state = get_principal_state(&principal)
+            .ok_or_else(|| format!("missing principal state for point ledger correction: {principal}"))?;
+        state
+            .total_points
+            .checked_add(delta)
+            .ok_or_else(|| format!("fiat stable correction would overflow total points for {principal}"))?;
+    }
+    Ok(corrections)
+}
+
+fn commit_fiat_stable_corrections(
+    corrections: Vec<FiatStableCorrection>,
+    now_ns: u64,
+) -> Result<(u32, u128), String> {
+    let mut by_principal = BTreeMap::<Principal, u128>::new();
+    let mut total = 0u128;
+    for correction in &corrections {
+        let principal_total = by_principal.entry(correction.entry.principal).or_default();
+        *principal_total = principal_total
+            .checked_add(correction.points)
+            .ok_or_else(|| "fiat stable correction aggregation overflow".to_string())?;
+        total = total
+            .checked_add(correction.points)
+            .ok_or_else(|| "fiat stable correction total overflow".to_string())?;
+    }
+    // This repeats the preflight check immediately before the writes so the
+    // invariant remains obvious even if this helper is reused elsewhere.
+    let mut updated = Vec::with_capacity(by_principal.len());
+    for (principal, delta) in by_principal {
+        let mut state = get_principal_state(&principal)
+            .ok_or_else(|| format!("missing principal state for point ledger correction: {principal}"))?;
+        state.total_points = state
+            .total_points
+            .checked_add(delta)
+            .ok_or_else(|| format!("fiat stable correction would overflow total points for {principal}"))?;
+        updated.push(state);
+    }
+    for correction in &corrections {
+        append_point_entry(PointEntry {
+            principal: correction.entry.principal,
+            epoch_index: correction.entry.epoch_index,
+            points_delta: correction.points,
+            source: PointSource::CkStable3PoolUnmatchedTopUp,
+            recorded_at_ns: now_ns,
+        });
+    }
+    for state in updated {
+        put_principal_state(state);
+    }
+    Ok((corrections.len() as u32, total))
+}
+
+/// Apply at most `max_rows` rows from the activation-fixed historical prefix.
+/// Rows are scanned by original ledger offset; appended correction rows never
+/// enter the prefix and therefore cannot be selected on retry or after upgrade.
+pub fn apply_fiat_stable_topups(
+    caller: Principal,
+    max_rows: u32,
+    now_ns: u64,
+) -> Result<FiatStableTopupProgress, String> {
+    require_admin(caller).map_err(|_| "unauthorized".to_string())?;
+    if max_rows == 0 {
+        return Err("max_rows must be greater than zero".to_string());
+    }
+    let mut policy = fiat_stable_policy_state();
+    let cutoff = policy
+        .historical_ledger_cutoff
+        .ok_or_else(|| "fiat stable policy is not scheduled".to_string())?;
+    let start = policy.historical_next_offset.min(cutoff);
+    let end = start.saturating_add(max_rows.min(MAX_FIAT_STABLE_TOPUP_ROWS) as u64).min(cutoff);
+    let corrections = fiat_stable_corrections(start, end, None)?;
+    let (credited_rows, credited_points) = commit_fiat_stable_corrections(corrections, now_ns)?;
+    policy.historical_next_offset = end;
+    policy.historical_complete = end == cutoff;
+    set_fiat_stable_policy_state(policy.clone());
+    Ok(FiatStableTopupProgress {
+        processed_rows: (end - start) as u32,
+        credited_rows,
+        credited_points,
+        next_offset: end,
+        complete: policy.historical_complete,
+    })
+}
+
+/// The one legacy epoch that was open when activation was scheduled emits its
+/// uplift inside the already-bounded close chunks.  This predicate is keyed by
+/// epoch, so no later flat-4x epoch can enter the inline path.
+pub fn inline_fiat_stable_topups_required_for_epoch(epoch_index: u64) -> bool {
+    let policy = fiat_stable_policy_state();
+    policy.legacy_epoch == Some(epoch_index) && !policy.inline_legacy_topups_complete
+}
+
+fn record_inline_fiat_stable_topup_rows(rows: u64) -> Result<(), String> {
+    if rows == 0 {
+        return Ok(());
+    }
+    let mut policy = fiat_stable_policy_state();
+    policy.inline_legacy_topup_rows = policy
+        .inline_legacy_topup_rows
+        .checked_add(rows)
+        .ok_or_else(|| "fiat stable inline top-up row count overflow".to_string())?;
+    set_fiat_stable_policy_state(policy);
+    Ok(())
+}
+
+fn mark_inline_fiat_stable_topups_complete(epoch_index: u64) {
+    let mut policy = fiat_stable_policy_state();
+    if policy.legacy_epoch == Some(epoch_index) {
+        policy.inline_legacy_topups_complete = true;
+        set_fiat_stable_policy_state(policy);
+    }
 }
 
 /// Row cap per audit-ledger page, same reasoning as `MAX_LEADERBOARD_LIMIT`
@@ -1462,6 +1777,9 @@ pub fn run_close_accrual_chunk(now_ns: u64) -> CloseStep {
         }
         let mut ps = match get_principal_state(p) {
             Some(s) => s,
+            None if inline_fiat_stable_topups_required_for_epoch(epoch_index) => ic_cdk::trap(
+                "missing principal state during fiat stable inline legacy top-up",
+            ),
             None => continue,
         };
         let min_weights = snapshot_buffer_get(p).unwrap_or_default();
@@ -1469,21 +1787,55 @@ pub fn run_close_accrual_chunk(now_ns: u64) -> CloseStep {
         // drained incrementally across the close batches instead of in one O(N)
         // sweep at the end (PTS-002, which would compound POINTS-002's budget).
         snapshot_buffer_remove(p);
-        let (entries, delta) =
-            accrual::accrue_principal(min_weights, &ps.repayment_events, epoch_start, epoch_end_capped);
-        for (source, pts) in entries {
+        let (entries, delta) = accrual::accrue_principal_for_policy(
+            min_weights,
+            &ps.repayment_events,
+            epoch_start,
+            epoch_end_capped,
+            fiat_stable_4x_active_for_epoch(epoch_index),
+        );
+        let inline_legacy_topup = inline_fiat_stable_topups_required_for_epoch(epoch_index);
+        let mut inline_topup_points = 0u128;
+        let mut inline_topup_rows = 0u64;
+        for (source, pts) in &entries {
             append_point_entry(PointEntry {
                 principal: *p,
                 epoch_index,
-                points_delta: pts,
-                source,
+                points_delta: *pts,
+                source: *source,
                 recorded_at_ns: now_ns,
             });
+            if inline_legacy_topup && *source == PointSource::CkStable3PoolUnmatched {
+                let correction = *pts / 3;
+                if correction > 0 {
+                    inline_topup_points = inline_topup_points
+                        .checked_add(correction)
+                        .unwrap_or_else(|| ic_cdk::trap("fiat stable inline top-up overflow"));
+                    inline_topup_rows = inline_topup_rows
+                        .checked_add(1)
+                        .unwrap_or_else(|| ic_cdk::trap("fiat stable inline top-up row count overflow"));
+                    append_point_entry(PointEntry {
+                        principal: *p,
+                        epoch_index,
+                        points_delta: correction,
+                        source: PointSource::CkStable3PoolUnmatchedTopUp,
+                        recorded_at_ns: now_ns,
+                    });
+                }
+            }
         }
         if delta > 0 {
-            ps.total_points = ps.total_points.saturating_add(delta);
+            let combined_delta = delta
+                .checked_add(inline_topup_points)
+                .unwrap_or_else(|| ic_cdk::trap("fiat stable inline top-up combined delta overflow"));
+            ps.total_points = ps
+                .total_points
+                .checked_add(combined_delta)
+                .unwrap_or_else(|| ic_cdk::trap("fiat stable inline top-up would overflow total points"));
             open.close_active = open.close_active.saturating_add(1);
         }
+        record_inline_fiat_stable_topup_rows(inline_topup_rows)
+            .unwrap_or_else(|error| ic_cdk::trap(&error));
         ps.last_epoch_processed = epoch_index;
         // Drop repayment windows that can no longer overlap any future epoch, so
         // the per-principal vec stays bounded (no unbounded growth in the value).
@@ -1518,6 +1870,7 @@ pub fn run_close_accrual_chunk(now_ns: u64) -> CloseStep {
             .fold(0u128, |acc, (_, v)| acc.saturating_add(v.into_current().total_points))
     });
     let registered_principals = registered_count();
+    mark_inline_fiat_stable_topups_complete(epoch_index);
     CloseStep::Done(CloseStats {
         total_points_all,
         points_accrued: open.close_points_accrued,
@@ -3018,5 +3371,179 @@ mod tests {
             paged.extend(page);
         }
         assert_eq!(paged, full, "cursor-paged shuffle equals the full shuffle, once each");
+    }
+
+    #[test]
+    fn fiat_stable_historical_batches_round_per_original_row_and_resume_once() {
+        let admin = tp(99);
+        init_default(admin);
+        let principal = tp(42);
+        register(principal, 1, QualifyingAction::Deposit3Pool).unwrap();
+        let mut state = get_principal_state(&principal).unwrap();
+        // The unmatched rows total 15, but per-row floor(8/3) + floor(7/3) is
+        // 4. Aggregating before the division would incorrectly yield 5; the
+        // unrelated 11-point debt row remains part of the reconciled total.
+        state.total_points = 26;
+        put_principal_state(state);
+        append_point_entry(PointEntry {
+            principal,
+            epoch_index: 0,
+            points_delta: 8,
+            source: PointSource::CkStable3PoolUnmatched,
+            recorded_at_ns: 2,
+        });
+        append_point_entry(PointEntry {
+            principal,
+            epoch_index: 0,
+            points_delta: 7,
+            source: PointSource::CkStable3PoolUnmatched,
+            recorded_at_ns: 3,
+        });
+        append_point_entry(PointEntry {
+            principal,
+            epoch_index: 0,
+            points_delta: 11,
+            source: PointSource::IcUsdDebt,
+            recorded_at_ns: 4,
+        });
+        set_open_epoch(Some(open_epoch_at(0)));
+        let scheduled = activate_fiat_stable_4x(admin).unwrap();
+        assert_eq!(scheduled.cutover_epoch, Some(1));
+        assert!(!scheduled.active_for_current_epoch);
+        assert_eq!(scheduled.historical_ledger_cutoff, Some(point_ledger_len()));
+
+        // Registration marker consumes the first bounded scan without credit.
+        assert_eq!(apply_fiat_stable_topups(admin, 1, 10).unwrap().credited_points, 0);
+        let second = apply_fiat_stable_topups(admin, 2, 11).unwrap();
+        assert_eq!(second.credited_rows, 2);
+        assert_eq!(second.credited_points, 4);
+        assert!(!second.complete);
+        let final_batch = apply_fiat_stable_topups(admin, 10, 12).unwrap();
+        assert!(final_batch.complete);
+        assert_eq!(get_principal_state(&principal).unwrap().total_points, 30);
+        assert_eq!(
+            point_entries(0, 100)
+                .entries
+                .iter()
+                .filter(|entry| entry.source == PointSource::CkStable3PoolUnmatchedTopUp)
+                .map(|entry| entry.points_delta)
+                .collect::<Vec<_>>(),
+            vec![2, 2]
+        );
+        // A retry at completion cannot append or credit again.
+        let len = point_ledger_len();
+        let retry = apply_fiat_stable_topups(admin, 10, 13).unwrap();
+        assert_eq!(retry.processed_rows, 0);
+        assert_eq!(point_ledger_len(), len);
+        assert_eq!(get_principal_state(&principal).unwrap().total_points, 30);
+    }
+
+    #[test]
+    fn fiat_stable_inline_legacy_topups_are_chunked_and_exactly_once() {
+        let admin = tp(99);
+        init_default(admin);
+        set_open_epoch(Some(open_epoch_at(0)));
+        for i in 1..=51u8 {
+            let principal = tp(i);
+            register(principal, 1, QualifyingAction::Deposit3Pool).unwrap();
+            snapshot_buffer_put(
+                principal,
+                SnapshotWeights {
+                    ck_unmatched: 3,
+                    ..Default::default()
+                },
+            );
+        }
+        activate_fiat_stable_4x(admin).unwrap();
+        assert_eq!(run_close_accrual_chunk(10), CloseStep::More);
+        assert_eq!(fiat_stable_points_policy().inline_legacy_topup_rows, 50);
+        let done = run_close_accrual_chunk(11);
+        let stats = match done {
+            CloseStep::Done(stats) => stats,
+            CloseStep::More => panic!("second bounded close chunk must finish"),
+        };
+        // Epoch summary accrual remains the immutable original legacy 3x
+        // amount. The policy corrections are out-of-band audit rows, while the
+        // all-principals total includes them for allocation reconciliation.
+        assert_eq!(stats.points_accrued, 51 * 21);
+        assert_eq!(stats.total_points_all, 51 * 28);
+        let policy = fiat_stable_points_policy();
+        assert!(policy.inline_legacy_topups_complete);
+        assert_eq!(policy.inline_legacy_topup_rows, 51);
+        for i in 1..=51u8 {
+            // 3 legacy weighted units x 7 days = 21, plus floor(21/3) = 7.
+            assert_eq!(get_principal_state(&tp(i)).unwrap().total_points, 28);
+        }
+        let topups = point_entries(0, 1_000)
+            .entries
+            .into_iter()
+            .filter(|entry| entry.source == PointSource::CkStable3PoolUnmatchedTopUp)
+            .count();
+        assert_eq!(topups, 51);
+        // The completed close has no eligible principal left if its final chunk
+        // is retried before epoch finalization.
+        assert!(matches!(run_close_accrual_chunk(12), CloseStep::Done(_)));
+        assert_eq!(
+            point_entries(0, 1_000)
+                .entries
+                .into_iter()
+                .filter(|entry| entry.source == PointSource::CkStable3PoolUnmatchedTopUp)
+                .count(),
+            51
+        );
+    }
+
+    #[test]
+    fn fiat_stable_activation_handles_held_epoch_and_anonymous_cannot_administer() {
+        let admin = tp(99);
+        init_default(admin);
+        with_state_mut(|state| state.snapshot_seed.legacy_transition_held = true);
+        set_open_epoch(Some(open_epoch_at(18)));
+        with_state_mut(|state| state.current_epoch_index = 18);
+        assert_eq!(
+            activate_fiat_stable_4x(Principal::anonymous()),
+            Err("unauthorized".to_string())
+        );
+        let policy = activate_fiat_stable_4x(admin).unwrap();
+        assert_eq!(policy.cutover_epoch, Some(19));
+        assert!(!policy.active_for_current_epoch);
+        assert!(!fiat_stable_4x_active_for_epoch(18));
+        assert!(fiat_stable_4x_active_for_epoch(19));
+        assert!(epoch_status().legacy_transition_held);
+        // The policy lives in its own stable cell and remains pending through
+        // a State blob save/restore, without rewriting the held open epoch.
+        let held = get_open_epoch();
+        save_state_to_stable();
+        restore_from_stable_or_trap();
+        assert_eq!(get_open_epoch(), held);
+        assert_eq!(fiat_stable_points_policy().cutover_epoch, Some(19));
+        assert!(!fiat_stable_points_policy().active_for_current_epoch);
+        with_state_mut(|state| state.current_epoch_index = 19);
+        assert!(fiat_stable_points_policy().active_for_current_epoch);
+    }
+
+    #[test]
+    fn fiat_stable_historical_overflow_aborts_before_cursor_or_rows_change() {
+        let admin = tp(99);
+        init_default(admin);
+        let principal = tp(43);
+        register(principal, 1, QualifyingAction::Deposit3Pool).unwrap();
+        let mut state = get_principal_state(&principal).unwrap();
+        state.total_points = u128::MAX;
+        put_principal_state(state);
+        append_point_entry(PointEntry {
+            principal,
+            epoch_index: 0,
+            points_delta: 3,
+            source: PointSource::CkStable3PoolUnmatched,
+            recorded_at_ns: 2,
+        });
+        set_open_epoch(Some(open_epoch_at(0)));
+        activate_fiat_stable_4x(admin).unwrap();
+        let len = point_ledger_len();
+        assert!(apply_fiat_stable_topups(admin, 10, 3).is_err());
+        assert_eq!(point_ledger_len(), len);
+        assert_eq!(fiat_stable_points_policy().historical_next_offset, 0);
+        assert_eq!(get_principal_state(&principal).unwrap().total_points, u128::MAX);
     }
 }

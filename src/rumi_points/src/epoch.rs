@@ -604,7 +604,10 @@ async fn capture(which: Snapshot) {
                 break;
             }
         };
-        let weights = accrual::snapshot_weights(&accrual::build_snapshot_inputs(&raw, &ctx.prices));
+        let weights = accrual::snapshot_weights_for_policy(
+            &accrual::build_snapshot_inputs(&raw, &ctx.prices),
+            state::fiat_stable_4x_active_for_epoch(open.epoch_index),
+        );
         match which {
             Snapshot::A => state::snapshot_buffer_put(*p, weights),
             Snapshot::B => state::snapshot_buffer_merge_min(*p, weights),

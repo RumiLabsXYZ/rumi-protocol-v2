@@ -72,6 +72,15 @@ pub enum PointSource {
     IcUsd3Pool,
     CkStable3PoolUnmatched,
     CkStable3PoolMatched,
+    /// Flat 4x ckUSDC/ckUSDT 3pool accrual, effective from the fiat-stable
+    /// cutover epoch.  This is deliberately distinct from the legacy split so
+    /// audit readers can distinguish the two policies without reinterpreting
+    /// historical rows.
+    CkStable3PoolFlat4x,
+    /// One-time uplift for a legacy unmatched 3pool accrual row.  The delta is
+    /// `floor(original_unmatched_points / 3)` and is never produced for a
+    /// future flat-4x row.
+    CkStable3PoolUnmatchedTopUp,
     VaultRepayment,
     IcUsdStabilityPool,
     ThreeUsdStabilityPool,
@@ -360,6 +369,33 @@ pub struct IngestStatus {
     /// Whether the periodic poll timer is running (Phase 2b).
     pub poll_enabled: bool,
     pub poll_interval_secs: u64,
+}
+
+/// Durable public status for the fiat-backed 3pool 4x cutover and its bounded
+/// historical unmatched-row uplift.  `historical_ledger_cutoff` is exclusive:
+/// rows at or after it are never considered by the historical migration.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FiatStablePointsPolicy {
+    pub cutover_epoch: Option<u64>,
+    pub legacy_epoch: Option<u64>,
+    pub active_for_current_epoch: bool,
+    pub historical_ledger_cutoff: Option<u64>,
+    pub historical_next_offset: u64,
+    pub historical_complete: bool,
+    pub inline_legacy_topups_complete: bool,
+    pub inline_legacy_topup_rows: u64,
+}
+
+/// Result of one bounded historical uplift batch.  `processed_rows` counts
+/// immutable source-ledger rows examined, while `credited_rows` counts only
+/// unmatched legacy rows that produced a positive correction.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FiatStableTopupProgress {
+    pub processed_rows: u32,
+    pub credited_rows: u32,
+    pub credited_points: u128,
+    pub next_offset: u64,
+    pub complete: bool,
 }
 
 /// Error surface for the admin / registration update endpoints.

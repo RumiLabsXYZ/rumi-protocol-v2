@@ -1,0 +1,52 @@
+diff --git a/src/rumi_points/src/state.rs b/src/rumi_points/src/state.rs
+--- a/src/rumi_points/src/state.rs
++++ b/src/rumi_points/src/state.rs
+@@ -607,6 +607,33 @@
+     Ok(())
+ }
+ 
++/// Test-fixture-only seeder used to produce a policy-cell-absent 4b4b1680
++/// stable layout for an upgrade compatibility test. This file lives only in the
++/// archived `/private/tmp` fixture source, never in the production checkout.
++pub fn test_seed_legacy_unmatched(
++    caller: Principal,
++    principal: Principal,
++    points_delta: u128,
++    now_ns: u64,
++) -> Result<(), PointsError> {
++    require_admin(caller)?;
++    let _ = register(principal, now_ns, QualifyingAction::Deposit3Pool)?;
++    let mut ps = get_principal_state(&principal).expect("fixture registration persisted principal");
++    ps.total_points = ps
++        .total_points
++        .checked_add(points_delta)
++        .expect("fixture points must not overflow");
++    put_principal_state(ps);
++    append_point_entry(PointEntry {
++        principal,
++        epoch_index: current_epoch_index(),
++        points_delta,
++        source: PointSource::CkStable3PoolUnmatched,
++        recorded_at_ns: now_ns,
++    });
++    Ok(())
++}
++
+ /// Max rows `get_leaderboard` will return in one call (PTS-001). A caller passing
+ /// an unbounded `limit` is clamped to this, bounding the response size and the
+ /// per-call materialization. Pagination via `offset` reaches the full board.
+diff --git a/src/rumi_points/src/main.rs b/src/rumi_points/src/main.rs
+--- a/src/rumi_points/src/main.rs
++++ b/src/rumi_points/src/main.rs
+@@ -181,6 +181,11 @@
+ }
+ 
+ #[ic_cdk::update]
++fn test_seed_legacy_unmatched(principal: Principal, points_delta: u128) -> Result<(), PointsError> {
++    state::test_seed_legacy_unmatched(ic_cdk::caller(), principal, points_delta, ic_cdk::api::time())
++}
++
++#[ic_cdk::update]
+ fn add_excluded_principal(principal: Principal) -> Result<(), PointsError> {
+     state::add_excluded(ic_cdk::caller(), principal)
+ }
