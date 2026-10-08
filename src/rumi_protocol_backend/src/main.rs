@@ -895,117 +895,18 @@ fn post_upgrade(arg: ProtocolArg) {
         }
     });
 
-    // CL14: migrate V7/V8 payout rows into unique operation-keyed receipts. Old
-    // rows lack exact ledger arguments, so they are held for reconciliation; do
-    // not invent a new attempt nonce that could duplicate an already-landed send.
-    mutate_state(|s| {
-        use rumi_protocol_backend::state::PendingPayoutKind;
-        let mut used = std::collections::BTreeSet::new();
-
-        let old_margin = std::mem::take(&mut s.pending_margin_transfers);
-        for ((vault_id, owner, key_id), mut transfer) in old_margin {
-            let mut operation_id = if transfer.operation_id != 0 {
-                transfer.operation_id
-            } else if key_id != 0 {
-                key_id
-            } else {
-                transfer.op_nonce
-            };
-            while operation_id == 0 || used.contains(&operation_id) {
-                operation_id = s.next_op_nonce();
-            }
-            used.insert(operation_id);
-            transfer.vault_id = vault_id;
-            transfer.owner = owner;
-            transfer.operation_id = operation_id;
-            transfer.payout_kind = PendingPayoutKind::Margin;
-            if transfer.in_flight {
-                transfer.in_flight = false;
-                transfer.held_for_manual_retry = true;
-                transfer.reconciliation_required = true;
-            }
-            if transfer.ledger.is_none()
-                || transfer.transfer_amount_raw.is_none()
-                || transfer.op_nonce == 0
-            {
-                transfer.held_for_manual_retry = true;
-                transfer.reconciliation_required = true;
-            }
-            s.pending_margin_transfers
-                .insert((vault_id, owner, operation_id), transfer);
-        }
-
-        let old_excess = std::mem::take(&mut s.pending_excess_transfers);
-        for ((vault_id, owner, key_id), mut transfer) in old_excess {
-            let mut operation_id = if transfer.operation_id != 0 {
-                transfer.operation_id
-            } else if key_id != 0 {
-                key_id
-            } else {
-                transfer.op_nonce
-            };
-            while operation_id == 0 || used.contains(&operation_id) {
-                operation_id = s.next_op_nonce();
-            }
-            used.insert(operation_id);
-            transfer.vault_id = vault_id;
-            transfer.owner = owner;
-            transfer.operation_id = operation_id;
-            transfer.payout_kind = PendingPayoutKind::Excess;
-            if transfer.in_flight {
-                transfer.in_flight = false;
-                transfer.held_for_manual_retry = true;
-                transfer.reconciliation_required = true;
-            }
-            if transfer.ledger.is_none()
-                || transfer.transfer_amount_raw.is_none()
-                || transfer.op_nonce == 0
-            {
-                transfer.held_for_manual_retry = true;
-                transfer.reconciliation_required = true;
-            }
-            s.pending_excess_transfers
-                .insert((vault_id, owner, operation_id), transfer);
-        }
-
-        let old_redemptions = std::mem::take(&mut s.pending_redemption_transfer);
-        for (block_index, mut transfer) in old_redemptions {
-            let mut operation_id = if transfer.operation_id != 0 {
-                transfer.operation_id
-            } else {
-                transfer.op_nonce
-            };
-            while operation_id == 0 || used.contains(&operation_id) {
-                operation_id = s.next_op_nonce();
-            }
-            used.insert(operation_id);
-            transfer.vault_id = 0;
-            transfer.operation_id = operation_id;
-            transfer.payout_kind = PendingPayoutKind::Redemption;
-            if transfer.in_flight {
-                transfer.in_flight = false;
-                transfer.held_for_manual_retry = true;
-                transfer.reconciliation_required = true;
-            }
-            if transfer.ledger.is_none()
-                || transfer.transfer_amount_raw.is_none()
-                || transfer.op_nonce == 0
-            {
-                transfer.held_for_manual_retry = true;
-                transfer.reconciliation_required = true;
-            }
-            s.pending_redemption_transfer.insert(block_index, transfer);
-        }
-        let nonce_collisions = s.quarantine_duplicate_pending_payout_nonces();
-        if nonce_collisions > 0 {
-            log!(
-                INFO,
-                "[upgrade]: quarantined {} pending payout receipts with duplicate ledger attempt nonces",
-                nonce_collisions
-            );
-        }
-        s.rebuild_pending_payout_index();
+    // CL14: migrate legacy receipts without inventing a replacement attempt
+    // nonce; rows lacking exact ledger arguments remain held for reconciliation.
+    let nonce_collisions = mutate_state(|s| {
+        s.migrate_legacy_pending_payout_rows(ic_cdk::api::time())
     });
+    if nonce_collisions > 0 {
+        log!(
+            INFO,
+            "[upgrade]: quarantined {} pending payout receipts with duplicate ledger attempt nonces",
+            nonce_collisions
+        );
+    }
 
     // One-time: remove PHASMA test collateral and clean up empty vaults
     mutate_state(|s| {

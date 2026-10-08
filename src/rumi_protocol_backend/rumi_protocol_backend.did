@@ -443,6 +443,7 @@ type Event = variant {
   pending_payout_queued : record {
     kind : PendingPayoutKind;
     operation_id : nat;
+    timestamp : opt nat64;
     transfer : PendingMarginTransfer;
   };
   oracle_circuit_breaker : record {
@@ -810,6 +811,7 @@ type Event = variant {
   };
   set_recovery_cr_multiplier : record { multiplier : text };
   pending_payout_rearmed : record {
+    owner : opt principal;
     operation_id : nat;
     timestamp : opt nat64;
     attempt_nonce : nat;

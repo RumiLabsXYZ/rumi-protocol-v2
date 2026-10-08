@@ -489,6 +489,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     'pending_payout_queued' : {
       'kind' : PendingPayoutKind,
       'operation_id' : bigint,
+      'timestamp' : [] | [bigint],
       'transfer' : PendingMarginTransfer,
     }
   } |
@@ -984,6 +985,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   { 'set_recovery_cr_multiplier' : { 'multiplier' : string } } |
   {
     'pending_payout_rearmed' : {
+      'owner' : [] | [Principal],
       'operation_id' : bigint,
       'timestamp' : [] | [bigint],
       'attempt_nonce' : bigint,
