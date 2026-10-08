@@ -4,17 +4,17 @@
       state: 'Merged source',
       title: 'PR #424 · CL-01 3pool',
       detail:
-        'Source merged to main at f33ca9b6. A valid artifact exists, but it has not been installed.',
+        'The source is merged and a valid artifact exists, but the change has not been installed.',
       tone: 'merged',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/424',
       link: 'View PR #424'
     },
     {
-      state: 'Merged source',
-      title: 'PR #425 · Points hold',
+      state: 'Installed safeguard',
+      title: 'PR #425 · Points CL-09 safeguard',
       detail:
-        'Source merged to main at f72d1459. Its exact artifact is valid, but no October Wasm installation is confirmed.',
-      tone: 'merged',
+        'The exact reviewed CL-09 Wasm is installed on mainnet, and the live bytes match that artifact. The Points ledger length is unchanged across the upgrade. This confirms that safeguard only; it does not establish that later merged Points features or broader remediation changes are installed.',
+      tone: 'live',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/425',
       link: 'View PR #425'
     },
@@ -22,7 +22,7 @@
       state: 'Merged source',
       title: 'PR #426 · Stability Pool',
       detail:
-        'The CL-04 duplicate-credit fix merged at 0345ac7f. It has not been installed.',
+        'The CL-04 duplicate-credit fix is merged, but it has not been installed.',
       tone: 'merged',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/426',
       link: 'View PR #426'
@@ -31,7 +31,7 @@
       state: 'Live configuration',
       title: 'Points epoch driver is disabled',
       detail:
-        'The live set_epoch_driver_enabled(false) call succeeded and driver_enabled is false. Epoch 18 remains open: phase A is complete and phase B is pending.',
+        'The live configuration confirms the epoch driver is disabled. Epoch 18 remains open, with phase A complete and phase B pending.',
       tone: 'live'
     },
     {
@@ -50,7 +50,7 @@
   <title>October 2026 Security Review Status · Rumi Protocol</title>
   <meta
     name="description"
-    content="Public October 7, 2026 update on Rumi Protocol security-review and release status, with merged source, live configuration, and Wasm installation clearly separated."
+    content="Public October 8, 2026 update on Rumi Protocol security-review and release status. The Points CL-09 safeguard is installed; other findings and installations remain under review."
   />
 </svelte:head>
 
@@ -63,10 +63,10 @@
           <h1>October review.<br /><span>Current status.</span></h1>
           <p class="hero-copy">
             This public update records the state of selected security follow-up and release work
-            on October 7, 2026. It distinguishes merged source, live configuration, and Wasm
-            installation on mainnet.
+            on October 8, 2026. The Points CL-09 safeguard is installed; other findings and
+            installations remain under review.
           </p>
-          <p class="review-date">Status date <time datetime="2026-10-07">October 7, 2026</time></p>
+          <p class="review-date">Status date <time datetime="2026-10-08">October 8, 2026</time></p>
         </div>
 
         <aside class="status-card" aria-labelledby="status-title">
@@ -75,16 +75,17 @@
             <span>Release status</span>
             <span class="status-label">Follow-up ongoing</span>
           </div>
-          <h2 id="status-title">Merged source; no October Wasm installs confirmed</h2>
+          <h2 id="status-title">Points CL-09 safeguard installed</h2>
           <p>
-            PRs #424, #425, and #426 are merged. The valid PR #424 and #425 artifacts are not
-            installed, and no October Wasm installation is confirmed. A separate live Points
-            configuration change disabled the epoch driver; the new pause policy is not live.
+            The exact reviewed Points CL-09 Wasm is installed on mainnet, the live bytes match
+            that artifact, and the Points ledger length is unchanged across the upgrade. The affected epoch remains held
+            while reward treatment is reviewed; no reward decision or release has been made.
+            Other security findings and installations remain pending.
           </p>
           <div class="status-divider"></div>
           <p class="status-footnote">
             Source merge, artifact validity, canister installation, and live configuration are
-            separate evidence states. This page only claims the states listed below.
+            separate evidence states. This update confirms the CL-09 safeguard only.
           </p>
         </aside>
       </div>
@@ -102,7 +103,7 @@
         <span class="rail-line" aria-hidden="true"></span>
         <div class="evidence-step live">
           <span class="step-icon" aria-hidden="true">03</span>
-          <div><strong>Mainnet</strong><span>Installation is a separate step</span></div>
+          <div><strong>Mainnet</strong><span>One safeguard installed</span></div>
         </div>
       </div>
     </div>
@@ -111,10 +112,10 @@
   <section class="section page-width" aria-labelledby="evidence-title">
     <div class="section-heading">
       <p class="section-kicker">What is known</p>
-      <h2 id="evidence-title">Source, release, and live configuration</h2>
+      <h2 id="evidence-title">Source, installation, and live configuration</h2>
       <p>
-        Each statement below is limited to the state recorded on the report date. A merged code
-        change alone does not establish an installed safeguard.
+        Each statement below is limited to the state recorded on the report date. Merged source
+        does not establish installation, and one installed safeguard does not close the wider review.
       </p>
     </div>
 
@@ -139,16 +140,17 @@
     <div class="page-width release-inner">
       <div class="section-heading release-heading">
         <p class="section-kicker">Points</p>
-        <h2 id="points-title">Epoch driver disabled; new pause policy not live</h2>
+        <h2 id="points-title">CL-09 installed; epoch remains held for review</h2>
         <p>
-          The live call to disable the Points epoch driver succeeded, and the current configuration
-          reports driver_enabled=false. This configuration pause is separate from the new Points
-          pause policy, which is not live.
+          The exact reviewed Points CL-09 Wasm is installed, the live bytes match that artifact,
+          and the Points ledger length is unchanged across the upgrade. The live configuration still shows the epoch
+          driver disabled. The affected epoch remains open while its reward treatment is reviewed;
+          the installation does not decide or release rewards.
         </p>
       </div>
       <p class="release-note">
-        Epoch 18 remains open, with phase A complete and phase B pending. The disabled driver
-        does not mean that the current epoch is closed or that the new pause policy is active.
+        Epoch 18 remains open, with phase A complete and phase B pending. Other security findings
+        and installations remain pending, so this is not a protocol-wide close-out.
       </p>
     </div>
   </section>
@@ -160,9 +162,10 @@
     </div>
     <ul class="limits-list">
       <li>It does not claim that all security findings are fixed or closed.</li>
-      <li>It does not claim that the PR #424, #425, or #426 source changes have been installed as Wasm.</li>
+      <li>It does not claim that the PR #424 or #426 source changes have been installed as Wasm.</li>
       <li>It does not treat draft PR #422 as merged, release-ready, or deployable.</li>
-      <li>It does not claim that the new Points pause policy is live or that epoch 18 is closed.</li>
+      <li>It does not claim that reward treatment is decided, epoch 18 is closed, or the epoch driver is re-enabled.</li>
+      <li>It confirms one safeguard installation only; other findings and installations remain pending.</li>
       <li>It is a high-level status summary, not publication of the private audit package or exploit details.</li>
     </ul>
     <p class="source-note">
@@ -173,7 +176,7 @@
   </section>
 
   <footer class="page-width page-foot">
-    <span>Report date: October 7, 2026.</span>
+    <span>Report date: October 8, 2026.</span>
     <a href="/security">Back to security reviews <span aria-hidden="true">↗</span></a>
   </footer>
 </main>
