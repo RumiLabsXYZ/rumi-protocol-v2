@@ -2767,6 +2767,113 @@ impl State {
         quarantined
     }
 
+    /// Convert V7/V8 payout rows into operation-keyed receipts during upgrade.
+    /// Legacy rows without exact ledger arguments are retained and held for
+    /// reconciliation; no attempt nonce is invented for them.
+    pub fn migrate_legacy_pending_payout_rows(&mut self, now: u64) -> usize {
+        let mut used = BTreeSet::new();
+
+        let old_margin = std::mem::take(&mut self.pending_margin_transfers);
+        for ((vault_id, owner, key_id), mut transfer) in old_margin {
+            let mut operation_id = if transfer.operation_id != 0 {
+                transfer.operation_id
+            } else if key_id != 0 {
+                key_id
+            } else {
+                transfer.op_nonce
+            };
+            while operation_id == 0 || used.contains(&operation_id) {
+                operation_id = self.next_op_nonce_at(now);
+            }
+            used.insert(operation_id);
+            transfer.vault_id = vault_id;
+            transfer.owner = owner;
+            transfer.operation_id = operation_id;
+            transfer.payout_kind = PendingPayoutKind::Margin;
+            if transfer.in_flight {
+                transfer.in_flight = false;
+                transfer.held_for_manual_retry = true;
+                transfer.reconciliation_required = true;
+            }
+            if transfer.ledger.is_none()
+                || transfer.transfer_amount_raw.is_none()
+                || transfer.op_nonce == 0
+            {
+                transfer.held_for_manual_retry = true;
+                transfer.reconciliation_required = true;
+            }
+            self.pending_margin_transfers
+                .insert((vault_id, owner, operation_id), transfer);
+        }
+
+        let old_excess = std::mem::take(&mut self.pending_excess_transfers);
+        for ((vault_id, owner, key_id), mut transfer) in old_excess {
+            let mut operation_id = if transfer.operation_id != 0 {
+                transfer.operation_id
+            } else if key_id != 0 {
+                key_id
+            } else {
+                transfer.op_nonce
+            };
+            while operation_id == 0 || used.contains(&operation_id) {
+                operation_id = self.next_op_nonce_at(now);
+            }
+            used.insert(operation_id);
+            transfer.vault_id = vault_id;
+            transfer.owner = owner;
+            transfer.operation_id = operation_id;
+            transfer.payout_kind = PendingPayoutKind::Excess;
+            if transfer.in_flight {
+                transfer.in_flight = false;
+                transfer.held_for_manual_retry = true;
+                transfer.reconciliation_required = true;
+            }
+            if transfer.ledger.is_none()
+                || transfer.transfer_amount_raw.is_none()
+                || transfer.op_nonce == 0
+            {
+                transfer.held_for_manual_retry = true;
+                transfer.reconciliation_required = true;
+            }
+            self.pending_excess_transfers
+                .insert((vault_id, owner, operation_id), transfer);
+        }
+
+        let old_redemptions = std::mem::take(&mut self.pending_redemption_transfer);
+        for (block_index, mut transfer) in old_redemptions {
+            let mut operation_id = if transfer.operation_id != 0 {
+                transfer.operation_id
+            } else {
+                transfer.op_nonce
+            };
+            while operation_id == 0 || used.contains(&operation_id) {
+                operation_id = self.next_op_nonce_at(now);
+            }
+            used.insert(operation_id);
+            transfer.vault_id = 0;
+            transfer.operation_id = operation_id;
+            transfer.payout_kind = PendingPayoutKind::Redemption;
+            if transfer.in_flight {
+                transfer.in_flight = false;
+                transfer.held_for_manual_retry = true;
+                transfer.reconciliation_required = true;
+            }
+            if transfer.ledger.is_none()
+                || transfer.transfer_amount_raw.is_none()
+                || transfer.op_nonce == 0
+            {
+                transfer.held_for_manual_retry = true;
+                transfer.reconciliation_required = true;
+            }
+            self.pending_redemption_transfer
+                .insert(block_index, transfer);
+        }
+
+        let nonce_collisions = self.quarantine_duplicate_pending_payout_nonces();
+        self.rebuild_pending_payout_index();
+        nonce_collisions
+    }
+
     /// Return at most `limit` payout IDs in stable order, resuming after the
     /// last completed ID and wrapping at the end of the index. Held entries
     /// are deliberately included in the bounded scan: the processor skips
@@ -10074,6 +10181,68 @@ mod tests {
         assert_eq!(key, (12, owner, 0));
         assert_eq!(value.op_nonce, 9001);
         assert_eq!(value.retry_count, 60);
+    }
+
+    #[test]
+    fn old_cbor_payout_rows_migrate_losslessly_to_held_indexed_receipts() {
+        #[derive(serde::Serialize)]
+        struct OldTransfer {
+            owner: Principal,
+            margin: ICP,
+            collateral_type: Principal,
+            retry_count: u8,
+            op_nonce: u128,
+        }
+        #[derive(serde::Serialize)]
+        struct OldState {
+            pending_margin_transfers: BTreeMap<(VaultId, Principal), OldTransfer>,
+            pending_excess_transfers: BTreeMap<(VaultId, Principal), OldTransfer>,
+            pending_redemption_transfer: BTreeMap<u64, OldTransfer>,
+        }
+
+        let owner = Principal::from_slice(&[8]);
+        let old_row = |nonce| OldTransfer {
+            owner,
+            margin: ICP::new(700 + nonce as u64),
+            collateral_type: Principal::anonymous(),
+            retry_count: 4,
+            op_nonce: nonce,
+        };
+        let old = OldState {
+            pending_margin_transfers: BTreeMap::from([((12, owner), old_row(901))]),
+            pending_excess_transfers: BTreeMap::from([((13, owner), old_row(902))]),
+            pending_redemption_transfer: BTreeMap::from([(77, old_row(903))]),
+        };
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&old, &mut encoded).expect("encode V7/V8 payout state");
+        let mut restored: State =
+            ciborium::de::from_reader(encoded.as_slice()).expect("decode old payout fields");
+
+        assert_eq!(restored.pending_margin_transfers.len(), 1);
+        assert_eq!(restored.pending_excess_transfers.len(), 1);
+        assert_eq!(restored.pending_redemption_transfer.len(), 1);
+        assert_eq!(restored.pending_margin_transfers.values().next().unwrap().operation_id, 0);
+        assert_eq!(restored.pending_margin_transfers.values().next().unwrap().ledger, None);
+
+        assert_eq!(restored.migrate_legacy_pending_payout_rows(1_000), 0);
+
+        for (operation_id, row) in [
+            (901, restored.pending_margin_transfers.values().next().unwrap()),
+            (902, restored.pending_excess_transfers.values().next().unwrap()),
+            (903, restored.pending_redemption_transfer.values().next().unwrap()),
+        ] {
+            assert_eq!(row.operation_id, operation_id);
+            assert_eq!(row.op_nonce, operation_id);
+            assert_eq!(row.retry_count, 4);
+            assert_eq!(row.margin, ICP::new(700 + operation_id as u64));
+            assert!(row.held_for_manual_retry);
+            assert!(row.reconciliation_required);
+            assert!(!row.in_flight);
+            assert_eq!(row.ledger, None);
+            assert_eq!(row.transfer_amount_raw, None);
+            assert!(restored.pending_payout_index.contains_key(&operation_id));
+        }
+        assert_eq!(restored.pending_payout_index.len(), 3);
     }
 
     #[test]

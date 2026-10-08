@@ -85,13 +85,18 @@ pub enum Event {
         kind: PendingPayoutKind,
         operation_id: u128,
         transfer: PendingMarginTransfer,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
     },
 
     #[serde(rename = "pending_payout_rearmed")]
     PendingPayoutRearmed {
         operation_id: u128,
         attempt_nonce: u128,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<Principal>,
     },
 
     #[serde(rename = "liquidate_vault")]
@@ -1291,6 +1296,8 @@ impl Event {
             Event::OpenVault { timestamp, .. }
             | Event::CloseVault { timestamp, .. }
             | Event::MarginTransfer { timestamp, .. }
+            | Event::PendingPayoutQueued { timestamp, .. }
+            | Event::PendingPayoutRearmed { timestamp, .. }
             | Event::LiquidateVault { timestamp, .. }
             | Event::PartialLiquidateVault { timestamp, .. }
             | Event::RedemptionOnVaults { timestamp, .. }
@@ -1548,6 +1555,8 @@ impl Event {
             Event::WithdrawLiquidity { caller, .. } => caller == p,
             Event::ClaimLiquidityReturns { caller, .. } => caller == p,
             Event::AdminMint { to, .. } => to == p,
+            Event::PendingPayoutQueued { transfer, .. } => &transfer.owner == p,
+            Event::PendingPayoutRearmed { owner, .. } => owner.as_ref() == Some(p),
             _ => false,
         }
     }
@@ -1787,7 +1796,7 @@ fn replay_with_nonce_time(
             Event::Upgrade(upgrade_args) => {
                 state.upgrade(upgrade_args);
             }
-            Event::PendingPayoutQueued { kind, operation_id, mut transfer } => {
+            Event::PendingPayoutQueued { kind, operation_id, mut transfer, .. } => {
                 transfer.operation_id = operation_id;
                 transfer.payout_kind = kind;
                 match kind {
@@ -2462,6 +2471,7 @@ pub fn record_pending_payout(state: &mut State, transfer: PendingMarginTransfer)
         kind: transfer.payout_kind,
         operation_id: transfer.operation_id,
         transfer,
+        timestamp: Some(now()),
     });
     state.insert_pending_payout(transfer);
 }
@@ -3888,6 +3898,47 @@ mod filter_tests {
             ckusdc_ledger_principal: None,
         });
         assert_eq!(init.timestamp_ns(), None);
+    }
+
+    #[test]
+    fn pending_payout_events_are_visible_in_time_and_principal_queries() {
+        let owner = caller_a();
+        let transfer = PendingMarginTransfer {
+            vault_id: 8,
+            operation_id: 91,
+            payout_kind: PendingPayoutKind::Margin,
+            owner,
+            margin: ICP::new(100),
+            collateral_type: icp_token(),
+            retry_count: 0,
+            op_nonce: 92,
+            ledger: None,
+            transfer_amount_raw: None,
+            held_for_manual_retry: true,
+            reconciliation_required: true,
+            in_flight: false,
+            too_old_confirmed: false,
+            history_log_length: None,
+            history_cursor: 0,
+            min_net_collateral_raw: None,
+        };
+        let queued = Event::PendingPayoutQueued {
+            kind: PendingPayoutKind::Margin,
+            operation_id: 91,
+            transfer,
+            timestamp: Some(123),
+        };
+        assert_eq!(queued.timestamp_ns(), Some(123));
+        assert!(queued.involves_principal(&owner));
+
+        let rearmed = Event::PendingPayoutRearmed {
+            operation_id: 91,
+            attempt_nonce: 93,
+            timestamp: Some(124),
+            owner: Some(owner),
+        };
+        assert_eq!(rearmed.timestamp_ns(), Some(124));
+        assert!(rearmed.involves_principal(&owner));
     }
 
     // ── collateral_token + vault lookup ───────────────────────────────────

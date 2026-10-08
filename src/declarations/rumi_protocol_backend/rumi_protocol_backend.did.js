@@ -642,6 +642,7 @@ export const idlFactory = ({ IDL }) => {
     'pending_payout_queued' : IDL.Record({
       'kind' : PendingPayoutKind,
       'operation_id' : IDL.Nat,
+      'timestamp' : IDL.Opt(IDL.Nat64),
       'transfer' : PendingMarginTransfer,
     }),
     'oracle_circuit_breaker' : IDL.Record({
@@ -1037,6 +1038,7 @@ export const idlFactory = ({ IDL }) => {
     }),
     'set_recovery_cr_multiplier' : IDL.Record({ 'multiplier' : IDL.Text }),
     'pending_payout_rearmed' : IDL.Record({
+      'owner' : IDL.Opt(IDL.Principal),
       'operation_id' : IDL.Nat,
       'timestamp' : IDL.Opt(IDL.Nat64),
       'attempt_nonce' : IDL.Nat,
