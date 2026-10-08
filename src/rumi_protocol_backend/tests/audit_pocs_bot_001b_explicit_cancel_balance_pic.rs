@@ -34,7 +34,7 @@ use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Nat, 
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 use std::time::{Duration, SystemTime};
 
-use rumi_protocol_backend::{ProtocolError, StableTokenType};
+use rumi_protocol_backend::ProtocolError;
 
 // ─── Local mirrors of ICRC-1 Candid types ───
 
@@ -162,6 +162,12 @@ enum ProtocolArgVariant {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
+enum StableTokenType {
+    CKUSDT,
+    CKUSDC,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
 struct VaultArg {
     vault_id: u64,
     amount: u64,
@@ -186,6 +192,17 @@ struct BotLiquidationResult {
     collateral_amount: u64,
     debt_covered: u64,
     collateral_price_e8s: u64,
+    claim_generation: u64,
+    collateral_return_memo: Vec<u8>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct BotCollateralReturnProofArg {
+    vault_id: u64,
+    claim_generation: u64,
+    block_index: u64,
+    amount: u64,
+    created_at_time: u64,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -329,6 +346,63 @@ fn icrc1_transfer_call(
     parsed.expect("transfer returned error");
 }
 
+fn icrc1_transfer_tuple_call(
+    pic: &PocketIc,
+    ledger: Principal,
+    sender: Principal,
+    to: Principal,
+    amount: u64,
+    memo: Vec<u8>,
+    created_at_time: u64,
+) -> u64 {
+    use num_traits::ToPrimitive;
+
+    let args = TransferArg {
+        from_subaccount: None,
+        to: account(to),
+        amount: Nat::from(amount),
+        fee: None,
+        memo: Some(memo),
+        created_at_time: Some(created_at_time),
+    };
+    let result = pic
+        .update_call(ledger, sender, "icrc1_transfer", encode_one(args).unwrap())
+        .expect("icrc1_transfer tuple call failed");
+    let parsed: Result<Nat, TransferError> = match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode icrc1_transfer tuple"),
+        WasmResult::Reject(message) => panic!("icrc1_transfer tuple rejected: {message}"),
+    };
+    parsed
+        .expect("collateral return transfer should commit")
+        .0
+        .to_u64()
+        .expect("collateral return block should fit u64")
+}
+
+fn record_return_proof(fixture: &Fixture, proof: BotCollateralReturnProofArg) {
+    let result = fixture
+        .pic
+        .update_call(
+            fixture.protocol_id,
+            fixture.developer,
+            "bot_record_collateral_return_proof",
+            encode_one(proof).unwrap(),
+        )
+        .expect("bot_record_collateral_return_proof call failed");
+    let parsed: Result<(), ProtocolError> = match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode return proof"),
+        WasmResult::Reject(message) => panic!("return proof rejected: {message}"),
+    };
+    parsed.expect("return proof should be accepted");
+}
+
+fn current_ledger_time_ns(pic: &PocketIc) -> u64 {
+    pic.get_time()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("PocketIC time should be after Unix epoch")
+        .as_nanos() as u64
+}
+
 fn icrc1_balance_of_call(pic: &PocketIc, ledger: Principal, owner: Principal) -> u64 {
     let result = pic
         .query_call(
@@ -344,28 +418,6 @@ fn icrc1_balance_of_call(pic: &PocketIc, ledger: Principal, owner: Principal) ->
     };
     use num_traits::ToPrimitive;
     parsed.0.to_u64().unwrap_or(0)
-}
-
-fn xrc_set_rate(
-    pic: &PocketIc,
-    xrc: Principal,
-    sender: Principal,
-    base: &str,
-    quote: &str,
-    rate_e8s: u64,
-) {
-    let result = pic
-        .update_call(
-            xrc,
-            sender,
-            "set_exchange_rate",
-            encode_args((base.to_string(), quote.to_string(), rate_e8s)).unwrap(),
-        )
-        .expect("set_exchange_rate call failed");
-    match result {
-        WasmResult::Reply(_) => {}
-        WasmResult::Reject(m) => panic!("set_exchange_rate rejected: {}", m),
-    }
 }
 
 fn get_bot_stats(pic: &PocketIc, protocol_id: Principal) -> BotStatsResponse {
@@ -469,7 +521,6 @@ struct Fixture {
     icp_ledger: Principal,
     #[allow(dead_code)]
     icusd_ledger: Principal,
-    xrc_id: Principal,
     developer: Principal,
     #[allow(dead_code)]
     test_user: Principal,
@@ -591,6 +642,30 @@ fn setup_fixture() -> Fixture {
         )
         .expect("set_treasury_principal");
 
+    // Bot claim admission pins a ckUSDC ledger for later exact payment proof.
+    let payment_ledger = deploy_icrc1_ledger(
+        &pic,
+        account(treasury),
+        10_000,
+        vec![(account(developer), Nat::from(100_000_000_000u64))],
+        "ckUSDC fixture",
+        "ckUSDC",
+        developer,
+    );
+    let stable_ledger_result = pic
+        .update_call(
+            protocol_id,
+            developer,
+            "set_stable_ledger_principal",
+            encode_args((StableTokenType::CKUSDC, payment_ledger)).unwrap(),
+        )
+        .expect("set_stable_ledger_principal call failed");
+    let stable_ledger_result: Result<(), ProtocolError> = match stable_ledger_result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode stable ledger setter"),
+        WasmResult::Reject(message) => panic!("stable ledger setter rejected: {message}"),
+    };
+    stable_ledger_result.expect("ckUSDC ledger configuration should succeed");
+
     icrc2_approve_call(&pic, icp_ledger, test_user, protocol_id, 50_000_000_000u128);
     let open_result = pic
         .update_call(
@@ -635,33 +710,30 @@ fn setup_fixture() -> Fixture {
         protocol_id,
         icp_ledger,
         icusd_ledger,
-        xrc_id,
         developer,
         test_user,
         vault_id,
     }
 }
 
-/// Drop ICP price and tick until the protocol's cached price reflects it.
-/// Drops outside the 70%-143% sanity band need three consecutive matching
-/// XRC samples before `check_price_sanity_band` confirms — each XRC interval
-/// is 300s, so we advance 310s and tick four times to land safely past the
-/// third confirmation.
+/// Set the cached ICP price through the same developer-only test endpoint
+/// used by the BOT-10 PocketIC fixture.
 fn drop_icp_price(fixture: &Fixture, new_price_e8s: u64) {
-    xrc_set_rate(
-        &fixture.pic,
-        fixture.xrc_id,
-        fixture.developer,
-        "ICP",
-        "USD",
-        new_price_e8s,
-    );
-    for _ in 0..4 {
-        fixture.pic.advance_time(Duration::from_secs(310));
-        for _ in 0..15 {
-            fixture.pic.tick();
-        }
-    }
+    let price_usd = new_price_e8s as f64 / 100_000_000.0;
+    let result = fixture
+        .pic
+        .update_call(
+            fixture.protocol_id,
+            fixture.developer,
+            "dev_set_collateral_price",
+            encode_args((fixture.icp_ledger, price_usd)).unwrap(),
+        )
+        .expect("dev_set_collateral_price call failed");
+    let parsed: Result<String, ProtocolError> = match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode dev_set_collateral_price"),
+        WasmResult::Reject(message) => panic!("dev_set_collateral_price rejected: {message}"),
+    };
+    parsed.expect("dev_set_collateral_price returned error");
 }
 
 /// Make `vault_id` underwater AND configure the bot, then have the bot
@@ -865,8 +937,8 @@ fn bot_001b_pic_explicit_cancel_rejected_when_balance_below_required() {
         ),
     };
     assert!(
-        err_msg.contains("< required"),
-        "shortfall error must mention balance vs required, got: {}",
+        err_msg.contains("verified collateral-return proof"),
+        "missing-proof error must reference the required claim-bound proof, got: {}",
         err_msg
     );
     assert!(
@@ -889,12 +961,25 @@ fn bot_001b_pic_explicit_cancel_rejected_when_balance_below_required() {
     // confirms the claim was preserved across the rejection (otherwise the
     // follow-up cancel would error with "No active claim").
     let return_amount = claim.collateral_amount.saturating_sub(icp_fee);
-    icrc1_transfer_call(
+    let return_time = current_ledger_time_ns(&f.pic);
+    let return_block = icrc1_transfer_tuple_call(
         &f.pic,
         f.icp_ledger,
         f.developer,
         f.protocol_id,
-        return_amount as u128,
+        return_amount,
+        claim.collateral_return_memo.clone(),
+        return_time,
+    );
+    record_return_proof(
+        &f,
+        BotCollateralReturnProofArg {
+            vault_id: f.vault_id,
+            claim_generation: claim.claim_generation,
+            block_index: return_block,
+            amount: return_amount,
+            created_at_time: return_time,
+        },
     );
     bot_cancel_liquidation_call(&f, f.developer, f.vault_id)
         .expect("retry must succeed once collateral is returned");
@@ -928,12 +1013,25 @@ fn bot_001b_pic_explicit_cancel_succeeds_when_balance_sufficient() {
     // amount is the threshold case where the gate must NOT fire.
     let icp_fee: u64 = 10_000;
     let return_amount = claim.collateral_amount.saturating_sub(icp_fee);
-    icrc1_transfer_call(
+    let return_time = current_ledger_time_ns(&f.pic);
+    let return_block = icrc1_transfer_tuple_call(
         &f.pic,
         f.icp_ledger,
         f.developer,
         f.protocol_id,
-        return_amount as u128,
+        return_amount,
+        claim.collateral_return_memo.clone(),
+        return_time,
+    );
+    record_return_proof(
+        &f,
+        BotCollateralReturnProofArg {
+            vault_id: f.vault_id,
+            claim_generation: claim.claim_generation,
+            block_index: return_block,
+            amount: return_amount,
+            created_at_time: return_time,
+        },
     );
 
     // Sanity: the protocol's main account must now hold AT LEAST the

@@ -1124,14 +1124,10 @@ pub async fn check_vaults() {
     // Auto-cancel bot claims that have been pending too long (10 minutes).
     // This prevents vaults from being permanently locked if the bot crashes.
     //
-    // Wave-11 BOT-001: gate the auto-cancel on the protocol's collateral
-    // balance having returned to (>=) `claim.collateral_amount - ledger_fee`.
-    // Without this, a CLAIM → SWAP-ok → TRANSFER-fail → admin-AFK-10min
-    // sequence would clear the claim while the bot still holds the
-    // collateral, leaving the vault permanently underwater. Mirrors the
-    // subaccount + fee derivation used by `bot_cancel_liquidation`. On a
-    // shortfall we leave the claim in place and emit
-    // `BotClaimReconciliationNeeded` so admin can reconcile manually.
+    // CL-02: a pooled default-account balance cannot prove that this claim's
+    // collateral was returned. Only the exact ICRC-3 transfer recorded for
+    // this claim generation may release its lock or restore its budget.
+    // Missing legacy proof data is held for operator reconciliation.
     //
     // The guard re-emits the event on every tick the gate fires (no
     // per-claim "already emitted" flag, since a state-shape change is
@@ -1139,8 +1135,6 @@ pub async fn check_vaults() {
     // to dedupe; operator action is unchanged regardless of count.
     const BOT_CLAIM_TIMEOUT_NS: u64 = 600_000_000_000; // 10 minutes
     let now = ic_cdk::api::time();
-    let collateral_return_proof_required = read_state(|s| s.bot_confirm_proof_required);
-
     let expired_claims: Vec<(u64, crate::state::BotClaim)> = read_state(|s| {
         s.bot_claims
             .iter()
@@ -1149,7 +1143,6 @@ pub async fn check_vaults() {
             .collect()
     });
 
-    let backend_id = ic_cdk::id();
     for (vault_id, claim) in &expired_claims {
         let required = read_state(|s| {
             let fee = s
@@ -1159,10 +1152,10 @@ pub async fn check_vaults() {
             claim.collateral_amount.saturating_sub(fee)
         });
 
-        if collateral_return_proof_required && claim.collateral_return_proof.is_none() {
+        if claim.collateral_return_proof.is_none() {
             log!(
                 INFO,
-                "[BOT-001] strict auto-cancel deferred for vault #{}: no verified return block for claim generation {}",
+                "[CL-02] auto-cancel deferred for vault #{}: no verified return block for claim generation {}",
                 vault_id,
                 claim.generation
             );
@@ -1179,102 +1172,32 @@ pub async fn check_vaults() {
             continue;
         }
 
-        if collateral_return_proof_required {
-            // The proof was fetched, checked against ICRC-3, and persisted by
-            // bot_record_collateral_return_proof before entering this branch.
-            // It is claim-generation-bound and survives an upgrade.
-            if claim.collateral_return_proof.is_none() {
-                continue;
-            }
-            let still_same_claim = read_state(|s| {
-                s.bot_claims.get(vault_id).is_some_and(|active| {
-                    active.generation == claim.generation
-                        && active.collateral_return_proof == claim.collateral_return_proof
-                })
-            });
-            if !still_same_claim {
-                continue;
-            }
-            mutate_state(|s| {
-                if !s.bot_claims.get(vault_id).is_some_and(|active| {
-                    active.generation == claim.generation
-                        && active.collateral_return_proof == claim.collateral_return_proof
-                }) {
-                    return;
-                }
-                if let Some(vault) = s.vault_id_to_vaults.get_mut(vault_id) {
-                    vault.bot_processing = false;
-                }
-                s.bot_budget_remaining_e8s += claim.debt_amount;
-                s.bot_claims.remove(vault_id);
-            });
+        // The proof was checked against ICRC-3 and persisted by
+        // bot_record_collateral_return_proof. It is bound to this claim
+        // generation and must still match before cleanup.
+        let still_same_claim = read_state(|s| {
+            s.bot_claims.get(vault_id).is_some_and(|active| {
+                active.generation == claim.generation
+                    && active.collateral_return_proof == claim.collateral_return_proof
+            })
+        });
+        if !still_same_claim {
             continue;
         }
-
-        let balance_result: Result<(candid::Nat,), _> = ic_cdk::call(
-            claim.collateral_type,
-            "icrc1_balance_of",
-            (icrc_ledger_types::icrc1::account::Account {
-                owner: backend_id,
-                subaccount: None,
-            },),
-        )
-        .await;
-
-        let observed = match balance_result {
-            Ok((bal,)) => bal.0.to_u64().unwrap_or(0),
-            Err((code, msg)) => {
-                log!(
-                    INFO,
-                    "[BOT-001] auto-cancel balance query failed for vault #{}: {:?} {}; deferring this tick",
-                    vault_id,
-                    code,
-                    msg
-                );
-                continue;
-            }
-        };
-
-        if observed < required {
-            log!(
-                INFO,
-                "[BOT-001] auto-cancel skipped for vault #{}: balance {} < required {} (collateral_amount {})",
-                vault_id,
-                observed,
-                required,
-                claim.collateral_amount
-            );
-            mutate_state(|s| {
-                // TOCTOU re-check: between collecting expired_claims and
-                // awaiting the balance query, the bot may have called
-                // `bot_cancel_liquidation` itself and cleared the claim.
-                // Avoid emitting a misleading reconciliation event for a
-                // vault that no longer needs reconciliation.
-                if !s.bot_claims.contains_key(vault_id) {
-                    return;
-                }
-                crate::event::record_bot_claim_reconciliation_needed(
-                    s, *vault_id, observed, required,
-                );
-            });
-            continue;
-        }
-
         log!(
             INFO,
-            "[check_vaults] Auto-cancelling stuck bot claim for vault #{} (claimed {}s ago, balance {} >= required {})",
+            "[check_vaults] Auto-cancelling returned bot claim for vault #{} (claimed {}s ago, verified exact collateral return)",
             vault_id,
-            (now - claim.claimed_at) / 1_000_000_000,
-            observed,
-            required
+            (now - claim.claimed_at) / 1_000_000_000
         );
 
         mutate_state(|s| {
-            // TOCTOU re-check: skip the budget restore if the claim was
-            // already cleared during the await window (e.g., bot raced us
-            // by calling `bot_cancel_liquidation`). Without this guard the
-            // budget would be double-credited.
-            if !s.bot_claims.contains_key(vault_id) {
+            // Re-check the generation and proof before clearing state so a
+            // newer claim can never be released by stale return evidence.
+            if !s.bot_claims.get(vault_id).is_some_and(|active| {
+                active.generation == claim.generation
+                    && active.collateral_return_proof == claim.collateral_return_proof
+            }) {
                 return;
             }
             if let Some(vault) = s.vault_id_to_vaults.get_mut(vault_id) {
