@@ -22,7 +22,8 @@ export interface BotClaimJournal {
 }
 export type BotClaimJournalStatus = { 'ReturnPending' : null } |
   { 'PaymentShortfall' : null } |
-  { 'SwapMayHaveStarted' : null };
+  { 'SwapMayHaveStarted' : null } |
+  { 'ReturnFeeQueryPending' : null };
 export interface BotConfig {
   'ckusdt_ledger' : [] | [Principal],
   'icp_fee_e8s' : [] | [bigint],
@@ -72,13 +73,15 @@ export interface BotReturnTransferJournal {
   'memo' : Uint8Array | number[],
   'fee_e8s' : bigint,
   'amount_e8s' : bigint,
+  'transfer_fee_e8s' : [] | [bigint],
   'ledger_principal' : Principal,
   'created_at_time' : bigint,
 }
 export type BotReturnTransferStatus = { 'ReceiptObserved' : null } |
   { 'NoEffect' : null } |
   { 'Ambiguous' : null } |
-  { 'Prepared' : null };
+  { 'Prepared' : null } |
+  { 'FeeMismatchAmbiguous' : null };
 export interface BotStats {
   'total_debt_covered_e8s' : bigint,
   'total_ckusdc_surplus_held_e6' : bigint,

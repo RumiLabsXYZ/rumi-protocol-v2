@@ -85,12 +85,14 @@ export const idlFactory = ({ IDL }) => {
     'ReturnPending' : IDL.Null,
     'PaymentShortfall' : IDL.Null,
     'SwapMayHaveStarted' : IDL.Null,
+    'ReturnFeeQueryPending' : IDL.Null,
   });
   const BotReturnTransferStatus = IDL.Variant({
     'ReceiptObserved' : IDL.Null,
     'NoEffect' : IDL.Null,
     'Ambiguous' : IDL.Null,
     'Prepared' : IDL.Null,
+    'FeeMismatchAmbiguous' : IDL.Null,
   });
   const TransferReceipt = IDL.Record({
     'block_index' : IDL.Nat64,
@@ -104,6 +106,7 @@ export const idlFactory = ({ IDL }) => {
     'memo' : IDL.Vec(IDL.Nat8),
     'fee_e8s' : IDL.Nat64,
     'amount_e8s' : IDL.Nat64,
+    'transfer_fee_e8s' : IDL.Opt(IDL.Nat64),
     'ledger_principal' : IDL.Principal,
     'created_at_time' : IDL.Nat64,
   });

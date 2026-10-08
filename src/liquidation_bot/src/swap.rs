@@ -31,6 +31,10 @@ pub struct TransferReceipt {
 pub enum TransferAttemptError {
     /// Ledger returned an explicit ICRC error, so it performed no transfer.
     NoEffect(String),
+    /// The ledger rejected this transfer's explicit fee. This attempt had no
+    /// effect; a caller replaying an older possibly-submitted intent must still
+    /// treat the overall outcome as ambiguous.
+    BadFee { expected_fee: String },
     /// The inter-canister call did not return; the ledger may have committed.
     Ambiguous(String),
 }
@@ -172,6 +176,10 @@ fn apply_slippage(amount: u64, max_slippage_bps: u16) -> u64 {
     (amount as u128 - reduction) as u64
 }
 
+fn return_transfer_fee_arg(transfer_fee_e8s: Option<u64>) -> Option<Nat> {
+    transfer_fee_e8s.map(Nat::from)
+}
+
 /// Transfer collateral (ICP) back to the backend canister.
 pub async fn return_collateral_to_backend(
     config: &BotConfig,
@@ -179,9 +187,16 @@ pub async fn return_collateral_to_backend(
     collateral_ledger: Principal,
     memo: Vec<u8>,
     send_amount: u64,
+    fee_e8s: u64,
+    transfer_fee_e8s: Option<u64>,
     created_at_time: u64,
 ) -> Result<TransferReceipt, TransferAttemptError> {
-    if send_amount == 0 || send_amount.saturating_add(config.icp_fee_e8s.unwrap_or(FALLBACK_LEDGER_FEE)) > amount_e8s {
+    if send_amount == 0
+        || send_amount
+            .checked_add(fee_e8s)
+            .is_none_or(|debit| debit > amount_e8s)
+        || transfer_fee_e8s.is_some_and(|wire_fee| wire_fee != fee_e8s)
+    {
         return Err(TransferAttemptError::NoEffect("Collateral return amount does not fit the claim reservation".into()));
     }
     let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
@@ -191,7 +206,7 @@ pub async fn return_collateral_to_backend(
             subaccount: None,
         },
         amount: Nat::from(send_amount),
-        fee: None,
+        fee: return_transfer_fee_arg(transfer_fee_e8s),
         memo: Some(icrc_ledger_types::icrc1::transfer::Memo(
             serde_bytes::ByteBuf::from(memo),
         )),
@@ -221,6 +236,11 @@ pub async fn return_collateral_to_backend(
                 block_index: duplicate_of.0.to_string().parse().map_err(|_| TransferAttemptError::Ambiguous("duplicate return block index exceeds u64".into()))?,
                 amount: send_amount,
                 created_at_time,
+            })
+        }
+        Ok((Err(TransferError::BadFee { expected_fee }),)) => {
+            Err(TransferAttemptError::BadFee {
+                expected_fee: expected_fee.0.to_string(),
             })
         }
         Ok((Err(e),)) => Err(TransferAttemptError::NoEffect(format!("Transfer error: {:?}", e))),
@@ -360,5 +380,16 @@ pub async fn transfer_icp_to_treasury(
         }
         Ok((Err(e),)) => Err(format!("ICP transfer to treasury failed: {:?}", e)),
         Err((code, msg)) => Err(format!("ICP transfer call failed: {:?} {}", code, msg)),
+    }
+}
+
+#[cfg(test)]
+mod return_transfer_tests {
+    use super::*;
+
+    #[test]
+    fn return_transfer_fee_keeps_new_and_legacy_wire_identities_distinct() {
+        assert_eq!(return_transfer_fee_arg(Some(10_000)), Some(Nat::from(10_000u64)));
+        assert_eq!(return_transfer_fee_arg(None), None);
     }
 }

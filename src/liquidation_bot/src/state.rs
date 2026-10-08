@@ -169,7 +169,14 @@ pub struct BotReturnTransferJournal {
     pub ledger_principal: Principal,
     pub backend_principal: Principal,
     pub amount_e8s: u64,
+    /// Fee used to size the transfer. For new intents this is queried directly
+    /// from the ledger before journaling; legacy intents preserve their cached
+    /// value for accounting and are never rewritten during replay.
     pub fee_e8s: u64,
+    /// Exact `TransferArg.fee` value. Missing on old snapshots means the
+    /// original request used `fee: None`; replay must preserve that identity.
+    #[serde(default)]
+    pub transfer_fee_e8s: Option<u64>,
     pub memo: Vec<u8>,
     pub created_at_time: u64,
     pub receipt: Option<crate::swap::TransferReceipt>,
@@ -177,11 +184,14 @@ pub struct BotReturnTransferJournal {
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum BotReturnTransferStatus { Prepared, Ambiguous, NoEffect, ReceiptObserved }
+pub enum BotReturnTransferStatus { Prepared, Ambiguous, NoEffect, ReceiptObserved, FeeMismatchAmbiguous }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BotClaimJournalStatus {
     SwapMayHaveStarted,
+    /// A new return is authorized but no transfer tuple exists yet. Querying
+    /// the fee and preparing the tuple is safe because no transfer was sent.
+    ReturnFeeQueryPending,
     ReturnPending,
     PaymentShortfall,
 }
@@ -507,6 +517,7 @@ mod tests {
                 backend_principal: Principal::from_text("tfesu-vyaaa-aaaap-qrd7a-cai").unwrap(),
                 amount_e8s: 49_990_000,
                 fee_e8s: 10_000,
+                transfer_fee_e8s: Some(10_000),
                 memo: b"RUMI-BOT-RETURN-V1:73:42".to_vec(),
                 created_at_time: 1_700_000_000_001,
                 receipt: None,
@@ -526,6 +537,7 @@ mod tests {
             .collateral_return.as_ref().unwrap();
         assert_eq!(return_journal.created_at_time, 1_700_000_000_001);
         assert_eq!(return_journal.amount_e8s, 49_990_000);
+        assert_eq!(return_journal.transfer_fee_e8s, Some(10_000));
         assert_eq!(return_journal.status, BotReturnTransferStatus::Ambiguous);
         assert_eq!(journal.memo, b"RUMI-BOT-PAYMENT-V1:73:42");
         assert_eq!(journal.status, BotPaymentStatus::ReceiptObserved);
@@ -535,8 +547,18 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("shortfall_receipt_observed");
+        legacy_snapshot["pending_claims"][vault_id.to_string()]["collateral_return"]
+            .as_object_mut()
+            .unwrap()
+            .remove("transfer_fee_e8s");
         let legacy_restored: BotState = serde_json::from_value(legacy_snapshot).unwrap();
         assert!(!legacy_restored.pending_payments[&vault_id].shortfall_receipt_observed);
+        assert_eq!(
+            legacy_restored.pending_claims[&vault_id]
+                .collateral_return.as_ref().unwrap().transfer_fee_e8s,
+            None,
+            "legacy return intents must preserve their original fee: None wire argument"
+        );
     }
 
     fn write_config_region(payload: &[u8]) {
