@@ -51,19 +51,25 @@ icp canister status "$BACKEND" --network ic --identity "$IDENTITY" --json
 icp canister snapshot list "$BACKEND" --network ic --identity "$IDENTITY"
 
 # Stop and wait until status explicitly reports Stopped.
-icp canister stop "$BACKEND" --network ic --identity "$IDENTITY"
+icp canister stop "$BACKEND" --network ic --identity "$IDENTITY" || exit 1
 icp canister status "$BACKEND" --network ic --identity "$IDENTITY" --json
 
 # Only after Stopped is confirmed. Because capacity is currently full, use
 # --replace only for the exact ID separately approved after its local copy
 # has been verified. Otherwise stop here; do not delete or replace anything.
-icp canister snapshot create "$BACKEND" --replace "$APPROVED_REPLACE_ID" \
-  --network ic --identity "$IDENTITY"
-icp canister snapshot list "$BACKEND" --network ic --identity "$IDENTITY"
+if ! icp canister snapshot create "$BACKEND" --replace "$APPROVED_REPLACE_ID" \
+  --network ic --identity "$IDENTITY"; then
+  # On failure or ambiguous output, restore service before investigating.
+  icp canister start "$BACKEND" --network ic --identity "$IDENTITY" || exit 1
+  icp canister status "$BACKEND" --network ic --identity "$IDENTITY" --json
+  icp canister snapshot list "$BACKEND" --network ic --identity "$IDENTITY"
+  exit 1
+fi
 
 # Restart immediately after successful creation and confirm Running.
-icp canister start "$BACKEND" --network ic --identity "$IDENTITY"
+icp canister start "$BACKEND" --network ic --identity "$IDENTITY" || exit 1
 icp canister status "$BACKEND" --network ic --identity "$IDENTITY" --json
+icp canister snapshot list "$BACKEND" --network ic --identity "$IDENTITY"
 ```
 
 If stop fails or the canister is not confirmed `Stopped`, do not create or replace a snapshot. If the approved snapshot ID, its local preservation, or the explicit replacement approval is missing, stop before the maintenance window. If replacement returns an error or ambiguous result, do not blindly retry: inspect the snapshot list first, preserve any returned/created ID, and verify whether the old ID remains. After any create/replace failure or ambiguity, make starting the backend the next action, then confirm `Running`; if start fails, keep the upgrade on hold and escalate to the authorized operator until the canister is running. Never leave the canister stopped while investigating snapshot metadata or local download problems.
