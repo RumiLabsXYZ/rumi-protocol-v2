@@ -188,8 +188,8 @@ fn assert_capacity_rejected(error: ThreePoolError) {
                 "missing capacity diagnostic: {reason}"
             );
             assert!(
-                reason.contains("no value moved"),
-                "missing no-value-moved diagnostic: {reason}"
+                reason.contains("inspect the payout journal before retrying"),
+                "missing recovery-safe diagnostic: {reason}"
             );
         }
         other => panic!("expected compatible capacity error, got {other:?}"),

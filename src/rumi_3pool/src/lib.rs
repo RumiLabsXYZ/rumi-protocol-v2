@@ -380,7 +380,7 @@ impl PendingClaimSlots {
             return Err(ThreePoolError::TransferFailed {
                 token: "pending_claims".to_string(),
                 reason: format!(
-                    "pending claim capacity reached: used={used}, reserved={reserved}, requested={slots}, capacity={limit}; no value moved"
+                    "pending claim capacity reached: used={used}, reserved={reserved}, requested={slots}, capacity={limit}; inspect the payout journal before retrying"
                 ),
             });
         }
