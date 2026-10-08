@@ -24,6 +24,7 @@
 //! sits *above* the breaker gate in `check_vaults`.
 
 use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Nat, Principal};
+use num_traits::ToPrimitive;
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 use std::time::{Duration, SystemTime};
 
@@ -129,6 +130,12 @@ struct TransferArg {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
+enum StableTokenType {
+    CKUSDT,
+    CKUSDC,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
 enum TransferError {
     BadFee { expected_fee: Nat },
     BadBurn { min_burn_amount: Nat },
@@ -181,6 +188,29 @@ struct BotLiquidationResult {
     collateral_amount: u64,
     debt_covered: u64,
     collateral_price_e8s: u64,
+    claim_generation: u64,
+    payment_memo: Vec<u8>,
+    collateral_return_memo: Vec<u8>,
+    payment_ledger_principal: Option<Principal>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct BotPaymentProof {
+    vault_id: u64,
+    claim_generation: u64,
+    ledger_principal: Principal,
+    block_index: u64,
+    amount_e6s: u64,
+    created_at_time: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct BotCollateralReturnProofArg {
+    vault_id: u64,
+    claim_generation: u64,
+    block_index: u64,
+    amount: u64,
+    created_at_time: u64,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -348,6 +378,35 @@ fn icrc1_transfer_call(
         WasmResult::Reject(m) => panic!("icrc1_transfer rejected: {}", m),
     };
     parsed.expect("transfer returned error");
+}
+
+fn icrc1_transfer_tuple_call(
+    pic: &PocketIc,
+    ledger: Principal,
+    sender: Principal,
+    to: Principal,
+    amount: u64,
+    memo: Vec<u8>,
+    created_at_time: u64,
+) -> Result<u64, TransferError> {
+    use num_traits::ToPrimitive;
+    let args = TransferArg {
+        from_subaccount: None,
+        to: account(to),
+        amount: Nat::from(amount),
+        fee: None,
+        memo: Some(memo),
+        created_at_time: Some(created_at_time),
+    };
+    let result = pic
+        .update_call(ledger, sender, "icrc1_transfer", encode_one(args).unwrap())
+        .expect("icrc1_transfer with exact tuple call failed");
+    let parsed: Result<Nat, TransferError> = match result {
+        WasmResult::Reply(b) => decode_one(&b).expect("decode tuple transfer"),
+        WasmResult::Reject(m) => panic!("tuple transfer rejected: {}", m),
+    };
+    parsed
+        .map(|block| block.0.to_u64().expect("block index should fit u64"))
 }
 
 fn icrc1_balance_of_call(pic: &PocketIc, ledger: Principal, owner: Principal) -> u64 {
@@ -599,6 +658,33 @@ fn setup_fixture() -> Fixture {
         )
         .expect("set_treasury_principal");
 
+    // The exact proof path pins ckUSDC at claim admission. Keep the protocol
+    // separate from the ledger minting account so its payment is represented
+    // by an explicit xfer with a verifiable `to`, not an unbound burn record.
+    // The standard ledger fixture exposes the real ICRC-3 schema/archive API.
+    let payment_ledger = deploy_icrc1_ledger(
+        &pic,
+        account(treasury),
+        10_000,
+        vec![(account(developer), Nat::from(100_000_000_000u64))],
+        "ckUSDC fixture",
+        "ckUSDC",
+        developer,
+    );
+    let stable_ledger_result = pic
+        .update_call(
+            protocol_id,
+            developer,
+            "set_stable_ledger_principal",
+            encode_args((StableTokenType::CKUSDC, payment_ledger)).unwrap(),
+        )
+        .expect("set_stable_ledger_principal call failed");
+    let stable_ledger_result: Result<(), ProtocolError> = match stable_ledger_result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode stable ledger setter"),
+        WasmResult::Reject(message) => panic!("stable ledger setter rejected: {message}"),
+    };
+    stable_ledger_result.expect("ckUSDC ledger configuration should succeed");
+
     icrc2_approve_call(&pic, icp_ledger, test_user, protocol_id, 50_000_000_000u128);
     let open_result = pic
         .update_call(
@@ -653,8 +739,9 @@ fn setup_fixture() -> Fixture {
 /// Drop ICP price and tick until the protocol's cached price reflects it.
 /// Drops outside the 70%-143% sanity band (e.g. $10 → $0.10) need three
 /// consecutive matching XRC samples before `check_price_sanity_band`
-/// confirms — each XRC interval is 300s, so we advance 310s and tick four
-/// times to land safely past the third confirmation.
+/// confirms — the PocketIC timer pass runs every 600s, so advance slightly
+/// past that interval and tick four times to land safely past the third
+/// confirmation.
 fn drop_icp_price(fixture: &Fixture, new_price_e8s: u64) {
     xrc_set_rate(
         &fixture.pic,
@@ -665,7 +752,7 @@ fn drop_icp_price(fixture: &Fixture, new_price_e8s: u64) {
         new_price_e8s,
     );
     for _ in 0..4 {
-        fixture.pic.advance_time(Duration::from_secs(310));
+        fixture.pic.advance_time(Duration::from_secs(610));
         for _ in 0..15 {
             fixture.pic.tick();
         }
@@ -688,12 +775,55 @@ fn seed_bot_claim(fixture: &Fixture) -> (u64, BotLiquidationResult) {
     // BOT-001 gate has a chance to fire on the next tick).
     drop_icp_price(fixture, 250_000_000);
 
+    // The demo XRC fixture rounds its source timestamp up to the next minute.
+    // `drop_icp_price` can therefore leave the newest sample a few seconds in
+    // the future, which the production freshness check correctly rejects.
+    // Move the PocketIC clock to the next minute boundary so that sample is
+    // fresh before the claim's oracle check.
+    let now_secs = fixture
+        .pic
+        .get_time()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("PocketIC time should be after Unix epoch")
+        .as_secs();
+    let secs_to_next_minute = 60 - now_secs % 60;
+    fixture
+        .pic
+        .advance_time(Duration::from_secs(secs_to_next_minute));
+
     let pre_claim_budget = get_bot_stats(&fixture.pic, fixture.protocol_id).budget_remaining_e8s;
 
     let claim = bot_claim_call(fixture, fixture.developer, fixture.vault_id)
         .expect("bot_claim_liquidation must succeed against underwater vault");
 
     (pre_claim_budget, claim)
+}
+
+fn call_proof_update<T: CandidType>(
+    fixture: &Fixture,
+    method: &str,
+    arg: T,
+) -> Result<(), ProtocolError> {
+    let result = fixture
+        .pic
+        .update_call(
+            fixture.protocol_id,
+            fixture.developer,
+            method,
+            encode_one(arg).unwrap(),
+        )
+        .expect("proof update call failed");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode proof update result"),
+        WasmResult::Reject(message) => panic!("proof update rejected: {message}"),
+    }
+}
+
+fn current_ledger_time_ns(pic: &PocketIc) -> u64 {
+    pic.get_time()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("PocketIC time should be after Unix epoch")
+        .as_nanos() as u64
 }
 
 /// Advance time + tick enough for the XRC interval to fire and
@@ -840,5 +970,140 @@ fn bot_001_pic_auto_cancel_proceeds_when_balance_sufficient() {
         events.is_empty(),
         "no BotClaimReconciliationNeeded events expected on the happy path; got {:?}",
         events
+    );
+}
+
+/// Exercise both claim-bound proof paths against the standard ICRC-1 ledger
+/// Wasm. The first transfer response is intentionally discarded; retrying the
+/// same tuple must return the ledger's Duplicate block, which then proves the
+/// payment or collateral return to the backend through ICRC-3.
+#[test]
+fn bot_claim_payment_and_return_proofs_use_exact_icrc3_ledger_blocks() {
+    let f = setup_fixture();
+    let _ = seed_bot_claim(&f);
+
+    // A returned collateral receipt must be exact and idempotent before the
+    // claim may be canceled. This also exercises ICRC-3 for the ICP ledger.
+    let first_claim = bot_claim_call(&f, f.developer, f.vault_id)
+        .expect("first bot claim should be active");
+    let return_time = current_ledger_time_ns(&f.pic);
+    let returned_amount = first_claim.collateral_amount.saturating_sub(10_000);
+    let return_block = icrc1_transfer_tuple_call(
+        &f.pic,
+        f.icp_ledger,
+        f.developer,
+        f.protocol_id,
+        returned_amount,
+        first_claim.collateral_return_memo.clone(),
+        return_time,
+    )
+    .expect("collateral return should commit");
+    let duplicate = icrc1_transfer_tuple_call(
+        &f.pic,
+        f.icp_ledger,
+        f.developer,
+        f.protocol_id,
+        returned_amount,
+        first_claim.collateral_return_memo.clone(),
+        return_time,
+    )
+    .expect_err("same-tuple retry after lost reply should be duplicate");
+    let reconciled_block = match duplicate {
+        TransferError::Duplicate { duplicate_of } => duplicate_of
+            .0
+            .to_u64()
+            .expect("duplicate block index should fit u64"),
+        other => panic!("expected Duplicate from standard ledger, got {other:?}"),
+    };
+    assert_eq!(reconciled_block, return_block);
+    call_proof_update(
+        &f,
+        "bot_record_collateral_return_proof",
+        BotCollateralReturnProofArg {
+            vault_id: f.vault_id,
+            claim_generation: first_claim.claim_generation,
+            block_index: reconciled_block,
+            amount: returned_amount,
+            created_at_time: return_time,
+        },
+    )
+    .expect("exact return ICRC-3 proof should be accepted");
+    call_proof_update(
+        &f,
+        "bot_cancel_liquidation",
+        f.vault_id,
+    )
+    .expect("verified return should allow claim cancellation");
+
+    // A second generation receives a different stable memo. Pay the minimum
+    // claim-bound ckUSDC amount and reconcile its block from Duplicate, so the
+    // proof API sees the same exact block the bot can recover after reply loss.
+    let second_claim = bot_claim_call(&f, f.developer, f.vault_id)
+        .expect("second generation bot claim should succeed after cancel");
+    assert_ne!(first_claim.claim_generation, second_claim.claim_generation);
+    let payment_ledger = second_claim
+        .payment_ledger_principal
+        .expect("claim must pin configured ckUSDC ledger");
+    let payment_amount = second_claim.debt_covered / 100
+        + u64::from(second_claim.debt_covered % 100 != 0);
+    let payment_time = current_ledger_time_ns(&f.pic);
+    let payment_block = icrc1_transfer_tuple_call(
+        &f.pic,
+        payment_ledger,
+        f.developer,
+        f.protocol_id,
+        payment_amount,
+        second_claim.payment_memo.clone(),
+        payment_time,
+    )
+    .expect("ckUSDC payment should commit");
+    let duplicate = icrc1_transfer_tuple_call(
+        &f.pic,
+        payment_ledger,
+        f.developer,
+        f.protocol_id,
+        payment_amount,
+        second_claim.payment_memo,
+        payment_time,
+    )
+    .expect_err("same-tuple retry after lost reply should be duplicate");
+    let reconciled_payment_block = match duplicate {
+        TransferError::Duplicate { duplicate_of } => duplicate_of
+            .0
+            .to_u64()
+            .expect("duplicate block index should fit u64"),
+        other => panic!("expected Duplicate from standard ledger, got {other:?}"),
+    };
+    assert_eq!(reconciled_payment_block, payment_block);
+    call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proof",
+        BotPaymentProof {
+            vault_id: f.vault_id,
+            claim_generation: second_claim.claim_generation,
+            ledger_principal: payment_ledger,
+            block_index: reconciled_payment_block,
+            amount_e6s: payment_amount,
+            created_at_time: payment_time,
+        },
+    )
+    .expect("exact payment ICRC-3 proof should be accepted");
+    call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proof",
+        BotPaymentProof {
+            vault_id: f.vault_id,
+            claim_generation: second_claim.claim_generation,
+            ledger_principal: payment_ledger,
+            block_index: reconciled_payment_block,
+            amount_e6s: payment_amount,
+            created_at_time: payment_time,
+        },
+    )
+    .expect("same proof should be idempotent");
+    assert_eq!(
+        get_bot_stats(&f.pic, f.protocol_id).total_debt_covered_e8s,
+        second_claim.debt_covered,
+        "proof confirmation should account the claim exactly once"
     );
 }

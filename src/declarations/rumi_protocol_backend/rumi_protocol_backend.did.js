@@ -145,12 +145,31 @@ export const idlFactory = ({ IDL }) => {
   const BotLiquidationResult = IDL.Record({
     'collateral_amount' : IDL.Nat64,
     'collateral_price_e8s' : IDL.Nat64,
+    'payment_memo' : IDL.Vec(IDL.Nat8),
+    'claim_generation' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
+    'payment_ledger_principal' : IDL.Opt(IDL.Principal),
+    'collateral_return_memo' : IDL.Vec(IDL.Nat8),
     'debt_covered' : IDL.Nat64,
   });
   const Result_5 = IDL.Variant({
     'Ok' : BotLiquidationResult,
     'Err' : ProtocolError,
+  });
+  const BotPaymentProof = IDL.Record({
+    'block_index' : IDL.Nat64,
+    'claim_generation' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'amount_e6s' : IDL.Nat64,
+    'ledger_principal' : IDL.Principal,
+    'created_at_time' : IDL.Nat64,
+  });
+  const BotCollateralReturnProofArg = IDL.Record({
+    'block_index' : IDL.Nat64,
+    'claim_generation' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'created_at_time' : IDL.Nat64,
+    'amount' : IDL.Nat64,
   });
   const Result_6 = IDL.Variant({
     'Ok' : IDL.Opt(IDL.Nat64),
@@ -1687,6 +1706,16 @@ export const idlFactory = ({ IDL }) => {
     'bot_cancel_liquidation' : IDL.Func([IDL.Nat64], [Result], []),
     'bot_claim_liquidation' : IDL.Func([IDL.Nat64], [Result_5], []),
     'bot_confirm_liquidation' : IDL.Func([IDL.Nat64], [Result], []),
+    'bot_confirm_liquidation_with_proof' : IDL.Func(
+        [BotPaymentProof],
+        [Result],
+        [],
+      ),
+    'bot_record_collateral_return_proof' : IDL.Func(
+        [BotCollateralReturnProofArg],
+        [Result],
+        [],
+      ),
     'cancel_xrp_pending_open' : IDL.Func([IDL.Nat64], [Result], []),
     'chain_has_active_settlement_op' : IDL.Func(
         [IDL.Nat32],
@@ -1730,6 +1759,7 @@ export const idlFactory = ({ IDL }) => {
     'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
     'delete_chain' : IDL.Func([IDL.Nat32], [Result], []),
     'disable_chain' : IDL.Func([IDL.Nat32], [Result], []),
+    'enable_bot_confirm_proof_requirement' : IDL.Func([], [Result], []),
     'enable_chain' : IDL.Func([IDL.Nat32], [Result], []),
     'enter_recovery_mode' : IDL.Func([], [Result], []),
     'exit_recovery_mode' : IDL.Func([], [Result], []),

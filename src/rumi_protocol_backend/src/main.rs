@@ -794,7 +794,9 @@ fn post_upgrade(arg: ProtocolArg) {
             );
             // Apply upgrade args to the restored state (the snapshot was taken
             // before this upgrade event, so we must apply it explicitly)
+            let pre_upgrade_ckusdc_ledger = state.ckusdc_ledger_principal;
             state.upgrade(upgrade_args);
+            bind_legacy_bot_payment_tombstones(&mut state, pre_upgrade_ckusdc_ledger);
             state
         }
         None => {
@@ -8587,6 +8589,258 @@ pub struct BotLiquidationResult {
     pub collateral_amount: u64,
     pub debt_covered: u64,
     pub collateral_price_e8s: u64,
+    /// Stable identity of this exact claim; callers must echo it in payment proof.
+    pub claim_generation: u64,
+    /// ICRC-1 memo required on the ckUSDC payment for this claim.
+    pub payment_memo: Vec<u8>,
+    /// ICRC-1 memo required when returning collateral for this claim.
+    pub collateral_return_memo: Vec<u8>,
+    /// ckUSDC ledger pinned to the claim generation.
+    pub payment_ledger_principal: Option<Principal>,
+}
+
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct BotPaymentProof {
+    pub vault_id: u64,
+    pub claim_generation: u64,
+    pub ledger_principal: Principal,
+    pub block_index: u64,
+    pub amount_e6s: u64,
+    pub created_at_time: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct BotCollateralReturnProofArg {
+    pub vault_id: u64,
+    pub claim_generation: u64,
+    pub block_index: u64,
+    pub amount: u64,
+    pub created_at_time: u64,
+}
+
+const BOT_PAYMENT_MEMO_PREFIX: &[u8] = b"RUMI-BOT-PAYMENT-V1:";
+const BOT_RETURN_MEMO_PREFIX: &[u8] = b"RUMI-BOT-RETURN-V1:";
+
+fn bot_payment_memo(vault_id: u64, generation: u64) -> Vec<u8> {
+    let mut memo = BOT_PAYMENT_MEMO_PREFIX.to_vec();
+    memo.extend_from_slice(&vault_id.to_be_bytes());
+    memo.extend_from_slice(&generation.to_be_bytes());
+    memo
+}
+
+fn bot_collateral_return_memo(vault_id: u64, generation: u64) -> Vec<u8> {
+    let mut memo = BOT_RETURN_MEMO_PREFIX.to_vec();
+    memo.extend_from_slice(&vault_id.to_be_bytes());
+    memo.extend_from_slice(&generation.to_be_bytes());
+    memo
+}
+
+fn bot_liquidation_result_from_claim(
+    claim: &rumi_protocol_backend::state::BotClaim,
+) -> BotLiquidationResult {
+    BotLiquidationResult {
+        vault_id: claim.vault_id,
+        collateral_amount: claim.collateral_amount,
+        debt_covered: claim.debt_amount,
+        collateral_price_e8s: claim.collateral_price_e8s,
+        claim_generation: claim.generation,
+        payment_memo: bot_payment_memo(claim.vault_id, claim.generation),
+        collateral_return_memo: bot_collateral_return_memo(claim.vault_id, claim.generation),
+        payment_ledger_principal: claim.payment_ledger_principal,
+    }
+}
+
+fn bot_proof_cutover_is_safe(active_claims: usize) -> bool {
+    active_claims == 0
+}
+
+async fn verify_bot_claim_transfer_receipt(
+    claim: &rumi_protocol_backend::state::BotClaim,
+    bot: Principal,
+    block_index: u64,
+) -> Result<(), String> {
+    let Some(transfer) = claim.collateral_transfer.as_ref() else {
+        return Err("claim has no persisted collateral transfer tuple".into());
+    };
+    if management::nonce_to_created_at_time(transfer.op_nonce) != transfer.created_at_time {
+        return Err("persisted collateral transfer nonce/time mismatch".into());
+    }
+    let memo = transfer.op_nonce.to_be_bytes();
+    rumi_protocol_backend::icrc3_proof::verify_icrc3_transfer_block(
+        claim.collateral_type,
+        block_index,
+        Some(icrc_ledger_types::icrc1::account::Account { owner: ic_cdk::id(), subaccount: None }),
+        icrc_ledger_types::icrc1::account::Account { owner: bot, subaccount: None },
+        claim.collateral_amount,
+        Some(&memo),
+        Some(transfer.created_at_time),
+    )
+    .await
+}
+
+fn bot_payment_replay_status(
+    consumed: Option<(u64, u64)>,
+    vault_id: u64,
+    generation: u64,
+) -> Result<bool, String> {
+    match consumed {
+        None => Ok(false),
+        Some(identity) if identity == (vault_id, generation) => Ok(true),
+        Some(_) => Err("ckUSDC payment block was already consumed by another claim".into()),
+    }
+}
+
+fn bot_payment_replay_status_for_ledger(
+    scoped: &std::collections::BTreeMap<String, (u64, u64)>,
+    legacy: &std::collections::BTreeMap<u64, (u64, u64)>,
+    legacy_ledger: Option<Principal>,
+    ledger: Principal,
+    block_index: u64,
+    vault_id: u64,
+    generation: u64,
+) -> Result<bool, String> {
+    let key = bot_payment_replay_key(ledger, block_index);
+    if let Some(identity) = scoped.get(&key).copied() {
+        return bot_payment_replay_status(Some(identity), vault_id, generation);
+    }
+    let identity = match legacy.get(&block_index).copied() {
+        Some(identity) if legacy_ledger == Some(ledger) => Some(identity),
+        Some(_) if legacy_ledger.is_none() => {
+            return Err("legacy consumed block has no provable ledger binding".into());
+        }
+        _ => None,
+    };
+    bot_payment_replay_status(identity, vault_id, generation)
+}
+
+fn bot_payment_replay_key(ledger: Principal, block_index: u64) -> String {
+    format!("{}:{block_index}", ledger.to_text())
+}
+
+fn bind_legacy_bot_payment_tombstones(
+    state: &mut rumi_protocol_backend::state::State,
+    pre_upgrade_ckusdc_ledger: Option<Principal>,
+) {
+    // The legacy tombstones lacked a ledger in their key. Bind them to the
+    // exact pre-upgrade configured ledger before upgrade args can rotate it.
+    // If it was unset, replay collisions remain fail-closed.
+    if !state.consumed_bot_payment_blocks.is_empty()
+        && state.legacy_consumed_payment_ledger.is_none()
+    {
+        state.legacy_consumed_payment_ledger = pre_upgrade_ckusdc_ledger;
+    }
+}
+
+fn bot_claim_generation_matches(active: u64, proof: u64) -> bool {
+    active != 0 && active == proof
+}
+
+fn bot_payment_ledger_matches(pinned: Option<Principal>, proof: Principal) -> bool {
+    pinned == Some(proof)
+}
+
+fn bot_payment_meets_claim_minimum(debt_e8s: u64, paid_e6s: u64) -> bool {
+    let minimum = debt_e8s / 100 + if debt_e8s % 100 == 0 { 0 } else { 1 };
+    paid_e6s >= minimum
+}
+
+#[cfg(test)]
+mod bot_payment_proof_tests {
+    use super::*;
+
+    #[test]
+    fn claim_payment_memo_binds_vault_and_generation() {
+        let memo = bot_payment_memo(7, 42);
+        assert_eq!(memo, bot_payment_memo(7, 42));
+        assert_ne!(memo, bot_payment_memo(7, 43));
+        assert_ne!(memo, bot_payment_memo(8, 42));
+    }
+
+    #[test]
+    fn short_payment_and_cross_claim_replay_are_rejected() {
+        assert!(bot_payment_meets_claim_minimum(100_000_000, 1_000_000));
+        assert!(!bot_payment_meets_claim_minimum(100_000_000, 999_999));
+        assert!(!bot_payment_meets_claim_minimum(100_000_001, 1_000_000));
+        assert!(bot_payment_meets_claim_minimum(100_000_001, 1_000_001));
+        assert_eq!(bot_payment_replay_status(None, 7, 42), Ok(false));
+        assert_eq!(bot_payment_replay_status(Some((7, 42)), 7, 42), Ok(true));
+        assert!(bot_payment_replay_status(Some((7, 42)), 7, 43).is_err());
+        assert!(!bot_claim_generation_matches(43, 42));
+    }
+
+    #[test]
+    fn consumed_payment_indices_are_ledger_scoped() {
+        let ledger_a = Principal::from_slice(&[10]);
+        let ledger_b = Principal::from_slice(&[11]);
+        let mut consumed = std::collections::BTreeMap::new();
+        consumed.insert(bot_payment_replay_key(ledger_a, 7), (1, 41));
+        consumed.insert(bot_payment_replay_key(ledger_b, 7), (2, 42));
+        assert_eq!(bot_payment_replay_status_for_ledger(
+            &consumed, &std::collections::BTreeMap::new(), None, ledger_a, 7, 1, 41,
+        ), Ok(true));
+        assert_eq!(bot_payment_replay_status_for_ledger(
+            &consumed, &std::collections::BTreeMap::new(), None, ledger_b, 7, 2, 42,
+        ), Ok(true));
+        assert!(bot_payment_replay_status_for_ledger(
+            &consumed, &std::collections::BTreeMap::new(), None, ledger_a, 7, 2, 42,
+        ).is_err());
+        let legacy = std::collections::BTreeMap::from([(7, (1, 41))]);
+        assert_eq!(bot_payment_replay_status_for_ledger(
+            &std::collections::BTreeMap::new(), &legacy, Some(ledger_a), ledger_a, 7, 1, 41,
+        ), Ok(true));
+        assert_eq!(bot_payment_replay_status_for_ledger(
+            &std::collections::BTreeMap::new(), &legacy, Some(ledger_a), ledger_b, 7, 2, 42,
+        ), Ok(false));
+        assert!(bot_payment_replay_status_for_ledger(
+            &std::collections::BTreeMap::new(), &legacy, None, ledger_b, 7, 2, 42,
+        ).is_err());
+    }
+
+    #[test]
+    fn payment_proof_uses_claim_pinned_ledger_after_config_rotation() {
+        let claim_ledger = Principal::from_slice(&[10]);
+        let rotated_config_ledger = Principal::from_slice(&[11]);
+        assert!(bot_payment_ledger_matches(Some(claim_ledger), claim_ledger));
+        assert!(!bot_payment_ledger_matches(Some(claim_ledger), rotated_config_ledger));
+        assert!(!bot_payment_ledger_matches(None, claim_ledger));
+    }
+
+    #[test]
+    fn legacy_consumed_blocks_bind_to_pre_upgrade_ledger_only_once() {
+        let old_ledger = Principal::from_slice(&[10]);
+        let rotated_ledger = Principal::from_slice(&[11]);
+        let mut state = rumi_protocol_backend::state::State::default();
+        state.consumed_bot_payment_blocks.insert(7, (1, 41));
+
+        bind_legacy_bot_payment_tombstones(&mut state, Some(old_ledger));
+        assert_eq!(state.legacy_consumed_payment_ledger, Some(old_ledger));
+        // Later upgrades must preserve the original binding, even if current
+        // configuration has since rotated to another ledger.
+        bind_legacy_bot_payment_tombstones(&mut state, Some(rotated_ledger));
+        assert_eq!(state.legacy_consumed_payment_ledger, Some(old_ledger));
+
+        let mut unknown = rumi_protocol_backend::state::State::default();
+        unknown.consumed_bot_payment_blocks.insert(7, (1, 41));
+        bind_legacy_bot_payment_tombstones(&mut unknown, None);
+        assert_eq!(unknown.legacy_consumed_payment_ledger, None);
+        assert!(bot_payment_replay_status_for_ledger(
+            &unknown.consumed_bot_payment_proofs,
+            &unknown.consumed_bot_payment_blocks,
+            unknown.legacy_consumed_payment_ledger,
+            rotated_ledger,
+            7,
+            2,
+            42,
+        ).is_err());
+    }
+
+    #[test]
+    fn strict_cutover_observes_claim_admitted_before_transfer_await() {
+        // Admission journals the claim synchronously, then suspends at the
+        // ledger call. The cutover must see that journal and remain closed.
+        assert!(bot_proof_cutover_is_safe(0));
+        assert!(!bot_proof_cutover_is_safe(1));
+    }
 }
 
 /// Bot stats exposed to the frontend.
@@ -8631,6 +8885,25 @@ async fn set_liquidation_bot_config(
         bot_principal,
         monthly_budget_e8s
     );
+    Ok(())
+}
+
+/// Enable or disable the legacy confirmation fail-closed guard (developer only).
+#[candid_method(update)]
+#[update]
+async fn enable_bot_confirm_proof_requirement() -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer can change the bot confirmation proof requirement".into(),
+        ));
+    }
+    if !read_state(|s| bot_proof_cutover_is_safe(s.bot_claims.len())) {
+        return Err(ProtocolError::GenericError(
+            "Cannot require proof while legacy bot claims are active".into(),
+        ));
+    }
+    mutate_state(|s| s.bot_confirm_proof_required = true);
     Ok(())
 }
 
@@ -8737,15 +9010,6 @@ fn get_bot_cr_tolerance_bps() -> u64 {
 #[update]
 async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, ProtocolError> {
     validate_call().await?;
-    validate_price_for_liquidation()?;
-    // ORC-001 (audit 2026-06-09): mirror the gates every manual/SP liquidation
-    // entry enforces. Without the per-vault freshness gate the bot computes the
-    // CR gate and seizure from a cached non-ICP price with no staleness
-    // ceiling (the VER-001 fail-open class); without the freeze gate the bot
-    // keeps claiming through an admin liquidation halt. Dormant while the bot
-    // allowlist is ICP-only, live the moment a non-ICP collateral is added.
-    validate_liquidation_not_frozen()?;
-    validate_freshness_for_vault(vault_id).await?;
     // Native-XRP collateral is claim-based. THIS path cannot settle an XrpClaim
     // (it would strand the seized XRP and burn SP depositors), so reject
     // native-XRP here. Native-XRP absorption goes through the dedicated flow
@@ -8774,14 +9038,82 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
     // message itself. Released on return (incl. continuation-trap via cleanup).
     let _vault_liq_guard = rumi_protocol_backend::guard::VaultLiquidationGuard::new(vault_id)?;
 
-    // Check no existing claim on this vault
-    let existing_claim = read_state(|s| s.bot_claims.contains_key(&vault_id));
-    if existing_claim {
-        return Err(ProtocolError::GenericError(format!(
-            "Vault #{} already has an active bot claim",
-            vault_id
-        )));
+    // A pre-transfer journal is also the admission fence for proof cutover.
+    // If the first reply was lost, retry the exact persisted ICRC dedup tuple;
+    // never allocate a new transfer or re-claim a different generation.
+    if let Some(claim) = read_state(|s| s.bot_claims.get(&vault_id).cloned()) {
+        if claim.collateral_return_proof.is_some() {
+            return Err(ProtocolError::GenericError(
+                "Collateral return is already recorded; retry cancellation instead".into(),
+            ));
+        }
+        let Some(transfer) = claim.collateral_transfer.as_ref() else {
+            return Err(ProtocolError::GenericError(
+                "This legacy claim has no persisted transfer tuple and requires manual reconciliation".into(),
+            ));
+        };
+        if transfer.block_index.is_none() {
+            let result = management::transfer_collateral_with_nonce_status(
+                claim.collateral_amount,
+                caller,
+                claim.collateral_type,
+                transfer.op_nonce,
+            )
+            .await;
+            let block = match result {
+                Ok(block) => block,
+                Err(error) => {
+                    let (status, protocol_error) = match error {
+                        management::DurableTransferError::LedgerNoEffect(error) => (
+                            rumi_protocol_backend::state::BotCollateralTransferStatus::NoEffect,
+                            ProtocolError::GenericError(format!("Collateral transfer had definitive no-effect; retry reuses the journaled nonce: {:?}", error)),
+                        ),
+                        management::DurableTransferError::AmbiguousCall { code, message } => (
+                            rumi_protocol_backend::state::BotCollateralTransferStatus::Ambiguous,
+                            ProtocolError::TemporarilyUnavailable(format!("Collateral transfer reply is ambiguous; retry reuses the journaled nonce: {:?} {}", code, message)),
+                        ),
+                        management::DurableTransferError::AmbiguousResponse(message) => (
+                            rumi_protocol_backend::state::BotCollateralTransferStatus::Ambiguous,
+                            ProtocolError::TemporarilyUnavailable(format!("Collateral transfer may have committed but its receipt cannot be represented: {message}")),
+                        ),
+                    };
+                    mutate_state(|s| {
+                        if let Some(active) = s.bot_claims.get_mut(&vault_id) {
+                            if active.generation == claim.generation {
+                                if let Some(transfer) = active.collateral_transfer.as_mut() {
+                                    transfer.status = status;
+                                }
+                            }
+                        }
+                    });
+                    return Err(protocol_error);
+                }
+            };
+            verify_bot_claim_transfer_receipt(&claim, caller, block)
+                .await
+                .map_err(|error| ProtocolError::TemporarilyUnavailable(format!(
+                    "Claim transfer block was not yet verified; retain the journal and retry: {error}"
+                )))?;
+            mutate_state(|s| {
+                if let Some(active) = s.bot_claims.get_mut(&vault_id) {
+                    if active.generation == claim.generation {
+                        if let Some(transfer) = active.collateral_transfer.as_mut() {
+                            transfer.block_index = Some(block);
+                            transfer.status = rumi_protocol_backend::state::BotCollateralTransferStatus::Confirmed;
+                        }
+                    }
+                }
+            });
+        }
+        return Ok(bot_liquidation_result_from_claim(&claim));
     }
+
+    validate_price_for_liquidation()?;
+    // ORC-001 (audit 2026-06-09): apply oracle freshness and freeze gates to
+    // new admissions. Retries of an already journaled transfer bypass these
+    // mutable preflight checks and must reconcile their original tuple.
+    validate_liquidation_not_frozen()?;
+    validate_freshness_for_vault(vault_id).await?;
 
     // Get vault info, validate collateral type, compute amounts, check budget
     let (collateral_price_usd, liquidatable_debt, collateral_to_seize, collateral_type) =
@@ -8806,6 +9138,14 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
                     "Collateral type {} is not in the bot's allowed list.",
                     vault.collateral_type
                 )));
+            }
+            // The current liquidation_bot implementation swaps ICP only. An
+            // allowlist entry alone does not provide a safe adapter for other
+            // collateral ledgers.
+            if vault.collateral_type != s.icp_ledger_principal {
+                return Err(ProtocolError::GenericError(
+                    "The liquidation bot currently supports ICP collateral only".into(),
+                ));
             }
 
             let price = s
@@ -8897,53 +9237,108 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
             ))
         })?;
 
-    // Transfer collateral to bot
-    match rumi_protocol_backend::management::transfer_collateral(
-        collateral_to_seize.to_u64(),
-        caller,
-        collateral_type,
-    )
-    .await
-    {
-        Ok(block) => {
-            log!(INFO, "[bot_claim_liquidation] Transferred {} collateral ({}) to bot for vault #{}, block {}",
-                collateral_to_seize.to_u64(), collateral_type, vault_id, block);
-        }
-        Err(e) => {
-            log!(
-                INFO,
-                "[bot_claim_liquidation] Collateral transfer failed for vault #{}: {:?}",
-                vault_id,
-                e
-            );
+    // Journal the generation, budget reservation, vault lock, and exact ICRC
+    // dedup tuple synchronously before dispatch. This fences proof-mode
+    // admission against a suspended transfer and allows reply-loss retries to
+    // reuse the same created_at_time + memo. Any error is retained for safe
+    // retry/reconciliation because a call rejection may be ambiguous.
+    let now = ic_cdk::api::time();
+    let claim = mutate_state(|s| {
+        let payment_ledger_principal = s.ckusdc_ledger_principal.ok_or_else(|| {
+            ProtocolError::GenericError("ckUSDC ledger is not configured".into())
+        })?;
+        let debt = liquidatable_debt.to_u64();
+        let Some(new_budget) = s.bot_budget_remaining_e8s.checked_sub(debt) else {
+            return Err(ProtocolError::GenericError(
+                "Bot budget changed before claim admission".into(),
+            ));
+        };
+        let generation = s.next_bot_claim_generation().ok_or_else(|| {
+            ProtocolError::GenericError("Bot claim generation counter exhausted".into())
+        })?;
+        let op_nonce = s.next_op_nonce_at(now);
+        let created_at_time = management::nonce_to_created_at_time(op_nonce);
+        let vault = s.vault_id_to_vaults.get_mut(&vault_id).ok_or_else(|| {
+            ProtocolError::GenericError(format!("Vault #{} disappeared before admission", vault_id))
+        })?;
+        if vault.bot_processing || s.bot_claims.contains_key(&vault_id) {
             return Err(ProtocolError::GenericError(format!(
-                "Collateral transfer failed: {:?}",
-                e
+                "Vault #{} already has active liquidation work", vault_id
             )));
         }
-    }
-
-    // Lock the vault and record the claim (but do NOT modify debt/collateral)
-    let now = ic_cdk::api::time();
-    mutate_state(|s| {
-        if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
-            vault.bot_processing = true;
-        }
-        s.bot_claims.insert(
+        vault.bot_processing = true;
+        s.bot_budget_remaining_e8s = new_budget;
+        let claim = rumi_protocol_backend::state::BotClaim {
             vault_id,
-            rumi_protocol_backend::state::BotClaim {
-                vault_id,
-                collateral_amount: collateral_to_seize.to_u64(),
-                debt_amount: liquidatable_debt.to_u64(),
-                collateral_type,
-                claimed_at: now,
-                collateral_price_e8s: collateral_price_usd.to_e8s(),
-            },
-        );
-        // Deduct from budget immediately to prevent over-claiming
-        s.bot_budget_remaining_e8s = s
-            .bot_budget_remaining_e8s
-            .saturating_sub(liquidatable_debt.to_u64());
+            generation,
+            collateral_transfer: Some(rumi_protocol_backend::state::BotCollateralTransfer {
+                op_nonce,
+                created_at_time,
+                block_index: None,
+                status: rumi_protocol_backend::state::BotCollateralTransferStatus::Reserved,
+            }),
+            payment_ledger_principal: Some(payment_ledger_principal),
+            collateral_amount: collateral_to_seize.to_u64(),
+            debt_amount: debt,
+            collateral_type,
+            claimed_at: now,
+            collateral_price_e8s: collateral_price_usd.to_e8s(),
+            collateral_return_proof: None,
+        };
+        s.bot_claims.insert(vault_id, claim.clone());
+        Ok(claim)
+    })?;
+
+    let result = rumi_protocol_backend::management::transfer_collateral_with_nonce_status(
+        claim.collateral_amount,
+        caller,
+        claim.collateral_type,
+        claim.collateral_transfer.as_ref().expect("new journal exists").op_nonce,
+    )
+    .await;
+    let block = match result {
+        Ok(block) => block,
+        Err(error) => {
+            let (status, protocol_error) = match error {
+                management::DurableTransferError::LedgerNoEffect(error) => (
+                    rumi_protocol_backend::state::BotCollateralTransferStatus::NoEffect,
+                    ProtocolError::GenericError(format!("Collateral transfer had definitive no-effect; claim remains journaled: {:?}", error)),
+                ),
+                management::DurableTransferError::AmbiguousCall { code, message } => (
+                    rumi_protocol_backend::state::BotCollateralTransferStatus::Ambiguous,
+                    ProtocolError::TemporarilyUnavailable(format!("Collateral transfer reply is ambiguous; claim remains journaled for exact retry: {:?} {}", code, message)),
+                ),
+                management::DurableTransferError::AmbiguousResponse(message) => (
+                    rumi_protocol_backend::state::BotCollateralTransferStatus::Ambiguous,
+                    ProtocolError::TemporarilyUnavailable(format!("Collateral transfer may have committed but its receipt cannot be represented: {message}")),
+                ),
+            };
+            mutate_state(|s| {
+                if let Some(active) = s.bot_claims.get_mut(&vault_id) {
+                    if active.generation == claim.generation {
+                        if let Some(transfer) = active.collateral_transfer.as_mut() {
+                            transfer.status = status;
+                        }
+                    }
+                }
+            });
+            return Err(protocol_error);
+        }
+    };
+    verify_bot_claim_transfer_receipt(&claim, caller, block)
+        .await
+        .map_err(|error| ProtocolError::TemporarilyUnavailable(format!(
+            "Claim transfer block was not yet verified; retain the journal and retry: {error}"
+        )))?;
+    mutate_state(|s| {
+        if let Some(active) = s.bot_claims.get_mut(&vault_id) {
+            if active.generation == claim.generation {
+                if let Some(transfer) = active.collateral_transfer.as_mut() {
+                    transfer.block_index = Some(block);
+                    transfer.status = rumi_protocol_backend::state::BotCollateralTransferStatus::Confirmed;
+                }
+            }
+        }
     });
 
     log!(
@@ -8954,12 +9349,9 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         collateral_to_seize.to_u64()
     );
 
-    Ok(BotLiquidationResult {
-        vault_id,
-        collateral_amount: collateral_to_seize.to_u64(),
-        debt_covered: liquidatable_debt.to_u64(),
-        collateral_price_e8s: collateral_price_usd.to_e8s(),
-    })
+    log!(INFO, "[bot_claim_liquidation] Transferred {} collateral ({}) to bot for vault #{}, block {}",
+        claim.collateral_amount, collateral_type, vault_id, block);
+    Ok(bot_liquidation_result_from_claim(&claim))
 }
 
 /// Bot calls this after successfully swapping collateral (phase 2 of 2).
@@ -8974,6 +9366,12 @@ async fn bot_confirm_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
     if !is_bot {
         return Err(ProtocolError::GenericError(
             "Caller is not the registered liquidation bot canister".to_string(),
+        ));
+    }
+
+    if read_state(|s| s.bot_confirm_proof_required) {
+        return Err(ProtocolError::GenericError(
+            "Legacy bot confirmation is disabled; submit an ICRC-3 payment proof".into(),
         ));
     }
 
@@ -9039,6 +9437,217 @@ async fn bot_confirm_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+/// Confirm a bot liquidation against the exact ckUSDC ICRC-3 transfer block.
+/// The claim-specific memo and generation prevent a payment for an older claim
+/// on the same vault from authorizing a later claim.
+#[candid_method(update)]
+#[update]
+async fn bot_confirm_liquidation_with_proof(
+    proof: BotPaymentProof,
+) -> Result<(), ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::api::caller();
+    let is_bot = read_state(|s| s.liquidation_bot_principal == Some(caller));
+    if !is_bot {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered liquidation bot canister".into(),
+        ));
+    }
+    if read_state(|s| bot_payment_replay_status_for_ledger(
+        &s.consumed_bot_payment_proofs,
+        &s.consumed_bot_payment_blocks,
+        s.legacy_consumed_payment_ledger,
+        proof.ledger_principal,
+        proof.block_index,
+        proof.vault_id,
+        proof.claim_generation,
+    ))
+    .map_err(ProtocolError::GenericError)? {
+        return Ok(());
+    }
+    let claim = read_state(|s| s.bot_claims.get(&proof.vault_id).cloned()).ok_or_else(|| {
+        ProtocolError::GenericError(format!("No active claim for vault #{}", proof.vault_id))
+    })?;
+    if !bot_payment_ledger_matches(claim.payment_ledger_principal, proof.ledger_principal) {
+        return Err(ProtocolError::GenericError(
+            "Payment ledger does not match the ledger pinned to this claim".into(),
+        ));
+    }
+    if claim.collateral_transfer.as_ref().and_then(|transfer| transfer.block_index).is_none() {
+        return Err(ProtocolError::GenericError(
+            "Collateral claim transfer has not been reconciled from its exact ledger block".into(),
+        ));
+    }
+    if !bot_claim_generation_matches(claim.generation, proof.claim_generation) {
+        return Err(ProtocolError::GenericError(
+            "Bot payment proof claim generation does not match the active claim".into(),
+        ));
+    }
+    if !bot_payment_meets_claim_minimum(claim.debt_amount, proof.amount_e6s)
+        || proof.created_at_time == 0
+    {
+        return Err(ProtocolError::GenericError(
+            "Bot payment amount is short or created_at_time is missing".into(),
+        ));
+    }
+    let memo = bot_payment_memo(proof.vault_id, proof.claim_generation);
+    // Validate the canonical ICRC-1 tuple. ICRC-3 records tx.ts only when
+    // created_at_time was supplied by the transfer caller.
+    rumi_protocol_backend::icrc3_proof::verify_icrc3_transfer_block(
+        proof.ledger_principal,
+        proof.block_index,
+        Some(icrc_ledger_types::icrc1::account::Account {
+            owner: caller,
+            subaccount: None,
+        }),
+        icrc_ledger_types::icrc1::account::Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },
+        proof.amount_e6s,
+        Some(&memo),
+        Some(proof.created_at_time),
+    )
+    .await
+    .map_err(ProtocolError::GenericError)?;
+    mutate_state(|s| {
+        let Some(active) = s.bot_claims.get(&proof.vault_id) else {
+            return Err("Active bot claim disappeared during proof verification".to_string());
+        };
+        if !bot_claim_generation_matches(active.generation, proof.claim_generation) {
+            return Err("Active bot claim changed during proof verification".to_string());
+        }
+        let Some(vault) = s.vault_id_to_vaults.get(&proof.vault_id) else {
+            return Err("Claimed vault disappeared before proof confirmation".to_string());
+        };
+        let Some(new_debt_e8s) = vault
+            .borrowed_icusd_amount
+            .to_u64()
+            .checked_sub(claim.debt_amount)
+        else {
+            return Err("Claim debt changed during payment proof verification".to_string());
+        };
+        let Some(new_collateral) = vault.collateral_amount.checked_sub(claim.collateral_amount)
+        else {
+            return Err("Claim collateral changed during payment proof verification".to_string());
+        };
+        s.consumed_bot_payment_proofs.insert(
+            bot_payment_replay_key(proof.ledger_principal, proof.block_index),
+            (proof.vault_id, proof.claim_generation),
+        );
+        let vault = s.vault_id_to_vaults.get_mut(&proof.vault_id).unwrap();
+        vault.borrowed_icusd_amount = ICUSD::new(new_debt_e8s);
+        vault.collateral_amount = new_collateral;
+        vault.bot_processing = false;
+        let event = rumi_protocol_backend::event::Event::PartialLiquidateVault {
+            vault_id: proof.vault_id,
+            liquidator_payment: ICUSD::new(claim.debt_amount),
+            icp_to_liquidator: ICP::from(claim.collateral_amount),
+            liquidator: Some(caller),
+            icp_rate: Some(UsdIcp::from(
+                Decimal::from(claim.collateral_price_e8s) / dec!(100_000_000),
+            )),
+            protocol_fee_collateral: None,
+            timestamp: Some(ic_cdk::api::time()),
+            three_usd_reserves_e8s: None,
+        };
+        rumi_protocol_backend::storage::record_event(&event);
+        s.bot_total_debt_covered_e8s += claim.debt_amount;
+        s.bot_claims.remove(&proof.vault_id);
+        s.cleanup_if_drained(proof.vault_id);
+        Ok::<(), String>(())
+    }).map_err(ProtocolError::GenericError)?;
+    Ok(())
+}
+
+/// Persist an exact collateral-return receipt before cancel or timeout cleanup.
+/// In strict mode both the explicit cancel and expiry gate require this record.
+#[candid_method(update)]
+#[update]
+async fn bot_record_collateral_return_proof(
+    proof: BotCollateralReturnProofArg,
+) -> Result<(), ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.liquidation_bot_principal == Some(caller)) {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered liquidation bot canister".into(),
+        ));
+    }
+    let claim = read_state(|s| s.bot_claims.get(&proof.vault_id).cloned()).ok_or_else(|| {
+        ProtocolError::GenericError(format!("No active claim for vault #{}", proof.vault_id))
+    })?;
+    if claim.collateral_transfer.as_ref().and_then(|transfer| transfer.block_index).is_none() {
+        return Err(ProtocolError::GenericError(
+            "Collateral claim transfer has not been reconciled from its exact ledger block".into(),
+        ));
+    }
+    if !bot_claim_generation_matches(claim.generation, proof.claim_generation) {
+        return Err(ProtocolError::GenericError(
+            "Collateral return proof claim generation does not match the active claim".into(),
+        ));
+    }
+    let expected_amount = read_state(|s| {
+        let fee = s.get_collateral_config(&claim.collateral_type)
+            .map(|config| config.ledger_fee).unwrap_or(0);
+        claim.collateral_amount.saturating_sub(fee)
+    });
+    if proof.amount != expected_amount || proof.created_at_time == 0 {
+        return Err(ProtocolError::GenericError(
+            "Collateral return amount or created_at_time does not match the claim".into(),
+        ));
+    }
+    if let Some(existing) = &claim.collateral_return_proof {
+        return if (existing.block_index, existing.amount, existing.created_at_time)
+            == (proof.block_index, proof.amount, proof.created_at_time)
+        {
+            Ok(())
+        } else {
+            Err(ProtocolError::GenericError(
+                "A different collateral return proof is already recorded for this claim".into(),
+            ))
+        };
+    }
+    let memo = bot_collateral_return_memo(proof.vault_id, proof.claim_generation);
+    rumi_protocol_backend::icrc3_proof::verify_icrc3_transfer_block(
+        claim.collateral_type,
+        proof.block_index,
+        Some(icrc_ledger_types::icrc1::account::Account {
+            owner: caller,
+            subaccount: None,
+        }),
+        icrc_ledger_types::icrc1::account::Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },
+        proof.amount,
+        Some(&memo),
+        Some(proof.created_at_time),
+    )
+    .await
+    .map_err(ProtocolError::GenericError)?;
+    mutate_state(|s| {
+        let Some(active) = s.bot_claims.get_mut(&proof.vault_id) else {
+            return Err("Active bot claim disappeared during return proof verification".to_string());
+        };
+        if !bot_claim_generation_matches(active.generation, proof.claim_generation) {
+            return Err("Active bot claim changed during return proof verification".to_string());
+        }
+        let stored = rumi_protocol_backend::state::BotCollateralReturnProof {
+            block_index: proof.block_index,
+            amount: proof.amount,
+            created_at_time: proof.created_at_time,
+        };
+        if active.collateral_return_proof.as_ref().is_some_and(|old| old != &stored) {
+            return Err("A different collateral return proof is already recorded".to_string());
+        }
+        active.collateral_return_proof = Some(stored);
+        Ok::<(), String>(())
+    })
+    .map_err(ProtocolError::GenericError)?;
+    Ok(())
+}
+
 /// Bot calls this when the swap failed and collateral has been returned (cancel phase).
 /// Unlocks the vault, restores budget, and clears the claim.
 /// The bot MUST transfer the collateral back to the backend canister BEFORE calling this.
@@ -9059,7 +9668,16 @@ async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
         ProtocolError::GenericError(format!("No active claim for vault #{}", vault_id))
     })?;
 
-    // Verify the collateral was actually returned by checking the backend's balance
+    let proof_required = read_state(|s| s.bot_confirm_proof_required);
+    if proof_required && claim.collateral_return_proof.is_none() {
+        return Err(ProtocolError::GenericError(
+            "Strict cancellation requires a verified collateral-return proof".into(),
+        ));
+    }
+
+    if !proof_required {
+    // Legacy compatibility path: verify collateral return by balance until the
+    // operator enables the proof-required cutover.
     let backend_id = ic_cdk::id();
     let balance_result: Result<(candid::Nat,), _> = ic_cdk::call(
         claim.collateral_type,
@@ -9111,7 +9729,6 @@ async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
             vault_id, observed, required
         )));
     }
-
     log!(
         INFO,
         "[BOT-001b] balance check passed for vault #{}: balance {} >= required {}",
@@ -9119,15 +9736,24 @@ async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
         observed,
         required
     );
+    }
 
     mutate_state(|s| {
+        let Some(active) = s.bot_claims.get(&vault_id) else {
+            return Err("Active bot claim disappeared before cancel".to_string());
+        };
+        if active.generation != claim.generation {
+            return Err("Active bot claim changed before cancel".to_string());
+        }
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             vault.bot_processing = false;
         }
         // Restore budget since this liquidation didn't go through
         s.bot_budget_remaining_e8s += claim.debt_amount;
         s.bot_claims.remove(&vault_id);
-    });
+        Ok::<(), String>(())
+    })
+    .map_err(ProtocolError::GenericError)?;
 
     log!(INFO, "[bot_cancel_liquidation] Cancelled claim for vault #{}: collateral={}, debt={} (budget restored)",
         vault_id, claim.collateral_amount, claim.debt_amount);
@@ -9218,6 +9844,10 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
             ))
         })?;
 
+    let generation = mutate_state(|s| s.next_bot_claim_generation()).ok_or_else(|| {
+        ProtocolError::GenericError("Bot claim generation counter exhausted".into())
+    })?;
+
     // Transfer collateral
     match rumi_protocol_backend::management::transfer_collateral(
         collateral_to_seize.to_u64(),
@@ -9252,11 +9882,15 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
             vault_id,
             rumi_protocol_backend::state::BotClaim {
                 vault_id,
+                generation,
+                collateral_transfer: None,
+                payment_ledger_principal: None,
                 collateral_amount: collateral_to_seize.to_u64(),
                 debt_amount: debt_to_cover.to_u64(),
                 collateral_type,
                 claimed_at: now,
                 collateral_price_e8s: collateral_price_usd.to_e8s(),
+                collateral_return_proof: None,
             },
         );
     });
@@ -9269,11 +9903,17 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
         collateral_to_seize.to_u64()
     );
 
+    let claim_generation = read_state(|s| s.bot_claims.get(&vault_id).map(|c| c.generation))
+        .ok_or_else(|| ProtocolError::GenericError("Bot claim disappeared after creation".into()))?;
     Ok(BotLiquidationResult {
         vault_id,
         collateral_amount: collateral_to_seize.to_u64(),
         debt_covered: debt_to_cover.to_u64(),
         collateral_price_e8s: collateral_price_usd.to_e8s(),
+        claim_generation,
+        payment_memo: bot_payment_memo(vault_id, claim_generation),
+        collateral_return_memo: bot_collateral_return_memo(vault_id, claim_generation),
+        payment_ledger_principal: None,
     })
 }
 
@@ -9366,6 +10006,10 @@ async fn dev_force_partial_bot_liquidate(
             ))
         })?;
 
+    let generation = mutate_state(|s| s.next_bot_claim_generation()).ok_or_else(|| {
+        ProtocolError::GenericError("Bot claim generation counter exhausted".into())
+    })?;
+
     // Transfer collateral
     match rumi_protocol_backend::management::transfer_collateral(
         collateral_to_seize.to_u64(),
@@ -9400,11 +10044,15 @@ async fn dev_force_partial_bot_liquidate(
             vault_id,
             rumi_protocol_backend::state::BotClaim {
                 vault_id,
+                generation,
+                collateral_transfer: None,
+                payment_ledger_principal: None,
                 collateral_amount: collateral_to_seize.to_u64(),
                 debt_amount: debt_to_cover.to_u64(),
                 collateral_type,
                 claimed_at: now,
                 collateral_price_e8s: collateral_price_usd.to_e8s(),
+                collateral_return_proof: None,
             },
         );
     });
@@ -9417,11 +10065,17 @@ async fn dev_force_partial_bot_liquidate(
         collateral_to_seize.to_u64()
     );
 
+    let claim_generation = read_state(|s| s.bot_claims.get(&vault_id).map(|c| c.generation))
+        .ok_or_else(|| ProtocolError::GenericError("Bot claim disappeared after creation".into()))?;
     Ok(BotLiquidationResult {
         vault_id,
         collateral_amount: collateral_to_seize.to_u64(),
         debt_covered: debt_to_cover.to_u64(),
         collateral_price_e8s: collateral_price_usd.to_e8s(),
+        claim_generation,
+        payment_memo: bot_payment_memo(vault_id, claim_generation),
+        collateral_return_memo: bot_collateral_return_memo(vault_id, claim_generation),
+        payment_ledger_principal: None,
     })
 }
 

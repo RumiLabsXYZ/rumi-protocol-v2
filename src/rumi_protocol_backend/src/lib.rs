@@ -1096,6 +1096,7 @@ pub async fn check_vaults() {
     // to dedupe; operator action is unchanged regardless of count.
     const BOT_CLAIM_TIMEOUT_NS: u64 = 600_000_000_000; // 10 minutes
     let now = ic_cdk::api::time();
+    let collateral_return_proof_required = read_state(|s| s.bot_confirm_proof_required);
 
     let expired_claims: Vec<(u64, crate::state::BotClaim)> = read_state(|s| {
         s.bot_claims
@@ -1114,6 +1115,58 @@ pub async fn check_vaults() {
                 .unwrap_or(0);
             claim.collateral_amount.saturating_sub(fee)
         });
+
+        if collateral_return_proof_required && claim.collateral_return_proof.is_none() {
+            log!(
+                INFO,
+                "[BOT-001] strict auto-cancel deferred for vault #{}: no verified return block for claim generation {}",
+                vault_id,
+                claim.generation
+            );
+            mutate_state(|s| {
+                if s.bot_claims.get(vault_id).is_some_and(|active| {
+                    active.generation == claim.generation
+                        && active.collateral_return_proof.is_none()
+                }) {
+                    crate::event::record_bot_claim_reconciliation_needed(
+                        s, *vault_id, 0, required,
+                    );
+                }
+            });
+            continue;
+        }
+
+        if collateral_return_proof_required {
+            // The proof was fetched, checked against ICRC-3, and persisted by
+            // bot_record_collateral_return_proof before entering this branch.
+            // It is claim-generation-bound and survives an upgrade.
+            if claim.collateral_return_proof.is_none() {
+                continue;
+            }
+            let still_same_claim = read_state(|s| {
+                s.bot_claims.get(vault_id).is_some_and(|active| {
+                    active.generation == claim.generation
+                        && active.collateral_return_proof == claim.collateral_return_proof
+                })
+            });
+            if !still_same_claim {
+                continue;
+            }
+            mutate_state(|s| {
+                if !s.bot_claims.get(vault_id).is_some_and(|active| {
+                    active.generation == claim.generation
+                        && active.collateral_return_proof == claim.collateral_return_proof
+                }) {
+                    return;
+                }
+                if let Some(vault) = s.vault_id_to_vaults.get_mut(vault_id) {
+                    vault.bot_processing = false;
+                }
+                s.bot_budget_remaining_e8s += claim.debt_amount;
+                s.bot_claims.remove(vault_id);
+            });
+            continue;
+        }
 
         let balance_result: Result<(candid::Nat,), _> = ic_cdk::call(
             claim.collateral_type,

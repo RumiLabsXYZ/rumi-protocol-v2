@@ -79,6 +79,11 @@ pub struct BotStats {
     pub total_debt_covered_e8s: u64,
     #[serde(default, alias = "total_icusd_burned_e8s")]
     pub total_ckusdc_deposited_e6: u64,
+    /// Swap proceeds retained by the bot after exact debt-plus-fee payments.
+    /// This is observable accounting only; retained ckUSDC is not reused as
+    /// proceeds for a later claim or swept automatically.
+    #[serde(default)]
+    pub total_ckusdc_surplus_held_e6: u64,
     pub total_collateral_received_e8s: u64,
     pub total_collateral_to_treasury_e8s: u64,
     pub events_count: u64,
@@ -99,6 +104,81 @@ pub struct BotAdminEvent {
     pub timestamp: u64,
     pub caller: String,
     pub action: BotAdminAction,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BotPaymentStatus {
+    Prepared,
+    Ambiguous,
+    NoEffect,
+    ReceiptObserved,
+    Confirmed,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct BotPaymentJournal {
+    pub vault_id: u64,
+    pub backend_principal: Principal,
+    pub ledger_principal: Principal,
+    pub claim_generation: u64,
+    pub debt_covered_e8s: u64,
+    pub collateral_amount_e8s: u64,
+    pub collateral_price_e8s: u64,
+    pub icp_swapped_e8s: u64,
+    pub ckusdc_received_e6: u64,
+    /// Measured claim proceeds left in the bot after the exact payment tuple.
+    #[serde(default)]
+    pub held_surplus_e6: u64,
+    /// Gross amount reserved from this claim's swap proceeds.
+    pub gross_amount_e6: u64,
+    /// Exact ICRC-1 `amount` and explicit fee in the persisted transfer tuple.
+    pub amount_e6: u64,
+    pub fee_e6: u64,
+    /// Exact ledger dedup tuple, persisted before dispatch.
+    pub created_at_time: u64,
+    pub memo: Vec<u8>,
+    pub status: BotPaymentStatus,
+    pub receipt: Option<crate::swap::TransferReceipt>,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct BotClaimJournal {
+    pub vault_id: u64,
+    pub claim_generation: u64,
+    pub debt_covered_e8s: u64,
+    pub collateral_amount_e8s: u64,
+    pub collateral_price_e8s: u64,
+    pub payment_memo: Vec<u8>,
+    pub collateral_return_memo: Vec<u8>,
+    /// Exact return transfer intent, persisted before dispatch. An ambiguous
+    /// reply can therefore be retried with the same ICRC dedup tuple.
+    #[serde(default)]
+    pub collateral_return: Option<BotReturnTransferJournal>,
+    /// Persisted before any swap call. An entry on upgrade is operator-held;
+    /// the swap itself cannot be blindly replayed.
+    pub status: BotClaimJournalStatus,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct BotReturnTransferJournal {
+    pub ledger_principal: Principal,
+    pub backend_principal: Principal,
+    pub amount_e8s: u64,
+    pub fee_e8s: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time: u64,
+    pub receipt: Option<crate::swap::TransferReceipt>,
+    pub status: BotReturnTransferStatus,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BotReturnTransferStatus { Prepared, Ambiguous, NoEffect, ReceiptObserved }
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BotClaimJournalStatus {
+    SwapMayHaveStarted,
+    ReturnPending,
+    PaymentShortfall,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -124,6 +204,15 @@ pub struct BotState {
     /// vaults on its next tick anyway.
     #[serde(default)]
     pub claim_retry_counts: BTreeMap<u64, u8>,
+    /// Payment intents survive upgrades so reply-loss retries reuse the exact
+    /// ckUSDC created_at_time + memo tuple and reconcile by returned block.
+    #[serde(default)]
+    pub pending_payments: BTreeMap<u64, BotPaymentJournal>,
+    #[serde(default)]
+    pub pending_claims: BTreeMap<u64, BotClaimJournal>,
+    /// Durable admission/worker pause for mixed-version rollout.
+    #[serde(default)]
+    pub processing_paused: bool,
 }
 
 thread_local! {
@@ -302,6 +391,8 @@ mod tests {
             "legacy three_pool_principal must round-trip via Option"
         );
         assert_eq!(state.stats.events_count, 99, "stats preserved");
+        assert!(state.pending_payments.is_empty());
+        assert!(state.pending_claims.is_empty());
         assert!(
             !state.migrated_to_stable_structures,
             "legacy blob has no migration marker, must default to false so post_upgrade runs the StableBTreeMap migration"
@@ -325,6 +416,64 @@ mod tests {
             ckusdt_ledger: None,
             icusd_ledger: None,
         }
+    }
+
+    #[test]
+    fn durable_payment_tuple_survives_state_snapshot_roundtrip() {
+        let vault_id = 73;
+        let mut state = BotState::default();
+        state.pending_payments.insert(vault_id, BotPaymentJournal {
+            vault_id,
+            backend_principal: Principal::from_text("tfesu-vyaaa-aaaap-qrd7a-cai").unwrap(),
+            ledger_principal: Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap(),
+            claim_generation: 42,
+            debt_covered_e8s: 100_000_000,
+            collateral_amount_e8s: 50_000_000,
+            collateral_price_e8s: 200_000_000,
+            icp_swapped_e8s: 40_000_000,
+            ckusdc_received_e6: 1_010_000,
+            held_surplus_e6: 0,
+            gross_amount_e6: 1_010_000,
+            amount_e6: 1_000_000,
+            fee_e6: 10_000,
+            created_at_time: 1_700_000_000_000,
+            memo: b"RUMI-BOT-PAYMENT-V1:73:42".to_vec(),
+            status: BotPaymentStatus::Ambiguous,
+            receipt: None,
+        });
+        state.pending_claims.insert(vault_id, BotClaimJournal {
+            vault_id,
+            claim_generation: 42,
+            debt_covered_e8s: 100_000_000,
+            collateral_amount_e8s: 50_000_000,
+            collateral_price_e8s: 200_000_000,
+            payment_memo: b"RUMI-BOT-PAYMENT-V1:73:42".to_vec(),
+            collateral_return_memo: b"RUMI-BOT-RETURN-V1:73:42".to_vec(),
+            collateral_return: Some(BotReturnTransferJournal {
+                ledger_principal: Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap(),
+                backend_principal: Principal::from_text("tfesu-vyaaa-aaaap-qrd7a-cai").unwrap(),
+                amount_e8s: 49_990_000,
+                fee_e8s: 10_000,
+                memo: b"RUMI-BOT-RETURN-V1:73:42".to_vec(),
+                created_at_time: 1_700_000_000_001,
+                receipt: None,
+                status: BotReturnTransferStatus::Ambiguous,
+            }),
+            status: BotClaimJournalStatus::ReturnPending,
+        });
+        let bytes = serde_json::to_vec(&state).unwrap();
+        let restored: BotState = serde_json::from_slice(&bytes).unwrap();
+        let journal = restored.pending_payments.get(&vault_id).unwrap();
+        assert_eq!(journal.created_at_time, 1_700_000_000_000);
+        assert_eq!(journal.amount_e6, 1_000_000);
+        assert_eq!(journal.fee_e6, 10_000);
+        let return_journal = restored.pending_claims.get(&vault_id).unwrap()
+            .collateral_return.as_ref().unwrap();
+        assert_eq!(return_journal.created_at_time, 1_700_000_000_001);
+        assert_eq!(return_journal.amount_e8s, 49_990_000);
+        assert_eq!(return_journal.status, BotReturnTransferStatus::Ambiguous);
+        assert_eq!(journal.memo, b"RUMI-BOT-PAYMENT-V1:73:42");
+        assert_eq!(journal.status, BotPaymentStatus::Ambiguous);
     }
 
     fn write_config_region(payload: &[u8]) {

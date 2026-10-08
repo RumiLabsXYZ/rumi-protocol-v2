@@ -222,23 +222,50 @@ pub async fn verify_icrc3_transfer_block(
     created_at_time: Option<u64>,
 ) -> Result<(), String> {
     let block = fetch_icrc3_block(ledger, block_index).await?;
-    let expected_op = if from.is_some() { "transfer" } else { "mint" };
+    validate_icrc3_transfer_block(&block, from, to, amount_e8s, memo, created_at_time)
+}
+
+/// Pure exact-tuple validator shared by the ledger fetch path and focused tests.
+pub fn validate_icrc3_transfer_block(
+    block: &DecodedBlock,
+    from: Option<Account>,
+    to: Account,
+    amount_e8s: u64,
+    memo: Option<&[u8]>,
+    created_at_time: Option<u64>,
+) -> Result<(), String> {
+    // The standard ICRC-3 block schema uses `btype = "1xfer"` and
+    // `tx.op = "xfer"`; do not normalize that ledger spelling to the
+    // ICRC-1 method name (`transfer`).
+    let expected_op = if from.is_some() { "xfer" } else { "mint" };
     let expected_btype = if from.is_some() { "1xfer" } else { "1mint" };
-    if block
-        .btype
-        .as_deref()
-        .is_some_and(|kind| kind != expected_btype)
-        || block.op != expected_op
-        || block.from != from
-        || !block
-            .to
-            .as_ref()
-            .is_some_and(|actual| accounts_match_default_subaccount(actual, &to))
-        || block.amount != u128::from(amount_e8s)
-        || memo.is_some_and(|expected| block.memo.as_deref() != Some(expected))
-        || created_at_time.is_some_and(|expected| block.created_at_time != Some(expected))
+    if block.btype.as_deref().is_some_and(|kind| kind != expected_btype) {
+        return Err("ICRC-3 block type does not match the expected transfer type".into());
+    }
+    if block.op != expected_op {
+        return Err("ICRC-3 operation does not match the expected transfer operation".into());
+    }
+    if block.from != from {
+        return Err("ICRC-3 sender does not match the expected account".into());
+    }
+    if block.spender.is_some() {
+        return Err("ICRC-3 transfer unexpectedly names a spender".into());
+    }
+    if !block
+        .to
+        .as_ref()
+        .is_some_and(|actual| accounts_match_default_subaccount(actual, &to))
     {
-        return Err("ICRC-3 transfer block does not match the exact expected tuple".into());
+        return Err("ICRC-3 recipient does not match the expected account".into());
+    }
+    if block.amount != u128::from(amount_e8s) {
+        return Err("ICRC-3 amount does not match the expected transfer amount".into());
+    }
+    if memo.is_some_and(|expected| block.memo.as_deref() != Some(expected)) {
+        return Err("ICRC-3 memo does not match the expected transfer memo".into());
+    }
+    if created_at_time.is_some_and(|expected| block.created_at_time != Some(expected)) {
+        return Err("ICRC-3 timestamp does not match the expected transfer timestamp".into());
     }
     Ok(())
 }
@@ -617,4 +644,54 @@ pub fn make_test_block_without_memo(
     amount_e8s: u64,
 ) -> ICRC3Value {
     make_test_block(op, Some(from), to, amount_e8s, None, false)
+}
+
+#[cfg(test)]
+mod bot_payment_proof_tests {
+    use super::*;
+
+    fn fixture() -> (DecodedBlock, Account, Account, Vec<u8>) {
+        let bot = Account { owner: Principal::from_slice(&[1]), subaccount: None };
+        let backend = Account { owner: Principal::from_slice(&[2]), subaccount: None };
+        let mut memo = b"RUMI-BOT-PAYMENT-V1:".to_vec();
+        memo.extend_from_slice(&7u64.to_be_bytes());
+        memo.extend_from_slice(&42u64.to_be_bytes());
+        let block = DecodedBlock {
+            btype: Some("1xfer".into()), op: "xfer".into(),
+            from: Some(bot.clone()), to: Some(backend.clone()), spender: None,
+            amount: 1_000_000, created_at_time: Some(123), memo: Some(memo.clone()),
+        };
+        (block, bot, backend, memo)
+    }
+
+    #[test]
+    fn bot_payment_proof_accepts_exact_tuple_and_rejects_forged_fields() {
+        let (block, bot, backend, memo) = fixture();
+        assert!(validate_icrc3_transfer_block(
+            &block, Some(bot.clone()), backend.clone(), 1_000_000, Some(&memo), Some(123)
+        ).is_ok());
+
+        let mut forged = block.clone();
+        forged.from = Some(Account { owner: Principal::from_slice(&[3]), subaccount: None });
+        assert!(validate_icrc3_transfer_block(
+            &forged, Some(bot), backend, 1_000_000, Some(&memo), Some(123)
+        ).is_err());
+    }
+
+    #[test]
+    fn bot_payment_proof_rejects_short_amount_wrong_memo_and_wrong_time() {
+        let (mut block, bot, backend, memo) = fixture();
+        block.amount -= 1;
+        assert!(validate_icrc3_transfer_block(
+            &block, Some(bot.clone()), backend.clone(), 1_000_000, Some(&memo), Some(123)
+        ).is_err());
+        block.amount += 1;
+        let other_memo = b"other";
+        assert!(validate_icrc3_transfer_block(
+            &block, Some(bot.clone()), backend.clone(), 1_000_000, Some(other_memo), Some(123)
+        ).is_err());
+        assert!(validate_icrc3_transfer_block(
+            &block, Some(bot), backend, 1_000_000, Some(&memo), Some(124)
+        ).is_err());
+    }
 }

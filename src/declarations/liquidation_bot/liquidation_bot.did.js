@@ -47,6 +47,7 @@ export const idlFactory = ({ IDL }) => {
   });
   const BotStats = IDL.Record({
     'total_debt_covered_e8s' : IDL.Nat64,
+    'total_ckusdc_surplus_held_e6' : IDL.Nat64,
     'total_collateral_to_treasury_e8s' : IDL.Nat64,
     'total_ckusdc_deposited_e6' : IDL.Nat64,
     'events_count' : IDL.Nat64,
@@ -80,6 +81,69 @@ export const idlFactory = ({ IDL }) => {
   const LiquidationRecordVersioned = IDL.Variant({
     'V1' : LiquidationRecordV1,
   });
+  const BotClaimJournalStatus = IDL.Variant({
+    'ReturnPending' : IDL.Null,
+    'PaymentShortfall' : IDL.Null,
+    'SwapMayHaveStarted' : IDL.Null,
+  });
+  const BotReturnTransferStatus = IDL.Variant({
+    'ReceiptObserved' : IDL.Null,
+    'NoEffect' : IDL.Null,
+    'Ambiguous' : IDL.Null,
+    'Prepared' : IDL.Null,
+  });
+  const TransferReceipt = IDL.Record({
+    'block_index' : IDL.Nat64,
+    'created_at_time' : IDL.Nat64,
+    'amount' : IDL.Nat64,
+  });
+  const BotReturnTransferJournal = IDL.Record({
+    'status' : BotReturnTransferStatus,
+    'backend_principal' : IDL.Principal,
+    'receipt' : IDL.Opt(TransferReceipt),
+    'memo' : IDL.Vec(IDL.Nat8),
+    'fee_e8s' : IDL.Nat64,
+    'amount_e8s' : IDL.Nat64,
+    'ledger_principal' : IDL.Principal,
+    'created_at_time' : IDL.Nat64,
+  });
+  const BotClaimJournal = IDL.Record({
+    'status' : BotClaimJournalStatus,
+    'collateral_price_e8s' : IDL.Nat64,
+    'payment_memo' : IDL.Vec(IDL.Nat8),
+    'collateral_return' : IDL.Opt(BotReturnTransferJournal),
+    'collateral_amount_e8s' : IDL.Nat64,
+    'claim_generation' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'collateral_return_memo' : IDL.Vec(IDL.Nat8),
+    'debt_covered_e8s' : IDL.Nat64,
+  });
+  const BotPaymentStatus = IDL.Variant({
+    'ReceiptObserved' : IDL.Null,
+    'NoEffect' : IDL.Null,
+    'Confirmed' : IDL.Null,
+    'Ambiguous' : IDL.Null,
+    'Prepared' : IDL.Null,
+  });
+  const BotPaymentJournal = IDL.Record({
+    'status' : BotPaymentStatus,
+    'collateral_price_e8s' : IDL.Nat64,
+    'backend_principal' : IDL.Principal,
+    'receipt' : IDL.Opt(TransferReceipt),
+    'fee_e6' : IDL.Nat64,
+    'ckusdc_received_e6' : IDL.Nat64,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'collateral_amount_e8s' : IDL.Nat64,
+    'claim_generation' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'gross_amount_e6' : IDL.Nat64,
+    'held_surplus_e6' : IDL.Nat64,
+    'ledger_principal' : IDL.Principal,
+    'amount_e6' : IDL.Nat64,
+    'created_at_time' : IDL.Nat64,
+    'debt_covered_e8s' : IDL.Nat64,
+    'icp_swapped_e8s' : IDL.Nat64,
+  });
   const LiquidatableVaultInfo = IDL.Record({
     'collateral_amount' : IDL.Nat64,
     'recommended_liquidation_amount' : IDL.Nat64,
@@ -90,6 +154,16 @@ export const idlFactory = ({ IDL }) => {
   });
   return IDL.Service({
     'admin_approve_pool' : IDL.Func([], [], []),
+    'admin_reconcile_payment_block' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [],
+      ),
+    'admin_reconcile_return_block' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [],
+      ),
     'admin_refresh_fees' : IDL.Func([], [IDL.Nat64, IDL.Nat64], []),
     'admin_resolve_pool_ordering' : IDL.Func([], [], []),
     'admin_retry_stuck_claim' : IDL.Func([IDL.Nat64], [], []),
@@ -128,6 +202,17 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(LiquidationRecordVersioned)],
         ['query'],
       ),
+    'get_pending_claim_journals' : IDL.Func(
+        [],
+        [IDL.Vec(BotClaimJournal)],
+        ['query'],
+      ),
+    'get_pending_payment_journals' : IDL.Func(
+        [],
+        [IDL.Vec(BotPaymentJournal)],
+        ['query'],
+      ),
+    'get_processing_paused' : IDL.Func([], [IDL.Bool], ['query']),
     'get_stuck_liquidations' : IDL.Func(
         [],
         [IDL.Vec(LiquidationRecordVersioned)],
@@ -139,6 +224,11 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'set_config' : IDL.Func([BotConfig], [], []),
+    'set_processing_paused' : IDL.Func(
+        [IDL.Bool],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [],
+      ),
   });
 };
 export const init = ({ IDL }) => {

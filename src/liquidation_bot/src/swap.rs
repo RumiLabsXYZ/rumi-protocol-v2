@@ -2,7 +2,7 @@ use candid::{CandidType, Nat, Principal};
 use ic_canister_log::log;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc2::approve::ApproveArgs;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::icpswap;
 use crate::state::BotConfig;
@@ -18,6 +18,21 @@ const FALLBACK_LEDGER_FEE: u64 = 10_000;
 pub struct SwapResult {
     pub ckusdc_received_e6: u64,
     pub effective_price_e8s: u64,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct TransferReceipt {
+    pub block_index: u64,
+    pub amount: u64,
+    pub created_at_time: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TransferAttemptError {
+    /// Ledger returned an explicit ICRC error, so it performed no transfer.
+    NoEffect(String),
+    /// The inter-canister call did not return; the ledger may have committed.
+    Ambiguous(String),
 }
 
 /// Fetch a token ledger's current ICRC-1 transfer fee.
@@ -162,13 +177,13 @@ pub async fn return_collateral_to_backend(
     config: &BotConfig,
     amount_e8s: u64,
     collateral_ledger: Principal,
-) -> Result<(), String> {
-    let fee = config.icp_fee_e8s.unwrap_or(FALLBACK_LEDGER_FEE);
-    let send_amount = amount_e8s.saturating_sub(fee);
-    if send_amount == 0 {
-        return Err("Collateral amount too small to cover transfer fee".to_string());
+    memo: Vec<u8>,
+    send_amount: u64,
+    created_at_time: u64,
+) -> Result<TransferReceipt, TransferAttemptError> {
+    if send_amount == 0 || send_amount.saturating_add(config.icp_fee_e8s.unwrap_or(FALLBACK_LEDGER_FEE)) > amount_e8s {
+        return Err(TransferAttemptError::NoEffect("Collateral return amount does not fit the claim reservation".into()));
     }
-
     let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
         from_subaccount: None,
         to: Account {
@@ -177,8 +192,10 @@ pub async fn return_collateral_to_backend(
         },
         amount: Nat::from(send_amount),
         fee: None,
-        memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo(
+            serde_bytes::ByteBuf::from(memo),
+        )),
+        created_at_time: Some(created_at_time),
     };
 
     let result: Result<
@@ -188,7 +205,11 @@ pub async fn return_collateral_to_backend(
 
     use icrc_ledger_types::icrc1::transfer::TransferError;
     match result {
-        Ok((Ok(_),)) => Ok(()),
+        Ok((Ok(block),)) => Ok(TransferReceipt {
+            block_index: block.0.to_string().parse().map_err(|_| TransferAttemptError::Ambiguous("return block index exceeds u64".into()))?,
+            amount: send_amount,
+            created_at_time,
+        }),
         // Audit Wave-3: a Duplicate response means the previous attempt landed.
         Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
             log!(
@@ -196,10 +217,14 @@ pub async fn return_collateral_to_backend(
                 "[return_collateral_to_backend] ledger reported Duplicate (block {}); treating as success",
                 duplicate_of
             );
-            Ok(())
+            Ok(TransferReceipt {
+                block_index: duplicate_of.0.to_string().parse().map_err(|_| TransferAttemptError::Ambiguous("duplicate return block index exceeds u64".into()))?,
+                amount: send_amount,
+                created_at_time,
+            })
         }
-        Ok((Err(e),)) => Err(format!("Transfer error: {:?}", e)),
-        Err((code, msg)) => Err(format!("Transfer call failed: {:?} {}", code, msg)),
+        Ok((Err(e),)) => Err(TransferAttemptError::NoEffect(format!("Transfer error: {:?}", e))),
+        Err((code, msg)) => Err(TransferAttemptError::Ambiguous(format!("Transfer call failed: {:?} {}", code, msg))),
     }
 }
 
@@ -234,11 +259,14 @@ pub async fn balance_of_self_ckusdc(config: &BotConfig) -> Result<u64, String> {
 pub async fn transfer_ckusdc_to_backend(
     config: &BotConfig,
     amount_e6: u64,
-) -> Result<u64, String> {
-    let fee = config.ckusdc_fee_e6.unwrap_or(FALLBACK_LEDGER_FEE);
-    let send_amount = amount_e6.saturating_sub(fee);
-    if send_amount == 0 {
-        return Err("ckUSDC amount too small to cover transfer fee".to_string());
+    memo: Vec<u8>,
+    created_at_time: u64,
+    fee_e6: u64,
+) -> Result<TransferReceipt, TransferAttemptError> {
+    if amount_e6 == 0 {
+        return Err(TransferAttemptError::NoEffect(
+            "ckUSDC amount too small to cover transfer fee".to_string(),
+        ));
     }
 
     let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
@@ -247,10 +275,12 @@ pub async fn transfer_ckusdc_to_backend(
             owner: config.backend_principal,
             subaccount: None,
         },
-        amount: Nat::from(send_amount),
-        fee: None,
-        memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
+        amount: Nat::from(amount_e6),
+        fee: Some(Nat::from(fee_e6)),
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo(
+            serde_bytes::ByteBuf::from(memo),
+        )),
+        created_at_time: Some(created_at_time),
     };
 
     let result: Result<
@@ -260,17 +290,29 @@ pub async fn transfer_ckusdc_to_backend(
 
     use icrc_ledger_types::icrc1::transfer::TransferError;
     match result {
-        Ok((Ok(_),)) => Ok(send_amount),
+        Ok((Ok(block),)) => Ok(TransferReceipt {
+            block_index: block.0.to_string().parse().map_err(|_| TransferAttemptError::Ambiguous("ckUSDC block index exceeds u64".into()))?,
+            amount: amount_e6,
+            created_at_time,
+        }),
         Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
             log!(
                 crate::INFO,
                 "[transfer_ckusdc_to_backend] ledger reported Duplicate (block {}); treating as success",
                 duplicate_of
             );
-            Ok(send_amount)
+            Ok(TransferReceipt {
+                block_index: duplicate_of.0.to_string().parse().map_err(|_| TransferAttemptError::Ambiguous("duplicate ckUSDC block index exceeds u64".into()))?,
+                amount: amount_e6,
+                created_at_time,
+            })
         }
-        Ok((Err(e),)) => Err(format!("ckUSDC transfer error: {:?}", e)),
-        Err((code, msg)) => Err(format!("ckUSDC transfer call failed: {:?} {}", code, msg)),
+        Ok((Err(e),)) => Err(TransferAttemptError::NoEffect(format!(
+            "ckUSDC transfer error: {:?}", e
+        ))),
+        Err((code, msg)) => Err(TransferAttemptError::Ambiguous(format!(
+            "ckUSDC transfer call failed: {:?} {}", code, msg
+        ))),
     }
 }
 

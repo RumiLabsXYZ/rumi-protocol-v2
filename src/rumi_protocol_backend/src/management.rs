@@ -1535,6 +1535,54 @@ pub async fn transfer_collateral_with_nonce(
     .await
 }
 
+/// Typed result for journaled collateral dispatch. A returned ledger error is
+/// definitive no-effect; an inter-canister reject is ambiguous because the
+/// ledger may have committed before the reply was lost.
+#[derive(Debug)]
+pub enum DurableTransferError {
+    LedgerNoEffect(TransferError),
+    AmbiguousCall { code: i32, message: String },
+    AmbiguousResponse(String),
+}
+
+pub async fn transfer_collateral_with_nonce_status(
+    amount: u64,
+    to: Principal,
+    ledger: Principal,
+    op_nonce: u128,
+) -> Result<u64, DurableTransferError> {
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger,
+    };
+    let outer = client
+        .transfer(TransferArg {
+            from_subaccount: None,
+            to: Account { owner: to, subaccount: None },
+            fee: None,
+            created_at_time: Some(nonce_to_created_at_time(op_nonce)),
+            memo: Some(nonce_to_memo(op_nonce)),
+            amount: Nat::from(amount),
+        })
+        .await;
+    match outer {
+        Err((code, message)) => Err(DurableTransferError::AmbiguousCall { code, message }),
+        Ok(Err(TransferError::Duplicate { duplicate_of })) => {
+            duplicate_of.0.to_u64().ok_or_else(|| DurableTransferError::AmbiguousResponse(
+                "duplicate block index does not fit u64".into(),
+            ))
+        }
+        Ok(Err(TransferError::BadFee { expected_fee })) => {
+            set_cached_fee(ledger, expected_fee.0.to_u64().unwrap_or(0));
+            Err(DurableTransferError::LedgerNoEffect(TransferError::BadFee { expected_fee }))
+        }
+        Ok(Err(error)) => Err(DurableTransferError::LedgerNoEffect(error)),
+        Ok(Ok(block)) => block.0.to_u64().ok_or_else(|| DurableTransferError::AmbiguousResponse(
+            "transfer block index does not fit u64".into(),
+        )),
+    }
+}
+
 /// Generic collateral transfer_from: pull tokens from a user into the protocol canister.
 /// The `ledger` parameter is the ICRC-1 ledger canister ID of the collateral token.
 pub async fn transfer_collateral_from(amount: u64, from: Principal, ledger: Principal) -> Result<u64, TransferFromError> {

@@ -34,6 +34,85 @@ pub(crate) fn next_claim_retry_action(current_count: u8, max: u8) -> ClaimRetryA
     }
 }
 
+fn required_ckusdc_gross(debt_e8s: u64, fee_e6: u64) -> u64 {
+    let net = debt_e8s / 100 + u64::from(debt_e8s % 100 != 0);
+    net.saturating_add(fee_e6)
+}
+
+async fn choose_bounded_topup_amount(
+    config: &BotConfig,
+    remaining_icp: u64,
+    shortfall_e6: u64,
+) -> Result<Option<u64>, String> {
+    if remaining_icp == 0 || shortfall_e6 == 0 {
+        return Ok(None);
+    }
+    let conservative_output = |quoted: u64| {
+        (quoted as u128)
+            .saturating_mul(10_000u128.saturating_sub(config.max_slippage_bps as u128))
+            .checked_div(10_000)
+            .unwrap_or(0)
+    };
+    let mut low = 1u64;
+    let mut high = remaining_icp;
+    // At most 16 bounded quote calls. If the remaining collateral cannot
+    // conservatively cover the shortfall, do not spend it on a futile swap.
+    for _ in 0..16 {
+        if low >= high {
+            break;
+        }
+        let mid = low + (high - low) / 2;
+        let quoted = swap::quote_icp_for_ckusdc(config, mid).await?;
+        if conservative_output(quoted) >= u128::from(shortfall_e6) {
+            high = mid;
+        } else {
+            low = mid.saturating_add(1);
+        }
+    }
+    let quoted = swap::quote_icp_for_ckusdc(config, low).await?;
+    if conservative_output(quoted) >= u128::from(shortfall_e6) {
+        Ok(Some(low))
+    } else {
+        Ok(None)
+    }
+}
+
+fn write_short_payment_recovery(
+    id: u64,
+    vault_id: u64,
+    timestamp: u64,
+    collateral_amount: u64,
+    debt_covered: u64,
+    swap_amount: u64,
+    ckusdc_received: u64,
+    collateral_price: u64,
+    effective_price: u64,
+    slippage_bps: i32,
+    reason: &str,
+) {
+    state::mutate_state(|s| {
+        if let Some(journal) = s.pending_claims.get_mut(&vault_id) {
+            journal.status = state::BotClaimJournalStatus::PaymentShortfall;
+        }
+    });
+    state::save_config_to_stable();
+    write_record(LiquidationRecordV1 {
+        id, vault_id, timestamp,
+        status: LiquidationStatus::TransferFailed,
+        collateral_claimed_e8s: collateral_amount,
+        debt_to_cover_e8s: debt_covered,
+        icp_swapped_e8s: swap_amount,
+        ckusdc_received_e6: ckusdc_received,
+        ckusdc_transferred_e6: 0,
+        icp_to_treasury_e8s: 0,
+        oracle_price_e8s: collateral_price,
+        effective_price_e8s: effective_price,
+        slippage_bps,
+        error_message: Some(reason.to_string()),
+        confirm_retry_count: 0,
+    });
+}
+
 /// Per-claim ckUSDC accounting decision after a swap.
 ///
 /// `process_pending` brackets the swap with two `balance_of_self_ckusdc`
@@ -61,6 +140,64 @@ pub(crate) struct SwapReservation {
     /// `discrepancy_note` carries a human-readable explanation that gets
     /// appended to the LiquidationRecord's `error_message`. None = clean.
     pub discrepancy_note: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ClaimPaymentAllocation {
+    gross_to_transfer_e6: u64,
+    held_surplus_e6: u64,
+}
+
+fn allocate_claim_payment(reservation: &SwapReservation, required_gross_e6: u64) -> ClaimPaymentAllocation {
+    let gross_to_transfer_e6 = reservation.to_transfer_e6.min(required_gross_e6);
+    ClaimPaymentAllocation {
+        gross_to_transfer_e6,
+        held_surplus_e6: reservation
+            .recorded_received_e6
+            .saturating_sub(gross_to_transfer_e6),
+    }
+}
+
+/// Apply post-confirmation totals exactly once and consume their journal in
+/// the same stable-state mutation. The journal identity protects against a
+/// stale completion for a later claim on the same vault.
+fn apply_confirmed_payment_totals_once(
+    bot_state: &mut state::BotState,
+    journal: &state::BotPaymentJournal,
+    transferred_amount_e6: u64,
+) -> bool {
+    let matches_pending = bot_state
+        .pending_payments
+        .get(&journal.vault_id)
+        .is_some_and(|pending| {
+            pending.claim_generation == journal.claim_generation
+                && pending.ledger_principal == journal.ledger_principal
+                && pending.created_at_time == journal.created_at_time
+                && pending.memo == journal.memo
+        });
+    if !matches_pending {
+        return false;
+    }
+
+    bot_state.stats.total_debt_covered_e8s = bot_state
+        .stats
+        .total_debt_covered_e8s
+        .saturating_add(journal.debt_covered_e8s);
+    bot_state.stats.total_ckusdc_deposited_e6 = bot_state
+        .stats
+        .total_ckusdc_deposited_e6
+        .saturating_add(transferred_amount_e6);
+    bot_state.stats.total_ckusdc_surplus_held_e6 = bot_state
+        .stats
+        .total_ckusdc_surplus_held_e6
+        .saturating_add(journal.held_surplus_e6);
+    bot_state.stats.total_collateral_received_e8s = bot_state
+        .stats
+        .total_collateral_received_e8s
+        .saturating_add(journal.collateral_amount_e8s);
+    bot_state.stats.events_count = bot_state.stats.events_count.saturating_add(1);
+    bot_state.pending_payments.remove(&journal.vault_id);
+    true
 }
 
 /// Compute the per-claim ckUSDC reservation from balance snapshots.
@@ -186,6 +323,29 @@ pub struct BotLiquidationResult {
     pub collateral_amount: u64,
     pub debt_covered: u64,
     pub collateral_price_e8s: u64,
+    pub claim_generation: u64,
+    pub payment_memo: Vec<u8>,
+    pub collateral_return_memo: Vec<u8>,
+    pub payment_ledger_principal: Option<candid::Principal>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+pub struct BotPaymentProof {
+    pub vault_id: u64,
+    pub claim_generation: u64,
+    pub ledger_principal: candid::Principal,
+    pub block_index: u64,
+    pub amount_e6s: u64,
+    pub created_at_time: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+pub struct BotCollateralReturnProofArg {
+    pub vault_id: u64,
+    pub claim_generation: u64,
+    pub block_index: u64,
+    pub amount: u64,
+    pub created_at_time: u64,
 }
 
 #[derive(CandidType, Deserialize, Debug)]
@@ -214,21 +374,37 @@ impl std::fmt::Display for BackendError {
 }
 
 pub async fn process_pending() {
+    if state::read_state(|s| s.processing_paused) {
+        return;
+    }
     let _guard = match crate::ProcessingGuard::acquire() {
         Ok(g) => g,
         Err(_) => return, // Another liquidation is already in flight
     };
 
-    let vault = state::mutate_state(|s| s.pending_vaults.pop());
-    let Some(vault) = vault else { return };
-
-    let config = match state::read_state(|s| s.config.clone()) {
+    let mut config = match state::read_state(|s| s.config.clone()) {
         Some(c) => c,
         None => {
-            log!(crate::INFO, "Bot not configured, skipping vault #{}", vault.vault_id);
+            log!(crate::INFO, "Bot not configured; skipping pending work");
             return;
         }
     };
+
+    if resume_pending_payment(&config).await {
+        return;
+    }
+    if resume_pending_return(&config).await {
+        return;
+    }
+    if let Some((vault_id, phase)) = state::read_state(|s| {
+        s.pending_claims.iter().next().map(|(id, claim)| (*id, claim.status.clone()))
+    }) {
+        log!(crate::INFO, "STUCK: claim #{} is held in {:?}; refuse to replay a swap or transfer without operator reconciliation", vault_id, phase);
+        return;
+    }
+
+    let vault = state::mutate_state(|s| s.pending_vaults.pop());
+    let Some(vault) = vault else { return };
 
     let prior_retry_count = state::read_state(|s| {
         s.claim_retry_counts.get(&vault.vault_id).copied().unwrap_or(0)
@@ -245,12 +421,34 @@ pub async fn process_pending() {
 
     // -- Phase 1: CLAIM --
     let liq_result = call_bot_claim_liquidation(&config, vault.vault_id).await;
-    let (collateral_amount, debt_covered, collateral_price) = match liq_result {
+    let (collateral_amount, debt_covered, collateral_price, claim_generation, payment_memo, return_memo) = match liq_result {
         Ok(r) => {
             state::mutate_state(|s| {
                 s.claim_retry_counts.remove(&vault.vault_id);
+                s.pending_claims.insert(vault.vault_id, state::BotClaimJournal {
+                    vault_id: r.vault_id,
+                    claim_generation: r.claim_generation,
+                    debt_covered_e8s: r.debt_covered,
+                    collateral_amount_e8s: r.collateral_amount,
+                    collateral_price_e8s: r.collateral_price_e8s,
+                    payment_memo: r.payment_memo.clone(),
+                    collateral_return_memo: r.collateral_return_memo.clone(),
+                    collateral_return: None,
+                    status: state::BotClaimJournalStatus::SwapMayHaveStarted,
+                });
             });
-            (r.collateral_amount, r.debt_covered, r.collateral_price_e8s)
+            state::save_config_to_stable();
+            let Some(payment_ledger) = r.payment_ledger_principal else {
+                write_short_payment_recovery(
+                    record_id, r.vault_id, timestamp,
+                    r.collateral_amount, r.debt_covered, 0, 0,
+                    r.collateral_price_e8s, 0, 0,
+                    "claim has no pinned ckUSDC ledger; operator reconciliation required",
+                );
+                return;
+            };
+            config.ckusdc_ledger = payment_ledger;
+            (r.collateral_amount, r.debt_covered, r.collateral_price_e8s, r.claim_generation, r.payment_memo, r.collateral_return_memo)
         }
         Err(e) => {
             let action = next_claim_retry_action(prior_retry_count, CLAIM_RETRY_LIMIT);
@@ -303,7 +501,7 @@ pub async fn process_pending() {
     };
 
     // -- Phase 2: SWAP ICP -> ckUSDC --
-    let swap_amount = calculate_swap_amount(collateral_amount, debt_covered, collateral_price);
+    let mut swap_amount = calculate_swap_amount(collateral_amount, debt_covered, collateral_price);
 
     // Per-claim reservation: bracket the swap with wallet balance reads so
     // we know the EXACT ckUSDC this claim earned, independent of any leftover
@@ -324,11 +522,39 @@ pub async fn process_pending() {
         Err(swap_err) => {
             log!(crate::INFO, "Swap failed for vault #{}: {}. Returning ICP.", vault.vault_id, swap_err);
 
+            state::mutate_state(|s| {
+                if let Some(journal) = s.pending_claims.get_mut(&vault.vault_id) {
+                    journal.status = state::BotClaimJournalStatus::ReturnPending;
+                }
+            });
+            state::save_config_to_stable();
+
             // Step 1: return seized ICP to the backend.
+            let return_fee = config.icp_fee_e8s.unwrap_or(10_000);
+            let return_amount = collateral_amount.saturating_sub(return_fee);
+            let return_created_at_time = ic_cdk::api::time();
+            state::mutate_state(|s| {
+                if let Some(journal) = s.pending_claims.get_mut(&vault.vault_id) {
+                    journal.collateral_return = Some(state::BotReturnTransferJournal {
+                        ledger_principal: config.icp_ledger,
+                        backend_principal: config.backend_principal,
+                        amount_e8s: return_amount,
+                        fee_e8s: return_fee,
+                        memo: return_memo.clone(),
+                        created_at_time: return_created_at_time,
+                        receipt: None,
+                        status: state::BotReturnTransferStatus::Prepared,
+                    });
+                }
+            });
+            state::save_config_to_stable();
             let return_result = swap::return_collateral_to_backend(
                 &config,
                 collateral_amount,
                 config.icp_ledger,
+                return_memo.clone(),
+                return_amount,
+                return_created_at_time,
             )
             .await;
 
@@ -337,7 +563,42 @@ pub async fn process_pending() {
             // collateral balance is back to (>=) `claim.collateral_amount - fee`,
             // so attempting cancel after a failed return is pointless and would
             // just produce noisy `[BOT-001b] cancel rejected` log lines.
-            let cancel_err = if return_result.is_ok() {
+            let return_proof_result = match return_result {
+                Ok(receipt) => {
+                    state::mutate_state(|s| {
+                        if let Some(journal) = s.pending_claims.get_mut(&vault.vault_id) {
+                            if let Some(return_intent) = journal.collateral_return.as_mut() {
+                                return_intent.receipt = Some(receipt.clone());
+                            }
+                        }
+                    });
+                    state::save_config_to_stable();
+                    call_bot_record_collateral_return_proof(
+                        &config,
+                        BotCollateralReturnProofArg {
+                            vault_id: vault.vault_id,
+                            claim_generation,
+                            block_index: receipt.block_index,
+                            amount: receipt.amount,
+                            created_at_time: receipt.created_at_time,
+                        },
+                    ).await
+                }
+                Err(e) => {
+                    state::mutate_state(|s| {
+                        if let Some(intent) = s.pending_claims.get_mut(&vault.vault_id)
+                            .and_then(|claim| claim.collateral_return.as_mut()) {
+                            intent.status = match &e {
+                                swap::TransferAttemptError::NoEffect(_) => state::BotReturnTransferStatus::NoEffect,
+                                swap::TransferAttemptError::Ambiguous(_) => state::BotReturnTransferStatus::Ambiguous,
+                            };
+                        }
+                    });
+                    state::save_config_to_stable();
+                    Err(format!("{:?}", e))
+                },
+            };
+            let cancel_err = if return_proof_result.is_ok() {
                 let mut last_err = String::new();
                 let mut succeeded = false;
                 let mut attempts: u8 = 0;
@@ -371,12 +632,16 @@ pub async fn process_pending() {
             let outcome = decide_swap_failure_outcome(
                 vault.vault_id,
                 &swap_err,
-                return_result.as_ref().err().map(|s| s.as_str()),
+                return_proof_result.as_ref().err().map(|s| s.as_str()),
                 cancel_err.as_ref().map(|(n, e)| (*n, e.as_str())),
             );
 
             if let Some(line) = &outcome.stuck_log {
                 log!(crate::INFO, "{}", line);
+            }
+            if return_proof_result.is_ok() && cancel_err.is_none() {
+                state::mutate_state(|s| { s.pending_claims.remove(&vault.vault_id); });
+                state::save_config_to_stable();
             }
 
             write_record(LiquidationRecordV1 {
@@ -403,7 +668,7 @@ pub async fn process_pending() {
         log!(crate::INFO, "Post-swap balance read failed for vault #{}: {} (using router-reported amount)", vault.vault_id, e);
         bal_before_swap.saturating_add(router_received) // synthesise delta = router_received
     });
-    let reservation = compute_swap_reservation(
+    let mut reservation = compute_swap_reservation(
         vault.vault_id,
         router_received,
         bal_before_swap,
@@ -412,25 +677,134 @@ pub async fn process_pending() {
     if let Some(note) = &reservation.discrepancy_note {
         log!(crate::INFO, "[per-claim-reservation] {}", note);
     }
+    let ckusdc_fee = config.ckusdc_fee_e6.unwrap_or(10_000);
+    let required_gross = required_ckusdc_gross(debt_covered, ckusdc_fee);
+    if reservation.to_transfer_e6 < required_gross {
+        let shortfall = required_gross - reservation.to_transfer_e6;
+        let remaining_icp = collateral_amount.saturating_sub(swap_amount);
+        match choose_bounded_topup_amount(&config, remaining_icp, shortfall).await {
+            Ok(Some(topup_icp)) => {
+                let before = match swap::balance_of_self_ckusdc(&config).await {
+                    Ok(balance) => balance,
+                    Err(error) => {
+                        log!(crate::INFO, "STUCK: pre-top-up ckUSDC balance unavailable for vault #{}: {}", vault.vault_id, error);
+                        write_short_payment_recovery(record_id, vault.vault_id, timestamp, collateral_amount, debt_covered, swap_amount, reservation.recorded_received_e6, collateral_price, effective_price, slippage_bps, "pre-top-up balance unavailable");
+                        return;
+                    }
+                };
+                match swap::swap_icp_for_ckusdc(&config, topup_icp).await {
+                    Ok(extra) => {
+                        let after = match swap::balance_of_self_ckusdc(&config).await {
+                            Ok(balance) => balance,
+                            Err(error) => {
+                                log!(crate::INFO, "STUCK: post-top-up ckUSDC balance unavailable for vault #{}: {}", vault.vault_id, error);
+                                write_short_payment_recovery(record_id, vault.vault_id, timestamp, collateral_amount, debt_covered, swap_amount.saturating_add(topup_icp), reservation.recorded_received_e6, collateral_price, effective_price, slippage_bps, "post-top-up balance unavailable");
+                                return;
+                            }
+                        };
+                        let extra_reservation = compute_swap_reservation(vault.vault_id, extra.ckusdc_received_e6, before, after);
+                        reservation.to_transfer_e6 = reservation.to_transfer_e6.saturating_add(extra_reservation.to_transfer_e6);
+                        reservation.recorded_received_e6 = reservation.recorded_received_e6.saturating_add(extra_reservation.recorded_received_e6);
+                        swap_amount = swap_amount.saturating_add(topup_icp);
+                    }
+                    Err(error) => {
+                        log!(crate::INFO, "STUCK: bounded short-payment top-up failed for vault #{}: {}", vault.vault_id, error);
+                        write_short_payment_recovery(record_id, vault.vault_id, timestamp, collateral_amount, debt_covered, swap_amount, reservation.recorded_received_e6, collateral_price, effective_price, slippage_bps, &format!("bounded top-up failed: {error}"));
+                        return;
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log!(crate::INFO, "STUCK: cannot quote bounded short-payment top-up for vault #{}: {}", vault.vault_id, error);
+                write_short_payment_recovery(record_id, vault.vault_id, timestamp, collateral_amount, debt_covered, swap_amount, reservation.recorded_received_e6, collateral_price, effective_price, slippage_bps, &format!("top-up quote unavailable: {error}"));
+                return;
+            }
+        }
+    }
+    let payment_allocation = allocate_claim_payment(&reservation, required_gross);
     let ckusdc_received = reservation.recorded_received_e6;
+    let min_ckusdc_net = required_gross.saturating_sub(ckusdc_fee);
+    if reservation.to_transfer_e6 < required_gross {
+        // Never transfer a short amount: that would credit the backend without
+        // authorizing the debt write-down. The active claim and both asset
+        // balances are left for explicit recovery instead.
+        let message = format!(
+            "ckUSDC output is short; no payment sent (available gross {}, required gross {}, net debt minimum {})",
+            payment_allocation.gross_to_transfer_e6, required_gross, min_ckusdc_net
+        );
+        log!(crate::INFO, "STUCK: {} for vault #{}; claim remains active for recovery", message, vault.vault_id);
+        write_short_payment_recovery(record_id, vault.vault_id, timestamp, collateral_amount, debt_covered, swap_amount, ckusdc_received, collateral_price, effective_price, slippage_bps, &message);
+        return;
+    }
 
     // -- Phase 3: TRANSFER ckUSDC to backend (NO RETRY) --
-    // We send `reservation.to_transfer_e6`, which is capped to what THIS
-    // claim actually deposited in the wallet — never blowing past the
-    // wallet's real balance even if the router lied.
-    let transfer_result =
-        swap::transfer_ckusdc_to_backend(&config, reservation.to_transfer_e6).await;
+    // Send only the exact gross debt-plus-fee requirement. Favorable swap
+    // overage remains in the bot and is accounted as held surplus; it cannot
+    // increase the debt write-down or the treasury distribution.
+    let created_at_time = ic_cdk::api::time();
+    let payment_journal = state::BotPaymentJournal {
+        vault_id: vault.vault_id,
+        backend_principal: config.backend_principal,
+        ledger_principal: config.ckusdc_ledger,
+        claim_generation,
+        debt_covered_e8s: debt_covered,
+        collateral_amount_e8s: collateral_amount,
+        collateral_price_e8s: collateral_price,
+        icp_swapped_e8s: swap_amount,
+        ckusdc_received_e6: ckusdc_received,
+        held_surplus_e6: payment_allocation.held_surplus_e6,
+        gross_amount_e6: payment_allocation.gross_to_transfer_e6,
+        amount_e6: payment_allocation.gross_to_transfer_e6.saturating_sub(ckusdc_fee),
+        fee_e6: ckusdc_fee,
+        created_at_time,
+        memo: payment_memo.clone(),
+        status: state::BotPaymentStatus::Prepared,
+        receipt: None,
+    };
+    state::mutate_state(|s| {
+        s.pending_claims.remove(&vault.vault_id);
+        s.pending_payments.insert(vault.vault_id, payment_journal.clone());
+    });
+    state::save_config_to_stable();
+
+    let transfer_result = swap::transfer_ckusdc_to_backend(
+        &config,
+        payment_journal.amount_e6,
+        payment_memo,
+        created_at_time,
+        ckusdc_fee,
+    ).await;
 
     let ckusdc_transferred = match transfer_result {
-        Ok(actual_sent) => actual_sent,
+        Ok(receipt) => {
+            state::mutate_state(|s| {
+                if let Some(journal) = s.pending_payments.get_mut(&vault.vault_id) {
+                    journal.status = state::BotPaymentStatus::ReceiptObserved;
+                    journal.receipt = Some(receipt.clone());
+                }
+            });
+            state::save_config_to_stable();
+            receipt
+        }
         Err(e) => {
+            let (status, message) = match e {
+                swap::TransferAttemptError::NoEffect(message) => (state::BotPaymentStatus::NoEffect, message),
+                swap::TransferAttemptError::Ambiguous(message) => (state::BotPaymentStatus::Ambiguous, message),
+            };
+            state::mutate_state(|s| {
+                if let Some(journal) = s.pending_payments.get_mut(&vault.vault_id) {
+                    journal.status = status;
+                }
+            });
+            state::save_config_to_stable();
             let stuck_msg = match &reservation.discrepancy_note {
-                Some(note) => format!("{} | transfer: {}", note, e),
-                None => e,
+                Some(note) => format!("{} | transfer: {}", note, message),
+                None => message,
             };
             log!(crate::INFO,
-                "STUCK: ckUSDC transfer failed for vault #{}. Bot holding {} ckUSDC e6 (router said {}). Error: {}. Needs admin resolution.",
-                vault.vault_id, reservation.to_transfer_e6, router_received, stuck_msg);
+            "STUCK: ckUSDC transfer failed for vault #{}. Bot holding {} ckUSDC e6 for this claim, including {} held surplus (router said {}). Error: {}. Needs admin resolution.",
+                vault.vault_id, payment_allocation.gross_to_transfer_e6.saturating_add(payment_allocation.held_surplus_e6), payment_allocation.held_surplus_e6, router_received, stuck_msg);
             write_record(LiquidationRecordV1 {
                 id: record_id, vault_id: vault.vault_id, timestamp,
                 status: LiquidationStatus::TransferFailed,
@@ -450,7 +824,14 @@ pub async fn process_pending() {
     let mut last_confirm_err = String::new();
 
     for attempt in 0..CONFIRM_ATTEMPTS {
-        match call_bot_confirm_liquidation(&config, vault.vault_id).await {
+        match call_bot_confirm_liquidation_with_proof(&config, BotPaymentProof {
+            vault_id: vault.vault_id,
+            claim_generation,
+            ledger_principal: config.ckusdc_ledger,
+            block_index: ckusdc_transferred.block_index,
+            amount_e6s: ckusdc_transferred.amount,
+            created_at_time: ckusdc_transferred.created_at_time,
+        }).await {
             Ok(()) => {
                 confirm_ok = true;
                 confirm_retries = attempt + 1;
@@ -476,12 +857,19 @@ pub async fn process_pending() {
             status: LiquidationStatus::ConfirmFailed,
             collateral_claimed_e8s: collateral_amount, debt_to_cover_e8s: debt_covered,
             icp_swapped_e8s: swap_amount, ckusdc_received_e6: ckusdc_received,
-            ckusdc_transferred_e6: ckusdc_transferred, icp_to_treasury_e8s: 0,
+            ckusdc_transferred_e6: ckusdc_transferred.amount, icp_to_treasury_e8s: 0,
             oracle_price_e8s: collateral_price, effective_price_e8s: effective_price,
             slippage_bps, error_message: Some(last_confirm_err), confirm_retry_count: confirm_retries,
         });
         return;
     }
+
+    state::mutate_state(|s| {
+        if let Some(journal) = s.pending_payments.get_mut(&vault.vault_id) {
+            journal.status = state::BotPaymentStatus::Confirmed;
+        }
+    });
+    state::save_config_to_stable();
 
     // -- Phase 5: TREASURY (liquidation bonus) --
     let icp_to_treasury = collateral_amount.saturating_sub(swap_amount);
@@ -498,24 +886,296 @@ pub async fn process_pending() {
         status: LiquidationStatus::Completed,
         collateral_claimed_e8s: collateral_amount, debt_to_cover_e8s: debt_covered,
         icp_swapped_e8s: swap_amount, ckusdc_received_e6: ckusdc_received,
-        ckusdc_transferred_e6: ckusdc_transferred, icp_to_treasury_e8s: icp_to_treasury,
+        ckusdc_transferred_e6: ckusdc_transferred.amount, icp_to_treasury_e8s: icp_to_treasury,
         oracle_price_e8s: collateral_price, effective_price_e8s: effective_price,
         slippage_bps, error_message: None, confirm_retry_count: confirm_retries,
     });
 
     // Update legacy stats for backward compat with explorer UI
     state::mutate_state(|s| {
-        s.stats.total_debt_covered_e8s += debt_covered;
-        s.stats.total_collateral_received_e8s += collateral_amount;
-        s.stats.total_collateral_to_treasury_e8s += icp_to_treasury;
-        s.stats.events_count += 1;
+        if apply_confirmed_payment_totals_once(s, &payment_journal, ckusdc_transferred.amount) {
+            s.stats.total_collateral_to_treasury_e8s = s
+                .stats
+                .total_collateral_to_treasury_e8s
+                .saturating_add(icp_to_treasury);
+        }
     });
+    state::save_config_to_stable();
 }
 
 // -- Helpers --
 
 fn write_record(record: LiquidationRecordV1) {
     history::insert_record(LiquidationRecordVersioned::V1(record));
+}
+
+/// Reconcile a payment intent before processing another vault. The intent is
+/// written to stable memory before the ledger call; retries reuse its exact
+/// amount, memo and created_at_time. A returned block is never paid again and
+/// is handed to the backend's exact ICRC-3 verifier.
+async fn resume_pending_payment(config: &BotConfig) -> bool {
+    let Some(mut journal) = state::read_state(|s| s.pending_payments.values().next().cloned())
+    else {
+        return false;
+    };
+    if config.backend_principal != journal.backend_principal
+        || config.ckusdc_ledger != journal.ledger_principal
+    {
+        log!(crate::INFO, "STUCK: payment journal for vault #{} is bound to different backend/ledger config; operator reconciliation required", journal.vault_id);
+        return true;
+    }
+
+    if journal.status == state::BotPaymentStatus::NoEffect {
+        log!(crate::INFO, "STUCK: payment for vault #{} has a definitive no-effect response; operator must correct the cause before allocating a new exact tuple", journal.vault_id);
+        return true;
+    }
+
+    if journal.receipt.is_none() {
+        const SAFE_RETRY_WINDOW_NS: u64 = 23 * 60 * 60 * 1_000_000_000;
+        if ic_cdk::api::time().saturating_sub(journal.created_at_time) >= SAFE_RETRY_WINDOW_NS {
+            log!(crate::INFO, "STUCK: payment intent for vault #{} exceeded the safe dedup retry window; do not re-dispatch, reconcile by exact ICRC-3 history", journal.vault_id);
+            return true;
+        }
+        match swap::transfer_ckusdc_to_backend(
+            config,
+            journal.amount_e6,
+            journal.memo.clone(),
+            journal.created_at_time,
+            journal.fee_e6,
+        )
+        .await
+        {
+            Ok(receipt) => {
+                journal.status = state::BotPaymentStatus::ReceiptObserved;
+                journal.receipt = Some(receipt);
+            }
+            Err(swap::TransferAttemptError::NoEffect(message)) => {
+                journal.status = state::BotPaymentStatus::NoEffect;
+                log!(crate::INFO, "Payment retry had definitive no-effect for vault #{}: {}", journal.vault_id, message);
+                state::mutate_state(|s| { s.pending_payments.insert(journal.vault_id, journal.clone()); });
+                state::save_config_to_stable();
+                return true;
+            }
+            Err(swap::TransferAttemptError::Ambiguous(message)) => {
+                journal.status = state::BotPaymentStatus::Ambiguous;
+                log!(crate::INFO, "Payment retry outcome remains ambiguous for vault #{}: {}", journal.vault_id, message);
+                state::mutate_state(|s| { s.pending_payments.insert(journal.vault_id, journal.clone()); });
+                state::save_config_to_stable();
+                return true;
+            }
+        }
+        state::mutate_state(|s| { s.pending_payments.insert(journal.vault_id, journal.clone()); });
+        state::save_config_to_stable();
+    }
+
+    let Some(receipt) = journal.receipt.as_ref() else { return true };
+    let proof = BotPaymentProof {
+        vault_id: journal.vault_id,
+        claim_generation: journal.claim_generation,
+        ledger_principal: journal.ledger_principal,
+        block_index: receipt.block_index,
+        amount_e6s: receipt.amount,
+        created_at_time: receipt.created_at_time,
+    };
+    match call_bot_confirm_liquidation_with_proof(config, proof).await {
+        Ok(()) => {
+            journal.status = state::BotPaymentStatus::Confirmed;
+            state::mutate_state(|s| {
+                apply_confirmed_payment_totals_once(s, &journal, receipt.amount);
+            });
+            state::save_config_to_stable();
+            log!(crate::INFO, "Recovered and confirmed payment for vault #{} from exact ckUSDC block {}; any unswapped ICP remains held for operator reconciliation", journal.vault_id, receipt.block_index);
+        }
+        Err(error) => {
+            journal.status = state::BotPaymentStatus::ReceiptObserved;
+            state::mutate_state(|s| { s.pending_payments.insert(journal.vault_id, journal.clone()); });
+            state::save_config_to_stable();
+            log!(crate::INFO, "Payment block is durable but backend proof confirmation remains pending for vault #{}: {}", journal.vault_id, error);
+        }
+    }
+    true
+}
+
+/// Resume a claim-bound collateral return with the exact ledger dedup tuple.
+/// Legacy journals without an intent, and intents outside the dedup window,
+/// remain operator-held for exact ledger history reconciliation.
+async fn resume_pending_return(config: &BotConfig) -> bool {
+    let Some(mut claim) = state::read_state(|s| {
+        s.pending_claims.values()
+            .find(|claim| claim.status == state::BotClaimJournalStatus::ReturnPending)
+            .cloned()
+    }) else { return false };
+    let Some(mut intent) = claim.collateral_return.clone() else {
+        log!(crate::INFO, "STUCK: return for vault #{} lacks a persisted transfer tuple; operator reconciliation required", claim.vault_id);
+        return true;
+    };
+    if config.backend_principal != intent.backend_principal || config.icp_ledger != intent.ledger_principal {
+        log!(crate::INFO, "STUCK: return tuple for vault #{} is bound to a different backend or ledger", claim.vault_id);
+        return true;
+    }
+    if intent.status == state::BotReturnTransferStatus::NoEffect {
+        log!(crate::INFO, "STUCK: collateral return for vault #{} had a definitive no-effect response; explicit operator repair is required", claim.vault_id);
+        return true;
+    }
+    if intent.receipt.is_none() {
+        const SAFE_RETRY_WINDOW_NS: u64 = 23 * 60 * 60 * 1_000_000_000;
+        if ic_cdk::api::time().saturating_sub(intent.created_at_time) >= SAFE_RETRY_WINDOW_NS {
+            log!(crate::INFO, "STUCK: return tuple for vault #{} exceeded the safe dedup window; exact ledger reconciliation required", claim.vault_id);
+            return true;
+        }
+        match swap::return_collateral_to_backend(
+            config,
+            intent.amount_e8s.saturating_add(intent.fee_e8s),
+            intent.ledger_principal,
+            intent.memo.clone(),
+            intent.amount_e8s,
+            intent.created_at_time,
+        ).await {
+            Ok(receipt) => {
+                intent.receipt = Some(receipt);
+                intent.status = state::BotReturnTransferStatus::ReceiptObserved;
+                claim.collateral_return = Some(intent.clone());
+                state::mutate_state(|s| { s.pending_claims.insert(claim.vault_id, claim.clone()); });
+                state::save_config_to_stable();
+            }
+            Err(swap::TransferAttemptError::Ambiguous(error)) => {
+                intent.status = state::BotReturnTransferStatus::Ambiguous;
+                claim.collateral_return = Some(intent);
+                state::mutate_state(|s| { s.pending_claims.insert(claim.vault_id, claim.clone()); });
+                state::save_config_to_stable();
+                log!(crate::INFO, "Return outcome remains ambiguous for vault #{}: {}", claim.vault_id, error);
+                return true;
+            }
+            Err(swap::TransferAttemptError::NoEffect(error)) => {
+                intent.status = state::BotReturnTransferStatus::NoEffect;
+                claim.collateral_return = Some(intent);
+                state::mutate_state(|s| { s.pending_claims.insert(claim.vault_id, claim.clone()); });
+                state::save_config_to_stable();
+                log!(crate::INFO, "Return had a definitive no-effect response for vault #{}; operator action required: {}", claim.vault_id, error);
+                return true;
+            }
+        }
+    }
+    let Some(receipt) = intent.receipt.as_ref() else { return true };
+    let proof = BotCollateralReturnProofArg {
+        vault_id: claim.vault_id,
+        claim_generation: claim.claim_generation,
+        block_index: receipt.block_index,
+        amount: receipt.amount,
+        created_at_time: receipt.created_at_time,
+    };
+    if let Err(error) = call_bot_record_collateral_return_proof(config, proof).await {
+        log!(crate::INFO, "Return receipt remains durable but backend proof recording failed for vault #{}: {}", claim.vault_id, error);
+        return true;
+    }
+    match call_bot_cancel_liquidation(config, claim.vault_id).await {
+        Ok(()) => {
+            state::mutate_state(|s| { s.pending_claims.remove(&claim.vault_id); });
+            state::save_config_to_stable();
+        }
+        Err(error) => log!(crate::INFO, "Return proof recorded but claim cancellation remains pending for vault #{}: {}", claim.vault_id, error),
+    }
+    true
+}
+
+pub async fn admin_retry_no_effect_payment(
+    config: &BotConfig,
+    vault_id: u64,
+) -> Result<(), String> {
+    let Some(mut journal) = state::read_state(|s| s.pending_payments.get(&vault_id).cloned()) else {
+        return Err("no durable payment journal for this vault".into());
+    };
+    if journal.status != state::BotPaymentStatus::NoEffect || journal.receipt.is_some() {
+        return Err("only a definitive no-effect payment can be manually retried".into());
+    }
+    if config.backend_principal != journal.backend_principal
+        || config.ckusdc_ledger != journal.ledger_principal
+    {
+        return Err("configured backend or ckUSDC ledger differs from the journal".into());
+    }
+    let fee = config.ckusdc_fee_e6.unwrap_or(10_000);
+    if journal.gross_amount_e6 < required_ckusdc_gross(journal.debt_covered_e8s, fee) {
+        return Err("available claim proceeds remain short after the current ledger fee; claim is operator-held".into());
+    }
+    let balance = swap::balance_of_self_ckusdc(config).await?;
+    if balance < journal.gross_amount_e6 {
+        return Err("bot ckUSDC balance no longer covers the persisted claim reservation".into());
+    }
+    // The prior ICRC error proves no transfer occurred. Allocate a fresh
+    // created_at_time for the new attempt while preserving the claim-bound
+    // memo and amount; then persist before the next external call.
+        journal.created_at_time = ic_cdk::api::time();
+        journal.fee_e6 = fee;
+        journal.amount_e6 = journal.gross_amount_e6.saturating_sub(fee);
+    journal.status = state::BotPaymentStatus::Prepared;
+    state::mutate_state(|s| { s.pending_payments.insert(vault_id, journal); });
+    state::save_config_to_stable();
+    resume_pending_payment(config).await;
+    if state::read_state(|s| s.pending_payments.contains_key(&vault_id)) {
+        Err("payment retry remains pending or ambiguous; inspect the durable journal".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Operator supplies a candidate ledger block from ICRC-3 history. The backend
+/// independently verifies every tuple field against the claim before debt
+/// changes, so this endpoint cannot authorize a forged block.
+pub async fn admin_reconcile_payment_block(
+    config: &BotConfig,
+    vault_id: u64,
+    block_index: u64,
+) -> Result<(), String> {
+    let mut journal = state::read_state(|s| s.pending_payments.get(&vault_id).cloned())
+        .ok_or_else(|| "no pending payment journal for this vault".to_string())?;
+    if journal.receipt.is_some() {
+        return Err("payment journal already has a recorded block".into());
+    }
+    journal.receipt = Some(swap::TransferReceipt {
+        block_index,
+        amount: journal.amount_e6,
+        created_at_time: journal.created_at_time,
+    });
+    journal.status = state::BotPaymentStatus::ReceiptObserved;
+    state::mutate_state(|s| { s.pending_payments.insert(vault_id, journal); });
+    state::save_config_to_stable();
+    resume_pending_payment(config).await;
+    if state::read_state(|s| s.pending_payments.contains_key(&vault_id)) {
+        Err("candidate block was not accepted or confirmation remains pending; inspect the durable journal".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Operator supplies a candidate collateral-return block. The backend checks
+/// exact sender, receiver, amount, memo, generation and timestamp before
+/// recording the proof or allowing cancellation.
+pub async fn admin_reconcile_return_block(
+    config: &BotConfig,
+    vault_id: u64,
+    block_index: u64,
+) -> Result<(), String> {
+    let mut claim = state::read_state(|s| s.pending_claims.get(&vault_id).cloned())
+        .ok_or_else(|| "no pending claim journal for this vault".to_string())?;
+    let intent = claim.collateral_return.as_mut()
+        .ok_or_else(|| "claim has no durable return tuple to reconcile".to_string())?;
+    if intent.receipt.is_some() {
+        return Err("return journal already has a recorded block".into());
+    }
+    intent.receipt = Some(swap::TransferReceipt {
+        block_index,
+        amount: intent.amount_e8s,
+        created_at_time: intent.created_at_time,
+    });
+    intent.status = state::BotReturnTransferStatus::ReceiptObserved;
+    state::mutate_state(|s| { s.pending_claims.insert(vault_id, claim); });
+    state::save_config_to_stable();
+    resume_pending_return(config).await;
+    if state::read_state(|s| s.pending_claims.contains_key(&vault_id)) {
+        Err("candidate block was not accepted or cancellation remains pending; inspect the durable journal".into())
+    } else {
+        Ok(())
+    }
 }
 
 async fn call_bot_claim_liquidation(
@@ -532,13 +1192,33 @@ async fn call_bot_claim_liquidation(
     }
 }
 
-pub async fn call_bot_confirm_liquidation(
+async fn call_bot_confirm_liquidation_with_proof(
     config: &BotConfig,
-    vault_id: u64,
+    proof: BotPaymentProof,
 ) -> Result<(), String> {
-    let result: Result<(BackendResult<()>,), _> =
-        ic_cdk::call(config.backend_principal, "bot_confirm_liquidation", (vault_id,)).await;
+    let result: Result<(BackendResult<()>,), _> = ic_cdk::call(
+        config.backend_principal,
+        "bot_confirm_liquidation_with_proof",
+        (proof,),
+    )
+    .await;
+    match result {
+        Ok((BackendResult::Ok(()),)) => Ok(()),
+        Ok((BackendResult::Err(e),)) => Err(format!("{}", e)),
+        Err((code, msg)) => Err(format!("{:?}: {}", code, msg)),
+    }
+}
 
+async fn call_bot_record_collateral_return_proof(
+    config: &BotConfig,
+    proof: BotCollateralReturnProofArg,
+) -> Result<(), String> {
+    let result: Result<(BackendResult<()>,), _> = ic_cdk::call(
+        config.backend_principal,
+        "bot_record_collateral_return_proof",
+        (proof,),
+    )
+    .await;
     match result {
         Ok((BackendResult::Ok(()),)) => Ok(()),
         Ok((BackendResult::Err(e),)) => Err(format!("{}", e)),
@@ -584,6 +1264,51 @@ mod tests {
     const SWAP_ERR: &str = "Quote returned zero output";
     const RETURN_ERR: &str = "Transfer error: BadFee";
     const CANCEL_ERR: &str = "GenericError(\"Cannot cancel claim for vault #7: protocol collateral balance 0 < required 99990000\")";
+
+    #[test]
+    fn short_payment_gross_threshold_covers_rounding_and_fee() {
+        assert_eq!(required_ckusdc_gross(100_000_000, 10_000), 1_010_000);
+        assert_eq!(required_ckusdc_gross(100_000_001, 10_000), 1_010_001);
+        assert_eq!(required_ckusdc_gross(u64::MAX, u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn confirmed_payment_totals_and_surplus_are_applied_once() {
+        let journal = state::BotPaymentJournal {
+            vault_id: 19,
+            backend_principal: candid::Principal::anonymous(),
+            ledger_principal: candid::Principal::management_canister(),
+            claim_generation: 4,
+            debt_covered_e8s: 100_000_000,
+            collateral_amount_e8s: 200_000_000,
+            collateral_price_e8s: 100_000_000,
+            icp_swapped_e8s: 110_000_000,
+            ckusdc_received_e6: 1_050_000,
+            held_surplus_e6: 40_000,
+            gross_amount_e6: 1_010_000,
+            amount_e6: 1_000_000,
+            fee_e6: 10_000,
+            created_at_time: 123,
+            memo: b"claim-19-4".to_vec(),
+            status: state::BotPaymentStatus::Confirmed,
+            receipt: Some(crate::swap::TransferReceipt {
+                block_index: 8,
+                amount: 1_000_000,
+                created_at_time: 123,
+            }),
+        };
+        let mut bot_state = state::BotState::default();
+        bot_state.pending_payments.insert(journal.vault_id, journal.clone());
+
+        assert!(apply_confirmed_payment_totals_once(&mut bot_state, &journal, 1_000_000));
+        assert!(!apply_confirmed_payment_totals_once(&mut bot_state, &journal, 1_000_000));
+        assert_eq!(bot_state.stats.total_debt_covered_e8s, 100_000_000);
+        assert_eq!(bot_state.stats.total_ckusdc_deposited_e6, 1_000_000);
+        assert_eq!(bot_state.stats.total_ckusdc_surplus_held_e6, 40_000);
+        assert_eq!(bot_state.stats.total_collateral_received_e8s, 200_000_000);
+        assert_eq!(bot_state.stats.events_count, 1);
+        assert!(!bot_state.pending_payments.contains_key(&journal.vault_id));
+    }
 
     #[test]
     fn swap_failure_clean_cleanup_records_swap_failed() {
@@ -701,6 +1426,23 @@ mod tests {
         assert_eq!(r.to_transfer_e6, 4_000_000, "must not dip into surplus that wasn't earmarked");
         assert_eq!(r.recorded_received_e6, 4_000_000);
         assert!(r.discrepancy_note.is_none(), "over-delivery is not a stuck-claim situation");
+    }
+
+    #[test]
+    fn favorable_swap_overage_is_held_and_not_reused_by_next_claim() {
+        let first = compute_swap_reservation(7, 1_050_000, 2_000_000, 3_050_000);
+        let first_payment = allocate_claim_payment(&first, 1_010_000);
+        assert_eq!(first_payment.gross_to_transfer_e6, 1_010_000);
+        assert_eq!(first_payment.held_surplus_e6, 40_000);
+
+        // The old 40_000 remains in the shared bot balance. A later claim's
+        // before/after delta excludes it, so it cannot help satisfy the new
+        // claim's independent reservation.
+        let second = compute_swap_reservation(8, 800_000, 3_090_000, 3_890_000);
+        let second_payment = allocate_claim_payment(&second, 810_000);
+        assert_eq!(second.to_transfer_e6, 800_000);
+        assert_eq!(second_payment.gross_to_transfer_e6, 800_000);
+        assert_eq!(second_payment.held_surplus_e6, 0);
     }
 
     #[test]

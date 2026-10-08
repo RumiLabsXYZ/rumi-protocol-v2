@@ -22,11 +22,30 @@ export interface AddCollateralArg {
   'interest_rate_apr' : number,
   'liquidation_ratio' : number,
 }
+export interface BotCollateralReturnProofArg {
+  'block_index' : bigint,
+  'claim_generation' : bigint,
+  'vault_id' : bigint,
+  'created_at_time' : bigint,
+  'amount' : bigint,
+}
 export interface BotLiquidationResult {
   'collateral_amount' : bigint,
   'collateral_price_e8s' : bigint,
+  'payment_memo' : Uint8Array | number[],
+  'claim_generation' : bigint,
   'vault_id' : bigint,
+  'payment_ledger_principal' : [] | [Principal],
+  'collateral_return_memo' : Uint8Array | number[],
   'debt_covered' : bigint,
+}
+export interface BotPaymentProof {
+  'block_index' : bigint,
+  'claim_generation' : bigint,
+  'vault_id' : bigint,
+  'amount_e6s' : bigint,
+  'ledger_principal' : Principal,
+  'created_at_time' : bigint,
 }
 export interface BotStatsResponse {
   'total_debt_covered_e8s' : bigint,
@@ -1711,6 +1730,11 @@ export interface _SERVICE {
   'bot_cancel_liquidation' : ActorMethod<[bigint], Result>,
   'bot_claim_liquidation' : ActorMethod<[bigint], Result_5>,
   'bot_confirm_liquidation' : ActorMethod<[bigint], Result>,
+  'bot_confirm_liquidation_with_proof' : ActorMethod<[BotPaymentProof], Result>,
+  'bot_record_collateral_return_proof' : ActorMethod<
+    [BotCollateralReturnProofArg],
+    Result
+  >,
   'cancel_xrp_pending_open' : ActorMethod<[bigint], Result>,
   'chain_has_active_settlement_op' : ActorMethod<[number], boolean>,
   'claim_chain_collateral' : ActorMethod<
@@ -1736,6 +1760,7 @@ export interface _SERVICE {
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'delete_chain' : ActorMethod<[number], Result>,
   'disable_chain' : ActorMethod<[number], Result>,
+  'enable_bot_confirm_proof_requirement' : ActorMethod<[], Result>,
   'enable_chain' : ActorMethod<[number], Result>,
   'enter_recovery_mode' : ActorMethod<[], Result>,
   'exit_recovery_mode' : ActorMethod<[], Result>,
