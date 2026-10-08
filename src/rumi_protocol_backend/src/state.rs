@@ -1267,8 +1267,71 @@ impl Default for Mode {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingPayoutKind {
+    Margin,
+    Excess,
+    Redemption,
+}
+
+/// Persisted binding for one owner-requested ICRC-3 scan after a typed TooOld.
+/// Old rows decode this as `None` and are therefore never eligible to rearm.
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct PendingPayoutHistoryScan {
+    pub operation_id: u128,
+    pub payout_kind: PendingPayoutKind,
+    pub ledger: Principal,
+    pub owner: Principal,
+    pub amount_raw: u64,
+    pub attempt_nonce: u128,
+    pub start_index: u64,
+    pub snapshot_log_length: u64,
+    pub next_index: u64,
+}
+
+/// Immutable record of a completed no-effect history scan and its fresh
+/// replacement attempt. The original operation ID and retry count are kept.
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct PendingPayoutNoEffectProof {
+    pub operation_id: u128,
+    pub payout_kind: PendingPayoutKind,
+    pub ledger: Principal,
+    pub owner: Principal,
+    pub amount_raw: u64,
+    pub old_attempt_nonce: u128,
+    pub new_attempt_nonce: u128,
+    pub start_index: u64,
+    pub snapshot_log_length: u64,
+    pub complete_prefix: bool,
+    pub verified_at_ns: u64,
+}
+
+impl Default for PendingPayoutKind {
+    fn default() -> Self {
+        Self::Margin
+    }
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
+pub struct PendingPayoutLocator {
+    pub kind: PendingPayoutKind,
+    pub vault_id: u64,
+    pub recipient: Principal,
+    pub redemption_block_index: Option<u64>,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
 pub struct PendingMarginTransfer {
+    /// Source vault (0 for a redemption spanning multiple vaults).
+    #[serde(default)]
+    pub vault_id: u64,
+    /// Stable identity for this payout obligation. Unlike `op_nonce`, this does
+    /// not change when a proved-no-effect payout is rearmed with a fresh attempt.
+    #[serde(default)]
+    pub operation_id: u128,
+    #[serde(default)]
+    pub payout_kind: PendingPayoutKind,
     pub owner: Principal,
     pub margin: ICP,
     /// Which collateral ledger to transfer on. Defaults to ICP (via Principal::anonymous()
@@ -1286,8 +1349,43 @@ pub struct PendingMarginTransfer {
     /// without dedup, matching prior behaviour, no regression).
     #[serde(default)]
     pub op_nonce: u128,
-    /// Minimum net collateral the user consented to receive for a redemption.
-    /// Absent on older snapshots/events, which preserves their prior behavior.
+    /// Ledger and net amount pinned when the payout is created. Missing on V7/V8
+    /// rows: such legacy rows are retained for reconciliation and never guessed.
+    #[serde(default)]
+    pub ledger: Option<Principal>,
+    #[serde(default)]
+    pub transfer_amount_raw: Option<u64>,
+    #[serde(default)]
+    pub held_for_manual_retry: bool,
+    #[serde(default)]
+    pub reconciliation_required: bool,
+    #[serde(default)]
+    pub in_flight: bool,
+    #[serde(default)]
+    pub too_old_confirmed: bool,
+    /// Ledger log length observed before the first dispatch of this nonce.
+    /// Missing means an earlier ambiguous send cannot be excluded.
+    #[serde(default)]
+    pub history_start_index: Option<u64>,
+    /// Explicit opt-in version set only when this implementation creates the
+    /// row. Missing/defaulted legacy rows cannot use history-based rearming.
+    #[serde(default)]
+    pub rearm_schema_version: u8,
+    #[serde(default)]
+    pub history_scan: Option<PendingPayoutHistoryScan>,
+    #[serde(default)]
+    pub history_candidate_seen: bool,
+    /// Replays retain one immutable attempt lineage. A payout may be rearmed
+    /// at most once; a second TooOld remains held for operator reconciliation.
+    #[serde(default)]
+    pub no_effect_proof: Option<PendingPayoutNoEffectProof>,
+    /// Resumable ICRC-1 history proof state. `None` means no proof is in progress.
+    #[serde(default)]
+    pub history_log_length: Option<u64>,
+    #[serde(default)]
+    pub history_cursor: u64,
+    /// Minimum net collateral the redeemer consented to receive. Absent on
+    /// older snapshots/events, preserving their historical unbounded behavior.
     #[serde(default)]
     pub min_net_collateral_raw: Option<u64>,
 }
@@ -1363,20 +1461,17 @@ thread_local! {
     static __STATE: RefCell<Option<State>> = RefCell::default();
 }
 
-// Wave-4 LIQ-001: pending_margin_transfers and pending_excess_transfers are keyed
-// by (VaultId, Principal) so concurrent liquidators on the same vault each have
-// their own pending entry. Legacy snapshots (BTreeMap<VaultId, _>) are accepted
-// transparently via this Visitor and re-keyed using the entry's `owner`.
+// CL14: queues are keyed by (VaultId, recipient, operation_id). The visitor also
+// accepts V7/V8's integer and (VaultId, recipient) keys without collapsing rows.
 //
 // We can't use `#[serde(untagged)]` here because ciborium's untagged-enum
 // dispatch doesn't reliably distinguish a CBOR map with integer keys from one
 // with array keys when both variants are themselves maps. Instead, we drive a
 // Visitor over MapAccess and decide per-entry: each key is deserialized as
-// `EitherKey`, which is a small two-variant enum that ciborium *does* handle
-// cleanly via deserialize_any (integer vs. array).
+// `EitherKey`, which ciborium handles cleanly via deserialize_any (integer vs. array).
 fn deserialize_pending_keyed<'de, D>(
     d: D,
-) -> Result<BTreeMap<(VaultId, Principal), PendingMarginTransfer>, D::Error>
+) -> Result<BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -1385,18 +1480,17 @@ where
     #[derive(serde::Deserialize)]
     #[serde(untagged)]
     enum EitherKey {
-        New((VaultId, Principal)),
+        Current((VaultId, Principal, u128)),
+        Previous((VaultId, Principal)),
         Legacy(VaultId),
     }
 
     struct V;
     impl<'de> serde::de::Visitor<'de> for V {
-        type Value = BTreeMap<(VaultId, Principal), PendingMarginTransfer>;
+        type Value = BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>;
 
         fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str(
-                "a map of pending margin transfers (legacy u64 keys or new (u64, Principal) keys)",
-            )
+            f.write_str("a map of pending transfers (legacy u64, V7/V8 pair, or CL14 triple keys)")
         }
 
         fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -1407,8 +1501,17 @@ where
             while let Some(key) = map.next_key::<EitherKey>()? {
                 let value: PendingMarginTransfer = map.next_value()?;
                 let final_key = match key {
-                    EitherKey::New(t) => t,
-                    EitherKey::Legacy(vault_id) => (vault_id, value.owner),
+                    EitherKey::Current((vault_id, owner, operation_id)) => (
+                        vault_id,
+                        owner,
+                        if operation_id == 0 {
+                            value.operation_id
+                        } else {
+                            operation_id
+                        },
+                    ),
+                    EitherKey::Previous((vault_id, owner)) => (vault_id, owner, value.operation_id),
+                    EitherKey::Legacy(vault_id) => (vault_id, value.owner, value.operation_id),
                 };
                 out.insert(final_key, value);
             }
@@ -1429,10 +1532,24 @@ pub struct State {
     pub vault_id_to_vaults: BTreeMap<u64, Vault>,
     pub principal_to_vault_ids: BTreeMap<Principal, BTreeSet<u64>>,
     #[serde(deserialize_with = "deserialize_pending_keyed")]
-    pub pending_margin_transfers: BTreeMap<(VaultId, Principal), PendingMarginTransfer>,
+    pub pending_margin_transfers: BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>,
     #[serde(deserialize_with = "deserialize_pending_keyed")]
-    pub pending_excess_transfers: BTreeMap<(VaultId, Principal), PendingMarginTransfer>,
+    pub pending_excess_transfers: BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>,
     pub pending_redemption_transfer: BTreeMap<u64, PendingMarginTransfer>,
+    /// Owner-facing index over all durable payout receipts, keyed by stable ID.
+    #[serde(default)]
+    pub pending_payout_index: BTreeMap<u128, PendingPayoutLocator>,
+    /// Last payout receipt inspected by the bounded timer drain. This cursor
+    /// makes progress fair across held and retryable receipts and survives an
+    /// upgrade without adding any payout state transition.
+    #[serde(default)]
+    pub pending_payout_scan_cursor: Option<u128>,
+    /// Global quota for owner-triggered ICRC-3 history paging. This bounds
+    /// aggregate callback/cycle work even if callers have many payout rows.
+    #[serde(default)]
+    pub payout_history_scan_window_ns: u64,
+    #[serde(default)]
+    pub payout_history_scan_count: u8,
     /// Wave-4 ICC-007: durable refund queue for `redeem_reserves` failures,
     /// keyed by the burn icUSD block index. Empty for pre-Wave-4 snapshots.
     #[serde(default)]
@@ -2233,6 +2350,10 @@ impl Default for State {
             pending_margin_transfers: BTreeMap::new(),
             pending_excess_transfers: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            pending_payout_index: BTreeMap::new(),
+            pending_payout_scan_cursor: None,
+            payout_history_scan_window_ns: 0,
+            payout_history_scan_count: 0,
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             mode: Mode::default(),
@@ -2391,6 +2512,10 @@ impl From<InitArg> for State {
             price_pusher_allowed: std::collections::BTreeSet::new(),
             principal_to_vault_ids: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            pending_payout_index: BTreeMap::new(),
+            pending_payout_scan_cursor: None,
+            payout_history_scan_window_ns: 0,
+            payout_history_scan_count: 0,
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             vault_id_to_vaults: BTreeMap::new(),
@@ -2658,6 +2783,415 @@ impl From<InitArg> for State {
 }
 
 impl State {
+    /// Enforce an aggregate owner-triggered ICRC-3 query quota.
+    pub fn claim_payout_history_scan_slot(&mut self, now: u64) -> bool {
+        const WINDOW_NS: u64 = 60_000_000_000;
+        const MAX_SCANS_PER_WINDOW: u8 = 12;
+        if self.payout_history_scan_window_ns == 0
+            || now.saturating_sub(self.payout_history_scan_window_ns) >= WINDOW_NS
+        {
+            self.payout_history_scan_window_ns = now;
+            self.payout_history_scan_count = 0;
+        }
+        if self.payout_history_scan_count >= MAX_SCANS_PER_WINDOW {
+            return false;
+        }
+        self.payout_history_scan_count += 1;
+        true
+    }
+
+    /// Fail closed when distinct payout receipts share an ICRC attempt nonce.
+    /// A nonce collision can cause ledger deduplication to treat one transfer
+    /// as the result for multiple obligations, so every colliding receipt must
+    /// remain visible and held for reconciliation.
+    pub fn quarantine_duplicate_pending_payout_nonces(&mut self) -> usize {
+        let mut counts = BTreeMap::<u128, usize>::new();
+        for transfer in self
+            .pending_margin_transfers
+            .values()
+            .chain(self.pending_excess_transfers.values())
+            .chain(self.pending_redemption_transfer.values())
+        {
+            if transfer.op_nonce != 0 {
+                *counts.entry(transfer.op_nonce).or_default() += 1;
+            }
+        }
+
+        let duplicate_nonces: BTreeSet<u128> = counts
+            .into_iter()
+            .filter_map(|(nonce, count)| (count > 1).then_some(nonce))
+            .collect();
+        if duplicate_nonces.is_empty() {
+            return 0;
+        }
+
+        let mut quarantined = 0;
+        for transfer in self
+            .pending_margin_transfers
+            .values_mut()
+            .chain(self.pending_excess_transfers.values_mut())
+            .chain(self.pending_redemption_transfer.values_mut())
+        {
+            if duplicate_nonces.contains(&transfer.op_nonce) {
+                transfer.held_for_manual_retry = true;
+                transfer.reconciliation_required = true;
+                transfer.in_flight = false;
+                quarantined += 1;
+            }
+        }
+        quarantined
+    }
+
+    /// Convert V7/V8 payout rows into operation-keyed receipts during upgrade.
+    /// Legacy rows without exact ledger arguments are retained and held for
+    /// reconciliation; no attempt nonce is invented for them.
+    pub fn migrate_legacy_pending_payout_rows(&mut self, now: u64) -> usize {
+        let mut used = BTreeSet::new();
+
+        let old_margin = std::mem::take(&mut self.pending_margin_transfers);
+        for ((vault_id, owner, key_id), mut transfer) in old_margin {
+            let mut operation_id = if transfer.operation_id != 0 {
+                transfer.operation_id
+            } else if key_id != 0 {
+                key_id
+            } else {
+                transfer.op_nonce
+            };
+            while operation_id == 0 || used.contains(&operation_id) {
+                operation_id = self.next_op_nonce_at(now);
+            }
+            used.insert(operation_id);
+            transfer.vault_id = vault_id;
+            transfer.owner = owner;
+            transfer.operation_id = operation_id;
+            transfer.payout_kind = PendingPayoutKind::Margin;
+            if transfer.in_flight {
+                transfer.in_flight = false;
+                transfer.held_for_manual_retry = true;
+                transfer.reconciliation_required = true;
+            }
+            if transfer.ledger.is_none()
+                || transfer.transfer_amount_raw.is_none()
+                || transfer.op_nonce == 0
+            {
+                transfer.held_for_manual_retry = true;
+                transfer.reconciliation_required = true;
+            }
+            self.pending_margin_transfers
+                .insert((vault_id, owner, operation_id), transfer);
+        }
+
+        let old_excess = std::mem::take(&mut self.pending_excess_transfers);
+        for ((vault_id, owner, key_id), mut transfer) in old_excess {
+            let mut operation_id = if transfer.operation_id != 0 {
+                transfer.operation_id
+            } else if key_id != 0 {
+                key_id
+            } else {
+                transfer.op_nonce
+            };
+            while operation_id == 0 || used.contains(&operation_id) {
+                operation_id = self.next_op_nonce_at(now);
+            }
+            used.insert(operation_id);
+            transfer.vault_id = vault_id;
+            transfer.owner = owner;
+            transfer.operation_id = operation_id;
+            transfer.payout_kind = PendingPayoutKind::Excess;
+            if transfer.in_flight {
+                transfer.in_flight = false;
+                transfer.held_for_manual_retry = true;
+                transfer.reconciliation_required = true;
+            }
+            if transfer.ledger.is_none()
+                || transfer.transfer_amount_raw.is_none()
+                || transfer.op_nonce == 0
+            {
+                transfer.held_for_manual_retry = true;
+                transfer.reconciliation_required = true;
+            }
+            self.pending_excess_transfers
+                .insert((vault_id, owner, operation_id), transfer);
+        }
+
+        let old_redemptions = std::mem::take(&mut self.pending_redemption_transfer);
+        for (block_index, mut transfer) in old_redemptions {
+            let mut operation_id = if transfer.operation_id != 0 {
+                transfer.operation_id
+            } else {
+                transfer.op_nonce
+            };
+            while operation_id == 0 || used.contains(&operation_id) {
+                operation_id = self.next_op_nonce_at(now);
+            }
+            used.insert(operation_id);
+            transfer.vault_id = 0;
+            transfer.operation_id = operation_id;
+            transfer.payout_kind = PendingPayoutKind::Redemption;
+            if transfer.in_flight {
+                transfer.in_flight = false;
+                transfer.held_for_manual_retry = true;
+                transfer.reconciliation_required = true;
+            }
+            if transfer.ledger.is_none()
+                || transfer.transfer_amount_raw.is_none()
+                || transfer.op_nonce == 0
+            {
+                transfer.held_for_manual_retry = true;
+                transfer.reconciliation_required = true;
+            }
+            self.pending_redemption_transfer
+                .insert(block_index, transfer);
+        }
+
+        let nonce_collisions = self.quarantine_duplicate_pending_payout_nonces();
+        self.rebuild_pending_payout_index();
+        nonce_collisions
+    }
+
+    /// Return at most `limit` payout IDs in stable order, resuming after the
+    /// last completed ID and wrapping at the end of the index. Held entries
+    /// are deliberately included in the bounded scan: the processor skips
+    /// them, and advancing this cursor prevents a held prefix from starving
+    /// retryable entries later in the map.
+    pub fn next_pending_payout_batch(&self, limit: usize) -> Vec<u128> {
+        use std::ops::Bound::{Excluded, Unbounded};
+
+        if limit == 0 || self.pending_payout_index.is_empty() {
+            return Vec::new();
+        }
+        let mut ids = Vec::with_capacity(limit.min(self.pending_payout_index.len()));
+        if let Some(cursor) = self.pending_payout_scan_cursor {
+            ids.extend(
+                self.pending_payout_index
+                    .range((Excluded(cursor), Unbounded))
+                    .take(limit)
+                    .map(|(operation_id, _)| *operation_id),
+            );
+            if ids.len() < limit {
+                ids.extend(
+                    self.pending_payout_index
+                        .range(..=cursor)
+                        .take(limit - ids.len())
+                        .map(|(operation_id, _)| *operation_id),
+                );
+            }
+        } else {
+            ids.extend(self.pending_payout_index.keys().take(limit).copied());
+        }
+        ids
+    }
+
+    /// Advance the persisted payout scan only after the selected receipt has
+    /// returned from processing. If an upgrade interrupts a batch, the next
+    /// drain therefore resumes at the first unprocessed receipt.
+    pub fn advance_pending_payout_scan_cursor(&mut self, operation_id: u128) {
+        self.pending_payout_scan_cursor = Some(operation_id);
+    }
+
+    /// Return a bounded owner-filtered page from the global operation index.
+    /// The cursor tracks the global index, so empty pages can still advance
+    /// through other owners' rows without starving sparse owners.
+    pub fn pending_payout_ids_for_owner(
+        &self,
+        owner: Principal,
+        cursor: Option<u128>,
+        page_size: usize,
+        scan_limit: usize,
+    ) -> (Vec<u128>, Option<u128>) {
+        use std::ops::Bound::{Excluded, Unbounded};
+
+        if page_size == 0 || scan_limit == 0 {
+            return (Vec::new(), None);
+        }
+        let start = cursor.map_or(Unbounded, Excluded);
+        let rows = self
+            .pending_payout_index
+            .range((start, Unbounded))
+            .take(scan_limit.saturating_add(1))
+            .map(|(operation_id, _)| *operation_id)
+            .collect::<Vec<_>>();
+        let global_more = rows.len() > scan_limit;
+        let mut ids = Vec::with_capacity(page_size);
+        let mut last_scanned = None;
+        let mut next_cursor = None;
+        for operation_id in rows.into_iter().take(scan_limit) {
+            if let Some((_, transfer)) = self.get_pending_payout(operation_id) {
+                if transfer.owner == owner {
+                    if ids.len() == page_size {
+                        next_cursor = last_scanned;
+                        break;
+                    }
+                    ids.push(operation_id);
+                }
+            }
+            last_scanned = Some(operation_id);
+        }
+        if next_cursor.is_none() && global_more {
+            next_cursor = last_scanned;
+        }
+        (ids, next_cursor)
+    }
+
+    pub fn insert_pending_payout(&mut self, transfer: PendingMarginTransfer) {
+        let operation_id = transfer.operation_id;
+        assert!(
+            operation_id != 0,
+            "pending payout operation ID must be nonzero"
+        );
+        assert!(
+            !self.pending_payout_index.contains_key(&operation_id),
+            "pending payout operation ID collision: {operation_id}"
+        );
+        let key = (transfer.vault_id, transfer.owner, operation_id);
+        let locator = PendingPayoutLocator {
+            kind: transfer.payout_kind,
+            vault_id: transfer.vault_id,
+            recipient: transfer.owner,
+            redemption_block_index: None,
+        };
+        self.pending_payout_index.insert(operation_id, locator);
+        match transfer.payout_kind {
+            PendingPayoutKind::Margin => {
+                self.pending_margin_transfers.insert(key, transfer);
+            }
+            PendingPayoutKind::Excess => {
+                self.pending_excess_transfers.insert(key, transfer);
+            }
+            PendingPayoutKind::Redemption => {
+                unreachable!("redemptions use insert_pending_redemption")
+            }
+        }
+    }
+
+    pub fn insert_pending_redemption(&mut self, block_index: u64, transfer: PendingMarginTransfer) {
+        assert!(
+            transfer.operation_id != 0,
+            "pending payout operation ID must be nonzero"
+        );
+        assert!(
+            !self
+                .pending_payout_index
+                .contains_key(&transfer.operation_id),
+            "pending payout operation ID collision: {}",
+            transfer.operation_id
+        );
+        self.pending_payout_index.insert(
+            transfer.operation_id,
+            PendingPayoutLocator {
+                kind: PendingPayoutKind::Redemption,
+                vault_id: transfer.vault_id,
+                recipient: transfer.owner,
+                redemption_block_index: Some(block_index),
+            },
+        );
+        self.pending_redemption_transfer
+            .insert(block_index, transfer);
+    }
+
+    pub fn get_pending_payout(
+        &self,
+        operation_id: u128,
+    ) -> Option<(PendingPayoutKind, PendingMarginTransfer)> {
+        let locator = self.pending_payout_index.get(&operation_id)?;
+        let transfer = match locator.kind {
+            PendingPayoutKind::Margin => self.pending_margin_transfers.get(&(
+                locator.vault_id,
+                locator.recipient,
+                operation_id,
+            )),
+            PendingPayoutKind::Excess => self.pending_excess_transfers.get(&(
+                locator.vault_id,
+                locator.recipient,
+                operation_id,
+            )),
+            PendingPayoutKind::Redemption => self
+                .pending_redemption_transfer
+                .get(&locator.redemption_block_index?),
+        }?;
+        Some((locator.kind, *transfer))
+    }
+
+    pub fn remove_pending_payout(&mut self, operation_id: u128) -> Option<PendingMarginTransfer> {
+        let locator = self.pending_payout_index.remove(&operation_id)?;
+        match locator.kind {
+            PendingPayoutKind::Margin => self.pending_margin_transfers.remove(&(
+                locator.vault_id,
+                locator.recipient,
+                operation_id,
+            )),
+            PendingPayoutKind::Excess => self.pending_excess_transfers.remove(&(
+                locator.vault_id,
+                locator.recipient,
+                operation_id,
+            )),
+            PendingPayoutKind::Redemption => self
+                .pending_redemption_transfer
+                .remove(&locator.redemption_block_index?),
+        }
+    }
+
+    pub fn mutate_pending_payout<F>(&mut self, operation_id: u128, f: F) -> bool
+    where
+        F: FnOnce(&mut PendingMarginTransfer),
+    {
+        let Some(locator) = self.pending_payout_index.get(&operation_id).copied() else {
+            return false;
+        };
+        let transfer = match locator.kind {
+            PendingPayoutKind::Margin => self.pending_margin_transfers.get_mut(&(
+                locator.vault_id,
+                locator.recipient,
+                operation_id,
+            )),
+            PendingPayoutKind::Excess => self.pending_excess_transfers.get_mut(&(
+                locator.vault_id,
+                locator.recipient,
+                operation_id,
+            )),
+            PendingPayoutKind::Redemption => self
+                .pending_redemption_transfer
+                .get_mut(&locator.redemption_block_index.unwrap_or_default()),
+        };
+        if let Some(transfer) = transfer {
+            f(transfer);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn rebuild_pending_payout_index(&mut self) {
+        self.pending_payout_index.clear();
+        for (kind, rows) in [
+            (PendingPayoutKind::Margin, &self.pending_margin_transfers),
+            (PendingPayoutKind::Excess, &self.pending_excess_transfers),
+        ] {
+            for ((vault_id, recipient, operation_id), _) in rows {
+                self.pending_payout_index.insert(
+                    *operation_id,
+                    PendingPayoutLocator {
+                        kind,
+                        vault_id: *vault_id,
+                        recipient: *recipient,
+                        redemption_block_index: None,
+                    },
+                );
+            }
+        }
+        for (block_index, transfer) in &self.pending_redemption_transfer {
+            self.pending_payout_index.insert(
+                transfer.operation_id,
+                PendingPayoutLocator {
+                    kind: PendingPayoutKind::Redemption,
+                    vault_id: transfer.vault_id,
+                    recipient: transfer.owner,
+                    redemption_block_index: Some(*block_index),
+                },
+            );
+        }
+    }
+
     /// True iff `caller` may set the manual price for `(chain_id, symbol)`:
     /// the developer may set any pair; the narrowly-scoped price-pusher principal
     /// (audit F-01) may set ONLY the pairs in `price_pusher_allowed`. Every other
@@ -6057,6 +6591,11 @@ impl State {
             self.pending_excess_transfers,
             other.pending_excess_transfers,
             "pending_excess_transfers does not match"
+        );
+        ensure_eq!(
+            self.pending_payout_index,
+            other.pending_payout_index,
+            "pending_payout_index does not match"
         );
         ensure_eq!(
             self.principal_to_vault_ids,
@@ -9476,6 +10015,342 @@ mod tests {
     }
 
     #[test]
+    fn pending_payouts_for_same_recipient_keep_distinct_operation_identity() {
+        let mut state = test_state();
+        let owner = Principal::from_slice(&[1, 2, 3]);
+        for operation_id in [41_u128, 42_u128] {
+            state.insert_pending_payout(PendingMarginTransfer {
+                vault_id: 7,
+                operation_id,
+                payout_kind: PendingPayoutKind::Margin,
+                owner,
+                margin: ICP::new(100),
+                collateral_type: state.icp_collateral_type(),
+                retry_count: 0,
+                op_nonce: operation_id,
+                ledger: Some(Principal::from_slice(&[9])),
+                transfer_amount_raw: Some(90),
+                held_for_manual_retry: false,
+                reconciliation_required: false,
+                in_flight: false,
+                too_old_confirmed: false,
+                history_start_index: None,
+                rearm_schema_version: 0,
+                history_scan: None,
+                history_candidate_seen: false,
+                no_effect_proof: None,
+                history_log_length: None,
+                history_cursor: 0,
+                min_net_collateral_raw: None,
+            });
+        }
+        assert_eq!(state.pending_margin_transfers.len(), 2);
+        assert_eq!(state.get_pending_payout(41).unwrap().1.owner, owner);
+        state.remove_pending_payout(41);
+        assert!(state.get_pending_payout(42).is_some());
+    }
+
+    #[test]
+    fn duplicate_attempt_nonces_quarantine_every_payout_kind() {
+        let mut state = test_state();
+        let owner = Principal::from_slice(&[3]);
+        let collateral_type = state.icp_collateral_type();
+        let row = |operation_id, kind| PendingMarginTransfer {
+            vault_id: 7,
+            operation_id,
+            payout_kind: kind,
+            owner,
+            margin: ICP::new(100),
+            collateral_type,
+            retry_count: 2,
+            op_nonce: 1234,
+            ledger: Some(Principal::from_slice(&[9])),
+            transfer_amount_raw: Some(90),
+            held_for_manual_retry: false,
+            reconciliation_required: false,
+            in_flight: true,
+            too_old_confirmed: false,
+                history_start_index: None,
+                rearm_schema_version: 0,
+                history_scan: None,
+                history_candidate_seen: false,
+                no_effect_proof: None,
+            history_log_length: None,
+            history_cursor: 0,
+            min_net_collateral_raw: None,
+        };
+        let margin = row(51, PendingPayoutKind::Margin);
+        state
+            .pending_margin_transfers
+            .insert((7, owner, 51), margin);
+        let excess = row(52, PendingPayoutKind::Excess);
+        state
+            .pending_excess_transfers
+            .insert((7, owner, 52), excess);
+        let redemption = row(53, PendingPayoutKind::Redemption);
+        state.pending_redemption_transfer.insert(77, redemption);
+
+        assert_eq!(state.quarantine_duplicate_pending_payout_nonces(), 3);
+        for row in state
+            .pending_margin_transfers
+            .values()
+            .chain(state.pending_excess_transfers.values())
+            .chain(state.pending_redemption_transfer.values())
+        {
+            assert_eq!(row.op_nonce, 1234, "migration must not rearm attempts");
+            assert!(row.held_for_manual_retry);
+            assert!(row.reconciliation_required);
+            assert!(!row.in_flight);
+        }
+    }
+
+    #[test]
+    fn bounded_pending_payout_scan_reaches_rows_after_held_prefix() {
+        let mut state = test_state();
+        let owner = Principal::from_slice(&[4]);
+        let collateral_type = state.icp_collateral_type();
+        for operation_id in 1..=205_u128 {
+            state.insert_pending_payout(PendingMarginTransfer {
+                vault_id: 7,
+                operation_id,
+                payout_kind: PendingPayoutKind::Margin,
+                owner,
+                margin: ICP::new(100),
+                collateral_type,
+                retry_count: 0,
+                op_nonce: operation_id + 10_000,
+                ledger: Some(Principal::from_slice(&[9])),
+                transfer_amount_raw: Some(90),
+                held_for_manual_retry: operation_id <= 200,
+                reconciliation_required: operation_id <= 200,
+                in_flight: false,
+                too_old_confirmed: false,
+                history_start_index: None,
+                rearm_schema_version: 0,
+                history_scan: None,
+                history_candidate_seen: false,
+                no_effect_proof: None,
+                history_log_length: None,
+                history_cursor: 0,
+                min_net_collateral_raw: None,
+            });
+        }
+
+        let first = state.next_pending_payout_batch(100);
+        state.advance_pending_payout_scan_cursor(*first.last().unwrap());
+        let second = state.next_pending_payout_batch(100);
+        state.advance_pending_payout_scan_cursor(*second.last().unwrap());
+        let third = state.next_pending_payout_batch(100);
+        assert_eq!(first.len(), 100);
+        assert_eq!(second.len(), 100);
+        assert_eq!(third.len(), 100);
+        assert!((201..=205).all(|id| third.contains(&id)));
+        state.advance_pending_payout_scan_cursor(*third.last().unwrap());
+        assert_eq!(state.pending_payout_scan_cursor, third.last().copied());
+    }
+
+    #[test]
+    fn owner_payout_pages_advance_across_other_owners_rows() {
+        let mut state = test_state();
+        let owner = Principal::from_slice(&[5]);
+        let other = Principal::from_slice(&[6]);
+        let collateral_type = state.icp_collateral_type();
+        for operation_id in 1..=205_u128 {
+            state.insert_pending_payout(PendingMarginTransfer {
+                vault_id: 8,
+                operation_id,
+                payout_kind: PendingPayoutKind::Margin,
+                owner: if operation_id >= 201 { owner } else { other },
+                margin: ICP::new(100),
+                collateral_type,
+                retry_count: 0,
+                op_nonce: operation_id + 20_000,
+                ledger: Some(Principal::from_slice(&[9])),
+                transfer_amount_raw: Some(90),
+                held_for_manual_retry: false,
+                reconciliation_required: false,
+                in_flight: false,
+                too_old_confirmed: false,
+                history_start_index: None,
+                rearm_schema_version: 0,
+                history_scan: None,
+                history_candidate_seen: false,
+                no_effect_proof: None,
+                history_log_length: None,
+                history_cursor: 0,
+                min_net_collateral_raw: None,
+            });
+        }
+
+        let (empty_page, cursor) = state.pending_payout_ids_for_owner(owner, None, 2, 100);
+        assert!(empty_page.is_empty());
+        assert_eq!(cursor, Some(100));
+        let (empty_page, cursor) = state.pending_payout_ids_for_owner(owner, cursor, 2, 100);
+        assert!(empty_page.is_empty());
+        assert_eq!(cursor, Some(200));
+        let (page, cursor) = state.pending_payout_ids_for_owner(owner, cursor, 2, 100);
+        assert_eq!(page, vec![201, 202]);
+        assert_eq!(cursor, Some(202));
+        let (page, cursor) = state.pending_payout_ids_for_owner(owner, cursor, 2, 100);
+        assert_eq!(page, vec![203, 204]);
+        assert_eq!(cursor, Some(204));
+        let (page, cursor) = state.pending_payout_ids_for_owner(owner, cursor, 2, 100);
+        assert_eq!(page, vec![205]);
+        assert_eq!(cursor, None);
+    }
+
+    #[test]
+    fn payout_scan_cursor_advances_only_after_each_receipt_returns() {
+        let mut state = test_state();
+        let owner = Principal::from_slice(&[7]);
+        let collateral_type = state.icp_collateral_type();
+        for operation_id in 1..=205_u128 {
+            state.insert_pending_payout(PendingMarginTransfer {
+                vault_id: 9,
+                operation_id,
+                payout_kind: PendingPayoutKind::Margin,
+                owner,
+                margin: ICP::new(100),
+                collateral_type,
+                retry_count: 0,
+                op_nonce: operation_id + 30_000,
+                ledger: Some(Principal::from_slice(&[9])),
+                transfer_amount_raw: Some(90),
+                held_for_manual_retry: true,
+                reconciliation_required: true,
+                in_flight: false,
+                too_old_confirmed: false,
+                history_start_index: None,
+                rearm_schema_version: 0,
+                history_scan: None,
+                history_candidate_seen: false,
+                no_effect_proof: None,
+                history_log_length: None,
+                history_cursor: 0,
+                min_net_collateral_raw: None,
+            });
+        }
+
+        let interrupted = state.next_pending_payout_batch(100);
+        assert_eq!(interrupted.first(), Some(&1));
+        assert_eq!(state.pending_payout_scan_cursor, None);
+        state.advance_pending_payout_scan_cursor(interrupted[0]);
+        let resumed = state.next_pending_payout_batch(100);
+        assert_eq!(resumed.first(), Some(&2));
+        assert!(resumed.contains(&100), "unprocessed selected rows resume");
+    }
+
+    #[test]
+    fn pending_payout_v7_v8_pair_keys_decode_without_losing_attempt_identity() {
+        #[derive(serde::Serialize)]
+        struct LegacyState {
+            pending: BTreeMap<(VaultId, Principal), PendingMarginTransfer>,
+        }
+        #[derive(serde::Deserialize)]
+        struct CurrentState {
+            #[serde(deserialize_with = "deserialize_pending_keyed")]
+            pending: BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>,
+        }
+        let owner = Principal::from_slice(&[7]);
+        let transfer = PendingMarginTransfer {
+            owner,
+            margin: ICP::new(500),
+            collateral_type: Principal::anonymous(),
+            retry_count: 60,
+            op_nonce: 9001,
+            vault_id: 0,
+            operation_id: 0,
+            payout_kind: PendingPayoutKind::Margin,
+            ledger: None,
+            transfer_amount_raw: None,
+            held_for_manual_retry: false,
+            reconciliation_required: false,
+            in_flight: false,
+            too_old_confirmed: false,
+                history_start_index: None,
+                rearm_schema_version: 0,
+                history_scan: None,
+                history_candidate_seen: false,
+                no_effect_proof: None,
+            history_log_length: None,
+            history_cursor: 0,
+            min_net_collateral_raw: None,
+        };
+        let legacy = LegacyState {
+            pending: BTreeMap::from([((12, owner), transfer)]),
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut bytes).unwrap();
+        let restored: CurrentState = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let (key, value) = restored.pending.into_iter().next().unwrap();
+        assert_eq!(key, (12, owner, 0));
+        assert_eq!(value.op_nonce, 9001);
+        assert_eq!(value.retry_count, 60);
+    }
+
+    #[test]
+    fn old_cbor_payout_rows_migrate_losslessly_to_held_indexed_receipts() {
+        #[derive(serde::Serialize)]
+        struct OldTransfer {
+            owner: Principal,
+            margin: ICP,
+            collateral_type: Principal,
+            retry_count: u8,
+            op_nonce: u128,
+        }
+        #[derive(serde::Serialize)]
+        struct OldState {
+            pending_margin_transfers: BTreeMap<(VaultId, Principal), OldTransfer>,
+            pending_excess_transfers: BTreeMap<(VaultId, Principal), OldTransfer>,
+            pending_redemption_transfer: BTreeMap<u64, OldTransfer>,
+        }
+
+        let owner = Principal::from_slice(&[8]);
+        let old_row = |nonce| OldTransfer {
+            owner,
+            margin: ICP::new(700 + nonce as u64),
+            collateral_type: Principal::anonymous(),
+            retry_count: 4,
+            op_nonce: nonce,
+        };
+        let old = OldState {
+            pending_margin_transfers: BTreeMap::from([((12, owner), old_row(901))]),
+            pending_excess_transfers: BTreeMap::from([((13, owner), old_row(902))]),
+            pending_redemption_transfer: BTreeMap::from([(77, old_row(903))]),
+        };
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&old, &mut encoded).expect("encode V7/V8 payout state");
+        let mut restored: State =
+            ciborium::de::from_reader(encoded.as_slice()).expect("decode old payout fields");
+
+        assert_eq!(restored.pending_margin_transfers.len(), 1);
+        assert_eq!(restored.pending_excess_transfers.len(), 1);
+        assert_eq!(restored.pending_redemption_transfer.len(), 1);
+        assert_eq!(restored.pending_margin_transfers.values().next().unwrap().operation_id, 0);
+        assert_eq!(restored.pending_margin_transfers.values().next().unwrap().ledger, None);
+
+        assert_eq!(restored.migrate_legacy_pending_payout_rows(1_000), 0);
+
+        for (operation_id, row) in [
+            (901, restored.pending_margin_transfers.values().next().unwrap()),
+            (902, restored.pending_excess_transfers.values().next().unwrap()),
+            (903, restored.pending_redemption_transfer.values().next().unwrap()),
+        ] {
+            assert_eq!(row.operation_id, operation_id);
+            assert_eq!(row.op_nonce, operation_id);
+            assert_eq!(row.retry_count, 4);
+            assert_eq!(row.margin, ICP::new(700 + operation_id as u64));
+            assert!(row.held_for_manual_retry);
+            assert!(row.reconciliation_required);
+            assert!(!row.in_flight);
+            assert_eq!(row.ledger, None);
+            assert_eq!(row.transfer_amount_raw, None);
+            assert!(restored.pending_payout_index.contains_key(&operation_id));
+        }
+        assert_eq!(restored.pending_payout_index.len(), 3);
+    }
+
+    #[test]
     fn pending_margin_transfer_minimum_defaults_and_round_trips() {
         let transfer = PendingMarginTransfer {
             owner: Principal::anonymous(),
@@ -9483,6 +10358,22 @@ mod tests {
             collateral_type: Principal::anonymous(),
             retry_count: 1,
             op_nonce: 42,
+            vault_id: 0,
+            operation_id: 42,
+            payout_kind: PendingPayoutKind::Margin,
+            ledger: None,
+            transfer_amount_raw: None,
+            held_for_manual_retry: false,
+            reconciliation_required: false,
+            in_flight: false,
+            too_old_confirmed: false,
+                history_start_index: None,
+                rearm_schema_version: 0,
+                history_scan: None,
+                history_candidate_seen: false,
+                no_effect_proof: None,
+            history_log_length: None,
+            history_cursor: 0,
             min_net_collateral_raw: Some(100),
         };
         let mut encoded = Vec::new();

@@ -27,8 +27,8 @@ use rumi_protocol_backend::{
     CollateralInterestInfo, CollateralSnapshot, CollateralTotals, EventTypeFilter,
     EventsByPrincipalPagedResponse, Fees, ForwardFilteredEventsResponse, GetEventsArg,
     GetEventsFilteredResponse, GetSnapshotsArg, InterestSplitArg, PerCollateralRateCurve,
-    ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus, RedeemQuotedRequest,
-    PreparedRedemptionOffer, RedemptionError, RedemptionOfferRefreshError, RedemptionPreview,
+    PreparedRedemptionOffer, ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus,
+    RedeemQuotedRequest, RedemptionError, RedemptionOfferRefreshError, RedemptionPreview,
     RedemptionQueue, RedemptionQuote, RedemptionResult, ReserveBalance, ReserveRedemptionResult,
     StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee, SupplyAudit, SupplyAuditEntry,
     VaultArgWithToken, VaultHistoryPagedResponse, VaultsPageResponse, XrpSpAbsorbPreflight,
@@ -767,8 +767,10 @@ fn pre_upgrade() {
 
 #[post_upgrade]
 fn post_upgrade(arg: ProtocolArg) {
-    use rumi_protocol_backend::event::replay;
-    use rumi_protocol_backend::storage::{count_events, events, record_event};
+    use rumi_protocol_backend::event::replay_with_pending_payout_events;
+    use rumi_protocol_backend::storage::{
+        count_events, events, pending_payout_events, record_event,
+    };
 
     let start = ic_cdk::api::instruction_counter();
 
@@ -802,12 +804,14 @@ fn post_upgrade(arg: ProtocolArg) {
                 "[upgrade]: no stable state found, replaying {} events",
                 count_events()
             );
-            replay(events()).unwrap_or_else(|e| {
-                ic_cdk::trap(&format!(
-                    "[upgrade]: failed to replay the event log: {:?}",
-                    e
-                ))
-            })
+            replay_with_pending_payout_events(events(), pending_payout_events()).unwrap_or_else(
+                |e| {
+                    ic_cdk::trap(&format!(
+                        "[upgrade]: failed to replay the event log: {:?}",
+                        e
+                    ))
+                },
+            )
         }
     };
     let xrp_guardrail_migration =
@@ -895,63 +899,18 @@ fn post_upgrade(arg: ProtocolArg) {
         }
     });
 
-    // Wave-3 migration: backfill op_nonce on pending transfers carried over from
-    // pre-Wave-3 snapshots so their retries get ledger-side dedup. Without this,
-    // legacy entries stay at op_nonce: 0 (TooOld at the ledger) and never finish.
-    //
-    // Wave-4 LIQ-001: pending_margin_transfers and pending_excess_transfers are now
-    // keyed by (vault_id, owner). Legacy entries from pre-Wave-4 snapshots are
-    // re-keyed transparently by `state::deserialize_pending_keyed`, so by the time
-    // this block runs they already have tuple keys.
-    mutate_state(|s| {
-        let mut backfilled = 0u64;
-        let margin_keys: Vec<(u64, candid::Principal)> = s
-            .pending_margin_transfers
-            .iter()
-            .filter(|(_, t)| t.op_nonce == 0)
-            .map(|(k, _)| *k)
-            .collect();
-        for k in margin_keys {
-            let nonce = s.next_op_nonce();
-            if let Some(t) = s.pending_margin_transfers.get_mut(&k) {
-                t.op_nonce = nonce;
-                backfilled += 1;
-            }
-        }
-        let excess_keys: Vec<(u64, candid::Principal)> = s
-            .pending_excess_transfers
-            .iter()
-            .filter(|(_, t)| t.op_nonce == 0)
-            .map(|(k, _)| *k)
-            .collect();
-        for k in excess_keys {
-            let nonce = s.next_op_nonce();
-            if let Some(t) = s.pending_excess_transfers.get_mut(&k) {
-                t.op_nonce = nonce;
-                backfilled += 1;
-            }
-        }
-        let redemption_ids: Vec<u64> = s
-            .pending_redemption_transfer
-            .iter()
-            .filter(|(_, t)| t.op_nonce == 0)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in redemption_ids {
-            let nonce = s.next_op_nonce();
-            if let Some(t) = s.pending_redemption_transfer.get_mut(&id) {
-                t.op_nonce = nonce;
-                backfilled += 1;
-            }
-        }
-        if backfilled > 0 {
-            log!(
-                INFO,
-                "[upgrade]: backfilled op_nonce on {} legacy pending transfers (Wave-3 migration)",
-                backfilled
-            );
-        }
+    // CL14: migrate legacy receipts without inventing a replacement attempt
+    // nonce; rows lacking exact ledger arguments remain held for reconciliation.
+    let nonce_collisions = mutate_state(|s| {
+        s.migrate_legacy_pending_payout_rows(ic_cdk::api::time())
     });
+    if nonce_collisions > 0 {
+        log!(
+            INFO,
+            "[upgrade]: quarantined {} pending payout receipts with duplicate ledger attempt nonces",
+            nonce_collisions
+        );
+    }
 
     // One-time: remove PHASMA test collateral and clean up empty vaults
     mutate_state(|s| {
@@ -1061,6 +1020,9 @@ fn post_upgrade(arg: ProtocolArg) {
     );
 
     setup_timers();
+    // Async futures are cancelled by an upgrade. Resume durable payout and
+    // refund queues from stable state instead of waiting for an unrelated call.
+    ic_cdk::spawn(rumi_protocol_backend::process_pending_transfer());
 }
 
 /// Validates that the State has consistent collateral configuration after replay.
@@ -5873,11 +5835,7 @@ const FORWARD_FILTERED_MAX_SCAN: u64 = 2000;
 /// wasm target. Returning `None` means the requested window would end beyond
 /// `usize::MAX`; callers must leave the cursor unchanged rather than advance
 /// to a position they cannot seek to on wasm32.
-fn bounded_forward_event_cursor(
-    start: u64,
-    scan: u64,
-    count: u64,
-) -> Option<(u64, bool)> {
+fn bounded_forward_event_cursor(start: u64, scan: u64, count: u64) -> Option<(u64, bool)> {
     let start_usize = usize::try_from(start).ok()?;
     if start >= count {
         return Some((count, true));
@@ -5902,8 +5860,7 @@ fn scan_events_forward_filtered<I: Iterator<Item = Event>>(
     types_set: Option<&std::collections::HashSet<EventTypeFilter>>,
 ) -> ForwardFilteredEventsResponse {
     let scan = max_scan.min(FORWARD_FILTERED_MAX_SCAN);
-    let Some((next_start, reached_end)) = bounded_forward_event_cursor(start, scan, count)
-    else {
+    let Some((next_start, reached_end)) = bounded_forward_event_cursor(start, scan, count) else {
         return ForwardFilteredEventsResponse {
             events: Vec::new(),
             next_start: start,
@@ -6082,9 +6039,7 @@ fn get_events_by_principal_paged(
     let total_events = rumi_protocol_backend::storage::count_events();
     let scan_length = scan_length.min(MAX_EVENTS_BY_PRINCIPAL_SCAN);
     let bounded_cursor = bounded_forward_event_cursor(scan_start, scan_length, total_events);
-    let scan_end = bounded_cursor
-        .map(|(next, _)| next)
-        .unwrap_or(scan_start);
+    let scan_end = bounded_cursor.map(|(next, _)| next).unwrap_or(scan_start);
 
     let mut events_page: Vec<(u64, Event)> = Vec::new();
     if scan_start < total_events && scan_length > 0 {
@@ -8376,97 +8331,182 @@ fn http_request(req: HttpRequest) -> HttpResponse {
     }
 }
 
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+struct PendingPayoutPage {
+    items: Vec<PendingPayoutView>,
+    next_cursor: Option<u128>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+struct PendingPayoutView {
+    operation_id: u128,
+    kind: rumi_protocol_backend::state::PendingPayoutKind,
+    amount_gross: ICP,
+    amount_net_raw: Option<u64>,
+    minimum_net_raw: Option<u64>,
+    ledger: Option<Principal>,
+    retry_count: u8,
+    held_for_manual_retry: bool,
+    reconciliation_required: bool,
+    too_old_confirmed: bool,
+    hold_reason: Option<String>,
+    redemption_block_index: Option<u64>,
+}
+
+#[candid_method(query)]
+#[query]
+fn get_pending_payouts(cursor: Option<u128>, limit: Option<u16>) -> PendingPayoutPage {
+    let caller = ic_cdk::caller();
+    let page_size = limit.unwrap_or(50).clamp(1, 100) as usize;
+    // The index is global, while this query is owner-filtered. Bound work to
+    // 10x the requested page size and return a continuation cursor even when
+    // this bounded slice contains no rows for the caller.
+    let scan_limit = page_size.saturating_mul(10).clamp(100, 1_000);
+    read_state(|s| {
+        let (ids, next_cursor) =
+            s.pending_payout_ids_for_owner(caller, cursor, page_size, scan_limit);
+        let items = ids
+            .into_iter()
+            .filter_map(|operation_id| {
+                let (kind, transfer) = s.get_pending_payout(operation_id)?;
+                let locator = s.pending_payout_index.get(&operation_id)?;
+                Some(PendingPayoutView {
+                    operation_id,
+                    kind,
+                    amount_gross: transfer.margin,
+                    amount_net_raw: transfer.transfer_amount_raw,
+                    minimum_net_raw: transfer.min_net_collateral_raw,
+                    ledger: transfer.ledger,
+                    retry_count: transfer.retry_count,
+                    held_for_manual_retry: transfer.held_for_manual_retry,
+                    reconciliation_required: transfer.reconciliation_required,
+                    too_old_confirmed: transfer.too_old_confirmed,
+                    hold_reason: if !transfer.held_for_manual_retry
+                        && !transfer.reconciliation_required
+                    {
+                        None
+                    } else if transfer.too_old_confirmed {
+                        Some(if transfer.history_candidate_seen {
+                            "Ledger history contains a transfer with the same source, recipient, and amount; identity is ambiguous and the payout remains held".to_string()
+                        } else if let Some(scan) = transfer.history_scan {
+                            format!("Ledger history reconciliation progress: scanned through block {} of {}", scan.next_index, scan.snapshot_log_length)
+                        } else {
+                            "Attempt exceeded the ledger replay window; complete ledger-history proof is required before any rearm".to_string()
+                        })
+                    } else if transfer.reconciliation_required {
+                        Some("Legacy or upgrade-interrupted receipt lacks a safe automatic reconciliation proof".to_string())
+                    } else if transfer.ledger.is_none() || transfer.transfer_amount_raw.is_none() {
+                        Some("Exact ledger or net amount is not pinned; payout remains held".to_string())
+                    } else if transfer.retry_count >= rumi_protocol_backend::MAX_PENDING_RETRIES {
+                        Some("Automatic retry limit reached; payout remains held".to_string())
+                    } else {
+                        Some("Ledger rejected the pinned transfer arguments; manual reconciliation required".to_string())
+                    },
+                    redemption_block_index: locator.redemption_block_index,
+                })
+            })
+            .collect();
+        PendingPayoutPage { items, next_cursor }
+    })
+}
+
+#[candid_method(update)]
+#[update]
+async fn recover_pending_payout(operation_id: u128) -> Result<bool, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let _guard =
+        rumi_protocol_backend::guard::GuardPrincipal::new(caller, "recover_pending_payout")?;
+    let transfer = read_state(|s| {
+        s.get_pending_payout(operation_id)
+            .map(|(_, transfer)| transfer)
+    });
+    let Some(transfer) = transfer else {
+        return Err(ProtocolError::GenericError(
+            "No pending payout with this operation ID".to_string(),
+        ));
+    };
+    if transfer.owner != caller {
+        return Err(ProtocolError::GenericError(
+            "Only the payout owner can recover it".to_string(),
+        ));
+    }
+    if transfer.held_for_manual_retry || transfer.reconciliation_required {
+        if !transfer.too_old_confirmed {
+            return Err(ProtocolError::GenericError(
+                "Payout is held for manual reconciliation; it was not resent".to_string(),
+            ));
+        }
+        match rumi_protocol_backend::payout_history::advance_owner_rearm(operation_id, caller)
+            .await
+            .map_err(ProtocolError::GenericError)?
+        {
+            rumi_protocol_backend::payout_history::PayoutRearmProgress::Rearmed => {
+                rumi_protocol_backend::process_one_pending_payout(operation_id).await;
+                return Ok(read_state(|s| s.get_pending_payout(operation_id).is_none()));
+            }
+            rumi_protocol_backend::payout_history::PayoutRearmProgress::Scanning
+            | rumi_protocol_backend::payout_history::PayoutRearmProgress::CandidateHeld
+            | rumi_protocol_backend::payout_history::PayoutRearmProgress::UnsupportedHeld => {
+                return Ok(false);
+            }
+        }
+    }
+    rumi_protocol_backend::process_one_pending_payout(operation_id).await;
+    Ok(read_state(|s| s.get_pending_payout(operation_id).is_none()))
+}
+
 #[candid_method(update)]
 #[update]
 async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> {
     let caller = ic_cdk::caller();
-    // ASYNC-003: serialize per-caller so two concurrent manual recoveries cannot
-    // both pay out the same pending entry (the entry is only removed AFTER the
-    // await below). Defense-in-depth on top of the nonce-dedup fix.
     let _guard =
         rumi_protocol_backend::guard::GuardPrincipal::new(caller, "recover_pending_transfer")?;
-
-    // Wave-4 LIQ-001: pending_margin_transfers and pending_excess_transfers are
-    // keyed by (vault_id, owner). Look up the entry that belongs to the caller.
-    let key = (vault_id, caller);
-    let transfer_info = read_state(|s| {
-        if let Some(t) = s.pending_margin_transfers.get(&key).cloned() {
-            Some(("margin", t))
-        } else {
-            s.pending_excess_transfers
-                .get(&key)
-                .cloned()
-                .map(|t| ("excess", t))
-        }
+    let operation_ids = read_state(|s| {
+        s.pending_payout_index
+            .iter()
+            .filter_map(|(id, locator)| {
+                if locator.vault_id != vault_id
+                    || !matches!(
+                        locator.kind,
+                        rumi_protocol_backend::state::PendingPayoutKind::Margin
+                            | rumi_protocol_backend::state::PendingPayoutKind::Excess
+                    )
+                {
+                    return None;
+                }
+                s.get_pending_payout(*id)
+                    .and_then(|(_, transfer)| (transfer.owner == caller).then_some(*id))
+            })
+            .collect::<Vec<_>>()
     });
-
-    if let Some((source, transfer)) = transfer_info {
-        // Look up per-collateral config for ledger and fee; fall back to global ICP defaults
-        let (ledger, transfer_fee) =
-            read_state(
-                |s| match s.get_collateral_config(&transfer.collateral_type) {
-                    Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
-                    None => (s.icp_ledger_principal, s.icp_ledger_fee),
-                },
-            );
-
-        if transfer.margin <= transfer_fee {
-            // Margin too small to cover fee — clean it up
-            mutate_state(|s| match source {
-                "margin" => {
-                    s.pending_margin_transfers.remove(&key);
-                }
-                _ => {
-                    s.pending_excess_transfers.remove(&key);
-                }
-            });
-            return Err(ProtocolError::GenericError(
-                "Pending transfer margin is too small to cover the ledger fee".to_string(),
-            ));
-        }
-
-        // ASYNC-003: pay with the entry's PERSISTED op_nonce (not a fresh one) so
-        // this manual recovery shares the ledger dedup tuple (created_at_time +
-        // memo) with process_pending_transfer's timer retry. transfer_idempotent
-        // converts the ledger's Duplicate response to Ok, so a concurrent timer
-        // retry and this manual recovery can never double-pay the owner.
-        let result = management::transfer_collateral_with_nonce(
-            (transfer.margin - transfer_fee).to_u64(),
-            transfer.owner,
-            ledger,
-            transfer.op_nonce,
-        )
-        .await;
-
-        match result {
-            Ok(block_index) => {
-                mutate_state(|s| match source {
-                    "margin" => {
-                        event::record_margin_transfer(s, vault_id, caller, block_index);
-                    }
-                    _ => {
-                        s.pending_excess_transfers.remove(&key);
-                    }
-                });
-                Ok(true)
-            }
-            Err(error) => {
-                log!(
-                    DEBUG,
-                    "[recover_pending_transfer] failed to transfer margin: {}, via ledger: {}, with error: {}",
-                    transfer.margin,
-                    ledger,
-                    error
-                );
-                Err(ProtocolError::TransferError(error))
-            }
-        }
-    } else {
-        // No pending transfer found for this caller + vault
-        Err(ProtocolError::GenericError(
-            "No pending transfer found for this vault".to_string(),
-        ))
+    if operation_ids.is_empty() {
+        return Err(ProtocolError::GenericError(
+            "No pending payout found for this owner and vault".to_string(),
+        ));
     }
+    let any_held = read_state(|s| {
+        operation_ids.iter().any(|operation_id| {
+            s.get_pending_payout(*operation_id)
+                .map(|(_, transfer)| {
+                    transfer.held_for_manual_retry || transfer.reconciliation_required
+                })
+                .unwrap_or(true)
+        })
+    });
+    if any_held {
+        return Err(ProtocolError::GenericError(
+            "At least one payout is held for ledger-history reconciliation; none were resent"
+                .to_string(),
+        ));
+    }
+    for operation_id in &operation_ids {
+        rumi_protocol_backend::process_one_pending_payout(*operation_id).await;
+    }
+    Ok(read_state(|s| {
+        operation_ids
+            .iter()
+            .all(|id| s.get_pending_payout(*id).is_none())
+    }))
 }
 
 // Add treasury configuration endpoint (developer only)
@@ -12000,9 +12040,7 @@ fn get_pending_stability_pool_interest_notification_count() -> u64 {
 }
 
 fn can_inspect_held_interest_notifications(caller: Principal, developer: Principal) -> bool {
-    caller != Principal::anonymous()
-        && developer != Principal::anonymous()
-        && caller == developer
+    caller != Principal::anonymous() && developer != Principal::anonymous() && caller == developer
 }
 
 /// Page durable pool-interest notifications so operators can inspect legacy
@@ -12013,7 +12051,10 @@ fn can_inspect_held_interest_notifications(caller: Principal, developer: Princip
 fn get_pending_stability_pool_interest_notifications(
     start_after_mint_block: Option<u64>,
     limit: u64,
-) -> Result<Vec<rumi_protocol_backend::state::PendingStabilityPoolInterestNotification>, ProtocolError> {
+) -> Result<
+    Vec<rumi_protocol_backend::state::PendingStabilityPoolInterestNotification>,
+    ProtocolError,
+> {
     let caller = ic_cdk::api::caller();
     if !read_state(|s| can_inspect_held_interest_notifications(caller, s.developer_principal)) {
         return Err(ProtocolError::GenericError(
@@ -12039,7 +12080,9 @@ mod pending_stability_pool_interest_notification_query_tests {
     #[test]
     fn held_interest_rows_are_not_visible_to_anonymous_callers_or_developers() {
         let developer = Principal::from_slice(&[1]);
-        assert!(can_inspect_held_interest_notifications(developer, developer));
+        assert!(can_inspect_held_interest_notifications(
+            developer, developer
+        ));
         assert!(!can_inspect_held_interest_notifications(
             Principal::anonymous(),
             developer,
@@ -12611,7 +12654,6 @@ async fn register_icrc_collateral_token(
     arg: rumi_protocol_backend::AddCollateralArg,
     exact_risk_parameters: Option<IcrcCollateralRiskParameters>,
 ) -> Result<(), ProtocolError> {
-
     // Check it doesn't already exist
     let already_exists = read_state(|s| s.collateral_configs.contains_key(&arg.ledger_canister_id));
     if already_exists {
@@ -12688,8 +12730,7 @@ async fn register_icrc_collateral_token(
             interest_rate_apr: Ratio::from_f64(arg.interest_rate_apr),
             redemption_fee_floor: Ratio::from_f64(arg.redemption_fee_floor.unwrap_or(0.005)),
             redemption_fee_ceiling: Ratio::from_f64(arg.redemption_fee_ceiling.unwrap_or(0.05)),
-            recovery_target_cr: borrow_threshold_ratio
-                * read_state(|s| s.recovery_cr_multiplier),
+            recovery_target_cr: borrow_threshold_ratio * read_state(|s| s.recovery_cr_multiplier),
             recovery_borrowing_fee: None,
             recovery_interest_rate_apr: None,
             healthy_cr: None,

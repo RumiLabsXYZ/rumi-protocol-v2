@@ -469,12 +469,16 @@ type Event = variant {
     display_color : opt text;
   };
   redemption_on_vaults : record {
+    payout_operation_id : opt nat;
     icusd_amount : nat64;
+    payout_ledger : opt principal;
     icusd_block_index : nat64;
     owner : principal;
+    payout_transfer_amount_raw : opt nat64;
     timestamp : opt nat64;
     payout_collateral_raw : opt nat64;
     fee_amount : nat64;
+    payout_attempt_nonce : opt nat;
     collateral_type : opt principal;
     min_net_collateral_raw : opt nat64;
     vault_redemptions : opt vec VaultRedemption;
@@ -496,7 +500,9 @@ type Event = variant {
     collateral_type : principal;
   };
   margin_transfer : record {
+    payout_kind : opt PendingPayoutKind;
     block_index : nat64;
+    operation_id : opt nat;
     vault_id : nat64;
     timestamp : opt nat64;
   };
@@ -737,6 +743,7 @@ type Event = variant {
   };
   redemption_transfered : record {
     icusd_block_index : nat64;
+    operation_id : opt nat;
     icp_block_index : nat64;
     timestamp : opt nat64;
   };
@@ -926,6 +933,25 @@ type PendingLiquidationV1 = record {
   tier : LiquidationTier;
   debt_to_clear_e8s : nat;
   collateral_reserved_native : nat;
+};
+type PendingPayoutKind = variant { Margin; Redemption; Excess };
+type PendingPayoutPage = record {
+  next_cursor : opt nat;
+  items : vec PendingPayoutView;
+};
+type PendingPayoutView = record {
+  too_old_confirmed : bool;
+  retry_count : nat8;
+  kind : PendingPayoutKind;
+  minimum_net_raw : opt nat64;
+  operation_id : nat;
+  redemption_block_index : opt nat64;
+  hold_reason : opt text;
+  amount_gross : nat64;
+  reconciliation_required : bool;
+  amount_net_raw : opt nat64;
+  ledger : opt principal;
+  held_for_manual_retry : bool;
 };
 type PendingStabilityPoolInterestNotification = record {
   source_mint_block : nat64;
@@ -1560,6 +1586,7 @@ service : (ProtocolArg) -> {
   get_pending_3usd_refunds : () -> (vec PendingThreeUsdRefund) query;
   get_pending_amm1_donations_count : () -> (nat64) query;
   get_pending_chain_burn_aging : () -> (vec PendingChainBurnAging) query;
+  get_pending_payouts : (opt nat, opt nat16) -> (PendingPayoutPage) query;
   get_pending_stability_pool_interest_notification_count : () -> (nat64) query;
   get_pending_stability_pool_interest_notifications : (opt nat64, nat64) -> (
       Result_9,
@@ -1636,6 +1663,7 @@ service : (ProtocolArg) -> {
   prepare_redemption_offer : (nat64) -> (Result_17);
   provide_liquidity : (nat64) -> (Result_1);
   reconcile_chain_supply : (nat32) -> (Result_18);
+  recover_pending_payout : (nat) -> (Result_19);
   recover_pending_transfer : (nat64) -> (Result_19);
   recover_stuck_chain_vault : (nat32, nat64) -> (Result);
   redeem_collateral : (principal, nat64) -> (Result_4);

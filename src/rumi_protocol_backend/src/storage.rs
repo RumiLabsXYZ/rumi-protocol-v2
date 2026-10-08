@@ -23,11 +23,16 @@ const STATE_MEMORY_ID: MemoryId = MemoryId::new(4);
 // which matches today's behaviour.
 const EVENT_TS_INDEX_MEMORY_ID: MemoryId = MemoryId::new(5);
 const EVENT_TS_DATA_MEMORY_ID: MemoryId = MemoryId::new(6);
+// Private payout-obligation journal. Keeping these records outside `Event`
+// preserves the variant set returned by the long-lived public get_events API.
+const PAYOUT_EVENT_INDEX_MEMORY_ID: MemoryId = MemoryId::new(7);
+const PAYOUT_EVENT_DATA_MEMORY_ID: MemoryId = MemoryId::new(8);
 
 type VMem = VirtualMemory<DefaultMemoryImpl>;
 type EventLog = StableLog<Vec<u8>, VMem, VMem>;
 type SnapshotLog = StableLog<Vec<u8>, VMem, VMem>;
 type TimestampLog = StableLog<u64, VMem, VMem>;
+type PayoutEventLog = StableLog<Vec<u8>, VMem, VMem>;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> = RefCell::new(
@@ -69,6 +74,96 @@ thread_local! {
                   ).expect("failed to initialize event timestamp log")
               )
         );
+
+    static PAYOUT_EVENTS: RefCell<PayoutEventLog> = MEMORY_MANAGER
+        .with(|m|
+              RefCell::new(
+                  StableLog::init(
+                      m.borrow().get(PAYOUT_EVENT_INDEX_MEMORY_ID),
+                      m.borrow().get(PAYOUT_EVENT_DATA_MEMORY_ID)
+                  ).expect("failed to initialize private payout event log")
+              )
+        );
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingPayoutJournalEntry {
+    /// Number of public Event records already appended when this transition
+    /// was recorded. Replay uses this to interleave both append-only journals.
+    pub after_event_count: u64,
+    pub event: crate::event::PendingPayoutEvent,
+}
+
+pub struct PendingPayoutEventIterator {
+    buf: Vec<u8>,
+    pos: u64,
+}
+
+impl Iterator for PendingPayoutEventIterator {
+    type Item = PendingPayoutJournalEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        PAYOUT_EVENTS.with(|log| {
+            let log = log.borrow();
+            match log.read_entry(self.pos, &mut self.buf) {
+                Ok(()) => {
+                    self.pos = self.pos.saturating_add(1);
+                    Some(
+                        ciborium::de::from_reader(&self.buf[..])
+                            .expect("failed to decode private payout event"),
+                    )
+                }
+                Err(NoSuchEntry) => None,
+            }
+        })
+    }
+}
+
+pub fn pending_payout_events() -> PendingPayoutEventIterator {
+    PendingPayoutEventIterator {
+        buf: Vec::new(),
+        pos: 0,
+    }
+}
+
+pub fn record_pending_payout_event(event: &crate::event::PendingPayoutEvent) {
+    let entry = PendingPayoutJournalEntry {
+        after_event_count: count_events(),
+        event: event.clone(),
+    };
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&entry, &mut bytes)
+        .expect("failed to encode private payout event");
+    PAYOUT_EVENTS.with(|log| {
+        log.borrow_mut()
+            .append(&bytes)
+            .expect("failed to append private payout event");
+    });
+}
+
+#[cfg(test)]
+mod pending_payout_journal_tests {
+    use super::PendingPayoutJournalEntry;
+    use crate::event::PendingPayoutEvent;
+    use candid::Principal;
+
+    #[test]
+    fn private_journal_entry_round_trips_from_stable_cbor() {
+        let entry = PendingPayoutJournalEntry {
+            after_event_count: 7,
+            event: PendingPayoutEvent::TooOld {
+                operation_id: 11,
+                attempt_nonce: 12,
+                owner: Principal::from_slice(&[1, 2, 3]),
+                timestamp: Some(99),
+            },
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&entry, &mut bytes).expect("encode private journal entry");
+        let decoded: PendingPayoutJournalEntry =
+            ciborium::de::from_reader(bytes.as_slice()).expect("decode private journal entry");
+        assert_eq!(decoded, entry);
+    }
 }
 
 pub struct EventIterator {
