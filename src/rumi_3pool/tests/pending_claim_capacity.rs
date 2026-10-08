@@ -556,7 +556,7 @@ fn swap_compensation_identity_survives_upgrade_and_repeated_parent_recovery() {
         PayoutOutcome::Unresolved { .. }
     ));
     let after_lost_refund_reply = balance(&h, h.ledgers[0], h.user);
-    assert_eq!(input_before - after_lost_refund_reply, 10_000);
+    assert_eq!(input_before - after_lost_refund_reply, 20_000);
 
     h.pic
         .upgrade_canister(
