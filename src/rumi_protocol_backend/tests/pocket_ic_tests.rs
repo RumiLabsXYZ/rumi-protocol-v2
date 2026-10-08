@@ -4218,11 +4218,10 @@ fn test_3usd_reserves_liquidation_happy_path() {
     let three_usd_consumed = three_usd_amount - sp_3usd_after;
     assert_eq!(three_usd_consumed, three_usd_to_send, "Consumed 3USD should match requested amount");
 
-    // Verify 3USD arrived in reserves subaccount
-    let reserves_subaccount = rumi_protocol_backend::management::protocol_3usd_reserves_subaccount();
-    let reserves_balance = get_balance(&pic, three_usd_ledger, protocol_id, Some(reserves_subaccount));
-    log(&format!("📊 Reserves subaccount balance: {}", reserves_balance));
-    assert_eq!(reserves_balance, three_usd_to_send, "Reserves subaccount should hold the transferred 3USD");
+    // The in-tree 3pool LP ledger records ICRC-3 transfer subaccounts but
+    // keeps balances owner-keyed. The SP balance delta above and the reserve
+    // counter below are meaningful; this query cannot prove physical
+    // subaccount isolation.
 
     // Verify: protocol_3usd_reserves state was incremented
     let reserves_state = pic.query_call(

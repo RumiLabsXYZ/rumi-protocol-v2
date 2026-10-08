@@ -357,6 +357,7 @@ type Event = variant {
     amount : nat64;
   };
   set_bot_cr_tolerance_bps : record { bps : nat64 };
+  bot_claim_generation_reserved : record { generation : nat64 };
   collateral_withdrawn : record {
     block_index : nat64;
     vault_id : nat64;
@@ -680,6 +681,7 @@ type Event = variant {
   };
   set_three_pool_canister : record { canister : principal };
   set_liquidation_bonus : record { rate : text };
+  bot_proof_mode_enabled;
   reserve_redemption : record {
     icusd_amount : nat64;
     icusd_block_index : nat64;
@@ -710,6 +712,12 @@ type Event = variant {
     timestamp : nat64;
   };
   set_redemption_fee_ceiling : record { rate : text };
+  bot_payment_proof_consumed : record {
+    block_index : nat64;
+    claim_generation : nat64;
+    vault_id : nat64;
+    ledger_principal : principal;
+  };
   set_deficit_readonly_threshold_e8s : record {
     threshold_e8s : nat64;
     timestamp : nat64;
@@ -921,6 +929,15 @@ type InitArg = record {
 };
 type InterestSplitArg = record { bps : nat64; destination : text };
 type InterpolationMethod = variant { Linear };
+type LegacyPendingThreeUsdRefund = record {
+  retry_count : nat8;
+  vault_id : nat64;
+  amount_e8s : nat64;
+  ledger : principal;
+  op_nonce : nat;
+  stability_pool : principal;
+};
+type LegacySpProofLedger = variant { IcusdBurn; ThreePoolTransfer };
 type LineDisplayPage = record { lines : vec text };
 type LiquidationTier = variant { Bot; StabilityPool };
 type LiquidityStatus = record {
@@ -979,14 +996,6 @@ type PendingStabilityPoolInterestNotification = record {
   pool_principal : principal;
   collateral_type : principal;
   token_ledger : principal;
-};
-type PendingThreeUsdRefund = record {
-  retry_count : nat8;
-  vault_id : nat64;
-  amount_e8s : nat64;
-  ledger : principal;
-  op_nonce : nat;
-  stability_pool : principal;
 };
 type PerCollateralRateCurve = record {
   markers : vec record { float64; float64 };
@@ -1301,7 +1310,11 @@ type SpBurnRefundReceipt = record {
   refund_block_index : nat64;
   refund_created_at_time : nat64;
 };
-type SpProofLedger = variant { IcusdBurn; ThreePoolTransfer };
+type SpProofLedger = variant {
+  IcusdBurn;
+  ThreePoolTransfer;
+  ThreePoolTransferDefault;
+};
 type SpWritedownProof = record {
   block_index : nat64;
   ledger_kind : SpProofLedger;
@@ -1337,6 +1350,57 @@ type SupplyAuditEntry = record {
   supply_e8s : nat;
   display_name : text;
   chain_id : nat32;
+};
+type ThreeUsdReserveIngressV2Status = variant {
+  FailedAfterTransferRefunded : record {
+    transfer_block_index : nat64;
+    error : text;
+    ingress_fee_e8s : nat64;
+    refund_receipt : ThreeUsdReserveRefundReceipt;
+    refund_fee_e8s : nat64;
+  };
+  TransferSubmittedOrUnknown;
+  PreTransferRejected : record { reason : text };
+  TransferConfirmed : record { transfer_block_index : nat64 };
+  FailedRefundPending : record {
+    transfer_block_index : nat64;
+    refund_amount_e8s : nat64;
+    error : text;
+  };
+  AdmissionPending;
+  Unseen;
+  Absorbed : record {
+    result : StabilityPoolLiquidationResult;
+    transfer_block_index : nat64;
+    proportional_refund : opt ThreeUsdReserveRefundReceipt;
+    ingress_fee_e8s : nat64;
+  };
+  ReconciliationRequired : record { reason : text };
+  AbsorbedRefundPending : record {
+    result : StabilityPoolLiquidationResult;
+    transfer_block_index : nat64;
+    refund_amount_e8s : nat64;
+  };
+};
+type ThreeUsdReserveIngressV2StatusView = record {
+  status : ThreeUsdReserveIngressV2Status;
+  vault_id : nat64;
+  absorb_id : nat64;
+  stability_pool : principal;
+};
+type ThreeUsdReserveRefundReceipt = record {
+  tuple : ThreeUsdReserveRefundTuple;
+  block_index : nat64;
+};
+type ThreeUsdReserveRefundTuple = record {
+  source_subaccount : opt blob;
+  destination : Account;
+  charged_fee_e8s : nat64;
+  created_at_time_ns : nat64;
+  memo : blob;
+  fee_e8s : opt nat64;
+  amount_e8s : nat64;
+  source_owner : principal;
 };
 type TransferError = variant {
   GenericError : record { message : text; error_code : nat };
@@ -1491,6 +1555,7 @@ type XrpVaultOpenInfo = record {
   vault_id : nat64;
 };
 service : (ProtocolArg) -> {
+  acknowledge_three_usd_reserve_v2_client : () -> (Result);
   add_collateral_token : (AddCollateralArg) -> (Result);
   add_margin_to_vault : (VaultArg) -> (Result_1);
   add_margin_with_deposit : (nat64) -> (Result_1);
@@ -1564,7 +1629,7 @@ service : (ProtocolArg) -> {
     ) query;
   get_collateral_totals : () -> (vec CollateralTotals) query;
   get_consumed_writedown_proofs : () -> (
-      vec record { SpProofLedger; nat64 },
+      vec record { LegacySpProofLedger; nat64 },
     ) query;
   get_deposit_account : (opt principal) -> (Account) query;
   get_dust_liquidation_threshold : () -> (nat64) query;
@@ -1605,7 +1670,7 @@ service : (ProtocolArg) -> {
   get_my_xrp_pending_deposits : () -> (
       vec record { nat64; XrpPendingDeposit },
     ) query;
-  get_pending_3usd_refunds : () -> (vec PendingThreeUsdRefund) query;
+  get_pending_3usd_refunds : () -> (vec LegacyPendingThreeUsdRefund) query;
   get_pending_amm1_donations_count : () -> (nat64) query;
   get_pending_chain_burn_aging : () -> (vec PendingChainBurnAging) query;
   get_pending_payouts : (opt nat, opt nat16) -> (PendingPayoutPage) query;
@@ -1639,6 +1704,9 @@ service : (ProtocolArg) -> {
   get_snapshot_count : () -> (nat64) query;
   get_sp_writedown_disabled : () -> (bool) query;
   get_stability_pool_config : () -> (StabilityPoolConfig) query;
+  get_stability_pool_liquidate_with_reserves_v2_status : (nat64, nat64) -> (
+      ThreeUsdReserveIngressV2StatusView,
+    ) query;
   get_stability_pool_principal : () -> (opt principal) query;
   get_stable_token_enabled : (StableTokenType) -> (bool) query;
   get_supply_audit : () -> (SupplyAudit) query;
@@ -1646,6 +1714,7 @@ service : (ProtocolArg) -> {
       vec record { principal; CollateralStatus },
     ) query;
   get_three_pool_canister : () -> (opt principal) query;
+  get_three_usd_reserve_ingress_enabled : () -> (bool) query;
   get_treasury_principal : () -> (opt principal) query;
   get_treasury_stats : () -> (TreasuryStats) query;
   get_vault_count : () -> (nat64) query;
@@ -1686,6 +1755,11 @@ service : (ProtocolArg) -> {
   provide_liquidity : (nat64) -> (Result_1);
   reconcile_chain_supply : (nat32) -> (Result_18);
   recover_pending_payout : (nat) -> (Result_19);
+  reconcile_three_usd_reserve_ingress_candidate_block : (
+      nat64,
+      nat64,
+      nat64,
+    ) -> (Result);
   recover_pending_transfer : (nat64) -> (Result_19);
   recover_stuck_chain_vault : (nat32, nat64) -> (Result);
   redeem_collateral : (principal, nat64) -> (Result_4);
@@ -1786,6 +1860,7 @@ service : (ProtocolArg) -> {
   set_stable_ledger_principal : (StableTokenType, principal) -> (Result);
   set_stable_token_enabled : (StableTokenType, bool) -> (Result);
   set_three_pool_canister : (principal) -> (Result);
+  set_three_usd_reserve_ingress_enabled : (bool) -> (Result);
   set_treasury_principal : (principal) -> (Result);
   set_vault_check_tick_interval_secs : (nat64) -> (Result);
   set_xrc_fetch_interval_secs : (nat64) -> (Result);
@@ -1815,6 +1890,13 @@ service : (ProtocolArg) -> {
   stability_pool_liquidate_with_reserves : (nat64, nat64, nat64, principal) -> (
       Result_26,
     );
+  stability_pool_liquidate_with_reserves_v2 : (
+      nat64,
+      nat64,
+      nat64,
+      nat64,
+      principal,
+    ) -> (Result_26);
   stability_pool_liquidate_xrp_vault : (XrpSpAbsorbRequest) -> (Result_28);
   stability_pool_preflight_chain_absorb : (nat64, nat64) -> (Result);
   stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_29);

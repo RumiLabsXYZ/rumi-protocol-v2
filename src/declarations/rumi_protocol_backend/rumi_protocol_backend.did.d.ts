@@ -1105,6 +1105,16 @@ export interface InitArg {
 }
 export interface InterestSplitArg { 'bps' : bigint, 'destination' : string }
 export type InterpolationMethod = { 'Linear' : null };
+export interface LegacyPendingThreeUsdRefund {
+  'retry_count' : number,
+  'vault_id' : bigint,
+  'amount_e8s' : bigint,
+  'ledger' : Principal,
+  'op_nonce' : bigint,
+  'stability_pool' : Principal,
+}
+export type LegacySpProofLedger = { 'IcusdBurn' : null } |
+  { 'ThreePoolTransfer' : null };
 export interface LineDisplayPage { 'lines' : Array<string> }
 export type LiquidationTier = { 'Bot' : null } |
   { 'StabilityPool' : null };
@@ -1171,14 +1181,6 @@ export interface PendingStabilityPoolInterestNotification {
   'pool_principal' : Principal,
   'collateral_type' : Principal,
   'token_ledger' : Principal,
-}
-export interface PendingThreeUsdRefund {
-  'retry_count' : number,
-  'vault_id' : bigint,
-  'amount_e8s' : bigint,
-  'ledger' : Principal,
-  'op_nonce' : bigint,
-  'stability_pool' : Principal,
 }
 export interface PerCollateralRateCurve {
   'markers' : Array<[number, number]>,
@@ -1515,7 +1517,8 @@ export interface SpBurnRefundReceipt {
   'refund_created_at_time' : bigint,
 }
 export type SpProofLedger = { 'IcusdBurn' : null } |
-  { 'ThreePoolTransfer' : null };
+  { 'ThreePoolTransfer' : null } |
+  { 'ThreePoolTransferDefault' : null };
 export interface SpWritedownProof {
   'block_index' : bigint,
   'ledger_kind' : SpProofLedger,
@@ -1555,6 +1558,63 @@ export interface SupplyAuditEntry {
   'supply_e8s' : bigint,
   'display_name' : string,
   'chain_id' : number,
+}
+export type ThreeUsdReserveIngressV2Status = {
+    'FailedAfterTransferRefunded' : {
+      'transfer_block_index' : bigint,
+      'error' : string,
+      'ingress_fee_e8s' : bigint,
+      'refund_receipt' : ThreeUsdReserveRefundReceipt,
+      'refund_fee_e8s' : bigint,
+    }
+  } |
+  { 'TransferSubmittedOrUnknown' : null } |
+  { 'PreTransferRejected' : { 'reason' : string } } |
+  { 'TransferConfirmed' : { 'transfer_block_index' : bigint } } |
+  {
+    'FailedRefundPending' : {
+      'transfer_block_index' : bigint,
+      'refund_amount_e8s' : bigint,
+      'error' : string,
+    }
+  } |
+  { 'AdmissionPending' : null } |
+  { 'Unseen' : null } |
+  {
+    'Absorbed' : {
+      'result' : StabilityPoolLiquidationResult,
+      'transfer_block_index' : bigint,
+      'proportional_refund' : [] | [ThreeUsdReserveRefundReceipt],
+      'ingress_fee_e8s' : bigint,
+    }
+  } |
+  { 'ReconciliationRequired' : { 'reason' : string } } |
+  {
+    'AbsorbedRefundPending' : {
+      'result' : StabilityPoolLiquidationResult,
+      'transfer_block_index' : bigint,
+      'refund_amount_e8s' : bigint,
+    }
+  };
+export interface ThreeUsdReserveIngressV2StatusView {
+  'status' : ThreeUsdReserveIngressV2Status,
+  'vault_id' : bigint,
+  'absorb_id' : bigint,
+  'stability_pool' : Principal,
+}
+export interface ThreeUsdReserveRefundReceipt {
+  'tuple' : ThreeUsdReserveRefundTuple,
+  'block_index' : bigint,
+}
+export interface ThreeUsdReserveRefundTuple {
+  'source_subaccount' : [] | [Uint8Array | number[]],
+  'destination' : Account,
+  'charged_fee_e8s' : bigint,
+  'created_at_time_ns' : bigint,
+  'memo' : Uint8Array | number[],
+  'fee_e8s' : [] | [bigint],
+  'amount_e8s' : bigint,
+  'source_owner' : Principal,
 }
 export type TransferError = {
     'GenericError' : { 'message' : string, 'error_code' : bigint }
@@ -1715,6 +1775,7 @@ export interface XrpVaultOpenInfo {
   'vault_id' : bigint,
 }
 export interface _SERVICE {
+  'acknowledge_three_usd_reserve_v2_client' : ActorMethod<[], Result>,
   'add_collateral_token' : ActorMethod<[AddCollateralArg], Result>,
   'add_margin_to_vault' : ActorMethod<[VaultArg], Result_1>,
   'add_margin_with_deposit' : ActorMethod<[bigint], Result_1>,
@@ -1816,7 +1877,7 @@ export interface _SERVICE {
   'get_collateral_totals' : ActorMethod<[], Array<CollateralTotals>>,
   'get_consumed_writedown_proofs' : ActorMethod<
     [],
-    Array<[SpProofLedger, bigint]>
+    Array<[LegacySpProofLedger, bigint]>
   >,
   'get_deposit_account' : ActorMethod<[[] | [Principal]], Account>,
   'get_dust_liquidation_threshold' : ActorMethod<[], bigint>,
@@ -1878,7 +1939,10 @@ export interface _SERVICE {
     [],
     Array<[bigint, XrpPendingDeposit]>
   >,
-  'get_pending_3usd_refunds' : ActorMethod<[], Array<PendingThreeUsdRefund>>,
+  'get_pending_3usd_refunds' : ActorMethod<
+    [],
+    Array<LegacyPendingThreeUsdRefund>
+  >,
   'get_pending_amm1_donations_count' : ActorMethod<[], bigint>,
   'get_pending_chain_burn_aging' : ActorMethod<
     [],
@@ -1925,6 +1989,10 @@ export interface _SERVICE {
   'get_snapshot_count' : ActorMethod<[], bigint>,
   'get_sp_writedown_disabled' : ActorMethod<[], boolean>,
   'get_stability_pool_config' : ActorMethod<[], StabilityPoolConfig>,
+  'get_stability_pool_liquidate_with_reserves_v2_status' : ActorMethod<
+    [bigint, bigint],
+    ThreeUsdReserveIngressV2StatusView
+  >,
   'get_stability_pool_principal' : ActorMethod<[], [] | [Principal]>,
   'get_stable_token_enabled' : ActorMethod<[StableTokenType], boolean>,
   'get_supply_audit' : ActorMethod<[], SupplyAudit>,
@@ -1933,6 +2001,7 @@ export interface _SERVICE {
     Array<[Principal, CollateralStatus]>
   >,
   'get_three_pool_canister' : ActorMethod<[], [] | [Principal]>,
+  'get_three_usd_reserve_ingress_enabled' : ActorMethod<[], boolean>,
   'get_treasury_principal' : ActorMethod<[], [] | [Principal]>,
   'get_treasury_stats' : ActorMethod<[], TreasuryStats>,
   'get_vault_count' : ActorMethod<[], bigint>,
@@ -1992,6 +2061,10 @@ export interface _SERVICE {
   'prepare_redemption_offer' : ActorMethod<[bigint], Result_17>,
   'provide_liquidity' : ActorMethod<[bigint], Result_1>,
   'reconcile_chain_supply' : ActorMethod<[number], Result_18>,
+  'reconcile_three_usd_reserve_ingress_candidate_block' : ActorMethod<
+    [bigint, bigint, bigint],
+    Result
+  >,
   'recover_pending_payout' : ActorMethod<[bigint], Result_19>,
   'recover_pending_transfer' : ActorMethod<[bigint], Result_19>,
   'recover_stuck_chain_vault' : ActorMethod<[number, bigint], Result>,
@@ -2125,6 +2198,7 @@ export interface _SERVICE {
   >,
   'set_stable_token_enabled' : ActorMethod<[StableTokenType, boolean], Result>,
   'set_three_pool_canister' : ActorMethod<[Principal], Result>,
+  'set_three_usd_reserve_ingress_enabled' : ActorMethod<[boolean], Result>,
   'set_treasury_principal' : ActorMethod<[Principal], Result>,
   'set_vault_check_tick_interval_secs' : ActorMethod<[bigint], Result>,
   'set_xrc_fetch_interval_secs' : ActorMethod<[bigint], Result>,
@@ -2157,6 +2231,10 @@ export interface _SERVICE {
   >,
   'stability_pool_liquidate_with_reserves' : ActorMethod<
     [bigint, bigint, bigint, Principal],
+    Result_26
+  >,
+  'stability_pool_liquidate_with_reserves_v2' : ActorMethod<
+    [bigint, bigint, bigint, bigint, Principal],
     Result_26
   >,
   'stability_pool_liquidate_xrp_vault' : ActorMethod<

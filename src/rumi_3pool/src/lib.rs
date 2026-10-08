@@ -1,4 +1,4 @@
-use candid::Principal;
+use candid::{candid_method, Principal};
 use ic_cdk::{query, update, init, pre_upgrade, post_upgrade};
 use ic_canister_log::log;
 use std::cell::Cell;
@@ -3591,6 +3591,17 @@ pub fn icrc2_transfer_from(
 #[query]
 pub fn icrc3_get_blocks(args: Vec<icrc3::GetBlocksArgs>) -> icrc3::GetBlocksResult {
     icrc3::icrc3_get_blocks(args)
+}
+
+/// Ordered transfer-outcome fence for callers reconciling an older ICRC-2
+/// request. Because this is an update, requests from one caller to this
+/// canister execute in send order; the returned log length is a fixed prefix
+/// tip for a subsequent complete ICRC-3 scan. This reveals no more than the
+/// public ICRC-3 log length query.
+#[update]
+#[candid_method(update)]
+pub fn icrc3_ordered_log_tip() -> u64 {
+    storage::blocks::len()
 }
 
 #[query]

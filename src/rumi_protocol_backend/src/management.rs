@@ -404,6 +404,58 @@ pub async fn get_or_refresh_fee(ledger: Principal) -> Result<u64, String> {
     refresh_fee_cache(ledger).await
 }
 
+/// Ledger balance floor for the V2 3USD default account. Only proof-keyed
+/// absorbed backing and durable refund reservations count as obligations.
+pub fn three_usd_default_account_required_balance(ledger: Principal) -> Option<u128> {
+    crate::state::read_state(|s| {
+        // Every V2 refund row must still be backed by its parent ingress
+        // journal. A missing or mismatched journal makes the balance floor
+        // unprovable; never interpret that orphan as free liquidity.
+        let refunds_consistent = s.pending_3usd_refunds.values()
+            .filter(|refund| refund.ledger == ledger
+                && refund.source == crate::state::ThreeUsdRefundSource::DefaultAccount
+                && refund.parent_absorb_id.is_some())
+            .all(|refund| {
+                let key = crate::state::ThreeUsdReserveIngressKey {
+                    stability_pool: refund.stability_pool,
+                    vault_id: refund.vault_id,
+                    absorb_id: refund.parent_absorb_id.unwrap_or_default(),
+                };
+                s.three_usd_reserve_ingress_journals.get(&key).is_some_and(|journal| {
+                    journal.request.ledger == ledger
+                        && journal.protocol_refund_fee_reserve_e8s == refund.amount_e8s
+                        && journal.refund.as_ref().is_some_and(|child| {
+                            child.op_nonce == refund.op_nonce
+                                && child.required_net_credit_e8s == refund.amount_e8s
+                        })
+                })
+            });
+        if !refunds_consistent {
+            return None;
+        }
+        let backing = s.sp_three_usd_reserve_absorb_results_by_proof.values()
+            .filter(|stored| stored.ledger == ledger
+                && stored.proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault)
+            .try_fold(0u128, |sum, stored| {
+                let amount = if stored.icusd_debt_covered_e8s == 0
+                    || stored.result.liquidated_debt >= stored.icusd_debt_covered_e8s {
+                    u128::from(stored.three_usd_amount_e8s)
+                } else {
+                    u128::from(stored.three_usd_amount_e8s)
+                        .checked_mul(u128::from(stored.result.liquidated_debt))?
+                        .checked_div(u128::from(stored.icusd_debt_covered_e8s))?
+                };
+                sum.checked_add(amount)
+            })?;
+        let reservations = s.three_usd_reserve_ingress_journals.values()
+            .filter(|journal| journal.request.ledger == ledger)
+            .try_fold(0u128, |sum, journal| {
+                sum.checked_add(u128::from(journal.protocol_refund_fee_reserve_e8s))
+            })?;
+        backing.checked_add(reservations)
+    })
+}
+
 /// Idempotent ICRC-1 transfer.
 ///
 /// `op_nonce` MUST be stable across retries of the same logical operation
@@ -427,6 +479,18 @@ pub async fn transfer_idempotent(
     op_nonce: u128,
     memo: Option<Memo>,
 ) -> Result<u64, TransferError> {
+    let protects_three_usd_default = from_subaccount.is_none()
+        && crate::state::read_state(|s| s.three_pool_canister == Some(ledger));
+    let _default_account_guard = if protects_three_usd_default {
+        Some(ThreeUsdReserveIngressAdmissionGuard::try_acquire().ok_or_else(|| {
+            TransferError::GenericError {
+                error_code: Nat::from(0u8),
+                message: "3USD default-account transfer is held by an active reserve admission/refund".into(),
+            }
+        })?)
+    } else {
+        None
+    };
     let created_at_time = nonce_to_created_at_time(op_nonce);
     let memo = memo.unwrap_or_else(|| nonce_to_memo(op_nonce));
 
@@ -445,6 +509,31 @@ pub async fn transfer_idempotent(
         })
         .await;
 
+    handle_transfer_outcome(ledger, outer)
+}
+
+/// Idempotent transfer with an explicit, durable fee pin. Use for protocol
+/// refunds whose fee is covered by a bounded capital reservation; BadFee is a
+/// no-effect response and the caller must hold/reconcile before changing it.
+pub async fn transfer_idempotent_pinned_fee(
+    ledger: Principal,
+    from_subaccount: Option<[u8; 32]>,
+    to: Account,
+    amount: u128,
+    op_nonce: u128,
+    fee_e8s: u64,
+) -> Result<u64, TransferError> {
+    let created_at_time = nonce_to_created_at_time(op_nonce);
+    let memo = nonce_to_memo(op_nonce);
+    let client = ICRC1Client { runtime: CdkRuntime, ledger_canister_id: ledger };
+    let outer = client.transfer(TransferArg {
+        from_subaccount,
+        to,
+        fee: Some(Nat::from(fee_e8s)),
+        created_at_time: Some(created_at_time),
+        memo: Some(memo),
+        amount: Nat::from(amount),
+    }).await;
     handle_transfer_outcome(ledger, outer)
 }
 
@@ -478,6 +567,81 @@ pub async fn transfer_from_idempotent(
         .await;
 
     handle_transfer_from_outcome(ledger, outer)
+}
+
+/// Submit the exact ICRC-2 arguments durably recorded by a V2 reserve ingress.
+/// Callers must persist this tuple before invoking the helper and pass the same
+/// value on every retry.
+pub async fn transfer_from_three_usd_ingress_tuple(
+    ledger: Principal,
+    tuple: &crate::state::ThreeUsdReserveIngressTuple,
+) -> Result<u64, TransferFromError> {
+    use icrc_ledger_types::icrc2::transfer_from::TransferFromArgs;
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: ledger,
+    };
+    let outer = client
+        .transfer_from(TransferFromArgs {
+            spender_subaccount: tuple.spender_subaccount,
+            from: tuple.source.clone(),
+            to: tuple.destination.clone(),
+            amount: Nat::from(tuple.amount_e8s),
+            fee: tuple.fee_e8s.map(Nat::from),
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(Memo(tuple.memo.to_vec().into())),
+        })
+        .await;
+    handle_transfer_from_outcome(ledger, outer)
+}
+
+pub fn three_usd_reserve_ingress_journal(
+    key: &crate::state::ThreeUsdReserveIngressKey,
+) -> Option<crate::state::ThreeUsdReserveIngressJournal> {
+    crate::state::read_state(|state| state.three_usd_reserve_ingress_journals.get(key).cloned())
+}
+
+thread_local! {
+    static THREE_USD_INGRESS_IN_FLIGHT:
+        std::cell::RefCell<std::collections::BTreeSet<crate::state::ThreeUsdReserveIngressKey>> =
+        std::cell::RefCell::new(std::collections::BTreeSet::new());
+    static THREE_USD_INGRESS_ADMISSION_IN_FLIGHT: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+/// Serializes V2 pre-pull liquidity checks so two new ingresses cannot both
+/// consume the same protocol-funded refund-fee buffer across inter-canister awaits.
+pub struct ThreeUsdReserveIngressAdmissionGuard;
+
+impl ThreeUsdReserveIngressAdmissionGuard {
+    pub fn try_acquire() -> Option<Self> {
+        THREE_USD_INGRESS_ADMISSION_IN_FLIGHT.with(|active| {
+            if active.replace(true) { None } else { Some(Self) }
+        })
+    }
+}
+
+impl Drop for ThreeUsdReserveIngressAdmissionGuard {
+    fn drop(&mut self) {
+        THREE_USD_INGRESS_ADMISSION_IN_FLIGHT.with(|active| active.set(false));
+    }
+}
+
+pub struct ThreeUsdReserveIngressGuard(crate::state::ThreeUsdReserveIngressKey);
+
+impl ThreeUsdReserveIngressGuard {
+    pub fn try_acquire(key: &crate::state::ThreeUsdReserveIngressKey) -> Option<Self> {
+        THREE_USD_INGRESS_IN_FLIGHT.with(|keys| {
+            keys.borrow_mut().insert(key.clone()).then(|| Self(key.clone()))
+        })
+    }
+}
+
+impl Drop for ThreeUsdReserveIngressGuard {
+    fn drop(&mut self) {
+        THREE_USD_INGRESS_IN_FLIGHT.with(|keys| {
+            keys.borrow_mut().remove(&self.0);
+        });
+    }
 }
 
 fn handle_transfer_outcome(

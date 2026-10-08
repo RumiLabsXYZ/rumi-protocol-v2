@@ -737,6 +737,7 @@ service : (ThreePoolInitArgs) -> {
 
   // ICRC-3 (Transaction Log)
   icrc3_get_blocks : (vec GetBlocksArgs) -> (GetBlocksResult) query;
+  icrc3_ordered_log_tip : () -> (nat64);
   icrc3_get_archives : (GetArchivesArgs) -> (GetArchivesResult) query;
   icrc3_get_tip_certificate : () -> (opt Icrc3DataCertificate) query;
   icrc3_supported_block_types : () -> (vec SupportedBlockType) query;

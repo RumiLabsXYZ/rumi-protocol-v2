@@ -121,6 +121,7 @@ fn init(args: StabilityPoolInitArgs) {
         setup_chain_absorb_auto_timer();
         setup_native_xrp_settle_sweep_timer();
         setup_native_xrp_absorb_recovery_timer();
+        setup_three_usd_absorb_recovery_timer();
         setup_unallocated_interest_forward_retry_timer();
         setup_ledger_reconciliation_timer();
     });
@@ -177,6 +178,7 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
         setup_chain_absorb_auto_timer();
         setup_native_xrp_settle_sweep_timer();
         setup_native_xrp_absorb_recovery_timer();
+        setup_three_usd_absorb_recovery_timer();
         setup_unallocated_interest_forward_retry_timer();
         setup_ledger_reconciliation_timer();
     });
@@ -284,6 +286,15 @@ fn setup_chain_absorb_auto_timer() {
             });
         },
     );
+}
+
+/// Recover terminal 3USD reserve intents independently of the protocol's
+/// current liquidatable-vault scan, which may omit a vault after a partial
+/// absorb or deletion.
+fn setup_three_usd_absorb_recovery_timer() {
+    ic_cdk_timers::set_timer_interval(Duration::from_secs(30), || {
+        ic_cdk::spawn(crate::liquidation::recover_pending_three_usd_absorbs());
+    });
 }
 
 /// A successful backend notification only means the SP has durably received

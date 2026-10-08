@@ -559,6 +559,8 @@ fn call_sp_liquidate_with_reserves(
 struct Fixture {
     pic: PocketIc,
     protocol_id: Principal,
+    xrc_id: Principal,
+    icp_ledger: Principal,
     /// Whichever ledger the SP holds 3USD on AND the protocol resolves
     /// `s.three_pool_canister` to. For the happy/refund-success cases this
     /// is the real `rumi_3pool` LP canister; for the refund-failure case
@@ -758,6 +760,8 @@ fn setup_fixture(three_pool_kind: ThreePoolKind) -> Fixture {
     Fixture {
         pic,
         protocol_id,
+        xrc_id,
+        icp_ledger,
         three_pool_ledger,
         sp_principal,
         developer,
@@ -769,7 +773,7 @@ fn setup_fixture(three_pool_kind: ThreePoolKind) -> Fixture {
 // ─── Tests ───
 
 /// **Happy-path control.** With the kill switch off and the standard
-/// ic-icrc1-ledger backing the 3pool path, a clean reserves liquidation
+/// in-tree 3pool LP ledger backing the reserves path, a clean liquidation
 /// pulls 3USD into the protocol's reserves subaccount, the writedown
 /// commits, `protocol_3usd_reserves` accumulates the pulled amount, and
 /// no refund-side log fires. Pins the success accounting that the
@@ -838,20 +842,10 @@ fn icc_002_pic_happy_path_no_refund_no_orphan() {
         "protocol_3usd_reserves must accumulate the pulled amount on success"
     );
 
-    // Belt-and-suspenders: the protocol's reserves subaccount on the 3pool
-    // ledger must hold the pulled tokens. (Zero-fee ledger so amounts match.)
-    let reserves_subacct_balance = icrc1_balance_of(
-        &f.pic,
-        f.three_pool_ledger,
-        Account {
-            owner: f.protocol_id,
-            subaccount: Some(protocol_3usd_reserves_subaccount()),
-        },
-    );
-    assert_eq!(
-        reserves_subacct_balance, three_usd_amount as u128,
-        "protocol reserves subaccount must hold the pulled 3USD"
-    );
+    // The in-tree 3pool LP ledger records requested subaccounts in ICRC-3 but
+    // aggregates balances by owner. This legacy path checks the SP balance
+    // delta and reserve counter; the P08 proof-bound case checks the exact
+    // transfer tuple. Do not infer physical subaccount isolation here.
 
     // Sanity: no refund log on the happy path.
     let logs = fetch_info_logs(&f.pic, f.protocol_id);
@@ -861,6 +855,377 @@ fn icc_002_pic_happy_path_no_refund_no_orphan() {
             .any(|m| m.contains("after liquidation rollback")),
         "happy path must not emit the Wave-4 refund log; saw logs: {:?}",
         logs
+    );
+}
+
+/// P08-02 integration fence: a proof-verified V2 ingress pulls from the SP's
+/// default account into the backend's default account, and an exact replay
+/// returns the committed result without another pull. The real 3pool canister
+/// supplies ICRC-2 and ICRC-3 behavior; the backend sees the registered SP
+/// principal as caller, matching its production authorization boundary.
+#[test]
+fn p08_02_v2_ingress_is_default_account_proof_bound_and_replay_safe() {
+    use rumi_protocol_backend::{
+        state::PriceSource, AddCollateralArg, StabilityPoolLiquidationResult,
+        ThreeUsdReserveIngressV2Status as Status, ThreeUsdReserveIngressV2StatusView,
+    };
+
+    let f = setup_fixture(ThreePoolKind::Standard);
+    let debt_e8s = 500_000_000u64;
+    let amount_e8s = 500_000_000u64;
+    let disabled_absorb_id = 40u64;
+    let absorb_id = 41u64;
+
+    let enabled: bool = match f
+        .pic
+        .query_call(
+            f.protocol_id,
+            Principal::anonymous(),
+            "get_three_usd_reserve_ingress_enabled",
+            encode_args(()).unwrap(),
+        )
+        .expect("query V2 gate")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 gate"),
+        WasmResult::Reject(message) => panic!("V2 gate query rejected: {message}"),
+    };
+    assert!(!enabled, "V2 reserve ingress must be default-off");
+
+    // The configured 3pool ledger cannot enter the generic collateral payout
+    // path. This must reject before querying ledger metadata.
+    let overlap_registration: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "add_collateral_token",
+            encode_one(AddCollateralArg {
+                ledger_canister_id: f.three_pool_ledger,
+                price_source: PriceSource::Xrc {
+                    base_asset: "3USD".into(),
+                    base_asset_class: Default::default(),
+                    quote_asset: "USD".into(),
+                    quote_asset_class: Default::default(),
+                },
+                liquidation_ratio: 1.33,
+                borrow_threshold_ratio: 1.5,
+                liquidation_bonus: 1.15,
+                borrowing_fee: 0.0,
+                debt_ceiling: u64::MAX,
+                min_vault_debt: 0,
+                interest_rate_apr: 0.0,
+                min_collateral_deposit: 0,
+                display_color: None,
+                redemption_fee_floor: None,
+                redemption_fee_ceiling: None,
+                redemption_tier: None,
+            })
+            .unwrap(),
+        )
+        .expect("overlap registration call")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode overlap registration"),
+        WasmResult::Reject(message) => panic!("overlap registration rejected: {message}"),
+    };
+    assert!(
+        format!("{overlap_registration:?}").contains("configured 3pool ledger cannot be registered as collateral"),
+        "configured 3pool ledger registration must fail closed: {overlap_registration:?}"
+    );
+
+    // Conversely, an already registered collateral ledger cannot replace the
+    // configured 3pool, and the rejected transition leaves the old value.
+    let overlap_setter: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "set_three_pool_canister",
+            encode_one(f.icp_ledger).unwrap(),
+        )
+        .expect("overlap setter call")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode overlap setter"),
+        WasmResult::Reject(message) => panic!("overlap setter rejected: {message}"),
+    };
+    assert!(
+        format!("{overlap_setter:?}").contains("registered collateral ledger cannot be configured as 3pool"),
+        "registered collateral cannot replace 3pool: {overlap_setter:?}"
+    );
+    let configured_pool: Option<Principal> = match f
+        .pic
+        .query_call(
+            f.protocol_id,
+            Principal::anonymous(),
+            "get_three_pool_canister",
+            encode_args(()).unwrap(),
+        )
+        .expect("query configured 3pool after rejected setter")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode configured 3pool"),
+        WasmResult::Reject(message) => panic!("configured 3pool query rejected: {message}"),
+    };
+    assert_eq!(configured_pool, Some(f.three_pool_ledger));
+
+    // The disabled endpoint must reject before a transfer, even for the
+    // otherwise valid registered Stability Pool identity.
+    let disabled_call = f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.sp_principal,
+            "stability_pool_liquidate_with_reserves_v2",
+            encode_args((
+                f.vault_id,
+                disabled_absorb_id,
+                debt_e8s,
+                amount_e8s,
+                f.three_pool_ledger,
+            ))
+            .unwrap(),
+        )
+        .expect("disabled V2 call transport");
+    let disabled_result: Result<StabilityPoolLiquidationResult, ProtocolError> = match disabled_call {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode disabled V2 result"),
+        WasmResult::Reject(message) => panic!("disabled V2 call rejected: {message}"),
+    };
+    assert!(disabled_result.is_err(), "disabled V2 ingress must not run");
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)),
+        f.sp_three_pool_balance as u128,
+        "disabled V2 ingress must not pull from the Stability Pool"
+    );
+    let disabled_status: ThreeUsdReserveIngressV2StatusView = match f
+        .pic
+        .query_call(
+            f.protocol_id,
+            f.sp_principal,
+            "get_stability_pool_liquidate_with_reserves_v2_status",
+            encode_args((f.vault_id, disabled_absorb_id)).unwrap(),
+        )
+        .expect("query disabled V2 terminal status")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode disabled terminal status"),
+        WasmResult::Reject(message) => panic!("disabled status rejected: {message}"),
+    };
+    assert!(matches!(
+        disabled_status.status,
+        Status::PreTransferRejected { .. }
+    ), "disabled gate should be a durable typed no-pull terminal");
+
+    let acknowledged: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.sp_principal,
+            "acknowledge_three_usd_reserve_v2_client",
+            encode_args(()).unwrap(),
+        )
+        .expect("acknowledge V2 client interface")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 acknowledgement"),
+        WasmResult::Reject(message) => panic!("V2 acknowledgement rejected: {message}"),
+    };
+    acknowledged.expect("registered Stability Pool may acknowledge V2 in the isolated test canister");
+
+    let enabled_result: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "set_three_usd_reserve_ingress_enabled",
+            encode_one(true).unwrap(),
+        )
+        .expect("enable V2 ingress")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode enable result"),
+        WasmResult::Reject(message) => panic!("enable V2 rejected: {message}"),
+    };
+    enabled_result.expect("developer may enable V2 in the isolated test canister");
+
+    // This endpoint now re-checks vault health after the reserve transfer.
+    // Lower the mock ICP/USD quote and let the normal XRC timer publish it so
+    // the fixture is actually liquidatable (50 ICP * $0.20 / $10 debt = 100%).
+    xrc_set_rate(&f.pic, f.xrc_id, f.developer, "ICP", "USD", 20_000_000);
+    // ICP outliers require three distinct, source-timestamped observations.
+    for _ in 0..3 {
+        f.pic.advance_time(Duration::from_secs(481));
+        for _ in 0..10 {
+            f.pic.tick();
+        }
+    }
+    #[derive(CandidType, Deserialize)]
+    struct PriceView {
+        price_e8s: u128,
+    }
+    let cached_price: PriceView = match f
+        .pic
+        .query_call(
+            f.protocol_id,
+            Principal::anonymous(),
+            "get_icp_usd_price_e8s",
+            encode_args(()).unwrap(),
+        )
+        .expect("query lowered ICP/USD price")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode lowered ICP/USD price"),
+        WasmResult::Reject(message) => panic!("ICP/USD price query rejected: {message}"),
+    };
+    assert_eq!(cached_price.price_e8s, 20_000_000, "mock XRC price must be published before liquidation");
+    assert!(50.0 * 0.2 / 10.0 < 1.33, "test vault must be below the liquidation threshold");
+
+    let pool_cycles_before_approve = f
+        .pic
+        .canister_status(f.three_pool_ledger, Some(Principal::anonymous()))
+        .expect("read isolated 3pool cycles before approval")
+        .cycles;
+    eprintln!("3pool cycles before P08 approval: {}", pool_cycles_before_approve.0);
+    // This focused proof performs several additional ledger calls after the
+    // shared harness's initial setup. Keep the test-only cycle budget separate
+    // from production policy so exhaustion cannot mask the proof assertions.
+    f.pic.add_cycles(f.three_pool_ledger, 2_000_000_000_000);
+
+    icrc2_approve_call(
+        &f.pic,
+        f.three_pool_ledger,
+        f.sp_principal,
+        f.protocol_id,
+        (amount_e8s as u128) * 2,
+    );
+
+    let fee: u64 = match f
+        .pic
+        .query_call(
+            f.three_pool_ledger,
+            Principal::anonymous(),
+            "icrc1_fee",
+            encode_args(()).unwrap(),
+        )
+        .expect("query 3pool ledger fee")
+    {
+        WasmResult::Reply(bytes) => decode_one::<Nat>(&bytes)
+            .expect("decode 3pool fee")
+            .0
+            .try_into()
+            .expect("3pool fee fits u64"),
+        WasmResult::Reject(message) => panic!("3pool fee query rejected: {message}"),
+    };
+    let sp_before = icrc1_balance_of(
+        &f.pic,
+        f.three_pool_ledger,
+        account(f.sp_principal),
+    );
+    let backend_default_before = icrc1_balance_of(
+        &f.pic,
+        f.three_pool_ledger,
+        account(f.protocol_id),
+    );
+    let call_v2 = || {
+        f.pic
+            .update_call(
+                f.protocol_id,
+                f.sp_principal,
+                "stability_pool_liquidate_with_reserves_v2",
+                encode_args((
+                    f.vault_id,
+                    absorb_id,
+                    debt_e8s,
+                    amount_e8s,
+                    f.three_pool_ledger,
+                ))
+                .unwrap(),
+            )
+            .expect("V2 reserve ingress update")
+    };
+    let result: Result<StabilityPoolLiquidationResult, ProtocolError> = match call_v2() {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 result"),
+        WasmResult::Reject(message) => panic!("V2 reserve ingress rejected: {message}"),
+    };
+    let result = result.expect("V2 ingress and exact ICRC-3 proof should succeed");
+    assert!(result.success);
+    assert_eq!(result.vault_id, f.vault_id);
+    assert_eq!(result.liquidated_debt, debt_e8s);
+
+    let status: ThreeUsdReserveIngressV2StatusView = match f
+        .pic
+        .query_call(
+            f.protocol_id,
+            f.sp_principal,
+            "get_stability_pool_liquidate_with_reserves_v2_status",
+            encode_args((f.vault_id, absorb_id)).unwrap(),
+        )
+        .expect("query V2 durable status")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 status"),
+        WasmResult::Reject(message) => panic!("V2 status rejected: {message}"),
+    };
+    assert_eq!(status.stability_pool, f.sp_principal);
+    assert_eq!(status.vault_id, f.vault_id);
+    assert_eq!(status.absorb_id, absorb_id);
+    let (transfer_block_index, ingress_fee) = match status.status {
+        Status::Absorbed {
+            transfer_block_index,
+            ingress_fee_e8s,
+            result: status_result,
+            proportional_refund,
+        } => {
+            assert_eq!(status_result, result);
+            assert!(proportional_refund.is_none(), "full debt coverage needs no refund");
+            (transfer_block_index, ingress_fee_e8s)
+        }
+        other => panic!("expected proof-verified absorbed status, got {other:?}"),
+    };
+    assert_eq!(ingress_fee, fee, "status fee must match the verified ICRC-3 transfer fee");
+    assert_eq!(result.block_index, transfer_block_index);
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)),
+        sp_before - amount_e8s as u128 - ingress_fee as u128,
+        "ICRC-2 transferFrom charges amount plus its verified fee to the SP default account"
+    );
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.protocol_id)),
+        backend_default_before + amount_e8s as u128,
+        "V2 custody destination must be the backend default account"
+    );
+    // The in-tree 3pool ledger intentionally keys balance by owner principal
+    // and preserves subaccounts only in ICRC-3 blocks. The proof verified above
+    // already asserts the exact default-account destination, so a balance
+    // query cannot distinguish this from the legacy reserves subaccount.
+
+    let replay: Result<StabilityPoolLiquidationResult, ProtocolError> = match call_v2() {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 replay"),
+        WasmResult::Reject(message) => panic!("V2 replay rejected: {message}"),
+    };
+    assert_eq!(replay.expect("exact replay returns committed result"), result);
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)),
+        sp_before - amount_e8s as u128 - ingress_fee as u128,
+        "same absorb ID replay must not pull a second time"
+    );
+    let changed_request: Result<StabilityPoolLiquidationResult, ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.sp_principal,
+            "stability_pool_liquidate_with_reserves_v2",
+            encode_args((
+                f.vault_id,
+                absorb_id,
+                debt_e8s,
+                amount_e8s + 1,
+                f.three_pool_ledger,
+            ))
+            .unwrap(),
+        )
+        .expect("changed identity request transport")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode changed request result"),
+        WasmResult::Reject(message) => panic!("changed request rejected: {message}"),
+    };
+    assert!(changed_request.is_err(), "an absorb ID cannot be rebound to new arguments");
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)),
+        sp_before - amount_e8s as u128 - ingress_fee as u128,
+        "rebound ID must not transfer additional LP tokens"
     );
 }
 
@@ -978,20 +1343,6 @@ fn icc_002_pic_writedown_failure_refunds_3usd_to_sp() {
         reserves_after, 0,
         "protocol_3usd_reserves MUST stay at zero — the writedown rejected \
          BEFORE the state mutation that increments it"
-    );
-
-    let reserves_subacct_balance = icrc1_balance_of(
-        &f.pic,
-        f.three_pool_ledger,
-        Account {
-            owner: f.protocol_id,
-            subaccount: Some(protocol_3usd_reserves_subaccount()),
-        },
-    );
-    assert_eq!(
-        reserves_subacct_balance, 0,
-        "protocol reserves subaccount must be empty after the refund \
-         (the pulled tokens were sent back to the SP)"
     );
 
     let logs = fetch_info_logs(&f.pic, f.protocol_id);

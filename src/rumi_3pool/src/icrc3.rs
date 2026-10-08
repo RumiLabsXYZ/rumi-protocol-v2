@@ -138,6 +138,9 @@ pub fn encode_block_with_phash(block: &Icrc3Block, phash: Option<&[u8; 32]>) -> 
                     account_to_value(*s, spender_subaccount.as_deref()),
                 ));
             }
+            // ICRC-3 puts the transfer's caller-supplied idempotency metadata
+            // inside `tx`. Omit absent values so blocks created before this
+            // field was introduced re-encode byte-for-byte identically.
             if let Some(memo) = memo {
                 fields.push(("memo".to_string(), Icrc3Value::Blob(memo.clone())));
             }
@@ -388,4 +391,109 @@ pub fn icrc3_supported_block_types() -> Vec<SupportedBlockType> {
 fn nat_to_u64(n: &Nat) -> u64 {
     use num_traits::cast::ToPrimitive;
     n.0.to_u64().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod transfer_metadata_tests {
+    use super::{account_to_value, encode_block_with_phash, Icrc3Value};
+    use crate::types::{Icrc3Block, Icrc3Transaction};
+    use candid::{Nat, Principal};
+
+    fn account(owner: u8) -> Principal { Principal::from_slice(&[owner]) }
+
+    fn tx_fields(value: Icrc3Value) -> Vec<(String, Icrc3Value)> {
+        let Icrc3Value::Map(block) = value else { panic!("block must be a map") };
+        let Some((_, Icrc3Value::Map(tx))) = block.into_iter().find(|(key, _)| key == "tx") else {
+            panic!("block must contain tx map")
+        };
+        tx
+    }
+
+    #[test]
+    fn transfer_from_encoder_emits_exact_memo_and_transaction_time() {
+        let block = Icrc3Block {
+            id: 9,
+            timestamp: 900,
+            tx: Icrc3Transaction::Transfer {
+                from: account(1), to: account(2), amount: 33,
+                spender: Some(account(3)), from_subaccount: None,
+                to_subaccount: None, spender_subaccount: None,
+                memo: Some(vec![4; 16]), created_at_time: Some(123_456),
+            },
+        };
+        let fields = tx_fields(encode_block_with_phash(&block, None));
+        assert!(fields.contains(&("memo".into(), Icrc3Value::Blob(vec![4; 16]))));
+        assert!(fields.contains(&("ts".into(), Icrc3Value::Nat(Nat::from(123_456u64)))));
+        assert!(fields.contains(&("spender".into(), account_to_value(account(3), None))));
+    }
+
+    #[test]
+    fn direct_owner_transfer_metadata_is_emitted_but_none_stays_legacy_shaped() {
+        let metadata_transfer = Icrc3Block {
+            id: 1,
+            timestamp: 901,
+            tx: Icrc3Transaction::Transfer {
+                from: account(1), to: account(2), amount: 7,
+                spender: None, from_subaccount: None, to_subaccount: None,
+                spender_subaccount: None, memo: Some(vec![8]), created_at_time: Some(45),
+            },
+        };
+        let tx = tx_fields(encode_block_with_phash(&metadata_transfer, None));
+        assert!(tx.iter().any(|(key, _)| key == "memo"));
+        assert!(tx.iter().any(|(key, _)| key == "ts"));
+
+        let legacy_shaped = Icrc3Block {
+            id: 0, timestamp: 902,
+            tx: Icrc3Transaction::Transfer {
+                from: account(1), to: account(2), amount: 7,
+                spender: None, from_subaccount: None, to_subaccount: None,
+                spender_subaccount: None, memo: None, created_at_time: None,
+            },
+        };
+        let tx = tx_fields(encode_block_with_phash(&legacy_shaped, None));
+        assert!(!tx.iter().any(|(key, _)| key == "memo" || key == "ts"));
+    }
+
+    #[test]
+    fn old_transfer_snapshot_decodes_and_keeps_the_pre_metadata_block_hash() {
+        #[derive(serde::Serialize)]
+        struct LegacyBlock { id: u64, timestamp: u64, tx: LegacyTransaction }
+        #[derive(serde::Serialize)]
+        enum LegacyTransaction {
+            Transfer {
+                from: Principal, to: Principal, amount: u128, spender: Option<Principal>,
+                from_subaccount: Option<Vec<u8>>, to_subaccount: Option<Vec<u8>>,
+                spender_subaccount: Option<Vec<u8>>,
+            },
+        }
+        let legacy = LegacyBlock {
+            id: 0, timestamp: 777,
+            tx: LegacyTransaction::Transfer {
+                from: account(1), to: account(2), amount: 66, spender: Some(account(3)),
+                from_subaccount: None, to_subaccount: None, spender_subaccount: None,
+            },
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut bytes).unwrap();
+        let restored: Icrc3Block = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let Icrc3Transaction::Transfer { memo, created_at_time, .. } = &restored.tx else {
+            panic!("legacy transfer variant must decode")
+        };
+        assert_eq!(memo, &None);
+        assert_eq!(created_at_time, &None);
+
+        let legacy_encoded = Icrc3Value::Map(vec![
+            ("ts".into(), Icrc3Value::Nat(Nat::from(777u64))),
+            ("fee".into(), Icrc3Value::Nat(Nat::from(0u64))),
+            ("tx".into(), Icrc3Value::Map(vec![
+                ("op".into(), Icrc3Value::Text("xfer".into())),
+                ("from".into(), account_to_value(account(1), None)),
+                ("to".into(), account_to_value(account(2), None)),
+                ("amt".into(), Icrc3Value::Nat(Nat::from(66u64))),
+                ("spender".into(), account_to_value(account(3), None)),
+            ])),
+        ]);
+        let encoded_after_upgrade = encode_block_with_phash(&restored, None);
+        assert_eq!(crate::certification::hash_value(&encoded_after_upgrade), crate::certification::hash_value(&legacy_encoded));
+    }
 }

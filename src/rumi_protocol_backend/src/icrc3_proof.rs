@@ -25,11 +25,10 @@
 //!   * `ThreePoolTransfer` (reserves `_with_reserves` path) — the proof is
 //!     produced by the backend itself after `transfer_3usd_to_reserves`
 //!     succeeds, so vault binding is enforced by code construction at
-//!     proof-build time. The on-chain block has no memo to check (the
-//!     `rumi_3pool` ledger's `Icrc3Transaction::Transfer` variant does not
-//!     persist memos into ICRC-3 blocks; it only consumes them for ICRC-1
-//!     dedup). Verification on this kind asserts op / amount / from / to,
-//!     and the consumed-proof set still blocks block-index replay.
+//!     proof-build time. This legacy proof kind asserts op / amount / from /
+//!     to and the consumed-proof set blocks block-index replay. The P08 V2
+//!     ingress path uses the separate exact tuple validator below, including
+//!     spender, memo, created_at_time, fee, and both accounts.
 //!
 //! Replay within a single vault is blocked by the consumed-proof set on
 //! `State` (see `State::consumed_writedown_proofs`).
@@ -61,6 +60,17 @@ pub enum SpProofLedger {
     IcusdBurn,
     /// 3USD / 3pool ledger — expect a transfer to the protocol's reserves
     /// subaccount (reserves path).
+    ThreePoolTransfer,
+    /// Receipt-backed reserve ingress on the backend's default account.
+    ThreePoolTransferDefault,
+}
+
+/// Stable output shape for the pre-V2 consumed-proof monitoring query. Keep
+/// new V2 proof kinds out of its result; adding an enum arm would break old
+/// generated clients that decode the query response.
+#[derive(CandidType, Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LegacySpProofLedger {
+    IcusdBurn,
     ThreePoolTransfer,
 }
 
@@ -119,6 +129,7 @@ pub struct DecodedBlock {
     pub to: Option<Account>,
     pub spender: Option<Account>,
     pub amount: u128,
+    pub fee: Option<u64>,
     pub created_at_time: Option<u64>,
     pub memo: Option<Vec<u8>>,
 }
@@ -182,6 +193,17 @@ pub fn decode_block(value: &ICRC3Value) -> Result<DecodedBlock, String> {
         .ok_or_else(|| "tx missing 'amt'".to_string())
         .and_then(nat_to_u128)?;
 
+    // Standard ICRC-3 places fee in `tx`; the in-tree 3pool ledger currently
+    // emits its (zero) fee at block level. Prefer transaction metadata when
+    // present, then read the ledger's block-level representation.
+    let fee = tx_map
+        .get("fee")
+        .or_else(|| block_map.get("fee"))
+        .map(nat_to_u128)
+        .transpose()?
+        .map(|value| u64::try_from(value).map_err(|_| "block fee does not fit in u64".to_string()))
+        .transpose()?;
+
     let created_at_time = tx_map
         .get("ts")
         .or_else(|| tx_map.get("created_at_time"))
@@ -205,9 +227,182 @@ pub fn decode_block(value: &ICRC3Value) -> Result<DecodedBlock, String> {
         to,
         spender,
         amount,
+        fee,
         created_at_time,
         memo,
     })
+}
+
+/// Validate the exact ICRC-2 transferFrom tuple retained by a V2 ingress.
+/// In particular, a transfer to the legacy hashed subaccount cannot authorize
+/// a write-down under the default-account route.
+pub fn validate_three_usd_reserve_ingress_block(
+    block: &DecodedBlock,
+    tuple: &crate::state::ThreeUsdReserveIngressTuple,
+) -> Result<u64, String> {
+    if (block.op != "xfer" && block.op != "transfer")
+        || block.btype.as_deref().is_some_and(|kind| kind != "2xfer")
+    {
+        return Err("reserve ingress receipt is not a transfer block".into());
+    }
+    let spender = block.spender.as_ref().ok_or("reserve ingress block is missing spender")?;
+    if spender.owner != tuple.spender_owner
+        || spender.subaccount != tuple.spender_subaccount
+        || block.from.as_ref() != Some(&tuple.source)
+        || block.to.as_ref() != Some(&tuple.destination)
+        || block.amount != u128::from(tuple.amount_e8s)
+        || tuple.fee_e8s != Some(tuple.ledger_fee_e8s)
+        || block.fee != Some(tuple.ledger_fee_e8s)
+        || block.memo.as_deref() != Some(tuple.memo.as_slice())
+        || block.created_at_time != Some(tuple.created_at_time_ns)
+    {
+        return Err("reserve ingress receipt does not match the persisted ICRC-2 tuple".into());
+    }
+    block
+        .fee
+        .ok_or_else(|| "reserve ingress block is missing its actual charged fee".into())
+}
+
+/// Validate one complete, contiguous ICRC-3 page for an absence scan. A
+/// positive exact match returns its global block index. Any missing/extra ID,
+/// archive descriptor, short log-length claim, or undecodable block fails
+/// closed; callers may advance a durable cursor only after `Ok(None)`.
+pub fn validate_three_usd_ingress_scan_page(
+    start: u64,
+    end: u64,
+    fixed_tip: u64,
+    response: &GetBlocksResult,
+    tuple: &crate::state::ThreeUsdReserveIngressTuple,
+) -> Result<Option<u64>, String> {
+    if end < start || end > fixed_tip
+        || response.log_length.0.to_u64().is_none_or(|length| length < fixed_tip) {
+        return Err("ICRC-3 page does not cover the pinned ledger prefix".into());
+    }
+    if !response.archived_blocks.is_empty() {
+        return Err("archive-backed prefix pages are unsupported; absence remains unproven".into());
+    }
+    let count = usize::try_from(end - start).map_err(|_| "page length exceeds address space")?;
+    if response.blocks.len() != count {
+        return Err("ICRC-3 page is short or has extra blocks".into());
+    }
+    let mut match_index = None;
+    for (offset, block) in response.blocks.iter().enumerate() {
+        let expected_id = start.checked_add(offset as u64).ok_or("block index overflow")?;
+        if block.id.0.to_u64() != Some(expected_id) {
+            return Err("ICRC-3 page has a gap, duplicate, or out-of-order block ID".into());
+        }
+        let decoded = decode_block(&block.block)?;
+        if validate_three_usd_reserve_ingress_block(&decoded, tuple).is_ok() {
+            if match_index.replace(expected_id).is_some() {
+                return Err("exact ingress tuple appears more than once in scanned prefix".into());
+            }
+        } else if decoded.op == "transfer" || decoded.op == "xfer" {
+            let could_be_tuple = decoded.from.as_ref() == Some(&tuple.source)
+                && decoded.to.as_ref() == Some(&tuple.destination)
+                // No spender means an ordinary owner transfer. It cannot be
+                // accepted as positive ICRC-2 proof, but old/variant ledger
+                // schemas could have omitted this discriminator; keep the
+                // absence scan held on the matching envelope rather than
+                // treating it as proof that the requested transferFrom did
+                // not occur.
+                && decoded.spender.as_ref().is_none_or(|spender|
+                    spender.owner == tuple.spender_owner && spender.subaccount == tuple.spender_subaccount)
+                && decoded.amount == u128::from(tuple.amount_e8s);
+            if could_be_tuple {
+                // Some ledgers omit memo/created_at_time from ICRC-3. Such a
+                // block may be this operation, so it cannot be counted as
+                // absence or promoted as positive evidence.
+                return Err("ledger block matches ingress principals and amount but omits or changes exact tuple metadata".into());
+            }
+        }
+    }
+    Ok(match_index)
+}
+
+pub async fn verify_three_usd_reserve_ingress_block(
+    ledger: Principal,
+    block_index: u64,
+    tuple: &crate::state::ThreeUsdReserveIngressTuple,
+) -> Result<u64, String> {
+    let block = fetch_icrc3_block(ledger, block_index).await?;
+    validate_three_usd_reserve_ingress_block(&block, tuple)
+}
+
+pub fn validate_three_usd_reserve_refund_block(
+    block: &DecodedBlock,
+    tuple: &crate::state::ThreeUsdReserveRefundTuple,
+) -> Result<(), String> {
+    if (block.op != "xfer" && block.op != "transfer")
+        || block.btype.as_deref().is_some_and(|kind| kind != "1xfer")
+        || block.spender.is_some()
+        || block.from.as_ref().map_or(true, |from| {
+            from.owner != tuple.source_owner || from.subaccount != tuple.source_subaccount
+        })
+        || block.to.as_ref() != Some(&tuple.destination)
+        || block.amount != u128::from(tuple.amount_e8s)
+        || block.fee != Some(tuple.charged_fee_e8s)
+        || block.memo.as_deref() != Some(tuple.memo.as_slice())
+        || block.created_at_time != Some(tuple.created_at_time_ns)
+        || tuple.fee_e8s.is_some_and(|fee| fee != tuple.charged_fee_e8s)
+    {
+        return Err("3USD refund receipt block does not match the exact persisted transfer tuple".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod three_usd_reserve_refund_tests {
+    use super::{validate_three_usd_reserve_refund_block, DecodedBlock};
+    use crate::state::ThreeUsdReserveRefundTuple;
+    use candid::Principal;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn tuple() -> ThreeUsdReserveRefundTuple {
+        ThreeUsdReserveRefundTuple {
+            source_owner: Principal::from_slice(&[1]),
+            source_subaccount: None,
+            destination: Account { owner: Principal::from_slice(&[2]), subaccount: None },
+            amount_e8s: 99,
+            charged_fee_e8s: 1,
+            fee_e8s: None,
+            memo: [7; 16],
+            created_at_time_ns: 42,
+        }
+    }
+
+    #[test]
+    fn refund_proof_binds_the_actual_block_fee_when_transfer_argument_omits_fee() {
+        let tuple = tuple();
+        let block = DecodedBlock {
+            btype: Some("1xfer".into()),
+            op: "transfer".into(),
+            from: Some(Account { owner: tuple.source_owner, subaccount: tuple.source_subaccount }),
+            to: Some(tuple.destination.clone()),
+            spender: None,
+            amount: tuple.amount_e8s.into(),
+            fee: Some(1),
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(tuple.memo.to_vec()),
+        };
+        assert!(validate_three_usd_reserve_refund_block(&block, &tuple).is_ok());
+
+        let mut changed_fee = block.clone();
+        changed_fee.fee = Some(2);
+        assert!(validate_three_usd_reserve_refund_block(&changed_fee, &tuple).is_err());
+
+        let mut changed_source = block.clone();
+        changed_source.from.as_mut().unwrap().owner = Principal::from_slice(&[9]);
+        assert!(validate_three_usd_reserve_refund_block(&changed_source, &tuple).is_err());
+    }
+}
+
+pub async fn verify_three_usd_reserve_refund_block(
+    ledger: Principal,
+    block_index: u64,
+    tuple: &crate::state::ThreeUsdReserveRefundTuple,
+) -> Result<(), String> {
+    let block = fetch_icrc3_block(ledger, block_index).await?;
+    validate_three_usd_reserve_refund_block(&block, tuple)
 }
 
 /// Verify an exact ICRC-1 mint/transfer block, resolving a single advertised
@@ -372,13 +567,10 @@ pub async fn icrc3_log_length(ledger: Principal) -> Result<u64, String> {
 /// `ThreePoolTransfer`-specific rules:
 ///   * `op == "xfer"` (or `"transfer"`).
 ///   * `to` must equal `expected.reserves_account`.
-///   * Memo is NOT checked. The `rumi_3pool` ledger does not persist memos
-///     into its ICRC-3 block log (only consumes them for ICRC-1 dedup), and
-///     the proof on this path is constructed by the backend itself rather
-///     than supplied by the SP, so cross-vault replay is prevented by the
-///     backend's code-time construction (`vault_id_memo` is set to the
-///     call's `vault_id`) plus the consumed-proof set's per-block-index
-///     replay defense.
+///   * This legacy proof kind does not validate ICRC-1 transaction metadata;
+///     the P08 V2 route uses `validate_three_usd_reserve_ingress_block` for
+///     its exact ICRC-2 tuple. Here the backend constructs proof after the
+///     transfer, and the consumed-proof set blocks block-index replay.
 pub fn validate_block(block: &DecodedBlock, expected: &ProofExpectations) -> Result<u64, String> {
     match expected.ledger_kind {
         SpProofLedger::IcusdBurn => {
@@ -393,6 +585,14 @@ pub fn validate_block(block: &DecodedBlock, expected: &ProofExpectations) -> Res
             if block.op != "xfer" && block.op != "transfer" {
                 return Err(format!(
                     "expected transfer block on 3USD ledger, got op={}",
+                    block.op
+                ));
+            }
+        }
+        SpProofLedger::ThreePoolTransferDefault => {
+            if block.op != "xfer" && block.op != "transfer" {
+                return Err(format!(
+                    "expected default-account transfer block on 3USD ledger, got op={}",
                     block.op
                 ));
             }
@@ -420,7 +620,7 @@ pub fn validate_block(block: &DecodedBlock, expected: &ProofExpectations) -> Res
     }
 
     match expected.ledger_kind {
-        SpProofLedger::ThreePoolTransfer => {
+        SpProofLedger::ThreePoolTransfer | SpProofLedger::ThreePoolTransferDefault => {
             let to = block
                 .to
                 .as_ref()
@@ -634,6 +834,180 @@ fn account_to_value(account: Account) -> ICRC3Value {
     ICRC3Value::Array(parts)
 }
 
+#[cfg(test)]
+mod three_usd_reserve_ingress_tests {
+    use super::{decode_block, validate_three_usd_ingress_scan_page, validate_three_usd_reserve_ingress_block, DecodedBlock};
+    use candid::Nat;
+    use icrc_ledger_types::icrc3::blocks::{ArchivedBlocks, BlockWithId, GetBlocksRequest, GetBlocksResult};
+    use icrc_ledger_types::icrc3::archive::QueryArchiveFn;
+    use icrc_ledger_types::icrc::generic_value::{ICRC3Map, ICRC3Value};
+    use serde_bytes::ByteBuf;
+    use crate::state::ThreeUsdReserveIngressTuple;
+    use candid::Principal;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn tuple() -> ThreeUsdReserveIngressTuple {
+        ThreeUsdReserveIngressTuple {
+            spender_owner: Principal::from_slice(&[3]),
+            spender_subaccount: None,
+            source: Account { owner: Principal::from_slice(&[2]), subaccount: None },
+            destination: Account { owner: Principal::from_slice(&[3]), subaccount: None },
+            amount_e8s: 42,
+            fee_e8s: Some(0),
+            ledger_fee_e8s: 0,
+            memo: [7; 16],
+            created_at_time_ns: 99,
+            op_nonce: 4,
+            parent_absorb_id: 8,
+        }
+    }
+
+    fn block(tuple: &ThreeUsdReserveIngressTuple) -> DecodedBlock {
+        DecodedBlock {
+            btype: Some("2xfer".into()),
+            op: "transfer".into(),
+            from: Some(tuple.source.clone()),
+            to: Some(tuple.destination.clone()),
+            spender: Some(Account { owner: tuple.spender_owner, subaccount: tuple.spender_subaccount }),
+            amount: tuple.amount_e8s.into(),
+            fee: Some(tuple.ledger_fee_e8s),
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(tuple.memo.to_vec()),
+        }
+    }
+
+    fn encoded_block(tuple: &ThreeUsdReserveIngressTuple) -> ICRC3Value {
+        let mut tx: ICRC3Map = std::collections::BTreeMap::new();
+        tx.insert("op".into(), ICRC3Value::Text("transfer".into()));
+        tx.insert("from".into(), super::account_to_value(tuple.source.clone()));
+        tx.insert("to".into(), super::account_to_value(tuple.destination.clone()));
+        tx.insert("spender".into(), super::account_to_value(Account { owner: tuple.spender_owner, subaccount: tuple.spender_subaccount }));
+        tx.insert("amt".into(), ICRC3Value::Nat(Nat::from(tuple.amount_e8s)));
+        tx.insert("fee".into(), ICRC3Value::Nat(Nat::from(tuple.ledger_fee_e8s)));
+        tx.insert("ts".into(), ICRC3Value::Nat(Nat::from(tuple.created_at_time_ns)));
+        tx.insert("memo".into(), ICRC3Value::Blob(ByteBuf::from(tuple.memo.to_vec())));
+        let mut outer: ICRC3Map = std::collections::BTreeMap::new();
+        outer.insert("btype".into(), ICRC3Value::Text("2xfer".into()));
+        outer.insert("tx".into(), ICRC3Value::Map(tx));
+        ICRC3Value::Map(outer)
+    }
+
+    fn response(ids: &[u64], log_length: u64, tuple: &ThreeUsdReserveIngressTuple) -> GetBlocksResult {
+        GetBlocksResult {
+            log_length: Nat::from(log_length),
+            blocks: ids.iter().map(|id| BlockWithId { id: Nat::from(*id), block: encoded_block(tuple) }).collect(),
+            archived_blocks: vec![],
+        }
+    }
+
+    #[test]
+    fn full_prefix_pages_require_every_global_id_and_detect_exact_transfer() {
+        let tuple = tuple();
+        assert_eq!(validate_three_usd_ingress_scan_page(0, 1, 3, &response(&[0], 3, &tuple), &tuple), Ok(Some(0)));
+        let mut different_tuple = tuple.clone();
+        different_tuple.amount_e8s += 1;
+        assert_eq!(validate_three_usd_ingress_scan_page(0, 1, 3, &response(&[0], 3, &tuple), &different_tuple), Ok(None));
+        let mut owner_transfer = response(&[0], 3, &tuple);
+        if let ICRC3Value::Map(block) = &mut owner_transfer.blocks[0].block {
+            if let Some(ICRC3Value::Map(tx)) = block.get_mut("tx") { tx.remove("spender"); }
+        }
+        assert!(validate_three_usd_ingress_scan_page(0, 1, 3, &owner_transfer, &tuple).is_err());
+        assert!(validate_three_usd_ingress_scan_page(0, 2, 3, &response(&[0], 3, &tuple), &tuple).is_err());
+        assert!(validate_three_usd_ingress_scan_page(0, 2, 3, &response(&[0, 2], 3, &tuple), &tuple).is_err());
+        assert!(validate_three_usd_ingress_scan_page(0, 2, 3, &response(&[0, 1], 1, &tuple), &tuple).is_err());
+        let archived = GetBlocksResult {
+            log_length: Nat::from(2u64), blocks: vec![],
+            archived_blocks: vec![ArchivedBlocks {
+                args: vec![GetBlocksRequest { start: Nat::from(0u64), length: Nat::from(2u64) }],
+                callback: QueryArchiveFn { canister_id: Principal::from_slice(&[8]), method: "get_blocks".into(), _marker: std::marker::PhantomData },
+            }],
+        };
+        assert!(validate_three_usd_ingress_scan_page(0, 2, 2, &archived, &tuple).is_err());
+    }
+
+    #[test]
+    fn real_3pool_encoder_output_satisfies_backend_exact_transfer_from_verifier() {
+        let tuple = tuple();
+        let block = rumi_3pool::types::Icrc3Block {
+            id: 5,
+            timestamp: 777,
+            tx: rumi_3pool::types::Icrc3Transaction::Transfer {
+                from: tuple.source.owner,
+                to: tuple.destination.owner,
+                amount: u128::from(tuple.amount_e8s),
+                spender: Some(tuple.spender_owner),
+                from_subaccount: tuple.source.subaccount.map(|sub| sub.to_vec()),
+                to_subaccount: tuple.destination.subaccount.map(|sub| sub.to_vec()),
+                spender_subaccount: tuple.spender_subaccount.map(|sub| sub.to_vec()),
+                memo: Some(tuple.memo.to_vec()),
+                created_at_time: Some(tuple.created_at_time_ns),
+            },
+        };
+        let encoded = rumi_3pool::icrc3::encode_block_with_phash(&block, None);
+        let bytes = candid::encode_one(encoded).unwrap();
+        let wire_value: ICRC3Value = candid::decode_one(&bytes).unwrap();
+        let decoded = decode_block(&wire_value).unwrap();
+        assert_eq!(validate_three_usd_reserve_ingress_block(&decoded, &tuple), Ok(0));
+
+        let owner_transfer = rumi_3pool::types::Icrc3Block {
+            id: 6,
+            timestamp: 778,
+            tx: rumi_3pool::types::Icrc3Transaction::Transfer {
+                from: tuple.source.owner,
+                to: tuple.destination.owner,
+                amount: u128::from(tuple.amount_e8s),
+                spender: None,
+                from_subaccount: tuple.source.subaccount.map(|sub| sub.to_vec()),
+                to_subaccount: tuple.destination.subaccount.map(|sub| sub.to_vec()),
+                spender_subaccount: tuple.spender_subaccount.map(|sub| sub.to_vec()),
+                memo: Some(tuple.memo.to_vec()),
+                created_at_time: Some(tuple.created_at_time_ns),
+            },
+        };
+        let owner_wire = rumi_3pool::icrc3::encode_block_with_phash(&owner_transfer, None);
+        let owner_bytes = candid::encode_one(owner_wire).unwrap();
+        let owner_wire_value: ICRC3Value = candid::decode_one(&owner_bytes).unwrap();
+        let decoded_owner_transfer = decode_block(&owner_wire_value).unwrap();
+        assert!(validate_three_usd_reserve_ingress_block(&decoded_owner_transfer, &tuple).is_err());
+    }
+
+    #[test]
+    fn reserve_ingress_proof_binds_the_exact_default_account_tuple() {
+        let tuple = tuple();
+        let exact = block(&tuple);
+        assert_eq!(validate_three_usd_reserve_ingress_block(&exact, &tuple), Ok(0));
+
+        // V2 pins the current 3pool's zero fee in the ICRC-2 tuple. A fee
+        // change between preflight and execution must fail closed instead of
+        // changing tracked pool accounting.
+        let mut fee_drifted = exact.clone();
+        fee_drifted.fee = Some(17);
+        assert!(validate_three_usd_reserve_ingress_block(&fee_drifted, &tuple).is_err());
+
+        let mut wrong = exact.clone();
+        wrong.to.as_mut().unwrap().subaccount = Some([1; 32]);
+        assert!(validate_three_usd_reserve_ingress_block(&wrong, &tuple).is_err());
+        let mut wrong = exact.clone();
+        wrong.spender.as_mut().unwrap().owner = Principal::from_slice(&[9]);
+        assert!(validate_three_usd_reserve_ingress_block(&wrong, &tuple).is_err());
+        let mut wrong = exact.clone();
+        wrong.amount += 1;
+        assert!(validate_three_usd_reserve_ingress_block(&wrong, &tuple).is_err());
+        let mut missing_fee = exact.clone();
+        missing_fee.fee = None;
+        assert!(validate_three_usd_reserve_ingress_block(&missing_fee, &tuple).is_err());
+        let mut wrong = exact.clone();
+        wrong.btype = Some("1xfer".into());
+        assert!(validate_three_usd_reserve_ingress_block(&wrong, &tuple).is_err());
+        let mut wrong = exact.clone();
+        wrong.created_at_time = Some(100);
+        assert!(validate_three_usd_reserve_ingress_block(&wrong, &tuple).is_err());
+        let mut wrong = exact;
+        wrong.memo = Some(vec![0; 16]);
+        assert!(validate_three_usd_reserve_ingress_block(&wrong, &tuple).is_err());
+    }
+}
+
 /// Public helper exported for audit_pocs use: builds a memoless burn block.
 /// Tests use this to confirm `validate_block` rejects burn blocks without
 /// the LIQ-004 memo.
@@ -659,7 +1033,7 @@ mod bot_payment_proof_tests {
         let block = DecodedBlock {
             btype: Some("1xfer".into()), op: "xfer".into(),
             from: Some(bot.clone()), to: Some(backend.clone()), spender: None,
-            amount: 1_000_000, created_at_time: Some(123), memo: Some(memo.clone()),
+            amount: 1_000_000, fee: None, created_at_time: Some(123), memo: Some(memo.clone()),
         };
         (block, bot, backend, memo)
     }

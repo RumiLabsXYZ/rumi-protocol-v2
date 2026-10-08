@@ -866,6 +866,7 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Opt(Icrc3DataCertificate)],
         ['query'],
       ),
+    'icrc3_ordered_log_tip' : IDL.Func([], [IDL.Nat64], []),
     'icrc3_supported_block_types' : IDL.Func(
         [],
         [IDL.Vec(SupportedBlockType)],

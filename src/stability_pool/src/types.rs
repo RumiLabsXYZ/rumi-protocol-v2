@@ -455,6 +455,25 @@ pub struct ChainSpAbsorbCompletion {
     pub completed_at_ns: u64,
 }
 
+/// Exact backend request tuple for a 3USD reserve absorb. The SP persists this
+/// before dispatch so an inter-canister timeout retries with the same
+/// idempotency key and arguments, even if the next liquidation scan changes.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreeUsdReserveAbsorbIntent {
+    pub absorb_id: u64,
+    pub vault_id: u64,
+    pub debt_e8s: u64,
+    pub amount: u64,
+    pub ledger: Principal,
+    /// Immutable settlement metadata captured before dispatch. Missing values
+    /// in pre-migration stable state remain zero/anonymous and are never
+    /// reconstructed from a later liquidatable-vault scan.
+    #[serde(default)]
+    pub collateral_type: Option<Principal>,
+    #[serde(default)]
+    pub collateral_price_e8s: Option<u64>,
+}
+
 pub const MIN_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS: u64 = 60;
 pub const DEFAULT_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS: u64 = 300;
 pub const DEFAULT_CHAIN_ABSORB_AUTO_MAX_SCAN_PER_CHAIN: u64 = 1;
