@@ -11,12 +11,12 @@
     },
     {
       state: 'Installed safeguard',
-      title: 'PR #425 · Points CL-09 safeguard',
+      title: 'PR #450 · Points history migration',
       detail:
-        'The exact reviewed CL-09 Wasm is installed on mainnet, and the live bytes match that artifact. The Points ledger length is unchanged across the upgrade. This confirms that safeguard only; it does not establish that later merged Points features or broader remediation changes are installed.',
+        'PR #450 is merged and its Points module is installed on mainnet. The live module SHA-256 is dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277. The ledger contains 417 rows: 401 original rows plus 16 historical adjustment rows.',
       tone: 'live',
-      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/425',
-      link: 'View PR #425'
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/450',
+      link: 'View PR #450'
     },
     {
       state: 'Merged source',
@@ -31,7 +31,7 @@
       state: 'Live configuration',
       title: 'Points epoch driver is disabled',
       detail:
-        'The live configuration confirms the epoch driver is disabled. Epoch 18 remains open, with phase A complete and phase B pending.',
+        'The live configuration confirms the epoch driver is disabled. Epoch 18 remains open, with phase A complete and phase B absent.',
       tone: 'live'
     },
     {
@@ -50,7 +50,7 @@
   <title>October 2026 Security Review Status · Rumi Protocol</title>
   <meta
     name="description"
-    content="Public October 8, 2026 update on Rumi Protocol security-review and release status. The Points CL-09 safeguard is installed; other findings and installations remain under review."
+    content="Public October 8, 2026 update on Rumi Protocol security-review and release status. Points PR #450 is installed; epoch 18 remains open and the driver disabled."
   />
 </svelte:head>
 
@@ -63,7 +63,7 @@
           <h1>October review.<br /><span>Current status.</span></h1>
           <p class="hero-copy">
             This public update records the state of selected security follow-up and release work
-            on October 8, 2026. The Points CL-09 safeguard is installed; other findings and
+            on October 8, 2026. Points PR #450 is installed; other findings and
             installations remain under review.
           </p>
           <p class="review-date">Status date <time datetime="2026-10-08">October 8, 2026</time></p>
@@ -75,17 +75,17 @@
             <span>Release status</span>
             <span class="status-label">Follow-up ongoing</span>
           </div>
-          <h2 id="status-title">Points CL-09 safeguard installed</h2>
+          <h2 id="status-title">Points PR #450 installed</h2>
           <p>
-            The exact reviewed Points CL-09 Wasm is installed on mainnet, the live bytes match
-            that artifact, and the Points ledger length is unchanged across the upgrade. The affected epoch remains held
-            while reward treatment is reviewed; no reward decision or release has been made.
+            The live Points module is <code>dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277</code>.
+            The ledger has 417 rows: 401 original rows and 16 historical adjustment rows. Epoch 18 remains open;
+            phase A is complete and phase B is absent. The epoch driver is disabled.
             Other security findings and installations remain pending.
           </p>
           <div class="status-divider"></div>
           <p class="status-footnote">
             Source merge, artifact validity, canister installation, and live configuration are
-            separate evidence states. This update confirms the CL-09 safeguard only.
+            separate evidence states. The installed Points state reflects PR #450.
           </p>
         </aside>
       </div>
@@ -103,7 +103,7 @@
         <span class="rail-line" aria-hidden="true"></span>
         <div class="evidence-step live">
           <span class="step-icon" aria-hidden="true">03</span>
-          <div><strong>Mainnet</strong><span>One safeguard installed</span></div>
+          <div><strong>Mainnet</strong><span>Points PR #450 installed</span></div>
         </div>
       </div>
     </div>
@@ -140,16 +140,16 @@
     <div class="page-width release-inner">
       <div class="section-heading release-heading">
         <p class="section-kicker">Points</p>
-        <h2 id="points-title">CL-09 installed; epoch remains held for review</h2>
+        <h2 id="points-title">PR #450 installed; epoch 18 remains open</h2>
         <p>
-          The exact reviewed Points CL-09 Wasm is installed, the live bytes match that artifact,
-          and the Points ledger length is unchanged across the upgrade. The live configuration still shows the epoch
-          driver disabled. The affected epoch remains open while its reward treatment is reviewed;
-          the installation does not decide or release rewards.
+          PR #450 is installed on mainnet. The live module SHA-256 is
+          <code>dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277</code>.
+          The ledger contains 417 rows, including 16 historical adjustment rows in addition to the 401 original rows.
+          Epoch 18 remains open, phase A is complete, phase B is absent, and the epoch driver is disabled.
         </p>
       </div>
       <p class="release-note">
-        Epoch 18 remains open, with phase A complete and phase B pending. Other security findings
+        Epoch 18 remains open, with phase A complete and phase B absent. Other security findings
         and installations remain pending, so this is not a protocol-wide close-out.
       </p>
     </div>
