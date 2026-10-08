@@ -1591,10 +1591,12 @@ fn replay_with_nonce_time(
                 if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
                     // Compute proportional interest share before reducing debt
                     let interest_share = if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
-                        let share = (rust_decimal::Decimal::from(liquidator_payment.0)
-                            * rust_decimal::Decimal::from(vault.accrued_interest.0)
-                            / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                            .to_u64().unwrap_or(0);
+                        let share = crate::numeric::checked_proportional_amount(
+                            liquidator_payment.0,
+                            vault.borrowed_icusd_amount.0,
+                            vault.accrued_interest.0,
+                        )
+                        .unwrap_or(0);
                         ICUSD::new(share.min(vault.accrued_interest.0))
                     } else { ICUSD::new(0) };
                     // Use saturating_sub during replay: interest drift can inflate
@@ -1604,8 +1606,9 @@ fn replay_with_nonce_time(
                     vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(liquidator_payment);
                     // Vault loses icp_to_liquidator + protocol_fee_collateral
                     // (old events have protocol_fee_collateral=None → 0, which is correct)
-                    let total_collateral_seized = icp_to_liquidator.to_u64()
-                        + protocol_fee_collateral.unwrap_or(0);
+                    let total_collateral_seized = icp_to_liquidator
+                        .to_u64()
+                        .saturating_add(protocol_fee_collateral.unwrap_or(0));
                     vault.collateral_amount = vault.collateral_amount.saturating_sub(total_collateral_seized);
                     vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_share);
                 }
@@ -2678,7 +2681,7 @@ fn record_redemption_on_vault_run_with(
         ct_price,
         &redeem_ct,
         allowed_vault_ids,
-    );
+    ).ok_or(RedemptionRecordError::PayoutUnrepresentable)?;
     let payout_collateral_raw = total_actual_collateral_seized(&simulated)
         .ok_or(RedemptionRecordError::PayoutUnrepresentable)?;
     if let Some(minimum_net_raw) = min_net_collateral_raw {
@@ -4582,8 +4585,9 @@ mod redemption_replay_tests {
             });
 
             let rate = UsdIcp::new(Decimal::from_f64_retain(price_f64).unwrap());
-            let simulated =
-                state.simulate_redemption_for_vault_ids(ICUSD::new(10_000_000), rate, &icp, &[1]);
+            let simulated = state
+                .simulate_redemption_for_vault_ids(ICUSD::new(10_000_000), rate, &icp, &[1])
+                .unwrap();
             let gross = total_actual_collateral_seized(&simulated).unwrap();
             let expected_net = gross.saturating_sub(config.ledger_fee);
             let block = 300 + index as u64;

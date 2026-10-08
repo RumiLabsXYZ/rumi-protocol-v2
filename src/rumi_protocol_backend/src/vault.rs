@@ -15,10 +15,9 @@ use crate::GuardError;
 use crate::PendingMarginTransfer;
 use crate::DEBUG;
 use crate::{
-    mutate_state, read_state, ProtocolError, RedeemQuotedRequest, RedemptionError,
-    PreparedRedemptionOffer, RedemptionOfferRefreshError, RedemptionPayoutStatus,
-    RedemptionPreview, RedemptionQueue, RedemptionQueueEntry, RedemptionQuote,
-    RedemptionResult,
+    mutate_state, read_state, PreparedRedemptionOffer, ProtocolError, RedeemQuotedRequest,
+    RedemptionError, RedemptionOfferRefreshError, RedemptionPayoutStatus, RedemptionPreview,
+    RedemptionQueue, RedemptionQueueEntry, RedemptionQuote, RedemptionResult,
     StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee, VaultArgWithToken,
     DUST_THRESHOLD,
 };
@@ -30,8 +29,8 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::cell::RefCell;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// One ten-minute maximum-age contract shared by quote display, ranking refresh,
 /// and pre/post-pull verification. This matches XRC's existing hard ceiling.
@@ -39,8 +38,7 @@ const REDEMPTION_PRICE_MAX_AGE_NS: u64 = 10 * 60 * 1_000_000_000;
 pub(crate) const MAX_REDEMPTION_PRICE_CANDIDATES: usize = 64;
 const MAX_REDEMPTION_OFFER_REFRESH_PASSES: usize = 2;
 const MAX_LST_EXTERNAL_CALLS_PER_REFRESH: usize = 2;
-const MAX_REDEMPTION_OFFER_REFRESH_TARGETS_PER_PASS: usize =
-    MAX_REDEMPTION_PRICE_CANDIDATES + 1; // one off-set ICP source dependency
+const MAX_REDEMPTION_OFFER_REFRESH_TARGETS_PER_PASS: usize = MAX_REDEMPTION_PRICE_CANDIDATES + 1; // one off-set ICP source dependency
 const REDEMPTION_OFFER_REFRESH_COOLDOWN_NS: u64 = 300 * 1_000_000_000;
 const REDEMPTION_OFFER_REFRESH_LEASE_NS: u64 = 300 * 1_000_000_000;
 // Deliberately loose upper bound: two passes over at most 64 candidates plus
@@ -50,13 +48,13 @@ const REDEMPTION_OFFER_REFRESH_LEASE_NS: u64 = 300 * 1_000_000_000;
 // even when it is both a candidate and an LST dependency. `fetch_icp_rate`
 // couples at most 64 LSTs, each with the same two-call ceiling. This is 518
 // calls maximum.
-const MAX_REDEMPTION_OFFER_EXTERNAL_CALLS: usize =
-    (MAX_REDEMPTION_OFFER_REFRESH_PASSES * MAX_REDEMPTION_OFFER_REFRESH_TARGETS_PER_PASS
-        * MAX_LST_EXTERNAL_CALLS_PER_REFRESH)
-        + MAX_REDEMPTION_OFFER_REFRESH_PASSES
-        + (MAX_REDEMPTION_OFFER_REFRESH_PASSES
-            * MAX_REDEMPTION_PRICE_CANDIDATES
-            * MAX_LST_EXTERNAL_CALLS_PER_REFRESH);
+const MAX_REDEMPTION_OFFER_EXTERNAL_CALLS: usize = (MAX_REDEMPTION_OFFER_REFRESH_PASSES
+    * MAX_REDEMPTION_OFFER_REFRESH_TARGETS_PER_PASS
+    * MAX_LST_EXTERNAL_CALLS_PER_REFRESH)
+    + MAX_REDEMPTION_OFFER_REFRESH_PASSES
+    + (MAX_REDEMPTION_OFFER_REFRESH_PASSES
+        * MAX_REDEMPTION_PRICE_CANDIDATES
+        * MAX_LST_EXTERNAL_CALLS_PER_REFRESH);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct RedemptionOfferRefreshGateState {
@@ -66,10 +64,7 @@ struct RedemptionOfferRefreshGateState {
 }
 
 impl RedemptionOfferRefreshGateState {
-    fn try_acquire(
-        &mut self,
-        now_ns: u64,
-    ) -> Result<u64, RedemptionOfferRefreshError> {
+    fn try_acquire(&mut self, now_ns: u64) -> Result<u64, RedemptionOfferRefreshError> {
         if let Some((_, started_at_ns)) = self.in_flight {
             let elapsed = now_ns.saturating_sub(started_at_ns);
             if now_ns < started_at_ns || elapsed < REDEMPTION_OFFER_REFRESH_LEASE_NS {
@@ -114,11 +109,7 @@ struct RedemptionOfferRefreshGuard(u64);
 
 impl RedemptionOfferRefreshGuard {
     fn try_acquire(now_ns: u64) -> Result<Self, RedemptionOfferRefreshError> {
-        REDEMPTION_OFFER_REFRESH_GATE.with(|gate| {
-            gate.borrow_mut()
-                .try_acquire(now_ns)
-                .map(Self)
-        })
+        REDEMPTION_OFFER_REFRESH_GATE.with(|gate| gate.borrow_mut().try_acquire(now_ns).map(Self))
     }
 }
 
@@ -129,11 +120,8 @@ impl Drop for RedemptionOfferRefreshGuard {
 }
 
 fn redemption_offer_refresh_cooldown_remaining(now_ns: u64) -> u64 {
-    REDEMPTION_OFFER_REFRESH_GATE.with(|gate| {
-        gate.borrow()
-            .cooldown_until_ns
-            .saturating_sub(now_ns)
-    })
+    REDEMPTION_OFFER_REFRESH_GATE
+        .with(|gate| gate.borrow().cooldown_until_ns.saturating_sub(now_ns))
 }
 
 /// Fee inputs frozen for one read-only queue calculation. The elapsed-hour
@@ -232,9 +220,9 @@ fn redemption_candidate_prices_are_fresh(
     candidates: &[Principal],
     now: u64,
 ) -> bool {
-    candidates
-        .iter()
-        .all(|collateral_type| redemption_candidate_price_is_valid(state, collateral_type, now, true))
+    candidates.iter().all(|collateral_type| {
+        redemption_candidate_price_is_valid(state, collateral_type, now, true)
+    })
 }
 
 fn stale_redemption_candidate_types(
@@ -381,15 +369,11 @@ fn legacy_redemption_run_for_request(
     } else {
         requested_collateral_type
     };
-    let run = state
-        .redemption_runs()
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            ProtocolError::TemporarilyUnavailable(
-                "No eligible collateral vaults are available for redemption.".to_string(),
-            )
-        })?;
+    let run = state.redemption_runs().into_iter().next().ok_or_else(|| {
+        ProtocolError::TemporarilyUnavailable(
+            "No eligible collateral vaults are available for redemption.".to_string(),
+        )
+    })?;
     if run.collateral_type != requested_collateral_type {
         let requested_symbol = state
             .get_collateral_config(&requested_collateral_type)
@@ -424,15 +408,11 @@ fn legacy_reserve_spillover_run(
     if spillover_e8s == 0 {
         return Ok(None);
     }
-    let run = state
-        .redemption_runs()
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            ProtocolError::TemporarilyUnavailable(
-                "No eligible collateral vaults are available for reserve spillover.".to_string(),
-            )
-        })?;
+    let run = state.redemption_runs().into_iter().next().ok_or_else(|| {
+        ProtocolError::TemporarilyUnavailable(
+            "No eligible collateral vaults are available for reserve spillover.".to_string(),
+        )
+    })?;
     validate_legacy_reserve_spillover_asset(state, &run)?;
     Ok(Some(run))
 }
@@ -655,8 +635,8 @@ async fn refresh_redemption_candidate_prices() -> Result<(), ProtocolError> {
 /// cached ICP and do not recursively fetch ICP. Unlike
 /// `refresh_redemption_candidate_prices`, this helper is only used by the
 /// public no-funds offer endpoint.
-async fn refresh_stale_redemption_candidates_for_offer(
-) -> Result<(), RedemptionOfferRefreshError> {
+async fn refresh_stale_redemption_candidates_for_offer() -> Result<(), RedemptionOfferRefreshError>
+{
     refresh_stale_redemption_candidates_for_offer_with(
         || ic_cdk::api::time(),
         |now| read_state(|state| redemption_offer_price_refresh_snapshot(state, now)),
@@ -683,8 +663,7 @@ where
     Now: FnMut() -> u64,
     Snapshot: FnMut(u64) -> RedemptionOfferPriceRefreshSnapshot,
     Refresh: FnMut(Principal) -> RefreshFuture,
-    RefreshFuture:
-        std::future::Future<Output = Result<(), RedemptionOfferRefreshError>>,
+    RefreshFuture: std::future::Future<Output = Result<(), RedemptionOfferRefreshError>>,
 {
     for _ in 0..MAX_REDEMPTION_OFFER_REFRESH_PASSES {
         let current = snapshot(now());
@@ -746,8 +725,8 @@ fn build_redemption_queue_and_quote(
             .expect("fee snapshot prepared for every redemption run");
         let simulation = redemption_simulation_plan(state, run);
         let max_input = max_input_for_run_with(state, run, fee_snapshot, &simulation);
-        let max_net = net_for_run_input(state, run, max_input, fee_snapshot, &simulation)
-            .unwrap_or(0);
+        let max_net =
+            net_for_run_input(state, run, max_input, fee_snapshot, &simulation).unwrap_or(0);
         if index == 0 {
             quote_result = Some(if ranking_complete {
                 quote_for_redemption_run(
@@ -828,7 +807,11 @@ fn quote_for_redemption_run(
     let fee = amount * fee_snapshot.fee(amount);
     let rmr = state.get_redemption_margin_ratio();
     let effective = (amount - fee) * rmr;
-    let simulated = simulation.simulate(effective);
+    let simulated = simulation.simulate(effective).ok_or_else(|| {
+        RedemptionError::RedemptionQuoteUnavailable(
+            "The selected collateral payout exceeds the supported raw-token range.".to_string(),
+        )
+    })?;
     let gross = simulated_collateral_total_raw(&simulated).ok_or_else(|| {
         RedemptionError::RedemptionQuoteUnavailable(
             "The selected collateral payout exceeds the supported raw-token range.".to_string(),
@@ -879,7 +862,8 @@ fn prepared_offer_from_current_state(
     let (queue, quote) = build_redemption_queue_and_quote(state, now, amount_e8s, false);
     if !queue.ranking_fresh {
         return Err(RedemptionOfferRefreshError::RefreshUnavailable {
-            message: "The complete collateral ranking is no longer fresh; refresh the offer again.".to_string(),
+            message: "The complete collateral ranking is no longer fresh; refresh the offer again."
+                .to_string(),
             retry_after_ns,
         });
     }
@@ -976,7 +960,11 @@ pub fn get_redemption_quote(amount_e8s: u64) -> Result<RedemptionQuote, Redempti
         let fee = amount * fee_ratio;
         let rmr = s.get_redemption_margin_ratio();
         let effective = (amount - fee) * rmr;
-        let simulated = simulation.simulate(effective);
+        let simulated = simulation.simulate(effective).ok_or_else(|| {
+            RedemptionError::RedemptionQuoteUnavailable(
+                "The selected collateral payout exceeds the supported raw-token range.".to_string(),
+            )
+        })?;
         let gross = simulated_collateral_total_raw(&simulated).ok_or_else(|| {
             RedemptionError::RedemptionQuoteUnavailable(
                 "The selected collateral payout exceeds the supported raw-token range.".to_string(),
@@ -1026,8 +1014,7 @@ pub fn get_redemption_quote(amount_e8s: u64) -> Result<RedemptionQuote, Redempti
 pub fn get_redemption_preview(amount_e8s: u64) -> RedemptionPreview {
     let now = ic_cdk::api::time();
     read_state(|state| {
-        let (queue, estimate) =
-            build_redemption_queue_and_quote(state, now, amount_e8s, true);
+        let (queue, estimate) = build_redemption_queue_and_quote(state, now, amount_e8s, true);
         RedemptionPreview { queue, estimate }
     })
 }
@@ -1103,7 +1090,9 @@ fn max_input_for_run_with(
         if !theoretical_collateral_target_fits_u64(effective, price, run.decimals) {
             return false;
         }
-        let simulated = simulation.simulate(effective);
+        let Some(simulated) = simulation.simulate(effective) else {
+            return false;
+        };
         simulated_collateral_total_raw(&simulated).is_some()
     })
 }
@@ -1152,7 +1141,9 @@ fn simulated_collateral_total_raw(redemptions: &[crate::event::VaultRedemption])
     u64::try_from(total).ok()
 }
 
-fn redemption_record_error_to_protocol(error: crate::event::RedemptionRecordError) -> RedemptionError {
+fn redemption_record_error_to_protocol(
+    error: crate::event::RedemptionRecordError,
+) -> RedemptionError {
     match error {
         crate::event::RedemptionRecordError::PayoutUnrepresentable => {
             RedemptionError::RedemptionQuoteUnavailable(
@@ -1210,7 +1201,7 @@ fn net_for_run_input(
     let amount = ICUSD::from(amount_e8s);
     let fee = amount * fee_snapshot.fee(amount);
     let effective = (amount - fee) * state.get_redemption_margin_ratio();
-    let simulated = simulation.simulate(effective);
+    let simulated = simulation.simulate(effective)?;
     let gross = simulated_collateral_total_raw(&simulated)?;
     let ledger_fee = state
         .get_collateral_config(&run.collateral_type)?
@@ -1382,7 +1373,7 @@ fn stable_repay_pull_e6s(amount: ICUSD, fee_rate: Ratio) -> Result<(u64, u64, u6
 #[cfg(test)]
 mod stable_repay_rounding_tests {
     use super::stable_repay_pull_e6s;
-    use crate::numeric::{ICUSD, Ratio};
+    use crate::numeric::{Ratio, ICUSD};
     use crate::ProtocolError;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -1398,11 +1389,8 @@ mod stable_repay_rounding_tests {
         // inside the dust threshold. A base computed from the request alone
         // would cover only 10,000,000,000 e8s and underfund that retirement.
         assert!(u128::from(requested_e8s / 100) * 100 < u128::from(debt_e8s));
-        let (base_e6s, fee_e6s, total_e6s) = stable_repay_pull_e6s(
-            ICUSD::new(debt_e8s),
-            Ratio::new(dec!(0.01)),
-        )
-        .unwrap();
+        let (base_e6s, fee_e6s, total_e6s) =
+            stable_repay_pull_e6s(ICUSD::new(debt_e8s), Ratio::new(dec!(0.01))).unwrap();
         assert_eq!(base_e6s, 100_500_000);
         assert_eq!(fee_e6s, 1_005_000);
         assert_eq!(total_e6s, 101_505_000);
@@ -1414,11 +1402,9 @@ mod stable_repay_rounding_tests {
     #[test]
     fn fractional_e8_debt_rounds_up_and_fee_is_not_counted_as_principal() {
         let finalized_debt_e8s = 10_000_000_001u64;
-        let (base_e6s, fee_e6s, total_e6s) = stable_repay_pull_e6s(
-            ICUSD::new(finalized_debt_e8s),
-            Ratio::new(dec!(0.0005)),
-        )
-        .unwrap();
+        let (base_e6s, fee_e6s, total_e6s) =
+            stable_repay_pull_e6s(ICUSD::new(finalized_debt_e8s), Ratio::new(dec!(0.0005)))
+                .unwrap();
         assert_eq!(base_e6s, 100_000_001);
         assert_eq!(fee_e6s, 50_000);
         assert_eq!(total_e6s, 100_050_001);
@@ -1451,11 +1437,8 @@ mod stable_repay_rounding_tests {
             accrued_interest: ICUSD::new(0),
             bot_processing: false,
         };
-        let retired = super::round_up_partial_liq_dust(
-            &vault,
-            ICUSD::new(debt_e8s - 1),
-            ICUSD::new(100),
-        );
+        let retired =
+            super::round_up_partial_liq_dust(&vault, ICUSD::new(debt_e8s - 1), ICUSD::new(100));
         assert_eq!(retired, ICUSD::new(debt_e8s));
 
         let (base_e6s, fee_e6s, total_e6s) =
@@ -1771,8 +1754,7 @@ pub async fn redeem_reserves(
         let refreshed = refresh_redemption_candidate_prices().await;
         let still_representable = refreshed.is_ok()
             && read_state(|state| {
-                let Some(run) =
-                    current_legacy_reserve_run_for_snapshot(state, expected_snapshot)
+                let Some(run) = current_legacy_reserve_run_for_snapshot(state, expected_snapshot)
                 else {
                     return false;
                 };
@@ -1908,8 +1890,7 @@ pub async fn redeem_reserves(
             // Stable and treasury ledger calls have awaited. Compare the full
             // pre-pull snapshot before the synchronous event mutation. If any
             // part changed, do not seize and refund only the spillover tail.
-            let Some(expected_snapshot) = &spillover_plan
-            else {
+            let Some(expected_snapshot) = &spillover_plan else {
                 return reserve_spillover_snapshot_mismatch_refund(
                     spillover_e8s,
                     rmr,
@@ -1950,7 +1931,7 @@ pub async fn redeem_reserves(
                     spillover_e8s,
                     rmr,
                     raw_spillover_refund_budget_e8s,
-                )
+                );
             };
             let current_price = UsdIcp::from(price_decimal);
 
@@ -1972,18 +1953,24 @@ pub async fn redeem_reserves(
                 max_effective_icusd_for_u64_payout(price_decimal, run.decimals);
             let bounded_effective =
                 ICUSD::new(effective_spillover.to_u64().min(safe_effective_e8s));
-            let simulated = s.simulate_redemption_for_vault_ids(
+            let Some(simulated) = s.simulate_redemption_for_vault_ids(
                 bounded_effective,
                 current_price,
                 &run.collateral_type,
                 &run.vault_ids,
-            );
+            ) else {
+                return reserve_spillover_snapshot_mismatch_refund(
+                    spillover_e8s,
+                    rmr,
+                    raw_spillover_refund_budget_e8s,
+                );
+            };
             if simulated_collateral_total_raw(&simulated).is_none() {
                 return reserve_spillover_snapshot_mismatch_refund(
                     spillover_e8s,
                     rmr,
                     raw_spillover_refund_budget_e8s,
-                )
+                );
             }
 
             let outcome = match crate::event::record_redemption_on_vault_run(
@@ -2046,12 +2033,8 @@ pub async fn redeem_reserves(
     };
     if refund_e8s > 0 {
         let refund_nonce = mutate_state(|s| s.next_op_nonce());
-        match management::transfer_icusd_with_nonce(
-            ICUSD::from(refund_e8s),
-            caller,
-            refund_nonce,
-        )
-        .await
+        match management::transfer_icusd_with_nonce(ICUSD::from(refund_e8s), caller, refund_nonce)
+            .await
         {
             Ok(refund_block) => {
                 log!(
@@ -2181,8 +2164,7 @@ pub async fn redeem_collateral(
     // Fail closed on a stale price for the collateral actually being seized
     // (VER-001 ceiling applies inside ensure_fresh_price_for).
     refresh_redemption_candidate_prices().await?;
-    let pre_pull_run =
-        read_state(|s| legacy_redemption_run_for_request(s, collateral_type))?;
+    let pre_pull_run = read_state(|s| legacy_redemption_run_for_request(s, collateral_type))?;
     let pre_pull_snapshot = RedemptionRunSnapshot::capture(&pre_pull_run);
     let redeem_ct = pre_pull_run.collateral_type;
     let collateral_price = Decimal::from_f64_retain(pre_pull_run.price_usd).ok_or(
@@ -2216,7 +2198,7 @@ pub async fn redeem_collateral(
                     UsdIcp::from(price),
                     &run.collateral_type,
                     &run.vault_ids,
-                );
+                )?;
                 simulated_collateral_total_raw(&simulated)
             })
             .is_some();
@@ -2267,8 +2249,7 @@ pub async fn redeem_collateral(
                 )
                 .await);
             };
-            if let Some(error) = redemption_run_snapshot_error(&pre_pull_snapshot, &post_pull_run)
-            {
+            if let Some(error) = redemption_run_snapshot_error(&pre_pull_snapshot, &post_pull_run) {
                 return Err(refund_rejected_quoted_redemption(
                     caller,
                     icusd_amount.to_u64(),
@@ -2345,7 +2326,9 @@ pub async fn redeem_collateral(
                     &run_vault_ids,
                     None,
                 )
-                .map_err(|error| legacy_redemption_error(redemption_record_error_to_protocol(error)))?;
+                .map_err(|error| {
+                    legacy_redemption_error(redemption_record_error_to_protocol(error))
+                })?;
 
                 crate::record_per_collateral_redemption_fee(
                     s,
@@ -2575,12 +2558,19 @@ pub async fn redeem_quoted(
                             "Collateral price is unavailable.".to_string(),
                         )
                     })?);
-                let simulated = state.simulate_redemption_for_vault_ids(
-                    effective,
-                    price,
-                    &run.collateral_type,
-                    &run.vault_ids,
-                );
+                let simulated = state
+                    .simulate_redemption_for_vault_ids(
+                        effective,
+                        price,
+                        &run.collateral_type,
+                        &run.vault_ids,
+                    )
+                    .ok_or_else(|| {
+                        RedemptionError::RedemptionQuoteUnavailable(
+                            "The selected collateral payout exceeds the supported raw-token range."
+                                .to_string(),
+                        )
+                    })?;
                 let gross = simulated_collateral_total_raw(&simulated).ok_or_else(|| {
                     RedemptionError::RedemptionQuoteUnavailable(
                         "The selected collateral payout exceeds the supported raw-token range."
@@ -3374,11 +3364,20 @@ fn xrp_sp_absorb_sizing(
     }
 
     let liquidation_amount = ICUSD::new(expected_icusd_burn_e8s);
-    let collateral_raw =
-        crate::numeric::icusd_to_collateral_amount(liquidation_amount, price, cfg.decimals);
-    let collateral_with_bonus =
-        ICP::from(collateral_raw) * state.get_liquidation_bonus_for(&vault.collateral_type);
-    let total_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+    // This is preflight sizing for the full-debt Stability Pool burn. Saturate
+    // an unrepresentable collateral requirement and apply the bonus through
+    // the checked physical-collateral cap so the reservation matches what the
+    // proof-backed settlement can safely consume.
+    let collateral_raw = crate::numeric::icusd_to_collateral_amount_for_burned_debt(
+        liquidation_amount,
+        price,
+        cfg.decimals,
+    );
+    let total_to_seize = ICP::from(crate::numeric::collateral_with_bonus_capped(
+        collateral_raw,
+        state.get_liquidation_bonus_for(&vault.collateral_type),
+        vault.collateral_amount,
+    ));
     let total_to_seize_drops = total_to_seize.to_u64();
     let bonus_portion = total_to_seize_drops.saturating_sub(collateral_raw);
     let protocol_cut = (Decimal::from(bonus_portion) * state.get_liquidation_protocol_share().0)
@@ -3537,10 +3536,7 @@ fn ensure_no_active_xrp_sp_absorb_preflight(
     Ok(())
 }
 
-fn reject_active_xrp_sp_absorb_preflight(
-    vault_id: u64,
-    now_ns: u64,
-) -> Result<(), ProtocolError> {
+fn reject_active_xrp_sp_absorb_preflight(vault_id: u64, now_ns: u64) -> Result<(), ProtocolError> {
     read_state(|s| ensure_no_active_xrp_sp_absorb_preflight(s, vault_id, now_ns))
 }
 
@@ -3918,10 +3914,11 @@ pub fn stability_pool_liquidate_xrp_vault_in_state(
     let mut interest_share = ICUSD::new(0);
     if let Some(vault) = state.vault_id_to_vaults.get_mut(&request.vault_id) {
         if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
-            let share = (Decimal::from(request.icusd_burned_e8s)
-                * Decimal::from(vault.accrued_interest.0)
-                / Decimal::from(vault.borrowed_icusd_amount.0))
-            .to_u64()
+            let share = crate::numeric::checked_proportional_amount(
+                request.icusd_burned_e8s,
+                vault.borrowed_icusd_amount.0,
+                vault.accrued_interest.0,
+            )
             .unwrap_or(0);
             interest_share = ICUSD::new(share.min(vault.accrued_interest.0));
         }
@@ -4461,7 +4458,13 @@ pub async fn settle_xrp_claim_with_tag(
     destination: String,
     destination_tag: Option<u32>,
 ) -> Result<String, ProtocolError> {
-    settle_xrp_claim_as(ic_cdk::api::caller(), claim_id, destination, destination_tag).await
+    settle_xrp_claim_as(
+        ic_cdk::api::caller(),
+        claim_id,
+        destination,
+        destination_tag,
+    )
+    .await
 }
 
 /// Settlement body with an explicit acting claimant. The claimant entry points
@@ -5709,7 +5712,15 @@ async fn borrow_from_vault_internal(
     });
     let max_borrowable_amount: ICUSD = collateral_value / min_ratio;
 
-    if vault.borrowed_icusd_amount + amount > max_borrowable_amount {
+    // Reject debt overflow before the external icUSD mint. The state update
+    // after mint repeats this addition while the per-vault borrow guard is held.
+    let new_total_debt = crate::numeric::checked_icusd_add(vault.borrowed_icusd_amount, amount)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "Borrow would exceed the representable icUSD debt range.".to_string(),
+            )
+        })?;
+    if new_total_debt > max_borrowable_amount {
         return Err(ProtocolError::GenericError(format!(
             "failed to borrow from vault, max borrowable: {max_borrowable_amount}, borrowed: {}, requested: {amount}",
             vault.borrowed_icusd_amount
@@ -5717,7 +5728,6 @@ async fn borrow_from_vault_internal(
     }
 
     // Compute projected vault CR after this borrow (for dynamic fee multiplier)
-    let new_total_debt = vault.borrowed_icusd_amount + amount;
     let projected_cr = if new_total_debt.to_u64() == 0 {
         Ratio::new(dec!(999))
     } else {
@@ -6027,14 +6037,14 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
     // near-full-debt snap. Ceiling the conversion prevents retiring more
     // icUSD debt than the stable principal can cover.
     let fee_rate = read_state(|s| s.ckstable_repay_fee);
-    let (_base_stable_e6s, fee_e6s, total_pull_e6s) =
-        match stable_repay_pull_e6s(amount, fee_rate) {
-            Ok(pull) => pull,
-            Err(error) => {
-                guard_principal.fail();
-                return Err(error);
-            }
-        };
+    let (_base_stable_e6s, fee_e6s, total_pull_e6s) = match stable_repay_pull_e6s(amount, fee_rate)
+    {
+        Ok(pull) => pull,
+        Err(error) => {
+            guard_principal.fail();
+            return Err(error);
+        }
+    };
 
     // Transfer the stable token from user (in 6-decimal units)
     match transfer_stable_from(arg.token_type.clone(), total_pull_e6s, caller).await {
@@ -7518,9 +7528,11 @@ pub async fn liquidate_vault_partial(
                         price,
                         decimals,
                     );
-                    let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-                    let total_to_seize =
-                        collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+                    let total_to_seize = ICP::from(crate::numeric::collateral_with_bonus_capped(
+                        collateral_raw,
+                        liq_bonus,
+                        vault.collateral_amount,
+                    ));
 
                     // Split: protocol gets a share of the bonus portion (liquidator's profit)
                     let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
@@ -7602,10 +7614,11 @@ pub async fn liquidate_vault_partial(
         // Compute proportional interest share before reducing debt
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
             if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
-                let share = (rust_decimal::Decimal::from(max_liquidatable_debt.0)
-                    * rust_decimal::Decimal::from(vault.accrued_interest.0)
-                    / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                .to_u64()
+                let share = crate::numeric::checked_proportional_amount(
+                    max_liquidatable_debt.0,
+                    vault.borrowed_icusd_amount.0,
+                    vault.accrued_interest.0,
+                )
                 .unwrap_or(0);
                 ICUSD::new(share.min(vault.accrued_interest.0))
             } else {
@@ -7934,9 +7947,11 @@ pub async fn liquidate_vault_partial_with_stable(
                         price,
                         decimals,
                     );
-                    let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-                    let total_to_seize =
-                        collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+                    let total_to_seize = ICP::from(crate::numeric::collateral_with_bonus_capped(
+                        collateral_raw,
+                        liq_bonus,
+                        vault.collateral_amount,
+                    ));
 
                     // Split: protocol gets a share of the bonus portion
                     let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
@@ -8030,10 +8045,11 @@ pub async fn liquidate_vault_partial_with_stable(
         // Compute proportional interest share before reducing debt
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
             if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
-                let share = (rust_decimal::Decimal::from(max_liquidatable_debt.0)
-                    * rust_decimal::Decimal::from(vault.accrued_interest.0)
-                    / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                .to_u64()
+                let share = crate::numeric::checked_proportional_amount(
+                    max_liquidatable_debt.0,
+                    vault.borrowed_icusd_amount.0,
+                    vault.accrued_interest.0,
+                )
                 .unwrap_or(0);
                 ICUSD::new(share.min(vault.accrued_interest.0))
             } else {
@@ -8534,14 +8550,21 @@ pub async fn liquidate_vault_debt_already_burned(
 
                     let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
                     let protocol_share = s.get_liquidation_protocol_share();
-                    let collateral_raw = crate::numeric::icusd_to_collateral_amount(
+                    // The external burn is already final. If its mathematically
+                    // required collateral exceeds the u64 ledger range, saturate
+                    // before the existing min(vault collateral) bound so the
+                    // proven debt write-down consumes at most this vault's actual
+                    // collateral and cannot orphan the burn.
+                    let collateral_raw = crate::numeric::icusd_to_collateral_amount_for_burned_debt(
                         actual_liquidation_amount,
                         price,
                         decimals,
                     );
-                    let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-                    let total_to_seize =
-                        collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+                    let total_to_seize = ICP::from(crate::numeric::collateral_with_bonus_capped(
+                        collateral_raw,
+                        liq_bonus,
+                        vault.collateral_amount,
+                    ));
 
                     let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
                     let protocol_cut = (rust_decimal::Decimal::from(bonus_portion)
@@ -8640,10 +8663,11 @@ pub async fn liquidate_vault_debt_already_burned(
 
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
             if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
-                let share = (rust_decimal::Decimal::from(max_liquidatable_debt.0)
-                    * rust_decimal::Decimal::from(vault.accrued_interest.0)
-                    / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                .to_u64()
+                let share = crate::numeric::checked_proportional_amount(
+                    max_liquidatable_debt.0,
+                    vault.borrowed_icusd_amount.0,
+                    vault.accrued_interest.0,
+                )
                 .unwrap_or(0);
                 ICUSD::new(share.min(vault.accrued_interest.0))
             } else {
@@ -8951,8 +8975,17 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         let debt = s.effective_liquidation_amount(&vault, collateral_price_usd, None);
         let is_partial = debt < vault.borrowed_icusd_amount;
         let collateral_raw =
-            crate::numeric::icusd_to_collateral_amount(debt, collateral_price, config_decimals);
-        let total_to_seize = (ICP::from(collateral_raw) * liq_bonus).min(vault_collateral);
+            crate::numeric::try_icusd_to_collateral_amount(debt, collateral_price, config_decimals)
+                .unwrap_or(u64::MAX);
+        let total_to_seize = crate::numeric::try_icusd_to_collateral_amount_with_bonus(
+            debt,
+            collateral_price,
+            config_decimals,
+            liq_bonus,
+        )
+        .unwrap_or(u64::MAX)
+        .min(vault.collateral_amount);
+        let total_to_seize = ICP::from(total_to_seize);
         // Split: protocol gets a share of the bonus portion (liquidator's profit)
         let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
         let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
@@ -9723,8 +9756,11 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         collateral_price,
         config_decimals,
     );
-    let icp_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-    let total_to_seize = icp_with_bonus.min(ICP::from(vault.collateral_amount));
+    let total_to_seize = ICP::from(crate::numeric::collateral_with_bonus_capped(
+        collateral_raw,
+        liq_bonus,
+        vault.collateral_amount,
+    ));
 
     // Split: protocol gets a share of the bonus portion (liquidator's profit)
     let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
@@ -9766,10 +9802,11 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         // Compute proportional interest share before reducing debt
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&arg.vault_id) {
             if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
-                let share = (rust_decimal::Decimal::from(liquidator_payment.0)
-                    * rust_decimal::Decimal::from(vault.accrued_interest.0)
-                    / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                .to_u64()
+                let share = crate::numeric::checked_proportional_amount(
+                    liquidator_payment.0,
+                    vault.borrowed_icusd_amount.0,
+                    vault.accrued_interest.0,
+                )
                 .unwrap_or(0);
                 ICUSD::new(share.min(vault.accrued_interest.0))
             } else {
@@ -10234,10 +10271,17 @@ mod xrp_sp_absorb_contract_tests {
             "an active reservation must block vault operations"
         );
 
-        let released =
-            stability_pool_release_xrp_absorb_preflight_in_state(&mut state, sp(), VAULT_ID, 100 * E8)
-                .expect("registered SP may release its own unburned reservation");
-        assert!(released, "release must report that a reservation was cleared");
+        let released = stability_pool_release_xrp_absorb_preflight_in_state(
+            &mut state,
+            sp(),
+            VAULT_ID,
+            100 * E8,
+        )
+        .expect("registered SP may release its own unburned reservation");
+        assert!(
+            released,
+            "release must report that a reservation was cleared"
+        );
         assert!(state.sp_xrp_absorb_preflights.is_empty());
         assert!(
             ensure_no_active_xrp_sp_absorb_preflight(&state, VAULT_ID, 20).is_ok(),
@@ -10269,8 +10313,13 @@ mod xrp_sp_absorb_contract_tests {
             .expect("preflight reservation");
 
         let not_sp = principal(0x77);
-        stability_pool_release_xrp_absorb_preflight_in_state(&mut state, not_sp, VAULT_ID, 100 * E8)
-            .expect_err("only the registered stability pool may release a reservation");
+        stability_pool_release_xrp_absorb_preflight_in_state(
+            &mut state,
+            not_sp,
+            VAULT_ID,
+            100 * E8,
+        )
+        .expect_err("only the registered stability pool may release a reservation");
         assert!(
             state.sp_xrp_absorb_preflights.contains_key(&VAULT_ID),
             "a rejected release must not clear the reservation"
@@ -10325,8 +10374,7 @@ mod xrp_sp_absorb_contract_tests {
             "missing claim must use the settled-or-unknown wording the sweep keys off: {missing:?}"
         );
 
-        state.xrp_claims.get_mut(&9).unwrap().quarantine_reason =
-            Some("diverged".to_string());
+        state.xrp_claims.get_mut(&9).unwrap().quarantine_reason = Some("diverged".to_string());
         let quarantined = validate_sp_settle_xrp_claim_in_state(&state, sp(), 9, depositor);
         assert!(
             format!("{quarantined:?}").contains("quarantined"),
@@ -10352,7 +10400,11 @@ mod xrp_sp_absorb_contract_tests {
         if let Some(cfg) = state.collateral_configs.get_mut(&xrp) {
             cfg.last_price = Some(1.30);
         }
-        let vault = state.vault_id_to_vaults.get(&VAULT_ID).expect("vault").clone();
+        let vault = state
+            .vault_id_to_vaults
+            .get(&VAULT_ID)
+            .expect("vault")
+            .clone();
         let dummy = UsdIcp::from(Decimal::ZERO);
 
         // The generic cap is a strict partial here — the pre-fix dispatch value.
@@ -10388,7 +10440,10 @@ mod xrp_sp_absorb_contract_tests {
             20,
         )
         .expect("automated dispatch amount must be accepted by the preflight");
-        assert_eq!(preflight.icusd_burn_e8s, vault.borrowed_icusd_amount.to_u64());
+        assert_eq!(
+            preflight.icusd_burn_e8s,
+            vault.borrowed_icusd_amount.to_u64()
+        );
     }
 
     #[test]
@@ -10737,10 +10792,13 @@ mod xrp_sp_absorb_contract_tests {
             .unwrap()
             .collateral_amount = 60_000_000;
 
-        assert!(
-            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), valid_request(44), 20)
-                .is_err()
-        );
+        assert!(stability_pool_liquidate_xrp_vault_in_state(
+            &mut state,
+            sp(),
+            valid_request(44),
+            20
+        )
+        .is_err());
         assert!(state.xrp_claims.is_empty());
         assert_eq!(state.next_xrp_claim_id, 0);
         assert!(state.sp_xrp_absorb_results_by_proof.is_empty());
@@ -10775,10 +10833,13 @@ mod xrp_sp_absorb_contract_tests {
             .unwrap()
             .borrowed_icusd_amount = ICUSD::new(50 * E8);
 
-        assert!(
-            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), valid_request(44), 20)
-                .is_err()
-        );
+        assert!(stability_pool_liquidate_xrp_vault_in_state(
+            &mut state,
+            sp(),
+            valid_request(44),
+            20
+        )
+        .is_err());
         assert!(state.xrp_claims.is_empty());
         assert_eq!(state.next_xrp_claim_id, 0);
         assert!(state.sp_xrp_absorb_results_by_proof.is_empty());
@@ -10857,7 +10918,11 @@ mod xrp_sp_absorb_contract_tests {
             .expect("exact replay returns cached result");
         assert_eq!(replay, first);
         assert_eq!(state.xrp_claims, claims_after_first);
-        assert_eq!(state.xrp_claims.len(), 3, "replay must not re-mint the dev claim");
+        assert_eq!(
+            state.xrp_claims.len(),
+            3,
+            "replay must not re-mint the dev claim"
+        );
         assert_eq!(state.next_xrp_claim_id, 3);
     }
 
@@ -11036,10 +11101,7 @@ mod redemption_ranking_completeness_tests {
         let candidates: Vec<_> = (0..65).map(|i| Principal::from_slice(&[i])).collect();
         let first_64: Vec<_> = candidates.iter().take(64).copied().collect();
         assert!(redemption_ranking_is_complete(
-            &first_64,
-            &first_64,
-            true,
-            64,
+            &first_64, &first_64, true, 64,
         ));
         assert!(!redemption_ranking_is_complete(
             &candidates,
@@ -11108,19 +11170,16 @@ mod redemption_ranking_completeness_tests {
 #[cfg(test)]
 mod redemption_await_boundary_tests {
     use super::{
-        current_fresh_legacy_reserve_run_for_snapshot,
-        current_legacy_reserve_run_for_snapshot, legacy_redemption_run_for_request,
         build_redemption_queue_and_quote, cached_redemption_offer_is_fresh,
-        prepared_offer_from_current_state, stale_redemption_candidate_types,
-        redemption_offer_price_refresh_snapshot,
-        refresh_stale_redemption_candidates_for_offer_with,
-        RedemptionOfferRefreshGateState, REDEMPTION_OFFER_REFRESH_COOLDOWN_NS,
-        REDEMPTION_OFFER_REFRESH_LEASE_NS,
-        legacy_reserve_spillover_run, persist_rejected_redemption_refund,
-        redemption_raw_refund, redemption_ranking_is_fresh,
-        redemption_run_snapshot_error, reserve_spillover_raw_refund_budget,
-        redemption_tail_raw_refund, reserve_spillover_snapshot_mismatch_refund,
-        reserve_post_settlement_raw_refund, RedemptionRunSnapshot, Vault,
+        current_fresh_legacy_reserve_run_for_snapshot, current_legacy_reserve_run_for_snapshot,
+        legacy_redemption_run_for_request, legacy_reserve_spillover_run,
+        persist_rejected_redemption_refund, prepared_offer_from_current_state,
+        redemption_offer_price_refresh_snapshot, redemption_ranking_is_fresh,
+        redemption_raw_refund, redemption_run_snapshot_error, redemption_tail_raw_refund,
+        refresh_stale_redemption_candidates_for_offer_with, reserve_post_settlement_raw_refund,
+        reserve_spillover_raw_refund_budget, reserve_spillover_snapshot_mismatch_refund,
+        stale_redemption_candidate_types, RedemptionOfferRefreshGateState, RedemptionRunSnapshot,
+        Vault, REDEMPTION_OFFER_REFRESH_COOLDOWN_NS, REDEMPTION_OFFER_REFRESH_LEASE_NS,
         REDEMPTION_PRICE_MAX_AGE_NS,
     };
     use crate::numeric::{Ratio, ICUSD};
@@ -11245,8 +11304,14 @@ mod redemption_await_boundary_tests {
         assert!(message.contains("review a new quote"));
         assert_eq!(vault_balances(&state), before_balances);
         assert_eq!(state.pending_refunds.len(), before_pending_refunds);
-        assert_eq!(state.pending_redemption_transfer.len(), before_pending_payouts);
-        assert_eq!(state.collateral_configs[&xaut].current_base_rate, before_base_rate);
+        assert_eq!(
+            state.pending_redemption_transfer.len(),
+            before_pending_payouts
+        );
+        assert_eq!(
+            state.collateral_configs[&xaut].current_base_rate,
+            before_base_rate
+        );
 
         assert_eq!(
             legacy_redemption_run_for_request(&state, xaut)
@@ -11328,7 +11393,10 @@ mod redemption_await_boundary_tests {
         assert_eq!(new_first.collateral_type, xaut);
         assert!(current_legacy_reserve_run_for_snapshot(&state, &snapshot).is_none());
         let rmr = Ratio::from(dec!(0.9));
-        assert_eq!(reserve_spillover_snapshot_mismatch_refund(700, rmr, 777), 777);
+        assert_eq!(
+            reserve_spillover_snapshot_mismatch_refund(700, rmr, 777),
+            777
+        );
         assert_eq!(vault_balances(&state), before);
         assert!(state.pending_redemption_transfer.is_empty());
     }
@@ -11345,12 +11413,10 @@ mod redemption_await_boundary_tests {
             &state.redemption_runs(),
             boundary_now
         ));
-        assert!(current_fresh_legacy_reserve_run_for_snapshot(
-            &state,
-            &snapshot,
-            boundary_now
-        )
-        .is_some());
+        assert!(
+            current_fresh_legacy_reserve_run_for_snapshot(&state, &snapshot, boundary_now)
+                .is_some()
+        );
 
         // Both prices and the selected IDs remain identical, but the stable
         // transfer crossed the ten-minute cache-age limit before seizure.
@@ -11363,12 +11429,9 @@ mod redemption_await_boundary_tests {
             &state.redemption_runs(),
             stale_now
         ));
-        assert!(current_fresh_legacy_reserve_run_for_snapshot(
-            &state,
-            &snapshot,
-            stale_now
-        )
-        .is_none());
+        assert!(
+            current_fresh_legacy_reserve_run_for_snapshot(&state, &snapshot, stale_now).is_none()
+        );
 
         // A future competitor timestamp also makes the complete ordering
         // unavailable, even though the selected ICP quote itself is unchanged.
@@ -11450,9 +11513,7 @@ mod redemption_await_boundary_tests {
         assert_eq!(outcome.consumed.to_u64(), 40_095_000);
         assert_eq!(outcome.margin.to_u64(), 40_095_000);
         assert_eq!(
-            state.vault_id_to_vaults[&1]
-                .borrowed_icusd_amount
-                .to_u64(),
+            state.vault_id_to_vaults[&1].borrowed_icusd_amount.to_u64(),
             0,
             "the selected-run execution really retires the fixture vault debt"
         );
@@ -11488,10 +11549,10 @@ mod redemption_await_boundary_tests {
         // Independent oracle: stable payout plus committed native fee/debt is
         // 81,000,000 effective e8s; / .9 consumes the full 90,000,000 raw
         // post-reserve-fee budget exactly once.
-        let raw_native_leg =
-            (rust_decimal::Decimal::from(vault_fee.to_u64() + consumed.to_u64()) / rmr.0)
-                .to_u64()
-                .unwrap();
+        let raw_native_leg = (rust_decimal::Decimal::from(vault_fee.to_u64() + consumed.to_u64())
+            / rmr.0)
+            .to_u64()
+            .unwrap();
         assert_eq!(raw_native_leg, 45_000_000);
         let stable_raw_leg = (Decimal::from(available_for_user * 100) / rmr.0)
             .ceil()
@@ -11508,14 +11569,9 @@ mod redemption_await_boundary_tests {
         let stable_raw_budget = reserve_spillover_raw_refund_budget(90_000_000, 405_000, rmr);
         assert_eq!(stable_raw_budget, 45_000_000);
         assert_eq!(
-            redemption_tail_raw_refund(
-                Decimal::from(40_500_000),
-                rmr,
-                stable_raw_budget
-            ),
+            redemption_tail_raw_refund(Decimal::from(40_500_000), rmr, stable_raw_budget),
             45_000_000
         );
-
     }
 
     #[test]
@@ -11546,8 +11602,7 @@ mod redemption_await_boundary_tests {
         let spillover_e8s = (net_after_reserve_fee * rmr).to_u64();
         assert_eq!(spillover_e8s, 81_000_000);
         let raw_budget = net_after_reserve_fee.to_u64();
-        let raw_budget_after_stable =
-            reserve_spillover_raw_refund_budget(raw_budget, 0, rmr);
+        let raw_budget_after_stable = reserve_spillover_raw_refund_budget(raw_budget, 0, rmr);
         assert_eq!(raw_budget_after_stable, 90_000_000);
 
         // Pin both fee bounds to 1% so the actual recorder is independent of
@@ -11574,9 +11629,7 @@ mod redemption_await_boundary_tests {
         .unwrap();
         assert_eq!(outcome.consumed.to_u64(), 40_095_000);
         assert_eq!(
-            state.vault_id_to_vaults[&1]
-                .borrowed_icusd_amount
-                .to_u64(),
+            state.vault_id_to_vaults[&1].borrowed_icusd_amount.to_u64(),
             0
         );
         let [crate::event::Event::RedemptionOnVaults {
@@ -11598,11 +11651,11 @@ mod redemption_await_boundary_tests {
         // Independent oracle: V + C = 40,905,000 effective e8s;
         // ceil(40,905,000 / .9) = 45,450,000 raw, leaving 44,550,000.
         assert_eq!(refund_raw, 44_550_000);
-        let native_raw_spent =
-            (Decimal::from(vault_fee.to_u64() + outcome.consumed.to_u64()) / rmr.0)
-                .ceil()
-                .to_u64()
-                .unwrap();
+        let native_raw_spent = (Decimal::from(vault_fee.to_u64() + outcome.consumed.to_u64())
+            / rmr.0)
+            .ceil()
+            .to_u64()
+            .unwrap();
         assert_eq!(native_raw_spent, 45_450_000);
         assert_eq!(
             reserve_fee.to_u64() + refund_raw + native_raw_spent,
@@ -11688,7 +11741,8 @@ mod redemption_await_boundary_tests {
         let reserve_fee = ICUSD::from(input_e8s) * state.reserve_redemption_fee;
         let net_after_reserve_fee = ICUSD::from(input_e8s) - reserve_fee;
         let spillover_e8s = (net_after_reserve_fee * rmr).to_u64();
-        let raw_budget = reserve_spillover_raw_refund_budget(net_after_reserve_fee.to_u64(), 0, rmr);
+        let raw_budget =
+            reserve_spillover_raw_refund_budget(net_after_reserve_fee.to_u64(), 0, rmr);
         let planned_vault_fee = ICUSD::from(spillover_e8s) * Ratio::from(dec!(0.01));
         assert_eq!(planned_vault_fee.to_u64(), 810_000);
         let effective_spillover = ICUSD::from(spillover_e8s) - planned_vault_fee;
@@ -11717,20 +11771,17 @@ mod redemption_await_boundary_tests {
         ));
         assert_eq!(vault_balances(&state), before);
         assert_eq!(state.pending_redemption_transfer.len(), before_pending);
-        assert_eq!(state.collateral_configs[&icp].current_base_rate, before_base_rate);
+        assert_eq!(
+            state.collateral_configs[&icp].current_base_rate,
+            before_base_rate
+        );
         assert!(persisted_events.is_empty());
 
         // The recorder failed before committing the native fee. Preserve the
         // settled reserve fee, refund the entire effective spillover tail, and
         // do not subtract the locally calculated but uncommitted 1% fee.
         assert_eq!(
-            reserve_post_settlement_raw_refund(
-                net_after_reserve_fee.to_u64(),
-                0,
-                0,
-                0,
-                rmr,
-            ),
+            reserve_post_settlement_raw_refund(net_after_reserve_fee.to_u64(), 0, 0, 0, rmr,),
             90_000_000
         );
         assert_eq!(
@@ -11810,11 +11861,7 @@ mod redemption_await_boundary_tests {
     #[test]
     fn incomplete_cached_ranking_does_not_invent_an_advisory_quote() {
         let (mut state, _icp, xaut) = redemption_state(120_000_000);
-        state
-            .collateral_configs
-            .get_mut(&xaut)
-            .unwrap()
-            .last_price = None;
+        state.collateral_configs.get_mut(&xaut).unwrap().last_price = None;
         let (queue, estimate) = build_redemption_queue_and_quote(&state, 10, E8, true);
         assert!(!queue.ranking_fresh);
         assert_eq!(queue.entries.len(), 1);
@@ -11901,22 +11948,28 @@ mod redemption_await_boundary_tests {
         assert!(quote.net_collateral_raw > 0);
         assert_eq!(vault_balances(&state), before_vaults);
         assert_eq!(state.pending_refunds.len(), before_pending_refunds);
-        assert_eq!(state.pending_redemption_transfer.len(), before_pending_payouts);
+        assert_eq!(
+            state.pending_redemption_transfer.len(),
+            before_pending_payouts
+        );
         assert_eq!(state.total_borrowed_icusd_amount(), before_debt);
 
         let refresh_calls = std::cell::Cell::new(0usize);
-        let refresh_result = futures::executor::block_on(
-            refresh_stale_redemption_candidates_for_offer_with(
+        let refresh_result =
+            futures::executor::block_on(refresh_stale_redemption_candidates_for_offer_with(
                 || now,
                 |at| redemption_offer_price_refresh_snapshot(&state, at),
                 |_| {
                     refresh_calls.set(refresh_calls.get() + 1);
                     std::future::ready(Ok::<(), crate::RedemptionOfferRefreshError>(()))
                 },
-            ),
-        );
+            ));
         assert!(refresh_result.is_ok());
-        assert_eq!(refresh_calls.get(), 0, "all-fresh cache bypasses oracle work");
+        assert_eq!(
+            refresh_calls.get(),
+            0,
+            "all-fresh cache bypasses oracle work"
+        );
     }
 
     #[test]
@@ -11936,8 +11989,7 @@ mod redemption_await_boundary_tests {
             "the fresh ICP competitor must not cause an unnecessary oracle call"
         );
         assert_eq!(
-            super::MAX_REDEMPTION_OFFER_REFRESH_PASSES
-                * super::MAX_REDEMPTION_PRICE_CANDIDATES,
+            super::MAX_REDEMPTION_OFFER_REFRESH_PASSES * super::MAX_REDEMPTION_PRICE_CANDIDATES,
             128,
             "the offer refresh loop has two passes over at most 64 candidates"
         );
@@ -11975,8 +12027,8 @@ mod redemption_await_boundary_tests {
         // ICP also simulates the existing LST coupling publication.
         let state = Rc::new(RefCell::new(initial_state));
         let requested = Rc::new(RefCell::new(Vec::new()));
-        let result = futures::executor::block_on(
-            refresh_stale_redemption_candidates_for_offer_with(
+        let result =
+            futures::executor::block_on(refresh_stale_redemption_candidates_for_offer_with(
                 || now,
                 {
                     let state = Rc::clone(&state);
@@ -12015,14 +12067,19 @@ mod redemption_await_boundary_tests {
                         }
                     }
                 },
-            ),
+            ));
+        assert!(
+            result.is_ok(),
+            "a fresh accepted dependency permits the offer"
         );
-        assert!(result.is_ok(), "a fresh accepted dependency permits the offer");
         assert_eq!(*requested.borrow(), vec![icp, nicp]);
 
         let state = state.borrow();
         assert_eq!(state.last_icp_timestamp, Some(now));
-        assert_eq!(state.collateral_configs[&nicp].last_price_timestamp, Some(now));
+        assert_eq!(
+            state.collateral_configs[&nicp].last_price_timestamp,
+            Some(now)
+        );
         let (queue, quote) = build_redemption_queue_and_quote(&state, now, E8, false);
         assert!(queue.ranking_fresh);
         assert_eq!(queue.entries.len(), 1);
@@ -12065,8 +12122,8 @@ mod redemption_await_boundary_tests {
     fn failed_icp_dependency_refresh_returns_no_stale_offer() {
         let (state, icp, _nicp) = stale_lst_only_redemption_state();
         let now = 1_000_000_000_000;
-        let result = futures::executor::block_on(
-            refresh_stale_redemption_candidates_for_offer_with(
+        let result =
+            futures::executor::block_on(refresh_stale_redemption_candidates_for_offer_with(
                 || now,
                 |at| redemption_offer_price_refresh_snapshot(&state, at),
                 move |collateral_type| {
@@ -12078,8 +12135,7 @@ mod redemption_await_boundary_tests {
                         },
                     ))
                 },
-            ),
-        );
+            ));
         assert!(matches!(
             result,
             Err(crate::RedemptionOfferRefreshError::RefreshUnavailable {

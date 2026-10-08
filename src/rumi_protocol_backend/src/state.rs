@@ -86,7 +86,10 @@ struct RedemptionSimVault {
 }
 
 impl RedemptionSimulationPlan {
-    pub(crate) fn simulate(&self, icusd_amount: ICUSD) -> Vec<crate::event::VaultRedemption> {
+    pub(crate) fn simulate(
+        &self,
+        icusd_amount: ICUSD,
+    ) -> Option<Vec<crate::event::VaultRedemption>> {
         fn distribute(
             vaults: &mut [RedemptionSimVault],
             indices: &[usize],
@@ -95,9 +98,9 @@ impl RedemptionSimulationPlan {
             price: Decimal,
             decimals: u8,
             results: &mut Vec<crate::event::VaultRedemption>,
-        ) {
+        ) -> Option<()> {
             if total_debt == 0 || redemption_e8s == 0 {
-                return;
+                return Some(());
             }
             let mut distributed = 0u128;
             for (position, index) in indices.iter().enumerate() {
@@ -112,12 +115,12 @@ impl RedemptionSimulationPlan {
                 }
                 let actual_share = share.min(vault_debt);
                 let debt_to_deduct = ICUSD::new(actual_share as u64);
-                let collateral_to_deduct = crate::numeric::icusd_to_collateral_amount(
+                let vault = &mut vaults[*index];
+                let collateral_to_deduct = crate::numeric::try_icusd_to_collateral_amount(
                     debt_to_deduct,
                     price,
                     decimals,
-                );
-                let vault = &mut vaults[*index];
+                )?;
                 let actual_collateral = collateral_to_deduct.min(vault.collateral);
                 vault.debt = vault.debt.saturating_sub(actual_share as u64);
                 vault.collateral = vault.collateral.saturating_sub(actual_collateral);
@@ -128,10 +131,11 @@ impl RedemptionSimulationPlan {
                     collateral_seized: actual_collateral,
                 });
             }
+            Some(())
         }
 
         if icusd_amount == 0 || self.vaults.is_empty() {
-            return Vec::new();
+            return Some(Vec::new());
         }
         let mut vaults = self.vaults.clone();
         let mut results = Vec::new();
@@ -158,7 +162,7 @@ impl RedemptionSimulationPlan {
                     self.price,
                     self.decimals,
                     &mut results,
-                );
+                )?;
                 break;
             }
             let next_cr = vaults[band_end].cr;
@@ -172,7 +176,7 @@ impl RedemptionSimulationPlan {
                     self.price,
                     self.decimals,
                     &mut results,
-                );
+                )?;
                 break;
             }
             let needed = (Decimal::from(total_debt as u64) * (next_cr - band_cr) / cr_denom)
@@ -187,7 +191,7 @@ impl RedemptionSimulationPlan {
                     self.price,
                     self.decimals,
                     &mut results,
-                );
+                )?;
                 remaining -= needed;
                 for vault in &mut vaults[band_start..band_end] {
                     vault.cr = next_cr;
@@ -201,11 +205,11 @@ impl RedemptionSimulationPlan {
                     self.price,
                     self.decimals,
                     &mut results,
-                );
+                )?;
                 break;
             }
         }
-        results
+        Some(results)
     }
 }
 
@@ -1051,6 +1055,29 @@ pub fn enforce_xrp_launch_guardrails(state: &mut State) -> XrpLaunchGuardrailMig
     }
 
     migration
+}
+
+/// Freeze legacy collateral configs whose ledger precision exceeds the range
+/// supported by Rumi's collateral valuation and liquidation conversions.
+/// New registrations reject this precision before insertion; this idempotent
+/// migration protects configs persisted by older releases.
+pub fn freeze_unsupported_collateral_precision(
+    state: &mut State,
+) -> Vec<(CollateralType, u8, CollateralStatus)> {
+    let mut frozen = Vec::new();
+    for (collateral_type, config) in &mut state.collateral_configs {
+        if config.decimals > 18
+            && !matches!(
+                config.status,
+                CollateralStatus::Frozen | CollateralStatus::Deprecated
+            )
+        {
+            let previous_status = config.status;
+            config.status = CollateralStatus::Frozen;
+            frozen.push((*collateral_type, config.decimals, previous_status));
+        }
+    }
+    frozen
 }
 
 pub fn validate_xrp_launch_config_update(
@@ -2930,11 +2957,15 @@ impl State {
             if let Some(config) = self.get_collateral_config(&vault.collateral_type) {
                 if let Some(price) = config.last_price {
                     let price_dec = Decimal::from_f64(price).unwrap_or(Decimal::ZERO);
-                    total_value += crate::numeric::collateral_usd_value(
-                        vault.collateral_amount,
-                        price_dec,
-                        config.decimals,
-                    );
+                    total_value = crate::numeric::checked_icusd_add(
+                        total_value,
+                        crate::numeric::collateral_usd_value(
+                            vault.collateral_amount,
+                            price_dec,
+                            config.decimals,
+                        ),
+                    )
+                    .unwrap_or(ICUSD::new(u64::MAX));
                 }
                 // No price → contributes 0 value (conservative)
             }
@@ -4622,7 +4653,9 @@ impl State {
     pub fn borrow_from_vault(&mut self, vault_id: u64, borrowed_amount: ICUSD) {
         match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
-                vault.borrowed_icusd_amount += borrowed_amount;
+                vault.borrowed_icusd_amount =
+                    crate::numeric::checked_icusd_add(vault.borrowed_icusd_amount, borrowed_amount)
+                        .unwrap_or_else(|| ic_cdk::trap("vault debt exceeds the u64 icUSD range"));
             }
             None => ic_cdk::trap("borrowing from unknown vault"),
         }
@@ -4682,10 +4715,11 @@ impl State {
                 let repayed_amount = repayed_amount.min(vault.borrowed_icusd_amount);
                 let interest_share =
                     if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
-                        let share = (rust_decimal::Decimal::from(repayed_amount.0)
-                            * rust_decimal::Decimal::from(vault.accrued_interest.0)
-                            / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                        .to_u64()
+                        let share = crate::numeric::checked_proportional_amount(
+                            repayed_amount.0,
+                            vault.borrowed_icusd_amount.0,
+                            vault.accrued_interest.0,
+                        )
                         .unwrap_or(0);
                         // INT-001: also cap by `repayed_amount` so the saturating
                         // subtraction below cannot lose principal silently. The
@@ -5239,21 +5273,27 @@ impl State {
             let decimals = config.decimals;
             let liq_bonus = self.get_liquidation_bonus_for(&ct);
 
-            // Collateral seized = icusd_to_collateral_amount(repay_amount * bonus)
-            let repay_with_bonus: ICUSD = repay_amount * liq_bonus;
-            let collateral_seized =
-                crate::numeric::icusd_to_collateral_amount(repay_with_bonus, price, decimals)
-                    .min(vault.collateral_amount);
+            // Convert the bonus-adjusted debt directly in Decimal space; do
+            // not narrow the intermediate ICUSD e8 amount after payment.
+            let collateral_seized = crate::numeric::try_icusd_to_collateral_amount_with_bonus(
+                repay_amount,
+                price,
+                decimals,
+                liq_bonus,
+            )
+            .unwrap_or(u64::MAX)
+            .min(vault.collateral_amount);
 
             let interest_share = match self.vault_id_to_vaults.get_mut(&vault_id) {
                 Some(vault) => {
                     // Compute interest share proportionally before reducing debt
                     let interest_share =
                         if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
-                            let share = (rust_decimal::Decimal::from(repay_amount.0)
-                                * rust_decimal::Decimal::from(vault.accrued_interest.0)
-                                / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                            .to_u64()
+                            let share = crate::numeric::checked_proportional_amount(
+                                repay_amount.0,
+                                vault.borrowed_icusd_amount.0,
+                                vault.accrued_interest.0,
+                            )
                             .unwrap_or(0);
                             ICUSD::new(share.min(vault.accrued_interest.0))
                         } else {
@@ -5825,9 +5865,9 @@ impl State {
         collateral_price: UsdIcp,
         collateral_type: &CollateralType,
         allowed_ids: &[VaultId],
-    ) -> Vec<crate::event::VaultRedemption> {
+    ) -> Option<Vec<crate::event::VaultRedemption>> {
         if icusd_amount == 0 {
-            return Vec::new();
+            return Some(Vec::new());
         }
         self.prepare_redemption_simulation_for_vault_ids(
             collateral_price,
@@ -5875,7 +5915,8 @@ impl State {
 
             let icusd_to_deduct = ICUSD::from(actual_share as u64);
             let collateral_to_deduct =
-                crate::numeric::icusd_to_collateral_amount(icusd_to_deduct, price, decimals);
+                crate::numeric::try_icusd_to_collateral_amount(icusd_to_deduct, price, decimals)
+                    .unwrap_or(u64::MAX);
             // Wave-9 RED-002: capture the actual collateral seized (post
             // saturating-sub). For solvent vaults this equals
             // `collateral_to_deduct`; for underwater vaults the
@@ -6308,6 +6349,55 @@ mod tests {
         let decoded: State =
             ciborium::de::from_reader(old_snapshot.as_slice()).expect("decode pre-CL08 snapshot");
         assert!(decoded.sp_burn_refunds_by_proof.is_empty());
+    }
+
+    #[test]
+    fn redemption_simulation_returns_error_for_unrepresentable_conversion() {
+        let plan = RedemptionSimulationPlan {
+            vaults: vec![RedemptionSimVault {
+                cr: Decimal::ONE,
+                id: 1,
+                debt: 100_000_000,
+                collateral: u64::MAX,
+            }],
+            price: dec!(1),
+            decimals: 20,
+        };
+
+        assert!(
+            plan.simulate(ICUSD::new(100_000_000)).is_none(),
+            "quote construction must return a recoverable error rather than trap after a pull"
+        );
+    }
+
+    #[test]
+    fn borrowing_past_u64_debt_limit_traps_without_wrapping() {
+        let mut state = test_state();
+        let vault_id = 73;
+        state.vault_id_to_vaults.insert(
+            vault_id,
+            crate::vault::Vault {
+                owner: Principal::anonymous(),
+                vault_id,
+                collateral_amount: 1,
+                borrowed_icusd_amount: ICUSD::new(u64::MAX),
+                collateral_type: state.icp_ledger_principal,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.borrow_from_vault(vault_id, ICUSD::new(1));
+        }));
+
+        assert!(result.is_err(), "debt overflow must fail closed");
+        assert_eq!(
+            state.vault_id_to_vaults[&vault_id].borrowed_icusd_amount,
+            ICUSD::new(u64::MAX),
+            "the failed addition must leave vault debt unchanged"
+        );
     }
 
     #[test]
@@ -7575,8 +7665,7 @@ mod tests {
         // tests below — so this test pins the amount explicitly, exactly as
         // `vault::liquidate_vault` now does pre-await.)
         let vault_before = state.vault_id_to_vaults.get(&10).cloned().unwrap();
-        let expected_repay =
-            state.compute_partial_liquidation_cap(&vault_before, collateral_price);
+        let expected_repay = state.compute_partial_liquidation_cap(&vault_before, collateral_price);
         assert!(
             expected_repay > ICUSD::new(0) && expected_repay < vault_before.borrowed_icusd_amount,
             "premise: this vault's CR must yield a genuine partial cap under the new unified logic"
@@ -7592,8 +7681,12 @@ mod tests {
         .to_u64()
         .unwrap_or(0);
 
-        let interest_share =
-            state.liquidate_vault(10, Mode::GeneralAvailability, collateral_price, Some(pinned));
+        let interest_share = state.liquidate_vault(
+            10,
+            Mode::GeneralAvailability,
+            collateral_price,
+            Some(pinned),
+        );
         assert_eq!(
             interest_share.0, expected_interest_share,
             "partial liquidation should return the proportional interest share"
@@ -7776,7 +7869,11 @@ mod tests {
         let icp_ct = state.icp_collateral_type();
         // The redemption planner now requires a configured price to rank the
         // candidate set; keep this legacy water-fill regression non-vacuous.
-        state.collateral_configs.get_mut(&icp_ct).unwrap().last_price = Some(5.0);
+        state
+            .collateral_configs
+            .get_mut(&icp_ct)
+            .unwrap()
+            .last_price = Some(5.0);
         state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
         state.open_vault(audit_vault(2, icp_ct, 800_000_000, 500_000_000));
         state.vault_id_to_vaults.get_mut(&1).unwrap().bot_processing = true;
@@ -7807,7 +7904,11 @@ mod tests {
         let icp_ct = state.icp_collateral_type();
         // Ranking candidates need a configured price; otherwise no run is
         // eligible and the lock assertion would pass without exercising it.
-        state.collateral_configs.get_mut(&icp_ct).unwrap().last_price = Some(5.0);
+        state
+            .collateral_configs
+            .get_mut(&icp_ct)
+            .unwrap()
+            .last_price = Some(5.0);
         state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
         state.open_vault(audit_vault(2, icp_ct, 800_000_000, 500_000_000));
 
@@ -7832,7 +7933,11 @@ mod tests {
         // the claim is oversized.
         let mut state = test_state();
         let icp_ct = state.icp_collateral_type();
-        state.collateral_configs.get_mut(&icp_ct).unwrap().last_price = Some(5.0);
+        state
+            .collateral_configs
+            .get_mut(&icp_ct)
+            .unwrap()
+            .last_price = Some(5.0);
         state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
 
         let price = UsdIcp::from(rust_decimal_macros::dec!(5.0));
@@ -8714,6 +8819,25 @@ mod tests {
     }
 
     #[test]
+    fn legacy_collateral_with_unsupported_precision_is_frozen_on_upgrade() {
+        let mut state = test_state();
+        let collateral = Principal::from_slice(&[0x44]);
+        let mut config = state.get_collateral_config(&state.icp_ledger_principal).unwrap().clone();
+        config.ledger_canister_id = collateral;
+        config.decimals = 20;
+        config.status = CollateralStatus::Active;
+        state.collateral_configs.insert(collateral, config);
+
+        let frozen = freeze_unsupported_collateral_precision(&mut state);
+        assert_eq!(frozen, vec![(collateral, 20, CollateralStatus::Active)]);
+        assert_eq!(
+            state.collateral_configs[&collateral].status,
+            CollateralStatus::Frozen
+        );
+        assert!(state.collateral_configs[&state.icp_ledger_principal].status.allows_liquidation());
+    }
+
+    #[test]
     fn xrp_launch_config_update_allows_any_ceiling_but_keeps_key_gate() {
         let xrp = xrp_collateral_principal();
         let mut cfg = xrp_collateral_config(
@@ -9099,8 +9223,8 @@ mod tests {
             &icp,
             &[906, 907],
         );
-        let preview = plan.simulate(ICUSD::new(2_000_000_000)); // 20 icUSD effective input
-        assert_eq!(preview, plan.simulate(ICUSD::new(2_000_000_000)));
+        let preview = plan.simulate(ICUSD::new(2_000_000_000)).unwrap(); // 20 icUSD effective input
+        assert_eq!(preview, plan.simulate(ICUSD::new(2_000_000_000)).unwrap());
 
         assert_eq!(preview.len(), 2);
         assert!(preview
@@ -9186,8 +9310,8 @@ mod tests {
         let amount = ICUSD::new(200_000_000);
         let rate = UsdIcp::from(rust_decimal_macros::dec!(1.0));
         let plan = s.prepare_redemption_simulation_for_vault_ids(rate, &icp, &[916]);
-        let preview = plan.simulate(amount);
-        assert_eq!(preview, plan.simulate(amount));
+        let preview = plan.simulate(amount).unwrap();
+        assert_eq!(preview, plan.simulate(amount).unwrap());
         assert_eq!(preview.len(), 1);
         assert_eq!(preview[0].collateral_seized, 100_000_000);
         assert_eq!(
@@ -9226,8 +9350,8 @@ mod tests {
                 let rate = UsdIcp::from(rust_decimal::Decimal::from_f64_retain(price).unwrap());
 
                 let plan = s.prepare_redemption_simulation_for_vault_ids(rate, &icp, &[vault_id]);
-                let preview = plan.simulate(amount);
-                assert_eq!(preview, plan.simulate(amount));
+                let preview = plan.simulate(amount).unwrap();
+                assert_eq!(preview, plan.simulate(amount).unwrap());
                 assert_eq!(preview.len(), 1, "decimals={decimals}, price={price}");
                 let expected_collateral = crate::numeric::icusd_to_collateral_amount(
                     amount,
@@ -9270,8 +9394,8 @@ mod tests {
         let price = UsdIcp::from(rust_decimal_macros::dec!(1.0));
 
         let plan = s.prepare_redemption_simulation_for_vault_ids(price, &icp, &[917]);
-        let preview = plan.simulate(amount);
-        assert_eq!(preview, plan.simulate(amount));
+        let preview = plan.simulate(amount).unwrap();
+        assert_eq!(preview, plan.simulate(amount).unwrap());
         assert_eq!(preview.len(), 1);
         assert_eq!(preview[0].icusd_redeemed_e8s, 100_000_000);
         assert_eq!(preview[0].collateral_seized, 50_000_000);
@@ -9825,7 +9949,6 @@ mod tests {
         let borrow_threshold = state.get_min_collateral_ratio_for(&icp);
         assert!(base >= borrow_threshold);
     }
-
 
     // ─────────────────────────────────────────────────────────────────
     // LIQ-0XX: small-position-liquidation fix.
@@ -10562,10 +10685,9 @@ mod tests {
         // Replay the legacy event (repay_amount = None).
         state.liquidate_vault(vault_id, Mode::Recovery, collateral_price, None);
 
-        let remaining = state
-            .vault_id_to_vaults
-            .get(&vault_id)
-            .expect("legacy Recovery-mode replay should partially liquidate, not close, this vault");
+        let remaining = state.vault_id_to_vaults.get(&vault_id).expect(
+            "legacy Recovery-mode replay should partially liquidate, not close, this vault",
+        );
         let cr_after = compute_collateral_ratio(remaining, collateral_price, &state);
         assert!(
             (cr_after.to_f64() - 1.55).abs() < 0.01,
