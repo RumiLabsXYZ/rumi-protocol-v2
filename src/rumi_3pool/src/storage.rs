@@ -32,6 +32,9 @@
 //   22      swap_receipts_v1            — never-evicted caller-scoped attempts
 //   23      swap_receipt_fence          — durable reserve mutation fence
 //   24      swap_receipt_clients        — bounded admin-managed capability set
+//   25      icrc_dedup_by_hash          — full ICRC-1/2 transfer identity -> original block
+//   26      icrc_dedup_by_expiry        — ordered expiry index for bounded pruning
+//   27      icrc_dedup_upgrade_fence    — one-time bridge for pre-fix heap-only entries
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -84,6 +87,9 @@ const MEM_NEXT_CLAIM_ID: MemoryId = MemoryId::new(21);
 const MEM_SWAP_RECEIPTS_V1: MemoryId = MemoryId::new(22);
 const MEM_SWAP_RECEIPT_FENCE: MemoryId = MemoryId::new(23);
 const MEM_SWAP_RECEIPT_CLIENTS: MemoryId = MemoryId::new(24);
+const MEM_ICRC_DEDUP_BY_HASH: MemoryId = MemoryId::new(25);
+const MEM_ICRC_DEDUP_BY_EXPIRY: MemoryId = MemoryId::new(26);
+const MEM_ICRC_DEDUP_UPGRADE_FENCE: MemoryId = MemoryId::new(27);
 
 // ─── SlimState ───────────────────────────────────────────────────────────────
 //
@@ -263,6 +269,106 @@ impl Storable for StorableHash {
     };
 }
 
+/// Durable ICRC transfer dedup record. Stores the original timestamp and
+/// block index so retries after an upgrade return the original block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DedupEntry {
+    pub created_at_time: u64,
+    pub block_index: u64,
+}
+
+impl Storable for DedupEntry {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut bytes = Vec::with_capacity(16);
+        bytes.extend_from_slice(&self.created_at_time.to_be_bytes());
+        bytes.extend_from_slice(&self.block_index.to_be_bytes());
+        Cow::Owned(bytes)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let bytes = bytes.as_ref();
+        assert_eq!(bytes.len(), 16, "invalid ICRC dedup entry length");
+        Self {
+            created_at_time: u64::from_be_bytes(bytes[..8].try_into().unwrap()),
+            block_index: u64::from_be_bytes(bytes[8..].try_into().unwrap()),
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 16,
+        is_fixed_size: true,
+    };
+}
+
+/// Composite key ordered by expiry time and then transaction hash. Big-endian
+/// encoding preserves numeric ordering for the stable map pruning cursor.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct DedupExpiryKey {
+    pub expires_at: u64,
+    pub tx_hash: StorableHash,
+}
+
+impl Storable for DedupExpiryKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut bytes = Vec::with_capacity(40);
+        bytes.extend_from_slice(&self.expires_at.to_be_bytes());
+        bytes.extend_from_slice(&self.tx_hash.0);
+        Cow::Owned(bytes)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let bytes = bytes.as_ref();
+        assert_eq!(bytes.len(), 40, "invalid ICRC dedup expiry key length");
+        let mut tx_hash = [0; 32];
+        tx_hash.copy_from_slice(&bytes[8..]);
+        Self {
+            expires_at: u64::from_be_bytes(bytes[..8].try_into().unwrap()),
+            tx_hash: StorableHash(tx_hash),
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 40,
+        is_fixed_size: true,
+    };
+}
+
+/// One-time compatibility fence for entries held only in heap by the version
+/// immediately before durable dedup was introduced. `state` is 0 for an
+/// existing installation not yet migrated, 1 for a fresh install, and 2 while
+/// the legacy replay window is fenced.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DedupUpgradeFence {
+    pub state: u8,
+    pub max_created_at_time: u64,
+    pub until: u64,
+}
+
+impl Storable for DedupUpgradeFence {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut bytes = Vec::with_capacity(17);
+        bytes.push(self.state);
+        bytes.extend_from_slice(&self.max_created_at_time.to_be_bytes());
+        bytes.extend_from_slice(&self.until.to_be_bytes());
+        Cow::Owned(bytes)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let bytes = bytes.as_ref();
+        assert_eq!(bytes.len(), 17, "invalid ICRC dedup upgrade fence length");
+        Self {
+            state: bytes[0],
+            max_created_at_time: u64::from_be_bytes(bytes[1..9].try_into().unwrap()),
+            until: u64::from_be_bytes(bytes[9..17].try_into().unwrap()),
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 17,
+        is_fixed_size: true,
+    };
+}
+
 /// Empty marker for set-style BTreeMaps (`BTreeMap<K, ()>` isn't supported
 /// directly because `()` would need a Storable impl we don't control).
 #[derive(Clone, Copy, Debug, Default)]
@@ -335,6 +441,18 @@ thread_local! {
         StableCell::init(MM.with(|m| m.borrow().get(MEM_SLIM_STATE)), SlimState::default())
             .expect("init SlimState cell"),
     );
+    pub(crate) static ICRC_DEDUP_BY_HASH: RefCell<StableBTreeMap<StorableHash, DedupEntry, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_ICRC_DEDUP_BY_HASH))));
+    pub(crate) static ICRC_DEDUP_BY_EXPIRY: RefCell<StableBTreeMap<DedupExpiryKey, Unit, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_ICRC_DEDUP_BY_EXPIRY))));
+    pub(crate) static ICRC_DEDUP_UPGRADE_FENCE: RefCell<StableCell<DedupUpgradeFence, Memory>> =
+        RefCell::new(
+            StableCell::init(
+                MM.with(|m| m.borrow().get(MEM_ICRC_DEDUP_UPGRADE_FENCE)),
+                DedupUpgradeFence::default(),
+            )
+            .expect("init ICRC dedup upgrade fence"),
+        );
 
     pub(crate) static LP_BALANCES: RefCell<StableBTreeMap<StorablePrincipal, StorableU128, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_LP_BALANCES))));
@@ -588,6 +706,198 @@ log_api!(admin_ev, ADMIN_EV_LOG, ThreePoolAdminEvent);
 log_api!(vp_snap, VP_SNAP_LOG, VirtualPriceSnapshot);
 log_api!(blocks, BLOCKS_LOG, Icrc3Block);
 log_api!(block_hashes, BLOCK_HASHES_LOG, StorableHash);
+
+/// Persistent ICRC-1/2 transfer replay index.
+pub mod dedup {
+    use super::*;
+
+    /// Bound work per successful timestamped transfer while expired records
+    /// are reclaimed in expiry order. The second stable index avoids a full
+    /// map scan when pruning a busy token's history.
+    pub const MAX_PRUNE_PER_RECORD: usize = 256;
+
+    fn legacy_fence_for(now: u64, window: u64, drift: u64) -> DedupUpgradeFence {
+        let max_created_at_time = now.saturating_add(drift);
+        DedupUpgradeFence {
+            state: 2,
+            max_created_at_time,
+            until: max_created_at_time
+                .saturating_add(window)
+                .saturating_add(drift),
+        }
+    }
+
+    fn install_fence(
+        current: DedupUpgradeFence,
+        now: u64,
+        window: u64,
+        drift: u64,
+    ) -> DedupUpgradeFence {
+        if current.state == 0 {
+            legacy_fence_for(now, window, drift)
+        } else {
+            current
+        }
+    }
+
+    fn legacy_fenced(fence: DedupUpgradeFence, now: u64, created_at_time: u64) -> bool {
+        fence.state == 2 && created_at_time <= fence.max_created_at_time && now <= fence.until
+    }
+
+    pub fn get(tx_hash: &[u8; 32]) -> Option<DedupEntry> {
+        ICRC_DEDUP_BY_HASH.with(|map| map.borrow().get(&StorableHash(*tx_hash)))
+    }
+
+    pub fn len() -> u64 {
+        ICRC_DEDUP_BY_HASH.with(|map| map.borrow().len())
+    }
+
+    /// Record one accepted transfer and reclaim a bounded number of entries
+    /// whose full ICRC dedup retention window has elapsed.
+    pub fn record(
+        now: u64,
+        created_at_time: u64,
+        expires_at: u64,
+        tx_hash: [u8; 32],
+        block_index: u64,
+    ) {
+        let key = StorableHash(tx_hash);
+        for _ in 0..MAX_PRUNE_PER_RECORD {
+            let oldest = ICRC_DEDUP_BY_EXPIRY.with(|map| map.borrow().iter().next());
+            let Some((expiry_key, _)) = oldest else { break };
+            if expiry_key.expires_at >= now {
+                break;
+            }
+            ICRC_DEDUP_BY_EXPIRY.with(|map| {
+                map.borrow_mut().remove(&expiry_key);
+            });
+            ICRC_DEDUP_BY_HASH.with(|map| {
+                map.borrow_mut().remove(&expiry_key.tx_hash);
+            });
+        }
+
+        // Hashes include created_at_time, so an existing key should only be
+        // replaced by an identical identity. Remove its prior index defensively
+        // before updating the block index.
+        if let Some(previous) = ICRC_DEDUP_BY_HASH.with(|map| map.borrow_mut().remove(&key)) {
+            let previous_expiry = previous
+                .created_at_time
+                .saturating_add(crate::icrc_token::TRANSACTION_WINDOW_NS)
+                .saturating_add(crate::icrc_token::PERMITTED_DRIFT_NS);
+            ICRC_DEDUP_BY_EXPIRY.with(|map| {
+                map.borrow_mut().remove(&DedupExpiryKey {
+                    expires_at: previous_expiry,
+                    tx_hash: key,
+                });
+            });
+        }
+
+        ICRC_DEDUP_BY_HASH.with(|map| {
+            map.borrow_mut().insert(
+                key,
+                DedupEntry {
+                    created_at_time,
+                    block_index,
+                },
+            );
+        });
+        ICRC_DEDUP_BY_EXPIRY.with(|map| {
+            map.borrow_mut().insert(
+                DedupExpiryKey {
+                    expires_at,
+                    tx_hash: key,
+                },
+                Unit,
+            );
+        });
+    }
+
+    /// Called from `init`; distinguishes a clean install from an old
+    /// installation whose heap-only dedup entries will be lost on this upgrade.
+    pub fn mark_fresh_install() {
+        ICRC_DEDUP_UPGRADE_FENCE.with(|cell| {
+            cell.borrow_mut()
+                .set(DedupUpgradeFence {
+                    state: 1,
+                    ..DedupUpgradeFence::default()
+                })
+                .expect("set fresh-install ICRC dedup marker");
+        });
+    }
+
+    /// Initialize the one-time legacy replay fence after the first upgrade
+    /// from the previous heap-only implementation. Later upgrades preserve it.
+    pub fn install_legacy_fence_if_needed(now: u64, window: u64, drift: u64) {
+        ICRC_DEDUP_UPGRADE_FENCE.with(|cell| {
+            let mut cell = cell.borrow_mut();
+            let current = *cell.get();
+            let next = install_fence(current, now, window, drift);
+            if next != current {
+                cell.set(next).expect("set legacy ICRC dedup fence");
+            }
+        });
+    }
+
+    /// True while a timestamp could refer to a transfer in the pre-fix
+    /// heap-only cache and that transfer is still inside ICRC's dedup window.
+    pub fn is_legacy_fenced(now: u64, created_at_time: u64) -> bool {
+        ICRC_DEDUP_UPGRADE_FENCE
+            .with(|cell| legacy_fenced(*cell.borrow().get(), now, created_at_time))
+    }
+
+    #[cfg(test)]
+    pub fn fence_snapshot() -> DedupUpgradeFence {
+        ICRC_DEDUP_UPGRADE_FENCE.with(|cell| *cell.borrow().get())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn legacy_upgrade_fence_covers_inclusive_full_retention_window() {
+            let now = 1_700_000_000_000_000_000;
+            let window = 24 * 60 * 60 * 1_000_000_000;
+            let drift = 60 * 1_000_000_000;
+            let fence = legacy_fence_for(now, window, drift);
+
+            assert_eq!(fence.state, 2);
+            assert_eq!(fence.max_created_at_time, now + drift);
+            assert_eq!(fence.until, now + window + 2 * drift);
+            assert!(legacy_fenced(fence, now, fence.max_created_at_time));
+            assert!(legacy_fenced(fence, fence.until, fence.max_created_at_time));
+            // A newly-created request becomes admissible once its CAT is
+            // strictly beyond the largest CAT accepted before the upgrade.
+            // Thus new timestamped traffic has only the permitted-drift
+            // startup pause; the longer fence covers possible legacy retries.
+            assert!(!legacy_fenced(
+                fence,
+                now + drift + 1,
+                fence.max_created_at_time + 1
+            ));
+            assert!(!legacy_fenced(
+                fence,
+                fence.until + 1,
+                fence.max_created_at_time
+            ));
+            assert!(!legacy_fenced(fence, now, fence.max_created_at_time + 1));
+        }
+
+        #[test]
+        fn legacy_upgrade_fence_is_installed_only_once() {
+            let now = 1_700_000_000_000_000_000;
+            let existing = DedupUpgradeFence {
+                state: 1,
+                ..DedupUpgradeFence::default()
+            };
+            assert_eq!(install_fence(existing, now, 100, 10), existing);
+
+            let installed = install_fence(DedupUpgradeFence::default(), now, 100, 10);
+            assert_eq!(installed.state, 2);
+            assert_eq!(install_fence(installed, now + 1, 100, 10), installed);
+        }
+    }
+}
 
 // ─── Public API: pending_claims ──────────────────────────────────────────────
 //
