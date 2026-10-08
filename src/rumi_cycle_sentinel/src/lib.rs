@@ -25,6 +25,8 @@ mod telemetry_access;
 mod test_support;
 mod types;
 
+const MAX_CONSENT_INGRESS_BYTES: usize = 4 * 1024;
+
 /// The IC wall clock, in seconds — every `governance::*_at` function takes
 /// this as an explicit parameter rather than reading `ic_cdk::api::time()`
 /// itself, so this is the one place that conversion happens.
@@ -186,6 +188,26 @@ fn icrc21_canister_call_consent_message(
     request: icrc21::ConsentMessageRequest,
 ) -> icrc21::ConsentMessageResult {
     icrc21::icrc21_canister_call_consent_message(request)
+}
+
+/// Drop unauthenticated update ingress before Candid decoding. This is a
+/// cycle-cost filter only: every update method still enforces its own
+/// authorization after replicated execution. ICRC-21 remains available to
+/// wallets, but its arbitrary request payload is bounded before decoding.
+#[ic_cdk::inspect_message]
+fn inspect_message() {
+    let method = ic_cdk::api::call::method_name();
+    let caller = ic_cdk::caller();
+    let allow = if method == "icrc21_canister_call_consent_message" {
+        ic_cdk::api::call::arg_data_raw_size() <= MAX_CONSENT_INGRESS_BYTES
+    } else if method == "configure_single_operator_governance" {
+        telemetry_access::is_operator(caller)
+    } else {
+        caller != Principal::anonymous() && state::is_signer(caller)
+    };
+    if allow {
+        ic_cdk::api::call::accept_message();
+    }
 }
 
 #[ic_cdk::query]

@@ -98,6 +98,32 @@ struct SelfRecoveryPolicyArgs {
 }
 
 #[derive(CandidType)]
+struct ConsentRequest {
+    method: String,
+    arg: Vec<u8>,
+    user_preferences: ConsentMessageSpec,
+}
+
+#[derive(CandidType)]
+struct ConsentMessageSpec {
+    metadata: ConsentMetadata,
+    device_spec: Option<ConsentDeviceSpec>,
+}
+
+#[derive(CandidType)]
+struct ConsentMetadata {
+    language: String,
+    utc_offset_minutes: Option<i16>,
+}
+
+#[allow(dead_code)]
+#[derive(CandidType)]
+enum ConsentDeviceSpec {
+    GenericDisplay,
+    FieldsDisplay,
+}
+
+#[derive(CandidType)]
 struct MockInit {
     role: MockRole,
 }
@@ -1068,6 +1094,114 @@ fn boot_with_funding_and_interval(
         None,
     );
     (pic, sentinel, signer)
+}
+
+#[test]
+fn inspect_message_preserves_bounded_wallet_consent_and_rejects_unauthenticated_updates() {
+    let (pic, sentinel, signer) = boot();
+    let consent_for = |arg| ConsentRequest {
+        method: "pause_target".to_string(),
+        arg,
+        user_preferences: ConsentMessageSpec {
+            metadata: ConsentMetadata {
+                language: "en-US".to_string(),
+                utc_offset_minutes: Some(0),
+            },
+            device_spec: Some(ConsentDeviceSpec::GenericDisplay),
+        },
+    };
+    let consent = consent_for(Encode!(&principal(SELF_REPORT_TARGETS[0])).unwrap());
+
+    // Both the public anonymous wallet path and a real signer caller retain
+    // the standard's successful consent-message response.
+    for caller in [
+        Principal::anonymous(),
+        signer,
+        Principal::from_slice(&[8; 10]),
+    ] {
+        let response = pic
+            .update_call(
+                sentinel,
+                caller,
+                "icrc21_canister_call_consent_message",
+                Encode!(&consent).unwrap(),
+            )
+            .expect("small consent request passes ingress inspection");
+        let WasmResult::Reply(bytes) = response else {
+            panic!("small consent request did not return a reply: {response:?}");
+        };
+        assert_ok(&bytes);
+    }
+
+    const CONSENT_INGRESS_LIMIT: usize = 4 * 1024;
+    let (exact_boundary_request, exact_boundary_bytes) = (0..=CONSENT_INGRESS_LIMIT)
+        .find_map(|arg_len| {
+            let request = consent_for(vec![0; arg_len]);
+            let bytes = Encode!(&request).ok()?;
+            (bytes.len() == CONSENT_INGRESS_LIMIT).then_some((request, bytes))
+        })
+        .expect("a valid consent request can fill the raw ingress budget exactly");
+    assert_eq!(exact_boundary_bytes.len(), CONSENT_INGRESS_LIMIT);
+    let exact_boundary_reply = pic
+        .update_call(
+            sentinel,
+            Principal::anonymous(),
+            "icrc21_canister_call_consent_message",
+            exact_boundary_bytes,
+        )
+        .expect("exact-boundary consent request passes ingress inspection");
+    let WasmResult::Reply(bytes) = exact_boundary_reply else {
+        panic!("exact-boundary consent request did not return a reply");
+    };
+    assert_ok(&bytes);
+
+    // Valid Candid for an update cannot reach the handler from anonymous or
+    // arbitrary non-signer principals. A handler-level authorization error
+    // would be a Reply; the inspect hook rejects before replicated execution.
+    let action_arg = Encode!(&principal(SELF_REPORT_TARGETS[0])).unwrap();
+    for caller in [Principal::anonymous(), Principal::from_slice(&[8; 10])] {
+        assert!(matches!(
+            pic.update_call(sentinel, caller, "pause_target", action_arg.clone()),
+            Err(_)
+        ));
+    }
+
+    // The consent request itself is valid Candid, but its embedded arg pushes
+    // the raw request over the 4 KiB ingress limit and is rejected at inspect.
+    let ConsentRequest { arg, .. } = exact_boundary_request;
+    let mut oversized_arg = arg;
+    oversized_arg.push(0);
+    let oversized_consent = consent_for(oversized_arg);
+    let oversized_consent_bytes = Encode!(&oversized_consent).unwrap();
+    assert_eq!(oversized_consent_bytes.len(), CONSENT_INGRESS_LIMIT + 1);
+    assert!(matches!(
+        pic.update_call(
+            sentinel,
+            Principal::anonymous(),
+            "icrc21_canister_call_consent_message",
+            oversized_consent_bytes,
+        ),
+        Err(_)
+    ));
+
+    // Signer-authorized update traffic still reaches the method body; the
+    // missing proposal produces a normal Candid Result reply.
+    assert!(matches!(
+        pic.update_call(sentinel, signer, "cancel_proposal", Encode!(&0u64).unwrap()),
+        Ok(WasmResult::Reply(_))
+    ));
+
+    // The separately authorized one-shot operator bootstrap remains reachable
+    // before its operator principals have joined the signer set.
+    assert!(matches!(
+        pic.update_call(
+            sentinel,
+            telemetry_viewer(),
+            "configure_single_operator_governance",
+            Encode!().unwrap(),
+        ),
+        Ok(WasmResult::Reply(_))
+    ));
 }
 
 fn run_timer(pic: &PocketIc, sentinel: Principal) {
