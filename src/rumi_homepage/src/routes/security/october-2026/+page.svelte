@@ -10,7 +10,7 @@
       link: 'View PR #424'
     },
     {
-      state: 'Installed safeguard',
+      state: 'Installed Points release',
       title: 'PR #450 · Points history migration',
       detail:
         'PR #450 is merged and its Points module is installed on mainnet. The live module SHA-256 is dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277. The ledger contains 417 rows: 401 original rows plus 16 historical adjustment rows.',
@@ -115,7 +115,7 @@
       <h2 id="evidence-title">Source, installation, and live configuration</h2>
       <p>
         Each statement below is limited to the state recorded on the report date. Merged source
-        does not establish installation, and one installed safeguard does not close the wider review.
+        does not establish installation, and the installed Points release does not close the wider review.
       </p>
     </div>
 
@@ -165,7 +165,7 @@
       <li>It does not claim that the PR #424 or #426 source changes have been installed as Wasm.</li>
       <li>It does not treat draft PR #422 as merged, release-ready, or deployable.</li>
       <li>It does not claim that reward treatment is decided, epoch 18 is closed, or the epoch driver is re-enabled.</li>
-      <li>It confirms one safeguard installation only; other findings and installations remain pending.</li>
+      <li>It confirms the Points release only; other findings and installations remain pending.</li>
       <li>It is a high-level status summary, not publication of the private audit package or exploit details.</li>
     </ul>
     <p class="source-note">
