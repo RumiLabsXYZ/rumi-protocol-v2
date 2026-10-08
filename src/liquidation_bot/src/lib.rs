@@ -133,6 +133,11 @@ fn post_upgrade() {
         state::load_config_from_stable();
     }
 
+    // Stop automatic liquidation after every upgrade. Persist the pause before
+    // reinstalling the 30-second worker timer so no queued work can run before
+    // an operator has inspected state and explicitly resumed processing.
+    state::mutate_state(state::pause_after_upgrade);
+    state::save_config_to_stable();
     setup_timer();
 }
 

@@ -237,6 +237,13 @@ pub fn init_state(state: BotState) {
     STATE.with(|s| *s.borrow_mut() = Some(state));
 }
 
+/// Keep the timer worker inert after an upgrade until an operator explicitly
+/// resumes it. This applies to both legacy snapshots without the pause field
+/// and snapshots that persisted an earlier `false` value.
+pub fn pause_after_upgrade(state: &mut BotState) {
+    state.processing_paused = true;
+}
+
 /// Trap wrapper: real `ic_cdk::trap` on-canister, plain panic off-canister so
 /// unit tests can exercise trap paths via `std::panic::catch_unwind` (the ic0
 /// host stub panics with a generic message that would swallow ours).
@@ -397,6 +404,42 @@ mod tests {
             !state.migrated_to_stable_structures,
             "legacy blob has no migration marker, must default to false so post_upgrade runs the StableBTreeMap migration"
         );
+    }
+
+    #[test]
+    fn upgrade_pause_handles_legacy_snapshot_without_pause_field() {
+        let mut snapshot = serde_json::to_value(BotState::default()).unwrap();
+        snapshot
+            .as_object_mut()
+            .unwrap()
+            .remove("processing_paused");
+
+        let mut restored: BotState = serde_json::from_value(snapshot).unwrap();
+        assert!(
+            !restored.processing_paused,
+            "legacy decode uses the bool default"
+        );
+
+        pause_after_upgrade(&mut restored);
+
+        assert!(restored.processing_paused);
+        let persisted = serde_json::to_value(&restored).unwrap();
+        let reloaded: BotState = serde_json::from_value(persisted).unwrap();
+        assert!(reloaded.processing_paused);
+    }
+
+    #[test]
+    fn upgrade_pause_overrides_previously_persisted_false() {
+        let snapshot = serde_json::to_value(BotState::default()).unwrap();
+        let mut restored: BotState = serde_json::from_value(snapshot).unwrap();
+        assert!(!restored.processing_paused);
+
+        pause_after_upgrade(&mut restored);
+
+        assert!(restored.processing_paused);
+        let persisted = serde_json::to_value(&restored).unwrap();
+        let reloaded: BotState = serde_json::from_value(persisted).unwrap();
+        assert!(reloaded.processing_paused);
     }
 
     fn test_config() -> BotConfig {
