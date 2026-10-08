@@ -209,6 +209,63 @@ export interface OptimalRebalanceQuote {
   'amount_out' : bigint,
   'token_out' : number,
 }
+export interface PayoutAttempt {
+  'number' : number,
+  'replay_count' : number,
+  'transfer' : PayoutTransfer,
+  'outcome' : PayoutOutcome,
+}
+export interface PayoutEntitlement {
+  'id' : bigint,
+  'token_index' : number,
+  'settled' : boolean,
+  'owner' : Principal,
+  'kind' : PayoutKind,
+  'attempts' : Array<PayoutAttempt>,
+  'compensation_id' : [] | [bigint],
+  'compensation_for' : [] | [bigint],
+  'ledger' : Principal,
+  'gross' : bigint,
+  'swap_context' : [] | [PayoutSwapContext],
+  'symbol' : string,
+}
+export type PayoutKind = { 'RemoveOneCoin' : null } |
+  { 'SwapOutput' : null } |
+  { 'AdminFeeWithdrawal' : null } |
+  { 'AddLiquidityRefund' : null } |
+  { 'SwapInputRefund' : null } |
+  { 'RemoveLiquidity' : null };
+export type PayoutOutcome = { 'Confirmed' : { 'block' : bigint } } |
+  { 'Prepared' : null } |
+  { 'Unresolved' : { 'reason' : string } } |
+  { 'RejectedNoTransfer' : { 'reason' : string } } |
+  { 'HeldLegacyUnbound' : null } |
+  { 'Submitted' : null };
+export interface PayoutSwapContext {
+  'amp' : bigint,
+  'admin_fee_bps' : number,
+  'precision_muls' : Array<bigint>,
+  'imbalance_after' : bigint,
+  'gross_output' : bigint,
+  'token_in' : number,
+  'is_rebalancing' : boolean,
+  'fee_bps' : number,
+  'imbalance_before' : bigint,
+  'amount_in' : bigint,
+  'token_out' : number,
+  'balances_before' : Array<bigint>,
+  'pool_fee' : bigint,
+}
+export interface PayoutTransfer {
+  'to' : Account,
+  'fee' : bigint,
+  'net' : bigint,
+  'from' : Account,
+  'memo' : Uint8Array | number[],
+  'ledger' : Principal,
+  'gross' : bigint,
+  'created_at_time' : bigint,
+}
 export interface PoolHealth {
   'imbalance_trend_1h' : number,
   'current_imbalance' : bigint,
@@ -384,6 +441,7 @@ export type ThreePoolError = {
   { 'Unauthorized' : null } |
   { 'InvariantNotConverged' : null } |
   { 'InsufficientLiquidity' : null } |
+  { 'LegacyClaimHeld' : null } |
   { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
   { 'PendingClaimCapacityReached' : null } |
   { 'SlippageExceeded' : null } |
@@ -555,6 +613,11 @@ export interface _SERVICE {
   >,
   'get_lp_balance' : ActorMethod<[Principal], bigint>,
   'get_lp_holders' : ActorMethod<[bigint, bigint], Array<[Principal, bigint]>>,
+  'get_payout_entitlement' : ActorMethod<[bigint], [] | [PayoutEntitlement]>,
+  'get_payout_entitlements' : ActorMethod<
+    [bigint, bigint],
+    Array<PayoutEntitlement>
+  >,
   'get_pending_claim_count' : ActorMethod<[], bigint>,
   'get_pending_claims' : ActorMethod<
     [bigint, bigint],

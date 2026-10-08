@@ -37,6 +37,7 @@ export const idlFactory = ({ IDL }) => {
     'Unauthorized' : IDL.Null,
     'InvariantNotConverged' : IDL.Null,
     'InsufficientLiquidity' : IDL.Null,
+    'LegacyClaimHeld' : IDL.Null,
     'TransferFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
     'PendingClaimCapacityReached' : IDL.Null,
     'SlippageExceeded' : IDL.Null,
@@ -182,6 +183,71 @@ export const idlFactory = ({ IDL }) => {
     'reached_end' : IDL.Bool,
     'events' : IDL.Vec(IDL.Tuple(IDL.Nat64, LiquidityEventV2)),
   });
+  const PayoutKind = IDL.Variant({
+    'RemoveOneCoin' : IDL.Null,
+    'SwapOutput' : IDL.Null,
+    'AdminFeeWithdrawal' : IDL.Null,
+    'AddLiquidityRefund' : IDL.Null,
+    'SwapInputRefund' : IDL.Null,
+    'RemoveLiquidity' : IDL.Null,
+  });
+  const Account = IDL.Record({
+    'owner' : IDL.Principal,
+    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+  });
+  const PayoutTransfer = IDL.Record({
+    'to' : Account,
+    'fee' : IDL.Nat,
+    'net' : IDL.Nat,
+    'from' : Account,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'ledger' : IDL.Principal,
+    'gross' : IDL.Nat,
+    'created_at_time' : IDL.Nat64,
+  });
+  const PayoutOutcome = IDL.Variant({
+    'Confirmed' : IDL.Record({ 'block' : IDL.Nat }),
+    'Prepared' : IDL.Null,
+    'Unresolved' : IDL.Record({ 'reason' : IDL.Text }),
+    'RejectedNoTransfer' : IDL.Record({ 'reason' : IDL.Text }),
+    'HeldLegacyUnbound' : IDL.Null,
+    'Submitted' : IDL.Null,
+  });
+  const PayoutAttempt = IDL.Record({
+    'number' : IDL.Nat32,
+    'replay_count' : IDL.Nat8,
+    'transfer' : PayoutTransfer,
+    'outcome' : PayoutOutcome,
+  });
+  const PayoutSwapContext = IDL.Record({
+    'amp' : IDL.Nat,
+    'admin_fee_bps' : IDL.Nat16,
+    'precision_muls' : IDL.Vec(IDL.Nat),
+    'imbalance_after' : IDL.Nat64,
+    'gross_output' : IDL.Nat,
+    'token_in' : IDL.Nat8,
+    'is_rebalancing' : IDL.Bool,
+    'fee_bps' : IDL.Nat16,
+    'imbalance_before' : IDL.Nat64,
+    'amount_in' : IDL.Nat,
+    'token_out' : IDL.Nat8,
+    'balances_before' : IDL.Vec(IDL.Nat),
+    'pool_fee' : IDL.Nat,
+  });
+  const PayoutEntitlement = IDL.Record({
+    'id' : IDL.Nat64,
+    'token_index' : IDL.Nat8,
+    'settled' : IDL.Bool,
+    'owner' : IDL.Principal,
+    'kind' : PayoutKind,
+    'attempts' : IDL.Vec(PayoutAttempt),
+    'compensation_id' : IDL.Opt(IDL.Nat64),
+    'compensation_for' : IDL.Opt(IDL.Nat64),
+    'ledger' : IDL.Principal,
+    'gross' : IDL.Nat,
+    'swap_context' : IDL.Opt(PayoutSwapContext),
+    'symbol' : IDL.Text,
+  });
   const ThreePoolPendingClaim = IDL.Record({
     'id' : IDL.Nat64,
     'token_index' : IDL.Nat8,
@@ -265,10 +331,6 @@ export const idlFactory = ({ IDL }) => {
     'Unresolved' : IDL.Null,
     'RefundSubmitted' : IDL.Null,
     'Completed' : IDL.Null,
-  });
-  const Account = IDL.Record({
-    'owner' : IDL.Principal,
-    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
   });
   const SwapTransferStatusV1 = IDL.Variant({
     'SkippedDust' : IDL.Null,
@@ -642,6 +704,16 @@ export const idlFactory = ({ IDL }) => {
     'get_lp_holders' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat))],
+        ['query'],
+      ),
+    'get_payout_entitlement' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Opt(PayoutEntitlement)],
+        ['query'],
+      ),
+    'get_payout_entitlements' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(PayoutEntitlement)],
         ['query'],
       ),
     'get_pending_claim_count' : IDL.Func([], [IDL.Nat64], ['query']),
