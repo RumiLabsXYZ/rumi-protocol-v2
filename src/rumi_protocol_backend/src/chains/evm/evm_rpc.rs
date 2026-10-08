@@ -815,8 +815,8 @@ async fn single_call(canister: Principal, url: &str, json_payload: &str) -> Resu
     .await;
     match result {
         Ok((RequestResult::Ok(text),)) => Ok(text),
-        Ok((RequestResult::Err(rpc_err),)) => Err(format!("RPC error from {}: {:?}", url, rpc_err)),
-        Err((code, msg)) => Err(format!("call error to {} ({:?}): {}", url, code, msg)),
+        Ok((RequestResult::Err(rpc_err),)) => Err(redact_provider_urls(&format!("RPC provider error: {:?}", rpc_err))),
+        Err((code, _msg)) => Err(format!("EVM RPC canister call failed ({:?})", code)),
     }
 }
 
@@ -981,12 +981,12 @@ async fn call_evm_rpc_detailed(chain: ChainId, json_payload: &str) -> Result<Str
     let canister = evm_rpc_principal();
 
     // Collect EVERY provider's outcome (not just the last error), so a
-    // disagreement or all-fail diagnosis can name every provider by URL.
+    // disagreement and all-fail diagnostics identify providers by index only.
     let mut outcomes: Vec<(String, Result<String, String>)> = Vec::new();
-    for url in &endpoints {
+    for (index, url) in endpoints.iter().enumerate() {
         let outcome = single_call(canister, url, json_payload).await;
         if let Err(ref e) = outcome {
-            log!(DEBUG, "[evm_rpc] provider read error via {}: {}", url, e);
+            log!(DEBUG, "[evm_rpc] provider #{} read error: {}", index + 1, redact_provider_urls(e));
         }
         outcomes.push((url.clone(), outcome));
     }
@@ -999,6 +999,32 @@ async fn call_evm_rpc_detailed(chain: ChainId, json_payload: &str) -> Result<Str
 /// inter-canister call. `outcomes` is `(provider_url, single_call result)` for
 /// every distinct configured endpoint, in the same order `call_evm_rpc_detailed`
 /// queried them; `floor` is the chain's minimum quorum-provider floor.
+fn redact_provider_urls(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        let bytes = rest.as_bytes();
+        let scheme_len = if bytes.get(..8).map_or(false, |s| s.eq_ignore_ascii_case(b"https://")) {
+            Some(8)
+        } else if bytes.get(..7).map_or(false, |s| s.eq_ignore_ascii_case(b"http://")) {
+            Some(7)
+        } else {
+            None
+        };
+        if let Some(scheme_len) = scheme_len {
+            output.push_str("[redacted provider URL]");
+            rest = &rest[scheme_len..];
+            let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+            rest = &rest[end..];
+        } else {
+            let ch = rest.chars().next().expect("non-empty rest");
+            output.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    output
+}
+
 fn tally_provider_outcomes(
     chain: ChainId,
     outcomes: &[(String, Result<String, String>)],
@@ -1020,7 +1046,10 @@ fn tally_provider_outcomes(
     if oks.is_empty() {
         let detail = errs
             .iter()
-            .map(|(url, e)| format!("{} -> {}", url, e))
+            .map(|(url, e)| {
+                let index = outcomes.iter().position(|(candidate, _)| candidate == *url).unwrap_or(0) + 1;
+                format!("provider #{} -> {}", index, redact_provider_urls(e))
+            })
             .collect::<Vec<_>>()
             .join("; ");
         return Err(QuorumError::AllProvidersFailed(format!(
@@ -1051,7 +1080,10 @@ fn tally_provider_outcomes(
             "; malformed responses excluded from tally (shape-invalid, not a vote): {}",
             malformed
                 .iter()
-                .map(|(url, text)| format!("{} -> {:?}", url, text))
+                .map(|(url, _)| {
+                    let index = outcomes.iter().position(|(candidate, _)| candidate == *url).unwrap_or(0) + 1;
+                    format!("provider #{}", index)
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -1065,7 +1097,10 @@ fn tally_provider_outcomes(
         // in the diagnostic.
         let errs_detail = errs
             .iter()
-            .map(|(url, e)| format!("{} -> {}", url, e))
+            .map(|(url, e)| {
+                let index = outcomes.iter().position(|(candidate, _)| candidate == *url).unwrap_or(0) + 1;
+                format!("provider #{} -> {}", index, redact_provider_urls(e))
+            })
             .collect::<Vec<_>>()
             .join("; ");
         return Err(QuorumError::AllProvidersFailed(format!(
@@ -1128,7 +1163,12 @@ fn tally_provider_outcomes(
         }
         let groups_detail = groups
             .iter()
-            .map(|(key, urls)| format!("{} from [{}]", key, urls.join(", ")))
+            .map(|(key, urls)| {
+                let indices = urls.iter().map(|url| {
+                    outcomes.iter().position(|(candidate, _)| candidate == *url).unwrap_or(0) + 1
+                }).map(|index| format!("#{}", index)).collect::<Vec<_>>().join(", ");
+                format!("{} from [{}]", redact_provider_urls(&key.to_string()), indices)
+            })
             .collect::<Vec<_>>()
             .join("; ");
         let errs_detail = if errs.is_empty() {
@@ -1137,7 +1177,10 @@ fn tally_provider_outcomes(
             format!(
                 "; provider errors: {}",
                 errs.iter()
-                    .map(|(url, e)| format!("{} -> {}", url, e))
+                    .map(|(url, e)| {
+                let index = outcomes.iter().position(|(candidate, _)| candidate == *url).unwrap_or(0) + 1;
+                format!("provider #{} -> {}", index, redact_provider_urls(e))
+            })
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -1168,7 +1211,13 @@ where
             .map_err(|error| format!("broadcast stopped before provider attempt: {error}"))?;
         match call(item).await {
             Ok(text) => return Ok(text),
-            Err(error) => last_err = error,
+            Err(error) => {
+                last_err = format!(
+                    "provider #{} failed: {}",
+                    attempt + 1,
+                    redact_provider_urls(&error)
+                );
+            }
         }
     }
     Err(last_err)
@@ -2004,18 +2053,49 @@ mod tests {
         format!(r#"{{"jsonrpc":"2.0","id":{},"result":{}}}"#, id, result)
     }
 
-    fn too_few_cycles_err(url: &str, expected: u64, received: u64) -> String {
-        // Mirrors EXACTLY what `single_call` produces for a `TooFewCycles`
-        // provider error, so this fixture is a regression check on that format
-        // too: `format!("RPC error from {}: {:?}", url, rpc_err)`.
+    fn too_few_cycles_err(expected: u64, received: u64) -> String {
+        // Mirrors the URL-free error text produced for a TooFewCycles response.
         let rpc_err = RpcError::ProviderError(ProviderError::TooFewCycles(TooFewCyclesRecord {
             expected: candid::Nat::from(expected),
             received: candid::Nat::from(received),
         }));
-        format!("RPC error from {}: {:?}", url, rpc_err)
+        format!("RPC provider error: {:?}", rpc_err)
     }
 
     // (a) quorum of "0x0" (and a nonzero count) at N => Some(N): block exists.
+    #[test]
+    fn provider_url_redaction_removes_credentials_and_preserves_indices() {
+        let secret = "provider failed at HtTpS://rpc.example/path?key=SECRET,WITHCOMMA retry later";
+        let redacted = super::redact_provider_urls(secret);
+        assert!(!redacted.contains("https://"));
+        assert!(!redacted.contains("SECRET"));
+        assert!(!redacted.contains("WITHCOMMA"));
+        assert!(redacted.contains("[redacted provider URL]"));
+
+        let outcomes = vec![(
+            "https://rpc.example/path?key=SECRET".to_string(),
+            Err(secret.to_string()),
+        )];
+        let err = tally_provider_outcomes(CHAIN, &outcomes, 2).unwrap_err().to_string();
+        assert!(err.contains("provider #1"));
+        assert!(!err.contains("https://"));
+        assert!(!err.contains("SECRET"));
+        assert!(!err.contains("WITHCOMMA"));
+    }
+
+    #[test]
+    fn first_ok_error_keeps_provider_index_without_url() {
+        let error = futures::executor::block_on(super::guarded_first_ok(
+            vec!["https://rpc.example/path?key=SECRET".to_string()],
+            |_| Ok(()),
+            |_| async { Err::<String, String>("request failed".to_string()) },
+        ))
+        .unwrap_err();
+        assert!(error.contains("provider #1"));
+        assert!(!error.contains("https://"));
+        assert!(!error.contains("SECRET"));
+    }
+
     #[test]
     fn quorum_of_zero_tx_count_confirms_block_exists() {
         let urls = providers();
@@ -2279,7 +2359,7 @@ mod tests {
                 .map(|u| {
                     (
                         u.clone(),
-                        Err(too_few_cycles_err(u, 3_714_459_200, 2_000_000_000)),
+                        Err(too_few_cycles_err(3_714_459_200, 2_000_000_000)),
                     )
                 })
                 .collect()
@@ -2289,17 +2369,12 @@ mod tests {
         let quorum_err = tally.expect_err("all-providers-failed must be Err");
         assert!(matches!(quorum_err, QuorumError::AllProvidersFailed(_)));
         let detail = quorum_err.to_string();
-        // Actionable: names the failure class...
+        // Actionable: names the failure class and provider indices, without URLs.
         assert!(detail.contains("infrastructure failure"), "{}", detail);
-        // ...every provider by URL...
-        for url in &urls {
-            assert!(
-                detail.contains(url.as_str()),
-                "missing {} in: {}",
-                url,
-                detail
-            );
+        for index in 1..=urls.len() {
+            assert!(detail.contains(&format!("provider #{}", index)), "{}", detail);
         }
+        assert!(!detail.contains("https://"), "provider URL leaked: {}", detail);
         // ...and the exact TooFewCycles expected/received cycle counts.
         assert!(detail.contains("TooFewCycles"), "{}", detail);
         assert!(
@@ -2410,7 +2485,8 @@ mod tests {
         match &tally {
             Err(QuorumError::Disagreement(detail)) => {
                 assert!(detail.contains("malformed"), "{}", detail);
-                assert!(detail.contains(urls[1].as_str()), "{}", detail);
+                assert!(detail.contains("provider #2"), "{}", detail);
+                assert!(!detail.contains(urls[1].as_str()), "provider URL leaked: {}", detail);
             }
             other => panic!("expected Disagreement (a votable response existed but didn't reach quorum), got {:?}", other),
         }
@@ -2566,7 +2642,8 @@ mod tests {
         match &tally {
             Err(QuorumError::Disagreement(detail)) => {
                 assert!(detail.contains("malformed"), "{}", detail);
-                assert!(detail.contains(urls[2].as_str()), "{}", detail);
+                assert!(detail.contains("provider #3"), "{}", detail);
+                assert!(!detail.contains(urls[2].as_str()), "provider URL leaked: {}", detail);
             }
             other => panic!(
                 "expected Disagreement (malformed cannot manufacture a false quorum), got {:?}",

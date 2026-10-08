@@ -118,6 +118,21 @@ pub fn build_dashboard() -> Vec<u8> {
     .into_bytes()
 }
 
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 fn with_utf8_buffer(f: impl FnOnce(&mut Vec<u8>)) -> String {
     let mut buf = Vec::new();
     f(&mut buf);
@@ -177,10 +192,10 @@ fn construct_metadata_table() -> String {
                     </tr>
                 </tbody>
             </table>",
-            s.mode,
-            s.icusd_ledger_principal,
-            s.icp_ledger_principal,
-            s.xrc_principal,
+            escape_html(&s.mode.to_string()),
+            escape_html(&s.icusd_ledger_principal.to_string()),
+            escape_html(&s.icp_ledger_principal.to_string()),
+            escape_html(&s.xrc_principal.to_string()),
             last_icp_rate.unwrap_or(crate::UsdIcp::from(rust_decimal::Decimal::ZERO)),
             last_icp_timetsamp.unwrap_or(0),
             s.total_collateral_ratio.to_f64() * 100.0,
@@ -215,11 +230,11 @@ fn construct_vault_table() -> String {
                 </tr>
                 ",
                     vault.vault_id,
-                    vault.owner,
+                    escape_html(&vault.owner.to_string()),
                     vault.borrowed_icusd_amount,
                     vault.collateral_amount,
-                    vault.collateral_type,
-                    ct_display,
+                    escape_html(&vault.collateral_type.to_string()),
+                    escape_html(&ct_display),
                 )
                 .unwrap();
             }
@@ -278,15 +293,15 @@ fn construct_collateral_types_table() -> String {
                         <td>{}</td>
                         <td>{}</td>
                     </tr>",
-                    ct,
-                    &ct.to_string()[..std::cmp::min(ct.to_string().len(), 12)],
-                    config.status,
+                    escape_html(&ct.to_string()),
+                    escape_html(&ct.to_string()[..std::cmp::min(ct.to_string().len(), 12)]),
+                    escape_html(&format!("{:?}", config.status)),
                     config.decimals,
-                    price_str,
+                    escape_html(&price_str),
                     total_raw,
                     total_debt,
                     vault_count,
-                    ceiling_str,
+                    escape_html(&ceiling_str),
                 )
                 .unwrap();
             }
@@ -308,7 +323,7 @@ fn construct_liquidity_table() -> String {
                     <td>{}</td>
                 </tr>
                 ",
-                    principal,
+                    escape_html(&principal.to_string()),
                     (*amount)
                 )
                 .unwrap();
@@ -327,7 +342,7 @@ fn construct_liquidity_returns() -> String {
     with_utf8_buffer(|buf| {
         read_state(|s| {
             for (principal, amount) in s.liquidity_returns.iter() {
-                write!(buf, "<tr><td>{}</td><td>{}</td></tr>", principal, (*amount)).unwrap();
+                write!(buf, "<tr><td>{}</td><td>{}</td></tr>", escape_html(&principal.to_string()), (*amount)).unwrap();
             }
             write!(
                 buf,
@@ -346,7 +361,7 @@ fn display_logs() -> String {
         write!(
             buf,
             "<tr><td>{:?}</td><td class=\"ts-class\">{}</td><td><code>{}:{}</code></td><td>{}</td></tr>",
-            e.priority, e.timestamp, e.file, e.line, e.message
+            escape_html(&format!("{:?}", e.priority)), e.timestamp, escape_html(&e.file), e.line, escape_html(&e.message)
         )
         .unwrap()
     }
@@ -360,4 +375,14 @@ fn display_logs() -> String {
             display_entry(buf, &e);
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_html;
+
+    #[test]
+    fn escapes_html_text_and_attribute_delimiters() {
+        assert_eq!(escape_html("<script a=\"x\">'&"), "&lt;script a=&quot;x&quot;&gt;&#39;&amp;");
+    }
 }
