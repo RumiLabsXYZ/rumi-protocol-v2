@@ -7,8 +7,9 @@ use ic_cdk::call;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
+use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Conservative fallback for a stablecoin ledger's transfer fee (native units),
 /// used when the live `icrc1_fee` query fails. Known stablecoin registry values
@@ -21,6 +22,34 @@ thread_local! {
     /// `icrc1_fee`. Heap-only (not persisted), so it is simply re-warmed after
     /// an upgrade. Mirrors rumi_3pool::transfers::LEDGER_FEES.
     static LEDGER_FEES: RefCell<HashMap<Principal, u64>> = RefCell::new(HashMap::new());
+    /// Prevent concurrent claims for one stable refund while its callback is
+    /// outstanding. The stable journal remains authoritative after traps.
+    static ACTIVE_PENDING_REFUND_CLAIMS: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
+}
+
+const MAX_PENDING_REFUND_HISTORY_BLOCKS_PER_CLAIM: u64 = 8;
+const PENDING_REFUND_MEMO_PREFIX: &[u8; 8] = b"RSPRFND:";
+
+struct PendingRefundClaimGuard(u64);
+
+impl PendingRefundClaimGuard {
+    fn reserve(refund_id: u64) -> Result<Self, StabilityPoolError> {
+        ACTIVE_PENDING_REFUND_CLAIMS.with(|active| {
+            if active.borrow_mut().insert(refund_id) {
+                Ok(Self(refund_id))
+            } else {
+                Err(StabilityPoolError::SystemBusy)
+            }
+        })
+    }
+}
+
+impl Drop for PendingRefundClaimGuard {
+    fn drop(&mut self) {
+        ACTIVE_PENDING_REFUND_CLAIMS.with(|active| {
+            active.borrow_mut().remove(&self.0);
+        });
+    }
 }
 
 pub(crate) fn record_deposit_credit_after_async(
@@ -778,9 +807,10 @@ pub async fn deposit_as_3usd(
 /// IC-S-001: the refund sends `amount` NET of the ledger transfer fee so the
 /// pool's ledger balance drops by exactly `amount` (a gross refund cost
 /// amount+fee, drifting the pool one fee below its tracked deposits per
-/// refund). If the refund transfer itself fails, the amount is persisted as a
-/// pending refund recoverable via `claim_pending_refund` instead of being
-/// silently stranded.
+/// refund). The liability is journaled before any fee/history/transfer await;
+/// its exact tuple is persisted before dispatch and verified against ICRC-3
+/// before the row is removed. Unsent rows retain an initialization marker,
+/// while legacy attemptless rows fail closed for manual reconciliation.
 async fn refund_user(
     user: Principal,
     token_ledger: Principal,
@@ -788,54 +818,121 @@ async fn refund_user(
     reason: &str,
     pending_refund_slot: crate::pool_guard::PendingRefundSlotGuard,
 ) {
+    // Journal the liability before any await that could later lead to a
+    // compensating transfer. The initialization marker proves this row has
+    // never been dispatched if fee discovery or history lookup fails.
+    let refund = record_pending_refund(
+        user,
+        token_ledger,
+        amount,
+        reason,
+        pending_refund_slot,
+    );
+    let _claim_guard = match PendingRefundClaimGuard::reserve(refund.id) {
+        Ok(guard) => guard,
+        Err(error) => {
+            log!(INFO, "refund_user: refund #{} remains durably queued before payout setup: {:?}", refund.id, error);
+            return;
+        }
+    };
+
     let fee = match current_ledger_transfer_fee(token_ledger).await {
         Ok(fee) => fee,
         Err(error) => {
-            record_pending_refund(
-                user,
-                token_ledger,
-                amount,
-                &format!("{}; live refund fee unavailable: {:?}", reason, error),
-                pending_refund_slot,
-            );
+            log!(INFO, "refund_user: refund #{} remains queued; live fee unavailable: {:?}", refund.id, error);
             return;
         }
     };
     if amount <= fee {
-        // Keep the obligation durable even when the current fee consumes the
-        // whole amount. A later fee reduction can make it claimable.
-        record_pending_refund(user, token_ledger, amount, reason, pending_refund_slot);
+        // Keep the never-dispatched marker so a later lower fee can initialize
+        // a tuple without confusing this row with a legacy ambiguous payout.
+        log!(INFO, "refund_user: refund #{} remains queued; amount {} is not above fee {}", refund.id, amount, fee);
         return;
     }
+
+    let history_start = match pending_refund_history_tip(token_ledger).await {
+        Ok(tip) => tip,
+        Err(error) => {
+            log!(INFO, "refund_user: refund #{} remains queued; ledger history boundary unavailable: {:?}", refund.id, error);
+            return;
+        }
+    };
+    let mut attempt = match build_pending_refund_attempt(&refund, fee, history_start, None) {
+        Ok(attempt) => attempt,
+        Err(error) => {
+            log!(INFO, "refund_user: refund #{} remains queued; payout tuple unavailable: {:?}", refund.id, error);
+            return;
+        }
+    };
+    attempt.dispatch_started = true;
+    if !mutate_state(|state| {
+        if !state.pending_refund_attempt_initializable(refund.id) {
+            return false;
+        }
+        state.put_pending_refund_attempt(attempt.clone());
+        true
+    }) {
+        log!(INFO, "refund_user: refund #{} remains queued; durable payout intent could not be installed", refund.id);
+        return;
+    }
+
     let transfer_args = TransferArg {
-        to: Account {
-            owner: user,
-            subaccount: None,
-        },
-        amount: (amount - fee).into(),
-        fee: Some(fee.into()),
-        memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
-        from_subaccount: None,
+        from_subaccount: attempt.from.subaccount,
+        to: attempt.to.clone(),
+        amount: attempt.amount.into(),
+        fee: Some(attempt.fee.into()),
+        memo: Some(attempt.memo.clone().into()),
+        created_at_time: Some(attempt.created_at_time_ns.into()),
     };
     let result: Result<(Result<candid::Nat, TransferError>,), _> =
-        call(token_ledger, "icrc1_transfer", (transfer_args,)).await;
-    let failure = match result {
-        Ok((Ok(_),)) => None,
-        // Duplicate: a previous refund attempt already paid the user.
-        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
-            log!(
-                INFO,
-                "refund_user: Duplicate (block {}); previous refund landed",
-                duplicate_of
-            );
-            None
+        call(attempt.token_ledger, "icrc1_transfer", (transfer_args,)).await;
+    match result {
+        Ok((Ok(block),)) => {
+            let block_index: u64 = match block.0.try_into() {
+                Ok(index) => index,
+                Err(_) => {
+                    hold_pending_refund_attempt(
+                        &attempt,
+                        "refund receipt block index exceeds u64; obligation remains held".to_string(),
+                    );
+                    return;
+                }
+            };
+            attempt.expected_block_index = Some(block_index);
+            mutate_state(|state| state.update_pending_refund_attempt(attempt.clone()));
+            if let Err(error) = verify_pending_refund_attempt(&refund, &attempt).await {
+                log!(INFO, "refund_user: refund #{} payout remains held after receipt verification: {:?}", refund.id, error);
+            }
         }
-        Ok((Err(e),)) => Some(format!("{}; refund transfer failed: {:?}", reason, e)),
-        Err(e) => Some(format!("{}; refund call failed: {:?}", reason, e)),
-    };
-    if let Some(why) = failure {
-        record_pending_refund(user, token_ledger, amount, &why, pending_refund_slot);
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            let block_index: u64 = match duplicate_of.0.try_into() {
+                Ok(index) => index,
+                Err(_) => {
+                    hold_pending_refund_attempt(
+                        &attempt,
+                        "duplicate refund block index exceeds u64; obligation remains held".to_string(),
+                    );
+                    return;
+                }
+            };
+            attempt.expected_block_index = Some(block_index);
+            mutate_state(|state| state.update_pending_refund_attempt(attempt.clone()));
+            if let Err(error) = verify_pending_refund_attempt(&refund, &attempt).await {
+                log!(INFO, "refund_user: duplicate refund #{} remains held after receipt verification: {:?}", refund.id, error);
+            }
+        }
+        Ok((Err(transfer_error),)) => {
+            hold_pending_refund_attempt(
+                &attempt,
+                format!("{reason}; refund transfer returned unresolved error: {transfer_error:?}"),
+            );
+        }
+        Err(call_error) => {
+            hold_pending_refund_attempt(
+                &attempt,
+                format!("{reason}; refund call outcome is ambiguous: {call_error:?}"),
+            );
+        }
     }
 }
 
@@ -845,129 +942,432 @@ fn record_pending_refund(
     amount: u64,
     reason: &str,
     _slot: crate::pool_guard::PendingRefundSlotGuard,
-) {
+) -> PendingRefund {
+    let created_at = ic_cdk::api::time();
     let result = mutate_state(|s| {
         s.record_pending_refund(
             user,
             token_ledger,
             amount,
             reason.to_string(),
-            ic_cdk::api::time(),
+            created_at,
         )
     });
     let id = result;
     log!(
         INFO,
-        "refund_user: refund of {} {} to {} failed ({}); recorded pending refund #{}",
+        "refund_user: refund of {} {} to {} was journaled as pending #{} ({})",
         amount,
         token_ledger,
         user,
-        reason,
-        id
+        id,
+        reason
     );
+    PendingRefund {
+        id,
+        user,
+        token_ledger,
+        amount,
+        reason: reason.to_string(),
+        created_at,
+    }
 }
 
-/// Recover tokens the pool owes after a failed deposit_as_3usd refund
-/// (IC-S-001). Callable by the original user or a pool admin. The record is
-/// removed BEFORE the async transfer (so two concurrent claims cannot both pay
-/// out) and re-inserted if the transfer fails. Returns the net amount sent
-/// (gross minus the ledger fee). Mirrors rumi_3pool::claim_pending.
-pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolError> {
-    // SP-102: refuse balance-mutating ops while a liquidation is apportioning.
-    if crate::pool_balance_mutation_blocked() {
-        return Err(StabilityPoolError::SystemBusy);
-    }
-    let caller = ic_cdk::api::caller();
-
-    let refund = mutate_state(|s| s.take_pending_refund(refund_id))
-        .ok_or(StabilityPoolError::RefundClaimNotFound)?;
-    let _pending_refund_slot = crate::pool_guard::PendingRefundSlotGuard::reserve_claimed_row();
-
-    if caller != refund.user && !read_state(|s| s.is_admin(&caller)) {
-        // Not authorized; re-insert before returning so the record is not lost.
-        mutate_state(|s| s.put_pending_refund(refund));
-        return Err(StabilityPoolError::Unauthorized);
-    }
-
-    let fee = match current_ledger_transfer_fee(refund.token_ledger).await {
-        Ok(fee) => fee,
-        Err(error) => {
-            mutate_state(|s| s.put_pending_refund(refund));
-            return Err(error);
+async fn pending_refund_history_tip(ledger: Principal) -> Result<u64, StabilityPoolError> {
+    let request = vec![GetBlocksRequest {
+        start: candid::Nat::from(0u64),
+        length: candid::Nat::from(1u64),
+    }];
+    let result: Result<(GetBlocksResult,), _> =
+        call(ledger, "icrc3_get_blocks", (request,)).await;
+    let (response,) = result.map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+        target: ledger.to_string(),
+        method: "icrc3_get_blocks".to_string(),
+    })?;
+    response.log_length.0.try_into().map_err(|_| {
+        StabilityPoolError::LedgerTransferFailed {
+            reason: "ICRC-3 log length does not fit u64; refund remains held".to_string(),
         }
-    };
+    })
+}
+
+fn build_pending_refund_attempt(
+    refund: &PendingRefund,
+    fee: u64,
+    history_start_index: u64,
+    previous_timestamp: Option<u64>,
+) -> Result<PendingRefundPayoutAttempt, StabilityPoolError> {
     if refund.amount <= fee {
-        // Keep the claim durable; a later fee change may make the amount
-        // payable. Never silently erase a refund obligation.
-        log!(INFO, "claim_pending_refund: refund #{} of {} {} not currently payable (<= ledger fee {}); keeping the durable record",
-            refund_id, refund.amount, refund.token_ledger, fee);
-        mutate_state(|s| s.put_pending_refund(refund));
         return Err(StabilityPoolError::AmountTooLow {
             minimum_e8s: fee.saturating_add(1),
         });
     }
-    let net = refund.amount - fee;
-
-    let transfer_args = TransferArg {
+    let now = ic_cdk::api::time();
+    let created_at_time_ns = match previous_timestamp {
+        Some(previous) if now <= previous => previous.checked_add(1).ok_or_else(|| {
+            StabilityPoolError::LedgerTransferFailed {
+                reason: "refund timestamp exhausted; obligation remains held".to_string(),
+            }
+        })?,
+        _ => now,
+    };
+    let mut memo = PENDING_REFUND_MEMO_PREFIX.to_vec();
+    memo.extend_from_slice(&refund.id.to_be_bytes());
+    memo.extend_from_slice(&created_at_time_ns.to_be_bytes());
+    Ok(PendingRefundPayoutAttempt {
+        refund_id: refund.id,
+        token_ledger: refund.token_ledger,
+        from: Account {
+            owner: ic_cdk::api::id(),
+            subaccount: None,
+        },
         to: Account {
             owner: refund.user,
             subaccount: None,
         },
-        amount: net.into(),
-        fee: Some(fee.into()),
-        memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
-        from_subaccount: None,
+        amount: refund.amount - fee,
+        fee,
+        memo,
+        created_at_time_ns,
+        history_start_index,
+        dispatch_started: false,
+        history_next_index: Some(history_start_index),
+        history_tip: None,
+        expected_block_index: None,
+        last_error: None,
+    })
+}
+
+fn same_default_account(actual: &Account, expected: &Account) -> bool {
+    actual.owner == expected.owner
+        && match (&actual.subaccount, &expected.subaccount) {
+            (None, None) => true,
+            (Some(actual), Some(expected)) => actual == expected,
+            (Some(actual), None) | (None, Some(actual)) => *actual == [0; 32],
+        }
+}
+
+fn exact_pending_refund_block(
+    attempt: &PendingRefundPayoutAttempt,
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+) -> bool {
+    (block.op == "xfer" || block.op == "transfer")
+        && block.btype.as_deref().is_none_or(|kind| kind == "1xfer")
+        && block.spender.is_none()
+        && block.from.as_ref().is_some_and(|from| same_default_account(from, &attempt.from))
+        && block.to.as_ref().is_some_and(|to| same_default_account(to, &attempt.to))
+        && block.amount == u128::from(attempt.amount)
+        && block.fee == Some(attempt.fee)
+        && block.memo.as_deref() == Some(attempt.memo.as_slice())
+        && block.created_at_time == Some(attempt.created_at_time_ns)
+}
+
+fn possible_pending_refund_block(
+    attempt: &PendingRefundPayoutAttempt,
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+) -> bool {
+    if block.op != "xfer" && block.op != "transfer" {
+        return false;
+    }
+    // A present exact discriminator can safely rule out this attempt. Missing
+    // fields cannot: some ICRC-3 block layouts omit transfer metadata, and a
+    // partial record with no contradiction must keep the liability held.
+    let conclusively_different = block
+        .from
+        .as_ref()
+        .is_some_and(|from| !same_default_account(from, &attempt.from))
+        || block
+            .to
+            .as_ref()
+            .is_some_and(|to| !same_default_account(to, &attempt.to))
+        || block.spender.is_some()
+        || block.amount != u128::from(attempt.amount)
+        || block.fee.is_some_and(|fee| fee != attempt.fee)
+        || block
+            .memo
+            .as_deref()
+            .is_some_and(|memo| memo != attempt.memo.as_slice())
+        || block
+            .created_at_time
+            .is_some_and(|timestamp| timestamp != attempt.created_at_time_ns)
+        || block
+            .btype
+            .as_deref()
+            .is_some_and(|kind| kind != "1xfer");
+    !conclusively_different
+}
+
+fn refresh_pending_refund_history_tip(
+    attempt: &mut PendingRefundPayoutAttempt,
+    latest_tip: u64,
+) -> Result<(), String> {
+    if latest_tip < attempt.history_start_index {
+        return Err("ledger history tip precedes the persisted dispatch boundary".to_string());
+    }
+    let cursor = attempt
+        .history_next_index
+        .unwrap_or(attempt.history_start_index);
+    if cursor > latest_tip {
+        return Err("persisted refund history cursor exceeds the refreshed ledger tip".to_string());
+    }
+    attempt.history_tip = Some(latest_tip);
+    attempt.history_next_index = Some(cursor);
+    Ok(())
+}
+
+fn hold_pending_refund_attempt(attempt: &PendingRefundPayoutAttempt, reason: String) {
+    let mut held = attempt.clone();
+    held.last_error = Some(reason);
+    mutate_state(|state| {
+        state.update_pending_refund_attempt(held);
+    });
+}
+
+fn finish_verified_pending_refund(
+    refund: &PendingRefund,
+    attempt: &PendingRefundPayoutAttempt,
+) -> Result<u64, StabilityPoolError> {
+    let finalized = mutate_state(|state| {
+        state.finalize_pending_refund_payout(refund.id, attempt)
+    });
+    if !finalized {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "verified refund receipt did not match the live durable attempt; obligation remains held".to_string(),
+        });
+    }
+    log!(INFO, "claim_pending_refund: refund #{} exact payout verified on {} to {}, net {}, fee {}, timestamp {}, block {:?}",
+        refund.id, attempt.token_ledger, refund.user, attempt.amount, attempt.fee,
+        attempt.created_at_time_ns, attempt.expected_block_index);
+    Ok(attempt.amount)
+}
+
+async fn verify_pending_refund_attempt(
+    refund: &PendingRefund,
+    attempt: &PendingRefundPayoutAttempt,
+) -> Result<u64, StabilityPoolError> {
+    let block_index = attempt.expected_block_index.expect("verified attempt has index");
+    let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(
+        attempt.token_ledger,
+        block_index,
+    )
+    .await
+    .map_err(|reason| {
+        hold_pending_refund_attempt(attempt, format!("receipt lookup failed: {reason}"));
+        StabilityPoolError::LedgerTransferFailed {
+            reason: format!("refund payout is held; exact ICRC-3 receipt is unavailable: {reason}"),
+        }
+    })?;
+    if !exact_pending_refund_block(attempt, &block) {
+        let reason = "returned block index does not match the exact refund transfer tuple".to_string();
+        hold_pending_refund_attempt(attempt, reason.clone());
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: format!("refund payout is held: {reason}"),
+        });
+    }
+    finish_verified_pending_refund(refund, attempt)
+}
+
+/// Recover tokens the pool owes after a failed deposit_as_3usd refund
+/// (IC-S-001). The liability stays in stable state across every await and is
+/// removed only after the exact ICRC-1 tuple is verified in ICRC-3 history.
+/// Ambiguous outcomes are reconciled by a bounded scan that follows ledger-
+/// advertised archive callbacks; incomplete or conflicting evidence is held.
+pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolError> {
+    if crate::pool_balance_mutation_blocked() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    // Keep a liquidation absorb from starting while this claim holds the
+    // shared SP ledger balance across fee/history/transfer awaits.
+    let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new();
+    let _claim_guard = PendingRefundClaimGuard::reserve(refund_id)?;
+    let caller = ic_cdk::api::caller();
+    let refund = read_state(|state| {
+        state
+            .pending_refunds
+            .as_ref()
+            .and_then(|refunds| refunds.get(&refund_id).cloned())
+    })
+    .ok_or(StabilityPoolError::RefundClaimNotFound)?;
+    if caller != refund.user && !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+
+    let mut attempt = read_state(|state| state.pending_refund_attempt(refund_id));
+    if attempt.is_none() {
+        if !read_state(|state| state.pending_refund_attempt_initializable(refund_id)) {
+            return Err(StabilityPoolError::LedgerTransferFailed {
+                reason: "legacy refund has no durable payout identity; held for manual reconciliation".to_string(),
+            });
+        }
+        let fee = current_ledger_transfer_fee(refund.token_ledger).await?;
+        let history_start = pending_refund_history_tip(refund.token_ledger).await?;
+        let created = build_pending_refund_attempt(&refund, fee, history_start, None)?;
+        let stored = mutate_state(|state| {
+            if !state.pending_refund_attempt_initializable(refund_id) {
+                return false;
+            }
+            state.put_pending_refund_attempt(created.clone());
+            true
+        });
+        if !stored {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        attempt = Some(created);
+    }
+    let mut attempt = attempt.expect("attempt created or loaded");
+
+    if attempt.expected_block_index.is_some() {
+        return verify_pending_refund_attempt(&refund, &attempt).await;
+    }
+
+    if attempt.dispatch_started {
+        // The previous call may have committed even if its reply was lost or
+        // a later replay returned BadFee. Refresh the ledger tip on every
+        // reconciliation pass so history appended after the pre-dispatch
+        // boundary is included before any replacement tuple is considered.
+        let latest_tip = match pending_refund_history_tip(attempt.token_ledger).await {
+            Ok(tip) => tip,
+            Err(error) => {
+                hold_pending_refund_attempt(&attempt, format!("history tip unavailable: {error:?}"));
+                return Err(error);
+            }
+        };
+        if let Err(reason) = refresh_pending_refund_history_tip(&mut attempt, latest_tip) {
+            hold_pending_refund_attempt(&attempt, reason.clone());
+            return Err(StabilityPoolError::LedgerTransferFailed {
+                reason: format!("refund payout is held: {reason}"),
+            });
+        }
+        let tip = attempt.history_tip.expect("refreshed history tip");
+        let mut cursor = attempt
+            .history_next_index
+            .unwrap_or(attempt.history_start_index);
+        let end = tip.min(cursor.saturating_add(MAX_PENDING_REFUND_HISTORY_BLOCKS_PER_CLAIM));
+        while cursor < end {
+            let block = match rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(
+                attempt.token_ledger,
+                cursor,
+            )
+            .await
+            {
+                Ok(block) => block,
+                Err(reason) => {
+                    hold_pending_refund_attempt(
+                        &attempt,
+                        format!("history block {cursor} unavailable or unverified: {reason}"),
+                    );
+                    return Err(StabilityPoolError::LedgerTransferFailed {
+                        reason: format!("refund payout is held at ICRC-3 block {cursor}: {reason}"),
+                    });
+                }
+            };
+            if exact_pending_refund_block(&attempt, &block) {
+                attempt.expected_block_index = Some(cursor);
+                if !mutate_state(|state| state.update_pending_refund_attempt(attempt.clone())) {
+                    return Err(StabilityPoolError::SystemBusy);
+                }
+                return verify_pending_refund_attempt(&refund, &attempt).await;
+            }
+            if possible_pending_refund_block(&attempt, &block) {
+                let reason = format!("ICRC-3 block {cursor} resembles this refund but does not prove its exact tuple");
+                hold_pending_refund_attempt(&attempt, reason.clone());
+                return Err(StabilityPoolError::LedgerTransferFailed {
+                    reason: format!("refund payout is held: {reason}"),
+                });
+            }
+            cursor += 1;
+            attempt.history_next_index = Some(cursor);
+            if !mutate_state(|state| state.update_pending_refund_attempt(attempt.clone())) {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+        }
+
+        if cursor < tip {
+            return Err(StabilityPoolError::LedgerTransferFailed {
+                reason: format!("refund payout reconciliation continues at ICRC-3 block {cursor}; liability remains pending"),
+            });
+        }
+
+        // The persisted scan reached the refreshed current tip with no exact
+        // or plausible receipt. Only now may a changed fee get a new tuple.
+        let fee = current_ledger_transfer_fee(refund.token_ledger).await?;
+        let next_attempt = build_pending_refund_attempt(
+            &refund,
+            fee,
+            tip,
+            Some(attempt.created_at_time_ns),
+        )?;
+        attempt = next_attempt;
+        if !mutate_state(|state| state.update_pending_refund_attempt(attempt.clone())) {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+    }
+
+    // Persist dispatch intent before the external call. A callback trap or
+    // upgrade after this point will reconcile fresh ICRC-3 history next time.
+    attempt.dispatch_started = true;
+    if !mutate_state(|state| state.update_pending_refund_attempt(attempt.clone())) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let transfer_args = TransferArg {
+        from_subaccount: attempt.from.subaccount,
+        to: attempt.to.clone(),
+        amount: attempt.amount.into(),
+        fee: Some(attempt.fee.into()),
+        memo: Some(attempt.memo.clone().into()),
+        created_at_time: Some(attempt.created_at_time_ns.into()),
     };
     let result: Result<(Result<candid::Nat, TransferError>,), _> =
-        call(refund.token_ledger, "icrc1_transfer", (transfer_args,)).await;
-
+        call(attempt.token_ledger, "icrc1_transfer", (transfer_args,)).await;
     match result {
-        Ok((Ok(block_index),)) => {
-            log!(
-                INFO,
-                "claim_pending_refund: refund #{} paid {} (net of fee {}) of {} to {}, block {}",
-                refund_id,
-                net,
-                fee,
-                refund.token_ledger,
-                refund.user,
-                block_index
-            );
-            Ok(net)
+        Ok((Ok(block),)) => {
+            let block_index: u64 = block.0.try_into().map_err(|_| {
+                StabilityPoolError::LedgerTransferFailed {
+                    reason: "refund transfer block index exceeds u64; obligation remains held".to_string(),
+                }
+            })?;
+            attempt.expected_block_index = Some(block_index);
+            if !mutate_state(|state| state.update_pending_refund_attempt(attempt.clone())) {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            verify_pending_refund_attempt(&refund, &attempt).await
         }
-        // Duplicate: a previous claim attempt already paid the user.
         Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
-            log!(
-                INFO,
-                "claim_pending_refund: refund #{} Duplicate (block {}); previous attempt landed",
-                refund_id,
-                duplicate_of
+            let block_index: u64 = duplicate_of.0.try_into().map_err(|_| {
+                StabilityPoolError::LedgerTransferFailed {
+                    reason: "duplicate refund block index exceeds u64; obligation remains held".to_string(),
+                }
+            })?;
+            attempt.expected_block_index = Some(block_index);
+            if !mutate_state(|state| state.update_pending_refund_attempt(attempt.clone())) {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            verify_pending_refund_attempt(&refund, &attempt).await
+        }
+        Ok((Err(TransferError::BadFee { expected_fee }),)) => {
+            let expected_fee: u64 = expected_fee.0.try_into().unwrap_or(u64::MAX);
+            // BadFee proves only this invocation made no transfer. Keep the
+            // exact attempt so the next call scans the complete pinned ledger
+            // range before it may create a replacement tuple; a prior
+            // ambiguous dispatch of this attempt must still be reconcilable.
+            hold_pending_refund_attempt(
+                &attempt,
+                format!("BadFee expected {expected_fee}; reconcile this exact attempt before re-arming"),
             );
-            Ok(net)
+            Err(StabilityPoolError::LedgerTransferFailed {
+                reason: format!("ledger rejected quoted fee; expected {expected_fee}; refund remains pending"),
+            })
         }
         Ok((Err(transfer_error),)) => {
-            log!(
-                INFO,
-                "claim_pending_refund: refund #{} transfer failed, re-inserting: {:?}",
-                refund_id,
-                transfer_error
-            );
-            let reason = format!("{:?}", transfer_error);
-            mutate_state(|s| s.put_pending_refund(refund));
-            Err(StabilityPoolError::LedgerTransferFailed { reason })
+            hold_pending_refund_attempt(&attempt, format!("ledger returned unresolved error: {transfer_error:?}"));
+            Err(StabilityPoolError::LedgerTransferFailed {
+                reason: format!("refund payout is held pending exact ICRC-3 reconciliation: {transfer_error:?}"),
+            })
         }
         Err(call_error) => {
-            log!(
-                INFO,
-                "claim_pending_refund: refund #{} call failed, re-inserting: {:?}",
-                refund_id,
-                call_error
-            );
-            let target = format!("{}", refund.token_ledger);
-            mutate_state(|s| s.put_pending_refund(refund));
+            hold_pending_refund_attempt(&attempt, format!("inter-canister outcome is ambiguous: {call_error:?}"));
             Err(StabilityPoolError::InterCanisterCallFailed {
-                target,
+                target: attempt.token_ledger.to_string(),
                 method: "icrc1_transfer".to_string(),
             })
         }
@@ -1008,6 +1408,31 @@ mod tests {
             last_error: None,
             created_at_ns: 123,
             updated_at_ns: 456,
+        }
+    }
+
+    fn refund_attempt_for_test(refund: &PendingRefund) -> PendingRefundPayoutAttempt {
+        PendingRefundPayoutAttempt {
+            refund_id: refund.id,
+            token_ledger: refund.token_ledger,
+            from: Account {
+                owner: principal(90),
+                subaccount: None,
+            },
+            to: Account {
+                owner: refund.user,
+                subaccount: None,
+            },
+            amount: refund.amount - 3,
+            fee: 3,
+            memo: b"RSPRFND:exact-test".to_vec(),
+            created_at_time_ns: 1234,
+            history_start_index: 7,
+            dispatch_started: true,
+            history_next_index: Some(7),
+            history_tip: Some(8),
+            expected_block_index: Some(7),
+            last_error: None,
         }
     }
 
@@ -1060,6 +1485,85 @@ mod tests {
             0,
             "blocked post-await LP credit must not mutate the SP denominator",
         );
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+    }
+
+    #[test]
+    fn ambiguous_commit_then_bad_fee_keeps_tuple_for_receipt_reconciliation() {
+        let mut state = crate::state::StabilityPoolState::default();
+        let id = state.record_pending_refund(
+            principal(1),
+            principal(10),
+            103,
+            "transfer reply was ambiguous".to_string(),
+            100,
+        );
+        let refund = state.pending_refunds_for(&principal(1)).remove(0);
+        assert!(state.pending_refund_attempt_initializable(id));
+        let mut attempt = refund_attempt_for_test(&refund);
+        attempt.history_tip = None;
+        attempt.expected_block_index = None;
+        state.put_pending_refund_attempt(attempt.clone());
+        assert!(!state.pending_refund_attempt_initializable(id));
+        crate::state::replace_state(state);
+
+        // The initial compensating transfer can commit while its callback is
+        // lost. The attempt was journaled before dispatch, so the next claim
+        // refreshes beyond the old pre-dispatch boundary and can find it.
+        hold_pending_refund_attempt(&attempt, "BadFee expected 4; reconcile first".to_string());
+        attempt = read_state(|s| s.pending_refund_attempt(id)).expect("attempt remains held");
+        assert_eq!(read_state(|s| s.pending_refunds_for(&principal(1)).len()), 1);
+        assert!(attempt.dispatch_started, "BadFee must not downgrade a submitted tuple to an unsent one");
+        assert_eq!(attempt.history_tip, None);
+        refresh_pending_refund_history_tip(&mut attempt, 8)
+            .expect("retry must extend reconciliation through newly appended blocks");
+        assert_eq!(attempt.history_tip, Some(8));
+        assert_eq!(attempt.history_next_index, Some(7));
+        mutate_state(|s| assert!(s.update_pending_refund_attempt(attempt.clone())));
+
+        let exact = rumi_protocol_backend::icrc3_proof::DecodedBlock {
+            btype: Some("1xfer".to_string()),
+            op: "xfer".to_string(),
+            from: Some(attempt.from.clone()),
+            to: Some(attempt.to.clone()),
+            spender: None,
+            amount: attempt.amount.into(),
+            fee: Some(attempt.fee),
+            created_at_time: Some(attempt.created_at_time_ns),
+            memo: Some(attempt.memo.clone()),
+        };
+        let mut ambiguous = exact.clone();
+        ambiguous.memo = None;
+        assert!(!exact_pending_refund_block(&attempt, &ambiguous));
+        assert!(possible_pending_refund_block(&attempt, &ambiguous));
+
+        let mut missing_account = exact.clone();
+        missing_account.from = None;
+        missing_account.memo = None;
+        missing_account.created_at_time = None;
+        assert!(
+            possible_pending_refund_block(&attempt, &missing_account),
+            "missing identity fields cannot count as proof that a transfer is unrelated",
+        );
+
+        let mut unrelated_source = exact.clone();
+        unrelated_source.from = Some(Account {
+            owner: principal(91),
+            subaccount: None,
+        });
+        assert!(
+            !possible_pending_refund_block(&attempt, &unrelated_source),
+            "a present, different source conclusively excludes this exact transfer",
+        );
+        assert_eq!(read_state(|s| s.pending_refunds_for(&principal(1)).len()), 1);
+        assert!(read_state(|s| s.pending_refund_attempt(id).is_some()));
+
+        assert!(exact_pending_refund_block(&attempt, &exact));
+        attempt.expected_block_index = Some(7);
+        mutate_state(|s| assert!(s.update_pending_refund_attempt(attempt.clone())));
+        assert_eq!(finish_verified_pending_refund(&refund, &attempt).unwrap(), 100);
+        assert!(read_state(|s| s.pending_refunds_for(&principal(1)).is_empty()));
+        assert!(read_state(|s| s.pending_refund_attempt(id).is_none()));
         crate::state::replace_state(crate::state::StabilityPoolState::default());
     }
 }

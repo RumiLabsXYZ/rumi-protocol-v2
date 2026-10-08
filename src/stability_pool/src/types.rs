@@ -587,6 +587,39 @@ pub struct PendingRefund {
     pub created_at: u64,
 }
 
+/// Exact ICRC-1 payout identity retained while a pending refund transfer is
+/// unresolved. This state is separate from `PendingRefund` so the existing
+/// public query record remains wire-compatible.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRefundPayoutAttempt {
+    pub refund_id: u64,
+    pub token_ledger: Principal,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    /// Net amount sent to `to`; `fee` is charged separately by ICRC-1.
+    pub amount: u64,
+    pub fee: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    /// First global block index that could contain this transfer.
+    pub history_start_index: u64,
+    /// Set and persisted immediately before dispatching this tuple. A tuple
+    /// that was never dispatched needs no history reconciliation; once set,
+    /// every retry must refresh ICRC-3 history before creating a new tuple.
+    #[serde(default)]
+    pub dispatch_started: bool,
+    /// Cursor and pinned tip for an upgrade-safe, bounded ICRC-3 scan.
+    #[serde(default)]
+    pub history_next_index: Option<u64>,
+    #[serde(default)]
+    pub history_tip: Option<u64>,
+    /// A returned block index still requires exact ICRC-3 verification.
+    #[serde(default)]
+    pub expected_block_index: Option<u64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
 /// A durable, batched forward of interest that could not be allocated because
 /// no icUSD depositor was eligible for its source collateral.  The transfer
 /// timestamp and memo are persisted before the first ledger call so a retry

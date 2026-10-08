@@ -176,6 +176,15 @@ pub struct StabilityPoolState {
     pub pending_refunds: Option<BTreeMap<u64, PendingRefund>>,
     #[serde(default)]
     pub next_pending_refund_id: Option<u64>,
+    /// Durable exact ledger transfer tuples for refund claims that have not
+    /// yet been reconciled to an ICRC-3 receipt.
+    #[serde(default)]
+    pub pending_refund_attempts: Option<BTreeMap<u64, PendingRefundPayoutAttempt>>,
+    /// Refund rows created before any payout dispatch. Only these rows may
+    /// create their first exact transfer attempt; legacy attemptless rows are
+    /// held for evidence-based reconciliation.
+    #[serde(default)]
+    pub pending_refund_attempt_initialization: Option<BTreeSet<u64>>,
     /// Monotonic ICRC-2 `created_at_time` allocator for deposit pulls.
     #[serde(default)]
     pub last_deposit_transfer_created_at: Option<u64>,
@@ -231,6 +240,8 @@ impl Default for StabilityPoolState {
             next_event_id: Some(0),
             pending_refunds: Some(BTreeMap::new()),
             next_pending_refund_id: Some(0),
+            pending_refund_attempts: Some(BTreeMap::new()),
+            pending_refund_attempt_initialization: Some(BTreeSet::new()),
             last_deposit_transfer_created_at: None,
             processed_interest_mint_blocks: Some(BTreeSet::new()),
             processed_interest_mint_block_high_watermark: None,
@@ -1862,12 +1873,14 @@ impl StabilityPoolState {
                 created_at: now,
             },
         );
+        self.pending_refund_attempt_initialization
+            .get_or_insert_with(BTreeSet::new)
+            .insert(id);
         id
     }
 
-    /// Remove and return a pending refund. Removal happens BEFORE the payout
-    /// transfer so two concurrent claims cannot both pay out; the caller
-    /// re-inserts via `put_pending_refund` if the transfer fails.
+    /// Legacy helper retained for tests/migrations. Production payout claims
+    /// must keep the obligation in `pending_refunds` until exact ICRC-3 proof.
     pub fn take_pending_refund(&mut self, id: u64) -> Option<PendingRefund> {
         self.pending_refunds.as_mut().and_then(|m| m.remove(&id))
     }
@@ -1876,6 +1889,72 @@ impl StabilityPoolState {
         self.pending_refunds
             .get_or_insert_with(BTreeMap::new)
             .insert(refund.id, refund);
+    }
+
+    pub fn pending_refund_attempt(&self, id: u64) -> Option<PendingRefundPayoutAttempt> {
+        self.pending_refund_attempts
+            .as_ref()
+            .and_then(|attempts| attempts.get(&id).cloned())
+    }
+
+    pub fn put_pending_refund_attempt(&mut self, attempt: PendingRefundPayoutAttempt) {
+        self.pending_refund_attempts
+            .get_or_insert_with(BTreeMap::new)
+            .insert(attempt.refund_id, attempt.clone());
+        self.pending_refund_attempt_initialization
+            .get_or_insert_with(BTreeSet::new)
+            .remove(&attempt.refund_id);
+    }
+
+    pub fn pending_refund_attempt_initializable(&self, id: u64) -> bool {
+        self.pending_refund_attempt_initialization
+            .as_ref()
+            .is_some_and(|ids| ids.contains(&id))
+    }
+
+    pub fn update_pending_refund_attempt(
+        &mut self,
+        attempt: PendingRefundPayoutAttempt,
+    ) -> bool {
+        let Some(current) = self
+            .pending_refund_attempts
+            .as_mut()
+            .and_then(|attempts| attempts.get_mut(&attempt.refund_id))
+        else {
+            return false;
+        };
+        *current = attempt;
+        true
+    }
+
+    /// Discharge a refund only when the exact persisted transfer attempt is
+    /// still present and its ledger receipt has been verified by the caller.
+    pub fn finalize_pending_refund_payout(
+        &mut self,
+        refund_id: u64,
+        verified_attempt: &PendingRefundPayoutAttempt,
+    ) -> bool {
+        if verified_attempt.refund_id != refund_id
+            || self.pending_refund_attempt(refund_id).as_ref() != Some(verified_attempt)
+            || self
+                .pending_refunds
+                .as_ref()
+                .is_none_or(|refunds| !refunds.contains_key(&refund_id))
+        {
+            return false;
+        }
+        self.pending_refunds
+            .as_mut()
+            .expect("checked refund map above")
+            .remove(&refund_id);
+        self.pending_refund_attempts
+            .as_mut()
+            .expect("verified attempt map above")
+            .remove(&refund_id);
+        self.pending_refund_attempt_initialization
+            .get_or_insert_with(BTreeSet::new)
+            .remove(&refund_id);
+        true
     }
 
     pub fn pending_refunds_for(&self, user: &Principal) -> Vec<PendingRefund> {
@@ -3314,6 +3393,8 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             next_event_id: v1.next_event_id,
             pending_refunds: Some(BTreeMap::new()),
             next_pending_refund_id: Some(0),
+            pending_refund_attempts: Some(BTreeMap::new()),
+            pending_refund_attempt_initialization: Some(BTreeSet::new()),
             last_deposit_transfer_created_at: None,
             processed_interest_mint_blocks: Some(BTreeSet::new()),
             processed_interest_mint_block_high_watermark: None,
@@ -4824,11 +4905,18 @@ mod tests {
     }
 
     #[test]
-    fn chain_absorb_auto_fields_decode_disabled_when_missing() {
+    fn prior_pending_refund_schema_decodes_rows_without_attempt_identity() {
         let mut current = StabilityPoolState::default();
         current
             .register_chain_collateral(1030, "CFX".to_string(), 18)
             .unwrap();
+        let legacy_refund_id = current.record_pending_refund(
+            user_a(),
+            icusd_ledger(),
+            1_000_000,
+            "pre-attempt-journal pending refund".to_string(),
+            100,
+        );
 
         #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
         struct PreInc9State {
@@ -4897,6 +4985,12 @@ mod tests {
             DEFAULT_CHAIN_ABSORB_AUTO_MAX_SCAN_PER_CHAIN
         );
         assert!(decoded.chain_absorb_auto_last_tick().is_none());
+        assert_eq!(decoded.pending_refunds_for(&user_a()).len(), 1);
+        assert!(decoded.pending_refund_attempt(legacy_refund_id).is_none());
+        assert!(
+            !decoded.pending_refund_attempt_initializable(legacy_refund_id),
+            "previous schema rows lack the proof that first dispatch never occurred",
+        );
     }
 
     #[test]
@@ -6348,6 +6442,79 @@ mod tests {
     }
 
     #[test]
+    fn pending_refund_liability_is_removed_only_with_the_current_verified_attempt() {
+        let mut state = test_state();
+        let id = state.record_pending_refund(
+            user_a(),
+            icusd_ledger(),
+            1_000_000,
+            "ambiguous transfer".to_string(),
+            100,
+        );
+        assert!(state.pending_refund_attempt_initializable(id));
+        let attempt = PendingRefundPayoutAttempt {
+            refund_id: id,
+            token_ledger: icusd_ledger(),
+            from: icrc_ledger_types::icrc1::account::Account {
+                owner: Principal::from_slice(&[99]),
+                subaccount: None,
+            },
+            to: icrc_ledger_types::icrc1::account::Account {
+                owner: user_a(),
+                subaccount: None,
+            },
+            amount: 900_000,
+            fee: 100_000,
+            memo: b"RSPRFND:attempt".to_vec(),
+            created_at_time_ns: 200,
+            history_start_index: 5,
+            dispatch_started: true,
+            history_next_index: Some(5),
+            history_tip: Some(6),
+            expected_block_index: Some(5),
+            last_error: None,
+        };
+        state.put_pending_refund_attempt(attempt.clone());
+        assert!(!state.pending_refund_attempt_initializable(id));
+        let stable_bytes = Encode!(&state).expect("encode pending refund attempt");
+        state = Decode!(&stable_bytes, StabilityPoolState)
+            .expect("attempt journal survives stable-state decode");
+        assert_eq!(state.pending_refund_attempt(id), Some(attempt.clone()));
+        assert!(!state.pending_refund_attempt_initializable(id));
+        assert_eq!(state.pending_refunds_for(&user_a()).len(), 1);
+
+        let mut mismatched = attempt.clone();
+        mismatched.fee += 1;
+        assert!(
+            !state.finalize_pending_refund_payout(id, &mismatched),
+            "a receipt for a different tuple cannot discharge the row",
+        );
+        assert_eq!(state.pending_refunds_for(&user_a()).len(), 1);
+        assert!(state.finalize_pending_refund_payout(id, &attempt));
+        assert!(state.pending_refunds_for(&user_a()).is_empty());
+        assert!(state.pending_refund_attempt(id).is_none());
+    }
+
+    #[test]
+    fn legacy_attemptless_refund_is_not_marked_safe_for_first_dispatch() {
+        let mut state = test_state();
+        let id = state.record_pending_refund(
+            user_a(),
+            icusd_ledger(),
+            1_000_000,
+            "legacy ambiguous refund".to_string(),
+            100,
+        );
+        state.pending_refund_attempt_initialization = None;
+        let stable_bytes = Encode!(&state).expect("encode prior pending-refund state");
+        let restored = Decode!(&stable_bytes, StabilityPoolState)
+            .expect("decode prior pending-refund state");
+        assert!(restored.pending_refund_attempt(id).is_none());
+        assert!(!restored.pending_refund_attempt_initializable(id));
+        assert_eq!(restored.pending_refunds_for(&user_a()).len(), 1);
+    }
+
+    #[test]
     fn ic_s_001_state_v1_snapshot_decodes_with_empty_pending_refunds() {
         // Pre-IC-S-001 snapshot bytes (no pending_refunds / next_pending_refund_id)
         // must decode without losing positions; pending refunds start empty.
@@ -6392,6 +6559,7 @@ mod tests {
             "pending refunds must start empty after a v1 upgrade",
         );
         assert_eq!(decoded.next_pending_refund_id.unwrap_or(0), 0);
+        assert!(decoded.pending_refund_attempts.unwrap_or_default().is_empty());
         assert!(decoded.unallocated_interest_mint_index.unwrap_or_default().is_empty());
     }
 
