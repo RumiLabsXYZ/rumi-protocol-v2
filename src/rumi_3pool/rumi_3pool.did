@@ -64,6 +64,7 @@ type ThreePoolError = variant {
   BurnFailed : record { token : text; reason : text };
   PoolLocked;
   ClaimNotFound;
+  PendingClaimCapacityReached;
 };
 
 type ThreePoolPendingClaim = record {
