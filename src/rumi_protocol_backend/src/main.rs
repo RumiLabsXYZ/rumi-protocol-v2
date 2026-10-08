@@ -10678,74 +10678,13 @@ async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
         ProtocolError::GenericError(format!("No active claim for vault #{}", vault_id))
     })?;
 
-    let proof_required = read_state(|s| s.bot_confirm_proof_required);
-    if proof_required && claim.collateral_return_proof.is_none() {
+    if claim.collateral_return_proof.is_none() {
         return Err(ProtocolError::GenericError(
-            "Strict cancellation requires a verified collateral-return proof".into(),
+            format!(
+                "Cancellation for vault #{} requires a verified collateral-return proof bound to this claim generation",
+                vault_id
+            ),
         ));
-    }
-
-    if !proof_required {
-    // Legacy compatibility path: verify collateral return by balance until the
-    // operator enables the proof-required cutover.
-    let backend_id = ic_cdk::id();
-    let balance_result: Result<(candid::Nat,), _> = ic_cdk::call(
-        claim.collateral_type,
-        "icrc1_balance_of",
-        (icrc_ledger_types::icrc1::account::Account {
-            owner: backend_id,
-            subaccount: None,
-        },),
-    )
-    .await;
-
-    // Wave-12 BOT-001b: gate the explicit cancel on the protocol's collateral
-    // balance having returned to (>=) `claim.collateral_amount - ledger_fee`.
-    // Mirrors the Wave-11 BOT-001 auto-cancel gate in `lib.rs::check_vaults`.
-    // Unlike the auto-cancel (which skips and emits a reconciliation event so
-    // operators can intervene), the explicit cancel rejects: the caller is
-    // the bot itself, so it must retry its collateral transfer and submit the
-    // exact return proof before cancelling the claim.
-    let observed = match balance_result {
-        Ok((bal,)) => bal.0.to_u64().unwrap_or(0),
-        Err((code, msg)) => {
-            log!(
-                INFO,
-                "[BOT-001b] balance query failed for vault #{}: {:?} {}",
-                vault_id,
-                code,
-                msg
-            );
-            return Err(ProtocolError::TemporarilyUnavailable(format!(
-                "Could not verify collateral return for vault #{}: {:?} {}. Retry once the ledger is available.",
-                vault_id, code, msg
-            )));
-        }
-    };
-
-    let required = read_state(|s| {
-        let fee = s
-            .get_collateral_config(&claim.collateral_type)
-            .map(|c| c.ledger_fee)
-            .unwrap_or(0);
-        claim.collateral_amount.saturating_sub(fee)
-    });
-
-    if observed < required {
-        log!(INFO, "[BOT-001b] cancel rejected for vault #{}: balance {} < required {} (collateral_amount {})",
-            vault_id, observed, required, claim.collateral_amount);
-        return Err(ProtocolError::GenericError(format!(
-            "Cannot cancel claim for vault #{}: protocol collateral balance {} < required {} (bot must return collateral first; after reconciling the exact return block, submit bot_record_collateral_return_proof and retry bot_cancel_liquidation; proofless legacy admin recovery is disabled)",
-            vault_id, observed, required
-        )));
-    }
-    log!(
-        INFO,
-        "[BOT-001b] balance check passed for vault #{}: balance {} >= required {}",
-        vault_id,
-        observed,
-        required
-    );
     }
 
     mutate_state(|s| {
@@ -10754,6 +10693,11 @@ async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
         };
         if active.generation != claim.generation {
             return Err("Active bot claim changed before cancel".to_string());
+        }
+        if active.collateral_return_proof != claim.collateral_return_proof
+            || active.collateral_return_proof.is_none()
+        {
+            return Err("Verified collateral-return proof changed before cancel".to_string());
         }
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             vault.bot_processing = false;

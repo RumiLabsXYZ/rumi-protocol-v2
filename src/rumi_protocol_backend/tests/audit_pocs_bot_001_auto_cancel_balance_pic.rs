@@ -528,6 +528,26 @@ fn bot_claim_call(
     }
 }
 
+fn bot_cancel_liquidation_call(
+    fixture: &Fixture,
+    bot: Principal,
+    vault_id: u64,
+) -> Result<(), ProtocolError> {
+    let result = fixture
+        .pic
+        .update_call(
+            fixture.protocol_id,
+            bot,
+            "bot_cancel_liquidation",
+            encode_args((vault_id,)).unwrap(),
+        )
+        .expect("bot_cancel_liquidation call failed");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode bot_cancel_liquidation"),
+        WasmResult::Reject(message) => panic!("bot_cancel_liquidation rejected: {message}"),
+    }
+}
+
 // ─── Fixture ───
 
 struct Fixture {
@@ -799,6 +819,52 @@ fn seed_bot_claim(fixture: &Fixture) -> (u64, BotLiquidationResult) {
     (pre_claim_budget, claim)
 }
 
+/// Open a second vault whose collateral remains in the backend's shared
+/// default account. Its balance is intentionally unrelated to the first
+/// vault's bot claim, but large enough to satisfy the old pooled-balance
+/// cancellation check.
+fn open_second_vault(fixture: &Fixture) -> u64 {
+    icrc2_approve_call(
+        &fixture.pic,
+        fixture.icp_ledger,
+        fixture.test_user,
+        fixture.protocol_id,
+        50_000_000_000u128,
+    );
+    let opened = fixture
+        .pic
+        .update_call(
+            fixture.protocol_id,
+            fixture.test_user,
+            "open_vault",
+            encode_args((5_000_000_000u64, None::<Principal>)).unwrap(),
+        )
+        .expect("second open_vault failed");
+    let vault_id = match opened {
+        WasmResult::Reply(bytes) => decode_one::<Result<OpenVaultSuccess, ProtocolError>>(&bytes)
+            .expect("decode second open_vault")
+            .expect("second open_vault returned error")
+            .vault_id,
+        WasmResult::Reject(message) => panic!("second open_vault rejected: {message}"),
+    };
+    let borrowed = fixture
+        .pic
+        .update_call(
+            fixture.protocol_id,
+            fixture.test_user,
+            "borrow_from_vault",
+            encode_args((VaultArg { vault_id, amount: 10_000_000_000 },)).unwrap(),
+        )
+        .expect("second borrow_from_vault failed");
+    match borrowed {
+        WasmResult::Reply(bytes) => decode_one::<Result<SuccessWithFee, ProtocolError>>(&bytes)
+            .expect("decode second borrow")
+            .expect("second borrow_from_vault returned error"),
+        WasmResult::Reject(message) => panic!("second borrow rejected: {message}"),
+    };
+    vault_id
+}
+
 fn call_proof_update<T: CandidType>(
     fixture: &Fixture,
     method: &str,
@@ -927,19 +993,32 @@ fn bot_001_pic_auto_cancel_proceeds_when_balance_sufficient() {
         "bot_claim_liquidation must deduct from budget"
     );
 
-    // Bot returns the collateral to the protocol's main account, paying
-    // the ICP transfer fee. The BOT-001 gate compares against
-    // `claim.collateral_amount - ledger_fee`, so transferring exactly
-    // that amount is the threshold case where the gate must NOT fire.
+    // Return claim A's exact amount with its generation-bound memo.
     let icp_fee: u64 = 10_000;
     let return_amount = claim.collateral_amount.saturating_sub(icp_fee);
-    icrc1_transfer_call(
+    let return_time = current_ledger_time_ns(&f.pic);
+    let return_block = icrc1_transfer_tuple_call(
         &f.pic,
         f.icp_ledger,
         f.developer,
         f.protocol_id,
-        return_amount as u128,
-    );
+        return_amount,
+        claim.collateral_return_memo.clone(),
+        return_time,
+    )
+    .expect("exact collateral return should commit");
+    call_proof_update(
+        &f,
+        "bot_record_collateral_return_proof",
+        BotCollateralReturnProofArg {
+            vault_id: f.vault_id,
+            claim_generation: claim.claim_generation,
+            block_index: return_block,
+            amount: return_amount,
+            created_at_time: return_time,
+        },
+    )
+    .expect("exact return proof should be recorded");
 
     // Sanity: the protocol's main account must now hold AT LEAST the
     // required collateral so the BOT-001 gate has something to detect on
@@ -971,6 +1050,122 @@ fn bot_001_pic_auto_cancel_proceeds_when_balance_sufficient() {
         "no BotClaimReconciliationNeeded events expected on the happy path; got {:?}",
         events
     );
+}
+
+/// CL-02 PIC regression: a second vault's collateral can make the pooled
+/// default-account balance exceed claim A's return threshold, but neither
+/// explicit cancel nor timeout may release A without A's exact proof. The
+/// exact generation-bound proof then permits explicit cancel, and the next
+/// claim's exact proof permits timeout cleanup.
+#[test]
+fn cl_02_pooled_second_vault_balance_cannot_release_claim_without_exact_proof() {
+    let f = setup_fixture();
+    let second_vault_id = open_second_vault(&f);
+    assert_ne!(second_vault_id, f.vault_id);
+
+    let (budget_before_a, claim_a) = seed_bot_claim(&f);
+    let budget_with_a = get_bot_stats(&f.pic, f.protocol_id).budget_remaining_e8s;
+    let required_a = claim_a.collateral_amount.saturating_sub(10_000);
+    let pooled_balance = icrc1_balance_of_call(&f.pic, f.icp_ledger, f.protocol_id);
+    assert!(
+        pooled_balance >= required_a,
+        "second vault collateral should make pooled balance {} cover claim A's threshold {}",
+        pooled_balance,
+        required_a
+    );
+
+    let no_proof = bot_cancel_liquidation_call(&f, f.developer, f.vault_id)
+        .expect_err("pooled second-vault collateral must not cancel claim A");
+    match no_proof {
+        ProtocolError::GenericError(message) => assert!(
+            message.contains("verified collateral-return proof"),
+            "expected exact-proof error, got: {message}"
+        ),
+        other => panic!("expected proof rejection, got {other:?}"),
+    }
+    assert_eq!(
+        get_bot_stats(&f.pic, f.protocol_id).budget_remaining_e8s,
+        budget_with_a,
+        "explicit rejection must retain claim A's budget hold"
+    );
+
+    fast_forward_past_bot_timeout(&f);
+    assert_eq!(
+        get_bot_stats(&f.pic, f.protocol_id).budget_remaining_e8s,
+        budget_with_a,
+        "pooled second-vault collateral must not auto-cancel claim A"
+    );
+    assert!(
+        !get_bot_001_events(&f.pic, f.protocol_id).is_empty(),
+        "missing exact return proof should raise reconciliation"
+    );
+
+    let return_time = current_ledger_time_ns(&f.pic);
+    let returned_a = claim_a.collateral_amount.saturating_sub(10_000);
+    let return_block_a = icrc1_transfer_tuple_call(
+        &f.pic,
+        f.icp_ledger,
+        f.developer,
+        f.protocol_id,
+        returned_a,
+        claim_a.collateral_return_memo.clone(),
+        return_time,
+    )
+    .expect("claim A collateral return should commit");
+    call_proof_update(
+        &f,
+        "bot_record_collateral_return_proof",
+        BotCollateralReturnProofArg {
+            vault_id: f.vault_id,
+            claim_generation: claim_a.claim_generation,
+            block_index: return_block_a,
+            amount: returned_a,
+            created_at_time: return_time,
+        },
+    )
+    .expect("claim A exact return proof should be accepted");
+    bot_cancel_liquidation_call(&f, f.developer, f.vault_id)
+        .expect("claim A exact proof should permit explicit cancel");
+    assert_eq!(
+        get_bot_stats(&f.pic, f.protocol_id).budget_remaining_e8s,
+        budget_before_a,
+        "claim A exact return proof should restore its budget"
+    );
+
+    let claim_a2 = bot_claim_call(&f, f.developer, f.vault_id)
+        .expect("a new claim should be available after exact-proof cancel");
+    let budget_with_a2 = get_bot_stats(&f.pic, f.protocol_id).budget_remaining_e8s;
+    let return_time_a2 = current_ledger_time_ns(&f.pic);
+    let returned_a2 = claim_a2.collateral_amount.saturating_sub(10_000);
+    let return_block_a2 = icrc1_transfer_tuple_call(
+        &f.pic,
+        f.icp_ledger,
+        f.developer,
+        f.protocol_id,
+        returned_a2,
+        claim_a2.collateral_return_memo.clone(),
+        return_time_a2,
+    )
+    .expect("second claim's collateral return should commit");
+    call_proof_update(
+        &f,
+        "bot_record_collateral_return_proof",
+        BotCollateralReturnProofArg {
+            vault_id: f.vault_id,
+            claim_generation: claim_a2.claim_generation,
+            block_index: return_block_a2,
+            amount: returned_a2,
+            created_at_time: return_time_a2,
+        },
+    )
+    .expect("second claim's exact return proof should be accepted");
+    fast_forward_past_bot_timeout(&f);
+    assert_eq!(
+        get_bot_stats(&f.pic, f.protocol_id).budget_remaining_e8s,
+        budget_before_a,
+        "timeout may restore claim A's budget after its exact return proof"
+    );
+    assert!(budget_with_a2 < budget_before_a);
 }
 
 /// Exercise both claim-bound proof paths against the standard ICRC-1 ledger
