@@ -81,11 +81,37 @@ type ApproveError = variant {
   GenericError : record { error_code : nat; message : text };
 };
 
+type ICRC3Value = variant {
+  Blob : blob;
+  Text : text;
+  Nat : nat;
+  Int : int;
+  Array : vec ICRC3Value;
+  Map : vec record { text; ICRC3Value };
+};
+type GetBlocksArgs = record { start : nat; length : nat };
+type BlockWithId = record { id : nat; block : ICRC3Value };
+type GetBlocksResult = record {
+  log_length : nat;
+  blocks : vec BlockWithId;
+  archived_blocks : vec ArchivedBlocks;
+};
+type ArchivedBlocks = record {
+  args : vec GetBlocksArgs;
+  callback : func (vec GetBlocksArgs) -> (GetBlocksResult) query;
+};
+type GetArchivesArgs = record { from : opt principal };
+type ICRC3ArchiveInfo = record { canister_id : principal; start : nat; end : nat };
+
 service : () -> {
   // ICRC-1
   icrc1_balance_of : (Account) -> (nat) query;
   icrc1_fee : () -> (nat) query;
   icrc1_transfer : (TransferArg) -> (variant { Ok : nat; Err : TransferError });
+
+  // ICRC-3 exact block history used by payout-recovery integration tests.
+  icrc3_get_blocks : (vec GetBlocksArgs) -> (GetBlocksResult) query;
+  icrc3_get_archives : (GetArchivesArgs) -> (vec ICRC3ArchiveInfo) query;
 
   // ICRC-2
   icrc2_approve : (ApproveArgs) -> (variant { Ok : nat; Err : ApproveError });

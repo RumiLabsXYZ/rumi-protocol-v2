@@ -733,6 +733,11 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
   >,
+  'reconcile_aged_payout' : ActorMethod<
+    [bigint, bigint],
+    { 'Ok' : null } |
+      { 'Err' : ThreePoolError }
+  >,
   'remove_authorized_burn_caller' : ActorMethod<
     [Principal],
     { 'Ok' : null } |
