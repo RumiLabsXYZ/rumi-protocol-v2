@@ -50,3 +50,7 @@ Reviewer A's two advisory limitations are deferred: the singleton frontend store
 ## Independent review round 5
 
 Reviewer A passed the accounting and query-error paths. Reviewer B found the shared season loader discarded a successful policy when an unrelated status/config query failed, allowing consumers to substitute legacy rules. The final runtime flow now preserves settled results independently, uses a shared unknown policy for unset or failed policy reads, and reserves legacy fallback for confirmed missing-method compatibility. The points page, docs, CTA, banner, liquidity UI and live-position input use that same unknown default. Three store regressions bring the final focused frontend suite to 53 passing tests across five files; production build/auth assets pass. Backend, generated declarations, and upgrade evidence remain unchanged.
+
+## Independent review round 6
+
+Reviewer A passed the completed runtime flow. Reviewer B found the global SeasonBar still claimed current earning while the epoch driver was disabled. Its live-phase driver-off branch now says processing is paused and existing earned points are preserved, before either enrolled or disconnected earning claims. The public status is sufficient for that generic statement; no private security flag is exposed. Existing 53 tests, production build and auth assets remain passing.

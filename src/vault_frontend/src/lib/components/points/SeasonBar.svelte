@@ -65,6 +65,9 @@
     {:else if phase === 'ended'}
       <span class="sb-msg">Season 1 has ended — allocations are being finalized</span>
       <span class="sb-cta">View →</span>
+    {:else if phase === 'live' && $seasonStore.status && !$seasonStore.status.driver_enabled}
+      <span class="sb-msg">Points processing is paused. Existing earned points are preserved.</span>
+      <span class="sb-cta">View →</span>
     {:else if body === 'enrolled' && pts !== null}
       <span class="sb-msg">You're earning — <strong class="sb-pts">{pts}</strong> points so far</span>
       <span class="sb-cta">View →</span>
