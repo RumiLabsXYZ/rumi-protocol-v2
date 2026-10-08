@@ -3,6 +3,7 @@ use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::approve::ApproveArgs;
 use pocket_ic::{PocketIcBuilder, WasmResult};
+use sha2::{Digest, Sha256};
 use stability_pool::types::*;
 
 // ─── Candid types for ICRC-1 ledger initialization ───
@@ -89,6 +90,10 @@ struct TestEnv {
 }
 
 fn setup_test_env() -> TestEnv {
+    setup_test_env_with_sp_wasm(stability_pool_wasm())
+}
+
+fn setup_test_env_with_sp_wasm(sp_wasm: Vec<u8>) -> TestEnv {
     let pic = PocketIcBuilder::new()
         .with_application_subnet()
         .build();
@@ -210,7 +215,7 @@ fn setup_test_env() -> TestEnv {
 
     let sp_id = pic.create_canister();
     pic.add_cycles(sp_id, 2_000_000_000_000);
-    pic.install_canister(sp_id, stability_pool_wasm(), encode_one(sp_init).unwrap(), None);
+    pic.install_canister(sp_id, sp_wasm, encode_one(sp_init).unwrap(), None);
 
     // ── Approve all ledgers for both 3pool and stability pool ──
     for ledger_id in &ledger_ids {
@@ -780,6 +785,66 @@ fn test_interest_v2_duplicate_receipt_is_idempotent_across_upgrade() {
         WasmResult::Reject(message) => panic!("event count query rejected: {message}"),
     };
     assert_eq!(event_count_after_upgrade, event_count_after);
+}
+
+/// The immediate parent predates `pending_three_usd_absorbs`, so it cannot
+/// produce a pending 3USD absorb. This checks populated predecessor deposits
+/// and post-upgrade receipt functionality without fabricating that journal.
+#[test]
+#[ignore = "requires the Stability Pool Wasm built from immediate parent 9d5f359e"]
+fn p08_upgrade_preserves_parent_populated_deposit_state() {
+    let parent_path = std::env::var("RUMI_P08_PARENT_STABILITY_POOL_WASM")
+        .expect("set RUMI_P08_PARENT_STABILITY_POOL_WASM to the 9d5f359e SP Wasm");
+    let parent_wasm = std::fs::read(parent_path).expect("read parent Stability Pool Wasm");
+    let parent_sha256 = format!("{:x}", Sha256::digest(&parent_wasm));
+    assert_eq!(parent_sha256, "efad428d54d7989be2577940b91b85b533cd99c6a27f1bcb3fa22bc39712c482",
+        "unexpected parent Stability Pool artifact");
+
+    let env = setup_test_env_with_sp_wasm(parent_wasm);
+    let deposit_amount = 100_00000000u64;
+    let result = env.pic.update_call(env.sp_id, env.test_user, "deposit",
+        encode_args((env.icusd_ledger, deposit_amount)).unwrap())
+        .expect("parent deposit call");
+    match result {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
+            .unwrap().expect("parent deposit succeeds"),
+        WasmResult::Reject(message) => panic!("parent deposit rejected: {message}"),
+    }
+
+    let before = get_user_position(&env.pic, env.sp_id, env.test_user)
+        .expect("parent position exists");
+    let before_status = get_pool_status(&env.pic, env.sp_id);
+    assert_eq!(before.total_interest_earned_e8s, 0);
+    assert_eq!(before_status.total_deposits_e8s, deposit_amount);
+
+    let upgrade_args = StabilityPoolInitArgs {
+        protocol_canister_id: env.protocol_id,
+        authorized_admins: vec![env.admin],
+    };
+    env.pic.upgrade_canister(env.sp_id, stability_pool_wasm(),
+        encode_one(upgrade_args).unwrap(), None)
+        .expect("upgrade parent Stability Pool to P08");
+
+    let after = get_user_position(&env.pic, env.sp_id, env.test_user)
+        .expect("position survives upgrade");
+    assert_eq!(after.stablecoin_balances, before.stablecoin_balances);
+    assert_eq!(after.total_interest_earned_e8s, before.total_interest_earned_e8s);
+    assert_eq!(get_pool_status(&env.pic, env.sp_id).total_deposits_e8s, deposit_amount);
+
+    let receipt = env.pic.update_call(env.sp_id, env.protocol_id, "receive_interest_revenue_v2",
+        encode_args((env.icusd_ledger, 10_00000000u64, None::<Principal>, 42u64)).unwrap())
+        .expect("post-upgrade receipt call");
+    match receipt {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
+            .unwrap().expect("P08 receipt accepted after upgrade"),
+        WasmResult::Reject(message) => panic!("post-upgrade receipt rejected: {message}"),
+    }
+    let after_receipt = get_user_position(&env.pic, env.sp_id, env.test_user)
+        .expect("position remains after receipt");
+    assert_eq!(*after_receipt.stablecoin_balances.iter()
+        .find(|(ledger, _)| **ledger == env.icusd_ledger).unwrap().1,
+        deposit_amount + 10_00000000);
+    assert_eq!(after_receipt.total_interest_earned_e8s, 10_00000000);
 }
 
 /// Reconciliation observability: after a clean deposit, the pool's tracked
