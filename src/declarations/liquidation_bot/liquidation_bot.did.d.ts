@@ -13,16 +13,21 @@ export interface BotClaimJournal {
   'status' : BotClaimJournalStatus,
   'collateral_price_e8s' : bigint,
   'payment_memo' : Uint8Array | number[],
+  'collateral_outbound_fee_e8s' : [] | [bigint],
   'collateral_return' : [] | [BotReturnTransferJournal],
   'collateral_amount_e8s' : bigint,
   'claim_generation' : bigint,
   'vault_id' : bigint,
+  'collateral_received_amount_e8s' : [] | [bigint],
   'collateral_return_memo' : Uint8Array | number[],
   'debt_covered_e8s' : bigint,
+  'failed_return_attempts' : Array<BotReturnTransferJournal>,
 }
 export type BotClaimJournalStatus = { 'ReturnPending' : null } |
   { 'PaymentShortfall' : null } |
-  { 'SwapMayHaveStarted' : null };
+  { 'SwapMayHaveStarted' : null } |
+  { 'ReturnFeeQueryPending' : null } |
+  { 'ReturnFeeRefreshExhausted' : null };
 export interface BotConfig {
   'ckusdt_ledger' : [] | [Principal],
   'icp_fee_e8s' : [] | [bigint],
@@ -53,6 +58,7 @@ export interface BotPaymentJournal {
   'claim_generation' : bigint,
   'vault_id' : bigint,
   'gross_amount_e6' : bigint,
+  'collateral_received_amount_e8s' : [] | [bigint],
   'held_surplus_e6' : bigint,
   'ledger_principal' : Principal,
   'amount_e6' : bigint,
@@ -72,13 +78,15 @@ export interface BotReturnTransferJournal {
   'memo' : Uint8Array | number[],
   'fee_e8s' : bigint,
   'amount_e8s' : bigint,
+  'transfer_fee_e8s' : [] | [bigint],
   'ledger_principal' : Principal,
   'created_at_time' : bigint,
 }
 export type BotReturnTransferStatus = { 'ReceiptObserved' : null } |
   { 'NoEffect' : null } |
   { 'Ambiguous' : null } |
-  { 'Prepared' : null };
+  { 'Prepared' : null } |
+  { 'FeeMismatchAmbiguous' : null };
 export interface BotStats {
   'total_debt_covered_e8s' : bigint,
   'total_ckusdc_surplus_held_e6' : bigint,

@@ -7,6 +7,9 @@ use crate::swap;
 
 const CONFIRM_ATTEMPTS: u8 = 5;
 const CANCEL_ATTEMPTS: u8 = 3;
+/// Number of fee-refresh tuples permitted after the original first dispatch.
+/// Every typed first-dispatch BadFee is retained before a refresh.
+const MAX_AUTO_RETURN_FEE_REFRESHES: usize = 3;
 
 /// Max number of times the bot will re-attempt `bot_claim_liquidation` for a
 /// single vault before giving up and letting the cascade escalate to the SP.
@@ -332,6 +335,12 @@ pub(crate) fn decide_swap_failure_outcome(
 pub struct BotLiquidationResult {
     pub vault_id: u64,
     pub collateral_amount: u64,
+    /// Net ICP received by the bot after the backend-paid outbound fee.
+    /// Optional only for rolling Candid compatibility; absence is held fail-closed.
+    pub collateral_received_amount: Option<u64>,
+    /// Exact outbound ledger fee paid by the backend.
+    /// Optional only for rolling Candid compatibility; absence is held fail-closed.
+    pub collateral_outbound_fee: Option<u64>,
     pub debt_covered: u64,
     pub collateral_price_e8s: u64,
     pub claim_generation: u64,
@@ -432,7 +441,15 @@ pub async fn process_pending() {
 
     // -- Phase 1: CLAIM --
     let liq_result = call_bot_claim_liquidation(&config, vault.vault_id).await;
-    let (collateral_amount, debt_covered, collateral_price, claim_generation, payment_memo, return_memo) = match liq_result {
+    let (
+        collateral_amount,
+        collateral_received_amount,
+        collateral_outbound_fee,
+        debt_covered,
+        collateral_price,
+        claim_generation,
+        payment_memo,
+    ) = match liq_result {
         Ok(r) => {
             state::mutate_state(|s| {
                 s.claim_retry_counts.remove(&vault.vault_id);
@@ -441,9 +458,12 @@ pub async fn process_pending() {
                     claim_generation: r.claim_generation,
                     debt_covered_e8s: r.debt_covered,
                     collateral_amount_e8s: r.collateral_amount,
+                    collateral_received_amount_e8s: r.collateral_received_amount,
+                    collateral_outbound_fee_e8s: r.collateral_outbound_fee,
                     collateral_price_e8s: r.collateral_price_e8s,
                     payment_memo: r.payment_memo.clone(),
                     collateral_return_memo: r.collateral_return_memo.clone(),
+                    failed_return_attempts: Vec::new(),
                     collateral_return: None,
                     status: state::BotClaimJournalStatus::SwapMayHaveStarted,
                 });
@@ -459,7 +479,15 @@ pub async fn process_pending() {
                 return;
             };
             config.ckusdc_ledger = payment_ledger;
-            (r.collateral_amount, r.debt_covered, r.collateral_price_e8s, r.claim_generation, r.payment_memo, r.collateral_return_memo)
+            (
+                r.collateral_amount,
+                r.collateral_received_amount,
+                r.collateral_outbound_fee,
+                r.debt_covered,
+                r.collateral_price_e8s,
+                r.claim_generation,
+                r.payment_memo,
+            )
         }
         Err(e) => {
             let action = next_claim_retry_action(prior_retry_count, CLAIM_RETRY_LIMIT);
@@ -511,8 +539,43 @@ pub async fn process_pending() {
         }
     };
 
+    let collateral_received_amount = match validated_net_claim(
+        collateral_amount,
+        collateral_received_amount,
+        collateral_outbound_fee,
+    ) {
+        Some(net) => net,
+        None => {
+            let error = "claim result lacks a valid gross/net/outbound-fee tuple; exact backend return accounting is required";
+            log!(
+                crate::INFO,
+                "STUCK: {} for vault #{}; claim remains active and no swap will run",
+                error,
+                vault.vault_id
+            );
+            write_record(LiquidationRecordV1 {
+                id: record_id,
+                vault_id: vault.vault_id,
+                timestamp,
+                status: LiquidationStatus::TransferFailed,
+                collateral_claimed_e8s: collateral_amount,
+                debt_to_cover_e8s: debt_covered,
+                icp_swapped_e8s: 0,
+                ckusdc_received_e6: 0,
+                ckusdc_transferred_e6: 0,
+                icp_to_treasury_e8s: 0,
+                oracle_price_e8s: collateral_price,
+                effective_price_e8s: 0,
+                slippage_bps: 0,
+                error_message: Some(error.to_string()),
+                confirm_retry_count: 0,
+            });
+            return;
+        }
+    };
+
     // -- Phase 2: SWAP ICP -> ckUSDC --
-    let mut swap_amount = calculate_swap_amount(collateral_amount, debt_covered, collateral_price);
+    let mut swap_amount = calculate_swap_amount(collateral_received_amount, debt_covered, collateral_price);
 
     // Per-claim reservation: bracket the swap with wallet balance reads so
     // we know the EXACT ckUSDC this claim earned, independent of any leftover
@@ -535,45 +598,25 @@ pub async fn process_pending() {
 
             state::mutate_state(|s| {
                 if let Some(journal) = s.pending_claims.get_mut(&vault.vault_id) {
-                    journal.status = state::BotClaimJournalStatus::ReturnPending;
+                    journal.status = state::BotClaimJournalStatus::ReturnFeeQueryPending;
                 }
             });
             state::save_config_to_stable();
 
-            // Step 1: return seized ICP to the backend.
-            let return_fee = config.icp_fee_e8s.unwrap_or(10_000);
-            let return_amount = collateral_amount.saturating_sub(return_fee);
-            let return_created_at_time = ic_cdk::api::time();
-            state::mutate_state(|s| {
-                if let Some(journal) = s.pending_claims.get_mut(&vault.vault_id) {
-                    journal.collateral_return = Some(state::BotReturnTransferJournal {
-                        ledger_principal: config.icp_ledger,
-                        backend_principal: config.backend_principal,
-                        amount_e8s: return_amount,
-                        fee_e8s: return_fee,
-                        memo: return_memo.clone(),
-                        created_at_time: return_created_at_time,
-                        receipt: None,
-                        status: state::BotReturnTransferStatus::Prepared,
-                    });
-                }
-            });
-            state::save_config_to_stable();
-            let return_result = swap::return_collateral_to_backend(
-                &config,
-                collateral_amount,
-                config.icp_ledger,
-                return_memo.clone(),
-                return_amount,
-                return_created_at_time,
-            )
-            .await;
+            // A new return gets a fresh ledger fee before its exact transfer
+            // tuple is persisted. The helper saves that tuple before dispatch.
+            let claim = state::read_state(|s| s.pending_claims.get(&vault.vault_id).cloned());
+            let return_result = match claim {
+                Some(claim) => create_and_send_return_intent(&config, &claim).await,
+                None => Err(swap::TransferAttemptError::NoEffect(
+                    "durable bot claim journal disappeared before ICP return".into(),
+                )),
+            };
 
             // Step 2: cancel the protocol-side claim, only if the return succeeded.
-            // The Wave-12 BOT-001b balance gate rejects cancel until the protocol's
-            // collateral balance is back to (>=) `claim.collateral_amount - fee`,
-            // so attempting cancel after a failed return is pointless and would
-            // just produce noisy `[BOT-001b] cancel rejected` log lines.
+            // The backend requires an exact full-gross return proof before
+            // cancellation. Do not attempt cancel after a failed or partial
+            // return, because no debt or claim state may be cleared then.
             let return_proof_result = match return_result {
                 Ok(receipt) => {
                     state::mutate_state(|s| {
@@ -594,18 +637,27 @@ pub async fn process_pending() {
                             created_at_time: receipt.created_at_time,
                         },
                     ).await
-                }
-                Err(e) => {
-                    state::mutate_state(|s| {
-                        if let Some(intent) = s.pending_claims.get_mut(&vault.vault_id)
-                            .and_then(|claim| claim.collateral_return.as_mut()) {
-                            intent.status = match &e {
-                                swap::TransferAttemptError::NoEffect(_) => state::BotReturnTransferStatus::NoEffect,
-                                swap::TransferAttemptError::Ambiguous(_) => state::BotReturnTransferStatus::Ambiguous,
-                            };
+            }
+            Err(e) => {
+                    match &e {
+                        swap::TransferAttemptError::BadFee { expected_fee } => {
+                            let refresh_scheduled = record_first_dispatch_bad_fee(vault.vault_id);
+                            log!(crate::INFO, "ICP return for vault #{} received typed first-dispatch BadFee (expected {}). The no-effect tuple was retained; fee refresh scheduled: {}", vault.vault_id, expected_fee, refresh_scheduled == Some(true));
                         }
-                    });
-                    state::save_config_to_stable();
+                        _ => {
+                            state::mutate_state(|s| {
+                                if let Some(intent) = s.pending_claims.get_mut(&vault.vault_id)
+                                    .and_then(|claim| claim.collateral_return.as_mut()) {
+                                    intent.status = match &e {
+                                        swap::TransferAttemptError::NoEffect(_) => state::BotReturnTransferStatus::NoEffect,
+                                        swap::TransferAttemptError::BadFee { .. } => unreachable!(),
+                                        swap::TransferAttemptError::Ambiguous(_) => state::BotReturnTransferStatus::Ambiguous,
+                                    };
+                                }
+                            });
+                            state::save_config_to_stable();
+                        }
+                    }
                     Err(format!("{:?}", e))
                 },
             };
@@ -692,7 +744,7 @@ pub async fn process_pending() {
     let required_gross = required_ckusdc_gross(debt_covered, ckusdc_fee);
     if reservation.to_transfer_e6 < required_gross {
         let shortfall = required_gross - reservation.to_transfer_e6;
-        let remaining_icp = collateral_amount.saturating_sub(swap_amount);
+        let remaining_icp = collateral_received_amount.saturating_sub(swap_amount);
         match choose_bounded_topup_amount(&config, remaining_icp, shortfall).await {
             Ok(Some(topup_icp)) => {
                 let before = match swap::balance_of_self_ckusdc(&config).await {
@@ -761,6 +813,7 @@ pub async fn process_pending() {
         claim_generation,
         debt_covered_e8s: debt_covered,
         collateral_amount_e8s: collateral_amount,
+        collateral_received_amount_e8s: Some(collateral_received_amount),
         collateral_price_e8s: collateral_price,
         icp_swapped_e8s: swap_amount,
         ckusdc_received_e6: ckusdc_received,
@@ -802,6 +855,10 @@ pub async fn process_pending() {
         Err(e) => {
             let (status, message) = match e {
                 swap::TransferAttemptError::NoEffect(message) => (state::BotPaymentStatus::NoEffect, message),
+                swap::TransferAttemptError::BadFee { expected_fee } => (
+                    state::BotPaymentStatus::NoEffect,
+                    format!("ledger rejected transfer fee; expected {}", expected_fee),
+                ),
                 swap::TransferAttemptError::Ambiguous(message) => (state::BotPaymentStatus::Ambiguous, message),
             };
             state::mutate_state(|s| {
@@ -909,7 +966,7 @@ pub async fn process_pending() {
     state::save_config_to_stable();
 
     // -- Phase 5: TREASURY (liquidation bonus) --
-    let icp_to_treasury = collateral_amount.saturating_sub(swap_amount);
+    let icp_to_treasury = collateral_received_amount.saturating_sub(swap_amount);
     if icp_to_treasury > 0 {
         let _ = swap::transfer_icp_to_treasury(&config, icp_to_treasury).await;
     }
@@ -1004,6 +1061,13 @@ async fn resume_pending_payment(config: &BotConfig) -> bool {
                 state::save_config_to_stable();
                 return true;
             }
+            Err(swap::TransferAttemptError::BadFee { expected_fee }) => {
+                journal.status = state::BotPaymentStatus::Ambiguous;
+                log!(crate::INFO, "STUCK: replayed ckUSDC payment for vault #{} returned BadFee (expected {}); prior submission may have committed, so exact ledger history reconciliation is required", journal.vault_id, expected_fee);
+                state::mutate_state(|s| { s.pending_payments.insert(journal.vault_id, journal.clone()); });
+                state::save_config_to_stable();
+                return true;
+            }
         }
         state::mutate_state(|s| { s.pending_payments.insert(journal.vault_id, journal.clone()); });
         state::save_config_to_stable();
@@ -1044,15 +1108,259 @@ async fn resume_pending_payment(config: &BotConfig) -> bool {
     true
 }
 
+/// Query the fee and persist a new claim-bound return tuple before its first
+/// dispatch. This is only valid before any return intent exists.
+async fn create_and_send_return_intent(
+    config: &BotConfig,
+    claim: &state::BotClaimJournal,
+) -> Result<swap::TransferReceipt, swap::TransferAttemptError> {
+    if claim.status != state::BotClaimJournalStatus::ReturnFeeQueryPending
+        || claim.collateral_return.is_some()
+        || claim.failed_return_attempts.len() > MAX_AUTO_RETURN_FEE_REFRESHES
+    {
+        return Err(swap::TransferAttemptError::NoEffect(
+            "new ICP return is not in the fee-query phase".into(),
+        ));
+    }
+
+    let (Some(net_received), Some(outbound_fee)) = (
+        claim.collateral_received_amount_e8s,
+        claim.collateral_outbound_fee_e8s,
+    ) else {
+        return Err(swap::TransferAttemptError::NoEffect(
+            "legacy claim journal lacks exact net collateral and outbound fee; return is held".into(),
+        ));
+    };
+    if net_received == 0
+        || net_received.checked_add(outbound_fee) != Some(claim.collateral_amount_e8s)
+    {
+        return Err(swap::TransferAttemptError::NoEffect(
+            "claim journal gross collateral does not equal net receipt plus exact outbound fee"
+                .into(),
+        ));
+    }
+
+    let fee_e8s = swap::fetch_ledger_fee(config.icp_ledger)
+        .await
+        .map_err(|error| {
+            swap::TransferAttemptError::NoEffect(format!(
+                "failed to query current ICP ledger fee: {error}"
+            ))
+        })?;
+    let amount_e8s = claim.collateral_amount_e8s;
+    let available_balance_e8s = swap::balance_of_self_icp(config)
+        .await
+        .map_err(swap::TransferAttemptError::NoEffect)?;
+    if !return_balance_covers(amount_e8s, fee_e8s, available_balance_e8s) {
+        let required_balance_e8s = required_return_balance(amount_e8s, fee_e8s)
+            .map(|required| required.to_string())
+            .unwrap_or_else(|| "an amount above u64::MAX".into());
+        return Err(swap::TransferAttemptError::NoEffect(format!(
+            "ICP fee float is insufficient for gross return: have {}, need {}",
+            available_balance_e8s, required_balance_e8s
+        )));
+    }
+    let created_at_time = next_return_created_at_time(
+        ic_cdk::api::time(),
+        &claim.failed_return_attempts,
+    )
+    .ok_or_else(|| {
+        swap::TransferAttemptError::NoEffect(
+            "cannot create a unique ICP return timestamp after the prior BadFee attempt".into(),
+        )
+    })?;
+    let intent = state::BotReturnTransferJournal {
+        ledger_principal: config.icp_ledger,
+        backend_principal: config.backend_principal,
+        amount_e8s,
+        fee_e8s,
+        transfer_fee_e8s: Some(fee_e8s),
+        memo: claim.collateral_return_memo.clone(),
+        created_at_time,
+        receipt: None,
+        status: state::BotReturnTransferStatus::Prepared,
+    };
+    let persisted = state::mutate_state(|s| {
+        let Some(active) = s.pending_claims.get_mut(&claim.vault_id) else {
+            return false;
+        };
+        if active.claim_generation != claim.claim_generation
+            || active.status != state::BotClaimJournalStatus::ReturnFeeQueryPending
+            || active.collateral_return.is_some()
+        {
+            return false;
+        }
+        active.collateral_return = Some(intent.clone());
+        active.status = state::BotClaimJournalStatus::ReturnPending;
+        true
+    });
+    if !persisted {
+        return Err(swap::TransferAttemptError::NoEffect(
+            "claim changed before ICP return tuple could be persisted".into(),
+        ));
+    }
+    state::save_config_to_stable();
+
+    swap::return_collateral_to_backend(
+        config,
+        intent.ledger_principal,
+        intent.memo.clone(),
+        intent.amount_e8s,
+        intent.fee_e8s,
+        intent.transfer_fee_e8s,
+        intent.created_at_time,
+    )
+    .await
+}
+
+fn validated_net_claim(gross: u64, net: Option<u64>, outbound_fee: Option<u64>) -> Option<u64> {
+    let (Some(net), Some(outbound_fee)) = (net, outbound_fee) else {
+        return None;
+    };
+    (net > 0 && net.checked_add(outbound_fee) == Some(gross)).then_some(net)
+}
+
+fn required_return_balance(gross: u64, return_fee: u64) -> Option<u64> {
+    gross.checked_add(return_fee)
+}
+
+fn return_balance_covers(gross: u64, return_fee: u64, available: u64) -> bool {
+    required_return_balance(gross, return_fee).is_some_and(|required| available >= required)
+}
+
+fn bad_fee_return_status(prior_dispatch_may_have_committed: bool) -> state::BotReturnTransferStatus {
+    if prior_dispatch_may_have_committed {
+        state::BotReturnTransferStatus::FeeMismatchAmbiguous
+    } else {
+        state::BotReturnTransferStatus::NoEffect
+    }
+}
+
+/// Retain a tuple only when it was dispatched for the first time and the
+/// ledger returned typed BadFee, which proves that tuple had no effect.
+/// ReturnFeeQueryPending authorizes another fee query while the bounded retry
+/// budget remains; exhaustion leaves the complete history operator-held.
+fn archive_first_dispatch_bad_fee(
+    claim: &mut state::BotClaimJournal,
+) -> Option<bool> {
+    if claim.status != state::BotClaimJournalStatus::ReturnPending {
+        return None;
+    }
+    let intent = claim.collateral_return.as_ref()?;
+    if intent.status != state::BotReturnTransferStatus::Prepared
+        || intent.receipt.is_some()
+        || intent.transfer_fee_e8s.is_none()
+    {
+        return None;
+    }
+
+    let mut failed = claim.collateral_return.take()?;
+    failed.status = state::BotReturnTransferStatus::NoEffect;
+    claim.failed_return_attempts.push(failed);
+    let refresh_scheduled = claim.failed_return_attempts.len() <= MAX_AUTO_RETURN_FEE_REFRESHES;
+    claim.status = if refresh_scheduled {
+        state::BotClaimJournalStatus::ReturnFeeQueryPending
+    } else {
+        state::BotClaimJournalStatus::ReturnFeeRefreshExhausted
+    };
+    Some(refresh_scheduled)
+}
+
+fn record_first_dispatch_bad_fee(vault_id: u64) -> Option<bool> {
+    let result = state::mutate_state(|s| {
+        s.pending_claims
+            .get_mut(&vault_id)
+            .and_then(archive_first_dispatch_bad_fee)
+    });
+    if result.is_some() {
+        state::save_config_to_stable();
+    }
+    result
+}
+
+fn next_return_created_at_time(
+    now: u64,
+    failed_attempts: &[state::BotReturnTransferJournal],
+) -> Option<u64> {
+    match failed_attempts.last() {
+        Some(previous) => previous.created_at_time.checked_add(1).map(|next| now.max(next)),
+        None => Some(now),
+    }
+}
+
 /// Resume a claim-bound collateral return with the exact ledger dedup tuple.
 /// Legacy journals without an intent, and intents outside the dedup window,
 /// remain operator-held for exact ledger history reconciliation.
 async fn resume_pending_return(config: &BotConfig) -> bool {
     let Some(mut claim) = state::read_state(|s| {
         s.pending_claims.values()
-            .find(|claim| claim.status == state::BotClaimJournalStatus::ReturnPending)
+            .find(|claim| matches!(
+                claim.status,
+                state::BotClaimJournalStatus::ReturnFeeQueryPending
+                    | state::BotClaimJournalStatus::ReturnPending
+            ))
             .cloned()
     }) else { return false };
+
+    if claim.status == state::BotClaimJournalStatus::ReturnFeeQueryPending {
+        if claim.collateral_return.is_some() {
+            log!(crate::INFO, "STUCK: fee-query phase for vault #{} unexpectedly already has a return tuple", claim.vault_id);
+            return true;
+        }
+        if claim.failed_return_attempts.len() > MAX_AUTO_RETURN_FEE_REFRESHES {
+            log!(crate::INFO, "STUCK: automatic ICP return fee refresh budget is exhausted for vault #{}", claim.vault_id);
+            return true;
+        }
+        match create_and_send_return_intent(config, &claim).await {
+            Ok(receipt) => {
+                claim = state::read_state(|s| {
+                    s.pending_claims.get(&claim.vault_id).cloned().unwrap_or(claim.clone())
+                });
+                if let Some(intent) = claim.collateral_return.as_mut() {
+                    intent.receipt = Some(receipt);
+                    intent.status = state::BotReturnTransferStatus::ReceiptObserved;
+                }
+                claim.status = state::BotClaimJournalStatus::ReturnPending;
+                state::mutate_state(|s| { s.pending_claims.insert(claim.vault_id, claim.clone()); });
+                state::save_config_to_stable();
+            }
+            Err(swap::TransferAttemptError::BadFee { expected_fee }) => {
+                let refresh_scheduled = record_first_dispatch_bad_fee(claim.vault_id);
+                log!(crate::INFO, "First-dispatch ICP return for vault #{} received typed BadFee (expected {}). The no-effect tuple was retained; fee refresh scheduled: {}", claim.vault_id, expected_fee, refresh_scheduled == Some(true));
+                return true;
+            }
+            Err(swap::TransferAttemptError::Ambiguous(error)) => {
+                claim = state::read_state(|s| {
+                    s.pending_claims.get(&claim.vault_id).cloned().unwrap_or(claim.clone())
+                });
+                if let Some(intent) = claim.collateral_return.as_mut() {
+                    intent.status = state::BotReturnTransferStatus::Ambiguous;
+                }
+                claim.status = state::BotClaimJournalStatus::ReturnPending;
+                state::mutate_state(|s| { s.pending_claims.insert(claim.vault_id, claim.clone()); });
+                state::save_config_to_stable();
+                log!(crate::INFO, "Return outcome remains ambiguous for vault #{}: {}", claim.vault_id, error);
+                return true;
+            }
+            Err(swap::TransferAttemptError::NoEffect(error)) => {
+                let persisted = state::read_state(|s| {
+                    s.pending_claims.get(&claim.vault_id).cloned()
+                });
+                if let Some(persisted) = persisted {
+                    claim = persisted;
+                    if let Some(intent) = claim.collateral_return.as_mut() {
+                        intent.status = state::BotReturnTransferStatus::NoEffect;
+                        claim.status = state::BotClaimJournalStatus::ReturnPending;
+                        state::mutate_state(|s| { s.pending_claims.insert(claim.vault_id, claim.clone()); });
+                        state::save_config_to_stable();
+                    }
+                }
+                log!(crate::INFO, "No ICP return tuple was dispatched for vault #{}: {}", claim.vault_id, error);
+                return true;
+            }
+        }
+    }
+
     let Some(mut intent) = claim.collateral_return.clone() else {
         log!(crate::INFO, "STUCK: return for vault #{} lacks a persisted transfer tuple; operator reconciliation required", claim.vault_id);
         return true;
@@ -1065,6 +1373,10 @@ async fn resume_pending_return(config: &BotConfig) -> bool {
         log!(crate::INFO, "STUCK: collateral return for vault #{} had a definitive no-effect response; explicit operator repair is required", claim.vault_id);
         return true;
     }
+    if intent.status == state::BotReturnTransferStatus::FeeMismatchAmbiguous {
+        log!(crate::INFO, "STUCK: ICP return for vault #{} has an ambiguous prior submission after BadFee; exact ledger history reconciliation is required", claim.vault_id);
+        return true;
+    }
     if intent.receipt.is_none() {
         const SAFE_RETRY_WINDOW_NS: u64 = 23 * 60 * 60 * 1_000_000_000;
         if ic_cdk::api::time().saturating_sub(intent.created_at_time) >= SAFE_RETRY_WINDOW_NS {
@@ -1073,10 +1385,11 @@ async fn resume_pending_return(config: &BotConfig) -> bool {
         }
         match swap::return_collateral_to_backend(
             config,
-            intent.amount_e8s.saturating_add(intent.fee_e8s),
             intent.ledger_principal,
             intent.memo.clone(),
             intent.amount_e8s,
+            intent.fee_e8s,
+            intent.transfer_fee_e8s,
             intent.created_at_time,
         ).await {
             Ok(receipt) => {
@@ -1092,6 +1405,18 @@ async fn resume_pending_return(config: &BotConfig) -> bool {
                 state::mutate_state(|s| { s.pending_claims.insert(claim.vault_id, claim.clone()); });
                 state::save_config_to_stable();
                 log!(crate::INFO, "Return outcome remains ambiguous for vault #{}: {}", claim.vault_id, error);
+                return true;
+            }
+            Err(swap::TransferAttemptError::BadFee { expected_fee }) => {
+                // The current attempt had no effect, but a prior dispatch may
+                // have committed before a lost reply. Preserve the original
+                // tuple and stop automatic retries until exact block history
+                // is reconciled.
+                intent.status = bad_fee_return_status(true);
+                claim.collateral_return = Some(intent);
+                state::mutate_state(|s| { s.pending_claims.insert(claim.vault_id, claim.clone()); });
+                state::save_config_to_stable();
+                log!(crate::INFO, "STUCK: replayed ICP return for vault #{} received BadFee (expected {}); prior submission may have committed, so its original tuple is held for exact ledger reconciliation", claim.vault_id, expected_fee);
                 return true;
             }
             Err(swap::TransferAttemptError::NoEffect(error)) => {
@@ -1309,6 +1634,19 @@ fn calculate_slippage(effective_price_e8s: u64, oracle_price_e8s: u64) -> i32 {
 mod tests {
     use super::*;
 
+    #[derive(candid::CandidType)]
+    #[allow(dead_code)]
+    struct LegacyBotLiquidationResult {
+        vault_id: u64,
+        collateral_amount: u64,
+        debt_covered: u64,
+        collateral_price_e8s: u64,
+        claim_generation: u64,
+        payment_memo: Vec<u8>,
+        collateral_return_memo: Vec<u8>,
+        payment_ledger_principal: Option<candid::Principal>,
+    }
+
     const SWAP_ERR: &str = "Quote returned zero output";
     const RETURN_ERR: &str = "Transfer error: BadFee";
     const CANCEL_ERR: &str = "GenericError(\"Cannot cancel claim for vault #7: protocol collateral balance 0 < required 99990000\")";
@@ -1321,6 +1659,179 @@ mod tests {
     }
 
     #[test]
+    fn net_claim_and_return_fee_float_are_checked_fail_closed() {
+        assert_eq!(
+            validated_net_claim(50_000_000, Some(49_980_000), Some(20_000)),
+            Some(49_980_000)
+        );
+        assert_eq!(validated_net_claim(50_000_000, None, Some(20_000)), None);
+        assert_eq!(validated_net_claim(50_000_000, Some(49_980_000), None), None);
+        assert_eq!(
+            validated_net_claim(50_000_000, Some(49_980_000), Some(10_000)),
+            None
+        );
+        assert_eq!(required_return_balance(50_000_000, 10_000), Some(50_010_000));
+        assert_eq!(required_return_balance(u64::MAX, 1), None);
+        assert!(return_balance_covers(50_000_000, 10_000, 50_010_000));
+        assert!(!return_balance_covers(50_000_000, 10_000, 50_009_999));
+        assert!(!return_balance_covers(u64::MAX, 1, u64::MAX));
+        assert_eq!(
+            bad_fee_return_status(false),
+            state::BotReturnTransferStatus::NoEffect
+        );
+        assert_eq!(
+            bad_fee_return_status(true),
+            state::BotReturnTransferStatus::FeeMismatchAmbiguous
+        );
+    }
+
+    #[test]
+    fn typed_first_dispatch_bad_fee_refreshes_are_lossless_unique_and_bounded() {
+        let ledger = candid::Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap();
+        let backend = candid::Principal::from_text("tfesu-vyaaa-aaaap-qrd7a-cai").unwrap();
+        let mut claim = state::BotClaimJournal {
+            vault_id: 19,
+            claim_generation: 2,
+            debt_covered_e8s: 100,
+            collateral_amount_e8s: 50,
+            collateral_received_amount_e8s: Some(49),
+            collateral_outbound_fee_e8s: Some(1),
+            collateral_price_e8s: 200,
+            payment_memo: b"payment".to_vec(),
+            collateral_return_memo: b"generation-bound-return-memo".to_vec(),
+            failed_return_attempts: Vec::new(),
+            collateral_return: Some(state::BotReturnTransferJournal {
+                ledger_principal: ledger,
+                backend_principal: backend,
+                amount_e8s: 50,
+                fee_e8s: 10,
+                transfer_fee_e8s: Some(10),
+                memo: b"generation-bound-return-memo".to_vec(),
+                created_at_time: 100,
+                receipt: None,
+                status: state::BotReturnTransferStatus::Prepared,
+            }),
+            status: state::BotClaimJournalStatus::ReturnPending,
+        };
+
+        for prior_bad_fee_count in 1..=MAX_AUTO_RETURN_FEE_REFRESHES + 1 {
+            let failed = claim.collateral_return.as_ref().unwrap().clone();
+            let refresh_scheduled = archive_first_dispatch_bad_fee(&mut claim).unwrap();
+            assert_eq!(
+                refresh_scheduled,
+                prior_bad_fee_count <= MAX_AUTO_RETURN_FEE_REFRESHES
+            );
+            let archived = claim.failed_return_attempts.last().unwrap();
+            assert_eq!(archived.ledger_principal, failed.ledger_principal);
+            assert_eq!(archived.backend_principal, failed.backend_principal);
+            assert_eq!(archived.amount_e8s, failed.amount_e8s);
+            assert_eq!(archived.fee_e8s, failed.fee_e8s);
+            assert_eq!(archived.transfer_fee_e8s, failed.transfer_fee_e8s);
+            assert_eq!(archived.memo, failed.memo);
+            assert_eq!(archived.created_at_time, failed.created_at_time);
+            assert_eq!(archived.status, state::BotReturnTransferStatus::NoEffect);
+            assert!(archived.receipt.is_none());
+
+            if refresh_scheduled {
+                assert_eq!(claim.status, state::BotClaimJournalStatus::ReturnFeeQueryPending);
+                assert!(claim.collateral_return.is_none());
+                let fresh_time = next_return_created_at_time(100, &claim.failed_return_attempts)
+                    .unwrap();
+                assert!(fresh_time > failed.created_at_time);
+                claim.collateral_return = Some(state::BotReturnTransferJournal {
+                    ledger_principal: ledger,
+                    backend_principal: backend,
+                    amount_e8s: 50,
+                    fee_e8s: 11 + prior_bad_fee_count as u64,
+                    transfer_fee_e8s: Some(11 + prior_bad_fee_count as u64),
+                    memo: claim.collateral_return_memo.clone(),
+                    created_at_time: fresh_time,
+                    receipt: None,
+                    status: state::BotReturnTransferStatus::Prepared,
+                });
+                claim.status = state::BotClaimJournalStatus::ReturnPending;
+            }
+        }
+
+        assert_eq!(claim.failed_return_attempts.len(), 4);
+        assert!(claim.collateral_return.is_none());
+        assert_eq!(claim.status, state::BotClaimJournalStatus::ReturnFeeRefreshExhausted);
+        let timestamps = claim
+            .failed_return_attempts
+            .iter()
+            .map(|attempt| attempt.created_at_time)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(timestamps.len(), 4, "each attempted tuple must have a distinct dedup timestamp");
+        assert!(claim.failed_return_attempts.iter().all(|attempt| {
+            attempt.memo == claim.collateral_return_memo
+                && attempt.status == state::BotReturnTransferStatus::NoEffect
+        }));
+    }
+
+    #[test]
+    fn ambiguous_or_legacy_return_attempts_cannot_be_fee_refreshed() {
+        let mut claim = state::BotClaimJournal {
+            vault_id: 19,
+            claim_generation: 2,
+            debt_covered_e8s: 100,
+            collateral_amount_e8s: 50,
+            collateral_received_amount_e8s: Some(49),
+            collateral_outbound_fee_e8s: Some(1),
+            collateral_price_e8s: 200,
+            payment_memo: b"payment".to_vec(),
+            collateral_return_memo: b"generation-bound-return-memo".to_vec(),
+            failed_return_attempts: Vec::new(),
+            collateral_return: Some(state::BotReturnTransferJournal {
+                ledger_principal: candid::Principal::anonymous(),
+                backend_principal: candid::Principal::anonymous(),
+                amount_e8s: 50,
+                fee_e8s: 10,
+                transfer_fee_e8s: Some(10),
+                memo: b"generation-bound-return-memo".to_vec(),
+                created_at_time: 100,
+                receipt: None,
+                status: state::BotReturnTransferStatus::Ambiguous,
+            }),
+            status: state::BotClaimJournalStatus::ReturnPending,
+        };
+        assert_eq!(archive_first_dispatch_bad_fee(&mut claim), None);
+        assert_eq!(claim.failed_return_attempts.len(), 0);
+        assert!(claim.collateral_return.is_some());
+
+        claim.collateral_return.as_mut().unwrap().status = state::BotReturnTransferStatus::Prepared;
+        claim.collateral_return.as_mut().unwrap().transfer_fee_e8s = None;
+        assert_eq!(archive_first_dispatch_bad_fee(&mut claim), None);
+        assert_eq!(claim.failed_return_attempts.len(), 0);
+        assert!(claim.collateral_return.is_some());
+    }
+
+    #[test]
+    fn old_backend_result_decodes_with_missing_net_fields_as_held() {
+        let old_response = LegacyBotLiquidationResult {
+            vault_id: 19,
+            collateral_amount: 50_000_000,
+            debt_covered: 100_000_000,
+            collateral_price_e8s: 200_000_000,
+            claim_generation: 2,
+            payment_memo: b"payment".to_vec(),
+            collateral_return_memo: b"return".to_vec(),
+            payment_ledger_principal: Some(candid::Principal::anonymous()),
+        };
+        let bytes = candid::encode_one(old_response).unwrap();
+        let decoded: BotLiquidationResult = candid::decode_one(&bytes).unwrap();
+        assert_eq!(decoded.collateral_received_amount, None);
+        assert_eq!(decoded.collateral_outbound_fee, None);
+        assert_eq!(
+            validated_net_claim(
+                decoded.collateral_amount,
+                decoded.collateral_received_amount,
+                decoded.collateral_outbound_fee,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn a_short_durable_receipt_is_held_below_the_claim_net_minimum() {
         let journal = state::BotPaymentJournal {
             vault_id: 19,
@@ -1329,6 +1840,7 @@ mod tests {
             claim_generation: 4,
             debt_covered_e8s: 100_000_001,
             collateral_amount_e8s: 200_000_000,
+            collateral_received_amount_e8s: None,
             collateral_price_e8s: 100_000_000,
             icp_swapped_e8s: 110_000_000,
             ckusdc_received_e6: 1_010_001,
@@ -1366,6 +1878,7 @@ mod tests {
             claim_generation: 4,
             debt_covered_e8s: 100_000_000,
             collateral_amount_e8s: 200_000_000,
+            collateral_received_amount_e8s: Some(199_980_000),
             collateral_price_e8s: 100_000_000,
             icp_swapped_e8s: 110_000_000,
             ckusdc_received_e6: 1_050_000,
