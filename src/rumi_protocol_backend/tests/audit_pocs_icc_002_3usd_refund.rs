@@ -560,6 +560,7 @@ struct Fixture {
     pic: PocketIc,
     protocol_id: Principal,
     xrc_id: Principal,
+    icp_ledger: Principal,
     /// Whichever ledger the SP holds 3USD on AND the protocol resolves
     /// `s.three_pool_canister` to. For the happy/refund-success cases this
     /// is the real `rumi_3pool` LP canister; for the refund-failure case
@@ -760,6 +761,7 @@ fn setup_fixture(three_pool_kind: ThreePoolKind) -> Fixture {
         pic,
         protocol_id,
         xrc_id,
+        icp_ledger,
         three_pool_ledger,
         sp_principal,
         developer,
@@ -771,7 +773,7 @@ fn setup_fixture(three_pool_kind: ThreePoolKind) -> Fixture {
 // ─── Tests ───
 
 /// **Happy-path control.** With the kill switch off and the standard
-/// ic-icrc1-ledger backing the 3pool path, a clean reserves liquidation
+/// in-tree 3pool LP ledger backing the reserves path, a clean liquidation
 /// pulls 3USD into the protocol's reserves subaccount, the writedown
 /// commits, `protocol_3usd_reserves` accumulates the pulled amount, and
 /// no refund-side log fires. Pins the success accounting that the
@@ -840,20 +842,10 @@ fn icc_002_pic_happy_path_no_refund_no_orphan() {
         "protocol_3usd_reserves must accumulate the pulled amount on success"
     );
 
-    // Belt-and-suspenders: the protocol's reserves subaccount on the 3pool
-    // ledger must hold the pulled tokens. (Zero-fee ledger so amounts match.)
-    let reserves_subacct_balance = icrc1_balance_of(
-        &f.pic,
-        f.three_pool_ledger,
-        Account {
-            owner: f.protocol_id,
-            subaccount: Some(protocol_3usd_reserves_subaccount()),
-        },
-    );
-    assert_eq!(
-        reserves_subacct_balance, three_usd_amount as u128,
-        "protocol reserves subaccount must hold the pulled 3USD"
-    );
+    // The in-tree 3pool LP ledger records requested subaccounts in ICRC-3 but
+    // aggregates balances by owner. This legacy path checks the SP balance
+    // delta and reserve counter; the P08 proof-bound case checks the exact
+    // transfer tuple. Do not infer physical subaccount isolation here.
 
     // Sanity: no refund log on the happy path.
     let logs = fetch_info_logs(&f.pic, f.protocol_id);
@@ -874,8 +866,8 @@ fn icc_002_pic_happy_path_no_refund_no_orphan() {
 #[test]
 fn p08_02_v2_ingress_is_default_account_proof_bound_and_replay_safe() {
     use rumi_protocol_backend::{
-        StabilityPoolLiquidationResult, ThreeUsdReserveIngressV2Status as Status,
-        ThreeUsdReserveIngressV2StatusView,
+        state::PriceSource, AddCollateralArg, StabilityPoolLiquidationResult,
+        ThreeUsdReserveIngressV2Status as Status, ThreeUsdReserveIngressV2StatusView,
     };
 
     let f = setup_fixture(ThreePoolKind::Standard);
@@ -898,6 +890,81 @@ fn p08_02_v2_ingress_is_default_account_proof_bound_and_replay_safe() {
         WasmResult::Reject(message) => panic!("V2 gate query rejected: {message}"),
     };
     assert!(!enabled, "V2 reserve ingress must be default-off");
+
+    // The configured 3pool ledger cannot enter the generic collateral payout
+    // path. This must reject before querying ledger metadata.
+    let overlap_registration: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "add_collateral_token",
+            encode_one(AddCollateralArg {
+                ledger_canister_id: f.three_pool_ledger,
+                price_source: PriceSource::Xrc {
+                    base_asset: "3USD".into(),
+                    base_asset_class: Default::default(),
+                    quote_asset: "USD".into(),
+                    quote_asset_class: Default::default(),
+                },
+                liquidation_ratio: 1.33,
+                borrow_threshold_ratio: 1.5,
+                liquidation_bonus: 1.15,
+                borrowing_fee: 0.0,
+                debt_ceiling: u64::MAX,
+                min_vault_debt: 0,
+                interest_rate_apr: 0.0,
+                min_collateral_deposit: 0,
+                display_color: None,
+                redemption_fee_floor: None,
+                redemption_fee_ceiling: None,
+                redemption_tier: None,
+            })
+            .unwrap(),
+        )
+        .expect("overlap registration call")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode overlap registration"),
+        WasmResult::Reject(message) => panic!("overlap registration rejected: {message}"),
+    };
+    assert!(
+        format!("{overlap_registration:?}").contains("configured 3pool ledger cannot be registered as collateral"),
+        "configured 3pool ledger registration must fail closed: {overlap_registration:?}"
+    );
+
+    // Conversely, an already registered collateral ledger cannot replace the
+    // configured 3pool, and the rejected transition leaves the old value.
+    let overlap_setter: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "set_three_pool_canister",
+            encode_one(f.icp_ledger).unwrap(),
+        )
+        .expect("overlap setter call")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode overlap setter"),
+        WasmResult::Reject(message) => panic!("overlap setter rejected: {message}"),
+    };
+    assert!(
+        format!("{overlap_setter:?}").contains("registered collateral ledger cannot be configured as 3pool"),
+        "registered collateral cannot replace 3pool: {overlap_setter:?}"
+    );
+    let configured_pool: Option<Principal> = match f
+        .pic
+        .query_call(
+            f.protocol_id,
+            Principal::anonymous(),
+            "get_three_pool_canister",
+            encode_args(()).unwrap(),
+        )
+        .expect("query configured 3pool after rejected setter")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode configured 3pool"),
+        WasmResult::Reject(message) => panic!("configured 3pool query rejected: {message}"),
+    };
+    assert_eq!(configured_pool, Some(f.three_pool_ledger));
 
     // The disabled endpoint must reject before a transfer, even for the
     // otherwise valid registered Stability Pool identity.
@@ -1276,20 +1343,6 @@ fn icc_002_pic_writedown_failure_refunds_3usd_to_sp() {
         reserves_after, 0,
         "protocol_3usd_reserves MUST stay at zero — the writedown rejected \
          BEFORE the state mutation that increments it"
-    );
-
-    let reserves_subacct_balance = icrc1_balance_of(
-        &f.pic,
-        f.three_pool_ledger,
-        Account {
-            owner: f.protocol_id,
-            subaccount: Some(protocol_3usd_reserves_subaccount()),
-        },
-    );
-    assert_eq!(
-        reserves_subacct_balance, 0,
-        "protocol reserves subaccount must be empty after the refund \
-         (the pulled tokens were sent back to the SP)"
     );
 
     let logs = fetch_info_logs(&f.pic, f.protocol_id);

@@ -3207,6 +3207,14 @@ impl State {
         self.collateral_configs.contains_key(&ledger)
     }
 
+    /// A persisted legacy overlap must not activate the V2 reserve ingress;
+    /// normal configuration endpoints prevent creating a new overlap.
+    pub fn three_pool_is_registered_as_collateral(&self) -> bool {
+        self.three_pool_canister
+            .map(|ledger| self.is_registered_collateral_ledger(ledger))
+            .unwrap_or(false)
+    }
+
     /// Enforce an aggregate owner-triggered ICRC-3 query quota.
     pub fn claim_payout_history_scan_slot(&mut self, now: u64) -> bool {
         const WINDOW_NS: u64 = 60_000_000_000;
@@ -8830,7 +8838,25 @@ mod tests {
         state.collateral_configs.insert(ledger, config);
 
         assert!(state.is_registered_collateral_ledger(ledger));
-        assert!(!state.is_registered_collateral_ledger(Principal::anonymous()));
+        assert!(!state.is_registered_collateral_ledger(Principal::from_text("aaaaa-aa").unwrap()));
+    }
+
+    #[test]
+    fn legacy_three_pool_collateral_overlap_blocks_v2_activation() {
+        let mut state = test_state();
+        let ledger = Principal::from_text("2vxsx-fae").unwrap();
+        let mut config = state
+            .collateral_configs
+            .get(&state.icp_ledger_principal)
+            .unwrap()
+            .clone();
+        config.ledger_canister_id = ledger;
+        state.collateral_configs.insert(ledger, config);
+        state.three_pool_canister = Some(ledger);
+
+        assert!(state.three_pool_is_registered_as_collateral());
+        state.three_pool_canister = None;
+        assert!(!state.three_pool_is_registered_as_collateral());
     }
 
     // ---------------------------------------------------------------

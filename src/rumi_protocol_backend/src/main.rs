@@ -8246,6 +8246,11 @@ fn set_three_usd_reserve_ingress_enabled(enabled: bool) -> Result<(), ProtocolEr
         return Err(ProtocolError::GenericError("Only developer can toggle V2 3USD reserve ingress".into()));
     }
     mutate_state(|s| {
+        if enabled && s.three_pool_is_registered_as_collateral() {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "configured 3pool ledger is registered as collateral; V2 ingress remains disabled".into(),
+            ));
+        }
         if enabled && !s.three_usd_reserve_v2_client_ready {
             return Err(ProtocolError::TemporarilyUnavailable(
                 "registered Stability Pool has not acknowledged the V2 client interface".into(),
@@ -14461,6 +14466,16 @@ async fn register_icrc_collateral_token(
         custody_kind: None,
         symbol: symbol_opt.clone(),
     };
+
+    // Ledger metadata calls above yield to other canister messages. Recheck
+    // immediately before committing so a concurrent 3pool configuration
+    // cannot race the initial guard.
+    let is_three_pool = read_state(|s| s.is_configured_three_pool_ledger(arg.ledger_canister_id));
+    if is_three_pool {
+        return Err(ProtocolError::GenericError(
+            "The configured 3pool ledger cannot be registered as collateral".to_string(),
+        ));
+    }
 
     mutate_state(|s| {
         event::record_add_collateral_type(s, arg.ledger_canister_id, config);
