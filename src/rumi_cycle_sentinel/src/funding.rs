@@ -4045,8 +4045,30 @@ pub mod icp {
         let block = icp_cmc::query_block(types::icp_ledger_principal_for_sentinel(), block_index)
             .await
             .map_err(FundingError::BlockLookup)?;
-        icp_cmc::verify_block_matches_snapshot(&block, &snapshot, sentinel_id)
-            .map_err(FundingError::BlockProof)?;
+        let source_account_identifier = icp_cmc::account_identifier(&icp_cmc::Account {
+            owner: snapshot.source_principal,
+            subaccount: snapshot.source_subaccount.map(|value| value.to_vec()),
+        })
+        .map_err(FundingError::BlockLookup)?;
+        let cmc_account_identifier = icp_cmc::account_identifier(&icp_cmc::Account {
+            owner: snapshot.cmc_principal,
+            subaccount: Some(snapshot.cmc_account_identifier.to_vec()),
+        })
+        .map_err(FundingError::BlockLookup)?;
+        icp_cmc::verify_native_block_matches_snapshot(
+            &block,
+            &snapshot,
+            sentinel_id,
+            &source_account_identifier,
+            &cmc_account_identifier,
+        )
+        .map_err(FundingError::BlockProof)?;
+        // Ledger reads above yield; do not settle against an obsolete operation snapshot.
+        if state::get_operation(operation_id).as_ref() != Some(&op) {
+            return Err(FundingError::Update(
+                state::UpdateOperationError::InvalidTransition,
+            ));
+        }
         match op.state() {
             FundingOperationState::Icp(
                 IcpFundingState::LedgerSubmitted | IcpFundingState::TransferUnknown,
@@ -4114,8 +4136,29 @@ pub mod icp {
         let block = icp_cmc::query_block(snapshot.ledger_principal, block_index)
             .await
             .map_err(FundingError::BlockLookup)?;
-        icp_cmc::verify_refund_block_matches_snapshot(&block, &snapshot)
-            .map_err(FundingError::BlockProof)?;
+        let source_account_identifier = icp_cmc::account_identifier(&icp_cmc::Account {
+            owner: snapshot.source_principal,
+            subaccount: snapshot.source_subaccount.map(|value| value.to_vec()),
+        })
+        .map_err(FundingError::BlockLookup)?;
+        let cmc_account_identifier = icp_cmc::account_identifier(&icp_cmc::Account {
+            owner: snapshot.cmc_principal,
+            subaccount: Some(snapshot.cmc_account_identifier.to_vec()),
+        })
+        .map_err(FundingError::BlockLookup)?;
+        icp_cmc::verify_native_refund_block_matches_snapshot(
+            &block,
+            &snapshot,
+            &source_account_identifier,
+            &cmc_account_identifier,
+        )
+        .map_err(FundingError::BlockProof)?;
+        // The query yields, so require the original quarantine and hint to remain current.
+        if state::get_operation(operation_id).as_ref() != Some(&op) {
+            return Err(FundingError::Update(
+                state::UpdateOperationError::InvalidTransition,
+            ));
+        }
         let net_debit =
             icp_cmc::refund_net_debit_e8s(&snapshot).map_err(FundingError::BlockProof)?;
         let attached = op

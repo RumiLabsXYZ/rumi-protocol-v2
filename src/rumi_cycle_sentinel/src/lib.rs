@@ -362,6 +362,22 @@ fn test_get_operation(operation_id: u64) -> Option<test_support::TestOperationVi
     test_support::operation_view(operation_id)
 }
 
+/// Read-only test projection of an immutable ICP call snapshot. This endpoint
+/// exists only in the opt-in integration Wasm and is absent from production.
+#[cfg(feature = "test_endpoints")]
+#[ic_cdk::query]
+fn test_get_icp_snapshot(operation_id: u64) -> Result<Option<types::IcpCmcSnapshot>, String> {
+    if !state::is_signer(ic_cdk::caller()) {
+        return Err(format!("{:?}", governance::GovernanceError::NotSigner));
+    }
+    let snapshot =
+        state::get_operation(operation_id).and_then(|operation| match operation.rail_arguments() {
+            types::FundingRailArguments::Icp(snapshot) => Some(snapshot.clone()),
+            types::FundingRailArguments::Cycles(_) => None,
+        });
+    Ok(snapshot)
+}
+
 /// Read-only test projection for asserting bootstrap safety defaults.  The
 /// production public row deliberately omits control-plane flags.
 #[cfg(feature = "test_endpoints")]

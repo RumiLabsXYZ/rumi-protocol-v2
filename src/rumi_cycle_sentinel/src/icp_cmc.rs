@@ -8,8 +8,11 @@
 //! notification arguments here makes the immutable operation snapshot the
 //! source of truth for every retry.
 
-use candid::{CandidType, Int, Nat, Principal};
+#[cfg(test)]
+use candid::Int;
+use candid::{CandidType, Nat, Principal};
 use serde::Deserialize;
+use sha2::{Digest, Sha224};
 
 use crate::types::{FixedBytes32, IcpCmcDelivery, IcpCmcSnapshot};
 
@@ -89,6 +92,7 @@ pub type TransferReply = Result<Nat, TransferError>;
 /// endpoint.  It is retained as an alternate authoritative proof seam because
 /// it is easier to inspect than the generic `Value` block representation.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct LedgerTransaction {
     pub burn: Option<LedgerBurn>,
     pub kind: String,
@@ -99,6 +103,7 @@ pub struct LedgerTransaction {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct LedgerBurn {
     pub from: Account,
     pub memo: Option<Vec<u8>>,
@@ -108,6 +113,7 @@ pub struct LedgerBurn {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct LedgerMint {
     pub to: Account,
     pub memo: Option<Vec<u8>>,
@@ -116,6 +122,7 @@ pub struct LedgerMint {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct LedgerApprove {
     pub fee: Option<Nat>,
     pub from: Account,
@@ -128,6 +135,7 @@ pub struct LedgerApprove {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct LedgerTransfer {
     pub to: Account,
     pub fee: Option<Nat>,
@@ -139,21 +147,25 @@ pub struct LedgerTransfer {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct GetTransactionsRequest {
     pub start: Nat,
     pub length: Nat,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct TransactionRange {
     pub transactions: Vec<LedgerTransaction>,
 }
 
+#[cfg(test)]
 candid::define_function!(
     pub QueryArchiveFn : (GetTransactionsRequest) -> (TransactionRange) query
 );
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct GetTransactionsResponse {
     pub first_index: Nat,
     pub log_length: Nat,
@@ -162,6 +174,7 @@ pub struct GetTransactionsResponse {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct ArchivedTransactionRange {
     pub start: Nat,
     pub length: Nat,
@@ -170,6 +183,7 @@ pub struct ArchivedTransactionRange {
 
 /// Generic block values used by the ICP Ledger `get_blocks` interface.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub enum IcpLedgerValue {
     Blob(Vec<u8>),
     Text(String),
@@ -181,21 +195,25 @@ pub enum IcpLedgerValue {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct GetBlocksArgs {
     pub start: Nat,
     pub length: Nat,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct BlockRange {
     pub blocks: Vec<IcpLedgerValue>,
 }
 
+#[cfg(test)]
 candid::define_function!(
     pub QueryBlockArchiveFn : (GetBlocksArgs) -> (BlockRange) query
 );
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct GetBlocksResponse {
     pub first_index: Nat,
     pub chain_length: u64,
@@ -205,10 +223,113 @@ pub struct GetBlocksResponse {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct ArchivedBlockRange {
     pub start: Nat,
     pub length: Nat,
     pub callback: QueryBlockArchiveFn,
+}
+
+// Native ICP Ledger `query_blocks` wire types. These intentionally mirror the
+// official ledger interface, not the ICRC ledger's generic `get_blocks`
+// representation declared in `src/ledger/ledger.did`.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NativeIcpTimestamp {
+    pub timestamp_nanos: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NativeIcpTokens {
+    pub e8s: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NativeIcpTransaction {
+    pub memo: u64,
+    pub icrc1_memo: Option<Vec<u8>>,
+    pub operation: Option<NativeIcpOperation>,
+    pub created_at_time: NativeIcpTimestamp,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum NativeIcpOperation {
+    Burn {
+        from: Vec<u8>,
+        spender: Option<Vec<u8>>,
+        amount: NativeIcpTokens,
+    },
+    Mint {
+        to: Vec<u8>,
+        amount: NativeIcpTokens,
+    },
+    Transfer {
+        from: Vec<u8>,
+        to: Vec<u8>,
+        spender: Option<Vec<u8>>,
+        amount: NativeIcpTokens,
+        fee: NativeIcpTokens,
+    },
+    Approve {
+        from: Vec<u8>,
+        spender: Vec<u8>,
+        allowance_e8s: i128,
+        allowance: NativeIcpTokens,
+        fee: NativeIcpTokens,
+        expires_at: Option<NativeIcpTimestamp>,
+        expected_allowance: Option<NativeIcpTokens>,
+    },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NativeIcpBlock {
+    pub parent_hash: Option<Vec<u8>>,
+    pub transaction: NativeIcpTransaction,
+    pub timestamp: NativeIcpTimestamp,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NativeIcpGetBlocksArgs {
+    pub start: u64,
+    pub length: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NativeIcpBlockRange {
+    pub blocks: Vec<NativeIcpBlock>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum NativeIcpQueryArchiveError {
+    BadFirstBlockIndex {
+        requested_index: u64,
+        first_valid_index: u64,
+    },
+    Other {
+        error_code: u64,
+        error_message: String,
+    },
+}
+
+pub type NativeIcpQueryArchiveResult = Result<NativeIcpBlockRange, NativeIcpQueryArchiveError>;
+
+candid::define_function!(
+    pub NativeIcpQueryArchiveFn : (NativeIcpGetBlocksArgs) -> (NativeIcpQueryArchiveResult) query
+);
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NativeIcpArchivedBlocksRange {
+    pub start: u64,
+    pub length: u64,
+    pub callback: NativeIcpQueryArchiveFn,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NativeIcpQueryBlocksResponse {
+    pub chain_length: u64,
+    pub certificate: Option<Vec<u8>>,
+    pub blocks: Vec<NativeIcpBlock>,
+    pub first_block_index: u64,
+    pub archived_blocks: Vec<NativeIcpArchivedBlocksRange>,
 }
 
 // ─────────────────────────── CMC wire types ───────────────────────────
@@ -584,6 +705,7 @@ pub enum BlockProofError {
     WrongDestination,
     WrongAmount,
     WrongFee,
+    UnexpectedSpender,
     WrongMemo,
     WrongCreatedAtTime,
     WrongRefundSource,
@@ -596,12 +718,14 @@ pub enum BlockProofError {
     UnsupportedValue,
 }
 
+#[cfg(test)]
 fn map_field<'a>(map: &'a [(String, IcpLedgerValue)], name: &str) -> Option<&'a IcpLedgerValue> {
     map.iter()
         .find(|(key, _)| key == name)
         .map(|(_, value)| value)
 }
 
+#[cfg(test)]
 fn map_account(value: &IcpLedgerValue) -> Option<Account> {
     match value {
         // ICRC-3's canonical Account encoding is an Array containing the
@@ -657,6 +781,7 @@ fn map_account(value: &IcpLedgerValue) -> Option<Account> {
     }
 }
 
+#[cfg(test)]
 fn map_nat(value: Option<&IcpLedgerValue>) -> Option<Nat> {
     match value? {
         IcpLedgerValue::Nat(nat) => Some(nat.clone()),
@@ -666,6 +791,7 @@ fn map_nat(value: Option<&IcpLedgerValue>) -> Option<Nat> {
     }
 }
 
+#[cfg(test)]
 fn find_transfer_map(value: &IcpLedgerValue) -> Option<&[(String, IcpLedgerValue)]> {
     match value {
         IcpLedgerValue::Map(map)
@@ -686,6 +812,7 @@ fn find_transfer_map(value: &IcpLedgerValue) -> Option<&[(String, IcpLedgerValue
 /// than treating a partial match as proof.  A caller must obtain `block` from
 /// the ledger's `get_blocks` query (including an archive callback) before
 /// invoking this function; this function itself is deliberately pure.
+#[cfg(test)]
 pub fn verify_block_matches_snapshot(
     block: &IcpLedgerValue,
     snapshot: &IcpCmcSnapshot,
@@ -753,6 +880,7 @@ pub fn verify_block_matches_snapshot(
     Ok(())
 }
 
+#[cfg(test)]
 pub fn verify_transaction_matches_snapshot(
     transaction: &LedgerTransaction,
     snapshot: &IcpCmcSnapshot,
@@ -820,6 +948,7 @@ pub fn refund_net_debit_e8s(snapshot: &IcpCmcSnapshot) -> Result<u128, BlockProo
 /// account, for the exact refund amount and ledger fee. CMC's legacy refund
 /// transfer has no created-at-time and an empty/default memo; if those fields
 /// are present in a generic representation they must be the default value.
+#[cfg(test)]
 pub fn verify_refund_block_matches_snapshot(
     block: &IcpLedgerValue,
     snapshot: &IcpCmcSnapshot,
@@ -888,6 +1017,24 @@ pub enum BlockLookupError {
     NotFound,
     ResponseOverflow,
     ArchiveCallFailed,
+    InvalidArchiveResponse,
+    InvalidAccount,
+}
+
+fn block_offset(first_index: u64, block_count: usize, requested: u64) -> Option<usize> {
+    let offset: usize = requested.checked_sub(first_index)?.try_into().ok()?;
+    (offset < block_count).then_some(offset)
+}
+
+fn archive_range_covers_index(
+    start: u64,
+    length: u64,
+    requested: u64,
+) -> Result<bool, BlockLookupError> {
+    let end = start
+        .checked_add(length)
+        .ok_or(BlockLookupError::ResponseOverflow)?;
+    Ok(length > 0 && requested >= start && requested < end)
 }
 
 /// Queries a block and, when the live range does not contain it, follows the
@@ -897,59 +1044,184 @@ pub enum BlockLookupError {
 pub async fn query_block(
     ledger: Principal,
     block_index: u64,
-) -> Result<IcpLedgerValue, BlockLookupError> {
-    let (response,) = ic_cdk::call::<(GetBlocksArgs,), (GetBlocksResponse,)>(
+) -> Result<NativeIcpBlock, BlockLookupError> {
+    let request = NativeIcpGetBlocksArgs {
+        start: block_index,
+        length: 1,
+    };
+    let (response,) = ic_cdk::call::<(NativeIcpGetBlocksArgs,), (NativeIcpQueryBlocksResponse,)>(
         ledger,
-        "get_blocks",
-        (GetBlocksArgs {
-            start: Nat::from(block_index),
-            length: Nat::from(1u8),
-        },),
+        "query_blocks",
+        (request.clone(),),
     )
     .await
     .map_err(|_| BlockLookupError::CallFailed)?;
-    let first = u64::try_from(response.first_index.0.clone())
-        .map_err(|_| BlockLookupError::ResponseOverflow)?;
-    if block_index >= first
-        && block_index
-            < first
-                .checked_add(response.blocks.len() as u64)
-                .ok_or(BlockLookupError::ResponseOverflow)?
-    {
+    if let Some(offset) = block_offset(
+        response.first_block_index,
+        response.blocks.len(),
+        block_index,
+    ) {
         return response
             .blocks
             .into_iter()
-            .nth((block_index - first) as usize)
+            .nth(offset)
             .ok_or(BlockLookupError::NotFound);
     }
     for archive in response.archived_blocks {
-        let start = u64::try_from(archive.start.0.clone())
-            .map_err(|_| BlockLookupError::ResponseOverflow)?;
-        let length = u64::try_from(archive.length.0.clone())
-            .map_err(|_| BlockLookupError::ResponseOverflow)?;
-        let end = start
-            .checked_add(length)
-            .ok_or(BlockLookupError::ResponseOverflow)?;
-        if block_index < start || block_index >= end {
+        if !archive_range_covers_index(archive.start, archive.length, block_index)? {
             continue;
         }
-        let (range,) = ic_cdk::call::<(GetBlocksArgs,), (BlockRange,)>(
+        let (result,) = ic_cdk::call::<(NativeIcpGetBlocksArgs,), (NativeIcpQueryArchiveResult,)>(
             archive.callback.0.principal,
             &archive.callback.0.method,
-            (GetBlocksArgs {
-                start: Nat::from(block_index),
-                length: Nat::from(1u8),
-            },),
+            (request,),
         )
         .await
         .map_err(|_| BlockLookupError::ArchiveCallFailed)?;
-        return range
-            .blocks
-            .into_iter()
-            .next()
-            .ok_or(BlockLookupError::NotFound);
+        return match result {
+            Ok(range) if range.blocks.len() == 1 => range
+                .blocks
+                .into_iter()
+                .next()
+                .ok_or(BlockLookupError::NotFound),
+            Ok(_) => Err(BlockLookupError::InvalidArchiveResponse),
+            Err(_) => Err(BlockLookupError::ArchiveCallFailed),
+        };
     }
     Err(BlockLookupError::NotFound)
+}
+
+/// Derives the native ICP Ledger AccountIdentifier from an ICRC account.
+/// The legacy ledger ABI has no account_identifier method; its canonical
+/// identifier is CRC32(SHA-224("\x0Aaccount-id" || principal || subaccount)).
+pub fn account_identifier(account: &Account) -> Result<[u8; 32], BlockLookupError> {
+    let subaccount: &[u8] = match account.subaccount.as_deref() {
+        Some(bytes) if bytes.len() == 32 => bytes,
+        Some(_) => return Err(BlockLookupError::InvalidAccount),
+        None => &[0; 32],
+    };
+    let mut hasher = Sha224::new();
+    hasher.update(b"\x0Aaccount-id");
+    hasher.update(account.owner.as_slice());
+    hasher.update(subaccount);
+    let hash = hasher.finalize();
+    let checksum = crc32_ieee(&hash);
+    let mut identifier = [0; 32];
+    identifier[..4].copy_from_slice(&checksum.to_be_bytes());
+    identifier[4..].copy_from_slice(&hash);
+    Ok(identifier)
+}
+
+fn crc32_ieee(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+fn native_transfer_fields(
+    block: &NativeIcpBlock,
+) -> Result<(&[u8], &[u8], Option<&[u8]>, u64, u64, Option<&[u8]>), BlockProofError> {
+    let Some(NativeIcpOperation::Transfer {
+        from,
+        to,
+        spender,
+        amount,
+        fee,
+    }) = block.transaction.operation.as_ref()
+    else {
+        return Err(BlockProofError::NotTransfer);
+    };
+    Ok((
+        from,
+        to,
+        spender.as_deref(),
+        amount.e8s,
+        fee.e8s,
+        block.transaction.icrc1_memo.as_deref(),
+    ))
+}
+
+/// Verifies a transfer block returned by native ICP `query_blocks`. Native
+/// blocks identify accounts with 32-byte AccountIdentifier values, so callers
+/// must derive the source identifier using the native ledger formula.
+pub fn verify_native_block_matches_snapshot(
+    block: &NativeIcpBlock,
+    snapshot: &IcpCmcSnapshot,
+    source: Principal,
+    source_account_identifier: &[u8],
+    cmc_account_identifier: &[u8],
+) -> Result<(), BlockProofError> {
+    validate_snapshot(snapshot, None, None).map_err(|_| BlockProofError::UnsupportedValue)?;
+    if source != snapshot.source_principal {
+        return Err(BlockProofError::WrongSource);
+    }
+    let (from, to, spender, amount, fee, memo) = native_transfer_fields(block)?;
+    if spender.is_some() {
+        return Err(BlockProofError::UnexpectedSpender);
+    }
+    if from != source_account_identifier {
+        return Err(BlockProofError::WrongSource);
+    }
+    if to != cmc_account_identifier {
+        return Err(BlockProofError::WrongDestination);
+    }
+    if amount != snapshot.amount_e8s {
+        return Err(BlockProofError::WrongAmount);
+    }
+    if fee != snapshot.fee_e8s {
+        return Err(BlockProofError::WrongFee);
+    }
+    if memo != Some(snapshot.memo.to_le_bytes().as_slice()) {
+        return Err(BlockProofError::WrongMemo);
+    }
+    if block.transaction.created_at_time.timestamp_nanos != snapshot.created_at_time_ns {
+        return Err(BlockProofError::WrongCreatedAtTime);
+    }
+    Ok(())
+}
+
+/// Verifies the native ICP Ledger block produced by the CMC's automatic
+/// legacy `send_pb` refund. The CMC uses numeric memo zero and no ICRC-1 memo;
+/// its ledger transaction timestamp is assigned by the ledger because the
+/// legacy request has no `created_at_time` argument.
+pub fn verify_native_refund_block_matches_snapshot(
+    block: &NativeIcpBlock,
+    snapshot: &IcpCmcSnapshot,
+    source_account_identifier: &[u8],
+    cmc_account_identifier: &[u8],
+) -> Result<(), BlockProofError> {
+    validate_snapshot(snapshot, None, None).map_err(|_| BlockProofError::UnsupportedValue)?;
+    let (from, to, spender, amount, fee, memo) = native_transfer_fields(block)?;
+    if spender.is_some() {
+        return Err(BlockProofError::UnexpectedSpender);
+    }
+    if from != cmc_account_identifier {
+        return Err(BlockProofError::WrongRefundSource);
+    }
+    if to != source_account_identifier {
+        return Err(BlockProofError::WrongRefundDestination);
+    }
+    let expected_amount =
+        expected_refund_amount_e8s(snapshot).ok_or(BlockProofError::NoRefundAmount)?;
+    if amount != expected_amount {
+        return Err(BlockProofError::WrongRefundAmount);
+    }
+    if fee != snapshot.fee_e8s {
+        return Err(BlockProofError::WrongRefundFee);
+    }
+    if block.transaction.memo != 0 || memo.is_some() {
+        return Err(BlockProofError::WrongRefundMemo);
+    }
+    Ok(())
 }
 
 pub async fn transfer(
@@ -1082,6 +1354,21 @@ mod tests {
 
     fn sha256(bytes: &[u8]) -> [u8; 32] {
         Sha256::digest(bytes).into()
+    }
+
+    #[test]
+    fn native_account_identifier_matches_anonymous_default_account_vector() {
+        let account = Account {
+            owner: Principal::anonymous(),
+            subaccount: None,
+        };
+        let actual = account_identifier(&account).expect("valid default account");
+        let expected = [
+            0x1c, 0x7a, 0x48, 0xba, 0x6a, 0x56, 0x2a, 0xa9, 0xea, 0xa2, 0x48, 0x1a, 0x90, 0x49,
+            0xcd, 0xf0, 0x43, 0x3b, 0x97, 0x38, 0xc9, 0x92, 0xd6, 0x98, 0xc3, 0x1d, 0x8a, 0xbf,
+            0x89, 0xca, 0xdc, 0x79,
+        ];
+        assert_eq!(actual, expected);
     }
 
     fn target() -> Principal {
@@ -1343,5 +1630,242 @@ mod tests {
             ("tx".into(), tx),
         ]);
         assert_eq!(verify_block_matches_snapshot(&block, &snap, owner), Ok(()));
+    }
+
+    fn native_transfer_block(
+        from: Vec<u8>,
+        to: Vec<u8>,
+        amount: u64,
+        fee: u64,
+        memo: Option<Vec<u8>>,
+        created_at_time: u64,
+    ) -> NativeIcpBlock {
+        NativeIcpBlock {
+            parent_hash: None,
+            transaction: NativeIcpTransaction {
+                memo: 0,
+                icrc1_memo: memo,
+                operation: Some(NativeIcpOperation::Transfer {
+                    from,
+                    to,
+                    spender: None,
+                    amount: NativeIcpTokens { e8s: amount },
+                    fee: NativeIcpTokens { e8s: fee },
+                }),
+                created_at_time: NativeIcpTimestamp {
+                    timestamp_nanos: created_at_time,
+                },
+            },
+            timestamp: NativeIcpTimestamp {
+                timestamp_nanos: created_at_time,
+            },
+        }
+    }
+
+    #[test]
+    fn native_query_blocks_proof_checks_exact_transfer_tuple() {
+        let snap = snapshot();
+        let source_id = vec![0x11; 32];
+        let cmc_id = vec![0x22; 32];
+        let block = native_transfer_block(
+            source_id.clone(),
+            cmc_id.clone(),
+            snap.amount_e8s,
+            snap.fee_e8s,
+            Some(snap.memo.to_le_bytes().to_vec()),
+            snap.created_at_time_ns,
+        );
+        assert_eq!(
+            verify_native_block_matches_snapshot(
+                &block,
+                &snap,
+                snap.source_principal,
+                &source_id,
+                &cmc_id,
+            ),
+            Ok(())
+        );
+
+        let mut with_spender = block.clone();
+        let Some(NativeIcpOperation::Transfer { spender, .. }) =
+            with_spender.transaction.operation.as_mut()
+        else {
+            unreachable!("fixture is a transfer")
+        };
+        *spender = Some(vec![0x55; 32]);
+        assert_eq!(
+            verify_native_block_matches_snapshot(
+                &with_spender,
+                &snap,
+                snap.source_principal,
+                &source_id,
+                &cmc_id,
+            ),
+            Err(BlockProofError::UnexpectedSpender)
+        );
+
+        let mut wrong_memo = block.clone();
+        wrong_memo.transaction.icrc1_memo = Some(b"not the payment memo".to_vec());
+        assert_eq!(
+            verify_native_block_matches_snapshot(
+                &wrong_memo,
+                &snap,
+                snap.source_principal,
+                &source_id,
+                &cmc_id,
+            ),
+            Err(BlockProofError::WrongMemo)
+        );
+
+        let wrong_recipient = native_transfer_block(
+            source_id.clone(),
+            vec![0x33; 32],
+            snap.amount_e8s,
+            snap.fee_e8s,
+            Some(snap.memo.to_le_bytes().to_vec()),
+            snap.created_at_time_ns,
+        );
+        assert_eq!(
+            verify_native_block_matches_snapshot(
+                &wrong_recipient,
+                &snap,
+                snap.source_principal,
+                &source_id,
+                &cmc_id,
+            ),
+            Err(BlockProofError::WrongDestination)
+        );
+
+        for (altered, error) in [
+            (
+                native_transfer_block(
+                    source_id.clone(),
+                    cmc_id.clone(),
+                    snap.amount_e8s + 1,
+                    snap.fee_e8s,
+                    Some(snap.memo.to_le_bytes().to_vec()),
+                    snap.created_at_time_ns,
+                ),
+                BlockProofError::WrongAmount,
+            ),
+            (
+                native_transfer_block(
+                    source_id.clone(),
+                    cmc_id.clone(),
+                    snap.amount_e8s,
+                    snap.fee_e8s + 1,
+                    Some(snap.memo.to_le_bytes().to_vec()),
+                    snap.created_at_time_ns,
+                ),
+                BlockProofError::WrongFee,
+            ),
+            (
+                native_transfer_block(
+                    source_id.clone(),
+                    cmc_id.clone(),
+                    snap.amount_e8s,
+                    snap.fee_e8s,
+                    Some(snap.memo.to_le_bytes().to_vec()),
+                    snap.created_at_time_ns + 1,
+                ),
+                BlockProofError::WrongCreatedAtTime,
+            ),
+            (
+                native_transfer_block(
+                    vec![0x44; 32],
+                    cmc_id.clone(),
+                    snap.amount_e8s,
+                    snap.fee_e8s,
+                    Some(snap.memo.to_le_bytes().to_vec()),
+                    snap.created_at_time_ns,
+                ),
+                BlockProofError::WrongSource,
+            ),
+        ] {
+            assert_eq!(
+                verify_native_block_matches_snapshot(
+                    &altered,
+                    &snap,
+                    snap.source_principal,
+                    &source_id,
+                    &cmc_id,
+                ),
+                Err(error)
+            );
+        }
+    }
+
+    #[test]
+    fn native_refund_proof_uses_exact_ledger_account_identifiers_and_cmc_legacy_memo() {
+        let snap = snapshot();
+        let source_id = vec![0x11; 32];
+        let cmc_id = vec![0x22; 32];
+        let amount = expected_refund_amount_e8s(&snap).unwrap();
+        let block = native_transfer_block(
+            cmc_id.clone(),
+            source_id.clone(),
+            amount,
+            snap.fee_e8s,
+            None,
+            1_234,
+        );
+        assert_eq!(
+            verify_native_refund_block_matches_snapshot(&block, &snap, &source_id, &cmc_id,),
+            Ok(())
+        );
+
+        let mut with_spender = block.clone();
+        let Some(NativeIcpOperation::Transfer { spender, .. }) =
+            with_spender.transaction.operation.as_mut()
+        else {
+            unreachable!("fixture is a transfer")
+        };
+        *spender = Some(Vec::new());
+        assert_eq!(
+            verify_native_refund_block_matches_snapshot(&with_spender, &snap, &source_id, &cmc_id,),
+            Err(BlockProofError::UnexpectedSpender)
+        );
+
+        let wrong_recipient = native_transfer_block(
+            cmc_id.clone(),
+            vec![0x33; 32],
+            amount,
+            snap.fee_e8s,
+            None,
+            1_234,
+        );
+        assert_eq!(
+            verify_native_refund_block_matches_snapshot(
+                &wrong_recipient,
+                &snap,
+                &source_id,
+                &cmc_id,
+            ),
+            Err(BlockProofError::WrongRefundDestination)
+        );
+
+        let wrong_memo = native_transfer_block(
+            cmc_id.clone(),
+            source_id.clone(),
+            amount,
+            snap.fee_e8s,
+            Some(Vec::new()),
+            1_234,
+        );
+        assert_eq!(
+            verify_native_refund_block_matches_snapshot(&wrong_memo, &snap, &source_id, &cmc_id,),
+            Err(BlockProofError::WrongRefundMemo)
+        );
+    }
+
+    #[test]
+    fn native_archive_descriptor_must_cover_exact_index_without_overflow() {
+        assert_eq!(archive_range_covers_index(20, 1, 20), Ok(true));
+        assert_eq!(archive_range_covers_index(20, 1, 21), Ok(false));
+        assert_eq!(archive_range_covers_index(20, 0, 20), Ok(false));
+        assert_eq!(
+            archive_range_covers_index(u64::MAX, 1, u64::MAX),
+            Err(BlockLookupError::ResponseOverflow)
+        );
     }
 }
