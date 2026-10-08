@@ -183,7 +183,6 @@ fn return_transfer_fee_arg(transfer_fee_e8s: Option<u64>) -> Option<Nat> {
 /// Transfer collateral (ICP) back to the backend canister.
 pub async fn return_collateral_to_backend(
     config: &BotConfig,
-    amount_e8s: u64,
     collateral_ledger: Principal,
     memo: Vec<u8>,
     send_amount: u64,
@@ -191,13 +190,10 @@ pub async fn return_collateral_to_backend(
     transfer_fee_e8s: Option<u64>,
     created_at_time: u64,
 ) -> Result<TransferReceipt, TransferAttemptError> {
-    if send_amount == 0
-        || send_amount
-            .checked_add(fee_e8s)
-            .is_none_or(|debit| debit > amount_e8s)
-        || transfer_fee_e8s.is_some_and(|wire_fee| wire_fee != fee_e8s)
-    {
-        return Err(TransferAttemptError::NoEffect("Collateral return amount does not fit the claim reservation".into()));
+    if send_amount == 0 || transfer_fee_e8s.is_some_and(|wire_fee| wire_fee != fee_e8s) {
+        return Err(TransferAttemptError::NoEffect(
+            "Collateral return tuple has an invalid amount or fee".into(),
+        ));
     }
     let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
         from_subaccount: None,
@@ -271,6 +267,33 @@ pub async fn balance_of_self_ckusdc(config: &BotConfig) -> Result<u64, String> {
             .parse::<u64>()
             .map_err(|_| format!("icrc1_balance_of returned non-u64 from {}", config.ckusdc_ledger)),
         Err((code, msg)) => Err(format!("icrc1_balance_of call failed ({:?}): {}", code, msg)),
+    }
+}
+
+/// Read the bot's main-account ICP balance to reserve claim collateral plus
+/// the explicit return fee from its separate fee float.
+pub async fn balance_of_self_icp(config: &BotConfig) -> Result<u64, String> {
+    let result: Result<(Nat,), _> = ic_cdk::call(
+        config.icp_ledger,
+        "icrc1_balance_of",
+        (Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },),
+    )
+    .await;
+
+    match result {
+        Ok((balance,)) => balance.0.to_string().parse::<u64>().map_err(|_| {
+            format!(
+                "icrc1_balance_of returned non-u64 from {}",
+                config.icp_ledger
+            )
+        }),
+        Err((code, msg)) => Err(format!(
+            "icrc1_balance_of call failed ({:?}): {}",
+            code, msg
+        )),
     }
 }
 
@@ -389,7 +412,10 @@ mod return_transfer_tests {
 
     #[test]
     fn return_transfer_fee_keeps_new_and_legacy_wire_identities_distinct() {
-        assert_eq!(return_transfer_fee_arg(Some(10_000)), Some(Nat::from(10_000u64)));
+        assert_eq!(
+            return_transfer_fee_arg(Some(10_000)),
+            Some(Nat::from(10_000u64))
+        );
         assert_eq!(return_transfer_fee_arg(None), None);
     }
 }

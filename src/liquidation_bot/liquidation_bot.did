@@ -97,6 +97,7 @@ type BotPaymentJournal = record {
   claim_generation : nat64;
   debt_covered_e8s : nat64;
   collateral_amount_e8s : nat64;
+  collateral_received_amount_e8s : opt nat64;
   collateral_price_e8s : nat64;
   icp_swapped_e8s : nat64;
   ckusdc_received_e6 : nat64;
@@ -128,6 +129,8 @@ type BotClaimJournal = record {
   claim_generation : nat64;
   debt_covered_e8s : nat64;
   collateral_amount_e8s : nat64;
+  collateral_received_amount_e8s : opt nat64;
+  collateral_outbound_fee_e8s : opt nat64;
   collateral_price_e8s : nat64;
   payment_memo : blob;
   collateral_return_memo : blob;
