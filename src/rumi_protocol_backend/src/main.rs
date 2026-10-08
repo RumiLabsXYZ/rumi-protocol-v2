@@ -1024,7 +1024,9 @@ fn post_upgrade(arg: ProtocolArg) {
     setup_timers();
     // Async futures are cancelled by an upgrade. Resume durable payout and
     // refund queues from stable state instead of waiting for an unrelated call.
-    ic_cdk::spawn(rumi_protocol_backend::process_pending_transfer());
+    ic_cdk_timers::set_timer(std::time::Duration::ZERO, || {
+        ic_cdk::spawn(rumi_protocol_backend::process_pending_transfer())
+    });
 }
 
 /// Validates that the State has consistent collateral configuration after replay.

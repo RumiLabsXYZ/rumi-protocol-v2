@@ -203,6 +203,13 @@ struct ProtocolInitArg {
 #[derive(CandidType, Deserialize, Clone, Debug)]
 enum ProtocolArgVariant {
     Init(ProtocolInitArg),
+    Upgrade(ProtocolUpgradeArg),
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct ProtocolUpgradeArg {
+    mode: Option<()>,
+    description: Option<String>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -582,6 +589,13 @@ enum ThreePoolKind {
 }
 
 fn setup_fixture(three_pool_kind: ThreePoolKind) -> Fixture {
+    setup_fixture_with_backend_wasm(three_pool_kind, protocol_wasm())
+}
+
+fn setup_fixture_with_backend_wasm(
+    three_pool_kind: ThreePoolKind,
+    backend_wasm: Vec<u8>,
+) -> Fixture {
     let pool_harness = three_pool_test_harness::deploy_pool_with_liquidity_and_swaps(0);
     let pool_owner = pool_harness.user;
     let three_pool_ledger = pool_harness.three_pool;
@@ -670,7 +684,7 @@ fn setup_fixture(three_pool_kind: ThreePoolKind) -> Fixture {
     });
     pic.install_canister(
         protocol_id,
-        protocol_wasm(),
+        backend_wasm,
         encode_args((init,)).expect("encode protocol init"),
         None,
     );
@@ -1508,4 +1522,78 @@ fn icc_002_pic_refund_failure_enqueues_durable_retry_and_heals() {
         "expected a settled-refund log after the queue drained; saw logs: {:?}",
         settled_log
     );
+}
+
+/// A refund row created with the pre-P08 backend source at 9d5f359e keeps its
+/// legacy hashed-reserve source and exact retry identity when upgraded to P08.
+/// Set `RUMI_P08_PRE_P08_BACKEND_WASM` to that pinned source-built artifact.
+#[test]
+#[ignore = "requires the pre-P08 backend Wasm built from source 9d5f359e"]
+fn p08_upgrade_preserves_parent_legacy_refund_identity_and_recovers() {
+    let parent_path = std::env::var("RUMI_P08_PRE_P08_BACKEND_WASM")
+        .expect("set RUMI_P08_PRE_P08_BACKEND_WASM to the source-9d5f359e backend Wasm");
+    let parent_wasm = std::fs::read(parent_path).expect("read parent backend Wasm");
+    let parent_sha256 = format!("{:x}", Sha256::digest(&parent_wasm));
+    assert_eq!(parent_sha256, "1d5f9a5b7980ceab1f2ecc19bfc3ce8900b33efd0428d5bc3e11b6affc9519eb",
+        "unexpected parent backend artifact");
+
+    let f = setup_fixture_with_backend_wasm(ThreePoolKind::Flaky, parent_wasm);
+    let icusd_debt = 500_000_000u64;
+    let three_usd_amount = 500_000_000u64;
+    icrc2_approve_call(&f.pic, f.three_pool_ledger, f.sp_principal, f.protocol_id,
+        (three_usd_amount as u128) * 2);
+    call_set_sp_writedown_disabled(&f.pic, f.protocol_id, f.developer, true);
+    flaky_set_fail_transfers(&f.pic, f.three_pool_ledger, true);
+    let sp_balance_before = icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal));
+
+    let err = call_sp_liquidate_with_reserves(&f.pic, f.protocol_id, f.sp_principal, f.vault_id,
+        icusd_debt, three_usd_amount, f.three_pool_ledger)
+        .expect_err("parent writedown must reject with the kill switch engaged");
+    assert!(matches!(err, ProtocolError::TemporarilyUnavailable(_)));
+
+    let before = get_pending_3usd_refunds(&f.pic, f.protocol_id);
+    assert_eq!(before.len(), 1, "parent should persist one legacy refund");
+    let row = &before[0];
+    assert_eq!(row.stability_pool, f.sp_principal);
+    assert_eq!(row.ledger, f.three_pool_ledger);
+    assert_eq!(row.vault_id, f.vault_id);
+    assert_eq!(row.amount_e8s, three_usd_amount);
+    assert_ne!(row.op_nonce, Nat::from(0u8));
+    let reserve_account = Account { owner: f.protocol_id, subaccount: Some(protocol_3usd_reserves_subaccount()) };
+    assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, reserve_account.clone()),
+        three_usd_amount as u128, "legacy refund remains in hashed reserve account before upgrade");
+    let reserve_counter_before = get_protocol_3usd_reserves(&f.pic, f.protocol_id);
+
+    let upgrade = ProtocolArgVariant::Upgrade(ProtocolUpgradeArg {
+        mode: None,
+        description: Some("P08 populated refund migration test".to_string()),
+    });
+    f.pic.upgrade_canister(f.protocol_id, protocol_wasm(), encode_args((upgrade,)).unwrap(), None)
+        .expect("upgrade parent backend to P08");
+
+    // Run the zero-delay post-upgrade timer explicitly before checking that it
+    // made exactly one retry against the still-failing ledger.
+    f.pic.tick();
+
+    let after = get_pending_3usd_refunds(&f.pic, f.protocol_id);
+    assert_eq!(after.len(), 1, "P08 must retain the pending refund");
+    assert_eq!(after[0].stability_pool, row.stability_pool);
+    assert_eq!(after[0].ledger, row.ledger);
+    assert_eq!(after[0].amount_e8s, row.amount_e8s);
+    assert_eq!(after[0].vault_id, row.vault_id);
+    assert_eq!(after[0].retry_count, row.retry_count.saturating_add(1),
+        "post-upgrade worker makes one bounded retry while the ledger is still failing");
+    assert_eq!(after[0].op_nonce, row.op_nonce, "retry must reuse exact nonce");
+    assert_eq!(get_protocol_3usd_reserves(&f.pic, f.protocol_id), reserve_counter_before,
+        "upgrade must not change reserve accounting");
+    assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, reserve_account.clone()),
+        three_usd_amount as u128, "legacy refund source remains the hashed reserve account");
+
+    flaky_set_fail_transfers(&f.pic, f.three_pool_ledger, false);
+    drain_pending_transfers(&f.pic);
+    assert!(get_pending_3usd_refunds(&f.pic, f.protocol_id).is_empty());
+    assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)), sp_balance_before,
+        "terminal recovery restores the stability pool's exact balance");
+    assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, reserve_account), 0,
+        "terminal recovery drains the legacy hashed reserve account");
 }
