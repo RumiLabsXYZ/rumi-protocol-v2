@@ -1,251 +1,277 @@
 <script>
-  const evidence = [
+  const report = {
+    date: 'October 8, 2026',
+    datetime: '2026-10-08',
+    source: 'origin/main at 8b4951d97576',
+    snapshot: 'Mainnet readback · October 8, 2026'
+  };
+
+  const states = [
+    { name: 'Merged source', meaning: 'The change is present on the repository main branch.' },
+    { name: 'Installed', meaning: 'The canister reports the module hash shown in this snapshot.' },
+    { name: 'Paused', meaning: 'The live system reports its emergency pause as active.' },
+    { name: 'Not installed', meaning: 'The mainnet canister still reports its earlier module.' }
+  ];
+
+  const changes = [
     {
-      state: 'Merged source',
-      title: 'PR #424 · CL-01 3pool',
-      detail:
-        'The source is merged and a valid artifact exists, but the change has not been installed.',
-      tone: 'merged',
-      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/424',
-      link: 'View PR #424'
+      pr: '#466',
+      title: '3pool upgrade and state preservation',
+      summary: 'Merged into main and installed on October 8. The rumi_3pool canister (fohh4-yyaaa-aaaap-qtkpa-cai) reports module SHA-256 b6e5e2eab401c8e1551a33acc134369a92744efb769ed4e34a7feb9923a7a1af. The upgrade readback recorded unchanged LP supply, reserves, admin fees, and virtual price, with zero pending claims.',
+      state: 'Installed · readback recorded',
+      tone: 'installed',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/466'
     },
     {
-      state: 'Installed Points release',
-      title: 'PR #450 · Points history migration',
-      detail:
-        'PR #450 is merged and its Points module is installed on mainnet. The live module SHA-256 is dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277. The ledger contains 417 rows: 401 original rows plus 16 historical adjustment rows.',
-      tone: 'live',
-      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/450',
-      link: 'View PR #450'
+      pr: '#459',
+      title: 'Stability Pool containment',
+      summary: 'The rumi_stability_pool canister (tmhzi-dqaaa-aaaap-qrd6q-cai) is emergency-paused. Its module remains 54245b779feb30c4da7ac3f60e9cb62afb99f1accd2ea5affc7adda8a28e4754; the upgrade is pending. The October 8 pause readback recorded 13 depositors. A later read confirmed the pause and depositor count; aggregate deposits are omitted because the later total differs from the earlier snapshot and has not been analyzed.',
+      state: 'Paused · upgrade pending',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/459'
     },
     {
-      state: 'Merged source',
-      title: 'PR #426 · Stability Pool',
-      detail:
-        'The CL-04 duplicate-credit fix is merged, but it has not been installed.',
-      tone: 'merged',
-      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/426',
-      link: 'View PR #426'
+      pr: '#455',
+      title: 'Bot upgrade pause',
+      summary: 'Source is merged. The liquidation_bot canister (nygob-3qaaa-aaaap-qttcq-cai) still reports its earlier module hash, f336ccf377d16d6ab675fe958205ba9fa3a799da4daf6d21b2d08f26871235c6.',
+      state: 'Merged · not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/455'
     },
     {
-      state: 'Live configuration',
-      title: 'Points epoch driver is disabled',
-      detail:
-        'The live configuration confirms the epoch driver is disabled. Epoch 18 remains open, with phase A complete and phase B absent.',
-      tone: 'live'
+      pr: '#456',
+      title: 'P08 account migration',
+      summary: 'Source is merged. The rumi_protocol_backend canister (tfesu-vyaaa-aaaap-qrd7a-cai) still reports its earlier module hash, 1714712f12525a5058c288bde8f456b09e2e893e4ac51fe7a82992ac07b0ecf1. This row does not imply installation on the other affected canisters.',
+      state: 'Merged · backend not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/456'
     },
     {
-      state: 'Draft source',
-      title: 'PR #422 is unmerged and not deployable',
-      detail:
-        'The broader security-remediation work remains a draft pull request. Its source and review progress do not establish a release artifact or a mainnet change.',
-      tone: 'draft',
-      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/422',
-      link: 'View draft PR #422'
+      pr: '#457',
+      title: 'P08 populated-state upgrade proof',
+      summary: 'The source and upgrade evidence are merged. The live backend remains at the earlier module hash shown above; this report makes no claim that the change is installed.',
+      state: 'Merged · backend not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/457'
+    },
+    {
+      pr: '#458',
+      title: 'BOT-10 recovery guard',
+      summary: 'Source is merged. The live backend and liquidation bot still report their earlier module hashes shown above; this report makes no claim that either change is installed.',
+      state: 'Merged · not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/458'
+    },
+    {
+      pr: '#460',
+      title: 'CL-02 collateral-return proof',
+      summary: 'Source is merged. The live backend still reports its earlier module hash shown above; this report makes no claim that the change is installed.',
+      state: 'Merged · backend not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/460'
+    },
+    {
+      pr: '#468',
+      title: 'Backend release compatibility',
+      summary: 'The backend compatibility change is merged into main. The live backend still reports its earlier module hash shown above; no installation is claimed here.',
+      state: 'Merged · backend not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/468'
+    }
+  ];
+
+  const limits = [
+    {
+      system: 'Points',
+      status: 'Not assessed in this snapshot',
+      detail: 'This update has no current Points canister or epoch readback, so it makes no claim about the active epoch, driver, or awards.'
+    },
+    {
+      system: 'Scope',
+      status: 'Selected status only',
+      detail: 'These entries cover named merge and release states. They do not establish that every finding is fixed, every component is current, or the protocol has received a formal third-party audit.'
     }
   ];
 </script>
 
 <svelte:head>
-  <title>October 2026 Security Review Status · Rumi Protocol</title>
+  <title>October 2026 Security Status · Rumi Protocol</title>
   <meta
     name="description"
-    content="Public October 8, 2026 update on Rumi Protocol security-review and release status. Points PR #450 is installed; epoch 18 remains open and the driver disabled."
+    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, and current mainnet pause status."
   />
 </svelte:head>
 
 <main>
-  <section class="hero">
-    <div class="page-width hero-inner">
-      <p class="eyebrow"><span class="eyebrow-mark" aria-hidden="true"></span> Security status report</p>
+  <section class="masthead">
+    <div class="page-width masthead-inner">
+      <p class="eyebrow"><span class="status-mark" aria-hidden="true"></span> Rumi Protocol / Security notes</p>
       <div class="hero-grid">
-        <div>
-          <h1>October review.<br /><span>Current status.</span></h1>
-          <p class="hero-copy">
-            This public update records the state of selected security follow-up and release work
-            on October 8, 2026. Points PR #450 is installed; other findings and
-            installations remain under review.
+        <div class="hero-copy">
+          <p class="issue-line">Status report <span>—</span> <time datetime={report.datetime}>{report.date}</time></p>
+          <h1>Security update,<br /><span>where things stand.</span></h1>
+          <p class="lede">
+            This snapshot separates merged source from mainnet installation. The 3pool upgrade
+            is installed with recorded state invariants; the Stability Pool remains paused, and
+            backend and bot follow-up changes are not yet installed.
           </p>
-          <p class="review-date">Status date <time datetime="2026-10-08">October 8, 2026</time></p>
         </div>
-
-        <aside class="status-card" aria-labelledby="status-title">
-          <div class="status-card-top">
-            <span class="status-dot" aria-hidden="true"></span>
-            <span>Release status</span>
-            <span class="status-label">Follow-up ongoing</span>
-          </div>
-          <h2 id="status-title">Points PR #450 installed</h2>
-          <p>
-            The live Points module is <code>dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277</code>.
-            The ledger has 417 rows: 401 original rows and 16 historical adjustment rows. Epoch 18 remains open;
-            phase A is complete and phase B is absent. The epoch driver is disabled.
-            Other security findings and installations remain pending.
-          </p>
-          <div class="status-divider"></div>
-          <p class="status-footnote">
-            Source merge, artifact validity, canister installation, and live configuration are
-            separate evidence states. The installed Points state reflects PR #450.
-          </p>
+        <aside class="report-stamp" aria-label={report.snapshot}>
+          <span class="stamp-label">Publication state</span>
+          <strong>{report.snapshot}</strong>
+          <p>The module hashes and state notes below come from a controller-authorized canister readback recorded by the release operator on October 8. This page is a dated snapshot, not live telemetry.</p>
+          <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
-
-      <div class="evidence-rail" aria-label="Security work evidence states">
-        <div class="evidence-step published">
-          <span class="step-icon" aria-hidden="true">01</span>
-          <div><strong>Source work</strong><span>Changes and review history</span></div>
-        </div>
-        <span class="rail-line" aria-hidden="true"></span>
-        <div class="evidence-step working">
-          <span class="step-icon" aria-hidden="true">02</span>
-          <div><strong>Release state</strong><span>Merge and artifact status</span></div>
-        </div>
-        <span class="rail-line" aria-hidden="true"></span>
-        <div class="evidence-step live">
-          <span class="step-icon" aria-hidden="true">03</span>
-          <div><strong>Mainnet</strong><span>Points PR #450 installed</span></div>
-        </div>
-      </div>
+      <div class="rule-caption"><span>Source cutoff · {report.source} · October 8, 2026</span><span>Selected remediation and release follow-up</span></div>
     </div>
   </section>
 
-  <section class="section page-width" aria-labelledby="evidence-title">
+  <section class="page-width section evidence-section" aria-labelledby="evidence-title">
     <div class="section-heading">
-      <p class="section-kicker">What is known</p>
-      <h2 id="evidence-title">Source, installation, and live configuration</h2>
-      <p>
-        Each statement below is limited to the state recorded on the report date. Merged source
-        does not establish installation, and the installed Points release does not close the wider review.
-      </p>
+      <p class="section-label">How to read this page</p>
+      <h2 id="evidence-title">Each stage needs its own proof.</h2>
+      <p>A merged source change does not establish installation. Module hashes and the pause state are reported separately from source history.</p>
     </div>
-
-    <div class="state-grid">
-      {#each evidence as item}
-        <article class="state-card" class:state-source={item.tone === 'draft'} class:state-live={item.tone === 'live'}>
-          <span class="state-icon" aria-hidden="true">{item.tone === 'merged' ? '✓' : item.tone === 'draft' ? '◷' : item.tone === 'live' ? '●' : '—'}</span>
-          <p class="state-label">{item.state}</p>
-          <h3>{item.title}</h3>
-          <p>{item.detail}</p>
-          {#if item.href}
-            <a class="evidence-link" href={item.href} target="_blank" rel="noopener noreferrer">
-              {item.link} <span aria-hidden="true">↗</span>
-            </a>
-          {/if}
+    <div class="state-key">
+      {#each states as item}
+        <article class="key-item">
+          <span class="badge" class:badge-held={item.name === 'Not installed' || item.name === 'Paused'} class:badge-installed={item.name === 'Installed'}>{item.name}</span>
+          <p>{item.meaning}</p>
         </article>
       {/each}
     </div>
   </section>
 
-  <section class="release-section" aria-labelledby="points-title">
-    <div class="page-width release-inner">
-      <div class="section-heading release-heading">
-        <p class="section-kicker">Points</p>
-        <h2 id="points-title">PR #450 installed; epoch 18 remains open</h2>
-        <p>
-          PR #450 is installed on mainnet. The live module SHA-256 is
-          <code>dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277</code>.
-          The ledger contains 417 rows, including 16 historical adjustment rows in addition to the 401 original rows.
-          Epoch 18 remains open, phase A is complete, phase B is absent, and the epoch driver is disabled.
-        </p>
+  <section class="updates-section" aria-labelledby="updates-title">
+    <div class="page-width section">
+      <div class="section-heading section-heading-wide">
+        <p class="section-label">Selected changes</p>
+        <h2 id="updates-title">Change and release status</h2>
+        <p>This October 8 snapshot reports the highest evidence stage available for each change. A source merge and a live installation remain separate states.</p>
       </div>
-      <p class="release-note">
-        Epoch 18 remains open, with phase A complete and phase B absent. Other security findings
-        and installations remain pending, so this is not a protocol-wide close-out.
+      <div class="change-list">
+        {#each changes as item}
+          <article class="change-row">
+            <div class="change-ref"><span>{item.pr}</span><span class="change-rule" aria-hidden="true"></span></div>
+            <div class="change-main">
+              <h3>{item.title}</h3>
+              <p>{item.summary}</p>
+              <a href={item.href} target="_blank" rel="noopener noreferrer">Review public source record <span aria-hidden="true">↗</span></a>
+            </div>
+            <div class="change-state">
+              <span class="badge" class:badge-held={item.tone === 'held'} class:badge-installed={item.tone === 'installed'}>{item.state}</span>
+            </div>
+          </article>
+        {/each}
+      </div>
+    </div>
+  </section>
+
+  <section class="page-width section held-section" aria-labelledby="held-title">
+    <div class="section-heading">
+      <p class="section-label">Scope and limits</p>
+      <h2 id="held-title">What this snapshot does not establish</h2>
+      <p>This is a selected status update, not a full finding inventory.</p>
+    </div>
+    <div class="held-list">
+      {#each limits as item}
+        <article class="held-row">
+          <div class="held-heading"><h3>{item.system}</h3><span class="badge badge-held">{item.status}</span></div>
+          <p>{item.detail}</p>
+        </article>
+      {/each}
+    </div>
+  </section>
+
+  <section class="limits-band" aria-labelledby="limits-title">
+    <div class="page-width limits-inner">
+      <div>
+        <p class="section-label">Scope</p>
+        <h2 id="limits-title">A status record, not a clearance.</h2>
+      </div>
+      <p>
+        Source review, tests, builds, installation, activation, and live behavior are distinct claims.
+        This page records an October 8 snapshot; it does not publish private audit material or
+        establish that every finding is closed.
       </p>
     </div>
   </section>
 
-  <section class="section page-width" aria-labelledby="limits-title">
-    <div class="section-heading">
-      <p class="section-kicker">Scope and limits</p>
-      <h2 id="limits-title">What this update does not establish</h2>
-    </div>
-    <ul class="limits-list">
-      <li>It does not claim that all security findings are fixed or closed.</li>
-      <li>It does not claim that the PR #424 or #426 source changes have been installed as Wasm.</li>
-      <li>It does not treat draft PR #422 as merged, release-ready, or deployable.</li>
-      <li>It does not claim that reward treatment is decided, epoch 18 is closed, or the epoch driver is re-enabled.</li>
-      <li>It confirms the Points release only; other findings and installations remain pending.</li>
-      <li>It is a high-level status summary, not publication of the private audit package or exploit details.</li>
-    </ul>
-    <p class="source-note">
-      The public review archive and responsible-disclosure contact are on the
-      <a href="/security">Security page</a>. For the public source history, see the
-      <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener noreferrer">Rumi Protocol repository</a>.
-    </p>
-  </section>
-
   <footer class="page-width page-foot">
-    <span>Report date: October 8, 2026.</span>
+    <span>Evidence date: <time datetime={report.datetime}>{report.date}</time></span>
     <a href="/security">Back to security reviews <span aria-hidden="true">↗</span></a>
   </footer>
 </main>
 
 <style>
-  main { color: var(--rumi-text-primary); }
-  .page-width { width: min(1120px, calc(100% - 3rem)); margin-inline: auto; }
-  .hero { position: relative; overflow: hidden; border-bottom: 1px solid var(--rumi-border); background: radial-gradient(ellipse at 12% 0%, color-mix(in srgb, var(--rumi-purple-accent) 16%, transparent), transparent 52%), radial-gradient(ellipse at 92% 70%, color-mix(in srgb, var(--rumi-action) 8%, transparent), transparent 38%), var(--rumi-bg-primary); }
-  .hero-inner { padding-top: clamp(4rem, 8vw, 7rem); padding-bottom: 2.75rem; }
-  .eyebrow, .section-kicker { display: flex; align-items: center; gap: .65rem; margin: 0 0 1rem; color: var(--rumi-purple-accent); font-size: .72rem; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
-  .eyebrow-mark { width: .5rem; height: .5rem; border-radius: 50%; background: var(--rumi-purple-accent); box-shadow: 0 0 18px color-mix(in srgb, var(--rumi-purple-accent) 65%, transparent); }
-  .hero-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(300px, .8fr); align-items: center; gap: clamp(2rem, 6vw, 5rem); }
-  h1 { max-width: 720px; margin: 0; font-size: clamp(2.6rem, 6.3vw, 5.4rem); line-height: .99; letter-spacing: -.055em; }
+  main { color: var(--rumi-text-primary); --report-muted: #a09bb5; }
+  .page-width { width: min(1080px, calc(100% - 3rem)); margin-inline: auto; }
+  .masthead { position: relative; overflow: hidden; border-bottom: 1px solid var(--rumi-border); background: linear-gradient(115deg, color-mix(in srgb, var(--rumi-purple-accent) 9%, var(--rumi-bg-primary)), var(--rumi-bg-primary) 48%, color-mix(in srgb, #e7a94c 5%, var(--rumi-bg-primary))); }
+  .masthead-inner { padding-block: clamp(3rem, 7vw, 6.5rem) 1.5rem; }
+  .eyebrow, .section-label { margin: 0 0 1rem; color: var(--rumi-teal); font-size: .73rem; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
+  .eyebrow { display: flex; align-items: center; gap: .7rem; }
+  .status-mark { width: .55rem; height: .55rem; border: 2px solid var(--rumi-teal); border-radius: 50%; }
+  .hero-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(245px, .65fr); align-items: end; gap: clamp(2rem, 7vw, 6rem); }
+  .issue-line { margin: 0 0 1rem; color: var(--report-muted); font-size: .88rem; }
+  .issue-line span { padding-inline: .4rem; color: var(--rumi-purple-accent); }
+  .issue-line time { color: var(--rumi-text-secondary); }
+  h1 { max-width: 740px; margin: 0; font-size: clamp(2.75rem, 6.4vw, 5.25rem); line-height: .98; letter-spacing: -.065em; }
   h1 span { color: var(--rumi-purple-accent); }
-  .hero-copy { max-width: 620px; margin: 1.6rem 0 1rem; color: var(--rumi-text-secondary); font-size: 1.08rem; line-height: 1.75; }
-  .review-date { color: var(--rumi-text-muted); font-size: .84rem; }
-  .review-date time { color: var(--rumi-text-secondary); }
-  .status-card { padding: 1.5rem; border: 1px solid color-mix(in srgb, #f4c46e 35%, var(--rumi-border)); border-radius: 1rem; background: linear-gradient(150deg, color-mix(in srgb, #f4c46e 8%, var(--rumi-bg-surface1)), var(--rumi-bg-surface1) 72%); box-shadow: 0 24px 80px rgba(0,0,0,.22); }
-  .status-card-top { display: flex; align-items: center; gap: .55rem; color: #f4c46e; font-size: .72rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
-  .status-dot { width: .5rem; height: .5rem; border-radius: 50%; background: #f4c46e; box-shadow: 0 0 0 4px rgba(244,196,110,.12); }
-  .status-label { margin-left: auto; padding: .32rem .55rem; border: 1px solid rgba(244,196,110,.25); border-radius: 999px; font-size: .62rem; letter-spacing: .08em; }
-  .status-card h2 { margin: 1.2rem 0 .55rem; font-size: 1.45rem; letter-spacing: -.03em; }
-  .status-card p { margin: 0; color: var(--rumi-text-secondary); font-size: .9rem; line-height: 1.65; }
-  .status-divider { height: 1px; margin: 1.1rem 0; background: var(--rumi-border); }
-  .status-card .status-footnote { color: var(--rumi-text-muted); font-size: .77rem; }
-  .evidence-rail { display: grid; grid-template-columns: 1fr minmax(28px,.15fr) 1fr minmax(28px,.15fr) 1fr; align-items: center; gap: .75rem; margin-top: clamp(3rem, 7vw, 5.5rem); padding: 1.1rem 1.3rem; border: 1px solid var(--rumi-border); border-radius: .9rem; background: color-mix(in srgb, var(--rumi-bg-surface1) 76%, transparent); }
-  .evidence-step { display: flex; align-items: center; gap: .8rem; min-width: 0; }
-  .step-icon { display: grid; width: 2.2rem; height: 2.2rem; flex: 0 0 auto; place-items: center; border: 1px solid var(--rumi-border); border-radius: .65rem; color: var(--rumi-purple-accent); font-size: .68rem; font-weight: 700; }
-  .evidence-step div { display: grid; gap: .2rem; }
-  .evidence-step strong { font-size: .82rem; }
-  .evidence-step span:last-child { color: var(--rumi-text-muted); font-size: .7rem; }
-  .evidence-step.working .step-icon { color: #f4c46e; border-color: rgba(244,196,110,.3); }
-  .evidence-step.live .step-icon { color: var(--rumi-teal); }
-  .rail-line { height: 1px; background: linear-gradient(90deg, var(--rumi-purple-accent), rgba(244,196,110,.6)); }
-  .section { padding-block: clamp(4rem, 8vw, 6.5rem); }
+  .lede { max-width: 670px; margin: 1.6rem 0 0; color: var(--rumi-text-secondary); font-size: clamp(1rem, 1.6vw, 1.16rem); line-height: 1.75; }
+  .report-stamp { padding: 1.2rem 1.25rem; border: 1px solid color-mix(in srgb, #e7a94c 32%, var(--rumi-border)); border-top: 3px solid #e7a94c; background: color-mix(in srgb, var(--rumi-bg-surface1) 88%, transparent); }
+  .stamp-label { display: block; margin-bottom: .65rem; color: #e7bb72; font-size: .68rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+  .report-stamp strong { display: block; font-size: 1.12rem; line-height: 1.4; }
+  .report-stamp p { margin: .65rem 0 1rem; color: var(--report-muted); font-size: .82rem; line-height: 1.6; }
+  .report-stamp a, .change-main a, .page-foot a { color: var(--rumi-teal-bright); text-decoration: none; text-underline-offset: 4px; }
+  .report-stamp a:hover, .change-main a:hover, .page-foot a:hover { text-decoration: underline; }
+  .rule-caption { display: flex; justify-content: space-between; gap: 1rem; margin-top: clamp(3rem, 7vw, 5.8rem); padding-block: .8rem; border-top: 1px solid var(--rumi-border); color: var(--report-muted); font-size: .73rem; }
+  .rule-caption span:first-child { color: var(--rumi-text-secondary); font-weight: 700; }
+  .section { padding-block: clamp(3.5rem, 7vw, 6rem); }
   .section-heading { max-width: 680px; margin-bottom: 2rem; }
-  .section-kicker { margin-bottom: .7rem; color: var(--rumi-teal); }
-  .section-heading h2 { margin: 0; font-size: clamp(1.8rem, 3.4vw, 2.7rem); letter-spacing: -.04em; }
-  .section-heading > p:last-child { margin: .85rem 0 0; color: var(--rumi-text-muted); line-height: 1.7; }
-  .state-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
-  .state-card { position: relative; display: flex; min-height: 290px; flex-direction: column; align-items: flex-start; padding: 1.4rem; border: 1px solid var(--rumi-border); border-radius: .9rem; background: var(--rumi-bg-surface1); }
-  .state-card::before { position: absolute; inset: 0 auto 0 0; width: 2px; border-radius: .9rem 0 0 .9rem; background: var(--rumi-purple-accent); content: ''; opacity: .7; }
-  .state-source::before { background: #f4c46e; }
-  .state-live::before { background: var(--rumi-teal); }
-  .state-icon { display: grid; width: 2rem; height: 2rem; place-items: center; border-radius: .6rem; background: color-mix(in srgb, var(--rumi-purple-accent) 12%, var(--rumi-bg-surface2)); color: var(--rumi-purple-accent); font-size: .95rem; }
-  .state-source .state-icon { color: #f4c46e; background: rgba(244,196,110,.1); }
-  .state-live .state-icon { color: var(--rumi-teal); background: color-mix(in srgb, var(--rumi-teal) 10%, var(--rumi-bg-surface2)); }
-  .state-label { margin: 1.2rem 0 .35rem; color: var(--rumi-text-muted); font-size: .66rem; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
-  .state-card h3 { margin: 0 0 .65rem; font-size: 1.1rem; }
-  .state-card > p:not(.state-label) { margin: 0; color: var(--rumi-text-secondary); font-size: .86rem; line-height: 1.7; }
-  .evidence-link { margin-top: auto; padding-top: 1rem; color: var(--rumi-purple-accent); font-size: .82rem; font-weight: 600; text-decoration: none; }
-  .release-section { border-block: 1px solid var(--rumi-border); background: linear-gradient(120deg, rgba(14,18,34,.95), rgba(10,14,26,.96)); }
-  .release-inner { padding-block: clamp(4rem, 8vw, 6rem); }
-  .release-heading { margin-bottom: 1rem; }
-  .release-note { margin: 1.4rem 0 0; padding: 1rem 1.1rem; border-left: 2px solid #f4c46e; background: rgba(20,26,46,.58); color: var(--rumi-text-secondary); font-size: .9rem; line-height: 1.7; }
-  .limits-list { display: grid; gap: .65rem; max-width: 780px; margin: 0; padding-left: 1.2rem; color: var(--rumi-text-secondary); line-height: 1.7; }
-  .limits-list li::marker { color: var(--rumi-purple-accent); }
-  .source-note { max-width: 780px; margin-top: 2rem; color: var(--rumi-text-muted); font-size: .85rem; line-height: 1.7; }
-  .source-note a, .page-foot a { color: var(--rumi-purple-accent); text-underline-offset: 3px; }
-  .page-foot { display: flex; justify-content: space-between; gap: 1rem; padding-block: 1.3rem 2rem; border-top: 1px solid var(--rumi-border); color: var(--rumi-text-muted); font-size: .72rem; }
+  .section-label { margin-bottom: .7rem; }
+  .section-heading h2, .limits-inner h2 { margin: 0; font-size: clamp(1.8rem, 3.5vw, 2.75rem); line-height: 1.1; letter-spacing: -.045em; }
+  .section-heading > p:last-child { margin: .85rem 0 0; color: var(--report-muted); line-height: 1.7; }
+  .state-key { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--rumi-border); border-left: 1px solid var(--rumi-border); }
+  .key-item { min-height: 118px; padding: 1rem; border-right: 1px solid var(--rumi-border); border-bottom: 1px solid var(--rumi-border); background: color-mix(in srgb, var(--rumi-bg-surface1) 58%, transparent); }
+  .key-item p { max-width: 250px; margin: .75rem 0 0; color: var(--report-muted); font-size: .8rem; line-height: 1.55; }
+  .badge { display: inline-flex; align-items: center; width: fit-content; min-height: 1.7rem; padding: .28rem .55rem; border: 1px solid color-mix(in srgb, var(--rumi-purple-accent) 35%, var(--rumi-border)); border-radius: 999px; color: #c5b3ff; background: color-mix(in srgb, var(--rumi-purple-accent) 10%, transparent); font-size: .68rem; font-weight: 700; line-height: 1.25; }
+  .badge-held { border-color: rgba(231,169,76,.38); color: #edc77f; background: rgba(231,169,76,.09); }
+  .badge-installed { border-color: color-mix(in srgb, var(--rumi-teal) 38%, var(--rumi-border)); color: var(--rumi-teal-bright); background: color-mix(in srgb, var(--rumi-teal) 9%, transparent); }
+  .updates-section { border-block: 1px solid var(--rumi-border); background: color-mix(in srgb, var(--rumi-bg-surface1) 45%, var(--rumi-bg-primary)); }
+  .section-heading-wide { max-width: 760px; }
+  .change-list { border-top: 1px solid var(--rumi-border); }
+  .change-row { display: grid; grid-template-columns: 100px minmax(0, 1fr) minmax(150px, auto); gap: 1.5rem; padding-block: 1.55rem; border-bottom: 1px solid var(--rumi-border); }
+  .change-ref { display: flex; align-items: flex-start; gap: .7rem; color: var(--rumi-teal); font-size: .82rem; font-weight: 700; }
+  .change-rule { width: 1px; min-height: 32px; background: color-mix(in srgb, var(--rumi-teal) 44%, var(--rumi-border)); }
+  .change-main h3, .held-heading h3 { margin: 0; font-size: 1.08rem; letter-spacing: -.015em; }
+  .change-main p, .held-row > p { max-width: 700px; margin: .55rem 0 .65rem; color: var(--rumi-text-secondary); font-size: .87rem; line-height: 1.7; overflow-wrap: anywhere; }
+  .change-main a { font-size: .78rem; font-weight: 600; }
+  .change-state { display: flex; flex-direction: column; align-items: flex-end; gap: .45rem; }
+  .held-list { border-top: 1px solid var(--rumi-border); }
+  .held-row { padding-block: 1.25rem; border-bottom: 1px solid var(--rumi-border); }
+  .held-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+  .held-row > p { margin-bottom: 0; }
+  .limits-band { border-block: 1px solid var(--rumi-border); background: linear-gradient(105deg, color-mix(in srgb, var(--rumi-purple-accent) 8%, var(--rumi-bg-primary)), var(--rumi-bg-primary) 55%); }
+  .limits-inner { display: grid; grid-template-columns: minmax(230px, .7fr) 1fr; gap: clamp(2rem, 7vw, 6rem); align-items: start; padding-block: clamp(2.5rem, 5vw, 4rem); }
+  .limits-inner > p { max-width: 620px; margin: 0; color: var(--rumi-text-secondary); line-height: 1.8; }
+  .page-foot { display: flex; justify-content: space-between; gap: 1rem; padding-block: 1.2rem 2rem; color: var(--report-muted); font-size: .75rem; }
   a:focus-visible { outline: 2px solid var(--rumi-teal-bright); outline-offset: 4px; border-radius: 2px; }
   @media (max-width: 760px) {
-    .page-width { width: min(100% - 2rem, 600px); }
-    .hero-grid { grid-template-columns: 1fr; gap: 2rem; }
-    .status-card { max-width: 540px; }
-    .evidence-rail { grid-template-columns: 1fr; gap: .7rem; padding: 1rem; }
-    .rail-line { width: 1px; height: 16px; margin-left: 1.05rem; background: linear-gradient(180deg, var(--rumi-purple-accent), rgba(244,196,110,.6)); }
-    .state-grid { grid-template-columns: 1fr; }
-    .state-card { min-height: auto; }
+    :global(.top-bar) { box-sizing: border-box; min-width: 0; }
+    .page-width { box-sizing: border-box; width: calc(100% - 2rem); max-width: 610px; }
+    .hero-grid, .limits-inner { grid-template-columns: 1fr; gap: 1.75rem; }
+    .hero-grid > *, .limits-inner > * { min-width: 0; }
+    .report-stamp { box-sizing: border-box; width: 100%; max-width: 480px; overflow-wrap: anywhere; }
+    .lede, .report-stamp p, .report-stamp strong { overflow-wrap: anywhere; }
+    .rule-caption { flex-direction: column; gap: .3rem; }
+    .state-key { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .change-row { grid-template-columns: 72px minmax(0, 1fr); gap: .9rem; }
+    .change-state { grid-column: 2; align-items: flex-start; }
+    .held-heading { align-items: flex-start; flex-direction: column; gap: .65rem; }
     .page-foot { flex-direction: column; }
+  }
+  @media (max-width: 430px) {
+    .state-key { grid-template-columns: 1fr; }
   }
 </style>
