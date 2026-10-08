@@ -8382,7 +8382,13 @@ fn get_pending_payouts(cursor: Option<u128>, limit: Option<u16>) -> PendingPayou
                     {
                         None
                     } else if transfer.too_old_confirmed {
-                        Some("Attempt exceeded the ledger replay window; complete ledger-history proof is required before any rearm".to_string())
+                        Some(if transfer.history_candidate_seen {
+                            "Ledger history contains a transfer with the same source, recipient, and amount; identity is ambiguous and the payout remains held".to_string()
+                        } else if let Some(scan) = transfer.history_scan {
+                            format!("Ledger history reconciliation progress: scanned through block {} of {}", scan.next_index, scan.snapshot_log_length)
+                        } else {
+                            "Attempt exceeded the ledger replay window; complete ledger-history proof is required before any rearm".to_string()
+                        })
                     } else if transfer.reconciliation_required {
                         Some("Legacy or upgrade-interrupted receipt lacks a safe automatic reconciliation proof".to_string())
                     } else if transfer.ledger.is_none() || transfer.transfer_amount_raw.is_none() {
@@ -8421,9 +8427,25 @@ async fn recover_pending_payout(operation_id: u128) -> Result<bool, ProtocolErro
         ));
     }
     if transfer.held_for_manual_retry || transfer.reconciliation_required {
-        return Err(ProtocolError::GenericError(
-            "Payout is held for ledger-history reconciliation; it was not resent".to_string(),
-        ));
+        if !transfer.too_old_confirmed {
+            return Err(ProtocolError::GenericError(
+                "Payout is held for manual reconciliation; it was not resent".to_string(),
+            ));
+        }
+        match rumi_protocol_backend::payout_history::advance_owner_rearm(operation_id, caller)
+            .await
+            .map_err(ProtocolError::GenericError)?
+        {
+            rumi_protocol_backend::payout_history::PayoutRearmProgress::Rearmed => {
+                rumi_protocol_backend::process_one_pending_payout(operation_id).await;
+                return Ok(read_state(|s| s.get_pending_payout(operation_id).is_none()));
+            }
+            rumi_protocol_backend::payout_history::PayoutRearmProgress::Scanning
+            | rumi_protocol_backend::payout_history::PayoutRearmProgress::CandidateHeld
+            | rumi_protocol_backend::payout_history::PayoutRearmProgress::UnsupportedHeld => {
+                return Ok(false);
+            }
+        }
     }
     rumi_protocol_backend::process_one_pending_payout(operation_id).await;
     Ok(read_state(|s| s.get_pending_payout(operation_id).is_none()))

@@ -1275,6 +1275,38 @@ pub enum PendingPayoutKind {
     Redemption,
 }
 
+/// Persisted binding for one owner-requested ICRC-3 scan after a typed TooOld.
+/// Old rows decode this as `None` and are therefore never eligible to rearm.
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct PendingPayoutHistoryScan {
+    pub operation_id: u128,
+    pub payout_kind: PendingPayoutKind,
+    pub ledger: Principal,
+    pub owner: Principal,
+    pub amount_raw: u64,
+    pub attempt_nonce: u128,
+    pub start_index: u64,
+    pub snapshot_log_length: u64,
+    pub next_index: u64,
+}
+
+/// Immutable record of a completed no-effect history scan and its fresh
+/// replacement attempt. The original operation ID and retry count are kept.
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct PendingPayoutNoEffectProof {
+    pub operation_id: u128,
+    pub payout_kind: PendingPayoutKind,
+    pub ledger: Principal,
+    pub owner: Principal,
+    pub amount_raw: u64,
+    pub old_attempt_nonce: u128,
+    pub new_attempt_nonce: u128,
+    pub start_index: u64,
+    pub snapshot_log_length: u64,
+    pub complete_prefix: bool,
+    pub verified_at_ns: u64,
+}
+
 impl Default for PendingPayoutKind {
     fn default() -> Self {
         Self::Margin
@@ -1331,6 +1363,22 @@ pub struct PendingMarginTransfer {
     pub in_flight: bool,
     #[serde(default)]
     pub too_old_confirmed: bool,
+    /// Ledger log length observed before the first dispatch of this nonce.
+    /// Missing means an earlier ambiguous send cannot be excluded.
+    #[serde(default)]
+    pub history_start_index: Option<u64>,
+    /// Explicit opt-in version set only when this implementation creates the
+    /// row. Missing/defaulted legacy rows cannot use history-based rearming.
+    #[serde(default)]
+    pub rearm_schema_version: u8,
+    #[serde(default)]
+    pub history_scan: Option<PendingPayoutHistoryScan>,
+    #[serde(default)]
+    pub history_candidate_seen: bool,
+    /// Replays retain one immutable attempt lineage. A payout may be rearmed
+    /// at most once; a second TooOld remains held for operator reconciliation.
+    #[serde(default)]
+    pub no_effect_proof: Option<PendingPayoutNoEffectProof>,
     /// Resumable ICRC-1 history proof state. `None` means no proof is in progress.
     #[serde(default)]
     pub history_log_length: Option<u64>,
@@ -1496,6 +1544,12 @@ pub struct State {
     /// upgrade without adding any payout state transition.
     #[serde(default)]
     pub pending_payout_scan_cursor: Option<u128>,
+    /// Global quota for owner-triggered ICRC-3 history paging. This bounds
+    /// aggregate callback/cycle work even if callers have many payout rows.
+    #[serde(default)]
+    pub payout_history_scan_window_ns: u64,
+    #[serde(default)]
+    pub payout_history_scan_count: u8,
     /// Wave-4 ICC-007: durable refund queue for `redeem_reserves` failures,
     /// keyed by the burn icUSD block index. Empty for pre-Wave-4 snapshots.
     #[serde(default)]
@@ -2298,6 +2352,8 @@ impl Default for State {
             pending_redemption_transfer: BTreeMap::new(),
             pending_payout_index: BTreeMap::new(),
             pending_payout_scan_cursor: None,
+            payout_history_scan_window_ns: 0,
+            payout_history_scan_count: 0,
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             mode: Mode::default(),
@@ -2458,6 +2514,8 @@ impl From<InitArg> for State {
             pending_redemption_transfer: BTreeMap::new(),
             pending_payout_index: BTreeMap::new(),
             pending_payout_scan_cursor: None,
+            payout_history_scan_window_ns: 0,
+            payout_history_scan_count: 0,
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             vault_id_to_vaults: BTreeMap::new(),
@@ -2725,6 +2783,23 @@ impl From<InitArg> for State {
 }
 
 impl State {
+    /// Enforce an aggregate owner-triggered ICRC-3 query quota.
+    pub fn claim_payout_history_scan_slot(&mut self, now: u64) -> bool {
+        const WINDOW_NS: u64 = 60_000_000_000;
+        const MAX_SCANS_PER_WINDOW: u8 = 12;
+        if self.payout_history_scan_window_ns == 0
+            || now.saturating_sub(self.payout_history_scan_window_ns) >= WINDOW_NS
+        {
+            self.payout_history_scan_window_ns = now;
+            self.payout_history_scan_count = 0;
+        }
+        if self.payout_history_scan_count >= MAX_SCANS_PER_WINDOW {
+            return false;
+        }
+        self.payout_history_scan_count += 1;
+        true
+    }
+
     /// Fail closed when distinct payout receipts share an ICRC attempt nonce.
     /// A nonce collision can cause ledger deduplication to treat one transfer
     /// as the result for multiple obligations, so every colliding receipt must
@@ -9959,6 +10034,11 @@ mod tests {
                 reconciliation_required: false,
                 in_flight: false,
                 too_old_confirmed: false,
+                history_start_index: None,
+                rearm_schema_version: 0,
+                history_scan: None,
+                history_candidate_seen: false,
+                no_effect_proof: None,
                 history_log_length: None,
                 history_cursor: 0,
                 min_net_collateral_raw: None,
@@ -9990,6 +10070,11 @@ mod tests {
             reconciliation_required: false,
             in_flight: true,
             too_old_confirmed: false,
+                history_start_index: None,
+                rearm_schema_version: 0,
+                history_scan: None,
+                history_candidate_seen: false,
+                no_effect_proof: None,
             history_log_length: None,
             history_cursor: 0,
             min_net_collateral_raw: None,
@@ -10040,6 +10125,11 @@ mod tests {
                 reconciliation_required: operation_id <= 200,
                 in_flight: false,
                 too_old_confirmed: false,
+                history_start_index: None,
+                rearm_schema_version: 0,
+                history_scan: None,
+                history_candidate_seen: false,
+                no_effect_proof: None,
                 history_log_length: None,
                 history_cursor: 0,
                 min_net_collateral_raw: None,
@@ -10081,6 +10171,11 @@ mod tests {
                 reconciliation_required: false,
                 in_flight: false,
                 too_old_confirmed: false,
+                history_start_index: None,
+                rearm_schema_version: 0,
+                history_scan: None,
+                history_candidate_seen: false,
+                no_effect_proof: None,
                 history_log_length: None,
                 history_cursor: 0,
                 min_net_collateral_raw: None,
@@ -10125,6 +10220,11 @@ mod tests {
                 reconciliation_required: true,
                 in_flight: false,
                 too_old_confirmed: false,
+                history_start_index: None,
+                rearm_schema_version: 0,
+                history_scan: None,
+                history_candidate_seen: false,
+                no_effect_proof: None,
                 history_log_length: None,
                 history_cursor: 0,
                 min_net_collateral_raw: None,
@@ -10167,6 +10267,11 @@ mod tests {
             reconciliation_required: false,
             in_flight: false,
             too_old_confirmed: false,
+                history_start_index: None,
+                rearm_schema_version: 0,
+                history_scan: None,
+                history_candidate_seen: false,
+                no_effect_proof: None,
             history_log_length: None,
             history_cursor: 0,
             min_net_collateral_raw: None,
@@ -10262,6 +10367,11 @@ mod tests {
             reconciliation_required: false,
             in_flight: false,
             too_old_confirmed: false,
+                history_start_index: None,
+                rearm_schema_version: 0,
+                history_scan: None,
+                history_candidate_seen: false,
+                no_effect_proof: None,
             history_log_length: None,
             history_cursor: 0,
             min_net_collateral_raw: Some(100),

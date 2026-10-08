@@ -49,6 +49,7 @@ pub mod liquidity_pool;
 pub mod logs;
 pub mod management;
 pub mod numeric;
+pub mod payout_history;
 pub mod state;
 pub mod storage;
 pub mod treasury;
@@ -1526,6 +1527,10 @@ pub async fn process_one_pending_payout(operation_id: u128) {
     let Some(transfer) = transfer else {
         return;
     };
+    if !crate::payout_history::capture_dispatch_boundary(operation_id, transfer).await {
+        crate::payout_history::hold_failed_dispatch_preflight(operation_id, transfer);
+        return;
+    }
     let ledger = transfer.ledger.expect("validated payout ledger");
     let amount = transfer
         .transfer_amount_raw
@@ -1565,11 +1570,21 @@ pub async fn process_one_pending_payout(operation_id: u128) {
             });
         }
         Err(error) => {
-            mutate_state(|s| {
-                s.mutate_pending_payout(operation_id, |row| {
-                    note_pending_payout_failure(row, &error);
+            if matches!(&error, TransferError::TooOld) {
+                mutate_state(|s| {
+                    crate::event::record_pending_payout_too_old(
+                        s,
+                        operation_id,
+                        transfer.op_nonce,
+                    );
                 });
-            });
+            } else {
+                mutate_state(|s| {
+                    s.mutate_pending_payout(operation_id, |row| {
+                        note_pending_payout_failure(row, &error);
+                    });
+                });
+            }
             if let TransferError::BadFee { expected_fee } = error {
                 if let Ok(fee) = expected_fee.0.try_into() {
                     mutate_state(|s| {
