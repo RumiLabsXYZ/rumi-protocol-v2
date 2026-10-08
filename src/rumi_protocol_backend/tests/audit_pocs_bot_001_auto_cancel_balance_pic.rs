@@ -463,6 +463,21 @@ fn get_bot_stats(pic: &PocketIc, protocol_id: Principal) -> BotStatsResponse {
     }
 }
 
+fn get_bot_claim_vault_ids(pic: &PocketIc, protocol_id: Principal) -> Vec<u64> {
+    let result = pic
+        .query_call(
+            protocol_id,
+            Principal::anonymous(),
+            "get_bot_claim_vault_ids",
+            encode_args(()).unwrap(),
+        )
+        .expect("get_bot_claim_vault_ids call failed");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode claim vault ids"),
+        WasmResult::Reject(message) => panic!("get_bot_claim_vault_ids rejected: {message}"),
+    }
+}
+
 fn get_bot_001_events(pic: &PocketIc, protocol_id: Principal) -> Vec<Event> {
     let args = GetEventsArg {
         start: 0,
@@ -1300,5 +1315,47 @@ fn bot_claim_payment_and_return_proofs_use_exact_icrc3_ledger_blocks() {
         get_bot_stats(&f.pic, f.protocol_id).total_debt_covered_e8s,
         second_claim.debt_covered,
         "proof confirmation should account the claim exactly once"
+    );
+}
+
+/// The legacy vault-id-only endpoint must fail closed even when the stored
+/// proof-mode flag is still at its false legacy default. A registered bot
+/// cannot settle debt or release the claim without an exact payment receipt.
+#[test]
+fn legacy_bot_confirmation_never_mutates_claim_or_accounting_without_proof() {
+    let f = setup_fixture();
+    let (_, claim) = seed_bot_claim(&f);
+    let before = get_bot_stats(&f.pic, f.protocol_id);
+
+    let result = f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "bot_confirm_liquidation",
+            encode_args((claim.vault_id,)).unwrap(),
+        )
+        .expect("legacy confirmation update should return a protocol error");
+    let error: Result<(), ProtocolError> = match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode legacy confirmation"),
+        WasmResult::Reject(message) => panic!("legacy confirmation trapped: {message}"),
+    };
+    assert!(
+        matches!(error, Err(ProtocolError::GenericError(ref message)) if message.contains("exact ICRC-3 payment proof")),
+        "legacy endpoint must explain the required proof, got {error:?}"
+    );
+
+    let after = get_bot_stats(&f.pic, f.protocol_id);
+    assert_eq!(
+        after.total_debt_covered_e8s, before.total_debt_covered_e8s,
+        "proofless confirmation must not write down debt"
+    );
+    assert_eq!(
+        after.budget_remaining_e8s, before.budget_remaining_e8s,
+        "proofless confirmation must keep the claim's budget reserved"
+    );
+    assert!(
+        get_bot_claim_vault_ids(&f.pic, f.protocol_id).contains(&claim.vault_id),
+        "proofless confirmation must leave the claim active"
     );
 }

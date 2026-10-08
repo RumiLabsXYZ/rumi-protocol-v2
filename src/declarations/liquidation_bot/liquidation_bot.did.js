@@ -127,6 +127,7 @@ export const idlFactory = ({ IDL }) => {
   });
   const BotPaymentJournal = IDL.Record({
     'status' : BotPaymentStatus,
+    'shortfall_receipt_observed' : IDL.Bool,
     'collateral_price_e8s' : IDL.Nat64,
     'backend_principal' : IDL.Principal,
     'receipt' : IDL.Opt(TransferReceipt),

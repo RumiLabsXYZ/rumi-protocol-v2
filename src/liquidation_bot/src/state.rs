@@ -139,6 +139,11 @@ pub struct BotPaymentJournal {
     pub memo: Vec<u8>,
     pub status: BotPaymentStatus,
     pub receipt: Option<crate::swap::TransferReceipt>,
+    /// Receipt is durable but below the claim's minimum net payment. The
+    /// journal is held for manual recovery until cumulative proof support is
+    /// available. Additive for old snapshots and admin clients.
+    #[serde(default)]
+    pub shortfall_receipt_observed: bool,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -481,8 +486,13 @@ mod tests {
             fee_e6: 10_000,
             created_at_time: 1_700_000_000_000,
             memo: b"RUMI-BOT-PAYMENT-V1:73:42".to_vec(),
-            status: BotPaymentStatus::Ambiguous,
-            receipt: None,
+            status: BotPaymentStatus::ReceiptObserved,
+            receipt: Some(crate::swap::TransferReceipt {
+                block_index: 91,
+                amount: 999_999,
+                created_at_time: 1_700_000_000_000,
+            }),
+            shortfall_receipt_observed: true,
         });
         state.pending_claims.insert(vault_id, BotClaimJournal {
             vault_id,
@@ -510,13 +520,23 @@ mod tests {
         assert_eq!(journal.created_at_time, 1_700_000_000_000);
         assert_eq!(journal.amount_e6, 1_000_000);
         assert_eq!(journal.fee_e6, 10_000);
+        assert_eq!(journal.receipt.as_ref().unwrap().block_index, 91);
+        assert!(journal.shortfall_receipt_observed);
         let return_journal = restored.pending_claims.get(&vault_id).unwrap()
             .collateral_return.as_ref().unwrap();
         assert_eq!(return_journal.created_at_time, 1_700_000_000_001);
         assert_eq!(return_journal.amount_e8s, 49_990_000);
         assert_eq!(return_journal.status, BotReturnTransferStatus::Ambiguous);
         assert_eq!(journal.memo, b"RUMI-BOT-PAYMENT-V1:73:42");
-        assert_eq!(journal.status, BotPaymentStatus::Ambiguous);
+        assert_eq!(journal.status, BotPaymentStatus::ReceiptObserved);
+
+        let mut legacy_snapshot = serde_json::to_value(&state).unwrap();
+        legacy_snapshot["pending_payments"][vault_id.to_string()]
+            .as_object_mut()
+            .unwrap()
+            .remove("shortfall_receipt_observed");
+        let legacy_restored: BotState = serde_json::from_value(legacy_snapshot).unwrap();
+        assert!(!legacy_restored.pending_payments[&vault_id].shortfall_receipt_observed);
     }
 
     fn write_config_region(payload: &[u8]) {
