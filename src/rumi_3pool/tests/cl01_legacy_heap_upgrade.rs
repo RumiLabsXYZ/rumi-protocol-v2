@@ -15,7 +15,7 @@
 //! Fixture SHA-256: `701670b8fa0e8bb565cd9a1d173ec9e09bad834643a368a1ad1879b845e80b2a`.
 //! New side of this run: the current modified checkout, built with
 //! `--features test_endpoints`; Wasm SHA-256
-//! `11f52ab9a7be5f3ea36d716c520eb7959bb5389e2adcf08cc046a5d728efb6a7`.
+//! `b86a371947c245c22a7e99b30810994bf0e78f00ec5428763d01645b8645f0d4`.
 
 mod common;
 
