@@ -19,6 +19,7 @@
 //! notification / manual handling; the SP never auto-retries a liquidation
 //! (project rule).
 
+use crate::state::{read_state, MAX_PENDING_REFUNDS};
 use crate::types::StabilityPoolError;
 use std::cell::RefCell;
 
@@ -27,6 +28,62 @@ thread_local! {
     static BALANCE_ASYNC_IN_FLIGHT: RefCell<u32> = const { RefCell::new(0) };
     static CHAIN_ABSORB_AUTO_TICK_ACTIVE: RefCell<bool> = const { RefCell::new(false) };
     static UNALLOCATED_INTEREST_FORWARD_ACTIVE: RefCell<bool> = const { RefCell::new(false) };
+    /// Pending-refund slots held by operations that have pulled tokens but have
+    /// not yet either completed or transferred their refund into stable state.
+    static PENDING_REFUND_SLOTS_IN_FLIGHT: RefCell<usize> = const { RefCell::new(0) };
+}
+
+fn pending_refund_capacity_available(pending: usize, in_flight: usize) -> bool {
+    pending.saturating_add(in_flight) < MAX_PENDING_REFUNDS
+}
+
+fn pending_refund_reservation_available(pending: usize, in_flight: usize) -> bool {
+    // The queue admission cap is far below the u64 key space. The widened
+    // count ensures there is an ID for every durable row and held reservation.
+    let reserved_rows = pending as u128 + in_flight as u128 + 1;
+    pending_refund_capacity_available(pending, in_flight) && reserved_rows <= (u64::MAX as u128) + 1
+}
+
+/// A capacity reservation for a refund that may be owed after an async ledger
+/// operation. Reservations are heap-only concurrency state; the refund itself
+/// is committed to the stable `pending_refunds` map before this guard is
+/// dropped. This prevents concurrent operations from overcommitting the bounded
+/// durable queue without changing its serialized schema.
+#[must_use]
+pub struct PendingRefundSlotGuard;
+
+impl PendingRefundSlotGuard {
+    pub fn reserve() -> Result<Self, StabilityPoolError> {
+        let pending = read_state(|s| s.pending_refunds.as_ref().map_or(0, |m| m.len()));
+        PENDING_REFUND_SLOTS_IN_FLIGHT.with(|slots| {
+            let mut slots = slots.borrow_mut();
+            if !pending_refund_reservation_available(pending, *slots) {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            *slots += 1;
+            Ok(Self)
+        })
+    }
+
+    /// Called synchronously after removing a pending refund for claim. Since
+    /// the removed row frees the slot and there is no await between removal and
+    /// reservation, the existing capacity invariant already guarantees room.
+    pub fn reserve_claimed_row() -> Self {
+        PENDING_REFUND_SLOTS_IN_FLIGHT.with(|slots| {
+            let mut slots = slots.borrow_mut();
+            *slots = slots.saturating_add(1);
+        });
+        Self
+    }
+}
+
+impl Drop for PendingRefundSlotGuard {
+    fn drop(&mut self) {
+        PENDING_REFUND_SLOTS_IN_FLIGHT.with(|slots| {
+            let mut slots = slots.borrow_mut();
+            *slots = slots.saturating_sub(1);
+        });
+    }
 }
 
 #[must_use]
@@ -150,6 +207,32 @@ impl Drop for UnallocatedInterestForwardGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_refund_capacity_counts_in_flight_reservations() {
+        assert!(pending_refund_capacity_available(
+            MAX_PENDING_REFUNDS - 1,
+            0
+        ));
+        assert!(!pending_refund_capacity_available(MAX_PENDING_REFUNDS, 0));
+        assert!(!pending_refund_capacity_available(
+            MAX_PENDING_REFUNDS - 1,
+            1
+        ));
+        assert!(!pending_refund_capacity_available(usize::MAX, 1));
+        assert!(pending_refund_reservation_available(
+            MAX_PENDING_REFUNDS - 1,
+            0
+        ));
+        assert!(!pending_refund_reservation_available(
+            MAX_PENDING_REFUNDS,
+            0
+        ));
+        assert!(!pending_refund_reservation_available(
+            MAX_PENDING_REFUNDS - 1,
+            1
+        ));
+    }
 
     #[test]
     fn sp_liquidation_guard_is_exclusive_and_blocks_ops() {

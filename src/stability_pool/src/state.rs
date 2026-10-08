@@ -1832,11 +1832,11 @@ impl StabilityPoolState {
 
     // ─── Pending Refunds (audit IC-S-001) ───
 
-    /// Record tokens the pool owes `user` after a failed `deposit_as_3usd`
-    /// refund so they can be recovered via `claim_pending_refund`. `amount` is
-    /// the GROSS amount still held by the pool; the payout nets the ledger fee.
-    /// Returns the refund id. `now` is passed explicitly so the bookkeeping is
-    /// testable without the IC runtime.
+    /// Persist a refund obligation without evicting an existing row. Queue
+    /// capacity is reserved before external value movement; if that admission
+    /// invariant is ever violated after a transfer, preserve the new row even
+    /// if the map temporarily exceeds its cap. IDs wrap only when needed to
+    /// avoid overwriting an existing row after an exhausted/corrupt cursor.
     pub fn record_pending_refund(
         &mut self,
         user: Principal,
@@ -1846,16 +1846,11 @@ impl StabilityPoolState {
         now: u64,
     ) -> u64 {
         let refunds = self.pending_refunds.get_or_insert_with(BTreeMap::new);
-        // Bound memory. Ids are monotonic, so the smallest key is the oldest
-        // record; dropping it is a (logged at the call site) value loss, but
-        // reaching the cap requires thousands of genuine ledger failures.
-        if refunds.len() >= MAX_PENDING_REFUNDS {
-            if let Some(oldest) = refunds.keys().next().copied() {
-                refunds.remove(&oldest);
-            }
+        let mut id = self.next_pending_refund_id.unwrap_or(0);
+        while refunds.contains_key(&id) {
+            id = id.wrapping_add(1);
         }
-        let id = self.next_pending_refund_id.unwrap_or(0);
-        self.next_pending_refund_id = Some(id + 1);
+        self.next_pending_refund_id = Some(id.wrapping_add(1));
         refunds.insert(
             id,
             PendingRefund {
@@ -6327,7 +6322,7 @@ mod tests {
     }
 
     #[test]
-    fn ic_s_001_pending_refund_cap_drops_oldest() {
+    fn ic_s_001_pending_refund_overflow_preserves_oldest_rows() {
         let mut state = test_state();
         for i in 0..MAX_PENDING_REFUNDS {
             state.record_pending_refund(
@@ -6338,23 +6333,18 @@ mod tests {
                 i as u64,
             );
         }
-        assert_eq!(
-            state.pending_refunds_for(&user_a()).len(),
-            MAX_PENDING_REFUNDS
-        );
+        assert_eq!(state.pending_refunds_for(&user_a()).len(), MAX_PENDING_REFUNDS);
 
-        let id =
+        // Admission is rejected before a pull when full. If the invariant is
+        // nevertheless exceeded after value movement, insertion is fail-safe.
+        let extra_id =
             state.record_pending_refund(user_a(), icusd_ledger(), 999, "fail".to_string(), 999);
-        assert_eq!(id as usize, MAX_PENDING_REFUNDS);
+        assert_eq!(extra_id, MAX_PENDING_REFUNDS as u64);
         assert_eq!(
             state.pending_refunds_for(&user_a()).len(),
-            MAX_PENDING_REFUNDS,
-            "cap must hold",
+            MAX_PENDING_REFUNDS + 1
         );
-        assert!(
-            state.take_pending_refund(0).is_none(),
-            "oldest record dropped at cap"
-        );
+        assert_eq!(state.take_pending_refund(0).unwrap().amount, 1);
     }
 
     #[test]
