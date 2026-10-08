@@ -44,6 +44,24 @@ pub enum IcpSwapResult {
     Err(IcpSwapError),
 }
 
+/// Errors returned after the deposit-and-swap method was dispatched. Either
+/// an application error or a rejected call can follow a committed swap when
+/// the response is lost, so callers must treat both as outcome-ambiguous.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DepositAndSwapError {
+    Application(String),
+    CallRejected(String),
+}
+
+impl std::fmt::Display for DepositAndSwapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Application(message) => write!(f, "ICPSwap swap error: {message}"),
+            Self::CallRejected(message) => write!(f, "ICPSwap swap call failed: {message}"),
+        }
+    }
+}
+
 impl std::fmt::Display for IcpSwapError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -119,7 +137,7 @@ pub async fn deposit_and_swap(
     zero_for_one: bool,
     token_in_fee: u64,
     token_out_fee: u64,
-) -> Result<u64, String> {
+) -> Result<u64, DepositAndSwapError> {
     let args = DepositAndSwapArgs {
         amount_in: amount_in.to_string(),
         amount_out_minimum: min_amount_out.to_string(),
@@ -133,8 +151,8 @@ pub async fn deposit_and_swap(
 
     match result {
         Ok((IcpSwapResult::Ok(n),)) => Ok(nat_to_u64(&n)),
-        Ok((IcpSwapResult::Err(e),)) => Err(format!("ICPSwap swap error: {}", e)),
-        Err((code, msg)) => Err(format!("ICPSwap swap call failed ({:?}): {}", code, msg)),
+        Ok((IcpSwapResult::Err(e),)) => Err(DepositAndSwapError::Application(e.to_string())),
+        Err((code, msg)) => Err(DepositAndSwapError::CallRejected(format!("{:?}: {}", code, msg))),
     }
 }
 

@@ -127,6 +127,41 @@ fn write_short_payment_recovery(
     });
 }
 
+/// Record an ambiguous DEX dispatch without changing the claim's
+/// `SwapMayHaveStarted` status or attempting any financial cleanup. Amounts
+/// in the history row are only the amounts observed before the ambiguous call.
+fn write_ambiguous_swap_recovery(
+    id: u64,
+    vault_id: u64,
+    timestamp: u64,
+    collateral_amount: u64,
+    debt_covered: u64,
+    observed_icp_swapped: u64,
+    observed_ckusdc_received: u64,
+    collateral_price: u64,
+    effective_price: u64,
+    slippage_bps: i32,
+    message: &str,
+) {
+    write_record(LiquidationRecordV1 {
+        id,
+        vault_id,
+        timestamp,
+        status: LiquidationStatus::ConfirmFailed,
+        collateral_claimed_e8s: collateral_amount,
+        debt_to_cover_e8s: debt_covered,
+        icp_swapped_e8s: observed_icp_swapped,
+        ckusdc_received_e6: observed_ckusdc_received,
+        ckusdc_transferred_e6: 0,
+        icp_to_treasury_e8s: 0,
+        oracle_price_e8s: collateral_price,
+        effective_price_e8s: effective_price,
+        slippage_bps,
+        error_message: Some(message.to_string()),
+        confirm_retry_count: 0,
+    });
+}
+
 /// Per-claim ckUSDC accounting decision after a swap.
 ///
 /// `process_pending` brackets the swap with two `balance_of_self_ckusdc`
@@ -591,10 +626,39 @@ pub async fn process_pending() {
 
     let swap_result = swap::swap_icp_for_ckusdc(&config, swap_amount).await;
 
+    if let Err(swap_err) = &swap_result {
+        if !swap::swap_error_allows_return(swap_err) {
+            let message = format!(
+                "ICPSwap depositFromAndSwap outcome for requested {} ICP e8s is ambiguous: {}; no collateral return, claim cancellation, or ckUSDC payment was attempted. The claim remains held in SwapMayHaveStarted for operator reconciliation; swap output was not observed.",
+                swap_amount, swap_err
+            );
+            log!(crate::INFO, "STUCK: {} for vault #{}", message, vault.vault_id);
+            write_record(LiquidationRecordV1 {
+                id: record_id,
+                vault_id: vault.vault_id,
+                timestamp,
+                status: LiquidationStatus::ConfirmFailed,
+                collateral_claimed_e8s: collateral_amount,
+                debt_to_cover_e8s: debt_covered,
+                icp_swapped_e8s: 0,
+                ckusdc_received_e6: 0,
+                ckusdc_transferred_e6: 0,
+                icp_to_treasury_e8s: 0,
+                oracle_price_e8s: collateral_price,
+                effective_price_e8s: 0,
+                slippage_bps: 0,
+                error_message: Some(message),
+                confirm_retry_count: 0,
+            });
+            return;
+        }
+    }
+
     let (router_received, effective_price) = match swap_result {
         Ok(r) => (r.ckusdc_received_e6, r.effective_price_e8s),
         Err(swap_err) => {
-            log!(crate::INFO, "Swap failed for vault #{}: {}. Returning ICP.", vault.vault_id, swap_err);
+            let swap_err = swap_err.to_string();
+            log!(crate::INFO, "Swap failed before deposit dispatch for vault #{}: {}. Returning ICP.", vault.vault_id, swap_err);
 
             state::mutate_state(|s| {
                 if let Some(journal) = s.pending_claims.get_mut(&vault.vault_id) {
@@ -770,9 +834,30 @@ pub async fn process_pending() {
                         reservation.recorded_received_e6 = reservation.recorded_received_e6.saturating_add(extra_reservation.recorded_received_e6);
                         swap_amount = swap_amount.saturating_add(topup_icp);
                     }
-                    Err(error) => {
-                        log!(crate::INFO, "STUCK: bounded short-payment top-up failed for vault #{}: {}", vault.vault_id, error);
-                        write_short_payment_recovery(record_id, vault.vault_id, timestamp, collateral_amount, debt_covered, swap_amount, reservation.recorded_received_e6, collateral_price, effective_price, slippage_bps, &format!("bounded top-up failed: {error}"));
+                    Err(swap::SwapAttemptError::Ambiguous(error)) => {
+                        let message = format!(
+                            "bounded top-up depositFromAndSwap outcome for requested {} ICP e8s is ambiguous: {}; no payment, collateral return, or cancellation was attempted. The claim remains held in SwapMayHaveStarted. History contains only the earlier confirmed swap output; top-up output was not observed.",
+                            topup_icp, error
+                        );
+                        log!(crate::INFO, "STUCK: {} for vault #{}", message, vault.vault_id);
+                        write_ambiguous_swap_recovery(
+                            record_id,
+                            vault.vault_id,
+                            timestamp,
+                            collateral_amount,
+                            debt_covered,
+                            swap_amount,
+                            reservation.recorded_received_e6,
+                            collateral_price,
+                            effective_price,
+                            slippage_bps,
+                            &message,
+                        );
+                        return;
+                    }
+                    Err(swap::SwapAttemptError::NoEffect(error)) => {
+                        log!(crate::INFO, "STUCK: bounded short-payment top-up failed before deposit dispatch for vault #{}: {}", vault.vault_id, error);
+                        write_short_payment_recovery(record_id, vault.vault_id, timestamp, collateral_amount, debt_covered, swap_amount, reservation.recorded_received_e6, collateral_price, effective_price, slippage_bps, &format!("bounded top-up failed before deposit dispatch: {error}"));
                         return;
                     }
                 }
