@@ -37,7 +37,7 @@
 use candid::{CandidType, Deserialize, Principal};
 use ic_canister_log::log;
 
-use crate::chains::config::{ChainId, ChainStatus};
+use crate::chains::config::{ChainId, ChainStatus, GasStrategy};
 use crate::chains::liquidation_config::ChainLiquidationConfigV1;
 use crate::chains::monad::chain_vault::ChainVaultStatus;
 use crate::chains::multi_chain_state::MultiChainState;
@@ -239,6 +239,47 @@ pub fn select_next_op(q: &SettlementQueueV1) -> Option<(u64, OpAction)> {
     select_next_op_with_submit_filter(q, |_, _| false)
 }
 
+/// The configured EVM fee ceiling also bounds the withdrawal gas reserve
+/// enforced at admission. Never sign/broadcast using an RPC fee above it.
+pub fn ensure_fee_within_chain_ceiling(
+    state: &MultiChainState,
+    chain: ChainId,
+    max_fee_wei: u128,
+) -> Result<(), String> {
+    let config = state
+        .chain_configs
+        .get(&chain)
+        .ok_or_else(|| format!("missing fee config for chain {}", chain.0))?;
+    let ceiling_gwei = match &config.gas_strategy {
+        GasStrategy::EvmEip1559 {
+            max_fee_gwei_ceiling,
+            ..
+        } => *max_fee_gwei_ceiling,
+        GasStrategy::EvmLegacy {
+            gas_price_gwei_ceiling,
+        } => *gas_price_gwei_ceiling,
+        GasStrategy::SolanaPriorityFee { .. } | GasStrategy::NotApplicable => {
+            return Err(format!("chain {} has a non-EVM fee config", chain.0));
+        }
+    };
+    let ceiling_wei = (ceiling_gwei as u128)
+        .checked_mul(1_000_000_000)
+        .ok_or_else(|| format!("fee ceiling overflow for chain {}", chain.0))?;
+    if max_fee_wei > ceiling_wei {
+        return Err(format!(
+            "RPC max fee {max_fee_wei} exceeds configured ceiling {ceiling_wei} wei"
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_current_fee_within_chain_ceiling(
+    chain: ChainId,
+    max_fee_wei: u128,
+) -> Result<(), String> {
+    read_state(|s| ensure_fee_within_chain_ceiling(&s.multi_chain, chain, max_fee_wei))
+}
+
 /// Pick the next op to act on, treating queued ops for which
 /// `submit_blocked(id, op)` is true as temporarily non-actionable. Inflight ops
 /// are never skipped: one-in-flight-per-queue remains the first rule.
@@ -258,7 +299,36 @@ where
             return Some((id, OpAction::Confirm));
         }
     }
-    for (&id, op) in q.pending.iter() {
+    // `drain_order` is persisted. Do not silently fall back to op_id ordering
+    // when it is incomplete or ambiguous: that would reinterpret legacy queue
+    // order. Fail closed until an operator resolves the malformed snapshot.
+    let queued_count = q
+        .pending
+        .values()
+        .filter(|op| matches!(op.status, SettlementOpStatus::Queued))
+        .count();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut represented_queued = 0usize;
+    for &id in &q.drain_order {
+        if !seen.insert(id) {
+            return None;
+        }
+        if !q.pending.contains_key(&id) {
+            // Terminal IDs can remain until prune_terminal; missing IDs cannot.
+            return None;
+        }
+        if matches!(
+            q.pending.get(&id).map(|op| &op.status),
+            Some(SettlementOpStatus::Queued)
+        ) {
+            represented_queued += 1;
+        }
+    }
+    if seen.len() != q.drain_order.len() || queued_count != represented_queued {
+        return None;
+    }
+    for &id in &q.drain_order {
+        let op = q.pending.get(&id)?;
         if matches!(op.status, SettlementOpStatus::Queued) && !submit_blocked(id, op) {
             // Increment 3: LiquidationSwap ops are now actionable (submit_op routes
             // them through the dedicated swap path). The Inc-2 skip is removed.
@@ -696,6 +766,7 @@ pub fn claim_chain_collateral_in_state(
             crate::chains::settlement_queue::SettlementQueueError::DuplicateIdempotencyKey(key) => {
                 format!("Duplicate chain collateral claim payout idempotency key {key}")
             }
+            other => format!("Unable to enqueue chain collateral claim payout: {other:?}"),
         })?;
 
     let claim = state
@@ -1024,9 +1095,21 @@ pub async fn run_settlement(chain: ChainId) {
         None => return, // chain not registered / no queue
     };
 
+    let was_submit = matches!(action, OpAction::Submit);
     match action {
         OpAction::Submit => submit_op(chain, op_id, op).await,
         OpAction::Confirm => confirm_op(chain, op_id, op).await,
+    }
+
+    // A retryable submit may intentionally leave the op Queued (for example a
+    // Mint whose deposit is not final yet). Move that attempt behind later work
+    // so a permanently deferred head cannot starve exits and payouts.
+    if was_submit {
+        mutate_state(|s| {
+            if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
+                q.rotate_queued_to_tail(op_id);
+            }
+        });
     }
 
     // Reap terminal (Succeeded/Failed) ops so `pending` does not grow
@@ -1826,6 +1909,11 @@ async fn submit_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_que
         }
     };
     let max_fee = base_fee.saturating_mul(2).saturating_add(prio);
+    let fee_check = ensure_current_fee_within_chain_ceiling(chain, max_fee);
+    if let Err(reason) = fee_check {
+        log!(INFO, "[settlement chain={:?}] op {} deferred above configured gas fee ceiling: {}; will retry", chain, op_id, reason);
+        return;
+    }
 
     // 4. Native withdrawals may net gas from the transfer value; claim payouts
     //    are exact entitlements and must have enough custody balance for both
@@ -1934,6 +2022,16 @@ async fn submit_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_que
         );
         return;
     }
+    if let Err(reason) = ensure_current_fee_within_chain_ceiling(chain, fields.max_fee_per_gas) {
+        log!(
+            INFO,
+            "[settlement chain={:?}] op {} fee ceiling changed before signing: {}; will retry",
+            chain,
+            op_id,
+            reason
+        );
+        return;
+    }
 
     // 6. Sign with the resolved signer (settlement for mints, custody for withdrawals).
     let raw_hex = match tx::sign_eip1559(&fields, path, &signer_addr).await {
@@ -1960,6 +2058,10 @@ async fn submit_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_que
             op_id,
             reason
         );
+        return;
+    }
+    if let Err(reason) = ensure_current_fee_within_chain_ceiling(chain, fields.max_fee_per_gas) {
+        log!(INFO, "[settlement chain={:?}] op {} fee ceiling changed before broadcast: {}; signed bytes discarded", chain, op_id, reason);
         return;
     }
     let chain_payout_local_tx_hash = if kind == TxPlanKind::ChainCollateralPayout {
@@ -3383,6 +3485,11 @@ async fn resubmit_if_stuck(
     };
     let base_max_fee = base_fee.saturating_mul(2).saturating_add(prio);
     let (bumped_prio, bumped_max) = hardening::bump_gas(prio, base_max_fee);
+    let fee_check = ensure_current_fee_within_chain_ceiling(chain, bumped_max);
+    if let Err(reason) = fee_check {
+        log!(INFO, "[settlement chain={:?}] replacement for op {} exceeds configured gas fee ceiling: {}; leaving original Inflight transaction untouched", chain, op_id, reason);
+        return;
+    }
 
     // Re-net withdrawal value at the BUMPED fee. Claim payouts remain exact:
     // if custody cannot fund amount + bumped gas, leave the original tx Inflight
@@ -3440,6 +3547,9 @@ async fn resubmit_if_stuck(
     if ensure_submit_still_allowed(chain, &op.kind, ic_cdk::api::time()).is_err() {
         return;
     }
+    if ensure_current_fee_within_chain_ceiling(chain, plan.fields.max_fee_per_gas).is_err() {
+        return;
+    }
 
     // Re-sign on the stored nonce with the resolved signer.
     let raw_hex = match tx::sign_eip1559(&plan.fields, path, &signer_addr).await {
@@ -3450,6 +3560,9 @@ async fn resubmit_if_stuck(
         }
     };
     if ensure_submit_still_allowed(chain, &op.kind, ic_cdk::api::time()).is_err() {
+        return;
+    }
+    if ensure_current_fee_within_chain_ceiling(chain, plan.fields.max_fee_per_gas).is_err() {
         return;
     }
     let chain_payout_replacement_hash = if matches!(
@@ -3480,6 +3593,10 @@ async fn resubmit_if_stuck(
             log!(INFO, "[settlement chain={:?}] resubmit claim payout op {}: replacement record aborted before broadcast ({:?})", chain, op_id, e);
             return;
         }
+    }
+
+    if ensure_current_fee_within_chain_ceiling(chain, plan.fields.max_fee_per_gas).is_err() {
+        return;
     }
 
     // Rebroadcast.

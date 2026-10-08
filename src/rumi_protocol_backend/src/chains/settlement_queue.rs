@@ -210,9 +210,26 @@ pub struct SettlementQueueV1 {
     pub drain_order: VecDeque<u64>,
 }
 
+/// Keep one chain's persisted worker queue and per-tick scans bounded. This is
+/// deliberately an active-work limit: terminal entries are reaped by the
+/// settlement worker before the next enqueue in normal operation. This cap is
+/// prospective: a legacy queue already above the limit is not truncated, and
+/// admission remains fail-closed until its obligations drain below the cap.
+pub const MAX_ACTIVE_SETTLEMENT_OPS_PER_CHAIN: usize = 256;
+/// Leave capacity for exposure-reducing operations even when risk-increasing
+/// work is deferred behind a deposit/readiness gate.
+pub const MAX_RISK_INCREASING_SETTLEMENT_OPS_PER_CHAIN: usize =
+    MAX_ACTIVE_SETTLEMENT_OPS_PER_CHAIN - 64;
+/// A vault may have a small number of dependent operations in flight, but must
+/// not be able to reserve an unbounded amount of worker capacity.
+pub const MAX_ACTIVE_SETTLEMENT_OPS_PER_VAULT: usize = 4;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum SettlementQueueError {
     DuplicateIdempotencyKey(String),
+    QueueFull,
+    VaultOutstandingLimit(u64),
+    DuplicateVaultWithdrawal(u64),
 }
 
 impl SettlementQueueV1 {
@@ -222,6 +239,38 @@ impl SettlementQueueV1 {
                 op.idempotency_key,
             ));
         }
+        let active = self.pending.values().filter(|pending| {
+            matches!(
+                pending.status,
+                SettlementOpStatus::Queued | SettlementOpStatus::Inflight { .. }
+            )
+        });
+        let active_count = active.clone().count();
+        if active_count >= MAX_ACTIVE_SETTLEMENT_OPS_PER_CHAIN {
+            return Err(SettlementQueueError::QueueFull);
+        }
+        if is_risk_increasing(&op.kind)
+            && active_count >= MAX_RISK_INCREASING_SETTLEMENT_OPS_PER_CHAIN
+        {
+            return Err(SettlementQueueError::QueueFull);
+        }
+        let vault_id = settlement_vault_id(&op.kind);
+        if let Some(vault_id) = vault_id {
+            let per_vault = active
+                .filter(|pending| settlement_vault_id(&pending.kind) == Some(vault_id))
+                .count();
+            if per_vault >= MAX_ACTIVE_SETTLEMENT_OPS_PER_VAULT {
+                return Err(SettlementQueueError::VaultOutstandingLimit(vault_id));
+            }
+            if matches!(op.kind, SettlementOpKind::NativeWithdrawal { .. })
+                && self.pending.values().any(|pending| {
+                    matches!(pending.status, SettlementOpStatus::Queued | SettlementOpStatus::Inflight { .. })
+                        && matches!(pending.kind, SettlementOpKind::NativeWithdrawal { vault_id: pending_vault, .. } if pending_vault == vault_id)
+                })
+            {
+                return Err(SettlementQueueError::DuplicateVaultWithdrawal(vault_id));
+            }
+        }
         let assigned = self.tail;
         op.op_id = assigned;
         self.seen_idempotency_keys
@@ -230,6 +279,20 @@ impl SettlementQueueV1 {
         self.pending.insert(assigned, op);
         self.tail = self.tail.saturating_add(1);
         Ok(assigned)
+    }
+
+    /// Return a still-queued op to the FIFO tail after a transient submit-time
+    /// deferral. Inflight work is never rotated because its nonce/replacement
+    /// state must remain exclusive until confirmation.
+    pub fn rotate_queued_to_tail(&mut self, op_id: u64) {
+        if !matches!(
+            self.pending.get(&op_id).map(|op| &op.status),
+            Some(SettlementOpStatus::Queued)
+        ) {
+            return;
+        }
+        self.drain_order.retain(|id| *id != op_id);
+        self.drain_order.push_back(op_id);
     }
 
     pub fn pending_len(&self) -> usize {
@@ -311,6 +374,24 @@ impl SettlementQueueV1 {
         // op_id. With nothing left, head meets tail (the next id to assign).
         self.head = self.pending.keys().next().copied().unwrap_or(self.tail);
     }
+}
+
+fn settlement_vault_id(kind: &SettlementOpKind) -> Option<u64> {
+    match kind {
+        SettlementOpKind::Mint { vault_id, .. }
+        | SettlementOpKind::NativeWithdrawal { vault_id, .. }
+        | SettlementOpKind::InterestMint { vault_id, .. }
+        | SettlementOpKind::LiquidationSwap { vault_id, .. }
+        | SettlementOpKind::ChainCollateralPayout { vault_id, .. } => Some(*vault_id),
+        SettlementOpKind::Burn { .. } => None,
+    }
+}
+
+fn is_risk_increasing(kind: &SettlementOpKind) -> bool {
+    matches!(
+        kind,
+        SettlementOpKind::Mint { .. } | SettlementOpKind::InterestMint { .. }
+    )
 }
 
 #[cfg(test)]
