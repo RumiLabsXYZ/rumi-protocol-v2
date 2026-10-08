@@ -776,6 +776,7 @@ export const idlFactory = ({ IDL }) => {
       'timestamp' : IDL.Nat64,
       'tx_hash' : IDL.Text,
     }),
+    'bot_claim_generation_reserved' : IDL.Record({ 'generation' : IDL.Nat64 }),
     'chain_reorg_detected' : IDL.Record({
       'chain_id' : IDL.Nat32,
       'timestamp' : IDL.Nat64,
@@ -869,6 +870,7 @@ export const idlFactory = ({ IDL }) => {
     }),
     'set_three_pool_canister' : IDL.Record({ 'canister' : IDL.Principal }),
     'set_liquidation_bonus' : IDL.Record({ 'rate' : IDL.Text }),
+    'bot_proof_mode_enabled' : IDL.Null,
     'reserve_redemption' : IDL.Record({
       'icusd_amount' : IDL.Nat64,
       'icusd_block_index' : IDL.Nat64,
@@ -905,6 +907,12 @@ export const idlFactory = ({ IDL }) => {
       'timestamp' : IDL.Nat64,
     }),
     'set_redemption_fee_ceiling' : IDL.Record({ 'rate' : IDL.Text }),
+    'bot_payment_proof_consumed' : IDL.Record({
+      'block_index' : IDL.Nat64,
+      'claim_generation' : IDL.Nat64,
+      'vault_id' : IDL.Nat64,
+      'ledger_principal' : IDL.Principal,
+    }),
     'set_deficit_readonly_threshold_e8s' : IDL.Record({
       'threshold_e8s' : IDL.Nat64,
       'timestamp' : IDL.Nat64,

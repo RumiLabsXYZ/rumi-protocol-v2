@@ -8797,6 +8797,62 @@ mod bot_payment_proof_tests {
     }
 
     #[test]
+    fn event_replay_tombstone_rejects_old_payment_for_reused_vault_generation() {
+        let principal = |seed| Principal::from_slice(&[seed]);
+        let ledger = principal(10);
+        let init = rumi_protocol_backend::InitArg {
+            xrc_principal: principal(20),
+            icusd_ledger_principal: principal(21),
+            icp_ledger_principal: principal(22),
+            fee_e8s: 0,
+            developer_principal: principal(23),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: Some(ledger),
+        };
+        let events = vec![
+            rumi_protocol_backend::event::Event::Init(init),
+            rumi_protocol_backend::event::Event::BotProofModeEnabled,
+            rumi_protocol_backend::event::Event::BotClaimGenerationReserved { generation: 41 },
+            rumi_protocol_backend::event::Event::BotPaymentProofConsumed {
+                ledger_principal: ledger,
+                block_index: 9001,
+                vault_id: 77,
+                claim_generation: 41,
+            },
+            rumi_protocol_backend::event::Event::BotClaimGenerationReserved { generation: 42 },
+        ];
+        let state = rumi_protocol_backend::event::replay(events.into_iter())
+            .expect("event-only upgrade recovery should replay");
+
+        assert!(state.bot_confirm_proof_required);
+        assert_eq!(state.bot_claim_generation_counter, 42);
+        assert_eq!(
+            bot_payment_replay_status_for_ledger(
+                &state.consumed_bot_payment_proofs,
+                &state.consumed_bot_payment_blocks,
+                state.legacy_consumed_payment_ledger,
+                ledger,
+                9001,
+                77,
+                41,
+            ),
+            Ok(true),
+        );
+        assert!(bot_payment_replay_status_for_ledger(
+            &state.consumed_bot_payment_proofs,
+            &state.consumed_bot_payment_blocks,
+            state.legacy_consumed_payment_ledger,
+            ledger,
+            9001,
+            77,
+            42,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn payment_proof_uses_claim_pinned_ledger_after_config_rotation() {
         let claim_ledger = Principal::from_slice(&[10]);
         let rotated_config_ledger = Principal::from_slice(&[11]);
@@ -8903,7 +8959,7 @@ async fn enable_bot_confirm_proof_requirement() -> Result<(), ProtocolError> {
             "Cannot require proof while legacy bot claims are active".into(),
         ));
     }
-    mutate_state(|s| s.bot_confirm_proof_required = true);
+    mutate_state(rumi_protocol_backend::event::record_bot_proof_mode_enabled);
     Ok(())
 }
 
@@ -9253,12 +9309,13 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
                 "Bot budget changed before claim admission".into(),
             ));
         };
-        let generation = s.next_bot_claim_generation().ok_or_else(|| {
-            ProtocolError::GenericError("Bot claim generation counter exhausted".into())
-        })?;
-        let op_nonce = s.next_op_nonce_at(now);
-        let created_at_time = management::nonce_to_created_at_time(op_nonce);
-        let vault = s.vault_id_to_vaults.get_mut(&vault_id).ok_or_else(|| {
+        let generation = s
+            .bot_claim_generation_counter
+            .checked_add(1)
+            .ok_or_else(|| {
+                ProtocolError::GenericError("Bot claim generation counter exhausted".into())
+            })?;
+        let vault = s.vault_id_to_vaults.get(&vault_id).ok_or_else(|| {
             ProtocolError::GenericError(format!("Vault #{} disappeared before admission", vault_id))
         })?;
         if vault.bot_processing || s.bot_claims.contains_key(&vault_id) {
@@ -9266,6 +9323,10 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
                 "Vault #{} already has active liquidation work", vault_id
             )));
         }
+        rumi_protocol_backend::event::record_bot_claim_generation_reserved(s, generation);
+        let op_nonce = s.next_op_nonce_at(now);
+        let created_at_time = management::nonce_to_created_at_time(op_nonce);
+        let vault = s.vault_id_to_vaults.get_mut(&vault_id).expect("validated vault");
         vault.bot_processing = true;
         s.bot_budget_remaining_e8s = new_budget;
         let claim = rumi_protocol_backend::state::BotClaim {
@@ -9531,9 +9592,12 @@ async fn bot_confirm_liquidation_with_proof(
         else {
             return Err("Claim collateral changed during payment proof verification".to_string());
         };
-        s.consumed_bot_payment_proofs.insert(
-            bot_payment_replay_key(proof.ledger_principal, proof.block_index),
-            (proof.vault_id, proof.claim_generation),
+        rumi_protocol_backend::event::record_bot_payment_proof_consumed(
+            s,
+            proof.ledger_principal,
+            proof.block_index,
+            proof.vault_id,
+            proof.claim_generation,
         );
         let vault = s.vault_id_to_vaults.get_mut(&proof.vault_id).unwrap();
         vault.borrowed_icusd_amount = ICUSD::new(new_debt_e8s);
@@ -9844,9 +9908,12 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
             ))
         })?;
 
-    let generation = mutate_state(|s| s.next_bot_claim_generation()).ok_or_else(|| {
-        ProtocolError::GenericError("Bot claim generation counter exhausted".into())
-    })?;
+    let generation = mutate_state(|s| {
+        let generation = s.bot_claim_generation_counter.checked_add(1)?;
+        rumi_protocol_backend::event::record_bot_claim_generation_reserved(s, generation);
+        Some(generation)
+    })
+    .ok_or_else(|| ProtocolError::GenericError("Bot claim generation counter exhausted".into()))?;
 
     // Transfer collateral
     match rumi_protocol_backend::management::transfer_collateral(
@@ -10006,9 +10073,12 @@ async fn dev_force_partial_bot_liquidate(
             ))
         })?;
 
-    let generation = mutate_state(|s| s.next_bot_claim_generation()).ok_or_else(|| {
-        ProtocolError::GenericError("Bot claim generation counter exhausted".into())
-    })?;
+    let generation = mutate_state(|s| {
+        let generation = s.bot_claim_generation_counter.checked_add(1)?;
+        rumi_protocol_backend::event::record_bot_claim_generation_reserved(s, generation);
+        Some(generation)
+    })
+    .ok_or_else(|| ProtocolError::GenericError("Bot claim generation counter exhausted".into()))?;
 
     // Transfer collateral
     match rumi_protocol_backend::management::transfer_collateral(
@@ -15632,7 +15702,9 @@ service : {
     // cargo test ... check_candid_interface_compatibility`. Skips the equality
     // assertion and writes the canonical interface back to the file instead.
     let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let did_path = manifest_dir.join("rumi_protocol_backend.did");
+    let did_path = std::env::var_os("RUMI_REGEN_DID_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("rumi_protocol_backend.did"));
     if std::env::var("RUMI_REGEN_DID").is_ok() {
         std::fs::write(&did_path, &new_interface).expect("failed to write .did");
         eprintln!("Regenerated {}", did_path.display());

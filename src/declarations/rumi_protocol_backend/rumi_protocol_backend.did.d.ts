@@ -682,6 +682,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'tx_hash' : string,
     }
   } |
+  { 'bot_claim_generation_reserved' : { 'generation' : bigint } } |
   {
     'chain_reorg_detected' : {
       'chain_id' : number,
@@ -800,6 +801,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   } |
   { 'set_three_pool_canister' : { 'canister' : Principal } } |
   { 'set_liquidation_bonus' : { 'rate' : string } } |
+  { 'bot_proof_mode_enabled' : null } |
   {
     'reserve_redemption' : {
       'icusd_amount' : bigint,
@@ -847,6 +849,14 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   { 'set_redemption_fee_ceiling' : { 'rate' : string } } |
+  {
+    'bot_payment_proof_consumed' : {
+      'block_index' : bigint,
+      'claim_generation' : bigint,
+      'vault_id' : bigint,
+      'ledger_principal' : Principal,
+    }
+  } |
   {
     'set_deficit_readonly_threshold_e8s' : {
       'threshold_e8s' : bigint,

@@ -357,6 +357,7 @@ type Event = variant {
     amount : nat64;
   };
   set_bot_cr_tolerance_bps : record { bps : nat64 };
+  bot_claim_generation_reserved : record { generation : nat64 };
   collateral_withdrawn : record {
     block_index : nat64;
     vault_id : nat64;
@@ -680,6 +681,7 @@ type Event = variant {
   };
   set_three_pool_canister : record { canister : principal };
   set_liquidation_bonus : record { rate : text };
+  bot_proof_mode_enabled;
   reserve_redemption : record {
     icusd_amount : nat64;
     icusd_block_index : nat64;
@@ -710,6 +712,12 @@ type Event = variant {
     timestamp : nat64;
   };
   set_redemption_fee_ceiling : record { rate : text };
+  bot_payment_proof_consumed : record {
+    block_index : nat64;
+    claim_generation : nat64;
+    vault_id : nat64;
+    ledger_principal : principal;
+  };
   set_deficit_readonly_threshold_e8s : record {
     threshold_e8s : nat64;
     timestamp : nat64;

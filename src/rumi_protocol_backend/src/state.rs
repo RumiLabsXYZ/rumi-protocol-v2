@@ -3260,12 +3260,6 @@ impl State {
         }
     }
 
-    /// Allocate a non-zero monotonic identity for a newly persisted bot claim.
-    pub fn next_bot_claim_generation(&mut self) -> Option<u64> {
-        self.bot_claim_generation_counter = self.bot_claim_generation_counter.checked_add(1)?;
-        Some(self.bot_claim_generation_counter)
-    }
-
     /// True iff `caller` may set the manual price for `(chain_id, symbol)`:
     /// the developer may set any pair; the narrowly-scoped price-pusher principal
     /// (audit F-01) may set ONLY the pairs in `price_pusher_allowed`. Every other

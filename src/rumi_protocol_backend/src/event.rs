@@ -390,6 +390,24 @@ pub enum Event {
     #[serde(rename = "set_bot_cr_tolerance_bps")]
     SetBotCrToleranceBps { bps: u64 },
 
+    /// Irreversible cutover guard for bot confirmation. This must be in the
+    /// event log because event replay is used when no state snapshot exists.
+    #[serde(rename = "bot_proof_mode_enabled")]
+    BotProofModeEnabled,
+
+    /// Persist claim identity allocations so replay cannot reuse a generation.
+    #[serde(rename = "bot_claim_generation_reserved")]
+    BotClaimGenerationReserved { generation: u64 },
+
+    /// Permanent ledger-scoped tombstone for a successfully consumed payment.
+    #[serde(rename = "bot_payment_proof_consumed")]
+    BotPaymentProofConsumed {
+        ledger_principal: Principal,
+        block_index: u64,
+        vault_id: u64,
+        claim_generation: u64,
+    },
+
     /// Wave-14a CDP-14 follow-up: per-collateral override for the XRC
     /// source-count floor (None = inherit global). Emitted when an admin
     /// tunes the per-asset floor (typically used to lower the gate for
@@ -1046,6 +1064,9 @@ impl Event {
             Event::SetBotBudget { .. } => false,
             Event::SetBotAllowedCollateralTypes { .. } => false,
             Event::SetBotCrToleranceBps { .. } => false,
+            Event::BotProofModeEnabled => false,
+            Event::BotClaimGenerationReserved { .. } => false,
+            Event::BotPaymentProofConsumed { .. } => false,
             Event::SetCollateralMinXrcSources { .. } => false,
             Event::SetLiquidationBonus { .. } => false,
             Event::SetBorrowingFee { .. } => false,
@@ -1222,6 +1243,9 @@ impl Event {
             Event::SetBotBudget { .. } => Some("SetBotBudget"),
             Event::SetBotAllowedCollateralTypes { .. } => Some("SetBotAllowedCollateralTypes"),
             Event::SetBotCrToleranceBps { .. } => Some("SetBotCrToleranceBps"),
+            Event::BotProofModeEnabled => Some("BotProofModeEnabled"),
+            Event::BotClaimGenerationReserved { .. } => Some("BotClaimGenerationReserved"),
+            Event::BotPaymentProofConsumed { .. } => Some("BotPaymentProofConsumed"),
             Event::SetCollateralMinXrcSources { .. } => Some("SetCollateralMinXrcSources"),
             Event::SetLiquidationBonus { .. } => Some("SetLiquidationBonus"),
             Event::SetBorrowingFee { .. } => Some("SetBorrowingFee"),
@@ -2090,6 +2114,22 @@ fn replay_with_nonce_time_and_payout_events(
             },
             Event::SetBotCrToleranceBps { bps } => {
                 state.bot_cr_tolerance_bps = bps;
+            },
+            Event::BotProofModeEnabled => state.bot_confirm_proof_required = true,
+            Event::BotClaimGenerationReserved { generation } => {
+                state.bot_claim_generation_counter =
+                    state.bot_claim_generation_counter.max(generation);
+            },
+            Event::BotPaymentProofConsumed {
+                ledger_principal,
+                block_index,
+                vault_id,
+                claim_generation,
+            } => {
+                state.consumed_bot_payment_proofs.insert(
+                    format!("{}:{block_index}", ledger_principal.to_text()),
+                    (vault_id, claim_generation),
+                );
             },
             Event::SetCollateralMinXrcSources { collateral_type, min_xrc_sources } => {
                 if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
@@ -3546,6 +3586,38 @@ pub fn record_set_bot_allowed_collateral_types(
 pub fn record_set_bot_cr_tolerance_bps(state: &mut State, bps: u64) {
     record_event(&Event::SetBotCrToleranceBps { bps });
     state.bot_cr_tolerance_bps = bps;
+}
+
+pub fn record_bot_proof_mode_enabled(state: &mut State) {
+    if !state.bot_confirm_proof_required {
+        record_event(&Event::BotProofModeEnabled);
+        state.bot_confirm_proof_required = true;
+    }
+}
+
+pub fn record_bot_claim_generation_reserved(state: &mut State, generation: u64) {
+    debug_assert!(generation > state.bot_claim_generation_counter);
+    record_event(&Event::BotClaimGenerationReserved { generation });
+    state.bot_claim_generation_counter = state.bot_claim_generation_counter.max(generation);
+}
+
+pub fn record_bot_payment_proof_consumed(
+    state: &mut State,
+    ledger_principal: Principal,
+    block_index: u64,
+    vault_id: u64,
+    claim_generation: u64,
+) {
+    record_event(&Event::BotPaymentProofConsumed {
+        ledger_principal,
+        block_index,
+        vault_id,
+        claim_generation,
+    });
+    state.consumed_bot_payment_proofs.insert(
+        format!("{}:{block_index}", ledger_principal.to_text()),
+        (vault_id, claim_generation),
+    );
 }
 
 /// Wave-14a CDP-14 follow-up: record + apply a per-collateral override
@@ -5007,6 +5079,33 @@ mod redemption_replay_tests {
     fn replay(events: Vec<Event>) -> State {
         super::replay_with_nonce_time(events.into_iter(), || 2)
             .expect("replay fixture should be consistent")
+    }
+
+    #[test]
+    fn bot_proof_security_state_survives_event_only_replay() {
+        let icp = principal(29);
+        let payment_ledger = principal(31);
+        let state = replay(vec![
+            Event::Init(init_args(icp)),
+            Event::BotProofModeEnabled,
+            Event::BotClaimGenerationReserved { generation: 41 },
+            Event::BotPaymentProofConsumed {
+                ledger_principal: payment_ledger,
+                block_index: 9001,
+                vault_id: 77,
+                claim_generation: 41,
+            },
+            Event::BotClaimGenerationReserved { generation: 42 },
+        ]);
+
+        assert!(state.bot_confirm_proof_required);
+        assert_eq!(state.bot_claim_generation_counter, 42);
+        assert_eq!(
+            state
+                .consumed_bot_payment_proofs
+                .get(&format!("{}:9001", payment_ledger.to_text())),
+            Some(&(77, 41)),
+        );
     }
 
     #[test]
