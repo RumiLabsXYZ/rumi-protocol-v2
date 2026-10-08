@@ -31,6 +31,78 @@ fn quoted_redemption_minimum_holds_on_fee_increase_and_legacy_is_unbounded() {
     ));
 }
 
+fn sample_pending_payout() -> crate::state::PendingMarginTransfer {
+    crate::state::PendingMarginTransfer {
+        vault_id: 8,
+        operation_id: 900,
+        payout_kind: crate::state::PendingPayoutKind::Margin,
+        owner: Principal::from_slice(&[8]),
+        margin: ICP::new(1_000),
+        collateral_type: Principal::from_slice(&[9]),
+        retry_count: 0,
+        op_nonce: 901,
+        ledger: Some(Principal::from_slice(&[10])),
+        transfer_amount_raw: Some(900),
+        held_for_manual_retry: false,
+        reconciliation_required: false,
+        in_flight: true,
+        too_old_confirmed: false,
+        history_log_length: None,
+        history_cursor: 0,
+        min_net_collateral_raw: None,
+    }
+}
+
+#[test]
+fn cl14_too_old_holds_receipt_without_changing_identity_or_arguments() {
+    let mut row = sample_pending_payout();
+    crate::note_pending_payout_failure(
+        &mut row,
+        &icrc_ledger_types::icrc1::transfer::TransferError::TooOld,
+    );
+    assert!(row.held_for_manual_retry);
+    assert!(row.reconciliation_required);
+    assert!(row.too_old_confirmed);
+    assert!(!row.in_flight);
+    assert_eq!(row.operation_id, 900);
+    assert_eq!(row.op_nonce, 901);
+    assert_eq!(row.transfer_amount_raw, Some(900));
+    assert_eq!(row.retry_count, 0);
+}
+
+#[test]
+fn cl14_retry_cap_retains_receipt_as_held() {
+    let mut row = sample_pending_payout();
+    for _ in 0..crate::MAX_PENDING_RETRIES {
+        row.in_flight = true;
+        crate::note_pending_payout_failure(
+            &mut row,
+            &icrc_ledger_types::icrc1::transfer::TransferError::TemporarilyUnavailable,
+        );
+    }
+    assert!(row.held_for_manual_retry);
+    assert_eq!(row.retry_count, crate::MAX_PENDING_RETRIES);
+    assert_eq!(row.operation_id, 900);
+    assert_eq!(row.op_nonce, 901);
+    assert_eq!(row.transfer_amount_raw, Some(900));
+}
+
+#[test]
+fn cl14_bad_fee_holds_immutable_net_amount() {
+    let mut row = sample_pending_payout();
+    crate::note_pending_payout_failure(
+        &mut row,
+        &icrc_ledger_types::icrc1::transfer::TransferError::BadFee {
+            expected_fee: icrc_ledger_types::icrc1::transfer::NumTokens::from(200u64),
+        },
+    );
+    assert!(row.held_for_manual_retry);
+    assert!(!row.reconciliation_required);
+    assert_eq!(row.retry_count, 0);
+    assert_eq!(row.transfer_amount_raw, Some(900));
+    assert_eq!(row.op_nonce, 901);
+}
+
 #[test]
 fn exhausted_icusd_refunds_are_held_without_being_auto_retried() {
     assert!(crate::pending_refund_is_automatically_retryable(0));

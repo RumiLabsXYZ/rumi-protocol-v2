@@ -486,6 +486,13 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   {
+    'pending_payout_queued' : {
+      'kind' : PendingPayoutKind,
+      'operation_id' : bigint,
+      'transfer' : PendingMarginTransfer,
+    }
+  } |
+  {
     'oracle_circuit_breaker' : {
       'timestamp' : bigint,
       'consecutive_failures' : bigint,
@@ -527,12 +534,16 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   } |
   {
     'redemption_on_vaults' : {
+      'payout_operation_id' : [] | [bigint],
       'icusd_amount' : bigint,
+      'payout_ledger' : [] | [Principal],
       'icusd_block_index' : bigint,
       'owner' : Principal,
+      'payout_transfer_amount_raw' : [] | [bigint],
       'timestamp' : [] | [bigint],
       'payout_collateral_raw' : [] | [bigint],
       'fee_amount' : bigint,
+      'payout_attempt_nonce' : [] | [bigint],
       'collateral_type' : [] | [Principal],
       'min_net_collateral_raw' : [] | [bigint],
       'vault_redemptions' : [] | [Array<VaultRedemption>],
@@ -562,7 +573,9 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   } |
   {
     'margin_transfer' : {
+      'payout_kind' : [] | [PendingPayoutKind],
       'block_index' : bigint,
+      'operation_id' : [] | [bigint],
       'vault_id' : bigint,
       'timestamp' : [] | [bigint],
     }
@@ -889,6 +902,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   {
     'redemption_transfered' : {
       'icusd_block_index' : bigint,
+      'operation_id' : [] | [bigint],
       'icp_block_index' : bigint,
       'timestamp' : [] | [bigint],
     }
@@ -967,7 +981,14 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'token_type' : StableTokenType,
     }
   } |
-  { 'set_recovery_cr_multiplier' : { 'multiplier' : string } };
+  { 'set_recovery_cr_multiplier' : { 'multiplier' : string } } |
+  {
+    'pending_payout_rearmed' : {
+      'operation_id' : bigint,
+      'timestamp' : [] | [bigint],
+      'attempt_nonce' : bigint,
+    }
+  };
 export interface EventTimeRange { 'start_ns' : bigint, 'end_ns' : bigint }
 export type EventTypeFilter = { 'BreakerTripped' : null } |
   { 'StabilityPoolDeposit' : null } |
@@ -1106,6 +1127,46 @@ export interface PendingLiquidationV1 {
   'tier' : LiquidationTier,
   'debt_to_clear_e8s' : bigint,
   'collateral_reserved_native' : bigint,
+}
+export interface PendingMarginTransfer {
+  'too_old_confirmed' : boolean,
+  'payout_kind' : PendingPayoutKind,
+  'history_log_length' : [] | [bigint],
+  'owner' : Principal,
+  'retry_count' : number,
+  'transfer_amount_raw' : [] | [bigint],
+  'operation_id' : bigint,
+  'vault_id' : bigint,
+  'reconciliation_required' : boolean,
+  'ledger' : [] | [Principal],
+  'op_nonce' : bigint,
+  'history_cursor' : bigint,
+  'margin' : bigint,
+  'in_flight' : boolean,
+  'collateral_type' : Principal,
+  'min_net_collateral_raw' : [] | [bigint],
+  'held_for_manual_retry' : boolean,
+}
+export type PendingPayoutKind = { 'Margin' : null } |
+  { 'Redemption' : null } |
+  { 'Excess' : null };
+export interface PendingPayoutPage {
+  'next_cursor' : [] | [bigint],
+  'items' : Array<PendingPayoutView>,
+}
+export interface PendingPayoutView {
+  'too_old_confirmed' : boolean,
+  'retry_count' : number,
+  'kind' : PendingPayoutKind,
+  'minimum_net_raw' : [] | [bigint],
+  'operation_id' : bigint,
+  'redemption_block_index' : [] | [bigint],
+  'hold_reason' : [] | [string],
+  'amount_gross' : bigint,
+  'reconciliation_required' : boolean,
+  'amount_net_raw' : [] | [bigint],
+  'ledger' : [] | [Principal],
+  'held_for_manual_retry' : boolean,
 }
 export interface PendingStabilityPoolInterestNotification {
   'source_mint_block' : bigint,
@@ -1821,6 +1882,10 @@ export interface _SERVICE {
     [],
     Array<PendingChainBurnAging>
   >,
+  'get_pending_payouts' : ActorMethod<
+    [[] | [bigint], [] | [number]],
+    PendingPayoutPage
+  >,
   'get_pending_stability_pool_interest_notification_count' : ActorMethod<
     [],
     bigint
@@ -1925,6 +1990,7 @@ export interface _SERVICE {
   'prepare_redemption_offer' : ActorMethod<[bigint], Result_17>,
   'provide_liquidity' : ActorMethod<[bigint], Result_1>,
   'reconcile_chain_supply' : ActorMethod<[number], Result_18>,
+  'recover_pending_payout' : ActorMethod<[bigint], Result_19>,
   'recover_pending_transfer' : ActorMethod<[bigint], Result_19>,
   'recover_stuck_chain_vault' : ActorMethod<[number, bigint], Result>,
   'redeem_collateral' : ActorMethod<[Principal, bigint], Result_4>,
