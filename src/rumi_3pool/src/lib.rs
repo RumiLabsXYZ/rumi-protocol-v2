@@ -1,6 +1,7 @@
 use candid::Principal;
 use ic_cdk::{query, update, init, pre_upgrade, post_upgrade};
 use ic_canister_log::log;
+use std::cell::Cell;
 use std::time::Duration;
 
 pub mod types;
@@ -336,9 +337,71 @@ fn get_current_a() -> u64 {
 /// controllable, so this is a memory-safety bound rather than an anti-DoS one.
 const MAX_PENDING_CLAIMS: u64 = 10_000;
 
+thread_local! {
+    static RESERVED_PENDING_CLAIM_SLOTS: Cell<u64> = const { Cell::new(0) };
+    #[cfg(feature = "test_endpoints")]
+    static TEST_PENDING_CLAIM_LIMIT: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+fn pending_claim_limit() -> u64 {
+    #[cfg(feature = "test_endpoints")]
+    if let Some(limit) = TEST_PENDING_CLAIM_LIMIT.with(Cell::get) {
+        return limit;
+    }
+    MAX_PENDING_CLAIMS
+}
+
+/// Hold recovery capacity before an operation can move value.
+struct PendingClaimSlots {
+    remaining: u64,
+}
+
+impl PendingClaimSlots {
+    fn reserve(slots: u64) -> Result<Self, ThreePoolError> {
+        let used = storage::pending_claims::len();
+        let limit = pending_claim_limit();
+        let accepted = RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| {
+            let current = reserved.get();
+            let Some(total) = used.checked_add(current).and_then(|n| n.checked_add(slots)) else {
+                return false;
+            };
+            if total > limit {
+                return false;
+            }
+            reserved.set(current + slots);
+            true
+        });
+        if !accepted {
+            return Err(ThreePoolError::PendingClaimCapacityReached);
+        }
+        Ok(Self { remaining: slots })
+    }
+
+    fn consume_one(&mut self) {
+        assert!(self.remaining > 0, "pending claim inserted without reserved capacity");
+        self.remaining -= 1;
+        RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| {
+            let current = reserved.get();
+            assert!(current > 0, "pending claim reservation underflow");
+            reserved.set(current - 1);
+        });
+    }
+}
+
+impl Drop for PendingClaimSlots {
+    fn drop(&mut self) {
+        RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| {
+            let current = reserved.get();
+            assert!(current >= self.remaining, "pending claim reservation underflow");
+            reserved.set(current - self.remaining);
+        });
+    }
+}
+
 /// Record tokens the pool owes `claimant` after a failed payout/refund so the
 /// funds can be recovered via `claim_pending` instead of being stranded.
 fn record_pending_claim(
+    slots: &mut PendingClaimSlots,
     claimant: Principal,
     token_index: u8,
     ledger: Principal,
@@ -346,14 +409,7 @@ fn record_pending_claim(
     amount: u128,
     reason: &str,
 ) -> u64 {
-    // Bound memory. Dropping the oldest claim is itself a (logged) value loss,
-    // but reaching the cap requires thousands of genuine ledger failures.
-    if storage::pending_claims::len() >= MAX_PENDING_CLAIMS {
-        if let Some(oldest) = storage::pending_claims::list(0, 1).into_iter().next() {
-            log!(INFO, "WARN: pending_claims at capacity; dropping oldest claim #{}", oldest.id);
-            storage::pending_claims::remove(oldest.id);
-        }
-    }
+    slots.consume_one();
     let id = storage::pending_claims::next_id();
     log!(INFO, "Pending claim #{} recorded: {} owes {} of token {} ({}): {}",
         id, claimant, amount, token_index, symbol, reason);
@@ -566,6 +622,14 @@ async fn swap_inner(
         return Err(ThreePoolError::SlippageExceeded);
     }
 
+    // Receipt-backed swaps have their own recovery journal. Ordinary swaps
+    // reserve one pending-claim slot before pulling input tokens.
+    let mut claim_slots = if receipt.is_none() {
+        Some(PendingClaimSlots::reserve(1)?)
+    } else {
+        None
+    };
+
     // 7. Transfer input token from user to pool
     let caller = ic_cdk::api::caller();
     let token_i_symbol = read_state(|s| s.config.tokens[i_idx].symbol.clone());
@@ -654,6 +718,7 @@ async fn swap_inner(
         if let Err(reason) = transfer_to_user(token_j_ledger, caller, output).await {
             if let Err(refund_err) = transfer_to_user(token_i_ledger, caller, dx).await {
                 record_pending_claim(
+                claim_slots.as_mut().expect("ordinary swap reserved a claim slot"),
                 caller,
                 i,
                 token_i_ledger,
@@ -806,6 +871,10 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
             (s.config.tokens[2].ledger_id, s.config.tokens[2].symbol.clone()),
         ]
     });
+    // On failure of the last nonzero pull, every earlier successful pull can
+    // independently fail its refund. Reserve that full bound before pulling.
+    let possible_refunds = amounts_arr.iter().filter(|amount| **amount > 0).count().saturating_sub(1) as u64;
+    let mut claim_slots = PendingClaimSlots::reserve(possible_refunds)?;
     for k in 0..3 {
         if amounts_arr[k] > 0 {
             let (ledger, symbol) = &token_meta[k];
@@ -818,6 +887,7 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
                             transfer_to_user(*r_ledger, caller, amounts_arr[r]).await
                         {
                             record_pending_claim(
+                                &mut claim_slots,
                                 caller,
                                 r as u8,
                                 *r_ledger,
@@ -969,6 +1039,9 @@ pub async fn remove_liquidity(
         }
     }
 
+    let claim_slots_needed = amounts.iter().filter(|amount| **amount > 0).count() as u64;
+    let mut claim_slots = PendingClaimSlots::reserve(claim_slots_needed)?;
+
     // 5. Revalidate and deduct LP first (deduct-before-transfer pattern).
     // `ledger_fee` above can await on a cold cache; ICRC-1 LP transfers are
     // not covered by PoolGuard and may have reduced this balance meanwhile.
@@ -1013,6 +1086,7 @@ pub async fn remove_liquidity(
             let (ledger, symbol) = &token_meta[k];
             if let Err(reason) = transfer_to_user(*ledger, caller, amounts[k]).await {
                 record_pending_claim(
+                    &mut claim_slots,
                     caller,
                     k as u8,
                     *ledger,
@@ -1126,6 +1200,10 @@ pub async fn remove_one_coin(
         return Err(ThreePoolError::SlippageExceeded);
     }
 
+    // LP and reserves are debited below; hold room for the possible payout
+    // claim before committing that debit.
+    let mut claim_slots = PendingClaimSlots::reserve(1)?;
+
     // 5. Deduct LP and balance first. Revalidate after the fee-cache await:
     // LP-token transfers can execute while this update is suspended.
     let admin_fee_share = fee.checked_mul(admin_fee_bps as u128)
@@ -1167,6 +1245,7 @@ pub async fn remove_one_coin(
 
     if let Err(reason) = transfer_to_user(ledger, caller, amount).await {
         record_pending_claim(
+            &mut claim_slots,
             caller,
             coin_index,
             ledger,
@@ -2838,11 +2917,26 @@ pub fn test_corrupt_hash_cache_tip(bogus_hash: Vec<u8>) {
 pub fn test_insert_pending_claim(token_index: u8, amount: u128) -> u64 {
     assert!(token_index < 3, "token_index out of range");
     let caller = ic_cdk::api::caller();
+    let mut slots = PendingClaimSlots::reserve(1).expect("test claim capacity available");
     let (ledger, symbol) = read_state(|s| {
         let t = &s.config.tokens[token_index as usize];
         (t.ledger_id, t.symbol.clone())
     });
-    record_pending_claim(caller, token_index, ledger, &symbol, amount, "test-injected claim")
+    record_pending_claim(&mut slots, caller, token_index, ledger, &symbol, amount, "test-injected claim")
+}
+
+/// Test-only: lower the pending-claim cap to exercise fail-closed behavior.
+#[cfg(feature = "test_endpoints")]
+#[update]
+pub fn test_set_pending_claim_limit(limit: u64) -> Result<(), ThreePoolError> {
+    assert_eq!(ic_cdk::api::caller(), read_state(|s| s.config.admin), "admin only");
+    let occupied = storage::pending_claims::len()
+        .saturating_add(RESERVED_PENDING_CLAIM_SLOTS.with(Cell::get));
+    if limit < occupied || limit > MAX_PENDING_CLAIMS {
+        return Err(ThreePoolError::PendingClaimCapacityReached);
+    }
+    TEST_PENDING_CLAIM_LIMIT.with(|test_limit| test_limit.set(Some(limit)));
+    Ok(())
 }
 
 #[cfg(test)]
