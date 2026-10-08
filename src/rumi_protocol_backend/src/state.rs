@@ -586,6 +586,17 @@ impl CollateralStatus {
 pub struct BotClaim {
     /// Vault ID being liquidated
     pub vault_id: u64,
+    /// Monotonic claim identity; distinguishes a later claim for this vault.
+    #[serde(default)]
+    pub generation: u64,
+    /// Transfer tuple reserved before dispatch. `None` identifies legacy or
+    /// test-only claim records that cannot safely be retried automatically.
+    #[serde(default)]
+    pub collateral_transfer: Option<BotCollateralTransfer>,
+    /// ckUSDC ledger selected when this claim is created. A later ledger
+    /// configuration change must not change which ledger can prove payment.
+    #[serde(default)]
+    pub payment_ledger_principal: Option<Principal>,
     /// Amount of collateral transferred to the bot
     pub collateral_amount: u64,
     /// Debt amount the bot committed to cover
@@ -596,6 +607,34 @@ pub struct BotClaim {
     pub claimed_at: u64,
     /// Collateral price at time of claim (for event logging)
     pub collateral_price_e8s: u64,
+    /// Exact return-transfer block verified before strict cancel or expiry.
+    #[serde(default)]
+    pub collateral_return_proof: Option<BotCollateralReturnProof>,
+}
+
+#[derive(candid::CandidType, Clone, Debug, serde::Deserialize, Serialize)]
+pub struct BotCollateralTransfer {
+    pub op_nonce: u128,
+    pub created_at_time: u64,
+    pub block_index: Option<u64>,
+    #[serde(default)]
+    pub status: BotCollateralTransferStatus,
+}
+
+#[derive(candid::CandidType, Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, Serialize)]
+pub enum BotCollateralTransferStatus {
+    #[default]
+    Reserved,
+    NoEffect,
+    Ambiguous,
+    Confirmed,
+}
+
+#[derive(candid::CandidType, Clone, Debug, Eq, PartialEq, serde::Deserialize, Serialize)]
+pub struct BotCollateralReturnProof {
+    pub block_index: u64,
+    pub amount: u64,
+    pub created_at_time: u64,
 }
 
 /// Asset class for XRC price queries (mirrors ic_xrc_types::AssetClass but with serde support).
@@ -1924,6 +1963,25 @@ pub struct State {
     /// Active bot claims — tracks collateral transferred to bot but not yet confirmed.
     /// Key = vault_id. Auto-cancelled after `BOT_CLAIM_TIMEOUT_NS`.
     pub bot_claims: BTreeMap<u64, BotClaim>,
+    /// Monotonic identity source for bot claims (old snapshots start at zero).
+    #[serde(default)]
+    pub bot_claim_generation_counter: u64,
+    /// When enabled, the legacy vault-id-only confirmation endpoint fails closed.
+    #[serde(default)]
+    pub bot_confirm_proof_required: bool,
+    /// Permanent consumed ckUSDC payment block -> (vault, claim generation).
+    /// Never evicted: removal could make a settled ledger block reusable after
+    /// a claim recreation or upgrade.
+    #[serde(default)]
+    pub consumed_bot_payment_blocks: BTreeMap<u64, (u64, u64)>,
+    /// Ledger associated with the old block-only map at migration. Unknown
+    /// historical ledger identity makes collisions fail closed.
+    #[serde(default)]
+    pub legacy_consumed_payment_ledger: Option<Principal>,
+    /// New ledger-scoped replay tombstones. The legacy block-only map above
+    /// remains loaded and consulted so migration never drops old tombstones.
+    #[serde(default)]
+    pub consumed_bot_payment_proofs: BTreeMap<String, (u64, u64)>,
 
     /// Monotonic counter for ICRC transfer idempotency nonces (audit Wave-3).
     /// Combined with `ic_cdk::api::time()` in `next_op_nonce` to mint a u128
@@ -2459,6 +2517,11 @@ impl Default for State {
             bot_pending_vaults: BTreeMap::new(),
             sp_attempted_vaults: BTreeSet::new(),
             bot_claims: BTreeMap::new(),
+            bot_claim_generation_counter: 0,
+            bot_confirm_proof_required: false,
+            consumed_bot_payment_blocks: BTreeMap::new(),
+            legacy_consumed_payment_ledger: None,
+            consumed_bot_payment_proofs: BTreeMap::new(),
             op_nonce_counter: 0,
             pending_outlier_prices: BTreeMap::new(),
             liquidation_frozen: false,
@@ -2741,6 +2804,11 @@ impl From<InitArg> for State {
             bot_pending_vaults: BTreeMap::new(),
             sp_attempted_vaults: BTreeSet::new(),
             bot_claims: BTreeMap::new(),
+            bot_claim_generation_counter: 0,
+            bot_confirm_proof_required: false,
+            consumed_bot_payment_blocks: BTreeMap::new(),
+            legacy_consumed_payment_ledger: None,
+            consumed_bot_payment_proofs: BTreeMap::new(),
             op_nonce_counter: 0,
             pending_outlier_prices: BTreeMap::new(),
             liquidation_frozen: false,

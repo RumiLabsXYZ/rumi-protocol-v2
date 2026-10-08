@@ -9,6 +9,20 @@ export interface BotAdminEvent {
   'timestamp' : bigint,
   'caller' : string,
 }
+export interface BotClaimJournal {
+  'status' : BotClaimJournalStatus,
+  'collateral_price_e8s' : bigint,
+  'payment_memo' : Uint8Array | number[],
+  'collateral_return' : [] | [BotReturnTransferJournal],
+  'collateral_amount_e8s' : bigint,
+  'claim_generation' : bigint,
+  'vault_id' : bigint,
+  'collateral_return_memo' : Uint8Array | number[],
+  'debt_covered_e8s' : bigint,
+}
+export type BotClaimJournalStatus = { 'ReturnPending' : null } |
+  { 'PaymentShortfall' : null } |
+  { 'SwapMayHaveStarted' : null };
 export interface BotConfig {
   'ckusdt_ledger' : [] | [Principal],
   'icp_fee_e8s' : [] | [bigint],
@@ -26,8 +40,47 @@ export interface BotConfig {
   'three_pool_principal' : [] | [Principal],
 }
 export interface BotInitArgs { 'config' : BotConfig }
+export interface BotPaymentJournal {
+  'status' : BotPaymentStatus,
+  'collateral_price_e8s' : bigint,
+  'backend_principal' : Principal,
+  'receipt' : [] | [TransferReceipt],
+  'fee_e6' : bigint,
+  'ckusdc_received_e6' : bigint,
+  'memo' : Uint8Array | number[],
+  'collateral_amount_e8s' : bigint,
+  'claim_generation' : bigint,
+  'vault_id' : bigint,
+  'gross_amount_e6' : bigint,
+  'held_surplus_e6' : bigint,
+  'ledger_principal' : Principal,
+  'amount_e6' : bigint,
+  'created_at_time' : bigint,
+  'debt_covered_e8s' : bigint,
+  'icp_swapped_e8s' : bigint,
+}
+export type BotPaymentStatus = { 'ReceiptObserved' : null } |
+  { 'NoEffect' : null } |
+  { 'Confirmed' : null } |
+  { 'Ambiguous' : null } |
+  { 'Prepared' : null };
+export interface BotReturnTransferJournal {
+  'status' : BotReturnTransferStatus,
+  'backend_principal' : Principal,
+  'receipt' : [] | [TransferReceipt],
+  'memo' : Uint8Array | number[],
+  'fee_e8s' : bigint,
+  'amount_e8s' : bigint,
+  'ledger_principal' : Principal,
+  'created_at_time' : bigint,
+}
+export type BotReturnTransferStatus = { 'ReceiptObserved' : null } |
+  { 'NoEffect' : null } |
+  { 'Ambiguous' : null } |
+  { 'Prepared' : null };
 export interface BotStats {
   'total_debt_covered_e8s' : bigint,
+  'total_ckusdc_surplus_held_e6' : bigint,
   'total_collateral_to_treasury_e8s' : bigint,
   'total_ckusdc_deposited_e6' : bigint,
   'events_count' : bigint,
@@ -86,8 +139,23 @@ export interface SwapResult {
 }
 export type TestSwapResult = { 'Ok' : SwapResult } |
   { 'Err' : string };
+export interface TransferReceipt {
+  'block_index' : bigint,
+  'created_at_time' : bigint,
+  'amount' : bigint,
+}
 export interface _SERVICE {
   'admin_approve_pool' : ActorMethod<[], undefined>,
+  'admin_reconcile_payment_block' : ActorMethod<
+    [bigint, bigint],
+    { 'Ok' : null } |
+      { 'Err' : string }
+  >,
+  'admin_reconcile_return_block' : ActorMethod<
+    [bigint, bigint],
+    { 'Ok' : null } |
+      { 'Err' : string }
+  >,
   'admin_refresh_fees' : ActorMethod<[], [bigint, bigint]>,
   'admin_resolve_pool_ordering' : ActorMethod<[], undefined>,
   'admin_retry_stuck_claim' : ActorMethod<[bigint], undefined>,
@@ -108,12 +176,20 @@ export interface _SERVICE {
     [bigint, bigint],
     Array<LiquidationRecordVersioned>
   >,
+  'get_pending_claim_journals' : ActorMethod<[], Array<BotClaimJournal>>,
+  'get_pending_payment_journals' : ActorMethod<[], Array<BotPaymentJournal>>,
+  'get_processing_paused' : ActorMethod<[], boolean>,
   'get_stuck_liquidations' : ActorMethod<[], Array<LiquidationRecordVersioned>>,
   'notify_liquidatable_vaults' : ActorMethod<
     [Array<LiquidatableVaultInfo>],
     undefined
   >,
   'set_config' : ActorMethod<[BotConfig], undefined>,
+  'set_processing_paused' : ActorMethod<
+    [boolean],
+    { 'Ok' : null } |
+      { 'Err' : string }
+  >,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];

@@ -23,6 +23,7 @@ type BotInitArgs = record {
 type BotStats = record {
   total_debt_covered_e8s : nat64;
   total_ckusdc_deposited_e6 : nat64;
+  total_ckusdc_surplus_held_e6 : nat64;
   total_collateral_received_e8s : nat64;
   total_collateral_to_treasury_e8s : nat64;
   events_count : nat64;
@@ -83,15 +84,83 @@ type SwapResult = record {
   ckusdc_received_e6 : nat64;
   effective_price_e8s : nat64;
 };
+type TransferReceipt = record {
+  block_index : nat64;
+  amount : nat64;
+  created_at_time : nat64;
+};
+type BotPaymentStatus = variant { Prepared; Ambiguous; NoEffect; ReceiptObserved; Confirmed };
+type BotPaymentJournal = record {
+  vault_id : nat64;
+  backend_principal : principal;
+  ledger_principal : principal;
+  claim_generation : nat64;
+  debt_covered_e8s : nat64;
+  collateral_amount_e8s : nat64;
+  collateral_price_e8s : nat64;
+  icp_swapped_e8s : nat64;
+  ckusdc_received_e6 : nat64;
+  held_surplus_e6 : nat64;
+  gross_amount_e6 : nat64;
+  amount_e6 : nat64;
+  fee_e6 : nat64;
+  created_at_time : nat64;
+  memo : blob;
+  status : BotPaymentStatus;
+  receipt : opt TransferReceipt;
+};
+type BotReturnTransferStatus = variant { Prepared; Ambiguous; NoEffect; ReceiptObserved };
+type BotReturnTransferJournal = record {
+  ledger_principal : principal;
+  backend_principal : principal;
+  amount_e8s : nat64;
+  fee_e8s : nat64;
+  memo : blob;
+  created_at_time : nat64;
+  receipt : opt TransferReceipt;
+  status : BotReturnTransferStatus;
+};
+type BotClaimJournalStatus = variant { SwapMayHaveStarted; ReturnPending; PaymentShortfall };
+type BotClaimJournal = record {
+  vault_id : nat64;
+  claim_generation : nat64;
+  debt_covered_e8s : nat64;
+  collateral_amount_e8s : nat64;
+  collateral_price_e8s : nat64;
+  payment_memo : blob;
+  collateral_return_memo : blob;
+  collateral_return : opt BotReturnTransferJournal;
+  status : BotClaimJournalStatus;
+};
 
 type TestSwapResult = variant { Ok : SwapResult; Err : text };
+
+type CycleManagerCyclesStatus = record {
+  balance : nat;
+  low_watermark : nat;
+  healthy : bool;
+  freeze_threshold_secs : nat64;
+  stable_memory_bytes : opt nat64;
+  heap_memory_bytes : opt nat64;
+  idle_burn_cycles_per_day : opt nat;
+};
+type CycleManagerMetric = record {
+  key : text;
+  count : nat64;
+  value : nat;
+  label : opt text;
+};
 
 service : (BotInitArgs) -> {
   // Core
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> ();
   set_config : (BotConfig) -> ();
+  set_processing_paused : (bool) -> (variant { Ok; Err : text });
+  get_processing_paused : () -> (bool) query;
 
   // Stats
+  cycles_status : () -> (CycleManagerCyclesStatus) query;
+  cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   get_bot_stats : () -> (BotStats) query;
 
   // History
@@ -104,12 +173,16 @@ service : (BotInitArgs) -> {
   // Admin events
   get_admin_events : (nat64, nat64) -> (vec BotAdminEvent) query;
   get_admin_event_count : () -> (nat64) query;
+  get_pending_payment_journals : () -> (vec BotPaymentJournal) query;
+  get_pending_claim_journals : () -> (vec BotClaimJournal) query;
 
   // Admin actions
   admin_resolve_pool_ordering : () -> ();
   admin_approve_pool : () -> ();
   admin_sweep_ckusdc : (principal, opt nat64) -> ();
   admin_retry_stuck_claim : (nat64) -> ();
+  admin_reconcile_payment_block : (nat64, nat64) -> (variant { Ok; Err : text });
+  admin_reconcile_return_block : (nat64, nat64) -> (variant { Ok; Err : text });
   // Returns (icp_fee_e8s, ckusdc_fee_e6) freshly read from each ledger and
   // also writes them back into BotConfig so future swaps use the live values.
   admin_refresh_fees : () -> (nat64, nat64);

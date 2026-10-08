@@ -20,6 +20,25 @@ type BotLiquidationResult = record {
   collateral_price_e8s : nat64;
   vault_id : nat64;
   debt_covered : nat64;
+  claim_generation : nat64;
+  payment_memo : blob;
+  collateral_return_memo : blob;
+  payment_ledger_principal : opt principal;
+};
+type BotPaymentProof = record {
+  vault_id : nat64;
+  claim_generation : nat64;
+  ledger_principal : principal;
+  block_index : nat64;
+  amount_e6s : nat64;
+  created_at_time : nat64;
+};
+type BotCollateralReturnProofArg = record {
+  vault_id : nat64;
+  claim_generation : nat64;
+  block_index : nat64;
+  amount : nat64;
+  created_at_time : nat64;
 };
 type BotStatsResponse = record {
   total_debt_covered_e8s : nat64;
@@ -338,6 +357,7 @@ type Event = variant {
     amount : nat64;
   };
   set_bot_cr_tolerance_bps : record { bps : nat64 };
+  bot_claim_generation_reserved : record { generation : nat64 };
   collateral_withdrawn : record {
     block_index : nat64;
     vault_id : nat64;
@@ -661,6 +681,7 @@ type Event = variant {
   };
   set_three_pool_canister : record { canister : principal };
   set_liquidation_bonus : record { rate : text };
+  bot_proof_mode_enabled;
   reserve_redemption : record {
     icusd_amount : nat64;
     icusd_block_index : nat64;
@@ -691,6 +712,12 @@ type Event = variant {
     timestamp : nat64;
   };
   set_redemption_fee_ceiling : record { rate : text };
+  bot_payment_proof_consumed : record {
+    block_index : nat64;
+    claim_generation : nat64;
+    vault_id : nat64;
+    ledger_principal : principal;
+  };
   set_deficit_readonly_threshold_e8s : record {
     threshold_e8s : nat64;
     timestamp : nat64;
@@ -1488,6 +1515,9 @@ service : (ProtocolArg) -> {
   bot_cancel_liquidation : (nat64) -> (Result);
   bot_claim_liquidation : (nat64) -> (Result_5);
   bot_confirm_liquidation : (nat64) -> (Result);
+  bot_confirm_liquidation_with_proof : (BotPaymentProof) -> (Result);
+  bot_record_collateral_return_proof : (BotCollateralReturnProofArg) -> (Result);
+  enable_bot_confirm_proof_requirement : () -> (Result);
   cancel_xrp_pending_open : (nat64) -> (Result);
   chain_has_active_settlement_op : (nat32) -> (bool) query;
   claim_chain_collateral : (nat64, principal, nat, text) -> (Result_1);

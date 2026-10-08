@@ -152,6 +152,7 @@ fn inspect_message() {
         // Admin/auth methods: reject anonymous to save cycles on Candid decoding
         "set_config" | "admin_resolve_pool_ordering" | "admin_approve_pool"
         | "admin_sweep_ckusdc" | "admin_retry_stuck_claim"
+        | "set_processing_paused" | "admin_reconcile_payment_block" | "admin_reconcile_return_block"
         | "admin_refresh_fees" | "admin_test_swap" => {
             if ic_cdk::api::caller() != Principal::anonymous() {
                 ic_cdk::api::call::accept_message();
@@ -184,6 +185,24 @@ fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) {
         trim_admin_events(&mut s.admin_events);
     });
     log!(INFO, "Received {} liquidatable vaults from backend", count);
+}
+
+/// Pause/resume the timer-driven liquidation worker. Pausing is refused while
+/// an update is suspended in an external call; retry after it has settled.
+#[update]
+fn set_processing_paused(paused: bool) -> Result<(), String> {
+    require_admin();
+    if paused && PROCESSING.with(|p| *p.borrow()) {
+        return Err("cannot pause while a liquidation or admin operation is in flight".into());
+    }
+    state::mutate_state(|s| s.processing_paused = paused);
+    state::save_config_to_stable();
+    Ok(())
+}
+
+#[query]
+fn get_processing_paused() -> bool {
+    state::read_state(|s| s.processing_paused)
 }
 
 #[query]
@@ -260,6 +279,10 @@ fn trim_admin_events(events: &mut Vec<BotAdminEvent>) {
 #[update]
 fn set_config(config: BotConfig) {
     require_admin();
+    if state::read_state(|s| !s.pending_payments.is_empty() || !s.pending_claims.is_empty()) {
+        log!(INFO, "Rejected config change while a claim/payment recovery journal is pending");
+        return;
+    }
     state::mutate_state(|s| {
         s.config = Some(config);
         s.admin_events.push(BotAdminEvent {
@@ -269,6 +292,18 @@ fn set_config(config: BotConfig) {
         });
         trim_admin_events(&mut s.admin_events);
     });
+}
+
+#[query]
+fn get_pending_payment_journals() -> Vec<state::BotPaymentJournal> {
+    require_admin();
+    state::read_state(|s| s.pending_payments.values().cloned().collect())
+}
+
+#[query]
+fn get_pending_claim_journals() -> Vec<state::BotClaimJournal> {
+    require_admin();
+    state::read_state(|s| s.pending_claims.values().cloned().collect())
 }
 
 // ---- History query endpoints ----
@@ -372,6 +407,9 @@ async fn admin_sweep_ckusdc(target: Principal, record_id: Option<u64>) {
     require_admin();
     let _guard = ProcessingGuard::acquire()
         .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
+    if state::read_state(|s| !s.pending_payments.is_empty() || !s.pending_claims.is_empty()) {
+        ic_cdk::trap("Cannot sweep assets while a claim/payment recovery journal is pending");
+    }
     let ckusdc_ledger = state::read_state(|s| {
         s.config.as_ref().expect("Config not set").ckusdc_ledger
     });
@@ -505,38 +543,104 @@ async fn admin_test_swap(amount_e8s: u64) -> Result<swap::SwapResult, String> {
     result
 }
 
-/// Retry confirm for a stuck claim.
+/// Retry only a payment with a durable definitive no-effect response. Every
+/// other case requires exact proof reconciliation; never fall back to the
+/// vault-id-only legacy confirm endpoint.
 #[update]
 async fn admin_retry_stuck_claim(vault_id: u64) {
     require_admin();
     let _guard = ProcessingGuard::acquire()
         .unwrap_or_else(|_| ic_cdk::trap("Another operation is in progress"));
     let config = state::read_state(|s| s.config.clone()).expect("Not configured");
-
-    match process::call_bot_confirm_liquidation(&config, vault_id).await {
-        Ok(()) => {
-            // Find and update the stuck record for this vault
-            let count = history::record_count();
-            for id in (0..count).rev() {
-                if let Some(record) = history::get_record(id) {
-                    match &record {
-                        history::LiquidationRecordVersioned::V1(r) => {
-                            if r.vault_id == vault_id && r.status == history::LiquidationStatus::ConfirmFailed {
-                                history::update_record_status(id, history::LiquidationStatus::Completed);
-                                log!(INFO, "admin_retry_stuck_claim: marked record #{} as Completed", id);
-                                break;
-                            }
-                        }
-                    }
-                }
+    let disposition = state::read_state(|s| {
+        admin_retry_disposition(
+            s.pending_payments.get(&vault_id).map(|journal| journal.status.clone()),
+            s.pending_claims.contains_key(&vault_id),
+        )
+    });
+    match disposition {
+        AdminRetryDisposition::RetryNoEffectPayment => {
+            if let Err(error) = process::admin_retry_no_effect_payment(&config, vault_id).await {
+                ic_cdk::trap(&format!("Payment remains held for vault #{}: {}", vault_id, error));
             }
-            log!(INFO, "admin_retry_stuck_claim: confirmed vault #{}", vault_id);
+            log!(INFO, "admin_retry_stuck_claim: retried definitive no-effect payment for vault #{}", vault_id);
         }
-        Err(e) => {
-            ic_cdk::trap(&format!(
-                "Confirm still failing for vault #{}: {}",
-                vault_id, e
-            ));
-        }
+        AdminRetryDisposition::ReconcilePaymentProof => ic_cdk::trap(&format!(
+            "Payment for vault #{} requires exact ICRC-3 block reconciliation; legacy confirmation is disabled",
+            vault_id
+        )),
+        AdminRetryDisposition::HoldClaim => ic_cdk::trap(&format!(
+            "Claim for vault #{} is held without an accepted payment proof; legacy confirmation is disabled",
+            vault_id
+        )),
+        AdminRetryDisposition::HoldLegacy => ic_cdk::trap(&format!(
+            "Vault #{} has no durable proof journal; legacy confirmation is disabled",
+            vault_id
+        )),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdminRetryDisposition {
+    RetryNoEffectPayment,
+    ReconcilePaymentProof,
+    HoldClaim,
+    HoldLegacy,
+}
+
+fn admin_retry_disposition(
+    payment_status: Option<state::BotPaymentStatus>,
+    has_pending_claim: bool,
+) -> AdminRetryDisposition {
+    match payment_status {
+        Some(state::BotPaymentStatus::NoEffect) => AdminRetryDisposition::RetryNoEffectPayment,
+        Some(_) => AdminRetryDisposition::ReconcilePaymentProof,
+        None if has_pending_claim => AdminRetryDisposition::HoldClaim,
+        None => AdminRetryDisposition::HoldLegacy,
+    }
+}
+
+#[cfg(test)]
+mod admin_retry_tests {
+    use super::*;
+
+    #[test]
+    fn short_payment_claim_cannot_fall_through_to_legacy_confirmation() {
+        assert_eq!(
+            admin_retry_disposition(None, true),
+            AdminRetryDisposition::HoldClaim,
+        );
+    }
+
+    #[test]
+    fn missing_journal_also_fails_closed() {
+        assert_eq!(
+            admin_retry_disposition(None, false),
+            AdminRetryDisposition::HoldLegacy,
+        );
+    }
+}
+
+/// Reconcile an ambiguous payment by an operator-supplied ICRC-3 block.
+/// Backend validation remains authoritative before any debt write-down.
+#[update]
+async fn admin_reconcile_payment_block(vault_id: u64, block_index: u64) -> Result<(), String> {
+    require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .map_err(|_| "Another operation is in progress".to_string())?;
+    let config = state::read_state(|s| s.config.clone())
+        .ok_or_else(|| "Config not set".to_string())?;
+    process::admin_reconcile_payment_block(&config, vault_id, block_index).await
+}
+
+/// Reconcile a collateral return by an operator-supplied ICRC-3 block.
+/// Backend validation remains authoritative before cancellation.
+#[update]
+async fn admin_reconcile_return_block(vault_id: u64, block_index: u64) -> Result<(), String> {
+    require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .map_err(|_| "Another operation is in progress".to_string())?;
+    let config = state::read_state(|s| s.config.clone())
+        .ok_or_else(|| "Config not set".to_string())?;
+    process::admin_reconcile_return_block(&config, vault_id, block_index).await
 }
