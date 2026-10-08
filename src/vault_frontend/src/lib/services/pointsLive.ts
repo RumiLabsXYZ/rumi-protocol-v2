@@ -25,6 +25,7 @@ import { threePoolService } from './threePoolService';
 import { ammService, type PoolInfo } from './ammService';
 import { threeUsdPriceFromPoolStatus } from './threeUsdPrice';
 import type { LiveInputs } from '$lib/utils/pointsBreakdown';
+import { getFiatStablePointsPolicy } from './pointsService';
 
 const E8S = 100_000_000;
 
@@ -133,13 +134,14 @@ export async function fetchLiveInputs(
   p: Principal,
   state: PrincipalState | null,
 ): Promise<LiveInputs> {
-  const [vaultDebt, sp, wallet3usd, amm, icpUsd, virtualPrice] = await Promise.allSettled([
+  const [vaultDebt, sp, wallet3usd, amm, icpUsd, virtualPrice, pointsPolicy] = await Promise.allSettled([
     fetchVaultDebtUsd(p),
     fetchSpBalances(p),
     threePoolService.getLpBalance(p).then((b) => Number(b) / E8S),
     fetchAmmShares(p),
     fetchIcpUsd(),
     fetchVirtualPrice(),
+    getFiatStablePointsPolicy(),
   ]);
 
   const spVal = settled(sp, 'stability pool');
@@ -154,5 +156,6 @@ export async function fetchLiveInputs(
     recorded3pool: recorded3poolFromState(state),
     icpUsd: settled(icpUsd, 'ICP price'),
     virtualPrice: settled(virtualPrice, '3USD virtual price'),
+    pointsPolicy: settled(pointsPolicy, 'fiat-stable points policy') ?? undefined,
   };
 }

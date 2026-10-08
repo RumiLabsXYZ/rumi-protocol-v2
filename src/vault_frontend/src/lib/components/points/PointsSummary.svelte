@@ -189,8 +189,16 @@
           <li class="rounded-lg border border-gray-700/40 bg-gray-900/30 px-3 py-2">
             <div class="flex items-center justify-between gap-3">
               <span class="min-w-0 flex items-center gap-2">
-                <span class="text-sm text-gray-100 truncate">{s.meta.label}</span>
-                <MultiplierBadge multiplier={s.meta.multiplier} />
+                <span class="text-sm text-gray-100 truncate">
+                  {s.meta.kind === 'adjustment' ? s.meta.label : `Historical ${s.meta.label}`}
+                </span>
+                {#if s.meta.kind === 'adjustment'}
+                  <span class="text-[10px] uppercase tracking-wider text-sky-300/90 border border-sky-300/30 rounded-full px-1.5 py-px whitespace-nowrap">adjustment</span>
+                {:else if s.meta.multiplier === null}
+                  <span class="text-[10px] uppercase tracking-wider text-amber-300/90 border border-amber-300/30 rounded-full px-1.5 py-px whitespace-nowrap">rate unavailable</span>
+                {:else}
+                  <MultiplierBadge multiplier={s.meta.multiplier} />
+                {/if}
               </span>
               <span class="text-sm text-gray-100 tabular-nums whitespace-nowrap">{formatPoints(s.points)}</span>
             </div>

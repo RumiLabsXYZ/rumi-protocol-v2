@@ -172,7 +172,7 @@
   const SOURCE_META: Record<string, { label: string; mult: string }> = Object.fromEntries(
     Object.entries(SHARED_SOURCE_META).map(([k, m]) => [
       k,
-      { label: m.label, mult: m.multiplier > 0 ? `${m.multiplier}×` : '—' },
+      { label: m.label, mult: m.kind === 'adjustment' ? 'adjustment' : m.multiplier === null ? 'unavailable' : `${m.multiplier}×` },
     ]),
   );
   const SOURCE_TAGS: Record<number, string> = {

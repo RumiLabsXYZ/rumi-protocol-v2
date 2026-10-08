@@ -10,6 +10,7 @@ import {
   type LiveInputs,
 } from './pointsBreakdown';
 import type { PointEntry, PointSource, EpochSummary } from '$declarations/rumi_points/rumi_points.did';
+import { normalizeFiatStablePointsPolicy } from './fiatStablePointsPolicy';
 
 const P = Principal.fromText('2vxsx-fae');
 
@@ -143,6 +144,31 @@ describe('buildLivePositions — mirrors accrual.rs snapshot_weights', () => {
     expect(live.threePool!.underVerified).toBe(false);
   });
 
+  it('uses one flat 4x row after the runtime cutover', () => {
+    const policy = normalizeFiatStablePointsPolicy({
+      cutover_epoch: [19n],
+      legacy_epoch: [],
+      active_for_current_epoch: true,
+      historical_ledger_cutoff: [42n],
+      historical_next_offset: 0n,
+      historical_complete: false,
+      inline_legacy_topups_complete: false,
+      inline_legacy_topup_rows: 0n,
+    });
+    const live = buildLivePositions(
+      inputs({
+        pointsPolicy: policy,
+        wallet3usd: 1000,
+        recorded3pool: { icusd: 0, ckusdc: 100, ckusdt: 40 },
+      }),
+    );
+    const fiat = live.rows.find((r) => r.key === 'CkStable3PoolFlat4x')!;
+    expect(fiat.valueUsd).toBeCloseTo(140);
+    expect(fiat.multiplier).toBe(4);
+    expect(fiat.weightedUsd).toBeCloseTo(560);
+    expect(live.rows.some((r) => r.key === 'CkStable3PoolMatched')).toBe(false);
+  });
+
   it('3pool verification counts wallet + SP + AMM 3USD at the virtual price', () => {
     // held 3USD = 200+300+100 = 600 @ vp 1.03 → verified 618, cap 621.09 ≥ 600.
     const live = buildLivePositions(
@@ -228,8 +254,15 @@ describe('forward compatibility', () => {
     expect(row).toBeDefined();
     expect(row.meta.label).toBe('SomeFutureSource');
     expect(row.meta.short).toBe('SomeFutureSource');
-    expect(row.meta.multiplier).toBe(0);
+    expect(row.meta.multiplier).toBeNull();
     expect(s.total).toBe(150n);
+  });
+
+  it('keeps the historical unmatched top-up distinct from live accrual', () => {
+    const s = summarizeLedger([entry('CkStable3PoolUnmatchedTopUp', 18, 1_000n)], 18);
+    const row = s.sources[0];
+    expect(row.meta.kind).toBe('adjustment');
+    expect(row.meta.label).toContain('top-up');
   });
 });
 
@@ -264,6 +297,8 @@ describe('SOURCE_META', () => {
       'IcUsd3Pool',
       'CkStable3PoolMatched',
       'CkStable3PoolUnmatched',
+      'CkStable3PoolFlat4x',
+      'CkStable3PoolUnmatchedTopUp',
       'IcUsdStabilityPool',
       'ThreeUsdStabilityPool',
       'AmmLp',

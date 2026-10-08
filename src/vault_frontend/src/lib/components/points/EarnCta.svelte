@@ -2,6 +2,8 @@
   import MultiplierBadge from './MultiplierBadge.svelte';
   import { AMM1_LIQUIDITY_PAUSED } from '$lib/config';
   import type { EarnVenue } from '$lib/utils/pointsRules';
+  import { seasonStore } from '$lib/stores/seasonStore';
+  import { LEGACY_FIAT_STABLE_POINTS_POLICY } from '$lib/utils/fiatStablePointsPolicy';
 
   interface Props {
     heading?: string;
@@ -15,20 +17,29 @@
     label: string;
     desc: string;
     href: string;
-    mult: number;
+    mult: number | null;
   }
 
-  // Curated, sorted high → low. Each venue shows its best available multiplier.
-  // The AMM row is dropped while AMM1 deposits are paused — never advertise an
-  // action the app itself blocks.
-  const actions: Action[] = [
-    { venue: 'threePool', label: 'Provide 3pool liquidity', desc: 'Pair ckUSDC + ckUSDT for the highest boost; icUSD earns 1×.', href: '/3usd', mult: 5 },
-    { venue: 'stabilityPool', label: 'Deposit to the stability pool', desc: 'Backstop liquidations — 3USD earns 2×, icUSD 1×.', href: '/stability-pool', mult: 2 },
-    ...(AMM1_LIQUIDITY_PAUSED
-      ? []
-      : [{ venue: 'amm' as EarnVenue, label: 'Add 3USD/ICP to the AMM', desc: 'Provide liquidity to the Rumi AMM.', href: '/swap', mult: 2 }]),
-    { venue: 'vault', label: 'Mint icUSD', desc: 'Borrow icUSD against your vault collateral.', href: '/', mult: 1 },
-  ];
+  // Curated, sorted high → low. The 3pool row follows the runtime policy so a
+  // pending cutover never pitches pairing both coins for a historical 5× bonus.
+  const actions = $derived.by((): Action[] => {
+    const policy = $seasonStore.policy ?? LEGACY_FIAT_STABLE_POINTS_POLICY;
+    const threePoolMultiplier = policy.mode === 'flat4x' ? 4 : policy.mode === 'unknown' ? null : 5;
+    const threePoolDesc =
+      policy.mode === 'flat4x'
+        ? 'Deposit ckUSDC or ckUSDT; both fiat-backed stablecoins earn the same rate.'
+        : policy.mode === 'unknown'
+          ? 'The current fiat-stable points rate is unavailable; check the live policy.'
+        : 'Pairing earns up to 5× in the current legacy epoch; future epochs follow the published policy.';
+    return [
+      { venue: 'threePool', label: 'Provide 3pool liquidity', desc: threePoolDesc, href: '/3usd', mult: threePoolMultiplier },
+      { venue: 'stabilityPool', label: 'Deposit to the stability pool', desc: 'Backstop liquidations — 3USD earns 2×, icUSD 1×.', href: '/stability-pool', mult: 2 },
+      ...(AMM1_LIQUIDITY_PAUSED
+        ? []
+        : [{ venue: 'amm' as EarnVenue, label: 'Add 3USD/ICP to the AMM', desc: 'Provide liquidity to the Rumi AMM.', href: '/swap', mult: 2 }]),
+      { venue: 'vault', label: 'Mint icUSD', desc: 'Borrow icUSD against your vault collateral.', href: '/', mult: 1 },
+    ];
+  });
 </script>
 
 <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4">
@@ -49,7 +60,11 @@
             </span>
             <span class="block text-xs text-gray-500">{a.desc}</span>
           </span>
-          <MultiplierBadge multiplier={a.mult} size="md" />
+          {#if a.mult !== null}
+            <MultiplierBadge multiplier={a.mult} size="md" />
+          {:else}
+            <span class="text-xs text-amber-300 whitespace-nowrap">Rate unavailable</span>
+          {/if}
         </a>
       </li>
     {/each}

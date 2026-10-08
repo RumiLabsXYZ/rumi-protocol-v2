@@ -201,3 +201,25 @@ Authorization: implement a 66.6% deposit cap with Luna workers and merge when ve
 - Existing unrelated work and historical board entries remain untouched. Models are explicitly user-selected Luna, so no Sonnet check/fallback is required.
 
 Evidence and shared reviewer rubric: `docs/coordination/3pool-deposit-cap-evidence-2026-10-06.md`. DEP-01: 123 native tests passed. DEP-03: 9 new real-ledger tests and 9 existing canister regressions passed. Final frontend: 934 tests and production build passed; type-check baseline unchanged. Both independent reviewer pairs passed across two rounds. The merge gate passed; authoritative merge state is recorded in PR #420. No deployment or live wallet transaction is claimed.
+
+## Fiat stable 4x release — October 7, 2026
+
+User authorized implementation, merge, deployment and historical points top-ups. Coordinator owns merge/deployment. Worktree `/private/tmp/rumi-points-release`, branch `codex/fiat-stable-points-release`. Policy: `docs/coordination/fiat-stable-points-policy.md`. No unrelated backend, 3pool, Stability Pool, governance or funds changes.
+
+| Card | State | Owner | Requested / actual model | Scope | Acceptance / evidence |
+| --- | --- | --- | --- | --- | --- |
+| PS4-BACKEND | Complete | backend worker | Sonnet unavailable / GPT-5.6 Terra | Points-only policy, durable historical adjustment, epoch transition, tests and Rust interface | Preserve historical 5x, per-row floor(3x/3) top-ups exactly once; epoch-consistent future4x; old-state upgrade, auth, boundedness, reconciliation tests |
+| PS4-FRONTEND | Complete | frontend worker | Sonnet unavailable / GPT-5.6 Luna | Points rule UI, historical labels, docs and focused tests | Runtime policy truth; historical5x and top-ups identifiable; no new5x composition incentive |
+| PS4-PREFLIGHT | Complete | preflight worker | Sonnet unavailable / GPT-5.6 Luna | Read-only mainnet points identity, controllers, module, epoch/ledger state; deploy commands | Exact current target and availability; no mutations |
+| PS4-INTEGRATE | In progress | coordinator | coordinator | Generated declarations, reporting, isolated builds, independent review, PR merge and authorized live release | Two independent adversarial reviewers; deterministic gates; exact merged artifact and deployed hash; ledger/top-up reconciliation and served frontend bytes |
+
+Backend uses Terra because a retry-safe persisted migration must coexist with in-flight randomized snapshots and populated legacy-state upgrade; Luna handles narrower frontend and evidence tasks. Every subagent must return exact evidence and blockers. Deployment and admin migration mutations remain coordinator-only.
+
+| Card | State | Owner | Actual model | Scope | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| PS4-REPORT | Complete | reporting worker | GPT-5.6 Luna | Read-only prefix preview and post-migration reconciliation | 15 tests pass; live original prefix 401 rows; expected uplift 215174119482 e8s |
+| PS4-REVIEW-1A | Complete | code_review_a | GPT-5.6 Luna | Independent source and release review | First code review round |
+| PS4-REVIEW-1B | Complete | code_review_b | GPT-5.6 Luna | Independent source and release review | First code review round |
+
+| PS4-REVIEW-2A | Complete | final_review_a | GPT-6 Luna | Fresh independent adversarial review | Completed code and upgrade evidence |
+| PS4-REVIEW-2B | Complete | final_review_b | GPT-6 Luna | Fresh independent adversarial review | Completed code and upgrade evidence |
