@@ -1401,6 +1401,118 @@ pub async fn get_token_balance(ledger: Principal) -> Result<u64, String> {
 
 // ─── Protocol 3USD reserves ───
 
+/// 3pool `virtual_price` is scaled by 1e18; LP token amounts use e8 decimals.
+const THREE_POOL_VIRTUAL_PRICE_SCALE: u128 = 1_000_000_000_000_000_000;
+/// One e8 unit covers only integer-floor rounding in the value conversion.
+const THREE_USD_VALUE_TOLERANCE_E8S: u128 = 1;
+
+/// Minimal `get_pool_status` response. Candid record subtyping lets the
+/// backend decode this one field and ignore the rest of the pool status.
+#[derive(candid::CandidType, serde::Deserialize)]
+struct ThreePoolStatusVirtualPrice {
+    virtual_price: Nat,
+}
+
+/// Read the virtual price from the configured 3pool canister. Update calls
+/// invoke query methods in replicated mode, so callers do not rely on an
+/// unauthenticated client-side query result.
+pub async fn three_pool_virtual_price(three_pool: Principal) -> Result<u128, String> {
+    let result: Result<(ThreePoolStatusVirtualPrice,), _> =
+        ic_cdk::call(three_pool, "get_pool_status", ()).await;
+    let (status,) = result.map_err(|(code, message)| {
+        format!("3pool get_pool_status failed ({:?}): {}", code, message)
+    })?;
+    let virtual_price = status
+        .virtual_price
+        .0
+        .to_u128()
+        .ok_or_else(|| "3pool virtual price exceeds u128".to_string())?;
+    if virtual_price == 0 {
+        return Err("3pool virtual price is zero".to_string());
+    }
+    Ok(virtual_price)
+}
+
+/// Bind reserves transfers and status reads to the single configured 3pool
+/// principal, which is also the 3USD ICRC ledger.
+pub fn validate_three_usd_ledger(
+    configured_pool: Option<Principal>,
+    supplied_ledger: Principal,
+) -> Result<Principal, String> {
+    match configured_pool {
+        Some(pool) if pool == supplied_ledger => Ok(pool),
+        Some(_) => Err("3USD ledger does not match the configured 3pool canister".to_string()),
+        None => Err("3USD ledger has no configured 3pool canister".to_string()),
+    }
+}
+
+/// Reject 3USD/LP amounts whose independently read pool value cannot cover
+/// the icUSD debt. Arithmetic overflow fails closed. The one-e8-unit margin
+/// is only for the integer floor used by the SP's matching conversion.
+pub fn validate_three_usd_value(
+    three_usd_amount_e8s: u64,
+    virtual_price_e18: u128,
+    debt_covered_e8s: u64,
+) -> Result<(), String> {
+    let value_e8s = u128::from(three_usd_amount_e8s)
+        .checked_mul(virtual_price_e18)
+        .ok_or_else(|| "3USD value calculation overflowed".to_string())?
+        / THREE_POOL_VIRTUAL_PRICE_SCALE;
+    if value_e8s.saturating_add(THREE_USD_VALUE_TOLERANCE_E8S)
+        < u128::from(debt_covered_e8s)
+    {
+        return Err(format!(
+            "3USD value {} e8s is below debt covered {} e8s",
+            value_e8s, debt_covered_e8s
+        ));
+    }
+    Ok(())
+}
+
+pub fn checked_three_usd_reserves_total(current_e8s: u64, added_e8s: u64) -> Result<u64, String> {
+    current_e8s
+        .checked_add(added_e8s)
+        .ok_or_else(|| "3USD reserves accounting capacity exhausted".to_string())
+}
+
+#[cfg(test)]
+mod three_usd_value_tests {
+    use super::validate_three_usd_value;
+
+    #[test]
+    fn value_binding_covers_debt_and_fails_closed() {
+        const VP: u128 = 1_000_000_000_000_000_000;
+        assert!(validate_three_usd_value(1_000_000_000, VP, 1_000_000_000).is_ok());
+        assert!(validate_three_usd_value(1, VP, 10_000_000).is_err());
+        assert!(validate_three_usd_value(99, VP, 100).is_ok()); // one-e8 rounding tolerance
+        assert!(validate_three_usd_value(u64::MAX, u128::MAX, 1).is_err());
+
+        // A value sufficient at the pre-transfer rate becomes insufficient
+        // when the independently re-read pool virtual price falls.
+        let amount = 1_000_000_000;
+        let debt = 1_000_000_000;
+        assert!(validate_three_usd_value(amount, VP, debt).is_ok());
+        assert!(validate_three_usd_value(amount, 800_000_000_000_000_000, debt).is_err());
+    }
+
+    #[test]
+    fn ledger_must_equal_the_configured_pool_principal() {
+        use candid::Principal;
+
+        let pool = Principal::from_slice(&[1]);
+        let other_ledger = Principal::from_slice(&[2]);
+        assert_eq!(super::validate_three_usd_ledger(Some(pool), pool), Ok(pool));
+        assert!(super::validate_three_usd_ledger(Some(pool), other_ledger).is_err());
+        assert!(super::validate_three_usd_ledger(None, pool).is_err());
+    }
+
+    #[test]
+    fn reserves_capacity_rejects_overflow() {
+        assert_eq!(super::checked_three_usd_reserves_total(7, 5), Ok(12));
+        assert!(super::checked_three_usd_reserves_total(u64::MAX, 1).is_err());
+    }
+}
+
 /// Deterministic subaccount for protocol-held 3USD reserves from SP liquidations.
 pub fn protocol_3usd_reserves_subaccount() -> [u8; 32] {
     let mut hasher = Sha256::new();

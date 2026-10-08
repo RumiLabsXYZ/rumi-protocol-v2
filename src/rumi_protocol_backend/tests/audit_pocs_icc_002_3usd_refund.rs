@@ -56,17 +56,20 @@
 //! kill-switch reject exercises it identically to a real
 //! "vault closed mid-flight" or "proof verification failed" error.
 //!
-//! Fixtures are lifted from `audit_pocs_liq_004_icrc3_burn_proof_pic.rs`
-//! and `audit_pocs_icrc_idempotent.rs` (for the flaky-ledger Candid
-//! mirrors).
+//! Standard scenarios use the real `rumi_3pool` LP canister so its status,
+//! transfer, and ICRC-3 interfaces share one principal. The flaky ledger is
+//! retained only for the kill-switch refund retry case.
 
 use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Nat, Principal};
 use ic_cdk::api::management_canister::http_request::{
     HttpResponse as MgmtHttpResponse, TransformArgs,
 };
-use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
+use pocket_ic::{PocketIc, WasmResult};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, SystemTime};
+
+#[path = "../../rumi_3pool/tests/common/mod.rs"]
+mod three_pool_test_harness;
 
 use rumi_protocol_backend::ProtocolError;
 
@@ -558,7 +561,7 @@ struct Fixture {
     protocol_id: Principal,
     /// Whichever ledger the SP holds 3USD on AND the protocol resolves
     /// `s.three_pool_canister` to. For the happy/refund-success cases this
-    /// is a standard zero-fee ic-icrc1-ledger; for the refund-failure case
+    /// is the real `rumi_3pool` LP canister; for the refund-failure case
     /// this is the `flaky_ledger`.
     three_pool_ledger: Principal,
     sp_principal: Principal,
@@ -569,7 +572,7 @@ struct Fixture {
     sp_three_pool_balance: u64,
 }
 
-/// Mode for fixture setup: standard ic-icrc1-ledger (with ICRC-3) or flaky
+/// Mode for fixture setup: real 3pool (with ICRC-3) or flaky
 /// (no ICRC-3, with failure-injection knobs).
 enum ThreePoolKind {
     Standard,
@@ -577,7 +580,10 @@ enum ThreePoolKind {
 }
 
 fn setup_fixture(three_pool_kind: ThreePoolKind) -> Fixture {
-    let pic = PocketIcBuilder::new().with_nns_subnet().build();
+    let pool_harness = three_pool_test_harness::deploy_pool_with_liquidity_and_swaps(0);
+    let pool_owner = pool_harness.user;
+    let three_pool_ledger = pool_harness.three_pool;
+    let pic = pool_harness.pic;
 
     let test_user = Principal::self_authenticating(b"icc_002_pic_user");
     let developer = Principal::self_authenticating(b"icc_002_pic_developer");
@@ -608,17 +614,38 @@ fn setup_fixture(three_pool_kind: ThreePoolKind) -> Fixture {
         developer,
     );
 
-    let sp_three_pool_balance = 1_000_000_000_000u64;
+    let pool_owner_balance = icrc1_balance_of(&pic, three_pool_ledger, account(pool_owner));
+    let sp_three_pool_balance = u64::try_from(pool_owner_balance)
+        .expect("3pool LP balance fits test amount type");
+    let transfer = icrc_ledger_types::icrc1::transfer::TransferArg {
+        from_subaccount: None,
+        to: icrc_ledger_types::icrc1::account::Account {
+            owner: sp_principal,
+            subaccount: None,
+        },
+        amount: Nat::from(sp_three_pool_balance),
+        fee: Some(Nat::from(0u64)),
+        memo: None,
+        created_at_time: None,
+    };
+    let transferred = pic
+        .update_call(
+            three_pool_ledger,
+            pool_owner,
+            "icrc1_transfer",
+            encode_args((transfer,)).unwrap(),
+        )
+        .expect("seed stability pool with real 3pool LP");
+    match transferred {
+        WasmResult::Reply(bytes) => {
+            let result: Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError> =
+                decode_one(&bytes).expect("decode 3pool LP transfer");
+            result.expect("transfer 3pool LP to SP");
+        }
+        WasmResult::Reject(message) => panic!("3pool LP transfer rejected: {message}"),
+    }
     let three_pool_ledger = match three_pool_kind {
-        ThreePoolKind::Standard => deploy_icrc1_ledger(
-            &pic,
-            account(protocol_id),
-            0, // zero fee for clean refund accounting
-            vec![(account(sp_principal), Nat::from(sp_three_pool_balance))],
-            "Rumi 3pool LP",
-            "3USD",
-            developer,
-        ),
+        ThreePoolKind::Standard => three_pool_ledger,
         ThreePoolKind::Flaky => {
             let id = deploy_flaky_ledger(&pic);
             flaky_mint(&pic, id, sp_principal, sp_three_pool_balance as u128);
@@ -834,6 +861,51 @@ fn icc_002_pic_happy_path_no_refund_no_orphan() {
             .any(|m| m.contains("after liquidation rollback")),
         "happy path must not emit the Wave-4 refund log; saw logs: {:?}",
         logs
+    );
+}
+
+/// CL-07 value/principal preflight: the real 3pool principal is both the LP
+/// ledger and the source of virtual price. Wrong-principal and under-valued
+/// pulls reject before any SP balance change; the happy-path control above
+/// confirms a correctly covered amount succeeds.
+#[test]
+fn cl07_rejects_wrong_ledger_and_under_valued_reserves_before_pull() {
+    let f = setup_fixture(ThreePoolKind::Standard);
+    let debt = 500_000_000u64;
+    let balance_before = icrc1_balance_of(
+        &f.pic,
+        f.three_pool_ledger,
+        account(f.sp_principal),
+    );
+
+    let wrong_ledger = call_sp_liquidate_with_reserves(
+        &f.pic,
+        f.protocol_id,
+        f.sp_principal,
+        f.vault_id,
+        debt,
+        debt,
+        Principal::anonymous(),
+    )
+    .expect_err("ledger principal must match the configured pool");
+    assert!(format!("{wrong_ledger:?}").contains("does not match the configured"));
+
+    let under_valued = call_sp_liquidate_with_reserves(
+        &f.pic,
+        f.protocol_id,
+        f.sp_principal,
+        f.vault_id,
+        debt,
+        1,
+        f.three_pool_ledger,
+    )
+    .expect_err("1 e8 LP unit cannot cover 5 icUSD");
+    assert!(format!("{under_valued:?}").contains("below debt covered"));
+
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)),
+        balance_before,
+        "preflight failures must not pull LP from the SP"
     );
 }
 

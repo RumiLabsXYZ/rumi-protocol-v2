@@ -1220,6 +1220,110 @@ fn net_for_run_input(
 
 use crate::compute_collateral_ratio;
 
+/// A reserves-path writedown transfers 3USD before the backend commits the
+/// vault mutation. Re-check health after the ledger awaits have completed so a
+/// concurrent borrower top-up cannot turn a stale liquidation into a payout.
+/// IcusdBurn intentionally preserves the legacy already-burned behavior.
+fn post_await_sp_liquidation_health_error(
+    state: &crate::state::State,
+    vault: &Vault,
+    collateral_price_usd: UsdIcp,
+    ledger_kind: crate::icrc3_proof::SpProofLedger,
+) -> Option<String> {
+    if ledger_kind != crate::icrc3_proof::SpProofLedger::ThreePoolTransfer {
+        return None;
+    }
+
+    let cr = compute_collateral_ratio(vault, collateral_price_usd, state);
+    let min_liq = state.get_min_liquidation_ratio_for(&vault.collateral_type);
+    (cr >= min_liq).then(|| {
+        format!(
+            "reserves SP liquidation rejected after 3USD transfer: vault #{} collateral ratio {} is at or above liquidation threshold {}",
+            vault.vault_id,
+            cr.to_f64(),
+            min_liq.to_f64()
+        )
+    })
+}
+
+#[cfg(test)]
+mod post_await_sp_liquidation_health_tests {
+    use super::post_await_sp_liquidation_health_error;
+    use crate::icrc3_proof::SpProofLedger;
+    use crate::numeric::{Ratio, ICUSD, UsdIcp};
+    use crate::state::State;
+    use crate::vault::Vault;
+    use candid::Principal;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn reserves_rechecks_live_health_after_await_but_burn_path_is_unchanged() {
+        let icp = Principal::from_slice(&[1]);
+        let owner = Principal::from_slice(&[2]);
+        let mut state = State::from(crate::InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::from_slice(&[3]),
+            icp_ledger_principal: icp,
+            fee_e8s: 0,
+            developer_principal: Principal::from_slice(&[4]),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let mut config = state.collateral_configs.get(&icp).unwrap().clone();
+        config.last_price = Some(1.0);
+        config.liquidation_ratio = Ratio::from(dec!(1.33));
+        state.collateral_configs.insert(icp, config);
+        let vault = Vault {
+            owner,
+            vault_id: 17,
+            borrowed_icusd_amount: ICUSD::new(1_000_000_000),
+            collateral_amount: 1_000_000_000,
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        };
+        state.open_vault(vault.clone());
+        let price = UsdIcp::from(dec!(1));
+
+        assert!(post_await_sp_liquidation_health_error(
+            &state,
+            &vault,
+            price,
+            SpProofLedger::ThreePoolTransfer,
+        )
+        .is_none(), "the originally liquidatable vault remains eligible");
+
+        // Model the borrower topping up while the reserves transfer_from is
+        // awaiting the 3USD ledger reply. The post-await read must use this
+        // updated vault state, before the writedown mutates debt/collateral.
+        let topped_up = Vault {
+            collateral_amount: 1_330_000_000,
+            ..vault.clone()
+        };
+        state.open_vault(topped_up.clone());
+        let topped_up = state.vault_id_to_vaults.get(&17).unwrap().clone();
+        let error = post_await_sp_liquidation_health_error(
+            &state,
+            &topped_up,
+            price,
+            SpProofLedger::ThreePoolTransfer,
+        )
+        .expect("healthy post-await reserves vault must reject");
+        assert!(error.contains("at or above liquidation threshold"));
+
+        assert!(post_await_sp_liquidation_health_error(
+            &state,
+            &topped_up,
+            price,
+            SpProofLedger::IcusdBurn,
+        )
+        .is_none(), "already-burned IcusdBurn retains legacy settlement behavior");
+    }
+}
+
 /// INT-003 defense in depth: clamp a raw borrow fee so `amount - fee >= 1 e8s`.
 /// The validation cap on borrowing-fee curve multipliers (see
 /// `state::MAX_BORROWING_FEE_MULTIPLIER`) is the primary fence; this clamp
@@ -8116,6 +8220,7 @@ pub async fn liquidate_vault_debt_already_burned(
     icusd_burned_e8s: u64,
     caller: Principal,
     three_usd_received_e8s: Option<u64>,
+    three_usd_ledger: Option<Principal>,
     proof: crate::icrc3_proof::SpWritedownProof,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
     // Wave-8b LIQ-002 band gate is deactivated globally as of 2026-05-18.
@@ -8258,6 +8363,46 @@ pub async fn liquidate_vault_debt_already_burned(
         )));
     }
 
+    // Re-read the configured pool after proof verification. The reserves
+    // transfer and proof checks are separate awaits, so value coverage must
+    // use the latest pool virtual price immediately before state commit.
+    if proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransfer {
+        let configured_pool = read_state(|s| s.three_pool_canister);
+        let pool = match three_usd_ledger
+            .ok_or_else(|| "3USD ledger argument is missing".to_string())
+            .and_then(|ledger| {
+                crate::management::validate_three_usd_ledger(configured_pool, ledger)
+            })
+        {
+            Ok(pool) => pool,
+            Err(error) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(error));
+            }
+        };
+        let current_virtual_price = match crate::management::three_pool_virtual_price(pool)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!(
+                    "Failed to re-read configured 3pool virtual price after transfer: {error}"
+                )));
+            }
+        };
+        if let Err(error) = crate::management::validate_three_usd_value(
+            three_usd_received_e8s.unwrap_or(0),
+            current_virtual_price,
+            icusd_burned_e8s,
+        ) {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "3USD value no longer covers debt after transfer: {error}"
+            )));
+        }
+    }
+
     // Step 1: Validate vault is liquidatable and compute collateral to release
     let (
         vault,
@@ -8271,6 +8416,14 @@ pub async fn liquidate_vault_debt_already_burned(
     ) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
+                if proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransfer
+                    && (s.three_pool_canister.is_none()
+                        || s.three_pool_canister != three_usd_ledger)
+                {
+                    return Err(
+                        "3USD ledger no longer matches the configured 3pool canister".to_string(),
+                    );
+                }
                 if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
                     if !status.allows_liquidation() {
                         return Err(
@@ -8284,15 +8437,23 @@ pub async fn liquidate_vault_debt_already_burned(
                     .ok_or_else(|| {
                         "No price available for collateral. Price feed may be down.".to_string()
                     })?;
+                if let Some(error) = post_await_sp_liquidation_health_error(
+                    s,
+                    vault,
+                    UsdIcp::from(price),
+                    proof.ledger_kind,
+                ) {
+                    return Err(error);
+                }
                 let decimals = s
                     .get_collateral_config(&vault.collateral_type)
                     .map(|c| c.decimals)
                     .unwrap_or(8);
                 let collateral_price_usd = UsdIcp::from(price);
 
-                // NO CR CHECK HERE — icUSD was already burned by the 3pool.
-                // The backend MUST honor the write-down regardless of vault health.
-                // Rejecting would leave burned icUSD unaccounted for.
+                // IcusdBurn was already burned by the 3pool and must be honored
+                // regardless of health. ThreePoolTransfer takes the reserves
+                // path and was checked above after all proof/ledger awaits.
                 {
                     let actual_liquidation_amount =
                         liquidation_amount.min(vault.borrowed_icusd_amount);
@@ -8342,6 +8503,28 @@ pub async fn liquidate_vault_debt_already_burned(
         }
     };
 
+    // Reserve balances may have changed while the 3USD pull and proof were
+    // awaiting replies. Fail before mutation so the caller's existing error
+    // branch refunds the transfer instead of trapping on an overflowing add.
+    let protocol_3usd_reserves_after = if let Some(amount) = three_usd_received_e8s {
+        match read_state(|s| {
+            crate::management::checked_three_usd_reserves_total(
+                s.protocol_3usd_reserves,
+                amount,
+            )
+        }) {
+            Ok(total) => Some(total),
+            Err(_) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(
+                    "3USD reserves accounting capacity exhausted after transfer".to_string(),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     // LIQ-0XX: min_icusd_amount applies to the FINAL amount and is skipped
     // when that amount closes the vault fully (see comment above — the icUSD
     // was already burned, so rejecting a genuine dust vault here would
@@ -8360,13 +8543,10 @@ pub async fn liquidate_vault_debt_already_burned(
         vault_id, max_liquidatable_debt.to_u64(), collateral_to_liquidator.to_u64(), protocol_cut
     );
 
-    // Wave-8c LIQ-004 (sanity log on healthy vaults): if the pre-call CR is
-    // above min_liq_ratio, a buggy or malicious SP is writing down a
-    // non-underwater vault. Log loudly so an operator can investigate. Do
-    // NOT reject — the SP has already burned icUSD (or moved 3USD into
-    // reserves), so refusing here would orphan that token movement. The
-    // proof verification + kill switch are the enforcement layers; this
-    // is purely an alarm.
+    // Wave-8c LIQ-004 (sanity log on healthy vaults): report a healthy-vault
+    // write-down for operator investigation. The ThreePoolTransfer reserves
+    // path was already rejected above if the fresh post-await CR is healthy;
+    // IcusdBurn preserves the legacy already-burned settlement behavior.
     let pre_call_cr = read_state(|s| compute_collateral_ratio(&vault, collateral_price_usd, s));
     let min_liq = read_state(|s| s.get_min_liquidation_ratio_for(&vault.collateral_type));
     if pre_call_cr >= min_liq {
@@ -8479,8 +8659,8 @@ pub async fn liquidate_vault_debt_already_burned(
         crate::storage::record_event(&event);
 
         // Track 3USD reserves at runtime (also persisted via event replay)
-        if let Some(three_usd_e8s) = three_usd_received_e8s {
-            s.protocol_3usd_reserves += three_usd_e8s;
+        if let Some(reserves_total) = protocol_3usd_reserves_after {
+            s.protocol_3usd_reserves = reserves_total;
         }
 
         let nonce = s.next_op_nonce();
@@ -9809,6 +9989,7 @@ mod sp_writedown_native_xrp_guard_tests {
             2,
             1_000_000_000,
             caller,
+            None,
             None,
             dummy_proof(2),
         ));

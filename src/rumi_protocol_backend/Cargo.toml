@@ -99,6 +99,7 @@ lazy_static = "1.4.0"
 xrc-mock = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
 rand = "0.8.5"
 pocket-ic = "6.0.0"
+rumi_3pool = { path = "../rumi_3pool" }
 proptest = "1.0"
 flate2 = "1.0"
 # Host-side verification of the threshold-Ed25519 signature in the M2 sign test.

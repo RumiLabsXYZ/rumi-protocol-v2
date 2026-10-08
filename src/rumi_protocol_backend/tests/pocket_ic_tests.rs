@@ -19,6 +19,9 @@ use rumi_protocol_backend::state::{CollateralConfig, CollateralStatus, PriceSour
 use ic_xrc_types::{Asset, AssetClass, GetExchangeRateRequest, ExchangeRate};
 use rust_decimal_macros::dec;
 
+#[path = "../../rumi_3pool/tests/common/mod.rs"]
+mod three_pool_test_harness;
+
 //-----------------------------------------------------------------------------------
 // MOCK XRC CANISTER IMPLEMENTATION
 //-----------------------------------------------------------------------------------
@@ -121,15 +124,24 @@ fn icrc1_ledger_wasm() -> Vec<u8> {
 }
 
 fn protocol_wasm() -> Vec<u8> {
-    let wasm = include_bytes!("../../../target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm").to_vec();
+    let wasm = read_release_wasm("rumi_protocol_backend.wasm");
     log(&format!("📦 Loaded Protocol WASM: {} bytes", wasm.len()));
     wasm
 }
 
 fn stability_pool_wasm() -> Vec<u8> {
-    let wasm = include_bytes!("../../../target/wasm32-unknown-unknown/release/stability_pool.wasm").to_vec();
+    let wasm = read_release_wasm("stability_pool.wasm");
     log(&format!("📦 Loaded Stability Pool WASM: {} bytes", wasm.len()));
     wasm
+}
+
+fn read_release_wasm(name: &str) -> Vec<u8> {
+    let candidates = [
+        format!("{}/../../../target/wasm32-unknown-unknown/release/{name}", env!("CARGO_MANIFEST_DIR")),
+        format!("{}/../../../../target/wasm32-unknown-unknown/release/{name}", env!("CARGO_MANIFEST_DIR")),
+    ];
+    candidates.iter().find_map(|path| std::fs::read(path).ok())
+        .unwrap_or_else(|| panic!("unable to read release Wasm {name} from {candidates:?}"))
 }
 
 fn xrc_wasm() -> Vec<u8> {
@@ -3921,51 +3933,6 @@ fn test_admin_mint_cooldown_enforced() {
 
 // ─── 3USD Reserves Liquidation Tests ───
 
-/// Deploy a standalone ICRC-1/2 ledger to serve as the 3USD LP token for testing.
-/// Mints `initial_balance` to `initial_holder`.
-fn deploy_3usd_ledger(
-    pic: &PocketIc,
-    minting_principal: Principal,
-    initial_holder: Principal,
-    initial_balance: u64,
-) -> Principal {
-    let ledger_id = pic.create_canister();
-    pic.add_cycles(ledger_id, 2_000_000_000_000);
-
-    let init_args = InitArgs {
-        minting_account: Account { owner: minting_principal, subaccount: None },
-        fee_collector_account: None,
-        transfer_fee: candid::Nat::from(0u64), // Zero fee for clean testing
-        decimals: Some(8),
-        max_memo_length: Some(32),
-        token_name: "3USD LP Token".into(),
-        token_symbol: "3USD".into(),
-        metadata: vec![],
-        initial_balances: vec![(
-            Account { owner: initial_holder, subaccount: None },
-            candid::Nat::from(initial_balance as u128),
-        )],
-        feature_flags: Some(FeatureFlags { icrc2: true }),
-        maximum_number_of_accounts: None,
-        accounts_overflow_trim_quantity: None,
-        archive_options: ArchiveOptions {
-            num_blocks_to_archive: 2000,
-            trigger_threshold: 1000,
-            controller_id: minting_principal,
-            max_transactions_per_response: None,
-            max_message_size_bytes: None,
-            cycles_for_archive_creation: None,
-            node_max_memory_size_bytes: None,
-            more_controller_ids: None,
-        },
-    };
-
-    let encoded = encode_args((LedgerArg::Init(init_args),)).expect("encode 3USD ledger init");
-    pic.install_canister(ledger_id, icrc1_ledger_wasm(), encoded, None);
-    log(&format!("✅ Deployed 3USD ledger: {}", ledger_id));
-    ledger_id
-}
-
 /// Helper: get balance of any ICRC-1 ledger for a given account
 fn get_balance(pic: &PocketIc, ledger: Principal, owner: Principal, subaccount: Option<[u8; 32]>) -> u64 {
     let account = Account { owner, subaccount };
@@ -3983,9 +3950,10 @@ fn get_balance(pic: &PocketIc, ledger: Principal, owner: Principal, subaccount: 
 fn setup_protocol_for_3usd_test() -> (PocketIc, Principal, Principal, Principal, Principal, Principal, Principal) {
     log("🔧 Setting up protocol for 3USD test");
 
-    let pic = PocketIcBuilder::new()
-        .with_nns_subnet()
-        .build();
+    let pool_harness = crate::three_pool_test_harness::deploy_pool_with_liquidity_and_swaps(0);
+    let pool_owner = pool_harness.user;
+    let three_usd_ledger = pool_harness.three_pool;
+    let pic = pool_harness.pic;
 
     let test_user = Principal::self_authenticating(&[1, 2, 3, 4]);
     let developer = Principal::self_authenticating(&[5, 6, 7, 8]);
@@ -4056,9 +4024,34 @@ fn setup_protocol_for_3usd_test() -> (PocketIc, Principal, Principal, Principal,
     pic.add_cycles(xrc_id, 1_000_000_000_000);
     pic.install_canister(xrc_id, xrc_wasm(), prepare_mock_xrc(), None);
 
-    // Deploy 3USD ledger with balance for SP
-    let three_usd_amount = 100_00000000u64; // 100 3USD
-    let three_usd_ledger = deploy_3usd_ledger(&pic, developer, sp_principal, three_usd_amount);
+    // Seed the SP with real 3pool LP, whose principal also serves the
+    // configured get_pool_status and ICRC-3 interfaces.
+    let three_usd_amount = get_balance(&pic, three_usd_ledger, pool_owner, None);
+    let transfer = icrc_ledger_types::icrc1::transfer::TransferArg {
+        from_subaccount: None,
+        to: icrc_ledger_types::icrc1::account::Account {
+            owner: sp_principal,
+            subaccount: None,
+        },
+        amount: candid::Nat::from(three_usd_amount),
+        fee: Some(candid::Nat::from(0u64)),
+        memo: None,
+        created_at_time: None,
+    };
+    let transfer_result = pic.update_call(
+        three_usd_ledger,
+        pool_owner,
+        "icrc1_transfer",
+        encode_args((transfer,)).unwrap(),
+    ).expect("seed SP with real 3pool LP");
+    match transfer_result {
+        WasmResult::Reply(bytes) => {
+            let result: Result<candid::Nat, icrc_ledger_types::icrc1::transfer::TransferError> =
+                decode_one(&bytes).expect("decode 3pool LP seed transfer");
+            result.expect("transfer 3pool LP to SP");
+        }
+        WasmResult::Reject(message) => panic!("3pool LP seed transfer rejected: {message}"),
+    }
 
     // Set time to a recent date BEFORE installing protocol to avoid interest calc overflows.
     let target_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1711324800); // 2024-03-25

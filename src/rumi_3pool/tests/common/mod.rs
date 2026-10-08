@@ -65,8 +65,8 @@ pub enum LedgerArg {
 // ─── WASM loaders ───
 
 pub fn icrc1_ledger_wasm() -> Vec<u8> {
-    // Path: from src/rumi_3pool/tests/common/ back to src/rumi_3pool/ledger/
-    include_bytes!("../../../ledger/ic-icrc1-ledger.wasm").to_vec()
+    std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../ledger/ic-icrc1-ledger.wasm"))
+        .expect("read ICRC-1 ledger test Wasm")
 }
 
 pub fn three_pool_wasm() -> Vec<u8> {
@@ -74,7 +74,14 @@ pub fn three_pool_wasm() -> Vec<u8> {
     // WASM file. Build with `--features test_endpoints` if you need the
     // test_get_raw_block endpoint exposed (icrc3_hash_cache.rs needs it;
     // integration_test.rs doesn't but the endpoint being present is harmless).
-    include_bytes!("../../../../target/wasm32-unknown-unknown/release/rumi_3pool.wasm").to_vec()
+    let candidates = [
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/wasm32-unknown-unknown/release/rumi_3pool.wasm"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../target/wasm32-unknown-unknown/release/rumi_3pool.wasm"),
+    ];
+    candidates
+        .iter()
+        .find_map(|path| std::fs::read(path).ok())
+        .expect("read release rumi_3pool test Wasm")
 }
 
 // ─── Harness ───
