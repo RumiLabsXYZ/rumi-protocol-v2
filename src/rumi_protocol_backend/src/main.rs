@@ -6594,6 +6594,7 @@ async fn stability_pool_liquidate_debt_burned(
         icusd_burned_e8s,
         caller,
         None,
+        None,
         proof,
     )
     .await
@@ -7109,6 +7110,32 @@ async fn stability_pool_liquidate_with_reserves(
             "Cannot liquidate zero amount".to_string(),
         ));
     }
+    rumi_protocol_backend::management::validate_three_usd_ledger(
+        read_state(|s| s.three_pool_canister),
+        three_usd_ledger,
+    )
+    .map_err(ProtocolError::GenericError)?;
+    let virtual_price = rumi_protocol_backend::management::three_pool_virtual_price(
+        three_usd_ledger,
+    )
+    .await
+    .map_err(|error| {
+        ProtocolError::GenericError(format!("Failed to read configured 3pool virtual price: {error}"))
+    })?;
+    rumi_protocol_backend::management::validate_three_usd_value(
+        three_usd_amount_e8s,
+        virtual_price,
+        icusd_debt_covered_e8s,
+    )
+    .map_err(ProtocolError::GenericError)?;
+    // The query above awaits; ensure governance did not change the configured
+    // pool while its status was being read. No await occurs between this check
+    // and the transfer_from below.
+    if read_state(|s| s.three_pool_canister) != Some(three_usd_ledger) {
+        return Err(ProtocolError::GenericError(
+            "Configured 3pool changed while validating the 3USD value".to_string(),
+        ));
+    }
     read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
         Some(vault) => {
             if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
@@ -7150,6 +7177,17 @@ async fn stability_pool_liquidate_with_reserves(
         ))),
     })?;
 
+    // Preflight the eventual reserve accounting before pulling tokens. The
+    // post-await writedown repeats this check because other calls can credit
+    // reserves while the transfer/proof requests are in flight.
+    read_state(|s| {
+        rumi_protocol_backend::management::checked_three_usd_reserves_total(
+            s.protocol_3usd_reserves,
+            three_usd_amount_e8s,
+        )
+    })
+    .map_err(ProtocolError::GenericError)?;
+
     // Pull 3USD from the SP into protocol reserves subaccount (ICRC-2 transfer_from).
     // Only runs after validation passes — no tokens move if vault is stale.
     // The block index returned drives the Phase-2 internal proof below.
@@ -7185,6 +7223,7 @@ async fn stability_pool_liquidate_with_reserves(
         icusd_debt_covered_e8s,
         caller,
         Some(three_usd_amount_e8s),
+        Some(three_usd_ledger),
         proof,
     )
     .await

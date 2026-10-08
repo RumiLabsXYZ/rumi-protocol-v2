@@ -189,6 +189,21 @@ fn icrc1_fee() -> Nat {
     STATE.with(|s| Nat::from(s.borrow().fee))
 }
 
+/// Pool-status shim for the backend's CL-07 refund fixture. This canister is
+/// selected only in kill-switch tests, which reject after the 3USD pull and
+/// before ICRC-3 proof verification; success tests use real rumi_3pool.
+#[derive(CandidType, Serialize)]
+struct TestPoolStatus {
+    virtual_price: Nat,
+}
+
+#[query]
+fn get_pool_status() -> TestPoolStatus {
+    TestPoolStatus {
+        virtual_price: Nat::from(1_000_000_000_000_000_000u128),
+    }
+}
+
 #[update]
 fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
     let caller = ic_cdk::caller();
