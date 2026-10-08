@@ -127,12 +127,12 @@ export async function getFiatStablePointsPolicy(): Promise<FiatStablePointsPolic
   const key = 'points:fiat-stable-policy';
   const c = getCached<FiatStablePointsPolicy>(key, TTL.POLICY);
   if (c.hit) return c.value;
-  const actor = getActor();
-  // Older deployed points canisters may not have the regenerated method at runtime.
-  if (typeof actor.get_fiat_stable_points_policy !== 'function') {
-    return setCache(key, LEGACY_FIAT_STABLE_POINTS_POLICY);
-  }
   try {
+    const actor = getActor();
+    // Older deployed points canisters may not have the regenerated method at runtime.
+    if (typeof actor.get_fiat_stable_points_policy !== 'function') {
+      return setCache(key, LEGACY_FIAT_STABLE_POINTS_POLICY);
+    }
     return setCache(key, normalizeFiatStablePointsPolicy(await withRetry(() => actor.get_fiat_stable_points_policy())));
   } catch (e) {
     // A method that is absent on the deployed canister is a compatibility case;
