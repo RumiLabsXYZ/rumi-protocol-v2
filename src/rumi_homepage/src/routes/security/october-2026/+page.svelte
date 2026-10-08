@@ -25,7 +25,7 @@
     {
       pr: '#459',
       title: 'Stability Pool containment',
-      summary: 'The rumi_stability_pool canister (tmhzi-dqaaa-aaaap-qrd6q-cai) is emergency-paused. Its module remains 54245b779feb30c4da7ac3f60e9cb62afb99f1accd2ea5affc7adda8a28e4754; the upgrade is pending. The pause snapshot recorded 13 depositors and an unchanged aggregate balance.',
+      summary: 'The rumi_stability_pool canister (tmhzi-dqaaa-aaaap-qrd6q-cai) is emergency-paused. Its module remains 54245b779feb30c4da7ac3f60e9cb62afb99f1accd2ea5affc7adda8a28e4754; the upgrade is pending. The October 8 pause readback recorded 13 depositors. A later read confirmed the pause and depositor count; aggregate deposits are omitted because the later total differs from the earlier snapshot and has not been analyzed.',
       state: 'Paused · upgrade pending',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/459'
