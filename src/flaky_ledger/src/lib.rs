@@ -134,6 +134,9 @@ struct LedgerState {
     fail_transfer_from: bool,
     /// Next N transfers commit but return a transient error (simulates lost reply).
     phantom_failures_remaining: u32,
+    /// Next N ICRC-1 transfers commit but lose their reply, without consuming
+    /// the fault on an earlier ICRC-2 transfer_from in the same saga.
+    phantom_icrc1_failures_remaining: u32,
     /// Next N transfers return BadFee with the current fee value.
     bad_fee_failures_remaining: u32,
     /// Recent transfers keyed by their dedup tuple. Retained until reset_dedup().
@@ -294,6 +297,13 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
                 message: "Injected phantom failure (transfer committed, reply lost)".to_string(),
             });
         }
+        if state.phantom_icrc1_failures_remaining > 0 {
+            state.phantom_icrc1_failures_remaining -= 1;
+            return Err(TransferError::GenericError {
+                error_code: Nat::from(997u64),
+                message: "Injected ICRC-1 phantom failure (transfer committed, reply lost)".to_string(),
+            });
+        }
 
         Ok(Nat::from(landed_block))
     })
@@ -443,6 +453,13 @@ fn set_fee(fee: Nat) {
 #[update]
 fn set_phantom_failures(n: u32) {
     STATE.with(|s| s.borrow_mut().phantom_failures_remaining = n);
+}
+
+/// Next N ICRC-1 transfers commit and lose their reply. ICRC-2 transfer_from
+/// calls do not consume this fault, allowing precise multi-leg saga tests.
+#[update]
+fn set_phantom_icrc1_failures(n: u32) {
+    STATE.with(|s| s.borrow_mut().phantom_icrc1_failures_remaining = n);
 }
 
 /// Next N transfers return BadFee { expected_fee = current fee } before

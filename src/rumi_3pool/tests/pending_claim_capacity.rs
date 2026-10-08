@@ -525,7 +525,7 @@ fn swap_compensation_identity_survives_upgrade_and_repeated_parent_recovery() {
         .update_call(
             h.ledgers[0],
             h.user,
-            "set_phantom_failures",
+            "set_phantom_icrc1_failures",
             encode_one(1u32).unwrap(),
         )
         .unwrap();
