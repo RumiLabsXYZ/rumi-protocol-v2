@@ -12,7 +12,7 @@
 //     first time on the new wasm (one-shot drain from the legacy blob) or
 //     subsequent times (load `SlimState` from its cell).
 //
-// Memory ID layout (25 IDs used; 255 available):
+// Memory ID layout (34 IDs used; 255 available):
 //
 //   0       SlimState cell              — bounded residual heap
 //   1       lp_balances                 — BTreeMap<Principal, u128>
@@ -35,6 +35,11 @@
 //   25      icrc_dedup_by_hash          — full ICRC-1/2 transfer identity -> original block
 //   26      icrc_dedup_by_expiry        — ordered expiry index for bounded pruning
 //   27      icrc_dedup_upgrade_fence    — one-time bridge for pre-fix heap-only entries
+//   28,29   payout_journal log          — append-only payout lifecycle evidence
+//   30      next_payout_event_id cell    — monotonic journal sequence
+//   31      payout_current              — recovery lookup projection
+//   32      payout_fence cell            — unresolved ordinary swap reserves
+//   33      payout_owner_index           — bounded per-owner payout listing
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -90,6 +95,12 @@ const MEM_SWAP_RECEIPT_CLIENTS: MemoryId = MemoryId::new(24);
 const MEM_ICRC_DEDUP_BY_HASH: MemoryId = MemoryId::new(25);
 const MEM_ICRC_DEDUP_BY_EXPIRY: MemoryId = MemoryId::new(26);
 const MEM_ICRC_DEDUP_UPGRADE_FENCE: MemoryId = MemoryId::new(27);
+const MEM_PAYOUT_JOURNAL_INDEX: MemoryId = MemoryId::new(28);
+const MEM_PAYOUT_JOURNAL_DATA: MemoryId = MemoryId::new(29);
+const MEM_NEXT_PAYOUT_EVENT_ID: MemoryId = MemoryId::new(30);
+const MEM_PAYOUT_CURRENT: MemoryId = MemoryId::new(31);
+const MEM_PAYOUT_FENCE: MemoryId = MemoryId::new(32);
+const MEM_PAYOUT_OWNER_INDEX: MemoryId = MemoryId::new(33);
 
 // ─── SlimState ───────────────────────────────────────────────────────────────
 //
@@ -244,6 +255,34 @@ impl Storable for StorableU128 {
         max_size: 16,
         is_fixed_size: true,
     };
+}
+
+/// Ordered payout-owner index key used for bounded owner-visible history pages.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct PayoutOwnerKey {
+    pub owner: Principal,
+    pub id: u64,
+}
+
+impl Storable for PayoutOwnerKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut out = Vec::with_capacity(1 + self.owner.as_slice().len() + 8);
+        out.push(self.owner.as_slice().len() as u8);
+        out.extend_from_slice(self.owner.as_slice());
+        out.extend_from_slice(&self.id.to_be_bytes());
+        Cow::Owned(out)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let data = bytes.as_ref();
+        let owner_len = data[0] as usize;
+        let owner = Principal::from_slice(&data[1..1 + owner_len]);
+        let mut id = [0u8; 8];
+        id.copy_from_slice(&data[1 + owner_len..1 + owner_len + 8]);
+        Self { owner, id: u64::from_be_bytes(id) }
+    }
+
+    const BOUND: Bound = Bound::Bounded { max_size: 38, is_fixed_size: false };
 }
 
 /// 32-byte hash stored verbatim. Used for the ICRC-3 cumulative hash-chain
@@ -417,6 +456,8 @@ impl_storable_candid_unbounded!(Icrc3Block);
 impl_storable_candid_unbounded!(LpAllowance);
 impl_storable_candid_unbounded!(ThreePoolPendingClaim);
 impl_storable_candid_unbounded!(crate::receipts::SwapReceiptV1);
+impl_storable_candid_unbounded!(crate::payouts::PayoutEntitlement);
+impl_storable_candid_unbounded!(crate::payouts::PayoutJournalEvent);
 
 // ─── MemoryManager + stable structures (thread-local) ────────────────────────
 //
@@ -546,6 +587,30 @@ thread_local! {
         StableCell::init(MM.with(|m| m.borrow().get(MEM_NEXT_CLAIM_ID)), StorableU128(0))
             .expect("init next_claim_id cell"),
     );
+    pub(crate) static PAYOUT_JOURNAL: RefCell<StableLog<crate::payouts::PayoutJournalEvent, Memory, Memory>> =
+        RefCell::new(
+            StableLog::init(
+                MM.with(|m| m.borrow().get(MEM_PAYOUT_JOURNAL_INDEX)),
+                MM.with(|m| m.borrow().get(MEM_PAYOUT_JOURNAL_DATA)),
+            )
+            .expect("init payout journal"),
+        );
+    pub(crate) static NEXT_PAYOUT_EVENT_ID: RefCell<StableCell<StorableU128, Memory>> =
+        RefCell::new(
+            StableCell::init(
+                MM.with(|m| m.borrow().get(MEM_NEXT_PAYOUT_EVENT_ID)),
+                StorableU128(0),
+            )
+            .expect("init next payout event id"),
+        );
+    pub(crate) static PAYOUT_CURRENT: RefCell<StableBTreeMap<StorableU128, crate::payouts::PayoutEntitlement, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_CURRENT))));
+    pub(crate) static PAYOUT_FENCE: RefCell<StableCell<u8, Memory>> = RefCell::new(
+        StableCell::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_FENCE)), 0)
+            .expect("init payout fence"),
+    );
+    pub(crate) static PAYOUT_OWNER_INDEX: RefCell<StableBTreeMap<PayoutOwnerKey, Unit, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_OWNER_INDEX))));
 }
 
 // ─── Public API: SlimState cell ──────────────────────────────────────────────
@@ -933,6 +998,11 @@ pub mod pending_claims {
         PENDING_CLAIMS.with(|m| m.borrow_mut().remove(&StorableU128(id as u128)))
     }
 
+    /// Read one pending claim without scanning an offset page.
+    pub fn get(id: u64) -> Option<ThreePoolPendingClaim> {
+        PENDING_CLAIMS.with(|m| m.borrow().get(&StorableU128(id as u128)))
+    }
+
     /// Number of outstanding pending claims.
     pub fn len() -> u64 {
         PENDING_CLAIMS.with(|m| m.borrow().len())
@@ -961,6 +1031,89 @@ pub mod pending_claims {
                 .map(|(_, v)| v)
                 .collect()
         })
+    }
+}
+
+/// Durable payout journal and its current-state projection.
+pub mod payouts {
+    use super::*;
+
+    pub fn next_event_id() -> u64 {
+        NEXT_PAYOUT_EVENT_ID.with(|cell| {
+            let current = cell.borrow().get().0;
+            let next = current.checked_add(1).expect("payout journal sequence exhausted");
+            cell.borrow_mut()
+                .set(StorableU128(next))
+                .expect("persist payout journal sequence");
+            current as u64
+        })
+    }
+
+    pub fn append_event(event: crate::payouts::PayoutJournalEvent) {
+        PAYOUT_JOURNAL.with(|log| {
+            log.borrow_mut().append(&event).expect("append payout journal event");
+        });
+    }
+
+    pub fn get(id: u64) -> Option<crate::payouts::PayoutEntitlement> {
+        PAYOUT_CURRENT.with(|map| map.borrow().get(&StorableU128(id as u128)))
+    }
+
+    pub fn insert(value: crate::payouts::PayoutEntitlement) {
+        PAYOUT_CURRENT.with(|map| {
+            let key = StorableU128(value.id as u128);
+            let is_new = !map.borrow().contains_key(&key);
+            if is_new {
+                PAYOUT_OWNER_INDEX.with(|index| {
+                    index.borrow_mut().insert(
+                        PayoutOwnerKey { owner: value.owner, id: value.id },
+                        Unit,
+                    );
+                });
+            }
+            map.borrow_mut().insert(StorableU128(value.id as u128), value);
+        });
+    }
+
+    pub fn list(offset: u64, limit: u64) -> Vec<crate::payouts::PayoutEntitlement> {
+        PAYOUT_CURRENT.with(|map| {
+            map.borrow()
+                .iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .map(|(_, value)| value)
+                .collect()
+        })
+    }
+
+    pub fn list_for_owner(owner: Principal, offset: u64, limit: u64) -> Vec<crate::payouts::PayoutEntitlement> {
+        let start = PayoutOwnerKey { owner, id: 0 };
+        let end = PayoutOwnerKey { owner, id: u64::MAX };
+        PAYOUT_OWNER_INDEX.with(|index| {
+            let ids: Vec<u64> = index
+                .borrow()
+                .range(start..=end)
+                .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+                .take(usize::try_from(limit).unwrap_or(usize::MAX))
+                .map(|(key, _)| key.id)
+                .collect();
+            PAYOUT_CURRENT.with(|current| {
+                let current = current.borrow();
+                ids.into_iter()
+                    .filter_map(|id| current.get(&StorableU128(id as u128)))
+                    .collect()
+            })
+        })
+    }
+
+    pub fn fenced() -> bool {
+        PAYOUT_FENCE.with(|cell| *cell.borrow().get() != 0)
+    }
+
+    pub fn set_fence(active: bool) {
+        PAYOUT_FENCE.with(|cell| {
+            cell.borrow_mut().set(u8::from(active)).expect("persist payout fence");
+        });
     }
 }
 
