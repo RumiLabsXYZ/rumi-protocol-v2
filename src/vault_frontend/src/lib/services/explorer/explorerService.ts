@@ -1035,8 +1035,8 @@ export async function fetchStuckBotLiquidations(): Promise<LiquidationRecordV1[]
  *
  * The bot canister's `get_stuck_liquidations` returns historical records
  * with `TransferFailed`/`ConfirmFailed` status forever. After Wave-11 BOT-001
- * (10-min auto-cancel) or `admin_resolve_stuck_claim` clears the protocol-side
- * claim, the bot record stays — so the "stuck claim" banner should reconcile
+ * (10-min auto-cancel, when eligible) or proof-backed bot confirmation/cancellation
+ * clears the protocol-side claim, the bot record stays — so the "stuck claim" banner should reconcile
  * against the live protocol set, not the immutable bot log.
  */
 export async function fetchActiveBotClaimVaultIds(): Promise<Set<bigint>> {

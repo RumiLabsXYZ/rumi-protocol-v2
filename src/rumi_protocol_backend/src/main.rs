@@ -10704,8 +10704,8 @@ async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
     // Mirrors the Wave-11 BOT-001 auto-cancel gate in `lib.rs::check_vaults`.
     // Unlike the auto-cancel (which skips and emits a reconciliation event so
     // operators can intervene), the explicit cancel rejects: the caller is
-    // the bot itself, so forcing the bot to retry its collateral transfer or
-    // escalate to `admin_resolve_stuck_claim` is the right escape hatch.
+    // the bot itself, so it must retry its collateral transfer and submit the
+    // exact return proof before cancelling the claim.
     let observed = match balance_result {
         Ok((bal,)) => bal.0.to_u64().unwrap_or(0),
         Err((code, msg)) => {
@@ -10735,7 +10735,7 @@ async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
         log!(INFO, "[BOT-001b] cancel rejected for vault #{}: balance {} < required {} (collateral_amount {})",
             vault_id, observed, required, claim.collateral_amount);
         return Err(ProtocolError::GenericError(format!(
-            "Cannot cancel claim for vault #{}: protocol collateral balance {} < required {} (bot must return collateral first; if permanently lost, use admin_resolve_stuck_claim)",
+            "Cannot cancel claim for vault #{}: protocol collateral balance {} < required {} (bot must return collateral first; after reconciling the exact return block, submit bot_record_collateral_return_proof and retry bot_cancel_liquidation; proofless legacy admin recovery is disabled)",
             vault_id, observed, required
         )));
     }
@@ -11240,7 +11240,7 @@ fn get_bot_stats() -> BotStatsResponse {
 /// `get_stuck_liquidations` (a permanent history log) against the protocol's
 /// live claim set. A record can be `TransferFailed`/`ConfirmFailed` in the
 /// bot's log forever, but if the matching vault is no longer in `bot_claims`
-/// (e.g. resolved by Wave-11 BOT-001 auto-cancel or `admin_resolve_stuck_claim`),
+/// (e.g. resolved by Wave-11 BOT-001 auto-cancel or proof-backed bot confirmation/cancellation),
 /// the explorer should not flag it as awaiting admin action.
 #[candid_method(query)]
 #[query]
@@ -11248,13 +11248,23 @@ fn get_bot_claim_vault_ids() -> Vec<u64> {
     read_state(|s| s.bot_claims.keys().copied().collect())
 }
 
-/// Admin-only: force-resolve a stuck bot claim. Used when the bot's ckUSDC transfer
-/// or confirm failed and the vault is stuck with bot_processing=true.
-///
-/// - `apply_debt_reduction = false`: TransferFailed case. ckUSDC never reached the backend,
-///   so vault debt stays as-is. Just unlocks vault and restores budget.
-/// - `apply_debt_reduction = true`: ConfirmFailed case. ckUSDC DID reach the backend,
-///   so also write down the vault's debt and collateral (same as what confirm would do).
+fn reject_unproven_stuck_claim_resolution(
+    vault_id: u64,
+    apply_debt_reduction: bool,
+) -> ProtocolError {
+    let action = if apply_debt_reduction {
+        "write down debt and collateral without an exact payment proof"
+    } else {
+        "unlock the vault and restore budget without an exact collateral-return proof"
+    };
+    ProtocolError::GenericError(format!(
+        "Unsafe stuck-claim recovery disabled for vault #{}: cannot {}. Use bot_confirm_liquidation_with_proof with the exact ICRC-3 payment proof to settle, or bot_record_collateral_return_proof followed by bot_cancel_liquidation with the exact collateral-return proof to cancel.",
+        vault_id, action
+    ))
+}
+
+/// Compatibility endpoint retained for older clients. It cannot resolve a claim
+/// because the legacy boolean does not prove either payment or collateral return.
 #[candid_method(update)]
 #[update]
 fn admin_resolve_stuck_claim(
@@ -11269,43 +11279,10 @@ fn admin_resolve_stuck_claim(
         ));
     }
 
-    let claim = read_state(|s| s.bot_claims.get(&vault_id).cloned()).ok_or_else(|| {
-        ProtocolError::GenericError(format!("No active claim for vault #{}", vault_id))
-    })?;
-
-    mutate_state(|s| {
-        if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
-            if apply_debt_reduction {
-                // AR-B-001 (audit 2026-06-09): saturate, same as
-                // bot_confirm_liquidation. The non-saturating `-=` made this
-                // recovery endpoint trap on exactly the stuck state it exists
-                // to resolve (debt already reduced below the claim amount).
-                vault.borrowed_icusd_amount = vault
-                    .borrowed_icusd_amount
-                    .saturating_sub(ICUSD::new(claim.debt_amount));
-                vault.collateral_amount = vault
-                    .collateral_amount
-                    .saturating_sub(claim.collateral_amount);
-                s.bot_total_debt_covered_e8s += claim.debt_amount;
-            }
-            vault.bot_processing = false;
-        }
-        if !apply_debt_reduction {
-            s.bot_budget_remaining_e8s += claim.debt_amount;
-        }
-        s.bot_claims.remove(&vault_id);
-        // Wave-8b LIQ-002: re-key only when debt/collateral was actually
-        // reduced. The pure-cancel branch only flips `bot_processing`, which
-        // does not affect CR.
-        if apply_debt_reduction {
-            s.reindex_vault_cr(vault_id);
-        }
-    });
-
-    log!(INFO, "[admin_resolve_stuck_claim] Resolved stuck claim for vault #{}: debt={}, collateral={}, debt_reduced={}",
-        vault_id, claim.debt_amount, claim.collateral_amount, apply_debt_reduction);
-
-    Ok(())
+    Err(reject_unproven_stuck_claim_resolution(
+        vault_id,
+        apply_debt_reduction,
+    ))
 }
 
 // ---- Stable token repayment admin functions ----
