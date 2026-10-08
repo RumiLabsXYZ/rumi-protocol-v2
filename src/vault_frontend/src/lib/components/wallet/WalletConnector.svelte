@@ -279,7 +279,7 @@
 
     try {
       isRefreshingBalance = true;
-      await Promise.all([walletStore.refreshBalance(), fetchThreeUsdBalance()]);
+      await Promise.all([walletStore.refreshBalance({ skipCache: true }), fetchThreeUsdBalance()]);
     } catch (err) {
       console.error('Manual balance refresh failed:', err);
     } finally {
