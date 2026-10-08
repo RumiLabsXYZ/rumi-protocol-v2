@@ -2456,6 +2456,11 @@ pub fn get_authorized_burn_callers() -> Vec<Principal> {
 
 // ─── Authorized Redeem-and-Burn ───
 
+fn require_nonzero_virtual_price(vp: Option<u128>) -> Result<u128, ThreePoolError> {
+    vp.filter(|value| *value > 0)
+        .ok_or(ThreePoolError::InvariantNotConverged)
+}
+
 /// Authorized redeem-and-burn: an authorized canister burns its LP tokens
 /// and a corresponding amount of one token is removed from pool reserves
 /// and burned on that token's ledger.
@@ -2523,26 +2528,26 @@ pub async fn authorized_redeem_and_burn(
         virtual_price(&s.balances, &pms, a, s.lp_total_supply)
     });
 
-    if let Some(vp) = vp {
-        // Expected token value of the LP being burned (in 18-dec)
-        let expected_value_18 = args.lp_amount as u128 * vp / 100_000_000; // LP is 8-dec
-        // token_amount in 18-dec for comparison
-        let token_decimals = read_state(|s| s.config.tokens[token_idx].decimals);
-        let token_amount_18 = args.token_amount * 10u128.pow((18 - token_decimals) as u32);
+    let vp = require_nonzero_virtual_price(vp)?;
 
-        // Check slippage: token_amount should not exceed expected_value * (1 + slippage)
-        let max_token_18 = expected_value_18 * (10_000 + args.max_slippage_bps as u128) / 10_000;
-        if token_amount_18 > max_token_18 {
-            let actual_bps = if expected_value_18 > 0 {
-                ((token_amount_18 - expected_value_18) * 10_000 / expected_value_18) as u16
-            } else {
-                u16::MAX
-            };
-            return Err(ThreePoolError::BurnSlippageExceeded {
-                max_bps: args.max_slippage_bps,
-                actual_bps,
-            });
-        }
+    // Expected token value of the LP being burned (in 18-dec)
+    let expected_value_18 = args.lp_amount as u128 * vp / 100_000_000; // LP is 8-dec
+    // token_amount in 18-dec for comparison
+    let token_decimals = read_state(|s| s.config.tokens[token_idx].decimals);
+    let token_amount_18 = args.token_amount * 10u128.pow((18 - token_decimals) as u32);
+
+    // Check slippage: token_amount should not exceed expected_value * (1 + slippage)
+    let max_token_18 = expected_value_18 * (10_000 + args.max_slippage_bps as u128) / 10_000;
+    if token_amount_18 > max_token_18 {
+        let actual_bps = if expected_value_18 > 0 {
+            ((token_amount_18 - expected_value_18) * 10_000 / expected_value_18) as u16
+        } else {
+            u16::MAX
+        };
+        return Err(ThreePoolError::BurnSlippageExceeded {
+            max_bps: args.max_slippage_bps,
+            actual_bps,
+        });
     }
 
     // 6. Deduct LP and pool balance BEFORE the async burn call (deduct-before-transfer)
@@ -2811,6 +2816,24 @@ pub fn test_insert_pending_claim(token_index: u8, amount: u128) -> u64 {
         (t.ledger_id, t.symbol.clone())
     });
     record_pending_claim(caller, token_index, ledger, &symbol, amount, "test-injected claim")
+}
+
+#[cfg(test)]
+mod redeem_virtual_price_tests {
+    use super::{require_nonzero_virtual_price, ThreePoolError};
+
+    #[test]
+    fn unavailable_or_zero_virtual_price_is_rejected() {
+        assert!(matches!(
+            require_nonzero_virtual_price(None),
+            Err(ThreePoolError::InvariantNotConverged)
+        ));
+        assert!(matches!(
+            require_nonzero_virtual_price(Some(0)),
+            Err(ThreePoolError::InvariantNotConverged)
+        ));
+        assert!(matches!(require_nonzero_virtual_price(Some(1)), Ok(1)));
+    }
 }
 
 #[cfg(test)]

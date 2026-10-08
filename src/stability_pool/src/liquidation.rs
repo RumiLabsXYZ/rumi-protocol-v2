@@ -2832,6 +2832,19 @@ pub async fn claim_cfx(
     }
 }
 
+fn lp_liquidation_equivalent_e8s(
+    state: &crate::state::StabilityPoolState,
+    token_ledger: Principal,
+    amount: u64,
+) -> Option<u64> {
+    let virtual_price = state
+        .virtual_prices()
+        .get(&token_ledger)
+        .copied()
+        .filter(|virtual_price| *virtual_price > 0)?;
+    Some(lp_to_usd_e8s(amount, virtual_price))
+}
+
 /// Core liquidation logic for a single vault.
 ///
 /// Strategy:
@@ -3113,13 +3126,18 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         };
 
         // Calculate icUSD equivalent using cached virtual price
-        let vp = read_state(|s| {
-            s.virtual_prices()
-                .get(token_ledger)
-                .copied()
-                .unwrap_or(1_000_000_000_000_000_000)
+        let icusd_equiv_e8s = read_state(|s| {
+            lp_liquidation_equivalent_e8s(s, *token_ledger, *amount)
         });
-        let icusd_equiv_e8s = lp_to_usd_e8s(*amount, vp);
+        let Some(icusd_equiv_e8s) = icusd_equiv_e8s else {
+            log!(
+                INFO,
+                "Skipping LP token {} for vault {}: virtual price is unavailable",
+                token_ledger,
+                vault_info.vault_id
+            );
+            continue;
+        };
 
         if icusd_equiv_e8s < 10_000_000 {
             log!(
@@ -3352,6 +3370,32 @@ mod tests {
 
     fn principal(byte: u8) -> Principal {
         Principal::from_slice(&[byte])
+    }
+
+    #[test]
+    fn lp_liquidation_requires_a_present_nonzero_virtual_price() {
+        let lp_ledger = principal(30);
+        let amount = 100_000_000;
+        let mut state = StabilityPoolState::default();
+
+        assert_eq!(lp_liquidation_equivalent_e8s(&state, lp_ledger, amount), None);
+
+        state
+            .cached_virtual_prices
+            .as_mut()
+            .unwrap()
+            .insert(lp_ledger, 0);
+        assert_eq!(lp_liquidation_equivalent_e8s(&state, lp_ledger, amount), None);
+
+        state
+            .cached_virtual_prices
+            .as_mut()
+            .unwrap()
+            .insert(lp_ledger, 1_000_000_000_000_000_000);
+        assert_eq!(
+            lp_liquidation_equivalent_e8s(&state, lp_ledger, amount),
+            Some(amount)
+        );
     }
 
     fn icusd_ledger() -> Principal {
