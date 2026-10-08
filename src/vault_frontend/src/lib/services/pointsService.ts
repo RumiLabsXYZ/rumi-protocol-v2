@@ -22,6 +22,12 @@ import type {
   IngestStatus,
   PointEntry,
 } from '$declarations/rumi_points/rumi_points.did';
+import {
+  LEGACY_FIAT_STABLE_POINTS_POLICY,
+  normalizeFiatStablePointsPolicy,
+  UNKNOWN_FIAT_STABLE_POINTS_POLICY,
+  type FiatStablePointsPolicy,
+} from '$lib/utils/fiatStablePointsPolicy';
 
 const TTL = {
   STATUS: 15_000,
@@ -29,6 +35,7 @@ const TTL = {
   PRINCIPAL: 15_000,
   LEADERBOARD: 30_000,
   ADMIN: 30_000,
+  POLICY: 15_000,
 } as const;
 
 interface CacheEntry<T> {
@@ -109,6 +116,35 @@ export async function getPointsConfig(): Promise<PointsConfig> {
   const c = getCached<PointsConfig>(key, TTL.CONFIG);
   if (c.hit) return c.value;
   return setCache(key, await withRetry(() => getActor().get_points_config()));
+}
+
+/**
+ * Read the canister-owned fiat-stable points policy. Older deployed points
+ * canisters do not expose this additive query; those deployments intentionally
+ * retain the legacy 5x/3x UI until the query exists. A malformed response is
+ * surfaced as unknown by the normalizer, never silently treated as 0x.
+ */
+export async function getFiatStablePointsPolicy(): Promise<FiatStablePointsPolicy> {
+  const key = 'points:fiat-stable-policy';
+  const c = getCached<FiatStablePointsPolicy>(key, TTL.POLICY);
+  if (c.hit) return c.value;
+  try {
+    const actor = getActor();
+    // Older deployed points canisters may not have the regenerated method at runtime.
+    if (typeof actor.get_fiat_stable_points_policy !== 'function') {
+      return setCache(key, LEGACY_FIAT_STABLE_POINTS_POLICY);
+    }
+    return setCache(key, normalizeFiatStablePointsPolicy(await withRetry(() => actor.get_fiat_stable_points_policy())));
+  } catch (e) {
+    // A method that is absent on the deployed canister is a compatibility case;
+    // other query failures remain visible as unknown policy state.
+    const text = String(e);
+    if (text.includes('no query method') || text.includes('IC0536')) {
+      return setCache(key, LEGACY_FIAT_STABLE_POINTS_POLICY);
+    }
+    console.warn('[pointsService] fiat-stable policy read failed', e);
+    return setCache(key, UNKNOWN_FIAT_STABLE_POINTS_POLICY);
+  }
 }
 
 export async function isRegistered(p: Principal): Promise<boolean> {

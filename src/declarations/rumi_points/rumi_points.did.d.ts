@@ -51,6 +51,23 @@ export interface EpochSummary {
   'snapshot_b_ns' : bigint,
   'epoch_end_ns' : bigint,
 }
+export interface FiatStablePointsPolicy {
+  'legacy_epoch' : [] | [bigint],
+  'active_for_current_epoch' : boolean,
+  'historical_next_offset' : bigint,
+  'cutover_epoch' : [] | [bigint],
+  'inline_legacy_topup_rows' : bigint,
+  'historical_ledger_cutoff' : [] | [bigint],
+  'inline_legacy_topups_complete' : boolean,
+  'historical_complete' : boolean,
+}
+export interface FiatStableTopupProgress {
+  'credited_rows' : number,
+  'processed_rows' : number,
+  'credited_points' : bigint,
+  'complete' : boolean,
+  'next_offset' : bigint,
+}
 export interface IngestStatus {
   'registered_count' : bigint,
   'poll_interval_secs' : bigint,
@@ -99,7 +116,9 @@ export interface PointEntryPage {
 }
 export type PointSource = { 'CkStable3PoolMatched' : null } |
   { 'Registration' : null } |
+  { 'CkStable3PoolFlat4x' : null } |
   { 'CkStable3PoolUnmatched' : null } |
+  { 'CkStable3PoolUnmatchedTopUp' : null } |
   { 'VaultRepayment' : null } |
   { 'IcUsd3Pool' : null } |
   { 'AmmLp' : null } |
@@ -157,13 +176,17 @@ export interface RepaymentEvent {
   'amount_usd' : bigint,
   'window_end' : bigint,
 }
-export type Result = { 'Ok' : null } |
+export type Result = { 'Ok' : FiatStablePointsPolicy } |
+  { 'Err' : string };
+export type Result_1 = { 'Ok' : null } |
   { 'Err' : PointsError };
-export type Result_1 = { 'Ok' : bigint } |
+export type Result_2 = { 'Ok' : bigint } |
   { 'Err' : string };
-export type Result_2 = { 'Ok' : null } |
+export type Result_3 = { 'Ok' : FiatStableTopupProgress } |
   { 'Err' : string };
-export type Result_3 = { 'Ok' : bigint } |
+export type Result_4 = { 'Ok' : null } |
+  { 'Err' : string };
+export type Result_5 = { 'Ok' : bigint } |
   { 'Err' : PointsError };
 export interface RevealedSeed {
   'revealed_at_ns' : bigint,
@@ -183,16 +206,19 @@ export type Venue = { 'Amm' : null } |
   { 'Vault' : null } |
   { 'StabilityPool' : null };
 export interface _SERVICE {
-  'add_excluded_principal' : ActorMethod<[Principal], Result>,
-  'admin_rebuild_3pool_recorded' : ActorMethod<[], Result_1>,
+  'activate_fiat_stable_4x' : ActorMethod<[], Result>,
+  'add_excluded_principal' : ActorMethod<[Principal], Result_1>,
+  'admin_rebuild_3pool_recorded' : ActorMethod<[], Result_2>,
+  'apply_fiat_stable_topups' : ActorMethod<[number], Result_3>,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
-  'force_epoch_tick' : ActorMethod<[], Result>,
+  'force_epoch_tick' : ActorMethod<[], Result_1>,
   'get_asset_ledgers' : ActorMethod<[], Array<[number, Principal]>>,
   'get_epoch_history' : ActorMethod<[number, number], Array<EpochSummary>>,
   'get_epoch_status' : ActorMethod<[], PublicEpochStatus>,
   'get_epoch_status_admin' : ActorMethod<[], EpochStatus>,
   'get_excluded_principals' : ActorMethod<[], Array<Principal>>,
+  'get_fiat_stable_points_policy' : ActorMethod<[], FiatStablePointsPolicy>,
   'get_ingest_status' : ActorMethod<[], IngestStatus>,
   'get_leaderboard' : ActorMethod<[number, number], Array<LeaderboardEntry>>,
   'get_pending_commit' : ActorMethod<[], Uint8Array | number[]>,
@@ -208,18 +234,18 @@ export interface _SERVICE {
   'get_revealed_seed' : ActorMethod<[bigint], [] | [RevealedSeed]>,
   'is_excluded' : ActorMethod<[Principal], boolean>,
   'is_registered' : ActorMethod<[Principal], boolean>,
-  'register_test_principal' : ActorMethod<[Principal], Result>,
-  'remove_excluded_principal' : ActorMethod<[Principal], Result>,
-  'set_asset_ledger' : ActorMethod<[number, Principal], Result>,
-  'set_epoch_driver_enabled' : ActorMethod<[boolean], Result>,
-  'set_epoch_driver_interval_secs' : ActorMethod<[bigint], Result>,
-  'set_excluded_principals' : ActorMethod<[Array<Principal>], Result>,
-  'set_poll_enabled' : ActorMethod<[boolean], Result>,
-  'set_poll_interval_secs' : ActorMethod<[bigint], Result>,
-  'set_season_end_ns' : ActorMethod<[bigint], Result_2>,
-  'set_source_canister' : ActorMethod<[number, Principal], Result>,
-  'start_season' : ActorMethod<[Uint8Array | number[]], Result_2>,
-  'trigger_poll' : ActorMethod<[], Result_3>,
+  'register_test_principal' : ActorMethod<[Principal], Result_1>,
+  'remove_excluded_principal' : ActorMethod<[Principal], Result_1>,
+  'set_asset_ledger' : ActorMethod<[number, Principal], Result_1>,
+  'set_epoch_driver_enabled' : ActorMethod<[boolean], Result_1>,
+  'set_epoch_driver_interval_secs' : ActorMethod<[bigint], Result_1>,
+  'set_excluded_principals' : ActorMethod<[Array<Principal>], Result_1>,
+  'set_poll_enabled' : ActorMethod<[boolean], Result_1>,
+  'set_poll_interval_secs' : ActorMethod<[bigint], Result_1>,
+  'set_season_end_ns' : ActorMethod<[bigint], Result_4>,
+  'set_source_canister' : ActorMethod<[number, Principal], Result_1>,
+  'start_season' : ActorMethod<[Uint8Array | number[]], Result_4>,
+  'trigger_poll' : ActorMethod<[], Result_5>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];

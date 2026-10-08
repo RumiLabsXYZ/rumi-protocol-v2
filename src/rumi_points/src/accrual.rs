@@ -53,19 +53,29 @@ impl SnapshotWeights {
 
     /// Non-zero `(source, weight)` pairs, for writing one `PointEntry` per active
     /// activity. Skips zero fields so no empty ledger rows are written.
-    pub fn by_source(&self) -> Vec<(PointSource, u128)> {
-        [
+    pub fn by_source_for_policy(&self, fiat_stable_flat_4x: bool) -> Vec<(PointSource, u128)> {
+        let mut sources = vec![
             (PointSource::IcUsdDebt, self.icusd_debt),
             (PointSource::IcUsd3Pool, self.icusd_3pool),
-            (PointSource::CkStable3PoolMatched, self.ck_matched),
-            (PointSource::CkStable3PoolUnmatched, self.ck_unmatched),
+        ];
+        if fiat_stable_flat_4x {
+            sources.push((PointSource::CkStable3PoolFlat4x, self.ck_matched));
+        } else {
+            sources.push((PointSource::CkStable3PoolMatched, self.ck_matched));
+            sources.push((PointSource::CkStable3PoolUnmatched, self.ck_unmatched));
+        }
+        sources.extend([
             (PointSource::IcUsdStabilityPool, self.icusd_sp),
             (PointSource::ThreeUsdStabilityPool, self.threeusd_sp),
             (PointSource::AmmLp, self.amm_lp),
-        ]
-        .into_iter()
-        .filter(|(_, weight)| *weight > 0)
-        .collect()
+        ]);
+        sources.into_iter().filter(|(_, weight)| *weight > 0).collect()
+    }
+
+    /// Legacy decomposition for callers that are explicitly replaying or
+    /// testing the pre-cutover multiplier table.
+    pub fn by_source(&self) -> Vec<(PointSource, u128)> {
+        self.by_source_for_policy(false)
     }
 }
 
@@ -147,7 +157,7 @@ fn apply_verification(
 
 /// One principal's per-source weighted values at a snapshot (the multiplier table,
 /// spec Section 4). The caller skips excluded principals.
-pub fn snapshot_weights(inp: &SnapshotInputs) -> SnapshotWeights {
+pub fn snapshot_weights_for_policy(inp: &SnapshotInputs, fiat_stable_flat_4x: bool) -> SnapshotWeights {
     let (eff_icusd, eff_usdc, eff_usdt) = apply_verification(
         inp.recorded_3pool_icusd,
         inp.recorded_3pool_usdc,
@@ -157,13 +167,31 @@ pub fn snapshot_weights(inp: &SnapshotInputs) -> SnapshotWeights {
     SnapshotWeights {
         icusd_debt: inp.vault_debt,
         icusd_3pool: eff_icusd,
-        // matched value 2*min(usdc,usdt) at 5x; unmatched |usdc-usdt| at 3x.
-        ck_matched: eff_usdc.min(eff_usdt).saturating_mul(2).saturating_mul(5),
-        ck_unmatched: eff_usdc.abs_diff(eff_usdt).saturating_mul(3),
+        // Before cutover this keeps the legacy matched 5x / unmatched 3x
+        // decomposition.  At/after cutover `ck_matched` carries the entire
+        // verified fiat value at 4x and `ck_unmatched` is deliberately zero.
+        // The names remain stable because the snapshot buffer predates this
+        // policy and must restore a mid-legacy-epoch upgrade byte-for-byte.
+        ck_matched: if fiat_stable_flat_4x {
+            eff_usdc.saturating_add(eff_usdt).saturating_mul(4)
+        } else {
+            eff_usdc.min(eff_usdt).saturating_mul(2).saturating_mul(5)
+        },
+        ck_unmatched: if fiat_stable_flat_4x {
+            0
+        } else {
+            eff_usdc.abs_diff(eff_usdt).saturating_mul(3)
+        },
         icusd_sp: inp.sp_icusd,
         threeusd_sp: inp.sp_3usd.saturating_mul(2),
         amm_lp: inp.amm_lp_value.saturating_mul(2),
     }
+}
+
+/// Legacy multiplier-table entry point retained for existing callers and
+/// historical-vector tests.  New epoch capture calls `snapshot_weights_for_policy`.
+pub fn snapshot_weights(inp: &SnapshotInputs) -> SnapshotWeights {
+    snapshot_weights_for_policy(inp, false)
 }
 
 /// Points for one repayment event's overlap with one epoch (spec Section 6),
@@ -245,14 +273,15 @@ pub fn build_snapshot_inputs(raw: &RawSnapshot, prices: &SnapshotPrices) -> Snap
 /// Close-time accrual for one principal: scale the min-snapshot weights over the
 /// epoch period into per-source points, then add the repayment-window points
 /// (OUTSIDE the min). Returns the per-source ledger entries and the total delta.
-pub fn accrue_principal(
+pub fn accrue_principal_for_policy(
     min_weights: SnapshotWeights,
     repayments: &[RepaymentEvent],
     epoch_start: u64,
     epoch_end_capped: u64,
+    fiat_stable_flat_4x: bool,
 ) -> (Vec<(PointSource, u128)>, u128) {
     let period_ns = epoch_end_capped.saturating_sub(epoch_start);
-    let mut entries = scale_by_period(min_weights, period_ns).by_source();
+    let mut entries = scale_by_period(min_weights, period_ns).by_source_for_policy(fiat_stable_flat_4x);
     let repay_total = repayments.iter().fold(0u128, |acc, r| {
         acc.saturating_add(repayment_points(
             r.amount_usd,
@@ -269,6 +298,17 @@ pub fn accrue_principal(
         .iter()
         .fold(0u128, |acc, (_, p)| acc.saturating_add(*p));
     (entries, total)
+}
+
+/// Legacy close-time entry point retained for historical-vector tests and
+/// callers that need the pre-cutover source decomposition.
+pub fn accrue_principal(
+    min_weights: SnapshotWeights,
+    repayments: &[RepaymentEvent],
+    epoch_start: u64,
+    epoch_end_capped: u64,
+) -> (Vec<(PointSource, u128)>, u128) {
+    accrue_principal_for_policy(min_weights, repayments, epoch_start, epoch_end_capped, false)
 }
 
 #[cfg(test)]
@@ -424,6 +464,52 @@ mod tests {
         // matched value 2*min(50,30)=60 at 5x -> 300; unmatched |50-30|=20 at 3x -> 60.
         assert_eq!(got.ck_matched, 300);
         assert_eq!(got.ck_unmatched, 60);
+    }
+
+    #[test]
+    fn fiat_stable_flat_policy_makes_mixed_legs_four_x_and_auditable() {
+        let got = snapshot_weights_for_policy(
+            &SnapshotInputs {
+                recorded_3pool_usdc: 50,
+                recorded_3pool_usdt: 30,
+                verified_3usd: 1_000_000,
+                ..inputs()
+            },
+            true,
+        );
+        // 50 + 30 of verified fiat-backed value at 4x, regardless of pairing.
+        assert_eq!(got.ck_matched, 320);
+        assert_eq!(got.ck_unmatched, 0);
+        assert_eq!(
+            got.by_source_for_policy(true),
+            vec![(PointSource::CkStable3PoolFlat4x, 320)]
+        );
+    }
+
+    #[test]
+    fn fiat_stable_future_close_emits_only_flat_four_x_source() {
+        let weights = snapshot_weights_for_policy(
+            &SnapshotInputs {
+                recorded_3pool_usdc: 400,
+                recorded_3pool_usdt: 300,
+                verified_3usd: 1_000_000,
+                ..inputs()
+            },
+            true,
+        );
+        // 700 verified fiat units at 4x; no legacy matched/unmatched source is
+        // emitted when this snapshot closes under the future policy.
+        assert_eq!(weights.ck_matched, 2_800);
+        assert_eq!(weights.ck_unmatched, 0);
+        let (entries, total) = accrue_principal_for_policy(
+            weights,
+            &[],
+            0,
+            NANOS_PER_DAY,
+            true,
+        );
+        assert_eq!(entries, vec![(PointSource::CkStable3PoolFlat4x, 2_800)]);
+        assert_eq!(total, 2_800);
     }
 
     #[test]

@@ -6,31 +6,43 @@
  */
 import { writable, derived } from 'svelte/store';
 import { POINTS_ENABLED } from '$lib/config';
-import { getEpochStatus, getPointsConfig } from '$lib/services/pointsService';
+import { getEpochStatus, getPointsConfig, getFiatStablePointsPolicy } from '$lib/services/pointsService';
 import { seasonState, type SeasonPhase } from '$lib/utils/points';
+import { UNKNOWN_FIAT_STABLE_POINTS_POLICY, type FiatStablePointsPolicy } from '$lib/utils/fiatStablePointsPolicy';
 import type { PublicEpochStatus, PointsConfig } from '$declarations/rumi_points/rumi_points.did';
 
 interface SeasonData {
   status: PublicEpochStatus | null;
   config: PointsConfig | null;
+  policy: FiatStablePointsPolicy | null;
   loaded: boolean;
 }
 
-const store = writable<SeasonData>({ status: null, config: null, loaded: false });
+const store = writable<SeasonData>({ status: null, config: null, policy: null, loaded: false });
 let started = false;
 
 async function ensureLoaded(): Promise<void> {
   if (started || !POINTS_ENABLED) return;
   started = true;
-  try {
-    const [status, config] = await Promise.all([getEpochStatus(), getPointsConfig()]);
-    store.set({ status, config, loaded: true });
-  } catch (e) {
-    // Don't latch a transient failure: release the guard so a later trigger
-    // (navigation, another component mounting) retries instead of leaving the
-    // season bar/badges stuck off for the rest of the session. The service
-    // layer already retries each call with backoff before we get here.
-    console.error('[seasonStore] load failed, will retry on next trigger', e);
+  const [statusResult, configResult, policyResult] = await Promise.allSettled([
+    Promise.resolve().then(() => getEpochStatus()),
+    Promise.resolve().then(() => getPointsConfig()),
+    Promise.resolve().then(() => getFiatStablePointsPolicy()),
+  ]);
+  const status = statusResult.status === 'fulfilled' ? statusResult.value : null;
+  const config = configResult.status === 'fulfilled' ? configResult.value : null;
+  const policy =
+    policyResult.status === 'fulfilled' && policyResult.value
+      ? policyResult.value
+      : UNKNOWN_FIAT_STABLE_POINTS_POLICY;
+  store.set({ status, config, policy, loaded: true });
+
+  if (statusResult.status === 'rejected' || configResult.status === 'rejected' || policyResult.status === 'rejected') {
+    console.error('[seasonStore] partial load; failed queries will retry on next trigger', {
+      status: statusResult.status === 'rejected' ? statusResult.reason : undefined,
+      config: configResult.status === 'rejected' ? configResult.reason : undefined,
+      policy: policyResult.status === 'rejected' ? policyResult.reason : undefined,
+    });
     started = false;
   }
 }

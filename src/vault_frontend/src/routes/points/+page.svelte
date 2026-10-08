@@ -8,6 +8,12 @@
   import { myPointsStore } from '$lib/stores/pointsStore';
   import { getEpochStatus, getPointsConfig, getLeaderboard } from '$lib/services/pointsService';
   import { bodyState, seasonState } from '$lib/utils/points';
+  import { seasonStore } from '$lib/stores/seasonStore';
+  import {
+    fiatStableMigrationNotice,
+    fiatStablePolicyStatus,
+    UNKNOWN_FIAT_STABLE_POINTS_POLICY,
+  } from '$lib/utils/fiatStablePointsPolicy';
   import { truncatePrincipal } from '$lib/utils/principalHelpers';
   import type { PublicEpochStatus, PointsConfig } from '$declarations/rumi_points/rumi_points.did';
   import type { EarnVenue } from '$lib/utils/pointsRules';
@@ -59,6 +65,7 @@
       return;
     }
     loadSeason();
+    seasonStore.ensureLoaded();
   });
 
   // Load / reset the viewed wallet's points as the principal (or ?view) changes.
@@ -105,6 +112,8 @@
   const seasonEnded = $derived(
     seasonState(status, config, BigInt(Date.now()) * 1_000_000n) === 'ended',
   );
+  const fiatPolicy = $derived($seasonStore.policy ?? UNKNOWN_FIAT_STABLE_POINTS_POLICY);
+  const migrationNotice = $derived(fiatStableMigrationNotice(fiatPolicy));
 
   /** Venues with a live earning position — marked "active" in Earn more. */
   const activeVenues = $derived.by(() => {
@@ -127,6 +136,17 @@
   {/if}
 
   <SeasonBanner {status} {config} />
+
+  <div class="rounded-lg border border-gray-700/40 bg-gray-900/20 px-3 py-2 text-xs text-gray-400">
+    {fiatStablePolicyStatus(fiatPolicy)}
+    {#if status && !status.driver_enabled}
+      Epoch processing is paused; new epoch credits await resumption.
+    {/if}
+    {#if fiatPolicy.effectiveEpoch !== null && fiatPolicy.mode !== 'flat4x'}
+      Flat 4× is scheduled from epoch {Number(fiatPolicy.effectiveEpoch)}; the current epoch keeps its legacy rule.
+    {/if}
+    {#if migrationNotice}{migrationNotice}{/if}
+  </div>
 
   {#if $myPointsStore.loading}
     <div class="flex justify-center py-12">

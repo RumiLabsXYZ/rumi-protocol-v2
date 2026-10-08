@@ -118,6 +118,27 @@ struct TPrincipalState {
     total_points: candid::Nat,
 }
 
+#[derive(CandidType, Deserialize, Debug)]
+struct TFiatStablePointsPolicy {
+    cutover_epoch: Option<u64>,
+    legacy_epoch: Option<u64>,
+    active_for_current_epoch: bool,
+    historical_ledger_cutoff: Option<u64>,
+    historical_next_offset: u64,
+    historical_complete: bool,
+    inline_legacy_topups_complete: bool,
+    inline_legacy_topup_rows: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TFiatStableTopupProgress {
+    processed_rows: u32,
+    credited_rows: u32,
+    credited_points: candid::Nat,
+    next_offset: u64,
+    complete: bool,
+}
+
 fn admin() -> Principal {
     Principal::from_slice(&[9; 10])
 }
@@ -592,6 +613,167 @@ fn legacy_points_upgrade_holds_epoch_18_between_snapshots() {
     admin_ok(&pic, rp, "force_epoch_tick", Encode!().unwrap());
     assert_eq!(total_points(&pic, rp, registered), partial_reward);
     assert_eq!(source_status(&pic, rp, 0), source_before_upgrade);
+}
+
+/// Upgrade a populated, policy-cell-absent `4b4b1680` fixture into the current
+/// Wasm. The fixture adds only a test-only old-layout seeder; it preserves the
+/// baseline's production stable types and has no FiatStable memory region. This
+/// gives the runtime migration a real legacy unmatched audit row without adding
+/// any production test endpoint to rumi_points.
+///
+/// Run with:
+/// `RUMI_POINTS_BASELINE_WASM=/private/tmp/rumi-points-baseline-fixture.wasm \
+///  POCKET_IC_BIN=/Users/robertripley/coding/rumi-protocol-v2/pocket-ic \
+///  cargo test -p rumi_points --test pocket_ic_ingest \
+///  baseline_points_upgrade_initializes_fiat_policy_and_migrates_prefix -- --ignored`
+#[test]
+#[ignore = "requires the locally-built 4b4b1680 policy-cell-absent fixture Wasm"]
+fn baseline_points_upgrade_initializes_fiat_policy_and_migrates_prefix() {
+    let baseline_path = std::env::var_os("RUMI_POINTS_BASELINE_WASM")
+        .expect("set RUMI_POINTS_BASELINE_WASM to the 4b4b1680 fixture Wasm");
+    let baseline_wasm = std::fs::read(&baseline_path)
+        .unwrap_or_else(|e| panic!("failed to read baseline Wasm at {:?}: {e}", baseline_path));
+    assert!(!baseline_wasm.is_empty());
+
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let season_start_ns = 1_700_000_000_000_000_000;
+    set_time_ns(&pic, season_start_ns);
+    let rp = install_legacy_points(
+        &pic,
+        &baseline_wasm,
+        season_start_ns,
+        1_800_000_000_000_000_000,
+    );
+    let participant = Principal::from_slice(&[71; 10]);
+    let seeded = pic
+        .update_call(
+            rp,
+            admin(),
+            "test_seed_legacy_unmatched",
+            Encode!(&participant, &8u128).unwrap(),
+        )
+        .expect("baseline fixture seed call failed");
+    match seeded {
+        WasmResult::Reply(_) => {}
+        WasmResult::Reject(message) => panic!("baseline fixture seed rejected: {message}"),
+    }
+    assert_eq!(total_points(&pic, rp, participant), 8);
+
+    // The baseline has no MemoryId-14 policy cell. Upgrade must initialize its
+    // V1 default while retaining the append-only row and principal total.
+    pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None)
+        .expect("upgrade baseline fixture to candidate Wasm");
+    let before = fiat_policy(&pic, rp);
+    assert_eq!(before.cutover_epoch, None);
+    assert_eq!(before.historical_ledger_cutoff, None);
+    assert_eq!(total_points(&pic, rp, participant), 8);
+
+    let denied = pic
+        .update_call(rp, Principal::anonymous(), "activate_fiat_stable_4x", Encode!().unwrap())
+        .expect("anonymous activation call failed at transport");
+    match denied {
+        WasmResult::Reply(bytes) => {
+            let result: Result<TFiatStablePointsPolicy, String> = Decode!(&bytes, Result<TFiatStablePointsPolicy, String>).unwrap();
+            assert!(result.is_err(), "anonymous must not schedule the policy");
+        }
+        WasmResult::Reject(message) => panic!("anonymous activation trapped: {message}"),
+    }
+
+    // Start the old epoch only after upgrade, so its pre-existing unmatched row
+    // belongs to the fixed historical prefix and the schedule is current+1.
+    start_season_ok(&pic, rp, SEASON_SEED);
+    let activated = pic
+        .update_call(rp, admin(), "activate_fiat_stable_4x", Encode!().unwrap())
+        .expect("admin activation call failed");
+    match activated {
+        WasmResult::Reply(bytes) => {
+            let result: Result<TFiatStablePointsPolicy, String> = Decode!(&bytes, Result<TFiatStablePointsPolicy, String>).unwrap();
+            let policy = result.expect("admin activation succeeds");
+            assert_eq!(policy.cutover_epoch, Some(1));
+            assert_eq!(policy.legacy_epoch, Some(0));
+            assert!(!policy.active_for_current_epoch);
+        }
+        WasmResult::Reject(message) => panic!("admin activation trapped: {message}"),
+    }
+    let denied_topup = pic
+        .update_call(
+            rp,
+            Principal::anonymous(),
+            "apply_fiat_stable_topups",
+            Encode!(&1u32).unwrap(),
+        )
+        .expect("anonymous top-up call failed at transport");
+    match denied_topup {
+        WasmResult::Reply(bytes) => {
+            let result: Result<TFiatStableTopupProgress, String> = Decode!(&bytes, Result<TFiatStableTopupProgress, String>).unwrap();
+            assert!(result.is_err(), "anonymous must not run the migration");
+        }
+        WasmResult::Reject(message) => panic!("anonymous migration trapped: {message}"),
+    }
+    // The registration marker is first in the fixed prefix. Process it alone,
+    // then prove the durable cursor resumes after a second candidate upgrade.
+    let first_batch = pic
+        .update_call(rp, admin(), "apply_fiat_stable_topups", Encode!(&1u32).unwrap())
+        .expect("first historical migration call failed");
+    match first_batch {
+        WasmResult::Reply(bytes) => {
+            let result: Result<TFiatStableTopupProgress, String> = Decode!(&bytes, Result<TFiatStableTopupProgress, String>).unwrap();
+            let progress = result.expect("first migration batch succeeds");
+            assert_eq!(progress.processed_rows, 1);
+            assert_eq!(progress.credited_rows, 0);
+            assert!(!progress.complete);
+        }
+        WasmResult::Reject(message) => panic!("first historical migration trapped: {message}"),
+    }
+    pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None)
+        .expect("upgrade candidate with partial historical cursor");
+    assert_eq!(fiat_policy(&pic, rp).historical_next_offset, 1);
+    let migrated = pic
+        .update_call(rp, admin(), "apply_fiat_stable_topups", Encode!(&1_000u32).unwrap())
+        .expect("resumed historical migration call failed");
+    match migrated {
+        WasmResult::Reply(bytes) => {
+            let result: Result<TFiatStableTopupProgress, String> = Decode!(&bytes, Result<TFiatStableTopupProgress, String>).unwrap();
+            let progress = result.expect("historical migration succeeds");
+            assert_eq!(progress.credited_rows, 1);
+            assert_eq!(nat_to_u128(&progress.credited_points), 2);
+            assert!(progress.complete);
+        }
+        WasmResult::Reject(message) => panic!("historical migration trapped: {message}"),
+    }
+    assert_eq!(total_points(&pic, rp, participant), 10);
+    let after = fiat_policy(&pic, rp);
+    assert!(after.historical_complete);
+    assert_eq!(after.historical_next_offset, after.historical_ledger_cutoff.unwrap());
+
+    // A completed migration is idempotent: retrying cannot append a second
+    // correction or change the durable cursor.
+    let retry = pic
+        .update_call(rp, admin(), "apply_fiat_stable_topups", Encode!(&1_000u32).unwrap())
+        .expect("completed historical migration retry failed");
+    match retry {
+        WasmResult::Reply(bytes) => {
+            let progress: Result<TFiatStableTopupProgress, String> =
+                Decode!(&bytes, Result<TFiatStableTopupProgress, String>).unwrap();
+            let progress = progress.expect("completed migration retry succeeds");
+            assert_eq!(progress.processed_rows, 0);
+            assert_eq!(progress.credited_rows, 0);
+            assert_eq!(nat_to_u128(&progress.credited_points), 0);
+            assert!(progress.complete);
+        }
+        WasmResult::Reject(message) => panic!("completed migration retry trapped: {message}"),
+    }
+    assert_eq!(total_points(&pic, rp, participant), 10);
+}
+
+fn fiat_policy(pic: &pocket_ic::PocketIc, rp: Principal) -> TFiatStablePointsPolicy {
+    let reply = pic
+        .query_call(rp, Principal::anonymous(), "get_fiat_stable_points_policy", Encode!().unwrap())
+        .expect("fiat stable policy query call failed");
+    match reply {
+        WasmResult::Reply(bytes) => Decode!(&bytes, TFiatStablePointsPolicy).unwrap(),
+        WasmResult::Reject(message) => panic!("fiat stable policy query rejected: {message}"),
+    }
 }
 
 fn nat_to_u128(n: &candid::Nat) -> u128 {

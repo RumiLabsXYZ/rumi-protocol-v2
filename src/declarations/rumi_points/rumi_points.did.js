@@ -6,12 +6,37 @@ export const idlFactory = ({ IDL }) => {
     'season_start_ns' : IDL.Opt(IDL.Nat64),
     'season_end_ns' : IDL.Opt(IDL.Nat64),
   });
+  const FiatStablePointsPolicy = IDL.Record({
+    'legacy_epoch' : IDL.Opt(IDL.Nat64),
+    'active_for_current_epoch' : IDL.Bool,
+    'historical_next_offset' : IDL.Nat64,
+    'cutover_epoch' : IDL.Opt(IDL.Nat64),
+    'inline_legacy_topup_rows' : IDL.Nat64,
+    'historical_ledger_cutoff' : IDL.Opt(IDL.Nat64),
+    'inline_legacy_topups_complete' : IDL.Bool,
+    'historical_complete' : IDL.Bool,
+  });
+  const Result = IDL.Variant({
+    'Ok' : FiatStablePointsPolicy,
+    'Err' : IDL.Text,
+  });
   const PointsError = IDL.Variant({
     'Unauthorized' : IDL.Null,
     'Excluded' : IDL.Null,
   });
-  const Result = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : PointsError });
-  const Result_1 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text });
+  const Result_1 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : PointsError });
+  const Result_2 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text });
+  const FiatStableTopupProgress = IDL.Record({
+    'credited_rows' : IDL.Nat32,
+    'processed_rows' : IDL.Nat32,
+    'credited_points' : IDL.Nat,
+    'complete' : IDL.Bool,
+    'next_offset' : IDL.Nat64,
+  });
+  const Result_3 = IDL.Variant({
+    'Ok' : FiatStableTopupProgress,
+    'Err' : IDL.Text,
+  });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -98,7 +123,9 @@ export const idlFactory = ({ IDL }) => {
   const PointSource = IDL.Variant({
     'CkStable3PoolMatched' : IDL.Null,
     'Registration' : IDL.Null,
+    'CkStable3PoolFlat4x' : IDL.Null,
     'CkStable3PoolUnmatched' : IDL.Null,
+    'CkStable3PoolUnmatchedTopUp' : IDL.Null,
     'VaultRepayment' : IDL.Null,
     'IcUsd3Pool' : IDL.Null,
     'AmmLp' : IDL.Null,
@@ -183,18 +210,20 @@ export const idlFactory = ({ IDL }) => {
     'snapshot_time_a_ns' : IDL.Nat64,
     'snapshot_time_b_ns' : IDL.Nat64,
   });
-  const Result_2 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
-  const Result_3 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : PointsError });
+  const Result_4 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
+  const Result_5 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : PointsError });
   return IDL.Service({
-    'add_excluded_principal' : IDL.Func([IDL.Principal], [Result], []),
-    'admin_rebuild_3pool_recorded' : IDL.Func([], [Result_1], []),
+    'activate_fiat_stable_4x' : IDL.Func([], [Result], []),
+    'add_excluded_principal' : IDL.Func([IDL.Principal], [Result_1], []),
+    'admin_rebuild_3pool_recorded' : IDL.Func([], [Result_2], []),
+    'apply_fiat_stable_topups' : IDL.Func([IDL.Nat32], [Result_3], []),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],
         ['query'],
       ),
     'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
-    'force_epoch_tick' : IDL.Func([], [Result], []),
+    'force_epoch_tick' : IDL.Func([], [Result_1], []),
     'get_asset_ledgers' : IDL.Func(
         [],
         [IDL.Vec(IDL.Tuple(IDL.Nat8, IDL.Principal))],
@@ -210,6 +239,11 @@ export const idlFactory = ({ IDL }) => {
     'get_excluded_principals' : IDL.Func(
         [],
         [IDL.Vec(IDL.Principal)],
+        ['query'],
+      ),
+    'get_fiat_stable_points_policy' : IDL.Func(
+        [],
+        [FiatStablePointsPolicy],
         ['query'],
       ),
     'get_ingest_status' : IDL.Func([], [IngestStatus], ['query']),
@@ -248,22 +282,22 @@ export const idlFactory = ({ IDL }) => {
       ),
     'is_excluded' : IDL.Func([IDL.Principal], [IDL.Bool], ['query']),
     'is_registered' : IDL.Func([IDL.Principal], [IDL.Bool], ['query']),
-    'register_test_principal' : IDL.Func([IDL.Principal], [Result], []),
-    'remove_excluded_principal' : IDL.Func([IDL.Principal], [Result], []),
-    'set_asset_ledger' : IDL.Func([IDL.Nat8, IDL.Principal], [Result], []),
-    'set_epoch_driver_enabled' : IDL.Func([IDL.Bool], [Result], []),
-    'set_epoch_driver_interval_secs' : IDL.Func([IDL.Nat64], [Result], []),
+    'register_test_principal' : IDL.Func([IDL.Principal], [Result_1], []),
+    'remove_excluded_principal' : IDL.Func([IDL.Principal], [Result_1], []),
+    'set_asset_ledger' : IDL.Func([IDL.Nat8, IDL.Principal], [Result_1], []),
+    'set_epoch_driver_enabled' : IDL.Func([IDL.Bool], [Result_1], []),
+    'set_epoch_driver_interval_secs' : IDL.Func([IDL.Nat64], [Result_1], []),
     'set_excluded_principals' : IDL.Func(
         [IDL.Vec(IDL.Principal)],
-        [Result],
+        [Result_1],
         [],
       ),
-    'set_poll_enabled' : IDL.Func([IDL.Bool], [Result], []),
-    'set_poll_interval_secs' : IDL.Func([IDL.Nat64], [Result], []),
-    'set_season_end_ns' : IDL.Func([IDL.Nat64], [Result_2], []),
-    'set_source_canister' : IDL.Func([IDL.Nat8, IDL.Principal], [Result], []),
-    'start_season' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_2], []),
-    'trigger_poll' : IDL.Func([], [Result_3], []),
+    'set_poll_enabled' : IDL.Func([IDL.Bool], [Result_1], []),
+    'set_poll_interval_secs' : IDL.Func([IDL.Nat64], [Result_1], []),
+    'set_season_end_ns' : IDL.Func([IDL.Nat64], [Result_4], []),
+    'set_source_canister' : IDL.Func([IDL.Nat8, IDL.Principal], [Result_1], []),
+    'start_season' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_4], []),
+    'trigger_poll' : IDL.Func([], [Result_5], []),
   });
 };
 export const init = ({ IDL }) => {

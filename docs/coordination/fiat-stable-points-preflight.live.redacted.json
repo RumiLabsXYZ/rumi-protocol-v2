@@ -1,0 +1,53 @@
+{
+  "as_of": "2026-10-07",
+  "checkout_commit": "4b4b1680a89b37ab82641ae1e1cb6addf98dcdb5",
+  "environment": "mainnet-live",
+  "network": "ic",
+  "identity": {
+    "name": "rumi_identity",
+    "principal": "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae",
+    "default_identity_changed": false,
+    "admin_query": "succeeded",
+    "non_admin_query": "trapped_unauthorized"
+  },
+  "canisters": {
+    "rumi_points": {
+      "id": "bfnu3-6aaaa-aaaab-qhanq-cai",
+      "status": "Running",
+      "module_hash": "b092cffb6046b384ca0e827128d1b6fb500f27dbd41da94c6cff2d1aa045dc90",
+      "controllers": [
+        "cpbhu-5iaaa-aaaad-aalta-cai",
+        "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae"
+      ],
+      "current_epoch_index": 18,
+      "open_epoch": true,
+      "public_snapshot_a": "fired",
+      "public_snapshot_b": "withheld",
+      "driver_enabled": false,
+      "poll_enabled": true,
+      "poll_interval_secs": 300,
+      "registered_count": 15,
+      "excluded_count": 9,
+      "point_ledger_len": 401,
+      "cycles_healthy": true
+    },
+    "vault_frontend": {
+      "id": "tcfua-yaaaa-aaaap-qrd7q-cai",
+      "status": "Running",
+      "module_hash": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62",
+      "points_mapping_in_settings": "bfnu3-6aaaa-aaaab-qhanq-cai"
+    }
+  },
+  "candid": {
+    "deployed_metadata_private_path": "/private/tmp/rumi-points-release-live-candid.did",
+    "deployed_sha256": "05fa0809b6b84809081dbeaeb1e73558f60285d4fc02dbdc153f0850d2f6d6",
+    "current_source_sha256": "a935728e07fe7910340c2c0f720962547408ec0666dd29db1fc05b35fe7f82f9",
+    "legacy_transition_fields_live": false
+  },
+  "readiness": {
+    "mapping_and_authority": "pass",
+    "artifact_freshness": "unknown",
+    "active_legacy_epoch_upgrade_continuation": "blocked",
+    "deploy_clearance": false
+  }
+}

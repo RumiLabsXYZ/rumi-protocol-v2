@@ -19,6 +19,11 @@ import type {
   PointSource,
   EpochSummary,
 } from '$declarations/rumi_points/rumi_points.did';
+import {
+  fiatStableMultiplier,
+  LEGACY_FIAT_STABLE_POINTS_POLICY,
+  type FiatStablePointsPolicy,
+} from './fiatStablePointsPolicy';
 
 // ── Source metadata (single source of truth for source labels) ──────────────
 
@@ -28,6 +33,8 @@ export type PointSourceKey =
   | 'IcUsd3Pool'
   | 'CkStable3PoolMatched'
   | 'CkStable3PoolUnmatched'
+  | 'CkStable3PoolFlat4x'
+  | 'CkStable3PoolUnmatchedTopUp'
   | 'IcUsdStabilityPool'
   | 'ThreeUsdStabilityPool'
   | 'AmmLp'
@@ -43,9 +50,11 @@ export interface SourceMeta {
   /** The multiplier accrual applies (accrual.rs::snapshot_weights). For the
    *  matched pair this is the 5x on the matched dollars (2*min), matching the
    *  user-facing table — not the per-min-side 10x framing. */
-  multiplier: number;
+  multiplier: number | null;
   /** Where to act on it. */
   href: string;
+  /** Historical top-ups are adjustments, not a current earning multiplier. */
+  kind?: 'accrual' | 'adjustment';
 }
 
 export const SOURCE_META: Record<PointSourceKey, SourceMeta> = {
@@ -54,17 +63,33 @@ export const SOURCE_META: Record<PointSourceKey, SourceMeta> = {
   IcUsd3Pool: { label: 'icUSD in the 3pool', short: 'icUSD 3pool', venue: 'threePool', multiplier: 1, href: '/3usd' },
   CkStable3PoolMatched: {
     label: 'ckUSDC + ckUSDT matched in the 3pool',
-    short: 'Matched pair',
+    short: 'Matched legacy',
     venue: 'threePool',
     multiplier: 5,
     href: '/3usd',
   },
   CkStable3PoolUnmatched: {
     label: 'Unmatched ckUSDC/ckUSDT in the 3pool',
-    short: 'Unmatched ck',
+    short: 'Unmatched legacy',
     venue: 'threePool',
     multiplier: 3,
     href: '/3usd',
+  },
+  CkStable3PoolFlat4x: {
+    label: 'ckUSDC/ckUSDT in the 3pool (flat 4×)',
+    short: 'Fiat stable 4×',
+    venue: 'threePool',
+    multiplier: 4,
+    href: '/3usd',
+    kind: 'accrual',
+  },
+  CkStable3PoolUnmatchedTopUp: {
+    label: 'Historical unmatched ckUSDC/ckUSDT top-up',
+    short: 'Legacy top-up',
+    venue: 'threePool',
+    multiplier: 4,
+    href: '/3usd',
+    kind: 'adjustment',
   },
   IcUsdStabilityPool: {
     label: 'icUSD in the stability pool',
@@ -98,11 +123,11 @@ export function sourceKey(s: PointSource): PointSourceKey {
 /**
  * Meta for a source key, surviving a canister-side variant this build does not
  * know yet (regenerated declarations + a new PointSource must never crash the
- * page — render the raw key at 0x instead).
+ * page — render the raw key with an unavailable rate instead of inventing 0x).
  */
 export function sourceMeta(key: PointSourceKey): SourceMeta {
   return (
-    SOURCE_META[key] ?? { label: key, short: key, venue: 'vault', multiplier: 0, href: '/points' }
+    SOURCE_META[key] ?? { label: key, short: key, venue: 'vault', multiplier: null, href: '/points', kind: 'adjustment' }
   );
 }
 
@@ -230,6 +255,7 @@ export interface LiveInputs {
    *  capture in that case; the mirror degrades per-venue instead). */
   icpUsd: number | null;
   virtualPrice: number | null;
+  pointsPolicy?: FiatStablePointsPolicy;
 }
 
 export interface LivePositionRow {
@@ -261,6 +287,7 @@ export interface LivePositions {
   /** Sources whose live read failed (shown as "couldn't check"). */
   unavailable: string[];
   threePool: ThreePoolVerification | null;
+  policyAvailable: boolean;
 }
 
 /** Spec Section 5: 0.5% upward tolerance on verified 3USD. */
@@ -273,6 +300,7 @@ const VERIFICATION_TOLERANCE = 1.005;
 export function buildLivePositions(inp: LiveInputs): LivePositions {
   const rows: LivePositionRow[] = [];
   const unavailable: string[] = [];
+  const policy = inp.pointsPolicy ?? LEGACY_FIAT_STABLE_POINTS_POLICY;
 
   // Vault debt @1x.
   if (inp.vaultDebtUsd === null) unavailable.push('vault debt');
@@ -320,9 +348,19 @@ export function buildLivePositions(inp: LiveInputs): LivePositions {
     const effUsdt = rec.ckusdt * factor;
     const matched = 2 * Math.min(effUsdc, effUsdt);
     const unmatched = Math.abs(effUsdc - effUsdt);
+    const matchedRate = fiatStableMultiplier(policy, 'matched');
+    const unmatchedRate = fiatStableMultiplier(policy, 'unmatched');
     if (effIcusd > 0) rows.push(row('IcUsd3Pool', effIcusd));
-    if (matched > 0) rows.push(row('CkStable3PoolMatched', matched));
-    if (unmatched > 0) rows.push(row('CkStable3PoolUnmatched', unmatched));
+    if (matched > 0 || unmatched > 0) {
+      if (matchedRate === null || unmatchedRate === null) {
+        unavailable.push('fiat-stable points policy');
+      } else if (policy.mode === 'flat4x') {
+        rows.push(row('CkStable3PoolFlat4x', matched + unmatched));
+      } else {
+        if (matched > 0) rows.push(row('CkStable3PoolMatched', matched));
+        if (unmatched > 0) rows.push(row('CkStable3PoolUnmatched', unmatched));
+      }
+    }
     threePool = {
       recordedUsd,
       verifiedUsd,
@@ -333,12 +371,29 @@ export function buildLivePositions(inp: LiveInputs): LivePositions {
   }
 
   const weekly = rows.reduce((acc, r) => acc + r.weightedUsd, 0) * 7;
-  return { rows, weeklyEstimateUsdDays: weekly, unavailable, threePool };
+  const hasFiatStablePosition = inp.recorded3pool.ckusdc + inp.recorded3pool.ckusdt > 0;
+  return {
+    rows,
+    weeklyEstimateUsdDays: weekly,
+    unavailable,
+    threePool,
+    policyAvailable: policy.mode !== 'unknown' || !hasFiatStablePosition,
+  };
 }
 
 function row(key: PointSourceKey, valueUsd: number): LivePositionRow {
   const meta = SOURCE_META[key];
-  return { key, meta, valueUsd, multiplier: meta.multiplier, weightedUsd: valueUsd * meta.multiplier };
+  const multiplier = meta.multiplier;
+  return {
+    key,
+    meta,
+    valueUsd,
+    multiplier: multiplier ?? 0,
+    weightedUsd: multiplier === null ? 0 : valueUsd * multiplier,
+    ...(multiplier === null
+      ? { note: { tone: 'warning' as const, text: 'Current points rate unavailable.' } }
+      : {}),
+  };
 }
 
 // ── Epoch date helpers ──────────────────────────────────────────────────────

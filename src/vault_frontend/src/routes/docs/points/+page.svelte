@@ -1,5 +1,11 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { AMM1_LIQUIDITY_PAUSED } from '$lib/config';
+  import { seasonStore } from '$lib/stores/seasonStore';
+  import { UNKNOWN_FIAT_STABLE_POINTS_POLICY } from '$lib/utils/fiatStablePointsPolicy';
+
+  onMount(() => { void seasonStore.ensureLoaded(); });
+  const fiatPolicy = $derived($seasonStore.policy ?? UNKNOWN_FIAT_STABLE_POINTS_POLICY);
 </script>
 
 <svelte:head><title>Points &amp; Airdrop | Rumi Docs</title></svelte:head>
@@ -28,8 +34,14 @@
         <tbody>
           <tr><td>icUSD debt outstanding in a vault</td><td class="mult">1x</td></tr>
           <tr><td>icUSD deposited in the 3pool</td><td class="mult">1x</td></tr>
-          <tr><td>ckUSDC or ckUSDT deposited in the 3pool (unmatched)</td><td class="mult">3x</td></tr>
-          <tr><td>ckUSDC and ckUSDT deposited together (matched pair)</td><td class="mult">5x</td></tr>
+          {#if fiatPolicy.mode === 'flat4x'}
+            <tr><td>ckUSDC or ckUSDT deposited in the 3pool (flat fiat-stable rule)</td><td class="mult">4x</td></tr>
+          {:else if fiatPolicy.mode === 'unknown'}
+            <tr><td>ckUSDC/ckUSDT deposited in the 3pool</td><td class="mult">Unavailable</td></tr>
+          {:else}
+            <tr><td>ckUSDC or ckUSDT deposited in the 3pool (unmatched)</td><td class="mult">3x</td></tr>
+            <tr><td>ckUSDC and ckUSDT deposited together (matched pair)</td><td class="mult">5x</td></tr>
+          {/if}
           <tr><td>icUSD in the stability pool</td><td class="mult">1x</td></tr>
           <tr><td>3USD in the stability pool</td><td class="mult">2x</td></tr>
           <tr><td>3USD/ICP liquidity in the Rumi AMM{#if AMM1_LIQUIDITY_PAUSED} <span class="soon">paused</span>{/if}</td><td class="mult">2x</td></tr>
@@ -39,7 +51,15 @@
     </div>
     <p>Multipliers stack <strong>across activities</strong>: borrowing against a vault, depositing in the 3pool, and depositing in the stability pool all earn independently at the same time. They do not stack within a single activity.</p>
     {#if AMM1_LIQUIDITY_PAUSED}<p>New deposits to the 3USD/ICP AMM are currently paused. Liquidity already in the pool keeps earning 2x until it is withdrawn.</p>{/if}
-    <p>For the matched-pair rate, the matched portion is twice the smaller of your ckUSDC and ckUSDT deposits at 5x; whatever is left over on the larger side earns the unmatched 3x rate. Adding a token-sized amount of one coin does not flip your whole position to 5x.</p>
+    {#if fiatPolicy.mode === 'flat4x'}
+      <p>The points canister has activated the flat 4x fiat-stable rule at an epoch boundary. Future ckUSDC and ckUSDT 3pool deposits earn the same rate regardless of composition. Already-recorded matched 5x points remain unchanged, and eligible historical unmatched 3x rows receive a separately labelled one-time top-up.</p>
+    {:else if fiatPolicy.mode === 'unknown'}
+      <p>The current fiat-stable points policy could not be read. The dashboard leaves that rate unavailable until the canister response is understood.</p>
+    {:else}
+      <p>The current epoch uses the legacy matched-pair rate: the matched portion is twice the smaller of your ckUSDC and ckUSDT deposits at 5x; whatever is left over on the larger side earns the unmatched 3x rate. Adding a token-sized amount of one coin does not flip your whole position to 5x. The points page will reflect the canister policy after a future epoch-boundary cutover.</p>
+      {#if fiatPolicy.effectiveEpoch !== null}<p>Flat 4x is scheduled from epoch {Number(fiatPolicy.effectiveEpoch)}; the current epoch remains on the legacy rule until that boundary.</p>{/if}
+    {/if}
+    <p>Historical matched 5x points remain preserved. Historical unmatched 3x contributions may receive a separately identifiable one-time top-up of <code>floor(points_delta / 3)</code>; this is an uplift of recorded contributions, not a replay of discarded snapshots. Adding points can change percentage allocation shares even when previously earned point totals stay unchanged.</p>
     <p>The <strong>5x repayment boost</strong> rewards repaying vault debt with ckUSDC or ckUSDT: the repaid amount earns for a 90-day window (capped at season end). It is not live yet and will be enabled in an upcoming backend release.</p>
   </section>
 

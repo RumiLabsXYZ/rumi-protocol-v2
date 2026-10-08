@@ -13,6 +13,7 @@
   import { seasonStore, seasonPhase } from '$lib/stores/seasonStore';
   import { formatPoints, bodyState } from '$lib/utils/points';
   import { MAX_MULTIPLIER } from '$lib/utils/pointsRules';
+  import { UNKNOWN_FIAT_STABLE_POINTS_POLICY } from '$lib/utils/fiatStablePointsPolicy';
 
   let loadedFor = $state<string | null>(null);
 
@@ -41,6 +42,7 @@
     bodyState({ connected: $isConnected, excluded: $myPointsStore.excluded, state: $myPointsStore.state }),
   );
   const pts = $derived($myPointsStore.state ? formatPoints($myPointsStore.state.total_points) : null);
+  const fiatStableMode = $derived(($seasonStore.policy ?? UNKNOWN_FIAT_STABLE_POINTS_POLICY).mode);
 </script>
 
 {#if POINTS_ENABLED && phase !== 'unknown' && body !== 'excluded'}
@@ -52,10 +54,19 @@
     <span class="sb-sep" aria-hidden="true">·</span>
 
     {#if phase === 'pre'}
-      <span class="sb-msg">Airdrop starts soon — get positioned to earn up to {MAX_MULTIPLIER}×</span>
+      <span class="sb-msg">
+        {fiatStableMode === 'flat4x'
+          ? 'Earn 4× on fiat-backed 3pool deposits'
+          : fiatStableMode === 'unknown'
+            ? 'Fiat-stable points rate unavailable'
+            : `Airdrop starts soon — get positioned to earn up to ${MAX_MULTIPLIER}×`}
+      </span>
       <span class="sb-cta">See how →</span>
     {:else if phase === 'ended'}
       <span class="sb-msg">Season 1 has ended — allocations are being finalized</span>
+      <span class="sb-cta">View →</span>
+    {:else if phase === 'live' && $seasonStore.status && !$seasonStore.status.driver_enabled}
+      <span class="sb-msg">Points processing is paused. Existing earned points are preserved.</span>
       <span class="sb-cta">View →</span>
     {:else if body === 'enrolled' && pts !== null}
       <span class="sb-msg">You're earning — <strong class="sb-pts">{pts}</strong> points so far</span>
@@ -64,7 +75,13 @@
       <span class="sb-msg">You're not earning yet — take any qualifying action to enroll</span>
       <span class="sb-cta">See how →</span>
     {:else}
-      <span class="sb-msg">The airdrop is live — earn up to {MAX_MULTIPLIER}× points just by using Rumi</span>
+      <span class="sb-msg">
+        {fiatStableMode === 'flat4x'
+          ? 'Earn 4× on fiat-backed 3pool deposits'
+          : fiatStableMode === 'unknown'
+            ? 'Fiat-stable points rate unavailable'
+            : `The airdrop is live — earn up to ${MAX_MULTIPLIER}× points just by using Rumi`}
+      </span>
       <span class="sb-cta">{$isConnected ? 'View →' : 'Connect to earn →'}</span>
     {/if}
   </a>
