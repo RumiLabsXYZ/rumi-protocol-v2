@@ -97,6 +97,7 @@ type BotPaymentJournal = record {
   claim_generation : nat64;
   debt_covered_e8s : nat64;
   collateral_amount_e8s : nat64;
+  collateral_received_amount_e8s : opt nat64;
   collateral_price_e8s : nat64;
   icp_swapped_e8s : nat64;
   ckusdc_received_e6 : nat64;
@@ -110,26 +111,30 @@ type BotPaymentJournal = record {
   receipt : opt TransferReceipt;
   shortfall_receipt_observed : bool;
 };
-type BotReturnTransferStatus = variant { Prepared; Ambiguous; NoEffect; ReceiptObserved };
+type BotReturnTransferStatus = variant { Prepared; Ambiguous; NoEffect; ReceiptObserved; FeeMismatchAmbiguous };
 type BotReturnTransferJournal = record {
   ledger_principal : principal;
   backend_principal : principal;
   amount_e8s : nat64;
   fee_e8s : nat64;
+  transfer_fee_e8s : opt nat64;
   memo : blob;
   created_at_time : nat64;
   receipt : opt TransferReceipt;
   status : BotReturnTransferStatus;
 };
-type BotClaimJournalStatus = variant { SwapMayHaveStarted; ReturnPending; PaymentShortfall };
+type BotClaimJournalStatus = variant { SwapMayHaveStarted; ReturnFeeQueryPending; ReturnFeeRefreshExhausted; ReturnPending; PaymentShortfall };
 type BotClaimJournal = record {
   vault_id : nat64;
   claim_generation : nat64;
   debt_covered_e8s : nat64;
   collateral_amount_e8s : nat64;
+  collateral_received_amount_e8s : opt nat64;
+  collateral_outbound_fee_e8s : opt nat64;
   collateral_price_e8s : nat64;
   payment_memo : blob;
   collateral_return_memo : blob;
+  failed_return_attempts : vec BotReturnTransferJournal;
   collateral_return : opt BotReturnTransferJournal;
   status : BotClaimJournalStatus;
 };

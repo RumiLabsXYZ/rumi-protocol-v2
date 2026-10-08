@@ -7728,6 +7728,7 @@ pub async fn liquidate_vault_partial(
             } else {
                 None
             },
+            ledger_fee_collateral: None,
             timestamp: Some(ic_cdk::api::time()),
             three_usd_reserves_e8s: None,
         };
@@ -8153,6 +8154,7 @@ pub async fn liquidate_vault_partial_with_stable(
             } else {
                 None
             },
+            ledger_fee_collateral: None,
             timestamp: Some(ic_cdk::api::time()),
             three_usd_reserves_e8s: None,
         };
@@ -8948,6 +8950,7 @@ async fn liquidate_vault_debt_already_burned_inner(
             } else {
                 None
             },
+            ledger_fee_collateral: None,
             timestamp: Some(ic_cdk::api::time()),
             three_usd_reserves_e8s: three_usd_received_e8s,
         };
@@ -10033,6 +10036,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             } else {
                 None
             },
+            ledger_fee_collateral: None,
             timestamp: Some(ic_cdk::api::time()),
             three_usd_reserves_e8s: None,
         };

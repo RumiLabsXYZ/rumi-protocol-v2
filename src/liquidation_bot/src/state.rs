@@ -84,6 +84,8 @@ pub struct BotStats {
     /// proceeds for a later claim or swept automatically.
     #[serde(default)]
     pub total_ckusdc_surplus_held_e6: u64,
+    /// Gross ICP seized/claimed (C), retained as historical aggregate semantics;
+    /// this is not the net amount credited to the bot after outbound fees.
     pub total_collateral_received_e8s: u64,
     pub total_collateral_to_treasury_e8s: u64,
     pub events_count: u64,
@@ -122,7 +124,12 @@ pub struct BotPaymentJournal {
     pub ledger_principal: Principal,
     pub claim_generation: u64,
     pub debt_covered_e8s: u64,
+    /// Gross seized ICP (C), retained for compatibility with historical records.
     pub collateral_amount_e8s: u64,
+    /// Net ICP credited to the bot after the backend-paid outbound fee.
+    /// Missing on legacy journals.
+    #[serde(default)]
+    pub collateral_received_amount_e8s: Option<u64>,
     pub collateral_price_e8s: u64,
     pub icp_swapped_e8s: u64,
     pub ckusdc_received_e6: u64,
@@ -151,10 +158,25 @@ pub struct BotClaimJournal {
     pub vault_id: u64,
     pub claim_generation: u64,
     pub debt_covered_e8s: u64,
+    /// Gross ICP claim amount C. Kept separate from the net amount received
+    /// after the backend-paid outbound ledger fee.
     pub collateral_amount_e8s: u64,
+    /// Net ICP credited to the bot by the backend claim transfer.
+    /// Missing on legacy journals, which must remain operator-held.
+    #[serde(default)]
+    pub collateral_received_amount_e8s: Option<u64>,
+    /// Exact outbound fee paid by the backend on the claim transfer.
+    /// Missing on legacy journals, which must remain operator-held.
+    #[serde(default)]
+    pub collateral_outbound_fee_e8s: Option<u64>,
     pub collateral_price_e8s: u64,
     pub payment_memo: Vec<u8>,
     pub collateral_return_memo: Vec<u8>,
+    /// Exact return tuples rejected with a typed first-dispatch BadFee. These
+    /// are proven no-effect attempts retained so fee refresh never erases an
+    /// earlier dedup identity. Bounded by the automatic refresh limit.
+    #[serde(default)]
+    pub failed_return_attempts: Vec<BotReturnTransferJournal>,
     /// Exact return transfer intent, persisted before dispatch. An ambiguous
     /// reply can therefore be retried with the same ICRC dedup tuple.
     #[serde(default)]
@@ -169,7 +191,14 @@ pub struct BotReturnTransferJournal {
     pub ledger_principal: Principal,
     pub backend_principal: Principal,
     pub amount_e8s: u64,
+    /// Fee recorded for this return. New intents query and pay this exact fee;
+    /// legacy intents preserve the old cached sizing fee while replaying their
+    /// original `fee: None` wire argument.
     pub fee_e8s: u64,
+    /// Exact `TransferArg.fee` value. Missing on old snapshots means the
+    /// original request used `fee: None`; replay must preserve that identity.
+    #[serde(default)]
+    pub transfer_fee_e8s: Option<u64>,
     pub memo: Vec<u8>,
     pub created_at_time: u64,
     pub receipt: Option<crate::swap::TransferReceipt>,
@@ -177,11 +206,25 @@ pub struct BotReturnTransferJournal {
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum BotReturnTransferStatus { Prepared, Ambiguous, NoEffect, ReceiptObserved }
+pub enum BotReturnTransferStatus {
+    Prepared,
+    Ambiguous,
+    NoEffect,
+    ReceiptObserved,
+    FeeMismatchAmbiguous,
+}
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BotClaimJournalStatus {
     SwapMayHaveStarted,
+    /// A new return is authorized but no transfer tuple exists yet. Querying
+    /// the fee and preparing the tuple is safe because no transfer was sent,
+    /// or the prior tuple received a typed first-dispatch BadFee.
+    ReturnFeeQueryPending,
+    /// The bounded automatic fee refresh attempts were exhausted after
+    /// definitive first-dispatch BadFee responses. Operator reconciliation is
+    /// required before another tuple can be created.
+    ReturnFeeRefreshExhausted,
     ReturnPending,
     PaymentShortfall,
 }
@@ -477,6 +520,7 @@ mod tests {
             claim_generation: 42,
             debt_covered_e8s: 100_000_000,
             collateral_amount_e8s: 50_000_000,
+            collateral_received_amount_e8s: Some(49_980_000),
             collateral_price_e8s: 200_000_000,
             icp_swapped_e8s: 40_000_000,
             ckusdc_received_e6: 1_010_000,
@@ -499,14 +543,18 @@ mod tests {
             claim_generation: 42,
             debt_covered_e8s: 100_000_000,
             collateral_amount_e8s: 50_000_000,
+            collateral_received_amount_e8s: Some(49_980_000),
+            collateral_outbound_fee_e8s: Some(20_000),
             collateral_price_e8s: 200_000_000,
             payment_memo: b"RUMI-BOT-PAYMENT-V1:73:42".to_vec(),
             collateral_return_memo: b"RUMI-BOT-RETURN-V1:73:42".to_vec(),
+            failed_return_attempts: Vec::new(),
             collateral_return: Some(BotReturnTransferJournal {
                 ledger_principal: Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap(),
                 backend_principal: Principal::from_text("tfesu-vyaaa-aaaap-qrd7a-cai").unwrap(),
                 amount_e8s: 49_990_000,
                 fee_e8s: 10_000,
+                transfer_fee_e8s: Some(10_000),
                 memo: b"RUMI-BOT-RETURN-V1:73:42".to_vec(),
                 created_at_time: 1_700_000_000_001,
                 receipt: None,
@@ -520,12 +568,14 @@ mod tests {
         assert_eq!(journal.created_at_time, 1_700_000_000_000);
         assert_eq!(journal.amount_e6, 1_000_000);
         assert_eq!(journal.fee_e6, 10_000);
+        assert_eq!(journal.collateral_received_amount_e8s, Some(49_980_000));
         assert_eq!(journal.receipt.as_ref().unwrap().block_index, 91);
         assert!(journal.shortfall_receipt_observed);
         let return_journal = restored.pending_claims.get(&vault_id).unwrap()
             .collateral_return.as_ref().unwrap();
         assert_eq!(return_journal.created_at_time, 1_700_000_000_001);
         assert_eq!(return_journal.amount_e8s, 49_990_000);
+        assert_eq!(return_journal.transfer_fee_e8s, Some(10_000));
         assert_eq!(return_journal.status, BotReturnTransferStatus::Ambiguous);
         assert_eq!(journal.memo, b"RUMI-BOT-PAYMENT-V1:73:42");
         assert_eq!(journal.status, BotPaymentStatus::ReceiptObserved);
@@ -535,8 +585,52 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("shortfall_receipt_observed");
+        legacy_snapshot["pending_payments"][vault_id.to_string()]
+            .as_object_mut()
+            .unwrap()
+            .remove("collateral_received_amount_e8s");
+        legacy_snapshot["pending_claims"][vault_id.to_string()]["collateral_return"]
+            .as_object_mut()
+            .unwrap()
+            .remove("transfer_fee_e8s");
+        legacy_snapshot["pending_claims"][vault_id.to_string()]
+            .as_object_mut()
+            .unwrap()
+            .remove("collateral_received_amount_e8s");
+        legacy_snapshot["pending_claims"][vault_id.to_string()]
+            .as_object_mut()
+            .unwrap()
+            .remove("collateral_outbound_fee_e8s");
+        legacy_snapshot["pending_claims"][vault_id.to_string()]
+            .as_object_mut()
+            .unwrap()
+            .remove("failed_return_attempts");
         let legacy_restored: BotState = serde_json::from_value(legacy_snapshot).unwrap();
         assert!(!legacy_restored.pending_payments[&vault_id].shortfall_receipt_observed);
+        assert_eq!(
+            legacy_restored.pending_claims[&vault_id]
+                .collateral_return.as_ref().unwrap().transfer_fee_e8s,
+            None,
+            "legacy return intents must preserve their original fee: None wire argument"
+        );
+        let legacy_claim = &legacy_restored.pending_claims[&vault_id];
+        assert_eq!(legacy_claim.collateral_received_amount_e8s, None);
+        assert_eq!(legacy_claim.collateral_outbound_fee_e8s, None);
+        assert!(legacy_claim.failed_return_attempts.is_empty());
+        assert_eq!(
+            legacy_restored.pending_payments[&vault_id].collateral_received_amount_e8s,
+            None
+        );
+
+        let mut missing_gross = serde_json::to_value(&state).unwrap();
+        missing_gross["pending_claims"][vault_id.to_string()]
+            .as_object_mut()
+            .unwrap()
+            .remove("collateral_amount_e8s");
+        assert!(
+            serde_json::from_value::<BotState>(missing_gross).is_err(),
+            "a claim without its gross collateral must fail closed rather than infer it from net fields"
+        );
     }
 
     fn write_config_region(payload: &[u8]) {

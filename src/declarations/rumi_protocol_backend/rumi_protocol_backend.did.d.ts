@@ -33,11 +33,13 @@ export interface BotLiquidationResult {
   'collateral_amount' : bigint,
   'collateral_price_e8s' : bigint,
   'payment_memo' : Uint8Array | number[],
+  'collateral_outbound_fee' : [] | [bigint],
   'claim_generation' : bigint,
   'vault_id' : bigint,
   'payment_ledger_principal' : [] | [Principal],
   'collateral_return_memo' : Uint8Array | number[],
   'debt_covered' : bigint,
+  'collateral_received_amount' : [] | [bigint],
 }
 export interface BotPaymentProof {
   'block_index' : bigint,
@@ -768,6 +770,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'icp_rate' : [] | [Uint8Array | number[]],
       'liquidator_payment' : bigint,
       'vault_id' : bigint,
+      'ledger_fee_collateral' : [] | [bigint],
       'timestamp' : [] | [bigint],
       'three_usd_reserves_e8s' : [] | [bigint],
       'liquidator' : [] | [Principal],

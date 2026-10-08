@@ -535,7 +535,9 @@ async fn admin_test_swap(amount_e8s: u64) -> Result<swap::SwapResult, String> {
         .ok_or_else(|| "Config not set".to_string())?;
 
     log!(INFO, "admin_test_swap: attempting to swap {} ICP e8s", amount_e8s);
-    let result = swap::swap_icp_for_ckusdc(&config, amount_e8s).await;
+    let result = swap::swap_icp_for_ckusdc(&config, amount_e8s)
+        .await
+        .map_err(|error| error.to_string());
     match &result {
         Ok(r) => log!(
             INFO,

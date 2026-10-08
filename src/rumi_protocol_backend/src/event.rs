@@ -109,6 +109,9 @@ pub enum Event {
         vault_id: u64,
         #[serde(alias = "liquidated_debt")]
         liquidator_payment: ICUSD,
+        /// Net collateral received by the liquidator. Bot claim events record
+        /// the outbound ledger fee separately below; legacy/manual events keep
+        /// their historical meaning.
         #[serde(alias = "collateral_seized")]
         icp_to_liquidator: ICP,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,6 +122,10 @@ pub enum Event {
         /// Old events deserialize as None (protocol_cut was 0 before this field existed).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         protocol_fee_collateral: Option<u64>,
+        /// Explicit ledger transfer fee debited in addition to the net amount
+        /// credited to the liquidator. None for legacy and non-bot events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ledger_fee_collateral: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<u64>,
         /// 3USD (LP tokens) credited to protocol reserves during this liquidation.
@@ -733,14 +740,10 @@ pub enum Event {
     #[serde(rename = "set_breaker_window_debt_ceiling_e8s")]
     SetBreakerWindowDebtCeilingE8s { ceiling_e8s: u64, timestamp: u64 },
 
-    /// Wave-11 BOT-001: `check_vaults` detected an expired `bot_claims` entry
-    /// whose collateral was not returned (`icrc1_balance_of` < required).
-    /// The auto-cancel was skipped to keep the protocol from clearing the
-    /// claim while the bot still holds the collateral. Admin must reconcile
-    /// manually via `bot_cancel_liquidation` once the collateral is back, or
-    /// via an admin sweep if the bot is genuinely stuck. Re-emitted on every
-    /// `check_vaults` tick the gate fires; the explorer can group by
-    /// `vault_id` to dedupe.
+    /// `check_vaults` detected an expired claim without a provable full-gross
+    /// return and conserving outbound fee tuple. Auto-cancel is skipped. The
+    /// legacy observed/required balance fields are retained; observed_balance
+    /// is zero when no exact return proof exists. Re-emitted each tick.
     #[serde(rename = "bot_claim_reconciliation_needed")]
     BotClaimReconciliationNeeded {
         vault_id: u64,
@@ -1830,6 +1833,7 @@ fn replay_with_nonce_time_and_payout_events(
                 liquidator_payment,
                 icp_to_liquidator,
                 protocol_fee_collateral,
+                ledger_fee_collateral,
                 three_usd_reserves_e8s,
                 ..
             } => {
@@ -1854,7 +1858,8 @@ fn replay_with_nonce_time_and_payout_events(
                     // (old events have protocol_fee_collateral=None → 0, which is correct)
                     let total_collateral_seized = icp_to_liquidator
                         .to_u64()
-                        .saturating_add(protocol_fee_collateral.unwrap_or(0));
+                        .saturating_add(protocol_fee_collateral.unwrap_or(0))
+                        .saturating_add(ledger_fee_collateral.unwrap_or(0));
                     vault.collateral_amount = vault.collateral_amount.saturating_sub(total_collateral_seized);
                     vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_share);
                 }
@@ -4165,6 +4170,42 @@ pub fn record_price_update(collateral_type: CollateralType, price: Decimal, time
 mod filter_tests {
     use super::*;
     use crate::vault::Vault;
+
+    #[test]
+    fn legacy_partial_liquidation_event_defaults_missing_ledger_fee_to_none() {
+        let event = Event::PartialLiquidateVault {
+            vault_id: 1,
+            liquidator_payment: ICUSD::new(100),
+            icp_to_liquidator: ICP::new(90),
+            liquidator: None,
+            icp_rate: None,
+            protocol_fee_collateral: None,
+            ledger_fee_collateral: None,
+            timestamp: None,
+            three_usd_reserves_e8s: None,
+        };
+        let mut old_value =
+            serde_json::to_value(event).expect("serialize partial liquidation event");
+        let event_record = old_value
+            .as_object_mut()
+            .expect("event serializes as a tagged record")
+            .values_mut()
+            .next()
+            .expect("event variant payload");
+        event_record
+            .as_object_mut()
+            .expect("event payload serializes as a record")
+            .remove("ledger_fee_collateral");
+
+        let decoded: Event = serde_json::from_value(old_value).expect("decode legacy event");
+        assert!(matches!(
+            decoded,
+            Event::PartialLiquidateVault {
+                ledger_fee_collateral: None,
+                ..
+            }
+        ));
+    }
 
     fn p(seed: u8) -> Principal {
         Principal::self_authenticating([seed; 32])

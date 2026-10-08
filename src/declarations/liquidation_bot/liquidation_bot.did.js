@@ -85,12 +85,15 @@ export const idlFactory = ({ IDL }) => {
     'ReturnPending' : IDL.Null,
     'PaymentShortfall' : IDL.Null,
     'SwapMayHaveStarted' : IDL.Null,
+    'ReturnFeeQueryPending' : IDL.Null,
+    'ReturnFeeRefreshExhausted' : IDL.Null,
   });
   const BotReturnTransferStatus = IDL.Variant({
     'ReceiptObserved' : IDL.Null,
     'NoEffect' : IDL.Null,
     'Ambiguous' : IDL.Null,
     'Prepared' : IDL.Null,
+    'FeeMismatchAmbiguous' : IDL.Null,
   });
   const TransferReceipt = IDL.Record({
     'block_index' : IDL.Nat64,
@@ -104,6 +107,7 @@ export const idlFactory = ({ IDL }) => {
     'memo' : IDL.Vec(IDL.Nat8),
     'fee_e8s' : IDL.Nat64,
     'amount_e8s' : IDL.Nat64,
+    'transfer_fee_e8s' : IDL.Opt(IDL.Nat64),
     'ledger_principal' : IDL.Principal,
     'created_at_time' : IDL.Nat64,
   });
@@ -111,12 +115,15 @@ export const idlFactory = ({ IDL }) => {
     'status' : BotClaimJournalStatus,
     'collateral_price_e8s' : IDL.Nat64,
     'payment_memo' : IDL.Vec(IDL.Nat8),
+    'collateral_outbound_fee_e8s' : IDL.Opt(IDL.Nat64),
     'collateral_return' : IDL.Opt(BotReturnTransferJournal),
     'collateral_amount_e8s' : IDL.Nat64,
     'claim_generation' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
+    'collateral_received_amount_e8s' : IDL.Opt(IDL.Nat64),
     'collateral_return_memo' : IDL.Vec(IDL.Nat8),
     'debt_covered_e8s' : IDL.Nat64,
+    'failed_return_attempts' : IDL.Vec(BotReturnTransferJournal),
   });
   const BotPaymentStatus = IDL.Variant({
     'ReceiptObserved' : IDL.Null,
@@ -138,6 +145,7 @@ export const idlFactory = ({ IDL }) => {
     'claim_generation' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
     'gross_amount_e6' : IDL.Nat64,
+    'collateral_received_amount_e8s' : IDL.Opt(IDL.Nat64),
     'held_surplus_e6' : IDL.Nat64,
     'ledger_principal' : IDL.Principal,
     'amount_e6' : IDL.Nat64,

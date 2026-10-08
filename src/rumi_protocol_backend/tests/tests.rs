@@ -2619,6 +2619,7 @@ mod reserve_redemption_config_tests {
             liquidator: Some(Principal::anonymous()),
             icp_rate: None,
             protocol_fee_collateral,
+            ledger_fee_collateral: None,
             timestamp: None,
             three_usd_reserves_e8s: None,
         };
@@ -2689,6 +2690,7 @@ mod reserve_redemption_config_tests {
             liquidator: None,
             icp_rate: None,
             protocol_fee_collateral: None, // Old events deserialize as None
+            ledger_fee_collateral: None,
             timestamp: None,
             three_usd_reserves_e8s: None,
         };
