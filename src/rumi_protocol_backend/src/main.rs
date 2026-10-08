@@ -10376,72 +10376,16 @@ async fn bot_confirm_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
         ));
     }
 
-    if read_state(|s| s.bot_confirm_proof_required) {
-        return Err(ProtocolError::GenericError(
-            "Legacy bot confirmation is disabled; submit an ICRC-3 payment proof".into(),
-        ));
-    }
-
-    let claim = read_state(|s| s.bot_claims.get(&vault_id).cloned()).ok_or_else(|| {
-        ProtocolError::GenericError(format!("No active claim for vault #{}", vault_id))
-    })?;
-
-    mutate_state(|s| {
-        if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
-            // AR-B-001 (audit 2026-06-09): saturate the debt write-down. A
-            // non-saturating `-=` traps if anything reduced the vault's debt
-            // during the claim->confirm window, permanently sticking the vault
-            // at `bot_processing = true` with the bot's collateral already
-            // paid. The redemption skip + user-op rejection make that window
-            // race-free today; saturating keeps a residual drift from ever
-            // bricking the vault (it degrades to under-reduction instead).
-            vault.borrowed_icusd_amount = vault
-                .borrowed_icusd_amount
-                .saturating_sub(ICUSD::new(claim.debt_amount));
-            vault.collateral_amount = vault
-                .collateral_amount
-                .saturating_sub(claim.collateral_amount);
-            vault.bot_processing = false;
-        }
-
-        let event = rumi_protocol_backend::event::Event::PartialLiquidateVault {
-            vault_id,
-            liquidator_payment: ICUSD::new(claim.debt_amount),
-            icp_to_liquidator: ICP::from(claim.collateral_amount),
-            liquidator: Some(caller),
-            icp_rate: Some(UsdIcp::from(
-                Decimal::from(claim.collateral_price_e8s) / dec!(100_000_000),
-            )),
-            protocol_fee_collateral: None,
-            timestamp: Some(ic_cdk::api::time()),
-            three_usd_reserves_e8s: None,
-        };
-        rumi_protocol_backend::storage::record_event(&event);
-
-        s.bot_total_debt_covered_e8s += claim.debt_amount;
-        s.bot_claims.remove(&vault_id);
-        // Shared drain rule (see state::cleanup_if_drained): a bot confirm
-        // normally only reduces debt+collateral (re-key the CR entry), but if
-        // the write-down emptied the vault it must be removed like every
-        // other PartialLiquidateVault path, or replay diverges.
-        if s.cleanup_if_drained(vault_id) {
-            log!(
-                INFO,
-                "[bot_confirm_liquidation] Vault #{} fully liquidated — removed",
-                vault_id
-            );
-        }
-    });
-
-    log!(
-        INFO,
-        "[bot_confirm_liquidation] Confirmed liquidation for vault #{}: debt={}, collateral={}",
-        vault_id,
-        claim.debt_amount,
-        claim.collateral_amount
-    );
-
-    Ok(())
+    // This compatibility endpoint has no ledger evidence. Never allow a
+    // configuration flag (including its legacy default of false) to turn a
+    // vault-id-only request into debt settlement. The proof-backed endpoint is
+    // the only bot settlement path.
+    Err(ProtocolError::GenericError(
+        format!(
+            "Legacy bot confirmation is disabled for vault #{}; submit an exact ICRC-3 payment proof",
+            vault_id
+        ),
+    ))
 }
 
 /// Confirm a bot liquidation against the exact ckUSDC ICRC-3 transfer block.

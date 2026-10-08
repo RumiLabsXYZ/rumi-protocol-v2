@@ -42,6 +42,7 @@ export interface BotConfig {
 export interface BotInitArgs { 'config' : BotConfig }
 export interface BotPaymentJournal {
   'status' : BotPaymentStatus,
+  'shortfall_receipt_observed' : boolean,
   'collateral_price_e8s' : bigint,
   'backend_principal' : Principal,
   'receipt' : [] | [TransferReceipt],

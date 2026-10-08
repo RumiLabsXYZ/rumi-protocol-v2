@@ -108,6 +108,7 @@ type BotPaymentJournal = record {
   memo : blob;
   status : BotPaymentStatus;
   receipt : opt TransferReceipt;
+  shortfall_receipt_observed : bool;
 };
 type BotReturnTransferStatus = variant { Prepared; Ambiguous; NoEffect; ReceiptObserved };
 type BotReturnTransferJournal = record {

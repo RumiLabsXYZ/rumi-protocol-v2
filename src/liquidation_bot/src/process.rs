@@ -39,6 +39,17 @@ fn required_ckusdc_gross(debt_e8s: u64, fee_e6: u64) -> u64 {
     net.saturating_add(fee_e6)
 }
 
+fn required_ckusdc_net(debt_e8s: u64) -> u64 {
+    debt_e8s / 100 + u64::from(debt_e8s % 100 != 0)
+}
+
+fn payment_receipt_is_short(
+    journal: &state::BotPaymentJournal,
+    receipt: &swap::TransferReceipt,
+) -> bool {
+    receipt.amount < required_ckusdc_net(journal.debt_covered_e8s)
+}
+
 async fn choose_bounded_topup_amount(
     config: &BotConfig,
     remaining_icp: u64,
@@ -761,6 +772,7 @@ pub async fn process_pending() {
         memo: payment_memo.clone(),
         status: state::BotPaymentStatus::Prepared,
         receipt: None,
+        shortfall_receipt_observed: false,
     };
     state::mutate_state(|s| {
         s.pending_claims.remove(&vault.vault_id);
@@ -817,6 +829,31 @@ pub async fn process_pending() {
             return;
         }
     };
+
+    if payment_receipt_is_short(&payment_journal, &ckusdc_transferred) {
+        state::mutate_state(|s| {
+            if let Some(journal) = s.pending_payments.get_mut(&vault.vault_id) {
+                journal.shortfall_receipt_observed = true;
+            }
+        });
+        state::save_config_to_stable();
+        let minimum = required_ckusdc_net(debt_covered);
+        let message = format!(
+            "exact ckUSDC receipt is short (received {}, required {}); claim and receipt held pending a cumulative-payment recovery implementation",
+            ckusdc_transferred.amount, minimum
+        );
+        log!(crate::INFO, "STUCK: {} for vault #{}; do not retry this proof or release the claim", message, vault.vault_id);
+        write_record(LiquidationRecordV1 {
+            id: record_id, vault_id: vault.vault_id, timestamp,
+            status: LiquidationStatus::ConfirmFailed,
+            collateral_claimed_e8s: collateral_amount, debt_to_cover_e8s: debt_covered,
+            icp_swapped_e8s: swap_amount, ckusdc_received_e6: ckusdc_received,
+            ckusdc_transferred_e6: ckusdc_transferred.amount, icp_to_treasury_e8s: 0,
+            oracle_price_e8s: collateral_price, effective_price_e8s: effective_price,
+            slippage_bps, error_message: Some(message), confirm_retry_count: 0,
+        });
+        return;
+    }
 
     // -- Phase 4: CONFIRM (with retry, idempotent) --
     let mut confirm_ok = false;
@@ -929,6 +966,10 @@ async fn resume_pending_payment(config: &BotConfig) -> bool {
         log!(crate::INFO, "STUCK: payment for vault #{} has a definitive no-effect response; operator must correct the cause before allocating a new exact tuple", journal.vault_id);
         return true;
     }
+    if journal.shortfall_receipt_observed {
+        log!(crate::INFO, "STUCK: short payment receipt for vault #{} remains held; cumulative claim-generation proof support is not available", journal.vault_id);
+        return true;
+    }
 
     if journal.receipt.is_none() {
         const SAFE_RETRY_WINDOW_NS: u64 = 23 * 60 * 60 * 1_000_000_000;
@@ -969,6 +1010,13 @@ async fn resume_pending_payment(config: &BotConfig) -> bool {
     }
 
     let Some(receipt) = journal.receipt.as_ref() else { return true };
+    if payment_receipt_is_short(&journal, receipt) {
+        journal.shortfall_receipt_observed = true;
+        state::mutate_state(|s| { s.pending_payments.insert(journal.vault_id, journal.clone()); });
+        state::save_config_to_stable();
+        log!(crate::INFO, "STUCK: exact ckUSDC block {} for vault #{} is short ({} received, {} required); claim remains held pending cumulative-payment recovery support", receipt.block_index, journal.vault_id, receipt.amount, required_ckusdc_net(journal.debt_covered_e8s));
+        return true;
+    }
     let proof = BotPaymentProof {
         vault_id: journal.vault_id,
         claim_generation: journal.claim_generation,
@@ -1273,6 +1321,43 @@ mod tests {
     }
 
     #[test]
+    fn a_short_durable_receipt_is_held_below_the_claim_net_minimum() {
+        let journal = state::BotPaymentJournal {
+            vault_id: 19,
+            backend_principal: candid::Principal::anonymous(),
+            ledger_principal: candid::Principal::management_canister(),
+            claim_generation: 4,
+            debt_covered_e8s: 100_000_001,
+            collateral_amount_e8s: 200_000_000,
+            collateral_price_e8s: 100_000_000,
+            icp_swapped_e8s: 110_000_000,
+            ckusdc_received_e6: 1_010_001,
+            held_surplus_e6: 0,
+            gross_amount_e6: 1_010_001,
+            amount_e6: 1_000_001,
+            fee_e6: 10_000,
+            created_at_time: 123,
+            memo: b"claim-19-4".to_vec(),
+            status: state::BotPaymentStatus::ReceiptObserved,
+            receipt: None,
+            shortfall_receipt_observed: false,
+        };
+        let short = crate::swap::TransferReceipt {
+            block_index: 8,
+            amount: 1_000_000,
+            created_at_time: 123,
+        };
+        let exact = crate::swap::TransferReceipt {
+            amount: 1_000_001,
+            ..short.clone()
+        };
+
+        assert!(payment_receipt_is_short(&journal, &short));
+        assert!(!payment_receipt_is_short(&journal, &exact));
+        assert_eq!(required_ckusdc_net(u64::MAX), u64::MAX / 100 + 1);
+    }
+
+    #[test]
     fn confirmed_payment_totals_and_surplus_are_applied_once() {
         let journal = state::BotPaymentJournal {
             vault_id: 19,
@@ -1296,6 +1381,7 @@ mod tests {
                 amount: 1_000_000,
                 created_at_time: 123,
             }),
+            shortfall_receipt_observed: false,
         };
         let mut bot_state = state::BotState::default();
         bot_state.pending_payments.insert(journal.vault_id, journal.clone());
