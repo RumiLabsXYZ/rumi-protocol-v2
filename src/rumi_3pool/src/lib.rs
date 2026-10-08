@@ -373,20 +373,20 @@ impl PendingClaimSlots {
     pub(crate) fn reserve(slots: u64) -> Result<Self, ThreePoolError> {
         let used = storage::pending_claims::len();
         let limit = pending_claim_limit();
-        let accepted = RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| {
-            let current = reserved.get();
-            let Some(total) = used.checked_add(current).and_then(|n| n.checked_add(slots)) else {
-                return false;
-            };
-            if total > limit {
-                return false;
-            }
-            reserved.set(current + slots);
-            true
-        });
-        if !accepted {
-            return Err(ThreePoolError::PendingClaimCapacityReached);
+        let reserved = RESERVED_PENDING_CLAIM_SLOTS.with(Cell::get);
+        let total = used.checked_add(reserved).and_then(|n| n.checked_add(slots));
+        let new_reserved = reserved.checked_add(slots);
+        if total.map_or(true, |total| total > limit) || new_reserved.is_none() {
+            return Err(ThreePoolError::TransferFailed {
+                token: "pending_claims".to_string(),
+                reason: format!(
+                    "pending claim capacity reached: used={used}, reserved={reserved}, requested={slots}, capacity={limit}; inspect the payout journal before retrying"
+                ),
+            });
         }
+        RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| {
+            reserved.set(new_reserved.expect("checked pending claim reservation"));
+        });
         Ok(Self { remaining: slots })
     }
 
@@ -3737,6 +3737,19 @@ pub fn test_get_raw_block(id: u64) -> Option<types::Icrc3Block> {
     storage::blocks::get(id)
 }
 
+/// Test-only, one-shot HTTP barrier before an uncached ledger-fee call. The
+/// CL-01 PocketIC regression releases it only after an LP transfer executes.
+#[cfg(any(feature = "test_endpoints", test))]
+#[update]
+pub fn test_gate_next_fee_lookup() {
+    assert_eq!(
+        ic_cdk::api::caller(),
+        read_state(|s| s.config.admin),
+        "admin only"
+    );
+    transfers::gate_next_fee_lookup();
+}
+
 /// Test-only: clear the ICRC-3 hash cache. Used by tests to simulate the
 /// pre-Task-3 mainnet state where blocks exist but the cache is empty.
 /// The post_upgrade hook (Task 5) backfills the cache; this endpoint lets
@@ -3788,7 +3801,12 @@ pub fn test_set_pending_claim_limit(limit: u64) -> Result<(), ThreePoolError> {
     let occupied = storage::pending_claims::len()
         .saturating_add(RESERVED_PENDING_CLAIM_SLOTS.with(Cell::get));
     if limit < occupied || limit > MAX_PENDING_CLAIMS {
-        return Err(ThreePoolError::PendingClaimCapacityReached);
+        return Err(ThreePoolError::TransferFailed {
+            token: "pending_claims".to_string(),
+            reason: format!(
+                "pending claim capacity configuration rejected: occupied={occupied}, requested_limit={limit}, maximum={MAX_PENDING_CLAIMS}; no value moved"
+            ),
+        });
     }
     TEST_PENDING_CLAIM_LIMIT.with(|test_limit| test_limit.set(Some(limit)));
     Ok(())

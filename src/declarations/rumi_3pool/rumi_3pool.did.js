@@ -38,7 +38,6 @@ export const idlFactory = ({ IDL }) => {
     'InvariantNotConverged' : IDL.Null,
     'InsufficientLiquidity' : IDL.Null,
     'TransferFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
-    'PendingClaimCapacityReached' : IDL.Null,
     'SlippageExceeded' : IDL.Null,
     'ClaimNotFound' : IDL.Null,
     'PoolEmpty' : IDL.Null,

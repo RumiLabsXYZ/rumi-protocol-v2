@@ -84,6 +84,27 @@ pub fn three_pool_wasm() -> Vec<u8> {
         .expect("read release rumi_3pool test Wasm")
 }
 
+pub fn three_pool_test_endpoints_wasm() -> Vec<u8> {
+    let candidates = [
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/wasm32-unknown-unknown/release/rumi_3pool_test_endpoints.wasm"
+        ),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../target/wasm32-unknown-unknown/release/rumi_3pool_test_endpoints.wasm"
+        ),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../../../target/wasm32-unknown-unknown/release/rumi_3pool_test_endpoints.wasm"
+        ),
+    ];
+    candidates
+        .iter()
+        .find_map(|path| std::fs::read(path).ok())
+        .expect("read release rumi_3pool test-endpoints Wasm")
+}
+
 // ─── Harness ───
 
 pub struct ThreePoolHarness {

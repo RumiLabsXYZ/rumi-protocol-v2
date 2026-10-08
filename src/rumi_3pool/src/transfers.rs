@@ -25,6 +25,13 @@ thread_local! {
     /// first outbound transfer to a ledger. Heap-only (not persisted), so it is
     /// simply re-warmed after an upgrade.
     static LEDGER_FEES: RefCell<HashMap<Principal, u128>> = RefCell::new(HashMap::new());
+    #[cfg(any(feature = "test_endpoints", test))]
+    static GATE_NEXT_FEE_LOOKUP: RefCell<bool> = const { RefCell::new(false) };
+}
+
+#[cfg(any(feature = "test_endpoints", test))]
+pub(crate) fn gate_next_fee_lookup() {
+    GATE_NEXT_FEE_LOOKUP.with(|gate| *gate.borrow_mut() = true);
 }
 
 /// Fetch a ledger's transfer fee, caching the result per ledger. On query
@@ -32,6 +39,27 @@ thread_local! {
 pub async fn ledger_fee(ledger: Principal) -> u128 {
     if let Some(fee) = LEDGER_FEES.with(|c| c.borrow().get(&ledger).copied()) {
         return fee;
+    }
+    // Test-only observable barrier. PocketIC holds this HTTPS reply until the
+    // regression test's competing LP transfer has completed, proving the
+    // withdrawal passed its first ownership check before that transfer.
+    #[cfg(any(feature = "test_endpoints", test))]
+    if GATE_NEXT_FEE_LOOKUP.with(|gate| gate.replace(false)) {
+        use ic_cdk::api::management_canister::http_request::{
+            http_request, CanisterHttpRequestArgument, HttpMethod,
+        };
+        let _ = http_request(
+            CanisterHttpRequestArgument {
+                url: "https://3pool-fee-gate.test/hold".into(),
+                max_response_bytes: Some(1),
+                method: HttpMethod::GET,
+                headers: vec![],
+                body: None,
+                transform: None,
+            },
+            1_000_000_000,
+        )
+        .await;
     }
     let fee = current_ledger_fee(ledger).await;
     LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, fee));
