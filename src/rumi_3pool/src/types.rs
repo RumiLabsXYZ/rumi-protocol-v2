@@ -420,8 +420,6 @@ pub enum ThreePoolError {
     /// No pending claim exists with the requested id (already resolved, or
     /// never recorded). Audit 2026-06-05 (3P-01/02/03): pending-claim recovery.
     ClaimNotFound,
-    /// Pending-claim capacity is unavailable; the operation did not move value.
-    PendingClaimCapacityReached,
 }
 
 /// A record of tokens the pool owes a user after a value-moving operation

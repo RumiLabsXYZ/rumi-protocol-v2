@@ -179,6 +179,23 @@ fn set_test_cap(h: &Harness, cap: u64) {
     result.expect("set test claim cap");
 }
 
+fn assert_capacity_rejected(error: ThreePoolError) {
+    match error {
+        ThreePoolError::TransferFailed { token, reason } => {
+            assert_eq!(token, "pending_claims");
+            assert!(
+                reason.contains("capacity"),
+                "missing capacity diagnostic: {reason}"
+            );
+            assert!(
+                reason.contains("no value moved"),
+                "missing no-value-moved diagnostic: {reason}"
+            );
+        }
+        other => panic!("expected compatible capacity error, got {other:?}"),
+    }
+}
+
 fn balance(h: &Harness, ledger: Principal, owner: Principal) -> u128 {
     let result: Nat = decode_one(&reply(
         h.pic
@@ -411,7 +428,7 @@ fn add_liquidity_reserves_every_possible_late_refund_slot_before_pull() {
             .unwrap(),
     ))
     .unwrap();
-    assert!(matches!(result, Err(ThreePoolError::PendingClaimCapacityReached)));
+    assert_capacity_rejected(result.unwrap_err());
     assert_eq!(h.ledgers.map(|ledger| balance(&h, ledger, h.user)), before);
     assert!(claims(&h).is_empty());
 }
@@ -444,10 +461,7 @@ fn insufficient_capacity_rejects_before_any_add_liquidity_pull_and_keeps_old_cla
             .unwrap(),
     ))
     .unwrap();
-    assert!(matches!(
-        result,
-        Err(ThreePoolError::PendingClaimCapacityReached)
-    ));
+    assert_capacity_rejected(result.unwrap_err());
     assert_eq!(h.ledgers.map(|ledger| balance(&h, ledger, h.user)), before);
     let existing = claims(&h);
     assert_eq!(existing.len(), 1);

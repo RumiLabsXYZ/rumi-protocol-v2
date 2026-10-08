@@ -373,20 +373,20 @@ impl PendingClaimSlots {
     pub(crate) fn reserve(slots: u64) -> Result<Self, ThreePoolError> {
         let used = storage::pending_claims::len();
         let limit = pending_claim_limit();
-        let accepted = RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| {
-            let current = reserved.get();
-            let Some(total) = used.checked_add(current).and_then(|n| n.checked_add(slots)) else {
-                return false;
-            };
-            if total > limit {
-                return false;
-            }
-            reserved.set(current + slots);
-            true
-        });
-        if !accepted {
-            return Err(ThreePoolError::PendingClaimCapacityReached);
+        let reserved = RESERVED_PENDING_CLAIM_SLOTS.with(Cell::get);
+        let total = used.checked_add(reserved).and_then(|n| n.checked_add(slots));
+        let new_reserved = reserved.checked_add(slots);
+        if total.map_or(true, |total| total > limit) || new_reserved.is_none() {
+            return Err(ThreePoolError::TransferFailed {
+                token: "pending_claims".to_string(),
+                reason: format!(
+                    "pending claim capacity reached: used={used}, reserved={reserved}, requested={slots}, capacity={limit}; no value moved"
+                ),
+            });
         }
+        RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| {
+            reserved.set(new_reserved.expect("checked pending claim reservation"));
+        });
         Ok(Self { remaining: slots })
     }
 
@@ -3801,7 +3801,12 @@ pub fn test_set_pending_claim_limit(limit: u64) -> Result<(), ThreePoolError> {
     let occupied = storage::pending_claims::len()
         .saturating_add(RESERVED_PENDING_CLAIM_SLOTS.with(Cell::get));
     if limit < occupied || limit > MAX_PENDING_CLAIMS {
-        return Err(ThreePoolError::PendingClaimCapacityReached);
+        return Err(ThreePoolError::TransferFailed {
+            token: "pending_claims".to_string(),
+            reason: format!(
+                "pending claim capacity configuration rejected: occupied={occupied}, requested_limit={limit}, maximum={MAX_PENDING_CLAIMS}; no value moved"
+            ),
+        });
     }
     TEST_PENDING_CLAIM_LIMIT.with(|test_limit| test_limit.set(Some(limit)));
     Ok(())
