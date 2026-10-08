@@ -94,6 +94,14 @@ export const idlFactory = ({ IDL }) => {
     'completed_at_ns' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
   });
+  const LedgerReconciliationEntry = IDL.Record({
+    'healthy' : IDL.Bool,
+    'ledger' : IDL.Principal,
+    'live_e8s' : IDL.Nat64,
+    'recorded_e8s' : IDL.Nat64,
+    'symbol' : IDL.Text,
+    'delta_e8s' : IDL.Int64,
+  });
   const PoolLiquidationRecord = IDL.Record({
     'collateral_price_e8s' : IDL.Opt(IDL.Nat64),
     'stables_consumed' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
@@ -487,6 +495,16 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(ChainSpAbsorbCompletion)],
         ['query'],
       ),
+    'get_ledger_reconciliation' : IDL.Func(
+        [],
+        [
+          IDL.Variant({
+            'Ok' : IDL.Vec(LedgerReconciliationEntry),
+            'Err' : StabilityPoolError,
+          }),
+        ],
+        [],
+      ),
     'get_liquidation_history' : IDL.Func(
         [IDL.Opt(IDL.Nat64)],
         [IDL.Vec(PoolLiquidationRecord)],
@@ -519,11 +537,6 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_pool_status' : IDL.Func([], [StabilityPoolStatus], ['query']),
-    'get_suspended_tokens' : IDL.Func(
-        [],
-        [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat32))],
-        ['query'],
-      ),
     'get_user_position' : IDL.Func(
         [IDL.Opt(IDL.Principal)],
         [IDL.Opt(UserStabilityPosition)],
