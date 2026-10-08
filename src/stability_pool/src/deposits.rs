@@ -24,12 +24,12 @@ thread_local! {
     static LEDGER_FEES: RefCell<HashMap<Principal, u64>> = RefCell::new(HashMap::new());
 }
 
-fn record_deposit_credit_after_async(
+pub(crate) fn record_deposit_credit_after_async(
     caller: Principal,
     token_ledger: Principal,
     amount: u64,
 ) -> Result<(), StabilityPoolError> {
-    crate::ensure_pool_balance_mutation_allowed()?;
+    crate::ensure_pool_token_balance_mutation_allowed(&[token_ledger])?;
     mutate_state(|s| {
         s.add_deposit(caller, token_ledger, amount);
         s.push_event(
@@ -50,7 +50,7 @@ fn record_deposit_as_3usd_credit_after_async(
     three_usd_ledger: Principal,
     lp_amount: u64,
 ) -> Result<(), StabilityPoolError> {
-    crate::ensure_pool_balance_mutation_allowed()?;
+    crate::ensure_pool_token_balance_mutation_allowed(&[token_ledger, three_usd_ledger])?;
     mutate_state(|s| {
         s.add_deposit(caller, three_usd_ledger, lp_amount);
         s.push_event(
@@ -199,7 +199,7 @@ pub(crate) async fn ledger_pool_balance(ledger: Principal) -> Option<u64> {
     }
 }
 
-fn prepare_withdrawal_after_ledger_check(
+pub(crate) fn prepare_withdrawal_after_ledger_check(
     caller: Principal,
     token_ledger: Principal,
     requested_amount: u64,
@@ -261,7 +261,7 @@ fn prepare_withdrawal_after_ledger_check(
 /// Deposit a stablecoin into the pool. User must have pre-approved the pool canister.
 pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
     // SP-102: refuse balance-mutating ops while a liquidation is apportioning.
-    if crate::pool_balance_mutation_blocked() {
+    if crate::pool_token_balance_mutation_blocked(&[token_ledger]) {
         return Err(StabilityPoolError::SystemBusy);
     }
     let caller = ic_cdk::api::caller();
@@ -307,6 +307,7 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
             .map_err(|_| StabilityPoolError::SystemBusy)?;
 
     // ICRC-2 transfer_from: pull tokens from user to pool canister
+    let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new();
     let transfer_args = TransferFromArgs {
         from: Account {
             owner: caller,
@@ -380,7 +381,7 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
     // SP-102: refuse balance-mutating ops while a liquidation is apportioning,
     // so a withdraw cannot land between a liquidation's snapshot and its burn
     // apportionment and escape the depositor's share of the loss.
-    if crate::pool_balance_mutation_blocked() {
+    if crate::pool_token_balance_mutation_blocked(&[token_ledger]) {
         return Err(StabilityPoolError::SystemBusy);
     }
     let caller = ic_cdk::api::caller();
@@ -394,6 +395,10 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
     // overdrawing the pool ledger account.
     let ledger_fee = ledger_transfer_fee(token_ledger).await;
     let pool_ledger_balance = ledger_pool_balance(token_ledger).await;
+
+    // Fee/balance queries above await other canisters. Recheck after them so a
+    // burn intent created during those calls cannot race this withdrawal.
+    crate::ensure_pool_token_balance_mutation_allowed(&[token_ledger])?;
 
     if amount <= ledger_fee {
         return Err(StabilityPoolError::AmountTooLow {
@@ -740,7 +745,7 @@ pub async fn deposit_as_3usd(
     amount: u64,
 ) -> Result<u64, StabilityPoolError> {
     // SP-102: refuse balance-mutating ops while a liquidation is apportioning.
-    if crate::pool_balance_mutation_blocked() {
+    if crate::pool_token_balance_mutation_blocked(&[token_ledger]) {
         return Err(StabilityPoolError::SystemBusy);
     }
     let caller = ic_cdk::api::caller();
@@ -786,6 +791,10 @@ pub async fn deposit_as_3usd(
             })
     })?;
 
+    // A conversion mutates both the input and the credited LP balance. Check
+    // both sides before starting the external pool operation.
+    crate::ensure_pool_token_balance_mutation_allowed(&[token_ledger, three_usd_ledger])?;
+
     log!(
         INFO,
         "deposit_as_3usd: {} depositing {} of {} via 3pool",
@@ -798,6 +807,10 @@ pub async fn deposit_as_3usd(
     let transfer_created_at_time =
         mutate_state(|s| s.reserve_deposit_transfer_timestamp(ic_cdk::api::time()))
             .map_err(|_| StabilityPoolError::SystemBusy)?;
+
+    // Keep a liquidation from snapshotting while the pulled token is being
+    // converted and the resulting LP credit is not yet reflected in state.
+    let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new();
 
     // Step 1: Pull tokens from user
     let transfer_args = TransferFromArgs {
