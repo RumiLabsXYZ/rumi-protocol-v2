@@ -2,7 +2,13 @@
   import { createEventDispatcher, onMount } from 'svelte';
   import { Principal } from '@dfinity/principal';
   import { walletStore } from '../../stores/wallet';
-  import { stabilityPoolService, formatTokenAmount, parseTokenAmount } from '../../services/stabilityPoolService';
+  import {
+    stabilityPoolService,
+    captureStabilityPoolActionContext,
+    parseTokenAmount,
+    readPendingStabilityPoolDeposit,
+    type PendingStabilityPoolDeposit,
+  } from '../../services/stabilityPoolService';
   import { formatStableTokenDisplay, formatStableTokenTx } from '../../utils/format';
   import type { PoolStatus, StablecoinConfig, UserPosition } from '../../services/stabilityPoolService';
   import { CANISTER_IDS } from '../../config';
@@ -12,7 +18,16 @@
   import { spMultiplier } from '$lib/utils/pointsRules';
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
 
-  onMount(() => { seasonStore.ensureLoaded(); });
+  onMount(() => {
+    seasonStore.ensureLoaded();
+    const onStorage = (event: StorageEvent) => {
+      if (!event.key || event.key.startsWith('rumi:stability-pool:pending-deposit:')) {
+        pendingRefresh += 1;
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  });
 
   $: spMult = spMultiplier(selectedToken?.symbol);
 
@@ -35,10 +50,32 @@
   let showDropdown = false;
   let poolTokenBalance: bigint | null = null;
   let poolTokenBalanceKey = '';
+  let pendingRefresh = 0;
+  let pendingDeposit: PendingStabilityPoolDeposit | null = null;
+  let pendingDepositStorageError = '';
 
   $: isConnected = $walletStore.isConnected;
   $: activeStablecoins = poolStatus?.stablecoin_registry?.filter(s => s.is_active) ?? [];
   $: selectedToken = activeStablecoins[selectedTokenIndex] ?? null;
+  $: {
+    pendingRefresh;
+    selectedToken;
+    $walletStore.principal;
+    if (!$walletStore.principal) {
+      pendingDeposit = null;
+      pendingDepositStorageError = '';
+    } else {
+      try {
+        pendingDeposit = readPendingStabilityPoolDeposit($walletStore.principal.toText());
+        pendingDepositStorageError = '';
+      } catch (err) {
+        pendingDeposit = null;
+        pendingDepositStorageError = err instanceof Error
+          ? err.message
+          : 'A Stability Pool recovery record needs review.';
+      }
+    }
+  }
 
   // Map wallet balance keys to ledger IDs
   const LEDGER_TO_WALLET_KEY: Record<string, string> = {
@@ -178,20 +215,43 @@
   }
 
   async function handleSubmit() {
-    if (!selectedToken || !amount || parseFloat(amount) <= 0) {
+    if (loading) return;
+    const token = selectedToken;
+    const action = activeTab;
+    const amountText = amount;
+    if (!pendingDeposit && (!token || !amountText || parseFloat(amountText) <= 0)) {
       error = 'Enter a valid amount';
+      return;
+    }
+    if (pendingDeposit && action !== 'deposit') {
+      error = `Resume pending deposit intent ${pendingDeposit.intentSeq} before starting another action.`;
       return;
     }
 
     try {
       loading = true;
       error = '';
-      const rawAmount = parseTokenAmount(amount, selectedToken.decimals);
+      if (pendingDeposit) {
+        const lockedLedger = Principal.fromText(pendingDeposit.ledger);
+        await stabilityPoolService.deposit(
+          lockedLedger,
+          BigInt(pendingDeposit.amount),
+          captureStabilityPoolActionContext(lockedLedger, 'deposit'),
+        );
+        dispatch('success', { action: 'deposit' });
+        amount = '';
+        return;
+      }
+      if (!token) {
+        error = 'Select a token';
+        return;
+      }
+      const rawAmount = parseTokenAmount(amountText, token.decimals);
 
-      if (activeTab === 'deposit') {
-        const oneUnit = BigInt(Math.pow(10, selectedToken.decimals));
+      if (action === 'deposit') {
+        const oneUnit = BigInt(Math.pow(10, token.decimals));
         if (rawAmount < oneUnit) {
-          error = `Minimum deposit is 1 ${selectedToken.symbol}`;
+          error = `Minimum deposit is 1 ${token.symbol}`;
           return;
         }
         // User needs amount + 2 fees (approve + transfer_from). Read fees
@@ -199,15 +259,16 @@
         // `await fetchLedgerFee` here would burn the browser user-gesture
         // window and block the Oisy signer popup with a "Signer window should
         // not be opened outside of click handler" error.
-        const totalFees = getCachedLedgerFee(ledgerRefFor(selectedToken)) * 2n;
-        if (rawAmount + totalFees > walletBalance) {
+        const totalFees = getCachedLedgerFee(ledgerRefFor(token)) * 2n;
+        if (!pendingDeposit && rawAmount + totalFees > walletBalance) {
           error = 'Insufficient balance (amount + fees)';
           return;
         }
-        await stabilityPoolService.deposit(selectedToken.ledger_id, rawAmount);
+        const context = captureStabilityPoolActionContext(token.ledger_id, action);
+        await stabilityPoolService.deposit(token.ledger_id, rawAmount, context);
         dispatch('success', { action: 'deposit' });
       } else {
-        const ledgerFee = getCachedLedgerFee(ledgerRefFor(selectedToken));
+        const ledgerFee = getCachedLedgerFee(ledgerRefFor(token));
         const grossWithdrawal = rawAmount + ledgerFee;
         if (grossWithdrawal > currentWithdrawGrossAvailable()) {
           error = poolTokenBalance !== null && poolTokenBalance < depositedBalance
@@ -215,15 +276,17 @@
             : 'Exceeds deposited amount (amount + fee)';
           return;
         }
-        await stabilityPoolService.withdraw(selectedToken.ledger_id, grossWithdrawal);
+        const context = captureStabilityPoolActionContext(token.ledger_id, action);
+        await stabilityPoolService.withdraw(token.ledger_id, grossWithdrawal, context);
         dispatch('success', { action: 'withdraw' });
-        void refreshPoolTokenBalance(selectedToken);
+        void refreshPoolTokenBalance(token);
       }
       amount = '';
     } catch (err: any) {
-      error = err.message || `Failed to ${activeTab}`;
+      error = err.message || `Failed to ${action}`;
     } finally {
       loading = false;
+      pendingRefresh += 1;
     }
   }
 </script>
@@ -283,7 +346,7 @@
         min="0"
         placeholder="0.00"
         bind:value={amount}
-        disabled={loading}
+        disabled={loading || (activeTab === 'deposit' && !!pendingDeposit)}
         class="amount-input"
         class:has-value={amount && parseFloat(amount) > 0}
       />
@@ -332,16 +395,29 @@
     <button
       class="submit-btn" class:withdraw={activeTab === 'withdraw'}
       on:click={handleSubmit}
-      disabled={loading || !amount || parseFloat(amount) <= 0}
+      disabled={loading || (activeTab === 'deposit' && !!pendingDepositStorageError) || (!!pendingDeposit && activeTab !== 'deposit') ||
+        (!pendingDeposit && (!amount || parseFloat(amount) <= 0))}
     >
       {#if loading}
         <span class="spinner"></span>
         {activeTab === 'deposit' ? 'Depositing…' : 'Withdrawing…'}
       {:else}
-        {activeTab === 'deposit' ? 'Deposit' : 'Withdraw'}
-        {selectedToken?.symbol ?? ''}
+        {pendingDeposit
+          ? (activeTab === 'deposit' ? `Resume intent ${pendingDeposit.intentSeq}` : 'Resolve deposit intent first')
+          : `${activeTab === 'deposit' ? 'Deposit' : 'Withdraw'} ${selectedToken?.symbol ?? ''}`}
       {/if}
     </button>
+
+    {#if pendingDeposit || pendingDepositStorageError}
+      <div class="recovery-note" role="status">
+        {#if pendingDeposit}
+          Deposit intent {pendingDeposit.intentSeq} is retained for owner {pendingDeposit.owner}, ledger {pendingDeposit.ledger}, amount {pendingDeposit.amount} raw units.
+          The next attempt reuses this exact canister intent. The authenticated Stability Pool result controls when the lock clears; balances do not.
+        {:else}
+          {pendingDepositStorageError} New deposits stay disabled until the recovery state is readable and reconciled.
+        {/if}
+      </div>
+    {/if}
 
     <!-- Docs link -->
     <a href="/docs/stability-pool" class="docs-link">
@@ -695,5 +771,17 @@
     border-radius: 0.375rem;
     color: var(--rumi-danger);
     font-size: 0.8125rem;
+  }
+  .recovery-note {
+    display: grid;
+    gap: 0.625rem;
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    border-radius: 0.375rem;
+    color: var(--rumi-text-secondary);
+    font-size: 0.8125rem;
+    line-height: 1.45;
   }
 </style>

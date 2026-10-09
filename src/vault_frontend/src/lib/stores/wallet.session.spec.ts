@@ -47,6 +47,9 @@ const mocks = vi.hoisted(() => {
     authInitialize: vi.fn(),
     authConnect: vi.fn(),
     authDisconnect: vi.fn(),
+    beginWalletSessionTransition: vi.fn(),
+    pnpConnect: vi.fn(),
+    pnpDisconnect: vi.fn(),
     setWalletState: vi.fn(),
     fetchBalances: vi.fn(),
     fetchProtocolStatus: vi.fn(),
@@ -66,13 +69,13 @@ vi.mock('../services/auth', () => ({
   },
   WALLET_TYPES: { PLUG: 'plug', INTERNET_IDENTITY: 'internet-identity', OISY: 'oisy' },
   currentWalletType: writable(null),
-  beginWalletSessionTransition: vi.fn(),
+  beginWalletSessionTransition: mocks.beginWalletSessionTransition,
   selectedWalletId: writable(null),
   connectionError: writable(null),
 }));
 
 vi.mock('../services/pnp', () => ({
-  pnp: {},
+  pnp: { connect: mocks.pnpConnect, disconnect: mocks.pnpDisconnect },
   canisterIDLs: {},
 }));
 
@@ -230,5 +233,59 @@ describe('walletStore.connect() — fresh login visible connection state (wallet
 
     expect(mocks.setWalletState).toHaveBeenCalledWith(true, expect.anything());
     expect(mocks.setWalletState).not.toHaveBeenCalledWith(false, null);
+  });
+});
+
+describe('walletStore.refreshWallet() — session identity transition', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((callback: () => void) => {
+      queueMicrotask(callback);
+      return 0;
+    }) as typeof setTimeout);
+    mocks.getTokenBalance.mockResolvedValue(0n);
+    mocks.getThreeUsdPrice.mockResolvedValue(1);
+    mocks.fetchSupportedCollateral.mockResolvedValue([]);
+    mocks.fetchBalances.mockResolvedValue({ icpBalance: 0n, icusdBalance: 0n });
+    mocks.fetchProtocolStatus.mockResolvedValue({ lastIcpRate: 1 });
+    mocks.authConnect.mockResolvedValue({ owner: TEST_PRINCIPAL, balance: 0n });
+    mocks.authDisconnect.mockResolvedValue(undefined);
+    mocks.clearVaultCache.mockResolvedValue(undefined);
+    mocks.pnpDisconnect.mockResolvedValue(undefined);
+  });
+
+  afterEach(async () => {
+    await walletStore.disconnect();
+    vi.restoreAllMocks();
+  });
+
+  it('invalidates in-flight action contexts before reconnect and publishes a changed provider owner', async () => {
+    const ownerB = Principal.fromUint8Array(new Uint8Array([9, 8, 7, 6, 5]));
+    await walletStore.connect('plug');
+    localStorage.setItem('rumi_last_wallet', 'plug');
+    mocks.beginWalletSessionTransition.mockClear();
+    mocks.pnpConnect.mockResolvedValue({ owner: ownerB, balance: 0n });
+
+    await walletStore.refreshWallet();
+
+    expect(mocks.beginWalletSessionTransition).toHaveBeenCalledOnce();
+    expect(mocks.beginWalletSessionTransition.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.pnpDisconnect.mock.invocationCallOrder[0]);
+    expect(get(walletStore).isConnected).toBe(true);
+    expect(get(walletStore).principal?.toText()).toBe(ownerB.toText());
+    expect(mocks.setWalletState).toHaveBeenLastCalledWith(true, ownerB);
+  });
+
+  it('fails closed and clears the published identity if reconnect fails', async () => {
+    await walletStore.connect('plug');
+    localStorage.setItem('rumi_last_wallet', 'plug');
+    mocks.beginWalletSessionTransition.mockClear();
+    mocks.pnpConnect.mockRejectedValue(new Error('provider reconnect failed'));
+
+    await expect(walletStore.refreshWallet()).rejects.toThrow(/provider reconnect failed/i);
+
+    expect(mocks.beginWalletSessionTransition).toHaveBeenCalledOnce();
+    expect(get(walletStore)).toMatchObject({ isConnected: false, principal: null, loading: false });
+    expect(mocks.setWalletState).toHaveBeenLastCalledWith(false, null);
   });
 });

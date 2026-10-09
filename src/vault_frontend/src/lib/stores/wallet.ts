@@ -335,18 +335,23 @@ function createWalletStore() {
 
   async function refreshWallet() {
     console.log('Attempting to refresh wallet connection...');
-    
-    await clearPendingOperations();
-    
-    const currentState = get(walletStore);
     const currentWalletId = localStorage.getItem('rumi_last_wallet');
     
     if (!currentWalletId || !pnp) {
       console.warn('No wallet to refresh');
       return;
     }
-  
+
+    // A refresh disconnects and replaces the provider session. Invalidate any
+    // financial action synchronously before the first await, and make new
+    // actions fail closed until the refreshed owner is published.
+    beginWalletSessionTransition();
+    authenticatedActor = null;
+    update(s => ({ ...s, loading: true, error: null }));
+
     try {
+      await clearPendingOperations();
+
       await pnp.disconnect();
       console.log('Disconnected from wallet');
     } catch (e) {
@@ -363,18 +368,38 @@ function createWalletStore() {
         throw new Error('Wallet reconnect failed');
       }
       console.log('Successfully reconnected to wallet');
-      
-      if (!currentState.principal && connected.owner) {
-        update(s => ({...s, principal: connected.owner, loading: false}));
-      } else {
-        update(s => ({...s, loading: false}));
-      }
-      
+
+      const refreshedPrincipal = getOwner(connected.owner);
+      appDataStore.setWalletState(true, refreshedPrincipal);
+      update(s => ({
+        ...s,
+        isConnected: true,
+        principal: refreshedPrincipal,
+        balance: null,
+        tokenBalances: {},
+        loading: false,
+        error: null,
+        icon: currentWalletId === WALLET_TYPES.INTERNET_IDENTITY
+          ? '/wallets/01InfinityMarkHEX.svg'
+          : walletsList.find(w => w.id === currentWalletId)?.icon ?? ''
+      }));
+
       await refreshBalance();
       
       return true;
     } catch (e) {
-      update(s => ({...s, loading: false, error: e instanceof Error ? e.message : 'Unknown error'}));
+      authenticatedActor = null;
+      stopBalanceRefresh();
+      appDataStore.setWalletState(false, null);
+      set({
+        isConnected: false,
+        principal: null,
+        balance: null,
+        tokenBalances: {},
+        error: e instanceof Error ? e.message : 'Unknown error',
+        loading: false,
+        icon: String(),
+      });
       console.error('Wallet refresh failed:', e);
       throw e;
     }

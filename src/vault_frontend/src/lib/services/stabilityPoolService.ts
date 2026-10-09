@@ -2,6 +2,7 @@ import { Principal } from '@dfinity/principal';
 import { Actor, HttpAgent, AnonymousIdentity } from '@dfinity/agent';
 import { pnp, canisterIDLs } from './pnp';
 import { walletStore } from '../stores/wallet';
+import { walletSessionGeneration } from './auth';
 import { get } from 'svelte/store';
 import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
@@ -187,6 +188,279 @@ export function decimalsForLedger(ledger: Principal, registries?: { stablecoins?
 
 const STABILITY_POOL_CANISTER_ID = CANISTER_IDS.STABILITY_POOL;
 
+export type StabilityPoolAction = 'deposit' | 'withdraw';
+
+export interface StabilityPoolActionContext {
+  readonly principalText: string;
+  readonly walletIcon: string;
+  readonly sessionGeneration: number;
+  readonly ledgerText: string;
+  readonly action: StabilityPoolAction;
+  readonly oisy: boolean;
+}
+
+export interface PendingStabilityPoolDeposit {
+  owner: string;
+  ledger: string;
+  action: 'deposit';
+  amount: string;
+  intentSeq: string;
+  walletIcon: string;
+  oisy: boolean;
+  createdAt: number;
+  status: 'pending';
+}
+
+type DepositIntentResult =
+  | { Completed: { intent_seq: bigint; token_ledger: Principal; amount: bigint; block_index: bigint } }
+  | { NoEffect: { intent_seq: bigint; token_ledger: Principal; amount: bigint; reason: string } }
+  | { Pending: { intent_seq: bigint; token_ledger: Principal; amount: bigint; phase: unknown; reason: [] | [string] } };
+
+interface DepositIntentStatus {
+  high_watermark: bigint;
+  next_seq: [] | [bigint];
+  intent: [] | [DepositIntentResult];
+  active_intent: [] | [DepositIntentResult];
+}
+
+const candidOption = <T>(value: [] | [T] | undefined): T | undefined => value?.[0];
+
+function intentPayload(result: DepositIntentResult): { seq: bigint; ledger: string; amount: bigint; state: 'completed' | 'no-effect' | 'pending'; reason?: string } {
+  if ('Completed' in result) {
+    const value = result.Completed;
+    return { seq: value.intent_seq, ledger: value.token_ledger.toText(), amount: value.amount, state: 'completed' };
+  }
+  if ('NoEffect' in result) {
+    const value = result.NoEffect;
+    return { seq: value.intent_seq, ledger: value.token_ledger.toText(), amount: value.amount, state: 'no-effect', reason: value.reason };
+  }
+  const value = result.Pending;
+  return { seq: value.intent_seq, ledger: value.token_ledger.toText(), amount: value.amount, state: 'pending', reason: candidOption(value.reason) };
+}
+
+function assertIntentPayload(record: PendingStabilityPoolDeposit, result: DepositIntentResult): void {
+  const observed = intentPayload(result);
+  if (observed.seq !== BigInt(record.intentSeq) || observed.ledger !== record.ledger || observed.amount !== BigInt(record.amount)) {
+    throw new PendingStabilityPoolDepositError('The canister returned a different deposit intent. Keep the lock and contact support.');
+  }
+}
+
+function bindToAuthoritativePendingIntent(
+  record: PendingStabilityPoolDeposit,
+  active: DepositIntentResult,
+  context: StabilityPoolActionContext,
+): void {
+  try {
+    assertIntentPayload(record, active);
+  } catch {
+    const authoritative = pendingRecord(record.owner, active, context);
+    persistAuthoritativePendingIntent(authoritative);
+    throw new PendingStabilityPoolDepositError(
+      `The canister reports active intent ${authoritative.intentSeq} for ledger ${authoritative.ledger} and ${authoritative.amount} raw units. The local retry has been bound to that exact intent.`,
+    );
+  }
+}
+
+function pendingRecord(owner: string, result: DepositIntentResult, context: StabilityPoolActionContext): PendingStabilityPoolDeposit {
+  const payload = intentPayload(result);
+  if (payload.state !== 'pending') throw new Error('Expected a pending Stability Pool deposit intent.');
+  return {
+    owner,
+    ledger: payload.ledger,
+    action: 'deposit',
+    amount: payload.amount.toString(),
+    intentSeq: payload.seq.toString(),
+    walletIcon: context.walletIcon,
+    oisy: context.oisy,
+    createdAt: Date.now(),
+    status: 'pending',
+  };
+}
+
+interface StabilityPoolLockManager {
+  request<T>(
+    name: string,
+    options: { mode: 'exclusive'; ifAvailable: true },
+    callback: (lock: unknown | null) => Promise<T>,
+  ): Promise<T>;
+}
+
+export class PendingStabilityPoolDepositError extends Error {
+  constructor(message = 'A prior Stability Pool deposit intent is unresolved. Resume its exact sequence, ledger, and amount before starting another deposit.') {
+    super(message);
+    this.name = 'PendingStabilityPoolDepositError';
+  }
+}
+
+const pendingDepositKey = (owner: string) => `rumi:stability-pool:pending-deposit:${owner}`;
+
+function localStorageOrThrow(): Storage {
+  if (typeof localStorage === 'undefined') {
+    throw new Error('Persistent browser storage is unavailable. The deposit was not submitted.');
+  }
+  return localStorage;
+}
+
+export function readPendingStabilityPoolDeposit(owner: string): PendingStabilityPoolDeposit | null {
+  const serialized = localStorageOrThrow().getItem(pendingDepositKey(owner));
+  if (serialized === null) return null;
+  try {
+    const record = JSON.parse(serialized) as Partial<PendingStabilityPoolDeposit>;
+    const validLedger = typeof record.ledger === 'string' && Principal.fromText(record.ledger).toText() === record.ledger;
+    if (record.owner === owner && validLedger && record.action === 'deposit' &&
+        typeof record.amount === 'string' && /^\d+$/.test(record.amount) &&
+        typeof record.intentSeq === 'string' && /^\d+$/.test(record.intentSeq) &&
+        typeof record.walletIcon === 'string' && typeof record.oisy === 'boolean' &&
+        typeof record.createdAt === 'number' && record.status === 'pending') {
+      return record as PendingStabilityPoolDeposit;
+    }
+  } catch {
+    // A damaged marker remains a lock; unreadable state must never permit a retry.
+  }
+  throw new PendingStabilityPoolDepositError(
+    'A Stability Pool intent record is unreadable. Keep deposits locked and contact support for recovery.',
+  );
+}
+
+function savePendingStabilityPoolDeposit(record: PendingStabilityPoolDeposit): void {
+  const storage = localStorageOrThrow();
+  if (readPendingStabilityPoolDeposit(record.owner)) {
+    throw new PendingStabilityPoolDepositError();
+  }
+  const key = pendingDepositKey(record.owner);
+  const serialized = JSON.stringify(record);
+  storage.setItem(key, serialized);
+  if (storage.getItem(key) !== serialized) {
+    throw new Error('Could not persist the Stability Pool recovery lock. The deposit was not submitted.');
+  }
+}
+
+function persistAuthoritativePendingIntent(record: PendingStabilityPoolDeposit): void {
+  const storage = localStorageOrThrow();
+  const key = pendingDepositKey(record.owner);
+  const serialized = JSON.stringify(record);
+  storage.setItem(key, serialized);
+  if (storage.getItem(key) !== serialized) {
+    throw new PendingStabilityPoolDepositError('Could not persist the canister-reported active intent. Keep deposits locked and contact support.');
+  }
+}
+
+function refreshPendingWalletContext(record: PendingStabilityPoolDeposit, context: StabilityPoolActionContext): PendingStabilityPoolDeposit {
+  const updated = { ...record, walletIcon: context.walletIcon, oisy: context.oisy };
+  if (updated.walletIcon !== record.walletIcon || updated.oisy !== record.oisy) {
+    persistAuthoritativePendingIntent(updated);
+  }
+  return updated;
+}
+
+function clearPendingStabilityPoolDeposit(owner: string, intentSeq: string): void {
+  const storage = localStorageOrThrow();
+  const current = readPendingStabilityPoolDeposit(owner);
+  if (!current || current.intentSeq !== intentSeq) return;
+  const key = pendingDepositKey(owner);
+  storage.removeItem(key);
+  if (storage.getItem(key) !== null) throw new Error('Could not clear the Stability Pool recovery lock.');
+}
+
+function isKnownSignerAbort(error: unknown): boolean {
+  return !!error && typeof error === 'object' && (error as { code?: number }).code === 3001;
+}
+
+const inFlightActions = new Set<string>();
+
+export function captureStabilityPoolActionContext(
+  tokenLedger: Principal,
+  action: StabilityPoolAction,
+): StabilityPoolActionContext {
+  const wallet = get(walletStore);
+  if (wallet.loading) throw new Error('Wallet session is changing. Wait for the wallet refresh to finish.');
+  const principalText = wallet.isConnected ? wallet.principal?.toText() : undefined;
+  if (!principalText) throw new Error('Wallet not connected');
+  return Object.freeze({
+    principalText,
+    walletIcon: wallet.icon,
+    sessionGeneration: get(walletSessionGeneration),
+    ledgerText: tokenLedger.toText(),
+    action,
+    oisy: isOisyWallet(),
+  });
+}
+
+/** Pure validation for the click-time identity and operation parameters. */
+export function assertStabilityPoolActionContext(
+  context: StabilityPoolActionContext,
+  livePrincipalText: string | null,
+  liveWalletIcon: string,
+  liveSessionGeneration: number,
+  liveOisy: boolean,
+  tokenLedger: Principal,
+  action: StabilityPoolAction,
+): void {
+  if (context.principalText !== livePrincipalText || context.walletIcon !== liveWalletIcon ||
+      context.sessionGeneration !== liveSessionGeneration ||
+      context.oisy !== liveOisy ||
+      context.ledgerText !== tokenLedger.toText() || context.action !== action) {
+    throw new Error('Wallet session or Stability Pool action changed. Nothing further was submitted.');
+  }
+}
+
+function assertCurrentAction(
+  context: StabilityPoolActionContext,
+  tokenLedger: Principal,
+  action: StabilityPoolAction,
+): void {
+  const wallet = get(walletStore);
+  if (wallet.loading) {
+    throw new Error('Wallet session is changing. Nothing further was submitted.');
+  }
+  assertStabilityPoolActionContext(
+    context,
+    wallet.isConnected ? wallet.principal?.toText() ?? null : null,
+    wallet.icon,
+    get(walletSessionGeneration),
+    isOisyWallet(),
+    tokenLedger,
+    action,
+  );
+}
+
+function actionLockKey(context: StabilityPoolActionContext): string {
+  return `${context.principalText}:${context.ledgerText}:${context.action}`;
+}
+
+async function withActionLock<T>(context: StabilityPoolActionContext, run: () => Promise<T>): Promise<T> {
+  const key = actionLockKey(context);
+  if (inFlightActions.has(key)) {
+    throw new Error('A Stability Pool action for this token is already in progress.');
+  }
+  inFlightActions.add(key);
+  try {
+    return await run();
+  } finally {
+    inFlightActions.delete(key);
+  }
+}
+
+async function withCrossTabDepositLock<T>(context: StabilityPoolActionContext, run: () => Promise<T>): Promise<T> {
+  const locks = typeof navigator === 'undefined'
+    ? undefined
+    : navigator.locks as unknown as StabilityPoolLockManager;
+  if (!locks) {
+    throw new Error('This browser cannot safely coordinate Stability Pool deposits across tabs. No deposit was submitted.');
+  }
+  localStorageOrThrow();
+  return locks.request(
+    `rumi:stability-pool:deposit:${context.principalText}`,
+    { mode: 'exclusive', ifAvailable: true },
+    async lock => {
+      if (!lock) {
+        throw new PendingStabilityPoolDepositError('A Stability Pool deposit is active in another tab. Wait for its result before retrying.');
+      }
+      return run();
+    },
+  );
+}
+
 class StabilityPoolService {
   private _anonAgent: HttpAgent | null = null;
 
@@ -267,96 +541,238 @@ class StabilityPoolService {
 
   // ── Mutations ──
 
-  async deposit(tokenLedger: Principal, amount: bigint): Promise<void> {
-    const wallet = get(walletStore);
-    if (!wallet.isConnected) throw new Error('Wallet not connected');
-
-    const oisyDetected = isOisyWallet();
-
-    if (oisyDetected && wallet.principal) {
-      // ─── Oisy sequential path (v5: no batch concept) ───
-      console.log(`[Oisy] Sequential approve + SP deposit via @icp-sdk/signer v5`);
-      const signerAgent = await getOisySignerAgent(wallet.principal);
-
-      const ledgerActor = createOisyActor(
-        tokenLedger.toText(), CONFIG.icusd_ledgerIDL, signerAgent
-      );
-      const poolActor = createOisyActor(
-        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
-      );
-
-      const requestedAllowance = amount * 105n / 100n;
-
-      // 1) Approve (first Oisy consent screen, Tier 1 native).
-      const approveResult = await ledgerActor.icrc2_approve({
-        amount: requestedAllowance,
-        spender: { owner: Principal.fromText(STABILITY_POOL_CANISTER_ID), subaccount: [] },
-        expires_at: [], expected_allowance: [], memo: [], fee: [],
-        from_subaccount: [], created_at_time: []
-      });
-      if (approveResult && 'Err' in approveResult) {
-        throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
+  async deposit(
+    tokenLedger: Principal,
+    amount: bigint,
+    context = captureStabilityPoolActionContext(tokenLedger, 'deposit'),
+  ): Promise<void> {
+    assertCurrentAction(context, tokenLedger, 'deposit');
+    return withActionLock(context, () => withCrossTabDepositLock(context, async () => {
+      assertCurrentAction(context, tokenLedger, 'deposit');
+      const marker = readPendingStabilityPoolDeposit(context.principalText);
+      if (marker && (marker.ledger !== context.ledgerText || marker.amount !== amount.toString())) {
+        throw new PendingStabilityPoolDepositError(
+          `Deposit intent ${marker.intentSeq} is locked for ledger ${marker.ledger} and ${marker.amount} raw units. Resume that exact intent before starting another deposit.`,
+        );
       }
 
-      // 2) Deposit (second Oisy consent screen, Tier 3 blind-request).
-      const result = await poolActor.deposit(tokenLedger, amount);
-      if ('Err' in result) {
-        throw new Error(this.formatError(result.Err));
+      let ledgerActor: any;
+      let poolActor: any;
+      if (context.oisy) {
+        const signerAgent = await getOisySignerAgent(Principal.fromText(context.principalText));
+        assertCurrentAction(context, tokenLedger, 'deposit');
+        ledgerActor = createOisyActor(tokenLedger.toText(), CONFIG.icusd_ledgerIDL, signerAgent);
+        poolActor = createOisyActor(STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent);
+      } else {
+        ledgerActor = await walletStore.getActor(tokenLedger.toText(), CONFIG.icusd_ledgerIDL) as any;
+        assertCurrentAction(context, tokenLedger, 'deposit');
+        poolActor = await walletStore.getActor(STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool) as any;
+        assertCurrentAction(context, tokenLedger, 'deposit');
       }
-    } else {
-      // ─── Non-Oisy path (Plug, II, etc.) ───
-      // Approve first, then deposit.
-      const ledgerActor = await walletStore.getActor(
-        tokenLedger.toText(), CONFIG.icusd_ledgerIDL
-      ) as any;
 
+      // An update status read lets a reload or another device recover the exact
+      // caller-scoped sequence. Passing zero discovers any caller-wide active intent.
+      let status = await poolActor.get_deposit_intent(BigInt(marker?.intentSeq ?? '0')) as DepositIntentStatus;
+      assertCurrentAction(context, tokenLedger, 'deposit');
+      let record = marker;
+      const active = candidOption(status.active_intent);
+      if (record && active) bindToAuthoritativePendingIntent(record, active, context);
+      const known = candidOption(status.intent);
+      if (record && known) {
+        assertIntentPayload(record, known);
+        const outcome = intentPayload(known);
+        if (outcome.state === 'completed') {
+          clearPendingStabilityPoolDeposit(record.owner, record.intentSeq);
+          return;
+        }
+        if (outcome.state === 'no-effect') {
+          clearPendingStabilityPoolDeposit(record.owner, record.intentSeq);
+          throw new Error(outcome.reason ?? 'The Stability Pool confirmed that this deposit had no effect.');
+        }
+      }
+
+      if (!record && active) {
+        record = pendingRecord(context.principalText, active, context);
+        savePendingStabilityPoolDeposit(record);
+        if (record.ledger !== context.ledgerText || record.amount !== amount.toString()) {
+          throw new PendingStabilityPoolDepositError(
+            `Another device has pending deposit intent ${record.intentSeq} for ledger ${record.ledger} and ${record.amount} raw units. Resume that exact intent first.`,
+          );
+        }
+      }
+
+      if (record && !active && !known) {
+        const nextSeq = candidOption(status.next_seq);
+        if (nextSeq !== BigInt(record.intentSeq)) {
+          throw new PendingStabilityPoolDepositError(
+            'The canister no longer has this exact intent in retained status. Keep the local lock and contact support; do not allocate a new sequence.',
+          );
+        }
+      }
+
+      if (!record) {
+        const nextSeq = candidOption(status.next_seq);
+        if (active || nextSeq === undefined) {
+          throw new PendingStabilityPoolDepositError('The Stability Pool has an unresolved deposit. Refresh status and resume that exact intent first.');
+        }
+        record = {
+          owner: context.principalText,
+          ledger: context.ledgerText,
+          action: 'deposit',
+          amount: amount.toString(),
+          intentSeq: nextSeq.toString(),
+          walletIcon: context.walletIcon,
+          oisy: context.oisy,
+          createdAt: Date.now(),
+          status: 'pending',
+        };
+        savePendingStabilityPoolDeposit(record);
+      }
+      record = refreshPendingWalletContext(record, context);
+
+      assertCurrentAction(context, tokenLedger, 'deposit');
       const approveResult = await ledgerActor.icrc2_approve({
         amount: amount * 105n / 100n,
         spender: { owner: Principal.fromText(STABILITY_POOL_CANISTER_ID), subaccount: [] },
         expires_at: [], expected_allowance: [], memo: [], fee: [],
         from_subaccount: [], created_at_time: []
       });
-
+      assertCurrentAction(context, tokenLedger, 'deposit');
       if (approveResult && 'Err' in approveResult) {
+        // Keep the exact intent marker. The next click reuses the same sequence
+        // and payload after approval succeeds; approval itself cannot deposit.
         throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
       }
 
-      // Small delay for ledger sync
-      await new Promise(r => setTimeout(r, 2000));
-
-      const poolActor = await walletStore.getActor(
-        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool
-      ) as any;
-      const result = await poolActor.deposit(tokenLedger, amount) as { Ok: null } | { Err: any };
-      if ('Err' in result) {
-        throw new Error(this.formatError(result.Err));
+      if (!context.oisy) {
+        await new Promise(r => setTimeout(r, 2000));
+        assertCurrentAction(context, tokenLedger, 'deposit');
       }
-    }
+      assertCurrentAction(context, tokenLedger, 'deposit');
+
+      let result: { Ok?: DepositIntentResult; Err?: any };
+      try {
+        result = await poolActor.deposit_with_intent(BigInt(record.intentSeq), tokenLedger, amount) as { Ok: DepositIntentResult } | { Err: any };
+        assertCurrentAction(context, tokenLedger, 'deposit');
+      } catch (error) {
+        if (context.oisy && isKnownSignerAbort(error)) {
+          throw new Error('The wallet canceled before the Stability Pool intent was submitted. The same intent remains available to resume.');
+        }
+        // Status can prove a terminal result after a lost reply. A missing or
+        // pending result never unlocks: replay uses this exact seq and payload.
+        try {
+          assertCurrentAction(context, tokenLedger, 'deposit');
+          status = await poolActor.get_deposit_intent(BigInt(record.intentSeq)) as DepositIntentStatus;
+          assertCurrentAction(context, tokenLedger, 'deposit');
+          const recovered = candidOption(status.intent);
+          const activeNow = candidOption(status.active_intent);
+          if (activeNow) bindToAuthoritativePendingIntent(record, activeNow, context);
+          if (recovered) {
+            assertIntentPayload(record, recovered);
+            const outcome = intentPayload(recovered);
+            if (outcome.state === 'completed') {
+              clearPendingStabilityPoolDeposit(record.owner, record.intentSeq);
+              return;
+            }
+            if (outcome.state === 'no-effect') {
+              clearPendingStabilityPoolDeposit(record.owner, record.intentSeq);
+              throw new Error(outcome.reason ?? 'The Stability Pool confirmed that this deposit had no effect.');
+            }
+          }
+        } catch (statusError) {
+          if (statusError instanceof Error && !/reject|fetch|network|timeout|connection/i.test(statusError.message)) throw statusError;
+        }
+        throw new PendingStabilityPoolDepositError(
+          `Deposit intent ${record.intentSeq} has no terminal update result yet. Retry only this exact ledger and amount to resume it.`,
+        );
+      }
+
+      if (result && 'Ok' in result) {
+        assertIntentPayload(record, result.Ok);
+        const outcome = intentPayload(result.Ok);
+        if (outcome.state === 'completed') {
+          clearPendingStabilityPoolDeposit(record.owner, record.intentSeq);
+          return;
+        }
+        if (outcome.state === 'no-effect') {
+          clearPendingStabilityPoolDeposit(record.owner, record.intentSeq);
+          throw new Error(outcome.reason ?? 'The Stability Pool confirmed that this deposit had no effect.');
+        }
+        throw new PendingStabilityPoolDepositError(
+          `Deposit intent ${record.intentSeq} is still pending (${outcome.reason ?? 'reconciliation continues'}). Resume the same intent; do not start a new deposit.`,
+        );
+      }
+
+      if (result && 'Err' in result) {
+        // The update has returned a definite Candid error. Ask the same
+        // authenticated canister for current intent state before unlocking.
+        try {
+          status = await poolActor.get_deposit_intent(BigInt(record.intentSeq)) as DepositIntentStatus;
+          assertCurrentAction(context, tokenLedger, 'deposit');
+          const recovered = candidOption(status.intent);
+          const activeNow = candidOption(status.active_intent);
+          if (activeNow) bindToAuthoritativePendingIntent(record, activeNow, context);
+          if (recovered) {
+            assertIntentPayload(record, recovered);
+            const outcome = intentPayload(recovered);
+            if (outcome.state === 'completed') {
+              clearPendingStabilityPoolDeposit(record.owner, record.intentSeq);
+              return;
+            }
+            if (outcome.state === 'no-effect') {
+              clearPendingStabilityPoolDeposit(record.owner, record.intentSeq);
+              throw new Error(outcome.reason ?? 'The Stability Pool confirmed that this deposit had no effect.');
+            }
+          } else if (!activeNow && candidOption(status.next_seq) === BigInt(record.intentSeq)) {
+            clearPendingStabilityPoolDeposit(record.owner, record.intentSeq);
+            throw new Error(this.formatError(result.Err));
+          }
+        } catch (statusError) {
+          if (statusError instanceof Error && !/reject|fetch|network|timeout|connection/i.test(statusError.message)) throw statusError;
+        }
+        throw new PendingStabilityPoolDepositError(
+          `The canister returned an error for intent ${record.intentSeq}, but its exact state is unresolved. Keep the lock and resume that same intent.`,
+        );
+      }
+
+      throw new PendingStabilityPoolDepositError('The Stability Pool returned an unrecognized intent result. Keep the lock and resume only this exact intent.');
+    }));
   }
 
-  async withdraw(tokenLedger: Principal, amount: bigint): Promise<void> {
-    const wallet = get(walletStore);
-    if (!wallet.isConnected) throw new Error('Wallet not connected');
+  async withdraw(
+    tokenLedger: Principal,
+    amount: bigint,
+    context = captureStabilityPoolActionContext(tokenLedger, 'withdraw'),
+  ): Promise<void> {
+    assertCurrentAction(context, tokenLedger, 'withdraw');
+    return withActionLock(context, async () => {
+      assertCurrentAction(context, tokenLedger, 'withdraw');
 
-    if (isOisyWallet() && wallet.principal) {
-      console.log(`[Oisy] Sequential SP withdraw via @icp-sdk/signer v5`);
-      const signerAgent = await getOisySignerAgent(wallet.principal);
-      const poolActor = createOisyActor(
-        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
-      );
-      const result = await poolActor.withdraw(tokenLedger, amount);
-      if ('Err' in result) {
-        throw new Error(this.formatError(result.Err));
+      if (context.oisy) {
+        console.log('[Oisy] Sequential SP withdraw via @icp-sdk/signer v5');
+        const signerAgent = await getOisySignerAgent(Principal.fromText(context.principalText));
+        assertCurrentAction(context, tokenLedger, 'withdraw');
+        const poolActor = createOisyActor(
+          STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
+        );
+        assertCurrentAction(context, tokenLedger, 'withdraw');
+        const result = await poolActor.withdraw(tokenLedger, amount);
+        assertCurrentAction(context, tokenLedger, 'withdraw');
+        if ('Err' in result) {
+          throw new Error(this.formatError(result.Err));
+        }
+      } else {
+        const poolActor = await walletStore.getActor(
+          STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool
+        ) as any;
+        assertCurrentAction(context, tokenLedger, 'withdraw');
+        const result = await poolActor.withdraw(tokenLedger, amount) as { Ok: null } | { Err: any };
+        assertCurrentAction(context, tokenLedger, 'withdraw');
+        if ('Err' in result) {
+          throw new Error(this.formatError(result.Err));
+        }
       }
-    } else {
-      const poolActor = await walletStore.getActor(
-        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool
-      ) as any;
-      const result = await poolActor.withdraw(tokenLedger, amount) as { Ok: null } | { Err: any };
-      if ('Err' in result) {
-        throw new Error(this.formatError(result.Err));
-      }
-    }
+    });
   }
 
   async claimCollateral(collateralLedger: Principal): Promise<bigint> {
@@ -550,6 +966,9 @@ class StabilityPoolService {
   // ── Error formatting ──
 
   private formatError(err: any): string {
+    if ('DepositIntentCapacityReached' in err) {
+      return 'Stability Pool deposit capacity is full (100,000 caller limit). No deposit was submitted; deposits cannot be retried until capacity changes. Existing withdrawals remain available.';
+    }
     if ('InsufficientBalance' in err) {
       return `Insufficient balance: need ${err.InsufficientBalance.required}, have ${err.InsufficientBalance.available}`;
     }
