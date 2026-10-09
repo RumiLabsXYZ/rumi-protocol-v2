@@ -1,4 +1,4 @@
-use crate::state::mutate_state;
+use crate::state::{mutate_state, read_state, PushSweepRequest};
 use candid::Principal;
 use std::marker::PhantomData;
 use ic_cdk::api::time;
@@ -215,6 +215,41 @@ impl VaultLiquidationGuard {
     /// flight; the caller should back off (the stability pool, per project
     /// rule, must NOT retry — it falls through to manual, which is correct).
     pub fn new(vault_id: u64) -> Result<Self, crate::ProtocolError> {
+        Self::acquire(vault_id, None)
+    }
+
+    /// Acquire the lock only for the exact caller/vault add-margin retry whose
+    /// durable push-sweep journal currently owns the vault. All other callers
+    /// remain blocked until that journal settles.
+    pub fn new_for_push_sweep_retry(
+        vault_id: u64,
+        owner: Principal,
+    ) -> Result<Self, crate::ProtocolError> {
+        Self::acquire(vault_id, Some(owner))
+    }
+
+    fn acquire(
+        vault_id: u64,
+        retry_owner: Option<Principal>,
+    ) -> Result<Self, crate::ProtocolError> {
+        let pending = read_state(|s| {
+            s.push_sweep_journals
+                .iter()
+                .filter(|(_, journal)| journal.vault_id == vault_id)
+                .map(|(owner, journal)| (*owner, journal.request.clone()))
+                .collect::<Vec<_>>()
+        });
+        if !pending.is_empty()
+            && !(pending.len() == 1
+                && retry_owner.is_some_and(|owner| {
+                    pending[0].0 == owner
+                        && pending[0].1 == (PushSweepRequest::AddMargin { vault_id })
+                }))
+        {
+            return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                "Vault #{vault_id} has an unresolved push-deposit sweep; retry that exact operation"
+            )));
+        }
         LIQUIDATING_VAULTS.with(|set| {
             let mut set = set.borrow_mut();
             if set.contains(&vault_id) {
@@ -373,6 +408,7 @@ mod vault_liquidation_guard_tests {
 
     #[test]
     fn vault_liquidation_guard_is_exclusive_per_vault() {
+        crate::state::replace_state(crate::state::State::default());
         // BK-001/002 fence: the lock is per-vault, not per-caller.
         let g1 = VaultLiquidationGuard::new(42).expect("first acquire for vault 42");
         // A second liquidator (any caller) racing the SAME vault is rejected.
@@ -390,6 +426,7 @@ mod vault_liquidation_guard_tests {
 
     #[test]
     fn chain_vault_liquidation_guard_is_exclusive_and_independent_of_icp() {
+        crate::state::replace_state(crate::state::State::default());
         let g1 = ChainVaultLiquidationGuard::new(7).expect("first acquire chain vault 7");
         assert!(
             ChainVaultLiquidationGuard::new(7).is_err(),
@@ -399,6 +436,37 @@ mod vault_liquidation_guard_tests {
         let _icp = VaultLiquidationGuard::new(7).expect("ICP guard for id 7 is independent");
         drop(g1);
         let _g2 = ChainVaultLiquidationGuard::new(7).expect("re-acquire chain vault 7 after release");
+    }
+
+    #[test]
+    fn unresolved_add_margin_journal_locks_vault_except_exact_retry() {
+        let owner = Principal::from_slice(&[71]);
+        let vault_id = 72;
+        let journal = crate::state::PushSweepJournal {
+            owner,
+            request: PushSweepRequest::AddMargin { vault_id },
+            vault_id,
+            ledger: Principal::from_slice(&[73]),
+            from_subaccount: [74; 32],
+            to_owner: Principal::from_slice(&[75]),
+            amount_e8s: 76,
+            fee_e8s: 77,
+            memo: vec![78],
+            created_at_time_ns: 79,
+            op_nonce: 80,
+            dispatch_attempts: 1,
+        };
+        crate::state::replace_state(crate::state::State::default());
+        crate::state::mutate_state(|s| {
+            s.push_sweep_journals.insert(owner, journal);
+        });
+
+        assert!(VaultLiquidationGuard::new(vault_id).is_err());
+        assert!(VaultLiquidationGuard::new_for_push_sweep_retry(vault_id, Principal::from_slice(&[81])).is_err());
+        let exact_retry = VaultLiquidationGuard::new_for_push_sweep_retry(vault_id, owner)
+            .expect("only the journal owner can retry the exact add-margin operation");
+        drop(exact_retry);
+        assert!(VaultLiquidationGuard::new(vault_id).is_err());
     }
 
     #[test]

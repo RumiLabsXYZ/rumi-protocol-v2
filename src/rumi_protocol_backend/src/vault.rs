@@ -196,6 +196,7 @@ pub(crate) fn redemption_candidate_types(state: &crate::state::State) -> Vec<Pri
     for vault in state.vault_id_to_vaults.values() {
         if vault.borrowed_icusd_amount == 0
             || vault.bot_processing
+            || state.has_unresolved_push_sweep_for_vault(vault.vault_id)
             || crate::guard::is_vault_liquidating(vault.vault_id)
         {
             continue;
@@ -3458,6 +3459,11 @@ pub fn stability_pool_preflight_xrp_absorb_in_state(
             "Vault #{vault_id} has another operation in flight; retry shortly"
         )));
     }
+    if state.has_unresolved_push_sweep_for_vault(vault_id) {
+        return Err(ProtocolError::TemporarilyUnavailable(format!(
+            "Vault #{vault_id} has an unresolved push-deposit sweep"
+        )));
+    }
 
     let sizing = xrp_sp_absorb_sizing(state, vault_id, expected_icusd_burn_e8s)?;
     let mut preflight = sizing.preflight;
@@ -6294,6 +6300,7 @@ where
 pub async fn open_vault_with_deposit(
     borrow_amount_raw: u64,
     collateral_type_opt: Option<Principal>,
+    allow_initial_borrow: bool,
 ) -> Result<OpenVaultSuccess, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = match GuardPrincipal::new(caller, "open_vault_with_deposit") {
@@ -6310,23 +6317,50 @@ pub async fn open_vault_with_deposit(
     };
 
     // Resolve collateral type: default to ICP if not specified
-    let collateral_type =
-        collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
+    let collateral_type = collateral_type_opt.unwrap_or_else(|| {
+        read_state(|s| {
+            s.push_sweep_journals
+                .get(&caller)
+                .and_then(|journal| match &journal.request {
+                    crate::state::PushSweepRequest::OpenVault {
+                        collateral_type,
+                        borrow_amount_raw: saved_borrow,
+                    } if *saved_borrow == borrow_amount_raw => Some(*collateral_type),
+                    _ => None,
+                })
+                .unwrap_or_else(|| s.icp_collateral_type())
+        })
+    });
+    let sweep_request = crate::state::PushSweepRequest::OpenVault { collateral_type, borrow_amount_raw };
+    // Resolve a saved intent before consulting mutable collateral policy. A
+    // config removal or min/fee change must not strand an already-dispatched
+    // exact tuple.
+    let pinned_journal = read_state(|s| {
+        s.push_sweep_journals.get(&caller)
+            .filter(|j| j.request == sweep_request)
+            .cloned()
+    });
 
-    // Look up CollateralConfig
     let (config_ledger, config_status, config_fee, min_deposit, is_native_xrp) =
-        read_state(|s| match s.get_collateral_config(&collateral_type) {
-            Some(config) => Ok((
-                config.ledger_canister_id,
-                config.status,
-                config.ledger_fee,
-                config.min_collateral_deposit,
-                config.is_native_xrp(),
-            )),
-            None => Err(ProtocolError::GenericError(
-                "Collateral type not supported.".to_string(),
-            )),
-        })?;
+        if let Some(journal) = &pinned_journal {
+            (journal.ledger, None, journal.fee_e8s, 0, false)
+        } else {
+            match read_state(|s| s.get_collateral_config(&collateral_type).cloned()) {
+                Some(config) => (
+                    config.ledger_canister_id,
+                    Some(config.status),
+                    config.ledger_fee,
+                    config.min_collateral_deposit,
+                    config.is_native_xrp(),
+                ),
+                None => {
+                    guard_principal.fail();
+                    return Err(ProtocolError::GenericError(
+                        "Collateral type not supported.".to_string(),
+                    ));
+                }
+            }
+        };
 
     // P2: native-XRP collateral is custodied on the XRP Ledger (chains::xrp), not
     // swept from an ICRC deposit subaccount. Reject until the XRP deposit flow (P3).
@@ -6337,22 +6371,24 @@ pub async fn open_vault_with_deposit(
         ));
     }
 
-    if !config_status.allows_open() {
+    if config_status.is_some_and(|status| !status.allows_open()) {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(
             "Collateral type is not accepting new vaults.".to_string(),
         ));
     }
 
-    // Sweep funds from the caller's deposit subaccount
-    let (collateral_amount, sweep_block_index) = match management::sweep_deposit(
+    let sweep = match management::sweep_deposit_for_request(
         &caller,
         config_ledger,
         config_fee,
+        min_deposit,
+        u64::MAX,
+        sweep_request,
     )
     .await
     {
-        Ok(result) => result,
+        Ok(receipt) => receipt,
         Err(e) => {
             guard_principal.fail();
             return Err(ProtocolError::GenericError(
@@ -6361,17 +6397,14 @@ pub async fn open_vault_with_deposit(
         }
     };
 
-    let icp_margin_amount: ICP = collateral_amount.into();
-    if min_deposit > 0 && icp_margin_amount < ICP::new(min_deposit) {
-        guard_principal.fail();
-        return Err(ProtocolError::AmountTooLow {
-            minimum_amount: min_deposit,
-        });
-    }
+    let collateral_amount = sweep.amount_e8s;
+    let sweep_block_index = sweep.block_index;
+    let vault_id = sweep.journal.vault_id;
 
-    // Open the vault with the swept collateral (same logic as open_vault post-transfer)
-    let vault_id = mutate_state(|s| {
-        let vault_id = s.increment_vault_id();
+    let settled = mutate_state(|s| {
+        if s.push_sweep_journals.get(&caller) != Some(&sweep.journal) {
+            return Err(ProtocolError::GenericError("Push-deposit sweep journal changed before credit.".into()));
+        }
         record_open_vault(
             s,
             Vault {
@@ -6386,8 +6419,13 @@ pub async fn open_vault_with_deposit(
             },
             sweep_block_index,
         );
-        vault_id
+        s.push_sweep_journals.remove(&caller);
+        Ok(())
     });
+    if let Err(error) = settled {
+        guard_principal.fail();
+        return Err(error);
+    }
 
     log!(INFO, "[open_vault_with_deposit] opened vault {} for {} with {} collateral via push-deposit (sweep block {})",
         vault_id, caller, collateral_amount, sweep_block_index);
@@ -6395,6 +6433,12 @@ pub async fn open_vault_with_deposit(
     // If the caller also requested an initial borrow, do it now.
     // Use borrow_from_vault_internal to avoid GuardPrincipal conflict —
     // this function already holds the guard for `caller`.
+    if borrow_amount_raw > 0 && !allow_initial_borrow {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(format!(
+            "Vault created (id={vault_id}) and the exact push-deposit sweep was credited, but the initial borrow was deferred because borrow admission checks are currently unavailable. Borrow separately after the protocol and price checks recover."
+        )));
+    }
     if borrow_amount_raw > 0 {
         // AR-B-003: per-vault op lock across the borrow's mint await.
         let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
@@ -6437,7 +6481,7 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("add_margin_deposit_{}", vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
-    let _vault_op_guard = match VaultLiquidationGuard::new(vault_id) {
+    let _vault_op_guard = match VaultLiquidationGuard::new_for_push_sweep_retry(vault_id, caller) {
         Ok(g) => g,
         Err(e) => {
             guard_principal.fail();
@@ -6454,16 +6498,22 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
     let (vault, config_ledger, config_fee, min_deposit, is_native_xrp) =
         match read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
             Some(v) => {
-                let config = s
-                    .get_collateral_config(&v.collateral_type)
-                    .ok_or("Collateral type not configured")?;
-                Ok((
-                    v.clone(),
-                    config.ledger_canister_id,
-                    config.ledger_fee,
-                    config.min_collateral_deposit,
-                    config.is_native_xrp(),
-                ))
+                if let Some(journal) = s.push_sweep_journals.get(&caller).filter(|j| {
+                    j.request == (crate::state::PushSweepRequest::AddMargin { vault_id })
+                }) {
+                    Ok((v.clone(), journal.ledger, journal.fee_e8s, 0, false))
+                } else {
+                    let config = s
+                        .get_collateral_config(&v.collateral_type)
+                        .ok_or("Collateral type not configured")?;
+                    Ok((
+                        v.clone(),
+                        config.ledger_canister_id,
+                        config.ledger_fee,
+                        config.min_collateral_deposit,
+                        config.is_native_xrp(),
+                    ))
+                }
             }
             None => Err("Vault not found"),
         }) {
@@ -6491,8 +6541,14 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
 
     // Check collateral status
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
+    let (retrying_exact_sweep, sweep_ledger) = read_state(|s| {
+        s.push_sweep_journals.get(&caller)
+            .filter(|j| j.request == (crate::state::PushSweepRequest::AddMargin { vault_id }))
+            .map(|j| (true, j.ledger))
+            .unwrap_or((false, config_ledger))
+    });
     if let Some(status) = collateral_status {
-        if !status.allows_add_collateral() {
+        if !status.allows_add_collateral() && !retrying_exact_sweep {
             guard_principal.fail();
             return Err(ProtocolError::GenericError(
                 "Adding collateral is not allowed for this collateral type.".to_string(),
@@ -6509,26 +6565,34 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
     // fits the vault's remaining u64 collateral capacity. Both checks happen
     // after reading the balance and before transferring it.
     let remaining_collateral_capacity = u64::MAX - vault.collateral_amount;
-    let (collateral_amount, sweep_block_index) = match management::sweep_deposit_with_bounds(
+    let sweep = match management::sweep_deposit_for_request(
         &caller,
-        config_ledger,
+        sweep_ledger,
         config_fee,
         min_deposit,
         remaining_collateral_capacity,
+        crate::state::PushSweepRequest::AddMargin { vault_id },
     )
     .await
     {
-        Ok(result) => result,
+        Ok(receipt) => receipt,
         Err(error) => {
             guard_principal.fail();
             return Err(map_push_deposit_sweep_error(error));
         }
     };
+    let collateral_amount = sweep.amount_e8s;
+    let sweep_block_index = sweep.block_index;
 
     let margin_added: ICP = collateral_amount.into();
 
     if let Err(error) = mutate_state(|s| {
-        record_add_margin_to_vault(s, vault_id, margin_added, sweep_block_index)
+        if s.push_sweep_journals.get(&caller) != Some(&sweep.journal) {
+            return Err(ProtocolError::GenericError("Push-deposit sweep journal changed before credit.".into()));
+        }
+        record_add_margin_to_vault(s, vault_id, margin_added, sweep_block_index)?;
+        s.push_sweep_journals.remove(&caller);
+        Ok(())
     }) {
         guard_principal.fail();
         return Err(error);
@@ -6562,6 +6626,7 @@ fn map_push_deposit_sweep_error(error: management::SweepDepositError) -> Protoco
                 "Push-deposit sweep response is ambiguous: {message}. Reconcile the deposit before retrying."
             ))
         }
+        management::SweepDepositError::PendingUnknown => ProtocolError::GenericError("Push-deposit sweep remains unresolved after an earlier possibly committed ledger call. Retry only the same operation; no new sweep was started.".into()),
         management::SweepDepositError::Transfer(message) => ProtocolError::GenericError(
             format!("Push-deposit sweep failed: {message}. Did you transfer collateral to your deposit account first?"),
         ),
@@ -10734,6 +10799,7 @@ mod xrp_sp_absorb_contract_tests {
     #[test]
     fn xrp_sp_preflight_rejects_when_vault_operation_in_flight() {
         let mut state = test_state_with_xrp_vault();
+        crate::state::replace_state(crate::state::State::default());
         let guard = crate::guard::VaultLiquidationGuard::new(VAULT_ID).expect("lock vault");
         let err =
             stability_pool_preflight_xrp_absorb_in_state(&mut state, sp(), VAULT_ID, 100 * E8, 10)
