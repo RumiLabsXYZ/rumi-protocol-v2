@@ -21,6 +21,29 @@ pub struct VaultRedemption {
     pub collateral_seized: u64,
 }
 
+#[cfg(test)]
+mod stability_pool_principal_cutover_tests {
+    use super::apply_set_stability_pool_principal;
+    use crate::state::State;
+    use candid::Principal;
+
+    #[test]
+    fn changing_pool_clears_v2_readiness_but_same_principal_preserves_it() {
+        let old = Principal::from_slice(&[1]);
+        let new = Principal::from_slice(&[2]);
+        let mut state = State::default();
+        state.stability_pool_canister = Some(old);
+        state.three_usd_reserve_v2_client_ready = true;
+
+        apply_set_stability_pool_principal(&mut state, old);
+        assert!(state.three_usd_reserve_v2_client_ready);
+
+        apply_set_stability_pool_principal(&mut state, new);
+        assert_eq!(state.stability_pool_canister, Some(new));
+        assert!(!state.three_usd_reserve_v2_client_ready);
+    }
+}
+
 /// Wave-8e LIQ-005: identifies which fee revenue stream a deficit
 /// repayment was sourced from. Persisted in the `DeficitRepaid` event so
 /// the explorer can attribute repayment volume per source.
@@ -2131,7 +2154,7 @@ fn replay_with_nonce_time_and_payout_events(
                 state.treasury_principal = Some(principal);
             },
             Event::SetStabilityPoolPrincipal { principal } => {
-                state.stability_pool_canister = Some(principal);
+                apply_set_stability_pool_principal(&mut state, principal);
             },
             Event::SetLiquidationBotPrincipal { principal } => {
                 state.liquidation_bot_principal = Some(principal);
@@ -3571,6 +3594,13 @@ pub fn record_set_treasury_principal(state: &mut State, principal: Principal) {
 
 pub fn record_set_stability_pool_principal(state: &mut State, principal: Principal) {
     record_event(&Event::SetStabilityPoolPrincipal { principal });
+    apply_set_stability_pool_principal(state, principal);
+}
+
+fn apply_set_stability_pool_principal(state: &mut State, principal: Principal) {
+    if state.stability_pool_canister != Some(principal) {
+        state.three_usd_reserve_v2_client_ready = false;
+    }
     state.stability_pool_canister = Some(principal);
 }
 

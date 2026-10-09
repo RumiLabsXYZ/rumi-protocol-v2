@@ -1577,6 +1577,25 @@ export interface SupplyAuditEntry {
   'display_name' : string,
   'chain_id' : number,
 }
+export interface ThreeUsdRefundRecoveryStatus {
+  'status' : ThreeUsdRefundRecoveryStatusKind,
+  'retry_count' : number,
+  'vault_id' : bigint,
+  'amount_e8s' : bigint,
+  'ledger' : Principal,
+  'stability_pool' : Principal,
+}
+export type ThreeUsdRefundRecoveryStatusKind = {
+    'Held' : { 'reason' : string }
+  } |
+  { 'RetryScheduled' : null } |
+  {
+    'ReceiptVerified' : {
+      'block_index' : bigint,
+      'fee_e8s' : bigint,
+      'reconciled_at_ns' : bigint,
+    }
+  };
 export type ThreeUsdReserveIngressV2Status = {
     'FailedAfterTransferRefunded' : {
       'transfer_block_index' : bigint,
@@ -1810,6 +1829,10 @@ export interface _SERVICE {
   'admin_resolve_stuck_claim' : ActorMethod<[bigint, boolean], Result>,
   'admin_resolve_xrp_claim' : ActorMethod<[bigint, XrpClaimResolution], Result>,
   'admin_sweep_to_treasury' : ActorMethod<[string], Result_1>,
+  'attest_three_usd_reserve_v1_cutover_reconciled' : ActorMethod<
+    [Uint8Array | number[]],
+    Result
+  >,
   'backfill_collateral_symbols' : ActorMethod<[], Result_3>,
   'borrow_chain_vault_evm' : ActorMethod<
     [VaultIntent, Uint8Array | number[]],
@@ -1854,6 +1877,10 @@ export interface _SERVICE {
   'enter_recovery_mode' : ActorMethod<[], Result>,
   'exit_recovery_mode' : ActorMethod<[], Result>,
   'freeze_protocol' : ActorMethod<[], Result>,
+  'get_3usd_refund_recovery_status' : ActorMethod<
+    [bigint],
+    [] | [ThreeUsdRefundRecoveryStatus]
+  >,
   'get_all_vaults' : ActorMethod<[], Array<CandidVault>>,
   'get_amm1_canister' : ActorMethod<[], [] | [Principal]>,
   'get_amm1_pool_id' : ActorMethod<[], [] | [string]>,
@@ -2080,6 +2107,11 @@ export interface _SERVICE {
   'prepare_redemption_offer' : ActorMethod<[bigint], Result_18>,
   'provide_liquidity' : ActorMethod<[bigint], Result_1>,
   'reconcile_chain_supply' : ActorMethod<[number], Result_19>,
+  'reconcile_default_account_3usd_refund' : ActorMethod<
+    [bigint, bigint],
+    Result
+  >,
+  'reconcile_legacy_3usd_refund' : ActorMethod<[bigint, bigint], Result>,
   'reconcile_three_usd_reserve_ingress_candidate_block' : ActorMethod<
     [bigint, bigint, bigint],
     Result

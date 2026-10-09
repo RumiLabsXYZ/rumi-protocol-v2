@@ -1371,6 +1371,23 @@ type SupplyAuditEntry = record {
   display_name : text;
   chain_id : nat32;
 };
+type ThreeUsdRefundRecoveryStatus = record {
+  status : ThreeUsdRefundRecoveryStatusKind;
+  retry_count : nat8;
+  vault_id : nat64;
+  amount_e8s : nat64;
+  ledger : principal;
+  stability_pool : principal;
+};
+type ThreeUsdRefundRecoveryStatusKind = variant {
+  Held : record { reason : text };
+  RetryScheduled;
+  ReceiptVerified : record {
+    block_index : nat64;
+    fee_e8s : nat64;
+    reconciled_at_ns : nat64;
+  };
+};
 type ThreeUsdReserveIngressV2Status = variant {
   FailedAfterTransferRefunded : record {
     transfer_block_index : nat64;
@@ -1586,6 +1603,7 @@ service : (ProtocolArg) -> {
   admin_resolve_stuck_claim : (nat64, bool) -> (Result);
   admin_resolve_xrp_claim : (nat64, XrpClaimResolution) -> (Result);
   admin_sweep_to_treasury : (text) -> (Result_1);
+  attest_three_usd_reserve_v1_cutover_reconciled : (blob) -> (Result);
   backfill_collateral_symbols : () -> (Result_3);
   borrow_chain_vault_evm : (VaultIntent, blob) -> (Result);
   borrow_from_vault : (VaultArg) -> (Result_4);
@@ -1620,6 +1638,9 @@ service : (ProtocolArg) -> {
   enter_recovery_mode : () -> (Result);
   exit_recovery_mode : () -> (Result);
   freeze_protocol : () -> (Result);
+  get_3usd_refund_recovery_status : (nat) -> (
+      opt ThreeUsdRefundRecoveryStatus,
+    ) query;
   get_all_vaults : () -> (vec CandidVault) query;
   get_amm1_canister : () -> (opt principal) query;
   get_amm1_pool_id : () -> (opt text) query;
@@ -1777,6 +1798,8 @@ service : (ProtocolArg) -> {
   prepare_redemption_offer : (nat64) -> (Result_18);
   provide_liquidity : (nat64) -> (Result_1);
   reconcile_chain_supply : (nat32) -> (Result_19);
+  reconcile_default_account_3usd_refund : (nat, nat64) -> (Result);
+  reconcile_legacy_3usd_refund : (nat, nat64) -> (Result);
   reconcile_three_usd_reserve_ingress_candidate_block : (
       nat64,
       nat64,
