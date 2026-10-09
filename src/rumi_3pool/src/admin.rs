@@ -134,7 +134,12 @@ pub async fn withdraw_admin_fees(caller: Principal) -> Result<[u128; 3], ThreePo
     // liabilities. Dust below the current transfer fee stays accrued.
     for k in 0..3 {
         if fees[k] > 0 {
-            ledger_fees[k] = crate::transfers::current_ledger_fee(tokens[k].ledger_id).await;
+            ledger_fees[k] = crate::transfers::try_current_ledger_fee(tokens[k].ledger_id)
+                .await
+                .map_err(|reason| ThreePoolError::TransferFailed {
+                    token: tokens[k].symbol.clone(),
+                    reason: format!("cannot safely withdraw admin fees without the current ledger fee: {reason}"),
+                })?;
         }
     }
     let transferable: [u128; 3] = core::array::from_fn(|k| {

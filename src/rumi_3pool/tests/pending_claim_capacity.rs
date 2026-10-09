@@ -505,6 +505,66 @@ fn add_liquidity_rejects_fee_sized_leg_before_any_pull_or_claim() {
 }
 
 #[test]
+fn swap_fee_query_rejection_happens_before_any_input_or_payout_identity() {
+    let h = setup();
+    // Bootstrap add-liquidity uses uncached strict fee queries, so the swap's
+    // first output-fee lookup is cold and reaches this rejecting ledger.
+    call_ledger_flag(&h, h.ledgers[1], "set_fail_fee_query", true);
+    let user_input_before = balance(&h, h.ledgers[0], h.user);
+    let user_output_before = balance(&h, h.ledgers[1], h.user);
+    let pool_input_before = balance(&h, h.ledgers[0], h.pool);
+    let pool_output_before = balance(&h, h.ledgers[1], h.pool);
+    let payouts_before = payout_storage_counts(&h);
+
+    let failed: Result<Nat, ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool,
+            h.user,
+            "swap",
+            encode_args((0u8, 1u8, 100_000_000u128, 1u128)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(
+        failed,
+        Err(ThreePoolError::TransferFailed { ref token, ref reason })
+            if token == "T1" && reason.contains("icrc1_fee query failed")
+    ));
+    assert_eq!(balance(&h, h.ledgers[0], h.user), user_input_before);
+    assert_eq!(balance(&h, h.ledgers[1], h.user), user_output_before);
+    assert_eq!(balance(&h, h.ledgers[0], h.pool), pool_input_before);
+    assert_eq!(balance(&h, h.ledgers[1], h.pool), pool_output_before);
+    assert_eq!(payout_storage_counts(&h), payouts_before);
+    assert!(claims(&h).is_empty());
+}
+
+#[test]
+fn proportional_exit_fee_query_rejection_happens_before_lp_or_reserve_debit() {
+    let h = setup();
+    call_ledger_flag(&h, h.ledgers[0], "set_fail_fee_query", true);
+    let lp_before = lp_balance(&h);
+    let pool_balances_before = h.ledgers.map(|ledger| balance(&h, ledger, h.pool));
+    let payouts_before = payout_storage_counts(&h);
+
+    let failed: Result<Vec<Nat>, ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool,
+            h.user,
+            "remove_liquidity",
+            encode_args((100_000_000u128, vec![0u128; 3])).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(
+        failed,
+        Err(ThreePoolError::TransferFailed { ref reason, .. })
+            if reason.contains("icrc1_fee query failed")
+    ));
+    assert_eq!(lp_balance(&h), lp_before);
+    assert_eq!(h.ledgers.map(|ledger| balance(&h, ledger, h.pool)), pool_balances_before);
+    assert_eq!(payout_storage_counts(&h), payouts_before);
+    assert!(claims(&h).is_empty());
+}
+
+#[test]
 fn add_liquidity_fails_closed_when_actual_fee_query_fails() {
     let h = setup();
     // Prime the general fee cache at zero through a donation, which has no
@@ -896,6 +956,40 @@ fn admin_fee_below_ledger_fee_remains_accrued() {
         h.pic.query_call(h.pool, h.admin, "get_admin_fees", encode_args(()).unwrap()).unwrap(),
     )).unwrap();
     assert_eq!(accrued, vec![100, 0, 0], "fee dust is not silently written off");
+    assert!(claims(&h).is_empty());
+}
+
+#[test]
+fn admin_fee_query_rejection_preserves_the_liability() {
+    let h = setup();
+    let fees = [12_345u128, 0, 0];
+    h.pic.update_call(
+        h.pool,
+        h.admin,
+        "test_seed_admin_fees",
+        encode_one(fees).unwrap(),
+    ).unwrap();
+    call_ledger_flag(&h, h.ledgers[0], "set_fail_fee_query", true);
+    let payouts_before = payout_storage_counts(&h);
+
+    let failed: Result<Vec<u128>, ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool,
+            h.admin,
+            "withdraw_admin_fees",
+            encode_args(()).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(
+        failed,
+        Err(ThreePoolError::TransferFailed { ref token, ref reason })
+            if token == "T0" && reason.contains("icrc1_fee query failed")
+    ));
+    let accrued: Vec<u128> = decode_one(&reply(
+        h.pic.query_call(h.pool, h.admin, "get_admin_fees", encode_args(()).unwrap()).unwrap(),
+    )).unwrap();
+    assert_eq!(accrued, fees, "fee lookup failure must not clear any liability");
+    assert_eq!(payout_storage_counts(&h), payouts_before);
     assert!(claims(&h).is_empty());
 }
 
@@ -1296,6 +1390,39 @@ fn proven_bad_fee_starts_new_exact_attempt_with_refreshed_fee() {
     assert!(failure_reason.contains(&format!("get_payout_entitlement({})", claim.id)));
     assert!(failure_reason.contains("get_payout_entitlements"));
     let before_retry = balance(&h, h.ledgers[0], h.user);
+    call_ledger_flag(&h, h.ledgers[0], "set_fail_fee_query", true);
+    let fee_query_failed: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool,
+            h.user,
+            "claim_pending",
+            encode_one(claim.id).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(
+        fee_query_failed,
+        Err(ThreePoolError::TransferFailed { ref reason, .. })
+            if reason.contains("cannot rearm payout") && reason.contains("icrc1_fee query failed")
+    ));
+    let held = payout(&h, h.user, claim.id);
+    assert_eq!(held.attempts.len(), 1, "failed fee lookup must not replace or append an attempt");
+    assert!(!held.settled);
+    assert!(
+        claims(&h).is_empty(),
+        "zero-capacity journal-only exits must not fabricate a secondary claim projection"
+    );
+    assert!(payouts(&h, h.user).iter().any(|item| {
+        item.id == claim.id
+            && !item.settled
+            && item.attempts.len() == 1
+            && matches!(
+                item.attempts[0].outcome,
+                PayoutOutcome::RejectedNoTransfer { .. }
+            )
+    }), "the payout journal must retain the exact rejected attempt for recovery");
+    assert_eq!(balance(&h, h.ledgers[0], h.user), before_retry);
+
+    call_ledger_flag(&h, h.ledgers[0], "set_fail_fee_query", false);
     call_ledger_nat(&h, h.ledgers[0], "set_fee", 250);
     let retried: Result<(), ThreePoolError> = decode_one(&reply(
         h.pic

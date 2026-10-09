@@ -13,10 +13,6 @@ use crate::payouts::{
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-/// Standard ICRC-1 transfer fee (native units), used as a conservative fallback
-/// when a ledger's `icrc1_fee` query cannot be reached. Erring high keeps the
-/// pool solvent (we send slightly less) rather than risking an over-send.
-const DEFAULT_LEDGER_FEE: u128 = 10_000;
 const MAX_PAYOUT_ATTEMPTS: u32 = 16;
 const MAX_EXACT_REPLAYS: u8 = 3;
 
@@ -34,11 +30,11 @@ pub(crate) fn gate_next_fee_lookup() {
     GATE_NEXT_FEE_LOOKUP.with(|gate| *gate.borrow_mut() = true);
 }
 
-/// Fetch a ledger's transfer fee, caching the result per ledger. On query
-/// failure, falls back to the standard ICRC-1 fee (the solvency-safe direction).
-pub async fn ledger_fee(ledger: Principal) -> u128 {
+/// Fetch a ledger's transfer fee, caching only successful queries. A guessed
+/// fee cannot safely bind a transfer or a recoverable payout identity.
+pub async fn ledger_fee(ledger: Principal) -> Result<u128, String> {
     if let Some(fee) = LEDGER_FEES.with(|c| c.borrow().get(&ledger).copied()) {
-        return fee;
+        return Ok(fee);
     }
     // Test-only observable barrier. PocketIC holds this HTTPS reply until the
     // regression test's competing LP transfer has completed, proving the
@@ -61,26 +57,14 @@ pub async fn ledger_fee(ledger: Principal) -> u128 {
         )
         .await;
     }
-    let fee = current_ledger_fee(ledger).await;
+    let fee = try_current_ledger_fee(ledger).await?;
     LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, fee));
-    fee
+    Ok(fee)
 }
 
-/// Query the live ledger fee without consulting the per-canister cache. Use
-/// this when an exact fee determines whether a persisted liability is cleared;
-/// a stale cached fee must never turn below-fee dust into a dispatchable claim.
-pub async fn current_ledger_fee(ledger: Principal) -> u128 {
-    let result: Result<(candid::Nat,), _> =
-        ic_cdk::call(ledger, "icrc1_fee", ()).await;
-    match result {
-        Ok((fee,)) => fee.0.try_into().unwrap_or(DEFAULT_LEDGER_FEE),
-        Err(_) => DEFAULT_LEDGER_FEE,
-    }
-}
-
-/// Query a fee for an admission decision that cannot safely use the fallback
-/// fee. Unlike `ledger_fee`, this never consults or updates the fee cache and
-/// fails closed on call rejection or values outside `u128`.
+/// Query a fee for an admission decision that cannot safely use a cached fee.
+/// This never consults or updates the fee cache and fails closed on rejection
+/// or values outside `u128`.
 pub async fn try_current_ledger_fee(ledger: Principal) -> Result<u128, String> {
     let result: Result<(candid::Nat,), _> = ic_cdk::call(ledger, "icrc1_fee", ()).await;
     let (fee,) = result.map_err(|(code, message)| {
@@ -93,14 +77,10 @@ pub async fn try_current_ledger_fee(ledger: Principal) -> Result<u128, String> {
 
 /// Refresh the fee after a proven no-effect rejection. Cached quotes are not
 /// sufficient evidence for choosing the next transfer tuple.
-async fn refresh_ledger_fee(ledger: Principal) -> u128 {
-    let result: Result<(candid::Nat,), _> = ic_cdk::call(ledger, "icrc1_fee", ()).await;
-    let fee = match result {
-        Ok((value,)) => value.0.try_into().unwrap_or(DEFAULT_LEDGER_FEE),
-        Err(_) => DEFAULT_LEDGER_FEE,
-    };
+async fn refresh_ledger_fee(ledger: Principal) -> Result<u128, String> {
+    let fee = try_current_ledger_fee(ledger).await?;
     LEDGER_FEES.with(|cache| cache.borrow_mut().insert(ledger, fee));
-    fee
+    Ok(fee)
 }
 
 /// Persist a payout identity without dispatching it. Multi-leg operations use
@@ -158,7 +138,11 @@ pub async fn prepare_input_payout(
     owner: Principal,
     gross: u128,
 ) -> Result<u64, PayoutFailure> {
-    let fee = ledger_fee(ledger).await;
+    let fee = ledger_fee(ledger).await.map_err(|reason| PayoutFailure {
+        id: 0,
+        reason: format!("fee lookup failed before an input recovery identity was created: {reason}"),
+        ambiguous: false,
+    })?;
     prepare_input_payout_with_fee(kind, action, token_index, ledger, symbol, owner, gross, fee)
 }
 
@@ -436,7 +420,11 @@ async fn payout_to_user_inner(
     swap_context: Option<crate::payouts::PayoutSwapContext>,
     compensation_for: Option<u64>,
 ) -> Result<u64, PayoutFailure> {
-    let fee = ledger_fee(ledger).await;
+    let fee = ledger_fee(ledger).await.map_err(|reason| PayoutFailure {
+        id: compensation_for.unwrap_or(0),
+        reason: format!("fee lookup failed before a payout identity was created: {reason}"),
+        ambiguous: false,
+    })?;
     let entitlement = prepare_payout_with_fee(kind, token_index, ledger, symbol, to, gross, swap_context, compensation_for, fee, true)?;
     execute_prepared_payout(entitlement.id).await?;
     if kind != PayoutKind::SwapOutput {
@@ -568,7 +556,11 @@ pub async fn retry_payout_claim(id: u64) -> Result<(), PayoutFailure> {
     if number >= MAX_PAYOUT_ATTEMPTS {
         return Err(PayoutFailure { id, reason: "payout attempt limit reached; entitlement remains held".into(), ambiguous: true });
     }
-    let fee = refresh_ledger_fee(entitlement.ledger).await;
+    let fee = refresh_ledger_fee(entitlement.ledger).await.map_err(|reason| PayoutFailure {
+        id,
+        reason: format!("cannot rearm payout without a verified current fee: {reason}"),
+        ambiguous: false,
+    })?;
     let attempt = make_attempt(id, number, entitlement.ledger, entitlement.owner, entitlement.gross, fee);
     entitlement.attempts.push(attempt.clone());
     crate::payouts::save(entitlement.clone());
