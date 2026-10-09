@@ -660,6 +660,26 @@ pub async fn sp_absorb_chain_vault(
     crate::liquidation::sp_absorb_chain_vault(vault_id).await
 }
 
+/// Admin recovery for a native-XRP burn whose ledger call reply was lost.
+/// The supplied block index is only a candidate: it is accepted only after
+/// the pinned ledger returns the exact direct ICRC-3 block for the persisted
+/// burn tuple. When omitted, recovery checks a bounded direct tail of history.
+/// Archived candidates remain held because archive callbacks are not accepted
+/// as proof of canonical ledger membership.
+#[update]
+pub async fn admin_recover_ambiguous_native_xrp_burn(
+    vault_id: u64,
+    candidate_block_index: Option<u64>,
+) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    crate::liquidation::recover_ambiguous_native_xrp_burn_proof(vault_id, candidate_block_index)
+        .await?;
+    crate::liquidation::reconcile_pending_native_xrp_absorb_from_status(vault_id).await
+}
+
 #[update]
 pub async fn scan_chain_absorb_candidates(
     max_per_chain: Option<u64>,

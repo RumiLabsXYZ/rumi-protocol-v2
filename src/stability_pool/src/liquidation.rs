@@ -4,6 +4,7 @@ use ic_cdk::call;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{Memo, TransferArg, TransferError};
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
+use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
 use num_traits::ToPrimitive;
 use rumi_protocol_backend::chains::config::ChainId;
 use std::collections::BTreeMap;
@@ -21,6 +22,7 @@ use crate::types::*;
 pub(crate) const FALLBACK_COLLATERAL_FEE_E8S: u64 = 10_000;
 
 pub(crate) const CHAIN_WRITEDOWN_MEMO_PREFIX: &[u8] = b"RUMI-LIQ-004:";
+const AMBIGUOUS_BURN_RECOVERY_SCAN_BLOCKS: u64 = 256;
 
 #[derive(Clone, Debug)]
 pub(crate) struct IcusdBurnAttemptError {
@@ -125,6 +127,253 @@ pub fn build_icusd_burn_proof(
         ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn,
         vault_id_memo: vault_id,
     }
+}
+
+/// Validate the positive evidence needed to recover an ambiguous native-XRP
+/// burn. A standard ICRC-1 burn records the source account and burn tuple;
+/// the minting account is established separately from the pinned ledger.
+/// Missing fields are never treated as a substitute for these checks.
+fn validate_ambiguous_native_xrp_burn_block(
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+    intent: &NativeXrpAbsorbIntent,
+    minting_account: &Account,
+    stability_pool: Principal,
+) -> Result<(), String> {
+    if block.btype.as_deref().is_some_and(|kind| kind != "1burn") || block.op != "burn" {
+        return Err("candidate is not a standard ICRC-1 burn block".into());
+    }
+    if minting_account != &intent.icusd_minting_account {
+        return Err("pinned ledger minting account differs from the persisted burn intent".into());
+    }
+    let expected_from = Account {
+        owner: stability_pool,
+        subaccount: None,
+    };
+    if block.from.as_ref() != Some(&expected_from) {
+        return Err("burn source account differs from the Stability Pool account".into());
+    }
+    if block.spender.is_some() {
+        return Err("ICRC-1 burn unexpectedly records a spender".into());
+    }
+    if block.to.as_ref().is_some_and(|to| to != minting_account) {
+        return Err("burn destination differs from the pinned minting account".into());
+    }
+    if block.amount != u128::from(intent.icusd_to_burn_e8s)
+        || block.memo.as_deref() != Some(encode_chain_writedown_memo(intent.vault_id).as_slice())
+        || block.created_at_time != Some(intent.burn_created_at_time_ns)
+    {
+        return Err("burn block does not match the persisted amount, memo, or timestamp".into());
+    }
+    // ICRC-1 burns have a zero fee. Some ledger block encodings omit fee for
+    // burn operations; when it is present, it must agree with that standard.
+    if block.fee.is_some_and(|fee| fee != 0) {
+        return Err("burn block records a nonzero fee".into());
+    }
+    Ok(())
+}
+
+async fn fetch_direct_icusd_burn_blocks(
+    ledger: Principal,
+    start: u64,
+    length: u64,
+) -> Result<
+    Vec<(
+        u64,
+        Option<rumi_protocol_backend::icrc3_proof::DecodedBlock>,
+    )>,
+    StabilityPoolError,
+> {
+    if length == 0 || length > AMBIGUOUS_BURN_RECOVERY_SCAN_BLOCKS {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "invalid direct ledger recovery page length".into(),
+        });
+    }
+    let request = vec![GetBlocksRequest {
+        start: Nat::from(start),
+        length: Nat::from(length),
+    }];
+    let result: Result<(GetBlocksResult,), _> = call(ledger, "icrc3_get_blocks", (request,)).await;
+    let (response,) = result.map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+        target: ledger.to_string(),
+        method: "icrc3_get_blocks".into(),
+    })?;
+    let log_length =
+        response
+            .log_length
+            .0
+            .to_u64()
+            .ok_or_else(|| StabilityPoolError::LedgerTransferFailed {
+                reason: "ledger log length does not fit in u64".into(),
+            })?;
+    if start
+        .checked_add(length)
+        .map_or(true, |end| end > log_length)
+        || !response.archived_blocks.is_empty()
+        || response.blocks.len() != length as usize
+    {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "ledger did not return the complete direct block range".into(),
+        });
+    }
+    response
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(offset, block)| {
+            let expected_index = start + offset as u64;
+            if block.id.0.to_u64() != Some(expected_index) {
+                return Err(StabilityPoolError::LedgerTransferFailed {
+                    reason: "ledger direct block range contains a gap or wrong index".into(),
+                });
+            }
+            // This page can contain unrelated ICRC operations (including
+            // ledger-specific blocks the shared decoder does not understand).
+            // Their index still contributes to page completeness, but they
+            // cannot constitute positive burn evidence.
+            Ok((
+                expected_index,
+                rumi_protocol_backend::icrc3_proof::decode_block(&block.block).ok(),
+            ))
+        })
+        .collect()
+}
+
+async fn direct_icusd_burn_recovery_candidate(
+    intent: &NativeXrpAbsorbIntent,
+    candidate_index: Option<u64>,
+    minting_account: &Account,
+) -> Result<u64, StabilityPoolError> {
+    let (start, length) = if let Some(index) = candidate_index {
+        (index, 1)
+    } else {
+        // A zero-length direct request obtains the current log length without
+        // asking an archive callback to supply any transaction evidence.
+        let tip_request = vec![GetBlocksRequest {
+            start: Nat::from(0u64),
+            length: Nat::from(0u64),
+        }];
+        let tip_call: Result<(GetBlocksResult,), _> =
+            call(intent.icusd_ledger, "icrc3_get_blocks", (tip_request,)).await;
+        let (tip_response,) =
+            tip_call.map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+                target: intent.icusd_ledger.to_string(),
+                method: "icrc3_get_blocks".into(),
+            })?;
+        if !tip_response.blocks.is_empty() || !tip_response.archived_blocks.is_empty() {
+            return Err(StabilityPoolError::LedgerTransferFailed {
+                reason: "ledger tip response unexpectedly included blocks or archives".into(),
+            });
+        }
+        let log_length = tip_response.log_length.0.to_u64().ok_or_else(|| {
+            StabilityPoolError::LedgerTransferFailed {
+                reason: "ledger log length does not fit in u64".into(),
+            }
+        })?;
+        let start = log_length.saturating_sub(AMBIGUOUS_BURN_RECOVERY_SCAN_BLOCKS);
+        (start, log_length.saturating_sub(start))
+    };
+    if length == 0 {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "icUSD ledger contains no candidate blocks to scan".into(),
+        });
+    }
+    let blocks = fetch_direct_icusd_burn_blocks(intent.icusd_ledger, start, length).await?;
+
+    let mut matches = Vec::new();
+    for (index, block) in blocks {
+        if let Some(block) = block {
+            if validate_ambiguous_native_xrp_burn_block(
+                &block,
+                intent,
+                minting_account,
+                ic_cdk::api::id(),
+            )
+            .is_ok()
+            {
+                matches.push(index);
+            }
+        }
+    }
+    if matches.len() != 1 {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: if matches.is_empty() {
+                "no exact direct ledger burn block matched the persisted intent".into()
+            } else {
+                "multiple direct ledger burn blocks matched the persisted intent".into()
+            },
+        });
+    }
+    Ok(matches[0])
+}
+
+/// Attach a proof only after a direct ledger block has matched the persisted
+/// ambiguous burn tuple. The caller compares the complete intent after awaits
+/// to prevent applying evidence to changed state.
+pub(crate) async fn recover_ambiguous_native_xrp_burn_proof(
+    vault_id: u64,
+    candidate_index: Option<u64>,
+) -> Result<(), StabilityPoolError> {
+    let intent =
+        read_state(|state| state.get_pending_native_xrp_absorb(vault_id)).ok_or_else(|| {
+            StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "missing pending native XRP absorb intent".into(),
+            }
+        })?;
+    if intent.burn_proof.is_some()
+        || !matches!(intent.burn_attempted, Some(true) | None)
+        || intent.status != NativeXrpAbsorbIntentStatus::Prepared
+    {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "intent is not an unresolved ambiguous native XRP burn".into(),
+        });
+    }
+    let minting_account = fetch_icusd_minting_account(intent.icusd_ledger).await?;
+    let block_index =
+        direct_icusd_burn_recovery_candidate(&intent, candidate_index, &minting_account).await?;
+    let proof = build_icusd_burn_proof(block_index, vault_id);
+    mutate_state(|state| {
+        mark_native_xrp_absorb_recovered_burn_proof_in_state(
+            state,
+            &intent,
+            proof,
+            ic_cdk::api::time(),
+        )
+    })
+}
+
+fn mark_native_xrp_absorb_recovered_burn_proof_in_state(
+    state: &mut StabilityPoolState,
+    expected: &NativeXrpAbsorbIntent,
+    proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+    now_ns: u64,
+) -> Result<(), StabilityPoolError> {
+    let vault_id = expected.vault_id;
+    let mut current = state
+        .get_pending_native_xrp_absorb(vault_id)
+        .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "pending native XRP intent disappeared during ledger verification".into(),
+        })?;
+    if current != *expected
+        || current.burn_proof.is_some()
+        || !matches!(current.burn_attempted, Some(true) | None)
+        || current.status != NativeXrpAbsorbIntentStatus::Prepared
+        || proof.ledger_kind != rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn
+        || proof.vault_id_memo != vault_id
+    {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "pending native XRP intent changed or proof is not applicable".into(),
+        });
+    }
+    current.burn_proof = Some(proof);
+    current.burn_attempted = Some(true);
+    current.status = NativeXrpAbsorbIntentStatus::Burned;
+    current.last_error = None;
+    current.updated_at_ns = now_ns;
+    state.put_pending_native_xrp_absorb(current)
 }
 
 pub async fn fetch_icusd_minting_account(
@@ -3890,7 +4139,9 @@ mod tests {
     use super::*;
     use crate::state::{chain_collateral_sentinel, read_state, replace_state, StabilityPoolState};
     use candid::Nat;
+    use icrc_ledger_types::icrc::generic_value::{ICRC3Map, ICRC3Value};
     use icrc_ledger_types::icrc1::transfer::Memo;
+    use serde_bytes::ByteBuf;
 
     #[test]
     fn new_three_usd_absorb_requires_v2_readiness_before_intent_or_approval() {
@@ -3931,6 +4182,239 @@ mod tests {
 
     fn icusd_ledger() -> Principal {
         Principal::from_slice(&[10])
+    }
+
+    fn ambiguous_native_xrp_burn_intent(vault_id: u64) -> NativeXrpAbsorbIntent {
+        let mut state = test_state();
+        prepare_or_reuse_native_xrp_absorb_intent_in_state(
+            &mut state,
+            &native_xrp_plan(vault_id, 42_000, 1_000),
+            1,
+        )
+        .expect("persist intent");
+        mark_native_xrp_absorb_burn_attempted_in_state(&mut state, vault_id, 2)
+            .expect("mark dispatched");
+        state.get_pending_native_xrp_absorb(vault_id).unwrap()
+    }
+
+    fn decoded_native_xrp_burn_block(
+        intent: &NativeXrpAbsorbIntent,
+        pool: Principal,
+    ) -> rumi_protocol_backend::icrc3_proof::DecodedBlock {
+        // Exercise a plausible legacy burn shape consistent with the sampled
+        // xfer/mint blocks: top-level ts plus tx.op, no btype or explicit
+        // burn `to`. No live burn block was observed. A present
+        // tx.created_at_time still has to match the persisted tuple.
+        let mut tx: ICRC3Map = std::collections::BTreeMap::new();
+        tx.insert("op".into(), ICRC3Value::Text("burn".into()));
+        tx.insert(
+            "from".into(),
+            ICRC3Value::Array(vec![ICRC3Value::Blob(ByteBuf::from(
+                pool.as_slice().to_vec(),
+            ))]),
+        );
+        tx.insert(
+            "amt".into(),
+            ICRC3Value::Nat(Nat::from(intent.icusd_to_burn_e8s)),
+        );
+        tx.insert(
+            "memo".into(),
+            ICRC3Value::Blob(ByteBuf::from(encode_chain_writedown_memo(intent.vault_id))),
+        );
+        tx.insert(
+            "created_at_time".into(),
+            ICRC3Value::Nat(Nat::from(intent.burn_created_at_time_ns)),
+        );
+        let mut outer: ICRC3Map = std::collections::BTreeMap::new();
+        outer.insert("ts".into(), ICRC3Value::Nat(Nat::from(77u64)));
+        outer.insert("tx".into(), ICRC3Value::Map(tx));
+        rumi_protocol_backend::icrc3_proof::decode_block(&ICRC3Value::Map(outer))
+            .expect("decode legacy ICRC-3 burn shape")
+    }
+
+    #[test]
+    fn ambiguous_native_xrp_burn_recovery_requires_exact_direct_block_tuple() {
+        let intent = ambiguous_native_xrp_burn_intent(903);
+        let minting = intent.icusd_minting_account.clone();
+        let pool = principal(42);
+        let block = decoded_native_xrp_burn_block(&intent, pool);
+        assert!(block.btype.is_none());
+        assert!(validate_ambiguous_native_xrp_burn_block(&block, &intent, &minting, pool).is_ok());
+
+        let mut wrong_btype = block.clone();
+        wrong_btype.btype = Some("1xfer".into());
+        assert!(
+            validate_ambiguous_native_xrp_burn_block(&wrong_btype, &intent, &minting, pool)
+                .is_err()
+        );
+        let mut wrong_op = block.clone();
+        wrong_op.op = "xfer".into();
+        assert!(
+            validate_ambiguous_native_xrp_burn_block(&wrong_op, &intent, &minting, pool).is_err()
+        );
+
+        let mut wrong_amount = block.clone();
+        wrong_amount.amount += 1;
+        assert!(
+            validate_ambiguous_native_xrp_burn_block(&wrong_amount, &intent, &minting, pool)
+                .is_err()
+        );
+        let mut wrong_memo = block.clone();
+        wrong_memo.memo = Some(b"unrelated".to_vec());
+        assert!(
+            validate_ambiguous_native_xrp_burn_block(&wrong_memo, &intent, &minting, pool).is_err()
+        );
+        let mut wrong_timestamp = block.clone();
+        wrong_timestamp.created_at_time = Some(intent.burn_created_at_time_ns + 1);
+        assert!(validate_ambiguous_native_xrp_burn_block(
+            &wrong_timestamp,
+            &intent,
+            &minting,
+            pool
+        )
+        .is_err());
+        let mut wrong_source = block.clone();
+        wrong_source.from.as_mut().unwrap().owner = principal(43);
+        assert!(
+            validate_ambiguous_native_xrp_burn_block(&wrong_source, &intent, &minting, pool)
+                .is_err()
+        );
+        let mut nonzero_fee = block.clone();
+        nonzero_fee.fee = Some(1);
+        assert!(
+            validate_ambiguous_native_xrp_burn_block(&nonzero_fee, &intent, &minting, pool)
+                .is_err()
+        );
+        assert!(validate_ambiguous_native_xrp_burn_block(
+            &block,
+            &intent,
+            &Account {
+                owner: principal(91),
+                subaccount: None,
+            },
+            pool
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn canonical_btype_burn_with_tx_ts_requires_the_persisted_timestamp() {
+        let intent = ambiguous_native_xrp_burn_intent(906);
+        let minting = intent.icusd_minting_account.clone();
+        let pool = principal(42);
+        let mut tx: ICRC3Map = std::collections::BTreeMap::new();
+        tx.insert("op".into(), ICRC3Value::Text("burn".into()));
+        tx.insert(
+            "from".into(),
+            ICRC3Value::Array(vec![ICRC3Value::Blob(ByteBuf::from(
+                pool.as_slice().to_vec(),
+            ))]),
+        );
+        tx.insert(
+            "amt".into(),
+            ICRC3Value::Nat(Nat::from(intent.icusd_to_burn_e8s)),
+        );
+        tx.insert(
+            "memo".into(),
+            ICRC3Value::Blob(ByteBuf::from(encode_chain_writedown_memo(intent.vault_id))),
+        );
+        tx.insert(
+            "ts".into(),
+            ICRC3Value::Nat(Nat::from(intent.burn_created_at_time_ns)),
+        );
+        let mut outer: ICRC3Map = std::collections::BTreeMap::new();
+        outer.insert("btype".into(), ICRC3Value::Text("1burn".into()));
+        outer.insert("ts".into(), ICRC3Value::Nat(Nat::from(77u64)));
+        outer.insert("tx".into(), ICRC3Value::Map(tx));
+
+        let block = rumi_protocol_backend::icrc3_proof::decode_block(&ICRC3Value::Map(
+            outer.clone(),
+        ))
+        .expect("decode canonical btype burn block");
+        assert_eq!(block.btype.as_deref(), Some("1burn"));
+        assert_eq!(block.created_at_time, Some(intent.burn_created_at_time_ns));
+        assert!(validate_ambiguous_native_xrp_burn_block(
+            &block, &intent, &minting, pool
+        )
+        .is_ok());
+
+        let mut wrong_outer = outer;
+        let ICRC3Value::Map(wrong_tx) = wrong_outer.get_mut("tx").unwrap() else {
+            unreachable!();
+        };
+        wrong_tx.insert(
+            "ts".into(),
+            ICRC3Value::Nat(Nat::from(intent.burn_created_at_time_ns + 1)),
+        );
+        let wrong_timestamp = rumi_protocol_backend::icrc3_proof::decode_block(
+            &ICRC3Value::Map(wrong_outer),
+        )
+        .expect("decode burn block with changed tx.ts");
+        assert!(validate_ambiguous_native_xrp_burn_block(
+            &wrong_timestamp,
+            &intent,
+            &minting,
+            pool,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn recovered_native_xrp_burn_proof_is_attached_once_to_unchanged_intent() {
+        let mut state = test_state();
+        prepare_or_reuse_native_xrp_absorb_intent_in_state(
+            &mut state,
+            &native_xrp_plan(904, 42_000, 1_000),
+            1,
+        )
+        .expect("persist intent");
+        let expected = mark_native_xrp_absorb_burn_attempted_in_state(&mut state, 904, 2)
+            .expect("mark dispatched");
+        let proof = build_icusd_burn_proof(321, 904);
+        mark_native_xrp_absorb_recovered_burn_proof_in_state(
+            &mut state,
+            &expected,
+            proof.clone(),
+            3,
+        )
+        .expect("attach verified positive proof");
+        let recovered = state.get_pending_native_xrp_absorb(904).unwrap();
+        assert_eq!(recovered.burn_proof, Some(proof));
+        assert_eq!(recovered.status, NativeXrpAbsorbIntentStatus::Burned);
+        assert_eq!(recovered.burn_attempted, Some(true));
+        assert!(mark_native_xrp_absorb_recovered_burn_proof_in_state(
+            &mut state,
+            &expected,
+            build_icusd_burn_proof(321, 904),
+            4,
+        )
+        .is_err());
+        assert_eq!(state.get_pending_native_xrp_absorb(904).unwrap(), recovered);
+
+        let mut legacy_state = test_state();
+        let mut legacy = prepare_or_reuse_native_xrp_absorb_intent_in_state(
+            &mut legacy_state,
+            &native_xrp_plan(905, 42_000, 1_000),
+            1,
+        )
+        .expect("persist legacy-shaped intent");
+        legacy.burn_attempted = None;
+        legacy_state
+            .put_pending_native_xrp_absorb(legacy.clone())
+            .expect("persist legacy dispatch marker");
+        mark_native_xrp_absorb_recovered_burn_proof_in_state(
+            &mut legacy_state,
+            &legacy,
+            build_icusd_burn_proof(322, 905),
+            3,
+        )
+        .expect("positive exact evidence resolves legacy unknown dispatch state");
+        let recovered_legacy = legacy_state.get_pending_native_xrp_absorb(905).unwrap();
+        assert_eq!(recovered_legacy.burn_attempted, Some(true));
+        assert_eq!(
+            recovered_legacy.burn_proof,
+            Some(build_icusd_burn_proof(322, 905))
+        );
     }
 
     #[test]
