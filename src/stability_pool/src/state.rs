@@ -17,6 +17,7 @@ pub const MAX_PROCESSED_INTEREST_MINT_BLOCKS: usize = 10_000;
 /// Maximum lifetime source receipts retained for unallocated-interest forwards.
 /// At capacity, new receipts remain pending at the backend for reconciliation.
 pub const MAX_UNALLOCATED_INTEREST_MINT_RECEIPTS: usize = 10_000;
+const MAX_PENDING_SP_LIQUIDATIONS_V2: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InterestMintReceiptStatus {
@@ -117,6 +118,12 @@ pub struct StabilityPoolState {
     pub configuration: PoolConfiguration,
     pub liquidation_history: Vec<PoolLiquidationRecord>,
     pub in_flight_liquidations: BTreeSet<u64>,
+    /// Additive, disabled-by-default journal for receipt-bound liquidation.
+    /// The existing liquidation executor does not admit or consume these rows.
+    #[serde(default)]
+    pub next_sp_liquidation_request_id: Option<u64>,
+    #[serde(default)]
+    pub pending_sp_liquidations_v2: Option<BTreeMap<u64, PendingSpLiquidationV2>>,
     /// Durable identity for 3USD reserve absorbs. The row is written before
     /// the backend call so an ambiguous reply retries the same backend request.
     #[serde(default)]
@@ -232,6 +239,8 @@ impl Default for StabilityPoolState {
             },
             liquidation_history: Vec::new(),
             in_flight_liquidations: BTreeSet::new(),
+            next_sp_liquidation_request_id: Some(1),
+            pending_sp_liquidations_v2: Some(BTreeMap::new()),
             pending_three_usd_absorbs: Some(BTreeMap::new()),
             next_three_usd_absorb_id: Some(1),
             three_usd_absorb_recovery_cursor: None,
@@ -283,6 +292,126 @@ pub const MAX_COMPLETED_CFX_CLAIM_PAYOUT_RECOVERIES: usize = 10_000;
 pub const MAX_XRP_SP_PAYOUT_ALLOCATIONS: usize = 500;
 
 impl StabilityPoolState {
+    /// Initialize fields added after older snapshots were written. Existing
+    /// rows are retained, and a missing allocator advances past every retained
+    /// request ID; overflow leaves it unavailable so admission fails closed.
+    pub fn initialize_sp_liquidation_v2_journal(&mut self) {
+        if self.pending_sp_liquidations_v2.is_none() {
+            self.pending_sp_liquidations_v2 = Some(BTreeMap::new());
+        }
+        if self.next_sp_liquidation_request_id.is_none() {
+            let rows = self.pending_sp_liquidations_v2.as_ref().expect("journal initialized");
+            self.next_sp_liquidation_request_id = match rows.keys().next_back().copied() {
+                Some(last) => last.checked_add(1),
+                None => Some(1),
+            };
+        }
+    }
+
+    /// Reserve a monotonic request ID and pin the complete local request tuple
+    /// before any caller can begin a V2 liquidation side effect.
+    pub fn prepare_sp_liquidation_v2(
+        &mut self,
+        request: SpLiquidationV2Request,
+        stability_pool: Principal,
+        stablecoin_ledger: Principal,
+        collateral_type: Principal,
+        stable_tuple: SpLiquidationV2StableTuple,
+    ) -> Result<PendingSpLiquidationV2, StabilityPoolError> {
+        if self.pending_sp_liquidations_v2.as_ref().is_none_or(|rows| {
+            rows.len() >= MAX_PENDING_SP_LIQUIDATIONS_V2
+                || rows.contains_key(&request.request_id)
+        }) || self.next_sp_liquidation_request_id != Some(request.request_id)
+            || request.amount == 0
+            || stablecoin_ledger != stable_tuple.ledger
+            || stable_tuple.amount != request.amount
+            || stable_tuple.from.owner != stability_pool
+            || stable_tuple.from.subaccount.is_some()
+            || stable_tuple.spender.owner != self.protocol_canister_id
+            || stable_tuple.spender.subaccount.is_some()
+            || stable_tuple.to.owner != self.protocol_canister_id
+            || stable_tuple.to.subaccount.is_some()
+        {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        let next_id = request
+            .request_id
+            .checked_add(1)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        let row = PendingSpLiquidationV2 {
+            request: request.clone(),
+            stability_pool,
+            backend_canister: self.protocol_canister_id,
+            stablecoin_ledger,
+            collateral_type,
+            stable_tuple,
+            stable_receipt: None,
+            payout_receipt: None,
+            pending_collateral_allocations: BTreeMap::new(),
+            phase: SpLiquidationV2Phase::Prepared,
+        };
+        self.pending_sp_liquidations_v2
+            .as_mut()
+            .ok_or(StabilityPoolError::SystemBusy)?
+            .insert(request.request_id, row.clone());
+        self.next_sp_liquidation_request_id = Some(next_id);
+        Ok(row)
+    }
+
+    /// Record receipts that the caller has already verified against the exact
+    /// backend result and ledger blocks, then quarantine depositor allocations.
+    /// Enforces the pinned transfer counterparties; does not touch claim balances.
+    pub(crate) fn record_verified_sp_liquidation_v2_receipts(
+        &mut self,
+        request_id: u64,
+        stable_receipt: SpLiquidationV2StableReceipt,
+        payout_receipt: SpLiquidationV2PayoutReceipt,
+        allocations: BTreeMap<Principal, u64>,
+    ) -> Result<(), StabilityPoolError> {
+        let row = self.pending_sp_liquidations_v2
+            .as_mut()
+            .and_then(|rows| rows.get_mut(&request_id))
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        if row.stable_receipt.as_ref() == Some(&stable_receipt)
+            && row.payout_receipt.as_ref() == Some(&payout_receipt)
+            && row.pending_collateral_allocations == allocations
+        {
+            return Ok(());
+        }
+        let allocated = allocations.values().try_fold(0u64, |sum, value| sum.checked_add(*value))
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        let net_collateral = payout_receipt
+            .tuple
+            .gross_amount
+            .checked_sub(payout_receipt.tuple.fee)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        if row.phase != SpLiquidationV2Phase::Prepared
+            || stable_receipt.tuple != row.stable_tuple
+            || stable_receipt.tuple.ledger != row.stablecoin_ledger
+            || stable_receipt.tuple.from.owner != row.stability_pool
+            || stable_receipt.tuple.from.subaccount.is_some()
+            || stable_receipt.tuple.spender.owner != row.backend_canister
+            || stable_receipt.tuple.spender.subaccount.is_some()
+            || stable_receipt.tuple.to.owner != row.backend_canister
+            || stable_receipt.tuple.to.subaccount.is_some()
+            || payout_receipt.tuple.ledger != row.collateral_type
+            || payout_receipt.tuple.source.owner != row.backend_canister
+            || payout_receipt.tuple.source.subaccount.is_some()
+            || payout_receipt.tuple.destination.owner != row.stability_pool
+            || payout_receipt.tuple.destination.subaccount.is_some()
+            || payout_receipt.tuple.collateral_type != row.collateral_type
+            || allocated != net_collateral
+            || allocations.values().any(|amount| *amount == 0)
+        {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        row.stable_receipt = Some(stable_receipt);
+        row.payout_receipt = Some(payout_receipt);
+        row.pending_collateral_allocations = allocations;
+        row.phase = SpLiquidationV2Phase::StableReceiptRecorded;
+        Ok(())
+    }
+
     /// Allocate a strictly increasing ICRC-1 created_at_time value.
     pub fn allocate_outbound_payout_timestamp(
         &mut self,
@@ -3838,6 +3967,8 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             configuration: v1.configuration,
             liquidation_history: v1.liquidation_history,
             in_flight_liquidations: v1.in_flight_liquidations,
+            next_sp_liquidation_request_id: Some(1),
+            pending_sp_liquidations_v2: Some(BTreeMap::new()),
             pending_three_usd_absorbs: Some(BTreeMap::new()),
             next_three_usd_absorb_id: Some(1),
             three_usd_absorb_recovery_cursor: None,
@@ -3981,6 +4112,116 @@ pub fn load_from_stable_memory() {
 mod tests {
     use super::*;
     use candid::Encode;
+
+    #[test]
+    fn sp_v2_journal_pins_tuple_and_keeps_allocations_quarantined() {
+        use icrc_ledger_types::icrc1::account::Account;
+        let mut state = StabilityPoolState::default();
+        let user = Principal::from_slice(&[71]);
+        let stability_pool = Principal::from_slice(&[76]);
+        let backend = Principal::from_slice(&[77]);
+        let ledger = icusd_ledger();
+        let collateral = icp_ledger();
+        state.protocol_canister_id = backend;
+        let account = |owner| Account { owner, subaccount: None };
+        let stable_tuple = SpLiquidationV2StableTuple {
+            ledger,
+            from: account(stability_pool),
+            spender: account(backend),
+            to: account(backend),
+            amount: 500,
+            fee: 10,
+            memo: vec![1, 2],
+            created_at_time_ns: 99,
+        };
+        let request = SpLiquidationV2Request {
+            request_id: 1,
+            vault_id: 44,
+            amount: 500,
+            token: SpLiquidationToken::IcUsd,
+        };
+        state.prepare_sp_liquidation_v2(
+            request.clone(), stability_pool, ledger, collateral, stable_tuple.clone(),
+        ).unwrap();
+        let stable_receipt = SpLiquidationV2StableReceipt { block_index: 8, tuple: stable_tuple };
+        let payout_tuple = SpLiquidationV2PayoutTuple {
+            ledger: collateral,
+            source: account(backend),
+            destination: account(stability_pool),
+            gross_amount: 10,
+            fee: 1,
+            created_at_time_ns: 100,
+            collateral_type: collateral,
+        };
+        let payout_receipt = SpLiquidationV2PayoutReceipt { block_index: 9, tuple: payout_tuple };
+        let allocations = BTreeMap::from([(user, 9)]);
+        let wrong_destination = SpLiquidationV2PayoutReceipt {
+            block_index: 9,
+            tuple: SpLiquidationV2PayoutTuple {
+                destination: account(user),
+                ..payout_receipt.tuple.clone()
+            },
+        };
+        assert!(state.record_verified_sp_liquidation_v2_receipts(
+            1,
+            stable_receipt.clone(),
+            wrong_destination,
+            allocations.clone(),
+        ).is_err());
+        let underflow_receipt = SpLiquidationV2PayoutReceipt {
+            block_index: 10,
+            tuple: SpLiquidationV2PayoutTuple {
+                ledger: collateral,
+                source: account(backend),
+                destination: account(user),
+                gross_amount: 0,
+                fee: 1,
+                created_at_time_ns: 101,
+                collateral_type: collateral,
+            },
+        };
+        assert!(state.record_verified_sp_liquidation_v2_receipts(
+            1,
+            stable_receipt.clone(),
+            underflow_receipt,
+            BTreeMap::new(),
+        ).is_err());
+        // The allocation total must equal gross less the exact ledger fee.
+        assert!(state.record_verified_sp_liquidation_v2_receipts(
+            1,
+            stable_receipt.clone(),
+            payout_receipt.clone(),
+            BTreeMap::from([(user, 10)]),
+        ).is_err());
+        state.record_verified_sp_liquidation_v2_receipts(
+            1, stable_receipt.clone(), payout_receipt.clone(), allocations.clone(),
+        ).unwrap();
+        // Exact duplicate receipt delivery is a no-op; mismatched allocation
+        // content is rejected while the original allocation stays quarantined.
+        state.record_verified_sp_liquidation_v2_receipts(
+            1, stable_receipt.clone(), payout_receipt.clone(), allocations.clone(),
+        ).unwrap();
+        assert!(state.record_verified_sp_liquidation_v2_receipts(
+            1, stable_receipt, payout_receipt, BTreeMap::from([(user, 10)]),
+        ).is_err());
+        let pending = state.pending_sp_liquidations_v2.as_ref().unwrap().get(&1).unwrap();
+        assert_eq!(pending.phase, SpLiquidationV2Phase::StableReceiptRecorded);
+        assert_eq!(pending.pending_collateral_allocations, allocations);
+        assert_eq!(state.deposits.get(&user).and_then(|p| p.collateral_gains.get(&collateral)), None);
+
+        let retained_rows = state.pending_sp_liquidations_v2.clone();
+        state.next_sp_liquidation_request_id = None;
+        state.initialize_sp_liquidation_v2_journal();
+        assert_eq!(state.pending_sp_liquidations_v2, retained_rows);
+        assert_eq!(state.next_sp_liquidation_request_id, Some(2));
+
+        let mut legacy_snapshot = StabilityPoolState::default();
+        legacy_snapshot.pending_sp_liquidations_v2 = None;
+        legacy_snapshot.next_sp_liquidation_request_id = None;
+        legacy_snapshot.initialize_sp_liquidation_v2_journal();
+        assert!(legacy_snapshot.pending_sp_liquidations_v2.unwrap().is_empty());
+        assert_eq!(legacy_snapshot.next_sp_liquidation_request_id, Some(1));
+    }
 
     #[test]
     fn deposit_transfer_timestamps_are_unique_within_a_round_and_persisted() {

@@ -666,6 +666,81 @@ pub struct PendingOutboundPayoutStatus {
     pub candidate_block_index_raw: Option<String>,
 }
 
+/// Token class selected by a receipt-bound SP liquidation request.
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpLiquidationToken {
+    IcUsd,
+    CKUSDT,
+    CKUSDC,
+}
+
+/// Immutable request identity. The ledger and collateral are pinned on the
+/// local journal row alongside this caller-facing tuple.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2Request {
+    pub request_id: u64,
+    pub vault_id: u64,
+    pub amount: u64,
+    pub token: SpLiquidationToken,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2StableTuple {
+    pub ledger: Principal,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub spender: icrc_ledger_types::icrc1::account::Account,
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    pub amount: u64,
+    pub fee: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2StableReceipt {
+    pub block_index: u64,
+    pub tuple: SpLiquidationV2StableTuple,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2PayoutTuple {
+    pub ledger: Principal,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub gross_amount: u64,
+    pub fee: u64,
+    pub created_at_time_ns: u64,
+    pub collateral_type: Principal,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2PayoutReceipt {
+    pub block_index: u64,
+    pub tuple: SpLiquidationV2PayoutTuple,
+}
+
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpLiquidationV2Phase {
+    Prepared,
+    StableReceiptRecorded,
+}
+
+/// Local journal record. Allocations stay quarantined here until a future
+/// terminal transition atomically materializes gains or proves full refund.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingSpLiquidationV2 {
+    pub request: SpLiquidationV2Request,
+    pub stability_pool: Principal,
+    pub backend_canister: Principal,
+    pub stablecoin_ledger: Principal,
+    pub collateral_type: Principal,
+    pub stable_tuple: SpLiquidationV2StableTuple,
+    pub stable_receipt: Option<SpLiquidationV2StableReceipt>,
+    pub payout_receipt: Option<SpLiquidationV2PayoutReceipt>,
+    pub pending_collateral_allocations: BTreeMap<Principal, u64>,
+    pub phase: SpLiquidationV2Phase,
+}
+
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingRefundPayoutAttempt {
     pub refund_id: u64,

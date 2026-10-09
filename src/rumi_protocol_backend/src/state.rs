@@ -2218,6 +2218,14 @@ pub struct State {
     /// withdrawals. `serde(default)` keeps older snapshots decoding cleanly.
     #[serde(default)]
     pub pending_3usd_refunds: BTreeMap<u128, PendingThreeUsdRefund>,
+    /// V2 SP liquidation request identities and status, keyed by SP and ID.
+    /// Empty in legacy snapshots and until V2 admission is explicitly wired.
+    #[serde(default)]
+    pub sp_liquidation_v2_journals: BTreeMap<(Principal, u64), SpLiquidationV2Journal>,
+    /// Reserved monotonic acknowledgement floor for a later proof-gated
+    /// compaction transition. It remains empty in this milestone.
+    #[serde(default)]
+    pub sp_liquidation_v2_acknowledged_through: BTreeMap<Principal, u64>,
     /// In-flight borrow mints keyed by vault. Their debt counts against both
     /// the collateral ceiling and global cap until confirmed or explicitly
     /// cleared by a ledger response that guarantees no transfer occurred.
@@ -3049,6 +3057,14 @@ pub struct StoredXrpSpAbsorbPreflight {
     pub expires_at_ns: u64,
 }
 
+/// Additive persistent V2 request journal. This state is intentionally
+/// dormant until a later milestone wires an authenticated admission path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct SpLiquidationV2Journal {
+    pub request: crate::SpLiquidationV2Request,
+    pub status: crate::SpLiquidationV2Status,
+}
+
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
 /// old CBOR snapshots. Never used for actual State construction (use From<InitArg>).
 impl Default for State {
@@ -3065,6 +3081,8 @@ impl Default for State {
             payout_history_scan_count: 0,
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
+            sp_liquidation_v2_journals: BTreeMap::new(),
+            sp_liquidation_v2_acknowledged_through: BTreeMap::new(),
             pending_borrow_mints: BTreeMap::new(),
             liquidity_withdraw_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
@@ -3224,6 +3242,287 @@ impl Default for State {
     }
 }
 
+/// Pure, in-memory admission transition for the first V2 backend milestone.
+/// This is deliberately not connected to an endpoint or ledger dispatch. Only
+/// icUSD is supported here; CKUSDT, CKUSDC, and 3USD remain unsupported.
+pub(crate) fn admit_sp_liquidation_v2_journal(
+    state: &mut State,
+    stability_pool: Principal,
+    backend: Principal,
+    request: crate::SpLiquidationV2Request,
+    pull: crate::SpLiquidationStablePullTuple,
+) -> Result<(), String> {
+    let key = (stability_pool, request.request_id);
+    if let Some(existing) = state.sp_liquidation_v2_journals.get(&key) {
+        return if existing.request == request
+            && matches!(
+                &existing.status,
+                crate::SpLiquidationV2Status::StablePullPending { tuple, .. } if tuple == &pull
+            )
+        {
+            Ok(())
+        } else {
+            Err("SP liquidation request ID is already bound to another payload".into())
+        };
+    }
+    let acknowledged = state
+        .sp_liquidation_v2_acknowledged_through
+        .get(&stability_pool)
+        .copied()
+        .unwrap_or(0);
+    let next_request_id = acknowledged
+        .checked_add(1)
+        .ok_or_else(|| "SP liquidation request ID sequence is exhausted".to_string())?;
+    if request.request_id == 0 || request.request_id != next_request_id {
+        return Err("SP liquidation request ID is not the next sequence value".into());
+    }
+    if state
+        .sp_liquidation_v2_journals
+        .keys()
+        .any(|(pool, _)| *pool == stability_pool)
+    {
+        return Err("an earlier SP liquidation request is unresolved".into());
+    }
+    let approval = &request.approval.tuple;
+    if request.token != crate::SpLiquidationToken::IcUsd
+        || stability_pool == Principal::anonymous()
+        || backend == Principal::anonymous()
+        || request.amount == 0
+        || request.vault_id == 0
+        || approval.ledger != state.icusd_ledger_principal
+        || approval.ledger != pull.ledger
+        || approval.owner.owner != stability_pool
+        || approval.owner.subaccount.is_some()
+        || approval.spender.owner != backend
+        || approval.spender.subaccount.is_some()
+        || approval.allowance_raw < request.amount
+        || approval.expires_at_ns <= approval.created_at_time_ns
+        || pull.created_at_time_ns < approval.created_at_time_ns
+        || pull.created_at_time_ns >= approval.expires_at_ns
+        || pull.amount_raw != request.amount
+        || pull.fee_raw != 0
+        || pull.from.owner != stability_pool
+        || pull.from.subaccount.is_some()
+        || pull.spender.owner != backend
+        || pull.spender.subaccount.is_some()
+        || pull.to.owner != backend
+        || pull.to.subaccount.is_some()
+        || pull.ledger == Principal::anonymous()
+    {
+        return Err("approval or stable pull tuple does not bind an icUSD SP/backend transfer".into());
+    }
+
+    state.sp_liquidation_v2_journals.insert(
+        key,
+        SpLiquidationV2Journal {
+            request,
+            status: crate::SpLiquidationV2Status::StablePullPending {
+                tuple: pull,
+                candidate_block_index: None,
+                last_error: None,
+            },
+        },
+    );
+    Ok(())
+}
+
+/// Record a retryable failure on a pending pull without changing the pinned
+/// tuple, candidate receipt, or status variant. Terminal transitions and
+/// compaction are intentionally absent until their receipt proofs are wired.
+pub(crate) fn record_sp_liquidation_v2_pull_error(
+    state: &mut State,
+    stability_pool: Principal,
+    request_id: u64,
+    error: String,
+) -> Result<(), String> {
+    let journal = state
+        .sp_liquidation_v2_journals
+        .get_mut(&(stability_pool, request_id))
+        .ok_or_else(|| "SP liquidation journal row is missing".to_string())?;
+    match &mut journal.status {
+        crate::SpLiquidationV2Status::StablePullPending { last_error, .. } => {
+            *last_error = Some(error);
+            Ok(())
+        }
+        _ => Err("only a pending stable pull can record a retryable error".into()),
+    }
+}
+
+#[cfg(test)]
+mod sp_liquidation_v2_state_tests {
+    use super::*;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn request(
+        pool: Principal,
+        backend: Principal,
+        request_id: u64,
+    ) -> crate::SpLiquidationV2Request {
+        let ledger = Principal::from_slice(&[3]);
+        crate::SpLiquidationV2Request {
+            request_id,
+            vault_id: 9,
+            amount: 100,
+            token: crate::SpLiquidationToken::IcUsd,
+            approval: crate::SpLiquidationApprovalReceipt {
+                block_index: 7,
+                tuple: crate::SpLiquidationApprovalTuple {
+                    ledger,
+                    owner: Account {
+                        owner: pool,
+                        subaccount: None,
+                    },
+                    spender: Account {
+                        owner: backend,
+                        subaccount: None,
+                    },
+                    allowance_raw: 100,
+                    fee_raw: 10,
+                    memo: vec![1],
+                    created_at_time_ns: 10,
+                    expires_at_ns: 20,
+                },
+            },
+        }
+    }
+
+    fn pull(
+        pool: Principal,
+        backend: Principal,
+        request: &crate::SpLiquidationV2Request,
+    ) -> crate::SpLiquidationStablePullTuple {
+        crate::SpLiquidationStablePullTuple {
+            op_nonce: 11,
+            ledger: request.approval.tuple.ledger,
+            from: Account {
+                owner: pool,
+                subaccount: None,
+            },
+            spender: Account {
+                owner: backend,
+                subaccount: None,
+            },
+            to: Account {
+                owner: backend,
+                subaccount: None,
+            },
+            amount_raw: request.amount,
+            fee_raw: 0,
+            memo: vec![2],
+            created_at_time_ns: 12,
+        }
+    }
+
+    #[test]
+    fn legacy_state_decode_defaults_v2_journal_and_replay_fence_off() {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&State::default(), &mut bytes).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let mut fields = match value {
+            ciborium::Value::Map(fields) => fields,
+            other => panic!("expected state map, got {other:?}"),
+        };
+        fields.retain(|(key, _)| {
+            !matches!(key, ciborium::Value::Text(name)
+                if name == "sp_liquidation_v2_journals"
+                    || name == "sp_liquidation_v2_acknowledged_through")
+        });
+        let mut old_bytes = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(fields), &mut old_bytes).unwrap();
+        let decoded: State = ciborium::de::from_reader(old_bytes.as_slice()).unwrap();
+        assert!(decoded.sp_liquidation_v2_journals.is_empty());
+        assert!(decoded.sp_liquidation_v2_acknowledged_through.is_empty());
+    }
+
+    #[test]
+    fn icusd_journal_admission_is_idempotent_and_pending_error_keeps_tuple_pinned() {
+        let pool = Principal::from_slice(&[1]);
+        let backend = Principal::from_slice(&[2]);
+        let req = request(pool, backend, 1);
+        let mut state = State::default();
+        state.icusd_ledger_principal = req.approval.tuple.ledger;
+        admit_sp_liquidation_v2_journal(
+            &mut state,
+            pool,
+            backend,
+            req.clone(),
+            pull(pool, backend, &req),
+        )
+        .unwrap();
+        assert!(admit_sp_liquidation_v2_journal(
+            &mut state,
+            pool,
+            backend,
+            req.clone(),
+            pull(pool, backend, &req)
+        )
+        .is_ok());
+        let mut changed_pull = pull(pool, backend, &req);
+        changed_pull.op_nonce += 1;
+        assert!(admit_sp_liquidation_v2_journal(
+            &mut state,
+            pool,
+            backend,
+            req.clone(),
+            changed_pull
+        )
+        .is_err());
+        assert!(admit_sp_liquidation_v2_journal(
+            &mut state,
+            pool,
+            backend,
+            request(pool, backend, 2),
+            pull(pool, backend, &req)
+        )
+        .is_err());
+        record_sp_liquidation_v2_pull_error(
+            &mut state,
+            pool,
+            1,
+            "temporary failure".into(),
+        )
+        .unwrap();
+        let journal = &state.sp_liquidation_v2_journals[&(pool, 1)];
+        assert!(matches!(
+            &journal.status,
+            crate::SpLiquidationV2Status::StablePullPending { tuple, last_error: Some(error), .. }
+                if tuple == &pull(pool, backend, &req) && error == "temporary failure"
+        ));
+    }
+
+    #[test]
+    fn ckusd_stable_tokens_are_rejected_by_this_disabled_first_milestone() {
+        let pool = Principal::from_slice(&[1]);
+        let backend = Principal::from_slice(&[2]);
+        let mut req = request(pool, backend, 1);
+        req.token = crate::SpLiquidationToken::CKUSDT;
+        let mut state = State::default();
+        assert!(admit_sp_liquidation_v2_journal(
+            &mut state,
+            pool,
+            backend,
+            req.clone(),
+            pull(pool, backend, &req)
+        )
+        .is_err());
+        assert!(state.sp_liquidation_v2_journals.is_empty());
+    }
+
+    #[test]
+    fn admission_rejects_approval_and_pull_on_unconfigured_ledger() {
+        let pool = Principal::from_slice(&[1]);
+        let backend = Principal::from_slice(&[2]);
+        let mut req = request(pool, backend, 1);
+        req.approval.tuple.ledger = Principal::from_slice(&[4]);
+        let pull = pull(pool, backend, &req);
+        let mut state = State::default();
+        state.icusd_ledger_principal = Principal::from_slice(&[3]);
+
+        assert!(admit_sp_liquidation_v2_journal(&mut state, pool, backend, req, pull).is_err());
+        assert!(state.sp_liquidation_v2_journals.is_empty());
+    }
+}
+
 impl From<InitArg> for State {
     fn from(args: InitArg) -> Self {
         let fee = Decimal::from_u64(args.fee_e8s).unwrap() / dec!(100_000_000);
@@ -3242,6 +3541,8 @@ impl From<InitArg> for State {
             payout_history_scan_count: 0,
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
+            sp_liquidation_v2_journals: BTreeMap::new(),
+            sp_liquidation_v2_acknowledged_through: BTreeMap::new(),
             pending_borrow_mints: BTreeMap::new(),
             liquidity_withdraw_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),

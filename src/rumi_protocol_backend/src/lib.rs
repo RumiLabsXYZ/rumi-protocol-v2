@@ -135,6 +135,162 @@ pub enum StableTokenType {
     CKUSDC,
 }
 
+/// Stablecoin selected by the Stability Pool for a receipt-backed
+/// liquidation. The backend V2 journal remains empty until a later milestone
+/// explicitly wires admission.
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpLiquidationToken {
+    IcUsd,
+    CKUSDT,
+    CKUSDC,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationApprovalTuple {
+    pub ledger: Principal,
+    pub owner: icrc_ledger_types::icrc1::account::Account,
+    pub spender: icrc_ledger_types::icrc1::account::Account,
+    pub allowance_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub expires_at_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationApprovalReceipt {
+    pub block_index: u64,
+    pub tuple: SpLiquidationApprovalTuple,
+}
+
+/// Caller-persisted identity for one SP liquidation. This schema is
+/// introduced ahead of any public admission endpoint.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2Request {
+    pub request_id: u64,
+    pub vault_id: u64,
+    pub amount: u64,
+    pub token: SpLiquidationToken,
+    pub approval: SpLiquidationApprovalReceipt,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationStablePullTuple {
+    pub op_nonce: u128,
+    pub ledger: Principal,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub spender: icrc_ledger_types::icrc1::account::Account,
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    pub amount_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationStablePullReceipt {
+    pub block_index: u64,
+    pub tuple: SpLiquidationStablePullTuple,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationStableRefundTuple {
+    pub op_nonce: u128,
+    pub ledger: Principal,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub principal_refund_raw: u64,
+    pub approval_fee_refund_raw: u64,
+    pub pull_fee_refund_raw: u64,
+    pub amount_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationStableRefundReceipt {
+    pub block_index: u64,
+    pub tuple: SpLiquidationStableRefundTuple,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationPayoutTuple {
+    pub op_nonce: u128,
+    pub ledger: Principal,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub gross_amount_raw: u64,
+    pub net_amount_raw: u64,
+    pub fee_raw: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub collateral_type: Principal,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationPayoutReceipt {
+    pub block_index: u64,
+    pub tuple: SpLiquidationPayoutTuple,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpLiquidationPayoutNoEffectEvidence {
+    BadFee { expected_fee_raw: u64 },
+    InsufficientFunds { reported_balance_raw: u64 },
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpLiquidationV2Status {
+    Unseen,
+    StablePullPending {
+        tuple: SpLiquidationStablePullTuple,
+        candidate_block_index: Option<u64>,
+        last_error: Option<String>,
+    },
+    StablePullRefundPending {
+        stable_pull_receipt: Option<SpLiquidationStablePullReceipt>,
+        tuple: SpLiquidationStableRefundTuple,
+        candidate_block_index: Option<u64>,
+        last_error: Option<String>,
+    },
+    StablePullRefunded {
+        stable_pull_receipt: Option<SpLiquidationStablePullReceipt>,
+        refund_receipt: SpLiquidationStableRefundReceipt,
+        reason: String,
+    },
+    CollateralPayoutPending {
+        stable_pull_receipt: SpLiquidationStablePullReceipt,
+        result: SuccessWithFee,
+        tuple: SpLiquidationPayoutTuple,
+        candidate_block_index: Option<u64>,
+        last_error: Option<String>,
+    },
+    CollateralPayoutSupersessionPending {
+        stable_pull_receipt: SpLiquidationStablePullReceipt,
+        result: SuccessWithFee,
+        predecessor: SpLiquidationPayoutTuple,
+        replacement: SpLiquidationPayoutTuple,
+        evidence: SpLiquidationPayoutNoEffectEvidence,
+        generation: u32,
+    },
+    Complete {
+        stable_pull_receipt: SpLiquidationStablePullReceipt,
+        result: SuccessWithFee,
+        payout_receipt: SpLiquidationPayoutReceipt,
+    },
+    Rejected { reason: String },
+    Acknowledged,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpLiquidationV2StatusView {
+    pub stability_pool: Principal,
+    pub request_id: u64,
+    pub request: Option<SpLiquidationV2Request>,
+    pub status: SpLiquidationV2Status,
+}
+
 /// Arguments for repaying vault with a stable token
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultArgWithToken {
@@ -290,7 +446,7 @@ pub struct Fees {
     pub redemption_fee: f64,
 }
 
-#[derive(CandidType, Deserialize, Debug)]
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct SuccessWithFee {
     pub block_index: u64,
     pub fee_amount_paid: u64,

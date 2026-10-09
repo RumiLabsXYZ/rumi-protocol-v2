@@ -145,6 +145,7 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
     state::load_from_stable_memory();
     let recovered_payouts = mutate_state(|s| {
         s.initialize_pending_outbound_payouts();
+        s.initialize_sp_liquidation_v2_journal();
         let pending = s.pending_outbound_payouts.as_ref().map_or(0, |p| p.len());
         s.reconcile_pending_outbound_payouts_after_upgrade();
         pending
