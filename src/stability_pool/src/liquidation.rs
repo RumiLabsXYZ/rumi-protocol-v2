@@ -3253,10 +3253,9 @@ async fn resolve_three_usd_absorb_status(
     }
 }
 
-/// Apply verified terminal accounting and clear the durable identity in the
-/// same stable-state mutation. `gains` is Some only when recovery is the sole
-/// source of the liquidation settlement; the normal batch has already applied
-/// its aggregate gain snapshot and calls this for the exact fee/identity leg.
+/// Apply verified terminal refund accounting and clear the durable identity in
+/// the same stable-state mutation. Backend absorb status does not prove payout,
+/// so gain-bearing settlement is held until payout proof exists.
 fn apply_three_usd_absorb_settlement(
     state: &mut StabilityPoolState,
     intent: &ThreeUsdReserveAbsorbIntent,
@@ -3266,38 +3265,11 @@ fn apply_three_usd_absorb_settlement(
     if state.get_pending_three_usd_absorb(intent.vault_id).as_ref() != Some(intent) {
         return Err(StabilityPoolError::SystemBusy);
     }
-    if let Some((consumed, net_collateral, collateral_price_e8s)) = gains {
-        let collateral_type = intent.collateral_type.ok_or_else(|| {
-            StabilityPoolError::LiquidationFailed {
-                vault_id: intent.vault_id,
-                reason: "pending 3USD absorb lacks pinned collateral type".into(),
-            }
-        })?;
-        let pinned_price = intent.collateral_price_e8s.ok_or_else(|| {
-            StabilityPoolError::LiquidationFailed {
-                vault_id: intent.vault_id,
-                reason: "pending 3USD absorb lacks pinned collateral price".into(),
-            }
-        })?;
-        if collateral_price_e8s != pinned_price {
-            return Err(StabilityPoolError::LiquidationFailed {
-                vault_id: intent.vault_id,
-                reason: "settlement collateral price differs from persisted absorb metadata".into(),
-            });
-        }
-        if !state.can_process_liquidation_gains(&collateral_type, &consumed) {
-            return Err(StabilityPoolError::LiquidationFailed {
-                vault_id: intent.vault_id,
-                reason: "pinned collateral/ledger eligibility no longer supports gain accounting".into(),
-            });
-        }
-        state.process_liquidation_gains(
-            intent.vault_id,
-            collateral_type,
-            &consumed,
-            net_collateral,
-            collateral_price_e8s,
-        );
+    if gains.is_some() {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: intent.vault_id,
+            reason: "3USD absorb gain booking is held because collateral payout proof is unavailable".into(),
+        });
     }
     state.deduct_exact_fee_from_pool(intent.ledger, fee_total_e8s)?;
     state.complete_three_usd_absorb(intent.vault_id, intent.absorb_id);
@@ -3364,33 +3336,7 @@ pub async fn recover_pending_three_usd_absorbs() {
                 }
             }
             ThreeUsdReserveAbsorbStatusResolution::Absorbed { result, ingress_fee_e8s, refund_fee_e8s } => {
-                let (Some(collateral_type), Some(collateral_price_e8s)) =
-                    (intent.collateral_type, intent.collateral_price_e8s) else {
-                    log!(INFO, "Holding legacy 3USD absorb {}: cannot book gains without immutable collateral metadata", intent.absorb_id);
-                    continue;
-                };
-                let Some(fees) = ingress_fee_e8s.checked_add(refund_fee_e8s) else { continue };
-                let collateral_fee = match call::<(), (Nat,)>(collateral_type, "icrc1_fee", ()).await {
-                    Ok((fee,)) => fee.0.to_u64().unwrap_or(FALLBACK_COLLATERAL_FEE_E8S),
-                    Err(_) => FALLBACK_COLLATERAL_FEE_E8S,
-                };
-                let realized = three_usd_realized_amount(&intent, result.liquidated_debt);
-                let mut consumed = BTreeMap::new();
-                consumed.insert(intent.ledger, realized);
-                let settled = mutate_state(|state| {
-                    let mut next = state.clone();
-                    apply_three_usd_absorb_settlement(
-                        &mut next,
-                        &intent,
-                        fees,
-                        Some((consumed, result.collateral_received.saturating_sub(collateral_fee), collateral_price_e8s)),
-                    )?;
-                    *state = next;
-                    Ok::<(), StabilityPoolError>(())
-                });
-                if let Err(error) = settled {
-                    log!(INFO, "3USD absorb {} terminal gain accounting remains held: {:?}", intent.absorb_id, error);
-                }
+                log!(INFO, "Holding 3USD absorb {} after backend absorption: ingress/refund status does not prove collateral payout; preserving intent and depositor accounting ({:?}, fees {} + {})", intent.absorb_id, result, ingress_fee_e8s, refund_fee_e8s);
             }
             ThreeUsdReserveAbsorbStatusResolution::Pending(reason) => {
                 log!(INFO, "3USD absorb {} remains held for reconciliation: {}", intent.absorb_id, reason);
@@ -3407,30 +3353,26 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         return execute_native_xrp_absorb_with_io(vault_info, &mut CdkNativeXrpAbsorbIo).await;
     }
 
-    let protocol_id = read_state(|s| s.protocol_canister_id);
-
-    // Step 1: Compute token draw
-    // Use recommended_liquidation_amount (partial cap) if available, otherwise full debt
-    let draw_amount = if vault_info.recommended_liquidation_amount > 0 {
-        vault_info.recommended_liquidation_amount
-    } else {
-        vault_info.debt_amount
-    };
-    let mut token_draw = read_state(|s| s.compute_token_draw(draw_amount, &vault_info.collateral_type));
-    if let Some(pending) = read_state(|s| s.get_pending_three_usd_absorb(vault_info.vault_id)) {
-        token_draw.insert(pending.ledger, pending.amount);
-    }
-
-    if token_draw.is_empty() {
+    let pending_intent = read_state(|s| s.get_pending_three_usd_absorb(vault_info.vault_id));
+    let Some(pending_intent) = pending_intent else {
         return LiquidationResult {
             vault_id: vault_info.vault_id,
             stables_consumed: BTreeMap::new(),
             collateral_gained: 0,
             collateral_type: vault_info.collateral_type,
             success: false,
-            error_message: Some("No stablecoins available for liquidation".to_string()),
+            error_message: Some(
+                "New stability-pool liquidation is held pending collateral payout proof".into(),
+            ),
         };
-    }
+    };
+
+    let protocol_id = read_state(|s| s.protocol_canister_id);
+
+    // Recovery may only use the pre-existing exact identity. Never compute a
+    // fresh draw for this vault, even if reconciliation clears the intent while
+    // this call is in progress.
+    let token_draw = BTreeMap::from([(pending_intent.ledger, pending_intent.amount)]);
 
     log!(
         INFO,
@@ -3443,7 +3385,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
     let mut total_collateral_gained: u64 = 0;
     let mut actual_consumed: BTreeMap<Principal, u64> = BTreeMap::new();
     let mut non_lp_outcome_unknown = false;
-    let mut successful_three_usd_absorbs: Vec<(ThreeUsdReserveAbsorbIntent, u64)> = Vec::new();
+    let mut held_absorb = false;
 
     let stablecoin_configs: BTreeMap<Principal, StablecoinConfig> =
         read_state(|s| s.stablecoin_registry.clone());
@@ -3951,34 +3893,9 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 ingress_fee_e8s,
                 refund_fee_e8s,
             } => {
-                if !intent_metadata_matches_current {
-                    log!(INFO, "Holding 3USD absorb {} because terminal gains lack matching immutable collateral metadata", intent.absorb_id);
-                    continue;
-                }
-                let absorb_fees = match ingress_fee_e8s.checked_add(refund_fee_e8s) {
-                    Some(fees) => fees,
-                    None => {
-                        log!(INFO, "3USD absorb {} fee total overflowed; preserving pending identity", intent.absorb_id);
-                        continue;
-                    }
-                };
-                successful_three_usd_absorbs.push((intent.clone(), absorb_fees));
-                // VER-002 (audit 2026-06-05): the backend caps the writedown to
-                // the vault's current debt and refunds the proportional excess
-                // 3USD (see stability_pool_liquidate_with_reserves). Record only
-                // the REALIZED 3USD using the SAME floor formula the backend
-                // refund uses. The realized amount alone drives collateral
-                // allocation; the independently verified ingress/refund fees
-                // are debited from pool balances below without collateral credit.
-                // `icusd_equiv_e8s` here equals the `icusd_debt_covered_e8s` the
-                // backend received, so the two formulas are identical.
-                let realized_3usd =
-                    three_usd_realized_amount(&intent, success.liquidated_debt);
-                actual_consumed.insert(intent.ledger, realized_3usd);
-                total_collateral_gained += success.collateral_received;
-                log!(INFO, "3USD reserves liquidation succeeded for vault {}: {} collateral, {} 3USD consumed (requested {})",
-                    vault_info.vault_id, success.collateral_received, realized_3usd, intent.amount);
-                break; // one token per vault per round
+                log!(INFO, "Holding 3USD absorb {} after backend absorption: ingress/refund status does not prove collateral payout; preserving intent and depositor accounting ({:?}, fees {} + {})", intent.absorb_id, success, ingress_fee_e8s, refund_fee_e8s);
+                held_absorb = true;
+                continue;
             }
             ThreeUsdReserveAbsorbStatusResolution::PreTransferRejected => {
                 mutate_state(|s| s.clear_pending_three_usd_absorb(intent.vault_id));
@@ -4039,20 +3956,6 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
 
         let accounting = mutate_state(|state| {
             let mut next = state.clone();
-            if !successful_three_usd_absorbs.is_empty()
-                && (!next.can_process_liquidation_gains(
-                    &vault_info.collateral_type,
-                    &actual_consumed,
-                ) || successful_three_usd_absorbs.iter().any(|(intent, _)| {
-                    intent.collateral_type != Some(vault_info.collateral_type)
-                        || intent.collateral_price_e8s != Some(vault_info.collateral_price_e8s)
-                }))
-            {
-                return Err(StabilityPoolError::LiquidationFailed {
-                    vault_id: vault_info.vault_id,
-                    reason: "3USD terminal gain accounting no longer matches its pinned metadata".into(),
-                });
-            }
             next.process_liquidation_gains(
                 vault_info.vault_id,
                 vault_info.collateral_type,
@@ -4060,9 +3963,6 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 net_collateral,
                 vault_info.collateral_price_e8s,
             );
-            for (intent, fee_total) in &successful_three_usd_absorbs {
-                apply_three_usd_absorb_settlement(&mut next, intent, *fee_total, None)?;
-            }
             *state = next;
             Ok::<(), StabilityPoolError>(())
         });
@@ -4095,7 +3995,11 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             collateral_gained: 0,
             collateral_type: vault_info.collateral_type,
             success: false,
-            error_message: Some("All liquidation calls failed".to_string()),
+            error_message: Some(if held_absorb {
+                "Backend absorbed 3USD; Stability Pool settlement awaits collateral payout proof".to_string()
+            } else {
+                "All liquidation calls failed".to_string()
+            }),
         }
     };
 
@@ -4500,7 +4404,7 @@ mod tests {
     }
 
     #[test]
-    fn three_usd_terminal_settlement_completes_exact_intent_once() {
+    fn three_usd_terminal_refund_completes_exact_intent_once() {
         let mut state = StabilityPoolState::default();
         let ledger = principal(13);
         let intent = state.prepare_three_usd_absorb(
@@ -4515,7 +4419,38 @@ mod tests {
     }
 
     #[test]
-    fn three_usd_recovery_holds_if_pinned_gain_eligibility_no_longer_exists() {
+    fn ordinary_liquidation_without_persisted_three_usd_intent_is_held_before_calls() {
+        let mut state = test_state();
+        let owner = user_a();
+        let ledger = icusd_ledger();
+        add_deposit_direct(&mut state, owner, ledger, 50_000_000);
+        replace_state(state);
+
+        let vault = LiquidatableVaultInfo {
+            vault_id: 4242,
+            collateral_type: principal(55),
+            debt_amount: 20_000_000,
+            collateral_amount: 1_000_000,
+            recommended_liquidation_amount: 0,
+            collateral_price_e8s: 100_000_000,
+        };
+        // This future must complete without entering any ledger or backend await.
+        // The canister call APIs have no test runtime here, so a missed early guard
+        // would fail before this assertion.
+        let result = futures::executor::block_on(execute_single_liquidation(&vault));
+
+        assert!(!result.success);
+        assert!(result.error_message.as_deref().unwrap().contains("pending collateral payout proof"));
+        read_state(|state| {
+            assert!(state.get_pending_three_usd_absorb(vault.vault_id).is_none());
+            assert_eq!(state.total_stablecoin_balances.get(&ledger), Some(&50_000_000));
+            assert_eq!(state.deposits[&owner].stablecoin_balances.get(&ledger), Some(&50_000_000));
+        });
+        replace_state(StabilityPoolState::default());
+    }
+
+    #[test]
+    fn three_usd_absorbed_gain_settlement_stays_pending_without_payout_proof() {
         let mut state = StabilityPoolState::default();
         let ledger = principal(13);
         let intent = state.prepare_three_usd_absorb(
@@ -4529,9 +4464,11 @@ mod tests {
             0,
             Some((consumed, 1, 100_000_000)),
         );
-        assert!(result.is_err(), "unregistered collateral must not silently no-op gain booking");
+        assert!(result.is_err(), "backend absorption is not proof that collateral reached the pool");
         assert_eq!(state.get_pending_three_usd_absorb(42), Some(intent));
         assert!(state.completed_three_usd_absorbs.as_ref().unwrap().is_empty());
+        assert!(state.total_stablecoin_balances.is_empty());
+        assert!(state.deposits.is_empty());
     }
 
     #[test]
