@@ -3,7 +3,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import path from 'path';
 
 /**
- * Test-only config for src/lib/utils/dogeBorrowPage.fixture.spec.ts.
+ * Test-only config for DOGE borrow recovery component/route specs.
  *
  * Mounting the real +page.svelte with `mount()`/`unmount()` from 'svelte'
  * requires the client-side runtime, but Vite's default "node" resolve
@@ -32,7 +32,10 @@ export default defineConfig({
     globals: true,
     hookTimeout: 60000,
     testTimeout: 30000,
-    include: ['src/lib/utils/dogeBorrowPage.fixture.spec.ts'],
+    include: [
+      'src/lib/utils/dogeBorrowPage.fixture.spec.ts',
+      'src/lib/components/vault/PendingBorrowMintRecovery.spec.ts',
+    ],
     setupFiles: ['src/tests/vitest-setup.ts'],
   },
 });

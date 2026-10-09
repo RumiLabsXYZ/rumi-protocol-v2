@@ -509,6 +509,47 @@ pub fn validate_icrc1_mint_block(
     Ok(())
 }
 
+/// Validate a positive ICRC-3 receipt for a persisted borrow mint tuple.
+/// It accepts the ICRC-3 backward-compatible form without `btype` only when
+/// `tx.op = "mint"`; a present block type must be exactly `1mint`.
+pub fn validate_icrc3_borrow_mint_block(
+    block: &DecodedBlock,
+    tuple: &crate::state::BorrowMintTuple,
+) -> Result<(), String> {
+    if block.op != "mint" || block.btype.as_deref().is_some_and(|kind| kind != "1mint") {
+        return Err("ICRC-3 block is not an exact ICRC-1 mint block".into());
+    }
+    validate_icrc3_transfer_block(
+        block,
+        None,
+        Account {
+            owner: tuple.destination,
+            subaccount: None,
+        },
+        tuple.amount_e8s,
+        Some(&tuple.memo),
+        Some(tuple.created_at_time_ns),
+    )?;
+    if block.fee.is_some_and(|fee| fee != 0) {
+        return Err("ICRC-3 mint receipt unexpectedly records a nonzero fee".into());
+    }
+    Ok(())
+}
+
+/// Fetch an archive-aware candidate block and validate it against the exact
+/// persisted mint arguments. Candidate indexes are untrusted caller input.
+pub async fn verify_icrc3_borrow_mint_block(
+    ledger: Principal,
+    block_index: u64,
+    tuple: &crate::state::BorrowMintTuple,
+) -> Result<(), String> {
+    if tuple.ledger != ledger {
+        return Err("borrow mint candidate ledger differs from the persisted tuple".into());
+    }
+    let block = fetch_icrc3_block(ledger, block_index).await?;
+    validate_icrc3_borrow_mint_block(&block, tuple)
+}
+
 fn accounts_match_default_subaccount(actual: &Account, expected: &Account) -> bool {
     actual.owner == expected.owner
         && match (&actual.subaccount, &expected.subaccount) {
@@ -620,6 +661,99 @@ pub async fn icrc3_log_length(ledger: Principal) -> Result<u64, String> {
         .0
         .to_u64()
         .ok_or_else(|| "ICRC-3 log length exceeds u64".into())
+}
+
+#[cfg(test)]
+mod borrow_mint_receipt_tests {
+    use super::{decode_block, make_test_block, validate_icrc3_borrow_mint_block, DecodedBlock};
+    use crate::state::BorrowMintTuple;
+    use candid::Principal;
+    use icrc_ledger_types::icrc::generic_value::ICRC3Value;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn tuple() -> BorrowMintTuple {
+        BorrowMintTuple {
+            ledger: Principal::from_slice(&[1]),
+            destination: Principal::from_slice(&[2]),
+            amount_e8s: 123_456,
+            memo: [0x5a; 16],
+            created_at_time_ns: 987_654,
+            op_nonce: 77,
+        }
+    }
+
+    fn block(tuple: &BorrowMintTuple) -> DecodedBlock {
+        DecodedBlock {
+            btype: Some("1mint".into()),
+            op: "mint".into(),
+            from: None,
+            to: Some(Account { owner: tuple.destination, subaccount: None }),
+            spender: None,
+            amount: u128::from(tuple.amount_e8s),
+            fee: None,
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(tuple.memo.to_vec()),
+        }
+    }
+
+    #[test]
+    fn receipt_requires_exact_mint_schema_and_persisted_tuple() {
+        let tuple = tuple();
+        let expected = block(&tuple);
+        assert!(validate_icrc3_borrow_mint_block(&expected, &tuple).is_ok());
+
+        let mut changed = expected.clone();
+        changed.btype = None;
+        assert!(validate_icrc3_borrow_mint_block(&changed, &tuple).is_ok());
+        changed.btype = Some("1xfer".into());
+        assert!(validate_icrc3_borrow_mint_block(&changed, &tuple).is_err());
+        let mut changed = expected.clone();
+        changed.op = "xfer".into();
+        assert!(validate_icrc3_borrow_mint_block(&changed, &tuple).is_err());
+        let mut changed = expected.clone();
+        changed.amount += 1;
+        assert!(validate_icrc3_borrow_mint_block(&changed, &tuple).is_err());
+        let mut changed = expected.clone();
+        changed.to.as_mut().unwrap().owner = Principal::from_slice(&[3]);
+        assert!(validate_icrc3_borrow_mint_block(&changed, &tuple).is_err());
+        let mut changed = expected.clone();
+        changed.memo.as_mut().unwrap()[0] ^= 1;
+        assert!(validate_icrc3_borrow_mint_block(&changed, &tuple).is_err());
+        let mut changed = expected;
+        changed.created_at_time = Some(tuple.created_at_time_ns + 1);
+        assert!(validate_icrc3_borrow_mint_block(&changed, &tuple).is_err());
+    }
+
+    #[test]
+    fn decoder_rejects_conflicting_btype_and_tx_op_but_accepts_legacy_mint() {
+        let tuple = tuple();
+        let mut legacy = make_test_block(
+            "mint",
+            None,
+            Some(Account { owner: tuple.destination, subaccount: None }),
+            tuple.amount_e8s,
+            Some(&tuple.memo),
+            false,
+        );
+        if let ICRC3Value::Map(block) = &mut legacy {
+            if let Some(ICRC3Value::Map(tx)) = block.get_mut("tx") {
+                tx.insert(
+                    "ts".into(),
+                    ICRC3Value::Nat(candid::Nat::from(tuple.created_at_time_ns)),
+                );
+            }
+        }
+        let decoded = decode_block(&legacy).expect("legacy tx.op mint schema decodes");
+        assert!(validate_icrc3_borrow_mint_block(&decoded, &tuple).is_ok());
+
+        if let ICRC3Value::Map(block) = &mut legacy {
+            block.insert("btype".into(), ICRC3Value::Text("1mint".into()));
+            if let Some(ICRC3Value::Map(tx)) = block.get_mut("tx") {
+                tx.insert("op".into(), ICRC3Value::Text("burn".into()));
+            }
+        }
+        assert!(decode_block(&legacy).is_err());
+    }
 }
 
 /// Pure-logic validator. Asserts `block` matches `expected` for the given

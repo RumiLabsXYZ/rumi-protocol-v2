@@ -4,7 +4,7 @@ use crate::state::{
     PendingPayoutNoEffectProof, RateCurveV2, State, PendingAmm1Donation,
     HeldAmm1Donation,
 };
-use crate::storage::record_event;
+use crate::storage::{record_event, record_event_at};
 use crate::vault::Vault;
 use crate::{EventTimeRange, EventTypeFilter, InitArg, Mode, StableTokenType, UpgradeArg};
 use candid::{CandidType, Principal};
@@ -3069,14 +3069,55 @@ pub fn record_borrow_from_vault(
     fee_amount: ICUSD,
     block_index: u64,
 ) {
-    record_event(&Event::BorrowFromVault {
+    record_borrow_from_vault_for_caller(
+        state,
         vault_id,
-        block_index,
-        fee_amount,
         borrowed_amount,
-        caller: Some(ic_cdk::caller()),
-        timestamp: Some(now()),
-    });
+        fee_amount,
+        block_index,
+        ic_cdk::caller(),
+    );
+}
+
+pub fn record_borrow_from_vault_for_caller(
+    state: &mut State,
+    vault_id: u64,
+    borrowed_amount: ICUSD,
+    fee_amount: ICUSD,
+    block_index: u64,
+    caller: Principal,
+) {
+    record_borrow_from_vault_at(
+        state,
+        vault_id,
+        borrowed_amount,
+        fee_amount,
+        block_index,
+        caller,
+        ic_cdk::api::time(),
+    );
+}
+
+pub fn record_borrow_from_vault_at(
+    state: &mut State,
+    vault_id: u64,
+    borrowed_amount: ICUSD,
+    fee_amount: ICUSD,
+    block_index: u64,
+    caller: Principal,
+    timestamp_ns: u64,
+) {
+    record_event_at(
+        &Event::BorrowFromVault {
+            vault_id,
+            block_index,
+            fee_amount,
+            borrowed_amount,
+            caller: Some(caller),
+            timestamp: Some(timestamp_ns),
+        },
+        timestamp_ns,
+    );
     state.borrow_from_vault(vault_id, borrowed_amount);
     // Fee is now minted to treasury in the async caller — no longer credited to liquidity pool.
 }

@@ -1124,6 +1124,16 @@ export const idlFactory = ({ IDL }) => {
     'set_at_ns' : IDL.Nat64,
     'price_e8' : IDL.Nat64,
   });
+  const BorrowMintPhase = IDL.Variant({
+    'ReceiptRecoveryRequired' : IDL.Null,
+    'MintConfirmedHeld' : IDL.Record({ 'block_index' : IDL.Nat64 }),
+    'SubmittedOrUnknown' : IDL.Null,
+  });
+  const BorrowMintStatus = IDL.Record({
+    'vault_id' : IDL.Nat64,
+    'borrowed_amount_e8s' : IDL.Nat64,
+    'phase' : BorrowMintPhase,
+  });
   const PendingIcusdRefundView = IDL.Record({
     'retry_count' : IDL.Nat8,
     'amount_e8s' : IDL.Nat64,
@@ -2035,6 +2045,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_min_icusd_amount' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_my_pending_borrow_mints' : IDL.Func(
+        [],
+        [IDL.Vec(BorrowMintStatus)],
+        ['query'],
+      ),
     'get_my_pending_icusd_refunds' : IDL.Func(
         [],
         [IDL.Vec(PendingIcusdRefundView)],
@@ -2277,6 +2292,11 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'reconcile_chain_supply' : IDL.Func([IDL.Nat32], [Result_19], []),
+    'reconcile_pending_borrow_mint_from_block' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [Result_4],
+        [],
+      ),
     'reconcile_three_usd_reserve_ingress_candidate_block' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, IDL.Nat64],
         [Result],

@@ -215,7 +215,7 @@ impl VaultLiquidationGuard {
     /// flight; the caller should back off (the stability pool, per project
     /// rule, must NOT retry — it falls through to manual, which is correct).
     pub fn new(vault_id: u64) -> Result<Self, crate::ProtocolError> {
-        Self::acquire(vault_id, None)
+        Self::acquire(vault_id, None, false)
     }
 
     /// Acquire the lock only for the exact caller/vault add-margin retry whose
@@ -225,12 +225,19 @@ impl VaultLiquidationGuard {
         vault_id: u64,
         owner: Principal,
     ) -> Result<Self, crate::ProtocolError> {
-        Self::acquire(vault_id, Some(owner))
+        Self::acquire(vault_id, Some(owner), false)
+    }
+
+    /// Only the already-authorized exact borrow retry may pass its own
+    /// pending mint lock. A pending push sweep still blocks that retry.
+    pub fn new_for_borrow_retry(vault_id: u64) -> Result<Self, crate::ProtocolError> {
+        Self::acquire(vault_id, None, true)
     }
 
     fn acquire(
         vault_id: u64,
         retry_owner: Option<Principal>,
+        allow_pending_borrow: bool,
     ) -> Result<Self, crate::ProtocolError> {
         let pending = read_state(|s| {
             s.push_sweep_journals
@@ -248,6 +255,11 @@ impl VaultLiquidationGuard {
         {
             return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
                 "Vault #{vault_id} has an unresolved push-deposit sweep; retry that exact operation"
+            )));
+        }
+        if !allow_pending_borrow && crate::state::has_pending_borrow_mint(vault_id) {
+            return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                "Vault #{vault_id} has an unresolved icUSD mint; retry the exact borrow to reconcile it"
             )));
         }
         LIQUIDATING_VAULTS.with(|set| {
@@ -422,6 +434,39 @@ mod vault_liquidation_guard_tests {
         // Once vault 42's liquidation finishes (guard dropped), it can be re-acquired.
         let _g3 = VaultLiquidationGuard::new(42).expect("re-acquire vault 42 after release");
         drop(g2);
+    }
+
+    #[test]
+    fn durable_borrow_journal_blocks_other_vault_operations_but_allows_retry() {
+        let owner = Principal::from_slice(&[7]);
+        let collateral_type = Principal::from_slice(&[8]);
+        let mut state = crate::state::State::default();
+        state.pending_borrow_mints.insert(
+            77,
+            crate::state::BorrowMintJournal {
+                vault_id: 77,
+                owner,
+                collateral_type,
+                borrowed_amount_e8s: 100,
+                fee_amount_e8s: 1,
+                tuple: crate::state::BorrowMintTuple {
+                    ledger: Principal::from_slice(&[9]),
+                    destination: owner,
+                    amount_e8s: 99,
+                    memo: [1; 16],
+                    created_at_time_ns: 1,
+                    op_nonce: 1,
+                },
+                phase: crate::state::BorrowMintPhase::SubmittedOrUnknown,
+            },
+        );
+        crate::state::replace_state(state);
+
+        assert!(VaultLiquidationGuard::new(77).is_err());
+        let retry_guard = VaultLiquidationGuard::new_for_borrow_retry(77)
+            .expect("exact borrow retry may acquire the held vault");
+        drop(retry_guard);
+        assert!(VaultLiquidationGuard::new(77).is_err());
     }
 
     #[test]

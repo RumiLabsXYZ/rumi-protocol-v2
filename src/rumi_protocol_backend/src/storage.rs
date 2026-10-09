@@ -271,8 +271,14 @@ pub fn count_events() -> u64 {
 /// every set_*, admin_*). The two logs always grow in lock-step from this
 /// point forward — index N in EVENTS aligns with index N in EVENT_TIMESTAMPS.
 pub fn record_event(event: &Event) {
+    record_event_at(event, ic_cdk::api::time());
+}
+
+/// Records an event using a caller-supplied timestamp. This is useful for
+/// deterministic operation paths that already pinned their timestamp before
+/// an inter-canister await.
+pub fn record_event_at(event: &Event, timestamp_ns: u64) {
     let bytes = encode_event(event);
-    let now = ic_cdk::api::time();
     EVENTS.with(|events| {
         events
             .borrow()
@@ -281,7 +287,7 @@ pub fn record_event(event: &Event) {
     });
     EVENT_TIMESTAMPS.with(|ts| {
         ts.borrow()
-            .append(&now)
+            .append(&timestamp_ns)
             .expect("failed to append to the event timestamp log");
     });
 }

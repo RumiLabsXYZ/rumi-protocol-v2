@@ -39,6 +39,14 @@ export interface Amm1DonationInspectionRow {
   'notify_nonce' : bigint,
   'reason' : [] | [string],
 }
+export type BorrowMintPhase = { 'ReceiptRecoveryRequired' : null } |
+  { 'MintConfirmedHeld' : { 'block_index' : bigint } } |
+  { 'SubmittedOrUnknown' : null };
+export interface BorrowMintStatus {
+  'vault_id' : bigint,
+  'borrowed_amount_e8s' : bigint,
+  'phase' : BorrowMintPhase,
+}
 export interface BotCollateralReturnProofArg {
   'block_index' : bigint,
   'claim_generation' : bigint,
@@ -1972,6 +1980,7 @@ export interface _SERVICE {
     [] | [ManualPriceInfo]
   >,
   'get_min_icusd_amount' : ActorMethod<[], bigint>,
+  'get_my_pending_borrow_mints' : ActorMethod<[], Array<BorrowMintStatus>>,
   'get_my_pending_icusd_refunds' : ActorMethod<
     [],
     Array<PendingIcusdRefundView>
@@ -2107,6 +2116,10 @@ export interface _SERVICE {
     Result
   >,
   'reconcile_chain_supply' : ActorMethod<[number], Result_19>,
+  'reconcile_pending_borrow_mint_from_block' : ActorMethod<
+    [bigint, bigint],
+    Result_4
+  >,
   'reconcile_three_usd_reserve_ingress_candidate_block' : ActorMethod<
     [bigint, bigint, bigint],
     Result

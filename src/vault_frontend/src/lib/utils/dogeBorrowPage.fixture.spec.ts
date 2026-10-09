@@ -138,6 +138,15 @@ const fx = vi.hoisted(() => {
       errorMessage: 'unset' as string | null,
       submittedIcusdRaw: 0n,
     })),
+    retryPendingBorrowMintBound: vi.fn(async (_ctx: unknown, vaultId: bigint, amount: bigint) => ({
+      kind: 'dispatched_err' as 'dispatched_err' | 'dispatched_ok' | 'predispatch_aborted' | 'ambiguous_transport',
+      vaultId: Number(vaultId),
+      blockIndex: null as number | null,
+      feePaidRaw: null as bigint | null,
+      errorMessage: 'unset' as string | null,
+      submittedIcusdRaw: amount,
+    })),
+    getMyPendingBorrowMintsBound: vi.fn(async () => [] as unknown[]),
     getVaults: vi.fn(async (_owners: unknown[]) => [] as unknown[]),
     getPublicMinterActor: vi.fn(async () => ({
       get_doge_address: vi.fn(async () => 'DUNSET0000000000000000000000000'),
@@ -181,6 +190,8 @@ vi.mock('$lib/services/protocol', () => ({
   protocolService: {
     openVaultAndBorrowBound: fx.openVaultAndBorrowBound,
     borrowFromVaultBound: fx.borrowFromVaultBound,
+    retryPendingBorrowMintBound: fx.retryPendingBorrowMintBound,
+    getMyPendingBorrowMintsBound: fx.getMyPendingBorrowMintsBound,
   },
 }));
 
@@ -190,6 +201,8 @@ vi.mock('$lib/services/protocol/apiClient', () => ({
 
 vi.mock('$lib/services/auth', () => ({
   WALLET_TYPES: { PLUG: 'plug', INTERNET_IDENTITY: 'internet-identity', OISY: 'oisy' },
+  currentWalletType: { subscribe: (run: (value: string) => void) => { run('plug'); return () => {}; } },
+  walletSessionGeneration: { subscribe: (run: (value: number) => void) => { run(1); return () => {}; } },
 }));
 
 vi.mock('$lib/services/ckdogeMinterActors', () => ({
@@ -336,6 +349,15 @@ beforeEach(() => {
     errorMessage: 'unset',
     submittedIcusdRaw: 0n,
   }));
+  fx.getMyPendingBorrowMintsBound.mockReset().mockResolvedValue([]);
+  fx.retryPendingBorrowMintBound.mockReset().mockImplementation(async (_ctx: unknown, vaultId: bigint, amount: bigint) => ({
+    kind: 'dispatched_err' as const,
+    vaultId: Number(vaultId),
+    blockIndex: null,
+    feePaidRaw: null,
+    errorMessage: 'unset',
+    submittedIcusdRaw: amount,
+  }));
   fx.getVaults.mockReset().mockResolvedValue([]);
   fx.getPublicMinterActor.mockReset().mockResolvedValue({
     get_doge_address: vi.fn(async () => 'DUNSET0000000000000000000000000'),
@@ -354,6 +376,41 @@ afterEach(() => {
   host.remove();
   localStorage.clear();
   clearToasts();
+});
+
+describe('/doge/borrow — journal recovery after lost transport reply', () => {
+  it('discovers the owner journal and retries exact raw amount even when live CR has changed', async () => {
+    const originalAmount = 50_000_001n;
+  fx.getMyPendingBorrowMintsBound.mockResolvedValue([{
+      vault_id: 77n,
+      borrowed_amount_e8s: originalAmount,
+      phase: { SubmittedOrUnknown: null },
+    }]);
+    fx.retryPendingBorrowMintBound.mockResolvedValue({
+      kind: 'dispatched_ok',
+      vaultId: 77,
+      blockIndex: 91,
+      feePaidRaw: 0n,
+      errorMessage: null,
+      submittedIcusdRaw: originalAmount,
+    });
+    connectAs(PRINCIPAL_A);
+    // The currently displayed calculator now says the requested leverage is unsafe.
+    fx.collateralState.set({ collaterals: [fakeCollateralInfo({ minimumCr: 1000 })], loading: false });
+    renderPage();
+
+    await settle();
+    expect(host.textContent).toContain('unresolved borrow of 0.50000001 icUSD');
+    const retry = findButtonByText('Retry exact 0.50000001 icUSD borrow');
+    expect(retry).toBeTruthy();
+    retry!.click();
+    await settle();
+
+    expect(fx.retryPendingBorrowMintBound).toHaveBeenCalledTimes(1);
+    expect(fx.retryPendingBorrowMintBound.mock.calls[0][1]).toBe(77n);
+    expect(fx.retryPendingBorrowMintBound.mock.calls[0][2]).toBe(originalAmount);
+    expect(fx.openVaultAndBorrowBound).not.toHaveBeenCalled();
+  });
 });
 
 describe('/doge/borrow — disconnected calculator', () => {

@@ -22,6 +22,8 @@ const fx = vi.hoisted(() => {
     open: vi.fn(async () => ({ kind: 'dispatched_err', vaultId: null, blockIndex: null, partialZeroDebtVaultId: null,
       errorMessage: 'unset', approvalMayHaveMutated: false, submittedCollateralRaw: 0n, submittedIcusdRaw: 0n })),
     borrow: vi.fn(async () => ({})), getVaults: vi.fn(async () => []),
+    getMyPendingBorrowMints: vi.fn(async () => []),
+    retryPendingBorrowMintBound: vi.fn(async (_ctx: unknown, vaultId: bigint, amount: bigint) => ({ kind: 'dispatched_err', vaultId: Number(vaultId), blockIndex: null, feePaidRaw: null, errorMessage: 'unset', submittedIcusdRaw: amount })),
     getActor: vi.fn(async () => ({ get_btc_address: vi.fn(async () => 'bc1qfixtureaddress000000000000000000000000000000'), get_minter_info: vi.fn(async () => fakeMinterInfo()) })),
     update: vi.fn(async () => ({ Ok: [] })), qr: vi.fn(async () => 'data:image/png;base64,fake'),
   };
@@ -32,9 +34,13 @@ vi.mock('$lib/stores/wallet', () => ({ walletStore: { subscribe: fx.wallet.subsc
 vi.mock('$lib/stores/collateralStore', () => ({ collateralStore: { subscribe: fx.collateral.subscribe, fetchSupportedCollateral: fx.fetchCollateral } }));
 vi.mock('$lib/stores/appDataStore', () => ({ appDataStore: { subscribe: fx.app.subscribe, fetchProtocolStatus: fx.fetchStatus, refreshAll: fx.refreshAll,
   fetchUserVaults: fx.fetchVaults }, protocolStatus: fx.derived(fx.app, (s: any) => s.protocolStatus), userVaults: fx.derived(fx.app, (s: any) => s.userVaults) }));
-vi.mock('$lib/services/protocol', () => ({ protocolService: { openVaultAndBorrowBound: fx.open, borrowFromVaultBound: fx.borrow } }));
+vi.mock('$lib/services/protocol', () => ({ protocolService: { openVaultAndBorrowBound: fx.open, borrowFromVaultBound: fx.borrow, getMyPendingBorrowMintsBound: fx.getMyPendingBorrowMints, retryPendingBorrowMintBound: fx.retryPendingBorrowMintBound } }));
 vi.mock('$lib/services/protocol/apiClient', () => ({ publicActor: { get_vaults: fx.getVaults } }));
-vi.mock('$lib/services/auth', () => ({ WALLET_TYPES: { INTERNET_IDENTITY: 'internet-identity', OISY: 'oisy' } }));
+vi.mock('$lib/services/auth', () => ({
+  WALLET_TYPES: { INTERNET_IDENTITY: 'internet-identity', OISY: 'oisy' },
+  currentWalletType: { subscribe: (run: (value: string) => void) => { run('plug'); return () => {}; } },
+  walletSessionGeneration: { subscribe: (run: (value: number) => void) => { run(1); return () => {}; } },
+}));
 vi.mock('$lib/services/ckbtcMinterActors', () => ({ getPublicCkbtcMinterActor: fx.getActor, updateBtcBalanceForOwner: fx.update }));
 vi.mock('qrcode', () => ({ default: { toDataURL: fx.qr } }));
 vi.mock('$lib/components/vault/VaultCard.svelte', async () => ({ default: (await import('../../../tests/doge-borrow-fixtures/FakeVaultCard.svelte')).default }));
@@ -122,6 +128,7 @@ describe('/bitcoin/borrow mounted boundary', () => {
     const entries = Object.keys(localStorage).filter((key) => key.includes(PRINCIPAL_A.toText()));
     expect(entries).toHaveLength(1);
     expect(JSON.parse(localStorage.getItem(entries[0])!).pendingAction).toBe('open_and_borrow');
+    await vi.waitFor(() => expect(fx.getMyPendingBorrowMints.mock.calls.length).toBeGreaterThanOrEqual(2));
     expect(button('Confirm and borrow')).toBeNull();
     expect(host.textContent).toMatch(/uncertain|recheck|check/i);
   });

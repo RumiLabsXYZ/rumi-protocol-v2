@@ -699,6 +699,27 @@ describe('ApiClient.borrowFromVaultBound — finish-borrow leg', () => {
     expect(mocks.getActor).not.toHaveBeenCalled();
   });
 
+  it('journal retry preserves exact nat64 vault ID and raw amount below current client minimum', async () => {
+    const ctx = makeCtx(PRINCIPAL_A);
+    const vaultId = 9_007_199_254_740_993n;
+    const originalRawAmount = 5_000_001n;
+    const largeMintBlock = 9_007_199_254_740_995n;
+
+    const normalBorrow = await ApiClient.borrowFromVaultBound(ctx, vaultId, originalRawAmount);
+    expect(normalBorrow.kind).toBe('predispatch_aborted');
+    expect(backendActor.borrow_from_vault).not.toHaveBeenCalled();
+
+    backendActor.borrow_from_vault.mockResolvedValueOnce({ Ok: { block_index: largeMintBlock, fee_amount_paid: 1_000n } });
+    const retry = await ApiClient.retryPendingBorrowMintBound(ctx, vaultId, originalRawAmount);
+    expect(backendActor.borrow_from_vault).toHaveBeenCalledWith({
+      vault_id: vaultId,
+      amount: originalRawAmount,
+    });
+    expect(retry.kind).toBe('dispatched_ok');
+    expect(retry.vaultId).toBe(vaultId);
+    expect(retry.blockIndex).toBe(largeMintBlock);
+  });
+
   it('a false assertCurrent() aborts before the actor is ever fetched', async () => {
     const ctx = makeCtx(PRINCIPAL_A, () => false);
     const result = await ApiClient.borrowFromVaultBound(ctx, VAULT_ID, ICUSD_RAW);

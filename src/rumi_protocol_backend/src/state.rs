@@ -1843,17 +1843,86 @@ pub struct ThreeUsdReserveIngressTuple {
     pub parent_absorb_id: u64,
 }
 
+/// Exact ICRC-1 arguments for a borrow mint. The borrow journal stores this
+/// tuple before dispatch so a lost reply or upgrade can only retry the same
+/// ledger operation.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct BorrowMintTuple {
+    pub ledger: Principal,
+    pub destination: Principal,
+    pub amount_e8s: u64,
+    pub memo: [u8; 16],
+    pub created_at_time_ns: u64,
+    pub op_nonce: u128,
+}
+
+/// Durable debt reservation for one borrow whose icUSD mint has not yet been
+/// applied to the vault. Rows are held across ambiguous outcomes and upgrades.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum BorrowMintPhase {
+    SubmittedOrUnknown,
+    MintConfirmedHeld { block_index: u64 },
+    /// The pinned tuple received TooOld, which cannot tell whether an earlier
+    /// dispatch committed. Only a positive exact ICRC-3 receipt may advance it.
+    ReceiptRecoveryRequired,
+}
+
+impl Default for BorrowMintPhase {
+    fn default() -> Self {
+        Self::SubmittedOrUnknown
+    }
+}
+
+/// Public status contains no ledger tuple or memo; it is safe to show only to
+/// the journal owner and allows recovery after a lost top-level reply.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct BorrowMintStatus {
+    pub vault_id: u64,
+    pub borrowed_amount_e8s: u64,
+    pub phase: BorrowMintPhase,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct BorrowMintJournal {
+    pub vault_id: u64,
+    pub owner: Principal,
+    pub collateral_type: Principal,
+    pub borrowed_amount_e8s: u64,
+    pub fee_amount_e8s: u64,
+    pub tuple: BorrowMintTuple,
+    #[serde(default)]
+    pub phase: BorrowMintPhase,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub enum ThreeUsdReserveIngressPhase {
     AdmissionPending,
-    PreTransferRejected { reason: String },
-    SubmittedOrUnknown { tuple: ThreeUsdReserveIngressTuple },
-    TransferConfirmed { tuple: ThreeUsdReserveIngressTuple, block_index: u64 },
-    Absorbed { tuple: ThreeUsdReserveIngressTuple, block_index: u64, result: crate::StabilityPoolLiquidationResult },
-    FailedAfterTransfer { tuple: ThreeUsdReserveIngressTuple, block_index: u64, error: String },
+    PreTransferRejected {
+        reason: String,
+    },
+    SubmittedOrUnknown {
+        tuple: ThreeUsdReserveIngressTuple,
+    },
+    TransferConfirmed {
+        tuple: ThreeUsdReserveIngressTuple,
+        block_index: u64,
+    },
+    Absorbed {
+        tuple: ThreeUsdReserveIngressTuple,
+        block_index: u64,
+        result: crate::StabilityPoolLiquidationResult,
+    },
+    FailedAfterTransfer {
+        tuple: ThreeUsdReserveIngressTuple,
+        block_index: u64,
+        error: String,
+    },
     /// Exact tuple was rejected as TooOld, then the complete ledger prefix
     /// through an ordered fixed tip was scanned without a matching receipt.
-    NoTransferProven { tuple: ThreeUsdReserveIngressTuple, tip_log_length: u64 },
+    NoTransferProven {
+        tuple: ThreeUsdReserveIngressTuple,
+        tip_log_length: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -2081,6 +2150,11 @@ pub struct State {
     /// withdrawals. `serde(default)` keeps older snapshots decoding cleanly.
     #[serde(default)]
     pub pending_3usd_refunds: BTreeMap<u128, PendingThreeUsdRefund>,
+    /// In-flight borrow mints keyed by vault. Their debt counts against both
+    /// the collateral ceiling and global cap until confirmed or explicitly
+    /// cleared by a ledger response that guarantees no transfer occurred.
+    #[serde(default)]
+    pub pending_borrow_mints: BTreeMap<u64, BorrowMintJournal>,
     #[serde(default)]
     pub three_usd_reserve_ingress_journals:
         BTreeMap<ThreeUsdReserveIngressKey, ThreeUsdReserveIngressJournal>,
@@ -2921,6 +2995,7 @@ impl Default for State {
             payout_history_scan_count: 0,
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
+            pending_borrow_mints: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
             three_usd_reserve_ingress_enabled: false,
             three_usd_reserve_v2_client_ready: false,
@@ -3096,6 +3171,7 @@ impl From<InitArg> for State {
             payout_history_scan_count: 0,
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
+            pending_borrow_mints: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
             three_usd_reserve_ingress_enabled: false,
             three_usd_reserve_v2_client_ready: false,
@@ -7562,6 +7638,43 @@ where
     F: FnOnce(&State) -> R,
 {
     __STATE.with(|s| f(s.borrow().as_ref().expect("State not initialized!")))
+}
+
+/// Safe pre-initialization probe used by transient guards. A pending borrow
+/// journal is a durable vault lock; old snapshots decode it as an empty map.
+pub fn has_pending_borrow_mint(vault_id: u64) -> bool {
+    __STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .is_some_and(|s| s.pending_borrow_mints.contains_key(&vault_id))
+    })
+}
+
+/// Returns only the caller's unresolved borrow operations. The exact ledger
+/// tuple stays private while the amount and vault ID support owner recovery.
+pub fn pending_borrow_mint_statuses(owner: Principal) -> Vec<BorrowMintStatus> {
+    read_state(|state| {
+        state
+            .pending_borrow_mints
+            .values()
+            .filter(|journal| journal.owner == owner)
+            .map(|journal| BorrowMintStatus {
+                vault_id: journal.vault_id,
+                borrowed_amount_e8s: journal.borrowed_amount_e8s,
+                phase: journal.phase.clone(),
+            })
+            .collect()
+    })
+}
+
+pub fn has_pending_borrow_mint_for_owner(owner: Principal, vault_id: u64) -> bool {
+    read_state(|state| {
+        state
+            .pending_borrow_mints
+            .get(&vault_id)
+            .is_some_and(|journal| journal.owner == owner)
+    })
 }
 
 /// Replaces the current state.
@@ -12558,6 +12671,97 @@ mod tests {
             1_250_000_000 - 90 - 10,
             "replay must subtract net liquidator receipt plus the separately paid ledger fee"
         );
+    }
+
+    #[test]
+    fn pre_borrow_journal_snapshot_decodes_with_empty_journal_and_preserves_state() {
+        let mut state = State::default();
+        state.next_available_vault_id = 123;
+        state.pending_borrow_mints.insert(
+            8,
+            BorrowMintJournal {
+                vault_id: 8,
+                owner: Principal::from_slice(&[8]),
+                collateral_type: Principal::from_slice(&[9]),
+                borrowed_amount_e8s: 1_000,
+                fee_amount_e8s: 5,
+                tuple: BorrowMintTuple {
+                    ledger: Principal::from_slice(&[10]),
+                    destination: Principal::from_slice(&[8]),
+                    amount_e8s: 995,
+                    memo: [3; 16],
+                    created_at_time_ns: 4,
+                    op_nonce: 5,
+                },
+                phase: BorrowMintPhase::SubmittedOrUnknown,
+            },
+        );
+
+        // Remove the newly added key from a serialized State to reproduce the
+        // pre-feature snapshot shape, then decode through the real State type.
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let value: ciborium::value::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let mut map = match value {
+            ciborium::value::Value::Map(map) => map,
+            other => panic!("State must serialize as a CBOR map, got {other:?}"),
+        };
+        map.retain(|(key, _)| {
+            key != &ciborium::value::Value::Text("pending_borrow_mints".to_string())
+        });
+        let mut legacy_bytes = Vec::new();
+        ciborium::ser::into_writer(&ciborium::value::Value::Map(map), &mut legacy_bytes).unwrap();
+        let restored: State = ciborium::de::from_reader(legacy_bytes.as_slice()).unwrap();
+        assert!(restored.pending_borrow_mints.is_empty());
+        assert_eq!(restored.next_available_vault_id, 123);
+    }
+
+    #[test]
+    fn too_old_receipt_recovery_phase_survives_stable_round_trip() {
+        let phase = BorrowMintPhase::ReceiptRecoveryRequired;
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&phase, &mut bytes).unwrap();
+        let restored: BorrowMintPhase = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(restored, phase);
+    }
+
+    #[test]
+    fn pending_borrow_statuses_are_owner_scoped_and_hide_ledger_tuple() {
+        let owner = Principal::from_slice(&[8]);
+        let other = Principal::from_slice(&[7]);
+        let mut state = State::default();
+        for (vault_id, journal_owner) in [(8, owner), (9, other)] {
+            state.pending_borrow_mints.insert(
+                vault_id,
+                BorrowMintJournal {
+                    vault_id,
+                    owner: journal_owner,
+                    collateral_type: Principal::anonymous(),
+                    borrowed_amount_e8s: 123_456_789,
+                    fee_amount_e8s: 1,
+                    tuple: BorrowMintTuple {
+                        ledger: Principal::management_canister(),
+                        destination: journal_owner,
+                        amount_e8s: 123_456_788,
+                        memo: [4; 16],
+                        created_at_time_ns: 5,
+                        op_nonce: 6,
+                    },
+                    phase: BorrowMintPhase::MintConfirmedHeld { block_index: 77 },
+                },
+            );
+        }
+        replace_state(state);
+
+        let statuses = pending_borrow_mint_statuses(owner);
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].vault_id, 8);
+        assert_eq!(statuses[0].borrowed_amount_e8s, 123_456_789);
+        assert_eq!(
+            statuses[0].phase,
+            BorrowMintPhase::MintConfirmedHeld { block_index: 77 }
+        );
+        assert!(pending_borrow_mint_statuses(Principal::from_slice(&[6])).is_empty());
     }
 }
 

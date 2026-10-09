@@ -118,11 +118,17 @@ fn check_postcondition<T>(t: T) -> T {
 /// but yields once to the executor; in either case, treat the call as a
 /// suspension boundary.
 async fn validate_call() -> Result<(), ProtocolError> {
+    validate_authenticated_not_frozen()?;
+    rumi_protocol_backend::xrc::ensure_fresh_price().await
+}
+
+/// Journal recovery may finish an exact reserved borrow without fresh market
+/// data. Frozen state still suspends every state-changing operation.
+fn validate_authenticated_not_frozen() -> Result<(), ProtocolError> {
     if ic_cdk::caller() == Principal::anonymous() {
         return Err(ProtocolError::AnonymousCallerNotAllowed);
     }
-    validate_not_frozen()?;
-    rumi_protocol_backend::xrc::ensure_fresh_price().await
+    validate_not_frozen()
 }
 
 /// The emergency freeze remains authoritative even for exact ledger retries.
@@ -133,6 +139,17 @@ fn validate_not_frozen() -> Result<(), ProtocolError> {
         ));
     }
     Ok(())
+}
+
+fn has_owned_pending_borrow_in_state(
+    state: &rumi_protocol_backend::state::State,
+    caller: Principal,
+    vault_id: u64,
+) -> bool {
+    state
+        .pending_borrow_mints
+        .get(&vault_id)
+        .is_some_and(|journal| journal.owner == caller)
 }
 
 fn validate_mode() -> Result<(), ProtocolError> {
@@ -6218,6 +6235,32 @@ fn get_vaults(target: Option<Principal>) -> Vec<CandidVault> {
     }
 }
 
+/// Owner-authenticated recovery view for borrow mints whose top-level result
+/// may have been lost. It exposes only vault, gross raw amount, and phase.
+#[candid_method(query)]
+#[query]
+fn get_my_pending_borrow_mints() -> Vec<rumi_protocol_backend::state::BorrowMintStatus> {
+    rumi_protocol_backend::state::pending_borrow_mint_statuses(ic_cdk::caller())
+}
+
+/// Reconcile an ambiguous borrow only from a positive, exact ICRC-3 mint
+/// receipt. Candidate indexes are untrusted and checked against the journal.
+#[candid_method(update)]
+#[update]
+async fn reconcile_pending_borrow_mint_from_block(
+    vault_id: u64,
+    candidate_block_index: u64,
+) -> Result<SuccessWithFee, ProtocolError> {
+    validate_authenticated_not_frozen()?;
+    check_postcondition(
+        rumi_protocol_backend::vault::reconcile_pending_borrow_mint_from_block(
+            vault_id,
+            candidate_block_index,
+        )
+        .await,
+    )
+}
+
 /// Paginated vault enumeration. Returns vaults with `vault_id >= start_id`
 /// up to `limit` entries (capped at `MAX_VAULTS_PAGE_LIMIT`), ordered
 /// ascending by `vault_id`. `next_start_id` is `Some(id)` when more
@@ -6423,10 +6466,21 @@ async fn open_vault_and_borrow(
 #[candid_method(update)]
 #[update]
 async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
-    validate_call().await?;
-    validate_mode()?;
-    // ORACLE-001: refresh this vault's collateral price before minting more debt.
-    validate_freshness_for_vault(arg.vault_id).await?;
+    let caller = ic_cdk::api::caller();
+    validate_authenticated_not_frozen()?;
+    // Exact retries resolve the durable journal and must not be blocked by
+    // changed mode/CR/caps or unavailable price refresh after the mint was
+    // sent. The internal path still authenticates journal owner and exact
+    // amount. Frozen state and anonymous-caller policy remain in force.
+    let has_owned_pending_journal = rumi_protocol_backend::state::read_state(|state| {
+        has_owned_pending_borrow_in_state(state, caller, arg.vault_id)
+    });
+    if !has_owned_pending_journal {
+        validate_call().await?;
+        validate_mode()?;
+        // ORACLE-001: refresh this vault's collateral price before a new borrow.
+        validate_freshness_for_vault(arg.vault_id).await?;
+    }
     check_postcondition(rumi_protocol_backend::vault::borrow_from_vault(arg).await)
 }
 
@@ -18228,5 +18282,44 @@ mod inc6_settlement_proof_context_tests {
         let ids = settlement_proof_ids_from_state(&s);
         assert_eq!(ids.pending, vec!["pending:a", "pending:b"]);
         assert_eq!(ids.reserve, vec!["reserve:a"]);
+    }
+}
+
+#[cfg(test)]
+mod borrow_recovery_gate_tests {
+    use super::has_owned_pending_borrow_in_state;
+    use candid::Principal;
+    use rumi_protocol_backend::state::{
+        BorrowMintJournal, BorrowMintPhase, BorrowMintTuple, State,
+    };
+
+    #[test]
+    fn only_the_journal_owner_skips_fresh_borrow_market_gates() {
+        let owner = Principal::from_text("aaaaa-aa").unwrap();
+        let other = Principal::from_text("2vxsx-fae").unwrap();
+        let mut state = State::default();
+        state.pending_borrow_mints.insert(
+            77,
+            BorrowMintJournal {
+                vault_id: 77,
+                owner,
+                collateral_type: Principal::anonymous(),
+                borrowed_amount_e8s: 50_000_001,
+                fee_amount_e8s: 0,
+                tuple: BorrowMintTuple {
+                    ledger: Principal::anonymous(),
+                    destination: owner,
+                    amount_e8s: 50_000_001,
+                    memo: [1; 16],
+                    created_at_time_ns: 10,
+                    op_nonce: 20,
+                },
+                phase: BorrowMintPhase::SubmittedOrUnknown,
+            },
+        );
+
+        assert!(has_owned_pending_borrow_in_state(&state, owner, 77));
+        assert!(!has_owned_pending_borrow_in_state(&state, other, 77));
+        assert!(!has_owned_pending_borrow_in_state(&state, owner, 78));
     }
 }
