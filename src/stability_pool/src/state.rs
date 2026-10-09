@@ -265,6 +265,45 @@ impl Default for StabilityPoolState {
 /// Maximum pool events retained in memory.
 const MAX_POOL_EVENTS: usize = 10_000;
 
+/// Allocate a ledger debit proportionally, then assign integer remainder
+/// units in canonical Principal order. The result never exceeds any position
+/// balance and sums to `min(amount, total)`.
+fn proportional_debits(balances: &[(Principal, u64)], amount: u64) -> BTreeMap<Principal, u64> {
+    let total = balances
+        .iter()
+        .fold(0u128, |sum, (_, balance)| sum + *balance as u128);
+    if total == 0 || amount == 0 {
+        return BTreeMap::new();
+    }
+
+    let mut ordered = balances.to_vec();
+    ordered.sort_by(|(left, _), (right, _)| left.as_slice().cmp(right.as_slice()));
+    let debit = (amount as u128).min(total) as u64;
+    let mut shares = BTreeMap::new();
+    let mut allocated = 0u64;
+    for (principal, balance) in &ordered {
+        let share = ((debit as u128 * *balance as u128) / total) as u64;
+        let share = share.min(*balance);
+        shares.insert(*principal, share);
+        allocated += share;
+    }
+
+    let mut remainder = debit - allocated;
+    for (principal, balance) in ordered {
+        if remainder == 0 {
+            break;
+        }
+        let share = shares.get(&principal).copied().unwrap_or(0);
+        let extra = remainder.min(balance - share);
+        if extra > 0 {
+            *shares.entry(principal).or_insert(0) += extra;
+            remainder -= extra;
+        }
+    }
+    debug_assert_eq!(remainder, 0);
+    shares
+}
+
 /// Maximum outstanding pending refunds (audit IC-S-001). A record is only
 /// created when a refund transfer fails after the user's tokens were pulled,
 /// which is not caller-controllable, so this is a memory-safety bound rather
@@ -2928,6 +2967,27 @@ impl StabilityPoolState {
             per_token_opted_in_totals.insert(*token_ledger, total);
         }
 
+        // Precompute exact per-depositor debits so books reflect the full
+        // amount removed from each stablecoin ledger.
+        let mut debits_per_token: BTreeMap<Principal, BTreeMap<Principal, u64>> =
+            BTreeMap::new();
+        for (token_ledger, &amount) in stables_consumed {
+            let balances: Vec<(Principal, u64)> = opted_in_principals
+                .iter()
+                .filter_map(|principal| {
+                    let balance = self
+                        .deposits
+                        .get(principal)?
+                        .stablecoin_balances
+                        .get(token_ledger)
+                        .copied()
+                        .unwrap_or(0);
+                    (balance > 0).then_some((*principal, balance))
+                })
+                .collect();
+            debits_per_token.insert(*token_ledger, proportional_debits(&balances, amount));
+        }
+
         // Phase 2: Compute total e8s consumed to determine collateral distribution shares.
         // LP tokens are valued at virtual price, not face value.
         // Clone virtual prices and registry info upfront to avoid borrow conflicts with Phase 3.
@@ -2968,7 +3028,7 @@ impl StabilityPoolState {
             let mut user_consumed_e8s: u64 = 0;
 
             if let Some(position) = self.deposits.get_mut(principal) {
-                for (token_ledger, &total_consumed) in stables_consumed {
+                for token_ledger in stables_consumed.keys() {
                     let total_opted_in = per_token_opted_in_totals
                         .get(token_ledger)
                         .copied()
@@ -2986,10 +3046,11 @@ impl StabilityPoolState {
                     }
 
                     // User's share of this token's consumption
-                    let user_share_native = (total_consumed as u128 * user_balance as u128
-                        / total_opted_in as u128)
-                        as u64;
-                    let user_share_native = user_share_native.min(user_balance);
+                    let user_share_native = debits_per_token
+                        .get(token_ledger)
+                        .and_then(|debits| debits.get(principal))
+                        .copied()
+                        .unwrap_or(0);
 
                     // Reduce balance
                     if let Some(bal) = position.stablecoin_balances.get_mut(token_ledger) {
@@ -3115,6 +3176,27 @@ impl StabilityPoolState {
             per_token_opted_in_totals.insert(*token_ledger, total);
         }
 
+        // Chain-collateral liquidations debit the same stablecoin ledger
+        // books as generic ICRC liquidations, so allocate every burned unit.
+        let mut debits_per_token: BTreeMap<Principal, BTreeMap<Principal, u64>> =
+            BTreeMap::new();
+        for (token_ledger, &amount) in stables_consumed {
+            let balances: Vec<(Principal, u64)> = opted_in_principals
+                .iter()
+                .filter_map(|principal| {
+                    let balance = self
+                        .deposits
+                        .get(principal)?
+                        .stablecoin_balances
+                        .get(token_ledger)
+                        .copied()
+                        .unwrap_or(0);
+                    (balance > 0).then_some((*principal, balance))
+                })
+                .collect();
+            debits_per_token.insert(*token_ledger, proportional_debits(&balances, amount));
+        }
+
         let vps = self.virtual_prices().clone();
         let registry_snapshot: BTreeMap<Principal, (u8, bool)> = stables_consumed
             .keys()
@@ -3149,7 +3231,7 @@ impl StabilityPoolState {
             let mut user_consumed_e8s: u64 = 0;
 
             if let Some(position) = self.deposits.get_mut(principal) {
-                for (token_ledger, &total_consumed) in stables_consumed {
+                for token_ledger in stables_consumed.keys() {
                     let total_opted_in = per_token_opted_in_totals
                         .get(token_ledger)
                         .copied()
@@ -3166,10 +3248,11 @@ impl StabilityPoolState {
                         continue;
                     }
 
-                    let user_share_native = (total_consumed as u128 * user_balance as u128
-                        / total_opted_in as u128)
-                        as u64;
-                    let user_share_native = user_share_native.min(user_balance);
+                    let user_share_native = debits_per_token
+                        .get(token_ledger)
+                        .and_then(|debits| debits.get(principal))
+                        .copied()
+                        .unwrap_or(0);
                     if let Some(bal) = position.stablecoin_balances.get_mut(token_ledger) {
                         *bal = bal.saturating_sub(user_share_native);
                     }
@@ -3349,28 +3432,33 @@ impl StabilityPoolState {
             Some(t) if t > 0 => t,
             _ => return,
         };
-
-        let mut deducted: u64 = 0;
-        let depositor_keys: Vec<Principal> = self.deposits.keys().copied().collect();
-
-        for key in &depositor_keys {
-            if let Some(pos) = self.deposits.get_mut(key) {
-                if let Some(bal) = pos.stablecoin_balances.get_mut(&token_ledger) {
-                    if *bal > 0 {
-                        // Proportional share: fee * bal / total (rounded down)
-                        let share = (fee as u128 * *bal as u128 / total as u128) as u64;
-                        let actual = share.min(*bal);
-                        *bal = bal.saturating_sub(actual);
-                        deducted += actual;
-                        if *bal == 0 {
-                            pos.stablecoin_balances.remove(&token_ledger);
-                        }
+        let fee = fee.min(total);
+        let balances: Vec<(Principal, u64)> = self
+            .deposits
+            .iter()
+            .filter_map(|(principal, position)| {
+                position
+                    .stablecoin_balances
+                    .get(&token_ledger)
+                    .copied()
+                    .filter(|balance| *balance > 0)
+                    .map(|balance| (*principal, balance))
+            })
+            .collect();
+        let allocations = proportional_debits(&balances, fee);
+        let deducted: u64 = allocations.values().copied().sum();
+        for (principal, share) in allocations {
+            if let Some(position) = self.deposits.get_mut(&principal) {
+                if let Some(balance) = position.stablecoin_balances.get_mut(&token_ledger) {
+                    *balance -= share;
+                    if *balance == 0 {
+                        position.stablecoin_balances.remove(&token_ledger);
                     }
                 }
             }
         }
 
-        // Apply any rounding remainder (at most depositor_count - 1 units) to the aggregate
+        // Keep the aggregate equal to the exact book debit.
         if let Some(agg) = self.total_stablecoin_balances.get_mut(&token_ledger) {
             *agg = agg.saturating_sub(deducted);
         }
@@ -6624,7 +6712,7 @@ mod tests {
         // user_a: 1_000_000 * 3_333_333 / 10_000_000 = 333_333 (truncated from 333_333.3)
         // user_b: 333_333
         // user_c: 1_000_000 * 3_333_334 / 10_000_000 = 333_333 (truncated from 333_333.4)
-        // Sum of shares: 999_999 (less than 1_000_000!)
+        // One remainder unit is assigned to the first principal in byte order.
         let mut consumed = BTreeMap::new();
         consumed.insert(icusd_ledger(), 1_000_000);
 
@@ -6635,6 +6723,17 @@ mod tests {
             500_000,
             7_50000000,
             1_000_000_000,
+        );
+
+        assert_eq!(
+            10_000_000 - state.total_stablecoin_balances[&icusd_ledger()],
+            1_000_000,
+            "depositor books must reflect the full ledger debit"
+        );
+        assert_eq!(
+            state.deposits[&user_a()].stablecoin_balances[&icusd_ledger()],
+            2_999_999,
+            "the first principal receives the deterministic remainder unit"
         );
 
         // The critical assertion: aggregate should match sum of individual balances
@@ -6664,6 +6763,75 @@ mod tests {
             sum, tracked,
             "Sum of individual balances must equal aggregate"
         );
+    }
+
+    #[test]
+    fn chain_liquidation_assigns_stablecoin_rounding_remainder_exactly() {
+        const E18: u128 = 1_000_000_000_000_000_000;
+        let mut state = test_state();
+        state.register_chain_collateral_sentinel(cfx_sentinel());
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 3_333_333);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 3_333_333);
+        add_deposit_direct(&mut state, user_c(), icusd_ledger(), 3_333_334);
+        for user in [user_a(), user_b(), user_c()] {
+            state.opt_in_cfx(&user, cfx_sentinel()).unwrap();
+        }
+        let consumed = BTreeMap::from([(icusd_ledger(), 1_000_000)]);
+
+        state.process_chain_liquidation_gains_at(
+            100,
+            cfx_sentinel(),
+            &consumed,
+            E18,
+            5_000_000,
+            123,
+        );
+
+        assert_eq!(
+            10_000_000 - state.total_stablecoin_balances[&icusd_ledger()],
+            1_000_000
+        );
+        assert_eq!(
+            state.deposits[&user_a()].stablecoin_balances[&icusd_ledger()],
+            2_999_999
+        );
+        let total_claims: u128 = state
+            .deposits
+            .values()
+            .map(|position| {
+                position
+                    .cfx_claims
+                    .as_ref()
+                    .and_then(|claims| claims.get(&cfx_sentinel()))
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .sum();
+        assert_eq!(total_claims, E18, "CFX claims remain fully distributed");
+        assert!(state.validate_state().is_ok());
+    }
+
+    #[test]
+    fn generic_fee_deduction_assigns_rounding_remainder_exactly() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 3_333_333);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 3_333_333);
+        add_deposit_direct(&mut state, user_c(), icusd_ledger(), 3_333_334);
+
+        state.deduct_fee_from_pool(icusd_ledger(), 1_000_000);
+
+        assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 9_000_000);
+        assert_eq!(
+            state.deposits[&user_a()].stablecoin_balances[&icusd_ledger()],
+            2_999_999
+        );
+        assert_eq!(
+            state.deposits.values().map(|position| {
+                position.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0)
+            }).sum::<u64>(),
+            9_000_000
+        );
+        assert!(state.validate_state().is_ok());
     }
 
     // ─── 3USD / LP Token Tests ───

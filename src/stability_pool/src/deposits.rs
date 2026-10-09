@@ -322,7 +322,19 @@ pub(crate) fn prepare_withdrawal_after_ledger_check(
                     correction_msg = Some(msg);
                     withdrawal_amount = live_balance;
                 } else {
-                    return Err(StabilityPoolError::InsufficientPoolBalance);
+                    // The caller may withdraw only the same fraction of live
+                    // backing as their fraction of the recorded book. This
+                    // makes a historical stablecoin shortfall accessible
+                    // proportionally instead of freezing all depositors.
+                    let max_pro_rata = if aggregate_balance == 0 {
+                        0
+                    } else {
+                        (live_balance as u128 * user_balance as u128
+                            / aggregate_balance as u128) as u64
+                    };
+                    if requested_amount > max_pro_rata {
+                        return Err(StabilityPoolError::InsufficientPoolBalance);
+                    }
                 }
             } else if live_balance < requested_amount {
                 return Err(StabilityPoolError::InsufficientPoolBalance);
@@ -2035,6 +2047,38 @@ mod tests {
 
     fn principal(byte: u8) -> Principal {
         Principal::from_slice(&[byte])
+    }
+
+    #[test]
+    fn withdrawal_shortfall_caps_debit_at_live_pro_rata_share() {
+        let ledger = principal(10);
+        let alice = principal(1);
+        let bob = principal(2);
+        let mut state = crate::state::StabilityPoolState::default();
+        state.add_deposit_at(alice, ledger, 50, 1);
+        state.add_deposit_at(bob, ledger, 50, 1);
+        crate::state::replace_state(state);
+
+        assert!(matches!(
+            prepare_withdrawal_after_ledger_check(alice, ledger, 46, Some(90), 1),
+            Err(StabilityPoolError::InsufficientPoolBalance)
+        ));
+        assert_eq!(
+            read_state(|s| s.total_stablecoin_balances.get(&ledger).copied()),
+            Some(100),
+            "rejected pro-rata overdraw must not mutate books"
+        );
+
+        assert_eq!(
+            prepare_withdrawal_after_ledger_check(alice, ledger, 45, Some(90), 1)
+                .expect("pro-rata amount is allowed"),
+            (45, None)
+        );
+        assert_eq!(
+            read_state(|s| s.total_stablecoin_balances.get(&ledger).copied()),
+            Some(55)
+        );
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
     }
 
     fn pending_intent() -> ChainSpAbsorbIntent {
