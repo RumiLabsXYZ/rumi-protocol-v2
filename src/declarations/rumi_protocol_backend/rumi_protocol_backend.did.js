@@ -2601,6 +2601,11 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'settle_pending_payout_receipt' : IDL.Func(
+        [IDL.Nat, IDL.Nat64],
+        [Result_21],
+        [],
+      ),
     'settle_reserve_burn' : IDL.Func(
         [IDL.Nat32, IDL.Nat, IDL.Text],
         [Result],

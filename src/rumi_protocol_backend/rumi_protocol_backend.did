@@ -1636,10 +1636,10 @@ service : (ProtocolArg) -> {
   bot_confirm_liquidation : (nat64) -> (Result);
   bot_confirm_liquidation_with_proof : (BotPaymentProof) -> (Result);
   bot_confirm_liquidation_with_proofs : (vec BotPaymentProof) -> (Result);
-  bot_verify_liquidation_payment_proof : (BotPaymentProof) -> (Result);
   bot_record_collateral_return_proof : (BotCollateralReturnProofArg) -> (
       Result,
     );
+  bot_verify_liquidation_payment_proof : (BotPaymentProof) -> (Result);
   cancel_xrp_pending_open : (nat64) -> (Result);
   chain_has_active_settlement_op : (nat32) -> (bool) query;
   claim_chain_collateral : (nat64, principal, nat, text) -> (Result_1);
@@ -1944,6 +1944,7 @@ service : (ProtocolArg) -> {
   settle_pending_chain_burn_with_proof : (nat32, BurnSettlementProofArg) -> (
       Result,
     );
+  settle_pending_payout_receipt : (nat, nat64) -> (Result_21);
   settle_reserve_burn : (nat32, nat, text) -> (Result);
   settle_reserve_burn_with_proof : (nat32, ReserveSettlementProofArg) -> (
       Result,

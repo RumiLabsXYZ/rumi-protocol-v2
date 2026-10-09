@@ -1046,6 +1046,22 @@ pub enum PendingPayoutEvent {
         timestamp: Option<u64>,
         owner: Option<Principal>,
     },
+    /// A direct ICRC-3 block response exactly matched a held payout's current
+    /// immutable transfer tuple. This records positive receipt settlement; it
+    /// never authorizes another transfer attempt.
+    ReceiptConfirmed {
+        operation_id: u128,
+        payout_kind: PendingPayoutKind,
+        attempt_nonce: u128,
+        ledger: Principal,
+        owner: Principal,
+        amount_raw: u64,
+        memo: Vec<u8>,
+        created_at_time_ns: u64,
+        block_index: u64,
+        settled_by: Principal,
+        timestamp: u64,
+    },
 }
 
 impl Event {
@@ -1833,6 +1849,53 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
             state.op_nonce_counter = state
                 .op_nonce_counter
                 .max((attempt_nonce as u64).wrapping_add(1));
+        }
+        PendingPayoutEvent::ReceiptConfirmed {
+            operation_id,
+            payout_kind,
+            attempt_nonce,
+            ledger,
+            owner,
+            amount_raw,
+            memo,
+            created_at_time_ns,
+            block_index: _,
+            settled_by,
+            timestamp: _,
+        } => {
+            // The durable record is only actionable while it still identifies
+            // the exact pending row and no other obligation shares its dedup
+            // nonce. This makes replay fail closed after schema/state drift.
+            let Some((kind, transfer)) = state.get_pending_payout(operation_id) else {
+                return;
+            };
+            let expected_memo = crate::management::nonce_to_memo(attempt_nonce);
+            let duplicate_nonce = state
+                .pending_margin_transfers
+                .values()
+                .chain(state.pending_excess_transfers.values())
+                .chain(state.pending_redemption_transfer.values())
+                .any(|other| {
+                    other.operation_id != operation_id && other.op_nonce == attempt_nonce
+                });
+            if kind != payout_kind
+                || transfer.payout_kind != payout_kind
+                || transfer.op_nonce != attempt_nonce
+                || transfer.ledger != Some(ledger)
+                || transfer.owner != owner
+                || transfer.transfer_amount_raw != Some(amount_raw)
+                || expected_memo.0.as_ref() != memo.as_slice()
+                || crate::management::nonce_to_created_at_time(attempt_nonce)
+                    != created_at_time_ns
+                || settled_by != owner
+                || !transfer.held_for_manual_retry
+                || transfer.in_flight
+                || attempt_nonce == 0
+                || duplicate_nonce
+            {
+                return;
+            }
+            let _ = state.remove_pending_payout(operation_id);
         }
     }
 }
@@ -2914,6 +2977,94 @@ pub fn record_pending_payout_rearmed(
     transfer.history_start_index = None;
     transfer.no_effect_proof = Some(proof);
     state.mutate_pending_payout(proof.operation_id, |row| *row = transfer);
+    true
+}
+
+/// Persist a positive exact-receipt settlement for a held payout and remove
+/// the obligation. The caller must already have fetched and validated the
+/// direct ledger block. All immutable fields are rechecked before journaling.
+pub fn record_pending_payout_receipt_confirmed(
+    state: &mut State,
+    operation_id: u128,
+    block_index: u64,
+    settled_by: Principal,
+) -> bool {
+    let Some((kind, transfer)) = state.get_pending_payout(operation_id) else {
+        return false;
+    };
+    let (Some(ledger), Some(amount_raw)) = (transfer.ledger, transfer.transfer_amount_raw) else {
+        return false;
+    };
+    let attempt_nonce = transfer.op_nonce;
+    let redemption_block_index = state
+        .pending_payout_index
+        .get(&operation_id)
+        .and_then(|locator| locator.redemption_block_index);
+    if kind == PendingPayoutKind::Redemption && redemption_block_index.is_none() {
+        return false;
+    }
+    if attempt_nonce == 0
+        || transfer.owner != settled_by
+        || !transfer.held_for_manual_retry
+        || transfer.in_flight
+        || state
+            .pending_margin_transfers
+            .values()
+            .chain(state.pending_excess_transfers.values())
+            .chain(state.pending_redemption_transfer.values())
+            .any(|other| {
+                other.operation_id != operation_id && other.op_nonce == attempt_nonce
+            })
+    {
+        return false;
+    }
+    let memo = crate::management::nonce_to_memo(attempt_nonce).0.to_vec();
+    let created_at_time_ns = crate::management::nonce_to_created_at_time(attempt_nonce);
+    let timestamp = now();
+    // Remove first so a failed state/index invariant cannot leave behind a
+    // durable receipt record for an obligation that was not removed. A trap
+    // in either journal append rolls back the whole update message.
+    state
+        .remove_pending_payout(operation_id)
+        .expect("pending payout was revalidated before receipt settlement");
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::ReceiptConfirmed {
+        operation_id,
+        payout_kind: kind,
+        attempt_nonce,
+        ledger,
+        owner: transfer.owner,
+        amount_raw,
+        memo,
+        created_at_time_ns,
+        block_index,
+        settled_by,
+        timestamp,
+    });
+    match kind {
+        PendingPayoutKind::Margin | PendingPayoutKind::Excess => {
+            record_event_at(
+                &Event::MarginTransfer {
+                    vault_id: transfer.vault_id,
+                    block_index,
+                    operation_id: Some(operation_id),
+                    payout_kind: Some(kind),
+                    timestamp: Some(timestamp),
+                },
+                timestamp,
+            );
+        }
+        PendingPayoutKind::Redemption => {
+            record_event_at(
+                &Event::RedemptionTransfered {
+                    icusd_block_index: redemption_block_index.expect("validated above"),
+                    icp_block_index: block_index,
+                    operation_id: Some(operation_id),
+                    timestamp: Some(timestamp),
+                },
+                timestamp,
+            );
+        }
+    }
     true
 }
 
@@ -4380,6 +4531,60 @@ mod filter_tests {
             .expect("payout replay fixture should be consistent")
     }
 
+    fn held_receipt_row(
+        operation_id: u128,
+        owner: Principal,
+        ledger: Principal,
+        nonce: u128,
+    ) -> PendingMarginTransfer {
+        PendingMarginTransfer {
+            vault_id: 7,
+            operation_id,
+            payout_kind: PendingPayoutKind::Margin,
+            owner,
+            margin: ICP::new(100),
+            collateral_type: ledger,
+            retry_count: crate::MAX_PENDING_RETRIES,
+            op_nonce: nonce,
+            ledger: Some(ledger),
+            transfer_amount_raw: Some(90),
+            held_for_manual_retry: true,
+            reconciliation_required: true,
+            in_flight: false,
+            too_old_confirmed: false,
+            history_start_index: None,
+            rearm_schema_version: 1,
+            history_scan: None,
+            history_candidate_seen: false,
+            no_effect_proof: None,
+            history_log_length: None,
+            history_cursor: 0,
+            min_net_collateral_raw: None,
+        }
+    }
+
+    fn receipt_confirmation(
+        operation_id: u128,
+        owner: Principal,
+        ledger: Principal,
+        nonce: u128,
+        amount_raw: u64,
+    ) -> PendingPayoutEvent {
+        PendingPayoutEvent::ReceiptConfirmed {
+            operation_id,
+            payout_kind: PendingPayoutKind::Margin,
+            attempt_nonce: nonce,
+            ledger,
+            owner,
+            amount_raw,
+            memo: crate::management::nonce_to_memo(nonce).0.to_vec(),
+            created_at_time_ns: crate::management::nonce_to_created_at_time(nonce),
+            block_index: 42,
+            settled_by: owner,
+            timestamp: 99,
+        }
+    }
+
     fn vault_with(id: u64, owner: Principal, ct: Principal, collateral_e8s: u64) -> Vault {
         Vault {
             owner,
@@ -4635,6 +4840,118 @@ mod filter_tests {
         assert_eq!(legacy_row.op_nonce, old_nonce);
         assert!(legacy_row.held_for_manual_retry);
         assert!(legacy_row.reconciliation_required);
+    }
+
+    #[test]
+    fn replayed_direct_receipt_settlement_removes_only_the_exact_held_tuple() {
+        let owner = p(33);
+        let ledger = p(34);
+        let nonce = (123u128 << 64) | 9;
+        let queued = PendingPayoutEvent::Queued {
+            kind: PendingPayoutKind::Margin,
+            operation_id: 91,
+            transfer: held_receipt_row(91, owner, ledger, nonce),
+            timestamp: Some(1),
+        };
+        let confirmed = receipt_confirmation(91, owner, ledger, nonce, 90);
+        let settled = replay_payout_events(
+            vec![
+                Event::Init(payout_init_args(p(35))),
+                Event::MarginTransfer {
+                    vault_id: 7,
+                    block_index: 42,
+                    operation_id: Some(91),
+                    payout_kind: Some(PendingPayoutKind::Margin),
+                    timestamp: Some(99),
+                },
+            ],
+            vec![queued.clone(), confirmed.clone()],
+        );
+        assert!(settled.get_pending_payout(91).is_none());
+
+        let mismatched = replay_payout_events(
+            vec![Event::Init(payout_init_args(p(35)))],
+            vec![queued.clone(), receipt_confirmation(91, owner, ledger, nonce, 89)],
+        );
+        assert!(mismatched.get_pending_payout(91).is_some());
+
+        let duplicate_tuple = PendingPayoutEvent::Queued {
+            kind: PendingPayoutKind::Margin,
+            operation_id: 92,
+            transfer: PendingMarginTransfer {
+                payout_kind: PendingPayoutKind::Margin,
+                operation_id: 92,
+                ..held_receipt_row(92, owner, ledger, nonce)
+            },
+            timestamp: Some(2),
+        };
+        let ambiguous = replay_payout_events(
+            vec![Event::Init(payout_init_args(p(35)))],
+            vec![queued, duplicate_tuple, confirmed],
+        );
+        assert!(ambiguous.get_pending_payout(91).is_some());
+        assert!(ambiguous.get_pending_payout(92).is_some());
+    }
+
+    #[test]
+    fn direct_receipt_settlement_accepts_held_badfee_cap_too_old_and_upgrade_rows() {
+        let owner = p(36);
+        let ledger = p(37);
+        let nonce = (456u128 << 64) | 11;
+        for (
+            operation_id,
+            needs_reconciliation,
+            too_old,
+            rearm_schema_version,
+            retry_count,
+        ) in [
+            (101, false, false, 1, 1), // BadFee
+            (102, false, false, 1, crate::MAX_PENDING_RETRIES), // retry cap
+            (103, true, true, 1, 3),   // TooOld
+            (104, true, false, 0, 1),  // interrupted by upgrade; tuple survived
+        ] {
+            let mut transfer =
+                held_receipt_row(operation_id, owner, ledger, nonce + operation_id);
+            transfer.reconciliation_required = needs_reconciliation;
+            transfer.too_old_confirmed = too_old;
+            transfer.rearm_schema_version = rearm_schema_version;
+            transfer.retry_count = retry_count;
+            let queued = PendingPayoutEvent::Queued {
+                kind: PendingPayoutKind::Margin,
+                operation_id,
+                transfer,
+                timestamp: Some(1),
+            };
+            let confirmed = receipt_confirmation(operation_id, owner, ledger, nonce + operation_id, 90);
+            let settled = replay_payout_events(
+                vec![Event::Init(payout_init_args(p(38)))],
+                vec![queued, confirmed],
+            );
+            assert!(
+                settled.get_pending_payout(operation_id).is_none(),
+                "exact tuple should settle held operation {operation_id}"
+            );
+        }
+
+        let owner = p(39);
+        let ledger = p(40);
+        let operation_id = 105;
+        let nonce = (789u128 << 64) | 13;
+        let mut legacy = held_receipt_row(operation_id, owner, ledger, nonce);
+        legacy.ledger = None;
+        let held = replay_payout_events(
+            vec![Event::Init(payout_init_args(p(41)))],
+            vec![
+                PendingPayoutEvent::Queued {
+                    kind: PendingPayoutKind::Margin,
+                    operation_id,
+                    transfer: legacy,
+                    timestamp: Some(1),
+                },
+                receipt_confirmation(operation_id, owner, ledger, nonce, 90),
+            ],
+        );
+        assert!(held.get_pending_payout(operation_id).is_some());
     }
 
     #[test]

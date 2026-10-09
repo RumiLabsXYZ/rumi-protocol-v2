@@ -2292,6 +2292,7 @@ export interface _SERVICE {
     [number, BurnSettlementProofArg],
     Result
   >,
+  'settle_pending_payout_receipt' : ActorMethod<[bigint, bigint], Result_21>,
   'settle_reserve_burn' : ActorMethod<[number, bigint, string], Result>,
   'settle_reserve_burn_with_proof' : ActorMethod<
     [number, ReserveSettlementProofArg],

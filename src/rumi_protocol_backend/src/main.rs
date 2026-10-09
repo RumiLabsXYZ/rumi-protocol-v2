@@ -9595,6 +9595,116 @@ async fn recover_pending_payout(operation_id: u128) -> Result<bool, ProtocolErro
     Ok(read_state(|s| s.get_pending_payout(operation_id).is_none()))
 }
 
+/// Settle a held payout only after its current pinned ICRC-1 transfer tuple is
+/// found in a directly served block from the same ledger. This endpoint never
+/// submits or rearms a transfer. A direct ledger response is trusted as the
+/// source of the block; archive callback responses are rejected by the fetcher
+/// and no independent chain-membership proof is claimed.
+#[candid_method(update)]
+#[update]
+async fn settle_pending_payout_receipt(
+    operation_id: u128,
+    block_index: u64,
+) -> Result<bool, ProtocolError> {
+    use icrc_ledger_types::icrc1::account::Account;
+
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::GenericError(
+            "Anonymous callers cannot settle payout receipts".to_string(),
+        ));
+    }
+    let _guard = rumi_protocol_backend::guard::GuardPrincipal::new(
+        caller,
+        "settle_pending_payout_receipt",
+    )?;
+    let (kind, transfer) = read_state(|s| s.get_pending_payout(operation_id))
+        .ok_or_else(|| {
+            ProtocolError::GenericError("No pending payout with this operation ID".to_string())
+        })?;
+    if transfer.owner != caller {
+        return Err(ProtocolError::GenericError(
+            "Only the payout owner can settle it".to_string(),
+        ));
+    }
+    if !transfer.held_for_manual_retry || transfer.in_flight {
+        return Err(ProtocolError::GenericError(
+            "Only held, non-in-flight payouts can use receipt settlement".to_string(),
+        ));
+    }
+    let (Some(ledger), Some(amount_raw)) = (transfer.ledger, transfer.transfer_amount_raw) else {
+        return Err(ProtocolError::GenericError(
+            "Payout lacks its immutable ledger or amount tuple and remains held".to_string(),
+        ));
+    };
+    if transfer.op_nonce == 0 {
+        return Err(ProtocolError::GenericError(
+            "Payout lacks its immutable attempt nonce and remains held".to_string(),
+        ));
+    }
+    let duplicate_nonce = read_state(|s| {
+        s.pending_margin_transfers
+            .values()
+            .chain(s.pending_excess_transfers.values())
+            .chain(s.pending_redemption_transfer.values())
+            .any(|other| other.operation_id != operation_id && other.op_nonce == transfer.op_nonce)
+    });
+    if duplicate_nonce {
+        return Err(ProtocolError::GenericError(
+            "Payout nonce is shared by another pending obligation and remains held".to_string(),
+        ));
+    }
+
+    let from = Some(Account {
+        owner: ic_cdk::id(),
+        subaccount: None,
+    });
+    let to = Account {
+        owner: transfer.owner,
+        subaccount: None,
+    };
+    let memo = rumi_protocol_backend::management::nonce_to_memo(transfer.op_nonce);
+    let created_at_time = rumi_protocol_backend::management::nonce_to_created_at_time(transfer.op_nonce);
+    let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(ledger, block_index)
+        .await
+        .map_err(|reason| {
+            ProtocolError::GenericError(format!(
+                "Direct payout receipt could not be verified; payout remains held: {reason}"
+            ))
+        })?;
+    rumi_protocol_backend::icrc3_proof::validate_icrc3_transfer_block(
+        &block,
+        from,
+        to,
+        amount_raw,
+        Some(memo.0.as_ref()),
+        Some(created_at_time),
+    )
+    .map_err(|reason| {
+        ProtocolError::GenericError(format!(
+            "Direct block does not match the pinned payout tuple; payout remains held: {reason}"
+        ))
+    })?;
+
+    mutate_state(|s| {
+        if s.get_pending_payout(operation_id) != Some((kind, transfer)) {
+            return false;
+        }
+        rumi_protocol_backend::event::record_pending_payout_receipt_confirmed(
+            s,
+            operation_id,
+            block_index,
+            caller,
+        )
+    })
+    .then_some(true)
+    .ok_or_else(|| {
+        ProtocolError::GenericError(
+            "Payout changed during receipt verification; it remains held".to_string(),
+        )
+    })
+}
+
 #[candid_method(update)]
 #[update]
 async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> {
