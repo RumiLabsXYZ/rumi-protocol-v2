@@ -66,8 +66,12 @@ fn cache_virtual_price(
 /// its durable intent. Unrelated-token deposits and withdrawals remain safe;
 /// live liquidation and any intersecting ledger stay globally serialized.
 pub(crate) fn pool_token_balance_mutation_blocked(ledgers: &[Principal]) -> bool {
-    crate::pool_guard::liquidation_in_progress()
-        || read_state(|state| {
+    crate::pool_guard::token_balance_mutation_guarded(ledgers)
+        || pool_token_balance_mutation_blocked_without_snapshot(ledgers)
+}
+
+fn pool_token_balance_mutation_blocked_without_snapshot(ledgers: &[Principal]) -> bool {
+    crate::pool_guard::liquidation_in_progress() || read_state(|state| {
             let chain_intersects = state.pending_chain_absorbs().iter().any(|intent| {
                 ledgers
                     .iter()
@@ -82,10 +86,45 @@ pub(crate) fn pool_token_balance_mutation_blocked(ledgers: &[Principal]) -> bool
         })
 }
 
+pub(crate) fn ensure_no_token_balance_mutation_in_flight(
+    ledgers: &[Principal],
+) -> Result<(), StabilityPoolError> {
+    if crate::pool_guard::token_balance_mutation_in_flight(ledgers) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    ensure_no_ambiguous_inbound_deposit(ledgers)
+}
+
+pub(crate) fn ensure_no_ambiguous_inbound_deposit(
+    ledgers: &[Principal],
+) -> Result<(), StabilityPoolError> {
+    if read_state(|state| {
+        ledgers
+            .iter()
+            .any(|ledger| state.has_pending_deposit_intent_for_ledger(*ledger))
+    }) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_pool_token_balance_mutation_allowed(
     ledgers: &[Principal],
 ) -> Result<(), StabilityPoolError> {
     if pool_token_balance_mutation_blocked(ledgers) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(())
+}
+
+/// Check pool-wide absorb state but ignore a caller's own per-ledger snapshot
+/// reservation. Used after a withdrawal's await and for crediting a completed
+/// inbound deposit: incoming funds cannot reduce backing, while liquidation or
+/// pending-absorb state still invalidates the operation.
+pub(crate) fn ensure_pool_token_balance_mutation_allowed_without_snapshot(
+    ledgers: &[Principal],
+) -> Result<(), StabilityPoolError> {
+    if pool_token_balance_mutation_blocked_without_snapshot(ledgers) {
         return Err(StabilityPoolError::SystemBusy);
     }
     Ok(())
@@ -826,6 +865,15 @@ async fn process_unallocated_interest_forward(batch_id: u64) -> Result<(), Stabi
         // operator configuration has not selected a destination yet.
         return Ok(());
     };
+
+    ensure_pool_token_balance_mutation_allowed_without_snapshot(&[batch.token_ledger])?;
+    ensure_no_ambiguous_inbound_deposit(&[batch.token_ledger])?;
+
+    // This transfer spends an unallocated stablecoin surplus. Serialize by
+    // ledger with withdrawal snapshots so a stale live-balance cap cannot
+    // include surplus after it has been forwarded to treasury.
+    let _snapshot_guard =
+        crate::pool_guard::TokenBalanceMutationGuard::acquire(batch.token_ledger)?;
 
     let batch = if batch.transfer_block_index.is_none() && batch.fee.is_none() {
         let fee = deposits::unallocated_interest_transfer_fee(batch.token_ledger).await;

@@ -392,6 +392,17 @@ impl StabilityPoolState {
             .and_then(|pending| pending.get(&caller).cloned())
     }
 
+    /// A dispatched immutable transfer intent can represent tokens already
+    /// reflected in the ledger but not yet credited to depositor books. A
+    /// merely prepared, never-dispatched intent must not freeze the ledger.
+    pub fn has_pending_deposit_intent_for_ledger(&self, ledger: Principal) -> bool {
+        self.pending_deposit_intents.as_ref().is_some_and(|pending| {
+            pending.values().any(|intent| {
+                intent.token_ledger == ledger && intent.dispatch_started
+            })
+        })
+    }
+
     pub fn completed_deposit_intent(
         &self,
         caller: Principal,
@@ -3899,8 +3910,14 @@ mod tests {
         let caller = Principal::from_slice(&[41]);
         let other = Principal::from_slice(&[42]);
         let mut state = StabilityPoolState::default();
-        let first = deposit_intent_for_test(caller, 1, 500);
+        let mut first = deposit_intent_for_test(caller, 1, 500);
         assert_eq!(state.reserve_deposit_intent(first.clone()), Ok(()));
+        assert!(
+            !state.has_pending_deposit_intent_for_ledger(Principal::from_slice(&[70])),
+            "a never-dispatched row does not freeze its ledger"
+        );
+        first.dispatch_started = true;
+        assert!(state.update_deposit_intent(first.clone()));
 
         // A second tab cannot reserve another sequence while the first is held.
         assert_eq!(
@@ -3912,6 +3929,8 @@ mod tests {
         let bytes = Encode!(&state).expect("encode unresolved deposit intents");
         let restored = try_decode_state(&bytes).expect("decode unresolved deposit intents");
         assert_eq!(restored.pending_deposit_intent(caller), Some(first));
+        assert!(restored.has_pending_deposit_intent_for_ledger(Principal::from_slice(&[70])));
+        assert!(!restored.has_pending_deposit_intent_for_ledger(Principal::from_slice(&[71])));
         assert_eq!(restored.deposit_intent_status(caller, 1).high_watermark, 1);
         assert_eq!(restored.deposit_intent_status(caller, 1).next_seq, None);
         assert!(matches!(

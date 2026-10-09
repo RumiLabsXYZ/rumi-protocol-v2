@@ -88,7 +88,9 @@ pub(crate) fn record_deposit_credit_after_async(
     token_ledger: Principal,
     amount: u64,
 ) -> Result<(), StabilityPoolError> {
-    crate::ensure_pool_token_balance_mutation_allowed(&[token_ledger])?;
+    // This callback only credits a settled inbound transfer. It cannot reduce
+    // live backing, so it may complete while a withdrawal owns a snapshot.
+    crate::ensure_pool_token_balance_mutation_allowed_without_snapshot(&[token_ledger])?;
     mutate_state(|s| {
         s.add_deposit(caller, token_ledger, amount);
         s.push_event(
@@ -352,6 +354,10 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
     if crate::pool_token_balance_mutation_blocked(&[token_ledger]) {
         return Err(StabilityPoolError::SystemBusy);
     }
+    crate::ensure_no_token_balance_mutation_in_flight(&[token_ledger])?;
+    // The inbound transfer can appear in a live balance query before its
+    // depositor credit is recorded, so reserve this ledger across pull/credit.
+    let _balance_guard = crate::pool_guard::TokenBalanceMutationGuard::acquire(token_ledger)?;
     let caller = ic_cdk::api::caller();
 
     // Validate token is accepted
@@ -487,6 +493,11 @@ pub async fn deposit_with_intent(
         return Ok(completed.result);
     }
 
+    // This may resume or start an inbound transfer. Keep its ledger out of
+    // withdrawal snapshots until the receipt and matching book credit settle.
+    let _token_balance_guard =
+        crate::pool_guard::TokenBalanceMutationGuard::acquire(token_ledger)?;
+
     let existing = read_state(|state| state.pending_deposit_intent(caller));
     let intent = if let Some(intent) = existing {
         if intent.intent_seq != intent_seq {
@@ -513,9 +524,8 @@ pub async fn deposit_with_intent(
                 expected_seq: expected,
             });
         }
-        if crate::pool_token_balance_mutation_blocked(&[token_ledger]) {
-            return Err(StabilityPoolError::SystemBusy);
-        }
+        crate::ensure_pool_token_balance_mutation_allowed_without_snapshot(&[token_ledger])?;
+        crate::ensure_no_ambiguous_inbound_deposit(&[token_ledger])?;
         let config = read_state(|state| state.get_stablecoin_config(&token_ledger).cloned())
             .ok_or(StabilityPoolError::TokenNotAccepted { ledger: token_ledger })?;
         if !config.is_active {
@@ -660,7 +670,7 @@ fn finish_deposit_intent_completed(
     intent: &DepositIntent,
     block_index: u64,
 ) -> Result<DepositIntentResult, StabilityPoolError> {
-    crate::ensure_pool_token_balance_mutation_allowed(&[intent.token_ledger])?;
+    crate::ensure_pool_token_balance_mutation_allowed_without_snapshot(&[intent.token_ledger])?;
     let result = DepositIntentResult::Completed {
         intent_seq: intent.intent_seq,
         token_ledger: intent.token_ledger,
@@ -1015,6 +1025,11 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
     if crate::pool_token_balance_mutation_blocked(&[token_ledger]) {
         return Err(StabilityPoolError::SystemBusy);
     }
+    crate::ensure_no_token_balance_mutation_in_flight(&[token_ledger])?;
+    // Reserve this ledger before either live-state query awaits. Liquidations
+    // check the same key after taking the pool-wide liquidation guard, so a
+    // snapshot cannot authorize a withdrawal after a concurrent pool debit.
+    let _snapshot_guard = crate::pool_guard::TokenBalanceMutationGuard::acquire(token_ledger)?;
     let caller = ic_cdk::api::caller();
 
     if read_state(|s| s.configuration.emergency_pause) {
@@ -1029,7 +1044,7 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
 
     // Fee/balance queries above await other canisters. Recheck after them so a
     // burn intent created during those calls cannot race this withdrawal.
-    crate::ensure_pool_token_balance_mutation_allowed(&[token_ledger])?;
+    crate::ensure_pool_token_balance_mutation_allowed_without_snapshot(&[token_ledger])?;
 
     if amount <= ledger_fee {
         return Err(StabilityPoolError::AmountTooLow {
@@ -1771,6 +1786,11 @@ pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolEr
     if caller != refund.user && !read_state(|state| state.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
+    crate::ensure_no_token_balance_mutation_in_flight(&[refund.token_ledger])?;
+    // The payout reduces this ledger's live backing. Exclude an overlapping
+    // withdrawal snapshot only for this refund's token, not every pool token.
+    let _snapshot_guard =
+        crate::pool_guard::TokenBalanceMutationGuard::acquire(refund.token_ledger)?;
 
     let mut attempt = read_state(|state| state.pending_refund_attempt(refund_id));
     if attempt.is_none() {

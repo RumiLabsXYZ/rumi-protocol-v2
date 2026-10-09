@@ -21,11 +21,18 @@
 
 use crate::state::{read_state, MAX_PENDING_REFUNDS};
 use crate::types::StabilityPoolError;
+use candid::Principal;
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 
 thread_local! {
     static LIQUIDATION_ACTIVE: RefCell<bool> = const { RefCell::new(false) };
     static BALANCE_ASYNC_IN_FLIGHT: RefCell<u32> = const { RefCell::new(0) };
+    /// Ledgers with an in-flight operation that reads or changes live backing.
+    /// This is narrower than `BALANCE_ASYNC_IN_FLIGHT`: a slow balance query
+    /// for one token must not stall liquidations of every other token.
+    static TOKEN_BALANCE_MUTATION_IN_FLIGHT: RefCell<BTreeSet<Principal>> =
+        const { RefCell::new(BTreeSet::new()) };
     static CHAIN_ABSORB_AUTO_TICK_ACTIVE: RefCell<bool> = const { RefCell::new(false) };
     static UNALLOCATED_INTEREST_FORWARD_ACTIVE: RefCell<bool> = const { RefCell::new(false) };
     /// Pending-refund slots held by operations that have pulled tokens but have
@@ -116,6 +123,48 @@ impl Drop for SpLiquidationGuard {
 /// liquidation's snapshot -> await -> apportion sequence.
 pub fn liquidation_in_progress() -> bool {
     LIQUIDATION_ACTIVE.with(|f| *f.borrow())
+}
+
+/// Exclusive per-ledger reservation spanning a live-balance snapshot or other
+/// backing-changing operation across its ledger awaits. Liquidation paths
+/// check this after acquiring `SpLiquidationGuard`, before their first await.
+#[must_use]
+pub struct TokenBalanceMutationGuard {
+    ledger: Principal,
+}
+
+impl TokenBalanceMutationGuard {
+    pub fn acquire(ledger: Principal) -> Result<Self, StabilityPoolError> {
+        if liquidation_in_progress() {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        TOKEN_BALANCE_MUTATION_IN_FLIGHT.with(|active| {
+            let mut active = active.borrow_mut();
+            if !active.insert(ledger) {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            Ok(Self { ledger })
+        })
+    }
+}
+
+impl Drop for TokenBalanceMutationGuard {
+    fn drop(&mut self) {
+        TOKEN_BALANCE_MUTATION_IN_FLIGHT.with(|active| {
+            active.borrow_mut().remove(&self.ledger);
+        });
+    }
+}
+
+pub fn token_balance_mutation_in_flight(ledgers: &[Principal]) -> bool {
+    TOKEN_BALANCE_MUTATION_IN_FLIGHT.with(|active| {
+        let active = active.borrow();
+        ledgers.iter().any(|ledger| active.contains(ledger))
+    })
+}
+
+pub fn token_balance_mutation_guarded(ledgers: &[Principal]) -> bool {
+    liquidation_in_progress() || token_balance_mutation_in_flight(ledgers)
 }
 
 #[must_use]
@@ -266,6 +315,61 @@ mod tests {
         );
         drop(g1);
         assert!(!balance_async_in_flight());
+    }
+
+    #[test]
+    fn token_balance_mutation_is_ledger_keyed_for_deposits_and_withdrawals() {
+        let ledger_a = Principal::from_slice(&[1]);
+        let ledger_b = Principal::from_slice(&[2]);
+        assert!(!token_balance_mutation_in_flight(&[ledger_a, ledger_b]));
+        {
+            // A settled inbound pull can raise live balance before its book
+            // credit. Holding the same key prevents an overlapping withdrawal
+            // from combining that larger numerator with the old denominator.
+            let _ledger_a_mutation = TokenBalanceMutationGuard::acquire(ledger_a).unwrap();
+            assert!(token_balance_mutation_in_flight(&[ledger_a]));
+            assert!(!token_balance_mutation_in_flight(&[ledger_b]));
+            assert!(matches!(
+                TokenBalanceMutationGuard::acquire(ledger_a),
+                Err(StabilityPoolError::SystemBusy)
+            ));
+            assert!(matches!(
+                crate::ensure_no_token_balance_mutation_in_flight(&[ledger_a]),
+                Err(StabilityPoolError::SystemBusy)
+            ), "liquidation that wins the pool lock after this snapshot must not debit this ledger");
+            crate::ensure_no_token_balance_mutation_in_flight(&[ledger_b])
+                .expect("a different ledger can continue");
+            let _unrelated_snapshot = TokenBalanceMutationGuard::acquire(ledger_b)
+                .expect("unrelated ledger remains available");
+        }
+        assert!(!token_balance_mutation_in_flight(&[ledger_a, ledger_b]));
+    }
+
+    #[test]
+    fn liquidation_first_blocks_withdraw_snapshot_and_other_lock_releases() {
+        let ledger = Principal::from_slice(&[4]);
+        let liquidation = SpLiquidationGuard::new().expect("liquidation takes pool lock");
+        assert!(liquidation_in_progress());
+        assert!(token_balance_mutation_guarded(&[ledger]));
+        assert!(matches!(
+            TokenBalanceMutationGuard::acquire(ledger),
+            Err(StabilityPoolError::SystemBusy)
+        ));
+        drop(liquidation);
+        assert!(!liquidation_in_progress());
+        assert!(!token_balance_mutation_guarded(&[ledger]));
+        let _acquired_after_release = TokenBalanceMutationGuard::acquire(ledger).unwrap();
+    }
+
+    #[test]
+    fn token_snapshot_reservation_releases_during_unwind() {
+        let ledger = Principal::from_slice(&[3]);
+        let result = std::panic::catch_unwind(|| {
+            let _snapshot = TokenBalanceMutationGuard::acquire(ledger).unwrap();
+            panic!("simulate panic while holding async snapshot reservation");
+        });
+        assert!(result.is_err());
+        assert!(!token_balance_mutation_in_flight(&[ledger]));
     }
 
     #[test]

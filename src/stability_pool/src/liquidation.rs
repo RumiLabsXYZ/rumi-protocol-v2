@@ -1787,6 +1787,11 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
     let (protocol_id, icusd_ledger, existing_minting_account, icusd_to_burn_e8s, stables_consumed) =
         current;
 
+    let snapshot_ledgers: Vec<Principal> = stables_consumed.keys().copied().collect();
+    if let Err(error) = crate::ensure_no_token_balance_mutation_in_flight(&snapshot_ledgers) {
+        return liquidation_failure(vault_info, error);
+    }
+
     let preflight = match io
         .preflight_xrp_absorb(protocol_id, vault_info.vault_id, icusd_to_burn_e8s)
         .await
@@ -2766,6 +2771,7 @@ async fn sp_absorb_chain_vault_core(
     read_state(|s| ensure_no_other_pending_pool_absorb_for_chain(s, vault_id))?;
     if let Some(intent) = read_state(|s| s.get_pending_chain_absorb(vault_id)) {
         let plan = chain_absorb_plan_from_intent(&intent);
+        crate::ensure_no_token_balance_mutation_in_flight(&[plan.icusd_ledger])?;
         if let Some(result) = intent.backend_result.clone() {
             return mutate_state(|s| apply_chain_absorb_success_in_state(s, &plan, result));
         }
@@ -2860,6 +2866,7 @@ async fn sp_absorb_chain_vault_core(
         reason: "chain vault not found in liquidatable discovery".to_string(),
     })?;
     let plan = read_state(|s| prepare_chain_absorb_plan_in_state(s, &candidate))?;
+    crate::ensure_no_token_balance_mutation_in_flight(&[plan.icusd_ledger])?;
 
     let minting_account = match read_state(|s| s.get_pending_chain_absorb(vault_id)) {
         Some(intent) => intent.icusd_minting_account,
@@ -3319,6 +3326,11 @@ pub async fn recover_pending_three_usd_absorbs() {
     let pending: Vec<ThreeUsdReserveAbsorbIntent> =
         mutate_state(|state| state.take_pending_three_usd_absorb_page(MAX_PER_TICK));
     for intent in pending {
+        if crate::ensure_no_token_balance_mutation_in_flight(&[intent.ledger]).is_err() {
+            // A withdrawal already owns this ledger's live-balance snapshot.
+            // Defer only this row; unrelated ledger reconciliations proceed.
+            continue;
+        }
         let mut resolution = resolve_three_usd_absorb_status(protocol_id, &intent).await;
         if matches!(resolution, ThreeUsdReserveAbsorbStatusResolution::TransferSubmittedOrUnknown) {
             // Resume the same durable identity directly. This call never
@@ -3430,6 +3442,11 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             success: false,
             error_message: Some("No stablecoins available for liquidation".to_string()),
         };
+    }
+
+    let snapshot_ledgers: Vec<Principal> = token_draw.keys().copied().collect();
+    if let Err(error) = crate::ensure_no_token_balance_mutation_in_flight(&snapshot_ledgers) {
+        return liquidation_failure(vault_info, error);
     }
 
     log!(
