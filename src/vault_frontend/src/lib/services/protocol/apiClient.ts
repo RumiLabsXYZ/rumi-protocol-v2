@@ -16,7 +16,8 @@ import type {
     Fees,
     SuccessWithFee,
     ProtocolError,
-    OpenVaultSuccess
+    OpenVaultSuccess,
+    BorrowMintStatus
   } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
 import {
   walletOperations,
@@ -153,8 +154,8 @@ export interface BoundOpenVaultAndBorrowResult {
 
 export interface BoundBorrowFromVaultResult {
   kind: BoundActionOutcomeKind;
-  vaultId: number;
-  blockIndex: number | null;
+  vaultId: number | bigint;
+  blockIndex: number | bigint | null;
   feePaidRaw: bigint | null;
   errorMessage: string | null;
   submittedIcusdRaw: bigint;
@@ -1290,12 +1291,34 @@ static async openVaultAndBorrowBound(
  */
 static async borrowFromVaultBound(
   ctx: ActionBoundContext,
-  vaultId: number,
+  vaultId: number | bigint,
   icusdAmountRaw: bigint
 ): Promise<BoundBorrowFromVaultResult> {
+  return ApiClient.borrowFromVaultBoundInternal(ctx, vaultId, icusdAmountRaw, false);
+}
+
+/** Exact-journal retry: backend owner/amount checks are authoritative, so
+ * changed client-side minimums or CR calculations cannot strand a reservation. */
+static async retryPendingBorrowMintBound(
+  ctx: ActionBoundContext,
+  vaultId: bigint,
+  icusdAmountRaw: bigint
+): Promise<BoundBorrowFromVaultResult> {
+  return ApiClient.borrowFromVaultBoundInternal(ctx, vaultId, icusdAmountRaw, true);
+}
+
+private static async borrowFromVaultBoundInternal(
+  ctx: ActionBoundContext,
+  vaultId: number | bigint,
+  icusdAmountRaw: bigint,
+  isJournalRetry: boolean
+): Promise<BoundBorrowFromVaultResult> {
+  // A recovery row carries a nat64 ID; converting it to Number can silently
+  // change the operation identity above JavaScript's safe-integer ceiling.
+  const resultVaultId = vaultId;
   const abort = (errorMessage: string): BoundBorrowFromVaultResult => ({
     kind: 'predispatch_aborted',
-    vaultId,
+    vaultId: resultVaultId,
     blockIndex: null,
     feePaidRaw: null,
     errorMessage,
@@ -1305,7 +1328,7 @@ static async borrowFromVaultBound(
   if (icusdAmountRaw <= 0n) {
     return abort(`Invalid borrowing amount: ${icusdAmountRaw.toString()}. Amount must be a positive integer.`);
   }
-  if (icusdAmountRaw < BigInt(MIN_ICUSD_AMOUNT)) {
+  if (!isJournalRetry && icusdAmountRaw < BigInt(MIN_ICUSD_AMOUNT)) {
     return abort(`Amount too low. Minimum borrowing amount: ${MIN_ICUSD_AMOUNT / E8S} icUSD`);
   }
 
@@ -1318,7 +1341,7 @@ static async borrowFromVaultBound(
     return abort(err instanceof Error ? err.message : 'Unknown error before dispatch');
   }
 
-  const vaultArg = { vault_id: BigInt(vaultId), amount: icusdAmountRaw };
+  const vaultArg = { vault_id: typeof vaultId === 'bigint' ? vaultId : BigInt(vaultId), amount: icusdAmountRaw };
 
   let result: any;
   try {
@@ -1326,7 +1349,7 @@ static async borrowFromVaultBound(
   } catch (dispatchErr) {
     return {
       kind: 'ambiguous_transport',
-      vaultId,
+      vaultId: resultVaultId,
       blockIndex: null,
       feePaidRaw: null,
       errorMessage: dispatchErr instanceof Error ? dispatchErr.message : 'Network error after dispatch.',
@@ -1337,8 +1360,10 @@ static async borrowFromVaultBound(
   if ('Ok' in result) {
     return {
       kind: 'dispatched_ok',
-      vaultId,
-      blockIndex: Number(result.Ok.block_index),
+      vaultId: resultVaultId,
+      blockIndex: BigInt(result.Ok.block_index) <= BigInt(Number.MAX_SAFE_INTEGER)
+        ? Number(result.Ok.block_index)
+        : BigInt(result.Ok.block_index),
       feePaidRaw: BigInt(result.Ok.fee_amount_paid),
       errorMessage: null,
       submittedIcusdRaw: icusdAmountRaw,
@@ -1347,7 +1372,7 @@ static async borrowFromVaultBound(
 
   return {
     kind: 'dispatched_err',
-    vaultId,
+    vaultId: resultVaultId,
     blockIndex: null,
     feePaidRaw: null,
     errorMessage: ApiClient.formatProtocolError(result.Err),
@@ -2240,6 +2265,76 @@ static async repayToVaultWithStable(
         throw err;
       }
     });
+  }
+
+  /** Owner-authenticated list of unresolved native borrow mint operations. */
+  static async getMyPendingBorrowMintsBound(ctx: ActionBoundContext): Promise<BorrowMintStatus[]> {
+    assertActionBoundContextCurrent(ctx);
+    const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+    assertActionBoundContextCurrent(ctx);
+    const result = await actor.get_my_pending_borrow_mints();
+    assertActionBoundContextCurrent(ctx);
+    return result;
+  }
+
+  /** Promote only a caller-supplied candidate block that proves the pinned mint tuple. */
+  static async reconcilePendingBorrowMintFromBlockBound(
+    ctx: ActionBoundContext,
+    vaultId: bigint,
+    candidateBlockIndex: bigint,
+    borrowedAmountRaw: bigint
+  ): Promise<BoundBorrowFromVaultResult> {
+    const resultVaultId = vaultId;
+    const base = {
+      vaultId: resultVaultId,
+      blockIndex: null,
+      feePaidRaw: null,
+      submittedIcusdRaw: borrowedAmountRaw,
+    };
+    if (candidateBlockIndex < 0n) {
+      return { ...base, kind: 'predispatch_aborted', errorMessage: 'Block index must be nonnegative.' };
+    }
+    if (candidateBlockIndex > 18_446_744_073_709_551_615n) {
+      return { ...base, kind: 'predispatch_aborted', errorMessage: 'Block index exceeds the ledger’s nat64 range.' };
+    }
+    let actor: _SERVICE;
+    try {
+      assertActionBoundContextCurrent(ctx);
+      actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+    } catch (error) {
+      return {
+        ...base,
+        kind: 'predispatch_aborted',
+        errorMessage: error instanceof Error ? error.message : 'Wallet session changed before reconciliation.',
+      };
+    }
+    try {
+      const result = await actor.reconcile_pending_borrow_mint_from_block(vaultId, candidateBlockIndex);
+      assertActionBoundContextCurrent(ctx);
+      if ('Ok' in result) {
+        return {
+          ...base,
+          kind: 'dispatched_ok',
+          blockIndex: BigInt(result.Ok.block_index) <= BigInt(Number.MAX_SAFE_INTEGER)
+            ? Number(result.Ok.block_index)
+            : BigInt(result.Ok.block_index),
+          feePaidRaw: BigInt(result.Ok.fee_amount_paid),
+          errorMessage: null,
+        };
+      }
+      return {
+        ...base,
+        kind: 'dispatched_err',
+        errorMessage: ApiClient.formatProtocolError(result.Err),
+      };
+    } catch (error) {
+      return {
+        ...base,
+        kind: 'ambiguous_transport',
+        errorMessage: error instanceof Error ? error.message : 'Reconciliation outcome is unknown; refresh the pending journal.',
+      };
+    }
   }
 
   /**

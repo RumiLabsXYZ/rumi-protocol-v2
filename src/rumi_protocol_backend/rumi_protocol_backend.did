@@ -1517,6 +1517,16 @@ type VaultRedemption = record {
   vault_id : nat64;
   collateral_seized : nat64;
 };
+type BorrowMintPhase = variant {
+  MintConfirmedHeld : record { block_index : nat64 };
+  ReceiptRecoveryRequired;
+  SubmittedOrUnknown;
+};
+type BorrowMintStatus = record {
+  vault_id : nat64;
+  borrowed_amount_e8s : nat64;
+  phase : BorrowMintPhase;
+};
 type VaultsPageResponse = record {
   vaults : vec CandidVault;
   next_start_id : opt nat64;
@@ -1607,6 +1617,7 @@ service : (ProtocolArg) -> {
   backfill_collateral_symbols : () -> (Result_3);
   borrow_chain_vault_evm : (VaultIntent, blob) -> (Result);
   borrow_from_vault : (VaultArg) -> (Result_4);
+  reconcile_pending_borrow_mint_from_block : (nat64, nat64) -> (Result_4);
   bot_cancel_liquidation : (nat64) -> (Result);
   bot_claim_liquidation : (nat64) -> (Result_5);
   bot_confirm_liquidation : (nat64) -> (Result);
@@ -1766,6 +1777,7 @@ service : (ProtocolArg) -> {
       GetEventsFilteredResponse,
     ) query;
   get_vault_interest_rate : (nat64) -> (Result_13) query;
+  get_my_pending_borrow_mints : () -> (vec BorrowMintStatus) query;
   get_vaults : (opt principal) -> (vec CandidVault) query;
   get_vaults_page : (nat64, nat64) -> (VaultsPageResponse) query;
   get_xrp_claims : () -> (vec record { nat64; XrpClaim }) query;

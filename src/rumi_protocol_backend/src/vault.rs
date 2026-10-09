@@ -1,13 +1,11 @@
 use crate::event::{
-    record_add_margin_to_vault, record_borrow_from_vault, record_open_vault,
-    record_repayed_to_vault,
+    record_add_margin_to_vault, record_open_vault, record_repayed_to_vault,
 };
 use crate::guard::{GuardPrincipal, VaultLiquidationGuard};
 use crate::logs::INFO;
 use crate::management;
 use crate::management::{
-    mint_icusd, transfer_collateral, transfer_collateral_from, transfer_icusd_from,
-    transfer_stable_from,
+    transfer_collateral, transfer_collateral_from, transfer_icusd_from, transfer_stable_from,
 };
 use crate::numeric::{Ratio, UsdIcp, ICP, ICUSD};
 use crate::state::PendingMarginTransfer;
@@ -1556,6 +1554,11 @@ pub fn require_vault_not_processing(vault: &Vault) -> Result<(), ProtocolError> 
     if vault.bot_processing {
         Err(ProtocolError::GenericError(format!(
             "Vault #{} is locked — bot liquidation in progress",
+            vault.vault_id
+        )))
+    } else if crate::state::has_pending_borrow_mint(vault.vault_id) {
+        Err(ProtocolError::TemporarilyUnavailable(format!(
+            "Vault #{} has an unresolved icUSD mint; retry the exact borrow to reconcile it",
             vault.vault_id
         )))
     } else {
@@ -5646,7 +5649,62 @@ async fn borrow_from_vault_internal(
     caller: Principal,
     arg: VaultArg,
 ) -> Result<SuccessWithFee, ProtocolError> {
+    borrow_from_vault_internal_with(
+        caller,
+        arg,
+        |tuple| async move { management::mint_icusd_with_borrow_tuple(&tuple).await },
+        ic_cdk::api::time,
+    )
+    .await
+}
+
+async fn borrow_from_vault_internal_with<F, Fut, N>(
+    caller: Principal,
+    arg: VaultArg,
+    dispatch: F,
+    now: N,
+) -> Result<SuccessWithFee, ProtocolError>
+where
+    F: FnOnce(crate::state::BorrowMintTuple) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<u64, icrc_ledger_types::icrc1::transfer::TransferError>,
+    >,
+    N: Fn() -> u64 + Copy,
+{
     let amount: ICUSD = arg.amount.into();
+    let now_ns = now();
+
+    // A pending row is the authorization for replay: accept only its original
+    // owner and gross amount, then submit its persisted ledger tuple verbatim.
+    if let Some(journal) = read_state(|s| s.pending_borrow_mints.get(&arg.vault_id).cloned()) {
+        if caller != journal.owner {
+            return Err(ProtocolError::CallerNotOwner);
+        }
+        if amount.to_u64() != journal.borrowed_amount_e8s {
+            return Err(ProtocolError::GenericError(format!(
+                "Vault #{} has an unresolved borrow of {} e8s; retry that exact amount to reconcile the existing mint",
+                arg.vault_id, journal.borrowed_amount_e8s
+            )));
+        }
+        let vault_matches = read_state(|s| {
+            s.vault_id_to_vaults.get(&arg.vault_id).is_some_and(|v| {
+                v.owner == journal.owner && v.collateral_type == journal.collateral_type
+            })
+        });
+        if !vault_matches {
+            return Err(ProtocolError::GenericError(format!(
+                "Vault #{} has an unresolved borrow journal and cannot be changed until it is reconciled",
+                arg.vault_id
+            )));
+        }
+        if journal.phase == crate::state::BorrowMintPhase::ReceiptRecoveryRequired {
+            return Err(ProtocolError::GenericError(format!(
+                "icUSD ledger returned TooOld for vault #{}; this does not prove the mint was absent. Submit a candidate ICRC-3 mint block index to reconcile_pending_borrow_mint_from_block; no mint will be retried",
+                arg.vault_id
+            )));
+        }
+        return dispatch_borrow_mint_with(journal, dispatch, now).await;
+    }
 
     if amount < read_state(|s| s.min_icusd_amount) {
         return Err(ProtocolError::AmountTooLow {
@@ -5655,9 +5713,8 @@ async fn borrow_from_vault_internal(
     }
 
     // Accrue interest on this vault before borrowing so CR check uses up-to-date debt.
-    let now = ic_cdk::api::time();
-    reject_active_xrp_sp_absorb_preflight(arg.vault_id, now)?;
-    mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
+    reject_active_xrp_sp_absorb_preflight(arg.vault_id, now_ns)?;
+    mutate_state(|s| s.accrue_single_vault(arg.vault_id, now_ns));
 
     let (vault, collateral_price, config_decimals, is_native_xrp) =
         read_state(|s| match s.vault_id_to_vaults.get(&arg.vault_id) {
@@ -5701,14 +5758,27 @@ async fn borrow_from_vault_internal(
     // Check debt ceiling + global mint cap AND reserve the headroom atomically.
     //
     // BK-003 (audit 2026-06-05): these caps are checked here but the debt is not
-    // recorded until after the `mint_icusd().await` below. Two borrows from
+    // recorded until the ledger confirms. Two borrows from
     // DIFFERENT owners both pass this check against the same committed aggregate,
     // both mint, and jointly exceed the cap (the per-caller GuardPrincipal does
     // not serialize distinct owners against the aggregate). The reservation guard
-    // counts every in-flight borrow in the check and is held across the mint, so
-    // a concurrent borrow sees this one's reserved amount. Released on Drop
-    // (return or continuation-trap via ic-cdk cleanup).
-    let current_debt = read_state(|s| s.total_debt_for_collateral(&vault.collateral_type));
+    // Durable pending journals count across await and upgrades; the transient
+    // reservation protects admission until the journal is inserted, then drops.
+    let (current_debt, pending_collateral_debt, pending_global_debt) = read_state(|s| {
+        let mut pending_collateral = 0u64;
+        let mut pending_global = 0u64;
+        for journal in s.pending_borrow_mints.values() {
+            pending_global = pending_global.saturating_add(journal.borrowed_amount_e8s);
+            if journal.collateral_type == vault.collateral_type {
+                pending_collateral = pending_collateral.saturating_add(journal.borrowed_amount_e8s);
+            }
+        }
+        (
+            s.total_debt_for_collateral(&vault.collateral_type),
+            pending_collateral,
+            pending_global,
+        )
+    });
     let debt_ceiling = read_state(|s| {
         s.get_collateral_config(&vault.collateral_type)
             .map(|c| c.debt_ceiling)
@@ -5719,9 +5789,11 @@ async fn borrow_from_vault_internal(
     let _borrow_reservation = crate::guard::BorrowReservationGuard::try_reserve(
         vault.collateral_type,
         amount.to_u64(),
-        current_debt.to_u64(),
+        current_debt
+            .to_u64()
+            .saturating_add(pending_collateral_debt),
         debt_ceiling,
-        total_borrowed.to_u64(),
+        total_borrowed.to_u64().saturating_add(pending_global_debt),
         global_cap,
     )
     .map_err(ProtocolError::GenericError)?;
@@ -5782,15 +5854,206 @@ async fn borrow_from_vault_internal(
         clamp_borrow_fee(amount, raw_fee)
     });
 
-    match mint_icusd(amount - fee, caller).await {
-        Ok(block_index) => {
-            mutate_state(|s| {
-                record_borrow_from_vault(s, arg.vault_id, amount, fee, block_index);
+    let (ledger, op_nonce) = mutate_state(|s| {
+        let ledger = s.icusd_ledger_principal;
+        let op_nonce = s.next_op_nonce_at(now_ns);
+        (ledger, op_nonce)
+    });
+    let tuple = crate::state::BorrowMintTuple {
+        ledger,
+        destination: caller,
+        amount_e8s: (amount - fee).to_u64(),
+        memo: op_nonce.to_be_bytes(),
+        created_at_time_ns: crate::management::nonce_to_created_at_time(op_nonce),
+        op_nonce,
+    };
+    let journal = crate::state::BorrowMintJournal {
+        vault_id: arg.vault_id,
+        owner: caller,
+        collateral_type: vault.collateral_type,
+        borrowed_amount_e8s: amount.to_u64(),
+        fee_amount_e8s: fee.to_u64(),
+        tuple,
+        phase: crate::state::BorrowMintPhase::SubmittedOrUnknown,
+    };
+    let inserted = mutate_state(|s| {
+        if s.pending_borrow_mints.contains_key(&arg.vault_id) {
+            return false;
+        }
+        s.pending_borrow_mints.insert(arg.vault_id, journal.clone());
+        true
+    });
+    if !inserted {
+        return Err(ProtocolError::TemporarilyUnavailable(format!(
+            "Vault #{} acquired a pending borrow mint during admission; retry the exact request",
+            arg.vault_id
+        )));
+    }
+    // The durable row now carries this headroom across awaits and upgrades.
+    // Release the transient reservation before dispatch so later admissions
+    // count each outstanding borrow exactly once.
+    drop(_borrow_reservation);
+    dispatch_borrow_mint_with(journal, dispatch, now).await
+}
+
+async fn dispatch_borrow_mint_with<F, Fut>(
+    journal: crate::state::BorrowMintJournal,
+    dispatch: F,
+    now: impl FnOnce() -> u64,
+) -> Result<SuccessWithFee, ProtocolError>
+where
+    F: FnOnce(crate::state::BorrowMintTuple) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<u64, icrc_ledger_types::icrc1::transfer::TransferError>,
+    >,
+{
+    let (block_index, confirmed_journal) = match journal.phase.clone() {
+        crate::state::BorrowMintPhase::MintConfirmedHeld { block_index } => {
+            (block_index, journal.clone())
+        }
+        crate::state::BorrowMintPhase::ReceiptRecoveryRequired => {
+            return Err(ProtocolError::GenericError(format!(
+                "borrow mint for vault #{} requires an exact positive ICRC-3 receipt; resubmission is disabled",
+                journal.vault_id
+            )));
+        }
+        crate::state::BorrowMintPhase::SubmittedOrUnknown => {
+            match dispatch(journal.tuple.clone()).await {
+                Ok(block_index) => {
+                    let mut confirmed = journal.clone();
+                    confirmed.phase = crate::state::BorrowMintPhase::MintConfirmedHeld {
+                        block_index,
+                    };
+                    let recorded = mutate_state(|s| {
+                        if s.pending_borrow_mints.get(&journal.vault_id) != Some(&journal) {
+                            return false;
+                        }
+                        s.pending_borrow_mints.insert(journal.vault_id, confirmed.clone());
+                        true
+                    });
+                    if !recorded {
+                        return Err(ProtocolError::GenericError(format!(
+                            "icUSD mint for vault #{} was confirmed at block {}, but its matching journal could not be advanced; operator reconciliation is required",
+                            journal.vault_id, block_index
+                        )));
+                    }
+                    (block_index, confirmed)
+                }
+                Err(mint_error) => {
+                    if matches!(
+                        &mint_error,
+                        icrc_ledger_types::icrc1::transfer::TransferError::TooOld
+                    ) {
+                        let advanced = mutate_state(|s| {
+                            let Some(current) = s.pending_borrow_mints.get_mut(&journal.vault_id)
+                            else {
+                                return false;
+                            };
+                            if current != &journal
+                                || current.phase
+                                    != crate::state::BorrowMintPhase::SubmittedOrUnknown
+                            {
+                                return false;
+                            }
+                            current.phase = crate::state::BorrowMintPhase::ReceiptRecoveryRequired;
+                            true
+                        });
+                        return Err(ProtocolError::GenericError(if advanced {
+                            format!(
+                                "icUSD ledger returned TooOld for vault #{}; the original mint outcome remains unknown. No further mint will be sent. Find the matching ICRC-3 mint block and submit its index with reconcile_pending_borrow_mint_from_block",
+                                journal.vault_id
+                            )
+                        } else {
+                            format!(
+                                "icUSD ledger returned TooOld for vault #{} but the journal changed; no further mint will be sent",
+                                journal.vault_id
+                            )
+                        }));
+                    }
+                    // These ledger replies are defined to reject without applying a
+                    // transfer. TooOld is intentionally excluded: after the dedup
+                    // window it cannot establish whether an earlier attempt minted.
+                    let definite_no_effect = matches!(
+                        mint_error,
+                        icrc_ledger_types::icrc1::transfer::TransferError::BadFee { .. }
+                            | icrc_ledger_types::icrc1::transfer::TransferError::BadBurn { .. }
+                            | icrc_ledger_types::icrc1::transfer::TransferError::InsufficientFunds { .. }
+                            | icrc_ledger_types::icrc1::transfer::TransferError::CreatedInFuture { .. }
+                    );
+                    if definite_no_effect {
+                        mutate_state(|s| {
+                            if s.pending_borrow_mints.get(&journal.vault_id) == Some(&journal) {
+                                s.pending_borrow_mints.remove(&journal.vault_id);
+                            }
+                        });
+                        return Err(ProtocolError::TransferError(mint_error));
+                    }
+                    return Err(ProtocolError::GenericError(format!(
+                        "icUSD mint outcome for vault #{} is unresolved. Retry borrow_from_vault with the exact amount {} e8s to resubmit the pinned ledger tuple; do not open a second vault. Ledger response: {:?}",
+                        journal.vault_id, journal.borrowed_amount_e8s, mint_error
+                    )));
+                }
+            }
+        }
+    };
+
+            let debt_can_be_applied = read_state(|s| {
+                s.pending_borrow_mints.get(&confirmed_journal.vault_id) == Some(&confirmed_journal)
+                    && s.vault_id_to_vaults.get(&journal.vault_id).is_some_and(|vault| {
+                        vault.owner == journal.owner
+                            && vault.collateral_type == journal.collateral_type
+                            && crate::numeric::checked_icusd_add(
+                                vault.borrowed_icusd_amount,
+                                ICUSD::new(journal.borrowed_amount_e8s),
+                            )
+                            .is_some()
+                    })
             });
+            if !debt_can_be_applied {
+                return Err(ProtocolError::GenericError(format!(
+                    "icUSD mint for vault #{} was confirmed at block {}, but debt cannot be applied safely; the journal remains held for reconciliation",
+                    journal.vault_id, block_index
+                )));
+            }
+            let committed = mutate_state(|s| {
+                if s.pending_borrow_mints.get(&confirmed_journal.vault_id)
+                    != Some(&confirmed_journal)
+                {
+                    return false;
+                }
+                let vault_matches = s.vault_id_to_vaults.get(&journal.vault_id).is_some_and(|vault| {
+                    vault.owner == journal.owner
+                        && vault.collateral_type == journal.collateral_type
+                        && crate::numeric::checked_icusd_add(
+                            vault.borrowed_icusd_amount,
+                            ICUSD::new(journal.borrowed_amount_e8s),
+                        )
+                        .is_some()
+                });
+                if !vault_matches {
+                    return false;
+                }
+                crate::event::record_borrow_from_vault_at(
+                    s,
+                    journal.vault_id,
+                    ICUSD::new(journal.borrowed_amount_e8s),
+                    ICUSD::new(journal.fee_amount_e8s),
+                    block_index,
+                    journal.owner,
+                    now(),
+                );
+                s.pending_borrow_mints.remove(&journal.vault_id);
+                true
+            });
+            if !committed {
+                return Err(ProtocolError::GenericError(format!(
+                    "icUSD mint for vault #{} was confirmed at block {}, but its matching borrow journal was unavailable; operator reconciliation is required",
+                    journal.vault_id, block_index
+                )));
+            }
 
-            // Mint the borrowing fee to treasury (fire-and-forget)
+            let fee = ICUSD::new(journal.fee_amount_e8s);
             crate::treasury::mint_borrowing_fee_to_treasury(fee).await;
-
             Ok(SuccessWithFee {
                 block_index,
                 fee_amount_paid: fee.to_u64(),
@@ -5799,8 +6062,311 @@ async fn borrow_from_vault_internal(
                 stable_pulled_e6s: None,   // SP-110
                 xrp_claim_id: None,
             })
+}
+
+#[cfg(test)]
+mod borrow_mint_journal_tests {
+    use super::*;
+    use crate::state::{replace_state, BorrowMintJournal, BorrowMintPhase, BorrowMintTuple, State};
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    #[test]
+    fn commit_then_error_retries_exact_tuple_and_records_debt_once() {
+        let owner = Principal::from_slice(&[0x41]);
+        let ledger = Principal::from_slice(&[0x42]);
+        let mut state = State::from(crate::InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: ledger,
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        state.min_icusd_amount = ICUSD::new(0);
+        let collateral_type = state.icp_collateral_type();
+        if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+            config.last_price = Some(100.0);
         }
-        Err(mint_error) => Err(ProtocolError::TransferError(mint_error)),
+        state.open_vault(Vault {
+            owner,
+            borrowed_icusd_amount: ICUSD::new(0),
+            collateral_amount: 10_000_000_000,
+            vault_id: 9001,
+            collateral_type,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+
+        replace_state(state);
+
+        // Simulate the ledger committing block 77 but losing the reply. The
+        // call exercises the borrow validation, durable reservation, dispatch,
+        // and callback commit path; the retry is normalized from Duplicate to
+        // Ok(77), just as the production management adapter does.
+        let ledger_commit: Rc<RefCell<Option<(BorrowMintTuple, u64)>>> =
+            Rc::new(RefCell::new(None));
+        let first_commit = ledger_commit.clone();
+        let first_guard = VaultLiquidationGuard::new(9001).expect("first borrow acquires vault");
+        let first = futures::executor::block_on(borrow_from_vault_internal_with(
+            owner,
+            VaultArg {
+                vault_id: 9001,
+                amount: 1_000,
+            },
+            move |submitted| async move {
+                *first_commit.borrow_mut() = Some((submitted, 77));
+                Err(icrc_ledger_types::icrc1::transfer::TransferError::TemporarilyUnavailable)
+            },
+            || 10_000_000_000,
+        ));
+        drop(first_guard);
+        assert!(matches!(first, Err(ProtocolError::GenericError(_))));
+        let committed_tuple = ledger_commit
+            .borrow()
+            .as_ref()
+            .expect("first ledger call committed before its reply was lost")
+            .0
+            .clone();
+        crate::state::read_state(|s| {
+            assert_eq!(
+                s.vault_id_to_vaults[&9001].borrowed_icusd_amount,
+                ICUSD::new(0)
+            );
+            assert_eq!(
+                s.pending_borrow_mints[&9001].tuple,
+                committed_tuple,
+                "the exact tuple must persist before retry"
+            );
+        });
+        let discovered = crate::state::pending_borrow_mint_statuses(owner);
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].vault_id, 9001);
+        assert_eq!(discovered[0].borrowed_amount_e8s, 1_000);
+        assert_eq!(
+            discovered[0].phase,
+            crate::state::BorrowMintPhase::SubmittedOrUnknown
+        );
+
+        let second_commit = ledger_commit.clone();
+        let retry_guard = VaultLiquidationGuard::new_for_borrow_retry(9001)
+            .expect("borrow retry can reacquire its unresolved vault");
+        let second = futures::executor::block_on(borrow_from_vault_internal_with(
+            owner,
+            VaultArg {
+                vault_id: 9001,
+                amount: 1_000,
+            },
+            move |submitted| async move {
+                let committed = second_commit
+                    .borrow()
+                    .clone()
+                    .expect("first send committed");
+                assert_eq!(
+                    submitted, committed.0,
+                    "retry must preserve the exact ledger tuple"
+                );
+                // The ledger reports Duplicate, proving the original mint
+                // committed. Simulate an intervening admin edit that makes
+                // immediate debt attribution unsafe; this must remain held.
+                mutate_state(|s| {
+                    s.vault_id_to_vaults.get_mut(&9001).unwrap().collateral_type =
+                        Principal::from_slice(&[0x99]);
+                });
+                Ok(committed.1)
+            },
+            || 20_000_000_000,
+        ));
+        drop(retry_guard);
+        assert!(matches!(second, Err(ProtocolError::GenericError(_))));
+        let held = crate::state::pending_borrow_mint_statuses(owner);
+        assert_eq!(held.len(), 1);
+        assert_eq!(
+            held[0].phase,
+            crate::state::BorrowMintPhase::MintConfirmedHeld { block_index: 77 }
+        );
+        mutate_state(|s| {
+            s.vault_id_to_vaults.get_mut(&9001).unwrap().collateral_type = collateral_type;
+        });
+
+        let retry_guard = VaultLiquidationGuard::new_for_borrow_retry(9001)
+            .expect("confirmed mint journal remains retryable");
+        let third = futures::executor::block_on(borrow_from_vault_internal_with(
+            owner,
+            VaultArg {
+                vault_id: 9001,
+                amount: 1_000,
+            },
+            |_| async {
+                panic!("a confirmed-held mint must not be submitted to the ledger again")
+            },
+            || 30_000_000_000,
+        ));
+        drop(retry_guard);
+        assert_eq!(third.expect("confirmed mint applies debt").block_index, 77);
+        crate::state::read_state(|s| {
+            assert_eq!(
+                s.vault_id_to_vaults[&9001].borrowed_icusd_amount,
+                ICUSD::new(1_000)
+            );
+            assert!(!s.pending_borrow_mints.contains_key(&9001));
+        });
+    }
+
+    #[test]
+    fn too_old_requires_positive_receipt_and_never_resubmits_the_mint() {
+        let owner = Principal::from_slice(&[0x51]);
+        let journal = BorrowMintJournal {
+            vault_id: 99,
+            owner,
+            collateral_type: Principal::from_slice(&[0x52]),
+            borrowed_amount_e8s: 500,
+            fee_amount_e8s: 0,
+            tuple: BorrowMintTuple {
+                ledger: Principal::from_slice(&[0x53]),
+                destination: owner,
+                amount_e8s: 500,
+                memo: [0x54; 16],
+                created_at_time_ns: 123,
+                op_nonce: 88,
+            },
+            phase: BorrowMintPhase::SubmittedOrUnknown,
+        };
+        let mut state = State::default();
+        state.pending_borrow_mints.insert(99, journal.clone());
+        replace_state(state);
+
+        let sends = Rc::new(Cell::new(0));
+        let first_sends = sends.clone();
+        let first = futures::executor::block_on(dispatch_borrow_mint_with(
+            journal,
+            move |_| async move {
+                first_sends.set(first_sends.get() + 1);
+                Err(icrc_ledger_types::icrc1::transfer::TransferError::TooOld)
+            },
+            || 1,
+        ));
+        assert!(matches!(first, Err(ProtocolError::GenericError(_))));
+        assert_eq!(sends.get(), 1);
+        let held = crate::state::read_state(|s| s.pending_borrow_mints[&99].clone());
+        assert_eq!(held.phase, BorrowMintPhase::ReceiptRecoveryRequired);
+
+        let retry_sends = sends.clone();
+        let retry = futures::executor::block_on(dispatch_borrow_mint_with(
+            held,
+            move |_| async move {
+                retry_sends.set(retry_sends.get() + 1);
+                Err(icrc_ledger_types::icrc1::transfer::TransferError::TemporarilyUnavailable)
+            },
+            || 2,
+        ));
+        assert!(matches!(retry, Err(ProtocolError::GenericError(_))));
+        assert_eq!(sends.get(), 1, "TooOld must permanently disable mint resubmission");
+        assert_eq!(
+            crate::state::pending_borrow_mint_statuses(owner)[0].phase,
+            BorrowMintPhase::ReceiptRecoveryRequired
+        );
+    }
+}
+
+/// Reconcile a borrow journal after its exact ICRC-1 retry returned TooOld.
+/// The caller-supplied block index is only a candidate: debt is committed only
+/// after an archive-aware ICRC-3 read validates the exact persisted mint tuple.
+/// This path never dispatches a mint.
+pub async fn reconcile_pending_borrow_mint_from_block(
+    vault_id: u64,
+    candidate_block_index: u64,
+) -> Result<SuccessWithFee, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard_principal = match GuardPrincipal::new(caller, &format!("borrow_vault_{vault_id}")) {
+        Ok(guard) => guard,
+        Err(err) => return Err(err.into()),
+    };
+    let _vault_op_guard = match VaultLiquidationGuard::new_for_borrow_retry(vault_id) {
+        Ok(guard) => guard,
+        Err(error) => {
+            guard_principal.fail();
+            return Err(error);
+        }
+    };
+
+    let journal = match read_state(|s| s.pending_borrow_mints.get(&vault_id).cloned()) {
+        Some(journal) => journal,
+        None => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "Vault #{vault_id} has no pending borrow mint to reconcile"
+            )));
+        }
+    };
+    if caller != journal.owner {
+        guard_principal.fail();
+        return Err(ProtocolError::CallerNotOwner);
+    }
+    if journal.phase != crate::state::BorrowMintPhase::ReceiptRecoveryRequired {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "borrow journal is not awaiting TooOld receipt recovery".into(),
+        ));
+    }
+
+    if let Err(error) = crate::icrc3_proof::verify_icrc3_borrow_mint_block(
+        journal.tuple.ledger,
+        candidate_block_index,
+        &journal.tuple,
+    )
+    .await
+    {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(format!(
+            "candidate ICRC-3 block does not prove the exact borrow mint; journal remains held: {error}"
+        )));
+    }
+
+    let confirmed = mutate_state(|s| {
+        let Some(current) = s.pending_borrow_mints.get_mut(&vault_id) else {
+            return false;
+        };
+        if current != &journal
+            || current.phase != crate::state::BorrowMintPhase::ReceiptRecoveryRequired
+        {
+            return false;
+        }
+        current.phase = crate::state::BorrowMintPhase::MintConfirmedHeld {
+            block_index: candidate_block_index,
+        };
+        true
+    });
+    if !confirmed {
+        guard_principal.fail();
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "borrow journal changed while committing the verified mint receipt; journal remains held".into(),
+        ));
+    }
+
+    // The held phase bypasses the ledger closure and runs the same checked,
+    // once-only debt/event commit used by a direct successful ledger reply.
+    match borrow_from_vault_internal(
+        caller,
+        VaultArg {
+            vault_id,
+            amount: journal.borrowed_amount_e8s,
+        },
+    )
+    .await
+    {
+        Ok(result) => {
+            guard_principal.complete();
+            Ok(result)
+        }
+        Err(error) => {
+            guard_principal.fail();
+            Err(error)
+        }
     }
 }
 
@@ -5824,7 +6390,7 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
     // above does not exclude a concurrent liquidation/redemption of this
     // vault; this lock does (and the redemption water-fill skips locked
     // vaults). See guard.rs::VaultLiquidationGuard.
-    let _vault_op_guard = match VaultLiquidationGuard::new(arg.vault_id) {
+    let _vault_op_guard = match VaultLiquidationGuard::new_for_borrow_retry(arg.vault_id) {
         Ok(g) => g,
         Err(e) => {
             guard_principal.fail();

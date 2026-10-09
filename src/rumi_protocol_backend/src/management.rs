@@ -1598,13 +1598,95 @@ pub async fn mint_icusd(amount: ICUSD, to: Principal) -> Result<u64, TransferErr
     .await
 }
 
-pub async fn transfer_icusd_from(amount: ICUSD, caller: Principal) -> Result<u64, TransferFromError> {
-    let (ledger, op_nonce) = crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
+/// Mint icUSD using the exact tuple durably reserved by a borrow operation.
+/// Retries must call this with the same journal row so ledger deduplication
+/// can return `Duplicate` as the original block.
+pub async fn mint_icusd_with_borrow_tuple(
+    tuple: &crate::state::BorrowMintTuple,
+) -> Result<u64, TransferError> {
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: tuple.ledger,
+    };
+    let outer = client
+        .transfer(TransferArg {
+            from_subaccount: None,
+            to: Account {
+                owner: tuple.destination,
+                subaccount: None,
+            },
+            fee: None,
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(Memo::from(tuple.memo.to_vec())),
+            amount: Nat::from(tuple.amount_e8s),
+        })
+        .await;
+    handle_borrow_mint_outcome(tuple.ledger, outer)
+}
+
+/// Borrow debt may only be committed with a representable, exact mint block.
+/// The generic transfer wrapper predates the durable borrow journal and maps
+/// oversized ledger Nat indices to zero. Keep the journal unresolved instead
+/// of recording a false block identity after a successful external mint.
+fn handle_borrow_mint_outcome(
+    ledger: Principal,
+    outer: Result<Result<Nat, TransferError>, (i32, String)>,
+) -> Result<u64, TransferError> {
+    let confirmed_block = match &outer {
+        Ok(Ok(block)) => Some(block),
+        Ok(Err(TransferError::Duplicate { duplicate_of })) => Some(duplicate_of),
+        _ => None,
+    };
+    if confirmed_block.is_some_and(|block| block.0.to_u64().is_none()) {
+        return Err(TransferError::GenericError {
+            error_code: Nat::from(0u8),
+            message: "borrow mint was confirmed at a block index outside the journal's supported range; operator reconciliation is required".to_string(),
+        });
+    }
+    handle_transfer_outcome(ledger, outer)
+}
+
+#[cfg(test)]
+mod borrow_mint_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_success_and_duplicate_blocks_are_held_instead_of_recorded_as_zero() {
+        let ledger = Principal::anonymous();
+        let oversized = Nat::from(u128::from(u64::MAX) + 1);
+        let success = handle_borrow_mint_outcome(ledger, Ok(Ok(oversized.clone())));
+        let duplicate = handle_borrow_mint_outcome(
+            ledger,
+            Ok(Err(TransferError::Duplicate {
+                duplicate_of: oversized,
+            })),
+        );
+        assert!(matches!(success, Err(TransferError::GenericError { .. })));
+        assert!(matches!(duplicate, Err(TransferError::GenericError { .. })));
+        assert_eq!(
+            handle_borrow_mint_outcome(ledger, Ok(Ok(Nat::from(42u64)))),
+            Ok(42)
+        );
+    }
+}
+
+pub async fn transfer_icusd_from(
+    amount: ICUSD,
+    caller: Principal,
+) -> Result<u64, TransferFromError> {
+    let (ledger, op_nonce) =
+        crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
     let protocol_id = ic_cdk::id();
     transfer_from_idempotent(
         ledger,
-        Account { owner: caller, subaccount: None },
-        Account { owner: protocol_id, subaccount: None },
+        Account {
+            owner: caller,
+            subaccount: None,
+        },
+        Account {
+            owner: protocol_id,
+            subaccount: None,
+        },
         amount.to_u64() as u128,
         op_nonce,
         None,

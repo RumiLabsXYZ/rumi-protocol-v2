@@ -67,6 +67,7 @@
   } from '$lib/utils/dogeBorrowWizard';
   import { userVaults } from '$lib/stores/appDataStore';
   import VaultCard from '$lib/components/vault/VaultCard.svelte';
+  import PendingBorrowMintRecovery from '$lib/components/vault/PendingBorrowMintRecovery.svelte';
   import { toastStore } from '$lib/stores/toast';
 
   const CKDOGE_PRINCIPAL = CANISTER_IDS.CKDOGE_LEDGER;
@@ -542,6 +543,7 @@
   let actionInProgress = false;
   let confirmError = '';
   let outcome: OpenAndBorrowOutcome | null = null;
+  let pendingBorrowRefreshToken = 0;
 
   async function refreshFinalTerms() {
     const refreshToken = ++finalTermsRefreshToken;
@@ -732,6 +734,12 @@
         submittedIcusdRaw,
         CKDOGE_PRINCIPAL
       );
+      if (result.kind === 'ambiguous_transport' || result.kind === 'dispatched_err') {
+        pendingBorrowRefreshToken += 1;
+        setTimeout(() => {
+          if (isLiveIntentSession(session, baseIntent.createdAt)) pendingBorrowRefreshToken += 1;
+        }, 1_000);
+      }
 
       // Resolve against the CAPTURED owner, regardless of who is connected by the time this awaits resolve.
       let vaultsAfter: VaultLite[] = [];
@@ -896,6 +904,12 @@
       };
 
       const result = await protocolService.borrowFromVaultBound(ctx, vaultId, submittedIcusdRaw);
+      if (result.kind === 'ambiguous_transport' || result.kind === 'dispatched_err') {
+        pendingBorrowRefreshToken += 1;
+        setTimeout(() => {
+          if (isLiveIntentSession(session, baseIntent.createdAt)) pendingBorrowRefreshToken += 1;
+        }, 1_000);
+      }
 
       let vaultAfter: VaultLite | null = null;
       try {
@@ -1281,6 +1295,11 @@
   {/if}
 
   <div class="dbw-panel">
+    <PendingBorrowMintRecovery
+      principalText={ownerPrincipalText}
+      refreshToken={pendingBorrowRefreshToken}
+      onResolved={() => ownerPrincipal && appDataStore.refreshAll(ownerPrincipal).catch(() => {})}
+    />
     {#if step === 'choose'}
       <div class="dbw-row dbw-row--annotated">
         <label class="dbw-field-label" for="dbw-collateral">DOGE you'll send</label>
