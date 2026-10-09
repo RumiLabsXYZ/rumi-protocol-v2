@@ -8778,6 +8778,26 @@ async fn withdraw_liquidity(amount: u64) -> Result<u64, ProtocolError> {
 
 #[candid_method(update)]
 #[update]
+async fn withdraw_liquidity_with_id(request_id: u128, amount_e8s: u64) -> Result<u64, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::liquidity_pool::withdraw_liquidity_with_id(request_id, amount_e8s).await)
+}
+
+#[candid_method(query)]
+#[query]
+fn get_my_liquidity_withdrawal_status() -> Option<rumi_protocol_backend::state::LiquidityWithdrawStatus> {
+    rumi_protocol_backend::liquidity_pool::my_liquidity_withdrawal_status()
+}
+
+#[candid_method(update)]
+#[update]
+async fn reconcile_liquidity_withdrawal_from_block(request_id: u128, candidate_block_index: u64) -> Result<u64, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::liquidity_pool::reconcile_liquidity_withdrawal_from_block(request_id, candidate_block_index).await)
+}
+
+#[candid_method(update)]
+#[update]
 async fn claim_liquidity_returns() -> Result<u64, ProtocolError> {
     validate_call().await?;
     check_postcondition(rumi_protocol_backend::liquidity_pool::claim_liquidity_returns().await)

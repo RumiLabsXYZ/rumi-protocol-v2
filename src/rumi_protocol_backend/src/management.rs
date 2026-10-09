@@ -1624,6 +1624,38 @@ pub async fn mint_icusd_with_borrow_tuple(
     handle_borrow_mint_outcome(tuple.ledger, outer)
 }
 
+pub enum DurableMintOutcome {
+    Confirmed(u64),
+    ConfirmedBlockOutOfRange,
+    Rejected(TransferError),
+}
+
+pub async fn mint_icusd_with_tuple(
+    tuple: &crate::state::BorrowMintTuple,
+) -> DurableMintOutcome {
+    let client = ICRC1Client { runtime: CdkRuntime, ledger_canister_id: tuple.ledger };
+    let outer = client.transfer(TransferArg {
+        from_subaccount: None,
+        to: Account { owner: tuple.destination, subaccount: None },
+        fee: None,
+        created_at_time: Some(tuple.created_at_time_ns),
+        memo: Some(Memo::from(tuple.memo.to_vec())),
+        amount: Nat::from(tuple.amount_e8s),
+    }).await;
+    let confirmed = match &outer {
+        Ok(Ok(block)) => Some(block),
+        Ok(Err(TransferError::Duplicate { duplicate_of })) => Some(duplicate_of),
+        _ => None,
+    };
+    if confirmed.is_some_and(|block| block.0.to_u64().is_none()) {
+        return DurableMintOutcome::ConfirmedBlockOutOfRange;
+    }
+    match handle_transfer_outcome(tuple.ledger, outer) {
+        Ok(block) => DurableMintOutcome::Confirmed(block),
+        Err(error) => DurableMintOutcome::Rejected(error),
+    }
+}
+
 /// Borrow debt may only be committed with a representable, exact mint block.
 /// The generic transfer wrapper predates the durable borrow journal and maps
 /// oversized ledger Nat indices to zero. Keep the journal unresolved instead

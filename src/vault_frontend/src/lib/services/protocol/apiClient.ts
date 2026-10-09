@@ -17,7 +17,8 @@ import type {
     SuccessWithFee,
     ProtocolError,
     OpenVaultSuccess,
-    BorrowMintStatus
+    BorrowMintStatus,
+    LiquidityWithdrawStatus
   } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
 import {
   walletOperations,
@@ -71,6 +72,21 @@ import { mapLiquidationSuccessWithFee } from '../xrpPayoutHelpers';
 
 // Constants from backend
 export const E8S = 100_000_000;
+const NAT64_MAX = 18_446_744_073_709_551_615n;
+
+/** Parse an icUSD decimal string into exact e8s without passing through Number. */
+export function parseIcusdAmountToE8s(amount: string): bigint {
+  if (typeof amount !== 'string' || !/^(?:\d+(?:\.\d{0,8})?|\.\d{1,8})$/.test(amount)) {
+    throw new Error('Enter an icUSD amount with up to 8 decimal places');
+  }
+  const [whole = '0', fraction = ''] = amount.split('.');
+  const wholeDigits = whole.replace(/^0+/, '') || '0';
+  if (wholeDigits.length > 12) throw new Error('Amount exceeds the maximum supported icUSD amount');
+  const e8s = BigInt(wholeDigits) * 100_000_000n + BigInt((fraction + '00000000').slice(0, 8));
+  if (e8s > NAT64_MAX) throw new Error('Amount exceeds the maximum supported icUSD amount');
+  return e8s;
+}
+
 export let MIN_ICUSD_AMOUNT = 10_000_000; // 0.10 icUSD default; updated from protocol status
 
 /** Update the minimum icUSD amount from protocol status (called after fetching status). */
@@ -2992,11 +3008,11 @@ static async repayToVaultWithStable(
         try {
           if (USE_MOCK_DATA) {
             return {
-              liquidity_provided: 1000000000n, // 10 ICP
-              total_liquidity_provided: 5000000000n, // 50 ICP
+              liquidity_provided: 1000000000n, // 10 icUSD
+              total_liquidity_provided: 5000000000n, // 50 icUSD
               liquidity_pool_share: 0.2, // 20%
               available_liquidity_reward: 500000000n, // 5 icUSD
-              total_available_returns: 2500000000n // 25 icUSD
+              total_available_returns: 2500000000n // 25 ICP
             };
           }
           
@@ -3010,98 +3026,29 @@ static async repayToVaultWithStable(
       }
     
       /**
-       * Provide liquidity to the protocol
+       * New deposits to the legacy backend liquidity pool are closed.
        */
-      static async provideLiquidity(amount: number): Promise<VaultOperationResult> {
-        try {
-          console.log(`Providing ${amount} ICP as liquidity`);
-
-          if (amount <= 0) {
-            return {
-              success: false,
-              error: 'Amount must be greater than 0'
-            };
-          }
-
-          // Convert amount to e8s
-          const amountE8s = BigInt(Math.floor(amount * E8S));
-
-          if (USE_MOCK_DATA) {
-            // Simulate processing delay
-            await new Promise(resolve => setTimeout(resolve, 1500));
-
-            return {
-              success: true,
-              blockIndex: Math.floor(Math.random() * 1000) + 1
-            };
-          }
-
-          const actor = await ApiClient.getAuthenticatedActor();
-
-          // Pre-provide liquidity snapshot for the Oisy false-negative
-          // verifier. provide_liquidity grows liquidity_provided.
-          const before = await ApiClient.fetchLiquidityStatusSnapshot();
-
-          const result = await callWithOisyFalseNegativeGuard(
-            () => actor.provide_liquidity(amountE8s),
-            async () => {
-              if (!before) return false;
-              const after = await ApiClient.fetchLiquidityStatusSnapshot();
-              if (!after) return false;
-              return after.liquidityProvided - before.liquidityProvided >= (amountE8s * 95n) / 100n;
-            },
-            `provide_liquidity ${amount} ICP`
-          );
-
-          if (isOisyLandedSentinel(result)) {
-            return {
-              success: true,
-              blockIndex: undefined,
-              oisyResilient: true,
-            };
-          }
-
-          if (result && typeof result === 'object' && 'Ok' in result) {
-            return {
-              success: true,
-              blockIndex: Number(result.Ok)
-            };
-          } else if (result && typeof result === 'object' && 'Err' in result) {
-            return {
-              success: false,
-              error: ApiClient.formatProtocolError(result.Err)
-            };
-          } else {
-            return {
-              success: false,
-              error: 'Unknown response format from the protocol'
-            };
-          }
-        } catch (err) {
-          console.error('Error providing liquidity:', err);
-          return {
-            success: false,
-            error: err instanceof Error ? err.message : 'Unknown error providing liquidity'
-          };
-        }
+      static async provideLiquidity(_amount: number): Promise<VaultOperationResult> {
+        return {
+          success: false,
+          error: 'New deposits to the legacy liquidity pool are closed. Do not retry an earlier deposit with an uncertain outcome; contact support for reconciliation.'
+        };
       }
 
       /**
        * Withdraw liquidity from the protocol
        */
-      static async withdrawLiquidity(amount: number): Promise<VaultOperationResult> {
+      static async withdrawLiquidity(amount: string, startNew = false): Promise<VaultOperationResult> {
+        let submittedRequestId: bigint | undefined;
         try {
-          console.log(`Withdrawing ${amount} ICP from liquidity pool`);
-
-          if (amount <= 0) {
+          console.log(`Withdrawing ${amount} icUSD from the legacy liquidity pool`);
+          const amountE8s = parseIcusdAmountToE8s(amount);
+          if (amountE8s <= 0n) {
             return {
               success: false,
               error: 'Amount must be greater than 0'
             };
           }
-
-          // Convert amount to e8s
-          const amountE8s = BigInt(Math.floor(amount * E8S));
 
           if (USE_MOCK_DATA) {
             // Simulate processing delay
@@ -3113,38 +3060,76 @@ static async repayToVaultWithStable(
             };
           }
 
-          const actor = await ApiClient.getAuthenticatedActor();
-
-          // Pre-withdraw snapshot. withdraw_liquidity reduces
-          // liquidity_provided by `amount` (or all of it).
-          const before = await ApiClient.fetchLiquidityStatusSnapshot();
-
-          const result = await callWithOisyFalseNegativeGuard(
-            () => actor.withdraw_liquidity(amountE8s),
-            async () => {
-              if (!before) return false;
-              const after = await ApiClient.fetchLiquidityStatusSnapshot();
-              if (!after) return false;
-              const drop = before.liquidityProvided - after.liquidityProvided;
-              return drop >= (amountE8s * 95n) / 100n || after.liquidityProvided === 0n;
-            },
-            `withdraw_liquidity ${amount} ICP`
-          );
-
-          if (isOisyLandedSentinel(result)) {
-            return {
-              success: true,
-              blockIndex: undefined,
-              oisyResilient: true,
-            };
+          const walletAtStart = get(walletStore);
+          const owner = walletAtStart.principal?.toText();
+          const walletType = get(currentWalletType);
+          const generation = get(walletSessionGeneration);
+          if (!walletAtStart.isConnected || walletAtStart.loading || !owner || !walletType) throw new Error('Wait for the withdrawal owner account to finish connecting, then resume this request.');
+          const actionContext: ActionBoundContext = {
+            expectedPrincipalText: owner,
+            assertCurrent: () => get(walletStore).isConnected
+              && !get(walletStore).loading
+              && get(currentWalletType) === walletType
+              && get(walletSessionGeneration) === generation,
+          };
+          assertActionBoundContextCurrent(actionContext);
+          const actor = await ApiClient.getBoundAuthenticatedActor(actionContext);
+          assertActionBoundContextCurrent(actionContext);
+          // The principal, not its provider, owns the backend journal. A
+          // provider switch must not turn a lost reply into a fresh request.
+          const storageKey = `rumi:liquidity-withdrawal:${owner}`;
+          const pending = ApiClient.getFromLocalStorage<{ requestId: bigint; amountE8s: bigint }>(storageKey);
+          const statusOpt = await actor.get_my_liquidity_withdrawal_status() as [] | [LiquidityWithdrawStatus];
+          assertActionBoundContextCurrent(actionContext);
+          const status = statusOpt[0] ?? null;
+          let requestId: bigint;
+          const statusTerminal = status && ('Completed' in status.phase || 'RejectedNoEffect' in status.phase);
+          const savedUnresolved = pending && (!status || status.request_id < pending.requestId
+            || (status.request_id === pending.requestId && !statusTerminal));
+          if (savedUnresolved) {
+            if (startNew) return { success: false, error: 'A saved withdrawal may still be unresolved. Resume its exact amount before starting another.' };
+            if (pending.amountE8s !== amountE8s) return { success: false, error: 'A previous withdrawal is still saved for this account. Retry that exact amount first.' };
+            requestId = pending.requestId;
+          } else if (status && !statusTerminal) {
+            if (startNew) return { success: false, error: 'A previous withdrawal is unresolved. Resume it before starting another.' };
+            if (status.amount_e8s !== amountE8s) return { success: false, error: 'A previous withdrawal is unresolved. Enter its exact amount to resume it.' };
+            requestId = status.request_id;
+          } else if (pending && status && pending.requestId === status.request_id
+            && 'Completed' in status.phase && startNew) {
+            return { success: false, error: 'Your saved withdrawal has finished but has not been acknowledged here. First leave Start a new withdrawal unchecked and recover its exact amount.' };
+          } else if (status && !startNew && 'Completed' in status.phase && status.amount_e8s === amountE8s) {
+            // Re-reading a completed result is safe even after a lost reply,
+            // reload, storage failure, or provider change.
+            requestId = status.request_id;
+          } else if (status && !startNew) {
+            return { success: false, error: 'The latest withdrawal is finished. To withdraw again, explicitly select Start a new withdrawal.' };
+          } else {
+            requestId = status ? status.request_id + 1n : 1n;
           }
+          // Unlike the generic best-effort storage helper, failure here must
+          // stop before the mint update is sent.
+          const savedAttempt = BigIntUtils.stringify({ requestId, amountE8s });
+          localStorage.setItem(storageKey, savedAttempt);
+          if (localStorage.getItem(storageKey) !== savedAttempt) throw new Error('Could not save the withdrawal retry identity. No mint request was sent.');
+          submittedRequestId = requestId;
+          assertActionBoundContextCurrent(actionContext);
+          const result = await actor.withdraw_liquidity_with_id(requestId, amountE8s);
+          assertActionBoundContextCurrent(actionContext);
 
           if ('Ok' in result) {
+            localStorage.removeItem(storageKey);
             return {
               success: true,
               blockIndex: Number(result.Ok)
             };
           } else {
+            const latestOpt = await actor.get_my_liquidity_withdrawal_status() as [] | [LiquidityWithdrawStatus];
+            assertActionBoundContextCurrent(actionContext);
+            const latest = latestOpt[0];
+            if (latest && latest.request_id >= requestId) {
+              localStorage.setItem(storageKey, BigIntUtils.stringify({ requestId: latest.request_id, amountE8s: latest.amount_e8s }));
+              if (latest.request_id === requestId && 'RejectedNoEffect' in latest.phase) localStorage.removeItem(storageKey);
+            }
             return {
               success: false,
               error: ApiClient.formatProtocolError(result.Err)
@@ -3152,9 +3137,13 @@ static async repayToVaultWithStable(
           }
         } catch (err) {
           console.error('Error withdrawing liquidity:', err);
+          const sessionChanged = err instanceof StaleActionSessionError;
+          const suffix = sessionChanged && submittedRequestId !== undefined
+            ? ` Request ${submittedRequestId} may have reached the canister; reconnect the same owner and wallet to check its status before retrying.`
+            : '';
           return {
             success: false,
-            error: err instanceof Error ? err.message : 'Unknown error withdrawing liquidity'
+            error: `${err instanceof Error ? err.message : 'Unknown error withdrawing liquidity'}${suffix}`
           };
         }
       }

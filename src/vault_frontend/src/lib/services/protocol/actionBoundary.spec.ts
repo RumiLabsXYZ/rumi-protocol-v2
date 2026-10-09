@@ -25,7 +25,7 @@ const mocks = vi.hoisted(() => ({
   getRedemptionPreview: vi.fn(),
   prepareRedemptionOffer: vi.fn(),
   getSignerAgent: vi.fn(),
-  walletState: { isConnected: true, principal: null as any },
+  walletState: { isConnected: true, principal: null as any, loading: false },
   // Literal, not sourced from '../../config': vi.mock factories are hoisted
   // above this file's own top-level imports/consts, so a factory can never
   // reference a later `const` (temporal dead zone). Cross-checked against
@@ -88,6 +88,7 @@ import {
   ApiClient,
   type BoundOpenVaultAndBorrowResult,
   type BoundBorrowFromVaultResult,
+  parseIcusdAmountToE8s,
 } from './apiClient';
 import type { AcceptedRedemptionOffer } from '$lib/utils/redemptionPreview';
 import { walletOperations, StaleActionSessionError, type ActionBoundContext } from './walletOperations';
@@ -141,6 +142,8 @@ let backendActor: {
   open_vault_and_borrow: ReturnType<typeof vi.fn>;
   borrow_from_vault: ReturnType<typeof vi.fn>;
   redeem_quoted: ReturnType<typeof vi.fn>;
+  get_my_liquidity_withdrawal_status: ReturnType<typeof vi.fn>;
+  withdraw_liquidity_with_id: ReturnType<typeof vi.fn>;
 };
 let ledgerActor: { icrc2_approve: ReturnType<typeof vi.fn> };
 
@@ -165,6 +168,8 @@ beforeEach(() => {
       net_collateral_raw: 123_000n,
       payout_status: 'queued',
     } }),
+    get_my_liquidity_withdrawal_status: vi.fn().mockResolvedValue([]),
+    withdraw_liquidity_with_id: vi.fn().mockResolvedValue({ Ok: 101n }),
   };
   ledgerActor = {
     icrc2_approve: vi.fn().mockResolvedValue({ Ok: 1n }),
@@ -183,6 +188,182 @@ beforeEach(() => {
   mocks.getSignerAgent.mockResolvedValue(null);
 
   setLivePrincipal(PRINCIPAL_A);
+  mocks.walletState.loading = false;
+});
+
+describe('ApiClient.withdrawLiquidity — journal identity and session boundary', () => {
+  const storageKey = `rumi:liquidity-withdrawal:${PRINCIPAL_A}`;
+  const saved = () => ApiClient.getFromLocalStorage<{ requestId: bigint; amountE8s: bigint }>(storageKey);
+
+  it('persists the same ID across a lost reply and retries it after reload', async () => {
+    backendActor.withdraw_liquidity_with_id
+      .mockRejectedValueOnce(new Error('reply lost'))
+      .mockResolvedValueOnce({ Ok: 101n });
+    const first = await ApiClient.withdrawLiquidity('0.29');
+    expect(first.success).toBe(false);
+    const persisted = saved();
+    expect(persisted?.requestId).toBe(1n);
+    expect(persisted?.amountE8s).toBe(29_000_000n);
+
+    backendActor.get_my_liquidity_withdrawal_status.mockResolvedValueOnce([{
+      request_id: 1n,
+      amount_e8s: 29_000_000n,
+      phase: { SubmittedOrUnknown: null },
+    }]);
+    const retry = await ApiClient.withdrawLiquidity('0.29');
+    expect(retry.success).toBe(true);
+    expect(backendActor.withdraw_liquidity_with_id).toHaveBeenNthCalledWith(2, 1n, 29_000_000n);
+    expect(localStorage.getItem(storageKey)).toBeNull();
+  });
+
+  it('retains the request ID when the wallet session changes during dispatch', async () => {
+    let resolveDispatch!: (value: any) => void;
+    backendActor.withdraw_liquidity_with_id.mockImplementationOnce(() => new Promise(resolve => { resolveDispatch = resolve; }));
+    const action = ApiClient.withdrawLiquidity('0.2');
+    await vi.waitFor(() => expect(backendActor.withdraw_liquidity_with_id).toHaveBeenCalledTimes(1));
+    walletSessionGeneration.set(1);
+    resolveDispatch({ Ok: 101n });
+    const result = await action;
+    expect(result.success).toBe(false);
+    expect(saved()).toEqual({ requestId: 1n, amountE8s: 20_000_000n });
+  });
+
+  it('reuses a completed owner request after a lost reply and provider switch', async () => {
+    currentWalletType.set(WALLET_TYPES.OISY);
+    backendActor.get_my_liquidity_withdrawal_status.mockResolvedValueOnce([{
+      request_id: 10n,
+      amount_e8s: 20_000_000n,
+      phase: { Completed: { block_index: 101n } },
+    }]);
+    const result = await ApiClient.withdrawLiquidity('0.2');
+    expect(result.success).toBe(true);
+    expect(backendActor.withdraw_liquidity_with_id).toHaveBeenCalledWith(10n, 20_000_000n);
+  });
+
+  it('requires an explicit new intent after a completed withdrawal', async () => {
+    backendActor.get_my_liquidity_withdrawal_status.mockResolvedValue([{
+      request_id: 10n,
+      amount_e8s: 20_000_000n,
+      phase: { Completed: { block_index: 101n } },
+    }]);
+    const uncertain = await ApiClient.withdrawLiquidity('0.3');
+    expect(uncertain.success).toBe(false);
+    expect(backendActor.withdraw_liquidity_with_id).not.toHaveBeenCalled();
+    const fresh = await ApiClient.withdrawLiquidity('0.3', true);
+    expect(fresh.success).toBe(true);
+    expect(backendActor.withdraw_liquidity_with_id).toHaveBeenCalledWith(11n, 30_000_000n);
+  });
+
+  it('keeps an intent through status lag, then advances after a durable no-effect tombstone', async () => {
+    backendActor.withdraw_liquidity_with_id.mockResolvedValueOnce({
+      Err: { AmountTooLow: { minimum_amount: 10_000_000n } },
+    });
+    // The first status read is served before the rejection tombstone is visible.
+    backendActor.get_my_liquidity_withdrawal_status.mockResolvedValueOnce([]);
+    const rejected = await ApiClient.withdrawLiquidity('0.01');
+    expect(rejected.success).toBe(false);
+    expect(saved()).toEqual({ requestId: 1n, amountE8s: 1_000_000n });
+
+    const stillLagging = await ApiClient.withdrawLiquidity('0.2', true);
+    expect(stillLagging.success).toBe(false);
+    expect(backendActor.withdraw_liquidity_with_id).toHaveBeenCalledTimes(1);
+    expect(saved()).toEqual({ requestId: 1n, amountE8s: 1_000_000n });
+
+    // Once status proves request 1 was rejected without dispatch, the user
+    // can change the amount and start request 2. It must not reuse request 1.
+    backendActor.get_my_liquidity_withdrawal_status.mockResolvedValueOnce([{
+      request_id: 1n,
+      amount_e8s: 1_000_000n,
+      phase: { RejectedNoEffect: null },
+    }]);
+    const accepted = await ApiClient.withdrawLiquidity('0.2', true);
+    expect(accepted.success).toBe(true);
+    expect(backendActor.withdraw_liquidity_with_id).toHaveBeenNthCalledWith(2, 2n, 20_000_000n);
+    expect(localStorage.getItem(storageKey)).toBeNull();
+  });
+
+  it('cannot reuse a still-saved fresh intent to mint a second time after its reply is lost', async () => {
+    ApiClient.saveToLocalStorage(storageKey, { requestId: 10n, amountE8s: 20_000_000n });
+    backendActor.get_my_liquidity_withdrawal_status.mockResolvedValue([{
+      request_id: 10n,
+      amount_e8s: 20_000_000n,
+      phase: { Completed: { block_index: 101n } },
+    }]);
+    const accidentalNew = await ApiClient.withdrawLiquidity('0.2', true);
+    expect(accidentalNew.success).toBe(false);
+    expect(backendActor.withdraw_liquidity_with_id).not.toHaveBeenCalled();
+    const recovered = await ApiClient.withdrawLiquidity('0.2');
+    expect(recovered.success).toBe(true);
+    expect(backendActor.withdraw_liquidity_with_id).toHaveBeenCalledWith(10n, 20_000_000n);
+    expect(localStorage.getItem(storageKey)).toBeNull();
+  });
+
+  it('fails before dispatch if the retry identity cannot be persisted', async () => {
+    const save = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('storage unavailable'); });
+    try {
+      const result = await ApiClient.withdrawLiquidity('0.2');
+      expect(result.success).toBe(false);
+      expect(backendActor.withdraw_liquidity_with_id).not.toHaveBeenCalled();
+    } finally {
+      save.mockRestore();
+    }
+  });
+
+  it('does not capture an old principal while wallet connection is loading', async () => {
+    mocks.walletState.loading = true;
+    const result = await ApiClient.withdrawLiquidity('0.2');
+    expect(result.success).toBe(false);
+    expect(mocks.getActor).not.toHaveBeenCalled();
+  });
+
+  it('recovers another tab’s unresolved ID from owner status without replacing it with a changed amount', async () => {
+    backendActor.get_my_liquidity_withdrawal_status.mockResolvedValueOnce([{
+      request_id: 9n,
+      amount_e8s: 30_000_000n,
+      phase: { SubmittedOrUnknown: null },
+    }]);
+    const result = await ApiClient.withdrawLiquidity('0.2');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('exact amount');
+    expect(backendActor.withdraw_liquidity_with_id).not.toHaveBeenCalled();
+    expect(localStorage.getItem(storageKey)).toBeNull();
+  });
+
+  it('aborts before dispatch after a session switch during actor acquisition and preserves the saved identity', async () => {
+    ApiClient.saveToLocalStorage(storageKey, { requestId: 7n, amountE8s: 20_000_000n });
+    let resolveActor!: (actor: any) => void;
+    mocks.getActor.mockImplementationOnce(() => new Promise(resolve => { resolveActor = resolve; }));
+    const action = ApiClient.withdrawLiquidity('0.2');
+    await vi.waitFor(() => expect(mocks.getActor).toHaveBeenCalled());
+    walletSessionGeneration.set(1);
+    resolveActor(backendActor);
+    const result = await action;
+    expect(result.success).toBe(false);
+    expect(backendActor.withdraw_liquidity_with_id).not.toHaveBeenCalled();
+    expect(saved()).toEqual({ requestId: 7n, amountE8s: 20_000_000n });
+  });
+});
+
+describe('exact icUSD withdrawal amount parsing', () => {
+  it('preserves decimal text exactly when dispatching and journaling a keyed withdrawal', async () => {
+    const result = await ApiClient.withdrawLiquidity('0.29');
+    expect(result.success).toBe(true);
+    expect(backendActor.withdraw_liquidity_with_id).toHaveBeenCalledWith(1n, 29_000_000n);
+  });
+
+  it('accepts at most eight decimal places and enforces the nat64 maximum', () => {
+    expect(parseIcusdAmountToE8s('0.12345678')).toBe(12_345_678n);
+    expect(parseIcusdAmountToE8s('184467440737.09551615')).toBe(18_446_744_073_709_551_615n);
+    expect(() => parseIcusdAmountToE8s('0.123456789')).toThrow('up to 8 decimal places');
+    expect(() => parseIcusdAmountToE8s('184467440737.09551616')).toThrow('maximum supported');
+  });
+});
+
+it('closes legacy liquidity deposits before constructing an actor', async () => {
+  const result = await ApiClient.provideLiquidity(1);
+  expect(result.success).toBe(false);
+  expect(result.error).toContain('closed');
+  expect(mocks.getActor).not.toHaveBeenCalled();
 });
 
 describe('ApiClient.openVaultAndBorrowBound — standard ICRC-2 path (Internet Identity, Plug)', () => {
