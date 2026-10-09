@@ -479,18 +479,7 @@ pub async fn transfer_idempotent(
     op_nonce: u128,
     memo: Option<Memo>,
 ) -> Result<u64, TransferError> {
-    let protects_three_usd_default = from_subaccount.is_none()
-        && crate::state::read_state(|s| s.three_pool_canister == Some(ledger));
-    let _default_account_guard = if protects_three_usd_default {
-        Some(ThreeUsdReserveIngressAdmissionGuard::try_acquire().ok_or_else(|| {
-            TransferError::GenericError {
-                error_code: Nat::from(0u8),
-                message: "3USD default-account transfer is held by an active reserve admission/refund".into(),
-            }
-        })?)
-    } else {
-        None
-    };
+    let _default_account_guard = try_acquire_three_usd_default_account_guard(ledger, from_subaccount)?;
     let created_at_time = nonce_to_created_at_time(op_nonce);
     let memo = memo.unwrap_or_else(|| nonce_to_memo(op_nonce));
 
@@ -623,6 +612,24 @@ impl ThreeUsdReserveIngressAdmissionGuard {
 impl Drop for ThreeUsdReserveIngressAdmissionGuard {
     fn drop(&mut self) {
         THREE_USD_INGRESS_ADMISSION_IN_FLIGHT.with(|active| active.set(false));
+    }
+}
+
+fn try_acquire_three_usd_default_account_guard(
+    ledger: Principal,
+    from_subaccount: Option<[u8; 32]>,
+) -> Result<Option<ThreeUsdReserveIngressAdmissionGuard>, TransferError> {
+    let protects_three_usd_default = from_subaccount.is_none()
+        && crate::state::read_state(|s| s.three_pool_canister == Some(ledger));
+    if protects_three_usd_default {
+        ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+            .map(Some)
+            .ok_or_else(|| TransferError::GenericError {
+                error_code: Nat::from(0u8),
+                message: "3USD default-account transfer is held by an active reserve admission/refund".into(),
+            })
+    } else {
+        Ok(None)
     }
 }
 
@@ -1854,6 +1861,32 @@ pub async fn transfer_collateral_with_nonce_status(
     transfer_collateral_with_nonce_and_fee_status(amount, None, to, ledger, op_nonce).await
 }
 
+async fn transfer_with_nonce_status_and_guard<F, Fut>(
+    ledger: Principal,
+    from_subaccount: Option<[u8; 32]>,
+    dispatch: F,
+) -> Result<u64, DurableTransferError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<
+        Output = Result<Result<Nat, TransferError>, (i32, String)>,
+    >,
+{
+    let _default_account_guard =
+        try_acquire_three_usd_default_account_guard(ledger, from_subaccount).map_err(
+            DurableTransferError::LedgerNoEffect,
+        )?;
+    let result = classify_durable_transfer_outcome(dispatch().await);
+    if let Err(DurableTransferError::LedgerNoEffect(TransferError::BadFee { expected_fee })) =
+        &result
+    {
+        if let Some(fee) = expected_fee.0.to_u64() {
+            set_cached_fee(ledger, fee);
+        }
+    }
+    result
+}
+
 /// Idempotent collateral transfer with a persisted explicit fee. Bot claim
 /// transfers use this to make the gross debit (`amount + fee`) equal the
 /// collateral removed from the vault. Retries must reuse this exact tuple.
@@ -1868,25 +1901,22 @@ pub async fn transfer_collateral_with_nonce_and_fee_status(
         runtime: CdkRuntime,
         ledger_canister_id: ledger,
     };
-    let outer = client
-        .transfer(TransferArg {
-            from_subaccount: None,
-            to: Account { owner: to, subaccount: None },
-            fee: fee_e8s.map(Nat::from),
-            created_at_time: Some(nonce_to_created_at_time(op_nonce)),
-            memo: Some(nonce_to_memo(op_nonce)),
-            amount: Nat::from(amount),
-        })
-        .await;
-    match classify_durable_transfer_outcome(outer) {
-        Err(DurableTransferError::LedgerNoEffect(TransferError::BadFee { expected_fee })) => {
-            if let Some(fee_e8s) = expected_fee.0.to_u64() {
-                set_cached_fee(ledger, fee_e8s);
-            }
-            Err(DurableTransferError::LedgerNoEffect(TransferError::BadFee { expected_fee }))
-        }
-        result => result,
-    }
+    transfer_with_nonce_status_and_guard(ledger, None, || async move {
+        client
+            .transfer(TransferArg {
+                from_subaccount: None,
+                to: Account {
+                    owner: to,
+                    subaccount: None,
+                },
+                fee: fee_e8s.map(Nat::from),
+                created_at_time: Some(nonce_to_created_at_time(op_nonce)),
+                memo: Some(nonce_to_memo(op_nonce)),
+                amount: Nat::from(amount),
+            })
+            .await
+    })
+    .await
 }
 
 /// Generic collateral transfer_from: pull tokens from a user into the protocol canister.
@@ -2371,7 +2401,11 @@ pub async fn approve_icusd(spender: Principal, amount: u64) -> Result<u64, Appro
 
 #[cfg(test)]
 mod sweep_deposit_limit_tests {
-    use super::{classify_durable_transfer_outcome, classify_push_sweep_outcome, push_sweep_transfer_arg, transfer_deposit_after_bounds, DurableTransferError, SweepDepositError};
+    use super::{
+        classify_durable_transfer_outcome, classify_push_sweep_outcome, push_sweep_transfer_arg,
+        transfer_deposit_after_bounds, transfer_with_nonce_status_and_guard,
+        DurableTransferError, SweepDepositError, ThreeUsdReserveIngressAdmissionGuard,
+    };
     use crate::state::{PushSweepJournal, PushSweepRequest};
     use candid::Principal;
     use candid::Nat;
@@ -2445,6 +2479,80 @@ mod sweep_deposit_limit_tests {
             ambiguous,
             Err(DurableTransferError::AmbiguousCall { code: 5, .. })
         ));
+
+        let typed_no_effect = classify_durable_transfer_outcome(Ok(Err(
+            TransferError::TemporarilyUnavailable,
+        )));
+        assert!(matches!(
+            typed_no_effect,
+            Err(DurableTransferError::LedgerNoEffect(
+                TransferError::TemporarilyUnavailable
+            ))
+        ));
+    }
+
+    #[test]
+    fn durable_transfer_requires_a_representable_block_index() {
+        assert_eq!(
+            classify_durable_transfer_outcome(Ok(Ok(Nat::from(123u64)))).unwrap(),
+            123
+        );
+        assert_eq!(
+            classify_durable_transfer_outcome(Ok(Err(TransferError::Duplicate {
+                duplicate_of: Nat::from(456u64),
+            })))
+            .unwrap(),
+            456
+        );
+
+        assert!(matches!(
+            classify_durable_transfer_outcome(Ok(Ok(Nat::from(u64::MAX as u128 + 1)))),
+            Err(DurableTransferError::AmbiguousResponse(_))
+        ));
+        assert!(matches!(
+            classify_durable_transfer_outcome(Ok(Err(TransferError::Duplicate {
+                duplicate_of: Nat::from(u64::MAX as u128 + 1),
+            }))),
+            Err(DurableTransferError::AmbiguousResponse(_))
+        ));
+    }
+
+    #[test]
+    fn concurrent_three_usd_default_account_admission_blocks_status_transfer_before_dispatch() {
+        let ledger = Principal::from_slice(&[17]);
+        crate::state::replace_state(crate::state::State::default());
+        crate::state::mutate_state(|state| state.three_pool_canister = Some(ledger));
+
+        let existing_admission = ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+            .expect("first 3USD default-account operation acquires the guard");
+        let dispatched = std::cell::Cell::new(false);
+        let held = futures::executor::block_on(transfer_with_nonce_status_and_guard(
+            ledger,
+            None,
+            || async {
+                dispatched.set(true);
+                Ok(Ok(Nat::from(77u64)))
+            },
+        ));
+        assert!(matches!(
+            held,
+            Err(DurableTransferError::LedgerNoEffect(
+                TransferError::GenericError { .. }
+            ))
+        ));
+        assert!(!dispatched.get(), "guard rejection must precede ledger dispatch");
+
+        drop(existing_admission);
+        let retried = futures::executor::block_on(transfer_with_nonce_status_and_guard(
+            ledger,
+            None,
+            || async {
+                dispatched.set(true);
+                Ok(Ok(Nat::from(78u64)))
+            },
+        ));
+        assert_eq!(retried.unwrap(), 78);
+        assert!(dispatched.get(), "transfer may dispatch after guard release");
     }
 
     #[test]

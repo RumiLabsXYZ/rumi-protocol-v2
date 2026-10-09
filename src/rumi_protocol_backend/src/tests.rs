@@ -63,7 +63,9 @@ fn cl14_too_old_holds_receipt_without_changing_identity_or_arguments() {
     let mut row = sample_pending_payout();
     crate::note_pending_payout_failure(
         &mut row,
-        &icrc_ledger_types::icrc1::transfer::TransferError::TooOld,
+        &crate::management::DurableTransferError::LedgerNoEffect(
+            icrc_ledger_types::icrc1::transfer::TransferError::TooOld,
+        ),
     );
     assert!(row.held_for_manual_retry);
     assert!(row.reconciliation_required);
@@ -82,7 +84,9 @@ fn cl14_retry_cap_retains_receipt_as_held() {
         row.in_flight = true;
         crate::note_pending_payout_failure(
             &mut row,
-            &icrc_ledger_types::icrc1::transfer::TransferError::TemporarilyUnavailable,
+            &crate::management::DurableTransferError::LedgerNoEffect(
+                icrc_ledger_types::icrc1::transfer::TransferError::TemporarilyUnavailable,
+            ),
         );
     }
     assert!(row.held_for_manual_retry);
@@ -97,15 +101,44 @@ fn cl14_bad_fee_holds_immutable_net_amount() {
     let mut row = sample_pending_payout();
     crate::note_pending_payout_failure(
         &mut row,
-        &icrc_ledger_types::icrc1::transfer::TransferError::BadFee {
-            expected_fee: icrc_ledger_types::icrc1::transfer::NumTokens::from(200u64),
-        },
+        &crate::management::DurableTransferError::LedgerNoEffect(
+            icrc_ledger_types::icrc1::transfer::TransferError::BadFee {
+                expected_fee: icrc_ledger_types::icrc1::transfer::NumTokens::from(200u64),
+            },
+        ),
     );
     assert!(row.held_for_manual_retry);
     assert!(!row.reconciliation_required);
     assert_eq!(row.retry_count, 0);
     assert_eq!(row.transfer_amount_raw, Some(900));
     assert_eq!(row.op_nonce, 901);
+}
+
+#[test]
+fn ambiguous_payout_is_held_and_cannot_dispatch_again_without_proof() {
+    let mut row = sample_pending_payout();
+    crate::note_pending_payout_failure(
+        &mut row,
+        &crate::management::DurableTransferError::AmbiguousCall {
+            code: 5,
+            message: "reply lost".into(),
+        },
+    );
+    assert!(row.held_for_manual_retry);
+    assert!(row.reconciliation_required);
+    assert!(!row.in_flight);
+    assert_eq!(row.retry_count, 0);
+    assert_eq!(row.op_nonce, 901);
+    assert_eq!(row.transfer_amount_raw, Some(900));
+
+    let mut dispatched = false;
+    if crate::pending_payout_is_dispatchable(&row) {
+        dispatched = true;
+    }
+    assert!(
+        !dispatched,
+        "held ambiguous attempt must not be dispatched again"
+    );
 }
 
 #[test]
