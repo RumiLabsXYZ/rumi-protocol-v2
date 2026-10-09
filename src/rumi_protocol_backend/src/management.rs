@@ -1,5 +1,5 @@
 use crate::numeric::{ICUSD, ICP};
-use crate::state::read_state;
+use crate::state::{mutate_state, read_state, PushSweepJournal, PushSweepRequest};
 use crate::StableTokenType;
 use candid::{Nat, Principal};
 use ic_xrc_types::{Asset, AssetClass, GetExchangeRateRequest, GetExchangeRateResult};
@@ -2011,18 +2011,6 @@ pub async fn get_balance_of(account: Account, ledger: Principal) -> Result<u64, 
     }
 }
 
-/// Sweep funds from a deposit subaccount into the protocol's main account.
-/// Returns (amount_received, sweep_block_index) where amount is balance minus ledger fee.
-pub async fn sweep_deposit(
-    caller: &Principal,
-    ledger: Principal,
-    ledger_fee: u64,
-) -> Result<(u64, u64), String> {
-    sweep_deposit_with_bounds(caller, ledger, ledger_fee, 0, u64::MAX)
-        .await
-        .map_err(|error| error.to_string())
-}
-
 #[derive(Debug)]
 pub(crate) enum SweepDepositError {
     Transfer(String),
@@ -2031,6 +2019,14 @@ pub(crate) enum SweepDepositError {
     AmbiguousResponse(String),
     AmountTooLow { minimum_amount: u64 },
     ExceedsCapacity { amount: u64, maximum_amount: u64 },
+    PendingUnknown,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SweepDepositReceipt {
+    pub amount_e8s: u64,
+    pub block_index: u64,
+    pub journal: PushSweepJournal,
 }
 
 impl std::fmt::Display for SweepDepositError {
@@ -2051,107 +2047,128 @@ impl std::fmt::Display for SweepDepositError {
                 f,
                 "Deposit amount ({amount}) exceeds the vault's remaining collateral capacity ({maximum_amount})"
             ),
+            Self::PendingUnknown => f.write_str("a prior push sweep may have transferred funds; retry the same operation and prove the exact ledger transfer before starting another sweep"),
         }
     }
 }
 
 /// Sweep a pushed deposit only when its net amount fits the vault's inclusive
 /// minimum/maximum bounds. Both checks run before the irreversible transfer.
-pub(crate) async fn sweep_deposit_with_bounds(
+pub(crate) async fn sweep_deposit_for_request(
     caller: &Principal,
     ledger: Principal,
     ledger_fee: u64,
     minimum_transfer_amount: u64,
     max_transfer_amount: u64,
-) -> Result<(u64, u64), SweepDepositError> {
+    request: PushSweepRequest,
+) -> Result<SweepDepositReceipt, SweepDepositError> {
     let subaccount = compute_deposit_subaccount(caller);
-    let deposit_account = Account {
-        owner: ic_cdk::id(),
-        subaccount: Some(subaccount),
+    let mut journal = if let Some(j) = read_state(|s| s.push_sweep_journals.get(caller).cloned()) {
+        if j.owner != *caller || j.request != request || j.ledger != ledger {
+            return Err(SweepDepositError::Transfer("an unresolved push sweep is bound to another owner/vault operation".into()));
+        }
+        j
+    } else {
+        let balance = get_balance_of(Account { owner: ic_cdk::id(), subaccount: Some(subaccount) }, ledger)
+            .await.map_err(SweepDepositError::Transfer)?;
+        let fee = cached_fee_for(ledger).unwrap_or(ledger_fee);
+        if balance == 0 { return Err(SweepDepositError::Transfer("No deposit found in subaccount".into())); }
+        if balance <= fee { return Err(SweepDepositError::Transfer(format!("Deposit balance ({balance}) is not enough to cover the ledger fee ({fee})"))); }
+        let amount_e8s = balance - fee;
+        ensure_sweep_amount_within_bounds(amount_e8s, minimum_transfer_amount, max_transfer_amount)?;
+        mutate_state(|s| {
+            if let Some(j) = s.push_sweep_journals.get(caller) {
+                if j.owner == *caller && j.request == request && j.ledger == ledger { return Ok(j.clone()); }
+                return Err(SweepDepositError::Transfer("an unresolved push sweep is bound to another owner/vault operation".into()));
+            }
+            let vault_id = match &request {
+                PushSweepRequest::OpenVault { .. } => s.increment_vault_id(),
+                PushSweepRequest::AddMargin { vault_id } => *vault_id,
+            };
+            let op_nonce = s.next_op_nonce_at(ic_cdk::api::time());
+            let j = PushSweepJournal {
+                owner: *caller, request: request.clone(), vault_id, ledger,
+                from_subaccount: subaccount, to_owner: ic_cdk::id(), amount_e8s,
+                fee_e8s: fee, memo: op_nonce.to_be_bytes().to_vec(),
+                created_at_time_ns: nonce_to_created_at_time(op_nonce), op_nonce,
+                dispatch_attempts: 0,
+            };
+            s.push_sweep_journals.insert(*caller, j.clone());
+            Ok(j)
+        })?
     };
 
-    // Read how much is sitting in the deposit subaccount
-    let balance = get_balance_of(deposit_account, ledger)
-        .await
+    journal = mutate_state(|s| s.mark_push_sweep_dispatched(caller, &journal))
         .map_err(SweepDepositError::Transfer)?;
-
-    if balance == 0 {
-        return Err(SweepDepositError::Transfer(
-            "No deposit found in subaccount".to_string(),
-        ));
-    }
-
-    if balance <= ledger_fee {
-        return Err(SweepDepositError::Transfer(format!(
-            "Deposit balance ({}) is not enough to cover the ledger fee ({})",
-            balance, ledger_fee
-        )));
-    }
-
-    let transfer_amount = balance - ledger_fee;
-    let transfer_result = transfer_deposit_after_bounds(
-        transfer_amount,
-        minimum_transfer_amount,
-        max_transfer_amount,
-        || {
-            let op_nonce = crate::state::mutate_state(|s| s.next_op_nonce());
-            transfer_deposit_idempotent_status(
-                ledger,
-                subaccount,
-                Account { owner: ic_cdk::id(), subaccount: None },
-                transfer_amount,
-                op_nonce,
-            )
-        },
-    )
-    .await?;
-    let block_index_u64 = transfer_result.map_err(|error| match error {
-        DurableTransferError::LedgerNoEffect(TransferError::BadFee { expected_fee }) => {
-            if let Some(fee) = expected_fee.0.to_u64() {
-                set_cached_fee(ledger, fee);
-            }
-            SweepDepositError::Ledger(TransferError::BadFee { expected_fee })
+    let attempt = journal.dispatch_attempts;
+    let block = transfer_deposit_idempotent_status(&journal).await.map_err(|error| {
+        if attempt == 1 && matches!(&error, DurableTransferError::LedgerNoEffect(_)) {
+            mutate_state(|s| s.release_push_sweep_after_first_no_effect(caller, &journal));
         }
-        DurableTransferError::LedgerNoEffect(error) => SweepDepositError::Ledger(error),
+        match error {
+        DurableTransferError::LedgerNoEffect(TransferError::BadFee { expected_fee }) => {
+            if attempt == 1 { SweepDepositError::Ledger(TransferError::BadFee { expected_fee }) } else { SweepDepositError::PendingUnknown }
+        }
+        DurableTransferError::LedgerNoEffect(error) if attempt == 1 => SweepDepositError::Ledger(error),
+        // After an earlier ambiguous attempt, even a no-effect response (most
+        // notably TooOld after the ledger's dedup horizon) cannot prove that
+        // the original request never committed. Keep the saved tuple held.
+        DurableTransferError::LedgerNoEffect(_) => SweepDepositError::PendingUnknown,
         DurableTransferError::AmbiguousCall { code, message } => {
             SweepDepositError::AmbiguousCall { code, message }
         }
         DurableTransferError::AmbiguousResponse(message) => {
             SweepDepositError::AmbiguousResponse(message)
         }
-    })?;
+    }})?;
 
     log!(DEBUG,
         "[sweep_deposit] Swept {} from subaccount for {} on ledger {} (block {})",
-        transfer_amount, caller, ledger, block_index_u64
+        journal.amount_e8s, caller, ledger, block
     );
 
-    Ok((transfer_amount, block_index_u64))
+    Ok(SweepDepositReceipt { amount_e8s: journal.amount_e8s, block_index: block, journal })
 }
 
 async fn transfer_deposit_idempotent_status(
-    ledger: Principal,
-    from_subaccount: [u8; 32],
-    to: Account,
-    amount: u64,
-    op_nonce: u128,
+    journal: &PushSweepJournal,
 ) -> Result<u64, DurableTransferError> {
-    let client = ICRC1Client { runtime: CdkRuntime, ledger_canister_id: ledger };
-    let outcome = client.transfer(TransferArg {
-        from_subaccount: Some(from_subaccount),
-        to,
-        fee: None,
-        created_at_time: Some(nonce_to_created_at_time(op_nonce)),
-        memo: Some(nonce_to_memo(op_nonce)),
-        amount: Nat::from(amount),
-    }).await;
-    let result = classify_durable_transfer_outcome(outcome);
+    let client = ICRC1Client { runtime: CdkRuntime, ledger_canister_id: journal.ledger };
+    let outcome = client.transfer(push_sweep_transfer_arg(journal)).await;
+    let result = classify_push_sweep_outcome(outcome);
     if let Err(DurableTransferError::LedgerNoEffect(TransferError::BadFee { expected_fee })) = &result {
         if let Some(fee) = expected_fee.0.to_u64() {
-            set_cached_fee(ledger, fee);
+            set_cached_fee(journal.ledger, fee);
         }
     }
     result
+}
+
+/// A ledger `GenericError` is not accepted as proof of no transfer: a ledger
+/// can commit and then fail while forming its response. Only a successful
+/// block or exact-tuple Duplicate proves positive settlement.
+fn classify_push_sweep_outcome(
+    outcome: Result<Result<Nat, TransferError>, (i32, String)>,
+) -> Result<u64, DurableTransferError> {
+    match outcome {
+        Ok(Err(TransferError::GenericError { error_code, message })) => {
+            Err(DurableTransferError::AmbiguousResponse(format!(
+                "ledger GenericError {error_code}: {message}"
+            )))
+        }
+        other => classify_durable_transfer_outcome(other),
+    }
+}
+
+fn push_sweep_transfer_arg(journal: &PushSweepJournal) -> TransferArg {
+    TransferArg {
+        from_subaccount: Some(journal.from_subaccount),
+        to: Account { owner: journal.to_owner, subaccount: None },
+        fee: Some(Nat::from(journal.fee_e8s)),
+        created_at_time: Some(journal.created_at_time_ns),
+        memo: Some(Memo::from(journal.memo.clone())),
+        amount: Nat::from(journal.amount_e8s),
+    }
 }
 
 async fn transfer_deposit_after_bounds<F, Fut>(
@@ -2240,7 +2257,9 @@ pub async fn approve_icusd(spender: Principal, amount: u64) -> Result<u64, Appro
 
 #[cfg(test)]
 mod sweep_deposit_limit_tests {
-    use super::{classify_durable_transfer_outcome, transfer_deposit_after_bounds, DurableTransferError, SweepDepositError};
+    use super::{classify_durable_transfer_outcome, classify_push_sweep_outcome, push_sweep_transfer_arg, transfer_deposit_after_bounds, DurableTransferError, SweepDepositError};
+    use crate::state::{PushSweepJournal, PushSweepRequest};
+    use candid::Principal;
     use candid::Nat;
     use icrc_ledger_types::icrc1::transfer::TransferError;
     use std::cell::Cell;
@@ -2311,6 +2330,49 @@ mod sweep_deposit_limit_tests {
         assert!(matches!(
             ambiguous,
             Err(DurableTransferError::AmbiguousCall { code: 5, .. })
+        ));
+    }
+
+    #[test]
+    fn reply_loss_retry_reuses_complete_transfer_tuple_and_duplicate_proves_credit_block() {
+        let journal = PushSweepJournal {
+            owner: Principal::from_slice(&[1]),
+            request: PushSweepRequest::AddMargin { vault_id: 91 },
+            vault_id: 91,
+            ledger: Principal::from_slice(&[2]),
+            from_subaccount: [3; 32],
+            to_owner: Principal::from_slice(&[4]),
+            amount_e8s: 5_000,
+            fee_e8s: 100,
+            memo: 77u128.to_be_bytes().to_vec(),
+            created_at_time_ns: 12_000,
+            op_nonce: 77,
+            dispatch_attempts: 1,
+        };
+        let original = push_sweep_transfer_arg(&journal);
+        let retry = push_sweep_transfer_arg(&PushSweepJournal { dispatch_attempts: 2, ..journal });
+        assert_eq!(original.from_subaccount, retry.from_subaccount);
+        assert_eq!(original.to, retry.to);
+        assert_eq!(original.amount, retry.amount);
+        assert_eq!(original.fee, retry.fee);
+        assert_eq!(original.memo, retry.memo);
+        assert_eq!(original.created_at_time, retry.created_at_time);
+
+        assert!(matches!(
+            classify_push_sweep_outcome(Ok(Err(TransferError::GenericError {
+                error_code: Nat::from(5u64), message: "commit then response error".into(),
+            }))),
+            Err(DurableTransferError::AmbiguousResponse(_))
+        ));
+        assert_eq!(
+            classify_push_sweep_outcome(Ok(Err(TransferError::Duplicate {
+                duplicate_of: Nat::from(123u64),
+            }))).unwrap(),
+            123
+        );
+        assert!(matches!(
+            classify_push_sweep_outcome(Ok(Err(TransferError::TooOld))),
+            Err(DurableTransferError::LedgerNoEffect(TransferError::TooOld))
         ));
     }
 }

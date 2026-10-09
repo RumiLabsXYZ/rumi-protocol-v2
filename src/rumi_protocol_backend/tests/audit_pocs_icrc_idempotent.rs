@@ -44,6 +44,7 @@
 
 use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Nat, Principal};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
+use sha2::{Digest, Sha256};
 
 // ─── Flaky ledger Candid types (mirror of `flaky_ledger::*`) ───
 
@@ -124,10 +125,67 @@ enum ApproveError {
     GenericError { error_code: Nat, message: String },
 }
 
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct ProtocolInitArg {
+    xrc_principal: Principal,
+    icusd_ledger_principal: Principal,
+    icp_ledger_principal: Principal,
+    fee_e8s: u64,
+    developer_principal: Principal,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum ProtocolArg {
+    Init(ProtocolInitArg),
+    Upgrade(ProtocolUpgradeArg),
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct ProtocolUpgradeArg {
+    mode: Option<()>,
+    description: Option<String>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct MockXRC {
+    rates: Vec<(String, u64)>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct CandidVault {
+    owner: Principal,
+    borrowed_icusd_amount: u64,
+    icp_margin_amount: u64,
+    vault_id: u64,
+    collateral_amount: u64,
+    collateral_type: Principal,
+    accrued_interest: u64,
+}
+
 // ─── WASM loader + helpers ───
 
 fn flaky_ledger_wasm() -> Vec<u8> {
     include_bytes!("../../../target/wasm32-unknown-unknown/release/flaky_ledger.wasm").to_vec()
+}
+
+fn protocol_wasm() -> Vec<u8> {
+    include_bytes!("../../../target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm")
+        .to_vec()
+}
+
+fn deploy_mock_xrc(pic: &PocketIc) -> Principal {
+    let id = pic.create_canister();
+    pic.add_cycles(id, 1_000_000_000_000);
+    pic.install_canister(
+        id,
+        include_bytes!("../../xrc_demo/xrc/xrc.wasm").to_vec(),
+        encode_one(MockXRC {
+            rates: vec![("ICP/USD".into(), 1_000_000_000)],
+        })
+        .unwrap(),
+        None,
+    );
+    id
 }
 
 fn deploy_flaky_ledger(pic: &PocketIc) -> Principal {
@@ -148,6 +206,16 @@ fn balance_of(pic: &PocketIc, ledger: Principal, owner: Principal) -> u128 {
     let acct = Account { owner, subaccount: None };
     let result = pic.query_call(ledger, Principal::anonymous(), "icrc1_balance_of",
         encode_one(acct).unwrap()).expect("balance_of failed");
+    let bal: Nat = match result {
+        WasmResult::Reply(b) => decode_one(&b).expect("decode balance"),
+        WasmResult::Reject(m) => panic!("balance_of rejected: {}", m),
+    };
+    bal.0.try_into().unwrap_or(0)
+}
+
+fn balance_of_account(pic: &PocketIc, ledger: Principal, account: Account) -> u128 {
+    let result = pic.query_call(ledger, Principal::anonymous(), "icrc1_balance_of",
+        encode_one(account).unwrap()).expect("balance_of failed");
     let bal: Nat = match result {
         WasmResult::Reply(b) => decode_one(&b).expect("decode balance"),
         WasmResult::Reject(m) => panic!("balance_of rejected: {}", m),
@@ -288,6 +356,214 @@ fn icrc_001_no_dedup_retry_with_same_created_at_time_dedupes() {
     let dup_block_u64: u64 = dup_block.0.try_into().unwrap();
     assert_eq!(dup_block_u64, 1,
         "Duplicate must point at the original committed block (block 1)");
+}
+
+/// Push-sweep tuple regression: a commit followed by a lost/failed reply must
+/// be retried with the identical caller subaccount, destination, amount, fee,
+/// memo, and created_at_time. Duplicate then proves the one committed block.
+#[test]
+fn push_sweep_reply_loss_retry_keeps_exact_caller_subaccount_tuple() {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let ledger = deploy_flaky_ledger(&pic);
+    let backend = Principal::self_authenticating(&[31, 32, 33]);
+    let subaccount = [34; 32];
+    let deposit = Account { owner: backend, subaccount: Some(subaccount) };
+    let main = Account { owner: backend, subaccount: None };
+    pic.update_call(ledger, Principal::anonymous(), "mint",
+        encode_args((deposit.clone(), Nat::from(100_000u64))).unwrap())
+        .expect("mint pushed deposit");
+    set_phantom_failures(&pic, ledger, 1);
+
+    let tuple = TransferArg {
+        from_subaccount: Some(subaccount),
+        to: main.clone(),
+        amount: Nat::from(90_000u64),
+        fee: Some(Nat::from(10_000u64)),
+        memo: Some(77u128.to_be_bytes().to_vec()),
+        created_at_time: Some(1_700_000_000_000_000_077),
+    };
+    assert!(matches!(icrc1_transfer(&pic, ledger, backend, tuple.clone()),
+        Err(TransferError::GenericError { .. })));
+    assert_eq!(balance_of_account(&pic, ledger, deposit.clone()), 0);
+    assert_eq!(balance_of_account(&pic, ledger, main.clone()), 90_000);
+
+    assert!(matches!(icrc1_transfer(&pic, ledger, backend, tuple),
+        Err(TransferError::Duplicate { duplicate_of }) if duplicate_of == Nat::from(1u64)));
+    assert_eq!(balance_of_account(&pic, ledger, deposit), 0);
+    assert_eq!(balance_of_account(&pic, ledger, main), 90_000);
+}
+
+/// Endpoint-level regression: the backend must save its exact transfer tuple
+/// before dispatch, then settle one vault credit when the committed reply is
+/// lost and the endpoint is retried.
+#[test]
+fn backend_open_with_deposit_reply_loss_recovers_exactly_once() {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let ledger = deploy_flaky_ledger(&pic);
+    set_fee(&pic, ledger, 10_000);
+    let developer = Principal::self_authenticating(b"push-sweep-developer");
+    let user = Principal::self_authenticating(b"push-sweep-user");
+    let xrc = deploy_mock_xrc(&pic);
+    let protocol = pic.create_canister();
+    pic.add_cycles(protocol, 2_000_000_000_000);
+    pic.set_controllers(protocol, None, vec![developer])
+        .expect("set protocol controller");
+    pic.install_canister(
+        protocol,
+        protocol_wasm(),
+        encode_args((ProtocolArg::Init(ProtocolInitArg {
+            xrc_principal: xrc,
+            icusd_ledger_principal: ledger,
+            icp_ledger_principal: ledger,
+            fee_e8s: 10_000,
+            developer_principal: developer,
+        }),)).unwrap(),
+        Some(developer),
+    );
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"rumi-deposit");
+    hasher.update(user.as_slice());
+    let deposit_subaccount: [u8; 32] = hasher.finalize().into();
+    let deposit = Account { owner: protocol, subaccount: Some(deposit_subaccount) };
+    let main = Account { owner: protocol, subaccount: None };
+    pic.update_call(ledger, Principal::anonymous(), "mint",
+        encode_args((deposit, Nat::from(1_000_000u64))).unwrap())
+        .expect("mint caller deposit");
+    set_phantom_failures(&pic, ledger, 1);
+
+    let args = encode_args((0u64, Option::<Principal>::None)).unwrap();
+    let first = pic.update_call(protocol, user, "open_vault_with_deposit", args.clone())
+        .expect("backend call reply");
+    let WasmResult::Reply(first) = first else { panic!("backend call rejected") };
+    let first_value = candid::IDLArgs::from_bytes(&first).expect("decode dynamic first result");
+    assert!(format!("{first_value:?}").contains("GenericError"), "first call should report ambiguity: {first_value:?}");
+    assert_eq!(balance_of_account(&pic, ledger, main.clone()), 990_000);
+
+    // Mutable admission policy no longer controls the already-dispatched
+    // tuple: raise the minimum above the original amount before the retry.
+    let changed_minimum = pic.update_call(protocol, developer, "set_collateral_min_deposit",
+        encode_args((ledger, 2_000_000u64)).unwrap()).expect("change collateral minimum");
+    let WasmResult::Reply(changed_minimum) = changed_minimum else { panic!("minimum update rejected") };
+    let minimum_result: Result<(), candid::Reserved> = decode_one(&changed_minimum).unwrap();
+    assert!(minimum_result.is_ok(), "minimum update returned an error");
+    set_fee(&pic, ledger, 20_000);
+    let frozen = pic.update_call(protocol, developer, "freeze_protocol", encode_args(()).unwrap())
+        .expect("freeze protocol");
+    assert!(matches!(frozen, WasmResult::Reply(_)));
+    pic.upgrade_canister(
+        protocol,
+        protocol_wasm(),
+        encode_args((ProtocolArg::Upgrade(ProtocolUpgradeArg {
+            mode: None,
+            description: Some("push-sweep retry persistence regression".into()),
+        }),)).unwrap(),
+        Some(developer),
+    ).expect("upgrade must preserve pending push-sweep journal");
+
+    let frozen_retry = pic.update_call(protocol, user, "open_vault_with_deposit", args.clone())
+        .expect("frozen exact retry reply");
+    let WasmResult::Reply(frozen_retry) = frozen_retry else { panic!("frozen retry rejected") };
+    let frozen_value = candid::IDLArgs::from_bytes(&frozen_retry).expect("decode frozen retry result");
+    assert!(format!("{frozen_value:?}").contains("Protocol is frozen"),
+        "emergency freeze must remain authoritative: {frozen_value:?}");
+    let unfrozen = pic.update_call(protocol, developer, "unfreeze_protocol", encode_args(()).unwrap())
+        .expect("unfreeze protocol");
+    assert!(matches!(unfrozen, WasmResult::Reply(_)));
+
+    let second = pic.update_call(protocol, user, "open_vault_with_deposit", args.clone())
+        .expect("backend retry reply");
+    let WasmResult::Reply(second) = second else { panic!("backend retry rejected") };
+    let second_value: Result<candid::Reserved, candid::Reserved> =
+        decode_one(&second).expect("decode open retry result");
+    assert!(second_value.is_ok(), "exact retry should settle via Duplicate");
+
+    let vault_result = pic.query_call(protocol, Principal::anonymous(), "get_vaults",
+        encode_one(Some(user)).unwrap()).expect("get_vaults failed");
+    let vaults: Vec<CandidVault> = match vault_result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode user vaults"),
+        WasmResult::Reject(message) => panic!("get_vaults rejected: {message}"),
+    };
+    assert_eq!(vaults.len(), 1);
+    assert_eq!(vaults[0].collateral_amount, 990_000);
+    assert_eq!(balance_of_account(&pic, ledger, main.clone()), 990_000);
+    let history_result = pic.query_call(protocol, Principal::anonymous(), "get_vault_history",
+        encode_one(vaults[0].vault_id).unwrap()).expect("get_vault_history failed");
+    let WasmResult::Reply(history_bytes) = history_result else { panic!("vault history query rejected") };
+    let history: Vec<candid::Reserved> = decode_one(&history_bytes).expect("decode vault history");
+    assert_eq!(history.len(), 1, "reply-loss retry must record one open event");
+
+    // Exercise the independent AddMargin endpoint and its per-vault retry
+    // lock/recovery path with a second committed transfer and lost reply.
+    set_fee(&pic, ledger, 10_000);
+    pic.update_call(protocol, developer, "set_collateral_min_deposit",
+        encode_args((ledger, 100_000u64)).unwrap()).expect("lower minimum for new margin");
+    let mut hasher = Sha256::new();
+    hasher.update(b"rumi-deposit");
+    hasher.update(user.as_slice());
+    let deposit_subaccount: [u8; 32] = hasher.finalize().into();
+    pic.update_call(ledger, Principal::anonymous(), "mint",
+        encode_args((Account { owner: protocol, subaccount: Some(deposit_subaccount) }, Nat::from(1_000_000u64))).unwrap())
+        .expect("mint second pushed deposit");
+    set_phantom_failures(&pic, ledger, 1);
+    let first_margin = pic.update_call(protocol, user, "add_margin_with_deposit",
+        encode_one(vaults[0].vault_id).unwrap()).expect("add-margin backend reply");
+    let WasmResult::Reply(first_margin) = first_margin else { panic!("add-margin call rejected") };
+    let first_margin_value = candid::IDLArgs::from_bytes(&first_margin).expect("decode add-margin ambiguity");
+    assert!(format!("{first_margin_value:?}").contains("GenericError"));
+    assert_eq!(balance_of_account(&pic, ledger, main.clone()), 1_980_000);
+
+    pic.update_call(protocol, developer, "set_collateral_min_deposit",
+        encode_args((ledger, 2_000_000u64)).unwrap()).expect("raise minimum before add-margin retry");
+    set_fee(&pic, ledger, 30_000);
+    pic.update_call(protocol, developer, "freeze_protocol", encode_args(()).unwrap())
+        .expect("freeze before add-margin retry");
+    pic.upgrade_canister(
+        protocol,
+        protocol_wasm(),
+        encode_args((ProtocolArg::Upgrade(ProtocolUpgradeArg {
+            mode: None,
+            description: Some("add-margin push-sweep retry persistence regression".into()),
+        }),)).unwrap(),
+        Some(developer),
+    ).expect("upgrade must preserve add-margin journal");
+    let frozen_margin_retry = pic.update_call(protocol, user, "add_margin_with_deposit",
+        encode_one(vaults[0].vault_id).unwrap()).expect("frozen add-margin retry reply");
+    let WasmResult::Reply(frozen_margin_retry) = frozen_margin_retry else { panic!("frozen add-margin retry rejected") };
+    let frozen_margin_value = candid::IDLArgs::from_bytes(&frozen_margin_retry).expect("decode frozen margin retry");
+    assert!(format!("{frozen_margin_value:?}").contains("Protocol is frozen"));
+    let unfrozen = pic.update_call(protocol, developer, "unfreeze_protocol", encode_args(()).unwrap())
+        .expect("unfreeze before add-margin retry");
+    assert!(matches!(unfrozen, WasmResult::Reply(_)));
+
+    let second_margin = pic.update_call(protocol, user, "add_margin_with_deposit",
+        encode_one(vaults[0].vault_id).unwrap()).expect("add-margin retry reply");
+    let WasmResult::Reply(second_margin) = second_margin else { panic!("add-margin retry rejected") };
+    let second_margin_value: Result<u64, candid::Reserved> =
+        decode_one(&second_margin).expect("decode add-margin retry");
+    assert!(second_margin_value.is_ok(), "exact add-margin retry should settle via Duplicate");
+
+    let vault_result = pic.query_call(protocol, Principal::anonymous(), "get_vaults",
+        encode_one(Some(user)).unwrap()).expect("get_vaults after add-margin failed");
+    let vaults: Vec<CandidVault> = match vault_result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode updated user vaults"),
+        WasmResult::Reject(message) => panic!("get_vaults rejected: {message}"),
+    };
+    assert_eq!(vaults.len(), 1);
+    assert_eq!(vaults[0].collateral_amount, 1_980_000);
+    assert_eq!(balance_of_account(&pic, ledger, main.clone()), 1_980_000);
+    let history_result = pic.query_call(protocol, Principal::anonymous(), "get_vault_history",
+        encode_one(vaults[0].vault_id).unwrap()).expect("get_vault_history after margin failed");
+    let WasmResult::Reply(history_bytes) = history_result else { panic!("vault history rejected") };
+    let history: Vec<candid::Reserved> = decode_one(&history_bytes).expect("decode updated vault history");
+    assert_eq!(history.len(), 2, "reply-loss retries must record one open and one add-margin event");
+
+    let third = pic.update_call(protocol, user, "open_vault_with_deposit", args)
+        .expect("post-settlement call reply");
+    let WasmResult::Reply(third) = third else { panic!("post-settlement call rejected") };
+    let third_value = candid::IDLArgs::from_bytes(&third).expect("decode dynamic third result");
+    assert!(format!("{third_value:?}").contains("No deposit found"));
+    assert_eq!(balance_of_account(&pic, ledger, main), 1_980_000);
 }
 
 /// **ICRC-001 demonstration of the bug**, NOT the fix. With

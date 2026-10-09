@@ -35,7 +35,7 @@ mod three_usd_reserve_ingress_state_tests {
         confirm_three_usd_ingress_candidate_block, PendingThreeUsdRefund,
         ThreeUsdIngressNonInclusionScan, ThreeUsdRefundSource, ThreeUsdReserveIngressJournal,
         ThreeUsdReserveIngressPhase, ThreeUsdReserveIngressRequest,
-        ThreeUsdReserveIngressTuple,
+        ThreeUsdReserveIngressTuple, PushSweepJournal, PushSweepRequest,
     };
     use candid::Principal;
     use icrc_ledger_types::icrc1::account::Account;
@@ -181,6 +181,65 @@ mod three_usd_reserve_ingress_state_tests {
         ciborium::ser::into_writer(&legacy, &mut bytes).unwrap();
         let decoded: ThreeUsdReserveIngressJournal = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         assert_eq!(decoded.non_inclusion_scan, None);
+    }
+
+    #[test]
+    fn push_sweep_tuple_survives_upgrade_and_legacy_state_defaults_empty() {
+        let owner = Principal::from_slice(&[21]);
+        let journal = PushSweepJournal {
+            owner,
+            request: PushSweepRequest::OpenVault {
+                collateral_type: Principal::from_slice(&[22]),
+                borrow_amount_raw: 123,
+            },
+            vault_id: 8,
+            ledger: Principal::from_slice(&[23]),
+            from_subaccount: [24; 32],
+            to_owner: Principal::from_slice(&[25]),
+            amount_e8s: 900,
+            fee_e8s: 100,
+            memo: 26u128.to_be_bytes().to_vec(),
+            created_at_time_ns: 27,
+            op_nonce: 28,
+            dispatch_attempts: 0,
+        };
+        let mut state = super::State::default();
+        state.push_sweep_journals.insert(owner, journal.clone());
+        assert!(state.has_unresolved_push_sweep_for_vault(8));
+        assert!(!state.has_unresolved_push_sweep_for_vault(9));
+        let first = state
+            .mark_push_sweep_dispatched(&owner, &journal)
+            .expect("first dispatch is journaled");
+        assert_eq!(first.dispatch_attempts, 1);
+        let second = state
+            .mark_push_sweep_dispatched(&owner, &first)
+            .expect("retry remains journaled");
+        assert_eq!(second.dispatch_attempts, 2);
+        assert!(!state.release_push_sweep_after_first_no_effect(&owner, &second));
+        assert_eq!(state.push_sweep_journals.get(&owner), Some(&second));
+
+        // A separate first-attempt no-effect may safely release an unused
+        // intent because no earlier dispatch could have committed.
+        let mut no_effect_state = super::State::default();
+        no_effect_state.push_sweep_journals.insert(owner, journal.clone());
+        let first = no_effect_state
+            .mark_push_sweep_dispatched(&owner, &journal)
+            .unwrap();
+        assert!(no_effect_state.release_push_sweep_after_first_no_effect(&owner, &first));
+        assert!(!no_effect_state.has_unresolved_push_sweep_for_vault(8));
+
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&state, &mut encoded).unwrap();
+        let restored: super::State = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        assert_eq!(restored.push_sweep_journals.get(&owner), Some(&second));
+
+        let mut old: ciborium::value::Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        let ciborium::value::Value::Map(fields) = &mut old else { panic!("State must encode as a map") };
+        fields.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name) if name == "push_sweep_journals"));
+        let mut legacy_bytes = Vec::new();
+        ciborium::ser::into_writer(&old, &mut legacy_bytes).unwrap();
+        let legacy: super::State = ciborium::de::from_reader(legacy_bytes.as_slice()).unwrap();
+        assert!(legacy.push_sweep_journals.is_empty());
     }
 }
 
@@ -1819,6 +1878,29 @@ pub struct ThreeUsdReserveIngressJournal {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum PushSweepRequest {
+    OpenVault { collateral_type: Principal, borrow_amount_raw: u64 },
+    AddMargin { vault_id: u64 },
+}
+
+/// Exact ICRC-1 tuple retained across reply loss and upgrades.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct PushSweepJournal {
+    pub owner: Principal,
+    pub request: PushSweepRequest,
+    pub vault_id: u64,
+    pub ledger: Principal,
+    pub from_subaccount: [u8; 32],
+    pub to_owner: Principal,
+    pub amount_e8s: u64,
+    pub fee_e8s: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub op_nonce: u128,
+    pub dispatch_attempts: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct ThreeUsdIngressNonInclusionScan {
     pub tuple: ThreeUsdReserveIngressTuple,
     pub ledger: Principal,
@@ -2410,6 +2492,12 @@ pub struct State {
     /// impossible because their tuples have `created_at_time: None`).
     #[serde(default)]
     pub op_nonce_counter: u64,
+    /// One unresolved push sweep per owner; old snapshots decode this empty.
+    /// Pre-journal ambiguous sweeps cannot be reconstructed from state and are
+    /// historical reconciliation liabilities; this field does not backfill or
+    /// release those rows, and its presence is not legacy recovery proof.
+    #[serde(default)]
+    pub push_sweep_journals: BTreeMap<Principal, PushSweepJournal>,
 
     /// Wave-5 LIQ-007 / ORACLE-009: queued outlier price candidates per collateral.
     /// When a fetched price falls outside the sanity band (PRICE_SANITY_BAND_RATIO)
@@ -2949,6 +3037,7 @@ impl Default for State {
             legacy_consumed_payment_ledger: None,
             consumed_bot_payment_proofs: BTreeMap::new(),
             op_nonce_counter: 0,
+            push_sweep_journals: BTreeMap::new(),
             pending_outlier_prices: BTreeMap::new(),
             liquidation_frozen: false,
             vault_cr_index: BTreeMap::new(),
@@ -3243,6 +3332,7 @@ impl From<InitArg> for State {
             legacy_consumed_payment_ledger: None,
             consumed_bot_payment_proofs: BTreeMap::new(),
             op_nonce_counter: 0,
+            push_sweep_journals: BTreeMap::new(),
             pending_outlier_prices: BTreeMap::new(),
             liquidation_frozen: false,
             vault_cr_index: BTreeMap::new(),
@@ -3985,6 +4075,43 @@ impl State {
         ((now as u128) << 64) | (counter as u128)
     }
 
+    pub fn mark_push_sweep_dispatched(
+        &mut self,
+        owner: &Principal,
+        expected: &PushSweepJournal,
+    ) -> Result<PushSweepJournal, String> {
+        let Some(saved) = self.push_sweep_journals.get_mut(owner) else {
+            return Err("push sweep journal disappeared before dispatch".into());
+        };
+        if saved != expected {
+            return Err("push sweep journal changed before dispatch".into());
+        }
+        saved.dispatch_attempts = saved.dispatch_attempts.saturating_add(1);
+        Ok(saved.clone())
+    }
+
+    /// A sole definitive no-effect response can release its unused intent.
+    /// Once an earlier attempt may have been lost, the exact tuple is held.
+    pub fn release_push_sweep_after_first_no_effect(
+        &mut self,
+        owner: &Principal,
+        expected: &PushSweepJournal,
+    ) -> bool {
+        if expected.dispatch_attempts != 1
+            || self.push_sweep_journals.get(owner) != Some(expected)
+        {
+            return false;
+        }
+        self.push_sweep_journals.remove(owner);
+        true
+    }
+
+    pub fn has_unresolved_push_sweep_for_vault(&self, vault_id: u64) -> bool {
+        self.push_sweep_journals
+            .values()
+            .any(|journal| journal.vault_id == vault_id)
+    }
+
     pub fn increment_vault_id(&mut self) -> u64 {
         let vault_id = self.next_available_vault_id;
         self.next_available_vault_id += 1;
@@ -4231,6 +4358,7 @@ impl State {
         for vault in self.vault_id_to_vaults.values() {
             if vault.borrowed_icusd_amount == 0
                 || vault.bot_processing
+                || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
             {
                 continue;
@@ -6503,7 +6631,10 @@ impl State {
             // Replay stays exact because `RedemptionOnVaults` replay applies
             // the event's stored `vault_redemptions` instead of re-running
             // this scan (see `apply_vault_redemptions`).
-            if vault.bot_processing || crate::guard::is_vault_liquidating(vault.vault_id) {
+            if vault.bot_processing
+                || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || crate::guard::is_vault_liquidating(vault.vault_id)
+            {
                 continue;
             }
             let vault_ct = if vault.collateral_type == Principal::anonymous() {
@@ -6742,7 +6873,10 @@ impl State {
             // Replay stays exact because `RedemptionOnVaults` replay applies
             // the event's stored `vault_redemptions` instead of re-running
             // this scan (see `apply_vault_redemptions`).
-            if vault.bot_processing || crate::guard::is_vault_liquidating(vault.vault_id) {
+            if vault.bot_processing
+                || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || crate::guard::is_vault_liquidating(vault.vault_id)
+            {
                 continue;
             }
             let vault_ct = if vault.collateral_type == Principal::anonymous() {
@@ -6931,6 +7065,7 @@ impl State {
             };
             if vault.borrowed_icusd_amount == 0
                 || vault.bot_processing
+                || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
             {
                 continue;
@@ -7069,7 +7204,10 @@ impl State {
             if vault.borrowed_icusd_amount == 0 {
                 continue;
             }
-            if vault.bot_processing || crate::guard::is_vault_liquidating(vault.vault_id) {
+            if vault.bot_processing
+                || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || crate::guard::is_vault_liquidating(vault.vault_id)
+            {
                 continue;
             }
             let vault_ct = if vault.collateral_type == Principal::anonymous() {
@@ -9145,6 +9283,7 @@ mod tests {
         state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
         state.open_vault(audit_vault(2, icp_ct, 800_000_000, 500_000_000));
 
+        replace_state(State::default());
         let guard = crate::guard::VaultLiquidationGuard::new(1).expect("lock vault 1");
         let price = UsdIcp::from(rust_decimal_macros::dec!(5.0));
         let results = state.redeem_on_vaults(ICUSD::new(100_000_000), price, &icp_ct);
@@ -9196,6 +9335,7 @@ mod tests {
         state.open_vault(audit_vault(2, icp_ct, 800_000_000, 500_000_000));
         state.open_vault(audit_vault(3, icp_ct, 100_000_000, 200_000_000));
         state.vault_id_to_vaults.get_mut(&1).unwrap().bot_processing = true;
+        replace_state(State::default());
         let _guard = crate::guard::VaultLiquidationGuard::new(2).expect("lock vault 2");
 
         assert_eq!(
@@ -10677,6 +10817,7 @@ mod tests {
         s.open_vault(audit_vault(924, xrp, 150_000_000, 100_000_000));
         s.open_vault(audit_vault(925, icp, 160_000_000, 100_000_000));
         s.vault_id_to_vaults.get_mut(&925).unwrap().bot_processing = true;
+        replace_state(State::default());
         let lock = crate::guard::VaultLiquidationGuard::new(921).expect("lock vault 921");
 
         let runs = s.redemption_runs();

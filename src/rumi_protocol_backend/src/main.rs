@@ -121,13 +121,18 @@ async fn validate_call() -> Result<(), ProtocolError> {
     if ic_cdk::caller() == Principal::anonymous() {
         return Err(ProtocolError::AnonymousCallerNotAllowed);
     }
-    // Freeze check — if frozen, reject ALL state-changing operations
+    validate_not_frozen()?;
+    rumi_protocol_backend::xrc::ensure_fresh_price().await
+}
+
+/// The emergency freeze remains authoritative even for exact ledger retries.
+fn validate_not_frozen() -> Result<(), ProtocolError> {
     if read_state(|s| s.frozen) {
         return Err(ProtocolError::TemporarilyUnavailable(
             "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
         ));
     }
-    rumi_protocol_backend::xrc::ensure_fresh_price().await
+    Ok(())
 }
 
 fn validate_mode() -> Result<(), ProtocolError> {
@@ -6468,12 +6473,52 @@ async fn open_vault_with_deposit(
     borrow_amount: u64,
     collateral_type: Option<Principal>,
 ) -> Result<OpenVaultSuccess, ProtocolError> {
-    validate_call().await?;
-    validate_mode()?;
-    // ORACLE-001: refresh the (possibly non-ICP) collateral price before minting.
-    validate_freshness_for_collateral(collateral_type).await?;
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    let retry_collateral_type = read_state(|s| {
+        s.push_sweep_journals.get(&caller).and_then(|journal| {
+            match &journal.request {
+                rumi_protocol_backend::state::PushSweepRequest::OpenVault {
+                    collateral_type: saved_collateral_type,
+                    borrow_amount_raw,
+                } if *borrow_amount_raw == borrow_amount
+                    && collateral_type.map_or(true, |provided| provided == *saved_collateral_type) =>
+                {
+                    Some(*saved_collateral_type)
+                }
+                _ => None,
+            }
+        })
+    });
+    let exact_sweep_retry = retry_collateral_type.is_some();
+    let allow_initial_borrow = if exact_sweep_retry {
+        validate_not_frozen()?;
+        if borrow_amount == 0 {
+            true
+        } else {
+            // Settle the proven collateral sweep even when the optional borrow
+            // leg is currently inadmissible. The core reports that borrow as
+            // deferred after it records the vault credit.
+            validate_call().await.is_ok()
+                && validate_mode().is_ok()
+                && validate_freshness_for_collateral(retry_collateral_type).await.is_ok()
+        }
+    } else {
+        validate_call().await?;
+        validate_mode()?;
+        // ORACLE-001: refresh the (possibly non-ICP) collateral price before minting.
+        validate_freshness_for_collateral(collateral_type).await?;
+        true
+    };
     check_postcondition(
-        rumi_protocol_backend::vault::open_vault_with_deposit(borrow_amount, collateral_type).await,
+        rumi_protocol_backend::vault::open_vault_with_deposit(
+            borrow_amount,
+            collateral_type,
+            allow_initial_borrow,
+        )
+        .await,
     )
 }
 
@@ -6482,7 +6527,21 @@ async fn open_vault_with_deposit(
 #[candid_method(update)]
 #[update]
 async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
-    validate_call().await?;
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    let exact_sweep_retry = read_state(|s| {
+        s.push_sweep_journals.get(&caller).is_some_and(|journal| {
+            journal.request
+                == (rumi_protocol_backend::state::PushSweepRequest::AddMargin { vault_id })
+        })
+    });
+    if exact_sweep_retry {
+        validate_not_frozen()?;
+    } else {
+        validate_call().await?;
+    }
     check_postcondition(rumi_protocol_backend::vault::add_margin_with_deposit(vault_id).await)
 }
 
@@ -10787,7 +10846,10 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         let vault = s.vault_id_to_vaults.get(&vault_id).ok_or_else(|| {
             ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
         })?;
-        if vault.bot_processing || s.bot_claims.contains_key(&vault_id) {
+        if vault.bot_processing
+            || s.has_unresolved_push_sweep_for_vault(vault_id)
+            || s.bot_claims.contains_key(&vault_id)
+        {
             return Err(ProtocolError::GenericError(format!(
                 "Vault #{} is already being processed",
                 vault_id
@@ -10827,7 +10889,7 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
                 ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
             })?;
 
-            if vault.bot_processing {
+            if vault.bot_processing || s.has_unresolved_push_sweep_for_vault(vault_id) {
                 return Err(ProtocolError::GenericError(format!(
                     "Vault #{} is already being processed",
                     vault_id
@@ -10982,7 +11044,10 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         let vault = s.vault_id_to_vaults.get(&vault_id).ok_or_else(|| {
             ProtocolError::GenericError(format!("Vault #{} disappeared before admission", vault_id))
         })?;
-        if vault.bot_processing || s.bot_claims.contains_key(&vault_id) {
+        if vault.bot_processing
+            || s.has_unresolved_push_sweep_for_vault(vault_id)
+            || s.bot_claims.contains_key(&vault_id)
+        {
             return Err(ProtocolError::GenericError(format!(
                 "Vault #{} already has active liquidation work", vault_id
             )));
@@ -11470,7 +11535,7 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
                 ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
             })?;
 
-            if vault.bot_processing {
+            if vault.bot_processing || s.has_unresolved_push_sweep_for_vault(vault_id) {
                 return Err(ProtocolError::GenericError(format!(
                     "Vault #{} is already being processed",
                     vault_id
@@ -11635,7 +11700,7 @@ async fn dev_force_partial_bot_liquidate(
                 ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
             })?;
 
-            if vault.bot_processing {
+            if vault.bot_processing || s.has_unresolved_push_sweep_for_vault(vault_id) {
                 return Err(ProtocolError::GenericError(format!(
                     "Vault #{} is already being processed",
                     vault_id
@@ -11790,7 +11855,7 @@ async fn dev_test_pool_only_liquidation(vault_id: u64) -> Result<String, Protoco
             .get(&vault_id)
             .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
 
-        if vault.bot_processing {
+        if vault.bot_processing || s.has_unresolved_push_sweep_for_vault(vault_id) {
             return Err(ProtocolError::GenericError(format!(
                 "Vault #{} is locked by bot_processing",
                 vault_id
