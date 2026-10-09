@@ -1786,6 +1786,10 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
     };
     let (protocol_id, icusd_ledger, existing_minting_account, icusd_to_burn_e8s, stables_consumed) =
         current;
+    let stable_ledgers: Vec<Principal> = stables_consumed.keys().copied().collect();
+    if crate::pool_token_withdrawal_intent_blocked(&stable_ledgers) {
+        return liquidation_failure(vault_info, StabilityPoolError::SystemBusy);
+    }
 
     let preflight = match io
         .preflight_xrp_absorb(protocol_id, vault_info.vault_id, icusd_to_burn_e8s)
@@ -3032,6 +3036,9 @@ pub async fn claim_cfx(
     if caller == Principal::anonymous() {
         return Err(StabilityPoolError::Unauthorized);
     }
+    if read_state(|state| state.caller_has_pending_withdrawal(caller)) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
     if read_state(|s| s.configuration.emergency_pause) {
         return Err(StabilityPoolError::EmergencyPaused);
     }
@@ -3429,6 +3436,18 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             collateral_type: vault_info.collateral_type,
             success: false,
             error_message: Some("No stablecoins available for liquidation".to_string()),
+        };
+    }
+
+    let draw_ledgers: Vec<Principal> = token_draw.keys().copied().collect();
+    if crate::pool_token_withdrawal_intent_blocked(&draw_ledgers) {
+        return LiquidationResult {
+            vault_id: vault_info.vault_id,
+            stables_consumed: BTreeMap::new(),
+            collateral_gained: 0,
+            collateral_type: vault_info.collateral_type,
+            success: false,
+            error_message: Some("A stablecoin ledger has an unresolved caller withdrawal intent".to_string()),
         };
     }
 

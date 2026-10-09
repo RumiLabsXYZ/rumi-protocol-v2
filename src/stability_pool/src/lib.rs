@@ -66,6 +66,16 @@ fn cache_virtual_price(
 /// its durable intent. Unrelated-token deposits and withdrawals remain safe;
 /// live liquidation and any intersecting ledger stay globally serialized.
 pub(crate) fn pool_token_balance_mutation_blocked(ledgers: &[Principal]) -> bool {
+    pool_token_external_mutation_blocked(ledgers)
+        || read_state(|state| {
+            ledgers.iter().any(|ledger| state.has_pending_withdrawal_for_ledger(*ledger))
+        })
+}
+
+/// Check only pre-existing absorb/liquidation fences, excluding withdrawal
+/// intent rows. A recovery call must be able to reconcile its own row while
+/// that row continues to fence competing balance mutations.
+pub(crate) fn pool_token_external_mutation_blocked(ledgers: &[Principal]) -> bool {
     crate::pool_guard::liquidation_in_progress()
         || read_state(|state| {
             let chain_intersects = state.pending_chain_absorbs().iter().any(|intent| {
@@ -80,6 +90,13 @@ pub(crate) fn pool_token_balance_mutation_blocked(ledgers: &[Principal]) -> bool
             });
             chain_intersects || native_xrp_intersects
         })
+}
+
+/// Ledger-specific durable-intent fence used by liquidation after it has
+/// computed its token draw. This deliberately does not include the transient
+/// liquidation lock, so the guarded liquidation can inspect its own draw.
+pub(crate) fn pool_token_withdrawal_intent_blocked(ledgers: &[Principal]) -> bool {
+    read_state(|state| ledgers.iter().any(|ledger| state.has_pending_withdrawal_for_ledger(*ledger)))
 }
 
 pub(crate) fn ensure_pool_token_balance_mutation_allowed(
@@ -382,10 +399,27 @@ pub async fn deposit_with_intent(
     crate::deposits::deposit_with_intent(intent_seq, token_ledger, amount).await
 }
 
+/// Caller-scoped withdrawal with a durable transfer identity. Reuse the same
+/// sequence and payload until this returns a terminal result.
+#[update]
+pub async fn withdraw_with_intent(
+    intent_seq: u64,
+    token_ledger: Principal,
+    amount: u64,
+) -> Result<WithdrawalIntentResult, StabilityPoolError> {
+    crate::deposits::withdraw_with_intent(intent_seq, token_ledger, amount).await
+}
+
 /// Authoritative status update for recovery after reload or on another device.
 #[update]
 pub fn get_deposit_intent(intent_seq: u64) -> DepositIntentStatus {
     crate::deposits::deposit_intent_status(ic_cdk::api::caller(), intent_seq)
+}
+
+/// Authoritative caller-bound withdrawal status for recovery after reload.
+#[update]
+pub fn get_withdrawal_intent(intent_seq: u64) -> WithdrawalIntentStatus {
+    crate::deposits::withdrawal_intent_status(ic_cdk::api::caller(), intent_seq)
 }
 
 #[update]
@@ -768,7 +802,7 @@ pub async fn receive_interest_revenue_v2(
     if caller != expected {
         return Err(StabilityPoolError::Unauthorized);
     }
-    ensure_pool_balance_mutation_allowed()?;
+    ensure_pool_token_balance_mutation_allowed(&[token_ledger])?;
     if read_state(|s| s.configuration.emergency_pause) {
         return Err(StabilityPoolError::EmergencyPaused);
     }
@@ -1507,7 +1541,7 @@ pub fn admin_correct_balance(
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
-    ensure_pool_balance_mutation_allowed()?;
+    ensure_pool_token_balance_mutation_allowed(&[token_ledger])?;
     let msg = mutate_state(|s| {
         let result = s.correct_balance(user, token_ledger, correct_amount);
         s.push_event(

@@ -1,5 +1,5 @@
 use crate::logs::INFO;
-use crate::state::{mutate_state, read_state};
+use crate::state::{mutate_state, read_state, WithdrawalIntentReserveError};
 use crate::types::*;
 use candid::Principal;
 use ic_canister_log::log;
@@ -30,11 +30,16 @@ thread_local! {
     /// Prevent overlapping retries for one durable deposit intent while an
     /// inter-canister call or ICRC-3 reconciliation is outstanding.
     static ACTIVE_DEPOSIT_INTENTS: RefCell<BTreeSet<Principal>> = RefCell::new(BTreeSet::new());
+    /// Prevent overlapping caller-scoped withdrawal recovery calls.
+    static ACTIVE_WITHDRAWAL_INTENTS: RefCell<BTreeSet<Principal>> = RefCell::new(BTreeSet::new());
 }
 
 const MAX_DEPOSIT_INTENT_HISTORY_BLOCKS_PER_CALL: u64 = 8;
 const DEPOSIT_INTENT_MEMO_PREFIX: &[u8; 8] = b"RSPDI001";
 const DEPOSIT_INTENT_MEMO_DIGEST_BYTES: usize = 24;
+const MAX_WITHDRAWAL_INTENT_HISTORY_BLOCKS_PER_CALL: u64 = 8;
+const WITHDRAWAL_INTENT_MEMO_PREFIX: &[u8; 8] = b"RSPWI001";
+const WITHDRAWAL_INTENT_MEMO_DIGEST_BYTES: usize = 24;
 
 struct DepositIntentGuard(Principal);
 
@@ -53,6 +58,28 @@ impl DepositIntentGuard {
 impl Drop for DepositIntentGuard {
     fn drop(&mut self) {
         ACTIVE_DEPOSIT_INTENTS.with(|active| {
+            active.borrow_mut().remove(&self.0);
+        });
+    }
+}
+
+struct WithdrawalIntentGuard(Principal);
+
+impl WithdrawalIntentGuard {
+    fn reserve(caller: Principal) -> Result<Self, StabilityPoolError> {
+        ACTIVE_WITHDRAWAL_INTENTS.with(|active| {
+            if active.borrow_mut().insert(caller) {
+                Ok(Self(caller))
+            } else {
+                Err(StabilityPoolError::SystemBusy)
+            }
+        })
+    }
+}
+
+impl Drop for WithdrawalIntentGuard {
+    fn drop(&mut self) {
+        ACTIVE_WITHDRAWAL_INTENTS.with(|active| {
             active.borrow_mut().remove(&self.0);
         });
     }
@@ -990,6 +1017,348 @@ async fn resume_deposit_intent(
     }
 }
 
+/// Submit or reconcile one caller-scoped stablecoin withdrawal. The immutable
+/// ICRC-1 tuple and accounting debit are persisted before the first transfer.
+pub async fn withdraw_with_intent(
+    intent_seq: u64,
+    token_ledger: Principal,
+    amount: u64,
+) -> Result<WithdrawalIntentResult, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let _intent_guard = WithdrawalIntentGuard::reserve(caller)?;
+    let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new();
+
+    if let Some(completed) = read_state(|state| state.completed_withdrawal_intent(caller, intent_seq)) {
+        if completed.token_ledger != token_ledger || completed.requested_amount != amount {
+            return Err(StabilityPoolError::WithdrawalIntentPayloadMismatch);
+        }
+        return Ok(completed.result);
+    }
+    let existing = read_state(|state| state.pending_withdrawal_intent(caller));
+    let intent = if let Some(intent) = existing {
+        if intent.intent_seq != intent_seq {
+            return Err(StabilityPoolError::WithdrawalIntentUnresolved { active_seq: intent.intent_seq });
+        }
+        if intent.token_ledger != token_ledger || intent.requested_amount != amount {
+            return Err(StabilityPoolError::WithdrawalIntentPayloadMismatch);
+        }
+        intent
+    } else {
+        let expected = read_state(|state| {
+            state.withdrawal_intent_high_watermarks.as_ref()
+                .and_then(|watermarks| watermarks.get(&caller).copied()).unwrap_or(0)
+                .checked_add(1)
+        }).ok_or(StabilityPoolError::WithdrawalIntentSequenceExhausted)?;
+        if intent_seq != expected {
+            return Err(StabilityPoolError::WithdrawalIntentSequenceMismatch { expected_seq: expected });
+        }
+        crate::ensure_pool_token_balance_mutation_allowed(&[token_ledger])?;
+        if read_state(|state| state.configuration.emergency_pause) {
+            return Err(StabilityPoolError::EmergencyPaused);
+        }
+        let config = read_state(|state| state.get_stablecoin_config(&token_ledger).cloned())
+            .ok_or(StabilityPoolError::TokenNotAccepted { ledger: token_ledger })?;
+        if !config.is_active {
+            return Err(StabilityPoolError::TokenNotActive { ledger: token_ledger });
+        }
+        let ledger_fee = ledger_transfer_fee(token_ledger).await;
+        let pool_ledger_balance = ledger_pool_balance(token_ledger).await;
+        crate::ensure_pool_token_balance_mutation_allowed(&[token_ledger])?;
+        if amount <= ledger_fee {
+            return Err(StabilityPoolError::AmountTooLow { minimum_e8s: ledger_fee.saturating_add(1) });
+        }
+
+        let reserved = mutate_state(|state| {
+            // This preflight is inside the same serialized mutation as the
+            // correction, debit, sequence increment, and durable row insert.
+            if state.pending_withdrawal_intents.as_ref().and_then(|pending| pending.get(&caller)).is_some() {
+                return Err(WithdrawalIntentReserveError::Active(
+                    state.pending_withdrawal_intents.as_ref().and_then(|pending| pending.get(&caller)).unwrap().intent_seq,
+                ));
+            }
+            let expected = state.withdrawal_intent_high_watermarks.as_ref()
+                .and_then(|watermarks| watermarks.get(&caller).copied()).unwrap_or(0)
+                .checked_add(1).ok_or(WithdrawalIntentReserveError::SequenceExhausted)?;
+            if intent_seq != expected { return Err(WithdrawalIntentReserveError::SequenceMismatch(expected)); }
+            if state.withdrawal_intent_high_watermarks.as_ref().map_or(0, BTreeMap::len) >= crate::state::MAX_WITHDRAWAL_INTENT_CALLERS
+                && !state.withdrawal_intent_high_watermarks.as_ref().is_some_and(|map| map.contains_key(&caller))
+                || state.pending_withdrawal_intents.as_ref().map_or(0, BTreeMap::len) >= crate::state::MAX_PENDING_WITHDRAWAL_INTENTS
+            { return Err(WithdrawalIntentReserveError::CapacityReached); }
+
+            let mut withdrawal_amount = amount;
+            let user_balance = state.deposits.get(&caller)
+                .and_then(|position| position.stablecoin_balances.get(&token_ledger).copied()).unwrap_or(0);
+            let aggregate_balance = state.total_stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
+            let mut correction = None;
+            if let Some(live_balance) = pool_ledger_balance {
+                if live_balance < aggregate_balance {
+                    if live_balance <= ledger_fee {
+                        return Err(WithdrawalIntentReserveError::ProcessFailed(StabilityPoolError::AmountTooLow {
+                            minimum_e8s: ledger_fee.saturating_add(1),
+                        }));
+                    }
+                    let sole_holder = user_balance > 0 && user_balance == aggregate_balance;
+                    if sole_holder && (amount == user_balance || amount == live_balance) {
+                        correction = Some(live_balance);
+                        withdrawal_amount = live_balance;
+                    } else {
+                        return Err(WithdrawalIntentReserveError::ProcessFailed(StabilityPoolError::InsufficientPoolBalance));
+                    }
+                } else if live_balance < amount {
+                    return Err(WithdrawalIntentReserveError::ProcessFailed(StabilityPoolError::InsufficientPoolBalance));
+                }
+            }
+            if withdrawal_amount <= ledger_fee {
+                return Err(WithdrawalIntentReserveError::ProcessFailed(StabilityPoolError::AmountTooLow {
+                    minimum_e8s: ledger_fee.saturating_add(1),
+                }));
+            }
+            let created_at_time_ns = state.reserve_deposit_transfer_timestamp(ic_cdk::api::time())
+                .map_err(|_| WithdrawalIntentReserveError::CapacityReached)?;
+            if let Some(corrected_amount) = correction {
+                let message = state.correct_balance(caller, token_ledger, corrected_amount);
+                state.push_event(caller, PoolEventType::BalanceCorrected {
+                    user: caller, token_ledger, new_amount: corrected_amount,
+                });
+                log!(INFO, "Withdrawal reconciled ledger shortfall: {}", message);
+            }
+            let transfer_amount = withdrawal_amount - ledger_fee;
+            let intent = WithdrawalIntent {
+                caller,
+                intent_seq,
+                token_ledger,
+                requested_amount: amount,
+                amount: withdrawal_amount,
+                transfer_amount,
+                fee: ledger_fee,
+                from: Account { owner: ic_cdk::api::id(), subaccount: None },
+                to: Account { owner: caller, subaccount: None },
+                memo: withdrawal_intent_memo(caller, intent_seq, token_ledger, withdrawal_amount, ledger_fee),
+                created_at_time_ns,
+                history_start_index: None,
+                history_next_index: None,
+                history_tip: None,
+                expected_block_index: None,
+                dispatch_started: false,
+                last_error: None,
+            };
+            state.reserve_withdrawal_intent(intent.clone())?;
+            Ok(intent)
+        });
+        match reserved {
+            Ok(intent) => intent,
+            Err(WithdrawalIntentReserveError::Active(active_seq)) => return Err(StabilityPoolError::WithdrawalIntentUnresolved { active_seq }),
+            Err(WithdrawalIntentReserveError::SequenceMismatch(expected_seq)) => return Err(StabilityPoolError::WithdrawalIntentSequenceMismatch { expected_seq }),
+            Err(WithdrawalIntentReserveError::SequenceExhausted) => return Err(StabilityPoolError::WithdrawalIntentSequenceExhausted),
+            Err(WithdrawalIntentReserveError::CapacityReached) => return Err(StabilityPoolError::WithdrawalIntentCapacityReached),
+            Err(WithdrawalIntentReserveError::ProcessFailed(error)) => return Err(error),
+        }
+    };
+    resume_withdrawal_intent(intent).await
+}
+
+pub fn withdrawal_intent_status(caller: Principal, intent_seq: u64) -> WithdrawalIntentStatus {
+    read_state(|state| state.withdrawal_intent_status(caller, intent_seq))
+}
+
+fn withdrawal_intent_memo(caller: Principal, seq: u64, ledger: Principal, amount: u64, fee: u64) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update([caller.as_slice().len() as u8]);
+    hasher.update(caller.as_slice());
+    hasher.update(seq.to_be_bytes());
+    hasher.update([ledger.as_slice().len() as u8]);
+    hasher.update(ledger.as_slice());
+    hasher.update(amount.to_be_bytes());
+    hasher.update(fee.to_be_bytes());
+    let digest = hasher.finalize();
+    let mut memo = WITHDRAWAL_INTENT_MEMO_PREFIX.to_vec();
+    memo.extend_from_slice(&digest[..WITHDRAWAL_INTENT_MEMO_DIGEST_BYTES]);
+    memo
+}
+
+fn withdrawal_intent_result(intent: &WithdrawalIntent, phase: WithdrawalIntentPhase, reason: Option<String>) -> WithdrawalIntentResult {
+    WithdrawalIntentResult::Pending { intent_seq: intent.intent_seq, token_ledger: intent.token_ledger,
+        requested_amount: intent.requested_amount, amount: intent.amount, phase, reason }
+}
+
+fn save_withdrawal_intent(intent: &WithdrawalIntent) -> bool {
+    mutate_state(|state| state.update_withdrawal_intent(intent.clone()))
+}
+
+fn hold_withdrawal_intent(intent: &WithdrawalIntent, reason: String) -> WithdrawalIntentResult {
+    let mut held = intent.clone();
+    held.last_error = Some(reason.clone());
+    save_withdrawal_intent(&held);
+    withdrawal_intent_result(&held, WithdrawalIntentPhase::Reconciling, Some(reason))
+}
+
+fn exact_withdrawal_intent_block(intent: &WithdrawalIntent, block: &rumi_protocol_backend::icrc3_proof::DecodedBlock) -> bool {
+    (block.op == "transfer" || block.op == "xfer")
+        && block.btype.as_deref().is_none_or(|kind| kind == "1xfer")
+        && block.from.as_ref() == Some(&intent.from)
+        && block.to.as_ref() == Some(&intent.to)
+        && block.amount == u128::from(intent.transfer_amount)
+        && block.fee == Some(intent.fee)
+        && block.memo.as_deref() == Some(intent.memo.as_slice())
+        && block.created_at_time == Some(intent.created_at_time_ns)
+}
+
+fn possible_withdrawal_intent_block(intent: &WithdrawalIntent, block: &rumi_protocol_backend::icrc3_proof::DecodedBlock) -> bool {
+    block.memo.as_deref() == Some(intent.memo.as_slice())
+        || (block.from.as_ref() == Some(&intent.from) && block.to.as_ref() == Some(&intent.to)
+            && block.amount == u128::from(intent.transfer_amount)
+            && block.created_at_time == Some(intent.created_at_time_ns))
+}
+
+async fn finish_withdrawal_intent(intent: &WithdrawalIntent, result: WithdrawalIntentResult) -> Result<WithdrawalIntentResult, StabilityPoolError> {
+    if !mutate_state(|state| state.finalize_withdrawal_intent(intent.caller, intent.intent_seq, result.clone(), ic_cdk::api::time())) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(result)
+}
+
+async fn verify_withdrawal_intent_receipt(intent: &WithdrawalIntent) -> Result<WithdrawalIntentResult, StabilityPoolError> {
+    let block_index = intent.expected_block_index.expect("receipt index checked");
+    let block = match fetch_direct_deposit_intent_block(intent.token_ledger, block_index).await {
+        Ok(block) => block,
+        Err(reason) => return Ok(hold_withdrawal_intent(intent, format!("exact ICRC-3 receipt is unavailable: {reason}"))),
+    };
+    if !exact_withdrawal_intent_block(intent, &block) {
+        return Ok(hold_withdrawal_intent(intent, "ledger block does not match the persisted ICRC-1 transfer tuple".into()));
+    }
+    finish_withdrawal_intent(intent, WithdrawalIntentResult::Completed {
+        intent_seq: intent.intent_seq, token_ledger: intent.token_ledger,
+        requested_amount: intent.requested_amount, amount: intent.amount,
+        transfer_amount: intent.transfer_amount, fee: intent.fee, block_index,
+    }).await
+}
+
+async fn reconcile_withdrawal_intent_history(intent: &mut WithdrawalIntent) -> Result<Option<WithdrawalIntentResult>, StabilityPoolError> {
+    let latest_tip = match pending_refund_history_tip(intent.token_ledger).await {
+        Ok(tip) => tip,
+        Err(error) => return Ok(Some(hold_withdrawal_intent(intent, format!("ledger history tip unavailable: {error:?}")))),
+    };
+    let start = intent.history_start_index.ok_or_else(|| StabilityPoolError::LedgerTransferFailed { reason: "withdrawal intent has no persisted history boundary".into() })?;
+    let mut cursor = intent.history_next_index.unwrap_or(start);
+    let pinned_tip = intent.history_tip.unwrap_or(latest_tip);
+    if latest_tip < start || latest_tip < pinned_tip || cursor > pinned_tip {
+        return Ok(Some(hold_withdrawal_intent(intent, "ledger tip or saved cursor precedes the dispatch boundary".into())));
+    }
+    if cursor == pinned_tip {
+        if latest_tip > pinned_tip {
+            intent.history_tip = Some(latest_tip);
+            if !save_withdrawal_intent(intent) { return Err(StabilityPoolError::SystemBusy); }
+            return Ok(Some(withdrawal_intent_result(intent, WithdrawalIntentPhase::Reconciling, Some("ledger history advanced; continuing receipt reconciliation".into()))));
+        }
+        return Ok(None);
+    }
+    intent.history_tip = Some(pinned_tip);
+    let end = pinned_tip.min(cursor.saturating_add(MAX_WITHDRAWAL_INTENT_HISTORY_BLOCKS_PER_CALL));
+    while cursor < end {
+        let block = match fetch_direct_deposit_intent_block(intent.token_ledger, cursor).await {
+            Ok(block) => block,
+            Err(reason) => {
+                intent.history_next_index = Some(cursor);
+                return Ok(Some(hold_withdrawal_intent(intent, format!("ICRC-3 history block {cursor} unavailable or unverified: {reason}"))));
+            }
+        };
+        if exact_withdrawal_intent_block(intent, &block) {
+            intent.expected_block_index = Some(cursor);
+            intent.history_next_index = Some(cursor);
+            if !save_withdrawal_intent(intent) { return Err(StabilityPoolError::SystemBusy); }
+            return Ok(Some(verify_withdrawal_intent_receipt(intent).await?));
+        }
+        if possible_withdrawal_intent_block(intent, &block) {
+            intent.history_next_index = Some(cursor);
+            return Ok(Some(hold_withdrawal_intent(intent, format!("ICRC-3 block {cursor} resembles this intent but does not prove its exact tuple"))));
+        }
+        cursor += 1;
+        intent.history_next_index = Some(cursor);
+        if !save_withdrawal_intent(intent) { return Err(StabilityPoolError::SystemBusy); }
+    }
+    if cursor < pinned_tip || latest_tip > pinned_tip {
+        if latest_tip > pinned_tip { intent.history_tip = Some(latest_tip); }
+        if !save_withdrawal_intent(intent) { return Err(StabilityPoolError::SystemBusy); }
+        return Ok(Some(withdrawal_intent_result(intent, WithdrawalIntentPhase::Reconciling, Some(format!("history reconciliation continues at ledger block {cursor}")))));
+    }
+    Ok(None)
+}
+
+fn confirmed_no_effect_withdrawal_error(error: &TransferError) -> bool {
+    matches!(error, TransferError::BadFee { .. } | TransferError::BadBurn { .. }
+        | TransferError::InsufficientFunds { .. } | TransferError::TooOld
+        | TransferError::CreatedInFuture { .. })
+}
+
+async fn resume_withdrawal_intent(mut intent: WithdrawalIntent) -> Result<WithdrawalIntentResult, StabilityPoolError> {
+    if intent.expected_block_index.is_some() { return verify_withdrawal_intent_receipt(&intent).await; }
+    let previously_dispatched = intent.dispatch_started;
+    let mut absence_proven = false;
+    if previously_dispatched {
+        if let Some(result) = reconcile_withdrawal_intent_history(&mut intent).await? { return Ok(result); }
+        absence_proven = true;
+    } else if intent.history_start_index.is_none() {
+        let tip = match pending_refund_history_tip(intent.token_ledger).await {
+            Ok(tip) => tip,
+            Err(error) => return Ok(hold_withdrawal_intent(&intent, format!("pre-dispatch history boundary unavailable: {error:?}"))),
+        };
+        intent.history_start_index = Some(tip);
+        intent.history_next_index = Some(tip);
+        intent.history_tip = Some(tip);
+        if !save_withdrawal_intent(&intent) { return Err(StabilityPoolError::SystemBusy); }
+    }
+    if crate::pool_token_external_mutation_blocked(&[intent.token_ledger]) {
+        return Ok(hold_withdrawal_intent(&intent, "liquidation or absorb blocks transfer dispatch; intent remains pending".into()));
+    }
+    let (is_active, paused) = read_state(|state| (
+        state.get_stablecoin_config(&intent.token_ledger).is_some_and(|config| config.is_active),
+        state.configuration.emergency_pause,
+    ));
+    if !is_active || paused {
+        return Ok(hold_withdrawal_intent(&intent, if paused { "emergency pause prevents dispatch; exact intent remains pending".into() } else { "token is inactive; exact intent remains pending".into() }));
+    }
+    let args = TransferArg {
+        to: intent.to.clone(), amount: intent.transfer_amount.into(), fee: Some(intent.fee.into()),
+        memo: Some(intent.memo.clone().into()), created_at_time: Some(intent.created_at_time_ns.into()),
+        from_subaccount: intent.from.subaccount,
+    };
+    intent.dispatch_started = true;
+    intent.last_error = None;
+    if !save_withdrawal_intent(&intent) { return Err(StabilityPoolError::SystemBusy); }
+    let call_result: Result<(Result<candid::Nat, TransferError>,), _> = call(intent.token_ledger, "icrc1_transfer", (args,)).await;
+    match call_result {
+        Ok((Ok(block),)) => {
+            let block_index = match block.0.try_into() {
+                Ok(index) => index,
+                Err(_) => return Ok(hold_withdrawal_intent(&intent, "transfer block index exceeds u64; exact receipt remains unresolved".into())),
+            };
+            intent.expected_block_index = Some(block_index);
+            if !save_withdrawal_intent(&intent) { return Err(StabilityPoolError::SystemBusy); }
+            verify_withdrawal_intent_receipt(&intent).await
+        }
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            let block_index = match duplicate_of.0.try_into() {
+                Ok(index) => index,
+                Err(_) => return Ok(hold_withdrawal_intent(&intent, "duplicate block index exceeds u64; exact receipt remains unresolved".into())),
+            };
+            intent.expected_block_index = Some(block_index);
+            if !save_withdrawal_intent(&intent) { return Err(StabilityPoolError::SystemBusy); }
+            verify_withdrawal_intent_receipt(&intent).await
+        }
+        Ok((Err(error),)) if confirmed_no_effect_withdrawal_error(&error) && (!previously_dispatched || absence_proven) => {
+            let result = WithdrawalIntentResult::NoEffect { intent_seq: intent.intent_seq,
+                token_ledger: intent.token_ledger, requested_amount: intent.requested_amount,
+                amount: intent.amount, reason: format!("ledger confirmed no transfer: {error:?}") };
+            finish_withdrawal_intent(&intent, result).await
+        }
+        Ok((Err(error),)) => Ok(hold_withdrawal_intent(&intent, format!("ledger returned unresolved transfer error: {error:?}"))),
+        Err(error) => Ok(hold_withdrawal_intent(&intent, format!("transfer call outcome is ambiguous: {error:?}"))),
+    }
+}
+
 /// Withdraw a stablecoin from the pool (only unconsumed balances).
 ///
 /// Uses deduct-before-transfer pattern to prevent TOCTOU double-spend:
@@ -1004,6 +1373,9 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
         return Err(StabilityPoolError::SystemBusy);
     }
     let caller = ic_cdk::api::caller();
+    if read_state(|state| state.caller_has_pending_withdrawal(caller)) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
 
     if read_state(|s| s.configuration.emergency_pause) {
         return Err(StabilityPoolError::EmergencyPaused);
@@ -1151,6 +1523,9 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
         return Err(StabilityPoolError::SystemBusy);
     }
     let caller = ic_cdk::api::caller();
+    if read_state(|state| state.caller_has_pending_withdrawal(caller)) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
 
     if read_state(|s| s.configuration.emergency_pause) {
         return Err(StabilityPoolError::EmergencyPaused);
@@ -1322,6 +1697,9 @@ pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, Stabilit
         return Err(StabilityPoolError::SystemBusy);
     }
     let caller = ic_cdk::api::caller();
+    if read_state(|state| state.caller_has_pending_withdrawal(caller)) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
 
     if read_state(|s| s.configuration.emergency_pause) {
         return Err(StabilityPoolError::EmergencyPaused);

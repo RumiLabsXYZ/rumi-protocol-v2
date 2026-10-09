@@ -16,6 +16,7 @@ export const idlFactory = ({ IDL }) => {
       'required' : IDL.Nat64,
     }),
     'InvalidPayoutAddress' : IDL.Record({ 'reason' : IDL.Text }),
+    'WithdrawalIntentSequenceExhausted' : IDL.Null,
     'CollateralNotFound' : IDL.Record({ 'ledger' : IDL.Principal }),
     'NoPositionFound' : IDL.Null,
     'AmountTooLow' : IDL.Record({ 'minimum_e8s' : IDL.Nat64 }),
@@ -28,6 +29,7 @@ export const idlFactory = ({ IDL }) => {
     'DepositIntentSequenceMismatch' : IDL.Record({
       'expected_seq' : IDL.Nat64,
     }),
+    'WithdrawalIntentCapacityReached' : IDL.Null,
     'DepositIntentSequenceExhausted' : IDL.Null,
     'XrpClaimStillOutstanding' : IDL.Record({ 'claim_id' : IDL.Nat64 }),
     'LiquidationFailed' : IDL.Record({
@@ -35,12 +37,17 @@ export const idlFactory = ({ IDL }) => {
       'reason' : IDL.Text,
     }),
     'DepositIntentCapacityReached' : IDL.Null,
+    'WithdrawalIntentPayloadMismatch' : IDL.Null,
     'XrpClaimStatusCheckFailed' : IDL.Record({ 'reason' : IDL.Text }),
     'SystemBusy' : IDL.Null,
+    'WithdrawalIntentUnresolved' : IDL.Record({ 'active_seq' : IDL.Nat64 }),
     'AlreadyOptedIn' : IDL.Record({ 'collateral' : IDL.Principal }),
     'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
     'InsufficientPoolBalance' : IDL.Null,
     'DepositIntentPayloadMismatch' : IDL.Null,
+    'WithdrawalIntentSequenceMismatch' : IDL.Record({
+      'expected_seq' : IDL.Nat64,
+    }),
   });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
@@ -345,6 +352,44 @@ export const idlFactory = ({ IDL }) => {
     'total_usd_value_e8s' : IDL.Nat64,
     'opted_out_collateral' : IDL.Vec(IDL.Principal),
   });
+  const WithdrawalIntentPhase = IDL.Variant({
+    'Dispatching' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'ReceiptVerification' : IDL.Null,
+    'Reconciling' : IDL.Null,
+  });
+  const WithdrawalIntentResult = IDL.Variant({
+    'NoEffect' : IDL.Record({
+      'requested_amount' : IDL.Nat64,
+      'amount' : IDL.Nat64,
+      'intent_seq' : IDL.Nat64,
+      'token_ledger' : IDL.Principal,
+      'reason' : IDL.Text,
+    }),
+    'Completed' : IDL.Record({
+      'fee' : IDL.Nat64,
+      'requested_amount' : IDL.Nat64,
+      'block_index' : IDL.Nat64,
+      'transfer_amount' : IDL.Nat64,
+      'amount' : IDL.Nat64,
+      'intent_seq' : IDL.Nat64,
+      'token_ledger' : IDL.Principal,
+    }),
+    'Pending' : IDL.Record({
+      'requested_amount' : IDL.Nat64,
+      'phase' : WithdrawalIntentPhase,
+      'amount' : IDL.Nat64,
+      'intent_seq' : IDL.Nat64,
+      'token_ledger' : IDL.Principal,
+      'reason' : IDL.Opt(IDL.Text),
+    }),
+  });
+  const WithdrawalIntentStatus = IDL.Record({
+    'next_seq' : IDL.Opt(IDL.Nat64),
+    'intent' : IDL.Opt(WithdrawalIntentResult),
+    'high_watermark' : IDL.Nat64,
+    'active_intent' : IDL.Opt(WithdrawalIntentResult),
+  });
   const Icrc10SupportedStandard = IDL.Record({
     'url' : IDL.Text,
     'name' : IDL.Text,
@@ -598,6 +643,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Opt(UserStabilityPosition)],
         ['query'],
       ),
+    'get_withdrawal_intent' : IDL.Func(
+        [IDL.Nat64],
+        [WithdrawalIntentStatus],
+        [],
+      ),
     'icrc10_supported_standards' : IDL.Func(
         [],
         [IDL.Vec(Icrc10SupportedStandard)],
@@ -731,6 +781,16 @@ export const idlFactory = ({ IDL }) => {
     'withdraw' : IDL.Func(
         [IDL.Principal, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'withdraw_with_intent' : IDL.Func(
+        [IDL.Nat64, IDL.Principal, IDL.Nat64],
+        [
+          IDL.Variant({
+            'Ok' : WithdrawalIntentResult,
+            'Err' : StabilityPoolError,
+          }),
+        ],
         [],
       ),
   });

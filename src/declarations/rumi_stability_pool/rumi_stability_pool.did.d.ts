@@ -335,6 +335,7 @@ export type StabilityPoolError = {
     }
   } |
   { 'InvalidPayoutAddress' : { 'reason' : string } } |
+  { 'WithdrawalIntentSequenceExhausted' : null } |
   { 'CollateralNotFound' : { 'ledger' : Principal } } |
   { 'NoPositionFound' : null } |
   { 'AmountTooLow' : { 'minimum_e8s' : bigint } } |
@@ -342,16 +343,20 @@ export type StabilityPoolError = {
   { 'InterCanisterCallFailed' : { 'method' : string, 'target' : string } } |
   { 'PayoutAddressRequired' : { 'collateral' : Principal } } |
   { 'DepositIntentSequenceMismatch' : { 'expected_seq' : bigint } } |
+  { 'WithdrawalIntentCapacityReached' : null } |
   { 'DepositIntentSequenceExhausted' : null } |
   { 'XrpClaimStillOutstanding' : { 'claim_id' : bigint } } |
   { 'LiquidationFailed' : { 'vault_id' : bigint, 'reason' : string } } |
   { 'DepositIntentCapacityReached' : null } |
+  { 'WithdrawalIntentPayloadMismatch' : null } |
   { 'XrpClaimStatusCheckFailed' : { 'reason' : string } } |
   { 'SystemBusy' : null } |
+  { 'WithdrawalIntentUnresolved' : { 'active_seq' : bigint } } |
   { 'AlreadyOptedIn' : { 'collateral' : Principal } } |
   { 'TokenNotAccepted' : { 'ledger' : Principal } } |
   { 'InsufficientPoolBalance' : null } |
-  { 'DepositIntentPayloadMismatch' : null };
+  { 'DepositIntentPayloadMismatch' : null } |
+  { 'WithdrawalIntentSequenceMismatch' : { 'expected_seq' : bigint } };
 export interface StabilityPoolInitArgs {
   'protocol_canister_id' : Principal,
   'authorized_admins' : Array<Principal>,
@@ -404,6 +409,46 @@ export interface UserStabilityPosition {
   'native_payout_addresses' : [] | [Array<[Principal, string]>],
   'total_usd_value_e8s' : bigint,
   'opted_out_collateral' : Array<Principal>,
+}
+export type WithdrawalIntentPhase = { 'Dispatching' : null } |
+  { 'Prepared' : null } |
+  { 'ReceiptVerification' : null } |
+  { 'Reconciling' : null };
+export type WithdrawalIntentResult = {
+    'NoEffect' : {
+      'requested_amount' : bigint,
+      'amount' : bigint,
+      'intent_seq' : bigint,
+      'token_ledger' : Principal,
+      'reason' : string,
+    }
+  } |
+  {
+    'Completed' : {
+      'fee' : bigint,
+      'requested_amount' : bigint,
+      'block_index' : bigint,
+      'transfer_amount' : bigint,
+      'amount' : bigint,
+      'intent_seq' : bigint,
+      'token_ledger' : Principal,
+    }
+  } |
+  {
+    'Pending' : {
+      'requested_amount' : bigint,
+      'phase' : WithdrawalIntentPhase,
+      'amount' : bigint,
+      'intent_seq' : bigint,
+      'token_ledger' : Principal,
+      'reason' : [] | [string],
+    }
+  };
+export interface WithdrawalIntentStatus {
+  'next_seq' : [] | [bigint],
+  'intent' : [] | [WithdrawalIntentResult],
+  'high_watermark' : bigint,
+  'active_intent' : [] | [WithdrawalIntentResult],
 }
 export interface _SERVICE {
   'ack_native_xrp_payout_settled' : ActorMethod<
@@ -510,6 +555,7 @@ export interface _SERVICE {
     [[] | [Principal]],
     [] | [UserStabilityPosition]
   >,
+  'get_withdrawal_intent' : ActorMethod<[bigint], WithdrawalIntentStatus>,
   'icrc10_supported_standards' : ActorMethod<
     [],
     Array<Icrc10SupportedStandard>
@@ -626,6 +672,11 @@ export interface _SERVICE {
   'withdraw' : ActorMethod<
     [Principal, bigint],
     { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'withdraw_with_intent' : ActorMethod<
+    [bigint, Principal, bigint],
+    { 'Ok' : WithdrawalIntentResult } |
       { 'Err' : StabilityPoolError }
   >,
 }

@@ -441,6 +441,66 @@ fn ledger_allowance(
 // ─── Tests ───
 
 #[test]
+fn test_withdrawal_intent_uses_official_ledger_receipt_and_caller_status() {
+    let env = setup_test_env();
+    let deposit_amount = 100_00000000u64;
+    let deposit = env.pic.update_call(
+        env.sp_id,
+        env.test_user,
+        "deposit",
+        encode_args((env.icusd_ledger, deposit_amount)).unwrap(),
+    ).expect("deposit call");
+    match deposit {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
+            .expect("decode deposit").expect("deposit succeeds"),
+        WasmResult::Reject(message) => panic!("deposit rejected: {message}"),
+    }
+
+    let user_before = ledger_balance(&env.pic, env.icusd_ledger, env.test_user);
+    let call_withdrawal = || {
+        env.pic.update_call(
+            env.sp_id,
+            env.test_user,
+            "withdraw_with_intent",
+            encode_args((1u64, env.icusd_ledger, deposit_amount)).unwrap(),
+        ).expect("withdraw_with_intent call")
+    };
+    let first = match call_withdrawal() {
+        WasmResult::Reply(bytes) => decode_one::<Result<WithdrawalIntentResult, StabilityPoolError>>(&bytes)
+            .expect("decode withdrawal result").expect("withdrawal settles"),
+        WasmResult::Reject(message) => panic!("withdrawal rejected: {message}"),
+    };
+    let block_index = match first {
+        WithdrawalIntentResult::Completed { block_index, amount, transfer_amount, fee, .. } => {
+            assert_eq!(amount, deposit_amount);
+            assert_eq!(transfer_amount + fee, amount);
+            block_index
+        }
+        other => panic!("expected exact completed receipt, got {other:?}"),
+    };
+
+    let replay = match call_withdrawal() {
+        WasmResult::Reply(bytes) => decode_one::<Result<WithdrawalIntentResult, StabilityPoolError>>(&bytes)
+            .expect("decode replay result").expect("terminal result replays"),
+        WasmResult::Reject(message) => panic!("withdrawal replay rejected: {message}"),
+    };
+    assert!(matches!(replay, WithdrawalIntentResult::Completed { block_index: replay_index, .. } if replay_index == block_index));
+    let status = match env.pic.update_call(
+        env.sp_id,
+        env.test_user,
+        "get_withdrawal_intent",
+        encode_one(1u64).unwrap(),
+    ).expect("status call") {
+        WasmResult::Reply(bytes) => decode_one::<WithdrawalIntentStatus>(&bytes).expect("decode status"),
+        WasmResult::Reject(message) => panic!("status rejected: {message}"),
+    };
+    assert_eq!(status.high_watermark, 1);
+    assert!(matches!(status.intent, Some(WithdrawalIntentResult::Completed { block_index: status_index, .. }) if status_index == block_index));
+    assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.test_user) - user_before, deposit_amount as u128);
+    assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.sp_id), 0);
+}
+
+#[test]
 fn test_ckusdc_max_withdraw_drains_position_net_of_ledger_fee() {
     let pic = PocketIcBuilder::new()
         .with_application_subnet()

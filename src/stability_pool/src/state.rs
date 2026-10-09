@@ -185,7 +185,7 @@ pub struct StabilityPoolState {
     /// held for evidence-based reconciliation.
     #[serde(default)]
     pub pending_refund_attempt_initialization: Option<BTreeSet<u64>>,
-    /// Monotonic ICRC-2 `created_at_time` allocator for deposit pulls.
+    /// Shared monotonic `created_at_time` allocator for pool token transfers.
     #[serde(default)]
     pub last_deposit_transfer_created_at: Option<u64>,
     /// Durable caller-scoped FE-SP-001 sequence high-watermarks. Retained even
@@ -198,6 +198,16 @@ pub struct StabilityPoolState {
     /// Bounded terminal response window keyed by `(caller, intent_seq)`.
     #[serde(default)]
     pub completed_deposit_intents: Option<BTreeMap<(Principal, u64), CompletedDepositIntent>>,
+    /// Caller-scoped monotonic sequences for outgoing stablecoin transfers.
+    #[serde(default)]
+    pub withdrawal_intent_high_watermarks: Option<BTreeMap<Principal, u64>>,
+    /// At most one unresolved withdrawal per caller; exact tuple and reserved
+    /// debit remain durable until a receipt or proven no-effect outcome.
+    #[serde(default)]
+    pub pending_withdrawal_intents: Option<BTreeMap<Principal, WithdrawalIntent>>,
+    /// Bounded caller-queryable terminal withdrawal receipts.
+    #[serde(default)]
+    pub completed_withdrawal_intents: Option<BTreeMap<(Principal, u64), CompletedWithdrawalIntent>>,
     /// Recent source-ledger mint blocks already allocated to eligible SP depositors.
     #[serde(default)]
     pub processed_interest_mint_blocks: Option<BTreeSet<u64>>,
@@ -256,6 +266,9 @@ impl Default for StabilityPoolState {
             deposit_intent_high_watermarks: Some(BTreeMap::new()),
             pending_deposit_intents: Some(BTreeMap::new()),
             completed_deposit_intents: Some(BTreeMap::new()),
+            withdrawal_intent_high_watermarks: Some(BTreeMap::new()),
+            pending_withdrawal_intents: Some(BTreeMap::new()),
+            completed_withdrawal_intents: Some(BTreeMap::new()),
             processed_interest_mint_blocks: Some(BTreeSet::new()),
             processed_interest_mint_block_high_watermark: None,
         }
@@ -280,6 +293,9 @@ pub const MAX_COMPLETED_DEPOSIT_INTENTS: usize = 10_000;
 pub const MAX_DEPOSIT_INTENT_CALLERS: usize = 100_000;
 /// Bound durable ambiguity rows created before an external transfer resolves.
 pub const MAX_PENDING_DEPOSIT_INTENTS: usize = 1_000;
+pub const MAX_COMPLETED_WITHDRAWAL_INTENTS: usize = 10_000;
+pub const MAX_WITHDRAWAL_INTENT_CALLERS: usize = 100_000;
+pub const MAX_PENDING_WITHDRAWAL_INTENTS: usize = 1_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DepositIntentReserveError {
@@ -288,9 +304,222 @@ pub enum DepositIntentReserveError {
     SequenceExhausted,
     CapacityReached,
 }
+
+#[derive(Clone, Debug)]
+pub enum WithdrawalIntentReserveError {
+    Active(u64),
+    SequenceMismatch(u64),
+    SequenceExhausted,
+    CapacityReached,
+    ProcessFailed(StabilityPoolError),
+}
 pub const MAX_XRP_SP_PAYOUT_ALLOCATIONS: usize = 500;
 
 impl StabilityPoolState {
+    pub fn has_pending_withdrawal_intents(&self) -> bool {
+        self.pending_withdrawal_intents
+            .as_ref()
+            .is_some_and(|pending| !pending.is_empty())
+    }
+
+    pub fn has_pending_withdrawal_for_ledger(&self, ledger: Principal) -> bool {
+        self.pending_withdrawal_intents
+            .as_ref()
+            .is_some_and(|pending| pending.values().any(|intent| intent.token_ledger == ledger))
+    }
+
+    pub fn caller_has_pending_withdrawal(&self, caller: Principal) -> bool {
+        self.pending_withdrawal_intents.as_ref().is_some_and(|pending| pending.contains_key(&caller))
+    }
+
+    pub fn withdrawal_intent_status(
+        &self,
+        caller: Principal,
+        intent_seq: u64,
+    ) -> WithdrawalIntentStatus {
+        let high_watermark = self
+            .withdrawal_intent_high_watermarks
+            .as_ref()
+            .and_then(|watermarks| watermarks.get(&caller).copied())
+            .unwrap_or(0);
+        let active_intent = self
+            .pending_withdrawal_intents
+            .as_ref()
+            .and_then(|pending| pending.get(&caller))
+            .map(|pending| WithdrawalIntentResult::Pending {
+                intent_seq: pending.intent_seq,
+                token_ledger: pending.token_ledger,
+                requested_amount: pending.requested_amount,
+                amount: pending.amount,
+                phase: if pending.expected_block_index.is_some() {
+                    WithdrawalIntentPhase::ReceiptVerification
+                } else if pending.dispatch_started {
+                    if pending.last_error.is_none() {
+                        WithdrawalIntentPhase::Dispatching
+                    } else {
+                        WithdrawalIntentPhase::Reconciling
+                    }
+                } else {
+                    WithdrawalIntentPhase::Prepared
+                },
+                reason: pending.last_error.clone(),
+            });
+        let intent = active_intent
+            .as_ref()
+            .filter(|active| matches!(active, WithdrawalIntentResult::Pending { intent_seq: seq, .. } if *seq == intent_seq))
+            .cloned()
+            .or_else(|| {
+                self.completed_withdrawal_intents
+                    .as_ref()
+                    .and_then(|completed| completed.get(&(caller, intent_seq)))
+                    .map(|completed| completed.result.clone())
+            });
+        WithdrawalIntentStatus {
+            high_watermark,
+            next_seq: if active_intent.is_some() { None } else { high_watermark.checked_add(1) },
+            intent,
+            active_intent,
+        }
+    }
+
+    pub fn pending_withdrawal_intent(&self, caller: Principal) -> Option<WithdrawalIntent> {
+        self.pending_withdrawal_intents
+            .as_ref()
+            .and_then(|pending| pending.get(&caller).cloned())
+    }
+
+    pub fn completed_withdrawal_intent(
+        &self,
+        caller: Principal,
+        intent_seq: u64,
+    ) -> Option<CompletedWithdrawalIntent> {
+        self.completed_withdrawal_intents
+            .as_ref()
+            .and_then(|completed| completed.get(&(caller, intent_seq)).cloned())
+    }
+
+    /// Atomically reserve the next caller sequence, debit the exact booked
+    /// amount, and persist its immutable outgoing transfer identity.
+    pub fn reserve_withdrawal_intent(
+        &mut self,
+        intent: WithdrawalIntent,
+    ) -> Result<(), WithdrawalIntentReserveError> {
+        if let Some(active) = self.pending_withdrawal_intents.as_ref().and_then(|pending| pending.get(&intent.caller)) {
+            return Err(WithdrawalIntentReserveError::Active(active.intent_seq));
+        }
+        let has_watermark = self.withdrawal_intent_high_watermarks.as_ref()
+            .is_some_and(|watermarks| watermarks.contains_key(&intent.caller));
+        let expected = self.withdrawal_intent_high_watermarks.as_ref()
+            .and_then(|watermarks| watermarks.get(&intent.caller).copied()).unwrap_or(0)
+            .checked_add(1).ok_or(WithdrawalIntentReserveError::SequenceExhausted)?;
+        if intent.intent_seq != expected {
+            return Err(WithdrawalIntentReserveError::SequenceMismatch(expected));
+        }
+        if (!has_watermark
+            && self.withdrawal_intent_high_watermarks.as_ref().map_or(0, BTreeMap::len)
+                >= MAX_WITHDRAWAL_INTENT_CALLERS)
+            || self.pending_withdrawal_intents.as_ref().map_or(0, BTreeMap::len) >= MAX_PENDING_WITHDRAWAL_INTENTS
+        {
+            return Err(WithdrawalIntentReserveError::CapacityReached);
+        }
+        // All admission checks precede accounting mutation. Keep an otherwise
+        // empty position row alive until the ledger result is terminal so a
+        // proven no-effect result can apply an inverse delta without replacing
+        // unrelated position metadata.
+        let position = self.deposits.get_mut(&intent.caller)
+            .ok_or(WithdrawalIntentReserveError::ProcessFailed(StabilityPoolError::NoPositionFound))?;
+        let balance = position.stablecoin_balances.get(&intent.token_ledger).copied().unwrap_or(0);
+        if balance < intent.amount {
+            return Err(WithdrawalIntentReserveError::ProcessFailed(StabilityPoolError::InsufficientBalance {
+                token: intent.token_ledger, required: intent.amount, available: balance,
+            }));
+        }
+        *position.stablecoin_balances.get_mut(&intent.token_ledger).expect("balance checked") -= intent.amount;
+        if position.stablecoin_balances.get(&intent.token_ledger) == Some(&0) {
+            position.stablecoin_balances.remove(&intent.token_ledger);
+        }
+        if let Some(total) = self.total_stablecoin_balances.get_mut(&intent.token_ledger) {
+            *total = total.saturating_sub(intent.amount);
+        }
+        self.withdrawal_intent_high_watermarks.get_or_insert_with(BTreeMap::new)
+            .insert(intent.caller, intent.intent_seq);
+        self.pending_withdrawal_intents.get_or_insert_with(BTreeMap::new)
+            .insert(intent.caller, intent);
+        Ok(())
+    }
+
+    pub fn update_withdrawal_intent(&mut self, intent: WithdrawalIntent) -> bool {
+        let Some(pending) = self.pending_withdrawal_intents.as_mut() else { return false; };
+        let Some(current) = pending.get(&intent.caller) else { return false; };
+        if current.intent_seq != intent.intent_seq
+            || current.token_ledger != intent.token_ledger
+            || current.requested_amount != intent.requested_amount
+            || current.amount != intent.amount
+            || current.transfer_amount != intent.transfer_amount
+            || current.fee != intent.fee
+            || current.from != intent.from
+            || current.to != intent.to
+            || current.memo != intent.memo
+            || current.created_at_time_ns != intent.created_at_time_ns
+        { return false; }
+        pending.insert(intent.caller, intent);
+        true
+    }
+
+    pub fn finalize_withdrawal_intent(
+        &mut self,
+        caller: Principal,
+        intent_seq: u64,
+        result: WithdrawalIntentResult,
+        now_ns: u64,
+    ) -> bool {
+        let Some(intent) = self.pending_withdrawal_intents.as_ref()
+            .and_then(|pending| pending.get(&caller).cloned()) else { return false; };
+        if intent.intent_seq != intent_seq { return false; }
+        let matches = match &result {
+            WithdrawalIntentResult::Completed { intent_seq: seq, token_ledger, requested_amount, amount, transfer_amount, fee, .. } =>
+                *seq == intent.intent_seq && *token_ledger == intent.token_ledger
+                    && *requested_amount == intent.requested_amount && *amount == intent.amount
+                    && *transfer_amount == intent.transfer_amount && *fee == intent.fee,
+            WithdrawalIntentResult::NoEffect { intent_seq: seq, token_ledger, requested_amount, amount, .. } =>
+                *seq == intent.intent_seq && *token_ledger == intent.token_ledger
+                    && *requested_amount == intent.requested_amount && *amount == intent.amount,
+            WithdrawalIntentResult::Pending { .. } => false,
+        };
+        if !matches { return false; }
+        if matches!(&result, WithdrawalIntentResult::NoEffect { .. }) {
+            // Same-ledger mutations stay fenced while the row is pending.
+            // Restore only this intent's exact debit; unrelated-ledger changes
+            // made while it was pending remain intact.
+            self.add_deposit_at(caller, intent.token_ledger, intent.amount, now_ns);
+        } else {
+            self.push_event_at(caller, PoolEventType::Withdraw {
+                token_ledger: intent.token_ledger,
+                amount: intent.amount,
+            }, now_ns);
+            if self.deposits.get(&caller).is_some_and(DepositPosition::is_empty) {
+                self.deposits.remove(&caller);
+            }
+        }
+        self.pending_withdrawal_intents.as_mut().expect("pending existed").remove(&caller);
+        let completed = self.completed_withdrawal_intents.get_or_insert_with(BTreeMap::new);
+        completed.insert((caller, intent_seq), CompletedWithdrawalIntent {
+            caller, intent_seq, token_ledger: intent.token_ledger,
+            requested_amount: intent.requested_amount, amount: intent.amount, result,
+        });
+        while completed.len() > MAX_COMPLETED_WITHDRAWAL_INTENTS {
+            if let Some(oldest) = completed.keys().next().copied() { completed.remove(&oldest); } else { break; }
+        }
+        true
+    }
+
+    pub fn update_withdrawal_intent_error(&mut self, caller: Principal, seq: u64, reason: String) -> bool {
+        let Some(intent) = self.pending_withdrawal_intents.as_mut().and_then(|pending| pending.get_mut(&caller)) else { return false; };
+        if intent.intent_seq != seq { return false; }
+        intent.last_error = Some(reason);
+        true
+    }
+
     pub fn deposit_intent_status(
         &self,
         caller: Principal,
@@ -537,7 +766,7 @@ impl StabilityPoolState {
         true
     }
 
-    /// Reserve a unique timestamp for a new ICRC-2 deposit pull.
+    /// Reserve a unique timestamp for a new pool token transfer.
     pub fn reserve_deposit_transfer_timestamp(&mut self, now_ns: u64) -> Result<u64, ()> {
         let timestamp = match self.last_deposit_transfer_created_at {
             Some(last) if now_ns <= last => last.checked_add(1).ok_or(())?,
@@ -3693,6 +3922,9 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             deposit_intent_high_watermarks: Some(BTreeMap::new()),
             pending_deposit_intents: Some(BTreeMap::new()),
             completed_deposit_intents: Some(BTreeMap::new()),
+            withdrawal_intent_high_watermarks: Some(BTreeMap::new()),
+            pending_withdrawal_intents: Some(BTreeMap::new()),
+            completed_withdrawal_intents: Some(BTreeMap::new()),
             processed_interest_mint_blocks: Some(BTreeSet::new()),
             processed_interest_mint_block_high_watermark: None,
         }
@@ -3804,6 +4036,74 @@ mod tests {
             dispatch_started: false,
             last_error: None,
         }
+    }
+
+    fn withdrawal_intent_for_test(caller: Principal, seq: u64, amount: u64) -> WithdrawalIntent {
+        WithdrawalIntent {
+            caller,
+            intent_seq: seq,
+            token_ledger: icusd_ledger(),
+            requested_amount: amount,
+            amount,
+            transfer_amount: amount - 10,
+            fee: 10,
+            from: icrc_ledger_types::icrc1::account::Account { owner: Principal::from_slice(&[99]), subaccount: None },
+            to: icrc_ledger_types::icrc1::account::Account { owner: caller, subaccount: None },
+            memo: vec![7; 32],
+            created_at_time_ns: seq,
+            history_start_index: None,
+            history_next_index: None,
+            history_tip: None,
+            expected_block_index: None,
+            dispatch_started: false,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn withdrawal_no_effect_applies_inverse_debit_and_preserves_unrelated_credit() {
+        let caller = user_a();
+        let mut state = test_state();
+        state.add_deposit_at(caller, icusd_ledger(), 1_000, 1);
+        let intent = withdrawal_intent_for_test(caller, 1, 400);
+        assert!(state.reserve_withdrawal_intent(intent.clone()).is_ok());
+        assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 600);
+        assert!(state.has_pending_withdrawal_for_ledger(icusd_ledger()));
+
+        // A different token can still settle while this withdrawal is held.
+        // Its user and aggregate credits must survive the inverse withdrawal.
+        state.add_deposit_at(caller, ckusdt_ledger(), 25, 2);
+        state.distribute_interest_revenue(ckusdt_ledger(), 5, None);
+        let result = WithdrawalIntentResult::NoEffect {
+            intent_seq: 1,
+            token_ledger: icusd_ledger(),
+            requested_amount: 400,
+            amount: 400,
+            reason: "typed ledger rejection".into(),
+        };
+        assert!(state.finalize_withdrawal_intent(caller, 1, result.clone(), 77));
+        assert_eq!(state.deposits[&caller].stablecoin_balances[&icusd_ledger()], 1_000);
+        assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 1_000);
+        assert_eq!(state.deposits[&caller].stablecoin_balances[&ckusdt_ledger()], 30);
+        assert_eq!(state.total_stablecoin_balances[&ckusdt_ledger()], 30);
+        assert!(!state.has_pending_withdrawal_for_ledger(icusd_ledger()));
+        assert_eq!(state.withdrawal_intent_status(caller, 1).intent, Some(result));
+        assert_eq!(state.withdrawal_intent_status(caller, 1).next_seq, Some(2));
+        assert!(state.validate_state().is_ok());
+    }
+
+    #[test]
+    fn withdrawal_intent_reservation_is_monotonic_and_upgrade_safe() {
+        let caller = user_b();
+        let mut state = test_state();
+        state.add_deposit_at(caller, icusd_ledger(), 1_000, 1);
+        let first = withdrawal_intent_for_test(caller, 1, 400);
+        assert!(state.reserve_withdrawal_intent(first.clone()).is_ok());
+        assert!(matches!(state.reserve_withdrawal_intent(withdrawal_intent_for_test(caller, 2, 400)), Err(WithdrawalIntentReserveError::Active(1))));
+        let restored = try_decode_state(&Encode!(&state).unwrap()).unwrap();
+        assert_eq!(restored.pending_withdrawal_intent(caller), Some(first));
+        assert_eq!(restored.withdrawal_intent_status(caller, 1).high_watermark, 1);
+        assert_eq!(restored.withdrawal_intent_status(caller, 1).next_seq, None);
     }
 
     #[test]

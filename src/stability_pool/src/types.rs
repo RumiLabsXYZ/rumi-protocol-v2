@@ -706,6 +706,91 @@ pub struct CompletedDepositIntent {
     pub result: DepositIntentResult,
 }
 
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WithdrawalIntentResult {
+    Completed {
+        intent_seq: u64,
+        token_ledger: Principal,
+        requested_amount: u64,
+        amount: u64,
+        transfer_amount: u64,
+        fee: u64,
+        block_index: u64,
+    },
+    NoEffect {
+        intent_seq: u64,
+        token_ledger: Principal,
+        requested_amount: u64,
+        amount: u64,
+        reason: String,
+    },
+    Pending {
+        intent_seq: u64,
+        token_ledger: Principal,
+        requested_amount: u64,
+        amount: u64,
+        phase: WithdrawalIntentPhase,
+        reason: Option<String>,
+    },
+}
+
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WithdrawalIntentPhase {
+    Prepared,
+    Dispatching,
+    Reconciling,
+    ReceiptVerification,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WithdrawalIntentStatus {
+    pub high_watermark: u64,
+    pub next_seq: Option<u64>,
+    pub intent: Option<WithdrawalIntentResult>,
+    pub active_intent: Option<WithdrawalIntentResult>,
+}
+
+/// Immutable ICRC-1 transfer identity. Persisted before the ledger call so an
+/// ambiguous response cannot release the reserved balance or allocate a
+/// different transfer identity.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WithdrawalIntent {
+    pub caller: Principal,
+    pub intent_seq: u64,
+    pub token_ledger: Principal,
+    pub requested_amount: u64,
+    /// Actual booked/debited amount after any authorized shortfall correction.
+    pub amount: u64,
+    pub transfer_amount: u64,
+    pub fee: u64,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    #[serde(default)]
+    pub history_start_index: Option<u64>,
+    #[serde(default)]
+    pub history_next_index: Option<u64>,
+    #[serde(default)]
+    pub history_tip: Option<u64>,
+    #[serde(default)]
+    pub expected_block_index: Option<u64>,
+    #[serde(default)]
+    pub dispatch_started: bool,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedWithdrawalIntent {
+    pub caller: Principal,
+    pub intent_seq: u64,
+    pub token_ledger: Principal,
+    pub requested_amount: u64,
+    pub amount: u64,
+    pub result: WithdrawalIntentResult,
+}
+
 /// A durable, batched forward of interest that could not be allocated because
 /// no icUSD depositor was eligible for its source collateral.  The transfer
 /// timestamp and memo are persisted before the first ledger call so a retry
@@ -840,6 +925,15 @@ pub enum StabilityPoolError {
     DepositIntentPayloadMismatch,
     DepositIntentCapacityReached,
     DepositIntentUnresolved {
+        active_seq: u64,
+    },
+    WithdrawalIntentSequenceMismatch {
+        expected_seq: u64,
+    },
+    WithdrawalIntentSequenceExhausted,
+    WithdrawalIntentPayloadMismatch,
+    WithdrawalIntentCapacityReached,
+    WithdrawalIntentUnresolved {
         active_seq: u64,
     },
     AlreadyOptedOut {

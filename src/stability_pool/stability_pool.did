@@ -306,6 +306,26 @@ type DepositIntentStatus = record {
   active_intent : opt DepositIntentResult;
 };
 
+type WithdrawalIntentPhase = variant {
+  Prepared;
+  Dispatching;
+  Reconciling;
+  ReceiptVerification;
+};
+
+type WithdrawalIntentResult = variant {
+  Completed : record { intent_seq : nat64; token_ledger : principal; requested_amount : nat64; amount : nat64; transfer_amount : nat64; fee : nat64; block_index : nat64 };
+  NoEffect : record { intent_seq : nat64; token_ledger : principal; requested_amount : nat64; amount : nat64; reason : text };
+  Pending : record { intent_seq : nat64; token_ledger : principal; requested_amount : nat64; amount : nat64; phase : WithdrawalIntentPhase; reason : opt text };
+};
+
+type WithdrawalIntentStatus = record {
+  high_watermark : nat64;
+  next_seq : opt nat64;
+  intent : opt WithdrawalIntentResult;
+  active_intent : opt WithdrawalIntentResult;
+};
+
 // ── Error type ──
 
 type StabilityPoolError = variant {
@@ -327,6 +347,11 @@ type StabilityPoolError = variant {
   DepositIntentPayloadMismatch;
   DepositIntentUnresolved : record { active_seq : nat64 };
   DepositIntentCapacityReached;
+  WithdrawalIntentSequenceMismatch : record { expected_seq : nat64 };
+  WithdrawalIntentSequenceExhausted;
+  WithdrawalIntentPayloadMismatch;
+  WithdrawalIntentUnresolved : record { active_seq : nat64 };
+  WithdrawalIntentCapacityReached;
   AlreadyOptedOut : record { collateral : principal };
   AlreadyOptedIn : record { collateral : principal };
   PayoutAddressRequired : record { collateral : principal };
@@ -444,6 +469,8 @@ service : (StabilityPoolInitArgs) -> {
   deposit : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
   deposit_with_intent : (nat64, principal, nat64) -> (variant { Ok : DepositIntentResult; Err : StabilityPoolError });
   get_deposit_intent : (nat64) -> (DepositIntentStatus);
+  withdraw_with_intent : (nat64, principal, nat64) -> (variant { Ok : WithdrawalIntentResult; Err : StabilityPoolError });
+  get_withdrawal_intent : (nat64) -> (WithdrawalIntentStatus);
   withdraw : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
   deposit_as_3usd : (principal, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_collateral : (principal) -> (variant { Ok : nat64; Err : StabilityPoolError });
