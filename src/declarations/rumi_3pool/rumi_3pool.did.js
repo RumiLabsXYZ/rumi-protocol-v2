@@ -229,6 +229,7 @@ export const idlFactory = ({ IDL }) => {
     'ledger' : IDL.Principal,
     'created_at_time' : IDL.Nat64,
     'amount' : IDL.Nat,
+    'fee' : IDL.Opt(IDL.Nat),
   });
   const PayoutInputOutcome = IDL.Variant({
     'Confirmed' : IDL.Record({ 'block' : IDL.Nat }),

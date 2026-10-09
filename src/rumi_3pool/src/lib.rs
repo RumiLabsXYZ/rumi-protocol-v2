@@ -344,6 +344,8 @@ thread_local! {
     static TEST_PENDING_CLAIM_LIMIT: Cell<Option<u64>> = const { Cell::new(None) };
     #[cfg(feature = "test_endpoints")]
     static TEST_TRAP_AFTER_ADMIN_FEE_FIRST_LEG: Cell<bool> = const { Cell::new(false) };
+    #[cfg(feature = "test_endpoints")]
+    static TEST_GATE_NEXT_SWAP_INPUT_PULL: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(crate) fn maybe_trap_after_admin_fee_leg(index: usize) {
@@ -1216,6 +1218,43 @@ async fn swap_inner(
         return Err(ThreePoolError::SlippageExceeded);
     }
 
+    // A no-effect output failure must leave a payable input refund. A cached
+    // fee can be stale after a prior transfer, so ask the input ledger before
+    // reserving either payout identity or pulling the user's tokens. Pin this
+    // fee into the refund tuple used by the ordinary and receipt-backed paths.
+    let token_i_symbol = read_state(|s| s.config.tokens[i_idx].symbol.clone());
+    let input_fee = crate::transfers::try_current_ledger_fee(token_i_ledger)
+        .await
+        .map_err(|reason| ThreePoolError::TransferFailed {
+            token: token_i_symbol.clone(),
+            reason: format!("cannot safely admit swap input without its actual refund fee: {reason}"),
+        })?;
+    if dx <= input_fee {
+        return Err(ThreePoolError::InsufficientOutput {
+            expected_min: input_fee.saturating_add(1),
+            actual: dx,
+        });
+    }
+    // PocketIC can change the ledger fee after the admission query but before
+    // the input pull. This barrier is absent from production Wasm.
+    #[cfg(feature = "test_endpoints")]
+    if TEST_GATE_NEXT_SWAP_INPUT_PULL.with(|gate| gate.replace(false)) {
+        use ic_cdk::api::management_canister::http_request::{
+            http_request, CanisterHttpRequestArgument, HttpMethod,
+        };
+        let _ = http_request(
+            CanisterHttpRequestArgument {
+                url: "https://3pool-swap-fee-gate.test/hold".into(),
+                max_response_bytes: Some(1),
+                method: HttpMethod::GET,
+                headers: vec![],
+                body: None,
+                transform: None,
+            },
+            1_000_000_000,
+        ).await;
+    }
+
     // Refund identities must be constructible without another pre-journal
     // await after the input has been pulled.
     // Prove every reserve/admin-fee arithmetic transition before either ledger
@@ -1247,16 +1286,9 @@ async fn swap_inner(
 
     // 7. Transfer input token from user to pool
     let caller = ic_cdk::api::caller();
-    let token_i_symbol = read_state(|s| s.config.tokens[i_idx].symbol.clone());
     let mut swap_payout_id = None;
 
     if let Some(r) = receipt.as_deref_mut() {
-        let input_fee = crate::transfers::ledger_fee(token_i_ledger)
-            .await
-            .map_err(|reason| ThreePoolError::TransferFailed {
-                token: token_i_symbol.clone(),
-                reason: format!("cannot safely admit swap input without its refund fee: {reason}"),
-            })?;
         r.pool_fee = Some(fee);
         r.gross_output = Some(output);
         receipts::set_fence(true);
@@ -1338,7 +1370,7 @@ async fn swap_inner(
             };
         // Persist the exact inbound identity, its held refund, and the exact
         // output entitlement before the first input ledger call.
-        let refund_id = crate::transfers::prepare_input_payout(
+        let refund_id = crate::transfers::prepare_input_payout_with_fee(
             crate::payouts::PayoutKind::SwapInputRefund,
             crate::payouts::PayoutInputAction::Swap,
             i,
@@ -1346,7 +1378,8 @@ async fn swap_inner(
             &token_i_symbol,
             caller,
             dx,
-        ).await.map_err(|failure| ThreePoolError::TransferFailed { token: token_i_symbol.clone(), reason: failure.reason })?;
+            input_fee,
+        ).map_err(|failure| ThreePoolError::TransferFailed { token: token_i_symbol.clone(), reason: failure.reason })?;
         let output_id = crate::transfers::prepare_swap_output(
             j,
             token_j_ledger,
@@ -3793,6 +3826,14 @@ pub fn test_gate_next_fee_lookup() {
         "admin only"
     );
     transfers::gate_next_fee_lookup();
+}
+
+/// Test-only barrier between the input fee query and the swap's input pull.
+#[cfg(feature = "test_endpoints")]
+#[update]
+pub fn test_gate_next_swap_input_pull() {
+    assert_eq!(ic_cdk::api::caller(), read_state(|s| s.config.admin), "admin only");
+    TEST_GATE_NEXT_SWAP_INPUT_PULL.with(|gate| gate.set(true));
 }
 
 /// Test-only: clear the ICRC-3 hash cache. Used by tests to simulate the

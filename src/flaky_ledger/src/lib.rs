@@ -364,6 +364,10 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             }
         }
 
+        if fee.is_some_and(|quoted| quoted != state.fee) {
+            return Err(TransferError::BadFee { expected_fee: Nat::from(state.fee) });
+        }
+
         // Balance check (against the caller's debit, not the to-account).
         let balance = state.balances.get(&from).copied().unwrap_or(0);
         if amount + state.fee > balance {
@@ -487,6 +491,10 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
                     duplicate_of: Nat::from(prev_block),
                 });
             }
+        }
+
+        if fee.is_some_and(|quoted| quoted != state.fee) {
+            return Err(TransferFromError::BadFee { expected_fee: Nat::from(state.fee) });
         }
 
         let allowance = state

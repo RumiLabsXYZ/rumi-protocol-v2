@@ -39,6 +39,10 @@ pub struct PayoutInputTransfer {
     pub from: Account,
     pub to: Account,
     pub amount: u128,
+    /// New pulls pin the checked ledger fee. Missing legacy values preserve
+    /// the earlier `fee: None` wire tuple for exact replay after upgrade.
+    #[serde(default)]
+    pub fee: Option<u128>,
     /// Unique deduplication salt derived from this stable entitlement ID.
     /// Optional only for forward compatibility with early, unreleased saga data.
     #[serde(default)]
@@ -204,6 +208,32 @@ pub fn mark_settled(id: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_input_tuple_keeps_implicit_fee_on_decode() {
+        #[derive(CandidType, Serialize)]
+        struct LegacyInputTransfer {
+            ledger: Principal,
+            from: Account,
+            to: Account,
+            amount: u128,
+            memo: Option<Vec<u8>>,
+            created_at_time: u64,
+        }
+        let owner = Principal::self_authenticating(b"legacy input owner");
+        let legacy = LegacyInputTransfer {
+            ledger: Principal::self_authenticating(b"legacy input ledger"),
+            from: Account { owner, subaccount: None },
+            to: Account { owner: Principal::management_canister(), subaccount: None },
+            amount: 123_456,
+            memo: Some(vec![7; 32]),
+            created_at_time: 42,
+        };
+        let decoded: PayoutInputTransfer = candid::decode_one(&candid::encode_one(legacy).unwrap()).unwrap();
+        assert_eq!(decoded.fee, None, "legacy exact replay must retain fee: None");
+        assert_eq!(decoded.amount, 123_456);
+        assert_eq!(decoded.memo, Some(vec![7; 32]));
+    }
 
     #[test]
     fn exact_transfer_tuple_and_failure_class_are_stable() {
