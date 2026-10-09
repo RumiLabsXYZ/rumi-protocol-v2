@@ -211,6 +211,27 @@ export const idlFactory = ({ IDL }) => {
     'icp_margin_amount' : IDL.Nat64,
     'borrowed_icusd_amount' : IDL.Nat64,
   });
+  const Amm1DonationInspectionRow = IDL.Record({
+    'status' : IDL.Text,
+    'mint_op_nonce' : IDL.Opt(IDL.Nat),
+    'amount_e8s' : IDL.Nat64,
+    'amm_canister' : IDL.Opt(IDL.Principal),
+    'ledger' : IDL.Opt(IDL.Principal),
+    'mint_block_index' : IDL.Opt(IDL.Nat64),
+    'pool_id' : IDL.Opt(IDL.Text),
+    'reward_subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'notify_nonce' : IDL.Nat64,
+    'reason' : IDL.Opt(IDL.Text),
+  });
+  const Amm1DonationInspectionPage = IDL.Record({
+    'total' : IDL.Nat64,
+    'items' : IDL.Vec(Amm1DonationInspectionRow),
+    'next_offset' : IDL.Opt(IDL.Nat64),
+  });
+  const Result_33 = IDL.Variant({
+    'Ok' : Amm1DonationInspectionPage,
+    'Err' : ProtocolError,
+  });
   const BotProofAuditEvent = IDL.Variant({
     'bot_claim_generation_reserved' : IDL.Record({ 'generation' : IDL.Nat64 }),
     'bot_proof_mode_enabled' : IDL.Null,
@@ -1851,6 +1872,11 @@ export const idlFactory = ({ IDL }) => {
     'freeze_protocol' : IDL.Func([], [Result], []),
     'get_all_vaults' : IDL.Func([], [IDL.Vec(CandidVault)], ['query']),
     'get_amm1_canister' : IDL.Func([], [IDL.Opt(IDL.Principal)], ['query']),
+    'get_amm1_donation_inspection_page' : IDL.Func(
+        [IDL.Nat64, IDL.Opt(IDL.Nat16)],
+        [Result_33],
+        ['query'],
+      ),
     'get_amm1_pool_id' : IDL.Func([], [IDL.Opt(IDL.Text)], ['query']),
     'get_borrowing_fee' : IDL.Func([], [IDL.Float64], ['query']),
     'get_bot_allowed_collateral_types' : IDL.Func(
@@ -2245,6 +2271,11 @@ export const idlFactory = ({ IDL }) => {
     'partial_repay_to_vault' : IDL.Func([VaultArg], [Result_1], []),
     'prepare_redemption_offer' : IDL.Func([IDL.Nat64], [Result_18], []),
     'provide_liquidity' : IDL.Func([IDL.Nat64], [Result_1], []),
+    'reconcile_amm1_donation_mint_candidate_block' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [Result],
+        [],
+      ),
     'reconcile_chain_supply' : IDL.Func([IDL.Nat32], [Result_19], []),
     'reconcile_three_usd_reserve_ingress_candidate_block' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, IDL.Nat64],

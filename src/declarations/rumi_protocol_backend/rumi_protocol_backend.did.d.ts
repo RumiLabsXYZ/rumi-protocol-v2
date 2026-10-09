@@ -22,6 +22,23 @@ export interface AddCollateralArg {
   'interest_rate_apr' : number,
   'liquidation_ratio' : number,
 }
+export interface Amm1DonationInspectionPage {
+  'total' : bigint,
+  'items' : Array<Amm1DonationInspectionRow>,
+  'next_offset' : [] | [bigint],
+}
+export interface Amm1DonationInspectionRow {
+  'status' : string,
+  'mint_op_nonce' : [] | [bigint],
+  'amount_e8s' : bigint,
+  'amm_canister' : [] | [Principal],
+  'ledger' : [] | [Principal],
+  'mint_block_index' : [] | [bigint],
+  'pool_id' : [] | [string],
+  'reward_subaccount' : [] | [Uint8Array | number[]],
+  'notify_nonce' : bigint,
+  'reason' : [] | [string],
+}
 export interface BotCollateralReturnProofArg {
   'block_index' : bigint,
   'claim_generation' : bigint,
@@ -1508,6 +1525,8 @@ export type Result_31 = { 'Ok' : XrpSpAbsorbStatus } |
   { 'Err' : ProtocolError };
 export type Result_32 = { 'Ok' : number } |
   { 'Err' : ProtocolError };
+export type Result_33 = { 'Ok' : Amm1DonationInspectionPage } |
+  { 'Err' : ProtocolError };
 export type Result_4 = { 'Ok' : SuccessWithFee } |
   { 'Err' : ProtocolError };
 export type Result_5 = { 'Ok' : BotLiquidationResult } |
@@ -1856,6 +1875,10 @@ export interface _SERVICE {
   'freeze_protocol' : ActorMethod<[], Result>,
   'get_all_vaults' : ActorMethod<[], Array<CandidVault>>,
   'get_amm1_canister' : ActorMethod<[], [] | [Principal]>,
+  'get_amm1_donation_inspection_page' : ActorMethod<
+    [bigint, [] | [number]],
+    Result_33
+  >,
   'get_amm1_pool_id' : ActorMethod<[], [] | [string]>,
   'get_borrowing_fee' : ActorMethod<[], number>,
   'get_bot_allowed_collateral_types' : ActorMethod<[], Array<Principal>>,
@@ -2079,6 +2102,10 @@ export interface _SERVICE {
   'partial_repay_to_vault' : ActorMethod<[VaultArg], Result_1>,
   'prepare_redemption_offer' : ActorMethod<[bigint], Result_18>,
   'provide_liquidity' : ActorMethod<[bigint], Result_1>,
+  'reconcile_amm1_donation_mint_candidate_block' : ActorMethod<
+    [bigint, bigint],
+    Result
+  >,
   'reconcile_chain_supply' : ActorMethod<[number], Result_19>,
   'reconcile_three_usd_reserve_ingress_candidate_block' : ActorMethod<
     [bigint, bigint, bigint],
