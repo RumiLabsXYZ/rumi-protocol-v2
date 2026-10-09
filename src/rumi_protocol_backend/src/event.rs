@@ -1046,6 +1046,12 @@ pub enum PendingPayoutEvent {
         timestamp: Option<u64>,
         owner: Option<Principal>,
     },
+    AmbiguousOutcome {
+        operation_id: u128,
+        attempt_nonce: u128,
+        owner: Principal,
+        timestamp: Option<u64>,
+    },
 }
 
 impl Event {
@@ -1781,6 +1787,20 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
                     transfer.held_for_manual_retry = true;
                     transfer.reconciliation_required = true;
                     transfer.too_old_confirmed = true;
+                }
+            });
+        }
+        PendingPayoutEvent::AmbiguousOutcome {
+            operation_id,
+            attempt_nonce,
+            owner,
+            ..
+        } => {
+            state.mutate_pending_payout(operation_id, |transfer| {
+                if transfer.op_nonce == attempt_nonce && transfer.owner == owner {
+                    transfer.in_flight = false;
+                    transfer.held_for_manual_retry = true;
+                    transfer.reconciliation_required = true;
                 }
             });
         }
@@ -2856,6 +2876,33 @@ pub fn record_pending_payout_too_old(
         row.held_for_manual_retry = true;
         row.reconciliation_required = true;
         row.too_old_confirmed = true;
+    });
+    true
+}
+
+pub fn record_pending_payout_ambiguous_outcome(
+    state: &mut State,
+    operation_id: u128,
+    attempt_nonce: u128,
+) -> bool {
+    let Some((_, transfer)) = state.get_pending_payout(operation_id) else {
+        return false;
+    };
+    if transfer.op_nonce != attempt_nonce || !transfer.in_flight {
+        return false;
+    }
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::AmbiguousOutcome {
+        operation_id,
+        attempt_nonce,
+        owner: transfer.owner,
+        timestamp: Some(now()),
+    });
+    state.mutate_pending_payout(operation_id, |row| {
+        if row.op_nonce == attempt_nonce && row.owner == transfer.owner {
+            row.in_flight = false;
+            row.held_for_manual_retry = true;
+            row.reconciliation_required = true;
+        }
     });
     true
 }
@@ -4635,6 +4682,90 @@ mod filter_tests {
         assert_eq!(legacy_row.op_nonce, old_nonce);
         assert!(legacy_row.held_for_manual_retry);
         assert!(legacy_row.reconciliation_required);
+    }
+
+    #[test]
+    fn ambiguous_payout_hold_survives_private_journal_replay() {
+        let owner = p(40);
+        let ledger = p(41);
+        let operation_id = 101;
+        let attempt_nonce = 102;
+        let transfer = PendingMarginTransfer {
+            vault_id: 7,
+            operation_id,
+            payout_kind: PendingPayoutKind::Margin,
+            owner,
+            margin: ICP::new(100),
+            collateral_type: ledger,
+            retry_count: 0,
+            op_nonce: attempt_nonce,
+            ledger: Some(ledger),
+            transfer_amount_raw: Some(90),
+            held_for_manual_retry: false,
+            reconciliation_required: false,
+            in_flight: false,
+            too_old_confirmed: false,
+            history_start_index: None,
+            rearm_schema_version: 1,
+            history_scan: None,
+            history_candidate_seen: false,
+            no_effect_proof: None,
+            history_log_length: None,
+            history_cursor: 0,
+            min_net_collateral_raw: None,
+        };
+        let journal_entry = crate::storage::PendingPayoutJournalEntry {
+            after_event_count: 1,
+            event: PendingPayoutEvent::AmbiguousOutcome {
+                operation_id,
+                attempt_nonce,
+                owner,
+                timestamp: Some(3),
+            },
+        };
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&journal_entry, &mut encoded)
+            .expect("encode ambiguous outcome before upgrade");
+        let restored_entry: crate::storage::PendingPayoutJournalEntry =
+            ciborium::de::from_reader(encoded.as_slice())
+                .expect("decode ambiguous outcome after upgrade");
+        assert_eq!(restored_entry, journal_entry);
+
+        let recovered = replay_payout_events(
+            vec![Event::Init(payout_init_args(p(42)))],
+            vec![
+                PendingPayoutEvent::Queued {
+                    kind: PendingPayoutKind::Margin,
+                    operation_id,
+                    transfer,
+                    timestamp: Some(1),
+                },
+                PendingPayoutEvent::DispatchBoundary {
+                    operation_id,
+                    attempt_nonce,
+                    payout_kind: Some(PendingPayoutKind::Margin),
+                    ledger,
+                    owner,
+                    amount_raw: 90,
+                    start_index: Some(10),
+                    timestamp: Some(2),
+                },
+                PendingPayoutEvent::AmbiguousOutcome {
+                    operation_id,
+                    attempt_nonce,
+                    owner,
+                    timestamp: Some(3),
+                },
+            ],
+        );
+
+        let (_, recovered) = recovered.get_pending_payout(operation_id).unwrap();
+        assert!(!recovered.in_flight);
+        assert!(recovered.held_for_manual_retry);
+        assert!(recovered.reconciliation_required);
+        assert_eq!(recovered.op_nonce, attempt_nonce);
+        assert_eq!(recovered.transfer_amount_raw, Some(90));
+        assert_eq!(recovered.history_start_index, Some(10));
     }
 
     #[test]

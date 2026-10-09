@@ -1600,23 +1600,45 @@ pub fn compute_collateral_ratio(vault: &Vault, _rate: UsdIcp, state: &state::Sta
 
 fn note_pending_payout_failure(
     row: &mut crate::state::PendingMarginTransfer,
-    error: &TransferError,
+    error: &crate::management::DurableTransferError,
 ) {
     row.in_flight = false;
-    if matches!(error, TransferError::TooOld) {
-        row.held_for_manual_retry = true;
-        row.reconciliation_required = true;
-        row.too_old_confirmed = true;
-    } else if matches!(error, TransferError::BadFee { .. }) {
-        // The original net amount and attempt identity are immutable. A changed
-        // fee needs owner review; changing amounts under the old nonce is unsafe.
-        row.held_for_manual_retry = true;
-    } else {
-        row.retry_count = row.retry_count.saturating_add(1);
-        if row.retry_count >= MAX_PENDING_RETRIES {
+    match error {
+        crate::management::DurableTransferError::LedgerNoEffect(TransferError::TooOld) => {
+            row.held_for_manual_retry = true;
+            row.reconciliation_required = true;
+            row.too_old_confirmed = true;
+        }
+        crate::management::DurableTransferError::LedgerNoEffect(TransferError::BadFee {
+            ..
+        }) => {
+            // The original net amount and attempt identity are immutable. A changed
+            // fee needs owner review; changing amounts under the old nonce is unsafe.
             row.held_for_manual_retry = true;
         }
+        crate::management::DurableTransferError::AmbiguousCall { .. }
+        | crate::management::DurableTransferError::AmbiguousResponse(_) => {
+            // The ledger may have committed before the reply was lost. Keep the
+            // same attempt held until exact reconciliation evidence is supplied.
+            row.held_for_manual_retry = true;
+            row.reconciliation_required = true;
+        }
+        crate::management::DurableTransferError::LedgerNoEffect(_) => {
+            row.retry_count = row.retry_count.saturating_add(1);
+            if row.retry_count >= MAX_PENDING_RETRIES {
+                row.held_for_manual_retry = true;
+            }
+        }
     }
+}
+
+fn pending_payout_is_dispatchable(transfer: &crate::state::PendingMarginTransfer) -> bool {
+    !transfer.held_for_manual_retry
+        && !transfer.reconciliation_required
+        && !transfer.in_flight
+        && transfer.op_nonce != 0
+        && transfer.ledger.is_some()
+        && transfer.transfer_amount_raw.is_some()
 }
 
 pub async fn process_one_pending_payout(operation_id: u128) {
@@ -1628,13 +1650,7 @@ pub async fn process_one_pending_payout(operation_id: u128) {
             s.mutate_pending_payout(operation_id, |row| row.held_for_manual_retry = true);
             return None;
         }
-        if transfer.held_for_manual_retry
-            || transfer.reconciliation_required
-            || transfer.in_flight
-            || transfer.op_nonce == 0
-            || transfer.ledger.is_none()
-            || transfer.transfer_amount_raw.is_none()
-        {
+        if !pending_payout_is_dispatchable(&transfer) {
             return None;
         }
         s.mutate_pending_payout(operation_id, |row| row.in_flight = true);
@@ -1651,7 +1667,7 @@ pub async fn process_one_pending_payout(operation_id: u128) {
     let amount = transfer
         .transfer_amount_raw
         .expect("validated payout amount");
-    let result = crate::management::transfer_collateral_with_nonce(
+    let result = crate::management::transfer_collateral_with_nonce_status(
         amount,
         transfer.owner,
         ledger,
@@ -1686,22 +1702,36 @@ pub async fn process_one_pending_payout(operation_id: u128) {
             });
         }
         Err(error) => {
-            if matches!(&error, TransferError::TooOld) {
+            if matches!(
+                &error,
+                crate::management::DurableTransferError::LedgerNoEffect(TransferError::TooOld)
+            ) {
                 mutate_state(|s| {
-                    crate::event::record_pending_payout_too_old(
-                        s,
-                        operation_id,
-                        transfer.op_nonce,
-                    );
+                    crate::event::record_pending_payout_too_old(s, operation_id, transfer.op_nonce);
                 });
             } else {
                 mutate_state(|s| {
-                    s.mutate_pending_payout(operation_id, |row| {
-                        note_pending_payout_failure(row, &error);
-                    });
+                    if matches!(
+                        &error,
+                        crate::management::DurableTransferError::AmbiguousCall { .. }
+                            | crate::management::DurableTransferError::AmbiguousResponse(_)
+                    ) {
+                        crate::event::record_pending_payout_ambiguous_outcome(
+                            s,
+                            operation_id,
+                            transfer.op_nonce,
+                        );
+                    } else {
+                        s.mutate_pending_payout(operation_id, |row| {
+                            note_pending_payout_failure(row, &error);
+                        });
+                    }
                 });
             }
-            if let TransferError::BadFee { expected_fee } = error {
+            if let crate::management::DurableTransferError::LedgerNoEffect(
+                TransferError::BadFee { expected_fee },
+            ) = error
+            {
                 if let Ok(fee) = expected_fee.0.try_into() {
                     mutate_state(|s| {
                         if let Some(config) = s.get_collateral_config_mut(&transfer.collateral_type)
