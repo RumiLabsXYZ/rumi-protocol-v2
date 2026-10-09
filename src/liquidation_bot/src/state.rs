@@ -119,6 +119,10 @@ pub enum BotPaymentStatus {
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub struct BotPaymentJournal {
+    /// Local history identity for reconstructing the treasury phase after an
+    /// upgrade between backend confirmation and treasury-intent persistence.
+    #[serde(default)]
+    pub record_id: Option<u64>,
     pub vault_id: u64,
     pub backend_principal: Principal,
     pub ledger_principal: Principal,
@@ -171,6 +175,40 @@ pub struct BotPaymentTopUpJournal {
     pub funding_allocation_e6: u64,
     pub status: BotPaymentStatus,
     pub receipt: Option<crate::swap::TransferReceipt>,
+}
+
+/// Durable ICP treasury transfer for one confirmed liquidation claim.
+/// The identity fields are fixed before dispatch and survive reply loss.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BotTreasuryJournal {
+    pub record_id: u64,
+    pub vault_id: u64,
+    pub claim_generation: u64,
+    pub ledger_principal: Principal,
+    pub sender_principal: Principal,
+    pub treasury_principal: Principal,
+    /// Gross ICP debit reserved for the bonus, including the ledger fee.
+    pub gross_amount_e8s: u64,
+    /// Exact ICRC-1 amount credited to the treasury.
+    pub amount_e8s: u64,
+    pub fee_e8s: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time: u64,
+    pub status: BotTreasuryStatus,
+    pub receipt: Option<crate::swap::TransferReceipt>,
+    /// Set with the Paid transition so a restart cannot add the metric twice.
+    pub paid_total_applied: bool,
+    pub record: crate::history::LiquidationRecordV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BotTreasuryStatus {
+    NeedsPreparation,
+    Prepared,
+    Ambiguous,
+    NoEffect,
+    ReceiptObserved,
+    Paid,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -298,6 +336,14 @@ pub struct BotState {
     pub pending_payments: BTreeMap<u64, BotPaymentJournal>,
     #[serde(default)]
     pub pending_claims: BTreeMap<u64, BotClaimJournal>,
+    /// ICP treasury bonus transfers keyed by durable liquidation history ID.
+    /// Missing on older snapshots; those snapshots decode with no new work.
+    #[serde(default)]
+    pub pending_treasury: BTreeMap<u64, BotTreasuryJournal>,
+    /// Last treasury obligation selected for worker service; round-robin avoids
+    /// one repeatedly failing transfer starving later confirmed obligations.
+    #[serde(default)]
+    pub treasury_resume_cursor: Option<u64>,
     /// Durable admission/worker pause for mixed-version rollout.
     #[serde(default)]
     pub processing_paused: bool,
@@ -488,10 +534,44 @@ mod tests {
         assert_eq!(state.stats.events_count, 99, "stats preserved");
         assert!(state.pending_payments.is_empty());
         assert!(state.pending_claims.is_empty());
+        assert!(state.pending_treasury.is_empty(), "new treasury journal defaults empty on legacy snapshots");
+        assert_eq!(state.treasury_resume_cursor, None, "new fairness cursor defaults empty on legacy snapshots");
         assert!(
             !state.migrated_to_stable_structures,
             "legacy blob has no migration marker, must default to false so post_upgrade runs the StableBTreeMap migration"
         );
+    }
+
+    #[test]
+    fn treasury_intent_round_trips_in_stable_state() {
+        let mut state = BotState::default();
+        state.pending_treasury.insert(19, BotTreasuryJournal {
+            record_id: 19, vault_id: 8, claim_generation: 42,
+            ledger_principal: Principal::management_canister(),
+            sender_principal: Principal::management_canister(),
+            treasury_principal: Principal::anonymous(),
+            gross_amount_e8s: 25_000, amount_e8s: 15_000, fee_e8s: 10_000,
+            memo: b"RUMI:TB1:record-and-claim".to_vec(), created_at_time: 123,
+            status: BotTreasuryStatus::Ambiguous, receipt: None,
+            paid_total_applied: false,
+            record: crate::history::LiquidationRecordV1 {
+                id: 19, vault_id: 8, timestamp: 100,
+                status: crate::history::LiquidationStatus::TransferFailed,
+                collateral_claimed_e8s: 30_000, debt_to_cover_e8s: 10,
+                icp_swapped_e8s: 4_000, ckusdc_received_e6: 50,
+                ckusdc_transferred_e6: 50, icp_to_treasury_e8s: 0,
+                oracle_price_e8s: 1, effective_price_e8s: 1, slippage_bps: 0,
+                error_message: Some("ambiguous".into()), confirm_retry_count: 1,
+            },
+        });
+        let bytes = serde_json::to_vec(&state).unwrap();
+        let decoded: BotState = serde_json::from_slice(&bytes).unwrap();
+        let journal = decoded.pending_treasury.get(&19).unwrap();
+        assert_eq!(journal.claim_generation, 42);
+        assert_eq!(journal.created_at_time, 123);
+        assert_eq!(journal.amount_e8s + journal.fee_e8s, journal.gross_amount_e8s);
+        assert_eq!(journal.status, BotTreasuryStatus::Ambiguous);
+        assert!(!journal.paid_total_applied);
     }
 
     #[test]
@@ -554,6 +634,7 @@ mod tests {
         let vault_id = 73;
         let mut state = BotState::default();
         state.pending_payments.insert(vault_id, BotPaymentJournal {
+            record_id: Some(1),
             vault_id,
             backend_principal: Principal::from_text("tfesu-vyaaa-aaaap-qrd7a-cai").unwrap(),
             ledger_principal: Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap(),

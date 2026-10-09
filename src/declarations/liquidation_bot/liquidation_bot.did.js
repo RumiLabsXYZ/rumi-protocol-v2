@@ -177,6 +177,7 @@ export const idlFactory = ({ IDL }) => {
     'amount_e6' : IDL.Nat64,
     'created_at_time' : IDL.Nat64,
     'debt_covered_e8s' : IDL.Nat64,
+    'record_id' : IDL.Opt(IDL.Nat64),
     'icp_swapped_e8s' : IDL.Nat64,
   });
   const LiquidatableVaultInfo = IDL.Record({

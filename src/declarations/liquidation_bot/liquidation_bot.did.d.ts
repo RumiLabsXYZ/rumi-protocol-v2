@@ -66,6 +66,7 @@ export interface BotPaymentJournal {
   'amount_e6' : bigint,
   'created_at_time' : bigint,
   'debt_covered_e8s' : bigint,
+  'record_id' : [] | [bigint],
   'icp_swapped_e8s' : bigint,
 }
 export type BotPaymentStatus = { 'ReceiptObserved' : null } |

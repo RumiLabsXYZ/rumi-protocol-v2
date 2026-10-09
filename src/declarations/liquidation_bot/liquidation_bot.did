@@ -102,6 +102,7 @@ type BotPaymentTopUpJournal = record {
   receipt : opt TransferReceipt;
 };
 type BotPaymentJournal = record {
+  record_id : opt nat64;
   vault_id : nat64;
   backend_principal : principal;
   ledger_principal : principal;

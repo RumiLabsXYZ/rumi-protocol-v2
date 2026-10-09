@@ -7,6 +7,7 @@ use std::cell::RefCell;
 mod history;
 mod icpswap;
 mod memory;
+mod native_icp_blocks;
 mod process;
 mod state;
 mod swap;
