@@ -710,7 +710,7 @@ fn liq_004_pocket_ic_writedown_with_real_burn_proof_succeeds() {
 }
 
 #[test]
-fn liq_004_pocket_ic_archived_burn_proof_succeeds() {
+fn liq_004_pocket_ic_archived_burn_proof_remains_held() {
     // Keep the archive batches tiny so the proof block moves to the archive
     // during this test instead of requiring thousands of filler transactions.
     let f = setup_fixture_with_icusd_archive(Some((2, 3)));
@@ -771,7 +771,9 @@ fn liq_004_pocket_ic_archived_burn_proof_succeeds() {
         ledger_kind: SpProofLedger::IcusdBurn,
         vault_id_memo: f.vault_id,
     };
-    let result = call_debt_burned(
+    let debt_before =
+        get_vault_view(&f.pic, f.protocol_id, f.test_user, f.vault_id).borrowed_icusd_amount;
+    let err = call_debt_burned(
         &f.pic,
         f.protocol_id,
         f.sp_principal,
@@ -779,13 +781,29 @@ fn liq_004_pocket_ic_archived_burn_proof_succeeds() {
         amount_e8s,
         proof,
     )
-    .expect("archive-backed burn proof must be accepted");
-    assert!(result.success, "archive-backed writedown should succeed");
+    .expect_err("an archived block without authenticated chain inclusion must remain held");
+    let message = match err {
+        ProtocolError::GenericError(message) => message,
+        other => panic!("expected GenericError, got {:?}", other),
+    };
     assert!(
-        get_consumed_proofs(&f.pic, f.protocol_id)
-            .contains(&(SpProofLedger::IcusdBurn, block_index)),
-        "archive-backed proof index must be consumed after successful writedown"
+        message.contains("archive-backed block evidence is unsupported"),
+        "archived proof must fail with the held-evidence reason; got: {}",
+        message
     );
+    assert_eq!(
+        get_vault_view(&f.pic, f.protocol_id, f.test_user, f.vault_id).borrowed_icusd_amount,
+        debt_before,
+        "an unverified archive block must not change vault debt"
+    );
+    assert!(
+        !get_consumed_proofs(&f.pic, f.protocol_id)
+            .contains(&(SpProofLedger::IcusdBurn, block_index)),
+        "an unverified archive block must remain unconsumed"
+    );
+    // Liveness remains intentionally limited: direct ledger blocks can prove
+    // the writedown (covered above), while archived blocks stay held until the
+    // implementation can authenticate their inclusion in the ledger chain.
 }
 
 #[test]
