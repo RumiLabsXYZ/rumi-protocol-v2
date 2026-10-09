@@ -188,6 +188,16 @@ pub struct StabilityPoolState {
     /// Monotonic ICRC-2 `created_at_time` allocator for deposit pulls.
     #[serde(default)]
     pub last_deposit_transfer_created_at: Option<u64>,
+    /// Durable caller-scoped FE-SP-001 sequence high-watermarks. Retained even
+    /// after old terminal response rows are evicted.
+    #[serde(default)]
+    pub deposit_intent_high_watermarks: Option<BTreeMap<Principal, u64>>,
+    /// At most one unresolved immutable ICRC-2 deposit tuple per caller.
+    #[serde(default)]
+    pub pending_deposit_intents: Option<BTreeMap<Principal, DepositIntent>>,
+    /// Bounded terminal response window keyed by `(caller, intent_seq)`.
+    #[serde(default)]
+    pub completed_deposit_intents: Option<BTreeMap<(Principal, u64), CompletedDepositIntent>>,
     /// Recent source-ledger mint blocks already allocated to eligible SP depositors.
     #[serde(default)]
     pub processed_interest_mint_blocks: Option<BTreeSet<u64>>,
@@ -243,6 +253,9 @@ impl Default for StabilityPoolState {
             pending_refund_attempts: Some(BTreeMap::new()),
             pending_refund_attempt_initialization: Some(BTreeSet::new()),
             last_deposit_transfer_created_at: None,
+            deposit_intent_high_watermarks: Some(BTreeMap::new()),
+            pending_deposit_intents: Some(BTreeMap::new()),
+            completed_deposit_intents: Some(BTreeMap::new()),
             processed_interest_mint_blocks: Some(BTreeSet::new()),
             processed_interest_mint_block_high_watermark: None,
         }
@@ -261,9 +274,269 @@ pub const MAX_PENDING_CHAIN_ABSORBS: usize = 1_000;
 pub const MAX_PENDING_NATIVE_XRP_ABSORBS: usize = 1_000;
 pub const MAX_COMPLETED_CHAIN_ABSORBS: usize = 10_000;
 pub const MAX_COMPLETED_CFX_CLAIM_PAYOUT_RECOVERIES: usize = 10_000;
+pub const MAX_COMPLETED_DEPOSIT_INTENTS: usize = 10_000;
+/// Permanent sequence floors are retained for every caller that has completed
+/// a deposit; cap distinct caller identities rather than evicting replay guards.
+pub const MAX_DEPOSIT_INTENT_CALLERS: usize = 100_000;
+/// Bound durable ambiguity rows created before an external transfer resolves.
+pub const MAX_PENDING_DEPOSIT_INTENTS: usize = 1_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DepositIntentReserveError {
+    Active(u64),
+    SequenceMismatch(u64),
+    SequenceExhausted,
+    CapacityReached,
+}
 pub const MAX_XRP_SP_PAYOUT_ALLOCATIONS: usize = 500;
 
 impl StabilityPoolState {
+    pub fn deposit_intent_status(
+        &self,
+        caller: Principal,
+        intent_seq: u64,
+    ) -> DepositIntentStatus {
+        let high_watermark = self
+            .deposit_intent_high_watermarks
+            .as_ref()
+            .and_then(|watermarks| watermarks.get(&caller).copied())
+            .unwrap_or(0);
+        let active_intent = self
+            .pending_deposit_intents
+            .as_ref()
+            .and_then(|pending| pending.get(&caller))
+            .map(|pending| DepositIntentResult::Pending {
+                intent_seq: pending.intent_seq,
+                token_ledger: pending.token_ledger,
+                amount: pending.amount,
+                phase: if pending.expected_block_index.is_some() {
+                    DepositIntentPhase::ReceiptVerification
+                } else if pending.dispatch_started {
+                    if pending.last_error.is_none() {
+                        DepositIntentPhase::Dispatching
+                    } else {
+                        DepositIntentPhase::Reconciling
+                    }
+                } else {
+                    DepositIntentPhase::Prepared
+                },
+                reason: pending.last_error.clone(),
+            });
+        let intent = active_intent
+            .as_ref()
+            .filter(|active| match active {
+                DepositIntentResult::Pending { intent_seq: active_seq, .. } => *active_seq == intent_seq,
+                _ => false,
+            })
+            .cloned()
+            .or_else(|| {
+                self.completed_deposit_intents
+                    .as_ref()
+                    .and_then(|completed| completed.get(&(caller, intent_seq)))
+                    .map(|completed| completed.result.clone())
+            });
+        DepositIntentStatus {
+            high_watermark,
+            next_seq: if active_intent.is_some() {
+                None
+            } else {
+                high_watermark.checked_add(1)
+            },
+            intent,
+            active_intent,
+        }
+    }
+
+    pub fn pending_deposit_intent(&self, caller: Principal) -> Option<DepositIntent> {
+        self.pending_deposit_intents
+            .as_ref()
+            .and_then(|pending| pending.get(&caller).cloned())
+    }
+
+    pub fn completed_deposit_intent(
+        &self,
+        caller: Principal,
+        intent_seq: u64,
+    ) -> Option<CompletedDepositIntent> {
+        self.completed_deposit_intents
+            .as_ref()
+            .and_then(|completed| completed.get(&(caller, intent_seq)).cloned())
+    }
+
+    /// Reserve the caller's next sequence and exact ledger tuple atomically.
+    /// No ledger call may occur before this succeeds.
+    pub fn reserve_deposit_intent(
+        &mut self,
+        intent: DepositIntent,
+    ) -> Result<(), DepositIntentReserveError> {
+        if let Some(active) = self
+            .pending_deposit_intents
+            .as_ref()
+            .and_then(|pending| pending.get(&intent.caller))
+        {
+            return Err(DepositIntentReserveError::Active(active.intent_seq));
+        }
+        let watermarks = self
+            .deposit_intent_high_watermarks
+            .get_or_insert_with(BTreeMap::new);
+        let caller_has_watermark = watermarks.contains_key(&intent.caller);
+        let expected = watermarks
+            .get(&intent.caller)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(DepositIntentReserveError::SequenceExhausted)?;
+        if intent.intent_seq != expected {
+            return Err(DepositIntentReserveError::SequenceMismatch(expected));
+        }
+        let pending = self
+            .pending_deposit_intents
+            .get_or_insert_with(BTreeMap::new);
+        if (!caller_has_watermark && watermarks.len() >= MAX_DEPOSIT_INTENT_CALLERS)
+            || pending.len() >= MAX_PENDING_DEPOSIT_INTENTS
+        {
+            return Err(DepositIntentReserveError::CapacityReached);
+        }
+        watermarks.insert(intent.caller, intent.intent_seq);
+        pending.insert(intent.caller, intent);
+        Ok(())
+    }
+
+    /// Release a confirmed no-effect sequence so its caller can safely retry
+    /// that same sequence. The full-history absence proof and ledger no-effect
+    /// response are checked by the caller before this transition.
+    pub fn release_deposit_intent_no_effect(
+        &mut self,
+        caller: Principal,
+        intent_seq: u64,
+    ) -> bool {
+        let Some(pending) = self
+            .pending_deposit_intents
+            .as_ref()
+            .and_then(|pending| pending.get(&caller))
+        else {
+            return false;
+        };
+        if pending.intent_seq != intent_seq {
+            return false;
+        }
+        // Never let a stale no-effect callback lower a replay floor that has
+        // since advanced (for example after a future state-machine change).
+        if self
+            .deposit_intent_high_watermarks
+            .as_ref()
+            .and_then(|watermarks| watermarks.get(&caller))
+            .copied()
+            != Some(intent_seq)
+        {
+            return false;
+        }
+        self.pending_deposit_intents
+            .as_mut()
+            .expect("pending intent existed")
+            .remove(&caller);
+        let previous_seq = intent_seq.saturating_sub(1);
+        let watermarks = self
+            .deposit_intent_high_watermarks
+            .get_or_insert_with(BTreeMap::new);
+        if previous_seq == 0 {
+            watermarks.remove(&caller);
+        } else {
+            watermarks.insert(caller, previous_seq);
+        }
+        true
+    }
+
+    /// Update reconciliation metadata without changing the immutable transfer
+    /// identity stored for this caller and sequence.
+    pub fn update_deposit_intent(&mut self, intent: DepositIntent) -> bool {
+        let Some(pending) = self.pending_deposit_intents.as_mut() else {
+            return false;
+        };
+        let Some(current) = pending.get(&intent.caller) else {
+            return false;
+        };
+        if current.intent_seq != intent.intent_seq
+            || current.token_ledger != intent.token_ledger
+            || current.amount != intent.amount
+            || current.from != intent.from
+            || current.to != intent.to
+            || current.memo != intent.memo
+            || current.created_at_time_ns != intent.created_at_time_ns
+        {
+            return false;
+        }
+        pending.insert(intent.caller, intent);
+        true
+    }
+
+    /// Complete an intent and credit exactly once, in one state transition.
+    pub fn finalize_deposit_intent(
+        &mut self,
+        caller: Principal,
+        intent_seq: u64,
+        result: DepositIntentResult,
+        now_ns: u64,
+    ) -> bool {
+        let Some(intent) = self
+            .pending_deposit_intents
+            .as_ref()
+            .and_then(|pending| pending.get(&caller).cloned())
+        else {
+            return false;
+        };
+        if intent.intent_seq != intent_seq {
+            return false;
+        }
+        let identity_matches = match &result {
+            DepositIntentResult::Completed { intent_seq: seq, token_ledger, amount, .. }
+            | DepositIntentResult::NoEffect { intent_seq: seq, token_ledger, amount, .. } => {
+                *seq == intent.intent_seq
+                    && *token_ledger == intent.token_ledger
+                    && *amount == intent.amount
+            }
+            DepositIntentResult::Pending { .. } => false,
+        };
+        if !identity_matches {
+            return false;
+        }
+        if matches!(&result, DepositIntentResult::Completed { .. }) {
+            self.add_deposit_at(caller, intent.token_ledger, intent.amount, now_ns);
+            self.push_event_at(
+                caller,
+                PoolEventType::Deposit {
+                    token_ledger: intent.token_ledger,
+                    amount: intent.amount,
+                },
+                now_ns,
+            );
+        }
+        self.pending_deposit_intents
+            .as_mut()
+            .expect("pending map was present")
+            .remove(&caller);
+        let completed = self
+            .completed_deposit_intents
+            .get_or_insert_with(BTreeMap::new);
+        completed.insert(
+            (caller, intent_seq),
+            CompletedDepositIntent {
+                caller,
+                intent_seq,
+                token_ledger: intent.token_ledger,
+                amount: intent.amount,
+                result,
+            },
+        );
+        while completed.len() > MAX_COMPLETED_DEPOSIT_INTENTS {
+            let Some(oldest) = completed.keys().next().copied() else {
+                break;
+            };
+            completed.remove(&oldest);
+        }
+        true
+    }
+
     /// Reserve a unique timestamp for a new ICRC-2 deposit pull.
     pub fn reserve_deposit_transfer_timestamp(&mut self, now_ns: u64) -> Result<u64, ()> {
         let timestamp = match self.last_deposit_transfer_created_at {
@@ -728,6 +1001,27 @@ impl StabilityPoolState {
             .deposits
             .entry(user)
             .or_insert_with(|| DepositPosition::new(ic_cdk::api::time()));
+        *position
+            .stablecoin_balances
+            .entry(token_ledger)
+            .or_insert(0) += amount;
+        *self
+            .total_stablecoin_balances
+            .entry(token_ledger)
+            .or_insert(0) += amount;
+    }
+
+    pub fn add_deposit_at(
+        &mut self,
+        user: Principal,
+        token_ledger: Principal,
+        amount: u64,
+        now_ns: u64,
+    ) {
+        let position = self
+            .deposits
+            .entry(user)
+            .or_insert_with(|| DepositPosition::new(now_ns));
         *position
             .stablecoin_balances
             .entry(token_ledger)
@@ -3396,6 +3690,9 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             pending_refund_attempts: Some(BTreeMap::new()),
             pending_refund_attempt_initialization: Some(BTreeSet::new()),
             last_deposit_transfer_created_at: None,
+            deposit_intent_high_watermarks: Some(BTreeMap::new()),
+            pending_deposit_intents: Some(BTreeMap::new()),
+            completed_deposit_intents: Some(BTreeMap::new()),
             processed_interest_mint_blocks: Some(BTreeSet::new()),
             processed_interest_mint_block_high_watermark: None,
         }
@@ -3482,6 +3779,195 @@ pub fn load_from_stable_memory() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn deposit_intent_for_test(caller: Principal, seq: u64, amount: u64) -> DepositIntent {
+        let ledger = Principal::from_slice(&[70]);
+        DepositIntent {
+            caller,
+            intent_seq: seq,
+            token_ledger: ledger,
+            amount,
+            from: icrc_ledger_types::icrc1::account::Account {
+                owner: caller,
+                subaccount: None,
+            },
+            to: icrc_ledger_types::icrc1::account::Account {
+                owner: Principal::from_slice(&[71]),
+                subaccount: None,
+            },
+            memo: [b"RSPDI001".as_slice(), caller.as_slice(), &seq.to_be_bytes()].concat(),
+            created_at_time_ns: 100 + seq,
+            history_start_index: Some(3),
+            history_next_index: Some(3),
+            history_tip: Some(3),
+            expected_block_index: None,
+            dispatch_started: false,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn deposit_intent_reservation_is_monotonic_caller_scoped_and_upgrade_safe() {
+        let caller = Principal::from_slice(&[41]);
+        let other = Principal::from_slice(&[42]);
+        let mut state = StabilityPoolState::default();
+        let first = deposit_intent_for_test(caller, 1, 500);
+        assert_eq!(state.reserve_deposit_intent(first.clone()), Ok(()));
+
+        // A second tab cannot reserve another sequence while the first is held.
+        assert_eq!(
+            state.reserve_deposit_intent(deposit_intent_for_test(caller, 2, 500)),
+            Err(DepositIntentReserveError::Active(1))
+        );
+        assert_eq!(state.reserve_deposit_intent(deposit_intent_for_test(other, 1, 500)), Ok(()));
+
+        let bytes = Encode!(&state).expect("encode unresolved deposit intents");
+        let restored = try_decode_state(&bytes).expect("decode unresolved deposit intents");
+        assert_eq!(restored.pending_deposit_intent(caller), Some(first));
+        assert_eq!(restored.deposit_intent_status(caller, 1).high_watermark, 1);
+        assert_eq!(restored.deposit_intent_status(caller, 1).next_seq, None);
+        assert!(matches!(
+            restored.deposit_intent_status(caller, 1).active_intent,
+            Some(DepositIntentResult::Pending { intent_seq: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn deposit_intent_completion_credits_once_and_terminal_replay_returns_receipt() {
+        let caller = Principal::from_slice(&[43]);
+        let mut state = StabilityPoolState::default();
+        let intent = deposit_intent_for_test(caller, 1, 500);
+        state.reserve_deposit_intent(intent.clone()).unwrap();
+        let completed = DepositIntentResult::Completed {
+            intent_seq: 1,
+            token_ledger: intent.token_ledger,
+            amount: intent.amount,
+            block_index: 19,
+        };
+        assert!(state.finalize_deposit_intent(caller, 1, completed.clone(), 777));
+        assert!(!state.finalize_deposit_intent(caller, 1, completed.clone(), 778));
+        assert_eq!(
+            state.deposits[&caller].stablecoin_balances[&intent.token_ledger],
+            intent.amount
+        );
+        assert_eq!(state.total_stablecoin_balances[&intent.token_ledger], intent.amount);
+        let status = state.deposit_intent_status(caller, 1);
+        assert_eq!(status.intent, Some(completed.clone()));
+        assert_eq!(status.active_intent, None);
+        assert_eq!(status.next_seq, Some(2));
+        assert!(state.validate_state().is_ok());
+    }
+
+    #[test]
+    fn deposit_intent_confirmed_no_effect_releases_sequence_without_credit() {
+        let caller = Principal::from_slice(&[45]);
+        let mut state = StabilityPoolState::default();
+        let intent = deposit_intent_for_test(caller, 1, 500);
+        state.reserve_deposit_intent(intent.clone()).unwrap();
+        assert!(state.release_deposit_intent_no_effect(caller, 1));
+        assert!(!state.deposits.contains_key(&caller));
+        let status = state.deposit_intent_status(caller, 1);
+        assert_eq!(status.intent, None);
+        assert_eq!(status.high_watermark, 0);
+        assert_eq!(status.next_seq, Some(1));
+        assert!(state.reserve_deposit_intent(deposit_intent_for_test(caller, 1, 600)).is_ok());
+    }
+
+    #[test]
+    fn stale_no_effect_cannot_clear_a_pending_intent_or_lower_its_replay_floor() {
+        let caller = Principal::from_slice(&[47]);
+        let mut state = StabilityPoolState::default();
+        state
+            .reserve_deposit_intent(deposit_intent_for_test(caller, 1, 500))
+            .unwrap();
+        state
+            .deposit_intent_high_watermarks
+            .as_mut()
+            .unwrap()
+            .insert(caller, 2);
+        assert!(!state.release_deposit_intent_no_effect(caller, 1));
+        assert_eq!(state.pending_deposit_intent(caller).unwrap().intent_seq, 1);
+        assert_eq!(state.deposit_intent_status(caller, 1).high_watermark, 2);
+    }
+
+    #[test]
+    fn no_effect_after_success_preserves_the_prior_successful_sequence_floor() {
+        let caller = Principal::from_slice(&[48]);
+        let mut state = StabilityPoolState::default();
+        let first = deposit_intent_for_test(caller, 1, 500);
+        state.reserve_deposit_intent(first.clone()).unwrap();
+        let receipt = DepositIntentResult::Completed {
+            intent_seq: 1,
+            token_ledger: first.token_ledger,
+            amount: first.amount,
+            block_index: 31,
+        };
+        assert!(state.finalize_deposit_intent(caller, 1, receipt, 777));
+        state
+            .reserve_deposit_intent(deposit_intent_for_test(caller, 2, 500))
+            .unwrap();
+        assert!(state.release_deposit_intent_no_effect(caller, 2));
+        let status = state.deposit_intent_status(caller, 2);
+        assert_eq!(status.high_watermark, 1);
+        assert_eq!(status.next_seq, Some(2));
+        assert!(state.completed_deposit_intent(caller, 1).is_some());
+    }
+
+    #[test]
+    fn deposit_intent_capacity_bounds_permanent_and_pending_admission() {
+        let mut state = StabilityPoolState::default();
+        let caller = Principal::from_slice(&[46]);
+        let mut intent = deposit_intent_for_test(caller, 1, 500);
+        state
+            .deposit_intent_high_watermarks
+            .as_mut()
+            .unwrap()
+            .extend((0..MAX_DEPOSIT_INTENT_CALLERS).map(|n| {
+                let mut bytes = [0u8; 29];
+                bytes[..8].copy_from_slice(&(n as u64).to_be_bytes());
+                (Principal::from_slice(&bytes), 1)
+            }));
+        let encoded_watermarks = Encode!(state.deposit_intent_high_watermarks.as_ref().unwrap())
+            .expect("encode capped caller watermarks");
+        // Includes the Candid header/type table and 29-byte principals.
+        assert_eq!(encoded_watermarks.len(), 3_900_018);
+        assert_eq!(
+            state.reserve_deposit_intent(intent.clone()),
+            Err(DepositIntentReserveError::CapacityReached)
+        );
+
+        state.deposit_intent_high_watermarks = Some(BTreeMap::new());
+        state.pending_deposit_intents = Some(BTreeMap::new());
+        state.pending_deposit_intents.as_mut().unwrap().extend(
+            (0..MAX_PENDING_DEPOSIT_INTENTS).map(|n| {
+                let bytes = n.to_be_bytes();
+                let principal = Principal::from_slice(&bytes);
+                (principal, deposit_intent_for_test(principal, 1, 1))
+            }),
+        );
+        // Use an unrelated caller so only the global pending bound rejects it.
+        intent.caller = Principal::from_slice(&[250, 251]);
+        assert_eq!(
+            state.reserve_deposit_intent(intent),
+            Err(DepositIntentReserveError::CapacityReached)
+        );
+    }
+
+    #[test]
+    fn pruned_intent_status_keeps_watermark_without_claiming_no_effect() {
+        let caller = Principal::from_slice(&[44]);
+        let mut state = StabilityPoolState::default();
+        state
+            .deposit_intent_high_watermarks
+            .as_mut()
+            .unwrap()
+            .insert(caller, 9);
+        let status = state.deposit_intent_status(caller, 9);
+        assert_eq!(status.high_watermark, 9);
+        assert_eq!(status.next_seq, Some(10));
+        assert_eq!(status.intent, None);
+        assert_eq!(status.active_intent, None);
+    }
 
     #[test]
     fn deposit_transfer_timestamps_are_unique_within_a_round_and_persisted() {
@@ -6561,6 +7047,9 @@ mod tests {
         assert_eq!(decoded.next_pending_refund_id.unwrap_or(0), 0);
         assert!(decoded.pending_refund_attempts.unwrap_or_default().is_empty());
         assert!(decoded.unallocated_interest_mint_index.unwrap_or_default().is_empty());
+        assert!(decoded.deposit_intent_high_watermarks.unwrap_or_default().is_empty());
+        assert!(decoded.pending_deposit_intents.unwrap_or_default().is_empty());
+        assert!(decoded.completed_deposit_intents.unwrap_or_default().is_empty());
     }
 
     #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
