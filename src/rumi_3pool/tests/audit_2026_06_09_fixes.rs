@@ -15,6 +15,7 @@ mod common;
 use candid::{decode_one, encode_args, encode_one, Nat, Principal};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
+use icrc_ledger_types::icrc2::allowance::AllowanceArgs;
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use pocket_ic::WasmResult;
@@ -152,6 +153,155 @@ fn pic_now_ns(h: &ThreePoolHarness) -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos() as u64
+}
+
+#[test]
+fn icrc2_insufficient_funds_preserves_allowance_for_next_transfer() {
+    let h = deploy_pool_with_liquidity_and_swaps(0);
+    let spender = Principal::self_authenticating(&[8, 4, 2]);
+    let recipient = Principal::self_authenticating(&[7, 4, 2]);
+    let balance_before = lp_balance(&h, h.user);
+    let approved = balance_before + 1;
+
+    let approve = h
+        .pic
+        .update_call(
+            h.three_pool,
+            h.user,
+            "icrc2_approve",
+            encode_one(ApproveArgs {
+                from_subaccount: None,
+                spender: Account {
+                    owner: spender,
+                    subaccount: None,
+                },
+                amount: Nat::from(approved),
+                expected_allowance: None,
+                expires_at: None,
+                fee: None,
+                memo: None,
+                created_at_time: None,
+            })
+            .unwrap(),
+        )
+        .expect("icrc2_approve call failed");
+    let approve_result: Result<Nat, ApproveError> = decode_one(&reply_bytes(approve)).unwrap();
+    approve_result.expect("approval must succeed");
+
+    let allowance = |h: &ThreePoolHarness| -> u128 {
+        let res = h
+            .pic
+            .query_call(
+                h.three_pool,
+                Principal::anonymous(),
+                "icrc2_allowance",
+                encode_one(AllowanceArgs {
+                    account: Account {
+                        owner: h.user,
+                        subaccount: None,
+                    },
+                    spender: Account {
+                        owner: spender,
+                        subaccount: None,
+                    },
+                })
+                .unwrap(),
+            )
+            .expect("icrc2_allowance query failed");
+        let result: icrc_ledger_types::icrc2::allowance::Allowance =
+            decode_one(&reply_bytes(res)).unwrap();
+        result.allowance.0.try_into().unwrap()
+    };
+
+    let failed = h
+        .pic
+        .update_call(
+            h.three_pool,
+            spender,
+            "icrc2_transfer_from",
+            encode_one(TransferFromArgs {
+                spender_subaccount: None,
+                from: Account {
+                    owner: h.user,
+                    subaccount: None,
+                },
+                to: Account {
+                    owner: recipient,
+                    subaccount: None,
+                },
+                amount: Nat::from(approved),
+                fee: None,
+                memo: None,
+                created_at_time: None,
+            })
+            .unwrap(),
+        )
+        .expect("failed transfer_from call must return a typed error");
+    let failed_result: Result<Nat, TransferFromError> = decode_one(&reply_bytes(failed)).unwrap();
+    assert_eq!(
+        failed_result,
+        Err(TransferFromError::InsufficientFunds {
+            balance: Nat::from(balance_before),
+        })
+    );
+    assert_eq!(lp_balance(&h, h.user), balance_before);
+    assert_eq!(
+        allowance(&h),
+        approved,
+        "failed transfer must preserve allowance"
+    );
+
+    let valid_args = TransferFromArgs {
+        spender_subaccount: None,
+        from: Account {
+            owner: h.user,
+            subaccount: None,
+        },
+        to: Account {
+            owner: recipient,
+            subaccount: None,
+        },
+        amount: Nat::from(1u64),
+        fee: None,
+        memo: None,
+        created_at_time: Some(pic_now_ns(&h)),
+    };
+    let valid = h
+        .pic
+        .update_call(
+            h.three_pool,
+            spender,
+            "icrc2_transfer_from",
+            encode_one(valid_args.clone()).unwrap(),
+        )
+        .expect("valid transfer_from call failed");
+    let valid_result: Result<Nat, TransferFromError> = decode_one(&reply_bytes(valid)).unwrap();
+    let block = valid_result.expect("valid transfer_from must succeed");
+    assert_eq!(
+        allowance(&h),
+        balance_before,
+        "valid transfer spends allowance once"
+    );
+    assert_eq!(lp_balance(&h, h.user), balance_before - 1);
+    assert_eq!(lp_balance(&h, recipient), 1);
+
+    let retry = h
+        .pic
+        .update_call(
+            h.three_pool,
+            spender,
+            "icrc2_transfer_from",
+            encode_one(valid_args).unwrap(),
+        )
+        .expect("transfer_from retry call failed");
+    let retry_result: Result<Nat, TransferFromError> = decode_one(&reply_bytes(retry)).unwrap();
+    assert_eq!(
+        retry_result,
+        Err(TransferFromError::Duplicate { duplicate_of: block })
+    );
+    assert_eq!(allowance(&h), balance_before);
+    assert_eq!(lp_balance(&h, h.user), balance_before - 1);
+    assert_eq!(lp_balance(&h, recipient), 1);
 }
 
 // ─── IC-S-003 ───
