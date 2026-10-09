@@ -412,8 +412,8 @@ pub async fn verify_three_usd_reserve_refund_block(
     validate_three_usd_reserve_refund_block(&block, tuple)
 }
 
-/// Verify an exact ICRC-1 mint/transfer block, resolving a single advertised
-/// archive callback when the ledger has archived the requested index.
+/// Verify an exact directly served ICRC-1 mint/transfer block. Archived
+/// indexes remain held until an authenticated archive-proof path exists.
 pub async fn verify_icrc3_transfer_block(
     ledger: Principal,
     block_index: u64,
@@ -536,7 +536,7 @@ pub fn validate_icrc3_borrow_mint_block(
     Ok(())
 }
 
-/// Fetch an archive-aware candidate block and validate it against the exact
+/// Fetch a directly served candidate block and validate it against the exact
 /// persisted mint arguments. Candidate indexes are untrusted caller input.
 pub async fn verify_icrc3_borrow_mint_block(
     ledger: Principal,
@@ -559,9 +559,11 @@ fn accounts_match_default_subaccount(actual: &Account, expected: &Account) -> bo
         }
 }
 
-/// Fetch an exact ledger-global block. Archive metadata must identify exactly
-/// one bounded callback covering the requested index; nested archives fail
-/// closed.
+/// Fetch an exact block served directly by the configured ledger canister.
+/// Archive callbacks are not authenticated as members of the ledger's
+/// certified chain by this helper, so any archived response fails closed.
+/// This still trusts the configured ledger canister's direct response; it is
+/// not an independent ICRC-3 certificate/hash-chain inclusion verifier.
 pub async fn fetch_icrc3_block(
     ledger: Principal,
     block_index: u64,
@@ -583,68 +585,30 @@ pub async fn fetch_icrc3_block(
     if block_index >= log_length {
         return Err("requested block index is outside the ledger log length".into());
     }
-    if response.blocks.len() == 1
-        && response.blocks[0].id.0.to_u64() == Some(block_index)
-        && response.archived_blocks.is_empty()
-    {
-        return decode_block(&response.blocks[0].block);
-    }
-    if !response.blocks.is_empty() || response.archived_blocks.len() != 1 {
-        return Err("icrc3_get_blocks returned ambiguous or incomplete archive evidence".into());
-    }
-    let archive = &response.archived_blocks[0];
-    if archive.callback.method.trim().is_empty() {
-        return Err("archive callback method is empty".into());
-    }
-    validate_exact_archive_ranges(block_index, &archive.args)?;
-    let archive_request = vec![GetBlocksRequest {
-        start: Nat::from(block_index),
-        length: Nat::from(1u64),
-    }];
-    let result: Result<(GetBlocksResult,), _> = ic_cdk::call(
-        archive.callback.canister_id,
-        &archive.callback.method,
-        (archive_request,),
-    )
-    .await;
-    let (archived,) = result
-        .map_err(|(code, message)| format!("icrc3 archive call failed: {code:?} {message}"))?;
-    decode_block(exact_archive_callback_block(block_index, &archived)?)
+    decode_direct_icrc3_block(block_index, &response)
 }
 
-fn exact_archive_callback_block(
+fn decode_direct_icrc3_block(
     block_index: u64,
     response: &GetBlocksResult,
-) -> Result<&ICRC3Value, String> {
-    if !response.archived_blocks.is_empty()
-        || response.blocks.len() != 1
-        || response.blocks[0].id.0.to_u64() != Some(block_index)
-    {
-        return Err("archive callback returned malformed exact block response".into());
+) -> Result<DecodedBlock, String> {
+    if !response.archived_blocks.is_empty() {
+        return Err(
+            "archive-backed block evidence is unsupported; block remains unverified".into(),
+        );
     }
-    Ok(&response.blocks[0].block)
-}
-
-fn validate_exact_archive_ranges(
-    block_index: u64,
-    args: &[GetBlocksRequest],
-) -> Result<(), String> {
-    if args.len() > 32 {
-        return Err("archive callback has too many advertised ranges".into());
+    if response.blocks.len() != 1 || response.blocks[0].id.0.to_u64() != Some(block_index) {
+        return Err("icrc3_get_blocks did not return one exact directly served block".into());
     }
-    let mut coverage_count = 0usize;
-    for arg in args {
-        let start = arg.start.0.to_u64().ok_or_else(|| "archive range start does not fit in u64".to_string())?;
-        let len = arg.length.0.to_u64().ok_or_else(|| "archive range length does not fit in u64".to_string())?;
-        let end = start.checked_add(len).ok_or_else(|| "archive range overflows u64".to_string())?;
-        if start <= block_index && block_index < end {
-            coverage_count += 1;
-        }
+    let log_length = response
+        .log_length
+        .0
+        .to_u64()
+        .ok_or_else(|| "ledger log length does not fit in u64".to_string())?;
+    if block_index >= log_length {
+        return Err("requested block index is outside the ledger log length".into());
     }
-    if coverage_count != 1 {
-        return Err("archive callback does not uniquely cover the requested block".into());
-    }
-    Ok(())
+    decode_block(&response.blocks[0].block)
 }
 
 pub async fn icrc3_log_length(ledger: Principal) -> Result<u64, String> {
@@ -1021,7 +985,11 @@ fn account_to_value(account: Account) -> ICRC3Value {
 
 #[cfg(test)]
 mod three_usd_reserve_ingress_tests {
-    use super::{decode_block, exact_archive_callback_block, validate_exact_archive_ranges, validate_icrc1_mint_block, validate_three_usd_ingress_scan_page, validate_three_usd_reserve_ingress_block, DecodedBlock};
+    use super::{
+        decode_block, decode_direct_icrc3_block, validate_icrc1_mint_block,
+        validate_three_usd_ingress_scan_page, validate_three_usd_reserve_ingress_block,
+        DecodedBlock,
+    };
     use candid::Nat;
     use icrc_ledger_types::icrc3::blocks::{ArchivedBlocks, BlockWithId, GetBlocksRequest, GetBlocksResult};
     use icrc_ledger_types::icrc3::archive::QueryArchiveFn;
@@ -1241,39 +1209,10 @@ mod three_usd_reserve_ingress_tests {
     }
 
     #[test]
-    fn exact_archive_ranges_reject_overflow_and_ambiguous_or_unrepresentable_ranges() {
-        let range = |start: Nat, length: Nat| GetBlocksRequest { start, length };
-        assert!(validate_exact_archive_ranges(5, &[range(Nat::from(4u64), Nat::from(2u64))]).is_ok());
-        assert!(validate_exact_archive_ranges(5, &[range(Nat::from(u64::MAX), Nat::from(2u64))]).is_err());
-        assert!(validate_exact_archive_ranges(5, &[range(Nat::from(0u64), Nat::from(6u64)), range(Nat::from(5u64), Nat::from(1u64))]).is_err());
-        assert!(validate_exact_archive_ranges(5, &[range(Nat::from(0u64), Nat::from(5u64))]).is_err());
-        assert!(validate_exact_archive_ranges(5, &[range(Nat::from(0u64), Nat::from(u128::from(u64::MAX) + 1))]).is_err());
-        let too_many = (0..33).map(|_| range(Nat::from(0u64), Nat::from(6u64))).collect::<Vec<_>>();
-        assert!(validate_exact_archive_ranges(5, &too_many).is_err());
-    }
-
-    #[test]
-    fn archive_callback_must_return_one_exact_non_nested_block() {
+    fn direct_block_is_accepted_but_archive_descriptors_fail_before_any_callback() {
         let tuple = tuple();
-        let exact = response(&[7], 8, &tuple);
-        assert!(exact_archive_callback_block(7, &exact).is_ok());
-        assert!(exact_archive_callback_block(6, &exact).is_err());
-        assert!(exact_archive_callback_block(7, &response(&[], 8, &tuple)).is_err());
-        assert!(exact_archive_callback_block(7, &response(&[7, 8], 9, &tuple)).is_err());
-        let mut nested = response(&[7], 8, &tuple);
-        nested.archived_blocks.push(ArchivedBlocks {
-            args: vec![GetBlocksRequest { start: Nat::from(7u64), length: Nat::from(1u64) }],
-            callback: QueryArchiveFn { canister_id: Principal::from_slice(&[9]), method: "nested".into(), _marker: std::marker::PhantomData },
-        });
-        assert!(exact_archive_callback_block(7, &nested).is_err());
-    }
-
-    #[test]
-    fn archived_proof_block_is_checked_against_the_configured_expectations() {
-        let tuple = tuple();
-        let archive_response = response(&[7], 8, &tuple);
-        let decoded = decode_block(exact_archive_callback_block(7, &archive_response).unwrap())
-            .unwrap();
+        let direct = response(&[7], 8, &tuple);
+        let decoded = decode_direct_icrc3_block(7, &direct).unwrap();
         let expected = super::ProofExpectations {
             ledger_kind: super::SpProofLedger::ThreePoolTransferDefault,
             expected_amount_e8s: tuple.amount_e8s,
@@ -1284,9 +1223,38 @@ mod three_usd_reserve_ingress_tests {
 
         assert_eq!(super::validate_block(&decoded, &expected), Ok(42));
 
+        // Even if this advertised callback returned a fully matching tuple
+        // (as the removed positive synthetic test modeled), the descriptor
+        // itself is not ledger-chain evidence. The direct-only decoder
+        // rejects here, before fetch_icrc3_block can invoke any callback.
+        let mut advertised_archive = response(&[], 8, &tuple);
+        advertised_archive.archived_blocks.push(ArchivedBlocks {
+            args: vec![GetBlocksRequest {
+                start: Nat::from(7u64),
+                length: Nat::from(1u64),
+            }],
+            callback: QueryArchiveFn {
+                canister_id: Principal::from_slice(&[8]),
+                method: "get_blocks".into(),
+                _marker: std::marker::PhantomData,
+            },
+        });
+        assert!(decode_direct_icrc3_block(7, &advertised_archive)
+            .unwrap_err()
+            .contains("archive-backed block evidence is unsupported"));
+        advertised_archive.archived_blocks[0].args.clear();
+        advertised_archive.archived_blocks[0].callback.method.clear();
+        assert!(decode_direct_icrc3_block(7, &advertised_archive).is_err());
+
         let mut wrong_expectations = expected;
         wrong_expectations.expected_amount_e8s += 1;
         assert!(super::validate_block(&decoded, &wrong_expectations).is_err());
+
+        // Direct responses with malformed IDs, extra blocks, or a log length
+        // that excludes the requested ID are also rejected.
+        assert!(decode_direct_icrc3_block(6, &direct).is_err());
+        assert!(decode_direct_icrc3_block(8, &response(&[7, 8], 9, &tuple)).is_err());
+        assert!(decode_direct_icrc3_block(8, &response(&[8], 8, &tuple)).is_err());
     }
 }
 
