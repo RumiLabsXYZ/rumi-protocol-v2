@@ -658,7 +658,6 @@ fn setup_timers() {
     // from double-processing an op.
     register_settlement_timer();
     register_observer_timer();
-    register_chain_vault_gc_timer();
     // Task 12: foreign-chain interest harvest. Defaults to a ~1-year interval
     // (effectively OFF) so realization is deliberate; tunable via
     // `set_chain_interest_tick_interval_secs`. No-op when no EVM chain is
@@ -670,31 +669,6 @@ fn setup_timers() {
     // any canister with no chain configured, so it is safe to register everywhere.
     register_chains_price_timer();
     register_conflux_hot_wallet_refresh_timer();
-}
-
-/// M2 anti-spam backstop: hourly GC of stale `AwaitingDeposit` chain vaults
-/// (unfunded opens older than the TTL). Bounds total unfunded state from
-/// anonymous `open_chain_vault_evm` spam without the self-DoS of a hard cap.
-/// Pruning an `AwaitingDeposit` vault is supply-invariant-safe (no confirmed
-/// debt / enqueued mint). Re-registered every upgrade via `setup_timers`.
-fn register_chain_vault_gc_timer() {
-    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(3600), || {
-        let now = ic_cdk::api::time();
-        let pruned = mutate_state(|s| {
-            rumi_protocol_backend::chains::vault::prune_stale_awaiting_deposit(
-                &mut s.multi_chain,
-                now,
-                rumi_protocol_backend::chains::vault::AWAITING_DEPOSIT_TTL_NS,
-            )
-        });
-        if pruned > 0 {
-            log!(
-                INFO,
-                "[chain_vault_gc] pruned {} stale AwaitingDeposit vaults",
-                pruned
-            );
-        }
-    });
 }
 
 fn capture_protocol_snapshot() {

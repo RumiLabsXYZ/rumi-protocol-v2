@@ -1242,109 +1242,50 @@ fn per_owner_cap_counts_non_terminal_only() {
     assert_eq!(s.count_owner_active_vaults(&owner), 2);
 }
 
-// ─── M2: stale AwaitingDeposit GC ─────────────────────────────────────────────
-
-use super::vault::{prune_stale_awaiting_deposit, AWAITING_DEPOSIT_TTL_NS};
+// ─── AwaitingDeposit retention and bounded observer discoverability ───────────
 
 #[test]
-fn gc_prunes_only_stale_awaiting_deposit() {
+fn stale_awaiting_deposit_records_remain_owned_and_pollable() {
     use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
-    // setup() registers CHAIN (status Registered), so its observer is "active"
-    // and the GC is allowed to reap stale unfunded vaults on it (finding F).
+
+    let owner = Principal::from_slice(&[42]);
     let mut s = setup(PRICE_150_USD_E8);
-    let mk = |id: u64, st: ChainVaultStatus, opened: u64| ChainVaultV1 {
+    let mk = |id: u64, custody_address: &str, collateral: u128| ChainVaultV1 {
         vault_id: id,
-        owner: Principal::anonymous(),
+        owner,
         collateral_chain: CHAIN,
-        custody_address: "c".into(),
-        collateral_amount_native: 0,
+        custody_address: custody_address.into(),
+        collateral_amount_native: collateral,
         debt_e8s: 0,
         mint_recipient: "r".into(),
-        pending_mint_e8s: 0,
-        status: st,
-        opened_at_ns: opened,
-        last_interest_accrual_ns: 0,
-        pending_interest_mint_e8s: 0,
-        pending_liquidation: None,
-        owner_evm: None,
-    };
-    let now = 100 * AWAITING_DEPOSIT_TTL_NS;
-    // 1: stale AwaitingDeposit (older than TTL) -> pruned.
-    s.chain_vaults.insert(
-        1,
-        mk(
-            1,
-            ChainVaultStatus::AwaitingDeposit,
-            now - AWAITING_DEPOSIT_TTL_NS - 1,
-        ),
-    );
-    // 2: young AwaitingDeposit (within TTL) -> kept.
-    s.chain_vaults
-        .insert(2, mk(2, ChainVaultStatus::AwaitingDeposit, now - 1));
-    // 3: old Open vault -> kept (only AwaitingDeposit is GC'd; a funded vault is safe).
-    s.chain_vaults.insert(3, mk(3, ChainVaultStatus::Open, 0));
-    // 4: old MintPending -> kept (a mint is in flight; not unfunded).
-    s.chain_vaults
-        .insert(4, mk(4, ChainVaultStatus::MintPending, 0));
-
-    let pruned = prune_stale_awaiting_deposit(&mut s, now, AWAITING_DEPOSIT_TTL_NS);
-    assert_eq!(pruned, 1);
-    assert!(
-        !s.chain_vaults.contains_key(&1),
-        "stale AwaitingDeposit pruned"
-    );
-    assert!(
-        s.chain_vaults.contains_key(&2),
-        "young AwaitingDeposit kept"
-    );
-    assert!(s.chain_vaults.contains_key(&3), "Open kept");
-    assert!(s.chain_vaults.contains_key(&4), "MintPending kept");
-}
-
-#[test]
-fn gc_skips_stale_vaults_when_observer_inactive() {
-    use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
-    let now = 100 * AWAITING_DEPOSIT_TTL_NS;
-    let stale = |id: u64| ChainVaultV1 {
-        vault_id: id,
-        owner: Principal::anonymous(),
-        collateral_chain: CHAIN,
-        custody_address: "c".into(),
-        collateral_amount_native: 0,
-        debt_e8s: 0,
-        mint_recipient: "r".into(),
-        pending_mint_e8s: 0,
+        pending_mint_e8s: 5_000_000_000,
         status: ChainVaultStatus::AwaitingDeposit,
-        opened_at_ns: now - AWAITING_DEPOSIT_TTL_NS - 1,
-        owner_evm: None,
+        opened_at_ns: 1,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
         pending_liquidation: None,
+        owner_evm: None,
     };
-    // (a) Chain not registered at all -> no observer -> not reaped (would strand
-    //     a funded-but-unobserved deposit).
-    let mut s = MultiChainState::default();
-    s.chain_vaults.insert(1, stale(1));
+    // The observer has no reliable proof that an old address is unfunded:
+    // one row may have received a deposit while RPC/page coverage was missing,
+    // and a zero-balance observation would still race a later transfer.
+    s.chain_vaults.insert(1, mk(1, "custody-funded-unknown", ONE_SOL));
+    s.chain_vaults.insert(2, mk(2, "custody-no-deposit-yet", 2 * ONE_SOL));
+
+    assert_eq!(s.count_owner_active_vaults(&owner), 2);
+    let page = super::evm::deposit_watch::take_awaiting_deposit_page(&mut s, CHAIN);
     assert_eq!(
-        prune_stale_awaiting_deposit(&mut s, now, AWAITING_DEPOSIT_TTL_NS),
-        0
+        page,
+        vec![
+            (1, "custody-funded-unknown".into(), ONE_SOL),
+            (2, "custody-no-deposit-yet".into(), 2 * ONE_SOL),
+        ]
     );
-    assert!(
-        s.chain_vaults.contains_key(&1),
-        "unregistered-chain vault kept"
-    );
-    // (b) Chain registered but reorg-halted -> observer halted -> not reaped.
-    let mut s = setup(PRICE_150_USD_E8);
-    s.reorg_halted.insert(CHAIN, true);
-    s.chain_vaults.insert(1, stale(1));
-    assert_eq!(
-        prune_stale_awaiting_deposit(&mut s, now, AWAITING_DEPOSIT_TTL_NS),
-        0
-    );
-    assert!(
-        s.chain_vaults.contains_key(&1),
-        "reorg-halted-chain vault kept"
-    );
+    assert_eq!(s.count_owner_active_vaults(&owner), 2);
+    assert!(s
+        .chain_vaults
+        .values()
+        .all(|vault| vault.status == ChainVaultStatus::AwaitingDeposit));
 }
 
 // ─── M2 review finding A: collateral release blocked while a borrow mint pends ─
