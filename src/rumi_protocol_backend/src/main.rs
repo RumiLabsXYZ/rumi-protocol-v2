@@ -10376,11 +10376,9 @@ fn validate_three_usd_default_source_refund_candidate_block(
 #[update]
 #[candid_method(update)]
 async fn stability_pool_liquidate_v2(
-    _request: rumi_protocol_backend::SpLiquidationV2Request,
+    request: rumi_protocol_backend::SpLiquidationV2Request,
 ) -> Result<rumi_protocol_backend::SpLiquidationV2StatusView, ProtocolError> {
-    Err(ProtocolError::TemporarilyUnavailable(
-        "Stability Pool liquidation V2 is disabled pending exact real-ledger receipt and refund verification".into(),
-    ))
+    rumi_protocol_backend::vault::stability_pool_liquidate_v2(request).await
 }
 
 #[update]
