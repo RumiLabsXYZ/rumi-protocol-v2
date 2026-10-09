@@ -180,6 +180,29 @@ export const idlFactory = ({ IDL }) => {
     'record_id' : IDL.Opt(IDL.Nat64),
     'icp_swapped_e8s' : IDL.Nat64,
   });
+  const BotTreasuryStatus = IDL.Variant({
+    'ReceiptObserved' : IDL.Null,
+    'NoEffect' : IDL.Null,
+    'Paid' : IDL.Null,
+    'Ambiguous' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'NeedsPreparation' : IDL.Null,
+  });
+  const BotTreasuryIntentView = IDL.Record({
+    'status' : BotTreasuryStatus,
+    'gross_amount_e8s' : IDL.Nat64,
+    'receipt' : IDL.Opt(TransferReceipt),
+    'memo' : IDL.Vec(IDL.Nat8),
+    'fee_e8s' : IDL.Nat64,
+    'claim_generation' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'amount_e8s' : IDL.Nat64,
+    'treasury_principal' : IDL.Principal,
+    'ledger_principal' : IDL.Principal,
+    'created_at_time' : IDL.Nat64,
+    'record_id' : IDL.Nat64,
+    'sender_principal' : IDL.Principal,
+  });
   const LiquidatableVaultInfo = IDL.Record({
     'collateral_amount' : IDL.Nat64,
     'recommended_liquidation_amount' : IDL.Nat64,
@@ -201,6 +224,11 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'admin_reconcile_return_block' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [],
+      ),
+    'admin_reconcile_treasury_block' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
         [],
@@ -251,6 +279,11 @@ export const idlFactory = ({ IDL }) => {
     'get_pending_payment_journals' : IDL.Func(
         [],
         [IDL.Vec(BotPaymentJournal)],
+        ['query'],
+      ),
+    'get_pending_treasury_intent' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Opt(BotTreasuryIntentView)],
         ['query'],
       ),
     'get_processing_paused' : IDL.Func([], [IDL.Bool], ['query']),

@@ -267,6 +267,36 @@ fn official_icp_treasury_transfer_decodes_direct_and_archived_blocks() {
         created_at_time,
     );
 
+    // A different, valid ICP transfer at the operator-supplied wrong block
+    // index must not be accepted as proof for the saved treasury tuple.
+    let wrong_block_index = ledger_transfer(
+        &pic,
+        ledger,
+        sender,
+        treasury,
+        1,
+        b"wrong-candidate-block".to_vec(),
+        created_at_time + 10,
+    );
+    let wrong_source = native_icp_blocks::select_block_source(
+        query_blocks(&pic, ledger, wrong_block_index),
+        wrong_block_index,
+    )
+    .expect("select the valid but unrelated candidate block");
+    let BlockSource::Direct(wrong_block) = wrong_source else {
+        panic!("new candidate transfer should remain in the direct ledger range");
+    };
+    assert!(native_icp_blocks::verify_treasury_transfer(
+        &wrong_block,
+        sender,
+        treasury,
+        amount,
+        fee,
+        &memo,
+        created_at_time,
+    )
+    .is_err());
+
     let mut archived_block = None;
     for index in 0..20u64 {
         let _ = ledger_transfer(

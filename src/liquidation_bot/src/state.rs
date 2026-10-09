@@ -201,7 +201,7 @@ pub struct BotTreasuryJournal {
     pub record: crate::history::LiquidationRecordV1,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BotTreasuryStatus {
     NeedsPreparation,
     Prepared,
@@ -209,6 +209,45 @@ pub enum BotTreasuryStatus {
     NoEffect,
     ReceiptObserved,
     Paid,
+}
+
+/// Bounded admin projection of the immutable treasury transfer tuple. The
+/// mutable liquidation record and accounting flag stay behind the canister.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq)]
+pub struct BotTreasuryIntentView {
+    pub record_id: u64,
+    pub vault_id: u64,
+    pub claim_generation: u64,
+    pub ledger_principal: Principal,
+    pub sender_principal: Principal,
+    pub treasury_principal: Principal,
+    pub gross_amount_e8s: u64,
+    pub amount_e8s: u64,
+    pub fee_e8s: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time: u64,
+    pub status: BotTreasuryStatus,
+    pub receipt: Option<crate::swap::TransferReceipt>,
+}
+
+impl From<&BotTreasuryJournal> for BotTreasuryIntentView {
+    fn from(journal: &BotTreasuryJournal) -> Self {
+        Self {
+            record_id: journal.record_id,
+            vault_id: journal.vault_id,
+            claim_generation: journal.claim_generation,
+            ledger_principal: journal.ledger_principal,
+            sender_principal: journal.sender_principal,
+            treasury_principal: journal.treasury_principal,
+            gross_amount_e8s: journal.gross_amount_e8s,
+            amount_e8s: journal.amount_e8s,
+            fee_e8s: journal.fee_e8s,
+            memo: journal.memo.clone(),
+            created_at_time: journal.created_at_time,
+            status: journal.status.clone(),
+            receipt: journal.receipt.clone(),
+        }
+    }
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]

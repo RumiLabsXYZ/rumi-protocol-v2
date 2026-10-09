@@ -650,6 +650,24 @@ mod return_transfer_tests {
             fee.e8s += 1;
         }
         assert!(verify(&wrong_fee).is_err());
+        let mut wrong_amount = block.clone();
+        if let Some(IcpCandidOperation::Transfer { amount, .. }) = wrong_amount.transaction.operation.as_mut() {
+            amount.e8s += 1;
+        }
+        assert!(verify(&wrong_amount).is_err());
+        let mut wrong_sender = block.clone();
+        if let Some(IcpCandidOperation::Transfer { from, .. }) = wrong_sender.transaction.operation.as_mut() {
+            *from = native_icp_blocks::default_account_identifier(Principal::management_canister());
+        }
+        assert!(verify(&wrong_sender).is_err());
+        let mut wrong_recipient = block.clone();
+        if let Some(IcpCandidOperation::Transfer { to, .. }) = wrong_recipient.transaction.operation.as_mut() {
+            *to = native_icp_blocks::default_account_identifier(Principal::management_canister());
+        }
+        assert!(verify(&wrong_recipient).is_err());
+        let mut wrong_time = block.clone();
+        wrong_time.transaction.created_at_time.timestamp_nanos += 1;
+        assert!(verify(&wrong_time).is_err());
         let mut wrong_memo = block;
         wrong_memo.transaction.icrc1_memo = Some(b"other transfer".to_vec());
         assert!(verify(&wrong_memo).is_err());

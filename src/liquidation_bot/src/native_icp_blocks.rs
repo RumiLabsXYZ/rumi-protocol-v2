@@ -214,3 +214,27 @@ pub fn default_account_identifier(owner: Principal) -> Vec<u8> {
     account.extend_from_slice(&hash);
     account
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supplied_wrong_block_index_is_rejected() {
+        let response = QueryBlocksResponse {
+            chain_length: 6,
+            certificate: None,
+            blocks: vec![Block {
+                transaction: Transaction {
+                    memo: 0,
+                    icrc1_memo: None,
+                    operation: None,
+                    created_at_time: Timestamp { timestamp_nanos: 1 },
+                },
+            }],
+            first_block_index: 5,
+            archived_blocks: vec![],
+        };
+        assert!(select_block_source(response, 6).is_err());
+    }
+}

@@ -122,6 +122,27 @@ export interface BotSwapIntent {
   'output_fee_e6' : bigint,
   'amount_out_minimum_e6' : bigint,
 }
+export interface BotTreasuryIntentView {
+  'status' : BotTreasuryStatus,
+  'gross_amount_e8s' : bigint,
+  'receipt' : [] | [TransferReceipt],
+  'memo' : Uint8Array | number[],
+  'fee_e8s' : bigint,
+  'claim_generation' : bigint,
+  'vault_id' : bigint,
+  'amount_e8s' : bigint,
+  'treasury_principal' : Principal,
+  'ledger_principal' : Principal,
+  'created_at_time' : bigint,
+  'record_id' : bigint,
+  'sender_principal' : Principal,
+}
+export type BotTreasuryStatus = { 'ReceiptObserved' : null } |
+  { 'NoEffect' : null } |
+  { 'Paid' : null } |
+  { 'Ambiguous' : null } |
+  { 'Prepared' : null } |
+  { 'NeedsPreparation' : null };
 export interface CycleManagerCyclesStatus {
   'idle_burn_cycles_per_day' : [] | [bigint],
   'stable_memory_bytes' : [] | [bigint],
@@ -197,6 +218,11 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : string }
   >,
+  'admin_reconcile_treasury_block' : ActorMethod<
+    [bigint, bigint],
+    { 'Ok' : null } |
+      { 'Err' : string }
+  >,
   'admin_refresh_fees' : ActorMethod<[], [bigint, bigint]>,
   'admin_resolve_pool_ordering' : ActorMethod<[], undefined>,
   'admin_retry_stuck_claim' : ActorMethod<[bigint], undefined>,
@@ -219,6 +245,10 @@ export interface _SERVICE {
   >,
   'get_pending_claim_journals' : ActorMethod<[], Array<BotClaimJournal>>,
   'get_pending_payment_journals' : ActorMethod<[], Array<BotPaymentJournal>>,
+  'get_pending_treasury_intent' : ActorMethod<
+    [bigint],
+    [] | [BotTreasuryIntentView]
+  >,
   'get_processing_paused' : ActorMethod<[], boolean>,
   'get_stuck_liquidations' : ActorMethod<[], Array<LiquidationRecordVersioned>>,
   'notify_liquidatable_vaults' : ActorMethod<

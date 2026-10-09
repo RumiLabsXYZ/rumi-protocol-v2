@@ -160,7 +160,7 @@ fn inspect_message() {
         | "admin_sweep_ckusdc" | "admin_retry_stuck_claim"
         | "set_processing_paused" | "admin_reconcile_payment_block" | "admin_reconcile_return_block"
         | "admin_authorize_shortfall_topup"
-        | "admin_refresh_fees" | "admin_test_swap" => {
+        | "admin_refresh_fees" | "admin_test_swap" | "admin_reconcile_treasury_block" => {
             if ic_cdk::api::caller() != Principal::anonymous() {
                 ic_cdk::api::call::accept_message();
             }
@@ -286,8 +286,11 @@ fn trim_admin_events(events: &mut Vec<BotAdminEvent>) {
 #[update]
 fn set_config(config: BotConfig) {
     require_admin();
-    if state::read_state(|s| !s.pending_payments.is_empty() || !s.pending_claims.is_empty()) {
-        log!(INFO, "Rejected config change while a claim/payment recovery journal is pending");
+    let (has_payment, has_claim, has_treasury) = state::read_state(|s| (
+        !s.pending_payments.is_empty(), !s.pending_claims.is_empty(), !s.pending_treasury.is_empty(),
+    ));
+    if !admin_config_update_allowed(has_payment, has_claim, has_treasury) {
+        log!(INFO, "Rejected config change while a claim, payment, or treasury recovery journal is pending");
         return;
     }
     state::mutate_state(|s| {
@@ -311,6 +314,14 @@ fn get_pending_payment_journals() -> Vec<state::BotPaymentJournal> {
 fn get_pending_claim_journals() -> Vec<state::BotClaimJournal> {
     require_admin();
     state::read_state(|s| s.pending_claims.values().cloned().collect())
+}
+
+/// Return one immutable pending treasury intent for operator block reconciliation.
+/// The record ID makes the query bounded regardless of the journal's total size.
+#[query]
+fn get_pending_treasury_intent(record_id: u64) -> Option<state::BotTreasuryIntentView> {
+    require_admin();
+    state::read_state(|s| s.pending_treasury.get(&record_id).map(Into::into))
 }
 
 // ---- History query endpoints ----
@@ -536,8 +547,9 @@ async fn admin_test_swap(amount_e8s: u64) -> Result<swap::SwapResult, String> {
     let (has_claim_recovery, has_payment_recovery) = state::read_state(|s| {
         (!s.pending_claims.is_empty(), !s.pending_payments.is_empty())
     });
-    if !admin_test_swap_allowed(has_claim_recovery, has_payment_recovery) {
-        return Err("cannot run admin_test_swap while claim or payment recovery is pending".into());
+    let has_treasury_recovery = state::read_state(|s| !s.pending_treasury.is_empty());
+    if !admin_test_swap_allowed(has_claim_recovery, has_payment_recovery, has_treasury_recovery) {
+        return Err("cannot run admin_test_swap while claim, payment, or treasury recovery is pending".into());
     }
     let config = state::read_state(|s| s.config.clone())
         .ok_or_else(|| "Config not set".to_string())?;
@@ -615,8 +627,12 @@ fn admin_retry_disposition(
     }
 }
 
-fn admin_test_swap_allowed(has_claim_recovery: bool, has_payment_recovery: bool) -> bool {
-    !has_claim_recovery && !has_payment_recovery
+fn admin_test_swap_allowed(has_claim_recovery: bool, has_payment_recovery: bool, has_treasury_recovery: bool) -> bool {
+    !has_claim_recovery && !has_payment_recovery && !has_treasury_recovery
+}
+
+fn admin_config_update_allowed(has_payment_recovery: bool, has_claim_recovery: bool, has_treasury_recovery: bool) -> bool {
+    !has_payment_recovery && !has_claim_recovery && !has_treasury_recovery
 }
 
 #[cfg(test)]
@@ -641,10 +657,17 @@ mod admin_retry_tests {
 
     #[test]
     fn admin_test_swap_is_blocked_by_any_pending_recovery_journal() {
-        assert!(admin_test_swap_allowed(false, false));
-        assert!(!admin_test_swap_allowed(true, false));
-        assert!(!admin_test_swap_allowed(false, true));
-        assert!(!admin_test_swap_allowed(true, true));
+        assert!(admin_test_swap_allowed(false, false, false));
+        assert!(!admin_test_swap_allowed(true, false, false));
+        assert!(!admin_test_swap_allowed(false, true, false));
+        assert!(!admin_test_swap_allowed(true, true, false));
+        assert!(!admin_test_swap_allowed(false, false, true));
+    }
+
+    #[test]
+    fn config_change_is_blocked_by_pending_treasury_obligation() {
+        assert!(admin_config_update_allowed(false, false, false));
+        assert!(!admin_config_update_allowed(false, false, true));
     }
 }
 
@@ -658,6 +681,17 @@ async fn admin_reconcile_payment_block(vault_id: u64, block_index: u64) -> Resul
     let config = state::read_state(|s| s.config.clone())
         .ok_or_else(|| "Config not set".to_string())?;
     process::admin_reconcile_payment_block(&config, vault_id, block_index).await
+}
+
+/// Reconcile one unresolved treasury bonus using an operator-supplied candidate
+/// ICP ledger block. The stored transfer tuple remains authoritative; this path
+/// verifies and records the block without dispatching another transfer.
+#[update]
+async fn admin_reconcile_treasury_block(record_id: u64, block_index: u64) -> Result<(), String> {
+    require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .map_err(|_| "Another operation is in progress".to_string())?;
+    process::admin_reconcile_treasury_block(record_id, block_index).await
 }
 
 /// Authorize one exact residual payment after allocating residual plus fee.
