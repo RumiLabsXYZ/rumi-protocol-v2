@@ -167,6 +167,45 @@ fn write_ambiguous_swap_recovery(
     });
 }
 
+/// Record a successful router response whose output could not be verified
+/// against the bot's wallet. Keep the existing `SwapMayHaveStarted` claim
+/// journal untouched so the claim generation remains held for reconciliation.
+fn write_unverified_swap_recovery(
+    id: u64,
+    vault_id: u64,
+    timestamp: u64,
+    collateral_amount: u64,
+    debt_covered: u64,
+    swap_amount: u64,
+    collateral_price: u64,
+    effective_price: u64,
+    slippage_bps: i32,
+    router_received: u64,
+    error: &str,
+) {
+    write_record(LiquidationRecordV1 {
+        id,
+        vault_id,
+        timestamp,
+        status: LiquidationStatus::ConfirmFailed,
+        collateral_claimed_e8s: collateral_amount,
+        debt_to_cover_e8s: debt_covered,
+        icp_swapped_e8s: swap_amount,
+        // No wallet balance was read, so the router's reported output is not
+        // recorded as received ckUSDC.
+        ckusdc_received_e6: 0,
+        ckusdc_transferred_e6: 0,
+        icp_to_treasury_e8s: 0,
+        oracle_price_e8s: collateral_price,
+        effective_price_e8s: effective_price,
+        slippage_bps,
+        error_message: Some(format!(
+            "post-swap ckUSDC balance unavailable; router reported {router_received} e6 but receipt is unverified; claim generation remains held and no payment, collateral return, or cancellation was attempted: {error}"
+        )),
+        confirm_retry_count: 0,
+    });
+}
+
 /// Authorize the existing exact collateral-return path after a failure that
 /// happened before ICPSwap dispatch. The generation/status checks ensure this
 /// transition cannot overwrite a later claim phase or an existing return.
@@ -208,6 +247,31 @@ pub(crate) struct SwapReservation {
     /// `discrepancy_note` carries a human-readable explanation that gets
     /// appended to the LiquidationRecord's `error_message`. None = clean.
     pub discrepancy_note: Option<String>,
+}
+
+/// Result of the post-swap wallet read. An unavailable balance has no
+/// reservation, so it cannot flow into the Phase 3 payment path.
+#[derive(Debug, PartialEq)]
+enum PostSwapReservation {
+    Measured(SwapReservation),
+    Unavailable(String),
+}
+
+fn reserve_measured_post_swap_delta(
+    vault_id: u64,
+    router_received_e6: u64,
+    balance_before_e6: u64,
+    balance_after: Result<u64, String>,
+) -> PostSwapReservation {
+    match balance_after {
+        Ok(balance_after_e6) => PostSwapReservation::Measured(compute_swap_reservation(
+            vault_id,
+            router_received_e6,
+            balance_before_e6,
+            balance_after_e6,
+        )),
+        Err(error) => PostSwapReservation::Unavailable(error),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -858,21 +922,38 @@ pub async fn process_pending() {
 
     let slippage_bps = calculate_slippage(effective_price, collateral_price);
 
-    // Per-claim reservation: read wallet balance again, compute delta, and use
-    // that — not the router's claim — as the amount this claim is allowed to
-    // spend. See compute_swap_reservation for the decision rules. When the
-    // pre-swap balance read failed we set it to u64::MAX, which makes the
-    // delta saturate to 0 and falls back to the router's number unchanged.
-    let bal_after_swap = swap::balance_of_self_ckusdc(&config).await.unwrap_or_else(|e| {
-        log!(crate::INFO, "Post-swap balance read failed for vault #{}: {} (using router-reported amount)", vault.vault_id, e);
-        bal_before_swap.saturating_add(router_received) // synthesise delta = router_received
-    });
-    let mut reservation = compute_swap_reservation(
+    // The router's report is advisory. A failed wallet read cannot produce a
+    // measured delta, so retain the generation-bound claim for reconciliation
+    // and stop before any Phase 3 payment or post-swap cleanup.
+    let mut reservation = match reserve_measured_post_swap_delta(
         vault.vault_id,
         router_received,
         bal_before_swap,
-        bal_after_swap,
-    );
+        swap::balance_of_self_ckusdc(&config).await,
+    ) {
+        PostSwapReservation::Measured(reservation) => reservation,
+        PostSwapReservation::Unavailable(error) => {
+            let message = format!(
+                "post-swap ckUSDC balance read failed for vault #{}: {}",
+                vault.vault_id, error
+            );
+            log!(crate::INFO, "STUCK: {}; no payment, collateral return, or cancellation attempted", message);
+            write_unverified_swap_recovery(
+                record_id,
+                vault.vault_id,
+                timestamp,
+                collateral_amount,
+                debt_covered,
+                swap_amount,
+                collateral_price,
+                effective_price,
+                slippage_bps,
+                router_received,
+                &error,
+            );
+            return;
+        }
+    };
     if let Some(note) = &reservation.discrepancy_note {
         log!(crate::INFO, "[per-claim-reservation] {}", note);
     }
@@ -2377,17 +2458,79 @@ mod tests {
     }
 
     #[test]
-    fn reservation_before_balance_unreadable_falls_back_to_router() {
-        // process_pending uses u64::MAX as a sentinel when the pre-swap
-        // balance read fails. saturating_sub then yields 0, but the
-        // post-swap read sees the post-swap balance — actual_delta
-        // saturates to 0, triggering the under-delivery branch (use 0).
-        // This is the conservative behavior we want when balance reads
-        // are unreliable: do nothing rather than spend blindly.
-        let r = compute_swap_reservation(99, 1_000_000, u64::MAX, 500_000);
-        assert_eq!(r.to_transfer_e6, 0);
-        assert_eq!(r.recorded_received_e6, 0);
-        assert!(r.discrepancy_note.is_some());
+    fn post_swap_balance_read_failure_cannot_create_phase_three_reservation() {
+        crate::memory::init_memory_manager();
+        history::init_history();
+
+        let decision = reserve_measured_post_swap_delta(
+            99,
+            1_000_000,
+            500_000,
+            Err("ledger query unavailable".to_string()),
+        );
+
+        assert_eq!(
+            decision,
+            PostSwapReservation::Unavailable("ledger query unavailable".to_string()),
+            "without a measured post-swap balance there must be no reservation to pay"
+        );
+
+        let claim = state::BotClaimJournal {
+            vault_id: 99,
+            claim_generation: 42,
+            debt_covered_e8s: 100,
+            collateral_amount_e8s: 50,
+            collateral_received_amount_e8s: Some(49),
+            collateral_outbound_fee_e8s: Some(1),
+            collateral_price_e8s: 200,
+            payment_memo: b"payment".to_vec(),
+            collateral_return_memo: b"claim-99-42-return".to_vec(),
+            failed_return_attempts: Vec::new(),
+            collateral_return: None,
+            status: state::BotClaimJournalStatus::SwapMayHaveStarted,
+        };
+        let mut bot_state = state::BotState::default();
+        bot_state.pending_claims.insert(99, claim);
+        state::init_state(bot_state);
+
+        // This is the recovery action taken by the unavailable branch. It
+        // writes a diagnostic while leaving the pre-swap generation-bound
+        // journal available for reconciliation.
+        write_unverified_swap_recovery(
+            123,
+            99,
+            456,
+            50,
+            100,
+            10,
+            200,
+            205,
+            250,
+            1_000_000,
+            "ledger query unavailable",
+        );
+
+        state::read_state(|s| {
+            let held = s.pending_claims.get(&99).expect("claim remains held");
+            assert_eq!(held.claim_generation, 42);
+            assert_eq!(
+                held.status,
+                state::BotClaimJournalStatus::SwapMayHaveStarted
+            );
+            assert!(held.collateral_return.is_none());
+            assert!(!s.pending_payments.contains_key(&99));
+        });
+        match history::get_record(123).expect("recovery diagnostic is recorded") {
+            LiquidationRecordVersioned::V1(record) => {
+                assert_eq!(record.status, LiquidationStatus::ConfirmFailed);
+                assert_eq!(record.ckusdc_received_e6, 0);
+                assert_eq!(record.ckusdc_transferred_e6, 0);
+                let message = record.error_message.expect("diagnostic explains the hold");
+                assert!(message.contains("router reported 1000000 e6"));
+                assert!(message.contains("receipt is unverified"));
+                assert!(message.contains("ledger query unavailable"));
+            }
+        }
     }
 
     #[test]
