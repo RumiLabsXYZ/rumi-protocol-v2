@@ -1945,7 +1945,9 @@ pub struct LiquidityWithdrawJournal {
     pub owner: Principal,
     pub request_id: u128,
     pub amount_e8s: u64,
-    pub tuple: BorrowMintTuple,
+    /// Absent only for a durable rejection recorded before any ledger dispatch.
+    #[serde(default)]
+    pub tuple: Option<BorrowMintTuple>,
     /// Number of dispatches durably reserved before awaiting the ledger.
     #[serde(default)]
     pub attempt_count: u32,

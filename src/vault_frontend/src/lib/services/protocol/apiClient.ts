@@ -3094,7 +3094,8 @@ static async repayToVaultWithStable(
             if (startNew) return { success: false, error: 'A previous withdrawal is unresolved. Resume it before starting another.' };
             if (status.amount_e8s !== amountE8s) return { success: false, error: 'A previous withdrawal is unresolved. Enter its exact amount to resume it.' };
             requestId = status.request_id;
-          } else if (pending && status && pending.requestId === status.request_id && startNew) {
+          } else if (pending && status && pending.requestId === status.request_id
+            && 'Completed' in status.phase && startNew) {
             return { success: false, error: 'Your saved withdrawal has finished but has not been acknowledged here. First leave Start a new withdrawal unchecked and recover its exact amount.' };
           } else if (status && !startNew && 'Completed' in status.phase && status.amount_e8s === amountE8s) {
             // Re-reading a completed result is safe even after a lost reply,

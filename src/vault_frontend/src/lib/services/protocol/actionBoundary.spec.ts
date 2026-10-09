@@ -254,6 +254,34 @@ describe('ApiClient.withdrawLiquidity — journal identity and session boundary'
     expect(backendActor.withdraw_liquidity_with_id).toHaveBeenCalledWith(11n, 30_000_000n);
   });
 
+  it('keeps an intent through status lag, then advances after a durable no-effect tombstone', async () => {
+    backendActor.withdraw_liquidity_with_id.mockResolvedValueOnce({
+      Err: { AmountTooLow: { minimum_amount: 10_000_000n } },
+    });
+    // The first status read is served before the rejection tombstone is visible.
+    backendActor.get_my_liquidity_withdrawal_status.mockResolvedValueOnce([]);
+    const rejected = await ApiClient.withdrawLiquidity('0.01');
+    expect(rejected.success).toBe(false);
+    expect(saved()).toEqual({ requestId: 1n, amountE8s: 1_000_000n });
+
+    const stillLagging = await ApiClient.withdrawLiquidity('0.2', true);
+    expect(stillLagging.success).toBe(false);
+    expect(backendActor.withdraw_liquidity_with_id).toHaveBeenCalledTimes(1);
+    expect(saved()).toEqual({ requestId: 1n, amountE8s: 1_000_000n });
+
+    // Once status proves request 1 was rejected without dispatch, the user
+    // can change the amount and start request 2. It must not reuse request 1.
+    backendActor.get_my_liquidity_withdrawal_status.mockResolvedValueOnce([{
+      request_id: 1n,
+      amount_e8s: 1_000_000n,
+      phase: { RejectedNoEffect: null },
+    }]);
+    const accepted = await ApiClient.withdrawLiquidity('0.2', true);
+    expect(accepted.success).toBe(true);
+    expect(backendActor.withdraw_liquidity_with_id).toHaveBeenNthCalledWith(2, 2n, 20_000_000n);
+    expect(localStorage.getItem(storageKey)).toBeNull();
+  });
+
   it('cannot reuse a still-saved fresh intent to mint a second time after its reply is lost', async () => {
     ApiClient.saveToLocalStorage(storageKey, { requestId: 10n, amountE8s: 20_000_000n });
     backendActor.get_my_liquidity_withdrawal_status.mockResolvedValue([{

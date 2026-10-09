@@ -38,10 +38,16 @@ pub async fn withdraw_liquidity_with_id(
         PrepareWithdrawal::Completed(block) => return Ok(block),
         PrepareWithdrawal::Rejected => return Err(ProtocolError::GenericError("This withdrawal request was rejected without a mint; use a higher request_id for a new attempt.".into())),
         PrepareWithdrawal::ReceiptRecoveryRequired => return Err(ProtocolError::GenericError("This withdrawal is awaiting exact positive ICRC-3 receipt recovery; no new mint will be sent.".into())),
+        PrepareWithdrawal::RejectedWithError(error) => return Err(error),
         PrepareWithdrawal::Dispatch(journal) => journal,
     };
     let journal = record_dispatch_attempt(caller, &journal)?;
-    match mint_icusd_with_tuple(&journal.tuple).await {
+    let Some(tuple) = journal.tuple.as_ref() else {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "withdrawal journal has no dispatch tuple; no mint was sent".into(),
+        ));
+    };
+    match mint_icusd_with_tuple(tuple).await {
         DurableMintOutcome::Confirmed(block_index) => {
             let commit_time = ic_cdk::api::time();
             let committed = mutate_state(|s| commit_liquidity_withdrawal_in_state(s, &journal, block_index, commit_time));
@@ -74,6 +80,7 @@ enum PrepareWithdrawal {
     Completed(u64),
     ReceiptRecoveryRequired,
     Rejected,
+    RejectedWithError(ProtocolError),
 }
 
 fn prepare_liquidity_withdrawal(
@@ -127,43 +134,83 @@ fn prepare_liquidity_withdrawal_in_state(
     }
     let provided = s.liquidity_pool.get(&caller).copied().unwrap_or_default();
     if provided == 0 {
-        return Err(ProtocolError::GenericError(
-            "You have no provided liquidity to withdraw".into(),
+        return Ok(reject_pre_dispatch_in_state(
+            s,
+            caller,
+            request_id,
+            amount_e8s,
+            ProtocolError::GenericError("You have no provided liquidity to withdraw".into()),
         ));
     }
     if ICUSD::from(amount_e8s) > provided {
-        return Err(ProtocolError::GenericError(format!(
-            "cannot withdraw: {} e8s, provided: {provided}",
-            amount_e8s
-        )));
+        return Ok(reject_pre_dispatch_in_state(
+            s,
+            caller,
+            request_id,
+            amount_e8s,
+            ProtocolError::GenericError(format!(
+                "cannot withdraw: {} e8s, provided: {provided}",
+                amount_e8s
+            )),
+        ));
     }
     // The minimum limits partial exits, but must not strand a smaller final
     // balance (including historical fee credits). This only applies to a new
     // request: an exact journal replay above is independent of today's balance.
     if amount_e8s < MIN_LIQUIDITY_AMOUNT.to_u64() && ICUSD::from(amount_e8s) != provided {
-        return Err(ProtocolError::AmountTooLow {
-            minimum_amount: MIN_LIQUIDITY_AMOUNT.to_u64(),
-        });
+        return Ok(reject_pre_dispatch_in_state(
+            s,
+            caller,
+            request_id,
+            amount_e8s,
+            ProtocolError::AmountTooLow {
+                minimum_amount: MIN_LIQUIDITY_AMOUNT.to_u64(),
+            },
+        ));
     }
     let op_nonce = s.next_op_nonce_at(now);
     let journal = crate::state::LiquidityWithdrawJournal {
         owner: caller,
         request_id,
         amount_e8s,
-        tuple: crate::state::BorrowMintTuple {
+        tuple: Some(crate::state::BorrowMintTuple {
             ledger: s.icusd_ledger_principal,
             destination: caller,
             amount_e8s,
             memo: op_nonce.to_be_bytes(),
             created_at_time_ns: crate::management::nonce_to_created_at_time(op_nonce),
             op_nonce,
-        },
+        }),
         attempt_count: 0,
         phase: crate::state::LiquidityWithdrawPhase::SubmittedOrUnknown,
     };
     s.liquidity_withdraw_journals
         .insert(caller, journal.clone());
     Ok(PrepareWithdrawal::Dispatch(journal))
+}
+
+fn reject_pre_dispatch_in_state(
+    s: &mut crate::state::State,
+    caller: candid::Principal,
+    request_id: u128,
+    amount_e8s: u64,
+    error: ProtocolError,
+) -> PrepareWithdrawal {
+    // Reserve the owner-scoped ID before returning a definite no-effect
+    // response. The client can advance once this tombstone is visible, while
+    // an exact replay cannot become a mint later if the balance changes.
+    s.liquidity_withdraw_journals.insert(
+        caller,
+        crate::state::LiquidityWithdrawJournal {
+            owner: caller,
+            request_id,
+            amount_e8s,
+            tuple: None,
+            attempt_count: 0,
+            phase: crate::state::LiquidityWithdrawPhase::RejectedNoEffect,
+        },
+    );
+    PrepareWithdrawal::RejectedWithError(error)
 }
 
 fn record_dispatch_attempt(
@@ -321,7 +368,12 @@ pub async fn reconcile_liquidity_withdrawal_from_block(
             "withdrawal ID is not awaiting receipt recovery".into(),
         ));
     }
-    crate::icrc3_proof::verify_icrc3_borrow_mint_block(journal.tuple.ledger, candidate_block_index, &journal.tuple).await.map_err(|error| ProtocolError::GenericError(format!("candidate ICRC-3 block does not prove the exact withdrawal mint; journal remains held: {error}")))?;
+    let Some(tuple) = journal.tuple.as_ref() else {
+        return Err(ProtocolError::GenericError(
+            "withdrawal journal has no dispatched mint tuple to reconcile".into(),
+        ));
+    };
+    crate::icrc3_proof::verify_icrc3_borrow_mint_block(tuple.ledger, candidate_block_index, tuple).await.map_err(|error| ProtocolError::GenericError(format!("candidate ICRC-3 block does not prove the exact withdrawal mint; journal remains held: {error}")))?;
     let commit_time = ic_cdk::api::time();
     let committed = mutate_state(|s| {
         commit_liquidity_withdrawal_in_state(s, &journal, candidate_block_index, commit_time)
@@ -396,20 +448,38 @@ mod withdrawal_journal_tests {
         state.liquidity_pool.insert(owner, ICUSD::from(1_500_000));
         assert!(matches!(
             prepare_liquidity_withdrawal_in_state(&mut state, owner, 1, 1_000_000, 123),
-            Err(ProtocolError::AmountTooLow { .. })
+            Ok(PrepareWithdrawal::RejectedWithError(ProtocolError::AmountTooLow { .. }))
         ));
-        assert!(state.liquidity_withdraw_journals.is_empty());
-        let row = match prepare_liquidity_withdrawal_in_state(&mut state, owner, 1, 1_500_000, 123) {
+        let rejected = &state.liquidity_withdraw_journals[&owner];
+        assert_eq!(rejected.request_id, 1);
+        assert_eq!(rejected.amount_e8s, 1_000_000);
+        assert_eq!(rejected.tuple, None);
+        assert_eq!(rejected.attempt_count, 0);
+        assert_eq!(rejected.phase, LiquidityWithdrawPhase::RejectedNoEffect);
+        let mut tombstone_bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut tombstone_bytes).unwrap();
+        let mut state: State = ciborium::de::from_reader(tombstone_bytes.as_slice()).unwrap();
+        assert_eq!(state.liquidity_withdraw_journals[&owner].tuple, None);
+        assert_eq!(
+            state.liquidity_withdraw_journals[&owner].phase,
+            LiquidityWithdrawPhase::RejectedNoEffect
+        );
+
+        // The rejected intent stays terminal; the owner may proceed with a
+        // higher ID and a valid full-balance dust exit.
+        let row = match prepare_liquidity_withdrawal_in_state(&mut state, owner, 2, 1_500_000, 123) {
             Ok(PrepareWithdrawal::Dispatch(row)) => row,
             other => panic!("expected full-balance dust exit, got {other:?}"),
         };
+        assert!(row.tuple.is_some());
         assert_eq!(row.amount_e8s, 1_500_000);
         assert!(commit_liquidity_withdrawal_in_state(&mut state, &row, 70, 500));
         assert_eq!(state.liquidity_pool.get(&owner).copied().unwrap_or_default(), ICUSD::from(0));
         assert!(matches!(
-            prepare_liquidity_withdrawal_in_state(&mut state, owner, 1, 1_500_000, 999),
+            prepare_liquidity_withdrawal_in_state(&mut state, owner, 2, 1_500_000, 999),
             Ok(PrepareWithdrawal::Completed(70))
         ));
+        assert!(prepare_liquidity_withdrawal_in_state(&mut state, owner, 1, 1_000_000, 999).is_err());
     }
 
     #[test]
@@ -525,6 +595,35 @@ mod withdrawal_journal_tests {
         ciborium::ser::into_writer(&state, &mut bytes).unwrap();
         let restored: State = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         assert_eq!(restored.liquidity_withdraw_journals[&owner], row);
+
+        // Before the pre-dispatch tombstone, `tuple` was a required struct
+        // field. CBOR encodes `Some(tuple)` with the same map shape, so an
+        // already-persisted journal must upgrade to the new optional field.
+        #[derive(serde::Serialize)]
+        struct LegacyJournal {
+            owner: Principal,
+            request_id: u128,
+            amount_e8s: u64,
+            tuple: crate::state::BorrowMintTuple,
+            attempt_count: u32,
+            phase: LiquidityWithdrawPhase,
+        }
+        let mut old_bytes = Vec::new();
+        ciborium::ser::into_writer(
+            &LegacyJournal {
+                owner,
+                request_id: row.request_id,
+                amount_e8s: row.amount_e8s,
+                tuple: row.tuple.clone().unwrap(),
+                attempt_count: row.attempt_count,
+                phase: row.phase.clone(),
+            },
+            &mut old_bytes,
+        )
+        .unwrap();
+        let upgraded: crate::state::LiquidityWithdrawJournal =
+            ciborium::de::from_reader(old_bytes.as_slice()).unwrap();
+        assert_eq!(upgraded, row);
 
         let value: ciborium::value::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         let mut map = match value {
