@@ -345,7 +345,9 @@ fn delete_chain_removes_zero_supply_chain() {
     );
     assert_eq!(s.evm_burn_proof_floor_by_chain.get(&c), Some(&43),
         "deleting registration must not reopen covered burn history");
-    assert_eq!(s.evm_burn_proof_legacy_hold_through.get(&c), Some(&41),
+    // No verified-floor marker was seeded, so V8 migration must widen the
+    // ambiguous legacy hold through the observed cursor (42), not keep 41.
+    assert_eq!(s.evm_burn_proof_legacy_hold_through.get(&c), Some(&42),
         "chain deletion must not erase ambiguous legacy history");
     assert!(!s.has_evm_burn_replay_id(c, 43, "0xabc", 7),
         "covered direct-proof identity is retired before deletion");
