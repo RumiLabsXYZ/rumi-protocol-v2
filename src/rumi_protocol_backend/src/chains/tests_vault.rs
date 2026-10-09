@@ -577,6 +577,147 @@ fn borrow_rejects_when_mint_in_flight() {
 }
 
 #[test]
+fn borrow_rejects_when_interest_mint_is_in_flight_without_mutation() {
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
+    s.chain_vaults
+        .get_mut(&7)
+        .unwrap()
+        .pending_interest_mint_e8s = 2_00000000;
+    let vault_before = s.chain_vaults[&7].clone();
+
+    let r = borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        50_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1,
+    );
+
+    assert_eq!(r, Err(BorrowError::InterestMintInFlight));
+    assert_eq!(s.chain_vaults[&7], vault_before, "rejection preserves vault");
+    assert_eq!(
+        s.settlement_queues.get(&CHAIN).map_or(0, |q| q.pending_len()),
+        0,
+        "rejection does not enqueue a borrow mint"
+    );
+}
+
+#[test]
+fn borrow_cr_includes_interest_accrued_since_last_realization() {
+    use super::config::ChainId;
+    use crate::numeric::NANOS_PER_YEAR;
+
+    fn interest_fixture() -> MultiChainState {
+        let mut s = setup(PRICE_150_USD_E8);
+        let interest_chain = ChainId(71); // 200 bps APR in collateral_config
+        crate::chains::admin::register_chain_in_state(
+            &mut s,
+            RegisterChainArg {
+                chain_id: interest_chain,
+                display_name: "ConfluxEspace".into(),
+                rpc_endpoints: vec!["https://rpc".into()],
+                finality_depth: 1,
+                gas_strategy: GasStrategy::EvmEip1559 {
+                    max_priority_fee_gwei: 1,
+                    max_fee_gwei_ceiling: 1,
+                },
+                chain_native_decimals: 9,
+                min_quorum_providers: None,
+            },
+            0,
+        )
+        .expect("register interest-configured chain");
+        s.manual_prices
+            .insert((interest_chain, "SOL".into()), PRICE_150_USD_E8);
+        insert_open_vault(&mut s, Principal::anonymous(), 7, ONE_SOL, 100_00000000);
+        let vault = s.chain_vaults.get_mut(&7).unwrap();
+        vault.collateral_chain = interest_chain;
+        vault.last_interest_accrual_ns = 0;
+        s.chain_supplies.remove(&CHAIN);
+        s.chain_supplies.insert(interest_chain, 100_00000000);
+        s
+    }
+
+    // Without elapsed time, 100 + 14 icUSD is still above the 130% CR floor.
+    let mut control = interest_fixture();
+    assert_eq!(
+        borrow_chain_vault_in_state(
+            &mut control,
+            7,
+            14_00000000,
+            "good-address".into(),
+            only_good,
+            "SOL",
+            13_000,
+            0,
+            None,
+            0,
+        ),
+        Ok(())
+    );
+
+    // At a 129.20% floor the same year-old position still passes when only the
+    // pre-existing 100 icUSD debt accrues (CR 129.31%). Accruing the just-borrowed
+    // 14 icUSD retroactively would instead lower CR to about 129.00% and reject.
+    let mut existing_debt_only = interest_fixture();
+    assert_eq!(
+        borrow_chain_vault_in_state(
+            &mut existing_debt_only,
+            7,
+            14_00000000,
+            "good-address".into(),
+            only_good,
+            "SOL",
+            12_920,
+            0,
+            None,
+            NANOS_PER_YEAR,
+        ),
+        Ok(()),
+        "accrued interest applies only to debt that existed during the accrual window"
+    );
+
+    // One year of 2% interest adds 2 icUSD to confirmed debt for the CR check:
+    // 150 / (100 + 14 + 2) = 129.31%, so the same borrow must now reject.
+    let mut s = interest_fixture();
+    let vault_before = s.chain_vaults[&7].clone();
+    let r = borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        14_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        NANOS_PER_YEAR,
+    );
+
+    assert!(matches!(r, Err(BorrowError::BelowMinCr { .. })), "got {r:?}");
+    assert_eq!(s.chain_vaults[&7], vault_before, "rejection preserves vault");
+    assert_eq!(
+        s.settlement_queues
+            .get(&ChainId(71))
+            .map_or(0, |q| q.pending_len()),
+        0,
+        "rejection does not enqueue a borrow mint"
+    );
+}
+
+#[test]
 fn borrow_rejects_non_open_vault() {
     use super::monad::chain_vault::ChainVaultStatus;
     let mut s = setup(PRICE_150_USD_E8);

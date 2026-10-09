@@ -871,32 +871,8 @@ pub async fn fetch_and_validate_block(
     block_index: u64,
     expected: &ProofExpectations,
 ) -> Result<u64, String> {
-    let request = vec![GetBlocksRequest {
-        start: Nat::from(block_index),
-        length: Nat::from(1u64),
-    }];
-    let result: Result<(GetBlocksResult,), _> =
-        ic_cdk::call(ledger_principal, "icrc3_get_blocks", (request,)).await;
-    let (response,) = result.map_err(|(code, msg)| {
-        format!(
-            "icrc3_get_blocks call to {} failed: {:?} {}",
-            ledger_principal, code, msg
-        )
-    })?;
-
-    let block_with_id = response
-        .blocks
-        .into_iter()
-        .find(|b| nat_to_u64_opt(&b.id) == Some(block_index))
-        .ok_or_else(|| {
-            format!(
-                "ledger {} returned no block at index {}",
-                ledger_principal, block_index
-            )
-        })?;
-
-    let decoded = decode_block(&block_with_id.block)?;
-    validate_block(&decoded, expected)
+    let block = fetch_icrc3_block(ledger_principal, block_index).await?;
+    validate_block(&block, expected)
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -965,10 +941,6 @@ fn nat_to_u128(v: &ICRC3Value) -> Result<u128, String> {
         }
         _ => Err("expected Nat value".to_string()),
     }
-}
-
-fn nat_to_u64_opt(n: &Nat) -> Option<u64> {
-    n.0.to_u64()
 }
 
 // ─── Test helpers (not gated on cfg(test) so audit_pocs files can use them) ─
@@ -1294,6 +1266,27 @@ mod three_usd_reserve_ingress_tests {
             callback: QueryArchiveFn { canister_id: Principal::from_slice(&[9]), method: "nested".into(), _marker: std::marker::PhantomData },
         });
         assert!(exact_archive_callback_block(7, &nested).is_err());
+    }
+
+    #[test]
+    fn archived_proof_block_is_checked_against_the_configured_expectations() {
+        let tuple = tuple();
+        let archive_response = response(&[7], 8, &tuple);
+        let decoded = decode_block(exact_archive_callback_block(7, &archive_response).unwrap())
+            .unwrap();
+        let expected = super::ProofExpectations {
+            ledger_kind: super::SpProofLedger::ThreePoolTransferDefault,
+            expected_amount_e8s: tuple.amount_e8s,
+            sp_principal: tuple.source.owner,
+            reserves_account: tuple.destination.clone(),
+            vault_id_memo: 42,
+        };
+
+        assert_eq!(super::validate_block(&decoded, &expected), Ok(42));
+
+        let mut wrong_expectations = expected;
+        wrong_expectations.expected_amount_e8s += 1;
+        assert!(super::validate_block(&decoded, &wrong_expectations).is_err());
     }
 }
 

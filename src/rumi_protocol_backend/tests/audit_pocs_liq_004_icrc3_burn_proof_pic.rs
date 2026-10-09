@@ -50,6 +50,7 @@
 //! exercised by the Layer-1 unit tests (`liq_004_decode_block_accepts_3pool_format`).
 
 use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Nat, Principal};
+use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 use std::time::{Duration, SystemTime};
 
@@ -268,6 +269,7 @@ fn deploy_icrc1_ledger(
     name: &str,
     symbol: &str,
     controller: Principal,
+    archive_settings: Option<(u64, u64)>,
 ) -> Principal {
     let ledger_id = pic.create_canister();
     pic.add_cycles(ledger_id, 2_000_000_000_000);
@@ -285,8 +287,8 @@ fn deploy_icrc1_ledger(
         maximum_number_of_accounts: None,
         accounts_overflow_trim_quantity: None,
         archive_options: ArchiveOptions {
-            num_blocks_to_archive: 2000,
-            trigger_threshold: 1000,
+            num_blocks_to_archive: archive_settings.map_or(2000, |(count, _)| count),
+            trigger_threshold: archive_settings.map_or(1000, |(_, threshold)| threshold),
             controller_id: controller,
             max_transactions_per_response: None,
             max_message_size_bytes: None,
@@ -367,6 +369,10 @@ struct Fixture {
 }
 
 fn setup_fixture() -> Fixture {
+    setup_fixture_with_icusd_archive(None)
+}
+
+fn setup_fixture_with_icusd_archive(archive_settings: Option<(u64, u64)>) -> Fixture {
     let pic = PocketIcBuilder::new().with_nns_subnet().build();
 
     let test_user = Principal::self_authenticating(b"liq_004_pic_user");
@@ -397,6 +403,7 @@ fn setup_fixture() -> Fixture {
         "Internet Computer Protocol",
         "ICP",
         developer,
+        None,
     );
 
     // SP pre-funded with icUSD so it can burn for the legacy-path tests.
@@ -411,6 +418,7 @@ fn setup_fixture() -> Fixture {
         "icUSD",
         "icUSD",
         developer,
+        archive_settings,
     );
 
     // 3USD ledger for the reserves-path test. SP holds initial balance and
@@ -425,6 +433,7 @@ fn setup_fixture() -> Fixture {
         "Rumi 3pool LP",
         "3USD",
         developer,
+        None,
     );
 
     let xrc_id = pic.create_canister();
@@ -698,6 +707,85 @@ fn liq_004_pocket_ic_writedown_with_real_burn_proof_succeeds() {
     // fact is "the icUSD ledger emits the standard btype-style format".
     // If this test passes, the standard format is what we're matching.
     let _ = f.sp_icusd_balance;
+}
+
+#[test]
+fn liq_004_pocket_ic_archived_burn_proof_succeeds() {
+    // Keep the archive batches tiny so the proof block moves to the archive
+    // during this test instead of requiring thousands of filler transactions.
+    let f = setup_fixture_with_icusd_archive(Some((2, 3)));
+    let amount_e8s: u64 = 500_000_000;
+    let block_index = sp_burn_icusd(
+        &f.pic,
+        f.icusd_ledger,
+        f.sp_principal,
+        f.protocol_id,
+        f.vault_id,
+        amount_e8s,
+    );
+
+    for _ in 0..8 {
+        icrc1_transfer_call(
+            &f.pic,
+            f.icusd_ledger,
+            f.sp_principal,
+            TransferArg {
+                from_subaccount: None,
+                to: account(f.test_user),
+                fee: None,
+                created_at_time: None,
+                memo: None,
+                amount: Nat::from(100_000u64),
+            },
+        )
+        .expect("filler transfer should succeed");
+        f.pic.tick();
+    }
+
+    let request = vec![GetBlocksRequest {
+        start: Nat::from(block_index),
+        length: Nat::from(1u64),
+    }];
+    let archived = f
+        .pic
+        .query_call(
+            f.icusd_ledger,
+            Principal::anonymous(),
+            "icrc3_get_blocks",
+            encode_args((request,)).unwrap(),
+        )
+        .expect("icrc3_get_blocks query should succeed");
+    let archived: GetBlocksResult = match archived {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode archived block response"),
+        WasmResult::Reject(message) => panic!("icrc3_get_blocks rejected: {message}"),
+    };
+    assert!(
+        archived.blocks.is_empty() && archived.archived_blocks.len() == 1,
+        "fixture must return this proof index through one archive callback; got {} inline blocks and {} archive callbacks",
+        archived.blocks.len(),
+        archived.archived_blocks.len()
+    );
+
+    let proof = SpWritedownProof {
+        block_index,
+        ledger_kind: SpProofLedger::IcusdBurn,
+        vault_id_memo: f.vault_id,
+    };
+    let result = call_debt_burned(
+        &f.pic,
+        f.protocol_id,
+        f.sp_principal,
+        f.vault_id,
+        amount_e8s,
+        proof,
+    )
+    .expect("archive-backed burn proof must be accepted");
+    assert!(result.success, "archive-backed writedown should succeed");
+    assert!(
+        get_consumed_proofs(&f.pic, f.protocol_id)
+            .contains(&(SpProofLedger::IcusdBurn, block_index)),
+        "archive-backed proof index must be consumed after successful writedown"
+    );
 }
 
 #[test]
