@@ -394,10 +394,10 @@ fn get_asset_ledgers() -> Vec<(u8, Principal)> {
 /// PUBLIC epoch status (POINTS-001 / PTS-002). Returns the open epoch's bounds
 /// only; the in-flight capture/close cursors and completion flags are withheld so
 /// a not-yet-captured principal cannot watch the cursor and time a flash deposit
-/// to beat the `min(A,B)` anti-snipe defense, and each snapshot time is withheld
-/// (`null`) until it has fired, since a future snapshot time is precisely the
-/// snipe target the commit-reveal seed hides. Admins use `get_epoch_status_admin`
-/// for the full view.
+/// to beat the `min(A,B)` anti-snipe defense. Each snapshot time is withheld
+/// (`null`) until its capture completes; passing the scheduled time alone does
+/// not mean the driver has finished reading balances. Admins use
+/// `get_epoch_status_admin` for the full view.
 #[ic_cdk::query]
 fn get_epoch_status() -> PublicEpochStatus {
     state::public_epoch_status(ic_cdk::api::time())

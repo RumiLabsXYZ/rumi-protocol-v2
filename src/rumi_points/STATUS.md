@@ -42,7 +42,7 @@ From the 2026-06-02 code review (no critical/high bugs found). Fixed in-branch:
 ICP non-finite-rate guard, repayment-window pruning at close, atomic-trap on the
 (unreachable) seed-close failure, per-principal source-id caching. Still open:
 - `epoch.rs` capture has no STALL counter if a source stays unreachable past a
-  snapshot time (the epoch safely never closes; visible via `get_epoch_status`,
+  snapshot capture (the epoch safely never closes; visible via `get_epoch_status`,
   recoverable via `force_epoch_tick`). Consider surfacing a stall count.
 - `set_asset_ledger` / `set_source_canister` accept any `u8` tag (admin-only;
   out-of-range writes a harmless dead entry). Minor range-validation nicety.
@@ -158,7 +158,8 @@ mutable set.
 OFF by default (like the poll timer). To run a season: enable the poll + confirm
 registrations, then admin `start_season(S0)` (the 32-byte secret seed; commit `H0 =
 sha256(S0)` at init via `snapshot_seed_commit`). `start_season` opens epoch 0 and
-enables the driver. `get_epoch_status` shows the open epoch + driver state;
+enables the driver. `get_epoch_status` shows the open epoch + driver state and
+reveals each snapshot time only after its capture completes;
 `force_epoch_tick` steps the machine manually (ops recovery / E2E);
 `get_revealed_seed(i)` + `get_pending_commit` expose the audit chain. Asset/source
 ids are admin-overridable for local/test (`set_asset_ledger` / `set_source_canister`).

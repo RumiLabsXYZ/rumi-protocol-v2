@@ -319,34 +319,40 @@ pub struct PublicEpochStatus {
     pub snapshot_seed_committed: bool,
 }
 
-/// Public view of the open epoch: its bounds, plus each snapshot time only AFTER
-/// that moment has passed (PTS-002). A FUTURE snapshot time is exactly when a
-/// flash deposit must land to game the `min(A,B)` anti-snipe defense, so it stays
-/// `None` until `now >= time`; once fired it is history and safe to show. The
-/// capture/close cursors and completion flags are not exposed at all (POINTS-001).
+/// Public view of the open epoch: its bounds, plus each snapshot time only after
+/// its capture is complete (PTS-002). A scheduled time passing does not mean the
+/// snapshot has fired: capture completes on a later driver tick after source
+/// reads. The capture/close cursors and completion flags are not exposed at all
+/// (POINTS-001).
 /// Admins keep full visibility via `get_epoch_status_admin`.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PublicOpenEpoch {
     pub epoch_index: u64,
     pub epoch_start_ns: u64,
     pub epoch_end_ns: u64,
-    /// `None` while the snapshot time is still in the future (PTS-002).
+    /// `None` until snapshot A capture is complete (PTS-002).
     pub snapshot_a_ns: Option<u64>,
-    /// `None` while the snapshot time is still in the future (PTS-002).
+    /// `None` until snapshot B capture is complete (PTS-002).
     pub snapshot_b_ns: Option<u64>,
 }
 
 impl PublicOpenEpoch {
-    /// Reduce the full open epoch to its public view as of `now_ns`, revealing
-    /// each snapshot time only once it has fired.
+    /// Reduce the full open epoch to its public view, revealing each scheduled
+    /// time only after that snapshot's capture has completed.
     pub fn redacted(o: &OpenEpoch, now_ns: u64) -> Self {
-        let fired = |t: u64| if now_ns >= t { Some(t) } else { None };
+        let fired = |complete: bool, t: u64| {
+            if complete && now_ns >= t {
+                Some(t)
+            } else {
+                None
+            }
+        };
         PublicOpenEpoch {
             epoch_index: o.epoch_index,
             epoch_start_ns: o.epoch_start_ns,
             epoch_end_ns: o.epoch_end_ns,
-            snapshot_a_ns: fired(o.snapshot_a_ns),
-            snapshot_b_ns: fired(o.snapshot_b_ns),
+            snapshot_a_ns: fired(o.a_complete, o.snapshot_a_ns),
+            snapshot_b_ns: fired(o.b_complete, o.snapshot_b_ns),
         }
     }
 }
