@@ -100,6 +100,15 @@ fn prepare_at(
     now_ns: u64,
 ) -> Result<FundingOperation, FundingError> {
     funding_cycles::require_sentinel_identity(actual_sentinel_id, sentinel_id)?;
+    // The stable at-risk tombstone independently blocks any new recovery
+    // withdrawal. Even if the in-flight state were accidentally cleared by
+    // a future migration, a late credit from the quarantined request could
+    // otherwise be followed by a second successful top-up.
+    if state::current_self_recovery_delivery_risk().is_some() {
+        return Err(FundingError::SelfRecoveryReserve(
+            types::SelfRecoveryStateError::AlreadyInFlight,
+        ));
+    }
     let global_policy = state::global_config().global_policy;
     let self_recovery_policy = global_policy.self_recovery_policy();
 
@@ -539,6 +548,43 @@ mod tests {
             .pending()
             .iter()
             .any(|p| p.operation_id == op.id()));
+    }
+
+    #[test]
+    fn at_risk_tombstone_prevents_a_second_withdrawal_even_if_recovery_slot_is_cleared() {
+        let global = test_global_policy(1_000, 500, 1, 10, 600);
+        init_test_state(global);
+        seed_cache(1_000_000, 0, 1_000);
+        let first = prepare(sentinel_id(), 10, 1_000, 0).unwrap();
+        let quarantined = first
+            .record_attempt(
+                FundingOperationState::Cycles(CyclesFundingState::Quarantined),
+                1_001,
+                crate::types::FundingAttemptResultClass::Indeterminate,
+            )
+            .unwrap();
+        state::update_operation(quarantined.clone()).unwrap();
+        state::record_self_recovery_delivery_risk(crate::types::SelfRecoveryDeliveryRisk {
+            operation_id: first.id(),
+            delivery_status: types::SelfRecoveryDeliveryStatus::Unknown,
+            cause: crate::types::SelfRecoveryDeliveryRiskCause::Duplicate { duplicate_of: 7 },
+            observed_at_secs: 1_001,
+        })
+        .unwrap();
+        // Simulate state drift: the durable tombstone remains the independent
+        // guard even if the regular recovery slot no longer names the old op.
+        let mut recovery = state::get_self_recovery_state();
+        recovery = recovery.release_no_spend(first.id()).unwrap();
+        state::set_self_recovery_state(recovery);
+
+        assert_eq!(
+            prepare(sentinel_id(), 10, 1_002, 0),
+            Err(FundingError::SelfRecoveryReserve(
+                types::SelfRecoveryStateError::AlreadyInFlight
+            ))
+        );
+        assert_eq!(state::current_self_recovery_delivery_risk().unwrap().operation_id, first.id());
+        assert_eq!(state::get_operation(first.id()), Some(quarantined));
     }
 
     #[test]

@@ -390,6 +390,8 @@ export type Result_12 = { 'Ok' : bigint } |
   { 'Err' : GovernanceError };
 export type Result_13 = { 'Ok' : null } |
   { 'Err' : string };
+export type Result_14 = { 'Ok' : [] | [SelfRecoveryDeliveryRisk] } |
+  { 'Err' : AuthenticatedQueryError };
 export type Result_2 = { 'Ok' : null } |
   { 'Err' : GovernanceError };
 export type Result_3 = { 'Ok' : OperatorDashboard } |
@@ -413,6 +415,19 @@ export interface Sample {
   'burn_cycles_per_hour' : [] | [bigint],
   'timestamp_secs' : bigint,
 }
+export interface SelfRecoveryDeliveryRisk {
+  'delivery_status' : SelfRecoveryDeliveryStatus,
+  'cause' : SelfRecoveryDeliveryRiskCause,
+  'operation_id' : bigint,
+  'observed_at_secs' : bigint,
+}
+export type SelfRecoveryDeliveryRiskCause = {
+    'Duplicate' : { 'duplicate_of' : bigint }
+  } |
+  { 'AttemptLimit' : null } |
+  { 'TooOld' : null } |
+  { 'LegacyQuarantine' : null };
+export type SelfRecoveryDeliveryStatus = { 'Unknown' : null };
 export interface SelfRecoveryPolicyArgs {
   'refill_cycles' : bigint,
   'low_balance_threshold_cycles' : bigint,
@@ -540,6 +555,7 @@ export interface _SERVICE {
   'propose_update_targets' : ActorMethod<[Array<TargetUpdate>], Result_12>,
   'resolve_unknown_as_spent' : ActorMethod<[bigint], Result_1>,
   'run_maintenance_now' : ActorMethod<[], Result_13>,
+  'self_recovery_delivery_risk' : ActorMethod<[], Result_14>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];

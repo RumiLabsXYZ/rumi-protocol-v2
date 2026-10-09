@@ -576,6 +576,23 @@ export const idlFactory = ({ IDL }) => {
   });
   const Result_12 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : GovernanceError });
   const Result_13 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
+  const SelfRecoveryDeliveryStatus = IDL.Variant({ 'Unknown' : IDL.Null });
+  const SelfRecoveryDeliveryRiskCause = IDL.Variant({
+    'Duplicate' : IDL.Record({ 'duplicate_of' : IDL.Nat64 }),
+    'AttemptLimit' : IDL.Null,
+    'TooOld' : IDL.Null,
+    'LegacyQuarantine' : IDL.Null,
+  });
+  const SelfRecoveryDeliveryRisk = IDL.Record({
+    'delivery_status' : SelfRecoveryDeliveryStatus,
+    'cause' : SelfRecoveryDeliveryRiskCause,
+    'operation_id' : IDL.Nat64,
+    'observed_at_secs' : IDL.Nat64,
+  });
+  const Result_14 = IDL.Variant({
+    'Ok' : IDL.Opt(SelfRecoveryDeliveryRisk),
+    'Err' : AuthenticatedQueryError,
+  });
   return IDL.Service({
     'acknowledge_alarm' : IDL.Func([IDL.Nat64], [Result], []),
     'approve_proposal' : IDL.Func([IDL.Nat64], [Result], []),
@@ -663,6 +680,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'resolve_unknown_as_spent' : IDL.Func([IDL.Nat64], [Result_1], []),
     'run_maintenance_now' : IDL.Func([], [Result_13], []),
+    'self_recovery_delivery_risk' : IDL.Func([], [Result_14], ['query']),
   });
 };
 export const init = ({ IDL }) => {
