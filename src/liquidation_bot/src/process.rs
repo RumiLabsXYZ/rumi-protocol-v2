@@ -119,6 +119,14 @@ fn shortfall_residual(journal: &state::BotPaymentJournal) -> Result<(u64, u64), 
     Ok((receipt.amount, residual))
 }
 
+fn dispatch_only_after_original_receipt_verification<T>(
+    verification: Result<(), String>,
+    transfer: impl FnOnce() -> T,
+) -> Result<T, String> {
+    verification?;
+    Ok(transfer())
+}
+
 fn prepare_shortfall_topup_intent(
     journal: &state::BotPaymentJournal,
     fee_e6: u64,
@@ -1501,6 +1509,24 @@ async fn resume_shortfall_payment(
     }
 
     if topup.receipt.is_none() {
+        // Re-verify the original receipt on every dispatch attempt. This also
+        // protects journals persisted by older code where an operator-supplied
+        // block index may have been stored without proof.
+        let Some(original_receipt) = journal.receipt.as_ref() else {
+            return true;
+        };
+        let original_receipt_verification = call_bot_verify_liquidation_payment_proof(
+            config,
+            BotPaymentProof {
+                vault_id: journal.vault_id,
+                claim_generation: journal.claim_generation,
+                ledger_principal: journal.ledger_principal,
+                block_index: original_receipt.block_index,
+                amount_e6s: original_receipt.amount,
+                created_at_time: original_receipt.created_at_time,
+            },
+        )
+        .await;
         if topup.status == state::BotPaymentStatus::NoEffect {
             log!(crate::INFO, "STUCK: residual payment for vault #{} had a definitive no-effect response; explicit repair is required", journal.vault_id);
             return true;
@@ -1510,15 +1536,25 @@ async fn resume_shortfall_payment(
             log!(crate::INFO, "STUCK: residual payment tuple for vault #{} exceeded the safe dedup window; exact ICRC-3 history reconciliation is required", journal.vault_id);
             return true;
         }
-        match swap::transfer_ckusdc_to_backend(
-            config,
-            topup.amount_e6,
-            topup.memo.clone(),
-            topup.created_at_time,
-            topup.fee_e6,
-        )
-        .await
-        {
+        let transfer = match dispatch_only_after_original_receipt_verification(
+            original_receipt_verification,
+            || {
+                swap::transfer_ckusdc_to_backend(
+                    config,
+                    topup.amount_e6,
+                    topup.memo.clone(),
+                    topup.created_at_time,
+                    topup.fee_e6,
+                )
+            },
+        ) {
+            Ok(transfer) => transfer,
+            Err(error) => {
+                log!(crate::INFO, "STUCK: original short-payment block for vault #{} is not independently verified; residual transfer remains undispatched: {}", journal.vault_id, error);
+                return true;
+            }
+        };
+        match transfer.await {
             Ok(receipt) => {
                 topup.status = state::BotPaymentStatus::ReceiptObserved;
                 topup.receipt = Some(receipt);
@@ -2077,6 +2113,27 @@ pub async fn admin_authorize_shortfall_topup(
         return Err("configured backend or ckUSDC ledger differs from the payment journal".into());
     }
     shortfall_residual(&journal)?;
+    let receipt = journal
+        .receipt
+        .as_ref()
+        .expect("shortfall_residual checked receipt");
+    call_bot_verify_liquidation_payment_proof(
+        config,
+        BotPaymentProof {
+            vault_id: journal.vault_id,
+            claim_generation: journal.claim_generation,
+            ledger_principal: journal.ledger_principal,
+            block_index: receipt.block_index,
+            amount_e6s: receipt.amount,
+            created_at_time: receipt.created_at_time,
+        },
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "original short-payment block is not independently verified; no residual tuple was authorized: {error}"
+        )
+    })?;
     if !journal.shortfall_receipt_observed {
         journal.shortfall_receipt_observed = true;
     }
@@ -2123,6 +2180,23 @@ pub async fn admin_reconcile_payment_block(
     if journal.receipt.is_some() {
         return Err("payment journal already has a recorded block".into());
     }
+    call_bot_verify_liquidation_payment_proof(
+        config,
+        BotPaymentProof {
+            vault_id: journal.vault_id,
+            claim_generation: journal.claim_generation,
+            ledger_principal: journal.ledger_principal,
+            block_index,
+            amount_e6s: journal.amount_e6,
+            created_at_time: journal.created_at_time,
+        },
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "candidate original payment block did not prove the exact claim-bound transfer; journal remains unchanged: {error}"
+        )
+    })?;
     journal.receipt = Some(swap::TransferReceipt {
         block_index,
         amount: journal.amount_e6,
@@ -2136,6 +2210,23 @@ pub async fn admin_reconcile_payment_block(
         Err("candidate block was not accepted or confirmation remains pending; inspect the durable journal".into())
     } else {
         Ok(())
+    }
+}
+
+async fn call_bot_verify_liquidation_payment_proof(
+    config: &BotConfig,
+    proof: BotPaymentProof,
+) -> Result<(), String> {
+    let result: Result<(BackendResult<()>,), _> = ic_cdk::call(
+        config.backend_principal,
+        "bot_verify_liquidation_payment_proof",
+        (proof,),
+    )
+    .await;
+    match result {
+        Ok((BackendResult::Ok(()),)) => Ok(()),
+        Ok((BackendResult::Err(error),)) => Err(format!("{}", error)),
+        Err((code, message)) => Err(format!("{:?}: {}", code, message)),
     }
 }
 
@@ -2639,6 +2730,20 @@ mod tests {
         assert!(prepare_shortfall_topup_intent(&with_receipt, 10_000, 124, 10_000).is_err());
         assert!(prepare_shortfall_topup_intent(&with_receipt, 10_000, 123, 10_001).is_err());
         assert_eq!(required_ckusdc_net(u64::MAX), u64::MAX / 100 + 1);
+    }
+
+    #[test]
+    fn false_original_payment_proof_never_invokes_residual_transfer() {
+        let mut dispatched = false;
+        let result = dispatch_only_after_original_receipt_verification(
+            Err("candidate block does not match the original transfer".into()),
+            || {
+                dispatched = true;
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!dispatched, "failed verification must leave transfer closure uncalled");
     }
 
     #[test]

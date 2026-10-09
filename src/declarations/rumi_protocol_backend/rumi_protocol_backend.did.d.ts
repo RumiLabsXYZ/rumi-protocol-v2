@@ -1864,6 +1864,10 @@ export interface _SERVICE {
     [BotCollateralReturnProofArg],
     Result
   >,
+  'bot_verify_liquidation_payment_proof' : ActorMethod<
+    [BotPaymentProof],
+    Result
+  >,
   'cancel_xrp_pending_open' : ActorMethod<[bigint], Result>,
   'chain_has_active_settlement_op' : ActorMethod<[number], boolean>,
   'claim_chain_collateral' : ActorMethod<

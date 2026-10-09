@@ -11393,6 +11393,124 @@ async fn bot_confirm_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
     ))
 }
 
+/// Verify a claim-bound bot payment receipt without changing claim or vault
+/// state. Short-payment recovery uses this before dispatching any residual
+/// transfer, so an operator-supplied block index cannot authorize funds by
+/// itself.
+#[candid_method(update)]
+#[update]
+async fn bot_verify_liquidation_payment_proof(proof: BotPaymentProof) -> Result<(), ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.liquidation_bot_principal == Some(caller)) {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered liquidation bot canister".into(),
+        ));
+    }
+    let already_consumed = read_state(|s| {
+        bot_payment_replay_status_for_ledger(
+            &s.consumed_bot_payment_proofs,
+            &s.consumed_bot_payment_blocks,
+            s.legacy_consumed_payment_ledger,
+            proof.ledger_principal,
+            proof.block_index,
+            proof.vault_id,
+            proof.claim_generation,
+        )
+    })
+    .map_err(ProtocolError::GenericError)?;
+    if already_consumed {
+        return Err(ProtocolError::GenericError(
+            "Payment block was already consumed; residual recovery is closed".into(),
+        ));
+    }
+    let claim = read_state(|s| s.bot_claims.get(&proof.vault_id).cloned()).ok_or_else(|| {
+        ProtocolError::GenericError(format!("No active claim for vault #{}", proof.vault_id))
+    })?;
+    if bot_claim_collateral_return_recorded(&claim) {
+        return Err(ProtocolError::GenericError(
+            "Collateral return is already recorded; payment recovery is closed".into(),
+        ));
+    }
+    if !bot_payment_ledger_matches(claim.payment_ledger_principal, proof.ledger_principal) {
+        return Err(ProtocolError::GenericError(
+            "Payment ledger does not match the ledger pinned to this claim".into(),
+        ));
+    }
+    if claim
+        .collateral_transfer
+        .as_ref()
+        .and_then(|transfer| transfer.block_index)
+        .is_none()
+    {
+        return Err(ProtocolError::GenericError(
+            "Collateral claim transfer has not been reconciled from its exact ledger block".into(),
+        ));
+    }
+    if !bot_claim_generation_matches(claim.generation, proof.claim_generation)
+        || proof.amount_e6s == 0
+        || proof.created_at_time == 0
+    {
+        return Err(ProtocolError::GenericError(
+            "Payment proof does not identify a positive transfer for the active claim".into(),
+        ));
+    }
+    let memo = bot_payment_memo_for_claim(&claim);
+    rumi_protocol_backend::icrc3_proof::verify_icrc3_transfer_block(
+        proof.ledger_principal,
+        proof.block_index,
+        Some(icrc_ledger_types::icrc1::account::Account {
+            owner: caller,
+            subaccount: None,
+        }),
+        icrc_ledger_types::icrc1::account::Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },
+        proof.amount_e6s,
+        Some(&memo),
+        Some(proof.created_at_time),
+    )
+    .await
+    .map_err(ProtocolError::GenericError)?;
+    // The inter-canister ledger read yields. Recheck claim identity and its
+    // pinned ledger after the await so a stale proof cannot pass a concurrent
+    // claim transition.
+    let claim_still_matches = read_state(|s| {
+        s.liquidation_bot_principal == Some(caller)
+            && bot_payment_replay_status_for_ledger(
+                &s.consumed_bot_payment_proofs,
+                &s.consumed_bot_payment_blocks,
+                s.legacy_consumed_payment_ledger,
+                proof.ledger_principal,
+                proof.block_index,
+                proof.vault_id,
+                proof.claim_generation,
+            )
+            .is_ok_and(|already_consumed| !already_consumed)
+            && s.bot_claims.get(&proof.vault_id).is_some_and(|active| {
+                !bot_claim_collateral_return_recorded(active)
+                    && bot_claim_generation_matches(active.generation, proof.claim_generation)
+                    && bot_payment_ledger_matches(
+                        active.payment_ledger_principal,
+                        proof.ledger_principal,
+                    )
+                    && active
+                        .collateral_transfer
+                        .as_ref()
+                        .and_then(|transfer| transfer.block_index)
+                        .is_some()
+                    && bot_payment_memo_for_claim(active) == memo
+            })
+    });
+    if !claim_still_matches {
+        return Err(ProtocolError::GenericError(
+            "Active claim changed during payment proof verification".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Confirm a bot liquidation against the exact ckUSDC ICRC-3 transfer block.
 /// The claim-specific memo and generation prevent a payment for an older claim
 /// on the same vault from authorizing a later claim.

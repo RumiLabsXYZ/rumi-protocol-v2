@@ -1636,6 +1636,7 @@ service : (ProtocolArg) -> {
   bot_confirm_liquidation : (nat64) -> (Result);
   bot_confirm_liquidation_with_proof : (BotPaymentProof) -> (Result);
   bot_confirm_liquidation_with_proofs : (vec BotPaymentProof) -> (Result);
+  bot_verify_liquidation_payment_proof : (BotPaymentProof) -> (Result);
   bot_record_collateral_return_proof : (BotCollateralReturnProofArg) -> (
       Result,
     );

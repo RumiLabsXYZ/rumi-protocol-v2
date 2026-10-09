@@ -1848,6 +1848,11 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'bot_verify_liquidation_payment_proof' : IDL.Func(
+        [BotPaymentProof],
+        [Result],
+        [],
+      ),
     'cancel_xrp_pending_open' : IDL.Func([IDL.Nat64], [Result], []),
     'chain_has_active_settlement_op' : IDL.Func(
         [IDL.Nat32],
