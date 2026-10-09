@@ -1,10 +1,16 @@
-use candid::{CandidType, Nat, Principal};
+use candid::{CandidType, Encode, Nat, Principal};
 use ic_canister_log::log;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc2::approve::ApproveArgs;
 use serde::{Deserialize, Serialize};
 
 use crate::icpswap;
+use crate::native_icp_blocks::{self, BlockSource};
+#[cfg(test)]
+use crate::native_icp_blocks::{
+    Block as IcpCandidBlock, Operation as IcpCandidOperation, Timestamp as IcpTimestamp,
+    Tokens as IcpTokens, Transaction as IcpCandidTransaction,
+};
 use crate::state::BotConfig;
 
 /// Belt-and-suspenders default when `BotConfig.*_fee` is unset. The real fee
@@ -428,56 +434,244 @@ pub async fn transfer_ckusdc_to_backend(
     }
 }
 
-/// Transfer ICP to treasury (liquidation bonus).
-pub async fn transfer_icp_to_treasury(
+/// Prepare and persist this exact ICRC tuple before dispatch. `gross` includes
+/// the fee; the recorded amount is what the treasury account receives.
+pub fn prepare_icp_treasury_transfer(
     config: &BotConfig,
-    amount_e8s: u64,
-) -> Result<(), String> {
-    let fee = config.icp_fee_e8s.unwrap_or(FALLBACK_LEDGER_FEE);
-    let send_amount = amount_e8s.saturating_sub(fee);
-    if send_amount == 0 {
-        return Ok(());
-    }
+    record_id: u64,
+    vault_id: u64,
+    claim_generation: u64,
+    gross_amount_e8s: u64,
+    created_at_time: u64,
+) -> Result<crate::state::BotTreasuryJournal, String> {
+    let fee_e8s = config.icp_fee_e8s.unwrap_or(FALLBACK_LEDGER_FEE);
+    let amount_e8s = gross_amount_e8s.checked_sub(fee_e8s).unwrap_or(0);
+    let memo = icp_treasury_memo(record_id, claim_generation);
+    Ok(crate::state::BotTreasuryJournal {
+        record_id, vault_id, claim_generation,
+        ledger_principal: config.icp_ledger,
+        sender_principal: ic_cdk::id(),
+        treasury_principal: config.treasury_principal,
+        gross_amount_e8s, amount_e8s, fee_e8s, memo, created_at_time,
+        status: if amount_e8s == 0 { crate::state::BotTreasuryStatus::NeedsPreparation } else { crate::state::BotTreasuryStatus::Prepared },
+        receipt: None,
+        paid_total_applied: false,
+        record: crate::history::LiquidationRecordV1 {
+            id: record_id, vault_id, timestamp: created_at_time,
+            status: crate::history::LiquidationStatus::TransferFailed,
+            collateral_claimed_e8s: 0, debt_to_cover_e8s: 0, icp_swapped_e8s: 0,
+            ckusdc_received_e6: 0, ckusdc_transferred_e6: 0,
+            icp_to_treasury_e8s: gross_amount_e8s,
+            oracle_price_e8s: 0, effective_price_e8s: 0, slippage_bps: 0,
+            error_message: None, confirm_retry_count: 0,
+        },
+    })
+}
 
+pub(crate) fn icp_treasury_transfer_amount(gross_e8s: u64, fee_e8s: u64) -> Result<u64, String> {
+    gross_e8s.checked_sub(fee_e8s).filter(|amount| *amount > 0)
+        .ok_or_else(|| format!("ICP treasury bonus {} e8s does not exceed fee {} e8s", gross_e8s, fee_e8s))
+}
+
+fn icp_treasury_memo(record_id: u64, claim_generation: u64) -> Vec<u8> {
+    let mut memo = b"RUMI:TB1:".to_vec();
+    memo.extend_from_slice(&record_id.to_be_bytes());
+    memo.extend_from_slice(&claim_generation.to_be_bytes());
+    memo
+}
+
+/// Replay only the journaled tuple. A success or Duplicate returns its block;
+/// typed ledger errors prove this dispatch had no effect, rejects are ambiguous.
+pub async fn transfer_icp_to_treasury(
+    journal: &crate::state::BotTreasuryJournal,
+) -> Result<TransferReceipt, TransferAttemptError> {
+    if journal.sender_principal != ic_cdk::id()
+        || journal.memo.len() > 32
+        || journal.amount_e8s == 0
+        || journal.amount_e8s.checked_add(journal.fee_e8s) != Some(journal.gross_amount_e8s)
+    {
+        return Err(TransferAttemptError::NoEffect("persisted ICP treasury tuple is invalid".into()));
+    }
     let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
         from_subaccount: None,
-        to: Account {
-            owner: config.treasury_principal,
-            subaccount: None,
-        },
-        amount: Nat::from(send_amount),
-        fee: None,
-        memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
+        to: Account { owner: journal.treasury_principal, subaccount: None },
+        amount: Nat::from(journal.amount_e8s),
+        fee: Some(Nat::from(journal.fee_e8s)),
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo(serde_bytes::ByteBuf::from(journal.memo.clone()))),
+        created_at_time: Some(journal.created_at_time),
     };
-
-    let result: Result<
-        (Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,),
-        _,
-    > = ic_cdk::call(config.icp_ledger, "icrc1_transfer", (transfer_args,)).await;
-
-    use icrc_ledger_types::icrc1::transfer::TransferError;
-    match result {
-        Ok((Ok(_),)) => {
-            log!(crate::INFO, "Transferred {} e8s ICP to treasury", send_amount);
-            Ok(())
+    let result: Result<(Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,), _> =
+        ic_cdk::call(journal.ledger_principal, "icrc1_transfer", (transfer_args,)).await;
+    let block = match result {
+        Err((code, msg)) => return Err(TransferAttemptError::Ambiguous(format!("ICP treasury call failed: {code:?} {msg}"))),
+        Ok((Ok(block),)) => block,
+        Ok((Err(icrc_ledger_types::icrc1::transfer::TransferError::Duplicate { duplicate_of }),)) => duplicate_of,
+        Ok((Err(icrc_ledger_types::icrc1::transfer::TransferError::BadFee { expected_fee }),)) => {
+            return Err(TransferAttemptError::BadFee { expected_fee: expected_fee.0.to_string() });
         }
-        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
-            log!(
-                crate::INFO,
-                "[transfer_icp_to_treasury] ledger reported Duplicate (block {}); treating as success",
-                duplicate_of
-            );
-            Ok(())
-        }
-        Ok((Err(e),)) => Err(format!("ICP transfer to treasury failed: {:?}", e)),
-        Err((code, msg)) => Err(format!("ICP transfer call failed: {:?} {}", code, msg)),
+        Ok((Err(error),)) => return Err(TransferAttemptError::NoEffect(format!("ICP treasury transfer rejected: {error:?}"))),
+    };
+    let block_index = block.0.to_string().parse::<u64>()
+        .map_err(|_| TransferAttemptError::Ambiguous("ICP treasury block index exceeds u64".into()))?;
+    Ok(TransferReceipt { block_index, amount: journal.amount_e8s, created_at_time: journal.created_at_time })
+}
+
+/// Verify the returned block against the persisted tuple using the native ICP
+/// ledger's block query. Archive callbacks are trusted only as advertised by
+/// the configured ledger, matching the backend native-ICP verifier; this is
+/// ledger-response verification, not an independent ICRC-3 certificate proof.
+pub async fn verify_icp_treasury_receipt(
+    journal: &crate::state::BotTreasuryJournal,
+    receipt: &TransferReceipt,
+) -> Result<(), String> {
+    if receipt.amount != journal.amount_e8s || receipt.created_at_time != journal.created_at_time {
+        return Err("ICP treasury receipt metadata does not match its persisted intent".into());
     }
+    let request = native_icp_blocks::GetBlocksArgs { start: receipt.block_index, length: 1 };
+    let request_bytes = candid::Encode!(&request)
+        .map_err(|error| format!("could not encode ICP query_blocks request: {error}"))?;
+    let response_bytes = ic_cdk::api::call::call_raw(
+        journal.ledger_principal,
+        "query_blocks",
+        request_bytes,
+        0,
+    ).await.map_err(|(code, msg)| format!("ICP query_blocks failed: {code:?} {msg}"))?;
+    let response = native_icp_blocks::decode_query_blocks(&response_bytes)?;
+    let block = match native_icp_blocks::select_block_source(response, receipt.block_index)? {
+        BlockSource::Direct(block) => block,
+        BlockSource::Archive { canister_id, method } => {
+            let callback_args = candid::Encode!(&request)
+                .map_err(|error| format!("could not encode ICP archive request: {error}"))?;
+            let archive_bytes = ic_cdk::api::call::call_raw(
+                canister_id,
+                &method,
+                callback_args,
+                0,
+            ).await.map_err(|(code, msg)| format!("ICP archive callback failed: {code:?} {msg}"))?;
+            let mut blocks = native_icp_blocks::decode_archive_result(&archive_bytes)?
+                .map_err(|error| format!("ICP archive rejected the requested block: {error:?}"))?
+                .blocks;
+            if blocks.len() != 1 {
+                return Err("ICP archive callback did not return exactly one block for the exact request".into());
+            }
+            blocks.remove(0)
+        }
+    };
+    if journal.sender_principal != ic_cdk::id() {
+        return Err("persisted ICP treasury transfer belongs to a different sender canister".into());
+    }
+    native_icp_blocks::verify_treasury_transfer(
+        &block,
+        journal.sender_principal,
+        journal.treasury_principal,
+        journal.amount_e8s,
+        journal.fee_e8s,
+        &journal.memo,
+        journal.created_at_time,
+    )
 }
 
 #[cfg(test)]
 mod return_transfer_tests {
     use super::*;
+
+    #[test]
+    fn icp_treasury_tuple_uses_claim_bound_dedup_identity_and_exact_fee() {
+        assert_eq!(icp_treasury_transfer_amount(25_000, 10_000).unwrap(), 15_000);
+        assert!(icp_treasury_transfer_amount(10_000, 10_000).is_err());
+        assert!(icp_treasury_transfer_amount(9_999, 10_000).is_err());
+        let memo = icp_treasury_memo(7, 42);
+        assert_eq!(memo.len(), 25, "memo stays under ICP's 32-byte limit");
+        assert_ne!(memo, icp_treasury_memo(7, 43));
+    }
+
+    #[test]
+    fn native_icp_default_account_identifier_matches_canonical_vector() {
+        let identifier = native_icp_blocks::default_account_identifier(Principal::from_slice(&[1]));
+        assert_eq!(identifier, vec![
+            0x5d, 0xc3, 0xba, 0x97, 0x57, 0xeb, 0xd7, 0xcc,
+            0x99, 0x58, 0x2c, 0xd3, 0xe7, 0xe4, 0x8e, 0x37,
+            0x46, 0x11, 0xc7, 0x22, 0x0c, 0xc4, 0x47, 0x60,
+            0x1d, 0xdc, 0x74, 0x4e, 0xcd, 0xf8, 0x60, 0x90,
+        ]);
+    }
+
+    #[test]
+    fn native_icp_transfer_block_matches_exact_persisted_tuple() {
+        let mut journal = crate::state::BotTreasuryJournal {
+            record_id: 7, vault_id: 8, claim_generation: 12,
+            ledger_principal: Principal::management_canister(),
+            sender_principal: Principal::anonymous(), treasury_principal: Principal::anonymous(),
+            gross_amount_e8s: 25_000, amount_e8s: 15_000, fee_e8s: 10_000,
+            memo: Vec::new(), created_at_time: 100,
+            status: crate::state::BotTreasuryStatus::ReceiptObserved,
+            receipt: Some(TransferReceipt { block_index: 4, amount: 15_000, created_at_time: 100 }),
+            paid_total_applied: false,
+            record: crate::history::LiquidationRecordV1 {
+                id: 7, vault_id: 8, timestamp: 90,
+                status: crate::history::LiquidationStatus::TransferFailed,
+                collateral_claimed_e8s: 30_000, debt_to_cover_e8s: 10, icp_swapped_e8s: 5_000,
+                ckusdc_received_e6: 100, ckusdc_transferred_e6: 100, icp_to_treasury_e8s: 0,
+                oracle_price_e8s: 1, effective_price_e8s: 1, slippage_bps: 0,
+                error_message: None, confirm_retry_count: 1,
+            },
+        };
+        journal.sender_principal = Principal::from_slice(&[1]);
+        journal.treasury_principal = Principal::from_slice(&[2]);
+        journal.memo = b"RUMI:TB1:test".to_vec();
+        let block = IcpCandidBlock {
+            transaction: IcpCandidTransaction {
+                memo: 0,
+                icrc1_memo: Some(journal.memo.clone()),
+                operation: Some(IcpCandidOperation::Transfer {
+                    from: native_icp_blocks::default_account_identifier(journal.sender_principal),
+                    to: native_icp_blocks::default_account_identifier(journal.treasury_principal),
+                    spender: None,
+                    amount: IcpTokens { e8s: journal.amount_e8s },
+                    fee: IcpTokens { e8s: journal.fee_e8s },
+                }),
+                created_at_time: IcpTimestamp { timestamp_nanos: journal.created_at_time },
+            },
+        };
+        let verify = |candidate: &IcpCandidBlock| {
+            native_icp_blocks::verify_treasury_transfer(
+                candidate,
+                journal.sender_principal,
+                journal.treasury_principal,
+                journal.amount_e8s,
+                journal.fee_e8s,
+                &journal.memo,
+                journal.created_at_time,
+            )
+        };
+        assert!(verify(&block).is_ok());
+        let mut wrong_fee = block.clone();
+        if let Some(IcpCandidOperation::Transfer { fee, .. }) = wrong_fee.transaction.operation.as_mut() {
+            fee.e8s += 1;
+        }
+        assert!(verify(&wrong_fee).is_err());
+        let mut wrong_amount = block.clone();
+        if let Some(IcpCandidOperation::Transfer { amount, .. }) = wrong_amount.transaction.operation.as_mut() {
+            amount.e8s += 1;
+        }
+        assert!(verify(&wrong_amount).is_err());
+        let mut wrong_sender = block.clone();
+        if let Some(IcpCandidOperation::Transfer { from, .. }) = wrong_sender.transaction.operation.as_mut() {
+            *from = native_icp_blocks::default_account_identifier(Principal::management_canister());
+        }
+        assert!(verify(&wrong_sender).is_err());
+        let mut wrong_recipient = block.clone();
+        if let Some(IcpCandidOperation::Transfer { to, .. }) = wrong_recipient.transaction.operation.as_mut() {
+            *to = native_icp_blocks::default_account_identifier(Principal::management_canister());
+        }
+        assert!(verify(&wrong_recipient).is_err());
+        let mut wrong_time = block.clone();
+        wrong_time.transaction.created_at_time.timestamp_nanos += 1;
+        assert!(verify(&wrong_time).is_err());
+        let mut wrong_memo = block;
+        wrong_memo.transaction.icrc1_memo = Some(b"other transfer".to_vec());
+        assert!(verify(&wrong_memo).is_err());
+    }
 
     #[test]
     fn deposit_application_err_is_ambiguous_and_never_unwinds_claim() {

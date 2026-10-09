@@ -636,6 +636,15 @@ pub async fn process_pending() {
         }
     };
 
+    let treasury_work_attempted = resume_pending_treasury(&config).await;
+    if should_stop_after_treasury_attempt(treasury_work_attempted) {
+        return;
+    }
+    if state::read_state(|s| s.processing_paused) {
+        return;
+    }
+    let Some(refreshed_config) = state::read_state(|s| s.config.clone()) else { return };
+    config = refreshed_config;
     if resume_pending_payment(&config).await {
         return;
     }
@@ -1179,6 +1188,7 @@ pub async fn process_pending() {
     // increase the debt write-down or the treasury distribution.
     let created_at_time = ic_cdk::api::time();
     let payment_journal = state::BotPaymentJournal {
+        record_id: Some(record_id),
         vault_id: vault.vault_id,
         backend_principal: config.backend_principal,
         ledger_principal: config.ckusdc_ledger,
@@ -1339,41 +1349,311 @@ pub async fn process_pending() {
     state::save_config_to_stable();
 
     // -- Phase 5: TREASURY (liquidation bonus) --
-    let icp_to_treasury = collateral_received_amount.saturating_sub(swap_amount);
-    if icp_to_treasury > 0 {
-        let _ = swap::transfer_icp_to_treasury(&config, icp_to_treasury).await;
-    }
-
-    // -- Phase 6: SUCCESS --
-    log!(crate::INFO, "Vault #{} liquidated: debt={} e8s, ckUSDC={} e6, treasury={} e8s ICP",
-        vault.vault_id, debt_covered, ckusdc_received, icp_to_treasury);
-
-    write_record(LiquidationRecordV1 {
+    let gross_bonus_e8s = collateral_received_amount.saturating_sub(swap_amount);
+    let record = LiquidationRecordV1 {
         id: record_id, vault_id: vault.vault_id, timestamp,
-        status: LiquidationStatus::Completed,
+        status: if gross_bonus_e8s == 0 { LiquidationStatus::Completed } else { LiquidationStatus::TransferFailed },
         collateral_claimed_e8s: collateral_amount, debt_to_cover_e8s: debt_covered,
         icp_swapped_e8s: swap_amount, ckusdc_received_e6: ckusdc_received,
-        ckusdc_transferred_e6: ckusdc_transferred.amount, icp_to_treasury_e8s: icp_to_treasury,
+        ckusdc_transferred_e6: ckusdc_transferred.amount,
+        // A held record carries an unpaid obligation; only verified settlement
+        // moves it to Completed and the paid-ICP statistic.
+        icp_to_treasury_e8s: 0,
         oracle_price_e8s: collateral_price, effective_price_e8s: effective_price,
         slippage_bps, error_message: None, confirm_retry_count: confirm_retries,
-    });
-
-    // Update legacy stats for backward compat with explorer UI
-    state::mutate_state(|s| {
-        if apply_confirmed_payment_totals_once(s, &payment_journal, ckusdc_transferred.amount) {
-            s.stats.total_collateral_to_treasury_e8s = s
-                .stats
-                .total_collateral_to_treasury_e8s
-                .saturating_add(icp_to_treasury);
+    };
+    if gross_bonus_e8s == 0 {
+        write_record(record);
+    } else {
+        let mut treasury = swap::prepare_icp_treasury_transfer(
+            &config, record_id, vault.vault_id, claim_generation, gross_bonus_e8s,
+            ic_cdk::api::time(),
+        ).expect("treasury obligation construction is infallible");
+        treasury.record = record.clone();
+        if treasury.status == state::BotTreasuryStatus::NeedsPreparation {
+            treasury.record.error_message = Some(format!("ICP treasury bonus obligation pending preparation: {} e8s gross", gross_bonus_e8s));
         }
-    });
+        let initial_record = treasury.record.clone();
+        state::mutate_state(|s| { s.pending_treasury.insert(record_id, treasury); });
+        write_record(initial_record);
+        state::mutate_state(|s| { apply_confirmed_payment_totals_once(s, &payment_journal, ckusdc_transferred.amount); });
+        state::save_config_to_stable();
+        let _ = resume_pending_treasury(&config).await;
+        return;
+    }
+
+    log!(crate::INFO, "Vault #{} liquidated: debt={} e8s, ckUSDC={} e6, treasury=0 e8s ICP",
+        vault.vault_id, debt_covered, ckusdc_received);
+    state::mutate_state(|s| { apply_confirmed_payment_totals_once(s, &payment_journal, ckusdc_transferred.amount); });
     state::save_config_to_stable();
+}
+
+/// Treasury delivery is a best-effort follow-up after ckUSDC settlement. The
+/// current claim's swaps are bounded by its measured collateral, so a held
+/// bonus must not block unrelated claim/payment progress.
+fn should_stop_after_treasury_attempt(_attempted: bool) -> bool {
+    false
 }
 
 // -- Helpers --
 
 fn write_record(record: LiquidationRecordV1) {
     history::insert_record(LiquidationRecordVersioned::V1(record));
+}
+
+/// Commit an already ledger-verified receipt and its paid metric in one
+/// BotState mutation. A stale generation or mismatched receipt cannot settle.
+fn apply_verified_treasury_receipt_once(
+    bot_state: &mut state::BotState,
+    journal: &state::BotTreasuryJournal,
+) -> bool {
+    let Some(receipt) = journal.receipt.as_ref() else { return false };
+    if receipt.amount != journal.amount_e8s
+        || receipt.created_at_time != journal.created_at_time
+        || journal.amount_e8s.checked_add(journal.fee_e8s) != Some(journal.gross_amount_e8s)
+    { return false; }
+    let Some(current) = bot_state.pending_treasury.get_mut(&journal.record_id) else { return false };
+    if !treasury_intent_matches(current, journal)
+        || current.status != state::BotTreasuryStatus::ReceiptObserved
+        || current.receipt.as_ref() != Some(receipt)
+    { return false; }
+    current.status = state::BotTreasuryStatus::Paid;
+    if !current.paid_total_applied {
+        bot_state.stats.total_collateral_to_treasury_e8s = bot_state.stats.total_collateral_to_treasury_e8s
+            .saturating_add(current.gross_amount_e8s);
+        current.paid_total_applied = true;
+    }
+    true
+}
+
+fn treasury_intent_matches(
+    current: &state::BotTreasuryJournal,
+    candidate: &state::BotTreasuryJournal,
+) -> bool {
+    current.record_id == candidate.record_id
+        && current.vault_id == candidate.vault_id
+        && current.claim_generation == candidate.claim_generation
+        && current.ledger_principal == candidate.ledger_principal
+        && current.sender_principal == candidate.sender_principal
+        && current.treasury_principal == candidate.treasury_principal
+        && current.gross_amount_e8s == candidate.gross_amount_e8s
+        && current.amount_e8s == candidate.amount_e8s
+        && current.fee_e8s == candidate.fee_e8s
+        && current.memo == candidate.memo
+        && current.created_at_time == candidate.created_at_time
+}
+
+/// Commit a candidate that was already verified against the saved tuple by the
+/// configured ledger's direct/archive parser. This function performs no ledger
+/// calls and never initiates a transfer.
+fn apply_verified_treasury_candidate_once(
+    bot_state: &mut state::BotState,
+    journal: &state::BotTreasuryJournal,
+    receipt: &swap::TransferReceipt,
+    expected_sender: candid::Principal,
+) -> bool {
+    if journal.sender_principal != expected_sender
+        || journal.amount_e8s == 0
+        || journal.amount_e8s.checked_add(journal.fee_e8s) != Some(journal.gross_amount_e8s)
+        || receipt.amount != journal.amount_e8s
+        || receipt.created_at_time != journal.created_at_time
+    {
+        return false;
+    }
+    let mut observed = journal.clone();
+    observed.status = state::BotTreasuryStatus::ReceiptObserved;
+    observed.receipt = Some(receipt.clone());
+    let Some(current) = bot_state.pending_treasury.get_mut(&journal.record_id) else {
+        return false;
+    };
+    if !treasury_intent_matches(current, journal)
+        || current.status == state::BotTreasuryStatus::Paid
+    {
+        return false;
+    }
+    current.status = state::BotTreasuryStatus::ReceiptObserved;
+    current.receipt = Some(receipt.clone());
+    apply_verified_treasury_receipt_once(bot_state, &observed)
+}
+
+/// Reconcile an ambiguous treasury delivery from an exact saved ICP ledger
+/// block. The retry-window cutoff applies only to redispatch; a verified block
+/// remains admissible for an older unresolved intent.
+pub async fn admin_reconcile_treasury_block(
+    record_id: u64,
+    block_index: u64,
+) -> Result<(), String> {
+    let journal = state::read_state(|s| s.pending_treasury.get(&record_id).cloned())
+        .ok_or_else(|| "no pending treasury intent for this record ID".to_string())?;
+    if journal.status == state::BotTreasuryStatus::Paid {
+        return Err("treasury intent is already settled".into());
+    }
+    let receipt = swap::TransferReceipt {
+        block_index,
+        amount: journal.amount_e8s,
+        created_at_time: journal.created_at_time,
+    };
+    swap::verify_icp_treasury_receipt(&journal, &receipt)
+        .await
+        .map_err(|error| format!(
+            "candidate block did not prove the exact saved treasury transfer; intent remains pending: {error}"
+        ))?;
+
+    let committed = state::mutate_state(|s| {
+        apply_verified_treasury_candidate_once(s, &journal, &receipt, ic_cdk::id())
+    });
+    if !committed {
+        return Err("treasury intent changed or was already settled while its candidate block was verified".into());
+    }
+    state::save_config_to_stable();
+
+    let mut record = journal.record.clone();
+    record.status = LiquidationStatus::Completed;
+    record.icp_to_treasury_e8s = journal.gross_amount_e8s;
+    record.error_message = None;
+    write_record(record);
+    state::mutate_state(|s| {
+        if s.pending_treasury.get(&record_id).is_some_and(|current| {
+            treasury_intent_matches(current, &journal)
+                && current.status == state::BotTreasuryStatus::Paid
+        }) {
+            s.pending_treasury.remove(&record_id);
+        }
+    });
+    state::save_config_to_stable();
+    Ok(())
+}
+
+/// Resume one claim-bound bonus transfer. Ambiguous outcomes replay the exact
+/// tuple; metrics move only after the ledger block matches that tuple.
+async fn resume_pending_treasury(config: &BotConfig) -> bool {
+    const SAFE_RETRY_WINDOW_NS: u64 = 23 * 60 * 60 * 1_000_000_000;
+    let now = ic_cdk::api::time();
+    let selected = state::read_state(|s| {
+        let eligible = |j: &state::BotTreasuryJournal| {
+            if j.status == state::BotTreasuryStatus::Paid { return true; }
+            if j.status == state::BotTreasuryStatus::ReceiptObserved { return true; }
+            if config.icp_ledger != j.ledger_principal || config.treasury_principal != j.treasury_principal { return false; }
+            match j.status {
+                state::BotTreasuryStatus::ReceiptObserved => true,
+                state::BotTreasuryStatus::NeedsPreparation => swap::icp_treasury_transfer_amount(
+                    j.gross_amount_e8s, config.icp_fee_e8s.unwrap_or(10_000),
+                ).is_ok(),
+                state::BotTreasuryStatus::Prepared | state::BotTreasuryStatus::Ambiguous | state::BotTreasuryStatus::NoEffect =>
+                    now.saturating_sub(j.created_at_time) < SAFE_RETRY_WINDOW_NS,
+                state::BotTreasuryStatus::Paid => false,
+            }
+        };
+        let cursor = s.treasury_resume_cursor;
+        s.pending_treasury.iter()
+            .find(|(id, j)| cursor.is_some_and(|cursor| **id > cursor) && eligible(j))
+            .or_else(|| s.pending_treasury.iter().find(|(_, j)| eligible(j)))
+            .map(|(id, journal)| (*id, journal.clone()))
+    });
+    let Some((selected_id, mut journal)) = selected else { return false };
+    state::mutate_state(|s| { s.treasury_resume_cursor = Some(selected_id); });
+    state::save_config_to_stable();
+    if !matches!(journal.status, state::BotTreasuryStatus::Paid | state::BotTreasuryStatus::ReceiptObserved)
+        && (config.icp_ledger != journal.ledger_principal
+        || config.treasury_principal != journal.treasury_principal
+        )
+    {
+        log!(crate::INFO, "STUCK: ICP treasury intent for vault #{} is bound to different ledger/recipient configuration", journal.vault_id);
+        return true;
+    }
+    if journal.status == state::BotTreasuryStatus::Paid {
+        let mut record = journal.record.clone();
+        record.status = LiquidationStatus::Completed;
+        record.icp_to_treasury_e8s = journal.gross_amount_e8s;
+        record.error_message = None;
+        write_record(record);
+        state::mutate_state(|s| {
+            if s.pending_treasury.get(&journal.record_id).is_some_and(|current| current.claim_generation == journal.claim_generation && current.status == state::BotTreasuryStatus::Paid) {
+                s.pending_treasury.remove(&journal.record_id);
+            }
+        });
+        state::save_config_to_stable();
+        return true;
+    }
+    if journal.status == state::BotTreasuryStatus::NeedsPreparation {
+        let mut refreshed = swap::prepare_icp_treasury_transfer(
+            config, journal.record_id, journal.vault_id, journal.claim_generation,
+            journal.gross_amount_e8s, journal.created_at_time,
+        ).expect("treasury obligation construction is infallible");
+        refreshed.record = journal.record.clone();
+        journal = refreshed;
+        state::mutate_state(|s| { s.pending_treasury.insert(journal.record_id, journal.clone()); });
+        state::save_config_to_stable();
+        if journal.status == state::BotTreasuryStatus::NeedsPreparation {
+            return true;
+        }
+    }
+    if journal.status != state::BotTreasuryStatus::ReceiptObserved {
+        if ic_cdk::api::time().saturating_sub(journal.created_at_time) >= SAFE_RETRY_WINDOW_NS {
+            log!(crate::INFO, "STUCK: ICP treasury intent for claim generation {} exceeded safe dedup window; no new tuple was created", journal.claim_generation);
+            return true;
+        }
+        match swap::transfer_icp_to_treasury(&journal).await {
+            Ok(receipt) => {
+                journal.status = state::BotTreasuryStatus::ReceiptObserved;
+                journal.receipt = Some(receipt);
+            }
+            Err(swap::TransferAttemptError::NoEffect(error)) => {
+                journal.status = state::BotTreasuryStatus::NoEffect;
+                log!(crate::INFO, "ICP treasury transfer had a typed no-effect result for claim {}: {}", journal.claim_generation, error);
+            }
+            Err(swap::TransferAttemptError::BadFee { expected_fee }) => {
+                journal.status = if journal.status == state::BotTreasuryStatus::Ambiguous {
+                    state::BotTreasuryStatus::Ambiguous
+                } else {
+                    state::BotTreasuryStatus::NeedsPreparation
+                };
+                log!(crate::INFO, "ICP treasury transfer returned BadFee ({expected_fee}) for claim {}", journal.claim_generation);
+            }
+            Err(swap::TransferAttemptError::Ambiguous(error)) => {
+                journal.status = state::BotTreasuryStatus::Ambiguous;
+                log!(crate::INFO, "ICP treasury transfer outcome is ambiguous for claim {}: {}", journal.claim_generation, error);
+            }
+        }
+        state::mutate_state(|s| { s.pending_treasury.insert(journal.record_id, journal.clone()); });
+        state::save_config_to_stable();
+    }
+    let Some(receipt) = journal.receipt.as_ref() else {
+        let mut record = journal.record.clone();
+        record.status = LiquidationStatus::TransferFailed;
+        record.error_message = Some(match journal.status {
+            state::BotTreasuryStatus::NoEffect => "ICP treasury transfer had a definitive no-effect response; retry remains bound to its exact tuple".into(),
+            _ => "ICP treasury transfer outcome is unresolved; retry remains bound to its exact tuple".into(),
+        });
+        write_record(record);
+        return true;
+    };
+    if let Err(error) = swap::verify_icp_treasury_receipt(&journal, receipt).await {
+        journal.record.status = LiquidationStatus::TransferFailed;
+        journal.record.icp_to_treasury_e8s = 0;
+        journal.record.error_message = Some(format!("ICP treasury receipt block {} is not yet proven: {}", receipt.block_index, error));
+        state::mutate_state(|s| { s.pending_treasury.insert(journal.record_id, journal.clone()); });
+        state::save_config_to_stable();
+        write_record(journal.record.clone());
+        log!(crate::INFO, "STUCK: ICP treasury receipt block {} could not be verified for claim {}: {}", receipt.block_index, journal.claim_generation, error);
+        return true;
+    }
+    let paid_now = state::mutate_state(|s| apply_verified_treasury_receipt_once(s, &journal));
+    state::save_config_to_stable();
+    if paid_now {
+        let mut record = journal.record.clone();
+        record.status = LiquidationStatus::Completed;
+        record.icp_to_treasury_e8s = journal.gross_amount_e8s;
+        record.error_message = None;
+        write_record(record);
+        state::mutate_state(|s| {
+            if s.pending_treasury.get(&journal.record_id).is_some_and(|current| current.claim_generation == journal.claim_generation && current.status == state::BotTreasuryStatus::Paid) {
+                s.pending_treasury.remove(&journal.record_id);
+            }
+        });
+        state::save_config_to_stable();
+    }
+    true
 }
 
 /// Reconcile a payment intent before processing another vault. The intent is
@@ -1464,6 +1744,51 @@ async fn resume_pending_payment(config: &BotConfig) -> bool {
     match call_bot_confirm_liquidation_with_proof(config, proof).await {
         Ok(()) => {
             journal.status = state::BotPaymentStatus::Confirmed;
+            // Legacy payment journals predate the history link. Allocate and
+            // persist one before reconstructing any unpaid treasury phase.
+            if journal.record_id.is_none() {
+                journal.record_id = Some(history::next_id());
+                state::mutate_state(|s| { s.pending_payments.insert(journal.vault_id, journal.clone()); });
+                state::save_config_to_stable();
+            }
+            // If an upgrade happened after backend confirmation but before
+            // Phase 5, reconstruct and persist the exact treasury intent from
+            // this payment journal before consuming it.
+            if let (Some(record_id), Some(collateral_received)) =
+                (journal.record_id, journal.collateral_received_amount_e8s)
+            {
+                let gross_bonus = collateral_received.saturating_sub(journal.icp_swapped_e8s);
+                let mut record = LiquidationRecordV1 {
+                    id: record_id,
+                    vault_id: journal.vault_id,
+                    timestamp: journal.created_at_time,
+                    status: if gross_bonus == 0 { LiquidationStatus::Completed } else { LiquidationStatus::TransferFailed },
+                    collateral_claimed_e8s: journal.collateral_amount_e8s,
+                    debt_to_cover_e8s: journal.debt_covered_e8s,
+                    icp_swapped_e8s: journal.icp_swapped_e8s,
+                    ckusdc_received_e6: journal.ckusdc_received_e6,
+                    ckusdc_transferred_e6: receipt.amount,
+                    icp_to_treasury_e8s: 0,
+                    oracle_price_e8s: journal.collateral_price_e8s,
+                    effective_price_e8s: journal.collateral_price_e8s,
+                    slippage_bps: 0,
+                    error_message: if gross_bonus == 0 { None } else { Some("recovered ckUSDC confirmation; treasury bonus pending".into()) },
+                    confirm_retry_count: 0,
+                };
+                if gross_bonus > 0 {
+                    if let Some(existing) = state::read_state(|s| s.pending_treasury.get(&record_id).cloned()) {
+                        record = existing.record;
+                    } else {
+                        let mut treasury = swap::prepare_icp_treasury_transfer(
+                            config, record_id, journal.vault_id, journal.claim_generation,
+                            gross_bonus, ic_cdk::api::time(),
+                        ).expect("treasury obligation construction is infallible");
+                        treasury.record = record.clone();
+                        state::mutate_state(|s| { s.pending_treasury.insert(record_id, treasury); });
+                    }
+                }
+                write_record(record);
+            }
             state::mutate_state(|s| {
                 apply_confirmed_payment_totals_once(s, &journal, receipt.amount);
             });
@@ -2375,6 +2700,95 @@ mod tests {
     }
 
     const SWAP_ERR: &str = "Quote returned zero output";
+
+    #[test]
+    fn held_treasury_attempt_does_not_starve_later_bot_work() {
+        assert!(!should_stop_after_treasury_attempt(true));
+        assert!(!should_stop_after_treasury_attempt(false));
+    }
+
+    fn treasury_test_journal() -> state::BotTreasuryJournal {
+        state::BotTreasuryJournal {
+            record_id: 77, vault_id: 8, claim_generation: 12,
+            ledger_principal: candid::Principal::management_canister(),
+            sender_principal: candid::Principal::anonymous(),
+            treasury_principal: candid::Principal::anonymous(),
+            gross_amount_e8s: 25_000, amount_e8s: 15_000, fee_e8s: 10_000,
+            memo: b"RUMI:TB1:77:12".to_vec(), created_at_time: 100,
+            status: state::BotTreasuryStatus::ReceiptObserved,
+            receipt: Some(swap::TransferReceipt { block_index: 4, amount: 15_000, created_at_time: 100 }),
+            paid_total_applied: false,
+            record: LiquidationRecordV1 {
+                id: 77, vault_id: 8, timestamp: 90,
+                status: LiquidationStatus::TransferFailed,
+                collateral_claimed_e8s: 30_000, debt_to_cover_e8s: 10,
+                icp_swapped_e8s: 5_000, ckusdc_received_e6: 100,
+                ckusdc_transferred_e6: 100, icp_to_treasury_e8s: 0,
+                oracle_price_e8s: 1, effective_price_e8s: 1, slippage_bps: 0,
+                error_message: None, confirm_retry_count: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn treasury_paid_totals_require_matching_receipt_and_apply_once_per_generation() {
+        let journal = treasury_test_journal();
+        let mut bot_state = state::BotState::default();
+        bot_state.pending_treasury.insert(journal.record_id, journal.clone());
+        let mut wrong_generation = journal.clone();
+        wrong_generation.claim_generation += 1;
+        assert!(!apply_verified_treasury_receipt_once(&mut bot_state, &wrong_generation));
+        assert_eq!(bot_state.stats.total_collateral_to_treasury_e8s, 0);
+        assert!(apply_verified_treasury_receipt_once(&mut bot_state, &journal));
+        assert_eq!(bot_state.stats.total_collateral_to_treasury_e8s, 25_000);
+        assert_eq!(bot_state.pending_treasury[&journal.record_id].status, state::BotTreasuryStatus::Paid);
+        assert!(!apply_verified_treasury_receipt_once(&mut bot_state, &journal));
+        assert_eq!(bot_state.stats.total_collateral_to_treasury_e8s, 25_000);
+        let mut wrong_receipt = journal;
+        wrong_receipt.receipt.as_mut().unwrap().amount += 1;
+        assert!(!apply_verified_treasury_receipt_once(&mut bot_state, &wrong_receipt));
+        assert_eq!(bot_state.stats.total_collateral_to_treasury_e8s, 25_000);
+    }
+
+    #[test]
+    fn expired_ambiguous_treasury_intent_accepts_exact_verified_candidate_once() {
+        let mut journal = treasury_test_journal();
+        journal.status = state::BotTreasuryStatus::Ambiguous;
+        journal.receipt = None;
+        // The created-at time is far beyond the 23-hour redispatch window. A
+        // ledger-proven candidate remains reconcilable without another send.
+        let mut bot_state = state::BotState::default();
+        bot_state.pending_treasury.insert(journal.record_id, journal.clone());
+        let receipt = swap::TransferReceipt {
+            block_index: 9001,
+            amount: journal.amount_e8s,
+            created_at_time: journal.created_at_time,
+        };
+
+        assert!(apply_verified_treasury_candidate_once(&mut bot_state, &journal, &receipt, journal.sender_principal));
+        assert_eq!(bot_state.pending_treasury[&journal.record_id].status, state::BotTreasuryStatus::Paid);
+        assert_eq!(bot_state.stats.total_collateral_to_treasury_e8s, journal.gross_amount_e8s);
+        assert!(!apply_verified_treasury_candidate_once(&mut bot_state, &journal, &receipt, journal.sender_principal));
+        assert_eq!(bot_state.stats.total_collateral_to_treasury_e8s, journal.gross_amount_e8s);
+    }
+
+    #[test]
+    fn treasury_candidate_with_wrong_tuple_metadata_leaves_pending_intent_unchanged() {
+        let mut journal = treasury_test_journal();
+        journal.status = state::BotTreasuryStatus::Ambiguous;
+        journal.receipt = None;
+        let mut bot_state = state::BotState::default();
+        bot_state.pending_treasury.insert(journal.record_id, journal.clone());
+        let wrong_receipt = swap::TransferReceipt {
+            block_index: 9002,
+            amount: journal.amount_e8s + 1,
+            created_at_time: journal.created_at_time,
+        };
+
+        assert!(!apply_verified_treasury_candidate_once(&mut bot_state, &journal, &wrong_receipt, journal.sender_principal));
+        assert_eq!(bot_state.pending_treasury[&journal.record_id].status, state::BotTreasuryStatus::Ambiguous);
+        assert_eq!(bot_state.stats.total_collateral_to_treasury_e8s, 0);
+    }
     const RETURN_ERR: &str = "Transfer error: BadFee";
     const CANCEL_ERR: &str = "GenericError(\"Cannot cancel claim for vault #7: protocol collateral balance 0 < required 99990000\")";
 
@@ -2670,6 +3084,7 @@ mod tests {
     #[test]
     fn a_short_durable_receipt_is_held_below_the_claim_net_minimum() {
         let journal = state::BotPaymentJournal {
+            record_id: None,
             vault_id: 19,
             backend_principal: candid::Principal::anonymous(),
             ledger_principal: candid::Principal::management_canister(),
@@ -2749,6 +3164,7 @@ mod tests {
     #[test]
     fn cumulative_shortfall_confirmation_applies_totals_and_removes_journal_once() {
         let journal = state::BotPaymentJournal {
+            record_id: None,
             vault_id: 19,
             backend_principal: candid::Principal::anonymous(),
             ledger_principal: candid::Principal::management_canister(),

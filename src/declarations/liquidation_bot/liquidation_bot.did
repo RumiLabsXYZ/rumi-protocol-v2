@@ -102,6 +102,7 @@ type BotPaymentTopUpJournal = record {
   receipt : opt TransferReceipt;
 };
 type BotPaymentJournal = record {
+  record_id : opt nat64;
   vault_id : nat64;
   backend_principal : principal;
   ledger_principal : principal;
@@ -164,6 +165,22 @@ type BotClaimJournal = record {
   swap_intents : vec BotSwapIntent;
   status : BotClaimJournalStatus;
 };
+type BotTreasuryStatus = variant { NeedsPreparation; Prepared; Ambiguous; NoEffect; ReceiptObserved; Paid };
+type BotTreasuryIntentView = record {
+  record_id : nat64;
+  vault_id : nat64;
+  claim_generation : nat64;
+  ledger_principal : principal;
+  sender_principal : principal;
+  treasury_principal : principal;
+  gross_amount_e8s : nat64;
+  amount_e8s : nat64;
+  fee_e8s : nat64;
+  memo : blob;
+  created_at_time : nat64;
+  status : BotTreasuryStatus;
+  receipt : opt TransferReceipt;
+};
 
 type TestSwapResult = variant { Ok : SwapResult; Err : text };
 
@@ -207,6 +224,7 @@ service : (BotInitArgs) -> {
   get_admin_event_count : () -> (nat64) query;
   get_pending_payment_journals : () -> (vec BotPaymentJournal) query;
   get_pending_claim_journals : () -> (vec BotClaimJournal) query;
+  get_pending_treasury_intent : (nat64) -> (opt BotTreasuryIntentView) query;
 
   // Admin actions
   admin_resolve_pool_ordering : () -> ();
@@ -215,6 +233,7 @@ service : (BotInitArgs) -> {
   admin_retry_stuck_claim : (nat64) -> ();
   admin_authorize_shortfall_topup : (nat64, nat64) -> (variant { Ok; Err : text });
   admin_reconcile_payment_block : (nat64, nat64) -> (variant { Ok; Err : text });
+  admin_reconcile_treasury_block : (nat64, nat64) -> (variant { Ok; Err : text });
   admin_reconcile_return_block : (nat64, nat64) -> (variant { Ok; Err : text });
   // Returns (icp_fee_e8s, ckusdc_fee_e6) freshly read from each ledger and
   // also writes them back into BotConfig so future swaps use the live values.
