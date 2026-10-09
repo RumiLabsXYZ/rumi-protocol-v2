@@ -1,9 +1,9 @@
 <script>
   const report = {
-    date: 'October 8, 2026',
-    datetime: '2026-10-08',
-    source: 'origin/main at 8b4951d97576 · includes PR #450',
-    snapshot: 'Mainnet readback · October 8, 2026'
+    date: 'October 9, 2026',
+    datetime: '2026-10-09',
+    source: 'origin/main at 7b2d0dbf690f · includes PR #483',
+    snapshot: 'Mainnet readback · October 9, 2026'
   };
 
   const states = [
@@ -25,16 +25,24 @@
     {
       pr: '#466',
       title: '3pool upgrade and state preservation',
-      summary: 'Merged into main and installed on October 8. The rumi_3pool canister (fohh4-yyaaa-aaaap-qtkpa-cai) reports module SHA-256 b6e5e2eab401c8e1551a33acc134369a92744efb769ed4e34a7feb9923a7a1af. The upgrade readback recorded unchanged LP supply, reserves, admin fees, and virtual price, with zero pending claims.',
-      state: 'Installed · readback recorded',
+      summary: 'Merged into main and installed on October 8. At that time, the rumi_3pool canister (fohh4-yyaaa-aaaap-qtkpa-cai) reported module SHA-256 b6e5e2eab401c8e1551a33acc134369a92744efb769ed4e34a7feb9923a7a1af. The October 8 readback recorded unchanged LP supply, reserves, admin fees, and virtual price, with zero pending claims. PR #483 later superseded this installation; see its October 9 readback below.',
+      state: 'Installed October 8 · superseded',
       tone: 'installed',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/466'
     },
     {
+      pr: '#483',
+      title: '3pool upgrade verification and state preservation',
+      summary: 'Merged on October 9. The rumi_3pool canister (fohh4-yyaaa-aaaap-qtkpa-cai) reports module SHA-256 9797bf2454923ef41d6ef6a003435e0430aaa2b2b413734c6d9e6e921889dfc0. A clean-source rebuild matched the installed module. Immediate readback found LP supply, reserves, virtual price, admin fees, and pending-claim count unchanged.',
+      state: 'Installed · rebuild matched · readback recorded',
+      tone: 'installed',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/483'
+    },
+    {
       pr: '#459',
       title: 'Stability Pool containment',
-      summary: 'The rumi_stability_pool canister (tmhzi-dqaaa-aaaap-qrd6q-cai) is emergency-paused. Its module remains 54245b779feb30c4da7ac3f60e9cb62afb99f1accd2ea5affc7adda8a28e4754; the upgrade is pending. The October 8 pause readback recorded 13 depositors. A later read confirmed the pause and depositor count; aggregate deposits are omitted because the later total differs from the earlier snapshot and has not been analyzed.',
-      state: 'Paused · upgrade pending',
+      summary: 'The rumi_stability_pool canister (tmhzi-dqaaa-aaaap-qrd6q-cai) is emergency-paused and still runs module SHA-256 54245b779feb30c4da7ac3f60e9cb62afb99f1accd2ea5affc7adda8a28e4754; the newer source is not installed there. The October 8 pause readback recorded 13 depositors. A later read confirmed the pause and depositor count; aggregate deposits are omitted because the later total differs from the earlier snapshot and has not been analyzed.',
+      state: 'Paused · newer source not installed',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/459'
     },
@@ -106,7 +114,7 @@
   <title>October 2026 Security Status · Rumi Protocol</title>
   <meta
     name="description"
-    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, and October 8 mainnet pause status."
+    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, and October 9 mainnet readback status."
   />
 </svelte:head>
 
@@ -119,19 +127,20 @@
           <p class="issue-line">Status report <span>—</span> <time datetime={report.datetime}>{report.date}</time></p>
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
-            This snapshot separates merged source from mainnet installation. The 3pool upgrade
-            is installed with recorded state invariants; the Stability Pool remains paused, and
+            This snapshot separates merged source from mainnet installation. The October 9 3pool
+            release is installed with a matching clean-source rebuild and recorded state invariants;
+            the Stability Pool remains paused, and
             backend and bot follow-up changes are not yet installed.
           </p>
         </div>
         <aside class="report-stamp" aria-label={report.snapshot}>
           <span class="stamp-label">Publication state</span>
           <strong>{report.snapshot}</strong>
-          <p>The 3pool and Points module hashes and release readbacks are dated October 8. The Stability Pool pause and depositor count were confirmed again in a later read. This page combines those time-scoped records; it is not live telemetry.</p>
+          <p>The 3pool PR #483 module hash, matching clean-source rebuild, and immediate state readback are dated October 9. The Points release readback is dated October 8. The Stability Pool pause and depositor count were confirmed again in a later read. This page combines those time-scoped records; it is not live telemetry.</p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
-      <div class="rule-caption"><span>Source cutoff · {report.source} · October 8, 2026</span><span>Selected remediation and release follow-up</span></div>
+      <div class="rule-caption"><span>Source cutoff · {report.source} · October 9, 2026</span><span>Selected remediation and release follow-up</span></div>
     </div>
   </section>
 
@@ -156,7 +165,7 @@
       <div class="section-heading section-heading-wide">
         <p class="section-label">Selected changes</p>
         <h2 id="updates-title">Change and release status</h2>
-        <p>This October 8 snapshot reports the highest evidence stage available for each change. A source merge and a live installation remain separate states.</p>
+        <p>This October 9 snapshot reports the highest evidence stage available for each change. A source merge and a live installation remain separate states.</p>
       </div>
       <div class="change-list">
         {#each changes as item}
@@ -200,7 +209,7 @@
       </div>
       <p>
         Source review, tests, builds, installation, activation, and live behavior are distinct claims.
-        This page records an October 8 snapshot; it does not publish private audit material or
+        This page records an October 9 snapshot; it does not publish private audit material or
         establish that every finding is closed.
       </p>
     </div>
