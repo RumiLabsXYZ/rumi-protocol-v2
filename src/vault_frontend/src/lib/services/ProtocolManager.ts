@@ -742,26 +742,22 @@ export class ProtocolManager {
   }
 
   /**
-   * Provide liquidity to the protocol
+   * New deposits to the legacy liquidity pool are closed.
    */
-  async provideLiquidity(icpAmount: number): Promise<VaultOperationResult> {
+  async provideLiquidity(icusdAmount: number): Promise<VaultOperationResult> {
     return this.executeOperation(
       'provideLiquidity',
-      () => ApiClient.provideLiquidity(icpAmount),
-      async () => {
-        // Check if the user has sufficient balance
-        await walletOperations.checkSufficientBalance(icpAmount);
-      }
+      () => ApiClient.provideLiquidity(icusdAmount)
     );
   }
 
   /**
    * Withdraw liquidity from the protocol
    */
-  async withdrawLiquidity(icpAmount: number): Promise<VaultOperationResult> {
+  async withdrawLiquidity(icusdAmount: string, startNew = false): Promise<VaultOperationResult> {
     return this.executeOperation(
       'withdrawLiquidity',
-      () => ApiClient.withdrawLiquidity(icpAmount)
+      () => ApiClient.withdrawLiquidity(icusdAmount, startNew)
     );
   }
 

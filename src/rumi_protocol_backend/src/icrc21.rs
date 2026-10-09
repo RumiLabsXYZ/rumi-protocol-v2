@@ -105,6 +105,10 @@ fn format_icusd_amount(e8s: u64) -> String {
     format!("{:.2} icUSD", icusd)
 }
 
+fn format_icusd_exact_amount(e8s: u64) -> String {
+    format!("{}.{:08} icUSD", e8s / 100_000_000, e8s % 100_000_000)
+}
+
 /// Format XRP drops without floating-point rounding.
 fn format_xrp_drops(drops: u64) -> String {
     const DROPS_PER_XRP: u64 = 1_000_000;
@@ -613,43 +617,25 @@ fn generate_consent_message_for_caller(
         }
         
         "provide_liquidity" => {
-            match try_decode_u64(arg, "provide_liquidity")? {
-                Some(amount) => Ok(format!(
-                    "## Provide Liquidity\n\n\
-                    You are depositing **{}** icUSD into the legacy backend liquidity pool.\n\n\
-                    The icUSD is transferred to the backend's account. No liquidation rewards are credited by this pool.\n\n\
-                    You can request a withdrawal later; the backend mints icUSD for the approved withdrawal amount.",
-                    format_icusd_amount(amount)
-                )),
-                None => Ok(
-                    "## Provide Liquidity\n\n\
-                    You are depositing icUSD into the legacy backend liquidity pool.\n\n\
-                    The icUSD is transferred to the backend's account. No liquidation rewards are credited by this pool.\n\n\
-                    You can request a withdrawal later; the backend mints icUSD for the approved withdrawal amount.".to_string()
-                ),
-            }
+            Ok("## Provide Liquidity\n\nNew deposits to the legacy liquidity pool are disabled. This call will fail before any icUSD transfer. Refresh Rumi to see the withdrawal-only page.".to_string())
         }
         
         "withdraw_liquidity" => {
-            match try_decode_u64(arg, "withdraw_liquidity")? {
-                Some(amount) => Ok(format!(
-                    "## Withdraw Liquidity\n\n\
-                    You are requesting a **{}** icUSD withdrawal from the legacy backend liquidity pool.\n\n\
-                    If successful, the backend mints icUSD to your wallet; this does not return the deposited tokens.",
-                    format_icusd_amount(amount)
+            Ok("## Withdraw Liquidity\n\nThis legacy method is disabled. Refresh Rumi and use the withdrawal method with a request ID; no funds will move from this call.".to_string())
+        }
+
+        "withdraw_liquidity_with_id" => {
+            match Decode!(arg, u128, u64) {
+                Ok((request_id, amount)) => Ok(format!(
+                    "## Withdraw Liquidity\n\nYou are requesting **{}** from the legacy backend liquidity pool to your connected wallet. Request ID: **{}**. The backend mints icUSD for a successful withdrawal and reduces your recorded liquidity by the same amount; it does not return the deposited tokens.",
+                    format_icusd_exact_amount(amount), request_id
                 )),
-                None => Ok(
-                    "## Withdraw Liquidity\n\n\
-                    You are requesting an icUSD withdrawal from the legacy backend liquidity pool.\n\n\
-                    If successful, the backend mints icUSD to your wallet; this does not return the deposited tokens.".to_string()
-                ),
+                Err(_) => Ok("## Withdraw Liquidity\n\nThe request ID and amount could not be decoded. Verify both in Rumi before approving.".to_string()),
             }
         }
         
         "claim_liquidity_returns" => {
-            Ok("## Claim Liquidation Rewards\n\n\
-                You are claiming your accumulated liquidation rewards.\n\n\
-                This will transfer all earned ICP collateral to your wallet.".to_string())
+            Ok("## Claim Historical ICP Returns\n\nThis legacy claim method is held for safe payout reconciliation. The call will fail before any ICP transfer; your recorded return balance remains unchanged.".to_string())
         }
         
         "redeem_collateral" => {
@@ -1007,11 +993,21 @@ mod tests {
         assert!(liquidation.contains("your icUSD balance"));
         assert!(!liquidation.contains("stability pool"));
         let provide = generate_consent_message("provide_liquidity", &Encode!(&100_000_000u64).unwrap()).unwrap();
-        assert!(provide.contains("legacy backend liquidity pool"));
-        assert!(provide.contains("No liquidation rewards"));
-        let withdraw = generate_consent_message("withdraw_liquidity", &Encode!(&100_000_000u64).unwrap()).unwrap();
+        assert!(provide.contains("legacy liquidity pool"));
+        assert!(provide.contains("disabled"));
+        assert!(provide.contains("before any icUSD transfer"));
+        let withdraw = generate_consent_message("withdraw_liquidity_with_id", &Encode!(&7u128, &100_000_000u64).unwrap()).unwrap();
         assert!(withdraw.contains("backend mints icUSD"));
         assert!(withdraw.contains("does not return the deposited tokens"));
+        assert!(withdraw.contains("1.00000000"));
+        assert!(withdraw.contains("Request ID: **7**"));
+        let precise = generate_consent_message("withdraw_liquidity_with_id", &Encode!(&8u128, &1u64).unwrap()).unwrap();
+        assert!(precise.contains("0.00000001 icUSD"));
+        let legacy_withdraw = generate_consent_message("withdraw_liquidity", &Encode!(&100_000_000u64).unwrap()).unwrap();
+        assert!(legacy_withdraw.contains("disabled"));
+        let held_claim = generate_consent_message("claim_liquidity_returns", &Encode!().unwrap()).unwrap();
+        assert!(held_claim.contains("held for safe payout reconciliation"));
+        assert!(held_claim.contains("before any ICP transfer"));
         let close = generate_consent_message("close_vault", &Encode!(&7u64).unwrap()).unwrap();
         assert!(close.contains("does not transfer collateral"));
         let repay_close = generate_consent_message("repay_and_close_vault", &Encode!(&VaultArg { vault_id: 7, amount: 10 }).unwrap()).unwrap();

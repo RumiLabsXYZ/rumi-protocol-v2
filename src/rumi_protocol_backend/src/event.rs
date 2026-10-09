@@ -2681,12 +2681,22 @@ pub fn record_withdraw_liquidity(
     caller: Principal,
     block_index: u64,
 ) {
-    record_event(&Event::WithdrawLiquidity {
+    record_withdraw_liquidity_at(state, amount, caller, block_index, now());
+}
+
+pub fn record_withdraw_liquidity_at(
+    state: &mut State,
+    amount: ICUSD,
+    caller: Principal,
+    block_index: u64,
+    timestamp_ns: u64,
+) {
+    record_event_at(&Event::WithdrawLiquidity {
         amount,
         block_index,
         caller,
-        timestamp: Some(now()),
-    });
+        timestamp: Some(timestamp_ns),
+    }, timestamp_ns);
     state.withdraw_liquidity(amount, caller);
 }
 

@@ -1928,6 +1928,38 @@ pub struct BorrowMintJournal {
     pub phase: BorrowMintPhase,
 }
 
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum LiquidityWithdrawPhase {
+    SubmittedOrUnknown,
+    ReceiptRecoveryRequired,
+    Completed { block_index: u64 },
+    RejectedNoEffect,
+}
+
+impl Default for LiquidityWithdrawPhase {
+    fn default() -> Self { Self::SubmittedOrUnknown }
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct LiquidityWithdrawJournal {
+    pub owner: Principal,
+    pub request_id: u128,
+    pub amount_e8s: u64,
+    pub tuple: BorrowMintTuple,
+    /// Number of dispatches durably reserved before awaiting the ledger.
+    #[serde(default)]
+    pub attempt_count: u32,
+    #[serde(default)]
+    pub phase: LiquidityWithdrawPhase,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct LiquidityWithdrawStatus {
+    pub request_id: u128,
+    pub amount_e8s: u64,
+    pub phase: LiquidityWithdrawPhase,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub enum ThreeUsdReserveIngressPhase {
     AdmissionPending,
@@ -2189,6 +2221,8 @@ pub struct State {
     /// cleared by a ledger response that guarantees no transfer occurred.
     #[serde(default)]
     pub pending_borrow_mints: BTreeMap<u64, BorrowMintJournal>,
+    #[serde(default)]
+    pub liquidity_withdraw_journals: BTreeMap<Principal, LiquidityWithdrawJournal>,
     #[serde(default)]
     pub three_usd_reserve_ingress_journals:
         BTreeMap<ThreeUsdReserveIngressKey, ThreeUsdReserveIngressJournal>,
@@ -3030,6 +3064,7 @@ impl Default for State {
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             pending_borrow_mints: BTreeMap::new(),
+            liquidity_withdraw_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
             three_usd_reserve_ingress_enabled: false,
             three_usd_reserve_v2_client_ready: false,
@@ -3206,6 +3241,7 @@ impl From<InitArg> for State {
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             pending_borrow_mints: BTreeMap::new(),
+            liquidity_withdraw_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
             three_usd_reserve_ingress_enabled: false,
             three_usd_reserve_v2_client_ready: false,
