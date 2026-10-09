@@ -1144,18 +1144,37 @@ fn conflux_liquidation_swap_executes_and_credits_reserve() {
     assert_eq!(v.status, ChainVaultStatus::Open, "vault stays Open under the marker");
     assert_supply(&pic, backend, 100 * E8, "after detection + swap submit (supply unchanged)");
 
-    // ── Step 6: provide the realized-USDC Transfer log + receipt at the cursor ─
-    // The confirm reads the receipt (mined+final) then queries eth_getLogs on the
-    // USDC token for TRANSFER_TOPIC0 at [cursor1, cursor1]. The mock's get_logs
-    // filters by topic0 + block range (NOT contract address), so a push_log with
-    // the Transfer topic0 + the reserve `to` topic at cursor1 is returned.
+    // ── Step 6: provide a decoy first, then the swap output + receipt ─────────
+    // Confirmation reads the receipt (mined + final) then queries the stable
+    // token's Transfer logs for that block. A different transaction can transfer
+    // dust to this shared reserve in the same block; it must not be attributed to
+    // the swap just because the provider returns it first.
     update_any(
         &pic,
         mock,
         "set_receipt",
         Encode!(&"0xcfxswap1".to_string(), &true, &cursor1).unwrap(),
     );
-    // realized = 110 USDC (18-dec) > the 100 icUSD debt; from(any), to(reserve).
+    let decoy_topics = vec![
+        TRANSFER_TOPIC0.to_string(),
+        word_addr("0x000000000000000000000000000000000000cafe"), // unrelated sender
+        word_addr(&reserve),
+    ];
+    update_any(
+        &pic,
+        mock,
+        "push_log",
+        Encode!(
+            &decoy_topics,
+            &word_u128(1), // one wei of unrelated reserve dust
+            &"0xdecoy".to_string(),
+            &cursor1
+        )
+        .unwrap(),
+    );
+    // Recipient-only selection would consume this dust and fail the settlement
+    // accounting assertions below.
+    // The swap's realized output is 110 USDC (18-dec), from(any), to(reserve).
     let realized_usdc_native = 110u128 * E18;
     let transfer_topics = vec![
         TRANSFER_TOPIC0.to_string(),

@@ -2645,6 +2645,24 @@ async fn submit_liquidation_swap(
     log!(INFO, "[settlement chain={:?}] liquidation swap submitted: op={} vault={} amount_in={} min_out={} to_reserve={} tx={}", chain, op_id, vault_id, fundable, min_out, reserve_to, tx_hash);
 }
 
+fn realized_swap_output_from_logs(
+    logs: &[(Vec<String>, String, String, u64, u64)],
+    tx_hash: &str,
+    block_number: u64,
+    reserve_to: &str,
+) -> Option<u128> {
+    logs.iter()
+        .find_map(|(topics, data, log_tx, log_block, _log_index)| {
+            if !log_tx.eq_ignore_ascii_case(tx_hash) || *log_block != block_number {
+                return None;
+            }
+            evm_rpc::TransferLog::from_raw(topics, data)
+                .ok()
+                .filter(|transfer| transfer.to.eq_ignore_ascii_case(reserve_to))
+                .map(|transfer| transfer.amount)
+        })
+}
+
 /// Confirm path: check an `Inflight` op's receipt and finalize on success.
 async fn confirm_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_queue::SettlementOp) {
     // The submit path always records at least one hash before going Inflight.
@@ -3326,15 +3344,10 @@ async fn confirm_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_qu
             if ensure_chain_still_registered(chain).is_err() {
                 return;
             }
-            let mut realized: Option<u128> = None;
-            for (topics, data, _log_tx, _log_block, _log_index) in &logs {
-                if let Ok(t) = evm_rpc::TransferLog::from_raw(topics, data) {
-                    if t.to.eq_ignore_ascii_case(&reserve_to) {
-                        realized = Some(t.amount);
-                        break;
-                    }
-                }
-            }
+            // `get_logs` is block-scoped, so only a Transfer attributed to this
+            // submitted transaction and receipt block proves realized output.
+            let realized =
+                realized_swap_output_from_logs(&logs, &tx_hash, block_number, &reserve_to);
             let realized_usdc = match realized {
                 Some(a) => a,
                 None => {
@@ -3640,4 +3653,64 @@ async fn resubmit_if_stuck(
         "[settlement chain={:?}] STUCK op {} (tries={}, finality_depth={}) replaced-by-fee on nonce {}: prio {}->{}, max_fee {}->{}, old_tx={} new_tx={}",
         chain, op_id, tries, finality_depth, nonce, prio, bumped_prio, base_max_fee, bumped_max, tx_hash, new_tx_hash
     );
+}
+
+#[cfg(test)]
+mod liquidation_swap_log_selection_tests {
+    use super::realized_swap_output_from_logs;
+    use crate::chains::evm::evm_rpc::TRANSFER_EVENT_TOPIC0;
+
+    const TX: &str = "0xswap";
+    const RESERVE: &str = "0x000000000000000000000000000000000000cafe";
+
+    fn topic_address(address: &str) -> String {
+        format!("0x{:0>64}", &address[2..].to_ascii_lowercase())
+    }
+
+    fn transfer(
+        tx: &str,
+        block: u64,
+        recipient: &str,
+        amount: u128,
+        index: u64,
+    ) -> (Vec<String>, String, String, u64, u64) {
+        (
+            vec![
+                TRANSFER_EVENT_TOPIC0.to_string(),
+                topic_address("0x000000000000000000000000000000000000babe"),
+                topic_address(recipient),
+            ],
+            format!("0x{:064x}", amount),
+            tx.to_string(),
+            block,
+            index,
+        )
+    }
+
+    #[test]
+    fn ignores_earlier_same_block_reserve_transfer_and_selects_exact_swap_log() {
+        let logs = vec![
+            transfer("0xdecoy", 77, RESERVE, 1, 0),
+            transfer(TX, 77, RESERVE, 110, 1),
+        ];
+        assert_eq!(
+            realized_swap_output_from_logs(&logs, TX, 77, RESERVE),
+            Some(110)
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_block_and_missing_exact_transaction_output() {
+        let wrong_block = vec![transfer(TX, 76, RESERVE, 110, 1)];
+        assert_eq!(
+            realized_swap_output_from_logs(&wrong_block, TX, 77, RESERVE),
+            None
+        );
+
+        let wrong_transaction = vec![transfer("0xdecoy", 77, RESERVE, 1, 0)];
+        assert_eq!(
+            realized_swap_output_from_logs(&wrong_transaction, TX, 77, RESERVE),
+            None
+        );
+    }
 }
