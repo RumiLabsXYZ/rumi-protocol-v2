@@ -1221,8 +1221,7 @@ pub fn epoch_status() -> EpochStatus {
 /// with the capture/close cursors and completion flags OMITTED (exposing capture
 /// progress would let a not-yet-captured principal time a flash deposit to land
 /// in a snapshot it has not been captured into yet) and each snapshot time hidden
-/// until it has fired at `now_ns` (PTS-002: a future snapshot time IS the snipe
-/// target the commit-reveal seed exists to hide).
+/// until its scheduled time has passed and its capture is complete (PTS-002).
 pub fn public_epoch_status(now_ns: u64) -> PublicEpochStatus {
     with_state(|s| PublicEpochStatus {
         current_epoch_index: s.current_epoch_index,
@@ -3309,7 +3308,7 @@ mod tests {
             a_cursor: Some(tp(7)),
             a_complete: true,
             b_cursor: Some(tp(3)),
-            b_complete: false,
+            b_complete: true,
             close_started: true,
             close_cursor: Some(tp(5)),
             close_points_accrued: 99,
@@ -3320,8 +3319,8 @@ mod tests {
         let foe = full.open_epoch.unwrap();
         assert_eq!(foe.a_cursor, Some(tp(7)));
         assert!(foe.a_complete);
-        // The public status reduces the open epoch to bounds + FIRED snapshot
-        // times only (both have passed at now=20).
+        // The public status reduces the open epoch to bounds + completed
+        // snapshot times only (both captures completed before now=20).
         let pub_status = public_epoch_status(20);
         let poe = pub_status.open_epoch.unwrap();
         assert_eq!(poe.epoch_index, 2);
@@ -3336,10 +3335,10 @@ mod tests {
         assert_eq!(poe.snapshot_a_ns, Some(foe.snapshot_a_ns));
     }
 
-    // ── PTS-002: future snapshot times stay hidden from the public status ──
+    // ── PTS-002: snapshot times stay hidden until capture completes ──
 
     #[test]
-    fn pts_002_public_status_hides_future_snapshot_times() {
+    fn pts_002_public_status_reveals_times_only_after_capture() {
         init_default(tp(99));
         set_open_epoch(Some(OpenEpoch {
             epoch_index: 0,
@@ -3356,19 +3355,29 @@ mod tests {
             close_points_accrued: 0,
             close_active: 0,
         }));
-        // Before snapshot A fires, BOTH times are withheld (revealing a future
-        // time hands an attacker the exact flash-deposit moment).
+        // Neither scheduled time is public before it passes.
         let poe = public_epoch_status(11).open_epoch.unwrap();
         assert_eq!(poe.snapshot_a_ns, None);
         assert_eq!(poe.snapshot_b_ns, None);
-        // Once A fires (now >= a) it is history and revealed; B stays hidden.
+        // Passing A's scheduled time does not reveal it before capture finishes.
+        let poe = public_epoch_status(12).open_epoch.unwrap();
+        assert_eq!(poe.snapshot_a_ns, None);
+        assert_eq!(poe.snapshot_b_ns, None);
+        // A completed capture is revealed, while B remains hidden.
+        let mut open = epoch_status().open_epoch.unwrap();
+        open.a_complete = true;
+        set_open_epoch(Some(open));
         let poe = public_epoch_status(12).open_epoch.unwrap();
         assert_eq!(poe.snapshot_a_ns, Some(12));
         assert_eq!(poe.snapshot_b_ns, None);
+        // B's scheduled time passing still does not reveal its incomplete capture.
         let poe = public_epoch_status(17).open_epoch.unwrap();
         assert_eq!(poe.snapshot_a_ns, Some(12));
         assert_eq!(poe.snapshot_b_ns, None);
-        // After B fires, both are revealed.
+        // Once B completes, both times are revealed.
+        let mut open = epoch_status().open_epoch.unwrap();
+        open.b_complete = true;
+        set_open_epoch(Some(open));
         let poe = public_epoch_status(18).open_epoch.unwrap();
         assert_eq!(poe.snapshot_a_ns, Some(12));
         assert_eq!(poe.snapshot_b_ns, Some(18));

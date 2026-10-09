@@ -953,18 +953,32 @@ fn public_epoch_status_hides_cursors_and_admin_view_is_gated() {
     assert_eq!(poe.snapshot_a_ns, None, "future snapshot A must be hidden");
     assert_eq!(poe.snapshot_b_ns, None, "future snapshot B must be hidden");
 
-    // Capture A so the admin view has a non-trivial cursor to expose.
+    // The scheduled time has passed, but no driver tick has captured A yet.
     set_time_ns(&pic, oe.snapshot_a_ns);
+    let poe = public_epoch_status(&pic, rp)
+        .open_epoch
+        .expect("epoch 0 is open");
+    assert_eq!(
+        poe.snapshot_a_ns, None,
+        "elapsed but incomplete snapshot A stays hidden"
+    );
+    assert_eq!(poe.snapshot_b_ns, None);
+
+    // Capture A so the admin view has a non-trivial cursor to expose.
     force_tick(&pic, rp);
 
     // The PUBLIC query (anonymous caller) decodes into PublicEpochStatus, whose
     // open epoch has bounds but NO cursor/complete fields. The decode itself
     // proves the wire shape carries no cursors. A has fired (now >= a) so it is
-    // revealed; B is still in the future and stays hidden (PTS-002).
+    // revealed only after completion; B is still in the future and stays hidden.
     let pub_status = public_epoch_status(&pic, rp);
     let poe = pub_status.open_epoch.expect("epoch 0 is open");
     assert_eq!(poe.epoch_index, 0);
-    assert_eq!(poe.snapshot_a_ns, Some(oe.snapshot_a_ns), "fired snapshot A is revealed");
+    assert_eq!(
+        poe.snapshot_a_ns,
+        Some(oe.snapshot_a_ns),
+        "fired snapshot A is revealed"
+    );
     assert_eq!(poe.snapshot_b_ns, None, "future snapshot B stays hidden");
 
     // The ADMIN query is admin-gated: an anonymous caller is rejected (trap).
