@@ -2606,6 +2606,17 @@ mod chains_price_feed_tests {
             .multi_chain
             .chain_liquidation_configs
             .insert(CFX_MAINNET, liquidation_config_row(true));
+        // This pure-state test models a chain whose observer completed a
+        // finalized Burn-log scan through the same point as its cursor.
+        state.multi_chain.last_observed_block.insert(CFX_MAINNET, 1);
+        state
+            .multi_chain
+            .evm_burn_proof_floor_by_chain
+            .insert(CFX_MAINNET, 1);
+        state
+            .multi_chain
+            .evm_burn_proof_verified_floor_by_chain
+            .insert(CFX_MAINNET, 1);
         assert!(
             pair_is_xrc_managed(&state, CFX_MAINNET, "CFX"),
             "precondition: the pair is XRC-managed when the fetch starts"

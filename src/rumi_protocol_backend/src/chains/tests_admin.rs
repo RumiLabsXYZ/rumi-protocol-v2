@@ -458,6 +458,15 @@ fn liq_config_row() -> ChainLiquidationConfigV1 {
     }
 }
 
+fn seed_verified_evm_activation(s: &mut MultiChainState, chain: ChainId, through: u64) {
+    // Pure-state admin tests model the result of the update endpoint's
+    // quorum-finalized baseline or complete Burn-log scan.
+    s.last_observed_block.insert(chain, through);
+    s.evm_burn_proof_floor_by_chain.insert(chain, through);
+    s.evm_burn_proof_verified_floor_by_chain
+        .insert(chain, through);
+}
+
 #[test]
 fn enable_chain_flips_disabled_back_to_registered() {
     let mut s = MultiChainState::default();
@@ -468,6 +477,7 @@ fn enable_chain_flips_disabled_back_to_registered() {
         ChainStatus::Disabled
     ));
 
+    seed_verified_evm_activation(&mut s, ChainId(101), 1);
     enable_chain_in_state(&mut s, ChainId(101)).expect("enable");
     assert!(matches!(
         s.chain_configs[&ChainId(101)].status,
@@ -491,6 +501,42 @@ fn enable_chain_rejects_an_unknown_chain() {
         s.chain_configs.is_empty(),
         "enable_chain must never create a chain"
     );
+}
+
+#[test]
+fn enable_chain_refuses_migrated_legacy_history_even_when_cursor_matches_floor() {
+    let mut s = MultiChainState::default();
+    let chain = ChainId(101);
+    register_chain_in_state(&mut s, arg(), 0).expect("register");
+    s.chain_configs.get_mut(&chain).expect("config").status = ChainStatus::Disabled;
+    s.last_observed_block.insert(chain, 42);
+    s.chain_supplies.insert(chain, 100);
+
+    let err = enable_chain_in_state(&mut s, chain)
+        .expect_err("legacy cursor range has unknown Burn-log coverage");
+    assert!(matches!(err, ChainAdminError::InvalidConfig(message) if message.contains("unknown legacy Burn-log coverage")));
+    assert_eq!(s.evm_burn_proof_floor_by_chain.get(&chain), Some(&0));
+    assert_eq!(s.evm_burn_proof_legacy_hold_through.get(&chain), Some(&42));
+    assert_eq!(s.chain_supplies.get(&chain), Some(&100));
+    assert!(matches!(s.chain_configs[&chain].status, ChainStatus::Disabled));
+}
+
+#[test]
+fn enable_chain_refuses_a_stale_or_uncovered_cursor_without_mutating_status() {
+    let mut s = MultiChainState::default();
+    let chain = ChainId(101);
+    register_chain_in_state(&mut s, arg(), 0).expect("register");
+    s.chain_configs.get_mut(&chain).expect("config").status = ChainStatus::Disabled;
+    s.last_observed_block.insert(chain, 42);
+    s.evm_burn_proof_floor_by_chain.insert(chain, 41);
+    s.evm_burn_proof_verified_floor_by_chain.insert(chain, 40);
+
+    let err = enable_chain_in_state(&mut s, chain)
+        .expect_err("floor must cover exactly the cursor before activation");
+    assert!(matches!(err, ChainAdminError::InvalidConfig(message) if message.contains("contiguous proof floor")));
+    assert_eq!(s.last_observed_block.get(&chain), Some(&42));
+    assert_eq!(s.evm_burn_proof_floor_by_chain.get(&chain), Some(&41));
+    assert!(matches!(s.chain_configs[&chain].status, ChainStatus::Disabled));
 }
 
 #[test]
@@ -529,6 +575,8 @@ fn disable_then_enable_preserves_every_per_chain_state_entry() {
     s.manual_price_set_at_ns
         .insert((c, "MON".to_string()), 1_700_000_000_000_000_000);
     s.last_observed_block.insert(c, 42);
+    s.evm_burn_proof_floor_by_chain.insert(c, 42);
+    s.evm_burn_proof_verified_floor_by_chain.insert(c, 42);
     s.hot_wallet_balance_e18.insert(c, 1_000);
     s.chain_bad_debt_e8s.insert(c, 77);
     s.chain_bad_debt_circuit_threshold_e8s.insert(c, 100);
@@ -574,6 +622,7 @@ fn enable_chain_is_idempotent_only_in_the_sense_that_a_repeat_is_refused() {
     let mut s = MultiChainState::default();
     register_chain_in_state(&mut s, arg(), 0).expect("register");
     disable_chain_in_state(&mut s, ChainId(101)).expect("disable");
+    seed_verified_evm_activation(&mut s, ChainId(101), 1);
     enable_chain_in_state(&mut s, ChainId(101)).expect("first enable");
     // A second call is a VISIBLE error, not a silent success: an operator who
     // re-runs the command must not read "ok" as confirmation that a fresh
@@ -586,6 +635,7 @@ fn enable_chain_is_idempotent_only_in_the_sense_that_a_repeat_is_refused() {
 fn disable_enable_can_be_cycled_repeatedly() {
     let mut s = MultiChainState::default();
     register_chain_in_state(&mut s, arg(), 0).expect("register");
+    seed_verified_evm_activation(&mut s, ChainId(101), 1);
     for round in 0..3 {
         disable_chain_in_state(&mut s, ChainId(101)).unwrap_or_else(|e| panic!("disable {round}: {e:?}"));
         assert!(!s.chain_is_registered(ChainId(101)));

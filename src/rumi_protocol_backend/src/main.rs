@@ -4858,42 +4858,25 @@ fn clear_reorg_halt(
     Ok(())
 }
 
-/// Seed the burn-watch cursor to the current chain tip when activating a chain
-/// (Gate-4 prerequisite). Events before the seed are not scanned (none exist
-/// pre-activation). 0 = unseeded (burn-watch inert; deposit-watch still runs).
-/// Developer-gated.
+/// Manual EVM observer cursor writes are disabled. A developer-supplied height
+/// is not proof of contiguous Burn-log coverage or current external finality;
+/// only the observer's completed scan may advance the cursor and proof floor.
+/// Fresh-chain activation remains unavailable until a separately verified
+/// quorum-tip setup path is implemented.
 #[candid_method(update)]
 #[update]
 fn set_last_observed_block(
     chain: rumi_protocol_backend::chains::config::ChainId,
-    block: u64,
+    _block: u64,
 ) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
-    if read_state(|s| s.developer_principal != caller) {
+    if caller == candid::Principal::anonymous() || read_state(|s| s.developer_principal != caller) {
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
-    mutate_state(|s| {
-        let floor = s.multi_chain.ensure_evm_burn_proof_floor(chain);
-        if block < floor {
-            return Err(ProtocolError::ChainAdmin(format!(
-                "burn proof floor for chain {} is {}; cursor cannot be seeded below it",
-                chain.0, floor
-            )));
-        }
-        s.multi_chain.last_observed_block.insert(chain, block);
-        // This developer-gated endpoint seeds the observer at an explicitly
-        // asserted activation baseline. It may resolve legacy ambiguous history
-        // only when the supplied baseline reaches/passes its held cursor.
-        s.multi_chain.accept_evm_burn_proof_baseline(chain, block);
-        Ok(())
-    })?;
-    log!(
-        INFO,
-        "[set_last_observed_block] chain={:?} block={}",
-        chain,
-        block
-    );
-    Ok(())
+    let _ = chain;
+    Err(ProtocolError::ChainAdmin(
+        "manual observer cursor seeding is disabled; EVM activation requires a verified finalized-tip and contiguous Burn-log coverage path".into(),
+    ))
 }
 
 /// Read the burn-watch cursor (`last_observed_block`) for a chain. Returns 0 when

@@ -340,7 +340,7 @@ fn unscanned_observer_cursor_does_not_reject_later_direct_burn_proof() {
 }
 
 #[test]
-fn legacy_cursor_history_is_held_as_ambiguous_until_developer_baseline() {
+fn legacy_cursor_history_cannot_be_cleared_by_a_developer_height() {
     let mut s = state_with_open_vault(100);
     let chain = ChainId(10143);
     s.last_observed_block.insert(chain, 20);
@@ -366,18 +366,33 @@ fn legacy_cursor_history_is_held_as_ambiguous_until_developer_baseline() {
     );
     assert_eq!(s.chain_vaults[&1].debt_e8s, 100);
 
-    // The developer-only current-tip activation assertion explicitly chooses
-    // to exclude this prior history, after which the ordinary stale guard is
-    // precise and no longer conflates it with an unknown legacy gap.
-    s.accept_evm_burn_proof_baseline(chain, 20);
+    assert_eq!(s.evm_burn_proof_floor_by_chain.get(&chain), Some(&0));
+    assert_eq!(s.evm_burn_proof_legacy_hold_through.get(&chain), Some(&20));
     assert_eq!(
         apply_receipt_burns_to_state(&mut s, chain, "0xcafe", "0xtx", &receipt),
-        Err(ApplyBurnsError::StaleProof {
+        Err(ApplyBurnsError::LegacyHistoryHeld {
             block: 10,
-            floor: 20,
+            held_through: 20,
         })
     );
     assert_eq!(s.chain_vaults[&1].debt_e8s, 100);
+}
+
+#[test]
+fn v9_no_scan_cursor_advance_does_not_become_a_legacy_migration_hold() {
+    let mut s = MultiChainState::default();
+    let chain = ChainId(10143);
+    s.last_observed_block.insert(chain, 500);
+    s.evm_burn_proof_floor_by_chain.insert(chain, 500);
+    s.evm_burn_proof_verified_floor_by_chain.insert(chain, 500);
+
+    super::deposit_watch::advance_cursor_without_burn_coverage(&mut s, chain, 525);
+    assert_eq!(s.last_observed_block.get(&chain), Some(&525));
+    assert_eq!(s.evm_burn_proof_floor_by_chain.get(&chain), Some(&500));
+    assert_eq!(s.evm_burn_proof_verified_floor_by_chain.get(&chain), Some(&500));
+    assert_eq!(s.evm_burn_proof_legacy_hold_through.get(&chain), None);
+    assert_eq!(s.ensure_evm_burn_proof_floor(chain), 500);
+    assert_eq!(s.evm_burn_proof_legacy_hold_through.get(&chain), None);
 }
 
 #[test]
