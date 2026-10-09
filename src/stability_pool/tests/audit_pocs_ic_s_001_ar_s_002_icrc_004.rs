@@ -16,10 +16,10 @@
 //!   the ledger). The fix gates both on
 //!   `pool_guard::liquidation_in_progress()` (SystemBusy), the SP-102 idiom.
 //!
-//! ICRC-004 / SP-203: `claim_collateral` fell back to fee=0 when the
-//!   `icrc1_fee` query failed, over-crediting the claimant by one ledger fee
-//!   (inconsistent with the SP-104 conservative fallback on the liquidation
-//!   gains path). The fix applies the same `FALLBACK_COLLATERAL_FEE_E8S`.
+//! SP claim transport ambiguity: a lost ICRC-1 reply restored already-paid
+//!   collateral gains. The fix persists the exact payout tuple before dispatch,
+//!   holds ambiguous outcomes, retries the identical tuple, and fails closed
+//!   when `icrc1_fee` cannot be queried.
 //!
 //! Source fences (the end-to-end paths need a PocketIC + failing-ledger
 //! harness); state-level regression tests live in `src/state.rs`
@@ -34,7 +34,9 @@ fn read(rel: &str) -> String {
 }
 
 fn fn_body<'a>(src: &'a str, header: &'a str) -> &'a str {
-    let start = src.find(header).unwrap_or_else(|| panic!("`{}` not found", header));
+    let start = src
+        .find(header)
+        .unwrap_or_else(|| panic!("`{}` not found", header));
     let after = start + header.len();
     let end = ["\npub async fn ", "\npub fn ", "\nasync fn ", "\nfn "]
         .iter()
@@ -55,7 +57,8 @@ fn ic_s_001_refund_is_net_of_ledger_fee() {
     );
     let tuple_builder = fn_body(&src, "fn build_pending_refund_attempt(");
     assert!(
-        tuple_builder.contains("refund.amount - fee") && body.contains("amount: attempt.amount.into()"),
+        tuple_builder.contains("refund.amount - fee")
+            && body.contains("amount: attempt.amount.into()"),
         "refund_user must send the amount NET of the ledger fee, not gross with fee:None \
          (a gross refund debits amount+fee from the pool) (audit IC-S-001).",
     );
@@ -107,7 +110,12 @@ fn ic_s_001_recovery_endpoints_exist_and_are_declared() {
         "the SP must expose a get_pending_refunds query (audit IC-S-001).",
     );
     let did = read("stability_pool.did");
-    for method in ["claim_pending_refund", "get_pending_refunds", "PendingRefund", "RefundClaimNotFound"] {
+    for method in [
+        "claim_pending_refund",
+        "get_pending_refunds",
+        "PendingRefund",
+        "RefundClaimNotFound",
+    ] {
         assert!(
             did.contains(method),
             "stability_pool.did must declare `{}` (audit IC-S-001).",
@@ -141,16 +149,16 @@ fn ic_s_001_claim_keeps_record_until_exact_receipt() {
         .find("PoolBalanceAsyncGuard::new()")
         .expect("refund claim must hold the shared-balance async guard");
     let first_await = body.find(".await").expect("claim has ledger awaits");
-    assert!(balance_guard < first_await, "guard must span every claim await");
+    assert!(
+        balance_guard < first_await,
+        "guard must span every claim await"
+    );
 }
 
 #[test]
 fn ar_s_002_opt_endpoints_reject_during_liquidation() {
     let src = read("src/lib.rs");
-    for header in [
-        "pub fn opt_out_collateral(",
-        "pub fn opt_in_collateral(",
-    ] {
+    for header in ["pub fn opt_out_collateral(", "pub fn opt_in_collateral("] {
         let body = fn_body(&src, header);
         assert!(
             body.contains("liquidation_in_progress"),
@@ -162,17 +170,45 @@ fn ar_s_002_opt_endpoints_reject_during_liquidation() {
 }
 
 #[test]
-fn icrc_004_sp_203_claim_collateral_fee_fallback_is_conservative() {
+fn sp_claim_requires_live_fee_and_persists_exact_payout_identity() {
     let src = read("src/deposits.rs");
     let body = fn_body(&src, "pub async fn claim_collateral(");
     assert!(
-        body.contains("FALLBACK_COLLATERAL_FEE_E8S"),
-        "claim_collateral's icrc1_fee failure path must use the SP-104 conservative \
-         fallback, matching the liquidation gains path (audit ICRC-004 / SP-203).",
+        body.contains("icrc1_fee"),
+        "collateral claims must discover the ledger fee"
     );
     assert!(
-        !body.contains("Err(_) => 0"),
-        "claim_collateral must not fall back to fee=0 on icrc1_fee failure (over-credits \
-         the claimant by one ledger fee) (audit ICRC-004 / SP-203).",
+        body.contains("claim gains unchanged"),
+        "fee-query failure must leave gains unreserved"
     );
+    assert!(
+        body.contains("prepare_collateral_payout"),
+        "claim must persist the debit and exact tuple before dispatch"
+    );
+    assert!(
+        body.contains("begin_outbound_payout_retry"),
+        "legacy claim endpoint must retry its held tuple"
+    );
+    assert!(
+        !body.contains("FALLBACK_COLLATERAL_FEE_E8S"),
+        "claim must not guess a fee such as the 10,000-unit fallback"
+    );
+    let transfer = fn_body(&src, "fn outbound_transfer_args(");
+    assert!(
+        transfer.contains("fee: Some(payout.transfer_fee.into())"),
+        "transfer must pin the discovered fee in the immutable tuple"
+    );
+    assert!(
+        transfer.contains("created_at_time: Some(payout.transfer_created_at_time_ns)"),
+        "retry must reuse the exact ICRC dedup timestamp"
+    );
+    let claim_all = fn_body(&src, "pub async fn claim_all_collateral(");
+    assert!(claim_all.contains("pending_outbound_payouts"), "claim_all must retry pending rows with zero visible gains");
+    assert!(src.contains("verify_collateral_payout_block"), "Duplicate and aged reconciliation need exact ledger evidence");
+    assert!(src.contains("native_icp_proof::query_block"), "native ICP claims must use the legacy query_blocks proof path");
+    assert!(src.contains("archive-backed ICRC-3 response is unsupported"), "ICRC-3 archive proof must remain held without certified membership");
+
+    let did = read("stability_pool.did");
+    assert!(did.contains("claim_collateral : (principal) -> (variant { Ok : nat64; Err : StabilityPoolError });"), "legacy claim_collateral Candid signature must remain unchanged");
+    assert!(did.contains("reconcile_collateral_claim : (principal, principal, nat64)"), "exact candidate-block reconciliation must be additive");
 }
