@@ -294,6 +294,11 @@ type CompletedOutboundPayoutStatus = record {
   block_index : nat64;
   completed_at_ns : nat64;
 };
+type CompletedOutboundPayoutPage = record {
+  items : vec CompletedOutboundPayoutStatus;
+  next_cursor : opt nat64;
+  has_more : bool;
+};
 type PendingRefund = record {
   id : nat64;
   user : principal;
@@ -516,7 +521,9 @@ service : (StabilityPoolInitArgs) -> {
   list_depositor_principals : () -> (vec principal) query;
   get_pending_refunds : (opt principal) -> (vec PendingRefund) query;
   get_my_pending_collateral_claims : () -> (vec PendingOutboundPayoutStatus) query;
+  // Bounded compatibility view; use the cursor method for complete history.
   get_my_completed_collateral_claims : () -> (vec CompletedOutboundPayoutStatus) query;
+  get_my_completed_collateral_claims_page : (opt nat64, nat16) -> (CompletedOutboundPayoutPage) query;
   get_pending_unallocated_interest_forwards : () -> (vec UnallocatedInterestForwardBatch) query;
   get_my_native_xrp_payouts : () -> (vec NativeXrpPendingPayout) query;
   get_pending_chain_absorbs : () -> (vec ChainSpAbsorbIntent) query;

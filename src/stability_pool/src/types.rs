@@ -638,6 +638,15 @@ pub struct CompletedOutboundPayoutStatus {
     pub completed_at_ns: u64,
 }
 
+/// Bounded caller-scoped page over the permanent collateral-claim journal.
+/// `next_cursor` is exclusive and should be passed back as `after_timestamp`.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedOutboundPayoutPage {
+    pub items: Vec<CompletedOutboundPayoutStatus>,
+    pub next_cursor: Option<u64>,
+    pub has_more: bool,
+}
+
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingOutboundPayoutStatus {
     pub ledger: Principal,

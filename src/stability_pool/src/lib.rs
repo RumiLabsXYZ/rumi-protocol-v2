@@ -8,6 +8,7 @@ pub mod deposits;
 pub mod liquidation;
 pub mod logs;
 pub mod pool_guard;
+pub mod receipt_store;
 pub mod state;
 pub mod types;
 
@@ -111,6 +112,9 @@ fn init(args: StabilityPoolInitArgs) {
         "refusing to init: stable memory non-empty; use upgrade mode not reinstall"
     );
     mutate_state(|s| s.initialize(args));
+    receipt_store::init_layout();
+    state::save_to_stable_memory();
+    receipt_store::set_layout_version(receipt_store::LAYOUT_VERSION);
     log!(
         INFO,
         "Stability Pool initialized. Protocol: {}",
@@ -191,6 +195,7 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
         "Migration: normalized {} stablecoin transfer fee values",
         corrected_fees
     );
+    state::save_to_stable_memory();
 
     // Defer timer setup to avoid ic0_call_new restriction during upgrade
     ic_cdk_timers::set_timer(Duration::ZERO, || {
@@ -424,11 +429,29 @@ pub fn get_my_pending_collateral_claims() -> Vec<PendingOutboundPayoutStatus> {
     read_state(|s| s.pending_outbound_payouts_for(&caller))
 }
 
-/// Caller-scoped receipt history for settled collateral payouts.
+/// Compatibility view of the first 10,000 caller-scoped settled collateral
+/// receipts, preserving the prior endpoint bound. This returns the oldest
+/// rows by transfer timestamp and cannot represent a larger history; use the
+/// page method to traverse the complete permanent receipt journal.
 #[query]
 pub fn get_my_completed_collateral_claims() -> Vec<CompletedOutboundPayoutStatus> {
     let caller = ic_cdk::api::caller();
-    read_state(|s| s.completed_outbound_payouts_for(&caller))
+    receipt_store::all_for_owner_compat(caller)
+}
+
+/// Caller-scoped bounded page over every settled collateral-claim receipt.
+#[query]
+pub fn get_my_completed_collateral_claims_page(
+    after_timestamp: Option<u64>,
+    limit: u16,
+) -> CompletedOutboundPayoutPage {
+    let caller = ic_cdk::api::caller();
+    let page = receipt_store::page(caller, after_timestamp, limit.into());
+    CompletedOutboundPayoutPage {
+        items: page.items,
+        next_cursor: page.next_cursor,
+        has_more: page.has_more,
+    }
 }
 
 

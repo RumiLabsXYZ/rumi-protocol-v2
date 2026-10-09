@@ -127,6 +127,11 @@ export const idlFactory = ({ IDL }) => {
     'transfer_memo' : IDL.Vec(IDL.Nat8),
     'gross_amount' : IDL.Nat64,
   });
+  const CompletedOutboundPayoutPage = IDL.Record({
+    'next_cursor' : IDL.Opt(IDL.Nat64),
+    'items' : IDL.Vec(CompletedOutboundPayoutStatus),
+    'has_more' : IDL.Bool,
+  });
   const NativeXrpPendingPayout = IDL.Record({
     'claim_id' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
@@ -547,6 +552,11 @@ export const idlFactory = ({ IDL }) => {
     'get_my_completed_collateral_claims' : IDL.Func(
         [],
         [IDL.Vec(CompletedOutboundPayoutStatus)],
+        ['query'],
+      ),
+    'get_my_completed_collateral_claims_page' : IDL.Func(
+        [IDL.Opt(IDL.Nat64), IDL.Nat16],
+        [CompletedOutboundPayoutPage],
         ['query'],
       ),
     'get_my_native_xrp_payouts' : IDL.Func(

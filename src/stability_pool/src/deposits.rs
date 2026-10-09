@@ -834,15 +834,13 @@ pub async fn reconcile_collateral_claim(
         });
         return Err(StabilityPoolError::LedgerTransferFailed { reason });
     }
-    let completed = mutate_state(|state| {
-        state.complete_outbound_payout(
-            claim_owner,
-            collateral_ledger,
-            &reserved,
-            block_index,
-            ic_cdk::api::time(),
-        )
-    });
+    let completed = complete_outbound_payout_and_append(
+        claim_owner,
+        collateral_ledger,
+        &reserved,
+        block_index,
+        ic_cdk::api::time(),
+    );
     if !completed {
         return Err(StabilityPoolError::LedgerTransferFailed {
             reason: "exact ledger proof returned but payout row changed; claim remains held".into(),
@@ -882,15 +880,13 @@ async fn dispatch_outbound_payout(
                     });
                 }
             };
-            let completed = mutate_state(|s| {
-                s.complete_outbound_payout(
-                    caller,
-                    ledger,
-                    &payout,
-                    block_index,
-                    ic_cdk::api::time(),
-                )
-            });
+            let completed = complete_outbound_payout_and_append(
+                caller,
+                ledger,
+                &payout,
+                block_index,
+                ic_cdk::api::time(),
+            );
             if completed {
                 Ok(())
             } else {
@@ -945,15 +941,13 @@ async fn dispatch_outbound_payout(
                 });
                 return Err(StabilityPoolError::LedgerTransferFailed { reason });
             }
-            let completed = mutate_state(|s| {
-                s.complete_outbound_payout(
-                    caller,
-                    ledger,
-                    &payout,
-                    block_index,
-                    ic_cdk::api::time(),
-                )
-            });
+            let completed = complete_outbound_payout_and_append(
+                caller,
+                ledger,
+                &payout,
+                block_index,
+                ic_cdk::api::time(),
+            );
             if completed {
                 Ok(())
             } else {
@@ -1009,6 +1003,80 @@ async fn dispatch_outbound_payout(
             })
         }
     }
+}
+
+/// Apply the completion to heap accounting and append its permanent receipt in
+/// this same synchronous response message. A trap in either write rolls both
+/// back under IC message atomicity.
+fn complete_outbound_payout_and_append(
+    caller: Principal,
+    ledger: Principal,
+    payout: &PendingOutboundPayout,
+    block_index: u64,
+    now_ns: u64,
+) -> bool {
+    let timestamp = payout.transfer_created_at_time_ns;
+    if let Some(existing) = crate::receipt_store::get(caller, timestamp) {
+        let has_pending = read_state(|state| {
+            state
+                .pending_outbound_payout(&caller, &ledger)
+                .is_some()
+        });
+        if let Err(reason) = validate_existing_completion(
+            &existing,
+            ledger,
+            payout,
+            block_index,
+            has_pending,
+        ) {
+            ic_cdk::trap(reason);
+        }
+        // The permanent journal is authoritative. A replay after completion
+        // must not reapply counters or append a duplicate event.
+        return true;
+    }
+
+    let Some(completed) = mutate_state(|state| {
+        state.complete_outbound_payout_record(caller, ledger, payout, block_index, now_ns)
+    }) else {
+        return false;
+    };
+    if let Err(reason) = crate::receipt_store::append(
+        caller,
+        crate::receipt_store::StoredReceipt {
+            ledger,
+            receipt: completed,
+        },
+    ) {
+        ic_cdk::trap(&reason);
+    }
+    true
+}
+
+fn validate_existing_completion(
+    existing: &crate::receipt_store::StoredReceipt,
+    ledger: Principal,
+    payout: &PendingOutboundPayout,
+    block_index: u64,
+    has_pending: bool,
+) -> Result<(), &'static str> {
+    let saved = &existing.receipt.payout;
+    if existing.ledger != ledger
+        || saved.gross_amount != payout.gross_amount
+        || saved.transfer_amount != payout.transfer_amount
+        || saved.transfer_fee != payout.transfer_fee
+        || saved.recipient != payout.recipient
+        || saved.from_subaccount != payout.from_subaccount
+        || saved.transfer_memo != payout.transfer_memo
+        || saved.transfer_created_at_time_ns != payout.transfer_created_at_time_ns
+        || existing.receipt.block_index != block_index
+    {
+        return Err("SP claim completion conflicts with an existing owner/timestamp receipt");
+    }
+    if has_pending {
+        return Err("SP claim receipt exists while a pending tuple remains; refusing duplicate accounting");
+    }
+    Ok(())
 }
 
 /// Claim collateral gains for a single collateral type.
@@ -1131,6 +1199,7 @@ pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, Stabilit
     }
 
     let mut claimed = BTreeMap::new();
+    let mut first_error = None;
     for (collateral_ledger, amount) in &claims_by_ledger {
         match claim_collateral(*collateral_ledger).await {
             Ok(claimed_amount) => {
@@ -1145,10 +1214,25 @@ pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, Stabilit
                     e
                 );
                 // Continue claiming others — partial success is fine
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
             }
         }
     }
 
+    finish_claim_all(claimed, first_error)
+}
+
+fn finish_claim_all(
+    claimed: BTreeMap<Principal, u64>,
+    first_error: Option<StabilityPoolError>,
+) -> Result<BTreeMap<Principal, u64>, StabilityPoolError> {
+    if claimed.is_empty() {
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+    }
     Ok(claimed)
 }
 /// Convenience conversion is temporarily fail-closed until a durable conversion
@@ -1845,6 +1929,132 @@ mod tests {
             expected_block_index: Some(7),
             last_error: None,
         }
+    }
+
+    #[test]
+    fn claim_all_reports_total_failure_but_keeps_partial_successes() {
+        let error = StabilityPoolError::LedgerTransferFailed {
+            reason: "pending transfer remains unresolved".into(),
+        };
+        assert!(matches!(finish_claim_all(BTreeMap::new(), None), Ok(result) if result.is_empty()));
+        assert!(matches!(finish_claim_all(BTreeMap::new(), Some(error.clone())), Err(StabilityPoolError::LedgerTransferFailed { .. })));
+
+        let mut partial = BTreeMap::new();
+        partial.insert(principal(8), 123);
+        assert!(matches!(finish_claim_all(partial.clone(), Some(error)), Ok(result) if result == partial));
+    }
+
+    #[test]
+    fn completion_appends_permanent_receipt_when_cache_trims_new_low_key() {
+        let caller = principal(1);
+        let ledger = principal(11);
+        let cached_owner = principal(2);
+        let cached_ledger = principal(12);
+        let cached_recipient = Account {
+            owner: cached_owner,
+            subaccount: None,
+        };
+        let mut state = crate::state::StabilityPoolState::default();
+        let completed_cache = state.completed_outbound_payouts.as_mut().unwrap();
+        for timestamp in 1..=crate::state::MAX_RECENT_OUTBOUND_PAYOUTS as u64 {
+            let payout = PendingOutboundPayout {
+                gross_amount: 3,
+                transfer_amount: 2,
+                transfer_fee: 1,
+                recipient: cached_recipient,
+                from_subaccount: None,
+                transfer_memo: vec![2],
+                transfer_created_at_time_ns: timestamp,
+                dispatch_in_flight: false,
+                ambiguous_seen: false,
+                last_error: None,
+                dispatch_generation: 1,
+                reconciliation_attempts: 0,
+                last_reconciliation_at_ns: None,
+                candidate_block_index: None,
+                candidate_block_index_raw: None,
+            };
+            completed_cache.insert(
+                (cached_owner, cached_ledger, timestamp),
+                CompletedOutboundPayout {
+                    payout,
+                    block_index: timestamp,
+                    completed_at_ns: timestamp,
+                },
+            );
+        }
+
+        let mut position = DepositPosition::new(1);
+        position.collateral_gains.insert(ledger, 1_000);
+        state.deposits.insert(caller, position);
+        let pending = state
+            .prepare_collateral_payout(
+                caller,
+                ledger,
+                100,
+                Account {
+                    owner: caller,
+                    subaccount: None,
+                },
+                500,
+                vec![1],
+            )
+            .unwrap()
+            .unwrap();
+        let timestamp = pending.transfer_created_at_time_ns;
+        crate::receipt_store::init_layout();
+        crate::state::replace_state(state);
+
+        assert!(complete_outbound_payout_and_append(caller, ledger, &pending, 700, 800));
+
+        let permanent = crate::receipt_store::get(caller, timestamp)
+            .expect("permanent journal retains receipt evicted from compatibility cache");
+        assert_eq!(permanent.ledger, ledger);
+        assert_eq!(permanent.receipt.payout.transfer_created_at_time_ns, timestamp);
+        assert_eq!(permanent.receipt.block_index, 700);
+        assert_eq!(permanent.receipt.completed_at_ns, 800);
+        read_state(|state| {
+            assert!(state.pending_outbound_payout(&caller, &ledger).is_none());
+            assert_eq!(state.completed_outbound_payouts.as_ref().unwrap().len(), crate::state::MAX_RECENT_OUTBOUND_PAYOUTS);
+            assert!(!state.completed_outbound_payouts.as_ref().unwrap().contains_key(&(caller, ledger, timestamp)));
+            assert_eq!(state.deposits.get(&caller).unwrap().total_claimed_gains.get(&ledger), Some(&1_000));
+            assert_eq!(state.pool_events().len(), 1);
+        });
+    }
+
+    #[test]
+    fn exact_receipt_replay_is_idempotent_only_after_pending_row_is_gone() {
+        let owner = principal(7);
+        let ledger = principal(8);
+        let payout = PendingOutboundPayout {
+            gross_amount: 120,
+            transfer_amount: 100,
+            transfer_fee: 20,
+            recipient: Account { owner, subaccount: None },
+            from_subaccount: None,
+            transfer_memo: vec![1, 2, 3],
+            transfer_created_at_time_ns: 10,
+            dispatch_in_flight: false,
+            ambiguous_seen: false,
+            last_error: None,
+            dispatch_generation: 1,
+            reconciliation_attempts: 0,
+            last_reconciliation_at_ns: None,
+            candidate_block_index: Some(110),
+            candidate_block_index_raw: Some("110".into()),
+        };
+        let existing = crate::receipt_store::StoredReceipt {
+            ledger,
+            receipt: CompletedOutboundPayout {
+                payout: payout.clone(),
+                block_index: 110,
+                completed_at_ns: 210,
+            },
+        };
+
+        assert!(validate_existing_completion(&existing, ledger, &payout, 110, false).is_ok());
+        assert!(validate_existing_completion(&existing, ledger, &payout, 110, true).is_err());
+        assert!(validate_existing_completion(&existing, ledger, &payout, 111, false).is_err());
     }
 
     #[test]

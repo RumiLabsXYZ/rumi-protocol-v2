@@ -1,4 +1,4 @@
-use candid::{CandidType, Decode, Encode, Principal};
+use candid::{CandidType, Decode, Principal};
 use ic_canister_log::log;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -272,7 +272,10 @@ const MAX_POOL_EVENTS: usize = 10_000;
 /// than an anti-DoS one (mirrors rumi_3pool's MAX_PENDING_CLAIMS).
 pub const MAX_PENDING_REFUNDS: usize = 10_000;
 pub const MAX_PENDING_OUTBOUND_PAYOUTS: usize = 10_000;
-pub const MAX_COMPLETED_OUTBOUND_PAYOUTS: usize = 10_000;
+/// Heap compatibility cache only. The authoritative receipt journal is the
+/// append-only stable map in `receipt_store`; old exact receipts are never
+/// evicted from that map.
+pub const MAX_RECENT_OUTBOUND_PAYOUTS: usize = 100;
 pub const MAX_PENDING_CHAIN_ABSORBS: usize = 1_000;
 pub const MAX_PENDING_NATIVE_XRP_ABSORBS: usize = 1_000;
 pub const MAX_COMPLETED_CHAIN_ABSORBS: usize = 10_000;
@@ -448,8 +451,9 @@ impl StabilityPoolState {
             .pending_outbound_payouts
             .as_ref()
             .ok_or(StabilityPoolError::SystemBusy)?;
-        let completed_count = self.completed_outbound_payouts.as_ref()
-            .ok_or(StabilityPoolError::SystemBusy)?.len();
+        self.completed_outbound_payouts
+            .as_ref()
+            .ok_or(StabilityPoolError::SystemBusy)?;
         if payouts.contains_key(&(caller, ledger)) {
             return Err(StabilityPoolError::SystemBusy);
         }
@@ -461,15 +465,11 @@ impl StabilityPoolState {
         if gross_amount == 0 || gross_amount <= fee {
             return Ok(None);
         }
-        // Interim bounded policy: never evict completed evidence. The 10k
-        // admission cap becomes an availability limit until receipts move to
-        // dedicated append-only stable storage with paged queries.
         if payouts.contains_key(&(caller, ledger))
             || payouts.len() >= MAX_PENDING_OUTBOUND_PAYOUTS
-            || completed_count.saturating_add(payouts.len()) >= MAX_COMPLETED_OUTBOUND_PAYOUTS
         {
             return Err(StabilityPoolError::LedgerTransferFailed {
-                reason: "completed payout receipt capacity is reserved or exhausted; gains unchanged".into(),
+                reason: "pending payout capacity is exhausted; gains unchanged".into(),
             });
         }
         let total_claimed = self.deposits.get(&caller)
@@ -601,56 +601,70 @@ impl StabilityPoolState {
         block_index: u64,
         now_ns: u64,
     ) -> bool {
+        self.complete_outbound_payout_record(
+            caller,
+            ledger,
+            expected,
+            block_index,
+            now_ns,
+        )
+        .is_some()
+    }
+
+    /// Complete accounting and return the exact receipt independently of the
+    /// bounded compatibility cache, which may evict this key during trimming.
+    pub fn complete_outbound_payout_record(
+        &mut self,
+        caller: Principal,
+        ledger: Principal,
+        expected: &PendingOutboundPayout,
+        block_index: u64,
+        now_ns: u64,
+    ) -> Option<CompletedOutboundPayout> {
         let Some(payouts) = self.pending_outbound_payouts.as_ref() else {
-            return false;
+            return None;
         };
         let Some(saved) = payouts.get(&(caller, ledger)) else {
-            return false;
+            return None;
         };
         if !saved.dispatch_in_flight
             || saved.dispatch_generation != expected.dispatch_generation
             || !Self::outbound_payout_tuple_matches(saved, expected)
         {
-            return false;
+            return None;
         }
         let current_total = self.deposits
             .get(&caller)
             .and_then(|position| position.total_claimed_gains.get(&ledger).copied())
             .unwrap_or(0);
         let Some(next_total) = current_total.checked_add(expected.gross_amount) else {
-            return false;
+            return None;
         };
         let key = (caller, ledger, expected.transfer_created_at_time_ns);
         let Some(completed) = self.completed_outbound_payouts.as_mut() else {
-            return false;
+            return None;
         };
-        if completed.len() >= MAX_COMPLETED_OUTBOUND_PAYOUTS {
-            return false;
-        }
-        if let Some(existing) = completed.get(&key) {
-            if Self::outbound_payout_tuple_matches(&existing.payout, expected) {
-                return false;
-            }
-            return false;
-        }
         let payout = {
             let Some(payouts) = self.pending_outbound_payouts.as_mut() else {
-                return false;
+                return None;
             };
             let Some(payout) = payouts.remove(&(caller, ledger)) else {
-                return false;
+                return None;
             };
             payout
         };
-        completed.insert(
-            key,
-            CompletedOutboundPayout {
-                payout: payout.clone(),
-                block_index,
-                completed_at_ns: now_ns,
-            },
-        );
-        debug_assert!(completed.len() <= MAX_COMPLETED_OUTBOUND_PAYOUTS);
+        let receipt = CompletedOutboundPayout {
+            payout: payout.clone(),
+            block_index,
+            completed_at_ns: now_ns,
+        };
+        completed.insert(key, receipt.clone());
+        while completed.len() > MAX_RECENT_OUTBOUND_PAYOUTS {
+            let Some(oldest_key) = completed.keys().next().copied() else {
+                break;
+            };
+            completed.remove(&oldest_key);
+        }
         let position = self
             .deposits
             .entry(caller)
@@ -664,7 +678,7 @@ impl StabilityPoolState {
             },
             now_ns,
         );
-        true
+        Some(receipt)
     }
 
     pub fn reject_outbound_payout_without_effect(
@@ -3766,36 +3780,11 @@ pub fn replace_state(state: StabilityPoolState) {
     });
 }
 
-/// Serialize state to stable memory (called from pre_upgrade).
-//
-// SAFETY (UPG-004): this writes the encoded state at raw stable-memory offset 0
-// using `stable64_write`, with a leading 8-byte length prefix. It does NOT use
-// `ic_stable_structures::MemoryManager`. A future migration that introduces
-// MemoryManager MUST first read the legacy blob into RAM via the same raw
-// `stable64_read(0, ...)` path before calling `MemoryManager::init`, because
-// `MemoryManager::init` unconditionally writes its 'MGR' magic header at
-// physical offset 0 and would destructively overwrite the legacy state. See
-// `liquidation_bot::post_upgrade` for the canonical "rescue legacy blob first,
-// then init MemoryManager" pattern.
+/// Serialize state into the MemoryManager-backed snapshot cell (called from
+/// pre_upgrade). Legacy offset-zero snapshots are read and migrated by
+/// `load_from_stable_memory` before the manager is initialized.
 pub fn save_to_stable_memory() {
-    STATE.with(|s| {
-        let state = s.borrow();
-        let bytes = Encode!(&*state).expect("Failed to encode stability pool state");
-        let len = bytes.len() as u64;
-
-        // Only grow if current stable memory is insufficient.
-        // Pages are 64 KiB each and never shrink, so avoid redundant grows.
-        let needed_pages = (len + 8 + 65535) / 65536;
-        let current_pages = ic_cdk::api::stable::stable64_size();
-        if needed_pages > current_pages {
-            ic_cdk::api::stable::stable64_grow(needed_pages - current_pages)
-                .expect("Failed to grow stable memory");
-        }
-
-        // Write length prefix (8 bytes) then data
-        ic_cdk::api::stable::stable64_write(0, &len.to_le_bytes());
-        ic_cdk::api::stable::stable64_write(8, &bytes);
-    });
+    STATE.with(|s| crate::receipt_store::save_snapshot(&s.borrow()));
 }
 
 /// Pre-IC-S-001 snapshot of `StabilityPoolState` (before the `pending_refunds`
@@ -3915,42 +3904,67 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<StabilityPoolState> {
 /// every position. This matches the backend (UPG-001) and the other satellites,
 /// which all trap-not-wipe on an undecodable snapshot.
 pub fn load_from_stable_memory() {
-    let mut len_bytes = [0u8; 8];
-    ic_cdk::api::stable::stable64_read(0, &mut len_bytes);
-    let len = u64::from_le_bytes(len_bytes) as usize;
+    // Decode a bounded raw-offset candidate before accepting any MGR prefix:
+    // the legacy length word can itself begin with those three bytes.
+    let existing_layout = crate::receipt_store::inspect_existing_layout();
+    let mut state = match existing_layout {
+        crate::receipt_store::ExistingStableLayout::Empty => {
+            crate::receipt_store::init_layout();
+            let state = read_state(|state| state.clone());
+            crate::receipt_store::save_snapshot(&state);
+            crate::receipt_store::set_layout_version(crate::receipt_store::LAYOUT_VERSION);
+            return;
+        }
+        crate::receipt_store::ExistingStableLayout::MemoryManager => {
+            crate::receipt_store::init_layout();
+            let version = crate::receipt_store::layout_version();
+            if version != crate::receipt_store::LAYOUT_VERSION {
+                ic_cdk::trap(&format!(
+                    "unsupported SP stable-memory layout version {version}"
+                ));
+            }
+            let state = crate::receipt_store::load_snapshot().unwrap_or_else(|| {
+                ic_cdk::trap("SP MemoryManager layout is missing its state snapshot")
+            });
+            if let Err(reason) = crate::receipt_store::validate_compatibility_cache(&state) {
+                ic_cdk::trap(&reason);
+            }
+            replace_state(state);
+            return;
+        }
+        crate::receipt_store::ExistingStableLayout::Legacy(state) => state,
+        crate::receipt_store::ExistingStableLayout::Invalid(preview) => {
+            let preview_len = preview.len();
+            let preview_hex: String = preview
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            log!(
+                INFO,
+                "CRITICAL UPG-001/UPG-101: SP raw stable snapshot failed all known schema decoders and did not have a valid MemoryManager header. \
+                 first_{}_bytes_hex={}. Trapping before initializing MemoryManager so the predecessor bytes remain intact.",
+                preview_len,
+                preview_hex
+            );
+            ic_cdk::trap(
+                "stability_pool post_upgrade: stable memory is neither a decodable predecessor snapshot nor a valid MemoryManager layout; refusing to overwrite it",
+            );
+        }
+    };
 
-    if len == 0 {
-        return; // No saved state, fresh start.
+    crate::receipt_store::init_layout();
+
+    if let Err(reason) = crate::receipt_store::migrate_legacy_state(&mut state) {
+        ic_cdk::trap(&format!(
+            "SP legacy receipt migration rejected a duplicate owner/timestamp key: {reason}"
+        ));
     }
 
-    let mut bytes = vec![0u8; len];
-    ic_cdk::api::stable::stable64_read(8, &mut bytes);
-
-    if let Some(state) = try_decode_state(&bytes) {
-        replace_state(state);
-        return;
-    }
-
-    let preview_len = bytes.len().min(64);
-    let preview_hex: String = bytes[..preview_len]
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect();
-    log!(
-        INFO,
-        "CRITICAL UPG-001/UPG-101: stability pool snapshot decode failed for all known schema \
-         versions. snapshot_len={} bytes, first_{}_bytes_hex={}. \
-         Trapping to preserve on-chain state (old wasm + stable memory stay intact) rather than \
-         wiping every depositor position. Ship a wasm with a matching StabilityPoolStateVN \
-         snapshot to recover.",
-        bytes.len(),
-        preview_len,
-        preview_hex
-    );
-    ic_cdk::trap(
-        "stability_pool post_upgrade: stable state did not decode under any known schema version; \
-         refusing to wipe depositor positions — see CRITICAL log",
-    );
+    // Marker is written last. A trap anywhere before here rolls the entire
+    // upgrade back to the raw predecessor blob under IC upgrade atomicity.
+    crate::receipt_store::save_snapshot(&state);
+    crate::receipt_store::set_layout_version(crate::receipt_store::LAYOUT_VERSION);
+    replace_state(state);
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -3960,6 +3974,7 @@ pub fn load_from_stable_memory() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candid::Encode;
 
     #[test]
     fn deposit_transfer_timestamps_are_unique_within_a_round_and_persisted() {
@@ -4055,7 +4070,7 @@ mod tests {
     }
 
     #[test]
-    fn payout_receipt_capacity_is_reserved_for_every_pending_claim() {
+    fn completed_receipts_do_not_block_new_pending_claims() {
         let owner = Principal::from_slice(&[35]);
         let ledger = Principal::from_slice(&[45]);
         let other_owner = Principal::from_slice(&[36]);
@@ -4071,7 +4086,7 @@ mod tests {
             candidate_block_index_raw: None,
         };
         let completed = state.completed_outbound_payouts.as_mut().unwrap();
-        for index in 0..(MAX_COMPLETED_OUTBOUND_PAYOUTS as u64 - 1) {
+        for index in 0..(MAX_RECENT_OUTBOUND_PAYOUTS as u64 + 1) {
             let mut payout = template.clone();
             payout.transfer_created_at_time_ns = index;
             completed.insert((owner, ledger, index), CompletedOutboundPayout {
@@ -4084,17 +4099,15 @@ mod tests {
             state.deposits.insert(user, position);
         }
         assert!(state.prepare_collateral_payout(owner, ledger, 1, recipient, 20_000, vec![2]).unwrap().is_some());
-        assert_eq!(state.completed_outbound_payouts.as_ref().unwrap().len(), MAX_COMPLETED_OUTBOUND_PAYOUTS - 1);
+        assert_eq!(state.completed_outbound_payouts.as_ref().unwrap().len(), MAX_RECENT_OUTBOUND_PAYOUTS + 1);
         assert_eq!(state.pending_outbound_payouts.as_ref().unwrap().len(), 1);
         state.reconcile_pending_outbound_payouts_after_upgrade();
-        assert!(matches!(
-            state.prepare_collateral_payout(other_owner, other_ledger, 1,
+        assert!(state.prepare_collateral_payout(other_owner, other_ledger, 1,
                 icrc_ledger_types::icrc1::account::Account { owner: other_owner, subaccount: None },
-                20_001, vec![3]),
-            Err(StabilityPoolError::LedgerTransferFailed { .. })
-        ));
-        assert_eq!(state.deposits.get(&other_owner).unwrap().collateral_gains.get(&other_ledger), Some(&2));
-        assert_eq!(state.pending_outbound_payouts.as_ref().unwrap().len(), 1);
+                20_001, vec![3]).unwrap().is_some());
+        assert_eq!(state.deposits.get(&other_owner).unwrap().collateral_gains.get(&other_ledger), None);
+        assert_eq!(state.pending_outbound_payouts.as_ref().unwrap().get(&(other_owner, other_ledger)).unwrap().gross_amount, 2);
+        assert_eq!(state.pending_outbound_payouts.as_ref().unwrap().len(), 2);
     }
 
     #[test]
@@ -4198,6 +4211,51 @@ mod tests {
             state.completed_outbound_payouts_for(&caller)[0].transfer_created_at_time_ns,
             20
         );
+    }
+
+    #[test]
+    fn interrupted_pending_claim_survives_snapshot_upgrade_with_exact_tuple() {
+        let caller = Principal::from_slice(&[38]);
+        let ledger = Principal::from_slice(&[48]);
+        let recipient = icrc_ledger_types::icrc1::account::Account {
+            owner: caller,
+            subaccount: None,
+        };
+        let mut before_upgrade = StabilityPoolState::default();
+        let mut position = DepositPosition::new(1);
+        position.collateral_gains.insert(ledger, 2_000_000);
+        before_upgrade.deposits.insert(caller, position);
+        let payout = before_upgrade
+            .prepare_collateral_payout(caller, ledger, 1_000_000, recipient, 88, vec![6, 7, 8])
+            .unwrap()
+            .unwrap();
+
+        // The snapshot is taken while the dispatch is in flight, as it is
+        // when an upgrade begins during the ledger await.
+        let bytes = Encode!(&before_upgrade).unwrap();
+        let mut after_upgrade = try_decode_state(&bytes).expect("decode pending payout snapshot");
+        after_upgrade.reconcile_pending_outbound_payouts_after_upgrade();
+        let held = after_upgrade
+            .pending_outbound_payout(&caller, &ledger)
+            .expect("pending payout survives upgrade");
+        assert!(!held.dispatch_in_flight);
+        assert!(held.ambiguous_seen);
+        assert_eq!(held.gross_amount, payout.gross_amount);
+        assert_eq!(held.transfer_amount, payout.transfer_amount);
+        assert_eq!(held.transfer_fee, payout.transfer_fee);
+        assert_eq!(held.recipient, payout.recipient);
+        assert_eq!(held.from_subaccount, payout.from_subaccount);
+        assert_eq!(held.transfer_memo, payout.transfer_memo);
+        assert_eq!(held.transfer_created_at_time_ns, payout.transfer_created_at_time_ns);
+
+        let retry = after_upgrade.begin_outbound_payout_retry(caller, ledger).unwrap();
+        assert_eq!(retry.gross_amount, payout.gross_amount);
+        assert_eq!(retry.transfer_amount, payout.transfer_amount);
+        assert_eq!(retry.transfer_fee, payout.transfer_fee);
+        assert_eq!(retry.recipient, payout.recipient);
+        assert_eq!(retry.from_subaccount, payout.from_subaccount);
+        assert_eq!(retry.transfer_memo, payout.transfer_memo);
+        assert_eq!(retry.transfer_created_at_time_ns, payout.transfer_created_at_time_ns);
     }
 
     use std::collections::BTreeMap;

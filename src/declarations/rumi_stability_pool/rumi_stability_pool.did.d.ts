@@ -107,6 +107,11 @@ export type CollateralStatus = { 'Paused' : null } |
   { 'Deprecated' : null } |
   { 'Sunset' : null } |
   { 'Frozen' : null };
+export interface CompletedOutboundPayoutPage {
+  'next_cursor' : [] | [bigint],
+  'items' : Array<CompletedOutboundPayoutStatus>,
+  'has_more' : boolean,
+}
 export interface CompletedOutboundPayoutStatus {
   'block_index' : bigint,
   'transfer_fee' : bigint,
@@ -482,6 +487,10 @@ export interface _SERVICE {
   'get_my_completed_collateral_claims' : ActorMethod<
     [],
     Array<CompletedOutboundPayoutStatus>
+  >,
+  'get_my_completed_collateral_claims_page' : ActorMethod<
+    [[] | [bigint], number],
+    CompletedOutboundPayoutPage
   >,
   'get_my_native_xrp_payouts' : ActorMethod<[], Array<NativeXrpPendingPayout>>,
   'get_my_pending_collateral_claims' : ActorMethod<
