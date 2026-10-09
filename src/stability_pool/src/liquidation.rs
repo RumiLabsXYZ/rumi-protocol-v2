@@ -668,6 +668,7 @@ pub(crate) fn clear_unburned_native_xrp_absorb_intent_in_state(
         return false;
     };
     if intent.status == NativeXrpAbsorbIntentStatus::Prepared
+        && intent.burn_attempted == Some(false)
         && intent.burn_proof.is_none()
         && intent.backend_result.is_none()
     {
@@ -4112,6 +4113,8 @@ mod tests {
         submit_result: Option<XrpSpAbsorbResult>,
         minting_account: Option<Account>,
         burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
+        ambiguous_burn_failure: bool,
+        burn_attempts: usize,
         events: Vec<String>,
         submitted_requests: Vec<XrpSpAbsorbRequest>,
     }
@@ -4155,8 +4158,17 @@ mod tests {
             created_at_time: u64,
         ) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, IcusdBurnAttemptError>
         {
+            self.burn_attempts += 1;
             self.events
                 .push(format!("burn:{vault_id}:{amount_e8s}:{created_at_time}"));
+            if self.ambiguous_burn_failure {
+                return Err(IcusdBurnAttemptError::ambiguous(
+                    StabilityPoolError::LiquidationFailed {
+                        vault_id,
+                        reason: "simulated ambiguous burn result".into(),
+                    },
+                ));
+            }
             Ok(self
                 .burn_proof
                 .clone()
@@ -4657,6 +4669,120 @@ mod tests {
             "stables_consumed_e8s is the full icUSD burn this fixture absorbs"
         );
         assert!(success);
+    }
+
+    #[test]
+    fn native_xrp_unburned_clear_requires_known_not_attempted_state() {
+        for (dispatch_state, should_clear) in
+            [(Some(false), true), (Some(true), false), (None, false)]
+        {
+            let mut state = test_state();
+            let mut intent = prepare_or_reuse_native_xrp_absorb_intent_in_state(
+                &mut state,
+                &native_xrp_plan(901, 100, 1_000),
+                1,
+            )
+            .unwrap();
+            intent.burn_attempted = dispatch_state;
+            state.put_pending_native_xrp_absorb(intent).unwrap();
+
+            assert_eq!(
+                clear_unburned_native_xrp_absorb_intent_in_state(&mut state, 901),
+                should_clear,
+                "dispatch state {dispatch_state:?} must have the expected clear behavior",
+            );
+            assert_eq!(
+                state.get_pending_native_xrp_absorb(901).is_some(),
+                !should_clear,
+                "only an intent known never to have dispatched may be erased",
+            );
+        }
+
+        // A definitive first-attempt failure explicitly restores the dispatch
+        // marker to false before using the same clear helper.
+        let mut state = test_state();
+        let expected = prepare_or_reuse_native_xrp_absorb_intent_in_state(
+            &mut state,
+            &native_xrp_plan(902, 100, 1_000),
+            1,
+        )
+        .unwrap();
+        mark_native_xrp_absorb_burn_attempted_in_state(&mut state, 902, 2).unwrap();
+        assert!(cancel_first_definitive_native_burn_failure_in_state(
+            &mut state, &expected
+        ));
+        assert!(state.get_pending_native_xrp_absorb(902).is_none());
+    }
+
+    #[test]
+    fn ambiguous_native_xrp_burn_survives_retry_preflight_error_and_never_reburns() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_native_collateral_with_tag(
+                &user_a(),
+                xrp_ledger(),
+                valid_xrp_address(),
+                Some(7),
+            )
+            .unwrap();
+        replace_state(state);
+
+        let vault = xrp_vault(903, 60_00000000);
+        let mut ambiguous_io = FakeNativeXrpAbsorbIo {
+            preflight: Some(xrp_preflight(903, 60_00000000, 12_000_000)),
+            ambiguous_burn_failure: true,
+            ..Default::default()
+        };
+        assert!(
+            !futures::executor::block_on(execute_native_xrp_absorb_with_io(
+                &vault,
+                &mut ambiguous_io,
+            ))
+            .success
+        );
+        assert_eq!(ambiguous_io.burn_attempts, 1);
+        let pending = read_state(|s| s.get_pending_native_xrp_absorb(903)).unwrap();
+        assert_eq!(pending.burn_attempted, Some(true));
+        assert!(pending.burn_proof.is_none());
+        assert!(pending.backend_result.is_none());
+
+        // Simulate the next retry failing before it can rebuild the plan.
+        let mut failed_preflight = FakeNativeXrpAbsorbIo::default();
+        assert!(
+            !futures::executor::block_on(execute_native_xrp_absorb_with_io(
+                &vault,
+                &mut failed_preflight,
+            ))
+            .success
+        );
+        let held = read_state(|s| s.get_pending_native_xrp_absorb(903)).unwrap();
+        assert_eq!(held.burn_attempted, Some(true));
+        assert!(held.burn_proof.is_none());
+
+        // A later successful preflight reuses the held intent, whose attempted
+        // marker refuses another ledger burn without exact proof.
+        let mut later_retry = FakeNativeXrpAbsorbIo {
+            preflight: Some(xrp_preflight(903, 60_00000000, 12_000_000)),
+            ..Default::default()
+        };
+        assert!(
+            !futures::executor::block_on(execute_native_xrp_absorb_with_io(
+                &vault,
+                &mut later_retry,
+            ))
+            .success
+        );
+        assert_eq!(later_retry.burn_attempts, 0);
+        assert!(later_retry
+            .events
+            .iter()
+            .all(|event| !event.starts_with("burn:")));
+        assert_eq!(
+            read_state(|s| s.get_pending_native_xrp_absorb(903).unwrap().burn_attempted),
+            Some(true),
+        );
+        replace_state(StabilityPoolState::default());
     }
 
     #[test]
