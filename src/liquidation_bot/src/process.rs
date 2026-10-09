@@ -7,6 +7,11 @@ use crate::swap;
 
 const CONFIRM_ATTEMPTS: u8 = 5;
 const CANCEL_ATTEMPTS: u8 = 3;
+thread_local! {
+    /// In-memory fairness cursor only; pending return journals remain the
+    /// durable source of truth and selection restarts from the first claim.
+    static RETURN_RESUME_CURSOR: std::cell::Cell<Option<u64>> = std::cell::Cell::new(None);
+}
 /// Number of fee-refresh tuples permitted after the original first dispatch.
 /// Every typed first-dispatch BadFee is retained before a refresh.
 const MAX_AUTO_RETURN_FEE_REFRESHES: usize = 3;
@@ -160,6 +165,20 @@ fn write_ambiguous_swap_recovery(
         error_message: Some(message.to_string()),
         confirm_retry_count: 0,
     });
+}
+
+/// Authorize the existing exact collateral-return path after a failure that
+/// happened before ICPSwap dispatch. The generation/status checks ensure this
+/// transition cannot overwrite a later claim phase or an existing return.
+fn arm_pre_swap_failure_return(claim: &mut state::BotClaimJournal, claim_generation: u64) -> bool {
+    if claim.claim_generation != claim_generation
+        || claim.status != state::BotClaimJournalStatus::SwapMayHaveStarted
+        || claim.collateral_return.is_some()
+    {
+        return false;
+    }
+    claim.status = state::BotClaimJournalStatus::ReturnFeeQueryPending;
+    true
 }
 
 /// Per-claim ckUSDC accounting decision after a swap.
@@ -448,7 +467,7 @@ pub async fn process_pending() {
     if resume_pending_payment(&config).await {
         return;
     }
-    if resume_pending_return(&config).await {
+    if resume_pending_return(&config, None).await {
         return;
     }
     if let Some((vault_id, phase)) = state::read_state(|s| {
@@ -617,12 +636,65 @@ pub async fn process_pending() {
     // balance or what the swap router claims. The transfer in Phase 3 spends
     // only this delta (see compute_swap_reservation for rationale).
     //
-    // If the pre-swap balance read fails we proceed without bracketing —
-    // worse than capped, but better than skipping the swap entirely.
-    let bal_before_swap = swap::balance_of_self_ckusdc(&config).await.unwrap_or_else(|e| {
-        log!(crate::INFO, "Pre-swap balance read failed for vault #{}: {} (proceeding without per-claim cap)", vault.vault_id, e);
-        u64::MAX
-    });
+    // Do not dispatch a swap unless its per-claim ckUSDC baseline is known.
+    // Because this failure is before depositFromAndSwap, the exact collateral
+    // return is safe and can be resumed through the normal proof-backed path.
+    let bal_before_swap = match swap::balance_of_self_ckusdc(&config).await {
+        Ok(balance) => balance,
+        Err(error) => {
+            let armed = state::mutate_state(|s| {
+                s.pending_claims
+                    .get_mut(&vault.vault_id)
+                    .is_some_and(|claim| arm_pre_swap_failure_return(claim, claim_generation))
+            });
+            if armed {
+                state::save_config_to_stable();
+                log!(
+                    crate::INFO,
+                    "Pre-swap ckUSDC balance read failed for vault #{}: {}; no swap was dispatched, returning collateral",
+                    vault.vault_id,
+                    error
+                );
+                // Reuses the generation-bound return journal/proof/cancel
+                // pipeline. If a query or fee check still fails, the claim
+                // remains in ReturnFeeQueryPending for the next timer tick.
+                resume_pending_return(&config, Some(vault.vault_id)).await;
+            } else {
+                log!(
+                    crate::INFO,
+                    "STUCK: pre-swap ckUSDC balance read failed for vault #{} and claim state could not be moved to safe return; no swap was dispatched",
+                    vault.vault_id
+                );
+            }
+            let message = if armed {
+                format!(
+                    "pre-swap ckUSDC balance read failed; no swap dispatched and claim moved to proof-backed collateral return: {error}"
+                )
+            } else {
+                format!(
+                    "pre-swap ckUSDC balance read failed; no swap dispatched, but claim state could not be moved to safe return: {error}"
+                )
+            };
+            write_record(LiquidationRecordV1 {
+                id: record_id,
+                vault_id: vault.vault_id,
+                timestamp,
+                status: LiquidationStatus::TransferFailed,
+                collateral_claimed_e8s: collateral_amount,
+                debt_to_cover_e8s: debt_covered,
+                icp_swapped_e8s: 0,
+                ckusdc_received_e6: 0,
+                ckusdc_transferred_e6: 0,
+                icp_to_treasury_e8s: 0,
+                oracle_price_e8s: collateral_price,
+                effective_price_e8s: 0,
+                slippage_bps: 0,
+                error_message: Some(message),
+                confirm_retry_count: 0,
+            });
+            return;
+        }
+    };
 
     let swap_result = swap::swap_icp_for_ckusdc(&config, swap_amount).await;
 
@@ -1373,19 +1445,91 @@ fn next_return_created_at_time(
     }
 }
 
+/// Whether this claim has an automatic return action left to perform.
+/// Definitive no-effect and expired ambiguous tuples require reconciliation;
+/// they must not block another claim's resumable return.
+fn return_claim_is_actionable(claim: &state::BotClaimJournal, now: u64) -> bool {
+    match &claim.status {
+        state::BotClaimJournalStatus::ReturnFeeQueryPending => {
+            claim.collateral_return.is_none()
+                && claim.failed_return_attempts.len() <= MAX_AUTO_RETURN_FEE_REFRESHES
+        }
+        state::BotClaimJournalStatus::ReturnPending => {
+            let Some(intent) = claim.collateral_return.as_ref() else {
+                return false;
+            };
+            if matches!(
+                &intent.status,
+                state::BotReturnTransferStatus::NoEffect
+                    | state::BotReturnTransferStatus::FeeMismatchAmbiguous
+            ) {
+                return false;
+            }
+            if intent.receipt.is_some() {
+                return true;
+            }
+            const SAFE_RETRY_WINDOW_NS: u64 = 23 * 60 * 60 * 1_000_000_000;
+            now.saturating_sub(intent.created_at_time) < SAFE_RETRY_WINDOW_NS
+        }
+        _ => false,
+    }
+}
+
+fn return_claim_matches(
+    claim: &state::BotClaimJournal,
+    only_vault_id: Option<u64>,
+    now: u64,
+) -> bool {
+    only_vault_id.is_none_or(|vault_id| claim.vault_id == vault_id)
+        && return_claim_is_actionable(claim, now)
+}
+
+fn select_return_claim_id(
+    claims: &std::collections::BTreeMap<u64, state::BotClaimJournal>,
+    only_vault_id: Option<u64>,
+    cursor: Option<u64>,
+    now: u64,
+) -> Option<u64> {
+    if let Some(vault_id) = only_vault_id {
+        return claims
+            .get(&vault_id)
+            .filter(|claim| return_claim_matches(claim, Some(vault_id), now))
+            .map(|_| vault_id);
+    }
+
+    let next = claims
+        .iter()
+        .find(|(vault_id, claim)| {
+            cursor.is_none_or(|last| **vault_id > last)
+                && return_claim_is_actionable(claim, now)
+        })
+        .map(|(vault_id, _)| *vault_id);
+    next.or_else(|| {
+        claims.iter()
+            .find(|(_, claim)| return_claim_is_actionable(claim, now))
+            .map(|(vault_id, _)| *vault_id)
+    })
+}
+
 /// Resume a claim-bound collateral return with the exact ledger dedup tuple.
-/// Legacy journals without an intent, and intents outside the dedup window,
-/// remain operator-held for exact ledger history reconciliation.
-async fn resume_pending_return(config: &BotConfig) -> bool {
-    let Some(mut claim) = state::read_state(|s| {
-        s.pending_claims.values()
-            .find(|claim| matches!(
-                claim.status,
-                state::BotClaimJournalStatus::ReturnFeeQueryPending
-                    | state::BotClaimJournalStatus::ReturnPending
-            ))
-            .cloned()
-    }) else { return false };
+/// When a vault id is supplied, process only that claim; otherwise select the
+/// first claim that can still be retried automatically.
+async fn resume_pending_return(config: &BotConfig, only_vault_id: Option<u64>) -> bool {
+    let cursor = RETURN_RESUME_CURSOR.with(std::cell::Cell::get);
+    let Some(vault_id) = state::read_state(|s| {
+        select_return_claim_id(&s.pending_claims, only_vault_id, cursor, ic_cdk::api::time())
+    }) else {
+        return false;
+    };
+    // Advance before any await so a claim that remains pending after a
+    // transient failure cannot monopolize the next timer tick. An explicit
+    // admin or immediate-recovery target does not change general ordering.
+    if only_vault_id.is_none() {
+        RETURN_RESUME_CURSOR.with(|cursor| cursor.set(Some(vault_id)));
+    }
+    let Some(mut claim) = state::read_state(|s| s.pending_claims.get(&vault_id).cloned()) else {
+        return false;
+    };
 
     if claim.status == state::BotClaimJournalStatus::ReturnFeeQueryPending {
         if claim.collateral_return.is_some() {
@@ -1628,7 +1772,7 @@ pub async fn admin_reconcile_return_block(
     intent.status = state::BotReturnTransferStatus::ReceiptObserved;
     state::mutate_state(|s| { s.pending_claims.insert(vault_id, claim); });
     state::save_config_to_stable();
-    resume_pending_return(config).await;
+    resume_pending_return(config, Some(vault_id)).await;
     if state::read_state(|s| s.pending_claims.contains_key(&vault_id)) {
         Err("candidate block was not accepted or cancellation remains pending; inspect the durable journal".into())
     } else {
@@ -1735,6 +1879,109 @@ mod tests {
     const SWAP_ERR: &str = "Quote returned zero output";
     const RETURN_ERR: &str = "Transfer error: BadFee";
     const CANCEL_ERR: &str = "GenericError(\"Cannot cancel claim for vault #7: protocol collateral balance 0 < required 99990000\")";
+
+    #[test]
+    fn pre_swap_balance_failure_arms_only_current_unstarted_claim_for_return() {
+        let mut claim = state::BotClaimJournal {
+            vault_id: 19,
+            claim_generation: 42,
+            debt_covered_e8s: 100,
+            collateral_amount_e8s: 50,
+            collateral_received_amount_e8s: Some(49),
+            collateral_outbound_fee_e8s: Some(1),
+            collateral_price_e8s: 200,
+            payment_memo: b"payment".to_vec(),
+            collateral_return_memo: b"claim-19-42-return".to_vec(),
+            failed_return_attempts: Vec::new(),
+            collateral_return: None,
+            status: state::BotClaimJournalStatus::SwapMayHaveStarted,
+        };
+
+        assert!(arm_pre_swap_failure_return(&mut claim, 42));
+        assert_eq!(
+            claim.status,
+            state::BotClaimJournalStatus::ReturnFeeQueryPending
+        );
+        assert!(claim.collateral_return.is_none());
+
+        // A stale completion or a phase that may already have dispatched must
+        // not gain authority to create a new return intent.
+        assert!(!arm_pre_swap_failure_return(&mut claim, 41));
+        assert!(!arm_pre_swap_failure_return(&mut claim, 42));
+    }
+
+    #[test]
+    fn held_return_does_not_starve_a_later_resumable_claim() {
+        let mut held = state::BotClaimJournal {
+            vault_id: 1,
+            claim_generation: 3,
+            debt_covered_e8s: 100,
+            collateral_amount_e8s: 50,
+            collateral_received_amount_e8s: Some(49),
+            collateral_outbound_fee_e8s: Some(1),
+            collateral_price_e8s: 200,
+            payment_memo: b"payment-1".to_vec(),
+            collateral_return_memo: b"return-1".to_vec(),
+            failed_return_attempts: Vec::new(),
+            collateral_return: None,
+            status: state::BotClaimJournalStatus::ReturnPending,
+        };
+        held.collateral_return = Some(state::BotReturnTransferJournal {
+            ledger_principal: candid::Principal::anonymous(),
+            backend_principal: candid::Principal::anonymous(),
+            amount_e8s: 50,
+            fee_e8s: 10,
+            transfer_fee_e8s: Some(10),
+            memo: held.collateral_return_memo.clone(),
+            created_at_time: 100,
+            receipt: None,
+            status: state::BotReturnTransferStatus::NoEffect,
+        });
+        let resumable = state::BotClaimJournal {
+            vault_id: 2,
+            claim_generation: 4,
+            debt_covered_e8s: 100,
+            collateral_amount_e8s: 50,
+            collateral_received_amount_e8s: Some(49),
+            collateral_outbound_fee_e8s: Some(1),
+            collateral_price_e8s: 200,
+            payment_memo: b"payment-2".to_vec(),
+            collateral_return_memo: b"return-2".to_vec(),
+            failed_return_attempts: Vec::new(),
+            collateral_return: None,
+            status: state::BotClaimJournalStatus::ReturnFeeQueryPending,
+        };
+        let later_resumable = state::BotClaimJournal {
+            vault_id: 3,
+            claim_generation: 5,
+            debt_covered_e8s: 100,
+            collateral_amount_e8s: 50,
+            collateral_received_amount_e8s: Some(49),
+            collateral_outbound_fee_e8s: Some(1),
+            collateral_price_e8s: 200,
+            payment_memo: b"payment-3".to_vec(),
+            collateral_return_memo: b"return-3".to_vec(),
+            failed_return_attempts: Vec::new(),
+            collateral_return: None,
+            status: state::BotClaimJournalStatus::ReturnFeeQueryPending,
+        };
+
+        assert!(!return_claim_is_actionable(&held, 200));
+        assert!(return_claim_is_actionable(&resumable, 200));
+        let claims = std::collections::BTreeMap::from([
+            (held.vault_id, held),
+            (resumable.vault_id, resumable),
+            (later_resumable.vault_id, later_resumable),
+        ]);
+        let first = select_return_claim_id(&claims, None, None, 200);
+        assert_eq!(first, Some(2));
+        // Simulate the first claim remaining actionable after a failed query;
+        // the cursor advances before that attempt, so the next pass picks 3.
+        assert_eq!(select_return_claim_id(&claims, None, first, 200), Some(3));
+        assert_eq!(select_return_claim_id(&claims, None, Some(3), 200), Some(2));
+        // Explicit-vault reconciliation ignores cursor order and stays exact.
+        assert_eq!(select_return_claim_id(&claims, Some(2), Some(3), 200), Some(2));
+    }
 
     #[test]
     fn short_payment_gross_threshold_covers_rounding_and_fee() {
