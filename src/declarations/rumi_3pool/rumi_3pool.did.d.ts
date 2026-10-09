@@ -248,6 +248,7 @@ export interface PayoutInputTransfer {
   'ledger' : Principal,
   'created_at_time' : bigint,
   'amount' : bigint,
+  'fee' : [] | [bigint],
 }
 export type PayoutKind = { 'RemoveOneCoin' : null } |
   { 'SwapOutput' : null } |

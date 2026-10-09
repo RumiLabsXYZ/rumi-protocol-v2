@@ -4,10 +4,11 @@
 its wire signature, pricing, fee allocation, and gross-output return value.
 Both entrypoints use `swap_inner` for pricing and reserve accounting.
 
-Receipt clients must first be enabled by the pool admin through
-`set_swap_receipt_client_v1(client, enabled)`. The stable capability set starts
-empty and holds at most 64 clients. `is_swap_receipt_client_v1` exposes this
-capability. Source delivery does not enable any client.
+Production receipt ingress and new client enablement are disabled until an
+ambiguous transfer has a bounded, ledger-evidence-backed recovery path. The
+test-endpoints Wasm exercises this unfinished saga. Existing clients can still
+be revoked, and callers can still read their retained receipts. The stable
+capability set starts empty and holds at most 64 clients.
 
 A receipt request binds an exactly 32-byte `intent_id`, input/output coin
 indices, input amount `dx`, and net minimum received `min_dy`. IDs are scoped to
@@ -54,7 +55,8 @@ reserve mutations, including the legacy swap and pending-claim paths, even after
 an upgrade. Ordinary admin unpause cannot clear it. There is deliberately no
 operator-assertion recovery endpoint; clearing unresolved custody work requires
 a future implementation based on verified ledger evidence and correct reserve
-accounting.
+accounting. The production ingress gate prevents new receipt-backed transfers;
+it does not resolve any receipt created by an older installed module.
 
 `get_swap_receipt_v1` is caller-scoped. Canister consumers should use a replicated
 inter-canister call for authoritative observation. An off-chain ordinary query

@@ -7,6 +7,7 @@ use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
 use icrc_ledger_types::icrc2::approve::ApproveArgs;
 use num_traits::ToPrimitive;
+use pocket_ic::common::rest::{CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 use rumi_3pool::payouts::{PayoutEntitlement, PayoutInputAction, PayoutKind, PayoutOutcome};
 use rumi_3pool::types::{PoolStatus, ThreePoolError, ThreePoolInitArgs, ThreePoolPendingClaim, TokenConfig};
@@ -534,6 +535,114 @@ fn swap_fee_query_rejection_happens_before_any_input_or_payout_identity() {
     assert_eq!(balance(&h, h.ledgers[0], h.pool), pool_input_before);
     assert_eq!(balance(&h, h.ledgers[1], h.pool), pool_output_before);
     assert_eq!(payout_storage_counts(&h), payouts_before);
+    assert!(claims(&h).is_empty());
+}
+
+#[test]
+fn swap_rejects_fee_sized_input_before_pull_and_accepts_above_fee_control() {
+    let h = setup();
+    // T1 has six decimals and T0 has eight. This direction can quote a
+    // positive output even when the entire input is needed for its refund fee.
+    call_ledger_nat(&h, h.ledgers[1], "set_fee", 1_000);
+    let user_before = h.ledgers.map(|ledger| balance(&h, ledger, h.user));
+    let pool_before = h.ledgers.map(|ledger| balance(&h, ledger, h.pool));
+    let payouts_before = payout_storage_counts(&h);
+
+    let rejected: Result<Nat, ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool,
+            h.user,
+            "swap",
+            encode_args((1u8, 0u8, 1_000u128, 0u128)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(rejected, Err(ThreePoolError::InsufficientOutput { .. })),
+        "fee-sized input must be rejected even with positive net output: {rejected:?}");
+    assert_eq!(h.ledgers.map(|ledger| balance(&h, ledger, h.user)), user_before);
+    assert_eq!(h.ledgers.map(|ledger| balance(&h, ledger, h.pool)), pool_before);
+    assert_eq!(payout_storage_counts(&h), payouts_before);
+    assert!(claims(&h).is_empty());
+
+    let admitted: Result<Nat, ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool,
+            h.user,
+            "swap",
+            encode_args((1u8, 0u8, 1_001u128, 0u128)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(admitted.is_ok(), "above-fee control should remain tradable: {admitted:?}");
+    // The ledger charges the input transfer fee in addition to `dx`.
+    assert_eq!(user_before[1] - balance(&h, h.ledgers[1], h.user), 1_001 + 1_000);
+    assert!(balance(&h, h.ledgers[0], h.user) > user_before[0]);
+}
+
+#[test]
+fn swap_fee_rise_after_quote_rejects_pinned_input_without_moving_funds() {
+    let h = setup();
+    call_ledger_nat(&h, h.ledgers[1], "set_fee", 100);
+    let user_before = h.ledgers.map(|ledger| balance(&h, ledger, h.user));
+    let pool_before = h.ledgers.map(|ledger| balance(&h, ledger, h.pool));
+    let payouts_before = payout_storage_counts(&h);
+    let _: () = decode_one(&reply(h.pic.update_call(
+        h.pool,
+        h.admin,
+        "test_gate_next_swap_input_pull",
+        encode_args(()).unwrap(),
+    ).unwrap())).unwrap();
+
+    let swap = h.pic.submit_call(
+        h.pool,
+        h.user,
+        "swap",
+        encode_args((1u8, 0u8, 101u128, 0u128)).unwrap(),
+    ).unwrap();
+    let gate = (0..80).find_map(|_| {
+        h.pic.tick();
+        h.pic.get_canister_http().into_iter()
+            .find(|request| request.url == "https://3pool-swap-fee-gate.test/hold")
+    }).expect("swap reached the barrier after its input fee query");
+    call_ledger_nat(&h, h.ledgers[1], "set_fee", 1_000);
+    h.pic.mock_canister_http_response(MockCanisterHttpResponse {
+        subnet_id: gate.subnet_id,
+        request_id: gate.request_id,
+        response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+            status: 200,
+            headers: vec![],
+            body: b"release".to_vec(),
+        }),
+        additional_responses: vec![],
+    });
+    let rejected: Result<Nat, ThreePoolError> = decode_one(&reply(h.pic.await_call(swap).unwrap())).unwrap();
+    assert!(matches!(rejected, Err(ThreePoolError::TransferFailed { ref token, ref reason })
+        if token == "T1" && reason.contains("BadFee")),
+        "the pinned input fee must cause a no-effect ledger rejection: {rejected:?}");
+    assert_eq!(h.ledgers.map(|ledger| balance(&h, ledger, h.user)), user_before);
+    assert_eq!(h.ledgers.map(|ledger| balance(&h, ledger, h.pool)), pool_before);
+    assert_eq!(payout_storage_counts(&h), payouts_before);
+    assert!(claims(&h).is_empty());
+}
+
+#[test]
+fn donation_pins_fresh_input_fee_after_output_cache_becomes_stale() {
+    let h = setup();
+    // A T1 -> T0 swap warms T0's outbound fee cache at zero.
+    let warm: Result<Nat, ThreePoolError> = decode_one(&reply(h.pic.update_call(
+        h.pool, h.user, "swap",
+        encode_args((1u8, 0u8, 100_000u128, 0u128)).unwrap(),
+    ).unwrap())).unwrap();
+    warm.expect("warm T0 fee cache");
+    call_ledger_nat(&h, h.ledgers[0], "set_fee", 100);
+    let user_before = balance(&h, h.ledgers[0], h.user);
+    let pool_before = balance(&h, h.ledgers[0], h.pool);
+
+    let donated: Result<(), ThreePoolError> = decode_one(&reply(h.pic.update_call(
+        h.pool, h.user, "donate",
+        encode_args((0u8, 1_000u128)).unwrap(),
+    ).unwrap())).unwrap();
+    donated.expect("donation must query and pin the current input fee");
+    assert_eq!(user_before - balance(&h, h.ledgers[0], h.user), 1_100);
+    assert_eq!(balance(&h, h.ledgers[0], h.pool) - pool_before, 1_000);
     assert!(claims(&h).is_empty());
 }
 

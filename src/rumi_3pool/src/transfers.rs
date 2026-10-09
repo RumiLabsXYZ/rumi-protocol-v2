@@ -138,7 +138,7 @@ pub async fn prepare_input_payout(
     owner: Principal,
     gross: u128,
 ) -> Result<u64, PayoutFailure> {
-    let fee = ledger_fee(ledger).await.map_err(|reason| PayoutFailure {
+    let fee = try_current_ledger_fee(ledger).await.map_err(|reason| PayoutFailure {
         id: 0,
         reason: format!("fee lookup failed before an input recovery identity was created: {reason}"),
         ambiguous: false,
@@ -146,7 +146,7 @@ pub async fn prepare_input_payout(
     prepare_input_payout_with_fee(kind, action, token_index, ledger, symbol, owner, gross, fee)
 }
 
-fn prepare_input_payout_with_fee(
+pub(crate) fn prepare_input_payout_with_fee(
     kind: PayoutKind,
     action: crate::payouts::PayoutInputAction,
     token_index: u8,
@@ -174,6 +174,7 @@ fn prepare_input_payout_with_fee(
         from: Account { owner, subaccount: None },
         to: Account { owner: ic_cdk::id(), subaccount: None },
         amount: gross,
+        fee: Some(fee),
         memo: Some(input_memo.finalize().to_vec()),
         created_at_time: ic_cdk::api::time(),
     });
@@ -219,7 +220,7 @@ pub async fn execute_pinned_input(id: u64) -> Result<(), String> {
         from: input.from,
         to: input.to,
         amount: candid::Nat::from(input.amount),
-        fee: None,
+        fee: input.fee.map(candid::Nat::from),
         memo: input.memo.clone().map(Into::into),
         created_at_time: Some(input.created_at_time),
     };
@@ -248,7 +249,7 @@ pub async fn reconcile_pinned_input(id: u64) -> Result<(), String> {
         from: input.from,
         to: input.to,
         amount: candid::Nat::from(input.amount),
-        fee: None,
+        fee: input.fee.map(candid::Nat::from),
         memo: input.memo.clone().map(Into::into),
         created_at_time: Some(input.created_at_time),
     };

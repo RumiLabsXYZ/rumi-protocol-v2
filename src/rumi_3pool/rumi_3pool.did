@@ -130,6 +130,7 @@ type PayoutInputTransfer = record {
   from : Account;
   to : Account;
   amount : nat;
+  fee : opt nat;
   memo : opt blob;
   created_at_time : nat64;
 };
