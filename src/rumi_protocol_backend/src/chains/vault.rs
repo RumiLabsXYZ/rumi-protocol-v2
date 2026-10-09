@@ -1113,6 +1113,9 @@ pub enum BorrowError {
     },
     /// A mint is already in flight for this vault (`pending_mint_e8s != 0`).
     MintInFlight,
+    /// An interest mint is already in flight for this vault. Borrow admission
+    /// must wait until it settles so the pending amount is not omitted from CR.
+    InterestMintInFlight,
     ZeroDebt,
     NoPrice,
     NoPriceTimestamp,
@@ -1165,8 +1168,9 @@ pub enum BorrowError {
 /// `address_validator` / `price_symbol` are the same per-chain seams as the open
 /// helper. Rejections (no mutation on any path): `additional == 0` → `ZeroDebt`;
 /// malformed `recipient` → `InvalidAddress`; absent/non-Open vault →
-/// `UnknownVault`/`WrongStatus`; an in-flight mint → `MintInFlight`; no price →
-/// `NoPrice`; post-borrow CR `< min_cr_e4` → `BelowMinCr`.
+/// `UnknownVault`/`WrongStatus`; an in-flight mint → `MintInFlight` or
+/// `InterestMintInFlight`; no price → `NoPrice`; projected post-borrow CR `<
+/// min_cr_e4` → `BelowMinCr`.
 #[allow(clippy::too_many_arguments)]
 pub fn borrow_chain_vault_in_state(
     state: &mut MultiChainState,
@@ -1187,7 +1191,7 @@ pub fn borrow_chain_vault_in_state(
         return Err(BorrowError::InvalidAddress(recipient));
     }
     // Step 1: read-only validation — no mutation on any rejection path.
-    let (chain, collateral, new_debt) = {
+    let (chain, collateral, new_debt, effective_debt) = {
         let v = state
             .chain_vaults
             .get(&vault_id)
@@ -1204,6 +1208,12 @@ pub fn borrow_chain_vault_in_state(
         if v.pending_mint_e8s != 0 {
             return Err(BorrowError::MintInFlight);
         }
+        // An interest mint reserves debt that has not yet been folded into
+        // `debt_e8s`; borrowing during that window would check CR against a
+        // stale debt balance. Reject before any queue or vault mutation.
+        if v.pending_interest_mint_e8s != 0 {
+            return Err(BorrowError::InterestMintInFlight);
+        }
         // Increment 1 (spec 3.1): no new borrow while a liquidation is in flight —
         // the collateral is reserved/handed to a tier, so borrowing more against it
         // could leave the post-confirm vault under-collateralized.
@@ -1215,10 +1225,22 @@ pub fn borrow_chain_vault_in_state(
                 chain: v.collateral_chain,
             });
         }
+        let new_debt = v.debt_e8s.saturating_add(additional_e8s);
+        let apr_bps = crate::chains::collateral_config::chain_collateral_config(
+            v.collateral_chain,
+        )
+        .map(|c| c.interest_apr_bps)
+        .unwrap_or(0);
+        let accrued = crate::chains::interest::accrued_chain_interest_e8s(
+            v.debt_e8s,
+            apr_bps,
+            now_ns.saturating_sub(v.last_interest_accrual_ns),
+        );
         (
             v.collateral_chain,
             v.collateral_amount_native,
-            v.debt_e8s.saturating_add(additional_e8s),
+            new_debt,
+            new_debt.saturating_add(accrued),
         )
     };
     // Security review (F10): borrowing more debt is risk-increasing, same as
@@ -1236,7 +1258,7 @@ pub fn borrow_chain_vault_in_state(
         .get(&chain)
         .map(|c| c.chain_native_decimals)
         .unwrap_or(18);
-    let cr_e4 = collateral_ratio_e4(collateral, native_decimals, price_e8, new_debt);
+    let cr_e4 = collateral_ratio_e4(collateral, native_decimals, price_e8, effective_debt);
     if cr_e4 < min_cr_e4 {
         return Err(BorrowError::BelowMinCr {
             cr_e4,
