@@ -305,6 +305,7 @@ pub mod cycles {
         CacheQuery(cycles_ledger::CacheQueryError),
         SourceAttempt(SourceAttemptError),
         DeliveryRisk(state::RecordSelfRecoveryDeliveryRiskError),
+        WriteOffRecord(state::RecordSelfRecoveryWriteOffError),
         SourceReserve(SourceReserveError),
         TargetReserve(TargetReservationError),
         GlobalReserve(RollingSpendReserveError),
@@ -339,6 +340,12 @@ pub mod cycles {
         /// Self-recovery remains suppressed until independent evidence proves
         /// the recovery delivered to Sentinel itself.
         SelfRecoveryDeliveryProofRequired,
+        /// Only an unresolved Cycles Ledger self-recovery operation can use
+        /// the explicit unresolved write-off path.
+        SelfRecoveryWriteOffRequired,
+        /// An unresolved write-off is a permanent self-recovery latch; later
+        /// reconciliation cannot silently reinterpret the signer disposition.
+        SelfRecoveryWriteOffAlreadyApplied,
         /// A caller supplied a known debit greater than the immutable amount
         /// plus fee held by this operation.
         KnownDebitExceedsHeld,
@@ -653,6 +660,11 @@ pub mod cycles {
         now_secs: u64,
     ) -> Result<FundingOperation, FundingError> {
         let op = state::get_operation(operation_id).ok_or(FundingError::NotFound)?;
+        if state::self_recovery_write_off(operation_id).is_some() {
+            return Err(FundingError::Reconciliation(
+                ReconciliationError::SelfRecoveryWriteOffAlreadyApplied,
+            ));
+        }
         if op.rail() != types::FundingRail::CyclesLedger {
             return Err(FundingError::WrongRail);
         }
@@ -776,6 +788,132 @@ pub mod cycles {
             },
             now_secs,
         )
+    }
+
+    /// Signer-authorized liveness disposition for ambiguous Sentinel
+    /// self-recovery. It closes accounting as a distinct unresolved write-off,
+    /// charges the full source hold, releases distribution suppression, and
+    /// deliberately retains the delivery-risk tombstone and full operation
+    /// evidence so a late credit cannot be followed by another self-top-up.
+    pub(crate) fn write_off_self_recovery_unresolved(
+        operation_id: u64,
+        authorized_by: Principal,
+        now_secs: u64,
+    ) -> Result<types::SelfRecoveryWriteOffReceipt, FundingError> {
+        if let Some(receipt) = state::self_recovery_write_off(operation_id) {
+            return Ok(receipt);
+        }
+        let mut op = state::get_operation(operation_id).ok_or(FundingError::NotFound)?;
+        if op.trigger() != FundingTrigger::SelfRecovery
+            || op.rail() != types::FundingRail::CyclesLedger
+        {
+            return Err(FundingError::Reconciliation(
+                ReconciliationError::SelfRecoveryWriteOffRequired,
+            ));
+        }
+        if op.state() == FundingOperationState::Cycles(CyclesFundingState::Unknown) {
+            let cause = if op.attempts().len() >= types::MAX_FUNDING_ATTEMPTS - 1 {
+                types::SelfRecoveryDeliveryRiskCause::AttemptLimit
+            } else {
+                // The legacy risk enum has no general Unknown variant. The
+                // full operation receipt below preserves the Indeterminate
+                // attempt evidence without widening this stable/public enum.
+                types::SelfRecoveryDeliveryRiskCause::LegacyQuarantine
+            };
+            op = if op.attempts().len() >= types::MAX_FUNDING_ATTEMPTS - 1 {
+                op.quarantine_after_attempt_limit(now_secs)
+            } else {
+                op.record_attempt(
+                    FundingOperationState::Cycles(CyclesFundingState::Quarantined),
+                    now_secs,
+                    FundingAttemptResultClass::Indeterminate,
+                )
+            }
+            .map_err(FundingError::Transition)?;
+            state::update_operation(op.clone()).map_err(FundingError::Update)?;
+            state::record_self_recovery_delivery_risk(types::SelfRecoveryDeliveryRisk {
+                operation_id,
+                delivery_status: types::SelfRecoveryDeliveryStatus::Unknown,
+                cause,
+                observed_at_secs: now_secs,
+            })
+            .map_err(FundingError::DeliveryRisk)?;
+            raise_quarantine_alarm(&op, now_secs);
+        }
+        if op.state() != FundingOperationState::Cycles(CyclesFundingState::Quarantined) {
+            return Err(FundingError::Reconciliation(
+                ReconciliationError::NotQuarantined,
+            ));
+        }
+
+        match state::current_self_recovery_delivery_risk() {
+            Some(risk) if risk.operation_id == operation_id => {
+                // `current_*` can synthesize a legacy tombstone from a
+                // quarantined operation when the stable map is empty. Persist
+                // that evidence anchor before changing the operation state,
+                // otherwise the fallback scan would stop finding it after
+                // this write-off.
+                state::record_self_recovery_delivery_risk(risk)
+                    .map_err(FundingError::DeliveryRisk)?;
+            }
+            Some(_) => {
+                return Err(FundingError::DeliveryRisk(
+                    state::RecordSelfRecoveryDeliveryRiskError::AnotherRiskIsActive,
+                ));
+            }
+            None => {
+                let cause = if op.attempts().len() >= types::MAX_FUNDING_ATTEMPTS {
+                    types::SelfRecoveryDeliveryRiskCause::AttemptLimit
+                } else {
+                    types::SelfRecoveryDeliveryRiskCause::LegacyQuarantine
+                };
+                let risk = types::SelfRecoveryDeliveryRisk {
+                    operation_id,
+                    delivery_status: types::SelfRecoveryDeliveryStatus::Unknown,
+                    cause,
+                    observed_at_secs: now_secs,
+                };
+                state::record_self_recovery_delivery_risk(risk)
+                    .map_err(FundingError::DeliveryRisk)?;
+            }
+        };
+
+        let FundingRailArguments::Cycles(snapshot) = op.rail_arguments().clone() else {
+            return Err(FundingError::WrongRail);
+        };
+        let held = snapshot
+            .amount_cycles
+            .checked_add(snapshot.fee_cycles)
+            .ok_or(FundingError::Overflow)?;
+        let self_recovery = state::get_self_recovery_state()
+            .write_off_unresolved(op.id(), now_secs, ROLLING_CAP_WINDOW_SECS)
+            .map_err(FundingError::SelfRecoverySettle)?;
+        let source = state::get_source_reserve()
+            .settle(op.id(), held)
+            .map_err(FundingError::SourceSettle)?;
+
+        // Keep the full operation in its original Quarantined state as the
+        // immutable evidence anchor. Only the private versioned receipt
+        // records the accounting disposition; no public enum claims success.
+        let risk = state::current_self_recovery_delivery_risk()
+            .filter(|risk| risk.operation_id == operation_id)
+            .ok_or(FundingError::Reconciliation(
+                ReconciliationError::SelfRecoveryWriteOffRequired,
+            ))?;
+        let receipt = types::SelfRecoveryWriteOffReceipt {
+            operation: op,
+            disposition: types::SelfRecoveryWriteOffDisposition::Unresolved,
+            written_off_at_secs: now_secs,
+            authorized_by,
+            held_amount_cycles: held,
+            delivery_risk: risk,
+        };
+        state::record_self_recovery_write_off(receipt.clone())
+            .map_err(FundingError::WriteOffRecord)?;
+        state::set_self_recovery_state(self_recovery);
+        state::set_source_reserve(source);
+        let _ = state::alarms::raise_at(None, types::AlarmKind::SelfRecoveryUnresolved, now_secs);
+        Ok(receipt)
     }
 
     /// The precomputed, not-yet-committed result of settling every
@@ -2003,6 +2141,205 @@ pub mod cycles {
             );
             assert_eq!(state::get_operation(quarantined.id()), Some(quarantined));
             assert!(state::get_self_recovery_state().is_suppressing_distribution());
+        }
+
+        fn reserve_self_recovery_for_test(op: &FundingOperation) {
+            let self_recovery = state::get_self_recovery_state()
+                .begin(op.id(), 10, 1_000, ROLLING_CAP_WINDOW_SECS, 1_000_000)
+                .unwrap();
+            state::set_self_recovery_state(self_recovery);
+            seed_fresh_cache(1_000_000, 1, 1_000);
+            let source = state::get_source_reserve()
+                .reserve_self_recovery(op.id(), 11, 1_000, 1_000_000)
+                .unwrap();
+            state::set_source_reserve(source);
+        }
+
+        #[test]
+        fn signer_writeoff_of_unknown_preserves_ambiguity_and_charges_once() {
+            init_bare();
+            let op =
+                open_submitted_op(1, sentinel_id(), FundingTrigger::SelfRecovery, 10, 1, 1_000);
+            reserve_self_recovery_for_test(&op);
+            let unknown = op
+                .record_attempt(
+                    FundingOperationState::Cycles(CyclesFundingState::Unknown),
+                    1_001,
+                    FundingAttemptResultClass::Indeterminate,
+                )
+                .unwrap();
+            state::update_operation(unknown.clone()).unwrap();
+
+            let signer = Principal::from_slice(&[222]);
+            let written_off = write_off_self_recovery_unresolved(op.id(), signer, 1_002).unwrap();
+            assert_eq!(
+                written_off.operation.state(),
+                FundingOperationState::Cycles(CyclesFundingState::Quarantined)
+            );
+            assert_eq!(
+                written_off.disposition,
+                types::SelfRecoveryWriteOffDisposition::Unresolved
+            );
+            assert_eq!(written_off.operation.state().resolved_outcome(), None);
+            assert_eq!(written_off.operation.confirmed_block_index(), None);
+            assert!(written_off.operation.attempts().len() > unknown.attempts().len());
+            assert_eq!(written_off.held_amount_cycles, 11);
+            assert_eq!(written_off.authorized_by, signer);
+            assert_eq!(
+                state::current_self_recovery_delivery_risk().unwrap().cause,
+                types::SelfRecoveryDeliveryRiskCause::LegacyQuarantine
+            );
+            assert_eq!(
+                state::get_self_recovery_state().in_flight_operation_id(),
+                None
+            );
+            assert!(!state::get_self_recovery_state().is_suppressing_distribution());
+            assert_eq!(
+                state::get_self_recovery_state()
+                    .rolling_spend()
+                    .pending()
+                    .len(),
+                0
+            );
+            assert_eq!(
+                state::get_self_recovery_state()
+                    .rolling_spend()
+                    .settled()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                state::get_self_recovery_state().rolling_spend().settled()[0].amount_cycles,
+                10
+            );
+            assert!(state::get_source_reserve().pending().is_empty());
+            assert_eq!(
+                state::get_source_reserve().cache().unwrap().balance_cycles,
+                1_000_000 - 11
+            );
+
+            // An ingress retry returns the retained disposition and does not
+            // charge either ledger twice or evict the operation evidence.
+            assert_eq!(
+                write_off_self_recovery_unresolved(op.id(), signer, 1_003).unwrap(),
+                written_off
+            );
+            assert_eq!(
+                state::get_self_recovery_state()
+                    .rolling_spend()
+                    .settled()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                state::get_operation(op.id()),
+                Some(written_off.operation.clone())
+            );
+            assert_eq!(state::self_recovery_write_off(op.id()), Some(written_off));
+            // A whole-state reload pass accepts only the marker-bound
+            // reservation release and decodes the versioned stable receipt.
+            assert_eq!(state::validate_whole_state(sentinel_id()), Ok(()));
+        }
+
+        #[test]
+        fn signer_writeoff_of_quarantine_preserves_duplicate_evidence_and_risk_latch() {
+            init_bare();
+            let op =
+                open_submitted_op(1, sentinel_id(), FundingTrigger::SelfRecovery, 10, 1, 1_000);
+            reserve_self_recovery_for_test(&op);
+            let quarantined = resolve_operation(op, WithdrawOutcome::Duplicate(55), 1_001).unwrap();
+
+            let written_off = write_off_self_recovery_unresolved(
+                quarantined.id(),
+                Principal::from_slice(&[222]),
+                1_002,
+            )
+            .unwrap();
+            assert_eq!(
+                written_off.operation.state(),
+                FundingOperationState::Cycles(CyclesFundingState::Quarantined)
+            );
+            assert_eq!(written_off.operation, quarantined);
+            assert_eq!(written_off.operation.confirmed_block_index(), None);
+            assert_eq!(
+                state::current_self_recovery_delivery_risk().unwrap().cause,
+                types::SelfRecoveryDeliveryRiskCause::Duplicate { duplicate_of: 55 }
+            );
+            assert_eq!(
+                state::get_self_recovery_state().in_flight_operation_id(),
+                None
+            );
+            assert_eq!(state::get_source_reserve().pending().len(), 0);
+            assert!(!state::get_self_recovery_state().is_suppressing_distribution());
+            assert_eq!(
+                state::get_self_recovery_state()
+                    .rolling_spend()
+                    .settled()
+                    .len(),
+                1
+            );
+        }
+
+        #[test]
+        fn stable_writeoff_record_rejects_anonymous_authority_before_insert() {
+            init_bare();
+            let op =
+                open_submitted_op(1, sentinel_id(), FundingTrigger::SelfRecovery, 10, 1, 1_000);
+            reserve_self_recovery_for_test(&op);
+            let quarantined = resolve_operation(op, WithdrawOutcome::Duplicate(55), 1_001).unwrap();
+            let receipt = types::SelfRecoveryWriteOffReceipt {
+                operation: quarantined.clone(),
+                disposition: types::SelfRecoveryWriteOffDisposition::Unresolved,
+                written_off_at_secs: 1_002,
+                authorized_by: Principal::anonymous(),
+                held_amount_cycles: 11,
+                delivery_risk: state::current_self_recovery_delivery_risk().unwrap(),
+            };
+
+            assert_eq!(
+                state::record_self_recovery_write_off(receipt),
+                Err(state::RecordSelfRecoveryWriteOffError::InvalidOperation)
+            );
+            assert_eq!(state::self_recovery_write_off(quarantined.id()), None);
+            assert_eq!(state::get_operation(quarantined.id()), Some(quarantined));
+            assert_eq!(state::get_source_reserve().pending().len(), 1);
+            assert_eq!(
+                state::get_self_recovery_state().in_flight_operation_id(),
+                Some(1)
+            );
+        }
+
+        #[test]
+        fn signer_writeoff_persists_synthesized_legacy_risk_before_state_change() {
+            init_bare();
+            let op =
+                open_submitted_op(1, sentinel_id(), FundingTrigger::SelfRecovery, 10, 1, 1_000);
+            reserve_self_recovery_for_test(&op);
+            let quarantined = op
+                .record_attempt(
+                    FundingOperationState::Cycles(CyclesFundingState::Quarantined),
+                    1_001,
+                    FundingAttemptResultClass::Indeterminate,
+                )
+                .unwrap();
+            state::update_operation(quarantined.clone()).unwrap();
+
+            assert_eq!(
+                state::current_self_recovery_delivery_risk().unwrap().cause,
+                types::SelfRecoveryDeliveryRiskCause::LegacyQuarantine
+            );
+            let written_off =
+                write_off_self_recovery_unresolved(op.id(), Principal::from_slice(&[222]), 1_002)
+                    .unwrap();
+            assert_eq!(
+                written_off.operation.state(),
+                FundingOperationState::Cycles(CyclesFundingState::Quarantined)
+            );
+            assert_eq!(written_off.operation, quarantined);
+            assert_eq!(
+                state::current_self_recovery_delivery_risk().unwrap().cause,
+                types::SelfRecoveryDeliveryRiskCause::LegacyQuarantine
+            );
         }
 
         #[test]

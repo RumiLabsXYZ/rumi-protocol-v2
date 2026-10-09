@@ -324,6 +324,22 @@ fn resolve_unknown_as_spent(operation_id: u64) -> Result<types::FundingOperation
     }
 }
 
+/// Record an unresolved self-recovery write-off under explicit signer
+/// authority. The operation remains Quarantined; the separate receipt records
+/// the accounting disposition without claiming delivery success. This releases
+/// its source and recovery reservations, so upgrades that apply this disposition
+/// are forward-only: older Wasm validators require those reservations for any
+/// Quarantined self-recovery operation and will reject rollback.
+#[ic_cdk::update]
+fn write_off_self_recovery_unresolved(
+    operation_id: u64,
+) -> Result<types::SelfRecoveryWriteOffReceipt, String> {
+    let caller = ic_cdk::caller();
+    require_maintenance_signer(caller, || state::is_signer(caller))?;
+    funding::cycles::write_off_self_recovery_unresolved(operation_id, caller, now_secs())
+        .map_err(|err| format!("{err:?}"))
+}
+
 /// Attach a verified ICP Ledger block proof.  Cycles Ledger block proofs are
 /// intentionally not accepted from a bare block index: the Cycles Ledger
 /// adapter must independently verify its source/destination before calling
@@ -598,6 +614,14 @@ mod maintenance_authorization_tests {
         assert_eq!(
             require_maintenance_signer(Principal::from_slice(&[7]), || true),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn unresolved_write_off_uses_signer_gate() {
+        assert_eq!(
+            require_maintenance_signer(Principal::from_slice(&[8]), || false),
+            Err(format!("{:?}", governance::GovernanceError::NotSigner))
         );
     }
 }
