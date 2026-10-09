@@ -304,6 +304,7 @@ pub mod cycles {
         Reconciliation(ReconciliationError),
         CacheQuery(cycles_ledger::CacheQueryError),
         SourceAttempt(SourceAttemptError),
+        DeliveryRisk(state::RecordSelfRecoveryDeliveryRiskError),
         SourceReserve(SourceReserveError),
         TargetReserve(TargetReservationError),
         GlobalReserve(RollingSpendReserveError),
@@ -539,6 +540,12 @@ pub mod cycles {
         // admission timestamp; the immutable withdraw arguments above do not
         // change.
         let confirmation_now_secs = ic_cdk::api::time() / 1_000_000_000;
+        // Keep the source refresh interlock until this operation is settled.
+        // A refresh after an ambiguous call could already include a late
+        // ledger debit; subtracting the held amount again during later
+        // reconciliation would double-debit (or underflow) the cached view.
+        // Unknown and quarantined outcomes therefore retain both the marker
+        // and full amount+fee hold until independent evidence settles them.
         resolve_operation(op, outcome, confirmation_now_secs).map(|resolved| (resolved, outcome))
     }
 
@@ -708,6 +715,9 @@ pub mod cycles {
         let summary = TerminalFundingSummary::from_resolved(&resolved, now_secs)
             .map_err(FundingError::TerminalSummary)?;
         state::update_operation(resolved.clone()).map_err(FundingError::Update)?;
+        if resolved.trigger() == FundingTrigger::SelfRecovery {
+            state::clear_self_recovery_delivery_risk(resolved.id());
+        }
         commit_settlement(settlement, source);
         state::compact_operation(resolved.id(), summary).map_err(FundingError::Compact)?;
         Ok(resolved)
@@ -1021,6 +1031,13 @@ pub mod cycles {
                 }
                 .map_err(FundingError::Transition)?;
                 state::update_operation(quarantined.clone()).map_err(FundingError::Update)?;
+                record_self_recovery_delivery_risk(
+                    &quarantined,
+                    types::SelfRecoveryDeliveryRiskCause::Duplicate {
+                        duplicate_of: _duplicate_block,
+                    },
+                    now_secs,
+                )?;
                 raise_quarantine_alarm(&quarantined, now_secs);
                 Ok(quarantined)
             }
@@ -1044,6 +1061,11 @@ pub mod cycles {
                     unknown.state(),
                     FundingOperationState::Cycles(CyclesFundingState::Quarantined)
                 ) {
+                    record_self_recovery_delivery_risk(
+                        &unknown,
+                        types::SelfRecoveryDeliveryRiskCause::AttemptLimit,
+                        now_secs,
+                    )?;
                     raise_quarantine_alarm(&unknown, now_secs);
                 }
                 // Ambiguous: every reservation stays exactly as-is.
@@ -1061,6 +1083,11 @@ pub mod cycles {
                 }
                 .map_err(FundingError::Transition)?;
                 state::update_operation(quarantined.clone()).map_err(FundingError::Update)?;
+                record_self_recovery_delivery_risk(
+                    &quarantined,
+                    types::SelfRecoveryDeliveryRiskCause::TooOld,
+                    now_secs,
+                )?;
                 raise_quarantine_alarm(&quarantined, now_secs);
                 // Still reserved: needs a signer, never falls through to ICP.
                 Ok(quarantined)
@@ -1135,6 +1162,23 @@ pub mod cycles {
                 Ok(terminal)
             }
         }
+    }
+
+    fn record_self_recovery_delivery_risk(
+        operation: &FundingOperation,
+        cause: types::SelfRecoveryDeliveryRiskCause,
+        now_secs: u64,
+    ) -> Result<(), FundingError> {
+        if operation.trigger() != FundingTrigger::SelfRecovery {
+            return Ok(());
+        }
+        state::record_self_recovery_delivery_risk(types::SelfRecoveryDeliveryRisk {
+            operation_id: operation.id(),
+            delivery_status: types::SelfRecoveryDeliveryStatus::Unknown,
+            cause,
+            observed_at_secs: now_secs,
+        })
+        .map_err(FundingError::DeliveryRisk)
     }
 
     #[cfg(test)]

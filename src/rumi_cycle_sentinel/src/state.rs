@@ -1,8 +1,8 @@
 //! Stable-storage layer for Cycle Sentinel (Task 1c).
 //!
 //! Wires the pure domain types in `types.rs` into `ic-stable-structures`
-//! storage: one `MemoryManager` partitions stable memory into 19 regions
-//! (memory IDs 0-18, see `MEMORY_LAYOUT` below), each backing exactly one
+//! storage: one `MemoryManager` partitions stable memory into 21 regions
+//! (memory IDs 0-20, see `MEMORY_LAYOUT` below), each backing exactly one
 //! `StableCell`/`StableBTreeMap`. This file owns storage + raw CRUD + count
 //! bound enforcement at the storage boundary; it does **not** own
 //! governance/funding *policy* (threshold math, proposal execution, rail
@@ -82,8 +82,9 @@ use ic_stable_structures::{
 use serde::Deserialize;
 
 use crate::types::{
-    self, Alarm, AlarmKind, FundingOperation, FundingOperationV1, FundingOperationV2,
-    FundingOperationV3, FundingRail, FundingTrigger, GlobalPolicy, GlobalRollingSpendState,
+    self, Alarm, AlarmKind, CyclesFundingState, FundingOperation, FundingOperationState,
+    FundingOperationV1, FundingOperationV2, FundingOperationV3, FundingRail, FundingTrigger,
+    GlobalPolicy, GlobalRollingSpendState,
     IcpSourceAttemptError, IcpSourceReserveError, IcpSourceReserveState, InitArgs, InitArgsError,
     PendingIcpSourceDebit, PendingReservation, PendingSourceDebit, ProposalRecord, ProposalStatus,
     ReservedPrincipalKind, Sample, SelfRecoveryState, SharedReserveMintReceipt, SourceAttemptError,
@@ -126,6 +127,7 @@ const MEM_ICP_SOURCE_RESERVE: MemoryId = MemoryId::new(16); // StableCell<Stored
 const MEM_SHARED_CONVERSION_BUDGET: MemoryId = MemoryId::new(17); // StableCell<StoredGlobalRollingSpendState> (singleton)
 const MEM_SHARED_RESERVE_MINT_RECEIPTS: MemoryId = MemoryId::new(18); // StableBTreeMap<u64, StoredSharedReserveMintReceipt>
 const MEM_SINGLE_OPERATOR_SETUP: MemoryId = MemoryId::new(19); // StableCell<StoredSingleOperatorSetup> (singleton)
+const MEM_SELF_RECOVERY_DELIVERY_RISK: MemoryId = MemoryId::new(20); // StableBTreeMap<u64, StoredSelfRecoveryDeliveryRisk>
 
 /// Every stable memory slot this canister owns, paired with a human label.
 /// Single source of truth for the layout; iterated by `memory_ids_unique`.
@@ -153,6 +155,10 @@ const MEMORY_LAYOUT: &[(MemoryId, &str)] = &[
         "shared_reserve_mint_receipts",
     ),
     (MEM_SINGLE_OPERATOR_SETUP, "single_operator_setup"),
+    (
+        MEM_SELF_RECOVERY_DELIVERY_RISK,
+        "self_recovery_delivery_risk",
+    ),
 ];
 
 // ─────────────────────── state.rs-owned bookkeeping types ───────────────────────
@@ -449,6 +455,19 @@ enum StoredSharedReserveMintReceipt {
     V1(SharedReserveMintReceipt),
 }
 
+#[derive(CandidType, Deserialize, Clone)]
+enum StoredSelfRecoveryDeliveryRisk {
+    V1(types::SelfRecoveryDeliveryRisk),
+}
+
+impl StoredSelfRecoveryDeliveryRisk {
+    fn into_current(self) -> types::SelfRecoveryDeliveryRisk {
+        match self {
+            Self::V1(risk) => risk,
+        }
+    }
+}
+
 impl StoredSharedReserveMintReceipt {
     fn into_current(self) -> SharedReserveMintReceipt {
         match self {
@@ -632,6 +651,7 @@ impl_candid_storable!(StoredSample);
 impl_candid_storable!(StoredAlarm);
 impl_candid_storable!(StoredFundingOperation);
 impl_candid_storable!(StoredSharedReserveMintReceipt);
+impl_candid_storable!(StoredSelfRecoveryDeliveryRisk);
 impl_candid_storable!(StoredTargetReservationState);
 impl_candid_storable!(StoredGlobalRollingSpendState);
 impl_candid_storable!(StoredSelfRecoveryState);
@@ -817,6 +837,9 @@ thread_local! {
             StableCell::init(m.borrow().get(MEM_SINGLE_OPERATOR_SETUP), StoredSingleOperatorSetup::V1(false))
                 .expect("rumi_cycle_sentinel: failed to init single-operator setup cell")
         ));
+
+    static SELF_RECOVERY_DELIVERY_RISK: RefCell<StableBTreeMap<u64, StoredSelfRecoveryDeliveryRisk, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(MEM_SELF_RECOVERY_DELIVERY_RISK))));
 
     static TARGET_RESERVATIONS: RefCell<StableBTreeMap<StorablePrincipal, StoredTargetReservationState, VMem>> =
         MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(MEM_TARGET_RESERVATIONS))));
@@ -1790,6 +1813,76 @@ pub(crate) fn get_operation(id: u64) -> Option<FundingOperation> {
     FUNDING_OPERATIONS.with(|m| m.borrow().get(&id).map(|v| v.into_current()))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecordSelfRecoveryDeliveryRiskError {
+    MissingOperation,
+    WrongOperationState,
+    AnotherRiskIsActive,
+}
+
+/// Persist the delivery ambiguity beside the still-live funding operation.
+/// This map is intentionally a one-entry active tombstone, not an evicting
+/// history ring: an unresolved risk must not disappear through retention.
+pub(crate) fn record_self_recovery_delivery_risk(
+    risk: types::SelfRecoveryDeliveryRisk,
+) -> Result<(), RecordSelfRecoveryDeliveryRiskError> {
+    let operation = get_operation(risk.operation_id)
+        .ok_or(RecordSelfRecoveryDeliveryRiskError::MissingOperation)?;
+    if operation.trigger() != types::FundingTrigger::SelfRecovery
+        || operation.rail() != types::FundingRail::CyclesLedger
+        || operation.state()
+            != types::FundingOperationState::Cycles(types::CyclesFundingState::Quarantined)
+        || operation.confirmed_block_index().is_some()
+    {
+        return Err(RecordSelfRecoveryDeliveryRiskError::WrongOperationState);
+    }
+    SELF_RECOVERY_DELIVERY_RISK.with(|map| {
+        let mut map = map.borrow_mut();
+        if map.iter().any(|(id, _)| id != risk.operation_id) {
+            return Err(RecordSelfRecoveryDeliveryRiskError::AnotherRiskIsActive);
+        }
+        map.insert(
+            risk.operation_id,
+            StoredSelfRecoveryDeliveryRisk::V1(risk),
+        );
+        Ok(())
+    })
+}
+
+pub(crate) fn current_self_recovery_delivery_risk(
+) -> Option<types::SelfRecoveryDeliveryRisk> {
+    let stored = SELF_RECOVERY_DELIVERY_RISK.with(|map| {
+        map.borrow()
+            .iter()
+            .next()
+            .map(|(_, risk)| risk.into_current())
+    });
+    stored.or_else(|| {
+        list_unresolved_operations_after(None, types::MAX_FUNDING_OPERATIONS)
+            .into_iter()
+            .find(|operation| {
+                operation.trigger() == types::FundingTrigger::SelfRecovery
+                    && operation.rail() == types::FundingRail::CyclesLedger
+                    && operation.state()
+                        == types::FundingOperationState::Cycles(
+                            types::CyclesFundingState::Quarantined,
+                        )
+            })
+            .map(|operation| types::SelfRecoveryDeliveryRisk {
+                operation_id: operation.id(),
+                delivery_status: types::SelfRecoveryDeliveryStatus::Unknown,
+                cause: types::SelfRecoveryDeliveryRiskCause::LegacyQuarantine,
+                observed_at_secs: operation.updated_at_secs(),
+            })
+    })
+}
+
+pub(crate) fn clear_self_recovery_delivery_risk(operation_id: u64) {
+    SELF_RECOVERY_DELIVERY_RISK.with(|map| {
+        map.borrow_mut().remove(&operation_id);
+    });
+}
+
 /// Raw keyed overwrite, no bound/consistency checks — private because every
 /// external caller must go through either `insert_operation` (bound-checked
 /// new-operation path) or `update_operation` (immutable-snapshot/transition
@@ -2598,6 +2691,9 @@ pub(crate) enum StateValidationError {
         key: u64,
         operation_id: u64,
     },
+    SelfRecoveryDeliveryRiskMissingQuarantine {
+        operation_id: u64,
+    },
     IcpSnapshotInvalid {
         operation_id: u64,
     },
@@ -2999,6 +3095,29 @@ pub(crate) fn validate_whole_state(sentinel_id: Principal) -> Result<(), StateVa
         }
     }
     let operations: Vec<FundingOperation> = operations.into_iter().map(|(_, op)| op).collect();
+    SELF_RECOVERY_DELIVERY_RISK.with(|map| {
+        let risks: Vec<types::SelfRecoveryDeliveryRisk> = map
+            .borrow()
+            .iter()
+            .map(|(_, risk)| risk.into_current())
+            .collect();
+        for risk in risks {
+            let valid = operations.iter().any(|op| {
+                op.id() == risk.operation_id
+                    && op.trigger() == FundingTrigger::SelfRecovery
+                    && op.rail() == types::FundingRail::CyclesLedger
+                    && op.state()
+                        == FundingOperationState::Cycles(CyclesFundingState::Quarantined)
+                    && op.confirmed_block_index().is_none()
+            });
+            if !valid {
+                return Err(StateValidationError::SelfRecoveryDeliveryRiskMissingQuarantine {
+                    operation_id: risk.operation_id,
+                });
+            }
+        }
+        Ok(())
+    })?;
     // Operation target eligibility, scoped to UNRESOLVED operations only (a
     // resolved operation is an immutable historical snapshot, same framing
     // as the daily-cap check below): a `SelfRecovery`-triggered operation's
@@ -3738,7 +3857,7 @@ mod tests {
                 "duplicate stable MemoryId {id:?} (store {label:?}) — pick an unused slot"
             );
         }
-        assert_eq!(MEMORY_LAYOUT.len(), 20, "expected exactly 20 memory ids");
+        assert_eq!(MEMORY_LAYOUT.len(), 21, "expected exactly 21 memory ids");
     }
 
     // ── round-trip tests, one per stable structure ──
@@ -6347,6 +6466,82 @@ mod tests {
         assert!(list_unresolved_ordinary_operations()
             .iter()
             .all(|op| op.id() != 3));
+    }
+
+    #[test]
+    fn self_recovery_delivery_risk_is_a_stable_active_tombstone() {
+        let global = test_global_policy(1_000_000);
+        let sentinel = test_sentinel_id();
+        let base = test_funding_operation(
+            91,
+            sentinel,
+            FundingTrigger::SelfRecovery,
+            &global,
+            10,
+        );
+        let submitted = base
+            .record_attempt(
+                FundingOperationState::Cycles(CyclesFundingState::Submitted),
+                11,
+                FundingAttemptResultClass::Success,
+            )
+            .unwrap();
+        let quarantined = submitted
+            .record_attempt(
+                FundingOperationState::Cycles(CyclesFundingState::Quarantined),
+                12,
+                FundingAttemptResultClass::Indeterminate,
+            )
+            .unwrap();
+        insert_operation(quarantined.clone()).unwrap();
+        let risk = types::SelfRecoveryDeliveryRisk {
+            operation_id: 91,
+            delivery_status: types::SelfRecoveryDeliveryStatus::Unknown,
+            cause: types::SelfRecoveryDeliveryRiskCause::Duplicate { duplicate_of: 55 },
+            observed_at_secs: 12,
+        };
+        record_self_recovery_delivery_risk(risk).unwrap();
+
+        assert_eq!(current_self_recovery_delivery_risk(), Some(risk));
+        assert!(list_unresolved_operations_after(None, 10)
+            .iter()
+            .any(|op| op.id() == 91 && op.confirmed_block_index().is_none()));
+    }
+
+    #[test]
+    fn legacy_quarantined_self_recovery_is_reported_as_delivery_unknown() {
+        let global = test_global_policy(1_000_000);
+        let sentinel = test_sentinel_id();
+        let base = test_funding_operation(
+            92,
+            sentinel,
+            FundingTrigger::SelfRecovery,
+            &global,
+            10,
+        );
+        let submitted = base
+            .record_attempt(
+                FundingOperationState::Cycles(CyclesFundingState::Submitted),
+                11,
+                FundingAttemptResultClass::Success,
+            )
+            .unwrap();
+        let quarantined = submitted
+            .record_attempt(
+                FundingOperationState::Cycles(CyclesFundingState::Quarantined),
+                12,
+                FundingAttemptResultClass::Indeterminate,
+            )
+            .unwrap();
+        insert_operation(quarantined).unwrap();
+
+        let status = current_self_recovery_delivery_risk().unwrap();
+        assert_eq!(status.operation_id, 92);
+        assert_eq!(status.delivery_status, types::SelfRecoveryDeliveryStatus::Unknown);
+        assert_eq!(
+            status.cause,
+            types::SelfRecoveryDeliveryRiskCause::LegacyQuarantine
+        );
     }
 
     /// A resolved (`Complete`/`Terminal`/`Refunded`) operation is compacted

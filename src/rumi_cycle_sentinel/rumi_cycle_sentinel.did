@@ -109,6 +109,19 @@ type FundingOperationState = variant {
   Icp : IcpFundingState;
   Cycles : CyclesFundingState;
 };
+type SelfRecoveryDeliveryRiskCause = variant {
+  Duplicate : record { duplicate_of : nat64 };
+  TooOld;
+  AttemptLimit;
+  LegacyQuarantine;
+};
+type SelfRecoveryDeliveryRisk = record {
+  operation_id : nat64;
+  delivery_status : SelfRecoveryDeliveryStatus;
+  cause : SelfRecoveryDeliveryRiskCause;
+  observed_at_secs : nat64;
+};
+type SelfRecoveryDeliveryStatus = variant { Unknown };
 type FundingOutcome = variant { Refunded; Terminal; Completed };
 type FundingRail = variant { IcpCmc; CyclesLedger };
 type FundingRailArguments = variant {
@@ -378,6 +391,7 @@ type Result_10 = variant { Ok : PublicPage_5; Err : PublicQueryError };
 type Result_11 = variant { Ok : PublicPage; Err : AuthenticatedQueryError };
 type Result_12 = variant { Ok : nat64; Err : GovernanceError };
 type Result_13 = variant { Ok; Err : text };
+type Result_14 = variant { Ok : opt SelfRecoveryDeliveryRisk; Err : AuthenticatedQueryError };
 type Result_2 = variant { Ok; Err : GovernanceError };
 type Result_3 = variant {
   Ok : OperatorDashboard;
@@ -503,6 +517,7 @@ service : (InitArgs) -> {
   list_public_targets : (opt text, nat16) -> (Result_9) query;
   list_public_topups : (principal, opt text, nat16) -> (Result_10) query;
   list_unresolved_funding_operations : (opt text, nat16) -> (Result_11) query;
+  self_recovery_delivery_risk : () -> (Result_14) query;
   manual_top_up : (principal) -> (Result_1);
   manual_top_up_with_amount : (principal, FundingRail, nat) -> (Result_1);
   pause_target : (principal) -> (Result_2);

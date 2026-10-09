@@ -57,9 +57,10 @@ fn init(args: types::InitArgs) {
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
-    // A source transfer marker represents only an in-message await.  Upgrade
-    // interrupts that await, so clear the ephemeral marker while preserving
-    // the durable operation, source hold, and exact retry snapshot.
+    // A Cycles source-attempt marker remains until independent resolution:
+    // an interrupted await cannot prove whether the ledger has already
+    // applied the debit, so refresh must stay blocked to preserve settlement
+    // accounting across upgrade.
     state::reset_icp_source_attempts_on_upgrade();
     // A notify marker represents only an in-message CMC await. Upgrade
     // interrupts that await; clear the marker while retaining the exact
@@ -233,6 +234,14 @@ fn list_unresolved_funding_operations(
     limit: u16,
 ) -> Result<types::PublicPage<types::FundingOperation>, public_api::AuthenticatedQueryError> {
     public_api::list_unresolved_funding_operations_at(ic_cdk::caller(), cursor, limit)
+}
+
+/// Signer-only status for the durable at-risk delivery tombstone. `None`
+/// means no active tombstone; `Some` is still unresolved delivery evidence.
+#[ic_cdk::query]
+fn self_recovery_delivery_risk(
+) -> Result<Option<types::SelfRecoveryDeliveryRisk>, public_api::AuthenticatedQueryError> {
+    public_api::self_recovery_delivery_risk_at(ic_cdk::caller())
 }
 
 fn require_maintenance_signer(

@@ -493,6 +493,17 @@ pub fn list_unresolved_funding_operations_at(
     unresolved_funding_operation_page(cursor, limit)
 }
 
+/// Signer-only view of the active self-recovery delivery ambiguity. The
+/// marker is an at-risk tombstone, never proof of a completed top-up.
+pub fn self_recovery_delivery_risk_at(
+    caller: Principal,
+) -> Result<Option<types::SelfRecoveryDeliveryRisk>, AuthenticatedQueryError> {
+    if !state::is_signer(caller) {
+        return Err(AuthenticatedQueryError::NotSigner);
+    }
+    Ok(state::current_self_recovery_delivery_risk())
+}
+
 fn unresolved_funding_operation_page(
     cursor: Option<String>,
     limit: u16,
@@ -1021,6 +1032,19 @@ mod tests {
         assert_eq!(
             list_unresolved_funding_operations_at(test_signer(2), None, 10),
             Err(AuthenticatedQueryError::NotSigner)
+        );
+    }
+
+    #[test]
+    fn self_recovery_delivery_risk_at_is_signer_only() {
+        set_only_signer(test_signer(1), test_global_policy());
+        assert_eq!(
+            self_recovery_delivery_risk_at(test_signer(2)),
+            Err(AuthenticatedQueryError::NotSigner)
+        );
+        assert_eq!(
+            self_recovery_delivery_risk_at(test_signer(1)).unwrap(),
+            None
         );
     }
 

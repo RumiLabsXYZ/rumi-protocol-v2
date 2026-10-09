@@ -1584,6 +1584,34 @@ pub enum FundingOperationState {
     Icp(IcpFundingState),
 }
 
+/// Why a self-recovery Cycles Ledger operation entered quarantine. This is
+/// durable operator evidence only: no variant proves whether the destination
+/// received cycles, and a recorded `duplicate_of` block must never be used as
+/// a confirmed delivery block.
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelfRecoveryDeliveryRiskCause {
+    Duplicate { duplicate_of: u64 },
+    TooOld,
+    AttemptLimit,
+    LegacyQuarantine,
+}
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelfRecoveryDeliveryStatus {
+    Unknown,
+}
+
+/// At-risk marker for a quarantined self-recovery operation. The operation
+/// remains unresolved and its source/cap reservations remain held while this
+/// record exists. A late cycle credit is still possible.
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelfRecoveryDeliveryRisk {
+    pub operation_id: u64,
+    pub delivery_status: SelfRecoveryDeliveryStatus,
+    pub cause: SelfRecoveryDeliveryRiskCause,
+    pub observed_at_secs: u64,
+}
+
 impl FundingOperationState {
     pub fn rail(&self) -> FundingRail {
         match self {
@@ -5055,6 +5083,7 @@ impl SourceReserveState {
             pending,
         })
     }
+
 }
 
 impl Default for SourceReserveState {
