@@ -2,7 +2,7 @@
   const report = {
     date: 'October 8, 2026',
     datetime: '2026-10-08',
-    source: 'origin/main at 8b4951d97576',
+    source: 'origin/main at 8b4951d97576 · includes PR #450',
     snapshot: 'Mainnet readback · October 8, 2026'
   };
 
@@ -14,6 +14,14 @@
   ];
 
   const changes = [
+    {
+      pr: '#450',
+      title: 'Points release and historical reconciliation',
+      summary: 'Merged and deployed to the Points canister and frontend. The running Points module reports SHA-256 dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277. The original 401 ledger rows are preserved; 16 tagged rows add an approximate historical uplift of 2,151.74119482 points, bringing the ledger to 417 rows. This does not recreate discarded historical snapshot selection. Epoch 18 remains held (A present, B pending) with the driver off. Flat 4× is scheduled for epoch 19 and is not active yet.',
+      state: 'Installed · epoch 18 held',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/450'
+    },
     {
       pr: '#466',
       title: '3pool upgrade and state preservation',
@@ -83,8 +91,8 @@
   const limits = [
     {
       system: 'Points',
-      status: 'Not assessed in this snapshot',
-      detail: 'This update has no current Points canister or epoch readback, so it makes no claim about the active epoch, driver, or awards.'
+      status: 'Epoch 18 held · epoch 19 scheduled',
+      detail: 'The October 8 release evidence confirms the deployed module and completed historical adjustments. The epoch 18 hold and disabled driver remain in place; future flat 4× accrual is scheduled for epoch 19, not active.'
     },
     {
       system: 'Scope',
@@ -98,7 +106,7 @@
   <title>October 2026 Security Status · Rumi Protocol</title>
   <meta
     name="description"
-    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, and current mainnet pause status."
+    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, and October 8 mainnet pause status."
   />
 </svelte:head>
 
@@ -119,7 +127,7 @@
         <aside class="report-stamp" aria-label={report.snapshot}>
           <span class="stamp-label">Publication state</span>
           <strong>{report.snapshot}</strong>
-          <p>The module hashes and state notes below come from a controller-authorized canister readback recorded by the release operator on October 8. This page is a dated snapshot, not live telemetry.</p>
+          <p>The 3pool and Points module hashes and release readbacks are dated October 8. The Stability Pool pause and depositor count were confirmed again in a later read. This page combines those time-scoped records; it is not live telemetry.</p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>

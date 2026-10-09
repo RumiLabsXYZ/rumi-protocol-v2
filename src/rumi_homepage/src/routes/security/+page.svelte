@@ -66,7 +66,7 @@
   <title>Security · Rumi Protocol</title>
   <meta
     name="description"
-    content="Security review history, current release status, and responsible disclosure for Rumi Protocol. Status reviewed October 7, 2026."
+    content="Security review history, selected October 8 release status, and responsible disclosure for Rumi Protocol."
   />
 </svelte:head>
 
@@ -82,7 +82,7 @@
             code. A passing test, a source change, and an installed canister are different kinds
             of evidence.
           </p>
-          <p class="review-date">Status reviewed <time datetime="2026-10-07">October 7, 2026</time></p>
+          <p class="review-date">Status snapshot <time datetime="2026-10-08">October 8, 2026</time></p>
         </div>
 
         <aside class="status-card" aria-labelledby="release-status-title">
@@ -91,16 +91,18 @@
             <span>Release status</span>
             <span class="status-label">In progress</span>
           </div>
-          <h2 id="release-status-title">Remediation is not live</h2>
+          <h2 id="release-status-title">Selected releases are live</h2>
           <p>
-            The broader October security-remediation work remains unmerged and is not deployable.
-            Separately, the CL-01 3pool hotfix (PR #421) has merged to main, but its artifact was
-            not installed as of October 7, 2026.
+            The October 8 readback confirms the CL-01 3pool upgrade is installed. The Points
+            release is also installed, with epoch 18 still held and its driver off. The Stability
+            Pool remains paused; backend and bot follow-up changes remain uninstalled. Broader
+            findings are still open, and this is not a finding-by-finding closure statement.
           </p>
           <div class="status-divider"></div>
           <p class="status-footnote">
-            This is a release-status update, not a finding-by-finding closure statement. See the
-            October report for the scope and limits of these statements.
+            These October 8 readbacks are dated snapshots, not live telemetry. This is a release
+            update, not a finding-by-finding closure statement. See the October report for the
+            scope and limits of these statements.
           </p>
         </aside>
       </div>
@@ -113,12 +115,12 @@
         <span class="rail-line" aria-hidden="true"></span>
         <div class="evidence-step working">
           <span class="step-icon" aria-hidden="true">02</span>
-          <div><strong>Source remediation</strong><span>Unmerged; release evidence open</span></div>
+          <div><strong>Selected source changes</strong><span>Merged; broader findings remain open</span></div>
         </div>
         <span class="rail-line" aria-hidden="true"></span>
         <div class="evidence-step live">
           <span class="step-icon" aria-hidden="true">03</span>
-          <div><strong>Installed code</strong><span>Separate on-chain verification</span></div>
+          <div><strong>Installed code</strong><span>3pool and Points confirmed in dated readbacks</span></div>
         </div>
       </div>
     </div>
@@ -158,8 +160,9 @@
         <p class="state-label">Mainnet</p>
         <h3>Source changes do not update canisters</h3>
         <p>
-          The October remediation branch was unmerged and undeployed at the date above. A source
-          fix does not prove an upgrade, feature activation, migration, or successful live
+          The October 8 readbacks confirm selected 3pool and Points releases. Backend and bot
+          follow-up changes remain uninstalled, and the Stability Pool remains paused. A source
+          merge does not prove installation, feature activation, migration, or successful live
           operation.
         </p>
       </article>
@@ -169,13 +172,13 @@
   <section class="section page-width" aria-labelledby="october-report-title">
     <article class="report-card featured october-report-card">
       <div class="report-card-top">
-        <span class="report-kind">Status report · October 7, 2026</span>
-        <span class="latest-tag">Current update</span>
+        <span class="report-kind">Status report · October 8, 2026</span>
+        <span class="latest-tag">Latest status snapshot</span>
       </div>
       <h2 id="october-report-title">October security review status</h2>
       <p class="report-description">
-        Read the public summary of what is merged, what remains draft source work, what has not
-        been installed, and why the Points pause policy is not a live safeguard.
+        Read the public summary of selected merged and installed changes, remaining backend and
+        bot installations, and the Points epoch 18 hold with epoch 19 policy still scheduled.
       </p>
       <div class="report-links">
         <a href="/security/october-2026">Read the October status report <span aria-hidden="true">↗</span></a>
@@ -268,7 +271,7 @@
   </section>
 
   <footer class="page-width page-foot">
-    <span>Security status last reviewed October 7, 2026.</span>
+    <span>Security status snapshot dated October 8, 2026.</span>
     <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener">
       Verify source and release history <span aria-hidden="true">↗</span>
     </a>
