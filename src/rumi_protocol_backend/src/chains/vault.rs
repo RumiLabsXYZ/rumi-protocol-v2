@@ -40,6 +40,8 @@ pub enum ChainVaultStatus {
     /// Vault opened; awaiting the on-chain collateral deposit. No mint enqueued
     /// yet (open-then-verify). deposit-watch flips this to MintPending once the
     /// custody-address balance covers the declared collateral at finality.
+    /// Age alone cannot prove that the published custody address is unfunded;
+    /// retain the record until an observed lifecycle transition changes status.
     AwaitingDeposit,
     MintPending,
     Open,
@@ -1310,56 +1312,4 @@ pub fn borrow_chain_vault_in_state(
     Ok(())
 }
 
-// ─── M2: stale AwaitingDeposit GC (anti-spam backstop) ────────────────────────
-
-/// TTL for an unfunded vault before the GC reaps it (24h in ns).
-pub const AWAITING_DEPOSIT_TTL_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
-
-/// Remove `AwaitingDeposit` vaults whose `opened_at_ns` is older than `ttl_ns`.
-/// Returns the number pruned.
-///
-/// Safe: an `AwaitingDeposit` vault has NO confirmed debt, NO enqueued mint, and
-/// contributes nothing to `chain_supplies`, so removing it cannot break the
-/// supply invariant. Only unfunded vaults are reaped — the observer flips a
-/// funded vault to `MintPending` within its tick (seconds–minutes) long before
-/// the 24h TTL, so a real deposit is never stranded. This is the anti-spam
-/// backstop: it bounds total unfunded state without the self-DoS of a hard cap.
-///
-/// M2 review finding F: a vault is reaped ONLY if its chain's observer is
-/// currently running — `status == Registered` AND not `reorg_halted`. If the
-/// observer is halted or the chain is disabled, a funded-but-not-yet-observed
-/// deposit could otherwise be stranded by the GC. A vault on an
-/// inactive-observer chain is left until the observer resumes (then it either
-/// flips to `MintPending` if funded, or ages out on a later GC tick once active).
-pub fn prune_stale_awaiting_deposit(
-    state: &mut MultiChainState,
-    now_ns: u64,
-    ttl_ns: u64,
-) -> usize {
-    use crate::chains::config::ChainStatus;
-    let stale: Vec<u64> = state
-        .chain_vaults
-        .iter()
-        .filter(|(_, v)| {
-            let observer_active = matches!(
-                state
-                    .chain_configs
-                    .get(&v.collateral_chain)
-                    .map(|c| c.status),
-                Some(ChainStatus::Registered)
-            ) && !state
-                .reorg_halted
-                .get(&v.collateral_chain)
-                .copied()
-                .unwrap_or(false);
-            observer_active
-                && v.status == ChainVaultStatus::AwaitingDeposit
-                && now_ns.saturating_sub(v.opened_at_ns) > ttl_ns
-        })
-        .map(|(&id, _)| id)
-        .collect();
-    for id in &stale {
-        state.chain_vaults.remove(id);
-    }
-    stale.len()
-}
+// Do not remove a published custody record based only on age or a zero-balance read.
