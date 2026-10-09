@@ -440,6 +440,10 @@ pub struct ChainSpAbsorbIntent {
     pub icusd_to_burn_e8s: u64,
     pub stables_consumed: BTreeMap<Principal, u64>,
     pub burn_created_at_time_ns: u64,
+    /// `None` on legacy snapshots means the ICRC-1 dispatch outcome is
+    /// unknown and must stay held. New intents begin at `Some(false)`.
+    #[serde(default)]
+    pub burn_attempted: Option<bool>,
     pub status: ChainSpAbsorbIntentStatus,
     pub burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
     pub backend_result: Option<ChainStabilityPoolLiquidationResult>,

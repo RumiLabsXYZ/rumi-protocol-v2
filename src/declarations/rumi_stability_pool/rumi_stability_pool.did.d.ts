@@ -63,6 +63,7 @@ export interface ChainSpAbsorbIntent {
   'chain_sentinel' : Principal,
   'created_at_ns' : bigint,
   'burn_created_at_time_ns' : bigint,
+  'burn_attempted' : [] | [boolean],
   'chain_id' : number,
   'backend_result' : [] | [ChainStabilityPoolLiquidationResult],
   'icusd_ledger' : Principal,
@@ -379,6 +380,11 @@ export interface _SERVICE {
   'admin_correct_collateral_gain' : ActorMethod<
     [Principal, Principal, bigint],
     { 'Ok' : string } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'admin_recover_ambiguous_chain_burn' : ActorMethod<
+    [bigint, bigint],
+    { 'Ok' : ChainSpAbsorbResult } |
       { 'Err' : StabilityPoolError }
   >,
   'admin_recover_ambiguous_native_xrp_burn' : ActorMethod<

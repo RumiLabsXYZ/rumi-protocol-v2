@@ -205,6 +205,7 @@ type ChainSpAbsorbIntent = record {
   icusd_to_burn_e8s : nat64;
   stables_consumed : vec record { principal; nat64 };
   burn_created_at_time_ns : nat64;
+  burn_attempted : opt bool;
   status : ChainSpAbsorbIntentStatus;
   burn_proof : opt SpWritedownProof;
   backend_result : opt ChainStabilityPoolLiquidationResult;
@@ -439,6 +440,7 @@ service : (StabilityPoolInitArgs) -> {
   execute_liquidation : (nat64) -> (variant { Ok : LiquidationResult; Err : StabilityPoolError });
   sp_absorb_chain_vault : (nat64) -> (variant { Ok : ChainSpAbsorbResult; Err : StabilityPoolError });
   admin_recover_ambiguous_native_xrp_burn : (nat64, opt nat64) -> (variant { Ok; Err : StabilityPoolError });
+  admin_recover_ambiguous_chain_burn : (nat64, nat64) -> (variant { Ok : ChainSpAbsorbResult; Err : StabilityPoolError });
   scan_chain_absorb_candidates : (opt nat64) -> (variant { Ok : vec ChainSpAbsorbCandidate; Err : StabilityPoolError });
   set_chain_absorb_auto_config : (ChainAbsorbAutoConfig) -> (variant { Ok; Err : StabilityPoolError });
 

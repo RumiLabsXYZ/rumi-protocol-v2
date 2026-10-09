@@ -1398,6 +1398,7 @@ mod tests {
             icusd_to_burn_e8s: 100_00000000,
             stables_consumed,
             burn_created_at_time_ns: 123,
+            burn_attempted: Some(true),
             status: ChainSpAbsorbIntentStatus::Burned,
             burn_proof: Some(rumi_protocol_backend::icrc3_proof::SpWritedownProof {
                 block_index: 44,

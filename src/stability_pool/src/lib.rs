@@ -680,6 +680,23 @@ pub async fn admin_recover_ambiguous_native_xrp_burn(
     crate::liquidation::reconcile_pending_native_xrp_absorb_from_status(vault_id).await
 }
 
+/// Admin recovery for a chain burn with an ambiguous dispatch outcome. The
+/// block index is only a candidate and must match the persisted burn tuple in
+/// one directly served ICRC-3 response; archives are left held. Recovery
+/// records the original proof and resumes that intent without another burn.
+#[update]
+pub async fn admin_recover_ambiguous_chain_burn(
+    vault_id: u64,
+    candidate_block_index: u64,
+) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    crate::liquidation::recover_ambiguous_chain_burn_proof(vault_id, candidate_block_index).await?;
+    crate::liquidation::sp_absorb_chain_vault_core(vault_id).await
+}
+
 #[update]
 pub async fn scan_chain_absorb_candidates(
     max_per_chain: Option<u64>,
@@ -1578,6 +1595,7 @@ mod tests {
             icusd_to_burn_e8s: 100_00000000,
             stables_consumed,
             burn_created_at_time_ns: 123,
+            burn_attempted: Some(true),
             status: ChainSpAbsorbIntentStatus::Burned,
             burn_proof: Some(rumi_protocol_backend::icrc3_proof::SpWritedownProof {
                 block_index: 44,
