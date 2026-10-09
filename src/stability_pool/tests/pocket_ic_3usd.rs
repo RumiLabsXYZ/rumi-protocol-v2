@@ -5,6 +5,7 @@ use icrc_ledger_types::icrc2::approve::ApproveArgs;
 use pocket_ic::{PocketIcBuilder, WasmResult};
 use sha2::{Digest, Sha256};
 use stability_pool::types::*;
+use std::time::Duration;
 
 // ─── Candid types for ICRC-1 ledger initialization ───
 
@@ -891,6 +892,127 @@ fn p08_upgrade_preserves_parent_populated_deposit_state() {
         .find(|(ledger, _)| **ledger == env.icusd_ledger).unwrap().1,
         deposit_amount + 10_00000000);
     assert_eq!(after_receipt.total_interest_earned_e8s, 10_00000000);
+}
+
+/// The pre-claim-journal SP artifact writes one raw Candid snapshot at stable
+/// offset zero. Upgrade that populated state into the MemoryManager layout,
+/// then upgrade the new layout again to prove the marker and snapshot reopen
+/// cleanly. This is gated on the pinned predecessor artifact and uses the
+/// current release Wasm supplied by the shared test target.
+#[test]
+#[ignore = "requires predecessor Wasm at RUMI_SP_PRE_CLAIM_JOURNAL_WASM and current release Wasm"]
+fn claim_journal_upgrade_migrates_populated_predecessor_and_reopens_new_layout() {
+    let predecessor_path = std::env::var("RUMI_SP_PRE_CLAIM_JOURNAL_WASM")
+        .expect("set RUMI_SP_PRE_CLAIM_JOURNAL_WASM to the pinned predecessor SP Wasm");
+    let predecessor_wasm = std::fs::read(predecessor_path).expect("read predecessor SP Wasm");
+    let predecessor_sha256 = format!("{:x}", Sha256::digest(&predecessor_wasm));
+    assert_eq!(
+        predecessor_sha256,
+        "b38719a3b7b533e40dea5143a71afb794f2b09c95b8ebf96e7524c9ea73e643f",
+        "unexpected pre-claim-journal Stability Pool artifact",
+    );
+
+    let env = setup_test_env_with_sp_wasm(predecessor_wasm);
+    let deposit_amount = 100_00000000u64;
+    let deposit = env
+        .pic
+        .update_call(
+            env.sp_id,
+            env.test_user,
+            "deposit",
+            encode_args((env.icusd_ledger, deposit_amount)).unwrap(),
+        )
+        .expect("predecessor deposit call");
+    match deposit {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
+            .unwrap()
+            .expect("predecessor deposit succeeds"),
+        WasmResult::Reject(message) => panic!("predecessor deposit rejected: {message}"),
+    }
+
+    let before = get_user_position(&env.pic, env.sp_id, env.test_user)
+        .expect("predecessor position exists");
+    let before_status = get_pool_status(&env.pic, env.sp_id);
+    assert_eq!(before.total_interest_earned_e8s, 0);
+    assert_eq!(before_status.total_deposits_e8s, deposit_amount);
+
+    let upgrade_args = StabilityPoolInitArgs {
+        protocol_canister_id: env.protocol_id,
+        authorized_admins: vec![env.admin],
+    };
+    let new_layout_wasm = stability_pool_wasm();
+    env.pic
+        .upgrade_canister(
+            env.sp_id,
+            new_layout_wasm.clone(),
+            encode_one(upgrade_args.clone()).unwrap(),
+            None,
+        )
+        .expect("upgrade predecessor raw snapshot to claim journal layout");
+
+    let after_migration = get_user_position(&env.pic, env.sp_id, env.test_user)
+        .expect("position survives predecessor migration");
+    assert_eq!(after_migration.stablecoin_balances, before.stablecoin_balances);
+    assert_eq!(after_migration.total_interest_earned_e8s, before.total_interest_earned_e8s);
+    assert_eq!(get_pool_status(&env.pic, env.sp_id).total_deposits_e8s, deposit_amount);
+    let migrated_page = env
+        .pic
+        .query_call(
+            env.sp_id,
+            env.test_user,
+            "get_my_completed_collateral_claims_page",
+            encode_args((None::<u64>, 100u16)).unwrap(),
+        )
+        .expect("query migrated claim journal");
+    match migrated_page {
+        WasmResult::Reply(bytes) => {
+            let page: CompletedOutboundPayoutPage = decode_one(&bytes).unwrap();
+            assert!(page.items.is_empty());
+            assert_eq!(page.next_cursor, None);
+            assert!(!page.has_more);
+        }
+        WasmResult::Reject(message) => panic!("migrated claim journal query rejected: {message}"),
+    }
+
+    // PocketIC server 7 rate-limits another install_code after a costly
+    // upgrade until scheduler rounds have consumed the prior install debit.
+    env.pic.advance_time(Duration::from_secs(60));
+    for _ in 0..10 {
+        env.pic.tick();
+    }
+
+    env.pic
+        .upgrade_canister(
+            env.sp_id,
+            new_layout_wasm,
+            encode_one(upgrade_args).unwrap(),
+            None,
+        )
+        .expect("upgrade already-migrated MemoryManager layout again");
+
+    let after_reopen = get_user_position(&env.pic, env.sp_id, env.test_user)
+        .expect("position survives second new-layout upgrade");
+    assert_eq!(after_reopen.stablecoin_balances, before.stablecoin_balances);
+    assert_eq!(after_reopen.total_interest_earned_e8s, before.total_interest_earned_e8s);
+    assert_eq!(get_pool_status(&env.pic, env.sp_id).total_deposits_e8s, deposit_amount);
+    let reopened_page = env
+        .pic
+        .query_call(
+            env.sp_id,
+            env.test_user,
+            "get_my_completed_collateral_claims_page",
+            encode_args((None::<u64>, 100u16)).unwrap(),
+        )
+        .expect("query reopened claim journal");
+    match reopened_page {
+        WasmResult::Reply(bytes) => {
+            let page: CompletedOutboundPayoutPage = decode_one(&bytes).unwrap();
+            assert!(page.items.is_empty());
+            assert_eq!(page.next_cursor, None);
+            assert!(!page.has_more);
+        }
+        WasmResult::Reject(message) => panic!("reopened claim journal query rejected: {message}"),
+    }
 }
 
 /// Reconciliation observability: after a clean deposit, the pool's tracked

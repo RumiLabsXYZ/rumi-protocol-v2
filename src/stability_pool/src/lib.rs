@@ -8,6 +8,7 @@ pub mod deposits;
 pub mod liquidation;
 pub mod logs;
 pub mod pool_guard;
+pub mod receipt_store;
 pub mod state;
 pub mod types;
 
@@ -111,6 +112,9 @@ fn init(args: StabilityPoolInitArgs) {
         "refusing to init: stable memory non-empty; use upgrade mode not reinstall"
     );
     mutate_state(|s| s.initialize(args));
+    receipt_store::init_layout();
+    state::save_to_stable_memory();
+    receipt_store::set_layout_version(receipt_store::LAYOUT_VERSION);
     log!(
         INFO,
         "Stability Pool initialized. Protocol: {}",
@@ -139,11 +143,27 @@ fn pre_upgrade() {
 #[post_upgrade]
 fn post_upgrade(_args: StabilityPoolInitArgs) {
     state::load_from_stable_memory();
+    let recovered_payouts = mutate_state(|s| {
+        s.initialize_pending_outbound_payouts();
+        let pending = s.pending_outbound_payouts.as_ref().map_or(0, |p| p.len());
+        s.reconcile_pending_outbound_payouts_after_upgrade();
+        pending
+    });
+    if recovered_payouts > 0 {
+        log!(
+            INFO,
+            "SP payout migration: held {} outbound payout tuples for same-tuple reconciliation",
+            recovered_payouts
+        );
+    }
     let (indexed, retained) = mutate_state(|s| {
         s.initialize_unallocated_interest_mint_index();
         (
             s.unallocated_interest_mint_index.is_some(),
-            s.unallocated_interest_mint_index.as_ref().map(BTreeMap::len).unwrap_or(0),
+            s.unallocated_interest_mint_index
+                .as_ref()
+                .map(BTreeMap::len)
+                .unwrap_or(0),
         )
     });
     if !indexed {
@@ -152,7 +172,11 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
             "CL-10 migration: legacy unallocated-interest receipt history exceeds the bounded index; new notifications will remain pending for reconciliation"
         );
     } else {
-        log!(INFO, "CL-10 migration: indexed {} retained unallocated-interest receipts", retained);
+        log!(
+            INFO,
+            "CL-10 migration: indexed {} retained unallocated-interest receipts",
+            retained
+        );
     }
     log!(
         INFO,
@@ -171,6 +195,7 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
         "Migration: normalized {} stablecoin transfer fee values",
         corrected_fees
     );
+    state::save_to_stable_memory();
 
     // Defer timer setup to avoid ic0_call_new restriction during upgrade
     ic_cdk_timers::set_timer(Duration::ZERO, || {
@@ -385,6 +410,50 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
 pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, StabilityPoolError> {
     crate::deposits::claim_all_collateral().await
 }
+
+/// Confirm an aged ambiguous collateral claim from an exact direct-ledger ICRC-3 block.
+/// The claimant or an admin supplies the original owner, ledger, and candidate block index.
+#[update]
+pub async fn reconcile_collateral_claim(
+    collateral_ledger: Principal,
+    claim_owner: Principal,
+    block_index: u64,
+) -> Result<u64, StabilityPoolError> {
+    crate::deposits::reconcile_collateral_claim(collateral_ledger, claim_owner, block_index).await
+}
+
+/// Caller-scoped status for exact collateral payout tuples held for retry.
+#[query]
+pub fn get_my_pending_collateral_claims() -> Vec<PendingOutboundPayoutStatus> {
+    let caller = ic_cdk::api::caller();
+    read_state(|s| s.pending_outbound_payouts_for(&caller))
+}
+
+/// Compatibility view of the first 10,000 caller-scoped settled collateral
+/// receipts, preserving the prior endpoint bound. This returns the oldest
+/// rows by transfer timestamp and cannot represent a larger history; use the
+/// page method to traverse the complete permanent receipt journal.
+#[query]
+pub fn get_my_completed_collateral_claims() -> Vec<CompletedOutboundPayoutStatus> {
+    let caller = ic_cdk::api::caller();
+    receipt_store::all_for_owner_compat(caller)
+}
+
+/// Caller-scoped bounded page over every settled collateral-claim receipt.
+#[query]
+pub fn get_my_completed_collateral_claims_page(
+    after_timestamp: Option<u64>,
+    limit: u16,
+) -> CompletedOutboundPayoutPage {
+    let caller = ic_cdk::api::caller();
+    let page = receipt_store::page(caller, after_timestamp, limit.into());
+    CompletedOutboundPayoutPage {
+        items: page.items,
+        next_cursor: page.next_cursor,
+        has_more: page.has_more,
+    }
+}
+
 
 /// Convenience: deposit a stablecoin (icUSD, ckUSDT, ckUSDC) and have the pool
 /// mint 3USD on the user's behalf by depositing into the 3pool.
@@ -775,17 +844,23 @@ pub async fn receive_interest_revenue_v2(
     }
 
     if read_state(|s| s.has_eligible_interest_recipient(collateral_type.as_ref())) {
-        return match mutate_state(|s| {
-            match s.record_interest_mint_receipt(source_mint_block) {
+        return match mutate_state(
+            |s| match s.record_interest_mint_receipt(source_mint_block) {
                 state::InterestMintReceiptStatus::New => {
                     s.distribute_interest_revenue(token_ledger, amount, collateral_type);
-                    s.push_event(caller, PoolEventType::InterestReceived { token_ledger, amount });
+                    s.push_event(
+                        caller,
+                        PoolEventType::InterestReceived {
+                            token_ledger,
+                            amount,
+                        },
+                    );
                     Ok(())
                 }
                 state::InterestMintReceiptStatus::Duplicate => Ok(()),
                 _ => Err(StabilityPoolError::SystemBusy),
-            }
-        }) {
+            },
+        ) {
             Ok(()) => Ok(()),
             Err(error) => Err(error),
         };
@@ -1065,8 +1140,8 @@ async fn compute_ledger_reconciliation() -> Vec<LedgerReconciliationEntry> {
 /// before it blocks withdrawals. Admin-gated because it triggers one
 /// inter-canister balance query per token.
 #[update]
-pub async fn get_ledger_reconciliation() -> Result<Vec<LedgerReconciliationEntry>, StabilityPoolError>
-{
+pub async fn get_ledger_reconciliation(
+) -> Result<Vec<LedgerReconciliationEntry>, StabilityPoolError> {
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);

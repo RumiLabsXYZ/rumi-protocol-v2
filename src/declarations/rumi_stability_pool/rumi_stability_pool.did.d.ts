@@ -107,6 +107,23 @@ export type CollateralStatus = { 'Paused' : null } |
   { 'Deprecated' : null } |
   { 'Sunset' : null } |
   { 'Frozen' : null };
+export interface CompletedOutboundPayoutPage {
+  'next_cursor' : [] | [bigint],
+  'items' : Array<CompletedOutboundPayoutStatus>,
+  'has_more' : boolean,
+}
+export interface CompletedOutboundPayoutStatus {
+  'block_index' : bigint,
+  'transfer_fee' : bigint,
+  'completed_at_ns' : bigint,
+  'recipient' : IcrcAccount,
+  'transfer_amount' : bigint,
+  'from_subaccount' : [] | [Uint8Array | number[]],
+  'transfer_created_at_time_ns' : bigint,
+  'ledger' : Principal,
+  'transfer_memo' : Uint8Array | number[],
+  'gross_amount' : bigint,
+}
 export interface CycleManagerCyclesStatus {
   'idle_burn_cycles_per_day' : [] | [bigint],
   'stable_memory_bytes' : [] | [bigint],
@@ -201,6 +218,23 @@ export interface NativeXrpPendingPayout {
   'collateral_type' : Principal,
   'payout_address' : string,
   'drops' : bigint,
+}
+export interface PendingOutboundPayoutStatus {
+  'last_error' : [] | [string],
+  'ambiguous_seen' : boolean,
+  'transfer_fee' : bigint,
+  'reconciliation_attempts' : bigint,
+  'last_reconciliation_at_ns' : [] | [bigint],
+  'recipient' : IcrcAccount,
+  'transfer_amount' : bigint,
+  'from_subaccount' : [] | [Uint8Array | number[]],
+  'transfer_created_at_time_ns' : bigint,
+  'ledger' : Principal,
+  'candidate_block_index' : [] | [bigint],
+  'dispatch_in_flight' : boolean,
+  'candidate_block_index_raw' : [] | [string],
+  'transfer_memo' : Uint8Array | number[],
+  'gross_amount' : bigint,
 }
 export interface PendingRefund {
   'id' : bigint,
@@ -450,7 +484,19 @@ export interface _SERVICE {
     [[] | [bigint]],
     Array<PoolLiquidationRecord>
   >,
+  'get_my_completed_collateral_claims' : ActorMethod<
+    [],
+    Array<CompletedOutboundPayoutStatus>
+  >,
+  'get_my_completed_collateral_claims_page' : ActorMethod<
+    [[] | [bigint], number],
+    CompletedOutboundPayoutPage
+  >,
   'get_my_native_xrp_payouts' : ActorMethod<[], Array<NativeXrpPendingPayout>>,
+  'get_my_pending_collateral_claims' : ActorMethod<
+    [],
+    Array<PendingOutboundPayoutStatus>
+  >,
   'get_pending_chain_absorbs' : ActorMethod<[], Array<ChainSpAbsorbIntent>>,
   'get_pending_refunds' : ActorMethod<[[] | [Principal]], Array<PendingRefund>>,
   'get_pending_unallocated_interest_forwards' : ActorMethod<
@@ -515,6 +561,11 @@ export interface _SERVICE {
   'receive_interest_revenue_v2' : ActorMethod<
     [Principal, bigint, [] | [Principal], bigint],
     { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'reconcile_collateral_claim' : ActorMethod<
+    [Principal, Principal, bigint],
+    { 'Ok' : bigint } |
       { 'Err' : StabilityPoolError }
   >,
   'recredit_failed_cfx_claim_payout' : ActorMethod<

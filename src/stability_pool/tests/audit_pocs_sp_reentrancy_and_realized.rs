@@ -26,7 +26,9 @@ fn read(rel: &str) -> String {
 }
 
 fn fn_body<'a>(src: &'a str, header: &'a str) -> &'a str {
-    let start = src.find(header).unwrap_or_else(|| panic!("`{}` not found", header));
+    let start = src
+        .find(header)
+        .unwrap_or_else(|| panic!("`{}` not found", header));
     let after = start + header.len();
     let end = ["\npub async fn ", "\npub fn ", "\nasync fn ", "\nfn "]
         .iter()
@@ -65,7 +67,8 @@ fn sp_102_balance_ops_reject_during_liquidation() {
     ] {
         let body = fn_body(&src, header);
         assert!(
-            body.contains("liquidation_in_progress"),
+            body.contains("liquidation_in_progress")
+                || body.contains("pool_balance_mutation_blocked"),
             "balance-mutating entry `{}` must reject while a liquidation is apportioning \
              (audit SP-102).",
             header

@@ -591,6 +591,82 @@ pub struct PendingRefund {
 /// unresolved. This state is separate from `PendingRefund` so the existing
 /// public query record remains wire-compatible.
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingOutboundPayout {
+    pub gross_amount: u64,
+    pub transfer_amount: u64,
+    pub transfer_fee: u64,
+    pub recipient: icrc_ledger_types::icrc1::account::Account,
+    pub from_subaccount: Option<[u8; 32]>,
+    pub transfer_memo: Vec<u8>,
+    pub transfer_created_at_time_ns: u64,
+    #[serde(default)]
+    pub dispatch_in_flight: bool,
+    #[serde(default)]
+    pub ambiguous_seen: bool,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub dispatch_generation: u64,
+    #[serde(default)]
+    pub reconciliation_attempts: u64,
+    #[serde(default)]
+    pub last_reconciliation_at_ns: Option<u64>,
+    #[serde(default)]
+    pub candidate_block_index: Option<u64>,
+    #[serde(default)]
+    pub candidate_block_index_raw: Option<String>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedOutboundPayout {
+    pub payout: PendingOutboundPayout,
+    pub block_index: u64,
+    pub completed_at_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedOutboundPayoutStatus {
+    pub ledger: Principal,
+    pub gross_amount: u64,
+    pub transfer_amount: u64,
+    pub transfer_fee: u64,
+    pub recipient: icrc_ledger_types::icrc1::account::Account,
+    pub from_subaccount: Option<Vec<u8>>,
+    pub transfer_memo: Vec<u8>,
+    pub transfer_created_at_time_ns: u64,
+    pub block_index: u64,
+    pub completed_at_ns: u64,
+}
+
+/// Bounded caller-scoped page over the permanent collateral-claim journal.
+/// `next_cursor` is exclusive and should be passed back as `after_timestamp`.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedOutboundPayoutPage {
+    pub items: Vec<CompletedOutboundPayoutStatus>,
+    pub next_cursor: Option<u64>,
+    pub has_more: bool,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingOutboundPayoutStatus {
+    pub ledger: Principal,
+    pub gross_amount: u64,
+    pub transfer_amount: u64,
+    pub transfer_fee: u64,
+    pub recipient: icrc_ledger_types::icrc1::account::Account,
+    pub from_subaccount: Option<Vec<u8>>,
+    pub transfer_memo: Vec<u8>,
+    pub transfer_created_at_time_ns: u64,
+    pub dispatch_in_flight: bool,
+    pub ambiguous_seen: bool,
+    pub last_error: Option<String>,
+    pub reconciliation_attempts: u64,
+    pub last_reconciliation_at_ns: Option<u64>,
+    pub candidate_block_index: Option<u64>,
+    pub candidate_block_index_raw: Option<String>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingRefundPayoutAttempt {
     pub refund_id: u64,
     pub token_ledger: Principal,

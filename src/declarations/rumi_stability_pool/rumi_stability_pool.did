@@ -263,6 +263,42 @@ type PoolLiquidationRecord = record {
 
 // ── Pending refund recovery (audit IC-S-001) ──
 
+type PendingOutboundPayoutStatus = record {
+  ledger : principal;
+  gross_amount : nat64;
+  transfer_amount : nat64;
+  transfer_fee : nat64;
+  recipient : IcrcAccount;
+  from_subaccount : opt blob;
+  transfer_memo : blob;
+  transfer_created_at_time_ns : nat64;
+  dispatch_in_flight : bool;
+  ambiguous_seen : bool;
+  last_error : opt text;
+  reconciliation_attempts : nat64;
+  last_reconciliation_at_ns : opt nat64;
+  candidate_block_index : opt nat64;
+  candidate_block_index_raw : opt text;
+};
+
+
+type CompletedOutboundPayoutStatus = record {
+  ledger : principal;
+  gross_amount : nat64;
+  transfer_amount : nat64;
+  transfer_fee : nat64;
+  recipient : IcrcAccount;
+  from_subaccount : opt blob;
+  transfer_memo : blob;
+  transfer_created_at_time_ns : nat64;
+  block_index : nat64;
+  completed_at_ns : nat64;
+};
+type CompletedOutboundPayoutPage = record {
+  items : vec CompletedOutboundPayoutStatus;
+  next_cursor : opt nat64;
+  has_more : bool;
+};
 type PendingRefund = record {
   id : nat64;
   user : principal;
@@ -420,6 +456,7 @@ service : (StabilityPoolInitArgs) -> {
   withdraw : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
   deposit_as_3usd : (principal, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_collateral : (principal) -> (variant { Ok : nat64; Err : StabilityPoolError });
+  reconcile_collateral_claim : (principal, principal, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_all_collateral : () -> (variant { Ok : vec record { principal; nat64 }; Err : StabilityPoolError });
   claim_pending_refund : (nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_cfx : (principal, text) -> (variant { Ok : nat; Err : StabilityPoolError });
@@ -483,6 +520,10 @@ service : (StabilityPoolInitArgs) -> {
   get_pool_event_count : () -> (nat64) query;
   list_depositor_principals : () -> (vec principal) query;
   get_pending_refunds : (opt principal) -> (vec PendingRefund) query;
+  get_my_pending_collateral_claims : () -> (vec PendingOutboundPayoutStatus) query;
+  // Bounded compatibility view; use the cursor method for complete history.
+  get_my_completed_collateral_claims : () -> (vec CompletedOutboundPayoutStatus) query;
+  get_my_completed_collateral_claims_page : (opt nat64, nat16) -> (CompletedOutboundPayoutPage) query;
   get_pending_unallocated_interest_forwards : () -> (vec UnallocatedInterestForwardBatch) query;
   get_my_native_xrp_payouts : () -> (vec NativeXrpPendingPayout) query;
   get_pending_chain_absorbs : () -> (vec ChainSpAbsorbIntent) query;

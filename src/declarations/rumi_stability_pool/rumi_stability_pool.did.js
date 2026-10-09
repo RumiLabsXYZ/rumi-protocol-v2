@@ -111,6 +111,27 @@ export const idlFactory = ({ IDL }) => {
     'timestamp' : IDL.Nat64,
     'collateral_type' : IDL.Principal,
   });
+  const IcrcAccount = IDL.Record({
+    'owner' : IDL.Principal,
+    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+  });
+  const CompletedOutboundPayoutStatus = IDL.Record({
+    'block_index' : IDL.Nat64,
+    'transfer_fee' : IDL.Nat64,
+    'completed_at_ns' : IDL.Nat64,
+    'recipient' : IcrcAccount,
+    'transfer_amount' : IDL.Nat64,
+    'from_subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'transfer_created_at_time_ns' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'transfer_memo' : IDL.Vec(IDL.Nat8),
+    'gross_amount' : IDL.Nat64,
+  });
+  const CompletedOutboundPayoutPage = IDL.Record({
+    'next_cursor' : IDL.Opt(IDL.Nat64),
+    'items' : IDL.Vec(CompletedOutboundPayoutStatus),
+    'has_more' : IDL.Bool,
+  });
   const NativeXrpPendingPayout = IDL.Record({
     'claim_id' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
@@ -119,6 +140,23 @@ export const idlFactory = ({ IDL }) => {
     'collateral_type' : IDL.Principal,
     'payout_address' : IDL.Text,
     'drops' : IDL.Nat64,
+  });
+  const PendingOutboundPayoutStatus = IDL.Record({
+    'last_error' : IDL.Opt(IDL.Text),
+    'ambiguous_seen' : IDL.Bool,
+    'transfer_fee' : IDL.Nat64,
+    'reconciliation_attempts' : IDL.Nat64,
+    'last_reconciliation_at_ns' : IDL.Opt(IDL.Nat64),
+    'recipient' : IcrcAccount,
+    'transfer_amount' : IDL.Nat64,
+    'from_subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'transfer_created_at_time_ns' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'candidate_block_index' : IDL.Opt(IDL.Nat64),
+    'dispatch_in_flight' : IDL.Bool,
+    'candidate_block_index_raw' : IDL.Opt(IDL.Text),
+    'transfer_memo' : IDL.Vec(IDL.Nat8),
+    'gross_amount' : IDL.Nat64,
   });
   const ChainSpAbsorbIntentStatus = IDL.Variant({
     'BackendRejected' : IDL.Null,
@@ -146,10 +184,6 @@ export const idlFactory = ({ IDL }) => {
     'vault_id' : IDL.Nat64,
     'chain_id' : IDL.Nat32,
     'success' : IDL.Bool,
-  });
-  const IcrcAccount = IDL.Record({
-    'owner' : IDL.Principal,
-    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
   });
   const ChainSpAbsorbIntent = IDL.Record({
     'last_error' : IDL.Opt(IDL.Text),
@@ -515,9 +549,24 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(PoolLiquidationRecord)],
         ['query'],
       ),
+    'get_my_completed_collateral_claims' : IDL.Func(
+        [],
+        [IDL.Vec(CompletedOutboundPayoutStatus)],
+        ['query'],
+      ),
+    'get_my_completed_collateral_claims_page' : IDL.Func(
+        [IDL.Opt(IDL.Nat64), IDL.Nat16],
+        [CompletedOutboundPayoutPage],
+        ['query'],
+      ),
     'get_my_native_xrp_payouts' : IDL.Func(
         [],
         [IDL.Vec(NativeXrpPendingPayout)],
+        ['query'],
+      ),
+    'get_my_pending_collateral_claims' : IDL.Func(
+        [],
+        [IDL.Vec(PendingOutboundPayoutStatus)],
         ['query'],
       ),
     'get_pending_chain_absorbs' : IDL.Func(
@@ -605,6 +654,11 @@ export const idlFactory = ({ IDL }) => {
     'receive_interest_revenue_v2' : IDL.Func(
         [IDL.Principal, IDL.Nat64, IDL.Opt(IDL.Principal), IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'reconcile_collateral_claim' : IDL.Func(
+        [IDL.Principal, IDL.Principal, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : StabilityPoolError })],
         [],
       ),
     'recredit_failed_cfx_claim_payout' : IDL.Func(
