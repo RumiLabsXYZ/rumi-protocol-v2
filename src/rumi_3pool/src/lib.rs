@@ -333,9 +333,9 @@ fn get_current_a() -> u64 {
 
 // ─── Pending-claim recovery (audit 2026-06-05, 3P-01/02/03) ───
 
-/// Upper bound on outstanding pending claims. A claim is only created when a
-/// ledger transfer (and, for swap/add, its refund) fails, which is not caller-
-/// controllable, so this is a memory-safety bound rather than an anti-DoS one.
+/// Upper bound on outstanding recovery-index claims. Ledger failures can make
+/// claim creation caller-triggerable, so this cap must not gate withdrawals;
+/// payout entitlements remain the durable recovery source at capacity.
 const MAX_PENDING_CLAIMS: u64 = 10_000;
 
 thread_local! {
@@ -793,6 +793,13 @@ pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
                 }
                 crate::payouts::PayoutKind::AdminFeeWithdrawal => {
                     storage::payouts::clear_fence_for(claim_id);
+                }
+                crate::payouts::PayoutKind::RemoveLiquidity
+                | crate::payouts::PayoutKind::RemoveOneCoin => {
+                    // The LP/reserve debit and liquidity event were committed
+                    // by the original exit. This closes only the payout after
+                    // the exact ledger transfer is confirmed.
+                    payouts::mark_settled(claim_id);
                 }
                 _ => {}
             }
@@ -1522,6 +1529,34 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
         (s.balances, s.lp_total_supply, s.config.fee_curve.unwrap_or_default())
     });
 
+    let token_meta: [(Principal, String); 3] = read_state(|s| {
+        [
+            (s.config.tokens[0].ledger_id, s.config.tokens[0].symbol.clone()),
+            (s.config.tokens[1].ledger_id, s.config.tokens[1].symbol.clone()),
+            (s.config.tokens[2].ledger_id, s.config.tokens[2].symbol.clone()),
+        ]
+    });
+    // Pin the outbound fee for each possible compensation before any input
+    // pull. A pull whose gross amount cannot cover that fee would create an
+    // unpayable refund entitlement, so reject the whole batch first.
+    let mut refund_fees = [0u128; 3];
+    for k in 0..3 {
+        if amounts_arr[k] > 0 {
+            refund_fees[k] = crate::transfers::try_current_ledger_fee(token_meta[k].0)
+                .await
+                .map_err(|reason| ThreePoolError::TransferFailed {
+                    token: token_meta[k].1.clone(),
+                    reason: format!("cannot safely admit add-liquidity leg without its actual refund fee: {reason}"),
+                })?;
+            if amounts_arr[k] <= refund_fees[k] {
+                return Err(ThreePoolError::InsufficientOutput {
+                    expected_min: refund_fees[k].saturating_add(1),
+                    actual: amounts_arr[k],
+                });
+            }
+        }
+    }
+
     // 6. Calculate LP tokens to mint (dynamic fee curve)
     let liq_outcome = calc_add_liquidity(
         &amounts_arr,
@@ -1560,13 +1595,6 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
     let lp_supply_after = lp_total_supply
         .checked_add(lp_minted)
         .ok_or(ThreePoolError::MathOverflow)?;
-    let token_meta: [(Principal, String); 3] = read_state(|s| {
-        [
-            (s.config.tokens[0].ledger_id, s.config.tokens[0].symbol.clone()),
-            (s.config.tokens[1].ledger_id, s.config.tokens[1].symbol.clone()),
-            (s.config.tokens[2].ledger_id, s.config.tokens[2].symbol.clone()),
-        ]
-    });
     // On failure of the last nonzero pull, every earlier successful pull can
     // independently fail its refund. Reserve that full bound before pulling.
     let possible_refunds = amounts_arr.iter().filter(|amount| **amount > 0).count() as u64;
@@ -1579,7 +1607,7 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
         if amounts_arr[k] > 0 {
             let (ledger, symbol) = &token_meta[k];
             refund_ids[k] = Some(crate::transfers::prepare_add_liquidity_refund(
-                k as u8, *ledger, symbol, caller, amounts_arr[k],
+                k as u8, *ledger, symbol, caller, amounts_arr[k], refund_fees[k],
             ).await.map_err(|failure| ThreePoolError::TransferFailed {
                 token: symbol.clone(), reason: failure.reason,
             })?);
@@ -1806,8 +1834,6 @@ pub async fn remove_liquidity(
         }
     }
 
-    let claim_slots_needed = amounts.iter().filter(|amount| **amount > 0).count() as u64;
-    let mut claim_slots = PendingClaimSlots::reserve(claim_slots_needed)?;
     // This synchronous recheck occurs after all fee awaits and before any
     // payout journal mutation. No pending tuple is created unless the LP burn
     // can be applied.
@@ -1879,38 +1905,8 @@ pub async fn remove_liquidity(
             })?;
     }
 
-    // 6. Transfer each non-zero amount to user.
-    //
-    // LP and balances were already deducted in step 5 (deduct-before-transfer),
-    // so the user is owed these tokens unconditionally. If a transfer fails,
-    // record a pending claim for the un-sent amount and CONTINUE with the other
-    // tokens — never bail mid-loop and strand the remaining payouts. The user
-    // recovers any failed leg via `claim_pending`. Audit 2026-06-05 (3P-02).
-    let mut first_failure: Option<(String, String)> = None;
-    for k in 0..3 {
-        if let Some(payout_id) = payout_ids[k] {
-            let (ledger, symbol) = &token_meta[k];
-            if let Err(failure) = crate::transfers::execute_prepared_payout(payout_id).await {
-                let reason = failure.reason.clone();
-                record_pending_claim(
-                    &mut claim_slots,
-                    failure.id,
-                    caller,
-                    k as u8,
-                    *ledger,
-                    symbol,
-                    amounts[k],
-                    &format!("remove_liquidity payout of token {k} failed ({reason})"),
-                );
-                if first_failure.is_none() {
-                    first_failure = Some((symbol.clone(), reason));
-                }
-            }
-        }
-    }
-
-    // Record liquidity event v2. Proportional remove preserves pool weights,
-    // so it is neither rebalancing nor imbalancing and pays no fee.
+    // LP and reserves are already debited. Persist the exit event before any
+    // payout await so a failed or interrupted leg cannot hide the operation.
     mutate_state(|s| {
         let lp_supply = s.lp_total_supply;
         let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
@@ -1936,16 +1932,42 @@ pub async fn remove_liquidity(
         });
     });
 
-    for payout_id in payout_ids.into_iter().flatten() {
-        crate::payouts::mark_settled(payout_id);
+    // 6. Transfer each non-zero amount to user.
+    //
+    // LP and balances were already deducted in step 5 (deduct-before-transfer),
+    // so the user is owed these tokens unconditionally. If a transfer fails,
+    // CONTINUE with the other tokens and leave the exact payout entitlement
+    // discoverable for recovery. Audit 2026-06-05 (3P-02).
+    let mut first_failure: Option<(String, String, u64)> = None;
+    for k in 0..3 {
+        if let Some(payout_id) = payout_ids[k] {
+            let (_, symbol) = &token_meta[k];
+            match crate::transfers::execute_prepared_payout(payout_id).await {
+                Ok(()) => {
+                    crate::payouts::mark_settled(payout_id);
+                }
+                Err(failure) => {
+                    let reason = failure.reason.clone();
+                    log!(INFO, "remove_liquidity payout entitlement #{} remains recoverable after token {k} failed: {reason}", failure.id);
+                    if first_failure.is_none() {
+                        first_failure = Some((symbol.clone(), reason, failure.id));
+                    }
+                }
+            }
+        }
     }
 
     log!(INFO, "RemoveLiquidity: {} LP -> {:?} for {}", lp_burn, amounts, caller);
 
-    // Surface a partial-payout failure to the caller (claims persist for
-    // recovery). The LP burn and any successful legs are already committed.
-    if let Some((token, reason)) = first_failure {
-        return Err(ThreePoolError::TransferFailed { token, reason });
+    // Surface the recovery path to the caller. The LP burn and any successful
+    // legs are already committed; the payout journal remains queryable at cap.
+    if let Some((token, reason, payout_id)) = first_failure {
+        return Err(ThreePoolError::TransferFailed {
+            token,
+            reason: format!(
+                "payout entitlement #{payout_id} remains discoverable via get_payout_entitlement({payout_id}) / get_payout_entitlements and recoverable via claim_pending({payout_id}): {reason}"
+            ),
+        });
     }
 
     Ok(amounts.to_vec())
@@ -2013,10 +2035,6 @@ pub async fn remove_one_coin(
         return Err(ThreePoolError::SlippageExceeded);
     }
 
-    // LP and reserves are debited below; hold room for the possible payout
-    // claim before committing that debit.
-    let mut claim_slots = PendingClaimSlots::reserve(1)?;
-
     // 5. Deduct LP and balance first. Revalidate after the fee-cache await:
     // LP-token transfers can execute while this update is suspended.
     // The pool sends `amount` to the user and reserves `admin_fee_share` for
@@ -2065,28 +2083,8 @@ pub async fn remove_one_coin(
     crate::transfers::activate_prepared_payout(payout_id)
         .map_err(|failure| ThreePoolError::TransferFailed { token: symbol.clone(), reason: failure.reason })?;
 
-    // 6. Transfer to user.
-    //
-    // LP and balance were already deducted in step 5, so the user is owed
-    // `amount` unconditionally. If the transfer fails, record a pending claim
-    // so the user recovers it via `claim_pending` rather than losing it (the
-    // tokens physically remain in the pool). Audit 2026-06-05 (3P-02).
-    if let Err(failure) = crate::transfers::execute_prepared_payout(payout_id).await {
-        let reason = failure.reason.clone();
-        record_pending_claim(
-            &mut claim_slots,
-            payout_id,
-            caller,
-            coin_index,
-            ledger,
-            &symbol,
-            amount,
-            &format!("remove_one_coin payout of token {idx} failed ({reason})"),
-        );
-        return Err(ThreePoolError::TransferFailed { token: symbol, reason });
-    }
-
-    // Record liquidity event v2 (dynamic-fee schema).
+    // The LP/reserve debit is committed. Record its event before the payout
+    // await so a failed transfer remains a visible one-coin exit operation.
     mutate_state(|s| {
         let lp_supply = s.lp_total_supply;
         let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
@@ -2112,6 +2110,24 @@ pub async fn remove_one_coin(
             migrated: false,
         });
     });
+
+    // 6. Transfer to user.
+    //
+    // LP and balance were already deducted in step 5, so the user is owed
+    // `amount` unconditionally. If the transfer fails, the exact payout
+    // entitlement is already durable and discoverable, so recovery does not
+    // depend on the separately capped legacy pending-claim index.
+    if let Err(failure) = crate::transfers::execute_prepared_payout(payout_id).await {
+        let reason = failure.reason.clone();
+        log!(INFO, "remove_one_coin payout entitlement #{} remains recoverable after token {idx} failed: {reason}", payout_id);
+        return Err(ThreePoolError::TransferFailed {
+            token: symbol,
+            reason: format!(
+                "payout entitlement #{payout_id} remains discoverable via get_payout_entitlement({payout_id}) / get_payout_entitlements and recoverable via claim_pending({payout_id}): {reason}"
+            ),
+        });
+    }
+
     payouts::mark_settled(payout_id);
 
     log!(INFO, "RemoveOneCoin: {} LP -> {} of token {} for {} (fee: {})",

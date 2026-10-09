@@ -78,6 +78,19 @@ pub async fn current_ledger_fee(ledger: Principal) -> u128 {
     }
 }
 
+/// Query a fee for an admission decision that cannot safely use the fallback
+/// fee. Unlike `ledger_fee`, this never consults or updates the fee cache and
+/// fails closed on call rejection or values outside `u128`.
+pub async fn try_current_ledger_fee(ledger: Principal) -> Result<u128, String> {
+    let result: Result<(candid::Nat,), _> = ic_cdk::call(ledger, "icrc1_fee", ()).await;
+    let (fee,) = result.map_err(|(code, message)| {
+        format!("icrc1_fee query failed: {code:?} - {message}")
+    })?;
+    fee.0
+        .try_into()
+        .map_err(|_| "icrc1_fee result does not fit u128".to_string())
+}
+
 /// Refresh the fee after a proven no-effect rejection. Cached quotes are not
 /// sufficient evidence for choosing the next transfer tuple.
 async fn refresh_ledger_fee(ledger: Principal) -> u128 {
@@ -129,8 +142,9 @@ pub async fn prepare_add_liquidity_refund(
     symbol: &str,
     owner: Principal,
     gross: u128,
+    fee: u128,
 ) -> Result<u64, PayoutFailure> {
-    prepare_input_payout(PayoutKind::AddLiquidityRefund, crate::payouts::PayoutInputAction::AddLiquidity, token_index, ledger, symbol, owner, gross).await
+    prepare_input_payout_with_fee(PayoutKind::AddLiquidityRefund, crate::payouts::PayoutInputAction::AddLiquidity, token_index, ledger, symbol, owner, gross, fee)
 }
 
 /// Reserve an inbound transfer and its potential outbound recovery before the
@@ -145,6 +159,19 @@ pub async fn prepare_input_payout(
     gross: u128,
 ) -> Result<u64, PayoutFailure> {
     let fee = ledger_fee(ledger).await;
+    prepare_input_payout_with_fee(kind, action, token_index, ledger, symbol, owner, gross, fee)
+}
+
+fn prepare_input_payout_with_fee(
+    kind: PayoutKind,
+    action: crate::payouts::PayoutInputAction,
+    token_index: u8,
+    ledger: Principal,
+    symbol: &str,
+    owner: Principal,
+    gross: u128,
+    fee: u128,
+) -> Result<u64, PayoutFailure> {
     let id = prepare_payout_with_fee(
         kind, token_index, ledger, symbol, owner, gross,
         None, None, fee, false,
