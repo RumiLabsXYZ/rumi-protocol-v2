@@ -755,7 +755,15 @@ pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
             }
             Err(failure) => {
                 if let Some(slots) = slots.as_mut() {
-                    if storage::pending_claims::get(failure.id).is_none() {
+                    // A fee lookup can fail before payout_compensation creates
+                    // a child identity. In that case failure.id is the parent
+                    // output claim, not a new input-refund claim; preserve the
+                    // parent's existing recovery path without fabricating a
+                    // mismatched pending-claim projection.
+                    if failure.id != claim_id
+                        && payouts::get(failure.id).is_some()
+                        && storage::pending_claims::get(failure.id).is_none()
+                    {
                         record_pending_claim(
                             slots,
                             failure.id,
@@ -1187,7 +1195,13 @@ async fn swap_inner(
     // 6. Slippage check against the NET amount the taker receives. The output
     //    transfer pays `output - ledger_fee`, so check net so `min_dy` is a true
     //    minimum received. Fee lookup is cached (the output transfer reuses it).
-    let net_output = output.saturating_sub(crate::transfers::ledger_fee(token_j_ledger).await);
+    let output_fee = crate::transfers::ledger_fee(token_j_ledger)
+        .await
+        .map_err(|reason| ThreePoolError::TransferFailed {
+            token: token_j_symbol.clone(),
+            reason: format!("cannot safely quote swap output without the ledger fee: {reason}"),
+        })?;
+    let net_output = output.saturating_sub(output_fee);
     // Audit 2026-06-09 (IC-S-003): a zero NET output means transfer_to_user
     // would skip the send entirely (output <= ledger fee) while the pool still
     // debits balances, silently consuming the input for nothing. Reject before
@@ -1204,7 +1218,6 @@ async fn swap_inner(
 
     // Refund identities must be constructible without another pre-journal
     // await after the input has been pulled.
-    let output_fee = crate::transfers::ledger_fee(token_j_ledger).await;
     // Prove every reserve/admin-fee arithmetic transition before either ledger
     // can move value. Recovery uses the same snapshot and checked transition.
     let admin_fee_share = fee
@@ -1238,8 +1251,12 @@ async fn swap_inner(
     let mut swap_payout_id = None;
 
     if let Some(r) = receipt.as_deref_mut() {
-        let input_fee = crate::transfers::ledger_fee(token_i_ledger).await;
-        let output_fee = crate::transfers::ledger_fee(token_j_ledger).await;
+        let input_fee = crate::transfers::ledger_fee(token_i_ledger)
+            .await
+            .map_err(|reason| ThreePoolError::TransferFailed {
+                token: token_i_symbol.clone(),
+                reason: format!("cannot safely admit swap input without its refund fee: {reason}"),
+            })?;
         r.pool_fee = Some(fee);
         r.gross_output = Some(output);
         receipts::set_fence(true);
@@ -1820,7 +1837,12 @@ pub async fn remove_liquidity(
     });
     let mut payout_fees = [0u128; 3];
     for k in 0..3 {
-        payout_fees[k] = crate::transfers::ledger_fee(token_ledgers[k]).await;
+        payout_fees[k] = crate::transfers::ledger_fee(token_ledgers[k])
+            .await
+            .map_err(|reason| ThreePoolError::TransferFailed {
+                token: format!("token index {k}"),
+                reason: format!("cannot safely debit liquidity without the payout fee: {reason}"),
+            })?;
         let net_k = amounts[k].saturating_sub(payout_fees[k]);
         // Audit 2026-06-09 (IC-S-003): a payable leg that nets to zero would be
         // silently consumed (debited from the pool with nothing sent). Reject
@@ -2022,8 +2044,15 @@ pub async fn remove_one_coin(
 
     // 4. Slippage check against the NET amount the taker receives (the output
     //    transfer pays `amount - ledger_fee`), so `min_amount` is a true minimum.
-    let out_ledger = read_state(|s| s.config.tokens[idx].ledger_id);
-    let output_fee = crate::transfers::ledger_fee(out_ledger).await;
+    let (out_ledger, out_symbol) = read_state(|s| {
+        (s.config.tokens[idx].ledger_id, s.config.tokens[idx].symbol.clone())
+    });
+    let output_fee = crate::transfers::ledger_fee(out_ledger)
+        .await
+        .map_err(|reason| ThreePoolError::TransferFailed {
+            token: out_symbol,
+            reason: format!("cannot safely debit liquidity without the payout fee: {reason}"),
+        })?;
     let net_amount = amount.saturating_sub(output_fee);
     // Audit 2026-06-09 (IC-S-003): a zero NET amount means transfer_to_user
     // would skip the send while LP and balances are still debited. Reject
