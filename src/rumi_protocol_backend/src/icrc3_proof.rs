@@ -176,9 +176,16 @@ pub fn decode_block(value: &ICRC3Value) -> Result<DecodedBlock, String> {
         })?;
 
     let btype = block_map.get("btype").and_then(text_value);
+    let tx_op = tx_map.get("op").and_then(text_value);
     let op = if let Some(btype) = &btype {
-        normalize_op(btype)
-    } else if let Some(op) = tx_map.get("op").and_then(text_value) {
+        let normalized_btype = normalize_op(btype);
+        if tx_op.as_ref().is_some_and(|tx_op| {
+            normalize_semantic_op(tx_op) != normalize_semantic_op(&normalized_btype)
+        }) {
+            return Err("block type and transaction operation disagree".into());
+        }
+        normalized_btype
+    } else if let Some(op) = tx_op {
         normalize_op(&op)
     } else {
         return Err("block has neither top-level 'btype' nor tx.'op'".to_string());
@@ -465,6 +472,43 @@ pub fn validate_icrc3_transfer_block(
     Ok(())
 }
 
+/// Validate the stronger evidence required to recover an AMM1 donation after
+/// an ambiguous/TooOld mint outcome. Unlike the generic transfer validator,
+/// an ICRC-1 mint must explicitly carry the standard `1mint` block type.
+pub fn validate_icrc1_mint_block(
+    block: &DecodedBlock,
+    to: Account,
+    amount_e8s: u64,
+    memo: &[u8],
+    created_at_time: u64,
+) -> Result<(), String> {
+    if block.btype.as_deref() != Some("1mint") {
+        return Err("ICRC-3 block type is not exactly 1mint".into());
+    }
+    if block.op != "mint" {
+        return Err("ICRC-3 transaction operation is not mint".into());
+    }
+    if block.from.is_some() {
+        return Err("ICRC-3 mint unexpectedly has a sender".into());
+    }
+    if block.spender.is_some() {
+        return Err("ICRC-3 mint unexpectedly names a spender".into());
+    }
+    if block.to.as_ref() != Some(&to) {
+        return Err("ICRC-3 mint recipient does not exactly match the pinned account".into());
+    }
+    if block.amount != u128::from(amount_e8s) {
+        return Err("ICRC-3 mint amount does not match the pinned amount".into());
+    }
+    if block.memo.as_deref() != Some(memo) {
+        return Err("ICRC-3 mint memo does not match the pinned nonce".into());
+    }
+    if block.created_at_time != Some(created_at_time) {
+        return Err("ICRC-3 mint timestamp does not match the pinned nonce".into());
+    }
+    Ok(())
+}
+
 fn accounts_match_default_subaccount(actual: &Account, expected: &Account) -> bool {
     actual.owner == expected.owner
         && match (&actual.subaccount, &expected.subaccount) {
@@ -490,6 +534,14 @@ pub async fn fetch_icrc3_block(
     let (response,) = result.map_err(|(code, message)| {
         format!("icrc3_get_blocks call to {ledger} failed: {code:?} {message}")
     })?;
+    let log_length = response
+        .log_length
+        .0
+        .to_u64()
+        .ok_or_else(|| "ledger log length does not fit in u64".to_string())?;
+    if block_index >= log_length {
+        return Err("requested block index is outside the ledger log length".into());
+    }
     if response.blocks.len() == 1
         && response.blocks[0].id.0.to_u64() == Some(block_index)
         && response.archived_blocks.is_empty()
@@ -500,20 +552,10 @@ pub async fn fetch_icrc3_block(
         return Err("icrc3_get_blocks returned ambiguous or incomplete archive evidence".into());
     }
     let archive = &response.archived_blocks[0];
-    if archive.args.len() > 32
-        || !archive.args.iter().any(|arg| {
-            arg.start
-                .0
-                .to_u64()
-                .zip(arg.length.0.to_u64())
-                .is_some_and(|(start, len)| {
-                    start <= block_index
-                        && start.checked_add(len).is_none_or(|end| block_index < end)
-                })
-        })
-    {
-        return Err("archive callback does not uniquely cover the requested block".into());
+    if archive.callback.method.trim().is_empty() {
+        return Err("archive callback method is empty".into());
     }
+    validate_exact_archive_ranges(block_index, &archive.args)?;
     let archive_request = vec![GetBlocksRequest {
         start: Nat::from(block_index),
         length: Nat::from(1u64),
@@ -526,13 +568,42 @@ pub async fn fetch_icrc3_block(
     .await;
     let (archived,) = result
         .map_err(|(code, message)| format!("icrc3 archive call failed: {code:?} {message}"))?;
-    if !archived.archived_blocks.is_empty()
-        || archived.blocks.len() != 1
-        || archived.blocks[0].id.0.to_u64() != Some(block_index)
+    decode_block(exact_archive_callback_block(block_index, &archived)?)
+}
+
+fn exact_archive_callback_block(
+    block_index: u64,
+    response: &GetBlocksResult,
+) -> Result<&ICRC3Value, String> {
+    if !response.archived_blocks.is_empty()
+        || response.blocks.len() != 1
+        || response.blocks[0].id.0.to_u64() != Some(block_index)
     {
         return Err("archive callback returned malformed exact block response".into());
     }
-    decode_block(&archived.blocks[0].block)
+    Ok(&response.blocks[0].block)
+}
+
+fn validate_exact_archive_ranges(
+    block_index: u64,
+    args: &[GetBlocksRequest],
+) -> Result<(), String> {
+    if args.len() > 32 {
+        return Err("archive callback has too many advertised ranges".into());
+    }
+    let mut coverage_count = 0usize;
+    for arg in args {
+        let start = arg.start.0.to_u64().ok_or_else(|| "archive range start does not fit in u64".to_string())?;
+        let len = arg.length.0.to_u64().ok_or_else(|| "archive range length does not fit in u64".to_string())?;
+        let end = start.checked_add(len).ok_or_else(|| "archive range overflows u64".to_string())?;
+        if start <= block_index && block_index < end {
+            coverage_count += 1;
+        }
+    }
+    if coverage_count != 1 {
+        return Err("archive callback does not uniquely cover the requested block".into());
+    }
+    Ok(())
 }
 
 pub async fn icrc3_log_length(ledger: Principal) -> Result<u64, String> {
@@ -710,6 +781,14 @@ fn normalize_op(raw: &str) -> String {
     trimmed.to_ascii_lowercase()
 }
 
+fn normalize_semantic_op(raw: &str) -> String {
+    let normalized = normalize_op(raw);
+    match normalized.as_str() {
+        "transfer" => "xfer".into(),
+        _ => normalized,
+    }
+}
+
 fn account_from_value(v: &ICRC3Value) -> Result<Account, String> {
     let arr = match v {
         ICRC3Value::Array(a) => a,
@@ -836,7 +915,7 @@ fn account_to_value(account: Account) -> ICRC3Value {
 
 #[cfg(test)]
 mod three_usd_reserve_ingress_tests {
-    use super::{decode_block, validate_three_usd_ingress_scan_page, validate_three_usd_reserve_ingress_block, DecodedBlock};
+    use super::{decode_block, exact_archive_callback_block, validate_exact_archive_ranges, validate_icrc1_mint_block, validate_three_usd_ingress_scan_page, validate_three_usd_reserve_ingress_block, DecodedBlock};
     use candid::Nat;
     use icrc_ledger_types::icrc3::blocks::{ArchivedBlocks, BlockWithId, GetBlocksRequest, GetBlocksResult};
     use icrc_ledger_types::icrc3::archive::QueryArchiveFn;
@@ -1005,6 +1084,82 @@ mod three_usd_reserve_ingress_tests {
         let mut wrong = exact;
         wrong.memo = Some(vec![0; 16]);
         assert!(validate_three_usd_reserve_ingress_block(&wrong, &tuple).is_err());
+    }
+
+    #[test]
+    fn amm1_receipt_requires_exact_standard_mint_tuple() {
+        let to = Account { owner: Principal::from_slice(&[19]), subaccount: Some([8; 32]) };
+        let memo = [7u8; 16];
+        let exact = DecodedBlock {
+            btype: Some("1mint".into()),
+            op: "mint".into(),
+            from: None,
+            to: Some(to.clone()),
+            spender: None,
+            amount: 42,
+            fee: None,
+            created_at_time: Some(99),
+            memo: Some(memo.to_vec()),
+        };
+        assert!(validate_icrc1_mint_block(&exact, to.clone(), 42, &memo, 99).is_ok());
+
+        let mut wrong = exact.clone();
+        wrong.btype = None;
+        assert!(validate_icrc1_mint_block(&wrong, to.clone(), 42, &memo, 99).is_err());
+        let mut wrong = exact.clone();
+        wrong.op = "burn".into();
+        assert!(validate_icrc1_mint_block(&wrong, to.clone(), 42, &memo, 99).is_err());
+        let mut wrong = exact.clone();
+        wrong.from = Some(Account { owner: Principal::from_slice(&[20]), subaccount: None });
+        assert!(validate_icrc1_mint_block(&wrong, to.clone(), 42, &memo, 99).is_err());
+        let mut wrong = exact.clone();
+        wrong.spender = Some(Account { owner: Principal::from_slice(&[20]), subaccount: None });
+        assert!(validate_icrc1_mint_block(&wrong, to.clone(), 42, &memo, 99).is_err());
+        let mut wrong = exact.clone();
+        wrong.to.as_mut().unwrap().subaccount = None;
+        assert!(validate_icrc1_mint_block(&wrong, to.clone(), 42, &memo, 99).is_err());
+        assert!(validate_icrc1_mint_block(&exact, to.clone(), 43, &memo, 99).is_err());
+        assert!(validate_icrc1_mint_block(&exact, to.clone(), 42, &[9; 16], 99).is_err());
+        assert!(validate_icrc1_mint_block(&exact, to, 42, &memo, 100).is_err());
+
+        // btype cannot override a contradictory transaction operation.
+        if let ICRC3Value::Map(outer) = super::make_test_block(
+            "mint", None, Some(Account { owner: Principal::from_slice(&[19]), subaccount: Some([8; 32]) }), 42, Some(&memo), true,
+        ) {
+            let mut outer = outer;
+            if let Some(ICRC3Value::Map(tx)) = outer.get_mut("tx") {
+                tx.insert("op".into(), ICRC3Value::Text("burn".into()));
+            }
+            assert!(decode_block(&ICRC3Value::Map(outer)).is_err());
+        }
+    }
+
+    #[test]
+    fn exact_archive_ranges_reject_overflow_and_ambiguous_or_unrepresentable_ranges() {
+        let range = |start: Nat, length: Nat| GetBlocksRequest { start, length };
+        assert!(validate_exact_archive_ranges(5, &[range(Nat::from(4u64), Nat::from(2u64))]).is_ok());
+        assert!(validate_exact_archive_ranges(5, &[range(Nat::from(u64::MAX), Nat::from(2u64))]).is_err());
+        assert!(validate_exact_archive_ranges(5, &[range(Nat::from(0u64), Nat::from(6u64)), range(Nat::from(5u64), Nat::from(1u64))]).is_err());
+        assert!(validate_exact_archive_ranges(5, &[range(Nat::from(0u64), Nat::from(5u64))]).is_err());
+        assert!(validate_exact_archive_ranges(5, &[range(Nat::from(0u64), Nat::from(u128::from(u64::MAX) + 1))]).is_err());
+        let too_many = (0..33).map(|_| range(Nat::from(0u64), Nat::from(6u64))).collect::<Vec<_>>();
+        assert!(validate_exact_archive_ranges(5, &too_many).is_err());
+    }
+
+    #[test]
+    fn archive_callback_must_return_one_exact_non_nested_block() {
+        let tuple = tuple();
+        let exact = response(&[7], 8, &tuple);
+        assert!(exact_archive_callback_block(7, &exact).is_ok());
+        assert!(exact_archive_callback_block(6, &exact).is_err());
+        assert!(exact_archive_callback_block(7, &response(&[], 8, &tuple)).is_err());
+        assert!(exact_archive_callback_block(7, &response(&[7, 8], 9, &tuple)).is_err());
+        let mut nested = response(&[7], 8, &tuple);
+        nested.archived_blocks.push(ArchivedBlocks {
+            args: vec![GetBlocksRequest { start: Nat::from(7u64), length: Nat::from(1u64) }],
+            callback: QueryArchiveFn { canister_id: Principal::from_slice(&[9]), method: "nested".into(), _marker: std::marker::PhantomData },
+        });
+        assert!(exact_archive_callback_block(7, &nested).is_err());
     }
 }
 

@@ -1,4 +1,21 @@
 type Account = record { owner : principal; subaccount : opt blob };
+type Amm1DonationInspectionPage = record {
+  total : nat64;
+  items : vec Amm1DonationInspectionRow;
+  next_offset : opt nat64;
+};
+type Amm1DonationInspectionRow = record {
+  notify_nonce : nat64;
+  amount_e8s : nat64;
+  status : text;
+  ledger : opt principal;
+  amm_canister : opt principal;
+  pool_id : opt text;
+  reward_subaccount : opt blob;
+  mint_op_nonce : opt nat;
+  mint_block_index : opt nat64;
+  reason : opt text;
+};
 type AddCollateralArg = record {
   redemption_fee_ceiling : opt float64;
   debt_ceiling : nat64;
@@ -1319,6 +1336,7 @@ type Result_9 = variant {
   Ok : ChainRpcEndpointSetDigestV1;
   Err : ChainRpcEndpointDigestError;
 };
+type Result_33 = variant { Ok : Amm1DonationInspectionPage; Err : ProtocolError };
 type SettlementProofIds = record { pending : vec text; reserve : vec text };
 type SpBurnRefundReceipt = record {
   refund_memo : blob;
@@ -1622,6 +1640,8 @@ service : (ProtocolArg) -> {
   freeze_protocol : () -> (Result);
   get_all_vaults : () -> (vec CandidVault) query;
   get_amm1_canister : () -> (opt principal) query;
+  get_amm1_donation_inspection_page : (nat64, opt nat16) -> (Result_33) query;
+  reconcile_amm1_donation_mint_candidate_block : (nat64, nat64) -> (Result);
   get_amm1_pool_id : () -> (opt text) query;
   get_borrowing_fee : () -> (float64) query;
   get_bot_allowed_collateral_types : () -> (vec principal) query;

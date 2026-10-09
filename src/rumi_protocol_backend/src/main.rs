@@ -817,6 +817,15 @@ fn post_upgrade(arg: ProtocolArg) {
             )
         }
     };
+    let held_amm1_donations = state.migrate_legacy_amm1_donations();
+    if held_amm1_donations > 0 {
+        log!(
+            INFO,
+            "[upgrade]: held {} legacy AMM1 donation rows for reconciliation; no mint was retried",
+            held_amm1_donations
+        );
+    }
+
     let xrp_guardrail_migration =
         rumi_protocol_backend::state::enforce_xrp_launch_guardrails(&mut state);
     if let Some(previous) = xrp_guardrail_migration.previous_status {
@@ -14095,11 +14104,389 @@ fn get_amm1_pool_id() -> Option<String> {
     read_state(|s| s.amm1_pool_id.clone())
 }
 
-/// Diagnostic: return the length of the AMM1 donation retry queue.
+/// Diagnostic: return the count of AMM1 donations pending or held for reconciliation.
 #[candid_method(query)]
 #[query]
 fn get_pending_amm1_donations_count() -> u64 {
-    read_state(|s| s.pending_amm1_donations.len() as u64)
+    read_state(|s| {
+        (s.pending_amm1_donation_operations.len()
+            + s.pending_amm1_donations.len()
+            + s.held_amm1_donations.len()) as u64
+    })
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+struct Amm1DonationInspectionRow {
+    notify_nonce: u64,
+    amount_e8s: u64,
+    status: String,
+    ledger: Option<Principal>,
+    amm_canister: Option<Principal>,
+    pool_id: Option<String>,
+    reward_subaccount: Option<Vec<u8>>,
+    mint_op_nonce: Option<u128>,
+    mint_block_index: Option<u64>,
+    reason: Option<String>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+struct Amm1DonationInspectionPage {
+    items: Vec<Amm1DonationInspectionRow>,
+    total: u64,
+    next_offset: Option<u64>,
+}
+
+fn amm1_donation_inspection_page(
+    state: &State,
+    offset: u64,
+    limit: u16,
+) -> Amm1DonationInspectionPage {
+    use rumi_protocol_backend::state::{
+        Amm1DonationPhase, Amm1DonationReconciliationReason,
+    };
+
+    let active = state.pending_amm1_donation_operations.values().map(|operation| {
+        let (status, reason) = match &operation.phase {
+            Amm1DonationPhase::MintPending => ("mint_pending", None),
+            Amm1DonationPhase::NotifyPending => ("notify_pending", None),
+            Amm1DonationPhase::ReconciliationRequired => (
+                "reconciliation_required",
+                operation.reconciliation_reason.as_ref().map(|reason| match reason {
+                    Amm1DonationReconciliationReason::LedgerTooOld => {
+                        "ledger returned TooOld; commit status is unknown; exact ledger history reconciliation required".into()
+                    }
+                    Amm1DonationReconciliationReason::DedupWindowElapsedUnknown => {
+                        "pinned mint aged beyond automatic retry window; commit status is unknown; exact ledger history reconciliation required".into()
+                    }
+                }),
+            ),
+        };
+        Amm1DonationInspectionRow {
+            notify_nonce: operation.notify_nonce,
+            amount_e8s: operation.amount_e8s,
+            status: status.into(),
+            ledger: Some(operation.ledger),
+            amm_canister: Some(operation.amm_canister),
+            pool_id: Some(operation.pool_id.clone()),
+            reward_subaccount: Some(operation.reward_subaccount.to_vec()),
+            mint_op_nonce: Some(operation.mint_op_nonce),
+            mint_block_index: operation.mint_block_index,
+            reason,
+        }
+    });
+    let legacy = state.pending_amm1_donations.iter().map(|(amount_e8s, nonce)| {
+        held_amm1_inspection_row(*amount_e8s, *nonce, "legacy_unmigrated", "legacy row has no pinned mint tuple")
+    });
+    let held = state.held_amm1_donations.iter().map(|donation| {
+        held_amm1_inspection_row(donation.amount_e8s, donation.notify_nonce, "held_for_reconciliation", &donation.reason)
+    });
+    let total = (state.pending_amm1_donation_operations.len()
+        + state.pending_amm1_donations.len()
+        + state.held_amm1_donations.len()) as u64;
+    let page_size = usize::from(limit.clamp(1, 100));
+    let items = active
+        .chain(legacy)
+        .chain(held)
+        .skip(offset.min(total) as usize)
+        .take(page_size)
+        .collect::<Vec<_>>();
+    let next = offset.saturating_add(items.len() as u64);
+    Amm1DonationInspectionPage {
+        items,
+        total,
+        next_offset: (next < total).then_some(next),
+    }
+}
+
+fn is_amm1_donation_inspector(caller: Principal, developer: Principal) -> bool {
+    caller != Principal::anonymous() && caller == developer
+}
+
+fn held_amm1_inspection_row(
+    amount_e8s: u64,
+    notify_nonce: u64,
+    status: &str,
+    reason: &str,
+) -> Amm1DonationInspectionRow {
+    Amm1DonationInspectionRow {
+        notify_nonce,
+        amount_e8s,
+        status: status.into(),
+        ledger: None,
+        amm_canister: None,
+        pool_id: None,
+        reward_subaccount: None,
+        mint_op_nonce: None,
+        mint_block_index: None,
+        reason: Some(reason.into()),
+    }
+}
+
+/// Developer-only paged inspection of exact active AMM1 tuples and held
+/// legacy or aged-unknown obligations. Inspection does not prove ledger
+/// absence or authorize a replacement mint nonce.
+#[candid_method(query)]
+#[query]
+fn get_amm1_donation_inspection_page(
+    offset: u64,
+    limit: Option<u16>,
+) -> Result<Amm1DonationInspectionPage, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if !is_amm1_donation_inspector(caller, read_state(|state| state.developer_principal)) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can inspect AMM1 donation obligations".into(),
+        ));
+    }
+    Ok(read_state(|state| {
+        amm1_donation_inspection_page(state, offset, limit.unwrap_or(50))
+    }))
+}
+
+fn apply_amm1_donation_receipt_reconciliation(
+    notify_nonce: u64,
+    block_index: u64,
+    reconciled_by: Principal,
+    expected: &rumi_protocol_backend::state::PendingAmm1Donation,
+) -> Result<(), String> {
+    use rumi_protocol_backend::state::Amm1DonationPhase;
+    rumi_protocol_backend::state::mutate_state(|state| {
+        if let Some(receipt) = state.reconciled_amm1_donation_receipts.get(&notify_nonce) {
+            return if receipt.block_index == block_index {
+                Ok(())
+            } else {
+                Err("AMM1 donation already reconciled to a different block".into())
+            };
+        }
+        if state.icusd_ledger_principal != expected.ledger {
+            return Err("configured icUSD ledger differs from the pinned operation ledger".into());
+        }
+        let Some(current) = state.pending_amm1_donation_operations.get(&notify_nonce) else {
+            return Err("no active pinned AMM1 donation operation exists for this nonce".into());
+        };
+        if current != expected {
+            return Err("AMM1 donation changed while the ledger receipt was being checked".into());
+        }
+        if current.phase == Amm1DonationPhase::NotifyPending {
+            return if current.mint_block_index == Some(block_index) {
+                Ok(())
+            } else {
+                Err("AMM1 donation already has a different accepted mint block".into())
+            };
+        }
+        if !matches!(
+            current.phase,
+            Amm1DonationPhase::MintPending | Amm1DonationPhase::ReconciliationRequired
+        ) {
+            return Err("AMM1 donation is not awaiting mint receipt reconciliation".into());
+        }
+        rumi_protocol_backend::storage::record_pending_payout_event(
+            &rumi_protocol_backend::event::PendingPayoutEvent::Amm1DonationReceiptReconciled {
+                notify_nonce,
+                block_index,
+                reconciled_by,
+            },
+        );
+        state.reconciled_amm1_donation_receipts.insert(
+            notify_nonce,
+            rumi_protocol_backend::state::ReconciledAmm1DonationReceipt {
+                block_index,
+                reconciled_by,
+            },
+        );
+        let current = state.pending_amm1_donation_operations.get_mut(&notify_nonce).unwrap();
+        current.mint_block_index = Some(block_index);
+        current.phase = Amm1DonationPhase::NotifyPending;
+        current.reconciliation_reason = None;
+        Ok(())
+    })
+}
+
+/// Developer-only recovery using positive exact ICRC-3 mint-block evidence.
+/// This method never treats missing history as proof of non-mint and never
+/// submits a new mint.
+#[candid_method(update)]
+#[update]
+async fn reconcile_amm1_donation_mint_candidate_block(
+    notify_nonce: u64,
+    candidate_block_index: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let developer = read_state(|state| state.developer_principal);
+    if !is_amm1_donation_inspector(caller, developer) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can reconcile AMM1 donation receipts".into(),
+        ));
+    }
+    if let Some(receipt) = read_state(|state| {
+        state.reconciled_amm1_donation_receipts.get(&notify_nonce).cloned()
+    }) {
+        return if receipt.block_index == candidate_block_index {
+            Ok(())
+        } else {
+            Err(ProtocolError::GenericError(
+                "AMM1 donation already reconciled to a different block".into(),
+            ))
+        };
+    }
+    let Some(operation) = read_state(|state| {
+        state.pending_amm1_donation_operations.get(&notify_nonce).cloned()
+    }) else {
+        return Err(ProtocolError::GenericError(
+            "No active pinned AMM1 donation operation exists; legacy rows remain held".into(),
+        ));
+    };
+    if read_state(|state| state.icusd_ledger_principal) != operation.ledger {
+        return Err(ProtocolError::GenericError(
+            "Configured icUSD ledger differs from the pinned operation ledger".into(),
+        ));
+    }
+    let memo = rumi_protocol_backend::management::nonce_to_memo(operation.mint_op_nonce);
+    let expected_account = icrc_ledger_types::icrc1::account::Account {
+        owner: operation.amm_canister,
+        subaccount: Some(operation.reward_subaccount),
+    };
+    let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(
+        operation.ledger,
+        candidate_block_index,
+    )
+    .await
+    .map_err(ProtocolError::GenericError)?;
+    rumi_protocol_backend::icrc3_proof::validate_icrc1_mint_block(
+        &block,
+        expected_account,
+        operation.amount_e8s,
+        memo.0.as_slice(),
+        rumi_protocol_backend::management::nonce_to_created_at_time(operation.mint_op_nonce),
+    )
+    .map_err(ProtocolError::GenericError)?;
+    apply_amm1_donation_receipt_reconciliation(
+        notify_nonce,
+        candidate_block_index,
+        caller,
+        &operation,
+    )
+    .map_err(ProtocolError::GenericError)
+}
+
+#[cfg(test)]
+mod amm1_donation_inspection_tests {
+    use super::*;
+    use rumi_protocol_backend::state::{
+        Amm1DonationPhase, Amm1DonationReconciliationReason, HeldAmm1Donation,
+        PendingAmm1Donation,
+    };
+
+    #[test]
+    fn inspection_is_developer_only_and_never_anonymous() {
+        let developer = Principal::from_slice(&[9]);
+        assert!(is_amm1_donation_inspector(developer, developer));
+        assert!(!is_amm1_donation_inspector(Principal::anonymous(), Principal::anonymous()));
+        assert!(!is_amm1_donation_inspector(Principal::from_slice(&[8]), developer));
+    }
+
+    #[test]
+    fn inspection_pages_include_exact_active_tuple_and_held_legacy_reason() {
+        let mut state = State::default();
+        state.pending_amm1_donation_operations.insert(
+            10,
+            PendingAmm1Donation {
+                ledger: Principal::from_slice(&[1]),
+                amm_canister: Principal::from_slice(&[2]),
+                pool_id: "pinned-pool".into(),
+                reward_subaccount: [3; 32],
+                amount_e8s: 44,
+                mint_op_nonce: 55,
+                notify_nonce: 10,
+                mint_block_index: None,
+                phase: Amm1DonationPhase::ReconciliationRequired,
+                reconciliation_reason: Some(Amm1DonationReconciliationReason::LedgerTooOld),
+            },
+        );
+        state.pending_amm1_donations.push_back((66, 11));
+        state.held_amm1_donations.push(HeldAmm1Donation {
+            amount_e8s: 77,
+            notify_nonce: 12,
+            reason: "legacy tuple unavailable".into(),
+        });
+
+        let first = amm1_donation_inspection_page(&state, 0, 2);
+        assert_eq!(first.total, 3);
+        assert_eq!(first.items.len(), 2);
+        assert_eq!(first.items[0].status, "reconciliation_required");
+        assert_eq!(first.items[0].ledger, Some(Principal::from_slice(&[1])));
+        assert_eq!(first.items[0].pool_id.as_deref(), Some("pinned-pool"));
+        assert_eq!(first.items[0].mint_op_nonce, Some(55));
+        assert!(first.items[0].reason.as_deref().unwrap().contains("TooOld"));
+        assert_eq!(first.next_offset, Some(2));
+
+        let second = amm1_donation_inspection_page(&state, 2, 2);
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].status, "held_for_reconciliation");
+        assert_eq!(second.items[0].reason.as_deref(), Some("legacy tuple unavailable"));
+        assert_eq!(second.next_offset, None);
+    }
+
+    #[test]
+    fn positive_receipt_transition_is_config_bound_replayable_and_idempotent() {
+        use rumi_protocol_backend::state::{mutate_state, read_state, replace_state};
+        let ledger = Principal::from_slice(&[41]);
+        let caller = Principal::from_slice(&[42]);
+        let notify_nonce = 43;
+        let operation = PendingAmm1Donation {
+            ledger,
+            amm_canister: Principal::from_slice(&[44]),
+            pool_id: "pinned".into(),
+            reward_subaccount: [45; 32],
+            amount_e8s: 46,
+            mint_op_nonce: 47,
+            notify_nonce,
+            mint_block_index: None,
+            phase: Amm1DonationPhase::ReconciliationRequired,
+            reconciliation_reason: Some(Amm1DonationReconciliationReason::LedgerTooOld),
+        };
+        let mut state = State::default();
+        state.icusd_ledger_principal = ledger;
+        state.pending_amm1_donation_operations.insert(notify_nonce, operation.clone());
+        replace_state(state);
+
+        assert!(apply_amm1_donation_receipt_reconciliation(notify_nonce, 48, caller, &operation).is_ok());
+        let advanced = read_state(|s| s.pending_amm1_donation_operations.get(&notify_nonce).unwrap().clone());
+        assert_eq!(advanced.phase, Amm1DonationPhase::NotifyPending);
+        assert_eq!(advanced.mint_block_index, Some(48));
+        assert!(apply_amm1_donation_receipt_reconciliation(notify_nonce, 48, caller, &operation).is_ok());
+        assert!(apply_amm1_donation_receipt_reconciliation(notify_nonce, 49, caller, &operation).is_err());
+
+        mutate_state(|s| { s.pending_amm1_donation_operations.remove(&notify_nonce); });
+        assert!(apply_amm1_donation_receipt_reconciliation(notify_nonce, 48, caller, &operation).is_ok());
+        assert!(apply_amm1_donation_receipt_reconciliation(notify_nonce, 49, caller, &operation).is_err());
+        assert_eq!(read_state(|s| s.reconciled_amm1_donation_receipts.get(&notify_nonce).unwrap().reconciled_by), caller);
+
+        mutate_state(|s| { s.icusd_ledger_principal = Principal::from_slice(&[50]); });
+        let mut another = operation.clone();
+        another.notify_nonce = 51;
+        another.ledger = ledger;
+        mutate_state(|s| { s.pending_amm1_donation_operations.insert(51, another.clone()); });
+        assert!(apply_amm1_donation_receipt_reconciliation(51, 52, caller, &another).is_err());
+
+        let mut legacy_state = State::default();
+        legacy_state.icusd_ledger_principal = ledger;
+        legacy_state.held_amm1_donations.push(HeldAmm1Donation {
+            amount_e8s: 53,
+            notify_nonce: 54,
+            reason: "legacy tuple unavailable".into(),
+        });
+        replace_state(legacy_state);
+        let mut legacy_operation = operation;
+        legacy_operation.notify_nonce = 54;
+        assert!(apply_amm1_donation_receipt_reconciliation(
+            54,
+            55,
+            caller,
+            &legacy_operation,
+        )
+        .is_err());
+        assert_eq!(read_state(|s| s.held_amm1_donations.len()), 1);
+    }
 }
 
 /// Lightweight payload for the AMM TVL sampler (the latest cached XRC ICP/USD

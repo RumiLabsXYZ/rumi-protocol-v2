@@ -1,7 +1,8 @@
 use crate::numeric::{Ratio, UsdIcp, ICP, ICUSD};
 use crate::state::{
     CollateralConfig, CollateralStatus, CollateralType, PendingMarginTransfer, PendingPayoutKind,
-    PendingPayoutNoEffectProof, RateCurveV2, State,
+    PendingPayoutNoEffectProof, RateCurveV2, State, PendingAmm1Donation,
+    HeldAmm1Donation,
 };
 use crate::storage::record_event;
 use crate::vault::Vault;
@@ -1006,6 +1007,16 @@ pub enum PendingPayoutEvent {
     /// Internal bot claim proof transitions share the ordered private journal
     /// so they remain replayable without expanding the public Event variant set.
     BotProofAudit { event: BotProofAuditEvent },
+    Amm1DonationStarted { operation: PendingAmm1Donation },
+    Amm1DonationMintAccepted { notify_nonce: u64, block_index: u64 },
+    Amm1DonationReceiptReconciled {
+        notify_nonce: u64,
+        block_index: u64,
+        reconciled_by: Principal,
+    },
+    Amm1DonationReconciliationRequired { notify_nonce: u64, reason: crate::state::Amm1DonationReconciliationReason },
+    Amm1DonationCompleted { notify_nonce: u64 },
+    Amm1DonationHeld { donation: HeldAmm1Donation },
     Queued {
         kind: PendingPayoutKind,
         operation_id: u128,
@@ -1635,6 +1646,55 @@ fn apply_bot_proof_audit_event(state: &mut State, event: BotProofAuditEvent) {
 fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
     match event {
         PendingPayoutEvent::BotProofAudit { event } => apply_bot_proof_audit_event(state, event),
+        PendingPayoutEvent::Amm1DonationStarted { operation } => {
+            state.amm1_donation_nonce = state.amm1_donation_nonce.max(operation.notify_nonce);
+            state.op_nonce_counter = state
+                .op_nonce_counter
+                .max((operation.mint_op_nonce as u64).wrapping_add(1));
+            state.pending_amm1_donation_operations.insert(operation.notify_nonce, operation);
+        }
+        PendingPayoutEvent::Amm1DonationMintAccepted { notify_nonce, block_index } => {
+            if let Some(operation) = state.pending_amm1_donation_operations.get_mut(&notify_nonce) {
+                operation.mint_block_index = Some(block_index);
+                operation.phase = crate::state::Amm1DonationPhase::NotifyPending;
+                operation.reconciliation_reason = None;
+            }
+        }
+        PendingPayoutEvent::Amm1DonationReceiptReconciled {
+            notify_nonce,
+            block_index,
+            reconciled_by,
+        } => {
+            state.reconciled_amm1_donation_receipts.insert(
+                notify_nonce,
+                crate::state::ReconciledAmm1DonationReceipt {
+                    block_index,
+                    reconciled_by,
+                },
+            );
+            if let Some(operation) = state.pending_amm1_donation_operations.get_mut(&notify_nonce) {
+                operation.mint_block_index = Some(block_index);
+                operation.phase = crate::state::Amm1DonationPhase::NotifyPending;
+                operation.reconciliation_reason = None;
+            }
+        }
+        PendingPayoutEvent::Amm1DonationReconciliationRequired { notify_nonce, reason } => {
+            if let Some(operation) = state.pending_amm1_donation_operations.get_mut(&notify_nonce) {
+                operation.phase = crate::state::Amm1DonationPhase::ReconciliationRequired;
+                operation.reconciliation_reason = Some(reason);
+            }
+        }
+        PendingPayoutEvent::Amm1DonationCompleted { notify_nonce } => {
+            state.pending_amm1_donation_operations.remove(&notify_nonce);
+        }
+        PendingPayoutEvent::Amm1DonationHeld { donation } => {
+            if !state.held_amm1_donations.iter().any(|held| {
+                held.notify_nonce == donation.notify_nonce
+                    && held.amount_e8s == donation.amount_e8s
+            }) {
+                state.held_amm1_donations.push(donation);
+            }
+        }
         PendingPayoutEvent::Queued {
             kind,
             operation_id,
@@ -5045,6 +5105,110 @@ mod filter_tests {
             &lookup,
             0,
         ));
+    }
+    #[test]
+    fn amm1_private_journal_replays_mint_phase_and_completion_without_public_events() {
+        let icp = p(29);
+        let operation = PendingAmm1Donation {
+            ledger: p(31),
+            amm_canister: p(32),
+            pool_id: "pool".to_string(),
+            reward_subaccount: [7; 32],
+            amount_e8s: 100,
+            mint_op_nonce: 44,
+            notify_nonce: 45,
+            mint_block_index: None,
+            phase: crate::state::Amm1DonationPhase::MintPending,
+            reconciliation_reason: None,
+        };
+        let after_mint = replay_payout_events(
+            vec![Event::Init(payout_init_args(icp))],
+            vec![
+                PendingPayoutEvent::Amm1DonationStarted { operation: operation.clone() },
+                PendingPayoutEvent::Amm1DonationMintAccepted {
+                    notify_nonce: 45,
+                    block_index: 46,
+                },
+            ],
+        );
+        let pending = after_mint.pending_amm1_donation_operations.get(&45).unwrap();
+        assert_eq!(pending.phase, crate::state::Amm1DonationPhase::NotifyPending);
+        assert_eq!(pending.mint_block_index, Some(46));
+        assert_eq!(pending.mint_op_nonce, 44);
+        assert_eq!(after_mint.amm1_donation_nonce, 45);
+        assert_eq!(after_mint.op_nonce_counter, 45);
+
+        let held = replay_payout_events(
+            vec![Event::Init(payout_init_args(icp))],
+            vec![
+                PendingPayoutEvent::Amm1DonationStarted { operation: operation.clone() },
+                PendingPayoutEvent::Amm1DonationReconciliationRequired {
+                    notify_nonce: 45,
+                    reason: crate::state::Amm1DonationReconciliationReason::LedgerTooOld,
+                },
+            ],
+        );
+        let held_operation = held.pending_amm1_donation_operations.get(&45).unwrap();
+        assert_eq!(held_operation.phase, crate::state::Amm1DonationPhase::ReconciliationRequired);
+        assert_eq!(
+            held_operation.reconciliation_reason,
+            Some(crate::state::Amm1DonationReconciliationReason::LedgerTooOld),
+        );
+
+        let reconciled_by = p(33);
+        let reconciled = replay_payout_events(
+            vec![Event::Init(payout_init_args(icp))],
+            vec![
+                PendingPayoutEvent::Amm1DonationStarted { operation: operation.clone() },
+                PendingPayoutEvent::Amm1DonationReconciliationRequired {
+                    notify_nonce: 45,
+                    reason: crate::state::Amm1DonationReconciliationReason::LedgerTooOld,
+                },
+                PendingPayoutEvent::Amm1DonationReceiptReconciled {
+                    notify_nonce: 45,
+                    block_index: 47,
+                    reconciled_by,
+                },
+            ],
+        );
+        let reconciled_operation = reconciled.pending_amm1_donation_operations.get(&45).unwrap();
+        assert_eq!(reconciled_operation.phase, crate::state::Amm1DonationPhase::NotifyPending);
+        assert_eq!(reconciled_operation.mint_block_index, Some(47));
+        assert_eq!(reconciled_operation.reconciliation_reason, None);
+        assert_eq!(reconciled.reconciled_amm1_donation_receipts.get(&45).unwrap().block_index, 47);
+        assert_eq!(reconciled.reconciled_amm1_donation_receipts.get(&45).unwrap().reconciled_by, reconciled_by);
+
+        let completed_reconciled = replay_payout_events(
+            vec![Event::Init(payout_init_args(icp))],
+            vec![
+                PendingPayoutEvent::Amm1DonationStarted { operation: operation.clone() },
+                PendingPayoutEvent::Amm1DonationReconciliationRequired {
+                    notify_nonce: 45,
+                    reason: crate::state::Amm1DonationReconciliationReason::LedgerTooOld,
+                },
+                PendingPayoutEvent::Amm1DonationReceiptReconciled {
+                    notify_nonce: 45,
+                    block_index: 47,
+                    reconciled_by,
+                },
+                PendingPayoutEvent::Amm1DonationCompleted { notify_nonce: 45 },
+            ],
+        );
+        assert!(completed_reconciled.pending_amm1_donation_operations.is_empty());
+        assert_eq!(completed_reconciled.reconciled_amm1_donation_receipts.get(&45).unwrap().block_index, 47);
+
+        let completed = replay_payout_events(
+            vec![Event::Init(payout_init_args(icp))],
+            vec![
+                PendingPayoutEvent::Amm1DonationStarted { operation },
+                PendingPayoutEvent::Amm1DonationMintAccepted {
+                    notify_nonce: 45,
+                    block_index: 46,
+                },
+                PendingPayoutEvent::Amm1DonationCompleted { notify_nonce: 45 },
+            ],
+        );
+        assert!(completed.pending_amm1_donation_operations.is_empty());
     }
 }
 

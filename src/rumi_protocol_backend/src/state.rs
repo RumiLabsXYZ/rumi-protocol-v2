@@ -1648,6 +1648,54 @@ pub struct PendingStabilityPoolInterestNotification {
     pub receipt_protocol_version: Option<u8>,
 }
 
+/// Exact state for an AMM1 donation across its mint and notification calls.
+/// Every remote-call argument is pinned before the first await.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingAmm1Donation {
+    pub ledger: Principal,
+    pub amm_canister: Principal,
+    pub pool_id: String,
+    pub reward_subaccount: [u8; 32],
+    pub amount_e8s: u64,
+    pub mint_op_nonce: u128,
+    pub notify_nonce: u64,
+    pub mint_block_index: Option<u64>,
+    pub phase: Amm1DonationPhase,
+    #[serde(default)]
+    pub reconciliation_reason: Option<Amm1DonationReconciliationReason>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Amm1DonationPhase {
+    MintPending,
+    NotifyPending,
+    ReconciliationRequired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Amm1DonationReconciliationReason {
+    LedgerTooOld,
+    DedupWindowElapsedUnknown,
+}
+
+/// Legacy rows lack the transfer tuple and mint outcome, so they remain held
+/// for reconciliation instead of being sent through the mint path again.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HeldAmm1Donation {
+    pub amount_e8s: u64,
+    pub notify_nonce: u64,
+    pub reason: String,
+}
+
+/// Audit tombstone for a developer-reconciled positive ledger receipt. Kept
+/// after completion so repeating the same reconciliation request is safely
+/// idempotent and a conflicting block cannot be substituted later.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReconciledAmm1DonationReceipt {
+    pub block_index: u64,
+    pub reconciled_by: Principal,
+}
+
 /// Durable refund record for a stranded 3USD reserve refund
 /// (`stability_pool_liquidate_with_reserves`).
 ///
@@ -2235,14 +2283,22 @@ pub struct State {
     pub pending_stability_pool_interest_notifications:
         BTreeMap<u64, PendingStabilityPoolInterestNotification>,
 
-    /// AMM1-specific re-queue: (amount_e8s, nonce). Distinct from
-    /// `pending_interest_for_pools` (which is keyed by collateral_type
-    /// and re-splits across all destinations on retry). AMM1's
-    /// idempotency requires the SAME nonce on retry, so failed
-    /// donations are persisted with their original nonce here and
-    /// retried via `flush_pending_amm1_donations`.
+    /// Legacy AMM1 rows retained for snapshot compatibility. They are migrated
+    /// to held reconciliation because their mint transfer tuple is unknown.
     #[serde(default)]
     pub pending_amm1_donations: std::collections::VecDeque<(u64, u64)>,
+
+    /// Exact ledger/AMM arguments for active donation obligations.
+    #[serde(default)]
+    pub pending_amm1_donation_operations: BTreeMap<u64, PendingAmm1Donation>,
+
+    /// Legacy donation rows requiring explicit reconciliation.
+    #[serde(default)]
+    pub held_amm1_donations: Vec<HeldAmm1Donation>,
+
+    /// Positive-receipt reconciliation tombstones, keyed by notification nonce.
+    #[serde(default)]
+    pub reconciled_amm1_donation_receipts: BTreeMap<u64, ReconciledAmm1DonationReceipt>,
 
     /// Minimum interest (e8s) per collateral bucket before flushing. Admin-settable.
     /// Default = 10_000_000 (0.1 icUSD). At 0.01 the ledger fee eats ~10%.
@@ -2860,6 +2916,9 @@ impl Default for State {
             pending_interest_for_pools: BTreeMap::new(),
             pending_stability_pool_interest_notifications: BTreeMap::new(),
             pending_amm1_donations: std::collections::VecDeque::new(),
+            pending_amm1_donation_operations: BTreeMap::new(),
+            held_amm1_donations: Vec::new(),
+            reconciled_amm1_donation_receipts: BTreeMap::new(),
             interest_flush_threshold_e8s: default_flush_threshold(),
             pending_treasury_interest: ICUSD::new(0),
             pending_treasury_collateral: Vec::new(),
@@ -3146,6 +3205,9 @@ impl From<InitArg> for State {
             pending_interest_for_pools: BTreeMap::new(),
             pending_stability_pool_interest_notifications: BTreeMap::new(),
             pending_amm1_donations: std::collections::VecDeque::new(),
+            pending_amm1_donation_operations: BTreeMap::new(),
+            held_amm1_donations: Vec::new(),
+            reconciled_amm1_donation_receipts: BTreeMap::new(),
             interest_flush_threshold_e8s: default_flush_threshold(),
 
             // Treasury fee routing
@@ -3222,6 +3284,28 @@ impl From<InitArg> for State {
 }
 
 impl State {
+    /// Quarantine legacy AMM1 retries whose ledger mint tuple was never
+    /// persisted. Replaying them as fresh mints could duplicate a committed
+    /// donation, so preserve each obligation for operator reconciliation.
+    pub fn migrate_legacy_amm1_donations(&mut self) -> usize {
+        let legacy: Vec<_> = self.pending_amm1_donations.drain(..).collect();
+        let count = legacy.len();
+        for (amount_e8s, notify_nonce) in legacy {
+            let donation = HeldAmm1Donation {
+                amount_e8s,
+                notify_nonce,
+                reason: "legacy row lacks pinned ledger transfer tuple and mint outcome".into(),
+            };
+            crate::storage::record_pending_payout_event(
+                &crate::event::PendingPayoutEvent::Amm1DonationHeld {
+                    donation: donation.clone(),
+                },
+            );
+            self.held_amm1_donations.push(donation);
+        }
+        count
+    }
+
     /// Prevent the 3pool ledger from being routed through generic collateral
     /// payouts, which do not preserve the protocol's 3USD reserve floor.
     pub fn is_configured_three_pool_ledger(&self, ledger: Principal) -> bool {
@@ -11216,6 +11300,78 @@ mod tests {
         } else {
             panic!("expected CBOR map");
         }
+    }
+
+    #[test]
+    fn amm1_operation_fields_default_on_legacy_snapshot_while_tuple_rows_survive() {
+        let mut state = State::default();
+        state.pending_amm1_donations.push_back((42, 7));
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&state, &mut encoded).expect("encode state");
+        let mut snapshot: ciborium::value::Value =
+            ciborium::de::from_reader(encoded.as_slice()).expect("decode CBOR map");
+        let entries = match &mut snapshot {
+            ciborium::value::Value::Map(entries) => entries,
+            other => panic!("expected state map, got {other:?}"),
+        };
+        entries.retain(|(key, _)| {
+            !matches!(key, ciborium::value::Value::Text(name)
+                if name == "pending_amm1_donation_operations"
+                    || name == "held_amm1_donations"
+                    || name == "reconciled_amm1_donation_receipts")
+        });
+        let mut old_snapshot = Vec::new();
+        ciborium::ser::into_writer(&snapshot, &mut old_snapshot).expect("encode old snapshot");
+        let decoded: State =
+            ciborium::de::from_reader(old_snapshot.as_slice()).expect("decode legacy state");
+        assert_eq!(decoded.pending_amm1_donations.front(), Some(&(42, 7)));
+        assert!(decoded.pending_amm1_donation_operations.is_empty());
+        assert!(decoded.held_amm1_donations.is_empty());
+        assert!(decoded.reconciled_amm1_donation_receipts.is_empty());
+    }
+
+    #[test]
+    fn amm1_reconciliation_phase_survives_stable_snapshot_roundtrip() {
+        let mut state = State::default();
+        let operation = PendingAmm1Donation {
+            ledger: Principal::from_slice(&[1]),
+            amm_canister: Principal::from_slice(&[2]),
+            pool_id: "pool".into(),
+            reward_subaccount: [3; 32],
+            amount_e8s: 44,
+            mint_op_nonce: 55,
+            notify_nonce: 66,
+            mint_block_index: None,
+            phase: Amm1DonationPhase::ReconciliationRequired,
+            reconciliation_reason: Some(Amm1DonationReconciliationReason::LedgerTooOld),
+        };
+        state
+            .pending_amm1_donation_operations
+            .insert(operation.notify_nonce, operation.clone());
+
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).expect("encode stable state");
+        let decoded: State = ciborium::de::from_reader(bytes.as_slice())
+            .expect("decode stable state");
+
+        assert_eq!(
+            decoded.pending_amm1_donation_operations.get(&66),
+            Some(&operation),
+        );
+    }
+
+    #[test]
+    fn amm1_positive_receipt_tombstone_survives_stable_snapshot_roundtrip() {
+        let mut state = State::default();
+        let receipt = ReconciledAmm1DonationReceipt {
+            block_index: 7,
+            reconciled_by: Principal::from_slice(&[8]),
+        };
+        state.reconciled_amm1_donation_receipts.insert(6, receipt.clone());
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).expect("encode stable state");
+        let decoded: State = ciborium::de::from_reader(bytes.as_slice()).expect("decode stable state");
+        assert_eq!(decoded.reconciled_amm1_donation_receipts.get(&6), Some(&receipt));
     }
 
     #[test]
