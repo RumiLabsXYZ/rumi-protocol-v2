@@ -650,7 +650,7 @@ class StabilityPoolService {
       }
       assertCurrentAction(context, tokenLedger, 'deposit');
 
-      let result: { Ok?: DepositIntentResult; Err?: any };
+      let result: { Ok: DepositIntentResult } | { Err: any };
       try {
         result = await poolActor.deposit_with_intent(BigInt(record.intentSeq), tokenLedger, amount) as { Ok: DepositIntentResult } | { Err: any };
         assertCurrentAction(context, tokenLedger, 'deposit');

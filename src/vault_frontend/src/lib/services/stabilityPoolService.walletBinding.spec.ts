@@ -174,13 +174,14 @@ describe('Stability Pool wallet-bound deposit intents', () => {
     const poolActor = {
       get_deposit_intent: vi.fn().mockResolvedValue(emptyStatus(1n)),
       deposit_with_intent: vi.fn().mockResolvedValue({ Ok: completed(1n, ledgerA, 10n) }),
+      deposit: vi.fn(),
     };
     setupActors(poolActor, ledgerActor);
     const context = captureStabilityPoolActionContext(ledgerA, 'deposit');
 
     await expect(stabilityPoolService.deposit(ledgerA, 10n, context)).resolves.toBeUndefined();
     expect(poolActor.deposit_with_intent).toHaveBeenCalledWith(1n, ledgerA, 10n);
-    expect(poolActor.deposit).toBeUndefined();
+    expect(poolActor.deposit).not.toHaveBeenCalled();
   });
 
   it('fails closed when Web Locks are unavailable instead of using a tab-local fallback', async () => {
@@ -201,6 +202,7 @@ describe('Stability Pool wallet-bound deposit intents', () => {
     const poolActor = {
       get_deposit_intent: vi.fn().mockResolvedValue(emptyStatus(1n)),
       deposit_with_intent: vi.fn(() => dispatch.promise),
+      deposit: vi.fn(),
     };
     setupActors(poolActor);
     const context = captureStabilityPoolActionContext(ledgerA, 'deposit');
@@ -212,7 +214,7 @@ describe('Stability Pool wallet-bound deposit intents', () => {
     await expect(action).rejects.toThrow(/session or Stability Pool action changed/i);
     expect(readPendingStabilityPoolDeposit(ownerA.toText())).toMatchObject({ intentSeq: '1', ledger: ledgerA.toText() });
     expect(readPendingStabilityPoolDeposit(ownerB.toText())).toBeNull();
-    expect(poolActor.deposit).toBeUndefined();
+    expect(poolActor.deposit).not.toHaveBeenCalled();
   });
 
   it('does not reuse a stale actor when wallet provider identity changes during status lookup', async () => {
@@ -401,17 +403,18 @@ describe('Stability Pool wallet-bound deposit intents', () => {
       deposit_with_intent: vi.fn()
         .mockResolvedValueOnce({ Err: { TokenNotActive: { ledger: ledgerA } } })
         .mockResolvedValueOnce({ Ok: completed(1n, ledgerA, 10n) }),
+      deposit: vi.fn(),
     };
     setupActors(poolActor);
     const context = captureStabilityPoolActionContext(ledgerA, 'deposit');
 
-    await expect(stabilityPoolService.deposit(ledgerA, 10n, context)).rejects.toThrow(/not active/i);
+    await expect(stabilityPoolService.deposit(ledgerA, 10n, context)).rejects.toThrow(/not currently active/i);
     expect(poolActor.get_deposit_intent).toHaveBeenCalledTimes(2);
     expect(readPendingStabilityPoolDeposit(ownerA.toText())).toBeNull();
     await expect(stabilityPoolService.deposit(ledgerA, 10n, context)).resolves.toBeUndefined();
     expect(poolActor.deposit_with_intent).toHaveBeenNthCalledWith(1, 1n, ledgerA, 10n);
     expect(poolActor.deposit_with_intent).toHaveBeenNthCalledWith(2, 1n, ledgerA, 10n);
-    expect(poolActor.deposit).toBeUndefined();
+    expect(poolActor.deposit).not.toHaveBeenCalled();
   });
 
   it('shows capacity as a non-retryable admission limit after status proves no reservation', async () => {
