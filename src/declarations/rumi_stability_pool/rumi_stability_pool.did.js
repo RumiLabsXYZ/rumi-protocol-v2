@@ -414,6 +414,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Text, 'Err' : StabilityPoolError })],
         [],
       ),
+    'admin_recover_ambiguous_native_xrp_burn' : IDL.Func(
+        [IDL.Nat64, IDL.Opt(IDL.Nat64)],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
     'check_chain_absorb_capacity' : IDL.Func(
         [IDL.Principal, IDL.Nat64],
         [IDL.Bool],

@@ -381,6 +381,11 @@ export interface _SERVICE {
     { 'Ok' : string } |
       { 'Err' : StabilityPoolError }
   >,
+  'admin_recover_ambiguous_native_xrp_burn' : ActorMethod<
+    [bigint, [] | [bigint]],
+    { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
   'check_chain_absorb_capacity' : ActorMethod<[Principal, bigint], boolean>,
   'check_pool_capacity' : ActorMethod<[Principal, bigint], boolean>,
   'claim_all_collateral' : ActorMethod<
