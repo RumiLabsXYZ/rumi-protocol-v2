@@ -3442,6 +3442,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
     // Step 2: Process each token in the draw
     let mut total_collateral_gained: u64 = 0;
     let mut actual_consumed: BTreeMap<Principal, u64> = BTreeMap::new();
+    let mut non_lp_outcome_unknown = false;
     let mut successful_three_usd_absorbs: Vec<(ThreeUsdReserveAbsorbIntent, u64)> = Vec::new();
 
     let stablecoin_configs: BTreeMap<Principal, StablecoinConfig> =
@@ -3656,33 +3657,32 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 );
             }
             Err(call_error) => {
-                // Inter-canister call failed; outcome is unknown. We do NOT mutate
-                // depositor bookkeeping here — the previous "conservative deduct" path
-                // (SP-005) caused permanent depositor loss when the backend was in
-                // fact a no-op. If the backend rolled forward (took the tokens via
-                // transfer_from but failed to reply), the next liquidation or a manual
-                // `correct_balance` reconciliation against `icrc1_balance_of(pool)`
-                // will reconcile the divergence. Log loudly so operators notice.
+                // Inter-canister call failed; outcome is unknown. Do not issue a
+                // second liquidation call in this round: the backend may already
+                // have changed vault state even though no reply arrived. We still
+                // leave depositor bookkeeping untouched pending reconciliation.
                 log!(
                     INFO,
                     "Liquidation call failed for vault {} with token {}: {:?}. \
-                      No bookkeeping change; ledger balance should be reconciled if \
-                      tokens moved silently.",
+                      Outcome unknown; holding remaining draws for a later round and \
+                      reconciling pool balances if tokens moved silently.",
                     vault_info.vault_id,
                     token_ledger,
                     call_error
                 );
+                non_lp_outcome_unknown = true;
+                break;
             }
         }
     }
 
     // --- LP tokens (3USD): approve + backend pull (atomic) ---
-    for (token_ledger, amount) in &token_draw {
-        if !stablecoin_configs.get(token_ledger)
-            .is_some_and(|config| config.is_lp_token.unwrap_or(false)) {
-            continue;
-        }
-
+    for (token_ledger, amount) in lp_token_draws_after_non_lp_attempts(
+        &token_draw,
+        &stablecoin_configs,
+        &actual_consumed,
+        non_lp_outcome_unknown,
+    ) {
         // A pending request pins the exact tuple across an ambiguous backend
         // reply. Resume only from its recorded ledger and amount; a fresh
         // liquidation scan may have calculated a different draw.
@@ -4118,6 +4118,29 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
     liquidation_result
 }
 
+/// Select LP draws only when no earlier non-LP leg succeeded or has an
+/// ambiguous outcome. A backend call can mutate vault state before its reply,
+/// so remaining draws from the original snapshot must wait for a later round.
+fn lp_token_draws_after_non_lp_attempts<'a>(
+    token_draw: &'a BTreeMap<Principal, u64>,
+    stablecoin_configs: &BTreeMap<Principal, StablecoinConfig>,
+    actual_consumed: &BTreeMap<Principal, u64>,
+    non_lp_outcome_unknown: bool,
+) -> Vec<(&'a Principal, &'a u64)> {
+    if non_lp_outcome_unknown || !actual_consumed.is_empty() {
+        return Vec::new();
+    }
+
+    token_draw
+        .iter()
+        .filter(|(ledger, _)| {
+            stablecoin_configs
+                .get(*ledger)
+                .is_some_and(|config| config.is_lp_token.unwrap_or(false))
+        })
+        .collect()
+}
+
 /// Thin translation layer: map a ledger principal to the backend's StableTokenType enum.
 fn determine_stable_token_type(
     ledger: Principal,
@@ -4152,6 +4175,65 @@ mod tests {
 
     fn principal(byte: u8) -> Principal {
         Principal::from_slice(&[byte])
+    }
+
+    fn liquidation_token(ledger: Principal, is_lp_token: bool) -> StablecoinConfig {
+        StablecoinConfig {
+            ledger_id: ledger,
+            symbol: if is_lp_token { "3USD" } else { "icUSD" }.into(),
+            decimals: 8,
+            priority: 1,
+            is_active: true,
+            transfer_fee: Some(1),
+            is_lp_token: Some(is_lp_token),
+            underlying_pool: None,
+        }
+    }
+
+    #[test]
+    fn lp_draws_require_no_success_or_ambiguous_non_lp_outcome() {
+        let non_lp = principal(10);
+        let lp = principal(11);
+        let token_draw = BTreeMap::from([(non_lp, 100), (lp, 200)]);
+        let configs = BTreeMap::from([
+            (non_lp, liquidation_token(non_lp, false)),
+            (lp, liquidation_token(lp, true)),
+        ]);
+
+        // An explicit backend rejection or pre-call failure leaves no realized
+        // consumption or ambiguity, so LP fallback remains eligible this round.
+        let no_success = BTreeMap::new();
+        let fallback =
+            lp_token_draws_after_non_lp_attempts(&token_draw, &configs, &no_success, false);
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(*fallback[0].0, lp);
+        assert_eq!(*fallback[0].1, 200);
+
+        // A transport error can hide a successful backend mutation, so it must
+        // hold LP fallback even though no realized consumption was recorded.
+        assert!(
+            lp_token_draws_after_non_lp_attempts(&token_draw, &configs, &no_success, true)
+                .is_empty()
+        );
+
+        // Once a non-LP backend call succeeds, the LP loop receives no draw and
+        // therefore cannot make a second liquidation call against stale vault state.
+        let successful_non_lp = BTreeMap::from([(non_lp, 100)]);
+        assert!(lp_token_draws_after_non_lp_attempts(
+            &token_draw,
+            &configs,
+            &successful_non_lp,
+            false,
+        )
+        .is_empty());
+
+        // With no non-LP draw, the normal LP-only path is still selected.
+        let lp_only_draw = BTreeMap::from([(lp, 200)]);
+        let lp_only =
+            lp_token_draws_after_non_lp_attempts(&lp_only_draw, &configs, &no_success, false);
+        assert_eq!(lp_only.len(), 1);
+        assert_eq!(*lp_only[0].0, lp);
+        assert_eq!(*lp_only[0].1, 200);
     }
 
     #[test]
