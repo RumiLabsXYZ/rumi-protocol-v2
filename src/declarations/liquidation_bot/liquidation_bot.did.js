@@ -111,6 +111,19 @@ export const idlFactory = ({ IDL }) => {
     'ledger_principal' : IDL.Principal,
     'created_at_time' : IDL.Nat64,
   });
+  const BotSwapIntent = IDL.Record({
+    'output_ledger_principal' : IDL.Principal,
+    'input_ledger_principal' : IDL.Principal,
+    'input_fee_e8s' : IDL.Nat64,
+    'zero_for_one' : IDL.Bool,
+    'attempt_ordinal' : IDL.Nat32,
+    'pre_swap_ckusdc_balance_e6' : IDL.Nat64,
+    'pool_principal' : IDL.Principal,
+    'amount_in_e8s' : IDL.Nat64,
+    'created_at_time' : IDL.Nat64,
+    'output_fee_e6' : IDL.Nat64,
+    'amount_out_minimum_e6' : IDL.Nat64,
+  });
   const BotClaimJournal = IDL.Record({
     'status' : BotClaimJournalStatus,
     'collateral_price_e8s' : IDL.Nat64,
@@ -123,6 +136,7 @@ export const idlFactory = ({ IDL }) => {
     'collateral_received_amount_e8s' : IDL.Opt(IDL.Nat64),
     'collateral_return_memo' : IDL.Vec(IDL.Nat8),
     'debt_covered_e8s' : IDL.Nat64,
+    'swap_intents' : IDL.Vec(BotSwapIntent),
     'failed_return_attempts' : IDL.Vec(BotReturnTransferJournal),
   });
   const BotPaymentStatus = IDL.Variant({
@@ -132,6 +146,17 @@ export const idlFactory = ({ IDL }) => {
     'Ambiguous' : IDL.Null,
     'Prepared' : IDL.Null,
   });
+  const BotPaymentTopUpJournal = IDL.Record({
+    'status' : BotPaymentStatus,
+    'backend_principal' : IDL.Principal,
+    'receipt' : IDL.Opt(TransferReceipt),
+    'fee_e6' : IDL.Nat64,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'funding_allocation_e6' : IDL.Nat64,
+    'ledger_principal' : IDL.Principal,
+    'amount_e6' : IDL.Nat64,
+    'created_at_time' : IDL.Nat64,
+  });
   const BotPaymentJournal = IDL.Record({
     'status' : BotPaymentStatus,
     'shortfall_receipt_observed' : IDL.Bool,
@@ -139,6 +164,7 @@ export const idlFactory = ({ IDL }) => {
     'backend_principal' : IDL.Principal,
     'receipt' : IDL.Opt(TransferReceipt),
     'fee_e6' : IDL.Nat64,
+    'shortfall_topup' : IDL.Opt(BotPaymentTopUpJournal),
     'ckusdc_received_e6' : IDL.Nat64,
     'memo' : IDL.Vec(IDL.Nat8),
     'collateral_amount_e8s' : IDL.Nat64,
@@ -163,6 +189,11 @@ export const idlFactory = ({ IDL }) => {
   });
   return IDL.Service({
     'admin_approve_pool' : IDL.Func([], [], []),
+    'admin_authorize_shortfall_topup' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [],
+      ),
     'admin_reconcile_payment_block' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],

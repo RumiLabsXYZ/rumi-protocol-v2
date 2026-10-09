@@ -90,6 +90,17 @@ type TransferReceipt = record {
   created_at_time : nat64;
 };
 type BotPaymentStatus = variant { Prepared; Ambiguous; NoEffect; ReceiptObserved; Confirmed };
+type BotPaymentTopUpJournal = record {
+  backend_principal : principal;
+  ledger_principal : principal;
+  amount_e6 : nat64;
+  fee_e6 : nat64;
+  created_at_time : nat64;
+  memo : blob;
+  funding_allocation_e6 : nat64;
+  status : BotPaymentStatus;
+  receipt : opt TransferReceipt;
+};
 type BotPaymentJournal = record {
   vault_id : nat64;
   backend_principal : principal;
@@ -110,6 +121,7 @@ type BotPaymentJournal = record {
   status : BotPaymentStatus;
   receipt : opt TransferReceipt;
   shortfall_receipt_observed : bool;
+  shortfall_topup : opt BotPaymentTopUpJournal;
 };
 type BotReturnTransferStatus = variant { Prepared; Ambiguous; NoEffect; ReceiptObserved; FeeMismatchAmbiguous };
 type BotReturnTransferJournal = record {
@@ -124,6 +136,19 @@ type BotReturnTransferJournal = record {
   status : BotReturnTransferStatus;
 };
 type BotClaimJournalStatus = variant { SwapMayHaveStarted; ReturnFeeQueryPending; ReturnFeeRefreshExhausted; ReturnPending; PaymentShortfall };
+type BotSwapIntent = record {
+  pool_principal : principal;
+  input_ledger_principal : principal;
+  output_ledger_principal : principal;
+  amount_in_e8s : nat64;
+  amount_out_minimum_e6 : nat64;
+  zero_for_one : bool;
+  input_fee_e8s : nat64;
+  output_fee_e6 : nat64;
+  attempt_ordinal : nat32;
+  created_at_time : nat64;
+  pre_swap_ckusdc_balance_e6 : nat64;
+};
 type BotClaimJournal = record {
   vault_id : nat64;
   claim_generation : nat64;
@@ -136,6 +161,7 @@ type BotClaimJournal = record {
   collateral_return_memo : blob;
   failed_return_attempts : vec BotReturnTransferJournal;
   collateral_return : opt BotReturnTransferJournal;
+  swap_intents : vec BotSwapIntent;
   status : BotClaimJournalStatus;
 };
 
@@ -187,6 +213,7 @@ service : (BotInitArgs) -> {
   admin_approve_pool : () -> ();
   admin_sweep_ckusdc : (principal, opt nat64) -> ();
   admin_retry_stuck_claim : (nat64) -> ();
+  admin_authorize_shortfall_topup : (nat64, nat64) -> (variant { Ok; Err : text });
   admin_reconcile_payment_block : (nat64, nat64) -> (variant { Ok; Err : text });
   admin_reconcile_return_block : (nat64, nat64) -> (variant { Ok; Err : text });
   // Returns (icp_fee_e8s, ckusdc_fee_e6) freshly read from each ledger and

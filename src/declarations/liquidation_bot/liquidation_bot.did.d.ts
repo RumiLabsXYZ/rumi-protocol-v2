@@ -21,6 +21,7 @@ export interface BotClaimJournal {
   'collateral_received_amount_e8s' : [] | [bigint],
   'collateral_return_memo' : Uint8Array | number[],
   'debt_covered_e8s' : bigint,
+  'swap_intents' : Array<BotSwapIntent>,
   'failed_return_attempts' : Array<BotReturnTransferJournal>,
 }
 export type BotClaimJournalStatus = { 'ReturnPending' : null } |
@@ -52,6 +53,7 @@ export interface BotPaymentJournal {
   'backend_principal' : Principal,
   'receipt' : [] | [TransferReceipt],
   'fee_e6' : bigint,
+  'shortfall_topup' : [] | [BotPaymentTopUpJournal],
   'ckusdc_received_e6' : bigint,
   'memo' : Uint8Array | number[],
   'collateral_amount_e8s' : bigint,
@@ -71,6 +73,17 @@ export type BotPaymentStatus = { 'ReceiptObserved' : null } |
   { 'Confirmed' : null } |
   { 'Ambiguous' : null } |
   { 'Prepared' : null };
+export interface BotPaymentTopUpJournal {
+  'status' : BotPaymentStatus,
+  'backend_principal' : Principal,
+  'receipt' : [] | [TransferReceipt],
+  'fee_e6' : bigint,
+  'memo' : Uint8Array | number[],
+  'funding_allocation_e6' : bigint,
+  'ledger_principal' : Principal,
+  'amount_e6' : bigint,
+  'created_at_time' : bigint,
+}
 export interface BotReturnTransferJournal {
   'status' : BotReturnTransferStatus,
   'backend_principal' : Principal,
@@ -94,6 +107,19 @@ export interface BotStats {
   'total_ckusdc_deposited_e6' : bigint,
   'events_count' : bigint,
   'total_collateral_received_e8s' : bigint,
+}
+export interface BotSwapIntent {
+  'output_ledger_principal' : Principal,
+  'input_ledger_principal' : Principal,
+  'input_fee_e8s' : bigint,
+  'zero_for_one' : boolean,
+  'attempt_ordinal' : number,
+  'pre_swap_ckusdc_balance_e6' : bigint,
+  'pool_principal' : Principal,
+  'amount_in_e8s' : bigint,
+  'created_at_time' : bigint,
+  'output_fee_e6' : bigint,
+  'amount_out_minimum_e6' : bigint,
 }
 export interface CycleManagerCyclesStatus {
   'idle_burn_cycles_per_day' : [] | [bigint],
@@ -155,6 +181,11 @@ export interface TransferReceipt {
 }
 export interface _SERVICE {
   'admin_approve_pool' : ActorMethod<[], undefined>,
+  'admin_authorize_shortfall_topup' : ActorMethod<
+    [bigint, bigint],
+    { 'Ok' : null } |
+      { 'Err' : string }
+  >,
   'admin_reconcile_payment_block' : ActorMethod<
     [bigint, bigint],
     { 'Ok' : null } |

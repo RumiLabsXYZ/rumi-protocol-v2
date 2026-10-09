@@ -10158,6 +10158,12 @@ fn bot_claim_generation_matches(active: u64, proof: u64) -> bool {
     active != 0 && active == proof
 }
 
+fn bot_claim_collateral_return_recorded(
+    claim: &rumi_protocol_backend::state::BotClaim,
+) -> bool {
+    claim.collateral_return_proof.is_some()
+}
+
 fn bot_payment_ledger_matches(pinned: Option<Principal>, proof: Principal) -> bool {
     pinned == Some(proof)
 }
@@ -10167,9 +10173,137 @@ fn bot_payment_meets_claim_minimum(debt_e8s: u64, paid_e6s: u64) -> bool {
     paid_e6s >= minimum
 }
 
+const BOT_PAYMENT_PROOF_BATCH_MIN: usize = 2;
+const BOT_PAYMENT_PROOF_BATCH_MAX: usize = 8;
+
+fn bot_payment_claim_minimum(debt_e8s: u64) -> u64 {
+    debt_e8s / 100 + u64::from(debt_e8s % 100 != 0)
+}
+
+fn validate_bot_payment_proof_batch_shape(proofs: &[BotPaymentProof]) -> Result<(), String> {
+    if !(BOT_PAYMENT_PROOF_BATCH_MIN..=BOT_PAYMENT_PROOF_BATCH_MAX).contains(&proofs.len()) {
+        return Err("Payment proof batch must contain between 2 and 8 receipts".into());
+    }
+    let first = &proofs[0];
+    for (index, proof) in proofs.iter().enumerate() {
+        if proof.vault_id != first.vault_id
+            || proof.claim_generation != first.claim_generation
+            || proof.ledger_principal != first.ledger_principal
+        {
+            return Err("All payment proofs must identify the same claim and ledger".into());
+        }
+        if proof.amount_e6s == 0 || proof.created_at_time == 0 {
+            return Err("Payment proof amount and created_at_time must be nonzero".into());
+        }
+        if proofs[..index].iter().any(|prior| {
+            prior.ledger_principal == proof.ledger_principal
+                && prior.block_index == proof.block_index
+        }) {
+            return Err("Payment proof batch contains a duplicate ledger block".into());
+        }
+    }
+    Ok(())
+}
+
+fn bot_payment_proof_batch_total(proofs: &[BotPaymentProof]) -> Result<u64, String> {
+    proofs.iter().try_fold(0u64, |total, proof| {
+        total
+            .checked_add(proof.amount_e6s)
+            .ok_or_else(|| "Payment proof batch amount overflow".to_string())
+    })
+}
+
+fn validate_bot_payment_proof_batch_total(
+    proofs: &[BotPaymentProof],
+    debt_e8s: u64,
+) -> Result<(), String> {
+    if bot_payment_proof_batch_total(proofs)? != bot_payment_claim_minimum(debt_e8s) {
+        return Err("Payment proof batch total must exactly equal the rounded-up claim debt".into());
+    }
+    Ok(())
+}
+
+fn bot_payment_batch_is_fully_consumed(statuses: &[bool]) -> Result<bool, String> {
+    if statuses.is_empty() {
+        return Err("Payment proof batch must not be empty".into());
+    }
+    let consumed = statuses.iter().filter(|status| **status).count();
+    if consumed == statuses.len() {
+        Ok(true)
+    } else if consumed == 0 {
+        Ok(false)
+    } else {
+        Err("Payment proof batch is partially consumed".into())
+    }
+}
+
 #[cfg(test)]
 mod bot_payment_proof_tests {
     use super::*;
+
+    fn sample_payment_proof(block_index: u64, amount_e6s: u64) -> BotPaymentProof {
+        BotPaymentProof {
+            vault_id: 7,
+            claim_generation: 42,
+            ledger_principal: Principal::from_slice(&[9]),
+            block_index,
+            amount_e6s,
+            created_at_time: 123,
+        }
+    }
+
+    #[test]
+    fn payment_proof_batches_are_bounded_unique_and_claim_scoped() {
+        let valid = vec![sample_payment_proof(10, 40), sample_payment_proof(11, 60)];
+        assert!(validate_bot_payment_proof_batch_shape(&valid).is_ok());
+        assert!(validate_bot_payment_proof_batch_total(&valid, 10_000).is_ok());
+        assert!(validate_bot_payment_proof_batch_shape(&[sample_payment_proof(10, 100)]).is_err());
+
+        let duplicate = vec![sample_payment_proof(10, 40), sample_payment_proof(10, 60)];
+        assert!(validate_bot_payment_proof_batch_shape(&duplicate).is_err());
+
+        let mut wrong_generation = sample_payment_proof(11, 60);
+        wrong_generation.claim_generation += 1;
+        assert!(validate_bot_payment_proof_batch_shape(&[
+            sample_payment_proof(10, 40),
+            wrong_generation,
+        ])
+        .is_err());
+
+        let mut wrong_ledger = sample_payment_proof(11, 60);
+        wrong_ledger.ledger_principal = Principal::from_slice(&[10]);
+        assert!(validate_bot_payment_proof_batch_shape(&[
+            sample_payment_proof(10, 40),
+            wrong_ledger,
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn payment_proof_batch_amount_must_equal_rounded_up_debt_exactly() {
+        let debt_e8s = 10_001;
+        let exact = vec![sample_payment_proof(10, 50), sample_payment_proof(11, 51)];
+        assert_eq!(bot_payment_claim_minimum(debt_e8s), 101);
+        assert!(validate_bot_payment_proof_batch_total(&exact, debt_e8s).is_ok());
+
+        let short = vec![sample_payment_proof(10, 50), sample_payment_proof(11, 50)];
+        assert!(validate_bot_payment_proof_batch_total(&short, debt_e8s).is_err());
+        let excess = vec![sample_payment_proof(10, 50), sample_payment_proof(11, 52)];
+        assert!(validate_bot_payment_proof_batch_total(&excess, debt_e8s).is_err());
+        let overflow = vec![
+            sample_payment_proof(10, u64::MAX),
+            sample_payment_proof(11, 1),
+        ];
+        assert!(validate_bot_payment_proof_batch_total(&overflow, debt_e8s).is_err());
+    }
+
+    #[test]
+    fn payment_proof_batch_retry_requires_every_block_consumed() {
+        assert_eq!(bot_payment_batch_is_fully_consumed(&[false, false]), Ok(false));
+        assert_eq!(bot_payment_batch_is_fully_consumed(&[true, true]), Ok(true));
+        assert!(bot_payment_batch_is_fully_consumed(&[true, false]).is_err());
+        assert!(bot_payment_batch_is_fully_consumed(&[]).is_err());
+    }
 
     #[test]
     fn bot_audit_query_requires_developer_principal() {
@@ -11275,6 +11409,15 @@ async fn bot_confirm_liquidation_with_proof(
             "Caller is not the registered liquidation bot canister".into(),
         ));
     }
+    if read_state(|s| {
+        s.bot_claims
+            .get(&proof.vault_id)
+            .is_some_and(bot_claim_collateral_return_recorded)
+    }) {
+        return Err(ProtocolError::GenericError(
+            "Collateral return is already recorded; retry cancellation instead".into(),
+        ));
+    }
     if read_state(|s| bot_payment_replay_status_for_ledger(
         &s.consumed_bot_payment_proofs,
         &s.consumed_bot_payment_blocks,
@@ -11341,6 +11484,9 @@ async fn bot_confirm_liquidation_with_proof(
         if !bot_claim_generation_matches(active.generation, proof.claim_generation) {
             return Err("Active bot claim changed during proof verification".to_string());
         }
+        if bot_claim_collateral_return_recorded(active) {
+            return Err("Collateral return was recorded during payment proof verification".into());
+        }
         let Some(vault) = s.vault_id_to_vaults.get(&proof.vault_id) else {
             return Err("Claimed vault disappeared before proof confirmation".to_string());
         };
@@ -11385,6 +11531,191 @@ async fn bot_confirm_liquidation_with_proof(
         s.cleanup_if_drained(proof.vault_id);
         Ok::<(), String>(())
     }).map_err(ProtocolError::GenericError)?;
+    Ok(())
+}
+
+/// Settle one active bot liquidation from 2–8 exact ckUSDC payment blocks.
+/// Every block is verified before any block is tombstoned or vault accounting
+/// changes, and the batch sum must equal the claim's rounded-up debt exactly.
+#[candid_method(update)]
+#[update]
+async fn bot_confirm_liquidation_with_proofs(
+    proofs: Vec<BotPaymentProof>,
+) -> Result<(), ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.liquidation_bot_principal == Some(caller)) {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered liquidation bot canister".into(),
+        ));
+    }
+    validate_bot_payment_proof_batch_shape(&proofs).map_err(ProtocolError::GenericError)?;
+    let first = &proofs[0];
+    if read_state(|s| {
+        s.bot_claims
+            .get(&first.vault_id)
+            .is_some_and(bot_claim_collateral_return_recorded)
+    }) {
+        return Err(ProtocolError::GenericError(
+            "Collateral return is already recorded; retry cancellation instead".into(),
+        ));
+    }
+
+    // A retry is successful only if every receipt is already tombstoned for
+    // this exact claim. A mixed old/new set cannot partially consume a batch.
+    let replay_statuses = read_state(|s| {
+        proofs
+            .iter()
+            .map(|proof| {
+                bot_payment_replay_status_for_ledger(
+                    &s.consumed_bot_payment_proofs,
+                    &s.consumed_bot_payment_blocks,
+                    s.legacy_consumed_payment_ledger,
+                    proof.ledger_principal,
+                    proof.block_index,
+                    proof.vault_id,
+                    proof.claim_generation,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .map_err(ProtocolError::GenericError)?;
+    if bot_payment_batch_is_fully_consumed(&replay_statuses)
+        .map_err(ProtocolError::GenericError)?
+    {
+        return Ok(());
+    }
+
+    let claim = read_state(|s| s.bot_claims.get(&first.vault_id).cloned()).ok_or_else(|| {
+        ProtocolError::GenericError(format!("No active claim for vault #{}", first.vault_id))
+    })?;
+    if !bot_payment_ledger_matches(claim.payment_ledger_principal, first.ledger_principal) {
+        return Err(ProtocolError::GenericError(
+            "Payment ledger does not match the ledger pinned to this claim".into(),
+        ));
+    }
+    if claim.collateral_transfer.as_ref().and_then(|transfer| transfer.block_index).is_none() {
+        return Err(ProtocolError::GenericError(
+            "Collateral claim transfer has not been reconciled from its exact ledger block".into(),
+        ));
+    }
+    let (outbound_net, outbound_fee) =
+        bot_claim_outbound_terms(&claim).map_err(ProtocolError::GenericError)?;
+    if !bot_claim_generation_matches(claim.generation, first.claim_generation) {
+        return Err(ProtocolError::GenericError(
+            "Bot payment proof claim generation does not match the active claim".into(),
+        ));
+    }
+    validate_bot_payment_proof_batch_total(&proofs, claim.debt_amount)
+        .map_err(ProtocolError::GenericError)?;
+
+    let memo = bot_payment_memo_for_claim(&claim);
+    // Each receipt is checked against the same registered bot sender, backend
+    // receiver, claim memo, and pinned ledger before entering the single
+    // mutation below. No state is changed if any ICRC-3 lookup or check fails.
+    for proof in &proofs {
+        rumi_protocol_backend::icrc3_proof::verify_icrc3_transfer_block(
+            proof.ledger_principal,
+            proof.block_index,
+            Some(icrc_ledger_types::icrc1::account::Account {
+                owner: caller,
+                subaccount: None,
+            }),
+            icrc_ledger_types::icrc1::account::Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            },
+            proof.amount_e6s,
+            Some(&memo),
+            Some(proof.created_at_time),
+        )
+        .await
+        .map_err(ProtocolError::GenericError)?;
+    }
+
+    mutate_state(|s| {
+        // Inter-canister ICRC-3 calls yield. Recheck replay and the claim after
+        // those awaits so concurrent settlement or generation replacement
+        // cannot apply this proof set to changed state.
+        let commit_replays = proofs
+            .iter()
+            .map(|proof| {
+                bot_payment_replay_status_for_ledger(
+                    &s.consumed_bot_payment_proofs,
+                    &s.consumed_bot_payment_blocks,
+                    s.legacy_consumed_payment_ledger,
+                    proof.ledger_principal,
+                    proof.block_index,
+                    proof.vault_id,
+                    proof.claim_generation,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if bot_payment_batch_is_fully_consumed(&commit_replays)? {
+            return Ok(());
+        }
+        let Some(active) = s.bot_claims.get(&first.vault_id) else {
+            return Err("Active bot claim disappeared during proof verification".to_string());
+        };
+        if !bot_claim_generation_matches(active.generation, first.claim_generation)
+            || active.debt_amount != claim.debt_amount
+            || active.collateral_amount != claim.collateral_amount
+            || !bot_payment_ledger_matches(
+                active.payment_ledger_principal,
+                first.ledger_principal,
+            )
+            || bot_claim_collateral_return_recorded(active)
+        {
+            return Err("Active bot claim changed during proof verification".into());
+        }
+        validate_bot_payment_proof_batch_total(&proofs, active.debt_amount)?;
+        let Some(vault) = s.vault_id_to_vaults.get(&first.vault_id) else {
+            return Err("Claimed vault disappeared before proof confirmation".into());
+        };
+        let Some(new_debt_e8s) = vault
+            .borrowed_icusd_amount
+            .to_u64()
+            .checked_sub(claim.debt_amount)
+        else {
+            return Err("Claim debt changed during payment proof verification".into());
+        };
+        let Some(new_collateral) = vault.collateral_amount.checked_sub(claim.collateral_amount)
+        else {
+            return Err("Claim collateral changed during payment proof verification".into());
+        };
+        for proof in &proofs {
+            rumi_protocol_backend::event::record_bot_payment_proof_consumed(
+                s,
+                proof.ledger_principal,
+                proof.block_index,
+                proof.vault_id,
+                proof.claim_generation,
+            );
+        }
+        let vault = s.vault_id_to_vaults.get_mut(&first.vault_id).unwrap();
+        vault.borrowed_icusd_amount = ICUSD::new(new_debt_e8s);
+        vault.collateral_amount = new_collateral;
+        vault.bot_processing = false;
+        let event = rumi_protocol_backend::event::Event::PartialLiquidateVault {
+            vault_id: first.vault_id,
+            liquidator_payment: ICUSD::new(claim.debt_amount),
+            icp_to_liquidator: ICP::from(outbound_net),
+            liquidator: Some(caller),
+            icp_rate: Some(UsdIcp::from(
+                Decimal::from(claim.collateral_price_e8s) / dec!(100_000_000),
+            )),
+            protocol_fee_collateral: None,
+            ledger_fee_collateral: Some(outbound_fee),
+            timestamp: Some(ic_cdk::api::time()),
+            three_usd_reserves_e8s: None,
+        };
+        rumi_protocol_backend::storage::record_event(&event);
+        s.bot_total_debt_covered_e8s += claim.debt_amount;
+        s.bot_claims.remove(&first.vault_id);
+        s.cleanup_if_drained(first.vault_id);
+        Ok::<(), String>(())
+    })
+    .map_err(ProtocolError::GenericError)?;
     Ok(())
 }
 
