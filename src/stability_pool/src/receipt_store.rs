@@ -21,7 +21,7 @@ use crate::{
 };
 
 type Memory = VirtualMemory<DefaultMemoryImpl>;
-type ReceiptMap = StableBTreeMap<(Principal, u64), StoredReceipt, Memory>;
+type ReceiptMap = StableBTreeMap<(Principal, u64), StableReceiptRecord, Memory>;
 type SnapshotCell = StableCell<Vec<u8>, Memory>;
 type VersionCell = StableCell<u8, Memory>;
 
@@ -60,15 +60,150 @@ pub struct StoredReceipt {
     pub receipt: CompletedOutboundPayout,
 }
 
-impl Storable for StoredReceipt {
+/// Frozen permanent V1 payload. Keep this independent of the mutable pending
+/// payout schema; every field here is part of the exact settled tuple or its
+/// terminal receipt metadata.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredReceiptV1 {
+    ledger: Principal,
+    gross_amount: u64,
+    transfer_amount: u64,
+    transfer_fee: u64,
+    recipient: icrc_ledger_types::icrc1::account::Account,
+    from_subaccount: Option<Vec<u8>>,
+    transfer_memo: Vec<u8>,
+    transfer_created_at_time_ns: u64,
+    block_index: u64,
+    completed_at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize)]
+struct StoredReceiptEnvelope {
+    version: u8,
+    payload: Vec<u8>,
+}
+
+/// Source-only layout-1 compatibility shape from before the V1 envelope was
+/// introduced. The layout was not confirmed deployed; decode it narrowly so
+/// an intermediate installation can be upgraded without losing receipts.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Deserialize)]
+struct StoredReceiptV0 {
+    ledger: Principal,
+    receipt: CompletedOutboundPayout,
+}
+
+impl Storable for StoredReceiptV0 {
     const BOUND: Bound = Bound::Unbounded;
 
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        Cow::Owned(Encode!(self).expect("encode permanent SP claim receipt"))
+        Cow::Owned(Encode!(self).expect("encode legacy raw SP receipt"))
     }
 
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
-        Decode!(bytes.as_ref(), StoredReceipt).expect("decode permanent SP claim receipt")
+        Decode!(bytes.as_ref(), StoredReceiptV0).expect("decode legacy raw SP receipt")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StableReceiptRecord {
+    V1(StoredReceiptV1),
+    V0(StoredReceiptV0),
+    /// Retain unknown/corrupt bytes verbatim so merely opening a stable map
+    /// cannot panic or overwrite a future-version receipt.
+    Opaque(Vec<u8>),
+}
+
+impl StableReceiptRecord {
+    fn from_runtime(stored: &StoredReceipt) -> Self {
+        let payout = &stored.receipt.payout;
+        Self::V1(StoredReceiptV1 {
+            ledger: stored.ledger,
+            gross_amount: payout.gross_amount,
+            transfer_amount: payout.transfer_amount,
+            transfer_fee: payout.transfer_fee,
+            recipient: payout.recipient.clone(),
+            from_subaccount: payout.from_subaccount.map(|value| value.to_vec()),
+            transfer_memo: payout.transfer_memo.clone(),
+            transfer_created_at_time_ns: payout.transfer_created_at_time_ns,
+            block_index: stored.receipt.block_index,
+            completed_at_ns: stored.receipt.completed_at_ns,
+        })
+    }
+
+    fn into_runtime(self) -> Result<StoredReceipt, String> {
+        match self {
+            Self::V0(row) => Ok(StoredReceipt {
+                ledger: row.ledger,
+                receipt: row.receipt,
+            }),
+            Self::V1(row) => {
+                let from_subaccount = row
+                    .from_subaccount
+                    .map(|bytes| {
+                        bytes.try_into().map_err(|_| {
+                            "SP stored receipt V1 has an invalid subaccount length".to_string()
+                        })
+                    })
+                    .transpose()?;
+                Ok(StoredReceipt {
+                    ledger: row.ledger,
+                    receipt: CompletedOutboundPayout {
+                        payout: crate::types::PendingOutboundPayout {
+                            gross_amount: row.gross_amount,
+                            transfer_amount: row.transfer_amount,
+                            transfer_fee: row.transfer_fee,
+                            recipient: row.recipient,
+                            from_subaccount,
+                            transfer_memo: row.transfer_memo,
+                            transfer_created_at_time_ns: row.transfer_created_at_time_ns,
+                            dispatch_in_flight: false,
+                            ambiguous_seen: false,
+                            last_error: None,
+                            dispatch_generation: 0,
+                            reconciliation_attempts: 0,
+                            last_reconciliation_at_ns: None,
+                            candidate_block_index: Some(row.block_index),
+                            candidate_block_index_raw: Some(row.block_index.to_string()),
+                        },
+                        block_index: row.block_index,
+                        completed_at_ns: row.completed_at_ns,
+                    },
+                })
+            }
+            Self::Opaque(_) => Err("SP stored receipt uses an unsupported or malformed envelope".to_string()),
+        }
+    }
+}
+
+impl Storable for StableReceiptRecord {
+    const BOUND: Bound = Bound::Unbounded;
+
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let bytes = match self {
+            Self::V1(row) => {
+                let payload = Encode!(row).expect("encode frozen SP claim receipt V1");
+                Encode!(&StoredReceiptEnvelope { version: 1, payload })
+                    .expect("encode SP claim receipt envelope")
+            }
+            Self::V0(row) => Encode!(row).expect("encode legacy raw SP receipt"),
+            Self::Opaque(bytes) => bytes.clone(),
+        };
+        Cow::Owned(bytes)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let raw = bytes.into_owned();
+        match Decode!(&raw, StoredReceiptEnvelope) {
+            Ok(envelope) if envelope.version == 1 => match Decode!(&envelope.payload, StoredReceiptV1) {
+                Ok(row) => Self::V1(row),
+                Err(_) => Self::Opaque(raw),
+            },
+            Ok(_) => Self::Opaque(raw),
+            Err(_) => match Decode!(&raw, StoredReceiptV0) {
+                Ok(row) => Self::V0(row),
+                Err(_) => Self::Opaque(raw),
+            },
+        }
     }
 }
 
@@ -89,6 +224,18 @@ pub fn init_layout() {
     RECEIPTS.with(|cell| *cell.borrow_mut() = Some(receipts));
     SNAPSHOT.with(|cell| *cell.borrow_mut() = Some(snapshot));
     LAYOUT.with(|cell| *cell.borrow_mut() = Some(layout));
+}
+
+/// A successfully decoded predecessor snapshot may start with bytes that
+/// resemble a MemoryManager header. Clear its raw length prefix only after
+/// decoding, so `MemoryManager::init` creates a fresh header instead of
+/// attempting to load the predecessor's `MGR\0` collision as version zero.
+pub fn clear_legacy_header_before_manager_init() {
+    clear_legacy_header(&DefaultMemoryImpl::default());
+}
+
+fn clear_legacy_header<M: ic_stable_structures::Memory>(memory: &M) {
+    memory.write(0, &[0; 8]);
 }
 
 fn with_receipts<R>(f: impl FnOnce(&ReceiptMap) -> R) -> R {
@@ -174,25 +321,25 @@ pub fn append(owner: Principal, stored: StoredReceipt) -> Result<(), String> {
 }
 
 fn append_to_map<M: ic_stable_structures::Memory>(
-    map: &mut StableBTreeMap<(Principal, u64), StoredReceipt, M>,
+    map: &mut StableBTreeMap<(Principal, u64), StableReceiptRecord, M>,
     key: (Principal, u64),
     stored: StoredReceipt,
 ) -> Result<(), String> {
+    let encoded = StableReceiptRecord::from_runtime(&stored);
     if let Some(previous) = map.get(&key) {
-        return if previous == stored {
-            Ok(())
-        } else {
-            Err("SP claim receipt idempotency-key collision".to_string())
+        return match previous.into_runtime() {
+            Ok(previous) if StableReceiptRecord::from_runtime(&previous) == encoded => Ok(()),
+            _ => Err("SP claim receipt idempotency-key collision or unknown stored version".to_string()),
         };
     }
-    map.insert(key, stored);
+    map.insert(key, encoded);
     Ok(())
 }
 
 /// Migrate every legacy completed row without replacing any permanent row.
 /// The caller invokes this before persisting the new layout marker.
-pub fn migrate_legacy_receipts<M: ic_stable_structures::Memory>(
-    map: &mut StableBTreeMap<(Principal, u64), StoredReceipt, M>,
+fn migrate_legacy_receipts<M: ic_stable_structures::Memory>(
+    map: &mut StableBTreeMap<(Principal, u64), StableReceiptRecord, M>,
     state: &mut StabilityPoolState,
 ) -> Result<(), String> {
     let mut highest_timestamp = state.last_outbound_payout_created_at_ns.unwrap_or(0);
@@ -230,32 +377,65 @@ pub fn migrate_legacy_state(state: &mut StabilityPoolState) -> Result<(), String
     with_receipts_mut(|map| migrate_legacy_receipts(map, state))
 }
 
-pub fn get(owner: Principal, timestamp: u64) -> Option<StoredReceipt> {
-    with_receipts(|map| map.get(&(owner, timestamp)))
+pub fn get(owner: Principal, timestamp: u64) -> Result<Option<StoredReceipt>, String> {
+    with_receipts(|map| map.get(&(owner, timestamp)).map(StableReceiptRecord::into_runtime).transpose())
 }
 
 /// The serialized compatibility cache may only contain rows that are still
 /// present identically in the permanent journal. It is never used to decide
 /// replay or idempotency outcomes.
-pub fn validate_compatibility_cache(state: &StabilityPoolState) -> Result<(), String> {
+pub fn validate_compatibility_cache(state: &mut StabilityPoolState) -> Result<(), String> {
+    with_receipts(|map| validate_compatibility_cache_for_map(map, state))
+}
+
+fn validate_compatibility_cache_for_map<M: ic_stable_structures::Memory>(
+    map: &StableBTreeMap<(Principal, u64), StableReceiptRecord, M>,
+    state: &mut StabilityPoolState,
+) -> Result<(), String> {
     let Some(cache) = state.completed_outbound_payouts.as_ref() else {
         return Ok(());
     };
+    let mut cache_unverifiable = false;
     for ((owner, ledger, timestamp), receipt) in cache {
         let expected = StoredReceipt {
             ledger: *ledger,
             receipt: receipt.clone(),
         };
-        if get(*owner, *timestamp).as_ref() != Some(&expected) {
+        let actual = match map
+            .get(&(*owner, *timestamp))
+            .map(StableReceiptRecord::into_runtime)
+            .transpose()
+        {
+            Ok(Some(actual)) => actual,
+            Ok(None) => {
+                return Err(format!(
+                    "SP compatibility receipt cache diverges from permanent journal at owner {owner}, timestamp {timestamp}"
+                ));
+            }
+            Err(_) => {
+                cache_unverifiable = true;
+                break;
+            }
+        };
+        if StableReceiptRecord::from_runtime(&actual) != StableReceiptRecord::from_runtime(&expected) {
             return Err(format!(
                 "SP compatibility receipt cache diverges from permanent journal at owner {owner}, timestamp {timestamp}"
             ));
         }
     }
+    if cache_unverifiable {
+        // The cache is only a legacy compatibility projection. If a future
+        // envelope version is not understood, omit it instead of trapping the
+        // upgrade or preserving an unverifiable snapshot row.
+        state.completed_outbound_payouts = None;
+    }
     Ok(())
 }
 
-fn to_status(stored: StoredReceipt) -> CompletedOutboundPayoutStatus {
+fn to_status(record: StableReceiptRecord) -> CompletedOutboundPayoutStatus {
+    let stored = record
+        .into_runtime()
+        .unwrap_or_else(|error| ic_cdk::trap(&error));
     CompletedOutboundPayoutStatus {
         ledger: stored.ledger,
         gross_amount: stored.receipt.payout.gross_amount,
@@ -285,7 +465,7 @@ pub fn page(owner: Principal, after: Option<u64>, requested_limit: usize) -> Rec
 }
 
 fn page_from_map<M: ic_stable_structures::Memory>(
-    map: &StableBTreeMap<(Principal, u64), StoredReceipt, M>,
+    map: &StableBTreeMap<(Principal, u64), StableReceiptRecord, M>,
     owner: Principal,
     after: Option<u64>,
     requested_limit: usize,
@@ -321,7 +501,7 @@ pub fn all_for_owner_compat(owner: Principal) -> Vec<CompletedOutboundPayoutStat
 }
 
 fn all_for_owner_compat_from_map<M: ic_stable_structures::Memory>(
-    map: &StableBTreeMap<(Principal, u64), StoredReceipt, M>,
+    map: &StableBTreeMap<(Principal, u64), StableReceiptRecord, M>,
     owner: Principal,
 ) -> Vec<CompletedOutboundPayoutStatus> {
     map.range((
@@ -553,19 +733,25 @@ mod tests {
     }
 
     fn validate_cache_against_map<M: ic_stable_structures::Memory>(
-        map: &StableBTreeMap<(Principal, u64), StoredReceipt, M>,
+        map: &StableBTreeMap<(Principal, u64), StableReceiptRecord, M>,
         state: &StabilityPoolState,
     ) -> Result<(), String> {
         let Some(cache) = state.completed_outbound_payouts.as_ref() else {
             return Ok(());
         };
         for ((owner, ledger, timestamp), receipt) in cache {
-            if map.get(&(*owner, *timestamp))
-                != Some(StoredReceipt {
+            let expected = StoredReceipt {
                     ledger: *ledger,
                     receipt: receipt.clone(),
-                })
-            {
+                };
+            let matches = map
+                .get(&(*owner, *timestamp))
+                .and_then(|record| record.clone().into_runtime().ok())
+                .is_some_and(|actual| {
+                    StableReceiptRecord::from_runtime(&actual)
+                        == StableReceiptRecord::from_runtime(&expected)
+                });
+            if !matches {
                 return Err("compatibility cache diverged".into());
             }
         }
@@ -606,11 +792,149 @@ mod tests {
         assert_eq!(
             map.get(&(owner, 10))
                 .unwrap()
+                .clone()
+                .into_runtime()
+                .unwrap()
                 .receipt
                 .payout
                 .transfer_created_at_time_ns,
             10
         );
+    }
+
+    #[test]
+    fn frozen_receipt_v1_envelope_round_trips_and_unknown_version_stays_opaque() {
+        let owner = Principal::from_slice(&[7]);
+        let ledger = Principal::from_slice(&[8]);
+        let runtime = StoredReceipt {
+            ledger,
+            receipt: receipt(owner, 55),
+        };
+        let stable = StableReceiptRecord::from_runtime(&runtime);
+        let encoded = stable.to_bytes().into_owned();
+        let envelope = Decode!(&encoded, StoredReceiptEnvelope).unwrap();
+        assert_eq!(envelope.version, 1);
+        let decoded = StableReceiptRecord::from_bytes(Cow::Owned(encoded.clone()));
+        assert_eq!(decoded, stable);
+        let restored = decoded.into_runtime().unwrap();
+        assert_eq!(StableReceiptRecord::from_runtime(&restored), stable);
+
+        let future_bytes = Encode!(&StoredReceiptEnvelope {
+            version: 2,
+            payload: vec![9, 8, 7],
+        })
+        .unwrap();
+        let future = StableReceiptRecord::from_bytes(Cow::Owned(future_bytes.clone()));
+        assert!(matches!(future, StableReceiptRecord::Opaque(_)));
+        assert_eq!(future.to_bytes().as_ref(), future_bytes.as_slice());
+        assert!(future.into_runtime().is_err());
+    }
+
+    #[test]
+    fn raw_layout_one_receipt_bytes_decode_lazily_and_unknown_bytes_stay_opaque() {
+        let owner = Principal::from_slice(&[7]);
+        let ledger = Principal::from_slice(&[8]);
+        let memory = VectorMemory::default();
+        let head_receipt = StoredReceipt {
+            ledger,
+            receipt: receipt(owner, 70),
+        };
+        let legacy = StoredReceiptV0 {
+            ledger,
+            receipt: head_receipt.receipt.clone(),
+        };
+        let raw_head_bytes = Encode!(&legacy).unwrap();
+        assert_eq!(raw_head_bytes, Encode!(&head_receipt).unwrap());
+        assert_eq!(&raw_head_bytes[..4], b"DIDL");
+        {
+            let manager = MemoryManager::init(memory.clone());
+            let mut legacy_map: StableBTreeMap<(Principal, u64), StoredReceiptV0, _> =
+                StableBTreeMap::init(manager.get(MEM_RECEIPTS));
+            legacy_map.insert((owner, 70), legacy);
+            assert_eq!(
+                legacy_map.get(&(owner, 70)).unwrap().to_bytes().as_ref(),
+                raw_head_bytes.as_slice()
+            );
+        }
+
+        // Reopen the same memory with the new layout-1 value decoder. This is
+        // exactly the raw Candid value shape emitted by HEAD's StoredReceipt
+        // Storable implementation before the V1 envelope was added.
+        let manager = MemoryManager::init(memory);
+        let mut map: ReceiptMap = StableBTreeMap::init(manager.get(MEM_RECEIPTS));
+        assert!(matches!(
+            map.get(&(owner, 70)),
+            Some(StableReceiptRecord::V0(_))
+        ));
+        assert_eq!(
+            map.get(&(owner, 70)).unwrap().to_bytes().as_ref(),
+            raw_head_bytes
+        );
+        assert_eq!(map.len(), 1);
+
+        // Bounded point reads/pages can decode V0 without rewriting or
+        // scanning the append-only journal during post_upgrade.
+        assert_eq!(
+            map.get(&(owner, 70))
+                .unwrap()
+                .clone()
+                .into_runtime()
+                .unwrap()
+                .receipt
+                .payout
+                .transfer_created_at_time_ns,
+            70
+        );
+        let page = page_from_map(&map, owner, None, 10);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].transfer_created_at_time_ns, 70);
+
+        // Idempotent exact-key replay can verify a raw V0 value lazily without
+        // replacing its original bytes. Different tuples fail closed.
+        append_to_map(&mut map, (owner, 70), head_receipt).unwrap();
+        assert_eq!(
+            map.get(&(owner, 70)).unwrap().to_bytes().as_ref(),
+            raw_head_bytes
+        );
+        let mut conflicting = StoredReceipt {
+            ledger,
+            receipt: receipt(owner, 71),
+        };
+        conflicting.receipt.payout.transfer_created_at_time_ns = 70;
+        assert!(append_to_map(&mut map, (owner, 70), conflicting).is_err());
+
+        map.insert((owner, 71), StableReceiptRecord::Opaque(vec![0xff, 0x00]));
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            map.get(&(owner, 71)).unwrap().to_bytes().as_ref(),
+            &[0xff, 0x00]
+        );
+    }
+
+    #[test]
+    fn unknown_receipt_version_drops_unverifiable_compatibility_cache() {
+        let owner = Principal::from_slice(&[7]);
+        let ledger = Principal::from_slice(&[8]);
+        let memory = VectorMemory::default();
+        let manager = MemoryManager::init(memory);
+        let mut map: ReceiptMap = StableBTreeMap::init(manager.get(MEM_RECEIPTS));
+        let future_bytes = Encode!(&StoredReceiptEnvelope {
+            version: 2,
+            payload: vec![1, 2, 3],
+        })
+        .unwrap();
+        map.insert(
+            (owner, 10),
+            StableReceiptRecord::Opaque(future_bytes),
+        );
+
+        let mut state = StabilityPoolState::default();
+        state.completed_outbound_payouts.as_mut().unwrap().insert(
+            (owner, ledger, 10),
+            receipt(owner, 10),
+        );
+        assert!(validate_compatibility_cache_for_map(&map, &mut state).is_ok());
+        assert!(state.completed_outbound_payouts.is_none());
     }
 
     #[test]
@@ -628,51 +952,23 @@ mod tests {
         let mut map = map_for(&VectorMemory::default());
         assert!(migrate_legacy_receipts(&mut map, &mut legacy).is_err());
         assert_eq!(map.len(), 1);
-        assert_eq!(map.get(&(owner, 42)).unwrap().ledger, ledger_a);
+        assert_eq!(
+            map.get(&(owner, 42))
+                .unwrap()
+                .clone()
+                .into_runtime()
+                .unwrap()
+                .ledger,
+            ledger_a
+        );
     }
 
     #[test]
     fn legacy_length_word_that_starts_with_manager_magic_prefers_candid_decode() {
-        let collision_length = 5_392_205u64;
+        let predecessor_blob = colliding_legacy_snapshot();
+        let collision_length = predecessor_blob.len() as u64;
         let length_prefix = collision_length.to_le_bytes();
         assert_eq!(&length_prefix[..4], b"MGR\0");
-
-        let owner = Principal::from_slice(&[7]);
-        let ledger = Principal::from_slice(&[8]);
-        let mut legacy_state = StabilityPoolState::default();
-        let mut pending = receipt(owner, 10).payout;
-        pending.dispatch_in_flight = true;
-        pending.last_error = Some(String::new());
-        legacy_state
-            .pending_outbound_payouts
-            .as_mut()
-            .unwrap()
-            .insert((owner, ledger), pending.clone());
-
-        // Candid snapshots reject trailing padding, so make the old state
-        // itself exactly the colliding length using its serialized error text.
-        let mut low = 0usize;
-        let mut high = collision_length as usize;
-        while low <= high {
-            let middle = low + (high - low) / 2;
-            legacy_state
-                .pending_outbound_payouts
-                .as_mut()
-                .unwrap()
-                .get_mut(&(owner, ledger))
-                .unwrap()
-                .last_error = Some("x".repeat(middle));
-            let size = Encode!(&legacy_state).unwrap().len();
-            if size == collision_length as usize {
-                break;
-            } else if size < collision_length as usize {
-                low = middle + 1;
-            } else {
-                high = middle - 1;
-            }
-        }
-        let predecessor_blob = Encode!(&legacy_state).unwrap();
-        assert_eq!(predecessor_blob.len(), collision_length as usize);
         assert_eq!(&predecessor_blob[..4], b"DIDL");
         let decoded = state::try_decode_state(&predecessor_blob);
         assert!(
@@ -687,6 +983,83 @@ mod tests {
             classify_existing_layout(None, false, length_prefix.to_vec()),
             ExistingStableLayout::Invalid(_)
         ));
+    }
+
+    fn colliding_legacy_snapshot() -> Vec<u8> {
+        let collision_length = 5_392_205usize;
+        let owner = Principal::from_slice(&[7]);
+        let ledger = Principal::from_slice(&[8]);
+        let mut legacy_state = StabilityPoolState::default();
+        let mut pending = receipt(owner, 10).payout;
+        pending.dispatch_in_flight = true;
+        pending.last_error = Some(String::new());
+        legacy_state
+            .pending_outbound_payouts
+            .as_mut()
+            .unwrap()
+            .insert((owner, ledger), pending);
+
+        // Candid snapshots reject trailing padding, so make the old state
+        // itself exactly the colliding length using its serialized error text.
+        let mut low = 0usize;
+        let mut high = collision_length;
+        while low <= high {
+            let middle = low + (high - low) / 2;
+            legacy_state
+                .pending_outbound_payouts
+                .as_mut()
+                .unwrap()
+                .get_mut(&(owner, ledger))
+                .unwrap()
+                .last_error = Some("x".repeat(middle));
+            let size = Encode!(&legacy_state).unwrap().len();
+            if size == collision_length {
+                break;
+            } else if size < collision_length {
+                low = middle + 1;
+            } else {
+                high = middle - 1;
+            }
+        }
+        let predecessor_blob = Encode!(&legacy_state).unwrap();
+        assert_eq!(predecessor_blob.len(), collision_length);
+        predecessor_blob
+    }
+
+    #[test]
+    fn decoded_legacy_collision_header_is_cleared_before_physical_manager_init() {
+        let predecessor_blob = colliding_legacy_snapshot();
+        let prefix = (predecessor_blob.len() as u64).to_le_bytes();
+        assert_eq!(&prefix[..4], b"MGR\0");
+        assert!(state::try_decode_state(&predecessor_blob).is_some());
+
+        let memory = VectorMemory::default();
+        let byte_len = 8 + predecessor_blob.len() as u64;
+        let pages = byte_len.div_ceil(65_536);
+        assert!(memory.grow(pages) >= 0);
+        memory.write(0, &prefix);
+        memory.write(8, &predecessor_blob);
+
+        let mut observed_prefix = [0u8; 8];
+        memory.read(0, &mut observed_prefix);
+        assert_eq!(observed_prefix, prefix);
+        clear_legacy_header(&memory);
+        memory.read(0, &mut observed_prefix);
+        assert_eq!(observed_prefix, [0; 8]);
+
+        // Exercise the real stable-structures manager and map initialization
+        // against the physical legacy bytes after clearing only their prefix.
+        let manager = MemoryManager::init(memory.clone());
+        let mut map: ReceiptMap = StableBTreeMap::init(manager.get(MEM_RECEIPTS));
+        assert_eq!(map.len(), 0);
+        let owner = Principal::from_slice(&[7]);
+        let ledger = Principal::from_slice(&[8]);
+        let value = StoredReceipt {
+            ledger,
+            receipt: receipt(owner, 10),
+        };
+        append_to_map(&mut map, (owner, 10), value).expect("initialize map over legacy memory");
+        assert_eq!(map.len(), 1);
     }
 
     #[test]

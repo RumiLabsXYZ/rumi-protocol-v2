@@ -3923,16 +3923,22 @@ pub fn load_from_stable_memory() {
                     "unsupported SP stable-memory layout version {version}"
                 ));
             }
-            let state = crate::receipt_store::load_snapshot().unwrap_or_else(|| {
+            let mut state = crate::receipt_store::load_snapshot().unwrap_or_else(|| {
                 ic_cdk::trap("SP MemoryManager layout is missing its state snapshot")
             });
-            if let Err(reason) = crate::receipt_store::validate_compatibility_cache(&state) {
+            if let Err(reason) = crate::receipt_store::validate_compatibility_cache(&mut state) {
                 ic_cdk::trap(&reason);
             }
             replace_state(state);
             return;
         }
-        crate::receipt_store::ExistingStableLayout::Legacy(state) => state,
+        crate::receipt_store::ExistingStableLayout::Legacy(state) => {
+            // Decode the complete raw snapshot first, then remove only its
+            // legacy length prefix before MemoryManager claims offset zero.
+            // Any later trap rolls the whole upgrade back under IC semantics.
+            crate::receipt_store::clear_legacy_header_before_manager_init();
+            state
+        }
         crate::receipt_store::ExistingStableLayout::Invalid(preview) => {
             let preview_len = preview.len();
             let preview_hex: String = preview

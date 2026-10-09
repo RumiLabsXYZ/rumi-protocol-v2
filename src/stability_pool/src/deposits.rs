@@ -1016,7 +1016,11 @@ fn complete_outbound_payout_and_append(
     now_ns: u64,
 ) -> bool {
     let timestamp = payout.transfer_created_at_time_ns;
-    if let Some(existing) = crate::receipt_store::get(caller, timestamp) {
+    let existing = match crate::receipt_store::get(caller, timestamp) {
+        Ok(existing) => existing,
+        Err(reason) => ic_cdk::trap(&reason),
+    };
+    if let Some(existing) = existing {
         let has_pending = read_state(|state| {
             state
                 .pending_outbound_payout(&caller, &ledger)
@@ -2008,6 +2012,7 @@ mod tests {
         assert!(complete_outbound_payout_and_append(caller, ledger, &pending, 700, 800));
 
         let permanent = crate::receipt_store::get(caller, timestamp)
+            .expect("permanent receipt decodes")
             .expect("permanent journal retains receipt evicted from compatibility cache");
         assert_eq!(permanent.ledger, ledger);
         assert_eq!(permanent.receipt.payout.transfer_created_at_time_ns, timestamp);

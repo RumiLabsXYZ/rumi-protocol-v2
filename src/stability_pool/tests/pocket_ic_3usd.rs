@@ -5,6 +5,7 @@ use icrc_ledger_types::icrc2::approve::ApproveArgs;
 use pocket_ic::{PocketIcBuilder, WasmResult};
 use sha2::{Digest, Sha256};
 use stability_pool::types::*;
+use std::time::Duration;
 
 // ─── Candid types for ICRC-1 ledger initialization ───
 
@@ -971,6 +972,13 @@ fn claim_journal_upgrade_migrates_populated_predecessor_and_reopens_new_layout()
             assert!(!page.has_more);
         }
         WasmResult::Reject(message) => panic!("migrated claim journal query rejected: {message}"),
+    }
+
+    // PocketIC server 7 rate-limits another install_code after a costly
+    // upgrade until scheduler rounds have consumed the prior install debit.
+    env.pic.advance_time(Duration::from_secs(60));
+    for _ in 0..10 {
+        env.pic.tick();
     }
 
     env.pic
