@@ -687,9 +687,9 @@ fn handle_transfer_from_outcome(
     outer: Result<Result<Nat, TransferFromError>, (i32, String)>,
 ) -> Result<u64, TransferFromError> {
     match outer {
-        Ok(Ok(block)) => Ok(block.0.to_u64().unwrap_or(0)),
+        Ok(Ok(block)) => transfer_from_block_index_to_u64(block),
         Ok(Err(TransferFromError::Duplicate { duplicate_of })) => {
-            let block = duplicate_of.0.to_u64().unwrap_or(0);
+            let block = transfer_from_block_index_to_u64(duplicate_of)?;
             log!(DEBUG,
                 "[transfer_from_idempotent] ledger {} reported Duplicate; treating as success (block {})",
                 ledger, block
@@ -710,6 +710,92 @@ fn handle_transfer_from_outcome(
             error_code: Nat::from(code.max(0) as u64),
             message: msg,
         }),
+    }
+}
+
+/// `TransferFromError` is part of the existing public Candid surface, so an
+/// unrepresentable block index is surfaced as a tagged GenericError instead
+/// of adding a new variant or pretending the block was zero. The ledger may
+/// already have committed the pull; this helper reports that ambiguity but
+/// does not create a durable hold. Non-journaled callers still lack a durable
+/// hold across retries; that requires the separate B-NEW-2/3 journaling work.
+fn transfer_from_block_index_to_u64(block: Nat) -> Result<u64, TransferFromError> {
+    block.0.to_u64().ok_or_else(|| TransferFromError::GenericError {
+        // Use a code outside the backend's supported u64 block-index range so
+        // this outcome is distinguishable from ordinary ledger GenericError.
+        error_code: Nat::from(u128::from(u64::MAX) + 1),
+        message: format!(
+            "ICRC-2 transfer_from returned block index {block} outside the backend u64 range; the pull may have committed and must be reconciled before retrying"
+        ),
+    })
+}
+
+#[cfg(test)]
+mod transfer_from_outcome_tests {
+    use super::*;
+
+    fn assert_unrepresentable_result_is_rejected_without_fake_block(
+        result: Result<u64, TransferFromError>,
+    ) {
+        let error = result.expect_err("unrepresentable transfer_from index must be rejected");
+        match error {
+            TransferFromError::GenericError {
+                error_code,
+                message,
+            } => {
+                assert_eq!(error_code, Nat::from(u128::from(u64::MAX) + 1));
+                assert!(message.contains("outside the backend u64 range"));
+                assert!(message.contains("pull may have committed"));
+                assert!(message.contains("must be reconciled before retrying"));
+            }
+            other => panic!("expected tagged ambiguous outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oversized_success_index_cannot_be_returned_as_a_fake_block() {
+        let ledger = Principal::anonymous();
+        let oversized = Nat::from(u128::from(u64::MAX) + 1);
+
+        assert_unrepresentable_result_is_rejected_without_fake_block(handle_transfer_from_outcome(
+            ledger,
+            Ok(Ok(oversized)),
+        ));
+    }
+
+    #[test]
+    fn oversized_duplicate_index_cannot_be_returned_as_a_fake_block() {
+        let ledger = Principal::anonymous();
+        let oversized = Nat::from(u128::from(u64::MAX) + 1);
+
+        assert_unrepresentable_result_is_rejected_without_fake_block(handle_transfer_from_outcome(
+            ledger,
+            Ok(Err(TransferFromError::Duplicate {
+                duplicate_of: oversized,
+            })),
+        ));
+    }
+
+    #[test]
+    fn representable_indices_and_typed_no_effect_errors_keep_their_semantics() {
+        let ledger = Principal::anonymous();
+        assert_eq!(
+            handle_transfer_from_outcome(ledger, Ok(Ok(Nat::from(42u64))),),
+            Ok(42)
+        );
+        assert_eq!(
+            handle_transfer_from_outcome(
+                ledger,
+                Ok(Err(TransferFromError::Duplicate {
+                    duplicate_of: Nat::from(42u64),
+                })),
+            ),
+            Ok(42),
+        );
+        assert_eq!(
+            handle_transfer_from_outcome(ledger, Ok(Err(TransferFromError::TooOld))),
+            Err(TransferFromError::TooOld),
+        );
     }
 }
 
