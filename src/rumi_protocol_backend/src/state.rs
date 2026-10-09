@@ -70,6 +70,40 @@ mod three_usd_reserve_ingress_state_tests {
     }
 
     #[test]
+    fn capped_legacy_3usd_refund_stays_durable_and_keeps_its_transfer_tuple() {
+        let mut state = super::State::default();
+        let row = PendingThreeUsdRefund {
+            stability_pool: Principal::from_slice(&[1]),
+            ledger: Principal::from_slice(&[2]),
+            amount_e8s: 33,
+            vault_id: 4,
+            retry_count: 0,
+            op_nonce: 5,
+            source: ThreeUsdRefundSource::LegacyHashedReserve,
+            parent_absorb_id: None,
+            dispatch_amount_e8s: None,
+            dispatch_fee_e8s: None,
+            dispatch_submitted: false,
+            dispatch_block_index: None,
+        };
+        state.pending_3usd_refunds.insert(row.op_nonce, row);
+
+        for _ in 0..crate::MAX_PENDING_RETRIES {
+            state.note_pending_3usd_refund_failure(row.op_nonce).unwrap();
+        }
+
+        let retained = state.pending_3usd_refunds.get(&row.op_nonce).unwrap();
+        let expected = PendingThreeUsdRefund {
+            retry_count: crate::MAX_PENDING_RETRIES,
+            ..row
+        };
+        assert_eq!(*retained, expected);
+        assert!(!crate::pending_3usd_refund_is_automatically_retryable(
+            retained.retry_count
+        ));
+    }
+
+    #[test]
     fn new_reserve_ingress_admission_is_default_off() {
         let state = super::State::default();
         assert!(!state.three_usd_reserve_ingress_enabled);
@@ -3450,6 +3484,14 @@ impl From<InitArg> for State {
 }
 
 impl State {
+    /// Record a failed 3USD refund attempt while retaining the liability row,
+    /// including when the automatic retry cap is reached.
+    pub fn note_pending_3usd_refund_failure(&mut self, nonce: u128) -> Option<u8> {
+        let refund = self.pending_3usd_refunds.get_mut(&nonce)?;
+        refund.retry_count = refund.retry_count.saturating_add(1);
+        Some(refund.retry_count)
+    }
+
     /// Quarantine legacy AMM1 retries whose ledger mint tuple was never
     /// persisted. Replaying them as fresh mints could duplicate a committed
     /// donation, so preserve each obligation for operator reconciliation.

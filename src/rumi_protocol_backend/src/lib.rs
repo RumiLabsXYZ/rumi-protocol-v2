@@ -25,6 +25,10 @@ fn pending_refund_is_automatically_retryable(retry_count: u8) -> bool {
     retry_count < MAX_PENDING_RETRIES
 }
 
+fn pending_3usd_refund_is_automatically_retryable(retry_count: u8) -> bool {
+    retry_count < MAX_PENDING_RETRIES
+}
+
 fn redemption_transfer_meets_minimum(
     gross_raw: u64,
     fee_raw: u64,
@@ -1806,7 +1810,9 @@ pub async fn process_pending_transfer() {
     let pending_3usd_refunds = read_state(|s| {
         s.pending_3usd_refunds
             .iter()
-            .filter(|(_, refund)| refund.retry_count < MAX_PENDING_RETRIES)
+            .filter(|(_, refund)| {
+                pending_3usd_refund_is_automatically_retryable(refund.retry_count)
+            })
             .map(|(k, v)| (*k, *v))
             .collect::<Vec<(u128, crate::state::PendingThreeUsdRefund)>>()
     });
@@ -2081,30 +2087,19 @@ pub async fn process_pending_transfer() {
                     }
                 } else {
                     let retries = mutate_state(|s| {
-                        if let Some(r) = s.pending_3usd_refunds.get_mut(&nonce_key) {
-                            r.retry_count = r.retry_count.saturating_add(1);
-                            r.retry_count
-                        } else {
-                            0
-                        }
+                        s.note_pending_3usd_refund_failure(nonce_key).unwrap_or(0)
                     });
                     if retries >= MAX_PENDING_RETRIES {
                         log!(
                             INFO,
-                            "[refunding] CRITICAL: abandoning 3USD reserve refund for SP {} (vault {}) \
+                            "[refunding] CRITICAL: holding 3USD reserve refund for SP {} (vault {}) \
                              after {} retries. Amount: {}. Manual reconciliation required.",
                             refund.stability_pool,
                             refund.vault_id,
                             retries,
                             refund.amount_e8s
                         );
-                        if refund.source == crate::state::ThreeUsdRefundSource::LegacyHashedReserve {
-                            // Preserve the historical worker policy for rows from the old route.
-                            mutate_state(|s| {
-                                s.pending_3usd_refunds.remove(&nonce_key);
-                            });
-                        }
-                        // V2 rows stay durable so their SP can reconcile the exact refund proof.
+                        // Keep every capped obligation durable for reconciliation.
                     }
                 }
             }
@@ -2127,7 +2122,9 @@ pub async fn process_pending_transfer() {
             .any(|refund| pending_refund_is_automatically_retryable(refund.retry_count))
             || s.pending_3usd_refunds
                 .values()
-                .any(|refund| refund.retry_count < MAX_PENDING_RETRIES)
+                .any(|refund| {
+                    pending_3usd_refund_is_automatically_retryable(refund.retry_count)
+                })
     }) {
         // Schedule another check in 5 seconds
         log!(
