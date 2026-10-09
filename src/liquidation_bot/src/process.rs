@@ -16,6 +16,49 @@ thread_local! {
 /// Every typed first-dispatch BadFee is retained before a refresh.
 const MAX_AUTO_RETURN_FEE_REFRESHES: usize = 3;
 
+fn persist_swap_intent(
+    vault_id: u64,
+    claim_generation: u64,
+    config: &BotConfig,
+    prepared: &swap::PreparedSwap,
+    pre_swap_ckusdc_balance_e6: u64,
+) -> Result<(), String> {
+    let now = ic_cdk::api::time();
+    let persisted = state::mutate_state(|s| {
+        let Some(claim) = s.pending_claims.get_mut(&vault_id) else {
+            return false;
+        };
+        if claim.claim_generation != claim_generation
+            || claim.status != state::BotClaimJournalStatus::SwapMayHaveStarted
+        {
+            return false;
+        }
+        let ordinal = u32::try_from(claim.swap_intents.len())
+            .ok()
+            .and_then(|length| length.checked_add(1));
+        let Some(attempt_ordinal) = ordinal else { return false };
+        claim.swap_intents.push(state::BotSwapIntent {
+            pool_principal: config.icpswap_pool,
+            input_ledger_principal: config.icp_ledger,
+            output_ledger_principal: config.ckusdc_ledger,
+            amount_in_e8s: prepared.amount_in_e8s,
+            amount_out_minimum_e6: prepared.amount_out_minimum_e6,
+            zero_for_one: prepared.zero_for_one,
+            input_fee_e8s: prepared.input_fee_e8s,
+            output_fee_e6: prepared.output_fee_e6,
+            attempt_ordinal,
+            created_at_time: now,
+            pre_swap_ckusdc_balance_e6,
+        });
+        true
+    });
+    if !persisted {
+        return Err("claim generation changed or swap intent could not be persisted".into());
+    }
+    state::save_config_to_stable();
+    Ok(())
+}
+
 /// Max number of times the bot will re-attempt `bot_claim_liquidation` for a
 /// single vault before giving up and letting the cascade escalate to the SP.
 /// Each retry costs ~30s of bot processing time. Three is enough to ride out
@@ -56,6 +99,65 @@ fn payment_receipt_is_short(
     receipt: &swap::TransferReceipt,
 ) -> bool {
     receipt.amount < required_ckusdc_net(journal.debt_covered_e8s)
+}
+
+fn shortfall_residual(journal: &state::BotPaymentJournal) -> Result<(u64, u64), String> {
+    let receipt = journal
+        .receipt
+        .as_ref()
+        .ok_or_else(|| "shortfall recovery requires the original payment receipt".to_string())?;
+    let required = required_ckusdc_net(journal.debt_covered_e8s);
+    if receipt.amount >= required {
+        return Err("original payment receipt is not short".into());
+    }
+    let residual = required
+        .checked_sub(receipt.amount)
+        .ok_or_else(|| "shortfall residual underflow".to_string())?;
+    if residual == 0 {
+        return Err("shortfall residual is zero".into());
+    }
+    Ok((receipt.amount, residual))
+}
+
+fn dispatch_only_after_original_receipt_verification<T>(
+    verification: Result<(), String>,
+    transfer: impl FnOnce() -> T,
+) -> Result<T, String> {
+    verification?;
+    Ok(transfer())
+}
+
+fn prepare_shortfall_topup_intent(
+    journal: &state::BotPaymentJournal,
+    fee_e6: u64,
+    created_at_time: u64,
+    funding_allocation_e6: u64,
+) -> Result<state::BotPaymentTopUpJournal, String> {
+    let (_, residual) = shortfall_residual(journal)?;
+    let exact_allocation = residual
+        .checked_add(fee_e6)
+        .ok_or_else(|| "residual amount plus ledger fee overflowed".to_string())?;
+    if funding_allocation_e6 != exact_allocation {
+        return Err(format!(
+            "administrator allocation must equal the exact residual plus fee: {} e6",
+            exact_allocation
+        ));
+    }
+    let original = journal.receipt.as_ref().expect("shortfall_residual checked receipt");
+    if created_at_time <= original.created_at_time {
+        return Err("clock has not advanced beyond the original payment tuple".into());
+    }
+    Ok(state::BotPaymentTopUpJournal {
+        backend_principal: journal.backend_principal,
+        ledger_principal: journal.ledger_principal,
+        amount_e6: residual,
+        fee_e6,
+        created_at_time,
+        memo: journal.memo.clone(),
+        funding_allocation_e6,
+        status: state::BotPaymentStatus::Prepared,
+        receipt: None,
+    })
 }
 
 async fn choose_bounded_topup_amount(
@@ -298,16 +400,7 @@ fn apply_confirmed_payment_totals_once(
     journal: &state::BotPaymentJournal,
     transferred_amount_e6: u64,
 ) -> bool {
-    let matches_pending = bot_state
-        .pending_payments
-        .get(&journal.vault_id)
-        .is_some_and(|pending| {
-            pending.claim_generation == journal.claim_generation
-                && pending.ledger_principal == journal.ledger_principal
-                && pending.created_at_time == journal.created_at_time
-                && pending.memo == journal.memo
-        });
-    if !matches_pending {
+    if !pending_payment_matches(bot_state, journal) {
         return false;
     }
 
@@ -330,6 +423,21 @@ fn apply_confirmed_payment_totals_once(
     bot_state.stats.events_count = bot_state.stats.events_count.saturating_add(1);
     bot_state.pending_payments.remove(&journal.vault_id);
     true
+}
+
+fn pending_payment_matches(
+    bot_state: &state::BotState,
+    journal: &state::BotPaymentJournal,
+) -> bool {
+    bot_state
+        .pending_payments
+        .get(&journal.vault_id)
+        .is_some_and(|pending| {
+            pending.claim_generation == journal.claim_generation
+                && pending.ledger_principal == journal.ledger_principal
+                && pending.created_at_time == journal.created_at_time
+                && pending.memo == journal.memo
+        })
 }
 
 /// Compute the per-claim ckUSDC reservation from balance snapshots.
@@ -583,6 +691,7 @@ pub async fn process_pending() {
                     collateral_return_memo: r.collateral_return_memo.clone(),
                     failed_return_attempts: Vec::new(),
                     collateral_return: None,
+                    swap_intents: Vec::new(),
                     status: state::BotClaimJournalStatus::SwapMayHaveStarted,
                 });
             });
@@ -760,7 +869,19 @@ pub async fn process_pending() {
         }
     };
 
-    let swap_result = swap::swap_icp_for_ckusdc(&config, swap_amount).await;
+    let swap_result = match swap::prepare_icp_for_ckusdc(&config, swap_amount).await {
+        Err(error) => Err(error),
+        Ok(prepared) => match persist_swap_intent(
+            vault.vault_id,
+            claim_generation,
+            &config,
+            &prepared,
+            bal_before_swap,
+        ) {
+            Ok(()) => swap::dispatch_prepared_swap(&config, &prepared).await,
+            Err(error) => Err(swap::SwapAttemptError::NoEffect(error)),
+        },
+    };
 
     if let Err(swap_err) = &swap_result {
         if !swap::swap_error_allows_return(swap_err) {
@@ -972,7 +1093,20 @@ pub async fn process_pending() {
                         return;
                     }
                 };
-                match swap::swap_icp_for_ckusdc(&config, topup_icp).await {
+                let topup_result = match swap::prepare_icp_for_ckusdc(&config, topup_icp).await {
+                    Err(error) => Err(error),
+                    Ok(prepared) => match persist_swap_intent(
+                        vault.vault_id,
+                        claim_generation,
+                        &config,
+                        &prepared,
+                        before,
+                    ) {
+                        Ok(()) => swap::dispatch_prepared_swap(&config, &prepared).await,
+                        Err(error) => Err(swap::SwapAttemptError::NoEffect(error)),
+                    },
+                };
+                match topup_result {
                     Ok(extra) => {
                         let after = match swap::balance_of_self_ckusdc(&config).await {
                             Ok(balance) => balance,
@@ -1064,6 +1198,7 @@ pub async fn process_pending() {
         status: state::BotPaymentStatus::Prepared,
         receipt: None,
         shortfall_receipt_observed: false,
+        shortfall_topup: None,
     };
     state::mutate_state(|s| {
         s.pending_claims.remove(&vault.vault_id);
@@ -1134,10 +1269,10 @@ pub async fn process_pending() {
         state::save_config_to_stable();
         let minimum = required_ckusdc_net(debt_covered);
         let message = format!(
-            "exact ckUSDC receipt is short (received {}, required {}); claim and receipt held pending a cumulative-payment recovery implementation",
+            "exact ckUSDC receipt is short (received {}, required {}); claim and receipt held pending explicit admin allocation of the exact residual plus fee",
             ckusdc_transferred.amount, minimum
         );
-        log!(crate::INFO, "STUCK: {} for vault #{}; do not retry this proof or release the claim", message, vault.vault_id);
+        log!(crate::INFO, "STUCK: {} for vault #{}; original receipt is preserved and no second transfer will occur without admin authorization", message, vault.vault_id);
         write_record(LiquidationRecordV1 {
             id: record_id, vault_id: vault.vault_id, timestamp,
             status: LiquidationStatus::ConfirmFailed,
@@ -1262,8 +1397,7 @@ async fn resume_pending_payment(config: &BotConfig) -> bool {
         return true;
     }
     if journal.shortfall_receipt_observed {
-        log!(crate::INFO, "STUCK: short payment receipt for vault #{} remains held; cumulative claim-generation proof support is not available", journal.vault_id);
-        return true;
+        return resume_shortfall_payment(config, journal).await;
     }
 
     if journal.receipt.is_none() {
@@ -1316,7 +1450,7 @@ async fn resume_pending_payment(config: &BotConfig) -> bool {
         journal.shortfall_receipt_observed = true;
         state::mutate_state(|s| { s.pending_payments.insert(journal.vault_id, journal.clone()); });
         state::save_config_to_stable();
-        log!(crate::INFO, "STUCK: exact ckUSDC block {} for vault #{} is short ({} received, {} required); claim remains held pending cumulative-payment recovery support", receipt.block_index, journal.vault_id, receipt.amount, required_ckusdc_net(journal.debt_covered_e8s));
+        log!(crate::INFO, "STUCK: exact ckUSDC block {} for vault #{} is short ({} received, {} required); original receipt remains held pending explicit admin allocation of the exact residual plus fee", receipt.block_index, journal.vault_id, receipt.amount, required_ckusdc_net(journal.debt_covered_e8s));
         return true;
     }
     let proof = BotPaymentProof {
@@ -1342,6 +1476,167 @@ async fn resume_pending_payment(config: &BotConfig) -> bool {
             state::save_config_to_stable();
             log!(crate::INFO, "Payment block is durable but backend proof confirmation remains pending for vault #{}: {}", journal.vault_id, error);
         }
+    }
+    true
+}
+
+/// Resume only an administrator-authorized residual ckUSDC transfer. The
+/// original short receipt is immutable; the persisted top-up tuple is replayed
+/// exactly after an ambiguous reply, then both blocks are submitted together.
+async fn resume_shortfall_payment(
+    config: &BotConfig,
+    mut journal: state::BotPaymentJournal,
+) -> bool {
+    let Ok((original_amount, residual)) = shortfall_residual(&journal) else {
+        log!(crate::INFO, "STUCK: short payment journal for vault #{} lacks a valid original receipt", journal.vault_id);
+        return true;
+    };
+    let Some(mut topup) = journal.shortfall_topup.clone() else {
+        log!(crate::INFO, "STUCK: short payment for vault #{} needs explicit admin funding allocation of exactly {} ckUSDC e6 plus the ledger fee", journal.vault_id, residual);
+        return true;
+    };
+    if config.backend_principal != journal.backend_principal
+        || config.ckusdc_ledger != journal.ledger_principal
+        || topup.backend_principal != journal.backend_principal
+        || topup.ledger_principal != journal.ledger_principal
+        || topup.memo != journal.memo
+        || topup.amount_e6 != residual
+        || topup.funding_allocation_e6
+            != topup.amount_e6.saturating_add(topup.fee_e6)
+    {
+        log!(crate::INFO, "STUCK: residual payment tuple for vault #{} does not match the persisted claim allocation", journal.vault_id);
+        return true;
+    }
+
+    if topup.receipt.is_none() {
+        // Re-verify the original receipt on every dispatch attempt. This also
+        // protects journals persisted by older code where an operator-supplied
+        // block index may have been stored without proof.
+        let Some(original_receipt) = journal.receipt.as_ref() else {
+            return true;
+        };
+        let original_receipt_verification = call_bot_verify_liquidation_payment_proof(
+            config,
+            BotPaymentProof {
+                vault_id: journal.vault_id,
+                claim_generation: journal.claim_generation,
+                ledger_principal: journal.ledger_principal,
+                block_index: original_receipt.block_index,
+                amount_e6s: original_receipt.amount,
+                created_at_time: original_receipt.created_at_time,
+            },
+        )
+        .await;
+        if topup.status == state::BotPaymentStatus::NoEffect {
+            log!(crate::INFO, "STUCK: residual payment for vault #{} had a definitive no-effect response; explicit repair is required", journal.vault_id);
+            return true;
+        }
+        const SAFE_RETRY_WINDOW_NS: u64 = 23 * 60 * 60 * 1_000_000_000;
+        if ic_cdk::api::time().saturating_sub(topup.created_at_time) >= SAFE_RETRY_WINDOW_NS {
+            log!(crate::INFO, "STUCK: residual payment tuple for vault #{} exceeded the safe dedup window; exact ICRC-3 history reconciliation is required", journal.vault_id);
+            return true;
+        }
+        let transfer = match dispatch_only_after_original_receipt_verification(
+            original_receipt_verification,
+            || {
+                swap::transfer_ckusdc_to_backend(
+                    config,
+                    topup.amount_e6,
+                    topup.memo.clone(),
+                    topup.created_at_time,
+                    topup.fee_e6,
+                )
+            },
+        ) {
+            Ok(transfer) => transfer,
+            Err(error) => {
+                log!(crate::INFO, "STUCK: original short-payment block for vault #{} is not independently verified; residual transfer remains undispatched: {}", journal.vault_id, error);
+                return true;
+            }
+        };
+        match transfer.await {
+            Ok(receipt) => {
+                topup.status = state::BotPaymentStatus::ReceiptObserved;
+                topup.receipt = Some(receipt);
+            }
+            Err(swap::TransferAttemptError::Ambiguous(error)) => {
+                topup.status = state::BotPaymentStatus::Ambiguous;
+                journal.shortfall_topup = Some(topup);
+                state::mutate_state(|s| { s.pending_payments.insert(journal.vault_id, journal.clone()); });
+                state::save_config_to_stable();
+                log!(crate::INFO, "Residual payment outcome remains ambiguous for vault #{}: {}", journal.vault_id, error);
+                return true;
+            }
+            Err(swap::TransferAttemptError::NoEffect(error)) => {
+                topup.status = state::BotPaymentStatus::NoEffect;
+                journal.shortfall_topup = Some(topup);
+                state::mutate_state(|s| { s.pending_payments.insert(journal.vault_id, journal.clone()); });
+                state::save_config_to_stable();
+                log!(crate::INFO, "Residual payment had no effect for vault #{}: {}", journal.vault_id, error);
+                return true;
+            }
+            Err(swap::TransferAttemptError::BadFee { expected_fee }) => {
+                // This tuple was rejected without effect. Keep its exact fee
+                // identity and require operator reconciliation before a new
+                // tuple is authorized.
+                topup.status = state::BotPaymentStatus::NoEffect;
+                journal.shortfall_topup = Some(topup);
+                state::mutate_state(|s| { s.pending_payments.insert(journal.vault_id, journal.clone()); });
+                state::save_config_to_stable();
+                log!(crate::INFO, "Residual payment fee was rejected for vault #{} (expected {}); tuple remains held", journal.vault_id, expected_fee);
+                return true;
+            }
+        }
+        journal.shortfall_topup = Some(topup.clone());
+        state::mutate_state(|s| { s.pending_payments.insert(journal.vault_id, journal.clone()); });
+        state::save_config_to_stable();
+    }
+
+    let Some(original_receipt) = journal.receipt.as_ref() else { return true };
+    let Some(topup_receipt) = topup.receipt.as_ref() else { return true };
+    let Some(total) = original_amount.checked_add(topup_receipt.amount) else {
+        log!(crate::INFO, "STUCK: cumulative payment amount overflow for vault #{}", journal.vault_id);
+        return true;
+    };
+    if original_receipt.block_index == topup_receipt.block_index
+        || topup_receipt.amount != residual
+        || topup_receipt.created_at_time != topup.created_at_time
+        || total != required_ckusdc_net(journal.debt_covered_e8s)
+    {
+        log!(crate::INFO, "STUCK: original plus residual receipts do not form the exact claim payment for vault #{}", journal.vault_id);
+        return true;
+    }
+    let proofs = vec![
+        BotPaymentProof {
+            vault_id: journal.vault_id,
+            claim_generation: journal.claim_generation,
+            ledger_principal: journal.ledger_principal,
+            block_index: original_receipt.block_index,
+            amount_e6s: original_receipt.amount,
+            created_at_time: original_receipt.created_at_time,
+        },
+        BotPaymentProof {
+            vault_id: journal.vault_id,
+            claim_generation: journal.claim_generation,
+            ledger_principal: journal.ledger_principal,
+            block_index: topup_receipt.block_index,
+            amount_e6s: topup_receipt.amount,
+            created_at_time: topup_receipt.created_at_time,
+        },
+    ];
+    match call_bot_confirm_liquidation_with_proofs(config, proofs).await {
+        Ok(()) => {
+            let applied = state::mutate_state(|s| {
+                apply_confirmed_payment_totals_once(s, &journal, total)
+            });
+            if applied {
+                state::save_config_to_stable();
+                log!(crate::INFO, "Recovered exact cumulative payment for vault #{} from blocks {} and {}; unswapped ICP remains held for reconciliation", journal.vault_id, original_receipt.block_index, topup_receipt.block_index);
+            } else {
+                log!(crate::INFO, "Cumulative payment proof was accepted for vault #{}, but its local journal identity changed; operator reconciliation is required", journal.vault_id);
+            }
+        }
+        Err(error) => log!(crate::INFO, "Cumulative payment proof remains pending for vault #{}: {}", journal.vault_id, error),
     }
     true
 }
@@ -1801,6 +2096,77 @@ pub async fn admin_retry_no_effect_payment(
     }
 }
 
+/// Persist and dispatch one exact residual transfer after an administrator
+/// explicitly allocates the required ckUSDC from the bot's mixed account.
+/// The amount sent is always the claim's exact shortfall; the allocation also
+/// covers its separately charged ledger fee.
+pub async fn admin_authorize_shortfall_topup(
+    config: &BotConfig,
+    vault_id: u64,
+    funding_allocation_e6: u64,
+) -> Result<(), String> {
+    let mut journal = state::read_state(|s| s.pending_payments.get(&vault_id).cloned())
+        .ok_or_else(|| "no pending payment journal for this vault".to_string())?;
+    if config.backend_principal != journal.backend_principal
+        || config.ckusdc_ledger != journal.ledger_principal
+    {
+        return Err("configured backend or ckUSDC ledger differs from the payment journal".into());
+    }
+    shortfall_residual(&journal)?;
+    let receipt = journal
+        .receipt
+        .as_ref()
+        .expect("shortfall_residual checked receipt");
+    call_bot_verify_liquidation_payment_proof(
+        config,
+        BotPaymentProof {
+            vault_id: journal.vault_id,
+            claim_generation: journal.claim_generation,
+            ledger_principal: journal.ledger_principal,
+            block_index: receipt.block_index,
+            amount_e6s: receipt.amount,
+            created_at_time: receipt.created_at_time,
+        },
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "original short-payment block is not independently verified; no residual tuple was authorized: {error}"
+        )
+    })?;
+    if !journal.shortfall_receipt_observed {
+        journal.shortfall_receipt_observed = true;
+    }
+    if let Some(existing) = journal.shortfall_topup.as_ref() {
+        if existing.funding_allocation_e6 != funding_allocation_e6 {
+            return Err("a residual payment tuple already exists with a different funding allocation".into());
+        }
+    } else {
+        let fee = swap::fetch_ledger_fee(journal.ledger_principal).await?;
+        let balance = swap::balance_of_self_ckusdc(config).await?;
+        if balance < funding_allocation_e6 {
+            return Err(format!(
+                "bot ckUSDC balance {} is below the explicitly allocated residual debit {}",
+                balance, funding_allocation_e6
+            ));
+        }
+        journal.shortfall_topup = Some(prepare_shortfall_topup_intent(
+            &journal,
+            fee,
+            ic_cdk::api::time(),
+            funding_allocation_e6,
+        )?);
+    }
+    state::mutate_state(|s| { s.pending_payments.insert(vault_id, journal.clone()); });
+    state::save_config_to_stable();
+    resume_shortfall_payment(config, journal).await;
+    if state::read_state(|s| s.pending_payments.contains_key(&vault_id)) {
+        Err("shortfall top-up or cumulative backend proof remains pending; inspect the durable payment journal".into())
+    } else {
+        Ok(())
+    }
+}
+
 /// Operator supplies a candidate ledger block from ICRC-3 history. The backend
 /// independently verifies every tuple field against the claim before debt
 /// changes, so this endpoint cannot authorize a forged block.
@@ -1814,6 +2180,23 @@ pub async fn admin_reconcile_payment_block(
     if journal.receipt.is_some() {
         return Err("payment journal already has a recorded block".into());
     }
+    call_bot_verify_liquidation_payment_proof(
+        config,
+        BotPaymentProof {
+            vault_id: journal.vault_id,
+            claim_generation: journal.claim_generation,
+            ledger_principal: journal.ledger_principal,
+            block_index,
+            amount_e6s: journal.amount_e6,
+            created_at_time: journal.created_at_time,
+        },
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "candidate original payment block did not prove the exact claim-bound transfer; journal remains unchanged: {error}"
+        )
+    })?;
     journal.receipt = Some(swap::TransferReceipt {
         block_index,
         amount: journal.amount_e6,
@@ -1827,6 +2210,23 @@ pub async fn admin_reconcile_payment_block(
         Err("candidate block was not accepted or confirmation remains pending; inspect the durable journal".into())
     } else {
         Ok(())
+    }
+}
+
+async fn call_bot_verify_liquidation_payment_proof(
+    config: &BotConfig,
+    proof: BotPaymentProof,
+) -> Result<(), String> {
+    let result: Result<(BackendResult<()>,), _> = ic_cdk::call(
+        config.backend_principal,
+        "bot_verify_liquidation_payment_proof",
+        (proof,),
+    )
+    .await;
+    match result {
+        Ok((BackendResult::Ok(()),)) => Ok(()),
+        Ok((BackendResult::Err(error),)) => Err(format!("{}", error)),
+        Err((code, message)) => Err(format!("{:?}: {}", code, message)),
     }
 }
 
@@ -1889,6 +2289,23 @@ async fn call_bot_confirm_liquidation_with_proof(
         Ok((BackendResult::Ok(()),)) => Ok(()),
         Ok((BackendResult::Err(e),)) => Err(format!("{}", e)),
         Err((code, msg)) => Err(format!("{:?}: {}", code, msg)),
+    }
+}
+
+async fn call_bot_confirm_liquidation_with_proofs(
+    config: &BotConfig,
+    proofs: Vec<BotPaymentProof>,
+) -> Result<(), String> {
+    let result: Result<(BackendResult<()>,), _> = ic_cdk::call(
+        config.backend_principal,
+        "bot_confirm_liquidation_with_proofs",
+        (proofs,),
+    )
+    .await;
+    match result {
+        Ok((BackendResult::Ok(()),)) => Ok(()),
+        Ok((BackendResult::Err(error),)) => Err(format!("{}", error)),
+        Err((code, message)) => Err(format!("{:?}: {}", code, message)),
     }
 }
 
@@ -1975,6 +2392,7 @@ mod tests {
             collateral_return_memo: b"claim-19-42-return".to_vec(),
             failed_return_attempts: Vec::new(),
             collateral_return: None,
+            swap_intents: Vec::new(),
             status: state::BotClaimJournalStatus::SwapMayHaveStarted,
         };
 
@@ -2005,6 +2423,7 @@ mod tests {
             collateral_return_memo: b"return-1".to_vec(),
             failed_return_attempts: Vec::new(),
             collateral_return: None,
+            swap_intents: Vec::new(),
             status: state::BotClaimJournalStatus::ReturnPending,
         };
         held.collateral_return = Some(state::BotReturnTransferJournal {
@@ -2030,6 +2449,7 @@ mod tests {
             collateral_return_memo: b"return-2".to_vec(),
             failed_return_attempts: Vec::new(),
             collateral_return: None,
+            swap_intents: Vec::new(),
             status: state::BotClaimJournalStatus::ReturnFeeQueryPending,
         };
         let later_resumable = state::BotClaimJournal {
@@ -2044,6 +2464,7 @@ mod tests {
             collateral_return_memo: b"return-3".to_vec(),
             failed_return_attempts: Vec::new(),
             collateral_return: None,
+            swap_intents: Vec::new(),
             status: state::BotClaimJournalStatus::ReturnFeeQueryPending,
         };
 
@@ -2124,6 +2545,7 @@ mod tests {
                 receipt: None,
                 status: state::BotReturnTransferStatus::Prepared,
             }),
+            swap_intents: Vec::new(),
             status: state::BotClaimJournalStatus::ReturnPending,
         };
 
@@ -2205,6 +2627,7 @@ mod tests {
                 receipt: None,
                 status: state::BotReturnTransferStatus::Ambiguous,
             }),
+            swap_intents: Vec::new(),
             status: state::BotClaimJournalStatus::ReturnPending,
         };
         assert_eq!(archive_first_dispatch_bad_fee(&mut claim), None);
@@ -2266,6 +2689,7 @@ mod tests {
             status: state::BotPaymentStatus::ReceiptObserved,
             receipt: None,
             shortfall_receipt_observed: false,
+            shortfall_topup: None,
         };
         let short = crate::swap::TransferReceipt {
             block_index: 8,
@@ -2279,11 +2703,51 @@ mod tests {
 
         assert!(payment_receipt_is_short(&journal, &short));
         assert!(!payment_receipt_is_short(&journal, &exact));
+        assert_eq!(shortfall_residual(&state::BotPaymentJournal {
+            receipt: Some(short.clone()),
+            ..journal.clone()
+        }).unwrap(), (1_000_000, 1));
+        assert!(shortfall_residual(&state::BotPaymentJournal {
+            receipt: Some(exact.clone()),
+            ..journal.clone()
+        }).is_err(), "an exact receipt must never authorize a second transfer");
+        assert!(shortfall_residual(&state::BotPaymentJournal {
+            receipt: None,
+            ..journal.clone()
+        }).is_err(), "recovery requires the original durable receipt");
+        let with_receipt = state::BotPaymentJournal {
+            receipt: Some(short.clone()),
+            ..journal.clone()
+        };
+        let intent = prepare_shortfall_topup_intent(&with_receipt, 10_000, 124, 10_001).unwrap();
+        assert_eq!(intent.amount_e6, 1);
+        assert_eq!(intent.fee_e6, 10_000);
+        assert_eq!(intent.created_at_time, 124);
+        assert_eq!(intent.memo, with_receipt.memo);
+        assert_eq!(intent.funding_allocation_e6, 10_001);
+        assert_eq!(intent.status, state::BotPaymentStatus::Prepared);
+        assert!(intent.receipt.is_none());
+        assert!(prepare_shortfall_topup_intent(&with_receipt, 10_000, 124, 10_000).is_err());
+        assert!(prepare_shortfall_topup_intent(&with_receipt, 10_000, 123, 10_001).is_err());
         assert_eq!(required_ckusdc_net(u64::MAX), u64::MAX / 100 + 1);
     }
 
     #[test]
-    fn confirmed_payment_totals_and_surplus_are_applied_once() {
+    fn false_original_payment_proof_never_invokes_residual_transfer() {
+        let mut dispatched = false;
+        let result = dispatch_only_after_original_receipt_verification(
+            Err("candidate block does not match the original transfer".into()),
+            || {
+                dispatched = true;
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!dispatched, "failed verification must leave transfer closure uncalled");
+    }
+
+    #[test]
+    fn cumulative_shortfall_confirmation_applies_totals_and_removes_journal_once() {
         let journal = state::BotPaymentJournal {
             vault_id: 19,
             backend_principal: candid::Principal::anonymous(),
@@ -2304,16 +2768,39 @@ mod tests {
             status: state::BotPaymentStatus::Confirmed,
             receipt: Some(crate::swap::TransferReceipt {
                 block_index: 8,
-                amount: 1_000_000,
+                amount: 999_999,
                 created_at_time: 123,
             }),
-            shortfall_receipt_observed: false,
+            shortfall_receipt_observed: true,
+            shortfall_topup: Some(state::BotPaymentTopUpJournal {
+                backend_principal: candid::Principal::anonymous(),
+                ledger_principal: candid::Principal::management_canister(),
+                amount_e6: 1,
+                fee_e6: 10_000,
+                created_at_time: 124,
+                memo: b"claim-19-4".to_vec(),
+                funding_allocation_e6: 10_001,
+                status: state::BotPaymentStatus::ReceiptObserved,
+                receipt: Some(crate::swap::TransferReceipt {
+                    block_index: 9,
+                    amount: 1,
+                    created_at_time: 124,
+                }),
+            }),
         };
+        let topup = journal.shortfall_topup.as_ref().unwrap();
+        let original_receipt = journal.receipt.as_ref().unwrap();
+        let topup_receipt = topup.receipt.as_ref().unwrap();
+        let total = original_receipt.amount + topup_receipt.amount;
+        assert_eq!(total, required_ckusdc_net(journal.debt_covered_e8s));
+        assert_ne!(original_receipt.block_index, topup_receipt.block_index);
         let mut bot_state = state::BotState::default();
         bot_state.pending_payments.insert(journal.vault_id, journal.clone());
 
-        assert!(apply_confirmed_payment_totals_once(&mut bot_state, &journal, 1_000_000));
-        assert!(!apply_confirmed_payment_totals_once(&mut bot_state, &journal, 1_000_000));
+        // Models successful batch proof confirmation followed by a replay of
+        // the same local completion; accounting and journal removal are once-only.
+        assert!(apply_confirmed_payment_totals_once(&mut bot_state, &journal, total));
+        assert!(!apply_confirmed_payment_totals_once(&mut bot_state, &journal, total));
         assert_eq!(bot_state.stats.total_debt_covered_e8s, 100_000_000);
         assert_eq!(bot_state.stats.total_ckusdc_deposited_e6, 1_000_000);
         assert_eq!(bot_state.stats.total_ckusdc_surplus_held_e6, 40_000);
@@ -2487,6 +2974,7 @@ mod tests {
             collateral_return_memo: b"claim-99-42-return".to_vec(),
             failed_return_attempts: Vec::new(),
             collateral_return: None,
+            swap_intents: Vec::new(),
             status: state::BotClaimJournalStatus::SwapMayHaveStarted,
         };
         let mut bot_state = state::BotState::default();

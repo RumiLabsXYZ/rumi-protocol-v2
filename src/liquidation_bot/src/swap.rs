@@ -20,6 +20,15 @@ pub struct SwapResult {
     pub effective_price_e8s: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedSwap {
+    pub amount_in_e8s: u64,
+    pub amount_out_minimum_e6: u64,
+    pub zero_for_one: bool,
+    pub input_fee_e8s: u64,
+    pub output_fee_e6: u64,
+}
+
 /// Whether a swap failure proves the deposit call was never dispatched.
 /// Everything reported by `depositFromAndSwap` itself is outcome-ambiguous.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,7 +54,7 @@ pub(crate) fn swap_error_allows_return(error: &SwapAttemptError) -> bool {
     matches!(error, SwapAttemptError::NoEffect(_))
 }
 
-#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TransferReceipt {
     pub block_index: u64,
     pub amount: u64,
@@ -140,6 +149,16 @@ pub async fn swap_icp_for_ckusdc(
     config: &BotConfig,
     icp_amount_e8s: u64,
 ) -> Result<SwapResult, SwapAttemptError> {
+    let prepared = prepare_icp_for_ckusdc(config, icp_amount_e8s).await?;
+    dispatch_prepared_swap(config, &prepared).await
+}
+
+/// Query the pool and freeze every call argument without dispatching a swap.
+/// Claim processing persists this tuple before calling `dispatch_prepared_swap`.
+pub async fn prepare_icp_for_ckusdc(
+    config: &BotConfig,
+    icp_amount_e8s: u64,
+) -> Result<PreparedSwap, SwapAttemptError> {
     require_icpswap_pool_set(config).map_err(SwapAttemptError::NoEffect)?;
     let zero_for_one = config
         .icpswap_zero_for_one
@@ -172,13 +191,30 @@ pub async fn swap_icp_for_ckusdc(
     let icp_fee = config.icp_fee_e8s.unwrap_or(FALLBACK_LEDGER_FEE);
     let ckusdc_fee = config.ckusdc_fee_e6.unwrap_or(FALLBACK_LEDGER_FEE);
 
+    Ok(PreparedSwap {
+        amount_in_e8s: icp_amount_e8s,
+        amount_out_minimum_e6: min_output,
+        zero_for_one,
+        input_fee_e8s: icp_fee,
+        output_fee_e6: ckusdc_fee,
+    })
+}
+
+/// Dispatch one already prepared call. Any returned error is ambiguous because
+/// the pool can complete ledger work before its reply reaches this canister.
+pub async fn dispatch_prepared_swap(
+    config: &BotConfig,
+    prepared: &PreparedSwap,
+) -> Result<SwapResult, SwapAttemptError> {
+    let icp_amount_e8s = prepared.amount_in_e8s;
+
     let received = icpswap::deposit_and_swap(
         config.icpswap_pool,
         icp_amount_e8s,
-        min_output,
-        zero_for_one,
-        icp_fee,
-        ckusdc_fee,
+        prepared.amount_out_minimum_e6,
+        prepared.zero_for_one,
+        prepared.input_fee_e8s,
+        prepared.output_fee_e6,
     )
     .await
     .map_err(classify_deposit_dispatch_error)?;
@@ -193,7 +229,7 @@ pub async fn swap_icp_for_ckusdc(
 
     log!(
         crate::INFO,
-        "ICPSwap swap complete: {} ckUSDC e6 received, effective price {} e8s",
+        "ICPSwap call returned output claim {} ckUSDC e6, effective price {} e8s; ledger receipt is verified separately",
         received,
         effective_price_e8s
     );

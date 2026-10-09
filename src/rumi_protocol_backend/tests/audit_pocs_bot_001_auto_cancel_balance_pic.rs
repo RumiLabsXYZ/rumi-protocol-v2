@@ -155,6 +155,20 @@ struct ProtocolInitArg {
 #[derive(CandidType, Deserialize, Clone, Debug)]
 enum ProtocolArgVariant {
     Init(ProtocolInitArg),
+    Upgrade(UpgradeArgMirror),
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum ModeMirror {
+    ReadOnly,
+    GeneralAvailability,
+    Recovery,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct UpgradeArgMirror {
+    mode: Option<ModeMirror>,
+    description: Option<String>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -201,6 +215,36 @@ struct BotPaymentProof {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
+struct BotProofAuditRecordMirror {
+    journal_index: u64,
+    after_event_count: u64,
+    event: BotProofAuditEventMirror,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum BotProofAuditEventMirror {
+    #[serde(rename = "bot_proof_mode_enabled")]
+    ProofModeEnabled,
+    #[serde(rename = "bot_claim_generation_reserved")]
+    ClaimGenerationReserved { generation: u64 },
+    #[serde(rename = "bot_payment_proof_consumed")]
+    PaymentProofConsumed {
+        ledger_principal: Principal,
+        block_index: u64,
+        vault_id: u64,
+        claim_generation: u64,
+    },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct BotProofAuditEventsResponseMirror {
+    events: Vec<BotProofAuditRecordMirror>,
+    scan_end: u64,
+    exhausted: bool,
+    total_journal_entries: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
 struct BotCollateralReturnProofArg {
     vault_id: u64,
     claim_generation: u64,
@@ -216,6 +260,17 @@ struct BotStatsResponse {
     budget_remaining_e8s: u64,
     budget_start_timestamp: u64,
     total_debt_covered_e8s: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct CandidVaultMirror {
+    owner: Principal,
+    borrowed_icusd_amount: u64,
+    icp_margin_amount: u64,
+    vault_id: u64,
+    collateral_amount: u64,
+    collateral_type: Principal,
+    accrued_interest: u64,
 }
 
 // Subset of the real GetEventsArg / GetEventsFilteredResponse — only the
@@ -251,8 +306,21 @@ fn icrc1_ledger_wasm() -> Vec<u8> {
 }
 
 fn protocol_wasm() -> Vec<u8> {
-    include_bytes!("../../../target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm")
-        .to_vec()
+    match std::env::var_os("RUMI_BACKEND_TEST_WASM") {
+        Some(path) => {
+            let path = std::path::PathBuf::from(path);
+            std::fs::read(&path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to read RUMI_BACKEND_TEST_WASM at {}: {error}",
+                    path.display()
+                )
+            })
+        }
+        None => {
+            include_bytes!("../../../target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm")
+                .to_vec()
+        }
+    }
 }
 
 fn xrc_wasm() -> Vec<u8> {
@@ -376,6 +444,41 @@ fn icrc1_transfer_call(
     parsed.expect("transfer returned error");
 }
 
+fn icrc1_fee_call(pic: &PocketIc, ledger: Principal) -> u64 {
+    let result = pic
+        .query_call(
+            ledger,
+            Principal::anonymous(),
+            "icrc1_fee",
+            encode_args(()).unwrap(),
+        )
+        .expect("icrc1_fee call failed");
+    let fee: Nat = match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode icrc1_fee"),
+        WasmResult::Reject(message) => panic!("icrc1_fee rejected: {message}"),
+    };
+    use num_traits::ToPrimitive;
+    fee.0.to_u64().expect("ledger fee should fit u64")
+}
+
+fn fund_bot_for_collateral_return_fee(fixture: &Fixture) {
+    let fee = icrc1_fee_call(&fixture.pic, fixture.icp_ledger);
+    if fee > 0 {
+        // The backend's outbound transfer credits gross-minus-fee. Returning
+        // the gross claim amount also debits one fee, so the bot needs two
+        // fees added: one to cover the shortfall to gross and one for the
+        // return transfer's own fee. The test user separately pays the fee
+        // charged on this funding transfer.
+        icrc1_transfer_call(
+            &fixture.pic,
+            fixture.icp_ledger,
+            fixture.test_user,
+            fixture.developer,
+            (fee as u128) * 2,
+        );
+    }
+}
+
 fn icrc1_transfer_tuple_call(
     pic: &PocketIc,
     ledger: Principal,
@@ -459,6 +562,29 @@ fn get_bot_stats(pic: &PocketIc, protocol_id: Principal) -> BotStatsResponse {
     }
 }
 
+fn get_bot_proof_audit_events(
+    pic: &PocketIc,
+    protocol_id: Principal,
+    developer: Principal,
+) -> BotProofAuditEventsResponseMirror {
+    let result = pic
+        .query_call(
+            protocol_id,
+            developer,
+            "get_bot_proof_audit_events",
+            encode_args((0u64, 500u64)).unwrap(),
+        )
+        .expect("get_bot_proof_audit_events call failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            decode_one::<Result<BotProofAuditEventsResponseMirror, ProtocolError>>(&bytes)
+                .expect("decode bot proof audit result")
+                .expect("bot proof audit query should succeed")
+        }
+        WasmResult::Reject(message) => panic!("bot proof audit query rejected: {message}"),
+    }
+}
+
 fn get_bot_claim_vault_ids(pic: &PocketIc, protocol_id: Principal) -> Vec<u64> {
     let result = pic
         .query_call(
@@ -472,6 +598,39 @@ fn get_bot_claim_vault_ids(pic: &PocketIc, protocol_id: Principal) -> Vec<u64> {
         WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode claim vault ids"),
         WasmResult::Reject(message) => panic!("get_bot_claim_vault_ids rejected: {message}"),
     }
+}
+
+fn get_vault_snapshot(pic: &PocketIc, protocol_id: Principal, vault_id: u64) -> CandidVaultMirror {
+    let result = pic
+        .query_call(
+            protocol_id,
+            Principal::anonymous(),
+            "get_vaults",
+            encode_args((None::<Principal>,)).unwrap(),
+        )
+        .expect("get_vaults call failed");
+    let vaults: Vec<CandidVaultMirror> = match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode vault list"),
+        WasmResult::Reject(message) => panic!("get_vaults rejected: {message}"),
+    };
+    vaults
+        .into_iter()
+        .find(|vault| vault.vault_id == vault_id)
+        .expect("vault should remain queryable")
+}
+
+fn upgrade_protocol_with_same_wasm(pic: &PocketIc, protocol_id: Principal) {
+    let upgrade = ProtocolArgVariant::Upgrade(UpgradeArgMirror {
+        mode: None,
+        description: None,
+    });
+    pic.upgrade_canister(
+        protocol_id,
+        protocol_wasm(),
+        encode_args((upgrade,)).expect("encode protocol upgrade arg"),
+        None,
+    )
+    .expect("protocol canister upgrade should succeed");
 }
 
 fn get_bot_001_events(pic: &PocketIc, protocol_id: Principal) -> Vec<Event> {
@@ -896,6 +1055,33 @@ fn call_proof_update<T: CandidType>(
     }
 }
 
+fn record_exact_collateral_return(fixture: &Fixture, claim: &BotLiquidationResult) {
+    fund_bot_for_collateral_return_fee(fixture);
+    let created_at_time = current_ledger_time_ns(&fixture.pic);
+    let block_index = icrc1_transfer_tuple_call(
+        &fixture.pic,
+        fixture.icp_ledger,
+        fixture.developer,
+        fixture.protocol_id,
+        claim.collateral_amount,
+        claim.collateral_return_memo.clone(),
+        created_at_time,
+    )
+    .expect("exact collateral return should commit");
+    call_proof_update(
+        fixture,
+        "bot_record_collateral_return_proof",
+        BotCollateralReturnProofArg {
+            vault_id: claim.vault_id,
+            claim_generation: claim.claim_generation,
+            block_index,
+            amount: claim.collateral_amount,
+            created_at_time,
+        },
+    )
+    .expect("exact collateral return proof should be recorded");
+}
+
 fn current_ledger_time_ns(pic: &PocketIc) -> u64 {
     pic.get_time()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -1011,6 +1197,7 @@ fn bot_001_pic_auto_cancel_proceeds_when_balance_sufficient() {
     // Return the full gross claim amount with its generation-bound memo;
     // the bot pays the return fee separately from its own balance.
     let return_amount = claim.collateral_amount;
+    fund_bot_for_collateral_return_fee(&f);
     let return_time = current_ledger_time_ns(&f.pic);
     let return_block = icrc1_transfer_tuple_call(
         &f.pic,
@@ -1117,6 +1304,7 @@ fn cl_02_pooled_second_vault_balance_cannot_release_claim_without_exact_proof() 
 
     let return_time = current_ledger_time_ns(&f.pic);
     let returned_a = claim_a.collateral_amount;
+    fund_bot_for_collateral_return_fee(&f);
     let return_block_a = icrc1_transfer_tuple_call(
         &f.pic,
         f.icp_ledger,
@@ -1152,6 +1340,7 @@ fn cl_02_pooled_second_vault_balance_cannot_release_claim_without_exact_proof() 
     let budget_with_a2 = get_bot_stats(&f.pic, f.protocol_id).budget_remaining_e8s;
     let return_time_a2 = current_ledger_time_ns(&f.pic);
     let returned_a2 = claim_a2.collateral_amount;
+    fund_bot_for_collateral_return_fee(&f);
     let return_block_a2 = icrc1_transfer_tuple_call(
         &f.pic,
         f.icp_ledger,
@@ -1196,6 +1385,7 @@ fn bot_claim_payment_and_return_proofs_use_exact_icrc3_ledger_blocks() {
     // claim may be canceled. This also exercises ICRC-3 for the ICP ledger.
     let first_claim = bot_claim_call(&f, f.developer, f.vault_id)
         .expect("first bot claim should be active");
+    fund_bot_for_collateral_return_fee(&f);
     let return_time = current_ledger_time_ns(&f.pic);
     let returned_amount = first_claim.collateral_amount;
     let return_block = icrc1_transfer_tuple_call(
@@ -1316,6 +1506,426 @@ fn bot_claim_payment_and_return_proofs_use_exact_icrc3_ledger_blocks() {
         second_claim.debt_covered,
         "proof confirmation should account the claim exactly once"
     );
+}
+
+/// A committed short payment stays available for an additive exact-sum batch:
+/// every ICRC-3 block is checked first, then the claim settles once and both
+/// receipts appear in the private replay journal.
+#[test]
+fn bot_batch_payment_proofs_settle_short_receipt_and_residual_atomically() {
+    let f = setup_fixture();
+    let (_, claim) = seed_bot_claim(&f);
+    let vault_before = get_vault_snapshot(&f.pic, f.protocol_id, f.vault_id);
+    let payment_ledger = claim
+        .payment_ledger_principal
+        .expect("claim must pin configured ckUSDC ledger");
+    let minimum = claim.debt_covered / 100 + u64::from(claim.debt_covered % 100 != 0);
+    let short_amount = minimum - 1;
+    let residual_amount = 1;
+    let short_time = current_ledger_time_ns(&f.pic);
+    let short_block = icrc1_transfer_tuple_call(
+        &f.pic,
+        payment_ledger,
+        f.developer,
+        f.protocol_id,
+        short_amount,
+        claim.payment_memo.clone(),
+        short_time,
+    )
+    .expect("short ckUSDC payment should commit");
+    let short_proof = BotPaymentProof {
+        vault_id: f.vault_id,
+        claim_generation: claim.claim_generation,
+        ledger_principal: payment_ledger,
+        block_index: short_block,
+        amount_e6s: short_amount,
+        created_at_time: short_time,
+    };
+
+    let short_result = call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proof",
+        short_proof.clone(),
+    );
+    assert!(short_result.is_err(), "legacy single receipt must reject a short payment");
+    assert!(get_bot_claim_vault_ids(&f.pic, f.protocol_id).contains(&f.vault_id));
+
+    let mut wrong_generation = short_proof.clone();
+    wrong_generation.claim_generation += 1;
+    let mut wrong_generation_peer = wrong_generation.clone();
+    wrong_generation_peer.block_index = short_block.saturating_add(99);
+    wrong_generation_peer.amount_e6s = residual_amount;
+    assert!(call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proofs",
+        vec![wrong_generation, wrong_generation_peer],
+    )
+    .is_err());
+
+    let mut wrong_ledger = short_proof.clone();
+    wrong_ledger.ledger_principal = f.icp_ledger;
+    let mut wrong_ledger_peer = wrong_ledger.clone();
+    wrong_ledger_peer.block_index = short_block.saturating_add(100);
+    wrong_ledger_peer.amount_e6s = residual_amount;
+    assert!(call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proofs",
+        vec![wrong_ledger, wrong_ledger_peer],
+    )
+    .is_err());
+
+    let duplicate_batch = vec![short_proof.clone(), short_proof.clone()];
+    assert!(call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proofs",
+        duplicate_batch,
+    )
+    .is_err());
+
+    let mut oversum_short = short_proof.clone();
+    oversum_short.amount_e6s += 1;
+    let mut oversum_peer = short_proof.clone();
+    oversum_peer.block_index = short_block.saturating_add(101);
+    oversum_peer.amount_e6s = residual_amount;
+    assert!(call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proofs",
+        vec![oversum_short, oversum_peer],
+    )
+    .is_err());
+
+    // Same aggregate amount but a different memo must fail ICRC-3 tuple
+    // verification and leave the original receipt available for the retry.
+    let wrong_memo_time = short_time.saturating_add(1);
+    let wrong_memo_block = icrc1_transfer_tuple_call(
+        &f.pic,
+        payment_ledger,
+        f.developer,
+        f.protocol_id,
+        residual_amount,
+        b"wrong-claim-memo".to_vec(),
+        wrong_memo_time,
+    )
+    .expect("wrong-memo transfer should commit for the negative proof case");
+    let wrong_memo_proof = BotPaymentProof {
+        vault_id: f.vault_id,
+        claim_generation: claim.claim_generation,
+        ledger_principal: payment_ledger,
+        block_index: wrong_memo_block,
+        amount_e6s: residual_amount,
+        created_at_time: wrong_memo_time,
+    };
+    assert!(call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proofs",
+        vec![wrong_memo_proof.clone(), short_proof.clone()],
+    )
+    .is_err());
+    assert!(get_bot_claim_vault_ids(&f.pic, f.protocol_id).contains(&f.vault_id));
+    assert!(call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proofs",
+        vec![short_proof.clone(), wrong_memo_proof],
+    )
+    .is_err());
+    assert!(get_bot_claim_vault_ids(&f.pic, f.protocol_id).contains(&f.vault_id));
+
+    let residual_time = wrong_memo_time.saturating_add(1);
+    let residual_block = icrc1_transfer_tuple_call(
+        &f.pic,
+        payment_ledger,
+        f.developer,
+        f.protocol_id,
+        residual_amount,
+        claim.payment_memo,
+        residual_time,
+    )
+    .expect("residual ckUSDC payment should commit");
+    let residual_proof = BotPaymentProof {
+        vault_id: f.vault_id,
+        claim_generation: claim.claim_generation,
+        ledger_principal: payment_ledger,
+        block_index: residual_block,
+        amount_e6s: residual_amount,
+        created_at_time: residual_time,
+    };
+    let batch = vec![short_proof.clone(), residual_proof.clone()];
+    call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proofs",
+        batch.clone(),
+    )
+    .expect("exact receipt batch should settle the claim");
+    call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proofs",
+        batch.clone(),
+    )
+    .expect("complete same-claim batch retry should be idempotent");
+    call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proof",
+        short_proof,
+    )
+    .expect("each block should be tombstoned by the atomic batch");
+    call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proof",
+        residual_proof,
+    )
+    .expect("residual block should be tombstoned by the atomic batch");
+
+    assert_eq!(
+        get_bot_stats(&f.pic, f.protocol_id).total_debt_covered_e8s,
+        claim.debt_covered,
+        "batch settlement must account the claim exactly once"
+    );
+    assert!(!get_bot_claim_vault_ids(&f.pic, f.protocol_id).contains(&f.vault_id));
+
+    let vault_after = get_vault_snapshot(&f.pic, f.protocol_id, f.vault_id);
+    assert_eq!(
+        vault_after.borrowed_icusd_amount,
+        vault_before.borrowed_icusd_amount - claim.debt_covered,
+        "batch settlement must reduce debt exactly once"
+    );
+    assert_eq!(
+        vault_after.collateral_amount,
+        vault_before.collateral_amount - claim.collateral_amount,
+        "batch settlement must reduce collateral exactly once"
+    );
+
+    // The private bot-proof journal is stable across upgrade and remains
+    // replayable without adding proof transitions to the public Event enum.
+    upgrade_protocol_with_same_wasm(&f.pic, f.protocol_id);
+    assert_eq!(
+        get_bot_stats(&f.pic, f.protocol_id).total_debt_covered_e8s,
+        claim.debt_covered,
+        "upgrade must preserve the once-only debt accounting"
+    );
+    call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proofs",
+        batch,
+    )
+    .expect("same-claim batch retry must remain idempotent after upgrade");
+    let upgraded_vault = get_vault_snapshot(&f.pic, f.protocol_id, f.vault_id);
+    assert_eq!(upgraded_vault.borrowed_icusd_amount, vault_after.borrowed_icusd_amount);
+    assert_eq!(upgraded_vault.collateral_amount, vault_after.collateral_amount);
+    let audit = get_bot_proof_audit_events(&f.pic, f.protocol_id, f.developer);
+    let consumed = audit
+        .events
+        .iter()
+        .filter_map(|record| match &record.event {
+            BotProofAuditEventMirror::PaymentProofConsumed {
+                ledger_principal,
+                block_index,
+                vault_id,
+                claim_generation,
+            } => Some((
+                ledger_principal.clone(),
+                *block_index,
+                *vault_id,
+                *claim_generation,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(consumed.len(), 2, "the batch must journal both consumed blocks");
+    assert!(consumed.contains(&(
+        payment_ledger,
+        short_block,
+        f.vault_id,
+        claim.claim_generation,
+    )));
+    assert!(consumed.contains(&(
+        payment_ledger,
+        residual_block,
+        f.vault_id,
+        claim.claim_generation,
+    )));
+}
+
+/// A batch containing one previously consumed receipt and one fresh receipt
+/// fails closed, even when both identify the same claim generation.
+#[test]
+fn bot_batch_payment_proofs_reject_partial_replay() {
+    let f = setup_fixture();
+    let (_, claim) = seed_bot_claim(&f);
+    let payment_ledger = claim
+        .payment_ledger_principal
+        .expect("claim must pin configured ckUSDC ledger");
+    let amount = claim.debt_covered / 100 + u64::from(claim.debt_covered % 100 != 0);
+    let first_time = current_ledger_time_ns(&f.pic);
+    let first_block = icrc1_transfer_tuple_call(
+        &f.pic,
+        payment_ledger,
+        f.developer,
+        f.protocol_id,
+        amount,
+        claim.payment_memo.clone(),
+        first_time,
+    )
+    .expect("full payment should commit");
+    let first_proof = BotPaymentProof {
+        vault_id: f.vault_id,
+        claim_generation: claim.claim_generation,
+        ledger_principal: payment_ledger,
+        block_index: first_block,
+        amount_e6s: amount,
+        created_at_time: first_time,
+    };
+    call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proof",
+        first_proof.clone(),
+    )
+    .expect("legacy single proof endpoint should remain available");
+
+    let second_time = first_time.saturating_add(1);
+    let second_block = icrc1_transfer_tuple_call(
+        &f.pic,
+        payment_ledger,
+        f.developer,
+        f.protocol_id,
+        1,
+        claim.payment_memo,
+        second_time,
+    )
+    .expect("second same-claim transfer should commit");
+    let mut second_proof = first_proof.clone();
+    second_proof.block_index = second_block;
+    second_proof.amount_e6s = 1;
+    second_proof.created_at_time = second_time;
+    let result = call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proofs",
+        vec![first_proof, second_proof],
+    );
+    assert!(result.is_err(), "mixed consumed/new batch must reject");
+    assert_eq!(
+        get_bot_stats(&f.pic, f.protocol_id).total_debt_covered_e8s,
+        claim.debt_covered,
+        "partial replay must not account the claim twice"
+    );
+}
+
+#[test]
+fn bot_batch_payment_confirmation_rejects_claim_with_recorded_collateral_return() {
+    let f = setup_fixture();
+    let (_, claim) = seed_bot_claim(&f);
+    let before = get_bot_stats(&f.pic, f.protocol_id);
+    let vault_before = get_vault_snapshot(&f.pic, f.protocol_id, f.vault_id);
+    let payment_ledger = claim
+        .payment_ledger_principal
+        .expect("claim must pin configured ckUSDC ledger");
+    let amount = claim.debt_covered / 100 + u64::from(claim.debt_covered % 100 != 0);
+    let first_amount = amount - 1;
+    let first_time = current_ledger_time_ns(&f.pic);
+    let first_block = icrc1_transfer_tuple_call(
+        &f.pic,
+        payment_ledger,
+        f.developer,
+        f.protocol_id,
+        first_amount,
+        claim.payment_memo.clone(),
+        first_time,
+    )
+    .expect("first payment block should commit");
+    let second_time = first_time.saturating_add(1);
+    let second_block = icrc1_transfer_tuple_call(
+        &f.pic,
+        payment_ledger,
+        f.developer,
+        f.protocol_id,
+        1,
+        claim.payment_memo.clone(),
+        second_time,
+    )
+    .expect("residual payment block should commit");
+
+    record_exact_collateral_return(&f, &claim);
+    let result = call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proofs",
+        vec![
+            BotPaymentProof {
+                vault_id: f.vault_id,
+                claim_generation: claim.claim_generation,
+                ledger_principal: payment_ledger,
+                block_index: first_block,
+                amount_e6s: first_amount,
+                created_at_time: first_time,
+            },
+            BotPaymentProof {
+                vault_id: f.vault_id,
+                claim_generation: claim.claim_generation,
+                ledger_principal: payment_ledger,
+                block_index: second_block,
+                amount_e6s: 1,
+                created_at_time: second_time,
+            },
+        ],
+    );
+    assert!(result.is_err(), "returned collateral claim must not settle by batch payment");
+    assert_eq!(
+        get_bot_stats(&f.pic, f.protocol_id).total_debt_covered_e8s,
+        before.total_debt_covered_e8s,
+        "rejected batch must not account debt"
+    );
+    assert_eq!(
+        get_vault_snapshot(&f.pic, f.protocol_id, f.vault_id).borrowed_icusd_amount,
+        vault_before.borrowed_icusd_amount,
+        "rejected batch must leave debt unchanged"
+    );
+    assert_eq!(
+        get_vault_snapshot(&f.pic, f.protocol_id, f.vault_id).collateral_amount,
+        vault_before.collateral_amount,
+        "rejected batch must leave collateral unchanged"
+    );
+    assert!(get_bot_claim_vault_ids(&f.pic, f.protocol_id).contains(&f.vault_id));
+}
+
+#[test]
+fn bot_single_payment_confirmation_rejects_claim_with_recorded_collateral_return() {
+    let f = setup_fixture();
+    let (_, claim) = seed_bot_claim(&f);
+    let before = get_bot_stats(&f.pic, f.protocol_id);
+    let payment_ledger = claim
+        .payment_ledger_principal
+        .expect("claim must pin configured ckUSDC ledger");
+    let amount = claim.debt_covered / 100 + u64::from(claim.debt_covered % 100 != 0);
+    record_exact_collateral_return(&f, &claim);
+
+    let created_at_time = current_ledger_time_ns(&f.pic);
+    let block_index = icrc1_transfer_tuple_call(
+        &f.pic,
+        payment_ledger,
+        f.developer,
+        f.protocol_id,
+        amount,
+        claim.payment_memo,
+        created_at_time,
+    )
+    .expect("full payment block should commit");
+    let result = call_proof_update(
+        &f,
+        "bot_confirm_liquidation_with_proof",
+        BotPaymentProof {
+            vault_id: f.vault_id,
+            claim_generation: claim.claim_generation,
+            ledger_principal: payment_ledger,
+            block_index,
+            amount_e6s: amount,
+            created_at_time,
+        },
+    );
+    assert!(result.is_err(), "returned collateral claim must not settle by single payment");
+    assert_eq!(
+        get_bot_stats(&f.pic, f.protocol_id).total_debt_covered_e8s,
+        before.total_debt_covered_e8s,
+        "rejected single proof must not account debt"
+    );
+    assert!(get_bot_claim_vault_ids(&f.pic, f.protocol_id).contains(&f.vault_id));
 }
 
 /// The legacy vault-id-only endpoint must fail closed even when the stored

@@ -1332,6 +1332,12 @@ mod bot_payment_proof_tests {
         assert!(validate_icrc3_transfer_block(
             &forged, Some(bot), backend, 1_000_000, Some(&memo), Some(123)
         ).is_err());
+
+        let (mut forged, bot, backend, memo) = fixture();
+        forged.to = Some(Account { owner: Principal::from_slice(&[4]), subaccount: None });
+        assert!(validate_icrc3_transfer_block(
+            &forged, Some(bot), backend, 1_000_000, Some(&memo), Some(123)
+        ).is_err());
     }
 
     #[test]

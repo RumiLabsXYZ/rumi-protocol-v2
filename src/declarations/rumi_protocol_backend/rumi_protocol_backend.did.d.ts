@@ -1856,8 +1856,16 @@ export interface _SERVICE {
   'bot_claim_liquidation' : ActorMethod<[bigint], Result_5>,
   'bot_confirm_liquidation' : ActorMethod<[bigint], Result>,
   'bot_confirm_liquidation_with_proof' : ActorMethod<[BotPaymentProof], Result>,
+  'bot_confirm_liquidation_with_proofs' : ActorMethod<
+    [Array<BotPaymentProof>],
+    Result
+  >,
   'bot_record_collateral_return_proof' : ActorMethod<
     [BotCollateralReturnProofArg],
+    Result
+  >,
+  'bot_verify_liquidation_payment_proof' : ActorMethod<
+    [BotPaymentProof],
     Result
   >,
   'cancel_xrp_pending_open' : ActorMethod<[bigint], Result>,

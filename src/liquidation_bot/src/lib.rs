@@ -158,6 +158,7 @@ fn inspect_message() {
         "set_config" | "admin_resolve_pool_ordering" | "admin_approve_pool"
         | "admin_sweep_ckusdc" | "admin_retry_stuck_claim"
         | "set_processing_paused" | "admin_reconcile_payment_block" | "admin_reconcile_return_block"
+        | "admin_authorize_shortfall_topup"
         | "admin_refresh_fees" | "admin_test_swap" => {
             if ic_cdk::api::caller() != Principal::anonymous() {
                 ic_cdk::api::call::accept_message();
@@ -531,6 +532,12 @@ async fn admin_test_swap(amount_e8s: u64) -> Result<swap::SwapResult, String> {
     require_admin();
     let _guard = ProcessingGuard::acquire()
         .map_err(|_| "Another operation is in progress".to_string())?;
+    let (has_claim_recovery, has_payment_recovery) = state::read_state(|s| {
+        (!s.pending_claims.is_empty(), !s.pending_payments.is_empty())
+    });
+    if !admin_test_swap_allowed(has_claim_recovery, has_payment_recovery) {
+        return Err("cannot run admin_test_swap while claim or payment recovery is pending".into());
+    }
     let config = state::read_state(|s| s.config.clone())
         .ok_or_else(|| "Config not set".to_string())?;
 
@@ -607,6 +614,10 @@ fn admin_retry_disposition(
     }
 }
 
+fn admin_test_swap_allowed(has_claim_recovery: bool, has_payment_recovery: bool) -> bool {
+    !has_claim_recovery && !has_payment_recovery
+}
+
 #[cfg(test)]
 mod admin_retry_tests {
     use super::*;
@@ -626,6 +637,14 @@ mod admin_retry_tests {
             AdminRetryDisposition::HoldLegacy,
         );
     }
+
+    #[test]
+    fn admin_test_swap_is_blocked_by_any_pending_recovery_journal() {
+        assert!(admin_test_swap_allowed(false, false));
+        assert!(!admin_test_swap_allowed(true, false));
+        assert!(!admin_test_swap_allowed(false, true));
+        assert!(!admin_test_swap_allowed(true, true));
+    }
 }
 
 /// Reconcile an ambiguous payment by an operator-supplied ICRC-3 block.
@@ -638,6 +657,20 @@ async fn admin_reconcile_payment_block(vault_id: u64, block_index: u64) -> Resul
     let config = state::read_state(|s| s.config.clone())
         .ok_or_else(|| "Config not set".to_string())?;
     process::admin_reconcile_payment_block(&config, vault_id, block_index).await
+}
+
+/// Authorize one exact residual payment after allocating residual plus fee.
+#[update]
+async fn admin_authorize_shortfall_topup(
+    vault_id: u64,
+    funding_allocation_e6: u64,
+) -> Result<(), String> {
+    require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .map_err(|_| "Another operation is in progress".to_string())?;
+    let config = state::read_state(|s| s.config.clone())
+        .ok_or_else(|| "Config not set".to_string())?;
+    process::admin_authorize_shortfall_topup(&config, vault_id, funding_allocation_e6).await
 }
 
 /// Reconcile a collateral return by an operator-supplied ICRC-3 block.

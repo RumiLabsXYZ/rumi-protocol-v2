@@ -1838,8 +1838,18 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'bot_confirm_liquidation_with_proofs' : IDL.Func(
+        [IDL.Vec(BotPaymentProof)],
+        [Result],
+        [],
+      ),
     'bot_record_collateral_return_proof' : IDL.Func(
         [BotCollateralReturnProofArg],
+        [Result],
+        [],
+      ),
+    'bot_verify_liquidation_payment_proof' : IDL.Func(
+        [BotPaymentProof],
         [Result],
         [],
       ),

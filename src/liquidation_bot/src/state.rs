@@ -147,10 +147,30 @@ pub struct BotPaymentJournal {
     pub status: BotPaymentStatus,
     pub receipt: Option<crate::swap::TransferReceipt>,
     /// Receipt is durable but below the claim's minimum net payment. The
-    /// journal is held for manual recovery until cumulative proof support is
-    /// available. Additive for old snapshots and admin clients.
+    /// journal is held until an administrator explicitly authorizes an exact
+    /// residual transfer and the backend accepts both ledger proofs.
     #[serde(default)]
     pub shortfall_receipt_observed: bool,
+    /// A single exact residual payment intent, created only after an
+    /// administrator explicitly allocates funds from the bot account. The
+    /// original receipt above remains unchanged for cumulative proof.
+    #[serde(default)]
+    pub shortfall_topup: Option<BotPaymentTopUpJournal>,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BotPaymentTopUpJournal {
+    pub backend_principal: Principal,
+    pub ledger_principal: Principal,
+    pub amount_e6: u64,
+    pub fee_e6: u64,
+    pub created_at_time: u64,
+    pub memo: Vec<u8>,
+    /// Exact amount the administrator authorized from the mixed bot account
+    /// for this residual payment, including its ledger fee.
+    pub funding_allocation_e6: u64,
+    pub status: BotPaymentStatus,
+    pub receipt: Option<crate::swap::TransferReceipt>,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -181,9 +201,29 @@ pub struct BotClaimJournal {
     /// reply can therefore be retried with the same ICRC dedup tuple.
     #[serde(default)]
     pub collateral_return: Option<BotReturnTransferJournal>,
+    /// Exact ICPSwap call parameters persisted before every dispatch. Old
+    /// journals without intents remain operator-held and are never swapped
+    /// again. Entries are retained across initial and bounded top-up swaps.
+    #[serde(default)]
+    pub swap_intents: Vec<BotSwapIntent>,
     /// Persisted before any swap call. An entry on upgrade is operator-held;
     /// the swap itself cannot be blindly replayed.
     pub status: BotClaimJournalStatus,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BotSwapIntent {
+    pub pool_principal: Principal,
+    pub input_ledger_principal: Principal,
+    pub output_ledger_principal: Principal,
+    pub amount_in_e8s: u64,
+    pub amount_out_minimum_e6: u64,
+    pub zero_for_one: bool,
+    pub input_fee_e8s: u64,
+    pub output_fee_e6: u64,
+    pub attempt_ordinal: u32,
+    pub created_at_time: u64,
+    pub pre_swap_ckusdc_balance_e6: u64,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -537,6 +577,17 @@ mod tests {
                 created_at_time: 1_700_000_000_000,
             }),
             shortfall_receipt_observed: true,
+            shortfall_topup: Some(BotPaymentTopUpJournal {
+                backend_principal: Principal::from_text("tfesu-vyaaa-aaaap-qrd7a-cai").unwrap(),
+                ledger_principal: Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap(),
+                amount_e6: 1,
+                fee_e6: 10_000,
+                created_at_time: 1_700_000_000_001,
+                memo: b"RUMI-BOT-PAYMENT-V1:73:42".to_vec(),
+                funding_allocation_e6: 10_001,
+                status: BotPaymentStatus::Ambiguous,
+                receipt: None,
+            }),
         });
         state.pending_claims.insert(vault_id, BotClaimJournal {
             vault_id,
@@ -560,6 +611,19 @@ mod tests {
                 receipt: None,
                 status: BotReturnTransferStatus::Ambiguous,
             }),
+            swap_intents: vec![BotSwapIntent {
+                pool_principal: Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap(),
+                input_ledger_principal: Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap(),
+                output_ledger_principal: Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap(),
+                amount_in_e8s: 2_000_000,
+                amount_out_minimum_e6: 1,
+                zero_for_one: true,
+                input_fee_e8s: 10_000,
+                output_fee_e6: 10_000,
+                attempt_ordinal: 1,
+                created_at_time: 1_700_000_000_000,
+                pre_swap_ckusdc_balance_e6: 50,
+            }],
             status: BotClaimJournalStatus::ReturnPending,
         });
         let bytes = serde_json::to_vec(&state).unwrap();
@@ -571,6 +635,14 @@ mod tests {
         assert_eq!(journal.collateral_received_amount_e8s, Some(49_980_000));
         assert_eq!(journal.receipt.as_ref().unwrap().block_index, 91);
         assert!(journal.shortfall_receipt_observed);
+        let topup = journal.shortfall_topup.as_ref().unwrap();
+        assert_eq!(topup.amount_e6, 1);
+        assert_eq!(topup.funding_allocation_e6, 10_001);
+        assert_eq!(topup.status, BotPaymentStatus::Ambiguous);
+        assert_eq!(
+            restored.pending_claims[&vault_id].swap_intents[0].pre_swap_ckusdc_balance_e6,
+            50
+        );
         let return_journal = restored.pending_claims.get(&vault_id).unwrap()
             .collateral_return.as_ref().unwrap();
         assert_eq!(return_journal.created_at_time, 1_700_000_000_001);
@@ -585,6 +657,10 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("shortfall_receipt_observed");
+        legacy_snapshot["pending_payments"][vault_id.to_string()]
+            .as_object_mut()
+            .unwrap()
+            .remove("shortfall_topup");
         legacy_snapshot["pending_payments"][vault_id.to_string()]
             .as_object_mut()
             .unwrap()
@@ -605,8 +681,13 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("failed_return_attempts");
+        legacy_snapshot["pending_claims"][vault_id.to_string()]
+            .as_object_mut()
+            .unwrap()
+            .remove("swap_intents");
         let legacy_restored: BotState = serde_json::from_value(legacy_snapshot).unwrap();
         assert!(!legacy_restored.pending_payments[&vault_id].shortfall_receipt_observed);
+        assert!(legacy_restored.pending_payments[&vault_id].shortfall_topup.is_none());
         assert_eq!(
             legacy_restored.pending_claims[&vault_id]
                 .collateral_return.as_ref().unwrap().transfer_fee_e8s,
@@ -617,6 +698,7 @@ mod tests {
         assert_eq!(legacy_claim.collateral_received_amount_e8s, None);
         assert_eq!(legacy_claim.collateral_outbound_fee_e8s, None);
         assert!(legacy_claim.failed_return_attempts.is_empty());
+        assert!(legacy_claim.swap_intents.is_empty());
         assert_eq!(
             legacy_restored.pending_payments[&vault_id].collateral_received_amount_e8s,
             None
