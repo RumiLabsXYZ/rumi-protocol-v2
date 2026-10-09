@@ -202,6 +202,23 @@ export const idlFactory = ({ IDL }) => {
     'healthy' : IDL.Bool,
     'freeze_threshold_secs' : IDL.Nat64,
   });
+  const ThreeUsdRefundRecoveryStatusKind = IDL.Variant({
+    'Held' : IDL.Record({ 'reason' : IDL.Text }),
+    'RetryScheduled' : IDL.Null,
+    'ReceiptVerified' : IDL.Record({
+      'block_index' : IDL.Nat64,
+      'fee_e8s' : IDL.Nat64,
+      'reconciled_at_ns' : IDL.Nat64,
+    }),
+  });
+  const ThreeUsdRefundRecoveryStatus = IDL.Record({
+    'status' : ThreeUsdRefundRecoveryStatusKind,
+    'retry_count' : IDL.Nat8,
+    'vault_id' : IDL.Nat64,
+    'amount_e8s' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'stability_pool' : IDL.Principal,
+  });
   const CandidVault = IDL.Record({
     'collateral_amount' : IDL.Nat64,
     'owner' : IDL.Principal,
@@ -1781,6 +1798,11 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'admin_sweep_to_treasury' : IDL.Func([IDL.Text], [Result_1], []),
+    'attest_three_usd_reserve_v1_cutover_reconciled' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [Result],
+        [],
+      ),
     'backfill_collateral_symbols' : IDL.Func([], [Result_3], []),
     'borrow_chain_vault_evm' : IDL.Func(
         [VaultIntent, IDL.Vec(IDL.Nat8)],
@@ -1849,6 +1871,11 @@ export const idlFactory = ({ IDL }) => {
     'enter_recovery_mode' : IDL.Func([], [Result], []),
     'exit_recovery_mode' : IDL.Func([], [Result], []),
     'freeze_protocol' : IDL.Func([], [Result], []),
+    'get_3usd_refund_recovery_status' : IDL.Func(
+        [IDL.Nat],
+        [IDL.Opt(ThreeUsdRefundRecoveryStatus)],
+        ['query'],
+      ),
     'get_all_vaults' : IDL.Func([], [IDL.Vec(CandidVault)], ['query']),
     'get_amm1_canister' : IDL.Func([], [IDL.Opt(IDL.Principal)], ['query']),
     'get_amm1_pool_id' : IDL.Func([], [IDL.Opt(IDL.Text)], ['query']),
@@ -2246,6 +2273,16 @@ export const idlFactory = ({ IDL }) => {
     'prepare_redemption_offer' : IDL.Func([IDL.Nat64], [Result_18], []),
     'provide_liquidity' : IDL.Func([IDL.Nat64], [Result_1], []),
     'reconcile_chain_supply' : IDL.Func([IDL.Nat32], [Result_19], []),
+    'reconcile_default_account_3usd_refund' : IDL.Func(
+        [IDL.Nat, IDL.Nat64],
+        [Result],
+        [],
+      ),
+    'reconcile_legacy_3usd_refund' : IDL.Func(
+        [IDL.Nat, IDL.Nat64],
+        [Result],
+        [],
+      ),
     'reconcile_three_usd_reserve_ingress_candidate_block' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, IDL.Nat64],
         [Result],

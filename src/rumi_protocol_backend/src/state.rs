@@ -34,7 +34,7 @@ mod three_usd_reserve_ingress_state_tests {
     use super::{
         confirm_three_usd_ingress_candidate_block, PendingThreeUsdRefund,
         ThreeUsdIngressNonInclusionScan, ThreeUsdRefundSource, ThreeUsdReserveIngressJournal,
-        ThreeUsdReserveIngressPhase, ThreeUsdReserveIngressRequest,
+        ThreeUsdReserveIngressPhase, ThreeUsdReserveIngressRequest, ThreeUsdReserveV1Cutover,
         ThreeUsdReserveIngressTuple,
     };
     use candid::Principal;
@@ -67,13 +67,101 @@ mod three_usd_reserve_ingress_state_tests {
         assert_eq!(decoded.amount_e8s, 33);
         assert_eq!(decoded.parent_absorb_id, None);
         assert_eq!(decoded.dispatch_amount_e8s, None);
+        assert_eq!(decoded.resolution, None);
     }
 
     #[test]
     fn new_reserve_ingress_admission_is_default_off() {
         let state = super::State::default();
         assert!(!state.three_usd_reserve_ingress_enabled);
+        assert!(!state.three_usd_reserve_v1_retired);
         assert!(state.three_usd_reserve_ingress_journals.is_empty());
+    }
+
+    #[test]
+    fn old_state_snapshot_defaults_v1_cutover_retirement_to_false() {
+        let state = super::State::default();
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let mut entries = match value {
+            ciborium::Value::Map(entries) => entries,
+            other => panic!("expected a CBOR map, got {other:?}"),
+        };
+        let original_len = entries.len();
+        entries.retain(|(key, _)| {
+            !matches!(key, ciborium::Value::Text(name) if name == "three_usd_reserve_v1_retired")
+        });
+        assert_eq!(entries.len() + 1, original_len);
+        let mut legacy_bytes = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut legacy_bytes).unwrap();
+        let restored: super::State = ciborium::de::from_reader(legacy_bytes.as_slice())
+            .expect("pre-cutover snapshot must decode");
+        assert!(!restored.three_usd_reserve_v1_retired);
+    }
+
+    #[test]
+    fn old_state_snapshot_defaults_v1_upgrade_cutover_to_quarantined() {
+        let state = super::State::default();
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let mut entries = match value {
+            ciborium::Value::Map(entries) => entries,
+            other => panic!("expected a CBOR map, got {other:?}"),
+        };
+        let original_len = entries.len();
+        entries.retain(|(key, _)| {
+            !matches!(key, ciborium::Value::Text(name) if name == "three_usd_reserve_v1_cutover")
+        });
+        assert_eq!(entries.len() + 1, original_len);
+        let mut legacy_bytes = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut legacy_bytes).unwrap();
+        let restored: super::State = ciborium::de::from_reader(legacy_bytes.as_slice())
+            .expect("pre-quarantine snapshot must decode");
+        assert_eq!(
+            restored.three_usd_reserve_v1_cutover,
+            ThreeUsdReserveV1Cutover::Quarantined
+        );
+    }
+
+    #[test]
+    fn fresh_init_arg_has_no_legacy_v1_upgrade_exposure() {
+        let state = super::State::from(crate::InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::from_slice(&[1]),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        assert_eq!(
+            state.three_usd_reserve_v1_cutover,
+            ThreeUsdReserveV1Cutover::NoLegacyExposure
+        );
+    }
+
+    #[test]
+    fn post_upgrade_event_replay_forces_v1_cutover_quarantine() {
+        let mut state = super::State::from(crate::InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::from_slice(&[1]),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        super::quarantine_three_usd_v1_cutover_after_replay(&mut state);
+        assert_eq!(
+            state.three_usd_reserve_v1_cutover,
+            ThreeUsdReserveV1Cutover::Quarantined
+        );
     }
 
     fn submitted_journal() -> (ThreeUsdReserveIngressJournal, ThreeUsdReserveIngressRequest, ThreeUsdReserveIngressTuple) {
@@ -1694,6 +1782,20 @@ pub struct PendingThreeUsdRefund {
     pub dispatch_submitted: bool,
     #[serde(default)]
     pub dispatch_block_index: Option<u64>,
+    /// Terminal proof that a legacy hashed-reserve refund already reached the
+    /// Stability Pool. Unresolved rows remain liabilities and continue to
+    /// block V2 cutover until an exact direct-ledger receipt is verified.
+    #[serde(default)]
+    pub resolution: Option<ThreeUsdRefundResolution>,
+}
+
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum ThreeUsdRefundResolution {
+    ReceiptVerified {
+        block_index: u64,
+        fee_e8s: u64,
+        reconciled_at_ns: u64,
+    },
 }
 
 #[derive(candid::CandidType, Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -1912,6 +2014,35 @@ where
     d.deserialize_map(V)
 }
 
+/// Cutover state for the non-journaled V1 3USD reserve ingress.
+///
+/// `Quarantined` is the safe decode default for any pre-marker snapshot. A
+/// resolution record is an authenticated operator attestation referencing an
+/// external reconciliation artifact; its hash is not itself ledger proof.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum ThreeUsdReserveV1Cutover {
+    Quarantined,
+    NoLegacyExposure,
+    Reconciled {
+        operator: Principal,
+        resolved_at_ns: u64,
+        evidence_sha256: [u8; 32],
+    },
+}
+
+impl Default for ThreeUsdReserveV1Cutover {
+    fn default() -> Self {
+        Self::Quarantined
+    }
+}
+
+/// Event replay reconstructs protocol state without historical in-flight
+/// request journals. Never infer that V1 had no ambiguous operation from that
+/// reconstructed state.
+pub fn quarantine_three_usd_v1_cutover_after_replay(state: &mut State) {
+    state.three_usd_reserve_v1_cutover = ThreeUsdReserveV1Cutover::Quarantined;
+}
+
 // serde(default): when deserializing old CBOR that's missing fields added in a
 // later upgrade, serde fills those fields from Default::default() instead of
 // failing. This prevents fallback to event replay (which causes interest drift).
@@ -1960,6 +2091,15 @@ pub struct State {
     /// This prevents an older SP Wasm from continuing V1 ingress after cutover.
     #[serde(default)]
     pub three_usd_reserve_v2_client_ready: bool,
+    /// Permanently retires the legacy V1 3USD ingress after the first V2
+    /// activation. Kept separately from the reversible V2 rollout switch.
+    #[serde(default)]
+    pub three_usd_reserve_v1_retired: bool,
+    /// Old snapshots decode as quarantined because V1 had no durable operation
+    /// journal. Fresh init explicitly opts out of legacy quarantine. A
+    /// reconciliation record is an operator attestation, not ledger proof.
+    #[serde(default)]
+    pub three_usd_reserve_v1_cutover: ThreeUsdReserveV1Cutover,
     #[serde(default)]
     pub sp_three_usd_reserve_absorb_results_by_proof:
         BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredThreeUsdReserveAbsorbResult>,
@@ -2780,6 +2920,8 @@ impl Default for State {
             three_usd_reserve_ingress_journals: BTreeMap::new(),
             three_usd_reserve_ingress_enabled: false,
             three_usd_reserve_v2_client_ready: false,
+            three_usd_reserve_v1_retired: false,
+            three_usd_reserve_v1_cutover: ThreeUsdReserveV1Cutover::Quarantined,
             sp_three_usd_reserve_absorb_results_by_proof: BTreeMap::new(),
             mode: Mode::default(),
             consecutive_xrc_failures: 0,
@@ -2951,6 +3093,8 @@ impl From<InitArg> for State {
             three_usd_reserve_ingress_journals: BTreeMap::new(),
             three_usd_reserve_ingress_enabled: false,
             three_usd_reserve_v2_client_ready: false,
+            three_usd_reserve_v1_retired: false,
+            three_usd_reserve_v1_cutover: ThreeUsdReserveV1Cutover::NoLegacyExposure,
             sp_three_usd_reserve_absorb_results_by_proof: BTreeMap::new(),
             vault_id_to_vaults: BTreeMap::new(),
             xrc_principal: args.xrc_principal,

@@ -25,6 +25,229 @@ fn pending_refund_is_automatically_retryable(retry_count: u8) -> bool {
     retry_count < MAX_PENDING_RETRIES
 }
 
+fn pending_3usd_refund_is_automatically_retryable(
+    state: &crate::state::State,
+    refund: &crate::state::PendingThreeUsdRefund,
+) -> bool {
+    if refund.retry_count >= MAX_PENDING_RETRIES || refund.resolution.is_some() {
+        return false;
+    }
+    if refund.source == crate::state::ThreeUsdRefundSource::DefaultAccount
+        && refund.parent_absorb_id.is_none()
+    {
+        return false;
+    }
+    if refund.source == crate::state::ThreeUsdRefundSource::LegacyHashedReserve
+        && refund.dispatch_submitted
+    {
+        return false;
+    }
+    if refund.source == crate::state::ThreeUsdRefundSource::LegacyHashedReserve
+        && crate::management::hold_legacy_three_usd_refund_for_cutover(state, refund.ledger)
+    {
+        return false;
+    }
+    true
+}
+
+fn verify_legacy_three_usd_refund_receipt(
+    refund: &crate::state::PendingThreeUsdRefund,
+    backend: Principal,
+    block_index: u64,
+    block: Result<crate::icrc3_proof::DecodedBlock, String>,
+) -> Result<crate::state::ThreeUsdReserveRefundReceipt, String> {
+    let block = block?;
+    let tuple = crate::management::legacy_three_usd_refund_receipt_tuple(refund, backend);
+    crate::icrc3_proof::validate_three_usd_reserve_refund_block(&block, &tuple)?;
+    Ok(crate::state::ThreeUsdReserveRefundReceipt { block_index, tuple })
+}
+
+fn commit_legacy_three_usd_refund_receipt(
+    state: &mut crate::state::State,
+    nonce: u128,
+    expected: crate::state::PendingThreeUsdRefund,
+    receipt: &crate::state::ThreeUsdReserveRefundReceipt,
+    reconciled_at_ns: u64,
+) -> bool {
+    let Some(current) = state.pending_3usd_refunds.get_mut(&nonce) else {
+        return false;
+    };
+    if *current != expected
+        || current.source != crate::state::ThreeUsdRefundSource::LegacyHashedReserve
+        || !current.dispatch_submitted
+        || current.dispatch_block_index != Some(receipt.block_index)
+        || current.resolution.is_some()
+        || crate::management::legacy_three_usd_refund_receipt_tuple(
+            current,
+            receipt.tuple.source_owner,
+        ) != receipt.tuple
+    {
+        return false;
+    }
+    current.resolution = Some(crate::state::ThreeUsdRefundResolution::ReceiptVerified {
+        block_index: receipt.block_index,
+        fee_e8s: receipt.tuple.charged_fee_e8s,
+        reconciled_at_ns,
+    });
+    true
+}
+
+#[cfg(test)]
+mod pending_3usd_refund_retryability_tests {
+    use super::{
+        commit_legacy_three_usd_refund_receipt, pending_3usd_refund_is_automatically_retryable,
+        verify_legacy_three_usd_refund_receipt, MAX_PENDING_RETRIES,
+    };
+    use crate::state::{
+        PendingThreeUsdRefund, State, ThreeUsdRefundResolution, ThreeUsdRefundSource,
+    };
+    use candid::Principal;
+
+    fn refund(ledger: Principal, retry_count: u8) -> PendingThreeUsdRefund {
+        PendingThreeUsdRefund {
+            stability_pool: Principal::from_slice(&[2]),
+            ledger,
+            amount_e8s: 10,
+            vault_id: 3,
+            retry_count,
+            op_nonce: 4,
+            source: ThreeUsdRefundSource::LegacyHashedReserve,
+            parent_absorb_id: None,
+            dispatch_amount_e8s: None,
+            dispatch_fee_e8s: None,
+            dispatch_submitted: false,
+            dispatch_block_index: None,
+            resolution: None,
+        }
+    }
+
+    fn valid_legacy_receipt(
+        refund: &PendingThreeUsdRefund,
+        backend: Principal,
+    ) -> crate::icrc3_proof::DecodedBlock {
+        let tuple = crate::management::legacy_three_usd_refund_receipt_tuple(refund, backend);
+        crate::icrc3_proof::DecodedBlock {
+            btype: Some("1xfer".into()),
+            op: "xfer".into(),
+            from: Some(icrc_ledger_types::icrc1::account::Account {
+                owner: tuple.source_owner,
+                subaccount: tuple.source_subaccount,
+            }),
+            to: Some(tuple.destination),
+            spender: None,
+            amount: u128::from(tuple.amount_e8s),
+            fee: Some(0),
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(tuple.memo.to_vec()),
+        }
+    }
+
+    #[test]
+    fn exhausted_and_resolved_rows_are_not_automatically_retried() {
+        let ledger = Principal::from_slice(&[1]);
+        let state = State::default();
+        assert!(!pending_3usd_refund_is_automatically_retryable(
+            &state,
+            &refund(ledger, MAX_PENDING_RETRIES),
+        ));
+
+        let mut resolved = refund(ledger, 0);
+        resolved.resolution = Some(ThreeUsdRefundResolution::ReceiptVerified {
+            block_index: 9,
+            fee_e8s: 0,
+            reconciled_at_ns: 100,
+        });
+        assert!(!pending_3usd_refund_is_automatically_retryable(&state, &resolved));
+    }
+
+    #[test]
+    fn cutover_holds_only_the_configured_ledger_and_other_ledger_rows_keep_retrying() {
+        let configured = Principal::from_slice(&[1]);
+        let other = Principal::from_slice(&[3]);
+        let mut state = State::default();
+        state.three_pool_canister = Some(configured);
+        state.three_usd_reserve_v1_retired = true;
+
+        assert!(!pending_3usd_refund_is_automatically_retryable(
+            &state,
+            &refund(configured, 0),
+        ));
+        assert!(pending_3usd_refund_is_automatically_retryable(
+            &state,
+            &refund(other, 0),
+        ));
+    }
+
+    #[test]
+    fn legacy_refund_receipt_requires_exact_direct_block_and_tombstones_success() {
+        let ledger = Principal::from_slice(&[1]);
+        let backend = Principal::from_slice(&[8]);
+        let mut row = refund(ledger, 0);
+        let valid = valid_legacy_receipt(&row, backend);
+        let receipt = verify_legacy_three_usd_refund_receipt(
+            &row,
+            backend,
+            77,
+            Ok(valid.clone()),
+        )
+        .expect("exact legacy transfer tuple verifies");
+        assert_eq!(receipt.block_index, 77);
+        assert!(verify_legacy_three_usd_refund_receipt(
+            &row,
+            backend,
+            77,
+            Err("direct ICRC-3 response used an archive descriptor".into()),
+        )
+        .is_err());
+        assert!(verify_legacy_three_usd_refund_receipt(
+            &row,
+            backend,
+            77,
+            Err("direct ledger query unavailable".into()),
+        )
+        .is_err());
+        let mut mismatch = valid;
+        mismatch.to.as_mut().unwrap().owner = Principal::from_slice(&[9]);
+        assert!(verify_legacy_three_usd_refund_receipt(
+            &row,
+            backend,
+            77,
+            Ok(mismatch),
+        )
+        .is_err());
+
+        row.dispatch_submitted = true;
+        row.dispatch_block_index = Some(77);
+        let mut state = State::default();
+        state.pending_3usd_refunds.insert(row.op_nonce, row);
+        assert!(commit_legacy_three_usd_refund_receipt(
+            &mut state,
+            row.op_nonce,
+            row,
+            &receipt,
+            99,
+        ));
+        assert_eq!(state.pending_3usd_refunds[&row.op_nonce].resolution,
+            Some(ThreeUsdRefundResolution::ReceiptVerified {
+                block_index: 77, fee_e8s: 0, reconciled_at_ns: 99,
+            }));
+        assert!(!pending_3usd_refund_is_automatically_retryable(
+            &State::default(),
+            &state.pending_3usd_refunds[&row.op_nonce],
+        ));
+    }
+
+    #[test]
+    fn an_ambiguous_submitted_legacy_refund_is_never_automatically_resent() {
+        let mut row = refund(Principal::from_slice(&[1]), 0);
+        row.dispatch_submitted = true;
+        assert!(!pending_3usd_refund_is_automatically_retryable(
+            &State::default(),
+            &row,
+        ));
+    }
+}
+
 fn redemption_transfer_meets_minimum(
     gross_raw: u64,
     fee_raw: u64,
@@ -1806,21 +2029,45 @@ pub async fn process_pending_transfer() {
     let pending_3usd_refunds = read_state(|s| {
         s.pending_3usd_refunds
             .iter()
-            .filter(|(_, refund)| refund.retry_count < MAX_PENDING_RETRIES)
+            .filter(|(_, refund)| pending_3usd_refund_is_automatically_retryable(s, refund))
             .map(|(k, v)| (*k, *v))
             .collect::<Vec<(u128, crate::state::PendingThreeUsdRefund)>>()
     });
 
     for (nonce_key, refund) in pending_3usd_refunds {
-        let _default_account_guard = if refund.source == crate::state::ThreeUsdRefundSource::DefaultAccount
-            && refund.parent_absorb_id.is_some()
+        // Earlier queue entries may await ledger calls, during which cutover
+        // state or this row's resolution can change. Recheck before dispatch.
+        if !read_state(|s| {
+            s.pending_3usd_refunds
+                .get(&nonce_key)
+                .is_some_and(|current| {
+                    current == &refund
+                        && pending_3usd_refund_is_automatically_retryable(s, current)
+                })
+        }) {
+            continue;
+        }
+        if refund.source == crate::state::ThreeUsdRefundSource::DefaultAccount
+            && refund.parent_absorb_id.is_none()
         {
-            match crate::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire() {
-                Some(guard) => Some(guard),
-                None => continue,
-            }
-        } else {
-            None
+            // Parentless default-account rows have no V2 journal to establish
+            // their provenance or solvency. Preserve them for reconciliation.
+            continue;
+        }
+        if refund.source == crate::state::ThreeUsdRefundSource::LegacyHashedReserve
+            && read_state(|s| crate::management::hold_legacy_three_usd_refund_for_cutover(s, refund.ledger))
+        {
+            // A legacy hashed-reserve payout could consume liquidity that backs
+            // V2's default-account obligations. Preserve the legacy liability
+            // for reconciliation once V2 state or the retirement latch exists.
+            continue;
+        }
+        // Serialize every durable 3USD payout with V1/V2 admission and pool
+        // reconfiguration, including retries on a no-longer-active ledger.
+        let Some(_three_usd_refund_guard) =
+            crate::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+        else {
+            continue;
         };
         let destination = icrc_ledger_types::icrc1::account::Account {
             owner: refund.stability_pool,
@@ -1832,14 +2079,34 @@ pub async fn process_pending_transfer() {
             // Preserve the historic source and transfer arguments exactly for
             // rows decoded from old snapshots.
             crate::state::ThreeUsdRefundSource::LegacyHashedReserve => {
-                crate::management::transfer_idempotent(
-                    refund.ledger,
-                    Some(crate::management::protocol_3usd_reserves_subaccount()),
-                    destination.clone(),
-                    refund.amount_e8s as u128,
-                    refund.op_nonce,
-                    None,
-                ).await
+                let submitted = mutate_state(|s| {
+                    let Some(row) = s.pending_3usd_refunds.get_mut(&nonce_key) else {
+                        return false;
+                    };
+                    if *row != refund || row.dispatch_submitted || row.dispatch_block_index.is_some() {
+                        return false;
+                    }
+                    // Persist the at-most-once fence before crossing the
+                    // ledger await. An upgrade or uncertain reply can then
+                    // never silently resubmit this legacy tuple.
+                    row.dispatch_submitted = true;
+                    true
+                });
+                if !submitted {
+                    Err(TransferError::GenericError {
+                        error_code: candid::Nat::from(0u8),
+                        message: "legacy refund dispatch is already submitted or changed".into(),
+                    })
+                } else {
+                    crate::management::transfer_idempotent(
+                        refund.ledger,
+                        Some(crate::management::protocol_3usd_reserves_subaccount()),
+                        destination.clone(),
+                        refund.amount_e8s as u128,
+                        refund.op_nonce,
+                        None,
+                    ).await
+                }
             }
             crate::state::ThreeUsdRefundSource::DefaultAccount => {
                 // V2 refund rows promise a net credit to the SP. The protocol
@@ -1979,10 +2246,67 @@ pub async fn process_pending_transfer() {
         };
         match result {
             Ok(block_index) => {
-                let verified_refund = if refund.source == crate::state::ThreeUsdRefundSource::DefaultAccount {
+                let verified_refund = if refund.source == crate::state::ThreeUsdRefundSource::LegacyHashedReserve {
+                    let persisted = mutate_state(|s| {
+                        let Some(row) = s.pending_3usd_refunds.get_mut(&nonce_key) else {
+                            return None;
+                        };
+                        if row.source != crate::state::ThreeUsdRefundSource::LegacyHashedReserve
+                            || row.op_nonce != refund.op_nonce
+                            || row.amount_e8s != refund.amount_e8s
+                            || row.ledger != refund.ledger
+                            || row.stability_pool != refund.stability_pool
+                            || !row.dispatch_submitted
+                            || row.dispatch_block_index.is_some()
+                            || row.resolution.is_some()
+                        {
+                            return None;
+                        }
+                        row.dispatch_block_index = Some(block_index);
+                        Some(*row)
+                    });
+                    let Some(persisted) = persisted else {
+                        log!(INFO,
+                            "[refunding] 3USD legacy transfer returned block {}; durable row changed, preserving it for manual reconciliation",
+                            block_index
+                        );
+                        continue;
+                    };
+                    let verified = async {
+                        let block = crate::icrc3_proof::fetch_icrc3_block_direct(
+                            refund.ledger,
+                            block_index,
+                        ).await?;
+                        verify_legacy_three_usd_refund_receipt(
+                            &persisted,
+                            ic_cdk::id(),
+                            block_index,
+                            Ok(block),
+                        )
+                    }.await;
+                    match verified {
+                        Ok(receipt) => Some(receipt),
+                        Err(reason) => {
+                            log!(INFO,
+                                "[refunding] 3USD legacy transfer returned block {} but exact direct ICRC-3 proof failed; retaining liability and holding retries: {}",
+                                block_index, reason
+                            );
+                            mutate_state(|s| {
+                                if let Some(row) = s.pending_3usd_refunds.get_mut(&nonce_key) {
+                                    if row.dispatch_submitted
+                                        && row.dispatch_block_index == Some(block_index)
+                                    {
+                                        row.retry_count = MAX_PENDING_RETRIES;
+                                    }
+                                }
+                            });
+                            continue;
+                        }
+                    }
+                } else if refund.source == crate::state::ThreeUsdRefundSource::DefaultAccount {
                     let verified = async {
                         let amount = dispatched_amount.ok_or_else(|| "default refund amount was not pinned".to_string())?;
-                        let block = crate::icrc3_proof::fetch_icrc3_block(refund.ledger, block_index).await?;
+                        let block = crate::icrc3_proof::fetch_icrc3_block_direct(refund.ledger, block_index).await?;
                         let charged_fee = block.fee.ok_or_else(|| "refund block omits the charged fee".to_string())?;
                         let protocol_pays_fee = refund.parent_absorb_id.is_some();
                         let credited = if protocol_pays_fee { amount } else { amount.checked_add(charged_fee).unwrap_or_default() };
@@ -2022,11 +2346,22 @@ pub async fn process_pending_transfer() {
                 } else {
                     None
                 };
-                log!(INFO,
-                    "[refunding] 3USD reserve refund settled for SP {} (vault {}, refund block {}, amount {})",
-                    refund.stability_pool, refund.vault_id, block_index, refund.amount_e8s
-                );
-                mutate_state(|s| {
+                let committed = mutate_state(|s| {
+                    if refund.source == crate::state::ThreeUsdRefundSource::LegacyHashedReserve {
+                        let (Some(receipt), Some(current)) = (
+                            verified_refund.as_ref(),
+                            s.pending_3usd_refunds.get(&nonce_key).copied(),
+                        ) else {
+                            return false;
+                        };
+                        return commit_legacy_three_usd_refund_receipt(
+                            s,
+                            nonce_key,
+                            current,
+                            receipt,
+                            ic_cdk::api::time(),
+                        );
+                    }
                     if refund.source == crate::state::ThreeUsdRefundSource::DefaultAccount {
                         if let Some(parent_absorb_id) = refund.parent_absorb_id {
                             let key = crate::state::ThreeUsdReserveIngressKey {
@@ -2054,15 +2389,35 @@ pub async fn process_pending_transfer() {
                             journal.protocol_refund_fee_reserve_e8s = 0;
                         }
                     }
+                    true
                 });
+                if committed {
+                    log!(INFO,
+                        "[refunding] 3USD reserve refund receipt verified and recorded for SP {} (vault {}, refund block {}, amount {})",
+                        refund.stability_pool, refund.vault_id, block_index, refund.amount_e8s
+                    );
+                } else {
+                    log!(INFO,
+                        "[refunding] 3USD refund receipt verified at block {}, but durable row changed before commit; preserving liability for reconciliation",
+                        block_index
+                    );
+                }
             }
             Err(error) => {
+                let recovery_action = if refund.source
+                    == crate::state::ThreeUsdRefundSource::LegacyHashedReserve
+                {
+                    "will remain held; automatic resubmission is disabled"
+                } else {
+                    "will retry when safe"
+                };
                 log!(
                     INFO,
-                    "[refunding] 3USD reserve refund failed for SP {} (vault {}): {:?}. Will retry.",
+                    "[refunding] 3USD reserve refund failed for SP {} (vault {}): {:?}; {}.",
                     refund.stability_pool,
                     refund.vault_id,
-                    error
+                    error,
+                    recovery_action
                 );
                 if refund.parent_absorb_id.is_some() {
                     // With a submitted V2 tuple, any error or lost response is
@@ -2098,13 +2453,8 @@ pub async fn process_pending_transfer() {
                             retries,
                             refund.amount_e8s
                         );
-                        if refund.source == crate::state::ThreeUsdRefundSource::LegacyHashedReserve {
-                            // Preserve the historical worker policy for rows from the old route.
-                            mutate_state(|s| {
-                                s.pending_3usd_refunds.remove(&nonce_key);
-                            });
-                        }
-                        // V2 rows stay durable so their SP can reconcile the exact refund proof.
+                        // Keep every exhausted 3USD refund row durable as a
+                        // liability for operator reconciliation.
                     }
                 }
             }
@@ -2127,7 +2477,7 @@ pub async fn process_pending_transfer() {
             .any(|refund| pending_refund_is_automatically_retryable(refund.retry_count))
             || s.pending_3usd_refunds
                 .values()
-                .any(|refund| refund.retry_count < MAX_PENDING_RETRIES)
+                .any(|refund| pending_3usd_refund_is_automatically_retryable(s, refund))
     }) {
         // Schedule another check in 5 seconds
         log!(
