@@ -215,6 +215,21 @@ fn balance(h: &Harness, ledger: Principal, owner: Principal) -> u128 {
     result.0.try_into().unwrap()
 }
 
+fn lp_balance(h: &Harness) -> u128 {
+    balance(h, h.pool, h.user)
+}
+
+fn liquidity_event_count_v2(h: &Harness) -> u64 {
+    decode_one(&reply(
+        h.pic.query_call(
+            h.pool,
+            Principal::anonymous(),
+            "get_liquidity_event_count_v2",
+            encode_args(()).unwrap(),
+        ).unwrap(),
+    )).unwrap()
+}
+
 fn claims(h: &Harness) -> Vec<ThreePoolPendingClaim> {
     decode_one(&reply(
         h.pic
@@ -467,6 +482,77 @@ fn insufficient_capacity_rejects_before_any_add_liquidity_pull_and_keeps_old_cla
     assert_eq!(existing.len(), 1);
     assert_eq!(existing[0].id, first_id);
     assert_eq!(existing[0].amount, 777);
+}
+
+#[test]
+fn add_liquidity_rejects_fee_sized_leg_before_any_pull_or_claim() {
+    let h = setup();
+    call_ledger_nat(&h, h.ledgers[0], "set_fee", 1_000);
+    let before = h.ledgers.map(|ledger| balance(&h, ledger, h.user));
+    let payouts_before = payout_storage_counts(&h);
+    let result: Result<Nat, ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool,
+            h.user,
+            "add_liquidity",
+            encode_args(([500u128, ADD[1], ADD[2]].to_vec(), 0u128)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(result, Err(ThreePoolError::InsufficientOutput { .. })), "unexpected add result: {result:?}");
+    assert_eq!(h.ledgers.map(|ledger| balance(&h, ledger, h.user)), before);
+    assert!(claims(&h).is_empty());
+    assert_eq!(payout_storage_counts(&h), payouts_before, "dust leg must be rejected before payout reservation");
+}
+
+#[test]
+fn add_liquidity_fails_closed_when_actual_fee_query_fails() {
+    let h = setup();
+    // Prime the general fee cache at zero through a donation, which has no
+    // promised outbound refund. The live fee is then higher, so add admission
+    // must bypass that stale cache and fail closed.
+    let donated: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool,
+            h.user,
+            "donate",
+            encode_args((0u8, 1_000u128)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    donated.expect("donation should not require the add-liquidity refund fee guard");
+    call_ledger_nat(&h, h.ledgers[0], "set_fee", 1_000);
+    call_ledger_flag(&h, h.ledgers[0], "set_fail_fee_query", true);
+    let before = h.ledgers.map(|ledger| balance(&h, ledger, h.user));
+    let payouts_before = payout_storage_counts(&h);
+
+    let failed_query: Result<Nat, ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool,
+            h.user,
+            "add_liquidity",
+            encode_args(([500u128, ADD[1], ADD[2]].to_vec(), 0u128)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(
+        failed_query,
+        Err(ThreePoolError::TransferFailed { ref token, ref reason })
+            if token == "T0" && reason.contains("actual refund fee")
+    ));
+    assert_eq!(h.ledgers.map(|ledger| balance(&h, ledger, h.user)), before);
+    assert!(claims(&h).is_empty());
+    assert_eq!(payout_storage_counts(&h), payouts_before);
+
+    call_ledger_flag(&h, h.ledgers[0], "set_fail_fee_query", false);
+    let known_dust: Result<Nat, ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool,
+            h.user,
+            "add_liquidity",
+            encode_args(([500u128, ADD[1], ADD[2]].to_vec(), 0u128)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(known_dust, Err(ThreePoolError::InsufficientOutput { .. })));
+    assert_eq!(h.ledgers.map(|ledger| balance(&h, ledger, h.user)), before);
+    assert_eq!(payout_storage_counts(&h), payouts_before);
 }
 
 #[test]
@@ -1170,6 +1256,9 @@ fn legacy_claim_survives_upgrade_and_cannot_create_a_fresh_transfer() {
 #[test]
 fn proven_bad_fee_starts_new_exact_attempt_with_refreshed_fee() {
     let h = setup();
+    // Exits remain available when the secondary claim index is full. The
+    // payout journal already contains the exact durable recovery identity.
+    set_test_cap(&h, 0);
     h.pic
         .update_call(
             h.ledgers[0],
@@ -1179,6 +1268,8 @@ fn proven_bad_fee_starts_new_exact_attempt_with_refreshed_fee() {
         )
         .unwrap();
     call_ledger_nat(&h, h.ledgers[0], "set_fee", 100);
+    let events_before = liquidity_event_count_v2(&h);
+    let lp_before = lp_balance(&h);
 
     let result: Result<Vec<Nat>, ThreePoolError> = decode_one(&reply(
         h.pic
@@ -1191,22 +1282,89 @@ fn proven_bad_fee_starts_new_exact_attempt_with_refreshed_fee() {
             .unwrap(),
     ))
     .unwrap();
-    assert!(matches!(result, Err(ThreePoolError::TransferFailed { .. })));
-    let claim = claims(&h).into_iter().find(|claim| claim.token_index == 0).unwrap();
+    let failure_reason = match result {
+        Err(ThreePoolError::TransferFailed { reason, .. }) => reason,
+        other => panic!("unexpected proportional exit result: {other:?}"),
+    };
+    assert!(claims(&h).is_empty(), "exit recovery must not need a pending-claim slot");
+    let claim = payouts(&h, h.user).into_iter()
+        .find(|item| item.kind == PayoutKind::RemoveLiquidity && item.token_index == 0)
+        .expect("failed exit remains discoverable in the payout journal");
+    assert!(!claim.settled, "failed transfer must stay unsettled until recovery");
+    assert_eq!(liquidity_event_count_v2(&h), events_before + 1);
+    assert!(failure_reason.contains(&format!("claim_pending({})", claim.id)));
+    assert!(failure_reason.contains(&format!("get_payout_entitlement({})", claim.id)));
+    assert!(failure_reason.contains("get_payout_entitlements"));
     let before_retry = balance(&h, h.ledgers[0], h.user);
     call_ledger_nat(&h, h.ledgers[0], "set_fee", 250);
     let retried: Result<(), ThreePoolError> = decode_one(&reply(
         h.pic
-            .update_call(h.pool, h.user, "claim_pending", encode_one(claim.id).unwrap())
+        .update_call(h.pool, h.user, "claim_pending", encode_one(claim.id).unwrap())
             .unwrap(),
     ))
     .unwrap();
     retried.expect("typed BadFee proves no transfer and allows a new attempt");
     let updated = payout(&h, h.user, claim.id);
+    assert!(updated.settled, "confirmed proportional payout must close its entitlement");
     assert_eq!(updated.attempts.len(), 2);
     assert_eq!(updated.attempts[1].transfer.fee, 250);
-    assert_eq!(updated.attempts[1].transfer.net + 250, claim.amount);
-    assert_eq!(balance(&h, h.ledgers[0], h.user) - before_retry, claim.amount - 250);
+    assert_eq!(updated.attempts[1].transfer.net + 250, claim.gross);
+    assert_eq!(balance(&h, h.ledgers[0], h.user) - before_retry, claim.gross - 250);
+    assert_eq!(lp_balance(&h), lp_before - 100_000_000, "retry must not burn LP again");
+    assert_eq!(liquidity_event_count_v2(&h), events_before + 1, "retry must not duplicate the exit event");
+}
+
+#[test]
+fn one_coin_exit_at_claim_capacity_keeps_exact_recoverable_payout() {
+    let h = setup();
+    set_test_cap(&h, 0);
+    h.pic.update_call(
+        h.ledgers[0],
+        h.user,
+        "set_bad_fee_failures",
+        encode_one(1u32).unwrap(),
+    ).unwrap();
+    call_ledger_nat(&h, h.ledgers[0], "set_fee", 100);
+    let events_before = liquidity_event_count_v2(&h);
+    let lp_before = lp_balance(&h);
+
+    let result: Result<Nat, ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool,
+            h.user,
+            "remove_one_coin",
+            encode_args((100_000_000u128, 0u8, 0u128)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    let failure_reason = match result {
+        Err(ThreePoolError::TransferFailed { reason, .. }) => reason,
+        other => panic!("unexpected one-coin exit result: {other:?}"),
+    };
+    assert!(claims(&h).is_empty());
+    let entitlement = payouts(&h, h.user).into_iter()
+        .find(|item| item.kind == PayoutKind::RemoveOneCoin && item.token_index == 0)
+        .expect("one-coin payout remains discoverable at claim capacity");
+    assert!(!entitlement.settled, "failed transfer must stay unsettled until recovery");
+    assert_eq!(liquidity_event_count_v2(&h), events_before + 1);
+    assert!(failure_reason.contains(&format!("claim_pending({})", entitlement.id)));
+    assert!(failure_reason.contains(&format!("get_payout_entitlement({})", entitlement.id)));
+    assert!(failure_reason.contains("get_payout_entitlements"));
+    let before_retry = balance(&h, h.ledgers[0], h.user);
+
+    let recovered: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool,
+            h.user,
+            "claim_pending",
+            encode_one(entitlement.id).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    recovered.expect("exact payout entitlement should recover without a claim-index slot");
+    let updated = payout(&h, h.user, entitlement.id);
+    assert!(updated.settled);
+    assert_eq!(balance(&h, h.ledgers[0], h.user) - before_retry, entitlement.gross - 100);
+    assert_eq!(lp_balance(&h), lp_before - 100_000_000, "retry must not burn LP again");
+    assert_eq!(liquidity_event_count_v2(&h), events_before + 1, "retry must not duplicate the exit event");
 }
 
 #[test]

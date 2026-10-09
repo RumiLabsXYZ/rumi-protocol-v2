@@ -12,6 +12,7 @@
 //   - set_fail_transfers(bool)        all icrc1_transfer calls return GenericError
 //   - set_fail_transfer_from(bool)    all icrc2_transfer_from calls return GenericError
 //   - set_fee(Nat)                    update the ledger fee returned by icrc1_fee
+//   - set_fail_fee_query(bool)        make icrc1_fee trap
 //   - set_phantom_failures(u32)       next N transfers commit but return GenericError
 //                                     (simulates "ledger committed, reply lost")
 //   - set_bad_fee_failures(u32)       next N transfers return BadFee with set_fee value
@@ -136,6 +137,7 @@ struct LedgerState {
     /// operation appends exactly one block at its normal zero-based index.
     blocks: Vec<BlockWithId>,
     fee: u128,
+    fail_fee_query: bool,
     fail_transfers: bool,
     fail_transfer_from: bool,
     /// Next N transfers commit but return a transient error (simulates lost reply).
@@ -284,7 +286,13 @@ fn icrc1_balance_of(account: Account) -> Nat {
 
 #[query]
 fn icrc1_fee() -> Nat {
-    STATE.with(|s| Nat::from(s.borrow().fee))
+    STATE.with(|s| {
+        let state = s.borrow();
+        if state.fail_fee_query {
+            ic_cdk::trap("injected icrc1_fee query failure");
+        }
+        Nat::from(state.fee)
+    })
 }
 
 /// Pool-status shim for the backend's CL-07 refund fixture. This canister is
@@ -621,6 +629,12 @@ fn set_fail_transfer_from(fail: bool) {
 #[update]
 fn set_fee(fee: Nat) {
     STATE.with(|s| s.borrow_mut().fee = nat_to_u128(&fee));
+}
+
+/// Make icrc1_fee trap to exercise fail-closed fee admission.
+#[update]
+fn set_fail_fee_query(fail: bool) {
+    STATE.with(|s| s.borrow_mut().fail_fee_query = fail);
 }
 
 /// Next N transfers commit (state mutates, dedup record is written) and then

@@ -248,4 +248,53 @@ mod tests {
         assert_eq!(decoded.attempts[0].transfer, transfer);
         assert_eq!(decoded.attempts[0].outcome, PayoutOutcome::Prepared);
     }
+
+    #[test]
+    fn confirmed_exit_payouts_can_be_settled_idempotently() {
+        let owner = Principal::self_authenticating(b"exit payout owner");
+        let ledger = Principal::self_authenticating(b"exit payout ledger");
+        for kind in [PayoutKind::RemoveLiquidity, PayoutKind::RemoveOneCoin] {
+            let id = storage::pending_claims::next_id();
+            let attempt = PayoutAttempt {
+                number: 0,
+                replay_count: 0,
+                transfer: PayoutTransfer {
+                    ledger,
+                    from: Account { owner: Principal::management_canister(), subaccount: None },
+                    to: Account { owner, subaccount: None },
+                    gross: 1_000,
+                    net: 900,
+                    fee: 100,
+                    memo: vec![id as u8; 32],
+                    created_at_time: id,
+                },
+                outcome: PayoutOutcome::Confirmed { block: candid::Nat::from(id) },
+            };
+            save(PayoutEntitlement {
+                id,
+                owner,
+                token_index: 0,
+                ledger,
+                symbol: "T0".into(),
+                gross: 1_000,
+                kind,
+                swap_context: None,
+                compensation_id: None,
+                compensation_for: None,
+                dispatch_ready: Some(true),
+                input_transfer: None,
+                input_outcome: None,
+                input_action: None,
+                settled: false,
+                attempts: vec![attempt],
+            });
+
+            let evidence_before = storage::payouts::evidence_count();
+            assert!(mark_settled(id));
+            assert!(get(id).expect("settled entitlement remains durable").settled);
+            assert_eq!(storage::payouts::evidence_count(), evidence_before + 1);
+            assert!(mark_settled(id));
+            assert_eq!(storage::payouts::evidence_count(), evidence_before + 1);
+        }
+    }
 }

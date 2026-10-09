@@ -122,6 +122,7 @@ service : () -> {
   set_fail_transfers : (bool) -> ();
   set_fail_transfer_from : (bool) -> ();
   set_fee : (nat) -> ();
+  set_fail_fee_query : (bool) -> ();
   set_phantom_failures : (nat32) -> ();
   set_bad_fee_failures : (nat32) -> ();
   reset_dedup : () -> ();
