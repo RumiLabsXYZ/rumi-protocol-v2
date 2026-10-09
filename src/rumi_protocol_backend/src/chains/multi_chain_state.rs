@@ -1110,7 +1110,129 @@ impl MultiChainStateV8 {
     }
 }
 
-pub type MultiChainState = MultiChainStateV8;
+/// Additive V9 state adds provenance for the EVM burn-proof floor. V8 floors
+/// may have been advanced by an operator-supplied height, so a V8 snapshot with
+/// any prior cursor/floor migrates into an explicit legacy hold until a future
+/// verified inventory process resolves it. `verified` is advanced only by a
+/// complete finalized Burn-log scan.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default)]
+pub struct MultiChainStateV9 {
+    pub chain_configs: BTreeMap<ChainId, ChainConfigV3>,
+    pub chain_supplies: BTreeMap<ChainId, u128>,
+    pub settlement_queues: BTreeMap<ChainId, SettlementQueueV1>,
+    pub invariant_halted: bool,
+    #[serde(default)] pub chain_vaults: BTreeMap<u64, ChainVaultV1>,
+    #[serde(default)] pub chain_contracts: BTreeMap<ChainId, String>,
+    #[serde(default)] pub manual_prices: BTreeMap<(ChainId, String), u64>,
+    #[serde(default)] pub last_observed_block: BTreeMap<ChainId, u64>,
+    #[serde(default)] pub hot_wallet_balance_e18: BTreeMap<ChainId, u128>,
+    #[serde(default)] pub reorg_halted: BTreeMap<ChainId, bool>,
+    #[serde(default)] pub reorg_suspect_streak: BTreeMap<ChainId, u32>,
+    #[serde(default)] pub processed_burn_keys: BTreeMap<u64, BTreeSet<String>>,
+    #[serde(default)] pub evm_owner_nonces: BTreeMap<Principal, u64>,
+    #[serde(default)] pub manual_price_set_at_ns: BTreeMap<(ChainId, String), u64>,
+    #[serde(default)] pub reserve_backing_e8s: BTreeMap<ChainId, u128>,
+    #[serde(default)] pub reserve_usdc_native: BTreeMap<ChainId, u128>,
+    #[serde(default)] pub pending_chain_burn_e8s: BTreeMap<ChainId, u128>,
+    #[serde(default)] pub sp_attempted_chain_vaults: BTreeSet<u64>,
+    #[serde(default)] pub chain_liquidation_claims: BTreeMap<u64, ChainLiqClaimV1>,
+    #[serde(default)] pub chain_liquidation_configs: BTreeMap<ChainId, ChainLiquidationConfigV1>,
+    #[serde(default)] pub chain_debt_configs: BTreeMap<ChainId, ChainDebtConfigV1>,
+    #[serde(default)] pub bot_pending_chain_vaults: BTreeMap<u64, u64>,
+    #[serde(default)] pub chain_bad_debt_e8s: BTreeMap<ChainId, u128>,
+    #[serde(default)] pub settled_pending_burn_proofs: BTreeMap<String, SettlementProofRecord>,
+    #[serde(default)] pub settled_reserve_burn_proofs: BTreeMap<String, SettlementProofRecord>,
+    #[serde(default)] pub settled_settlement_burn_logs: BTreeSet<String>,
+    #[serde(default)] pub settled_reserve_transfer_e8s: BTreeMap<String, u128>,
+    #[serde(default)] pub chain_bad_debt_circuit_threshold_e8s: BTreeMap<ChainId, u128>,
+    #[serde(default)] pub chain_bad_debt_circuit_tripped_at_ns: BTreeMap<ChainId, u64>,
+    #[serde(default)] pub awaiting_deposit_cursor: BTreeMap<ChainId, u64>,
+    #[serde(default)] pub hot_wallet_balance_refreshed_at_ns: BTreeMap<ChainId, u64>,
+    #[serde(default)] pub pending_evm_burn_replay_ids: BTreeMap<(ChainId, u64), BTreeSet<String>>,
+    #[serde(default)] pub evm_burn_proof_floor_by_chain: BTreeMap<ChainId, u64>,
+    #[serde(default)] pub evm_burn_proof_legacy_hold_through: BTreeMap<ChainId, u64>,
+    /// Lower bound backed by a complete finalized Burn-log scan.
+    #[serde(default)] pub evm_burn_proof_verified_floor_by_chain: BTreeMap<ChainId, u64>,
+}
+
+impl_multi_chain_state_common!(MultiChainStateV9);
+
+impl MultiChainStateV9 {
+    /// Migrate V8 floor state fail-closed. V8 did not record whether a floor
+    /// came from a complete scan or a developer assertion, so any prior cursor
+    /// or floor is held through the larger value until exact inventory
+    /// reconciliation is available.
+    pub fn ensure_evm_burn_proof_floor(&mut self, chain: ChainId) -> u64 {
+        let floor = *self.evm_burn_proof_floor_by_chain.entry(chain).or_insert(0);
+        // Presence is the V8->V9 migration marker. Do not infer legacy status
+        // from cursor/floor divergence after migration: V9 legitimately moves
+        // the observer cursor on no-Burn-scan paths while preserving the lower
+        // proof floor so later replay catch-up can scan that skipped interval.
+        let had_verified_floor = self
+            .evm_burn_proof_verified_floor_by_chain
+            .contains_key(&chain);
+        self.evm_burn_proof_verified_floor_by_chain
+            .entry(chain)
+            .or_insert(0);
+        let cursor = self.last_observed_block.get(&chain).copied().unwrap_or(0);
+        let held_through = floor.max(cursor);
+        if !had_verified_floor && held_through > 0 {
+            self.evm_burn_proof_legacy_hold_through
+                .entry(chain)
+                .and_modify(|held| *held = (*held).max(held_through))
+                .or_insert(held_through);
+        }
+        floor
+    }
+
+    pub fn can_reserve_evm_burn_replay_ids(&self, additional: usize) -> bool {
+        self.pending_evm_burn_replay_ids.values()
+            .try_fold(0usize, |count, ids| count.checked_add(ids.len()))
+            .and_then(|count| count.checked_add(additional))
+            .is_some_and(|count| count <= MAX_PENDING_EVM_BURN_REPLAY_IDS)
+    }
+
+    pub fn has_evm_burn_replay_id(
+        &self, chain: ChainId, block: u64, tx_hash: &str, log_index: u64,
+    ) -> bool {
+        self.pending_evm_burn_replay_ids.get(&(chain, block))
+            .is_some_and(|ids| ids.contains(&format!("{}:{}", tx_hash.to_ascii_lowercase(), log_index)))
+    }
+
+    pub fn reserve_evm_burn_replay_id(
+        &mut self, chain: ChainId, block: u64, tx_hash: &str, log_index: u64,
+    ) -> Result<(), EvmBurnReplayIndexError> {
+        if self.has_evm_burn_replay_id(chain, block, tx_hash, log_index) {
+            return Ok(());
+        }
+        if !self.can_reserve_evm_burn_replay_ids(1) {
+            return Err(EvmBurnReplayIndexError::Full);
+        }
+        self.pending_evm_burn_replay_ids.entry((chain, block)).or_default()
+            .insert(format!("{}:{}", tx_hash.to_ascii_lowercase(), log_index));
+        Ok(())
+    }
+
+    /// Commit both floors monotonically only after a complete finalized
+    /// Burn-log scan. Cursor-only advances and configuration edits cannot
+    /// attest coverage or reopen a pruned replay horizon.
+    pub fn advance_evm_burn_proof_floor(&mut self, chain: ChainId, through: u64) {
+        let floor = self.ensure_evm_burn_proof_floor(chain).max(through);
+        self.evm_burn_proof_floor_by_chain.insert(chain, floor);
+        self.evm_burn_proof_verified_floor_by_chain
+            .entry(chain)
+            .and_modify(|verified| *verified = (*verified).max(through))
+            .or_insert(through);
+        let stale: Vec<_> = self.pending_evm_burn_replay_ids.keys()
+            .filter(|(entry_chain, block)| *entry_chain == chain && *block <= floor)
+            .copied()
+            .collect();
+        for key in stale { self.pending_evm_burn_replay_ids.remove(&key); }
+    }
+
+}
+
+pub type MultiChainState = MultiChainStateV9;
 
 #[cfg(test)]
 mod manual_price_tests {

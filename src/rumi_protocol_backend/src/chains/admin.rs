@@ -152,11 +152,48 @@ pub fn disable_chain_in_state(
 /// Re-enabling only reopens the gate; an open still has to satisfy the price
 /// presence/staleness checks in `open_chain_vault_in_state` against whatever
 /// price state exists at that moment. That is the point of the documented
-/// recovery order (disable, rebaseline manually, verify, enable).
+/// price recovery order (disable, rebaseline the price, verify, enable).
+///
+/// EVM-specific limitation: if the contiguous Burn-log floor trails the shared
+/// observer cursor, or an upgraded legacy range is held, this function refuses
+/// reactivation. Disabled chains do not run the observer, and manual cursor
+/// writes are disabled, so such a chain remains disabled until a separately
+/// implemented and verified reconciliation path closes the gap. This is an
+/// intentional interim availability limit; do not bypass it with an asserted
+/// developer height.
 pub fn enable_chain_in_state(
     state: &mut MultiChainState,
     chain_id: ChainId,
 ) -> Result<(), ChainAdminError> {
+    let Some(existing) = state.chain_configs.get(&chain_id) else {
+        return Err(ChainAdminError::ChainNotRegistered(chain_id));
+    };
+    if matches!(existing.status, ChainStatus::Disabled) && is_evm(&existing.gas_strategy) {
+        // V7's cursor advanced on paths that did not scan Burn logs. Materialize
+        // that ambiguity before deciding whether reactivation is safe. A
+        // developer cursor seed is not evidence that the held range was
+        // reconciled, and cannot authorize reopening proof admission.
+        state.ensure_evm_burn_proof_floor(chain_id);
+        if let Some(held_through) = state.evm_burn_proof_legacy_hold_through.get(&chain_id) {
+            return Err(ChainAdminError::InvalidConfig(format!(
+                "chain {} has unknown legacy Burn-log coverage through {}; verified inventory reconciliation is required before enable",
+                chain_id.0, held_through
+            )));
+        }
+        let cursor = state.last_observed_block.get(&chain_id).copied().unwrap_or(0);
+        let floor = state.evm_burn_proof_floor_by_chain.get(&chain_id).copied().unwrap_or(0);
+        let verified_floor = state
+            .evm_burn_proof_verified_floor_by_chain
+            .get(&chain_id)
+            .copied()
+            .unwrap_or(0);
+        if cursor == 0 || floor == 0 || floor != cursor || verified_floor != cursor {
+            return Err(ChainAdminError::InvalidConfig(format!(
+                "chain {} burn-proof activation requires a nonzero observer cursor exactly covered by the verified contiguous proof floor (cursor {}, floor {}, verified {})",
+                chain_id.0, cursor, floor, verified_floor
+            )));
+        }
+    }
     let cfg = state
         .chain_configs
         .get_mut(&chain_id)

@@ -2,7 +2,7 @@ use super::config::ChainId;
 use super::multi_chain_state::{
     ChainLiqClaimV1, MultiChainState, MultiChainStateV1, MultiChainStateV2, MultiChainStateV3,
     MultiChainStateV4, MultiChainStateV5, MultiChainStateV6, MultiChainStateV7, MultiChainStateV8,
-    SettlementProofRecord,
+    MultiChainStateV9, SettlementProofRecord,
 };
 use super::supply::migrate_multi_chain_state;
 
@@ -135,8 +135,8 @@ fn migration_preserves_v1_fields_and_defaults_new_ones() {
 }
 
 #[test]
-fn active_alias_points_at_v8() {
-    fn _check(x: MultiChainState) -> MultiChainStateV8 {
+fn active_alias_points_at_v9() {
+    fn _check(x: MultiChainState) -> MultiChainStateV9 {
         x
     }
 }
@@ -168,6 +168,43 @@ fn v7_snapshot_decodes_into_v8_and_holds_ambiguous_legacy_cursor_history() {
     decoded.accept_evm_burn_proof_baseline(chain, 777);
     assert!(!decoded.evm_burn_proof_legacy_hold_through.contains_key(&chain));
     assert_eq!(decoded.evm_burn_proof_floor_by_chain.get(&chain), Some(&777));
+}
+
+#[test]
+fn v8_operator_baseline_decodes_into_v9_as_unverified_legacy_history() {
+    let chain = ChainId(1030);
+    let mut v8 = MultiChainStateV8::default();
+    v8.chain_supplies.insert(chain, 42);
+    v8.last_observed_block.insert(chain, 777);
+    v8.evm_burn_proof_floor_by_chain.insert(chain, 777);
+
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&v8, &mut bytes).expect("encode V8");
+    let mut decoded: MultiChainStateV9 = ciborium::de::from_reader(bytes.as_slice())
+        .expect("V8 snapshot must decode into V9 without wiping state");
+
+    assert_eq!(decoded.chain_supplies.get(&chain), Some(&42));
+    assert_eq!(decoded.last_observed_block.get(&chain), Some(&777));
+    assert_eq!(decoded.evm_burn_proof_floor_by_chain.get(&chain), Some(&777));
+    assert_eq!(decoded.ensure_evm_burn_proof_floor(chain), 777);
+    assert_eq!(decoded.evm_burn_proof_verified_floor_by_chain.get(&chain), Some(&0));
+    assert_eq!(decoded.evm_burn_proof_legacy_hold_through.get(&chain), Some(&777));
+}
+
+#[test]
+fn v8_cursor_without_a_floor_decodes_into_v9_as_held_legacy_history() {
+    let chain = ChainId(1030);
+    let mut v8 = MultiChainStateV8::default();
+    v8.last_observed_block.insert(chain, 900);
+
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&v8, &mut bytes).expect("encode V8");
+    let mut decoded: MultiChainStateV9 = ciborium::de::from_reader(bytes.as_slice())
+        .expect("V8 snapshot must decode into V9");
+
+    assert_eq!(decoded.ensure_evm_burn_proof_floor(chain), 0);
+    assert_eq!(decoded.evm_burn_proof_verified_floor_by_chain.get(&chain), Some(&0));
+    assert_eq!(decoded.evm_burn_proof_legacy_hold_through.get(&chain), Some(&900));
 }
 
 #[test]
