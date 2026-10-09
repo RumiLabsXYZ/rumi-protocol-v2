@@ -3,9 +3,10 @@
 //! keeps reserve mutations fenced even after an upgrade.
 mod common;
 use candid::{decode_one, encode_args, encode_one, Nat, Principal};
-use common::{deploy_pool_with_liquidity_fee_and_swaps, three_pool_wasm, ThreePoolHarness};
+use common::{three_pool_test_endpoints_wasm, three_pool_wasm, ThreePoolHarness};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
+use pocket_ic::common::rest::{CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse};
 use pocket_ic::WasmResult;
 use rumi_3pool::receipts::*;
 use rumi_3pool::types::ThreePoolError;
@@ -24,6 +25,31 @@ fn request() -> SwapRequestV1 {
         dx: 100_000_000,
         min_dy: 1,
     }
+}
+fn deploy_pool_with_liquidity_fee_and_swaps(n_swaps: u64, transfer_fee: u128) -> ThreePoolHarness {
+    common::deploy_pool_with_liquidity_fee_and_swaps_with_wasm(
+        n_swaps,
+        transfer_fee,
+        three_pool_test_endpoints_wasm(),
+    )
+}
+
+#[test]
+fn production_wasm_keeps_receipt_ingress_closed_before_any_ledger_debit() {
+    let h = common::deploy_pool_with_liquidity_fee_and_swaps_with_wasm(0, 10_000, three_pool_wasm());
+    let enabled: Result<(), SwapReceiptErrorV1> = decode_one(&bytes(
+        h.pic.update_call(
+            h.three_pool,
+            h.admin,
+            "set_swap_receipt_client_v1",
+            encode_args((h.user, true)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert_eq!(enabled, Err(SwapReceiptErrorV1::Unauthorized));
+    let before_input = balance(&h, h.ledgers[0], h.user);
+    assert_eq!(submit(&h, request()), Err(SwapReceiptErrorV1::Unauthorized));
+    assert!(query(&h, h.user).is_none());
+    assert_eq!(balance(&h, h.ledgers[0], h.user), before_input);
 }
 fn submit(h: &ThreePoolHarness, r: SwapRequestV1) -> Result<SwapReceiptV1, SwapReceiptErrorV1> {
     decode_one(&bytes(
@@ -169,7 +195,7 @@ fn receipts_bind_ledger_economics_and_replay_survives_upgrade() {
     h.pic
         .upgrade_canister(
             h.three_pool,
-            three_pool_wasm(),
+            three_pool_test_endpoints_wasm(),
             encode_args(()).unwrap(),
             None,
         )
@@ -185,9 +211,40 @@ fn receipts_bind_ledger_economics_and_replay_survives_upgrade() {
 fn stopped_output_ledger_never_refunds_or_replays_and_fence_survives_upgrade() {
     let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);
     enable(&h);
-    h.pic.stop_canister(h.ledgers[1], None).unwrap();
     let before = balance(&h, h.ledgers[0], h.user);
-    let r = submit(&h, request()).unwrap();
+    // The output fee is fetched before the input pull. Pause after that
+    // successful quote so this tests an actual post-input output failure.
+    let _: () = decode_one(&bytes(h.pic.update_call(
+        h.three_pool,
+        h.admin,
+        "test_gate_next_swap_input_pull",
+        encode_args(()).unwrap(),
+    ).unwrap())).unwrap();
+    let attempt = h.pic.submit_call(
+        h.three_pool,
+        h.user,
+        "swap_with_receipt_v1",
+        encode_one(request()).unwrap(),
+    ).unwrap();
+    let gate = (0..80).find_map(|_| {
+        h.pic.tick();
+        h.pic.get_canister_http().into_iter()
+            .find(|pending| pending.url == "https://3pool-swap-fee-gate.test/hold")
+    }).expect("receipt reached the barrier after the output fee query");
+    h.pic.stop_canister(h.ledgers[1], None).unwrap();
+    h.pic.mock_canister_http_response(MockCanisterHttpResponse {
+        subnet_id: gate.subnet_id,
+        request_id: gate.request_id,
+        response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+            status: 200,
+            headers: vec![],
+            body: b"release".to_vec(),
+        }),
+        additional_responses: vec![],
+    });
+    let r: Result<SwapReceiptV1, SwapReceiptErrorV1> =
+        decode_one(&bytes(h.pic.await_call(attempt).unwrap())).unwrap();
+    let r = r.unwrap();
     assert_eq!(r.status, SwapReceiptStatusV1::Unresolved);
     assert!(r.input.as_ref().unwrap().block_index.is_some());
     assert!(r.output.as_ref().unwrap().block_index.is_none());
@@ -199,7 +256,7 @@ fn stopped_output_ledger_never_refunds_or_replays_and_fence_survives_upgrade() {
     h.pic
         .upgrade_canister(
             h.three_pool,
-            three_pool_wasm(),
+            three_pool_test_endpoints_wasm(),
             encode_args(()).unwrap(),
             None,
         )

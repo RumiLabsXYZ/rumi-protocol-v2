@@ -1100,6 +1100,11 @@ pub fn set_swap_receipt_client_v1(
     if ic_cdk::api::caller() != read_state(|s| s.config.admin) {
         return Err(SwapReceiptErrorV1::Unauthorized);
     }
+    // Existing clients may still be revoked, but production must not admit
+    // new receipt swaps before ambiguous legs have a bounded recovery path.
+    if enabled && !cfg!(feature = "test_endpoints") {
+        return Err(SwapReceiptErrorV1::Unauthorized);
+    }
     receipts::set_client(client, enabled)
 }
 #[query]
@@ -1111,6 +1116,12 @@ pub fn is_swap_receipt_client_v1(client: Principal) -> bool {
 pub async fn swap_with_receipt_v1(
     request: SwapRequestV1,
 ) -> Result<SwapReceiptV1, SwapReceiptErrorV1> {
+    // A receipt can retain a pool-wide fence after an uncertain ledger call.
+    // Keep the endpoint readable but close new production ingress until its
+    // exact-proof/absence recovery is complete. Test Wasm exercises the saga.
+    if !cfg!(feature = "test_endpoints") {
+        return Err(SwapReceiptErrorV1::Unauthorized);
+    }
     if !receipts::client_enabled(ic_cdk::api::caller()) {
         return Err(SwapReceiptErrorV1::Unauthorized);
     }
