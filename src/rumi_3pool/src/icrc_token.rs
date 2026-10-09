@@ -515,8 +515,9 @@ pub fn icrc2_transfer_from(
     }
 
     let result = mutate_state(|s| {
-        // Check and deduct allowance (unless self-transfer)
-        if caller != from_principal {
+        // Check allowance first to preserve error precedence, but defer its
+        // mutation until the balance check also succeeds.
+        let existing_allowance = if caller != from_principal {
             let existing = crate::storage::allowance_get(&from_principal, &caller);
             let current_allowance = existing
                 .as_ref()
@@ -527,23 +528,28 @@ pub fn icrc2_transfer_from(
                     allowance: Nat::from(current_allowance),
                 });
             }
+            existing
+        } else {
+            None
+        };
 
-            // Deduct allowance
-            let mut entry = existing.unwrap();
+        // Check balance before any allowance mutation. A failed transfer must
+        // leave the spender's approval intact.
+        let from_balance = crate::storage::lp_balance_get(&from_principal);
+        if from_balance < amount {
+            return Err(TransferFromError::InsufficientFunds {
+                balance: Nat::from(from_balance),
+            });
+        }
+
+        // Deduct allowance only after both validations succeed.
+        if let Some(mut entry) = existing_allowance {
             entry.amount = entry.amount.saturating_sub(amount);
             if entry.amount == 0 {
                 crate::storage::allowance_remove(&from_principal, &caller);
             } else {
                 crate::storage::allowance_set(from_principal, caller, entry);
             }
-        }
-
-        // Check balance
-        let from_balance = crate::storage::lp_balance_get(&from_principal);
-        if from_balance < amount {
-            return Err(TransferFromError::InsufficientFunds {
-                balance: Nat::from(from_balance),
-            });
         }
 
         // Debit (set-to-0 removes the entry from stable storage)
