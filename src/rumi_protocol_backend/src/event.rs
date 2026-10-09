@@ -3045,7 +3045,11 @@ pub fn record_add_margin_to_vault(
     vault_id: u64,
     margin_added: ICP,
     block_index: u64,
-) {
+) -> Result<(), crate::ProtocolError> {
+    // Validate and apply first. If the callback observes an unexpected state
+    // change, return cleanly without publishing an event that replay would
+    // apply differently. The caller holds the per-vault guard across the pull.
+    state.try_add_margin_to_vault(vault_id, margin_added)?;
     record_event(&Event::AddMarginToVault {
         vault_id,
         margin_added,
@@ -3053,7 +3057,7 @@ pub fn record_add_margin_to_vault(
         caller: Some(ic_cdk::caller()),
         timestamp: Some(now()),
     });
-    state.add_margin_to_vault(vault_id, margin_added);
+    Ok(())
 }
 
 /// Outcome of a redemption's vault water-fill, returned to the caller so the
@@ -5747,5 +5751,38 @@ mod redemption_replay_tests {
         assert_eq!(payout_collateral_raw, Some(50_000_000));
         assert_eq!(min_net_collateral_raw, Some(min_net_raw));
         assert_eq!(50_000_000u64 - 10_000, min_net_raw);
+    }
+}
+
+#[cfg(test)]
+mod add_margin_recording_tests {
+    use super::*;
+    use crate::state::State;
+    use crate::vault::Vault;
+
+    #[test]
+    fn overflow_is_rejected_before_event_is_appended() {
+        let mut state = State::default();
+        state.vault_id_to_vaults.insert(
+            73,
+            Vault {
+                owner: Principal::anonymous(),
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_amount: u64::MAX,
+                vault_id: 73,
+                collateral_type: Principal::anonymous(),
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+        let events_before = crate::storage::count_events();
+
+        assert!(matches!(
+            record_add_margin_to_vault(&mut state, 73, ICP::new(1), 9),
+            Err(crate::ProtocolError::GenericError(_))
+        ));
+        assert_eq!(crate::storage::count_events(), events_before);
+        assert_eq!(state.vault_id_to_vaults.get(&73).unwrap().collateral_amount, u64::MAX);
     }
 }

@@ -1711,6 +1711,26 @@ pub enum DurableTransferError {
     AmbiguousResponse(String),
 }
 
+fn classify_durable_transfer_outcome(
+    outer: Result<Result<Nat, TransferError>, (i32, String)>,
+) -> Result<u64, DurableTransferError> {
+    match outer {
+        Err((code, message)) => Err(DurableTransferError::AmbiguousCall { code, message }),
+        Ok(Err(TransferError::Duplicate { duplicate_of })) => {
+            duplicate_of.0.to_u64().ok_or_else(|| DurableTransferError::AmbiguousResponse(
+                "duplicate block index does not fit u64".into(),
+            ))
+        }
+        Ok(Err(TransferError::BadFee { expected_fee })) => {
+            Err(DurableTransferError::LedgerNoEffect(TransferError::BadFee { expected_fee }))
+        }
+        Ok(Err(error)) => Err(DurableTransferError::LedgerNoEffect(error)),
+        Ok(Ok(block)) => block.0.to_u64().ok_or_else(|| DurableTransferError::AmbiguousResponse(
+            "transfer block index does not fit u64".into(),
+        )),
+    }
+}
+
 pub async fn transfer_collateral_with_nonce_status(
     amount: u64,
     to: Principal,
@@ -1744,23 +1764,14 @@ pub async fn transfer_collateral_with_nonce_and_fee_status(
             amount: Nat::from(amount),
         })
         .await;
-    match outer {
-        Err((code, message)) => Err(DurableTransferError::AmbiguousCall { code, message }),
-        Ok(Err(TransferError::Duplicate { duplicate_of })) => {
-            duplicate_of.0.to_u64().ok_or_else(|| DurableTransferError::AmbiguousResponse(
-                "duplicate block index does not fit u64".into(),
-            ))
-        }
-        Ok(Err(TransferError::BadFee { expected_fee })) => {
+    match classify_durable_transfer_outcome(outer) {
+        Err(DurableTransferError::LedgerNoEffect(TransferError::BadFee { expected_fee })) => {
             if let Some(fee_e8s) = expected_fee.0.to_u64() {
                 set_cached_fee(ledger, fee_e8s);
             }
             Err(DurableTransferError::LedgerNoEffect(TransferError::BadFee { expected_fee }))
         }
-        Ok(Err(error)) => Err(DurableTransferError::LedgerNoEffect(error)),
-        Ok(Ok(block)) => block.0.to_u64().ok_or_else(|| DurableTransferError::AmbiguousResponse(
-            "transfer block index does not fit u64".into(),
-        )),
+        result => result,
     }
 }
 
@@ -2007,6 +2018,52 @@ pub async fn sweep_deposit(
     ledger: Principal,
     ledger_fee: u64,
 ) -> Result<(u64, u64), String> {
+    sweep_deposit_with_bounds(caller, ledger, ledger_fee, 0, u64::MAX)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Debug)]
+pub(crate) enum SweepDepositError {
+    Transfer(String),
+    Ledger(TransferError),
+    AmbiguousCall { code: i32, message: String },
+    AmbiguousResponse(String),
+    AmountTooLow { minimum_amount: u64 },
+    ExceedsCapacity { amount: u64, maximum_amount: u64 },
+}
+
+impl std::fmt::Display for SweepDepositError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transfer(message) => f.write_str(message),
+            Self::Ledger(error) => write!(f, "sweep transfer error: {:?}", error),
+            Self::AmbiguousCall { code, message } => {
+                write!(f, "sweep transfer call outcome is ambiguous ({code}): {message}")
+            }
+            Self::AmbiguousResponse(message) => {
+                write!(f, "sweep transfer response is ambiguous: {message}")
+            }
+            Self::AmountTooLow { minimum_amount } => {
+                write!(f, "Deposit amount is below minimum {minimum_amount}")
+            }
+            Self::ExceedsCapacity { amount, maximum_amount } => write!(
+                f,
+                "Deposit amount ({amount}) exceeds the vault's remaining collateral capacity ({maximum_amount})"
+            ),
+        }
+    }
+}
+
+/// Sweep a pushed deposit only when its net amount fits the vault's inclusive
+/// minimum/maximum bounds. Both checks run before the irreversible transfer.
+pub(crate) async fn sweep_deposit_with_bounds(
+    caller: &Principal,
+    ledger: Principal,
+    ledger_fee: u64,
+    minimum_transfer_amount: u64,
+    max_transfer_amount: u64,
+) -> Result<(u64, u64), SweepDepositError> {
     let subaccount = compute_deposit_subaccount(caller);
     let deposit_account = Account {
         owner: ic_cdk::id(),
@@ -2014,35 +2071,55 @@ pub async fn sweep_deposit(
     };
 
     // Read how much is sitting in the deposit subaccount
-    let balance = get_balance_of(deposit_account, ledger).await?;
+    let balance = get_balance_of(deposit_account, ledger)
+        .await
+        .map_err(SweepDepositError::Transfer)?;
 
     if balance == 0 {
-        return Err("No deposit found in subaccount".to_string());
-    }
-
-    if balance <= ledger_fee {
-        return Err(format!(
-            "Deposit balance ({}) is not enough to cover the ledger fee ({})",
-            balance, ledger_fee
+        return Err(SweepDepositError::Transfer(
+            "No deposit found in subaccount".to_string(),
         ));
     }
 
-    let transfer_amount = balance - ledger_fee;
-    let op_nonce = crate::state::mutate_state(|s| s.next_op_nonce());
+    if balance <= ledger_fee {
+        return Err(SweepDepositError::Transfer(format!(
+            "Deposit balance ({}) is not enough to cover the ledger fee ({})",
+            balance, ledger_fee
+        )));
+    }
 
-    let block_index_u64 = transfer_idempotent(
-        ledger,
-        Some(subaccount),
-        Account {
-            owner: ic_cdk::id(),
-            subaccount: None,
+    let transfer_amount = balance - ledger_fee;
+    let transfer_result = transfer_deposit_after_bounds(
+        transfer_amount,
+        minimum_transfer_amount,
+        max_transfer_amount,
+        || {
+            let op_nonce = crate::state::mutate_state(|s| s.next_op_nonce());
+            transfer_deposit_idempotent_status(
+                ledger,
+                subaccount,
+                Account { owner: ic_cdk::id(), subaccount: None },
+                transfer_amount,
+                op_nonce,
+            )
         },
-        transfer_amount as u128,
-        op_nonce,
-        None,
     )
-    .await
-    .map_err(|e| format!("sweep transfer error: {:?}", e))?;
+    .await?;
+    let block_index_u64 = transfer_result.map_err(|error| match error {
+        DurableTransferError::LedgerNoEffect(TransferError::BadFee { expected_fee }) => {
+            if let Some(fee) = expected_fee.0.to_u64() {
+                set_cached_fee(ledger, fee);
+            }
+            SweepDepositError::Ledger(TransferError::BadFee { expected_fee })
+        }
+        DurableTransferError::LedgerNoEffect(error) => SweepDepositError::Ledger(error),
+        DurableTransferError::AmbiguousCall { code, message } => {
+            SweepDepositError::AmbiguousCall { code, message }
+        }
+        DurableTransferError::AmbiguousResponse(message) => {
+            SweepDepositError::AmbiguousResponse(message)
+        }
+    })?;
 
     log!(DEBUG,
         "[sweep_deposit] Swept {} from subaccount for {} on ledger {} (block {})",
@@ -2050,6 +2127,68 @@ pub async fn sweep_deposit(
     );
 
     Ok((transfer_amount, block_index_u64))
+}
+
+async fn transfer_deposit_idempotent_status(
+    ledger: Principal,
+    from_subaccount: [u8; 32],
+    to: Account,
+    amount: u64,
+    op_nonce: u128,
+) -> Result<u64, DurableTransferError> {
+    let client = ICRC1Client { runtime: CdkRuntime, ledger_canister_id: ledger };
+    let outcome = client.transfer(TransferArg {
+        from_subaccount: Some(from_subaccount),
+        to,
+        fee: None,
+        created_at_time: Some(nonce_to_created_at_time(op_nonce)),
+        memo: Some(nonce_to_memo(op_nonce)),
+        amount: Nat::from(amount),
+    }).await;
+    let result = classify_durable_transfer_outcome(outcome);
+    if let Err(DurableTransferError::LedgerNoEffect(TransferError::BadFee { expected_fee })) = &result {
+        if let Some(fee) = expected_fee.0.to_u64() {
+            set_cached_fee(ledger, fee);
+        }
+    }
+    result
+}
+
+async fn transfer_deposit_after_bounds<F, Fut>(
+    transfer_amount: u64,
+    minimum_transfer_amount: u64,
+    max_transfer_amount: u64,
+    transfer: F,
+) -> Result<Result<u64, DurableTransferError>, SweepDepositError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<u64, DurableTransferError>>,
+{
+    ensure_sweep_amount_within_bounds(
+        transfer_amount,
+        minimum_transfer_amount,
+        max_transfer_amount,
+    )?;
+    Ok(transfer().await)
+}
+
+fn ensure_sweep_amount_within_bounds(
+    transfer_amount: u64,
+    minimum_transfer_amount: u64,
+    max_transfer_amount: u64,
+) -> Result<(), SweepDepositError> {
+    if transfer_amount < minimum_transfer_amount {
+        return Err(SweepDepositError::AmountTooLow {
+            minimum_amount: minimum_transfer_amount,
+        });
+    }
+    if transfer_amount > max_transfer_amount {
+        return Err(SweepDepositError::ExceedsCapacity {
+            amount: transfer_amount,
+            maximum_amount: max_transfer_amount,
+        });
+    }
+    Ok(())
 }
 
 /// Approve a spender to transfer icUSD from the protocol canister.
@@ -2096,5 +2235,82 @@ pub async fn approve_icusd(spender: Principal, amount: u64) -> Result<u64, Appro
             error_code: Nat::from(code as u64),
             message: msg,
         }),
+    }
+}
+
+#[cfg(test)]
+mod sweep_deposit_limit_tests {
+    use super::{classify_durable_transfer_outcome, transfer_deposit_after_bounds, DurableTransferError, SweepDepositError};
+    use candid::Nat;
+    use icrc_ledger_types::icrc1::transfer::TransferError;
+    use std::cell::Cell;
+
+    #[test]
+    fn sweep_limit_accepts_exact_remaining_capacity() {
+        let transferred = Cell::new(false);
+        let result = futures::executor::block_on(transfer_deposit_after_bounds(
+            12,
+            3,
+            12,
+            || {
+                transferred.set(true);
+                async { Ok(44) }
+            },
+        ));
+        assert_eq!(result.unwrap().unwrap(), 44);
+        assert!(transferred.get());
+    }
+
+    #[test]
+    fn sweep_limit_rejects_before_transfer_when_capacity_is_exceeded() {
+        let transferred = Cell::new(false);
+        assert!(matches!(
+            futures::executor::block_on(transfer_deposit_after_bounds(
+                13,
+                3,
+                12,
+                || {
+                    transferred.set(true);
+                    async { Ok(44) }
+                },
+            )),
+            Err(SweepDepositError::ExceedsCapacity { .. })
+        ));
+        assert!(!transferred.get());
+    }
+
+    #[test]
+    fn sweep_limit_rejects_below_minimum_before_transfer() {
+        let transferred = Cell::new(false);
+        assert!(matches!(
+            futures::executor::block_on(transfer_deposit_after_bounds(
+                2,
+                3,
+                12,
+                || {
+                    transferred.set(true);
+                    async { Ok(44) }
+                },
+            )),
+            Err(SweepDepositError::AmountTooLow { minimum_amount: 3 })
+        ));
+        assert!(!transferred.get());
+    }
+
+    #[test]
+    fn sweep_transfer_classifies_ledger_no_effect_separately_from_ambiguous_reject() {
+        let no_effect = classify_durable_transfer_outcome(Ok(Err(TransferError::BadFee {
+            expected_fee: Nat::from(10u64),
+        })));
+        assert!(matches!(
+            no_effect,
+            Err(DurableTransferError::LedgerNoEffect(TransferError::BadFee { .. }))
+        ));
+
+        let ambiguous = classify_durable_transfer_outcome(Err((5, "ledger call rejected".into())));
+        assert!(matches!(
+            ambiguous,
+            Err(DurableTransferError::AmbiguousCall { code: 5, .. })
+        ));
     }
 }

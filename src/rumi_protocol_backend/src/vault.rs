@@ -11,7 +11,7 @@ use crate::management::{
 };
 use crate::numeric::{Ratio, UsdIcp, ICP, ICUSD};
 use crate::state::PendingMarginTransfer;
-use crate::state::{compute_redemption_fee_with_rate, Mode, RedemptionSimulationPlan};
+use crate::state::{compute_redemption_fee_with_rate, Mode, RedemptionSimulationPlan, State};
 use crate::GuardError;
 use crate::DEBUG;
 use crate::{
@@ -6219,9 +6219,35 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    match transfer_collateral_from(arg.amount, caller, config_ledger).await {
+    // Reject an unrepresentable collateral total before the irreversible
+    // ICRC-2 pull. The per-vault guard remains held across the await, and the
+    // callback repeats this check against live state before recording anything.
+    let transfer_result = match pull_add_margin_after_preflight(
+        vault.collateral_amount,
+        amount,
+        || transfer_collateral_from(arg.amount, caller, config_ledger),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            guard_principal.fail();
+            return Err(error);
+        }
+    };
+
+    match transfer_result {
         Ok(block_index) => {
-            mutate_state(|s| record_add_margin_to_vault(s, arg.vault_id, amount, block_index));
+            if let Err(error) = mutate_state(|s| {
+                record_add_margin_to_vault(s, arg.vault_id, amount, block_index)
+            }) {
+                // The checked transition is expected to succeed because the
+                // vault guard excludes collateral mutations across the pull.
+                // Preserve a normal error response if persisted state violates
+                // that invariant; never trap in the post-transfer callback.
+                guard_principal.fail();
+                return Err(error);
+            }
             guard_principal.complete();
             Ok(block_index)
         }
@@ -6239,6 +6265,22 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
             Err(ProtocolError::TransferFromError(error, amount.to_u64()))
         }
     }
+}
+
+/// Keep the checked capacity decision adjacent to the pull boundary. The
+/// closure is intentionally lazy so an overflow rejection cannot dispatch a
+/// ledger request.
+async fn pull_add_margin_after_preflight<F, Fut>(
+    current_collateral: u64,
+    amount: ICP,
+    pull: F,
+) -> Result<Result<u64, TransferFromError>, ProtocolError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<u64, TransferFromError>>,
+{
+    State::checked_margin_total(current_collateral, amount)?;
+    Ok(pull().await)
 }
 
 // ─── Push-deposit vault operations (Oisy wallet integration) ───
@@ -6463,38 +6505,67 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    // Sweep funds from deposit subaccount
-    let (collateral_amount, sweep_block_index) = match management::sweep_deposit(
+    // Sweep only when the exact net amount satisfies the minimum deposit and
+    // fits the vault's remaining u64 collateral capacity. Both checks happen
+    // after reading the balance and before transferring it.
+    let remaining_collateral_capacity = u64::MAX - vault.collateral_amount;
+    let (collateral_amount, sweep_block_index) = match management::sweep_deposit_with_bounds(
         &caller,
         config_ledger,
         config_fee,
+        min_deposit,
+        remaining_collateral_capacity,
     )
     .await
     {
         Ok(result) => result,
-        Err(e) => {
+        Err(error) => {
             guard_principal.fail();
-            return Err(ProtocolError::GenericError(
-                format!("Push-deposit sweep failed: {}. Did you transfer collateral to your deposit account first?", e),
-            ));
+            return Err(map_push_deposit_sweep_error(error));
         }
     };
 
     let margin_added: ICP = collateral_amount.into();
-    if min_deposit > 0 && margin_added < ICP::new(min_deposit) {
-        guard_principal.fail();
-        return Err(ProtocolError::AmountTooLow {
-            minimum_amount: min_deposit,
-        });
-    }
 
-    mutate_state(|s| record_add_margin_to_vault(s, vault_id, margin_added, sweep_block_index));
+    if let Err(error) = mutate_state(|s| {
+        record_add_margin_to_vault(s, vault_id, margin_added, sweep_block_index)
+    }) {
+        guard_principal.fail();
+        return Err(error);
+    }
 
     log!(INFO, "[add_margin_with_deposit] added {} collateral to vault {} via push-deposit (sweep block {})",
         collateral_amount, vault_id, sweep_block_index);
 
     guard_principal.complete();
     Ok(sweep_block_index)
+}
+
+fn map_push_deposit_sweep_error(error: management::SweepDepositError) -> ProtocolError {
+    match error {
+        management::SweepDepositError::AmountTooLow { minimum_amount } => {
+            ProtocolError::AmountTooLow { minimum_amount }
+        }
+        management::SweepDepositError::Ledger(error) => ProtocolError::TransferError(error),
+        management::SweepDepositError::ExceedsCapacity { amount, maximum_amount } => {
+            ProtocolError::GenericError(format!(
+                "Push-deposit amount ({amount}) exceeds remaining collateral capacity ({maximum_amount})."
+            ))
+        }
+        management::SweepDepositError::AmbiguousCall { code, message } => {
+            ProtocolError::GenericError(format!(
+                "Push-deposit sweep outcome is ambiguous after ledger call reject ({code}): {message}. Reconcile the deposit before retrying."
+            ))
+        }
+        management::SweepDepositError::AmbiguousResponse(message) => {
+            ProtocolError::GenericError(format!(
+                "Push-deposit sweep response is ambiguous: {message}. Reconcile the deposit before retrying."
+            ))
+        }
+        management::SweepDepositError::Transfer(message) => ProtocolError::GenericError(
+            format!("Push-deposit sweep failed: {message}. Did you transfer collateral to your deposit account first?"),
+        ),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12335,5 +12406,66 @@ mod redemption_await_boundary_tests {
         assert!(gate
             .try_acquire(new_start + REDEMPTION_OFFER_REFRESH_COOLDOWN_NS)
             .is_ok());
+    }
+}
+
+#[cfg(test)]
+mod add_margin_overflow_tests {
+    use super::*;
+    use candid::Nat;
+    use icrc_ledger_types::icrc1::transfer::TransferError;
+    use std::cell::Cell;
+
+    #[test]
+    fn overflow_preflight_does_not_construct_a_ledger_pull() {
+        let pull_started = Cell::new(false);
+        let result = futures::executor::block_on(pull_add_margin_after_preflight(
+            u64::MAX,
+            ICP::new(1),
+            || {
+                pull_started.set(true);
+                async { Ok(17) }
+            },
+        ));
+
+        assert!(matches!(result, Err(ProtocolError::GenericError(_))));
+        assert!(!pull_started.get());
+    }
+
+    #[test]
+    fn exact_u64_boundary_reaches_the_pull() {
+        let pull_started = Cell::new(false);
+        let result = futures::executor::block_on(pull_add_margin_after_preflight(
+            u64::MAX - 7,
+            ICP::new(7),
+            || {
+                pull_started.set(true);
+                async { Ok(17) }
+            },
+        ));
+
+        assert_eq!(result.unwrap().unwrap(), 17);
+        assert!(pull_started.get());
+    }
+
+    #[test]
+    fn push_sweep_preserves_typed_ledger_no_effect_and_marks_reject_ambiguous() {
+        let mapped_ledger_error = map_push_deposit_sweep_error(
+            management::SweepDepositError::Ledger(TransferError::BadFee {
+                expected_fee: Nat::from(10u64),
+            }),
+        );
+        assert!(matches!(
+            mapped_ledger_error,
+            ProtocolError::TransferError(TransferError::BadFee { .. })
+        ));
+
+        let mapped_ambiguous = map_push_deposit_sweep_error(
+            management::SweepDepositError::AmbiguousCall {
+                code: 5,
+                message: "ledger call rejected".into(),
+            },
+        );
+        assert!(matches!(mapped_ambiguous, ProtocolError::GenericError(message) if message.contains("ambiguous")));
     }
 }

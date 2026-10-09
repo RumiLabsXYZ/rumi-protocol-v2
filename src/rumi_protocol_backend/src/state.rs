@@ -5656,15 +5656,41 @@ impl State {
         self.reindex_vault_cr(vault_id);
     }
 
-    pub fn add_margin_to_vault(&mut self, vault_id: u64, add_margin: ICP) {
-        match self.vault_id_to_vaults.get_mut(&vault_id) {
-            Some(vault) => {
-                vault.collateral_amount += add_margin.to_u64();
-            }
-            None => ic_cdk::trap("adding margin to unknown vault"),
-        }
+    /// Validate the representable collateral total without changing state.
+    /// Call before an irreversible collateral pull, then repeat the checked
+    /// transition after the await while the per-vault operation guard is held.
+    pub fn checked_margin_total(current: u64, add_margin: ICP) -> Result<u64, ProtocolError> {
+        current.checked_add(add_margin.to_u64()).ok_or_else(|| {
+            ProtocolError::GenericError(
+                "Adding margin would exceed the representable collateral range.".to_string(),
+            )
+        })
+    }
+
+    /// Apply an add-margin transition only when the new collateral total is
+    /// representable. This method is safe to call after an external transfer:
+    /// overflow is returned to the caller rather than trapping.
+    pub fn try_add_margin_to_vault(
+        &mut self,
+        vault_id: u64,
+        add_margin: ICP,
+    ) -> Result<(), ProtocolError> {
+        let vault = self.vault_id_to_vaults.get_mut(&vault_id).ok_or_else(|| {
+            ProtocolError::GenericError("Adding margin to an unknown vault.".to_string())
+        })?;
+        let new_collateral = Self::checked_margin_total(vault.collateral_amount, add_margin)?;
+        vault.collateral_amount = new_collateral;
         // Wave-8b LIQ-002: re-key after collateral change.
         self.reindex_vault_cr(vault_id);
+        Ok(())
+    }
+
+    /// Event replay retains its historical fail-fast behavior for an invalid
+    /// journal entry. Live add-margin uses `try_add_margin_to_vault` so a bad
+    /// post-transfer transition never traps the callback.
+    pub fn add_margin_to_vault(&mut self, vault_id: u64, add_margin: ICP) {
+        self.try_add_margin_to_vault(vault_id, add_margin)
+            .unwrap_or_else(|_| ic_cdk::trap("invalid add-margin event transition"));
     }
 
     pub fn remove_margin_from_vault(&mut self, vault_id: u64, amount: ICP) {
@@ -12235,5 +12261,42 @@ mod tests {
             1_250_000_000 - 90 - 10,
             "replay must subtract net liquidator receipt plus the separately paid ledger fee"
         );
+    }
+}
+
+#[cfg(test)]
+mod add_margin_checked_transition_tests {
+    use super::*;
+
+    #[test]
+    fn checked_add_margin_accepts_exact_u64_boundary() {
+        assert_eq!(
+            State::checked_margin_total(u64::MAX - 9, ICP::new(9)).unwrap(),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn rejected_add_margin_overflow_leaves_vault_unchanged() {
+        let mut state = State::default();
+        state.vault_id_to_vaults.insert(
+            41,
+            Vault {
+                owner: Principal::anonymous(),
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_amount: u64::MAX,
+                vault_id: 41,
+                collateral_type: Principal::anonymous(),
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+
+        assert!(matches!(
+            state.try_add_margin_to_vault(41, ICP::new(1)),
+            Err(ProtocolError::GenericError(_))
+        ));
+        assert_eq!(state.vault_id_to_vaults.get(&41).unwrap().collateral_amount, u64::MAX);
     }
 }
