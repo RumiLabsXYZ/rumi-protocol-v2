@@ -3738,7 +3738,7 @@ pub async fn process_pending_transfer() {
                 let verified_refund = if refund.source == crate::state::ThreeUsdRefundSource::DefaultAccount {
                     let verified = async {
                         let amount = dispatched_amount.ok_or_else(|| "default refund amount was not pinned".to_string())?;
-                        let block = crate::icrc3_proof::fetch_icrc3_block(refund.ledger, block_index).await?;
+                        let block = crate::icrc3_proof::fetch_icrc3_block_direct(refund.ledger, block_index).await?;
                         let charged_fee = block.fee.ok_or_else(|| "refund block omits the charged fee".to_string())?;
                         let protocol_pays_fee = refund.parent_absorb_id.is_some();
                         let credited = if protocol_pays_fee { amount } else { amount.checked_add(charged_fee).unwrap_or_default() };

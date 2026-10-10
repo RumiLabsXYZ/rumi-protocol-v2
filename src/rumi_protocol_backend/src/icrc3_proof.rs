@@ -331,7 +331,10 @@ pub async fn verify_three_usd_reserve_ingress_block(
     block_index: u64,
     tuple: &crate::state::ThreeUsdReserveIngressTuple,
 ) -> Result<u64, String> {
-    let block = fetch_icrc3_block(ledger, block_index).await?;
+    // V2 reserve ingress changes financial state, so only a block served by
+    // the ledger itself is proof. An archive callback is a locator, not
+    // authenticated ledger-membership evidence.
+    let block = fetch_icrc3_block_direct(ledger, block_index).await?;
     validate_three_usd_reserve_ingress_block(&block, tuple)
 }
 
