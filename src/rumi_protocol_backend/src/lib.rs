@@ -1646,6 +1646,34 @@ pub async fn process_one_pending_payout(operation_id: u128) {
         let Some((_, transfer)) = s.get_pending_payout(operation_id) else {
             return None;
         };
+        if let Some(key) = s.three_usd_reserve_payout_operation_keys.get(&operation_id) {
+            let journal_matches = s.three_usd_reserve_collateral_payouts.get(key).is_some_and(|payout| {
+                let attempt = if payout.op_nonce == transfer.op_nonce {
+                    Some((payout.fee_arg_e8s, payout.candidate_block_index))
+                } else {
+                    payout.rearmed_attempts.iter()
+                        .find(|attempt| attempt.op_nonce == transfer.op_nonce)
+                        .map(|attempt| (attempt.fee_arg_e8s, attempt.candidate_block_index))
+                };
+                payout.operation_id == operation_id
+                    && payout.ledger == transfer.ledger.unwrap_or(Principal::anonymous())
+                    && payout.destination.owner == transfer.owner
+                    && payout.destination.subaccount.is_none()
+                    && payout.net_e8s == transfer.transfer_amount_raw.unwrap_or_default()
+                    && payout.gross_e8s == transfer.margin.to_u64()
+                    && attempt.is_some_and(|(fee_arg, candidate)| {
+                        fee_arg == Some(payout.expected_fee_e8s) && candidate.is_none()
+                    })
+            });
+            if !journal_matches {
+                s.mutate_pending_payout(operation_id, |row| {
+                    row.in_flight = false;
+                    row.held_for_manual_retry = true;
+                    row.reconciliation_required = true;
+                });
+                return None;
+            }
+        }
         if transfer.retry_count >= MAX_PENDING_RETRIES {
             s.mutate_pending_payout(operation_id, |row| row.held_for_manual_retry = true);
             return None;
@@ -1667,8 +1695,23 @@ pub async fn process_one_pending_payout(operation_id: u128) {
     let amount = transfer
         .transfer_amount_raw
         .expect("validated payout amount");
-    let result = crate::management::transfer_collateral_with_nonce_status(
+    let reserve_fee_arg = read_state(|state| {
+        state.three_usd_reserve_payout_operation_keys
+            .get(&operation_id)
+            .and_then(|key| state.three_usd_reserve_collateral_payouts.get(key))
+            .and_then(|payout| {
+                if payout.op_nonce == transfer.op_nonce {
+                    Some(payout.fee_arg_e8s)
+                } else {
+                    payout.rearmed_attempts.iter()
+                        .find(|attempt| attempt.op_nonce == transfer.op_nonce)
+                        .map(|attempt| attempt.fee_arg_e8s)
+                }
+            })
+    });
+    let result = crate::management::transfer_collateral_with_nonce_and_fee_status(
         amount,
+        reserve_fee_arg.flatten(),
         transfer.owner,
         ledger,
         transfer.op_nonce,
@@ -1676,6 +1719,67 @@ pub async fn process_one_pending_payout(operation_id: u128) {
     .await;
     match result {
         Ok(block_index) => {
+            // Reserve-linked payouts keep their exact tuple and the ledger's
+            // returned index in the private replay journal before any proof
+            // await or public event removes the generic pending row.
+            let reserve_candidate = mutate_state(|state| {
+                let Some(key) = state.three_usd_reserve_payout_operation_keys
+                    .get(&operation_id).cloned() else { return None };
+                let Some(saved) = state.three_usd_reserve_collateral_payouts.get(&key) else {
+                    return None;
+                };
+                let mut payout = saved.clone();
+                if payout.op_nonce != transfer.op_nonce {
+                    let Some(attempt) = payout.rearmed_attempts.iter()
+                        .find(|attempt| attempt.op_nonce == transfer.op_nonce) else { return None };
+                    payout.op_nonce = attempt.op_nonce;
+                    payout.memo = attempt.memo;
+                    payout.created_at_time_ns = attempt.created_at_time_ns;
+                    payout.fee_arg_e8s = attempt.fee_arg_e8s;
+                    payout.candidate_block_index = attempt.candidate_block_index;
+                    payout.observed_fee_e8s = attempt.observed_fee_e8s;
+                }
+                if payout.operation_id != operation_id || payout.ledger != ledger
+                    || payout.destination.owner != transfer.owner
+                    || payout.net_e8s != amount || payout.op_nonce != transfer.op_nonce
+                {
+                    return None;
+                }
+                if !crate::event::record_three_usd_reserve_payout_candidate(
+                    state, key.clone(), operation_id, transfer.op_nonce, block_index,
+                ) {
+                    return None;
+                }
+                Some((key, payout.clone()))
+            });
+            let reserve_fee_observation = if let Some((key, payout)) = reserve_candidate {
+                match verify_three_usd_reserve_payout_fee(&payout, block_index).await {
+                    Ok(actual_fee_e8s) => Some((key, actual_fee_e8s)),
+                    Err(reason) => {
+                        mutate_state(|state| {
+                            state.mutate_pending_payout(operation_id, |row| {
+                                row.in_flight = false;
+                                row.held_for_manual_retry = true;
+                                row.reconciliation_required = true;
+                            });
+                        });
+                        log!(INFO, "3USD reserve payout {} candidate {} remains held pending direct fee evidence: {}", operation_id, block_index, reason);
+                        return;
+                    }
+                }
+            } else if read_state(|state| state.three_usd_reserve_payout_operation_keys.contains_key(&operation_id)) {
+                mutate_state(|state| {
+                    state.mutate_pending_payout(operation_id, |row| {
+                        row.in_flight = false;
+                        row.held_for_manual_retry = true;
+                        row.reconciliation_required = true;
+                    });
+                });
+                log!(INFO, "3USD reserve payout {} returned a block but its exact durable tuple did not match; payout remains held", operation_id);
+                return;
+            } else {
+                None
+            };
             mutate_state(|s| match transfer.payout_kind {
                 crate::state::PendingPayoutKind::Redemption => {
                     let burn_index = s
@@ -1691,14 +1795,36 @@ pub async fn process_one_pending_payout(operation_id: u128) {
                         );
                     }
                 }
-                kind => crate::event::record_margin_transfer(
-                    s,
-                    transfer.vault_id,
-                    transfer.owner,
-                    operation_id,
-                    kind,
-                    block_index,
-                ),
+                kind => {
+                    if let Some((key, actual_fee_e8s)) = reserve_fee_observation {
+                        if !crate::event::record_three_usd_reserve_payout_fee_observed(
+                            s, key, operation_id, transfer.op_nonce, block_index, actual_fee_e8s,
+                        ) {
+                            s.mutate_pending_payout(operation_id, |row| {
+                                row.in_flight = false;
+                                row.held_for_manual_retry = true;
+                                row.reconciliation_required = true;
+                            });
+                            return;
+                        }
+                        let expected_fee_e8s = s.three_usd_reserve_payout_operation_keys
+                            .get(&operation_id)
+                            .and_then(|key| s.three_usd_reserve_collateral_payouts.get(key))
+                            .map(|payout| payout.expected_fee_e8s);
+                        if !three_usd_reserve_fee_matches(expected_fee_e8s, actual_fee_e8s) {
+                            s.mutate_pending_payout(operation_id, |row| {
+                                row.in_flight = false;
+                                row.held_for_manual_retry = true;
+                                row.reconciliation_required = true;
+                            });
+                            log!(INFO, "3USD reserve payout {} has observed fee {} differing from pinned expected fee {:?}; completion remains held", operation_id, actual_fee_e8s, expected_fee_e8s);
+                            return;
+                        }
+                    }
+                    crate::event::record_margin_transfer(
+                        s, transfer.vault_id, transfer.owner, operation_id, kind, block_index,
+                    )
+                }
             });
         }
         Err(error) => {
@@ -1743,6 +1869,71 @@ pub async fn process_one_pending_payout(operation_id: u128) {
             }
         }
     }
+}
+
+fn three_usd_reserve_fee_matches(expected_fee_e8s: Option<u64>, observed_fee_e8s: u64) -> bool {
+    expected_fee_e8s == Some(observed_fee_e8s)
+}
+
+#[cfg(test)]
+mod three_usd_reserve_fee_tests {
+    use super::three_usd_reserve_fee_matches;
+
+    #[test]
+    fn only_exact_observed_fee_allows_payout_completion() {
+        assert!(three_usd_reserve_fee_matches(Some(10), 10));
+        assert!(!three_usd_reserve_fee_matches(Some(10), 12));
+        assert!(!three_usd_reserve_fee_matches(None, 10));
+    }
+}
+
+/// Read back a reserve payout candidate and verify its exact transfer tuple.
+/// The observed fee is evidence only; it is never added to the recipient
+/// amount. Archive callback-only blocks remain held; this backend candidate
+/// is not itself the authenticated inclusion proof required by the SP.
+async fn verify_three_usd_reserve_payout_fee(
+    payout: &crate::state::ThreeUsdReserveCollateralPayout,
+    block_index: u64,
+) -> Result<u64, String> {
+    if crate::native_icp_proof::is_native_icp_ledger(payout.ledger) {
+        let block = crate::native_icp_proof::query_block(payout.ledger, block_index).await?;
+        return crate::native_icp_proof::verify_transfer_block(
+            &block,
+            payout.source.owner,
+            payout.destination.owner,
+            payout.net_e8s,
+            &payout.memo,
+            payout.created_at_time_ns,
+        );
+    }
+    // This backend candidate is intentionally direct-ledger only. Archive
+    // callbacks do not authenticate membership for Stability Pool settlement.
+    let request = vec![icrc_ledger_types::icrc::blocks::GetBlocksRequest {
+        start: candid::Nat::from(block_index),
+        length: candid::Nat::from(1u64),
+    }];
+    let response: Result<(
+        icrc_ledger_types::icrc::blocks::GetBlocksResult,
+    ), _> = ic_cdk::call(payout.ledger, "icrc3_get_blocks", (request,)).await;
+    let (response,) = response.map_err(|(code, message)| {
+        format!("direct icrc3_get_blocks failed: {code:?} {message}")
+    })?;
+    if !response.archived_blocks.is_empty()
+        || response.blocks.len() != 1
+        || response.blocks[0].id.0.to_u64() != Some(block_index)
+    {
+        return Err("exact payout block is not served directly by the ledger".into());
+    }
+    let block = crate::icrc3_proof::decode_block(&response.blocks[0].block)?;
+    crate::icrc3_proof::validate_icrc3_transfer_block(
+        &block,
+        Some(payout.source.clone()),
+        payout.destination.clone(),
+        payout.net_e8s,
+        Some(&payout.memo),
+        Some(payout.created_at_time_ns),
+    )?;
+    block.fee.ok_or_else(|| "direct ICRC-3 transfer block omits fee".to_string())
 }
 
 pub async fn process_pending_transfer() {

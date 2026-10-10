@@ -2065,6 +2065,47 @@ pub struct ThreeUsdReserveIngressJournal {
     pub non_inclusion_scan: Option<ThreeUsdIngressNonInclusionScan>,
 }
 
+/// Immutable ICRC-1 tuple for the single collateral leg queued by a 3USD
+/// reserve absorb. `candidate_block_index` is only the ledger-returned block
+/// locator; SP must independently read and authenticate that block.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveCollateralPayout {
+    pub operation_id: u128,
+    pub op_nonce: u128,
+    pub collateral_type: Principal,
+    pub ledger: Principal,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub gross_e8s: u64,
+    pub net_e8s: u64,
+    pub expected_fee_e8s: u64,
+    pub memo: [u8; 16],
+    pub created_at_time_ns: u64,
+    #[serde(default)]
+    pub fee_arg_e8s: Option<u64>,
+    #[serde(default)]
+    pub candidate_block_index: Option<u64>,
+    #[serde(default)]
+    pub observed_fee_e8s: Option<u64>,
+    #[serde(default)]
+    pub rearmed_attempts: Vec<ThreeUsdReservePayoutAttempt>,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReservePayoutAttempt {
+    pub op_nonce: u128,
+    pub memo: [u8; 16],
+    pub created_at_time_ns: u64,
+    pub fee_arg_e8s: Option<u64>,
+    #[serde(default)]
+    pub candidate_block_index: Option<u64>,
+    #[serde(default)]
+    pub observed_fee_e8s: Option<u64>,
+}
+
+pub const MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS: usize = 3;
+pub const MAX_THREE_USD_RESERVE_PAYOUT_JOURNALS: usize = 10_000;
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub enum PushSweepRequest {
     OpenVault { collateral_type: Principal, borrow_amount_raw: u64 },
@@ -2279,6 +2320,13 @@ pub struct State {
     #[serde(default)]
     pub three_usd_reserve_ingress_journals:
         BTreeMap<ThreeUsdReserveIngressKey, ThreeUsdReserveIngressJournal>,
+    /// Reserve collateral payout tuple and candidate, rebuilt from the private
+    /// payout event journal when the stable snapshot is unavailable.
+    #[serde(default)]
+    pub three_usd_reserve_collateral_payouts:
+        BTreeMap<ThreeUsdReserveIngressKey, ThreeUsdReserveCollateralPayout>,
+    #[serde(default)]
+    pub three_usd_reserve_payout_operation_keys: BTreeMap<u128, ThreeUsdReserveIngressKey>,
     #[serde(default)]
     pub three_usd_reserve_ingress_enabled: bool,
     /// Set only when the registered SP has called the V2 readiness handshake.
@@ -3119,6 +3167,8 @@ impl Default for State {
             pending_borrow_mints: BTreeMap::new(),
             liquidity_withdraw_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
+            three_usd_reserve_collateral_payouts: BTreeMap::new(),
+            three_usd_reserve_payout_operation_keys: BTreeMap::new(),
             three_usd_reserve_ingress_enabled: false,
             three_usd_reserve_v2_client_ready: false,
             sp_three_usd_reserve_absorb_results_by_proof: BTreeMap::new(),
@@ -3296,6 +3346,8 @@ impl From<InitArg> for State {
             pending_borrow_mints: BTreeMap::new(),
             liquidity_withdraw_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
+            three_usd_reserve_collateral_payouts: BTreeMap::new(),
+            three_usd_reserve_payout_operation_keys: BTreeMap::new(),
             three_usd_reserve_ingress_enabled: false,
             three_usd_reserve_v2_client_ready: false,
             sp_three_usd_reserve_absorb_results_by_proof: BTreeMap::new(),

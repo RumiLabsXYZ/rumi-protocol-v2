@@ -1408,6 +1408,31 @@ export const idlFactory = ({ IDL }) => {
     'liquidation_discount' : IDL.Nat64,
     'stability_pool_canister' : IDL.Opt(IDL.Principal),
   });
+  const ThreeUsdReservePayoutAttempt = IDL.Record({
+    'created_at_time_ns' : IDL.Nat64,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'fee_arg_e8s' : IDL.Opt(IDL.Nat64),
+    'op_nonce' : IDL.Nat,
+    'candidate_block_index' : IDL.Opt(IDL.Nat64),
+    'observed_fee_e8s' : IDL.Opt(IDL.Nat64),
+  });
+  const ThreeUsdReserveCollateralPayout = IDL.Record({
+    'destination' : Account,
+    'source' : Account,
+    'created_at_time_ns' : IDL.Nat64,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'net_e8s' : IDL.Nat64,
+    'operation_id' : IDL.Nat,
+    'fee_arg_e8s' : IDL.Opt(IDL.Nat64),
+    'ledger' : IDL.Principal,
+    'op_nonce' : IDL.Nat,
+    'candidate_block_index' : IDL.Opt(IDL.Nat64),
+    'expected_fee_e8s' : IDL.Nat64,
+    'collateral_type' : IDL.Principal,
+    'gross_e8s' : IDL.Nat64,
+    'rearmed_attempts' : IDL.Vec(ThreeUsdReservePayoutAttempt),
+    'observed_fee_e8s' : IDL.Opt(IDL.Nat64),
+  });
   const ThreeUsdReserveRefundTuple = IDL.Record({
     'source_subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
     'destination' : Account,
@@ -2174,6 +2199,11 @@ export const idlFactory = ({ IDL }) => {
     'get_stability_pool_config' : IDL.Func(
         [],
         [StabilityPoolConfig],
+        ['query'],
+      ),
+    'get_stability_pool_liquidate_with_reserves_v2_payout_candidate' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Opt(ThreeUsdReserveCollateralPayout)],
         ['query'],
       ),
     'get_stability_pool_liquidate_with_reserves_v2_status' : IDL.Func(

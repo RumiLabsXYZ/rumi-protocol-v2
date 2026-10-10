@@ -1613,6 +1613,23 @@ export interface SupplyAuditEntry {
   'display_name' : string,
   'chain_id' : number,
 }
+export interface ThreeUsdReserveCollateralPayout {
+  'destination' : Account,
+  'source' : Account,
+  'created_at_time_ns' : bigint,
+  'memo' : Uint8Array | number[],
+  'net_e8s' : bigint,
+  'operation_id' : bigint,
+  'fee_arg_e8s' : [] | [bigint],
+  'ledger' : Principal,
+  'op_nonce' : bigint,
+  'candidate_block_index' : [] | [bigint],
+  'expected_fee_e8s' : bigint,
+  'collateral_type' : Principal,
+  'gross_e8s' : bigint,
+  'rearmed_attempts' : Array<ThreeUsdReservePayoutAttempt>,
+  'observed_fee_e8s' : [] | [bigint],
+}
 export type ThreeUsdReserveIngressV2Status = {
     'FailedAfterTransferRefunded' : {
       'transfer_block_index' : bigint,
@@ -1655,6 +1672,14 @@ export interface ThreeUsdReserveIngressV2StatusView {
   'vault_id' : bigint,
   'absorb_id' : bigint,
   'stability_pool' : Principal,
+}
+export interface ThreeUsdReservePayoutAttempt {
+  'created_at_time_ns' : bigint,
+  'memo' : Uint8Array | number[],
+  'fee_arg_e8s' : [] | [bigint],
+  'op_nonce' : bigint,
+  'candidate_block_index' : [] | [bigint],
+  'observed_fee_e8s' : [] | [bigint],
 }
 export interface ThreeUsdReserveRefundReceipt {
   'tuple' : ThreeUsdReserveRefundTuple,
@@ -2062,6 +2087,10 @@ export interface _SERVICE {
   'get_snapshot_count' : ActorMethod<[], bigint>,
   'get_sp_writedown_disabled' : ActorMethod<[], boolean>,
   'get_stability_pool_config' : ActorMethod<[], StabilityPoolConfig>,
+  'get_stability_pool_liquidate_with_reserves_v2_payout_candidate' : ActorMethod<
+    [bigint, bigint],
+    [] | [ThreeUsdReserveCollateralPayout]
+  >,
   'get_stability_pool_liquidate_with_reserves_v2_status' : ActorMethod<
     [bigint, bigint],
     ThreeUsdReserveIngressV2StatusView

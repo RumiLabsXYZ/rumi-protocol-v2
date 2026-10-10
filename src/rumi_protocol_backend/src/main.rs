@@ -7582,6 +7582,13 @@ async fn stability_pool_liquidate_with_reserves_v2(
         if three_usd_amount_e8s == 0 || icusd_debt_covered_e8s == 0 {
             return Err(ProtocolError::GenericError("3USD amount and debt covered must be nonzero".into()));
         }
+        if state.three_usd_reserve_ingress_journals.len()
+            >= rumi_protocol_backend::state::MAX_THREE_USD_RESERVE_PAYOUT_JOURNALS
+        {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "3USD reserve receipt journal capacity is exhausted; no stable pull admitted".into(),
+            ));
+        }
         let row = ThreeUsdReserveIngressJournal {
             request: request.clone(),
             phase: Phase::AdmissionPending,
@@ -8083,6 +8090,156 @@ fn get_stability_pool_liquidate_with_reserves_v2_status(
         }
     } else { Status::Unseen };
     ThreeUsdReserveIngressV2StatusView { stability_pool: caller, vault_id, absorb_id, status }
+}
+
+/// Caller-bound lookup for the one backend payout queued by a V2 reserve
+/// absorb. This returns a ledger candidate, not an authenticated receipt; the
+/// registered Stability Pool must read and verify the exact ledger block.
+#[query]
+#[candid_method(query)]
+fn get_stability_pool_liquidate_with_reserves_v2_payout_candidate(
+    vault_id: u64,
+    absorb_id: u64,
+) -> Option<rumi_protocol_backend::state::ThreeUsdReserveCollateralPayout> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return None;
+    }
+    read_state(|state| three_usd_reserve_payout_candidate_for_caller(
+        state, caller, ic_cdk::api::id(), vault_id, absorb_id,
+    ))
+}
+
+fn three_usd_reserve_payout_candidate_for_caller(
+    state: &rumi_protocol_backend::state::State,
+    caller: Principal,
+    backend: Principal,
+    vault_id: u64,
+    absorb_id: u64,
+) -> Option<rumi_protocol_backend::state::ThreeUsdReserveCollateralPayout> {
+    if caller == Principal::anonymous() { return None; }
+    let key = rumi_protocol_backend::state::ThreeUsdReserveIngressKey {
+        stability_pool: caller, vault_id, absorb_id,
+    };
+    let mut payout = state.three_usd_reserve_collateral_payouts.get(&key)?.clone();
+    let mut candidates = Vec::new();
+    if let Some(block_index) = payout.candidate_block_index {
+        candidates.push((payout.op_nonce, payout.memo, payout.created_at_time_ns,
+            payout.fee_arg_e8s, block_index, payout.observed_fee_e8s));
+    }
+    candidates.extend(payout.rearmed_attempts.iter().filter_map(|attempt| {
+        attempt.candidate_block_index.map(|block_index| (
+            attempt.op_nonce, attempt.memo, attempt.created_at_time_ns,
+            attempt.fee_arg_e8s, block_index, attempt.observed_fee_e8s,
+        ))
+    }));
+    if candidates.len() != 1
+        || payout.operation_id == 0
+        || payout.op_nonce != payout.operation_id
+        || payout.collateral_type == Principal::anonymous()
+        || payout.ledger == Principal::anonymous()
+        || payout.gross_e8s.checked_sub(payout.net_e8s) != Some(payout.expected_fee_e8s)
+        || payout.fee_arg_e8s != Some(payout.expected_fee_e8s)
+        || payout.memo.as_slice()
+            != rumi_protocol_backend::management::nonce_to_memo(payout.op_nonce).0.as_slice()
+        || payout.created_at_time_ns
+            != rumi_protocol_backend::management::nonce_to_created_at_time(payout.op_nonce)
+        || payout.rearmed_attempts.len()
+            > rumi_protocol_backend::state::MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS
+        || state.three_usd_reserve_payout_operation_keys.get(&payout.operation_id) != Some(&key)
+        || payout.source.owner != backend
+        || payout.source.subaccount.is_some()
+        || payout.destination.owner != caller
+        || payout.destination.subaccount.is_some()
+    {
+        return None;
+    }
+    if payout.rearmed_attempts.iter().any(|attempt| {
+        attempt.op_nonce == 0
+            || attempt.op_nonce == payout.op_nonce
+            || attempt.fee_arg_e8s != Some(payout.expected_fee_e8s)
+            || attempt.memo.as_slice()
+                != rumi_protocol_backend::management::nonce_to_memo(attempt.op_nonce).0.as_slice()
+            || attempt.created_at_time_ns
+                != rumi_protocol_backend::management::nonce_to_created_at_time(attempt.op_nonce)
+    }) {
+        return None;
+    }
+    let (op_nonce, memo, created_at_time_ns, fee_arg_e8s, block_index, observed_fee_e8s) = candidates[0];
+    payout.op_nonce = op_nonce;
+    payout.memo = memo;
+    payout.created_at_time_ns = created_at_time_ns;
+    payout.fee_arg_e8s = fee_arg_e8s;
+    payout.candidate_block_index = Some(block_index);
+    payout.observed_fee_e8s = observed_fee_e8s;
+    Some(payout)
+}
+
+#[cfg(test)]
+mod three_usd_reserve_payout_candidate_tests {
+    use super::*;
+    use rumi_protocol_backend::state::{
+        State, ThreeUsdReserveCollateralPayout, ThreeUsdReserveIngressKey,
+    };
+
+    fn p(seed: u8) -> Principal { Principal::self_authenticating([seed; 32]) }
+
+    fn payout(backend: Principal, pool: Principal) -> ThreeUsdReserveCollateralPayout {
+        let nonce = 9;
+        ThreeUsdReserveCollateralPayout {
+            operation_id: nonce,
+            op_nonce: nonce,
+            collateral_type: p(3),
+            ledger: p(3),
+            source: icrc_ledger_types::icrc1::account::Account { owner: backend, subaccount: None },
+            destination: icrc_ledger_types::icrc1::account::Account { owner: pool, subaccount: None },
+            gross_e8s: 110,
+            net_e8s: 100,
+            expected_fee_e8s: 10,
+            memo: rumi_protocol_backend::management::nonce_to_memo(nonce).0.as_slice()
+                .try_into().unwrap(),
+            created_at_time_ns: rumi_protocol_backend::management::nonce_to_created_at_time(nonce),
+            fee_arg_e8s: Some(10),
+            candidate_block_index: Some(12),
+            observed_fee_e8s: Some(10),
+            rearmed_attempts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn original_pool_can_recover_after_registration_rotation_but_new_pool_cannot_reuse_key() {
+        let backend = p(1);
+        let old_pool = p(2);
+        let new_pool = p(4);
+        let key = ThreeUsdReserveIngressKey { stability_pool: old_pool, vault_id: 5, absorb_id: 6 };
+        let mut state = State::default();
+        state.stability_pool_canister = Some(new_pool);
+        state.three_usd_reserve_collateral_payouts.insert(key.clone(), payout(backend, old_pool));
+        state.three_usd_reserve_payout_operation_keys.insert(9, key);
+        assert!(three_usd_reserve_payout_candidate_for_caller(&state, old_pool, backend, 5, 6).is_some());
+        assert!(three_usd_reserve_payout_candidate_for_caller(&state, new_pool, backend, 5, 6).is_none());
+    }
+
+    #[test]
+    fn multiple_candidate_attempts_are_not_exposed_as_one_receipt() {
+        let backend = p(1);
+        let pool = p(2);
+        let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 5, absorb_id: 6 };
+        let mut row = payout(backend, pool);
+        row.rearmed_attempts.push(rumi_protocol_backend::state::ThreeUsdReservePayoutAttempt {
+            op_nonce: 10,
+            memo: rumi_protocol_backend::management::nonce_to_memo(10).0.as_slice()
+                .try_into().unwrap(),
+            created_at_time_ns: rumi_protocol_backend::management::nonce_to_created_at_time(10),
+            fee_arg_e8s: Some(10),
+            candidate_block_index: Some(13),
+            observed_fee_e8s: None,
+        });
+        let mut state = State::default();
+        state.three_usd_reserve_collateral_payouts.insert(key.clone(), row);
+        state.three_usd_reserve_payout_operation_keys.insert(9, key);
+        assert!(three_usd_reserve_payout_candidate_for_caller(&state, pool, backend, 5, 6).is_none());
+    }
 }
 
 const THREE_USD_INGRESS_SCAN_PAGE: u64 = 64;

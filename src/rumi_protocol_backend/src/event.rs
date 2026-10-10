@@ -1017,6 +1017,23 @@ pub enum PendingPayoutEvent {
     Amm1DonationReconciliationRequired { notify_nonce: u64, reason: crate::state::Amm1DonationReconciliationReason },
     Amm1DonationCompleted { notify_nonce: u64 },
     Amm1DonationHeld { donation: HeldAmm1Donation },
+    ThreeUsdReservePayoutPrepared {
+        key: crate::state::ThreeUsdReserveIngressKey,
+        payout: crate::state::ThreeUsdReserveCollateralPayout,
+    },
+    ThreeUsdReservePayoutCandidate {
+        key: crate::state::ThreeUsdReserveIngressKey,
+        operation_id: u128,
+        attempt_nonce: u128,
+        block_index: u64,
+    },
+    ThreeUsdReservePayoutFeeObserved {
+        key: crate::state::ThreeUsdReserveIngressKey,
+        operation_id: u128,
+        attempt_nonce: u128,
+        block_index: u64,
+        actual_fee_e8s: u64,
+    },
     Queued {
         kind: PendingPayoutKind,
         operation_id: u128,
@@ -1701,6 +1718,84 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
                 state.held_amm1_donations.push(donation);
             }
         }
+        PendingPayoutEvent::ThreeUsdReservePayoutPrepared { key, payout } => {
+            if payout.operation_id == 0
+                || payout.op_nonce != payout.operation_id
+                || payout.candidate_block_index.is_some()
+                || payout.observed_fee_e8s.is_some()
+                || payout.rearmed_attempts.len() > crate::state::MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS
+                || payout.destination.owner != key.stability_pool
+                || payout.destination.subaccount.is_some()
+                || payout.source.owner == Principal::anonymous()
+                || payout.source.subaccount.is_some()
+                || payout.gross_e8s.checked_sub(payout.net_e8s) != Some(payout.expected_fee_e8s)
+                || payout.fee_arg_e8s != Some(payout.expected_fee_e8s)
+                || payout.memo.as_slice()
+                    != crate::management::nonce_to_memo(payout.op_nonce).0.as_slice()
+                || payout.created_at_time_ns
+                    != crate::management::nonce_to_created_at_time(payout.op_nonce)
+                || state.three_usd_reserve_payout_operation_keys
+                    .get(&payout.operation_id)
+                    .is_some_and(|existing| existing != &key)
+            {
+                return;
+            }
+            match state.three_usd_reserve_collateral_payouts.get(&key) {
+                None => {
+                    state.three_usd_reserve_payout_operation_keys
+                        .insert(payout.operation_id, key.clone());
+                    state.three_usd_reserve_collateral_payouts.insert(key, payout);
+                }
+                Some(existing) if existing == &payout => {
+                    state.three_usd_reserve_payout_operation_keys
+                        .insert(payout.operation_id, key);
+                }
+                _ => {}
+            }
+        }
+        PendingPayoutEvent::ThreeUsdReservePayoutCandidate { key, operation_id, attempt_nonce, block_index } => {
+            if !state.three_usd_reserve_payout_operation_keys
+                .get(&operation_id).is_some_and(|saved| saved == &key)
+                || !state.get_pending_payout(operation_id)
+                    .is_some_and(|(_, transfer)| transfer.op_nonce == attempt_nonce)
+            {
+                return;
+            }
+            if let Some(payout) = state.three_usd_reserve_collateral_payouts.get_mut(&key) {
+                if payout.operation_id != operation_id { return; }
+                if payout.op_nonce == attempt_nonce && payout.candidate_block_index.is_none() {
+                    payout.candidate_block_index = Some(block_index);
+                } else if let Some(attempt) = payout.rearmed_attempts.iter_mut()
+                    .find(|attempt| attempt.op_nonce == attempt_nonce && attempt.candidate_block_index.is_none())
+                {
+                    attempt.candidate_block_index = Some(block_index);
+                }
+            }
+        }
+        PendingPayoutEvent::ThreeUsdReservePayoutFeeObserved {
+            key, operation_id, attempt_nonce, block_index, actual_fee_e8s,
+        } => {
+            if !state.three_usd_reserve_payout_operation_keys
+                .get(&operation_id).is_some_and(|saved| saved == &key)
+            {
+                return;
+            }
+            if let Some(payout) = state.three_usd_reserve_collateral_payouts.get_mut(&key) {
+                if payout.operation_id != operation_id { return; }
+                if payout.op_nonce == attempt_nonce
+                    && payout.candidate_block_index == Some(block_index)
+                    && payout.observed_fee_e8s.is_none()
+                {
+                    payout.observed_fee_e8s = Some(actual_fee_e8s);
+                } else if let Some(attempt) = payout.rearmed_attempts.iter_mut().find(|attempt| {
+                    attempt.op_nonce == attempt_nonce
+                        && attempt.candidate_block_index == Some(block_index)
+                        && attempt.observed_fee_e8s.is_none()
+                }) {
+                    attempt.observed_fee_e8s = Some(actual_fee_e8s);
+                }
+            }
+        }
         PendingPayoutEvent::Queued {
             kind,
             operation_id,
@@ -1839,6 +1934,18 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
             {
                 return;
             }
+            if state.three_usd_reserve_payout_operation_keys
+                .get(&operation_id)
+                .and_then(|key| state.three_usd_reserve_collateral_payouts.get(key))
+                .is_some_and(|payout| payout.rearmed_attempts.len() >= crate::state::MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS)
+            {
+                state.mutate_pending_payout(operation_id, |row| {
+                    row.in_flight = false;
+                    row.held_for_manual_retry = true;
+                    row.reconciliation_required = true;
+                });
+                return;
+            }
             transfer.op_nonce = attempt_nonce;
             transfer.held_for_manual_retry = false;
             transfer.reconciliation_required = false;
@@ -1850,6 +1957,23 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
             transfer.history_start_index = None;
             transfer.no_effect_proof = Some(proof);
             state.mutate_pending_payout(operation_id, |row| *row = transfer);
+            if let Some(key) = state.three_usd_reserve_payout_operation_keys.get(&operation_id).cloned() {
+                if let Some(payout) = state.three_usd_reserve_collateral_payouts.get_mut(&key) {
+                    if payout.rearmed_attempts.len() < crate::state::MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS
+                        && !payout.rearmed_attempts.iter().any(|attempt| attempt.op_nonce == attempt_nonce)
+                    {
+                        payout.rearmed_attempts.push(crate::state::ThreeUsdReservePayoutAttempt {
+                            op_nonce: attempt_nonce,
+                            memo: crate::management::nonce_to_memo(attempt_nonce).0.as_slice()
+                                .try_into().expect("nonce memo is exactly 16 bytes"),
+                            created_at_time_ns: crate::management::nonce_to_created_at_time(attempt_nonce),
+                            fee_arg_e8s: payout.fee_arg_e8s,
+                            candidate_block_index: None,
+                            observed_fee_e8s: None,
+                        });
+                    }
+                }
+            }
             state.op_nonce_counter = state
                 .op_nonce_counter
                 .max((attempt_nonce as u64).wrapping_add(1));
@@ -2784,6 +2908,71 @@ pub fn record_pending_payout(state: &mut State, transfer: PendingMarginTransfer)
     state.insert_pending_payout(transfer);
 }
 
+pub fn record_three_usd_reserve_payout_prepared(
+    state: &mut State,
+    key: crate::state::ThreeUsdReserveIngressKey,
+    payout: crate::state::ThreeUsdReserveCollateralPayout,
+) -> bool {
+    if payout.rearmed_attempts.len() > crate::state::MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS
+        || state.three_usd_reserve_collateral_payouts.contains_key(&key)
+        || state.three_usd_reserve_payout_operation_keys.contains_key(&payout.operation_id)
+    {
+        return false;
+    }
+    let expected = payout.clone();
+    let operation_id = payout.operation_id;
+    let event = PendingPayoutEvent::ThreeUsdReservePayoutPrepared { key: key.clone(), payout };
+    crate::storage::record_pending_payout_event(&event);
+    apply_pending_payout_event(state, event);
+    state.three_usd_reserve_collateral_payouts.get(&key) == Some(&expected)
+        && state.three_usd_reserve_payout_operation_keys.get(&operation_id) == Some(&key)
+}
+
+pub fn record_three_usd_reserve_payout_candidate(
+    state: &mut State,
+    key: crate::state::ThreeUsdReserveIngressKey,
+    operation_id: u128,
+    attempt_nonce: u128,
+    block_index: u64,
+) -> bool {
+    let event = PendingPayoutEvent::ThreeUsdReservePayoutCandidate { key: key.clone(), operation_id, attempt_nonce, block_index };
+    crate::storage::record_pending_payout_event(&event);
+    apply_pending_payout_event(state, event);
+    state.three_usd_reserve_payout_operation_keys.get(&operation_id) == Some(&key)
+        && state.three_usd_reserve_collateral_payouts.get(&key).is_some_and(|payout| {
+            (payout.op_nonce == attempt_nonce && payout.candidate_block_index == Some(block_index))
+                || payout.rearmed_attempts.iter().any(|attempt| {
+                    attempt.op_nonce == attempt_nonce && attempt.candidate_block_index == Some(block_index)
+                })
+        })
+}
+
+pub fn record_three_usd_reserve_payout_fee_observed(
+    state: &mut State,
+    key: crate::state::ThreeUsdReserveIngressKey,
+    operation_id: u128,
+    attempt_nonce: u128,
+    block_index: u64,
+    actual_fee_e8s: u64,
+) -> bool {
+    let event = PendingPayoutEvent::ThreeUsdReservePayoutFeeObserved {
+        key: key.clone(), operation_id, attempt_nonce, block_index, actual_fee_e8s,
+    };
+    crate::storage::record_pending_payout_event(&event);
+    apply_pending_payout_event(state, event);
+    state.three_usd_reserve_payout_operation_keys.get(&operation_id) == Some(&key)
+        && state.three_usd_reserve_collateral_payouts.get(&key).is_some_and(|payout| {
+            (payout.op_nonce == attempt_nonce
+                && payout.candidate_block_index == Some(block_index)
+                && payout.observed_fee_e8s == Some(actual_fee_e8s))
+                || payout.rearmed_attempts.iter().any(|attempt| {
+                    attempt.op_nonce == attempt_nonce
+                        && attempt.candidate_block_index == Some(block_index)
+                        && attempt.observed_fee_e8s == Some(actual_fee_e8s)
+                })
+        })
+}
+
 /// Journal the immutable redemption dispatch tuple before payout processing
 /// can make its first ledger await. Public event replay alone never enables
 /// automatic rearm because historical events lack this ordering proof.
@@ -2914,6 +3103,13 @@ pub fn record_pending_payout_rearmed(
     let Some((_, mut transfer)) = state.get_pending_payout(proof.operation_id) else {
         return false;
     };
+    if state.three_usd_reserve_payout_operation_keys
+        .get(&proof.operation_id)
+        .and_then(|key| state.three_usd_reserve_collateral_payouts.get(key))
+        .is_some_and(|payout| payout.rearmed_attempts.len() >= crate::state::MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS)
+    {
+        return false;
+    }
     if transfer.rearm_schema_version != 1
         || !transfer.too_old_confirmed
         || !transfer.held_for_manual_retry
@@ -5391,6 +5587,120 @@ mod filter_tests {
             ],
         );
         assert!(completed.pending_amm1_donation_operations.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod three_usd_reserve_payout_replay_tests {
+    use super::*;
+
+    fn principal(seed: u8) -> Principal {
+        Principal::self_authenticating([seed; 32])
+    }
+
+    fn init_args(icp: Principal) -> InitArg {
+        InitArg {
+            xrc_principal: principal(20),
+            icusd_ledger_principal: principal(21),
+            icp_ledger_principal: icp,
+            fee_e8s: 0,
+            developer_principal: principal(22),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        }
+    }
+
+    #[test]
+    fn private_replay_retains_exact_reserve_payout_candidate_and_fee_after_generic_row_clears() {
+        use crate::state::{
+            PendingMarginTransfer, PendingPayoutKind, ThreeUsdReserveCollateralPayout,
+            ThreeUsdReserveIngressKey,
+        };
+        let backend = principal(31);
+        let pool = principal(32);
+        let ledger = principal(33);
+        let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 44, absorb_id: 55 };
+        let op_nonce = 66;
+        let memo: [u8; 16] = crate::management::nonce_to_memo(op_nonce).0.as_slice()
+            .try_into().unwrap();
+        let payout = ThreeUsdReserveCollateralPayout {
+            operation_id: op_nonce,
+            op_nonce,
+            collateral_type: ledger,
+            ledger,
+            source: icrc_ledger_types::icrc1::account::Account { owner: backend, subaccount: None },
+            destination: icrc_ledger_types::icrc1::account::Account { owner: pool, subaccount: None },
+            gross_e8s: 1_010,
+            net_e8s: 1_000,
+            expected_fee_e8s: 10,
+            memo,
+            created_at_time_ns: crate::management::nonce_to_created_at_time(op_nonce),
+            fee_arg_e8s: Some(10),
+            candidate_block_index: None,
+            observed_fee_e8s: None,
+            rearmed_attempts: Vec::new(),
+        };
+        let transfer = PendingMarginTransfer {
+            vault_id: 44,
+            operation_id: op_nonce,
+            payout_kind: PendingPayoutKind::Margin,
+            owner: pool,
+            margin: crate::numeric::ICP::from(1_010),
+            collateral_type: ledger,
+            retry_count: 0,
+            op_nonce,
+            ledger: Some(ledger),
+            transfer_amount_raw: Some(1_000),
+            held_for_manual_retry: false,
+            reconciliation_required: false,
+            in_flight: false,
+            too_old_confirmed: false,
+            history_start_index: None,
+            rearm_schema_version: 1,
+            history_scan: None,
+            history_candidate_seen: false,
+            no_effect_proof: None,
+            history_log_length: None,
+            history_cursor: 0,
+            min_net_collateral_raw: None,
+        };
+        let payout_events = vec![
+            PendingPayoutEvent::ThreeUsdReservePayoutPrepared { key: key.clone(), payout },
+            PendingPayoutEvent::Queued {
+                kind: PendingPayoutKind::Margin,
+                operation_id: op_nonce,
+                transfer,
+                timestamp: Some(1),
+            },
+            PendingPayoutEvent::ThreeUsdReservePayoutCandidate {
+                key: key.clone(), operation_id: op_nonce, attempt_nonce: op_nonce, block_index: 77,
+            },
+            PendingPayoutEvent::ThreeUsdReservePayoutFeeObserved {
+                key: key.clone(), operation_id: op_nonce, attempt_nonce: op_nonce,
+                block_index: 77, actual_fee_e8s: 10,
+            },
+            // The public completion event removed the generic pending row;
+            // this private journal projection must remain independently readable.
+        ];
+        let journal = payout_events.into_iter().map(|event| crate::storage::PendingPayoutJournalEntry {
+            after_event_count: 1,
+            event,
+        });
+        let state = replay_with_nonce_time_and_payout_events(
+            vec![
+                Event::Init(init_args(principal(34))),
+                Event::MarginTransfer { vault_id: 44, block_index: 77, timestamp: Some(3) },
+            ].into_iter(), journal, || 2,
+        ).expect("private payout replay should succeed");
+        let recovered = state.three_usd_reserve_collateral_payouts.get(&key).unwrap();
+        assert_eq!(state.get_pending_payout(op_nonce), None);
+        assert_eq!(state.three_usd_reserve_payout_operation_keys.get(&op_nonce), Some(&key));
+        assert_eq!(recovered.candidate_block_index, Some(77));
+        assert_eq!(recovered.expected_fee_e8s, 10);
+        assert_eq!(recovered.observed_fee_e8s, Some(10));
+        assert_eq!(recovered.expected_fee_e8s, recovered.observed_fee_e8s.unwrap());
     }
 }
 
