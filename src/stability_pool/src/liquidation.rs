@@ -3753,6 +3753,9 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
     }
 
     let pending_intent = read_state(|s| s.get_pending_three_usd_absorb(vault_info.vault_id));
+    if pending_intent.is_none() && read_state(|s| s.pending_three_usd_absorb_count() > 0) {
+        return liquidation_failure(vault_info, StabilityPoolError::SystemBusy);
+    }
     let protocol_id = read_state(|s| s.protocol_canister_id);
     let stablecoin_configs: BTreeMap<Principal, StablecoinConfig> =
         read_state(|s| s.stablecoin_registry.clone());
@@ -4199,6 +4202,11 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             true
         };
 
+        if should_approve && !read_state(|s| s.is_unique_pending_three_usd_absorb(&intent)) {
+            log!(INFO, "Holding pre-dispatch 3USD absorb {}: another saved 3USD absorb still depends on the same depositor books", intent.absorb_id);
+            continue;
+        }
+
         // Step A: Approve backend to pull 3USD only when backend status proves
         // there is no durable transfer outcome. Existing ambiguous identities
         // are held above, so retries cannot repeatedly charge approval fees.
@@ -4290,6 +4298,10 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         // cross the backend pull boundary for a fresh/unseen request afterward.
         if should_approve && read_state(|s| s.configuration.emergency_pause) {
             log!(INFO, "Holding 3USD absorb {} after approval because the pool was paused before backend dispatch", intent.absorb_id);
+            continue;
+        }
+        if should_approve && !read_state(|s| s.is_unique_pending_three_usd_absorb(&intent)) {
+            log!(INFO, "Holding 3USD absorb {} after approval because the saved request is no longer the sole pending 3USD absorb", intent.absorb_id);
             continue;
         }
 
@@ -5103,6 +5115,61 @@ mod tests {
             assert!(state.get_pending_three_usd_absorb(vault.vault_id).is_none());
             assert_eq!(state.total_stablecoin_balances.get(&ledger), Some(&50_000_000));
             assert_eq!(state.deposits[&owner].stablecoin_balances.get(&ledger), Some(&50_000_000));
+        });
+        replace_state(StabilityPoolState::default());
+    }
+
+    #[test]
+    fn second_vault_cannot_start_while_a_three_usd_absorb_is_unresolved() {
+        let mut state = test_state();
+        let three_usd = principal(56);
+        let collateral = principal(55);
+        state.register_stablecoin(StablecoinConfig {
+            ledger_id: three_usd,
+            symbol: "3USD".into(),
+            decimals: 8,
+            priority: 3,
+            is_active: true,
+            transfer_fee: Some(0),
+            is_lp_token: Some(true),
+            underlying_pool: Some(principal(57)),
+        });
+        state.cached_virtual_prices =
+            Some(BTreeMap::from([(three_usd, 1_000_000_000_000_000_000)]));
+        add_deposit_direct(&mut state, user_a(), three_usd, 100_000_000);
+        let first = state
+            .prepare_three_usd_absorb(
+                42,
+                20_000_000,
+                20_000_000,
+                three_usd,
+                collateral,
+                100_000_000,
+            )
+            .expect("first vault has a durable request");
+        replace_state(state);
+
+        let second = LiquidatableVaultInfo {
+            vault_id: 43,
+            collateral_type: collateral,
+            debt_amount: 20_000_000,
+            collateral_amount: 1_000_000,
+            recommended_liquidation_amount: 0,
+            collateral_price_e8s: 100_000_000,
+        };
+        // No inter-canister runtime is installed. An admission path that
+        // reaches approval or the backend would fail this synchronous test.
+        let result = futures::executor::block_on(execute_single_liquidation(&second));
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("SystemBusy"));
+        read_state(|state| {
+            assert_eq!(state.get_pending_three_usd_absorb(42), Some(first));
+            assert!(state.get_pending_three_usd_absorb(43).is_none());
+            assert_eq!(state.total_stablecoin_balances.get(&three_usd), Some(&100_000_000));
         });
         replace_state(StabilityPoolState::default());
     }

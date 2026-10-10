@@ -1713,6 +1713,15 @@ impl StabilityPoolState {
             .cloned()
     }
 
+    /// Saved requests from a populated snapshot stay recoverable, but a
+    /// pre-dispatch pull may use the uncommitted 3USD books only when this is
+    /// the sole pending request.
+    pub fn is_unique_pending_three_usd_absorb(&self, intent: &ThreeUsdReserveAbsorbIntent) -> bool {
+        self.pending_three_usd_absorbs.as_ref().is_some_and(|pending| {
+            pending.len() == 1 && pending.get(&intent.vault_id) == Some(intent)
+        })
+    }
+
     /// Reuse an existing request for this vault or reserve a monotonic id for
     /// the exact tuple that will be sent to the backend. Existing rows win so
     /// ambiguous backend replies cannot be retried with freshly calculated
@@ -1728,6 +1737,13 @@ impl StabilityPoolState {
     ) -> Result<ThreeUsdReserveAbsorbIntent, StabilityPoolError> {
         if let Some(existing) = self.get_pending_three_usd_absorb(vault_id) {
             return Ok(existing);
+        }
+        // Depositor balances are not reserved until a saved absorb settles.
+        // A second vault must not draw against the same unchanged 3USD books
+        // while the first pull or collateral payout is unresolved. Recovery of
+        // the original vault keeps its immutable request above.
+        if self.pending_three_usd_absorb_count() > 0 {
+            return Err(StabilityPoolError::SystemBusy);
         }
 
         let absorb_id = self.next_three_usd_absorb_id.unwrap_or(1);
@@ -6042,20 +6058,76 @@ mod tests {
     }
 
     #[test]
+    fn three_usd_absorb_holds_a_second_vault_until_the_first_is_terminal() {
+        let mut state = StabilityPoolState::default();
+        let ledger = Principal::from_slice(&[77]);
+        let collateral = Principal::from_slice(&[79]);
+        let first = state
+            .prepare_three_usd_absorb(
+                42,
+                500_000_000,
+                510_000_000,
+                ledger,
+                collateral,
+                100_000_000,
+            )
+            .expect("first vault creates the durable admission fence");
+        let next_id = state.next_three_usd_absorb_id;
+        assert!(state.is_unique_pending_three_usd_absorb(&first));
+
+        assert!(matches!(
+            state.prepare_three_usd_absorb(
+                43,
+                100_000_000,
+                101_000_000,
+                ledger,
+                collateral,
+                100_000_000
+            ),
+            Err(StabilityPoolError::SystemBusy),
+        ));
+        assert_eq!(state.pending_three_usd_absorb_count(), 1);
+        assert_eq!(state.next_three_usd_absorb_id, next_id);
+        assert_eq!(state.get_pending_three_usd_absorb(42), Some(first.clone()));
+
+        state.complete_three_usd_absorb(42, first.absorb_id);
+        assert!(state
+            .prepare_three_usd_absorb(
+                43,
+                100_000_000,
+                101_000_000,
+                ledger,
+                collateral,
+                100_000_000,
+            )
+            .is_ok());
+    }
+
+    #[test]
     fn three_usd_recovery_page_rotates_past_held_prefix() {
         let mut state = StabilityPoolState::default();
-        for vault_id in 1..=9 {
-            state
-                .prepare_three_usd_absorb(
-                vault_id,
+        let first = state
+            .prepare_three_usd_absorb(
+                1,
                 100,
                 100,
                 Principal::from_slice(&[77]),
                 Principal::from_slice(&[78]),
                 100_000_000,
-                )
-                .unwrap();
+            )
+            .unwrap();
+        // Populated predecessor state may contain several pending requests.
+        // New admission is serialized, but recovery still pages every saved row.
+        for vault_id in 2..=9 {
+            let mut legacy = first.clone();
+            legacy.vault_id = vault_id;
+            legacy.absorb_id = vault_id;
+            state.pending_three_usd_absorbs.as_mut().unwrap().insert(vault_id, legacy);
         }
+        assert!(!state.is_unique_pending_three_usd_absorb(&first));
+        assert!(!state.is_unique_pending_three_usd_absorb(
+            state.pending_three_usd_absorbs.as_ref().unwrap().get(&2).unwrap()
+        ));
         let first = state.take_pending_three_usd_absorb_page(8);
         assert_eq!(
             first
