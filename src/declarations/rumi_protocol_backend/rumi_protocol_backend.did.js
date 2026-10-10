@@ -2372,6 +2372,12 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'reconcile_legacy_three_usd_refund_candidate_block' : IDL.Func(
+        [IDL.Nat, IDL.Nat64],
+        [Result],
+        [],
+      ),
+    'rearm_unsent_legacy_three_usd_refund' : IDL.Func([IDL.Nat], [Result], []),
     'reconcile_three_usd_reserve_v1_cutover' : IDL.Func(
         [IDL.Vec(IDL.Nat8)],
         [Result],

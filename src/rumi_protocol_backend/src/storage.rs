@@ -542,6 +542,7 @@ mod state_snapshot_tests {
             dispatch_amount_e8s: Some(33_000),
             dispatch_fee_e8s: Some(0),
             dispatch_submitted: true,
+            legacy_dispatch_retryable: false,
             dispatch_block_index: None,
             resolution: None,
         };

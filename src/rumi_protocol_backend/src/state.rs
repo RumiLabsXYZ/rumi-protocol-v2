@@ -68,6 +68,7 @@ mod three_usd_reserve_ingress_state_tests {
         assert_eq!(decoded.amount_e8s, 33);
         assert_eq!(decoded.parent_absorb_id, None);
         assert_eq!(decoded.dispatch_amount_e8s, None);
+        assert!(!decoded.legacy_dispatch_retryable);
         assert_eq!(decoded.resolution, None);
     }
 
@@ -86,6 +87,7 @@ mod three_usd_reserve_ingress_state_tests {
             dispatch_amount_e8s: None,
             dispatch_fee_e8s: None,
             dispatch_submitted: false,
+            legacy_dispatch_retryable: true,
             dispatch_block_index: None,
             resolution: None,
         };
@@ -1824,14 +1826,17 @@ pub struct ReconciledAmm1DonationReceipt {
 /// blocks every non-sole-holder with `InsufficientPoolBalance`. This queue makes
 /// the refund durable: `process_pending_transfer` retries it (reserves subaccount
 /// -> SP) until success or MAX_PENDING_RETRIES, reusing `op_nonce` so the 3USD
-/// ledger deduplicates if a retry's reply was lost. Keyed by `op_nonce`.
+/// ledger deduplicates if a retry's reply was lost. Capped rows leave the timer;
+/// only a developer may rearm a fresh, known-unsent row. Keyed by `op_nonce`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy, candid::CandidType)]
 pub struct PendingThreeUsdRefund {
     /// The stability pool canister the 3USD is owed back to.
     pub stability_pool: Principal,
     /// The 3USD ledger the refund transfers on.
     pub ledger: Principal,
-    /// 3USD amount to refund (in e8s), already net of the ledger fee.
+    /// 3USD entitlement in e8s. Old rows (retryability marker defaults false)
+    /// store the historical amount sent with fee omitted; new legacy rows
+    /// store the full principal to credit, with the protocol fee pinned apart.
     pub amount_e8s: u64,
     /// Vault whose capped/failed liquidation stranded this refund (for tracing).
     pub vault_id: u64,
@@ -1856,6 +1861,12 @@ pub struct PendingThreeUsdRefund {
     /// upgrade/retry must hold as ambiguous rather than possibly duplicate it.
     #[serde(default)]
     pub dispatch_submitted: bool,
+    /// Provenance guard for automatic legacy dispatch. Rows decoded from
+    /// snapshots predating this field default false and require exact
+    /// candidate-block reconciliation; only rows created by the current
+    /// worker may set this true before their first dispatch.
+    #[serde(default)]
+    pub legacy_dispatch_retryable: bool,
     #[serde(default)]
     pub dispatch_block_index: Option<u64>,
     /// Positive direct-ledger receipt for a legacy refund. Without it the
@@ -2638,8 +2649,11 @@ pub struct State {
     /// by the developer principal. Read by the frontend via `get_protocol_config`.
     pub icpswap_routing_enabled: bool,
 
-    /// Cumulative 3USD (LP tokens) received from stability pool liquidations (e8s).
-    /// These sit in subaccount hash("protocol_3usd_reserves") on the 3USD ledger.
+    /// Net 3USD principal retained from stability pool reserve liquidations
+    /// (e8s), across the V1 hashed and V2 default-account rails. Proportional
+    /// refunds are excluded for new events; unresolved refunds are tracked
+    /// separately. Historical events retain their recorded gross amounts since
+    /// old payloads lack the denominator needed to infer a safe refund value.
     pub protocol_3usd_reserves: u64,
 
     // Admin mint cooldown tracking

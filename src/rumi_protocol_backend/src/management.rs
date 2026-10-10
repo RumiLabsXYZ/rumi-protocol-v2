@@ -437,15 +437,12 @@ pub fn three_usd_default_account_required_balance(ledger: Principal) -> Option<u
             .filter(|stored| stored.ledger == ledger
                 && stored.proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault)
             .try_fold(0u128, |sum, stored| {
-                let amount = if stored.icusd_debt_covered_e8s == 0
-                    || stored.result.liquidated_debt >= stored.icusd_debt_covered_e8s {
-                    u128::from(stored.three_usd_amount_e8s)
-                } else {
-                    u128::from(stored.three_usd_amount_e8s)
-                        .checked_mul(u128::from(stored.result.liquidated_debt))?
-                        .checked_div(u128::from(stored.icusd_debt_covered_e8s))?
-                };
-                sum.checked_add(amount)
+                let amount = realized_three_usd_reserve_credit_e8s(
+                    stored.three_usd_amount_e8s,
+                    stored.icusd_debt_covered_e8s,
+                    stored.result.liquidated_debt,
+                )?;
+                sum.checked_add(u128::from(amount))
             })?;
         let reservations = s.three_usd_reserve_ingress_journals.values()
             .filter(|journal| journal.request.ledger == ledger)
@@ -744,6 +741,316 @@ pub fn hold_legacy_three_usd_refund_for_cutover(
         })
 }
 
+/// Reconstruct the exact historical legacy-refund transfer tuple so the
+/// worker validates the original ledger call rather than inventing fields for
+/// old snapshots. Legacy transfers used the backend's hashed reserve account,
+/// sent the journaled amount to the SP default account, omitted the fee
+/// argument, and derived memo/time from the persisted operation nonce.
+pub fn legacy_three_usd_refund_receipt_tuple(
+    refund: &crate::state::PendingThreeUsdRefund,
+    backend: Principal,
+    observed_legacy_fee_e8s: Option<u64>,
+) -> Option<crate::state::ThreeUsdReserveRefundTuple> {
+    if refund.source != crate::state::ThreeUsdRefundSource::LegacyHashedReserve
+        || refund.op_nonce == 0
+        || refund.amount_e8s == 0
+    {
+        return None;
+    }
+    let (amount_e8s, charged_fee_e8s, fee_e8s) = if refund.legacy_dispatch_retryable {
+        let amount = refund.dispatch_amount_e8s?;
+        let fee = refund.dispatch_fee_e8s?;
+        if amount != refund.amount_e8s {
+            return None;
+        }
+        (amount, fee, Some(fee))
+    } else {
+        (refund.amount_e8s, observed_legacy_fee_e8s?, None)
+    };
+    Some(crate::state::ThreeUsdReserveRefundTuple {
+        source_owner: backend,
+        source_subaccount: Some(protocol_3usd_reserves_subaccount()),
+        destination: Account {
+            owner: refund.stability_pool,
+            subaccount: None,
+        },
+        amount_e8s,
+        charged_fee_e8s,
+        fee_e8s,
+        memo: refund.op_nonce.to_be_bytes(),
+        created_at_time_ns: nonce_to_created_at_time(refund.op_nonce),
+    })
+}
+
+/// Create the fresh full-principal V1 refund row before any ledger dispatch.
+/// Historical rows have no provenance marker and therefore cannot be created
+/// through this constructor.
+pub fn new_legacy_three_usd_refund(
+    stability_pool: Principal,
+    ledger: Principal,
+    principal_e8s: u64,
+    vault_id: u64,
+    op_nonce: u128,
+) -> Option<crate::state::PendingThreeUsdRefund> {
+    if principal_e8s == 0 || op_nonce == 0 {
+        return None;
+    }
+    Some(crate::state::PendingThreeUsdRefund {
+        stability_pool,
+        ledger,
+        amount_e8s: principal_e8s,
+        vault_id,
+        retry_count: 0,
+        op_nonce,
+        source: crate::state::ThreeUsdRefundSource::LegacyHashedReserve,
+        parent_absorb_id: None,
+        dispatch_amount_e8s: None,
+        dispatch_fee_e8s: None,
+        dispatch_submitted: false,
+        legacy_dispatch_retryable: true,
+        dispatch_block_index: None,
+        resolution: None,
+    })
+}
+
+/// Explicitly rearm a capped legacy refund only while its persisted row proves
+/// no transfer tuple was ever pinned or submitted. The developer action changes
+/// only the retry counter; nonce, amount, source, and destination identity stay
+/// immutable across the resumed worker attempt.
+pub fn rearm_unsent_legacy_three_usd_refund(
+    state: &mut crate::state::State,
+    caller: Principal,
+    op_nonce: u128,
+) -> Result<(), &'static str> {
+    if caller == Principal::anonymous() || caller != state.developer_principal {
+        return Err("only the developer can rearm a held 3USD refund");
+    }
+    let configured_ledger = state
+        .three_pool_canister
+        .ok_or("configured 3USD ledger is missing")?;
+    let configured_pool = state
+        .stability_pool_canister
+        .ok_or("registered Stability Pool is missing")?;
+    if hold_legacy_three_usd_refund_for_cutover(state, configured_ledger) {
+        return Err("legacy 3USD refund is held by reserve cutover state");
+    }
+    let refund = state
+        .pending_3usd_refunds
+        .get_mut(&op_nonce)
+        .ok_or("pending 3USD refund was not found")?;
+    if refund.source != crate::state::ThreeUsdRefundSource::LegacyHashedReserve
+        || !refund.legacy_dispatch_retryable
+        || refund.resolution.is_some()
+        || refund.retry_count < crate::MAX_PENDING_RETRIES
+        || refund.dispatch_submitted
+        || refund.dispatch_block_index.is_some()
+        || refund.dispatch_amount_e8s.is_some()
+        || refund.dispatch_fee_e8s.is_some()
+        || refund.ledger != configured_ledger
+        || refund.stability_pool != configured_pool
+    {
+        return Err("3USD refund is not a capped, known-unsent legacy row for the configured ledger and pool");
+    }
+    refund.retry_count = 0;
+    Ok(())
+}
+
+/// Require the net hashed-account reserve floor, all unresolved legacy refund
+/// principal, and the protocol-paid fee. `None` means the checked total
+/// overflowed or source accounting is inconsistent, so the caller must hold.
+pub fn three_usd_legacy_refund_fee_buffer_sufficient(
+    state: &crate::state::State,
+    ledger: Principal,
+    balance_e8s: u128,
+    fee_e8s: u64,
+) -> Option<bool> {
+    // `protocol_3usd_reserves` aggregates retained backing from both V1 hashed
+    // and V2 default-account rails. Remove the V2 realized backing before
+    // applying the aggregate floor to the V1 hashed account balance.
+    let v2_default_account_backing = state
+        .sp_three_usd_reserve_absorb_results_by_proof
+        .values()
+        .filter(|stored| {
+            stored.ledger == ledger
+                && stored.proof.ledger_kind
+                    == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault
+        })
+        .try_fold(0u128, |total, stored| {
+            let realized = realized_three_usd_reserve_credit_e8s(
+                stored.three_usd_amount_e8s,
+                stored.icusd_debt_covered_e8s,
+                stored.result.liquidated_debt,
+            )?;
+            total.checked_add(u128::from(realized))
+        })?;
+    let hashed_account_reserve_floor =
+        u128::from(state.protocol_3usd_reserves).checked_sub(v2_default_account_backing)?;
+    let unresolved_refunds = state
+        .pending_3usd_refunds
+        .values()
+        .filter(|refund| {
+            refund.ledger == ledger
+                && refund.source == crate::state::ThreeUsdRefundSource::LegacyHashedReserve
+                && refund.resolution.is_none()
+        })
+        .try_fold(0u128, |total, refund| {
+            total.checked_add(u128::from(refund.amount_e8s))
+        })?;
+    Some(
+        hashed_account_reserve_floor
+            .checked_add(unresolved_refunds)
+            .and_then(|required| required.checked_add(u128::from(fee_e8s)))
+            .is_some_and(|required| balance_e8s >= required),
+    )
+}
+
+#[cfg(test)]
+mod legacy_refund_fee_buffer_tests {
+    use crate::icrc3_proof::{SpProofLedger, SpWritedownProof};
+    use crate::state::{
+        PendingThreeUsdRefund, State, StoredThreeUsdReserveAbsorbResult, ThreeUsdRefundSource,
+    };
+    use candid::Principal;
+
+    #[test]
+    fn fresh_legacy_refund_journals_full_principal_before_dispatch() {
+        let pool = Principal::from_slice(&[2]);
+        let ledger = Principal::from_slice(&[1]);
+        let refund = super::new_legacy_three_usd_refund(pool, ledger, 100, 3, 4)
+            .expect("valid refund entitlement must be journalable");
+
+        assert_eq!(refund.stability_pool, pool);
+        assert_eq!(refund.ledger, ledger);
+        assert_eq!(refund.amount_e8s, 100);
+        assert_eq!(refund.dispatch_amount_e8s, None);
+        assert_eq!(refund.dispatch_fee_e8s, None);
+        assert!(!refund.dispatch_submitted);
+        assert!(refund.legacy_dispatch_retryable);
+        assert_eq!(refund.resolution, None);
+        assert!(super::new_legacy_three_usd_refund(pool, ledger, 0, 3, 4).is_none());
+        assert!(super::new_legacy_three_usd_refund(pool, ledger, 100, 3, 0).is_none());
+    }
+
+    #[test]
+    fn protocol_fee_must_be_surplus_to_principal_and_other_refund_liabilities() {
+        let ledger = Principal::from_slice(&[1]);
+        let row = PendingThreeUsdRefund {
+            stability_pool: Principal::from_slice(&[2]),
+            ledger,
+            amount_e8s: 100,
+            vault_id: 3,
+            retry_count: 0,
+            op_nonce: 4,
+            source: ThreeUsdRefundSource::LegacyHashedReserve,
+            parent_absorb_id: None,
+            dispatch_amount_e8s: None,
+            dispatch_fee_e8s: None,
+            dispatch_submitted: false,
+            legacy_dispatch_retryable: true,
+            dispatch_block_index: None,
+            resolution: None,
+        };
+        let mut state = State::default();
+        state.protocol_3usd_reserves = 100;
+        state.pending_3usd_refunds.insert(row.op_nonce, row);
+        assert_eq!(
+            super::three_usd_legacy_refund_fee_buffer_sufficient(&state, ledger, 202, 2),
+            Some(true),
+        );
+        assert_eq!(
+            super::three_usd_legacy_refund_fee_buffer_sufficient(&state, ledger, 101, 2),
+            Some(false),
+        );
+
+        // The failed-pull refund is a separate liability from the tracked
+        // reserve balance, so both principal amounts must remain backed.
+        assert_eq!(
+            super::three_usd_legacy_refund_fee_buffer_sufficient(&state, ledger, 102, 2),
+            Some(false),
+        );
+    }
+
+    #[test]
+    fn partial_success_refund_is_additive_to_net_tracked_reserves() {
+        let ledger = Principal::from_slice(&[1]);
+        let pool = Principal::from_slice(&[2]);
+        let refund = super::new_legacy_three_usd_refund(pool, ledger, 40, 3, 4)
+            .expect("valid partial refund must be journalable");
+        let mut state = State::default();
+        state.protocol_3usd_reserves = 60;
+        state.pending_3usd_refunds.insert(refund.op_nonce, refund);
+
+        assert_eq!(
+            super::three_usd_legacy_refund_fee_buffer_sufficient(&state, ledger, 102, 2),
+            Some(true),
+        );
+        assert_eq!(
+            super::three_usd_legacy_refund_fee_buffer_sufficient(&state, ledger, 101, 2),
+            Some(false),
+        );
+
+        state.pending_3usd_refunds.get_mut(&refund.op_nonce).unwrap().resolution =
+            Some(crate::state::ThreeUsdRefundResolution::ReceiptVerified {
+                block_index: 77,
+                fee_e8s: 2,
+                reconciled_at_ns: 88,
+            });
+        assert_eq!(
+            super::three_usd_legacy_refund_fee_buffer_sufficient(&state, ledger, 60, 0),
+            Some(true),
+        );
+        assert_eq!(
+            super::three_usd_legacy_refund_fee_buffer_sufficient(&state, ledger, 59, 0),
+            Some(false),
+        );
+    }
+
+    #[test]
+    fn v2_default_account_backing_is_not_assigned_to_the_legacy_hashed_account() {
+        let ledger = Principal::from_slice(&[1]);
+        let pool = Principal::from_slice(&[2]);
+        let proof = SpWritedownProof {
+            block_index: 7,
+            ledger_kind: SpProofLedger::ThreePoolTransferDefault,
+            vault_id_memo: 3,
+        };
+        let mut state = State::default();
+        // Net reserve backing includes 60 from V2's default account and 100
+        // from V1's hashed account. V2's stored proof retains gross ingress 100.
+        state.protocol_3usd_reserves = 160;
+        state.sp_three_usd_reserve_absorb_results_by_proof.insert(
+            (proof.ledger_kind, proof.block_index),
+            StoredThreeUsdReserveAbsorbResult {
+                caller: pool,
+                vault_id: 3,
+                absorb_id: 5,
+                icusd_debt_covered_e8s: 100,
+                three_usd_amount_e8s: 100,
+                ledger,
+                proof,
+                result: crate::StabilityPoolLiquidationResult {
+                    success: true,
+                    vault_id: 3,
+                    liquidated_debt: 60,
+                    collateral_received: 50,
+                    collateral_type: "ICP".into(),
+                    block_index: 7,
+                    fee: 0,
+                    collateral_price_e8s: 100,
+                },
+            },
+        );
+        assert_eq!(
+            super::three_usd_legacy_refund_fee_buffer_sufficient(&state, ledger, 102, 2),
+            Some(true),
+        );
+        assert_eq!(
+            super::three_usd_legacy_refund_fee_buffer_sufficient(&state, ledger, 101, 2),
+            Some(false),
+        );
+    }
+}
+
 pub fn three_pool_canister_change_has_old_ledger_obligations(
     state: &crate::state::State,
     requested: Principal,
@@ -801,6 +1108,10 @@ pub fn stability_pool_change_has_v2_obligations(
         return false;
     }
     state.three_usd_reserve_ingress_enabled
+        || matches!(
+            &state.three_usd_reserve_v1_cutover,
+            crate::state::ThreeUsdReserveV1Cutover::Quarantined
+        )
         || state
             .three_usd_reserve_ingress_journals
             .iter()
@@ -2379,6 +2690,24 @@ pub fn checked_three_usd_reserves_total(current_e8s: u64, added_e8s: u64) -> Res
         .ok_or_else(|| "3USD reserves accounting capacity exhausted".to_string())
 }
 
+/// Principal retained in reserves after the stability pool consumes a
+/// proportional share of an ingress. Proof and V2 replay records continue to
+/// pin gross ingress; only this realized amount enters reserve backing.
+pub fn realized_three_usd_reserve_credit_e8s(
+    gross_ingress_e8s: u64,
+    debt_covered_e8s: u64,
+    debt_realized_e8s: u64,
+) -> Option<u64> {
+    if debt_covered_e8s == 0 {
+        return None;
+    }
+    let realized_debt = debt_realized_e8s.min(debt_covered_e8s);
+    let credit = u128::from(gross_ingress_e8s)
+        .checked_mul(u128::from(realized_debt))?
+        .checked_div(u128::from(debt_covered_e8s))?;
+    u64::try_from(credit).ok()
+}
+
 #[cfg(test)]
 mod three_usd_value_tests {
     use super::validate_three_usd_value;
@@ -2469,6 +2798,13 @@ mod three_usd_value_tests {
         assert!(!super::stability_pool_change_has_v2_obligations(
             &state, new_pool
         ));
+        state.three_usd_reserve_v1_cutover =
+            crate::state::ThreeUsdReserveV1Cutover::Quarantined;
+        assert!(super::stability_pool_change_has_v2_obligations(
+            &state, new_pool
+        ));
+        state.three_usd_reserve_v1_cutover =
+            crate::state::ThreeUsdReserveV1Cutover::NoLegacyExposure;
 
         state.protocol_3usd_reserves = 1;
         assert!(super::three_pool_canister_change_has_old_ledger_obligations(&state, new_ledger));
@@ -2528,6 +2864,7 @@ mod three_usd_value_tests {
                 dispatch_amount_e8s: None,
                 dispatch_fee_e8s: None,
                 dispatch_submitted: true,
+                legacy_dispatch_retryable: false,
                 dispatch_block_index: None,
                 resolution: None,
             },
@@ -2579,6 +2916,18 @@ mod three_usd_value_tests {
     fn reserves_capacity_rejects_overflow() {
         assert_eq!(super::checked_three_usd_reserves_total(7, 5), Ok(12));
         assert!(super::checked_three_usd_reserves_total(u64::MAX, 1).is_err());
+        assert_eq!(
+            super::realized_three_usd_reserve_credit_e8s(100, 100, 60),
+            Some(60),
+        );
+        assert_eq!(
+            super::realized_three_usd_reserve_credit_e8s(100, 100, 101),
+            Some(100),
+        );
+        assert_eq!(
+            super::realized_three_usd_reserve_credit_e8s(100, 0, 0),
+            None,
+        );
     }
 }
 

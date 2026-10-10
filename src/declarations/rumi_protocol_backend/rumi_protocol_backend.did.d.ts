@@ -2179,6 +2179,11 @@ export interface _SERVICE {
     [bigint, bigint, bigint],
     Result
   >,
+  'reconcile_legacy_three_usd_refund_candidate_block' : ActorMethod<
+    [bigint, bigint],
+    Result
+  >,
+  'rearm_unsent_legacy_three_usd_refund' : ActorMethod<[bigint], Result>,
   'reconcile_three_usd_reserve_v1_cutover' : ActorMethod<
     [Uint8Array | number[]],
     Result

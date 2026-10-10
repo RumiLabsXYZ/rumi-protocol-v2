@@ -400,6 +400,34 @@ mod three_usd_reserve_refund_tests {
         let mut changed_source = block.clone();
         changed_source.from.as_mut().unwrap().owner = Principal::from_slice(&[9]);
         assert!(validate_three_usd_reserve_refund_block(&changed_source, &tuple).is_err());
+        let mut changed_subaccount = block.clone();
+        changed_subaccount.from.as_mut().unwrap().subaccount = Some([9; 32]);
+        assert!(validate_three_usd_reserve_refund_block(&changed_subaccount, &tuple).is_err());
+
+        let mut changed_recipient = block.clone();
+        changed_recipient.to.as_mut().unwrap().owner = Principal::from_slice(&[9]);
+        assert!(validate_three_usd_reserve_refund_block(&changed_recipient, &tuple).is_err());
+        let mut changed_type = block.clone();
+        changed_type.btype = Some("2xfer".into());
+        assert!(validate_three_usd_reserve_refund_block(&changed_type, &tuple).is_err());
+        let mut unexpected_spender = block.clone();
+        unexpected_spender.spender = Some(Account {
+            owner: Principal::from_slice(&[9]),
+            subaccount: None,
+        });
+        assert!(validate_three_usd_reserve_refund_block(&unexpected_spender, &tuple).is_err());
+        let mut changed_amount = block.clone();
+        changed_amount.amount += 1;
+        assert!(validate_three_usd_reserve_refund_block(&changed_amount, &tuple).is_err());
+        let mut changed_memo = block.clone();
+        changed_memo.memo.as_mut().unwrap()[0] ^= 1;
+        assert!(validate_three_usd_reserve_refund_block(&changed_memo, &tuple).is_err());
+        let mut changed_timestamp = block.clone();
+        changed_timestamp.created_at_time = Some(tuple.created_at_time_ns + 1);
+        assert!(validate_three_usd_reserve_refund_block(&changed_timestamp, &tuple).is_err());
+        let mut changed_operation = block.clone();
+        changed_operation.op = "mint".into();
+        assert!(validate_three_usd_reserve_refund_block(&changed_operation, &tuple).is_err());
     }
 }
 
@@ -671,6 +699,114 @@ pub async fn fetch_icrc3_block(
     let (archived,) = result
         .map_err(|(code, message)| format!("icrc3 archive call failed: {code:?} {message}"))?;
     decode_block(exact_archive_callback_block(block_index, &archived)?)
+}
+
+/// Fetch an exact block from the ledger canister itself. An archive descriptor
+/// is not direct-ledger proof: the advertised callback is controlled by a
+/// separate canister, so callers making financial reconciliation decisions
+/// must hold when the requested block is no longer served directly.
+pub async fn fetch_icrc3_block_direct(
+    ledger: Principal,
+    block_index: u64,
+) -> Result<DecodedBlock, String> {
+    let request = vec![GetBlocksRequest {
+        start: Nat::from(block_index),
+        length: Nat::from(1u64),
+    }];
+    let result: Result<(GetBlocksResult,), _> =
+        ic_cdk::call(ledger, "icrc3_get_blocks", (request,)).await;
+    let (response,) = result.map_err(|(code, message)| {
+        format!("direct icrc3_get_blocks call to {ledger} failed: {code:?} {message}")
+    })?;
+    validate_direct_icrc3_block_response(block_index, &response)
+}
+
+/// Validate a one-block response returned directly by a ledger. Kept pure so
+/// callers can test the proof boundary without an inter-canister call.
+fn validate_direct_icrc3_block_response(
+    block_index: u64,
+    response: &GetBlocksResult,
+) -> Result<DecodedBlock, String> {
+    let log_length = response
+        .log_length
+        .0
+        .to_u64()
+        .ok_or_else(|| "ICRC-3 log length exceeds u64".to_string())?;
+    if block_index >= log_length {
+        return Err("requested block is outside the ledger's reported log".into());
+    }
+    if !response.archived_blocks.is_empty() {
+        return Err("direct ICRC-3 proof cannot use an archive descriptor".into());
+    }
+    if response.blocks.len() != 1 || response.blocks[0].id.0.to_u64() != Some(block_index) {
+        return Err("direct ICRC-3 response does not contain the exact requested block".into());
+    }
+    decode_block(&response.blocks[0].block)
+}
+
+#[cfg(test)]
+mod direct_ledger_fetch_tests {
+    use super::{make_test_transfer_block, validate_direct_icrc3_block_response};
+    use candid::{Nat, Principal};
+    use icrc_ledger_types::icrc1::account::Account;
+    use icrc_ledger_types::icrc3::archive::QueryArchiveFn;
+    use icrc_ledger_types::icrc3::blocks::{
+        ArchivedBlocks, BlockWithId, GetBlocksRequest, GetBlocksResult,
+    };
+
+    fn exact_response(block_index: u64, log_length: u64) -> GetBlocksResult {
+        let owner = Principal::from_slice(&[1]);
+        let recipient = Principal::from_slice(&[2]);
+        GetBlocksResult {
+            log_length: Nat::from(log_length),
+            blocks: vec![BlockWithId {
+                id: Nat::from(block_index),
+                block: make_test_transfer_block(
+                    Account {
+                        owner,
+                        subaccount: None,
+                    },
+                    Account {
+                        owner: recipient,
+                        subaccount: None,
+                    },
+                    17,
+                    b"proof",
+                    true,
+                ),
+            }],
+            archived_blocks: vec![],
+        }
+    }
+
+    #[test]
+    fn direct_block_is_decoded_from_the_exact_ledger_response() {
+        let decoded = validate_direct_icrc3_block_response(4, &exact_response(4, 5)).unwrap();
+        assert_eq!(decoded.op, "xfer");
+        assert_eq!(decoded.amount, 17);
+    }
+
+    #[test]
+    fn archive_descriptor_is_rejected_without_following_callback() {
+        let mut response = exact_response(4, 5);
+        response.blocks.clear();
+        response.archived_blocks.push(ArchivedBlocks {
+            args: vec![GetBlocksRequest {
+                start: Nat::from(4u64),
+                length: Nat::from(1u64),
+            }],
+            callback: QueryArchiveFn::new(Principal::from_slice(&[9]), "archive_blocks"),
+        });
+        assert!(validate_direct_icrc3_block_response(4, &response)
+            .unwrap_err()
+            .contains("archive descriptor"));
+    }
+
+    #[test]
+    fn direct_response_rejects_wrong_index_and_out_of_log_index() {
+        assert!(validate_direct_icrc3_block_response(4, &exact_response(5, 6)).is_err());
+        assert!(validate_direct_icrc3_block_response(5, &exact_response(5, 5)).is_err());
+    }
 }
 
 fn exact_archive_callback_block(
