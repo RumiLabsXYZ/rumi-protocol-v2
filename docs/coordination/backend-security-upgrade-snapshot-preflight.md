@@ -2,6 +2,37 @@
 
 **Status:** source-only operating plan for future review. This document does not authorize a canister stop, snapshot, download, restore, install, deployment, or funds action.
 
+## Exact replacement candidate observed 2026-10-10
+
+An authenticated, read-only `icp canister snapshot list` with `rumi_identity`
+still returned **10 of 10** occupied network slots. The oldest network
+snapshot is `00000000000000000000000001f088fe0101`, taken
+2026-07-17 20:50:58 UTC, with reported size 82.78992366790771 MiB. This is
+the exact candidate for a separately approved atomic `--replace`; its age
+alone is not authorization to remove it. The full list and target must be
+re-read immediately before preservation or replacement, because another
+operator may change the inventory.
+
+The same read-only pass confirmed the backend was Running on module hash
+`1714712f12525a5058c288bde8f456b09e2e893e4ac51fe7a82992ac07b0ecf1`.
+Read-only queries returned a global icUSD mint cap of `1` raw unit and 49
+pending Stability Pool interest notifications. The old binary lacks the
+paged interest-notification and pending-payout queries, so this is not a
+complete outbox inventory. The current merged borrow-recovery source is at
+`9d757edafdf1dd0f7b34b3f8ac0aad82b06a0122`; its freshly reproduced
+production gzip artifact SHA-256 is
+`5c1fece6f03a08c964e8d25b054a579b1507d7a20cededfb63b666d1df9c3f53`.
+These are preflight identifiers, not an install instruction or proof of
+post-upgrade behavior. `post_upgrade` resumes timers and pending transfer
+processing, which must be reconciled separately from snapshot safety.
+
+No snapshot was downloaded, created, replaced, deleted, or restored during
+this preflight. Before any replacement, preserve the exact old snapshot in
+an access-restricted encrypted location, verify every downloaded file and
+metadata hash, and obtain approval naming the exact replacement ID above.
+The current source-only approval for borrow recovery does not authorize this
+snapshot operation or a backend install.
+
 ## Target and current evidence
 
 The production backend is `rumi_protocol_backend`, principal `tfesu-vyaaa-aaaap-qrd7a-cai`, from [`canister_ids.json`](../../canister_ids.json) (`ic` mapping). A public-state-tree status read on 2026-10-08 returned module hash `1714712f12525a5058c288bde8f456b09e2e893e4ac51fe7a82992ac07b0ecf1` and these controllers:
