@@ -5691,7 +5691,13 @@ mod three_usd_reserve_payout_replay_tests {
         let state = replay_with_nonce_time_and_payout_events(
             vec![
                 Event::Init(init_args(principal(34))),
-                Event::MarginTransfer { vault_id: 44, block_index: 77, timestamp: Some(3) },
+                Event::MarginTransfer {
+                    vault_id: 44,
+                    block_index: 77,
+                    operation_id: Some(op_nonce),
+                    payout_kind: Some(PendingPayoutKind::Margin),
+                    timestamp: Some(3),
+                },
             ].into_iter(), journal, || 2,
         ).expect("private payout replay should succeed");
         let recovered = state.three_usd_reserve_collateral_payouts.get(&key).unwrap();
