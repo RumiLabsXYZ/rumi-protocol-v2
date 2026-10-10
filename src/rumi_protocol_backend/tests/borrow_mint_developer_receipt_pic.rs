@@ -480,6 +480,43 @@ fn run_committed_mint_recovery(use_scanner: bool) {
     assert_eq!(vault_debt(&pic, backend, owner, vault_id), borrow_amount);
     assert_eq!(balance(&pic, icusd_ledger, owner), balance_after_phantom);
     assert_eq!(ledger_blocks(&pic, icusd_ledger), blocks_after_phantom);
+
+    // The newly authorized developer must also be unable to reuse a stale
+    // vault ID after the owner journal has been removed by successful recovery.
+    let developer_repeat_reply = if use_scanner {
+        call(
+            &pic,
+            backend,
+            developer,
+            "advance_pending_borrow_mint_recovery",
+            encode_args((vault_id,)).unwrap(),
+        )
+    } else {
+        call(
+            &pic,
+            backend,
+            developer,
+            "reconcile_pending_borrow_mint_from_block",
+            encode_args((vault_id, 0u64)).unwrap(),
+        )
+    };
+    let developer_repeat_rejected = if use_scanner {
+        let result: Result<(), ProtocolError> =
+            result(developer_repeat_reply, "developer repeat scan");
+        result.is_err()
+    } else {
+        let result: Result<SuccessWithFee, ProtocolError> =
+            result(developer_repeat_reply, "developer repeat reconciliation");
+        result.is_err()
+    };
+    assert!(
+        developer_repeat_rejected,
+        "developer cannot recover a stale journal after its once-only commit"
+    );
+    assert!(pending_mints(&pic, backend, owner).is_empty());
+    assert_eq!(vault_debt(&pic, backend, owner, vault_id), borrow_amount);
+    assert_eq!(balance(&pic, icusd_ledger, owner), balance_after_phantom);
+    assert_eq!(ledger_blocks(&pic, icusd_ledger), blocks_after_phantom);
 }
 
 #[test]

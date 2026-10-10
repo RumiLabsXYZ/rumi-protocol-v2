@@ -6482,7 +6482,9 @@ fn log_borrow_mint_receipt_recovery(
 
 /// Reconcile a borrow journal after its exact ICRC-1 retry returned TooOld.
 /// The caller-supplied block index is only a candidate: debt is committed only
-/// after an archive-aware ICRC-3 read validates the exact persisted mint tuple.
+/// after an exact ICRC-3 read validates the persisted mint tuple. Archived
+/// responses currently remain held because their chain membership is not
+/// established by this direct-block verifier.
 /// This path never dispatches a mint.
 pub async fn reconcile_pending_borrow_mint_from_block(
     vault_id: u64,

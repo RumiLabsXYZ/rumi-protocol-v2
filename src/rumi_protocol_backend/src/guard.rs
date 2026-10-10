@@ -511,6 +511,10 @@ mod vault_liquidation_guard_tests {
         });
 
         assert!(VaultLiquidationGuard::new(vault_id).is_err());
+        assert!(
+            VaultLiquidationGuard::new_for_borrow_retry(vault_id).is_err(),
+            "borrow recovery must not overlap an unresolved push sweep on the same vault"
+        );
         assert!(VaultLiquidationGuard::new_for_push_sweep_retry(vault_id, Principal::from_slice(&[81])).is_err());
         let exact_retry = VaultLiquidationGuard::new_for_push_sweep_retry(vault_id, owner)
             .expect("only the journal owner can retry the exact add-margin operation");
