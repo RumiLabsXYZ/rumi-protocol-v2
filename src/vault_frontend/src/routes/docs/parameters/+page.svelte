@@ -6,7 +6,9 @@
   import type { CollateralInfo, PerCollateralRateCurveDTO } from '$lib/services/types';
   import { get } from 'svelte/store';
   import { threePoolService } from '$lib/services/threePoolService';
+  import { formatGlobalMintCap } from '$lib/utils/mintCapDisplay';
 
+  let globalMintCap: bigint | null = null;
   let recoveryTargetCr = 0;
   let recoveryModeThreshold = 0;
   let recoveryCrMultiplier = 0;
@@ -156,6 +158,10 @@
   })();
 
   onMount(async () => {
+    const mintCapRequest = publicActor.get_global_icusd_mint_cap().catch((e) => {
+      console.error('Failed to fetch global icUSD mint cap:', e);
+      return null;
+    });
     try {
       // Fetch global parameters and per-collateral config in parallel
       const [status, rfFloor, rfCeil, ckFee, rrFee, lpShare, rFloor, rCeil, rFloorCr, rCeilCr, poolStatus] = await Promise.all([
@@ -216,6 +222,7 @@
     } catch (e) {
       console.error('Failed to fetch protocol parameters:', e);
     }
+    globalMintCap = await mintCapRequest;
     loaded = true;
   });
 </script>
@@ -286,6 +293,17 @@
         </tbody>
       </table>
     </div>
+  </section>
+
+  <section class="doc-section">
+    <h2 class="doc-heading">Global Borrowing Limit</h2>
+    <div class="params-table">
+      <div class="param">
+        <span class="param-label">Global icUSD Mint Cap <span class="tip" data-tip="New borrowing is blocked if total vault debt plus borrowing in progress would exceed this value. Per-collateral debt ceilings also apply. Interest can continue to accrue above the cap.">?</span></span>
+        <span class="param-val" class:live={globalMintCap !== null}>{formatGlobalMintCap(globalMintCap)}</span>
+      </div>
+    </div>
+    <p class="doc-note">A cap below existing vault debt temporarily holds new borrowing. Unlimited removes the global limit; each collateral's debt ceiling and collateral requirements still apply.</p>
   </section>
 
   <!-- Rate Curve Visualizations -->
