@@ -11,6 +11,9 @@
 //! POCKET_IC_BIN=/private/tmp/pocket-ic cargo test -p rumi_cycle_sentinel \
 //!   --test pocket_ic_integration
 //! ```
+//! The predecessor-to-candidate migration test additionally requires
+//! `PREDECESSOR_SENTINEL_WASM_PATH` to point to a `test_endpoints` Wasm built
+//! from the exact predecessor source commit. It fails if that fixture is absent.
 //!
 //! The mock fixture is installed at the protocol's pinned principals.  No
 //! mainnet call or funding action is possible from this test: every endpoint
@@ -20,6 +23,7 @@
 use candid::{CandidType, Decode, Encode, IDLArgs, IDLValue, Nat, Principal};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 const SENTINEL_WASM: &[u8] = include_bytes!(
@@ -563,6 +567,39 @@ fn call_query_raw(
     }
 }
 
+fn idl_record_field<'a>(value: &'a IDLValue, name: &str) -> &'a IDLValue {
+    let IDLValue::Record(fields) = value else {
+        panic!("expected Candid record while reading {name}");
+    };
+    fields
+        .iter()
+        .find(|field| field.id.get_id() == candid::idl_hash(name))
+        .map(|field| &field.val)
+        .unwrap_or_else(|| panic!("missing Candid record field {name}"))
+}
+
+fn idl_result_ok(bytes: &[u8]) -> IDLValue {
+    let values = IDLArgs::from_bytes(bytes).expect("decode Candid result");
+    let IDLValue::Variant(value) = &values.args[0] else {
+        panic!("expected Candid Result variant");
+    };
+    assert_eq!(value.0.id.get_id(), candid::idl_hash("Ok"));
+    value.0.val.clone()
+}
+
+fn idl_u64(value: &IDLValue) -> u64 {
+    match value {
+        IDLValue::Nat64(value) => *value,
+        IDLValue::Number(value) => value.parse().expect("decode Candid integer as u64"),
+        IDLValue::Nat(value) => value
+            .0
+            .clone()
+            .try_into()
+            .expect("decode Candid nat as u64"),
+        _ => panic!("expected Candid integer that fits in u64"),
+    }
+}
+
 fn decode_ok_u64(bytes: &[u8]) -> u64 {
     let values = IDLArgs::from_bytes(bytes).expect("decode result");
     let IDLValue::Variant(value) = &values.args[0] else {
@@ -1038,6 +1075,22 @@ fn boot_with_funding_and_interval(
     runtime_cycles: u128,
     sample_interval_secs: u64,
 ) -> (PocketIc, Principal, Principal) {
+    boot_with_funding_and_interval_using_wasm(
+        global_cap,
+        protected_reserve,
+        runtime_cycles,
+        sample_interval_secs,
+        SENTINEL_WASM,
+    )
+}
+
+fn boot_with_funding_and_interval_using_wasm(
+    global_cap: u128,
+    protected_reserve: u128,
+    runtime_cycles: u128,
+    sample_interval_secs: u64,
+    sentinel_wasm: &[u8],
+) -> (PocketIc, Principal, Principal) {
     // The fixtures intentionally use the real mainnet principals. PocketIC's
     // routing table assigns the ledger/system principals to their matching
     // subnet kinds, so those subnets must exist even though every installed
@@ -1089,7 +1142,7 @@ fn boot_with_funding_and_interval(
     };
     pic.install_canister(
         sentinel,
-        SENTINEL_WASM.to_vec(),
+        sentinel_wasm.to_vec(),
         Encode!(&init).expect("encode Sentinel init"),
         None,
     );
@@ -2522,6 +2575,173 @@ fn shared_reserve_conversion_cap_blocks_initial_deficit_without_debit() {
     assert_exact_withdrawals(&pic, &[]);
     assert!(public_topups(&pic, sentinel, target).is_empty());
     assert!(unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+}
+
+#[test]
+fn predecessor_self_recovery_writeoff_survives_candidate_upgrade() {
+    let predecessor_path = std::env::var_os("PREDECESSOR_SENTINEL_WASM_PATH")
+        .expect("PREDECESSOR_SENTINEL_WASM_PATH must point to the 3367564e test-endpoints Wasm");
+    let predecessor_wasm = std::fs::read(&predecessor_path).unwrap_or_else(|error| {
+        panic!(
+            "read predecessor Sentinel Wasm at {}: {error}",
+            std::path::PathBuf::from(&predecessor_path).display()
+        )
+    });
+    assert!(!predecessor_wasm.is_empty(), "predecessor Wasm is empty");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&predecessor_wasm)),
+        "ff2729769c1090b03fd79369c7ef8d8a3f121eadd8a65908534fd80d1612f424",
+        "predecessor fixture must be the reviewed 3367564e test-endpoints Wasm"
+    );
+
+    // Populate the predecessor through its real runtime-recovery path. The
+    // CMC mint is held pending first so the next maintenance pass can create a
+    // genuine SelfRecovery operation when the Cycles Ledger reply is unknown.
+    let (pic, sentinel, signer) = boot_with_funding_and_interval_using_wasm(
+        40 * T,
+        10 * T,
+        900_000_000_000,
+        1,
+        &predecessor_wasm,
+    );
+    shared_setup(&pic, 0);
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::Processing);
+    let target = enable_shared_target(&pic, sentinel, signer);
+    run_timer(&pic, sentinel);
+    run_timer(&pic, sentinel);
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(mock_count(&pic, CMC, "mint_delivery_count"), 0);
+
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::Completed);
+    set_mock_withdraw_mode(&pic, principal(CYCLES_LEDGER), WithdrawMode::Unknown);
+    run_timer(&pic, sentinel);
+    let unresolved_before = unresolved_operation_ids(&pic, sentinel, signer);
+    assert_eq!(
+        unresolved_before.len(),
+        1,
+        "one runtime-recovery operation is pending"
+    );
+    let operation_id = unresolved_before[0];
+    let operation_before = test_operation(&pic, sentinel, operation_id);
+    let reserved_amount_before = operation_before.reserved_amount_cycles.0.clone();
+    assert_eq!(
+        operation_before.state,
+        FundingState::Cycles(FundingCyclesState::Unknown),
+        "predecessor state contains the ambiguous Cycles Ledger withdrawal"
+    );
+    assert!(public_topups(&pic, sentinel, target).is_empty());
+
+    upgrade_sentinel(&pic, sentinel, SENTINEL_WASM, signer);
+    assert_operations_unchanged(
+        &pic,
+        sentinel,
+        &[operation_before],
+        "predecessor-to-candidate migration",
+    );
+    assert_eq!(
+        unresolved_operation_ids(&pic, sentinel, signer),
+        unresolved_before
+    );
+
+    let write_off_arg = Encode!(&operation_id).unwrap();
+    assert!(pic
+        .update_call(
+            sentinel,
+            Principal::anonymous(),
+            "write_off_self_recovery_unresolved",
+            write_off_arg.clone(),
+        )
+        .is_err());
+    let nonsigner = Principal::from_slice(&[8; 10]);
+    assert!(pic
+        .update_call(
+            sentinel,
+            nonsigner,
+            "write_off_self_recovery_unresolved",
+            write_off_arg,
+        )
+        .is_err());
+    assert_eq!(
+        test_operation(&pic, sentinel, operation_id).state,
+        FundingState::Cycles(FundingCyclesState::Unknown),
+        "unauthorized write-off attempts leave predecessor operation state intact"
+    );
+
+    let receipt_bytes = call_update_raw(
+        &pic,
+        sentinel,
+        signer,
+        "write_off_self_recovery_unresolved",
+        Encode!(&operation_id).unwrap(),
+    );
+    let receipt = idl_result_ok(&receipt_bytes);
+    let receipt_operation = idl_record_field(&receipt, "operation");
+    assert_eq!(
+        idl_u64(idl_record_field(receipt_operation, "id")),
+        operation_id
+    );
+    let IDLValue::Variant(trigger) = idl_record_field(receipt_operation, "trigger") else {
+        panic!("write-off receipt operation has a trigger variant");
+    };
+    assert_eq!(trigger.0.id.get_id(), candid::idl_hash("SelfRecovery"));
+    assert!(matches!(
+        idl_record_field(&receipt, "authorized_by"),
+        IDLValue::Principal(caller) if *caller == signer
+    ));
+    let IDLValue::Variant(disposition) = idl_record_field(&receipt, "disposition") else {
+        panic!("write-off receipt has a disposition variant");
+    };
+    assert_eq!(disposition.0.id.get_id(), candid::idl_hash("Unresolved"));
+    let IDLValue::Nat(held_amount) = idl_record_field(&receipt, "held_amount_cycles") else {
+        panic!("write-off receipt has a nat held amount");
+    };
+    assert_eq!(
+        held_amount.0,
+        reserved_amount_before + Nat::from(CYCLES_FEE).0,
+        "receipt charges the exact amount plus fee reserved by the operation"
+    );
+    let risk = idl_record_field(&receipt, "delivery_risk");
+    assert_eq!(
+        idl_u64(idl_record_field(risk, "operation_id")),
+        operation_id
+    );
+    assert_eq!(
+        test_operation(&pic, sentinel, operation_id).state,
+        FundingState::Cycles(FundingCyclesState::Quarantined),
+        "write-off records accounting disposition without claiming delivery"
+    );
+    assert_eq!(
+        unresolved_operation_ids(&pic, sentinel, signer),
+        unresolved_before
+    );
+
+    // An identical repeat proves the private receipt was persisted; the next
+    // candidate upgrade exercises whole-state validation with that receipt.
+    let repeated_receipt = call_update_raw(
+        &pic,
+        sentinel,
+        signer,
+        "write_off_self_recovery_unresolved",
+        Encode!(&operation_id).unwrap(),
+    );
+    assert_eq!(repeated_receipt, receipt_bytes);
+    upgrade_sentinel(&pic, sentinel, SENTINEL_WASM, signer);
+    assert_eq!(
+        test_operation(&pic, sentinel, operation_id).state,
+        FundingState::Cycles(FundingCyclesState::Quarantined)
+    );
+    assert_eq!(
+        unresolved_operation_ids(&pic, sentinel, signer),
+        unresolved_before
+    );
+    let persisted_receipt = call_update_raw(
+        &pic,
+        sentinel,
+        signer,
+        "write_off_self_recovery_unresolved",
+        Encode!(&operation_id).unwrap(),
+    );
+    assert_eq!(persisted_receipt, receipt_bytes);
 }
 
 #[test]
