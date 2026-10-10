@@ -433,3 +433,183 @@ fn developer_reconciles_exact_committed_mint_for_owner_once() {
     assert_eq!(balance(&pic, icusd_ledger, owner), balance_after_phantom);
     assert_eq!(ledger_blocks(&pic, icusd_ledger), blocks_after_phantom);
 }
+
+#[test]
+#[ignore = "requires source-matched shrunk test_endpoints Wasm and PocketIC server 7.0.0"]
+fn developer_clears_typed_too_old_with_complete_empty_history() {
+    let pic = PocketIcBuilder::new().with_nns_subnet().build();
+    let owner = Principal::self_authenticating(b"borrow-receipt-owner");
+    let stranger = Principal::self_authenticating(b"borrow-receipt-stranger");
+    let developer = Principal::self_authenticating(b"borrow-receipt-developer");
+
+    let backend = pic.create_canister();
+    pic.add_cycles(backend, 2_000_000_000_000);
+    let icp_ledger = install_flaky_ledger(&pic);
+    let icusd_ledger = install_flaky_ledger(&pic);
+    let xrc = pic.create_canister();
+    pic.add_cycles(xrc, 1_000_000_000_000);
+    let mut rates = HashMap::new();
+    rates.insert("ICP/USD".to_string(), 1_000_000_000);
+    pic.install_canister(
+        xrc,
+        include_bytes!("../../xrc_demo/xrc/xrc.wasm").to_vec(),
+        encode_one(MockXrc { rates }).unwrap(),
+        None,
+    );
+
+    let protocol_init = ProtocolArg::Init(ProtocolInitArg {
+        xrc_principal: xrc,
+        icusd_ledger_principal: icusd_ledger,
+        icp_ledger_principal: icp_ledger,
+        fee_e8s: 0,
+        developer_principal: developer,
+        treasury_principal: None,
+        stability_pool_principal: None,
+        ckusdt_ledger_principal: None,
+        ckusdc_ledger_principal: None,
+    });
+    pic.install_canister(
+        backend,
+        backend_wasm(),
+        encode_one(protocol_init).unwrap(),
+        None,
+    );
+
+    expect_reply(
+        call(
+            &pic,
+            icp_ledger,
+            owner,
+            "mint",
+            encode_args((
+                LedgerAccount {
+                    owner,
+                    subaccount: None,
+                },
+                Nat::from(5_000_000_000u64),
+            ))
+            .unwrap(),
+        ),
+        "fixture ICP mint",
+    );
+    let collateral_amount = 5_000_000_000u64;
+    expect_reply(
+        call(
+            &pic,
+            icp_ledger,
+            owner,
+            "icrc2_approve",
+            encode_args((ApproveArgs {
+                from_subaccount: None,
+                spender: LedgerAccount {
+                    owner: backend,
+                    subaccount: None,
+                },
+                amount: Nat::from(collateral_amount),
+                expected_allowance: None,
+                expires_at: None,
+                fee: None,
+                memo: None,
+                created_at_time: None,
+            },))
+            .unwrap(),
+        ),
+        "fixture ICP approve",
+    );
+
+    let open_reply = call(
+        &pic,
+        backend,
+        owner,
+        "open_vault",
+        encode_args((collateral_amount, Option::<Principal>::None)).unwrap(),
+    );
+    let opened: Result<OpenVaultSuccess, ProtocolError> = result(open_reply, "open_vault");
+    let vault_id = opened.expect("open owner vault").vault_id;
+    let price_reply = call(
+        &pic,
+        backend,
+        developer,
+        "dev_set_collateral_price",
+        encode_args((icp_ledger, 10.0f64)).unwrap(),
+    );
+    let price_set: Result<String, ProtocolError> = result(price_reply, "dev_set_collateral_price");
+    price_set.expect("set test ICP price");
+
+    expect_reply(
+        call(
+            &pic,
+            icusd_ledger,
+            owner,
+            "set_minter",
+            encode_args((Some(backend),)).unwrap(),
+        ),
+        "set_minter",
+    );
+    expect_reply(
+        call(
+            &pic,
+            icusd_ledger,
+            owner,
+            "set_too_old_before_mint",
+            encode_args((1u32,)).unwrap(),
+        ),
+        "set_too_old_before_mint",
+    );
+
+    let borrow_amount = 1_000_000_000u64;
+    let first_reply = call(
+        &pic,
+        backend,
+        owner,
+        "borrow_from_vault",
+        encode_args((VaultArg {
+            vault_id,
+            amount: borrow_amount,
+        },))
+        .unwrap(),
+    );
+    let first: Result<SuccessWithFee, ProtocolError> = result(first_reply, "borrow_from_vault");
+    assert!(
+        first.is_err(),
+        "fixture returns typed TooOld before committing"
+    );
+    let balance_before_recovery = balance(&pic, icusd_ledger, owner);
+    let blocks_before_recovery = ledger_blocks(&pic, icusd_ledger);
+    assert_eq!(balance_before_recovery, 0);
+    assert_eq!(blocks_before_recovery, 0);
+    let held = pending_mints(&pic, backend, owner);
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].phase, BorrowMintPhase::ReceiptRecoveryRequired);
+
+    let stranger_reply = call(
+        &pic,
+        backend,
+        stranger,
+        "advance_pending_borrow_mint_recovery",
+        encode_args((vault_id,)).unwrap(),
+    );
+    let stranger_result: Result<(), ProtocolError> =
+        result(stranger_reply, "stranger recovery advance");
+    assert!(
+        stranger_result.is_err(),
+        "stranger cannot clear owner's journal"
+    );
+    assert_eq!(pending_mints(&pic, backend, owner).len(), 1);
+    assert_eq!(vault_debt(&pic, backend, owner, vault_id), 0);
+
+    let developer_reply = call(
+        &pic,
+        backend,
+        developer,
+        "advance_pending_borrow_mint_recovery",
+        encode_args((vault_id,)).unwrap(),
+    );
+    let developer_result: Result<(), ProtocolError> =
+        result(developer_reply, "developer recovery advance");
+    developer_result.expect("developer may clear after complete empty history scan");
+    assert!(pending_mints(&pic, backend, owner).is_empty());
+    assert_eq!(vault_debt(&pic, backend, owner, vault_id), 0);
+    assert_eq!(balance(&pic, icusd_ledger, owner), balance_before_recovery);
+    assert_eq!(ledger_blocks(&pic, icusd_ledger), blocks_before_recovery);
+}

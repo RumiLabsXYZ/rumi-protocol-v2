@@ -154,6 +154,7 @@ struct LedgerState {
     /// typed TooOld reply on an exact retry without applying another mint.
     phantom_mint_dedup: BTreeMap<DedupKey, u64>,
     too_old_after_phantom_mint_remaining: u32,
+    too_old_before_mint_remaining: u32,
     /// Next N transfers return BadFee with the current fee value.
     bad_fee_failures_remaining: u32,
     /// Recent transfers keyed by their dedup tuple. Retained until reset_dedup().
@@ -396,6 +397,13 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             memo: args.memo.clone(),
             created_at_time,
         });
+
+        // Fixture mode for proving recovery when TooOld arrives before any
+        // mint commit. This is deliberately independent of the dedup map.
+        if is_mint && state.too_old_before_mint_remaining > 0 {
+            state.too_old_before_mint_remaining -= 1;
+            return Err(TransferError::TooOld);
+        }
 
         // Dedup check (only when created_at_time is provided, matching ICRC-1).
         if let Some(key) = dedup_key.as_ref() {
@@ -728,6 +736,13 @@ fn set_minter(minter: Option<Principal>) {
 #[update]
 fn set_too_old_after_phantom_mint(n: u32) {
     STATE.with(|s| s.borrow_mut().too_old_after_phantom_mint_remaining = n);
+}
+
+/// The next N configured minter calls return typed TooOld before changing
+/// balances, dedup state, or the ICRC-3 log.
+#[update]
+fn set_too_old_before_mint(n: u32) {
+    STATE.with(|s| s.borrow_mut().too_old_before_mint_remaining = n);
 }
 
 /// Next N transfers return BadFee { expected_fee = current fee } before
