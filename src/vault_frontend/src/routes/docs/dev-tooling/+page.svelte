@@ -272,8 +272,10 @@
 
   <div class="doc-card">
     <h3>set_global_icusd_mint_cap</h3>
-    <p class="doc-desc">Set the global cap on total icUSD that can be minted across all collateral types (e8s). Default: unlimited.</p>
-    <pre class="doc-code">icp canister call rumi_protocol_backend set_global_icusd_mint_cap '(100_000_000_000 : nat64)' --network ic</pre>
+    <p class="doc-desc">Limit new borrowing against total outstanding vault debt across collateral types. Amounts use e8s (100,000,000 = 1 icUSD). Per-collateral debt ceilings also apply. The default is unlimited; read the current cap in Protocol Parameters or with the query below.</p>
+    <pre class="doc-code">icp canister call rumi_protocol_backend get_global_icusd_mint_cap '()' -e mainnet-live --identity anonymous --query</pre>
+    <p class="doc-desc">Restore unlimited using the maximum nat64 value. A finite cap of 10,000,000 icUSD would instead use 1,000,000,000,000,000 e8s.</p>
+    <pre class="doc-code">icp canister call rumi_protocol_backend set_global_icusd_mint_cap '(18_446_744_073_709_551_615 : nat64)' -e mainnet-live --identity rumi_identity</pre>
   </div>
 
   <div class="doc-card">
