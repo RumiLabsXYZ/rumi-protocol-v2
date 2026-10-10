@@ -5654,15 +5654,17 @@ async fn borrow_from_vault_internal(
         arg,
         |tuple| async move { management::mint_icusd_with_borrow_tuple(&tuple).await },
         ic_cdk::api::time,
+        |ledger| async move { crate::icrc3_proof::icrc3_history_floor(ledger).await },
     )
     .await
 }
 
-async fn borrow_from_vault_internal_with<F, Fut, N>(
+async fn borrow_from_vault_internal_with<F, Fut, N, H, HFut>(
     caller: Principal,
     arg: VaultArg,
     dispatch: F,
     now: N,
+    history_floor: H,
 ) -> Result<SuccessWithFee, ProtocolError>
 where
     F: FnOnce(crate::state::BorrowMintTuple) -> Fut,
@@ -5670,6 +5672,8 @@ where
         Output = Result<u64, icrc_ledger_types::icrc1::transfer::TransferError>,
     >,
     N: Fn() -> u64 + Copy,
+    H: FnOnce(Principal) -> HFut,
+    HFut: std::future::Future<Output = Result<u64, String>>,
 {
     let amount: ICUSD = arg.amount.into();
 
@@ -5722,7 +5726,7 @@ where
     // Capture before price, accrual, fee and CR snapshots. No admission
     // decision may span this await and then be used with stale inputs.
     let history_ledger = read_state(|s| s.icusd_ledger_principal);
-    let history_floor = crate::icrc3_proof::icrc3_history_floor(history_ledger)
+    let history_floor = history_floor(history_ledger)
         .await
         .map_err(|error| ProtocolError::TemporarilyUnavailable(format!(
             "could not pin icUSD history before borrow admission: {error}"
@@ -6244,6 +6248,7 @@ mod borrow_mint_journal_tests {
                 Err(icrc_ledger_types::icrc1::transfer::TransferError::TemporarilyUnavailable)
             },
             || 10_000_000_000,
+            |_| async { Ok(0) },
         ));
         drop(first_guard);
         assert!(matches!(first, Err(ProtocolError::GenericError(_))));
@@ -6301,6 +6306,7 @@ mod borrow_mint_journal_tests {
                 Ok(committed.1)
             },
             || 20_000_000_000,
+            |_| async { Ok(0) },
         ));
         drop(retry_guard);
         assert!(matches!(second, Err(ProtocolError::GenericError(_))));
@@ -6326,6 +6332,7 @@ mod borrow_mint_journal_tests {
                 panic!("a confirmed-held mint must not be submitted to the ledger again")
             },
             || 30_000_000_000,
+            |_| async { Ok(0) },
         ));
         drop(retry_guard);
         assert_eq!(third.expect("confirmed mint applies debt").block_index, 77);
@@ -6623,17 +6630,34 @@ pub async fn reconcile_pending_borrow_mint_from_block(
 pub async fn advance_pending_borrow_mint_recovery(vault_id: u64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("borrow_vault_{vault_id}"))?;
-    let _vault_op_guard = VaultLiquidationGuard::new_for_borrow_retry(vault_id).map_err(|error| {
-        guard_principal.fail(); error
-    })?;
-    let journal = read_state(|s| s.pending_borrow_mints.get(&vault_id).cloned()).ok_or_else(|| {
-        guard_principal.fail(); ProtocolError::GenericError(format!("Vault #{vault_id} has no pending borrow mint"))
-    })?;
+    let _vault_op_guard = match VaultLiquidationGuard::new_for_borrow_retry(vault_id) {
+        Ok(guard) => guard,
+        Err(error) => {
+            guard_principal.fail();
+            return Err(error);
+        }
+    };
+    let journal = match read_state(|s| s.pending_borrow_mints.get(&vault_id).cloned()) {
+        Some(journal) => journal,
+        None => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "Vault #{vault_id} has no pending borrow mint"
+            )));
+        }
+    };
     let developer = read_state(|s| s.developer_principal);
-    let borrower = borrow_mint_recovery_owner(caller, &journal, developer).map_err(|error| {
-        guard_principal.fail(); error
-    })?;
-    validate_borrow_mint_recovery_journal(&journal).map_err(|error| { guard_principal.fail(); error })?;
+    let borrower = match borrow_mint_recovery_owner(caller, &journal, developer) {
+        Ok(borrower) => borrower,
+        Err(error) => {
+            guard_principal.fail();
+            return Err(error);
+        }
+    };
+    if let Err(error) = validate_borrow_mint_recovery_journal(&journal) {
+        guard_principal.fail();
+        return Err(error);
+    }
     if journal.phase != crate::state::BorrowMintPhase::ReceiptRecoveryRequired {
         guard_principal.fail();
         return Err(ProtocolError::GenericError("borrow journal is not awaiting typed TooOld recovery".into()));
@@ -6647,9 +6671,15 @@ pub async fn advance_pending_borrow_mint_recovery(vault_id: u64) -> Result<(), P
         return Err(ProtocolError::GenericError("absence scan is authorized only by a typed ledger TooOld outcome".into()));
     }
     let journal = if journal.absence_scan.is_none() {
-        let tip = crate::icrc3_proof::icrc3_history_floor(journal.tuple.ledger).await
-            .map_err(|error| { guard_principal.fail(); ProtocolError::TemporarilyUnavailable(
-                format!("could not capture fixed post-TooOld tip: {error}")) })?;
+        let tip = match crate::icrc3_proof::icrc3_history_floor(journal.tuple.ledger).await {
+            Ok(tip) => tip,
+            Err(error) => {
+                guard_principal.fail();
+                return Err(ProtocolError::TemporarilyUnavailable(format!(
+                    "could not capture fixed post-TooOld tip: {error}"
+                )));
+            }
+        };
         if borrow_mint_recovery_owner(caller, &journal, read_state(|s| s.developer_principal)).is_err() {
             guard_principal.fail(); return Err(ProtocolError::CallerNotOwner);
         }
@@ -6691,24 +6721,39 @@ pub async fn advance_pending_borrow_mint_recovery(vault_id: u64) -> Result<(), P
             start: candid::Nat::from(start), length: candid::Nat::from(end - start),
         }];
         let (response,): (icrc_ledger_types::icrc3::blocks::GetBlocksResult,) =
-            ic_cdk::call(journal.tuple.ledger, "icrc3_get_blocks", (request,)).await
-                .map_err(|(code, message)| { guard_principal.fail(); ProtocolError::TemporarilyUnavailable(
-                    format!("icUSD history page [{start}, {end}) failed ({code:?}): {message}")) })?;
+            match ic_cdk::call(journal.tuple.ledger, "icrc3_get_blocks", (request,)).await {
+                Ok(response) => response,
+                Err((code, message)) => {
+                    guard_principal.fail();
+                    return Err(ProtocolError::TemporarilyUnavailable(format!(
+                        "icUSD history page [{start}, {end}) failed ({code:?}): {message}"
+                    )));
+                }
+            };
         // Developer authorization may have been revoked during the ledger await.
         if borrow_mint_recovery_owner(caller, &journal, read_state(|s| s.developer_principal)).is_err() {
             guard_principal.fail(); return Err(ProtocolError::CallerNotOwner);
         }
-        let found = crate::icrc3_proof::validate_borrow_mint_scan_page(
+        let found = match crate::icrc3_proof::validate_borrow_mint_scan_page(
             start, end, tip, &response, &journal.tuple,
-        ).map_err(|error| { guard_principal.fail(); ProtocolError::TemporarilyUnavailable(
-            format!("icUSD history page is not complete proof: {error}")) })?;
+        ) {
+            Ok(found) => found,
+            Err(error) => {
+                guard_principal.fail();
+                return Err(ProtocolError::TemporarilyUnavailable(format!(
+                    "icUSD history page is not complete proof: {error}"
+                )));
+            }
+        };
         found
     };
     if scan.next_block_index < tip {
         let start = scan.next_block_index;
         let end = tip.min(start.saturating_add(64));
-        crate::state::record_borrow_mint_scan_page(&mut scan, start, end, found)
-            .map_err(|error| { guard_principal.fail(); ProtocolError::TemporarilyUnavailable(error) })?;
+        if let Err(error) = crate::state::record_borrow_mint_scan_page(&mut scan, start, end, found) {
+            guard_principal.fail();
+            return Err(ProtocolError::TemporarilyUnavailable(error));
+        }
         let advanced = mutate_state(|s| {
             let Some(current) = s.pending_borrow_mints.get_mut(&vault_id) else { return false; };
             if !crate::state::borrow_mint_scan_cas_matches(current, &journal) { return false; }
