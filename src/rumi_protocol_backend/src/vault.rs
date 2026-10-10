@@ -6141,6 +6141,39 @@ async fn borrow_from_vault_internal_with_operation(
     .await
 }
 
+/// Recover the operation binding for a borrow mint that belongs to a compound
+/// open-and-borrow. The caller cannot supply this ID: it is derived only from
+/// the owner's durable collateral journal and must match the exact vault,
+/// collateral type, and gross borrow amount pinned in the borrow journal.
+fn compound_operation_id_for_borrow_recovery(
+    borrow: &crate::state::BorrowMintJournal,
+) -> Option<u64> {
+    read_state(|state| {
+        let collateral = state.vault_collateral_pull_journals.get(&borrow.owner)?;
+        if collateral.owner != borrow.owner
+            || collateral.vault_id != borrow.vault_id
+            || !matches!(
+                collateral.phase,
+                crate::state::VaultCollateralPullPhase::VaultCredited { .. }
+            )
+        {
+            return None;
+        }
+        match collateral.request {
+            crate::state::VaultCollateralPullRequest::OpenVaultAndBorrow {
+                collateral_type,
+                borrow_amount_e8s,
+                ..
+            } if collateral_type == borrow.collateral_type
+                && borrow_amount_e8s == borrow.borrowed_amount_e8s =>
+            {
+                Some(collateral.operation_id)
+            }
+            _ => None,
+        }
+    })
+}
+
 async fn borrow_from_vault_internal_with<F, Fut, N, H, HFut>(
     caller: Principal,
     arg: VaultArg,
@@ -6820,6 +6853,140 @@ mod borrow_mint_journal_tests {
     }
 
     #[test]
+    fn compound_receipt_recovery_uses_only_the_matching_collateral_operation() {
+        let owner = Principal::from_slice(&[0x51]);
+        let collateral_type = Principal::from_slice(&[0x52]);
+        let protocol = Principal::from_slice(&[0x53]);
+        let request = crate::state::VaultCollateralPullRequest::OpenVaultAndBorrow {
+            collateral_type,
+            amount_e8s: 1_000,
+            borrow_amount_e8s: 500,
+        };
+        let mut state = State::default();
+        let mut config = crate::state::xrp_collateral_config(
+            Ratio::new(rust_decimal_macros::dec!(0.005)),
+            Ratio::new(rust_decimal_macros::dec!(0.01)),
+            Ratio::new(rust_decimal_macros::dec!(1.0)),
+        );
+        config.ledger_canister_id = collateral_type;
+        config.custody_kind = None;
+        config.min_collateral_deposit = 0;
+        state.collateral_configs.insert(collateral_type, config);
+        let pull = state
+            .prepare_vault_collateral_pull(owner, 1, request, collateral_type, protocol, 10, 88)
+            .unwrap();
+        let submitted = state.mark_vault_collateral_pull_dispatched(&owner, &pull).unwrap();
+        state.record_vault_pull_confirmed(&owner, &submitted, 33).unwrap();
+        state.vault_id_to_vaults.insert(
+            pull.vault_id,
+            Vault {
+                owner,
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_amount: 1_000,
+                vault_id: pull.vault_id,
+                collateral_type,
+                last_accrual_time: 88,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+        state.mark_vault_operation_credited(&owner, 1, 33).unwrap();
+        let borrow = BorrowMintJournal {
+            vault_id: pull.vault_id,
+            owner,
+            collateral_type,
+            borrowed_amount_e8s: 500,
+            fee_amount_e8s: 0,
+            tuple: BorrowMintTuple {
+                ledger: Principal::from_slice(&[0x54]),
+                destination: owner,
+                amount_e8s: 500,
+                memo: [0x55; 16],
+                created_at_time_ns: 99,
+                op_nonce: 99,
+            },
+            phase: BorrowMintPhase::MintConfirmedHeld { block_index: 77 },
+            history_floor: Some(20),
+            absence_scan: None,
+            dispatch_attempt_count: Some(1),
+            typed_too_old: false,
+        };
+        state.pending_borrow_mints.insert(pull.vault_id, borrow.clone());
+        replace_state(state);
+
+        // The former unbound recovery path must stay blocked and leave the
+        // confirmed mint held until the matching operation ID is supplied.
+        let unbound = futures::executor::block_on(borrow_from_vault_internal_with(
+            owner,
+            VaultArg {
+                vault_id: pull.vault_id,
+                amount: 500,
+            },
+            |_| async { panic!("confirmed mint must not dispatch") },
+            || 100,
+            |_| async { panic!("held mint needs no history read") },
+            None,
+        ));
+        assert!(matches!(
+            unbound,
+            Err(ProtocolError::TemporarilyUnavailable(_))
+        ));
+        crate::state::read_state(|s| {
+            assert_eq!(
+                s.vault_id_to_vaults[&pull.vault_id].borrowed_icusd_amount,
+                ICUSD::new(0)
+            );
+            assert_eq!(s.pending_borrow_mints.get(&pull.vault_id), Some(&borrow));
+        });
+
+        let operation_id = compound_operation_id_for_borrow_recovery(&borrow);
+        assert_eq!(operation_id, Some(1));
+        let mut wrong_amount = borrow.clone();
+        wrong_amount.borrowed_amount_e8s += 1;
+        assert_eq!(
+            compound_operation_id_for_borrow_recovery(&wrong_amount),
+            None
+        );
+        let mut wrong_collateral = borrow.clone();
+        wrong_collateral.collateral_type = Principal::from_slice(&[0x56]);
+        assert_eq!(
+            compound_operation_id_for_borrow_recovery(&wrong_collateral),
+            None
+        );
+
+        let recovered = futures::executor::block_on(borrow_from_vault_internal_with(
+            owner,
+            VaultArg {
+                vault_id: pull.vault_id,
+                amount: 500,
+            },
+            |_| async { panic!("confirmed mint must not dispatch") },
+            || 100,
+            |_| async { panic!("held mint needs no history read") },
+            operation_id,
+        ));
+        assert!(recovered.is_ok());
+        crate::state::read_state(|s| {
+            assert_eq!(
+                s.vault_id_to_vaults[&pull.vault_id].borrowed_icusd_amount,
+                ICUSD::new(500)
+            );
+            assert!(!s.pending_borrow_mints.contains_key(&pull.vault_id));
+            assert!(matches!(
+                s.vault_collateral_pull_journals[&owner].phase,
+                crate::state::VaultCollateralPullPhase::Completed {
+                    result: crate::state::VaultOperationResult::OpenVaultAndBorrow {
+                        vault_id: 1,
+                        block_index: 33,
+                        borrowed: true,
+                        failure: None,
+                    }
+                }
+            ));
+        });
+    }
+
+    #[test]
     fn receipt_recovery_authorizes_only_owner_or_configured_developer_and_keeps_owner_attribution()
     {
         let owner = Principal::from_slice(&[0x61]);
@@ -7370,12 +7537,14 @@ pub async fn reconcile_pending_borrow_mint_from_block(
 
     // The held phase bypasses the ledger closure and runs the same checked,
     // once-only debt/event commit used by a direct successful ledger reply.
-    match borrow_from_vault_internal(
+    let compound_operation_id = compound_operation_id_for_borrow_recovery(&journal);
+    match borrow_from_vault_internal_with_operation(
         borrower,
         VaultArg {
             vault_id,
             amount: journal.borrowed_amount_e8s,
         },
+        compound_operation_id,
     )
     .await
     {
@@ -7636,7 +7805,17 @@ pub async fn advance_pending_borrow_mint_recovery(vault_id: u64) -> Result<(), P
             true
         });
         if !committed { guard_principal.fail(); return Err(ProtocolError::TemporarilyUnavailable("borrow journal changed before receipt CAS".into())); }
-        match borrow_from_vault_internal(borrower, VaultArg { vault_id, amount: journal.borrowed_amount_e8s }).await {
+        let compound_operation_id = compound_operation_id_for_borrow_recovery(&journal);
+        match borrow_from_vault_internal_with_operation(
+            borrower,
+            VaultArg {
+                vault_id,
+                amount: journal.borrowed_amount_e8s,
+            },
+            compound_operation_id,
+        )
+        .await
+        {
             Ok(_) => { log_borrow_mint_receipt_recovery("scan_receipt_debt_committed", caller, &journal, block_index); guard_principal.complete(); Ok(()) }
             Err(error) => { guard_principal.fail(); Err(error) }
         }
