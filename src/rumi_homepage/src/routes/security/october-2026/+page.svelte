@@ -17,7 +17,7 @@
     {
       pr: '#450',
       title: 'Points release and historical reconciliation',
-      summary: 'Merged and deployed to the Points canister and frontend. The running Points module reports SHA-256 dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277. The original 401 ledger rows are preserved; 16 tagged rows add an approximate historical uplift of 2,151.74119482 points, bringing the ledger to 417 rows. This does not recreate discarded historical snapshot selection. Epoch 18 remains held (A present, B pending) with the driver off. Flat 4× is scheduled for epoch 19 and is not active yet.',
+      summary: 'Merged and deployed to the Points canister and frontend. The running Points module reports SHA-256 dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277. The original 401 ledger rows are preserved; 16 tagged rows add an approximate historical uplift of 2,151.74119482 points, bringing the ledger to 417 rows. This does not recreate discarded historical snapshot selection. A fresh October 10 read shows epoch 18 still open with both A and B captures complete and the driver off. The earlier B-pending snapshot is superseded; the public read does not show why B completed. No epoch close or reward release is shown. Flat 4× is scheduled for epoch 19 and is not active yet.',
       state: 'Installed · epoch 18 held',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/450'
@@ -129,7 +129,7 @@
     {
       system: 'Points',
       status: 'Epoch 18 held · epoch 19 scheduled',
-      detail: 'The October 8 release evidence confirms the deployed module and completed historical adjustments. The epoch 18 hold and disabled driver remain in place; future flat 4× accrual is scheduled for epoch 19, not active.'
+      detail: 'The October 8 release evidence confirms the deployed module and completed historical adjustments. An October 10 read shows both epoch 18 captures complete, the epoch still open, the driver disabled, and the ledger at 417 rows. It does not identify why B completed or show reward release. Future flat 4× accrual is scheduled for epoch 19, not active.'
     },
     {
       system: 'Vault borrowing',
