@@ -4,10 +4,9 @@
 // This module exposes them as a proper ICRC-1/ICRC-2 compliant token.
 //
 // Token: 3USD | Decimals: 8 | Fee: 0
-// Subaccounts: balances are tracked by owner principal only — subaccounts are
-// accepted on all fields (from, to, spender) but effectively ignored for
-// balance lookups. This allows DEX canisters that use per-pool subaccounts
-// (e.g. the Rumi AMM) to hold and transfer 3USD without issues.
+// Subaccounts: balances and allowances are tracked by owner principal only.
+// Only the default account (None or Some([0; 32])) is supported; non-default
+// subaccounts fail closed so they cannot alias a principal's default balance.
 
 use crate::state::{mutate_state, read_state};
 use crate::types::{Icrc3Transaction, LpAllowance};
@@ -35,6 +34,9 @@ use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromErro
 
 pub const TRANSACTION_WINDOW_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 pub const PERMITTED_DRIFT_NS: u64 = 60 * 1_000_000_000;
+const UNSUPPORTED_SUBACCOUNT_ERROR_CODE: u64 = 4;
+const UNSUPPORTED_SUBACCOUNT_MESSAGE: &str =
+    "non-default subaccounts are unsupported; use the default account";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DedupReject {
@@ -105,6 +107,10 @@ fn hash_part(h: &mut sha2::Sha256, part: Option<&[u8]>) {
         }
         None => h.update([0u8]),
     }
+}
+
+fn is_non_default_subaccount(subaccount: Option<&[u8; 32]>) -> bool {
+    subaccount.is_some_and(|subaccount| subaccount != &[0; 32])
 }
 
 /// Hash the full (caller, args) identity of an icrc1_transfer for dedup.
@@ -223,6 +229,9 @@ pub fn icrc1_minting_account() -> Option<Account> {
 }
 
 pub fn icrc1_balance_of(account: Account) -> Nat {
+    if is_non_default_subaccount(account.subaccount.as_ref()) {
+        return Nat::from(0u64);
+    }
     let p = account.owner;
     Nat::from(crate::storage::lp_balance_get(&p))
 }
@@ -240,6 +249,16 @@ pub fn icrc1_metadata() -> Vec<(String, MetadataValue)> {
 // ─── ICRC-1 Transfer ───
 
 pub fn icrc1_transfer(caller: Principal, args: TransferArg) -> Result<Nat, TransferError> {
+    // Reject unsupported accounts before deduplication or any state mutation.
+    if is_non_default_subaccount(args.from_subaccount.as_ref())
+        || is_non_default_subaccount(args.to.subaccount.as_ref())
+    {
+        return Err(TransferError::GenericError {
+            error_code: Nat::from(UNSUPPORTED_SUBACCOUNT_ERROR_CODE),
+            message: UNSUPPORTED_SUBACCOUNT_MESSAGE.to_string(),
+        });
+    }
+
     // Validate fee
     if let Some(ref fee) = args.fee {
         if *fee != Nat::from(0u64) {
@@ -269,11 +288,9 @@ pub fn icrc1_transfer(caller: Principal, args: TransferArg) -> Result<Nat, Trans
         }
     }
 
-    // Both from_subaccount and to accept any subaccount — balances are keyed
-    // by owner principal only, so subaccounts are effectively ignored for
-    // *balance* lookups. The subaccounts ARE preserved into the ICRC-3 block
-    // log so external consumers (e.g. the protocol_backend's SP writedown
-    // proof verifier) see the actual destination Account the caller chose.
+    // The all-zero subaccount is the default identity for balance accounting.
+    // Preserve the exact request tuple in ICRC-3 and the historical dedup key
+    // so prior Some([0; 32]) entries remain effective after upgrades.
     let to_principal = args.to.owner;
     let from_subaccount = args.from_subaccount.map(|s| s.to_vec());
     let to_subaccount = args.to.subaccount.map(|s| s.to_vec());
@@ -340,6 +357,16 @@ pub fn icrc1_transfer(caller: Principal, args: TransferArg) -> Result<Nat, Trans
 // ─── ICRC-2 Approve ───
 
 pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, ApproveError> {
+    // Reject unsupported accounts before deduplication or any state mutation.
+    if is_non_default_subaccount(args.from_subaccount.as_ref())
+        || is_non_default_subaccount(args.spender.subaccount.as_ref())
+    {
+        return Err(ApproveError::GenericError {
+            error_code: Nat::from(UNSUPPORTED_SUBACCOUNT_ERROR_CODE),
+            message: UNSUPPORTED_SUBACCOUNT_MESSAGE.to_string(),
+        });
+    }
+
     // Validate fee
     if let Some(ref fee) = args.fee {
         if *fee != Nat::from(0u64) {
@@ -370,9 +397,7 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
         }
     }
 
-    // Subaccounts accepted but ignored for balance/allowance keying — the
-    // 3pool tracks balances per principal only. Block log preserves the
-    // subaccounts the caller chose for ICRC-3 consumers.
+    // Keep the exact ICRC-3 tuple while using the principal's default account.
     let spender_principal = args.spender.owner;
     let from_subaccount = args.from_subaccount.map(|s| s.to_vec());
     let spender_subaccount = args.spender.subaccount.map(|s| s.to_vec());
@@ -439,6 +464,14 @@ pub fn icrc2_approve(caller: Principal, args: ApproveArgs) -> Result<Nat, Approv
 // ─── ICRC-2 Allowance Query ───
 
 pub fn icrc2_allowance(args: AllowanceArgs) -> Allowance {
+    if is_non_default_subaccount(args.account.subaccount.as_ref())
+        || is_non_default_subaccount(args.spender.subaccount.as_ref())
+    {
+        return Allowance {
+            allowance: Nat::from(0u64),
+            expires_at: None,
+        };
+    }
     let owner = args.account.owner;
     let spender = args.spender.owner;
 
@@ -463,6 +496,17 @@ pub fn icrc2_transfer_from(
     caller: Principal,
     args: TransferFromArgs,
 ) -> Result<Nat, TransferFromError> {
+    // Reject unsupported accounts before deduplication or any state mutation.
+    if is_non_default_subaccount(args.spender_subaccount.as_ref())
+        || is_non_default_subaccount(args.from.subaccount.as_ref())
+        || is_non_default_subaccount(args.to.subaccount.as_ref())
+    {
+        return Err(TransferFromError::GenericError {
+            error_code: Nat::from(UNSUPPORTED_SUBACCOUNT_ERROR_CODE),
+            message: UNSUPPORTED_SUBACCOUNT_MESSAGE.to_string(),
+        });
+    }
+
     // Validate fee
     if let Some(ref fee) = args.fee {
         if *fee != Nat::from(0u64) {
@@ -492,8 +536,7 @@ pub fn icrc2_transfer_from(
         }
     }
 
-    // Subaccounts accepted but ignored for balance keying — block log
-    // preserves them for ICRC-3 consumers (see icrc1_transfer comment).
+    // Keep the exact ICRC-3 tuple while using the principal's default account.
     let from_principal = args.from.owner;
     let to_principal = args.to.owner;
     let from_subaccount = args.from.subaccount.map(|s| s.to_vec());
@@ -737,6 +780,271 @@ mod icrc_001_dedup_tests {
         assert_ne!(
             hash_icrc2_approve(&caller_a, &args),
             hash_icrc2_approve(&caller_a, &sample_approve_args(1, Some(NOW + 1))),
+        );
+    }
+}
+
+#[cfg(test)]
+mod default_account_guard_tests {
+    use super::*;
+
+    fn account(owner: Principal, subaccount: Option<[u8; 32]>) -> Account {
+        Account { owner, subaccount }
+    }
+
+    #[test]
+    fn non_default_accounts_fail_closed_without_state_or_log_mutation() {
+        let owner = Principal::self_authenticating(&[31, 3, 1]);
+        let spender = Principal::self_authenticating(&[31, 3, 2]);
+        let receiver = Principal::self_authenticating(&[31, 3, 3]);
+        let non_default = Some([7; 32]);
+        crate::storage::lp_balance_set(owner, 500);
+        crate::storage::allowance_set(
+            owner,
+            spender,
+            LpAllowance {
+                amount: 300,
+                expires_at: None,
+            },
+        );
+
+        assert_eq!(icrc1_balance_of(account(owner, None)), Nat::from(500u64));
+        assert_eq!(
+            icrc1_balance_of(account(owner, non_default)),
+            Nat::from(0u64)
+        );
+        assert_eq!(
+            icrc2_allowance(AllowanceArgs {
+                account: account(owner, non_default),
+                spender: account(spender, None),
+            })
+            .allowance,
+            Nat::from(0u64)
+        );
+        assert_eq!(
+            icrc2_allowance(AllowanceArgs {
+                account: account(owner, None),
+                spender: account(spender, non_default),
+            })
+            .allowance,
+            Nat::from(0u64)
+        );
+
+        let before_owner = crate::storage::lp_balance_get(&owner);
+        let before_receiver = crate::storage::lp_balance_get(&receiver);
+        let before_allowance = crate::storage::allowance_get(&owner, &spender);
+        let before_blocks = crate::storage::blocks::len();
+        const TEST_NOW: u64 = 1_700_000_000_000_000_000;
+
+        let transfer_error = TransferError::GenericError {
+            error_code: Nat::from(UNSUPPORTED_SUBACCOUNT_ERROR_CODE),
+            message: UNSUPPORTED_SUBACCOUNT_MESSAGE.to_string(),
+        };
+        let mut transfer = TransferArg {
+            from_subaccount: non_default,
+            to: account(receiver, None),
+            amount: Nat::from(10u64),
+            fee: None,
+            memo: None,
+            created_at_time: Some(TEST_NOW),
+        };
+        let rejected_transfer_hash = hash_icrc1_transfer(&owner, &transfer);
+        assert_eq!(
+            icrc1_transfer(owner, transfer.clone()),
+            Err(transfer_error.clone())
+        );
+        transfer.from_subaccount = None;
+        transfer.to.subaccount = non_default;
+        let rejected_destination_hash = hash_icrc1_transfer(&owner, &transfer);
+        assert_eq!(icrc1_transfer(owner, transfer.clone()), Err(transfer_error));
+
+        let approve_error = ApproveError::GenericError {
+            error_code: Nat::from(UNSUPPORTED_SUBACCOUNT_ERROR_CODE),
+            message: UNSUPPORTED_SUBACCOUNT_MESSAGE.to_string(),
+        };
+        let mut approve = ApproveArgs {
+            from_subaccount: non_default,
+            spender: account(spender, None),
+            amount: Nat::from(900u64),
+            expected_allowance: None,
+            expires_at: None,
+            fee: None,
+            memo: None,
+            created_at_time: Some(TEST_NOW),
+        };
+        let rejected_approve_hash = hash_icrc2_approve(&owner, &approve);
+        assert_eq!(
+            icrc2_approve(owner, approve.clone()),
+            Err(approve_error.clone())
+        );
+        approve.from_subaccount = None;
+        approve.spender.subaccount = non_default;
+        let rejected_approve_spender_hash = hash_icrc2_approve(&owner, &approve);
+        assert_eq!(icrc2_approve(owner, approve), Err(approve_error));
+
+        let transfer_from_error = TransferFromError::GenericError {
+            error_code: Nat::from(UNSUPPORTED_SUBACCOUNT_ERROR_CODE),
+            message: UNSUPPORTED_SUBACCOUNT_MESSAGE.to_string(),
+        };
+        // Same-owner transferFrom normally skips the allowance check. A
+        // non-default from account must still fail before reaching that path.
+        let same_owner_args = TransferFromArgs {
+            spender_subaccount: None,
+            from: account(owner, non_default),
+            to: account(receiver, None),
+            amount: Nat::from(10u64),
+            fee: None,
+            memo: None,
+            created_at_time: Some(TEST_NOW),
+        };
+        let rejected_same_owner_hash = hash_icrc2_transfer_from(&owner, &same_owner_args);
+        assert_eq!(
+            icrc2_transfer_from(owner, same_owner_args),
+            Err(transfer_from_error.clone())
+        );
+        let mut transfer_from = TransferFromArgs {
+            spender_subaccount: non_default,
+            from: account(owner, None),
+            to: account(receiver, None),
+            amount: Nat::from(10u64),
+            fee: None,
+            memo: None,
+            created_at_time: Some(TEST_NOW),
+        };
+        let rejected_transfer_from_spender_hash =
+            hash_icrc2_transfer_from(&spender, &transfer_from);
+        assert_eq!(
+            icrc2_transfer_from(spender, transfer_from.clone()),
+            Err(transfer_from_error.clone())
+        );
+        transfer_from.spender_subaccount = None;
+        transfer_from.to.subaccount = non_default;
+        let rejected_transfer_to_hash = hash_icrc2_transfer_from(&spender, &transfer_from);
+        assert_eq!(
+            icrc2_transfer_from(spender, transfer_from),
+            Err(transfer_from_error)
+        );
+
+        assert_eq!(crate::storage::lp_balance_get(&owner), before_owner);
+        assert_eq!(crate::storage::lp_balance_get(&receiver), before_receiver);
+        let after_allowance = crate::storage::allowance_get(&owner, &spender);
+        assert_eq!(
+            after_allowance.map(|a| (a.amount, a.expires_at)),
+            before_allowance.map(|a| (a.amount, a.expires_at))
+        );
+        assert_eq!(crate::storage::blocks::len(), before_blocks);
+        for hash in [
+            rejected_transfer_hash,
+            rejected_destination_hash,
+            rejected_approve_hash,
+            rejected_approve_spender_hash,
+            rejected_same_owner_hash,
+            rejected_transfer_from_spender_hash,
+            rejected_transfer_to_hash,
+        ] {
+            assert!(crate::storage::dedup::get(&hash).is_none());
+        }
+    }
+
+    #[test]
+    fn none_and_all_zero_subaccounts_share_default_identity() {
+        let owner = Principal::self_authenticating(&[32, 3, 1]);
+        let spender = Principal::self_authenticating(&[32, 3, 2]);
+        let receiver = Principal::self_authenticating(&[32, 3, 3]);
+        crate::storage::lp_balance_set(owner, 100);
+
+        assert_eq!(
+            icrc1_balance_of(account(owner, None)),
+            icrc1_balance_of(account(owner, Some([0; 32])))
+        );
+        crate::storage::allowance_set(
+            owner,
+            spender,
+            LpAllowance {
+                amount: 40,
+                expires_at: None,
+            },
+        );
+        assert_eq!(
+            icrc2_allowance(AllowanceArgs {
+                account: account(owner, None),
+                spender: account(spender, None),
+            })
+            .allowance,
+            Nat::from(40u64)
+        );
+        assert_eq!(
+            icrc2_allowance(AllowanceArgs {
+                account: account(owner, Some([0; 32])),
+                spender: account(spender, Some([0; 32])),
+            })
+            .allowance,
+            Nat::from(40u64)
+        );
+
+        assert!(!is_non_default_subaccount(None));
+        assert!(!is_non_default_subaccount(Some(&[0; 32])));
+        assert_eq!(crate::storage::lp_balance_get(&owner), 100);
+        assert_eq!(crate::storage::lp_balance_get(&receiver), 0);
+    }
+
+    #[test]
+    fn dedup_hashes_preserve_historical_none_and_explicit_zero_identities() {
+        let owner = Principal::self_authenticating(&[33, 3, 1]);
+        let spender = Principal::self_authenticating(&[33, 3, 2]);
+        let receiver = Principal::self_authenticating(&[33, 3, 3]);
+        let caller = Principal::self_authenticating(&[33, 3, 4]);
+
+        let transfer = TransferArg {
+            from_subaccount: None,
+            to: account(receiver, None),
+            amount: Nat::from(1u64),
+            fee: None,
+            memo: None,
+            created_at_time: Some(1),
+        };
+        let mut transfer_zero = transfer.clone();
+        transfer_zero.from_subaccount = Some([0; 32]);
+        transfer_zero.to.subaccount = Some([0; 32]);
+        assert_ne!(
+            hash_icrc1_transfer(&caller, &transfer),
+            hash_icrc1_transfer(&caller, &transfer_zero)
+        );
+
+        let approve = ApproveArgs {
+            from_subaccount: None,
+            spender: account(spender, None),
+            amount: Nat::from(1u64),
+            expected_allowance: None,
+            expires_at: None,
+            fee: None,
+            memo: None,
+            created_at_time: Some(1),
+        };
+        let mut approve_zero = approve.clone();
+        approve_zero.from_subaccount = Some([0; 32]);
+        approve_zero.spender.subaccount = Some([0; 32]);
+        assert_ne!(
+            hash_icrc2_approve(&caller, &approve),
+            hash_icrc2_approve(&caller, &approve_zero)
+        );
+
+        let transfer_from = TransferFromArgs {
+            spender_subaccount: None,
+            from: account(owner, None),
+            to: account(receiver, None),
+            amount: Nat::from(1u64),
+            fee: None,
+            memo: None,
+            created_at_time: Some(1),
+        };
+        let mut transfer_from_zero = transfer_from.clone();
+        transfer_from_zero.spender_subaccount = Some([0; 32]);
+        transfer_from_zero.from.subaccount = Some([0; 32]);
+        transfer_from_zero.to.subaccount = Some([0; 32]);
+        assert_ne!(
+            hash_icrc2_transfer_from(&caller, &transfer_from),
+            hash_icrc2_transfer_from(&caller, &transfer_from_zero)
         );
     }
 }
