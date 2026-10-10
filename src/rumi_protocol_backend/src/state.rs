@@ -1896,8 +1896,10 @@ pub struct BorrowMintTuple {
 pub enum BorrowMintPhase {
     SubmittedOrUnknown,
     MintConfirmedHeld { block_index: u64 },
-    /// The pinned tuple received TooOld, which cannot tell whether an earlier
-    /// dispatch committed. Only a positive exact ICRC-3 receipt may advance it.
+    /// The pinned tuple or its separate zero-value expiry probe received
+    /// typed TooOld, which cannot tell whether an earlier dispatch committed.
+    /// Only an exact positive ICRC-3 receipt may commit debt; complete bounded
+    /// history may establish absence only for rows with a durable floor.
     ReceiptRecoveryRequired,
 }
 

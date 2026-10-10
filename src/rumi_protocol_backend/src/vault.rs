@@ -6233,6 +6233,12 @@ mod borrow_mint_journal_tests {
             borrow_mint_recovery_owner(developer, &journal, stranger),
             Err(ProtocolError::CallerNotOwner)
         ));
+        // Re-reading a changed developer principal after an await denies the
+        // formerly configured developer before any journal commit.
+        assert!(matches!(
+            borrow_mint_recovery_owner(developer, &journal, Principal::from_slice(&[0x67])),
+            Err(ProtocolError::CallerNotOwner)
+        ));
         assert!(validate_borrow_mint_recovery_journal(&journal).is_ok());
         let mut wrong_recipient = journal.clone();
         wrong_recipient.tuple.destination = developer;
@@ -6263,11 +6269,10 @@ mod borrow_mint_journal_tests {
             78,
         )
         .is_err());
-        assert!(borrow_mint_receipt_recovery_action(
-            &BorrowMintPhase::SubmittedOrUnknown,
-            77,
-        )
-        .is_err());
+        assert!(matches!(
+            borrow_mint_receipt_recovery_action(&BorrowMintPhase::SubmittedOrUnknown, 77),
+            Ok(BorrowMintReceiptRecoveryAction::VerifyCandidate)
+        ));
     }
 
     #[test]
@@ -6573,24 +6578,24 @@ fn borrow_mint_receipt_recovery_action(
         {
             Ok(BorrowMintReceiptRecoveryAction::ResumeHeldCommit)
         }
+        crate::state::BorrowMintPhase::SubmittedOrUnknown => {
+            Ok(BorrowMintReceiptRecoveryAction::VerifyCandidate)
+        }
         crate::state::BorrowMintPhase::MintConfirmedHeld { .. } => {
             Err(ProtocolError::GenericError(
                 "candidate block does not match the already confirmed borrow mint block".into(),
             ))
         }
-        _ => Err(ProtocolError::GenericError(
-            "borrow journal is not awaiting TooOld receipt recovery".into(),
-        )),
     }
 }
 
-/// Reconcile a borrow journal after its exact ICRC-1 retry returned TooOld.
-/// For `ReceiptRecoveryRequired`, the caller-supplied block is only a candidate
-/// until an exact ICRC-3 read validates the persisted mint tuple. For
-/// `MintConfirmedHeld`, only the stored block index resumes the once-only debt
-/// commit. Archived responses remain held because their chain membership is
-/// not established by the direct-block verifier. This path never dispatches a
-/// mint.
+/// Reconcile a borrow journal with an exact positive ICRC-3 receipt. For
+/// `SubmittedOrUnknown` or `ReceiptRecoveryRequired`, the caller-supplied block
+/// is only a candidate until an exact ICRC-3 read validates the persisted mint
+/// tuple. For `MintConfirmedHeld`, only the stored block index resumes the
+/// once-only debt commit. Archived responses remain held because their chain
+/// membership is not established by the direct-block verifier. This path
+/// never dispatches a mint.
 pub async fn reconcile_pending_borrow_mint_from_block(
     vault_id: u64,
     candidate_block_index: u64,
@@ -6690,7 +6695,11 @@ pub async fn reconcile_pending_borrow_mint_from_block(
                 return false;
             };
             if current != &journal
-                || current.phase != crate::state::BorrowMintPhase::ReceiptRecoveryRequired
+                || !matches!(
+                    &current.phase,
+                    crate::state::BorrowMintPhase::SubmittedOrUnknown
+                        | crate::state::BorrowMintPhase::ReceiptRecoveryRequired
+                )
             {
                 return false;
             }
@@ -6765,8 +6774,9 @@ pub async fn reconcile_pending_borrow_mint_from_block(
     }
 }
 
-/// Advance one bounded page of a complete post-TooOld history scan. A new-row
-/// floor and a fixed tip captured after typed TooOld are both mandatory.
+/// Establish expiry from a domain-separated zero-value probe when needed, then
+/// advance one bounded page of a complete history scan. A new-row floor and a
+/// fixed tip captured after a typed TooOld are both mandatory.
 pub async fn advance_pending_borrow_mint_recovery(vault_id: u64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("borrow_vault_{vault_id}"))?;
@@ -6777,7 +6787,7 @@ pub async fn advance_pending_borrow_mint_recovery(vault_id: u64) -> Result<(), P
             return Err(error);
         }
     };
-    let journal = match read_state(|s| s.pending_borrow_mints.get(&vault_id).cloned()) {
+    let mut journal = match read_state(|s| s.pending_borrow_mints.get(&vault_id).cloned()) {
         Some(journal) => journal,
         None => {
             guard_principal.fail();
@@ -6798,17 +6808,90 @@ pub async fn advance_pending_borrow_mint_recovery(vault_id: u64) -> Result<(), P
         guard_principal.fail();
         return Err(error);
     }
-    if journal.phase != crate::state::BorrowMintPhase::ReceiptRecoveryRequired {
-        guard_principal.fail();
-        return Err(ProtocolError::GenericError("borrow journal is not awaiting typed TooOld recovery".into()));
-    }
     let Some(floor) = journal.history_floor else {
         guard_principal.fail();
         return Err(ProtocolError::GenericError("legacy borrow journal has no durable history floor; positive receipt recovery only".into()));
     };
-    if !journal.typed_too_old {
+
+    // A developer or the journal owner may independently establish the
+    // expiry fence for an unresolved first dispatch. The probe changes both
+    // the operation memo and recipient, so its zero-value history entry can
+    // never look like a plausible receipt for the owner's positive mint.
+    if journal.phase == crate::state::BorrowMintPhase::SubmittedOrUnknown {
+        if journal.typed_too_old || journal.absence_scan.is_some() {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "borrow journal has inconsistent pre-expiry probe state; recovery remains held".into(),
+            ));
+        }
+        let Some(sink) = borrow_mint_expiry_probe_sink(&journal) else {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "could not derive a borrow expiry probe sink distinct from the journal owner".into(),
+            ));
+        };
+        if let Err(error) = management::probe_borrow_mint_expiry(&journal.tuple, vault_id, sink).await {
+            guard_principal.fail();
+            return Err(ProtocolError::TemporarilyUnavailable(format!(
+                "borrow expiry probe was inconclusive; journal remains held: {error}"
+            )));
+        }
+        // Only a typed inner TooOld reaches this point. Recheck revocable
+        // developer authority after the probe await before reading the tip.
+        if borrow_mint_recovery_owner(caller, &journal, read_state(|s| s.developer_principal)).is_err() {
+            guard_principal.fail();
+            return Err(ProtocolError::CallerNotOwner);
+        }
+        let tip = match crate::icrc3_proof::icrc3_history_floor(journal.tuple.ledger).await {
+            Ok(tip) => tip,
+            Err(error) => {
+                guard_principal.fail();
+                return Err(ProtocolError::TemporarilyUnavailable(format!(
+                    "typed TooOld was observed but the post-expiry ledger tip could not be captured: {error}"
+                )));
+            }
+        };
+        if borrow_mint_recovery_owner(caller, &journal, read_state(|s| s.developer_principal)).is_err() {
+            guard_principal.fail();
+            return Err(ProtocolError::CallerNotOwner);
+        }
+        if tip < floor {
+            guard_principal.fail();
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "post-expiry ledger tip precedes the durable history floor".into(),
+            ));
+        }
+        let mut armed = journal.clone();
+        armed.phase = crate::state::BorrowMintPhase::ReceiptRecoveryRequired;
+        armed.typed_too_old = true;
+        armed.absence_scan = Some(crate::state::BorrowMintAbsenceScan {
+            next_block_index: floor,
+            fixed_tip: Some(tip),
+            candidate_block_index: None,
+        });
+        let recorded = mutate_state(|s| {
+            if s.pending_borrow_mints.get(&vault_id) != Some(&journal) {
+                return false;
+            }
+            s.pending_borrow_mints.insert(vault_id, armed.clone());
+            true
+        });
+        if !recorded {
+            guard_principal.fail();
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "borrow journal changed while recording typed expiry and fixed tip".into(),
+            ));
+        }
+        journal = armed;
+    }
+
+    if journal.phase != crate::state::BorrowMintPhase::ReceiptRecoveryRequired
+        || !journal.typed_too_old
+    {
         guard_principal.fail();
-        return Err(ProtocolError::GenericError("absence scan is authorized only by a typed ledger TooOld outcome".into()));
+        return Err(ProtocolError::GenericError(
+            "absence scan is authorized only by a typed ledger TooOld outcome".into(),
+        ));
     }
     let journal = if journal.absence_scan.is_none() {
         let tip = match crate::icrc3_proof::icrc3_history_floor(journal.tuple.ledger).await {
@@ -6931,6 +7014,25 @@ pub async fn advance_pending_borrow_mint_recovery(vault_id: u64) -> Result<(), P
         log!(INFO, "event=borrow_mint_absence_recovery outcome=complete_absence caller={} journal_owner={} vault_id={} history_floor={} fixed_tip={}", caller, journal.owner, vault_id, floor, tip);
         guard_principal.complete(); Ok(())
     } else { guard_principal.fail(); Err(ProtocolError::GenericError("scan did not reach its fixed tip".into())) }
+}
+
+/// Derive a stable, per-journal probe recipient and reject the (cryptographic
+/// collision) case where it equals the borrower. Trying domain counters keeps
+/// the recipient deterministic while making the distinct-account invariant
+/// explicit at the call site.
+fn borrow_mint_expiry_probe_sink(journal: &crate::state::BorrowMintJournal) -> Option<Principal> {
+    for counter in 0u8..4 {
+        let mut seed = b"RUMI-BORROW-EXPIRY-PROBE-SINK-V1".to_vec();
+        seed.extend_from_slice(journal.owner.as_slice());
+        seed.extend_from_slice(&journal.vault_id.to_be_bytes());
+        seed.extend_from_slice(&journal.tuple.op_nonce.to_be_bytes());
+        seed.push(counter);
+        let sink = Principal::self_authenticating(&seed);
+        if sink != journal.owner {
+            return Some(sink);
+        }
+    }
+    None
 }
 
 pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {

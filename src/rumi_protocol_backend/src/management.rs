@@ -1631,6 +1631,62 @@ pub async fn mint_icusd_with_borrow_tuple(
     handle_borrow_mint_outcome(tuple.ledger, outer)
 }
 
+/// Submit a zero-value, domain-separated operation using the original borrow
+/// timestamp. Only an inner typed TooOld response proves that this timestamp
+/// has crossed the ledger's deduplication window. Every other outcome remains
+/// inconclusive and must leave the borrow journal held.
+pub async fn probe_borrow_mint_expiry(
+    tuple: &crate::state::BorrowMintTuple,
+    vault_id: u64,
+    sink: Principal,
+) -> Result<(), String> {
+    if sink == tuple.destination {
+        return Err("borrow expiry probe sink must differ from journal owner".into());
+    }
+    let mut memo_hash = Sha256::new();
+    memo_hash.update(b"RUMI-EXP-PROBE1");
+    memo_hash.update(vault_id.to_be_bytes());
+    memo_hash.update(tuple.op_nonce.to_be_bytes());
+    memo_hash.update(tuple.destination.as_slice());
+    let memo = memo_hash.finalize().to_vec();
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: tuple.ledger,
+    };
+    let outcome = client
+        .transfer(TransferArg {
+            from_subaccount: None,
+            to: Account {
+                owner: sink,
+                subaccount: None,
+            },
+            fee: Some(Nat::from(0u8)),
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(Memo::from(memo)),
+            amount: Nat::from(0u8),
+        })
+        .await;
+    classify_borrow_mint_expiry_probe_outcome(outcome)
+}
+
+fn classify_borrow_mint_expiry_probe_outcome(
+    outcome: Result<Result<Nat, TransferError>, (i32, String)>,
+) -> Result<(), String> {
+    match outcome {
+        Ok(Err(TransferError::TooOld)) => Ok(()),
+        Ok(Ok(_)) => Err("zero-value borrow expiry probe succeeded; journal remains held".into()),
+        Ok(Err(TransferError::Duplicate { .. })) => {
+            Err("zero-value borrow expiry probe was Duplicate; journal remains held".into())
+        }
+        Ok(Err(error)) => Err(format!(
+            "zero-value borrow expiry probe returned {error:?}; journal remains held"
+        )),
+        Err((code, message)) => Err(format!(
+            "zero-value borrow expiry probe call rejected ({code:?}): {message}"
+        )),
+    }
+}
+
 pub enum DurableMintOutcome {
     Confirmed(u64),
     ConfirmedBlockOutOfRange,
@@ -1706,6 +1762,29 @@ mod borrow_mint_outcome_tests {
             handle_borrow_mint_outcome(ledger, Ok(Ok(Nat::from(42u64)))),
             Ok(42)
         );
+    }
+
+    #[test]
+    fn expiry_probe_arms_only_on_decoded_typed_too_old() {
+        assert_eq!(
+            classify_borrow_mint_expiry_probe_outcome(Ok(Err(TransferError::TooOld))),
+            Ok(())
+        );
+        assert!(classify_borrow_mint_expiry_probe_outcome(Ok(Ok(Nat::from(1u8)))).is_err());
+        assert!(classify_borrow_mint_expiry_probe_outcome(Ok(Err(
+            TransferError::Duplicate {
+                duplicate_of: Nat::from(1u8),
+            }
+        )))
+        .is_err());
+        assert!(classify_borrow_mint_expiry_probe_outcome(Ok(Err(
+            TransferError::BadFee {
+                expected_fee: Nat::from(1u8),
+            }
+        )))
+        .is_err());
+        // Outer rejects include call failures and Candid decode failures.
+        assert!(classify_borrow_mint_expiry_probe_outcome(Err((5, "rejected".into()))).is_err());
     }
 }
 
