@@ -855,6 +855,131 @@ pub fn rearm_unsent_legacy_three_usd_refund(
     Ok(())
 }
 
+fn v2_default_account_refund_matches_parent(
+    state: &crate::state::State,
+    op_nonce: u128,
+    refund: &crate::state::PendingThreeUsdRefund,
+) -> bool {
+    let Some(absorb_id) = refund.parent_absorb_id else {
+        return false;
+    };
+    let key = crate::state::ThreeUsdReserveIngressKey {
+        stability_pool: refund.stability_pool,
+        vault_id: refund.vault_id,
+        absorb_id,
+    };
+    let Some(journal) = state.three_usd_reserve_ingress_journals.get(&key) else {
+        return false;
+    };
+    let parent_tuple_matches = match &journal.phase {
+        crate::state::ThreeUsdReserveIngressPhase::Absorbed { tuple, .. }
+        | crate::state::ThreeUsdReserveIngressPhase::FailedAfterTransfer { tuple, .. } => {
+            tuple.parent_absorb_id == absorb_id
+                && tuple.source.owner == refund.stability_pool
+                && tuple.source.subaccount.is_none()
+                && tuple.amount_e8s == journal.request.three_usd_amount_e8s
+        }
+        _ => false,
+    };
+    journal.ingress_proof_verified
+        && journal.request.ledger == refund.ledger
+        && journal.protocol_refund_fee_reserve_e8s == refund.amount_e8s
+        && parent_tuple_matches
+        && journal.refund.as_ref().is_some_and(|child| {
+            child.op_nonce == op_nonce
+                && child.required_net_credit_e8s == refund.amount_e8s
+                && child.settled_receipt.is_none()
+        })
+}
+
+/// Release the durable V2 dispatch fence after an ICRC BadFee response, which
+/// is a typed no-effect result. The caller passes the pre-dispatch snapshot;
+/// only the exact submitted tuple linked to the same unresolved parent child
+/// is eligible. The amount and nonce remain unchanged and the row is capped
+/// until an operator confirms the zero-fee rail is usable again.
+pub fn release_v2_default_account_refund_after_bad_fee(
+    state: &mut crate::state::State,
+    op_nonce: u128,
+    expected: crate::state::PendingThreeUsdRefund,
+) -> bool {
+    if expected.source != crate::state::ThreeUsdRefundSource::DefaultAccount
+        || expected.parent_absorb_id.is_none()
+        || expected.resolution.is_some()
+        || expected.dispatch_submitted
+        || expected.dispatch_block_index.is_some()
+        || expected.dispatch_amount_e8s.is_some()
+        || expected.dispatch_fee_e8s.is_some()
+        || !v2_default_account_refund_matches_parent(state, op_nonce, &expected)
+    {
+        return false;
+    }
+    let submitted = crate::state::PendingThreeUsdRefund {
+        dispatch_submitted: true,
+        dispatch_amount_e8s: Some(expected.amount_e8s),
+        dispatch_fee_e8s: Some(0),
+        ..expected
+    };
+    let Some(current) = state.pending_3usd_refunds.get_mut(&op_nonce) else {
+        return false;
+    };
+    if *current != submitted || current.dispatch_block_index.is_some() {
+        return false;
+    }
+    current.dispatch_submitted = false;
+    current.dispatch_amount_e8s = None;
+    current.dispatch_fee_e8s = None;
+    current.retry_count = crate::MAX_PENDING_RETRIES;
+    true
+}
+
+/// Developer rearm for a V2 child refund whose current state proves it is
+/// unsent. The row must still match its configured ledger and SP and the exact
+/// unresolved refund child in its confirmed parent ingress journal. This
+/// changes only retry_count; transfer identity and principal liability remain.
+pub fn rearm_unsent_v2_default_account_refund(
+    state: &mut crate::state::State,
+    caller: Principal,
+    op_nonce: u128,
+) -> Result<(), &'static str> {
+    if caller == Principal::anonymous() || caller != state.developer_principal {
+        return Err("only the developer can rearm a held V2 3USD refund");
+    }
+    let configured_ledger = state
+        .three_pool_canister
+        .ok_or("configured 3USD ledger is missing")?;
+    let configured_pool = state
+        .stability_pool_canister
+        .ok_or("registered Stability Pool is missing")?;
+    let refund = state
+        .pending_3usd_refunds
+        .get(&op_nonce)
+        .copied()
+        .ok_or("pending V2 3USD refund was not found")?;
+    if refund.source != crate::state::ThreeUsdRefundSource::DefaultAccount
+        || refund.parent_absorb_id.is_none()
+        || refund.resolution.is_some()
+        || refund.retry_count < crate::MAX_PENDING_RETRIES
+        || refund.dispatch_submitted
+        || refund.dispatch_block_index.is_some()
+        || refund.dispatch_amount_e8s.is_some()
+        || refund.dispatch_fee_e8s.is_some()
+        || refund.ledger != configured_ledger
+        || refund.stability_pool != configured_pool
+        || !v2_default_account_refund_matches_parent(state, op_nonce, &refund)
+    {
+        return Err("3USD refund is not a capped, known-unsent V2 child for the configured ledger and pool");
+    }
+    let current = state
+        .pending_3usd_refunds
+        .get_mut(&op_nonce)
+        .ok_or("pending V2 3USD refund disappeared")?;
+    if *current != refund {
+        return Err("pending V2 3USD refund changed before rearm");
+    }
+    current.retry_count = 0;
+    Ok(())
+}
+
 /// Require the net hashed-account reserve floor, all unresolved legacy refund
 /// principal, and the protocol-paid fee. `None` means the checked total
 /// overflowed or source accounting is inconsistent, so the caller must hold.

@@ -1,29 +1,4 @@
 type Account = record { owner : principal; subaccount : opt blob };
-type ThreeUsdReservePayoutAttempt = record {
-  op_nonce : nat;
-  memo : blob;
-  created_at_time_ns : nat64;
-  fee_arg_e8s : opt nat64;
-  candidate_block_index : opt nat64;
-  observed_fee_e8s : opt nat64;
-};
-type ThreeUsdReserveCollateralPayout = record {
-  operation_id : nat;
-  op_nonce : nat;
-  collateral_type : principal;
-  ledger : principal;
-  source : Account;
-  destination : Account;
-  gross_e8s : nat64;
-  net_e8s : nat64;
-  expected_fee_e8s : nat64;
-  memo : blob;
-  created_at_time_ns : nat64;
-  fee_arg_e8s : opt nat64;
-  candidate_block_index : opt nat64;
-  observed_fee_e8s : opt nat64;
-  rearmed_attempts : vec ThreeUsdReservePayoutAttempt;
-};
 type AddCollateralArg = record {
   redemption_fee_ceiling : opt float64;
   debt_ceiling : nat64;
@@ -1438,6 +1413,23 @@ type SupplyAuditEntry = record {
   display_name : text;
   chain_id : nat32;
 };
+type ThreeUsdReserveCollateralPayout = record {
+  destination : Account;
+  source : Account;
+  created_at_time_ns : nat64;
+  memo : blob;
+  net_e8s : nat64;
+  operation_id : nat;
+  fee_arg_e8s : opt nat64;
+  ledger : principal;
+  op_nonce : nat;
+  candidate_block_index : opt nat64;
+  expected_fee_e8s : nat64;
+  collateral_type : principal;
+  gross_e8s : nat64;
+  rearmed_attempts : vec ThreeUsdReservePayoutAttempt;
+  observed_fee_e8s : opt nat64;
+};
 type ThreeUsdReserveIngressV2Status = variant {
   FailedAfterTransferRefunded : record {
     transfer_block_index : nat64;
@@ -1474,6 +1466,14 @@ type ThreeUsdReserveIngressV2StatusView = record {
   vault_id : nat64;
   absorb_id : nat64;
   stability_pool : principal;
+};
+type ThreeUsdReservePayoutAttempt = record {
+  created_at_time_ns : nat64;
+  memo : blob;
+  fee_arg_e8s : opt nat64;
+  op_nonce : nat;
+  candidate_block_index : opt nat64;
+  observed_fee_e8s : opt nat64;
 };
 type ThreeUsdReserveRefundReceipt = record {
   tuple : ThreeUsdReserveRefundTuple;
@@ -1662,10 +1662,10 @@ service : (ProtocolArg) -> {
   bot_confirm_liquidation : (nat64) -> (Result);
   bot_confirm_liquidation_with_proof : (BotPaymentProof) -> (Result);
   bot_confirm_liquidation_with_proofs : (vec BotPaymentProof) -> (Result);
-  bot_verify_liquidation_payment_proof : (BotPaymentProof) -> (Result);
   bot_record_collateral_return_proof : (BotCollateralReturnProofArg) -> (
       Result,
     );
+  bot_verify_liquidation_payment_proof : (BotPaymentProof) -> (Result);
   cancel_xrp_pending_open : (nat64) -> (Result);
   chain_has_active_settlement_op : (nat32) -> (bool) query;
   claim_chain_collateral : (nat64, principal, nat, text) -> (Result_1);
@@ -1802,13 +1802,13 @@ service : (ProtocolArg) -> {
   get_snapshot_count : () -> (nat64) query;
   get_sp_writedown_disabled : () -> (bool) query;
   get_stability_pool_config : () -> (StabilityPoolConfig) query;
-  get_stability_pool_liquidate_with_reserves_v2_status : (nat64, nat64) -> (
-      ThreeUsdReserveIngressV2StatusView,
-    ) query;
   get_stability_pool_liquidate_with_reserves_v2_payout_candidate : (
       nat64,
       nat64,
     ) -> (opt ThreeUsdReserveCollateralPayout) query;
+  get_stability_pool_liquidate_with_reserves_v2_status : (nat64, nat64) -> (
+      ThreeUsdReserveIngressV2StatusView,
+    ) query;
   get_stability_pool_principal : () -> (opt principal) query;
   get_stable_token_enabled : (StableTokenType) -> (bool) query;
   get_supply_audit : () -> (SupplyAudit) query;
@@ -1855,8 +1855,11 @@ service : (ProtocolArg) -> {
   partial_repay_to_vault : (VaultArg) -> (Result_1);
   prepare_redemption_offer : (nat64) -> (Result_19);
   provide_liquidity : (nat64) -> (Result_1);
+  rearm_unsent_legacy_three_usd_refund : (nat) -> (Result);
+  rearm_unsent_v2_default_account_refund : (nat) -> (Result);
   reconcile_amm1_donation_mint_candidate_block : (nat64, nat64) -> (Result);
   reconcile_chain_supply : (nat32) -> (Result_20);
+  reconcile_legacy_three_usd_refund_candidate_block : (nat, nat64) -> (Result);
   reconcile_liquidity_withdrawal_from_block : (nat, nat64) -> (Result_1);
   reconcile_pending_borrow_mint_from_block : (nat64, nat64) -> (Result_4);
   reconcile_three_usd_reserve_ingress_candidate_block : (
@@ -1864,8 +1867,6 @@ service : (ProtocolArg) -> {
       nat64,
       nat64,
     ) -> (Result);
-  reconcile_legacy_three_usd_refund_candidate_block : (nat, nat64) -> (Result);
-  rearm_unsent_legacy_three_usd_refund : (nat) -> (Result);
   reconcile_three_usd_reserve_v1_cutover : (blob) -> (Result);
   recover_pending_payout : (nat) -> (Result_21);
   recover_pending_transfer : (nat64) -> (Result_21);

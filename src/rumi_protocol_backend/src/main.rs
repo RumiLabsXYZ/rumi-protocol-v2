@@ -8567,6 +8567,29 @@ fn rearm_unsent_legacy_three_usd_refund(op_nonce: u128) -> Result<(), ProtocolEr
     Ok(())
 }
 
+/// Resume a capped V2 refund only when its journal proves that no transfer
+/// remains submitted and no receipt has been recorded. The worker rechecks the
+/// current zero-fee ledger policy and the full liability balance before it
+/// pins a new attempt; a nonzero fee keeps the obligation held.
+#[update]
+#[candid_method(update)]
+fn rearm_unsent_v2_default_account_refund(op_nonce: u128) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    mutate_state(|state| {
+        rumi_protocol_backend::management::rearm_unsent_v2_default_account_refund(
+            state, caller, op_nonce,
+        )
+        .map_err(|error| ProtocolError::GenericError(error.into()))
+    })?;
+    ic_cdk::spawn(rumi_protocol_backend::process_pending_transfer());
+    Ok(())
+}
+
 fn three_usd_reserve_refund_receipt_matches(
     backend: Principal,
     stability_pool: Principal,

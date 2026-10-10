@@ -599,6 +599,274 @@ mod pending_3usd_refund_safety_tests {
 }
 
 #[cfg(test)]
+mod v2_default_account_refund_bad_fee_tests {
+    use super::{pending_3usd_refund_can_be_retried, MAX_PENDING_RETRIES};
+    use crate::state::{
+        PendingThreeUsdRefund, State, ThreeUsdRefundSource, ThreeUsdReserveIngressKey,
+        ThreeUsdReserveIngressJournal, ThreeUsdReserveIngressPhase,
+        ThreeUsdReserveIngressRefund, ThreeUsdReserveIngressRequest,
+        ThreeUsdReserveIngressTuple,
+    };
+    use candid::Principal;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn identities() -> (Principal, Principal, Principal, Principal) {
+        (
+            Principal::from_slice(&[1]), // Stability Pool
+            Principal::from_slice(&[2]), // 3USD ledger
+            Principal::from_slice(&[3]), // developer
+            Principal::from_slice(&[4]), // backend tuple destination
+        )
+    }
+
+    fn row(pool: Principal, ledger: Principal) -> PendingThreeUsdRefund {
+        PendingThreeUsdRefund {
+            stability_pool: pool,
+            ledger,
+            amount_e8s: 100,
+            vault_id: 5,
+            retry_count: 2,
+            op_nonce: 88,
+            source: ThreeUsdRefundSource::DefaultAccount,
+            parent_absorb_id: Some(7),
+            dispatch_amount_e8s: None,
+            dispatch_fee_e8s: None,
+            dispatch_submitted: false,
+            legacy_dispatch_retryable: false,
+            dispatch_block_index: None,
+            resolution: None,
+        }
+    }
+
+    fn state_with_parent(refund: PendingThreeUsdRefund, backend: Principal) -> State {
+        let mut state = State::default();
+        state.developer_principal = identities().2;
+        state.stability_pool_canister = Some(refund.stability_pool);
+        state.three_pool_canister = Some(refund.ledger);
+        let absorb_id = refund.parent_absorb_id.expect("fixture must be a V2 child");
+        let key = ThreeUsdReserveIngressKey {
+            stability_pool: refund.stability_pool,
+            vault_id: refund.vault_id,
+            absorb_id,
+        };
+        let tuple = ThreeUsdReserveIngressTuple {
+            spender_owner: refund.stability_pool,
+            spender_subaccount: None,
+            source: Account {
+                owner: refund.stability_pool,
+                subaccount: None,
+            },
+            destination: Account {
+                owner: backend,
+                subaccount: None,
+            },
+            amount_e8s: 200,
+            fee_e8s: Some(0),
+            ledger_fee_e8s: 0,
+            memo: [9; 16],
+            created_at_time_ns: 10,
+            op_nonce: 77,
+            parent_absorb_id: absorb_id,
+        };
+        state.three_usd_reserve_ingress_journals.insert(
+            key,
+            ThreeUsdReserveIngressJournal {
+                request: ThreeUsdReserveIngressRequest {
+                    icusd_debt_covered_e8s: 200,
+                    three_usd_amount_e8s: 200,
+                    ledger: refund.ledger,
+                },
+                phase: ThreeUsdReserveIngressPhase::FailedAfterTransfer {
+                    tuple,
+                    block_index: 12,
+                    error: "injected downstream failure".into(),
+                },
+                ingress_proof_verified: true,
+                refund: Some(ThreeUsdReserveIngressRefund {
+                    op_nonce: refund.op_nonce,
+                    required_net_credit_e8s: refund.amount_e8s,
+                    settled_receipt: None,
+                }),
+                protocol_refund_fee_reserve_e8s: refund.amount_e8s,
+                non_inclusion_scan: None,
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn typed_bad_fee_clears_only_the_exact_v2_fence_and_keeps_liability_capped() {
+        let (pool, ledger, _, backend) = identities();
+        let expected = row(pool, ledger);
+        let mut state = state_with_parent(expected, backend);
+        let submitted = PendingThreeUsdRefund {
+            dispatch_submitted: true,
+            dispatch_amount_e8s: Some(expected.amount_e8s),
+            dispatch_fee_e8s: Some(0),
+            ..expected
+        };
+        state.pending_3usd_refunds.insert(expected.op_nonce, submitted);
+
+        assert!(crate::management::release_v2_default_account_refund_after_bad_fee(
+            &mut state,
+            expected.op_nonce,
+            expected,
+        ));
+        let held = state.pending_3usd_refunds[&expected.op_nonce];
+        assert!(!held.dispatch_submitted);
+        assert_eq!(held.dispatch_block_index, None);
+        assert_eq!(held.dispatch_amount_e8s, None);
+        assert_eq!(held.dispatch_fee_e8s, None);
+        assert_eq!(held.retry_count, MAX_PENDING_RETRIES);
+        assert_eq!(held.op_nonce, expected.op_nonce);
+        assert_eq!(held.amount_e8s, expected.amount_e8s);
+        assert_eq!(held.parent_absorb_id, expected.parent_absorb_id);
+        assert_eq!(held.resolution, None);
+        assert!(!pending_3usd_refund_can_be_retried(&state, &held));
+        assert_eq!(
+            state.three_usd_reserve_ingress_journals.values().next().unwrap()
+                .refund.as_ref().unwrap().required_net_credit_e8s,
+            expected.amount_e8s,
+            "typed no-effect must retain the parent principal liability",
+        );
+    }
+
+    #[test]
+    fn bad_fee_release_rejects_changed_rows_or_parent_children() {
+        let (pool, ledger, _, backend) = identities();
+        let expected = row(pool, ledger);
+        let mut state = state_with_parent(expected, backend);
+        let submitted = PendingThreeUsdRefund {
+            dispatch_submitted: true,
+            dispatch_amount_e8s: Some(expected.amount_e8s),
+            dispatch_fee_e8s: Some(0),
+            ..expected
+        };
+        let changed = PendingThreeUsdRefund {
+            amount_e8s: expected.amount_e8s + 1,
+            ..submitted
+        };
+        state.pending_3usd_refunds.insert(expected.op_nonce, changed);
+        assert!(!crate::management::release_v2_default_account_refund_after_bad_fee(
+            &mut state,
+            expected.op_nonce,
+            expected,
+        ));
+        assert_eq!(state.pending_3usd_refunds[&expected.op_nonce], changed);
+
+        state.pending_3usd_refunds.insert(expected.op_nonce, submitted);
+        let journal = state.three_usd_reserve_ingress_journals.values_mut().next().unwrap();
+        journal.refund.as_mut().unwrap().op_nonce += 1;
+        assert!(!crate::management::release_v2_default_account_refund_after_bad_fee(
+            &mut state,
+            expected.op_nonce,
+            expected,
+        ));
+        assert_eq!(state.pending_3usd_refunds[&expected.op_nonce], submitted);
+    }
+
+    #[test]
+    fn developer_rearm_requires_exact_unsent_v2_child_and_preserves_identity() {
+        let (pool, ledger, developer, backend) = identities();
+        let expected = row(pool, ledger);
+        let mut state = state_with_parent(expected, backend);
+        let submitted = PendingThreeUsdRefund {
+            dispatch_submitted: true,
+            dispatch_amount_e8s: Some(expected.amount_e8s),
+            dispatch_fee_e8s: Some(0),
+            ..expected
+        };
+        state.pending_3usd_refunds.insert(expected.op_nonce, submitted);
+        assert!(crate::management::release_v2_default_account_refund_after_bad_fee(
+            &mut state,
+            expected.op_nonce,
+            expected,
+        ));
+        let held = state.pending_3usd_refunds[&expected.op_nonce];
+        assert!(crate::management::rearm_unsent_v2_default_account_refund(
+            &mut state,
+            Principal::from_slice(&[8]),
+            expected.op_nonce,
+        )
+        .is_err());
+        assert_eq!(state.pending_3usd_refunds[&expected.op_nonce], held);
+
+        state.stability_pool_canister = Some(Principal::from_slice(&[9]));
+        assert!(crate::management::rearm_unsent_v2_default_account_refund(
+            &mut state,
+            developer,
+            expected.op_nonce,
+        )
+        .is_err());
+        assert_eq!(state.pending_3usd_refunds[&expected.op_nonce], held);
+        state.stability_pool_canister = Some(expected.stability_pool);
+
+        crate::management::rearm_unsent_v2_default_account_refund(
+            &mut state,
+            developer,
+            expected.op_nonce,
+        )
+        .expect("developer may rearm exact known-unsent V2 child");
+        let rearmed = state.pending_3usd_refunds[&expected.op_nonce];
+        assert_eq!(rearmed.retry_count, 0);
+        assert_eq!(rearmed.op_nonce, expected.op_nonce);
+        assert_eq!(rearmed.amount_e8s, expected.amount_e8s);
+        assert_eq!(rearmed.ledger, expected.ledger);
+        assert_eq!(rearmed.stability_pool, expected.stability_pool);
+        assert_eq!(rearmed.parent_absorb_id, expected.parent_absorb_id);
+        assert!(pending_3usd_refund_can_be_retried(&state, &rearmed));
+    }
+
+    #[test]
+    fn developer_rearm_rejects_ambiguous_or_parent_mismatched_v2_rows() {
+        let (pool, ledger, developer, backend) = identities();
+        let expected = row(pool, ledger);
+        let mut state = state_with_parent(expected, backend);
+        let mut ambiguous = PendingThreeUsdRefund {
+            retry_count: MAX_PENDING_RETRIES,
+            dispatch_submitted: true,
+            dispatch_amount_e8s: Some(expected.amount_e8s),
+            dispatch_fee_e8s: Some(0),
+            ..expected
+        };
+        state.pending_3usd_refunds.insert(expected.op_nonce, ambiguous);
+        assert!(crate::management::rearm_unsent_v2_default_account_refund(
+            &mut state,
+            developer,
+            expected.op_nonce,
+        )
+        .is_err());
+        assert_eq!(state.pending_3usd_refunds[&expected.op_nonce], ambiguous);
+        assert!(state.pending_3usd_refunds[&expected.op_nonce].dispatch_submitted);
+        assert_eq!(
+            state.pending_3usd_refunds[&expected.op_nonce].dispatch_amount_e8s,
+            Some(expected.amount_e8s),
+        );
+        assert!(!pending_3usd_refund_can_be_retried(
+            &state,
+            &state.pending_3usd_refunds[&expected.op_nonce],
+        ));
+
+        ambiguous = PendingThreeUsdRefund {
+            retry_count: MAX_PENDING_RETRIES,
+            dispatch_submitted: false,
+            dispatch_amount_e8s: None,
+            dispatch_fee_e8s: None,
+            ..expected
+        };
+        state.pending_3usd_refunds.insert(expected.op_nonce, ambiguous);
+        let journal = state.three_usd_reserve_ingress_journals.values_mut().next().unwrap();
+        journal.request.ledger = Principal::from_slice(&[6]);
+        assert!(crate::management::rearm_unsent_v2_default_account_refund(
+            &mut state,
+            developer,
+            expected.op_nonce,
+        )
+        .is_err());
+    }
+}
+
+#[cfg(test)]
 mod legacy_3usd_refund_receipt_tests {
     use super::{
         commit_legacy_three_usd_refund_candidate, commit_legacy_three_usd_refund_receipt,
@@ -3547,7 +3815,7 @@ pub async fn process_pending_transfer() {
             Err(error) => {
                 log!(
                     INFO,
-                    "[refunding] 3USD reserve refund failed for SP {} (vault {}): {:?}. Will retry.",
+                    "[refunding] 3USD reserve refund failed for SP {} (vault {}): {:?}. Retaining durable liability.",
                     refund.stability_pool,
                     refund.vault_id,
                     error
@@ -3560,14 +3828,35 @@ pub async fn process_pending_transfer() {
                     });
                 }
                 if refund.parent_absorb_id.is_some() {
-                    // With a submitted V2 tuple, any error or lost response is
-                    // ambiguous unless a typed receipt proves no transfer. Do
-                    // not poll forever or change the dedup tuple.
-                    mutate_state(|s| {
-                        if let Some(row) = s.pending_3usd_refunds.get_mut(&nonce_key) {
-                            row.retry_count = MAX_PENDING_RETRIES;
+                    if matches!(&error, TransferError::BadFee { .. }) {
+                        // BadFee proves the pinned transfer had no effect. Clear
+                        // the fence only through exact CAS against the submitted
+                        // tuple and its unresolved parent child; the helper caps
+                        // the row until a developer rearms the zero-fee rail.
+                        let released = mutate_state(|s| {
+                            crate::management::release_v2_default_account_refund_after_bad_fee(
+                                s, nonce_key, refund,
+                            )
+                        });
+                        if !released {
+                            // Preserve a fail-closed cap if the row or parent
+                            // changed while the transfer call was in flight.
+                            mutate_state(|s| {
+                                if let Some(row) = s.pending_3usd_refunds.get_mut(&nonce_key) {
+                                    row.retry_count = MAX_PENDING_RETRIES;
+                                }
+                            });
                         }
-                    });
+                    } else {
+                        // Every non-typed response may have committed before a
+                        // lost reply. Keep the submitted tuple fenced and stop
+                        // timer polling for operator reconciliation.
+                        mutate_state(|s| {
+                            if let Some(row) = s.pending_3usd_refunds.get_mut(&nonce_key) {
+                                row.retry_count = MAX_PENDING_RETRIES;
+                            }
+                        });
+                    }
                 }
                 if let TransferError::BadFee { expected_fee } = error {
                     // Refresh fee cache; do NOT increment retry count on BadFee.

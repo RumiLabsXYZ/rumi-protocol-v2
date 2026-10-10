@@ -2162,11 +2162,17 @@ export interface _SERVICE {
   'partial_repay_to_vault' : ActorMethod<[VaultArg], Result_1>,
   'prepare_redemption_offer' : ActorMethod<[bigint], Result_19>,
   'provide_liquidity' : ActorMethod<[bigint], Result_1>,
+  'rearm_unsent_legacy_three_usd_refund' : ActorMethod<[bigint], Result>,
+  'rearm_unsent_v2_default_account_refund' : ActorMethod<[bigint], Result>,
   'reconcile_amm1_donation_mint_candidate_block' : ActorMethod<
     [bigint, bigint],
     Result
   >,
   'reconcile_chain_supply' : ActorMethod<[number], Result_20>,
+  'reconcile_legacy_three_usd_refund_candidate_block' : ActorMethod<
+    [bigint, bigint],
+    Result
+  >,
   'reconcile_liquidity_withdrawal_from_block' : ActorMethod<
     [bigint, bigint],
     Result_1
@@ -2179,11 +2185,6 @@ export interface _SERVICE {
     [bigint, bigint, bigint],
     Result
   >,
-  'reconcile_legacy_three_usd_refund_candidate_block' : ActorMethod<
-    [bigint, bigint],
-    Result
-  >,
-  'rearm_unsent_legacy_three_usd_refund' : ActorMethod<[bigint], Result>,
   'reconcile_three_usd_reserve_v1_cutover' : ActorMethod<
     [Uint8Array | number[]],
     Result
