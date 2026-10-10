@@ -6,8 +6,8 @@
 //! is true.
 
 use candid::{Nat, Principal};
-use ic_cdk::update;
 use ic_canister_log::log;
+use ic_cdk::update;
 use std::collections::BTreeMap;
 
 use crate::caller_is_admin;
@@ -15,7 +15,6 @@ use crate::derive_subaccount;
 use crate::logs::INFO;
 use crate::make_pool_id;
 use crate::state::{mutate_state, read_state};
-use crate::transfers::transfer_to_user;
 use crate::types::*;
 use crate::PoolGuard;
 
@@ -27,9 +26,8 @@ fn conflicts_with_threepool_pool(
 ) -> bool {
     let requested_pair_uses_threepool = token_a == threepool || token_b == threepool;
     requested_pair_uses_threepool
-        && existing_pairs.any(|(existing_a, existing_b)| {
-            existing_a == threepool || existing_b == threepool
-        })
+        && existing_pairs
+            .any(|(existing_a, existing_b)| existing_a == threepool || existing_b == threepool)
 }
 
 #[update]
@@ -65,8 +63,8 @@ fn create_pool(args: CreatePoolArgs) -> Result<PoolId, AmmError> {
     }
 
     let pool_id = make_pool_id(args.token_a, args.token_b);
-    let threepool = Principal::from_text(crate::THREEPOOL)
-        .expect("invalid THREEPOOL ledger principal");
+    let threepool =
+        Principal::from_text(crate::THREEPOOL).expect("invalid THREEPOOL ledger principal");
 
     mutate_state(|s| {
         if s.pools.contains_key(&pool_id) {
@@ -120,14 +118,23 @@ fn create_pool(args: CreatePoolArgs) -> Result<PoolId, AmmError> {
             reward_balance_snapshot: 0,
         };
 
-        log!(INFO, "Pool created: {} (fee: {} bps, admin: {})", pool_id, args.fee_bps, is_admin);
+        log!(
+            INFO,
+            "Pool created: {} (fee: {} bps, admin: {})",
+            pool_id,
+            args.fee_bps,
+            is_admin
+        );
         s.pools.insert(pool_id.clone(), pool);
-        s.record_admin_event(ic_cdk::caller(), AmmAdminAction::CreatePool {
-            pool_id: pool_id.clone(),
-            token_a,
-            token_b,
-            fee_bps: args.fee_bps,
-        });
+        s.record_admin_event(
+            ic_cdk::caller(),
+            AmmAdminAction::CreatePool {
+                pool_id: pool_id.clone(),
+                token_a,
+                token_b,
+                fee_bps: args.fee_bps,
+            },
+        );
         Ok(pool_id)
     })
 }
@@ -175,7 +182,13 @@ fn set_fee(pool_id: PoolId, fee_bps: u16) -> Result<(), AmmError> {
         let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
         pool.fee_bps = fee_bps;
         log!(INFO, "Pool {} fee set to {} bps", pool_id, fee_bps);
-        s.record_admin_event(caller, AmmAdminAction::SetFee { pool_id: pool_id.clone(), fee_bps });
+        s.record_admin_event(
+            caller,
+            AmmAdminAction::SetFee {
+                pool_id: pool_id.clone(),
+                fee_bps,
+            },
+        );
         Ok(())
     })
 }
@@ -190,25 +203,53 @@ fn set_protocol_fee(pool_id: PoolId, protocol_fee_bps: u16) -> Result<(), AmmErr
     mutate_state(|s| {
         let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
         pool.protocol_fee_bps = protocol_fee_bps;
-        log!(INFO, "Pool {} protocol fee set to {} bps", pool_id, protocol_fee_bps);
-        s.record_admin_event(caller, AmmAdminAction::SetProtocolFee { pool_id: pool_id.clone(), protocol_fee_bps });
+        log!(
+            INFO,
+            "Pool {} protocol fee set to {} bps",
+            pool_id,
+            protocol_fee_bps
+        );
+        s.record_admin_event(
+            caller,
+            AmmAdminAction::SetProtocolFee {
+                pool_id: pool_id.clone(),
+                protocol_fee_bps,
+            },
+        );
         Ok(())
     })
 }
 
 #[update]
 async fn withdraw_protocol_fees(pool_id: PoolId) -> Result<(u128, u128), AmmError> {
+    let caller = ic_cdk::caller();
     caller_is_admin()?;
 
     // Acquire per-pool lock to prevent concurrent fee withdrawals
     let _pool_guard = PoolGuard::new(pool_id.clone())?;
 
+    // A prior withdrawal may have reserved a payout before committing fee
+    // accounting, or may have dispatched only one of its legs. Never apply a
+    // new fee snapshot to a reused fixed payout identity.
+    if [
+        format!("protocol_fee_a:{}", pool_id),
+        format!("protocol_fee_b:{}", pool_id),
+    ]
+    .iter()
+    .any(|operation_id| crate::state::outbound_payout_by_operation(operation_id).is_some())
+    {
+        return Err(AmmError::PoolBusy);
+    }
+
     let (token_a, token_b, sub_a, sub_b, fees_a, fees_b, admin) = read_state(|s| {
         let pool = s.pools.get(&pool_id).ok_or(AmmError::PoolNotFound)?;
         Ok::<_, AmmError>((
-            pool.token_a, pool.token_b,
-            pool.subaccount_a, pool.subaccount_b,
-            pool.protocol_fees_a, pool.protocol_fees_b,
+            pool.token_a,
+            pool.token_b,
+            pool.subaccount_a,
+            pool.subaccount_b,
+            pool.protocol_fees_a,
+            pool.protocol_fees_b,
             s.admin,
         ))
     })?;
@@ -217,63 +258,150 @@ async fn withdraw_protocol_fees(pool_id: PoolId) -> Result<(u128, u128), AmmErro
         return Ok((0, 0));
     }
 
+    let fee_a = if fees_a > 0 {
+        crate::transfers::ledger_fee_strict(token_a)
+            .await
+            .map_err(|reason| AmmError::TransferFailed {
+                token: "protocol_fees".to_string(),
+                reason,
+            })?
+    } else {
+        0
+    };
+    let fee_b = if fees_b > 0 {
+        crate::transfers::ledger_fee_strict(token_b)
+            .await
+            .map_err(|reason| AmmError::TransferFailed {
+                token: "protocol_fees".to_string(),
+                reason,
+            })?
+    } else {
+        0
+    };
+    if !read_state(|s| {
+        s.admin == caller
+            && s.pools.get(&pool_id).map(|pool| {
+            pool.token_a == token_a
+                && pool.token_b == token_b
+                && pool.subaccount_a == sub_a
+                && pool.subaccount_b == sub_b
+                && pool.protocol_fees_a == fees_a
+                && pool.protocol_fees_b == fees_b
+            }) == Some(true)
+    })
+    {
+        return Err(AmmError::PoolBusy);
+    }
+
+    // Pin and journal both legs before changing fee liabilities or dispatching.
+    let payout_a = if fees_a > 0 {
+        Some(
+            crate::transfers::prepare_transfer_to_user_with_fee(
+                token_a,
+                sub_a,
+                admin,
+                fees_a,
+                fee_a,
+                format!("protocol_fee_a:{}", pool_id),
+            )
+            .map_err(|reason| AmmError::TransferFailed {
+                token: "protocol_fees".to_string(),
+                reason,
+            })?,
+        )
+    } else {
+        None
+    };
+    let payout_b = if fees_b > 0 {
+        match crate::transfers::prepare_transfer_to_user_with_fee(
+            token_b,
+            sub_b,
+            admin,
+            fees_b,
+            fee_b,
+            format!("protocol_fee_b:{}", pool_id),
+        ) {
+            Ok(id) => Some(id),
+            Err(reason) => {
+                if let Some(id) = payout_a {
+                    let _ = crate::state::finish_outbound_payout(id);
+                }
+                return Err(AmmError::TransferFailed {
+                    token: "protocol_fees".to_string(),
+                    reason,
+                });
+            }
+        }
+    } else {
+        None
+    };
+
     // Optimistic deduct: zero out fees in state BEFORE transferring.
     mutate_state(|s| {
-        let pool = s.pools.get_mut(&pool_id).expect("pool must exist: verified at start of withdraw_protocol_fees");
+        let pool = s
+            .pools
+            .get_mut(&pool_id)
+            .expect("pool must exist: verified at start of withdraw_protocol_fees");
         pool.protocol_fees_a = 0;
         pool.protocol_fees_b = 0;
+        // This event records the atomic accounting transition: protocol-fee
+        // balances become outbound payout liabilities. The journaled payout
+        // rows remain authoritative for whether external delivery completed.
+        // Recording in the same mutation prevents a callback trap or a
+        // partial A-success/B-failure from erasing the fee withdrawal intent.
+        s.record_admin_event(
+            ic_cdk::caller(),
+            AmmAdminAction::WithdrawProtocolFees {
+                pool_id: pool_id.clone(),
+                amount_a: fees_a,
+                amount_b: fees_b,
+            },
+        );
     });
 
     let mut withdrawn_a = 0u128;
     let mut withdrawn_b = 0u128;
     let mut errors = Vec::new();
 
-    if fees_a > 0 {
-        match transfer_to_user(token_a, sub_a, admin, fees_a).await {
-            Ok(_) => withdrawn_a = fees_a,
-            Err(reason) => {
-                log!(INFO, "WARN: withdraw_protocol_fees transfer_a failed: {}. Rolling back.", reason);
-                errors.push(format!("token_a: {}", reason));
+    if let Some(id) = payout_a {
+        match crate::transfers::dispatch_outbound_payout(id).await {
+            Ok(_) => {
+                withdrawn_a = fees_a;
+                let _ = crate::state::finish_outbound_payout(id);
             }
+            Err(reason) => errors.push(format!("token_a intent {} held: {}", id, reason)),
         }
     }
 
-    if fees_b > 0 {
-        match transfer_to_user(token_b, sub_b, admin, fees_b).await {
-            Ok(_) => withdrawn_b = fees_b,
-            Err(reason) => {
-                log!(INFO, "WARN: withdraw_protocol_fees transfer_b failed: {}. Rolling back.", reason);
-                errors.push(format!("token_b: {}", reason));
+    if let Some(id) = payout_b {
+        match crate::transfers::dispatch_outbound_payout(id).await {
+            Ok(_) => {
+                withdrawn_b = fees_b;
+                let _ = crate::state::finish_outbound_payout(id);
             }
+            Err(reason) => errors.push(format!("token_b intent {} held: {}", id, reason)),
         }
-    }
-
-    // Roll back any fees that failed to transfer
-    let rollback_a = fees_a - withdrawn_a;
-    let rollback_b = fees_b - withdrawn_b;
-    if rollback_a > 0 || rollback_b > 0 {
-        mutate_state(|s| {
-            let pool = s.pools.get_mut(&pool_id).expect("pool must exist: verified at start of withdraw_protocol_fees");
-            pool.protocol_fees_a += rollback_a;
-            pool.protocol_fees_b += rollback_b;
-        });
     }
 
     if !errors.is_empty() {
+        mutate_state(|s| {
+            if let Some(pool) = s.pools.get_mut(&pool_id) {
+                pool.paused = true;
+            }
+        });
         return Err(AmmError::TransferFailed {
             token: "protocol_fees".to_string(),
             reason: errors.join("; "),
         });
     }
 
-    log!(INFO, "Protocol fees withdrawn from {}: ({}, {})", pool_id, withdrawn_a, withdrawn_b);
-    mutate_state(|s| {
-        s.record_admin_event(ic_cdk::caller(), AmmAdminAction::WithdrawProtocolFees {
-            pool_id: pool_id.clone(),
-            amount_a: withdrawn_a,
-            amount_b: withdrawn_b,
-        });
-    });
+    log!(
+        INFO,
+        "Protocol fees withdrawn from {}: ({}, {})",
+        pool_id,
+        withdrawn_a,
+        withdrawn_b
+    );
     Ok((withdrawn_a, withdrawn_b))
 }
 
@@ -281,11 +409,22 @@ async fn withdraw_protocol_fees(pool_id: PoolId) -> Result<(u128, u128), AmmErro
 fn pause_pool(pool_id: PoolId) -> Result<(), AmmError> {
     let caller = ic_cdk::caller();
     caller_is_admin()?;
+    if PoolGuard::is_locked(&pool_id) {
+        return Err(AmmError::PoolBusy);
+    }
+    if crate::state::unresolved_inbound_for_pool(&pool_id) {
+        return Err(AmmError::PoolBusy);
+    }
     mutate_state(|s| {
         let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
         pool.paused = true;
         log!(INFO, "Pool {} paused", pool_id);
-        s.record_admin_event(caller, AmmAdminAction::PausePool { pool_id: pool_id.clone() });
+        s.record_admin_event(
+            caller,
+            AmmAdminAction::PausePool {
+                pool_id: pool_id.clone(),
+            },
+        );
         Ok(())
     })
 }
@@ -294,11 +433,27 @@ fn pause_pool(pool_id: PoolId) -> Result<(), AmmError> {
 fn unpause_pool(pool_id: PoolId) -> Result<(), AmmError> {
     let caller = ic_cdk::caller();
     caller_is_admin()?;
+    if PoolGuard::is_locked(&pool_id) {
+        return Err(AmmError::PoolBusy);
+    }
+    if crate::state::unresolved_inbound_for_pool(&pool_id) {
+        return Err(AmmError::PoolBusy);
+    }
+    if crate::state::has_dispatched_or_ambiguous_outbound_payouts() {
+        return Err(AmmError::InvalidInput {
+            reason: "cannot unpause while an outbound payout is unresolved".to_string(),
+        });
+    }
     mutate_state(|s| {
         let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
         pool.paused = false;
         log!(INFO, "Pool {} unpaused", pool_id);
-        s.record_admin_event(caller, AmmAdminAction::UnpausePool { pool_id: pool_id.clone() });
+        s.record_admin_event(
+            caller,
+            AmmAdminAction::UnpausePool {
+                pool_id: pool_id.clone(),
+            },
+        );
         Ok(())
     })
 }
@@ -309,7 +464,10 @@ fn set_pool_creation_open(open: bool) -> Result<(), AmmError> {
     mutate_state(|s| s.pool_creation_open = open);
     log!(INFO, "Pool creation open: {}", open);
     mutate_state(|s| {
-        s.record_admin_event(ic_cdk::caller(), AmmAdminAction::SetPoolCreationOpen { open });
+        s.record_admin_event(
+            ic_cdk::caller(),
+            AmmAdminAction::SetPoolCreationOpen { open },
+        );
     });
     Ok(())
 }
@@ -332,7 +490,10 @@ fn set_maintenance_mode(enabled: bool) -> Result<(), AmmError> {
     mutate_state(|s| s.maintenance_mode = enabled);
     log!(INFO, "Maintenance mode: {}", enabled);
     mutate_state(|s| {
-        s.record_admin_event(ic_cdk::caller(), AmmAdminAction::SetMaintenanceMode { enabled });
+        s.record_admin_event(
+            ic_cdk::caller(),
+            AmmAdminAction::SetMaintenanceMode { enabled },
+        );
     });
     Ok(())
 }
@@ -398,8 +559,7 @@ async fn admin_burn_subaccount_balance(
     sub.copy_from_slice(&subaccount);
     // Render the subaccount as a 64-char lowercase hex string for the
     // admin-event audit trail. Avoids pulling in the `hex` crate.
-    let subaccount_hex: String =
-        sub.iter().map(|b| format!("{:02x}", b)).collect();
+    let subaccount_hex: String = sub.iter().map(|b| format!("{:02x}", b)).collect();
 
     // 1. Query the canister's balance at the target subaccount.
     // Saturation note: ICRC-1 balances are bounded well below u128::MAX in
@@ -412,17 +572,13 @@ async fn admin_burn_subaccount_balance(
         owner: ic_cdk::id(),
         subaccount: Some(sub),
     };
-    let balance_call: Result<(Nat,), _> =
-        ic_cdk::call(ledger, "icrc1_balance_of", (acct,)).await;
+    let balance_call: Result<(Nat,), _> = ic_cdk::call(ledger, "icrc1_balance_of", (acct,)).await;
     let balance: u128 = match balance_call {
         Ok((n,)) => n.0.try_into().unwrap_or(u128::MAX),
         Err((code, msg)) => {
             return Err(AmmError::TransferFailed {
                 token: "icUSD".to_string(),
-                reason: format!(
-                    "icrc1_balance_of rejected: {:?} {}",
-                    code, msg,
-                ),
+                reason: format!("icrc1_balance_of rejected: {:?} {}", code, msg,),
             });
         }
     };
@@ -467,10 +623,7 @@ async fn admin_burn_subaccount_balance(
         Err((code, msg)) => {
             return Err(AmmError::TransferFailed {
                 token: "icUSD".to_string(),
-                reason: format!(
-                    "icrc1_minting_account rejected: {:?} {}",
-                    code, msg,
-                ),
+                reason: format!("icrc1_minting_account rejected: {:?} {}", code, msg,),
             });
         }
     };
@@ -554,14 +707,13 @@ async fn admin_burn_subaccount_balance(
 fn resolve_pending_claim(claim_id: u64) -> Result<(), AmmError> {
     let caller = ic_cdk::caller();
     caller_is_admin()?;
-    mutate_state(|s| {
-        let before = s.pending_claims.len();
-        s.pending_claims.retain(|c| c.id != claim_id);
-        if s.pending_claims.len() == before {
-            return Err(AmmError::ClaimNotFound);
-        }
-        log!(INFO, "Pending claim #{} force-resolved by admin", claim_id);
-        s.record_admin_event(caller, AmmAdminAction::ResolvePendingClaim { claim_id });
-        Ok(())
+    let exists = read_state(|s| s.pending_claims.iter().any(|c| c.id == claim_id));
+    if !exists {
+        return Err(AmmError::ClaimNotFound);
+    }
+    let _ = caller;
+    Err(AmmError::InvalidInput {
+        reason: "legacy pending claim cannot be deleted without its outbound payout identity"
+            .to_string(),
     })
 }

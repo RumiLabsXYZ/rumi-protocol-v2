@@ -1,28 +1,30 @@
-use candid::{CandidType, Nat, Principal};
-use ic_cdk::{query, update, init, pre_upgrade, post_upgrade};
+use candid::{CandidType, Encode, Nat, Principal};
 use ic_canister_log::log;
 use ic_canisters_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
+use ic_cdk::{init, post_upgrade, pre_upgrade, query, update};
 use serde::Deserialize;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub mod types;
-pub mod state;
+mod admin;
+pub mod analytics;
+pub mod icrc21;
+mod logs;
 pub mod math;
 pub mod rewards;
+pub mod state;
 pub mod transfers;
-pub mod icrc21;
-pub mod analytics;
-mod admin;
-mod logs;
+pub mod types;
 
-use crate::types::*;
-use crate::state::{mutate_state, read_state, MAX_PROCESSED_NONCES};
-use crate::math::{compute_swap, compute_initial_lp_shares, compute_proportional_lp_shares,
-                   compute_remove_liquidity, MINIMUM_LIQUIDITY};
-use crate::transfers::{transfer_from_user, transfer_reward_icusd, transfer_to_user};
 use crate::logs::INFO;
+use crate::math::{
+    compute_initial_lp_shares, compute_proportional_lp_shares, compute_remove_liquidity,
+    compute_swap, MINIMUM_LIQUIDITY,
+};
+use crate::state::{mutate_state, read_state, MAX_PROCESSED_NONCES};
+use crate::transfers::transfer_from_user;
+use crate::types::*;
 
 // ─── Per-pool reentrancy guard ───
 // Prevents concurrent async operations on the same pool. On IC, messages
@@ -46,6 +48,10 @@ impl PoolGuard {
             }
             Ok(Self { pool_id })
         })
+    }
+
+    pub(crate) fn is_locked(pool_id: &str) -> bool {
+        POOL_LOCKS.with(|locks| locks.borrow().contains(pool_id))
     }
 }
 
@@ -81,17 +87,12 @@ pub fn reward_subaccount_for(pool_id: &PoolId) -> [u8; 32] {
 /// Query the icUSD ledger for the AMM's reward-subaccount balance.
 async fn query_reward_subaccount_balance(pool_id: &PoolId) -> Result<u128, AmmError> {
     use icrc_ledger_types::icrc1::account::Account;
-    let icusd_ledger = Principal::from_text(ICUSD_LEDGER)
-        .expect("invalid icUSD ledger principal");
+    let icusd_ledger = Principal::from_text(ICUSD_LEDGER).expect("invalid icUSD ledger principal");
     let acct = Account {
         owner: ic_cdk::id(),
         subaccount: Some(reward_subaccount_for(pool_id)),
     };
-    let result: Result<(Nat,), _> = ic_cdk::call(
-        icusd_ledger,
-        "icrc1_balance_of",
-        (acct,),
-    ).await;
+    let result: Result<(Nat,), _> = ic_cdk::call(icusd_ledger, "icrc1_balance_of", (acct,)).await;
     match result {
         Ok((bal,)) => Ok(bal.0.try_into().unwrap_or(u128::MAX)),
         Err((code, msg)) => Err(AmmError::RewardLedgerTransferFailed {
@@ -145,7 +146,12 @@ async fn refresh_supply() {
             log!(INFO, "Supply cache refreshed: {} e8s", supply_u128);
         }
         Err((code, msg)) => {
-            log!(INFO, "Failed to fetch icUSD total supply: {:?} {}", code, msg);
+            log!(
+                INFO,
+                "Failed to fetch icUSD total supply: {:?} {}",
+                code,
+                msg
+            );
         }
     }
 }
@@ -217,7 +223,9 @@ fn setup_snapshot_timer() {
     });
     ic_cdk_timers::set_timer_interval(
         std::time::Duration::from_secs(SNAPSHOT_INTERVAL_SECS),
-        || { ic_cdk::spawn(take_holder_snapshots()); },
+        || {
+            ic_cdk::spawn(take_holder_snapshots());
+        },
     );
 }
 
@@ -227,8 +235,12 @@ async fn take_holder_snapshots() {
     // Collect icUSD holders
     match collect_icusd_holders().await {
         Ok(snapshot) => {
-            log!(INFO, "icUSD snapshot: {} holders, supply {}",
-                snapshot.holder_count, snapshot.total_supply);
+            log!(
+                INFO,
+                "icUSD snapshot: {} holders, supply {}",
+                snapshot.holder_count,
+                snapshot.total_supply
+            );
             mutate_state(|s| {
                 if s.holder_snapshots.len() >= state::MAX_HOLDER_SNAPSHOTS {
                     s.holder_snapshots.remove(0);
@@ -242,8 +254,12 @@ async fn take_holder_snapshots() {
     // Collect 3USD holders
     match collect_3usd_holders().await {
         Ok(snapshot) => {
-            log!(INFO, "3USD snapshot: {} holders, supply {}",
-                snapshot.holder_count, snapshot.total_supply);
+            log!(
+                INFO,
+                "3USD snapshot: {} holders, supply {}",
+                snapshot.holder_count,
+                snapshot.total_supply
+            );
             mutate_state(|s| {
                 if s.holder_snapshots.len() >= state::MAX_HOLDER_SNAPSHOTS {
                     s.holder_snapshots.remove(0);
@@ -267,7 +283,11 @@ async fn collect_icusd_holders() -> Result<HolderSnapshot, String> {
     // Load cached state
     let (mut balances, mut total_supply, mut start) = ICUSD_HOLDER_CACHE.with(|c| {
         let cache = c.borrow();
-        (cache.balances.clone(), cache.total_supply, cache.last_processed_index)
+        (
+            cache.balances.clone(),
+            cache.total_supply,
+            cache.last_processed_index,
+        )
     });
 
     let batch_size: u64 = 2000;
@@ -278,9 +298,10 @@ async fn collect_icusd_holders() -> Result<HolderSnapshot, String> {
             length: Nat::from(batch_size),
         };
 
-        let (response,): (GetTransactionsResponse,) = ic_cdk::call(
-            ledger, "get_transactions", (request,)
-        ).await.map_err(|(code, msg)| format!("get_transactions failed: {:?} {}", code, msg))?;
+        let (response,): (GetTransactionsResponse,) =
+            ic_cdk::call(ledger, "get_transactions", (request,))
+                .await
+                .map_err(|(code, msg)| format!("get_transactions failed: {:?} {}", code, msg))?;
 
         if response.transactions.is_empty() {
             break;
@@ -306,7 +327,9 @@ async fn collect_icusd_holders() -> Result<HolderSnapshot, String> {
                 "transfer" => {
                     if let Some(xfer) = &tx.transfer {
                         let amount: u128 = xfer.amount.0.clone().try_into().unwrap_or(0u128);
-                        let fee: u128 = xfer.fee.as_ref()
+                        let fee: u128 = xfer
+                            .fee
+                            .as_ref()
                             .map(|f| f.0.clone().try_into().unwrap_or(0u128))
                             .unwrap_or(0);
                         let from_entry = balances.entry(xfer.from.owner).or_insert(0);
@@ -420,7 +443,11 @@ async fn sample_tvl_for_all_pools() {
             return;
         }
         Err(e) => {
-            log!(INFO, "[tvl_sample] icp price fetch failed: {}; skipping sample", e);
+            log!(
+                INFO,
+                "[tvl_sample] icp price fetch failed: {}; skipping sample",
+                e
+            );
             return;
         }
     };
@@ -486,7 +513,11 @@ fn init(args: AmmInitArgs) {
     setup_supply_timer();
     setup_snapshot_timer();
     setup_tvl_sample_timer();
-    log!(INFO, "Rumi AMM initialized. Admin: {}", read_state(|s| s.admin));
+    log!(
+        INFO,
+        "Rumi AMM initialized. Admin: {}",
+        read_state(|s| s.admin)
+    );
 }
 
 #[pre_upgrade]
@@ -504,9 +535,12 @@ fn post_upgrade(_args: AmmInitArgs) {
     setup_supply_timer();
     setup_snapshot_timer();
     setup_tvl_sample_timer();
-    log!(INFO, "Rumi AMM post-upgrade: state restored. {} pools, {} snapshots",
+    log!(
+        INFO,
+        "Rumi AMM post-upgrade: state restored. {} pools, {} snapshots",
         read_state(|s| s.pools.len()),
-        read_state(|s| s.holder_snapshots.len()));
+        read_state(|s| s.holder_snapshots.len())
+    );
 }
 
 // ─── Helpers ───
@@ -550,38 +584,6 @@ pub(crate) fn make_pool_id(token_a: Principal, token_b: Principal) -> PoolId {
     }
 }
 
-/// Record a failed outbound transfer as a pending claim so the user can retry.
-fn record_pending_claim(
-    pool_id: &PoolId,
-    claimant: Principal,
-    token: Principal,
-    subaccount: [u8; 32],
-    amount: u128,
-    reason: &str,
-) -> u64 {
-    mutate_state(|s| {
-        if s.pending_claims.len() >= state::MAX_PENDING_CLAIMS {
-            log!(INFO, "WARN: pending_claims at capacity ({}). Dropping oldest claim.", state::MAX_PENDING_CLAIMS);
-            s.pending_claims.remove(0);
-        }
-        let id = s.next_claim_id;
-        s.next_claim_id += 1;
-        s.pending_claims.push(PendingClaim {
-            id,
-            pool_id: pool_id.clone(),
-            claimant,
-            token,
-            subaccount,
-            amount,
-            reason: reason.to_string(),
-            created_at: ic_cdk::api::time() / 1_000_000_000,
-        });
-        log!(INFO, "Pending claim #{} recorded: {} owes {} of token {} (pool {})",
-            id, claimant, amount, token, pool_id);
-        id
-    })
-}
-
 /// Receive a reward donation from the protocol backend. The caller is
 /// expected to have already minted `amount` icUSD into this canister's
 /// per-pool reward subaccount before invoking this call. This call
@@ -613,7 +615,12 @@ pub async fn notify_reward_received(
             .unwrap_or(false)
     });
     if already_processed {
-        log!(INFO, "[notify_reward_received] dedup on nonce {} for pool {}", nonce, pool_id);
+        log!(
+            INFO,
+            "[notify_reward_received] dedup on nonce {} for pool {}",
+            nonce,
+            pool_id
+        );
         return Ok(());
     }
 
@@ -641,11 +648,8 @@ pub async fn notify_reward_received(
 
         // Bump accumulator (or buffer if no LPs).
         if pool.total_lp_shares > 0 {
-            pool.acc_reward_per_share = crate::rewards::accumulate(
-                pool.acc_reward_per_share,
-                amount,
-                pool.total_lp_shares,
-            );
+            pool.acc_reward_per_share =
+                crate::rewards::accumulate(pool.acc_reward_per_share, amount, pool.total_lp_shares);
         } else {
             pool.pending_no_lp = pool.pending_no_lp.saturating_add(amount);
         }
@@ -671,8 +675,8 @@ pub async fn notify_reward_received(
 }
 
 /// Claim accumulated reward icUSD for the caller. Settles pending into
-/// claimable, transfers claimable, zeroes claimable on success. On
-/// transfer failure, restores claimable so the caller can retry.
+/// claimable, persists a payout identity, then debits claimable before
+/// dispatch. Ambiguous results stay held and are not automatically rearmed.
 #[update]
 pub async fn claim_rewards(pool_id: PoolId) -> Result<u128, AmmError> {
     let caller = ic_cdk::caller();
@@ -681,6 +685,13 @@ pub async fn claim_rewards(pool_id: PoolId) -> Result<u128, AmmError> {
     }
 
     let _guard = PoolGuard::new(pool_id.clone())?;
+
+    let reward_operation_id = format!("reward_claim:{}:{}", pool_id, caller);
+    if crate::state::outbound_payout_by_operation(&reward_operation_id).is_some() {
+        return Err(AmmError::RewardLedgerTransferFailed {
+            reason: "an earlier reward payout for this pool and caller is unresolved; claimable was not debited again".to_string(),
+        });
+    }
 
     // Phase 1: settle pending into claimable, snapshot the amount, persist.
     let amount = mutate_state(|s| -> Result<u128, AmmError> {
@@ -699,21 +710,43 @@ pub async fn claim_rewards(pool_id: PoolId) -> Result<u128, AmmError> {
                 min: crate::state::MIN_CLAIM_E8S,
             });
         }
-        // Optimistically zero claimable; will be restored on transfer fail.
-        entry.claimable = 0;
         Ok(claimable)
     })?;
 
-    // Phase 2: ICRC-1 transfer to caller from the reward subaccount.
-    let transfer_result = transfer_reward_icusd(&pool_id, caller, amount).await;
+    // Persist the immutable reward payout identity before debiting claimable.
+    let payout = crate::transfers::prepare_reward_transfer(
+        &pool_id,
+        caller,
+        amount,
+        reward_operation_id,
+    )
+    .await
+    .map_err(|reason| AmmError::RewardLedgerTransferFailed { reason })?;
+    mutate_state(|s| -> Result<(), AmmError> {
+        let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
+        let entry = pool
+            .lp_rewards
+            .get_mut(&caller)
+            .ok_or(AmmError::Unauthorized)?;
+        if entry.claimable < amount {
+            return Err(AmmError::InvalidInput {
+                reason: "reward claimable changed before dispatch".to_string(),
+            });
+        }
+        entry.claimable -= amount;
+        Ok(())
+    })?;
+
+    // Dispatch the already persisted identity.
+    let transfer_result = crate::transfers::dispatch_outbound_payout(payout).await;
 
     match transfer_result {
         Ok(_block_index) => {
             // Refetch live balance so the snapshot reflects the real payout
             // (and any concurrent third-party transfers). Mirrors the
             // notify_reward_received pattern of trusting on-chain truth.
-            // On query failure, fall back to subtracting amount: transfer_reward_icusd
-            // now sends amount - fee, so the subaccount drops by exactly amount
+            // On query failure, fall back to subtracting amount: the journaled
+            // transfer sends amount - fee, so the subaccount drops by exactly amount
             // (the claimant bears the fee), not amount + fee.
             let after_balance = query_reward_subaccount_balance(&pool_id).await;
             mutate_state(|s| {
@@ -729,18 +762,17 @@ pub async fn claim_rewards(pool_id: PoolId) -> Result<u128, AmmError> {
                     }
                 }
                 s.record_claim_event(pool_id.clone(), caller, amount);
+                let _ = s
+                    .outbound_payouts
+                    .iter()
+                    .position(|p| p.id == payout)
+                    .map(|idx| s.outbound_payouts.remove(idx));
             });
             Ok(amount)
         }
         Err(e) => {
-            // Restore claimable on failure (the user can retry).
-            mutate_state(|s| {
-                if let Some(pool) = s.pools.get_mut(&pool_id) {
-                    if let Some(entry) = pool.lp_rewards.get_mut(&caller) {
-                        entry.claimable = entry.claimable.saturating_add(amount);
-                    }
-                }
-            });
+            // The ledger may have applied the transfer before its reply failed.
+            // Keep claimable debited and the payout intent held for reconciliation.
             Err(AmmError::RewardLedgerTransferFailed { reason: e })
         }
     }
@@ -771,64 +803,13 @@ pub fn get_pending_rewards(pool_id: PoolId, principal: Principal) -> Nat {
 /// If the transfer fails, we re-add the claim.
 #[update]
 async fn claim_pending(claim_id: u64) -> Result<(), AmmError> {
-    let caller = ic_cdk::caller();
-
-    // Atomically find and remove the claim from state (prevents double-claim).
-    let claim = mutate_state(|s| {
-        let idx = s.pending_claims
-            .iter()
-            .position(|c| c.id == claim_id)
-            .ok_or(AmmError::ClaimNotFound)?;
-        let claim = s.pending_claims.remove(idx);
-        Ok::<_, AmmError>(claim)
-    })?;
-
-    let is_admin = caller_is_admin().is_ok();
-    if caller != claim.claimant && !is_admin {
-        // Not authorized — re-add the claim before returning error
-        mutate_state(|s| s.pending_claims.push(claim));
-        return Err(AmmError::Unauthorized);
+    let exists = read_state(|s| s.pending_claims.iter().any(|c| c.id == claim_id));
+    if !exists {
+        return Err(AmmError::ClaimNotFound);
     }
-
-    let claim_claimant = claim.claimant;
-    let claim_amount = claim.amount;
-
-    // Audit 2026-06-09 (IC-S-003): transfer_to_user silently skips sends of
-    // amount <= ledger fee, which would consume the claim with nothing
-    // received. Keep the claim and return a clear error; it becomes payable
-    // again if the ledger fee ever drops below the claim amount.
-    let fee = crate::transfers::ledger_fee(claim.token).await;
-    if claim.amount <= fee {
-        mutate_state(|s| s.pending_claims.push(claim));
-        return Err(AmmError::BelowMinClaim {
-            claimable: claim_amount,
-            min: fee.saturating_add(1),
-        });
-    }
-
-    match transfer_to_user(claim.token, claim.subaccount, claim.claimant, claim.amount).await {
-        Ok(_) => {
-            log!(INFO, "Pending claim #{} resolved: {} received {} of token {}",
-                claim_id, claim_claimant, claim_amount, claim.token);
-            mutate_state(|s| {
-                s.record_admin_event(caller, AmmAdminAction::ClaimPending {
-                    claim_id,
-                    claimant: claim_claimant,
-                    amount: claim_amount,
-                });
-            });
-            Ok(())
-        }
-        Err(reason) => {
-            // Transfer failed — re-add the claim so user can retry
-            log!(INFO, "claim_pending #{} transfer failed: {}. Re-adding claim.", claim_id, reason);
-            mutate_state(|s| s.pending_claims.push(claim));
-            Err(AmmError::TransferFailed {
-                token: claim_id.to_string(),
-                reason,
-            })
-        }
-    }
+    Err(AmmError::InvalidInput {
+        reason: "legacy pending claim has no bound outbound payout identity and is held for reconciliation".to_string(),
+    })
 }
 
 /// View all pending claims.
@@ -839,6 +820,464 @@ fn get_pending_claims() -> Vec<PendingClaim> {
 
 // ─── Core AMM ───
 
+/// Owner-authenticated visibility for durable inbound deposit operations.
+#[query]
+fn get_next_inbound_sequence() -> Result<u64, AmmError> {
+    reject_anonymous()?;
+    crate::state::next_inbound_sequence().map_err(|reason| AmmError::InvalidInput { reason })
+}
+
+/// Owner-authenticated visibility for durable inbound deposit operations.
+#[query]
+fn get_inbound_operation(request_id: Vec<u8>) -> Result<state::InboundOperationStatus, AmmError> {
+    if request_id.len() != 32 {
+        return Err(AmmError::InvalidInput {
+            reason: "request ID must be exactly 32 bytes".to_string(),
+        });
+    }
+    let operation = crate::state::inbound_operation(ic_cdk::caller(), &request_id)
+        .map_err(|reason| AmmError::InvalidInput { reason })?;
+    let linked_payout_status = operation
+        .output_payout_id
+        .and_then(|id| crate::state::outbound_payout(id).ok())
+        .map(|p| p.status);
+    Ok(state::InboundOperationStatus {
+        operation,
+        linked_payout_status,
+    })
+}
+
+/// Fixture-only reserve seeding for the PocketIC failure-injection wasm.
+#[cfg(feature = "pocketic-test")]
+#[update]
+fn pocketic_seed_pool(
+    pool_id: PoolId,
+    reserve_a: u128,
+    reserve_b: u128,
+) -> Result<([u8; 32], [u8; 32]), AmmError> {
+    let caller = ic_cdk::caller();
+    mutate_state(|s| {
+        if caller != s.admin {
+            return Err(AmmError::Unauthorized);
+        }
+        let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
+        pool.reserve_a = reserve_a;
+        pool.reserve_b = reserve_b;
+        pool.total_lp_shares = 1_000;
+        pool.lp_shares.insert(caller, 1_000);
+        Ok((pool.subaccount_a, pool.subaccount_b))
+    })
+}
+
+#[cfg(feature = "pocketic-test")]
+#[update]
+fn pocketic_seed_protocol_fees(
+    pool_id: PoolId,
+    amount_a: u128,
+    amount_b: u128,
+) -> Result<(), AmmError> {
+    let caller = ic_cdk::caller();
+    mutate_state(|s| {
+        if caller != s.admin {
+            return Err(AmmError::Unauthorized);
+        }
+        let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
+        pool.protocol_fees_a = amount_a;
+        pool.protocol_fees_b = amount_b;
+        Ok(())
+    })
+}
+
+#[cfg(feature = "pocketic-test")]
+#[query]
+fn pocketic_get_protocol_fees(pool_id: PoolId) -> Result<(u128, u128), AmmError> {
+    read_state(|s| {
+        let pool = s.pools.get(&pool_id).ok_or(AmmError::PoolNotFound)?;
+        Ok((pool.protocol_fees_a, pool.protocol_fees_b))
+    })
+}
+
+#[cfg(feature = "pocketic-test")]
+#[query]
+fn pocketic_get_outbound_payouts() -> Vec<state::OutboundPayout> {
+    read_state(|s| s.outbound_payouts.clone())
+}
+
+async fn swap_v2_inner(
+    request_id: Vec<u8>,
+    pool_id: PoolId,
+    token_in: Principal,
+    amount_in: u128,
+    min_amount_out: u128,
+) -> Result<SwapResult, AmmError> {
+    use state::{
+        InboundLeg, InboundLegStatus as LegStatus, InboundOperation, InboundOperationKind,
+        InboundOperationPhase as Phase,
+    };
+    reject_anonymous()?;
+    if request_id.len() != 32 {
+        return Err(AmmError::InvalidInput {
+            reason: "request ID must be exactly 32 bytes".into(),
+        });
+    }
+    let caller = ic_cdk::caller();
+    let digest_bytes = Encode!(&pool_id, &token_in, &amount_in, &min_amount_out).map_err(|e| {
+        AmmError::InvalidInput {
+            reason: format!("cannot encode request arguments: {e}"),
+        }
+    })?;
+    let digest = sha2::Sha256::digest(&digest_bytes).to_vec();
+    let _guard = PoolGuard::new(pool_id.clone())?;
+
+    let mut op = match crate::state::inbound_operation(caller, &request_id) {
+        Ok(op) => {
+            if op.argument_digest != digest
+                || op.pool_id != pool_id
+                || op.kind != InboundOperationKind::Swap
+            {
+                return Err(AmmError::InvalidInput {
+                    reason: "request ID is already bound to different arguments".into(),
+                });
+            }
+            op
+        }
+        Err(_) => {
+            if read_state(|s| s.maintenance_mode) {
+                return Err(AmmError::MaintenanceMode);
+            }
+            let (
+                token_a,
+                token_b,
+                reserve_a,
+                reserve_b,
+                fee_bps,
+                protocol_fee_bps,
+                sub_a,
+                sub_b,
+                paused,
+            ) = read_state(|s| {
+                let p = s.pools.get(&pool_id).ok_or(AmmError::PoolNotFound)?;
+                Ok::<_, AmmError>((
+                    p.token_a,
+                    p.token_b,
+                    p.reserve_a,
+                    p.reserve_b,
+                    p.fee_bps,
+                    p.protocol_fee_bps,
+                    p.subaccount_a,
+                    p.subaccount_b,
+                    p.paused,
+                ))
+            })?;
+            if paused {
+                return Err(AmmError::PoolPaused);
+            }
+            let (reserve_in, reserve_out, sub_in, ledger_in, ledger_out) = if token_in == token_a {
+                (reserve_a, reserve_b, sub_a, token_a, token_b)
+            } else if token_in == token_b {
+                (reserve_b, reserve_a, sub_b, token_b, token_a)
+            } else {
+                return Err(AmmError::InvalidToken);
+            };
+            let (amount_out, total_fee, protocol_fee) = compute_swap(
+                reserve_in,
+                reserve_out,
+                amount_in,
+                fee_bps,
+                protocol_fee_bps,
+            )?;
+            // This query may yield. Recheck the quote inputs afterward; a lost
+            // heap guard during upgrade cannot make a stale quote executable.
+            let output_ledger_fee = crate::transfers::ledger_fee_strict(ledger_out)
+                .await
+                .map_err(|reason| AmmError::InvalidInput {
+                    reason: format!("cannot safely quote output ledger fee before input: {reason}"),
+                })?;
+            let net_out = amount_out.saturating_sub(output_ledger_fee);
+            if net_out == 0 || net_out < min_amount_out {
+                return Err(AmmError::InsufficientOutput {
+                    expected_min: min_amount_out.max(1),
+                    actual: net_out,
+                });
+            }
+            let still_same = read_state(|s| {
+                s.pools
+                    .get(&pool_id)
+                    .map(|p| {
+                        !p.paused
+                            && p.reserve_a == reserve_a
+                            && p.reserve_b == reserve_b
+                            && p.token_a == token_a
+                            && p.token_b == token_b
+                            && p.fee_bps == fee_bps
+                            && p.protocol_fee_bps == protocol_fee_bps
+                            && p.subaccount_a == sub_a
+                            && p.subaccount_b == sub_b
+                            && !s.maintenance_mode
+                    })
+                    .unwrap_or(false)
+            });
+            if !still_same {
+                return Err(AmmError::PoolBusy);
+            }
+            let mut memo_hasher = sha2::Sha256::new();
+            use sha2::Digest;
+            memo_hasher.update(b"rumi_amm:inbound:swap:v2:");
+            memo_hasher.update(&request_id);
+            let memo = memo_hasher.finalize().to_vec();
+            let leg = InboundLeg {
+                ledger: ledger_in,
+                from: caller,
+                to_subaccount: crate::transfers::pool_subaccount(ledger_in, sub_in),
+                amount: amount_in,
+                fee: None,
+                memo,
+                created_at_time: ic_cdk::api::time(),
+                status: LegStatus::Prepared,
+            };
+            let op = InboundOperation {
+                request_id: request_id.clone(),
+                caller,
+                pool_id: pool_id.clone(),
+                kind: InboundOperationKind::Swap,
+                argument_digest: digest.clone(),
+                legs: vec![leg],
+                created_at_time: ic_cdk::api::time(),
+                phase: Phase::Prepared,
+                output_payout_id: None,
+                result_amount: Some(amount_out),
+                output_ledger_fee: Some(output_ledger_fee),
+                result_fee: Some(total_fee),
+                protocol_fee: Some(protocol_fee),
+                token_in: Some(token_in),
+                sequence_managed: Some(true),
+                held_reason: None,
+            };
+            let stored = crate::state::reserve_inbound_operation(op.clone())
+                .map_err(|reason| AmmError::InvalidInput { reason })?;
+            if stored.argument_digest != digest || stored.pool_id != pool_id {
+                return Err(AmmError::InvalidInput {
+                    reason: "request ID concurrently bound to different arguments".into(),
+                });
+            }
+            stored
+        }
+    };
+
+    if op.phase == Phase::Completed {
+        let gross_out = op.result_amount.ok_or(AmmError::InvalidInput {
+            reason: "completed swap is missing its output amount".into(),
+        })?;
+        let output_fee = op.output_ledger_fee.ok_or(AmmError::InvalidInput {
+            reason: "completed swap is missing its pinned output fee".into(),
+        })?;
+        return Ok(SwapResult {
+            amount_out: gross_out.saturating_sub(output_fee),
+            fee: op.result_fee.unwrap_or(0),
+        });
+    }
+    if op.phase == Phase::ProvenNoEffect {
+        return Err(AmmError::TransferFailed {
+            token: "input".into(),
+            reason: "request is terminal: ledger proved no effect".into(),
+        });
+    }
+    if op.phase == Phase::ResultUnavailable {
+        return Err(AmmError::InvalidInput {
+            reason: op.held_reason.unwrap_or_else(|| {
+                "historical result unavailable; operation will not be re-executed".into()
+            }),
+        });
+    }
+    if op.phase != Phase::Completed
+        && (op.result_amount.is_none() || op.output_ledger_fee.is_none())
+    {
+        return Err(AmmError::InvalidInput {
+            reason: "inbound operation lacks pinned output amount or fee; held without dispatch"
+                .into(),
+        });
+    }
+    if matches!(op.phase, Phase::Prepared | Phase::Held) {
+        match crate::transfers::dispatch_inbound_leg(caller, &request_id, 0).await {
+            Ok(_) => {
+                crate::state::update_inbound_operation(caller, &request_id, |x| {
+                    x.phase = Phase::InputsConfirmed
+                })
+                .map_err(|reason| AmmError::InvalidInput { reason })?;
+            }
+            Err(reason) => {
+                let leg = crate::state::inbound_operation(caller, &request_id)
+                    .map_err(|e| AmmError::InvalidInput { reason: e })?
+                    .legs[0]
+                    .clone();
+                let terminal = leg.status == LegStatus::ProvenNoEffect;
+                crate::state::update_inbound_operation(caller, &request_id, |x| {
+                    x.phase = if terminal {
+                        Phase::ProvenNoEffect
+                    } else {
+                        Phase::Held
+                    }
+                })
+                .ok();
+                if terminal {
+                    mutate_state(|s| {
+                        if let Some(p) = s.pools.get_mut(&pool_id) {
+                            p.paused = false;
+                        }
+                    });
+                }
+                return Err(AmmError::TransferFailed {
+                    token: "input".into(),
+                    reason,
+                });
+            }
+        }
+        op = crate::state::inbound_operation(caller, &request_id)
+            .map_err(|reason| AmmError::InvalidInput { reason })?;
+    }
+
+    let output_payout = if let Some(id) = op.output_payout_id {
+        id
+    } else {
+        let (ledger_out, sub_out) = read_state(|s| {
+            let p = s.pools.get(&pool_id).ok_or(AmmError::PoolNotFound)?;
+            let token_in = op.token_in.ok_or(AmmError::InvalidInput {
+                reason: "missing token direction".into(),
+            })?;
+            if token_in == p.token_a {
+                Ok((p.token_b, p.subaccount_b))
+            } else if token_in == p.token_b {
+                Ok((p.token_a, p.subaccount_a))
+            } else {
+                Err(AmmError::InvalidToken)
+            }
+        })?;
+        let pinned_fee = op.output_ledger_fee.ok_or(AmmError::InvalidInput {
+            reason: "missing pinned output ledger fee; operation remains held".into(),
+        })?;
+        let id = crate::transfers::prepare_transfer_to_user_with_fee(
+            ledger_out,
+            sub_out,
+            caller,
+            op.result_amount.ok_or(AmmError::InvalidInput {
+                reason: "confirmed input is missing its pinned output amount".into(),
+            })?,
+            pinned_fee,
+            format!(
+                "swap_v2:{}:{}",
+                caller,
+                request_id
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            ),
+        )
+        .map_err(|reason| AmmError::TransferFailed {
+            token: "output".into(),
+            reason,
+        })?;
+        crate::state::update_inbound_operation(caller, &request_id, |x| {
+            x.output_payout_id = Some(id)
+        })
+        .map_err(|reason| AmmError::InvalidInput { reason })?;
+        id
+    };
+
+    if op.phase == Phase::InputsConfirmed {
+        let token_in = op.token_in.ok_or(AmmError::InvalidToken)?;
+        let amount_out = op.result_amount.ok_or(AmmError::InvalidInput {
+            reason: "confirmed input is missing its pinned output amount".into(),
+        })?;
+        let total_fee = op.result_fee.unwrap_or(0);
+        let protocol_fee = op.protocol_fee.unwrap_or(0);
+        mutate_state(|s| {
+            let p = s
+                .pools
+                .get_mut(&pool_id)
+                .expect("persisted operation pool exists");
+            if token_in == p.token_a {
+                p.reserve_a += amount_in - protocol_fee;
+                p.protocol_fees_a += protocol_fee;
+                p.reserve_b -= amount_out;
+            } else {
+                p.reserve_b += amount_in - protocol_fee;
+                p.protocol_fees_b += protocol_fee;
+                p.reserve_a -= amount_out;
+            }
+            p.paused = true;
+            let x = s
+                .inbound_operations
+                .iter_mut()
+                .find(|x| x.caller == caller && x.request_id == request_id)
+                .expect("inbound operation exists");
+            x.phase = Phase::OutputPending;
+        });
+        op.phase = Phase::OutputPending;
+        let _ = total_fee;
+    }
+    match crate::transfers::dispatch_outbound_payout(output_payout).await {
+        Ok(_) => {
+            let token_in = op.token_in.ok_or(AmmError::InvalidToken)?;
+            let gross_out = op.result_amount.ok_or(AmmError::InvalidInput {
+                reason: "payout completed but swap output amount is missing".into(),
+            })?;
+            let output_fee = op.output_ledger_fee.ok_or(AmmError::InvalidInput {
+                reason: "payout completed but pinned output fee is missing".into(),
+            })?;
+            let (ledger_out, amount_out, total_fee) = read_state(|s| {
+                let p = s.pools.get(&pool_id).ok_or(AmmError::PoolNotFound)?;
+                let ledger = if token_in == p.token_a {
+                    p.token_b
+                } else {
+                    p.token_a
+                };
+                Ok::<_, AmmError>((
+                    ledger,
+                    op.result_amount.unwrap_or(0),
+                    op.result_fee.unwrap_or(0),
+                ))
+            })?;
+            mutate_state(|s| {
+                if let Some(p) = s.pools.get_mut(&pool_id) {
+                    p.paused = false;
+                }
+                s.record_swap_event(
+                    caller,
+                    pool_id.clone(),
+                    token_in,
+                    amount_in,
+                    ledger_out,
+                    amount_out,
+                    total_fee,
+                );
+                if let Some(i) = s
+                    .outbound_payouts
+                    .iter()
+                    .position(|p| p.id == output_payout)
+                {
+                    s.outbound_payouts.remove(i);
+                }
+                if let Some(x) = s
+                    .inbound_operations
+                    .iter_mut()
+                    .find(|x| x.caller == caller && x.request_id == request_id)
+                {
+                    x.phase = Phase::Completed;
+                }
+            });
+            analytics::invalidate_cache_for_pool(&pool_id);
+            Ok(SwapResult {
+                amount_out: gross_out.saturating_sub(output_fee),
+                fee: op.result_fee.unwrap_or(0),
+            })
+        }
+        Err(reason) => Err(AmmError::TransferFailed {
+            token: "output".into(),
+            reason,
+        }),
+    }
+}
+
 #[update]
 async fn swap(
     pool_id: PoolId,
@@ -846,142 +1285,70 @@ async fn swap(
     amount_in: u128,
     min_amount_out: u128,
 ) -> Result<SwapResult, AmmError> {
-    if read_state(|s| s.maintenance_mode) {
-        return Err(AmmError::MaintenanceMode);
-    }
-    reject_anonymous()?;
-
-    // Acquire per-pool lock to prevent interleaving attacks across await points
-    let _pool_guard = PoolGuard::new(pool_id.clone())?;
-    let caller = ic_cdk::caller();
-
-    // Read pool state
-    let (token_a, token_b, reserve_a, reserve_b, fee_bps, protocol_fee_bps, sub_a, sub_b, paused) =
-        read_state(|s| {
-            let pool = s.pools.get(&pool_id).ok_or(AmmError::PoolNotFound)?;
-            Ok::<_, AmmError>((
-                pool.token_a, pool.token_b,
-                pool.reserve_a, pool.reserve_b,
-                pool.fee_bps, pool.protocol_fee_bps,
-                pool.subaccount_a, pool.subaccount_b,
-                pool.paused,
-            ))
-        })?;
-
-    if paused {
-        return Err(AmmError::PoolPaused);
-    }
-
-    // Determine direction
-    let (reserve_in, reserve_out, sub_in, sub_out, ledger_in, ledger_out, is_a_to_b) =
-        if token_in == token_a {
-            (reserve_a, reserve_b, sub_a, sub_b, token_a, token_b, true)
-        } else if token_in == token_b {
-            (reserve_b, reserve_a, sub_b, sub_a, token_b, token_a, false)
-        } else {
-            return Err(AmmError::InvalidToken);
-        };
-
-    // Compute swap
-    let (amount_out, total_fee, protocol_fee) =
-        compute_swap(reserve_in, reserve_out, amount_in, fee_bps, protocol_fee_bps)?;
-
-    // Enforce slippage against the NET amount the taker receives. transfer_to_user
-    // pays `amount_out - ledger_fee`, so checking the gross output could let the
-    // taker receive up to one ledger fee less than `min_amount_out`. The fee
-    // lookup is cached (the transfer below reuses it), so this adds no real cost.
-    let net_out = amount_out.saturating_sub(crate::transfers::ledger_fee(ledger_out).await);
-    // Audit 2026-06-09 (IC-S-003): a zero NET output means transfer_to_user
-    // would skip the send entirely (amount_out <= ledger fee) while the input
-    // is still pulled and reserves credited, silently consuming the input for
-    // nothing. Require a positive net output regardless of min_amount_out.
-    if net_out == 0 || net_out < min_amount_out {
-        return Err(AmmError::InsufficientOutput {
-            expected_min: min_amount_out.max(1),
-            actual: net_out,
-        });
-    }
-
-    // Pull input tokens from user
-    transfer_from_user(ledger_in, caller, sub_in, amount_in)
-        .await
-        .map_err(|reason| AmmError::TransferFailed {
-            token: "input".to_string(),
-            reason,
-        })?;
-
-    // Input tokens are now on-ledger in our subaccount — record immediately
-    // so state matches on-chain reality even if the output transfer fails.
-    mutate_state(|s| {
-        let pool = s.pools.get_mut(&pool_id).expect("pool must exist: verified at start of swap");
-        if is_a_to_b {
-            pool.reserve_a += amount_in - protocol_fee;
-            pool.protocol_fees_a += protocol_fee;
-        } else {
-            pool.reserve_b += amount_in - protocol_fee;
-            pool.protocol_fees_b += protocol_fee;
-        }
-    });
-
-    // Send output tokens to user
-    match transfer_to_user(ledger_out, sub_out, caller, amount_out).await {
-        Ok(_) => {
-            // Output sent — deduct from reserves
-            mutate_state(|s| {
-                let pool = s.pools.get_mut(&pool_id).expect("pool must exist: verified at start of swap");
-                if is_a_to_b {
-                    pool.reserve_b -= amount_out;
-                } else {
-                    pool.reserve_a -= amount_out;
-                }
-            });
-        }
-        Err(reason) => {
-            // Output transfer failed — rollback input reserve change
-            mutate_state(|s| {
-                let pool = s.pools.get_mut(&pool_id).expect("pool must exist: verified at start of swap");
-                if is_a_to_b {
-                    pool.reserve_a -= amount_in - protocol_fee;
-                    pool.protocol_fees_a -= protocol_fee;
-                } else {
-                    pool.reserve_b -= amount_in - protocol_fee;
-                    pool.protocol_fees_b -= protocol_fee;
-                }
-            });
-
-            // Attempt to refund input tokens to user
-            if let Err(refund_err) = transfer_to_user(ledger_in, sub_in, caller, amount_in).await {
-                log!(INFO, "CRITICAL: swap output failed AND input refund failed for {}: {}. \
-                     Recording pending claim for {} of {} tokens.", pool_id, refund_err, amount_in, ledger_in);
-                record_pending_claim(&pool_id, caller, ledger_in, sub_in, amount_in, &format!(
-                    "Swap output transfer failed, then refund failed: {}", refund_err
-                ));
-            }
-
-            return Err(AmmError::TransferFailed {
-                token: "output".to_string(),
-                reason,
-            });
-        }
-    }
-
-    // Record swap event for explorer history
-    mutate_state(|s| {
-        s.record_swap_event(caller, pool_id.clone(), token_in, amount_in, ledger_out, amount_out, total_fee);
-    });
-    analytics::invalidate_cache_for_pool(&pool_id);
-
-    log!(INFO, "Swap on {}: {} in -> {} out (fee: {}, proto: {})",
-        pool_id, amount_in, amount_out, total_fee, protocol_fee);
-
-    Ok(SwapResult {
-        amount_out,
-        fee: total_fee,
+    let _ = (pool_id, token_in, amount_in, min_amount_out);
+    Err(AmmError::InvalidInput {
+        reason: "legacy swap is disabled; use swap_v2 with a durable request ID".to_string(),
     })
 }
 
 #[update]
+async fn swap_v2(
+    request_id: Vec<u8>,
+    pool_id: PoolId,
+    token_in: Principal,
+    amount_in: u128,
+    min_amount_out: u128,
+) -> Result<SwapResult, AmmError> {
+    #[cfg(feature = "pocketic-test")]
+    {
+        return swap_v2_inner(request_id, pool_id, token_in, amount_in, min_amount_out).await;
+    }
+    #[cfg(not(feature = "pocketic-test"))]
+    {
+        let _ = (request_id, pool_id, token_in, amount_in, min_amount_out);
+        Err(AmmError::InvalidInput {
+            reason: "swap_v2 is held pending effect-then-error and upgrade lifecycle verification"
+                .into(),
+        })
+    }
+}
+
+#[update]
 async fn add_liquidity(
+    pool_id: PoolId,
+    amount_a: u128,
+    amount_b: u128,
+    min_lp_shares: u128,
+) -> Result<u128, AmmError> {
+    let _ = (pool_id, amount_a, amount_b, min_lp_shares);
+    Err(AmmError::InvalidInput {
+        reason: "legacy add_liquidity is disabled; use add_liquidity_v2 with a durable request ID"
+            .to_string(),
+    })
+}
+
+#[update]
+async fn add_liquidity_v2(
+    request_id: Vec<u8>,
+    pool_id: PoolId,
+    amount_a: u128,
+    amount_b: u128,
+    min_lp_shares: u128,
+) -> Result<u128, AmmError> {
+    let _ = (pool_id, amount_a, amount_b, min_lp_shares);
+    if request_id.len() != 32 {
+        return Err(AmmError::InvalidInput {
+            reason: "request ID must be exactly 32 bytes".to_string(),
+        });
+    }
+    Err(AmmError::InvalidInput {
+        reason: "add_liquidity_v2 remains held until both inbound legs have durable phase replay"
+            .to_string(),
+    })
+}
+
+#[allow(dead_code)]
+async fn add_liquidity_legacy_disabled(
     pool_id: PoolId,
     amount_a: u128,
     amount_b: u128,
@@ -1000,10 +1367,13 @@ async fn add_liquidity(
         read_state(|s| {
             let pool = s.pools.get(&pool_id).ok_or(AmmError::PoolNotFound)?;
             Ok::<_, AmmError>((
-                pool.token_a, pool.token_b,
-                pool.reserve_a, pool.reserve_b,
+                pool.token_a,
+                pool.token_b,
+                pool.reserve_a,
+                pool.reserve_b,
                 pool.total_lp_shares,
-                pool.subaccount_a, pool.subaccount_b,
+                pool.subaccount_a,
+                pool.subaccount_b,
                 pool.paused,
             ))
         })?;
@@ -1027,8 +1397,23 @@ async fn add_liquidity(
         });
     }
 
-    // Pull both tokens from user.
-    // If token_b transfer fails after token_a succeeded, refund token_a.
+    // Reserve the only possible outbound leg before either deposit transfer.
+    let refund_payout = crate::transfers::prepare_transfer_to_user(
+        token_a,
+        sub_a,
+        caller,
+        amount_a,
+        format!("add_liquidity_refund:{}:{}", pool_id, caller),
+    )
+    .await
+    .map_err(|reason| AmmError::TransferFailed {
+        token: "refund".to_string(),
+        reason,
+    })?;
+
+    // Pull both tokens from user. If token B fails, dispatch the already
+    // journaled token A refund. Ambiguous refunds stay held and are never
+    // converted into a separately allocated pending claim.
     transfer_from_user(token_a, caller, sub_a, amount_a)
         .await
         .map_err(|reason| AmmError::TransferFailed {
@@ -1037,17 +1422,31 @@ async fn add_liquidity(
         })?;
 
     if let Err(reason) = transfer_from_user(token_b, caller, sub_b, amount_b).await {
-        // Refund token_a back to user. If refund fails, record a pending claim.
-        if let Err(refund_err) = transfer_to_user(token_a, sub_a, caller, amount_a).await {
-            log!(INFO, "CRITICAL: token_b transfer failed AND token_a refund failed: {}. \
-                 Recording pending claim for {} of token_a in pool {}.", refund_err, amount_a, pool_id);
-            record_pending_claim(&pool_id, caller, token_a, sub_a, amount_a, &format!(
-                "add_liquidity token_b failed, then token_a refund failed: {}", refund_err
-            ));
-        }
+        // The A refund itself may commit before the callback traps. Keep pool
+        // pricing disabled until that exact refund identity is confirmed.
+        mutate_state(|s| {
+            if let Some(pool) = s.pools.get_mut(&pool_id) {
+                pool.paused = true;
+            }
+        });
+        let refund = crate::transfers::dispatch_outbound_payout(refund_payout).await;
         return Err(AmmError::TransferFailed {
             token: "token_b".to_string(),
-            reason,
+            reason: match refund {
+                Ok(_) => {
+                    let _ = crate::state::finish_outbound_payout(refund_payout);
+                    mutate_state(|s| {
+                        if let Some(pool) = s.pools.get_mut(&pool_id) {
+                            pool.paused = false;
+                        }
+                    });
+                    reason
+                }
+                Err(refund_err) => format!(
+                    "{}; token_a refund intent {} is held: {}",
+                    reason, refund_payout, refund_err
+                ),
+            },
         });
     }
 
@@ -1071,12 +1470,18 @@ async fn add_liquidity(
         if was_first_liquidity {
             // First deposit: lock MINIMUM_LIQUIDITY to zero address.
             let user_shares = shares - MINIMUM_LIQUIDITY;
-            pool.lp_shares.insert(Principal::anonymous(), MINIMUM_LIQUIDITY);
+            pool.lp_shares
+                .insert(Principal::anonymous(), MINIMUM_LIQUIDITY);
             *pool.lp_shares.entry(caller).or_insert(0) += user_shares;
             pool.total_lp_shares = shares;
 
-            log!(INFO, "Initial liquidity for {}: {} shares ({} locked)",
-                pool_id, shares, MINIMUM_LIQUIDITY);
+            log!(
+                INFO,
+                "Initial liquidity for {}: {} shares ({} locked)",
+                pool_id,
+                shares,
+                MINIMUM_LIQUIDITY
+            );
         } else {
             *pool.lp_shares.entry(caller).or_insert(0) += shares;
             pool.total_lp_shares += shares;
@@ -1116,20 +1521,48 @@ async fn add_liquidity(
                 pool.total_lp_shares,
             );
             pool.pending_no_lp = 0;
-            log!(INFO, "[add_liquidity] drained pending_no_lp {} into acc for pool {}", buffered, pool_id);
+            log!(
+                INFO,
+                "[add_liquidity] drained pending_no_lp {} into acc for pool {}",
+                buffered,
+                pool_id
+            );
+        }
+
+        // Release the unused refund reservation atomically with accounting for
+        // both confirmed deposits.
+        if let Some(idx) = s
+            .outbound_payouts
+            .iter()
+            .position(|p| p.id == refund_payout)
+        {
+            s.outbound_payouts.remove(idx);
         }
     });
 
     mutate_state(|s| {
         s.record_liquidity_event(
-            caller, pool_id.clone(), AmmLiquidityAction::AddLiquidity,
-            token_a, amount_a, token_b, amount_b, shares,
+            caller,
+            pool_id.clone(),
+            AmmLiquidityAction::AddLiquidity,
+            token_a,
+            amount_a,
+            token_b,
+            amount_b,
+            shares,
         );
     });
     analytics::invalidate_cache_for_pool(&pool_id);
 
-    log!(INFO, "Add liquidity to {}: ({}, {}) -> {} shares for {}",
-        pool_id, amount_a, amount_b, shares, caller);
+    log!(
+        INFO,
+        "Add liquidity to {}: ({}, {}) -> {} shares for {}",
+        pool_id,
+        amount_a,
+        amount_b,
+        shares,
+        caller
+    );
 
     Ok(shares)
 }
@@ -1157,10 +1590,13 @@ async fn remove_liquidity(
             let pool = s.pools.get(&pool_id).ok_or(AmmError::PoolNotFound)?;
             let user_shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
             Ok::<_, AmmError>((
-                pool.token_a, pool.token_b,
-                pool.reserve_a, pool.reserve_b,
+                pool.token_a,
+                pool.token_b,
+                pool.reserve_a,
+                pool.reserve_b,
                 pool.total_lp_shares,
-                pool.subaccount_a, pool.subaccount_b,
+                pool.subaccount_a,
+                pool.subaccount_b,
                 user_shares,
                 pool.paused,
             ))
@@ -1177,18 +1613,52 @@ async fn remove_liquidity(
         });
     }
 
-    let (amount_a, amount_b) = compute_remove_liquidity(lp_shares, reserve_a, reserve_b, total_shares)?;
+    let (amount_a, amount_b) =
+        compute_remove_liquidity(lp_shares, reserve_a, reserve_b, total_shares)?;
 
     // Enforce slippage against the NET amounts the withdrawer receives (each leg
     // pays `amount - ledger_fee`), so min_amount_a/b are true minimums received.
     // Fee lookups are cached (the transfers below reuse them).
-    let net_a = amount_a.saturating_sub(crate::transfers::ledger_fee(token_a).await);
-    let net_b = amount_b.saturating_sub(crate::transfers::ledger_fee(token_b).await);
+    let fee_a = crate::transfers::ledger_fee_strict(token_a)
+        .await
+        .map_err(|reason| AmmError::TransferFailed {
+            token: "token_a".to_string(),
+            reason,
+        })?;
+    let fee_b = crate::transfers::ledger_fee_strict(token_b)
+        .await
+        .map_err(|reason| AmmError::TransferFailed {
+            token: "token_b".to_string(),
+            reason,
+        })?;
+    // Fee lookups yielded. Revalidate every value that determines this
+    // removal before reserving either payout or burning LP shares.
+    let snapshot_unchanged = read_state(|s| {
+        s.pools.get(&pool_id).map(|pool| {
+            !pool.paused
+                && pool.token_a == token_a
+                && pool.token_b == token_b
+                && pool.reserve_a == reserve_a
+                && pool.reserve_b == reserve_b
+                && pool.total_lp_shares == total_shares
+                && pool.subaccount_a == sub_a
+                && pool.subaccount_b == sub_b
+                && pool.lp_shares.get(&caller).copied().unwrap_or(0) == user_shares
+        }) == Some(true)
+    });
+    if !snapshot_unchanged {
+        return Err(AmmError::PoolBusy);
+    }
+    let net_a = amount_a.saturating_sub(fee_a);
+    let net_b = amount_b.saturating_sub(fee_b);
     // Audit 2026-06-09 (IC-S-003): a payable leg that nets to zero would be
     // silently consumed (shares burned, reserves debited, nothing sent).
     // Reject the whole removal up front, before the LP burn.
     if (amount_a > 0 && net_a == 0) || (amount_b > 0 && net_b == 0) {
-        return Err(AmmError::InsufficientOutput { expected_min: 1, actual: 0 });
+        return Err(AmmError::InsufficientOutput {
+            expected_min: 1,
+            actual: 0,
+        });
     }
     if net_a < min_amount_a || net_b < min_amount_b {
         return Err(AmmError::InsufficientOutput {
@@ -1196,6 +1666,50 @@ async fn remove_liquidity(
             actual: net_a.min(net_b),
         });
     }
+
+    // Reserve both output intents before burning shares. If the second slot
+    // cannot be obtained, release the first without touching LP accounting.
+    let payout_a = if amount_a > 0 {
+        Some(
+            crate::transfers::prepare_transfer_to_user_with_fee(
+                token_a,
+                sub_a,
+                caller,
+                amount_a,
+                fee_a,
+                format!("remove_liquidity_a:{}:{}", pool_id, caller),
+            )
+            .map_err(|reason| AmmError::TransferFailed {
+                token: "token_a".to_string(),
+                reason,
+            })?,
+        )
+    } else {
+        None
+    };
+    let payout_b = if amount_b > 0 {
+        match crate::transfers::prepare_transfer_to_user_with_fee(
+            token_b,
+            sub_b,
+            caller,
+            amount_b,
+            fee_b,
+            format!("remove_liquidity_b:{}:{}", pool_id, caller),
+        ) {
+            Ok(id) => Some(id),
+            Err(reason) => {
+                if let Some(id) = payout_a {
+                    let _ = crate::state::finish_outbound_payout(id);
+                }
+                return Err(AmmError::TransferFailed {
+                    token: "token_b".to_string(),
+                    reason,
+                });
+            }
+        }
+    } else {
+        None
+    };
 
     // Burn LP shares and update reserves FIRST (optimistic),
     // then transfer tokens. This ensures the protocol never overpays
@@ -1226,6 +1740,9 @@ async fn remove_liquidity(
         pool.total_lp_shares -= lp_shares;
         pool.reserve_a -= amount_a;
         pool.reserve_b -= amount_b;
+        // A callback trap after either payout dispatch must not leave a pool
+        // with debited reserves available to new pricing operations.
+        pool.paused = true;
 
         // 3. Reset reward_debt to the post-update share count.
         // Same accumulator (no drain in this path). If both shares and
@@ -1241,49 +1758,79 @@ async fn remove_liquidity(
         if should_prune {
             pool.lp_rewards.remove(&caller);
         }
+        // The liquidity event describes the committed AMM accounting change
+        // (shares burned and reserves debited), not successful delivery of
+        // either external token leg. Record it in the same durable mutation so
+        // a trap or ambiguous payout cannot erase the reserve transition.
+        s.record_liquidity_event(
+            caller,
+            pool_id.clone(),
+            AmmLiquidityAction::RemoveLiquidity,
+            token_a,
+            amount_a,
+            token_b,
+            amount_b,
+            lp_shares,
+        );
     });
 
-    // Send tokens to user. If either fails, shares are already burned
-    // but tokens remain in the pool subaccount. Record pending claims.
+    // Send each independently. An error may follow an applied transfer, so
+    // retain its original intent and never create a fresh claim/retry identity.
     let mut transfer_errors = Vec::new();
 
-    if amount_a > 0 {
-        if let Err(reason) = transfer_to_user(token_a, sub_a, caller, amount_a).await {
-            log!(INFO, "WARN: remove_liquidity transfer_a failed for {}: {}. Recording pending claim.", pool_id, reason);
-            record_pending_claim(&pool_id, caller, token_a, sub_a, amount_a, &format!(
-                "remove_liquidity transfer_a failed: {}", reason
-            ));
-            transfer_errors.push(format!("token_a: {}", reason));
+    if let Some(id) = payout_a {
+        match crate::transfers::dispatch_outbound_payout(id).await {
+            Ok(_) => {
+                let _ = crate::state::finish_outbound_payout(id);
+            }
+            Err(reason) => {
+                transfer_errors.push(format!("token_a intent {}: {}", id, reason));
+            }
         }
     }
 
-    if amount_b > 0 {
-        if let Err(reason) = transfer_to_user(token_b, sub_b, caller, amount_b).await {
-            log!(INFO, "WARN: remove_liquidity transfer_b failed for {}: {}. Recording pending claim.", pool_id, reason);
-            record_pending_claim(&pool_id, caller, token_b, sub_b, amount_b, &format!(
-                "remove_liquidity transfer_b failed: {}", reason
-            ));
-            transfer_errors.push(format!("token_b: {}", reason));
+    if let Some(id) = payout_b {
+        match crate::transfers::dispatch_outbound_payout(id).await {
+            Ok(_) => {
+                let _ = crate::state::finish_outbound_payout(id);
+            }
+            Err(reason) => {
+                transfer_errors.push(format!("token_b intent {}: {}", id, reason));
+            }
         }
     }
 
     if !transfer_errors.is_empty() {
+        mutate_state(|s| {
+            if let Some(pool) = s.pools.get_mut(&pool_id) {
+                pool.paused = true;
+            }
+        });
         return Err(AmmError::TransferFailed {
             token: "output".to_string(),
-            reason: format!("{}. Pending claims recorded — retry via claim_pending().", transfer_errors.join("; ")),
+            reason: format!(
+                "ambiguous payout held; pool paused for reconciliation: {}",
+                transfer_errors.join("; ")
+            ),
         });
     }
 
     mutate_state(|s| {
-        s.record_liquidity_event(
-            caller, pool_id.clone(), AmmLiquidityAction::RemoveLiquidity,
-            token_a, amount_a, token_b, amount_b, lp_shares,
-        );
+        if let Some(pool) = s.pools.get_mut(&pool_id) {
+            pool.paused = false;
+        }
     });
     analytics::invalidate_cache_for_pool(&pool_id);
 
-    log!(INFO, "Remove liquidity from {}: {} shares -> ({}, {}) for {}",
-        pool_id, lp_shares, amount_a, amount_b, caller);
+    log!(
+        INFO,
+        "Remove liquidity from {}: {} shares -> ({}, {}) for {}",
+        pool_id,
+        lp_shares,
+        amount_a,
+        amount_b,
+        caller
+    );
 
     Ok((amount_a, amount_b))
 }
@@ -1297,9 +1844,7 @@ fn get_pool(pool_id: PoolId) -> Option<PoolInfo> {
 
 #[query]
 fn get_pools() -> Vec<PoolInfo> {
-    read_state(|s| {
-        s.pools.iter().map(|(id, p)| p.to_info(id)).collect()
-    })
+    read_state(|s| s.pools.iter().map(|(id, p)| p.to_info(id)).collect())
 }
 
 #[query]
@@ -1316,7 +1861,11 @@ fn get_quote(pool_id: PoolId, token_in: Principal, amount_in: u128) -> Result<u1
         };
 
         let (amount_out, _, _) = compute_swap(
-            reserve_in, reserve_out, amount_in, pool.fee_bps, pool.protocol_fee_bps,
+            reserve_in,
+            reserve_out,
+            amount_in,
+            pool.fee_bps,
+            pool.protocol_fee_bps,
         )?;
         Ok(amount_out)
     })
@@ -1449,7 +1998,8 @@ fn get_amm_admin_event_count() -> u64 {
 #[query]
 fn get_holder_snapshots(token: String, start: u64, length: u64) -> Vec<HolderSnapshot> {
     read_state(|s| {
-        let filtered: Vec<&HolderSnapshot> = s.holder_snapshots
+        let filtered: Vec<&HolderSnapshot> = s
+            .holder_snapshots
             .iter()
             .filter(|snap| snap.token == token)
             .collect();
@@ -1466,7 +2016,10 @@ fn get_holder_snapshots(token: String, start: u64, length: u64) -> Vec<HolderSna
 #[query]
 fn get_holder_snapshot_count(token: String) -> u64 {
     read_state(|s| {
-        s.holder_snapshots.iter().filter(|snap| snap.token == token).count() as u64
+        s.holder_snapshots
+            .iter()
+            .filter(|snap| snap.token == token)
+            .count() as u64
     })
 }
 
@@ -1537,7 +2090,10 @@ fn get_amm_swap_events_by_time_range(query: AmmEventsByTimeRangeQuery) -> Vec<Am
 }
 
 #[query]
-pub fn get_amm_reward_series(pool_id: PoolId, window_days: u32) -> Vec<crate::analytics::DailyRewardPoint> {
+pub fn get_amm_reward_series(
+    pool_id: PoolId,
+    window_days: u32,
+) -> Vec<crate::analytics::DailyRewardPoint> {
     read_state(|s| {
         crate::analytics::build_reward_series(
             &s.reward_events,
@@ -1552,7 +2108,8 @@ pub fn get_amm_reward_series(pool_id: PoolId, window_days: u32) -> Vec<crate::an
 pub fn get_amm_tvl_series(pool_id: PoolId, window_days: u32) -> Vec<TvlSample> {
     read_state(|s| {
         let now = ic_cdk::api::time();
-        let cutoff = now.saturating_sub((window_days as u64).saturating_mul(86_400 * 1_000_000_000));
+        let cutoff =
+            now.saturating_sub((window_days as u64).saturating_mul(86_400 * 1_000_000_000));
         s.tvl_samples
             .iter()
             .filter(|s| s.pool_id == pool_id && s.timestamp >= cutoff)
@@ -1630,11 +2187,9 @@ fn http_request(req: HttpRequest) -> HttpResponse {
                 .with_body_and_content_length(format!("{}", supply_e8s))
                 .build()
         }
-        _ => {
-            HttpResponseBuilder::not_found()
-                .with_body_and_content_length("Not found")
-                .build()
-        }
+        _ => HttpResponseBuilder::not_found()
+            .with_body_and_content_length("Not found")
+            .build(),
     }
 }
 

@@ -57,7 +57,10 @@ pub struct ErrorInfo {
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub enum Icrc21Error {
-    GenericError { error_code: u64, description: String },
+    GenericError {
+        error_code: u64,
+        description: String,
+    },
     UnsupportedCanisterCall(ErrorInfo),
     ConsentMessageUnavailable(ErrorInfo),
 }
@@ -79,44 +82,46 @@ pub struct StandardRecord {
 
 fn generate_consent_message(method: &str) -> String {
     match method {
-        "swap" => {
-            "## Swap Tokens\n\n\
+        "swap" => "## Swap Tokens\n\n\
             You are swapping tokens in the Rumi AMM.\n\n\
             This will:\n\
             - Transfer your input token to the pool\n\
             - Receive the output token in return\n\n\
-            *A swap fee applies (set by the pool).*".to_string()
-        }
+            *A swap fee applies (set by the pool).*"
+            .to_string(),
 
-        "add_liquidity" => {
-            "## Add Liquidity\n\n\
+        "add_liquidity" => "## Add Liquidity\n\n\
             You are adding liquidity to a Rumi AMM pool.\n\n\
             This will:\n\
             - Transfer both tokens to the pool\n\
             - Mint LP shares representing your position\n\n\
-            *You can withdraw your liquidity at any time.*".to_string()
-        }
+            *You can withdraw your liquidity at any time.*"
+            .to_string(),
 
-        "remove_liquidity" => {
-            "## Remove Liquidity\n\n\
+        "remove_liquidity" => "## Remove Liquidity\n\n\
             You are withdrawing liquidity from a Rumi AMM pool.\n\n\
             This will:\n\
             - Burn your LP shares\n\
             - Return a proportional share of both tokens\n\n\
-            *No fee for withdrawal.*".to_string()
-        }
+            *No fee for withdrawal.*"
+            .to_string(),
 
-        "claim_pending" => {
-            "## Claim Pending Tokens\n\n\
+        "claim_pending" => "## Claim Pending Tokens\n\n\
             You are retrying a previously failed token transfer.\n\n\
             This will:\n\
             - Transfer tokens owed to you from a prior operation\n\n\
-            *No additional fee applies.*".to_string()
-        }
+            *No additional fee applies.*"
+            .to_string(),
 
         // Query methods
-        "health" | "get_pool" | "get_pools" | "get_quote" | "get_lp_balance" |
-        "is_pool_creation_open" | "is_maintenance_mode" | "get_pending_claims" => {
+        "health"
+        | "get_pool"
+        | "get_pools"
+        | "get_quote"
+        | "get_lp_balance"
+        | "is_pool_creation_open"
+        | "is_maintenance_mode"
+        | "get_pending_claims" => {
             format!(
                 "## Query: {}\n\n\
                 This is a read-only query that does not modify any state.",
@@ -125,9 +130,15 @@ fn generate_consent_message(method: &str) -> String {
         }
 
         // Admin methods
-        "create_pool" | "set_fee" | "set_protocol_fee" | "withdraw_protocol_fees" |
-        "pause_pool" | "unpause_pool" | "set_pool_creation_open" |
-        "set_maintenance_mode" | "resolve_pending_claim" => {
+        "create_pool"
+        | "set_fee"
+        | "set_protocol_fee"
+        | "withdraw_protocol_fees"
+        | "pause_pool"
+        | "unpause_pool"
+        | "set_pool_creation_open"
+        | "set_maintenance_mode"
+        | "resolve_pending_claim" => {
             format!(
                 "## Admin: {}\n\n\
                 You are calling an admin method on the Rumi AMM.\n\n\
@@ -155,7 +166,10 @@ pub fn icrc21_canister_call_consent_message(
     let message = generate_consent_message(&request.method);
 
     let consent_message = match &request.user_preferences.device_spec {
-        Some(DeviceSpec::LineDisplay { characters_per_line, lines_per_page }) => {
+        Some(DeviceSpec::LineDisplay {
+            characters_per_line,
+            lines_per_page,
+        }) => {
             let chars = *characters_per_line as usize;
             let lines = *lines_per_page as usize;
 
@@ -197,7 +211,9 @@ pub fn icrc21_canister_call_consent_message(
 
             let pages: Vec<LineDisplayPage> = all_lines
                 .chunks(lines)
-                .map(|chunk| LineDisplayPage { lines: chunk.to_vec() })
+                .map(|chunk| LineDisplayPage {
+                    lines: chunk.to_vec(),
+                })
                 .collect();
 
             ConsentMessage::LineDisplayMessage { pages }

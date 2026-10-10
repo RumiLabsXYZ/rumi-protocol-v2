@@ -47,6 +47,56 @@ type SwapResult = record {
   fee : nat;
 };
 
+type InboundOperationKind = variant { Swap; AddLiquidity };
+type InboundLegStatus = variant {
+  Prepared;
+  Confirmed : nat64;
+  ProvenNoEffect;
+  Ambiguous;
+};
+type InboundOperationPhase = variant {
+  Prepared;
+  InputsConfirmed;
+  OutputPending;
+  Completed;
+  ProvenNoEffect;
+  Held;
+  ResultUnavailable;
+};
+type InboundLeg = record {
+  ledger : principal;
+  from : principal;
+  to_subaccount : opt blob;
+  amount : nat;
+  fee : opt nat;
+  memo : blob;
+  created_at_time : nat64;
+  status : InboundLegStatus;
+};
+type InboundOperation = record {
+  request_id : blob;
+  caller : principal;
+  pool_id : text;
+  kind : InboundOperationKind;
+  argument_digest : blob;
+  legs : vec InboundLeg;
+  created_at_time : nat64;
+  phase : InboundOperationPhase;
+  output_payout_id : opt nat64;
+  result_amount : opt nat;
+  output_ledger_fee : opt nat;
+  result_fee : opt nat;
+  protocol_fee : opt nat;
+  token_in : opt principal;
+  sequence_managed : opt bool;
+  held_reason : opt text;
+};
+type OutboundPayoutStatus = variant { Reserved; Dispatched; Ambiguous };
+type InboundOperationStatus = record {
+  operation : InboundOperation;
+  linked_payout_status : opt OutboundPayoutStatus;
+};
+
 type PendingClaim = record {
   id : nat64;
   pool_id : text;
@@ -333,13 +383,17 @@ service : (AmmInitArgs) -> {
 
   // ── Core AMM ──
   swap : (text, principal, nat, nat) -> (variant { Ok : SwapResult; Err : AmmError });
+  swap_v2 : (blob, text, principal, nat, nat) -> (variant { Ok : SwapResult; Err : AmmError });
   add_liquidity : (text, nat, nat, nat) -> (variant { Ok : nat; Err : AmmError });
+  add_liquidity_v2 : (blob, text, nat, nat, nat) -> (variant { Ok : nat; Err : AmmError });
   remove_liquidity : (text, nat, nat, nat) -> (variant { Ok : record { nat; nat }; Err : AmmError });
 
   // ── Queries ──
   get_pool : (text) -> (opt PoolInfo) query;
   get_pools : () -> (vec PoolInfo) query;
   get_quote : (text, principal, nat) -> (variant { Ok : nat; Err : AmmError }) query;
+  get_next_inbound_sequence : () -> (variant { Ok : nat64; Err : AmmError }) query;
+  get_inbound_operation : (blob) -> (variant { Ok : InboundOperationStatus; Err : AmmError }) query;
   get_lp_balance : (text, principal) -> (nat) query;
 
   is_pool_creation_open : () -> (bool) query;

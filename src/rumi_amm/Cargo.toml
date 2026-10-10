@@ -7,6 +7,12 @@ edition = "2021"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+# Exposes deterministic fixture-only controls in the PocketIC wasm used by the
+# failure-injection integration suite. Never enable this for release artifacts.
+pocketic-test = []
+
 [dependencies]
 candid = "0.10.6"
 ic-cdk = "0.12.0"

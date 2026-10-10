@@ -271,9 +271,19 @@ pub fn get_balance_series(query: AmmSeriesQuery) -> Vec<AmmBalancePoint> {
         // Collect per-pool events into a single timeline.
         #[derive(Clone, Copy)]
         enum Delta {
-            Swap { in_is_a: bool, amount_in: u128, amount_out: u128 },
-            AddLiq { amount_a: u128, amount_b: u128 },
-            RemoveLiq { amount_a: u128, amount_b: u128 },
+            Swap {
+                in_is_a: bool,
+                amount_in: u128,
+                amount_out: u128,
+            },
+            AddLiq {
+                amount_a: u128,
+                amount_b: u128,
+            },
+            RemoveLiq {
+                amount_a: u128,
+                amount_b: u128,
+            },
         }
 
         let mut timeline: Vec<(u64, Delta)> = Vec::new();
@@ -333,7 +343,11 @@ pub fn get_balance_series(query: AmmSeriesQuery) -> Vec<AmmBalancePoint> {
         for boundary in boundaries.iter() {
             while idx < timeline.len() && timeline[idx].0 > *boundary {
                 match timeline[idx].1 {
-                    Delta::Swap { in_is_a, amount_in, amount_out } => {
+                    Delta::Swap {
+                        in_is_a,
+                        amount_in,
+                        amount_out,
+                    } => {
                         if in_is_a {
                             reserve_a -= amount_in as i128;
                             reserve_b += amount_out as i128;
@@ -729,7 +743,10 @@ pub fn build_reward_series(
     }
     buckets
         .into_iter()
-        .map(|(day_start_ns, amount)| DailyRewardPoint { day_start_ns, amount })
+        .map(|(day_start_ns, amount)| DailyRewardPoint {
+            day_start_ns,
+            amount,
+        })
         .collect()
 }
 
@@ -791,7 +808,15 @@ mod tests {
         clear_all_caches();
     }
 
-    fn push_swap(pool_id: &str, caller: Principal, ts_ns: u64, token_in_is_a: bool, amount_in: u128, amount_out: u128, fee: u128) {
+    fn push_swap(
+        pool_id: &str,
+        caller: Principal,
+        ts_ns: u64,
+        token_in_is_a: bool,
+        amount_in: u128,
+        amount_out: u128,
+        fee: u128,
+    ) {
         mutate_state(|s| {
             let pool = s.pools.get(pool_id).expect("pool exists");
             let (token_in, token_out) = if token_in_is_a {
@@ -815,7 +840,15 @@ mod tests {
         });
     }
 
-    fn push_liquidity(pool_id: &str, caller: Principal, ts_ns: u64, add: bool, amount_a: u128, amount_b: u128, shares: u128) {
+    fn push_liquidity(
+        pool_id: &str,
+        caller: Principal,
+        ts_ns: u64,
+        add: bool,
+        amount_a: u128,
+        amount_b: u128,
+        shares: u128,
+    ) {
         mutate_state(|s| {
             let pool = s.pools.get(pool_id).expect("pool exists");
             let (ta, tb) = (pool.token_a, pool.token_b);
@@ -824,7 +857,11 @@ mod tests {
                 id,
                 caller,
                 pool_id: pool_id.to_string(),
-                action: if add { AmmLiquidityAction::AddLiquidity } else { AmmLiquidityAction::RemoveLiquidity },
+                action: if add {
+                    AmmLiquidityAction::AddLiquidity
+                } else {
+                    AmmLiquidityAction::RemoveLiquidity
+                },
                 token_a: ta,
                 amount_a,
                 token_b: tb,
@@ -837,15 +874,31 @@ mod tests {
     }
 
     // Fix test time to a round value so bucket math is predictable.
-    fn t0() -> u64 { 1_700_000_000 * NANOS_PER_SEC }
-    fn minutes(n: u64) -> u64 { n * 60 * NANOS_PER_SEC }
+    fn t0() -> u64 {
+        1_700_000_000 * NANOS_PER_SEC
+    }
+    fn minutes(n: u64) -> u64 {
+        n * 60 * NANOS_PER_SEC
+    }
 
     #[test]
     fn window_duration_resolves_correctly() {
-        assert_eq!(window_duration_ns(AmmStatsWindow::Hour), Some(3_600 * NANOS_PER_SEC));
-        assert_eq!(window_duration_ns(AmmStatsWindow::Day), Some(86_400 * NANOS_PER_SEC));
-        assert_eq!(window_duration_ns(AmmStatsWindow::Week), Some(604_800 * NANOS_PER_SEC));
-        assert_eq!(window_duration_ns(AmmStatsWindow::Month), Some(2_592_000 * NANOS_PER_SEC));
+        assert_eq!(
+            window_duration_ns(AmmStatsWindow::Hour),
+            Some(3_600 * NANOS_PER_SEC)
+        );
+        assert_eq!(
+            window_duration_ns(AmmStatsWindow::Day),
+            Some(86_400 * NANOS_PER_SEC)
+        );
+        assert_eq!(
+            window_duration_ns(AmmStatsWindow::Week),
+            Some(604_800 * NANOS_PER_SEC)
+        );
+        assert_eq!(
+            window_duration_ns(AmmStatsWindow::Month),
+            Some(2_592_000 * NANOS_PER_SEC)
+        );
         assert_eq!(window_duration_ns(AmmStatsWindow::All), None);
     }
 
@@ -875,7 +928,11 @@ mod tests {
             window: AmmStatsWindow::Hour,
             points: 10,
         });
-        assert!(vol.is_empty(), "expected empty volume series, got {:?}", vol);
+        assert!(
+            vol.is_empty(),
+            "expected empty volume series, got {:?}",
+            vol
+        );
     }
 
     #[test]
@@ -935,8 +992,8 @@ mod tests {
         let now = t0() + minutes(60);
         set_test_time(now);
 
-        push_swap("testpool", alice(), t0() + minutes(2), true, 100, 90, 3);  // fee on a
-        push_swap("testpool", bob(), t0() + minutes(4), false, 50, 25, 1);    // fee on b
+        push_swap("testpool", alice(), t0() + minutes(2), true, 100, 90, 3); // fee on a
+        push_swap("testpool", bob(), t0() + minutes(4), false, 50, 25, 1); // fee on b
         push_swap("testpool", carol(), t0() + minutes(30), true, 200, 180, 6); // fee on a, different bucket
 
         let series = get_fee_series(AmmSeriesQuery {
@@ -1125,7 +1182,15 @@ mod tests {
         set_test_time(now);
 
         // Add liquidity event +500 a, +1000 b (so before: a=1B-500, b=2B-1000)
-        push_liquidity("testpool", alice(), t0() + minutes(30), true, 500, 1000, 10_000);
+        push_liquidity(
+            "testpool",
+            alice(),
+            t0() + minutes(30),
+            true,
+            500,
+            1000,
+            10_000,
+        );
 
         let series = get_balance_series(AmmSeriesQuery {
             pool: "testpool".into(),
@@ -1160,7 +1225,11 @@ mod tests {
             window: AmmStatsWindow::Hour,
             points: 10,
         });
-        assert_eq!(cached_again.len(), 1, "cache should still return stale result inside TTL");
+        assert_eq!(
+            cached_again.len(),
+            1,
+            "cache should still return stale result inside TTL"
+        );
 
         invalidate_cache_for_pool(&"testpool".to_string());
 
@@ -1190,18 +1259,27 @@ mod reward_series_tests {
         let now = 100 * NS_PER_DAY;
         let events = vec![
             AmmRewardEvent {
-                id: 0, pool_id: "3USD_ICP".into(),
-                amount: 100, total_shares_at_time: 1000, nonce: 0,
+                id: 0,
+                pool_id: "3USD_ICP".into(),
+                amount: 100,
+                total_shares_at_time: 1000,
+                nonce: 0,
                 timestamp: 99 * NS_PER_DAY,
             },
             AmmRewardEvent {
-                id: 1, pool_id: "3USD_ICP".into(),
-                amount: 200, total_shares_at_time: 1000, nonce: 1,
+                id: 1,
+                pool_id: "3USD_ICP".into(),
+                amount: 200,
+                total_shares_at_time: 1000,
+                nonce: 1,
                 timestamp: 99 * NS_PER_DAY + 3600 * 1_000_000_000,
             },
             AmmRewardEvent {
-                id: 2, pool_id: "3USD_ICP".into(),
-                amount: 50, total_shares_at_time: 1000, nonce: 2,
+                id: 2,
+                pool_id: "3USD_ICP".into(),
+                amount: 50,
+                total_shares_at_time: 1000,
+                nonce: 2,
                 timestamp: 92 * NS_PER_DAY, // outside 7d window
             },
         ];
@@ -1215,13 +1293,19 @@ mod reward_series_tests {
         let now = 100 * NS_PER_DAY;
         let events = vec![
             AmmRewardEvent {
-                id: 0, pool_id: "3USD_ICP".into(),
-                amount: 100, total_shares_at_time: 1000, nonce: 0,
+                id: 0,
+                pool_id: "3USD_ICP".into(),
+                amount: 100,
+                total_shares_at_time: 1000,
+                nonce: 0,
                 timestamp: 99 * NS_PER_DAY,
             },
             AmmRewardEvent {
-                id: 1, pool_id: "OTHER".into(),
-                amount: 999, total_shares_at_time: 1000, nonce: 1,
+                id: 1,
+                pool_id: "OTHER".into(),
+                amount: 999,
+                total_shares_at_time: 1000,
+                nonce: 1,
                 timestamp: 99 * NS_PER_DAY,
             },
         ];

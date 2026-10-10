@@ -202,10 +202,9 @@ mod tests {
 
     #[test]
     fn test_proportional_lp_shares() {
-        let shares = compute_proportional_lp_shares(
-            500_000, 500_000, 1_000_000, 1_000_000, 1_000_000,
-        )
-        .unwrap();
+        let shares =
+            compute_proportional_lp_shares(500_000, 500_000, 1_000_000, 1_000_000, 1_000_000)
+                .unwrap();
         assert_eq!(shares, 500_000);
     }
 

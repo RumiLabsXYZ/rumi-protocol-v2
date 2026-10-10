@@ -1,11 +1,12 @@
+use candid::{CandidType, Decode, Encode, Principal};
+use ic_canister_log::log;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use candid::{CandidType, Principal, Decode, Encode};
-use ic_canister_log::log;
-use serde::{Serialize, Deserialize};
 
-use crate::types::*;
 use crate::logs::INFO;
+use crate::types::*;
 
 // ─── Event log caps ───
 // Prevents unbounded heap growth that could brick the canister by causing
@@ -17,13 +18,16 @@ pub const MAX_LIQUIDITY_EVENTS: usize = 50_000;
 pub const MAX_ADMIN_EVENTS: usize = 10_000;
 pub const MAX_HOLDER_SNAPSHOTS: usize = 1_000; // ~500 days at 2/day
 pub const MAX_PENDING_CLAIMS: usize = 1_000;
+/// Maximum number of outstanding outbound transfers. Ambiguous rows are never
+/// evicted; new value-moving operations fail closed when this capacity is full.
+pub const MAX_OUTBOUND_PAYOUTS: usize = 1_000;
 pub const MAX_REWARD_EVENTS: usize = 50_000;
 pub const MAX_CLAIM_EVENTS: usize = 50_000;
 pub const MAX_PROCESSED_NONCES: usize = 1024;
 pub const REWARD_SCALE: u128 = 1_000_000_000_000; // 1e12 fixed-point for acc_reward_per_share
 /// Minimum claimable amount: 10x the live icUSD ledger fee (100_000 e8s =
 /// 0.001 icUSD), i.e. 1_000_000 e8s = 0.01 icUSD. `claim_rewards` pays out
-/// via `transfer_reward_icusd`, which sends `claimable - fee` and fails
+/// via the journaled reward payout, which sends `claimable - fee` and fails
 /// closed if `claimable <= fee`. Gating at 10x the fee guarantees any claim
 /// that passes this check has `claimable` well above the fee, so the payout
 /// nets clearly positive for the user and the fail-closed guard is never
@@ -74,6 +78,20 @@ pub struct AmmState {
     pub protocol_backend_principal: Option<Principal>,
     #[serde(default)]
     pub tvl_samples: Vec<TvlSample>,
+    /// Durable pre-dispatch intents. Rows remain until the caller has applied
+    /// confirmed-success accounting, or forever when a dispatch is ambiguous.
+    #[serde(default)]
+    pub outbound_payouts: Vec<OutboundPayout>,
+    #[serde(default)]
+    pub next_outbound_payout_id: u64,
+    /// Durable identities for user-authorized deposits. Ambiguous rows are
+    /// retained until an exact replay yields positive ledger evidence.
+    #[serde(default)]
+    pub inbound_operations: Vec<InboundOperation>,
+    /// Global monotonic request sequence. Terminal rows can be compacted because
+    /// any unseen request at or below this high-water is rejected forever.
+    #[serde(default)]
+    pub inbound_sequence_high_water: u64,
 }
 
 impl Default for AmmState {
@@ -98,8 +116,395 @@ impl Default for AmmState {
             next_claim_event_id: 0,
             protocol_backend_principal: None,
             tvl_samples: Vec::new(),
+            outbound_payouts: Vec::new(),
+            next_outbound_payout_id: 0,
+            inbound_operations: Vec::new(),
+            inbound_sequence_high_water: 0,
         }
     }
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OutboundPayoutStatus {
+    Reserved,
+    Dispatched,
+    Ambiguous,
+}
+
+/// Immutable transfer parameters, persisted before dispatch. The sender's
+/// gross liability equals `net_amount + fee`; `fee` is pinned in the ledger
+/// call so later fee drift cannot exceed the booked debit.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutboundPayout {
+    pub id: u64,
+    pub operation_id: String,
+    pub ledger: Principal,
+    pub from: Principal,
+    pub from_subaccount: Option<[u8; 32]>,
+    pub to: Principal,
+    pub to_subaccount: Option<[u8; 32]>,
+    pub gross_amount: u128,
+    pub net_amount: u128,
+    pub fee: u128,
+    pub memo: Vec<u8>,
+    pub created_at_time: u64,
+    pub status: OutboundPayoutStatus,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum InboundOperationKind {
+    Swap,
+    AddLiquidity,
+}
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum InboundLegStatus {
+    Prepared,
+    Confirmed(u64),
+    ProvenNoEffect,
+    Ambiguous,
+}
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum InboundOperationPhase {
+    Prepared,
+    InputsConfirmed,
+    OutputPending,
+    Completed,
+    ProvenNoEffect,
+    Held,
+    ResultUnavailable,
+}
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InboundLeg {
+    pub ledger: Principal,
+    pub from: Principal,
+    pub to_subaccount: Option<[u8; 32]>,
+    pub amount: u128,
+    pub fee: Option<u128>,
+    pub memo: Vec<u8>,
+    pub created_at_time: u64,
+    pub status: InboundLegStatus,
+}
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InboundOperation {
+    pub request_id: Vec<u8>,
+    pub caller: Principal,
+    pub pool_id: PoolId,
+    pub kind: InboundOperationKind,
+    pub argument_digest: Vec<u8>,
+    pub legs: Vec<InboundLeg>,
+    pub created_at_time: u64,
+    pub phase: InboundOperationPhase,
+    pub output_payout_id: Option<u64>,
+    pub result_amount: Option<u128>,
+    /// Ledger fee observed before accepting the input. Output dispatch must use
+    /// this exact fee so the user's minimum cannot drift after the deposit.
+    #[serde(default)]
+    pub output_ledger_fee: Option<u128>,
+    pub result_fee: Option<u128>,
+    pub protocol_fee: Option<u128>,
+    pub token_in: Option<Principal>,
+    /// `Some(true)` marks IDs created under the sequence high-water protocol.
+    /// `None`/`Some(false)` are frozen legacy random IDs and must not be
+    /// interpreted or compacted as sequence IDs.
+    #[serde(default)]
+    pub sequence_managed: Option<bool>,
+    #[serde(default)]
+    pub held_reason: Option<String>,
+}
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InboundOperationStatus {
+    pub operation: InboundOperation,
+    pub linked_payout_status: Option<OutboundPayoutStatus>,
+}
+
+/// Frozen journal shape before output-fee pinning was introduced.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct InboundOperationV7 {
+    pub request_id: Vec<u8>,
+    pub caller: Principal,
+    pub pool_id: PoolId,
+    pub kind: InboundOperationKind,
+    pub argument_digest: Vec<u8>,
+    pub legs: Vec<InboundLeg>,
+    pub created_at_time: u64,
+    pub phase: InboundOperationPhase,
+    pub output_payout_id: Option<u64>,
+    pub result_amount: Option<u128>,
+    pub result_fee: Option<u128>,
+    pub protocol_fee: Option<u128>,
+    pub token_in: Option<Principal>,
+}
+
+/// Frozen predecessor state used when upgrading from the initial inbound journal.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+struct AmmStateV7 {
+    pub admin: Principal,
+    pub pools: BTreeMap<PoolId, Pool>,
+    pub pool_creation_open: bool,
+    pub maintenance_mode: bool,
+    pub pending_claims: Vec<PendingClaim>,
+    pub next_claim_id: u64,
+    pub swap_events: Vec<AmmSwapEvent>,
+    pub next_swap_event_id: u64,
+    pub liquidity_events: Vec<AmmLiquidityEvent>,
+    pub next_liquidity_event_id: u64,
+    pub admin_events: Vec<AmmAdminEvent>,
+    pub next_admin_event_id: u64,
+    pub holder_snapshots: Vec<HolderSnapshot>,
+    pub reward_events: Vec<AmmRewardEvent>,
+    pub next_reward_event_id: u64,
+    pub claim_events: Vec<AmmClaimEvent>,
+    pub next_claim_event_id: u64,
+    pub protocol_backend_principal: Option<Principal>,
+    pub tvl_samples: Vec<TvlSample>,
+    pub outbound_payouts: Vec<OutboundPayout>,
+    pub next_outbound_payout_id: u64,
+    pub inbound_operations: Vec<InboundOperationV7>,
+}
+
+/// Frozen predecessor after fee pinning and before sequence-based compaction.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+struct AmmStateV8 {
+    pub admin: Principal,
+    pub pools: BTreeMap<PoolId, Pool>,
+    pub pool_creation_open: bool,
+    pub maintenance_mode: bool,
+    pub pending_claims: Vec<PendingClaim>,
+    pub next_claim_id: u64,
+    pub swap_events: Vec<AmmSwapEvent>,
+    pub next_swap_event_id: u64,
+    pub liquidity_events: Vec<AmmLiquidityEvent>,
+    pub next_liquidity_event_id: u64,
+    pub admin_events: Vec<AmmAdminEvent>,
+    pub next_admin_event_id: u64,
+    pub holder_snapshots: Vec<HolderSnapshot>,
+    pub reward_events: Vec<AmmRewardEvent>,
+    pub next_reward_event_id: u64,
+    pub claim_events: Vec<AmmClaimEvent>,
+    pub next_claim_event_id: u64,
+    pub protocol_backend_principal: Option<Principal>,
+    pub tvl_samples: Vec<TvlSample>,
+    pub outbound_payouts: Vec<OutboundPayout>,
+    pub next_outbound_payout_id: u64,
+    pub inbound_operations: Vec<InboundOperation>,
+}
+
+/// Bound unresolved liabilities, not lifetime throughput. Terminal requests are
+/// compacted into the per-caller sequence high-water plus a recent replay window.
+pub const MAX_ACTIVE_INBOUND_OPERATIONS: usize = 1_000;
+pub const INBOUND_TERMINAL_REPLAY_WINDOW: u64 = 128;
+pub fn next_inbound_sequence() -> Result<u64, String> {
+    read_state(|s| s.inbound_sequence_high_water.checked_add(1))
+        .ok_or_else(|| "caller request sequence exhausted".to_string())
+}
+
+fn hold_legacy_swap_without_fee(operation: &mut InboundOperation) {
+    if operation.kind == InboundOperationKind::Swap && operation.output_ledger_fee.is_none() {
+        // V7 did not persist the output fee in the operation. Preserve it as
+        // explicitly held rather than inventing a net result or redispatching
+        // an unknown amount.
+        operation.phase = if operation.phase == InboundOperationPhase::Completed {
+            InboundOperationPhase::ResultUnavailable
+        } else {
+            InboundOperationPhase::Held
+        };
+        operation.held_reason = Some(
+            "legacy swap has no pinned output fee; exact payout result unavailable; manual positive-proof reconciliation required".into(),
+        );
+    }
+}
+
+fn request_sequence(request_id: &[u8]) -> Option<u64> {
+    let bytes: [u8; 8] = request_id.get(..8)?.try_into().ok()?;
+    Some(u64::from_be_bytes(bytes))
+}
+
+fn compact_terminal_rows(s: &mut AmmState) {
+    let floor = s
+        .inbound_sequence_high_water
+        .saturating_sub(INBOUND_TERMINAL_REPLAY_WINDOW);
+    s.inbound_operations.retain(|row| {
+        if !matches!(
+            row.phase,
+            InboundOperationPhase::Completed
+                | InboundOperationPhase::ProvenNoEffect
+                | InboundOperationPhase::ResultUnavailable
+        ) {
+            return true;
+        }
+        // Keep legacy random-ID rows intact: their first eight bytes are not
+        // sequence metadata and can accidentally look like any u64 value.
+        match row.sequence_managed {
+            Some(true) => request_sequence(&row.request_id)
+                .map(|sequence| sequence > floor)
+                .unwrap_or(true),
+            None | Some(false) => true,
+        }
+    });
+}
+
+pub fn reserve_inbound_operation(op: InboundOperation) -> Result<InboundOperation, String> {
+    if op.request_id.len() != 32 {
+        return Err("request ID must be exactly 32 bytes".to_string());
+    }
+    mutate_state(|s| reserve_inbound_operation_in(s, op))
+}
+
+fn reserve_inbound_operation_in(
+    s: &mut AmmState,
+    op: InboundOperation,
+) -> Result<InboundOperation, String> {
+    if let Some(old) = s
+        .inbound_operations
+        .iter()
+        .find(|x| x.caller == op.caller && x.request_id == op.request_id)
+    {
+        if old.argument_digest != op.argument_digest
+            || old.pool_id != op.pool_id
+            || old.kind != op.kind
+        {
+            return Err("request ID already bound to different arguments".to_string());
+        }
+        return Ok(old.clone());
+    }
+    let sequence = request_sequence(&op.request_id)
+        .filter(|sequence| *sequence > 0)
+        .ok_or_else(|| {
+            "request ID must begin with a nonzero 64-bit big-endian sequence".to_string()
+        })?;
+    let high_water = s.inbound_sequence_high_water;
+    if sequence <= high_water {
+        if sequence_was_consumed_by_other_request(s, sequence, op.caller, &op.request_id) {
+            return Err(SEQUENCE_BOUND_TO_DIFFERENT_REQUEST.to_string());
+        }
+        return Err(RESULT_UNAVAILABLE_STALE_SEQUENCE.to_string());
+    }
+    let expected = high_water
+        .checked_add(1)
+        .ok_or_else(|| "global request sequence exhausted".to_string())?;
+    if sequence != expected {
+        return Err(
+            "stale AMM request sequence; operation was not started; fetch the next sequence"
+                .to_string(),
+        );
+    }
+    let mut op = op;
+    op.sequence_managed = Some(true);
+    compact_terminal_rows(s);
+    let active_count = s
+        .inbound_operations
+        .iter()
+        .filter(|row| {
+            !matches!(
+                row.phase,
+                InboundOperationPhase::Completed
+                    | InboundOperationPhase::ProvenNoEffect
+                    | InboundOperationPhase::ResultUnavailable
+            )
+        })
+        .count();
+    if active_count >= MAX_ACTIVE_INBOUND_OPERATIONS {
+        return Err(
+            "inbound operation journal full; unresolved rows require reconciliation".to_string(),
+        );
+    }
+    let pool = s
+        .pools
+        .get_mut(&op.pool_id)
+        .ok_or_else(|| "pool not found".to_string())?;
+    if pool.paused {
+        return Err("pool is paused".to_string());
+    }
+    // Stable pause is the durable pool fence. It survives callback traps
+    // and upgrades after the heap-only PoolGuard is lost.
+    pool.paused = true;
+    s.inbound_sequence_high_water = sequence;
+    s.inbound_operations.push(op.clone());
+    Ok(op)
+}
+
+pub fn inbound_operation(caller: Principal, request_id: &[u8]) -> Result<InboundOperation, String> {
+    read_state(|s| inbound_operation_in(s, caller, request_id))
+}
+
+fn inbound_operation_in(
+    s: &AmmState,
+    caller: Principal,
+    request_id: &[u8],
+) -> Result<InboundOperation, String> {
+    if let Some(operation) = s
+        .inbound_operations
+        .iter()
+        .find(|x| x.caller == caller && x.request_id == request_id)
+    {
+        return Ok(operation.clone());
+    }
+    let sequence = request_sequence(request_id).unwrap_or(0);
+    if sequence > 0 && sequence <= s.inbound_sequence_high_water {
+        if sequence_was_consumed_by_other_request(s, sequence, caller, request_id) {
+            Err(SEQUENCE_BOUND_TO_DIFFERENT_REQUEST.to_string())
+        } else {
+            Err(RESULT_UNAVAILABLE_STALE_SEQUENCE.to_string())
+        }
+    } else {
+        Err("inbound operation not found".to_string())
+    }
+}
+
+const SEQUENCE_BOUND_TO_DIFFERENT_REQUEST: &str = "AMM request sequence is bound to another request; this request was definitely not started and no input transfer was dispatched";
+const RESULT_UNAVAILABLE_STALE_SEQUENCE: &str = "stale request sequence; result unavailable and this ID cannot execute again (its terminal row may have been compacted)";
+
+/// A retained sequence-managed row is durable evidence that the global
+/// sequence was consumed by a different identity. Absence is not evidence:
+/// terminal rows may have been compacted, so those IDs remain unavailable.
+fn sequence_was_consumed_by_other_request(
+    s: &AmmState,
+    sequence: u64,
+    caller: Principal,
+    request_id: &[u8],
+) -> bool {
+    s.inbound_operations.iter().any(|row| {
+        row.sequence_managed == Some(true)
+            && request_sequence(&row.request_id) == Some(sequence)
+            && (row.caller != caller || row.request_id.as_slice() != request_id)
+    })
+}
+
+pub fn set_inbound_leg_status(
+    caller: Principal,
+    request_id: &[u8],
+    leg: usize,
+    status: InboundLegStatus,
+) -> Result<(), String> {
+    mutate_state(|s| {
+        let op = s
+            .inbound_operations
+            .iter_mut()
+            .find(|x| x.caller == caller && x.request_id == request_id)
+            .ok_or_else(|| "inbound operation not found".to_string())?;
+        let row = op
+            .legs
+            .get_mut(leg)
+            .ok_or_else(|| "inbound leg not found".to_string())?;
+        row.status = status;
+        Ok(())
+    })
+}
+
+pub fn update_inbound_operation<F>(caller: Principal, request_id: &[u8], f: F) -> Result<(), String>
+where
+    F: FnOnce(&mut InboundOperation),
+{
+    mutate_state(|s| {
+        let op = s
+            .inbound_operations
+            .iter_mut()
+            .find(|x| x.caller == caller && x.request_id == request_id)
+            .ok_or_else(|| "inbound operation not found".to_string())?;
+        f(op);
+        compact_terminal_rows(s);
+        Ok(())
+    })
 }
 
 impl AmmState {
@@ -107,7 +512,16 @@ impl AmmState {
         self.admin = args.admin;
     }
 
-    pub fn record_swap_event(&mut self, caller: Principal, pool_id: PoolId, token_in: Principal, amount_in: u128, token_out: Principal, amount_out: u128, fee: u128) {
+    pub fn record_swap_event(
+        &mut self,
+        caller: Principal,
+        pool_id: PoolId,
+        token_in: Principal,
+        amount_in: u128,
+        token_out: Principal,
+        amount_out: u128,
+        fee: u128,
+    ) {
         if self.swap_events.len() >= MAX_SWAP_EVENTS {
             self.swap_events.remove(0);
         }
@@ -191,12 +605,7 @@ impl AmmState {
         self.next_reward_event_id += 1;
     }
 
-    pub fn record_claim_event(
-        &mut self,
-        pool_id: PoolId,
-        claimant: Principal,
-        amount: u128,
-    ) {
+    pub fn record_claim_event(&mut self, pool_id: PoolId, claimant: Principal, amount: u128) {
         if self.claim_events.len() >= MAX_CLAIM_EVENTS {
             self.claim_events.remove(0);
         }
@@ -209,6 +618,145 @@ impl AmmState {
         });
         self.next_claim_event_id += 1;
     }
+}
+
+/// Persist a complete outbound transfer identity before dispatch. Capacity is
+/// bounded and unresolved entries are never evicted.
+pub fn reserve_outbound_payout(
+    operation_id: String,
+    ledger: Principal,
+    from_subaccount: Option<[u8; 32]>,
+    to: Principal,
+    to_subaccount: Option<[u8; 32]>,
+    gross_amount: u128,
+    fee: u128,
+    created_at_time: u64,
+) -> Result<u64, String> {
+    mutate_state(|s| {
+        if let Some(existing) = s
+            .outbound_payouts
+            .iter()
+            .find(|payout| payout.operation_id == operation_id)
+        {
+            if existing.ledger == ledger
+                && existing.from == ic_cdk::id()
+                && existing.from_subaccount == from_subaccount
+                && existing.to == to
+                && existing.to_subaccount == to_subaccount
+                && existing.gross_amount == gross_amount
+                && existing.fee == fee
+            {
+                return Ok(existing.id);
+            }
+            return Err(format!(
+                "outbound operation {} is already bound to a different transfer tuple",
+                operation_id
+            ));
+        }
+        if s.outbound_payouts.len() >= MAX_OUTBOUND_PAYOUTS {
+            return Err(format!(
+                "outbound payout journal is full ({})",
+                MAX_OUTBOUND_PAYOUTS
+            ));
+        }
+        let id = s.next_outbound_payout_id;
+        let next_id = id
+            .checked_add(1)
+            .ok_or_else(|| "outbound payout id exhausted".to_string())?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"rumi_amm:payout:v1:");
+        hasher.update(ic_cdk::id().as_slice());
+        hasher.update(id.to_be_bytes());
+        let memo = hasher.finalize().to_vec();
+        s.next_outbound_payout_id = next_id;
+        s.outbound_payouts.push(OutboundPayout {
+            id,
+            operation_id,
+            ledger,
+            from: ic_cdk::id(),
+            from_subaccount,
+            to,
+            to_subaccount,
+            gross_amount,
+            net_amount: gross_amount.saturating_sub(fee),
+            fee,
+            memo,
+            created_at_time,
+            status: OutboundPayoutStatus::Reserved,
+        });
+        Ok(id)
+    })
+}
+
+pub fn outbound_payout(id: u64) -> Result<OutboundPayout, String> {
+    read_state(|s| s.outbound_payouts.iter().find(|p| p.id == id).cloned())
+        .ok_or_else(|| format!("outbound payout {} not found", id))
+}
+
+pub fn outbound_payout_by_operation(operation_id: &str) -> Option<OutboundPayout> {
+    read_state(|s| {
+        s.outbound_payouts
+            .iter()
+            .find(|p| p.operation_id == operation_id)
+            .cloned()
+    })
+}
+
+pub fn unresolved_inbound_for_pool(pool_id: &str) -> bool {
+    read_state(|s| {
+        s.inbound_operations.iter().any(|op| {
+            op.pool_id == pool_id
+                && !matches!(
+                    op.phase,
+                    InboundOperationPhase::Completed
+                        | InboundOperationPhase::ProvenNoEffect
+                        | InboundOperationPhase::ResultUnavailable
+                )
+        })
+    })
+}
+
+pub fn has_dispatched_or_ambiguous_outbound_payouts() -> bool {
+    read_state(|s| {
+        s.outbound_payouts.iter().any(|p| {
+            matches!(
+                p.status,
+                OutboundPayoutStatus::Dispatched | OutboundPayoutStatus::Ambiguous
+            )
+        })
+    })
+}
+
+pub fn set_outbound_payout_status(id: u64, status: OutboundPayoutStatus) -> Result<(), String> {
+    mutate_state(|s| {
+        let payout = s
+            .outbound_payouts
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| format!("outbound payout {} not found", id))?;
+        payout.status = status;
+        Ok(())
+    })
+}
+
+/// Release a reservation only when no outbound call was made, or after the
+/// caller has atomically applied all accounting for a confirmed success.
+pub fn finish_outbound_payout(id: u64) -> Result<(), String> {
+    mutate_state(|s| {
+        let idx = s
+            .outbound_payouts
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or_else(|| format!("outbound payout {} not found", id))?;
+        if s.outbound_payouts[idx].status == OutboundPayoutStatus::Ambiguous {
+            return Err(format!(
+                "outbound payout {} is ambiguous and cannot be cleared",
+                id
+            ));
+        }
+        s.outbound_payouts.remove(idx);
+        Ok(())
+    })
 }
 
 // ─── Thread-local state ───
@@ -266,8 +814,9 @@ pub fn save_to_stable_memory() {
     });
 }
 
-/// V5 state shape — a frozen snapshot of `AmmState` AS OF the 2026-06-05 audit
-/// (SAT-004 fix). It mirrors every field of the live `AmmState` at this commit.
+/// V5 state shape — a frozen snapshot of `AmmState` as of the 2026-06-05 audit
+/// (SAT-004 fix), before outbound payout journaling was added. It intentionally
+/// remains unchanged; decoding V5 initializes the newer journal fields empty.
 ///
 /// WHY THIS EXISTS: the live `AmmState` carries ~13 fields beyond V4
 /// (`swap_events`, `liquidity_events`, `admin_events`, `holder_snapshots`,
@@ -279,10 +828,9 @@ pub fn save_to_stable_memory() {
 /// (halting reward distribution) and dropping all post-V4 state WITHOUT a
 /// trap — the exact 2026-05-18 state-wipe incident class (UPG-002).
 ///
-/// MAINTENANCE RULE: whenever you add a non-`Option` field to `AmmState`,
-/// FIRST add a new `AmmStateVN` that snapshots the *previous* shape (a copy of
-/// this struct) and wire it into `try_decode_state` ahead of V4. Keep this V5
-/// struct frozen — never edit it to track `AmmState`.
+/// MAINTENANCE RULE: before the next non-optional `AmmState` field is added,
+/// snapshot the current shape as V6 and wire it into `try_decode_state` before
+/// V5. Keep this V5 struct frozen — never edit it to track `AmmState`.
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 struct AmmStateV5 {
     pub admin: Principal,
@@ -341,15 +889,188 @@ struct AmmStateV1 {
     pub pools: BTreeMap<PoolId, Pool>,
 }
 
+/// Frozen predecessor of the inbound-operation journal.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+struct AmmStateV6 {
+    pub admin: Principal,
+    pub pools: BTreeMap<PoolId, Pool>,
+    pub pool_creation_open: bool,
+    pub maintenance_mode: bool,
+    pub pending_claims: Vec<PendingClaim>,
+    pub next_claim_id: u64,
+    pub swap_events: Vec<AmmSwapEvent>,
+    pub next_swap_event_id: u64,
+    pub liquidity_events: Vec<AmmLiquidityEvent>,
+    pub next_liquidity_event_id: u64,
+    pub admin_events: Vec<AmmAdminEvent>,
+    pub next_admin_event_id: u64,
+    pub holder_snapshots: Vec<HolderSnapshot>,
+    pub reward_events: Vec<AmmRewardEvent>,
+    pub next_reward_event_id: u64,
+    pub claim_events: Vec<AmmClaimEvent>,
+    pub next_claim_event_id: u64,
+    pub protocol_backend_principal: Option<Principal>,
+    pub tvl_samples: Vec<TvlSample>,
+    pub outbound_payouts: Vec<OutboundPayout>,
+    pub next_outbound_payout_id: u64,
+}
+
 /// Try to deserialize an AMM state snapshot, walking known schema versions
-/// in order (current, V4, V3, V2, V1). Returns `None` if no version decodes.
+/// in order (current, V6, V5, V4, V3, V2, V1). Returns `None` if no version decodes.
 pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
-    if let Ok(state) = Decode!(bytes, AmmState) {
+    if let Ok(mut state) = Decode!(bytes, AmmState) {
+        // Candid may decode an older record with the newly-added optional fee
+        // field set to None, so a V7 snapshot can succeed as the current type
+        // and never reach the explicit V7 fallback below. Normalize that
+        // migration here as well using the durable linked payout liability.
+        let payout_fees: BTreeMap<u64, u128> = state
+            .outbound_payouts
+            .iter()
+            .map(|payout| (payout.id, payout.fee))
+            .collect();
+        for operation in &mut state.inbound_operations {
+            operation.sequence_managed.get_or_insert(false);
+            if operation.output_ledger_fee.is_none() {
+                operation.output_ledger_fee = operation
+                    .output_payout_id
+                    .and_then(|id| payout_fees.get(&id).copied());
+            }
+            hold_legacy_swap_without_fee(operation);
+        }
         return Some(state);
     }
-    // V5: the frozen snapshot of the current shape. This is what protects a
-    // future non-Option field addition from silently falling through to V4 and
-    // wiping post-V4 state (SAT-004). It maps 1:1 onto AmmState today.
+    if let Ok(v8) = Decode!(bytes, AmmStateV8) {
+        let payout_fees: BTreeMap<u64, u128> = v8
+            .outbound_payouts
+            .iter()
+            .map(|payout| (payout.id, payout.fee))
+            .collect();
+        let mut inbound_operations = v8.inbound_operations;
+        for operation in &mut inbound_operations {
+            operation.sequence_managed.get_or_insert(false);
+            if operation.output_ledger_fee.is_none() {
+                operation.output_ledger_fee = operation
+                    .output_payout_id
+                    .and_then(|id| payout_fees.get(&id).copied());
+            }
+            hold_legacy_swap_without_fee(operation);
+        }
+        return Some(AmmState {
+            admin: v8.admin,
+            pools: v8.pools,
+            pool_creation_open: v8.pool_creation_open,
+            maintenance_mode: v8.maintenance_mode,
+            pending_claims: v8.pending_claims,
+            next_claim_id: v8.next_claim_id,
+            swap_events: v8.swap_events,
+            next_swap_event_id: v8.next_swap_event_id,
+            liquidity_events: v8.liquidity_events,
+            next_liquidity_event_id: v8.next_liquidity_event_id,
+            admin_events: v8.admin_events,
+            next_admin_event_id: v8.next_admin_event_id,
+            holder_snapshots: v8.holder_snapshots,
+            reward_events: v8.reward_events,
+            next_reward_event_id: v8.next_reward_event_id,
+            claim_events: v8.claim_events,
+            next_claim_event_id: v8.next_claim_event_id,
+            protocol_backend_principal: v8.protocol_backend_principal,
+            tvl_samples: v8.tvl_samples,
+            outbound_payouts: v8.outbound_payouts,
+            next_outbound_payout_id: v8.next_outbound_payout_id,
+            inbound_operations,
+            inbound_sequence_high_water: 0,
+        });
+    }
+    if let Ok(v7) = Decode!(bytes, AmmStateV7) {
+        let payout_fees: BTreeMap<u64, u128> = v7
+            .outbound_payouts
+            .iter()
+            .map(|payout| (payout.id, payout.fee))
+            .collect();
+        return Some(AmmState {
+            admin: v7.admin,
+            pools: v7.pools,
+            pool_creation_open: v7.pool_creation_open,
+            maintenance_mode: v7.maintenance_mode,
+            pending_claims: v7.pending_claims,
+            next_claim_id: v7.next_claim_id,
+            swap_events: v7.swap_events,
+            next_swap_event_id: v7.next_swap_event_id,
+            liquidity_events: v7.liquidity_events,
+            next_liquidity_event_id: v7.next_liquidity_event_id,
+            admin_events: v7.admin_events,
+            next_admin_event_id: v7.next_admin_event_id,
+            holder_snapshots: v7.holder_snapshots,
+            reward_events: v7.reward_events,
+            next_reward_event_id: v7.next_reward_event_id,
+            claim_events: v7.claim_events,
+            next_claim_event_id: v7.next_claim_event_id,
+            protocol_backend_principal: v7.protocol_backend_principal,
+            tvl_samples: v7.tvl_samples,
+            outbound_payouts: v7.outbound_payouts,
+            next_outbound_payout_id: v7.next_outbound_payout_id,
+            inbound_operations: v7
+                .inbound_operations
+                .into_iter()
+                .map(|op| {
+                    let mut migrated = InboundOperation {
+                        request_id: op.request_id,
+                        caller: op.caller,
+                        pool_id: op.pool_id,
+                        kind: op.kind,
+                        argument_digest: op.argument_digest,
+                        legs: op.legs,
+                        created_at_time: op.created_at_time,
+                        phase: op.phase,
+                        output_payout_id: op.output_payout_id,
+                        result_amount: op.result_amount,
+                        // If an old operation already reserved its output payout,
+                        // recover the exact fee from that durable liability row.
+                        output_ledger_fee: op
+                            .output_payout_id
+                            .and_then(|id| payout_fees.get(&id).copied()),
+                        result_fee: op.result_fee,
+                        protocol_fee: op.protocol_fee,
+                        token_in: op.token_in,
+                        sequence_managed: Some(false),
+                        held_reason: None,
+                    };
+                    hold_legacy_swap_without_fee(&mut migrated);
+                    migrated
+                })
+                .collect(),
+            inbound_sequence_high_water: 0,
+        });
+    }
+    if let Ok(v6) = Decode!(bytes, AmmStateV6) {
+        return Some(AmmState {
+            admin: v6.admin,
+            pools: v6.pools,
+            pool_creation_open: v6.pool_creation_open,
+            maintenance_mode: v6.maintenance_mode,
+            pending_claims: v6.pending_claims,
+            next_claim_id: v6.next_claim_id,
+            swap_events: v6.swap_events,
+            next_swap_event_id: v6.next_swap_event_id,
+            liquidity_events: v6.liquidity_events,
+            next_liquidity_event_id: v6.next_liquidity_event_id,
+            admin_events: v6.admin_events,
+            next_admin_event_id: v6.next_admin_event_id,
+            holder_snapshots: v6.holder_snapshots,
+            reward_events: v6.reward_events,
+            next_reward_event_id: v6.next_reward_event_id,
+            claim_events: v6.claim_events,
+            next_claim_event_id: v6.next_claim_event_id,
+            protocol_backend_principal: v6.protocol_backend_principal,
+            tvl_samples: v6.tvl_samples,
+            outbound_payouts: v6.outbound_payouts,
+            next_outbound_payout_id: v6.next_outbound_payout_id,
+            inbound_operations: Vec::new(),
+            inbound_sequence_high_water: 0,
+        });
+    }
+    // V5: the frozen pre-payout-journal state shape. This fallback preserves
+    // deployed fields and initializes only the newly introduced journal.
     if let Ok(v5) = Decode!(bytes, AmmStateV5) {
         return Some(AmmState {
             admin: v5.admin,
@@ -371,6 +1092,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             next_claim_event_id: v5.next_claim_event_id,
             protocol_backend_principal: v5.protocol_backend_principal,
             tvl_samples: v5.tvl_samples,
+            outbound_payouts: Vec::new(),
+            inbound_operations: Vec::new(),
+            inbound_sequence_high_water: 0,
+            next_outbound_payout_id: 0,
         });
     }
     if let Ok(v4) = Decode!(bytes, AmmStateV4) {
@@ -394,6 +1119,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             next_claim_event_id: 0,
             protocol_backend_principal: None,
             tvl_samples: Vec::new(),
+            outbound_payouts: Vec::new(),
+            inbound_operations: Vec::new(),
+            inbound_sequence_high_water: 0,
+            next_outbound_payout_id: 0,
         });
     }
     if let Ok(v3) = Decode!(bytes, AmmStateV3) {
@@ -417,6 +1146,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             next_claim_event_id: 0,
             protocol_backend_principal: None,
             tvl_samples: Vec::new(),
+            outbound_payouts: Vec::new(),
+            inbound_operations: Vec::new(),
+            inbound_sequence_high_water: 0,
+            next_outbound_payout_id: 0,
         });
     }
     if let Ok(v2) = Decode!(bytes, AmmStateV2) {
@@ -440,6 +1173,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             next_claim_event_id: 0,
             protocol_backend_principal: None,
             tvl_samples: Vec::new(),
+            outbound_payouts: Vec::new(),
+            inbound_operations: Vec::new(),
+            inbound_sequence_high_water: 0,
+            next_outbound_payout_id: 0,
         });
     }
     if let Ok(v1) = Decode!(bytes, AmmStateV1) {
@@ -463,6 +1200,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             next_claim_event_id: 0,
             protocol_backend_principal: None,
             tvl_samples: Vec::new(),
+            outbound_payouts: Vec::new(),
+            inbound_operations: Vec::new(),
+            inbound_sequence_high_water: 0,
+            next_outbound_payout_id: 0,
         });
     }
     None
@@ -519,4 +1260,280 @@ pub fn load_from_stable_memory() {
         "AMM post_upgrade: stable state did not decode under any known schema version \
          (current, V5, V4, V3, V2, V1); refusing to wipe live pools — see CRITICAL log",
     );
+}
+
+#[cfg(test)]
+mod inbound_sequence_tests {
+    use super::*;
+
+    fn pool(token_a: Principal, token_b: Principal) -> Pool {
+        Pool {
+            token_a,
+            token_b,
+            reserve_a: 1_000_000,
+            reserve_b: 1_000_000,
+            fee_bps: 30,
+            protocol_fee_bps: 0,
+            curve: CurveType::ConstantProduct,
+            lp_shares: BTreeMap::new(),
+            total_lp_shares: 0,
+            protocol_fees_a: 0,
+            protocol_fees_b: 0,
+            paused: false,
+            subaccount_a: [1; 32],
+            subaccount_b: [2; 32],
+            lp_rewards: BTreeMap::new(),
+            acc_reward_per_share: 0,
+            pending_no_lp: 0,
+            total_rewards_distributed: 0,
+            processed_donation_nonces: Default::default(),
+            reward_balance_snapshot: 0,
+        }
+    }
+
+    fn op(caller: Principal, pool_id: &str, sequence: u64) -> InboundOperation {
+        let mut request_id = vec![0; 32];
+        request_id[..8].copy_from_slice(&sequence.to_be_bytes());
+        request_id[8..].fill(0xA5);
+        InboundOperation {
+            request_id,
+            caller,
+            pool_id: pool_id.to_string(),
+            kind: InboundOperationKind::Swap,
+            argument_digest: vec![sequence as u8; 32],
+            legs: vec![InboundLeg {
+                ledger: Principal::anonymous(),
+                from: caller,
+                to_subaccount: None,
+                amount: 10,
+                fee: None,
+                memo: vec![sequence as u8; 32],
+                created_at_time: sequence,
+                status: InboundLegStatus::Prepared,
+            }],
+            created_at_time: sequence,
+            phase: InboundOperationPhase::Prepared,
+            output_payout_id: None,
+            result_amount: Some(1),
+            output_ledger_fee: Some(0),
+            result_fee: Some(0),
+            protocol_fee: Some(0),
+            token_in: Some(Principal::anonymous()),
+            sequence_managed: Some(true),
+            held_reason: None,
+        }
+    }
+
+    #[test]
+    fn global_sequence_keeps_old_active_ids_replayable_across_pools() {
+        let caller = Principal::self_authenticating(&[1]);
+        let token_a = Principal::self_authenticating(&[2]);
+        let token_b = Principal::self_authenticating(&[3]);
+        let mut state = AmmState::default();
+        state.pools.insert("a".into(), pool(token_a, token_b));
+        state.pools.insert("b".into(), pool(token_a, token_b));
+
+        let first = op(caller, "a", 1);
+        reserve_inbound_operation_in(&mut state, first.clone()).unwrap();
+        reserve_inbound_operation_in(&mut state, op(caller, "b", 2)).unwrap();
+        assert_eq!(state.inbound_sequence_high_water, 2);
+
+        // Existing exact active ID is checked before the global stale-sequence
+        // fence; this permits recovery even after another pool advances it.
+        let replay = reserve_inbound_operation_in(&mut state, first.clone()).unwrap();
+        assert_eq!(replay.request_id, first.request_id);
+        let mut different_args = first.clone();
+        different_args.argument_digest = vec![0xCC; 32];
+        assert!(reserve_inbound_operation_in(&mut state, different_args).is_err());
+    }
+
+    #[test]
+    fn compacted_terminal_ids_remain_permanently_non_executable() {
+        let caller = Principal::self_authenticating(&[11]);
+        let token_a = Principal::self_authenticating(&[12]);
+        let token_b = Principal::self_authenticating(&[13]);
+        let mut state = AmmState::default();
+        state.pools.insert("a".into(), pool(token_a, token_b));
+        let terminal = op(caller, "a", 1);
+        reserve_inbound_operation_in(&mut state, terminal.clone()).unwrap();
+        state.inbound_operations[0].phase = InboundOperationPhase::Completed;
+        state.inbound_sequence_high_water = 1_000;
+        compact_terminal_rows(&mut state);
+        assert!(state.inbound_operations.is_empty());
+        assert_eq!(
+            inbound_operation_in(&state, caller, &terminal.request_id).unwrap_err(),
+            RESULT_UNAVAILABLE_STALE_SEQUENCE
+        );
+        assert_eq!(
+            reserve_inbound_operation_in(&mut state, terminal).unwrap_err(),
+            RESULT_UNAVAILABLE_STALE_SEQUENCE
+        );
+        assert_eq!(state.inbound_sequence_high_water, 1_000);
+    }
+
+    #[test]
+    fn retained_sequence_owner_proves_other_request_never_started() {
+        let owner = Principal::self_authenticating(&[21]);
+        let other = Principal::self_authenticating(&[22]);
+        let token_a = Principal::self_authenticating(&[23]);
+        let token_b = Principal::self_authenticating(&[24]);
+        let mut state = AmmState::default();
+        state.pools.insert("a".into(), pool(token_a, token_b));
+        let consumed = op(owner, "a", 1);
+        reserve_inbound_operation_in(&mut state, consumed.clone()).unwrap();
+
+        let other_caller_same_sequence = op(other, "a", 1);
+        assert_eq!(
+            inbound_operation_in(&state, other, &other_caller_same_sequence.request_id)
+                .unwrap_err(),
+            SEQUENCE_BOUND_TO_DIFFERENT_REQUEST
+        );
+        assert_eq!(
+            reserve_inbound_operation_in(&mut state, other_caller_same_sequence).unwrap_err(),
+            SEQUENCE_BOUND_TO_DIFFERENT_REQUEST
+        );
+
+        let mut same_caller_different_id = consumed.clone();
+        same_caller_different_id.request_id[31] ^= 1;
+        assert_eq!(
+            inbound_operation_in(&state, owner, &same_caller_different_id.request_id)
+                .unwrap_err(),
+            SEQUENCE_BOUND_TO_DIFFERENT_REQUEST
+        );
+        assert_eq!(
+            reserve_inbound_operation_in(&mut state, same_caller_different_id).unwrap_err(),
+            SEQUENCE_BOUND_TO_DIFFERENT_REQUEST
+        );
+
+        // The retained exact row remains replayable despite its consumed seq.
+        assert!(reserve_inbound_operation_in(&mut state, consumed).is_ok());
+    }
+
+    #[test]
+    fn legacy_random_terminal_ids_are_not_misread_as_sequences() {
+        let caller = Principal::self_authenticating(&[15]);
+        let mut state = AmmState::default();
+        state.inbound_sequence_high_water = 10_000;
+        let mut legacy = op(caller, "old-pool", 1);
+        legacy.phase = InboundOperationPhase::Completed;
+        legacy.sequence_managed = Some(false);
+        state.inbound_operations.push(legacy.clone());
+        compact_terminal_rows(&mut state);
+        assert_eq!(state.inbound_operations.len(), 1);
+        assert_eq!(state.inbound_operations[0].request_id, legacy.request_id);
+    }
+
+    #[test]
+    fn successful_lifetime_throughput_does_not_hit_active_row_cap() {
+        let caller = Principal::self_authenticating(&[21]);
+        let token_a = Principal::self_authenticating(&[22]);
+        let token_b = Principal::self_authenticating(&[23]);
+        let mut state = AmmState::default();
+        state.pools.insert("pool".into(), pool(token_a, token_b));
+
+        for sequence in 1..=1_500 {
+            let operation = op(caller, "pool", sequence);
+            reserve_inbound_operation_in(&mut state, operation).unwrap();
+            state.inbound_operations.last_mut().unwrap().phase = InboundOperationPhase::Completed;
+            state.pools.get_mut("pool").unwrap().paused = false;
+            compact_terminal_rows(&mut state);
+        }
+
+        assert_eq!(state.inbound_sequence_high_water, 1_500);
+        assert_eq!(
+            state.inbound_operations.len(),
+            INBOUND_TERMINAL_REPLAY_WINDOW as usize
+        );
+        assert_eq!(
+            next_sequence_from_state(&state),
+            1_501,
+            "high-water advances independently from compacted terminal rows"
+        );
+    }
+
+    #[test]
+    fn v7_output_pending_migration_recovers_fee_from_saved_payout() {
+        let caller = Principal::self_authenticating(&[31]);
+        let mut state = AmmState::default();
+        state.outbound_payouts.push(OutboundPayout {
+            id: 77,
+            operation_id: "swap:v2:request".into(),
+            ledger: caller,
+            from: caller,
+            from_subaccount: Some([1; 32]),
+            to: caller,
+            to_subaccount: None,
+            gross_amount: 1_010,
+            net_amount: 1_000,
+            fee: 10,
+            memo: vec![4; 32],
+            created_at_time: 123,
+            status: OutboundPayoutStatus::Ambiguous,
+        });
+        let mut v7 = AmmStateV7 {
+            admin: caller,
+            pools: BTreeMap::new(),
+            pool_creation_open: false,
+            maintenance_mode: false,
+            pending_claims: Vec::new(),
+            next_claim_id: 0,
+            swap_events: Vec::new(),
+            next_swap_event_id: 0,
+            liquidity_events: Vec::new(),
+            next_liquidity_event_id: 0,
+            admin_events: Vec::new(),
+            next_admin_event_id: 0,
+            holder_snapshots: Vec::new(),
+            reward_events: Vec::new(),
+            next_reward_event_id: 0,
+            claim_events: Vec::new(),
+            next_claim_event_id: 0,
+            protocol_backend_principal: None,
+            tvl_samples: Vec::new(),
+            outbound_payouts: state.outbound_payouts,
+            next_outbound_payout_id: 78,
+            inbound_operations: vec![InboundOperationV7 {
+                request_id: vec![1; 32],
+                caller,
+                pool_id: "pool".into(),
+                kind: InboundOperationKind::Swap,
+                argument_digest: vec![2; 32],
+                legs: Vec::new(),
+                created_at_time: 123,
+                phase: InboundOperationPhase::OutputPending,
+                output_payout_id: Some(77),
+                result_amount: Some(1_010),
+                result_fee: Some(0),
+                protocol_fee: Some(0),
+                token_in: Some(caller),
+            }],
+        };
+        let snapshot = Encode!(&v7).expect("encode V7 predecessor fixture");
+        let migrated = try_decode_state(&snapshot).expect("decode V7 predecessor fixture");
+        let op = &migrated.inbound_operations[0];
+        assert_eq!(op.phase, InboundOperationPhase::OutputPending);
+        assert_eq!(op.output_payout_id, Some(77));
+        assert_eq!(op.output_ledger_fee, Some(10));
+        assert_eq!(migrated.outbound_payouts[0].net_amount, 1_000);
+
+        // A V7 completed swap whose payout row has already been retired has
+        // no source for the exact fee/net result. Migration must hold it, not
+        // report a guessed result or attempt another transfer.
+        v7.inbound_operations[0].phase = InboundOperationPhase::Completed;
+        v7.outbound_payouts.clear();
+        let snapshot = Encode!(&v7).expect("encode completed V7 predecessor fixture");
+        let migrated = try_decode_state(&snapshot).expect("decode completed V7 fixture");
+        let op = &migrated.inbound_operations[0];
+        assert_eq!(op.phase, InboundOperationPhase::ResultUnavailable);
+        assert_eq!(op.output_ledger_fee, None);
+        assert!(op
+            .held_reason
+            .as_deref()
+            .unwrap()
+            .contains("pinned output fee"));
+    }
+
+    fn next_sequence_from_state(state: &AmmState) -> u64 {
+        state.inbound_sequence_high_water + 1
+    }
 }
