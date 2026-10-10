@@ -1713,17 +1713,17 @@ fn icc_002_pic_writedown_failure_refunds_3usd_to_sp() {
     );
 }
 
-/// **Refund failure is durable, not stranded.** Same setup as the prior test
+/// **Fresh refund failure is durable, not stranded.** Same setup as the prior test
 /// but the 3USD ledger is `flaky_ledger` with `set_fail_transfers(true)`. The
 /// pull (`icrc2_transfer_from`) is unaffected and lands; the kill-switch reject
 /// fires the refund arm; the refund (`icrc1_transfer`) fails.
 ///
 /// Pre-fix, that failure only logged CRITICAL and left the 3USD stranded in the
 /// protocol's reserves subaccount, dropping the SP's live balance below its
-/// tracked aggregate and blocking every non-sole-holder withdrawal. This test
-/// pins the fix: the failed refund is persisted to `pending_3usd_refunds` and
-/// `process_pending_transfer` retries it. Once the ledger recovers, the queue
-/// drains, the SP is made whole, and the queue empties — no manual reconcile.
+/// tracked aggregate and blocking every non-sole-holder withdrawal. This
+/// current-source scenario creates a fresh row with retry provenance, verifies
+/// it remains eligible for bounded automatic retry, and confirms the queue
+/// drains when the ledger recovers.
 #[test]
 fn icc_002_pic_refund_failure_enqueues_durable_retry_and_heals() {
     let f = setup_fixture(ThreePoolKind::Flaky);
@@ -1862,11 +1862,14 @@ fn icc_002_pic_refund_failure_enqueues_durable_retry_and_heals() {
 }
 
 /// A refund row created with the pre-P08 backend source at 9d5f359e keeps its
-/// legacy hashed-reserve source and exact retry identity when upgraded to P08.
+/// legacy hashed-reserve source and exact identity when upgraded to P08, but it
+/// is held because the old snapshot cannot prove no earlier refund dispatch
+/// committed. The exact candidate-block reconciliation endpoint is the only
+/// way to clear this predecessor liability.
 /// Set `RUMI_P08_PRE_P08_BACKEND_WASM` to that pinned source-built artifact.
 #[test]
 #[ignore = "requires the pre-P08 backend Wasm built from source 9d5f359e"]
-fn p08_upgrade_preserves_parent_legacy_refund_identity_and_recovers() {
+fn p08_upgrade_preserves_parent_legacy_refund_identity_and_holds_without_receipt() {
     let parent_path = std::env::var("RUMI_P08_PRE_P08_BACKEND_WASM")
         .expect("set RUMI_P08_PRE_P08_BACKEND_WASM to the source-9d5f359e backend Wasm");
     let parent_wasm = std::fs::read(parent_path).expect("read parent backend Wasm");
@@ -1908,8 +1911,8 @@ fn p08_upgrade_preserves_parent_legacy_refund_identity_and_recovers() {
     f.pic.upgrade_canister(f.protocol_id, protocol_wasm(), encode_args((upgrade,)).unwrap(), None)
         .expect("upgrade parent backend to P08");
 
-    // Run the zero-delay post-upgrade timer explicitly before checking that it
-    // made exactly one retry against the still-failing ledger.
+    // Run the zero-delay post-upgrade timer explicitly. The old snapshot has no
+    // fresh-row provenance marker, so P08 must retain it without dispatching.
     f.pic.tick();
 
     let after = get_pending_3usd_refunds(&f.pic, f.protocol_id);
@@ -1918,19 +1921,39 @@ fn p08_upgrade_preserves_parent_legacy_refund_identity_and_recovers() {
     assert_eq!(after[0].ledger, row.ledger);
     assert_eq!(after[0].amount_e8s, row.amount_e8s);
     assert_eq!(after[0].vault_id, row.vault_id);
-    assert_eq!(after[0].retry_count, row.retry_count.saturating_add(1),
-        "post-upgrade worker makes one bounded retry while the ledger is still failing");
+    assert_eq!(after[0].retry_count, row.retry_count,
+        "predecessor row must remain held; upgrade must not dispatch it automatically");
     assert_eq!(after[0].op_nonce, row.op_nonce, "retry must reuse exact nonce");
     assert_eq!(get_protocol_3usd_reserves(&f.pic, f.protocol_id), reserve_counter_before,
         "upgrade must not change reserve accounting");
     assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, reserve_account.clone()),
         three_usd_amount as u128, "legacy refund source remains the hashed reserve account");
 
+    // Recovering the ledger does not turn an ambiguous predecessor row into a
+    // retryable fresh row. Drain timers and prove the identity and balances
+    // stay unchanged until direct receipt reconciliation supplies proof.
     flaky_set_fail_transfers(&f.pic, f.three_pool_ledger, false);
     drain_pending_transfers(&f.pic);
-    assert!(get_pending_3usd_refunds(&f.pic, f.protocol_id).is_empty());
-    assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)), sp_balance_before,
-        "terminal recovery restores the stability pool's exact balance");
-    assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, reserve_account), 0,
-        "terminal recovery drains the legacy hashed reserve account");
+    let rearm = f.pic.update_call(
+        f.protocol_id,
+        f.developer,
+        "rearm_unsent_legacy_three_usd_refund",
+        encode_one(row.op_nonce.clone()).unwrap(),
+    ).expect("rearm endpoint call executes");
+    let rearm_result: Result<(), ProtocolError> = match rearm {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode rearm result"),
+        WasmResult::Reject(message) => panic!("rearm endpoint rejected: {message}"),
+    };
+    assert!(rearm_result.is_err(), "old snapshot row must not use fresh-row rearm");
+
+    let still_held = get_pending_3usd_refunds(&f.pic, f.protocol_id);
+    assert_eq!(still_held.len(), 1, "predecessor liability remains durable");
+    assert_eq!(still_held[0].retry_count, row.retry_count);
+    assert_eq!(still_held[0].op_nonce, row.op_nonce);
+    assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)),
+        sp_balance_before - three_usd_amount as u128,
+        "held predecessor refund must not credit the SP without exact receipt proof");
+    assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, reserve_account),
+        three_usd_amount as u128,
+        "held predecessor principal remains in the legacy hashed reserve account");
 }
