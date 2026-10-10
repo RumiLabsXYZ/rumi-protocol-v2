@@ -8,7 +8,10 @@ use crate::management::{
     transfer_collateral, transfer_collateral_from, transfer_icusd_from, transfer_stable_from,
 };
 use crate::numeric::{Ratio, UsdIcp, ICP, ICUSD};
-use crate::state::PendingMarginTransfer;
+use crate::state::{
+    PendingMarginTransfer, VaultCollateralPullJournal, VaultCollateralPullPhase,
+    VaultCollateralPullRequest, VaultOperationResult,
+};
 use crate::state::{compute_redemption_fee_with_rate, Mode, RedemptionSimulationPlan, State};
 use crate::GuardError;
 use crate::DEBUG;
@@ -1490,6 +1493,53 @@ pub struct VaultArg {
     pub amount: u64,
 }
 
+#[derive(CandidType, Clone, Debug, Deserialize, Serialize)]
+pub struct OpenVaultV2Args {
+    pub operation_id: u64,
+    pub collateral_amount: u64,
+    pub collateral_type: Option<Principal>,
+}
+
+#[derive(CandidType, Clone, Debug, Deserialize, Serialize)]
+pub struct OpenVaultAndBorrowV2Args {
+    pub operation_id: u64,
+    pub collateral_amount: u64,
+    pub borrow_amount: u64,
+    pub collateral_type: Option<Principal>,
+}
+
+#[derive(CandidType, Clone, Debug, Deserialize, Serialize)]
+pub struct AddMarginV2Args {
+    pub operation_id: u64,
+    pub vault_id: u64,
+    pub amount: u64,
+}
+
+#[derive(CandidType, Clone, Debug, Deserialize, Serialize)]
+pub struct VaultOperationIdArg {
+    pub operation_id: u64,
+}
+
+fn completed_compound_operation_response(
+    journal: &VaultCollateralPullJournal,
+    operation_id: u64,
+    request: &VaultCollateralPullRequest,
+) -> Option<Result<OpenVaultSuccess, ProtocolError>> {
+    if journal.operation_id != operation_id || &journal.request != request { return None; }
+    match &journal.phase {
+        VaultCollateralPullPhase::Completed {
+            result: VaultOperationResult::OpenVaultAndBorrow { vault_id, block_index, borrowed, failure },
+        } => Some(if *borrowed {
+            Ok(OpenVaultSuccess { vault_id: *vault_id, block_index: *block_index })
+        } else {
+            Err(ProtocolError::GenericError(failure.clone().unwrap_or_else(|| {
+                format!("Vault created (id={vault_id}) but borrow did not complete.")
+            })))
+        }),
+        _ => None,
+    }
+}
+
 /// Returns `Principal::anonymous()` as sentinel for old events missing `collateral_type`.
 /// The replay handler replaces this with the actual ICP ledger principal.
 pub(crate) fn default_collateral_type() -> Principal {
@@ -2879,6 +2929,263 @@ pub async fn open_vault(
             ))
         }
     }
+}
+
+async fn prepare_or_resume_vault_operation(
+    owner: Principal,
+    operation_id: u64,
+    request: VaultCollateralPullRequest,
+    requested_ledger: Principal,
+) -> Result<VaultCollateralPullJournal, ProtocolError> {
+    let existing = read_state(|s| s.vault_collateral_pull_journals.get(&owner).cloned());
+    let ledger = if let Some(journal) = &existing {
+        if journal.operation_id != operation_id || journal.request != request {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "another operation is active or this ID is bound to a different request; replay or ACK it first".into(),
+            ));
+        }
+        if !matches!(journal.phase, VaultCollateralPullPhase::Prepared | VaultCollateralPullPhase::SafeNoEffect { .. }) {
+            return Ok(journal.clone());
+        }
+        requested_ledger
+    } else {
+        let status = read_state(|s| s.vault_operation_status(owner));
+        if operation_id <= status.acknowledged_through {
+            return Err(ProtocolError::GenericError("stale vault operation ID".into()));
+        }
+        if operation_id != status.acknowledged_through.saturating_add(1) {
+            return Err(ProtocolError::GenericError(format!(
+                "expected vault operation ID {}", status.acknowledged_through.saturating_add(1)
+            )));
+        }
+        requested_ledger
+    };
+    let amount_e8s = match &request {
+        VaultCollateralPullRequest::OpenVault { amount_e8s, .. }
+        | VaultCollateralPullRequest::OpenVaultAndBorrow { amount_e8s, .. }
+        | VaultCollateralPullRequest::AddMargin { amount_e8s, .. } => *amount_e8s,
+    };
+    let fee_e8s = management::preflight_vault_collateral_pull(owner, ledger, ic_cdk::id(), amount_e8s)
+        .await
+        .map_err(ProtocolError::TemporarilyUnavailable)?;
+    mutate_state(|s| s.prepare_vault_collateral_pull(
+        owner, operation_id, request, ledger, ic_cdk::id(), fee_e8s, ic_cdk::api::time(),
+    )).map_err(ProtocolError::TemporarilyUnavailable)
+}
+
+async fn dispatch_vault_collateral_operation(
+    owner: Principal,
+    journal: VaultCollateralPullJournal,
+) -> Result<VaultCollateralPullJournal, ProtocolError> {
+    if matches!(journal.phase, VaultCollateralPullPhase::PullConfirmed { .. }
+        | VaultCollateralPullPhase::VaultCredited { .. }
+        | VaultCollateralPullPhase::Completed { .. }) {
+        return Ok(journal);
+    }
+    let dispatch = mutate_state(|s| s.mark_vault_collateral_pull_dispatched(&owner, &journal))
+        .map_err(ProtocolError::TemporarilyUnavailable)?;
+    match management::transfer_collateral_from_journal(&dispatch).await {
+        Ok(block_index) => mutate_state(|s| s.record_vault_pull_confirmed(&owner, &dispatch, block_index))
+            .map_err(ProtocolError::TemporarilyUnavailable),
+        Err(error) => {
+            if error.is_typed_no_effect() && dispatch.dispatch_attempts == 1 {
+                let message = match &error {
+                    management::VaultCollateralPullDispatchError::Ledger(error) => error.to_string(),
+                    _ => "typed ledger no-effect".into(),
+                };
+                mutate_state(|s| s.record_vault_collateral_pull_no_effect(&owner, &dispatch, message));
+                if let management::VaultCollateralPullDispatchError::Ledger(error) = error {
+                    return Err(ProtocolError::TransferFromError(error, dispatch.amount_e8s));
+                }
+            }
+            let detail = match error {
+                management::VaultCollateralPullDispatchError::Ledger(TransferFromError::TooOld) =>
+                    "ledger returned TooOld without positive proof of the original transfer",
+                management::VaultCollateralPullDispatchError::Ledger(TransferFromError::GenericError { .. }) =>
+                    "ledger returned GenericError; transfer outcome is unknown",
+                management::VaultCollateralPullDispatchError::Ledger(_) =>
+                    "a prior ambiguous dispatch remains unresolved",
+                management::VaultCollateralPullDispatchError::Rejected { .. } =>
+                    "inter-canister call rejection leaves transfer outcome unknown",
+                management::VaultCollateralPullDispatchError::InvalidBlockIndex =>
+                    "ledger block index is invalid; transfer outcome remains held",
+            };
+            Err(ProtocolError::TemporarilyUnavailable(format!(
+                "{detail}; retry operation ID {} with identical arguments",
+                dispatch.operation_id
+            )))
+        }
+    }
+}
+
+/// Recover a collateral pull whose transfer_from callback was lost or whose
+/// exact retry aged out. The candidate index is only a hint: the authenticated
+/// caller's current journal is re-read after the ledger await and must remain
+/// byte-for-byte identical before accepting the direct exact receipt.
+pub async fn reconcile_vault_collateral_pull_from_block(
+    operation_id: u64,
+    candidate_block_index: u64,
+) -> Result<(), ProtocolError> {
+    let owner = ic_cdk::api::caller();
+    let journal = read_state(|s| s.vault_collateral_pull_journals.get(&owner).cloned())
+        .ok_or_else(|| ProtocolError::GenericError("no active vault operation to reconcile".into()))?;
+    if journal.operation_id != operation_id
+        || journal.dispatch_attempts == 0
+        || journal.phase != VaultCollateralPullPhase::Submitted
+    {
+        return Err(ProtocolError::GenericError(
+            "operation is not awaiting collateral pull receipt recovery".into(),
+        ));
+    }
+    let guard_name = match journal.request {
+        VaultCollateralPullRequest::OpenVault { .. } => "open_vault_v2".to_string(),
+        VaultCollateralPullRequest::OpenVaultAndBorrow { .. } => "open_vault_and_borrow_v2".to_string(),
+        VaultCollateralPullRequest::AddMargin { vault_id, .. } => format!("add_margin_vault_v2_{vault_id}"),
+    };
+    let guard = GuardPrincipal::new(owner, &guard_name)?;
+    let generation = mutate_state(|s| s.reserve_vault_pull_receipt_recovery(
+        owner,
+        operation_id,
+        ic_cdk::api::time(),
+    )).map_err(ProtocolError::TemporarilyUnavailable)?;
+    let receipt_result = if crate::native_icp_proof::is_native_icp_ledger(journal.ledger) {
+        if journal.from.subaccount.is_some() || journal.to.subaccount.is_some() {
+            Err("native ICP receipt verifier only accepts the pinned default-account tuple".into())
+        } else {
+        crate::native_icp_proof::query_direct_block(journal.ledger, candidate_block_index)
+            .await
+            .and_then(|block| crate::native_icp_proof::verify_transfer_from_block(
+                &block,
+                journal.owner,
+                ic_cdk::id(),
+                journal.to.owner,
+                journal.amount_e8s,
+                journal.fee_e8s,
+                &journal.memo,
+                journal.created_at_time_ns,
+            ))
+        }
+    } else {
+        crate::icrc3_proof::verify_vault_collateral_pull_block(
+            &journal,
+            candidate_block_index,
+            ic_cdk::id(),
+        ).await
+    };
+    if let Err(error) = receipt_result {
+        let _ = mutate_state(|s| s.finish_vault_pull_receipt_recovery(
+            &owner,
+            &journal,
+            generation,
+            ic_cdk::api::time(),
+            None,
+            true,
+        ));
+        guard.fail();
+        return Err(ProtocolError::TemporarilyUnavailable(format!(
+            "candidate block does not prove the exact collateral pull; operation remains held: {error}"
+        )));
+    }
+    if let Err(error) = mutate_state(|s| s.finish_vault_pull_receipt_recovery(
+        &owner,
+        &journal,
+        generation,
+        ic_cdk::api::time(),
+        Some(candidate_block_index),
+        false,
+    )) {
+        guard.fail();
+        return Err(ProtocolError::TemporarilyUnavailable(format!(
+            "collateral pull journal changed during receipt verification; operation remains held: {error}"
+        )));
+    }
+    guard.complete();
+    Ok(())
+}
+
+pub async fn open_vault_v2(args: OpenVaultV2Args) -> Result<OpenVaultSuccess, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard = GuardPrincipal::new(caller, "open_vault_v2")?;
+    let active = read_state(|s| s.vault_collateral_pull_journals.get(&caller).cloned());
+    let replay_type = active.as_ref().and_then(|journal| {
+        if journal.operation_id != args.operation_id { return None; }
+        match journal.request {
+            VaultCollateralPullRequest::OpenVault { collateral_type, amount_e8s }
+                if amount_e8s == args.collateral_amount
+                    && args.collateral_type.is_none_or(|requested| requested == collateral_type) => Some(collateral_type),
+            _ => None,
+        }
+    });
+    let collateral_type = args.collateral_type.or(replay_type).unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
+    let request = VaultCollateralPullRequest::OpenVault {
+        collateral_type,
+        amount_e8s: args.collateral_amount,
+    };
+    let resuming = active.as_ref().is_some_and(|journal| journal.operation_id == args.operation_id && journal.request == request);
+    if let Some(journal) = active.as_ref().filter(|journal| resuming) {
+        if let VaultCollateralPullPhase::Completed { result: VaultOperationResult::OpenVault { vault_id, block_index } } = &journal.phase {
+            guard.complete();
+            return Ok(OpenVaultSuccess { vault_id: *vault_id, block_index: *block_index });
+        }
+    }
+    let (ledger, status, min_deposit, native_xrp) = read_state(|s| {
+        s.get_collateral_config(&collateral_type).map(|config| (
+            config.ledger_canister_id, config.status, config.min_collateral_deposit, config.is_native_xrp(),
+        ))
+    }).ok_or_else(|| ProtocolError::GenericError("Collateral type not supported.".into()))?;
+    if !resuming && (native_xrp || !status.allows_open()) {
+        guard.fail();
+        return Err(ProtocolError::GenericError("Collateral type is not accepting ICRC-2 vault opens.".into()));
+    }
+    if !resuming && min_deposit > 0 && args.collateral_amount < min_deposit {
+        guard.fail();
+        return Err(ProtocolError::AmountTooLow { minimum_amount: min_deposit });
+    }
+    let journal = match prepare_or_resume_vault_operation(caller, args.operation_id, request, ledger).await {
+        Ok(journal) => journal,
+        Err(error) => { guard.fail(); return Err(error); }
+    };
+    if let VaultCollateralPullPhase::Completed { result: VaultOperationResult::OpenVault { vault_id, block_index } } = journal.phase {
+        guard.complete();
+        return Ok(OpenVaultSuccess { vault_id, block_index });
+    }
+    let journal = match dispatch_vault_collateral_operation(caller, journal).await {
+        Ok(journal) => journal,
+        Err(error) => { guard.fail(); return Err(error); }
+    };
+    let block_index = match journal.phase {
+        VaultCollateralPullPhase::PullConfirmed { block_index } => block_index,
+        _ => { guard.fail(); return Err(ProtocolError::TemporarilyUnavailable("vault pull is not confirmed".into())); }
+    };
+    let vault_id = journal.vault_id;
+    mutate_state(|s| {
+        record_open_vault(s, Vault {
+            owner: caller,
+            borrowed_icusd_amount: 0.into(),
+            collateral_amount: args.collateral_amount,
+            vault_id,
+            collateral_type,
+            last_accrual_time: ic_cdk::api::time(),
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        }, block_index);
+        s.complete_vault_operation(&caller, args.operation_id,
+            VaultOperationResult::OpenVault { vault_id, block_index })
+            .expect("operation journal is retained through vault credit");
+    });
+    guard.complete();
+    Ok(OpenVaultSuccess { vault_id, block_index })
+}
+
+pub async fn add_margin_to_vault_v2(_args: AddMarginV2Args) -> Result<u64, ProtocolError> {
+    // A submitted ICRC-2 pull can outlive its callback. Unlike opening a
+    // vault, add-margin has no safe terminal destination if liquidation
+    // removes the target vault before the exact pull receipt is reconciled.
+    // Keep this endpoint fail-closed until a liquidation-compatible recovery
+    // liability/refund path exists; do not create an intent or call a ledger.
+    Err(ProtocolError::TemporarilyUnavailable(
+        "operation-ID add-margin is held pending a safe recovery path; no collateral was pulled".into(),
+    ))
 }
 
 /// Compound open-vault-and-borrow in a single canister call.
@@ -5688,6 +5995,118 @@ pub async fn open_vault_and_borrow(
     })
 }
 
+pub async fn open_vault_and_borrow_v2(
+    args: OpenVaultAndBorrowV2Args,
+) -> Result<OpenVaultSuccess, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard = GuardPrincipal::new(caller, "open_vault_and_borrow_v2")?;
+    let active = read_state(|s| s.vault_collateral_pull_journals.get(&caller).cloned());
+    let replay_type = active.as_ref().and_then(|journal| {
+        if journal.operation_id != args.operation_id { return None; }
+        match journal.request {
+            VaultCollateralPullRequest::OpenVaultAndBorrow { collateral_type, amount_e8s, borrow_amount_e8s }
+                if amount_e8s == args.collateral_amount
+                    && borrow_amount_e8s == args.borrow_amount
+                    && args.collateral_type.is_none_or(|requested| requested == collateral_type) => Some(collateral_type),
+            _ => None,
+        }
+    });
+    let collateral_type = args.collateral_type.or(replay_type).unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
+    let request = VaultCollateralPullRequest::OpenVaultAndBorrow {
+        collateral_type,
+        amount_e8s: args.collateral_amount,
+        borrow_amount_e8s: args.borrow_amount,
+    };
+    let resuming = active.as_ref().is_some_and(|journal| journal.operation_id == args.operation_id && journal.request == request);
+    if let Some(journal) = active.as_ref().filter(|journal| resuming) {
+        if let Some(result) = completed_compound_operation_response(journal, args.operation_id, &request) {
+            guard.complete();
+            return result;
+        }
+    }
+    let (ledger, status, min_deposit, native_xrp) = read_state(|s| {
+        s.get_collateral_config(&collateral_type).map(|config| (
+            config.ledger_canister_id, config.status, config.min_collateral_deposit, config.is_native_xrp(),
+        ))
+    }).ok_or_else(|| ProtocolError::GenericError("Collateral type not supported.".into()))?;
+    if !resuming && (native_xrp || !status.allows_open()) {
+        guard.fail();
+        return Err(ProtocolError::GenericError("Collateral type is not accepting ICRC-2 vault opens.".into()));
+    }
+    if !resuming && min_deposit > 0 && args.collateral_amount < min_deposit {
+        guard.fail();
+        return Err(ProtocolError::AmountTooLow { minimum_amount: min_deposit });
+    }
+    let journal = match prepare_or_resume_vault_operation(caller, args.operation_id, request, ledger).await {
+        Ok(journal) => journal,
+        Err(error) => { guard.fail(); return Err(error); }
+    };
+    if let VaultCollateralPullPhase::Completed { result: VaultOperationResult::OpenVaultAndBorrow { vault_id, block_index, borrowed, failure } } = journal.phase {
+        guard.complete();
+        return if borrowed {
+            Ok(OpenVaultSuccess { vault_id, block_index })
+        } else {
+            Err(ProtocolError::GenericError(failure.unwrap_or_else(|| format!("Vault created (id={vault_id}) but borrow did not complete."))))
+        };
+    }
+    let journal = match dispatch_vault_collateral_operation(caller, journal).await {
+        Ok(journal) => journal,
+        Err(error) => { guard.fail(); return Err(error); }
+    };
+    let block_index = match journal.phase {
+        VaultCollateralPullPhase::PullConfirmed { block_index } => {
+            let vault_id = journal.vault_id;
+            mutate_state(|s| {
+                record_open_vault(s, Vault {
+                    owner: caller,
+                    borrowed_icusd_amount: 0.into(),
+                    collateral_amount: args.collateral_amount,
+                    vault_id,
+                    collateral_type,
+                    last_accrual_time: ic_cdk::api::time(),
+                    accrued_interest: ICUSD::new(0),
+                    bot_processing: false,
+                }, block_index);
+                s.mark_vault_operation_credited(&caller, args.operation_id, block_index)
+                    .expect("compound operation journal is retained through vault credit");
+            });
+            block_index
+        }
+        VaultCollateralPullPhase::VaultCredited { block_index } => block_index,
+        _ => { guard.fail(); return Err(ProtocolError::TemporarilyUnavailable("vault pull is not confirmed".into())); }
+    };
+    let vault_id = journal.vault_id;
+    if args.borrow_amount > 0 {
+        let _vault_op_guard = match compound_borrow_retry_guard(caller, args.operation_id, &journal) {
+            Ok(g) => g,
+            Err(error) => { guard.fail(); return Err(error); }
+        };
+        match borrow_from_vault_internal_for_compound(caller, VaultArg { vault_id, amount: args.borrow_amount }, args.operation_id).await {
+            Ok(_) => {},
+            Err(error) => {
+                let pending = read_state(|s| s.pending_borrow_mints.contains_key(&vault_id));
+                if pending {
+                    guard.fail();
+                    return Err(ProtocolError::TemporarilyUnavailable(format!(
+                        "vault {vault_id} is credited; retry operation ID {} to resume its pinned borrow mint: {error:?}", args.operation_id
+                    )));
+                }
+                let failure = format!("Vault created (id={vault_id}) but borrow of {} failed: {error:?}. You can borrow separately.", args.borrow_amount);
+                mutate_state(|s| s.complete_vault_operation(&caller, args.operation_id,
+                    VaultOperationResult::OpenVaultAndBorrow { vault_id, block_index, borrowed: false, failure: Some(failure.clone()) })
+                    .expect("compound operation journal survives a terminal borrow failure"));
+                guard.complete();
+                return Err(ProtocolError::GenericError(failure));
+            }
+        }
+    }
+    mutate_state(|s| s.complete_vault_operation(&caller, args.operation_id,
+        VaultOperationResult::OpenVaultAndBorrow { vault_id, block_index, borrowed: true, failure: None })
+        .expect("compound operation journal is retained through borrow completion"));
+    guard.complete();
+    Ok(OpenVaultSuccess { vault_id, block_index })
+}
+
 /// Internal borrow logic without guard management.
 /// Called by both `borrow_from_vault` (which acquires its own guard) and
 /// `open_vault_with_deposit` (which already holds a guard for the same principal).
@@ -5695,14 +6114,111 @@ async fn borrow_from_vault_internal(
     caller: Principal,
     arg: VaultArg,
 ) -> Result<SuccessWithFee, ProtocolError> {
+    borrow_from_vault_internal_with_operation(caller, arg, None).await
+}
+
+async fn borrow_from_vault_internal_for_compound(
+    caller: Principal,
+    arg: VaultArg,
+    operation_id: u64,
+) -> Result<SuccessWithFee, ProtocolError> {
+    borrow_from_vault_internal_with_operation(caller, arg, Some(operation_id)).await
+}
+
+async fn borrow_from_vault_internal_with_operation(
+    caller: Principal,
+    arg: VaultArg,
+    compound_operation_id: Option<u64>,
+) -> Result<SuccessWithFee, ProtocolError> {
     borrow_from_vault_internal_with(
         caller,
         arg,
         |tuple| async move { management::mint_icusd_with_borrow_tuple(&tuple).await },
         ic_cdk::api::time,
         |ledger| async move { crate::icrc3_proof::icrc3_history_floor(ledger).await },
+        compound_operation_id,
     )
     .await
+}
+
+/// Recover the operation binding for a borrow mint that belongs to a compound
+/// open-and-borrow. The caller cannot supply this ID: it is derived only from
+/// the owner's durable collateral journal and must match the exact vault,
+/// collateral type, and gross borrow amount pinned in the borrow journal.
+fn compound_operation_id_for_borrow_recovery(
+    borrow: &crate::state::BorrowMintJournal,
+) -> Option<u64> {
+    read_state(|state| {
+        let collateral = state.vault_collateral_pull_journals.get(&borrow.owner)?;
+        if collateral.owner != borrow.owner
+            || collateral.vault_id != borrow.vault_id
+            || !matches!(
+                collateral.phase,
+                crate::state::VaultCollateralPullPhase::VaultCredited { .. }
+            )
+        {
+            return None;
+        }
+        match collateral.request {
+            crate::state::VaultCollateralPullRequest::OpenVaultAndBorrow {
+                collateral_type,
+                borrow_amount_e8s,
+                ..
+            } if collateral_type == borrow.collateral_type
+                && borrow_amount_e8s == borrow.borrowed_amount_e8s =>
+            {
+                Some(collateral.operation_id)
+            }
+            _ => None,
+        }
+    })
+}
+
+/// Permit the pending-borrow exception to the vault operation lock only when
+/// the pending mint is exactly the borrow pinned by this credited compound
+/// operation. All other callers and requests take the ordinary lock path,
+/// which rejects any unresolved borrow journal.
+fn compound_borrow_retry_guard(
+    owner: Principal,
+    operation_id: u64,
+    expected: &VaultCollateralPullJournal,
+) -> Result<VaultLiquidationGuard, ProtocolError> {
+    let exact_pending_borrow = read_state(|state| {
+        let Some(collateral) = state.vault_collateral_pull_journals.get(&owner) else {
+            return false;
+        };
+        if expected.owner != owner
+            || expected.operation_id != operation_id
+            || collateral.owner != owner
+            || collateral.operation_id != operation_id
+            || collateral.vault_id != expected.vault_id
+            || collateral.request != expected.request
+            || !matches!(
+                collateral.phase,
+                VaultCollateralPullPhase::VaultCredited { .. }
+            )
+        {
+            return false;
+        }
+        let VaultCollateralPullRequest::OpenVaultAndBorrow {
+            collateral_type,
+            borrow_amount_e8s,
+            ..
+        } = collateral.request else {
+            return false;
+        };
+        state.pending_borrow_mints.get(&expected.vault_id).is_some_and(|borrow| {
+            borrow.vault_id == expected.vault_id
+                && borrow.owner == owner
+                && borrow.collateral_type == collateral_type
+                && borrow.borrowed_amount_e8s == borrow_amount_e8s
+        })
+    });
+    if exact_pending_borrow {
+        VaultLiquidationGuard::new_for_borrow_retry(expected.vault_id)
+    } else {
+        VaultLiquidationGuard::new(expected.vault_id)
+    }
 }
 
 async fn borrow_from_vault_internal_with<F, Fut, N, H, HFut>(
@@ -5711,6 +6227,7 @@ async fn borrow_from_vault_internal_with<F, Fut, N, H, HFut>(
     dispatch: F,
     now: N,
     history_floor: H,
+    compound_operation_id: Option<u64>,
 ) -> Result<SuccessWithFee, ProtocolError>
 where
     F: FnOnce(crate::state::BorrowMintTuple) -> Fut,
@@ -5722,6 +6239,26 @@ where
     HFut: std::future::Future<Output = Result<u64, String>>,
 {
     let amount: ICUSD = arg.amount.into();
+
+    let compound_binding_valid = read_state(|s| match compound_operation_id {
+        Some(operation_id) => s.vault_collateral_pull_journals.get(&caller).is_some_and(|journal| {
+            journal.operation_id == operation_id
+                && journal.vault_id == arg.vault_id
+                && matches!(journal.request,
+                    crate::state::VaultCollateralPullRequest::OpenVaultAndBorrow { borrow_amount_e8s, .. }
+                        if borrow_amount_e8s == arg.amount)
+                && matches!(journal.phase, crate::state::VaultCollateralPullPhase::VaultCredited { .. })
+        }),
+        None => !s.vault_collateral_pull_journals.values().any(|journal| {
+            journal.vault_id == arg.vault_id
+                && matches!(journal.phase, crate::state::VaultCollateralPullPhase::VaultCredited { .. })
+        }),
+    });
+    if !compound_binding_valid {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "vault has a compound borrow bound to a different operation ID".into(),
+        ));
+    }
 
     // A pending row is the authorization for replay: accept only its original
     // owner and gross amount, then submit its persisted ledger tuple verbatim.
@@ -5757,7 +6294,7 @@ where
                 arg.vault_id,
             )));
         }
-        return dispatch_borrow_mint_with(journal, dispatch, now).await;
+        return dispatch_borrow_mint_with(journal, dispatch, now, compound_operation_id).await;
     }
 
     if amount < read_state(|s| s.min_icusd_amount) {
@@ -5965,19 +6502,45 @@ where
     // Release the transient reservation before dispatch so later admissions
     // count each outstanding borrow exactly once.
     drop(_borrow_reservation);
-    dispatch_borrow_mint_with(journal, dispatch, now).await
+    dispatch_borrow_mint_with(journal, dispatch, now, compound_operation_id).await
 }
 
 async fn dispatch_borrow_mint_with<F, Fut>(
     mut journal: crate::state::BorrowMintJournal,
     dispatch: F,
     now: impl FnOnce() -> u64,
+    compound_operation_id: Option<u64>,
 ) -> Result<SuccessWithFee, ProtocolError>
 where
     F: FnOnce(crate::state::BorrowMintTuple) -> Fut,
     Fut: std::future::Future<
         Output = Result<u64, icrc_ledger_types::icrc1::transfer::TransferError>,
     >,
+{
+    dispatch_borrow_mint_with_post_commit(
+        journal,
+        dispatch,
+        now,
+        compound_operation_id,
+        |fee| async move { crate::treasury::mint_borrowing_fee_to_treasury(fee).await },
+    ).await
+}
+
+async fn dispatch_borrow_mint_with_post_commit<F, Fut, N, Post, PostFut>(
+    mut journal: crate::state::BorrowMintJournal,
+    dispatch: F,
+    now: N,
+    compound_operation_id: Option<u64>,
+    post_commit: Post,
+) -> Result<SuccessWithFee, ProtocolError>
+where
+    F: FnOnce(crate::state::BorrowMintTuple) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<u64, icrc_ledger_types::icrc1::transfer::TransferError>,
+    >,
+    N: FnOnce() -> u64,
+    Post: FnOnce(ICUSD) -> PostFut,
+    PostFut: std::future::Future<Output = ()>,
 {
     if journal.phase == crate::state::BorrowMintPhase::SubmittedOrUnknown {
         let previous_count = journal.dispatch_attempt_count;
@@ -6150,6 +6713,27 @@ where
                 if !vault_matches {
                     return false;
                 }
+                let collateral_completion = if let Some(operation_id) = compound_operation_id {
+                    let Some(collateral_journal) = s.vault_collateral_pull_journals.get(&journal.owner) else {
+                        return false;
+                    };
+                    if collateral_journal.operation_id != operation_id
+                        || collateral_journal.vault_id != journal.vault_id
+                        || !matches!(
+                            collateral_journal.request,
+                            crate::state::VaultCollateralPullRequest::OpenVaultAndBorrow { borrow_amount_e8s, .. }
+                                if borrow_amount_e8s == journal.borrowed_amount_e8s
+                        )
+                    {
+                        return false;
+                    }
+                    match collateral_journal.phase {
+                        crate::state::VaultCollateralPullPhase::VaultCredited { block_index } => Some((operation_id, block_index)),
+                        _ => return false,
+                    }
+                } else {
+                    None
+                };
                 crate::event::record_borrow_from_vault_at(
                     s,
                     journal.vault_id,
@@ -6160,6 +6744,18 @@ where
                     now(),
                 );
                 s.pending_borrow_mints.remove(&journal.vault_id);
+                if let Some((operation_id, collateral_block_index)) = collateral_completion {
+                    s.complete_vault_operation(
+                        &journal.owner,
+                        operation_id,
+                        crate::state::VaultOperationResult::OpenVaultAndBorrow {
+                            vault_id: journal.vault_id,
+                            block_index: collateral_block_index,
+                            borrowed: true,
+                            failure: None,
+                        },
+                    ).expect("validated compound journal completes with confirmed borrow debt");
+                }
                 true
             });
             if !committed {
@@ -6170,7 +6766,7 @@ where
             }
 
             let fee = ICUSD::new(journal.fee_amount_e8s);
-            crate::treasury::mint_borrowing_fee_to_treasury(fee).await;
+            post_commit(fee).await;
             Ok(SuccessWithFee {
                 block_index,
                 fee_amount_paid: fee.to_u64(),
@@ -6187,6 +6783,271 @@ mod borrow_mint_journal_tests {
     use crate::state::{replace_state, BorrowMintJournal, BorrowMintPhase, BorrowMintTuple, State};
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
+
+    #[test]
+    fn v2_add_margin_is_held_without_reserving_or_dispatching_a_pull() {
+        replace_state(State::default());
+        let result = futures::executor::block_on(add_margin_to_vault_v2(AddMarginV2Args {
+            operation_id: 1,
+            vault_id: 99,
+            amount: 100,
+        }));
+        assert!(matches!(result, Err(ProtocolError::TemporarilyUnavailable(message))
+            if message.contains("no collateral was pulled")));
+        crate::state::read_state(|state| {
+            assert!(state.vault_collateral_pull_journals.is_empty());
+            assert_eq!(state.op_nonce_counter, 0);
+        });
+    }
+
+    #[test]
+    fn compound_lost_reply_after_debt_commit_replays_before_a_second_mint() {
+        let owner = Principal::from_slice(&[0x41]);
+        let ledger = Principal::from_slice(&[0x42]);
+        let protocol = Principal::from_slice(&[0x43]);
+        let request = crate::state::VaultCollateralPullRequest::OpenVaultAndBorrow {
+            collateral_type: ledger,
+            amount_e8s: 1_000,
+            borrow_amount_e8s: 500,
+        };
+        let mut state = State::default();
+        let mut collateral = crate::state::xrp_collateral_config(
+            Ratio::new(rust_decimal_macros::dec!(0.005)),
+            Ratio::new(rust_decimal_macros::dec!(0.01)),
+            Ratio::new(rust_decimal_macros::dec!(1.0)),
+        );
+        collateral.ledger_canister_id = ledger;
+        collateral.custody_kind = None;
+        collateral.min_collateral_deposit = 0;
+        state.collateral_configs.insert(ledger, collateral);
+        let pull = state.prepare_vault_collateral_pull(owner, 1, request.clone(), ledger, protocol, 10, 88).unwrap();
+        let submitted = state.mark_vault_collateral_pull_dispatched(&owner, &pull).unwrap();
+        state.record_vault_pull_confirmed(&owner, &submitted, 33).unwrap();
+        state.vault_id_to_vaults.insert(pull.vault_id, Vault {
+            owner,
+            borrowed_icusd_amount: ICUSD::new(0),
+            collateral_amount: 1_000,
+            vault_id: pull.vault_id,
+            collateral_type: ledger,
+            last_accrual_time: 88,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+        state.mark_vault_operation_credited(&owner, 1, 33).unwrap();
+        let borrow_journal = BorrowMintJournal {
+            vault_id: pull.vault_id,
+            owner,
+            collateral_type: ledger,
+            borrowed_amount_e8s: 500,
+            fee_amount_e8s: 10,
+            tuple: BorrowMintTuple {
+                ledger: Principal::from_slice(&[0x44]),
+                destination: owner,
+                amount_e8s: 490,
+                memo: [0x45; 16],
+                created_at_time_ns: 99,
+                op_nonce: 99,
+            },
+            phase: BorrowMintPhase::MintConfirmedHeld { block_index: 77 },
+            history_floor: Some(20),
+            absence_scan: None,
+            dispatch_attempt_count: Some(1),
+            typed_too_old: false,
+        };
+        state.pending_borrow_mints.insert(pull.vault_id, borrow_journal.clone());
+        replace_state(state);
+
+        // The confirmed ledger mint is already represented by block 77. The
+        // post-commit hook stands in for the treasury await; it verifies that
+        // debt and the terminal operation receipt are atomic before reply.
+        let dispatch_count = Rc::new(Cell::new(1));
+        let second_dispatch_count = dispatch_count.clone();
+        let treasury_count = Rc::new(Cell::new(0));
+        let treasury_seen = treasury_count.clone();
+        let first_result = futures::executor::block_on(dispatch_borrow_mint_with_post_commit(
+            borrow_journal,
+            move |_| async move {
+                second_dispatch_count.set(second_dispatch_count.get() + 1);
+                panic!("confirmed mint must not dispatch a second time")
+            },
+            || 100,
+            Some(1),
+            move |_| async move {
+                crate::state::read_state(|s| {
+                    assert_eq!(s.vault_id_to_vaults[&1].borrowed_icusd_amount, ICUSD::new(500));
+                    assert!(!s.pending_borrow_mints.contains_key(&1));
+                    assert!(matches!(
+                        s.vault_collateral_pull_journals[&owner].phase,
+                        crate::state::VaultCollateralPullPhase::Completed {
+                            result: crate::state::VaultOperationResult::OpenVaultAndBorrow { borrowed: true, .. }
+                        }
+                    ));
+                });
+                treasury_seen.set(treasury_seen.get() + 1);
+            },
+        ));
+        assert!(first_result.is_ok());
+        // Drop the successful callee result to model a lost top-level reply.
+        drop(first_result);
+
+        let completed_journal = crate::state::read_state(|s| s.vault_collateral_pull_journals[&owner].clone());
+        let replay = completed_compound_operation_response(&completed_journal, 1, &request)
+            .expect("same operation ID must return its saved result");
+        assert!(matches!(replay, Ok(OpenVaultSuccess { vault_id: 1, block_index: 33 })));
+        assert_eq!(dispatch_count.get(), 1, "same operation ID cannot mint twice");
+        assert_eq!(treasury_count.get(), 1, "terminal replay does not reenter post-commit work");
+        crate::state::read_state(|s| assert_eq!(s.vault_id_to_vaults[&1].borrowed_icusd_amount, ICUSD::new(500)));
+    }
+
+    #[test]
+    fn compound_receipt_recovery_uses_only_the_matching_collateral_operation() {
+        let owner = Principal::from_slice(&[0x51]);
+        let collateral_type = Principal::from_slice(&[0x52]);
+        let protocol = Principal::from_slice(&[0x53]);
+        let request = crate::state::VaultCollateralPullRequest::OpenVaultAndBorrow {
+            collateral_type,
+            amount_e8s: 1_000,
+            borrow_amount_e8s: 500,
+        };
+        let mut state = State::default();
+        let mut config = crate::state::xrp_collateral_config(
+            Ratio::new(rust_decimal_macros::dec!(0.005)),
+            Ratio::new(rust_decimal_macros::dec!(0.01)),
+            Ratio::new(rust_decimal_macros::dec!(1.0)),
+        );
+        config.ledger_canister_id = collateral_type;
+        config.custody_kind = None;
+        config.min_collateral_deposit = 0;
+        state.collateral_configs.insert(collateral_type, config);
+        let pull = state
+            .prepare_vault_collateral_pull(owner, 1, request, collateral_type, protocol, 10, 88)
+            .unwrap();
+        let submitted = state.mark_vault_collateral_pull_dispatched(&owner, &pull).unwrap();
+        state.record_vault_pull_confirmed(&owner, &submitted, 33).unwrap();
+        state.vault_id_to_vaults.insert(
+            pull.vault_id,
+            Vault {
+                owner,
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_amount: 1_000,
+                vault_id: pull.vault_id,
+                collateral_type,
+                last_accrual_time: 88,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+        state.mark_vault_operation_credited(&owner, 1, 33).unwrap();
+        let borrow = BorrowMintJournal {
+            vault_id: pull.vault_id,
+            owner,
+            collateral_type,
+            borrowed_amount_e8s: 500,
+            fee_amount_e8s: 0,
+            tuple: BorrowMintTuple {
+                ledger: Principal::from_slice(&[0x54]),
+                destination: owner,
+                amount_e8s: 500,
+                memo: [0x55; 16],
+                created_at_time_ns: 99,
+                op_nonce: 99,
+            },
+            phase: BorrowMintPhase::MintConfirmedHeld { block_index: 77 },
+            history_floor: Some(20),
+            absence_scan: None,
+            dispatch_attempt_count: Some(1),
+            typed_too_old: false,
+        };
+        state.pending_borrow_mints.insert(pull.vault_id, borrow.clone());
+        replace_state(state);
+
+        assert!(compound_borrow_retry_guard(owner, 2, &pull).is_err());
+        crate::state::mutate_state(|s| {
+            s.pending_borrow_mints
+                .get_mut(&pull.vault_id)
+                .unwrap()
+                .borrowed_amount_e8s += 1;
+        });
+        assert!(compound_borrow_retry_guard(owner, 1, &pull).is_err());
+        crate::state::mutate_state(|s| {
+            s.pending_borrow_mints.insert(pull.vault_id, borrow.clone());
+        });
+        assert!(VaultLiquidationGuard::new(pull.vault_id).is_err());
+        let retry_guard = compound_borrow_retry_guard(owner, 1, &pull)
+            .expect("only the exact pending compound borrow may retry through the vault lock");
+        drop(retry_guard);
+
+        // The former unbound recovery path must stay blocked and leave the
+        // confirmed mint held until the matching operation ID is supplied.
+        let unbound = futures::executor::block_on(borrow_from_vault_internal_with(
+            owner,
+            VaultArg {
+                vault_id: pull.vault_id,
+                amount: 500,
+            },
+            |_| async { panic!("confirmed mint must not dispatch") },
+            || 100,
+            |_| async { panic!("held mint needs no history read") },
+            None,
+        ));
+        assert!(matches!(
+            unbound,
+            Err(ProtocolError::TemporarilyUnavailable(_))
+        ));
+        crate::state::read_state(|s| {
+            assert_eq!(
+                s.vault_id_to_vaults[&pull.vault_id].borrowed_icusd_amount,
+                ICUSD::new(0)
+            );
+            assert_eq!(s.pending_borrow_mints.get(&pull.vault_id), Some(&borrow));
+        });
+
+        let operation_id = compound_operation_id_for_borrow_recovery(&borrow);
+        assert_eq!(operation_id, Some(1));
+        let mut wrong_amount = borrow.clone();
+        wrong_amount.borrowed_amount_e8s += 1;
+        assert_eq!(
+            compound_operation_id_for_borrow_recovery(&wrong_amount),
+            None
+        );
+        let mut wrong_collateral = borrow.clone();
+        wrong_collateral.collateral_type = Principal::from_slice(&[0x56]);
+        assert_eq!(
+            compound_operation_id_for_borrow_recovery(&wrong_collateral),
+            None
+        );
+
+        let recovered = futures::executor::block_on(borrow_from_vault_internal_with(
+            owner,
+            VaultArg {
+                vault_id: pull.vault_id,
+                amount: 500,
+            },
+            |_| async { panic!("confirmed mint must not dispatch") },
+            || 100,
+            |_| async { panic!("held mint needs no history read") },
+            operation_id,
+        ));
+        assert!(recovered.is_ok());
+        crate::state::read_state(|s| {
+            assert_eq!(
+                s.vault_id_to_vaults[&pull.vault_id].borrowed_icusd_amount,
+                ICUSD::new(500)
+            );
+            assert!(!s.pending_borrow_mints.contains_key(&pull.vault_id));
+            assert!(matches!(
+                s.vault_collateral_pull_journals[&owner].phase,
+                crate::state::VaultCollateralPullPhase::Completed {
+                    result: crate::state::VaultOperationResult::OpenVaultAndBorrow {
+                        vault_id: 1,
+                        block_index: 33,
+                        borrowed: true,
+                        failure: None,
+                    }
+                }
+            ));
+        });
+    }
 
     #[test]
     fn receipt_recovery_authorizes_only_owner_or_configured_developer_and_keeps_owner_attribution()
@@ -6328,6 +7189,7 @@ mod borrow_mint_journal_tests {
             },
             || 10_000_000_000,
             |_| async { Ok(0) },
+            None,
         ));
         drop(first_guard);
         assert!(matches!(first, Err(ProtocolError::GenericError(_))));
@@ -6386,6 +7248,7 @@ mod borrow_mint_journal_tests {
             },
             || 20_000_000_000,
             |_| async { Ok(0) },
+            None,
         ));
         drop(retry_guard);
         assert!(matches!(second, Err(ProtocolError::GenericError(_))));
@@ -6412,6 +7275,7 @@ mod borrow_mint_journal_tests {
             },
             || 30_000_000_000,
             |_| async { Ok(0) },
+            None,
         ));
         drop(retry_guard);
         assert_eq!(third.expect("confirmed mint applies debt").block_index, 77);
@@ -6460,6 +7324,7 @@ mod borrow_mint_journal_tests {
                 Err(icrc_ledger_types::icrc1::transfer::TransferError::TooOld)
             },
             || 1,
+            None,
         ));
         assert!(matches!(first, Err(ProtocolError::GenericError(_))));
         assert_eq!(sends.get(), 1);
@@ -6474,6 +7339,7 @@ mod borrow_mint_journal_tests {
                 Err(icrc_ledger_types::icrc1::transfer::TransferError::TemporarilyUnavailable)
             },
             || 2,
+            None,
         ));
         assert!(matches!(retry, Err(ProtocolError::GenericError(_))));
         assert_eq!(sends.get(), 1, "TooOld must permanently disable mint resubmission");
@@ -6498,7 +7364,7 @@ mod borrow_mint_journal_tests {
         state.pending_borrow_mints.insert(101, journal.clone());
         replace_state(state);
         let result = futures::executor::block_on(dispatch_borrow_mint_with(
-            journal, |_| async { Err(icrc_ledger_types::icrc1::transfer::TransferError::BadFee { expected_fee: candid::Nat::from(1u64) }) }, || 1,
+            journal, |_| async { Err(icrc_ledger_types::icrc1::transfer::TransferError::BadFee { expected_fee: candid::Nat::from(1u64) }) }, || 1, None,
         ));
         assert!(matches!(result, Err(ProtocolError::GenericError(_))));
         crate::state::read_state(|s| {
@@ -6734,12 +7600,14 @@ pub async fn reconcile_pending_borrow_mint_from_block(
 
     // The held phase bypasses the ledger closure and runs the same checked,
     // once-only debt/event commit used by a direct successful ledger reply.
-    match borrow_from_vault_internal(
+    let compound_operation_id = compound_operation_id_for_borrow_recovery(&journal);
+    match borrow_from_vault_internal_with_operation(
         borrower,
         VaultArg {
             vault_id,
             amount: journal.borrowed_amount_e8s,
         },
+        compound_operation_id,
     )
     .await
     {
@@ -7000,7 +7868,17 @@ pub async fn advance_pending_borrow_mint_recovery(vault_id: u64) -> Result<(), P
             true
         });
         if !committed { guard_principal.fail(); return Err(ProtocolError::TemporarilyUnavailable("borrow journal changed before receipt CAS".into())); }
-        match borrow_from_vault_internal(borrower, VaultArg { vault_id, amount: journal.borrowed_amount_e8s }).await {
+        let compound_operation_id = compound_operation_id_for_borrow_recovery(&journal);
+        match borrow_from_vault_internal_with_operation(
+            borrower,
+            VaultArg {
+                vault_id,
+                amount: journal.borrowed_amount_e8s,
+            },
+            compound_operation_id,
+        )
+        .await
+        {
             Ok(_) => { log_borrow_mint_receipt_recovery("scan_receipt_debt_committed", caller, &journal, block_index); guard_principal.complete(); Ok(()) }
             Err(error) => { guard_principal.fail(); Err(error) }
         }

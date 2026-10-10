@@ -2697,6 +2697,117 @@ pub async fn transfer_collateral_from(amount: u64, from: Principal, ledger: Prin
     .await
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VaultCollateralPullDispatchError {
+    Ledger(TransferFromError),
+    Rejected { code: i32, message: String },
+    InvalidBlockIndex,
+}
+
+impl VaultCollateralPullDispatchError {
+    pub fn is_typed_no_effect(&self) -> bool {
+        matches!(self,
+            Self::Ledger(TransferFromError::BadFee { .. })
+                | Self::Ledger(TransferFromError::BadBurn { .. })
+                | Self::Ledger(TransferFromError::InsufficientFunds { .. })
+                | Self::Ledger(TransferFromError::InsufficientAllowance { .. })
+                | Self::Ledger(TransferFromError::CreatedInFuture { .. })
+        )
+    }
+}
+
+pub async fn transfer_collateral_from_journal(
+    journal: &crate::state::VaultCollateralPullJournal,
+) -> Result<u64, VaultCollateralPullDispatchError> {
+    use icrc_ledger_types::icrc2::transfer_from::TransferFromArgs;
+    let client = ICRC1Client { runtime: CdkRuntime, ledger_canister_id: journal.ledger };
+    let outer = client.transfer_from(TransferFromArgs {
+        spender_subaccount: None,
+        from: journal.from.clone(),
+        to: journal.to.clone(),
+        amount: Nat::from(journal.amount_e8s),
+        fee: Some(Nat::from(journal.fee_e8s)),
+        created_at_time: Some(journal.created_at_time_ns),
+        memo: Some(Memo(journal.memo.to_vec().into())),
+    }).await;
+    let block = match outer {
+        Ok(Ok(block)) => block.0,
+        Ok(Err(TransferFromError::Duplicate { duplicate_of })) => duplicate_of.0,
+        Ok(Err(error)) => return Err(VaultCollateralPullDispatchError::Ledger(error)),
+        Err((code, message)) => return Err(VaultCollateralPullDispatchError::Rejected { code, message }),
+    };
+    u64::try_from(block).map_err(|_| VaultCollateralPullDispatchError::InvalidBlockIndex)
+}
+
+#[cfg(test)]
+mod vault_collateral_pull_error_tests {
+    use super::VaultCollateralPullDispatchError as DispatchError;
+    use icrc_ledger_types::icrc2::transfer_from::TransferFromError;
+    use candid::Nat;
+
+    #[test]
+    fn only_explicit_first_attempt_no_effect_errors_release_the_pull_intent() {
+        let safe = [
+            TransferFromError::BadFee { expected_fee: Nat::from(3u64) },
+            TransferFromError::BadBurn { min_burn_amount: Nat::from(1u64) },
+            TransferFromError::InsufficientFunds { balance: Nat::from(0u64) },
+            TransferFromError::InsufficientAllowance { allowance: Nat::from(0u64) },
+            TransferFromError::CreatedInFuture { ledger_time: 1 },
+        ];
+        for error in safe {
+            assert!(DispatchError::Ledger(error).is_typed_no_effect());
+        }
+        let ambiguous = [
+            TransferFromError::TooOld,
+            TransferFromError::TemporarilyUnavailable,
+            TransferFromError::GenericError { error_code: Nat::from(1u64), message: "unknown".into() },
+            TransferFromError::Duplicate { duplicate_of: Nat::from(0u64) },
+        ];
+        for error in ambiguous {
+            assert!(!DispatchError::Ledger(error).is_typed_no_effect());
+        }
+        assert!(!DispatchError::Rejected { code: 5, message: "reply lost".into() }.is_typed_no_effect());
+        assert!(!DispatchError::InvalidBlockIndex.is_typed_no_effect());
+    }
+}
+
+/// Preflight an owner-funded ICRC-2 transfer and return the ledger's current
+/// exact fee. These reads only reduce avoidable submissions; they never prove
+/// that a previously dispatched transfer did not occur.
+pub async fn preflight_vault_collateral_pull(
+    owner: Principal,
+    ledger: Principal,
+    protocol: Principal,
+    amount_e8s: u64,
+) -> Result<u64, String> {
+    use icrc_ledger_types::icrc2::allowance::{Allowance, AllowanceArgs};
+    let fee_result: Result<(Nat,), _> = ic_cdk::call(ledger, "icrc1_fee", ()).await;
+    let (fee,) = fee_result.map_err(|(code, message)| format!("icrc1_fee failed ({code:?}): {message}"))?;
+    let fee_e8s = u64::try_from(fee.0).map_err(|_| "ledger fee exceeds u64".to_string())?;
+    let required = amount_e8s.checked_add(fee_e8s).ok_or_else(|| "amount plus ledger fee overflows".to_string())?;
+    let owner_account = Account { owner, subaccount: None };
+    let balance_result: Result<(Nat,), _> = ic_cdk::call(ledger, "icrc1_balance_of", (owner_account.clone(),)).await;
+    let (balance,) = balance_result.map_err(|(code, message)| format!("icrc1_balance_of failed ({code:?}): {message}"))?;
+    let balance = u64::try_from(balance.0).map_err(|_| "owner balance exceeds u64".to_string())?;
+    if balance < required { return Err(format!("owner balance {balance} is below amount plus fee {required}")); }
+
+    let allowance_result: Result<(Allowance,), _> = ic_cdk::call(
+        ledger,
+        "icrc2_allowance",
+        (AllowanceArgs {
+            account: owner_account,
+            spender: Account { owner: protocol, subaccount: None },
+        },),
+    ).await;
+    let (allowance,) = allowance_result.map_err(|(code, message)| format!("icrc2_allowance failed ({code:?}): {message}"))?;
+    let allowance_e8s = u64::try_from(allowance.allowance.0).map_err(|_| "allowance exceeds u64".to_string())?;
+    if allowance.expires_at.is_some_and(|expires_at| expires_at <= ic_cdk::api::time()) {
+        return Err("ICRC-2 allowance is expired".into());
+    }
+    if allowance_e8s < required { return Err(format!("allowance {allowance_e8s} is below amount plus fee {required}")); }
+    Ok(fee_e8s)
+}
+
 /// Transfer ckUSDT or ckUSDC from a user to the protocol (for vault repayment/liquidation)
 /// Amount is in e6s (6-decimal stable token units)
 pub async fn transfer_stable_from(token_type: StableTokenType, amount_e6s: u64, caller: Principal) -> Result<u64, TransferFromError> {

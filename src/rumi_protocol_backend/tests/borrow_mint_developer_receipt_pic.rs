@@ -8,7 +8,7 @@
 use candid::{decode_one, encode_args, encode_one, CandidType, Nat, Principal};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 use rumi_protocol_backend::state::{BorrowMintPhase, BorrowMintStatus};
-use rumi_protocol_backend::vault::{CandidVault, OpenVaultSuccess, VaultArg};
+use rumi_protocol_backend::vault::{CandidVault, OpenVaultSuccess, OpenVaultV2Args, VaultArg};
 use rumi_protocol_backend::{ProtocolError, SuccessWithFee};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -222,11 +222,7 @@ fn owner_reconciles_exact_committed_mint_for_owner_once() {
     run_committed_mint_recovery(false, true, false);
 }
 
-fn run_committed_mint_recovery(
-    use_scanner: bool,
-    recover_as_owner: bool,
-    from_submitted: bool,
-) {
+fn run_committed_mint_recovery(use_scanner: bool, recover_as_owner: bool, from_submitted: bool) {
     let pic = PocketIcBuilder::new().with_nns_subnet().build();
     let owner = Principal::self_authenticating(b"borrow-receipt-owner");
     let stranger = Principal::self_authenticating(b"borrow-receipt-stranger");
@@ -312,10 +308,15 @@ fn run_committed_mint_recovery(
         &pic,
         backend,
         owner,
-        "open_vault",
-        encode_args((collateral_amount, Option::<Principal>::None)).unwrap(),
+        "open_vault_v2",
+        encode_one(OpenVaultV2Args {
+            operation_id: 1,
+            collateral_amount,
+            collateral_type: None,
+        })
+        .unwrap(),
     );
-    let opened: Result<OpenVaultSuccess, ProtocolError> = result(open_reply, "open_vault");
+    let opened: Result<OpenVaultSuccess, ProtocolError> = result(open_reply, "open_vault_v2");
     let vault_id = opened.expect("open owner vault").vault_id;
     let price_reply = call(
         &pic,
@@ -679,10 +680,15 @@ fn developer_probe_too_old_scans_its_own_history_without_poisoning_absence() {
         &pic,
         backend,
         owner,
-        "open_vault",
-        encode_args((collateral_amount, Option::<Principal>::None)).unwrap(),
+        "open_vault_v2",
+        encode_one(OpenVaultV2Args {
+            operation_id: 1,
+            collateral_amount,
+            collateral_type: None,
+        })
+        .unwrap(),
     );
-    let opened: Result<OpenVaultSuccess, ProtocolError> = result(open_reply, "open_vault");
+    let opened: Result<OpenVaultSuccess, ProtocolError> = result(open_reply, "open_vault_v2");
     let vault_id = opened.expect("open owner vault").vault_id;
     let price: Result<String, ProtocolError> = result(
         call(
@@ -730,7 +736,10 @@ fn developer_probe_too_old_scans_its_own_history_without_poisoning_absence() {
         "initial ambiguous borrow",
     );
     assert!(first.is_err());
-    assert_eq!(pending_mints(&pic, backend, owner)[0].phase, BorrowMintPhase::SubmittedOrUnknown);
+    assert_eq!(
+        pending_mints(&pic, backend, owner)[0].phase,
+        BorrowMintPhase::SubmittedOrUnknown
+    );
     let stranger_result: Result<(), ProtocolError> = result(
         call(
             &pic,
@@ -755,7 +764,10 @@ fn developer_probe_too_old_scans_its_own_history_without_poisoning_absence() {
         "failed expiry probe",
     );
     assert!(rejected_probe.is_err());
-    assert_eq!(pending_mints(&pic, backend, owner)[0].phase, BorrowMintPhase::SubmittedOrUnknown);
+    assert_eq!(
+        pending_mints(&pic, backend, owner)[0].phase,
+        BorrowMintPhase::SubmittedOrUnknown
+    );
     assert_eq!(ledger_blocks(&pic, icusd_ledger), 0);
 
     expect_reply(
@@ -780,12 +792,18 @@ fn developer_probe_too_old_scans_its_own_history_without_poisoning_absence() {
         "fresh zero probe",
     );
     assert!(fresh_probe.is_err(), "success cannot arm the absence scan");
-    assert_eq!(pending_mints(&pic, backend, owner)[0].phase, BorrowMintPhase::SubmittedOrUnknown);
+    assert_eq!(
+        pending_mints(&pic, backend, owner)[0].phase,
+        BorrowMintPhase::SubmittedOrUnknown
+    );
     assert_eq!(balance(&pic, icusd_ledger, owner), before_probe_balance);
     assert_eq!(ledger_blocks(&pic, icusd_ledger), 1);
     let probe_block = ledger_block(&pic, icusd_ledger, 0);
     assert_eq!(probe_block.amount, 0);
-    assert_eq!(probe_block.to.expect("probe recipient").owner == owner, false);
+    assert_eq!(
+        probe_block.to.expect("probe recipient").owner == owner,
+        false
+    );
 
     let duplicate_probe: Result<(), ProtocolError> = result(
         call(
@@ -798,7 +816,10 @@ fn developer_probe_too_old_scans_its_own_history_without_poisoning_absence() {
         "duplicate zero probe",
     );
     assert!(duplicate_probe.is_err(), "Duplicate cannot arm a scan");
-    assert_eq!(pending_mints(&pic, backend, owner)[0].phase, BorrowMintPhase::SubmittedOrUnknown);
+    assert_eq!(
+        pending_mints(&pic, backend, owner)[0].phase,
+        BorrowMintPhase::SubmittedOrUnknown
+    );
     assert_eq!(ledger_blocks(&pic, icusd_ledger), 1);
 
     expect_reply(
@@ -822,7 +843,10 @@ fn developer_probe_too_old_scans_its_own_history_without_poisoning_absence() {
         "typed non-TooOld probe error",
     );
     assert!(other_error.is_err());
-    assert_eq!(pending_mints(&pic, backend, owner)[0].phase, BorrowMintPhase::SubmittedOrUnknown);
+    assert_eq!(
+        pending_mints(&pic, backend, owner)[0].phase,
+        BorrowMintPhase::SubmittedOrUnknown
+    );
     assert_eq!(ledger_blocks(&pic, icusd_ledger), 1);
 
     // This fixture injection stands in for the actual ledger's timestamp
@@ -941,10 +965,15 @@ fn developer_clears_typed_too_old_with_complete_nonempty_history() {
         &pic,
         backend,
         owner,
-        "open_vault",
-        encode_args((collateral_amount, Option::<Principal>::None)).unwrap(),
+        "open_vault_v2",
+        encode_one(OpenVaultV2Args {
+            operation_id: 1,
+            collateral_amount,
+            collateral_type: None,
+        })
+        .unwrap(),
     );
-    let opened: Result<OpenVaultSuccess, ProtocolError> = result(open_reply, "open_vault");
+    let opened: Result<OpenVaultSuccess, ProtocolError> = result(open_reply, "open_vault_v2");
     let vault_id = opened.expect("open owner vault").vault_id;
     let price_reply = call(
         &pic,

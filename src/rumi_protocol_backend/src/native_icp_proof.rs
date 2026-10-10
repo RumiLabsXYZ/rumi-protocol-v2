@@ -182,6 +182,43 @@ pub async fn query_block(ledger: Principal, block_index: u64) -> Result<Block, S
     }
 }
 
+/// Fetch only a block held directly by the native ICP ledger. Receipt recovery
+/// deliberately does not follow archive callbacks: a callback is a locator,
+/// not authenticated evidence that the ledger committed this global block.
+pub async fn query_direct_block(ledger: Principal, block_index: u64) -> Result<Block, String> {
+    if !is_native_icp_ledger(ledger) {
+        return Err("native ICP proof requested for a non-native ledger".into());
+    }
+    let request = GetBlocksArgs { start: block_index, length: 1 };
+    let (response,): (QueryBlocksResponse,) = ic_cdk::call(ledger, "query_blocks", (request,))
+        .await
+        .map_err(|(code, message)| format!("native ICP direct query_blocks failed: {code:?} {message}"))?;
+    if !is_exact_direct_block_range(
+        block_index,
+        response.first_block_index,
+        response.blocks.len(),
+        response.chain_length,
+        response.archived_blocks.len(),
+    ) {
+        return Err("candidate is not a direct contiguous native ICP block; archive evidence remains held".into());
+    }
+    response.blocks.into_iter().next()
+        .ok_or_else(|| "native ICP query_blocks returned no requested direct block".into())
+}
+
+fn is_exact_direct_block_range(
+    requested: u64,
+    first: u64,
+    block_count: usize,
+    chain_length: u64,
+    archived_range_count: usize,
+) -> bool {
+    first == requested
+        && block_count == 1
+        && requested < chain_length
+        && archived_range_count == 0
+}
+
 /// Verifies all return/claim transfer fields represented by the native ICP
 /// ledger block and returns the actual fee charged by that block.
 pub fn verify_transfer_block(
@@ -227,6 +264,37 @@ pub fn verify_transfer_block(
     Ok(fee.e8s)
 }
 
+/// Verifies the full native ICP representation of an ICRC-2 transfer_from.
+/// The ICP ledger stores the spender as its legacy AccountIdentifier, which
+/// binds both the canister principal and the exact (default) spender account.
+pub fn verify_transfer_from_block(
+    block: &Block,
+    owner: Principal,
+    spender: Principal,
+    destination: Principal,
+    amount_e8s: u64,
+    fee_e8s: u64,
+    memo: &[u8],
+    created_at_time_ns: u64,
+) -> Result<(), String> {
+    let Some(Operation::Transfer { from, to, spender: actual_spender, amount, fee }) =
+        block.transaction.operation.as_ref()
+    else {
+        return Err("native ICP block is not an ICRC-2 transfer_from transfer".into());
+    };
+    if from.as_slice() != account_identifier(owner).as_slice()
+        || to.as_slice() != account_identifier(destination).as_slice()
+        || actual_spender.as_deref() != Some(account_identifier(spender).as_slice())
+        || amount.e8s != amount_e8s
+        || fee.e8s != fee_e8s
+        || block.transaction.icrc1_memo.as_deref() != Some(memo)
+        || block.transaction.created_at_time.timestamp_nanos != created_at_time_ns
+    {
+        return Err("native ICP transfer_from block does not match the exact pinned tuple".into());
+    }
+    Ok(())
+}
+
 /// Derives the legacy ICP Ledger AccountIdentifier for an owner's default
 /// account: CRC32(SHA-224("\x0Aaccount-id" || principal || zero subaccount)).
 pub fn account_identifier(owner: Principal) -> [u8; 32] {
@@ -260,8 +328,8 @@ fn crc32_ieee(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        account_identifier, verify_transfer_block, Block, Operation, Timestamp, Tokens,
-        Transaction,
+        account_identifier, is_exact_direct_block_range, verify_transfer_block,
+        verify_transfer_from_block, Block, Operation, Timestamp, Tokens, Transaction,
     };
     use candid::Principal;
 
@@ -325,6 +393,67 @@ mod tests {
             *spender = Some(vec![0x44; 32]);
         }
         assert!(verify_transfer_block(&spender, bot, backend, 90, b"claim-return", 123).is_err());
+    }
+
+    #[test]
+    fn native_icrc2_receipt_binds_spender_and_all_pinned_transfer_fields() {
+        let owner = Principal::from_slice(&[11]);
+        let spender = Principal::from_slice(&[12]);
+        let destination = Principal::from_slice(&[13]);
+        let memo = [0x5a; 16];
+        let block = Block {
+            parent_hash: None,
+            transaction: Transaction {
+                memo: 0,
+                icrc1_memo: Some(memo.to_vec()),
+                operation: Some(Operation::Transfer {
+                    from: account_identifier(owner).to_vec(),
+                    to: account_identifier(destination).to_vec(),
+                    spender: Some(account_identifier(spender).to_vec()),
+                    amount: Tokens { e8s: 500 },
+                    fee: Tokens { e8s: 10 },
+                }),
+                created_at_time: Timestamp { timestamp_nanos: 99 },
+            },
+            timestamp: Timestamp { timestamp_nanos: 100 },
+        };
+        assert!(verify_transfer_from_block(&block, owner, spender, destination, 500, 10, &memo, 99).is_ok());
+        let mut changed = block.clone();
+        if let Some(Operation::Transfer { from, .. }) = changed.transaction.operation.as_mut() {
+            *from = account_identifier(Principal::from_slice(&[15])).to_vec();
+        }
+        assert!(verify_transfer_from_block(&changed, owner, spender, destination, 500, 10, &memo, 99).is_err());
+        let mut changed = block.clone();
+        if let Some(Operation::Transfer { to, .. }) = changed.transaction.operation.as_mut() {
+            *to = account_identifier(Principal::from_slice(&[16])).to_vec();
+        }
+        assert!(verify_transfer_from_block(&changed, owner, spender, destination, 500, 10, &memo, 99).is_err());
+        let mut changed = block.clone();
+        if let Some(Operation::Transfer { amount, .. }) = changed.transaction.operation.as_mut() {
+            amount.e8s += 1;
+        }
+        assert!(verify_transfer_from_block(&changed, owner, spender, destination, 500, 10, &memo, 99).is_err());
+        let mut changed = block.clone();
+        if let Some(Operation::Transfer { spender, .. }) = changed.transaction.operation.as_mut() {
+            *spender = None;
+        }
+        assert!(verify_transfer_from_block(&changed, owner, spender, destination, 500, 10, &memo, 99).is_err());
+        let mut changed = block.clone();
+        changed.transaction.icrc1_memo = None;
+        assert!(verify_transfer_from_block(&changed, owner, spender, destination, 500, 10, &memo, 99).is_err());
+        assert!(verify_transfer_from_block(&block, owner, Principal::from_slice(&[14]), destination, 500, 10, &memo, 99).is_err());
+        assert!(verify_transfer_from_block(&block, owner, spender, destination, 500, 11, &memo, 99).is_err());
+        assert!(verify_transfer_from_block(&block, owner, spender, destination, 500, 10, &[0; 16], 99).is_err());
+        assert!(verify_transfer_from_block(&block, owner, spender, destination, 500, 10, &memo, 98).is_err());
+    }
+
+    #[test]
+    fn native_direct_block_reader_rejects_archived_or_incomplete_ranges() {
+        assert!(is_exact_direct_block_range(7, 7, 1, 8, 0));
+        assert!(!is_exact_direct_block_range(7, 7, 1, 8, 1), "archive callbacks remain held");
+        assert!(!is_exact_direct_block_range(7, 6, 1, 8, 0));
+        assert!(!is_exact_direct_block_range(7, 7, 0, 8, 0));
+        assert!(!is_exact_direct_block_range(8, 8, 1, 8, 0));
     }
 
 }

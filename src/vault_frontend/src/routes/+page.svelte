@@ -252,12 +252,14 @@
     actionInProgress = true; errorMessage = ''; successMessage = '';
     try {
       // Compound: open vault + borrow in one backend call.
-      // For Oisy this batches approve + open_vault_and_borrow into a single popup.
+      // Oisy shows separate consent screens in its signer window for approval and the V2 call.
       const result = await protocolService.openVaultAndBorrow(collateralAmount, icusdAmount, selectedCollateralPrincipal);
 
       if (result.success) {
         const vaultLabel = result.vaultId !== undefined ? `vault #${result.vaultId}` : 'vault';
-        successMessage = result.oisyResilient
+        successMessage = result.message
+          ? `Created ${vaultLabel}, but borrowing did not complete: ${result.message}`
+          : result.oisyResilient
           ? `Submitted: created ${vaultLabel} and borrowed ${icusdAmount} icUSD. (Wallet glitch ignored — confirmed on-chain.)`
           : `Successfully created ${vaultLabel} and borrowed ${icusdAmount} icUSD!`;
         if ($principal) await appDataStore.refreshAll($principal);

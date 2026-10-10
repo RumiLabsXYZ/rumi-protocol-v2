@@ -47,7 +47,7 @@ vi.mock('@dfinity/agent', async () => {
         prepare_redemption_offer: mocks.prepareRedemptionOffer,
       })),
     },
-    HttpAgent: vi.fn(() => ({ fetchRootKey: vi.fn().mockResolvedValue(undefined) })),
+    HttpAgent: vi.fn(function HttpAgent() { return { fetchRootKey: vi.fn().mockResolvedValue(undefined) }; }),
     AnonymousIdentity: vi.fn(() => ({})),
   };
 });
@@ -139,25 +139,71 @@ function makeCtx(expectedPrincipalText: string, assertCurrent: () => boolean = (
 }
 
 let backendActor: {
-  open_vault_and_borrow: ReturnType<typeof vi.fn>;
+  open_vault_v2: ReturnType<typeof vi.fn>;
+  open_vault_and_borrow_v2: ReturnType<typeof vi.fn>;
+  add_margin_to_vault_v2: ReturnType<typeof vi.fn>;
+  get_vault_operation_status: ReturnType<typeof vi.fn>;
+  ack_vault_operation: ReturnType<typeof vi.fn>;
   borrow_from_vault: ReturnType<typeof vi.fn>;
   redeem_quoted: ReturnType<typeof vi.fn>;
   get_my_liquidity_withdrawal_status: ReturnType<typeof vi.fn>;
   withdraw_liquidity_with_id: ReturnType<typeof vi.fn>;
 };
 let ledgerActor: { icrc2_approve: ReturnType<typeof vi.fn> };
+let vaultStatusOverride: any = null;
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   vi.clearAllMocks();
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
   localStorage.clear();
+  vaultStatusOverride = null;
+  Object.defineProperty(navigator, 'locks', {
+    configurable: true,
+    value: { request: async (_name: string, _options: unknown, callback: (lock: object | null) => Promise<unknown>) => callback({}) },
+  });
   walletSessionGeneration.set(0);
   currentWalletType.set(WALLET_TYPES.PLUG);
 
+  let acknowledgedThrough = 0n;
+  let activeVaultOperation: any = null;
   backendActor = {
-    open_vault_and_borrow: vi.fn().mockResolvedValue({ Ok: { vault_id: 7n, block_index: 99n } }),
+    open_vault_v2: vi.fn().mockImplementation(async (args: any) => {
+      activeVaultOperation = {
+        operation_id: args.operation_id,
+        request: { OpenVault: { amount_e8s: args.collateral_amount, collateral_type: args.collateral_type[0] } },
+        vault_id: 8n,
+        phase: { Completed: { result: { OpenVault: { vault_id: 8n, block_index: 98n } } } },
+      };
+      return { Ok: { vault_id: 8n, block_index: 98n } };
+    }),
+    open_vault_and_borrow_v2: vi.fn().mockImplementation(async (args: any) => {
+      activeVaultOperation = {
+        operation_id: args.operation_id,
+        request: { OpenVaultAndBorrow: {
+          amount_e8s: args.collateral_amount,
+          borrow_amount_e8s: args.borrow_amount,
+          collateral_type: args.collateral_type[0],
+        } },
+        vault_id: 7n,
+        phase: { Completed: { result: { OpenVaultAndBorrow: {
+          vault_id: 7n, block_index: 99n, borrowed: true, failure: [],
+        } } } },
+      };
+      return { Ok: { vault_id: 7n, block_index: 99n } };
+    }),
+    add_margin_to_vault_v2: vi.fn(),
+    get_vault_operation_status: vi.fn().mockImplementation(async () => vaultStatusOverride ?? ({
+      Ok: { acknowledged_through: acknowledgedThrough, active: activeVaultOperation ? [activeVaultOperation] : [] },
+    })),
+    ack_vault_operation: vi.fn().mockImplementation(async ({ operation_id }: { operation_id: bigint }) => {
+      acknowledgedThrough = operation_id;
+      activeVaultOperation = null;
+      vaultStatusOverride = { Ok: { acknowledged_through: operation_id, active: [] } };
+      return { Ok: null };
+    }),
     borrow_from_vault: vi.fn().mockResolvedValue({ Ok: { block_index: 55n, fee_amount_paid: 1_000n } }),
     redeem_quoted: vi.fn().mockResolvedValue({ Ok: {
       icusd_block_index: 88n,
@@ -366,6 +412,19 @@ it('closes legacy liquidity deposits before constructing an actor', async () => 
   expect(mocks.getActor).not.toHaveBeenCalled();
 });
 
+it('openVault persists and dispatches the exact V2 request, then ACKs its terminal status', async () => {
+  const result = await ApiClient.openVault(1, CKDOGE_LEDGER_ID);
+
+  expect(backendActor.open_vault_v2).toHaveBeenCalledWith({
+    operation_id: 1n,
+    collateral_amount: 100_000_000n,
+    collateral_type: [Principal.fromText(CKDOGE_LEDGER_ID)],
+  });
+  expect(backendActor.ack_vault_operation).toHaveBeenCalledWith({ operation_id: 1n });
+  expect(result).toMatchObject({ success: true, vaultId: 8, blockIndex: 98 });
+  expect(localStorage.getItem(`rumi:vault-pull-operation:v1:${PRINCIPAL_A}`)).toBeNull();
+});
+
 describe('ApiClient.openVaultAndBorrowBound — standard ICRC-2 path (Internet Identity, Plug)', () => {
   const COLLATERAL_RAW = 123_456_789n; // exact koinu, deliberately not a round number
   const ICUSD_RAW = 250_000_000n; // exact e8s
@@ -374,12 +433,13 @@ describe('ApiClient.openVaultAndBorrowBound — standard ICRC-2 path (Internet I
     const ctx = makeCtx(PRINCIPAL_A);
     const result = await ApiClient.openVaultAndBorrowBound(ctx, COLLATERAL_RAW, ICUSD_RAW, CKDOGE_LEDGER_ID);
 
-    expect(backendActor.open_vault_and_borrow).toHaveBeenCalledTimes(1);
-    expect(backendActor.open_vault_and_borrow).toHaveBeenCalledWith(
-      COLLATERAL_RAW,
-      ICUSD_RAW,
-      [Principal.fromText(CKDOGE_LEDGER_ID)]
-    );
+    expect(backendActor.open_vault_and_borrow_v2).toHaveBeenCalledTimes(1);
+    expect(backendActor.open_vault_and_borrow_v2).toHaveBeenCalledWith({
+      operation_id: 1n,
+      collateral_amount: COLLATERAL_RAW,
+      borrow_amount: ICUSD_RAW,
+      collateral_type: [Principal.fromText(CKDOGE_LEDGER_ID)],
+    });
     expect(result).toEqual<BoundOpenVaultAndBorrowResult>({
       kind: 'dispatched_ok',
       vaultId: 7,
@@ -422,13 +482,13 @@ describe('ApiClient.openVaultAndBorrowBound — standard ICRC-2 path (Internet I
     expect(result.kind).toBe('predispatch_aborted');
     expect(mocks.getActor).not.toHaveBeenCalled();
     expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
-    expect(backendActor.open_vault_and_borrow).not.toHaveBeenCalled();
+    expect(backendActor.open_vault_and_borrow_v2).not.toHaveBeenCalled();
   });
 
   it('account switches A→B DURING the allowance-check await: approval is never dispatched under B', async () => {
-    mocks.anonAllowance.mockImplementation(async () => {
+    vi.spyOn(walletOperations, 'checkCollateralAllowanceBound').mockImplementation(async () => {
       setLivePrincipal(PRINCIPAL_B); // simulate the switch completing mid-await
-      return { allowance: 0n };
+      return 0n;
     });
     const ctx = makeCtx(PRINCIPAL_A);
 
@@ -437,7 +497,7 @@ describe('ApiClient.openVaultAndBorrowBound — standard ICRC-2 path (Internet I
     expect(result.kind).toBe('predispatch_aborted');
     expect((result as BoundOpenVaultAndBorrowResult).approvalMayHaveMutated).toBe(false);
     expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
-    expect(backendActor.open_vault_and_borrow).not.toHaveBeenCalled();
+    expect(backendActor.open_vault_and_borrow_v2).not.toHaveBeenCalled();
   });
 
   it('account switches A→B DURING the approve await: approval under A may have landed, but the backend call is never dispatched under B', async () => {
@@ -453,19 +513,19 @@ describe('ApiClient.openVaultAndBorrowBound — standard ICRC-2 path (Internet I
     expect((result as BoundOpenVaultAndBorrowResult).approvalMayHaveMutated).toBe(true);
     expect(ledgerActor.icrc2_approve).toHaveBeenCalledTimes(1);
     // getActor was called once for the ledger approval actor, never again for the backend.
-    expect(mocks.getActor).toHaveBeenCalledTimes(1);
-    expect(mocks.getActor).not.toHaveBeenCalledWith(BACKEND_ID, expect.anything());
-    expect(backendActor.open_vault_and_borrow).not.toHaveBeenCalled();
+    expect(mocks.getActor).toHaveBeenCalledTimes(2);
+    expect(mocks.getActor).toHaveBeenCalledWith(BACKEND_ID, expect.anything());
+    expect(backendActor.open_vault_and_borrow_v2).not.toHaveBeenCalled();
   });
 
   it('same-principal disconnect/reconnect (generation bump, principal text unchanged) aborts even though the text still matches', async () => {
     let live = true;
-    mocks.anonAllowance.mockImplementation(async () => {
+    vi.spyOn(walletOperations, 'checkCollateralAllowanceBound').mockImplementation(async () => {
       // Principal text is untouched — only the caller's own session-liveness
       // check (generation) flips, simulating a disconnect+reconnect of the
       // SAME account between the allowance read and the approval dispatch.
       live = false;
-      return { allowance: 0n };
+      return 0n;
     });
     const ctx = makeCtx(PRINCIPAL_A, () => live);
 
@@ -473,23 +533,23 @@ describe('ApiClient.openVaultAndBorrowBound — standard ICRC-2 path (Internet I
 
     expect(result.kind).toBe('predispatch_aborted');
     expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
-    expect(backendActor.open_vault_and_borrow).not.toHaveBeenCalled();
+    expect(backendActor.open_vault_and_borrow_v2).not.toHaveBeenCalled();
   });
 
   it('a thrown network error after dispatch is ambiguous_transport, never predispatch_aborted or a silent success', async () => {
-    backendActor.open_vault_and_borrow.mockRejectedValue(new Error('deadline exceeded'));
+    backendActor.open_vault_and_borrow_v2.mockRejectedValue(new Error('deadline exceeded'));
     const ctx = makeCtx(PRINCIPAL_A);
 
     const result = await ApiClient.openVaultAndBorrowBound(ctx, COLLATERAL_RAW, ICUSD_RAW, CKDOGE_LEDGER_ID);
 
     expect(result.kind).toBe('ambiguous_transport');
     expect(result.vaultId).toBeNull();
-    expect(result.errorMessage).toContain('deadline exceeded');
+    expect(result.errorMessage).toContain('no backend status yet');
     expect((result as BoundOpenVaultAndBorrowResult).approvalMayHaveMutated).toBe(true);
   });
 
   it('the Oisy `_arr` false-negative pattern after dispatch is ALSO ambiguous_transport — no heuristic on-chain recovery in the bound path', async () => {
-    backendActor.open_vault_and_borrow.mockRejectedValue(
+    backendActor.open_vault_and_borrow_v2.mockRejectedValue(
       new Error("Cannot read properties of undefined (reading '_arr')")
     );
     const ctx = makeCtx(PRINCIPAL_A);
@@ -498,12 +558,30 @@ describe('ApiClient.openVaultAndBorrowBound — standard ICRC-2 path (Internet I
 
     expect(result.kind).toBe('ambiguous_transport');
     // No extra actor was fetched to run a landed-heuristic scan.
-    expect(mocks.getActor).toHaveBeenCalledTimes(2); // ledger approval + backend actor only
+    expect(mocks.getActor).toHaveBeenCalledTimes(2); // authenticated backend + ledger approval actors
   });
 
   it('a typed Err whose GenericError text proves a zero-debt vault was created surfaces partialZeroDebtVaultId', async () => {
-    backendActor.open_vault_and_borrow.mockResolvedValue({
-      Err: { GenericError: 'Vault created (id=42) but the borrow step failed: mint_icusd rejected' },
+    backendActor.open_vault_and_borrow_v2.mockImplementation(async (args: any) => {
+      const request = {
+        OpenVaultAndBorrow: {
+          amount_e8s: args.collateral_amount,
+          borrow_amount_e8s: args.borrow_amount,
+          collateral_type: args.collateral_type[0],
+        },
+      };
+      vaultStatusOverride = {
+        Ok: { acknowledged_through: args.operation_id - 1n, active: [{
+          operation_id: args.operation_id,
+          request,
+          vault_id: 42n,
+          phase: { Completed: { result: { OpenVaultAndBorrow: {
+            vault_id: 42n, block_index: 100n, borrowed: false,
+            failure: ['Vault created (id=42) but the borrow step failed: mint_icusd rejected'],
+          } } } },
+        }] },
+      };
+      return { Ok: { vault_id: 42n, block_index: 100n } };
     });
     const ctx = makeCtx(PRINCIPAL_A);
 
@@ -514,18 +592,19 @@ describe('ApiClient.openVaultAndBorrowBound — standard ICRC-2 path (Internet I
     expect(result.errorMessage).toContain('Vault created (id=42)');
   });
 
-  it('a typed Err with no partial-vault text leaves partialZeroDebtVaultId null', async () => {
-    backendActor.open_vault_and_borrow.mockResolvedValue({ Err: { CallerNotOwner: null } });
+  it('a typed Err without terminal backend status remains ambiguous and keeps the exact intent', async () => {
+    backendActor.open_vault_and_borrow_v2.mockResolvedValue({ Err: { CallerNotOwner: null } });
     const ctx = makeCtx(PRINCIPAL_A);
 
     const result = await ApiClient.openVaultAndBorrowBound(ctx, COLLATERAL_RAW, ICUSD_RAW, CKDOGE_LEDGER_ID);
 
-    expect(result.kind).toBe('dispatched_err');
+    expect(result.kind).toBe('ambiguous_transport');
     expect((result as BoundOpenVaultAndBorrowResult).partialZeroDebtVaultId).toBeNull();
+    expect(localStorage.getItem(`rumi:vault-pull-operation:v1:${PRINCIPAL_A}`)).toBeTruthy();
   });
 
   it('skips the approval dispatch entirely when the existing allowance already covers the amount', async () => {
-    mocks.anonAllowance.mockResolvedValue({ allowance: 999_999_999_999n });
+    vi.spyOn(walletOperations, 'checkCollateralAllowanceBound').mockResolvedValue(999_999_999_999n);
     const ctx = makeCtx(PRINCIPAL_A);
 
     const result = await ApiClient.openVaultAndBorrowBound(ctx, COLLATERAL_RAW, ICUSD_RAW, CKDOGE_LEDGER_ID);
@@ -819,11 +898,12 @@ describe('ApiClient.openVaultAndBorrowBound — Oisy ICRC-112 batched path', () 
     const result = await ApiClient.openVaultAndBorrowBound(ctx, COLLATERAL_RAW, ICUSD_RAW, CKDOGE_LEDGER_ID);
 
     expect(ledgerActor.icrc2_approve).toHaveBeenCalledTimes(1);
-    expect(backendActor.open_vault_and_borrow).toHaveBeenCalledWith(
-      COLLATERAL_RAW,
-      ICUSD_RAW,
-      [Principal.fromText(CKDOGE_LEDGER_ID)]
-    );
+    expect(backendActor.open_vault_and_borrow_v2).toHaveBeenCalledWith({
+      operation_id: 1n,
+      collateral_amount: COLLATERAL_RAW,
+      borrow_amount: ICUSD_RAW,
+      collateral_type: [Principal.fromText(CKDOGE_LEDGER_ID)],
+    });
     expect(result.kind).toBe('dispatched_ok');
   });
 
@@ -838,7 +918,7 @@ describe('ApiClient.openVaultAndBorrowBound — Oisy ICRC-112 batched path', () 
 
     expect(result.kind).toBe('predispatch_aborted');
     expect((result as BoundOpenVaultAndBorrowResult).approvalMayHaveMutated).toBe(true);
-    expect(backendActor.open_vault_and_borrow).not.toHaveBeenCalled();
+    expect(backendActor.open_vault_and_borrow_v2).not.toHaveBeenCalled();
   });
 
   it('an Oisy approve Err response aborts predispatch without touching the backend actor', async () => {
@@ -849,7 +929,20 @@ describe('ApiClient.openVaultAndBorrowBound — Oisy ICRC-112 batched path', () 
 
     expect(result.kind).toBe('predispatch_aborted');
     expect((result as BoundOpenVaultAndBorrowResult).approvalMayHaveMutated).toBe(true);
-    expect(backendActor.open_vault_and_borrow).not.toHaveBeenCalled();
+    expect(backendActor.open_vault_and_borrow_v2).not.toHaveBeenCalled();
+  });
+});
+
+describe('ApiClient.addMarginToVault V2 collateral verification', () => {
+  it('fails closed before actor acquisition, status, approval, or transfer while AddMargin V2 is disabled', async () => {
+    const result = await ApiClient.addMarginToVault(5, 1, CKDOGE_LEDGER_ID);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('temporarily paused');
+    expect(mocks.getActor).not.toHaveBeenCalled();
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.add_margin_to_vault_v2).not.toHaveBeenCalled();
+    expect(backendActor.get_vault_operation_status).not.toHaveBeenCalled();
   });
 });
 
