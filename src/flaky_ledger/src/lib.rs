@@ -29,8 +29,10 @@
 use candid::{CandidType, Nat, Principal};
 use ic_cdk::{init, query, update};
 use icrc_ledger_types::icrc::generic_value::{ICRC3Map, ICRC3Value};
-use icrc_ledger_types::icrc3::archive::{GetArchivesArgs, GetArchivesResult};
-use icrc_ledger_types::icrc3::blocks::{BlockWithId, GetBlocksRequest, GetBlocksResult};
+use icrc_ledger_types::icrc3::archive::{GetArchivesArgs, GetArchivesResult, QueryArchiveFn};
+use icrc_ledger_types::icrc3::blocks::{
+    ArchivedBlocks, BlockWithId, GetBlocksRequest, GetBlocksResult,
+};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -138,6 +140,9 @@ struct LedgerState {
     /// ICRC-3 history is passive test evidence. Every successful ledger
     /// operation appends exactly one block at its normal zero-based index.
     blocks: Vec<BlockWithId>,
+    /// Optional exact nonempty ICRC-3 request range to report as archived.
+    /// This is test-only response corruption for recovery regressions.
+    icrc3_archive_range: Option<(u64, u64)>,
     fee: u128,
     fail_fee_query: bool,
     fail_transfers: bool,
@@ -655,6 +660,7 @@ fn icrc3_get_blocks(args: Vec<GetBlocksRequest>) -> GetBlocksResult {
     STATE.with(|s| {
         let state = s.borrow();
         let mut blocks = Vec::new();
+        let mut archived_blocks = Vec::new();
         for request in args {
             let Ok(start) = u64::try_from(request.start.0) else {
                 continue;
@@ -666,6 +672,19 @@ fn icrc3_get_blocks(args: Vec<GetBlocksRequest>) -> GetBlocksResult {
             let Some(end) = start.checked_add(length) else {
                 continue;
             };
+            if length > 0 && state.icrc3_archive_range == Some((start, length)) {
+                archived_blocks.push(ArchivedBlocks {
+                    args: vec![GetBlocksRequest {
+                        start: Nat::from(start),
+                        length: Nat::from(length),
+                    }],
+                    callback: QueryArchiveFn::new(
+                        ic_cdk::id(),
+                        "missing_icrc3_archive_callback",
+                    ),
+                });
+                continue;
+            }
             for block_index in start..end.min(state.blocks.len() as u64) {
                 if let Some(block) = state.blocks.get(block_index as usize) {
                     blocks.push(block.clone());
@@ -678,7 +697,7 @@ fn icrc3_get_blocks(args: Vec<GetBlocksRequest>) -> GetBlocksResult {
         GetBlocksResult {
             log_length: Nat::from(state.blocks.len() as u64),
             blocks,
-            archived_blocks: vec![],
+            archived_blocks,
         }
     })
 }
@@ -812,6 +831,14 @@ fn set_fail_transfers_for_caller(target: Option<Principal>) {
 #[update]
 fn set_fake_zero_balance_for(target: Option<Principal>) {
     STATE.with(|s| s.borrow_mut().fake_zero_balance_for = target);
+}
+
+/// When set to `Some((start, length))`, the exact nonempty ICRC-3 request
+/// returns an archive descriptor with no implemented callback. `None` clears
+/// the opt-in response fault. Other ranges retain normal direct-page behavior.
+#[update]
+fn set_icrc3_archive_range(range: Option<(u64, u64)>) {
+    STATE.with(|s| s.borrow_mut().icrc3_archive_range = range);
 }
 
 #[cfg(test)]

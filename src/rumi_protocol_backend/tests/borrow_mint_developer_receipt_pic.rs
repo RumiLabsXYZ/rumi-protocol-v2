@@ -723,6 +723,95 @@ fn developer_clears_typed_too_old_with_complete_nonempty_history() {
     );
     assert_eq!(vault_debt(&pic, backend, owner, vault_id), 0);
 
+    // The next page is exactly [64, 65). Make only that nonempty request look
+    // archived; the returned callback intentionally has no implementation.
+    expect_reply(
+        call(
+            &pic,
+            icusd_ledger,
+            owner,
+            "set_icrc3_archive_range",
+            encode_args((Some((64u64, 1u64)),)).unwrap(),
+        ),
+        "set_icrc3_archive_range",
+    );
+    let archived_page_reply = pic
+        .query_call(
+            icusd_ledger,
+            Principal::anonymous(),
+            "icrc3_get_blocks",
+            encode_args((vec![icrc_ledger_types::icrc3::blocks::GetBlocksRequest {
+                start: Nat::from(64u64),
+                length: Nat::from(1u64),
+            }],))
+            .unwrap(),
+        )
+        .expect("query configured archived page");
+    let archived_page: icrc_ledger_types::icrc3::blocks::GetBlocksResult =
+        result(archived_page_reply, "configured archived page");
+    assert!(archived_page.blocks.is_empty());
+    assert_eq!(archived_page.archived_blocks.len(), 1);
+    assert_eq!(
+        archived_page.archived_blocks[0].callback.method,
+        "missing_icrc3_archive_callback"
+    );
+
+    let held_before_archive = pending_mints(&pic, backend, owner);
+    let archive_reply = call(
+        &pic,
+        backend,
+        developer,
+        "advance_pending_borrow_mint_recovery",
+        encode_args((vault_id,)).unwrap(),
+    );
+    let archive_result: Result<(), ProtocolError> =
+        result(archive_reply, "developer recovery with archived page");
+    assert!(
+        matches!(
+            &archive_result,
+            Err(ProtocolError::TemporarilyUnavailable(message))
+                if message.contains("not complete proof")
+        ),
+        "an archived range must be rejected as incomplete proof before any callback"
+    );
+    assert_eq!(pending_mints(&pic, backend, owner), held_before_archive);
+    assert_eq!(vault_debt(&pic, backend, owner, vault_id), 0);
+    assert_eq!(balance(&pic, icusd_ledger, owner), balance_before_recovery);
+    assert_eq!(ledger_blocks(&pic, icusd_ledger), blocks_before_recovery);
+
+    // Repeating while the same page is still faulted must hit that same page;
+    // this proves the failed validation did not advance the durable cursor.
+    let repeated_archive_reply = call(
+        &pic,
+        backend,
+        developer,
+        "advance_pending_borrow_mint_recovery",
+        encode_args((vault_id,)).unwrap(),
+    );
+    let repeated_archive_result: Result<(), ProtocolError> =
+        result(repeated_archive_reply, "repeated archived-page recovery");
+    assert!(
+        matches!(
+            repeated_archive_result,
+            Err(ProtocolError::TemporarilyUnavailable(_))
+        ),
+        "the recovery cursor remains on the archived page until it is complete"
+    );
+    assert_eq!(pending_mints(&pic, backend, owner), held_before_archive);
+    assert_eq!(vault_debt(&pic, backend, owner, vault_id), 0);
+    assert_eq!(balance(&pic, icusd_ledger, owner), balance_before_recovery);
+    assert_eq!(ledger_blocks(&pic, icusd_ledger), blocks_before_recovery);
+    expect_reply(
+        call(
+            &pic,
+            icusd_ledger,
+            owner,
+            "set_icrc3_archive_range",
+            encode_args((Option::<(u64, u64)>::None,)).unwrap(),
+        ),
+        "clear icrc3 archive range",
+    );
+
     // Grow the live log between pages. Recovery must finish the already pinned
     // tip at 65 rather than expanding its absence claim to include new blocks.
     for _ in 0..64 {
