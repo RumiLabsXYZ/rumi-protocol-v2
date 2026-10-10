@@ -484,7 +484,7 @@ fn run_committed_mint_recovery(use_scanner: bool) {
 
 #[test]
 #[ignore = "requires source-matched shrunk test_endpoints Wasm and PocketIC server 7.0.0"]
-fn developer_clears_typed_too_old_with_complete_empty_history() {
+fn developer_clears_typed_too_old_with_complete_nonempty_history() {
     let pic = PocketIcBuilder::new().with_nns_subnet().build();
     let owner = Principal::self_authenticating(b"borrow-receipt-owner");
     let stranger = Principal::self_authenticating(b"borrow-receipt-stranger");
@@ -594,15 +594,16 @@ fn developer_clears_typed_too_old_with_complete_empty_history() {
         ),
         "set_minter",
     );
+    let unrelated = Principal::self_authenticating(b"unrelated-ledger-history");
     expect_reply(
         call(
             &pic,
             icusd_ledger,
             owner,
-            "set_too_old_before_mint",
-            encode_args((1u32,)).unwrap(),
+            "set_too_old_before_mint_with_history",
+            encode_args((65u32, unrelated)).unwrap(),
         ),
-        "set_too_old_before_mint",
+        "set_too_old_before_mint_with_history",
     );
 
     let borrow_amount = 1_000_000_000u64;
@@ -625,7 +626,8 @@ fn developer_clears_typed_too_old_with_complete_empty_history() {
     let balance_before_recovery = balance(&pic, icusd_ledger, owner);
     let blocks_before_recovery = ledger_blocks(&pic, icusd_ledger);
     assert_eq!(balance_before_recovery, 0);
-    assert_eq!(blocks_before_recovery, 0);
+    assert_eq!(blocks_before_recovery, 65);
+    assert_eq!(balance(&pic, icusd_ledger, unrelated), 65);
     let held = pending_mints(&pic, backend, owner);
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].phase, BorrowMintPhase::ReceiptRecoveryRequired);
@@ -645,6 +647,7 @@ fn developer_clears_typed_too_old_with_complete_empty_history() {
     );
     assert_eq!(pending_mints(&pic, backend, owner).len(), 1);
     assert_eq!(vault_debt(&pic, backend, owner, vault_id), 0);
+    assert_eq!(ledger_blocks(&pic, icusd_ledger), 65);
 
     let developer_reply = call(
         &pic,
@@ -655,9 +658,48 @@ fn developer_clears_typed_too_old_with_complete_empty_history() {
     );
     let developer_result: Result<(), ProtocolError> =
         result(developer_reply, "developer recovery advance");
-    developer_result.expect("developer may clear after complete empty history scan");
+    developer_result.expect("developer may validate the first complete history page");
+    assert_eq!(
+        pending_mints(&pic, backend, owner).len(),
+        1,
+        "65 blocks require a second page"
+    );
+    assert_eq!(vault_debt(&pic, backend, owner, vault_id), 0);
+
+    // Grow the live log between pages. Recovery must finish the already pinned
+    // tip at 65 rather than expanding its absence claim to include new blocks.
+    for _ in 0..64 {
+        expect_reply(
+            call(
+                &pic,
+                icusd_ledger,
+                owner,
+                "mint",
+                encode_args((
+                    LedgerAccount {
+                        owner: unrelated,
+                        subaccount: None,
+                    },
+                    Nat::from(1u64),
+                ))
+                .unwrap(),
+            ),
+            "append ledger history after fixed tip",
+        );
+    }
+    assert_eq!(ledger_blocks(&pic, icusd_ledger), 129);
+
+    let final_page_reply = call(
+        &pic,
+        backend,
+        developer,
+        "advance_pending_borrow_mint_recovery",
+        encode_args((vault_id,)).unwrap(),
+    );
+    let final_page: Result<(), ProtocolError> = result(final_page_reply, "final history page");
+    final_page.expect("developer may clear after scanning through the fixed tip");
     assert!(pending_mints(&pic, backend, owner).is_empty());
     assert_eq!(vault_debt(&pic, backend, owner, vault_id), 0);
     assert_eq!(balance(&pic, icusd_ledger, owner), balance_before_recovery);
-    assert_eq!(ledger_blocks(&pic, icusd_ledger), blocks_before_recovery);
+    assert_eq!(ledger_blocks(&pic, icusd_ledger), 129);
 }

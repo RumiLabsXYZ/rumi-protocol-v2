@@ -155,6 +155,8 @@ struct LedgerState {
     phantom_mint_dedup: BTreeMap<DedupKey, u64>,
     too_old_after_phantom_mint_remaining: u32,
     too_old_before_mint_remaining: u32,
+    too_old_before_mint_history_blocks: u32,
+    too_old_before_mint_history_owner: Option<Principal>,
     /// Next N transfers return BadFee with the current fee value.
     bad_fee_failures_remaining: u32,
     /// Recent transfers keyed by their dedup tuple. Retained until reset_dedup().
@@ -402,6 +404,21 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
         // mint commit. This is deliberately independent of the dedup map.
         if is_mint && state.too_old_before_mint_remaining > 0 {
             state.too_old_before_mint_remaining -= 1;
+            let history_blocks = std::mem::take(&mut state.too_old_before_mint_history_blocks);
+            if history_blocks > 0 {
+                let history_owner = state
+                    .too_old_before_mint_history_owner
+                    .take()
+                    .expect("history owner configured with history blocks");
+                let account = Account {
+                    owner: history_owner,
+                    subaccount: None,
+                };
+                for _ in 0..history_blocks {
+                    *state.balances.entry(account.clone()).or_insert(0) += 1;
+                    append_block(&mut state, mint_block(&account, 1));
+                }
+            }
             return Err(TransferError::TooOld);
         }
 
@@ -743,6 +760,19 @@ fn set_too_old_after_phantom_mint(n: u32) {
 #[update]
 fn set_too_old_before_mint(n: u32) {
     STATE.with(|s| s.borrow_mut().too_old_before_mint_remaining = n);
+}
+
+/// Make the next configured minter call append unrelated, balance-backed mint
+/// blocks immediately before returning typed TooOld. This lets recovery tests
+/// exercise a nonempty post-floor history without an external ledger mutation.
+#[update]
+fn set_too_old_before_mint_with_history(blocks: u32, owner: Principal) {
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        state.too_old_before_mint_remaining = 1;
+        state.too_old_before_mint_history_blocks = blocks;
+        state.too_old_before_mint_history_owner = Some(owner);
+    });
 }
 
 /// Next N transfers return BadFee { expected_fee = current fee } before
