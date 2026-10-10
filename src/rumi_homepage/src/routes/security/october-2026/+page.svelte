@@ -2,8 +2,8 @@
   const report = {
     date: 'October 10, 2026',
     datetime: '2026-10-10',
-    source: 'origin/main at 8ac01e6f7586 · includes PR #505',
-    snapshot: 'Mainnet readback · October 10, 2026 · AMM maintenance'
+    source: 'origin/main at 35fef06fd6de · includes PR #511',
+    snapshot: 'Mainnet readback · October 10, 2026 · AMM maintenance and borrowing hold'
   };
 
   const states = [
@@ -109,6 +109,14 @@
       state: 'Merged · backend not installed',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/468'
+    },
+    {
+      pr: '#511',
+      title: 'Borrow-mint recovery and temporary borrowing hold',
+      summary: 'Receipt-based borrow recovery is merged in source, but the backend still runs its earlier module. On October 10, the live global icUSD mint cap was reduced from 3,000,000,000,000 to 1 raw unit and read back at 1. This temporarily stops new vault borrowing through the standard routes while the backend upgrade is prepared; it does not install the recovery code or settle any earlier mint.',
+      state: 'Source merged · new borrowing held',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/511'
     }
   ];
 
@@ -124,6 +132,11 @@
       detail: 'The October 8 release evidence confirms the deployed module and completed historical adjustments. The epoch 18 hold and disabled driver remain in place; future flat 4× accrual is scheduled for epoch 19, not active.'
     },
     {
+      system: 'Vault borrowing',
+      status: 'New borrowing temporarily held',
+      detail: 'The October 10 cap readback was 1 raw icUSD unit, below the minimum borrow. The backend still reports General Availability mode; this cap is a targeted borrowing hold. Repayment and withdrawal are separate routes, and this readback does not prove any historical obligation has been resolved.'
+    },
+    {
       system: 'Scope',
       status: 'Selected status only',
       detail: 'These entries cover named merge and release states. They do not establish that every finding is fixed, every component is current, or the protocol has received a formal third-party audit.'
@@ -135,7 +148,7 @@
   <title>October 2026 Security Status · Rumi Protocol</title>
   <meta
     name="description"
-    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, October 10 mainnet readback, and AMM maintenance status."
+    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, October 10 mainnet readback, AMM maintenance, and the temporary borrowing hold."
   />
 </svelte:head>
 
@@ -150,14 +163,14 @@
           <p class="lede">
             This snapshot separates merged source from mainnet installation. The October 10
             Cycle Sentinel and AMM releases are installed with recorded state readbacks. The AMM
-            is now in maintenance mode and the Stability Pool remains paused; the backend, bot,
-            and 3pool account guard are not yet installed.
+            is now in maintenance mode, new borrowing is temporarily held, and the Stability Pool
+            remains paused; the backend, bot, and 3pool account guard are not yet installed.
           </p>
         </div>
         <aside class="report-stamp" aria-label={report.snapshot}>
           <span class="stamp-label">Publication state</span>
           <strong>{report.snapshot}</strong>
-          <p>The AMM and Cycle Sentinel module hashes and post-upgrade readbacks are dated October 10. AMM maintenance mode was confirmed later that day. The 3pool PR #483 and Points release observations are dated October 9 and October 8 respectively. The Stability Pool pause was confirmed again on October 10. This page combines those time-scoped records; it is not live telemetry.</p>
+          <p>The AMM and Cycle Sentinel module hashes and post-upgrade readbacks are dated October 10. AMM maintenance mode and the borrowing cap were confirmed later that day. The 3pool PR #483 and Points release observations are dated October 9 and October 8 respectively. The Stability Pool pause was confirmed again on October 10. This page combines those time-scoped records; it is not live telemetry.</p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
