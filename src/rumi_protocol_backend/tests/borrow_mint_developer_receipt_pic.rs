@@ -177,6 +177,16 @@ fn vault_debt(pic: &PocketIc, backend: Principal, owner: Principal, vault_id: u6
 #[test]
 #[ignore = "requires source-matched shrunk test_endpoints Wasm and PocketIC server 7.0.0"]
 fn developer_reconciles_exact_committed_mint_for_owner_once() {
+    run_committed_mint_recovery(false);
+}
+
+#[test]
+#[ignore = "requires source-matched shrunk test_endpoints Wasm and PocketIC server 7.0.0"]
+fn developer_scans_exact_committed_mint_for_owner_once() {
+    run_committed_mint_recovery(true);
+}
+
+fn run_committed_mint_recovery(use_scanner: bool) {
     let pic = PocketIcBuilder::new().with_nns_subnet().build();
     let owner = Principal::self_authenticating(b"borrow-receipt-owner");
     let stranger = Principal::self_authenticating(b"borrow-receipt-stranger");
@@ -358,47 +368,69 @@ fn developer_reconciles_exact_committed_mint_for_owner_once() {
         "TooOld retry must not append a mint"
     );
 
-    let stranger_reply = call(
-        &pic,
-        backend,
-        stranger,
-        "reconcile_pending_borrow_mint_from_block",
-        encode_args((vault_id, 0u64)).unwrap(),
-    );
-    let stranger_result: Result<SuccessWithFee, ProtocolError> =
-        result(stranger_reply, "stranger reconciliation");
-    assert!(
-        stranger_result.is_err(),
-        "stranger cannot reconcile the owner's mint"
-    );
+    let (stranger_method, stranger_args) = if use_scanner {
+        (
+            "advance_pending_borrow_mint_recovery",
+            encode_args((vault_id,)).unwrap(),
+        )
+    } else {
+        (
+            "reconcile_pending_borrow_mint_from_block",
+            encode_args((vault_id, 0u64)).unwrap(),
+        )
+    };
+    let stranger_reply = call(&pic, backend, stranger, stranger_method, stranger_args);
+    let stranger_denied = if use_scanner {
+        let result: Result<(), ProtocolError> = result(stranger_reply, "stranger scan");
+        result.is_err()
+    } else {
+        let result: Result<SuccessWithFee, ProtocolError> =
+            result(stranger_reply, "stranger reconciliation");
+        result.is_err()
+    };
+    assert!(stranger_denied, "stranger cannot recover the owner's mint");
     assert_eq!(vault_debt(&pic, backend, owner, vault_id), 0);
 
-    let wrong_block_reply = call(
-        &pic,
-        backend,
-        developer,
-        "reconcile_pending_borrow_mint_from_block",
-        encode_args((vault_id, 1u64)).unwrap(),
-    );
-    let wrong_block: Result<SuccessWithFee, ProtocolError> =
-        result(wrong_block_reply, "wrong-block reconciliation");
-    assert!(
-        wrong_block.is_err(),
-        "developer cannot reconcile from a nonmatching block"
-    );
+    if !use_scanner {
+        let wrong_block_reply = call(
+            &pic,
+            backend,
+            developer,
+            "reconcile_pending_borrow_mint_from_block",
+            encode_args((vault_id, 1u64)).unwrap(),
+        );
+        let wrong_block: Result<SuccessWithFee, ProtocolError> =
+            result(wrong_block_reply, "wrong-block reconciliation");
+        assert!(
+            wrong_block.is_err(),
+            "developer cannot reconcile from a nonmatching block"
+        );
+    }
     assert_eq!(pending_mints(&pic, backend, owner).len(), 1);
     assert_eq!(vault_debt(&pic, backend, owner, vault_id), 0);
 
-    let exact_reply = call(
-        &pic,
-        backend,
-        developer,
-        "reconcile_pending_borrow_mint_from_block",
-        encode_args((vault_id, 0u64)).unwrap(),
-    );
-    let exact: Result<SuccessWithFee, ProtocolError> =
-        result(exact_reply, "exact developer reconciliation");
-    exact.expect("developer reconciles exact positive receipt");
+    if use_scanner {
+        let scan_reply = call(
+            &pic,
+            backend,
+            developer,
+            "advance_pending_borrow_mint_recovery",
+            encode_args((vault_id,)).unwrap(),
+        );
+        let scan: Result<(), ProtocolError> = result(scan_reply, "developer receipt scan");
+        scan.expect("developer scan finds and commits the exact positive receipt");
+    } else {
+        let exact_reply = call(
+            &pic,
+            backend,
+            developer,
+            "reconcile_pending_borrow_mint_from_block",
+            encode_args((vault_id, 0u64)).unwrap(),
+        );
+        let exact: Result<SuccessWithFee, ProtocolError> =
+            result(exact_reply, "exact developer reconciliation");
+        exact.expect("developer reconciles exact positive receipt");
+    }
     assert_eq!(
         vault_debt(&pic, backend, owner, vault_id),
         borrow_amount,
@@ -416,17 +448,33 @@ fn developer_reconciles_exact_committed_mint_for_owner_once() {
         "reconciliation must not append another ledger block"
     );
 
-    let repeat_reply = call(
-        &pic,
-        backend,
-        owner,
-        "reconcile_pending_borrow_mint_from_block",
-        encode_args((vault_id, 0u64)).unwrap(),
-    );
-    let repeat: Result<SuccessWithFee, ProtocolError> =
-        result(repeat_reply, "repeat reconciliation");
+    let repeat_reply = if use_scanner {
+        call(
+            &pic,
+            backend,
+            owner,
+            "advance_pending_borrow_mint_recovery",
+            encode_args((vault_id,)).unwrap(),
+        )
+    } else {
+        call(
+            &pic,
+            backend,
+            owner,
+            "reconcile_pending_borrow_mint_from_block",
+            encode_args((vault_id, 0u64)).unwrap(),
+        )
+    };
+    let repeat_rejected = if use_scanner {
+        let result: Result<(), ProtocolError> = result(repeat_reply, "repeat scan");
+        result.is_err()
+    } else {
+        let result: Result<SuccessWithFee, ProtocolError> =
+            result(repeat_reply, "repeat reconciliation");
+        result.is_err()
+    };
     assert!(
-        repeat.is_err(),
+        repeat_rejected,
         "settled receipt cannot be applied a second time"
     );
     assert_eq!(vault_debt(&pic, backend, owner, vault_id), borrow_amount);
