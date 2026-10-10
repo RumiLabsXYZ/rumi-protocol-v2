@@ -44,6 +44,28 @@ export interface Amm1DonationInspectionRow {
   'notify_nonce' : bigint,
   'reason' : [] | [string],
 }
+export type BorrowFeeMintPhase = { 'ReceiptRecoveryRequired' : null } |
+  { 'TreasuryMissing' : null } |
+  { 'NotificationPending' : { 'mint_block_index' : bigint } } |
+  { 'SubmittedOrUnknown' : null };
+export interface BorrowFeeMintRecoveryPage {
+  'next_cursor' : [] | [bigint],
+  'items' : Array<BorrowFeeMintStatus>,
+}
+export type BorrowFeeMintRecoveryResult = { 'Ok' : BorrowFeeMintRecoveryPage } |
+  { 'Err' : ProtocolError };
+export interface BorrowFeeMintStatus {
+  'tuple' : [] | [BorrowMintTuple],
+  'owner' : Principal,
+  'borrow_block_index' : bigint,
+  'fee_amount_e8s' : bigint,
+  'vault_id' : bigint,
+  'to_repay_e8s' : bigint,
+  'phase' : BorrowFeeMintPhase,
+  'borrow_op_nonce' : bigint,
+  'treasury' : [] | [Principal],
+  'to_treasury_e8s' : bigint,
+}
 export type BorrowMintPhase = { 'ReceiptRecoveryRequired' : null } |
   { 'MintConfirmedHeld' : { 'block_index' : bigint } } |
   { 'SubmittedOrUnknown' : null };
@@ -51,6 +73,14 @@ export interface BorrowMintStatus {
   'vault_id' : bigint,
   'borrowed_amount_e8s' : bigint,
   'phase' : BorrowMintPhase,
+}
+export interface BorrowMintTuple {
+  'destination' : Principal,
+  'created_at_time_ns' : bigint,
+  'memo' : Uint8Array | number[],
+  'amount_e8s' : bigint,
+  'ledger' : Principal,
+  'op_nonce' : bigint,
 }
 export interface BotCollateralReturnProofArg {
   'block_index' : bigint,
@@ -1938,6 +1968,10 @@ export interface _SERVICE {
   'admin_sweep_to_treasury' : ActorMethod<[string], Result>,
   'advance_pending_borrow_mint_recovery' : ActorMethod<[bigint], Result_1>,
   'backfill_collateral_symbols' : ActorMethod<[], Result_3>,
+  'bind_and_retry_missing_borrow_fee_treasury' : ActorMethod<
+    [bigint],
+    Result_1
+  >,
   'borrow_chain_vault_evm' : ActorMethod<
     [VaultIntent, Uint8Array | number[]],
     Result_1
@@ -2095,6 +2129,10 @@ export interface _SERVICE {
     [],
     [] | [LiquidityWithdrawStatus]
   >,
+  'get_my_pending_borrow_fee_mints' : ActorMethod<
+    [[] | [bigint], number],
+    BorrowFeeMintRecoveryResult
+  >,
   'get_my_pending_borrow_mints' : ActorMethod<[], Array<BorrowMintStatus>>,
   'get_my_pending_icusd_refunds' : ActorMethod<
     [],
@@ -2110,6 +2148,10 @@ export interface _SERVICE {
     Array<LegacyPendingThreeUsdRefund>
   >,
   'get_pending_amm1_donations_count' : ActorMethod<[], bigint>,
+  'get_pending_borrow_fee_mint_recovery_page' : ActorMethod<
+    [[] | [bigint], number],
+    BorrowFeeMintRecoveryResult
+  >,
   'get_pending_chain_burn_aging' : ActorMethod<
     [],
     Array<PendingChainBurnAging>
@@ -2251,6 +2293,10 @@ export interface _SERVICE {
     [bigint, bigint],
     Result
   >,
+  'reconcile_pending_borrow_fee_mint_from_block' : ActorMethod<
+    [bigint, bigint],
+    Result_1
+  >,
   'reconcile_pending_borrow_mint_from_block' : ActorMethod<
     [bigint, bigint],
     Result_4
@@ -2291,6 +2337,7 @@ export interface _SERVICE {
   'repay_to_vault_with_stable' : ActorMethod<[VaultArgWithToken], Result>,
   'reset_bot_budget' : ActorMethod<[bigint], Result_1>,
   'resolve_stuck_settlement_op' : ActorMethod<[number, bigint], Result_1>,
+  'retry_pending_borrow_fee_mint' : ActorMethod<[bigint], Result_1>,
   'set_amm1_canister' : ActorMethod<[Principal], Result_1>,
   'set_amm1_pool_id' : ActorMethod<[string], Result_1>,
   'set_borrowing_fee' : ActorMethod<[number], Result_1>,

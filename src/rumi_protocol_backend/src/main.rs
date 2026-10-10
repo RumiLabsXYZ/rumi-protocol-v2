@@ -6233,6 +6233,81 @@ fn get_my_pending_borrow_mints() -> Vec<rumi_protocol_backend::state::BorrowMint
     rumi_protocol_backend::state::pending_borrow_mint_statuses(ic_cdk::caller())
 }
 
+/// Owner-authenticated view of durable borrowing-fee outbox rows.
+#[candid_method(query)]
+#[query]
+fn get_my_pending_borrow_fee_mints(
+    after_op_nonce: Option<u128>,
+    limit: u16,
+) -> Result<rumi_protocol_backend::state::BorrowFeeMintRecoveryPage, ProtocolError> {
+    rumi_protocol_backend::state::pending_borrow_fee_mint_recovery_page(
+        Some(ic_cdk::caller()),
+        after_op_nonce,
+        limit,
+    )
+    .map_err(ProtocolError::GenericError)
+}
+
+/// Developer-only bounded recovery listing for retained fee outbox rows.
+#[candid_method(query)]
+#[query]
+fn get_pending_borrow_fee_mint_recovery_page(
+    after_op_nonce: Option<u128>,
+    limit: u16,
+) -> Result<rumi_protocol_backend::state::BorrowFeeMintRecoveryPage, ProtocolError> {
+    if ic_cdk::caller() != rumi_protocol_backend::state::read_state(|s| s.developer_principal)
+        || ic_cdk::caller() == Principal::anonymous()
+    {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+    rumi_protocol_backend::state::pending_borrow_fee_mint_recovery_page(None, after_op_nonce, limit)
+        .map_err(ProtocolError::GenericError)
+}
+
+/// Retry a retained borrowing-fee mint with its original ledger tuple, or
+/// retry its idempotent treasury deposit notification.
+#[candid_method(update)]
+#[update]
+async fn retry_pending_borrow_fee_mint(borrow_op_nonce: u128) -> Result<(), ProtocolError> {
+    validate_authenticated_not_frozen()?;
+    check_postcondition(
+        rumi_protocol_backend::vault::retry_pending_borrow_fee_mint(borrow_op_nonce).await,
+    )
+}
+
+/// Bind a formerly missing treasury destination after explicit developer
+/// review, then dispatch the tuple created by this one-time binding.
+#[candid_method(update)]
+#[update]
+async fn bind_and_retry_missing_borrow_fee_treasury(
+    borrow_op_nonce: u128,
+) -> Result<(), ProtocolError> {
+    validate_authenticated_not_frozen()?;
+    check_postcondition(
+        rumi_protocol_backend::vault::bind_and_retry_missing_borrow_fee_treasury(
+            borrow_op_nonce,
+        )
+        .await,
+    )
+}
+
+/// Reconcile an ambiguous borrowing-fee mint from an exact ICRC-3 block.
+#[candid_method(update)]
+#[update]
+async fn reconcile_pending_borrow_fee_mint_from_block(
+    borrow_op_nonce: u128,
+    candidate_block_index: u64,
+) -> Result<(), ProtocolError> {
+    validate_authenticated_not_frozen()?;
+    check_postcondition(
+        rumi_protocol_backend::vault::reconcile_pending_borrow_fee_mint_from_block(
+            borrow_op_nonce,
+            candidate_block_index,
+        )
+        .await,
+    )
+}
+
 /// Reconcile an ambiguous borrow only from a positive, exact ICRC-3 mint
 /// receipt. Candidate indexes are untrusted and checked against the journal.
 #[candid_method(update)]

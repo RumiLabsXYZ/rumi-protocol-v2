@@ -17,6 +17,8 @@ use crate::management;
 use crate::numeric::ICUSD;
 use crate::state::read_state;
 
+const BORROWING_FEE_ONCE_METHOD: &str = "deposit_borrowing_fee_once";
+
 // ---------------------------------------------------------------------------
 // Mirror types matching rumi_treasury::types (can't depend on cdylib crate)
 // ---------------------------------------------------------------------------
@@ -231,6 +233,60 @@ pub async fn notify_treasury_deposit(
             );
             Err(msg)
         }
+    }
+}
+
+/// Notify Treasury through the versioned, idempotent borrowing-fee API.
+/// This uses a separate method name so an old Treasury can only reject the
+/// call as method-not-found instead of processing a retry through its legacy
+/// non-idempotent `deposit` entry point.
+pub async fn notify_treasury_borrowing_fee_once(
+    treasury: Principal,
+    amount: u64,
+    block_index: u64,
+) -> Result<u64, String> {
+    let args = borrowing_fee_once_args(amount, block_index);
+    let result: Result<(Result<u64, String>,), _> =
+        ic_cdk::call(treasury, BORROWING_FEE_ONCE_METHOD, (args,)).await;
+    match result {
+        Ok((Ok(deposit_id),)) => {
+            log!(INFO, "[treasury] Borrowing-fee deposit recorded: id={}", deposit_id);
+            Ok(deposit_id)
+        }
+        Ok((Err(error),)) => {
+            log!(INFO, "[treasury] Borrowing-fee deposit rejected: {}", error);
+            Err(error)
+        }
+        Err((code, message)) => {
+            log!(INFO, "[treasury] Borrowing-fee deposit call failed: {:?} {}", code, message);
+            Err(message)
+        }
+    }
+}
+
+fn borrowing_fee_once_args(amount: u64, block_index: u64) -> DepositArgs {
+    DepositArgs {
+        deposit_type: DepositType::BorrowingFee,
+        asset_type: AssetType::ICUSD,
+        amount,
+        block_index,
+        memo: None,
+    }
+}
+
+#[cfg(test)]
+mod borrowing_fee_endpoint_tests {
+    use super::{borrowing_fee_once_args, AssetType, DepositType, BORROWING_FEE_ONCE_METHOD};
+
+    #[test]
+    fn retries_use_only_the_versioned_idempotent_method_and_exact_deposit_key() {
+        assert_eq!(BORROWING_FEE_ONCE_METHOD, "deposit_borrowing_fee_once");
+        let args = borrowing_fee_once_args(75, 912);
+        assert!(matches!(args.deposit_type, DepositType::BorrowingFee));
+        assert!(matches!(args.asset_type, AssetType::ICUSD));
+        assert_eq!(args.amount, 75);
+        assert_eq!(args.block_index, 912);
+        assert_eq!(args.memo, None);
     }
 }
 
