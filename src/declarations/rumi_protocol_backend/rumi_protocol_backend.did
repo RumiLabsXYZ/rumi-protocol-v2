@@ -1,4 +1,29 @@
 type Account = record { owner : principal; subaccount : opt blob };
+type ThreeUsdReservePayoutAttempt = record {
+  op_nonce : nat;
+  memo : blob;
+  created_at_time_ns : nat64;
+  fee_arg_e8s : opt nat64;
+  candidate_block_index : opt nat64;
+  observed_fee_e8s : opt nat64;
+};
+type ThreeUsdReserveCollateralPayout = record {
+  operation_id : nat;
+  op_nonce : nat;
+  collateral_type : principal;
+  ledger : principal;
+  source : Account;
+  destination : Account;
+  gross_e8s : nat64;
+  net_e8s : nat64;
+  expected_fee_e8s : nat64;
+  memo : blob;
+  created_at_time_ns : nat64;
+  fee_arg_e8s : opt nat64;
+  candidate_block_index : opt nat64;
+  observed_fee_e8s : opt nat64;
+  rearmed_attempts : vec ThreeUsdReservePayoutAttempt;
+};
 type AddCollateralArg = record {
   redemption_fee_ceiling : opt float64;
   debt_ceiling : nat64;
@@ -1780,6 +1805,10 @@ service : (ProtocolArg) -> {
   get_stability_pool_liquidate_with_reserves_v2_status : (nat64, nat64) -> (
       ThreeUsdReserveIngressV2StatusView,
     ) query;
+  get_stability_pool_liquidate_with_reserves_v2_payout_candidate : (
+      nat64,
+      nat64,
+    ) -> (opt ThreeUsdReserveCollateralPayout) query;
   get_stability_pool_principal : () -> (opt principal) query;
   get_stable_token_enabled : (StableTokenType) -> (bool) query;
   get_supply_audit : () -> (SupplyAudit) query;

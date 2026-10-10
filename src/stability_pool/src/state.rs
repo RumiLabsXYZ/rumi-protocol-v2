@@ -1192,10 +1192,22 @@ impl StabilityPoolState {
     // ─── Deposits ───
 
     pub fn add_deposit(&mut self, user: Principal, token_ledger: Principal, amount: u64) {
+        self.add_deposit_at(user, token_ledger, amount, ic_cdk::api::time());
+    }
+
+    /// Add a deposit using an explicit timestamp, so state transitions remain
+    /// usable by tests and other off-canister callers.
+    pub fn add_deposit_at(
+        &mut self,
+        user: Principal,
+        token_ledger: Principal,
+        amount: u64,
+        now_ns: u64,
+    ) {
         let position = self
             .deposits
             .entry(user)
-            .or_insert_with(|| DepositPosition::new(ic_cdk::api::time()));
+            .or_insert_with(|| DepositPosition::new(now_ns));
         *position
             .stablecoin_balances
             .entry(token_ledger)
@@ -1701,6 +1713,15 @@ impl StabilityPoolState {
             .cloned()
     }
 
+    /// Saved requests from a populated snapshot stay recoverable, but a
+    /// pre-dispatch pull may use the uncommitted 3USD books only when this is
+    /// the sole pending request.
+    pub fn is_unique_pending_three_usd_absorb(&self, intent: &ThreeUsdReserveAbsorbIntent) -> bool {
+        self.pending_three_usd_absorbs.as_ref().is_some_and(|pending| {
+            pending.len() == 1 && pending.get(&intent.vault_id) == Some(intent)
+        })
+    }
+
     /// Reuse an existing request for this vault or reserve a monotonic id for
     /// the exact tuple that will be sent to the backend. Existing rows win so
     /// ambiguous backend replies cannot be retried with freshly calculated
@@ -1717,11 +1738,19 @@ impl StabilityPoolState {
         if let Some(existing) = self.get_pending_three_usd_absorb(vault_id) {
             return Ok(existing);
         }
+        // Depositor balances are not reserved until a saved absorb settles.
+        // A second vault must not draw against the same unchanged 3USD books
+        // while the first pull or collateral payout is unresolved. Recovery of
+        // the original vault keeps its immutable request above.
+        if self.pending_three_usd_absorb_count() > 0 {
+            return Err(StabilityPoolError::SystemBusy);
+        }
 
         let absorb_id = self.next_three_usd_absorb_id.unwrap_or(1);
         let next_id = absorb_id
             .checked_add(1)
             .ok_or(StabilityPoolError::SystemBusy)?;
+        let collateral_ledger = self.collateral_registry.get(&collateral_type).map(|info| info.ledger_id);
         let intent = ThreeUsdReserveAbsorbIntent {
             absorb_id,
             vault_id,
@@ -1729,6 +1758,7 @@ impl StabilityPoolState {
             amount,
             ledger,
             collateral_type: Some(collateral_type),
+            collateral_ledger,
             collateral_price_e8s: Some(collateral_price_e8s),
         };
         self.pending_three_usd_absorbs
@@ -2705,6 +2735,64 @@ impl StabilityPoolState {
         result
     }
 
+    /// Compute a draw using only the configured 3USD LP ledger. The backend
+    /// defines the configured 3pool principal as the 3USD ledger, so require
+    /// exact 3USD LP row. The backend remains authoritative for checking that
+    /// row's ledger against its configured 3pool principal before pulling.
+    pub fn compute_three_usd_token_draw(
+        &self,
+        debt_e8s: u64,
+        collateral_type: &Principal,
+    ) -> Option<(Principal, u64, u64)> {
+        let mut candidates = self.stablecoin_registry.iter().filter(|(ledger, config)| {
+            config.ledger_id == **ledger
+                && config.symbol == "3USD"
+                && config.is_lp_token == Some(true)
+                && config.decimals == 8
+                && config.is_active
+        });
+        let (ledger, _) = candidates.next()?;
+        if candidates.next().is_some() || debt_e8s == 0 {
+            return None;
+        }
+
+        let ledger = *ledger;
+        let virtual_price = self
+            .virtual_prices()
+            .get(&ledger)
+            .copied()
+            .filter(|price| *price > 0)?;
+        let available_native = self
+            .deposits
+            .values()
+            .filter(|position| self.position_opted_in_for(position, collateral_type))
+            .try_fold(0u64, |sum, position| {
+                sum.checked_add(position.stablecoin_balances.get(&ledger).copied().unwrap_or(0))
+            })?;
+        if available_native == 0 {
+            return None;
+        }
+        let available_value = u64::try_from(u128::from(available_native)
+            .checked_mul(virtual_price)?
+            .checked_div(1_000_000_000_000_000_000)?)
+            .ok()?;
+        let target_value = debt_e8s.min(available_value);
+        let numerator = u128::from(target_value)
+            .checked_mul(1_000_000_000_000_000_000)?;
+        // Floor the LP amount so the pool never consumes more value than the
+        // debt target. The covered debt is then recomputed from these exact LP
+        // units and may be slightly smaller due to integer rounding.
+        let amount_floor = u64::try_from(numerator.checked_div(virtual_price)?)
+            .ok()?;
+        let amount = amount_floor.min(available_native);
+        let covered_debt_e8s = u64::try_from(u128::from(amount)
+            .checked_mul(virtual_price)?
+            .checked_div(1_000_000_000_000_000_000)?)
+            .ok()?
+            .min(debt_e8s);
+        (amount > 0 && covered_debt_e8s > 0).then_some((ledger, amount, covered_debt_e8s))
+    }
+
     /// Compute an Inc 4 chain-vault draw. Returns at most one token, icUSD, in
     /// e8s. ckStables and 3USD are intentionally excluded from this path.
     pub fn compute_icusd_chain_draw(
@@ -3075,6 +3163,162 @@ impl StabilityPoolState {
             "stability pool aggregate/per-depositor invariant violated after \
              process_native_xrp_absorb_success_at"
         );
+        Ok(())
+    }
+
+    /// Exact 3USD reserve promotion. Floors are assigned proportionally, then
+    /// any stable debit remainder is charged in stable principal order to
+    /// opted-in depositors with remaining balance. Collateral rounding dust is
+    /// assigned to the first participant, preserving exact totals.
+    pub fn process_three_usd_reserve_gains_exact_at(
+        &mut self,
+        vault_id: u64,
+        ledger: Principal,
+        collateral_type: Principal,
+        realized_3usd_e8s: u64,
+        collateral_gained: u64,
+        collateral_price_e8s: u64,
+        timestamp: u64,
+    ) -> Result<(), StabilityPoolError> {
+        if realized_3usd_e8s == 0 || collateral_gained == 0 || collateral_price_e8s == 0 {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+        if !self
+            .stablecoin_registry
+            .get(&ledger)
+            .is_some_and(|config| config.is_lp_token == Some(true) && config.decimals == 8)
+        {
+            return Err(StabilityPoolError::TokenNotActive { ledger });
+        }
+        let virtual_price = self
+            .virtual_prices()
+            .get(&ledger)
+            .copied()
+            .filter(|price| *price > 0)
+            .ok_or(StabilityPoolError::InsufficientPoolBalance)?;
+        let mut participants: Vec<(Principal, u64)> = self
+            .deposits
+            .iter()
+            .filter(|(_, position)| self.position_opted_in_for(position, &collateral_type))
+            .filter_map(|(owner, position)| {
+                let balance = position
+                    .stablecoin_balances
+                    .get(&ledger)
+                    .copied()
+                    .unwrap_or(0);
+                (balance > 0).then_some((*owner, balance))
+            })
+            .collect();
+        participants.sort_by(|a, b| a.0.as_slice().cmp(b.0.as_slice()));
+        let available = participants
+            .iter()
+            .try_fold(0u64, |sum, (_, balance)| sum.checked_add(*balance))
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        if available < realized_3usd_e8s {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+        let total_value_e8s = lp_to_usd_e8s(realized_3usd_e8s, virtual_price);
+        if total_value_e8s == 0 {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+        let mut deductions = Vec::with_capacity(participants.len());
+        let mut allocated = 0u64;
+        for (owner, balance) in &participants {
+            let share = (realized_3usd_e8s as u128 * *balance as u128 / available as u128) as u64;
+            allocated = allocated
+                .checked_add(share)
+                .ok_or(StabilityPoolError::SystemBusy)?;
+            deductions.push((*owner, share));
+        }
+        let mut remainder = realized_3usd_e8s
+            .checked_sub(allocated)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        for (owner, share) in &mut deductions {
+            if remainder == 0 {
+                break;
+            }
+            let capacity = participants
+                .iter()
+                .find(|(candidate, _)| candidate == owner)
+                .map(|(_, balance)| balance.saturating_sub(*share))
+                .unwrap_or(0);
+            let extra = capacity.min(remainder);
+            *share = share
+                .checked_add(extra)
+                .ok_or(StabilityPoolError::SystemBusy)?;
+            remainder -= extra;
+        }
+        if remainder != 0 {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+        let mut gain_allocations = Vec::with_capacity(deductions.len());
+        let mut distributed = 0u64;
+        for (owner, amount) in &deductions {
+            let gain = (collateral_gained as u128 * *amount as u128
+                / realized_3usd_e8s as u128) as u64;
+            distributed = distributed
+                .checked_add(gain)
+                .ok_or(StabilityPoolError::SystemBusy)?;
+            gain_allocations.push((*owner, *amount, gain));
+        }
+        let gain_dust = collateral_gained
+            .checked_sub(distributed)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        if let Some((_, _, first_gain)) = gain_allocations.first_mut() {
+            *first_gain = first_gain
+                .checked_add(gain_dust)
+                .ok_or(StabilityPoolError::SystemBusy)?;
+        } else {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+        for (owner, amount, gain) in &gain_allocations {
+            let position = self
+                .deposits
+                .get_mut(owner)
+                .ok_or(StabilityPoolError::SystemBusy)?;
+            let balance = position
+                .stablecoin_balances
+                .get_mut(&ledger)
+                .ok_or(StabilityPoolError::SystemBusy)?;
+            *balance = balance
+                .checked_sub(*amount)
+                .ok_or(StabilityPoolError::SystemBusy)?;
+            if *balance == 0 {
+                position.stablecoin_balances.remove(&ledger);
+            }
+            if *gain > 0 {
+                let current_gain = position
+                    .collateral_gains
+                    .get(&collateral_type)
+                    .copied()
+                    .unwrap_or(0);
+                position.collateral_gains.insert(
+                    collateral_type,
+                    current_gain
+                        .checked_add(*gain)
+                        .ok_or(StabilityPoolError::SystemBusy)?,
+                );
+            }
+        }
+        let aggregate = self
+            .total_stablecoin_balances
+            .get_mut(&ledger)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        *aggregate = aggregate
+            .checked_sub(realized_3usd_e8s)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        self.record_liquidation_in_history(PoolLiquidationRecord {
+            vault_id,
+            timestamp,
+            stables_consumed: BTreeMap::from([(ledger, realized_3usd_e8s)]),
+            collateral_gained,
+            collateral_type,
+            depositors_count: gain_allocations.len() as u64,
+            collateral_price_e8s: Some(collateral_price_e8s),
+        });
+        self.deposits.retain(|_, position| !position.is_empty());
+        self.validate_state()
+            .map_err(|_| StabilityPoolError::SystemBusy)?;
         Ok(())
     }
 
@@ -5814,20 +6058,76 @@ mod tests {
     }
 
     #[test]
+    fn three_usd_absorb_holds_a_second_vault_until_the_first_is_terminal() {
+        let mut state = StabilityPoolState::default();
+        let ledger = Principal::from_slice(&[77]);
+        let collateral = Principal::from_slice(&[79]);
+        let first = state
+            .prepare_three_usd_absorb(
+                42,
+                500_000_000,
+                510_000_000,
+                ledger,
+                collateral,
+                100_000_000,
+            )
+            .expect("first vault creates the durable admission fence");
+        let next_id = state.next_three_usd_absorb_id;
+        assert!(state.is_unique_pending_three_usd_absorb(&first));
+
+        assert!(matches!(
+            state.prepare_three_usd_absorb(
+                43,
+                100_000_000,
+                101_000_000,
+                ledger,
+                collateral,
+                100_000_000
+            ),
+            Err(StabilityPoolError::SystemBusy),
+        ));
+        assert_eq!(state.pending_three_usd_absorb_count(), 1);
+        assert_eq!(state.next_three_usd_absorb_id, next_id);
+        assert_eq!(state.get_pending_three_usd_absorb(42), Some(first.clone()));
+
+        state.complete_three_usd_absorb(42, first.absorb_id);
+        assert!(state
+            .prepare_three_usd_absorb(
+                43,
+                100_000_000,
+                101_000_000,
+                ledger,
+                collateral,
+                100_000_000,
+            )
+            .is_ok());
+    }
+
+    #[test]
     fn three_usd_recovery_page_rotates_past_held_prefix() {
         let mut state = StabilityPoolState::default();
-        for vault_id in 1..=9 {
-            state
-                .prepare_three_usd_absorb(
-                vault_id,
+        let first = state
+            .prepare_three_usd_absorb(
+                1,
                 100,
                 100,
                 Principal::from_slice(&[77]),
                 Principal::from_slice(&[78]),
                 100_000_000,
-                )
-                .unwrap();
+            )
+            .unwrap();
+        // Populated predecessor state may contain several pending requests.
+        // New admission is serialized, but recovery still pages every saved row.
+        for vault_id in 2..=9 {
+            let mut legacy = first.clone();
+            legacy.vault_id = vault_id;
+            legacy.absorb_id = vault_id;
+            state.pending_three_usd_absorbs.as_mut().unwrap().insert(vault_id, legacy);
         }
+        assert!(!state.is_unique_pending_three_usd_absorb(&first));
+        assert!(!state.is_unique_pending_three_usd_absorb(
+            state.pending_three_usd_absorbs.as_ref().unwrap().get(&2).unwrap()
+        ));
         let first = state.take_pending_three_usd_absorb_page(8);
         assert_eq!(
             first
@@ -7034,6 +7334,74 @@ mod tests {
     }
 
     #[test]
+    fn exact_three_usd_gain_assigns_tiny_rounding_debit_and_collateral_deterministically() {
+        let mut state = test_state_with_3usd();
+        let ledger = three_usd_ledger();
+        let collateral = icp_ledger();
+        state.add_deposit_at(user_a(), ledger, 1, 123);
+        state.add_deposit_at(user_b(), ledger, 1, 123);
+
+        state
+            .process_three_usd_reserve_gains_exact_at(
+                77,
+                ledger,
+                collateral,
+                1,
+                7,
+                100_000_000,
+                123,
+            )
+            .expect("exact one-unit absorb is charged");
+
+        assert_eq!(state.total_stablecoin_balances.get(&ledger), Some(&1));
+        assert_eq!(
+            state.deposits[&user_a()].stablecoin_balances.get(&ledger),
+            None
+        );
+        assert_eq!(
+            state.deposits[&user_b()].stablecoin_balances.get(&ledger),
+            Some(&1)
+        );
+        assert_eq!(
+            state.deposits[&user_a()].collateral_gains.get(&collateral),
+            Some(&7)
+        );
+        assert_eq!(
+            state
+                .deposits
+                .get(&user_b())
+                .and_then(|p| p.collateral_gains.get(&collateral)),
+            None
+        );
+        assert!(state.validate_state().is_ok());
+    }
+
+    #[test]
+    fn exact_three_usd_gain_rejects_insufficient_opted_balance_without_mutation() {
+        let mut state = test_state_with_3usd();
+        let ledger = three_usd_ledger();
+        let collateral = icp_ledger();
+        state.add_deposit_at(user_a(), ledger, 1, 123);
+        let before = state.clone();
+        assert!(state
+            .process_three_usd_reserve_gains_exact_at(
+                77,
+                ledger,
+                collateral,
+                2,
+                7,
+                100_000_000,
+                123,
+            )
+            .is_err());
+        assert_eq!(
+            state.total_stablecoin_balances,
+            before.total_stablecoin_balances
+        );
+        assert_eq!(state.deposits, before.deposits);
+    }
+
+    #[test]
     fn test_lp_to_usd_e8s_conversion() {
         // 1 3USD at vp=1.0492 → 1.0492 USD
         let vp = 1_049_200_000_000_000_000u128;
@@ -7141,6 +7509,72 @@ mod tests {
             draw.contains_key(&three_usd_ledger()),
             "Should draw from 3USD for remainder"
         );
+    }
+
+    #[test]
+    fn three_usd_admission_draw_uses_only_the_unique_3usd_lp_and_caps_to_balance() {
+        let mut state = test_state_with_3usd();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 900_000_000);
+        add_deposit_direct(&mut state, user_a(), ckusdt_ledger(), 900_000_000);
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 200_000_000);
+        state.register_stablecoin(StablecoinConfig {
+            ledger_id: Principal::from_slice(&[45]),
+            symbol: "otherLP".into(),
+            decimals: 8,
+            priority: 5,
+            is_active: true,
+            transfer_fee: Some(0),
+            is_lp_token: Some(true),
+            underlying_pool: Some(Principal::from_slice(&[46])),
+        });
+        add_deposit_direct(&mut state, user_a(), Principal::from_slice(&[45]), 900_000_000);
+
+        let (ledger, amount, covered) = state
+            .compute_three_usd_token_draw(500_000_000, &icp_ledger())
+            .expect("configured 3USD LP is eligible");
+        assert_eq!(ledger, three_usd_ledger());
+        assert!(amount > 0 && amount <= 200_000_000);
+        assert!(covered > 0 && covered <= 500_000_000);
+        assert_eq!(covered, lp_to_usd_e8s(amount, 1_049_200_000_000_000_000));
+    }
+
+    #[test]
+    fn three_usd_admission_draw_fails_closed_without_exact_3usd_lp_or_price() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 500_000_000);
+        assert!(state
+            .compute_three_usd_token_draw(100_000_000, &icp_ledger())
+            .is_none());
+
+        let mut state = test_state_with_3usd();
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 500_000_000);
+        state.cached_virtual_prices = Some(BTreeMap::new());
+        assert!(state
+            .compute_three_usd_token_draw(100_000_000, &icp_ledger())
+            .is_none());
+
+        let mut state = test_state_with_3usd();
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 500_000_000);
+        state
+            .cached_virtual_prices
+            .as_mut()
+            .unwrap()
+            .insert(three_usd_ledger(), 3_000_000_000_000_000_000);
+        let (_, amount, covered) = state
+            .compute_three_usd_token_draw(10_000_000, &icp_ledger())
+            .expect("high virtual price still yields a bounded draw");
+        assert_eq!(amount, 3_333_333);
+        assert_eq!(covered, 9_999_999);
+        assert!(covered <= 10_000_000, "rounded LP value cannot exceed debt target");
+
+        let config = state
+            .stablecoin_registry
+            .get_mut(&three_usd_ledger())
+            .unwrap();
+        config.is_active = false;
+        assert!(state
+            .compute_three_usd_token_draw(10_000_000, &icp_ledger())
+            .is_none());
     }
 
     #[test]

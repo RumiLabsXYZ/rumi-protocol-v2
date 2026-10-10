@@ -1641,16 +1641,51 @@ fn pending_payout_is_dispatchable(transfer: &crate::state::PendingMarginTransfer
         && transfer.transfer_amount_raw.is_some()
 }
 
+fn reserve_payout_journal_mismatch_requires_hold(
+    transfer: &crate::state::PendingMarginTransfer,
+    journal_matches: bool,
+) -> bool {
+    pending_payout_is_dispatchable(transfer) && !journal_matches
+}
+
 pub async fn process_one_pending_payout(operation_id: u128) {
     let transfer = mutate_state(|s| {
         let Some((_, transfer)) = s.get_pending_payout(operation_id) else {
             return None;
         };
-        if transfer.retry_count >= MAX_PENDING_RETRIES {
-            s.mutate_pending_payout(operation_id, |row| row.held_for_manual_retry = true);
+        if !pending_payout_is_dispatchable(&transfer) {
             return None;
         }
-        if !pending_payout_is_dispatchable(&transfer) {
+        if let Some(key) = s.three_usd_reserve_payout_operation_keys.get(&operation_id) {
+            let journal_matches = s.three_usd_reserve_collateral_payouts.get(key).is_some_and(|payout| {
+                let attempt = if payout.op_nonce == transfer.op_nonce {
+                    Some((payout.fee_arg_e8s, payout.candidate_block_index))
+                } else {
+                    payout.rearmed_attempts.iter()
+                        .find(|attempt| attempt.op_nonce == transfer.op_nonce)
+                        .map(|attempt| (attempt.fee_arg_e8s, attempt.candidate_block_index))
+                };
+                payout.operation_id == operation_id
+                    && payout.ledger == transfer.ledger.unwrap_or(Principal::anonymous())
+                    && payout.destination.owner == transfer.owner
+                    && payout.destination.subaccount.is_none()
+                    && payout.net_e8s == transfer.transfer_amount_raw.unwrap_or_default()
+                    && payout.gross_e8s == transfer.margin.to_u64()
+                    && attempt.is_some_and(|(fee_arg, candidate)| {
+                        fee_arg == Some(payout.expected_fee_e8s) && candidate.is_none()
+                    })
+            });
+            if reserve_payout_journal_mismatch_requires_hold(&transfer, journal_matches) {
+                s.mutate_pending_payout(operation_id, |row| {
+                    row.in_flight = false;
+                    row.held_for_manual_retry = true;
+                    row.reconciliation_required = true;
+                });
+                return None;
+            }
+        }
+        if transfer.retry_count >= MAX_PENDING_RETRIES {
+            s.mutate_pending_payout(operation_id, |row| row.held_for_manual_retry = true);
             return None;
         }
         s.mutate_pending_payout(operation_id, |row| row.in_flight = true);
@@ -1667,8 +1702,23 @@ pub async fn process_one_pending_payout(operation_id: u128) {
     let amount = transfer
         .transfer_amount_raw
         .expect("validated payout amount");
-    let result = crate::management::transfer_collateral_with_nonce_status(
+    let reserve_fee_arg = read_state(|state| {
+        state.three_usd_reserve_payout_operation_keys
+            .get(&operation_id)
+            .and_then(|key| state.three_usd_reserve_collateral_payouts.get(key))
+            .and_then(|payout| {
+                if payout.op_nonce == transfer.op_nonce {
+                    Some(payout.fee_arg_e8s)
+                } else {
+                    payout.rearmed_attempts.iter()
+                        .find(|attempt| attempt.op_nonce == transfer.op_nonce)
+                        .map(|attempt| attempt.fee_arg_e8s)
+                }
+            })
+    });
+    let result = crate::management::transfer_collateral_with_nonce_and_fee_status(
         amount,
+        reserve_fee_arg.flatten(),
         transfer.owner,
         ledger,
         transfer.op_nonce,
@@ -1676,6 +1726,67 @@ pub async fn process_one_pending_payout(operation_id: u128) {
     .await;
     match result {
         Ok(block_index) => {
+            // Reserve-linked payouts keep their exact tuple and the ledger's
+            // returned index in the private replay journal before any proof
+            // await or public event removes the generic pending row.
+            let reserve_candidate = mutate_state(|state| {
+                let Some(key) = state.three_usd_reserve_payout_operation_keys
+                    .get(&operation_id).cloned() else { return None };
+                let Some(saved) = state.three_usd_reserve_collateral_payouts.get(&key) else {
+                    return None;
+                };
+                let mut payout = saved.clone();
+                if payout.op_nonce != transfer.op_nonce {
+                    let Some(attempt) = payout.rearmed_attempts.iter()
+                        .find(|attempt| attempt.op_nonce == transfer.op_nonce) else { return None };
+                    payout.op_nonce = attempt.op_nonce;
+                    payout.memo = attempt.memo;
+                    payout.created_at_time_ns = attempt.created_at_time_ns;
+                    payout.fee_arg_e8s = attempt.fee_arg_e8s;
+                    payout.candidate_block_index = attempt.candidate_block_index;
+                    payout.observed_fee_e8s = attempt.observed_fee_e8s;
+                }
+                if payout.operation_id != operation_id || payout.ledger != ledger
+                    || payout.destination.owner != transfer.owner
+                    || payout.net_e8s != amount || payout.op_nonce != transfer.op_nonce
+                {
+                    return None;
+                }
+                if !crate::event::record_three_usd_reserve_payout_candidate(
+                    state, key.clone(), operation_id, transfer.op_nonce, block_index,
+                ) {
+                    return None;
+                }
+                Some((key, payout.clone()))
+            });
+            let reserve_fee_observation = if let Some((key, payout)) = reserve_candidate {
+                match verify_three_usd_reserve_payout_fee(&payout, block_index).await {
+                    Ok(actual_fee_e8s) => Some((key, actual_fee_e8s)),
+                    Err(reason) => {
+                        mutate_state(|state| {
+                            state.mutate_pending_payout(operation_id, |row| {
+                                row.in_flight = false;
+                                row.held_for_manual_retry = true;
+                                row.reconciliation_required = true;
+                            });
+                        });
+                        log!(INFO, "3USD reserve payout {} candidate {} remains held pending direct fee evidence: {}", operation_id, block_index, reason);
+                        return;
+                    }
+                }
+            } else if read_state(|state| state.three_usd_reserve_payout_operation_keys.contains_key(&operation_id)) {
+                mutate_state(|state| {
+                    state.mutate_pending_payout(operation_id, |row| {
+                        row.in_flight = false;
+                        row.held_for_manual_retry = true;
+                        row.reconciliation_required = true;
+                    });
+                });
+                log!(INFO, "3USD reserve payout {} returned a block but its exact durable tuple did not match; payout remains held", operation_id);
+                return;
+            } else {
+                None
+            };
             mutate_state(|s| match transfer.payout_kind {
                 crate::state::PendingPayoutKind::Redemption => {
                     let burn_index = s
@@ -1691,14 +1802,36 @@ pub async fn process_one_pending_payout(operation_id: u128) {
                         );
                     }
                 }
-                kind => crate::event::record_margin_transfer(
-                    s,
-                    transfer.vault_id,
-                    transfer.owner,
-                    operation_id,
-                    kind,
-                    block_index,
-                ),
+                kind => {
+                    if let Some((key, actual_fee_e8s)) = reserve_fee_observation {
+                        if !crate::event::record_three_usd_reserve_payout_fee_observed(
+                            s, key, operation_id, transfer.op_nonce, block_index, actual_fee_e8s,
+                        ) {
+                            s.mutate_pending_payout(operation_id, |row| {
+                                row.in_flight = false;
+                                row.held_for_manual_retry = true;
+                                row.reconciliation_required = true;
+                            });
+                            return;
+                        }
+                        let expected_fee_e8s = s.three_usd_reserve_payout_operation_keys
+                            .get(&operation_id)
+                            .and_then(|key| s.three_usd_reserve_collateral_payouts.get(key))
+                            .map(|payout| payout.expected_fee_e8s);
+                        if !three_usd_reserve_fee_matches(expected_fee_e8s, actual_fee_e8s) {
+                            s.mutate_pending_payout(operation_id, |row| {
+                                row.in_flight = false;
+                                row.held_for_manual_retry = true;
+                                row.reconciliation_required = true;
+                            });
+                            log!(INFO, "3USD reserve payout {} has observed fee {} differing from pinned expected fee {:?}; completion remains held", operation_id, actual_fee_e8s, expected_fee_e8s);
+                            return;
+                        }
+                    }
+                    crate::event::record_margin_transfer(
+                        s, transfer.vault_id, transfer.owner, operation_id, kind, block_index,
+                    )
+                }
             });
         }
         Err(error) => {
@@ -1743,6 +1876,425 @@ pub async fn process_one_pending_payout(operation_id: u128) {
             }
         }
     }
+}
+
+fn three_usd_reserve_fee_matches(expected_fee_e8s: Option<u64>, observed_fee_e8s: u64) -> bool {
+    expected_fee_e8s == Some(observed_fee_e8s)
+}
+
+#[cfg(test)]
+mod three_usd_reserve_fee_tests {
+    use super::three_usd_reserve_fee_matches;
+
+    #[test]
+    fn only_exact_observed_fee_allows_payout_completion() {
+        assert!(three_usd_reserve_fee_matches(Some(10), 10));
+        assert!(!three_usd_reserve_fee_matches(Some(10), 12));
+        assert!(!three_usd_reserve_fee_matches(None, 10));
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThreeUsdReserveCandidateRecoveryClaim {
+    key: crate::state::ThreeUsdReserveIngressKey,
+    operation_id: u128,
+    attempt_nonce: u128,
+    block_index: u64,
+    payout: crate::state::ThreeUsdReserveCollateralPayout,
+}
+
+fn three_usd_reserve_payout_attempt(
+    payout: &crate::state::ThreeUsdReserveCollateralPayout,
+    attempt_nonce: u128,
+) -> Option<crate::state::ThreeUsdReserveCollateralPayout> {
+    let mut attempt_payout = payout.clone();
+    if payout.op_nonce == attempt_nonce {
+        return Some(attempt_payout);
+    }
+    let attempt = payout.rearmed_attempts.iter().find(|attempt| attempt.op_nonce == attempt_nonce)?;
+    attempt_payout.op_nonce = attempt.op_nonce;
+    attempt_payout.memo = attempt.memo;
+    attempt_payout.created_at_time_ns = attempt.created_at_time_ns;
+    attempt_payout.fee_arg_e8s = attempt.fee_arg_e8s;
+    attempt_payout.candidate_block_index = attempt.candidate_block_index;
+    attempt_payout.observed_fee_e8s = attempt.observed_fee_e8s;
+    Some(attempt_payout)
+}
+
+fn has_three_usd_reserve_candidate(
+    state: &crate::state::State,
+    operation_id: u128,
+) -> bool {
+    state.three_usd_reserve_payout_operation_keys
+        .get(&operation_id)
+        .and_then(|key| state.three_usd_reserve_collateral_payouts.get(key))
+        .is_some_and(|payout| {
+            payout.candidate_block_index.is_some()
+                || payout.rearmed_attempts.iter().any(|attempt| attempt.candidate_block_index.is_some())
+        })
+}
+
+fn claim_three_usd_reserve_candidate_recovery(
+    state: &mut crate::state::State,
+    owner: Principal,
+    backend: Principal,
+    operation_id: u128,
+) -> Option<ThreeUsdReserveCandidateRecoveryClaim> {
+    let key = state.three_usd_reserve_payout_operation_keys.get(&operation_id)?.clone();
+    let (_, transfer) = state.get_pending_payout(operation_id)?;
+    let payout = state.three_usd_reserve_collateral_payouts.get(&key)?;
+    let mut candidates = Vec::new();
+    if let Some(block_index) = payout.candidate_block_index {
+        candidates.push((payout.op_nonce, block_index));
+    }
+    candidates.extend(payout.rearmed_attempts.iter().filter_map(|attempt| {
+        attempt.candidate_block_index.map(|block_index| (attempt.op_nonce, block_index))
+    }));
+    if candidates.len() != 1 || candidates[0].0 != transfer.op_nonce
+        || transfer.operation_id != operation_id
+        || transfer.owner != owner
+        || owner != key.stability_pool
+        || transfer.vault_id != key.vault_id
+        || transfer.payout_kind != crate::state::PendingPayoutKind::Margin
+        || !transfer.held_for_manual_retry
+        || !transfer.reconciliation_required
+        || transfer.in_flight
+        || transfer.ledger != Some(payout.ledger)
+        || transfer.collateral_type != payout.collateral_type
+        || transfer.margin.to_u64() != payout.gross_e8s
+        || transfer.transfer_amount_raw != Some(payout.net_e8s)
+        || payout.operation_id != operation_id
+        || payout.op_nonce != operation_id
+        || payout.ledger == Principal::anonymous()
+        || payout.source.owner != backend
+        || payout.source.subaccount.is_some()
+        || payout.destination.owner != owner
+        || payout.destination.subaccount.is_some()
+        || payout.gross_e8s.checked_sub(payout.net_e8s) != Some(payout.expected_fee_e8s)
+        || payout.fee_arg_e8s != Some(payout.expected_fee_e8s)
+        || payout.rearmed_attempts.len() > crate::state::MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS
+    {
+        return None;
+    }
+    let (attempt_nonce, block_index) = candidates[0];
+    let attempt_payout = three_usd_reserve_payout_attempt(payout, attempt_nonce)?;
+    if attempt_payout.candidate_block_index != Some(block_index)
+        || attempt_payout.fee_arg_e8s != Some(attempt_payout.expected_fee_e8s)
+        || attempt_payout.memo.as_slice()
+            != crate::management::nonce_to_memo(attempt_nonce).0.as_slice()
+        || attempt_payout.created_at_time_ns
+            != crate::management::nonce_to_created_at_time(attempt_nonce)
+    {
+        return None;
+    }
+    state.mutate_pending_payout(operation_id, |row| row.in_flight = true);
+    Some(ThreeUsdReserveCandidateRecoveryClaim {
+        key,
+        operation_id,
+        attempt_nonce,
+        block_index,
+        payout: attempt_payout,
+    })
+}
+
+fn finish_three_usd_reserve_candidate_recovery(
+    state: &mut crate::state::State,
+    claim: &ThreeUsdReserveCandidateRecoveryClaim,
+    observed_fee_e8s: Option<u64>,
+    completed_at_ns: u64,
+) -> bool {
+    let same_claim = state.three_usd_reserve_payout_operation_keys.get(&claim.operation_id)
+        == Some(&claim.key)
+        && state.get_pending_payout(claim.operation_id).is_some_and(|(_, transfer)| {
+            transfer.operation_id == claim.operation_id
+                && transfer.owner == claim.payout.destination.owner
+                && transfer.vault_id == claim.key.vault_id
+                && transfer.payout_kind == crate::state::PendingPayoutKind::Margin
+                && transfer.ledger == Some(claim.payout.ledger)
+                && transfer.collateral_type == claim.payout.collateral_type
+                && transfer.margin.to_u64() == claim.payout.gross_e8s
+                && transfer.transfer_amount_raw == Some(claim.payout.net_e8s)
+                && transfer.op_nonce == claim.attempt_nonce
+                && transfer.held_for_manual_retry
+                && transfer.reconciliation_required
+                && transfer.in_flight
+        })
+        && state.three_usd_reserve_collateral_payouts.get(&claim.key)
+            .and_then(|payout| three_usd_reserve_payout_attempt(payout, claim.attempt_nonce))
+            .is_some_and(|payout| payout == claim.payout)
+        && claim.payout.candidate_block_index == Some(claim.block_index);
+    if !same_claim {
+        return false;
+    }
+    let hold = |state: &mut crate::state::State| {
+        state.mutate_pending_payout(claim.operation_id, |row| {
+            row.in_flight = false;
+            row.held_for_manual_retry = true;
+            row.reconciliation_required = true;
+        });
+    };
+    let Some(observed_fee_e8s) = observed_fee_e8s else {
+        hold(state);
+        return false;
+    };
+    if let Some(previous_fee) = claim.payout.observed_fee_e8s {
+        if previous_fee != observed_fee_e8s {
+            hold(state);
+            return false;
+        }
+    } else if !crate::event::record_three_usd_reserve_payout_fee_observed(
+        state,
+        claim.key.clone(),
+        claim.operation_id,
+        claim.attempt_nonce,
+        claim.block_index,
+        observed_fee_e8s,
+    ) {
+        hold(state);
+        return false;
+    }
+    if !three_usd_reserve_fee_matches(Some(claim.payout.expected_fee_e8s), observed_fee_e8s) {
+        hold(state);
+        return false;
+    }
+    crate::event::record_margin_transfer_at(
+        state,
+        claim.key.vault_id,
+        claim.payout.destination.owner,
+        claim.operation_id,
+        crate::state::PendingPayoutKind::Margin,
+        claim.block_index,
+        completed_at_ns,
+    );
+    true
+}
+
+/// Retry only proof for an already persisted 3USD reserve payout candidate.
+/// `None` means this operation has no persisted candidate and may continue
+/// through the generic recovery flow. `Some(false)` is held without resend.
+pub async fn recover_three_usd_reserve_payout_candidate(
+    operation_id: u128,
+    owner: Principal,
+) -> Option<bool> {
+    let reserve_linked = crate::state::read_state(|state| {
+        state.three_usd_reserve_payout_operation_keys.contains_key(&operation_id)
+    });
+    if reserve_linked && !crate::state::read_state(|state| has_three_usd_reserve_candidate(state, operation_id)) {
+        match crate::payout_history::advance_owner_reserve_candidate_discovery(operation_id, owner)
+            .await
+        {
+            Ok(crate::payout_history::ReserveCandidateDiscoveryProgress::CandidateRecorded) => {}
+            Ok(crate::payout_history::ReserveCandidateDiscoveryProgress::Scanning)
+            | Ok(crate::payout_history::ReserveCandidateDiscoveryProgress::Held)
+            | Err(_) => return Some(false),
+        }
+    }
+    let claim_result = crate::state::mutate_state(|state| {
+        if !has_three_usd_reserve_candidate(state, operation_id) {
+            return None;
+        }
+        Some(claim_three_usd_reserve_candidate_recovery(
+            state,
+            owner,
+            ic_cdk::id(),
+            operation_id,
+        ))
+    });
+    let claim = match claim_result {
+        None => return None,
+        Some(None) => return Some(false),
+        Some(Some(claim)) => claim,
+    };
+    let observed_fee_e8s = verify_three_usd_reserve_payout_fee(&claim.payout, claim.block_index)
+        .await
+        .ok();
+    let completed_at_ns = ic_cdk::api::time();
+    Some(crate::state::mutate_state(|state| {
+        finish_three_usd_reserve_candidate_recovery(state, &claim, observed_fee_e8s, completed_at_ns)
+    }))
+}
+
+#[cfg(test)]
+mod three_usd_reserve_candidate_recovery_tests {
+    use super::*;
+    use crate::state::{
+        PendingMarginTransfer, PendingPayoutKind, State, ThreeUsdReserveCollateralPayout,
+        ThreeUsdReserveIngressKey,
+    };
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn principal(seed: u8) -> Principal {
+        Principal::self_authenticating([seed; 32])
+    }
+
+    fn fixture() -> (State, Principal, Principal, ThreeUsdReserveIngressKey, u128) {
+        let backend = principal(51);
+        let pool = principal(52);
+        let ledger = principal(53);
+        let operation_id = 54;
+        let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 7, absorb_id: 8 };
+        let memo: [u8; 16] = crate::management::nonce_to_memo(operation_id).0.as_slice()
+            .try_into().unwrap();
+        let payout = ThreeUsdReserveCollateralPayout {
+            operation_id,
+            op_nonce: operation_id,
+            collateral_type: ledger,
+            ledger,
+            source: Account { owner: backend, subaccount: None },
+            destination: Account { owner: pool, subaccount: None },
+            gross_e8s: 110,
+            net_e8s: 100,
+            expected_fee_e8s: 10,
+            memo,
+            created_at_time_ns: crate::management::nonce_to_created_at_time(operation_id),
+            fee_arg_e8s: Some(10),
+            candidate_block_index: Some(12),
+            observed_fee_e8s: None,
+            rearmed_attempts: Vec::new(),
+        };
+        let transfer = PendingMarginTransfer {
+            vault_id: 7,
+            operation_id,
+            payout_kind: PendingPayoutKind::Margin,
+            owner: pool,
+            margin: crate::numeric::ICP::new(110),
+            collateral_type: ledger,
+            retry_count: 0,
+            op_nonce: operation_id,
+            ledger: Some(ledger),
+            transfer_amount_raw: Some(100),
+            held_for_manual_retry: true,
+            reconciliation_required: true,
+            in_flight: false,
+            too_old_confirmed: false,
+            history_start_index: None,
+            rearm_schema_version: 1,
+            history_scan: None,
+            history_candidate_seen: false,
+            no_effect_proof: None,
+            history_log_length: None,
+            history_cursor: 0,
+            min_net_collateral_raw: None,
+        };
+        let mut state = State::default();
+        state.three_usd_reserve_collateral_payouts.insert(key.clone(), payout);
+        state.three_usd_reserve_payout_operation_keys.insert(operation_id, key.clone());
+        state.insert_pending_payout(transfer);
+        (state, backend, pool, key, operation_id)
+    }
+
+    #[test]
+    fn exact_pinned_fee_completes_only_the_persisted_candidate() {
+        let (mut state, backend, pool, key, operation_id) = fixture();
+        let claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, backend, operation_id)
+            .expect("held single candidate should be claimable");
+        assert_eq!(claim.block_index, 12);
+        assert!(finish_three_usd_reserve_candidate_recovery(&mut state, &claim, Some(10), 100));
+        assert!(state.get_pending_payout(operation_id).is_none());
+        assert_eq!(
+            state.three_usd_reserve_collateral_payouts.get(&key).unwrap().observed_fee_e8s,
+            Some(10),
+        );
+    }
+
+    #[test]
+    fn fee_mismatch_is_journaled_and_stays_held() {
+        let (mut state, backend, pool, key, operation_id) = fixture();
+        let claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, backend, operation_id)
+            .expect("held single candidate should be claimable");
+        assert!(!finish_three_usd_reserve_candidate_recovery(&mut state, &claim, Some(12), 100));
+        let (_, transfer) = state.get_pending_payout(operation_id).unwrap();
+        assert!(transfer.held_for_manual_retry);
+        assert!(transfer.reconciliation_required);
+        assert!(!transfer.in_flight);
+        assert_eq!(
+            state.three_usd_reserve_collateral_payouts.get(&key).unwrap().observed_fee_e8s,
+            Some(12),
+        );
+    }
+
+    #[test]
+    fn stale_proof_callback_cannot_complete_a_changed_pending_tuple() {
+        let (mut state, backend, pool, _, operation_id) = fixture();
+        let claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, backend, operation_id)
+            .expect("held single candidate should be claimable");
+        state.mutate_pending_payout(operation_id, |row| row.transfer_amount_raw = Some(99));
+        let before = state.get_pending_payout(operation_id).unwrap();
+        assert!(!finish_three_usd_reserve_candidate_recovery(&mut state, &claim, Some(10), 100));
+        assert_eq!(state.get_pending_payout(operation_id), Some(before));
+    }
+
+    #[test]
+    fn failed_block_read_releases_only_the_in_memory_claim_and_keeps_payout_held() {
+        let (mut state, backend, pool, _, operation_id) = fixture();
+        let claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, backend, operation_id)
+            .expect("held single candidate should be claimable");
+        assert!(!finish_three_usd_reserve_candidate_recovery(&mut state, &claim, None, 100));
+        let (_, transfer) = state.get_pending_payout(operation_id).unwrap();
+        assert!(transfer.held_for_manual_retry);
+        assert!(transfer.reconciliation_required);
+        assert!(!transfer.in_flight);
+    }
+
+    #[test]
+    fn generic_timer_does_not_clear_an_owner_proof_claim_as_journal_mismatch() {
+        let (mut state, backend, pool, _, operation_id) = fixture();
+        let _claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, backend, operation_id)
+            .expect("held single candidate should be claimable");
+        let (_, transfer) = state.get_pending_payout(operation_id).unwrap();
+        assert!(!reserve_payout_journal_mismatch_requires_hold(&transfer, false));
+        assert!(transfer.in_flight);
+        assert!(transfer.held_for_manual_retry);
+    }
+}
+
+/// Read back a reserve payout candidate and verify its exact transfer tuple.
+/// The observed fee is evidence only; it is never added to the recipient
+/// amount. Archive callback-only blocks remain held; this backend candidate
+/// is not itself the authenticated inclusion proof required by the SP.
+async fn verify_three_usd_reserve_payout_fee(
+    payout: &crate::state::ThreeUsdReserveCollateralPayout,
+    block_index: u64,
+) -> Result<u64, String> {
+    if crate::native_icp_proof::is_native_icp_ledger(payout.ledger) {
+        let block = crate::native_icp_proof::query_block(payout.ledger, block_index).await?;
+        return crate::native_icp_proof::verify_transfer_block(
+            &block,
+            payout.source.owner,
+            payout.destination.owner,
+            payout.net_e8s,
+            &payout.memo,
+            payout.created_at_time_ns,
+        );
+    }
+    // This backend candidate is intentionally direct-ledger only. Archive
+    // callbacks do not authenticate membership for Stability Pool settlement.
+    let request = vec![icrc_ledger_types::icrc3::blocks::GetBlocksRequest {
+        start: candid::Nat::from(block_index),
+        length: candid::Nat::from(1u64),
+    }];
+    let response: Result<(
+        icrc_ledger_types::icrc3::blocks::GetBlocksResult,
+    ), _> = ic_cdk::call(payout.ledger, "icrc3_get_blocks", (request,)).await;
+    let (response,) = response.map_err(|(code, message)| {
+        format!("direct icrc3_get_blocks failed: {code:?} {message}")
+    })?;
+    if !response.archived_blocks.is_empty()
+        || response.blocks.len() != 1
+        || response.blocks[0].id.0.to_u64() != Some(block_index)
+    {
+        return Err("exact payout block is not served directly by the ledger".into());
+    }
+    let block = crate::icrc3_proof::decode_block(&response.blocks[0].block)?;
+    crate::icrc3_proof::validate_icrc3_transfer_block(
+        &block,
+        Some(payout.source.clone()),
+        payout.destination.clone(),
+        payout.net_e8s,
+        Some(&payout.memo),
+        Some(payout.created_at_time_ns),
+    )?;
+    block.fee.ok_or_else(|| "direct ICRC-3 transfer block omits fee".to_string())
 }
 
 pub async fn process_pending_transfer() {

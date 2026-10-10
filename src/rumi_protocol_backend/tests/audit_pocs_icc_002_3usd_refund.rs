@@ -66,6 +66,7 @@ use ic_cdk::api::management_canister::http_request::{
 };
 use pocket_ic::{PocketIc, WasmResult};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 #[path = "../../rumi_3pool/tests/common/mod.rs"]
@@ -243,6 +244,67 @@ struct StabilityPoolLiquidationResult {
     collateral_price_e8s: u64,
 }
 
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct StabilityPoolInitArgs {
+    protocol_canister_id: Principal,
+    authorized_admins: Vec<Principal>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct StabilityPoolStablecoinConfig {
+    ledger_id: Principal,
+    symbol: String,
+    decimals: u8,
+    priority: u8,
+    is_active: bool,
+    transfer_fee: Option<u64>,
+    is_lp_token: Option<bool>,
+    underlying_pool: Option<Principal>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum StabilityPoolCollateralStatus {
+    Active,
+    Paused,
+    Frozen,
+    Sunset,
+    Deprecated,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct StabilityPoolCollateralInfo {
+    ledger_id: Principal,
+    symbol: String,
+    decimals: u8,
+    status: StabilityPoolCollateralStatus,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct LiquidatableVaultInfo {
+    vault_id: u64,
+    collateral_type: Principal,
+    debt_amount: u64,
+    collateral_amount: u64,
+    recommended_liquidation_amount: u64,
+    collateral_price_e8s: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct PoolLiquidationResult {
+    vault_id: u64,
+    stables_consumed: BTreeMap<Principal, u64>,
+    collateral_gained: u64,
+    collateral_type: Principal,
+    success: bool,
+    error_message: Option<String>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct UserPositionView {
+    stablecoin_balances: BTreeMap<Principal, u64>,
+    collateral_gains: BTreeMap<Principal, u64>,
+}
+
 // ─── WASM fixtures ───
 
 fn icrc1_ledger_wasm() -> Vec<u8> {
@@ -250,6 +312,10 @@ fn icrc1_ledger_wasm() -> Vec<u8> {
 }
 
 fn protocol_wasm() -> Vec<u8> {
+    if let Some(path) = std::env::var_os("RUMI_N13_BACKEND_WASM") {
+        return std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("read RUMI_N13_BACKEND_WASM {path:?}: {error}"));
+    }
     include_bytes!("../../../target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm")
         .to_vec()
 }
@@ -280,6 +346,25 @@ fn account(owner: Principal) -> Account {
     Account {
         owner,
         subaccount: None,
+    }
+}
+
+fn get_sp_position(pic: &PocketIc, sp: Principal, user: Principal) -> UserPositionView {
+    match pic
+        .query_call(
+            sp,
+            Principal::anonymous(),
+            "get_user_position",
+            encode_args((Some(user),)).unwrap(),
+        )
+        .expect("query Stability Pool position")
+    {
+        WasmResult::Reply(bytes) => decode_one::<Option<UserPositionView>>(&bytes)
+            .expect("decode Stability Pool position")
+            .expect("depositor position exists"),
+        WasmResult::Reject(message) => {
+            panic!("Stability Pool position query rejected: {message}")
+        }
     }
 }
 
@@ -561,6 +646,194 @@ fn call_sp_liquidate_with_reserves(
     }
 }
 
+/// Exercise the receipt-gated reserve absorb with a real Stability Pool and
+/// real ledger canisters. The standard ICP ledger serves the payout block
+/// immediately; a staged held-then-released block requires a controllable
+/// ICRC-3 fixture and remains covered by the SP direct-block unit tests.
+#[test]
+fn n13_real_sp_promotes_exact_3usd_payout_once() {
+    use rumi_protocol_backend::{
+        state::ThreeUsdReserveCollateralPayout,
+        ThreeUsdReserveIngressV2Status as V2Status,
+        ThreeUsdReserveIngressV2StatusView,
+    };
+
+    let f = setup_fixture_with_real_sp(ThreePoolKind::Standard);
+    let amount = 1_000_000_000u64;
+
+    for (method, args) in [
+        (
+            "register_stablecoin",
+            encode_one(StabilityPoolStablecoinConfig {
+                ledger_id: f.three_pool_ledger,
+                symbol: "3USD".into(),
+                decimals: 8,
+                priority: 1,
+                is_active: true,
+                transfer_fee: Some(0),
+                is_lp_token: Some(true),
+                underlying_pool: Some(f.three_pool_ledger),
+            })
+            .unwrap(),
+        ),
+        (
+            "register_collateral",
+            encode_one(StabilityPoolCollateralInfo {
+                ledger_id: f.icp_ledger,
+                symbol: "ICP".into(),
+                decimals: 8,
+                status: StabilityPoolCollateralStatus::Active,
+            })
+            .unwrap(),
+        ),
+    ] {
+        match f.pic.update_call(f.sp_principal, f.developer, method, args).unwrap() {
+            WasmResult::Reply(_) => {}
+            WasmResult::Reject(message) => panic!("SP {method} rejected: {message}"),
+        }
+    }
+
+    icrc2_approve_call(&f.pic, f.three_pool_ledger, f.test_user, f.sp_principal, amount as u128);
+    match f.pic.update_call(
+        f.sp_principal,
+        f.test_user,
+        "deposit",
+        encode_args((f.three_pool_ledger, amount)).unwrap(),
+    ).unwrap() {
+        WasmResult::Reply(_) => {}
+        WasmResult::Reject(message) => panic!("SP 3USD deposit rejected: {message}"),
+    }
+    f.pic.advance_time(Duration::from_secs(1));
+    for _ in 0..10 { f.pic.tick(); }
+    let before = get_sp_position(&f.pic, f.sp_principal, f.test_user);
+    assert_eq!(before.stablecoin_balances.get(&f.three_pool_ledger), Some(&amount));
+    assert_eq!(before.collateral_gains.get(&f.icp_ledger).copied().unwrap_or(0), 0);
+
+    xrc_set_rate(&f.pic, f.xrc_id, f.developer, "ICP", "USD", 20_000_000);
+    for _ in 0..3 {
+        f.pic.advance_time(Duration::from_secs(481));
+        for _ in 0..10 { f.pic.tick(); }
+    }
+    match f.pic.update_call(
+        f.protocol_id,
+        f.sp_principal,
+        "acknowledge_three_usd_reserve_v2_client",
+        encode_args(()).unwrap(),
+    ).unwrap() {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), ProtocolError>>(&bytes)
+            .unwrap().expect("SP V2 acknowledgement"),
+        WasmResult::Reject(message) => panic!("V2 acknowledgement rejected: {message}"),
+    }
+    match f.pic.update_call(
+        f.protocol_id,
+        f.developer,
+        "set_three_usd_reserve_ingress_enabled",
+        encode_one(true).unwrap(),
+    ).unwrap() {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), ProtocolError>>(&bytes)
+            .unwrap().expect("enable V2 ingress"),
+        WasmResult::Reject(message) => panic!("V2 enable rejected: {message}"),
+    }
+
+    let notification = || encode_args((vec![LiquidatableVaultInfo {
+        vault_id: f.vault_id,
+        collateral_type: f.icp_ledger,
+        debt_amount: amount,
+        collateral_amount: 5_000_000_000,
+        recommended_liquidation_amount: amount,
+        collateral_price_e8s: 20_000_000,
+    }],)).unwrap();
+    let first: Vec<PoolLiquidationResult> = match f.pic.update_call(
+        f.sp_principal,
+        f.protocol_id,
+        "notify_liquidatable_vaults",
+        notification(),
+    ).unwrap() {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode SP liquidation"),
+        WasmResult::Reject(message) => panic!("SP liquidation rejected: {message}"),
+    };
+    assert_eq!(first.len(), 1);
+    assert!(!first[0].success, "first call must hold accounting for timer reconciliation");
+    assert_eq!(first[0].collateral_gained, 0);
+    assert_eq!(get_sp_position(&f.pic, f.sp_principal, f.test_user)
+        .collateral_gains.get(&f.icp_ledger).copied().unwrap_or(0), 0,
+        "backend commitment alone must not create a claimable collateral gain");
+    assert_eq!(get_sp_position(&f.pic, f.sp_principal, f.test_user)
+        .stablecoin_balances.get(&f.three_pool_ledger), Some(&amount),
+        "3USD book debit remains held until payout settlement");
+
+    // The first update persists the SP intent and returns promptly. Its
+    // 30-second recovery timer resumes the exact backend ingress tuple and
+    // then verifies the backend's collateral payout candidate against the
+    // real ledger's direct ICRC-3 block before promoting gains.
+    f.pic.advance_time(Duration::from_secs(31));
+    for _ in 0..10 { f.pic.tick(); }
+
+    // The fresh SP's first durable absorb ID is 1. Bind the promoted gain to
+    // the backend candidate and the real ledger's net transfer.
+    let status: ThreeUsdReserveIngressV2StatusView = match f.pic.query_call(
+        f.protocol_id,
+        f.sp_principal,
+        "get_stability_pool_liquidate_with_reserves_v2_status",
+        encode_args((f.vault_id, 1u64)).unwrap(),
+    ).unwrap() {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 status"),
+        WasmResult::Reject(message) => panic!("V2 status rejected: {message}"),
+    };
+    assert!(
+        matches!(
+            status.status,
+            V2Status::Absorbed { .. } | V2Status::AbsorbedRefundPending { .. }
+        ),
+        "backend absorb must be committed, got {:?}",
+        status.status
+    );
+    let payout: Option<ThreeUsdReserveCollateralPayout> = match f.pic.query_call(
+        f.protocol_id,
+        f.sp_principal,
+        "get_stability_pool_liquidate_with_reserves_v2_payout_candidate",
+        encode_args((f.vault_id, 1u64)).unwrap(),
+    ).unwrap() {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode exact payout candidate"),
+        WasmResult::Reject(message) => panic!("payout candidate rejected: {message}"),
+    };
+    let payout = payout.expect("committed backend payout candidate");
+    assert_eq!(payout.ledger, f.icp_ledger);
+    assert_eq!(payout.source.owner, f.protocol_id);
+    assert_eq!(payout.destination.owner, f.sp_principal);
+    assert!(payout.candidate_block_index.is_some());
+    assert_eq!(payout.net_e8s + payout.expected_fee_e8s, payout.gross_e8s);
+
+    let after = get_sp_position(&f.pic, f.sp_principal, f.test_user);
+    assert_eq!(after.stablecoin_balances.get(&f.three_pool_ledger).copied().unwrap_or(0), 0);
+    assert_eq!(after.collateral_gains.get(&f.icp_ledger), Some(&payout.net_e8s));
+    assert_eq!(icrc1_balance_of(&f.pic, f.icp_ledger, account(f.sp_principal)), payout.net_e8s as u128);
+
+    let balance_before_replay = icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal));
+    match f.pic.update_call(
+        f.protocol_id,
+        f.sp_principal,
+        "stability_pool_liquidate_with_reserves_v2",
+        encode_args((f.vault_id, 1u64, amount, amount, f.three_pool_ledger)).unwrap(),
+    ).unwrap() {
+        WasmResult::Reply(bytes) => {
+            let replay: Result<StabilityPoolLiquidationResult, ProtocolError> = decode_one(&bytes).unwrap();
+            assert!(replay.expect("exact backend replay").success);
+        }
+        WasmResult::Reject(message) => panic!("exact backend replay rejected: {message}"),
+    }
+    assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)), balance_before_replay,
+        "exact replay must not pull 3USD again");
+    let _replay_signal = f.pic.update_call(
+        f.sp_principal,
+        f.protocol_id,
+        "notify_liquidatable_vaults",
+        notification(),
+    ).expect("replay liquidation notification");
+    assert_eq!(get_sp_position(&f.pic, f.sp_principal, f.test_user).collateral_gains, after.collateral_gains,
+        "replayed signal cannot credit the receipt-backed gain twice");
+}
+
 // ─── Fixture ───
 
 struct Fixture {
@@ -579,6 +852,7 @@ struct Fixture {
     vault_id: u64,
     /// 3USD pre-minted to the SP. Used to verify refund accounting.
     sp_three_pool_balance: u64,
+    test_user: Principal,
 }
 
 /// Mode for fixture setup: real 3pool (with ICRC-3) or flaky
@@ -592,27 +866,64 @@ fn setup_fixture(three_pool_kind: ThreePoolKind) -> Fixture {
     setup_fixture_with_backend_wasm(three_pool_kind, protocol_wasm())
 }
 
+fn setup_fixture_with_real_sp(three_pool_kind: ThreePoolKind) -> Fixture {
+    // The caller must name the freshly built candidate explicitly. A shared
+    // Cargo target can contain a successful but stale Wasm from another tree.
+    let backend_path = std::env::var_os("RUMI_N13_BACKEND_WASM")
+        .expect("set RUMI_N13_BACKEND_WASM to the source-matched backend Wasm");
+    let backend_wasm = std::fs::read(&backend_path)
+        .unwrap_or_else(|error| panic!("read RUMI_N13_BACKEND_WASM {backend_path:?}: {error}"));
+    let path = std::env::var_os("RUMI_N13_SP_WASM")
+        .expect("set RUMI_N13_SP_WASM to the source-matched Stability Pool Wasm");
+    let sp_wasm = std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("read RUMI_N13_SP_WASM {path:?}: {error}"));
+    setup_fixture_with_backend_wasm_and_sp(
+        three_pool_kind,
+        backend_wasm,
+        Some(sp_wasm),
+    )
+}
+
 fn setup_fixture_with_backend_wasm(
     three_pool_kind: ThreePoolKind,
     backend_wasm: Vec<u8>,
+) -> Fixture {
+    setup_fixture_with_backend_wasm_and_sp(three_pool_kind, backend_wasm, None)
+}
+
+fn setup_fixture_with_backend_wasm_and_sp(
+    three_pool_kind: ThreePoolKind,
+    backend_wasm: Vec<u8>,
+    stability_pool_wasm: Option<Vec<u8>>,
 ) -> Fixture {
     let pool_harness = three_pool_test_harness::deploy_pool_with_liquidity_and_swaps(0);
     let pool_owner = pool_harness.user;
     let three_pool_ledger = pool_harness.three_pool;
     let pic = pool_harness.pic;
+    // The harness advances the 3pool canister through its historical snapshot
+    // schedule; every fixture needs enough cycles for subsequent LP calls.
+    pic.add_cycles(three_pool_ledger, 2_000_000_000_000);
 
     let test_user = Principal::self_authenticating(b"icc_002_pic_user");
     let developer = Principal::self_authenticating(b"icc_002_pic_developer");
-    let sp_principal = Principal::self_authenticating(b"icc_002_pic_sp");
+    let sp_principal = if stability_pool_wasm.is_some() {
+        let id = pic.create_canister();
+        pic.add_cycles(id, 2_000_000_000_000);
+        id
+    } else {
+        Principal::self_authenticating(b"icc_002_pic_sp")
+    };
 
     let protocol_id = pic.create_canister();
     pic.add_cycles(protocol_id, 2_000_000_000_000);
     pic.set_controllers(protocol_id, None, vec![Principal::anonymous(), developer])
         .expect("set_controllers failed");
 
+    // Keep the collateral ledger's minting account separate from the backend:
+    // transfers into the minting account are burns, not vault custody.
     let icp_ledger = deploy_icrc1_ledger(
         &pic,
-        account(protocol_id),
+        account(developer),
         10_000,
         vec![(account(test_user), Nat::from(1_000_000_000_000u64))],
         "Internet Computer Protocol",
@@ -636,7 +947,9 @@ fn setup_fixture_with_backend_wasm(
     let transfer = icrc_ledger_types::icrc1::transfer::TransferArg {
         from_subaccount: None,
         to: icrc_ledger_types::icrc1::account::Account {
-            owner: sp_principal,
+            // The real-SP case deposits through its public ICRC-2 flow below;
+            // backend-only cases retain their directly seeded ledger balance.
+            owner: if stability_pool_wasm.is_some() { test_user } else { sp_principal },
             subaccount: None,
         },
         amount: Nat::from(sp_three_pool_balance),
@@ -689,6 +1002,19 @@ fn setup_fixture_with_backend_wasm(
         None,
     );
 
+    if let Some(wasm) = stability_pool_wasm {
+        pic.install_canister(
+            sp_principal,
+            wasm,
+            encode_one(StabilityPoolInitArgs {
+                protocol_canister_id: protocol_id,
+                authorized_admins: vec![developer],
+            })
+            .expect("encode Stability Pool init args"),
+            None,
+        );
+    }
+
     pic.advance_time(Duration::from_secs(1));
     for _ in 0..10 {
         pic.tick();
@@ -730,7 +1056,7 @@ fn setup_fixture_with_backend_wasm(
     // Vault: 50 ICP / 10 icUSD borrowed at $10 ICP → 5000% CR. Drop later
     // when needed, but the kill-switch and happy-path tests don't need a
     // price drop because the SP-writedown path doesn't gate on CR.
-    icrc2_approve_call(&pic, icp_ledger, test_user, protocol_id, 5_000_000_000u128);
+    icrc2_approve_call(&pic, icp_ledger, test_user, protocol_id, 5_000_010_000u128);
     let open_result = pic
         .update_call(
             protocol_id,
@@ -781,6 +1107,7 @@ fn setup_fixture_with_backend_wasm(
         developer,
         vault_id,
         sp_three_pool_balance,
+        test_user,
     }
 }
 
@@ -795,6 +1122,16 @@ fn setup_fixture_with_backend_wasm(
 #[test]
 fn icc_002_pic_happy_path_no_refund_no_orphan() {
     let f = setup_fixture(ThreePoolKind::Standard);
+
+    // The backend now checks vault health after pulling reserves. Publish
+    // three distinct low-price observations so this vault is liquidatable.
+    xrc_set_rate(&f.pic, f.xrc_id, f.developer, "ICP", "USD", 20_000_000);
+    for _ in 0..3 {
+        f.pic.advance_time(Duration::from_secs(481));
+        for _ in 0..10 {
+            f.pic.tick();
+        }
+    }
 
     let icusd_debt: u64 = 500_000_000; // 5 icUSD
     let three_usd_amount: u64 = 500_000_000; // 1:1 with virtual price ≈ 1

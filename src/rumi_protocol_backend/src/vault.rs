@@ -3220,6 +3220,22 @@ fn queue_collateral_payout(
     op_nonce: u128,
     now_ns: u64,
 ) -> Option<u64> {
+    queue_collateral_payout_linked(
+        s, vault_id, custody_owner, recipient, margin, collateral_type, op_nonce, now_ns, None,
+    )
+}
+
+fn queue_collateral_payout_linked(
+    s: &mut crate::state::State,
+    vault_id: u64,
+    custody_owner: Principal,
+    recipient: Principal,
+    margin: ICP,
+    collateral_type: Principal,
+    op_nonce: u128,
+    now_ns: u64,
+    reserve_ingress_key: Option<crate::state::ThreeUsdReserveIngressKey>,
+) -> Option<u64> {
     let is_xrp = s
         .get_collateral_config(&collateral_type)
         .map(|c| c.is_native_xrp())
@@ -3240,9 +3256,37 @@ fn queue_collateral_payout(
             .unwrap_or((s.icp_ledger_principal, s.icp_ledger_fee.to_u64()));
         let transfer_amount_raw = margin.to_u64().checked_sub(fee);
         let mut operation_id = op_nonce;
-        while operation_id == 0 || s.pending_payout_index.contains_key(&operation_id) {
+        while operation_id == 0
+            || s.pending_payout_index.contains_key(&operation_id)
+            || s.three_usd_reserve_payout_operation_keys.contains_key(&operation_id)
+        {
             operation_id = s.next_op_nonce();
         }
+        let reserve_payout_journaled = match (reserve_ingress_key, transfer_amount_raw) {
+            (Some(key), Some(net_e8s)) => {
+                let payout = crate::state::ThreeUsdReserveCollateralPayout {
+                operation_id,
+                op_nonce: operation_id,
+                collateral_type,
+                ledger,
+                source: icrc_ledger_types::icrc1::account::Account { owner: ic_cdk::id(), subaccount: None },
+                destination: icrc_ledger_types::icrc1::account::Account { owner: recipient, subaccount: None },
+                gross_e8s: margin.to_u64(),
+                net_e8s,
+                expected_fee_e8s: fee,
+                memo: crate::management::nonce_to_memo(operation_id).0.as_slice()
+                    .try_into().expect("nonce memo is exactly 16 bytes"),
+                created_at_time_ns: crate::management::nonce_to_created_at_time(operation_id),
+                fee_arg_e8s: Some(fee),
+                candidate_block_index: None,
+                observed_fee_e8s: None,
+                rearmed_attempts: Vec::new(),
+                };
+                crate::event::record_three_usd_reserve_payout_prepared(s, key, payout)
+            }
+            (None, _) => true,
+            _ => false,
+        };
         crate::event::record_pending_payout(
             s,
             PendingMarginTransfer {
@@ -3256,8 +3300,10 @@ fn queue_collateral_payout(
                 op_nonce: operation_id,
                 ledger: Some(ledger),
                 transfer_amount_raw,
-                held_for_manual_retry: transfer_amount_raw.map_or(true, |amount| amount == 0),
-                reconciliation_required: transfer_amount_raw.map_or(true, |amount| amount == 0),
+                held_for_manual_retry: !reserve_payout_journaled
+                    || transfer_amount_raw.map_or(true, |amount| amount == 0),
+                reconciliation_required: !reserve_payout_journaled
+                    || transfer_amount_raw.map_or(true, |amount| amount == 0),
                 in_flight: false,
                 too_old_confirmed: false,
                 history_start_index: None,
@@ -10181,7 +10227,7 @@ async fn liquidate_vault_debt_already_burned_inner(
         }
 
         let nonce = s.next_op_nonce();
-        queue_collateral_payout(
+        queue_collateral_payout_linked(
             s,
             vault_id,
             vault.owner,
@@ -10190,6 +10236,7 @@ async fn liquidate_vault_debt_already_burned_inner(
             vault.collateral_type,
             nonce,
             ic_cdk::api::time(),
+            ingress_key.clone(),
         );
 
         // Shared drain rule (see state::cleanup_if_drained): remove the vault

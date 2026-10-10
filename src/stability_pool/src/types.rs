@@ -470,6 +470,9 @@ pub struct ThreeUsdReserveAbsorbIntent {
     /// reconstructed from a later liquidatable-vault scan.
     #[serde(default)]
     pub collateral_type: Option<Principal>,
+    /// Immutable collateral ledger snapshot; legacy rows without it remain held.
+    #[serde(default)]
+    pub collateral_ledger: Option<Principal>,
     #[serde(default)]
     pub collateral_price_e8s: Option<u64>,
 }
