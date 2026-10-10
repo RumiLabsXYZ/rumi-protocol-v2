@@ -318,6 +318,388 @@ pub fn commit_legacy_three_usd_refund_candidate(
     true
 }
 
+/// Verify a developer-selected direct ICRC-3 block for a V2 default-account
+/// refund child. The candidate is only accepted for a durably submitted,
+/// zero-fee child with the exact nonce-derived transfer tuple.
+pub fn verify_v2_default_account_three_usd_refund_candidate(
+    refund: &crate::state::PendingThreeUsdRefund,
+    backend: Principal,
+    block_index: u64,
+    block: Result<crate::icrc3_proof::DecodedBlock, String>,
+) -> Result<crate::state::ThreeUsdReserveRefundReceipt, String> {
+    let block = block?;
+    if refund.source != crate::state::ThreeUsdRefundSource::DefaultAccount
+        || refund.parent_absorb_id.is_none()
+        || refund.resolution.is_some()
+        || !refund.dispatch_submitted
+        || refund.dispatch_amount_e8s != Some(refund.amount_e8s)
+        || refund.dispatch_fee_e8s != Some(0)
+        || refund
+            .dispatch_block_index
+            .is_some_and(|saved| saved != block_index)
+        || refund.amount_e8s == 0
+        || block.fee != Some(0)
+    {
+        return Err("V2 refund is not a submitted zero-fee child for this candidate".into());
+    }
+    let memo: [u8; 16] = crate::management::nonce_to_memo(refund.op_nonce)
+        .0
+        .as_slice()
+        .try_into()
+        .map_err(|_| "refund memo is not 16 bytes".to_string())?;
+    let tuple = crate::state::ThreeUsdReserveRefundTuple {
+        source_owner: backend,
+        source_subaccount: None,
+        destination: icrc_ledger_types::icrc1::account::Account {
+            owner: refund.stability_pool,
+            subaccount: None,
+        },
+        amount_e8s: refund.amount_e8s,
+        charged_fee_e8s: 0,
+        fee_e8s: Some(0),
+        memo,
+        created_at_time_ns: crate::management::nonce_to_created_at_time(refund.op_nonce),
+    };
+    crate::icrc3_proof::validate_three_usd_reserve_refund_block(&block, &tuple)?;
+    Ok(crate::state::ThreeUsdReserveRefundReceipt { block_index, tuple })
+}
+
+/// Atomically settle a verified V2 child receipt and clear its parent fee
+/// reserve. Both the pending row and complete parent journal are compare-and-
+/// swapped against their pre-await snapshots so a changed child, parent, or
+/// developer authorization leaves the liability untouched.
+pub fn commit_v2_default_account_three_usd_refund_candidate(
+    state: &mut crate::state::State,
+    nonce: u128,
+    expected_refund: crate::state::PendingThreeUsdRefund,
+    key: &crate::state::ThreeUsdReserveIngressKey,
+    expected_journal: &crate::state::ThreeUsdReserveIngressJournal,
+    receipt: &crate::state::ThreeUsdReserveRefundReceipt,
+    developer: Principal,
+    backend: Principal,
+) -> bool {
+    use crate::state::{ThreeUsdRefundSource, ThreeUsdReserveIngressPhase as Phase};
+
+    let parent_absorb_id = match expected_refund.parent_absorb_id {
+        Some(id) => id,
+        None => return false,
+    };
+    let phase_binds_absorb = match &expected_journal.phase {
+        Phase::Absorbed {
+            tuple, block_index, ..
+        }
+        | Phase::FailedAfterTransfer {
+            tuple, block_index, ..
+        } => {
+            tuple.parent_absorb_id == parent_absorb_id
+                && tuple.source.owner == expected_refund.stability_pool
+                && tuple.source.subaccount.is_none()
+                && tuple.amount_e8s == expected_journal.request.three_usd_amount_e8s
+                && receipt.block_index > *block_index
+        }
+        _ => false,
+    };
+    let child_matches_parent = expected_journal.request.ledger == expected_refund.ledger
+        && expected_journal.ingress_proof_verified
+        && expected_journal.protocol_refund_fee_reserve_e8s == expected_refund.amount_e8s
+        && expected_journal.refund.as_ref().is_some_and(|child| {
+            child.op_nonce == nonce
+                && child.op_nonce == expected_refund.op_nonce
+                && child.required_net_credit_e8s == expected_refund.amount_e8s
+                && child.settled_receipt.is_none()
+        })
+        && phase_binds_absorb;
+    let expected_memo: [u8; 16] = match crate::management::nonce_to_memo(nonce)
+        .0
+        .as_slice()
+        .try_into()
+    {
+        Ok(memo) => memo,
+        Err(_) => return false,
+    };
+    if expected_refund.source != ThreeUsdRefundSource::DefaultAccount
+        || expected_refund.op_nonce != nonce
+        || expected_refund.vault_id != key.vault_id
+        || expected_refund.stability_pool != key.stability_pool
+        || parent_absorb_id != key.absorb_id
+        || expected_refund.resolution.is_some()
+        || !expected_refund.dispatch_submitted
+        || expected_refund.dispatch_amount_e8s != Some(expected_refund.amount_e8s)
+        || expected_refund.dispatch_fee_e8s != Some(0)
+        || expected_refund.amount_e8s == 0
+        || expected_refund
+            .dispatch_block_index
+            .is_some_and(|saved| saved != receipt.block_index)
+        || receipt.tuple.source_owner != backend
+        || receipt.tuple.source_subaccount.is_some()
+        || receipt.tuple.destination.owner != expected_refund.stability_pool
+        || receipt.tuple.destination.subaccount.is_some()
+        || receipt.tuple.amount_e8s != expected_refund.amount_e8s
+        || receipt.tuple.fee_e8s != Some(0)
+        || receipt.tuple.charged_fee_e8s != 0
+        || receipt.tuple.memo != expected_memo
+        || receipt.tuple.created_at_time_ns != crate::management::nonce_to_created_at_time(nonce)
+        || !child_matches_parent
+        || state.developer_principal != developer
+        || developer == Principal::anonymous()
+        || state.pending_3usd_refunds.get(&nonce) != Some(&expected_refund)
+        || state.three_usd_reserve_ingress_journals.get(key) != Some(expected_journal)
+    {
+        return false;
+    }
+    let Some(journal) = state.three_usd_reserve_ingress_journals.get_mut(key) else {
+        return false;
+    };
+    let Some(child) = journal.refund.as_mut() else {
+        return false;
+    };
+    child.settled_receipt = Some(receipt.clone());
+    journal.protocol_refund_fee_reserve_e8s = 0;
+    state.pending_3usd_refunds.remove(&nonce);
+    true
+}
+
+#[cfg(test)]
+mod v2_default_account_refund_candidate_tests {
+    use super::{
+        commit_v2_default_account_three_usd_refund_candidate,
+        verify_v2_default_account_three_usd_refund_candidate,
+    };
+    use crate::state::{
+        PendingThreeUsdRefund, State, ThreeUsdRefundSource, ThreeUsdReserveIngressJournal,
+        ThreeUsdReserveIngressKey, ThreeUsdReserveIngressPhase, ThreeUsdReserveIngressRefund,
+        ThreeUsdReserveIngressRequest, ThreeUsdReserveIngressTuple,
+    };
+    use candid::Principal;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn fixture() -> (
+        State,
+        PendingThreeUsdRefund,
+        ThreeUsdReserveIngressKey,
+        ThreeUsdReserveIngressJournal,
+        Principal,
+        Principal,
+        u64,
+    ) {
+        let backend = Principal::from_slice(&[1]);
+        let pool = Principal::from_slice(&[2]);
+        let ledger = Principal::from_slice(&[3]);
+        let developer = Principal::from_slice(&[9]);
+        let nonce = (7u128 << 64) | 4;
+        let amount = 123_000u64;
+        let absorb_id = 9;
+        let refund = PendingThreeUsdRefund {
+            stability_pool: pool,
+            ledger,
+            amount_e8s: amount,
+            vault_id: 5,
+            retry_count: 2,
+            op_nonce: nonce,
+            source: ThreeUsdRefundSource::DefaultAccount,
+            parent_absorb_id: Some(absorb_id),
+            dispatch_amount_e8s: Some(amount),
+            dispatch_fee_e8s: Some(0),
+            dispatch_submitted: true,
+            legacy_dispatch_retryable: false,
+            dispatch_block_index: Some(77),
+            resolution: None,
+        };
+        let key = ThreeUsdReserveIngressKey {
+            stability_pool: pool,
+            vault_id: 5,
+            absorb_id,
+        };
+        let ingress_tuple = ThreeUsdReserveIngressTuple {
+            spender_owner: backend,
+            spender_subaccount: None,
+            source: Account {
+                owner: pool,
+                subaccount: None,
+            },
+            destination: Account {
+                owner: backend,
+                subaccount: None,
+            },
+            amount_e8s: 500_000,
+            fee_e8s: Some(0),
+            ledger_fee_e8s: 0,
+            memo: [5; 16],
+            created_at_time_ns: 10,
+            op_nonce: 88,
+            parent_absorb_id: absorb_id,
+        };
+        let journal = ThreeUsdReserveIngressJournal {
+            request: ThreeUsdReserveIngressRequest {
+                icusd_debt_covered_e8s: 200_000,
+                three_usd_amount_e8s: 500_000,
+                ledger,
+            },
+            phase: ThreeUsdReserveIngressPhase::FailedAfterTransfer {
+                tuple: ingress_tuple,
+                block_index: 70,
+                error: "fixture".into(),
+            },
+            ingress_proof_verified: true,
+            refund: Some(ThreeUsdReserveIngressRefund {
+                op_nonce: nonce,
+                required_net_credit_e8s: amount,
+                settled_receipt: None,
+            }),
+            protocol_refund_fee_reserve_e8s: amount,
+            non_inclusion_scan: None,
+        };
+        let mut state = State::default();
+        state.developer_principal = developer;
+        state.pending_3usd_refunds.insert(nonce, refund);
+        state
+            .three_usd_reserve_ingress_journals
+            .insert(key.clone(), journal.clone());
+        (state, refund, key, journal, backend, developer, 77)
+    }
+
+    fn valid_block(
+        refund: &PendingThreeUsdRefund,
+        backend: Principal,
+    ) -> crate::icrc3_proof::DecodedBlock {
+        let memo: [u8; 16] = crate::management::nonce_to_memo(refund.op_nonce)
+            .0
+            .as_slice()
+            .try_into()
+            .unwrap();
+        crate::icrc3_proof::DecodedBlock {
+            btype: Some("1xfer".into()),
+            op: "xfer".into(),
+            from: Some(Account {
+                owner: backend,
+                subaccount: None,
+            }),
+            to: Some(Account {
+                owner: refund.stability_pool,
+                subaccount: None,
+            }),
+            spender: None,
+            amount: u128::from(refund.amount_e8s),
+            fee: Some(0),
+            created_at_time: Some(crate::management::nonce_to_created_at_time(refund.op_nonce)),
+            memo: Some(memo.to_vec()),
+        }
+    }
+
+    #[test]
+    fn exact_zero_fee_candidate_commits_child_and_releases_fee_reserve_atomically() {
+        let (mut state, refund, key, journal, backend, developer, block_index) = fixture();
+        let receipt = verify_v2_default_account_three_usd_refund_candidate(
+            &refund,
+            backend,
+            block_index,
+            Ok(valid_block(&refund, backend)),
+        )
+        .unwrap();
+        assert!(commit_v2_default_account_three_usd_refund_candidate(
+            &mut state,
+            refund.op_nonce,
+            refund,
+            &key,
+            &journal,
+            &receipt,
+            developer,
+            backend,
+        ));
+        assert!(!state.pending_3usd_refunds.contains_key(&refund.op_nonce));
+        let parent = &state.three_usd_reserve_ingress_journals[&key];
+        assert_eq!(parent.protocol_refund_fee_reserve_e8s, 0);
+        assert_eq!(
+            parent.refund.as_ref().unwrap().settled_receipt.as_ref(),
+            Some(&receipt)
+        );
+    }
+
+    #[test]
+    fn candidate_and_post_await_cas_reject_wrong_tuple_or_changed_parent() {
+        let (mut state, refund, key, journal, backend, developer, block_index) = fixture();
+        let mut wrong_block = valid_block(&refund, backend);
+        wrong_block.to = Some(Account {
+            owner: Principal::from_slice(&[8]),
+            subaccount: None,
+        });
+        assert!(verify_v2_default_account_three_usd_refund_candidate(
+            &refund,
+            backend,
+            block_index,
+            Ok(wrong_block),
+        )
+        .is_err());
+        let receipt = verify_v2_default_account_three_usd_refund_candidate(
+            &refund,
+            backend,
+            block_index,
+            Ok(valid_block(&refund, backend)),
+        )
+        .unwrap();
+        state
+            .three_usd_reserve_ingress_journals
+            .get_mut(&key)
+            .unwrap()
+            .protocol_refund_fee_reserve_e8s += 1;
+        assert!(!commit_v2_default_account_three_usd_refund_candidate(
+            &mut state,
+            refund.op_nonce,
+            refund,
+            &key,
+            &journal,
+            &receipt,
+            developer,
+            backend,
+        ));
+        assert!(state.pending_3usd_refunds.contains_key(&refund.op_nonce));
+    }
+
+    #[test]
+    fn candidate_rejects_inconsistent_parent_ingress_tuple() {
+        for mutation in 0..3 {
+            let (mut state, refund, key, mut journal, backend, developer, block_index) = fixture();
+            let receipt = verify_v2_default_account_three_usd_refund_candidate(
+                &refund,
+                backend,
+                block_index,
+                Ok(valid_block(&refund, backend)),
+            )
+            .unwrap();
+            let ThreeUsdReserveIngressPhase::FailedAfterTransfer { tuple, .. } = &mut journal.phase
+            else {
+                panic!("fixture must retain the ingress tuple");
+            };
+            match mutation {
+                0 => tuple.source.owner = Principal::from_slice(&[8]),
+                1 => tuple.source.subaccount = Some([1; 32]),
+                2 => tuple.amount_e8s += 1,
+                _ => unreachable!(),
+            }
+            state
+                .three_usd_reserve_ingress_journals
+                .insert(key.clone(), journal.clone());
+            assert!(!commit_v2_default_account_three_usd_refund_candidate(
+                &mut state,
+                refund.op_nonce,
+                refund,
+                &key,
+                &journal,
+                &receipt,
+                developer,
+                backend,
+            ));
+            assert!(state.pending_3usd_refunds.contains_key(&refund.op_nonce));
+            assert!(state.three_usd_reserve_ingress_journals[&key]
+                .refund
+                .as_ref()
+                .unwrap()
+                .settled_receipt
+                .is_none());
+        }
+    }
+}
+
 #[cfg(test)]
 mod pending_3usd_refund_safety_tests {
     use super::{

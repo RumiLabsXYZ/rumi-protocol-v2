@@ -2189,6 +2189,10 @@ export interface _SERVICE {
     [Uint8Array | number[]],
     Result
   >,
+  'reconcile_v2_default_account_three_usd_refund_candidate_block' : ActorMethod<
+    [bigint, bigint],
+    Result
+  >,
   'recover_pending_payout' : ActorMethod<[bigint], Result_21>,
   'recover_pending_transfer' : ActorMethod<[bigint], Result_21>,
   'recover_stuck_chain_vault' : ActorMethod<[number, bigint], Result>,

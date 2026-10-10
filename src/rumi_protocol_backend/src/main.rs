@@ -8545,6 +8545,83 @@ async fn reconcile_legacy_three_usd_refund_candidate_block(
     })
 }
 
+/// Reconcile a submitted V2 default-account refund child from one direct ICRC-3
+/// candidate block. This endpoint never submits or rearms the transfer.
+#[update]
+#[candid_method(update)]
+async fn reconcile_v2_default_account_three_usd_refund_candidate_block(
+    op_nonce: u128,
+    candidate_block_index: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || read_state(|state| state.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    let (refund, key, journal) = read_state(|state| {
+        let refund = state.pending_3usd_refunds.get(&op_nonce).copied()?;
+        let parent_absorb_id = refund.parent_absorb_id?;
+        let key = rumi_protocol_backend::state::ThreeUsdReserveIngressKey {
+            stability_pool: refund.stability_pool,
+            vault_id: refund.vault_id,
+            absorb_id: parent_absorb_id,
+        };
+        let journal = state.three_usd_reserve_ingress_journals.get(&key)?.clone();
+        Some((refund, key, journal))
+    })
+    .ok_or_else(|| {
+        ProtocolError::GenericError(
+            "unknown V2 default-account refund child or parent journal".into(),
+        )
+    })?;
+    if refund.source != rumi_protocol_backend::state::ThreeUsdRefundSource::DefaultAccount
+        || refund.parent_absorb_id != Some(key.absorb_id)
+    {
+        return Err(ProtocolError::GenericError(
+            "candidate proof requires a V2 default-account refund child".into(),
+        ));
+    }
+    let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block_direct(
+        refund.ledger,
+        candidate_block_index,
+    )
+    .await;
+    let receipt = rumi_protocol_backend::verify_v2_default_account_three_usd_refund_candidate(
+        &refund,
+        ic_cdk::id(),
+        candidate_block_index,
+        block,
+    )
+    .map_err(|reason| {
+        ProtocolError::TemporarilyUnavailable(format!(
+            "candidate block does not prove the exact V2 refund child: {reason}"
+        ))
+    })?;
+    mutate_state(|state| {
+        rumi_protocol_backend::commit_v2_default_account_three_usd_refund_candidate(
+            state,
+            op_nonce,
+            refund,
+            &key,
+            &journal,
+            &receipt,
+            caller,
+            ic_cdk::id(),
+        )
+        .then_some(())
+        .ok_or_else(|| {
+            ProtocolError::TemporarilyUnavailable(
+                "V2 refund child, parent journal, or developer authorization changed during proof"
+                    .into(),
+            )
+        })
+    })
+}
+
 /// Resume a capped legacy 3USD refund only when its saved state proves the
 /// worker never pinned or submitted a transfer tuple. This changes only the
 /// retry counter; old snapshots and ambiguous dispatches require receipt proof.
