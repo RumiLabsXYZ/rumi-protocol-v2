@@ -445,8 +445,7 @@ fn compound_open_v2_replays_one_phantom_committed_collateral_pull() {
     assert_one_journaled_pull(true);
 }
 
-#[test]
-fn compound_borrow_mint_receipt_reconciliation_completes_bound_operation() {
+fn assert_compound_borrow_mint_receipt_recovery_completes_bound_operation(use_scan: bool) {
     let (pic, backend, collateral_ledger, icusd_ledger, owner, amount) = install_fixture();
     call(
         &pic,
@@ -559,20 +558,34 @@ fn compound_borrow_mint_receipt_reconciliation_completes_bound_operation() {
     assert_eq!(balance(&pic, icusd_ledger, owner), borrow_amount);
     assert_eq!(block_count(&pic, icusd_ledger), 1);
 
-    let candidate_block = block_count(&pic, icusd_ledger) - 1;
-    let reconciled: Result<SuccessWithFee, ProtocolError> = reply(
-        call(
-            &pic,
-            backend,
-            owner,
+    if use_scan {
+        let advanced: Result<(), ProtocolError> = reply(
+            call(
+                &pic,
+                backend,
+                owner,
+                "advance_pending_borrow_mint_recovery",
+                encode_args((active.vault_id,)).unwrap(),
+            ),
+            "advance_pending_borrow_mint_recovery",
+        );
+        advanced.expect("the receipt scan must commit debt to the matching compound operation");
+    } else {
+        let candidate_block = block_count(&pic, icusd_ledger) - 1;
+        let reconciled: Result<SuccessWithFee, ProtocolError> = reply(
+            call(
+                &pic,
+                backend,
+                owner,
+                "reconcile_pending_borrow_mint_from_block",
+                encode_args((active.vault_id, candidate_block)).unwrap(),
+            ),
             "reconcile_pending_borrow_mint_from_block",
-            encode_args((active.vault_id, candidate_block)).unwrap(),
-        ),
-        "reconcile_pending_borrow_mint_from_block",
-    );
-    let _reconciled = reconciled.expect(
-        "positive receipt reconciliation must pass the compound operation ID into debt commit",
-    );
+        );
+        let _reconciled = reconciled.expect(
+            "positive receipt reconciliation must pass the compound operation ID into debt commit",
+        );
+    }
 
     let vaults: Vec<CandidVault> = reply(
         pic.query_call(
@@ -608,4 +621,14 @@ fn compound_borrow_mint_receipt_reconciliation_completes_bound_operation() {
         completed.phase,
         VaultCollateralPullPhase::Completed { .. }
     ));
+}
+
+#[test]
+fn compound_borrow_mint_receipt_reconciliation_completes_bound_operation() {
+    assert_compound_borrow_mint_receipt_recovery_completes_bound_operation(false);
+}
+
+#[test]
+fn compound_borrow_mint_receipt_scan_completes_bound_operation() {
+    assert_compound_borrow_mint_receipt_recovery_completes_bound_operation(true);
 }
