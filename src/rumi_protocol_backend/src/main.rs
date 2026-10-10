@@ -17292,126 +17292,30 @@ async fn admin_correct_vault_collateral(
     Ok(())
 }
 
-/// Sweep untracked ICP surplus from the backend to treasury.
-///
-/// Auto-calculates the surplus: actual ICP balance minus the sum of all
-/// ICP vault collateral, pending margin/excess/redemption transfers, and
-/// pending treasury collateral. Only the surplus can be swept — it is
-/// physically impossible to touch tracked collateral with this function.
+/// Treasury sweeps are held until shared-account liabilities and ambiguous
+/// outbound sweep transfers have durable accounting and recovery.
 #[update]
-async fn admin_sweep_to_treasury(reason: String) -> Result<u64, ProtocolError> {
-    let caller = ic_cdk::caller();
-    let is_developer = read_state(|s| s.developer_principal == caller);
-    if !is_developer {
-        return Err(ProtocolError::GenericError(
-            "Only developer can sweep to treasury".to_string(),
+async fn admin_sweep_to_treasury(_reason: String) -> Result<u64, ProtocolError> {
+    Err(ProtocolError::GenericError(
+        "ICP treasury sweep is disabled until shared-account liabilities and ambiguous outbound sweeps are durably accounted".to_string(),
+    ))
+}
+
+#[cfg(test)]
+mod admin_icp_treasury_sweep_gate_tests {
+    use super::{admin_sweep_to_treasury, ProtocolError};
+
+    #[test]
+    fn admin_sweep_endpoint_is_fail_closed() {
+        let result = futures::executor::block_on(admin_sweep_to_treasury("test".into()));
+
+        assert!(matches!(
+            result,
+            Err(ProtocolError::GenericError(message))
+                if message.contains("disabled")
+                    && message.contains("shared-account liabilities")
         ));
     }
-
-    let (treasury, icp_ledger, icp_fee) = read_state(|s| {
-        (
-            s.treasury_principal,
-            s.icp_ledger_principal,
-            s.icp_ledger_fee,
-        )
-    });
-    let treasury = treasury.ok_or(ProtocolError::GenericError(
-        "Treasury principal not configured".to_string(),
-    ))?;
-
-    // 1. Query actual ICP balance of this canister
-    let actual_balance = management::get_token_balance(icp_ledger)
-        .await
-        .map_err(|e| ProtocolError::GenericError(format!("Failed to query ICP balance: {}", e)))?;
-
-    // 2. Sum all tracked ICP obligations
-    let tracked = read_state(|s| {
-        let mut total: u64 = 0;
-
-        // All ICP vault collateral
-        for vault in s.vault_id_to_vaults.values() {
-            if vault.collateral_type == s.icp_ledger_principal {
-                total = total.saturating_add(vault.collateral_amount);
-            }
-        }
-
-        // Pending margin transfers (ICP only)
-        for pmt in s.pending_margin_transfers.values() {
-            if pmt.collateral_type == s.icp_ledger_principal
-                || pmt.collateral_type == Principal::anonymous()
-            {
-                total = total.saturating_add(pmt.margin.0);
-            }
-        }
-
-        // Pending excess transfers (ICP only)
-        for pmt in s.pending_excess_transfers.values() {
-            if pmt.collateral_type == s.icp_ledger_principal
-                || pmt.collateral_type == Principal::anonymous()
-            {
-                total = total.saturating_add(pmt.margin.0);
-            }
-        }
-
-        // Pending redemption transfers (ICP only)
-        for pmt in s.pending_redemption_transfer.values() {
-            if pmt.collateral_type == s.icp_ledger_principal
-                || pmt.collateral_type == Principal::anonymous()
-            {
-                total = total.saturating_add(pmt.margin.0);
-            }
-        }
-
-        // Pending treasury collateral (ICP only)
-        for (amount, ledger) in &s.pending_treasury_collateral {
-            if *ledger == s.icp_ledger_principal {
-                total = total.saturating_add(*amount);
-            }
-        }
-
-        total
-    });
-
-    // 3. Compute surplus (leave 1 transfer fee as buffer)
-    let fee_buffer = icp_fee.0;
-    let surplus = actual_balance
-        .saturating_sub(tracked)
-        .saturating_sub(fee_buffer);
-
-    if surplus == 0 {
-        return Err(ProtocolError::GenericError(format!(
-            "No surplus to sweep (actual: {}, tracked: {}, fee buffer: {})",
-            actual_balance, tracked, fee_buffer
-        )));
-    }
-
-    // 4. Transfer surplus to treasury
-    let block_index = management::transfer_collateral(surplus, treasury, icp_ledger)
-        .await
-        .map_err(|e| ProtocolError::GenericError(format!("Transfer failed: {:?}", e)))?;
-
-    log!(
-        INFO,
-        "[admin_sweep_to_treasury] Swept {} e8s ICP to treasury (block {}). Reason: {}",
-        surplus,
-        block_index,
-        reason
-    );
-
-    // 5. Record audit event
-    event::record_admin_sweep_to_treasury(surplus, treasury, block_index, reason.clone());
-
-    // 6. Notify treasury for bookkeeping (non-critical)
-    let _ = treasury::notify_treasury_deposit(
-        treasury,
-        treasury::DepositType::LiquidationFee, // closest category for recovered funds
-        treasury::AssetType::ICP,
-        surplus,
-        block_index,
-    )
-    .await;
-
-    Ok(block_index)
 }
 
 // ── Admin Debt Correction ─────────────────────────────────────────────────
