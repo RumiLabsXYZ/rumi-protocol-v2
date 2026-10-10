@@ -632,6 +632,26 @@ fn developer_clears_typed_too_old_with_complete_nonempty_history() {
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].phase, BorrowMintPhase::ReceiptRecoveryRequired);
 
+    // Block 0 is a real, in-range mint, but it has the fixture's unrelated
+    // amount and no borrow memo. A plausible block index must not be enough to
+    // commit debt for the pending tuple.
+    let wrong_receipt_reply = call(
+        &pic,
+        backend,
+        developer,
+        "reconcile_pending_borrow_mint_from_block",
+        encode_args((vault_id, 0u64)).unwrap(),
+    );
+    let wrong_receipt: Result<SuccessWithFee, ProtocolError> =
+        result(wrong_receipt_reply, "wrong-receipt reconciliation");
+    assert!(
+        wrong_receipt.is_err(),
+        "wrong amount and missing memo must fail exact receipt validation"
+    );
+    assert_eq!(pending_mints(&pic, backend, owner).len(), 1);
+    assert_eq!(vault_debt(&pic, backend, owner, vault_id), 0);
+    assert_eq!(ledger_blocks(&pic, icusd_ledger), blocks_before_recovery);
+
     let stranger_reply = call(
         &pic,
         backend,
