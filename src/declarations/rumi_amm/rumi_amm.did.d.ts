@@ -235,7 +235,70 @@ export type Icrc21Error = {
 export interface Icrc28TrustedOriginsResponse {
   'trusted_origins' : Array<string>,
 }
+export interface InboundLeg {
+  'fee' : [] | [bigint],
+  'status' : InboundLegStatus,
+  'to_subaccount' : [] | [Uint8Array | number[]],
+  'from' : Principal,
+  'memo' : Uint8Array | number[],
+  'ledger' : Principal,
+  'created_at_time' : bigint,
+  'amount' : bigint,
+}
+export type InboundLegStatus = { 'ProvenNoEffect' : null } |
+  { 'Confirmed' : bigint } |
+  { 'Ambiguous' : null } |
+  { 'Prepared' : null };
+export interface InboundOperation {
+  'request_id' : Uint8Array | number[],
+  'token_in' : [] | [Principal],
+  'sequence_managed' : [] | [boolean],
+  'kind' : InboundOperationKind,
+  'legs' : Array<InboundLeg>,
+  'output_payout_id' : [] | [bigint],
+  'output_ledger_fee' : [] | [bigint],
+  'argument_digest' : Uint8Array | number[],
+  'caller' : Principal,
+  'phase' : InboundOperationPhase,
+  'created_at_time' : bigint,
+  'pool_id' : string,
+  'result_fee' : [] | [bigint],
+  'protocol_fee' : [] | [bigint],
+  'result_amount' : [] | [bigint],
+  'held_reason' : [] | [string],
+}
+export type InboundOperationKind = { 'AddLiquidity' : null } |
+  { 'Swap' : null };
+export type InboundOperationPhase = { 'Held' : null } |
+  { 'ProvenNoEffect' : null } |
+  { 'OutputPending' : null } |
+  { 'Prepared' : null } |
+  { 'ResultUnavailable' : null } |
+  { 'InputsConfirmed' : null } |
+  { 'Completed' : null };
+export interface InboundOperationStatus {
+  'linked_payout_status' : [] | [OutboundPayoutStatus],
+  'operation' : InboundOperation,
+}
 export interface LineDisplayPage { 'lines' : Array<string> }
+export interface OutboundPayout {
+  'id' : bigint,
+  'to' : Principal,
+  'fee' : bigint,
+  'status' : OutboundPayoutStatus,
+  'net_amount' : bigint,
+  'to_subaccount' : [] | [Uint8Array | number[]],
+  'from' : Principal,
+  'memo' : Uint8Array | number[],
+  'operation_id' : string,
+  'from_subaccount' : [] | [Uint8Array | number[]],
+  'ledger' : Principal,
+  'created_at_time' : bigint,
+  'gross_amount' : bigint,
+}
+export type OutboundPayoutStatus = { 'Reserved' : null } |
+  { 'Dispatched' : null } |
+  { 'Ambiguous' : null };
 export interface PendingClaim {
   'id' : bigint,
   'token' : Principal,
@@ -272,6 +335,11 @@ export interface TvlSample {
 export interface _SERVICE {
   'add_liquidity' : ActorMethod<
     [string, bigint, bigint, bigint],
+    { 'Ok' : bigint } |
+      { 'Err' : AmmError }
+  >,
+  'add_liquidity_v2' : ActorMethod<
+    [Uint8Array | number[], string, bigint, bigint, bigint],
     { 'Ok' : bigint } |
       { 'Err' : AmmError }
   >,
@@ -346,8 +414,23 @@ export interface _SERVICE {
     [string, bigint, bigint],
     Array<HolderSnapshot>
   >,
+  'get_inbound_operation' : ActorMethod<
+    [Uint8Array | number[]],
+    { 'Ok' : InboundOperationStatus } |
+      { 'Err' : AmmError }
+  >,
   'get_latest_holder_snapshot' : ActorMethod<[string], [] | [HolderSnapshot]>,
   'get_lp_balance' : ActorMethod<[string, Principal], bigint>,
+  'get_next_inbound_sequence' : ActorMethod<
+    [],
+    { 'Ok' : bigint } |
+      { 'Err' : AmmError }
+  >,
+  'get_outbound_payout_status' : ActorMethod<
+    [bigint],
+    { 'Ok' : OutboundPayout } |
+      { 'Err' : AmmError }
+  >,
   'get_pending_claims' : ActorMethod<[], Array<PendingClaim>>,
   'get_pending_rewards' : ActorMethod<[string, Principal], bigint>,
   'get_pool' : ActorMethod<[string], [] | [PoolInfo]>,
@@ -355,6 +438,11 @@ export interface _SERVICE {
   'get_quote' : ActorMethod<
     [string, Principal, bigint],
     { 'Ok' : bigint } |
+      { 'Err' : AmmError }
+  >,
+  'get_unresolved_outbound_payouts' : ActorMethod<
+    [bigint, bigint],
+    { 'Ok' : Array<OutboundPayout> } |
       { 'Err' : AmmError }
   >,
   'health' : ActorMethod<[], string>,
@@ -374,6 +462,16 @@ export interface _SERVICE {
       { 'Err' : AmmError }
   >,
   'pause_pool' : ActorMethod<[string], { 'Ok' : null } | { 'Err' : AmmError }>,
+  'reconcile_inbound_leg_from_block' : ActorMethod<
+    [Principal, Uint8Array | number[], bigint, bigint],
+    { 'Ok' : null } |
+      { 'Err' : AmmError }
+  >,
+  'recover_outbound_payout' : ActorMethod<
+    [bigint, [] | [bigint]],
+    { 'Ok' : null } |
+      { 'Err' : AmmError }
+  >,
   'remove_liquidity' : ActorMethod<
     [string, bigint, bigint, bigint],
     { 'Ok' : [bigint, bigint] } |
@@ -416,6 +514,11 @@ export interface _SERVICE {
   >,
   'swap' : ActorMethod<
     [string, Principal, bigint, bigint],
+    { 'Ok' : SwapResult } |
+      { 'Err' : AmmError }
+  >,
+  'swap_v2' : ActorMethod<
+    [Uint8Array | number[], string, Principal, bigint, bigint],
     { 'Ok' : SwapResult } |
       { 'Err' : AmmError }
   >,

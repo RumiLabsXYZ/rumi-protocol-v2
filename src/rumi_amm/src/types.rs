@@ -171,17 +171,48 @@ pub struct AmmLiquidityEvent {
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub enum AmmAdminAction {
-    CreatePool { pool_id: PoolId, token_a: Principal, token_b: Principal, fee_bps: u16 },
-    SetFee { pool_id: PoolId, fee_bps: u16 },
-    SetProtocolFee { pool_id: PoolId, protocol_fee_bps: u16 },
-    WithdrawProtocolFees { pool_id: PoolId, amount_a: u128, amount_b: u128 },
-    PausePool { pool_id: PoolId },
-    UnpausePool { pool_id: PoolId },
-    SetPoolCreationOpen { open: bool },
-    SetMaintenanceMode { enabled: bool },
-    ClaimPending { claim_id: u64, claimant: Principal, amount: u128 },
-    ResolvePendingClaim { claim_id: u64 },
-    SetProtocolBackendPrincipal { backend: Principal },
+    CreatePool {
+        pool_id: PoolId,
+        token_a: Principal,
+        token_b: Principal,
+        fee_bps: u16,
+    },
+    SetFee {
+        pool_id: PoolId,
+        fee_bps: u16,
+    },
+    SetProtocolFee {
+        pool_id: PoolId,
+        protocol_fee_bps: u16,
+    },
+    WithdrawProtocolFees {
+        pool_id: PoolId,
+        amount_a: u128,
+        amount_b: u128,
+    },
+    PausePool {
+        pool_id: PoolId,
+    },
+    UnpausePool {
+        pool_id: PoolId,
+    },
+    SetPoolCreationOpen {
+        open: bool,
+    },
+    SetMaintenanceMode {
+        enabled: bool,
+    },
+    ClaimPending {
+        claim_id: u64,
+        claimant: Principal,
+        amount: u128,
+    },
+    ResolvePendingClaim {
+        claim_id: u64,
+    },
+    SetProtocolBackendPrincipal {
+        backend: Principal,
+    },
     AdminBurnSubaccount {
         ledger: Principal,
         subaccount_hex: String,
@@ -208,8 +239,8 @@ pub struct HolderEntry {
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub struct HolderSnapshot {
-    pub token: String,           // "icUSD" or "3USD"
-    pub timestamp: u64,          // nanoseconds
+    pub token: String,  // "icUSD" or "3USD"
+    pub timestamp: u64, // nanoseconds
     pub holder_count: u64,
     pub total_supply: u128,
     pub top_holders: Vec<HolderEntry>, // top 50

@@ -210,6 +210,77 @@ export const idlFactory = ({ IDL }) => {
     'timestamp' : IDL.Nat64,
     'total_supply' : IDL.Nat,
   });
+  const OutboundPayoutStatus = IDL.Variant({
+    'Reserved' : IDL.Null,
+    'Dispatched' : IDL.Null,
+    'Ambiguous' : IDL.Null,
+  });
+  const InboundOperationKind = IDL.Variant({
+    'AddLiquidity' : IDL.Null,
+    'Swap' : IDL.Null,
+  });
+  const InboundLegStatus = IDL.Variant({
+    'ProvenNoEffect' : IDL.Null,
+    'Confirmed' : IDL.Nat64,
+    'Ambiguous' : IDL.Null,
+    'Prepared' : IDL.Null,
+  });
+  const InboundLeg = IDL.Record({
+    'fee' : IDL.Opt(IDL.Nat),
+    'status' : InboundLegStatus,
+    'to_subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'from' : IDL.Principal,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'ledger' : IDL.Principal,
+    'created_at_time' : IDL.Nat64,
+    'amount' : IDL.Nat,
+  });
+  const InboundOperationPhase = IDL.Variant({
+    'Held' : IDL.Null,
+    'ProvenNoEffect' : IDL.Null,
+    'OutputPending' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'ResultUnavailable' : IDL.Null,
+    'InputsConfirmed' : IDL.Null,
+    'Completed' : IDL.Null,
+  });
+  const InboundOperation = IDL.Record({
+    'request_id' : IDL.Vec(IDL.Nat8),
+    'token_in' : IDL.Opt(IDL.Principal),
+    'sequence_managed' : IDL.Opt(IDL.Bool),
+    'kind' : InboundOperationKind,
+    'legs' : IDL.Vec(InboundLeg),
+    'output_payout_id' : IDL.Opt(IDL.Nat64),
+    'output_ledger_fee' : IDL.Opt(IDL.Nat),
+    'argument_digest' : IDL.Vec(IDL.Nat8),
+    'caller' : IDL.Principal,
+    'phase' : InboundOperationPhase,
+    'created_at_time' : IDL.Nat64,
+    'pool_id' : IDL.Text,
+    'result_fee' : IDL.Opt(IDL.Nat),
+    'protocol_fee' : IDL.Opt(IDL.Nat),
+    'result_amount' : IDL.Opt(IDL.Nat),
+    'held_reason' : IDL.Opt(IDL.Text),
+  });
+  const InboundOperationStatus = IDL.Record({
+    'linked_payout_status' : IDL.Opt(OutboundPayoutStatus),
+    'operation' : InboundOperation,
+  });
+  const OutboundPayout = IDL.Record({
+    'id' : IDL.Nat64,
+    'to' : IDL.Principal,
+    'fee' : IDL.Nat,
+    'status' : OutboundPayoutStatus,
+    'net_amount' : IDL.Nat,
+    'to_subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'from' : IDL.Principal,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'operation_id' : IDL.Text,
+    'from_subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'ledger' : IDL.Principal,
+    'created_at_time' : IDL.Nat64,
+    'gross_amount' : IDL.Nat,
+  });
   const PendingClaim = IDL.Record({
     'id' : IDL.Nat64,
     'token' : IDL.Principal,
@@ -289,6 +360,11 @@ export const idlFactory = ({ IDL }) => {
   return IDL.Service({
     'add_liquidity' : IDL.Func(
         [IDL.Text, IDL.Nat, IDL.Nat, IDL.Nat],
+        [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : AmmError })],
+        [],
+      ),
+    'add_liquidity_v2' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Text, IDL.Nat, IDL.Nat, IDL.Nat],
         [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : AmmError })],
         [],
       ),
@@ -393,6 +469,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(HolderSnapshot)],
         ['query'],
       ),
+    'get_inbound_operation' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [IDL.Variant({ 'Ok' : InboundOperationStatus, 'Err' : AmmError })],
+        ['query'],
+      ),
     'get_latest_holder_snapshot' : IDL.Func(
         [IDL.Text],
         [IDL.Opt(HolderSnapshot)],
@@ -401,6 +482,16 @@ export const idlFactory = ({ IDL }) => {
     'get_lp_balance' : IDL.Func(
         [IDL.Text, IDL.Principal],
         [IDL.Nat],
+        ['query'],
+      ),
+    'get_next_inbound_sequence' : IDL.Func(
+        [],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : AmmError })],
+        ['query'],
+      ),
+    'get_outbound_payout_status' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : OutboundPayout, 'Err' : AmmError })],
         ['query'],
       ),
     'get_pending_claims' : IDL.Func([], [IDL.Vec(PendingClaim)], ['query']),
@@ -414,6 +505,11 @@ export const idlFactory = ({ IDL }) => {
     'get_quote' : IDL.Func(
         [IDL.Text, IDL.Principal, IDL.Nat],
         [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : AmmError })],
+        ['query'],
+      ),
+    'get_unresolved_outbound_payouts' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Vec(OutboundPayout), 'Err' : AmmError })],
         ['query'],
       ),
     'health' : IDL.Func([], [IDL.Text], ['query']),
@@ -442,6 +538,16 @@ export const idlFactory = ({ IDL }) => {
       ),
     'pause_pool' : IDL.Func(
         [IDL.Text],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],
+        [],
+      ),
+    'reconcile_inbound_leg_from_block' : IDL.Func(
+        [IDL.Principal, IDL.Vec(IDL.Nat8), IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],
+        [],
+      ),
+    'recover_outbound_payout' : IDL.Func(
+        [IDL.Nat64, IDL.Opt(IDL.Nat64)],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],
         [],
       ),
@@ -487,6 +593,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'swap' : IDL.Func(
         [IDL.Text, IDL.Principal, IDL.Nat, IDL.Nat],
+        [IDL.Variant({ 'Ok' : SwapResult, 'Err' : AmmError })],
+        [],
+      ),
+    'swap_v2' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Text, IDL.Principal, IDL.Nat, IDL.Nat],
         [IDL.Variant({ 'Ok' : SwapResult, 'Err' : AmmError })],
         [],
       ),
