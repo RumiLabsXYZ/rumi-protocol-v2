@@ -128,6 +128,30 @@ fn ledger_blocks(pic: &PocketIc, ledger: Principal) -> u64 {
     u64::try_from(blocks.log_length.0).expect("ledger log length fits u64")
 }
 
+fn ledger_block(
+    pic: &PocketIc,
+    ledger: Principal,
+    index: u64,
+) -> rumi_protocol_backend::icrc3_proof::DecodedBlock {
+    let reply = pic
+        .query_call(
+            ledger,
+            Principal::anonymous(),
+            "icrc3_get_blocks",
+            encode_args((vec![icrc_ledger_types::icrc3::blocks::GetBlocksRequest {
+                start: Nat::from(index),
+                length: Nat::from(1u8),
+            }],))
+            .unwrap(),
+        )
+        .expect("query exact ICRC-3 block");
+    let blocks: icrc_ledger_types::icrc3::blocks::GetBlocksResult =
+        result(reply, "icrc3_get_blocks");
+    assert_eq!(blocks.blocks.len(), 1, "exact probe history block exists");
+    rumi_protocol_backend::icrc3_proof::decode_block(&blocks.blocks[0].block)
+        .expect("decode exact probe history block")
+}
+
 fn balance(pic: &PocketIc, ledger: Principal, owner: Principal) -> u64 {
     let reply = pic
         .query_call(
@@ -177,20 +201,37 @@ fn vault_debt(pic: &PocketIc, backend: Principal, owner: Principal, vault_id: u6
 #[test]
 #[ignore = "requires source-matched shrunk test_endpoints Wasm and PocketIC server 7.0.0"]
 fn developer_reconciles_exact_committed_mint_for_owner_once() {
-    run_committed_mint_recovery(false);
+    run_committed_mint_recovery(false, false, false);
 }
 
 #[test]
 #[ignore = "requires source-matched shrunk test_endpoints Wasm and PocketIC server 7.0.0"]
 fn developer_scans_exact_committed_mint_for_owner_once() {
-    run_committed_mint_recovery(true);
+    run_committed_mint_recovery(true, false, false);
 }
 
-fn run_committed_mint_recovery(use_scanner: bool) {
+#[test]
+#[ignore = "requires source-matched shrunk test_endpoints backend Wasm and PocketIC server 7.0.0"]
+fn developer_reconciles_submitted_mint_without_owner_retry() {
+    run_committed_mint_recovery(false, false, true);
+}
+
+#[test]
+#[ignore = "requires source-matched shrunk test_endpoints Wasm and PocketIC server 7.0.0"]
+fn owner_reconciles_exact_committed_mint_for_owner_once() {
+    run_committed_mint_recovery(false, true, false);
+}
+
+fn run_committed_mint_recovery(
+    use_scanner: bool,
+    recover_as_owner: bool,
+    from_submitted: bool,
+) {
     let pic = PocketIcBuilder::new().with_nns_subnet().build();
     let owner = Principal::self_authenticating(b"borrow-receipt-owner");
     let stranger = Principal::self_authenticating(b"borrow-receipt-stranger");
     let developer = Principal::self_authenticating(b"borrow-receipt-developer");
+    let recovery_caller = if recover_as_owner { owner } else { developer };
 
     let backend = pic.create_canister();
     pic.add_cycles(backend, 2_000_000_000_000);
@@ -332,6 +373,40 @@ fn run_committed_mint_recovery(use_scanner: bool) {
         "the phantom mint committed exactly one block"
     );
 
+    if from_submitted {
+        let held = pending_mints(&pic, backend, owner);
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].phase, BorrowMintPhase::SubmittedOrUnknown);
+        let exact_reply = call(
+            &pic,
+            backend,
+            recovery_caller,
+            "reconcile_pending_borrow_mint_from_block",
+            encode_args((vault_id, 0u64)).unwrap(),
+        );
+        let exact: Result<SuccessWithFee, ProtocolError> =
+            result(exact_reply, "SubmittedOrUnknown positive reconciliation");
+        exact.expect("developer reconciles the immutable exact receipt without owner retry");
+        assert_eq!(vault_debt(&pic, backend, owner, vault_id), borrow_amount);
+        assert!(pending_mints(&pic, backend, owner).is_empty());
+        assert_eq!(balance(&pic, icusd_ledger, owner), balance_after_phantom);
+        assert_eq!(ledger_blocks(&pic, icusd_ledger), blocks_after_phantom);
+        let duplicate = call(
+            &pic,
+            backend,
+            recovery_caller,
+            "reconcile_pending_borrow_mint_from_block",
+            encode_args((vault_id, 0u64)).unwrap(),
+        );
+        let duplicate: Result<SuccessWithFee, ProtocolError> =
+            result(duplicate, "duplicate SubmittedOrUnknown reconciliation");
+        assert!(duplicate.is_err(), "positive debt commit is once-only");
+        assert_eq!(vault_debt(&pic, backend, owner, vault_id), borrow_amount);
+        assert_eq!(balance(&pic, icusd_ledger, owner), balance_after_phantom);
+        assert_eq!(ledger_blocks(&pic, icusd_ledger), blocks_after_phantom);
+        return;
+    }
+
     expect_reply(
         call(
             &pic,
@@ -413,7 +488,7 @@ fn run_committed_mint_recovery(use_scanner: bool) {
         let scan_reply = call(
             &pic,
             backend,
-            developer,
+            recovery_caller,
             "advance_pending_borrow_mint_recovery",
             encode_args((vault_id,)).unwrap(),
         );
@@ -423,7 +498,7 @@ fn run_committed_mint_recovery(use_scanner: bool) {
         let exact_reply = call(
             &pic,
             backend,
-            developer,
+            recovery_caller,
             "reconcile_pending_borrow_mint_from_block",
             encode_args((vault_id, 0u64)).unwrap(),
         );
@@ -517,6 +592,266 @@ fn run_committed_mint_recovery(use_scanner: bool) {
     assert_eq!(vault_debt(&pic, backend, owner, vault_id), borrow_amount);
     assert_eq!(balance(&pic, icusd_ledger, owner), balance_after_phantom);
     assert_eq!(ledger_blocks(&pic, icusd_ledger), blocks_after_phantom);
+}
+
+#[test]
+#[ignore = "requires source-matched shrunk test_endpoints backend Wasm and PocketIC server 7.0.0"]
+fn developer_probe_too_old_scans_its_own_history_without_poisoning_absence() {
+    let pic = PocketIcBuilder::new().with_nns_subnet().build();
+    let owner = Principal::self_authenticating(b"borrow-probe-owner");
+    let stranger = Principal::self_authenticating(b"borrow-probe-stranger");
+    let developer = Principal::self_authenticating(b"borrow-probe-developer");
+
+    let backend = pic.create_canister();
+    pic.add_cycles(backend, 2_000_000_000_000);
+    let icp_ledger = install_flaky_ledger(&pic);
+    let icusd_ledger = install_flaky_ledger(&pic);
+    let xrc = pic.create_canister();
+    pic.add_cycles(xrc, 1_000_000_000_000);
+    let mut rates = HashMap::new();
+    rates.insert("ICP/USD".to_string(), 1_000_000_000);
+    pic.install_canister(
+        xrc,
+        include_bytes!("../../xrc_demo/xrc/xrc.wasm").to_vec(),
+        encode_one(MockXrc { rates }).unwrap(),
+        None,
+    );
+    pic.install_canister(
+        backend,
+        backend_wasm(),
+        encode_one(ProtocolArg::Init(ProtocolInitArg {
+            xrc_principal: xrc,
+            icusd_ledger_principal: icusd_ledger,
+            icp_ledger_principal: icp_ledger,
+            fee_e8s: 0,
+            developer_principal: developer,
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        }))
+        .unwrap(),
+        None,
+    );
+
+    expect_reply(
+        call(
+            &pic,
+            icp_ledger,
+            owner,
+            "mint",
+            encode_args((
+                LedgerAccount {
+                    owner,
+                    subaccount: None,
+                },
+                Nat::from(5_000_000_000u64),
+            ))
+            .unwrap(),
+        ),
+        "fixture ICP mint",
+    );
+    let collateral_amount = 5_000_000_000u64;
+    expect_reply(
+        call(
+            &pic,
+            icp_ledger,
+            owner,
+            "icrc2_approve",
+            encode_args((ApproveArgs {
+                from_subaccount: None,
+                spender: LedgerAccount {
+                    owner: backend,
+                    subaccount: None,
+                },
+                amount: Nat::from(collateral_amount),
+                expected_allowance: None,
+                expires_at: None,
+                fee: None,
+                memo: None,
+                created_at_time: None,
+            },))
+            .unwrap(),
+        ),
+        "fixture ICP approve",
+    );
+    let open_reply = call(
+        &pic,
+        backend,
+        owner,
+        "open_vault",
+        encode_args((collateral_amount, Option::<Principal>::None)).unwrap(),
+    );
+    let opened: Result<OpenVaultSuccess, ProtocolError> = result(open_reply, "open_vault");
+    let vault_id = opened.expect("open owner vault").vault_id;
+    let price: Result<String, ProtocolError> = result(
+        call(
+            &pic,
+            backend,
+            developer,
+            "dev_set_collateral_price",
+            encode_args((icp_ledger, 10.0f64)).unwrap(),
+        ),
+        "set test ICP price",
+    );
+    price.expect("set test ICP price");
+    expect_reply(
+        call(
+            &pic,
+            icusd_ledger,
+            owner,
+            "set_minter",
+            encode_args((Some(backend),)).unwrap(),
+        ),
+        "set icUSD minter",
+    );
+
+    // A typed-but-ambiguous error leaves the original journal submitted. The
+    // independent recovery caller must not be able to turn it into scan state.
+    expect_reply(
+        call(
+            &pic,
+            icusd_ledger,
+            owner,
+            "set_fail_transfers_for_caller",
+            encode_args((Some(backend),)).unwrap(),
+        ),
+        "fail backend ledger calls",
+    );
+    let amount = 1_000_000_000u64;
+    let first: Result<SuccessWithFee, ProtocolError> = result(
+        call(
+            &pic,
+            backend,
+            owner,
+            "borrow_from_vault",
+            encode_args((VaultArg { vault_id, amount },)).unwrap(),
+        ),
+        "initial ambiguous borrow",
+    );
+    assert!(first.is_err());
+    assert_eq!(pending_mints(&pic, backend, owner)[0].phase, BorrowMintPhase::SubmittedOrUnknown);
+    let stranger_result: Result<(), ProtocolError> = result(
+        call(
+            &pic,
+            backend,
+            stranger,
+            "advance_pending_borrow_mint_recovery",
+            encode_args((vault_id,)).unwrap(),
+        ),
+        "stranger expiry probe",
+    );
+    assert!(stranger_result.is_err());
+    assert_eq!(ledger_blocks(&pic, icusd_ledger), 0);
+
+    let rejected_probe: Result<(), ProtocolError> = result(
+        call(
+            &pic,
+            backend,
+            developer,
+            "advance_pending_borrow_mint_recovery",
+            encode_args((vault_id,)).unwrap(),
+        ),
+        "failed expiry probe",
+    );
+    assert!(rejected_probe.is_err());
+    assert_eq!(pending_mints(&pic, backend, owner)[0].phase, BorrowMintPhase::SubmittedOrUnknown);
+    assert_eq!(ledger_blocks(&pic, icusd_ledger), 0);
+
+    expect_reply(
+        call(
+            &pic,
+            icusd_ledger,
+            owner,
+            "set_fail_transfers_for_caller",
+            encode_args((Option::<Principal>::None,)).unwrap(),
+        ),
+        "restore ledger calls",
+    );
+    let before_probe_balance = balance(&pic, icusd_ledger, owner);
+    let fresh_probe: Result<(), ProtocolError> = result(
+        call(
+            &pic,
+            backend,
+            developer,
+            "advance_pending_borrow_mint_recovery",
+            encode_args((vault_id,)).unwrap(),
+        ),
+        "fresh zero probe",
+    );
+    assert!(fresh_probe.is_err(), "success cannot arm the absence scan");
+    assert_eq!(pending_mints(&pic, backend, owner)[0].phase, BorrowMintPhase::SubmittedOrUnknown);
+    assert_eq!(balance(&pic, icusd_ledger, owner), before_probe_balance);
+    assert_eq!(ledger_blocks(&pic, icusd_ledger), 1);
+    let probe_block = ledger_block(&pic, icusd_ledger, 0);
+    assert_eq!(probe_block.amount, 0);
+    assert_eq!(probe_block.to.expect("probe recipient").owner == owner, false);
+
+    let duplicate_probe: Result<(), ProtocolError> = result(
+        call(
+            &pic,
+            backend,
+            developer,
+            "advance_pending_borrow_mint_recovery",
+            encode_args((vault_id,)).unwrap(),
+        ),
+        "duplicate zero probe",
+    );
+    assert!(duplicate_probe.is_err(), "Duplicate cannot arm a scan");
+    assert_eq!(pending_mints(&pic, backend, owner)[0].phase, BorrowMintPhase::SubmittedOrUnknown);
+    assert_eq!(ledger_blocks(&pic, icusd_ledger), 1);
+
+    expect_reply(
+        call(
+            &pic,
+            icusd_ledger,
+            owner,
+            "set_bad_fee_failures",
+            encode_args((1u32,)).unwrap(),
+        ),
+        "inject typed non-TooOld error",
+    );
+    let other_error: Result<(), ProtocolError> = result(
+        call(
+            &pic,
+            backend,
+            developer,
+            "advance_pending_borrow_mint_recovery",
+            encode_args((vault_id,)).unwrap(),
+        ),
+        "typed non-TooOld probe error",
+    );
+    assert!(other_error.is_err());
+    assert_eq!(pending_mints(&pic, backend, owner)[0].phase, BorrowMintPhase::SubmittedOrUnknown);
+    assert_eq!(ledger_blocks(&pic, icusd_ledger), 1);
+
+    // This fixture injection stands in for the actual ledger's timestamp
+    // expiry. The emitted zero probe is included in the pinned scan prefix.
+    expect_reply(
+        call(
+            &pic,
+            icusd_ledger,
+            owner,
+            "set_too_old_before_mint",
+            encode_args((1u32,)).unwrap(),
+        ),
+        "inject typed TooOld probe result",
+    );
+    let expired_scan: Result<(), ProtocolError> = result(
+        call(
+            &pic,
+            backend,
+            developer,
+            "advance_pending_borrow_mint_recovery",
+            encode_args((vault_id,)).unwrap(),
+        ),
+        "TooOld probe and full absence scan",
+    );
+    expired_scan.expect("typed TooOld plus complete history proves absence");
+    assert!(pending_mints(&pic, backend, owner).is_empty());
+    assert_eq!(vault_debt(&pic, backend, owner, vault_id), 0);
+    assert_eq!(balance(&pic, icusd_ledger, owner), before_probe_balance);
+    assert_eq!(ledger_blocks(&pic, icusd_ledger), 1);
 }
 
 #[test]
