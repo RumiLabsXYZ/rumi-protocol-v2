@@ -1,9 +1,9 @@
 <script>
   const report = {
-    date: 'October 9, 2026',
-    datetime: '2026-10-09',
-    source: 'origin/main at 7b2d0dbf690f · includes PR #483',
-    snapshot: 'Mainnet readback · October 9, 2026'
+    date: 'October 10, 2026',
+    datetime: '2026-10-10',
+    source: 'origin/main at afa23b1d963f · includes PR #504',
+    snapshot: 'Mainnet readback · October 10, 2026'
   };
 
   const states = [
@@ -37,6 +37,22 @@
       state: 'Installed · rebuild matched · readback recorded',
       tone: 'installed',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/483'
+    },
+    {
+      pr: '#501',
+      title: 'Cycle Sentinel recovery safeguard',
+      summary: 'Installed on October 10. Cycle Sentinel (joh3a-5aaaa-aaaap-quy6a-cai) was restarted and reports module SHA-256 b18228fab536e290478472b7e4a54268ef64d046e8e2a21dd0cc1936206b48aa. A pre-upgrade snapshot is retained. This installation does not establish that any historical quarantined operation was reconciled; the available local controller identity is not an application signer.',
+      state: 'Installed · recovery pending',
+      tone: 'installed',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/501'
+    },
+    {
+      pr: '#504',
+      title: '3USD account boundary and AMM custody',
+      summary: 'Source merged on October 10. The matching Rumi AMM upgrade is installed at module SHA-256 832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2. Its single 3USD/ICP pool retained its reserves and LP supply, with no pending claims, and its 3USD ledger balance matched the reserve at readback. The 3pool account guard is not installed; the backend V1/V2 cutover and historical account compatibility remain under review.',
+      state: 'AMM installed · 3pool guard held',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/504'
     },
     {
       pr: '#459',
@@ -114,7 +130,7 @@
   <title>October 2026 Security Status · Rumi Protocol</title>
   <meta
     name="description"
-    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, and October 9 mainnet readback status."
+    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, and October 10 mainnet readback status."
   />
 </svelte:head>
 
@@ -127,20 +143,19 @@
           <p class="issue-line">Status report <span>—</span> <time datetime={report.datetime}>{report.date}</time></p>
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
-            This snapshot separates merged source from mainnet installation. The October 9 3pool
-            release is installed with a matching clean-source rebuild and recorded state invariants;
-            the Stability Pool remains paused, and
-            backend and bot follow-up changes are not yet installed.
+            This snapshot separates merged source from mainnet installation. The October 10
+            Cycle Sentinel and AMM releases are installed with recorded state readbacks. The
+            Stability Pool remains paused; the backend, bot, and 3pool account guard are not yet installed.
           </p>
         </div>
         <aside class="report-stamp" aria-label={report.snapshot}>
           <span class="stamp-label">Publication state</span>
           <strong>{report.snapshot}</strong>
-          <p>The 3pool PR #483 module hash, matching clean-source rebuild, and immediate state readback are dated October 9. The Points release readback is dated October 8. The Stability Pool pause and depositor count were confirmed again in a later read. This page combines those time-scoped records; it is not live telemetry.</p>
+          <p>The AMM and Cycle Sentinel module hashes and post-upgrade readbacks are dated October 10. The 3pool PR #483 and Points release observations are dated October 9 and October 8 respectively. The Stability Pool pause was confirmed again on October 10. This page combines those time-scoped records; it is not live telemetry.</p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
-      <div class="rule-caption"><span>Source cutoff · {report.source} · October 9, 2026</span><span>Selected remediation and release follow-up</span></div>
+      <div class="rule-caption"><span>Source cutoff · {report.source} · October 10, 2026</span><span>Selected remediation and release follow-up</span></div>
     </div>
   </section>
 
@@ -165,7 +180,7 @@
       <div class="section-heading section-heading-wide">
         <p class="section-label">Selected changes</p>
         <h2 id="updates-title">Change and release status</h2>
-        <p>This October 9 snapshot reports the highest evidence stage available for each change. A source merge and a live installation remain separate states.</p>
+        <p>This October 10 snapshot reports the highest evidence stage available for each change. A source merge and a live installation remain separate states.</p>
       </div>
       <div class="change-list">
         {#each changes as item}
@@ -209,7 +224,7 @@
       </div>
       <p>
         Source review, tests, builds, installation, activation, and live behavior are distinct claims.
-        This page records an October 9 snapshot; it does not publish private audit material or
+        This page records an October 10 snapshot; it does not publish private audit material or
         establish that every finding is closed.
       </p>
     </div>
