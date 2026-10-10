@@ -15,6 +15,8 @@
 //   - set_fail_fee_query(bool)        make icrc1_fee trap
 //   - set_phantom_failures(u32)       next N transfers commit but return GenericError
 //                                     (simulates "ledger committed, reply lost")
+//   - set_minter(Option<Principal>)   transfers from this caller produce fee-free 1mint blocks
+//   - set_too_old_after_phantom_mint(u32) next exact retry of a phantom mint returns TooOld
 //   - set_bad_fee_failures(u32)       next N transfers return BadFee with set_fee value
 //   - mint(Account, Nat)              mint tokens to any account (no auth)
 //   - reset_dedup()                   clear the dedup map (for explicit test isolation)
@@ -145,6 +147,13 @@ struct LedgerState {
     /// Next N ICRC-1 transfers commit but lose their reply, without consuming
     /// the fault on an earlier ICRC-2 transfer_from in the same saga.
     phantom_icrc1_failures_remaining: u32,
+    /// Optional caller whose default-account ICRC-1 transfers produce `1mint`
+    /// blocks. This is a fixture-only approximation of the configured minter.
+    minter: Option<Principal>,
+    /// Phantom mint tuples and their committed block indexes, used to model a
+    /// typed TooOld reply on an exact retry without applying another mint.
+    phantom_mint_dedup: BTreeMap<DedupKey, u64>,
+    too_old_after_phantom_mint_remaining: u32,
     /// Next N transfers return BadFee with the current fee value.
     bad_fee_failures_remaining: u32,
     /// Recent transfers keyed by their dedup tuple. Retained until reset_dedup().
@@ -169,6 +178,17 @@ thread_local! {
 
 fn nat_to_u128(n: &Nat) -> u128 {
     n.0.clone().try_into().unwrap_or(0)
+}
+
+fn take_too_old_after_phantom_mint(state: &mut LedgerState, key: &DedupKey, duplicate_of: u64) -> bool {
+    if state.phantom_mint_dedup.get(key) == Some(&duplicate_of)
+        && state.too_old_after_phantom_mint_remaining > 0
+    {
+        state.too_old_after_phantom_mint_remaining -= 1;
+        true
+    } else {
+        false
+    }
 }
 
 fn account_key(owner: Principal, subaccount: Option<[u8; 32]>) -> Account {
@@ -264,6 +284,27 @@ fn mint_block(to: &Account, amount: u128) -> ICRC3Value {
     ICRC3Value::Map(block)
 }
 
+fn borrow_mint_block(
+    to: &Account,
+    amount: u128,
+    memo: Option<&[u8]>,
+    created_at_time: Option<u64>,
+) -> ICRC3Value {
+    let mut block = match mint_block(to, amount) {
+        ICRC3Value::Map(block) => block,
+        _ => unreachable!("mint blocks are maps"),
+    };
+    if let Some(ICRC3Value::Map(tx)) = block.get_mut("tx") {
+        if let Some(memo) = memo {
+            tx.insert("memo".into(), ICRC3Value::Blob(memo.to_vec().into()));
+        }
+        if let Some(timestamp) = created_at_time {
+            tx.insert("ts".into(), ICRC3Value::Nat(Nat::from(timestamp)));
+        }
+    }
+    ICRC3Value::Map(block)
+}
+
 // ─── Init ───
 
 #[init]
@@ -345,32 +386,37 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
         let from = account_key(caller, args.from_subaccount);
         let amount = nat_to_u128(&args.amount);
         let fee = args.fee.as_ref().map(nat_to_u128);
+        let is_mint = state.minter == Some(caller) && args.from_subaccount.is_none();
+        let dedup_key = args.created_at_time.map(|created_at_time| DedupKey {
+            caller,
+            from_subaccount: args.from_subaccount,
+            to: args.to.clone(),
+            amount,
+            fee,
+            memo: args.memo.clone(),
+            created_at_time,
+        });
 
         // Dedup check (only when created_at_time is provided, matching ICRC-1).
-        if let Some(t) = args.created_at_time {
-            let key = DedupKey {
-                caller,
-                from_subaccount: args.from_subaccount,
-                to: args.to.clone(),
-                amount,
-                fee,
-                memo: args.memo.clone(),
-                created_at_time: t,
-            };
-            if let Some(prev_block) = state.dedup.get(&key).copied() {
+        if let Some(key) = dedup_key.as_ref() {
+            if let Some(prev_block) = state.dedup.get(key).copied() {
+                if is_mint && take_too_old_after_phantom_mint(&mut state, key, prev_block) {
+                    return Err(TransferError::TooOld);
+                }
                 return Err(TransferError::Duplicate {
                     duplicate_of: Nat::from(prev_block),
                 });
             }
         }
 
-        if fee.is_some_and(|quoted| quoted != state.fee) {
-            return Err(TransferError::BadFee { expected_fee: Nat::from(state.fee) });
+        let expected_fee = if is_mint { 0 } else { state.fee };
+        if fee.is_some_and(|quoted| quoted != expected_fee) {
+            return Err(TransferError::BadFee { expected_fee: Nat::from(expected_fee) });
         }
 
         // Balance check (against the caller's debit, not the to-account).
         let balance = state.balances.get(&from).copied().unwrap_or(0);
-        if amount + state.fee > balance {
+        if !is_mint && amount + state.fee > balance {
             return Err(TransferError::InsufficientFunds {
                 balance: Nat::from(balance),
             });
@@ -378,11 +424,19 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
 
         // Commit balances and append the same exact transfer to the passive
         // ICRC-3 fixture log used by positive-proof tests.
-        let charged_fee = state.fee;
-        *state.balances.entry(from.clone()).or_insert(0) -= amount + charged_fee;
+        let charged_fee = expected_fee;
+        if !is_mint {
+            *state.balances.entry(from.clone()).or_insert(0) -= amount + charged_fee;
+        }
         *state.balances.entry(args.to.clone()).or_insert(0) += amount;
-        let landed_block = append_block(
-            &mut state,
+        let block = if is_mint {
+            borrow_mint_block(
+                &args.to,
+                amount,
+                args.memo.as_deref(),
+                args.created_at_time,
+            )
+        } else {
             transfer_block(
                 "1xfer",
                 "xfer",
@@ -393,26 +447,23 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
                 args.memo.as_deref(),
                 args.created_at_time,
                 None,
-            ),
-        );
+            )
+        };
+        let landed_block = append_block(&mut state, block);
 
-        if let Some(t) = args.created_at_time {
-            let key = DedupKey {
-                caller,
-                from_subaccount: args.from_subaccount,
-                to: args.to,
-                amount,
-                fee,
-                memo: args.memo,
-                created_at_time: t,
-            };
-            state.dedup.insert(key, landed_block);
+        if let Some(key) = dedup_key.as_ref() {
+            state.dedup.insert(key.clone(), landed_block);
         }
 
         // Phantom-failure mode: the transfer committed above but we return an
         // error to the caller, simulating a lost reply.
         if state.phantom_failures_remaining > 0 {
             state.phantom_failures_remaining -= 1;
+            if is_mint {
+                if let Some(key) = dedup_key.as_ref() {
+                    state.phantom_mint_dedup.insert(key.clone(), landed_block);
+                }
+            }
             return Err(TransferError::GenericError {
                 error_code: Nat::from(998u64),
                 message: "Injected phantom failure (transfer committed, reply lost)".to_string(),
@@ -420,6 +471,11 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
         }
         if state.phantom_icrc1_failures_remaining > 0 {
             state.phantom_icrc1_failures_remaining -= 1;
+            if is_mint {
+                if let Some(key) = dedup_key.as_ref() {
+                    state.phantom_mint_dedup.insert(key.clone(), landed_block);
+                }
+            }
             return Err(TransferError::GenericError {
                 error_code: Nat::from(997u64),
                 message: "Injected ICRC-1 phantom failure (transfer committed, reply lost)"
@@ -659,6 +715,21 @@ fn set_phantom_icrc1_failures(n: u32) {
     STATE.with(|s| s.borrow_mut().phantom_icrc1_failures_remaining = n);
 }
 
+/// Configure the caller whose default-account ICRC-1 transfers produce
+/// fee-free `1mint` blocks. `None` restores ordinary transfer behavior.
+#[update]
+fn set_minter(minter: Option<Principal>) {
+    STATE.with(|s| s.borrow_mut().minter = minter);
+}
+
+/// The next N exact retries of a previously phantom-committed mint return the
+/// typed `TooOld` error. The original mint block and balance remain untouched;
+/// this is a simulated response, not evidence of real ledger expiry behavior.
+#[update]
+fn set_too_old_after_phantom_mint(n: u32) {
+    STATE.with(|s| s.borrow_mut().too_old_after_phantom_mint_remaining = n);
+}
+
 /// Next N transfers return BadFee { expected_fee = current fee } before
 /// committing, regardless of the fee the caller submitted.
 #[update]
@@ -670,7 +741,11 @@ fn set_bad_fee_failures(n: u32) {
 /// can call this to start fresh without redeploying the canister.
 #[update]
 fn reset_dedup() {
-    STATE.with(|s| s.borrow_mut().dedup.clear());
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        state.dedup.clear();
+        state.phantom_mint_dedup.clear();
+    });
 }
 
 /// When `Some(p)`, `icrc1_transfer` rejects with `GenericError` if the
@@ -692,4 +767,46 @@ fn set_fail_transfers_for_caller(target: Option<Principal>) {
 #[update]
 fn set_fake_zero_balance_for(target: Option<Principal>) {
     STATE.with(|s| s.borrow_mut().fake_zero_balance_for = target);
+}
+
+#[cfg(test)]
+mod borrow_mint_retry_tests {
+    use super::*;
+
+    #[test]
+    fn simulated_too_old_is_limited_to_the_exact_phantom_mint() {
+        let caller = Principal::self_authenticating(b"fixture-minter");
+        let owner = Principal::self_authenticating(b"mint-recipient");
+        let key = DedupKey {
+            caller,
+            from_subaccount: None,
+            to: Account {
+                owner,
+                subaccount: None,
+            },
+            amount: 42,
+            fee: None,
+            memo: Some(vec![1, 2, 3]),
+            created_at_time: 123,
+        };
+        let mut other_key = key.clone();
+        other_key.amount += 1;
+
+        let mut state = LedgerState {
+            too_old_after_phantom_mint_remaining: 1,
+            ..LedgerState::default()
+        };
+        state.balances.insert(key.to.clone(), 42);
+        state.dedup.insert(key.clone(), 7);
+        state.phantom_mint_dedup.insert(key.clone(), 7);
+
+        assert!(!take_too_old_after_phantom_mint(&mut state, &other_key, 7));
+        assert!(!take_too_old_after_phantom_mint(&mut state, &key, 8));
+        assert_eq!(state.too_old_after_phantom_mint_remaining, 1);
+        assert!(take_too_old_after_phantom_mint(&mut state, &key, 7));
+        assert!(!take_too_old_after_phantom_mint(&mut state, &key, 7));
+        assert_eq!(state.too_old_after_phantom_mint_remaining, 0);
+        assert_eq!(state.balances.get(&key.to), Some(&42));
+        assert!(state.blocks.is_empty());
+    }
 }
