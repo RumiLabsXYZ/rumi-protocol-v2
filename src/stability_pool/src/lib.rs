@@ -79,7 +79,15 @@ pub(crate) fn pool_token_balance_mutation_blocked(ledgers: &[Principal]) -> bool
                     .iter()
                     .any(|ledger| intent.stables_consumed.contains_key(ledger))
             });
-            chain_intersects || native_xrp_intersects
+            let three_usd_intersects = state
+                .pending_three_usd_absorbs
+                .as_ref()
+                .map_or(false, |pending| {
+                    pending
+                        .values()
+                        .any(|intent| ledgers.contains(&intent.ledger))
+                });
+            chain_intersects || native_xrp_intersects || three_usd_intersects
         })
 }
 
@@ -1682,6 +1690,41 @@ mod tests {
             ),
             "interest revenue and admin balance correction must not mutate live denominator while pending",
         );
+
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+    }
+
+    #[test]
+    fn pending_three_usd_absorb_blocks_its_ledger_balance_mutations() {
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+        let three_usd = principal(11);
+        let unrelated = principal(12);
+        mutate_state(|state| {
+            state
+                .prepare_three_usd_absorb(77, 100, 100, three_usd, principal(90), 100_000_000)
+                .unwrap();
+        });
+
+        assert!(pool_token_balance_mutation_blocked(&[three_usd]));
+        assert!(pool_token_balance_mutation_blocked(&[unrelated, three_usd]));
+        assert!(!pool_token_balance_mutation_blocked(&[unrelated]));
+        assert!(matches!(
+            futures::executor::block_on(crate::deposits::deposit(three_usd, 10)),
+            Err(StabilityPoolError::SystemBusy)
+        ));
+        assert!(matches!(
+            futures::executor::block_on(crate::deposits::withdraw(three_usd, 10)),
+            Err(StabilityPoolError::SystemBusy)
+        ));
+        assert!(matches!(
+            futures::executor::block_on(crate::deposits::claim_collateral(three_usd)),
+            Err(StabilityPoolError::SystemBusy)
+        ));
+        assert!(matches!(
+            futures::executor::block_on(crate::deposits::claim_all_collateral()),
+            Err(StabilityPoolError::SystemBusy)
+        ));
+        assert_eq!(read_state(|state| state.deposits.len()), 0);
 
         crate::state::replace_state(crate::state::StabilityPoolState::default());
     }
