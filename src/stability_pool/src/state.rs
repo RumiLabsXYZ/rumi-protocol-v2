@@ -2719,6 +2719,64 @@ impl StabilityPoolState {
         result
     }
 
+    /// Compute a draw using only the configured 3USD LP ledger. The backend
+    /// defines the configured 3pool principal as the 3USD ledger, so require
+    /// exact 3USD LP row. The backend remains authoritative for checking that
+    /// row's ledger against its configured 3pool principal before pulling.
+    pub fn compute_three_usd_token_draw(
+        &self,
+        debt_e8s: u64,
+        collateral_type: &Principal,
+    ) -> Option<(Principal, u64, u64)> {
+        let mut candidates = self.stablecoin_registry.iter().filter(|(ledger, config)| {
+            config.ledger_id == **ledger
+                && config.symbol == "3USD"
+                && config.is_lp_token == Some(true)
+                && config.decimals == 8
+                && config.is_active
+        });
+        let (ledger, _) = candidates.next()?;
+        if candidates.next().is_some() || debt_e8s == 0 {
+            return None;
+        }
+
+        let ledger = *ledger;
+        let virtual_price = self
+            .virtual_prices()
+            .get(&ledger)
+            .copied()
+            .filter(|price| *price > 0)?;
+        let available_native = self
+            .deposits
+            .values()
+            .filter(|position| self.position_opted_in_for(position, collateral_type))
+            .try_fold(0u64, |sum, position| {
+                sum.checked_add(position.stablecoin_balances.get(&ledger).copied().unwrap_or(0))
+            })?;
+        if available_native == 0 {
+            return None;
+        }
+        let available_value = u64::try_from(u128::from(available_native)
+            .checked_mul(virtual_price)?
+            .checked_div(1_000_000_000_000_000_000)?)
+            .ok()?;
+        let target_value = debt_e8s.min(available_value);
+        let numerator = u128::from(target_value)
+            .checked_mul(1_000_000_000_000_000_000)?;
+        // Floor the LP amount so the pool never consumes more value than the
+        // debt target. The covered debt is then recomputed from these exact LP
+        // units and may be slightly smaller due to integer rounding.
+        let amount_floor = u64::try_from(numerator.checked_div(virtual_price)?)
+            .ok()?;
+        let amount = amount_floor.min(available_native);
+        let covered_debt_e8s = u64::try_from(u128::from(amount)
+            .checked_mul(virtual_price)?
+            .checked_div(1_000_000_000_000_000_000)?)
+            .ok()?
+            .min(debt_e8s);
+        (amount > 0 && covered_debt_e8s > 0).then_some((ledger, amount, covered_debt_e8s))
+    }
+
     /// Compute an Inc 4 chain-vault draw. Returns at most one token, icUSD, in
     /// e8s. ckStables and 3USD are intentionally excluded from this path.
     pub fn compute_icusd_chain_draw(
@@ -7379,6 +7437,72 @@ mod tests {
             draw.contains_key(&three_usd_ledger()),
             "Should draw from 3USD for remainder"
         );
+    }
+
+    #[test]
+    fn three_usd_admission_draw_uses_only_the_unique_3usd_lp_and_caps_to_balance() {
+        let mut state = test_state_with_3usd();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 900_000_000);
+        add_deposit_direct(&mut state, user_a(), ckusdt_ledger(), 900_000_000);
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 200_000_000);
+        state.register_stablecoin(StablecoinConfig {
+            ledger_id: Principal::from_slice(&[45]),
+            symbol: "otherLP".into(),
+            decimals: 8,
+            priority: 5,
+            is_active: true,
+            transfer_fee: Some(0),
+            is_lp_token: Some(true),
+            underlying_pool: Some(Principal::from_slice(&[46])),
+        });
+        add_deposit_direct(&mut state, user_a(), Principal::from_slice(&[45]), 900_000_000);
+
+        let (ledger, amount, covered) = state
+            .compute_three_usd_token_draw(500_000_000, &icp_ledger())
+            .expect("configured 3USD LP is eligible");
+        assert_eq!(ledger, three_usd_ledger());
+        assert!(amount > 0 && amount <= 200_000_000);
+        assert!(covered > 0 && covered <= 500_000_000);
+        assert_eq!(covered, lp_to_usd_e8s(amount, 1_049_200_000_000_000_000));
+    }
+
+    #[test]
+    fn three_usd_admission_draw_fails_closed_without_exact_3usd_lp_or_price() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 500_000_000);
+        assert!(state
+            .compute_three_usd_token_draw(100_000_000, &icp_ledger())
+            .is_none());
+
+        let mut state = test_state_with_3usd();
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 500_000_000);
+        state.cached_virtual_prices = Some(BTreeMap::new());
+        assert!(state
+            .compute_three_usd_token_draw(100_000_000, &icp_ledger())
+            .is_none());
+
+        let mut state = test_state_with_3usd();
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 500_000_000);
+        state
+            .cached_virtual_prices
+            .as_mut()
+            .unwrap()
+            .insert(three_usd_ledger(), 3_000_000_000_000_000_000);
+        let (_, amount, covered) = state
+            .compute_three_usd_token_draw(10_000_000, &icp_ledger())
+            .expect("high virtual price still yields a bounded draw");
+        assert_eq!(amount, 3_333_333);
+        assert_eq!(covered, 9_999_999);
+        assert!(covered <= 10_000_000, "rounded LP value cannot exceed debt target");
+
+        let config = state
+            .stablecoin_registry
+            .get_mut(&three_usd_ledger())
+            .unwrap();
+        config.is_active = false;
+        assert!(state
+            .compute_three_usd_token_draw(10_000_000, &icp_ledger())
+            .is_none());
     }
 
     #[test]

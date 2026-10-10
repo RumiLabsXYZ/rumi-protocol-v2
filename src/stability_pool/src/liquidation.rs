@@ -3753,26 +3753,75 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
     }
 
     let pending_intent = read_state(|s| s.get_pending_three_usd_absorb(vault_info.vault_id));
-    let Some(pending_intent) = pending_intent else {
-        return LiquidationResult {
-            vault_id: vault_info.vault_id,
-            stables_consumed: BTreeMap::new(),
-            collateral_gained: 0,
-            collateral_type: vault_info.collateral_type,
-            success: false,
-            error_message: Some(
-                "New stability-pool liquidation is held pending collateral payout proof".into(),
-            ),
-        };
-    };
-
     let protocol_id = read_state(|s| s.protocol_canister_id);
+    let stablecoin_configs: BTreeMap<Principal, StablecoinConfig> =
+        read_state(|s| s.stablecoin_registry.clone());
+    let icusd_ledger = stablecoin_configs
+        .iter()
+        .find(|(_, c)| c.symbol == "icUSD")
+        .map(|(id, _)| *id);
 
+    // New work is limited to the one configured 3USD LP ledger. Ordinary
+    // icUSD/ck-stable routes remain held until their own receipt rails exist.
+    // Existing intents always take precedence and retain their saved tuple.
+    let token_draw = if let Some(intent) = &pending_intent {
+        BTreeMap::from([(intent.ledger, intent.amount)])
+    } else {
+        let fresh_draw = read_state(|state| {
+            let target_debt = if vault_info.recommended_liquidation_amount > 0 {
+                vault_info.recommended_liquidation_amount.min(vault_info.debt_amount)
+            } else {
+                vault_info.debt_amount
+            };
+            state.compute_three_usd_token_draw(target_debt, &vault_info.collateral_type)
+        });
+        let Some((ledger, amount, _)) = fresh_draw else {
+            return LiquidationResult {
+                vault_id: vault_info.vault_id,
+                stables_consumed: BTreeMap::new(),
+                collateral_gained: 0,
+                collateral_type: vault_info.collateral_type,
+                success: false,
+                error_message: Some(
+                    "No eligible configured 3USD balance; ordinary stablecoin liquidation remains held".into(),
+                ),
+            };
+        };
+        if vault_info.collateral_price_e8s == 0
+            || read_state(|state| {
+                state
+                    .collateral_registry
+                    .get(&vault_info.collateral_type)
+                    .is_none()
+            })
+        {
+            return LiquidationResult {
+                vault_id: vault_info.vault_id,
+                stables_consumed: BTreeMap::new(),
+                collateral_gained: 0,
+                collateral_type: vault_info.collateral_type,
+                success: false,
+                error_message: Some(
+                    "Fresh 3USD liquidation requires a pinned collateral price and ledger"
+                        .into(),
+                ),
+            };
+        }
+        if read_state(|state| state.configuration.emergency_pause) {
+            return LiquidationResult {
+                vault_id: vault_info.vault_id,
+                stables_consumed: BTreeMap::new(),
+                collateral_gained: 0,
+                collateral_type: vault_info.collateral_type,
+                success: false,
+                error_message: Some("Pool paused before new 3USD absorb admission".into()),
+            };
+        }
+        BTreeMap::from([(ledger, amount)])
+    };
     // Recovery may only use the pre-existing exact identity. Never compute a
     // fresh draw for this vault, even if reconciliation clears the intent while
     // this call is in progress.
-    let token_draw = BTreeMap::from([(pending_intent.ledger, pending_intent.amount)]);
-
     log!(
         INFO,
         "Token draw for vault {}: {:?}",
@@ -3785,13 +3834,6 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
     let mut actual_consumed: BTreeMap<Principal, u64> = BTreeMap::new();
     let mut non_lp_outcome_unknown = false;
     let mut held_absorb = false;
-
-    let stablecoin_configs: BTreeMap<Principal, StablecoinConfig> =
-        read_state(|s| s.stablecoin_registry.clone());
-    let icusd_ledger = stablecoin_configs
-        .iter()
-        .find(|(_, c)| c.symbol == "icUSD")
-        .map(|(id, _)| *id);
 
     // --- Non-LP tokens: approve + liquidate_vault_partial ---
     for (token_ledger, amount) in &token_draw {
@@ -4018,12 +4060,29 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
     }
 
     // --- LP tokens (3USD): approve + backend pull (atomic) ---
-    for (token_ledger, amount) in lp_token_draws_after_non_lp_attempts(
-        &token_draw,
-        &stablecoin_configs,
-        &actual_consumed,
-        non_lp_outcome_unknown,
-    ) {
+    let lp_draws: Vec<(&Principal, &u64)> = if pending_intent.is_some() {
+        // Recovery follows the immutable journal even if registry metadata
+        // changed after the operation was first admitted.
+        token_draw.iter().collect()
+    } else {
+        lp_token_draws_after_non_lp_attempts(
+            &token_draw,
+            &stablecoin_configs,
+            &actual_consumed,
+            non_lp_outcome_unknown,
+        )
+    };
+    for (token_ledger, amount) in lp_draws {
+        if pending_intent.is_none() && !stablecoin_configs.get(token_ledger).is_some_and(|config| {
+            config.ledger_id == *token_ledger
+                && config.symbol == "3USD"
+                && config.is_lp_token == Some(true)
+                && config.decimals == 8
+                && config.is_active
+        }) {
+            log!(INFO, "Skipping LP token {}: it is not the configured 3USD ledger", token_ledger);
+            continue;
+        }
         // A pending request pins the exact tuple across an ambiguous backend
         // reply. Resume only from its recorded ledger and amount; a fresh
         // liquidation scan may have calculated a different draw.
@@ -4063,54 +4122,50 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             continue;
         }
 
-        // Do not charge an approval fee for a brand-new absorb while the
-        // additive backend V2 rail is disabled (or the old backend has no
-        // readiness endpoint). Existing intents bypass this preflight so an
-        // ambiguous earlier operation can still reconcile by its persisted ID.
-        if !had_existing_intent {
-            let ack: Result<(Result<(), rumi_protocol_backend::ProtocolError>,), _> =
-                call(protocol_id, "acknowledge_three_usd_reserve_v2_client", ()).await;
-            if !matches!(ack, Ok((Ok(()),))) {
-                log!(INFO, "Skipping new 3USD reserve absorb for vault {}: V2 client handshake failed", vault_info.vault_id);
-                continue;
-            }
-            let ready: Result<(bool,), _> =
-                call(protocol_id, "get_three_usd_reserve_ingress_enabled", ()).await;
-            let readiness = match ready {
-                Ok((enabled,)) => Some(enabled),
-                Err(error) => {
-                    log!(INFO, "Skipping new 3USD reserve absorb for vault {}: backend V2 readiness is unavailable: {:?}", vault_info.vault_id, error);
-                    None
-                }
-            };
-            if !three_usd_backend_ready_for_new_absorb(readiness) {
-                log!(INFO, "Skipping new 3USD reserve absorb for vault {}: backend V2 ingress is disabled or unavailable", vault_info.vault_id);
-                continue;
-            }
-        }
-
+        // Persist the immutable request before any inter-canister await. Pause
+        // blocks new admissions; it does not block recovery of an existing ID.
         let intent = match pending_intent {
             Some(intent) => intent,
-            None => match mutate_state(|s| {
-                s.prepare_three_usd_absorb(
-                    vault_info.vault_id,
-                    icusd_equiv_e8s,
-                    requested_amount,
-                    *token_ledger,
-                    vault_info.collateral_type,
-                    vault_info.collateral_price_e8s,
-                )
-            }) {
-                Ok(intent) => intent,
-                Err(error) => {
-                    log!(INFO, "Could not persist 3USD reserve absorb for vault {}: {:?}", vault_info.vault_id, error);
+            None => {
+                if read_state(|s| s.configuration.emergency_pause) {
+                    log!(INFO, "Holding new 3USD absorb for vault {} because the pool is paused", vault_info.vault_id);
                     continue;
                 }
-            },
+                match mutate_state(|s| {
+                    if s.configuration.emergency_pause {
+                        return Err(StabilityPoolError::EmergencyPaused);
+                    }
+                    let config_matches = s.stablecoin_registry.get(token_ledger).is_some_and(|config| {
+                        config.ledger_id == *token_ledger
+                            && config.symbol == "3USD"
+                            && config.is_lp_token == Some(true)
+                            && config.decimals == 8
+                            && config.is_active
+                    });
+                    if !config_matches {
+                        return Err(StabilityPoolError::LiquidationFailed {
+                            vault_id: vault_info.vault_id,
+                            reason: "3USD ledger is no longer the configured LP ledger".into(),
+                        });
+                    }
+                    s.prepare_three_usd_absorb(
+                        vault_info.vault_id,
+                        icusd_equiv_e8s,
+                        requested_amount,
+                        *token_ledger,
+                        vault_info.collateral_type,
+                        vault_info.collateral_price_e8s,
+                    )
+                }) {
+                    Ok(intent) => intent,
+                    Err(error) => {
+                        log!(INFO, "Could not persist 3USD reserve absorb for vault {}: {:?}", vault_info.vault_id, error);
+                        continue;
+                    }
+                }
+            }
         };
-        let intent_metadata_matches_current = intent.collateral_type == Some(vault_info.collateral_type)
-            && intent.collateral_ledger == read_state(|s| s.collateral_registry.get(&vault_info.collateral_type).map(|info| info.ledger_id))
-            && intent.collateral_price_e8s == Some(vault_info.collateral_price_e8s);
+
         if intent.collateral_ledger.is_none() {
             log!(INFO, "Holding 3USD absorb {}: collateral ledger identity was not pinned before backend dispatch", intent.absorb_id);
             continue;
@@ -4122,14 +4177,6 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         // through the idempotent V2 endpoint without another approval.
         let should_approve = if had_existing_intent {
             let existing_status = resolve_three_usd_absorb_status(protocol_id, &intent).await;
-            if !intent_metadata_matches_current
-                && !matches!(existing_status,
-                    ThreeUsdReserveAbsorbStatusResolution::PreTransferRejected
-                    | ThreeUsdReserveAbsorbStatusResolution::FullyRefunded { .. })
-            {
-                log!(INFO, "Holding 3USD absorb {} because current vault metadata differs from its immutable request snapshot", intent.absorb_id);
-                continue;
-            }
             match existing_status {
                 ThreeUsdReserveAbsorbStatusResolution::Unseen => true,
                 ThreeUsdReserveAbsorbStatusResolution::TransferSubmittedOrUnknown => {
@@ -4156,61 +4203,94 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         // there is no durable transfer outcome. Existing ambiguous identities
         // are held above, so retries cannot repeatedly charge approval fees.
         if should_approve {
-        let live_approval_fee = crate::deposits::ledger_transfer_fee(*token_ledger).await;
-        if live_approval_fee != 0 {
-            log!(INFO, "Holding 3USD absorb {} because nonzero approval fees are unsupported", intent.absorb_id);
-            continue;
-        }
-        let approve_args = ApproveArgs {
-            from_subaccount: None,
-            spender: Account {
-                owner: protocol_id,
-                subaccount: None,
-            },
-            // Backend fee is pinned to zero on this 3pool route; authorize
-            // exactly this absorb amount and leave no excess allowance behind.
-            amount: candid::Nat::from(intent.amount as u128),
-            expected_allowance: None,
-            expires_at: Some(ic_cdk::api::time() + 300_000_000_000), // 5 min
-            fee: Some(candid::Nat::from(0u64)),
-            memo: None,
-            created_at_time: Some(ic_cdk::api::time()),
-        };
-
-        let approve_result: Result<(Result<candid::Nat, ApproveError>,), _> =
-            call(*token_ledger, "icrc2_approve", (approve_args,)).await;
-
-        match approve_result {
-            Ok((Ok(_),)) => {
-                // This path is admitted only for the current zero-fee 3pool
-                // ledger. Explicit fee=0 prevents fee drift from silently
-                // charging depositor assets; a changed fee returns BadFee.
+            // An Unseen saved intent is still pre-dispatch, so it must pass the
+            // readiness handshake on every retry. Dispatched requests bypass this
+            // branch and remain recoverable even if admission is later disabled.
+            let ack: Result<(Result<(), rumi_protocol_backend::ProtocolError>,), _> =
+                call(protocol_id, "acknowledge_three_usd_reserve_v2_client", ()).await;
+            if !matches!(ack, Ok((Ok(()),))) {
+                log!(INFO, "Holding 3USD absorb {}: V2 client handshake failed", intent.absorb_id);
+                continue;
             }
-            Ok((Err(e),)) => {
-                // This newly created request is proven pre-transfer because the
-                // backend has not been called yet. For a resumed ID, preserve it:
-                // the earlier backend call may already have pulled 3USD.
-                if !had_existing_intent {
-                    mutate_state(|s| s.clear_pending_three_usd_absorb(intent.vault_id));
+            let ready: Result<(bool,), _> =
+                call(protocol_id, "get_three_usd_reserve_ingress_enabled", ()).await;
+            let readiness = match ready {
+                Ok((enabled,)) => Some(enabled),
+                Err(error) => {
+                    log!(INFO, "Holding 3USD absorb {}: backend V2 readiness is unavailable: {:?}", intent.absorb_id, error);
+                    None
                 }
-                log!(
-                    INFO,
-                    "3USD approve failed for vault {}: {:?}",
-                    vault_info.vault_id,
-                    e
-                );
+            };
+            if !three_usd_backend_ready_for_new_absorb(readiness) {
+                log!(INFO, "Holding 3USD absorb {}: backend V2 ingress is disabled or unavailable", intent.absorb_id);
                 continue;
             }
-            Err(e) => {
-                log!(
-                    INFO,
-                    "3USD approve call failed for vault {}: {:?}",
-                    vault_info.vault_id,
-                    e
-                );
+            if read_state(|s| s.configuration.emergency_pause) {
+                log!(INFO, "Holding 3USD absorb {} before approval because the pool is paused", intent.absorb_id);
                 continue;
+            }
+            let live_approval_fee = crate::deposits::ledger_transfer_fee(*token_ledger).await;
+            if live_approval_fee != 0 {
+                log!(INFO, "Holding 3USD absorb {} because nonzero approval fees are unsupported", intent.absorb_id);
+                continue;
+            }
+            if read_state(|s| s.configuration.emergency_pause) {
+                log!(INFO, "Holding 3USD absorb {} after fee query because the pool is paused", intent.absorb_id);
+                continue;
+            }
+            let approve_args = ApproveArgs {
+                from_subaccount: None,
+                spender: Account {
+                    owner: protocol_id,
+                    subaccount: None,
+                },
+                // Backend fee is pinned to zero on this 3pool route; authorize
+                // exactly this absorb amount and leave no excess allowance behind.
+                amount: candid::Nat::from(intent.amount as u128),
+                expected_allowance: None,
+                expires_at: Some(ic_cdk::api::time() + 300_000_000_000), // 5 min
+                fee: Some(candid::Nat::from(0u64)),
+                memo: None,
+                created_at_time: Some(ic_cdk::api::time()),
+            };
+
+            let approve_result: Result<(Result<candid::Nat, ApproveError>,), _> =
+                call(*token_ledger, "icrc2_approve", (approve_args,)).await;
+
+            match approve_result {
+                Ok((Ok(_),)) => {
+                    // This path is admitted only for the current zero-fee 3pool
+                    // ledger. Explicit fee=0 prevents fee drift from silently
+                    // charging depositor assets; a changed fee returns BadFee.
+                }
+                Ok((Err(e),)) => {
+                    // Preserve the request identity. The backend was not called,
+                    // and a later retry can safely resolve Unseen before approval.
+                    log!(
+                        INFO,
+                        "3USD approve failed for vault {}: {:?}",
+                        vault_info.vault_id,
+                        e
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    log!(
+                        INFO,
+                        "3USD approve call failed for vault {}: {:?}",
+                        vault_info.vault_id,
+                        e
+                    );
+                    continue;
+                }
             }
         }
+
+        // Approval can complete while an administrator pauses the pool. Do not
+        // cross the backend pull boundary for a fresh/unseen request afterward.
+        if should_approve && read_state(|s| s.configuration.emergency_pause) {
+            log!(INFO, "Holding 3USD absorb {} after approval because the pool was paused before backend dispatch", intent.absorb_id);
+            continue;
         }
 
         // Step B: Ask backend to pull 3USD + write down debt atomically.
@@ -5018,13 +5098,70 @@ mod tests {
         let result = futures::executor::block_on(execute_single_liquidation(&vault));
 
         assert!(!result.success);
-        assert!(result.error_message.as_deref().unwrap().contains("pending collateral payout proof"));
+        assert!(result.error_message.as_deref().unwrap().contains("ordinary stablecoin liquidation remains held"));
         read_state(|state| {
             assert!(state.get_pending_three_usd_absorb(vault.vault_id).is_none());
             assert_eq!(state.total_stablecoin_balances.get(&ledger), Some(&50_000_000));
             assert_eq!(state.deposits[&owner].stablecoin_balances.get(&ledger), Some(&50_000_000));
         });
         replace_state(StabilityPoolState::default());
+    }
+
+    #[test]
+    fn fresh_three_usd_liquidation_rejects_unpinned_collateral_metadata_before_calls() {
+        let mut state = test_state();
+        let three_usd = principal(56);
+        let collateral = principal(55);
+        state.register_stablecoin(StablecoinConfig {
+            ledger_id: three_usd,
+            symbol: "3USD".into(),
+            decimals: 8,
+            priority: 3,
+            is_active: true,
+            transfer_fee: Some(0),
+            is_lp_token: Some(true),
+            underlying_pool: Some(principal(57)),
+        });
+        state.register_collateral(CollateralInfo {
+            ledger_id: collateral,
+            symbol: "ICP".into(),
+            decimals: 8,
+            status: CollateralStatus::Active,
+        });
+        state.cached_virtual_prices = Some(BTreeMap::from([(three_usd, 1_000_000_000_000_000_000)]));
+        add_deposit_direct(&mut state, user_a(), three_usd, 100_000_000);
+        replace_state(state);
+
+        let vault = LiquidatableVaultInfo {
+            vault_id: 4243,
+            collateral_type: collateral,
+            debt_amount: 20_000_000,
+            collateral_amount: 1_000_000,
+            recommended_liquidation_amount: 0,
+            collateral_price_e8s: 0,
+        };
+        let result = futures::executor::block_on(execute_single_liquidation(&vault));
+        assert!(!result.success);
+        assert!(result.error_message.as_deref().unwrap().contains("pinned collateral price"));
+        read_state(|state| {
+            assert!(state.get_pending_three_usd_absorb(vault.vault_id).is_none());
+            assert_eq!(state.total_stablecoin_balances.get(&three_usd), Some(&100_000_000));
+        });
+
+        mutate_state(|state| {
+            state.collateral_registry.remove(&collateral);
+        });
+        let missing_ledger = LiquidatableVaultInfo {
+            collateral_price_e8s: 100_000_000,
+            ..vault
+        };
+        let result = futures::executor::block_on(execute_single_liquidation(&missing_ledger));
+        assert!(!result.success);
+        assert!(result.error_message.as_deref().unwrap().contains("pinned collateral price"));
+        read_state(|state| {
+            assert!(state.get_pending_three_usd_absorb(vault.vault_id).is_none());
+            assert_eq!(state.total_stablecoin_balances.get(&three_usd), Some(&100_000_000));
+        });
     }
 
     #[test]
