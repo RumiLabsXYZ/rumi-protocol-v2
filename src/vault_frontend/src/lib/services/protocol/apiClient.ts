@@ -67,11 +67,20 @@ import {
 } from './rawSnapshotCache';
 import { TokenService } from '../tokenService';
 import { mapLiquidationSuccessWithFee } from '../xrpPayoutHelpers';
+import {
+  runVaultPullOperation,
+  normalizeVaultPullStatus,
+  type VaultPullRequest,
+  type VaultPullView,
+} from './vaultOperationJournal';
 
 
 
 // Constants from backend
 export const E8S = 100_000_000;
+// Backend retains the V2 endpoint but rejects AddMargin until its in-flight
+// collateral recovery path can safely handle concurrent vault liquidation.
+const isVaultAddMarginV2Enabled = (): boolean => false;
 const NAT64_MAX = 18_446_744_073_709_551_615n;
 
 /** Parse an icUSD decimal string into exact e8s without passing through Number. */
@@ -342,6 +351,162 @@ private static async refreshVaultData(): Promise<void> {
       }
     }
 
+    /** Run or resume one exact ID-bound collateral pull through the backend journal. */
+    private static async runVaultCollateralPull(
+      request: VaultPullRequest,
+      ctx?: ActionBoundContext,
+      lifecycle?: { onApprovalMayHaveMutated?: () => void; onDispatch?: () => void },
+    ): Promise<VaultOperationResult> {
+      const owner = ApiClient.currentPrincipalText();
+      if (!owner || !get(walletStore).isConnected) {
+        return { success: false, error: 'Wallet not connected. Please connect your wallet and try again.' };
+      }
+      ctx && assertActionBoundContextCurrent(ctx);
+      const actor = ctx
+        ? await ApiClient.getBoundAuthenticatedActor(ctx)
+        : await ApiClient.getAuthenticatedActor();
+      ctx && assertActionBoundContextCurrent(ctx);
+      const assertVaultOwner = () => {
+        ctx && assertActionBoundContextCurrent(ctx);
+        if (ApiClient.currentPrincipalText() !== owner) {
+          throw new Error('Wallet identity changed during the vault operation. The saved operation remains held for its original wallet.');
+        }
+      };
+
+      const collateralForRequest = async (exact: VaultPullRequest) => {
+        let collateralType: string;
+        let amount: bigint;
+        if ('OpenVault' in exact) {
+          collateralType = exact.OpenVault.collateral_type;
+          amount = exact.OpenVault.amount_e8s;
+        } else if ('OpenVaultAndBorrow' in exact) {
+          collateralType = exact.OpenVaultAndBorrow.collateral_type;
+          amount = exact.OpenVaultAndBorrow.amount_e8s;
+        } else {
+          amount = exact.AddMargin.amount_e8s;
+          if (exact.AddMargin.vault_id > BigInt(Number.MAX_SAFE_INTEGER)) {
+            throw new Error('Cannot verify collateral for this vault ID safely. The operation remains held without requesting approval.');
+          }
+          const vault = await ApiClient.getVaultById(Number(exact.AddMargin.vault_id));
+          if (!vault?.collateralType) {
+            throw new Error(`Could not verify the collateral ledger for vault ${exact.AddMargin.vault_id}. The operation remains held without requesting approval.`);
+          }
+          collateralType = vault.collateralType;
+        }
+        const info = collateralStore.getCollateralInfo(collateralType);
+        if (!info?.ledgerCanisterId) {
+          throw new Error(`Could not verify the collateral ledger for ${collateralType}. The operation remains held without requesting approval.`);
+        }
+        const ledgerId = info.ledgerCanisterId;
+        const approvalAmount = amount + BigInt(info?.ledgerFee ?? 0) * 2n;
+        return { collateralType, ledgerId, approvalAmount };
+      };
+
+      const completed = (view: VaultPullView): VaultOperationResult => {
+        const result = ('Completed' in view.phase ? view.phase.Completed.result : {}) as any;
+        if (result.OpenVault) {
+          return {
+            success: true,
+            vaultId: Number(result.OpenVault.vault_id),
+            blockIndex: Number(result.OpenVault.block_index),
+          };
+        }
+        if (result.OpenVaultAndBorrow) {
+          const opened = result.OpenVaultAndBorrow;
+          return {
+            success: true,
+            vaultId: Number(opened.vault_id),
+            blockIndex: Number(opened.block_index),
+            message: opened.borrowed ? undefined : (opened.failure?.[0] || 'Vault opened, but the borrow did not complete.'),
+          };
+        }
+        if (result.AddMargin) {
+          return {
+            success: true,
+            vaultId: Number(result.AddMargin.vault_id),
+            blockIndex: Number(result.AddMargin.block_index),
+          };
+        }
+        throw new Error('Completed vault operation has an unknown result shape.');
+      };
+
+      return runVaultPullOperation<VaultOperationResult>({
+        owner,
+        request,
+        adapter: {
+          currentOwner: () => ApiClient.currentPrincipalText(),
+          assertCurrent: assertVaultOwner,
+          getStatus: async () => {
+            const response = await actor.get_vault_operation_status();
+            if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+            return normalizeVaultPullStatus(response.Ok as any);
+          },
+          approve: async (exact) => {
+            const { ledgerId, approvalAmount } = await collateralForRequest(exact);
+            assertVaultOwner();
+            if (!isOisyWallet()) {
+              const allowance = ctx
+                ? await walletOperations.checkCollateralAllowanceBound(ctx, CONFIG.currentCanisterId, ledgerId)
+                : await walletOperations.checkCollateralAllowance(CONFIG.currentCanisterId, ledgerId);
+              assertVaultOwner();
+              if (allowance >= approvalAmount) return { success: true };
+            }
+
+            // Resolve the signer only after rechecking the pinned identity, and
+            // do not use the legacy retrying helper: a stale actor must never
+            // silently rebind an ambiguous approval to another wallet.
+            assertVaultOwner();
+            const ledgerIdl = ledgerId === CONFIG.currentIcpLedgerId ? CONFIG.icp_ledgerIDL : CONFIG.icusd_ledgerIDL;
+            const ledgerActor = await walletStore.getActor(ledgerId, ledgerIdl) as any;
+            assertVaultOwner();
+            lifecycle?.onApprovalMayHaveMutated?.();
+            const approvalResult = await ledgerActor.icrc2_approve({
+              amount: approvalAmount,
+              spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
+              expires_at: [], expected_allowance: [], memo: [], fee: [],
+              from_subaccount: [], created_at_time: [],
+            });
+            assertVaultOwner();
+            return 'Err' in approvalResult
+              ? { success: false, error: 'Collateral approval failed: ' + String(Object.keys(approvalResult.Err || {})[0] || approvalResult.Err) }
+              : { success: true };
+          },
+          dispatch: async (operationId, exact) => {
+            assertVaultOwner();
+            let response: any;
+            if ('OpenVault' in exact) {
+              response = await actor.open_vault_v2({
+                operation_id: operationId,
+                collateral_amount: exact.OpenVault.amount_e8s,
+                collateral_type: [Principal.fromText(exact.OpenVault.collateral_type)],
+              });
+            } else if ('OpenVaultAndBorrow' in exact) {
+              response = await actor.open_vault_and_borrow_v2({
+                operation_id: operationId,
+                collateral_amount: exact.OpenVaultAndBorrow.amount_e8s,
+                borrow_amount: exact.OpenVaultAndBorrow.borrow_amount_e8s,
+                collateral_type: [Principal.fromText(exact.OpenVaultAndBorrow.collateral_type)],
+              });
+            } else {
+              response = await actor.add_margin_to_vault_v2({
+                operation_id: operationId,
+                vault_id: exact.AddMargin.vault_id,
+                amount: exact.AddMargin.amount_e8s,
+              });
+            }
+            if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+            return response.Ok;
+          },
+          beforeDispatch: () => lifecycle?.onDispatch?.(),
+          completed,
+          acknowledge: async (operationId) => {
+            const response = await actor.ack_vault_operation({ operation_id: operationId });
+            if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+          },
+        },
+      });
+    }
+
     /**
      * Bound sibling of getAuthenticatedActor: re-asserts ctx immediately
      * before the actor is constructed, so an actor built after an internal
@@ -585,270 +750,39 @@ private static async refreshVaultData(): Promise<void> {
      *        If omitted, defaults to ICP.
      */
     static async openVault(collateralAmount: number, collateralTypePrincipal?: string): Promise<VaultOperationResult> {
-        // Keep track of ongoing request
-        let abortController: AbortController | null = null;
-
-        // Resolve collateral info
-        const ctPrincipal = collateralTypePrincipal || CANISTER_IDS.ICP_LEDGER;
-        const collateralInfo = collateralStore.getCollateralInfo(ctPrincipal);
-        const decimals = collateralInfo?.decimals ?? 8;
-        const decimalsFactor = Math.pow(10, decimals);
-        const ledgerCanisterId = collateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
-        const symbol = collateralInfo?.symbol ?? 'ICP';
-
+      return ApiClient.executeSequentialOperation(async () => {
         try {
-          console.log(`Creating vault with ${collateralAmount} ${symbol}`);
-
-          // Minimum amount check (in raw units) — per-collateral from on-chain config
-          const amountRaw = BigInt(Math.floor(collateralAmount * decimalsFactor));
-          const minDeposit = collateralInfo?.minCollateralDeposit ?? 0;
-          if (minDeposit > 0 && amountRaw < BigInt(minDeposit)) {
-            return {
-              success: false,
-              error: `Amount too low. Minimum required: ${minDeposit / decimalsFactor} ${symbol}`
-            };
+          const ctPrincipal = collateralTypePrincipal || CANISTER_IDS.ICP_LEDGER;
+          const collateralInfo = collateralStore.getCollateralInfo(ctPrincipal);
+          const decimals = collateralInfo?.decimals ?? 8;
+          const factor = Math.pow(10, decimals);
+          const symbol = collateralInfo?.symbol ?? 'ICP';
+          if (!Number.isFinite(collateralAmount) || collateralAmount <= 0) {
+            return { success: false, error: 'Collateral amount must be a finite positive number.' };
           }
-
-          // Check wallet connection status before proceeding
-          const walletState = get(walletStore);
-          if (!walletState.isConnected || !walletState.principal) {
-            return {
-              success: false,
-              error: "Wallet not connected. Please connect your wallet and try again."
-            };
+          const amountRaw = BigInt(Math.floor(collateralAmount * factor));
+          const minimum = BigInt(collateralInfo?.minCollateralDeposit ?? 0);
+          if (minimum > 0n && amountRaw < minimum) {
+            return { success: false, error: 'Amount too low. Minimum required: ' + Number(minimum) / factor + ' ' + symbol };
           }
-
-          // Create a new abort controller for this request
-          abortController = new AbortController();
-          const signal = abortController.signal;
-
-          // Enhanced error handling for wallet signer issues
-          try {
-            const actor = await ApiClient.getAuthenticatedActor();
-
-            // Build the optional collateral_type argument
-            const collateralTypeOpt: [] | [Principal] = ctPrincipal === CANISTER_IDS.ICP_LEDGER
-              ? []  // ICP is the default, no need to pass
-              : [Principal.fromText(ctPrincipal)];
-
-            // Pre-open vault-id snapshot for the Oisy false-negative
-            // verifier: if open_vault lands but Oisy mangles the
-            // response, we still find the new vault by diffing IDs.
-            // Oisy reads the warm sync cache (no network await inside the
-            // click gesture window); non-Oisy awaits a fresh snapshot.
-            const beforeIds = isOisyWallet() ? ApiClient.getCachedUserVaultIds() : await ApiClient.snapshotUserVaultIds();
-            const verifyOpenLanded = async () => {
-              if (!beforeIds) return false;
-              const newVault = await ApiClient.findNewlyOpenedVault(beforeIds);
-              if (!newVault) return false;
-              // Sanity check: collateral on the new vault is at least
-              // 95% of what we requested. Below that and something
-              // really odd happened.
-              return newVault.collateralAmount >= (amountRaw * 95n) / 100n;
-            };
-
-            // ─── Oisy ICRC-112 batched path ───
-            // Batches approve + open_vault into a single signer popup via ICRC-112.
-            // The SignerAgent natively handles icrc2_approve consent (Tier 1) so
-            // the ICP ledger's lack of ICRC-21 is not an issue.
-            const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
-
-            if (signerAgent) {
-              console.log(`[Oisy] Sequential approve + open_vault via @icp-sdk/signer v5`);
-              const requestedAllowance = amountRaw * 105n / 100n;
-
-              // Get the ledger actor (routes through Oisy signer)
-              const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL) as any;
-
-              // 1) Approve (first Oisy consent screen). icrc2_approve is handled
-              //    natively by Oisy at Tier 1 — no ICRC-21 needed on the ledger.
-              const approveResult = await ledgerActor.icrc2_approve({
-                amount: requestedAllowance,
-                spender: {
-                  owner: Principal.fromText(CONFIG.currentCanisterId),
-                  subaccount: []
-                },
-                expires_at: [],
-                expected_allowance: [],
-                memo: [],
-                fee: [],
-                from_subaccount: [],
-                created_at_time: []
-              });
-              if (approveResult && 'Err' in approveResult) {
-                return {
-                  success: false,
-                  error: `${symbol} approval failed: ${JSON.stringify(approveResult.Err)}`
-                };
-              }
-
-              // 2) Open vault (second Oisy consent screen).
-              //    Wrapped with _arr false-negative guard since the backend method
-              //    is custom and prone to Oisy's Principal serialization bug.
-              const result = await callWithOisyFalseNegativeGuard(
-                () => actor.open_vault(amountRaw, collateralTypeOpt),
-                verifyOpenLanded,
-                `Oisy open_vault ${collateralAmount} ${symbol}`
-              );
-
-              if (isOisyLandedSentinel(result)) {
-                const found = beforeIds ? await ApiClient.findNewlyOpenedVault(beforeIds) : null;
-                return {
-                  success: true,
-                  vaultId: found?.vaultId,
-                  blockIndex: undefined,
-                  oisyResilient: true,
-                };
-              }
-
-              if ('Ok' in result) {
-                return {
-                  success: true,
-                  vaultId: Number(result.Ok.vault_id),
-                  blockIndex: Number(result.Ok.block_index)
-                };
-              } else {
-                return {
-                  success: false,
-                  error: ApiClient.formatProtocolError(result.Err)
-                };
-              }
-            }
-
-            // ─── Standard ICRC-2 path (Plug, II, etc.) ───
-            // Sequential approve then open_vault (two separate popups)
-            const spenderCanisterId = CONFIG.currentCanisterId;
-
-            // First check current allowance (using generic collateral method)
-            const currentAllowance = await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
-            console.log(`Current ${symbol} allowance for protocol canister: ${Number(currentAllowance) / decimalsFactor}`);
-
-            // If allowance is insufficient, request approval
-            if (currentAllowance < amountRaw) {
-              console.log(`Requesting approval for ${collateralAmount} ${symbol}`);
-
-              // Use a higher allowance (5% more than needed) to avoid small rounding issues
-              const requestedAllowance = amountRaw * 105n / 100n;
-
-              const approvalResult = await walletOperations.approveCollateralTransfer(
-                requestedAllowance, spenderCanisterId, ledgerCanisterId
-              );
-
-              if (!approvalResult.success) {
-                return {
-                  success: false,
-                  error: approvalResult.error || `Failed to approve ${symbol} transfer`
-                };
-              }
-
-              console.log(`Successfully set ${symbol} allowance to ${Number(requestedAllowance) / decimalsFactor}`);
-            }
-
-            // Add a timeout to catch hanging signatures
-            const timeoutPromise = new Promise<never>((_, reject) => {
-              setTimeout(() => reject(new Error("Wallet signature request timed out")), 60000);
-            });
-
-            // Race between the actual operation and the timeout
-            const result = await callWithOisyFalseNegativeGuard(
-              () => Promise.race([
-                actor.open_vault(amountRaw, collateralTypeOpt),
-                timeoutPromise
-              ]),
-              verifyOpenLanded,
-              `open_vault ${collateralAmount} ${symbol}`
-            );
-
-            if (isOisyLandedSentinel(result)) {
-              const found = beforeIds ? await ApiClient.findNewlyOpenedVault(beforeIds) : null;
-              return {
-                success: true,
-                vaultId: found?.vaultId,
-                blockIndex: undefined,
-                oisyResilient: true,
-              };
-            }
-
-            if ('Ok' in result) {
-              return {
-                success: true,
-                vaultId: Number(result.Ok.vault_id),
-                blockIndex: Number(result.Ok.block_index)
-              };
-            } else {
-              return {
-                success: false,
-                error: ApiClient.formatProtocolError(result.Err)
-              };
-            }
-          } catch (signerErr) {
-            console.error('Signer error:', signerErr);
-            
-            // Explicitly abort any pending requests
-            if (abortController && !signal.aborted) {
-              abortController.abort();
-              console.log('Aborted previous signature request after error');
-            }
-            
-            // Handle insufficient allowance errors
-            if (signerErr instanceof Error) {
-              const errMsg = signerErr.message.toLowerCase();
-              
-              if (errMsg.includes('insufficientallowance') || 
-                  errMsg.includes('insufficient allowance')) {
-                return {
-                  success: false,
-                  error: "Insufficient ICP allowance. Please try again to approve the required amount."
-                };
-              }
-              
-              if (errMsg.includes('invalid response from signer') || 
-                  errMsg.includes('failed to sign') ||
-                  errMsg.includes('rejected') ||
-                  errMsg.includes('user declined')) {
-                
-                // Clear any pending wallet states
-                await walletOperations.resetWalletSignerState();
-                
-                // Attempt to refresh the wallet connection
-                try {
-                  await walletStore.refreshWallet();
-                  return {
-                    success: false,
-                    error: "Wallet signature failed. Please try again after refreshing the page."
-                  };
-                } catch (refreshErr) {
-                  return {
-                    success: false,
-                    error: "Wallet signature error. Please disconnect and reconnect your wallet."
-                  };
-                }
-              }
-            }
-            
-            throw signerErr; // Re-throw if it's not a specific signer error we can handle
-          }
-        } catch (err) {
-          console.error('Error opening vault:', err);
-          return {
-            success: false,
-            error: err instanceof Error ? err.message : 'Unknown error opening vault'
+          const type = Principal.fromText(ctPrincipal);
+          const request: VaultPullRequest = {
+            OpenVault: { amount_e8s: amountRaw, collateral_type: type.toText() },
           };
-        } finally {
-          // Make sure to clean up the abort controller
-          if (abortController && !abortController.signal.aborted) {
-            abortController.abort();
-          }
+          return await ApiClient.runVaultCollateralPull(request);
+        } catch (error) {
+          console.error('Error opening vault:', error);
+          return { success: false, error: error instanceof Error ? error.message : 'Unknown error opening vault' };
         }
-      }
+      }, undefined, { refreshBefore: false, refreshAfter: true });
+    }
 
 
 /**
  * Compound: open vault + borrow icUSD in a single canister call.
  *
- * For Oisy / ICRC-112 wallets this batches approve + open_vault_and_borrow
- * into **one** signer popup (instead of approve → open_vault → borrow which
- * requires three popups and fails because the browser blocks async popups).
+ * For Oisy wallets this sequences approval and open_vault_and_borrow_v2
+ * in the signer window, with separate consent screens for each canister call.
  *
  * For non-Oisy wallets this still reduces round-trips (approve → one backend call
  * instead of approve → open_vault → borrow).
@@ -859,181 +793,40 @@ static async openVaultAndBorrow(
   collateralTypePrincipal?: string
 ): Promise<VaultOperationResult> {
   return ApiClient.executeSequentialOperation(async () => {
-    const ctPrincipal = collateralTypePrincipal || CANISTER_IDS.ICP_LEDGER;
-    const collateralInfo = collateralStore.getCollateralInfo(ctPrincipal);
-    const decimals = collateralInfo?.decimals ?? 8;
-    const decimalsFactor = Math.pow(10, decimals);
-    const ledgerCanisterId = collateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
-    const symbol = collateralInfo?.symbol ?? 'ICP';
-
     try {
-      console.log(`Creating vault with ${collateralAmount} ${symbol} and borrowing ${icusdAmount} icUSD`);
-
-      const amountRaw = BigInt(Math.floor(collateralAmount * decimalsFactor));
+      const ctPrincipal = collateralTypePrincipal || CANISTER_IDS.ICP_LEDGER;
+      const collateralInfo = collateralStore.getCollateralInfo(ctPrincipal);
+      const factor = Math.pow(10, collateralInfo?.decimals ?? 8);
+      const symbol = collateralInfo?.symbol ?? 'ICP';
+      if (!Number.isFinite(collateralAmount) || collateralAmount <= 0 ||
+          !Number.isFinite(icusdAmount) || icusdAmount <= 0) {
+        return { success: false, error: 'Collateral and borrow amounts must be finite positive numbers.' };
+      }
+      const amountRaw = BigInt(Math.floor(collateralAmount * factor));
       const borrowRaw = BigInt(Math.floor(icusdAmount * E8S));
-
-      const minDeposit = collateralInfo?.minCollateralDeposit ?? 0;
-      if (minDeposit > 0 && amountRaw < BigInt(minDeposit)) {
-        return { success: false, error: `Amount too low. Minimum required: ${minDeposit / decimalsFactor} ${symbol}` };
+      if (borrowRaw < BigInt(MIN_ICUSD_AMOUNT)) {
+        return { success: false, error: 'Amount too low. Minimum borrowing amount: ' + MIN_ICUSD_AMOUNT / E8S + ' icUSD' };
       }
-
-      const walletState = get(walletStore);
-      if (!walletState.isConnected || !walletState.principal) {
-        return { success: false, error: "Wallet not connected. Please connect your wallet and try again." };
+      const minimum = BigInt(collateralInfo?.minCollateralDeposit ?? 0);
+      if (minimum > 0n && amountRaw < minimum) {
+        return { success: false, error: 'Amount too low. Minimum required: ' + Number(minimum) / factor + ' ' + symbol };
       }
-
-      try {
-        const actor = await ApiClient.getAuthenticatedActor();
-
-        const collateralTypeOpt: [] | [Principal] = ctPrincipal === CANISTER_IDS.ICP_LEDGER
-          ? []
-          : [Principal.fromText(ctPrincipal)];
-
-        // Pre-open-and-borrow snapshot for the Oisy false-negative
-        // verifier. open_vault_and_borrow creates a new vault AND
-        // borrows in one canister call; we treat "new vault appeared
-        // with the right collateral" as proof the call landed.
-        // Oisy reads the warm sync cache (no network await inside the
-        // click gesture window); non-Oisy awaits a fresh snapshot.
-        const beforeIds = isOisyWallet() ? ApiClient.getCachedUserVaultIds() : await ApiClient.snapshotUserVaultIds();
-        const verifyOpenAndBorrowLanded = async () => {
-          if (!beforeIds) return false;
-          const newVault = await ApiClient.findNewlyOpenedVault(beforeIds);
-          if (!newVault) return false;
-          return newVault.collateralAmount >= (amountRaw * 95n) / 100n;
-        };
-
-        // ─── Oisy ICRC-112 batched path ───
-        const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
-
-        if (signerAgent) {
-          console.log(`[Oisy] Sequential approve + open_vault_and_borrow via @icp-sdk/signer v5`);
-          const oisyLedgerFee = BigInt(collateralInfo?.ledgerFee ?? 10_000);
-          const requestedAllowance = amountRaw + oisyLedgerFee * 2n;
-
-          const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL) as any;
-
-          // 1) Approve (first Oisy consent screen, native Tier 1 handling).
-          const approveResult = await ledgerActor.icrc2_approve({
-            amount: requestedAllowance,
-            spender: {
-              owner: Principal.fromText(CONFIG.currentCanisterId),
-              subaccount: []
-            },
-            expires_at: [],
-            expected_allowance: [],
-            memo: [],
-            fee: [],
-            from_subaccount: [],
-            created_at_time: []
-          });
-          if (approveResult && 'Err' in approveResult) {
-            return { success: false, error: `${symbol} approval failed: ${JSON.stringify(approveResult.Err)}` };
-          }
-
-          // 2) open_vault_and_borrow (second consent screen), guarded against _arr.
-          const result = await callWithOisyFalseNegativeGuard(
-            () => actor.open_vault_and_borrow(amountRaw, borrowRaw, collateralTypeOpt),
-            verifyOpenAndBorrowLanded,
-            `Oisy open_vault_and_borrow ${collateralAmount} ${symbol}`
-          );
-
-          if (isOisyLandedSentinel(result)) {
-            const found = beforeIds ? await ApiClient.findNewlyOpenedVault(beforeIds) : null;
-            return {
-              success: true,
-              vaultId: found?.vaultId,
-              blockIndex: undefined,
-              oisyResilient: true,
-            };
-          }
-
-          if ('Ok' in result) {
-            return {
-              success: true,
-              vaultId: Number(result.Ok.vault_id),
-              blockIndex: Number(result.Ok.block_index)
-            };
-          } else {
-            return { success: false, error: ApiClient.formatProtocolError(result.Err) };
-          }
-        }
-
-        // ─── Standard ICRC-2 path (Plug, II, etc.) ───
-        const spenderCanisterId = CONFIG.currentCanisterId;
-
-        const currentAllowance = await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
-        const ledgerFee = BigInt(collateralInfo?.ledgerFee ?? 10_000);
-        const requiredAllowance = amountRaw + ledgerFee;
-        if (currentAllowance < requiredAllowance) {
-          const requestedAllowance = amountRaw + ledgerFee * 2n;
-          const approvalResult = await walletOperations.approveCollateralTransfer(
-            requestedAllowance, spenderCanisterId, ledgerCanisterId
-          );
-          if (!approvalResult.success) {
-            return { success: false, error: approvalResult.error || `Failed to approve ${symbol} transfer` };
-          }
-        }
-
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error("Wallet signature request timed out")), 60000);
-        });
-
-        const result = await callWithOisyFalseNegativeGuard(
-          () => Promise.race([
-            actor.open_vault_and_borrow(amountRaw, borrowRaw, collateralTypeOpt),
-            timeoutPromise
-          ]),
-          verifyOpenAndBorrowLanded,
-          `open_vault_and_borrow ${collateralAmount} ${symbol}`
-        );
-
-        if (isOisyLandedSentinel(result)) {
-          const found = beforeIds ? await ApiClient.findNewlyOpenedVault(beforeIds) : null;
-          return {
-            success: true,
-            vaultId: found?.vaultId,
-            blockIndex: undefined,
-            oisyResilient: true,
-          };
-        }
-
-        if ('Ok' in result) {
-          return {
-            success: true,
-            vaultId: Number(result.Ok.vault_id),
-            blockIndex: Number(result.Ok.block_index)
-          };
-        } else {
-          return { success: false, error: ApiClient.formatProtocolError(result.Err) };
-        }
-      } catch (signerErr) {
-        console.error('Error in openVaultAndBorrow:', signerErr);
-
-        if (signerErr instanceof Error) {
-          const errMsg = signerErr.message.toLowerCase();
-          if (errMsg.includes('insufficientallowance') || errMsg.includes('insufficient allowance')) {
-            return { success: false, error: "Insufficient ICP allowance. Please try again to approve the required amount." };
-          }
-          if (errMsg.includes('invalid response from signer') || errMsg.includes('failed to sign') ||
-              errMsg.includes('rejected') || errMsg.includes('user declined')) {
-            await walletOperations.resetWalletSignerState();
-            try {
-              await walletStore.refreshWallet();
-              return { success: false, error: "Wallet signature failed. Please try again after refreshing the page." };
-            } catch {
-              return { success: false, error: "Wallet signature error. Please disconnect and reconnect your wallet." };
-            }
-          }
-        }
-        throw signerErr;
-      }
-    } catch (err) {
-      console.error('Error in openVaultAndBorrow:', err);
-      return { success: false, error: err instanceof Error ? err.message : 'Unknown error opening vault' };
+      const type = Principal.fromText(ctPrincipal);
+      const request: VaultPullRequest = {
+        OpenVaultAndBorrow: {
+          amount_e8s: amountRaw,
+          borrow_amount_e8s: borrowRaw,
+          collateral_type: type.toText(),
+        },
+      };
+      return await ApiClient.runVaultCollateralPull(request);
+    } catch (error) {
+      console.error('Error in openVaultAndBorrow:', error);
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error opening vault' };
     }
-  });
+  }, undefined, { refreshBefore: false, refreshAfter: true });
 }
+
 
 /**
  * Borrow icUSD from an existing vault
@@ -1137,12 +930,9 @@ static async borrowFromVault(vaultId: number, icusdAmount: number): Promise<Vaul
  * same-account disconnect/reconnect, i.e. a new session with the same principal text) mid-flow
  * aborts before any further signer call rather than silently mixing identities across sub-steps.
  *
- * Deliberately does NOT run the legacy Oisy `_arr` false-negative on-chain landed-heuristic:
- * a heuristic vault-scan match is not provably attributable to this specific attempt, so any
- * thrown error after the mutating call is dispatched (including that pattern) is surfaced as
- * 'ambiguous_transport', never upgraded to a success. Does NOT go through
- * executeSequentialOperation — no global mutex, no before/after vault-cache refresh; the caller
- * owns reconciliation.
+ * The backend operation journal is the recovery authority; this path does not infer success
+ * from a vault-list diff. It keeps the bound-session checks while using the same cross-tab lock,
+ * exact-ID persistence, and reload recovery as the unbound V2 methods.
  */
 static async openVaultAndBorrowBound(
   ctx: ActionBoundContext,
@@ -1152,8 +942,6 @@ static async openVaultAndBorrowBound(
 ): Promise<BoundOpenVaultAndBorrowResult> {
   const ctPrincipal = collateralTypePrincipal || CANISTER_IDS.ICP_LEDGER;
   const collateralInfo = collateralStore.getCollateralInfo(ctPrincipal);
-  const ledgerCanisterId = collateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
-  const symbol = collateralInfo?.symbol ?? 'ICP';
 
   const submitted = { submittedCollateralRaw: collateralAmountRaw, submittedIcusdRaw: icusdAmountRaw };
   const abort = (errorMessage: string, approvalMayHaveMutated: boolean): BoundOpenVaultAndBorrowResult => ({
@@ -1165,138 +953,70 @@ static async openVaultAndBorrowBound(
     approvalMayHaveMutated,
     ...submitted,
   });
-
-  if (collateralAmountRaw <= 0n) {
-    return abort('Invalid collateral amount.', false);
+  if (collateralAmountRaw <= 0n || icusdAmountRaw <= 0n) {
+    return abort('Collateral and borrowing amounts must be positive integers.', false);
   }
-  if (icusdAmountRaw <= 0n) {
-    return abort('Invalid borrowing amount.', false);
+  if (icusdAmountRaw < BigInt(MIN_ICUSD_AMOUNT)) {
+    return abort('Amount too low. Minimum borrowing amount: ' + MIN_ICUSD_AMOUNT / E8S + ' icUSD', false);
   }
   const minDeposit = collateralInfo?.minCollateralDeposit ?? 0;
   if (minDeposit > 0 && collateralAmountRaw < BigInt(minDeposit)) {
-    return abort(`Amount too low. Minimum required: ${minDeposit} raw units`, false);
+    return abort('Amount too low. Minimum required: ' + minDeposit + ' raw units', false);
   }
 
-  let approvalDispatched = false;
-  let actor!: _SERVICE;
-  let collateralTypeOpt!: [] | [Principal];
-
+  const collateralType = Principal.fromText(ctPrincipal);
+  const request: VaultPullRequest = {
+    OpenVaultAndBorrow: {
+      amount_e8s: collateralAmountRaw,
+      borrow_amount_e8s: icusdAmountRaw,
+      collateral_type: collateralType.toText(),
+    },
+  };
+  let approvalMayHaveMutated = false;
+  let dispatchAttempted = false;
   try {
     assertActionBoundContextCurrent(ctx);
-
-    collateralTypeOpt = ctPrincipal === CANISTER_IDS.ICP_LEDGER ? [] : [Principal.fromText(ctPrincipal)];
-
-    // ─── Oisy ICRC-112 batched path ───
-    const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
-    assertActionBoundContextCurrent(ctx);
-
-    if (signerAgent) {
-      const oisyLedgerFee = BigInt(collateralInfo?.ledgerFee ?? 10_000);
-      const requestedAllowance = collateralAmountRaw + oisyLedgerFee * 2n;
-
-      const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL) as any;
-      assertActionBoundContextCurrent(ctx);
-
-      approvalDispatched = true;
-      const approveResult = await ledgerActor.icrc2_approve({
-        amount: requestedAllowance,
-        spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
-        expires_at: [],
-        expected_allowance: [],
-        memo: [],
-        fee: [],
-        from_subaccount: [],
-        created_at_time: []
-      });
-      assertActionBoundContextCurrent(ctx);
-
-      if (approveResult && 'Err' in approveResult) {
-        return abort(`${symbol} approval failed: ${JSON.stringify(approveResult.Err)}`, true);
-      }
-
-      actor = await ApiClient.getBoundAuthenticatedActor(ctx);
-      assertActionBoundContextCurrent(ctx);
-    } else {
-      // ─── Standard ICRC-2 path (Plug, II, etc.) ───
-      const spenderCanisterId = CONFIG.currentCanisterId;
-      const currentAllowance = await walletOperations.checkCollateralAllowanceBound(ctx, spenderCanisterId, ledgerCanisterId);
-      assertActionBoundContextCurrent(ctx);
-
-      const ledgerFee = BigInt(collateralInfo?.ledgerFee ?? 10_000);
-      const requiredAllowance = collateralAmountRaw + ledgerFee;
-      if (currentAllowance < requiredAllowance) {
-        const requestedAllowance = collateralAmountRaw + ledgerFee * 2n;
-        approvalDispatched = true;
-        const approvalResult = await walletOperations.approveCollateralTransferBound(
-          ctx, requestedAllowance, spenderCanisterId, ledgerCanisterId
-        );
-        assertActionBoundContextCurrent(ctx);
-        if (!approvalResult.success) {
-          return abort(approvalResult.error || `Failed to approve ${symbol} transfer`, true);
-        }
-      }
-
-      actor = await ApiClient.getBoundAuthenticatedActor(ctx);
-      assertActionBoundContextCurrent(ctx);
+    const result = await ApiClient.runVaultCollateralPull(request, ctx, {
+      onApprovalMayHaveMutated: () => { approvalMayHaveMutated = true; },
+      onDispatch: () => { dispatchAttempted = true; },
+    });
+    if (!result.success) {
+      return abort(result.error || 'Vault operation did not complete.', approvalMayHaveMutated);
     }
-  } catch (err) {
-    if (err instanceof StaleActionSessionError) {
-      return abort(err.message, approvalDispatched);
+    if (result.message) {
+      return {
+        kind: 'dispatched_err',
+        vaultId: null,
+        blockIndex: result.blockIndex ?? null,
+        partialZeroDebtVaultId: result.vaultId ?? null,
+        errorMessage: result.message,
+        approvalMayHaveMutated,
+        ...submitted,
+      };
     }
-    return abort(err instanceof Error ? err.message : 'Unknown error before dispatch', approvalDispatched);
-  }
-
-  // Final checkpoint immediately before the actual mutating call.
-  try {
-    assertActionBoundContextCurrent(ctx);
-  } catch (err) {
-    return abort(err instanceof Error ? err.message : 'Session changed before dispatch.', approvalDispatched);
-  }
-
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error('Wallet signature request timed out')), 60000);
-  });
-
-  let result: any;
-  try {
-    result = await Promise.race([
-      actor.open_vault_and_borrow(collateralAmountRaw, icusdAmountRaw, collateralTypeOpt),
-      timeoutPromise,
-    ]);
-  } catch (dispatchErr) {
-    // Dispatched but no typed backend result observed — never proof of no mutation.
     return {
-      kind: 'ambiguous_transport',
+      kind: 'dispatched_ok',
+      vaultId: result.vaultId ?? null,
+      blockIndex: result.blockIndex ?? null,
+      partialZeroDebtVaultId: null,
+      errorMessage: null,
+      approvalMayHaveMutated,
+      ...submitted,
+    };
+  } catch (error) {
+    if (error instanceof StaleActionSessionError && !dispatchAttempted) {
+      return abort(error.message, approvalMayHaveMutated);
+    }
+    return {
+      kind: dispatchAttempted ? 'ambiguous_transport' : 'predispatch_aborted',
       vaultId: null,
       blockIndex: null,
       partialZeroDebtVaultId: null,
-      errorMessage: dispatchErr instanceof Error ? dispatchErr.message : 'Network error after dispatch.',
-      approvalMayHaveMutated: approvalDispatched,
+      errorMessage: error instanceof Error ? error.message : 'Vault operation failed.',
+      approvalMayHaveMutated,
       ...submitted,
     };
   }
-
-  if ('Ok' in result) {
-    return {
-      kind: 'dispatched_ok',
-      vaultId: Number(result.Ok.vault_id),
-      blockIndex: Number(result.Ok.block_index),
-      partialZeroDebtVaultId: null,
-      errorMessage: null,
-      approvalMayHaveMutated: approvalDispatched,
-      ...submitted,
-    };
-  }
-
-  return {
-    kind: 'dispatched_err',
-    vaultId: null,
-    blockIndex: null,
-    partialZeroDebtVaultId: ApiClient.extractPartialZeroDebtVaultId(result.Err),
-    errorMessage: ApiClient.formatProtocolError(result.Err),
-    approvalMayHaveMutated: approvalDispatched,
-    ...submitted,
-  };
 }
 
 /**
@@ -1404,252 +1124,48 @@ private static async borrowFromVaultBoundInternal(
  * @param collateralTypePrincipal Optional: the collateral type principal. If omitted, looks up from vault data or defaults to ICP.
  */
 static async addMarginToVault(vaultId: number, collateralAmount: number, collateralTypePrincipal?: string): Promise<VaultOperationResult> {
+  if (!isVaultAddMarginV2Enabled()) {
+    return {
+      success: false,
+      error: 'Adding collateral is temporarily paused while safe recovery for an in-flight vault pull is finalized. No approval or transfer was started.',
+    };
+  }
+
   return ApiClient.executeSequentialOperation(async () => {
     try {
-      // Resolve collateral info — try the provided principal, or look up from vault, or default to ICP
+      if (!Number.isSafeInteger(vaultId) || vaultId < 0 ||
+          !Number.isFinite(collateralAmount) || collateralAmount <= 0) {
+        return { success: false, error: 'Vault ID and collateral amount must be valid positive values.' };
+      }
       let ctPrincipal = collateralTypePrincipal;
       if (!ctPrincipal) {
-        // Try to get collateral type from the user's vault data
         const vault = await ApiClient.getVaultById(vaultId);
         ctPrincipal = vault?.collateralType || CANISTER_IDS.ICP_LEDGER;
       }
-      const ctInfo = collateralStore.getCollateralInfo(ctPrincipal);
-      const ctDecimals = ctInfo?.decimals ?? 8;
-      const ctDecimalsFactor = Math.pow(10, ctDecimals);
-      const ledgerCanisterId = ctInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
-      const symbol = ctInfo?.symbol ?? 'ICP';
-
-      console.log(`Adding ${collateralAmount} ${symbol} to vault #${vaultId}`);
-
-      const minDeposit = ctInfo?.minCollateralDeposit ?? 0;
-      if (minDeposit > 0 && collateralAmount * ctDecimalsFactor < minDeposit) {
-        return {
-          success: false,
-          error: `Amount too low. Minimum required: ${minDeposit / ctDecimalsFactor} ${symbol}`
-        };
+      const collateralInfo = collateralStore.getCollateralInfo(ctPrincipal);
+      const factor = Math.pow(10, collateralInfo?.decimals ?? 8);
+      const symbol = collateralInfo?.symbol ?? 'ICP';
+      const amountRaw = BigInt(Math.floor(collateralAmount * factor));
+      const minimum = BigInt(collateralInfo?.minCollateralDeposit ?? 0);
+      if (minimum > 0n && amountRaw < minimum) {
+        return { success: false, error: 'Amount too low. Minimum required: ' + Number(minimum) / factor + ' ' + symbol };
       }
-      const amountRaw = BigInt(Math.floor(collateralAmount * ctDecimalsFactor));
-      const bufferAmount = amountRaw * BigInt(120) / BigInt(100); // 20% buffer
-
-      // Check if user has sufficient balance (only works for ICP via wallet store)
-      // Skip for Oisy — async calls burn user gesture context needed for signer popup.
-      // The canister validates balance anyway.
       if (ctPrincipal === CANISTER_IDS.ICP_LEDGER && !isOisyWallet()) {
-        const hasSufficientBalance = await walletOperations.checkSufficientBalance(Number(bufferAmount) / ctDecimalsFactor);
-        if (!hasSufficientBalance) {
-          return {
-            success: false,
-            error: `Insufficient ${symbol} balance. Please ensure you have at least ${collateralAmount} ${symbol} available.`
-          };
-        }
+        const sufficient = await walletOperations.checkSufficientBalance(Number(amountRaw) / factor);
+        if (!sufficient) return { success: false, error: 'Insufficient ' + symbol + ' balance.' };
       }
-
-      const actor = await ApiClient.getAuthenticatedActor();
-
-      // Snapshot pre-add collateral for the Oisy false-negative verifier.
-      // We read RAW token units so we can compare with BigInt arithmetic.
-      // Oisy reads the warm sync cache (no network await inside the click
-      // gesture window); non-Oisy awaits a fresh snapshot.
-      const beforeCollateral = isOisyWallet() ? ApiClient.getCachedRawCollateralAmount(vaultId) : await ApiClient.getRawCollateralAmount(vaultId);
-
-      // ─── Oisy ICRC-112 batched path ───
-      // Batches approve + add_margin into a single signer popup via ICRC-112.
-      const marginSignerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
-
-      if (marginSignerAgent) {
-        console.log(`[Oisy] Sequential approve + add_margin for vault #${vaultId}`);
-
-        const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL) as any;
-
-        // 1) Approve (first Oisy consent screen).
-        const approveResult = await ledgerActor.icrc2_approve({
-          amount: bufferAmount,
-          spender: {
-            owner: Principal.fromText(CONFIG.currentCanisterId),
-            subaccount: []
-          },
-          expires_at: [],
-          expected_allowance: [],
-          memo: [],
-          fee: [],
-          from_subaccount: [],
-          created_at_time: []
-        });
-        if (approveResult && 'Err' in approveResult) {
-          return {
-            success: false,
-            error: `${symbol} approval failed: ${JSON.stringify(approveResult.Err)}`
-          };
-        }
-
-        // 2) add_margin_to_vault (second consent screen), guarded against _arr.
-        const marginResult = await callWithOisyFalseNegativeGuard(
-          () => actor.add_margin_to_vault({
-            vault_id: BigInt(vaultId),
-            amount: amountRaw
-          }),
-          async () => {
-            if (beforeCollateral === null) return false;
-            const after = await ApiClient.getRawCollateralAmount(vaultId);
-            if (after === null) return false;
-            return after - beforeCollateral >= (amountRaw * 95n) / 100n;
-          },
-          `Oisy add_margin ${collateralAmount} ${symbol} to vault #${vaultId}`
-        );
-
-        if (isOisyLandedSentinel(marginResult)) {
-          return {
-            success: true,
-            vaultId,
-            blockIndex: undefined,
-            oisyResilient: true,
-          };
-        }
-
-        if ('Ok' in marginResult) {
-          return {
-            success: true,
-            vaultId,
-            blockIndex: Number(marginResult.Ok)
-          };
-        } else {
-          return {
-            success: false,
-            error: ApiClient.formatProtocolError(marginResult.Err)
-          };
-        }
-      }
-
-      // ─── Standard ICRC-2 path (Plug, II, etc.) ───
-      // First check current allowance
-      const spenderCanisterId = CONFIG.currentCanisterId;
-      let currentAllowance;
-
-      try {
-        currentAllowance = await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
-        console.log(`Current ${symbol} allowance:`, currentAllowance.toString());
-      } catch (err) {
-        console.error('Error checking allowance:', err);
-        return {
-          success: false,
-          error: 'Failed to check token allowance. Please ensure your wallet is connected and try again.'
-        };
-      }
-
-      if (currentAllowance < amountRaw) {
-        console.log('Insufficient allowance, requesting approval...');
-        console.log(`Requesting ${bufferAmount} raw (original: ${amountRaw} raw)`);
-
-        try {
-          const approvalResult = await walletOperations.approveCollateralTransfer(
-            bufferAmount, spenderCanisterId, ledgerCanisterId
-          );
-
-          if (!approvalResult.success) {
-            return {
-              success: false,
-              error: approvalResult.error || `Failed to approve ${symbol} transfer`
-            };
-          }
-
-          // Short delay to allow approval to be processed
-          await new Promise(resolve => setTimeout(resolve, 2000));
-
-          // Verify approval worked
-          const newAllowance = await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
-          console.log('New allowance after approval:', newAllowance.toString());
-
-          if (newAllowance < amountRaw) {
-            return {
-              success: false,
-              error: `Approval did not complete successfully. Required: ${amountRaw}, Got: ${newAllowance}`
-            };
-          }
-        } catch (approvalErr) {
-          console.error('Approval error:', approvalErr);
-          return {
-            success: false,
-            error: approvalErr instanceof Error ?
-              approvalErr.message : 'Unknown error during approval'
-          };
-        }
-      } else {
-        console.log(`Current allowance ${currentAllowance} is sufficient for amount ${amountRaw}`);
-
-        // If allowance is just barely enough, still request a higher allowance
-        if (currentAllowance < bufferAmount) {
-          console.log('Existing allowance is close to required amount, increasing for safety');
-          try {
-            const approvalResult = await walletOperations.approveCollateralTransfer(
-              bufferAmount, spenderCanisterId, ledgerCanisterId
-            );
-
-            if (approvalResult.success) {
-              console.log('Successfully increased allowance for future operations');
-              await new Promise(resolve => setTimeout(resolve, 2000));
-            } else {
-              console.warn('Failed to increase allowance, but continuing with existing allowance');
-            }
-          } catch (err) {
-            console.warn('Error increasing allowance, but continuing with existing allowance:', err);
-          }
-        }
-      }
-
-      // Now proceed with adding margin
-      const vaultArg = {
-        vault_id: BigInt(vaultId),
-        amount: amountRaw // Use the original amount for the actual operation
+      const request: VaultPullRequest = {
+        AddMargin: { vault_id: BigInt(vaultId), amount_e8s: amountRaw },
       };
-
-      console.log('Calling add_margin_to_vault with args:', {
-        vault_id: vaultArg.vault_id.toString(),
-        amount: vaultArg.amount.toString()
-      });
-
-      const result = await callWithOisyFalseNegativeGuard(
-        () => actor.add_margin_to_vault(vaultArg),
-        async () => {
-          if (beforeCollateral === null) return false;
-          const after = await ApiClient.getRawCollateralAmount(vaultId);
-          if (after === null) return false;
-          return after - beforeCollateral >= (amountRaw * 95n) / 100n;
-        },
-        `add_margin ${collateralAmount} ${symbol} to vault #${vaultId}`
-      );
-
-      if (isOisyLandedSentinel(result)) {
-        return {
-          success: true,
-          vaultId,
-          blockIndex: undefined,
-          oisyResilient: true,
-        };
-      }
-
-      if ('Ok' in result) {
-        return {
-          success: true,
-          vaultId,
-          blockIndex: Number(result.Ok)
-        };
-      } else {
-        return {
-          success: false,
-          error: ApiClient.formatProtocolError(result.Err)
-        };
-      }
-    } catch (err) {
-      console.error('Error adding margin to vault:', err);
-      return {
-        success: false,
-        error: err instanceof Error ? err.message : 'Unknown error adding margin'
-      };
+      return await ApiClient.runVaultCollateralPull(request);
+    } catch (error) {
+      console.error('Error adding margin to vault:', error);
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error adding margin' };
     }
-    // REMOVED: Don't use finally block with manual timestamp deletion
-  }, vaultId); // Pass vaultId here to let executeSequentialOperation handle tracking
+  }, vaultId, { refreshBefore: false, refreshAfter: true });
 }
-  
+
+
 /**
  * Repay icUSD to a vault.
  *
