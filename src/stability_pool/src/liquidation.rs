@@ -4794,11 +4794,11 @@ mod tests {
         let intent = state.prepare_three_usd_absorb(
             42, 500, 1_000, ledger, principal(14), 100_000_000,
         ).expect("persist intent before settlement");
-        apply_three_usd_absorb_settlement(&mut state, &intent, 0, None)
+        apply_three_usd_absorb_settlement_at(&mut state, &intent, 0, None, 123)
             .expect("verified terminal outcome settles");
         assert!(state.get_pending_three_usd_absorb(42).is_none());
         assert!(state.completed_three_usd_absorbs.as_ref().unwrap().contains(&intent.absorb_id));
-        assert!(apply_three_usd_absorb_settlement(&mut state, &intent, 0, None).is_err(),
+        assert!(apply_three_usd_absorb_settlement_at(&mut state, &intent, 0, None, 123).is_err(),
             "a timer/notification replay must not settle the same identity twice");
     }
 
@@ -5391,7 +5391,7 @@ mod tests {
         ]));
         crate::ensure_pool_token_balance_mutation_allowed(&[ckusdc_ledger()]).unwrap();
         mutate_state(|state| {
-            state.add_deposit(user_a(), ckusdc_ledger(), 20_000000);
+            state.add_deposit_at(user_a(), ckusdc_ledger(), 20_000000, 6);
         });
         crate::deposits::prepare_withdrawal_after_ledger_check(
             user_b(),
