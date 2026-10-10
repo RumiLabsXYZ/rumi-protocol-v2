@@ -6072,6 +6072,56 @@ mod borrow_mint_journal_tests {
     use std::rc::Rc;
 
     #[test]
+    fn receipt_recovery_authorizes_only_owner_or_configured_developer_and_keeps_owner_attribution()
+    {
+        let owner = Principal::from_slice(&[0x61]);
+        let developer = Principal::from_slice(&[0x62]);
+        let stranger = Principal::from_slice(&[0x63]);
+        let journal = BorrowMintJournal {
+            vault_id: 7,
+            owner,
+            collateral_type: Principal::from_slice(&[0x64]),
+            borrowed_amount_e8s: 500,
+            fee_amount_e8s: 0,
+            tuple: BorrowMintTuple {
+                ledger: Principal::from_slice(&[0x65]),
+                destination: owner,
+                amount_e8s: 500,
+                memo: [0x66; 16],
+                created_at_time_ns: 123,
+                op_nonce: 88,
+            },
+            phase: BorrowMintPhase::ReceiptRecoveryRequired,
+        };
+
+        assert!(
+            matches!(borrow_mint_recovery_owner(owner, &journal, developer), Ok(p) if p == owner)
+        );
+        assert!(
+            matches!(borrow_mint_recovery_owner(developer, &journal, developer), Ok(p) if p == owner)
+        );
+        assert!(matches!(
+            borrow_mint_recovery_owner(stranger, &journal, developer),
+            Err(ProtocolError::CallerNotOwner)
+        ));
+        assert!(matches!(
+            borrow_mint_recovery_owner(Principal::anonymous(), &journal, Principal::anonymous()),
+            Err(ProtocolError::CallerNotOwner)
+        ));
+        assert!(matches!(
+            borrow_mint_recovery_owner(developer, &journal, stranger),
+            Err(ProtocolError::CallerNotOwner)
+        ));
+        assert!(validate_borrow_mint_recovery_journal(&journal).is_ok());
+        let mut wrong_recipient = journal.clone();
+        wrong_recipient.tuple.destination = developer;
+        assert!(validate_borrow_mint_recovery_journal(&wrong_recipient).is_err());
+        let mut wrong_net = journal.clone();
+        wrong_net.tuple.amount_e8s += 1;
+        assert!(validate_borrow_mint_recovery_journal(&wrong_net).is_err());
+    }
+
+    #[test]
     fn commit_then_error_retries_exact_tuple_and_records_debt_once() {
         let owner = Principal::from_slice(&[0x41]);
         let ledger = Principal::from_slice(&[0x42]);
@@ -6273,6 +6323,35 @@ mod borrow_mint_journal_tests {
     }
 }
 
+fn borrow_mint_recovery_owner(
+    caller: Principal,
+    journal: &crate::state::BorrowMintJournal,
+    developer: Principal,
+) -> Result<Principal, ProtocolError> {
+    if caller == journal.owner || (caller != Principal::anonymous() && caller == developer) {
+        Ok(journal.owner)
+    } else {
+        Err(ProtocolError::CallerNotOwner)
+    }
+}
+
+fn validate_borrow_mint_recovery_journal(
+    journal: &crate::state::BorrowMintJournal,
+) -> Result<(), ProtocolError> {
+    let expected_net = journal
+        .borrowed_amount_e8s
+        .checked_sub(journal.fee_amount_e8s);
+    if journal.tuple.destination != journal.owner
+        || expected_net != Some(journal.tuple.amount_e8s)
+    {
+        return Err(ProtocolError::GenericError(
+            "borrow mint journal recipient or net amount is inconsistent; recovery remains held"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Reconcile a borrow journal after its exact ICRC-1 retry returned TooOld.
 /// The caller-supplied block index is only a candidate: debt is committed only
 /// after an archive-aware ICRC-3 read validates the exact persisted mint tuple.
@@ -6303,9 +6382,17 @@ pub async fn reconcile_pending_borrow_mint_from_block(
             )));
         }
     };
-    if caller != journal.owner {
+    let developer = read_state(|s| s.developer_principal);
+    let borrower = match borrow_mint_recovery_owner(caller, &journal, developer) {
+        Ok(owner) => owner,
+        Err(error) => {
+            guard_principal.fail();
+            return Err(error);
+        }
+    };
+    if let Err(error) = validate_borrow_mint_recovery_journal(&journal) {
         guard_principal.fail();
-        return Err(ProtocolError::CallerNotOwner);
+        return Err(error);
     }
     if journal.phase != crate::state::BorrowMintPhase::ReceiptRecoveryRequired {
         guard_principal.fail();
@@ -6325,6 +6412,14 @@ pub async fn reconcile_pending_borrow_mint_from_block(
         return Err(ProtocolError::GenericError(format!(
             "candidate ICRC-3 block does not prove the exact borrow mint; journal remains held: {error}"
         )));
+    }
+
+    // A developer may be revoked while the ledger proof call is outstanding.
+    // Recheck current authority before the once-only state transition.
+    if borrow_mint_recovery_owner(caller, &journal, read_state(|s| s.developer_principal)).is_err()
+    {
+        guard_principal.fail();
+        return Err(ProtocolError::CallerNotOwner);
     }
 
     let confirmed = mutate_state(|s| {
@@ -6351,7 +6446,7 @@ pub async fn reconcile_pending_borrow_mint_from_block(
     // The held phase bypasses the ledger closure and runs the same checked,
     // once-only debt/event commit used by a direct successful ledger reply.
     match borrow_from_vault_internal(
-        caller,
+        borrower,
         VaultArg {
             vault_id,
             amount: journal.borrowed_amount_e8s,
