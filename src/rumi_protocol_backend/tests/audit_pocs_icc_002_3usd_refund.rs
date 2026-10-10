@@ -492,6 +492,16 @@ fn flaky_set_fail_transfers(pic: &PocketIc, ledger: Principal, fail: bool) {
     .expect("set_fail_transfers failed");
 }
 
+fn flaky_arm_bad_fee_after_transfer_from(pic: &PocketIc, ledger: Principal) {
+    pic.update_call(
+        ledger,
+        Principal::anonymous(),
+        "set_bad_fee_after_transfer_from",
+        encode_one(true).unwrap(),
+    )
+    .expect("set_bad_fee_after_transfer_from failed");
+}
+
 fn xrc_set_rate(
     pic: &PocketIc,
     xrc: Principal,
@@ -1577,6 +1587,183 @@ fn p08_02_v2_ingress_is_default_account_proof_bound_and_replay_safe() {
         icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)),
         sp_before - amount_e8s as u128 - ingress_fee as u128,
         "rebound ID must not transfer additional LP tokens"
+    );
+}
+
+/// A typed BadFee from the V2 child refund proves that the dispatch did not
+/// commit. Keep the principal liability, clear only that exact submitted
+/// fence, and allow a developer rearm to settle the same child tuple later.
+#[test]
+fn p08_v2_child_refund_bad_fee_releases_fence_and_rearms() {
+    use rumi_protocol_backend::{
+        ThreeUsdReserveIngressV2Status as Status, ThreeUsdReserveIngressV2StatusView,
+        MAX_PENDING_RETRIES,
+    };
+
+    let f = setup_fixture(ThreePoolKind::Flaky);
+    let requested_debt_e8s = 2_000_000_000u64;
+    let ingress_amount_e8s = 2_000_000_000u64;
+    let absorb_id = 1u64;
+
+    let acknowledged: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.sp_principal,
+            "acknowledge_three_usd_reserve_v2_client",
+            encode_args(()).unwrap(),
+        )
+        .expect("acknowledge V2 client")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 acknowledgement"),
+        WasmResult::Reject(message) => panic!("V2 acknowledgement rejected: {message}"),
+    };
+    acknowledged.expect("registered SP may acknowledge the V2 client interface");
+    let enabled: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "set_three_usd_reserve_ingress_enabled",
+            encode_one(true).unwrap(),
+        )
+        .expect("enable V2 ingress")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 enable result"),
+        WasmResult::Reject(message) => panic!("V2 enable rejected: {message}"),
+    };
+    enabled.expect("developer may enable V2 in the isolated test canister");
+
+    xrc_set_rate(&f.pic, f.xrc_id, f.developer, "ICP", "USD", 20_000_000);
+    for _ in 0..3 {
+        f.pic.advance_time(Duration::from_secs(481));
+        for _ in 0..10 {
+            f.pic.tick();
+        }
+    }
+
+    let sp_before = icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal));
+    let backend_before = icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.protocol_id));
+    icrc2_approve_call(
+        &f.pic,
+        f.three_pool_ledger,
+        f.sp_principal,
+        f.protocol_id,
+        (ingress_amount_e8s as u128) * 2,
+    );
+    // The V2 ingress uses ICRC-2 transfer_from, so this one-shot ICRC-1 fault
+    // can only be consumed by the later protocol-to-SP child refund.
+    flaky_arm_bad_fee_after_transfer_from(&f.pic, f.three_pool_ledger);
+
+    let ingress: Result<StabilityPoolLiquidationResult, ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.sp_principal,
+            "stability_pool_liquidate_with_reserves_v2",
+            encode_args((
+                f.vault_id,
+                absorb_id,
+                requested_debt_e8s,
+                ingress_amount_e8s,
+                f.three_pool_ledger,
+            ))
+            .unwrap(),
+        )
+        .expect("V2 ingress call")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 ingress result"),
+        WasmResult::Reject(message) => panic!("V2 ingress rejected: {message}"),
+    };
+    let ingress = ingress.expect("proof-verified V2 ingress should partially liquidate the vault");
+    assert_eq!(
+        ingress.liquidated_debt, 1_000_000_000,
+        "fixture vault has 1B debt"
+    );
+
+    drain_pending_transfers(&f.pic);
+    let held = get_pending_3usd_refunds(&f.pic, f.protocol_id);
+    assert_eq!(
+        held.len(),
+        1,
+        "the proportional refund remains a durable child"
+    );
+    assert_eq!(
+        held[0].retry_count, MAX_PENDING_RETRIES,
+        "typed BadFee caps the known-unsent child"
+    );
+    assert_eq!(
+        held[0].amount_e8s, 1_000_000_000,
+        "half the gross ingress is the refund principal"
+    );
+    assert_ne!(held[0].op_nonce, Nat::from(0u8));
+    let refund_nonce = held[0].op_nonce.clone();
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)),
+        sp_before - ingress_amount_e8s as u128,
+        "BadFee must not credit the SP"
+    );
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.protocol_id)),
+        backend_before + ingress_amount_e8s as u128,
+        "BadFee must not debit the backend default account"
+    );
+
+    let rearmed: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "rearm_unsent_v2_default_account_refund",
+            encode_one(refund_nonce.clone()).unwrap(),
+        )
+        .expect("developer rearm call")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 rearm result"),
+        WasmResult::Reject(message) => panic!("V2 rearm endpoint rejected: {message}"),
+    };
+    rearmed.expect("developer may rearm the exact known-unsent V2 child");
+    drain_pending_transfers(&f.pic);
+
+    assert!(get_pending_3usd_refunds(&f.pic, f.protocol_id).is_empty());
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)),
+        sp_before - 1_000_000_000,
+        "the SP retains the net 1B corresponding to the debt actually liquidated"
+    );
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.protocol_id)),
+        backend_before + 1_000_000_000,
+        "the protocol keeps exactly the realized reserve principal"
+    );
+    assert_eq!(
+        get_protocol_3usd_reserves(&f.pic, f.protocol_id),
+        1_000_000_000
+    );
+
+    let status: ThreeUsdReserveIngressV2StatusView = match f
+        .pic
+        .query_call(
+            f.protocol_id,
+            f.sp_principal,
+            "get_stability_pool_liquidate_with_reserves_v2_status",
+            encode_args((f.vault_id, absorb_id)).unwrap(),
+        )
+        .expect("query V2 status")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 status"),
+        WasmResult::Reject(message) => panic!("V2 status query rejected: {message}"),
+    };
+    assert!(
+        matches!(
+            status.status,
+            Status::Absorbed {
+                proportional_refund: Some(_),
+                ..
+            }
+        ),
+        "the same child must settle only after an exact refund receipt: {:?}",
+        status.status
     );
 }
 
