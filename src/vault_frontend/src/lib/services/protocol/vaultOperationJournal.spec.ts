@@ -404,6 +404,6 @@ describe('runVaultPullOperation', () => {
 		expect(setup.adapter.approve).not.toHaveBeenCalled();
 		expect(setup.adapter.dispatch).not.toHaveBeenCalled();
 		expect(setup.adapter.acknowledge).not.toHaveBeenCalled();
-		expect(localStorage.getItem(`rumi:vault-pull-operation:v1:${owner}`)).toBeNull();
+		expect(localStorage.getItem(`rumi:vault-pull-operation:v1:${owner}`)).not.toBeNull();
 	});
 });

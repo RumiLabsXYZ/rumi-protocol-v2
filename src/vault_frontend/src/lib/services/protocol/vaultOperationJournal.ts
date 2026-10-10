@@ -275,12 +275,12 @@ async function runVaultPullOperationLocked<T>(
 		if (intent) {
 			const operationId = BigInt(intent.operationId);
 			if (status.acknowledged_through >= operationId) {
-				clearIntent(owner, operationId);
 				if (expectedRecoveredOperationId === operationId) {
 					throw new Error(
 						`Vault operation ${operationId} was acknowledged during recovery. Refresh vault data before starting another request.`
 					);
 				}
+				clearIntent(owner, operationId);
 				intent = null;
 			} else if (active) {
 				validateActive(active, intent);
