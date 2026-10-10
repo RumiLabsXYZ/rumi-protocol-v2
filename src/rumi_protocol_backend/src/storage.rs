@@ -523,6 +523,38 @@ mod state_snapshot_tests {
     }
 
     #[test]
+    fn submitted_p08_default_account_refund_survives_state_snapshot_round_trip() {
+        use crate::state::{PendingThreeUsdRefund, ThreeUsdRefundSource};
+
+        // A V2 parent-absorb refund differs from the legacy hashed-reserve
+        // rows covered by state.rs tests. These fields identify a possibly
+        // dispatched default-account transfer; clearing any can authorize a
+        // second payout after recovery.
+        let row = PendingThreeUsdRefund {
+            stability_pool: Principal::from_slice(&[1]),
+            ledger: Principal::from_slice(&[2]),
+            amount_e8s: 33_000,
+            vault_id: 4,
+            retry_count: 2,
+            op_nonce: 5,
+            source: ThreeUsdRefundSource::DefaultAccount,
+            parent_absorb_id: Some(41),
+            dispatch_amount_e8s: Some(33_000),
+            dispatch_fee_e8s: Some(0),
+            dispatch_submitted: true,
+            dispatch_block_index: None,
+        };
+        let mut state = crate::state::State::default();
+        state.pending_3usd_refunds.insert(row.op_nonce, row);
+
+        let decoded = decode_state_body(&encode_state(&state))
+            .expect("submitted P08 refund must survive the production State CBOR codec");
+
+        assert_eq!(decoded.pending_3usd_refunds.get(&row.op_nonce), Some(&row));
+        assert_eq!(decoded.pending_3usd_refunds.len(), 1);
+    }
+
+    #[test]
     fn populated_multi_chain_survives_round_trip() {
         // The guard the audit asked for: a populated `multi_chain` sub-tree (a
         // foreign-chain vault + its supply) must survive the exact ciborium
