@@ -2179,6 +2179,10 @@ export interface _SERVICE {
     [bigint, bigint, bigint],
     Result
   >,
+  'reconcile_three_usd_reserve_v1_cutover' : ActorMethod<
+    [Uint8Array | number[]],
+    Result
+  >,
   'recover_pending_payout' : ActorMethod<[bigint], Result_21>,
   'recover_pending_transfer' : ActorMethod<[bigint], Result_21>,
   'recover_stuck_chain_vault' : ActorMethod<[number, bigint], Result>,

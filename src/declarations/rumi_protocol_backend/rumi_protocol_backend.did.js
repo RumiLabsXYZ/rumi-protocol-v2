@@ -2372,6 +2372,11 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'reconcile_three_usd_reserve_v1_cutover' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [Result],
+        [],
+      ),
     'recover_pending_payout' : IDL.Func([IDL.Nat], [Result_21], []),
     'recover_pending_transfer' : IDL.Func([IDL.Nat64], [Result_21], []),
     'recover_stuck_chain_vault' : IDL.Func(

@@ -543,6 +543,7 @@ mod state_snapshot_tests {
             dispatch_fee_e8s: Some(0),
             dispatch_submitted: true,
             dispatch_block_index: None,
+            resolution: None,
         };
         let mut state = crate::state::State::default();
         state.pending_3usd_refunds.insert(row.op_nonce, row);

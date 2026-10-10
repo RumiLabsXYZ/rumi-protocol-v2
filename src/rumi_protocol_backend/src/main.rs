@@ -7372,9 +7372,14 @@ async fn stability_pool_liquidate_with_reserves(
             "Caller is not the registered stability pool canister".to_string(),
         ));
     }
-    if read_state(|s| s.three_usd_reserve_ingress_enabled) {
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    if read_state(rumi_protocol_backend::management::three_usd_reserve_v1_is_retired) {
         return Err(ProtocolError::TemporarilyUnavailable(
-            "V1 3USD reserve ingress is disabled after the V2 client cutover".into(),
+            "V1 3USD reserve ingress is retired or quarantined".into(),
         ));
     }
 
@@ -7464,6 +7469,29 @@ async fn stability_pool_liquidate_with_reserves(
     })
     .map_err(ProtocolError::GenericError)?;
 
+    // Last admission check after every validation await. The shared guard is
+    // held across dispatch and the entire V1 saga, so the V2 toggle cannot
+    // retire this path between the check and the ledger call.
+    if read_state(rumi_protocol_backend::management::three_usd_reserve_v1_is_retired) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "V1 3USD reserve ingress is retired after V2 cutover".into(),
+        ));
+    }
+    let prior_cutover = read_state(|state| state.three_usd_reserve_v1_cutover.clone());
+    // V1 has no durable ingress identity. Commit quarantine before the first
+    // ledger-dispatch await so an upgrade or lost reply cannot erase an
+    // unresolved old-account transfer from the cutover decision.
+    mutate_state(|state| {
+        if rumi_protocol_backend::management::three_usd_reserve_v1_is_retired(state) {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "V1 3USD reserve ingress is retired or quarantined".into(),
+            ));
+        }
+        state.three_usd_reserve_v1_cutover =
+            rumi_protocol_backend::state::ThreeUsdReserveV1Cutover::Quarantined;
+        Ok::<_, ProtocolError>(())
+    })?;
+
     // Pull 3USD from the SP into protocol reserves subaccount (ICRC-2 transfer_from).
     // Only runs after validation passes — no tokens move if vault is stale.
     // The block index returned drives the Phase-2 internal proof below.
@@ -7494,7 +7522,7 @@ async fn stability_pool_liquidate_with_reserves(
     // the 3USD is stranded in our reserves subaccount and the SP's bookkeeping never
     // got a chance to mark it consumed. Refund it so the SP's ledger balance and
     // bookkeeping stay in sync.
-    match rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
+    let result = match rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
         vault_id,
         icusd_debt_covered_e8s,
         caller,
@@ -7538,7 +7566,16 @@ async fn stability_pool_liquidate_with_reserves(
                 .await;
             Err(liq_error)
         }
+    };
+    if result.is_ok() {
+        mutate_state(|state| {
+            rumi_protocol_backend::management::finish_three_usd_reserve_v1_success(
+                state,
+                &prior_cutover,
+            );
+        });
     }
+    result
 }
 
 /// V2 reserve ingress: the absorb identity and full ICRC-2 tuple are journaled
@@ -7609,6 +7646,24 @@ async fn stability_pool_liquidate_with_reserves_v2(
             "exact ingress tuple was proven absent; refusing to dispatch it again".into(),
         )),
         _ => {}
+    }
+
+    // Old snapshots may retain an enabled toggle without any record of an
+    // in-flight V1 transfer. Quarantine only fresh admission; existing
+    // submitted journals remain eligible for exact receipt/refund recovery.
+    if matches!(journal.phase, Phase::AdmissionPending)
+        && read_state(rumi_protocol_backend::management::three_usd_reserve_v2_admission_quarantined)
+    {
+        let reason = "V2 3USD ingress is held by legacy V1 upgrade quarantine".to_string();
+        mutate_state(|state| {
+            if let Some(row) = state.three_usd_reserve_ingress_journals.get_mut(&key) {
+                if matches!(row.phase, Phase::AdmissionPending) {
+                    row.phase = Phase::PreTransferRejected { reason: reason.clone() };
+                    row.protocol_refund_fee_reserve_e8s = 0;
+                }
+            }
+        });
+        return Err(ProtocolError::TemporarilyUnavailable(reason));
     }
 
     // Persist a typed no-transfer terminal before replying when rollout is
@@ -7902,7 +7957,7 @@ async fn stability_pool_liquidate_with_reserves_v2(
                     _ => {}
                 }
             }
-        });
+                        });
     }
     match rumi_protocol_backend::vault::liquidate_vault_debt_already_burned_v2(
         vault_id, icusd_debt_covered_e8s, caller, three_usd_amount_e8s, three_usd_ledger,
@@ -7948,6 +8003,7 @@ async fn stability_pool_liquidate_with_reserves_v2(
                         dispatch_fee_e8s: None,
                         dispatch_submitted: false,
                         dispatch_block_index: None,
+                        resolution: None,
                     });
                 }
             });
@@ -7975,6 +8031,7 @@ async fn stability_pool_liquidate_with_reserves_v2(
                         dispatch_fee_e8s: None,
                         dispatch_submitted: false,
                         dispatch_block_index: None,
+                        resolution: None,
                     });
                 }
             });
@@ -8561,24 +8618,47 @@ fn set_three_usd_reserve_ingress_enabled(enabled: bool) -> Result<(), ProtocolEr
     if read_state(|s| s.developer_principal) != caller {
         return Err(ProtocolError::GenericError("Only developer can toggle V2 3USD reserve ingress".into()));
     }
-    mutate_state(|s| {
-        if enabled && s.three_pool_is_registered_as_collateral() {
-            return Err(ProtocolError::TemporarilyUnavailable(
-                "configured 3pool ledger is registered as collateral; V2 ingress remains disabled".into(),
-            ));
-        }
-        if enabled && !s.three_usd_reserve_v2_client_ready {
-            return Err(ProtocolError::TemporarilyUnavailable(
-                "registered Stability Pool has not acknowledged the V2 client interface".into(),
-            ));
-        }
-        s.three_usd_reserve_ingress_enabled = enabled;
-        if !enabled {
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    mutate_state(|s| -> Result<(), ProtocolError> {
+        if enabled {
+            if s.three_pool_is_registered_as_collateral() {
+                return Err(ProtocolError::TemporarilyUnavailable(
+                    "configured 3pool ledger is registered as collateral; V2 ingress remains disabled".into(),
+                ));
+            }
+            rumi_protocol_backend::management::commit_three_usd_reserve_v2_activation(s)
+                .map_err(|error| ProtocolError::TemporarilyUnavailable(error.into()))?;
+        } else {
+            s.three_usd_reserve_ingress_enabled = false;
             s.three_usd_reserve_v2_client_ready = false;
         }
         Ok(())
     })?;
     Ok(())
+}
+
+#[update]
+#[candid_method(update)]
+fn reconcile_three_usd_reserve_v1_cutover(evidence_sha256: Vec<u8>) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    mutate_state(|state| {
+        rumi_protocol_backend::management::record_three_usd_reserve_v1_cutover_reconciliation(
+            state,
+            caller,
+            &evidence_sha256,
+            ic_cdk::api::time(),
+        )
+        .map_err(|error| ProtocolError::GenericError(error.into()))
+    })
 }
 
 #[update]
@@ -8746,6 +8826,7 @@ fn enqueue_pending_3usd_refund(
                 dispatch_fee_e8s: None,
                 dispatch_submitted: false,
                 dispatch_block_index: None,
+                resolution: None,
             },
         );
     });
@@ -9844,6 +9925,22 @@ async fn set_stability_pool_principal(
     if !is_developer {
         return Err(ProtocolError::GenericError(
             "Only developer can set stability pool principal".to_string(),
+        ));
+    }
+
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    if read_state(|state| {
+        rumi_protocol_backend::management::stability_pool_change_has_v2_obligations(
+            state,
+            stability_pool_principal,
+        )
+    }) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "old Stability Pool has unresolved 3USD ingress or refund obligations".into(),
         ));
     }
 
@@ -11909,13 +12006,13 @@ async fn bot_confirm_liquidation_with_proofs(
             .iter()
             .map(|proof| {
                 bot_payment_replay_status_for_ledger(
-                    &s.consumed_bot_payment_proofs,
-                    &s.consumed_bot_payment_blocks,
-                    s.legacy_consumed_payment_ledger,
-                    proof.ledger_principal,
-                    proof.block_index,
-                    proof.vault_id,
-                    proof.claim_generation,
+        &s.consumed_bot_payment_proofs,
+        &s.consumed_bot_payment_blocks,
+        s.legacy_consumed_payment_ledger,
+        proof.ledger_principal,
+        proof.block_index,
+        proof.vault_id,
+        proof.claim_generation,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -14737,6 +14834,21 @@ async fn set_three_pool_canister(canister_id: Principal) -> Result<(), ProtocolE
     if !is_developer {
         return Err(ProtocolError::GenericError(
             "Only the developer principal can set 3pool canister".to_string(),
+        ));
+    }
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    if read_state(|state| {
+        rumi_protocol_backend::management::three_pool_canister_change_has_old_ledger_obligations(
+            state,
+            canister_id,
+        )
+    }) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "old 3pool ledger has unresolved reserve, ingress, or refund obligations".into(),
         ));
     }
     let is_collateral = read_state(|s| s.is_registered_collateral_ledger(canister_id));

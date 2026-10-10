@@ -1864,6 +1864,7 @@ service : (ProtocolArg) -> {
       nat64,
       nat64,
     ) -> (Result);
+  reconcile_three_usd_reserve_v1_cutover : (blob) -> (Result);
   recover_pending_payout : (nat) -> (Result_21);
   recover_pending_transfer : (nat64) -> (Result_21);
   recover_stuck_chain_vault : (nat32, nat64) -> (Result);
