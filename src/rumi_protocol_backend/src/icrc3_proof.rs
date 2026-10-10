@@ -567,6 +567,150 @@ pub fn validate_icrc3_borrow_mint_block(
     Ok(())
 }
 
+/// Validate the exact positive receipt for a journaled ICRC-2 collateral pull.
+/// A present block type must be `2xfer`; unlike an owner transfer, this block
+/// must name the canister as spender and preserve the exact transfer tuple.
+pub fn validate_vault_collateral_pull_block(
+    block: &DecodedBlock,
+    journal: &crate::state::VaultCollateralPullJournal,
+    spender: Principal,
+) -> Result<(), String> {
+    if block.btype.as_deref() != Some("2xfer") || block.op != "xfer" {
+        return Err("ICRC-3 receipt is not an exact ICRC-2 transfer_from block".into());
+    }
+    let expected_spender = Account { owner: spender, subaccount: None };
+    if block.from.as_ref() != Some(&journal.from)
+        || block.to.as_ref() != Some(&journal.to)
+        || block.spender.as_ref() != Some(&expected_spender)
+        || block.amount != u128::from(journal.amount_e8s)
+        || block.fee != Some(journal.fee_e8s)
+        || block.memo.as_deref() != Some(journal.memo.as_slice())
+        || block.created_at_time != Some(journal.created_at_time_ns)
+    {
+        return Err("ICRC-3 receipt does not match the pinned collateral pull tuple".into());
+    }
+    Ok(())
+}
+
+/// Accept only a direct, contiguous ledger-global block. Archive callbacks
+/// provide locators, not authenticated proof of the requested global block.
+pub async fn verify_vault_collateral_pull_block(
+    journal: &crate::state::VaultCollateralPullJournal,
+    block_index: u64,
+    spender: Principal,
+) -> Result<(), String> {
+    let request = vec![GetBlocksRequest { start: Nat::from(block_index), length: Nat::from(1u64) }];
+    let (response,): (GetBlocksResult,) = ic_cdk::call(journal.ledger, "icrc3_get_blocks", (request,))
+        .await
+        .map_err(|(code, message)| format!("direct collateral-ledger ICRC-3 read failed: {code:?} {message}"))?;
+    if !response.archived_blocks.is_empty()
+        || response.blocks.len() != 1
+        || response.blocks[0].id.0.to_u64() != Some(block_index)
+        || response.log_length.0.to_u64().is_none_or(|length| block_index >= length)
+    {
+        return Err("candidate is not a direct contiguous ledger block; archive evidence remains held".into());
+    }
+    let block = decode_block(&response.blocks[0].block)?;
+    validate_vault_collateral_pull_block(&block, journal, spender)
+}
+
+#[cfg(test)]
+mod vault_collateral_pull_receipt_tests {
+    use super::{validate_vault_collateral_pull_block, DecodedBlock};
+    use crate::state::{VaultCollateralPullJournal, VaultCollateralPullPhase, VaultCollateralPullRequest};
+    use candid::Principal;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn fixture() -> (VaultCollateralPullJournal, Principal, DecodedBlock) {
+        let owner = Principal::from_slice(&[1]);
+        let spender = Principal::from_slice(&[2]);
+        let ledger = Principal::from_slice(&[3]);
+        let from = Account { owner, subaccount: None };
+        let to = Account { owner: spender, subaccount: None };
+        let journal = VaultCollateralPullJournal {
+            owner,
+            operation_id: 4,
+            request: VaultCollateralPullRequest::OpenVault { collateral_type: ledger, amount_e8s: 500 },
+            vault_id: 9,
+            ledger,
+            from: from.clone(),
+            to: to.clone(),
+            amount_e8s: 500,
+            fee_e8s: 10,
+            memo: [0x5a; 16],
+            created_at_time_ns: 99,
+            op_nonce: 88,
+            dispatch_attempts: 1,
+            receipt_recovery_cooldown_until_ns: 0,
+            phase: VaultCollateralPullPhase::Submitted,
+        };
+        let block = DecodedBlock {
+            btype: Some("2xfer".into()),
+            op: "xfer".into(),
+            from: Some(from),
+            to: Some(to),
+            spender: Some(Account { owner: spender, subaccount: None }),
+            amount: 500,
+            fee: Some(10),
+            created_at_time: Some(99),
+            memo: Some(vec![0x5a; 16]),
+        };
+        (journal, spender, block)
+    }
+
+    #[test]
+    fn exact_positive_receipt_requires_direct_icrc2_tuple_fields() {
+        let (journal, spender, expected) = fixture();
+        assert!(validate_vault_collateral_pull_block(&expected, &journal, spender).is_ok());
+        for mutate in 0..7 {
+            let mut changed = expected.clone();
+            match mutate {
+                0 => changed.btype = None,
+                1 => changed.op = "transfer".into(),
+                2 => changed.from.as_mut().unwrap().owner = Principal::from_slice(&[4]),
+                3 => changed.to.as_mut().unwrap().owner = Principal::from_slice(&[4]),
+                4 => changed.spender.as_mut().unwrap().owner = Principal::from_slice(&[4]),
+                5 => changed.fee = Some(11),
+                _ => changed.created_at_time = Some(100),
+            }
+            assert!(validate_vault_collateral_pull_block(&changed, &journal, spender).is_err());
+        }
+    }
+
+    #[test]
+    fn lost_transfer_callback_then_too_old_recovers_only_from_exact_receipt() {
+        use crate::state::{State, VaultOperationResult};
+        let (journal, spender, expected) = fixture();
+        let owner = journal.owner;
+        let mut state = State::default();
+        state.vault_collateral_pull_journals.insert(owner, journal.clone());
+
+        // The flaky ledger applied the pull, but its callback was dropped.
+        let ledger_applied = true;
+        assert!(ledger_applied);
+        // Retrying after the dedup window returns TooOld. That response is not
+        // an absence proof and must leave the exact submitted generation held.
+        assert_eq!(state.vault_collateral_pull_journals.get(&owner), Some(&journal));
+        assert!(validate_vault_collateral_pull_block(&expected, &journal, spender).is_ok());
+        let confirmed = state.record_vault_pull_confirmed(&owner, &journal, 77).unwrap();
+        assert_eq!(confirmed.phase, VaultCollateralPullPhase::PullConfirmed { block_index: 77 });
+
+        // A later v2 retry consumes the durable confirmation once, then its
+        // terminal result protects against a lost top-level reply.
+        state.complete_vault_operation(&owner, journal.operation_id, VaultOperationResult::OpenVault {
+            vault_id: journal.vault_id,
+            block_index: 77,
+        }).unwrap();
+        assert_eq!(state.vault_operation_status(owner).active.unwrap().phase,
+            VaultCollateralPullPhase::Completed { result: VaultOperationResult::OpenVault {
+                vault_id: journal.vault_id, block_index: 77,
+            }});
+        assert!(validate_vault_collateral_pull_block(
+            &DecodedBlock { amount: 501, ..expected }, &journal, spender
+        ).is_err());
+    }
+}
+
 /// Fetch an archive-aware candidate block and validate it against the exact
 /// persisted mint arguments. Candidate indexes are untrusted caller input.
 pub async fn verify_icrc3_borrow_mint_block(

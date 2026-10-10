@@ -131,6 +131,22 @@ fn validate_authenticated_not_frozen() -> Result<(), ProtocolError> {
     validate_not_frozen()
 }
 
+/// Exact collateral-pull replays must be able to resolve after mode/oracle
+/// changes. The vault module still checks owner, operation ID, and full request
+/// equality before it can redispatch the pinned tuple.
+fn has_recoverable_vault_operation(owner: Principal, operation_id: u64) -> bool {
+    rumi_protocol_backend::state::read_state(|state| {
+        state.vault_collateral_pull_journals.get(&owner).is_some_and(|journal| {
+            journal.operation_id == operation_id
+                && !matches!(
+                    journal.phase,
+                    rumi_protocol_backend::state::VaultCollateralPullPhase::Prepared
+                        | rumi_protocol_backend::state::VaultCollateralPullPhase::SafeNoEffect { .. }
+                )
+        })
+    })
+}
+
 /// The emergency freeze remains authoritative even for exact ledger retries.
 fn validate_not_frozen() -> Result<(), ProtocolError> {
     if read_state(|s| s.frozen) {
@@ -6416,13 +6432,24 @@ async fn redeem_quoted(request: RedeemQuotedRequest) -> Result<RedemptionResult,
 #[candid_method(update)]
 #[update]
 async fn open_vault(
-    collateral_amount: u64,
-    collateral_type: Option<Principal>,
+    _collateral_amount: u64,
+    _collateral_type: Option<Principal>,
 ) -> Result<OpenVaultSuccess, ProtocolError> {
-    validate_call().await?;
-    check_postcondition(
-        rumi_protocol_backend::vault::open_vault(collateral_amount, collateral_type).await,
-    )
+    Err(ProtocolError::TemporarilyUnavailable(
+        "this endpoint is disabled; use open_vault_v2 with a client operation ID".into(),
+    ))
+}
+
+#[candid_method(update)]
+#[update]
+async fn open_vault_v2(args: rumi_protocol_backend::vault::OpenVaultV2Args) -> Result<OpenVaultSuccess, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if has_recoverable_vault_operation(caller, args.operation_id) {
+        validate_authenticated_not_frozen()?;
+    } else {
+        validate_call().await?;
+    }
+    check_postcondition(rumi_protocol_backend::vault::open_vault_v2(args).await)
 }
 
 /// Compound open vault + borrow in a single canister call.
@@ -6430,19 +6457,64 @@ async fn open_vault(
 #[candid_method(update)]
 #[update]
 async fn open_vault_and_borrow(
-    collateral_amount: u64,
-    borrow_amount: u64,
-    collateral_type: Option<Principal>,
+    _collateral_amount: u64,
+    _borrow_amount: u64,
+    _collateral_type: Option<Principal>,
 ) -> Result<OpenVaultSuccess, ProtocolError> {
-    validate_call().await?;
-    validate_mode()?;
-    // ORACLE-001: refresh the (possibly non-ICP) collateral price before minting.
-    validate_freshness_for_collateral(collateral_type).await?;
+    Err(ProtocolError::TemporarilyUnavailable(
+        "this endpoint is disabled; use open_vault_and_borrow_v2 with a client operation ID".into(),
+    ))
+}
+
+#[candid_method(update)]
+#[update]
+async fn open_vault_and_borrow_v2(args: rumi_protocol_backend::vault::OpenVaultAndBorrowV2Args) -> Result<OpenVaultSuccess, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if has_recoverable_vault_operation(caller, args.operation_id) {
+        validate_authenticated_not_frozen()?;
+    } else {
+        validate_call().await?;
+        validate_mode()?;
+        validate_freshness_for_collateral(args.collateral_type).await?;
+    }
+    check_postcondition(rumi_protocol_backend::vault::open_vault_and_borrow_v2(args).await)
+}
+
+#[candid_method(query)]
+#[query]
+fn get_vault_operation_status() -> Result<rumi_protocol_backend::state::VaultOperationStatus, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    Ok(rumi_protocol_backend::state::read_state(|s| s.vault_operation_status(caller)))
+}
+
+#[candid_method(update)]
+#[update]
+fn ack_vault_operation(arg: rumi_protocol_backend::vault::VaultOperationIdArg) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::GenericError("anonymous caller cannot ACK a vault operation".into()));
+    }
+    mutate_state(|s| s.acknowledge_vault_operation(caller, arg.operation_id))
+        .map_err(ProtocolError::GenericError)
+}
+
+/// Positive-only recovery for an ambiguous collateral transfer_from. The
+/// ledger-global block index is a candidate; the backend fetches and checks
+/// the direct block against the authenticated caller's pinned journal.
+#[candid_method(update)]
+#[update]
+async fn reconcile_vault_collateral_pull_from_block(
+    arg: rumi_protocol_backend::vault::VaultOperationIdArg,
+    block_index: u64,
+) -> Result<(), ProtocolError> {
+    validate_authenticated_not_frozen()?;
     check_postcondition(
-        rumi_protocol_backend::vault::open_vault_and_borrow(
-            collateral_amount,
-            borrow_amount,
-            collateral_type,
+        rumi_protocol_backend::vault::reconcile_vault_collateral_pull_from_block(
+            arg.operation_id,
+            block_index,
         )
         .await,
     )
@@ -6487,8 +6559,33 @@ async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, Proto
 #[candid_method(update)]
 #[update]
 async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
-    validate_call().await?;
-    check_postcondition(rumi_protocol_backend::vault::add_margin_to_vault(arg).await)
+    let _ = arg;
+    Err(ProtocolError::TemporarilyUnavailable(
+        "this endpoint is disabled; use add_margin_to_vault_v2 with a client operation ID".into(),
+    ))
+}
+
+#[candid_method(update)]
+#[update]
+async fn add_margin_to_vault_v2(args: rumi_protocol_backend::vault::AddMarginV2Args) -> Result<u64, ProtocolError> {
+    let _ = args;
+    Err(ProtocolError::TemporarilyUnavailable(
+        "operation-ID add-margin is held pending a safe recovery path; no collateral was pulled".into(),
+    ))
+}
+
+#[cfg(test)]
+#[test]
+fn add_margin_v2_wrapper_fails_before_canister_validation() {
+    let result = futures::executor::block_on(add_margin_to_vault_v2(
+        rumi_protocol_backend::vault::AddMarginV2Args {
+            operation_id: 1,
+            vault_id: 99,
+            amount: 100,
+        },
+    ));
+    assert!(matches!(result, Err(ProtocolError::TemporarilyUnavailable(message))
+        if message.contains("no collateral was pulled")));
 }
 
 // ─── Push-deposit endpoints (Oisy wallet integration) ───

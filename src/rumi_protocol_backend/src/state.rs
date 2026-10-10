@@ -300,6 +300,255 @@ mod three_usd_reserve_ingress_state_tests {
         let legacy: super::State = ciborium::de::from_reader(legacy_bytes.as_slice()).unwrap();
         assert!(legacy.push_sweep_journals.is_empty());
     }
+
+    #[test]
+    fn vault_operation_watermark_replay_ack_stale_and_legacy_migration() {
+        use super::{State, VaultCollateralPullRequest, VaultOperationResult};
+        let owner = Principal::from_slice(&[61]);
+        let ledger = Principal::from_slice(&[62]);
+        let protocol = Principal::from_slice(&[63]);
+        let request_a = VaultCollateralPullRequest::OpenVault { collateral_type: ledger, amount_e8s: 100 };
+        let request_b = VaultCollateralPullRequest::OpenVault { collateral_type: ledger, amount_e8s: 200 };
+        let mut state = State::default();
+        let mut collateral = super::xrp_collateral_config(
+            super::Ratio::new(rust_decimal_macros::dec!(0.005)),
+            super::Ratio::new(rust_decimal_macros::dec!(0.01)),
+            super::Ratio::new(rust_decimal_macros::dec!(1.0)),
+        );
+        collateral.ledger_canister_id = ledger;
+        collateral.custody_kind = None;
+        collateral.min_collateral_deposit = 0;
+        state.collateral_configs.insert(ledger, collateral);
+        let a = state.prepare_vault_collateral_pull(owner, 1, request_a.clone(), ledger, protocol, 2, 10).unwrap();
+        assert_eq!(a.vault_id, 1);
+        let submitted_a = state.mark_vault_collateral_pull_dispatched(&owner, &a).unwrap();
+        let retry_a = state.prepare_vault_collateral_pull(owner, 1, request_a.clone(), ledger, protocol, 99, 20).unwrap();
+        assert_eq!(retry_a, submitted_a, "reply loss reuses the exact aged transfer tuple");
+        assert!(state.prepare_vault_collateral_pull(owner, 2, request_b.clone(), ledger, protocol, 2, 30).is_err(),
+            "a concurrent operation is blocked while A is unresolved");
+        assert!(state.prepare_vault_collateral_pull(owner, 1,
+            VaultCollateralPullRequest::OpenVault { collateral_type: ledger, amount_e8s: 101 }, ledger, protocol, 2, 30
+        ).is_err(), "same ID cannot be rebound to changed arguments");
+        state.record_vault_pull_confirmed(&owner, &submitted_a, 44).unwrap();
+        state.complete_vault_operation(&owner, 1, VaultOperationResult::OpenVault { vault_id: 1, block_index: 44 }).unwrap();
+        assert_eq!(state.vault_operation_status(owner).active.unwrap().operation_id, 1);
+        assert_eq!(state.acknowledge_vault_operation(owner, 1).unwrap(), 1);
+        assert_eq!(state.acknowledge_vault_operation(owner, 1).unwrap(), 1, "lost ACK reply is idempotent");
+        let b = state.prepare_vault_collateral_pull(owner, 2, request_b.clone(), ledger, protocol, 2, 50).unwrap();
+        assert_eq!(b.vault_id, 2);
+        let submitted_b = state.mark_vault_collateral_pull_dispatched(&owner, &b).unwrap();
+        state.record_vault_pull_confirmed(&owner, &submitted_b, 55).unwrap();
+        state.complete_vault_operation(&owner, 2, VaultOperationResult::OpenVault { vault_id: 2, block_index: 55 }).unwrap();
+        state.acknowledge_vault_operation(owner, 2).unwrap();
+        assert!(state.prepare_vault_collateral_pull(owner, 1, request_a, ledger, protocol, 2, 60).is_err(),
+            "A then B then stale A must never dispatch A again");
+
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let mut old: ciborium::value::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let ciborium::value::Value::Map(fields) = &mut old else { panic!("State must encode as a map") };
+        fields.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name) if name == "vault_operation_acknowledged_through" || name == "vault_collateral_pull_journals" || name == "vault_pull_receipt_recovery_leases" || name == "vault_pull_receipt_recovery_generation"));
+        let mut legacy_bytes = Vec::new();
+        ciborium::ser::into_writer(&old, &mut legacy_bytes).unwrap();
+        let legacy: State = ciborium::de::from_reader(legacy_bytes.as_slice()).unwrap();
+        assert_eq!(legacy.vault_operation_status(owner).acknowledged_through, 0);
+        assert!(legacy.vault_operation_status(owner).active.is_none());
+        assert!(legacy.vault_pull_receipt_recovery_leases.is_empty());
+        assert_eq!(legacy.vault_pull_receipt_recovery_generation, 0);
+    }
+
+    #[test]
+    fn vault_pull_reservation_rechecks_config_after_preflight_race() {
+        use super::{CollateralStatus, State, VaultCollateralPullRequest};
+        let owner = Principal::from_slice(&[81]);
+        let ledger = Principal::from_slice(&[82]);
+        let changed_ledger = Principal::from_slice(&[83]);
+        let protocol = Principal::from_slice(&[84]);
+        let mut state = State::default();
+        let mut config = super::xrp_collateral_config(
+            super::Ratio::new(rust_decimal_macros::dec!(0.005)),
+            super::Ratio::new(rust_decimal_macros::dec!(0.01)),
+            super::Ratio::new(rust_decimal_macros::dec!(1.0)),
+        );
+        config.ledger_canister_id = ledger;
+        config.custody_kind = None;
+        config.min_collateral_deposit = 10;
+        state.collateral_configs.insert(ledger, config);
+
+        // Simulate the external preflight observing the old ledger, followed
+        // by an admin configuration mutation before the atomic reservation.
+        state.collateral_configs.get_mut(&ledger).unwrap().ledger_canister_id = changed_ledger;
+        let request = VaultCollateralPullRequest::OpenVault { collateral_type: ledger, amount_e8s: 100 };
+        assert!(state.prepare_vault_collateral_pull(owner, 1, request, ledger, protocol, 2, 10).is_err());
+        assert!(state.vault_collateral_pull_journals.is_empty());
+        assert_eq!(state.next_available_vault_id, 1, "a rejected reservation cannot consume a vault ID");
+
+        let config = state.collateral_configs.get_mut(&ledger).unwrap();
+        config.ledger_canister_id = ledger;
+        config.status = CollateralStatus::Paused;
+        let request = VaultCollateralPullRequest::OpenVault { collateral_type: ledger, amount_e8s: 100 };
+        assert!(state.prepare_vault_collateral_pull(owner, 1, request, ledger, protocol, 2, 11).is_err());
+        assert!(state.vault_collateral_pull_journals.is_empty());
+
+        state.collateral_configs.get_mut(&ledger).unwrap().status = CollateralStatus::Active;
+        state.collateral_configs.get_mut(&ledger).unwrap().min_collateral_deposit = 101;
+        let request = VaultCollateralPullRequest::OpenVault { collateral_type: ledger, amount_e8s: 100 };
+        assert!(state.prepare_vault_collateral_pull(owner, 1, request, ledger, protocol, 2, 12).is_err());
+        assert!(state.vault_collateral_pull_journals.is_empty());
+    }
+
+    #[test]
+    fn vault_receipt_recovery_is_cooldown_limited_and_generation_bound() {
+        use super::{State, VaultCollateralPullPhase, VaultCollateralPullRequest};
+        let owner = Principal::from_slice(&[91]);
+        let ledger = Principal::from_slice(&[92]);
+        let protocol = Principal::from_slice(&[93]);
+        let mut state = State::default();
+        let mut config = super::xrp_collateral_config(
+            super::Ratio::new(rust_decimal_macros::dec!(0.005)),
+            super::Ratio::new(rust_decimal_macros::dec!(0.01)),
+            super::Ratio::new(rust_decimal_macros::dec!(1.0)),
+        );
+        config.ledger_canister_id = ledger;
+        config.custody_kind = None;
+        config.min_collateral_deposit = 0;
+        state.collateral_configs.insert(ledger, config);
+        let prepared = state.prepare_vault_collateral_pull(
+            owner,
+            1,
+            VaultCollateralPullRequest::OpenVault { collateral_type: ledger, amount_e8s: 100 },
+            ledger,
+            protocol,
+            2,
+            10,
+        ).unwrap();
+        let submitted = state.mark_vault_collateral_pull_dispatched(&owner, &prepared).unwrap();
+
+        let generation = state.reserve_vault_pull_receipt_recovery(owner, 1, 100).unwrap();
+        assert!(state.reserve_vault_pull_receipt_recovery(owner, 1, 100).is_err(),
+            "one principal cannot issue concurrent paid receipt probes");
+        state.finish_vault_pull_receipt_recovery(&owner, &submitted, generation, 101, None, true).unwrap();
+        assert!(state.reserve_vault_pull_receipt_recovery(owner, 1, 102).is_err(),
+            "invalid probes set a persisted cooldown");
+
+        let after_cooldown = state.vault_collateral_pull_journals[&owner].clone();
+        let next_generation = state.reserve_vault_pull_receipt_recovery(owner, 1, 5_000_000_102).unwrap();
+        assert_ne!(generation, next_generation);
+        assert!(state.finish_vault_pull_receipt_recovery(
+            &owner, &after_cooldown, generation, 5_000_000_103, Some(55), false
+        ).is_err(), "an expired/superseded generation cannot confirm a receipt");
+        state.finish_vault_pull_receipt_recovery(
+            &owner, &after_cooldown, next_generation, 5_000_000_103, Some(55), false
+        ).unwrap();
+        assert_eq!(state.vault_collateral_pull_journals[&owner].phase,
+            VaultCollateralPullPhase::PullConfirmed { block_index: 55 });
+
+        let mut cap_state = State::default();
+        let mut cap_config = super::xrp_collateral_config(
+            super::Ratio::new(rust_decimal_macros::dec!(0.005)),
+            super::Ratio::new(rust_decimal_macros::dec!(0.01)),
+            super::Ratio::new(rust_decimal_macros::dec!(1.0)),
+        );
+        cap_config.ledger_canister_id = ledger;
+        cap_config.custody_kind = None;
+        cap_config.min_collateral_deposit = 0;
+        cap_state.collateral_configs.insert(ledger, cap_config);
+        for id in 100..100 + super::MAX_VAULT_PULL_RECEIPT_RECOVERY_IN_FLIGHT as u8 {
+            let principal = Principal::from_slice(&[id]);
+            let row = cap_state.prepare_vault_collateral_pull(
+                principal,
+                1,
+                VaultCollateralPullRequest::OpenVault { collateral_type: ledger, amount_e8s: 100 },
+                ledger,
+                protocol,
+                2,
+                10,
+            ).unwrap();
+            let _submitted = cap_state.mark_vault_collateral_pull_dispatched(&principal, &row).unwrap();
+            cap_state.reserve_vault_pull_receipt_recovery(principal, 1, 100).unwrap();
+        }
+        let overflow_owner = Principal::from_slice(&[120]);
+        let overflow_row = cap_state.prepare_vault_collateral_pull(
+            overflow_owner,
+            1,
+            VaultCollateralPullRequest::OpenVault { collateral_type: ledger, amount_e8s: 100 },
+            ledger,
+            protocol,
+            2,
+            10,
+        ).unwrap();
+        let overflow_row = cap_state.mark_vault_collateral_pull_dispatched(&overflow_owner, &overflow_row).unwrap();
+        assert!(cap_state.reserve_vault_pull_receipt_recovery(overflow_owner, 1, 100).is_err(),
+            "aggregate paid ledger reads are bounded across owners");
+        assert_eq!(cap_state.vault_pull_receipt_recovery_leases.len(), super::MAX_VAULT_PULL_RECEIPT_RECOVERY_IN_FLIGHT);
+        assert_eq!(overflow_row.phase, VaultCollateralPullPhase::Submitted);
+    }
+
+    #[test]
+    fn lost_reply_after_credit_replays_terminal_result_without_another_dispatch() {
+        use super::{State, VaultCollateralPullPhase, VaultCollateralPullRequest, VaultOperationResult};
+        let owner = Principal::from_slice(&[71]);
+        let ledger = Principal::from_slice(&[72]);
+        let protocol = Principal::from_slice(&[73]);
+        let request = VaultCollateralPullRequest::OpenVault { collateral_type: ledger, amount_e8s: 400 };
+        let mut state = State::default();
+        let mut collateral = super::xrp_collateral_config(
+            super::Ratio::new(rust_decimal_macros::dec!(0.005)),
+            super::Ratio::new(rust_decimal_macros::dec!(0.01)),
+            super::Ratio::new(rust_decimal_macros::dec!(1.0)),
+        );
+        collateral.ledger_canister_id = ledger;
+        collateral.custody_kind = None;
+        collateral.min_collateral_deposit = 0;
+        state.collateral_configs.insert(ledger, collateral);
+        let journal = state.prepare_vault_collateral_pull(owner, 1, request.clone(), ledger, protocol, 10, 88).unwrap();
+        let submitted = state.mark_vault_collateral_pull_dispatched(&owner, &journal).unwrap();
+        state.record_vault_pull_confirmed(&owner, &submitted, 99).unwrap();
+        state.complete_vault_operation(&owner, 1, VaultOperationResult::OpenVault { vault_id: 1, block_index: 99 }).unwrap();
+        let replay = state.prepare_vault_collateral_pull(owner, 1, request, ledger, protocol, 999, 999).unwrap();
+        assert!(matches!(replay.phase, VaultCollateralPullPhase::Completed { result: VaultOperationResult::OpenVault { vault_id: 1, block_index: 99 } }));
+        assert_eq!(replay.op_nonce, journal.op_nonce);
+        assert_eq!(replay.dispatch_attempts, 1);
+    }
+
+    #[test]
+    fn add_margin_pull_cannot_be_terminalized_without_recovery_credit() {
+        use super::{
+            State, VaultCollateralPullJournal, VaultCollateralPullPhase,
+            VaultCollateralPullRequest, VaultOperationResult,
+        };
+        let owner = Principal::from_slice(&[74]);
+        let ledger = Principal::from_slice(&[75]);
+        let mut state = State::default();
+        let journal = VaultCollateralPullJournal {
+            owner,
+            operation_id: 1,
+            request: VaultCollateralPullRequest::AddMargin { vault_id: 7, amount_e8s: 200 },
+            vault_id: 7,
+            ledger,
+            from: icrc_ledger_types::icrc1::account::Account { owner, subaccount: None },
+            to: icrc_ledger_types::icrc1::account::Account {
+                owner: Principal::management_canister(),
+                subaccount: None,
+            },
+            amount_e8s: 200,
+            fee_e8s: 2,
+            memo: [1; 16],
+            created_at_time_ns: 10,
+            op_nonce: 10,
+            dispatch_attempts: 1,
+            receipt_recovery_cooldown_until_ns: 0,
+            phase: VaultCollateralPullPhase::PullConfirmed { block_index: 55 },
+        };
+        state.vault_collateral_pull_journals.insert(owner, journal.clone());
+
+        assert!(state.complete_vault_operation(
+            &owner,
+            1,
+            VaultOperationResult::AddMargin { vault_id: 7, block_index: 55 },
+        ).is_err());
+        assert_eq!(state.vault_collateral_pull_journals.get(&owner), Some(&journal));
+    }
 }
 
 macro_rules! ensure {
@@ -2198,6 +2447,81 @@ pub struct PushSweepJournal {
     pub dispatch_attempts: u32,
 }
 
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum VaultCollateralPullRequest {
+    OpenVault { collateral_type: Principal, amount_e8s: u64 },
+    OpenVaultAndBorrow { collateral_type: Principal, amount_e8s: u64, borrow_amount_e8s: u64 },
+    AddMargin { vault_id: u64, amount_e8s: u64 },
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum VaultOperationResult {
+    OpenVault { vault_id: u64, block_index: u64 },
+    OpenVaultAndBorrow { vault_id: u64, block_index: u64, borrowed: bool, failure: Option<String> },
+    AddMargin { vault_id: u64, block_index: u64 },
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum VaultCollateralPullPhase {
+    Prepared,
+    Submitted,
+    PullConfirmed { block_index: u64 },
+    VaultCredited { block_index: u64 },
+    SafeNoEffect { message: String },
+    Completed { result: VaultOperationResult },
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct VaultCollateralPullJournal {
+    pub owner: Principal,
+    pub operation_id: u64,
+    pub request: VaultCollateralPullRequest,
+    /// Newly reserved for open operations; the existing vault for add-margin.
+    pub vault_id: u64,
+    pub ledger: Principal,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    pub amount_e8s: u64,
+    pub fee_e8s: u64,
+    pub memo: [u8; 16],
+    pub created_at_time_ns: u64,
+    pub op_nonce: u128,
+    pub dispatch_attempts: u32,
+    /// Wrong candidate receipt reads are throttled for this active operation.
+    #[serde(default)]
+    pub receipt_recovery_cooldown_until_ns: u64,
+    pub phase: VaultCollateralPullPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, Serialize)]
+pub struct VaultPullReceiptRecoveryLease {
+    pub operation_id: u64,
+    pub generation: u64,
+    pub expires_at_ns: u64,
+}
+
+pub const MAX_VAULT_PULL_RECEIPT_RECOVERY_IN_FLIGHT: usize = 8;
+pub const VAULT_PULL_RECEIPT_RECOVERY_LEASE_NS: u64 = 60_000_000_000;
+pub const VAULT_PULL_RECEIPT_RECOVERY_COOLDOWN_NS: u64 = 5_000_000_000;
+
+/// Wallet-safe operation view. The exact ledger account/fee/memo tuple stays
+/// internal and is never returned by this status method.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct VaultOperationView {
+    pub operation_id: u64,
+    pub request: VaultCollateralPullRequest,
+    pub vault_id: u64,
+    pub phase: VaultCollateralPullPhase,
+}
+
+/// The result is available until explicit ACK. After ACK only the watermark
+/// remains; stale IDs are rejected and can never dispatch again.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct VaultOperationStatus {
+    pub acknowledged_through: u64,
+    pub active: Option<VaultOperationView>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct ThreeUsdIngressNonInclusionScan {
     pub tuple: ThreeUsdReserveIngressTuple,
@@ -2824,6 +3148,18 @@ pub struct State {
     /// release those rows, and its presence is not legacy recovery proof.
     #[serde(default)]
     pub push_sweep_journals: BTreeMap<Principal, PushSweepJournal>,
+    /// Per-owner monotonic ACK watermark. It prevents stale operation IDs from
+    /// being accepted after terminal receipts have been acknowledged.
+    #[serde(default)]
+    pub vault_operation_acknowledged_through: BTreeMap<Principal, u64>,
+    /// One resumable or terminal client operation per owner, keyed by owner.
+    #[serde(default)]
+    pub vault_collateral_pull_journals: BTreeMap<Principal, VaultCollateralPullJournal>,
+    /// Expiring leases bound aggregate canister-paid direct ledger reads.
+    #[serde(default)]
+    pub vault_pull_receipt_recovery_leases: BTreeMap<Principal, VaultPullReceiptRecoveryLease>,
+    #[serde(default)]
+    pub vault_pull_receipt_recovery_generation: u64,
 
     /// Wave-5 LIQ-007 / ORACLE-009: queued outlier price candidates per collateral.
     /// When a fetched price falls outside the sanity band (PRICE_SANITY_BAND_RATIO)
@@ -3391,6 +3727,10 @@ impl Default for State {
             consumed_bot_payment_proofs: BTreeMap::new(),
             op_nonce_counter: 0,
             push_sweep_journals: BTreeMap::new(),
+            vault_operation_acknowledged_through: BTreeMap::new(),
+            vault_collateral_pull_journals: BTreeMap::new(),
+            vault_pull_receipt_recovery_leases: BTreeMap::new(),
+            vault_pull_receipt_recovery_generation: 0,
             pending_outlier_prices: BTreeMap::new(),
             liquidation_frozen: false,
             vault_cr_index: BTreeMap::new(),
@@ -3692,6 +4032,10 @@ impl From<InitArg> for State {
             consumed_bot_payment_proofs: BTreeMap::new(),
             op_nonce_counter: 0,
             push_sweep_journals: BTreeMap::new(),
+            vault_operation_acknowledged_through: BTreeMap::new(),
+            vault_collateral_pull_journals: BTreeMap::new(),
+            vault_pull_receipt_recovery_leases: BTreeMap::new(),
+            vault_pull_receipt_recovery_generation: 0,
             pending_outlier_prices: BTreeMap::new(),
             liquidation_frozen: false,
             vault_cr_index: BTreeMap::new(),
@@ -4477,6 +4821,315 @@ impl State {
         self.push_sweep_journals
             .values()
             .any(|journal| journal.vault_id == vault_id)
+    }
+
+    pub fn vault_operation_status(&self, owner: Principal) -> VaultOperationStatus {
+        VaultOperationStatus {
+            acknowledged_through: self.vault_operation_acknowledged_through.get(&owner).copied().unwrap_or(0),
+            active: self.vault_collateral_pull_journals.get(&owner).map(|journal| VaultOperationView {
+                operation_id: journal.operation_id,
+                request: journal.request.clone(),
+                vault_id: journal.vault_id,
+                phase: journal.phase.clone(),
+            }),
+        }
+    }
+
+    fn validate_vault_pull_admission(
+        &self,
+        owner: Principal,
+        request: &VaultCollateralPullRequest,
+        ledger: Principal,
+    ) -> Result<(), String> {
+        if self.frozen { return Err("protocol is frozen".into()); }
+        match request {
+            VaultCollateralPullRequest::OpenVault { collateral_type, amount_e8s } => {
+                let config = self.get_collateral_config(collateral_type).ok_or("collateral is not configured")?;
+                if config.ledger_canister_id != ledger { return Err("collateral ledger changed during pull preflight".into()); }
+                if config.is_native_xrp() || !config.status.allows_open() {
+                    return Err("collateral no longer accepts ICRC-2 vault opens".into());
+                }
+                if config.min_collateral_deposit > *amount_e8s { return Err("collateral amount is below the current minimum".into()); }
+            }
+            VaultCollateralPullRequest::OpenVaultAndBorrow { collateral_type, amount_e8s, .. } => {
+                let config = self.get_collateral_config(collateral_type).ok_or("collateral is not configured")?;
+                if config.ledger_canister_id != ledger { return Err("collateral ledger changed during pull preflight".into()); }
+                if self.mode == Mode::ReadOnly || config.is_native_xrp() || !config.status.allows_open() || !config.status.allows_borrow() {
+                    return Err("collateral or protocol mode no longer accepts vault opens and borrows".into());
+                }
+                if config.min_collateral_deposit > *amount_e8s { return Err("collateral amount is below the current minimum".into()); }
+            }
+            VaultCollateralPullRequest::AddMargin { vault_id, amount_e8s } => {
+                let vault = self.vault_id_to_vaults.get(vault_id).ok_or("vault no longer exists")?;
+                if vault.owner != owner { return Err("caller no longer owns the target vault".into()); }
+                let config = self.get_collateral_config(&vault.collateral_type).ok_or("vault collateral is not configured")?;
+                if config.ledger_canister_id != ledger { return Err("vault collateral ledger changed during pull preflight".into()); }
+                if config.is_native_xrp() || !config.status.allows_add_collateral() {
+                    return Err("collateral no longer accepts ICRC-2 margin additions".into());
+                }
+                if config.min_collateral_deposit > *amount_e8s { return Err("collateral amount is below the current minimum".into()); }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn prepare_vault_collateral_pull(
+        &mut self,
+        owner: Principal,
+        operation_id: u64,
+        request: VaultCollateralPullRequest,
+        ledger: Principal,
+        protocol: Principal,
+        fee_e8s: u64,
+        now_ns: u64,
+    ) -> Result<VaultCollateralPullJournal, String> {
+        if let Some(saved) = self.vault_collateral_pull_journals.get(&owner).cloned() {
+            if saved.operation_id != operation_id || saved.request != request {
+                return Err("another vault operation is active; replay it or ACK its terminal receipt first".into());
+            }
+            if matches!(saved.phase, VaultCollateralPullPhase::Submitted | VaultCollateralPullPhase::PullConfirmed { .. }
+                | VaultCollateralPullPhase::VaultCredited { .. } | VaultCollateralPullPhase::Completed { .. }) {
+                return Ok(saved);
+            }
+            self.validate_vault_pull_admission(owner, &request, ledger)?;
+            let mut retry = saved;
+            retry.ledger = ledger;
+            retry.amount_e8s = match request {
+                VaultCollateralPullRequest::OpenVault { amount_e8s, .. }
+                | VaultCollateralPullRequest::OpenVaultAndBorrow { amount_e8s, .. }
+                | VaultCollateralPullRequest::AddMargin { amount_e8s, .. } => amount_e8s,
+            };
+            retry.fee_e8s = fee_e8s;
+            retry.op_nonce = self.next_op_nonce_at(now_ns);
+            retry.memo = retry.op_nonce.to_be_bytes();
+            retry.created_at_time_ns = (retry.op_nonce >> 64) as u64;
+            retry.dispatch_attempts = 0;
+            retry.phase = VaultCollateralPullPhase::Prepared;
+            self.vault_collateral_pull_journals.insert(owner, retry.clone());
+            return Ok(retry);
+        }
+        let acknowledged = self.vault_operation_acknowledged_through.get(&owner).copied().unwrap_or(0);
+        if operation_id <= acknowledged {
+            return Err("stale vault operation ID has already been acknowledged".into());
+        }
+        if operation_id != acknowledged.saturating_add(1) {
+            return Err(format!("expected vault operation ID {}", acknowledged.saturating_add(1)));
+        }
+        self.validate_vault_pull_admission(owner, &request, ledger)?;
+        let (vault_id, amount_e8s) = match &request {
+            VaultCollateralPullRequest::OpenVault { amount_e8s, .. }
+            | VaultCollateralPullRequest::OpenVaultAndBorrow { amount_e8s, .. } =>
+                (self.increment_vault_id(), *amount_e8s),
+            VaultCollateralPullRequest::AddMargin { vault_id, amount_e8s } => (*vault_id, *amount_e8s),
+        };
+        let op_nonce = self.next_op_nonce_at(now_ns);
+        let journal = VaultCollateralPullJournal {
+            owner,
+            operation_id,
+            request,
+            vault_id,
+            ledger,
+            from: icrc_ledger_types::icrc1::account::Account { owner, subaccount: None },
+            to: icrc_ledger_types::icrc1::account::Account { owner: protocol, subaccount: None },
+            amount_e8s,
+            fee_e8s,
+            memo: op_nonce.to_be_bytes(),
+            created_at_time_ns: (op_nonce >> 64) as u64,
+            op_nonce,
+            dispatch_attempts: 0,
+            receipt_recovery_cooldown_until_ns: 0,
+            phase: VaultCollateralPullPhase::Prepared,
+        };
+        self.vault_collateral_pull_journals.insert(owner, journal.clone());
+        Ok(journal)
+    }
+
+    pub fn mark_vault_collateral_pull_dispatched(
+        &mut self,
+        owner: &Principal,
+        expected: &VaultCollateralPullJournal,
+    ) -> Result<VaultCollateralPullJournal, String> {
+        let Some(saved) = self.vault_collateral_pull_journals.get_mut(owner) else {
+            return Err("collateral pull intent disappeared before dispatch".into());
+        };
+        if saved != expected { return Err("collateral pull intent changed before dispatch".into()); }
+        if !matches!(saved.phase, VaultCollateralPullPhase::Prepared | VaultCollateralPullPhase::Submitted) {
+            return Err("collateral pull is not dispatchable in its current phase".into());
+        }
+        saved.dispatch_attempts = saved.dispatch_attempts.saturating_add(1);
+        saved.phase = VaultCollateralPullPhase::Submitted;
+        Ok(saved.clone())
+    }
+
+    pub fn record_vault_collateral_pull_no_effect(
+        &mut self,
+        owner: &Principal,
+        expected: &VaultCollateralPullJournal,
+        message: String,
+    ) -> bool {
+        if self.vault_collateral_pull_journals.get(owner) != Some(expected) || expected.dispatch_attempts != 1 {
+            return false;
+        }
+        let Some(saved) = self.vault_collateral_pull_journals.get_mut(owner) else { return false; };
+        saved.phase = VaultCollateralPullPhase::SafeNoEffect { message };
+        true
+    }
+
+    pub fn record_vault_pull_confirmed(
+        &mut self,
+        owner: &Principal,
+        expected: &VaultCollateralPullJournal,
+        block_index: u64,
+    ) -> Result<VaultCollateralPullJournal, String> {
+        let Some(saved) = self.vault_collateral_pull_journals.get_mut(owner) else { return Err("collateral pull journal missing".into()); };
+        if saved != expected { return Err("collateral pull journal changed before confirmation".into()); }
+        if !matches!(saved.phase, VaultCollateralPullPhase::Submitted) || saved.dispatch_attempts == 0 {
+            return Err("collateral pull cannot be confirmed before a submitted dispatch".into());
+        }
+        saved.phase = VaultCollateralPullPhase::PullConfirmed { block_index };
+        Ok(saved.clone())
+    }
+
+    pub fn reserve_vault_pull_receipt_recovery(
+        &mut self,
+        owner: Principal,
+        operation_id: u64,
+        now_ns: u64,
+    ) -> Result<u64, String> {
+        self.vault_pull_receipt_recovery_leases
+            .retain(|_, lease| lease.expires_at_ns > now_ns);
+        let journal = self.vault_collateral_pull_journals.get(&owner)
+            .ok_or("collateral pull journal missing")?;
+        if journal.operation_id != operation_id
+            || journal.dispatch_attempts == 0
+            || journal.phase != VaultCollateralPullPhase::Submitted
+        {
+            return Err("collateral pull is not awaiting positive receipt recovery".into());
+        }
+        if journal.receipt_recovery_cooldown_until_ns > now_ns {
+            return Err("receipt recovery is cooling down after an invalid or unavailable proof".into());
+        }
+        if self.vault_pull_receipt_recovery_leases.contains_key(&owner) {
+            return Err("receipt recovery is already in flight for this owner".into());
+        }
+        if self.vault_pull_receipt_recovery_leases.len() >= MAX_VAULT_PULL_RECEIPT_RECOVERY_IN_FLIGHT {
+            return Err("aggregate collateral receipt recovery limit reached".into());
+        }
+        let generation = self.vault_pull_receipt_recovery_generation.checked_add(1)
+            .ok_or("receipt recovery generation exhausted")?;
+        self.vault_pull_receipt_recovery_generation = generation;
+        self.vault_pull_receipt_recovery_leases.insert(owner, VaultPullReceiptRecoveryLease {
+            operation_id,
+            generation,
+            expires_at_ns: now_ns.saturating_add(VAULT_PULL_RECEIPT_RECOVERY_LEASE_NS),
+        });
+        Ok(generation)
+    }
+
+    pub fn finish_vault_pull_receipt_recovery(
+        &mut self,
+        owner: &Principal,
+        expected: &VaultCollateralPullJournal,
+        generation: u64,
+        now_ns: u64,
+        candidate_block_index: Option<u64>,
+        failed_probe: bool,
+    ) -> Result<(), String> {
+        let lease_matches = self.vault_pull_receipt_recovery_leases.get(owner).is_some_and(|lease|
+            lease.operation_id == expected.operation_id
+                && lease.generation == generation
+                && lease.expires_at_ns > now_ns
+        );
+        if !lease_matches {
+            return Err("receipt recovery lease expired or was superseded".into());
+        }
+        self.vault_pull_receipt_recovery_leases.remove(owner);
+        let Some(saved) = self.vault_collateral_pull_journals.get_mut(owner) else {
+            return Err("collateral pull journal disappeared during receipt recovery".into());
+        };
+        if saved != expected || saved.phase != VaultCollateralPullPhase::Submitted {
+            return Err("collateral pull journal changed during receipt recovery".into());
+        }
+        if let Some(block_index) = candidate_block_index {
+            saved.phase = VaultCollateralPullPhase::PullConfirmed { block_index };
+            saved.receipt_recovery_cooldown_until_ns = 0;
+            Ok(())
+        } else {
+            if failed_probe {
+                saved.receipt_recovery_cooldown_until_ns = now_ns
+                    .saturating_add(VAULT_PULL_RECEIPT_RECOVERY_COOLDOWN_NS);
+            }
+            Ok(())
+        }
+    }
+
+    pub fn mark_vault_operation_credited(
+        &mut self,
+        owner: &Principal,
+        operation_id: u64,
+        block_index: u64,
+    ) -> Result<(), String> {
+        let Some(saved) = self.vault_collateral_pull_journals.get_mut(owner) else { return Err("vault operation journal missing".into()); };
+        if saved.operation_id != operation_id { return Err("vault operation ID changed before credit".into()); }
+        if !matches!(saved.phase, VaultCollateralPullPhase::PullConfirmed { .. }) {
+            return Err("vault collateral cannot be credited before pull confirmation".into());
+        }
+        saved.phase = VaultCollateralPullPhase::VaultCredited { block_index };
+        Ok(())
+    }
+
+    pub fn complete_vault_operation(
+        &mut self,
+        owner: &Principal,
+        operation_id: u64,
+        result: VaultOperationResult,
+    ) -> Result<(), String> {
+        let Some(saved) = self.vault_collateral_pull_journals.get(owner).cloned() else { return Err("vault operation journal missing".into()); };
+        if saved.operation_id != operation_id { return Err("vault operation ID changed before completion".into()); }
+        if let VaultCollateralPullPhase::Completed { result: prior } = &saved.phase {
+            return if prior == &result { Ok(()) } else { Err("completed vault operation result cannot be changed".into()) };
+        }
+        let completion_is_valid = match (&saved.request, &saved.phase, &result) {
+            (VaultCollateralPullRequest::OpenVault { .. }, VaultCollateralPullPhase::PullConfirmed { block_index },
+                VaultOperationResult::OpenVault { vault_id, block_index: result_block }) =>
+                    *vault_id == saved.vault_id && block_index == result_block,
+            // Add-margin remains disabled until a confirmed pull can be
+            // settled safely even if liquidation removes its target vault.
+            (VaultCollateralPullRequest::AddMargin { .. }, _, VaultOperationResult::AddMargin { .. }) => false,
+            (VaultCollateralPullRequest::OpenVaultAndBorrow { borrow_amount_e8s, .. }, VaultCollateralPullPhase::VaultCredited { block_index },
+                VaultOperationResult::OpenVaultAndBorrow { vault_id, block_index: result_block, borrowed, failure }) => {
+                    *vault_id == saved.vault_id
+                        && block_index == result_block
+                        && if *borrowed {
+                            failure.is_none()
+                                && (*borrow_amount_e8s == 0
+                                    || (!self.pending_borrow_mints.contains_key(&saved.vault_id)
+                                        && self.vault_id_to_vaults.get(&saved.vault_id).is_some_and(|vault|
+                                            vault.borrowed_icusd_amount.to_u64() >= *borrow_amount_e8s)))
+                        } else {
+                            *borrow_amount_e8s > 0
+                                && failure.is_some()
+                                && !self.pending_borrow_mints.contains_key(&saved.vault_id)
+                        }
+                }
+            _ => false,
+        };
+        if !completion_is_valid { return Err("vault operation cannot complete from its current phase or with a mismatched result".into()); }
+        self.vault_collateral_pull_journals.get_mut(owner).expect("journal was checked above").phase =
+            VaultCollateralPullPhase::Completed { result };
+        Ok(())
+    }
+
+    pub fn acknowledge_vault_operation(&mut self, owner: Principal, operation_id: u64) -> Result<u64, String> {
+        let acknowledged = self.vault_operation_acknowledged_through.get(&owner).copied().unwrap_or(0);
+        if operation_id <= acknowledged { return Ok(acknowledged); }
+        let Some(journal) = self.vault_collateral_pull_journals.get(&owner) else { return Err("no terminal vault operation receipt to ACK".into()); };
+        if journal.operation_id != operation_id || !matches!(journal.phase, VaultCollateralPullPhase::SafeNoEffect { .. } | VaultCollateralPullPhase::Completed { .. }) {
+            return Err("vault operation is not terminal and cannot be ACKed".into());
+        }
+        self.vault_collateral_pull_journals.remove(&owner);
+        self.vault_operation_acknowledged_through.insert(owner, operation_id);
+        Ok(operation_id)
     }
 
     pub fn increment_vault_id(&mut self) -> u64 {
