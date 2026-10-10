@@ -6352,6 +6352,25 @@ fn validate_borrow_mint_recovery_journal(
     Ok(())
 }
 
+/// Operator-visible trace for a proof-based recovery. Keep the invoking caller
+/// separate from the journal owner, who alone receives the financial entry.
+fn log_borrow_mint_receipt_recovery(
+    outcome: &'static str,
+    caller: Principal,
+    journal: &crate::state::BorrowMintJournal,
+    block_index: u64,
+) {
+    log!(
+        INFO,
+        "event=borrow_mint_receipt_recovery outcome={} caller={} journal_owner={} vault_id={} block_index={}",
+        outcome,
+        caller,
+        journal.owner,
+        journal.vault_id,
+        block_index
+    );
+}
+
 /// Reconcile a borrow journal after its exact ICRC-1 retry returned TooOld.
 /// The caller-supplied block index is only a candidate: debt is committed only
 /// after an archive-aware ICRC-3 read validates the exact persisted mint tuple.
@@ -6401,6 +6420,8 @@ pub async fn reconcile_pending_borrow_mint_from_block(
         ));
     }
 
+    log_borrow_mint_receipt_recovery("started", caller, &journal, candidate_block_index);
+
     if let Err(error) = crate::icrc3_proof::verify_icrc3_borrow_mint_block(
         journal.tuple.ledger,
         candidate_block_index,
@@ -6408,6 +6429,12 @@ pub async fn reconcile_pending_borrow_mint_from_block(
     )
     .await
     {
+        log_borrow_mint_receipt_recovery(
+            "receipt_rejected",
+            caller,
+            &journal,
+            candidate_block_index,
+        );
         guard_principal.fail();
         return Err(ProtocolError::GenericError(format!(
             "candidate ICRC-3 block does not prove the exact borrow mint; journal remains held: {error}"
@@ -6418,6 +6445,12 @@ pub async fn reconcile_pending_borrow_mint_from_block(
     // Recheck current authority before the once-only state transition.
     if borrow_mint_recovery_owner(caller, &journal, read_state(|s| s.developer_principal)).is_err()
     {
+        log_borrow_mint_receipt_recovery(
+            "authority_revoked",
+            caller,
+            &journal,
+            candidate_block_index,
+        );
         guard_principal.fail();
         return Err(ProtocolError::CallerNotOwner);
     }
@@ -6437,6 +6470,12 @@ pub async fn reconcile_pending_borrow_mint_from_block(
         true
     });
     if !confirmed {
+        log_borrow_mint_receipt_recovery(
+            "journal_changed",
+            caller,
+            &journal,
+            candidate_block_index,
+        );
         guard_principal.fail();
         return Err(ProtocolError::TemporarilyUnavailable(
             "borrow journal changed while committing the verified mint receipt; journal remains held".into(),
@@ -6455,10 +6494,22 @@ pub async fn reconcile_pending_borrow_mint_from_block(
     .await
     {
         Ok(result) => {
+            log_borrow_mint_receipt_recovery(
+                "receipt_verified_debt_committed",
+                caller,
+                &journal,
+                candidate_block_index,
+            );
             guard_principal.complete();
             Ok(result)
         }
         Err(error) => {
+            log_borrow_mint_receipt_recovery(
+                "receipt_verified_debt_commit_pending",
+                caller,
+                &journal,
+                candidate_block_index,
+            );
             guard_principal.fail();
             Err(error)
         }
