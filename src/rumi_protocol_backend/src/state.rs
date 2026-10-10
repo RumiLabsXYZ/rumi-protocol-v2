@@ -2097,12 +2097,18 @@ pub struct ThreeUsdReservePayoutCandidateScan {
     pub attempt_nonce: u128,
     pub start_index: u64,
     pub snapshot_log_length: u64,
+    /// Lifetime-bounded number of distinct history snapshots attempted for
+    /// this payout attempt. This survives upgrade/replay to bound journal use.
+    #[serde(default = "one_candidate_scan_snapshot")]
+    pub snapshot_count: u8,
     pub next_index: u64,
     pub candidate_block_index: Option<u64>,
     /// More than one exact tuple match was found. Such a scan is permanently
     /// ambiguous and must never be promoted to a single candidate.
     pub multiple_candidates: bool,
 }
+
+fn one_candidate_scan_snapshot() -> u8 { 1 }
 
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct ThreeUsdReservePayoutAttempt {
@@ -2117,6 +2123,7 @@ pub struct ThreeUsdReservePayoutAttempt {
 }
 
 pub const MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS: usize = 3;
+pub const MAX_THREE_USD_RESERVE_CANDIDATE_SCAN_SNAPSHOTS: u8 = 3;
 pub const MAX_THREE_USD_RESERVE_PAYOUT_JOURNALS: usize = 10_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]

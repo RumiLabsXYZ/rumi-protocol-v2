@@ -89,6 +89,9 @@ pub async fn advance_owner_reserve_candidate_discovery(
         return Ok(ReserveCandidateDiscoveryProgress::Held);
     }
     let start_index = row.history_start_index.unwrap();
+    let next_snapshot_count = saved_scan.as_ref().map_or(1, |scan| {
+        scan.snapshot_count.saturating_add(1)
+    });
     let existing_scan = saved_scan;
     if let Some(scan) = existing_scan.as_ref() {
         if scan.operation_id != operation_id
@@ -99,6 +102,14 @@ pub async fn advance_owner_reserve_candidate_discovery(
             return Ok(ReserveCandidateDiscoveryProgress::Held);
         }
         if scan.multiple_candidates {
+            return Ok(ReserveCandidateDiscoveryProgress::Held);
+        }
+        if scan.next_index == scan.snapshot_log_length
+            && scan.candidate_block_index.is_none()
+            && scan.snapshot_count >= crate::state::MAX_THREE_USD_RESERVE_CANDIDATE_SCAN_SNAPSHOTS
+        {
+            // Lifetime cap exhausted. Keep the payout held and avoid creating
+            // another journal event; this is not proof of non-inclusion.
             return Ok(ReserveCandidateDiscoveryProgress::Held);
         }
     }
@@ -112,6 +123,10 @@ pub async fn advance_owner_reserve_candidate_discovery(
             if scan.next_index < scan.snapshot_log_length
                 || scan.candidate_block_index.is_some() => scan,
         _ => {
+            let snapshot_count = next_snapshot_count;
+            if snapshot_count > crate::state::MAX_THREE_USD_RESERVE_CANDIDATE_SCAN_SNAPSHOTS {
+                return Ok(ReserveCandidateDiscoveryProgress::Held);
+            }
             let ledger = payout.ledger;
             let request = vec![GetBlocksRequest {
                 start: Nat::from(start_index),
@@ -132,6 +147,7 @@ pub async fn advance_owner_reserve_candidate_discovery(
                 attempt_nonce: row.op_nonce,
                 start_index,
                 snapshot_log_length,
+                snapshot_count,
                 next_index: start_index,
                 candidate_block_index: None,
                 multiple_candidates: false,

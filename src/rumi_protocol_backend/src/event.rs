@@ -1842,6 +1842,8 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
                 || scan.attempt_nonce != attempt_nonce
                 || scan.next_index < scan.start_index
                 || scan.next_index > scan.snapshot_log_length
+                || scan.snapshot_count == 0
+                || scan.snapshot_count > crate::state::MAX_THREE_USD_RESERVE_CANDIDATE_SCAN_SNAPSHOTS
                 || scan.snapshot_log_length.saturating_sub(scan.start_index) > 10_000
                 || scan.candidate_block_index.is_some_and(|index| {
                     index < scan.start_index || index >= scan.next_index
@@ -1877,7 +1879,8 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
             }
             match state.three_usd_reserve_payout_candidate_scans.get(&key) {
                 None => {
-                    if scan.next_index != scan.start_index
+                    if scan.snapshot_count != 1
+                        || scan.next_index != scan.start_index
                         || scan.candidate_block_index.is_some()
                         || scan.multiple_candidates
                     {
@@ -1890,12 +1893,15 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
                         && !previous.multiple_candidates
                         && scan.next_index == scan.start_index
                         && scan.snapshot_log_length >= previous.snapshot_log_length
+                        && previous.snapshot_count < crate::state::MAX_THREE_USD_RESERVE_CANDIDATE_SCAN_SNAPSHOTS
+                        && scan.snapshot_count == previous.snapshot_count + 1
                         && scan.candidate_block_index.is_none()
                         && !scan.multiple_candidates;
                     let advances = previous.operation_id == operation_id
                         && previous.attempt_nonce == attempt_nonce
                         && previous.start_index == scan.start_index
                         && previous.snapshot_log_length == scan.snapshot_log_length
+                        && previous.snapshot_count == scan.snapshot_count
                         && scan.next_index >= previous.next_index
                         && scan.next_index.saturating_sub(previous.next_index) <= 64
                         && (previous.candidate_block_index.is_none()
@@ -5928,12 +5934,12 @@ mod three_usd_reserve_payout_replay_tests {
             history_candidate_seen: false, no_effect_proof: None, history_log_length: None,
             history_cursor: 0, min_net_collateral_raw: None,
         };
-        let scan_event = |next_index, candidate_block_index, multiple_candidates| {
+        let scan_event = |next_index, candidate_block_index, multiple_candidates, snapshot_count| {
             PendingPayoutEvent::ThreeUsdReservePayoutCandidateScan {
                 key: key.clone(), operation_id, attempt_nonce: operation_id,
                 scan: ThreeUsdReservePayoutCandidateScan {
                     operation_id, attempt_nonce: operation_id, start_index: 10,
-                    snapshot_log_length: 20, next_index, candidate_block_index,
+                    snapshot_log_length: 20, snapshot_count, next_index, candidate_block_index,
                     multiple_candidates,
                 },
             }
@@ -5946,8 +5952,8 @@ mod three_usd_reserve_payout_replay_tests {
                 ledger, owner: pool, amount_raw: 100, start_index: Some(10), timestamp: None,
             },
             PendingPayoutEvent::AmbiguousOutcome { operation_id, attempt_nonce: operation_id, owner: pool, timestamp: None },
-            scan_event(10, None, false),
-            scan_event(15, Some(12), false),
+            scan_event(10, None, false, 1),
+            scan_event(15, Some(12), false, 1),
         ];
         let partial = replay_with_nonce_time_and_payout_events(
             vec![Event::Init(init_args(ledger))].into_iter(),
@@ -5962,7 +5968,7 @@ mod three_usd_reserve_payout_replay_tests {
         assert_eq!(partial.three_usd_reserve_payout_candidate_scans.get(&key).unwrap().next_index, 15);
 
         let mut found_twice = prefix;
-        found_twice.push(scan_event(20, Some(12), true));
+        found_twice.push(scan_event(20, Some(12), true, 1));
         // Even a buggy promotion record after a second exact match is rejected
         // during replay; multiplicity remains durably held.
         found_twice.push(PendingPayoutEvent::ThreeUsdReservePayoutCandidate {
@@ -5980,6 +5986,84 @@ mod three_usd_reserve_payout_replay_tests {
         let scan = multiple.three_usd_reserve_payout_candidate_scans.get(&key).unwrap();
         assert_eq!(scan.candidate_block_index, Some(12));
         assert!(scan.multiple_candidates);
+    }
+
+    #[test]
+    fn repeated_no_match_candidate_scans_have_a_replay_persisted_cap() {
+        use crate::state::{
+            PendingMarginTransfer, PendingPayoutKind, ThreeUsdReserveCollateralPayout,
+            ThreeUsdReserveIngressKey, ThreeUsdReservePayoutCandidateScan,
+        };
+        let backend = principal(71);
+        let pool = principal(72);
+        let ledger = principal(73);
+        let operation_id = 74;
+        let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 9, absorb_id: 10 };
+        let memo: [u8; 16] = crate::management::nonce_to_memo(operation_id).0.as_slice()
+            .try_into().unwrap();
+        let payout = ThreeUsdReserveCollateralPayout {
+            operation_id, op_nonce: operation_id, collateral_type: ledger, ledger,
+            source: icrc_ledger_types::icrc1::account::Account { owner: backend, subaccount: None },
+            destination: icrc_ledger_types::icrc1::account::Account { owner: pool, subaccount: None },
+            gross_e8s: 110, net_e8s: 100, expected_fee_e8s: 10,
+            memo, created_at_time_ns: crate::management::nonce_to_created_at_time(operation_id),
+            fee_arg_e8s: Some(10), candidate_block_index: None, observed_fee_e8s: None,
+            rearmed_attempts: Vec::new(),
+        };
+        let transfer = PendingMarginTransfer {
+            vault_id: 9, operation_id, payout_kind: PendingPayoutKind::Margin,
+            owner: pool, margin: crate::numeric::ICP::new(110), collateral_type: ledger,
+            retry_count: 0, op_nonce: operation_id, ledger: Some(ledger), transfer_amount_raw: Some(100),
+            held_for_manual_retry: false, reconciliation_required: false, in_flight: false,
+            too_old_confirmed: false, history_start_index: None, rearm_schema_version: 1,
+            history_scan: None, history_candidate_seen: false, no_effect_proof: None,
+            history_log_length: None, history_cursor: 0, min_net_collateral_raw: None,
+        };
+        let scan = |snapshot_count, next_index| PendingPayoutEvent::ThreeUsdReservePayoutCandidateScan {
+            key: key.clone(), operation_id, attempt_nonce: operation_id,
+            scan: ThreeUsdReservePayoutCandidateScan {
+                operation_id, attempt_nonce: operation_id, start_index: 10,
+                snapshot_log_length: 20, snapshot_count, next_index,
+                candidate_block_index: None, multiple_candidates: false,
+            },
+        };
+        let mut events = vec![
+            PendingPayoutEvent::ThreeUsdReservePayoutPrepared { key: key.clone(), payout },
+            PendingPayoutEvent::Queued { kind: PendingPayoutKind::Margin, operation_id, transfer, timestamp: None },
+            PendingPayoutEvent::DispatchBoundary {
+                operation_id, attempt_nonce: operation_id, payout_kind: Some(PendingPayoutKind::Margin),
+                ledger, owner: pool, amount_raw: 100, start_index: Some(10), timestamp: None,
+            },
+            PendingPayoutEvent::AmbiguousOutcome { operation_id, attempt_nonce: operation_id, owner: pool, timestamp: None },
+            scan(1, 10), scan(1, 20),
+            scan(2, 10), scan(2, 20),
+            scan(3, 10), scan(3, 20),
+        ];
+        let capped = replay_with_nonce_time_and_payout_events(
+            vec![Event::Init(init_args(ledger))].into_iter(),
+            events.clone().into_iter().map(|event| crate::storage::PendingPayoutJournalEntry {
+                after_event_count: 1, event,
+            }),
+            || 1,
+        ).expect("bounded no-match rescans replay");
+        let saved = capped.three_usd_reserve_payout_candidate_scans.get(&key).unwrap();
+        assert_eq!(saved.snapshot_count, crate::state::MAX_THREE_USD_RESERVE_CANDIDATE_SCAN_SNAPSHOTS);
+        assert_eq!(saved.next_index, saved.snapshot_log_length);
+        assert_eq!(saved.candidate_block_index, None);
+
+        // A fourth full snapshot is rejected even if a caller manufactures its
+        // private event; the persisted lifetime cap remains at three.
+        events.push(scan(4, 10));
+        let exhausted = replay_with_nonce_time_and_payout_events(
+            vec![Event::Init(init_args(ledger))].into_iter(),
+            events.into_iter().map(|event| crate::storage::PendingPayoutJournalEntry {
+                after_event_count: 1, event,
+            }),
+            || 1,
+        ).expect("over-cap event is ignored during replay");
+        let saved = exhausted.three_usd_reserve_payout_candidate_scans.get(&key).unwrap();
+        assert_eq!(saved.snapshot_count, crate::state::MAX_THREE_USD_RESERVE_CANDIDATE_SCAN_SNAPSHOTS);
+        assert_eq!(saved.next_index, saved.snapshot_log_length);
     }
 
     #[test]
