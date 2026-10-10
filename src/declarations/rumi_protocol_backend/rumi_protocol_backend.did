@@ -1628,6 +1628,7 @@ service : (ProtocolArg) -> {
   admin_resolve_stuck_claim : (nat64, bool) -> (Result);
   admin_resolve_xrp_claim : (nat64, XrpClaimResolution) -> (Result);
   admin_sweep_to_treasury : (text) -> (Result_1);
+  advance_pending_borrow_mint_recovery : (nat64) -> (Result);
   backfill_collateral_symbols : () -> (Result_3);
   borrow_chain_vault_evm : (VaultIntent, blob) -> (Result);
   borrow_from_vault : (VaultArg) -> (Result_4);

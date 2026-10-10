@@ -29,8 +29,10 @@
 use candid::{CandidType, Nat, Principal};
 use ic_cdk::{init, query, update};
 use icrc_ledger_types::icrc::generic_value::{ICRC3Map, ICRC3Value};
-use icrc_ledger_types::icrc3::archive::{GetArchivesArgs, GetArchivesResult};
-use icrc_ledger_types::icrc3::blocks::{BlockWithId, GetBlocksRequest, GetBlocksResult};
+use icrc_ledger_types::icrc3::archive::{GetArchivesArgs, GetArchivesResult, QueryArchiveFn};
+use icrc_ledger_types::icrc3::blocks::{
+    ArchivedBlocks, BlockWithId, GetBlocksRequest, GetBlocksResult,
+};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -138,6 +140,9 @@ struct LedgerState {
     /// ICRC-3 history is passive test evidence. Every successful ledger
     /// operation appends exactly one block at its normal zero-based index.
     blocks: Vec<BlockWithId>,
+    /// Optional exact nonempty ICRC-3 request range to report as archived.
+    /// This is test-only response corruption for recovery regressions.
+    icrc3_archive_range: Option<(u64, u64)>,
     fee: u128,
     fail_fee_query: bool,
     fail_transfers: bool,
@@ -154,6 +159,9 @@ struct LedgerState {
     /// typed TooOld reply on an exact retry without applying another mint.
     phantom_mint_dedup: BTreeMap<DedupKey, u64>,
     too_old_after_phantom_mint_remaining: u32,
+    too_old_before_mint_remaining: u32,
+    too_old_before_mint_history_blocks: u32,
+    too_old_before_mint_history_owner: Option<Principal>,
     /// Next N transfers return BadFee with the current fee value.
     bad_fee_failures_remaining: u32,
     /// Recent transfers keyed by their dedup tuple. Retained until reset_dedup().
@@ -397,6 +405,28 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             created_at_time,
         });
 
+        // Fixture mode for proving recovery when TooOld arrives before any
+        // mint commit. This is deliberately independent of the dedup map.
+        if is_mint && state.too_old_before_mint_remaining > 0 {
+            state.too_old_before_mint_remaining -= 1;
+            let history_blocks = std::mem::take(&mut state.too_old_before_mint_history_blocks);
+            if history_blocks > 0 {
+                let history_owner = state
+                    .too_old_before_mint_history_owner
+                    .take()
+                    .expect("history owner configured with history blocks");
+                let account = Account {
+                    owner: history_owner,
+                    subaccount: None,
+                };
+                for _ in 0..history_blocks {
+                    *state.balances.entry(account.clone()).or_insert(0) += 1;
+                    append_block(&mut state, mint_block(&account, 1));
+                }
+            }
+            return Err(TransferError::TooOld);
+        }
+
         // Dedup check (only when created_at_time is provided, matching ICRC-1).
         if let Some(key) = dedup_key.as_ref() {
             if let Some(prev_block) = state.dedup.get(key).copied() {
@@ -630,6 +660,7 @@ fn icrc3_get_blocks(args: Vec<GetBlocksRequest>) -> GetBlocksResult {
     STATE.with(|s| {
         let state = s.borrow();
         let mut blocks = Vec::new();
+        let mut archived_blocks = Vec::new();
         for request in args {
             let Ok(start) = u64::try_from(request.start.0) else {
                 continue;
@@ -641,6 +672,19 @@ fn icrc3_get_blocks(args: Vec<GetBlocksRequest>) -> GetBlocksResult {
             let Some(end) = start.checked_add(length) else {
                 continue;
             };
+            if length > 0 && state.icrc3_archive_range == Some((start, length)) {
+                archived_blocks.push(ArchivedBlocks {
+                    args: vec![GetBlocksRequest {
+                        start: Nat::from(start),
+                        length: Nat::from(length),
+                    }],
+                    callback: QueryArchiveFn::new(
+                        ic_cdk::id(),
+                        "missing_icrc3_archive_callback",
+                    ),
+                });
+                continue;
+            }
             for block_index in start..end.min(state.blocks.len() as u64) {
                 if let Some(block) = state.blocks.get(block_index as usize) {
                     blocks.push(block.clone());
@@ -653,7 +697,7 @@ fn icrc3_get_blocks(args: Vec<GetBlocksRequest>) -> GetBlocksResult {
         GetBlocksResult {
             log_length: Nat::from(state.blocks.len() as u64),
             blocks,
-            archived_blocks: vec![],
+            archived_blocks,
         }
     })
 }
@@ -730,6 +774,26 @@ fn set_too_old_after_phantom_mint(n: u32) {
     STATE.with(|s| s.borrow_mut().too_old_after_phantom_mint_remaining = n);
 }
 
+/// The next N configured minter calls return typed TooOld before changing
+/// balances, dedup state, or the ICRC-3 log.
+#[update]
+fn set_too_old_before_mint(n: u32) {
+    STATE.with(|s| s.borrow_mut().too_old_before_mint_remaining = n);
+}
+
+/// Make the next configured minter call append unrelated, balance-backed mint
+/// blocks immediately before returning typed TooOld. This lets recovery tests
+/// exercise a nonempty post-floor history without an external ledger mutation.
+#[update]
+fn set_too_old_before_mint_with_history(blocks: u32, owner: Principal) {
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        state.too_old_before_mint_remaining = 1;
+        state.too_old_before_mint_history_blocks = blocks;
+        state.too_old_before_mint_history_owner = Some(owner);
+    });
+}
+
 /// Next N transfers return BadFee { expected_fee = current fee } before
 /// committing, regardless of the fee the caller submitted.
 #[update]
@@ -767,6 +831,14 @@ fn set_fail_transfers_for_caller(target: Option<Principal>) {
 #[update]
 fn set_fake_zero_balance_for(target: Option<Principal>) {
     STATE.with(|s| s.borrow_mut().fake_zero_balance_for = target);
+}
+
+/// When set to `Some((start, length))`, the exact nonempty ICRC-3 request
+/// returns an archive descriptor with no implemented callback. `None` clears
+/// the opt-in response fault. Other ranges retain normal direct-page behavior.
+#[update]
+fn set_icrc3_archive_range(range: Option<(u64, u64)>) {
+    STATE.with(|s| s.borrow_mut().icrc3_archive_range = range);
 }
 
 #[cfg(test)]
