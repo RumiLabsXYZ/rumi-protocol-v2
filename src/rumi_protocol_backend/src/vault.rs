@@ -6660,7 +6660,11 @@ pub async fn advance_pending_borrow_mint_recovery(vault_id: u64) -> Result<(), P
             guard_principal.fail(); return Err(ProtocolError::TemporarilyUnavailable("post-TooOld ledger tip precedes the durable history floor".into()));
         }
         let mut pinned = journal.clone();
-        pinned.absence_scan = Some(crate::state::BorrowMintAbsenceScan { next_block_index: floor, fixed_tip: Some(tip) });
+        pinned.absence_scan = Some(crate::state::BorrowMintAbsenceScan {
+            next_block_index: floor,
+            fixed_tip: Some(tip),
+            candidate_block_index: None,
+        });
         let recorded = mutate_state(|s| {
             if s.pending_borrow_mints.get(&vault_id) != Some(&journal) { return false; }
             s.pending_borrow_mints.insert(vault_id, pinned.clone()); true
