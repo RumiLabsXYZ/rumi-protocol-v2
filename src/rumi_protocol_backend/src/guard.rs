@@ -469,7 +469,14 @@ mod vault_liquidation_guard_tests {
         assert!(VaultLiquidationGuard::new(77).is_err());
         let retry_guard = VaultLiquidationGuard::new_for_borrow_retry(77)
             .expect("exact borrow retry may acquire the held vault");
+        assert!(
+            VaultLiquidationGuard::new_for_borrow_retry(77).is_err(),
+            "owner and developer recovery calls must share one per-vault lock"
+        );
         drop(retry_guard);
+        let recovery_after_release = VaultLiquidationGuard::new_for_borrow_retry(77)
+            .expect("another recovery may begin only after the first guard releases");
+        drop(recovery_after_release);
         assert!(VaultLiquidationGuard::new(77).is_err());
     }
 
