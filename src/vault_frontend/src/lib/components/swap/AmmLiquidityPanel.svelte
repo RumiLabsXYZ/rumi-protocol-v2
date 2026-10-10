@@ -1,8 +1,9 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
   import { walletStore } from '../../stores/wallet';
-  import { ammService, AMM_TOKENS, tokenFee, parseTokenAmount, formatTokenAmount } from '../../services/ammService';
+  import { ammService, AMM_ADD_LIQUIDITY_V2_READY, AMM_TOKENS, tokenFee, parseTokenAmount, formatTokenAmount } from '../../services/ammService';
   import type { PoolInfo } from '../../services/ammService';
+  import type { AmmOperation } from '../../services/ammOperationStore';
   import { CANISTER_IDS } from '../../config';
   import { ProtocolService } from '../../services/protocol';
   import { threePoolService } from '../../services/threePoolService';
@@ -41,6 +42,9 @@
   let addAmountB = ''; // ICP
   let addLoading = false;
   let slippageBps = 50;
+  let heldOperations: AmmOperation[] = [];
+  let checkingOperation = '';
+  let operationStatus = '';
 
   // Price data for auto-pairing (only needed for empty pool / initial deposit)
   let icpPriceUsd: number | null = null;
@@ -112,6 +116,7 @@
 
   onMount(() => {
     loadPool();
+    heldOperations = ammService.getHeldOperations();
     refreshAmm1();
     // Warm the ICRC-1 fee cache so the add-liquidity click handler reads fees
     // synchronously (Oisy gesture-safety — no live icrc1_fee await before the
@@ -298,6 +303,7 @@
         minLp = lpEstimate * BigInt(10000 - slippageBps) / 10000n;
       }
       await ammService.addLiquidity(pool.pool_id, poolAmountA, poolAmountB, minLp, poolTokenA, poolTokenB);
+      heldOperations = ammService.getHeldOperations();
       dispatch('success', { action: 'add_liquidity' });
       addAmountA = '';
       addAmountB = '';
@@ -307,8 +313,23 @@
       await refreshAmm1();
     } catch (err: any) {
       error = err.message || 'Add liquidity failed';
+      heldOperations = ammService.getHeldOperations();
     } finally {
       addLoading = false;
+    }
+  }
+
+  async function checkHeldOperation(requestId: number[]) {
+    checkingOperation = requestId.join(',');
+    operationStatus = '';
+    try {
+      const result = await ammService.checkOperation(requestId);
+      operationStatus = JSON.stringify(result, (_key, value) => typeof value === 'bigint' ? value.toString() : value);
+      heldOperations = ammService.getHeldOperations();
+    } catch (err: any) {
+      operationStatus = err.message || 'Status check failed';
+    } finally {
+      checkingOperation = '';
     }
   }
 
@@ -460,7 +481,10 @@
           <PointsCallout headline="Earning 2× points on your 3USD/ICP liquidity" />
         </div>
       {/if}
-      <button class="submit-btn" on:click={handleAdd} disabled={addLoading}>
+      {#if !AMM_ADD_LIQUIDITY_V2_READY}
+        <div class="held-operation" role="status">Adding AMM liquidity is temporarily unavailable until request-receipt support is ready. No approval or AMM mutation will be started.</div>
+      {/if}
+      <button class="submit-btn" on:click={handleAdd} disabled={addLoading || !AMM_ADD_LIQUIDITY_V2_READY}>
         {#if addLoading}
           <span class="spinner"></span> Adding...
         {:else}
@@ -521,6 +545,27 @@
       {error}
     </div>
   {/if}
+{/if}
+
+{#if heldOperations.length > 0}
+  <div class="held-operation" role="status">
+    <strong>AMM operation held for recovery</strong>
+    <p>Keep the same request ID; do not start a replacement operation for this pool.</p>
+    {#each heldOperations as operation}
+      <div class="held-operation-row">
+        <span>{operation.request.operation === 'swap' ? 'Swap' : 'Add liquidity'} · {operation.poolId}</span>
+        <button type="button" disabled={checkingOperation === operation.requestId.join(',')} on:click={() => checkHeldOperation(operation.requestId)}>
+          {checkingOperation === operation.requestId.join(',') ? 'Checking…' : 'Check status'}
+        </button>
+      </div>
+      <p>{operation.state === 'prepared'
+        ? 'The request is saved, but no approval or AMM call started. Retry only this exact request when the request-receipt endpoint is available.'
+        : operation.state === 'unavailable'
+          ? operation.message
+          : 'Approval or dispatch may have started. Check status before taking another action.'}</p>
+      {#if operationStatus}<pre>{operationStatus}</pre>{/if}
+    {/each}
+  </div>
 {/if}
 
 <style>
@@ -905,4 +950,18 @@
     color: var(--rumi-danger);
     font-size: 0.8125rem;
   }
+
+  .held-operation {
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    border-radius: 0.5rem;
+    background: rgba(245, 158, 11, 0.08);
+    color: var(--rumi-text, #e5e7eb);
+    font-size: 0.8rem;
+  }
+  .held-operation p { margin: 0.35rem 0 0.5rem; color: var(--rumi-text-muted); }
+  .held-operation-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+  .held-operation-row button { border: 1px solid currentColor; border-radius: 0.35rem; padding: 0.3rem 0.55rem; }
+  .held-operation pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.5rem 0 0; }
 </style>

@@ -658,12 +658,18 @@ export async function executeRoute(
 
   if (AMM1_ROUTING_PAUSED) {
     const winner = route.providerQuote?.provider ?? route.hopProviderQuote?.provider;
-    if (winner === 'rumi_amm' || route.type === 'stable_to_icp' || route.type === 'icp_to_stable') {
+    if (winner === 'rumi_amm') {
       throw new Error('AMM1 routing is currently paused. Please refresh the quote and try again.');
     }
   }
 
-  switch (route.type) {
+  if (route.type === 'stable_to_icp' || route.type === 'icp_to_stable') {
+    throw new Error('This multi-hop swap is temporarily held while durable recovery for both canister legs is completed. Your funds were not submitted.');
+  }
+
+  // The multi-hop variants are rejected above. Keep their legacy handlers
+  // typed for the recovery implementation that will replace this hold.
+  switch (route.type as RouteType) {
     case 'three_pool_swap': {
       return await threePoolService.swap(
         from.threePoolIndex, to.threePoolIndex, amountIn, minOutput
@@ -1089,9 +1095,8 @@ async function executeStableToIcpOisy(
   if ('Err' in r3) throw new Error(`3pool deposit failed: ${JSON.stringify(r3.Err)}`);
 
   // Step 4: AMM swap (use estimated 3USD amount — slippage protection via minOutput)
-  const r4 = await ammActor.swap(poolId, Principal.fromText(THREEPOOL_ID), threeUsdEstimate, icpMinOutput);
-  if ('Err' in r4) throw new Error(`AMM swap failed: ${JSON.stringify(r4.Err)}`);
-  return r4.Ok.amount_out;
+  const r4 = await ammService.swap(poolId, Principal.fromText(THREEPOOL_ID), threeUsdEstimate, icpMinOutput, AMM_TOKENS.find(t => t.is3USD)!);
+  return r4.amount_out;
 }
 
 /**
@@ -1154,8 +1159,7 @@ async function executeIcpToStableOisy(
   if (r1 && 'Err' in r1) throw new Error(`ICP approval failed: ${JSON.stringify(r1.Err)}`);
 
   // Step 2: AMM swap ICP → 3USD
-  const r2 = await ammActor.swap(poolId, Principal.fromText(ICP_LEDGER_ID), amountIn, threeUsdMinOutput);
-  if ('Err' in r2) throw new Error(`AMM swap failed: ${JSON.stringify(r2.Err)}`);
+  const r2 = await ammService.swap(poolId, Principal.fromText(ICP_LEDGER_ID), amountIn, threeUsdMinOutput, icpToken);
 
   // Step 3: 3pool redeem 3USD → stablecoin (no approval: burns caller's LP tokens).
   // Burn the NET 3USD the AMM actually paid out (gross - ledger_fee). Burning the
