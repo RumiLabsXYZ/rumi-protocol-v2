@@ -5750,61 +5750,66 @@ mod three_usd_reserve_payout_replay_tests {
         let old_nonce = 44;
         let new_nonce = 45;
         let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 7, absorb_id: 8 };
-        let mut state = State::from(init_args(ledger));
-        let memo: [u8; 16] = crate::management::nonce_to_memo(old_nonce).0.as_slice()
-            .try_into().unwrap();
-        state.three_usd_reserve_collateral_payouts.insert(key.clone(), ThreeUsdReserveCollateralPayout {
-            operation_id,
-            op_nonce: old_nonce,
-            collateral_type: ledger,
-            ledger,
-            source: icrc_ledger_types::icrc1::account::Account { owner: backend, subaccount: None },
-            destination: icrc_ledger_types::icrc1::account::Account { owner: pool, subaccount: None },
-            gross_e8s: 1_010,
-            net_e8s: 1_000,
-            expected_fee_e8s: 10,
-            memo,
-            created_at_time_ns: crate::management::nonce_to_created_at_time(old_nonce),
-            fee_arg_e8s: Some(10),
-            candidate_block_index: None,
-            observed_fee_e8s: None,
-            rearmed_attempts: Vec::new(),
-        });
-        state.three_usd_reserve_payout_operation_keys.insert(operation_id, key.clone());
-        state.insert_pending_payout(PendingMarginTransfer {
-            vault_id: 7,
-            operation_id,
-            payout_kind: PendingPayoutKind::Margin,
-            owner: pool,
-            margin: crate::numeric::ICP::new(1_010),
-            collateral_type: ledger,
-            retry_count: 1,
-            op_nonce: old_nonce,
-            ledger: Some(ledger),
-            transfer_amount_raw: Some(1_000),
-            held_for_manual_retry: true,
-            reconciliation_required: true,
-            in_flight: false,
-            too_old_confirmed: true,
-            history_start_index: Some(10),
-            rearm_schema_version: 1,
-            history_scan: Some(PendingPayoutHistoryScan {
+        let make_state = || {
+            let mut state = State::from(init_args(ledger));
+            let memo: [u8; 16] = crate::management::nonce_to_memo(old_nonce).0.as_slice()
+                .try_into().unwrap();
+            state.three_usd_reserve_collateral_payouts.insert(key.clone(), ThreeUsdReserveCollateralPayout {
+                operation_id,
+                op_nonce: old_nonce,
+                collateral_type: ledger,
+                ledger,
+                source: icrc_ledger_types::icrc1::account::Account { owner: backend, subaccount: None },
+                destination: icrc_ledger_types::icrc1::account::Account { owner: pool, subaccount: None },
+                gross_e8s: 1_010,
+                net_e8s: 1_000,
+                expected_fee_e8s: 10,
+                memo,
+                created_at_time_ns: crate::management::nonce_to_created_at_time(old_nonce),
+                fee_arg_e8s: Some(10),
+                candidate_block_index: None,
+                observed_fee_e8s: None,
+                rearmed_attempts: Vec::new(),
+            });
+            state.three_usd_reserve_payout_operation_keys.insert(operation_id, key.clone());
+            state.insert_pending_payout(PendingMarginTransfer {
+                vault_id: 7,
                 operation_id,
                 payout_kind: PendingPayoutKind::Margin,
-                ledger,
                 owner: pool,
-                amount_raw: 1_000,
-                attempt_nonce: old_nonce,
-                start_index: 10,
-                snapshot_log_length: 25,
-                next_index: 25,
-            }),
-            history_candidate_seen: false,
-            no_effect_proof: None,
-            history_log_length: Some(25),
-            history_cursor: 25,
-            min_net_collateral_raw: None,
-        });
+                margin: crate::numeric::ICP::new(1_010),
+                collateral_type: ledger,
+                retry_count: 1,
+                op_nonce: old_nonce,
+                ledger: Some(ledger),
+                transfer_amount_raw: Some(1_000),
+                held_for_manual_retry: true,
+                reconciliation_required: true,
+                in_flight: false,
+                too_old_confirmed: true,
+                history_start_index: Some(10),
+                rearm_schema_version: 1,
+                history_scan: Some(PendingPayoutHistoryScan {
+                    operation_id,
+                    payout_kind: PendingPayoutKind::Margin,
+                    ledger,
+                    owner: pool,
+                    amount_raw: 1_000,
+                    attempt_nonce: old_nonce,
+                    start_index: 10,
+                    snapshot_log_length: 25,
+                    next_index: 25,
+                }),
+                history_candidate_seen: false,
+                no_effect_proof: None,
+                history_log_length: Some(25),
+                history_cursor: 25,
+                min_net_collateral_raw: None,
+            });
+            state
+        };
+        let mut state = make_state();
+        let mut replayed = make_state();
         let proof = PendingPayoutNoEffectProof {
             operation_id,
             payout_kind: PendingPayoutKind::Margin,
@@ -5818,7 +5823,6 @@ mod three_usd_reserve_payout_replay_tests {
             complete_prefix: true,
             verified_at_ns: 99,
         };
-        let mut replayed = state.clone();
         assert!(record_pending_payout_rearmed(&mut state, proof));
         apply_pending_payout_event(&mut replayed, PendingPayoutEvent::Rearmed {
             operation_id,
