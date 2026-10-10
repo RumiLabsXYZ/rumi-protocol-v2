@@ -590,11 +590,22 @@ pub fn validate_borrow_mint_scan_page(
         let decoded = decode_block(&item.block)?;
         if validate_icrc3_borrow_mint_block(&decoded, tuple).is_ok() {
             if found.replace(index).is_some() { return Err("exact borrow mint appears more than once".into()); }
-        } else if (decoded.op == "mint" || decoded.btype.as_deref() == Some("1mint"))
-            && decoded.to.as_ref().is_some_and(|to| to.owner == tuple.destination)
-            && decoded.amount == u128::from(tuple.amount_e8s)
-        {
-            return Err("plausible borrow mint has missing or conflicting exact metadata".into());
+        } else if decoded.op == "mint" || decoded.btype.as_deref() == Some("1mint") {
+            let memo_matches = decoded.memo.as_deref() == Some(tuple.memo.as_slice());
+            let recipient_is_plausible = decoded.to.is_none()
+                || decoded
+                    .to
+                    .as_ref()
+                    .is_some_and(|to| to.owner == tuple.destination);
+            // `created_at_time` is the timestamp half of the nonce, while the
+            // memo carries the full nonce. Use it only with a plausible
+            // recipient; timestamps can collide across operations.
+            let metadata_matches = recipient_is_plausible
+                && (decoded.amount == u128::from(tuple.amount_e8s)
+                    || decoded.created_at_time == Some(tuple.created_at_time_ns));
+            if memo_matches || metadata_matches {
+                return Err("plausible borrow mint has missing or conflicting exact metadata".into());
+            }
         }
     }
     Ok(found)
@@ -842,6 +853,123 @@ mod borrow_mint_receipt_tests {
         let archive = ArchivedBlocks { args: vec![], callback: QueryArchiveFn::new(Principal::from_slice(&[9]), "archive") };
         let archived = GetBlocksResult { log_length: 2u64.into(), blocks: vec![], archived_blocks: vec![archive] };
         assert!(validate_borrow_mint_scan_page(1, 2, 2, &archived, &tuple).is_err());
+    }
+
+    #[test]
+    fn absence_scan_holds_incomplete_plausible_mints_but_ignores_other_recipients() {
+        use icrc_ledger_types::icrc3::blocks::{BlockWithId, GetBlocksResult};
+
+        let tuple = tuple();
+        let page = |block| GetBlocksResult {
+            log_length: 2u64.into(),
+            blocks: vec![BlockWithId {
+                id: 1u64.into(),
+                block,
+            }],
+            archived_blocks: vec![],
+        };
+        let mint = |recipient, amount, memo: &[u8], timestamp| {
+            let mut block = make_test_block("mint", None, recipient, amount, Some(memo), false);
+            if let ICRC3Value::Map(root) = &mut block {
+                if let Some(ICRC3Value::Map(tx)) = root.get_mut("tx") {
+                    tx.insert("ts".into(), ICRC3Value::Nat(candid::Nat::from(timestamp)));
+                }
+            }
+            block
+        };
+
+        // An absent recipient leaves the exact-amount mint plausibly bound to
+        // this journal, so the page cannot prove absence.
+        let mut missing_recipient = mint(
+            Some(Account { owner: tuple.destination, subaccount: None }),
+            tuple.amount_e8s,
+            &[0x99; 16],
+            tuple.created_at_time_ns,
+        );
+        if let ICRC3Value::Map(root) = &mut missing_recipient {
+            if let Some(ICRC3Value::Map(tx)) = root.get_mut("tx") {
+                tx.remove("to");
+            }
+        }
+        assert!(validate_borrow_mint_scan_page(
+            1,
+            2,
+            2,
+            &page(missing_recipient),
+            &tuple,
+        )
+        .is_err());
+
+        // The exact memo is the operation identifier. Even with a different
+        // valid recipient and amount, that block may be a conflicting copy of
+        // this operation and must keep recovery held.
+        let matching_memo = mint(
+            Some(Account { owner: Principal::from_slice(&[3]), subaccount: None }),
+            tuple.amount_e8s + 1,
+            &tuple.memo,
+            tuple.created_at_time_ns,
+        );
+        assert!(validate_borrow_mint_scan_page(
+            1,
+            2,
+            2,
+            &page(matching_memo),
+            &tuple,
+        )
+        .is_err());
+
+        // The timestamp is a useful secondary signal only when the recipient
+        // is also the journal owner (or absent); it is not unique by itself.
+        let matching_timestamp = mint(
+            Some(Account { owner: tuple.destination, subaccount: None }),
+            tuple.amount_e8s + 1,
+            &[0x97; 16],
+            tuple.created_at_time_ns,
+        );
+        assert!(validate_borrow_mint_scan_page(
+            1,
+            2,
+            2,
+            &page(matching_timestamp),
+            &tuple,
+        )
+        .is_err());
+
+        // A same-amount mint explicitly sent to another owner and carrying a
+        // different memo is an unrelated ledger operation, not a blocker,
+        // even if it happens to share this tuple's timestamp.
+        let unrelated = mint(
+            Some(Account { owner: Principal::from_slice(&[4]), subaccount: None }),
+            tuple.amount_e8s,
+            &[0x98; 16],
+            tuple.created_at_time_ns,
+        );
+        assert_eq!(
+            validate_borrow_mint_scan_page(1, 2, 2, &page(unrelated), &tuple).unwrap(),
+            None,
+        );
+
+        // A present but malformed recipient cannot be decoded and therefore
+        // also cannot be used as evidence of absence.
+        let mut malformed_recipient = mint(
+            Some(Account { owner: tuple.destination, subaccount: None }),
+            tuple.amount_e8s,
+            &tuple.memo,
+            tuple.created_at_time_ns,
+        );
+        if let ICRC3Value::Map(root) = &mut malformed_recipient {
+            if let Some(ICRC3Value::Map(tx)) = root.get_mut("tx") {
+                tx.insert("to".into(), ICRC3Value::Nat(candid::Nat::from(1u8)));
+            }
+        }
+        assert!(validate_borrow_mint_scan_page(
+            1,
+            2,
+            2,
+            &page(malformed_recipient),
+            &tuple,
+        )
+        .is_err());
     }
 }
 

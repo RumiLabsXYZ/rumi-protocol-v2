@@ -231,6 +231,17 @@ impl VaultLiquidationGuard {
     /// Only the already-authorized exact borrow retry may pass its own
     /// pending mint lock. A pending push sweep still blocks that retry.
     pub fn new_for_borrow_retry(vault_id: u64) -> Result<Self, crate::ProtocolError> {
+        let bot_liquidation_pending = read_state(|s| {
+            s.vault_id_to_vaults
+                .get(&vault_id)
+                .is_some_and(|vault| vault.bot_processing)
+                || s.bot_claims.contains_key(&vault_id)
+        });
+        if bot_liquidation_pending {
+            return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                "Vault #{vault_id} has an unresolved bot liquidation; retry after it settles"
+            )));
+        }
         Self::acquire(vault_id, None, true)
     }
 
@@ -478,6 +489,83 @@ mod vault_liquidation_guard_tests {
             .expect("another recovery may begin only after the first guard releases");
         drop(recovery_after_release);
         assert!(VaultLiquidationGuard::new(77).is_err());
+    }
+
+    #[test]
+    fn borrow_retry_remains_blocked_until_both_bot_liquidation_markers_clear() {
+        let vault_id = 78;
+        let mut state = crate::state::State::default();
+        state.vault_id_to_vaults.insert(
+            vault_id,
+            crate::vault::Vault {
+                owner: Principal::anonymous(),
+                borrowed_icusd_amount: crate::numeric::ICUSD::new(0),
+                collateral_amount: 1,
+                vault_id,
+                collateral_type: Principal::anonymous(),
+                last_accrual_time: 0,
+                accrued_interest: crate::numeric::ICUSD::new(0),
+                bot_processing: true,
+            },
+        );
+        state.bot_claims.insert(
+            vault_id,
+            crate::state::BotClaim {
+                vault_id,
+                generation: 1,
+                memo_version: None,
+                collateral_transfer: None,
+                prior_collateral_transfer: None,
+                payment_ledger_principal: None,
+                collateral_amount: 1,
+                debt_amount: 0,
+                collateral_type: Principal::anonymous(),
+                claimed_at: 0,
+                collateral_price_e8s: 0,
+                collateral_return_proof: None,
+            },
+        );
+        crate::state::replace_state(state);
+
+        assert!(
+            VaultLiquidationGuard::new_for_borrow_retry(vault_id).is_err(),
+            "borrow retry must not overlap an active bot claim"
+        );
+
+        // A restored state can have only one of the persisted markers set.
+        // Clearing bot_processing alone must not bypass the remaining claim.
+        crate::state::mutate_state(|s| {
+            s.vault_id_to_vaults
+                .get_mut(&vault_id)
+                .expect("test vault exists")
+                .bot_processing = false;
+        });
+        assert!(
+            VaultLiquidationGuard::new_for_borrow_retry(vault_id).is_err(),
+            "a bot claim must block even when bot_processing is false"
+        );
+
+        // Conversely, bot_processing alone must also block a restored state.
+        crate::state::mutate_state(|s| {
+            s.bot_claims.remove(&vault_id);
+            s.vault_id_to_vaults
+                .get_mut(&vault_id)
+                .expect("test vault exists")
+                .bot_processing = true;
+        });
+        assert!(
+            VaultLiquidationGuard::new_for_borrow_retry(vault_id).is_err(),
+            "bot_processing must block even when no bot claim exists"
+        );
+
+        crate::state::mutate_state(|s| {
+            s.vault_id_to_vaults
+                .get_mut(&vault_id)
+                .expect("test vault exists")
+                .bot_processing = false;
+        });
+        let _guard = VaultLiquidationGuard::new_for_borrow_retry(vault_id)
+            .expect("retry may acquire only after both persisted bot markers clear");
     }
 
     #[test]
