@@ -462,6 +462,11 @@ export interface _SERVICE {
       { 'Err' : AmmError }
   >,
   'pause_pool' : ActorMethod<[string], { 'Ok' : null } | { 'Err' : AmmError }>,
+  'reconcile_inbound_leg_from_block' : ActorMethod<
+    [Principal, Uint8Array | number[], bigint, bigint],
+    { 'Ok' : null } |
+      { 'Err' : AmmError }
+  >,
   'recover_outbound_payout' : ActorMethod<
     [bigint, [] | [bigint]],
     { 'Ok' : null } |

@@ -261,6 +261,26 @@ fn last_block_index(pic: &PocketIc, ledger: Principal) -> u64 {
     height - 1
 }
 
+fn reconcile_inbound_leg_from_block(
+    pic: &PocketIc,
+    amm: Principal,
+    caller: Principal,
+    owner: Principal,
+    id: &[u8],
+    leg_index: u64,
+    block_index: u64,
+) -> Result<(), AmmError> {
+    reply(
+        pic.update_call(
+            amm,
+            caller,
+            "reconcile_inbound_leg_from_block",
+            encode_args((owner, id.to_vec(), leg_index, block_index)).unwrap(),
+        )
+        .unwrap(),
+    )
+}
+
 fn call_swap(
     pic: &PocketIc,
     amm: Principal,
@@ -497,6 +517,14 @@ fn partial_remove_payout_keeps_atomic_reserve_event() {
     );
     assert!(events.is_empty(), "event history no longer contains the accounting proof");
     set_transfer_failure(&pic, token_b, false);
+    let admin_balance_before_recovery = balance(
+        &pic,
+        token_b,
+        LedgerAccount {
+            owner: admin,
+            subaccount: None,
+        },
+    );
     let recovered: Result<(), AmmError> = reply(
         pic.update_call(
             amm,
@@ -506,13 +534,24 @@ fn partial_remove_payout_keeps_atomic_reserve_event() {
         )
         .unwrap(),
     );
-    recovered.expect("committed B leg replays its exact tuple within ledger window");
-    assert!(balance(&pic, token_b, LedgerAccount { owner: admin, subaccount: None }) > 0);
+    assert!(matches!(recovered, Err(AmmError::InvalidInput { .. })));
+    assert_eq!(
+        balance(
+            &pic,
+            token_b,
+            LedgerAccount {
+                owner: admin,
+                subaccount: None,
+            },
+        ),
+        admin_balance_before_recovery,
+        "missing tx_window keeps the pre-effect failed payout held"
+    );
     let remaining: Result<Vec<OutboundPayout>, AmmError> = reply(
         pic.query_call(amm, admin, "get_unresolved_outbound_payouts", encode_args((0u64, 100u64)).unwrap())
             .unwrap(),
     );
-    assert!(remaining.unwrap().is_empty(), "only the recovered B row is retired");
+    assert_eq!(remaining.unwrap(), vec![payout]);
 }
 
 #[test]
@@ -798,6 +837,15 @@ fn effect_then_error_replays_exact_input_once_and_survives_upgrade() {
         2_010_000
     );
 
+    // This fixture intentionally omits icrc1:tx_window. A same-ID retry
+    // cannot treat the ambiguous ICRC-2 result as permission to pull again.
+    assert!(call_swap(&pic, amm, user, &id, &pool, token_a, 10_000).is_err());
+    assert!(matches!(
+        status(&pic, amm, user, &id).operation.phase,
+        InboundOperationPhase::Held
+    ));
+    let input_block = last_block_index(&pic, token_a);
+
     pic.upgrade_canister(
         amm,
         amm_test_wasm(),
@@ -822,8 +870,43 @@ fn effect_then_error_replays_exact_input_once_and_survives_upgrade() {
         2,
         "global high-water survives upgrade"
     );
+    reconcile_inbound_leg_from_block(&pic, amm, user, user, &id, 0, input_block)
+        .expect("exact direct ICRC-3 2xfer proof confirms the pull");
+    assert!(matches!(
+        status(&pic, amm, user, &id).operation.phase,
+        InboundOperationPhase::Held
+    ));
+    assert_eq!(
+        last_block_index(&pic, token_a),
+        input_block,
+        "proof confirmation does not dispatch another input transfer"
+    );
+    assert_eq!(
+        balance(
+            &pic,
+            token_a,
+            LedgerAccount {
+                owner: user,
+                subaccount: None
+            }
+        ),
+        before_in - 10_010,
+        "proof confirmation leaves input balances unchanged"
+    );
+    assert_eq!(
+        balance(
+            &pic,
+            token_a,
+            LedgerAccount {
+                owner: amm,
+                subaccount: Some(sub_a),
+            }
+        ),
+        2_010_000,
+        "proof confirmation does not credit the input account a second time"
+    );
     let recovered = call_swap(&pic, amm, user, &id, &pool, token_a, 10_000)
-        .expect("same-ID exact replay recovers Duplicate receipt and completes");
+        .expect("same-ID retry completes after the exact block proof");
     assert!(matches!(
         status(&pic, amm, user, &id).operation.phase,
         InboundOperationPhase::Completed
@@ -879,6 +962,69 @@ fn effect_then_error_replays_exact_input_once_and_survives_upgrade() {
 }
 
 #[test]
+fn inbound_block_reconciliation_rejects_wrong_index_and_unauthorized_caller() {
+    let (pic, amm, token_a, _token_b, user, pool, _sub_a, _sub_b) = setup();
+    let id = request_id(1, 0x53);
+    set_fault_count(&pic, token_a, "set_phantom_failures", 1);
+    assert!(matches!(
+        call_swap(&pic, amm, user, &id, &pool, token_a, 10_000),
+        Err(AmmError::TransferFailed { .. })
+    ));
+    let input_block = last_block_index(&pic, token_a);
+
+    assert!(matches!(
+        reconcile_inbound_leg_from_block(&pic, amm, user, user, &id, 1, input_block),
+        Err(AmmError::InvalidInput { .. })
+    ));
+    assert!(matches!(
+        reconcile_inbound_leg_from_block(&pic, amm, user, user, &id, 0, input_block + 1),
+        Err(AmmError::TransferFailed { .. })
+    ));
+    assert!(matches!(
+        status(&pic, amm, user, &id).operation.phase,
+        InboundOperationPhase::Held
+    ));
+
+    let stranger = Principal::self_authenticating(&[90, 91, 92]);
+    assert!(matches!(
+        reconcile_inbound_leg_from_block(&pic, amm, stranger, user, &id, 0, input_block),
+        Err(AmmError::Unauthorized)
+    ));
+    assert!(matches!(
+        status(&pic, amm, user, &id).operation.phase,
+        InboundOperationPhase::Held
+    ));
+}
+
+#[test]
+fn archived_inbound_block_evidence_remains_held() {
+    let (pic, amm, token_a, _token_b, user, pool, _sub_a, _sub_b) = setup();
+    let id = request_id(1, 0x54);
+    set_fault_count(&pic, token_a, "set_phantom_failures", 1);
+    assert!(matches!(
+        call_swap(&pic, amm, user, &id, &pool, token_a, 10_000),
+        Err(AmmError::TransferFailed { .. })
+    ));
+    let input_block = last_block_index(&pic, token_a);
+    pic.update_call(
+        token_a,
+        Principal::anonymous(),
+        "set_icrc3_archive_range",
+        encode_one(Some((input_block, 1u64))).unwrap(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        reconcile_inbound_leg_from_block(&pic, amm, user, user, &id, 0, input_block),
+        Err(AmmError::TransferFailed { .. })
+    ));
+    assert!(matches!(
+        status(&pic, amm, user, &id).operation.phase,
+        InboundOperationPhase::Held
+    ));
+}
+
+#[test]
 fn output_payout_liability_survives_upgrade_without_double_accounting() {
     let (pic, amm, token_a, token_b, user, pool, _sub_a, sub_b) = setup();
     let id = request_id(1, 0x52);
@@ -917,11 +1063,16 @@ fn output_payout_liability_survives_upgrade_without_double_accounting() {
     )
     .expect("upgrade preserves output liability and pool fence");
     set_transfer_failure(&pic, token_b, false);
-    let recovered = call_swap(&pic, amm, user, &id, &pool, token_a, 10_000)
-        .expect("same request resumes saved outbound identity");
+    let retry = call_swap(&pic, amm, user, &id, &pool, token_a, 10_000);
+    assert!(matches!(retry, Err(AmmError::TransferFailed { .. })));
+    let held_after_retry = status(&pic, amm, user, &id);
     assert!(matches!(
-        status(&pic, amm, user, &id).operation.phase,
-        InboundOperationPhase::Completed
+        held_after_retry.operation.phase,
+        InboundOperationPhase::OutputPending
+    ));
+    assert!(matches!(
+        held_after_retry.linked_payout_status,
+        Some(OutboundPayoutStatus::Ambiguous)
     ));
     assert_eq!(
         balance(
@@ -932,7 +1083,8 @@ fn output_payout_liability_survives_upgrade_without_double_accounting() {
                 subaccount: None
             }
         ),
-        before_out + recovered.amount_out
+        before_out,
+        "a pre-effect failure stays held without the ledger transaction window"
     );
     assert_eq!(
         balance(
@@ -943,19 +1095,17 @@ fn output_payout_liability_survives_upgrade_without_double_accounting() {
                 subaccount: Some(sub_b)
             }
         ),
-        2_000_000 - recovered.amount_out - 10
+        2_000_000,
+        "held payout does not debit the pool output balance"
     );
     let status = status(&pic, amm, user, &id);
     assert!(status.operation.output_payout_id.is_some());
     assert_eq!(status.operation.output_ledger_fee, Some(10));
     assert_eq!(
-        status.linked_payout_status, None,
-        "settled payout row may be retired after the operation keeps its terminal result"
+        status.linked_payout_status,
+        Some(OutboundPayoutStatus::Ambiguous)
     );
-    assert_eq!(
-        status.operation.result_amount.unwrap() - recovered.amount_out,
-        10
-    );
+    assert!(status.operation.result_amount.is_some());
 }
 
 #[test]

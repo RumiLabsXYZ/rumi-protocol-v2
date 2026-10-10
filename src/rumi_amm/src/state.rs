@@ -527,6 +527,52 @@ pub fn set_inbound_leg_status(
     })
 }
 
+/// Commit a positive ledger receipt only if the exact operation and leg that
+/// were checked before the ledger call are still pending. A stale callback or
+/// a second recovery call cannot replace a different confirmed block.
+pub fn confirm_inbound_leg_from_proof(
+    expected: &InboundOperation,
+    leg_index: usize,
+    block_index: u64,
+) -> Result<(), String> {
+    mutate_state(|s| {
+        let current = s
+            .inbound_operations
+            .iter_mut()
+            .find(|op| op.caller == expected.caller && op.request_id == expected.request_id)
+            .ok_or_else(|| "inbound operation disappeared during proof verification".to_string())?;
+        if current.pool_id != expected.pool_id
+            || current.kind != expected.kind
+            || current.argument_digest != expected.argument_digest
+        {
+            return Err("inbound operation changed during proof verification".into());
+        }
+        let current_leg = current
+            .legs
+            .get_mut(leg_index)
+            .ok_or("inbound leg disappeared during proof verification")?;
+        let expected_leg = expected
+            .legs
+            .get(leg_index)
+            .ok_or("expected inbound leg is missing")?;
+        if *current_leg == *expected_leg {
+            if !matches!(current.phase, InboundOperationPhase::Prepared | InboundOperationPhase::Held)
+                || current_leg.status != InboundLegStatus::Ambiguous
+            {
+                return Err("inbound leg is no longer awaiting an exact receipt".into());
+            }
+            current_leg.status = InboundLegStatus::Confirmed(block_index);
+            return Ok(());
+        }
+        let mut confirmed = expected_leg.clone();
+        confirmed.status = InboundLegStatus::Confirmed(block_index);
+        if *current_leg == confirmed {
+            return Ok(());
+        }
+        Err("inbound leg changed during proof verification".into())
+    })
+}
+
 pub fn update_inbound_operation<F>(caller: Principal, request_id: &[u8], f: F) -> Result<(), String>
 where
     F: FnOnce(&mut InboundOperation),

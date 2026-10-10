@@ -541,6 +541,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],
         [],
       ),
+    'reconcile_inbound_leg_from_block' : IDL.Func(
+        [IDL.Principal, IDL.Vec(IDL.Nat8), IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],
+        [],
+      ),
     'recover_outbound_payout' : IDL.Func(
         [IDL.Nat64, IDL.Opt(IDL.Nat64)],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : AmmError })],

@@ -5,7 +5,7 @@
 //! It deliberately does not interpret missing, partial, or unavailable history
 //! as proof that a payout did not happen.
 
-use crate::state::OutboundPayout;
+use crate::state::{InboundLeg, OutboundPayout};
 use candid::{CandidType, Nat, Principal};
 use icrc_ledger_types::icrc::generic_value::ICRC3Value;
 use icrc_ledger_types::icrc1::account::Account;
@@ -66,6 +66,56 @@ pub(crate) fn validate_exact_transfer(
     Ok(())
 }
 
+/// A positive ICRC-2 receipt may confirm a previously ambiguous pull. The
+/// original fee must have been pinned before dispatch; legacy rows without it
+/// remain held rather than accepting a weaker proof.
+pub(crate) fn validate_exact_inbound_transfer(
+    block: &DecodedTransferBlock,
+    leg: &InboundLeg,
+    amm: Principal,
+) -> Result<(), String> {
+    let expected_from = Account {
+        owner: leg.from,
+        subaccount: None,
+    };
+    let expected_to = Account {
+        owner: amm,
+        subaccount: leg.to_subaccount,
+    };
+    let expected_spender = Account {
+        owner: amm,
+        subaccount: None,
+    };
+    let fee = leg.fee.ok_or("inbound leg has no pinned fee; remains held")?;
+    // ICRC-3 permits op-only blocks. The exact spender account, source,
+    // destination, fee, memo and timestamp distinguish this ICRC-2 pull from
+    // an ordinary transfer when btype is omitted.
+    let matching_kind = block.btype.as_deref() == Some("2xfer")
+        || block.btype.is_none();
+    if !matching_kind
+        || block.op != "xfer"
+        || !block
+            .from
+            .as_ref()
+            .is_some_and(|actual| account_matches(actual, &expected_from))
+        || !block
+            .to
+            .as_ref()
+            .is_some_and(|actual| account_matches(actual, &expected_to))
+        || !block
+            .spender
+            .as_ref()
+            .is_some_and(|actual| account_matches(actual, &expected_spender))
+        || block.amount != leg.amount
+        || block.fee != Some(fee)
+        || block.memo.as_deref() != Some(leg.memo.as_slice())
+        || block.created_at_time != Some(leg.created_at_time)
+    {
+        return Err("ICRC-3 block does not match the exact persisted inbound transfer_from tuple".into());
+    }
+    Ok(())
+}
+
 /// Some ledgers encode an omitted default subaccount as an explicit zero
 /// subaccount. Accept that canonicalization only for `None`; nonzero
 /// subaccounts must match byte-for-byte.
@@ -105,6 +155,34 @@ pub(crate) async fn verify_exact_block(
 
     let decoded = decode_block(&value)?;
     validate_exact_transfer(&decoded, transfer)
+}
+
+pub(crate) async fn verify_exact_inbound_block(
+    ledger: Principal,
+    block_index: u64,
+    leg: &InboundLeg,
+    amm: Principal,
+) -> Result<(), String> {
+    if ledger != leg.ledger {
+        return Err("inbound proof ledger does not match the journal".into());
+    }
+    if is_native_icp_ledger(ledger) {
+        return verify_exact_native_inbound_block(ledger, block_index, leg, amm).await;
+    }
+    let args = vec![GetBlocksRequest {
+        start: Nat::from(block_index),
+        length: Nat::from(1u64),
+    }];
+    let (response,): (GetBlocksResult,) = ic_cdk::call(ledger, "icrc3_get_blocks", (args,))
+        .await
+        .map_err(|(code, message)| {
+            format!("icrc3_get_blocks call to {ledger} failed: {code:?} {message}")
+        })?;
+    if nat_to_u64(&response.log_length)? <= block_index {
+        return Err("ICRC-3 log length does not include the supplied block".into());
+    }
+    let decoded = decode_block(&direct_block_value(&response, block_index)?)?;
+    validate_exact_inbound_transfer(&decoded, leg, amm)
 }
 
 // The canonical ICP ledger uses its legacy query_blocks schema rather than
@@ -238,6 +316,68 @@ async fn verify_exact_native_block(
         .first()
         .ok_or("native ICP block is missing")?;
     validate_native_transfer(block, transfer)
+}
+
+async fn verify_exact_native_inbound_block(
+    ledger: Principal,
+    block_index: u64,
+    leg: &InboundLeg,
+    amm: Principal,
+) -> Result<(), String> {
+    let (response,): (NativeQueryBlocksResponse,) = ic_cdk::call(
+        ledger,
+        "query_blocks",
+        (NativeGetBlocksArgs {
+            start: block_index,
+            length: 1,
+        },),
+    )
+    .await
+    .map_err(|(code, message)| format!("native ICP query_blocks failed: {code:?} {message}"))?;
+    if response.chain_length <= block_index
+        || response.first_block_index != block_index
+        || response.blocks.len() != 1
+        || !response.archived_blocks.is_empty()
+    {
+        return Err("native ICP did not directly serve the exact inbound block; it remains held".into());
+    }
+    validate_native_inbound_transfer(&response.blocks[0], leg, amm)
+}
+
+fn validate_native_inbound_transfer(
+    block: &NativeBlock,
+    leg: &InboundLeg,
+    amm: Principal,
+) -> Result<(), String> {
+    let Some(NativeOperation::Transfer {
+        from,
+        to,
+        spender,
+        amount,
+        fee,
+    }) = block.transaction.operation.as_ref()
+    else {
+        return Err("native ICP inbound block is not an ordinary transfer".into());
+    };
+    let pinned_fee = leg.fee.ok_or("inbound leg has no pinned fee; remains held")?;
+    let expected_amount = u64::try_from(leg.amount)
+        .map_err(|_| "native ICP inbound amount exceeds u64".to_string())?;
+    let expected_fee = u64::try_from(pinned_fee)
+        .map_err(|_| "native ICP inbound fee exceeds u64".to_string())?;
+    let expected_from = native_account_identifier(leg.from, None);
+    let expected_to = native_account_identifier(amm, leg.to_subaccount);
+    let expected_spender = native_account_identifier(amm, None);
+    if from.as_slice() != expected_from
+        || to.as_slice() != expected_to
+        || spender.as_deref() != Some(expected_spender.as_slice())
+        || amount.e8s != expected_amount
+        || fee.e8s != expected_fee
+        || block.transaction.icrc1_memo.as_deref() != Some(leg.memo.as_slice())
+        || block.transaction.created_at_time.timestamp_nanos != leg.created_at_time
+    {
+        return Err("native ICP block does not match the exact persisted inbound transfer_from tuple".into());
+    }
+    Ok(())
 }
 
 fn validate_native_transfer(block: &NativeBlock, transfer: &OutboundPayout) -> Result<(), String> {
@@ -452,16 +592,21 @@ fn normalize_btype(btype: &str) -> Option<String> {
         "1xfer" => Some("xfer".into()),
         "1mint" => Some("mint".into()),
         "1burn" => Some("burn".into()),
-        "2xfer" => Some("transfer_from".into()),
+        // ICRC-2 records this as a transfer with a spender; the top-level
+        // block type and required spender distinguish it from an ICRC-1 xfer.
+        "2xfer" => Some("xfer".into()),
         _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::account_matches;
-    use candid::Principal;
+    use super::{account_matches, decode_block, validate_exact_inbound_transfer, DecodedTransferBlock};
+    use crate::state::{InboundLeg, InboundLegStatus};
+    use candid::{Nat, Principal};
+    use icrc_ledger_types::icrc::generic_value::ICRC3Value;
     use icrc_ledger_types::icrc1::account::Account;
+    use std::collections::BTreeMap;
 
     #[test]
     fn omitted_account_subaccount_matches_only_explicit_zero() {
@@ -494,5 +639,91 @@ mod tests {
                 subaccount: Some([0; 32])
             }
         ));
+    }
+
+    #[test]
+    fn inbound_receipt_requires_complete_pinned_transfer_from_tuple() {
+        let owner = Principal::from_slice(&[1, 2, 3]);
+        let amm = Principal::from_slice(&[4, 5, 6]);
+        let ledger = Principal::from_slice(&[7, 8, 9]);
+        let leg = InboundLeg {
+            ledger,
+            from: owner,
+            to_subaccount: Some([12; 32]),
+            amount: 123,
+            fee: Some(10),
+            memo: vec![2, 4, 6],
+            created_at_time: 789,
+            status: InboundLegStatus::Ambiguous,
+        };
+        let block = DecodedTransferBlock {
+            btype: Some("2xfer".into()),
+            op: "xfer".into(),
+            from: Some(Account { owner, subaccount: None }),
+            to: Some(Account { owner: amm, subaccount: Some([12; 32]) }),
+            spender: Some(Account { owner: amm, subaccount: None }),
+            amount: 123,
+            fee: Some(10),
+            memo: Some(vec![2, 4, 6]),
+            created_at_time: Some(789),
+        };
+        assert!(validate_exact_inbound_transfer(&block, &leg, amm).is_ok());
+        let mut wrong = block.clone();
+        wrong.spender = None;
+        assert!(validate_exact_inbound_transfer(&wrong, &leg, amm).is_err());
+        wrong = block.clone();
+        wrong.btype = Some("1xfer".into());
+        assert!(validate_exact_inbound_transfer(&wrong, &leg, amm).is_err());
+        wrong.btype = None;
+        assert!(validate_exact_inbound_transfer(&wrong, &leg, amm).is_ok());
+        wrong.spender = None;
+        assert!(validate_exact_inbound_transfer(&wrong, &leg, amm).is_err());
+        wrong = block.clone();
+        wrong.fee = Some(11);
+        assert!(validate_exact_inbound_transfer(&wrong, &leg, amm).is_err());
+        wrong = block.clone();
+        wrong.to = Some(Account { owner: amm, subaccount: Some([13; 32]) });
+        assert!(validate_exact_inbound_transfer(&wrong, &leg, amm).is_err());
+        wrong = block.clone();
+        wrong.memo = Some(vec![2, 4]);
+        assert!(validate_exact_inbound_transfer(&wrong, &leg, amm).is_err());
+        let mut legacy = leg;
+        legacy.fee = None;
+        assert!(validate_exact_inbound_transfer(&block, &legacy, amm).is_err());
+    }
+
+    #[test]
+    fn op_only_inbound_block_accepts_exact_spender_and_top_level_fee() {
+        let owner = Principal::from_slice(&[1, 2, 3]);
+        let amm = Principal::from_slice(&[4, 5, 6]);
+        let account = |principal: Principal| {
+            ICRC3Value::Array(vec![ICRC3Value::Blob(principal.as_slice().to_vec().into())])
+        };
+        let tx = BTreeMap::from([
+            ("op".into(), ICRC3Value::Text("xfer".into())),
+            ("from".into(), account(owner)),
+            ("to".into(), account(amm)),
+            ("spender".into(), account(amm)),
+            ("amt".into(), ICRC3Value::Nat(Nat::from(123u64))),
+            ("memo".into(), ICRC3Value::Blob(vec![2, 4, 6].into())),
+            ("ts".into(), ICRC3Value::Nat(Nat::from(789u64))),
+        ]);
+        let block = ICRC3Value::Map(BTreeMap::from([
+            ("ts".into(), ICRC3Value::Nat(Nat::from(790u64))),
+            ("fee".into(), ICRC3Value::Nat(Nat::from(0u64))),
+            ("tx".into(), ICRC3Value::Map(tx)),
+        ]));
+        let leg = InboundLeg {
+            ledger: Principal::from_slice(&[7, 8, 9]),
+            from: owner,
+            to_subaccount: None,
+            amount: 123,
+            fee: Some(0),
+            memo: vec![2, 4, 6],
+            created_at_time: 789,
+            status: InboundLegStatus::Ambiguous,
+        };
+        let decoded = decode_block(&block).expect("decode 3USD-style op-only receipt");
+        assert!(validate_exact_inbound_transfer(&decoded, &leg, amm).is_ok());
     }
 }

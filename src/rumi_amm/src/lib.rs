@@ -993,6 +993,61 @@ async fn recover_outbound_payout(
         .map_err(|reason| AmmError::InvalidInput { reason })
 }
 
+/// Confirm one ambiguous ICRC-2 pull from a directly served, exact ledger
+/// receipt. No transfer is dispatched here. The owner must repeat the same
+/// swap_v2 request to finish the accounting and output leg afterward.
+#[update]
+async fn reconcile_inbound_leg_from_block(
+    owner: Principal,
+    request_id: Vec<u8>,
+    leg_index: u64,
+    block_index: u64,
+) -> Result<(), AmmError> {
+    let caller = ic_cdk::caller();
+    if caller != owner && !read_state(|s| caller == s.admin) {
+        return Err(AmmError::Unauthorized);
+    }
+    let operation = crate::state::inbound_operation(owner, &request_id)
+        .map_err(|reason| AmmError::InvalidInput { reason })?;
+    let leg_index = usize::try_from(leg_index).map_err(|_| AmmError::InvalidInput {
+        reason: "inbound leg index exceeds addressable range".into(),
+    })?;
+    let leg = operation.legs.get(leg_index).ok_or(AmmError::InvalidInput {
+        reason: "inbound leg does not exist".into(),
+    })?;
+    if operation.caller != owner || leg.from != owner || leg.fee.is_none() {
+        return Err(AmmError::InvalidInput {
+            reason: "inbound proof owner or pinned fee is missing; leg remains held".into(),
+        });
+    }
+    if !matches!(
+        operation.phase,
+        state::InboundOperationPhase::Prepared | state::InboundOperationPhase::Held
+    ) || leg.status != state::InboundLegStatus::Ambiguous
+    {
+        return Err(AmmError::InvalidInput {
+            reason: "only an ambiguous, unfinished inbound leg can be reconciled".into(),
+        });
+    }
+    let _guard = PoolGuard::new(operation.pool_id.clone())?;
+    crate::payout_reconciliation::verify_exact_inbound_block(
+        leg.ledger,
+        block_index,
+        leg,
+        ic_cdk::id(),
+    )
+    .await
+    .map_err(|reason| AmmError::TransferFailed {
+        token: "inbound".into(),
+        reason,
+    })?;
+    if caller != owner && !read_state(|s| caller == s.admin) {
+        return Err(AmmError::Unauthorized);
+    }
+    crate::state::confirm_inbound_leg_from_proof(&operation, leg_index, block_index)
+        .map_err(|reason| AmmError::InvalidInput { reason })
+}
+
 fn outbound_recovery_authorized(caller: Principal, payout: &state::OutboundPayout) -> bool {
     caller == payout.to || read_state(|s| caller == s.admin)
 }
@@ -1377,6 +1432,29 @@ async fn pocketic_verify_native_payout_block(
         .map_err(|reason| AmmError::TransferFailed { token: "native ICP proof".into(), reason })
 }
 
+/// Test-only adapter for the actual NNS ledger's transfer_from block schema.
+/// Production callers must use the journal-bound reconciliation endpoint.
+#[cfg(feature = "pocketic-test")]
+#[update]
+async fn pocketic_verify_native_inbound_block(
+    ledger: Principal,
+    block_index: u64,
+    leg: state::InboundLeg,
+) -> Result<(), AmmError> {
+    caller_is_admin()?;
+    crate::payout_reconciliation::verify_exact_inbound_block(
+        ledger,
+        block_index,
+        &leg,
+        ic_cdk::id(),
+    )
+    .await
+    .map_err(|reason| AmmError::TransferFailed {
+        token: "native ICP inbound proof".into(),
+        reason,
+    })
+}
+
 #[cfg(feature = "pocketic-test")]
 #[update]
 fn pocketic_prune_accounting_events() -> Result<(), AmmError> {
@@ -1493,6 +1571,13 @@ async fn swap_v2_inner(
                 .map_err(|reason| AmmError::InvalidInput {
                     reason: format!("cannot safely quote output ledger fee before input: {reason}"),
                 })?;
+            // The input transfer uses an explicit fee. Its journal and any
+            // later exact receipt proof must agree on what the ledger charged.
+            let input_ledger_fee = crate::transfers::ledger_fee_strict(ledger_in)
+                .await
+                .map_err(|reason| AmmError::InvalidInput {
+                    reason: format!("cannot safely pin input ledger fee before input: {reason}"),
+                })?;
             let net_out = amount_out.saturating_sub(output_ledger_fee);
             if net_out == 0 || net_out < min_amount_out {
                 return Err(AmmError::InsufficientOutput {
@@ -1530,7 +1615,7 @@ async fn swap_v2_inner(
                 from: caller,
                 to_subaccount: crate::transfers::pool_subaccount(ledger_in, sub_in),
                 amount: amount_in,
-                fee: None,
+                fee: Some(input_ledger_fee),
                 memo,
                 created_at_time: ic_cdk::api::time(),
                 status: LegStatus::Prepared,
