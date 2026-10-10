@@ -1934,11 +1934,23 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
             {
                 return;
             }
-            if state.three_usd_reserve_payout_operation_keys
+            let reserve_link_invalid = state.three_usd_reserve_payout_operation_keys
                 .get(&operation_id)
-                .and_then(|key| state.three_usd_reserve_collateral_payouts.get(key))
-                .is_some_and(|payout| payout.rearmed_attempts.len() >= crate::state::MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS)
-            {
+                .is_some_and(|key| {
+                    state.three_usd_reserve_collateral_payouts.get(key).is_none_or(|payout| {
+                        payout.rearmed_attempts.len() >= crate::state::MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS
+                            || payout.op_nonce == attempt_nonce
+                            || payout.candidate_block_index.is_some()
+                            || payout.ledger != proof.ledger
+                            || payout.destination.owner != proof.owner
+                            || payout.net_e8s != proof.amount_raw
+                            || payout.rearmed_attempts.iter().any(|attempt| {
+                                attempt.candidate_block_index.is_some()
+                                    || attempt.op_nonce == attempt_nonce
+                            })
+                    })
+                });
+            if reserve_link_invalid {
                 state.mutate_pending_payout(operation_id, |row| {
                     row.in_flight = false;
                     row.held_for_manual_retry = true;
@@ -3100,19 +3112,14 @@ pub fn record_pending_payout_rearmed(
     state: &mut State,
     proof: PendingPayoutNoEffectProof,
 ) -> bool {
-    let Some((_, mut transfer)) = state.get_pending_payout(proof.operation_id) else {
+    let Some((_, transfer)) = state.get_pending_payout(proof.operation_id) else {
         return false;
     };
-    if state.three_usd_reserve_payout_operation_keys
-        .get(&proof.operation_id)
-        .and_then(|key| state.three_usd_reserve_collateral_payouts.get(key))
-        .is_some_and(|payout| payout.rearmed_attempts.len() >= crate::state::MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS)
-    {
-        return false;
-    }
     if transfer.rearm_schema_version != 1
         || !transfer.too_old_confirmed
         || !transfer.held_for_manual_retry
+        || !transfer.reconciliation_required
+        || transfer.in_flight
         || transfer.ledger != Some(proof.ledger)
         || transfer.owner != proof.owner
         || transfer.transfer_amount_raw != Some(proof.amount_raw)
@@ -3133,31 +3140,51 @@ pub fn record_pending_payout_rearmed(
         || transfer.retry_count >= crate::MAX_PENDING_RETRIES
         || proof.new_attempt_nonce == 0
         || proof.new_attempt_nonce == proof.old_attempt_nonce
+        || proof.operation_id != transfer.operation_id
         || proof.start_index > proof.snapshot_log_length
         || !proof.complete_prefix
         || transfer.no_effect_proof.is_some()
     {
         return false;
     }
-    crate::storage::record_pending_payout_event(&PendingPayoutEvent::Rearmed {
+    if let Some(key) = state.three_usd_reserve_payout_operation_keys.get(&proof.operation_id) {
+        let Some(payout) = state.three_usd_reserve_collateral_payouts.get(key) else {
+            return false;
+        };
+        if payout.rearmed_attempts.len() >= crate::state::MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS
+            || payout.op_nonce == proof.new_attempt_nonce
+            || payout.candidate_block_index.is_some()
+            || payout.rearmed_attempts.iter().any(|attempt| {
+                attempt.op_nonce == proof.new_attempt_nonce || attempt.candidate_block_index.is_some()
+            })
+            || payout.ledger != proof.ledger
+            || payout.destination.owner != proof.owner
+            || payout.net_e8s != proof.amount_raw
+        {
+            return false;
+        }
+    }
+    let event = PendingPayoutEvent::Rearmed {
         operation_id: proof.operation_id,
         attempt_nonce: proof.new_attempt_nonce,
         proof: Some(proof.clone()),
         timestamp: Some(proof.verified_at_ns),
         owner: Some(proof.owner),
-    });
-    transfer.op_nonce = proof.new_attempt_nonce;
-    transfer.held_for_manual_retry = false;
-    transfer.reconciliation_required = false;
-    transfer.too_old_confirmed = false;
-    transfer.history_log_length = None;
-    transfer.history_cursor = 0;
-    transfer.history_scan = None;
-    transfer.history_candidate_seen = false;
-    transfer.history_start_index = None;
-    transfer.no_effect_proof = Some(proof);
-    state.mutate_pending_payout(proof.operation_id, |row| *row = transfer);
-    true
+    };
+    crate::storage::record_pending_payout_event(&event);
+    apply_pending_payout_event(state, event);
+    let Some((_, rearmed)) = state.get_pending_payout(proof.operation_id) else {
+        return false;
+    };
+    rearmed.op_nonce == proof.new_attempt_nonce
+        && rearmed.no_effect_proof == Some(proof)
+        && state.three_usd_reserve_payout_operation_keys.get(&proof.operation_id)
+            .and_then(|key| state.three_usd_reserve_collateral_payouts.get(key))
+            .is_none_or(|payout| payout.rearmed_attempts.iter().any(|attempt| {
+                attempt.op_nonce == proof.new_attempt_nonce
+                    && attempt.candidate_block_index.is_none()
+                    && attempt.observed_fee_e8s.is_none()
+            }))
 }
 
 // ─── Wave-8e LIQ-005: deficit-account event recorders ───
@@ -5707,6 +5734,105 @@ mod three_usd_reserve_payout_replay_tests {
         assert_eq!(recovered.expected_fee_e8s, 10);
         assert_eq!(recovered.observed_fee_e8s, Some(10));
         assert_eq!(recovered.expected_fee_e8s, recovered.observed_fee_e8s.unwrap());
+    }
+
+    #[test]
+    fn live_and_replayed_reserve_rearm_apply_the_same_sidecar_attempt() {
+        use crate::state::{
+            PendingMarginTransfer, PendingPayoutHistoryScan, PendingPayoutKind,
+            PendingPayoutNoEffectProof, ThreeUsdReserveCollateralPayout,
+            ThreeUsdReserveIngressKey,
+        };
+        let backend = principal(41);
+        let pool = principal(42);
+        let ledger = principal(43);
+        let operation_id = 44;
+        let old_nonce = 44;
+        let new_nonce = 45;
+        let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 7, absorb_id: 8 };
+        let mut state = State::from(init_args(ledger));
+        let memo: [u8; 16] = crate::management::nonce_to_memo(old_nonce).0.as_slice()
+            .try_into().unwrap();
+        state.three_usd_reserve_collateral_payouts.insert(key.clone(), ThreeUsdReserveCollateralPayout {
+            operation_id,
+            op_nonce: old_nonce,
+            collateral_type: ledger,
+            ledger,
+            source: icrc_ledger_types::icrc1::account::Account { owner: backend, subaccount: None },
+            destination: icrc_ledger_types::icrc1::account::Account { owner: pool, subaccount: None },
+            gross_e8s: 1_010,
+            net_e8s: 1_000,
+            expected_fee_e8s: 10,
+            memo,
+            created_at_time_ns: crate::management::nonce_to_created_at_time(old_nonce),
+            fee_arg_e8s: Some(10),
+            candidate_block_index: None,
+            observed_fee_e8s: None,
+            rearmed_attempts: Vec::new(),
+        });
+        state.three_usd_reserve_payout_operation_keys.insert(operation_id, key.clone());
+        state.insert_pending_payout(PendingMarginTransfer {
+            vault_id: 7,
+            operation_id,
+            payout_kind: PendingPayoutKind::Margin,
+            owner: pool,
+            margin: crate::numeric::ICP::new(1_010),
+            collateral_type: ledger,
+            retry_count: 1,
+            op_nonce: old_nonce,
+            ledger: Some(ledger),
+            transfer_amount_raw: Some(1_000),
+            held_for_manual_retry: true,
+            reconciliation_required: true,
+            in_flight: false,
+            too_old_confirmed: true,
+            history_start_index: Some(10),
+            rearm_schema_version: 1,
+            history_scan: Some(PendingPayoutHistoryScan {
+                operation_id,
+                payout_kind: PendingPayoutKind::Margin,
+                ledger,
+                owner: pool,
+                amount_raw: 1_000,
+                attempt_nonce: old_nonce,
+                start_index: 10,
+                snapshot_log_length: 25,
+                next_index: 25,
+            }),
+            history_candidate_seen: false,
+            no_effect_proof: None,
+            history_log_length: Some(25),
+            history_cursor: 25,
+            min_net_collateral_raw: None,
+        });
+        let proof = PendingPayoutNoEffectProof {
+            operation_id,
+            payout_kind: PendingPayoutKind::Margin,
+            ledger,
+            owner: pool,
+            amount_raw: 1_000,
+            old_attempt_nonce: old_nonce,
+            new_attempt_nonce: new_nonce,
+            start_index: 10,
+            snapshot_log_length: 25,
+            complete_prefix: true,
+            verified_at_ns: 99,
+        };
+        let mut replayed = state.clone();
+        assert!(record_pending_payout_rearmed(&mut state, proof));
+        apply_pending_payout_event(&mut replayed, PendingPayoutEvent::Rearmed {
+            operation_id,
+            attempt_nonce: new_nonce,
+            proof: Some(proof),
+            timestamp: Some(99),
+            owner: Some(pool),
+        });
+        assert_eq!(state.get_pending_payout(operation_id), replayed.get_pending_payout(operation_id));
+        assert_eq!(state.three_usd_reserve_collateral_payouts, replayed.three_usd_reserve_collateral_payouts);
+        let payout = state.three_usd_reserve_collateral_payouts.get(&key).unwrap();
+        assert_eq!(payout.rearmed_attempts.len(), 1);
+        assert_eq!(payout.rearmed_attempts[0].op_nonce, new_nonce);
+        assert_eq!(payout.rearmed_attempts[0].fee_arg_e8s, Some(10));
     }
 }
 
