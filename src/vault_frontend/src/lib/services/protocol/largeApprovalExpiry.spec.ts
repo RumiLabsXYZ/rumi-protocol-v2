@@ -30,13 +30,13 @@ describe('largeApprovalExpiry (FE-001)', () => {
   it('FE-001: every inline LARGE_APPROVAL approve in apiClient.ts carries the bounded expiry', () => {
     const src = readFileSync(path.join(here, 'apiClient.ts'), 'utf8');
 
-    // The 7 Oisy vault flows share this single-line option block. The
+    // All inline vault approvals share this single-line option block. The
     // unbounded form must not reappear.
     expect(src).not.toContain('expires_at: [], expected_allowance: [], memo: [], fee: [],');
     const bounded = src.match(
       /expires_at: largeApprovalExpiry\(\), expected_allowance: \[\], memo: \[\], fee: \[\],/g,
     );
-    expect(bounded).toHaveLength(7);
+    expect(bounded).toHaveLength(8);
   });
 
   it('FE-001: the LARGE_APPROVAL helper paths in walletOperations.ts carry the bounded expiry', () => {

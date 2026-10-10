@@ -463,7 +463,7 @@ private static async refreshVaultData(): Promise<void> {
             const approvalResult = await ledgerActor.icrc2_approve({
               amount: approvalAmount,
               spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
-              expires_at: [], expected_allowance: [], memo: [], fee: [],
+              expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
               from_subaccount: [], created_at_time: [],
             });
             assertVaultOwner();
