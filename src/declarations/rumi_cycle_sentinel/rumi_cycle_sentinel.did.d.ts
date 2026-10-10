@@ -392,6 +392,8 @@ export type Result_13 = { 'Ok' : null } |
   { 'Err' : string };
 export type Result_14 = { 'Ok' : [] | [SelfRecoveryDeliveryRisk] } |
   { 'Err' : AuthenticatedQueryError };
+export type Result_15 = { 'Ok' : SelfRecoveryWriteOffReceipt } |
+  { 'Err' : string };
 export type Result_2 = { 'Ok' : null } |
   { 'Err' : GovernanceError };
 export type Result_3 = { 'Ok' : OperatorDashboard } |
@@ -440,6 +442,15 @@ export type SelfRecoveryPolicyError = { 'DailyCapBelowRefill' : null } |
   { 'ZeroRefillCycles' : null } |
   { 'ZeroDailyCap' : null } |
   { 'CyclesValueOverflow' : null };
+export type SelfRecoveryWriteOffDisposition = { 'Unresolved' : null };
+export interface SelfRecoveryWriteOffReceipt {
+  'written_off_at_secs' : bigint,
+  'delivery_risk' : SelfRecoveryDeliveryRisk,
+  'authorized_by' : Principal,
+  'held_amount_cycles' : bigint,
+  'operation' : FundingOperation,
+  'disposition' : SelfRecoveryWriteOffDisposition,
+}
 export type SingleOperatorSetupError = { 'SetupAlreadyUsed' : null } |
   { 'NotOperator' : null } |
   { 'InvalidProjection' : null };
@@ -556,6 +567,7 @@ export interface _SERVICE {
   'resolve_unknown_as_spent' : ActorMethod<[bigint], Result_1>,
   'run_maintenance_now' : ActorMethod<[], Result_13>,
   'self_recovery_delivery_risk' : ActorMethod<[], Result_14>,
+  'write_off_self_recovery_unresolved' : ActorMethod<[bigint], Result_15>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];

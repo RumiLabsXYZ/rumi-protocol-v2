@@ -593,6 +593,21 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : IDL.Opt(SelfRecoveryDeliveryRisk),
     'Err' : AuthenticatedQueryError,
   });
+  const SelfRecoveryWriteOffDisposition = IDL.Variant({
+    'Unresolved' : IDL.Null,
+  });
+  const SelfRecoveryWriteOffReceipt = IDL.Record({
+    'written_off_at_secs' : IDL.Nat64,
+    'delivery_risk' : SelfRecoveryDeliveryRisk,
+    'authorized_by' : IDL.Principal,
+    'held_amount_cycles' : IDL.Nat,
+    'operation' : FundingOperation,
+    'disposition' : SelfRecoveryWriteOffDisposition,
+  });
+  const Result_15 = IDL.Variant({
+    'Ok' : SelfRecoveryWriteOffReceipt,
+    'Err' : IDL.Text,
+  });
   return IDL.Service({
     'acknowledge_alarm' : IDL.Func([IDL.Nat64], [Result], []),
     'approve_proposal' : IDL.Func([IDL.Nat64], [Result], []),
@@ -681,6 +696,11 @@ export const idlFactory = ({ IDL }) => {
     'resolve_unknown_as_spent' : IDL.Func([IDL.Nat64], [Result_1], []),
     'run_maintenance_now' : IDL.Func([], [Result_13], []),
     'self_recovery_delivery_risk' : IDL.Func([], [Result_14], ['query']),
+    'write_off_self_recovery_unresolved' : IDL.Func(
+        [IDL.Nat64],
+        [Result_15],
+        [],
+      ),
   });
 };
 export const init = ({ IDL }) => {

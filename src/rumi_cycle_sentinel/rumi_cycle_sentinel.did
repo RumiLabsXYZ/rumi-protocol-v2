@@ -392,6 +392,16 @@ type Result_11 = variant { Ok : PublicPage; Err : AuthenticatedQueryError };
 type Result_12 = variant { Ok : nat64; Err : GovernanceError };
 type Result_13 = variant { Ok; Err : text };
 type Result_14 = variant { Ok : opt SelfRecoveryDeliveryRisk; Err : AuthenticatedQueryError };
+type SelfRecoveryWriteOffDisposition = variant { Unresolved };
+type SelfRecoveryWriteOffReceipt = record {
+  operation : FundingOperation;
+  disposition : SelfRecoveryWriteOffDisposition;
+  written_off_at_secs : nat64;
+  authorized_by : principal;
+  held_amount_cycles : nat;
+  delivery_risk : SelfRecoveryDeliveryRisk;
+};
+type Result_15 = variant { Ok : SelfRecoveryWriteOffReceipt; Err : text };
 type Result_2 = variant { Ok; Err : GovernanceError };
 type Result_3 = variant {
   Ok : OperatorDashboard;
@@ -531,5 +541,8 @@ service : (InitArgs) -> {
   propose_update_target : (principal, TargetPatch) -> (Result_12);
   propose_update_targets : (vec TargetUpdate) -> (Result_12);
   resolve_unknown_as_spent : (nat64) -> (Result_1);
+  // Forward-only disposition: releases source/cap reservations while operation remains Quarantined.
+  // Older validators require those holds and reject rollback after this write-off.
+  write_off_self_recovery_unresolved : (nat64) -> (Result_15);
   run_maintenance_now : () -> (Result_13);
 }

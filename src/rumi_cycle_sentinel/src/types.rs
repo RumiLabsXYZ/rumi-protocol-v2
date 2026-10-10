@@ -1601,15 +1601,35 @@ pub enum SelfRecoveryDeliveryStatus {
     Unknown,
 }
 
-/// At-risk marker for a quarantined self-recovery operation. The operation
-/// remains unresolved and its source/cap reservations remain held while this
-/// record exists. A late cycle credit is still possible.
+/// At-risk marker for a self-recovery operation whose delivery is unproven.
+/// It remains after a signer write-off so a late credit cannot be followed by
+/// another self-recovery withdrawal.
 #[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SelfRecoveryDeliveryRisk {
     pub operation_id: u64,
     pub delivery_status: SelfRecoveryDeliveryStatus,
     pub cause: SelfRecoveryDeliveryRiskCause,
     pub observed_at_secs: u64,
+}
+
+/// Signer disposition for an ambiguous self-recovery withdrawal. This is a
+/// separate Candid type so existing operation and outcome enums stay stable.
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelfRecoveryWriteOffDisposition {
+    Unresolved,
+}
+
+/// Exact receipt for an unresolved self-recovery write-off. `operation` stays
+/// Quarantined: this receipt records an accounting disposition, never proof
+/// that the destination received cycles.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct SelfRecoveryWriteOffReceipt {
+    pub operation: FundingOperation,
+    pub disposition: SelfRecoveryWriteOffDisposition,
+    pub written_off_at_secs: u64,
+    pub authorized_by: Principal,
+    pub held_amount_cycles: u128,
+    pub delivery_risk: SelfRecoveryDeliveryRisk,
 }
 
 impl FundingOperationState {
@@ -2731,8 +2751,8 @@ impl FundingOperation {
     /// Applies an explicit signer/adapter reconciliation decision to a
     /// quarantined Cycles-Ledger operation. This is intentionally separate
     /// from `record_attempt`: `Quarantined` stops automatic retry, but a
-    /// later Task 6 endpoint may resolve it after independently verifying a
-    /// ledger block or a no-spend/known-debit outcome. A `Duplicate` reply
+    /// later signer endpoint may resolve it from independently verified
+    /// evidence. A `Duplicate` reply
     /// alone can never call this method as delivery proof.
     pub fn reconcile_quarantined_cycles(
         &self,
@@ -2803,9 +2823,9 @@ impl FundingOperation {
         })
     }
 
-    /// Storage's compare-and-update helper needs to recognize the one
-    /// additional edge that is intentionally unavailable to automatic retry:
-    /// a quarantined Cycles operation may become `Complete` or `Terminal`
+    /// Storage's compare-and-update helper needs to recognize the explicit
+    /// reconciliation edges that are intentionally unavailable to automatic
+    /// retry: a quarantined Cycles operation may become `Complete` or `Terminal`.
     /// only after the explicit reconciliation method above has produced it.
     pub(crate) fn is_valid_quarantined_cycles_reconciliation(&self, next: &Self) -> bool {
         if self.state != FundingOperationState::Cycles(CyclesFundingState::Quarantined)
@@ -2838,15 +2858,28 @@ impl FundingOperation {
         }
         let current_len = self.attempts.len();
         let next_len = next.attempts.len();
+        let expected_result_class = match next.state {
+            FundingOperationState::Cycles(CyclesFundingState::Complete) => {
+                FundingAttemptResultClass::Success
+            }
+            FundingOperationState::Cycles(CyclesFundingState::Terminal) => {
+                FundingAttemptResultClass::TerminalFailure
+            }
+            _ => return false,
+        };
         if next_len == current_len {
             current_len > 0
                 && self.attempts.as_slice()[..current_len - 1]
                     == next.attempts.as_slice()[..current_len - 1]
-                && next.attempts.as_slice().last().map(|record| record.phase) == Some(next.state)
+                && next.attempts.as_slice().last().is_some_and(|record| {
+                    record.phase == next.state && record.result_class == expected_result_class
+                })
         } else {
             next_len == current_len + 1
                 && next.attempts.as_slice()[..current_len] == self.attempts.as_slice()[..]
-                && next.attempts.as_slice().last().map(|record| record.phase) == Some(next.state)
+                && next.attempts.as_slice().last().is_some_and(|record| {
+                    record.phase == next.state && record.result_class == expected_result_class
+                })
         }
     }
 
@@ -3459,9 +3492,9 @@ impl<'de> Deserialize<'de> for FundingOperation {
 
 /// The normal transition graph intentionally stops all automatic mutation at
 /// `Quarantined`. Stable histories may nevertheless contain the one explicit
-/// signer-reconciliation edge `Quarantined -> Complete|Terminal`; accepting
-/// that edge during decode keeps a legitimately reconciled operation
-/// reloadable without reopening automatic retry.
+/// signer-reconciliation edge `Quarantined -> Complete|Terminal`; accepting that
+/// edges during decode keeps a legitimately reconciled operation reloadable
+/// without reopening automatic retry.
 fn is_valid_persisted_successor(
     previous: &FundingOperationState,
     next: &FundingOperationState,
@@ -4650,6 +4683,29 @@ impl SelfRecoveryState {
         })
     }
 
+    /// Conservatively charges the reserved refill against the rolling cap
+    /// while releasing the in-flight slot. This does not record a successful
+    /// recovery; the independent delivery-risk tombstone must remain active.
+    pub fn write_off_unresolved(
+        &self,
+        operation_id: u64,
+        written_off_at_secs: u64,
+        window_secs: u64,
+    ) -> Result<Self, SelfRecoverySettleError> {
+        let rolling_spend = self
+            .rolling_spend
+            .settle(operation_id, written_off_at_secs, window_secs)
+            .map_err(|err| match err {
+                RollingSpendSettleError::UnknownOperation => SelfRecoverySettleError::Mismatch,
+                RollingSpendSettleError::Bound => SelfRecoverySettleError::Bound,
+            })?;
+        Ok(Self {
+            rolling_spend,
+            // Do not claim a recovery timestamp without delivery evidence.
+            last_recovery_at_secs: self.last_recovery_at_secs,
+        })
+    }
+
     /// Proven no-spend: releases only the matching pending reservation and
     /// leaves `last_recovery_at_secs` untouched.
     pub fn release_no_spend(&self, operation_id: u64) -> Result<Self, SelfRecoveryReleaseError> {
@@ -5083,7 +5139,6 @@ impl SourceReserveState {
             pending,
         })
     }
-
 }
 
 impl Default for SourceReserveState {

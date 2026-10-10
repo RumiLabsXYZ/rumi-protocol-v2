@@ -263,9 +263,40 @@ pub async fn run(now_secs: u64, _now_ns: u64, sentinel_id: Principal) -> bool {
     }
 
     let current = state::get_self_recovery_state();
-    if current.is_suppressing_distribution() {
-        let _ = state::alarms::raise_at(None, AlarmKind::SelfRecoveryUnresolved, now_secs);
-        return false;
+    let delivery_risk = state::current_self_recovery_delivery_risk();
+    let exact_writeoff_receipt = delivery_risk.is_some_and(|risk| {
+        state::self_recovery_write_off(risk.operation_id)
+            .is_some_and(|receipt| receipt.delivery_risk == risk)
+    });
+    match unresolved_distribution_gate(
+        current.is_suppressing_distribution(),
+        delivery_risk.is_some(),
+        exact_writeoff_receipt,
+    ) {
+        Some(false) => {
+            let _ = state::alarms::raise_at(None, AlarmKind::SelfRecoveryUnresolved, now_secs);
+            return false;
+        }
+        // A signer write-off releases only the ambiguity-based suppression,
+        // but its durable risk tombstone blocks another self-recovery debit
+        // until independent evidence resolves the original delivery
+        // ambiguity. The ordinary runtime low-balance gate still applies.
+        Some(true) => {
+            let _ = state::alarms::raise_at(None, AlarmKind::SelfRecoveryUnresolved, now_secs);
+            let balance = ic_cdk::api::canister_balance128();
+            let config = state::global_config();
+            let policy = config.global_policy.self_recovery_policy();
+            if writeoff_allows_distribution(
+                balance,
+                effective_threshold(policy.low_balance_threshold_cycles()),
+            ) {
+                state::alarms::resolve_at(None, AlarmKind::LowBalance, now_secs);
+                return true;
+            }
+            let _ = state::alarms::raise_at(None, AlarmKind::LowBalance, now_secs);
+            return false;
+        }
+        None => {}
     }
     // No longer unresolved (never started, or just resolved above): the
     // alarm this lane owns for "unresolved" no longer applies.
@@ -393,6 +424,36 @@ pub async fn run(now_secs: u64, _now_ns: u64, sentinel_id: Principal) -> bool {
             false
         }
     }
+}
+
+/// `None` means recovery is resolved and normal balance policy should run;
+/// `Some(false)` keeps distribution suppressed for a live reservation;
+/// `Some(true)` permits ordinary distribution while a written-off delivery
+/// risk tombstone continues to block further self-recovery attempts.
+fn unresolved_distribution_gate(
+    in_flight: bool,
+    delivery_risk: bool,
+    exact_writeoff_receipt: bool,
+) -> Option<bool> {
+    if in_flight {
+        Some(false)
+    } else if delivery_risk && exact_writeoff_receipt {
+        Some(true)
+    } else if delivery_risk {
+        // A stale or malformed risk marker without the exact signer receipt
+        // must fail closed; only the accounted write-off releases ordinary
+        // distribution suppression.
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// The unresolved-delivery tombstone blocks another self-top-up, but it does
+/// not waive the independent runtime low-balance safety gate for ordinary
+/// distribution.
+fn writeoff_allows_distribution(runtime_balance_cycles: u128, threshold_cycles: u128) -> bool {
+    runtime_balance_cycles > threshold_cycles
 }
 
 /// Maps a just-resolved self-recovery operation's final state to this
@@ -551,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn at_risk_tombstone_prevents_a_second_withdrawal_even_if_recovery_slot_is_cleared() {
+    fn unresolved_writeoff_releases_recovery_slot_but_latch_prevents_second_withdrawal() {
         let global = test_global_policy(1_000, 500, 1, 10, 600);
         init_test_state(global);
         seed_cache(1_000_000, 0, 1_000);
@@ -571,11 +632,26 @@ mod tests {
             observed_at_secs: 1_001,
         })
         .unwrap();
-        // Simulate state drift: the durable tombstone remains the independent
-        // guard even if the regular recovery slot no longer names the old op.
-        let mut recovery = state::get_self_recovery_state();
-        recovery = recovery.release_no_spend(first.id()).unwrap();
-        state::set_self_recovery_state(recovery);
+        // Signer write-off releases ordinary distribution and accounting
+        // suppression, while the tombstone remains the independent guard.
+        let written_off = crate::funding::cycles::write_off_self_recovery_unresolved(
+            first.id(),
+            Principal::from_slice(&[1]),
+            1_002,
+        )
+        .unwrap();
+        assert_eq!(
+            written_off.operation.state(),
+            FundingOperationState::Cycles(CyclesFundingState::Quarantined)
+        );
+        assert_eq!(
+            written_off.disposition,
+            types::SelfRecoveryWriteOffDisposition::Unresolved
+        );
+        assert_eq!(
+            state::get_self_recovery_state().in_flight_operation_id(),
+            None
+        );
 
         assert_eq!(
             prepare(sentinel_id(), 10, 1_002, 0),
@@ -583,8 +659,16 @@ mod tests {
                 types::SelfRecoveryStateError::AlreadyInFlight
             ))
         );
-        assert_eq!(state::current_self_recovery_delivery_risk().unwrap().operation_id, first.id());
-        assert_eq!(state::get_operation(first.id()), Some(quarantined));
+        assert_eq!(
+            state::current_self_recovery_delivery_risk()
+                .unwrap()
+                .operation_id,
+            first.id()
+        );
+        assert_eq!(
+            state::get_operation(first.id()),
+            Some(written_off.operation.clone())
+        );
     }
 
     #[test]
@@ -771,6 +855,28 @@ mod tests {
         // `funding::tests`; this test only proves the SHARED state this
         // module drives (`is_suppressing_distribution`) is what that check
         // reads.
+    }
+
+    #[test]
+    fn writeoff_risk_releases_distribution_but_keeps_recovery_latched() {
+        assert_eq!(unresolved_distribution_gate(true, true, true), Some(false));
+        assert_eq!(unresolved_distribution_gate(false, true, true), Some(true));
+        assert_eq!(
+            unresolved_distribution_gate(false, true, false),
+            Some(false)
+        );
+        assert_eq!(unresolved_distribution_gate(false, false, false), None);
+    }
+
+    #[test]
+    fn writeoff_keeps_low_balance_distribution_gate() {
+        assert!(!writeoff_allows_distribution(99, 100));
+        assert!(!writeoff_allows_distribution(100, 100));
+    }
+
+    #[test]
+    fn writeoff_allows_distribution_above_runtime_threshold() {
+        assert!(writeoff_allows_distribution(101, 100));
     }
 
     // ─── immutable destination stays sentinel-only across a resumed retry ───
