@@ -336,6 +336,10 @@ async fn withdraw_protocol_fees(pool_id: PoolId) -> Result<(u128, u128), AmmErro
         None
     };
 
+    // There is no await between reserving these rows and this accounting
+    // mutation. A trap in this message rolls both changes back; before the
+    // first transfer await dispatch marks each row Dispatched. Recovery must
+    // not expose Reserved rows as a generic retry/cancel mechanism.
     // Optimistic deduct: zero out fees in state BEFORE transferring.
     mutate_state(|s| {
         let pool = s

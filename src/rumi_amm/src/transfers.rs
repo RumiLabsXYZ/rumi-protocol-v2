@@ -180,7 +180,7 @@ pub async fn dispatch_inbound_leg(
 
 /// Read the ledger's configured transaction window. Missing metadata fails
 /// closed for ambiguous replay; no generic 24-hour value is assumed.
-async fn ledger_tx_window(ledger: Principal) -> Option<u64> {
+pub(crate) async fn ledger_tx_window(ledger: Principal) -> Option<u64> {
     use icrc_ledger_types::icrc::generic_metadata_value::MetadataValue;
     let result: Result<(Vec<(String, MetadataValue)>,), _> =
         ic_cdk::call(ledger, "icrc1_metadata", ()).await;

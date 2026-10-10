@@ -1,9 +1,11 @@
 use candid::{decode_one, encode_args, encode_one, CandidType, Nat, Principal};
+use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 use rumi_amm::{
-    state::{InboundOperationPhase, InboundOperationStatus, OutboundPayoutStatus},
+    state::{InboundOperationPhase, InboundOperationStatus, OutboundPayout, OutboundPayoutStatus},
     types::*,
 };
+use std::time::Duration;
 
 fn amm_test_wasm() -> Vec<u8> {
     include_bytes!("../../../target/wasm32-unknown-unknown/release/rumi_amm.wasm").to_vec()
@@ -233,6 +235,32 @@ fn balance(pic: &PocketIc, ledger: Principal, account: LedgerAccount) -> u128 {
     result.0.try_into().unwrap()
 }
 
+fn payout_status(pic: &PocketIc, amm: Principal, caller: Principal, id: u64) -> OutboundPayout {
+    let result: Result<OutboundPayout, AmmError> = reply(
+        pic.query_call(amm, caller, "get_outbound_payout_status", encode_one(id).unwrap())
+            .unwrap(),
+    );
+    result.expect("authorized payout status")
+}
+
+fn last_block_index(pic: &PocketIc, ledger: Principal) -> u64 {
+    let result: GetBlocksResult = reply(
+        pic.query_call(
+            ledger,
+            Principal::anonymous(),
+            "icrc3_get_blocks",
+            encode_one(vec![GetBlocksRequest {
+                start: Nat::from(0u8),
+                length: Nat::from(100u8),
+            }])
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let height: u64 = result.log_length.0.try_into().expect("block height fits u64");
+    height - 1
+}
+
 fn call_swap(
     pic: &PocketIc,
     amm: Principal,
@@ -302,8 +330,13 @@ fn unavailable_output_fee_fails_before_request_reservation_or_input_debit() {
 
 #[test]
 fn partial_remove_payout_keeps_atomic_reserve_event() {
-    let (pic, amm, _token_a, token_b, _user, pool, _sub_a, _sub_b) = setup();
+    let (pic, amm, _token_a, _token_b, _user, pool, _sub_a, _sub_b) = setup();
     let admin = Principal::self_authenticating(&[81, 82, 83]);
+    let info: Option<PoolInfo> = reply(
+        pic.query_call(amm, admin, "get_pool", encode_one(pool.clone()).unwrap())
+            .unwrap(),
+    );
+    let token_b = info.expect("pool exists").token_b;
     // Fixture seeding assigns 1,000 LP shares to the admin. Make B fail so A
     // can succeed first and the second leg remains held.
     set_transfer_failure(&pic, token_b, true);
@@ -340,6 +373,38 @@ fn partial_remove_payout_keeps_atomic_reserve_event() {
     let info = info.expect("pool remains queryable");
     assert_eq!(info.reserve_a + info.reserve_b, 1_800_000);
     assert!(info.paused, "pool remains fenced around held payout");
+
+    let unresolved: Result<Vec<OutboundPayout>, AmmError> = reply(
+        pic.query_call(
+            amm,
+            admin,
+            "get_unresolved_outbound_payouts",
+            encode_args((0u64, 100u64)).unwrap(),
+        )
+        .unwrap(),
+    );
+    let payout = unresolved
+        .expect("admin can inspect held outbound rows")
+        .into_iter()
+        .find(|row| row.operation_id.starts_with("remove_liquidity_b:"))
+        .expect("B liability is retained");
+    set_transfer_failure(&pic, token_b, false);
+    let recovered: Result<(), AmmError> = reply(
+        pic.update_call(
+            amm,
+            admin,
+            "recover_outbound_payout",
+            encode_args((payout.id, None::<u64>)).unwrap(),
+        )
+        .unwrap(),
+    );
+    recovered.expect("committed B leg replays its exact tuple within ledger window");
+    assert!(balance(&pic, token_b, LedgerAccount { owner: admin, subaccount: None }) > 0);
+    let remaining: Result<Vec<OutboundPayout>, AmmError> = reply(
+        pic.query_call(amm, admin, "get_unresolved_outbound_payouts", encode_args((0u64, 100u64)).unwrap())
+            .unwrap(),
+    );
+    assert!(remaining.unwrap().is_empty(), "only the recovered B row is retired");
 }
 
 #[test]
@@ -468,6 +533,23 @@ fn partial_admin_fee_withdrawal_records_event_and_retains_other_leg_liability() 
         .unwrap(),
     );
     assert_eq!(retained.unwrap(), (100, 200));
+
+    set_transfer_failure(&pic, info.token_b, false);
+    let recovered: Result<(), AmmError> = reply(
+        pic.update_call(
+            amm,
+            admin,
+            "recover_outbound_payout",
+            encode_args((payouts[0].id, None::<u64>)).unwrap(),
+        )
+        .unwrap(),
+    );
+    recovered.expect("committed B fee leg replays its exact tuple within ledger window");
+    assert_eq!(
+        balance(&pic, info.token_b, LedgerAccount { owner: admin, subaccount: None }),
+        690,
+        "recovery sends net of the pinned fee exactly once"
+    );
 }
 
 #[test]
@@ -752,6 +834,77 @@ fn output_payout_liability_survives_upgrade_without_double_accounting() {
         status.operation.result_amount.unwrap() - recovered.amount_out,
         10
     );
+}
+
+#[test]
+fn aged_output_liability_requires_exact_direct_block_and_finalizes_once() {
+    let (pic, amm, token_a, token_b, user, pool, _sub_a, _sub_b) = setup();
+    let id = request_id(1, 0x53);
+    let before_output = balance(&pic, token_b, LedgerAccount { owner: user, subaccount: None });
+    set_fault_count(&pic, token_b, "set_phantom_failures", 1);
+    assert!(matches!(
+        call_swap(&pic, amm, user, &id, &pool, token_a, 10_000),
+        Err(AmmError::TransferFailed { .. })
+    ));
+    let held = status(&pic, amm, user, &id);
+    assert!(matches!(held.operation.phase, InboundOperationPhase::OutputPending));
+    let payout_id = held.operation.output_payout_id.expect("linked payout id");
+    let payout = payout_status(&pic, amm, user, payout_id);
+    assert_eq!(payout.status, OutboundPayoutStatus::Ambiguous);
+    assert_eq!(
+        balance(&pic, token_b, LedgerAccount { owner: user, subaccount: None }),
+        before_output + payout.net_amount,
+        "phantom error represents an effect followed by a lost reply"
+    );
+    let exact_block = last_block_index(&pic, token_b);
+    pic.advance_time(Duration::from_secs(86_401));
+    pic.tick();
+
+    let wrong: Result<(), AmmError> = reply(
+        pic.update_call(
+            amm,
+            user,
+            "recover_outbound_payout",
+            encode_args((payout_id, Some(exact_block + 1))).unwrap(),
+        )
+        .unwrap(),
+    );
+    assert!(wrong.is_err(), "a missing/wrong block is not evidence of no effect");
+    assert_eq!(
+        payout_status(&pic, amm, user, payout_id).status,
+        OutboundPayoutStatus::Ambiguous,
+        "wrong evidence cannot retire the liability"
+    );
+
+    let recovered: Result<(), AmmError> = reply(
+        pic.update_call(
+            amm,
+            user,
+            "recover_outbound_payout",
+            encode_args((payout_id, Some(exact_block))).unwrap(),
+        )
+        .unwrap(),
+    );
+    recovered.expect("exact direct block finalizes the held swap payout");
+    assert!(matches!(
+        status(&pic, amm, user, &id).operation.phase,
+        InboundOperationPhase::Completed
+    ));
+    assert_eq!(
+        balance(&pic, token_b, LedgerAccount { owner: user, subaccount: None }),
+        before_output + payout.net_amount,
+        "finalization does not transfer twice"
+    );
+    let replay: Result<(), AmmError> = reply(
+        pic.update_call(
+            amm,
+            user,
+            "recover_outbound_payout",
+            encode_args((payout_id, Some(exact_block))).unwrap(),
+        )
+        .unwrap(),
+    );
+    assert!(replay.is_err(), "the once-only payout row has been retired");
 }
 
 fn get_pool_paused(pic: &PocketIc, amm: Principal, pool: &str) -> bool {

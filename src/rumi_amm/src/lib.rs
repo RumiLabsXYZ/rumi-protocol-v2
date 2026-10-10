@@ -11,6 +11,7 @@ mod admin;
 pub mod analytics;
 pub mod icrc21;
 mod logs;
+mod payout_reconciliation;
 pub mod math;
 pub mod rewards;
 pub mod state;
@@ -722,6 +723,10 @@ pub async fn claim_rewards(pool_id: PoolId) -> Result<u128, AmmError> {
     )
     .await
     .map_err(|reason| AmmError::RewardLedgerTransferFailed { reason })?;
+    // There is deliberately no await between reserving this payout and
+    // debiting claimable. If the canister traps in this message, IC message
+    // atomicity rolls back both; before the next await dispatch marks the row
+    // Dispatched. Recovery therefore never retries a merely Reserved row.
     mutate_state(|s| -> Result<(), AmmError> {
         let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
         let entry = pool
@@ -844,6 +849,402 @@ fn get_inbound_operation(request_id: Vec<u8>) -> Result<state::InboundOperationS
     Ok(state::InboundOperationStatus {
         operation,
         linked_payout_status,
+    })
+}
+
+/// Inspect one immutable outbound liability. Only its recipient or admin may
+/// read the exact transfer tuple.
+#[query]
+fn get_outbound_payout_status(
+    payout_id: u64,
+) -> Result<state::OutboundPayout, AmmError> {
+    let caller = ic_cdk::caller();
+    let payout = crate::state::outbound_payout(payout_id).map_err(|reason| AmmError::InvalidInput {
+        reason,
+    })?;
+    if caller != payout.to && read_state(|s| caller != s.admin) {
+        return Err(AmmError::Unauthorized);
+    }
+    Ok(payout)
+}
+
+/// Admin-only bounded inventory for unresolved outbound liabilities.
+#[query]
+fn get_unresolved_outbound_payouts(
+    start: u64,
+    limit: u64,
+) -> Result<Vec<state::OutboundPayout>, AmmError> {
+    caller_is_admin()?;
+    let start = usize::try_from(start).unwrap_or(usize::MAX);
+    let limit = usize::try_from(limit.min(100)).unwrap_or(100);
+    Ok(read_state(|s| {
+        s.outbound_payouts
+            .iter()
+            .skip(start)
+            .take(limit)
+            .cloned()
+            .collect()
+    }))
+}
+
+#[derive(Clone)]
+enum OutboundPurpose {
+    Swap {
+        caller: Principal,
+        pool_id: PoolId,
+        request_id: Vec<u8>,
+        token_in: Principal,
+        amount_in: u128,
+        amount_out: u128,
+        fee: u128,
+    },
+    Reward {
+        pool_id: PoolId,
+        claimant: Principal,
+        amount: u128,
+    },
+    AlreadyAccounted {
+        pool_id: PoolId,
+    },
+}
+
+/// Replay a pinned payout within its ledger's transaction window, or finalize
+/// it from a caller-supplied positive direct ICRC-3 block proof after that
+/// window. `Reserved`, archived, unsupported, and unlinked payout rows remain
+/// held. This endpoint never constructs a replacement transfer.
+#[update]
+async fn recover_outbound_payout(
+    payout_id: u64,
+    proof_block: Option<u64>,
+) -> Result<(), AmmError> {
+    let caller = ic_cdk::caller();
+    let payout = crate::state::outbound_payout(payout_id).map_err(|reason| {
+        AmmError::InvalidInput { reason }
+    })?;
+    if !outbound_recovery_authorized(caller, &payout) {
+        return Err(AmmError::Unauthorized);
+    }
+    if !matches!(
+        payout.status,
+        state::OutboundPayoutStatus::Dispatched | state::OutboundPayoutStatus::Ambiguous
+    ) {
+        return Err(AmmError::InvalidInput {
+            reason: "only a dispatched or ambiguous payout can be recovered; Reserved rows are held".into(),
+        });
+    }
+    if payout.from != ic_cdk::id()
+        || payout.net_amount.checked_add(payout.fee) != Some(payout.gross_amount)
+    {
+        return Err(AmmError::InvalidInput {
+            reason: "outbound payout sender or gross/net conservation invariant failed; liability remains held".into(),
+        });
+    }
+    let purpose = classify_outbound_purpose(&payout)?;
+    let pool_id = match &purpose {
+        OutboundPurpose::Swap { pool_id, .. }
+        | OutboundPurpose::Reward { pool_id, .. }
+        | OutboundPurpose::AlreadyAccounted { pool_id } => pool_id.clone(),
+    };
+    let _guard = PoolGuard::new(pool_id)?;
+
+    match proof_block {
+        None => {
+            let window = crate::transfers::ledger_tx_window(payout.ledger)
+                .await
+                .ok_or_else(|| AmmError::InvalidInput {
+                    reason: "ledger transaction window unavailable; payout remains held".into(),
+                })?;
+            revalidate_outbound_recovery(caller, &payout)?;
+            let now = ic_cdk::api::time();
+            if now > payout.created_at_time.saturating_add(window) {
+                return Err(AmmError::InvalidInput {
+                    reason: "payout is outside ledger deduplication window; supply an exact direct ICRC-3 block proof if supported".into(),
+                });
+            }
+            crate::transfers::dispatch_outbound_payout(payout_id)
+                .await
+                .map_err(|reason| AmmError::TransferFailed {
+                    token: "outbound".into(),
+                    reason,
+                })?;
+        }
+        Some(block_index) => {
+            crate::payout_reconciliation::verify_exact_block(
+                payout.ledger,
+                block_index,
+                &payout,
+            )
+            .await
+            .map_err(|reason| AmmError::TransferFailed {
+                token: "outbound".into(),
+                reason,
+            })?;
+            revalidate_outbound_recovery(caller, &payout)?;
+        }
+    }
+
+    let reward_snapshot = match &purpose {
+        OutboundPurpose::Reward { pool_id, .. } => {
+            Some(query_reward_subaccount_balance(pool_id).await?)
+        }
+        _ => None,
+    };
+    finalize_outbound_payout(payout, purpose, reward_snapshot)
+        .map_err(|reason| AmmError::InvalidInput { reason })
+}
+
+fn outbound_recovery_authorized(caller: Principal, payout: &state::OutboundPayout) -> bool {
+    caller == payout.to || read_state(|s| caller == s.admin)
+}
+
+fn revalidate_outbound_recovery(
+    caller: Principal,
+    payout: &state::OutboundPayout,
+) -> Result<(), AmmError> {
+    if !outbound_recovery_authorized(caller, payout) {
+        return Err(AmmError::Unauthorized);
+    }
+    let current = crate::state::outbound_payout(payout.id).map_err(|reason| {
+        AmmError::InvalidInput { reason }
+    })?;
+    if !same_outbound_tuple(&current, payout)
+        || !matches!(
+            current.status,
+            state::OutboundPayoutStatus::Dispatched | state::OutboundPayoutStatus::Ambiguous
+        )
+    {
+        return Err(AmmError::InvalidInput {
+            reason: "outbound payout changed while recovery was in flight; liability remains held".into(),
+        });
+    }
+    Ok(())
+}
+
+fn same_outbound_tuple(left: &state::OutboundPayout, right: &state::OutboundPayout) -> bool {
+    left.id == right.id
+        && left.operation_id == right.operation_id
+        && left.ledger == right.ledger
+        && left.from == right.from
+        && left.from_subaccount == right.from_subaccount
+        && left.to == right.to
+        && left.to_subaccount == right.to_subaccount
+        && left.gross_amount == right.gross_amount
+        && left.net_amount == right.net_amount
+        && left.fee == right.fee
+        && left.memo == right.memo
+        && left.created_at_time == right.created_at_time
+}
+
+fn classify_outbound_purpose(
+    payout: &state::OutboundPayout,
+) -> Result<OutboundPurpose, AmmError> {
+    read_state(|s| {
+        if let Some(op) = s
+            .inbound_operations
+            .iter()
+            .find(|op| op.output_payout_id == Some(payout.id))
+        {
+            if op.phase != state::InboundOperationPhase::OutputPending
+                || op.kind != state::InboundOperationKind::Swap
+            {
+                return Err(AmmError::InvalidInput {
+                    reason: "linked inbound operation is not awaiting this payout".into(),
+                });
+            }
+            let pool = s.pools.get(&op.pool_id).ok_or(AmmError::PoolNotFound)?;
+            let token_in = op.token_in.ok_or(AmmError::InvalidToken)?;
+            let (token_out, sub_out) = if token_in == pool.token_a {
+                (pool.token_b, pool.subaccount_b)
+            } else if token_in == pool.token_b {
+                (pool.token_a, pool.subaccount_a)
+            } else {
+                return Err(AmmError::InvalidToken);
+            };
+            let amount_out = op.result_amount.ok_or(AmmError::InvalidInput {
+                reason: "swap output amount is not pinned".into(),
+            })?;
+            if payout.ledger != token_out
+                || payout.from_subaccount != crate::transfers::pool_subaccount(token_out, sub_out)
+                || payout.to != op.caller
+                || payout.gross_amount != amount_out
+                || Some(payout.fee) != op.output_ledger_fee
+            {
+                return Err(AmmError::InvalidInput {
+                    reason: "swap payout does not match its committed input operation".into(),
+                });
+            }
+            let amount_in = op.legs.first().ok_or(AmmError::InvalidInput {
+                reason: "swap input leg is missing".into(),
+            })?.amount;
+            return Ok(OutboundPurpose::Swap {
+                caller: op.caller,
+                pool_id: op.pool_id.clone(),
+                request_id: op.request_id.clone(),
+                token_in,
+                amount_in,
+                amount_out,
+                fee: op.result_fee.unwrap_or(0),
+            });
+        }
+
+        let operation_id = payout.operation_id.as_str();
+        if let Some(rest) = operation_id.strip_prefix("reward_claim:") {
+            let (pool_id, claimant_text) = rest.rsplit_once(':').ok_or_else(|| {
+                AmmError::InvalidInput { reason: "malformed reward payout identity".into() }
+            })?;
+            let claimant = Principal::from_text(claimant_text).map_err(|_| AmmError::Unauthorized)?;
+            let expected_ledger = Principal::from_text(ICUSD_LEDGER)
+                .expect("invalid ICUSD ledger principal");
+            if payout.ledger != expected_ledger
+                || payout.from_subaccount != Some(reward_subaccount_for(&pool_id.to_string()))
+                || payout.to != claimant
+                || payout.to_subaccount.is_some()
+            {
+                return Err(AmmError::InvalidInput {
+                    reason: "reward payout tuple does not match its business identity".into(),
+                });
+            }
+            if !s.pools.contains_key(pool_id) {
+                return Err(AmmError::PoolNotFound);
+            }
+            return Ok(OutboundPurpose::Reward {
+                pool_id: pool_id.to_string(),
+                claimant,
+                amount: payout.gross_amount,
+            });
+        }
+
+        if let Some(rest) = operation_id
+            .strip_prefix("remove_liquidity_a:")
+            .or_else(|| operation_id.strip_prefix("remove_liquidity_b:"))
+        {
+            let token_a_leg = operation_id.starts_with("remove_liquidity_a:");
+            let (pool_id, claimant_text) = rest.rsplit_once(':').ok_or_else(|| {
+                AmmError::InvalidInput { reason: "malformed liquidity payout identity".into() }
+            })?;
+            let claimant = Principal::from_text(claimant_text).map_err(|_| AmmError::Unauthorized)?;
+            let pool = s.pools.get(pool_id).ok_or(AmmError::PoolNotFound)?;
+            let (ledger, subaccount) = if token_a_leg {
+                (pool.token_a, pool.subaccount_a)
+            } else {
+                (pool.token_b, pool.subaccount_b)
+            };
+            let amount_in_event = s.liquidity_events.iter().any(|event| {
+                event.pool_id == pool_id
+                    && event.caller == claimant
+                    && matches!(event.action, AmmLiquidityAction::RemoveLiquidity)
+                    && if token_a_leg {
+                        event.token_a == ledger && event.amount_a == payout.gross_amount
+                    } else {
+                        event.token_b == ledger && event.amount_b == payout.gross_amount
+                    }
+            });
+            if payout.ledger != ledger
+                || payout.from_subaccount != crate::transfers::pool_subaccount(ledger, subaccount)
+                || payout.to != claimant
+                || payout.to_subaccount.is_some()
+                || !amount_in_event
+            {
+                return Err(AmmError::InvalidInput {
+                    reason: "liquidity payout does not match a committed removal event".into(),
+                });
+            }
+            return Ok(OutboundPurpose::AlreadyAccounted { pool_id: pool_id.to_string() });
+        }
+
+        if let Some(rest) = operation_id.strip_prefix("protocol_fee_a:") {
+            let pool = s.pools.get(rest).ok_or(AmmError::PoolNotFound)?;
+            let event_matches = s.admin_events.iter().any(|event| {
+                matches!(&event.action, AmmAdminAction::WithdrawProtocolFees { pool_id, amount_a, .. }
+                    if pool_id == rest && *amount_a == payout.gross_amount)
+            });
+            if payout.ledger != pool.token_a
+                || payout.from_subaccount != crate::transfers::pool_subaccount(pool.token_a, pool.subaccount_a)
+                || !event_matches
+            {
+                return Err(AmmError::InvalidInput {
+                    reason: "protocol fee payout does not match a committed fee withdrawal".into(),
+                });
+            }
+            return Ok(OutboundPurpose::AlreadyAccounted { pool_id: rest.to_string() });
+        }
+        if let Some(rest) = operation_id.strip_prefix("protocol_fee_b:") {
+            let pool = s.pools.get(rest).ok_or(AmmError::PoolNotFound)?;
+            let event_matches = s.admin_events.iter().any(|event| {
+                matches!(&event.action, AmmAdminAction::WithdrawProtocolFees { pool_id, amount_b, .. }
+                    if pool_id == rest && *amount_b == payout.gross_amount)
+            });
+            if payout.ledger != pool.token_b
+                || payout.from_subaccount != crate::transfers::pool_subaccount(pool.token_b, pool.subaccount_b)
+                || !event_matches
+            {
+                return Err(AmmError::InvalidInput {
+                    reason: "protocol fee payout does not match a committed fee withdrawal".into(),
+                });
+            }
+            return Ok(OutboundPurpose::AlreadyAccounted { pool_id: rest.to_string() });
+        }
+        Err(AmmError::InvalidInput {
+            reason: "outbound payout purpose is unsupported; liability remains held".into(),
+        })
+    })
+}
+
+fn finalize_outbound_payout(
+    payout: state::OutboundPayout,
+    purpose: OutboundPurpose,
+    reward_snapshot: Option<u128>,
+) -> Result<(), String> {
+    mutate_state(|s| {
+        let index = s
+            .outbound_payouts
+            .iter()
+            .position(|row| {
+                same_outbound_tuple(row, &payout)
+                    && matches!(
+                        row.status,
+                        state::OutboundPayoutStatus::Dispatched
+                            | state::OutboundPayoutStatus::Ambiguous
+                    )
+            })
+            .ok_or_else(|| "outbound payout changed while recovery was in flight".to_string())?;
+        if !matches!(
+            s.outbound_payouts[index].status,
+            state::OutboundPayoutStatus::Dispatched | state::OutboundPayoutStatus::Ambiguous
+        ) {
+            return Err("outbound payout is no longer recoverable".into());
+        }
+        match purpose {
+            OutboundPurpose::Swap {
+                caller,
+                pool_id,
+                request_id,
+                token_in,
+                amount_in,
+                amount_out,
+                fee,
+            } => {
+                let op_index = s.inbound_operations.iter().position(|op| {
+                    op.caller == caller
+                        && op.request_id == request_id
+                        && op.output_payout_id == Some(payout.id)
+                        && op.phase == state::InboundOperationPhase::OutputPending
+                }).ok_or_else(|| "linked swap operation changed while recovery was in flight".to_string())?;
+                let pool = s.pools.get(&pool_id).ok_or_else(|| "swap pool disappeared".to_string())?;
+                let token_out = if token_in == pool.token_a { pool.token_b } else { pool.token_a };
+                s.record_swap_event(caller, pool_id, token_in, amount_in, token_out, amount_out, fee);
+                s.inbound_operations[op_index].phase = state::InboundOperationPhase::Completed;
+            }
+            OutboundPurpose::Reward { pool_id, claimant, amount } => {
+                let snapshot = reward_snapshot.ok_or_else(|| "reward balance proof is missing".to_string())?;
+                let pool = s.pools.get_mut(&pool_id).ok_or_else(|| "reward pool disappeared".to_string())?;
+                pool.reward_balance_snapshot = snapshot;
+                s.record_claim_event(pool_id, claimant, amount);
+            }
+            OutboundPurpose::AlreadyAccounted { .. } => {}
+        }
+        s.outbound_payouts.remove(index);
+        Ok(())
     })
 }
 
@@ -1711,6 +2112,10 @@ async fn remove_liquidity(
         None
     };
 
+    // Both reservations and the accounting/event transition are in one
+    // synchronous message segment. A trap before the next await rolls back
+    // both; before the first transfer await each payout has been marked
+    // Dispatched. Reserved rows are consequently not a generic retry surface.
     // Burn LP shares and update reserves FIRST (optimistic),
     // then transfer tokens. This ensures the protocol never overpays
     // if a transfer fails mid-way.

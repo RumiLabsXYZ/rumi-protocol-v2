@@ -96,6 +96,21 @@ type InboundOperationStatus = record {
   operation : InboundOperation;
   linked_payout_status : opt OutboundPayoutStatus;
 };
+type OutboundPayout = record {
+  id : nat64;
+  operation_id : text;
+  ledger : principal;
+  from : principal;
+  from_subaccount : opt blob;
+  to : principal;
+  to_subaccount : opt blob;
+  gross_amount : nat;
+  net_amount : nat;
+  fee : nat;
+  memo : blob;
+  created_at_time : nat64;
+  status : OutboundPayoutStatus;
+};
 
 type PendingClaim = record {
   id : nat64;
@@ -394,6 +409,9 @@ service : (AmmInitArgs) -> {
   get_quote : (text, principal, nat) -> (variant { Ok : nat; Err : AmmError }) query;
   get_next_inbound_sequence : () -> (variant { Ok : nat64; Err : AmmError }) query;
   get_inbound_operation : (blob) -> (variant { Ok : InboundOperationStatus; Err : AmmError }) query;
+  get_outbound_payout_status : (nat64) -> (variant { Ok : OutboundPayout; Err : AmmError }) query;
+  get_unresolved_outbound_payouts : (nat64, nat64) -> (variant { Ok : vec OutboundPayout; Err : AmmError }) query;
+  recover_outbound_payout : (nat64, opt nat64) -> (variant { Ok; Err : AmmError });
   get_lp_balance : (text, principal) -> (nat) query;
 
   is_pool_creation_open : () -> (bool) query;
