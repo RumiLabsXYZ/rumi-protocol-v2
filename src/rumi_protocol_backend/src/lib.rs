@@ -1908,12 +1908,12 @@ async fn verify_three_usd_reserve_payout_fee(
     }
     // This backend candidate is intentionally direct-ledger only. Archive
     // callbacks do not authenticate membership for Stability Pool settlement.
-    let request = vec![icrc_ledger_types::icrc::blocks::GetBlocksRequest {
+    let request = vec![icrc_ledger_types::icrc3::blocks::GetBlocksRequest {
         start: candid::Nat::from(block_index),
         length: candid::Nat::from(1u64),
     }];
     let response: Result<(
-        icrc_ledger_types::icrc::blocks::GetBlocksResult,
+        icrc_ledger_types::icrc3::blocks::GetBlocksResult,
     ), _> = ic_cdk::call(payout.ledger, "icrc3_get_blocks", (request,)).await;
     let (response,) = response.map_err(|(code, message)| {
         format!("direct icrc3_get_blocks failed: {code:?} {message}")
