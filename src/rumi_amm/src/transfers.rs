@@ -1,5 +1,6 @@
 // ICRC-1 / ICRC-2 token transfer helpers for the Rumi AMM.
-// Unlike the 3pool, these helpers support subaccounts for per-pool fund segregation.
+// These helpers support subaccounts for per-pool fund segregation, except for
+// THREEPOOL: its ledger rejects non-default account transfers.
 
 use candid::Principal;
 use icrc_ledger_types::icrc1::account::Account;
@@ -12,6 +13,14 @@ use std::collections::HashMap;
 /// ledger's `icrc1_fee` query cannot be reached. Erring high keeps the pool
 /// solvent (we send slightly less) rather than risking an over-send.
 const DEFAULT_LEDGER_FEE_E8S: u128 = 10_000;
+
+/// THREEPOOL only accepts the canister's default account. There can therefore
+/// be only one AMM pool containing this ledger (enforced in `create_pool`).
+fn pool_subaccount(ledger: Principal, subaccount: [u8; 32]) -> Option<[u8; 32]> {
+    let threepool = Principal::from_text(crate::THREEPOOL)
+        .expect("invalid THREEPOOL ledger principal");
+    (ledger != threepool).then_some(subaccount)
+}
 
 thread_local! {
     /// Per-ledger transfer-fee cache, populated lazily from `icrc1_fee` on the
@@ -51,7 +60,7 @@ pub async fn transfer_from_user(
         },
         to: Account {
             owner: ic_cdk::id(),
-            subaccount: Some(to_subaccount),
+            subaccount: pool_subaccount(ledger, to_subaccount),
         },
         amount: candid::Nat::from(amount),
         fee: None,
@@ -110,7 +119,7 @@ pub async fn transfer_to_user(
     }
     let send = amount - fee;
     let args = TransferArg {
-        from_subaccount: Some(from_subaccount),
+        from_subaccount: pool_subaccount(ledger, from_subaccount),
         to: Account {
             owner: to,
             subaccount: None,
@@ -139,6 +148,22 @@ pub async fn transfer_to_user(
         }
         Ok((Err(e),)) => Err(format!("icrc1_transfer error: {:?}", e)),
         Err((code, msg)) => Err(format!("inter-canister call failed: {:?} - {}", code, msg)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pool_subaccount;
+    use candid::Principal;
+
+    #[test]
+    fn threepool_uses_default_account_while_other_ledgers_keep_pool_subaccounts() {
+        let threepool = Principal::from_text(crate::THREEPOOL).unwrap();
+        let other_ledger = Principal::from_text(crate::ICUSD_LEDGER).unwrap();
+        let subaccount = [7; 32];
+
+        assert_eq!(pool_subaccount(threepool, subaccount), None);
+        assert_eq!(pool_subaccount(other_ledger, subaccount), Some(subaccount));
     }
 }
 

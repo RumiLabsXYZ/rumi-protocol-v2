@@ -12,7 +12,7 @@
 //     first time on the new wasm (one-shot drain from the legacy blob) or
 //     subsequent times (load `SlimState` from its cell).
 //
-// Memory ID layout (37 IDs used; 255 available):
+// Memory ID layout (38 IDs used; 255 available):
 //
 //   0       SlimState cell              — bounded residual heap
 //   1       lp_balances                 — BTreeMap<Principal, u128>
@@ -43,6 +43,7 @@
 //   34      unsettled_input_index        — (token, payout id) lookup for donation fence
 //   35      payout_input_index_cursor     — resumable bounded index backfill cursor
 //   36      payout_input_index_complete   — backfill completion marker
+//   37      lp_allowances_cutover         — one-time legacy approval invalidation
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -107,6 +108,7 @@ const MEM_PAYOUT_OWNER_INDEX: MemoryId = MemoryId::new(33);
 const MEM_UNSETTLED_INPUT_INDEX: MemoryId = MemoryId::new(34);
 const MEM_PAYOUT_INPUT_INDEX_CURSOR: MemoryId = MemoryId::new(35);
 const MEM_PAYOUT_INPUT_INDEX_COMPLETE: MemoryId = MemoryId::new(36);
+const MEM_LP_ALLOWANCES_CUTOVER: MemoryId = MemoryId::new(37);
 
 const PAYOUT_INPUT_INDEX_CURSOR_START: u128 = u128::MAX;
 const PAYOUT_INPUT_INDEX_BACKFILL_BATCH: usize = 16;
@@ -509,6 +511,12 @@ thread_local! {
 
     pub(crate) static LP_ALLOWANCES: RefCell<StableBTreeMap<AllowanceKey, LpAllowance, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_LP_ALLOWANCES))));
+    // One-time fence for legacy allowances whose originating account
+    // subaccount was not part of the principal-keyed allowance key.
+    pub(crate) static LP_ALLOWANCES_CUTOVER: RefCell<StableCell<u8, Memory>> = RefCell::new(
+        StableCell::init(MM.with(|m| m.borrow().get(MEM_LP_ALLOWANCES_CUTOVER)), 0)
+            .expect("init LP allowance cutover cell"),
+    );
 
     pub(crate) static BURN_CALLERS: RefCell<StableBTreeMap<StorablePrincipal, Unit, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_BURN_CALLERS))));
@@ -717,6 +725,32 @@ pub fn allowance_remove(owner: &Principal, spender: &Principal) {
             spender: *spender,
         });
     });
+}
+
+/// Mark fresh installations as already past the legacy-allowance cutover.
+/// Fresh canisters have no principal-keyed approvals to invalidate.
+pub fn mark_lp_allowances_cutover_complete() {
+    LP_ALLOWANCES_CUTOVER.with(|cell| {
+        cell.borrow_mut()
+            .set(1)
+            .expect("set LP allowance cutover marker");
+    });
+}
+
+/// Clear principal-keyed allowances once when upgrading from versions that
+/// accepted subaccounts but did not include them in allowance storage keys.
+/// `clear_new` resets the stable B-tree root and allocator without walking
+/// every legacy row. Returns true only when this invocation performed the
+/// one-time clear.
+pub fn invalidate_legacy_lp_allowances_once() -> bool {
+    let cutover_complete = LP_ALLOWANCES_CUTOVER.with(|cell| *cell.borrow().get() != 0);
+    if cutover_complete {
+        return false;
+    }
+
+    LP_ALLOWANCES.with(|allowances| allowances.borrow_mut().clear_new());
+    mark_lp_allowances_cutover_complete();
+    true
 }
 
 // ─── Public API: burn_callers ────────────────────────────────────────────────

@@ -47,6 +47,7 @@ fn init(args: ThreePoolInitArgs) {
         "refusing to init: stable memory non-empty; use upgrade mode not reinstall"
     );
     storage::dedup::mark_fresh_install();
+    storage::mark_lp_allowances_cutover_complete();
     mutate_state(|s| s.initialize(args));
     setup_timers();
     log!(
@@ -165,6 +166,12 @@ fn post_upgrade() {
                 storage::blocks::len());
         }
     }
+
+    // Prior versions keyed LP allowances only by principals, even when an
+    // approval originated from a nondefault account subaccount. Invalidate
+    // that ambiguous pre-cutover set after any legacy drain; subsequent
+    // upgrades preserve approvals created under the default-account guard.
+    storage::invalidate_legacy_lp_allowances_once();
 
     // Set certified ICRC-3 tip from the now-live blocks log.
     if let Some(h) = read_state(|s| s.last_block_hash) {

@@ -19,6 +19,19 @@ use crate::transfers::transfer_to_user;
 use crate::types::*;
 use crate::PoolGuard;
 
+fn conflicts_with_threepool_pool(
+    token_a: Principal,
+    token_b: Principal,
+    threepool: Principal,
+    mut existing_pairs: impl Iterator<Item = (Principal, Principal)>,
+) -> bool {
+    let requested_pair_uses_threepool = token_a == threepool || token_b == threepool;
+    requested_pair_uses_threepool
+        && existing_pairs.any(|(existing_a, existing_b)| {
+            existing_a == threepool || existing_b == threepool
+        })
+}
+
 #[update]
 fn create_pool(args: CreatePoolArgs) -> Result<PoolId, AmmError> {
     // Admin exempt from maintenance mode — can set up pools while canister is locked
@@ -52,10 +65,26 @@ fn create_pool(args: CreatePoolArgs) -> Result<PoolId, AmmError> {
     }
 
     let pool_id = make_pool_id(args.token_a, args.token_b);
+    let threepool = Principal::from_text(crate::THREEPOOL)
+        .expect("invalid THREEPOOL ledger principal");
 
     mutate_state(|s| {
         if s.pools.contains_key(&pool_id) {
             return Err(AmmError::PoolAlreadyExists);
+        }
+
+        // THREEPOOL only supports the canister's default ledger account.
+        // Since AMM reserves use a shared account for that ledger, a second
+        // pool containing THREEPOOL would make per-pool accounting unsafe.
+        if conflicts_with_threepool_pool(
+            args.token_a,
+            args.token_b,
+            threepool,
+            s.pools.values().map(|pool| (pool.token_a, pool.token_b)),
+        ) {
+            return Err(AmmError::InvalidInput {
+                reason: "only one AMM pool may contain the THREEPOOL ledger".to_string(),
+            });
         }
 
         let subaccount_a = derive_subaccount(&pool_id, "token_a");
@@ -101,6 +130,38 @@ fn create_pool(args: CreatePoolArgs) -> Result<PoolId, AmmError> {
         });
         Ok(pool_id)
     })
+}
+
+#[cfg(test)]
+mod threepool_pool_tests {
+    use super::conflicts_with_threepool_pool;
+    use candid::Principal;
+
+    #[test]
+    fn allows_first_threepool_pair_and_rejects_a_second() {
+        let threepool = Principal::from_text(crate::THREEPOOL).unwrap();
+        let other = Principal::from_text(crate::ICUSD_LEDGER).unwrap();
+        let another = Principal::self_authenticating(&[11]);
+
+        assert!(!conflicts_with_threepool_pool(
+            threepool,
+            other,
+            threepool,
+            std::iter::empty(),
+        ));
+        assert!(conflicts_with_threepool_pool(
+            threepool,
+            another,
+            threepool,
+            [(threepool, other)].into_iter(),
+        ));
+        assert!(!conflicts_with_threepool_pool(
+            other,
+            another,
+            threepool,
+            [(Principal::self_authenticating(&[12]), other)].into_iter(),
+        ));
+    }
 }
 
 #[update]
