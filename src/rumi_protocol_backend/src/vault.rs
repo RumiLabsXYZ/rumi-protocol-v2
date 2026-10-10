@@ -6197,6 +6197,34 @@ mod borrow_mint_journal_tests {
     }
 
     #[test]
+    fn receipt_recovery_phase_selection_resumes_only_the_exact_confirmed_block() {
+        assert!(matches!(
+            borrow_mint_receipt_recovery_action(
+                &BorrowMintPhase::ReceiptRecoveryRequired,
+                77,
+            ),
+            Ok(BorrowMintReceiptRecoveryAction::VerifyCandidate)
+        ));
+        assert!(matches!(
+            borrow_mint_receipt_recovery_action(
+                &BorrowMintPhase::MintConfirmedHeld { block_index: 77 },
+                77,
+            ),
+            Ok(BorrowMintReceiptRecoveryAction::ResumeHeldCommit)
+        ));
+        assert!(borrow_mint_receipt_recovery_action(
+            &BorrowMintPhase::MintConfirmedHeld { block_index: 77 },
+            78,
+        )
+        .is_err());
+        assert!(borrow_mint_receipt_recovery_action(
+            &BorrowMintPhase::SubmittedOrUnknown,
+            77,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn commit_then_error_retries_exact_tuple_and_records_debt_once() {
         let owner = Principal::from_slice(&[0x41]);
         let ledger = Principal::from_slice(&[0x42]);
@@ -6480,12 +6508,43 @@ fn log_borrow_mint_receipt_recovery(
     );
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BorrowMintReceiptRecoveryAction {
+    VerifyCandidate,
+    ResumeHeldCommit,
+}
+
+fn borrow_mint_receipt_recovery_action(
+    phase: &crate::state::BorrowMintPhase,
+    candidate_block_index: u64,
+) -> Result<BorrowMintReceiptRecoveryAction, ProtocolError> {
+    match phase {
+        crate::state::BorrowMintPhase::ReceiptRecoveryRequired => {
+            Ok(BorrowMintReceiptRecoveryAction::VerifyCandidate)
+        }
+        crate::state::BorrowMintPhase::MintConfirmedHeld { block_index }
+            if *block_index == candidate_block_index =>
+        {
+            Ok(BorrowMintReceiptRecoveryAction::ResumeHeldCommit)
+        }
+        crate::state::BorrowMintPhase::MintConfirmedHeld { .. } => {
+            Err(ProtocolError::GenericError(
+                "candidate block does not match the already confirmed borrow mint block".into(),
+            ))
+        }
+        _ => Err(ProtocolError::GenericError(
+            "borrow journal is not awaiting TooOld receipt recovery".into(),
+        )),
+    }
+}
+
 /// Reconcile a borrow journal after its exact ICRC-1 retry returned TooOld.
-/// The caller-supplied block index is only a candidate: debt is committed only
-/// after an exact ICRC-3 read validates the persisted mint tuple. Archived
-/// responses currently remain held because their chain membership is not
-/// established by this direct-block verifier.
-/// This path never dispatches a mint.
+/// For `ReceiptRecoveryRequired`, the caller-supplied block is only a candidate
+/// until an exact ICRC-3 read validates the persisted mint tuple. For
+/// `MintConfirmedHeld`, only the stored block index resumes the once-only debt
+/// commit. Archived responses remain held because their chain membership is
+/// not established by the direct-block verifier. This path never dispatches a
+/// mint.
 pub async fn reconcile_pending_borrow_mint_from_block(
     vault_id: u64,
     candidate_block_index: u64,
@@ -6524,73 +6583,98 @@ pub async fn reconcile_pending_borrow_mint_from_block(
         guard_principal.fail();
         return Err(error);
     }
-    if journal.phase != crate::state::BorrowMintPhase::ReceiptRecoveryRequired {
-        guard_principal.fail();
-        return Err(ProtocolError::GenericError(
-            "borrow journal is not awaiting TooOld receipt recovery".into(),
-        ));
-    }
-
-    log_borrow_mint_receipt_recovery("started", caller, &journal, candidate_block_index);
-
-    if let Err(error) = crate::icrc3_proof::verify_icrc3_borrow_mint_block(
-        journal.tuple.ledger,
+    let recovery_action = match borrow_mint_receipt_recovery_action(
+        &journal.phase,
         candidate_block_index,
-        &journal.tuple,
-    )
-    .await
-    {
-        log_borrow_mint_receipt_recovery(
-            "receipt_rejected",
-            caller,
-            &journal,
-            candidate_block_index,
-        );
-        guard_principal.fail();
-        return Err(ProtocolError::GenericError(format!(
-            "candidate ICRC-3 block does not prove the exact borrow mint; journal remains held: {error}"
-        )));
-    }
-
-    // A developer may be revoked while the ledger proof call is outstanding.
-    // Recheck current authority before the once-only state transition.
-    if borrow_mint_recovery_owner(caller, &journal, read_state(|s| s.developer_principal)).is_err()
-    {
-        log_borrow_mint_receipt_recovery(
-            "authority_revoked",
-            caller,
-            &journal,
-            candidate_block_index,
-        );
-        guard_principal.fail();
-        return Err(ProtocolError::CallerNotOwner);
-    }
-
-    let confirmed = mutate_state(|s| {
-        let Some(current) = s.pending_borrow_mints.get_mut(&vault_id) else {
-            return false;
-        };
-        if current != &journal
-            || current.phase != crate::state::BorrowMintPhase::ReceiptRecoveryRequired
-        {
-            return false;
+    ) {
+        Ok(action) => action,
+        Err(error) => {
+            if matches!(journal.phase, crate::state::BorrowMintPhase::MintConfirmedHeld { .. }) {
+                log_borrow_mint_receipt_recovery(
+                    "confirmed_block_mismatch",
+                    caller,
+                    &journal,
+                    candidate_block_index,
+                );
+            }
+            guard_principal.fail();
+            return Err(error);
         }
-        current.phase = crate::state::BorrowMintPhase::MintConfirmedHeld {
-            block_index: candidate_block_index,
-        };
-        true
-    });
-    if !confirmed {
+    };
+
+    if recovery_action == BorrowMintReceiptRecoveryAction::VerifyCandidate {
+        log_borrow_mint_receipt_recovery("started", caller, &journal, candidate_block_index);
+
+        if let Err(error) = crate::icrc3_proof::verify_icrc3_borrow_mint_block(
+            journal.tuple.ledger,
+            candidate_block_index,
+            &journal.tuple,
+        )
+        .await
+        {
+            log_borrow_mint_receipt_recovery(
+                "receipt_rejected",
+                caller,
+                &journal,
+                candidate_block_index,
+            );
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "candidate ICRC-3 block does not prove the exact borrow mint; journal remains held: {error}"
+            )));
+        }
+
+        // A developer may be revoked while the ledger proof call is outstanding.
+        // Recheck current authority before the once-only state transition.
+        if borrow_mint_recovery_owner(caller, &journal, read_state(|s| s.developer_principal))
+            .is_err()
+        {
+            log_borrow_mint_receipt_recovery(
+                "authority_revoked",
+                caller,
+                &journal,
+                candidate_block_index,
+            );
+            guard_principal.fail();
+            return Err(ProtocolError::CallerNotOwner);
+        }
+
+        let confirmed = mutate_state(|s| {
+            let Some(current) = s.pending_borrow_mints.get_mut(&vault_id) else {
+                return false;
+            };
+            if current != &journal
+                || current.phase != crate::state::BorrowMintPhase::ReceiptRecoveryRequired
+            {
+                return false;
+            }
+            current.phase = crate::state::BorrowMintPhase::MintConfirmedHeld {
+                block_index: candidate_block_index,
+            };
+            true
+        });
+        if !confirmed {
+            log_borrow_mint_receipt_recovery(
+                "journal_changed",
+                caller,
+                &journal,
+                candidate_block_index,
+            );
+            guard_principal.fail();
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "borrow journal changed while committing the verified mint receipt; journal remains held".into(),
+            ));
+        }
+    } else {
+        // The stored confirmation is already proof state. Retrying with its
+        // exact index resumes only the once-only debt commit; no ledger read
+        // or mint dispatch is performed here.
         log_borrow_mint_receipt_recovery(
-            "journal_changed",
+            "held_debt_commit_resumed",
             caller,
             &journal,
             candidate_block_index,
         );
-        guard_principal.fail();
-        return Err(ProtocolError::TemporarilyUnavailable(
-            "borrow journal changed while committing the verified mint receipt; journal remains held".into(),
-        ));
     }
 
     // The held phase bypasses the ledger closure and runs the same checked,
@@ -6606,7 +6690,11 @@ pub async fn reconcile_pending_borrow_mint_from_block(
     {
         Ok(result) => {
             log_borrow_mint_receipt_recovery(
-                "receipt_verified_debt_committed",
+                if recovery_action == BorrowMintReceiptRecoveryAction::ResumeHeldCommit {
+                    "held_debt_commit_resumed_and_committed"
+                } else {
+                    "receipt_verified_debt_committed"
+                },
                 caller,
                 &journal,
                 candidate_block_index,
@@ -6616,7 +6704,11 @@ pub async fn reconcile_pending_borrow_mint_from_block(
         }
         Err(error) => {
             log_borrow_mint_receipt_recovery(
-                "receipt_verified_debt_commit_pending",
+                if recovery_action == BorrowMintReceiptRecoveryAction::ResumeHeldCommit {
+                    "held_debt_commit_still_pending"
+                } else {
+                    "receipt_verified_debt_commit_pending"
+                },
                 caller,
                 &journal,
                 candidate_block_index,
