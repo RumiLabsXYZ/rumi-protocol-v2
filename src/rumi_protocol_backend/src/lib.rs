@@ -2076,6 +2076,19 @@ pub async fn recover_three_usd_reserve_payout_candidate(
     operation_id: u128,
     owner: Principal,
 ) -> Option<bool> {
+    let reserve_linked = crate::state::read_state(|state| {
+        state.three_usd_reserve_payout_operation_keys.contains_key(&operation_id)
+    });
+    if reserve_linked && !crate::state::read_state(|state| has_three_usd_reserve_candidate(state, operation_id)) {
+        match crate::payout_history::advance_owner_reserve_candidate_discovery(operation_id, owner)
+            .await
+        {
+            Ok(crate::payout_history::ReserveCandidateDiscoveryProgress::CandidateRecorded) => {}
+            Ok(crate::payout_history::ReserveCandidateDiscoveryProgress::Scanning)
+            | Ok(crate::payout_history::ReserveCandidateDiscoveryProgress::Held)
+            | Err(_) => return Some(false),
+        }
+    }
     let claim_result = crate::state::mutate_state(|state| {
         if !has_three_usd_reserve_candidate(state, operation_id) {
             return None;

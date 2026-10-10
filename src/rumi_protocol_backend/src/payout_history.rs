@@ -36,6 +36,300 @@ pub enum PayoutRearmProgress {
     UnsupportedHeld,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReserveCandidateDiscoveryProgress {
+    Scanning,
+    CandidateRecorded,
+    Held,
+}
+
+/// Discover a lost-reply 3USD reserve payout candidate from the exact
+/// pre-dispatch history boundary. This never proves absence and never rearms:
+/// only a unique exact tuple in a complete direct-ledger prefix is recorded.
+pub async fn advance_owner_reserve_candidate_discovery(
+    operation_id: u128,
+    caller: Principal,
+) -> Result<ReserveCandidateDiscoveryProgress, String> {
+    let Some((key, payout, row, saved_scan)) = crate::state::read_state(|state| {
+        let key = state.three_usd_reserve_payout_operation_keys.get(&operation_id)?.clone();
+        let payout = state.three_usd_reserve_collateral_payouts.get(&key)?.clone();
+        let (_, row) = state.get_pending_payout(operation_id)?;
+        let scan = state.three_usd_reserve_payout_candidate_scans.get(&key).cloned();
+        Some((key, payout, row, scan))
+    }) else {
+        return Ok(ReserveCandidateDiscoveryProgress::Held);
+    };
+    if row.owner != caller {
+        return Err("only the payout owner can request candidate discovery".into());
+    }
+    let Some(attempt) = reserve_attempt(&payout, row.op_nonce) else {
+        return Ok(ReserveCandidateDiscoveryProgress::Held);
+    };
+    if !row.held_for_manual_retry
+        || !row.reconciliation_required
+        || row.in_flight
+        || row.operation_id != operation_id
+        || row.payout_kind != crate::state::PendingPayoutKind::Margin
+        || row.ledger != Some(payout.ledger)
+        || row.collateral_type != payout.collateral_type
+        || row.margin.to_u64() != payout.gross_e8s
+        || row.transfer_amount_raw != Some(payout.net_e8s)
+        || row.history_start_index.is_none()
+        || payout.operation_id != operation_id
+        || payout.ledger == Principal::anonymous()
+        || payout.source.owner != ic_cdk::id()
+        || payout.destination.owner != caller
+        || payout.gross_e8s.checked_sub(payout.net_e8s) != Some(payout.expected_fee_e8s)
+        || attempt.fee_arg_e8s != Some(payout.expected_fee_e8s)
+        || attempt.candidate_block_index.is_some()
+        || attempt.observed_fee_e8s.is_some()
+        || payout.candidate_block_index.is_some()
+        || payout.observed_fee_e8s.is_some()
+    {
+        return Ok(ReserveCandidateDiscoveryProgress::Held);
+    }
+    let start_index = row.history_start_index.unwrap();
+    let existing_scan = saved_scan;
+    if let Some(scan) = existing_scan.as_ref() {
+        if scan.operation_id != operation_id
+            || scan.attempt_nonce != row.op_nonce
+            || scan.start_index != start_index
+            || scan.next_index > scan.snapshot_log_length
+        {
+            return Ok(ReserveCandidateDiscoveryProgress::Held);
+        }
+        if scan.multiple_candidates {
+            return Ok(ReserveCandidateDiscoveryProgress::Held);
+        }
+    }
+    let now = ic_cdk::api::time();
+    if !crate::state::mutate_state(|state| state.claim_payout_history_scan_slot(now)) {
+        return Ok(ReserveCandidateDiscoveryProgress::Scanning);
+    }
+
+    let scan = match existing_scan {
+        Some(scan)
+            if scan.next_index < scan.snapshot_log_length
+                || scan.candidate_block_index.is_some() => scan,
+        _ => {
+            let ledger = payout.ledger;
+            let request = vec![GetBlocksRequest {
+                start: Nat::from(start_index),
+                length: Nat::from(1u64),
+            }];
+            let result: Result<(GetBlocksResult,), _> =
+                ic_cdk::call(ledger, "icrc3_get_blocks", (request,)).await;
+            let Some(snapshot_log_length) = result.ok().and_then(|(response,)| response.log_length.0.to_u64()) else {
+                return Ok(ReserveCandidateDiscoveryProgress::Held);
+            };
+            if snapshot_log_length < start_index
+                || !history_span_within_budget(start_index, snapshot_log_length)
+            {
+                return Ok(ReserveCandidateDiscoveryProgress::Held);
+            }
+            let scan = crate::state::ThreeUsdReservePayoutCandidateScan {
+                operation_id,
+                attempt_nonce: row.op_nonce,
+                start_index,
+                snapshot_log_length,
+                next_index: start_index,
+                candidate_block_index: None,
+                multiple_candidates: false,
+            };
+            let stored = crate::state::mutate_state(|state| {
+                let same_row = state.get_pending_payout(operation_id)
+                    .is_some_and(|(_, current)| current == row);
+                let same_payout = state.three_usd_reserve_collateral_payouts.get(&key)
+                    .is_some_and(|current| current == &payout);
+                same_row && same_payout && crate::event::record_three_usd_reserve_payout_candidate_scan(
+                    state, key.clone(), operation_id, row.op_nonce, scan.clone(),
+                )
+            });
+            if !stored {
+                return Ok(ReserveCandidateDiscoveryProgress::Held);
+            }
+            scan
+        }
+    };
+
+    if scan.next_index == scan.snapshot_log_length {
+        return finish_reserve_candidate_scan(&key, &payout, &row, scan);
+    }
+    let Some(end) = next_page_end(scan.next_index, scan.snapshot_log_length) else {
+        return Ok(ReserveCandidateDiscoveryProgress::Held);
+    };
+    let request = vec![GetBlocksRequest {
+        start: Nat::from(scan.next_index),
+        length: Nat::from(end - scan.next_index),
+    }];
+    let response: Result<(GetBlocksResult,), _> =
+        ic_cdk::call(payout.ledger, "icrc3_get_blocks", (request,)).await;
+    let Ok((history,)) = response else {
+        return Ok(ReserveCandidateDiscoveryProgress::Held);
+    };
+    let Some(matches) = exact_reserve_candidate_page(
+        scan.next_index,
+        end,
+        scan.snapshot_log_length,
+        &payout,
+        row.op_nonce,
+        history,
+    ) else {
+        return Ok(ReserveCandidateDiscoveryProgress::Held);
+    };
+    let mut advanced = scan.clone();
+    advanced.next_index = end;
+    for index in matches {
+        if let Some(previous) = advanced.candidate_block_index {
+            if previous != index {
+                advanced.multiple_candidates = true;
+            }
+        } else {
+            advanced.candidate_block_index = Some(index);
+        }
+    }
+    let stored = crate::state::mutate_state(|state| {
+        let same_row = state.get_pending_payout(operation_id)
+            .is_some_and(|(_, current)| current == row);
+        same_row && crate::event::record_three_usd_reserve_payout_candidate_scan(
+            state, key.clone(), operation_id, row.op_nonce, advanced.clone(),
+        )
+    });
+    if !stored {
+        return Ok(ReserveCandidateDiscoveryProgress::Held);
+    }
+    if end == scan.snapshot_log_length {
+        finish_reserve_candidate_scan(&key, &payout, &row, advanced)
+    } else {
+        Ok(ReserveCandidateDiscoveryProgress::Scanning)
+    }
+}
+
+fn reserve_attempt(
+    payout: &crate::state::ThreeUsdReserveCollateralPayout,
+    nonce: u128,
+) -> Option<crate::state::ThreeUsdReservePayoutAttempt> {
+    if payout.op_nonce == nonce {
+        Some(crate::state::ThreeUsdReservePayoutAttempt {
+            op_nonce: payout.op_nonce,
+            memo: payout.memo,
+            created_at_time_ns: payout.created_at_time_ns,
+            fee_arg_e8s: payout.fee_arg_e8s,
+            candidate_block_index: payout.candidate_block_index,
+            observed_fee_e8s: payout.observed_fee_e8s,
+        })
+    } else {
+        payout.rearmed_attempts.iter().find(|attempt| attempt.op_nonce == nonce).cloned()
+    }
+}
+
+fn finish_reserve_candidate_scan(
+    key: &crate::state::ThreeUsdReserveIngressKey,
+    payout: &crate::state::ThreeUsdReserveCollateralPayout,
+    row: &crate::state::PendingMarginTransfer,
+    scan: crate::state::ThreeUsdReservePayoutCandidateScan,
+) -> Result<ReserveCandidateDiscoveryProgress, String> {
+    if scan.next_index != scan.snapshot_log_length || scan.multiple_candidates {
+        return Ok(ReserveCandidateDiscoveryProgress::Held);
+    }
+    let Some(block_index) = scan.candidate_block_index else {
+        return Ok(ReserveCandidateDiscoveryProgress::Held);
+    };
+    let stored = crate::state::mutate_state(|state| {
+        if !state.get_pending_payout(scan.operation_id).is_some_and(|(_, current)| current == *row)
+            || !state.three_usd_reserve_collateral_payouts.get(key).is_some_and(|current| {
+                current.operation_id == payout.operation_id
+                    && current.ledger == payout.ledger
+            })
+            || state.three_usd_reserve_payout_candidate_scans.get(key) != Some(&scan)
+        {
+            return false;
+        }
+        crate::event::record_three_usd_reserve_payout_candidate(
+            state,
+            key.clone(),
+            scan.operation_id,
+            scan.attempt_nonce,
+            block_index,
+        )
+    });
+    Ok(if stored {
+        ReserveCandidateDiscoveryProgress::CandidateRecorded
+    } else {
+        ReserveCandidateDiscoveryProgress::Held
+    })
+}
+
+/// Return exact matching block IDs only after the direct ledger page is fully
+/// covered. Any archive, unknown block, wrong fee encoding, or malformed page
+/// yields None and leaves the payout held.
+fn exact_reserve_candidate_page(
+    start: u64,
+    end: u64,
+    snapshot_log_length: u64,
+    payout: &crate::state::ThreeUsdReserveCollateralPayout,
+    nonce: u128,
+    history: GetBlocksResult,
+) -> Option<Vec<u64>> {
+    let length = end.checked_sub(start)?;
+    if length == 0
+        || length > PAGE_BLOCKS
+        || end > snapshot_log_length
+        || history.log_length.0.to_u64()? < snapshot_log_length
+        || history.blocks.len() > PAGE_BLOCKS as usize
+        || history.archived_blocks.len() > MAX_ARCHIVE_DESCRIPTORS
+    {
+        return None;
+    }
+    let attempt = reserve_attempt(payout, nonce)?;
+    if attempt.fee_arg_e8s != Some(payout.expected_fee_e8s) {
+        return None;
+    }
+    let mut seen = BTreeSet::new();
+    let mut matches = Vec::new();
+    for block in &history.blocks {
+        let index = block.id.0.to_u64()?;
+        if index < start || index >= end || !seen.insert(index) {
+            return None;
+        }
+        let decoded = crate::icrc3_proof::decode_block(&block.block).ok()?;
+        if !matches!(
+            decoded.btype.as_deref(),
+            Some("1xfer" | "2xfer" | "1mint" | "1burn" | "1approve" | "2approve")
+        ) {
+            return None;
+        }
+        if decoded.btype.as_deref() == Some("1xfer")
+            && decoded.op == "xfer"
+            && decoded.spender.is_none()
+            && decoded.from.as_ref() == Some(&payout.source)
+            && decoded.to.as_ref() == Some(&payout.destination)
+            && decoded.amount == u128::from(payout.net_e8s)
+            && decoded.memo.as_deref() == Some(attempt.memo.as_slice())
+            && decoded.created_at_time == Some(attempt.created_at_time_ns)
+        {
+            // A same-nonce tuple with a missing or drifted charged fee is
+            // ambiguous, not absence and not a settlement candidate.
+            if decoded.fee != attempt.fee_arg_e8s {
+                return None;
+            }
+            matches.push(index);
+        }
+    }
+    for archive in &history.archived_blocks {
+        if match clipped_requests(archive, start, end) {
+            Ok(ranges) => !ranges.is_empty(),
+            Err(()) => true,
+        } {
+            return None;
+        }
+    }
+    if seen.len() as u64 != length || (start..end).any(|index| !seen.contains(&index)) {
+        return None;
+    }
+    Some(matches)
+}
+
 /// Capture a lower block bound before the first dispatch for this attempt.
 /// If ICRC-3 is unavailable or malformed, keep normal payout processing but
 /// permanently disable automatic rearm for this receipt.
@@ -649,6 +943,42 @@ mod tests {
         }
     }
 
+    fn reserve_payout() -> crate::state::ThreeUsdReserveCollateralPayout {
+        let backend = Principal::from_slice(&[4]);
+        let pool = Principal::from_slice(&[2]);
+        let nonce = 55;
+        crate::state::ThreeUsdReserveCollateralPayout {
+            operation_id: 44,
+            op_nonce: nonce,
+            collateral_type: Principal::from_slice(&[4]),
+            ledger: Principal::from_slice(&[4]),
+            source: Account { owner: backend, subaccount: None },
+            destination: Account { owner: pool, subaccount: None },
+            gross_e8s: 100,
+            net_e8s: 90,
+            expected_fee_e8s: 10,
+            memo: crate::management::nonce_to_memo(nonce).0.as_slice().try_into().unwrap(),
+            created_at_time_ns: crate::management::nonce_to_created_at_time(nonce),
+            fee_arg_e8s: Some(10),
+            candidate_block_index: None,
+            observed_fee_e8s: None,
+            rearmed_attempts: Vec::new(),
+        }
+    }
+
+    fn exact_reserve_block(payout: &crate::state::ThreeUsdReserveCollateralPayout) -> ICRC3Value {
+        let mut block = crate::icrc3_proof::make_test_transfer_block(
+            payout.source.clone(), payout.destination.clone(), payout.net_e8s,
+            &payout.memo, true,
+        );
+        let ICRC3Value::Map(fields) = &mut block else { panic!("block is map") };
+        fields.insert("btype".into(), ICRC3Value::Text("1xfer".into()));
+        let Some(ICRC3Value::Map(tx)) = fields.get_mut("tx") else { panic!("tx is map") };
+        tx.insert("ts".into(), ICRC3Value::Nat(Nat::from(payout.created_at_time_ns)));
+        tx.insert("fee".into(), ICRC3Value::Nat(Nat::from(payout.expected_fee_e8s)));
+        block
+    }
+
     fn xfer(source: Principal, recipient: Principal, amount: u64) -> ICRC3Value {
         crate::icrc3_proof::make_test_transfer_block(
             Account {
@@ -913,5 +1243,54 @@ mod tests {
         }
         assert!(!state.claim_payout_history_scan_slot(1_000));
         assert!(state.claim_payout_history_scan_slot(60_000_001_000));
+    }
+
+    #[test]
+    fn reserve_candidate_requires_exact_icrc1_tuple_and_fee_presence() {
+        let payout = reserve_payout();
+        assert_eq!(
+            exact_reserve_candidate_page(10, 11, 11, &payout, payout.op_nonce,
+                response(11, vec![block(10, exact_reserve_block(&payout))])),
+            Some(vec![10]),
+        );
+        let mut wrong_memo = exact_reserve_block(&payout);
+        let ICRC3Value::Map(fields) = &mut wrong_memo else { panic!("block is map") };
+        let Some(ICRC3Value::Map(tx)) = fields.get_mut("tx") else { panic!("tx is map") };
+        tx.insert("memo".into(), ICRC3Value::Blob(serde_bytes::ByteBuf::from(vec![9; 16])));
+        assert_eq!(exact_reserve_candidate_page(10, 11, 11, &payout, payout.op_nonce,
+            response(11, vec![block(10, wrong_memo)])), Some(vec![]));
+        let mut no_fee = exact_reserve_block(&payout);
+        let ICRC3Value::Map(fields) = &mut no_fee else { panic!("block is map") };
+        let Some(ICRC3Value::Map(tx)) = fields.get_mut("tx") else { panic!("tx is map") };
+        tx.remove("fee");
+        assert_eq!(exact_reserve_candidate_page(10, 11, 11, &payout, payout.op_nonce,
+            response(11, vec![block(10, no_fee)])), None);
+        let mut drifted_fee = exact_reserve_block(&payout);
+        let ICRC3Value::Map(fields) = &mut drifted_fee else { panic!("block is map") };
+        let Some(ICRC3Value::Map(tx)) = fields.get_mut("tx") else { panic!("tx is map") };
+        tx.insert("fee".into(), ICRC3Value::Nat(Nat::from(11u64)));
+        assert_eq!(exact_reserve_candidate_page(10, 11, 11, &payout, payout.op_nonce,
+            response(11, vec![block(10, drifted_fee)])), None);
+        let mut wrong_type = exact_reserve_block(&payout);
+        let ICRC3Value::Map(fields) = &mut wrong_type else { panic!("block is map") };
+        fields.insert("btype".into(), ICRC3Value::Text("2xfer".into()));
+        assert_eq!(exact_reserve_candidate_page(10, 11, 11, &payout, payout.op_nonce,
+            response(11, vec![block(10, wrong_type)])), Some(vec![]));
+    }
+
+    #[test]
+    fn reserve_candidate_page_requires_all_direct_ids_and_rejects_archive_overlap() {
+        let payout = reserve_payout();
+        assert_eq!(exact_reserve_candidate_page(10, 12, 12, &payout, payout.op_nonce,
+            response(12, vec![block(10, exact_reserve_block(&payout))])), None);
+        let archived = GetBlocksResult {
+            log_length: Nat::from(11u64),
+            blocks: vec![],
+            archived_blocks: vec![ArchivedBlocks {
+                args: vec![GetBlocksRequest { start: Nat::from(10u64), length: Nat::from(1u64) }],
+                callback: QueryArchiveFn::new(Principal::from_slice(&[9]), "archive_blocks_v2"),
+            }],
+        };
+        assert_eq!(exact_reserve_candidate_page(10, 11, 11, &payout, payout.op_nonce, archived), None);
     }
 }

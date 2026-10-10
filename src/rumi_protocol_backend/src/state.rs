@@ -2092,6 +2092,19 @@ pub struct ThreeUsdReserveCollateralPayout {
 }
 
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReservePayoutCandidateScan {
+    pub operation_id: u128,
+    pub attempt_nonce: u128,
+    pub start_index: u64,
+    pub snapshot_log_length: u64,
+    pub next_index: u64,
+    pub candidate_block_index: Option<u64>,
+    /// More than one exact tuple match was found. Such a scan is permanently
+    /// ambiguous and must never be promoted to a single candidate.
+    pub multiple_candidates: bool,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct ThreeUsdReservePayoutAttempt {
     pub op_nonce: u128,
     pub memo: [u8; 16],
@@ -2325,6 +2338,12 @@ pub struct State {
     #[serde(default)]
     pub three_usd_reserve_collateral_payouts:
         BTreeMap<ThreeUsdReserveIngressKey, ThreeUsdReserveCollateralPayout>,
+    /// Private attempt-bound scan progress for receipt discovery after a lost
+    /// payout reply. Kept outside the Candid payout view and replayed only from
+    /// the private payout journal.
+    #[serde(default)]
+    pub three_usd_reserve_payout_candidate_scans:
+        BTreeMap<ThreeUsdReserveIngressKey, ThreeUsdReservePayoutCandidateScan>,
     #[serde(default)]
     pub three_usd_reserve_payout_operation_keys: BTreeMap<u128, ThreeUsdReserveIngressKey>,
     #[serde(default)]
@@ -3168,6 +3187,7 @@ impl Default for State {
             liquidity_withdraw_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
             three_usd_reserve_collateral_payouts: BTreeMap::new(),
+            three_usd_reserve_payout_candidate_scans: BTreeMap::new(),
             three_usd_reserve_payout_operation_keys: BTreeMap::new(),
             three_usd_reserve_ingress_enabled: false,
             three_usd_reserve_v2_client_ready: false,
@@ -3347,6 +3367,7 @@ impl From<InitArg> for State {
             liquidity_withdraw_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
             three_usd_reserve_collateral_payouts: BTreeMap::new(),
+            three_usd_reserve_payout_candidate_scans: BTreeMap::new(),
             three_usd_reserve_payout_operation_keys: BTreeMap::new(),
             three_usd_reserve_ingress_enabled: false,
             three_usd_reserve_v2_client_ready: false,
