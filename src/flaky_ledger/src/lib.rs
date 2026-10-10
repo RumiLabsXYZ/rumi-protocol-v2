@@ -7,6 +7,7 @@
 //   - icrc2_transfer_from (with dedup)
 //   - icrc1_balance_of
 //   - icrc1_fee
+//   - icrc2_allowance
 //
 // Control methods (test-only):
 //   - set_fail_transfers(bool)        all icrc1_transfer calls return GenericError
@@ -31,6 +32,7 @@
 use candid::{CandidType, Nat, Principal};
 use ic_cdk::{init, query, update};
 use icrc_ledger_types::icrc::generic_value::{ICRC3Map, ICRC3Value};
+use icrc_ledger_types::icrc2::allowance::{Allowance, AllowanceArgs};
 use icrc_ledger_types::icrc3::archive::{GetArchivesArgs, GetArchivesResult, QueryArchiveFn};
 use icrc_ledger_types::icrc3::blocks::{
     ArchivedBlocks, BlockWithId, GetBlocksRequest, GetBlocksResult,
@@ -547,6 +549,32 @@ fn icrc2_approve(args: ApproveArgs) -> Result<Nat, ApproveError> {
         let landed_block = append_block(&mut state, approve_block(&from, &spender, amount));
         Ok(Nat::from(landed_block))
     })
+}
+
+/// Read the current allowance for the exact owner and spender accounts.
+// The backend performs this preflight through an inter-canister update call,
+// so the mock exposes the standard allowance payload on an update method.
+#[update]
+fn icrc2_allowance(args: AllowanceArgs) -> Allowance {
+    let account = Account {
+        owner: args.account.owner,
+        subaccount: args.account.subaccount,
+    };
+    let spender = Account {
+        owner: args.spender.owner,
+        subaccount: args.spender.subaccount,
+    };
+    let allowance = STATE.with(|s| {
+        s.borrow()
+            .allowances
+            .get(&(account, spender))
+            .copied()
+            .unwrap_or(0)
+    });
+    Allowance {
+        allowance: Nat::from(allowance),
+        expires_at: None,
+    }
 }
 
 #[update]

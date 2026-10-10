@@ -6077,7 +6077,7 @@ pub async fn open_vault_and_borrow_v2(
     };
     let vault_id = journal.vault_id;
     if args.borrow_amount > 0 {
-        let _vault_op_guard = match VaultLiquidationGuard::new(vault_id) {
+        let _vault_op_guard = match compound_borrow_retry_guard(caller, args.operation_id, &journal) {
             Ok(g) => g,
             Err(error) => { guard.fail(); return Err(error); }
         };
@@ -6172,6 +6172,53 @@ fn compound_operation_id_for_borrow_recovery(
             _ => None,
         }
     })
+}
+
+/// Permit the pending-borrow exception to the vault operation lock only when
+/// the pending mint is exactly the borrow pinned by this credited compound
+/// operation. All other callers and requests take the ordinary lock path,
+/// which rejects any unresolved borrow journal.
+fn compound_borrow_retry_guard(
+    owner: Principal,
+    operation_id: u64,
+    expected: &VaultCollateralPullJournal,
+) -> Result<VaultLiquidationGuard, ProtocolError> {
+    let exact_pending_borrow = read_state(|state| {
+        let Some(collateral) = state.vault_collateral_pull_journals.get(&owner) else {
+            return false;
+        };
+        if expected.owner != owner
+            || expected.operation_id != operation_id
+            || collateral.owner != owner
+            || collateral.operation_id != operation_id
+            || collateral.vault_id != expected.vault_id
+            || collateral.request != expected.request
+            || !matches!(
+                collateral.phase,
+                VaultCollateralPullPhase::VaultCredited { .. }
+            )
+        {
+            return false;
+        }
+        let VaultCollateralPullRequest::OpenVaultAndBorrow {
+            collateral_type,
+            borrow_amount_e8s,
+            ..
+        } = collateral.request else {
+            return false;
+        };
+        state.pending_borrow_mints.get(&expected.vault_id).is_some_and(|borrow| {
+            borrow.vault_id == expected.vault_id
+                && borrow.owner == owner
+                && borrow.collateral_type == collateral_type
+                && borrow.borrowed_amount_e8s == borrow_amount_e8s
+        })
+    });
+    if exact_pending_borrow {
+        VaultLiquidationGuard::new_for_borrow_retry(expected.vault_id)
+    } else {
+        VaultLiquidationGuard::new(expected.vault_id)
+    }
 }
 
 async fn borrow_from_vault_internal_with<F, Fut, N, H, HFut>(
@@ -6913,6 +6960,22 @@ mod borrow_mint_journal_tests {
         };
         state.pending_borrow_mints.insert(pull.vault_id, borrow.clone());
         replace_state(state);
+
+        assert!(compound_borrow_retry_guard(owner, 2, &pull).is_err());
+        crate::state::mutate_state(|s| {
+            s.pending_borrow_mints
+                .get_mut(&pull.vault_id)
+                .unwrap()
+                .borrowed_amount_e8s += 1;
+        });
+        assert!(compound_borrow_retry_guard(owner, 1, &pull).is_err());
+        crate::state::mutate_state(|s| {
+            s.pending_borrow_mints.insert(pull.vault_id, borrow.clone());
+        });
+        assert!(VaultLiquidationGuard::new(pull.vault_id).is_err());
+        let retry_guard = compound_borrow_retry_guard(owner, 1, &pull)
+            .expect("only the exact pending compound borrow may retry through the vault lock");
+        drop(retry_guard);
 
         // The former unbound recovery path must stay blocked and leave the
         // confirmed mint held until the matching operation ID is supplied.
