@@ -218,6 +218,11 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : string }
   >,
+  'admin_reconcile_shortfall_topup_block' : ActorMethod<
+    [bigint, bigint],
+    { 'Ok' : null } |
+      { 'Err' : string }
+  >,
   'admin_reconcile_treasury_block' : ActorMethod<
     [bigint, bigint],
     { 'Ok' : null } |

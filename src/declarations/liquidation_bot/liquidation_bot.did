@@ -233,6 +233,7 @@ service : (BotInitArgs) -> {
   admin_retry_stuck_claim : (nat64) -> ();
   admin_authorize_shortfall_topup : (nat64, nat64) -> (variant { Ok; Err : text });
   admin_reconcile_payment_block : (nat64, nat64) -> (variant { Ok; Err : text });
+  admin_reconcile_shortfall_topup_block : (nat64, nat64) -> (variant { Ok; Err : text });
   admin_reconcile_treasury_block : (nat64, nat64) -> (variant { Ok; Err : text });
   admin_reconcile_return_block : (nat64, nat64) -> (variant { Ok; Err : text });
   // Returns (icp_fee_e8s, ckusdc_fee_e6) freshly read from each ledger and
