@@ -175,7 +175,7 @@ fn vault_debt(pic: &PocketIc, backend: Principal, owner: Principal, vault_id: u6
 }
 
 #[test]
-#[ignore = "requires source-matched test_endpoints Wasms and PocketIC server 7.0.0"]
+#[ignore = "requires source-matched shrunk test_endpoints Wasm and PocketIC server 7.0.0"]
 fn developer_reconciles_exact_committed_mint_for_owner_once() {
     let pic = PocketIcBuilder::new().with_nns_subnet().build();
     let owner = Principal::self_authenticating(b"borrow-receipt-owner");
