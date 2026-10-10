@@ -3212,17 +3212,19 @@ impl StabilityPoolState {
             if *balance == 0 {
                 position.stablecoin_balances.remove(&ledger);
             }
-            let current_gain = position
-                .collateral_gains
-                .get(&collateral_type)
-                .copied()
-                .unwrap_or(0);
-            position.collateral_gains.insert(
-                collateral_type,
-                current_gain
-                    .checked_add(*gain)
-                    .ok_or(StabilityPoolError::SystemBusy)?,
-            );
+            if *gain > 0 {
+                let current_gain = position
+                    .collateral_gains
+                    .get(&collateral_type)
+                    .copied()
+                    .unwrap_or(0);
+                position.collateral_gains.insert(
+                    collateral_type,
+                    current_gain
+                        .checked_add(*gain)
+                        .ok_or(StabilityPoolError::SystemBusy)?,
+                );
+            }
         }
         let aggregate = self
             .total_stablecoin_balances
