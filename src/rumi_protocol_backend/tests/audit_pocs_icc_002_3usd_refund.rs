@@ -24,10 +24,9 @@
 //!      approved the protocol to spend its 3USD; the entry point's pre-pull
 //!      validation (which does NOT check the kill switch) passes, the pull
 //!      lands, and `liquidate_vault_debt_already_burned` rejects with
-//!      `TemporarilyUnavailable` before any state mutation. The Wave-4
-//!      `Err` arm fires the refund: the SP's 3USD balance is restored,
-//!      `protocol_3usd_reserves` stays at zero, and the INFO log carries
-//!      a `refunded ... after liquidation rollback` line keyed to the vault.
+//!      `TemporarilyUnavailable` before any state mutation. The refund is
+//!      journaled before dispatch, then the worker restores the SP's 3USD
+//!      balance while `protocol_3usd_reserves` stays at zero.
 //!
 //!   3. `icc_002_pic_refund_failure_enqueues_durable_retry_and_heals` — the
 //!      refund-of-refund failure. Same setup as #2, but the 3USD ledger
@@ -56,9 +55,10 @@
 //! kill-switch reject exercises it identically to a real
 //! "vault closed mid-flight" or "proof verification failed" error.
 //!
-//! Standard scenarios use the real `rumi_3pool` LP canister so its status,
-//! transfer, and ICRC-3 interfaces share one principal. The flaky ledger is
-//! retained only for the kill-switch refund retry case.
+//! Legacy V1 scenarios use `flaky_ledger` because the current `rumi_3pool` LP
+//! token rejects the non-default reserve subaccount used by V1. This tests
+//! V1 refund accounting without implying the old route works on current 3pool;
+//! the V2 route uses the default account after its separate cutover.
 
 use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Nat, Principal};
 use ic_cdk::api::management_canister::http_request::{
@@ -1121,7 +1121,7 @@ fn setup_fixture_with_backend_wasm_and_sp(
 /// failure tests below contrast against.
 #[test]
 fn icc_002_pic_happy_path_no_refund_no_orphan() {
-    let f = setup_fixture(ThreePoolKind::Standard);
+    let f = setup_fixture(ThreePoolKind::Flaky);
 
     // The backend now checks vault health after pulling reserves. Publish
     // three distinct low-price observations so this vault is liquidatable.
@@ -1628,11 +1628,11 @@ fn cl07_rejects_wrong_ledger_and_under_valued_reserves_before_pull() {
 /// **Refund happens.** Arm `set_sp_writedown_disabled(true)` so the
 /// writedown rejects with `TemporarilyUnavailable` AFTER the entry-point
 /// pre-validation has passed and the 3USD pull has landed. The Wave-4 `Err`
-/// arm fires the refund: SP balance is restored, no orphan in
-/// `protocol_3usd_reserves`, and the INFO log carries the refund line.
+/// arm journals the refund before dispatch. The worker restores the SP
+/// balance and leaves no orphan in `protocol_3usd_reserves`.
 #[test]
 fn icc_002_pic_writedown_failure_refunds_3usd_to_sp() {
-    let f = setup_fixture(ThreePoolKind::Standard);
+    let f = setup_fixture(ThreePoolKind::Flaky);
 
     let icusd_debt: u64 = 500_000_000;
     let three_usd_amount: u64 = 500_000_000;
@@ -1677,6 +1677,11 @@ fn icc_002_pic_writedown_failure_refunds_3usd_to_sp() {
         err
     );
 
+    let pending = get_pending_3usd_refunds(&f.pic, f.protocol_id);
+    assert_eq!(pending.len(), 1, "the full refund must be journaled before dispatch");
+    assert_eq!(pending[0].amount_e8s, three_usd_amount);
+    drain_pending_transfers(&f.pic);
+
     let sp_balance_after = icrc1_balance_of(
         &f.pic,
         f.three_pool_ledger,
@@ -1696,21 +1701,8 @@ fn icc_002_pic_writedown_failure_refunds_3usd_to_sp() {
          BEFORE the state mutation that increments it"
     );
 
-    let logs = fetch_info_logs(&f.pic, f.protocol_id);
-    let vault_tag = format!("vault {}", f.vault_id);
-    assert!(
-        logs.iter().any(|m| {
-            m.contains("[stability_pool_liquidate_with_reserves] refunded")
-                && m.contains(&vault_tag)
-                && m.contains("after liquidation rollback")
-        }),
-        "expected Wave-4 refund INFO log keyed to vault #{}; saw logs: {:?}",
-        f.vault_id, logs
-    );
-    assert!(
-        !logs.iter().any(|m| m.contains("CRITICAL: refund of")),
-        "refund succeeded — there must be no CRITICAL log"
-    );
+    assert!(get_pending_3usd_refunds(&f.pic, f.protocol_id).is_empty(),
+        "verified immediate refund must leave no unresolved liability");
 }
 
 /// **Fresh refund failure is durable, not stranded.** Same setup as the prior test
@@ -1801,18 +1793,6 @@ fn icc_002_pic_refund_failure_enqueues_durable_retry_and_heals() {
         "queued refund amount must equal the stranded excess (3USD fee is 0)"
     );
 
-    let logs = fetch_info_logs(&f.pic, f.protocol_id);
-    let vault_tag = format!("vault {}", f.vault_id);
-    assert!(
-        logs.iter().any(|m| {
-            m.contains("[stability_pool_liquidate_with_reserves] refund of")
-                && m.contains(&vault_tag)
-                && m.contains("enqueued for durable retry")
-        }),
-        "expected the enqueue-for-retry INFO log keyed to vault #{}; saw logs: {:?}",
-        f.vault_id, logs
-    );
-
     // Now the ledger recovers. Draining the timer must settle the refund.
     flaky_set_fail_transfers(&f.pic, f.three_pool_ledger, false);
     drain_pending_transfers(&f.pic);
@@ -1850,15 +1830,6 @@ fn icc_002_pic_refund_failure_enqueues_durable_retry_and_heals() {
         reserves_subacct_balance
     );
 
-    let settled_log = fetch_info_logs(&f.pic, f.protocol_id);
-    assert!(
-        settled_log.iter().any(|m| {
-            m.contains("[refunding] 3USD reserve refund settled")
-                && m.contains(&format!("vault {}", f.vault_id))
-        }),
-        "expected a settled-refund log after the queue drained; saw logs: {:?}",
-        settled_log
-    );
 }
 
 /// A refund row created with the pre-P08 backend source at 9d5f359e keeps its

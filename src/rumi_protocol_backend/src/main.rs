@@ -8842,10 +8842,9 @@ fn enqueue_pending_3usd_refund(
     ic_cdk::spawn(rumi_protocol_backend::process_pending_transfer());
 }
 
-/// Stranded 3USD reserve refunds awaiting durable retry by
-/// `process_pending_transfer`. Non-empty means the stability pool is owed 3USD
-/// that a refund transfer failed to deliver; the queue self-heals but this
-/// surfaces the shortfall for monitoring. Empty in normal operation.
+/// Unresolved 3USD reserve refunds. Settled rows remain durable tombstones in
+/// state but are omitted here so monitoring does not report paid liabilities
+/// as still owed.
 #[derive(candid::CandidType, Clone)]
 struct LegacyPendingThreeUsdRefund {
     retry_count: u8,
@@ -8859,7 +8858,7 @@ struct LegacyPendingThreeUsdRefund {
 #[query]
 #[candid_method(query)]
 fn get_pending_3usd_refunds() -> Vec<LegacyPendingThreeUsdRefund> {
-    read_state(|s| s.pending_3usd_refunds.values().map(|row| LegacyPendingThreeUsdRefund {
+    read_state(|s| s.pending_3usd_refunds.values().filter(|row| row.resolution.is_none()).map(|row| LegacyPendingThreeUsdRefund {
         retry_count: row.retry_count,
         vault_id: row.vault_id,
         amount_e8s: row.amount_e8s,
