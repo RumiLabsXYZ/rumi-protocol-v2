@@ -3149,9 +3149,15 @@ async fn verify_three_usd_collateral_payout(
         return Err("payout tuple conflicts with the immutable absorb or backend result".into());
     }
     if rumi_protocol_backend::native_icp_proof::is_native_icp_ledger(payout.ledger) {
-        let block =
-            rumi_protocol_backend::native_icp_proof::query_block(payout.ledger, block_index)
-                .await?;
+        let args = rumi_protocol_backend::native_icp_proof::GetBlocksArgs {
+            start: block_index,
+            length: 1,
+        };
+        let (response,): (rumi_protocol_backend::native_icp_proof::QueryBlocksResponse,) =
+            call(payout.ledger, "query_blocks", (args,))
+                .await
+                .map_err(|error| format!("native ICP query_blocks failed: {error:?}"))?;
+        let block = native_icp_direct_candidate_block(response, block_index)?;
         let fee = rumi_protocol_backend::native_icp_proof::verify_transfer_block(
             &block,
             protocol_id,
@@ -3195,6 +3201,26 @@ async fn verify_three_usd_collateral_payout(
         return Err("direct ledger block does not match the exact backend payout tuple".into());
     }
     Ok(payout.net_e8s)
+}
+
+/// Native ICP archive callbacks can serve authentic ledger blocks, but that
+/// response does not prove the candidate's current ledger-global membership.
+/// For this terminal settlement require the canonical ledger's direct response.
+fn native_icp_direct_candidate_block(
+    response: rumi_protocol_backend::native_icp_proof::QueryBlocksResponse,
+    block_index: u64,
+) -> Result<rumi_protocol_backend::native_icp_proof::Block, String> {
+    if response.first_block_index != block_index
+        || response.blocks.len() != 1
+        || !response.archived_blocks.is_empty()
+    {
+        return Err("native ICP candidate block was not directly served at the exact index".into());
+    }
+    response
+        .blocks
+        .into_iter()
+        .next()
+        .ok_or_else(|| "native ICP query_blocks returned no candidate block".into())
 }
 
 fn three_usd_payout_identity_matches(
@@ -4375,6 +4401,48 @@ mod tests {
             subaccount: None,
         });
         assert!(!three_usd_payout_block_matches(&payout, &wrong));
+    }
+
+    #[test]
+    fn native_icp_candidate_requires_direct_exact_index_response() {
+        use rumi_protocol_backend::native_icp_proof::{
+            ArchivedBlocksRange, Block, QueryArchiveFn, QueryBlocksResponse, Timestamp,
+            Transaction,
+        };
+        let block = Block {
+            parent_hash: None,
+            transaction: Transaction {
+                memo: 0,
+                icrc1_memo: None,
+                operation: None,
+                created_at_time: Timestamp { timestamp_nanos: 1 },
+            },
+            timestamp: Timestamp { timestamp_nanos: 2 },
+        };
+        let direct = QueryBlocksResponse {
+            chain_length: 89,
+            certificate: None,
+            blocks: vec![block.clone()],
+            first_block_index: 88,
+            archived_blocks: Vec::new(),
+        };
+        assert_eq!(native_icp_direct_candidate_block(direct, 88), Ok(block));
+
+        let archive_only = QueryBlocksResponse {
+            chain_length: 89,
+            certificate: None,
+            blocks: Vec::new(),
+            first_block_index: 89,
+            archived_blocks: vec![ArchivedBlocksRange {
+                start: 88,
+                length: 1,
+                callback: QueryArchiveFn(candid::Func {
+                    principal: principal(43),
+                    method: "get_blocks".into(),
+                }),
+            }],
+        };
+        assert!(native_icp_direct_candidate_block(archive_only, 88).is_err());
     }
 
     fn principal(byte: u8) -> Principal {
