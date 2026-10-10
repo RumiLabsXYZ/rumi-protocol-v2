@@ -1823,6 +1823,11 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'admin_sweep_to_treasury' : IDL.Func([IDL.Text], [Result_1], []),
+    'advance_pending_borrow_mint_recovery' : IDL.Func(
+        [IDL.Nat64],
+        [Result],
+        [],
+      ),
     'backfill_collateral_symbols' : IDL.Func([], [Result_3], []),
     'borrow_chain_vault_evm' : IDL.Func(
         [VaultIntent, IDL.Vec(IDL.Nat8)],

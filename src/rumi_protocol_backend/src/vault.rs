@@ -5672,7 +5672,6 @@ where
     N: Fn() -> u64 + Copy,
 {
     let amount: ICUSD = arg.amount.into();
-    let now_ns = now();
 
     // A pending row is the authorization for replay: accept only its original
     // owner and gross amount, then submit its persisted ledger tuple verbatim.
@@ -5698,9 +5697,14 @@ where
             )));
         }
         if journal.phase == crate::state::BorrowMintPhase::ReceiptRecoveryRequired {
+            let reason = if journal.typed_too_old {
+                "icUSD ledger returned TooOld; the original mint outcome remains unknown"
+            } else {
+                "an earlier mint dispatch remains ambiguous after a later rejection"
+            };
             return Err(ProtocolError::GenericError(format!(
-                "icUSD ledger returned TooOld for vault #{}; this does not prove the mint was absent. Submit a candidate ICRC-3 mint block index to reconcile_pending_borrow_mint_from_block; no mint will be retried",
-                arg.vault_id
+                "{reason} for vault #{}; no mint will be retried. Submit an exact ICRC-3 candidate block to reconcile_pending_borrow_mint_from_block",
+                arg.vault_id,
             )));
         }
         return dispatch_borrow_mint_with(journal, dispatch, now).await;
@@ -5711,6 +5715,24 @@ where
             minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
     }
+    if !read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).is_some_and(|vault| vault.owner == caller)) {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+
+    // Capture before price, accrual, fee and CR snapshots. No admission
+    // decision may span this await and then be used with stale inputs.
+    let history_ledger = read_state(|s| s.icusd_ledger_principal);
+    let history_floor = crate::icrc3_proof::icrc3_history_floor(history_ledger)
+        .await
+        .map_err(|error| ProtocolError::TemporarilyUnavailable(format!(
+            "could not pin icUSD history before borrow admission: {error}"
+        )))?;
+    if read_state(|s| s.icusd_ledger_principal) != history_ledger {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "icUSD ledger changed while pinning pre-dispatch history; retry borrow admission".into(),
+        ));
+    }
+    let now_ns = now();
 
     // Accrue interest on this vault before borrowing so CR check uses up-to-date debt.
     reject_active_xrp_sp_absorb_preflight(arg.vault_id, now_ns)?;
@@ -5854,13 +5876,9 @@ where
         clamp_borrow_fee(amount, raw_fee)
     });
 
-    let (ledger, op_nonce) = mutate_state(|s| {
-        let ledger = s.icusd_ledger_principal;
-        let op_nonce = s.next_op_nonce_at(now_ns);
-        (ledger, op_nonce)
-    });
+    let op_nonce = mutate_state(|s| s.next_op_nonce_at(now_ns));
     let tuple = crate::state::BorrowMintTuple {
-        ledger,
+        ledger: history_ledger,
         destination: caller,
         amount_e8s: (amount - fee).to_u64(),
         memo: op_nonce.to_be_bytes(),
@@ -5875,6 +5893,10 @@ where
         fee_amount_e8s: fee.to_u64(),
         tuple,
         phase: crate::state::BorrowMintPhase::SubmittedOrUnknown,
+        history_floor: Some(history_floor),
+        absence_scan: None,
+        dispatch_attempt_count: Some(0),
+        typed_too_old: false,
     };
     let inserted = mutate_state(|s| {
         if s.pending_borrow_mints.contains_key(&arg.vault_id) {
@@ -5897,7 +5919,7 @@ where
 }
 
 async fn dispatch_borrow_mint_with<F, Fut>(
-    journal: crate::state::BorrowMintJournal,
+    mut journal: crate::state::BorrowMintJournal,
     dispatch: F,
     now: impl FnOnce() -> u64,
 ) -> Result<SuccessWithFee, ProtocolError>
@@ -5907,14 +5929,31 @@ where
         Output = Result<u64, icrc_ledger_types::icrc1::transfer::TransferError>,
     >,
 {
+    if journal.phase == crate::state::BorrowMintPhase::SubmittedOrUnknown {
+        let previous_count = journal.dispatch_attempt_count;
+        let next_count = previous_count.and_then(|count| count.checked_add(1));
+        let recorded = mutate_state(|s| {
+            let Some(current) = s.pending_borrow_mints.get_mut(&journal.vault_id) else { return false; };
+            if current != &journal { return false; }
+            current.dispatch_attempt_count = next_count;
+            true
+        });
+        if !recorded {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "borrow journal changed before dispatch reservation".into(),
+            ));
+        }
+        journal.dispatch_attempt_count = next_count;
+    }
     let (block_index, confirmed_journal) = match journal.phase.clone() {
         crate::state::BorrowMintPhase::MintConfirmedHeld { block_index } => {
             (block_index, journal.clone())
         }
         crate::state::BorrowMintPhase::ReceiptRecoveryRequired => {
             return Err(ProtocolError::GenericError(format!(
-                "borrow mint for vault #{} requires an exact positive ICRC-3 receipt; resubmission is disabled",
-                journal.vault_id
+                "borrow mint for vault #{} requires an exact positive ICRC-3 receipt; resubmission is disabled{}",
+                journal.vault_id,
+                if journal.typed_too_old { " after TooOld" } else { " after an ambiguous retry rejection" }
             )));
         }
         crate::state::BorrowMintPhase::SubmittedOrUnknown => {
@@ -5944,6 +5983,18 @@ where
                         &mint_error,
                         icrc_ledger_types::icrc1::transfer::TransferError::TooOld
                     ) {
+                        // This ordered read occurs only after the exact typed
+                        // TooOld response. If it fails, retain positive-only
+                        // recovery rather than inventing an absence boundary.
+                        let absence_scan = match journal.history_floor {
+                            Some(floor) => crate::icrc3_proof::icrc3_history_floor(journal.tuple.ledger)
+                                .await.ok().filter(|tip| *tip >= floor)
+                                .map(|tip| crate::state::BorrowMintAbsenceScan {
+                                    next_block_index: floor,
+                                    fixed_tip: Some(tip), candidate_block_index: None,
+                                }),
+                            None => None,
+                        };
                         let advanced = mutate_state(|s| {
                             let Some(current) = s.pending_borrow_mints.get_mut(&journal.vault_id)
                             else {
@@ -5956,6 +6007,8 @@ where
                                 return false;
                             }
                             current.phase = crate::state::BorrowMintPhase::ReceiptRecoveryRequired;
+                            current.typed_too_old = true;
+                            current.absence_scan = absence_scan.clone();
                             true
                         });
                         return Err(ProtocolError::GenericError(if advanced {
@@ -5980,13 +6033,27 @@ where
                             | icrc_ledger_types::icrc1::transfer::TransferError::InsufficientFunds { .. }
                             | icrc_ledger_types::icrc1::transfer::TransferError::CreatedInFuture { .. }
                     );
-                    if definite_no_effect {
+                    if definite_no_effect && journal.dispatch_attempt_count == Some(1) {
                         mutate_state(|s| {
                             if s.pending_borrow_mints.get(&journal.vault_id) == Some(&journal) {
                                 s.pending_borrow_mints.remove(&journal.vault_id);
                             }
                         });
                         return Err(ProtocolError::TransferError(mint_error));
+                    }
+                    if definite_no_effect {
+                        mutate_state(|s| {
+                            if let Some(current) = s.pending_borrow_mints.get_mut(&journal.vault_id) {
+                                if current == &journal {
+                                    current.phase = crate::state::BorrowMintPhase::ReceiptRecoveryRequired;
+                                    current.absence_scan = None;
+                                }
+                            }
+                        });
+                        return Err(ProtocolError::GenericError(format!(
+                            "retry of borrow mint for vault #{} was rejected, but an earlier attempt may have committed; journal remains held for positive receipt recovery: {:?}",
+                            journal.vault_id, mint_error
+                        )));
                     }
                     return Err(ProtocolError::GenericError(format!(
                         "icUSD mint outcome for vault #{} is unresolved. Retry borrow_from_vault with the exact amount {} e8s to resubmit the pinned ledger tuple; do not open a second vault. Ledger response: {:?}",
@@ -6092,6 +6159,10 @@ mod borrow_mint_journal_tests {
                 op_nonce: 88,
             },
             phase: BorrowMintPhase::ReceiptRecoveryRequired,
+            history_floor: None,
+            absence_scan: None,
+                dispatch_attempt_count: None,
+                typed_too_old: false,
         };
 
         assert!(
@@ -6285,6 +6356,10 @@ mod borrow_mint_journal_tests {
                 op_nonce: 88,
             },
             phase: BorrowMintPhase::SubmittedOrUnknown,
+            history_floor: None,
+            absence_scan: None,
+                dispatch_attempt_count: None,
+                typed_too_old: false,
         };
         let mut state = State::default();
         state.pending_borrow_mints.insert(99, journal.clone());
@@ -6320,6 +6395,33 @@ mod borrow_mint_journal_tests {
             crate::state::pending_borrow_mint_statuses(owner)[0].phase,
             BorrowMintPhase::ReceiptRecoveryRequired
         );
+    }
+
+    #[test]
+    fn retry_no_effect_error_cannot_clear_a_journal_after_an_ambiguous_attempt() {
+        let owner = Principal::from_slice(&[0x71]);
+        let journal = BorrowMintJournal {
+            vault_id: 101, owner, collateral_type: Principal::from_slice(&[0x72]),
+            borrowed_amount_e8s: 500, fee_amount_e8s: 0,
+            tuple: BorrowMintTuple { ledger: Principal::from_slice(&[0x73]), destination: owner,
+                amount_e8s: 500, memo: [8; 16], created_at_time_ns: 123, op_nonce: 8 },
+            phase: BorrowMintPhase::SubmittedOrUnknown, history_floor: Some(20),
+            absence_scan: None, dispatch_attempt_count: Some(1), typed_too_old: false,
+        };
+        let mut state = State::default();
+        state.pending_borrow_mints.insert(101, journal.clone());
+        replace_state(state);
+        let result = futures::executor::block_on(dispatch_borrow_mint_with(
+            journal, |_| async { Err(icrc_ledger_types::icrc1::transfer::TransferError::BadFee { expected_fee: candid::Nat::from(1u64) }) }, || 1,
+        ));
+        assert!(matches!(result, Err(ProtocolError::GenericError(_))));
+        crate::state::read_state(|s| {
+            let held = &s.pending_borrow_mints[&101];
+            assert_eq!(held.phase, BorrowMintPhase::ReceiptRecoveryRequired);
+            assert_eq!(held.dispatch_attempt_count, Some(2));
+            assert!(!held.typed_too_old);
+            assert!(held.absence_scan.is_none());
+        });
     }
 }
 
@@ -6514,6 +6616,132 @@ pub async fn reconcile_pending_borrow_mint_from_block(
             Err(error)
         }
     }
+}
+
+/// Advance one bounded page of a complete post-TooOld history scan. A new-row
+/// floor and a fixed tip captured after typed TooOld are both mandatory.
+pub async fn advance_pending_borrow_mint_recovery(vault_id: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard_principal = GuardPrincipal::new(caller, &format!("borrow_vault_{vault_id}"))?;
+    let _vault_op_guard = VaultLiquidationGuard::new_for_borrow_retry(vault_id).map_err(|error| {
+        guard_principal.fail(); error
+    })?;
+    let journal = read_state(|s| s.pending_borrow_mints.get(&vault_id).cloned()).ok_or_else(|| {
+        guard_principal.fail(); ProtocolError::GenericError(format!("Vault #{vault_id} has no pending borrow mint"))
+    })?;
+    let developer = read_state(|s| s.developer_principal);
+    let borrower = borrow_mint_recovery_owner(caller, &journal, developer).map_err(|error| {
+        guard_principal.fail(); error
+    })?;
+    validate_borrow_mint_recovery_journal(&journal).map_err(|error| { guard_principal.fail(); error })?;
+    if journal.phase != crate::state::BorrowMintPhase::ReceiptRecoveryRequired {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError("borrow journal is not awaiting typed TooOld recovery".into()));
+    }
+    let Some(floor) = journal.history_floor else {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError("legacy borrow journal has no durable history floor; positive receipt recovery only".into()));
+    };
+    if !journal.typed_too_old {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError("absence scan is authorized only by a typed ledger TooOld outcome".into()));
+    }
+    let journal = if journal.absence_scan.is_none() {
+        let tip = crate::icrc3_proof::icrc3_history_floor(journal.tuple.ledger).await
+            .map_err(|error| { guard_principal.fail(); ProtocolError::TemporarilyUnavailable(
+                format!("could not capture fixed post-TooOld tip: {error}")) })?;
+        if borrow_mint_recovery_owner(caller, &journal, read_state(|s| s.developer_principal)).is_err() {
+            guard_principal.fail(); return Err(ProtocolError::CallerNotOwner);
+        }
+        let Some(floor) = journal.history_floor else {
+            guard_principal.fail(); return Err(ProtocolError::GenericError("legacy borrow journal has no durable history floor".into()));
+        };
+        if tip < floor {
+            guard_principal.fail(); return Err(ProtocolError::TemporarilyUnavailable("post-TooOld ledger tip precedes the durable history floor".into()));
+        }
+        let mut pinned = journal.clone();
+        pinned.absence_scan = Some(crate::state::BorrowMintAbsenceScan { next_block_index: floor, fixed_tip: Some(tip) });
+        let recorded = mutate_state(|s| {
+            if s.pending_borrow_mints.get(&vault_id) != Some(&journal) { return false; }
+            s.pending_borrow_mints.insert(vault_id, pinned.clone()); true
+        });
+        if !recorded { guard_principal.fail(); return Err(ProtocolError::TemporarilyUnavailable("borrow journal changed while recording fixed tip".into())); }
+        pinned
+    } else { journal };
+    let Some(mut scan) = journal.absence_scan.clone() else { unreachable!() };
+    let Some(tip) = scan.fixed_tip else {
+        guard_principal.fail();
+        return Err(ProtocolError::TemporarilyUnavailable("borrow absence scan has no fixed ledger tip".into()));
+    };
+    if scan.next_block_index < floor || scan.next_block_index > tip {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError("persisted borrow scan cursor is outside its pinned range".into()));
+    }
+    let mut cas_journal = journal.clone();
+    let found = if scan.next_block_index == tip {
+        None
+    } else {
+        let start = scan.next_block_index;
+        let end = tip.min(start.saturating_add(64));
+        let request = vec![icrc_ledger_types::icrc3::blocks::GetBlocksRequest {
+            start: candid::Nat::from(start), length: candid::Nat::from(end - start),
+        }];
+        let (response,): (icrc_ledger_types::icrc3::blocks::GetBlocksResult,) =
+            ic_cdk::call(journal.tuple.ledger, "icrc3_get_blocks", (request,)).await
+                .map_err(|(code, message)| { guard_principal.fail(); ProtocolError::TemporarilyUnavailable(
+                    format!("icUSD history page [{start}, {end}) failed ({code:?}): {message}")) })?;
+        // Developer authorization may have been revoked during the ledger await.
+        if borrow_mint_recovery_owner(caller, &journal, read_state(|s| s.developer_principal)).is_err() {
+            guard_principal.fail(); return Err(ProtocolError::CallerNotOwner);
+        }
+        let found = crate::icrc3_proof::validate_borrow_mint_scan_page(
+            start, end, tip, &response, &journal.tuple,
+        ).map_err(|error| { guard_principal.fail(); ProtocolError::TemporarilyUnavailable(
+            format!("icUSD history page is not complete proof: {error}")) })?;
+        found
+    };
+    if scan.next_block_index < tip {
+        let start = scan.next_block_index;
+        let end = tip.min(start.saturating_add(64));
+        crate::state::record_borrow_mint_scan_page(&mut scan, start, end, found)
+            .map_err(|error| { guard_principal.fail(); ProtocolError::TemporarilyUnavailable(error) })?;
+        let advanced = mutate_state(|s| {
+            let Some(current) = s.pending_borrow_mints.get_mut(&vault_id) else { return false; };
+            if !crate::state::borrow_mint_scan_cas_matches(current, &journal) { return false; }
+            current.absence_scan = Some(scan.clone()); true
+        });
+        if !advanced { guard_principal.fail(); return Err(ProtocolError::TemporarilyUnavailable(
+            "borrow journal changed before scan cursor CAS".into())); }
+        cas_journal.absence_scan = Some(scan.clone());
+        if scan.next_block_index < tip { guard_principal.complete(); return Ok(()); }
+    }
+    // Recheck both authority and full journal identity immediately before CAS.
+    if borrow_mint_recovery_owner(caller, &journal, read_state(|s| s.developer_principal)).is_err() {
+        guard_principal.fail(); return Err(ProtocolError::CallerNotOwner);
+    }
+    if let Some(block_index) = scan.candidate_block_index {
+        let committed = mutate_state(|s| {
+            let Some(current) = s.pending_borrow_mints.get_mut(&vault_id) else { return false; };
+            if !crate::state::borrow_mint_scan_cas_matches(current, &cas_journal) { return false; }
+            current.phase = crate::state::BorrowMintPhase::MintConfirmedHeld { block_index };
+            current.absence_scan = None;
+            true
+        });
+        if !committed { guard_principal.fail(); return Err(ProtocolError::TemporarilyUnavailable("borrow journal changed before receipt CAS".into())); }
+        match borrow_from_vault_internal(borrower, VaultArg { vault_id, amount: journal.borrowed_amount_e8s }).await {
+            Ok(_) => { log_borrow_mint_receipt_recovery("scan_receipt_debt_committed", caller, &journal, block_index); guard_principal.complete(); Ok(()) }
+            Err(error) => { guard_principal.fail(); Err(error) }
+        }
+    } else if scan.next_block_index == tip {
+        let removed = mutate_state(|s| {
+            if !s.pending_borrow_mints.get(&vault_id).is_some_and(|current| crate::state::borrow_mint_scan_cas_matches(current, &cas_journal)) { return false; }
+            s.pending_borrow_mints.remove(&vault_id);
+            true
+        });
+        if !removed { guard_principal.fail(); return Err(ProtocolError::TemporarilyUnavailable("borrow journal changed before absence CAS".into())); }
+        log!(INFO, "event=borrow_mint_absence_recovery outcome=complete_absence caller={} journal_owner={} vault_id={} history_floor={} fixed_tip={}", caller, journal.owner, vault_id, floor, tip);
+        guard_principal.complete(); Ok(())
+    } else { guard_principal.fail(); Err(ProtocolError::GenericError("scan did not reach its fixed tip".into())) }
 }
 
 pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {

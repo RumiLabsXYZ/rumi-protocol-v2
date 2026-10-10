@@ -1846,6 +1846,7 @@ export interface _SERVICE {
   'admin_resolve_stuck_claim' : ActorMethod<[bigint, boolean], Result>,
   'admin_resolve_xrp_claim' : ActorMethod<[bigint, XrpClaimResolution], Result>,
   'admin_sweep_to_treasury' : ActorMethod<[string], Result_1>,
+  'advance_pending_borrow_mint_recovery' : ActorMethod<[bigint], Result>,
   'backfill_collateral_symbols' : ActorMethod<[], Result_3>,
   'borrow_chain_vault_evm' : ActorMethod<
     [VaultIntent, Uint8Array | number[]],

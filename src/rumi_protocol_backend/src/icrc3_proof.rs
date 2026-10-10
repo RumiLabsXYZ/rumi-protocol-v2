@@ -546,8 +546,58 @@ pub async fn verify_icrc3_borrow_mint_block(
     if tuple.ledger != ledger {
         return Err("borrow mint candidate ledger differs from the persisted tuple".into());
     }
-    let block = fetch_icrc3_block(ledger, block_index).await?;
+    // Borrow mint authority requires a direct ledger-global block. Archive
+    // callback metadata is only a locator and does not authenticate membership.
+    let request = vec![GetBlocksRequest { start: Nat::from(block_index), length: Nat::from(1u64) }];
+    let (response,): (GetBlocksResult,) = ic_cdk::call(ledger, "icrc3_get_blocks", (request,))
+        .await
+        .map_err(|(code, message)| format!("direct icUSD ICRC-3 read failed: {code:?} {message}"))?;
+    if response.archived_blocks.len() != 0 || response.blocks.len() != 1
+        || response.blocks[0].id.0.to_u64() != Some(block_index)
+        || response.log_length.0.to_u64().is_none_or(|length| block_index >= length)
+    {
+        return Err("candidate is not a direct contiguous ledger block; archive evidence remains held".into());
+    }
+    let block = decode_block(&response.blocks[0].block)?;
     validate_icrc3_borrow_mint_block(&block, tuple)
+}
+
+/// Read the current ledger-global exclusive log length. This is a metadata
+/// fence, not a mint probe; callers persist it before dispatch or after typed
+/// TooOld and then scan only fixed, direct contiguous pages.
+pub async fn icrc3_history_floor(ledger: Principal) -> Result<u64, String> {
+    icrc3_log_length(ledger).await
+}
+
+/// Validate a complete, direct ledger-global page within [start, end).
+/// Returns the unique exact mint index, or None for proven absence on this page.
+pub fn validate_borrow_mint_scan_page(
+    start: u64, end: u64, fixed_tip: u64, response: &GetBlocksResult,
+    tuple: &crate::state::BorrowMintTuple,
+) -> Result<Option<u64>, String> {
+    if end < start || end - start > 64 || end > fixed_tip || response.log_length.0.to_u64().is_none_or(|n| n < fixed_tip) {
+        return Err("ICRC-3 page does not cover the pinned ledger prefix".into());
+    }
+    if !response.archived_blocks.is_empty() {
+        return Err("archive-backed history is unsupported; absence remains unproven".into());
+    }
+    let count = usize::try_from(end - start).map_err(|_| "page length exceeds address space")?;
+    if response.blocks.len() != count { return Err("ICRC-3 page is short or has extra blocks".into()); }
+    let mut found = None;
+    for (offset, item) in response.blocks.iter().enumerate() {
+        let index = start.checked_add(offset as u64).ok_or("block index overflow")?;
+        if item.id.0.to_u64() != Some(index) { return Err("ICRC-3 page has a gap, duplicate, or out-of-order ID".into()); }
+        let decoded = decode_block(&item.block)?;
+        if validate_icrc3_borrow_mint_block(&decoded, tuple).is_ok() {
+            if found.replace(index).is_some() { return Err("exact borrow mint appears more than once".into()); }
+        } else if (decoded.op == "mint" || decoded.btype.as_deref() == Some("1mint"))
+            && decoded.to.as_ref().is_some_and(|to| to.owner == tuple.destination)
+            && decoded.amount == u128::from(tuple.amount_e8s)
+        {
+            return Err("plausible borrow mint has missing or conflicting exact metadata".into());
+        }
+    }
+    Ok(found)
 }
 
 fn accounts_match_default_subaccount(actual: &Account, expected: &Account) -> bool {
@@ -665,7 +715,7 @@ pub async fn icrc3_log_length(ledger: Principal) -> Result<u64, String> {
 
 #[cfg(test)]
 mod borrow_mint_receipt_tests {
-    use super::{decode_block, make_test_block, validate_icrc3_borrow_mint_block, DecodedBlock};
+    use super::{decode_block, make_test_block, validate_borrow_mint_scan_page, validate_icrc3_borrow_mint_block, DecodedBlock};
     use crate::state::BorrowMintTuple;
     use candid::Principal;
     use icrc_ledger_types::icrc::generic_value::ICRC3Value;
@@ -753,6 +803,45 @@ mod borrow_mint_receipt_tests {
             }
         }
         assert!(decode_block(&legacy).is_err());
+    }
+
+    #[test]
+    fn absence_scan_requires_complete_direct_exact_page_and_finds_exact_mint() {
+        use icrc_ledger_types::icrc3::blocks::{ArchivedBlocks, BlockWithId, GetBlocksResult};
+        use icrc_ledger_types::icrc3::archive::QueryArchiveFn;
+        let tuple = tuple();
+        let mut exact = make_test_block("mint", None,
+            Some(Account { owner: tuple.destination, subaccount: None }), tuple.amount_e8s,
+            Some(&tuple.memo), false);
+        if let ICRC3Value::Map(root) = &mut exact {
+            if let Some(ICRC3Value::Map(tx)) = root.get_mut("tx") {
+                tx.insert("ts".into(), ICRC3Value::Nat(candid::Nat::from(tuple.created_at_time_ns)));
+            }
+        }
+        let page = GetBlocksResult { log_length: 2u64.into(),
+            blocks: vec![BlockWithId { id: 1u64.into(), block: exact }], archived_blocks: vec![] };
+        assert_eq!(validate_borrow_mint_scan_page(1, 2, 2, &page, &tuple).unwrap(), Some(1));
+
+        let incomplete = GetBlocksResult { log_length: 2u64.into(), blocks: vec![], archived_blocks: vec![] };
+        assert!(validate_borrow_mint_scan_page(1, 2, 2, &incomplete, &tuple).is_err());
+        let empty_complete = GetBlocksResult { log_length: 2u64.into(), blocks: vec![], archived_blocks: vec![] };
+        assert_eq!(validate_borrow_mint_scan_page(2, 2, 2, &empty_complete, &tuple).unwrap(), None);
+
+        let mut conflicting = make_test_block("mint", None,
+            Some(Account { owner: tuple.destination, subaccount: None }), tuple.amount_e8s,
+            Some(&[0x99; 16]), false);
+        if let ICRC3Value::Map(root) = &mut conflicting {
+            if let Some(ICRC3Value::Map(tx)) = root.get_mut("tx") {
+                tx.insert("ts".into(), ICRC3Value::Nat(candid::Nat::from(tuple.created_at_time_ns)));
+            }
+        }
+        let suspicious = GetBlocksResult { log_length: 2u64.into(),
+            blocks: vec![BlockWithId { id: 1u64.into(), block: conflicting }], archived_blocks: vec![] };
+        assert!(validate_borrow_mint_scan_page(1, 2, 2, &suspicious, &tuple).is_err());
+
+        let archive = ArchivedBlocks { args: vec![], callback: QueryArchiveFn::new(Principal::from_slice(&[9]), "archive") };
+        let archived = GetBlocksResult { log_length: 2u64.into(), blocks: vec![], archived_blocks: vec![archive] };
+        assert!(validate_borrow_mint_scan_page(1, 2, 2, &archived, &tuple).is_err());
     }
 }
 

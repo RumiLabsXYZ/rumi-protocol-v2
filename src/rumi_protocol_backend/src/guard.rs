@@ -458,6 +458,10 @@ mod vault_liquidation_guard_tests {
                     op_nonce: 1,
                 },
                 phase: crate::state::BorrowMintPhase::SubmittedOrUnknown,
+                history_floor: None,
+                absence_scan: None,
+                dispatch_attempt_count: None,
+                typed_too_old: false,
             },
         );
         crate::state::replace_state(state);

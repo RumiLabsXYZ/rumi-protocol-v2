@@ -1926,6 +1926,57 @@ pub struct BorrowMintJournal {
     pub tuple: BorrowMintTuple,
     #[serde(default)]
     pub phase: BorrowMintPhase,
+    /// Ledger-global history boundary captured before first mint dispatch.
+    /// Legacy rows decode as None and can never authorize absence recovery.
+    #[serde(default)]
+    pub history_floor: Option<u64>,
+    /// Bounded scan state is created only after this tuple receives typed TooOld.
+    #[serde(default)]
+    pub absence_scan: Option<BorrowMintAbsenceScan>,
+    /// Number of attempts durably reserved before dispatch. None denotes a
+    /// legacy row whose prior dispatch count cannot be established.
+    #[serde(default)]
+    pub dispatch_attempt_count: Option<u32>,
+    /// True only after this canister decoded an inner ledger TooOld result.
+    #[serde(default)]
+    pub typed_too_old: bool,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct BorrowMintAbsenceScan {
+    pub next_block_index: u64,
+    #[serde(default)]
+    pub fixed_tip: Option<u64>,
+    #[serde(default)]
+    pub candidate_block_index: Option<u64>,
+}
+
+pub fn borrow_mint_scan_cas_matches(current: &BorrowMintJournal, expected: &BorrowMintJournal) -> bool {
+    current == expected
+        && current.phase == BorrowMintPhase::ReceiptRecoveryRequired
+        && current.typed_too_old
+        && current.history_floor.is_some()
+        && current.absence_scan.is_some()
+}
+
+pub fn record_borrow_mint_scan_page(
+    scan: &mut BorrowMintAbsenceScan,
+    start: u64,
+    end: u64,
+    found: Option<u64>,
+) -> Result<(), String> {
+    let tip = scan.fixed_tip.ok_or("borrow scan has no fixed tip")?;
+    if start != scan.next_block_index || end < start || end - start > 64 || end > tip {
+        return Err("borrow scan page does not match its bounded fixed-tip cursor".into());
+    }
+    if let Some(index) = found {
+        if index < start || index >= end || scan.candidate_block_index.is_some() {
+            return Err("borrow scan contains an invalid or multiple exact mint candidate".into());
+        }
+        scan.candidate_block_index = Some(index);
+    }
+    scan.next_block_index = end;
+    Ok(())
 }
 
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -12774,6 +12825,10 @@ mod tests {
                     op_nonce: 5,
                 },
                 phase: BorrowMintPhase::SubmittedOrUnknown,
+                history_floor: None,
+                absence_scan: None,
+                dispatch_attempt_count: None,
+                typed_too_old: false,
             },
         );
 
@@ -12806,6 +12861,82 @@ mod tests {
     }
 
     #[test]
+    fn legacy_borrow_journal_defaults_to_positive_only_recovery() {
+        let owner = Principal::from_slice(&[8]);
+        let journal = BorrowMintJournal {
+            vault_id: 8, owner, collateral_type: Principal::from_slice(&[9]),
+            borrowed_amount_e8s: 100, fee_amount_e8s: 0,
+            tuple: BorrowMintTuple { ledger: Principal::from_slice(&[10]), destination: owner,
+                amount_e8s: 100, memo: [2; 16], created_at_time_ns: 3, op_nonce: 4 },
+            phase: BorrowMintPhase::ReceiptRecoveryRequired,
+            history_floor: Some(5), absence_scan: Some(BorrowMintAbsenceScan { next_block_index: 5, fixed_tip: Some(9), candidate_block_index: None }),
+            dispatch_attempt_count: Some(1), typed_too_old: true,
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&journal, &mut bytes).unwrap();
+        let value: ciborium::value::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let mut map = match value { ciborium::value::Value::Map(map) => map, other => panic!("expected map: {other:?}") };
+        map.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name)
+            if ["history_floor", "absence_scan", "dispatch_attempt_count", "typed_too_old"].contains(&name.as_str())));
+        let mut old_bytes = Vec::new();
+        ciborium::ser::into_writer(&ciborium::value::Value::Map(map), &mut old_bytes).unwrap();
+        let restored: BorrowMintJournal = ciborium::de::from_reader(old_bytes.as_slice()).unwrap();
+        assert_eq!(restored.phase, BorrowMintPhase::ReceiptRecoveryRequired);
+        assert_eq!(restored.history_floor, None);
+        assert_eq!(restored.absence_scan, None);
+        assert_eq!(restored.dispatch_attempt_count, None);
+        assert!(!restored.typed_too_old);
+    }
+
+    #[test]
+    fn borrow_absence_scan_cas_rejects_stale_cursor_or_non_too_old_row() {
+        let owner = Principal::from_slice(&[8]);
+        let mut expected = BorrowMintJournal {
+            vault_id: 8, owner, collateral_type: Principal::from_slice(&[9]),
+            borrowed_amount_e8s: 100, fee_amount_e8s: 0,
+            tuple: BorrowMintTuple { ledger: Principal::from_slice(&[10]), destination: owner,
+                amount_e8s: 100, memo: [2; 16], created_at_time_ns: 3, op_nonce: 4 },
+            phase: BorrowMintPhase::ReceiptRecoveryRequired, history_floor: Some(5),
+            absence_scan: Some(BorrowMintAbsenceScan { next_block_index: 5, fixed_tip: Some(9), candidate_block_index: None }),
+            dispatch_attempt_count: Some(2), typed_too_old: true,
+        };
+        assert!(borrow_mint_scan_cas_matches(&expected, &expected));
+        let mut stale = expected.clone();
+        stale.absence_scan.as_mut().unwrap().next_block_index = 6;
+        assert!(!borrow_mint_scan_cas_matches(&stale, &expected));
+        expected.typed_too_old = false;
+        assert!(!borrow_mint_scan_cas_matches(&expected, &expected));
+    }
+
+    #[test]
+    fn full_absence_scan_cas_uses_cursor_persisted_at_each_page_boundary() {
+        let owner = Principal::from_slice(&[8]);
+        let mut current = BorrowMintJournal {
+            vault_id: 8, owner, collateral_type: Principal::from_slice(&[9]),
+            borrowed_amount_e8s: 100, fee_amount_e8s: 0,
+            tuple: BorrowMintTuple { ledger: Principal::from_slice(&[10]), destination: owner,
+                amount_e8s: 100, memo: [2; 16], created_at_time_ns: 3, op_nonce: 4 },
+            phase: BorrowMintPhase::ReceiptRecoveryRequired, history_floor: Some(0),
+            absence_scan: Some(BorrowMintAbsenceScan { next_block_index: 0, fixed_tip: Some(65), candidate_block_index: None }),
+            dispatch_attempt_count: Some(1), typed_too_old: true,
+        };
+        let first_page = current.clone();
+        assert!(borrow_mint_scan_cas_matches(&current, &first_page));
+        record_borrow_mint_scan_page(current.absence_scan.as_mut().unwrap(), 0, 64, None).unwrap();
+        current.absence_scan.as_mut().unwrap().next_block_index = 64;
+        let second_page = current.clone();
+        assert!(borrow_mint_scan_cas_matches(&current, &second_page));
+        record_borrow_mint_scan_page(current.absence_scan.as_mut().unwrap(), 64, 65, None).unwrap();
+        let terminal = current.clone();
+        assert!(borrow_mint_scan_cas_matches(&current, &terminal));
+        assert_eq!(terminal.absence_scan.unwrap().candidate_block_index, None);
+
+        let mut multiple = BorrowMintAbsenceScan { next_block_index: 0, fixed_tip: Some(65), candidate_block_index: None };
+        record_borrow_mint_scan_page(&mut multiple, 0, 64, Some(3)).unwrap();
+        assert!(record_borrow_mint_scan_page(&mut multiple, 64, 65, Some(64)).is_err());
+    }
+
+    #[test]
     fn pending_borrow_statuses_are_owner_scoped_and_hide_ledger_tuple() {
         let owner = Principal::from_slice(&[8]);
         let other = Principal::from_slice(&[7]);
@@ -12828,6 +12959,10 @@ mod tests {
                         op_nonce: 6,
                     },
                     phase: BorrowMintPhase::MintConfirmedHeld { block_index: 77 },
+                    history_floor: None,
+                    absence_scan: None,
+                dispatch_attempt_count: None,
+                typed_too_old: false,
                 },
             );
         }

@@ -6235,6 +6235,17 @@ async fn reconcile_pending_borrow_mint_from_block(
     )
 }
 
+/// Continue a bounded fixed-tip ICRC-3 recovery for one pending borrow mint.
+/// Caller supplies only the vault ID; the persisted journal defines all evidence.
+#[candid_method(update)]
+#[update]
+async fn advance_pending_borrow_mint_recovery(vault_id: u64) -> Result<(), ProtocolError> {
+    validate_authenticated_not_frozen()?;
+    check_postcondition(
+        rumi_protocol_backend::vault::advance_pending_borrow_mint_recovery(vault_id).await,
+    )
+}
+
 /// Paginated vault enumeration. Returns vaults with `vault_id >= start_id`
 /// up to `limit` entries (capped at `MAX_VAULTS_PAGE_LIMIT`), ordered
 /// ascending by `vault_id`. `next_start_id` is `Some(id)` when more
@@ -18758,6 +18769,10 @@ mod borrow_recovery_gate_tests {
                     op_nonce: 20,
                 },
                 phase: BorrowMintPhase::SubmittedOrUnknown,
+                history_floor: None,
+                absence_scan: None,
+                dispatch_attempt_count: None,
+                typed_too_old: false,
             },
         );
 
