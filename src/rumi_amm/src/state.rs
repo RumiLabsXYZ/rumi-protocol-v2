@@ -82,6 +82,10 @@ pub struct AmmState {
     /// confirmed-success accounting, or forever when a dispatch is ambiguous.
     #[serde(default)]
     pub outbound_payouts: Vec<OutboundPayout>,
+    /// Durable accounting linkage for active exit/admin payouts. Unlike event
+    /// history this list is bounded by active payouts and is never ring-pruned.
+    #[serde(default)]
+    pub outbound_payout_links: Vec<OutboundPayoutLink>,
     #[serde(default)]
     pub next_outbound_payout_id: u64,
     /// Durable identities for user-authorized deposits. Ambiguous rows are
@@ -117,6 +121,7 @@ impl Default for AmmState {
             protocol_backend_principal: None,
             tvl_samples: Vec::new(),
             outbound_payouts: Vec::new(),
+            outbound_payout_links: Vec::new(),
             next_outbound_payout_id: 0,
             inbound_operations: Vec::new(),
             inbound_sequence_high_water: 0,
@@ -149,6 +154,37 @@ pub struct OutboundPayout {
     pub memo: Vec<u8>,
     pub created_at_time: u64,
     pub status: OutboundPayoutStatus,
+}
+
+#[derive(CandidType, Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OutboundPayoutLeg {
+    TokenA,
+    TokenB,
+}
+
+/// Proof that an outbound payout's corresponding internal liability was
+/// atomically committed. Created in the same message as the reserve/fee
+/// accounting mutation and retained until the payout row is finalized.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OutboundPayoutPurpose {
+    RemoveLiquidity {
+        pool_id: PoolId,
+        caller: Principal,
+        leg: OutboundPayoutLeg,
+        gross_amount: u128,
+    },
+    WithdrawProtocolFees {
+        pool_id: PoolId,
+        admin: Principal,
+        leg: OutboundPayoutLeg,
+        gross_amount: u128,
+    },
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutboundPayoutLink {
+    pub payout_id: u64,
+    pub purpose: OutboundPayoutPurpose,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -739,6 +775,32 @@ pub fn set_outbound_payout_status(id: u64, status: OutboundPayoutStatus) -> Resu
     })
 }
 
+/// Attach durable evidence that a payout corresponds to a committed internal
+/// accounting mutation. Call from the same `mutate_state` as that mutation.
+pub fn link_outbound_payout_in(
+    s: &mut AmmState,
+    payout_id: u64,
+    purpose: OutboundPayoutPurpose,
+) -> Result<(), String> {
+    let row = s.outbound_payouts.iter().find(|row| row.id == payout_id)
+        .ok_or_else(|| format!("cannot link missing outbound payout {}", payout_id))?;
+    if row.status != OutboundPayoutStatus::Reserved {
+        return Err(format!("cannot attach accounting link to non-reserved payout {}", payout_id));
+    }
+    if let Some(existing) = s.outbound_payout_links.iter().find(|link| link.payout_id == payout_id) {
+        return if existing.purpose == purpose {
+            Ok(())
+        } else {
+            Err(format!("outbound payout {} is already linked to different accounting", payout_id))
+        };
+    }
+    if s.outbound_payout_links.len() >= MAX_OUTBOUND_PAYOUTS {
+        return Err("outbound accounting-link capacity reached".into());
+    }
+    s.outbound_payout_links.push(OutboundPayoutLink { payout_id, purpose });
+    Ok(())
+}
+
 /// Release a reservation only when no outbound call was made, or after the
 /// caller has atomically applied all accounting for a confirmed success.
 pub fn finish_outbound_payout(id: u64) -> Result<(), String> {
@@ -755,6 +817,7 @@ pub fn finish_outbound_payout(id: u64) -> Result<(), String> {
             ));
         }
         s.outbound_payouts.remove(idx);
+        s.outbound_payout_links.retain(|link| link.payout_id != id);
         Ok(())
     })
 }
@@ -976,6 +1039,7 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             protocol_backend_principal: v8.protocol_backend_principal,
             tvl_samples: v8.tvl_samples,
             outbound_payouts: v8.outbound_payouts,
+            outbound_payout_links: Vec::new(),
             next_outbound_payout_id: v8.next_outbound_payout_id,
             inbound_operations,
             inbound_sequence_high_water: 0,
@@ -1008,6 +1072,7 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             protocol_backend_principal: v7.protocol_backend_principal,
             tvl_samples: v7.tvl_samples,
             outbound_payouts: v7.outbound_payouts,
+            outbound_payout_links: Vec::new(),
             next_outbound_payout_id: v7.next_outbound_payout_id,
             inbound_operations: v7
                 .inbound_operations
@@ -1064,6 +1129,7 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             protocol_backend_principal: v6.protocol_backend_principal,
             tvl_samples: v6.tvl_samples,
             outbound_payouts: v6.outbound_payouts,
+            outbound_payout_links: Vec::new(),
             next_outbound_payout_id: v6.next_outbound_payout_id,
             inbound_operations: Vec::new(),
             inbound_sequence_high_water: 0,
@@ -1093,6 +1159,7 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             protocol_backend_principal: v5.protocol_backend_principal,
             tvl_samples: v5.tvl_samples,
             outbound_payouts: Vec::new(),
+            outbound_payout_links: Vec::new(),
             inbound_operations: Vec::new(),
             inbound_sequence_high_water: 0,
             next_outbound_payout_id: 0,
@@ -1120,6 +1187,7 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             protocol_backend_principal: None,
             tvl_samples: Vec::new(),
             outbound_payouts: Vec::new(),
+            outbound_payout_links: Vec::new(),
             inbound_operations: Vec::new(),
             inbound_sequence_high_water: 0,
             next_outbound_payout_id: 0,
@@ -1147,6 +1215,7 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             protocol_backend_principal: None,
             tvl_samples: Vec::new(),
             outbound_payouts: Vec::new(),
+            outbound_payout_links: Vec::new(),
             inbound_operations: Vec::new(),
             inbound_sequence_high_water: 0,
             next_outbound_payout_id: 0,
@@ -1174,6 +1243,7 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             protocol_backend_principal: None,
             tvl_samples: Vec::new(),
             outbound_payouts: Vec::new(),
+            outbound_payout_links: Vec::new(),
             inbound_operations: Vec::new(),
             inbound_sequence_high_water: 0,
             next_outbound_payout_id: 0,
@@ -1201,6 +1271,7 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             protocol_backend_principal: None,
             tvl_samples: Vec::new(),
             outbound_payouts: Vec::new(),
+            outbound_payout_links: Vec::new(),
             inbound_operations: Vec::new(),
             inbound_sequence_high_water: 0,
             next_outbound_payout_id: 0,
@@ -1531,6 +1602,90 @@ mod inbound_sequence_tests {
             .as_deref()
             .unwrap()
             .contains("pinned output fee"));
+    }
+
+    #[test]
+    fn v8_ambiguous_payout_migrates_without_invented_accounting_link() {
+        let caller = Principal::self_authenticating(&[41]);
+        let payout = OutboundPayout {
+            id: 8,
+            operation_id: "remove_liquidity_b:legacy:caller".into(),
+            ledger: caller,
+            from: caller,
+            from_subaccount: Some([9; 32]),
+            to: caller,
+            to_subaccount: None,
+            gross_amount: 20,
+            net_amount: 10,
+            fee: 10,
+            memo: vec![8; 32],
+            created_at_time: 123,
+            status: OutboundPayoutStatus::Ambiguous,
+        };
+        let v8 = AmmStateV8 {
+            admin: caller,
+            pools: BTreeMap::new(),
+            pool_creation_open: false,
+            maintenance_mode: true,
+            pending_claims: Vec::new(),
+            next_claim_id: 0,
+            swap_events: Vec::new(),
+            next_swap_event_id: 0,
+            liquidity_events: Vec::new(),
+            next_liquidity_event_id: 0,
+            admin_events: Vec::new(),
+            next_admin_event_id: 0,
+            holder_snapshots: Vec::new(),
+            reward_events: Vec::new(),
+            next_reward_event_id: 0,
+            claim_events: Vec::new(),
+            next_claim_event_id: 0,
+            protocol_backend_principal: None,
+            tvl_samples: Vec::new(),
+            outbound_payouts: vec![payout.clone()],
+            next_outbound_payout_id: 9,
+            inbound_operations: Vec::new(),
+        };
+
+        let bytes = Encode!(&v8).unwrap();
+        let migrated = try_decode_state(&bytes).expect("frozen V8 state migrates");
+        assert!(migrated.outbound_payout_links.is_empty());
+        assert_eq!(migrated.outbound_payouts, vec![payout]);
+        assert!(migrated.maintenance_mode, "migration retains the held rollout state");
+    }
+
+    #[test]
+    fn payout_link_is_not_created_by_reservation_and_is_bound_to_reserved_row() {
+        let caller = Principal::self_authenticating(&[51]);
+        let payout = OutboundPayout {
+            id: 3,
+            operation_id: "remove_liquidity_a:pool:user".into(),
+            ledger: caller,
+            from: caller,
+            from_subaccount: Some([1; 32]),
+            to: caller,
+            to_subaccount: None,
+            gross_amount: 20,
+            net_amount: 10,
+            fee: 10,
+            memo: vec![3; 32],
+            created_at_time: 123,
+            status: OutboundPayoutStatus::Reserved,
+        };
+        let mut state = AmmState::default();
+        state.outbound_payouts.push(payout);
+        assert!(state.outbound_payout_links.is_empty(), "reservation alone is not accounting proof");
+
+        let purpose = OutboundPayoutPurpose::RemoveLiquidity {
+            pool_id: "pool".into(),
+            caller,
+            leg: OutboundPayoutLeg::TokenA,
+            gross_amount: 20,
+        };
+        link_outbound_payout_in(&mut state, 3, purpose.clone()).unwrap();
+        assert_eq!(state.outbound_payout_links.len(), 1);
+        state.outbound_payouts[0].status = OutboundPayoutStatus::Dispatched;
+        assert!(link_outbound_payout_in(&mut state, 3, purpose).is_err());
     }
 
     fn next_sequence_from_state(state: &AmmState) -> u64 {

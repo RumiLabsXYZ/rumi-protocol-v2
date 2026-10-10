@@ -388,6 +388,16 @@ fn partial_remove_payout_keeps_atomic_reserve_event() {
         .into_iter()
         .find(|row| row.operation_id.starts_with("remove_liquidity_b:"))
         .expect("B liability is retained");
+    let pruned: Result<(), AmmError> = reply(
+        pic.update_call(amm, admin, "pocketic_prune_accounting_events", encode_args(()).unwrap())
+            .unwrap(),
+    );
+    pruned.expect("test-only event-ring pruning");
+    let events: Vec<AmmLiquidityEvent> = reply(
+        pic.query_call(amm, admin, "get_amm_liquidity_events", encode_args((0u64, 10u64)).unwrap())
+            .unwrap(),
+    );
+    assert!(events.is_empty(), "event history no longer contains the accounting proof");
     set_transfer_failure(&pic, token_b, false);
     let recovered: Result<(), AmmError> = reply(
         pic.update_call(
@@ -429,7 +439,9 @@ fn partial_admin_fee_withdrawal_records_event_and_retains_other_leg_liability() 
         .unwrap(),
     );
     seeded.expect("seed protocol-fee balances");
-    set_transfer_failure(&pic, info.token_b, true);
+    // B lands but its reply is lost, leaving a genuine aged ambiguity for the
+    // direct-block route after the admin event ring is cleared below.
+    set_fault_count(&pic, info.token_b, "set_phantom_failures", 1);
 
     let result: Result<(u128, u128), AmmError> = reply(
         pic.update_call(
@@ -479,6 +491,7 @@ fn partial_admin_fee_withdrawal_records_event_and_retains_other_leg_liability() 
     assert_eq!(payouts[0].gross_amount, 700);
     assert_eq!(payouts[0].status, OutboundPayoutStatus::Ambiguous);
     assert!(payouts[0].operation_id.starts_with("protocol_fee_b:"));
+    let payout_block = last_block_index(&pic, info.token_b);
     assert_eq!(
         balance(
             &pic,
@@ -534,17 +547,28 @@ fn partial_admin_fee_withdrawal_records_event_and_retains_other_leg_liability() 
     );
     assert_eq!(retained.unwrap(), (100, 200));
 
-    set_transfer_failure(&pic, info.token_b, false);
+    let pruned: Result<(), AmmError> = reply(
+        pic.update_call(amm, admin, "pocketic_prune_accounting_events", encode_args(()).unwrap())
+            .unwrap(),
+    );
+    pruned.expect("test-only event-ring pruning");
+    let events: Vec<AmmAdminEvent> = reply(
+        pic.query_call(amm, admin, "get_amm_admin_events", encode_args((0u64, 10u64)).unwrap())
+            .unwrap(),
+    );
+    assert!(events.is_empty(), "event history no longer contains the accounting proof");
+    pic.advance_time(Duration::from_secs(86_401));
+    pic.tick();
     let recovered: Result<(), AmmError> = reply(
         pic.update_call(
             amm,
             admin,
             "recover_outbound_payout",
-            encode_args((payouts[0].id, None::<u64>)).unwrap(),
+            encode_args((payouts[0].id, Some(payout_block))).unwrap(),
         )
         .unwrap(),
     );
-    recovered.expect("committed B fee leg replays its exact tuple within ledger window");
+    recovered.expect("committed B fee leg proves its exact direct block after window expiry");
     assert_eq!(
         balance(&pic, info.token_b, LedgerAccount { owner: admin, subaccount: None }),
         690,

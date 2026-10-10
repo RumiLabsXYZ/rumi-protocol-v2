@@ -1087,6 +1087,63 @@ fn classify_outbound_purpose(
             });
         }
 
+        if let Some(link) = s.outbound_payout_links.iter().find(|link| link.payout_id == payout.id) {
+            let (pool_id, ledger, subaccount, recipient, amount, operation_id) = match &link.purpose {
+                state::OutboundPayoutPurpose::RemoveLiquidity {
+                    pool_id,
+                    caller,
+                    leg,
+                    gross_amount,
+                } => {
+                    let pool = s.pools.get(pool_id).ok_or(AmmError::PoolNotFound)?;
+                    let (ledger, subaccount, suffix) = match leg {
+                        state::OutboundPayoutLeg::TokenA => (pool.token_a, pool.subaccount_a, "a"),
+                        state::OutboundPayoutLeg::TokenB => (pool.token_b, pool.subaccount_b, "b"),
+                    };
+                    (
+                        pool_id.clone(),
+                        ledger,
+                        crate::transfers::pool_subaccount(ledger, subaccount),
+                        *caller,
+                        *gross_amount,
+                        format!("remove_liquidity_{suffix}:{pool_id}:{caller}"),
+                    )
+                }
+                state::OutboundPayoutPurpose::WithdrawProtocolFees {
+                    pool_id,
+                    admin,
+                    leg,
+                    gross_amount,
+                } => {
+                    let pool = s.pools.get(pool_id).ok_or(AmmError::PoolNotFound)?;
+                    let (ledger, subaccount, suffix) = match leg {
+                        state::OutboundPayoutLeg::TokenA => (pool.token_a, pool.subaccount_a, "a"),
+                        state::OutboundPayoutLeg::TokenB => (pool.token_b, pool.subaccount_b, "b"),
+                    };
+                    (
+                        pool_id.clone(),
+                        ledger,
+                        crate::transfers::pool_subaccount(ledger, subaccount),
+                        *admin,
+                        *gross_amount,
+                        format!("protocol_fee_{suffix}:{pool_id}"),
+                    )
+                }
+            };
+            if payout.ledger != ledger
+                || payout.from_subaccount != subaccount
+                || payout.to != recipient
+                || payout.to_subaccount.is_some()
+                || payout.gross_amount != amount
+                || payout.operation_id != operation_id
+            {
+                return Err(AmmError::InvalidInput {
+                    reason: "outbound payout does not match its durable accounting link".into(),
+                });
+            }
+            return Ok(OutboundPurpose::AlreadyAccounted { pool_id });
+        }
+
         let operation_id = payout.operation_id.as_str();
         if let Some(rest) = operation_id.strip_prefix("reward_claim:") {
             let (pool_id, claimant_text) = rest.rsplit_once(':').ok_or_else(|| {
@@ -1244,6 +1301,7 @@ fn finalize_outbound_payout(
             OutboundPurpose::AlreadyAccounted { .. } => {}
         }
         s.outbound_payouts.remove(index);
+        s.outbound_payout_links.retain(|link| link.payout_id != payout.id);
         Ok(())
     })
 }
@@ -1302,6 +1360,20 @@ fn pocketic_get_protocol_fees(pool_id: PoolId) -> Result<(u128, u128), AmmError>
 #[query]
 fn pocketic_get_outbound_payouts() -> Vec<state::OutboundPayout> {
     read_state(|s| s.outbound_payouts.clone())
+}
+
+#[cfg(feature = "pocketic-test")]
+#[update]
+fn pocketic_prune_accounting_events() -> Result<(), AmmError> {
+    let caller = ic_cdk::caller();
+    mutate_state(|s| {
+        if caller != s.admin {
+            return Err(AmmError::Unauthorized);
+        }
+        s.liquidity_events.clear();
+        s.admin_events.clear();
+        Ok(())
+    })
 }
 
 async fn swap_v2_inner(
@@ -2177,7 +2249,33 @@ async fn remove_liquidity(
             amount_b,
             lp_shares,
         );
-    });
+        if let Some(payout_id) = payout_a {
+            crate::state::link_outbound_payout_in(
+                s,
+                payout_id,
+                state::OutboundPayoutPurpose::RemoveLiquidity {
+                    pool_id: pool_id.clone(),
+                    caller,
+                    leg: state::OutboundPayoutLeg::TokenA,
+                    gross_amount: amount_a,
+                },
+            )?;
+        }
+        if let Some(payout_id) = payout_b {
+            crate::state::link_outbound_payout_in(
+                s,
+                payout_id,
+                state::OutboundPayoutPurpose::RemoveLiquidity {
+                    pool_id: pool_id.clone(),
+                    caller,
+                    leg: state::OutboundPayoutLeg::TokenB,
+                    gross_amount: amount_b,
+                },
+            )?;
+        }
+        Ok(())
+    })
+    .map_err(|reason| AmmError::InvalidInput { reason })?;
 
     // Send each independently. An error may follow an applied transfer, so
     // retain its original intent and never create a fresh claim/retry identity.
