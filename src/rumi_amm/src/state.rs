@@ -782,22 +782,47 @@ pub fn link_outbound_payout_in(
     payout_id: u64,
     purpose: OutboundPayoutPurpose,
 ) -> Result<(), String> {
-    let row = s.outbound_payouts.iter().find(|row| row.id == payout_id)
-        .ok_or_else(|| format!("cannot link missing outbound payout {}", payout_id))?;
-    if row.status != OutboundPayoutStatus::Reserved {
-        return Err(format!("cannot attach accounting link to non-reserved payout {}", payout_id));
+    link_outbound_payouts_in(s, vec![(payout_id, purpose)])
+}
+
+/// Validate every requested payout link before adding any of them. Call this
+/// at the start of a synchronous state mutation, before changing accounting;
+/// a bad second leg must not leave the first leg linked or mutate liabilities.
+pub fn link_outbound_payouts_in(
+    s: &mut AmmState,
+    requested: Vec<(u64, OutboundPayoutPurpose)>,
+) -> Result<(), String> {
+    let mut additions: Vec<(u64, OutboundPayoutPurpose)> = Vec::with_capacity(requested.len());
+    for (_index, (payout_id, purpose)) in requested.into_iter().enumerate() {
+        #[cfg(feature = "pocketic-test")]
+        if _index == 1 && FAIL_SECOND_PAYOUT_LINK.with(|flag| flag.replace(false)) {
+            return Err("injected second payout-link admission failure".into());
+        }
+        let row = s.outbound_payouts.iter().find(|row| row.id == payout_id)
+            .ok_or_else(|| format!("cannot link missing outbound payout {}", payout_id))?;
+        if row.status != OutboundPayoutStatus::Reserved {
+            return Err(format!("cannot attach accounting link to non-reserved payout {}", payout_id));
+        }
+        if let Some(existing) = s.outbound_payout_links.iter().find(|link| link.payout_id == payout_id) {
+            if existing.purpose != purpose {
+                return Err(format!("outbound payout {} is already linked to different accounting", payout_id));
+            }
+            continue;
+        }
+        if let Some((_, prior)) = additions.iter().find(|(id, _)| *id == payout_id) {
+            if prior != &purpose {
+                return Err(format!("outbound payout {} was requested with conflicting accounting", payout_id));
+            }
+            continue;
+        }
+        additions.push((payout_id, purpose));
     }
-    if let Some(existing) = s.outbound_payout_links.iter().find(|link| link.payout_id == payout_id) {
-        return if existing.purpose == purpose {
-            Ok(())
-        } else {
-            Err(format!("outbound payout {} is already linked to different accounting", payout_id))
-        };
-    }
-    if s.outbound_payout_links.len() >= MAX_OUTBOUND_PAYOUTS {
+    if s.outbound_payout_links.len().saturating_add(additions.len()) > MAX_OUTBOUND_PAYOUTS {
         return Err("outbound accounting-link capacity reached".into());
     }
-    s.outbound_payout_links.push(OutboundPayoutLink { payout_id, purpose });
+    s.outbound_payout_links.extend(additions.into_iter().map(|(payout_id, purpose)| {
+        OutboundPayoutLink { payout_id, purpose }
+    }));
     Ok(())
 }
 
@@ -826,6 +851,13 @@ pub fn finish_outbound_payout(id: u64) -> Result<(), String> {
 
 thread_local! {
     static STATE: RefCell<AmmState> = RefCell::new(AmmState::default());
+    #[cfg(feature = "pocketic-test")]
+    static FAIL_SECOND_PAYOUT_LINK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(feature = "pocketic-test")]
+pub fn pocketic_fail_second_payout_link_once() {
+    FAIL_SECOND_PAYOUT_LINK.with(|flag| flag.set(true));
 }
 
 pub fn mutate_state<F, R>(f: F) -> R
@@ -1686,6 +1718,63 @@ mod inbound_sequence_tests {
         assert_eq!(state.outbound_payout_links.len(), 1);
         state.outbound_payouts[0].status = OutboundPayoutStatus::Dispatched;
         assert!(link_outbound_payout_in(&mut state, 3, purpose).is_err());
+    }
+
+    #[test]
+    fn failed_second_link_admission_leaves_no_partial_link_or_accounting_change() {
+        let caller = Principal::self_authenticating(&[52]);
+        let mut state = AmmState::default();
+        for id in [10, 11] {
+            state.outbound_payouts.push(OutboundPayout {
+                id,
+                operation_id: format!("remove:{id}"),
+                ledger: caller,
+                from: caller,
+                from_subaccount: None,
+                to: caller,
+                to_subaccount: None,
+                gross_amount: 25,
+                net_amount: 20,
+                fee: 5,
+                memo: vec![id as u8; 32],
+                created_at_time: 123,
+                status: OutboundPayoutStatus::Reserved,
+            });
+        }
+        // Model an invalid second leg: all admission checks must happen before
+        // either link is inserted or the caller proceeds to accounting writes.
+        state.outbound_payouts[1].status = OutboundPayoutStatus::Dispatched;
+        let purposes = vec![
+            (10, OutboundPayoutPurpose::RemoveLiquidity {
+                pool_id: "pool".into(), caller, leg: OutboundPayoutLeg::TokenA,
+                gross_amount: 25,
+            }),
+            (11, OutboundPayoutPurpose::RemoveLiquidity {
+                pool_id: "pool".into(), caller, leg: OutboundPayoutLeg::TokenB,
+                gross_amount: 25,
+            }),
+        ];
+        let before_events = state.admin_events.len();
+        let before_liquidity_events = state.liquidity_events.len();
+        let before_payout_statuses: Vec<_> = state.outbound_payouts.iter().map(|p| p.status.clone()).collect();
+
+        let result = (|| {
+            link_outbound_payouts_in(&mut state, purposes)?;
+            // Production callers perform reserve/share/fee/event mutations
+            // only after batch admission returns Ok.
+            state.next_admin_event_id += 1;
+            Ok::<(), String>(())
+        })();
+
+        assert!(result.is_err());
+        assert!(state.outbound_payout_links.is_empty());
+        assert_eq!(state.admin_events.len(), before_events);
+        assert_eq!(state.liquidity_events.len(), before_liquidity_events);
+        assert_eq!(state.next_admin_event_id, 0);
+        assert_eq!(
+            state.outbound_payouts.iter().map(|p| p.status.clone()).collect::<Vec<_>>(),
+            before_payout_statuses
+        );
     }
 
     fn next_sequence_from_state(state: &AmmState) -> u64 {

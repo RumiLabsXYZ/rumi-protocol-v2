@@ -1376,6 +1376,18 @@ fn pocketic_prune_accounting_events() -> Result<(), AmmError> {
     })
 }
 
+#[cfg(feature = "pocketic-test")]
+#[update]
+fn pocketic_fail_next_second_payout_link() -> Result<(), AmmError> {
+    let caller = ic_cdk::caller();
+    let is_admin = read_state(|s| caller == s.admin);
+    if !is_admin {
+        return Err(AmmError::Unauthorized);
+    }
+    state::pocketic_fail_second_payout_link_once();
+    Ok(())
+}
+
 async fn swap_v2_inner(
     request_id: Vec<u8>,
     pool_id: PoolId,
@@ -2191,7 +2203,28 @@ async fn remove_liquidity(
     // Burn LP shares and update reserves FIRST (optimistic),
     // then transfer tokens. This ensures the protocol never overpays
     // if a transfer fails mid-way.
-    mutate_state(|s| {
+    let accounting_admission = mutate_state(|s| -> Result<(), String> {
+        // Admit every durable link before changing LP shares, reserves, or
+        // events. The batch helper is all-or-nothing, so a bad B link cannot
+        // leave A linked or make a partial accounting transition.
+        if !s.pools.contains_key(&pool_id) {
+            return Err("pool disappeared before remove-liquidity commit".into());
+        }
+        let mut links = Vec::with_capacity(2);
+        if let Some(payout_id) = payout_a {
+            links.push((payout_id, state::OutboundPayoutPurpose::RemoveLiquidity {
+                pool_id: pool_id.clone(), caller, leg: state::OutboundPayoutLeg::TokenA,
+                gross_amount: amount_a,
+            }));
+        }
+        if let Some(payout_id) = payout_b {
+            links.push((payout_id, state::OutboundPayoutPurpose::RemoveLiquidity {
+                pool_id: pool_id.clone(), caller, leg: state::OutboundPayoutLeg::TokenB,
+                gross_amount: amount_b,
+            }));
+        }
+        crate::state::link_outbound_payouts_in(s, links)?;
+
         let pool = s.pools.get_mut(&pool_id).expect("pool exists");
 
         // Snapshot pre-update state for reward bookkeeping.
@@ -2249,33 +2282,14 @@ async fn remove_liquidity(
             amount_b,
             lp_shares,
         );
-        if let Some(payout_id) = payout_a {
-            crate::state::link_outbound_payout_in(
-                s,
-                payout_id,
-                state::OutboundPayoutPurpose::RemoveLiquidity {
-                    pool_id: pool_id.clone(),
-                    caller,
-                    leg: state::OutboundPayoutLeg::TokenA,
-                    gross_amount: amount_a,
-                },
-            )?;
-        }
-        if let Some(payout_id) = payout_b {
-            crate::state::link_outbound_payout_in(
-                s,
-                payout_id,
-                state::OutboundPayoutPurpose::RemoveLiquidity {
-                    pool_id: pool_id.clone(),
-                    caller,
-                    leg: state::OutboundPayoutLeg::TokenB,
-                    gross_amount: amount_b,
-                },
-            )?;
-        }
         Ok(())
-    })
-    .map_err(|reason| AmmError::InvalidInput { reason })?;
+    });
+    if let Err(reason) = accounting_admission {
+        // This segment resumed after the last fee-query await. Trap instead
+        // of returning normally so the replica rolls back the just-created
+        // Reserved rows together with this failed accounting admission.
+        ic_cdk::trap(&format!("remove-liquidity payout-link admission failed: {reason}"));
+    }
 
     // Send each independently. An error may follow an applied transfer, so
     // retain its original intent and never create a fresh claim/retry identity.

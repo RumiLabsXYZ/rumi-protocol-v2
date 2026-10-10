@@ -329,6 +329,104 @@ fn unavailable_output_fee_fails_before_request_reservation_or_input_debit() {
 }
 
 #[test]
+fn failed_second_payout_link_traps_before_lp_accounting_and_rolls_back_reservations() {
+    let (pic, amm, token_a, token_b, _user, pool, sub_a, sub_b) = setup();
+    let admin = Principal::self_authenticating(&[81, 82, 83]);
+    let before: Option<PoolInfo> = reply(
+        pic.query_call(amm, admin, "get_pool", encode_one(pool.clone()).unwrap())
+            .unwrap(),
+    );
+    let before = before.expect("pool exists");
+    let before_a = balance(&pic, token_a, LedgerAccount { owner: amm, subaccount: Some(sub_a) });
+    let before_b = balance(&pic, token_b, LedgerAccount { owner: amm, subaccount: Some(sub_b) });
+    let armed: Result<(), AmmError> = reply(
+        pic.update_call(amm, admin, "pocketic_fail_next_second_payout_link", encode_args(()).unwrap())
+            .unwrap(),
+    );
+    armed.expect("arm feature-only second-link failure");
+
+    let result = pic.update_call(
+        amm,
+        admin,
+        "remove_liquidity",
+        encode_args((pool.clone(), 100u128, 1u128, 1u128)).unwrap(),
+    );
+    assert!(result.is_err(), "failed link admission traps the callback segment");
+
+    let after: Option<PoolInfo> = reply(
+        pic.query_call(amm, admin, "get_pool", encode_one(pool).unwrap()).unwrap(),
+    );
+    let after = after.expect("pool remains available");
+    assert_eq!(after.reserve_a, before.reserve_a);
+    assert_eq!(after.reserve_b, before.reserve_b);
+    assert_eq!(after.total_lp_shares, before.total_lp_shares);
+    assert_eq!(balance(&pic, token_a, LedgerAccount { owner: amm, subaccount: Some(sub_a) }), before_a);
+    assert_eq!(balance(&pic, token_b, LedgerAccount { owner: amm, subaccount: Some(sub_b) }), before_b);
+
+    let payouts: Vec<OutboundPayout> = reply(
+        pic.query_call(amm, admin, "pocketic_get_outbound_payouts", encode_args(()).unwrap())
+            .unwrap(),
+    );
+    assert!(
+        payouts.iter().all(|row| !row.operation_id.starts_with("remove_liquidity_")),
+        "trap before the first payout await rolls back both Reserved rows"
+    );
+    let events: Vec<AmmLiquidityEvent> = reply(
+        pic.query_call(amm, admin, "get_amm_liquidity_events", encode_args((0u64, 10u64)).unwrap())
+            .unwrap(),
+    );
+    assert!(events.is_empty(), "failed admission records no accounting event");
+}
+
+#[test]
+fn failed_second_admin_link_traps_before_fee_debit_and_rolls_back_reservations() {
+    let (pic, amm, _token_a, _token_b, _user, pool, _sub_a, _sub_b) = setup();
+    let admin = Principal::self_authenticating(&[81, 82, 83]);
+    let seeded: Result<(), AmmError> = reply(
+        pic.update_call(
+            amm,
+            admin,
+            "pocketic_seed_protocol_fees",
+            encode_args((pool.clone(), 500u128, 700u128)).unwrap(),
+        )
+        .unwrap(),
+    );
+    seeded.expect("seed fee liabilities");
+    let armed: Result<(), AmmError> = reply(
+        pic.update_call(amm, admin, "pocketic_fail_next_second_payout_link", encode_args(()).unwrap())
+            .unwrap(),
+    );
+    armed.expect("arm feature-only second-link failure");
+
+    let result = pic.update_call(
+        amm,
+        admin,
+        "withdraw_protocol_fees",
+        encode_one(pool.clone()).unwrap(),
+    );
+    assert!(result.is_err(), "failed link admission traps before fee accounting changes");
+
+    let fees: Result<(u128, u128), AmmError> = reply(
+        pic.query_call(amm, admin, "pocketic_get_protocol_fees", encode_one(pool.clone()).unwrap())
+            .unwrap(),
+    );
+    assert_eq!(fees.unwrap(), (500, 700));
+    let payouts: Vec<OutboundPayout> = reply(
+        pic.query_call(amm, admin, "pocketic_get_outbound_payouts", encode_args(()).unwrap())
+            .unwrap(),
+    );
+    assert!(payouts.is_empty(), "trap rolls back both Reserved fee payout rows");
+    let events: Vec<AmmAdminEvent> = reply(
+        pic.query_call(amm, admin, "get_amm_admin_events", encode_args((0u64, 10u64)).unwrap())
+            .unwrap(),
+    );
+    assert!(
+        events.iter().all(|event| !matches!(event.action, AmmAdminAction::WithdrawProtocolFees { .. })),
+        "failed admission records no fee-withdrawal event"
+    );
+}
+
+#[test]
 fn partial_remove_payout_keeps_atomic_reserve_event() {
     let (pic, amm, _token_a, _token_b, _user, pool, _sub_a, _sub_b) = setup();
     let admin = Principal::self_authenticating(&[81, 82, 83]);

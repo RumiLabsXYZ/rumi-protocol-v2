@@ -341,7 +341,28 @@ async fn withdraw_protocol_fees(pool_id: PoolId) -> Result<(u128, u128), AmmErro
     // first transfer await dispatch marks each row Dispatched. Recovery must
     // not expose Reserved rows as a generic retry/cancel mechanism.
     // Optimistic deduct: zero out fees in state BEFORE transferring.
-    mutate_state(|s| -> Result<(), String> {
+    let accounting_admission = mutate_state(|s| -> Result<(), String> {
+        // Batch-admit both durable accounting links before mutating fee
+        // liabilities or recording the event. A failed B link must leave the
+        // complete fee balance untouched.
+        if !s.pools.contains_key(&pool_id) {
+            return Err("pool disappeared before fee-withdrawal commit".into());
+        }
+        let mut links = Vec::with_capacity(2);
+        if let Some(payout_id) = payout_a {
+            links.push((payout_id, crate::state::OutboundPayoutPurpose::WithdrawProtocolFees {
+                pool_id: pool_id.clone(), admin, leg: crate::state::OutboundPayoutLeg::TokenA,
+                gross_amount: fees_a,
+            }));
+        }
+        if let Some(payout_id) = payout_b {
+            links.push((payout_id, crate::state::OutboundPayoutPurpose::WithdrawProtocolFees {
+                pool_id: pool_id.clone(), admin, leg: crate::state::OutboundPayoutLeg::TokenB,
+                gross_amount: fees_b,
+            }));
+        }
+        crate::state::link_outbound_payouts_in(s, links)?;
+
         let pool = s
             .pools
             .get_mut(&pool_id)
@@ -361,33 +382,14 @@ async fn withdraw_protocol_fees(pool_id: PoolId) -> Result<(u128, u128), AmmErro
                 amount_b: fees_b,
             },
         );
-        if let Some(payout_id) = payout_a {
-            crate::state::link_outbound_payout_in(
-                s,
-                payout_id,
-                crate::state::OutboundPayoutPurpose::WithdrawProtocolFees {
-                    pool_id: pool_id.clone(),
-                    admin,
-                    leg: crate::state::OutboundPayoutLeg::TokenA,
-                    gross_amount: fees_a,
-                },
-            )?;
-        }
-        if let Some(payout_id) = payout_b {
-            crate::state::link_outbound_payout_in(
-                s,
-                payout_id,
-                crate::state::OutboundPayoutPurpose::WithdrawProtocolFees {
-                    pool_id: pool_id.clone(),
-                    admin,
-                    leg: crate::state::OutboundPayoutLeg::TokenB,
-                    gross_amount: fees_b,
-                },
-            )?;
-        }
         Ok(())
-    })
-    .map_err(|reason| AmmError::InvalidInput { reason })?;
+    });
+    if let Err(reason) = accounting_admission {
+        // A normal error return would persist the earlier Reserved rows.
+        // This callback segment has no ledger await since those reservations;
+        // trapping here rolls back the rows and leaves fee accounting intact.
+        ic_cdk::trap(&format!("protocol-fee payout-link admission failed: {reason}"));
+    }
 
     let mut withdrawn_a = 0u128;
     let mut withdrawn_b = 0u128;
