@@ -8,6 +8,9 @@ use rumi_amm::{
 use sha2::{Digest, Sha224, Sha256};
 use std::{process::Command, time::UNIX_EPOCH};
 
+#[path = "../../liquidation_bot/src/native_icp_blocks.rs"]
+mod native_icp_blocks;
+
 const ICP_LEDGER: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
 const FEE: u64 = 10_000;
 const OFFICIAL_LEDGER_GZIP_SHA256: &str =
@@ -237,6 +240,26 @@ fn verify(env: &Env, index: u64, payout: &OutboundPayout) -> Result<(), AmmError
     )
 }
 
+fn query_native_blocks(
+    pic: &PocketIc,
+    ledger: Principal,
+    start: u64,
+) -> native_icp_blocks::QueryBlocksResponse {
+    let bytes = match pic
+        .query_call(
+            ledger,
+            Principal::anonymous(),
+            "query_blocks",
+            encode_one(native_icp_blocks::GetBlocksArgs { start, length: 1 }).unwrap(),
+        )
+        .expect("query official native ICP ledger blocks")
+    {
+        WasmResult::Reply(bytes) => bytes,
+        WasmResult::Reject(reason) => panic!("native query_blocks rejected: {reason}"),
+    };
+    native_icp_blocks::decode_query_blocks(&bytes).expect("decode official query_blocks schema")
+}
+
 #[test]
 #[ignore = "requires POCKET_IC_BIN and the pinned official NNS ledger gzip"]
 fn native_icp_direct_block_matches_exact_payout_and_rejects_wrong_tuple() {
@@ -287,6 +310,21 @@ fn native_icp_archive_evidence_remains_held() {
         );
         result.expect("advance native ledger archive range");
     }
+    let response = query_native_blocks(&env.pic, env.ledger, env.index);
+    assert!(
+        response.blocks.is_empty(),
+        "aged target must no longer be in direct blocks"
+    );
+    assert!(
+        response.archived_blocks.iter().any(|range| {
+            range.length > 0
+                && range
+                    .start
+                    .checked_add(range.length)
+                    .is_some_and(|end| env.index >= range.start && env.index < end)
+        }),
+        "official native ledger must advertise an archive range covering the target index"
+    );
     let result = verify(&env, env.index, &env.payout);
     assert!(
         result.is_err(),
