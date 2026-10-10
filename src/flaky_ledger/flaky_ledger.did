@@ -125,6 +125,7 @@ service : () -> {
   set_fail_fee_query : (bool) -> ();
   set_phantom_failures : (nat32) -> ();
   set_bad_fee_failures : (nat32) -> ();
+  set_bad_fee_after_transfer_from : (bool) -> ();
   reset_dedup : () -> ();
   set_fail_transfers_for_caller : (opt principal) -> ();
   set_fake_zero_balance_for : (opt principal) -> ();

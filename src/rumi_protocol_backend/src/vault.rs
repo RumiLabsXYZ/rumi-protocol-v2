@@ -10167,9 +10167,24 @@ async fn liquidate_vault_debt_already_burned_inner(
     };
 
     // Reserve balances may have changed while the 3USD pull and proof were
-    // awaiting replies. Fail before mutation so the caller's existing error
-    // branch refunds the transfer instead of trapping on an overflowing add.
-    let protocol_3usd_reserves_after = if let Some(amount) = three_usd_received_e8s {
+    // awaiting replies. Track only the principal that remains after the
+    // proportional refund; the ICRC-3 proof above still validates gross ingress.
+    let protocol_3usd_reserve_credit_e8s = if let Some(amount) = three_usd_received_e8s {
+        let Some(realized) = crate::management::realized_three_usd_reserve_credit_e8s(
+            amount,
+            icusd_burned_e8s,
+            max_liquidatable_debt.to_u64(),
+        ) else {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "3USD realized reserve amount could not be calculated".into(),
+            ));
+        };
+        Some(realized)
+    } else {
+        None
+    };
+    let protocol_3usd_reserves_after = if let Some(amount) = protocol_3usd_reserve_credit_e8s {
         match read_state(|s| {
             crate::management::checked_three_usd_reserves_total(
                 s.protocol_3usd_reserves,
@@ -10319,7 +10334,7 @@ async fn liquidate_vault_debt_already_burned_inner(
             },
             ledger_fee_collateral: None,
             timestamp: Some(ic_cdk::api::time()),
-            three_usd_reserves_e8s: three_usd_received_e8s,
+            three_usd_reserves_e8s: protocol_3usd_reserve_credit_e8s,
         };
         crate::storage::record_event(&event);
 

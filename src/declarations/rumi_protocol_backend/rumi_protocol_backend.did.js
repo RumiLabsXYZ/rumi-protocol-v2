@@ -2351,12 +2351,23 @@ export const idlFactory = ({ IDL }) => {
     'partial_repay_to_vault' : IDL.Func([VaultArg], [Result_1], []),
     'prepare_redemption_offer' : IDL.Func([IDL.Nat64], [Result_19], []),
     'provide_liquidity' : IDL.Func([IDL.Nat64], [Result_1], []),
+    'rearm_unsent_legacy_three_usd_refund' : IDL.Func([IDL.Nat], [Result], []),
+    'rearm_unsent_v2_default_account_refund' : IDL.Func(
+        [IDL.Nat],
+        [Result],
+        [],
+      ),
     'reconcile_amm1_donation_mint_candidate_block' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [Result],
         [],
       ),
     'reconcile_chain_supply' : IDL.Func([IDL.Nat32], [Result_20], []),
+    'reconcile_legacy_three_usd_refund_candidate_block' : IDL.Func(
+        [IDL.Nat, IDL.Nat64],
+        [Result],
+        [],
+      ),
     'reconcile_liquidity_withdrawal_from_block' : IDL.Func(
         [IDL.Nat, IDL.Nat64],
         [Result_1],
@@ -2369,6 +2380,16 @@ export const idlFactory = ({ IDL }) => {
       ),
     'reconcile_three_usd_reserve_ingress_candidate_block' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, IDL.Nat64],
+        [Result],
+        [],
+      ),
+    'reconcile_three_usd_reserve_v1_cutover' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [Result],
+        [],
+      ),
+    'reconcile_v2_default_account_three_usd_refund_candidate_block' : IDL.Func(
+        [IDL.Nat, IDL.Nat64],
         [Result],
         [],
       ),

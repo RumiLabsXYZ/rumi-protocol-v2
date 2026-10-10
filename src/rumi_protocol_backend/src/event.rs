@@ -129,8 +129,11 @@ pub enum Event {
         ledger_fee_collateral: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<u64>,
-        /// 3USD (LP tokens) credited to protocol reserves during this liquidation.
-        /// None for legacy burn-path liquidations; Some(amount_e8s) for reserves-path.
+        /// Net 3USD principal retained in protocol reserves after any proportional
+        /// Stability Pool refund. The source proof and V2 absorb record retain gross
+        /// ingress separately. Older events replay their recorded value unchanged
+        /// because they lack the covered-principal denominator. None for legacy
+        /// burn-path liquidations.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         three_usd_reserves_e8s: Option<u64>,
     },
@@ -4761,6 +4764,48 @@ mod filter_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn reserve_replay_uses_realized_principal_after_partial_refund() {
+        let init = Event::Init(payout_init_args(icp_token()));
+        let partial = Event::PartialLiquidateVault {
+            vault_id: 1,
+            liquidator_payment: ICUSD::new(60),
+            icp_to_liquidator: ICP::new(50),
+            liquidator: None,
+            icp_rate: None,
+            protocol_fee_collateral: None,
+            ledger_fee_collateral: None,
+            timestamp: None,
+            // Gross ingress 100 with 60/100 debt realized leaves 40 refunded.
+            // The event now stores net reserve backing, matching runtime.
+            three_usd_reserves_e8s: Some(60),
+        };
+        let replayed = super::replay([init, partial].into_iter())
+            .expect("partial reserve event must replay");
+        assert_eq!(replayed.protocol_3usd_reserves, 60);
+    }
+
+    #[test]
+    fn legacy_reserve_replay_preserves_recorded_gross_amount() {
+        let init = Event::Init(payout_init_args(icp_token()));
+        let legacy_partial = Event::PartialLiquidateVault {
+            vault_id: 1,
+            liquidator_payment: ICUSD::new(60),
+            icp_to_liquidator: ICP::new(50),
+            liquidator: None,
+            icp_rate: None,
+            protocol_fee_collateral: None,
+            ledger_fee_collateral: None,
+            timestamp: None,
+            // Historical events do not retain the original covered-principal
+            // denominator, so replay cannot safely infer the refund amount.
+            three_usd_reserves_e8s: Some(100),
+        };
+        let replayed = super::replay([init, legacy_partial].into_iter())
+            .expect("legacy reserve event must replay without reinterpretation");
+        assert_eq!(replayed.protocol_3usd_reserves, 100);
     }
 
     fn p(seed: u8) -> Principal {

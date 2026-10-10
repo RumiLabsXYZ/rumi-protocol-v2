@@ -18,6 +18,8 @@
 //   - set_minter(Option<Principal>)   transfers from this caller produce fee-free 1mint blocks
 //   - set_too_old_after_phantom_mint(u32) next exact retry of a phantom mint returns TooOld
 //   - set_bad_fee_failures(u32)       next N transfers return BadFee with set_fee value
+//   - set_bad_fee_after_transfer_from(bool) arms one ICRC-1 BadFee after the next
+//                                     successful ICRC-2 transfer_from commit
 //   - mint(Account, Nat)              mint tokens to any account (no auth)
 //   - reset_dedup()                   clear the dedup map (for explicit test isolation)
 //
@@ -164,6 +166,10 @@ struct LedgerState {
     too_old_before_mint_history_owner: Option<Principal>,
     /// Next N transfers return BadFee with the current fee value.
     bad_fee_failures_remaining: u32,
+    /// Arm one typed ICRC-1 BadFee only after a transfer_from has committed.
+    bad_fee_after_transfer_from_armed: bool,
+    /// One-shot BadFee produced by the committed transfer_from above.
+    bad_fee_after_transfer_from_pending: bool,
     /// Recent transfers keyed by their dedup tuple. Retained until reset_dedup().
     dedup: BTreeMap<DedupKey, u64>,
     /// When set, icrc1_transfer rejects with GenericError if the caller
@@ -386,6 +392,13 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
 
         if state.bad_fee_failures_remaining > 0 {
             state.bad_fee_failures_remaining -= 1;
+            return Err(TransferError::BadFee {
+                expected_fee: Nat::from(state.fee),
+            });
+        }
+
+        if state.bad_fee_after_transfer_from_pending {
+            state.bad_fee_after_transfer_from_pending = false;
             return Err(TransferError::BadFee {
                 expected_fee: Nat::from(state.fee),
             });
@@ -639,6 +652,11 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
             state.dedup.insert(key, landed_block);
         }
 
+        if state.bad_fee_after_transfer_from_armed {
+            state.bad_fee_after_transfer_from_armed = false;
+            state.bad_fee_after_transfer_from_pending = true;
+        }
+
         if state.phantom_failures_remaining > 0 {
             state.phantom_failures_remaining -= 1;
             return Err(TransferFromError::GenericError {
@@ -799,6 +817,20 @@ fn set_too_old_before_mint_with_history(blocks: u32, owner: Principal) {
 #[update]
 fn set_bad_fee_failures(n: u32) {
     STATE.with(|s| s.borrow_mut().bad_fee_failures_remaining = n);
+}
+
+/// After the next committed ICRC-2 transfer_from, make exactly one subsequent
+/// ICRC-1 transfer return BadFee before committing. This targets the outbound
+/// leg of a multi-step test flow without affecting the ingress transfer_from.
+#[update]
+fn set_bad_fee_after_transfer_from(armed: bool) {
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        state.bad_fee_after_transfer_from_armed = armed;
+        if armed {
+            state.bad_fee_after_transfer_from_pending = false;
+        }
+    });
 }
 
 /// Wipe the dedup map. Tests that want explicit isolation between scenarios

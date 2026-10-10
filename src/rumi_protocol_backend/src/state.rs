@@ -36,6 +36,7 @@ mod three_usd_reserve_ingress_state_tests {
         ThreeUsdIngressNonInclusionScan, ThreeUsdRefundSource, ThreeUsdReserveIngressJournal,
         ThreeUsdReserveIngressPhase, ThreeUsdReserveIngressRequest,
         ThreeUsdReserveIngressTuple, PushSweepJournal, PushSweepRequest,
+        ThreeUsdReserveV1Cutover,
     };
     use candid::Principal;
     use icrc_ledger_types::icrc1::account::Account;
@@ -67,6 +68,8 @@ mod three_usd_reserve_ingress_state_tests {
         assert_eq!(decoded.amount_e8s, 33);
         assert_eq!(decoded.parent_absorb_id, None);
         assert_eq!(decoded.dispatch_amount_e8s, None);
+        assert!(!decoded.legacy_dispatch_retryable);
+        assert_eq!(decoded.resolution, None);
     }
 
     #[test]
@@ -84,7 +87,9 @@ mod three_usd_reserve_ingress_state_tests {
             dispatch_amount_e8s: None,
             dispatch_fee_e8s: None,
             dispatch_submitted: false,
+            legacy_dispatch_retryable: true,
             dispatch_block_index: None,
+            resolution: None,
         };
         state.pending_3usd_refunds.insert(row.op_nonce, row);
 
@@ -108,6 +113,26 @@ mod three_usd_reserve_ingress_state_tests {
         let state = super::State::default();
         assert!(!state.three_usd_reserve_ingress_enabled);
         assert!(state.three_usd_reserve_ingress_journals.is_empty());
+    }
+
+    #[test]
+    fn old_snapshot_without_cutover_field_defaults_to_quarantined() {
+        let mut state = super::State::default();
+        state.three_usd_reserve_v1_cutover = ThreeUsdReserveV1Cutover::NoLegacyExposure;
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let mut entries = match value {
+            ciborium::Value::Map(entries) => entries,
+            other => panic!("expected CBOR map, got {other:?}"),
+        };
+        entries.retain(|(key, _)| {
+            !matches!(key, ciborium::Value::Text(name) if name == "three_usd_reserve_v1_cutover")
+        });
+        let mut old_snapshot = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut old_snapshot).unwrap();
+        let decoded: super::State = ciborium::de::from_reader(old_snapshot.as_slice()).unwrap();
+        assert_eq!(decoded.three_usd_reserve_v1_cutover, ThreeUsdReserveV1Cutover::Quarantined);
     }
 
     fn submitted_journal() -> (ThreeUsdReserveIngressJournal, ThreeUsdReserveIngressRequest, ThreeUsdReserveIngressTuple) {
@@ -1801,14 +1826,17 @@ pub struct ReconciledAmm1DonationReceipt {
 /// blocks every non-sole-holder with `InsufficientPoolBalance`. This queue makes
 /// the refund durable: `process_pending_transfer` retries it (reserves subaccount
 /// -> SP) until success or MAX_PENDING_RETRIES, reusing `op_nonce` so the 3USD
-/// ledger deduplicates if a retry's reply was lost. Keyed by `op_nonce`.
+/// ledger deduplicates if a retry's reply was lost. Capped rows leave the timer;
+/// only a developer may rearm a fresh, known-unsent row. Keyed by `op_nonce`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy, candid::CandidType)]
 pub struct PendingThreeUsdRefund {
     /// The stability pool canister the 3USD is owed back to.
     pub stability_pool: Principal,
     /// The 3USD ledger the refund transfers on.
     pub ledger: Principal,
-    /// 3USD amount to refund (in e8s), already net of the ledger fee.
+    /// 3USD entitlement in e8s. Old rows (retryability marker defaults false)
+    /// store the historical amount sent with fee omitted; new legacy rows
+    /// store the full principal to credit, with the protocol fee pinned apart.
     pub amount_e8s: u64,
     /// Vault whose capped/failed liquidation stranded this refund (for tracing).
     pub vault_id: u64,
@@ -1833,8 +1861,27 @@ pub struct PendingThreeUsdRefund {
     /// upgrade/retry must hold as ambiguous rather than possibly duplicate it.
     #[serde(default)]
     pub dispatch_submitted: bool,
+    /// Provenance guard for automatic legacy dispatch. Rows decoded from
+    /// snapshots predating this field default false and require exact
+    /// candidate-block reconciliation; only rows created by the current
+    /// worker may set this true before their first dispatch.
+    #[serde(default)]
+    pub legacy_dispatch_retryable: bool,
     #[serde(default)]
     pub dispatch_block_index: Option<u64>,
+    /// Positive direct-ledger receipt for a legacy refund. Without it the
+    /// liability remains unresolved across the V1/V2 account cutover.
+    #[serde(default)]
+    pub resolution: Option<ThreeUsdRefundResolution>,
+}
+
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum ThreeUsdRefundResolution {
+    ReceiptVerified {
+        block_index: u64,
+        fee_e8s: u64,
+        reconciled_at_ns: u64,
+    },
 }
 
 #[derive(candid::CandidType, Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -2357,6 +2404,11 @@ pub struct State {
     pub three_usd_reserve_payout_operation_keys: BTreeMap<u128, ThreeUsdReserveIngressKey>,
     #[serde(default)]
     pub three_usd_reserve_ingress_enabled: bool,
+    /// Legacy V1 ingress cutover state. Missing fields from old snapshots are
+    /// quarantined because an interrupted, non-journaled V1 await is not
+    /// distinguishable from a completed call after upgrade.
+    #[serde(default)]
+    pub three_usd_reserve_v1_cutover: ThreeUsdReserveV1Cutover,
     /// Set only when the registered SP has called the V2 readiness handshake.
     /// This prevents an older SP Wasm from continuing V1 ingress after cutover.
     #[serde(default)]
@@ -2597,8 +2649,11 @@ pub struct State {
     /// by the developer principal. Read by the frontend via `get_protocol_config`.
     pub icpswap_routing_enabled: bool,
 
-    /// Cumulative 3USD (LP tokens) received from stability pool liquidations (e8s).
-    /// These sit in subaccount hash("protocol_3usd_reserves") on the 3USD ledger.
+    /// Net 3USD principal retained from stability pool reserve liquidations
+    /// (e8s), across the V1 hashed and V2 default-account rails. Proportional
+    /// refunds are excluded for new events; unresolved refunds are tracked
+    /// separately. Historical events retain their recorded gross amounts since
+    /// old payloads lack the denominator needed to infer a safe refund value.
     pub protocol_3usd_reserves: u64,
 
     // Admin mint cooldown tracking
@@ -3076,6 +3131,27 @@ pub struct State {
     pub chain_vault_id_counter: u64,
 }
 
+/// Upgrade-safe gate between the non-journaled V1 reserve path and V2's
+/// default-account liabilities. The digest records an operator attestation;
+/// it is not itself ledger proof.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum ThreeUsdReserveV1Cutover {
+    Quarantined,
+    NoLegacyExposure,
+    Reconciled {
+        operator: Principal,
+        resolved_at_ns: u64,
+        evidence_sha256: [u8; 32],
+    },
+    Retired,
+}
+
+impl Default for ThreeUsdReserveV1Cutover {
+    fn default() -> Self {
+        Self::Quarantined
+    }
+}
+
 fn default_check_vaults_alert_band_bps() -> u64 {
     crate::DEFAULT_CHECK_VAULTS_ALERT_BAND_BPS
 }
@@ -3199,6 +3275,7 @@ impl Default for State {
             three_usd_reserve_payout_candidate_scans: BTreeMap::new(),
             three_usd_reserve_payout_operation_keys: BTreeMap::new(),
             three_usd_reserve_ingress_enabled: false,
+            three_usd_reserve_v1_cutover: ThreeUsdReserveV1Cutover::Quarantined,
             three_usd_reserve_v2_client_ready: false,
             sp_three_usd_reserve_absorb_results_by_proof: BTreeMap::new(),
             mode: Mode::default(),
@@ -3379,6 +3456,7 @@ impl From<InitArg> for State {
             three_usd_reserve_payout_candidate_scans: BTreeMap::new(),
             three_usd_reserve_payout_operation_keys: BTreeMap::new(),
             three_usd_reserve_ingress_enabled: false,
+            three_usd_reserve_v1_cutover: ThreeUsdReserveV1Cutover::NoLegacyExposure,
             three_usd_reserve_v2_client_ready: false,
             sp_three_usd_reserve_absorb_results_by_proof: BTreeMap::new(),
             vault_id_to_vaults: BTreeMap::new(),
