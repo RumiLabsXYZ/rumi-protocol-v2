@@ -28,8 +28,9 @@ processing, which must be reconciled separately from snapshot safety.
 
 No snapshot was downloaded, created, replaced, deleted, or restored during
 this preflight. Before any replacement, preserve the exact old snapshot in
-an access-restricted encrypted location, verify every downloaded file and
-metadata hash, and obtain approval naming the exact replacement ID above.
+an access-restricted encrypted location, check its metadata, file sizes,
+and recorded chunk-store hashes for consistency, retain local file fingerprints, and obtain
+approval naming the exact replacement ID above.
 The current source-only approval for borrow recovery does not authorize this
 snapshot operation or a backend install.
 
@@ -47,7 +48,7 @@ The query was `icp canister status --public tfesu-vyaaa-aaaap-qrd7a-cai --networ
 
 1. Use the intended controller identity, `rumi_identity`, and confirm its principal is in the freshly read controller set. Stop if authorization or target identity is unclear.
 2. Read and save the complete controller-authorized status and settings, current module hash, running state, memory and cycle figures, and snapshot list. Check the current count, snapshot storage cost, and enough local encrypted disk for the full download. The reported inventory is already at the network limit of 10 snapshots per canister, so a plain `snapshot create` cannot be assumed to succeed.
-3. If a new snapshot is needed while the inventory is full, identify the oldest candidate from the fresh list. Before the maintenance window, download that existing snapshot to an encrypted, access-restricted location and validate its metadata, sizes, and file/chunk hashes. Preserve the complete verified copy and its manifest. For this historical snapshot, validate its own integrity; do not require its installed-module hash to equal today's live module hash. The live-hash equality check applies to the new pre-upgrade snapshot. That older snapshot is historical evidence and does not substitute for the new pre-upgrade snapshot.
+3. If a new snapshot is needed while the inventory is full, identify the oldest candidate from the fresh list. Before the maintenance window, download that existing snapshot to an encrypted, access-restricted location and validate its metadata, file sizes, and recorded chunk-store hashes. Record local SHA-256 fingerprints for every downloaded file. Preserve the complete verified copy and its manifest. For this historical snapshot, validate its own metadata and bytes; do not require its module hash to equal today's live module hash. The live-hash equality check applies to the new pre-upgrade snapshot. That older snapshot is historical evidence and does not substitute for the new pre-upgrade snapshot.
 4. Replacing an existing network snapshot requires a separate explicit approval naming the exact snapshot ID to replace. Only after the local copy has been verified and that approval is recorded may the operator use the CLI's `--replace <approved-snapshot-id>` option. Select the oldest candidate only if the separate approval names it. Never delete a snapshot to make room; `--replace` atomically keeps the old network snapshot until the new snapshot has been created successfully.
 5. Record the expected pre-upgrade live module hash and reviewed upgrade artifact hash in the operation record. Compare the fresh live hash with the expected value. A mismatch pauses the run for investigation.
 6. Coordinate the maintenance window with the separate pending Stability Pool snapshot owner. Keep the two canisters' inventories, approvals, snapshot IDs, and start/stop confirmations separate. Do not assume approval or completion of one authorizes or completes the other; avoid overlapping stops unless a coordinated window explicitly calls for it.
@@ -70,7 +71,7 @@ icp canister snapshot download "$BACKEND" "$OLD_SNAPSHOT_ID" \
   --output "$PRESERVE_DIR" --network ic --identity "$IDENTITY"
 ```
 
-Validate the candidate's metadata, file sizes, and file/chunk hashes using its own metadata and record a SHA-256 manifest in the restricted operation record. Keep all snapshot bytes private. A historical candidate may correctly have a different Wasm hash from the current live canister.
+Validate the candidate's metadata, file sizes, and recorded chunk-store hashes, then record local SHA-256 fingerprints for every downloaded file in the restricted operation record. The snapshot metadata does not supply trusted whole-file hashes for Wasm, heap, or stable memory; those local fingerprints support later comparison but do not independently authenticate the transfer. Keep all snapshot bytes private. A historical candidate may correctly have a different Wasm hash from the current live canister.
 
 ```sh
 BACKEND=tfesu-vyaaa-aaaap-qrd7a-cai
@@ -120,21 +121,21 @@ icp canister snapshot download tfesu-vyaaa-aaaap-qrd7a-cai "$SNAPSHOT_ID" \
   --output "$SNAPSHOT_DIR" --network ic --identity "$IDENTITY"
 
 # Record the transferred-file digest, then identify its format. The IC
-# module_hash is over the installed raw Wasm bytes, not a gzip container.
+# module_hash hashes the stored module bytes, which may be gzip-compressed.
 shasum -a 256 "$SNAPSHOT_DIR/wasm_module.bin"
-MODULE_MAGIC="$(od -An -tx1 -N3 "$SNAPSHOT_DIR/wasm_module.bin" | tr -d ' \n')"
-if [ "$MODULE_MAGIC" = "1f8b08" ]; then
+MODULE_MAGIC="$(od -An -tx1 -N4 "$SNAPSHOT_DIR/wasm_module.bin" | tr -d ' \n')"
+if [ "${MODULE_MAGIC%??}" = "1f8b08" ]; then
   gzip -t "$SNAPSHOT_DIR/wasm_module.bin" || exit 1
   gzip -dc "$SNAPSHOT_DIR/wasm_module.bin" | shasum -a 256
-elif [ "$MODULE_MAGIC" = "006173" ]; then
-  shasum -a 256 "$SNAPSHOT_DIR/wasm_module.bin"
+elif [ "$MODULE_MAGIC" = "0061736d" ]; then
+  : # Raw Wasm: its file digest was recorded above.
 else
   echo "Unrecognized Wasm module encoding; stop validation."
   exit 1
 fi
 ```
 
-Confirm the download completed and inspect `metadata.json` for the expected snapshot ID/timestamp and the recorded Wasm, heap, stable-memory, and chunk-store sizes and hashes. Validate all downloaded files/chunks against snapshot metadata. Record the transferred `wasm_module.bin` SHA-256 for file-integrity evidence. Determine the file format from its magic bytes: if gzip-compressed, verify decompression succeeds and compare the SHA-256 of the decompressed raw Wasm bytes with the fresh live `module_hash`; if raw Wasm, compare its file SHA-256 directly. The compressed-file digest is not interchangeable with the IC `module_hash`. The fresh pre-upgrade snapshot passes only if its installed-module hash equals the live hash recorded immediately before stopping (the 2026-10-08 observation was `1714712f12525a5058c288bde8f456b09e2e893e4ac51fe7a82992ac07b0ecf1`; use the fresh value at execution time). Any mismatch, missing file, unexplained size, or failed hash check means the backup is unverified and the upgrade must remain on hold. If interrupted, use the CLI's `--resume` option against the same directory, then repeat all validation. Retain the snapshot ID, metadata, and local SHA-256 manifest in the restricted operation record, not the snapshot bytes.
+Confirm the download completed and bind the CLI-reported snapshot ID to the destination directory and restricted operation record; the metadata does not itself contain that ID. Inspect `metadata.json` for the expected timestamp and recorded Wasm, heap, stable-memory, and chunk-store sizes. Validate each chunk-store file against its recorded chunk hash. Record local SHA-256 fingerprints of the Wasm, heap, and stable-memory files; the metadata does not provide independent whole-file hashes for those three files. The IC interface specification stores the original `wasm_module` bytes as `raw_module` and defines `module_hash` as SHA-256 of those stored bytes. A gzip upload is therefore hashed as gzip bytes; decompression is for parsing and optional content inspection, not for the live-hash comparison. For the fresh pre-upgrade snapshot, compare SHA-256 of its downloaded `wasm_module.bin` bytes with the live `module_hash` recorded immediately before stopping, after verifying the downloaded file represents the snapshot's original stored module bytes. The 2026-10-10 live observation was `1714712f12525a5058c288bde8f456b09e2e893e4ac51fe7a82992ac07b0ecf1`; use a fresh value at execution time. A historical candidate can legitimately have a different module hash. Any mismatch, missing file, unexplained size, or failed check means the backup remains unverified and the upgrade must remain on hold. If interrupted, use the CLI's `--resume` option against the same directory, then repeat all validation. Retain the snapshot ID, metadata, and local SHA-256 manifest in the restricted operation record, not the snapshot bytes.
 
 ## Recovery boundaries and hazards
 
@@ -147,5 +148,6 @@ The snapshot workflow itself performs no token transfer, mint, burn, withdrawal,
 - [ICP canister snapshots guide](https://docs.internetcomputer.org/guides/canister-management/snapshots/) — stopped-state requirement, CLI sequence, download files, resume behavior, restore semantics, snapshot limit and storage.
 - [ICP management canister snapshot reference](https://docs.internetcomputer.org/references/management-canister/) — snapshot methods and controller requirements.
 - [ICP interface specification](https://docs.internetcomputer.org/references/ic-interface-spec/) — certified `module_hash` is the SHA-256 hash of the currently installed module.
+- [ICP abstract behavior](https://docs.internetcomputer.org/references/ic-interface-spec/abstract-behavior/) — `module_hash = SHA-256(raw_module)`, `raw_module = A.wasm_module` at install, and snapshots retain that `raw_module` for module-data reads.
 - [Canister module format](https://docs.internetcomputer.org/references/ic-interface-spec/canister-interface/) — gzip-compressed Wasm is decompressed by the system before parsing as a Wasm module.
 - Repository production mapping: [`canister_ids.json`](../../canister_ids.json).
