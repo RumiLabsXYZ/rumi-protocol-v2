@@ -95,10 +95,26 @@ export interface VaultPullAdapter<T> {
 	beforeDispatch?(): void;
 	completed(view: VaultPullView): T;
 	acknowledge(operationId: bigint): Promise<void>;
+	reconcileFromBlock?(operationId: bigint, blockIndex: bigint): Promise<void>;
 }
 
 const STORAGE_PREFIX = 'rumi:vault-pull-operation:v1:';
 const NAT64_MAX = 18_446_744_073_709_551_615n;
+export const VAULT_PULL_STATUS_EVENT = 'rumi:vault-pull-status-change';
+
+function notifySubmittedVaultPull(owner: string): void {
+	if (typeof window === 'undefined') return;
+	window.dispatchEvent(new CustomEvent(VAULT_PULL_STATUS_EVENT, { detail: { owner } }));
+	if (typeof BroadcastChannel !== 'undefined') {
+		try {
+			const channel = new BroadcastChannel(VAULT_PULL_STATUS_EVENT);
+			channel.postMessage({ owner });
+			channel.close();
+		} catch {
+			// Cross-tab notification is advisory; held-operation handling remains authoritative.
+		}
+	}
+}
 
 export function vaultPullIntentKey(owner: string): string {
 	return `${STORAGE_PREFIX}${owner}`;
@@ -131,6 +147,11 @@ export function parseVaultPullIntent(raw: string | null): VaultPullIntent | null
 	} catch {
 		return null;
 	}
+}
+
+export function hasCompatibleVaultPullIntent(owner: string, operationId: bigint): boolean {
+	const intent = readIntent(owner);
+	return intent === null || intent.operationId === operationId.toString();
 }
 
 function serializeIntent(intent: VaultPullIntent): string {
@@ -228,7 +249,15 @@ export async function runVaultPullOperation<T>(args: {
 	adapter: VaultPullAdapter<T>;
 }): Promise<T> {
 	const { owner, request, adapter } = args;
-	return withCrossTabLock(owner, async () => {
+	return withCrossTabLock(owner, () => runVaultPullOperationLocked(owner, request, adapter));
+}
+
+async function runVaultPullOperationLocked<T>(
+	owner: string,
+	request: VaultPullRequest,
+	adapter: VaultPullAdapter<T>,
+	expectedRecoveredOperationId?: bigint
+): Promise<T> {
 		const assertOwner = () => {
 			adapter.assertCurrent?.();
 			if (adapter.currentOwner() !== owner)
@@ -247,12 +276,32 @@ export async function runVaultPullOperation<T>(args: {
 			const operationId = BigInt(intent.operationId);
 			if (status.acknowledged_through >= operationId) {
 				clearIntent(owner, operationId);
+				if (expectedRecoveredOperationId === operationId) {
+					throw new Error(
+						`Vault operation ${operationId} was acknowledged during recovery. Refresh vault data before starting another request.`
+					);
+				}
 				intent = null;
 			} else if (active) {
 				validateActive(active, intent);
 			} else if (operationId !== status.acknowledged_through + 1n) {
 				throw new Error(
 					`Saved vault operation ${operationId} no longer matches backend sequence ${status.acknowledged_through}. It remains held for recovery.`
+				);
+			}
+		}
+		if (expectedRecoveredOperationId !== undefined) {
+			if (!intent || BigInt(intent.operationId) !== expectedRecoveredOperationId || !active) {
+				throw new Error(
+					`Recovered vault operation ${expectedRecoveredOperationId} no longer has its active backend record. Its exact intent remains held.`
+				);
+			}
+			validateActive(active, intent);
+			if (
+				!('PullConfirmed' in active.phase || 'VaultCredited' in active.phase || 'Completed' in active.phase)
+			) {
+				throw new Error(
+					`Vault operation ${expectedRecoveredOperationId} is not in a verified post-pull phase. Its exact intent remains held.`
 				);
 			}
 		}
@@ -312,7 +361,10 @@ export async function runVaultPullOperation<T>(args: {
 			// ACK it here, because doing so would make that exact retry stale.
 		}
 
-		if (currentView && 'Submitted' in currentView.phase) throw new Error(heldMessage(currentView));
+		if (currentView && 'Submitted' in currentView.phase) {
+			notifySubmittedVaultPull(owner);
+			throw new Error(heldMessage(currentView));
+		}
 
 		if (
 			!currentView ||
@@ -360,6 +412,7 @@ export async function runVaultPullOperation<T>(args: {
 		}
 		validateActive(currentView, intent);
 
+		if ('Submitted' in currentView.phase) notifySubmittedVaultPull(owner);
 		if (!terminal(currentView)) throw new Error(heldMessage(currentView));
 		if ('SafeNoEffect' in currentView.phase) {
 			const message = currentView.phase.SafeNoEffect.message;
@@ -388,5 +441,64 @@ export async function runVaultPullOperation<T>(args: {
 		}
 		clearIntent(owner, operationId);
 		return result;
+	}
+
+/** Reconcile one explicitly supplied candidate for the currently saved Submitted operation. */
+export async function recoverSubmittedVaultPullFromBlock<T>(args: {
+	owner: string;
+	blockIndex: bigint;
+	adapter: VaultPullAdapter<T>;
+}): Promise<T> {
+	const { owner, blockIndex, adapter } = args;
+	if (blockIndex < 0n || blockIndex > NAT64_MAX) {
+		throw new Error('Enter a nonnegative ledger block index within the supported range. The saved operation remains held.');
+	}
+	const reconcile = adapter.reconcileFromBlock;
+	if (!reconcile) throw new Error('Exact-block recovery is unavailable. The saved operation remains held.');
+	return withCrossTabLock(owner, async () => {
+		const assertOwner = () => {
+			adapter.assertCurrent?.();
+			if (adapter.currentOwner() !== owner)
+				throw new Error('Wallet identity changed during recovery. The saved operation remains held for its original wallet.');
+		};
+		assertOwner();
+		let intent = readIntent(owner);
+		const before = await adapter.getStatus();
+		assertOwner();
+		const active = before.active[0];
+		if (!active || !('Submitted' in active.phase))
+			throw new Error(`There is no active Submitted vault operation to recover. Refresh its backend status.`);
+		if (!intent) {
+			intent = {
+				version: 1,
+				owner,
+				operationId: active.operation_id.toString(),
+				request: active.request,
+				savedAt: Date.now()
+			};
+			saveIntent(intent);
+		}
+		const operationId = BigInt(intent.operationId);
+		validateActive(active, intent);
+		let reconcileError: unknown;
+		try {
+			await reconcile(operationId, blockIndex);
+		} catch (error) {
+			reconcileError = error;
+		}
+		assertOwner();
+		const verified = await adapter.getStatus();
+		assertOwner();
+		const recovered = verified.active[0];
+		if (
+			!recovered ||
+			recovered.operation_id !== operationId ||
+			!('PullConfirmed' in recovered.phase || 'VaultCredited' in recovered.phase || 'Completed' in recovered.phase)
+		) {
+			if (reconcileError) throw reconcileError;
+			throw new Error(`Block ${blockIndex} did not move vault operation ${operationId} past Submitted. Its exact intent remains saved.`);
+		}
+		validateActive(recovered, intent);
+		return runVaultPullOperationLocked(owner, intent.request, adapter, operationId);
 	});
 }

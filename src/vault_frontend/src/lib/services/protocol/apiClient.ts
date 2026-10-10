@@ -69,9 +69,12 @@ import { TokenService } from '../tokenService';
 import { mapLiquidationSuccessWithFee } from '../xrpPayoutHelpers';
 import {
   runVaultPullOperation,
+  recoverSubmittedVaultPullFromBlock,
+  hasCompatibleVaultPullIntent,
   normalizeVaultPullStatus,
   type VaultPullRequest,
   type VaultPullView,
+  type VaultPullAdapter,
 } from './vaultOperationJournal';
 
 
@@ -356,6 +359,7 @@ private static async refreshVaultData(): Promise<void> {
       request: VaultPullRequest,
       ctx?: ActionBoundContext,
       lifecycle?: { onApprovalMayHaveMutated?: () => void; onDispatch?: () => void },
+      recoveryBlockIndex?: bigint,
     ): Promise<VaultOperationResult> {
       const owner = ApiClient.currentPrincipalText();
       if (!owner || !get(walletStore).isConnected) {
@@ -430,10 +434,7 @@ private static async refreshVaultData(): Promise<void> {
         throw new Error('Completed vault operation has an unknown result shape.');
       };
 
-      return runVaultPullOperation<VaultOperationResult>({
-        owner,
-        request,
-        adapter: {
+      const adapter: VaultPullAdapter<VaultOperationResult> = {
           currentOwner: () => ApiClient.currentPrincipalText(),
           assertCurrent: assertVaultOwner,
           getStatus: async () => {
@@ -500,11 +501,81 @@ private static async refreshVaultData(): Promise<void> {
           beforeDispatch: () => lifecycle?.onDispatch?.(),
           completed,
           acknowledge: async (operationId) => {
+            assertVaultOwner();
             const response = await actor.ack_vault_operation({ operation_id: operationId });
+            assertVaultOwner();
             if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
           },
-        },
-      });
+          reconcileFromBlock: async (operationId: bigint, blockIndex: bigint) => {
+            assertVaultOwner();
+            const response = await actor.reconcile_vault_collateral_pull_from_block(
+              { operation_id: operationId }, blockIndex
+            );
+            assertVaultOwner();
+            if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+          },
+        };
+      if (recoveryBlockIndex !== undefined) {
+        return recoverSubmittedVaultPullFromBlock<VaultOperationResult>({
+          owner, blockIndex: recoveryBlockIndex, adapter,
+        });
+      }
+      return runVaultPullOperation<VaultOperationResult>({ owner, request, adapter });
+    }
+
+    /** Return the authenticated active Submitted operation for the active wallet. */
+    static async getSubmittedVaultCollateralPull(): Promise<{ operationId: bigint; request: VaultPullRequest } | null> {
+      if (USE_MOCK_DATA) return null;
+      const walletAtStart = get(walletStore);
+      const owner = walletAtStart.principal?.toText();
+      const walletType = get(currentWalletType);
+      const generation = get(walletSessionGeneration);
+      if (!walletAtStart.isConnected || walletAtStart.loading || !owner || !walletType) return null;
+      const ctx: ActionBoundContext = {
+        expectedPrincipalText: owner,
+        assertCurrent: () => get(walletStore).isConnected
+          && !get(walletStore).loading
+          && get(currentWalletType) === walletType
+          && get(walletSessionGeneration) === generation,
+      };
+      assertActionBoundContextCurrent(ctx);
+      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+      const response = await actor.get_vault_operation_status();
+      assertActionBoundContextCurrent(ctx);
+      if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+      const active = normalizeVaultPullStatus(response.Ok as any).active[0];
+      if (!active || !('Submitted' in active.phase)) return null;
+      return { operationId: active.operation_id, request: active.request };
+    }
+
+    /** Verify and recover the currently saved Submitted operation by exact block index. */
+    static async recoverSubmittedVaultCollateralPull(blockIndex: bigint): Promise<VaultOperationResult> {
+      const walletAtStart = get(walletStore);
+      const owner = walletAtStart.principal?.toText();
+      const walletType = get(currentWalletType);
+      const generation = get(walletSessionGeneration);
+      if (!walletAtStart.isConnected || walletAtStart.loading || !owner || !walletType) {
+        throw new Error('Connect the wallet that owns the saved vault operation.');
+      }
+      const ctx: ActionBoundContext = {
+        expectedPrincipalText: owner,
+        assertCurrent: () => get(walletStore).isConnected
+          && !get(walletStore).loading
+          && get(currentWalletType) === walletType
+          && get(walletSessionGeneration) === generation,
+      };
+      assertActionBoundContextCurrent(ctx);
+      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+      const response = await actor.get_vault_operation_status();
+      assertActionBoundContextCurrent(ctx);
+      if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+      const active = normalizeVaultPullStatus(response.Ok as any).active[0];
+      if (!active || !('Submitted' in active.phase) || !hasCompatibleVaultPullIntent(owner, active.operation_id)) {
+        throw new Error('There is no matching saved Submitted vault operation to recover. Refresh the vault view.');
+      }
+      return ApiClient.runVaultCollateralPull(active.request, ctx, undefined, blockIndex);
     }
 
     /**
