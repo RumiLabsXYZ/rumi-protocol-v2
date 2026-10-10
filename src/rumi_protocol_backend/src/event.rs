@@ -2897,13 +2897,36 @@ pub fn record_margin_transfer(
     payout_kind: PendingPayoutKind,
     block_index: u64,
 ) {
-    record_event(&Event::MarginTransfer {
+    record_margin_transfer_at(
+        state,
         vault_id,
+        owner,
+        operation_id,
+        payout_kind,
         block_index,
-        operation_id: Some(operation_id),
-        payout_kind: Some(payout_kind),
-        timestamp: Some(now()),
-    });
+        now(),
+    );
+}
+
+pub(crate) fn record_margin_transfer_at(
+    state: &mut State,
+    vault_id: u64,
+    owner: Principal,
+    operation_id: u128,
+    payout_kind: PendingPayoutKind,
+    block_index: u64,
+    timestamp_ns: u64,
+) {
+    crate::storage::record_event_at(
+        &Event::MarginTransfer {
+            vault_id,
+            block_index,
+            operation_id: Some(operation_id),
+            payout_kind: Some(payout_kind),
+            timestamp: Some(timestamp_ns),
+        },
+        timestamp_ns,
+    );
     let _ = owner;
     state.remove_pending_payout(operation_id);
 }

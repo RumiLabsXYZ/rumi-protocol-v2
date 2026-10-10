@@ -9712,6 +9712,14 @@ async fn recover_pending_payout(operation_id: u128) -> Result<bool, ProtocolErro
             "Only the payout owner can recover it".to_string(),
         ));
     }
+    if let Some(recovered) = rumi_protocol_backend::recover_three_usd_reserve_payout_candidate(
+        operation_id,
+        caller,
+    )
+    .await
+    {
+        return Ok(recovered);
+    }
     if transfer.held_for_manual_retry || transfer.reconciliation_required {
         if !transfer.too_old_confirmed {
             return Err(ProtocolError::GenericError(
