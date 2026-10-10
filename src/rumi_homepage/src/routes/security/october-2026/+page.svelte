@@ -2,8 +2,8 @@
   const report = {
     date: 'October 10, 2026',
     datetime: '2026-10-10',
-    source: 'origin/main at afa23b1d963f · includes PR #504',
-    snapshot: 'Mainnet readback · October 10, 2026'
+    source: 'origin/main at 8ac01e6f7586 · includes PR #505',
+    snapshot: 'Mainnet readback · October 10, 2026 · AMM maintenance'
   };
 
   const states = [
@@ -49,8 +49,8 @@
     {
       pr: '#504',
       title: '3USD account boundary and AMM custody',
-      summary: 'Source merged on October 10. The matching Rumi AMM upgrade is installed at module SHA-256 832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2. Its single 3USD/ICP pool retained its reserves and LP supply, with no pending claims, and its 3USD ledger balance matched the reserve at readback. The 3pool account guard is not installed; the backend V1/V2 cutover and historical account compatibility remain under review.',
-      state: 'AMM installed · 3pool guard held',
+      summary: 'Source merged on October 10. The matching Rumi AMM upgrade is installed at module SHA-256 832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2. Its single 3USD/ICP pool retained its reserves and LP supply, with no pending claims, and its 3USD ledger balance matched the reserve at readback. Later on October 10, AMM maintenance mode was enabled during a separate transfer-recovery review; a fresh query confirmed the mode active and the pending-claim list empty. The 3pool account guard is not installed; the backend V1/V2 cutover and historical account compatibility remain under review.',
+      state: 'AMM installed · maintenance on · 3pool guard held',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/504'
     },
@@ -114,6 +114,11 @@
 
   const limits = [
     {
+      system: 'AMM',
+      status: 'Maintenance mode active',
+      detail: 'New swaps and liquidity deposits are temporarily held while transfer recovery is reviewed. The current canister source leaves the liquidity withdrawal route callable during maintenance. This is an operational hold, not a claim that any historical transfer has been settled.'
+    },
+    {
       system: 'Points',
       status: 'Epoch 18 held · epoch 19 scheduled',
       detail: 'The October 8 release evidence confirms the deployed module and completed historical adjustments. The epoch 18 hold and disabled driver remain in place; future flat 4× accrual is scheduled for epoch 19, not active.'
@@ -130,7 +135,7 @@
   <title>October 2026 Security Status · Rumi Protocol</title>
   <meta
     name="description"
-    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, and October 10 mainnet readback status."
+    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, October 10 mainnet readback, and AMM maintenance status."
   />
 </svelte:head>
 
@@ -144,14 +149,15 @@
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
             This snapshot separates merged source from mainnet installation. The October 10
-            Cycle Sentinel and AMM releases are installed with recorded state readbacks. The
-            Stability Pool remains paused; the backend, bot, and 3pool account guard are not yet installed.
+            Cycle Sentinel and AMM releases are installed with recorded state readbacks. The AMM
+            is now in maintenance mode and the Stability Pool remains paused; the backend, bot,
+            and 3pool account guard are not yet installed.
           </p>
         </div>
         <aside class="report-stamp" aria-label={report.snapshot}>
           <span class="stamp-label">Publication state</span>
           <strong>{report.snapshot}</strong>
-          <p>The AMM and Cycle Sentinel module hashes and post-upgrade readbacks are dated October 10. The 3pool PR #483 and Points release observations are dated October 9 and October 8 respectively. The Stability Pool pause was confirmed again on October 10. This page combines those time-scoped records; it is not live telemetry.</p>
+          <p>The AMM and Cycle Sentinel module hashes and post-upgrade readbacks are dated October 10. AMM maintenance mode was confirmed later that day. The 3pool PR #483 and Points release observations are dated October 9 and October 8 respectively. The Stability Pool pause was confirmed again on October 10. This page combines those time-scoped records; it is not live telemetry.</p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
