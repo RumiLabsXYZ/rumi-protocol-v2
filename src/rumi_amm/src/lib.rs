@@ -1362,6 +1362,21 @@ fn pocketic_get_outbound_payouts() -> Vec<state::OutboundPayout> {
     read_state(|s| s.outbound_payouts.clone())
 }
 
+/// Test-only adapter entry point for the canonical ICP `query_blocks` proof.
+/// It is deliberately absent from production Wasm and does not mutate AMM state.
+#[cfg(feature = "pocketic-test")]
+#[update]
+async fn pocketic_verify_native_payout_block(
+    ledger: Principal,
+    block_index: u64,
+    payout: state::OutboundPayout,
+) -> Result<(), AmmError> {
+    caller_is_admin()?;
+    crate::payout_reconciliation::verify_exact_block(ledger, block_index, &payout)
+        .await
+        .map_err(|reason| AmmError::TransferFailed { token: "native ICP proof".into(), reason })
+}
+
 #[cfg(feature = "pocketic-test")]
 #[update]
 fn pocketic_prune_accounting_events() -> Result<(), AmmError> {
