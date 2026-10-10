@@ -1192,10 +1192,22 @@ impl StabilityPoolState {
     // ─── Deposits ───
 
     pub fn add_deposit(&mut self, user: Principal, token_ledger: Principal, amount: u64) {
+        self.add_deposit_at(user, token_ledger, amount, ic_cdk::api::time());
+    }
+
+    /// Add a deposit using an explicit timestamp, so state transitions remain
+    /// usable by tests and other off-canister callers.
+    pub fn add_deposit_at(
+        &mut self,
+        user: Principal,
+        token_ledger: Principal,
+        amount: u64,
+        now_ns: u64,
+    ) {
         let position = self
             .deposits
             .entry(user)
-            .or_insert_with(|| DepositPosition::new(ic_cdk::api::time()));
+            .or_insert_with(|| DepositPosition::new(now_ns));
         *position
             .stablecoin_balances
             .entry(token_ledger)
@@ -7194,8 +7206,8 @@ mod tests {
         let mut state = test_state_with_3usd();
         let ledger = three_usd_ledger();
         let collateral = icp_ledger();
-        state.add_deposit(user_a(), ledger, 1);
-        state.add_deposit(user_b(), ledger, 1);
+        state.add_deposit_at(user_a(), ledger, 1, 123);
+        state.add_deposit_at(user_b(), ledger, 1, 123);
 
         state
             .process_three_usd_reserve_gains_exact_at(
@@ -7237,7 +7249,7 @@ mod tests {
         let mut state = test_state_with_3usd();
         let ledger = three_usd_ledger();
         let collateral = icp_ledger();
-        state.add_deposit(user_a(), ledger, 1);
+        state.add_deposit_at(user_a(), ledger, 1, 123);
         let before = state.clone();
         assert!(state
             .process_three_usd_reserve_gains_exact_at(

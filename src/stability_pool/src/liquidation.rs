@@ -3411,6 +3411,22 @@ fn apply_three_usd_absorb_settlement(
     fee_total_e8s: u64,
     gains: Option<(u64, u64, u64)>,
 ) -> Result<(), StabilityPoolError> {
+    apply_three_usd_absorb_settlement_at(
+        state,
+        intent,
+        fee_total_e8s,
+        gains,
+        ic_cdk::api::time(),
+    )
+}
+
+fn apply_three_usd_absorb_settlement_at(
+    state: &mut StabilityPoolState,
+    intent: &ThreeUsdReserveAbsorbIntent,
+    fee_total_e8s: u64,
+    gains: Option<(u64, u64, u64)>,
+    timestamp: u64,
+) -> Result<(), StabilityPoolError> {
     if state.get_pending_three_usd_absorb(intent.vault_id).as_ref() != Some(intent) {
         return Err(StabilityPoolError::SystemBusy);
     }
@@ -3465,7 +3481,7 @@ fn apply_three_usd_absorb_settlement(
             realized_3usd,
             collateral_net_e8s,
             collateral_price_e8s,
-            ic_cdk::api::time(),
+            timestamp,
         )?;
         let gains_after = state
             .deposits
@@ -4824,11 +4840,12 @@ mod tests {
         let intent = state.prepare_three_usd_absorb(
             42, 500, 1_000, ledger, principal(14), 100_000_000,
         ).expect("persist intent before recovery");
-        let result = apply_three_usd_absorb_settlement(
+        let result = apply_three_usd_absorb_settlement_at(
             &mut state,
             &intent,
             0,
             Some((1_000, 1, 100_000_000)),
+            123,
         );
         assert!(result.is_err(), "backend absorption is not proof that collateral reached the pool");
         assert_eq!(state.get_pending_three_usd_absorb(42), Some(intent));
@@ -4849,13 +4866,13 @@ mod tests {
             .insert(ledger, 1_000_000_000_000_000_000);
         let first = principal(21);
         let second = principal(22);
-        state.add_deposit(first, ledger, 1);
-        state.add_deposit(second, ledger, 1);
+        state.add_deposit_at(first, ledger, 1, 123);
+        state.add_deposit_at(second, ledger, 1, 123);
         let intent = state
             .prepare_three_usd_absorb(42, 1, 1, ledger, collateral, 100_000_000)
             .expect("immutable request persists");
 
-        apply_three_usd_absorb_settlement(&mut state, &intent, 0, Some((1, 7, 100_000_000)))
+        apply_three_usd_absorb_settlement_at(&mut state, &intent, 0, Some((1, 7, 100_000_000)), 123)
             .expect("exact receipt plus exact debit promotes");
         assert_eq!(state.total_stablecoin_balances.get(&ledger), Some(&1));
         assert_eq!(
@@ -4869,7 +4886,7 @@ mod tests {
             .unwrap()
             .contains(&intent.absorb_id));
         assert!(
-            apply_three_usd_absorb_settlement(&mut state, &intent, 0, Some((1, 7, 100_000_000)))
+            apply_three_usd_absorb_settlement_at(&mut state, &intent, 0, Some((1, 7, 100_000_000)), 123)
                 .is_err(),
             "completed absorb cannot promote twice"
         );
