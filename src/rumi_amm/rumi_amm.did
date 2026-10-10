@@ -412,6 +412,7 @@ service : (AmmInitArgs) -> {
   get_outbound_payout_status : (nat64) -> (variant { Ok : OutboundPayout; Err : AmmError }) query;
   get_unresolved_outbound_payouts : (nat64, nat64) -> (variant { Ok : vec OutboundPayout; Err : AmmError }) query;
   recover_outbound_payout : (nat64, opt nat64) -> (variant { Ok; Err : AmmError });
+  reconcile_inbound_leg_from_block : (principal, blob, nat64, nat64) -> (variant { Ok; Err : AmmError });
   get_lp_balance : (text, principal) -> (nat) query;
 
   is_pool_creation_open : () -> (bool) query;
