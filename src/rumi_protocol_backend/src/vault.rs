@@ -6522,8 +6522,232 @@ where
         dispatch,
         now,
         compound_operation_id,
-        |fee| async move { crate::treasury::mint_borrowing_fee_to_treasury(fee).await },
+        |_, fee_op_nonce| async move {
+            if let Some(fee_op_nonce) = fee_op_nonce {
+                if let Err(error) = drive_pending_borrow_fee_mint(fee_op_nonce).await {
+                    log!(INFO, "[borrow_fee] durable outbox remains pending: borrow_op_nonce={} error={:?}", fee_op_nonce, error);
+                }
+            }
+        },
     ).await
+}
+
+/// Advance a durable borrowing-fee outbox row. Every external mint uses the
+/// exact tuple stored with the row; an ambiguous TooOld result is held for
+/// positive receipt proof and is never resubmitted.
+async fn drive_pending_borrow_fee_mint(
+    borrow_op_nonce: u128,
+) -> Result<(), ProtocolError> {
+    drive_pending_borrow_fee_mint_for_recovery(borrow_op_nonce, None).await
+}
+
+async fn drive_pending_borrow_fee_mint_for_recovery(
+    borrow_op_nonce: u128,
+    developer_guard: Option<Principal>,
+) -> Result<(), ProtocolError> {
+    drive_pending_borrow_fee_mint_with_developer_guard(
+        borrow_op_nonce,
+        |tuple| async move { management::mint_icusd_with_borrow_tuple(&tuple).await },
+        |treasury, amount, block_index| async move {
+            crate::treasury::notify_treasury_borrowing_fee_once(
+                treasury, amount, block_index,
+            ).await
+        },
+        developer_guard,
+    ).await
+}
+
+async fn drive_pending_borrow_fee_mint_with<F, Fut, N, NFut>(
+    borrow_op_nonce: u128,
+    dispatch: F,
+    notify: N,
+) -> Result<(), ProtocolError>
+where
+    F: FnOnce(crate::state::BorrowMintTuple) -> Fut,
+    Fut: std::future::Future<Output = Result<u64, icrc_ledger_types::icrc1::transfer::TransferError>>,
+    N: FnOnce(Principal, u64, u64) -> NFut,
+    NFut: std::future::Future<Output = Result<u64, String>>,
+{
+    drive_pending_borrow_fee_mint_with_developer_guard(
+        borrow_op_nonce,
+        dispatch,
+        notify,
+        None,
+    ).await
+}
+
+/// A Some guard means a manually recovering developer must still be the
+/// configured developer after each external await before this call advances
+/// durable state or begins another external call. Owner and automatic
+/// post-borrow execution use None because their authority is not revocable by
+/// changing developer_principal.
+async fn drive_pending_borrow_fee_mint_with_developer_guard<F, Fut, N, NFut>(
+    borrow_op_nonce: u128,
+    dispatch: F,
+    notify: N,
+    developer_guard: Option<Principal>,
+) -> Result<(), ProtocolError>
+where
+    F: FnOnce(crate::state::BorrowMintTuple) -> Fut,
+    Fut: std::future::Future<Output = Result<u64, icrc_ledger_types::icrc1::transfer::TransferError>>,
+    N: FnOnce(Principal, u64, u64) -> NFut,
+    NFut: std::future::Future<Output = Result<u64, String>>,
+{
+    let Some(mut journal) = read_state(|s| {
+        s.pending_borrow_fee_mints.get(&borrow_op_nonce).cloned()
+    }) else {
+        return Err(ProtocolError::GenericError("no pending borrowing-fee mint".into()));
+    };
+    validate_borrow_fee_outbox_row(borrow_op_nonce, &journal)
+        .map_err(ProtocolError::GenericError)?;
+    match journal.phase {
+        crate::state::BorrowFeeMintPhase::TreasuryMissing
+        => return Err(ProtocolError::GenericError("treasury destination was missing at debt commit; developer binding is required".into())),
+        crate::state::BorrowFeeMintPhase::ReceiptRecoveryRequired => return Err(ProtocolError::GenericError(
+            "borrowing-fee mint is ambiguous after TooOld; submit an exact positive ICRC-3 receipt".into()
+        )),
+        crate::state::BorrowFeeMintPhase::NotificationPending { mint_block_index } => {
+            return notify_pending_borrow_fee_mint_with(
+                borrow_op_nonce, journal, mint_block_index, notify, developer_guard,
+            ).await;
+        }
+        crate::state::BorrowFeeMintPhase::SubmittedOrUnknown => {}
+    }
+    let Some(tuple) = journal.tuple.clone() else {
+        return Err(ProtocolError::GenericError("borrowing-fee row has no exact mint tuple".into()));
+    };
+    let Some(next_count) = journal.dispatch_attempt_count.and_then(|count| count.checked_add(1)) else {
+        return Err(ProtocolError::GenericError("borrowing-fee dispatch attempt counter unavailable".into()));
+    };
+    let reserved = mutate_state(|s| {
+        let Some(current) = s.pending_borrow_fee_mints.get_mut(&borrow_op_nonce) else { return false; };
+        if current != &journal || current.phase != crate::state::BorrowFeeMintPhase::SubmittedOrUnknown {
+            return false;
+        }
+        current.dispatch_attempt_count = Some(next_count);
+        true
+    });
+    if !reserved {
+        return Err(ProtocolError::TemporarilyUnavailable("borrowing-fee row changed before dispatch".into()));
+    }
+    journal.dispatch_attempt_count = Some(next_count);
+    match dispatch(tuple).await {
+        Ok(block_index) => {
+            ensure_borrow_fee_developer_authority(developer_guard)?;
+            let advanced = mutate_state(|s| {
+                let Some(current) = s.pending_borrow_fee_mints.get_mut(&borrow_op_nonce) else { return false; };
+                if current != &journal { return false; }
+                current.phase = crate::state::BorrowFeeMintPhase::NotificationPending { mint_block_index: block_index };
+                true
+            });
+            if advanced {
+                journal.phase = crate::state::BorrowFeeMintPhase::NotificationPending { mint_block_index: block_index };
+                notify_pending_borrow_fee_mint_with(
+                    borrow_op_nonce, journal, block_index, notify, developer_guard,
+                ).await
+            } else {
+                Err(ProtocolError::TemporarilyUnavailable("confirmed borrowing-fee mint receipt could not advance its row".into()))
+            }
+        }
+        Err(icrc_ledger_types::icrc1::transfer::TransferError::TooOld) => {
+            ensure_borrow_fee_developer_authority(developer_guard)?;
+            let held = mutate_state(|s| {
+                if let Some(current) = s.pending_borrow_fee_mints.get_mut(&borrow_op_nonce) {
+                    if current == &journal {
+                        current.phase = crate::state::BorrowFeeMintPhase::ReceiptRecoveryRequired;
+                        return true;
+                    }
+                }
+                false
+            });
+            Err(ProtocolError::GenericError(if held {
+                "borrowing-fee mint returned TooOld; row is held for exact positive ICRC-3 receipt recovery".into()
+            } else {
+                "borrowing-fee mint returned TooOld but its row changed; no new mint was sent".into()
+            }))
+        }
+        Err(error) => {
+            // Transport failures may have committed. Keep the exact tuple and
+            // allow only deduplicated replay while the ledger accepts it.
+            log!(INFO, "[borrow_fee] mint unresolved; exact tuple retained: borrow_op_nonce={} error={:?}", borrow_op_nonce, error);
+            Err(ProtocolError::TemporarilyUnavailable(format!("borrowing-fee mint outcome unresolved; retry uses the exact retained tuple: {error:?}")))
+        }
+    }
+}
+
+async fn notify_pending_borrow_fee_mint_with<N, NFut>(
+    borrow_op_nonce: u128,
+    journal: crate::state::BorrowFeeMintJournal,
+    mint_block_index: u64,
+    notify: N,
+    developer_guard: Option<Principal>,
+) -> Result<(), ProtocolError>
+where
+    N: FnOnce(Principal, u64, u64) -> NFut,
+    NFut: std::future::Future<Output = Result<u64, String>>,
+{
+    validate_borrow_fee_outbox_row(borrow_op_nonce, &journal)
+        .map_err(ProtocolError::GenericError)?;
+    if journal.phase
+        != (crate::state::BorrowFeeMintPhase::NotificationPending { mint_block_index })
+    {
+        return Err(ProtocolError::GenericError(
+            "borrowing-fee notification block does not match the confirmed journal phase".into(),
+        ));
+    }
+    let Some(treasury) = journal.treasury else {
+        return Err(ProtocolError::GenericError("treasury destination is missing".into()));
+    };
+    ensure_borrow_fee_developer_authority(developer_guard)?;
+    let result = notify(treasury, journal.to_treasury_e8s, mint_block_index).await;
+    if result.is_ok() {
+        ensure_borrow_fee_developer_authority(developer_guard)?;
+        let removed = mutate_state(|s| {
+            if s.pending_borrow_fee_mints.get(&borrow_op_nonce).is_some_and(|current| {
+                current == &journal
+                    && current.phase == crate::state::BorrowFeeMintPhase::NotificationPending { mint_block_index }
+            }) {
+                s.pending_borrow_fee_mints.remove(&borrow_op_nonce);
+                return true;
+            }
+            false
+        });
+        if removed { return Ok(()); }
+        return Err(ProtocolError::TemporarilyUnavailable("treasury recorded the fee but the outbox row changed before completion".into()));
+    }
+    Err(ProtocolError::TemporarilyUnavailable(format!("treasury fee notification remains pending: {}", result.unwrap_err())))
+}
+
+fn ensure_borrow_fee_developer_authority(
+    developer_guard: Option<Principal>,
+) -> Result<(), ProtocolError> {
+    if developer_guard.is_some_and(|expected| read_state(|s| s.developer_principal) != expected) {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+    Ok(())
+}
+
+fn validate_borrow_fee_outbox_row(
+    key_borrow_op_nonce: u128,
+    journal: &crate::state::BorrowFeeMintJournal,
+) -> Result<(), String> {
+    if journal.borrow_op_nonce != key_borrow_op_nonce {
+        return Err("borrowing-fee outbox key does not match its source borrow nonce".into());
+    }
+    if journal.to_treasury_e8s == 0
+        || journal.to_repay_e8s.checked_add(journal.to_treasury_e8s)
+            != Some(journal.fee_amount_e8s)
+    {
+        return Err("inconsistent borrowing-fee split; row remains held".into());
+    }
+    match (journal.treasury, journal.tuple.as_ref()) {
+        (Some(treasury), Some(tuple))
+            if tuple.destination == treasury
+                && tuple.amount_e8s == journal.to_treasury_e8s => Ok(()),
+        (None, None)
+            if journal.phase == crate::state::BorrowFeeMintPhase::TreasuryMissing => Ok(()),
+        _ => Err("inconsistent borrowing-fee treasury destination or mint tuple; row remains held".into()),
+    }
 }
 
 async fn dispatch_borrow_mint_with_post_commit<F, Fut, N, Post, PostFut>(
@@ -6539,7 +6763,7 @@ where
         Output = Result<u64, icrc_ledger_types::icrc1::transfer::TransferError>,
     >,
     N: FnOnce() -> u64,
-    Post: FnOnce(ICUSD) -> PostFut,
+    Post: FnOnce(ICUSD, Option<u128>) -> PostFut,
     PostFut: std::future::Future<Output = ()>,
 {
     if journal.phase == crate::state::BorrowMintPhase::SubmittedOrUnknown {
@@ -6695,10 +6919,14 @@ where
                     journal.vault_id, block_index
                 )));
             }
+            let fee_amount = ICUSD::new(journal.fee_amount_e8s);
             let committed = mutate_state(|s| {
                 if s.pending_borrow_mints.get(&confirmed_journal.vault_id)
                     != Some(&confirmed_journal)
                 {
+                    return false;
+                }
+                if s.pending_borrow_fee_mints.contains_key(&journal.tuple.op_nonce) {
                     return false;
                 }
                 let vault_matches = s.vault_id_to_vaults.get(&journal.vault_id).is_some_and(|vault| {
@@ -6734,15 +6962,57 @@ where
                 } else {
                     None
                 };
+                let timestamp_ns = now();
                 crate::event::record_borrow_from_vault_at(
                     s,
                     journal.vault_id,
                     ICUSD::new(journal.borrowed_amount_e8s),
-                    ICUSD::new(journal.fee_amount_e8s),
+                    fee_amount,
                     block_index,
                     journal.owner,
-                    now(),
+                    timestamp_ns,
                 );
+                let routing = crate::treasury::plan_fee_routing_at(
+                    s,
+                    fee_amount,
+                    crate::event::FeeSource::BorrowingFee,
+                    timestamp_ns,
+                );
+                if routing.to_remainder.0 > 0 {
+                    let treasury = s.treasury_principal;
+                    let tuple = treasury.map(|destination| {
+                        let op_nonce = s.next_op_nonce_at(timestamp_ns);
+                        crate::state::BorrowMintTuple {
+                            ledger: s.icusd_ledger_principal,
+                            destination,
+                            amount_e8s: routing.to_remainder.to_u64(),
+                            memo: op_nonce.to_be_bytes(),
+                            created_at_time_ns: crate::management::nonce_to_created_at_time(op_nonce),
+                            op_nonce,
+                        }
+                    });
+                    let phase = if treasury.is_some() {
+                        crate::state::BorrowFeeMintPhase::SubmittedOrUnknown
+                    } else {
+                        crate::state::BorrowFeeMintPhase::TreasuryMissing
+                    };
+                    s.pending_borrow_fee_mints.insert(
+                        journal.tuple.op_nonce,
+                        crate::state::BorrowFeeMintJournal {
+                            vault_id: journal.vault_id,
+                            owner: journal.owner,
+                            borrow_block_index: block_index,
+                            borrow_op_nonce: journal.tuple.op_nonce,
+                            fee_amount_e8s: fee_amount.to_u64(),
+                            to_repay_e8s: routing.to_repay.to_u64(),
+                            to_treasury_e8s: routing.to_remainder.to_u64(),
+                            treasury,
+                            tuple,
+                            phase,
+                            dispatch_attempt_count: Some(0),
+                        },
+                    );
+                }
                 s.pending_borrow_mints.remove(&journal.vault_id);
                 if let Some((operation_id, collateral_block_index)) = collateral_completion {
                     s.complete_vault_operation(
@@ -6765,8 +7035,13 @@ where
                 )));
             }
 
-            let fee = ICUSD::new(journal.fee_amount_e8s);
-            post_commit(fee).await;
+            let fee = fee_amount;
+            let fee_op_nonce = read_state(|s| {
+                s.pending_borrow_fee_mints
+                    .contains_key(&journal.tuple.op_nonce)
+                    .then_some(journal.tuple.op_nonce)
+            });
+            post_commit(fee, fee_op_nonce).await;
             Ok(SuccessWithFee {
                 block_index,
                 fee_amount_paid: fee.to_u64(),
@@ -6872,10 +7147,16 @@ mod borrow_mint_journal_tests {
             },
             || 100,
             Some(1),
-            move |_| async move {
+            move |fee, fee_op_nonce| async move {
+                assert_eq!(fee, ICUSD::new(10));
+                assert_eq!(fee_op_nonce, Some(99));
                 crate::state::read_state(|s| {
                     assert_eq!(s.vault_id_to_vaults[&1].borrowed_icusd_amount, ICUSD::new(500));
                     assert!(!s.pending_borrow_mints.contains_key(&1));
+                    let fee_row = &s.pending_borrow_fee_mints[&99];
+                    assert_eq!(fee_row.borrow_block_index, 77);
+                    assert_eq!(fee_row.to_repay_e8s + fee_row.to_treasury_e8s, 10);
+                    assert_eq!(fee_row.phase, crate::state::BorrowFeeMintPhase::TreasuryMissing);
                     assert!(matches!(
                         s.vault_collateral_pull_journals[&owner].phase,
                         crate::state::VaultCollateralPullPhase::Completed {
@@ -7374,6 +7655,428 @@ mod borrow_mint_journal_tests {
             assert!(!held.typed_too_old);
             assert!(held.absence_scan.is_none());
         });
+    }
+
+    #[test]
+    fn fee_outbox_retries_exact_tuple_then_retries_notification_without_remint() {
+        use crate::state::{BorrowFeeMintJournal, BorrowFeeMintPhase};
+        let owner = Principal::from_slice(&[0x81]);
+        let treasury = Principal::from_slice(&[0x82]);
+        let tuple = BorrowMintTuple {
+            ledger: Principal::from_slice(&[0x83]), destination: treasury,
+            amount_e8s: 90, memo: [0x84; 16], created_at_time_ns: 123, op_nonce: 200,
+        };
+        let journal = BorrowFeeMintJournal {
+            vault_id: 7, owner, borrow_block_index: 44, borrow_op_nonce: 99,
+            fee_amount_e8s: 100, to_repay_e8s: 10, to_treasury_e8s: 90,
+            treasury: Some(treasury), tuple: Some(tuple.clone()),
+            phase: BorrowFeeMintPhase::SubmittedOrUnknown, dispatch_attempt_count: Some(0),
+        };
+        let mut state = State::default();
+        state.pending_borrow_fee_mints.insert(99, journal);
+        replace_state(state);
+
+        let sent = Rc::new(Cell::new(0));
+        let first_sent = sent.clone();
+        let first_tuple = tuple.clone();
+        let first = futures::executor::block_on(drive_pending_borrow_fee_mint_with(
+            99,
+            move |submitted| async move {
+                assert_eq!(submitted, first_tuple);
+                first_sent.set(first_sent.get() + 1);
+                Err(icrc_ledger_types::icrc1::transfer::TransferError::TemporarilyUnavailable)
+            },
+            |_, _, _| async { panic!("ambiguous mint cannot notify before a receipt") },
+        ));
+        assert!(matches!(first, Err(ProtocolError::TemporarilyUnavailable(_))));
+
+        let retry_sent = sent.clone();
+        let retry_tuple = tuple.clone();
+        let first_notification = Rc::new(Cell::new(0));
+        let notification_count = first_notification.clone();
+        let retry = futures::executor::block_on(drive_pending_borrow_fee_mint_with(
+            99,
+            move |submitted| async move {
+                assert_eq!(submitted, retry_tuple);
+                retry_sent.set(retry_sent.get() + 1);
+                Ok(88)
+            },
+            move |recipient, amount, block| async move {
+                assert_eq!(recipient, treasury); assert_eq!(amount, 90); assert_eq!(block, 88);
+                notification_count.set(notification_count.get() + 1);
+                Err("reply lost after treasury recording".into())
+            },
+        ));
+        assert!(matches!(retry, Err(ProtocolError::TemporarilyUnavailable(_))));
+        crate::state::read_state(|s| assert_eq!(s.pending_borrow_fee_mints[&99].phase,
+            BorrowFeeMintPhase::NotificationPending { mint_block_index: 88 }));
+
+        let retry_notification_count = first_notification.clone();
+        let finished = futures::executor::block_on(drive_pending_borrow_fee_mint_with(
+            99,
+            |_| async { panic!("notification retry must not remint") },
+            move |recipient, amount, block| async move {
+                assert_eq!(recipient, treasury); assert_eq!(amount, 90); assert_eq!(block, 88);
+                retry_notification_count.set(retry_notification_count.get() + 1);
+                Ok(5)
+            },
+        ));
+        assert!(finished.is_ok());
+        assert_eq!(sent.get(), 2, "both attempts must use the exact same operation tuple");
+        assert_eq!(first_notification.get(), 2);
+        crate::state::read_state(|s| assert!(!s.pending_borrow_fee_mints.contains_key(&99)));
+    }
+
+    #[test]
+    fn fee_outbox_too_old_stays_held_and_never_dispatches_again() {
+        use crate::state::{BorrowFeeMintJournal, BorrowFeeMintPhase};
+        let owner = Principal::from_slice(&[0x91]);
+        let treasury = Principal::from_slice(&[0x92]);
+        let tuple = BorrowMintTuple { ledger: Principal::from_slice(&[0x93]), destination: treasury,
+            amount_e8s: 9, memo: [0x94; 16], created_at_time_ns: 123, op_nonce: 201 };
+        let journal = BorrowFeeMintJournal {
+            vault_id: 8, owner, borrow_block_index: 45, borrow_op_nonce: 100,
+            fee_amount_e8s: 10, to_repay_e8s: 1, to_treasury_e8s: 9, treasury: Some(treasury),
+            tuple: Some(tuple), phase: BorrowFeeMintPhase::SubmittedOrUnknown,
+            dispatch_attempt_count: Some(0),
+        };
+        let mut state = State::default(); state.pending_borrow_fee_mints.insert(100, journal); replace_state(state);
+        let sends = Rc::new(Cell::new(0)); let sent = sends.clone();
+        let first = futures::executor::block_on(drive_pending_borrow_fee_mint_with(
+            100,
+            move |_| async move { sent.set(sent.get() + 1); Err(icrc_ledger_types::icrc1::transfer::TransferError::TooOld) },
+            |_, _, _| async { panic!("TooOld is not a receipt") },
+        ));
+        assert!(matches!(first, Err(ProtocolError::GenericError(_))));
+        let retry = futures::executor::block_on(drive_pending_borrow_fee_mint_with(
+            100,
+            |_| async { panic!("TooOld permanently disables resubmission") },
+            |_, _, _| async { panic!("receipt is required before notification") },
+        ));
+        assert!(matches!(retry, Err(ProtocolError::GenericError(_))));
+        assert_eq!(sends.get(), 1);
+        crate::state::read_state(|s| assert_eq!(s.pending_borrow_fee_mints[&100].phase,
+            BorrowFeeMintPhase::ReceiptRecoveryRequired));
+    }
+
+    #[test]
+    fn fee_outbox_rejects_overflowing_split_before_dispatch() {
+        use crate::state::{BorrowFeeMintJournal, BorrowFeeMintPhase};
+        let owner = Principal::from_slice(&[0x95]);
+        let treasury = Principal::from_slice(&[0x96]);
+        let journal = BorrowFeeMintJournal {
+            vault_id: 9,
+            owner,
+            borrow_block_index: 46,
+            borrow_op_nonce: 101,
+            fee_amount_e8s: u64::MAX,
+            to_repay_e8s: u64::MAX,
+            to_treasury_e8s: 1,
+            treasury: Some(treasury),
+            tuple: Some(BorrowMintTuple {
+                ledger: Principal::from_slice(&[0x97]),
+                destination: treasury,
+                amount_e8s: 1,
+                memo: [0x98; 16],
+                created_at_time_ns: 124,
+                op_nonce: 202,
+            }),
+            phase: BorrowFeeMintPhase::SubmittedOrUnknown,
+            dispatch_attempt_count: Some(0),
+        };
+        let mut state = State::default();
+        state.pending_borrow_fee_mints.insert(101, journal);
+        replace_state(state);
+        let result = futures::executor::block_on(drive_pending_borrow_fee_mint_with(
+            101,
+            |_| async { panic!("invalid fee split must be rejected before mint dispatch") },
+            |_, _, _| async { panic!("invalid fee split must not notify treasury") },
+        ));
+        assert!(matches!(result, Err(ProtocolError::GenericError(message)) if message.contains("inconsistent")));
+    }
+
+    #[test]
+    fn fee_outbox_key_mismatch_blocks_both_dispatch_and_notification() {
+        use crate::state::{BorrowFeeMintJournal, BorrowFeeMintPhase};
+        let owner = Principal::from_slice(&[0x99]);
+        let treasury = Principal::from_slice(&[0x9a]);
+        let mut journal = BorrowFeeMintJournal {
+            vault_id: 10,
+            owner,
+            borrow_block_index: 47,
+            borrow_op_nonce: 111,
+            fee_amount_e8s: 10,
+            to_repay_e8s: 2,
+            to_treasury_e8s: 8,
+            treasury: Some(treasury),
+            tuple: Some(BorrowMintTuple {
+                ledger: Principal::from_slice(&[0x9b]),
+                destination: treasury,
+                amount_e8s: 8,
+                memo: [0x9c; 16],
+                created_at_time_ns: 125,
+                op_nonce: 203,
+            }),
+            phase: BorrowFeeMintPhase::SubmittedOrUnknown,
+            dispatch_attempt_count: Some(0),
+        };
+
+        let mut state = State::default();
+        state.pending_borrow_fee_mints.insert(110, journal.clone());
+        replace_state(state);
+        let dispatch_result = futures::executor::block_on(drive_pending_borrow_fee_mint_with(
+            110,
+            |_| async { panic!("row key mismatch must block mint dispatch") },
+            |_, _, _| async { panic!("row key mismatch must block treasury notification") },
+        ));
+        assert!(matches!(dispatch_result, Err(ProtocolError::GenericError(message)) if message.contains("key")));
+
+        journal.phase = BorrowFeeMintPhase::NotificationPending { mint_block_index: 88 };
+        let mut state = State::default();
+        state.pending_borrow_fee_mints.insert(110, journal);
+        replace_state(state);
+        let notification_result = futures::executor::block_on(drive_pending_borrow_fee_mint_with(
+            110,
+            |_| async { panic!("notification retry must not mint") },
+            |_, _, _| async { panic!("row key mismatch must block treasury notification") },
+        ));
+        assert!(matches!(notification_result, Err(ProtocolError::GenericError(message)) if message.contains("key")));
+    }
+
+    #[test]
+    fn revoked_developer_cannot_advance_confirmed_mint_or_notify_treasury() {
+        use crate::state::{BorrowFeeMintJournal, BorrowFeeMintPhase};
+        let owner = Principal::from_slice(&[0xa4]);
+        let developer = Principal::from_slice(&[0xa5]);
+        let replacement_developer = Principal::from_slice(&[0xa6]);
+        let treasury = Principal::from_slice(&[0xa7]);
+        let journal = BorrowFeeMintJournal {
+            vault_id: 11,
+            owner,
+            borrow_block_index: 48,
+            borrow_op_nonce: 112,
+            fee_amount_e8s: 10,
+            to_repay_e8s: 2,
+            to_treasury_e8s: 8,
+            treasury: Some(treasury),
+            tuple: Some(BorrowMintTuple {
+                ledger: Principal::from_slice(&[0xa8]),
+                destination: treasury,
+                amount_e8s: 8,
+                memo: [0xa9; 16],
+                created_at_time_ns: 126,
+                op_nonce: 204,
+            }),
+            phase: BorrowFeeMintPhase::SubmittedOrUnknown,
+            dispatch_attempt_count: Some(0),
+        };
+        let mut state = State::default();
+        state.developer_principal = developer;
+        state.pending_borrow_fee_mints.insert(112, journal);
+        replace_state(state);
+
+        let result = futures::executor::block_on(drive_pending_borrow_fee_mint_with_developer_guard(
+            112,
+            move |_| async move {
+                crate::state::mutate_state(|state| {
+                    state.developer_principal = replacement_developer;
+                });
+                Ok(89)
+            },
+            |_, _, _| async { panic!("revoked developer must not notify Treasury") },
+            Some(developer),
+        ));
+
+        assert!(matches!(result, Err(ProtocolError::CallerNotOwner)));
+        crate::state::read_state(|state| {
+            let row = &state.pending_borrow_fee_mints[&112];
+            assert_eq!(row.phase, BorrowFeeMintPhase::SubmittedOrUnknown);
+            assert_eq!(row.dispatch_attempt_count, Some(1));
+            assert_eq!(state.developer_principal, replacement_developer);
+        });
+    }
+
+    #[test]
+    fn fee_recovery_authority_is_owner_or_non_anonymous_developer_only() {
+        use crate::state::{BorrowFeeMintJournal, BorrowFeeMintPhase};
+        let owner = Principal::from_slice(&[0xa1]); let developer = Principal::from_slice(&[0xa2]);
+        let journal = BorrowFeeMintJournal { vault_id: 1, owner, borrow_block_index: 2, borrow_op_nonce: 3,
+            fee_amount_e8s: 1, to_repay_e8s: 0, to_treasury_e8s: 1, treasury: None, tuple: None,
+            phase: BorrowFeeMintPhase::TreasuryMissing, dispatch_attempt_count: Some(0) };
+        assert!(borrow_fee_recovery_authorized(owner, &journal, developer).is_ok());
+        assert!(borrow_fee_recovery_authorized(developer, &journal, developer).is_ok());
+        assert!(borrow_fee_recovery_authorized(Principal::anonymous(), &journal, Principal::anonymous()).is_err());
+        assert!(borrow_fee_recovery_authorized(Principal::from_slice(&[0xa3]), &journal, developer).is_err());
+    }
+}
+
+fn borrow_fee_recovery_authorized(
+    caller: Principal,
+    journal: &crate::state::BorrowFeeMintJournal,
+    developer: Principal,
+) -> Result<(), ProtocolError> {
+    if caller == journal.owner || (caller != Principal::anonymous() && caller == developer) {
+        Ok(())
+    } else {
+        Err(ProtocolError::CallerNotOwner)
+    }
+}
+
+/// Retry the exact persisted borrowing-fee mint tuple, or its idempotent
+/// treasury notification. The source borrow nonce identifies the outbox row.
+pub async fn bind_and_retry_missing_borrow_fee_treasury(
+    borrow_op_nonce: u128,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard = GuardPrincipal::new(caller, &format!("borrow_fee_{borrow_op_nonce}"))?;
+    let developer = read_state(|s| s.developer_principal);
+    if caller == Principal::anonymous() || caller != developer {
+        guard.fail();
+        return Err(ProtocolError::CallerNotOwner);
+    }
+    let timestamp_ns = ic_cdk::api::time();
+    if let Err(error) = mutate_state(|s| {
+        let Some(treasury) = s.treasury_principal else {
+            return Err(ProtocolError::GenericError("treasury principal is not configured".into()));
+        };
+        let Some(current) = s.pending_borrow_fee_mints.get(&borrow_op_nonce).cloned() else {
+            return Err(ProtocolError::GenericError("no pending borrowing-fee mint".into()));
+        };
+        if current.phase != crate::state::BorrowFeeMintPhase::TreasuryMissing
+            || current.treasury.is_some()
+            || current.tuple.is_some()
+            || current.to_treasury_e8s == 0
+        {
+            return Err(ProtocolError::GenericError("fee row is not awaiting an explicit treasury binding".into()));
+        }
+        let op_nonce = s.next_op_nonce_at(timestamp_ns);
+        let tuple = crate::state::BorrowMintTuple {
+            ledger: s.icusd_ledger_principal,
+            destination: treasury,
+            amount_e8s: current.to_treasury_e8s,
+            memo: op_nonce.to_be_bytes(),
+            created_at_time_ns: crate::management::nonce_to_created_at_time(op_nonce),
+            op_nonce,
+        };
+        let Some(row) = s.pending_borrow_fee_mints.get_mut(&borrow_op_nonce) else {
+            return Err(ProtocolError::TemporarilyUnavailable("fee row changed during treasury binding".into()));
+        };
+        if *row != current {
+            return Err(ProtocolError::TemporarilyUnavailable("fee row changed during treasury binding".into()));
+        }
+        row.treasury = Some(treasury);
+        row.tuple = Some(tuple);
+        row.phase = crate::state::BorrowFeeMintPhase::SubmittedOrUnknown;
+        row.dispatch_attempt_count = Some(0);
+        Ok(())
+    }) {
+        guard.fail();
+        return Err(error);
+    }
+    match drive_pending_borrow_fee_mint_for_recovery(borrow_op_nonce, Some(caller)).await {
+        Ok(()) => { guard.complete(); Ok(()) }
+        Err(error) => { guard.fail(); Err(error) }
+    }
+}
+
+pub async fn retry_pending_borrow_fee_mint(
+    borrow_op_nonce: u128,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard = GuardPrincipal::new(caller, &format!("borrow_fee_{borrow_op_nonce}"))?;
+    let Some(journal) = read_state(|s| s.pending_borrow_fee_mints.get(&borrow_op_nonce).cloned()) else {
+        guard.fail();
+        return Err(ProtocolError::GenericError("no pending borrowing-fee mint".into()));
+    };
+    let developer = read_state(|s| s.developer_principal);
+    if let Err(error) = borrow_fee_recovery_authorized(caller, &journal, developer) {
+        guard.fail();
+        return Err(error);
+    }
+    let developer_guard = (caller != journal.owner).then_some(caller);
+    match drive_pending_borrow_fee_mint_for_recovery(borrow_op_nonce, developer_guard).await {
+        Ok(()) => { guard.complete(); Ok(()) }
+        Err(error) => { guard.fail(); Err(error) }
+    }
+}
+
+/// Reconcile an ambiguous borrowing-fee mint only from an exact direct
+/// ICRC-3 receipt. A candidate index is untrusted input and never authorizes a
+/// fresh mint tuple or destination change.
+pub async fn reconcile_pending_borrow_fee_mint_from_block(
+    borrow_op_nonce: u128,
+    candidate_block_index: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard = GuardPrincipal::new(caller, &format!("borrow_fee_{borrow_op_nonce}"))?;
+    let Some(journal) = read_state(|s| s.pending_borrow_fee_mints.get(&borrow_op_nonce).cloned()) else {
+        guard.fail();
+        return Err(ProtocolError::GenericError("no pending borrowing-fee mint".into()));
+    };
+    let developer = read_state(|s| s.developer_principal);
+    if let Err(error) = borrow_fee_recovery_authorized(caller, &journal, developer) {
+        guard.fail();
+        return Err(error);
+    }
+    if let Err(error) = validate_borrow_fee_outbox_row(borrow_op_nonce, &journal) {
+        guard.fail();
+        return Err(ProtocolError::GenericError(error));
+    }
+    let Some(tuple) = journal.tuple.as_ref() else {
+        guard.fail();
+        return Err(ProtocolError::GenericError("borrowing-fee row has no frozen mint tuple".into()));
+    };
+    let already_confirmed = match journal.phase {
+        crate::state::BorrowFeeMintPhase::NotificationPending { mint_block_index } => {
+            if candidate_block_index != mint_block_index {
+                guard.fail();
+                return Err(ProtocolError::GenericError("candidate differs from the confirmed fee mint block".into()));
+            }
+            true
+        }
+        crate::state::BorrowFeeMintPhase::SubmittedOrUnknown
+        | crate::state::BorrowFeeMintPhase::ReceiptRecoveryRequired => false,
+        crate::state::BorrowFeeMintPhase::TreasuryMissing => {
+            guard.fail();
+            return Err(ProtocolError::GenericError("treasury destination was missing at debt commit".into()));
+        }
+    };
+    if !already_confirmed {
+        if let Err(error) = crate::icrc3_proof::verify_icrc3_borrow_mint_block(
+            tuple.ledger,
+            candidate_block_index,
+            tuple,
+        ).await {
+            guard.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "candidate ICRC-3 block does not prove the exact borrowing-fee mint; row remains held: {error}"
+            )));
+        }
+    }
+    // Developer authorization may change while the ledger proof call is
+    // outstanding. Recheck the current configured authority after that await
+    // and before advancing the durable row or contacting treasury.
+    let current_developer = read_state(|s| s.developer_principal);
+    if let Err(error) = borrow_fee_recovery_authorized(caller, &journal, current_developer) {
+        guard.fail();
+        return Err(error);
+    }
+    let confirmed = mutate_state(|s| {
+        let Some(current) = s.pending_borrow_fee_mints.get_mut(&borrow_op_nonce) else { return false; };
+        if current != &journal { return false; }
+        current.phase = crate::state::BorrowFeeMintPhase::NotificationPending {
+            mint_block_index: candidate_block_index,
+        };
+        true
+    });
+    if !confirmed {
+        guard.fail();
+        return Err(ProtocolError::TemporarilyUnavailable("borrowing-fee row changed during receipt proof".into()));
+    }
+    let developer_guard = (caller != journal.owner).then_some(caller);
+    match drive_pending_borrow_fee_mint_for_recovery(borrow_op_nonce, developer_guard).await {
+        Ok(()) => { guard.complete(); Ok(()) }
+        Err(error) => { guard.fail(); Err(error) }
     }
 }
 

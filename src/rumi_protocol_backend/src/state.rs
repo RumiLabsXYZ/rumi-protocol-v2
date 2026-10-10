@@ -2240,6 +2240,60 @@ pub struct BorrowMintJournal {
     pub typed_too_old: bool,
 }
 
+/// Durable outbox for the treasury remainder of a completed borrow fee.
+/// Routing and the exact mint tuple are frozen at debt commit.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct BorrowFeeMintJournal {
+    pub vault_id: u64,
+    pub owner: Principal,
+    pub borrow_block_index: u64,
+    pub borrow_op_nonce: u128,
+    pub fee_amount_e8s: u64,
+    pub to_repay_e8s: u64,
+    pub to_treasury_e8s: u64,
+    pub treasury: Option<Principal>,
+    /// None only for missing-treasury legacy holds. Zero-remainder fees do
+    /// not need an outbox row.
+    #[serde(default)]
+    pub tuple: Option<BorrowMintTuple>,
+    #[serde(default)]
+    pub phase: BorrowFeeMintPhase,
+    #[serde(default)]
+    pub dispatch_attempt_count: Option<u32>,
+}
+
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum BorrowFeeMintPhase {
+    SubmittedOrUnknown,
+    NotificationPending { mint_block_index: u64 },
+    ReceiptRecoveryRequired,
+    TreasuryMissing,
+}
+
+impl Default for BorrowFeeMintPhase {
+    fn default() -> Self { Self::SubmittedOrUnknown }
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct BorrowFeeMintStatus {
+    pub borrow_op_nonce: u128,
+    pub owner: Principal,
+    pub vault_id: u64,
+    pub borrow_block_index: u64,
+    pub fee_amount_e8s: u64,
+    pub to_repay_e8s: u64,
+    pub to_treasury_e8s: u64,
+    pub treasury: Option<Principal>,
+    pub tuple: Option<BorrowMintTuple>,
+    pub phase: BorrowFeeMintPhase,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct BorrowFeeMintRecoveryPage {
+    pub items: Vec<BorrowFeeMintStatus>,
+    pub next_cursor: Option<u128>,
+}
+
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct BorrowMintAbsenceScan {
     pub next_block_index: u64,
@@ -2708,6 +2762,8 @@ pub struct State {
     /// cleared by a ledger response that guarantees no transfer occurred.
     #[serde(default)]
     pub pending_borrow_mints: BTreeMap<u64, BorrowMintJournal>,
+    #[serde(default)]
+    pub pending_borrow_fee_mints: BTreeMap<u128, BorrowFeeMintJournal>,
     #[serde(default)]
     pub liquidity_withdraw_journals: BTreeMap<Principal, LiquidityWithdrawJournal>,
     #[serde(default)]
@@ -3605,6 +3661,7 @@ impl Default for State {
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             pending_borrow_mints: BTreeMap::new(),
+            pending_borrow_fee_mints: BTreeMap::new(),
             liquidity_withdraw_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
             three_usd_reserve_collateral_payouts: BTreeMap::new(),
@@ -3790,6 +3847,7 @@ impl From<InitArg> for State {
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             pending_borrow_mints: BTreeMap::new(),
+            pending_borrow_fee_mints: BTreeMap::new(),
             liquidity_withdraw_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
             three_usd_reserve_collateral_payouts: BTreeMap::new(),
@@ -8609,6 +8667,48 @@ pub fn pending_borrow_mint_statuses(owner: Principal) -> Vec<BorrowMintStatus> {
                 phase: journal.phase.clone(),
             })
             .collect()
+    })
+}
+
+pub fn pending_borrow_fee_mint_recovery_page(
+    owner_filter: Option<Principal>,
+    after_op_nonce: Option<u128>,
+    limit: u16,
+) -> Result<BorrowFeeMintRecoveryPage, String> {
+    if limit == 0 || limit > 100 {
+        return Err("limit must be between 1 and 100".into());
+    }
+    read_state(|state| {
+        let range = match after_op_nonce {
+            Some(cursor) => state.pending_borrow_fee_mints.range((Bound::Excluded(cursor), Bound::Unbounded)),
+            None => state.pending_borrow_fee_mints.range((
+                Bound::<u128>::Unbounded,
+                Bound::<u128>::Unbounded,
+            )),
+        };
+        let mut items = Vec::new();
+        let mut next_cursor = None;
+        for (op_nonce, journal) in range.take(limit as usize) {
+            next_cursor = Some(*op_nonce);
+            if owner_filter
+                .as_ref()
+                .is_none_or(|owner| *owner == journal.owner)
+            {
+                items.push(BorrowFeeMintStatus {
+                    borrow_op_nonce: *op_nonce,
+                    owner: journal.owner,
+                    vault_id: journal.vault_id,
+                    borrow_block_index: journal.borrow_block_index,
+                    fee_amount_e8s: journal.fee_amount_e8s,
+                    to_repay_e8s: journal.to_repay_e8s,
+                    to_treasury_e8s: journal.to_treasury_e8s,
+                    treasury: journal.treasury,
+                    tuple: journal.tuple.clone(),
+                    phase: journal.phase.clone(),
+                });
+            }
+        }
+        Ok(BorrowFeeMintRecoveryPage { items, next_cursor })
     })
 }
 
@@ -13645,8 +13745,8 @@ mod tests {
             },
         );
 
-        // Remove the newly added key from a serialized State to reproduce the
-        // pre-feature snapshot shape, then decode through the real State type.
+        // Remove operation-journal keys to reproduce a pre-journal snapshot,
+        // then decode through the real State type.
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&state, &mut bytes).unwrap();
         let value: ciborium::value::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
@@ -13654,13 +13754,13 @@ mod tests {
             ciborium::value::Value::Map(map) => map,
             other => panic!("State must serialize as a CBOR map, got {other:?}"),
         };
-        map.retain(|(key, _)| {
-            key != &ciborium::value::Value::Text("pending_borrow_mints".to_string())
-        });
+        map.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name)
+            if name == "pending_borrow_mints" || name == "pending_borrow_fee_mints"));
         let mut legacy_bytes = Vec::new();
         ciborium::ser::into_writer(&ciborium::value::Value::Map(map), &mut legacy_bytes).unwrap();
         let restored: State = ciborium::de::from_reader(legacy_bytes.as_slice()).unwrap();
         assert!(restored.pending_borrow_mints.is_empty());
+        assert!(restored.pending_borrow_fee_mints.is_empty());
         assert_eq!(restored.next_available_vault_id, 123);
     }
 
@@ -13699,6 +13799,64 @@ mod tests {
         assert_eq!(restored.absence_scan, None);
         assert_eq!(restored.dispatch_attempt_count, None);
         assert!(!restored.typed_too_old);
+    }
+
+    #[test]
+    fn fee_outbox_round_trips_and_recovery_pages_are_bounded_and_cursor_complete() {
+        let owner = Principal::from_slice(&[0x41]);
+        let other = Principal::from_slice(&[0x42]);
+        let treasury = Principal::from_slice(&[0x43]);
+        let make_row = |op_nonce: u128, row_owner: Principal| BorrowFeeMintJournal {
+            vault_id: op_nonce as u64,
+            owner: row_owner,
+            borrow_block_index: op_nonce as u64 + 10,
+            borrow_op_nonce: op_nonce,
+            fee_amount_e8s: 100,
+            to_repay_e8s: 25,
+            to_treasury_e8s: 75,
+            treasury: Some(treasury),
+            tuple: Some(BorrowMintTuple {
+                ledger: Principal::from_slice(&[0x44]),
+                destination: treasury,
+                amount_e8s: 75,
+                memo: op_nonce.to_be_bytes(),
+                created_at_time_ns: 1_000 + op_nonce as u64,
+                op_nonce: 1_000 + op_nonce,
+            }),
+            phase: BorrowFeeMintPhase::SubmittedOrUnknown,
+            dispatch_attempt_count: Some(0),
+        };
+        let mut state = State::default();
+        state.pending_borrow_fee_mints.insert(1, make_row(1, owner));
+        state.pending_borrow_fee_mints.insert(2, make_row(2, other));
+        state.pending_borrow_fee_mints.insert(3, make_row(3, owner));
+
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let restored: State = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(restored.pending_borrow_fee_mints, state.pending_borrow_fee_mints);
+        replace_state(restored);
+
+        let first = pending_borrow_fee_mint_recovery_page(Some(owner), None, 1).unwrap();
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].borrow_op_nonce, 1);
+        assert_eq!(first.items[0].treasury, Some(treasury));
+        assert_eq!(first.items[0].tuple.as_ref().unwrap().memo, 1_u128.to_be_bytes());
+        assert_eq!(first.next_cursor, Some(1));
+
+        // Page size bounds the scan, and the key cursor advances even when a
+        // page contains only rows owned by someone else.
+        let second = pending_borrow_fee_mint_recovery_page(Some(owner), first.next_cursor, 1).unwrap();
+        assert!(second.items.is_empty());
+        assert_eq!(second.next_cursor, Some(2));
+        let third = pending_borrow_fee_mint_recovery_page(Some(owner), second.next_cursor, 1).unwrap();
+        assert_eq!(third.items.len(), 1);
+        assert_eq!(third.items[0].borrow_op_nonce, 3);
+        assert_eq!(third.next_cursor, Some(3));
+        let done = pending_borrow_fee_mint_recovery_page(Some(owner), third.next_cursor, 1).unwrap();
+        assert!(done.items.is_empty());
+        assert_eq!(done.next_cursor, None);
+        assert!(pending_borrow_fee_mint_recovery_page(None, None, 101).is_err());
     }
 
     #[test]

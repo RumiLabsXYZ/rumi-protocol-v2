@@ -1141,6 +1141,40 @@ export const idlFactory = ({ IDL }) => {
     'amount_e8s' : IDL.Nat64,
     'phase' : LiquidityWithdrawPhase,
   });
+  const BorrowMintTuple = IDL.Record({
+    'destination' : IDL.Principal,
+    'created_at_time_ns' : IDL.Nat64,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'amount_e8s' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'op_nonce' : IDL.Nat,
+  });
+  const BorrowFeeMintPhase = IDL.Variant({
+    'ReceiptRecoveryRequired' : IDL.Null,
+    'TreasuryMissing' : IDL.Null,
+    'NotificationPending' : IDL.Record({ 'mint_block_index' : IDL.Nat64 }),
+    'SubmittedOrUnknown' : IDL.Null,
+  });
+  const BorrowFeeMintStatus = IDL.Record({
+    'tuple' : IDL.Opt(BorrowMintTuple),
+    'owner' : IDL.Principal,
+    'borrow_block_index' : IDL.Nat64,
+    'fee_amount_e8s' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'to_repay_e8s' : IDL.Nat64,
+    'phase' : BorrowFeeMintPhase,
+    'borrow_op_nonce' : IDL.Nat,
+    'treasury' : IDL.Opt(IDL.Principal),
+    'to_treasury_e8s' : IDL.Nat64,
+  });
+  const BorrowFeeMintRecoveryPage = IDL.Record({
+    'next_cursor' : IDL.Opt(IDL.Nat),
+    'items' : IDL.Vec(BorrowFeeMintStatus),
+  });
+  const BorrowFeeMintRecoveryResult = IDL.Variant({
+    'Ok' : BorrowFeeMintRecoveryPage,
+    'Err' : ProtocolError,
+  });
   const BorrowMintPhase = IDL.Variant({
     'ReceiptRecoveryRequired' : IDL.Null,
     'MintConfirmedHeld' : IDL.Record({ 'block_index' : IDL.Nat64 }),
@@ -1930,6 +1964,11 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'backfill_collateral_symbols' : IDL.Func([], [Result_3], []),
+    'bind_and_retry_missing_borrow_fee_treasury' : IDL.Func(
+        [IDL.Nat],
+        [Result_1],
+        [],
+      ),
     'borrow_chain_vault_evm' : IDL.Func(
         [VaultIntent, IDL.Vec(IDL.Nat8)],
         [Result_1],
@@ -2177,6 +2216,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Opt(LiquidityWithdrawStatus)],
         ['query'],
       ),
+    'get_my_pending_borrow_fee_mints' : IDL.Func(
+        [IDL.Opt(IDL.Nat), IDL.Nat16],
+        [BorrowFeeMintRecoveryResult],
+        ['query'],
+      ),
     'get_my_pending_borrow_mints' : IDL.Func(
         [],
         [IDL.Vec(BorrowMintStatus)],
@@ -2203,6 +2247,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_pending_amm1_donations_count' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_pending_borrow_fee_mint_recovery_page' : IDL.Func(
+        [IDL.Opt(IDL.Nat), IDL.Nat16],
+        [BorrowFeeMintRecoveryResult],
+        ['query'],
+      ),
     'get_pending_chain_burn_aging' : IDL.Func(
         [],
         [IDL.Vec(PendingChainBurnAging)],
@@ -2456,6 +2505,11 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'reconcile_pending_borrow_fee_mint_from_block' : IDL.Func(
+        [IDL.Nat, IDL.Nat64],
+        [Result_1],
+        [],
+      ),
     'reconcile_pending_borrow_mint_from_block' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [Result_4],
@@ -2514,6 +2568,7 @@ export const idlFactory = ({ IDL }) => {
         [Result_1],
         [],
       ),
+    'retry_pending_borrow_fee_mint' : IDL.Func([IDL.Nat], [Result_1], []),
     'set_amm1_canister' : IDL.Func([IDL.Principal], [Result_1], []),
     'set_amm1_pool_id' : IDL.Func([IDL.Text], [Result_1], []),
     'set_borrowing_fee' : IDL.Func([IDL.Float64], [Result_1], []),

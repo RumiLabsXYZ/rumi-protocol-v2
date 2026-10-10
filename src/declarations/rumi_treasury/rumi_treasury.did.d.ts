@@ -95,9 +95,19 @@ export interface WithdrawResult {
   'amount_transferred' : bigint,
 }
 export interface _SERVICE {
+  'continue_icusd_deposit_block_backfill' : ActorMethod<
+    [],
+    { 'Ok' : string } |
+      { 'Err' : string }
+  >,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'deposit' : ActorMethod<
+    [DepositArgs],
+    { 'Ok' : bigint } |
+      { 'Err' : string }
+  >,
+  'deposit_borrowing_fee_once' : ActorMethod<
     [DepositArgs],
     { 'Ok' : bigint } |
       { 'Err' : string }

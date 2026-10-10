@@ -42,10 +42,44 @@ type BorrowMintPhase = variant {
   MintConfirmedHeld : record { block_index : nat64 };
   SubmittedOrUnknown;
 };
+type BorrowMintTuple = record {
+  ledger : principal;
+  destination : principal;
+  amount_e8s : nat64;
+  memo : blob;
+  created_at_time_ns : nat64;
+  op_nonce : nat;
+};
 type BorrowMintStatus = record {
   vault_id : nat64;
   borrowed_amount_e8s : nat64;
   phase : BorrowMintPhase;
+};
+type BorrowFeeMintPhase = variant {
+  NotificationPending : record { mint_block_index : nat64 };
+  ReceiptRecoveryRequired;
+  SubmittedOrUnknown;
+  TreasuryMissing;
+};
+type BorrowFeeMintStatus = record {
+  borrow_op_nonce : nat;
+  owner : principal;
+  vault_id : nat64;
+  borrow_block_index : nat64;
+  fee_amount_e8s : nat64;
+  to_repay_e8s : nat64;
+  to_treasury_e8s : nat64;
+  treasury : opt principal;
+  tuple : opt BorrowMintTuple;
+  phase : BorrowFeeMintPhase;
+};
+type BorrowFeeMintRecoveryPage = record {
+  items : vec BorrowFeeMintStatus;
+  next_cursor : opt nat;
+};
+type BorrowFeeMintRecoveryResult = variant {
+  Ok : BorrowFeeMintRecoveryPage;
+  Err : ProtocolError;
 };
 type BotCollateralReturnProofArg = record {
   block_index : nat64;
@@ -1820,6 +1854,9 @@ service : (ProtocolArg) -> {
       opt LiquidityWithdrawStatus,
     ) query;
   get_my_pending_borrow_mints : () -> (vec BorrowMintStatus) query;
+  get_my_pending_borrow_fee_mints : (opt nat, nat16) -> (
+      BorrowFeeMintRecoveryResult,
+    ) query;
   get_my_pending_icusd_refunds : () -> (vec PendingIcusdRefundView) query;
   get_my_xrp_claims : () -> (vec record { nat64; XrpClaim }) query;
   get_my_xrp_pending_deposits : () -> (
@@ -1827,6 +1864,9 @@ service : (ProtocolArg) -> {
     ) query;
   get_pending_3usd_refunds : () -> (vec LegacyPendingThreeUsdRefund) query;
   get_pending_amm1_donations_count : () -> (nat64) query;
+  get_pending_borrow_fee_mint_recovery_page : (opt nat, nat16) -> (
+      BorrowFeeMintRecoveryResult,
+    ) query;
   get_pending_chain_burn_aging : () -> (vec PendingChainBurnAging) query;
   get_pending_payouts : (opt nat, opt nat16) -> (PendingPayoutPage) query;
   get_pending_stability_pool_interest_notification_count : () -> (nat64) query;
@@ -1919,6 +1959,7 @@ service : (ProtocolArg) -> {
   rearm_unsent_v2_default_account_refund : (nat) -> (Result_1);
   reconcile_amm1_donation_mint_candidate_block : (nat64, nat64) -> (Result_1);
   reconcile_chain_supply : (nat32) -> (Result_21);
+  reconcile_pending_borrow_fee_mint_from_block : (nat, nat64) -> (Result_1);
   reconcile_legacy_three_usd_refund_candidate_block : (nat, nat64) -> (
       Result_1,
     );
@@ -2055,6 +2096,8 @@ service : (ProtocolArg) -> {
     );
   settle_xrp_claim : (nat64, text) -> (Result_2);
   settle_xrp_claim_with_tag : (nat64, text, nat32) -> (Result_2);
+  bind_and_retry_missing_borrow_fee_treasury : (nat) -> (Result_1);
+  retry_pending_borrow_fee_mint : (nat) -> (Result_1);
   solana_bootstrap_nonce : (opt text) -> (Result_1);
   solana_get_balance : (text) -> (Result);
   solana_get_mint_supply : () -> (Result);

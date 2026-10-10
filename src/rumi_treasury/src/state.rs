@@ -26,6 +26,13 @@ const MEM_EVENTS: u8 = 3; // StableBTreeMap<u64, TreasuryEvent>  (event log)
 const MEM_WITHDRAWAL_CREATED_AT: u8 = 4; // StableBTreeMap<u64, u64> (request_id → first-attempt created_at_time)
 const MEM_SP_UNALLOCATED_INTEREST_BLOCKS: u8 = 5; // StableBTreeMap<u64, u64> (backend mint block → deposit id)
 const MEM_SP_UNALLOCATED_INTEREST_TRANSFER_BLOCKS: u8 = 6; // StableBTreeMap<u64, u64> (icUSD transfer block → deposit id)
+const MEM_ICUSD_DEPOSIT_BLOCKS: u8 = 7; // StableBTreeMap<u64, u64> (icUSD transfer block → deposit ID; 0 means ambiguous)
+const MEM_ICUSD_DEPOSIT_BLOCK_BACKFILL: u8 = 8; // StableCell<IcusdDepositBlockBackfill>
+const MEM_ICUSD_DEPOSIT_INDEXED_THROUGH: u8 = 9; // StableCell<u64>
+
+/// Keep each migration update bounded regardless of the size of the historic
+/// treasury deposit log.
+pub const ICUSD_BLOCK_BACKFILL_BATCH_SIZE: usize = 100;
 
 /// Every stable memory slot this canister owns, paired with a human label.
 /// Single source of truth for the layout; iterated by the uniqueness test.
@@ -43,7 +50,33 @@ const MEMORY_LAYOUT: &[(u8, &str)] = &[
         MEM_SP_UNALLOCATED_INTEREST_TRANSFER_BLOCKS,
         "sp_unallocated_interest_transfer_blocks",
     ),
+    (MEM_ICUSD_DEPOSIT_BLOCKS, "icusd_deposit_blocks"),
+    (
+        MEM_ICUSD_DEPOSIT_BLOCK_BACKFILL,
+        "icusd_deposit_block_backfill",
+    ),
+    (MEM_ICUSD_DEPOSIT_INDEXED_THROUGH, "icusd_deposit_indexed_through"),
 ];
+
+/// A block is marked ambiguous when more than one historic ICUSD deposit used
+/// it. Deposit IDs start at one, so zero is reserved as the ambiguity marker.
+/// Legacy block zero is always ambiguous because older code may have used zero
+/// as an unknown-block sentinel rather than a real ledger block.
+const AMBIGUOUS_BLOCK_INDEX: u64 = 0;
+
+#[derive(candid::CandidType, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum IcusdDepositBlockBackfill {
+    /// The stable cell did not exist on the previous canister version.
+    Uninitialized,
+    /// Historic deposit IDs in this inclusive range are being indexed.
+    InProgress {
+        next_deposit_id: u64,
+        snapshot_max_id: u64,
+    },
+    /// The historic snapshot has been fully indexed. New ICUSD deposits are
+    /// indexed synchronously alongside the deposit record.
+    Complete,
+}
 
 /// Treasury state that persists across upgrades
 pub struct TreasuryState {
@@ -71,6 +104,14 @@ pub struct TreasuryState {
     /// Physical icUSD transfer block → deposit ID. Source receipts and
     /// transfer receipts must agree before any balance is credited.
     pub sp_unallocated_interest_transfer_blocks: StableBTreeMap<u64, u64, Memory>,
+    /// Every ICUSD deposit's physical ledger block. Value zero means multiple
+    /// legacy rows used the same block or a legacy row used block zero.
+    pub icusd_deposit_blocks: StableBTreeMap<u64, u64, Memory>,
+    /// Resumable, bounded migration state for `icusd_deposit_blocks`.
+    pub icusd_deposit_block_backfill: StableCell<IcusdDepositBlockBackfill, Memory>,
+    /// Highest deposit ID whose ICUSD block has been indexed. Detects rows
+    /// written by an older Treasury after a downgrade and before re-upgrade.
+    pub icusd_deposit_indexed_through: StableCell<u64, Memory>,
 }
 
 /// Treasury configuration stored in stable memory
@@ -150,6 +191,19 @@ impl ic_stable_structures::Storable for BalancesSnapshot {
         ic_stable_structures::storable::Bound::Unbounded;
 }
 
+impl ic_stable_structures::Storable for IcusdDepositBlockBackfill {
+    fn to_bytes(&self) -> std::borrow::Cow<'_, [u8]> {
+        std::borrow::Cow::Owned(candid::encode_one(self).unwrap())
+    }
+
+    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
+        candid::decode_one(&bytes).unwrap()
+    }
+
+    const BOUND: ic_stable_structures::storable::Bound =
+        ic_stable_structures::storable::Bound::Unbounded;
+}
+
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
@@ -208,6 +262,19 @@ impl TreasuryState {
                 sp_unallocated_interest_transfer_blocks: StableBTreeMap::init(
                     memory_manager.get(MemoryId::new(MEM_SP_UNALLOCATED_INTEREST_TRANSFER_BLOCKS)),
                 ),
+                icusd_deposit_blocks: StableBTreeMap::init(
+                    memory_manager.get(MemoryId::new(MEM_ICUSD_DEPOSIT_BLOCKS)),
+                ),
+                icusd_deposit_block_backfill: StableCell::init(
+                    memory_manager.get(MemoryId::new(MEM_ICUSD_DEPOSIT_BLOCK_BACKFILL)),
+                    IcusdDepositBlockBackfill::Complete,
+                )
+                .unwrap(),
+                icusd_deposit_indexed_through: StableCell::init(
+                    memory_manager.get(MemoryId::new(MEM_ICUSD_DEPOSIT_INDEXED_THROUGH)),
+                    0,
+                )
+                .unwrap(),
             }
         })
     }
@@ -237,13 +304,19 @@ impl TreasuryState {
 
     /// Record an event in the audit trail.
     pub fn push_event(&mut self, caller: Principal, action: TreasuryAction) {
+        self.push_event_at(caller, action, ic_cdk::api::time());
+    }
+
+    /// Record an event with an explicit timestamp for deterministic state
+    /// transition tests.
+    pub fn push_event_at(&mut self, caller: Principal, action: TreasuryAction, timestamp: u64) {
         let event_id = self.next_event_id;
         self.next_event_id += 1;
         self.events.insert(
             event_id,
             TreasuryEvent {
                 id: event_id,
-                timestamp: ic_cdk::api::time(),
+                timestamp,
                 caller,
                 action,
             },
@@ -283,10 +356,170 @@ impl TreasuryState {
         // Store the deposit record
         let mut final_record = record;
         final_record.id = deposit_id;
+        let is_icusd = final_record.asset_type == AssetType::ICUSD;
         self.deposits.insert(deposit_id, final_record);
+
+        // Non-ICUSD rows cannot create physical ICUSD block collisions, so
+        // they can advance the contiguous watermark immediately. ICUSD rows
+        // advance it only after their physical-block entry has been written.
+        if !is_icusd
+            && matches!(
+                self.icusd_deposit_block_backfill.get(),
+                IcusdDepositBlockBackfill::Complete
+            )
+        {
+            let _ = self.icusd_deposit_indexed_through.set(deposit_id);
+        }
 
         self.persist_balances();
         deposit_id
+    }
+
+    /// Record a production ICUSD deposit against the shared physical-block
+    /// index. Only BorrowingFee/ICUSD retries are idempotent; every other
+    /// deposit type rejects a previously indexed block.
+    pub fn record_icusd_deposit_once(
+        &mut self,
+        record: DepositRecord,
+    ) -> Result<(u64, bool), String> {
+        if record.asset_type != AssetType::ICUSD {
+            return Err("ICUSD block index only accepts ICUSD deposits".to_string());
+        }
+        if !matches!(
+            self.icusd_deposit_block_backfill.get(),
+            IcusdDepositBlockBackfill::Complete
+        ) {
+            return Err("ICUSD deposit block index backfill is in progress".to_string());
+        }
+
+        // The SP receipt index predates the shared index. If it contains a
+        // block, never let a BorrowingFee retry treat that physical transfer
+        // as its own, even if the shared index is inconsistent.
+        if let Some(existing_id) = self
+            .sp_unallocated_interest_transfer_blocks
+            .get(&record.block_index)
+        {
+            return Err(format!(
+                "ICUSD block {} is already recorded as Stability Pool deposit {}",
+                record.block_index, existing_id
+            ));
+        }
+
+        if let Some(existing_id) = self.icusd_deposit_blocks.get(&record.block_index) {
+            if existing_id == AMBIGUOUS_BLOCK_INDEX {
+                return Err(format!(
+                    "ICUSD block {} is ambiguous in treasury history",
+                    record.block_index
+                ));
+            }
+
+            if record.deposit_type == crate::types::DepositType::BorrowingFee {
+                let existing = self.deposits.get(&existing_id).ok_or_else(|| {
+                    format!(
+                        "ICUSD block {} points to missing treasury deposit {}",
+                        record.block_index, existing_id
+                    )
+                })?;
+                if existing.deposit_type == crate::types::DepositType::BorrowingFee
+                    && existing.asset_type == AssetType::ICUSD
+                    && existing.amount == record.amount
+                    && existing.block_index == record.block_index
+                    && existing.memo == record.memo
+                {
+                    return Ok((existing_id, false));
+                }
+                return Err(format!(
+                    "ICUSD block {} conflicts with its existing treasury deposit",
+                    record.block_index
+                ));
+            }
+
+            return Err(format!(
+                "ICUSD block {} is already recorded as treasury deposit {}",
+                record.block_index, existing_id
+            ));
+        }
+
+        let block_index = record.block_index;
+        let deposit_id = self.add_deposit(record);
+        self.icusd_deposit_blocks.insert(block_index, deposit_id);
+        let _ = self.icusd_deposit_indexed_through.set(deposit_id);
+        Ok((deposit_id, true))
+    }
+
+    /// Index at most `ICUSD_BLOCK_BACKFILL_BATCH_SIZE` historic deposit rows.
+    /// The range is snapshotted when the upgrade is first restored, so newer
+    /// ICUSD ingress remains held until this finite migration is complete.
+    pub fn continue_icusd_deposit_block_backfill(&mut self) -> Result<(u64, u64, bool), String> {
+        let (mut cursor, snapshot_max_id) = match self.icusd_deposit_block_backfill.get().clone() {
+            IcusdDepositBlockBackfill::Uninitialized => {
+                return Err("ICUSD block backfill was not initialized".to_string())
+            }
+            IcusdDepositBlockBackfill::InProgress {
+                next_deposit_id,
+                snapshot_max_id,
+            } => (next_deposit_id, snapshot_max_id),
+            IcusdDepositBlockBackfill::Complete => return Ok((0, 0, true)),
+        };
+
+        let rows: Vec<(u64, DepositRecord)> = self
+            .deposits
+            .range(cursor..=snapshot_max_id)
+            .take(ICUSD_BLOCK_BACKFILL_BATCH_SIZE)
+            .collect();
+        let processed = rows.len() as u64;
+        let last_processed_id = rows.last().map(|(id, _)| *id);
+        for (deposit_id, record) in rows {
+            if record.asset_type != AssetType::ICUSD {
+                continue;
+            }
+
+            if record.block_index == 0 {
+                // Historical zero may mean "unknown". Never use it to
+                // authorize a retry, even if only one row currently exists.
+                self.icusd_deposit_blocks
+                    .insert(record.block_index, AMBIGUOUS_BLOCK_INDEX);
+            } else if let Some(existing_id) = self.icusd_deposit_blocks.get(&record.block_index) {
+                if existing_id != AMBIGUOUS_BLOCK_INDEX && existing_id != deposit_id {
+                    self.icusd_deposit_blocks
+                        .insert(record.block_index, AMBIGUOUS_BLOCK_INDEX);
+                }
+            } else {
+                self.icusd_deposit_blocks
+                    .insert(record.block_index, deposit_id);
+            }
+        }
+
+        if let Some(last_processed_id) = last_processed_id {
+            cursor = last_processed_id.checked_add(1).unwrap_or(last_processed_id);
+        }
+        let complete = processed == 0
+            || last_processed_id
+                .map(|last_id| last_id >= snapshot_max_id)
+                .unwrap_or(false);
+        let current_max_id = self.deposits.last_key_value().map(|(id, _)| id).unwrap_or(0);
+        let status = if complete && current_max_id <= snapshot_max_id {
+            self.icusd_deposit_indexed_through
+                .set(snapshot_max_id)
+                .map_err(|e| format!("Failed to persist ICUSD index watermark: {:?}", e))?;
+            IcusdDepositBlockBackfill::Complete
+        } else if complete {
+            IcusdDepositBlockBackfill::InProgress {
+                next_deposit_id: snapshot_max_id.checked_add(1).unwrap_or(snapshot_max_id),
+                snapshot_max_id: current_max_id,
+            }
+        } else {
+            IcusdDepositBlockBackfill::InProgress {
+                next_deposit_id: cursor,
+                snapshot_max_id,
+            }
+        };
+        let migration_complete = matches!(&status, IcusdDepositBlockBackfill::Complete);
+        self.icusd_deposit_block_backfill
+            .set(status)
+            .map_err(|e| format!("Failed to persist ICUSD block backfill: {:?}", e))?;
+
+        Ok((processed, cursor, migration_complete))
     }
 
     /// Record a Stability Pool treasury forward exactly once per backend mint
@@ -316,6 +549,12 @@ impl TreasuryState {
         if source_mint_blocks.is_empty() {
             return Err("source mint blocks cannot be empty".to_string());
         }
+        if !matches!(
+            self.icusd_deposit_block_backfill.get(),
+            IcusdDepositBlockBackfill::Complete
+        ) {
+            return Err("ICUSD deposit block index backfill is in progress".to_string());
+        }
         let existing: Vec<u64> = source_mint_blocks
             .iter()
             .filter_map(|block| self.sp_unallocated_interest_blocks.get(block))
@@ -324,7 +563,31 @@ impl TreasuryState {
             if existing.len() == source_mint_blocks.len()
                 && existing.iter().all(|id| *id == existing[0])
             {
-                return Ok((existing[0], false));
+                let existing_id = existing[0];
+                let existing_deposit = self.deposits.get(&existing_id).ok_or_else(|| {
+                    format!(
+                        "Stability Pool source receipt points to missing deposit {}",
+                        existing_id
+                    )
+                })?;
+                if existing_deposit.deposit_type == crate::types::DepositType::InterestRevenue
+                    && existing_deposit.asset_type == crate::types::AssetType::ICUSD
+                    && existing_deposit.amount == amount
+                    && existing_deposit.block_index == transfer_block_index
+                    && existing_deposit.memo.as_deref()
+                        == Some("stability-pool unallocated interest")
+                    && self.icusd_deposit_blocks.get(&transfer_block_index) == Some(existing_id)
+                    && self
+                        .sp_unallocated_interest_transfer_blocks
+                        .get(&transfer_block_index)
+                        == Some(existing_id)
+                {
+                    return Ok((existing_id, false));
+                }
+                return Err(
+                    "Stability Pool source receipt conflicts with its ICUSD transfer block"
+                        .to_string(),
+                );
             }
             return Err("one or more source mint blocks were already recorded".to_string());
         }
@@ -338,7 +601,7 @@ impl TreasuryState {
             ));
         }
 
-        let deposit_id = self.add_deposit(DepositRecord {
+        let (deposit_id, newly_recorded) = self.record_icusd_deposit_once(DepositRecord {
             id: 0,
             deposit_type: crate::types::DepositType::InterestRevenue,
             asset_type: crate::types::AssetType::ICUSD,
@@ -346,7 +609,10 @@ impl TreasuryState {
             block_index: transfer_block_index,
             timestamp: now,
             memo: Some("stability-pool unallocated interest".to_string()),
-        });
+        })?;
+        if !newly_recorded {
+            return Err("ICUSD transfer block already has a non-SP deposit".to_string());
+        }
         for source_mint_block in source_mint_blocks {
             self.sp_unallocated_interest_blocks
                 .insert(*source_mint_block, deposit_id);
@@ -541,13 +807,15 @@ pub fn restore_state() {
             };
 
             // Compute next_deposit_id from max key in the deposit map.
-            let max_id = deposits.iter().map(|(id, _)| id).last().unwrap_or(0);
+            // StableBTreeMap supports logarithmic last-key lookup; avoid
+            // scanning the entire deposit log during an upgrade.
+            let max_id = deposits.last_key_value().map(|(id, _)| id).unwrap_or(0);
             let next_deposit_id = if max_id > 0 { max_id + 1 } else { 1 };
 
             // Re-open events stable map
             let events: StableBTreeMap<u64, TreasuryEvent, Memory> =
                 StableBTreeMap::init(memory_manager.get(MemoryId::new(MEM_EVENTS)));
-            let max_event_id = events.iter().map(|(id, _)| id).last().unwrap_or(0);
+            let max_event_id = events.last_key_value().map(|(id, _)| id).unwrap_or(0);
             let next_event_id = if max_event_id > 0 {
                 max_event_id + 1
             } else {
@@ -566,6 +834,69 @@ pub fn restore_state() {
                     memory_manager.get(MemoryId::new(MEM_SP_UNALLOCATED_INTEREST_TRANSFER_BLOCKS)),
                 );
 
+            let icusd_deposit_blocks: StableBTreeMap<u64, u64, Memory> =
+                StableBTreeMap::init(memory_manager.get(MemoryId::new(MEM_ICUSD_DEPOSIT_BLOCKS)));
+            let mut icusd_deposit_block_backfill: StableCell<IcusdDepositBlockBackfill, Memory> =
+                StableCell::init(
+                    memory_manager.get(MemoryId::new(MEM_ICUSD_DEPOSIT_BLOCK_BACKFILL)),
+                    IcusdDepositBlockBackfill::Uninitialized,
+                )
+                .unwrap();
+            let icusd_deposit_indexed_through: StableCell<u64, Memory> = StableCell::init(
+                memory_manager.get(MemoryId::new(MEM_ICUSD_DEPOSIT_INDEXED_THROUGH)),
+                0,
+            )
+            .unwrap();
+            if matches!(
+                icusd_deposit_block_backfill.get(),
+                IcusdDepositBlockBackfill::Uninitialized
+            ) {
+                let indexed_through = *icusd_deposit_indexed_through.get();
+                let initial_status = if max_id <= indexed_through {
+                    IcusdDepositBlockBackfill::Complete
+                } else {
+                    IcusdDepositBlockBackfill::InProgress {
+                        next_deposit_id: indexed_through.checked_add(1).unwrap_or(indexed_through),
+                        snapshot_max_id: max_id,
+                    }
+                };
+                icusd_deposit_block_backfill
+                    .set(initial_status)
+                    .expect("persist initial ICUSD block backfill state");
+            } else if matches!(
+                icusd_deposit_block_backfill.get(),
+                IcusdDepositBlockBackfill::Complete
+            ) && max_id > *icusd_deposit_indexed_through.get()
+            {
+                // A downgraded version has no knowledge of the block index
+                // watermark and may have appended unindexed deposits. Rebuild
+                // only the bounded tail beginning immediately after the last
+                // ID known to have been indexed.
+                let next_deposit_id = icusd_deposit_indexed_through
+                    .get()
+                    .checked_add(1)
+                    .unwrap_or(*icusd_deposit_indexed_through.get());
+                icusd_deposit_block_backfill
+                    .set(IcusdDepositBlockBackfill::InProgress {
+                        next_deposit_id,
+                        snapshot_max_id: max_id,
+                    })
+                    .expect("persist ICUSD rollback backfill state");
+            } else if let IcusdDepositBlockBackfill::InProgress {
+                next_deposit_id,
+                snapshot_max_id,
+            } = icusd_deposit_block_backfill.get().clone()
+            {
+                if max_id > snapshot_max_id {
+                    icusd_deposit_block_backfill
+                        .set(IcusdDepositBlockBackfill::InProgress {
+                            next_deposit_id,
+                            snapshot_max_id: max_id,
+                        })
+                        .expect("extend ICUSD backfill snapshot after rollback");
+                }
+            }
+
             *s.borrow_mut() = Some(TreasuryState {
                 deposits,
                 balances,
@@ -577,6 +908,9 @@ pub fn restore_state() {
                 withdrawal_created_at,
                 sp_unallocated_interest_blocks,
                 sp_unallocated_interest_transfer_blocks,
+                icusd_deposit_blocks,
+                icusd_deposit_block_backfill,
+                icusd_deposit_indexed_through,
             });
         });
     });

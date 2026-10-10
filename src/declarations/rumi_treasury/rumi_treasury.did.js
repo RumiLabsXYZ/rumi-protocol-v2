@@ -94,6 +94,11 @@ export const idlFactory = ({ IDL }) => {
     'amount_transferred' : IDL.Nat64,
   });
   return IDL.Service({
+    'continue_icusd_deposit_block_backfill' : IDL.Func(
+        [],
+        [IDL.Variant({ 'Ok' : IDL.Text, 'Err' : IDL.Text })],
+        [],
+      ),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],
@@ -101,6 +106,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
     'deposit' : IDL.Func(
+        [DepositArgs],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],
+        [],
+      ),
+    'deposit_borrowing_fee_once' : IDL.Func(
         [DepositArgs],
         [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],
         [],
