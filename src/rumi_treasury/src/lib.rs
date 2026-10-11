@@ -150,12 +150,12 @@ async fn deposit(args: DepositArgs) -> Result<u64, String> {
     Ok(deposit_id)
 }
 
-fn validate_legacy_deposit_asset(asset_type: &AssetType) -> Result<(), String> {
-    if matches!(asset_type, AssetType::CKUSDT | AssetType::CKUSDC) {
-        Err("CKUSDT/CKUSDC deposits require record_external_token_deposit_once".to_string())
-    } else {
-        Ok(())
-    }
+fn validate_legacy_deposit_asset(_asset_type: &AssetType) -> Result<(), String> {
+    // TODO(external-token-receipts): remove CKUSDT/CKUSDC support here after
+    // every backend collateral/fee caller has migrated to the durable outbox
+    // and `record_external_token_deposit_once`; until then rejecting this
+    // route can strand already-transferred fees whose notifier uses `deposit`.
+    Ok(())
 }
 
 /// Record a BorrowingFee/ICUSD transfer with receiver-side idempotency. This

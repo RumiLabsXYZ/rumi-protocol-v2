@@ -809,11 +809,41 @@ mod tests {
     }
 
     #[test]
-    fn legacy_deposit_rejects_external_tokens_and_preserves_other_assets() {
-        assert!(crate::validate_legacy_deposit_asset(&AssetType::CKUSDT).is_err());
-        assert!(crate::validate_legacy_deposit_asset(&AssetType::CKUSDC).is_err());
+    fn legacy_deposit_temporarily_accepts_external_tokens_and_tombstones_blocks() {
+        init_test_treasury();
+        assert!(crate::validate_legacy_deposit_asset(&AssetType::CKUSDT).is_ok());
+        assert!(crate::validate_legacy_deposit_asset(&AssetType::CKUSDC).is_ok());
         assert!(crate::validate_legacy_deposit_asset(&AssetType::ICUSD).is_ok());
         assert!(crate::validate_legacy_deposit_asset(&AssetType::ICP).is_ok());
+
+        let ledger = crate::state::with_state(|s| s.get_config().ckusdt_ledger.unwrap());
+        let record = deposit_record(
+            DepositType::LiquidationFee,
+            AssetType::CKUSDT,
+            123,
+            17,
+            Some("legacy notifier compatibility"),
+        );
+        let legacy_id = crate::record_deposit_with_event(record, mock_principal(), 1).unwrap();
+        let retry = crate::state::with_state_mut(|s| {
+            s.record_external_token_deposit_once(
+                external_token_args(
+                    ledger,
+                    AssetType::CKUSDT,
+                    123,
+                    17,
+                    Some("legacy notifier compatibility"),
+                ),
+                2,
+            )
+        });
+        assert!(retry.is_err(), "legacy block tombstone must fail closed");
+        crate::state::with_state(|s| {
+            assert_eq!(s.get_deposits_count(), 1);
+            assert_eq!(s.balances[&AssetType::CKUSDT].total, 123);
+            assert_eq!(s.get_events_count(), 1);
+            assert_eq!(legacy_id, 1);
+        });
     }
 
     #[test]
