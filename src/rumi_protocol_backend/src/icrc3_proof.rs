@@ -522,7 +522,7 @@ pub async fn verify_reserve_redemption_candidate(
         }
         Phase::TreasuryFeeSubmitted | Phase::TreasuryFeeAmbiguous =>
             journal.treasury_ledger.ok_or("treasury fee ledger is absent")?,
-        Phase::RefundSubmitted | Phase::RefundNoEffect =>
+        Phase::RefundSubmitted | Phase::RefundRetrySubmitted | Phase::RefundNoEffect =>
             journal.refund_ledger.ok_or("refund ledger is absent")?,
         _ => return Err("journal phase has no unresolved receipt candidate".into()),
     };
@@ -541,7 +541,7 @@ pub fn validate_reserve_redemption_candidate_block(
         Phase::PullSubmitted => Leg::Pull,
         Phase::PayoutSubmitted | Phase::PayoutAmbiguous if journal.payout_amount_e6s > 0 => Leg::Payout,
         Phase::TreasuryFeeSubmitted | Phase::TreasuryFeeAmbiguous => Leg::TreasuryFee,
-        Phase::RefundSubmitted | Phase::RefundNoEffect => Leg::Refund,
+        Phase::RefundSubmitted | Phase::RefundRetrySubmitted | Phase::RefundNoEffect => Leg::Refund,
         _ => return Err("journal phase has no unresolved receipt candidate".into()),
     };
     match leg {
@@ -633,6 +633,9 @@ mod reserve_redemption_candidate_tests {
             operation_id: 7,
             caller,
             icusd_amount_e8s: 100_000,
+            fee_icusd_e8s: 0,
+            fee_stable_e6s: 0,
+            raw_dust_refund_e8s: 0,
             pull_ledger: ledger,
             pull_from: Account { owner: caller, subaccount: None },
             pull_to: Account { owner: canister, subaccount: None },
@@ -715,6 +718,29 @@ mod reserve_redemption_candidate_tests {
         let mut wrong = block;
         wrong.spender = Some(Account { owner: Principal::from_slice(&[9]), subaccount: None });
         assert!(validate_reserve_redemption_candidate_block(&row, &wrong).is_err());
+    }
+
+    #[test]
+    fn retry_submitted_refund_can_be_reconciled_against_its_saved_tuple() {
+        let mut row = journal();
+        row.phase = Phase::RefundRetrySubmitted;
+        row.pull_block_index = Some(9);
+        row.refund_ledger = Some(row.pull_ledger);
+        row.refund_amount_e8s = Some(row.icusd_amount_e8s);
+        row.refund_op_nonce = Some(44);
+        row.refund_memo = Some(44u128.to_be_bytes().to_vec());
+        row.refund_created_at_time_ns = Some(440);
+        let exact = transfer(
+            Account { owner: row.pull_to.owner, subaccount: None },
+            Account { owner: row.caller, subaccount: None },
+            row.icusd_amount_e8s,
+            row.refund_memo.clone().unwrap(),
+            row.refund_created_at_time_ns.unwrap(),
+        );
+        assert_eq!(validate_reserve_redemption_candidate_block(&row, &exact), Ok(Leg::Refund));
+        let mut changed = exact;
+        changed.memo.as_mut().unwrap()[0] ^= 1;
+        assert!(validate_reserve_redemption_candidate_block(&row, &changed).is_err());
     }
 }
 

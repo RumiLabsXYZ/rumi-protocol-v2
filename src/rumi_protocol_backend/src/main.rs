@@ -92,6 +92,7 @@ fn reserve_redemption_status_in(
         rumi_protocol_backend::state::ReserveRedemptionPhase::TreasuryFeeNoEffect => "treasury_fee_no_effect",
         rumi_protocol_backend::state::ReserveRedemptionPhase::TreasuryFeeAmbiguous => "treasury_fee_ambiguous",
         rumi_protocol_backend::state::ReserveRedemptionPhase::RefundSubmitted => "refund_submitted",
+        rumi_protocol_backend::state::ReserveRedemptionPhase::RefundRetrySubmitted => "refund_retry_submitted",
         rumi_protocol_backend::state::ReserveRedemptionPhase::RefundNoEffect => "refund_no_effect",
         rumi_protocol_backend::state::ReserveRedemptionPhase::RefundSettled => "refund_settled",
     };
@@ -19384,6 +19385,9 @@ mod reserve_redemption_status_tests {
                 operation_id: 99,
                 caller: owner,
                 icusd_amount_e8s: 10_000,
+                fee_icusd_e8s: 0,
+                fee_stable_e6s: 0,
+                raw_dust_refund_e8s: 0,
                 pull_ledger: ledger,
                 pull_from: Account { owner, subaccount: None },
                 pull_to: Account { owner: protocol, subaccount: None },

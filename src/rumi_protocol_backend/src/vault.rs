@@ -549,8 +549,10 @@ enum ReserveRedemptionRefundOutcome {
 }
 
 /// Persist the exact refund tuple before dispatch. Typed no-effect outcomes
-/// may retry this same tuple; rejects/GenericError/TooOld remain held for
-/// receipt proof because a prior dispatch may have committed.
+/// may retry this same tuple. TooOld stays ambiguous on the first attempt; on
+/// a persisted same-tuple retry it is typed no-effect relative to that retry.
+/// Rejects and GenericError remain held for receipt proof because a prior
+/// dispatch may have committed.
 async fn refund_reserve_redemption(
     operation_id: u128,
     pull_block_index: u64,
@@ -569,9 +571,7 @@ async fn refund_reserve_redemption(
             {
                 return None;
             }
-            let row = state.reserve_redemption_journals.get_mut(&operation_id)?;
-            row.phase = crate::state::ReserveRedemptionPhase::RefundSubmitted;
-            return Some(row.clone());
+            return state.begin_reserve_redemption_refund_retry(operation_id, &existing);
         }
         if existing.phase != crate::state::ReserveRedemptionPhase::PayoutSubmitted
             && existing.phase != crate::state::ReserveRedemptionPhase::PayoutSettled
@@ -1987,6 +1987,9 @@ pub async fn redeem_reserves(
             operation_id,
             caller,
             icusd_amount_e8s: icusd_amount.to_u64(),
+            fee_icusd_e8s: fee_icusd.to_u64(),
+            fee_stable_e6s: fee_e6s,
+            raw_dust_refund_e8s: raw_spillover_refund_budget_e8s,
             pull_ledger: state.icusd_ledger_principal,
             pull_from: icrc_ledger_types::icrc1::account::Account {
                 owner: caller,
@@ -15531,6 +15534,9 @@ mod add_margin_overflow_tests {
             operation_id: 9,
             caller,
             icusd_amount_e8s: 500,
+            fee_icusd_e8s: 0,
+            fee_stable_e6s: 0,
+            raw_dust_refund_e8s: 0,
             pull_ledger: ledger,
             pull_from: Account { owner: caller, subaccount: None },
             pull_to: Account { owner: protocol, subaccount: None },
@@ -15622,7 +15628,20 @@ mod add_margin_overflow_tests {
         let no_effect_retry = full_refund_state.reserve_redemption_journals.get(&9).unwrap().clone();
         assert_eq!(no_effect_retry.phase, ReserveRedemptionPhase::RefundNoEffect);
         assert_eq!(no_effect_retry.refund_op_nonce, Some(12));
+        let retry_submitted = full_refund_state
+            .begin_reserve_redemption_refund_retry(9, &no_effect_retry)
+            .expect("only a persisted typed no-effect refund can start an exact retry");
+        assert_eq!(retry_submitted.phase, ReserveRedemptionPhase::RefundRetrySubmitted);
+        assert_eq!(retry_submitted.refund_op_nonce, no_effect_retry.refund_op_nonce);
+        assert_eq!(retry_submitted.refund_memo, no_effect_retry.refund_memo);
+        assert_eq!(retry_submitted.refund_created_at_time_ns, no_effect_retry.refund_created_at_time_ns);
+        assert_eq!(retry_submitted.refund_amount_e8s, no_effect_retry.refund_amount_e8s);
+        assert!(full_refund_state.mark_reserve_redemption_refund_no_effect(9, &retry_submitted));
+        let second_too_old = full_refund_state.reserve_redemption_journals.get(&9).unwrap();
+        assert_eq!(second_too_old.phase, ReserveRedemptionPhase::RefundNoEffect);
+        assert_eq!(second_too_old.refund_op_nonce, Some(12));
         assert!(full_refund_state.check_invariants().is_ok());
+        let no_effect_retry = second_too_old.clone();
         assert!(full_refund_state.record_reserve_redemption_receipt(
             9,
             &no_effect_retry,

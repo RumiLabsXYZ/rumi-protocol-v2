@@ -2077,6 +2077,13 @@ pub struct ReserveRedemptionJournal {
     pub operation_id: u128,
     pub caller: Principal,
     pub icusd_amount_e8s: u64,
+    /// Immutable accounting inputs captured before the pull await.
+    #[serde(default)]
+    pub fee_icusd_e8s: u64,
+    #[serde(default)]
+    pub fee_stable_e6s: u64,
+    #[serde(default)]
+    pub raw_dust_refund_e8s: u64,
     pub pull_ledger: Principal,
     pub pull_from: icrc_ledger_types::icrc1::account::Account,
     pub pull_to: icrc_ledger_types::icrc1::account::Account,
@@ -2141,6 +2148,9 @@ pub enum ReserveRedemptionPhase {
     TreasuryFeeNoEffect,
     TreasuryFeeAmbiguous,
     RefundSubmitted,
+    /// A refund tuple previously received a typed no-effect response and is
+    /// being retried unchanged. A TooOld reply to this retry remains no-effect.
+    RefundRetrySubmitted,
     /// The refund ledger returned a typed error that proves this attempt had
     /// no effect. The exact tuple is retained and may be retried unchanged.
     RefundNoEffect,
@@ -8648,7 +8658,9 @@ impl State {
         let Some(row) = self.reserve_redemption_journals.get_mut(&operation_id) else {
             return false;
         };
-        if row != expected || row.phase != ReserveRedemptionPhase::RefundSubmitted {
+        if row != expected
+            || !matches!(row.phase, ReserveRedemptionPhase::RefundSubmitted | ReserveRedemptionPhase::RefundRetrySubmitted)
+        {
             return false;
         }
         row.refund_block_index = Some(refund_block_index);
@@ -8664,11 +8676,31 @@ impl State {
         let Some(row) = self.reserve_redemption_journals.get_mut(&operation_id) else {
             return false;
         };
-        if row != expected || row.phase != ReserveRedemptionPhase::RefundSubmitted {
+        if row != expected
+            || !matches!(row.phase, ReserveRedemptionPhase::RefundSubmitted | ReserveRedemptionPhase::RefundRetrySubmitted)
+        {
             return false;
         }
         row.phase = ReserveRedemptionPhase::RefundNoEffect;
         true
+    }
+
+    /// Begin an unchanged retry only from a persisted typed no-effect result.
+    /// The caller must dispatch the exact saved refund tuple after this CAS.
+    pub fn begin_reserve_redemption_refund_retry(
+        &mut self,
+        operation_id: u128,
+        expected: &ReserveRedemptionJournal,
+    ) -> Option<ReserveRedemptionJournal> {
+        let row = self.reserve_redemption_journals.get_mut(&operation_id)?;
+        if row != expected
+            || row.phase != ReserveRedemptionPhase::RefundNoEffect
+            || row.refund_block_index.is_some()
+        {
+            return None;
+        }
+        row.phase = ReserveRedemptionPhase::RefundRetrySubmitted;
+        Some(row.clone())
     }
 
     /// Persist a positive receipt only for the currently submitted/ambiguous
@@ -8707,7 +8739,7 @@ impl State {
                 row.phase = ReserveRedemptionPhase::TreasuryFeeSettled;
             }
             ReserveRedemptionReceiptLeg::Refund
-                if matches!(row.phase, ReserveRedemptionPhase::RefundSubmitted | ReserveRedemptionPhase::RefundNoEffect) =>
+                if matches!(row.phase, ReserveRedemptionPhase::RefundSubmitted | ReserveRedemptionPhase::RefundRetrySubmitted | ReserveRedemptionPhase::RefundNoEffect) =>
             {
                 row.refund_block_index = Some(block_index);
                 row.phase = ReserveRedemptionPhase::RefundSettled;
@@ -8769,6 +8801,14 @@ impl State {
                 row.pull_amount_e8s,
                 row.icusd_amount_e8s,
                 "reserve redemption pull amount does not match requested amount"
+            );
+            ensure!(
+                row.fee_icusd_e8s <= row.icusd_amount_e8s,
+                "reserve redemption icUSD fee exceeds the pulled amount"
+            );
+            ensure!(
+                row.raw_dust_refund_e8s <= row.icusd_amount_e8s,
+                "reserve redemption raw dust refund exceeds the pulled amount"
             );
             ensure_eq!(
                 row.pull_from.owner,
@@ -8859,6 +8899,11 @@ impl State {
                     created_at,
                     crate::management::nonce_to_created_at_time(nonce),
                     "reserve redemption treasury timestamp does not match its nonce"
+                );
+                ensure_eq!(
+                    row.treasury_amount_e6s.unwrap_or_default(),
+                    row.fee_stable_e6s,
+                    "reserve redemption treasury tuple amount differs from its persisted fee"
                 );
             }
 
@@ -8961,6 +9006,7 @@ impl State {
         let refund_phase = matches!(
                 row.phase,
             ReserveRedemptionPhase::RefundSubmitted
+                | ReserveRedemptionPhase::RefundRetrySubmitted
                 | ReserveRedemptionPhase::RefundNoEffect
                 | ReserveRedemptionPhase::RefundSettled
             );
@@ -8996,6 +9042,7 @@ impl State {
                     row.phase,
                     ReserveRedemptionPhase::TreasuryFeeSettled
                         | ReserveRedemptionPhase::RefundSubmitted
+                        | ReserveRedemptionPhase::RefundRetrySubmitted
                         | ReserveRedemptionPhase::RefundNoEffect
                         | ReserveRedemptionPhase::RefundSettled
                 ),
@@ -9323,6 +9370,9 @@ mod tests {
             operation_id: 9,
             caller,
             icusd_amount_e8s: 500,
+            fee_icusd_e8s: 0,
+            fee_stable_e6s: 0,
+            raw_dust_refund_e8s: 0,
             pull_ledger: ledger,
             pull_from: Account { owner: caller, subaccount: None },
             pull_to: Account { owner: Principal::from_slice(&[213]), subaccount: None },

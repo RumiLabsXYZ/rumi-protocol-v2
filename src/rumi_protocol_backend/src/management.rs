@@ -2600,6 +2600,22 @@ pub(crate) fn reserve_redemption_payout_refund_allowed(
     matches!(error, DurableTransferError::LedgerNoEffect(_))
 }
 
+fn classify_reserve_redemption_refund_too_old(
+    phase: crate::state::ReserveRedemptionPhase,
+) -> DurableTransferError {
+    if phase == crate::state::ReserveRedemptionPhase::RefundRetrySubmitted {
+        // This request is the exact same tuple that already received a typed
+        // no-effect response. TooOld applies to this retry's timestamp and
+        // does not erase the earlier proof that the operation tuple had no
+        // effect.
+        DurableTransferError::LedgerNoEffect(TransferError::TooOld)
+    } else {
+        DurableTransferError::AmbiguousResponse(
+            "ledger returned TooOld; the original refund may have settled".into(),
+        )
+    }
+}
+
 fn classify_durable_transfer_outcome(
     outer: Result<Result<Nat, TransferError>, (i32, String)>,
 ) -> Result<u64, DurableTransferError> {
@@ -2814,9 +2830,9 @@ pub async fn transfer_reserve_redemption_refund(
                 "ledger GenericError {error_code}: {message}"
             )))
         }
-        Ok(Err(TransferError::TooOld)) => Err(DurableTransferError::AmbiguousResponse(
-            "ledger returned TooOld; the original refund may have settled".into(),
-        )),
+        Ok(Err(TransferError::TooOld)) => Err(
+            classify_reserve_redemption_refund_too_old(journal.phase),
+        ),
         other => classify_durable_transfer_outcome(other),
     }
 }
@@ -3758,6 +3774,22 @@ mod sweep_deposit_limit_tests {
         assert!(super::reserve_redemption_payout_refund_allowed(
             &definite_no_effect
         ));
+    }
+
+    #[test]
+    fn refund_too_old_is_no_effect_only_after_a_typed_no_effect_retry() {
+        use crate::state::ReserveRedemptionPhase as Phase;
+
+        assert!(matches!(
+            super::classify_reserve_redemption_refund_too_old(Phase::RefundRetrySubmitted),
+            DurableTransferError::LedgerNoEffect(TransferError::TooOld)
+        ));
+        for phase in [Phase::RefundSubmitted, Phase::RefundNoEffect, Phase::PayoutSettled] {
+            assert!(matches!(
+                super::classify_reserve_redemption_refund_too_old(phase),
+                DurableTransferError::AmbiguousResponse(_)
+            ), "TooOld must remain ambiguous outside the persisted same-tuple retry dispatch");
+        }
     }
 
     #[test]
