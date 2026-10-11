@@ -786,38 +786,177 @@ async fn advance_stable_transfer_receipt_scan(
     }
 }
 
-async fn probe_stable_transfer_expiry(
+struct StableTransferExpiryProbeArgs {
+    subaccount: [u8; 32],
+    transfer: icrc_ledger_types::icrc1::transfer::TransferArg,
+}
+
+fn stable_transfer_expiry_probe_args(
     tuple: &crate::state::BorrowMintTuple,
-) -> Result<(), String> {
+    entropy: [u8; 32],
+) -> Result<StableTransferExpiryProbeArgs, String> {
     use icrc_ledger_types::icrc1::account::Account;
-    use icrc_ledger_types::icrc1::transfer::{Memo, TransferArg, TransferError};
+    use icrc_ledger_types::icrc1::transfer::{Memo, TransferArg};
     use sha2::{Digest, Sha256};
-    let mut sink_seed = b"RUMI-STABLE-TRANSFER-EXPIRY-SINK-V1".to_vec();
+
+    let mut subaccount_hash = Sha256::new();
+    subaccount_hash.update(b"RUMI-STABLE-TRANSFER-EXPIRY-SUBACCOUNT-V1");
+    subaccount_hash.update(tuple.ledger.as_slice());
+    subaccount_hash.update(tuple.destination.as_slice());
+    subaccount_hash.update(tuple.op_nonce.to_be_bytes());
+    subaccount_hash.update(tuple.created_at_time_ns.to_be_bytes());
+    subaccount_hash.update(entropy);
+    let subaccount: [u8; 32] = subaccount_hash.finalize().into();
+
+    let mut sink_seed = b"RUMI-STABLE-TRANSFER-EXPIRY-SINK-V2".to_vec();
     sink_seed.extend_from_slice(tuple.ledger.as_slice());
     sink_seed.extend_from_slice(tuple.destination.as_slice());
     sink_seed.extend_from_slice(&tuple.op_nonce.to_be_bytes());
+    sink_seed.extend_from_slice(&tuple.created_at_time_ns.to_be_bytes());
+    sink_seed.extend_from_slice(&entropy);
     let sink = Principal::self_authenticating(&sink_seed);
-    if sink == tuple.destination { return Err("expiry sink collides with Treasury".into()); }
+    if sink == tuple.destination {
+        return Err("expiry sink collides with Treasury".into());
+    }
     let mut hash = Sha256::new();
-    hash.update(b"RUMI-STABLE-TRANSFER-EXPIRY-PROBE-V1");
+    hash.update(b"RUMI-STABLE-TRANSFER-EXPIRY-PROBE-MEMO-V2");
     hash.update(tuple.ledger.as_slice());
     hash.update(tuple.destination.as_slice());
     hash.update(tuple.op_nonce.to_be_bytes());
     hash.update(tuple.created_at_time_ns.to_be_bytes());
+    hash.update(entropy);
     let memo = hash.finalize().to_vec();
-    if memo.as_slice() == tuple.memo { return Err("expiry probe memo collides with transfer memo".into()); }
-    let outcome: Result<(Result<Nat, TransferError>,), _> = ic_cdk::call(
-        tuple.ledger, "icrc1_transfer", (TransferArg {
-            from_subaccount: None, to: Account { owner: sink, subaccount: None },
-            fee: Some(Nat::from(0u8)), created_at_time: Some(tuple.created_at_time_ns),
-            memo: Some(Memo::from(memo)), amount: Nat::from(0u8),
-        },),
-    ).await;
+    if memo.as_slice() == tuple.memo {
+        return Err("expiry probe memo collides with transfer memo".into());
+    }
+    Ok(StableTransferExpiryProbeArgs {
+        subaccount,
+        transfer: TransferArg {
+            from_subaccount: Some(subaccount),
+            to: Account {
+                owner: sink,
+                subaccount: None,
+            },
+            fee: None,
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(Memo::from(memo)),
+            amount: Nat::from(1u8),
+        },
+    })
+}
+
+fn stable_transfer_expiry_was_proven(
+    result: &Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
+) -> bool {
+    matches!(
+        result,
+        Err(icrc_ledger_types::icrc1::transfer::TransferError::TooOld)
+    )
+}
+
+async fn probe_stable_transfer_expiry(tuple: &crate::state::BorrowMintTuple) -> Result<(), String> {
+    use icrc_ledger_types::icrc1::account::Account;
+    use icrc_ledger_types::icrc1::transfer::TransferError;
+
+    // The pinned ICRC ledger checks a supplied fee before transaction age.
+    // Use fee=None so its current fee is accepted. A fresh one-unit transfer
+    // from a private, empty subaccount cannot debit anything, even at zero fee;
+    // only a typed TooOld response may establish that the original timestamp
+    // has aged out. A separate exact-history scan still proves absence.
+    let entropy: [u8; 32] = ic_cdk::api::management_canister::main::raw_rand()
+        .await
+        .map_err(|(code, error)| format!("expiry probe entropy unavailable ({code:?}): {error}"))?
+        .0
+        .try_into()
+        .map_err(|_| "expiry probe entropy had an invalid length".to_string())?;
+    let args = stable_transfer_expiry_probe_args(tuple, entropy)?;
+    let source = Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(args.subaccount),
+    };
+    let balance: Result<(Nat,), _> =
+        ic_cdk::call(tuple.ledger, "icrc1_balance_of", (source,)).await;
+    let (balance,) = balance.map_err(|(code, error)| {
+        format!("expiry probe source balance unavailable ({code:?}): {error}")
+    })?;
+    if balance != Nat::from(0u8) {
+        return Err("expiry probe source subaccount was not empty; held".into());
+    }
+    let minting: Result<(Option<Account>,), _> =
+        ic_cdk::call(tuple.ledger, "icrc1_minting_account", ()).await;
+    let (minting,) = minting.map_err(|(code, error)| {
+        format!("expiry probe minting account unavailable ({code:?}): {error}")
+    })?;
+    if minting.as_ref() == Some(&source) || minting.as_ref() == Some(&args.transfer.to) {
+        return Err("expiry probe account collides with ledger minting account; held".into());
+    }
+    let outcome: Result<(Result<Nat, TransferError>,), _> =
+        ic_cdk::call(tuple.ledger, "icrc1_transfer", (args.transfer,)).await;
     match outcome {
-        Ok((Err(TransferError::TooOld),)) => Ok(()),
-        Ok((Ok(_),)) => Err("zero-value expiry probe succeeded; held".into()),
+        Ok((result,)) if stable_transfer_expiry_was_proven(&result) => Ok(()),
+        Ok((Ok(_),)) => Err("expiry probe unexpectedly succeeded; held".into()),
         Ok((Err(error),)) => Err(format!("expiry probe was not typed TooOld: {error:?}")),
         Err((code, error)) => Err(format!("expiry probe call rejected ({code:?}): {error}")),
+    }
+}
+
+#[cfg(test)]
+mod stable_transfer_expiry_probe_tests {
+    use super::{stable_transfer_expiry_probe_args, stable_transfer_expiry_was_proven};
+    use crate::state::BorrowMintTuple;
+    use candid::{Nat, Principal};
+    use icrc_ledger_types::icrc1::transfer::TransferError;
+
+    fn tuple() -> BorrowMintTuple {
+        BorrowMintTuple {
+            ledger: Principal::from_slice(&[1]),
+            destination: Principal::from_slice(&[2]),
+            amount_e8s: 123_456,
+            memo: [0xA5; 16],
+            created_at_time_ns: 42,
+            op_nonce: 7,
+        }
+    }
+
+    #[test]
+    fn probe_uses_randomized_empty_source_and_distinct_destination_and_memo() {
+        let tuple = tuple();
+        let entropy = [0x5A; 32];
+        let args = stable_transfer_expiry_probe_args(&tuple, entropy).unwrap();
+
+        assert_eq!(args.subaccount.len(), 32);
+        assert_eq!(args.transfer.from_subaccount, Some(args.subaccount));
+        assert_eq!(args.transfer.amount, Nat::from(1u8));
+        assert_eq!(args.transfer.fee, None);
+        assert_eq!(
+            args.transfer.created_at_time,
+            Some(tuple.created_at_time_ns)
+        );
+        assert_ne!(args.transfer.to.owner, tuple.destination);
+        let probe_memo = args.transfer.memo.as_ref().unwrap();
+        assert_ne!(probe_memo.0.as_ref(), tuple.memo.as_slice());
+
+        let other_entropy = [0x5B; 32];
+        let other_args = stable_transfer_expiry_probe_args(&tuple, other_entropy).unwrap();
+        assert_ne!(args.subaccount, other_args.subaccount);
+    }
+
+    #[test]
+    fn only_typed_too_old_proves_expiry() {
+        assert!(stable_transfer_expiry_was_proven(&Err(
+            TransferError::TooOld
+        )));
+        assert!(!stable_transfer_expiry_was_proven(&Ok(Nat::from(1u8))));
+        assert!(!stable_transfer_expiry_was_proven(&Err(
+            TransferError::BadFee {
+                expected_fee: Nat::from(10u8),
+            }
+        )));
+        assert!(!stable_transfer_expiry_was_proven(&Err(
+            TransferError::InsufficientFunds {
+                balance: Nat::from(0u8)
+            }
+        )));
     }
 }
 
