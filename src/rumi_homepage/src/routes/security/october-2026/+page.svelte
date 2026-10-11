@@ -1,9 +1,9 @@
 <script>
   const report = {
-    date: 'October 10, 2026',
-    datetime: '2026-10-10',
-    source: 'origin/main at 35fef06fd6de · includes PR #511',
-    snapshot: 'Mainnet readback · October 10, 2026 · AMM maintenance and borrowing hold'
+    date: 'October 11, 2026',
+    datetime: '2026-10-11',
+    source: 'origin/main at 3d1c82c · includes PR #521',
+    snapshot: 'Mainnet readback · October 11, 2026 · backend maintenance and borrowing hold'
   };
 
   const states = [
@@ -113,10 +113,18 @@
     {
       pr: '#511',
       title: 'Borrow-mint recovery and temporary borrowing hold',
-      summary: 'Receipt-based borrow recovery is merged in source, but the backend still runs its earlier module. On October 10, the live global icUSD mint cap was reduced from 3,000,000,000,000 to 1 raw unit and read back at 1. This temporarily stops new vault borrowing through the standard routes while the backend upgrade is prepared; it does not install the recovery code or settle any earlier mint.',
-      state: 'Source merged · new borrowing held',
+      summary: 'Receipt-based borrow recovery is merged in source, but the backend still runs its earlier module. On October 10, the live global icUSD mint cap was reduced from 3,000,000,000,000 to 1 raw unit and read back at 1. The backend was subsequently stopped and remained stopped at the October 11 readback. A coordinated upgrade is being prepared. This does not install the recovery code or settle any earlier mint.',
+      state: 'Source merged · backend stopped',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/511'
+    },
+    {
+      pr: '#521',
+      title: 'Borrowing-fee receipt and Treasury indexing',
+      summary: 'The backend fee outbox and Treasury physical-block index are merged in source. On October 11, the backend was stopped on its earlier module hash shown above; Treasury (tlg74-oiaaa-aaaap-qrd6a-cai) was running on its earlier module SHA-256 4163a25f7e1d5119768cf16d6c75b6c98925682b0a89e99ced5cfe5aa0107300. Neither new code path nor the historical index migration is installed or complete. The release plan keeps borrowing held until the coordinated upgrade and post-upgrade checks finish.',
+      state: 'Merged · backend and Treasury not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/521'
     }
   ];
 
@@ -133,8 +141,8 @@
     },
     {
       system: 'Vault borrowing',
-      status: 'New borrowing temporarily held',
-      detail: 'The October 10 cap readback was 1 raw icUSD unit, below the minimum borrow. The backend still reports General Availability mode; this cap is a targeted borrowing hold. Repayment and withdrawal are separate routes, and this readback does not prove any historical obligation has been resolved.'
+      status: 'Backend stopped for maintenance',
+      detail: 'The October 11 management readback showed the backend stopped. Calls to it, including borrowing, repayment, and collateral withdrawal, are unavailable while it is stopped. The last cap readback was 1 raw icUSD unit, below the minimum borrow. Neither the stop nor the cap proves that historical obligations are settled.'
     },
     {
       system: 'Scope',
@@ -148,7 +156,7 @@
   <title>October 2026 Security Status · Rumi Protocol</title>
   <meta
     name="description"
-    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, October 10 mainnet readback, AMM maintenance, and the temporary borrowing hold."
+    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, October 11 mainnet readback, AMM maintenance, and the backend maintenance hold."
   />
 </svelte:head>
 
@@ -162,19 +170,20 @@
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
             This snapshot separates merged source from mainnet installation. The October 10
-            Cycle Sentinel and AMM releases are installed with recorded state readbacks. The AMM
-            is now in maintenance mode, new borrowing is temporarily held, and the Stability Pool
-            remains paused; the backend, bot, and 3pool account guard are not yet installed.
+            Cycle Sentinel and AMM releases are installed with recorded state readbacks. On
+            October 11 the backend was stopped, so backend calls are unavailable. A coordinated
+            upgrade is being prepared. The AMM remains in maintenance mode and the Stability Pool remains
+            paused; newer backend, bot, Treasury, and Stability Pool code is not yet installed.
           </p>
         </div>
         <aside class="report-stamp" aria-label={report.snapshot}>
           <span class="stamp-label">Publication state</span>
           <strong>{report.snapshot}</strong>
-          <p>The AMM and Cycle Sentinel module hashes and post-upgrade readbacks are dated October 10. AMM maintenance mode and the borrowing cap were confirmed later that day. The 3pool PR #483 and Points release observations are dated October 9 and October 8 respectively. The Stability Pool pause was confirmed again on October 10. This page combines those time-scoped records; it is not live telemetry.</p>
+          <p>On October 11, the backend was stopped, Treasury and the bot still reported older modules, the Stability Pool was paused, and AMM maintenance mode remained on. The installed AMM, Cycle Sentinel, 3pool, and Points release evidence comes from earlier dated readbacks. This page combines time-scoped records; it is not live telemetry.</p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
-      <div class="rule-caption"><span>Source cutoff · {report.source} · October 10, 2026</span><span>Selected remediation and release follow-up</span></div>
+      <div class="rule-caption"><span>Source cutoff · {report.source} · October 11, 2026</span><span>Selected remediation and release follow-up</span></div>
     </div>
   </section>
 
@@ -199,7 +208,7 @@
       <div class="section-heading section-heading-wide">
         <p class="section-label">Selected changes</p>
         <h2 id="updates-title">Change and release status</h2>
-        <p>This October 10 snapshot reports the highest evidence stage available for each change. A source merge and a live installation remain separate states.</p>
+        <p>This October 11 snapshot reports the highest evidence stage available for each change. A source merge and a live installation remain separate states.</p>
       </div>
       <div class="change-list">
         {#each changes as item}
@@ -243,7 +252,7 @@
       </div>
       <p>
         Source review, tests, builds, installation, activation, and live behavior are distinct claims.
-        This page records an October 10 snapshot; it does not publish private audit material or
+        This page records an October 11 snapshot; it does not publish private audit material or
         establish that every finding is closed.
       </p>
     </div>
