@@ -44,6 +44,11 @@ export interface Amm1DonationInspectionRow {
   'notify_nonce' : bigint,
   'reason' : [] | [string],
 }
+export type AssetType = { 'ICP' : null } |
+  { 'CKUSDC' : null } |
+  { 'CKUSDT' : null } |
+  { 'ICUSD' : null } |
+  { 'CKBTC' : null };
 export type BorrowFeeMintPhase = { 'ReceiptRecoveryRequired' : null } |
   { 'TreasuryMissing' : null } |
   { 'NotificationPending' : { 'mint_block_index' : bigint } } |
@@ -428,6 +433,10 @@ export interface CycleManagerMetric {
 }
 export type DeficitSource = { 'Liquidation' : { 'vault_id' : bigint } } |
   { 'Redemption' : { 'redeemer' : Principal } };
+export type DepositType = { 'BorrowingFee' : null } |
+  { 'LiquidationFee' : null } |
+  { 'RedemptionFee' : null } |
+  { 'InterestRevenue' : null };
 export type DeviceSpec = { 'GenericDisplay' : null } |
   {
     'LineDisplay' : {
@@ -1599,6 +1608,8 @@ export type Result_34 = { 'Ok' : number } |
   { 'Err' : ProtocolError };
 export type Result_35 = { 'Ok' : TreasuryInterestMintRecoveryPage } |
   { 'Err' : ProtocolError };
+export type Result_36 = { 'Ok' : TreasuryStableTransferRecoveryPage } |
+  { 'Err' : ProtocolError };
 export type Result_4 = { 'Ok' : SuccessWithFee } |
   { 'Err' : ProtocolError };
 export type Result_5 = { 'Ok' : BotLiquidationResult } |
@@ -1792,6 +1803,40 @@ export interface TreasuryInterestMintRecoveryRow {
   'absence_scan' : [] | [BorrowMintAbsenceScan],
   'history_floor' : [] | [bigint],
   'treasury' : Principal,
+}
+export interface TreasuryStableTransferJournal {
+  'asset_type' : AssetType,
+  'source' : TreasuryStableTransferSource,
+  'created_at_time_ns' : bigint,
+  'deposit_type' : DepositType,
+  'memo' : Uint8Array | number[],
+  'fee_e6s' : [] | [bigint],
+  'amount_e6s' : bigint,
+  'ledger' : Principal,
+  'op_nonce' : bigint,
+  'expiry_proven' : boolean,
+  'phase' : TreasuryStableTransferPhase,
+  'recovery_scan' : [] | [BorrowMintAbsenceScan],
+  'history_floor' : [] | [bigint],
+  'treasury' : [] | [Principal],
+}
+export type TreasuryStableTransferPhase = {
+    'NotifyPending' : { 'block_index' : bigint }
+  } |
+  { 'ReceiptRecoveryRequired' : null } |
+  { 'ConfigurationReviewRequired' : { 'block_index' : bigint } } |
+  { 'TransferPending' : null } |
+  { 'AwaitingPreflight' : null } |
+  { 'ConfigurationHold' : null };
+export interface TreasuryStableTransferRecoveryPage {
+  'next_cursor' : [] | [TreasuryStableTransferSource],
+  'items' : Array<TreasuryStableTransferJournal>,
+}
+export interface TreasuryStableTransferSource {
+  'block_index' : bigint,
+  'lane' : string,
+  'slot' : number,
+  'ledger' : Principal,
 }
 export interface TreasuryStats {
   'pending_treasury_collateral_entries' : bigint,
@@ -1993,6 +2038,10 @@ export interface _SERVICE {
   'admin_sweep_to_treasury' : ActorMethod<[string], Result>,
   'advance_pending_borrow_mint_recovery' : ActorMethod<[bigint], Result_1>,
   'advance_pending_treasury_interest_mint_recovery' : ActorMethod<
+    [bigint],
+    Result_1
+  >,
+  'advance_pending_treasury_stable_transfer_recovery' : ActorMethod<
     [bigint],
     Result_1
   >,
@@ -2201,6 +2250,10 @@ export interface _SERVICE {
     [[] | [bigint], number],
     Result_35
   >,
+  'get_pending_treasury_stable_transfer_recovery_page' : ActorMethod<
+    [[] | [TreasuryStableTransferSource], number],
+    Result_36
+  >,
   'get_price_pusher_allowed' : ActorMethod<[], Array<[number, string]>>,
   'get_price_pusher_principal' : ActorMethod<[], [] | [Principal]>,
   'get_protocol_3usd_reserves' : ActorMethod<[], bigint>,
@@ -2373,6 +2426,7 @@ export interface _SERVICE {
   'repay_to_vault' : ActorMethod<[VaultArg], Result>,
   'repay_to_vault_with_stable' : ActorMethod<[VaultArgWithToken], Result>,
   'reset_bot_budget' : ActorMethod<[bigint], Result_1>,
+  'resolve_pending_treasury_stable_transfer' : ActorMethod<[bigint], Result_1>,
   'resolve_stuck_settlement_op' : ActorMethod<[number, bigint], Result_1>,
   'retry_pending_borrow_fee_mint' : ActorMethod<[bigint], Result_1>,
   'set_amm1_canister' : ActorMethod<[Principal], Result_1>,

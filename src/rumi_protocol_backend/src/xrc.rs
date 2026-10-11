@@ -1214,6 +1214,7 @@ pub async fn interest_and_treasury_tick() {
     // Flush accumulated interest to pools/treasury when threshold is reached.
     crate::treasury::flush_pending_interest().await;
     crate::treasury::flush_pending_treasury_interest_mints().await;
+    crate::treasury::flush_pending_treasury_stable_transfers().await;
     crate::treasury::flush_pending_stability_pool_interest_notifications().await;
     crate::treasury::flush_pending_amm1_donations().await;
 

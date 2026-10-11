@@ -1286,6 +1286,57 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : TreasuryInterestMintRecoveryPage,
     'Err' : ProtocolError,
   });
+  const TreasuryStableTransferSource = IDL.Record({
+    'block_index' : IDL.Nat64,
+    'lane' : IDL.Text,
+    'slot' : IDL.Nat32,
+    'ledger' : IDL.Principal,
+  });
+  const AssetType = IDL.Variant({
+    'ICP' : IDL.Null,
+    'CKUSDC' : IDL.Null,
+    'CKUSDT' : IDL.Null,
+    'ICUSD' : IDL.Null,
+    'CKBTC' : IDL.Null,
+  });
+  const DepositType = IDL.Variant({
+    'BorrowingFee' : IDL.Null,
+    'LiquidationFee' : IDL.Null,
+    'RedemptionFee' : IDL.Null,
+    'InterestRevenue' : IDL.Null,
+  });
+  const TreasuryStableTransferPhase = IDL.Variant({
+    'NotifyPending' : IDL.Record({ 'block_index' : IDL.Nat64 }),
+    'ReceiptRecoveryRequired' : IDL.Null,
+    'ConfigurationReviewRequired' : IDL.Record({ 'block_index' : IDL.Nat64 }),
+    'TransferPending' : IDL.Null,
+    'AwaitingPreflight' : IDL.Null,
+    'ConfigurationHold' : IDL.Null,
+  });
+  const TreasuryStableTransferJournal = IDL.Record({
+    'asset_type' : AssetType,
+    'source' : TreasuryStableTransferSource,
+    'created_at_time_ns' : IDL.Nat64,
+    'deposit_type' : DepositType,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'fee_e6s' : IDL.Opt(IDL.Nat64),
+    'amount_e6s' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'op_nonce' : IDL.Nat,
+    'expiry_proven' : IDL.Bool,
+    'phase' : TreasuryStableTransferPhase,
+    'recovery_scan' : IDL.Opt(BorrowMintAbsenceScan),
+    'history_floor' : IDL.Opt(IDL.Nat64),
+    'treasury' : IDL.Opt(IDL.Principal),
+  });
+  const TreasuryStableTransferRecoveryPage = IDL.Record({
+    'next_cursor' : IDL.Opt(TreasuryStableTransferSource),
+    'items' : IDL.Vec(TreasuryStableTransferJournal),
+  });
+  const Result_36 = IDL.Variant({
+    'Ok' : TreasuryStableTransferRecoveryPage,
+    'Err' : ProtocolError,
+  });
   const ProtocolConfig = IDL.Record({
     'global_rate_curve' : IDL.Vec(IDL.Tuple(IDL.Float64, IDL.Float64)),
     'bot_budget_remaining_e8s' : IDL.Nat64,
@@ -1995,6 +2046,11 @@ export const idlFactory = ({ IDL }) => {
         [Result_1],
         [],
       ),
+    'advance_pending_treasury_stable_transfer_recovery' : IDL.Func(
+        [IDL.Nat],
+        [Result_1],
+        [],
+      ),
     'backfill_collateral_symbols' : IDL.Func([], [Result_3], []),
     'bind_and_retry_missing_borrow_fee_treasury' : IDL.Func(
         [IDL.Nat],
@@ -2309,6 +2365,11 @@ export const idlFactory = ({ IDL }) => {
         [Result_35],
         ['query'],
       ),
+    'get_pending_treasury_stable_transfer_recovery_page' : IDL.Func(
+        [IDL.Opt(TreasuryStableTransferSource), IDL.Nat16],
+        [Result_36],
+        ['query'],
+      ),
     'get_price_pusher_allowed' : IDL.Func(
         [],
         [IDL.Vec(IDL.Tuple(IDL.Nat32, IDL.Text))],
@@ -2605,6 +2666,11 @@ export const idlFactory = ({ IDL }) => {
     'repay_to_vault' : IDL.Func([VaultArg], [Result], []),
     'repay_to_vault_with_stable' : IDL.Func([VaultArgWithToken], [Result], []),
     'reset_bot_budget' : IDL.Func([IDL.Nat64], [Result_1], []),
+    'resolve_pending_treasury_stable_transfer' : IDL.Func(
+        [IDL.Nat],
+        [Result_1],
+        [],
+      ),
     'resolve_stuck_settlement_op' : IDL.Func(
         [IDL.Nat32, IDL.Nat64],
         [Result_1],
