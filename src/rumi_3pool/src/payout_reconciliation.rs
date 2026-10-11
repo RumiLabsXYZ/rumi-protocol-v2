@@ -11,7 +11,7 @@ use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
 use num_traits::ToPrimitive;
 
-use crate::payouts::PayoutTransfer;
+use crate::payouts::{PayoutInputTransfer, PayoutTransfer};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DecodedTransferBlock {
@@ -45,11 +45,56 @@ pub(crate) fn validate_exact_transfer(
     Ok(())
 }
 
+/// A positive input proof must identify the same ICRC-2 spender and every
+/// immutable field of the pre-call journal. Legacy inputs missing a pinned fee
+/// or memo cannot be proved by this route.
+pub(crate) fn validate_exact_input_transfer(
+    block: &DecodedTransferBlock,
+    transfer: &PayoutInputTransfer,
+    spender: Account,
+) -> Result<(), String> {
+    // Early ICRC-3 histories may omit btype while retaining tx.op=xfer.
+    // In that form the exact spender distinguishes this ICRC-2 pull from an
+    // ordinary transfer. An explicit 1xfer type must never pass.
+    if !matches!(block.btype.as_deref(), None | Some("2xfer"))
+        || block.op != "xfer"
+        || block.from.as_ref() != Some(&transfer.from)
+        || block.to.as_ref() != Some(&transfer.to)
+        || block.spender.as_ref() != Some(&spender)
+        || block.amount != transfer.amount
+        || transfer.fee.is_none()
+        || block.fee != transfer.fee
+        || transfer.memo.is_none()
+        || block.memo != transfer.memo
+        || block.created_at_time != Some(transfer.created_at_time)
+    {
+        return Err("ICRC-3 block does not match the exact persisted input tuple".into());
+    }
+    Ok(())
+}
+
 pub(crate) async fn verify_exact_block(
     ledger: Principal,
     block_index: u64,
     transfer: &PayoutTransfer,
 ) -> Result<(), String> {
+    let value = fetch_direct_block(ledger, block_index).await?;
+    let decoded = decode_block(&value)?;
+    validate_exact_transfer(&decoded, transfer)
+}
+
+pub(crate) async fn verify_exact_input_block(
+    ledger: Principal,
+    block_index: u64,
+    transfer: &PayoutInputTransfer,
+    spender: Account,
+) -> Result<(), String> {
+    let value = fetch_direct_block(ledger, block_index).await?;
+    let decoded = decode_block(&value)?;
+    validate_exact_input_transfer(&decoded, transfer, spender)
+}
+
+async fn fetch_direct_block(ledger: Principal, block_index: u64) -> Result<ICRC3Value, String> {
     let args = vec![GetBlocksRequest {
         start: Nat::from(block_index),
         length: Nat::from(1u64),
@@ -68,15 +113,12 @@ pub(crate) async fn verify_exact_block(
         return Err("ICRC-3 log length does not include the supplied block".into());
     }
 
-    let value = direct_block_value(&response, block_index)?;
-
-    let decoded = decode_block(&value)?;
-    validate_exact_transfer(&decoded, transfer)
+    direct_block_value(&response, block_index)
 }
 
 fn direct_block_value(response: &GetBlocksResult, block_index: u64) -> Result<ICRC3Value, String> {
     if !response.archived_blocks.is_empty() {
-        return Err("archive-backed payout proof is unsupported; payout remains held".into());
+        return Err("archive-backed ICRC-3 proof is unsupported; transfer remains held".into());
     }
     if response.blocks.len() != 1 || response.blocks[0].id.0.to_u64() != Some(block_index) {
         return Err("ICRC-3 did not return the exact requested ledger block".into());
@@ -217,7 +259,8 @@ fn normalize_btype(btype: &str) -> Option<String> {
         "1xfer" => Some("xfer".into()),
         "1mint" => Some("mint".into()),
         "1burn" => Some("burn".into()),
-        "2xfer" => Some("transfer_from".into()),
+        // ICRC-3 distinguishes transfer_from by btype; tx.op remains xfer.
+        "2xfer" => Some("xfer".into()),
         _ => None,
     }
 }
@@ -259,6 +302,80 @@ mod tests {
             memo: Some(transfer.memo.clone()),
             created_at_time: Some(transfer.created_at_time),
         }
+    }
+
+    #[test]
+    fn input_proof_requires_exact_icrc2_tuple_and_spender() {
+        let pool = Account { owner: Principal::from_slice(&[7]), subaccount: None };
+        let transfer = PayoutInputTransfer {
+            ledger: Principal::from_slice(&[9]),
+            from: Account { owner: Principal::from_slice(&[1]), subaccount: None },
+            to: pool,
+            amount: 100,
+            fee: Some(10),
+            memo: Some(vec![3; 32]),
+            created_at_time: 77,
+        };
+        let block = DecodedTransferBlock {
+            btype: Some("2xfer".into()),
+            op: "xfer".into(),
+            from: Some(transfer.from),
+            to: Some(transfer.to),
+            spender: Some(pool),
+            amount: transfer.amount,
+            fee: transfer.fee,
+            memo: transfer.memo.clone(),
+            created_at_time: Some(transfer.created_at_time),
+        };
+        assert!(validate_exact_input_transfer(&block, &transfer, pool).is_ok());
+        let mut legacy_without_btype = block.clone();
+        legacy_without_btype.btype = None;
+        assert!(validate_exact_input_transfer(&legacy_without_btype, &transfer, pool).is_ok());
+        for mutate in 0..9 {
+            let mut altered = block.clone();
+            match mutate {
+                0 => altered.btype = Some("1xfer".into()),
+                1 => altered.from.as_mut().unwrap().owner = Principal::from_slice(&[4]),
+                2 => altered.to.as_mut().unwrap().owner = Principal::from_slice(&[4]),
+                3 => altered.spender.as_mut().unwrap().owner = Principal::from_slice(&[4]),
+                4 => altered.spender = None,
+                5 => altered.amount += 1,
+                6 => altered.fee = Some(11),
+                7 => altered.memo.as_mut().unwrap()[0] ^= 1,
+                _ => altered.created_at_time = Some(78),
+            }
+            assert!(validate_exact_input_transfer(&altered, &transfer, pool).is_err());
+        }
+        let mut legacy = transfer.clone();
+        legacy.memo = None;
+        assert!(validate_exact_input_transfer(&block, &legacy, pool).is_err());
+        legacy.memo = transfer.memo;
+        legacy.fee = None;
+        assert!(validate_exact_input_transfer(&block, &legacy, pool).is_err());
+    }
+
+    #[test]
+    fn decoder_accepts_icrc3_transfer_from_shape() {
+        let owner = Account { owner: Principal::from_slice(&[1]), subaccount: None };
+        let pool = Account { owner: Principal::from_slice(&[7]), subaccount: None };
+        let account = |value: Account| V::Array(vec![V::Blob(value.owner.as_slice().to_vec().into())]);
+        let mut tx = BTreeMap::new();
+        tx.insert("op".into(), V::Text("xfer".into()));
+        tx.insert("from".into(), account(owner));
+        tx.insert("to".into(), account(pool));
+        tx.insert("spender".into(), account(pool));
+        tx.insert("amt".into(), V::Nat(Nat::from(100u64)));
+        tx.insert("fee".into(), V::Nat(Nat::from(10u64)));
+        tx.insert("memo".into(), V::Blob(vec![3; 32].into()));
+        tx.insert("ts".into(), V::Nat(Nat::from(77u64)));
+        let mut block = BTreeMap::new();
+        block.insert("btype".into(), V::Text("2xfer".into()));
+        block.insert("ts".into(), V::Nat(Nat::from(78u64)));
+        block.insert("tx".into(), V::Map(tx));
+        let decoded = decode_block(&V::Map(block)).expect("ICRC-3 transfer_from has xfer operation");
+        assert_eq!(decoded.btype.as_deref(), Some("2xfer"));
+        assert_eq!(decoded.op, "xfer");
+        assert_eq!(decoded.spender, Some(pool));
     }
 
     #[test]
@@ -366,7 +483,7 @@ mod tests {
         };
         assert!(direct_block_value(&response, 10)
             .unwrap_err()
-            .contains("archive-backed payout proof is unsupported"));
+            .contains("archive-backed ICRC-3 proof is unsupported"));
     }
 
     #[test]

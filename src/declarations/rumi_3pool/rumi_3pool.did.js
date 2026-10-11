@@ -224,12 +224,12 @@ export const idlFactory = ({ IDL }) => {
   });
   const PayoutInputTransfer = IDL.Record({
     'to' : Account,
+    'fee' : IDL.Opt(IDL.Nat),
     'from' : Account,
     'memo' : IDL.Opt(IDL.Vec(IDL.Nat8)),
     'ledger' : IDL.Principal,
     'created_at_time' : IDL.Nat64,
     'amount' : IDL.Nat,
-    'fee' : IDL.Opt(IDL.Nat),
   });
   const PayoutInputOutcome = IDL.Variant({
     'Confirmed' : IDL.Record({ 'block' : IDL.Nat }),
@@ -894,6 +894,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'receive_donation' : IDL.Func(
         [IDL.Nat8, IDL.Nat],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
+        [],
+      ),
+    'reconcile_aged_input' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
         [],
       ),
