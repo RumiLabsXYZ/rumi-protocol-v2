@@ -14,8 +14,8 @@ use state::{init_state, restore_state, with_state, with_state_mut};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use types::{
-    AssetType, DepositArgs, DepositRecord, DepositType, TreasuryAction, TreasuryEvent,
-    TreasuryInitArgs, TreasuryStatus, WithdrawArgs, WithdrawResult,
+    AssetType, DepositArgs, DepositRecord, DepositType, ExternalTokenDepositArgs, TreasuryAction,
+    TreasuryEvent, TreasuryInitArgs, TreasuryStatus, WithdrawArgs, WithdrawResult,
 };
 
 // Declare log buffer for debugging
@@ -124,6 +124,7 @@ async fn deposit(args: DepositArgs) -> Result<u64, String> {
     if is_paused {
         return Err("Treasury is paused and not accepting deposits".to_string());
     }
+    validate_legacy_deposit_asset(&args.asset_type)?;
 
     log!(
         LOG,
@@ -147,6 +148,14 @@ async fn deposit(args: DepositArgs) -> Result<u64, String> {
 
     log!(LOG, "Deposit {} recorded successfully", deposit_id);
     Ok(deposit_id)
+}
+
+fn validate_legacy_deposit_asset(asset_type: &AssetType) -> Result<(), String> {
+    if matches!(asset_type, AssetType::CKUSDT | AssetType::CKUSDC) {
+        Err("CKUSDT/CKUSDC deposits require record_external_token_deposit_once".to_string())
+    } else {
+        Ok(())
+    }
 }
 
 /// Record a BorrowingFee/ICUSD transfer with receiver-side idempotency. This
@@ -190,6 +199,56 @@ fn validate_interest_revenue_args(args: &DepositArgs) -> Result<(), String> {
         return Err("only InterestRevenue/ICUSD deposits are accepted".to_string());
     }
     Ok(())
+}
+
+/// Record a configured ckUSDT/ckUSDC ledger receipt exactly once. The supplied
+/// ledger and block are a controller report used for idempotency; Treasury does
+/// not independently verify that a transfer exists on that ledger.
+#[update]
+#[candid_method(update)]
+fn record_external_token_deposit_once(args: ExternalTokenDepositArgs) -> Result<u64, String> {
+    ensure_controller()?;
+    if with_state(|s| s.get_config().is_paused) {
+        return Err("Treasury is paused and not accepting deposits".to_string());
+    }
+    let deposit_caller = caller();
+    let timestamp = ic_cdk::api::time();
+    record_external_token_deposit_with_event(args, deposit_caller, timestamp)
+}
+
+/// Continue the bounded migration of historical CKUSDT/CKUSDC block indexes.
+/// Legacy rows lack ledger provenance, so their asset/block pairs remain
+/// conservatively unavailable to the new receipt API.
+#[update]
+#[candid_method(update)]
+fn continue_external_token_deposit_backfill() -> Result<String, String> {
+    ensure_controller()?;
+    let (processed, next_deposit_id, complete) =
+        with_state_mut(|s| s.continue_external_token_deposit_backfill())?;
+    Ok(if complete {
+        format!(
+            "External token deposit block backfill complete; processed {} rows",
+            processed
+        )
+    } else {
+        format!(
+            "External token deposit block backfill processed {} rows; next deposit ID {}",
+            processed, next_deposit_id
+        )
+    })
+}
+
+/// Return the durable external-token index migration state for release
+/// preflight. The legacy ambiguity count is the stable map length and does
+/// not scan deposit history.
+#[query]
+#[candid_method(query)]
+fn get_external_token_deposit_backfill_status() -> types::ExternalTokenDepositBackfillStatus {
+    with_state(|s| types::ExternalTokenDepositBackfillStatus {
+        state: s.external_token_backfill.get().clone(),
+        indexed_through_deposit_id: *s.external_token_indexed_through.get(),
+        ambiguous_legacy_blocks: s.external_token_legacy_blocks.len(),
+    })
 }
 
 /// Record an InterestRevenue/ICUSD ledger transfer exactly once. This
@@ -240,6 +299,34 @@ fn record_interest_revenue_with_event(
     Ok(deposit_id)
 }
 
+fn record_external_token_deposit_with_event(
+    args: ExternalTokenDepositArgs,
+    deposit_caller: Principal,
+    timestamp: u64,
+) -> Result<u64, String> {
+    let (deposit_id, newly_recorded) =
+        with_state_mut(|s| s.record_external_token_deposit_once(args, timestamp))?;
+    if newly_recorded {
+        let record = with_state(|s| {
+            s.deposits
+                .get(&deposit_id)
+                .ok_or_else(|| format!("new external token deposit {} is missing", deposit_id))
+        })?;
+        with_state_mut(|s| {
+            s.push_event_at(
+                deposit_caller,
+                TreasuryAction::Deposit {
+                    deposit_type: record.deposit_type,
+                    asset_type: record.asset_type,
+                    amount: record.amount,
+                },
+                timestamp,
+            )
+        });
+    }
+    Ok(deposit_id)
+}
+
 /// Apply one deposit and its audit event as a single synchronous state
 /// transition. Exact BorrowingFee/ICUSD retries return the original ID and do
 /// not create another event.
@@ -255,7 +342,7 @@ fn record_deposit_with_event(
         if asset_type == AssetType::ICUSD {
             s.record_icusd_deposit_once(record)
         } else {
-            Ok((s.add_deposit(record), true))
+            Ok((s.try_add_deposit(record, true)?, true))
         }
     })?;
 

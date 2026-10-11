@@ -17,6 +17,17 @@ pub enum DepositType {
     InterestRevenue,
 }
 
+/// State exposed by the bounded legacy external-token receipt migration.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ExternalTokenDepositBackfill {
+    Uninitialized,
+    InProgress {
+        next_deposit_id: u64,
+        snapshot_max_id: u64,
+    },
+    Complete,
+}
+
 /// Asset types that can be held in treasury
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AssetType {
@@ -105,6 +116,28 @@ pub struct DepositArgs {
     pub block_index: u64,
     /// Optional memo
     pub memo: Option<String>,
+}
+
+/// A controller-reported ckUSDT/ckUSDC ledger receipt. `ledger` must equal
+/// the configured ledger for `asset_type`; the block index is only an
+/// idempotency key and is not independently verified as a ledger payment.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct ExternalTokenDepositArgs {
+    pub ledger: Principal,
+    pub deposit_type: DepositType,
+    pub asset_type: AssetType,
+    pub amount: u64,
+    pub block_index: u64,
+    pub memo: Option<String>,
+}
+
+/// Bounded release-preflight view of the external-token legacy index build.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ExternalTokenDepositBackfillStatus {
+    pub state: ExternalTokenDepositBackfill,
+    pub indexed_through_deposit_id: u64,
+    /// Every legacy asset/block key is held as unknown-provenance.
+    pub ambiguous_legacy_blocks: u64,
 }
 
 /// Arguments for withdrawing from treasury
