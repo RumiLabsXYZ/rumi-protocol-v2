@@ -2069,6 +2069,92 @@ pub struct PendingRefund {
     pub op_nonce: u128,
 }
 
+/// Durable intent for one reserve redemption. The exact pull and stable payout
+/// ledger arguments are retained before the first inter-canister await so an
+/// upgrade or lost reply cannot turn an ambiguous payout into an icUSD refund.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ReserveRedemptionJournal {
+    pub operation_id: u128,
+    pub caller: Principal,
+    pub icusd_amount_e8s: u64,
+    pub pull_ledger: Principal,
+    pub pull_from: icrc_ledger_types::icrc1::account::Account,
+    pub pull_to: icrc_ledger_types::icrc1::account::Account,
+    pub pull_amount_e8s: u64,
+    pub pull_fee_e8s: Option<u64>,
+    pub pull_memo: Vec<u8>,
+    pub pull_created_at_time_ns: u64,
+    pub pull_op_nonce: u128,
+    pub payout_ledger: Principal,
+    pub payout_from_subaccount: Option<[u8; 32]>,
+    pub payout_to: icrc_ledger_types::icrc1::account::Account,
+    pub payout_amount_e6s: u64,
+    pub payout_fee_e6s: Option<u64>,
+    pub payout_memo: Vec<u8>,
+    pub payout_created_at_time_ns: u64,
+    pub payout_op_nonce: u128,
+    #[serde(default)]
+    pub treasury_ledger: Option<Principal>,
+    #[serde(default)]
+    pub treasury_to: Option<icrc_ledger_types::icrc1::account::Account>,
+    #[serde(default)]
+    pub treasury_amount_e6s: Option<u64>,
+    #[serde(default)]
+    pub treasury_memo: Option<Vec<u8>>,
+    #[serde(default)]
+    pub treasury_created_at_time_ns: Option<u64>,
+    #[serde(default)]
+    pub treasury_op_nonce: Option<u128>,
+    /// Positive ledger receipt for the treasury fee leg, when returned or
+    /// reconciled from the ledger's direct ICRC-3 history.
+    #[serde(default)]
+    pub treasury_block_index: Option<u64>,
+    #[serde(default)]
+    pub refund_ledger: Option<Principal>,
+    #[serde(default)]
+    pub refund_amount_e8s: Option<u64>,
+    #[serde(default)]
+    pub refund_memo: Option<Vec<u8>>,
+    #[serde(default)]
+    pub refund_created_at_time_ns: Option<u64>,
+    #[serde(default)]
+    pub refund_op_nonce: Option<u128>,
+    #[serde(default)]
+    pub refund_block_index: Option<u64>,
+    #[serde(default)]
+    pub pull_block_index: Option<u64>,
+    #[serde(default)]
+    pub payout_block_index: Option<u64>,
+    pub phase: ReserveRedemptionPhase,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReserveRedemptionPhase {
+    PullSubmitted,
+    PullSettled,
+    PayoutSubmitted,
+    PayoutSettled,
+    PayoutAmbiguous,
+    TreasuryFeeSubmitted,
+    TreasuryFeeSettled,
+    TreasuryFeeNoEffect,
+    TreasuryFeeAmbiguous,
+    RefundSubmitted,
+    /// The refund ledger returned a typed error that proves this attempt had
+    /// no effect. The exact tuple is retained and may be retried unchanged.
+    RefundNoEffect,
+    RefundSettled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReserveRedemptionReceiptLeg {
+    Pull,
+    Payout,
+    TreasuryFee,
+    Refund,
+}
+
 /// A post-mint Stability Pool notification. The icUSD mint has already landed
 /// at the pool, so this receipt must survive a failed callback and be retried
 /// with the original mint block as the pool-side idempotency key.
@@ -2853,6 +2939,11 @@ pub struct State {
     /// keyed by the burn icUSD block index. Empty for pre-Wave-4 snapshots.
     #[serde(default)]
     pub pending_refunds: BTreeMap<u64, PendingRefund>,
+    /// Outstanding reserve redemptions keyed by their durable operation ID.
+    /// Rows are retained across upgrades until settlement is fully accounted
+    /// for or exact external evidence resolves an ambiguous transfer.
+    #[serde(default)]
+    pub reserve_redemption_journals: BTreeMap<u128, ReserveRedemptionJournal>,
     /// Durable retry queue for stranded 3USD reserve refunds
     /// (`stability_pool_liquidate_with_reserves`), keyed by `op_nonce`. A failed
     /// refund back to the stability pool would otherwise leave the SP's live 3USD
@@ -3773,6 +3864,7 @@ impl Default for State {
             payout_history_scan_window_ns: 0,
             payout_history_scan_count: 0,
             pending_refunds: BTreeMap::new(),
+            reserve_redemption_journals: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             pending_borrow_mints: BTreeMap::new(),
             pending_borrow_fee_mints: BTreeMap::new(),
@@ -3962,6 +4054,7 @@ impl From<InitArg> for State {
             payout_history_scan_window_ns: 0,
             payout_history_scan_count: 0,
             pending_refunds: BTreeMap::new(),
+            reserve_redemption_journals: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             pending_borrow_mints: BTreeMap::new(),
             pending_borrow_fee_mints: BTreeMap::new(),
@@ -8481,6 +8574,11 @@ impl State {
         actual_collateral_deducted
     }
 
+    /// Compare state that is reconstructed from the event log. Durable
+    /// inter-canister operation journals (including reserve redemption) are
+    /// intentionally excluded: they are sidecars, not event-sourced state.
+    /// Their upgrade persistence and internal tuple invariants are checked
+    /// separately by snapshot round-trip tests and `check_invariants`.
     pub fn check_semantically_eq(&self, other: &Self) -> Result<(), String> {
         ensure_eq!(
             self.vault_id_to_vaults,
@@ -8541,7 +8639,370 @@ impl State {
         Ok(())
     }
 
+    pub fn mark_reserve_redemption_refund_settled(
+        &mut self,
+        operation_id: u128,
+        expected: &ReserveRedemptionJournal,
+        refund_block_index: u64,
+    ) -> bool {
+        let Some(row) = self.reserve_redemption_journals.get_mut(&operation_id) else {
+            return false;
+        };
+        if row != expected || row.phase != ReserveRedemptionPhase::RefundSubmitted {
+            return false;
+        }
+        row.refund_block_index = Some(refund_block_index);
+        row.phase = ReserveRedemptionPhase::RefundSettled;
+        true
+    }
+
+    pub fn mark_reserve_redemption_refund_no_effect(
+        &mut self,
+        operation_id: u128,
+        expected: &ReserveRedemptionJournal,
+    ) -> bool {
+        let Some(row) = self.reserve_redemption_journals.get_mut(&operation_id) else {
+            return false;
+        };
+        if row != expected || row.phase != ReserveRedemptionPhase::RefundSubmitted {
+            return false;
+        }
+        row.phase = ReserveRedemptionPhase::RefundNoEffect;
+        true
+    }
+
+    /// Persist a positive receipt only for the currently submitted/ambiguous
+    /// leg. The caller must first validate a direct ledger block against this
+    /// row's exact transfer tuple.
+    pub fn record_reserve_redemption_receipt(
+        &mut self,
+        operation_id: u128,
+        expected: &ReserveRedemptionJournal,
+        block_index: u64,
+        leg: ReserveRedemptionReceiptLeg,
+    ) -> bool {
+        let Some(row) = self.reserve_redemption_journals.get_mut(&operation_id) else {
+            return false;
+        };
+        if row != expected {
+            return false;
+        }
+        match leg {
+            ReserveRedemptionReceiptLeg::Pull
+                if row.phase == ReserveRedemptionPhase::PullSubmitted =>
+            {
+                row.pull_block_index = Some(block_index);
+                row.phase = ReserveRedemptionPhase::PullSettled;
+            }
+            ReserveRedemptionReceiptLeg::Payout
+                if matches!(row.phase, ReserveRedemptionPhase::PayoutSubmitted | ReserveRedemptionPhase::PayoutAmbiguous) =>
+            {
+                row.payout_block_index = Some(block_index);
+                row.phase = ReserveRedemptionPhase::PayoutSettled;
+            }
+            ReserveRedemptionReceiptLeg::TreasuryFee
+                if matches!(row.phase, ReserveRedemptionPhase::TreasuryFeeSubmitted | ReserveRedemptionPhase::TreasuryFeeAmbiguous) =>
+            {
+                row.treasury_block_index = Some(block_index);
+                row.phase = ReserveRedemptionPhase::TreasuryFeeSettled;
+            }
+            ReserveRedemptionReceiptLeg::Refund
+                if matches!(row.phase, ReserveRedemptionPhase::RefundSubmitted | ReserveRedemptionPhase::RefundNoEffect) =>
+            {
+                row.refund_block_index = Some(block_index);
+                row.phase = ReserveRedemptionPhase::RefundSettled;
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Clear only the confirmed full-refund/no-payout case. Dust refunds after
+    /// a stable payout remain journaled until redemption event and fee
+    /// accounting commit.
+    pub fn clear_reserve_redemption_after_full_refund(&mut self, operation_id: u128) -> bool {
+        let Some(row) = self.reserve_redemption_journals.get(&operation_id) else {
+            return false;
+        };
+        if row.phase != ReserveRedemptionPhase::RefundSettled
+            || row.refund_block_index.is_none()
+            || row.payout_block_index.is_some()
+            || row.refund_amount_e8s != Some(row.icusd_amount_e8s)
+        {
+            return false;
+        }
+        self.reserve_redemption_journals.remove(&operation_id);
+        true
+    }
+
+    /// Called only after the reserve redemption event and fee routing have
+    /// completed in the same post-await message.
+    pub fn clear_accounted_reserve_redemption(&mut self, operation_id: u128) -> bool {
+        let Some(row) = self.reserve_redemption_journals.get(&operation_id) else {
+            return false;
+        };
+        if !matches!(
+            row.phase,
+            ReserveRedemptionPhase::PayoutSettled
+                | ReserveRedemptionPhase::TreasuryFeeSettled
+                | ReserveRedemptionPhase::TreasuryFeeNoEffect
+                | ReserveRedemptionPhase::RefundSettled
+        ) {
+            return false;
+        }
+        self.reserve_redemption_journals.remove(&operation_id);
+        true
+    }
+
     pub fn check_invariants(&self) -> Result<(), String> {
+        ensure!(
+            self.reserve_redemption_journals.len() <= 1,
+            "reserve redemption admission permits at most one unresolved operation"
+        );
+        for (operation_id, row) in &self.reserve_redemption_journals {
+            ensure_eq!(
+                *operation_id,
+                row.operation_id,
+                "reserve redemption journal key does not match operation id"
+            );
+            ensure_eq!(
+                row.pull_amount_e8s,
+                row.icusd_amount_e8s,
+                "reserve redemption pull amount does not match requested amount"
+            );
+            ensure_eq!(
+                row.pull_from.owner,
+                row.caller,
+                "reserve redemption pull owner does not match caller"
+            );
+            ensure!(
+                row.pull_from.subaccount.is_none(),
+                "reserve redemption pull must use the caller default account"
+            );
+            ensure!(
+                row.pull_to.subaccount.is_none(),
+                "reserve redemption pull must use the protocol default account"
+            );
+            ensure_eq!(
+                row.pull_op_nonce,
+                row.operation_id,
+                "reserve redemption pull nonce does not match operation id"
+            );
+            ensure_eq!(
+                row.pull_memo.as_slice(),
+                row.pull_op_nonce.to_be_bytes().as_slice(),
+                "reserve redemption pull memo does not match its nonce"
+            );
+            ensure_eq!(
+                row.pull_created_at_time_ns,
+                crate::management::nonce_to_created_at_time(row.pull_op_nonce),
+                "reserve redemption pull timestamp does not match its nonce"
+            );
+            ensure!(
+                row.payout_to.owner == row.caller && row.payout_to.subaccount.is_none(),
+                "reserve redemption payout must target the caller default account"
+            );
+            ensure!(
+                row.payout_from_subaccount.is_none(),
+                "reserve redemption payout must use the protocol default account"
+            );
+            ensure!(
+                row.payout_amount_e6s.saturating_mul(100) <= row.icusd_amount_e8s,
+                "reserve redemption stable amount exceeds the pulled icUSD amount"
+            );
+            ensure_eq!(
+                row.payout_memo.as_slice(),
+                row.payout_op_nonce.to_be_bytes().as_slice(),
+                "reserve redemption payout memo does not match its nonce"
+            );
+            ensure_eq!(
+                row.payout_created_at_time_ns,
+                crate::management::nonce_to_created_at_time(row.payout_op_nonce),
+                "reserve redemption payout timestamp does not match its nonce"
+            );
+
+            let treasury_fields = [
+                row.treasury_ledger.is_some(),
+                row.treasury_to.is_some(),
+                row.treasury_amount_e6s.is_some(),
+                row.treasury_memo.is_some(),
+                row.treasury_created_at_time_ns.is_some(),
+                row.treasury_op_nonce.is_some(),
+            ];
+            ensure!(
+                treasury_fields.iter().all(|present| *present)
+                    || treasury_fields.iter().all(|present| !*present),
+                "reserve redemption treasury transfer tuple is partial"
+            );
+            if let (Some(ledger), Some(to), Some(memo), Some(created_at), Some(nonce)) = (
+                row.treasury_ledger,
+                row.treasury_to.as_ref(),
+                row.treasury_memo.as_ref(),
+                row.treasury_created_at_time_ns,
+                row.treasury_op_nonce,
+            ) {
+                ensure_eq!(
+                    ledger,
+                    row.payout_ledger,
+                    "reserve redemption treasury ledger differs from payout ledger"
+                );
+                ensure!(
+                    to.subaccount.is_none(),
+                    "reserve redemption treasury fee must use a default account"
+                );
+                ensure_eq!(
+                    memo.as_slice(),
+                    nonce.to_be_bytes().as_slice(),
+                    "reserve redemption treasury memo does not match its nonce"
+                );
+                ensure_eq!(
+                    created_at,
+                    crate::management::nonce_to_created_at_time(nonce),
+                    "reserve redemption treasury timestamp does not match its nonce"
+                );
+            }
+
+            let refund_fields = [
+                row.refund_ledger.is_some(),
+                row.refund_amount_e8s.is_some(),
+                row.refund_memo.is_some(),
+                row.refund_created_at_time_ns.is_some(),
+                row.refund_op_nonce.is_some(),
+            ];
+            ensure!(
+                refund_fields.iter().all(|present| *present)
+                    || refund_fields.iter().all(|present| !*present),
+                "reserve redemption refund tuple is partial"
+            );
+            if let (Some(ledger), Some(memo), Some(created_at), Some(nonce)) = (
+                row.refund_ledger,
+                row.refund_memo.as_ref(),
+                row.refund_created_at_time_ns,
+                row.refund_op_nonce,
+            ) {
+                ensure_eq!(
+                    ledger,
+                    row.pull_ledger,
+                    "reserve redemption refund ledger differs from pull ledger"
+                );
+                ensure!(
+                    row.refund_amount_e8s.unwrap_or_default() <= row.icusd_amount_e8s,
+                    "reserve redemption refund amount exceeds the pulled icUSD amount"
+                );
+                ensure!(
+                    row.refund_amount_e8s.unwrap_or_default() > 0,
+                    "reserve redemption refund amount must be positive"
+                );
+                ensure_eq!(
+                    memo.as_slice(),
+                    nonce.to_be_bytes().as_slice(),
+                    "reserve redemption refund memo does not match its nonce"
+                );
+                ensure_eq!(
+                    created_at,
+                    crate::management::nonce_to_created_at_time(nonce),
+                    "reserve redemption refund timestamp does not match its nonce"
+                );
+            }
+
+            let pull_settled = !matches!(
+                row.phase,
+                ReserveRedemptionPhase::PullSubmitted
+            );
+            ensure_eq!(
+                row.pull_block_index.is_some(),
+                pull_settled,
+                "reserve redemption pull block index does not match its phase"
+            );
+            let payout_must_be_settled = matches!(
+                row.phase,
+                ReserveRedemptionPhase::PayoutSettled
+                    | ReserveRedemptionPhase::TreasuryFeeSubmitted
+                    | ReserveRedemptionPhase::TreasuryFeeSettled
+                    | ReserveRedemptionPhase::TreasuryFeeNoEffect
+                    | ReserveRedemptionPhase::TreasuryFeeAmbiguous
+            );
+            let payout_must_be_unsettled = matches!(
+                row.phase,
+                ReserveRedemptionPhase::PullSubmitted
+                    | ReserveRedemptionPhase::PullSettled
+                    | ReserveRedemptionPhase::PayoutSubmitted
+                    | ReserveRedemptionPhase::PayoutAmbiguous
+            );
+            if payout_must_be_settled && row.payout_amount_e6s > 0 {
+                ensure!(
+                    row.payout_block_index.is_some(),
+                    "reserve redemption settled phase is missing payout block index"
+                );
+            }
+            if payout_must_be_settled && row.payout_amount_e6s == 0 {
+                ensure!(
+                    row.payout_block_index.is_none(),
+                    "zero-amount reserve payout cannot have a ledger block index"
+                );
+            }
+            if payout_must_be_unsettled {
+                ensure!(
+                    row.payout_block_index.is_none(),
+                    "reserve redemption unsettled phase has a payout block index"
+                );
+            }
+            let treasury_phase = matches!(
+                row.phase,
+                ReserveRedemptionPhase::TreasuryFeeSubmitted
+                    | ReserveRedemptionPhase::TreasuryFeeSettled
+                    | ReserveRedemptionPhase::TreasuryFeeNoEffect
+                    | ReserveRedemptionPhase::TreasuryFeeAmbiguous
+            );
+            ensure!(
+                !treasury_phase || treasury_fields.iter().all(|present| *present),
+                "reserve redemption treasury phase is missing its transfer tuple"
+            );
+        let refund_phase = matches!(
+                row.phase,
+            ReserveRedemptionPhase::RefundSubmitted
+                | ReserveRedemptionPhase::RefundNoEffect
+                | ReserveRedemptionPhase::RefundSettled
+            );
+            ensure!(
+                refund_phase == refund_fields.iter().all(|present| *present),
+                "reserve redemption refund tuple presence does not match its phase"
+            );
+            ensure_eq!(
+                row.refund_block_index.is_some(),
+                matches!(row.phase, ReserveRedemptionPhase::RefundSettled),
+                "reserve redemption refund receipt block does not match its phase"
+            );
+            if refund_phase {
+                if row.refund_amount_e8s == Some(row.icusd_amount_e8s) {
+                    ensure!(
+                        row.payout_block_index.is_none(),
+                        "full reserve redemption refund cannot coexist with a stable payout receipt"
+                    );
+                } else {
+                    ensure!(
+                        row.payout_block_index.is_some(),
+                        "partial reserve redemption refund requires a settled stable payout"
+                    );
+                }
+            }
+            ensure!(
+                row.treasury_block_index.is_some()
+                    || !matches!(row.phase, ReserveRedemptionPhase::TreasuryFeeSettled),
+                "reserve redemption treasury receipt block does not match its phase"
+            );
+            ensure!(
+                row.treasury_block_index.is_none() || matches!(
+                    row.phase,
+                    ReserveRedemptionPhase::TreasuryFeeSettled
+                        | ReserveRedemptionPhase::RefundSubmitted
+                        | ReserveRedemptionPhase::RefundNoEffect
+                        | ReserveRedemptionPhase::RefundSettled
+                ),
+                "reserve redemption treasury receipt cannot be retained in this phase"
+            );
+        }
+
         ensure!(
             self.vault_id_to_vaults.len()
                 <= self
@@ -8851,6 +9312,62 @@ pub fn replace_state(state: State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserve_redemption_journal_invariants_reject_multiple_rows_and_bad_tuple() {
+        use icrc_ledger_types::icrc1::account::Account;
+
+        let caller = Principal::from_slice(&[211]);
+        let ledger = Principal::from_slice(&[212]);
+        let journal = ReserveRedemptionJournal {
+            operation_id: 9,
+            caller,
+            icusd_amount_e8s: 500,
+            pull_ledger: ledger,
+            pull_from: Account { owner: caller, subaccount: None },
+            pull_to: Account { owner: Principal::from_slice(&[213]), subaccount: None },
+            pull_amount_e8s: 500,
+            pull_fee_e8s: None,
+            pull_memo: 9u128.to_be_bytes().to_vec(),
+            pull_created_at_time_ns: crate::management::nonce_to_created_at_time(9),
+            pull_op_nonce: 9,
+            payout_ledger: ledger,
+            payout_from_subaccount: None,
+            payout_to: Account { owner: caller, subaccount: None },
+            payout_amount_e6s: 5,
+            payout_fee_e6s: None,
+            payout_memo: 10u128.to_be_bytes().to_vec(),
+            payout_created_at_time_ns: crate::management::nonce_to_created_at_time(10),
+            payout_op_nonce: 10,
+            treasury_ledger: None,
+            treasury_to: None,
+            treasury_amount_e6s: None,
+            treasury_memo: None,
+            treasury_created_at_time_ns: None,
+            treasury_op_nonce: None,
+            treasury_block_index: None,
+            refund_ledger: None,
+            refund_amount_e8s: None,
+            refund_memo: None,
+            refund_created_at_time_ns: None,
+            refund_op_nonce: None,
+            refund_block_index: None,
+            pull_block_index: Some(11),
+            payout_block_index: None,
+            phase: ReserveRedemptionPhase::PayoutAmbiguous,
+        };
+        let mut state = State::default();
+        state.reserve_redemption_journals.insert(9, journal.clone());
+        assert!(state.check_invariants().is_ok());
+
+        let mut bad_tuple = journal.clone();
+        bad_tuple.payout_memo[0] ^= 1;
+        state.reserve_redemption_journals.insert(9, bad_tuple);
+        assert!(state.check_invariants().is_err());
+
+        state.reserve_redemption_journals.insert(10, journal);
+        assert!(state.check_invariants().is_err());
+    }
 
     #[test]
     fn legacy_bot_transfer_journal_defaults_missing_fee_terms_to_held_options() {

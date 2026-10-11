@@ -2594,6 +2594,12 @@ pub enum DurableTransferError {
     AmbiguousResponse(String),
 }
 
+pub(crate) fn reserve_redemption_payout_refund_allowed(
+    error: &DurableTransferError,
+) -> bool {
+    matches!(error, DurableTransferError::LedgerNoEffect(_))
+}
+
 fn classify_durable_transfer_outcome(
     outer: Result<Result<Nat, TransferError>, (i32, String)>,
 ) -> Result<u64, DurableTransferError> {
@@ -2679,6 +2685,177 @@ pub async fn transfer_collateral_with_nonce_and_fee_status(
             .await
     })
     .await
+}
+
+/// Dispatch the exact reserve-redemption icUSD pull tuple persisted before
+/// the await. Any error leaves the journal in PullSubmitted for reconciliation.
+#[derive(Debug)]
+pub enum ReserveRedemptionPullError {
+    DefinitiveNoEffect(TransferFromError),
+    Ambiguous(TransferFromError),
+}
+
+fn classify_reserve_redemption_pull_outcome(
+    outer: Result<Result<Nat, TransferFromError>, (i32, String)>,
+) -> Result<u64, ReserveRedemptionPullError> {
+    match outer {
+        Ok(Ok(block)) => block.0.to_u64().ok_or_else(|| {
+            ReserveRedemptionPullError::Ambiguous(TransferFromError::GenericError {
+                error_code: Nat::from(0u8),
+                message: "pull block index does not fit u64".into(),
+            })
+        }),
+        Ok(Err(TransferFromError::Duplicate { duplicate_of })) => {
+            duplicate_of.0.to_u64().ok_or_else(|| {
+                ReserveRedemptionPullError::Ambiguous(TransferFromError::GenericError {
+                    error_code: Nat::from(0u8),
+                    message: "duplicate pull block index does not fit u64".into(),
+                })
+            })
+        }
+        Ok(Err(error @ TransferFromError::GenericError { .. }))
+        | Ok(Err(error @ TransferFromError::TooOld)) => {
+            Err(ReserveRedemptionPullError::Ambiguous(error))
+        }
+        Ok(Err(error)) => Err(ReserveRedemptionPullError::DefinitiveNoEffect(error)),
+        Err((code, message)) => Err(ReserveRedemptionPullError::Ambiguous(
+            TransferFromError::GenericError {
+                error_code: Nat::from(code.max(0) as u64),
+                message,
+            },
+        )),
+    }
+}
+
+pub async fn transfer_reserve_redemption_pull(
+    journal: &crate::state::ReserveRedemptionJournal,
+) -> Result<u64, ReserveRedemptionPullError> {
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: journal.pull_ledger,
+    };
+    let outer = client
+        .transfer_from(TransferFromArgs {
+            spender_subaccount: None,
+            from: journal.pull_from.clone(),
+            to: journal.pull_to.clone(),
+            amount: Nat::from(journal.pull_amount_e8s),
+            fee: journal.pull_fee_e8s.map(Nat::from),
+            created_at_time: Some(journal.pull_created_at_time_ns),
+            memo: Some(Memo::from(journal.pull_memo.clone())),
+        })
+        .await;
+    classify_reserve_redemption_pull_outcome(outer)
+}
+
+/// Dispatch the exact persisted reserve payout tuple. A ledger GenericError,
+/// TooOld, reject, or malformed block index is ambiguous for this flow and
+/// must never authorize an icUSD refund.
+pub async fn transfer_reserve_redemption_payout(
+    journal: &crate::state::ReserveRedemptionJournal,
+) -> Result<u64, DurableTransferError> {
+    let client = ICRC1Client {
+        runtime: CdkRuntime,
+        ledger_canister_id: journal.payout_ledger,
+    };
+    let outer = client
+        .transfer(TransferArg {
+            from_subaccount: journal.payout_from_subaccount,
+            to: journal.payout_to.clone(),
+            fee: journal.payout_fee_e6s.map(Nat::from),
+            created_at_time: Some(journal.payout_created_at_time_ns),
+            memo: Some(Memo::from(journal.payout_memo.clone())),
+            amount: Nat::from(journal.payout_amount_e6s),
+        })
+        .await;
+    match outer {
+        Ok(Err(TransferError::GenericError { error_code, message })) => {
+            Err(DurableTransferError::AmbiguousResponse(format!(
+                "ledger GenericError {error_code}: {message}"
+            )))
+        }
+        Ok(Err(TransferError::TooOld)) => Err(DurableTransferError::AmbiguousResponse(
+            "ledger returned TooOld; the original payout may have settled".into(),
+        )),
+        other => classify_durable_transfer_outcome(other),
+    }
+}
+
+/// Dispatch the exact icUSD refund tuple saved in a reserve-redemption
+/// journal. Typed ledger errors are definitive no-effect and permit a retry of
+/// this unchanged tuple; rejects, GenericError, TooOld, and malformed replies
+/// remain ambiguous and must never authorize a new refund tuple.
+pub async fn transfer_reserve_redemption_refund(
+    journal: &crate::state::ReserveRedemptionJournal,
+) -> Result<u64, DurableTransferError> {
+    let (Some(ledger), Some(amount), Some(memo), Some(created_at_time), Some(_nonce)) = (
+        journal.refund_ledger,
+        journal.refund_amount_e8s,
+        journal.refund_memo.as_ref(),
+        journal.refund_created_at_time_ns,
+        journal.refund_op_nonce,
+    ) else {
+        return Err(DurableTransferError::AmbiguousResponse(
+            "reserve redemption refund tuple is incomplete".into(),
+        ));
+    };
+    let client = ICRC1Client { runtime: CdkRuntime, ledger_canister_id: ledger };
+    let outer = client.transfer(TransferArg {
+        from_subaccount: None,
+        to: Account { owner: journal.caller, subaccount: None },
+        fee: None,
+        created_at_time: Some(created_at_time),
+        memo: Some(Memo::from(memo.clone())),
+        amount: Nat::from(amount),
+    }).await;
+    match outer {
+        Ok(Err(TransferError::GenericError { error_code, message })) => {
+            Err(DurableTransferError::AmbiguousResponse(format!(
+                "ledger GenericError {error_code}: {message}"
+            )))
+        }
+        Ok(Err(TransferError::TooOld)) => Err(DurableTransferError::AmbiguousResponse(
+            "ledger returned TooOld; the original refund may have settled".into(),
+        )),
+        other => classify_durable_transfer_outcome(other),
+    }
+}
+
+/// Dispatch the separately journaled treasury stable-fee leg.
+pub async fn transfer_reserve_redemption_treasury_fee(
+    journal: &crate::state::ReserveRedemptionJournal,
+) -> Result<u64, DurableTransferError> {
+    let (Some(ledger), Some(to), Some(amount), Some(memo), Some(created_at_time)) = (
+        journal.treasury_ledger,
+        journal.treasury_to.as_ref(),
+        journal.treasury_amount_e6s,
+        journal.treasury_memo.as_ref(),
+        journal.treasury_created_at_time_ns,
+    ) else {
+        return Err(DurableTransferError::AmbiguousResponse(
+            "reserve redemption treasury tuple is incomplete".into(),
+        ));
+    };
+    let client = ICRC1Client { runtime: CdkRuntime, ledger_canister_id: ledger };
+    let outer = client.transfer(TransferArg {
+        from_subaccount: None,
+        to: to.clone(),
+        fee: None,
+        created_at_time: Some(created_at_time),
+        memo: Some(Memo::from(memo.clone())),
+        amount: Nat::from(amount),
+    }).await;
+    match outer {
+        Ok(Err(TransferError::GenericError { error_code, message })) => {
+            Err(DurableTransferError::AmbiguousResponse(format!(
+                "ledger GenericError {error_code}: {message}"
+            )))
+        }
+        Ok(Err(TransferError::TooOld)) => Err(DurableTransferError::AmbiguousResponse(
+            "ledger returned TooOld; the original treasury fee may have settled".into(),
+        )),
+        other => classify_durable_transfer_outcome(other),
+    }
 }
 
 /// Generic collateral transfer_from: pull tokens from a user into the protocol canister.
@@ -3564,6 +3741,51 @@ mod sweep_deposit_limit_tests {
             Err(DurableTransferError::LedgerNoEffect(
                 TransferError::TemporarilyUnavailable
             ))
+        ));
+    }
+
+    #[test]
+    fn reserve_payout_commit_with_lost_reply_never_authorizes_refund() {
+        let committed_but_reply_lost = DurableTransferError::AmbiguousResponse(
+            "ledger committed payout but the reply could not be decoded".into(),
+        );
+        assert!(!super::reserve_redemption_payout_refund_allowed(
+            &committed_but_reply_lost
+        ));
+        let definite_no_effect = DurableTransferError::LedgerNoEffect(
+            TransferError::BadFee { expected_fee: Nat::from(10u64) },
+        );
+        assert!(super::reserve_redemption_payout_refund_allowed(
+            &definite_no_effect
+        ));
+    }
+
+    #[test]
+    fn reserve_pull_releases_only_typed_no_effect_and_holds_rejects() {
+        use icrc_ledger_types::icrc2::transfer_from::TransferFromError;
+
+        assert!(matches!(
+            super::classify_reserve_redemption_pull_outcome(Ok(Err(
+                TransferFromError::InsufficientAllowance {
+                    allowance: Nat::from(0u64),
+                }
+            ))),
+            Err(super::ReserveRedemptionPullError::DefinitiveNoEffect(
+                TransferFromError::InsufficientAllowance { .. }
+            ))
+        ));
+        assert!(matches!(
+            super::classify_reserve_redemption_pull_outcome(Err((5, "reply lost".into()))),
+            Err(super::ReserveRedemptionPullError::Ambiguous(_))
+        ));
+        assert!(matches!(
+            super::classify_reserve_redemption_pull_outcome(Ok(Err(
+                TransferFromError::GenericError {
+                    error_code: Nat::from(5u64),
+                    message: "ledger response ambiguous".into(),
+                }
+            ))),
+            Err(super::ReserveRedemptionPullError::Ambiguous(_))
         ));
     }
 

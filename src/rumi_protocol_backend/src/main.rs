@@ -59,6 +59,60 @@ pub struct PendingIcusdRefundView {
     pub held_for_manual_retry: bool,
 }
 
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ReserveRedemptionStatus {
+    pub icusd_amount_e8s: u64,
+    pub stable_token: Principal,
+    pub stable_amount_e6s: u64,
+    pub treasury_fee_e6s: u64,
+    pub pull_block_index: Option<u64>,
+    pub payout_block_index: Option<u64>,
+    pub treasury_block_index: Option<u64>,
+    pub refund_amount_e8s: Option<u64>,
+    pub refund_block_index: Option<u64>,
+    pub phase: String,
+}
+
+fn reserve_redemption_status_in(
+    state: &State,
+    caller: Principal,
+) -> Option<ReserveRedemptionStatus> {
+    let row = state
+        .reserve_redemption_journals
+        .values()
+        .find(|row| row.caller == caller)?;
+    let phase = match row.phase {
+        rumi_protocol_backend::state::ReserveRedemptionPhase::PullSubmitted => "pull_submitted",
+        rumi_protocol_backend::state::ReserveRedemptionPhase::PullSettled => "pull_settled",
+        rumi_protocol_backend::state::ReserveRedemptionPhase::PayoutSubmitted => "payout_submitted",
+        rumi_protocol_backend::state::ReserveRedemptionPhase::PayoutSettled => "payout_settled",
+        rumi_protocol_backend::state::ReserveRedemptionPhase::PayoutAmbiguous => "payout_ambiguous",
+        rumi_protocol_backend::state::ReserveRedemptionPhase::TreasuryFeeSubmitted => "treasury_fee_submitted",
+        rumi_protocol_backend::state::ReserveRedemptionPhase::TreasuryFeeSettled => "treasury_fee_settled",
+        rumi_protocol_backend::state::ReserveRedemptionPhase::TreasuryFeeNoEffect => "treasury_fee_no_effect",
+        rumi_protocol_backend::state::ReserveRedemptionPhase::TreasuryFeeAmbiguous => "treasury_fee_ambiguous",
+        rumi_protocol_backend::state::ReserveRedemptionPhase::RefundSubmitted => "refund_submitted",
+        rumi_protocol_backend::state::ReserveRedemptionPhase::RefundNoEffect => "refund_no_effect",
+        rumi_protocol_backend::state::ReserveRedemptionPhase::RefundSettled => "refund_settled",
+    };
+    Some(ReserveRedemptionStatus {
+        icusd_amount_e8s: row.icusd_amount_e8s,
+        stable_token: row.payout_ledger,
+        stable_amount_e6s: row.payout_amount_e6s,
+        treasury_fee_e6s: row.treasury_amount_e6s.unwrap_or(0),
+        pull_block_index: row.pull_block_index,
+        payout_block_index: row.payout_block_index,
+        treasury_block_index: row.treasury_block_index,
+        refund_amount_e8s: row.refund_amount_e8s,
+        refund_block_index: row.refund_block_index,
+        phase: phase.into(),
+    })
+}
+
+fn reserve_redemption_status_for(caller: Principal) -> Option<ReserveRedemptionStatus> {
+    read_state(|state| reserve_redemption_status_in(state, caller))
+}
+
 fn pending_refund_visible_to(claim_owner: Principal, caller: Principal) -> bool {
     claim_owner == caller
 }
@@ -13823,7 +13877,8 @@ fn get_liquidation_ordering_tolerance_bps() -> u64 {
 
 // ── End admin safety functions ────────────────────────────────────────────────
 
-/// Redeem icUSD for ckStable tokens from reserves (with vault spillover fallback)
+/// Redeem icUSD for ckStable tokens from reserves. Requests requiring vault
+/// spillover are held before the icUSD pull until receipt recovery is supported.
 #[candid_method(update)]
 #[update]
 async fn redeem_reserves(
@@ -13863,6 +13918,25 @@ fn get_reserve_balances() -> Vec<ReserveBalance> {
         }
     });
     balances
+}
+
+/// Return the caller's retained reserve-redemption settlement status.
+/// Raw ledger tuples and operation nonces remain private to backend state.
+#[candid_method(query)]
+#[query]
+fn get_reserve_redemption_status() -> Option<ReserveRedemptionStatus> {
+    reserve_redemption_status_for(ic_cdk::api::caller())
+}
+
+/// Retry a refund only after the ledger returned a typed no-effect result, or
+/// record a caller-supplied candidate index after direct-ledger ICRC-3 proves
+/// the exact journaled leg. This endpoint records one positive receipt; it
+/// cannot infer absence or finalize the remaining saga/accounting.
+#[candid_method(update)]
+#[update]
+async fn reconcile_reserve_redemption(candidate_block_index: Option<u64>) -> Result<(), ProtocolError> {
+    validate_call().await?;
+    rumi_protocol_backend::vault::reconcile_reserve_redemption(candidate_block_index).await
 }
 
 /// Admin: mint icUSD to a recipient (developer only).
@@ -19285,5 +19359,70 @@ mod borrow_recovery_gate_tests {
         assert!(has_owned_pending_borrow_in_state(&state, owner, 77));
         assert!(!has_owned_pending_borrow_in_state(&state, other, 77));
         assert!(!has_owned_pending_borrow_in_state(&state, owner, 78));
+    }
+}
+
+#[cfg(test)]
+mod reserve_redemption_status_tests {
+    use super::reserve_redemption_status_in;
+    use candid::Principal;
+    use icrc_ledger_types::icrc1::account::Account;
+    use rumi_protocol_backend::state::{
+        ReserveRedemptionJournal, ReserveRedemptionPhase, State,
+    };
+
+    #[test]
+    fn reserve_redemption_status_is_visible_only_to_its_caller() {
+        let owner = Principal::from_slice(&[31]);
+        let stranger = Principal::from_slice(&[32]);
+        let ledger = Principal::from_slice(&[33]);
+        let protocol = Principal::from_slice(&[34]);
+        let mut state = State::default();
+        state.reserve_redemption_journals.insert(
+            99,
+            ReserveRedemptionJournal {
+                operation_id: 99,
+                caller: owner,
+                icusd_amount_e8s: 10_000,
+                pull_ledger: ledger,
+                pull_from: Account { owner, subaccount: None },
+                pull_to: Account { owner: protocol, subaccount: None },
+                pull_amount_e8s: 10_000,
+                pull_fee_e8s: None,
+                pull_memo: 99u128.to_be_bytes().to_vec(),
+                pull_created_at_time_ns: 1,
+                pull_op_nonce: 99,
+                payout_ledger: ledger,
+                payout_from_subaccount: None,
+                payout_to: Account { owner, subaccount: None },
+                payout_amount_e6s: 100,
+                payout_fee_e6s: None,
+                payout_memo: 100u128.to_be_bytes().to_vec(),
+                payout_created_at_time_ns: 1,
+                payout_op_nonce: 100,
+                treasury_ledger: None,
+                treasury_to: None,
+                treasury_amount_e6s: None,
+                treasury_memo: None,
+                treasury_created_at_time_ns: None,
+                treasury_op_nonce: None,
+                treasury_block_index: None,
+                refund_ledger: None,
+                refund_amount_e8s: None,
+                refund_memo: None,
+                refund_created_at_time_ns: None,
+                refund_op_nonce: None,
+                refund_block_index: None,
+                pull_block_index: Some(7),
+                payout_block_index: None,
+                phase: ReserveRedemptionPhase::PayoutAmbiguous,
+            },
+        );
+
+        let visible = reserve_redemption_status_in(&state, owner).unwrap();
+        assert_eq!(visible.phase, "payout_ambiguous");
+        assert_eq!(visible.pull_block_index, Some(7));
+        assert_eq!(visible.stable_amount_e6s, 100);
+        assert!(reserve_redemption_status_in(&state, stranger).is_none());
     }
 }
