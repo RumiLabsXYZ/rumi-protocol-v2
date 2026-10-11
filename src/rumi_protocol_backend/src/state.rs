@@ -52,6 +52,9 @@ mod treasury_interest_snapshot_tests {
                 },
                 treasury: Principal::from_slice(&[2]),
                 phase: TreasuryInterestMintPhase::NotifyPending { mint_block_index: 77 },
+                history_floor: Some(70),
+                expiry_proven: false,
+                absence_scan: None,
             },
         );
         state.treasury_interest_mint_retry_cursor = 42;
@@ -62,6 +65,23 @@ mod treasury_interest_snapshot_tests {
         assert_eq!(restored.pending_treasury_interest_mints, state.pending_treasury_interest_mints);
         assert_eq!(restored.treasury_interest_mint_retry_cursor, 42);
         assert_eq!(restored.pending_treasury_interest_fallback_e8s, 500);
+
+        let row = state.pending_treasury_interest_mints[&42].clone();
+        let mut row_bytes = Vec::new();
+        ciborium::ser::into_writer(&row, &mut row_bytes).unwrap();
+        let mut row_fields = match ciborium::de::from_reader::<ciborium::value::Value, _>(row_bytes.as_slice()).unwrap() {
+            ciborium::value::Value::Map(fields) => fields,
+            other => panic!("expected CBOR row map, got {other:?}"),
+        };
+        row_fields.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name)
+            if name == "history_floor" || name == "expiry_proven" || name == "absence_scan"));
+        let mut legacy_row_bytes = Vec::new();
+        ciborium::ser::into_writer(&ciborium::value::Value::Map(row_fields), &mut legacy_row_bytes).unwrap();
+        let legacy_row: TreasuryInterestMintJournal =
+            ciborium::de::from_reader(legacy_row_bytes.as_slice()).unwrap();
+        assert_eq!(legacy_row.history_floor, None);
+        assert!(!legacy_row.expiry_proven);
+        assert_eq!(legacy_row.absence_scan, None);
 
         let mut map = match ciborium::de::from_reader::<ciborium::value::Value, _>(bytes.as_slice()).unwrap() {
             ciborium::value::Value::Map(map) => map,
@@ -2245,6 +2265,16 @@ pub struct TreasuryInterestMintJournal {
     pub tuple: BorrowMintTuple,
     pub treasury: Principal,
     pub phase: TreasuryInterestMintPhase,
+    /// Ledger-global exclusive log length captured before the first mint.
+    /// Rows predating this field may only use exact positive receipt recovery.
+    #[serde(default)]
+    pub history_floor: Option<u64>,
+    /// Set only after a typed TooOld expiry probe using the original timestamp.
+    #[serde(default)]
+    pub expiry_proven: bool,
+    /// Fixed-tip, bounded direct-ledger scan for a held unknown mint.
+    #[serde(default)]
+    pub absence_scan: Option<BorrowMintAbsenceScan>,
 }
 
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -2254,6 +2284,9 @@ pub enum TreasuryInterestMintPhase {
     /// The exact tuple is past automatic ledger deduplication, or returned
     /// TooOld. An exact positive receipt is needed before notification.
     ReceiptRecoveryRequired,
+    /// Source funds are reserved, but no ledger mint may be sent until a
+    /// pre-dispatch history floor is durably captured.
+    AwaitingHistoryFloor,
 }
 
 /// Durable debt reservation for one borrow whose icUSD mint has not yet been

@@ -1259,6 +1259,33 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : IDL.Vec(PendingStabilityPoolInterestNotification),
     'Err' : ProtocolError,
   });
+  const TreasuryInterestMintPhase = IDL.Variant({
+    'NotifyPending' : IDL.Record({ 'mint_block_index' : IDL.Nat64 }),
+    'MintPending' : IDL.Null,
+    'ReceiptRecoveryRequired' : IDL.Null,
+    'AwaitingHistoryFloor' : IDL.Null,
+  });
+  const BorrowMintAbsenceScan = IDL.Record({
+    'fixed_tip' : IDL.Opt(IDL.Nat64),
+    'candidate_block_index' : IDL.Opt(IDL.Nat64),
+    'next_block_index' : IDL.Nat64,
+  });
+  const TreasuryInterestMintRecoveryRow = IDL.Record({
+    'tuple' : BorrowMintTuple,
+    'expiry_proven' : IDL.Bool,
+    'phase' : TreasuryInterestMintPhase,
+    'absence_scan' : IDL.Opt(BorrowMintAbsenceScan),
+    'history_floor' : IDL.Opt(IDL.Nat64),
+    'treasury' : IDL.Principal,
+  });
+  const TreasuryInterestMintRecoveryPage = IDL.Record({
+    'next_cursor' : IDL.Opt(IDL.Nat),
+    'items' : IDL.Vec(TreasuryInterestMintRecoveryRow),
+  });
+  const Result_35 = IDL.Variant({
+    'Ok' : TreasuryInterestMintRecoveryPage,
+    'Err' : ProtocolError,
+  });
   const ProtocolConfig = IDL.Record({
     'global_rate_curve' : IDL.Vec(IDL.Tuple(IDL.Float64, IDL.Float64)),
     'bot_budget_remaining_e8s' : IDL.Nat64,
@@ -1963,6 +1990,11 @@ export const idlFactory = ({ IDL }) => {
         [Result_1],
         [],
       ),
+    'advance_pending_treasury_interest_mint_recovery' : IDL.Func(
+        [IDL.Nat],
+        [Result_1],
+        [],
+      ),
     'backfill_collateral_symbols' : IDL.Func([], [Result_3], []),
     'bind_and_retry_missing_borrow_fee_treasury' : IDL.Func(
         [IDL.Nat],
@@ -2272,6 +2304,11 @@ export const idlFactory = ({ IDL }) => {
         [Result_11],
         ['query'],
       ),
+    'get_pending_treasury_interest_mint_recovery_page' : IDL.Func(
+        [IDL.Opt(IDL.Nat), IDL.Nat16],
+        [Result_35],
+        ['query'],
+      ),
     'get_price_pusher_allowed' : IDL.Func(
         [],
         [IDL.Vec(IDL.Tuple(IDL.Nat32, IDL.Text))],
@@ -2513,6 +2550,11 @@ export const idlFactory = ({ IDL }) => {
     'reconcile_pending_borrow_mint_from_block' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [Result_4],
+        [],
+      ),
+    'reconcile_pending_treasury_interest_mint_from_block' : IDL.Func(
+        [IDL.Nat, IDL.Nat64],
+        [Result_1],
         [],
       ),
     'reconcile_three_usd_reserve_ingress_candidate_block' : IDL.Func(

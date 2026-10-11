@@ -22,6 +22,55 @@ const INTEREST_REVENUE_ONCE_METHOD: &str = "deposit_interest_revenue_once";
 const MAX_PENDING_TREASURY_INTEREST_MINTS: usize = 2048;
 const TREASURY_INTEREST_RETRY_BATCH: usize = 16;
 const TREASURY_INTEREST_AUTO_RETRY_MAX_AGE_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
+const MAX_TREASURY_INTEREST_RECOVERY_PAGE: u16 = 100;
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq)]
+pub struct TreasuryInterestMintRecoveryRow {
+    pub tuple: crate::state::BorrowMintTuple,
+    pub treasury: Principal,
+    pub phase: crate::state::TreasuryInterestMintPhase,
+    pub history_floor: Option<u64>,
+    pub expiry_proven: bool,
+    pub absence_scan: Option<crate::state::BorrowMintAbsenceScan>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq)]
+pub struct TreasuryInterestMintRecoveryPage {
+    pub items: Vec<TreasuryInterestMintRecoveryRow>,
+    pub next_cursor: Option<u128>,
+}
+
+pub fn treasury_interest_mint_recovery_page(
+    after_op_nonce: Option<u128>,
+    limit: u16,
+) -> Result<TreasuryInterestMintRecoveryPage, String> {
+    if limit == 0 {
+        return Err("page limit must be greater than zero".into());
+    }
+    let limit = usize::from(limit.min(MAX_TREASURY_INTEREST_RECOVERY_PAGE));
+    crate::state::read_state(|state| {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let start = after_op_nonce.map_or(Unbounded, Excluded);
+        let mut rows = state.pending_treasury_interest_mints.range((start, Unbounded));
+        let mut items = Vec::with_capacity(limit);
+        for (_, row) in rows.by_ref().take(limit) {
+            items.push(TreasuryInterestMintRecoveryRow {
+                tuple: row.tuple.clone(),
+                treasury: row.treasury,
+                phase: row.phase.clone(),
+                history_floor: row.history_floor,
+                expiry_proven: row.expiry_proven,
+                absence_scan: row.absence_scan.clone(),
+            });
+        }
+        let next_cursor = if rows.next().is_some() {
+            items.last().map(|row| row.tuple.op_nonce)
+        } else {
+            None
+        };
+        Ok(TreasuryInterestMintRecoveryPage { items, next_cursor })
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Mirror types matching rumi_treasury::types (can't depend on cdylib crate)
@@ -361,7 +410,10 @@ fn start_treasury_interest_mint_at(amount: ICUSD, now: u64) -> Result<u128, ICUS
                 op_nonce: nonce,
             },
             treasury,
-            phase: crate::state::TreasuryInterestMintPhase::MintPending,
+            phase: crate::state::TreasuryInterestMintPhase::AwaitingHistoryFloor,
+            history_floor: None,
+            expiry_proven: false,
+            absence_scan: None,
         };
         crate::storage::record_pending_payout_event(
             &crate::event::PendingPayoutEvent::TreasuryInterestMintStarted {
@@ -393,6 +445,45 @@ enum TreasuryInterestMintFailure {
 }
 
 async fn process_treasury_interest_mint(op_nonce: u128) {
+    let Some(operation) = crate::state::read_state(|s| {
+        s.pending_treasury_interest_mints.get(&op_nonce).cloned()
+    }) else { return; };
+    if operation.phase == crate::state::TreasuryInterestMintPhase::AwaitingHistoryFloor {
+        if operation.tuple.ledger
+            != crate::state::read_state(|s| s.icusd_ledger_principal)
+        {
+            log!(INFO, "[treasury] Interest mint {op_nonce} is held: configured ledger differs from its pinned tuple");
+            return;
+        }
+        let floor = match crate::icrc3_proof::icrc3_history_floor(operation.tuple.ledger).await {
+            Ok(floor) => floor,
+            Err(error) => {
+                log!(INFO, "[treasury] Could not capture pre-mint ICRC-3 history floor for {op_nonce}: {error}");
+                return;
+            }
+        };
+        let armed = crate::state::mutate_state(|s| {
+            if s.icusd_ledger_principal != operation.tuple.ledger
+                || s.pending_treasury_interest_mints.get(&op_nonce) != Some(&operation)
+            {
+                return false;
+            }
+            let mut updated = operation.clone();
+            updated.history_floor = Some(floor);
+            updated.phase = crate::state::TreasuryInterestMintPhase::MintPending;
+            crate::storage::record_pending_payout_event(
+                &crate::event::PendingPayoutEvent::TreasuryInterestMintUpdated {
+                    operation: updated.clone(),
+                },
+            );
+            s.pending_treasury_interest_mints.insert(op_nonce, updated);
+            true
+        });
+        if !armed {
+            log!(INFO, "[treasury] Interest journal changed while capturing pre-mint history floor for {op_nonce}; no mint sent");
+            return;
+        }
+    }
     process_treasury_interest_mint_with_now(
         op_nonce,
         ic_cdk::api::time(),
@@ -413,6 +504,439 @@ async fn process_treasury_interest_mint(op_nonce: u128) {
             ).await.map(|_| ())
         },
     ).await;
+}
+
+/// Reconcile only a positive exact ICRC-3 mint receipt. The verifier is
+/// injectable so the journal transition can be tested without a ledger call.
+pub async fn reconcile_treasury_interest_mint_from_block(
+    op_nonce: u128,
+    candidate_block_index: u64,
+) -> Result<(), String> {
+    reconcile_treasury_interest_mint_from_block_with(
+        op_nonce,
+        candidate_block_index,
+        ic_cdk::api::caller(),
+        |ledger, block, tuple| async move {
+            crate::icrc3_proof::verify_icrc3_borrow_mint_block(ledger, block, &tuple).await
+        },
+    ).await
+}
+
+/// Advance one bounded step of held Treasury-interest recovery. The scan can
+/// only begin after the original timestamp gets a typed TooOld response and
+/// a fixed post-expiry tip is durably recorded. Legacy rows without a floor
+/// stay eligible for positive receipt reconciliation only.
+pub async fn advance_pending_treasury_interest_mint_recovery(
+    op_nonce: u128,
+) -> Result<(), String> {
+    advance_pending_treasury_interest_mint_recovery_with(
+        op_nonce,
+        ic_cdk::api::caller(),
+        ic_cdk::api::time(),
+        |tuple, sink, memo| async move {
+            probe_treasury_interest_mint_expiry(&tuple, sink, memo).await
+        },
+        |ledger| async move { crate::icrc3_proof::icrc3_history_floor(ledger).await },
+        |ledger, start, end| async move {
+            let request = vec![icrc_ledger_types::icrc3::blocks::GetBlocksRequest {
+                start: candid::Nat::from(start),
+                length: candid::Nat::from(end - start),
+            }];
+            let (response,): (icrc_ledger_types::icrc3::blocks::GetBlocksResult,) =
+                ic_cdk::call(ledger, "icrc3_get_blocks", (request,))
+                    .await
+                    .map_err(|(code, message)| {
+                        format!("direct icUSD history page [{start}, {end}) failed ({code:?}): {message}")
+                    })?;
+            Ok(response)
+        },
+    ).await
+}
+
+async fn advance_pending_treasury_interest_mint_recovery_with<P, PF, T, TF, B, BF>(
+    op_nonce: u128,
+    caller: Principal,
+    now: u64,
+    probe: P,
+    history_floor: T,
+    page: B,
+) -> Result<(), String>
+where
+    P: FnOnce(crate::state::BorrowMintTuple, Principal, Vec<u8>) -> PF,
+    PF: std::future::Future<Output = Result<(), String>>,
+    T: FnOnce(Principal) -> TF,
+    TF: std::future::Future<Output = Result<u64, String>>,
+    B: FnOnce(Principal, u64, u64) -> BF,
+    BF: std::future::Future<Output = Result<icrc_ledger_types::icrc3::blocks::GetBlocksResult, String>>,
+{
+    let mut operation = crate::state::read_state(|s| {
+        s.pending_treasury_interest_mints.get(&op_nonce).cloned()
+    }).ok_or_else(|| "no active treasury-interest mint row exists".to_string())?;
+    if operation.tuple.op_nonce != op_nonce {
+        return Err("treasury-interest map key differs from the pinned tuple nonce".into());
+    }
+    validate_treasury_interest_recovery_authority(caller, &operation)?;
+    if operation.phase != crate::state::TreasuryInterestMintPhase::ReceiptRecoveryRequired {
+        return Err("treasury-interest mint is not awaiting receipt recovery".into());
+    }
+    let Some(floor) = operation.history_floor else {
+        return Err("legacy treasury-interest row has no durable history floor; positive receipt recovery only".into());
+    };
+    if !operation.expiry_proven && operation.absence_scan.is_some() {
+        return Err("treasury-interest scan exists without a persisted typed TooOld proof".into());
+    }
+
+    if !operation.expiry_proven {
+        let (sink, memo) = treasury_interest_expiry_probe_identity(&operation)?;
+        probe(operation.tuple.clone(), sink, memo).await?;
+
+        // Persist the typed TooOld before the next await so a restart can
+        // resume at the fixed-tip read without repeating the probe.
+        validate_treasury_interest_recovery_authority(caller, &operation)?;
+        let mut expired = operation.clone();
+        expired.expiry_proven = true;
+        if !cas_treasury_interest_mint_update(caller, &operation, &expired) {
+            return Err("treasury-interest journal or developer authority changed during expiry probe".into());
+        }
+        operation = expired;
+    }
+
+    if operation.absence_scan.is_none() {
+        let tip = history_floor(operation.tuple.ledger).await?;
+        validate_treasury_interest_recovery_authority(caller, &operation)?;
+        if tip < floor {
+            return Err("post-expiry ledger tip precedes the durable history floor".into());
+        }
+        let mut pinned = operation.clone();
+        pinned.absence_scan = Some(crate::state::BorrowMintAbsenceScan {
+            next_block_index: floor,
+            fixed_tip: Some(tip),
+            candidate_block_index: None,
+        });
+        if !cas_treasury_interest_mint_update(caller, &operation, &pinned) {
+            return Err("treasury-interest journal or developer authority changed while pinning history tip".into());
+        }
+        operation = pinned;
+    }
+
+    let mut scan = operation.absence_scan.clone()
+        .ok_or_else(|| "treasury-interest scan was not pinned".to_string())?;
+    let tip = scan.fixed_tip
+        .ok_or_else(|| "treasury-interest scan has no fixed tip".to_string())?;
+    if scan.next_block_index < floor || scan.next_block_index > tip {
+        return Err("persisted treasury-interest cursor is outside its pinned range".into());
+    }
+
+    if scan.next_block_index < tip {
+        let start = scan.next_block_index;
+        let end = tip.min(start.saturating_add(64));
+        let response = page(operation.tuple.ledger, start, end).await?;
+        validate_treasury_interest_recovery_authority(caller, &operation)?;
+        let found = crate::icrc3_proof::validate_borrow_mint_scan_page(
+            start, end, tip, &response, &operation.tuple,
+        ).map_err(|error| format!("icUSD history page is not complete proof: {error}"))?;
+        crate::state::record_borrow_mint_scan_page(&mut scan, start, end, found)?;
+        let mut advanced = operation.clone();
+        advanced.absence_scan = Some(scan.clone());
+
+        if scan.next_block_index == tip {
+            if let Some(block_index) = scan.candidate_block_index {
+                return commit_treasury_interest_mint_receipt(
+                    caller, &operation, &advanced, block_index,
+                ).then_some(()).ok_or_else(|| "treasury-interest journal changed before receipt commit".into());
+            }
+            return replace_proven_absent_treasury_interest_mint(
+                caller, &operation, &advanced, now,
+            ).then_some(()).ok_or_else(|| "treasury-interest journal changed before absence replacement".into());
+        }
+
+        if !cas_treasury_interest_mint_update(caller, &operation, &advanced) {
+            return Err("treasury-interest journal or developer authority changed before scan cursor CAS".into());
+        }
+        return Ok(());
+    }
+
+    if let Some(block_index) = scan.candidate_block_index {
+        return commit_treasury_interest_mint_receipt(caller, &operation, &operation, block_index)
+            .then_some(())
+            .ok_or_else(|| "treasury-interest journal changed before receipt commit".into());
+    }
+    replace_proven_absent_treasury_interest_mint(caller, &operation, &operation, now)
+        .then_some(())
+        .ok_or_else(|| "treasury-interest journal changed before absence replacement".into())
+}
+
+fn treasury_interest_expiry_probe_identity(
+    operation: &crate::state::TreasuryInterestMintJournal,
+) -> Result<(Principal, Vec<u8>), String> {
+    if operation.treasury != operation.tuple.destination {
+        return Err("treasury-interest journal destination differs from its pinned tuple".into());
+    }
+    let mut sink_seed = b"RUMI-TREASURY-INTEREST-EXPIRY-SINK-V1".to_vec();
+    sink_seed.extend_from_slice(operation.tuple.ledger.as_slice());
+    sink_seed.extend_from_slice(operation.treasury.as_slice());
+    sink_seed.extend_from_slice(&operation.tuple.op_nonce.to_be_bytes());
+    let sink = Principal::self_authenticating(&sink_seed);
+    if sink == operation.treasury {
+        return Err("could not derive a Treasury-interest expiry sink distinct from Treasury".into());
+    }
+    use sha2::{Digest, Sha256};
+    let mut memo = Sha256::new();
+    memo.update(b"RUMI-TREASURY-INTEREST-EXPIRY-PROBE-V1");
+    memo.update(operation.tuple.ledger.as_slice());
+    memo.update(operation.treasury.as_slice());
+    memo.update(operation.tuple.op_nonce.to_be_bytes());
+    memo.update(operation.tuple.created_at_time_ns.to_be_bytes());
+    Ok((sink, memo.finalize().to_vec()))
+}
+
+async fn probe_treasury_interest_mint_expiry(
+    tuple: &crate::state::BorrowMintTuple,
+    sink: Principal,
+    memo: Vec<u8>,
+) -> Result<(), String> {
+    if sink == tuple.destination || memo.as_slice() == tuple.memo.as_slice() {
+        return Err("Treasury-interest expiry probe is not domain-separated from the pinned mint".into());
+    }
+    use icrc_ledger_types::icrc1::account::Account;
+    use icrc_ledger_types::icrc1::transfer::{Memo, TransferArg, TransferError};
+    let outcome: Result<(Result<candid::Nat, TransferError>,), _> = ic_cdk::call(
+        tuple.ledger,
+        "icrc1_transfer",
+        (TransferArg {
+            from_subaccount: None,
+            to: Account { owner: sink, subaccount: None },
+            fee: Some(candid::Nat::from(0u8)),
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(Memo::from(memo)),
+            amount: candid::Nat::from(0u8),
+        },),
+    ).await;
+    classify_treasury_interest_expiry_probe_outcome(outcome.map(|(inner,)| inner))
+}
+
+fn classify_treasury_interest_expiry_probe_outcome(
+    outcome: Result<
+        Result<candid::Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
+        (ic_cdk::api::call::RejectionCode, String),
+    >,
+) -> Result<(), String> {
+    use icrc_ledger_types::icrc1::transfer::TransferError;
+    match outcome {
+        Ok(Err(TransferError::TooOld)) => Ok(()),
+        Ok(Ok(_)) => Err("zero-value Treasury-interest expiry probe succeeded; row remains held".into()),
+        Ok(Err(TransferError::Duplicate { .. })) => Err("zero-value Treasury-interest expiry probe was Duplicate; row remains held".into()),
+        Ok(Err(error)) => Err(format!("zero-value Treasury-interest expiry probe returned {error:?}; row remains held")),
+        Err((code, message)) => Err(format!("zero-value Treasury-interest expiry probe call rejected ({code:?}): {message}")),
+    }
+}
+
+fn cas_treasury_interest_mint_update(
+    caller: Principal,
+    expected: &crate::state::TreasuryInterestMintJournal,
+    updated: &crate::state::TreasuryInterestMintJournal,
+) -> bool {
+    crate::state::mutate_state(|s| {
+        if caller == Principal::anonymous()
+            || caller != s.developer_principal
+            || s.icusd_ledger_principal != expected.tuple.ledger
+            || expected.phase != crate::state::TreasuryInterestMintPhase::ReceiptRecoveryRequired
+            || expected.treasury != expected.tuple.destination
+            || updated.tuple != expected.tuple
+            || updated.treasury != expected.treasury
+            || updated.phase != crate::state::TreasuryInterestMintPhase::ReceiptRecoveryRequired
+            || s.pending_treasury_interest_mints.get(&expected.tuple.op_nonce) != Some(expected)
+        {
+            return false;
+        }
+        crate::storage::record_pending_payout_event(
+            &crate::event::PendingPayoutEvent::TreasuryInterestMintUpdated {
+                operation: updated.clone(),
+            },
+        );
+        s.pending_treasury_interest_mints.insert(updated.tuple.op_nonce, updated.clone());
+        true
+    })
+}
+
+fn commit_treasury_interest_mint_receipt(
+    caller: Principal,
+    expected: &crate::state::TreasuryInterestMintJournal,
+    completed: &crate::state::TreasuryInterestMintJournal,
+    block_index: u64,
+) -> bool {
+    let Some(scan) = completed.absence_scan.as_ref() else { return false; };
+    if !completed.expiry_proven
+        || completed.phase != crate::state::TreasuryInterestMintPhase::ReceiptRecoveryRequired
+        || scan.fixed_tip != Some(scan.next_block_index)
+        || scan.candidate_block_index != Some(block_index)
+        || expected.tuple != completed.tuple
+        || expected.treasury != completed.treasury
+        || expected.history_floor != completed.history_floor
+    {
+        return false;
+    }
+    crate::state::mutate_state(|s| {
+        if caller == Principal::anonymous()
+            || caller != s.developer_principal
+            || s.icusd_ledger_principal != expected.tuple.ledger
+            || expected.phase != crate::state::TreasuryInterestMintPhase::ReceiptRecoveryRequired
+            || expected.treasury != expected.tuple.destination
+            || s.pending_treasury_interest_mints.get(&expected.tuple.op_nonce) != Some(expected)
+        {
+            return false;
+        }
+        crate::storage::record_pending_payout_event(
+            &crate::event::PendingPayoutEvent::TreasuryInterestMintAccepted {
+                op_nonce: expected.tuple.op_nonce,
+                block_index,
+            },
+        );
+        if let Some(current) = s.pending_treasury_interest_mints.get_mut(&expected.tuple.op_nonce) {
+            current.phase = crate::state::TreasuryInterestMintPhase::NotifyPending {
+                mint_block_index: block_index,
+            };
+        }
+        true
+    })
+}
+
+fn replace_proven_absent_treasury_interest_mint(
+    caller: Principal,
+    expected: &crate::state::TreasuryInterestMintJournal,
+    completed: &crate::state::TreasuryInterestMintJournal,
+    now: u64,
+) -> bool {
+    let Some(scan) = completed.absence_scan.as_ref() else { return false; };
+    if scan.fixed_tip != Some(scan.next_block_index) || scan.candidate_block_index.is_some()
+        || !completed.expiry_proven || completed.phase != crate::state::TreasuryInterestMintPhase::ReceiptRecoveryRequired
+        || completed.history_floor.is_none_or(|floor| floor > scan.next_block_index)
+        || expected.tuple != completed.tuple
+        || expected.treasury != completed.treasury
+        || expected.history_floor != completed.history_floor
+        || !expected.expiry_proven
+    {
+        return false;
+    }
+    crate::state::mutate_state(|s| {
+        if caller == Principal::anonymous()
+            || caller != s.developer_principal
+            || s.icusd_ledger_principal != expected.tuple.ledger
+            || s.pending_treasury_interest_mints.get(&expected.tuple.op_nonce) != Some(expected)
+            || expected.phase != crate::state::TreasuryInterestMintPhase::ReceiptRecoveryRequired
+            || expected.treasury != expected.tuple.destination
+        {
+            return false;
+        }
+        let nonce = s.next_op_nonce_at(now);
+        if s.pending_treasury_interest_mints.contains_key(&nonce) {
+            return false;
+        }
+        let replacement = crate::state::TreasuryInterestMintJournal {
+            tuple: crate::state::BorrowMintTuple {
+                ledger: expected.tuple.ledger,
+                destination: expected.treasury,
+                amount_e8s: expected.tuple.amount_e8s,
+                memo: nonce.to_be_bytes(),
+                created_at_time_ns: management::nonce_to_created_at_time(nonce),
+                op_nonce: nonce,
+            },
+            treasury: expected.treasury,
+            phase: crate::state::TreasuryInterestMintPhase::AwaitingHistoryFloor,
+            history_floor: None,
+            expiry_proven: false,
+            absence_scan: None,
+        };
+        crate::storage::record_pending_payout_event(
+            &crate::event::PendingPayoutEvent::TreasuryInterestMintReplaced {
+                old_nonce: expected.tuple.op_nonce,
+                operation: replacement.clone(),
+            },
+        );
+        s.pending_treasury_interest_mints.remove(&expected.tuple.op_nonce);
+        s.pending_treasury_interest_mints.insert(nonce, replacement);
+        true
+    })
+}
+
+async fn reconcile_treasury_interest_mint_from_block_with<V, VF>(
+    op_nonce: u128,
+    candidate_block_index: u64,
+    caller: Principal,
+    verify: V,
+) -> Result<(), String>
+where
+    V: FnOnce(Principal, u64, crate::state::BorrowMintTuple) -> VF,
+    VF: std::future::Future<Output = Result<(), String>>,
+{
+    let operation = crate::state::read_state(|s| {
+        s.pending_treasury_interest_mints.get(&op_nonce).cloned()
+    }).ok_or_else(|| "no active treasury-interest mint row exists".to_string())?;
+    if operation.tuple.op_nonce != op_nonce {
+        return Err("treasury-interest map key differs from the pinned tuple nonce".into());
+    }
+    validate_treasury_interest_recovery_authority(caller, &operation)?;
+    if let crate::state::TreasuryInterestMintPhase::NotifyPending { mint_block_index } = &operation.phase {
+        return if *mint_block_index == candidate_block_index {
+            Ok(())
+        } else {
+            Err("treasury-interest mint is already reconciled to a different block".into())
+        };
+    }
+    if operation.phase != crate::state::TreasuryInterestMintPhase::ReceiptRecoveryRequired {
+        return Err("treasury-interest mint is not awaiting receipt recovery".into());
+    }
+    let ledger = operation.tuple.ledger;
+    verify(ledger, candidate_block_index, operation.tuple.clone()).await?;
+
+    // Await may change both developer authority and the persisted operation.
+    // Recheck them in the same state mutation that records the accepted receipt.
+    let committed = crate::state::mutate_state(|s| {
+        if caller == Principal::anonymous()
+            || caller != s.developer_principal
+            || s.icusd_ledger_principal != ledger
+            || s.pending_treasury_interest_mints.get(&op_nonce) != Some(&operation)
+            || operation.phase != crate::state::TreasuryInterestMintPhase::ReceiptRecoveryRequired
+        {
+            return false;
+        }
+        crate::storage::record_pending_payout_event(
+            &crate::event::PendingPayoutEvent::TreasuryInterestMintAccepted {
+                op_nonce,
+                block_index: candidate_block_index,
+            },
+        );
+        if let Some(current) = s.pending_treasury_interest_mints.get_mut(&op_nonce) {
+            current.phase = crate::state::TreasuryInterestMintPhase::NotifyPending {
+                mint_block_index: candidate_block_index,
+            };
+        }
+        true
+    });
+    if committed {
+        Ok(())
+    } else {
+        Err("treasury-interest journal or developer authority changed during receipt recovery".into())
+    }
+}
+
+fn validate_treasury_interest_recovery_authority(
+    caller: Principal,
+    operation: &crate::state::TreasuryInterestMintJournal,
+) -> Result<(), String> {
+    if caller == Principal::anonymous()
+        || caller != crate::state::read_state(|s| s.developer_principal)
+    {
+        return Err("only the developer principal can reconcile treasury-interest receipts".into());
+    }
+    let configured_ledger = crate::state::read_state(|s| s.icusd_ledger_principal);
+    if operation.tuple.ledger != configured_ledger {
+        return Err("configured icUSD ledger differs from the pinned operation ledger".into());
+    }
+    if operation.treasury != operation.tuple.destination {
+        return Err("treasury-interest journal destination differs from the pinned mint tuple".into());
+    }
+    Ok(())
 }
 
 async fn process_treasury_interest_mint_with_now<M, MFut, N, NFut>(
@@ -1822,7 +2346,8 @@ mod amm1_donation_retry_tests {
 #[cfg(test)]
 mod treasury_interest_mint_tests {
     use super::{
-        distribute_interest_at, distribute_stablecoin_interest, process_treasury_interest_mint_with_now,
+        advance_pending_treasury_interest_mint_recovery_with, distribute_interest_at,
+        distribute_stablecoin_interest, process_treasury_interest_mint_with_now,
         start_treasury_interest_mint_at,
         TreasuryInterestMintFailure, TREASURY_INTEREST_AUTO_RETRY_MAX_AGE_NS,
     };
@@ -1835,13 +2360,66 @@ mod treasury_interest_mint_tests {
         let mut state = State::default();
         state.icusd_ledger_principal = Principal::from_slice(&[1]);
         state.treasury_principal = Some(Principal::from_slice(&[2]));
+        state.developer_principal = Principal::from_slice(&[9]);
         state::replace_state(state);
+    }
+
+    fn arm_mint(nonce: u128) {
+        state::mutate_state(|s| {
+            let row = s.pending_treasury_interest_mints.get_mut(&nonce).unwrap();
+            row.history_floor = Some(0);
+            row.phase = TreasuryInterestMintPhase::MintPending;
+        });
+    }
+
+    fn held_interest_mint(history_floor: Option<u64>) -> u128 {
+        let nonce = start_treasury_interest_mint_at(ICUSD::from(42u64), 1_000).unwrap();
+        state::mutate_state(|s| {
+            let row = s.pending_treasury_interest_mints.get_mut(&nonce).unwrap();
+            row.phase = TreasuryInterestMintPhase::ReceiptRecoveryRequired;
+            row.history_floor = history_floor;
+        });
+        nonce
+    }
+
+    fn recovery_page(
+        start: u64,
+        end: u64,
+        tip: u64,
+        tuple: &crate::state::BorrowMintTuple,
+        exact_index: Option<u64>,
+    ) -> icrc_ledger_types::icrc3::blocks::GetBlocksResult {
+        use icrc_ledger_types::icrc::generic_value::{ICRC3Map, ICRC3Value};
+        use icrc_ledger_types::icrc3::blocks::{BlockWithId, GetBlocksResult};
+        let blocks = (start..end).map(|index| {
+            let mut tx = ICRC3Map::new();
+            let op = if exact_index == Some(index) { "mint" } else { "burn" };
+            tx.insert("op".into(), ICRC3Value::Text(op.into()));
+            if op == "mint" {
+                tx.insert("to".into(), ICRC3Value::Array(vec![ICRC3Value::Blob(
+                    serde_bytes::ByteBuf::from(tuple.destination.as_slice().to_vec()),
+                )]));
+                tx.insert("amt".into(), ICRC3Value::Nat(candid::Nat::from(tuple.amount_e8s)));
+                tx.insert("memo".into(), ICRC3Value::Blob(
+                    serde_bytes::ByteBuf::from(tuple.memo.to_vec()),
+                ));
+                tx.insert("ts".into(), ICRC3Value::Nat(candid::Nat::from(tuple.created_at_time_ns)));
+            } else {
+                tx.insert("amt".into(), ICRC3Value::Nat(candid::Nat::from(1u8)));
+            }
+            let mut block = ICRC3Map::new();
+            block.insert("btype".into(), ICRC3Value::Text(format!("1{op}")));
+            block.insert("tx".into(), ICRC3Value::Map(tx));
+            BlockWithId { id: candid::Nat::from(index), block: ICRC3Value::Map(block) }
+        }).collect();
+        GetBlocksResult { log_length: candid::Nat::from(tip), blocks, archived_blocks: vec![] }
     }
 
     #[test]
     fn uncertain_mint_retries_same_tuple_then_retries_only_notification() {
         configured_state();
         let nonce = start_treasury_interest_mint_at(ICUSD::from(900u64), 1_000).unwrap();
+        arm_mint(nonce);
         let tuple = state::read_state(|s| s.pending_treasury_interest_mints[&nonce].tuple.clone());
         let observed = RefCell::new(Vec::new());
         futures::executor::block_on(process_treasury_interest_mint_with_now(
@@ -1888,6 +2466,7 @@ mod treasury_interest_mint_tests {
     fn aged_unknown_and_typed_too_old_are_held_without_remint() {
         configured_state();
         let aged = start_treasury_interest_mint_at(ICUSD::from(1u64), 1_000).unwrap();
+        arm_mint(aged);
         futures::executor::block_on(process_treasury_interest_mint_with_now(
             aged,
             1_000 + TREASURY_INTEREST_AUTO_RETRY_MAX_AGE_NS,
@@ -1898,6 +2477,7 @@ mod treasury_interest_mint_tests {
             TreasuryInterestMintPhase::ReceiptRecoveryRequired);
 
         let too_old = start_treasury_interest_mint_at(ICUSD::from(2u64), 2_000).unwrap();
+        arm_mint(too_old);
         futures::executor::block_on(process_treasury_interest_mint_with_now(
             too_old,
             2_001,
@@ -1918,6 +2498,178 @@ mod treasury_interest_mint_tests {
     }
 
     #[test]
+    fn exact_positive_receipt_advances_held_row_and_replay_is_idempotent() {
+        configured_state();
+        let nonce = start_treasury_interest_mint_at(ICUSD::from(42u64), 1_000).unwrap();
+        let developer = Principal::from_slice(&[9]);
+        state::mutate_state(|s| {
+            s.pending_treasury_interest_mints.get_mut(&nonce).unwrap().phase =
+                TreasuryInterestMintPhase::ReceiptRecoveryRequired;
+        });
+        let expected = state::read_state(|s| s.pending_treasury_interest_mints[&nonce].clone());
+        futures::executor::block_on(super::reconcile_treasury_interest_mint_from_block_with(
+            nonce,
+            77,
+            developer,
+            move |ledger, block, tuple| async move {
+                assert_eq!(ledger, expected.tuple.ledger);
+                assert_eq!(block, 77);
+                assert_eq!(tuple, expected.tuple);
+                Ok(())
+            },
+        )).unwrap();
+        assert_eq!(state::read_state(|s| s.pending_treasury_interest_mints[&nonce].phase.clone()),
+            TreasuryInterestMintPhase::NotifyPending { mint_block_index: 77 });
+
+        futures::executor::block_on(super::reconcile_treasury_interest_mint_from_block_with(
+            nonce,
+            77,
+            developer,
+            |_, _, _| async { panic!("same-block replay must not fetch or remint") },
+        )).unwrap();
+        assert_eq!(state::read_state(|s| s.pending_treasury_interest_mints[&nonce].phase.clone()),
+            TreasuryInterestMintPhase::NotifyPending { mint_block_index: 77 });
+    }
+
+    #[test]
+    fn mismatched_receipt_leaves_held_row_unchanged() {
+        configured_state();
+        let nonce = start_treasury_interest_mint_at(ICUSD::from(42u64), 1_000).unwrap();
+        let developer = Principal::from_slice(&[9]);
+        state::mutate_state(|s| {
+            s.pending_treasury_interest_mints.get_mut(&nonce).unwrap().phase =
+                TreasuryInterestMintPhase::ReceiptRecoveryRequired;
+        });
+        let before = state::read_state(|s| s.pending_treasury_interest_mints[&nonce].clone());
+        let result = futures::executor::block_on(
+            super::reconcile_treasury_interest_mint_from_block_with(
+                nonce,
+                77,
+                developer,
+                |_, _, _| async { Err("candidate block does not match the exact mint".into()) },
+            ),
+        );
+        assert!(result.is_err());
+        assert_eq!(state::read_state(|s| s.pending_treasury_interest_mints[&nonce].clone()), before);
+    }
+
+    #[test]
+    fn expiry_probe_accepts_only_typed_too_old() {
+        use icrc_ledger_types::icrc1::transfer::TransferError;
+        assert!(super::classify_treasury_interest_expiry_probe_outcome(
+            Ok(Err(TransferError::TooOld)),
+        ).is_ok());
+        assert!(super::classify_treasury_interest_expiry_probe_outcome(
+            Ok(Err(TransferError::Duplicate { duplicate_of: 1u64.into() })),
+        ).is_err());
+        assert!(super::classify_treasury_interest_expiry_probe_outcome(
+            Ok(Ok(0u64.into())),
+        ).is_err());
+        assert!(super::classify_treasury_interest_expiry_probe_outcome(
+            Err((ic_cdk::api::call::RejectionCode::CanisterError, "rejected".into())),
+        ).is_err());
+    }
+
+    #[test]
+    fn full_absence_scan_replaces_tuple_only_after_fixed_tip_is_reached() {
+        configured_state();
+        let nonce = held_interest_mint(Some(0));
+        let developer = Principal::from_slice(&[9]);
+        let original = state::read_state(|s| s.pending_treasury_interest_mints[&nonce].clone());
+        let probe_tuple = original.tuple.clone();
+        let probe_treasury = original.treasury;
+        let first_page_tuple = original.tuple.clone();
+        futures::executor::block_on(advance_pending_treasury_interest_mint_recovery_with(
+            nonce,
+            developer,
+            2_000,
+            move |tuple, sink, memo| async move {
+                assert_eq!(tuple, probe_tuple);
+                assert_ne!(sink, probe_treasury);
+                assert_ne!(memo.as_slice(), tuple.memo.as_slice());
+                Ok(()) // injected typed TooOld result
+            },
+            |ledger| async move {
+                assert_eq!(ledger, Principal::from_slice(&[1]));
+                Ok(65)
+            },
+            |ledger, start, end| async move {
+                assert_eq!(ledger, Principal::from_slice(&[1]));
+                assert_eq!((start, end), (0, 64));
+                Ok(recovery_page(start, end, 65, &first_page_tuple, None))
+            },
+        )).unwrap();
+        let after_first = state::read_state(|s| s.pending_treasury_interest_mints[&nonce].clone());
+        assert!(after_first.expiry_proven);
+        assert_eq!(after_first.absence_scan.as_ref().unwrap().next_block_index, 64);
+        assert!(after_first.absence_scan.as_ref().unwrap().candidate_block_index.is_none());
+        let continuation_tuple = after_first.tuple.clone();
+        let continuation_treasury = after_first.treasury;
+        let continuation_page_tuple = continuation_tuple.clone();
+
+        futures::executor::block_on(advance_pending_treasury_interest_mint_recovery_with(
+            nonce,
+            developer,
+            2_001,
+            |_, _, _| async { Err("probe must not be repeated".into()) },
+            |_| async { Err("fixed tip must not be recaptured".into()) },
+            |ledger, start, end| async move {
+                assert_eq!(ledger, Principal::from_slice(&[1]));
+                assert_eq!((start, end), (64, 65));
+                Ok(recovery_page(start, end, 65, &continuation_page_tuple, None))
+            },
+        )).unwrap();
+        let rows = state::read_state(|s| s.pending_treasury_interest_mints.values().cloned().collect::<Vec<_>>());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].phase, TreasuryInterestMintPhase::AwaitingHistoryFloor);
+        assert_eq!(rows[0].tuple.amount_e8s, 42);
+        assert_eq!(rows[0].treasury, continuation_treasury);
+        assert_ne!(rows[0].tuple, continuation_tuple);
+        assert!(rows[0].history_floor.is_none());
+        assert!(rows[0].absence_scan.is_none());
+    }
+
+    #[test]
+    fn scan_with_candidate_keeps_scanning_to_tip_before_receipt_commit() {
+        configured_state();
+        let nonce = held_interest_mint(Some(0));
+        let developer = Principal::from_slice(&[9]);
+        let original = state::read_state(|s| s.pending_treasury_interest_mints[&nonce].clone());
+        let first_page_tuple = original.tuple.clone();
+        let second_page_tuple = original.tuple.clone();
+        futures::executor::block_on(advance_pending_treasury_interest_mint_recovery_with(
+            nonce,
+            developer,
+            2_000,
+            |_, _, _| async { Ok(()) },
+            |_| async { Ok(65) },
+            move |_, start, end| async move {
+                assert_eq!((start, end), (0, 64));
+                Ok(recovery_page(start, end, 65, &first_page_tuple, Some(0)))
+            },
+        )).unwrap();
+        let scan = state::read_state(|s| s.pending_treasury_interest_mints[&nonce].absence_scan.clone().unwrap());
+        assert_eq!(scan.next_block_index, 64);
+        assert_eq!(scan.candidate_block_index, Some(0));
+        assert_eq!(state::read_state(|s| s.pending_treasury_interest_mints[&nonce].phase.clone()),
+            TreasuryInterestMintPhase::ReceiptRecoveryRequired);
+
+        futures::executor::block_on(advance_pending_treasury_interest_mint_recovery_with(
+            nonce,
+            developer,
+            2_001,
+            |_, _, _| async { Err("probe must not be repeated".into()) },
+            |_| async { Err("fixed tip must not be recaptured".into()) },
+            move |_, start, end| async move {
+                assert_eq!((start, end), (64, 65));
+                Ok(recovery_page(start, end, 65, &second_page_tuple, None))
+            },
+        )).unwrap();
+        assert_eq!(state::read_state(|s| s.pending_treasury_interest_mints[&nonce].phase.clone()),
+            TreasuryInterestMintPhase::NotifyPending { mint_block_index: 0 });
+    }
+
+    #[test]
     fn stablecoin_fallback_preserves_interest_when_mint_journal_is_full() {
         for destination in [InterestDestination::ThreePool, InterestDestination::Amm1] {
             configured_state();
@@ -1934,6 +2686,9 @@ mod treasury_interest_mint_tests {
                     },
                     treasury: s.treasury_principal.unwrap(),
                     phase: TreasuryInterestMintPhase::ReceiptRecoveryRequired,
+                    history_floor: None,
+                    expiry_proven: false,
+                    absence_scan: None,
                 }
             });
             state::mutate_state(|s| {
@@ -1975,6 +2730,9 @@ mod treasury_interest_mint_tests {
                         },
                         treasury,
                         phase: TreasuryInterestMintPhase::ReceiptRecoveryRequired,
+                        history_floor: None,
+                        expiry_proven: false,
+                        absence_scan: None,
                     });
             }
         });

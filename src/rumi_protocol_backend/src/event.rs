@@ -43,6 +43,9 @@ mod treasury_interest_event_tests {
             },
             treasury,
             phase: TreasuryInterestMintPhase::MintPending,
+            history_floor: Some(70),
+            expiry_proven: false,
+            absence_scan: None,
         }
     }
 
@@ -76,6 +79,45 @@ mod treasury_interest_event_tests {
         });
         assert_eq!(state.pending_treasury_interest_mints[&42].phase,
             TreasuryInterestMintPhase::ReceiptRecoveryRequired);
+    }
+
+    #[test]
+    fn private_log_replays_floor_scan_and_proven_absence_replacement() {
+        let mut state = State::default();
+        let mut first = operation();
+        first.phase = TreasuryInterestMintPhase::AwaitingHistoryFloor;
+        first.history_floor = None;
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestMintStarted { operation: first.clone() });
+
+        first.phase = TreasuryInterestMintPhase::MintPending;
+        first.history_floor = Some(70);
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestMintUpdated { operation: first.clone() });
+        assert_eq!(state.pending_treasury_interest_mints[&42], first);
+
+        first.phase = TreasuryInterestMintPhase::ReceiptRecoveryRequired;
+        first.expiry_proven = true;
+        first.absence_scan = Some(crate::state::BorrowMintAbsenceScan {
+            next_block_index: 71,
+            fixed_tip: Some(72),
+            candidate_block_index: None,
+        });
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestMintUpdated { operation: first });
+
+        let mut replacement = operation();
+        replacement.tuple.op_nonce = 43;
+        replacement.tuple.memo = 43u128.to_be_bytes();
+        replacement.phase = TreasuryInterestMintPhase::AwaitingHistoryFloor;
+        replacement.history_floor = None;
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestMintReplaced {
+                old_nonce: 42,
+                operation: replacement.clone(),
+            });
+        assert!(!state.pending_treasury_interest_mints.contains_key(&42));
+        assert_eq!(state.pending_treasury_interest_mints[&43], replacement);
     }
 
     #[test]
@@ -1093,6 +1135,11 @@ pub enum PendingPayoutEvent {
     Amm1DonationCompleted { notify_nonce: u64 },
     Amm1DonationHeld { donation: HeldAmm1Donation },
     TreasuryInterestMintStarted { operation: crate::state::TreasuryInterestMintJournal },
+    TreasuryInterestMintUpdated { operation: crate::state::TreasuryInterestMintJournal },
+    TreasuryInterestMintReplaced {
+        old_nonce: u128,
+        operation: crate::state::TreasuryInterestMintJournal,
+    },
     TreasuryInterestMintAccepted { op_nonce: u128, block_index: u64 },
     TreasuryInterestMintHeld { op_nonce: u128 },
     TreasuryInterestMintCompleted { op_nonce: u128 },
@@ -1808,6 +1855,18 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
         PendingPayoutEvent::TreasuryInterestMintStarted { operation } => {
             let nonce = operation.tuple.op_nonce;
             state.op_nonce_counter = state.op_nonce_counter.max((nonce as u64).wrapping_add(1));
+            state.pending_treasury_interest_mints.insert(nonce, operation);
+        }
+        PendingPayoutEvent::TreasuryInterestMintUpdated { operation } => {
+            let nonce = operation.tuple.op_nonce;
+            if state.pending_treasury_interest_mints.contains_key(&nonce) {
+                state.pending_treasury_interest_mints.insert(nonce, operation);
+            }
+        }
+        PendingPayoutEvent::TreasuryInterestMintReplaced { old_nonce, operation } => {
+            let nonce = operation.tuple.op_nonce;
+            state.op_nonce_counter = state.op_nonce_counter.max((nonce as u64).wrapping_add(1));
+            state.pending_treasury_interest_mints.remove(&old_nonce);
             state.pending_treasury_interest_mints.insert(nonce, operation);
         }
         PendingPayoutEvent::TreasuryInterestMintAccepted { op_nonce, block_index } => {

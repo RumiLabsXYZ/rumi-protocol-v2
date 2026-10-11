@@ -81,6 +81,33 @@ type BorrowFeeMintRecoveryResult = variant {
   Ok : BorrowFeeMintRecoveryPage;
   Err : ProtocolError;
 };
+type TreasuryInterestMintPhase = variant {
+  AwaitingHistoryFloor;
+  MintPending;
+  NotifyPending : record { mint_block_index : nat64 };
+  ReceiptRecoveryRequired;
+};
+type BorrowMintAbsenceScan = record {
+  next_block_index : nat64;
+  fixed_tip : opt nat64;
+  candidate_block_index : opt nat64;
+};
+type TreasuryInterestMintRecoveryRow = record {
+  tuple : BorrowMintTuple;
+  treasury : principal;
+  phase : TreasuryInterestMintPhase;
+  history_floor : opt nat64;
+  expiry_proven : bool;
+  absence_scan : opt BorrowMintAbsenceScan;
+};
+type TreasuryInterestMintRecoveryPage = record {
+  items : vec TreasuryInterestMintRecoveryRow;
+  next_cursor : opt nat;
+};
+type Result_35 = variant {
+  Ok : TreasuryInterestMintRecoveryPage;
+  Err : ProtocolError;
+};
 type BotCollateralReturnProofArg = record {
   block_index : nat64;
   claim_generation : nat64;
@@ -1867,6 +1894,9 @@ service : (ProtocolArg) -> {
   get_pending_borrow_fee_mint_recovery_page : (opt nat, nat16) -> (
       BorrowFeeMintRecoveryResult,
     ) query;
+  get_pending_treasury_interest_mint_recovery_page : (opt nat, nat16) -> (
+      Result_35,
+    ) query;
   get_pending_chain_burn_aging : () -> (vec PendingChainBurnAging) query;
   get_pending_payouts : (opt nat, opt nat16) -> (PendingPayoutPage) query;
   get_pending_stability_pool_interest_notification_count : () -> (nat64) query;
@@ -1960,6 +1990,8 @@ service : (ProtocolArg) -> {
   reconcile_amm1_donation_mint_candidate_block : (nat64, nat64) -> (Result_1);
   reconcile_chain_supply : (nat32) -> (Result_21);
   reconcile_pending_borrow_fee_mint_from_block : (nat, nat64) -> (Result_1);
+  reconcile_pending_treasury_interest_mint_from_block : (nat, nat64) -> (Result_1);
+  advance_pending_treasury_interest_mint_recovery : (nat) -> (Result_1);
   reconcile_legacy_three_usd_refund_candidate_block : (nat, nat64) -> (
       Result_1,
     );
