@@ -550,6 +550,20 @@ pub(crate) fn make_pool_id(token_a: Principal, token_b: Principal) -> PoolId {
     }
 }
 
+const MAX_PENDING_CLAIM_REASON_BYTES: usize = 512;
+
+fn bounded_pending_claim_reason(reason: &str) -> String {
+    if reason.len() <= MAX_PENDING_CLAIM_REASON_BYTES {
+        return reason.to_string();
+    }
+
+    let mut end = MAX_PENDING_CLAIM_REASON_BYTES;
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    reason[..end].to_string()
+}
+
 /// Record a failed outbound transfer as a pending claim so the user can retry.
 fn record_pending_claim(
     pool_id: &PoolId,
@@ -573,7 +587,7 @@ fn record_pending_claim(
             token,
             subaccount,
             amount,
-            reason: reason.to_string(),
+            reason: bounded_pending_claim_reason(reason),
             created_at: ic_cdk::api::time() / 1_000_000_000,
         });
         log!(INFO, "Pending claim #{} recorded: {} owes {} of token {} (pool {})",
@@ -1694,5 +1708,35 @@ mod dos_001_tests {
             limit: u64::MAX,
         });
         assert_eq!(by_time.len() as u64, MAX_EVENT_PAGE);
+    }
+}
+
+#[cfg(test)]
+mod pending_claim_reason_tests {
+    use super::{bounded_pending_claim_reason, MAX_PENDING_CLAIM_REASON_BYTES};
+
+    #[test]
+    fn pending_claim_reason_is_bounded_at_utf8_boundaries() {
+        let fits = format!("{}étail", "a".repeat(MAX_PENDING_CLAIM_REASON_BYTES - 2));
+        let bounded_fits = bounded_pending_claim_reason(&fits);
+        assert_eq!(bounded_fits.len(), MAX_PENDING_CLAIM_REASON_BYTES);
+        assert!(std::str::from_utf8(bounded_fits.as_bytes()).is_ok());
+        assert!(bounded_fits.ends_with('é'));
+
+        let split = format!("{}é", "a".repeat(MAX_PENDING_CLAIM_REASON_BYTES - 1));
+        let bounded_split = bounded_pending_claim_reason(&split);
+        assert_eq!(bounded_split.len(), MAX_PENDING_CLAIM_REASON_BYTES - 1);
+        assert!(bounded_split.len() <= MAX_PENDING_CLAIM_REASON_BYTES);
+        assert!(std::str::from_utf8(bounded_split.as_bytes()).is_ok());
+        assert_eq!(
+            bounded_split,
+            "a".repeat(MAX_PENDING_CLAIM_REASON_BYTES - 1)
+        );
+    }
+
+    #[test]
+    fn short_pending_claim_reason_is_preserved_exactly() {
+        let reason = "ledger rejected transfer: é";
+        assert_eq!(bounded_pending_claim_reason(reason), reason);
     }
 }
