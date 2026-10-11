@@ -1086,6 +1086,124 @@ pub async fn reconcile_aged_payout(claim_id: u64, block_index: u64) -> Result<()
     claim_pending(claim_id).await
 }
 
+/// Confirm an aged ambiguous ICRC-2 input using a directly served, exact
+/// ledger block. This proves only that the input arrived; claim_pending still
+/// decides whether to finish a swap, account for a donation, or refund a
+/// failed add-liquidity leg. Missing and archived blocks leave the input held.
+#[update]
+#[candid_method(update)]
+pub async fn reconcile_aged_input(claim_id: u64, block_index: u64) -> Result<(), ThreePoolError> {
+    const MIN_AMBIGUOUS_AGE_NS: u64 = 23 * 60 * 60 * 1_000_000_000;
+
+    let pool_guard = pool_guard::PoolGuard::new_payout_recovery()?;
+    let caller = ic_cdk::api::caller();
+    let admin = read_state(|s| s.config.admin);
+    let entitlement = payouts::get(claim_id).ok_or(ThreePoolError::ClaimNotFound)?;
+    if caller != entitlement.owner && caller != admin {
+        return Err(ThreePoolError::Unauthorized);
+    }
+    let valid_input_kind = matches!(
+        (entitlement.kind, entitlement.input_action),
+        (crate::payouts::PayoutKind::AddLiquidityRefund,
+         Some(crate::payouts::PayoutInputAction::AddLiquidity | crate::payouts::PayoutInputAction::Donation))
+        | (crate::payouts::PayoutKind::SwapInputRefund,
+           Some(crate::payouts::PayoutInputAction::Swap))
+    );
+    if entitlement.settled || !valid_input_kind {
+        return Err(legacy_payout_held_error());
+    }
+    if let Some(claim) = storage::pending_claims::get(claim_id) {
+        if claim.claimant != entitlement.owner
+            || claim.token_index != entitlement.token_index
+            || claim.ledger != entitlement.ledger
+            || claim.amount != entitlement.gross
+        {
+            return Err(legacy_payout_held_error());
+        }
+    }
+    let input = entitlement.input_transfer.clone().ok_or_else(legacy_payout_held_error)?;
+    if input.ledger != entitlement.ledger
+        || input.from != (icrc_ledger_types::icrc1::account::Account {
+            owner: entitlement.owner,
+            subaccount: None,
+        })
+        || input.to != (icrc_ledger_types::icrc1::account::Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        })
+        || input.amount != entitlement.gross
+    {
+        return Err(legacy_payout_held_error());
+    }
+    if !matches!(entitlement.input_outcome, Some(crate::payouts::PayoutInputOutcome::Submitted | crate::payouts::PayoutInputOutcome::Unresolved { .. })) {
+        return Err(ThreePoolError::TransferFailed {
+            token: entitlement.symbol,
+            reason: "only an ambiguous input can be reconciled".into(),
+        });
+    }
+    if ic_cdk::api::time().saturating_sub(input.created_at_time) < MIN_AMBIGUOUS_AGE_NS {
+        return Err(ThreePoolError::TransferFailed {
+            token: entitlement.symbol,
+            reason: "ambiguous input is still inside the conservative ledger deduplication window".into(),
+        });
+    }
+    let recovery_id = if let Some(parent_id) = entitlement.compensation_for {
+        let parent = payouts::get(parent_id).ok_or_else(legacy_payout_held_error)?;
+        if parent.kind != crate::payouts::PayoutKind::SwapOutput
+            || parent.compensation_id != Some(claim_id)
+            || parent.owner != entitlement.owner
+            || parent.settled
+        {
+            return Err(legacy_payout_held_error());
+        }
+        parent_id
+    } else {
+        claim_id
+    };
+
+    crate::payout_reconciliation::verify_exact_input_block(
+        input.ledger,
+        block_index,
+        &input,
+        icrc_ledger_types::icrc1::account::Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },
+    )
+    .await
+    .map_err(|reason| ThreePoolError::TransferFailed {
+        token: entitlement.symbol.clone(),
+        reason,
+    })?;
+
+    // A callback from the proof query cannot confirm a changed or retired
+    // input. The guard also excludes competing pool writers during the await.
+    let mut current = payouts::get(claim_id).ok_or(ThreePoolError::ClaimNotFound)?;
+    if current.input_transfer.as_ref() != Some(&input)
+        || current.compensation_for != entitlement.compensation_for
+        || current.settled
+        || !matches!(current.input_outcome, Some(crate::payouts::PayoutInputOutcome::Submitted | crate::payouts::PayoutInputOutcome::Unresolved { .. }))
+    {
+        return Err(ThreePoolError::TransferFailed {
+            token: entitlement.symbol,
+            reason: "input identity changed while exact block evidence was being fetched".into(),
+        });
+    }
+    current.input_outcome = Some(crate::payouts::PayoutInputOutcome::Confirmed {
+        block: candid::Nat::from(block_index),
+    });
+    payouts::save(current);
+    payouts::append(
+        claim_id,
+        crate::payouts::PayoutJournalEventKind::InputConfirmed {
+            block: candid::Nat::from(block_index),
+        },
+    );
+
+    drop(pool_guard);
+    claim_pending(recovery_id).await
+}
+
 // ─── Swap ───
 
 #[update]

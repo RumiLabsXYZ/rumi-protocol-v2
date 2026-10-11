@@ -243,12 +243,12 @@ export type PayoutInputOutcome = { 'Confirmed' : { 'block' : bigint } } |
   { 'Submitted' : null };
 export interface PayoutInputTransfer {
   'to' : Account,
+  'fee' : [] | [bigint],
   'from' : Account,
   'memo' : [] | [Uint8Array | number[]],
   'ledger' : Principal,
   'created_at_time' : bigint,
   'amount' : bigint,
-  'fee' : [] | [bigint],
 }
 export type PayoutKind = { 'RemoveOneCoin' : null } |
   { 'SwapOutput' : null } |
@@ -730,6 +730,11 @@ export interface _SERVICE {
   >,
   'receive_donation' : ActorMethod<
     [number, bigint],
+    { 'Ok' : null } |
+      { 'Err' : ThreePoolError }
+  >,
+  'reconcile_aged_input' : ActorMethod<
+    [bigint, bigint],
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
   >,
