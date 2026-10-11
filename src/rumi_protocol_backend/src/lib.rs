@@ -2501,12 +2501,21 @@ pub struct LiquidatableVaultInfo {
     pub collateral_price_e8s: u64,
 }
 
+/// The fields needed to acknowledge an actual Stability Pool liquidation
+/// attempt. The pool replies with a wider `LiquidationResult` record; Candid
+/// record width subtyping lets us ignore its accounting fields here.
+#[derive(CandidType, Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct SpNotificationResult {
+    pub vault_id: u64,
+    pub success: bool,
+}
+
 /// Wave-14a CDP-10: post-spawn handler for the stability_pool
 /// `notify_liquidatable_vaults` call.
 ///
-/// On `Ok`: marks every dispatched vault id as SP-attempted so the next
-/// `check_vaults` tick won't re-send it (the SP retry budget is one shot
-/// per unhealthy episode).
+/// On `Ok`: marks only dispatched vault ids for which the SP returned an
+/// attempt result. The pool returns an empty vector when paused, busy, or
+/// unable to cover a vault; delivery of that reply is not an attempt.
 ///
 /// On `Err`: leaves `sp_attempted_vaults` unchanged so the next tick can
 /// retry, and returns a `StabilityPoolCallFailed` event so external
@@ -2520,7 +2529,7 @@ pub struct LiquidatableVaultInfo {
 pub fn record_sp_notification_result(
     state: &mut state::State,
     vault_ids: Vec<u64>,
-    result: Result<(), (i32, String)>,
+    result: Result<Vec<SpNotificationResult>, (i32, String)>,
 ) -> Option<event::Event> {
     record_sp_notification_result_at(state, vault_ids, result, ic_cdk::api::time())
 }
@@ -2530,16 +2539,19 @@ pub fn record_sp_notification_result(
 pub fn record_sp_notification_result_at(
     state: &mut state::State,
     vault_ids: Vec<u64>,
-    result: Result<(), (i32, String)>,
+    result: Result<Vec<SpNotificationResult>, (i32, String)>,
     now_ns: u64,
 ) -> Option<event::Event> {
     if vault_ids.is_empty() {
         return None;
     }
     match result {
-        Ok(()) => {
-            for vid in &vault_ids {
-                state.sp_attempted_vaults.insert(*vid);
+        Ok(results) => {
+            let dispatched: std::collections::BTreeSet<u64> = vault_ids.into_iter().collect();
+            for result in results {
+                if dispatched.contains(&result.vault_id) {
+                    state.sp_attempted_vaults.insert(result.vault_id);
+                }
             }
             None
         }
@@ -3006,10 +3018,11 @@ pub async fn check_vaults() {
                 let count = for_pool.len();
                 let dispatched_ids = pool_vault_ids.clone();
                 ic_cdk::spawn(async move {
-                    let result: Result<(), _> =
+                    let result: Result<(Vec<SpNotificationResult>,), _> =
                         ic_cdk::call(pool, "notify_liquidatable_vaults", (for_pool,)).await;
-                    let normalized: Result<(), (i32, String)> =
-                        result.map_err(|(code, msg)| (code as i32, msg));
+                    let normalized: Result<Vec<SpNotificationResult>, (i32, String)> = result
+                        .map(|(rows,)| rows)
+                        .map_err(|(code, msg)| (code as i32, msg));
                     if let Err((code, msg)) = &normalized {
                         log!(
                             INFO,
