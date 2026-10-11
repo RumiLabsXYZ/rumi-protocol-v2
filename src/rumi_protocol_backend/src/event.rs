@@ -22,6 +22,120 @@ pub struct VaultRedemption {
     pub collateral_seized: u64,
 }
 
+#[cfg(test)]
+mod treasury_interest_event_tests {
+    use super::{apply_pending_payout_event, PendingPayoutEvent};
+    use crate::state::{
+        BorrowMintTuple, State, TreasuryInterestMintJournal, TreasuryInterestMintPhase,
+    };
+    use candid::Principal;
+
+    fn operation() -> TreasuryInterestMintJournal {
+        let treasury = Principal::from_slice(&[2]);
+        TreasuryInterestMintJournal {
+            tuple: BorrowMintTuple {
+                ledger: Principal::from_slice(&[1]),
+                destination: treasury,
+                amount_e8s: 500,
+                memo: 42u128.to_be_bytes(),
+                created_at_time_ns: 1_000,
+                op_nonce: 42,
+            },
+            treasury,
+            phase: TreasuryInterestMintPhase::MintPending,
+            history_floor: Some(70),
+            expiry_proven: false,
+            absence_scan: None,
+        }
+    }
+
+    #[test]
+    fn private_log_replays_exact_interest_mint_phases() {
+        let mut state = State::default();
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryInterestMintStarted {
+            operation: operation(),
+        });
+        assert_eq!(state.pending_treasury_interest_mints[&42].phase,
+            TreasuryInterestMintPhase::MintPending);
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryInterestMintAccepted {
+            op_nonce: 42, block_index: 77,
+        });
+        assert_eq!(state.pending_treasury_interest_mints[&42].phase,
+            TreasuryInterestMintPhase::NotifyPending { mint_block_index: 77 });
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryInterestMintCompleted {
+            op_nonce: 42,
+        });
+        assert!(!state.pending_treasury_interest_mints.contains_key(&42));
+    }
+
+    #[test]
+    fn private_log_replays_unknown_mint_hold() {
+        let mut state = State::default();
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryInterestMintStarted {
+            operation: operation(),
+        });
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryInterestMintHeld {
+            op_nonce: 42,
+        });
+        assert_eq!(state.pending_treasury_interest_mints[&42].phase,
+            TreasuryInterestMintPhase::ReceiptRecoveryRequired);
+    }
+
+    #[test]
+    fn private_log_replays_floor_scan_and_proven_absence_replacement() {
+        let mut state = State::default();
+        let mut first = operation();
+        first.phase = TreasuryInterestMintPhase::AwaitingHistoryFloor;
+        first.history_floor = None;
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestMintStarted { operation: first.clone() });
+
+        first.phase = TreasuryInterestMintPhase::MintPending;
+        first.history_floor = Some(70);
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestMintUpdated { operation: first.clone() });
+        assert_eq!(state.pending_treasury_interest_mints[&42], first);
+
+        first.phase = TreasuryInterestMintPhase::ReceiptRecoveryRequired;
+        first.expiry_proven = true;
+        first.absence_scan = Some(crate::state::BorrowMintAbsenceScan {
+            next_block_index: 71,
+            fixed_tip: Some(72),
+            candidate_block_index: None,
+        });
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestMintUpdated { operation: first });
+
+        let mut replacement = operation();
+        replacement.tuple.op_nonce = 43;
+        replacement.tuple.memo = 43u128.to_be_bytes();
+        replacement.phase = TreasuryInterestMintPhase::AwaitingHistoryFloor;
+        replacement.history_floor = None;
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestMintReplaced {
+                old_nonce: 42,
+                operation: replacement.clone(),
+            });
+        assert!(!state.pending_treasury_interest_mints.contains_key(&42));
+        assert_eq!(state.pending_treasury_interest_mints[&43], replacement);
+    }
+
+    #[test]
+    fn private_log_replays_stablecoin_fallback_credit_and_admission() {
+        let mut state = State::default();
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestFallbackCredited { amount_e8s: 500 });
+        assert_eq!(state.pending_treasury_interest_fallback_e8s, 500);
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestMintStarted { operation: operation() });
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestFallbackAdmitted { amount_e8s: 500 });
+        assert_eq!(state.pending_treasury_interest_fallback_e8s, 0);
+        assert_eq!(state.pending_treasury_interest_mints[&42].phase,
+            TreasuryInterestMintPhase::MintPending);
+    }
+}
+
 /// Wave-8e LIQ-005: identifies which fee revenue stream a deficit
 /// repayment was sourced from. Persisted in the `DeficitRepaid` event so
 /// the explorer can attribute repayment volume per source.
@@ -1020,6 +1134,17 @@ pub enum PendingPayoutEvent {
     Amm1DonationReconciliationRequired { notify_nonce: u64, reason: crate::state::Amm1DonationReconciliationReason },
     Amm1DonationCompleted { notify_nonce: u64 },
     Amm1DonationHeld { donation: HeldAmm1Donation },
+    TreasuryInterestMintStarted { operation: crate::state::TreasuryInterestMintJournal },
+    TreasuryInterestMintUpdated { operation: crate::state::TreasuryInterestMintJournal },
+    TreasuryInterestMintReplaced {
+        old_nonce: u128,
+        operation: crate::state::TreasuryInterestMintJournal,
+    },
+    TreasuryInterestMintAccepted { op_nonce: u128, block_index: u64 },
+    TreasuryInterestMintHeld { op_nonce: u128 },
+    TreasuryInterestMintCompleted { op_nonce: u128 },
+    TreasuryInterestFallbackCredited { amount_e8s: u64 },
+    TreasuryInterestFallbackAdmitted { amount_e8s: u64 },
     ThreeUsdReservePayoutPrepared {
         key: crate::state::ThreeUsdReserveIngressKey,
         payout: crate::state::ThreeUsdReserveCollateralPayout,
@@ -1726,6 +1851,50 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
             }) {
                 state.held_amm1_donations.push(donation);
             }
+        }
+        PendingPayoutEvent::TreasuryInterestMintStarted { operation } => {
+            let nonce = operation.tuple.op_nonce;
+            state.op_nonce_counter = state.op_nonce_counter.max((nonce as u64).wrapping_add(1));
+            state.pending_treasury_interest_mints.insert(nonce, operation);
+        }
+        PendingPayoutEvent::TreasuryInterestMintUpdated { operation } => {
+            let nonce = operation.tuple.op_nonce;
+            if state.pending_treasury_interest_mints.contains_key(&nonce) {
+                state.pending_treasury_interest_mints.insert(nonce, operation);
+            }
+        }
+        PendingPayoutEvent::TreasuryInterestMintReplaced { old_nonce, operation } => {
+            let nonce = operation.tuple.op_nonce;
+            state.op_nonce_counter = state.op_nonce_counter.max((nonce as u64).wrapping_add(1));
+            state.pending_treasury_interest_mints.remove(&old_nonce);
+            state.pending_treasury_interest_mints.insert(nonce, operation);
+        }
+        PendingPayoutEvent::TreasuryInterestMintAccepted { op_nonce, block_index } => {
+            if let Some(operation) = state.pending_treasury_interest_mints.get_mut(&op_nonce) {
+                operation.phase = crate::state::TreasuryInterestMintPhase::NotifyPending {
+                    mint_block_index: block_index,
+                };
+            }
+        }
+        PendingPayoutEvent::TreasuryInterestMintHeld { op_nonce } => {
+            if let Some(operation) = state.pending_treasury_interest_mints.get_mut(&op_nonce) {
+                operation.phase = crate::state::TreasuryInterestMintPhase::ReceiptRecoveryRequired;
+            }
+        }
+        PendingPayoutEvent::TreasuryInterestMintCompleted { op_nonce } => {
+            state.pending_treasury_interest_mints.remove(&op_nonce);
+        }
+        PendingPayoutEvent::TreasuryInterestFallbackCredited { amount_e8s } => {
+            state.pending_treasury_interest_fallback_e8s = state
+                .pending_treasury_interest_fallback_e8s
+                .checked_add(u128::from(amount_e8s))
+                .expect("Treasury interest fallback replay overflow");
+        }
+        PendingPayoutEvent::TreasuryInterestFallbackAdmitted { amount_e8s } => {
+            state.pending_treasury_interest_fallback_e8s = state
+                .pending_treasury_interest_fallback_e8s
+                .checked_sub(u128::from(amount_e8s))
+                .expect("Treasury interest fallback replay underflow");
         }
         PendingPayoutEvent::ThreeUsdReservePayoutPrepared { key, payout } => {
             if payout.operation_id == 0

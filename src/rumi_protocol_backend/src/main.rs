@@ -6264,6 +6264,53 @@ fn get_pending_borrow_fee_mint_recovery_page(
         .map_err(ProtocolError::GenericError)
 }
 
+/// Developer-only paginated view of retained treasury-interest mint rows.
+/// Each item includes the complete pinned ledger tuple and current phase.
+#[candid_method(query)]
+#[query]
+fn get_pending_treasury_interest_mint_recovery_page(
+    after_op_nonce: Option<u128>,
+    limit: u16,
+) -> Result<rumi_protocol_backend::treasury::TreasuryInterestMintRecoveryPage, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous()
+        || caller != rumi_protocol_backend::state::read_state(|s| s.developer_principal)
+    {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+    rumi_protocol_backend::treasury::treasury_interest_mint_recovery_page(
+        after_op_nonce,
+        limit,
+    ).map_err(ProtocolError::GenericError)
+}
+
+/// Reconcile a held treasury-interest mint only from a positive exact ICRC-3
+/// block. No mint is submitted by this recovery method.
+#[candid_method(update)]
+#[update]
+async fn reconcile_pending_treasury_interest_mint_from_block(
+    op_nonce: u128,
+    candidate_block_index: u64,
+) -> Result<(), ProtocolError> {
+    rumi_protocol_backend::treasury::reconcile_treasury_interest_mint_from_block(
+        op_nonce,
+        candidate_block_index,
+    ).await.map_err(ProtocolError::GenericError)
+}
+
+/// Developer-only bounded recovery for a held Treasury-interest mint. Each
+/// call advances at most one direct ICRC-3 page or performs one proof-backed
+/// transition; no recovery call resends the old tuple.
+#[candid_method(update)]
+#[update]
+async fn advance_pending_treasury_interest_mint_recovery(
+    op_nonce: u128,
+) -> Result<(), ProtocolError> {
+    rumi_protocol_backend::treasury::advance_pending_treasury_interest_mint_recovery(
+        op_nonce,
+    ).await.map_err(ProtocolError::GenericError)
+}
+
 /// Retry a retained borrowing-fee mint with its original ledger tuple, or
 /// retry its idempotent treasury deposit notification.
 #[candid_method(update)]

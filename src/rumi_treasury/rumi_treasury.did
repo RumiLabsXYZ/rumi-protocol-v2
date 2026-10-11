@@ -110,4 +110,5 @@ service : (TreasuryInitArgs) -> {
   get_events: (opt nat64, opt nat64) -> (vec TreasuryEvent) query;
   get_event_count: () -> (nat64) query;
   set_paused: (bool) -> (variant { Ok; Err : text });
+  deposit_interest_revenue_once: (DepositArgs) -> (variant { Ok : nat64; Err : text });
 }

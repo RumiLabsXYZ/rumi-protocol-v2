@@ -66,6 +66,11 @@ export interface BorrowFeeMintStatus {
   'treasury' : [] | [Principal],
   'to_treasury_e8s' : bigint,
 }
+export interface BorrowMintAbsenceScan {
+  'fixed_tip' : [] | [bigint],
+  'candidate_block_index' : [] | [bigint],
+  'next_block_index' : bigint,
+}
 export type BorrowMintPhase = { 'ReceiptRecoveryRequired' : null } |
   { 'MintConfirmedHeld' : { 'block_index' : bigint } } |
   { 'SubmittedOrUnknown' : null };
@@ -1592,6 +1597,8 @@ export type Result_33 = { 'Ok' : XrpSpAbsorbStatus } |
   { 'Err' : ProtocolError };
 export type Result_34 = { 'Ok' : number } |
   { 'Err' : ProtocolError };
+export type Result_35 = { 'Ok' : TreasuryInterestMintRecoveryPage } |
+  { 'Err' : ProtocolError };
 export type Result_4 = { 'Ok' : SuccessWithFee } |
   { 'Err' : ProtocolError };
 export type Result_5 = { 'Ok' : BotLiquidationResult } |
@@ -1767,6 +1774,24 @@ export type TransferFromError = {
 export interface TransformArgs {
   'context' : Uint8Array | number[],
   'response' : HttpResponse,
+}
+export type TreasuryInterestMintPhase = {
+    'NotifyPending' : { 'mint_block_index' : bigint }
+  } |
+  { 'MintPending' : null } |
+  { 'ReceiptRecoveryRequired' : null } |
+  { 'AwaitingHistoryFloor' : null };
+export interface TreasuryInterestMintRecoveryPage {
+  'next_cursor' : [] | [bigint],
+  'items' : Array<TreasuryInterestMintRecoveryRow>,
+}
+export interface TreasuryInterestMintRecoveryRow {
+  'tuple' : BorrowMintTuple,
+  'expiry_proven' : boolean,
+  'phase' : TreasuryInterestMintPhase,
+  'absence_scan' : [] | [BorrowMintAbsenceScan],
+  'history_floor' : [] | [bigint],
+  'treasury' : Principal,
 }
 export interface TreasuryStats {
   'pending_treasury_collateral_entries' : bigint,
@@ -1967,6 +1992,10 @@ export interface _SERVICE {
   >,
   'admin_sweep_to_treasury' : ActorMethod<[string], Result>,
   'advance_pending_borrow_mint_recovery' : ActorMethod<[bigint], Result_1>,
+  'advance_pending_treasury_interest_mint_recovery' : ActorMethod<
+    [bigint],
+    Result_1
+  >,
   'backfill_collateral_symbols' : ActorMethod<[], Result_3>,
   'bind_and_retry_missing_borrow_fee_treasury' : ActorMethod<
     [bigint],
@@ -2168,6 +2197,10 @@ export interface _SERVICE {
     [[] | [bigint], bigint],
     Result_11
   >,
+  'get_pending_treasury_interest_mint_recovery_page' : ActorMethod<
+    [[] | [bigint], number],
+    Result_35
+  >,
   'get_price_pusher_allowed' : ActorMethod<[], Array<[number, string]>>,
   'get_price_pusher_principal' : ActorMethod<[], [] | [Principal]>,
   'get_protocol_3usd_reserves' : ActorMethod<[], bigint>,
@@ -2300,6 +2333,10 @@ export interface _SERVICE {
   'reconcile_pending_borrow_mint_from_block' : ActorMethod<
     [bigint, bigint],
     Result_4
+  >,
+  'reconcile_pending_treasury_interest_mint_from_block' : ActorMethod<
+    [bigint, bigint],
+    Result_1
   >,
   'reconcile_three_usd_reserve_ingress_candidate_block' : ActorMethod<
     [bigint, bigint, bigint],
