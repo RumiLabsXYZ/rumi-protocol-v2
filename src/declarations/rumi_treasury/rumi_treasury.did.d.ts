@@ -47,6 +47,22 @@ export type DepositType = { 'BorrowingFee' : null } |
   { 'LiquidationFee' : null } |
   { 'RedemptionFee' : null } |
   { 'InterestRevenue' : null };
+export interface ExternalTokenDepositArgs {
+  'asset_type' : AssetType,
+  'block_index' : bigint,
+  'deposit_type' : DepositType,
+  'memo' : [] | [string],
+  'ledger' : Principal,
+  'amount' : bigint,
+}
+export type ExternalTokenDepositBackfill = { 'Complete' : null } |
+  { 'Uninitialized' : null } |
+  { 'InProgress' : { 'next_deposit_id' : bigint, 'snapshot_max_id' : bigint } };
+export interface ExternalTokenDepositBackfillStatus {
+  'state' : ExternalTokenDepositBackfill,
+  'indexed_through_deposit_id' : bigint,
+  'ambiguous_legacy_blocks' : bigint,
+}
 export type TreasuryAction = {
     'Withdraw' : {
       'to' : Principal,
@@ -95,6 +111,11 @@ export interface WithdrawResult {
   'amount_transferred' : bigint,
 }
 export interface _SERVICE {
+  'continue_external_token_deposit_backfill' : ActorMethod<
+    [],
+    { 'Ok' : string } |
+      { 'Err' : string }
+  >,
   'continue_icusd_deposit_block_backfill' : ActorMethod<
     [],
     { 'Ok' : string } |
@@ -126,7 +147,16 @@ export interface _SERVICE {
     [[] | [bigint], [] | [bigint]],
     Array<TreasuryEvent>
   >,
+  'get_external_token_deposit_backfill_status' : ActorMethod<
+    [],
+    ExternalTokenDepositBackfillStatus
+  >,
   'get_status' : ActorMethod<[], TreasuryStatus>,
+  'record_external_token_deposit_once' : ActorMethod<
+    [ExternalTokenDepositArgs],
+    { 'Ok' : bigint } |
+      { 'Err' : string }
+  >,
   'record_stability_pool_unallocated_interest' : ActorMethod<
     [bigint, bigint, BigUint64Array | bigint[]],
     { 'Ok' : bigint } |

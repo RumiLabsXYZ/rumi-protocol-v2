@@ -1,11 +1,13 @@
 use crate::types::{
-    AssetBalance, AssetType, BalancesSnapshot, DepositRecord, TreasuryAction, TreasuryEvent,
-    TreasuryInitArgs,
+    AssetBalance, AssetType, BalancesSnapshot, DepositRecord, ExternalTokenDepositArgs,
+    ExternalTokenDepositBackfill, TreasuryAction, TreasuryEvent, TreasuryInitArgs,
 };
 use candid::Principal;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell};
+use std::borrow::Cow;
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 type Memory = VirtualMemory<DefaultMemoryImpl>;
@@ -29,10 +31,19 @@ const MEM_SP_UNALLOCATED_INTEREST_TRANSFER_BLOCKS: u8 = 6; // StableBTreeMap<u64
 const MEM_ICUSD_DEPOSIT_BLOCKS: u8 = 7; // StableBTreeMap<u64, u64> (icUSD transfer block → deposit ID; 0 means ambiguous)
 const MEM_ICUSD_DEPOSIT_BLOCK_BACKFILL: u8 = 8; // StableCell<IcusdDepositBlockBackfill>
 const MEM_ICUSD_DEPOSIT_INDEXED_THROUGH: u8 = 9; // StableCell<u64>
+const MEM_EXTERNAL_TOKEN_RECEIPTS: u8 = 10; // StableBTreeMap<(ledger, block), receipt>
+const MEM_EXTERNAL_TOKEN_LEGACY_BLOCKS: u8 = 11; // StableBTreeMap<(asset, block), ()>
+const MEM_EXTERNAL_TOKEN_BACKFILL: u8 = 12; // StableCell<ExternalTokenDepositBackfill>
+const MEM_EXTERNAL_TOKEN_INDEXED_THROUGH: u8 = 13; // StableCell<u64>
+const MEM_EXTERNAL_TOKEN_RECEIPTS_BY_ID: u8 = 14; // StableBTreeMap<deposit ID, receipt>
+
+const PRINCIPAL_KEY_MAX_BYTES: usize = 29;
+const EXTERNAL_RECEIPT_KEY_BYTES: usize = 1 + PRINCIPAL_KEY_MAX_BYTES + 8;
 
 /// Keep each migration update bounded regardless of the size of the historic
 /// treasury deposit log.
 pub const ICUSD_BLOCK_BACKFILL_BATCH_SIZE: usize = 100;
+pub const EXTERNAL_TOKEN_BLOCK_BACKFILL_BATCH_SIZE: usize = 100;
 
 /// Every stable memory slot this canister owns, paired with a human label.
 /// Single source of truth for the layout; iterated by the uniqueness test.
@@ -55,7 +66,24 @@ const MEMORY_LAYOUT: &[(u8, &str)] = &[
         MEM_ICUSD_DEPOSIT_BLOCK_BACKFILL,
         "icusd_deposit_block_backfill",
     ),
-    (MEM_ICUSD_DEPOSIT_INDEXED_THROUGH, "icusd_deposit_indexed_through"),
+    (
+        MEM_ICUSD_DEPOSIT_INDEXED_THROUGH,
+        "icusd_deposit_indexed_through",
+    ),
+    (MEM_EXTERNAL_TOKEN_RECEIPTS, "external_token_receipts"),
+    (
+        MEM_EXTERNAL_TOKEN_LEGACY_BLOCKS,
+        "external_token_legacy_blocks",
+    ),
+    (MEM_EXTERNAL_TOKEN_BACKFILL, "external_token_backfill"),
+    (
+        MEM_EXTERNAL_TOKEN_INDEXED_THROUGH,
+        "external_token_indexed_through",
+    ),
+    (
+        MEM_EXTERNAL_TOKEN_RECEIPTS_BY_ID,
+        "external_token_receipts_by_id",
+    ),
 ];
 
 /// A block is marked ambiguous when more than one historic ICUSD deposit used
@@ -76,6 +104,153 @@ pub enum IcusdDepositBlockBackfill {
     /// The historic snapshot has been fully indexed. New ICUSD deposits are
     /// indexed synchronously alongside the deposit record.
     Complete,
+}
+
+/// Stable key for a physical block scoped to the exact configured ledger.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalTokenReceiptKey {
+    pub ledger: Principal,
+    pub block_index: u64,
+}
+
+impl Ord for ExternalTokenReceiptKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.ledger
+            .cmp(&other.ledger)
+            .then_with(|| self.block_index.cmp(&other.block_index))
+    }
+}
+
+impl PartialOrd for ExternalTokenReceiptKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl ic_stable_structures::Storable for ExternalTokenReceiptKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let principal = self.ledger.as_slice();
+        assert!(principal.len() <= PRINCIPAL_KEY_MAX_BYTES);
+        let mut bytes = vec![0; EXTERNAL_RECEIPT_KEY_BYTES];
+        bytes[0] = principal.len() as u8;
+        bytes[1..1 + principal.len()].copy_from_slice(principal);
+        bytes[1 + PRINCIPAL_KEY_MAX_BYTES..].copy_from_slice(&self.block_index.to_be_bytes());
+        Cow::Owned(bytes)
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        assert_eq!(bytes.len(), EXTERNAL_RECEIPT_KEY_BYTES);
+        let principal_len = bytes[0] as usize;
+        assert!(principal_len <= PRINCIPAL_KEY_MAX_BYTES);
+        let ledger = Principal::from_slice(&bytes[1..1 + principal_len]);
+        let block_index = u64::from_be_bytes(
+            bytes[1 + PRINCIPAL_KEY_MAX_BYTES..]
+                .try_into()
+                .expect("fixed external receipt key block index"),
+        );
+        Self {
+            ledger,
+            block_index,
+        }
+    }
+
+    const BOUND: ic_stable_structures::storable::Bound =
+        ic_stable_structures::storable::Bound::Bounded {
+            max_size: EXTERNAL_RECEIPT_KEY_BYTES as u32,
+            is_fixed_size: true,
+        };
+}
+
+#[derive(candid::CandidType, serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct ExternalTokenDepositReceipt {
+    pub deposit_id: u64,
+    pub ledger: Principal,
+    pub deposit_type: crate::types::DepositType,
+    pub asset_type: AssetType,
+    pub amount: u64,
+    pub block_index: u64,
+    pub memo: Option<String>,
+}
+
+impl ic_stable_structures::Storable for ExternalTokenDepositReceipt {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(candid::encode_one(self).unwrap())
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        candid::decode_one(&bytes).unwrap()
+    }
+
+    const BOUND: ic_stable_structures::storable::Bound =
+        ic_stable_structures::storable::Bound::Unbounded;
+}
+
+/// Historical external-token deposits do not persist their ledger principal.
+/// A block-only key conservatively prevents either CK asset from claiming the
+/// physical block, including when both assets are configured to one ledger.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalTokenLegacyBlockKey {
+    pub block_index: u64,
+}
+
+impl Ord for ExternalTokenLegacyBlockKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.block_index.cmp(&other.block_index)
+    }
+}
+
+impl PartialOrd for ExternalTokenLegacyBlockKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl ic_stable_structures::Storable for ExternalTokenLegacyBlockKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(self.block_index.to_be_bytes().to_vec())
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        assert_eq!(bytes.len(), 8);
+        Self {
+            block_index: u64::from_be_bytes(bytes[..].try_into().unwrap()),
+        }
+    }
+
+    const BOUND: ic_stable_structures::storable::Bound =
+        ic_stable_structures::storable::Bound::Bounded {
+            max_size: 8,
+            is_fixed_size: true,
+        };
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnitValue;
+
+impl ic_stable_structures::Storable for UnitValue {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(vec![0])
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        assert_eq!(bytes.as_ref(), &[0]);
+        Self
+    }
+    const BOUND: ic_stable_structures::storable::Bound =
+        ic_stable_structures::storable::Bound::Bounded {
+            max_size: 1,
+            is_fixed_size: true,
+        };
+}
+
+impl ic_stable_structures::Storable for ExternalTokenDepositBackfill {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(candid::encode_one(self).unwrap())
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        candid::decode_one(&bytes).unwrap()
+    }
+    const BOUND: ic_stable_structures::storable::Bound =
+        ic_stable_structures::storable::Bound::Unbounded;
 }
 
 /// Treasury state that persists across upgrades
@@ -112,6 +287,13 @@ pub struct TreasuryState {
     /// Highest deposit ID whose ICUSD block has been indexed. Detects rows
     /// written by an older Treasury after a downgrade and before re-upgrade.
     pub icusd_deposit_indexed_through: StableCell<u64, Memory>,
+    pub external_token_receipts:
+        StableBTreeMap<ExternalTokenReceiptKey, ExternalTokenDepositReceipt, Memory>,
+    pub external_token_receipts_by_id: StableBTreeMap<u64, ExternalTokenDepositReceipt, Memory>,
+    pub external_token_legacy_blocks:
+        StableBTreeMap<ExternalTokenLegacyBlockKey, UnitValue, Memory>,
+    pub external_token_backfill: StableCell<ExternalTokenDepositBackfill, Memory>,
+    pub external_token_indexed_through: StableCell<u64, Memory>,
 }
 
 /// Treasury configuration stored in stable memory
@@ -222,6 +404,10 @@ fn empty_balances() -> HashMap<AssetType, AssetBalance> {
     m
 }
 
+fn is_external_token_asset(asset_type: &AssetType) -> bool {
+    matches!(asset_type, AssetType::CKUSDT | AssetType::CKUSDC)
+}
+
 impl TreasuryState {
     /// Initialize treasury state with given arguments (first install only).
     pub fn init(args: TreasuryInitArgs) -> Self {
@@ -275,6 +461,25 @@ impl TreasuryState {
                     0,
                 )
                 .unwrap(),
+                external_token_receipts: StableBTreeMap::init(
+                    memory_manager.get(MemoryId::new(MEM_EXTERNAL_TOKEN_RECEIPTS)),
+                ),
+                external_token_receipts_by_id: StableBTreeMap::init(
+                    memory_manager.get(MemoryId::new(MEM_EXTERNAL_TOKEN_RECEIPTS_BY_ID)),
+                ),
+                external_token_legacy_blocks: StableBTreeMap::init(
+                    memory_manager.get(MemoryId::new(MEM_EXTERNAL_TOKEN_LEGACY_BLOCKS)),
+                ),
+                external_token_backfill: StableCell::init(
+                    memory_manager.get(MemoryId::new(MEM_EXTERNAL_TOKEN_BACKFILL)),
+                    ExternalTokenDepositBackfill::Complete,
+                )
+                .unwrap(),
+                external_token_indexed_through: StableCell::init(
+                    memory_manager.get(MemoryId::new(MEM_EXTERNAL_TOKEN_INDEXED_THROUGH)),
+                    0,
+                )
+                .unwrap(),
             }
         })
     }
@@ -285,17 +490,20 @@ impl TreasuryState {
 
     /// Flush the in-memory balances HashMap to the stable `BalancesSnapshot` cell.
     /// Must be called after every mutation to `self.balances`.
-    fn persist_balances(&mut self) {
-        let snapshot = BalancesSnapshot {
-            entries: self
-                .balances
+    fn balance_snapshot(balances: &HashMap<AssetType, AssetBalance>) -> BalancesSnapshot {
+        BalancesSnapshot {
+            entries: balances
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
-        };
-        // Ignore the error — StableCell::set only fails if the value is too
-        // large for the memory region, which won't happen for 5 balance entries.
-        let _ = self.balances_cell.set(snapshot);
+        }
+    }
+
+    fn persist_balances(&mut self) {
+        let snapshot = Self::balance_snapshot(&self.balances);
+        self.balances_cell
+            .set(snapshot)
+            .expect("persist treasury balances");
     }
 
     // ------------------------------------------------------------------
@@ -311,7 +519,7 @@ impl TreasuryState {
     /// transition tests.
     pub fn push_event_at(&mut self, caller: Principal, action: TreasuryAction, timestamp: u64) {
         let event_id = self.next_event_id;
-        self.next_event_id += 1;
+        self.next_event_id = event_id.checked_add(1).expect("treasury event ID overflow");
         self.events.insert(
             event_id,
             TreasuryEvent {
@@ -342,37 +550,294 @@ impl TreasuryState {
     // Deposits / withdrawals
     // ------------------------------------------------------------------
 
-    /// Add a new deposit record and update balances.
+    /// Compatibility helper for unit fixtures. Production callers use the
+    /// fallible form so overflow is rejected without partially changing state.
     pub fn add_deposit(&mut self, record: DepositRecord) -> u64 {
-        let deposit_id = self.next_deposit_id;
-        self.next_deposit_id += 1;
+        self.try_add_deposit(record, true)
+            .expect("test fixture deposit must fit treasury counters and balances")
+    }
 
-        // Update balance for this asset type
-        if let Some(balance) = self.balances.get_mut(&record.asset_type) {
-            balance.total += record.amount;
-            balance.available += record.amount;
+    /// Add one deposit only after all arithmetic preconditions pass. Legacy
+    /// CKUSDT/CKUSDC rows are indexed as unknown-provenance block claims.
+    pub fn try_add_deposit(
+        &mut self,
+        mut record: DepositRecord,
+        legacy_external_receipt: bool,
+    ) -> Result<u64, String> {
+        let deposit_id = self.next_deposit_id;
+        let next_deposit_id = deposit_id
+            .checked_add(1)
+            .ok_or_else(|| "treasury deposit ID overflow".to_string())?;
+        let balance = self
+            .balances
+            .get(&record.asset_type)
+            .ok_or_else(|| format!("treasury balance entry missing for {:?}", record.asset_type))?;
+        let next_balance = AssetBalance {
+            total: balance
+                .total
+                .checked_add(record.amount)
+                .ok_or_else(|| format!("{:?} total balance overflow", record.asset_type))?,
+            reserved: balance.reserved,
+            available: balance
+                .available
+                .checked_add(record.amount)
+                .ok_or_else(|| format!("{:?} available balance overflow", record.asset_type))?,
+        };
+
+        let mut next_balances = self.balances.clone();
+        next_balances.insert(record.asset_type.clone(), next_balance.clone());
+        self.balances_cell
+            .set(Self::balance_snapshot(&next_balances))
+            .map_err(|e| format!("failed to persist deposit balance: {:?}", e))?;
+
+        let backfill_update = match self.external_token_backfill.get().clone() {
+            ExternalTokenDepositBackfill::Complete => {
+                if let Err(error) = self.external_token_indexed_through.set(deposit_id) {
+                    panic!("failed to persist external token index watermark after balance write: {error:?}");
+                }
+                None
+            }
+            ExternalTokenDepositBackfill::InProgress {
+                next_deposit_id: cursor,
+                ..
+            } => Some(ExternalTokenDepositBackfill::InProgress {
+                next_deposit_id: cursor,
+                snapshot_max_id: deposit_id,
+            }),
+            ExternalTokenDepositBackfill::Uninitialized => {
+                let old_indexed = *self.external_token_indexed_through.get();
+                Some(ExternalTokenDepositBackfill::InProgress {
+                    next_deposit_id: old_indexed.checked_add(1).unwrap_or(old_indexed),
+                    snapshot_max_id: deposit_id,
+                })
+            }
+        };
+        if let Some(status) = backfill_update {
+            if let Err(error) = self.external_token_backfill.set(status) {
+                panic!("failed to persist external token backfill state after balance write: {error:?}");
+            }
         }
 
-        // Store the deposit record
-        let mut final_record = record;
-        final_record.id = deposit_id;
-        let is_icusd = final_record.asset_type == AssetType::ICUSD;
-        self.deposits.insert(deposit_id, final_record);
+        record.id = deposit_id;
+        let external_asset = is_external_token_asset(&record.asset_type);
+        let asset_type = record.asset_type.clone();
+        let block_index = record.block_index;
 
-        // Non-ICUSD rows cannot create physical ICUSD block collisions, so
-        // they can advance the contiguous watermark immediately. ICUSD rows
-        // advance it only after their physical-block entry has been written.
-        if !is_icusd
-            && matches!(
-                self.icusd_deposit_block_backfill.get(),
-                IcusdDepositBlockBackfill::Complete
-            )
-        {
+        self.deposits.insert(deposit_id, record);
+        self.next_deposit_id = next_deposit_id;
+        self.balances.insert(asset_type.clone(), next_balance);
+        if external_asset && legacy_external_receipt {
+            self.external_token_legacy_blocks
+                .insert(ExternalTokenLegacyBlockKey { block_index }, UnitValue);
+        }
+
+        if matches!(
+            self.icusd_deposit_block_backfill.get(),
+            IcusdDepositBlockBackfill::Complete
+        ) {
             let _ = self.icusd_deposit_indexed_through.set(deposit_id);
         }
+        Ok(deposit_id)
+    }
 
-        self.persist_balances();
-        deposit_id
+    pub fn record_external_token_deposit_once(
+        &mut self,
+        args: ExternalTokenDepositArgs,
+        timestamp: u64,
+    ) -> Result<(u64, bool), String> {
+        match &args.asset_type {
+            AssetType::CKUSDT | AssetType::CKUSDC => {}
+            _ => return Err("external receipt accepts only CKUSDT or CKUSDC".to_string()),
+        }
+        if !matches!(
+            &args.deposit_type,
+            crate::types::DepositType::InterestRevenue
+                | crate::types::DepositType::LiquidationFee
+                | crate::types::DepositType::RedemptionFee
+        ) {
+            return Err("CKUSDT/CKUSDC receipts accept only InterestRevenue, LiquidationFee, or RedemptionFee".to_string());
+        }
+        if args.amount == 0 {
+            return Err("deposit amount must be greater than zero".to_string());
+        }
+        if !matches!(
+            self.external_token_backfill.get(),
+            ExternalTokenDepositBackfill::Complete
+        ) {
+            return Err("external token deposit block backfill is in progress".to_string());
+        }
+        if self
+            .external_token_legacy_blocks
+            .contains_key(&ExternalTokenLegacyBlockKey {
+                block_index: args.block_index,
+            })
+        {
+            return Err(format!(
+                "external token block {} has unknown legacy ledger provenance",
+                args.block_index
+            ));
+        }
+
+        let key = ExternalTokenReceiptKey {
+            ledger: args.ledger.clone(),
+            block_index: args.block_index,
+        };
+        if let Some(existing) = self.external_token_receipts.get(&key) {
+            if existing.deposit_id == 0 {
+                return Err("external token receipt index is marked ambiguous".to_string());
+            }
+            if existing.ledger != args.ledger
+                || existing.deposit_type != args.deposit_type
+                || existing.asset_type != args.asset_type
+                || existing.amount != args.amount
+                || existing.block_index != args.block_index
+                || existing.memo != args.memo
+            {
+                return Err(format!(
+                    "external token block {} conflicts with its existing receipt",
+                    args.block_index
+                ));
+            }
+            let deposit = self.deposits.get(&existing.deposit_id).ok_or_else(|| {
+                format!(
+                    "external token receipt points to missing deposit {}",
+                    existing.deposit_id
+                )
+            })?;
+            if deposit.asset_type != existing.asset_type
+                || deposit.deposit_type != existing.deposit_type
+                || deposit.amount != existing.amount
+                || deposit.block_index != existing.block_index
+                || deposit.memo != existing.memo
+            {
+                return Err(
+                    "external token receipt index conflicts with deposit record".to_string()
+                );
+            }
+            return Ok((existing.deposit_id, false));
+        }
+
+        let configured_ledger = match &args.asset_type {
+            AssetType::CKUSDT => self.get_config().ckusdt_ledger,
+            AssetType::CKUSDC => self.get_config().ckusdc_ledger,
+            _ => unreachable!("external asset was validated above"),
+        }
+        .ok_or_else(|| format!("configured ledger missing for {:?}", args.asset_type))?;
+        if args.ledger != configured_ledger {
+            return Err(format!(
+                "ledger does not match configured {:?} ledger",
+                args.asset_type
+            ));
+        }
+
+        // The endpoint emits exactly one event for a new receipt. Preflight
+        // its ID before any balance or receipt state is written.
+        self.next_event_id
+            .checked_add(1)
+            .ok_or_else(|| "treasury event ID overflow".to_string())?;
+
+        let record = DepositRecord {
+            id: 0,
+            deposit_type: args.deposit_type.clone(),
+            asset_type: args.asset_type.clone(),
+            amount: args.amount,
+            block_index: args.block_index,
+            timestamp,
+            memo: args.memo.clone(),
+        };
+        let deposit_id = self.try_add_deposit(record, false)?;
+        let receipt = ExternalTokenDepositReceipt {
+            deposit_id,
+            ledger: args.ledger,
+            deposit_type: args.deposit_type,
+            asset_type: args.asset_type,
+            amount: args.amount,
+            block_index: args.block_index,
+            memo: args.memo,
+        };
+        self.external_token_receipts.insert(key, receipt.clone());
+        self.external_token_receipts_by_id
+            .insert(deposit_id, receipt);
+        Ok((deposit_id, true))
+    }
+
+    pub fn continue_external_token_deposit_backfill(&mut self) -> Result<(u64, u64, bool), String> {
+        let (mut cursor, snapshot_max_id) = match self.external_token_backfill.get().clone() {
+            ExternalTokenDepositBackfill::Uninitialized => {
+                return Err("external token backfill was not initialized".to_string())
+            }
+            ExternalTokenDepositBackfill::InProgress {
+                next_deposit_id,
+                snapshot_max_id,
+            } => (next_deposit_id, snapshot_max_id),
+            ExternalTokenDepositBackfill::Complete => return Ok((0, 0, true)),
+        };
+        let rows: Vec<(u64, DepositRecord)> = self
+            .deposits
+            .range(cursor..=snapshot_max_id)
+            .take(EXTERNAL_TOKEN_BLOCK_BACKFILL_BATCH_SIZE)
+            .collect();
+        let processed = rows.len() as u64;
+        let last_id = rows.last().map(|(id, _)| *id);
+        for (deposit_id, record) in &rows {
+            if is_external_token_asset(&record.asset_type) {
+                let receipt_matches = self
+                    .external_token_receipts_by_id
+                    .get(deposit_id)
+                    .map(|receipt| {
+                        receipt.deposit_id == *deposit_id
+                            && receipt.asset_type == record.asset_type
+                            && receipt.deposit_type == record.deposit_type
+                            && receipt.amount == record.amount
+                            && receipt.block_index == record.block_index
+                            && receipt.memo == record.memo
+                    })
+                    .unwrap_or(false);
+                // Historical DepositRecord has no ledger principal. Preserve
+                // the fact that provenance is unknown instead of guessing the
+                // current configured ledger. Exact receipts from this version
+                // retain their stronger ledger-scoped provenance.
+                if !receipt_matches {
+                    self.external_token_legacy_blocks.insert(
+                        ExternalTokenLegacyBlockKey {
+                            block_index: record.block_index,
+                        },
+                        UnitValue,
+                    );
+                }
+            }
+        }
+        if let Some(id) = last_id {
+            cursor = id.checked_add(1).unwrap_or(id);
+        }
+        let batch_complete =
+            processed == 0 || last_id.map(|id| id >= snapshot_max_id).unwrap_or(false);
+        let current_max_id = self
+            .deposits
+            .last_key_value()
+            .map(|(id, _)| id)
+            .unwrap_or(0);
+        let status = if batch_complete && current_max_id <= snapshot_max_id {
+            self.external_token_indexed_through
+                .set(snapshot_max_id)
+                .expect("persist external token index watermark");
+            ExternalTokenDepositBackfill::Complete
+        } else if batch_complete {
+            ExternalTokenDepositBackfill::InProgress {
+                next_deposit_id: snapshot_max_id.checked_add(1).unwrap_or(snapshot_max_id),
+                snapshot_max_id: current_max_id,
+            }
+        } else {
+            ExternalTokenDepositBackfill::InProgress {
+                next_deposit_id: cursor,
+                snapshot_max_id,
+            }
+        };
+        let complete = matches!(status, ExternalTokenDepositBackfill::Complete);
+        self.external_token_backfill
+            .set(status)
+            .expect("persist external token block backfill state");
+        Ok((processed, cursor, complete))
     }
 
     /// Record a production ICUSD deposit against the shared physical-block
@@ -441,7 +906,7 @@ impl TreasuryState {
         }
 
         let block_index = record.block_index;
-        let deposit_id = self.add_deposit(record);
+        let deposit_id = self.try_add_deposit(record, false)?;
         self.icusd_deposit_blocks.insert(block_index, deposit_id);
         let _ = self.icusd_deposit_indexed_through.set(deposit_id);
         Ok((deposit_id, true))
@@ -507,7 +972,7 @@ impl TreasuryState {
         }
 
         let block_index = record.block_index;
-        let deposit_id = self.add_deposit(record);
+        let deposit_id = self.try_add_deposit(record, false)?;
         self.icusd_deposit_blocks.insert(block_index, deposit_id);
         let _ = self.icusd_deposit_indexed_through.set(deposit_id);
         Ok((deposit_id, true))
@@ -557,13 +1022,19 @@ impl TreasuryState {
         }
 
         if let Some(last_processed_id) = last_processed_id {
-            cursor = last_processed_id.checked_add(1).unwrap_or(last_processed_id);
+            cursor = last_processed_id
+                .checked_add(1)
+                .unwrap_or(last_processed_id);
         }
         let complete = processed == 0
             || last_processed_id
                 .map(|last_id| last_id >= snapshot_max_id)
                 .unwrap_or(false);
-        let current_max_id = self.deposits.last_key_value().map(|(id, _)| id).unwrap_or(0);
+        let current_max_id = self
+            .deposits
+            .last_key_value()
+            .map(|(id, _)| id)
+            .unwrap_or(0);
         let status = if complete && current_max_id <= snapshot_max_id {
             self.icusd_deposit_indexed_through
                 .set(snapshot_max_id)
@@ -913,6 +1384,26 @@ pub fn restore_state() {
                 0,
             )
             .unwrap();
+            let external_token_receipts = StableBTreeMap::init(
+                memory_manager.get(MemoryId::new(MEM_EXTERNAL_TOKEN_RECEIPTS)),
+            );
+            let external_token_receipts_by_id = StableBTreeMap::init(
+                memory_manager.get(MemoryId::new(MEM_EXTERNAL_TOKEN_RECEIPTS_BY_ID)),
+            );
+            let external_token_legacy_blocks = StableBTreeMap::init(
+                memory_manager.get(MemoryId::new(MEM_EXTERNAL_TOKEN_LEGACY_BLOCKS)),
+            );
+            let mut external_token_backfill: StableCell<ExternalTokenDepositBackfill, Memory> =
+                StableCell::init(
+                    memory_manager.get(MemoryId::new(MEM_EXTERNAL_TOKEN_BACKFILL)),
+                    ExternalTokenDepositBackfill::Uninitialized,
+                )
+                .unwrap();
+            let external_token_indexed_through: StableCell<u64, Memory> = StableCell::init(
+                memory_manager.get(MemoryId::new(MEM_EXTERNAL_TOKEN_INDEXED_THROUGH)),
+                0,
+            )
+            .unwrap();
             if matches!(
                 icusd_deposit_block_backfill.get(),
                 IcusdDepositBlockBackfill::Uninitialized
@@ -963,6 +1454,51 @@ pub fn restore_state() {
                 }
             }
 
+            if matches!(
+                external_token_backfill.get(),
+                ExternalTokenDepositBackfill::Uninitialized
+            ) {
+                let indexed_through = *external_token_indexed_through.get();
+                let initial_status = if max_id <= indexed_through {
+                    ExternalTokenDepositBackfill::Complete
+                } else {
+                    ExternalTokenDepositBackfill::InProgress {
+                        next_deposit_id: indexed_through.checked_add(1).unwrap_or(indexed_through),
+                        snapshot_max_id: max_id,
+                    }
+                };
+                external_token_backfill
+                    .set(initial_status)
+                    .expect("persist initial external token block backfill state");
+            } else if matches!(
+                external_token_backfill.get(),
+                ExternalTokenDepositBackfill::Complete
+            ) && max_id > *external_token_indexed_through.get()
+            {
+                // A downgrade to code without this index may have appended
+                // deposits. Re-scan from the last known complete watermark.
+                let indexed = *external_token_indexed_through.get();
+                external_token_backfill
+                    .set(ExternalTokenDepositBackfill::InProgress {
+                        next_deposit_id: indexed.checked_add(1).unwrap_or(indexed),
+                        snapshot_max_id: max_id,
+                    })
+                    .expect("persist external token rollback backfill state");
+            } else if let ExternalTokenDepositBackfill::InProgress {
+                next_deposit_id,
+                snapshot_max_id,
+            } = external_token_backfill.get().clone()
+            {
+                if max_id > snapshot_max_id {
+                    external_token_backfill
+                        .set(ExternalTokenDepositBackfill::InProgress {
+                            next_deposit_id,
+                            snapshot_max_id: max_id,
+                        })
+                        .expect("extend external token backfill snapshot after rollback");
+                }
+            }
+
             *s.borrow_mut() = Some(TreasuryState {
                 deposits,
                 balances,
@@ -977,6 +1513,11 @@ pub fn restore_state() {
                 icusd_deposit_blocks,
                 icusd_deposit_block_backfill,
                 icusd_deposit_indexed_through,
+                external_token_receipts,
+                external_token_receipts_by_id,
+                external_token_legacy_blocks,
+                external_token_backfill,
+                external_token_indexed_through,
             });
         });
     });

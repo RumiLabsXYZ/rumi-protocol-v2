@@ -386,6 +386,301 @@ mod tests {
         }
     }
 
+    fn external_token_args(
+        ledger: Principal,
+        asset_type: AssetType,
+        amount: u64,
+        block_index: u64,
+        memo: Option<&str>,
+    ) -> ExternalTokenDepositArgs {
+        ExternalTokenDepositArgs {
+            ledger,
+            deposit_type: DepositType::LiquidationFee,
+            asset_type,
+            amount,
+            block_index,
+            memo: memo.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn external_token_receipt_is_ledger_scoped_exactly_once_across_restore() {
+        let usdt_ledger = Principal::from_slice(&[1, 2, 3]);
+        let usdc_ledger = Principal::from_slice(&[4, 5, 6]);
+        crate::state::init_state(TreasuryInitArgs {
+            controller: mock_principal(),
+            icusd_ledger: mock_principal(),
+            icp_ledger: mock_principal(),
+            ckbtc_ledger: None,
+            ckusdt_ledger: Some(usdt_ledger),
+            ckusdc_ledger: Some(usdc_ledger),
+        });
+
+        let args = external_token_args(usdt_ledger, AssetType::CKUSDT, 500, 0, Some("liquidation"));
+        let first =
+            crate::record_external_token_deposit_with_event(args.clone(), mock_principal(), 10)
+                .unwrap();
+        assert_eq!(first, 1);
+        crate::state::restore_state();
+        let retry =
+            crate::record_external_token_deposit_with_event(args.clone(), mock_principal(), 20)
+                .unwrap();
+        assert_eq!(retry, first);
+
+        for conflict in [
+            external_token_args(usdt_ledger, AssetType::CKUSDT, 501, 0, Some("liquidation")),
+            external_token_args(
+                usdt_ledger,
+                AssetType::CKUSDT,
+                500,
+                0,
+                Some("different memo"),
+            ),
+            ExternalTokenDepositArgs {
+                deposit_type: DepositType::BorrowingFee,
+                ..args.clone()
+            },
+        ] {
+            assert!(crate::record_external_token_deposit_with_event(
+                conflict,
+                mock_principal(),
+                30
+            )
+            .is_err());
+        }
+        assert!(crate::record_external_token_deposit_with_event(
+            external_token_args(usdc_ledger, AssetType::CKUSDT, 500, 0, Some("wrong ledger")),
+            mock_principal(),
+            30,
+        )
+        .is_err());
+
+        // The same block number on a distinct configured ledger is a distinct
+        // physical key and may be recorded for that ledger's asset.
+        let second = crate::record_external_token_deposit_with_event(
+            external_token_args(usdc_ledger, AssetType::CKUSDC, 700, 0, None),
+            mock_principal(),
+            40,
+        )
+        .unwrap();
+        assert_ne!(second, first);
+
+        // Reconfiguring the same asset to a different ledger creates a new
+        // physical key namespace, while exact retries retain old provenance.
+        let rotated_ledger = Principal::from_slice(&[7, 8, 9]);
+        crate::state::with_state_mut(|s| {
+            let mut config = s.get_config();
+            config.ckusdt_ledger = Some(rotated_ledger);
+            s.config.set(config).unwrap();
+        });
+        let rotated = crate::record_external_token_deposit_with_event(
+            external_token_args(
+                rotated_ledger,
+                AssetType::CKUSDT,
+                600,
+                0,
+                Some("new ledger"),
+            ),
+            mock_principal(),
+            50,
+        )
+        .unwrap();
+        assert_ne!(rotated, first);
+        assert_eq!(
+            crate::record_external_token_deposit_with_event(args, mock_principal(), 60).unwrap(),
+            first,
+            "an exact lost-response replay remains valid after config rotates"
+        );
+        crate::state::with_state(|s| {
+            assert_eq!(s.get_deposits_count(), 3);
+            assert_eq!(s.get_events_count(), 3);
+            assert_eq!(s.balances[&AssetType::CKUSDT].total, 1_100);
+            assert_eq!(s.balances[&AssetType::CKUSDC].total, 700);
+        });
+    }
+
+    #[test]
+    fn external_token_rollback_backfill_preserves_exact_receipt_provenance() {
+        let ledger = Principal::from_slice(&[1, 2, 3]);
+        crate::state::init_state(TreasuryInitArgs {
+            controller: mock_principal(),
+            icusd_ledger: mock_principal(),
+            icp_ledger: mock_principal(),
+            ckbtc_ledger: None,
+            ckusdt_ledger: Some(ledger),
+            ckusdc_ledger: None,
+        });
+        let args = external_token_args(ledger, AssetType::CKUSDT, 500, 44, Some("receipt"));
+        let id = crate::state::with_state_mut(|s| {
+            s.record_external_token_deposit_once(args.clone(), 1)
+                .unwrap()
+                .0
+        });
+
+        // Simulate a downgrade that loses the new watermark but retains the
+        // receipt stores. Re-upgrade scans the row without weakening its
+        // ledger-scoped provenance.
+        crate::state::with_state_mut(|s| {
+            s.external_token_indexed_through.set(0).unwrap();
+            s.external_token_backfill
+                .set(ExternalTokenDepositBackfill::Complete)
+                .unwrap();
+        });
+        crate::state::restore_state();
+        let migration =
+            crate::state::with_state_mut(|s| s.continue_external_token_deposit_backfill().unwrap());
+        assert_eq!(migration, (1, 2, true));
+        let replay = crate::state::with_state_mut(|s| {
+            s.record_external_token_deposit_once(args, 2).unwrap()
+        });
+        assert_eq!(replay, (id, false));
+        crate::state::with_state(|s| {
+            assert_eq!(s.get_deposits_count(), 1);
+            assert_eq!(s.balances[&AssetType::CKUSDT].total, 500);
+            assert!(!s
+                .external_token_legacy_blocks
+                .contains_key(&crate::state::ExternalTokenLegacyBlockKey { block_index: 44 }));
+        });
+    }
+
+    #[test]
+    fn external_token_legacy_backfill_is_bounded_resumable_and_fail_closed() {
+        let ledger = Principal::from_slice(&[1, 2, 3]);
+        crate::state::init_state(TreasuryInitArgs {
+            controller: mock_principal(),
+            icusd_ledger: mock_principal(),
+            icp_ledger: mock_principal(),
+            ckbtc_ledger: None,
+            ckusdt_ledger: Some(ledger),
+            ckusdc_ledger: Some(Principal::from_slice(&[4, 5, 6])),
+        });
+        crate::state::with_state_mut(|s| {
+            for id in 1..=102 {
+                let block = match id {
+                    1 => 0,
+                    2 | 3 => 5,
+                    _ => id + 100,
+                };
+                let mut row = deposit_record(
+                    DepositType::LiquidationFee,
+                    AssetType::CKUSDT,
+                    1,
+                    block,
+                    None,
+                );
+                row.id = id;
+                s.deposits.insert(id, row);
+            }
+            s.external_token_backfill
+                .set(ExternalTokenDepositBackfill::Uninitialized)
+                .unwrap();
+            s.external_token_indexed_through.set(0).unwrap();
+        });
+        crate::state::restore_state();
+        let status = crate::get_external_token_deposit_backfill_status();
+        assert_eq!(
+            status.state,
+            ExternalTokenDepositBackfill::InProgress {
+                next_deposit_id: 1,
+                snapshot_max_id: 102,
+            }
+        );
+        assert_eq!(status.indexed_through_deposit_id, 0);
+        assert_eq!(status.ambiguous_legacy_blocks, 0);
+        let args = external_token_args(ledger, AssetType::CKUSDT, 1, 999, None);
+        assert!(crate::state::with_state_mut(
+            |s| s.record_external_token_deposit_once(args.clone(), 1)
+        )
+        .is_err());
+
+        let first =
+            crate::state::with_state_mut(|s| s.continue_external_token_deposit_backfill().unwrap());
+        assert_eq!(first, (100, 101, false));
+        crate::state::restore_state();
+        let second =
+            crate::state::with_state_mut(|s| s.continue_external_token_deposit_backfill().unwrap());
+        assert_eq!(second, (2, 103, true));
+        let status = crate::get_external_token_deposit_backfill_status();
+        assert_eq!(status.state, ExternalTokenDepositBackfill::Complete);
+        assert_eq!(status.indexed_through_deposit_id, 102);
+        assert_eq!(status.ambiguous_legacy_blocks, 101);
+
+        crate::state::with_state(|s| {
+            assert!(s
+                .external_token_legacy_blocks
+                .contains_key(&crate::state::ExternalTokenLegacyBlockKey { block_index: 0 }));
+            assert!(s
+                .external_token_legacy_blocks
+                .contains_key(&crate::state::ExternalTokenLegacyBlockKey { block_index: 5 }));
+        });
+        for block in [0, 5] {
+            assert!(
+                crate::state::with_state_mut(|s| s.record_external_token_deposit_once(
+                    external_token_args(ledger, AssetType::CKUSDT, 1, block, None),
+                    2,
+                ))
+                .is_err()
+            );
+        }
+        assert!(
+            crate::state::with_state_mut(|s| s.record_external_token_deposit_once(
+                external_token_args(
+                    Principal::from_slice(&[4, 5, 6]),
+                    AssetType::CKUSDC,
+                    1,
+                    0,
+                    None,
+                ),
+                2,
+            ))
+            .is_err(),
+            "legacy physical block ambiguity must cover both CK assets"
+        );
+        let (id, newly_recorded) = crate::state::with_state_mut(|s| {
+            s.record_external_token_deposit_once(args.clone(), 3)
+                .unwrap()
+        });
+        assert!(newly_recorded);
+        crate::state::restore_state();
+        let retry = crate::state::with_state_mut(|s| {
+            s.record_external_token_deposit_once(args, 4).unwrap()
+        });
+        assert_eq!(retry, (id, false));
+        crate::state::with_state(|s| {
+            assert_eq!(s.get_deposits_count(), 103);
+            assert_eq!(s.balances[&AssetType::CKUSDT].total, 103);
+        });
+    }
+
+    #[test]
+    fn external_token_receipt_rejects_overflow_without_partial_deposit() {
+        let ledger = Principal::from_slice(&[1, 2, 3]);
+        crate::state::init_state(TreasuryInitArgs {
+            controller: mock_principal(),
+            icusd_ledger: mock_principal(),
+            icp_ledger: mock_principal(),
+            ckbtc_ledger: None,
+            ckusdt_ledger: Some(ledger),
+            ckusdc_ledger: None,
+        });
+        crate::state::with_state_mut(|s| {
+            s.balances.get_mut(&AssetType::CKUSDT).unwrap().total = u64::MAX;
+            s.balances.get_mut(&AssetType::CKUSDT).unwrap().available = u64::MAX;
+        });
+        let result = crate::state::with_state_mut(|s| {
+            s.record_external_token_deposit_once(
+                external_token_args(ledger, AssetType::CKUSDT, 1, 7, None),
+                1,
+            )
+        });
+        assert!(result.is_err());
+        crate::state::with_state(|s| {
+            assert_eq!(s.get_deposits_count(), 0);
+            assert!(s.external_token_receipts.is_empty());
+            assert_eq!(s.balances[&AssetType::CKUSDT].total, u64::MAX);
+        });
+    }
+
     #[test]
     fn borrowing_fee_icusd_block_is_idempotent_only_for_exact_payload() {
         init_test_treasury();
@@ -506,7 +801,49 @@ mod tests {
         assert!(service.contains("continue_icusd_deposit_block_backfill"));
         assert!(service.contains("deposit_borrowing_fee_once"));
         assert!(service.contains("deposit_interest_revenue_once"));
+        assert!(service.contains("record_external_token_deposit_once"));
+        assert!(service.contains("continue_external_token_deposit_backfill"));
+        assert!(service.contains("get_external_token_deposit_backfill_status"));
         assert!(service.contains("DepositArgs"));
+        assert!(service.contains("ExternalTokenDepositArgs"));
+    }
+
+    #[test]
+    fn legacy_deposit_temporarily_accepts_external_tokens_and_tombstones_blocks() {
+        init_test_treasury();
+        assert!(crate::validate_legacy_deposit_asset(&AssetType::CKUSDT).is_ok());
+        assert!(crate::validate_legacy_deposit_asset(&AssetType::CKUSDC).is_ok());
+        assert!(crate::validate_legacy_deposit_asset(&AssetType::ICUSD).is_ok());
+        assert!(crate::validate_legacy_deposit_asset(&AssetType::ICP).is_ok());
+
+        let ledger = crate::state::with_state(|s| s.get_config().ckusdt_ledger.unwrap());
+        let record = deposit_record(
+            DepositType::LiquidationFee,
+            AssetType::CKUSDT,
+            123,
+            17,
+            Some("legacy notifier compatibility"),
+        );
+        let legacy_id = crate::record_deposit_with_event(record, mock_principal(), 1).unwrap();
+        let retry = crate::state::with_state_mut(|s| {
+            s.record_external_token_deposit_once(
+                external_token_args(
+                    ledger,
+                    AssetType::CKUSDT,
+                    123,
+                    17,
+                    Some("legacy notifier compatibility"),
+                ),
+                2,
+            )
+        });
+        assert!(retry.is_err(), "legacy block tombstone must fail closed");
+        crate::state::with_state(|s| {
+            assert_eq!(s.get_deposits_count(), 1);
+            assert_eq!(s.balances[&AssetType::CKUSDT].total, 123);
+            assert_eq!(s.get_events_count(), 1);
+            assert_eq!(legacy_id, 1);
+        });
     }
 
     #[test]
@@ -520,16 +857,20 @@ mod tests {
         };
         assert!(crate::validate_interest_revenue_args(&interest_icusd).is_ok());
 
-        assert!(crate::validate_interest_revenue_args(&crate::types::DepositArgs {
-            deposit_type: DepositType::BorrowingFee,
-            ..interest_icusd.clone()
-        })
-        .is_err());
-        assert!(crate::validate_interest_revenue_args(&crate::types::DepositArgs {
-            asset_type: AssetType::ICP,
-            ..interest_icusd
-        })
-        .is_err());
+        assert!(
+            crate::validate_interest_revenue_args(&crate::types::DepositArgs {
+                deposit_type: DepositType::BorrowingFee,
+                ..interest_icusd.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            crate::validate_interest_revenue_args(&crate::types::DepositArgs {
+                asset_type: AssetType::ICP,
+                ..interest_icusd
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -979,9 +1320,8 @@ mod tests {
             ));
         });
 
-        let first_batch = crate::state::with_state_mut(|s| {
-            s.continue_icusd_deposit_block_backfill().unwrap()
-        });
+        let first_batch =
+            crate::state::with_state_mut(|s| s.continue_icusd_deposit_block_backfill().unwrap());
         assert_eq!(first_batch, (1, 2, false));
         crate::state::with_state(|s| {
             assert_eq!(
@@ -993,9 +1333,8 @@ mod tests {
             );
         });
 
-        let final_batch = crate::state::with_state_mut(|s| {
-            s.continue_icusd_deposit_block_backfill().unwrap()
-        });
+        let final_batch =
+            crate::state::with_state_mut(|s| s.continue_icusd_deposit_block_backfill().unwrap());
         assert_eq!(final_batch, (1, 3, true));
         crate::state::with_state(|s| {
             assert_eq!(

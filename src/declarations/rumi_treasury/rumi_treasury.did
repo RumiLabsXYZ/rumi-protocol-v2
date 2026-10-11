@@ -69,6 +69,27 @@ type DepositArgs = record {
   memo: opt text;
 };
 
+type ExternalTokenDepositArgs = record {
+  ledger: principal;
+  deposit_type: DepositType;
+  asset_type: AssetType;
+  amount: nat64;
+  block_index: nat64;
+  memo: opt text;
+};
+
+type ExternalTokenDepositBackfill = variant {
+  Uninitialized;
+  InProgress: record { next_deposit_id: nat64; snapshot_max_id: nat64 };
+  Complete;
+};
+
+type ExternalTokenDepositBackfillStatus = record {
+  state: ExternalTokenDepositBackfill;
+  indexed_through_deposit_id: nat64;
+  ambiguous_legacy_blocks: nat64;
+};
+
 type WithdrawArgs = record {
   asset_type: AssetType;
   amount: nat64;
@@ -110,4 +131,8 @@ service : (TreasuryInitArgs) -> {
   get_events: (opt nat64, opt nat64) -> (vec TreasuryEvent) query;
   get_event_count: () -> (nat64) query;
   set_paused: (bool) -> (variant { Ok; Err : text });
+  deposit_interest_revenue_once: (DepositArgs) -> (variant { Ok : nat64; Err : text });
+  record_external_token_deposit_once: (ExternalTokenDepositArgs) -> (variant { Ok : nat64; Err : text });
+  continue_external_token_deposit_backfill: () -> (variant { Ok : text; Err : text });
+  get_external_token_deposit_backfill_status: () -> (ExternalTokenDepositBackfillStatus) query;
 }
