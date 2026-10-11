@@ -447,6 +447,72 @@ impl TreasuryState {
         Ok((deposit_id, true))
     }
 
+    /// Record an InterestRevenue/ICUSD ledger deposit with exact-block replay
+    /// protection. This is intentionally separate from the legacy deposit
+    /// path and from BorrowingFee idempotency: only the same physical block,
+    /// amount, and memo can return the original deposit ID.
+    pub fn record_interest_revenue_once(
+        &mut self,
+        record: DepositRecord,
+    ) -> Result<(u64, bool), String> {
+        if record.deposit_type != crate::types::DepositType::InterestRevenue
+            || record.asset_type != AssetType::ICUSD
+        {
+            return Err("only InterestRevenue/ICUSD deposits are accepted".to_string());
+        }
+        if !matches!(
+            self.icusd_deposit_block_backfill.get(),
+            IcusdDepositBlockBackfill::Complete
+        ) {
+            return Err("ICUSD deposit block index backfill is in progress".to_string());
+        }
+
+        if let Some(existing_id) = self.icusd_deposit_blocks.get(&record.block_index) {
+            if existing_id == AMBIGUOUS_BLOCK_INDEX {
+                return Err(format!(
+                    "ICUSD block {} is ambiguous in treasury history",
+                    record.block_index
+                ));
+            }
+            let existing = self.deposits.get(&existing_id).ok_or_else(|| {
+                format!(
+                    "ICUSD block {} points to missing treasury deposit {}",
+                    record.block_index, existing_id
+                )
+            })?;
+            if existing.deposit_type == crate::types::DepositType::InterestRevenue
+                && existing.asset_type == AssetType::ICUSD
+                && existing.amount == record.amount
+                && existing.block_index == record.block_index
+                && existing.memo == record.memo
+            {
+                return Ok((existing_id, false));
+            }
+            return Err(format!(
+                "ICUSD block {} conflicts with its existing treasury deposit",
+                record.block_index
+            ));
+        }
+
+        // The legacy Stability Pool index must not be silently bypassed if
+        // the shared physical-block index is inconsistent.
+        if self
+            .sp_unallocated_interest_transfer_blocks
+            .contains_key(&record.block_index)
+        {
+            return Err(format!(
+                "ICUSD block {} is already recorded as a Stability Pool deposit",
+                record.block_index
+            ));
+        }
+
+        let block_index = record.block_index;
+        let deposit_id = self.add_deposit(record);
+        self.icusd_deposit_blocks.insert(block_index, deposit_id);
+        let _ = self.icusd_deposit_indexed_through.set(deposit_id);
+        Ok((deposit_id, true))
+    }
+
     /// Index at most `ICUSD_BLOCK_BACKFILL_BATCH_SIZE` historic deposit rows.
     /// The range is snapshotted when the upgrade is first restored, so newer
     /// ICUSD ingress remains held until this finite migration is complete.

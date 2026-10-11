@@ -30,6 +30,57 @@ macro_rules! ensure_eq {
 }
 
 #[cfg(test)]
+mod treasury_interest_snapshot_tests {
+    use super::{
+        BorrowMintTuple, State, TreasuryInterestMintJournal, TreasuryInterestMintPhase,
+    };
+    use candid::Principal;
+
+    #[test]
+    fn old_snapshot_defaults_new_interest_outbox_and_new_rows_round_trip() {
+        let mut state = State::default();
+        state.pending_treasury_interest_mints.insert(
+            42,
+            TreasuryInterestMintJournal {
+                tuple: BorrowMintTuple {
+                    ledger: Principal::from_slice(&[1]),
+                    destination: Principal::from_slice(&[2]),
+                    amount_e8s: 500,
+                    memo: 42u128.to_be_bytes(),
+                    created_at_time_ns: 1_000,
+                    op_nonce: 42,
+                },
+                treasury: Principal::from_slice(&[2]),
+                phase: TreasuryInterestMintPhase::NotifyPending { mint_block_index: 77 },
+            },
+        );
+        state.treasury_interest_mint_retry_cursor = 42;
+        state.pending_treasury_interest_fallback_e8s = 500;
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let restored: State = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(restored.pending_treasury_interest_mints, state.pending_treasury_interest_mints);
+        assert_eq!(restored.treasury_interest_mint_retry_cursor, 42);
+        assert_eq!(restored.pending_treasury_interest_fallback_e8s, 500);
+
+        let mut map = match ciborium::de::from_reader::<ciborium::value::Value, _>(bytes.as_slice()).unwrap() {
+            ciborium::value::Value::Map(map) => map,
+            other => panic!("expected CBOR map, got {other:?}"),
+        };
+        map.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name)
+            if name == "pending_treasury_interest_mints"
+                || name == "treasury_interest_mint_retry_cursor"
+                || name == "pending_treasury_interest_fallback_e8s"));
+        let mut old_bytes = Vec::new();
+        ciborium::ser::into_writer(&ciborium::value::Value::Map(map), &mut old_bytes).unwrap();
+        let old: State = ciborium::de::from_reader(old_bytes.as_slice()).unwrap();
+        assert!(old.pending_treasury_interest_mints.is_empty());
+        assert_eq!(old.treasury_interest_mint_retry_cursor, 0);
+        assert_eq!(old.pending_treasury_interest_fallback_e8s, 0);
+    }
+}
+
+#[cfg(test)]
 mod three_usd_reserve_ingress_state_tests {
     use super::{
         confirm_three_usd_ingress_candidate_block, PendingThreeUsdRefund,
@@ -2186,6 +2237,25 @@ pub struct BorrowMintTuple {
     pub op_nonce: u128,
 }
 
+/// A treasury-interest share admitted for one exact icUSD ledger mint.
+/// Once admitted it is removed from the old accumulator and may only advance
+/// through this row; ambiguous outcomes never create a new mint identity.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct TreasuryInterestMintJournal {
+    pub tuple: BorrowMintTuple,
+    pub treasury: Principal,
+    pub phase: TreasuryInterestMintPhase,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum TreasuryInterestMintPhase {
+    MintPending,
+    NotifyPending { mint_block_index: u64 },
+    /// The exact tuple is past automatic ledger deduplication, or returned
+    /// TooOld. An exact positive receipt is needed before notification.
+    ReceiptRecoveryRequired,
+}
+
 /// Durable debt reservation for one borrow whose icUSD mint has not yet been
 /// applied to the vault. Rows are held across ambiguous outcomes and upgrades.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -3064,6 +3134,17 @@ pub struct State {
     /// Accumulated interest per collateral type, waiting to be flushed to pools.
     /// Key = collateral_type Principal, Value = total interest in e8s.
     pub pending_interest_for_pools: BTreeMap<Principal, u64>,
+    /// Durable interest mints to Treasury, keyed by the frozen operation nonce.
+    #[serde(default)]
+    pub pending_treasury_interest_mints: BTreeMap<u128, TreasuryInterestMintJournal>,
+    /// Unadmitted stablecoin-interest fallbacks. Every credit and drain has a
+    /// private replay event; unlike the legacy aggregate this survives event
+    /// log recovery if a stable snapshot cannot be loaded.
+    #[serde(default)]
+    pub pending_treasury_interest_fallback_e8s: u128,
+    /// Fair cursor for the bounded retry timer.
+    #[serde(default)]
+    pub treasury_interest_mint_retry_cursor: u128,
     /// Post-mint delivery receipts keyed by the icUSD mint block. Unlike
     /// `pending_interest_for_pools`, these funds are already minted and must
     /// never be re-minted on retry.
@@ -3748,6 +3829,9 @@ impl Default for State {
             weighted_avg_healthy_cr: Ratio::from(Decimal::ZERO),
             borrowing_fee_curve: None,
             pending_interest_for_pools: BTreeMap::new(),
+            pending_treasury_interest_mints: BTreeMap::new(),
+            pending_treasury_interest_fallback_e8s: 0,
+            treasury_interest_mint_retry_cursor: 0,
             pending_stability_pool_interest_notifications: BTreeMap::new(),
             pending_amm1_donations: std::collections::VecDeque::new(),
             pending_amm1_donation_operations: BTreeMap::new(),
@@ -4049,6 +4133,9 @@ impl From<InitArg> for State {
 
             // Periodic interest distribution
             pending_interest_for_pools: BTreeMap::new(),
+            pending_treasury_interest_mints: BTreeMap::new(),
+            pending_treasury_interest_fallback_e8s: 0,
+            treasury_interest_mint_retry_cursor: 0,
             pending_stability_pool_interest_notifications: BTreeMap::new(),
             pending_amm1_donations: std::collections::VecDeque::new(),
             pending_amm1_donation_operations: BTreeMap::new(),

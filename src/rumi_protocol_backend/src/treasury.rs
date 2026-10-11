@@ -10,7 +10,7 @@ use candid::{CandidType, Deserialize, Principal};
 use ic_canister_log::log;
 use serde::Serialize;
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::logs::INFO;
 use crate::management;
@@ -18,6 +18,10 @@ use crate::numeric::ICUSD;
 use crate::state::read_state;
 
 const BORROWING_FEE_ONCE_METHOD: &str = "deposit_borrowing_fee_once";
+const INTEREST_REVENUE_ONCE_METHOD: &str = "deposit_interest_revenue_once";
+const MAX_PENDING_TREASURY_INTEREST_MINTS: usize = 2048;
+const TREASURY_INTEREST_RETRY_BATCH: usize = 16;
+const TREASURY_INTEREST_AUTO_RETRY_MAX_AGE_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 
 // ---------------------------------------------------------------------------
 // Mirror types matching rumi_treasury::types (can't depend on cdylib crate)
@@ -58,6 +62,26 @@ thread_local! {
     /// same inter-canister notification concurrently in one backend instance.
     static IN_FLIGHT_INTEREST_NOTIFICATIONS: RefCell<BTreeSet<InterestNotificationKey>> =
         RefCell::new(BTreeSet::new());
+    static IN_FLIGHT_TREASURY_INTEREST_MINTS: RefCell<BTreeSet<u128>> =
+        RefCell::new(BTreeSet::new());
+}
+
+struct TreasuryInterestMintGuard(u128);
+
+impl TreasuryInterestMintGuard {
+    fn try_new(op_nonce: u128) -> Option<Self> {
+        IN_FLIGHT_TREASURY_INTEREST_MINTS.with(|in_flight| {
+            in_flight.borrow_mut().insert(op_nonce).then_some(Self(op_nonce))
+        })
+    }
+}
+
+impl Drop for TreasuryInterestMintGuard {
+    fn drop(&mut self) {
+        IN_FLIGHT_TREASURY_INTEREST_MINTS.with(|in_flight| {
+            in_flight.borrow_mut().remove(&self.0);
+        });
+    }
 }
 
 struct InterestNotificationGuard(InterestNotificationKey);
@@ -274,6 +298,29 @@ fn borrowing_fee_once_args(amount: u64, block_index: u64) -> DepositArgs {
     }
 }
 
+/// An old Treasury cannot accidentally accept a replay through legacy
+/// `deposit`: the versioned method must exist before this receipt is cleared.
+async fn notify_treasury_interest_revenue_once(
+    treasury: Principal,
+    amount: u64,
+    block_index: u64,
+) -> Result<u64, String> {
+    let args = DepositArgs {
+        deposit_type: DepositType::InterestRevenue,
+        asset_type: AssetType::ICUSD,
+        amount,
+        block_index,
+        memo: None,
+    };
+    let result: Result<(Result<u64, String>,), _> =
+        ic_cdk::call(treasury, INTEREST_REVENUE_ONCE_METHOD, (args,)).await;
+    match result {
+        Ok((Ok(id),)) => Ok(id),
+        Ok((Err(error),)) => Err(error),
+        Err((code, message)) => Err(format!("{code:?} {message}")),
+    }
+}
+
 #[cfg(test)]
 mod borrowing_fee_endpoint_tests {
     use super::{borrowing_fee_once_args, AssetType, DepositType, BORROWING_FEE_ONCE_METHOD};
@@ -294,50 +341,173 @@ mod borrowing_fee_endpoint_tests {
 // Public helpers — mint/transfer + notify
 // ---------------------------------------------------------------------------
 
-/// Mint icUSD interest revenue to treasury and record the deposit.
-///
-/// Returns `Ok(())` when the icUSD mint itself succeeded — the
-/// downstream `notify_treasury_deposit` call is bookkeeping and its
-/// failure does not roll back the mint. Returns `Err(interest_share)`
-/// when the mint did not happen (no treasury configured, or the ledger
-/// call failed); the caller is expected to re-queue this amount via
-/// the snapshot-then-decrement restore path so revenue is not lost.
-pub async fn mint_interest_to_treasury(interest_share: ICUSD) -> Result<(), ICUSD> {
-    if interest_share.0 == 0 {
-        return Ok(());
-    }
-    let treasury = read_state(|s| s.treasury_principal);
-    let Some(tp) = treasury else {
-        log!(
-            INFO,
-            "[treasury] WARNING: no treasury principal configured; {} icUSD interest unminted",
-            interest_share.to_u64()
+/// Reserve the precise ledger mint and Treasury destination before the first
+/// await. `Err` means no row was admitted and the caller may restore its
+/// aggregate bucket. Once admitted, the row owns the obligation exclusively.
+fn start_treasury_interest_mint_at(amount: ICUSD, now: u64) -> Result<u128, ICUSD> {
+    crate::state::mutate_state(|state| {
+        let Some(treasury) = state.treasury_principal else { return Err(amount); };
+        if state.pending_treasury_interest_mints.len() >= MAX_PENDING_TREASURY_INTEREST_MINTS {
+            return Err(amount);
+        }
+        let nonce = state.next_op_nonce_at(now);
+        let operation = crate::state::TreasuryInterestMintJournal {
+            tuple: crate::state::BorrowMintTuple {
+                ledger: state.icusd_ledger_principal,
+                destination: treasury,
+                amount_e8s: amount.to_u64(),
+                memo: nonce.to_be_bytes(),
+                created_at_time_ns: management::nonce_to_created_at_time(nonce),
+                op_nonce: nonce,
+            },
+            treasury,
+            phase: crate::state::TreasuryInterestMintPhase::MintPending,
+        };
+        crate::storage::record_pending_payout_event(
+            &crate::event::PendingPayoutEvent::TreasuryInterestMintStarted {
+                operation: operation.clone(),
+            },
         );
-        return Err(interest_share);
-    };
-    match management::mint_icusd(interest_share, tp).await {
-        Ok(block_index) => {
-            log!(
-                INFO,
-                "[treasury] Minted {} icUSD interest revenue (block {})",
-                interest_share.to_u64(),
-                block_index
-            );
-            let _ = notify_treasury_deposit(
-                tp,
-                DepositType::InterestRevenue,
-                AssetType::ICUSD,
-                interest_share.to_u64(),
+        state.pending_treasury_interest_mints.insert(nonce, operation);
+        Ok(nonce)
+    })
+}
+
+fn queue_treasury_interest_fallback(amount_e8s: u64) {
+    if amount_e8s == 0 { return; }
+    crate::state::mutate_state(|s| {
+        let next = s.pending_treasury_interest_fallback_e8s
+            .checked_add(u128::from(amount_e8s))
+            .expect("Treasury fallback aggregate overflow");
+        crate::storage::record_pending_payout_event(
+            &crate::event::PendingPayoutEvent::TreasuryInterestFallbackCredited { amount_e8s },
+        );
+        s.pending_treasury_interest_fallback_e8s = next;
+    });
+}
+
+#[derive(Debug)]
+enum TreasuryInterestMintFailure {
+    Retry(icrc_ledger_types::icrc1::transfer::TransferError),
+    Hold,
+}
+
+async fn process_treasury_interest_mint(op_nonce: u128) {
+    process_treasury_interest_mint_with_now(
+        op_nonce,
+        ic_cdk::api::time(),
+        |operation| async move {
+            management::mint_icusd_with_borrow_tuple(&operation.tuple)
+                .await
+                .map_err(|error| match error {
+                    icrc_ledger_types::icrc1::transfer::TransferError::TooOld =>
+                        TreasuryInterestMintFailure::Hold,
+                    other => TreasuryInterestMintFailure::Retry(other),
+                })
+        },
+        |operation, block_index| async move {
+            notify_treasury_interest_revenue_once(
+                operation.treasury,
+                operation.tuple.amount_e8s,
                 block_index,
-            )
-            .await;
-            Ok(())
+            ).await.map(|_| ())
+        },
+    ).await;
+}
+
+async fn process_treasury_interest_mint_with_now<M, MFut, N, NFut>(
+    op_nonce: u128,
+    now: u64,
+    mint: M,
+    notify: N,
+)
+where
+    M: FnOnce(crate::state::TreasuryInterestMintJournal) -> MFut,
+    MFut: std::future::Future<Output = Result<u64, TreasuryInterestMintFailure>>,
+    N: FnOnce(crate::state::TreasuryInterestMintJournal, u64) -> NFut,
+    NFut: std::future::Future<Output = Result<(), String>>,
+{
+    let Some(_guard) = TreasuryInterestMintGuard::try_new(op_nonce) else { return; };
+    let Some(mut operation) = crate::state::read_state(|s| {
+        s.pending_treasury_interest_mints.get(&op_nonce).cloned()
+    }) else { return; };
+    if operation.phase == crate::state::TreasuryInterestMintPhase::ReceiptRecoveryRequired {
+        return;
+    }
+
+    if operation.phase == crate::state::TreasuryInterestMintPhase::MintPending {
+        if now.saturating_sub(operation.tuple.created_at_time_ns)
+            >= TREASURY_INTEREST_AUTO_RETRY_MAX_AGE_NS
+        {
+            hold_treasury_interest_mint(op_nonce);
+            return;
         }
-        Err(e) => {
-            log!(INFO, "[treasury] WARNING: interest mint failed: {:?}", e);
-            Err(interest_share)
+        match mint(operation.clone()).await {
+            Ok(block_index) => {
+                let advanced = crate::state::mutate_state(|s| {
+                    let Some(current) = s.pending_treasury_interest_mints.get_mut(&op_nonce) else {
+                        return false;
+                    };
+                    if current.phase != crate::state::TreasuryInterestMintPhase::MintPending {
+                        return false;
+                    }
+                    crate::storage::record_pending_payout_event(
+                        &crate::event::PendingPayoutEvent::TreasuryInterestMintAccepted {
+                            op_nonce, block_index,
+                        },
+                    );
+                    current.phase = crate::state::TreasuryInterestMintPhase::NotifyPending {
+                        mint_block_index: block_index,
+                    };
+                    true
+                });
+                if !advanced { return; }
+                operation.phase = crate::state::TreasuryInterestMintPhase::NotifyPending {
+                    mint_block_index: block_index,
+                };
+            }
+            Err(TreasuryInterestMintFailure::Hold) => {
+                hold_treasury_interest_mint(op_nonce);
+                return;
+            }
+            Err(TreasuryInterestMintFailure::Retry(error)) => {
+                log!(INFO, "[treasury] Exact interest mint retained for retry (nonce {op_nonce}): {error:?}");
+                return;
+            }
         }
     }
+
+    let crate::state::TreasuryInterestMintPhase::NotifyPending { mint_block_index } = operation.phase else {
+        return;
+    };
+    match notify(operation, mint_block_index).await {
+        Ok(()) => crate::state::mutate_state(|s| {
+            if s.pending_treasury_interest_mints.get(&op_nonce).is_some_and(|row| {
+                row.phase == crate::state::TreasuryInterestMintPhase::NotifyPending {
+                    mint_block_index,
+                }
+            }) {
+                crate::storage::record_pending_payout_event(
+                    &crate::event::PendingPayoutEvent::TreasuryInterestMintCompleted { op_nonce },
+                );
+                s.pending_treasury_interest_mints.remove(&op_nonce);
+            }
+        }),
+        Err(error) => log!(INFO, "[treasury] Interest receipt held for exact retry (nonce {op_nonce}, mint block {mint_block_index}): {error}"),
+    }
+}
+
+fn hold_treasury_interest_mint(op_nonce: u128) {
+    crate::state::mutate_state(|s| {
+        if let Some(row) = s.pending_treasury_interest_mints.get_mut(&op_nonce) {
+            if row.phase == crate::state::TreasuryInterestMintPhase::MintPending {
+                crate::storage::record_pending_payout_event(
+                    &crate::event::PendingPayoutEvent::TreasuryInterestMintHeld { op_nonce },
+                );
+                row.phase = crate::state::TreasuryInterestMintPhase::ReceiptRecoveryRequired;
+            }
+        }
+    });
 }
 
 /// Mint icUSD interest revenue to the stability pool canister.
@@ -557,6 +727,10 @@ pub async fn flush_pending_stability_pool_interest_notifications() {
 /// snapshot-then-decrement restore path so the failed share is replayed
 /// on the next tick rather than silently lost.
 pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) -> ICUSD {
+    distribute_interest_at(interest, collateral_type, ic_cdk::api::time()).await
+}
+
+async fn distribute_interest_at(interest: ICUSD, collateral_type: Principal, now: u64) -> ICUSD {
     if interest.0 == 0 {
         return ICUSD::new(0);
     }
@@ -566,7 +740,37 @@ pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) ->
     let total_e8s = interest.to_u64();
     let mut unminted_e8s: u64 = 0;
 
-    for recipient in &split {
+    // Claim every Treasury-bound share before awaiting any other destination.
+    // Otherwise a callback trap after a prior pool await could leave the old
+    // interest bucket drained while this share has no durable obligation.
+    let mut treasury_jobs: BTreeMap<usize, Option<u128>> = BTreeMap::new();
+    let amm1_missing = read_state(|s| s.amm1_canister.is_none());
+    for (index, recipient) in split.iter().enumerate() {
+        let treasury_bound = match &recipient.destination {
+            crate::state::InterestDestination::Treasury => true,
+            crate::state::InterestDestination::ThreePool => three_pool.is_none(),
+            crate::state::InterestDestination::Amm1 => amm1_missing,
+            _ => false,
+        };
+        if treasury_bound {
+            let share_e8s = ((total_e8s as u128) * (recipient.bps as u128) / 10_000) as u64;
+            if share_e8s > 0 {
+                match start_treasury_interest_mint_at(ICUSD::from(share_e8s), now) {
+                    Ok(op_nonce) => { treasury_jobs.insert(index, Some(op_nonce)); }
+                    Err(_) => {
+                        // This share has no journal. Restore it before the
+                        // first await so a later callback trap cannot lose it.
+                        crate::state::mutate_state(|s| {
+                            s.restore_pending_interest_for_pool(collateral_type, share_e8s)
+                        });
+                        treasury_jobs.insert(index, None);
+                    }
+                }
+            }
+        }
+    }
+
+    for (index, recipient) in split.iter().enumerate() {
         let share_e8s = ((total_e8s as u128) * (recipient.bps as u128) / 10_000) as u64;
         if share_e8s == 0 {
             continue;
@@ -580,8 +784,8 @@ pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) ->
                 }
             }
             crate::state::InterestDestination::Treasury => {
-                if let Err(unsent) = mint_interest_to_treasury(share).await {
-                    unminted_e8s = unminted_e8s.saturating_add(unsent.to_u64());
+                if let Some(op_nonce) = treasury_jobs.get(&index).copied().flatten() {
+                    process_treasury_interest_mint(op_nonce).await;
                 }
             }
             crate::state::InterestDestination::ThreePool => {
@@ -591,12 +795,19 @@ pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) ->
                     }
                 } else {
                     log!(INFO, "[treasury] WARNING: 3pool interest share ({} icUSD) has no target canister configured, sending to treasury instead", share_e8s);
-                    if let Err(unsent) = mint_interest_to_treasury(share).await {
-                        unminted_e8s = unminted_e8s.saturating_add(unsent.to_u64());
+                    if let Some(op_nonce) = treasury_jobs.get(&index).copied().flatten() {
+                        process_treasury_interest_mint(op_nonce).await;
                     }
                 }
             }
             crate::state::InterestDestination::Amm1 => {
+                if amm1_missing {
+                    log!(INFO, "[treasury] AMM1 interest share ({} icUSD) has no target; using reserved Treasury fallback", share_e8s);
+                    if let Some(op_nonce) = treasury_jobs.get(&index).copied().flatten() {
+                        process_treasury_interest_mint(op_nonce).await;
+                    }
+                    continue;
+                }
                 match start_amm1_donation(share_e8s) {
                     Ok(Some(notify_nonce)) => {
                         process_amm1_donation(notify_nonce).await;
@@ -604,10 +815,12 @@ pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) ->
                         // bucket would re-split the obligation on retry.
                     }
                     Ok(None) => {
-                        log!(INFO, "[treasury] WARNING: AMM1 interest share ({} icUSD) has no target canister configured, sending to treasury instead", share_e8s);
-                        if let Err(unsent) = mint_interest_to_treasury(share).await {
-                            unminted_e8s = unminted_e8s.saturating_add(unsent.to_u64());
-                        }
+                        // Configuration disappeared after the initial route
+                        // snapshot. No Treasury fallback was reserved then.
+                        crate::state::mutate_state(|s| {
+                            s.restore_pending_interest_for_pool(collateral_type, share_e8s)
+                        });
+                        log!(INFO, "[treasury] AMM1 target changed; retained {} icUSD in pending interest", share_e8s);
                     }
                     Err(()) => log!(INFO, "[treasury] AMM1 interest share ({}) held: AMM1 pool ID is missing", share_e8s),
                 }
@@ -635,6 +848,25 @@ pub async fn distribute_stablecoin_interest(
     }
 
     let (split, three_pool) = read_state(|s| (s.interest_split.clone(), s.three_pool_canister));
+
+    // A missing donation destination converts its share into an icUSD mint
+    // for Treasury. Put that share in the durable aggregate before any await:
+    // admission may be full, and a preceding pool callback can trap. Timer B
+    // later admits it into the exact mint journal without losing the source.
+    let amm1_missing = read_state(|s| s.amm1_canister.is_none());
+    for recipient in &split {
+        let treasury_fallback = match &recipient.destination {
+            crate::state::InterestDestination::ThreePool => three_pool.is_none(),
+            crate::state::InterestDestination::Amm1 => amm1_missing,
+            _ => false,
+        };
+        if treasury_fallback {
+            let share_e8s = ((interest_e8s as u128) * (recipient.bps as u128) / 10_000) as u64;
+            if share_e8s > 0 {
+                queue_treasury_interest_fallback(share_e8s);
+            }
+        }
+    }
 
     for recipient in &split {
         let share_e8s = ((interest_e8s as u128) * (recipient.bps as u128) / 10_000) as u64;
@@ -693,18 +925,22 @@ pub async fn distribute_stablecoin_interest(
                 if let Some(pool_canister) = three_pool {
                     let _ = donate_to_three_pool(pool_canister, share_e8s).await;
                 } else {
-                    // Fallback: mint icUSD to treasury (same as distribute_interest)
-                    log!(INFO, "[treasury] WARNING: 3pool interest share ({} icUSD) has no target canister, sending to treasury instead", share_e8s);
-                    let _ = mint_interest_to_treasury(ICUSD::from(share_e8s)).await;
+                    log!(INFO, "[treasury] 3pool interest fallback ({} icUSD) queued for Treasury", share_e8s);
                 }
             }
             crate::state::InterestDestination::Amm1 => {
+                if amm1_missing {
+                    log!(INFO, "[treasury] AMM1 interest fallback ({} icUSD) queued for Treasury", share_e8s);
+                    continue;
+                }
                 match start_amm1_donation(share_e8s) {
                     Ok(Some(notify_nonce)) => process_amm1_donation(notify_nonce).await,
                     Ok(None) => {
-                        log!(INFO, "[treasury] WARNING: AMM1 stablecoin interest share ({} icUSD) has no target canister; routing to treasury", share_e8s);
-                        let pool_icusd = ICUSD::from(share_e8s);
-                        let _ = mint_interest_to_treasury(pool_icusd).await;
+                        // The target changed after this distribution began.
+                        // No Treasury fallback was pre-queued, so retain it
+                        // now instead of silently dropping the share.
+                        queue_treasury_interest_fallback(share_e8s);
+                        log!(INFO, "[treasury] AMM1 target changed; queued {} icUSD for Treasury", share_e8s);
                     }
                     Err(()) => log!(INFO, "[treasury] AMM1 stablecoin interest share ({}) held: AMM1 pool ID is missing", share_e8s),
                 }
@@ -1237,41 +1473,77 @@ pub async fn flush_pending_amm1_donations() {
 /// increment accumulates against zero; on mint failure the snapshot is
 /// restored via `saturating_add`, merging with whatever landed.
 pub async fn drain_pending_treasury_interest() {
-    let treasury = read_state(|s| s.treasury_principal);
-    let Some(tp) = treasury else {
+    if read_state(|s| s.treasury_principal.is_none()) {
         return;
-    };
+    }
     // Atomic snapshot+zero before the await.
     let snapshot = crate::state::mutate_state(|s| s.take_pending_treasury_interest());
     if snapshot.0 == 0 {
         return;
     }
-    match management::mint_icusd(snapshot, tp).await {
-        Ok(block_index) => {
-            log!(
-                INFO,
-                "[treasury] Drained {} pending interest (block {})",
-                snapshot.to_u64(),
-                block_index
-            );
-            let _ = notify_treasury_deposit(
-                tp,
-                DepositType::InterestRevenue,
-                AssetType::ICUSD,
-                snapshot.to_u64(),
-                block_index,
-            )
-            .await;
-        }
-        Err(e) => {
+    match start_treasury_interest_mint_at(snapshot, ic_cdk::api::time()) {
+        Ok(op_nonce) => process_treasury_interest_mint(op_nonce).await,
+        Err(_) => {
             crate::state::mutate_state(|s| s.restore_pending_treasury_interest(snapshot));
             log!(
                 INFO,
-                "[treasury] CRITICAL: pending interest drain failed, re-queued {} icUSD: {:?}",
+                "[treasury] Pending interest admission unavailable; retained {} icUSD",
                 snapshot.to_u64(),
-                e
             );
         }
+    }
+}
+
+/// Admit event-backed stablecoin-interest fallbacks without erasing their
+/// source obligation when the mint journal is full or Treasury is unavailable.
+pub async fn drain_pending_treasury_interest_fallback() {
+    let amount_e8s = crate::state::read_state(|s| {
+        s.pending_treasury_interest_fallback_e8s.min(u128::from(u64::MAX)) as u64
+    });
+    if amount_e8s == 0 { return; }
+    let Ok(op_nonce) = start_treasury_interest_mint_at(ICUSD::from(amount_e8s), ic_cdk::api::time()) else {
+        return;
+    };
+    // No await separates the journal start from this source debit. If this
+    // callback traps, both writes roll back and replay keeps the old credit.
+    crate::state::mutate_state(|s| {
+        let next = s.pending_treasury_interest_fallback_e8s
+            .checked_sub(u128::from(amount_e8s))
+            .expect("Treasury fallback source changed during admission");
+        crate::storage::record_pending_payout_event(
+            &crate::event::PendingPayoutEvent::TreasuryInterestFallbackAdmitted { amount_e8s },
+        );
+        s.pending_treasury_interest_fallback_e8s = next;
+    });
+    process_treasury_interest_mint(op_nonce).await;
+}
+
+/// Retry a bounded, fair batch of exact Treasury-interest operations. Held
+/// unknown mint outcomes stay visible in state and are never reminted here.
+pub async fn flush_pending_treasury_interest_mints() {
+    let pending = crate::state::mutate_state(|s| {
+        let cursor = s.treasury_interest_mint_retry_cursor;
+        let eligible: Vec<u128> = s.pending_treasury_interest_mints.iter()
+            .filter_map(|(&nonce, row)|
+                (row.phase != crate::state::TreasuryInterestMintPhase::ReceiptRecoveryRequired)
+                    .then_some(nonce))
+            .collect();
+        let mut selected: Vec<u128> = eligible.iter().copied()
+            .filter(|nonce| *nonce > cursor)
+            .take(TREASURY_INTEREST_RETRY_BATCH)
+            .collect();
+        if selected.len() < TREASURY_INTEREST_RETRY_BATCH {
+            selected.extend(eligible.into_iter()
+                .filter(|nonce| *nonce <= cursor)
+                .take(TREASURY_INTEREST_RETRY_BATCH - selected.len()));
+        }
+        if let Some(last) = selected.last() {
+            s.treasury_interest_mint_retry_cursor = *last;
+        }
+        selected
+    });
+    for op_nonce in pending {
+        process_treasury_interest_mint(op_nonce).await;
     }
 }
 
@@ -1544,5 +1816,171 @@ mod amm1_donation_retry_tests {
         assert_eq!(state::read_state(|s| s.held_amm1_donations.len()), 1);
         assert_eq!(state::read_state(|s| s.held_amm1_donations[0].amount_e8s), 123);
         assert!(state::read_state(|s| s.pending_amm1_donation_operations.is_empty()));
+    }
+}
+
+#[cfg(test)]
+mod treasury_interest_mint_tests {
+    use super::{
+        distribute_interest_at, distribute_stablecoin_interest, process_treasury_interest_mint_with_now,
+        start_treasury_interest_mint_at,
+        TreasuryInterestMintFailure, TREASURY_INTEREST_AUTO_RETRY_MAX_AGE_NS,
+    };
+    use crate::numeric::ICUSD;
+    use crate::state::{self, InterestDestination, InterestRecipient, State, TreasuryInterestMintPhase};
+    use candid::Principal;
+    use std::cell::RefCell;
+
+    fn configured_state() {
+        let mut state = State::default();
+        state.icusd_ledger_principal = Principal::from_slice(&[1]);
+        state.treasury_principal = Some(Principal::from_slice(&[2]));
+        state::replace_state(state);
+    }
+
+    #[test]
+    fn uncertain_mint_retries_same_tuple_then_retries_only_notification() {
+        configured_state();
+        let nonce = start_treasury_interest_mint_at(ICUSD::from(900u64), 1_000).unwrap();
+        let tuple = state::read_state(|s| s.pending_treasury_interest_mints[&nonce].tuple.clone());
+        let observed = RefCell::new(Vec::new());
+        futures::executor::block_on(process_treasury_interest_mint_with_now(
+            nonce,
+            1_001,
+            |operation| {
+                observed.borrow_mut().push(operation.tuple);
+                async {
+                    Err(TreasuryInterestMintFailure::Retry(
+                        icrc_ledger_types::icrc1::transfer::TransferError::TemporarilyUnavailable,
+                    ))
+                }
+            },
+            |_, _| async { panic!("uncertain mint must not notify") },
+        ));
+        assert_eq!(state::read_state(|s| s.pending_treasury_interest_mints[&nonce].phase.clone()),
+            TreasuryInterestMintPhase::MintPending);
+        futures::executor::block_on(process_treasury_interest_mint_with_now(
+            nonce,
+            1_002,
+            |operation| {
+                observed.borrow_mut().push(operation.tuple);
+                async { Ok(77) } // exact ledger Duplicate of first committed transfer
+            },
+            |operation, block| {
+                assert_eq!(operation.treasury, tuple.destination);
+                assert_eq!(block, 77);
+                async { Err("Treasury backfill incomplete".into()) }
+            },
+        ));
+        assert_eq!(observed.borrow().as_slice(), &[tuple.clone(), tuple]);
+        assert_eq!(state::read_state(|s| s.pending_treasury_interest_mints[&nonce].phase.clone()),
+            TreasuryInterestMintPhase::NotifyPending { mint_block_index: 77 });
+        futures::executor::block_on(process_treasury_interest_mint_with_now(
+            nonce,
+            1_003,
+            |_| async { panic!("notification retry must never remint") },
+            |_, block| async move { assert_eq!(block, 77); Ok(()) },
+        ));
+        assert!(state::read_state(|s| !s.pending_treasury_interest_mints.contains_key(&nonce)));
+    }
+
+    #[test]
+    fn aged_unknown_and_typed_too_old_are_held_without_remint() {
+        configured_state();
+        let aged = start_treasury_interest_mint_at(ICUSD::from(1u64), 1_000).unwrap();
+        futures::executor::block_on(process_treasury_interest_mint_with_now(
+            aged,
+            1_000 + TREASURY_INTEREST_AUTO_RETRY_MAX_AGE_NS,
+            |_| async { panic!("aged unknown may not be retried") },
+            |_, _| async { panic!("unknown mint may not be notified") },
+        ));
+        assert_eq!(state::read_state(|s| s.pending_treasury_interest_mints[&aged].phase.clone()),
+            TreasuryInterestMintPhase::ReceiptRecoveryRequired);
+
+        let too_old = start_treasury_interest_mint_at(ICUSD::from(2u64), 2_000).unwrap();
+        futures::executor::block_on(process_treasury_interest_mint_with_now(
+            too_old,
+            2_001,
+            |_| async { Err(TreasuryInterestMintFailure::Hold) },
+            |_, _| async { panic!("TooOld mint may not be notified") },
+        ));
+        assert_eq!(state::read_state(|s| s.pending_treasury_interest_mints[&too_old].phase.clone()),
+            TreasuryInterestMintPhase::ReceiptRecoveryRequired);
+    }
+
+    #[test]
+    fn admission_failure_does_not_claim_the_share() {
+        let mut state = State::default();
+        state.treasury_principal = None;
+        state::replace_state(state);
+        assert_eq!(start_treasury_interest_mint_at(ICUSD::from(42u64), 1_000), Err(ICUSD::from(42u64)));
+        assert!(state::read_state(|s| s.pending_treasury_interest_mints.is_empty()));
+    }
+
+    #[test]
+    fn stablecoin_fallback_preserves_interest_when_mint_journal_is_full() {
+        for destination in [InterestDestination::ThreePool, InterestDestination::Amm1] {
+            configured_state();
+            let row = state::read_state(|s| {
+                let nonce = 1u128;
+                crate::state::TreasuryInterestMintJournal {
+                    tuple: crate::state::BorrowMintTuple {
+                        ledger: s.icusd_ledger_principal,
+                        destination: s.treasury_principal.unwrap(),
+                        amount_e8s: 1,
+                        memo: nonce.to_be_bytes(),
+                        created_at_time_ns: 1,
+                        op_nonce: nonce,
+                    },
+                    treasury: s.treasury_principal.unwrap(),
+                    phase: TreasuryInterestMintPhase::ReceiptRecoveryRequired,
+                }
+            });
+            state::mutate_state(|s| {
+                s.interest_split = vec![InterestRecipient { destination, bps: 10_000 }];
+                for nonce in 1..=super::MAX_PENDING_TREASURY_INTEREST_MINTS {
+                    s.pending_treasury_interest_mints.insert(nonce as u128, row.clone());
+                }
+            });
+            futures::executor::block_on(distribute_stablecoin_interest(
+                500,
+                Principal::from_slice(&[3]),
+                crate::StableTokenType::CKUSDC,
+            ));
+            assert_eq!(state::read_state(|s| s.pending_treasury_interest_fallback_e8s), 500);
+            assert_eq!(state::read_state(|s| s.pending_treasury_interest_mints.len()),
+                super::MAX_PENDING_TREASURY_INTEREST_MINTS);
+        }
+    }
+
+    #[test]
+    fn icusd_interest_admission_failure_restores_share_before_any_await() {
+        configured_state();
+        state::mutate_state(|s| {
+            s.interest_split = vec![InterestRecipient {
+                destination: InterestDestination::Treasury,
+                bps: 10_000,
+            }];
+            let treasury = s.treasury_principal.unwrap();
+            for nonce in 1..=super::MAX_PENDING_TREASURY_INTEREST_MINTS {
+                s.pending_treasury_interest_mints.insert(nonce as u128,
+                    crate::state::TreasuryInterestMintJournal {
+                        tuple: crate::state::BorrowMintTuple {
+                            ledger: s.icusd_ledger_principal,
+                            destination: treasury,
+                            amount_e8s: 1,
+                            memo: (nonce as u128).to_be_bytes(),
+                            created_at_time_ns: 1,
+                            op_nonce: nonce as u128,
+                        },
+                        treasury,
+                        phase: TreasuryInterestMintPhase::ReceiptRecoveryRequired,
+                    });
+            }
+        });
+        let collateral = Principal::from_slice(&[3]);
+        let unminted = futures::executor::block_on(distribute_interest_at(ICUSD::from(500u64), collateral, 1_000));
+        assert_eq!(unminted.to_u64(), 0, "the share was already put in the pending bucket");
+        assert_eq!(state::read_state(|s| s.pending_interest_for_pools[&collateral]), 500);
     }
 }

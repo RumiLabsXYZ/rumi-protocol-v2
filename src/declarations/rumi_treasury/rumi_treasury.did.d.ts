@@ -112,6 +112,11 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : string }
   >,
+  'deposit_interest_revenue_once' : ActorMethod<
+    [DepositArgs],
+    { 'Ok' : bigint } |
+      { 'Err' : string }
+  >,
   'get_deposits' : ActorMethod<
     [[] | [bigint], [] | [bigint]],
     Array<DepositRecord>

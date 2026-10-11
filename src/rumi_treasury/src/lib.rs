@@ -185,6 +185,61 @@ fn validate_borrowing_fee_args(args: &DepositArgs) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_interest_revenue_args(args: &DepositArgs) -> Result<(), String> {
+    if args.deposit_type != DepositType::InterestRevenue || args.asset_type != AssetType::ICUSD {
+        return Err("only InterestRevenue/ICUSD deposits are accepted".to_string());
+    }
+    Ok(())
+}
+
+/// Record an InterestRevenue/ICUSD ledger transfer exactly once. This
+/// versioned endpoint lets a newer backend fail closed against an older
+/// Treasury that does not expose the method.
+#[update]
+#[candid_method(update)]
+fn deposit_interest_revenue_once(args: DepositArgs) -> Result<u64, String> {
+    ensure_controller()?;
+    validate_interest_revenue_args(&args)?;
+    if with_state(|s| s.get_config().is_paused) {
+        return Err("Treasury is paused and not accepting deposits".to_string());
+    }
+
+    let now = ic_cdk::api::time();
+    let record = DepositRecord {
+        id: 0,
+        deposit_type: args.deposit_type,
+        asset_type: args.asset_type,
+        amount: args.amount,
+        block_index: args.block_index,
+        timestamp: now,
+        memo: args.memo,
+    };
+    record_interest_revenue_with_event(record, caller(), now)
+}
+
+fn record_interest_revenue_with_event(
+    record: DepositRecord,
+    deposit_caller: Principal,
+    timestamp: u64,
+) -> Result<u64, String> {
+    let amount = record.amount;
+    let (deposit_id, newly_recorded) = with_state_mut(|s| s.record_interest_revenue_once(record))?;
+    if newly_recorded {
+        with_state_mut(|s| {
+            s.push_event_at(
+                deposit_caller,
+                TreasuryAction::Deposit {
+                    deposit_type: DepositType::InterestRevenue,
+                    asset_type: AssetType::ICUSD,
+                    amount,
+                },
+                timestamp,
+            )
+        });
+    }
+    Ok(deposit_id)
+}
+
 /// Apply one deposit and its audit event as a single synchronous state
 /// transition. Exact BorrowingFee/ICUSD retries return the original ID and do
 /// not create another event.

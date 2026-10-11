@@ -505,7 +505,128 @@ mod tests {
         let service = crate::__export_service();
         assert!(service.contains("continue_icusd_deposit_block_backfill"));
         assert!(service.contains("deposit_borrowing_fee_once"));
+        assert!(service.contains("deposit_interest_revenue_once"));
         assert!(service.contains("DepositArgs"));
+    }
+
+    #[test]
+    fn interest_revenue_endpoint_accepts_only_icusd_interest_payloads() {
+        let interest_icusd = crate::types::DepositArgs {
+            deposit_type: DepositType::InterestRevenue,
+            asset_type: AssetType::ICUSD,
+            amount: 1,
+            block_index: 1,
+            memo: Some("interest".to_string()),
+        };
+        assert!(crate::validate_interest_revenue_args(&interest_icusd).is_ok());
+
+        assert!(crate::validate_interest_revenue_args(&crate::types::DepositArgs {
+            deposit_type: DepositType::BorrowingFee,
+            ..interest_icusd.clone()
+        })
+        .is_err());
+        assert!(crate::validate_interest_revenue_args(&crate::types::DepositArgs {
+            asset_type: AssetType::ICP,
+            ..interest_icusd
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn interest_revenue_icusd_replay_returns_original_deposit_without_duplicate_event() {
+        init_test_treasury();
+        let original = deposit_record(
+            DepositType::InterestRevenue,
+            AssetType::ICUSD,
+            12_345,
+            99,
+            Some("interest revenue"),
+        );
+        let first =
+            crate::record_interest_revenue_with_event(original.clone(), mock_principal(), 100)
+                .expect("first report records");
+        let mut replay = original;
+        replay.timestamp = 200;
+        let duplicate = crate::record_interest_revenue_with_event(replay, mock_principal(), 200)
+            .expect("exact replay returns original ID");
+        assert_eq!(duplicate, first);
+
+        crate::state::with_state(|s| {
+            assert_eq!(s.get_deposits_count(), 1);
+            assert_eq!(s.balances[&AssetType::ICUSD].total, 12_345);
+            assert_eq!(s.get_events_count(), 1);
+        });
+    }
+
+    #[test]
+    fn interest_revenue_icusd_replay_rejects_payload_conflicts_and_incomplete_backfill() {
+        init_test_treasury();
+        crate::record_interest_revenue_with_event(
+            deposit_record(
+                DepositType::InterestRevenue,
+                AssetType::ICUSD,
+                12_345,
+                99,
+                Some("interest revenue"),
+            ),
+            mock_principal(),
+            100,
+        )
+        .unwrap();
+
+        for conflicting in [
+            deposit_record(
+                DepositType::InterestRevenue,
+                AssetType::ICUSD,
+                12_346,
+                99,
+                Some("interest revenue"),
+            ),
+            deposit_record(
+                DepositType::InterestRevenue,
+                AssetType::ICUSD,
+                12_345,
+                99,
+                Some("different memo"),
+            ),
+            deposit_record(
+                DepositType::BorrowingFee,
+                AssetType::ICUSD,
+                12_345,
+                99,
+                Some("interest revenue"),
+            ),
+        ] {
+            assert!(
+                crate::record_interest_revenue_with_event(conflicting, mock_principal(), 300)
+                    .is_err()
+            );
+        }
+
+        crate::state::with_state_mut(|s| {
+            s.icusd_deposit_block_backfill
+                .set(crate::state::IcusdDepositBlockBackfill::InProgress {
+                    next_deposit_id: 1,
+                    snapshot_max_id: 1,
+                })
+                .unwrap();
+        });
+        assert!(crate::state::with_state_mut(|s| {
+            s.record_interest_revenue_once(deposit_record(
+                DepositType::InterestRevenue,
+                AssetType::ICUSD,
+                12_345,
+                99,
+                Some("interest revenue"),
+            ))
+        })
+        .is_err());
+
+        crate::state::with_state(|s| {
+            assert_eq!(s.get_deposits_count(), 1);
+            assert_eq!(s.balances[&AssetType::ICUSD].total, 12_345);
+            assert_eq!(s.get_events_count(), 1);
+        });
     }
 
     #[test]

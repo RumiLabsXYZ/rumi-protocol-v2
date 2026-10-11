@@ -1208,10 +1208,12 @@ pub async fn interest_and_treasury_tick() {
     // Drain pending treasury interest/collateral accumulated from sync
     // liquidations.
     crate::treasury::drain_pending_treasury_interest().await;
+    crate::treasury::drain_pending_treasury_interest_fallback().await;
     crate::treasury::drain_pending_treasury_collateral().await;
 
     // Flush accumulated interest to pools/treasury when threshold is reached.
     crate::treasury::flush_pending_interest().await;
+    crate::treasury::flush_pending_treasury_interest_mints().await;
     crate::treasury::flush_pending_stability_pool_interest_notifications().await;
     crate::treasury::flush_pending_amm1_donations().await;
 
