@@ -5,6 +5,7 @@
   import { CANISTER_IDS } from '$lib/config';
   import CkErc20TokenSelect from '$lib/components/common/CkErc20TokenSelect.svelte';
   import { ckErc20Logo, featuredCkErc20Symbols } from '$lib/utils/ckerc20Logos';
+  import { withCkErc20WithdrawalLock } from '$lib/utils/ckerc20WithdrawalLock';
   import {
     CKERC20_MINTER_DASHBOARD,
     discoverCkErc20Tokens,
@@ -620,8 +621,8 @@
     if (!locks?.request) { error = 'This browser cannot safely coordinate minter transactions across tabs. Use a supported browser with Web Locks enabled.'; return; }
     busy = true;
     try {
-      await locks.request(`rumi:ckerc20:withdrawal:${owner.toText()}:${token.ledgerId}`, { mode: 'exclusive', ifAvailable: true }, async (lock: unknown) => {
-      if (!lock) throw new Error(`Another ${token.symbol} withdrawal is active in another tab. Wait for it to finish, then reconcile its status.`);
+      await withCkErc20WithdrawalLock(locks, owner.toText(), async (lock: unknown) => {
+      if (!lock) throw new Error('Another ckERC20 withdrawal for this wallet is active in another tab. Wait for it to finish, then reconcile its status.');
       syncPendingWithdrawal(owner);
       if (pendingWithdrawal?.owner === owner.toText()) throw new Error('A prior withdrawal request has no confirmed response. Reconcile its ledger activity and minter status before retrying.');
       requirePersistentOperationState();
