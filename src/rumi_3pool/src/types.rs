@@ -422,6 +422,41 @@ pub enum ThreePoolError {
     ClaimNotFound,
 }
 
+/// Errors returned by the keyed protocol donation endpoint. Kept separate
+/// from `ThreePoolError` so the legacy `receive_donation` response variant
+/// remains unchanged for existing callers.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DonationReceiptErrorV1 {
+    Unauthorized,
+    PayloadConflict,
+    CapacityExceeded,
+    InvalidCoinIndex,
+    ZeroAmount,
+    PoolEmpty,
+    PoolPaused,
+    PoolLocked,
+    MathOverflow,
+    TransferFailed { token: String, reason: String },
+}
+
+/// Immutable settlement identity for one backend-authorized donation.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DonationReceiptV1 {
+    pub token_index: u8,
+    pub ledger: Principal,
+    pub amount: u128,
+    pub source_mint_block: u64,
+}
+
+/// Read-only capacity telemetry for the permanent donation idempotency map.
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DonationReceiptCapacityV1 {
+    pub receipt_count: u64,
+    pub max_receipts: u64,
+    pub warning_threshold: u64,
+    pub warning_threshold_reached: bool,
+}
+
 /// A record of tokens the pool owes a user after a value-moving operation
 /// pulled or debited their funds but a subsequent ledger transfer failed.
 ///

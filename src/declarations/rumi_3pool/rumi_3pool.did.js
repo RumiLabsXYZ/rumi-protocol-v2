@@ -111,6 +111,12 @@ export const idlFactory = ({ IDL }) => {
     'timestamp' : IDL.Nat64,
     'balances' : IDL.Vec(IDL.Nat),
   });
+  const DonationReceiptCapacityV1 = IDL.Record({
+    'max_receipts' : IDL.Nat64,
+    'warning_threshold_reached' : IDL.Bool,
+    'receipt_count' : IDL.Nat64,
+    'warning_threshold' : IDL.Nat64,
+  });
   const FeePoint = IDL.Record({
     'timestamp' : IDL.Nat64,
     'avg_fee_bps' : IDL.Nat32,
@@ -596,6 +602,18 @@ export const idlFactory = ({ IDL }) => {
     'token_out' : IDL.Nat8,
     'fee_native' : IDL.Nat,
   });
+  const DonationReceiptErrorV1 = IDL.Variant({
+    'PoolPaused' : IDL.Null,
+    'InvalidCoinIndex' : IDL.Null,
+    'PayloadConflict' : IDL.Null,
+    'CapacityExceeded' : IDL.Null,
+    'ZeroAmount' : IDL.Null,
+    'PoolLocked' : IDL.Null,
+    'MathOverflow' : IDL.Null,
+    'Unauthorized' : IDL.Null,
+    'TransferFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
+    'PoolEmpty' : IDL.Null,
+  });
   const SwapReceiptErrorV1 = IDL.Variant({
     'CapacityExceeded' : IDL.Null,
     'IntentConflict' : IDL.Null,
@@ -683,6 +701,11 @@ export const idlFactory = ({ IDL }) => {
     'get_balance_series' : IDL.Func(
         [StatsWindow, IDL.Nat64],
         [IDL.Vec(BalancePoint)],
+        ['query'],
+      ),
+    'get_donation_receipt_capacity_v1' : IDL.Func(
+        [],
+        [DonationReceiptCapacityV1],
         ['query'],
       ),
     'get_fee_curve_params' : IDL.Func([], [FeeCurveParams], ['query']),
@@ -895,6 +918,11 @@ export const idlFactory = ({ IDL }) => {
     'receive_donation' : IDL.Func(
         [IDL.Nat8, IDL.Nat],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
+        [],
+      ),
+    'receive_donation_v2' : IDL.Func(
+        [IDL.Nat, IDL.Nat64, IDL.Nat8, IDL.Nat],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : DonationReceiptErrorV1 })],
         [],
       ),
     'reconcile_aged_input' : IDL.Func(

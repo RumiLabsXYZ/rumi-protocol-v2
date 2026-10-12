@@ -99,6 +99,22 @@ export type DeviceSpec = { 'GenericDisplay' : null } |
       'lines_per_page' : number,
     }
   };
+export interface DonationReceiptCapacityV1 {
+  'max_receipts' : bigint,
+  'warning_threshold_reached' : boolean,
+  'receipt_count' : bigint,
+  'warning_threshold' : bigint,
+}
+export type DonationReceiptErrorV1 = { 'PoolPaused' : null } |
+  { 'InvalidCoinIndex' : null } |
+  { 'PayloadConflict' : null } |
+  { 'CapacityExceeded' : null } |
+  { 'ZeroAmount' : null } |
+  { 'PoolLocked' : null } |
+  { 'MathOverflow' : null } |
+  { 'Unauthorized' : null } |
+  { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
+  { 'PoolEmpty' : null };
 export interface ErrorInfo { 'description' : string }
 export interface FeeBucket {
   'volume_per_token' : Array<bigint>,
@@ -608,6 +624,10 @@ export interface _SERVICE {
     [StatsWindow, bigint],
     Array<BalancePoint>
   >,
+  'get_donation_receipt_capacity_v1' : ActorMethod<
+    [],
+    DonationReceiptCapacityV1
+  >,
   'get_fee_curve_params' : ActorMethod<[], FeeCurveParams>,
   'get_fee_series' : ActorMethod<[StatsWindow, bigint], Array<FeePoint>>,
   'get_fee_stats' : ActorMethod<[StatsWindow], FeeStats>,
@@ -732,6 +752,11 @@ export interface _SERVICE {
     [number, bigint],
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
+  >,
+  'receive_donation_v2' : ActorMethod<
+    [bigint, bigint, number, bigint],
+    { 'Ok' : null } |
+      { 'Err' : DonationReceiptErrorV1 }
   >,
   'reconcile_aged_input' : ActorMethod<
     [bigint, bigint],

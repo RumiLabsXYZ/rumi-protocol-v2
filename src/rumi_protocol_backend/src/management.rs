@@ -1271,6 +1271,14 @@ pub fn stability_pool_change_has_v2_obligations(
             .pending_3usd_refunds
             .values()
             .any(|refund| refund.stability_pool == old_pool && refund.resolution.is_none())
+        // The fallback aggregate is keyed by collateral, not by the pool
+        // principal that was configured when the share accrued. Keep the old
+        // route bound until those liabilities are admitted into exact mint
+        // journal rows; otherwise rotation could send A's accrued share to B.
+        || state
+            .pending_stability_pool_interest_fallback_e8s
+            .values()
+            .any(|amount_e8s| *amount_e8s > 0)
 }
 
 thread_local! {
@@ -2288,10 +2296,10 @@ pub async fn mint_icusd(amount: ICUSD, to: Principal) -> Result<u64, TransferErr
     .await
 }
 
-/// Mint icUSD using the exact tuple durably reserved by a borrow operation.
-/// Retries must call this with the same journal row so ledger deduplication
-/// can return `Duplicate` as the original block.
-pub async fn mint_icusd_with_borrow_tuple(
+/// Mint icUSD using an exact tuple durably reserved before the first call.
+/// Retries must reuse the same tuple so ledger deduplication returns
+/// `Duplicate` as the original block after a lost response.
+pub async fn mint_icusd_with_exact_tuple(
     tuple: &crate::state::BorrowMintTuple,
 ) -> Result<u64, TransferError> {
     let client = ICRC1Client {
@@ -2312,6 +2320,13 @@ pub async fn mint_icusd_with_borrow_tuple(
         })
         .await;
     handle_borrow_mint_outcome(tuple.ledger, outer)
+}
+
+/// Compatibility name retained for existing borrow-mint callers.
+pub async fn mint_icusd_with_borrow_tuple(
+    tuple: &crate::state::BorrowMintTuple,
+) -> Result<u64, TransferError> {
+    mint_icusd_with_exact_tuple(tuple).await
 }
 
 /// Submit a zero-value, domain-separated operation using the original borrow
@@ -2444,6 +2459,16 @@ mod borrow_mint_outcome_tests {
         assert_eq!(
             handle_borrow_mint_outcome(ledger, Ok(Ok(Nat::from(42u64)))),
             Ok(42)
+        );
+        assert_eq!(
+            handle_borrow_mint_outcome(
+                ledger,
+                Ok(Err(TransferError::Duplicate {
+                    duplicate_of: Nat::from(42u64),
+                })),
+            ),
+            Ok(42),
+            "an exact-tuple ledger Duplicate is the original positive mint receipt"
         );
     }
 
@@ -3247,6 +3272,54 @@ mod three_usd_value_tests {
             &state, new_pool
         ));
         assert!(!super::three_pool_canister_change_has_old_ledger_obligations(&state, old_ledger));
+    }
+
+    #[test]
+    fn pool_rotation_stays_blocked_for_fallback_interest_but_missing_target_can_be_set() {
+        let old_pool = candid::Principal::from_slice(&[3]);
+        let new_pool = candid::Principal::from_slice(&[4]);
+        let collateral = candid::Principal::from_slice(&[5]);
+        let mut state = v2_ready_state();
+        state.stability_pool_canister = Some(old_pool);
+        state
+            .pending_stability_pool_interest_fallback_e8s
+            .insert(collateral, 765);
+
+        assert!(super::stability_pool_change_has_v2_obligations(&state, new_pool));
+        assert!(!super::stability_pool_change_has_v2_obligations(&state, old_pool));
+
+        state
+            .pending_stability_pool_interest_fallback_e8s
+            .remove(&collateral);
+        state.pending_treasury_interest_mints.insert(
+            9,
+            crate::state::TreasuryInterestMintJournal {
+                tuple: crate::state::BorrowMintTuple {
+                    ledger: candid::Principal::from_slice(&[6]),
+                    destination: old_pool,
+                    amount_e8s: 765,
+                    memo: [0; 16],
+                    created_at_time_ns: 1,
+                    op_nonce: 9,
+                },
+                treasury: old_pool,
+                route: crate::state::TreasuryInterestMintRoute::StabilityPool {
+                    collateral_type: collateral,
+                },
+                phase: crate::state::TreasuryInterestMintPhase::MintPending,
+                history_floor: None,
+                expiry_proven: false,
+                absence_scan: None,
+            },
+        );
+        // Already-admitted rows carry their destination in the exact tuple;
+        // they remain independently retryable across a later route change.
+        assert!(!super::stability_pool_change_has_v2_obligations(&state, new_pool));
+
+        // Missing-target shares have not been bound to a pool yet, so initial
+        // registration must remain possible to let the fallback drain.
+        state.stability_pool_canister = None;
+        assert!(!super::stability_pool_change_has_v2_obligations(&state, new_pool));
     }
 
     #[test]

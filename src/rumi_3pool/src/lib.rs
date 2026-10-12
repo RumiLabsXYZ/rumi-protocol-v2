@@ -2411,44 +2411,107 @@ pub async fn donate(token_index: u8, amount: u128) -> Result<(), ThreePoolError>
 #[update]
 pub async fn receive_donation(token_index: u8, amount: u128) -> Result<(), ThreePoolError> {
     let caller = ic_cdk::api::caller();
-    let admin = read_state(|s| s.config.admin);
-    if caller != admin && !ic_cdk::api::is_controller(&caller) {
+    if !donation_caller_authorized(caller) {
         return Err(ThreePoolError::Unauthorized);
     }
+    receive_donation_accounting(token_index, amount, caller, None)
+        .await
+        .map(|_| ())
+        .map_err(donation_receipt_error_to_legacy)
+}
+
+/// Read-only telemetry for the permanent keyed donation receipt table. This
+/// exposes the hard admission cap and its early-warning threshold so an
+/// operator can plan a cap-raising upgrade without deleting replay history.
+#[query]
+pub fn get_donation_receipt_capacity_v1() -> DonationReceiptCapacityV1 {
+    let receipt_count = storage::donation_receipts::len();
+    DonationReceiptCapacityV1 {
+        receipt_count,
+        max_receipts: storage::MAX_DONATION_RECEIPTS_V1,
+        warning_threshold: storage::DONATION_RECEIPT_WARNING_THRESHOLD_V1,
+        warning_threshold_reached:
+            storage::donation_receipt_warning_threshold_reached(receipt_count),
+    }
+}
+
+/// Idempotent protocol donation ingress. The exact backend operation nonce is
+/// scoped to the authenticated caller; `source_mint_block` and the full
+/// payload are retained so reusing an identity for different accounting fails.
+/// Existing `receive_donation` remains available with its original Candid ABI.
+#[update]
+pub async fn receive_donation_v2(
+    op_nonce: u128,
+    source_mint_block: u64,
+    token_index: u8,
+    amount: u128,
+) -> Result<(), DonationReceiptErrorV1> {
+    let caller = ic_cdk::api::caller();
+    if !donation_caller_authorized(caller) {
+        return Err(DonationReceiptErrorV1::Unauthorized);
+    }
+    let Some(token) = read_state(|s| s.config.tokens.get(token_index as usize).cloned()) else {
+        return Err(DonationReceiptErrorV1::InvalidCoinIndex);
+    };
+    let receipt = DonationReceiptV1 {
+        token_index,
+        ledger: token.ledger_id,
+        amount,
+        source_mint_block,
+    };
+    if let Some(existing) = storage::donation_receipts::get(caller, op_nonce) {
+        return if existing == receipt {
+            Ok(())
+        } else {
+            Err(DonationReceiptErrorV1::PayloadConflict)
+        };
+    }
+    receive_donation_accounting(token_index, amount, caller, Some((op_nonce, receipt)))
+        .await
+        .map(|_| ())
+}
+
+fn donation_caller_authorized(caller: Principal) -> bool {
+    caller == read_state(|s| s.config.admin) || ic_cdk::api::is_controller(&caller)
+}
+
+async fn receive_donation_accounting(
+    token_index: u8,
+    amount: u128,
+    caller: Principal,
+    receipt: Option<(u128, DonationReceiptV1)>,
+) -> Result<(), DonationReceiptErrorV1> {
     if read_state(|s| s.is_paused) {
-        return Err(ThreePoolError::PoolPaused);
+        return Err(DonationReceiptErrorV1::PoolPaused);
     }
     if amount == 0 {
-        return Err(ThreePoolError::ZeroAmount);
+        return Err(DonationReceiptErrorV1::ZeroAmount);
     }
     let idx = token_index as usize;
     if idx >= 3 {
-        return Err(ThreePoolError::InvalidCoinIndex);
+        return Err(DonationReceiptErrorV1::InvalidCoinIndex);
     }
     if read_state(|s| s.lp_total_supply) == 0 {
-        return Err(ThreePoolError::PoolEmpty);
+        return Err(DonationReceiptErrorV1::PoolEmpty);
     }
 
     // Acquire the pool lock BEFORE the icrc1_balance_of await. Without it, a
-    // concurrent swap/donate/add_liquidity could mutate s.balances[idx] between
-    // the on-chain balance read and the internal-balance read used to compute
-    // expected_min, producing a stale comparison. Closes GHSA-62cr-vcj8-663h
-    // Finding 4 (audit fence B-01b).
-    let _pool_guard = pool_guard::PoolGuard::new()?;
+    // concurrent swap/donate/add_liquidity could mutate reserves between the
+    // on-chain balance read and the internal-balance read below.
+    let _pool_guard = pool_guard::PoolGuard::new()
+        .map_err(|_| DonationReceiptErrorV1::PoolLocked)?;
     if storage::payouts::has_unsettled_input_for_token(token_index) {
-        return Err(ThreePoolError::PoolLocked);
+        return Err(DonationReceiptErrorV1::PoolLocked);
     }
 
-    // Verify the pool actually holds enough tokens on the ledger
     let (ledger, symbol) = read_state(|s| {
         (s.config.tokens[idx].ledger_id, s.config.tokens[idx].symbol.clone())
     });
-    let pool_id = ic_cdk::id();
     let balance: Result<(candid::Nat,), _> = ic_cdk::call(
         ledger,
         "icrc1_balance_of",
         (icrc_ledger_types::icrc1::account::Account {
-            owner: pool_id,
+            owner: ic_cdk::id(),
             subaccount: None,
         },),
     )
@@ -2457,48 +2520,93 @@ pub async fn receive_donation(token_index: u8, amount: u128) -> Result<(), Three
         Ok((nat,)) => nat.0.try_into().unwrap_or(0),
         Err((code, msg)) => {
             log!(INFO, "receive_donation: balance check failed: {:?} {}", code, msg);
-            return Err(ThreePoolError::TransferFailed {
+            return Err(DonationReceiptErrorV1::TransferFailed {
                 token: symbol,
                 reason: format!("balance check failed: {:?} {}", code, msg),
             });
         }
     };
-    // The ledger account also holds tokens backing liabilities that are not
-    // included in `balances`: accrued admin fees and failed outbound
-    // transfers/refunds recorded as pending claims. Do not let a donation
-    // acknowledgement reclassify those funds as LP reserves.
     let (tracked_reserves, admin_fees, balances_before, admin_fees_before) = read_state(|s| {
         (s.balances[idx], s.admin_fees[idx], s.balances, s.admin_fees)
     });
     let reserve_after = tracked_reserves
         .checked_add(amount)
-        .ok_or(ThreePoolError::MathOverflow)?;
+        .ok_or(DonationReceiptErrorV1::MathOverflow)?;
     let pending_claims = storage::pending_claims::total_for_token(token_index)
-        .ok_or(ThreePoolError::MathOverflow)?;
+        .ok_or(DonationReceiptErrorV1::MathOverflow)?;
     let expected_min = tracked_reserves
         .checked_add(admin_fees)
         .and_then(|liabilities| liabilities.checked_add(pending_claims))
         .and_then(|liabilities| liabilities.checked_add(amount))
-        .ok_or(ThreePoolError::MathOverflow)?;
+        .ok_or(DonationReceiptErrorV1::MathOverflow)?;
     if on_chain_balance < expected_min {
         log!(INFO, "receive_donation: on-chain balance {} < expected {}", on_chain_balance, expected_min);
-        return Err(ThreePoolError::TransferFailed {
+        return Err(DonationReceiptErrorV1::TransferFailed {
             token: symbol,
             reason: format!("on-chain balance {} < expected {}", on_chain_balance, expected_min),
         });
     }
 
-    mutate_state(|s| -> Result<(), ThreePoolError> {
+    let receipt_inserted = mutate_state(|s| -> Result<bool, DonationReceiptErrorV1> {
         if s.balances != balances_before || s.admin_fees != admin_fees_before {
-            return Err(ThreePoolError::PoolLocked);
+            return Err(DonationReceiptErrorV1::PoolLocked);
+        }
+        let mut receipt_inserted = false;
+        if let Some((op_nonce, receipt)) = receipt {
+            match storage::donation_receipts::insert_if_absent(caller, op_nonce, receipt) {
+                storage::DonationReceiptInsert::Inserted => receipt_inserted = true,
+                storage::DonationReceiptInsert::Existing => return Ok(false),
+                storage::DonationReceiptInsert::Conflict => {
+                    return Err(DonationReceiptErrorV1::PayloadConflict)
+                }
+                storage::DonationReceiptInsert::Full => {
+                    return Err(DonationReceiptErrorV1::CapacityExceeded)
+                }
+            }
         }
         s.balances[idx] = reserve_after;
-        Ok(())
+        Ok(receipt_inserted)
     })?;
 
-    log!(INFO, "ReceiveDonation: {} of {} (token {}) from {}", amount, symbol, token_index, caller);
-
+    if receipt_inserted
+        && storage::donation_receipts::len()
+            == storage::DONATION_RECEIPT_WARNING_THRESHOLD_V1
+    {
+        log!(
+            INFO,
+            "Donation receipt capacity warning: {} of {} permanent receipts ({} threshold); raise cap before exhaustion",
+            storage::donation_receipts::len(),
+            storage::MAX_DONATION_RECEIPTS_V1,
+            storage::DONATION_RECEIPT_WARNING_THRESHOLD_V1,
+        );
+    }
+    log!(
+        INFO,
+        "ReceiveDonation: {} of {} (token {}) from {}",
+        amount,
+        symbol,
+        token_index,
+        caller
+    );
     Ok(())
+}
+
+fn donation_receipt_error_to_legacy(error: DonationReceiptErrorV1) -> ThreePoolError {
+    match error {
+        DonationReceiptErrorV1::Unauthorized => ThreePoolError::Unauthorized,
+        DonationReceiptErrorV1::InvalidCoinIndex => ThreePoolError::InvalidCoinIndex,
+        DonationReceiptErrorV1::ZeroAmount => ThreePoolError::ZeroAmount,
+        DonationReceiptErrorV1::PoolEmpty => ThreePoolError::PoolEmpty,
+        DonationReceiptErrorV1::PoolPaused => ThreePoolError::PoolPaused,
+        DonationReceiptErrorV1::PoolLocked => ThreePoolError::PoolLocked,
+        DonationReceiptErrorV1::MathOverflow => ThreePoolError::MathOverflow,
+        DonationReceiptErrorV1::TransferFailed { token, reason } => {
+            ThreePoolError::TransferFailed { token, reason }
+        }
+        DonationReceiptErrorV1::PayloadConflict | DonationReceiptErrorV1::CapacityExceeded => {
+            unreachable!("legacy donation path has no receipt identity")
+        }
+    }
 }
 
 // ─── Query Endpoints ───

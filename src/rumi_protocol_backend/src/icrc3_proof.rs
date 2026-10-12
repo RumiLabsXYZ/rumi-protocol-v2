@@ -750,6 +750,103 @@ mod reserve_redemption_candidate_tests {
     }
 }
 
+/// Validate one complete direct-ledger range while searching for an exact
+/// Treasury stable-token transfer receipt. A lookalike with the same unique
+/// operation memo is held as contradictory evidence rather than treated as
+/// proof of absence.
+pub fn validate_treasury_stable_transfer_scan_page(
+    start: u64,
+    end: u64,
+    fixed_tip: u64,
+    response: &GetBlocksResult,
+    sender: Principal,
+    tuple: &crate::state::BorrowMintTuple,
+    expected_fee: u64,
+) -> Result<Option<u64>, String> {
+    if end < start || end - start > 64 || end > fixed_tip
+        || response.log_length.0.to_u64().is_none_or(|n| n < fixed_tip) {
+        return Err("ICRC-3 page does not cover the pinned ledger prefix".into());
+    }
+    if !response.archived_blocks.is_empty() {
+        return Err("archive-backed history is unsupported; stable transfer receipt remains held".into());
+    }
+    let count = usize::try_from(end - start).map_err(|_| "page length exceeds address space")?;
+    if response.blocks.len() != count { return Err("ICRC-3 page is short or has extra blocks".into()); }
+    let from = Some(Account { owner: sender, subaccount: None });
+    let to = Account { owner: tuple.destination, subaccount: None };
+    let mut found = None;
+    for (offset, item) in response.blocks.iter().enumerate() {
+        let index = start.checked_add(offset as u64).ok_or("block index overflow")?;
+        if item.id.0.to_u64() != Some(index) {
+            return Err("ICRC-3 page has a gap, duplicate, or out-of-order ID".into());
+        }
+        let decoded = decode_block(&item.block)?;
+        match validate_icrc3_transfer_block(
+            &decoded, from.clone(), to.clone(), tuple.amount_e8s,
+            Some(tuple.memo.as_slice()), Some(tuple.created_at_time_ns),
+        ) {
+            Ok(()) => {
+                if decoded.fee != Some(expected_fee) {
+                    return Err("ICRC-3 stable transfer fee differs from the frozen explicit fee".into());
+                }
+                if found.replace(index).is_some() { return Err("exact stable transfer appears more than once".into()); }
+            }
+            Err(error) if decoded.memo.as_deref() == Some(tuple.memo.as_slice()) => {
+                return Err(format!("stable transfer memo matches but tuple differs: {error}"));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(found)
+}
+
+#[cfg(test)]
+mod treasury_stable_transfer_fee_proof_tests {
+    use super::validate_treasury_stable_transfer_scan_page;
+    use crate::state::BorrowMintTuple;
+    use candid::{Nat, Principal};
+    use icrc_ledger_types::icrc::generic_value::{ICRC3Map, ICRC3Value};
+    use icrc_ledger_types::icrc3::blocks::{BlockWithId, GetBlocksResult};
+
+    fn account(owner: Principal) -> ICRC3Value {
+        ICRC3Value::Array(vec![ICRC3Value::Blob(owner.as_slice().to_vec().into())])
+    }
+
+    fn response(tuple: &BorrowMintTuple, sender: Principal, fee: u64) -> GetBlocksResult {
+        let mut tx = ICRC3Map::new();
+        tx.insert("op".into(), ICRC3Value::Text("xfer".into()));
+        tx.insert("from".into(), account(sender));
+        tx.insert("to".into(), account(tuple.destination));
+        tx.insert("amt".into(), ICRC3Value::Nat(Nat::from(tuple.amount_e8s)));
+        tx.insert("fee".into(), ICRC3Value::Nat(Nat::from(fee)));
+        tx.insert("ts".into(), ICRC3Value::Nat(Nat::from(tuple.created_at_time_ns)));
+        tx.insert("memo".into(), ICRC3Value::Blob(tuple.memo.to_vec().into()));
+        let mut block = ICRC3Map::new();
+        block.insert("btype".into(), ICRC3Value::Text("1xfer".into()));
+        block.insert("tx".into(), ICRC3Value::Map(tx));
+        GetBlocksResult {
+            log_length: Nat::from(1u8),
+            blocks: vec![BlockWithId { id: Nat::from(0u8), block: ICRC3Value::Map(block) }],
+            archived_blocks: vec![],
+        }
+    }
+
+    #[test]
+    fn stable_transfer_receipt_binds_explicit_fee() {
+        let tuple = BorrowMintTuple {
+            ledger: Principal::from_slice(&[1]),
+            destination: Principal::from_slice(&[2]),
+            amount_e8s: 100,
+            memo: [7; 16],
+            created_at_time_ns: 42,
+            op_nonce: 9,
+        };
+        let sender = Principal::from_slice(&[9]);
+        assert_eq!(validate_treasury_stable_transfer_scan_page(0, 1, 1, &response(&tuple, sender, 3), sender, &tuple, 3), Ok(Some(0)));
+        assert!(validate_treasury_stable_transfer_scan_page(0, 1, 1, &response(&tuple, sender, 4), sender, &tuple, 3).is_err());
+    }
+}
+
 /// Validate the stronger evidence required to recover an AMM1 donation after
 /// an ambiguous/TooOld mint outcome. Unlike the generic transfer validator,
 /// an ICRC-1 mint must explicitly carry the standard `1mint` block type.
