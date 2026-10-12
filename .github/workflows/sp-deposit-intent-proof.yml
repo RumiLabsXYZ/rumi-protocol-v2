@@ -1,0 +1,51 @@
+name: Stability Pool deposit-intent proof
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/sp-deposit-intent-proof.yml
+      - Cargo.lock
+      - Cargo.toml
+      - src/stability_pool/**
+      - src/flaky_ledger/**
+      - src/rumi_3pool/**
+      - src/ledger/ic-icrc1-ledger.wasm
+
+permissions:
+  contents: read
+
+jobs:
+  archived-receipt:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Rust target and native build dependency
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal
+          rustup +1.92.0 target add wasm32-unknown-unknown
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev
+      - name: Install pinned PocketIC server
+        run: |
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/pocket-ic.gz" \
+            https://github.com/dfinity/pocketic/releases/download/7.0.0/pocket-ic-x86_64-linux.gz
+          echo "0935ee6ece312719aae4eabddec2dfc6af34d5edbddf4d3af53bccd1b3636044  $RUNNER_TEMP/pocket-ic.gz" | sha256sum --check
+          gzip --decompress --stdout "$RUNNER_TEMP/pocket-ic.gz" > "$RUNNER_TEMP/pocket-ic"
+          chmod +x "$RUNNER_TEMP/pocket-ic"
+      - name: Build exact test Wasms
+        run: cargo +1.92.0 build --release --target wasm32-unknown-unknown --locked -p stability_pool -p flaky_ledger
+      - name: Prove archived deposit recovery across upgrade
+        env:
+          POCKET_IC_BIN: ${{ runner.temp }}/pocket-ic
+          RUMI_SP_WASM_PATH: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/stability_pool.wasm
+          RUMI_FLAKY_LEDGER_WASM_PATH: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/flaky_ledger.wasm
+        run: |
+          cargo +1.92.0 test --locked -p stability_pool --test pocket_ic_3usd \
+            deposit_intent_authenticates_archived_history_segment_across_upgrade -- --exact --nocapture
