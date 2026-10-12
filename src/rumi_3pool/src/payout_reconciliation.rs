@@ -1,17 +1,43 @@
 //! Positive-only recovery of an aged ambiguous 3pool payout.
 //!
 //! A caller supplies one candidate ledger block index. This module accepts it
-//! only when the ledger directly serves the exact ICRC-3 block.
+//! only when the ledger directly serves the exact ICRC-3 block or serves an
+//! archived candidate linked through consecutive phash values to a direct
+//! ledger block.
 //! It deliberately does not interpret missing, partial, or unavailable history
 //! as proof that a payout did not happen.
 
-use candid::{Nat, Principal};
+use candid::{CandidType, Nat, Principal};
 use icrc_ledger_types::icrc::generic_value::ICRC3Value;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
 use num_traits::ToPrimitive;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::payouts::{PayoutInputTransfer, PayoutTransfer};
+
+/// One bounded step in proving an archived payout block belongs to the
+/// configured ledger's append-only ICRC-3 chain. This lives in its own stable
+/// memory region so existing payout records and their Candid shape do not
+/// change.
+#[derive(CandidType, Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ArchivePayoutProofProgress {
+    pub(crate) ledger: Principal,
+    pub(crate) candidate_block_index: u64,
+    pub(crate) attempt_number: u32,
+    pub(crate) transfer_digest: [u8; 32],
+    pub(crate) transfer: PayoutTransfer,
+    pub(crate) latest_verified_block_index: u64,
+    /// The next block whose parent hash must equal `prior_block_hash`.
+    pub(crate) next_block_index: u64,
+    pub(crate) prior_block_hash: [u8; 32],
+}
+
+// One callback per block is a valid archive response shape. Keep the maximum
+// page at the callback cap so even that shape can make bounded progress.
+const MAX_ARCHIVE_CHAIN_BLOCKS_PER_CALL: u64 = 8;
+const MAX_ARCHIVE_CALLBACKS_PER_CALL: usize = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DecodedTransferBlock {
@@ -73,14 +99,340 @@ pub(crate) fn validate_exact_input_transfer(
     Ok(())
 }
 
-pub(crate) async fn verify_exact_block(
+/// Verify an exact payout block. A block served directly by the configured
+/// ledger is already consensus-backed by this inter-canister update call. For
+/// an archived candidate, walk a bounded number of consecutive blocks at a
+/// time and persist the verified cursor until the chain reaches a block served
+/// directly by that ledger.
+pub(crate) async fn verify_exact_payout_block(
+    claim_id: u64,
+    attempt_number: u32,
     ledger: Principal,
     block_index: u64,
     transfer: &PayoutTransfer,
 ) -> Result<(), String> {
-    let value = fetch_direct_block(ledger, block_index).await?;
-    let decoded = decode_block(&value)?;
-    validate_exact_transfer(&decoded, transfer)
+    let mut progress = match crate::storage::payout_archive_proofs::get(claim_id) {
+        Some(progress) => {
+            if progress.ledger != ledger
+                || progress.candidate_block_index != block_index
+                || progress.attempt_number != attempt_number
+                || progress.transfer_digest != transfer_digest(transfer)?
+                || progress.transfer != *transfer
+                || progress.latest_verified_block_index.checked_add(1)
+                    != Some(progress.next_block_index)
+            {
+                crate::storage::payout_archive_proofs::remove(claim_id);
+                return Err("stored archive proof belongs to a different payout attempt".into());
+            }
+            progress
+        }
+        None => {
+            let candidate_page = fetch_ledger_page(ledger, block_index, 1).await?;
+            let candidate = candidate_page
+                .into_iter()
+                .next()
+                .filter(|candidate| candidate.index == block_index)
+                .ok_or_else(|| "ledger did not return the exact candidate block".to_string())?;
+            let decoded = decode_block(&candidate.block)?;
+            validate_exact_transfer(&decoded, transfer)?;
+            if candidate.direct_from_ledger {
+                return Ok(());
+            }
+            // Non-genesis ICRC-3 blocks must carry their parent hash even when
+            // the proof starts at this archived candidate.
+            block_parent_hash(&candidate.block, block_index)?;
+            let next_block_index = block_index
+                .checked_add(1)
+                .ok_or_else(|| "candidate block index overflow".to_string())?;
+            let progress = ArchivePayoutProofProgress {
+                ledger,
+                candidate_block_index: block_index,
+                attempt_number,
+                transfer_digest: transfer_digest(transfer)?,
+                transfer: transfer.clone(),
+                latest_verified_block_index: block_index,
+                next_block_index,
+                prior_block_hash: block_hash(&candidate.block)?,
+            };
+            if !crate::storage::payout_archive_proofs::insert(claim_id, progress.clone()) {
+                return Err("bounded archive proof cursor capacity is exhausted".into());
+            }
+            progress
+        }
+    };
+
+    let page = fetch_ledger_page(
+        ledger,
+        progress.next_block_index,
+        MAX_ARCHIVE_CHAIN_BLOCKS_PER_CALL,
+    )
+    .await?;
+    if page.is_empty() {
+        return Err("ledger returned no blocks while archive proof remains incomplete".into());
+    }
+
+    for block in page {
+        if block.index != progress.next_block_index {
+            crate::storage::payout_archive_proofs::remove(claim_id);
+            return Err("ICRC-3 archive proof contains a block gap or wrong ID".into());
+        }
+        let parent_hash = block_parent_hash(&block.block, block.index).map_err(|reason| {
+            crate::storage::payout_archive_proofs::remove(claim_id);
+            reason
+        })?;
+        if !verify_chain_link(progress.prior_block_hash, parent_hash) {
+            crate::storage::payout_archive_proofs::remove(claim_id);
+            return Err("ICRC-3 archive block does not link to the prior verified block".into());
+        }
+        if block.direct_from_ledger {
+            // Its parent hash authenticates the archived prefix against this
+            // directly served block. The anchor's own hash is not needed.
+            crate::storage::payout_archive_proofs::remove(claim_id);
+            return Ok(());
+        }
+        progress.prior_block_hash = block_hash(&block.block).map_err(|reason| {
+            crate::storage::payout_archive_proofs::remove(claim_id);
+            reason
+        })?;
+        progress.latest_verified_block_index = block.index;
+        progress.next_block_index = block
+            .index
+            .checked_add(1)
+            .ok_or_else(|| "archive proof block index overflow".to_string())?;
+
+        // Commit each verified link so a later archive outage or upgrade can
+        // resume from the last authenticated block, never skip over a gap.
+        if !crate::storage::payout_archive_proofs::insert(claim_id, progress.clone()) {
+            return Err("bounded archive proof cursor capacity is exhausted".into());
+        }
+    }
+
+    Err("archive proof is still progressing; retry reconciliation to continue".into())
+}
+
+fn verify_chain_link(prior_hash: [u8; 32], parent_hash: Option<[u8; 32]>) -> bool {
+    parent_hash == Some(prior_hash)
+}
+
+fn transfer_digest(transfer: &PayoutTransfer) -> Result<[u8; 32], String> {
+    use sha2::Digest;
+    let encoded = candid::encode_one(transfer)
+        .map_err(|error| format!("could not encode payout tuple for archive proof: {error}"))?;
+    Ok(sha2::Sha256::digest(encoded).into())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FetchedBlock {
+    index: u64,
+    block: ICRC3Value,
+    direct_from_ledger: bool,
+}
+
+/// Fetch at most `length` blocks, following only the exact archive callbacks
+/// returned by the ledger for this range. The result is the longest complete
+/// consecutive prefix; a gap before any later returned block is rejected.
+async fn fetch_ledger_page(
+    ledger: Principal,
+    start: u64,
+    length: u64,
+) -> Result<Vec<FetchedBlock>, String> {
+    if length == 0 || length > MAX_ARCHIVE_CHAIN_BLOCKS_PER_CALL {
+        return Err("ICRC-3 proof page length is outside its fixed bound".into());
+    }
+    let requested_end = start
+        .checked_add(length)
+        .ok_or_else(|| "ICRC-3 proof page range overflow".to_string())?;
+    let args = vec![GetBlocksRequest {
+        start: Nat::from(start),
+        length: Nat::from(length),
+    }];
+    let (response,): (GetBlocksResult,) = ic_cdk::call(ledger, "icrc3_get_blocks", (args,))
+        .await
+        .map_err(|(code, message)| {
+            format!("icrc3_get_blocks call to {ledger} failed: {code:?} {message}")
+        })?;
+    let log_length = response
+        .log_length
+        .0
+        .to_u64()
+        .ok_or_else(|| "ICRC-3 log length exceeds u64".to_string())?;
+    if log_length <= start {
+        return Err("ICRC-3 log length does not include the requested block".into());
+    }
+    let page_end = requested_end.min(log_length);
+    let expected_count = usize::try_from(page_end - start)
+        .map_err(|_| "ICRC-3 proof page length exceeds platform limits".to_string())?;
+    let mut blocks = BTreeMap::<u64, FetchedBlock>::new();
+
+    for block in response.blocks {
+        insert_page_block(&mut blocks, block.id, block.block, true, start, page_end)?;
+    }
+
+    if response.archived_blocks.len() > MAX_ARCHIVE_CALLBACKS_PER_CALL
+        || response.archived_blocks.len() > expected_count
+    {
+        return Err("ledger returned too many archive callbacks for the bounded page".into());
+    }
+    let mut archive_requested_ids = std::collections::BTreeSet::new();
+    for archived in response.archived_blocks {
+        if archived.callback.method.trim().is_empty()
+            || archived.callback.canister_id == Principal::anonymous()
+            || archived.args.is_empty()
+            || archived.args.len() > expected_count
+        {
+            return Err("ledger returned an invalid ICRC-3 archive callback".into());
+        }
+        let mut callback_ids = Vec::new();
+        for arg in &archived.args {
+            let arg_start = arg
+                .start
+                .0
+                .to_u64()
+                .ok_or_else(|| "archive callback start exceeds u64".to_string())?;
+            let arg_length = arg
+                .length
+                .0
+                .to_u64()
+                .ok_or_else(|| "archive callback length exceeds u64".to_string())?;
+            let arg_end = arg_start
+                .checked_add(arg_length)
+                .ok_or_else(|| "archive callback range overflow".to_string())?;
+            if arg_length == 0 || arg_start < start || arg_end > page_end {
+                return Err("archive callback range exceeds the requested proof page".into());
+            }
+            for index in arg_start..arg_end {
+                if !archive_requested_ids.insert(index) {
+                    return Err("archive callbacks contain overlapping block ranges".into());
+                }
+                callback_ids.push(index);
+            }
+        }
+        if callback_ids.len() > expected_count {
+            return Err("archive callback work exceeds the bounded proof page".into());
+        }
+        let (archive_response,): (GetBlocksResult,) = ic_cdk::call(
+            archived.callback.canister_id,
+            archived.callback.method.as_str(),
+            (archived.args,),
+        )
+        .await
+        .map_err(|(code, message)| {
+            format!("ICRC-3 archive callback failed: {code:?} {message}")
+        })?;
+        if !archive_response.archived_blocks.is_empty()
+            || archive_response.blocks.len() > callback_ids.len()
+        {
+            return Err("archive callback returned nested or oversized block history".into());
+        }
+        let allowed_ids: std::collections::BTreeSet<u64> = callback_ids.into_iter().collect();
+        for block in archive_response.blocks {
+            let id = block
+                .id
+                .0
+                .to_u64()
+                .ok_or_else(|| "archived block ID exceeds u64".to_string())?;
+            if !allowed_ids.contains(&id) {
+                return Err("archive callback returned a block outside its requested range".into());
+            }
+            insert_page_block(&mut blocks, block.id, block.block, false, start, page_end)?;
+        }
+    }
+
+    complete_block_prefix(blocks, start, page_end)
+}
+
+fn complete_block_prefix(
+    blocks: BTreeMap<u64, FetchedBlock>,
+    start: u64,
+    end: u64,
+) -> Result<Vec<FetchedBlock>, String> {
+    let mut prefix_end = start;
+    while prefix_end < end && blocks.contains_key(&prefix_end) {
+        prefix_end += 1;
+    }
+    if (prefix_end..end).any(|index| blocks.contains_key(&index)) {
+        return Err("ICRC-3 ledger and archive responses contain a gap before a later block".into());
+    }
+    if prefix_end == start {
+        return Err("ICRC-3 ledger and archive responses contain no complete block prefix".into());
+    }
+    Ok(blocks
+        .into_iter()
+        .take_while(|(index, _)| *index < prefix_end)
+        .map(|(_, block)| block)
+        .collect())
+}
+
+fn insert_page_block(
+    blocks: &mut BTreeMap<u64, FetchedBlock>,
+    id: Nat,
+    block: ICRC3Value,
+    direct_from_ledger: bool,
+    start: u64,
+    end: u64,
+) -> Result<(), String> {
+    let index = id
+        .0
+        .to_u64()
+        .ok_or_else(|| "ICRC-3 block ID exceeds u64".to_string())?;
+    if index < start || index >= end {
+        return Err("ICRC-3 response returned a block outside the requested range".into());
+    }
+    if blocks
+        .insert(
+            index,
+            FetchedBlock {
+                index,
+                block,
+                direct_from_ledger,
+            },
+        )
+        .is_some()
+    {
+        return Err("ICRC-3 response contains duplicate block IDs".into());
+    }
+    Ok(())
+}
+
+fn block_parent_hash(block: &ICRC3Value, index: u64) -> Result<Option<[u8; 32]>, String> {
+    let map = match block {
+        ICRC3Value::Map(map) => map,
+        _ => return Err("ICRC-3 block is not a map".into()),
+    };
+    match map.get("phash") {
+        Some(ICRC3Value::Blob(bytes)) if bytes.len() == 32 => {
+            let mut hash = [0; 32];
+            hash.copy_from_slice(bytes);
+            Ok(Some(hash))
+        }
+        Some(_) => Err("ICRC-3 parent hash is not a 32-byte blob".into()),
+        None if index == 0 => Ok(None),
+        None => Err("non-genesis ICRC-3 block has no parent hash".into()),
+    }
+}
+
+/// `icrc-ledger-types` 0.1.x hashes `Int` by converting through i128 and can
+/// panic for wider Candid integers. Its positive-Int encoding also differs
+/// from the signed representation required by ICRC-3. Refuse any Int value
+/// (including nested values) before calling the dependency hash implementation
+/// so unsupported ledger blocks fail closed instead of trapping this canister.
+fn block_hash(block: &ICRC3Value) -> Result<[u8; 32], String> {
+    fn contains_int(value: &ICRC3Value) -> bool {
+        match value {
+            ICRC3Value::Int(_) => true,
+            ICRC3Value::Array(values) => values.iter().any(contains_int),
+            ICRC3Value::Map(values) => values.values().any(contains_int),
+            ICRC3Value::Blob(_) | ICRC3Value::Text(_) | ICRC3Value::Nat(_) => false,
+        }
+    }
+
+    if contains_int(block) {
+        return Err(
+            "ICRC-3 block contains Int, which the pinned hash implementation cannot safely authenticate"
+                .into(),
+        );
+    }
+    Ok(block.clone().hash())
 }
 
 pub(crate) async fn verify_exact_input_block(
@@ -302,6 +654,119 @@ mod tests {
             memo: Some(transfer.memo.clone()),
             created_at_time: Some(transfer.created_at_time),
         }
+    }
+
+    #[test]
+    fn icrc3_representation_independent_hash_matches_spec_vector() {
+        let hash = V::Nat(Nat::from(42u32)).hash();
+        assert_eq!(
+            hash,
+            [
+                0x68, 0x48, 0x88, 0xc0, 0xeb, 0xb1, 0x7f, 0x37, 0x42, 0x98, 0xb6, 0x5e,
+                0xe2, 0x80, 0x75, 0x26, 0xc0, 0x66, 0x09, 0x4c, 0x70, 0x1b, 0xcc, 0x7e,
+                0xbb, 0xe1, 0xc1, 0x09, 0x5f, 0x49, 0x4f, 0xc1,
+            ]
+        );
+    }
+
+    #[test]
+    fn unsupported_int_values_fail_closed_without_hashing_or_trapping() {
+        let values = [
+            V::Int(64i64.into()),
+            V::Int((-42i64).into()),
+            V::Map(BTreeMap::from([(
+                "nested".into(),
+                V::Array(vec![V::Int(candid::Int(candid::Int::from(1u64).0 << 200usize))]),
+            )])),
+        ];
+        for value in values {
+            assert!(block_hash(&value)
+                .unwrap_err()
+                .contains("contains Int"));
+        }
+    }
+
+    #[test]
+    fn archive_candidate_must_link_through_child_to_direct_anchor() {
+        let candidate = V::Map(BTreeMap::from([("ts".into(), V::Nat(Nat::from(1u64)))]));
+        let candidate_hash = candidate.clone().hash();
+        let child = V::Map(BTreeMap::from([(
+            "phash".into(),
+            V::Blob(candidate_hash.to_vec().into()),
+        )]));
+        let child_hash = child.clone().hash();
+        let direct_anchor = V::Map(BTreeMap::from([(
+            "phash".into(),
+            V::Blob(child_hash.to_vec().into()),
+        )]));
+
+        assert!(verify_chain_link(candidate_hash, block_parent_hash(&child, 1).unwrap()));
+        assert!(verify_chain_link(child_hash, block_parent_hash(&direct_anchor, 2).unwrap()));
+        assert!(!verify_chain_link([0; 32], block_parent_hash(&child, 1).unwrap()));
+        assert!(block_parent_hash(&V::Map(BTreeMap::new()), 1).is_err());
+        assert!(block_parent_hash(
+            &V::Map(BTreeMap::from([("phash".into(), V::Blob(vec![0; 31].into()))])),
+            1
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn direct_anchor_needs_matching_parent_hash_but_not_its_own_value_hash() {
+        let candidate = V::Map(BTreeMap::from([("ts".into(), V::Nat(Nat::from(1u64)))]));
+        let candidate_hash = block_hash(&candidate).unwrap();
+        let direct_anchor = V::Map(BTreeMap::from([
+            ("phash".into(), V::Blob(candidate_hash.to_vec().into())),
+            ("extension".into(), V::Int(64i64.into())),
+        ]));
+        assert!(verify_chain_link(
+            candidate_hash,
+            block_parent_hash(&direct_anchor, 1).unwrap()
+        ));
+        assert!(block_hash(&direct_anchor).is_err());
+    }
+
+    #[test]
+    fn bounded_page_accepts_short_complete_prefix_but_rejects_internal_gap() {
+        let block = |index| FetchedBlock {
+            index,
+            block: V::Map(BTreeMap::new()),
+            direct_from_ledger: true,
+        };
+        let short = BTreeMap::from([(10, block(10)), (11, block(11))]);
+        assert_eq!(complete_block_prefix(short, 10, 14).unwrap().len(), 2);
+
+        let gap = BTreeMap::from([(10, block(10)), (12, block(12))]);
+        assert!(complete_block_prefix(gap, 10, 14)
+            .unwrap_err()
+            .contains("gap before a later block"));
+    }
+
+    #[test]
+    fn archive_progress_is_storable_across_upgrade_and_binds_attempt() {
+        use ic_stable_structures::storable::Storable;
+        let transfer = transfer();
+        let progress = ArchivePayoutProofProgress {
+            ledger: transfer.ledger,
+            candidate_block_index: 17,
+            attempt_number: 3,
+            transfer_digest: transfer_digest(&transfer).unwrap(),
+            transfer,
+            latest_verified_block_index: 17,
+            next_block_index: 18,
+            prior_block_hash: [0x5a; 32],
+        };
+        let encoded = progress.to_bytes();
+        let decoded = ArchivePayoutProofProgress::from_bytes(encoded);
+        assert_eq!(decoded, progress);
+        assert_ne!(
+            decoded.transfer_digest,
+            transfer_digest(&PayoutTransfer {
+                memo: vec![4; 32],
+                ..decoded.transfer.clone()
+            })
+            .unwrap()
+        );
     }
 
     #[test]

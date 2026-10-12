@@ -147,6 +147,9 @@ struct LedgerState {
     /// Optional exact nonempty ICRC-3 request range to report as archived.
     /// This is test-only response corruption for recovery regressions.
     icrc3_archive_range: Option<(u64, u64)>,
+    /// When enabled, advertise the fixture's bounded archived-block query
+    /// callback instead of the deliberately missing callback above.
+    icrc3_archive_callback_enabled: bool,
     fee: u128,
     fail_fee_query: bool,
     fail_transfers: bool,
@@ -698,7 +701,7 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
     })
 }
 
-// ─── ICRC-3 (unarchived, fixture-sized history) ───
+// ─── ICRC-3 fixture history ───
 
 #[query]
 fn icrc3_get_blocks(args: Vec<GetBlocksRequest>) -> GetBlocksResult {
@@ -718,22 +721,43 @@ fn icrc3_get_blocks(args: Vec<GetBlocksRequest>) -> GetBlocksResult {
             let Some(end) = start.checked_add(length) else {
                 continue;
             };
-            if length > 0 && state.icrc3_archive_range == Some((start, length)) {
+            let end = end.min(state.blocks.len() as u64);
+            let archived_range = state.icrc3_archive_range.and_then(|(archive_start, length)| {
+                let archive_end = archive_start.checked_add(length)?;
+                let overlap_start = start.max(archive_start);
+                let overlap_end = end.min(archive_end);
+                (overlap_start < overlap_end).then_some((overlap_start, overlap_end))
+            });
+            if let Some((archive_start, archive_end)) = archived_range {
+                for block_index in start..archive_start {
+                    if let Some(block) = state.blocks.get(block_index as usize) {
+                        blocks.push(block.clone());
+                    }
+                }
                 archived_blocks.push(ArchivedBlocks {
                     args: vec![GetBlocksRequest {
-                        start: Nat::from(start),
-                        length: Nat::from(length),
+                        start: Nat::from(archive_start),
+                        length: Nat::from(archive_end - archive_start),
                     }],
                     callback: QueryArchiveFn::new(
                         ic_cdk::id(),
-                        "missing_icrc3_archive_callback",
+                        if state.icrc3_archive_callback_enabled {
+                            "icrc3_get_archived_blocks"
+                        } else {
+                            "missing_icrc3_archive_callback"
+                        },
                     ),
                 });
-                continue;
-            }
-            for block_index in start..end.min(state.blocks.len() as u64) {
-                if let Some(block) = state.blocks.get(block_index as usize) {
-                    blocks.push(block.clone());
+                for block_index in archive_end..end {
+                    if let Some(block) = state.blocks.get(block_index as usize) {
+                        blocks.push(block.clone());
+                    }
+                }
+            } else {
+                for block_index in start..end {
+                    if let Some(block) = state.blocks.get(block_index as usize) {
+                        blocks.push(block.clone());
+                    }
                 }
             }
             if blocks.len() == MAX_BLOCKS_PER_RESPONSE {
@@ -744,6 +768,60 @@ fn icrc3_get_blocks(args: Vec<GetBlocksRequest>) -> GetBlocksResult {
             log_length: Nat::from(state.blocks.len() as u64),
             blocks,
             archived_blocks,
+        }
+    })
+}
+
+/// Test-only archive endpoint. It returns exact blocks only from the fixture's
+/// configured archived range and never redirects or serves nested archives.
+#[query]
+fn icrc3_get_archived_blocks(args: Vec<GetBlocksRequest>) -> GetBlocksResult {
+    const MAX_BLOCKS_PER_RESPONSE: usize = 100;
+    STATE.with(|s| {
+        let state = s.borrow();
+        let mut blocks = Vec::new();
+        let Some((archive_start, archive_length)) = state.icrc3_archive_range else {
+            return GetBlocksResult {
+                log_length: Nat::from(state.blocks.len() as u64),
+                blocks,
+                archived_blocks: vec![],
+            };
+        };
+        let Some(archive_end) = archive_start.checked_add(archive_length) else {
+            return GetBlocksResult {
+                log_length: Nat::from(state.blocks.len() as u64),
+                blocks,
+                archived_blocks: vec![],
+            };
+        };
+        for request in args {
+            if blocks.len() >= MAX_BLOCKS_PER_RESPONSE {
+                break;
+            }
+            let (Ok(start), Ok(length)) =
+                (u64::try_from(request.start.0), u64::try_from(request.length.0))
+            else {
+                continue;
+            };
+            let Some(end) = start.checked_add(length) else {
+                continue;
+            };
+            if length == 0 || start < archive_start || end > archive_end {
+                continue;
+            }
+            for index in start..end.min(state.blocks.len() as u64) {
+                if blocks.len() >= MAX_BLOCKS_PER_RESPONSE {
+                    break;
+                }
+                if let Some(block) = state.blocks.get(index as usize) {
+                    blocks.push(block.clone());
+                }
+            }
+        }
+        GetBlocksResult {
+            log_length: Nat::from(state.blocks.len() as u64),
+            blocks,
+            archived_blocks: vec![],
         }
     })
 }
@@ -893,12 +971,17 @@ fn set_fake_zero_balance_for(target: Option<Principal>) {
     STATE.with(|s| s.borrow_mut().fake_zero_balance_for = target);
 }
 
-/// When set to `Some((start, length))`, the exact nonempty ICRC-3 request
-/// returns an archive descriptor with no implemented callback. `None` clears
-/// the opt-in response fault. Other ranges retain normal direct-page behavior.
+/// When set, blocks overlapping this exact archived range are returned through
+/// the archive callback. Callback execution stays disabled by default so tests
+/// can retain the missing-callback fault.
 #[update]
 fn set_icrc3_archive_range(range: Option<(u64, u64)>) {
     STATE.with(|s| s.borrow_mut().icrc3_archive_range = range);
+}
+
+#[update]
+fn set_icrc3_archive_callback_enabled(enabled: bool) {
+    STATE.with(|s| s.borrow_mut().icrc3_archive_callback_enabled = enabled);
 }
 
 #[cfg(test)]

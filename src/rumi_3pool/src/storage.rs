@@ -12,7 +12,7 @@
 //     first time on the new wasm (one-shot drain from the legacy blob) or
 //     subsequent times (load `SlimState` from its cell).
 //
-// Memory ID layout (39 IDs used; 255 available):
+// Memory ID layout (40 IDs used; 255 available):
 //
 //   0       SlimState cell              — bounded residual heap
 //   1       lp_balances                 — BTreeMap<Principal, u128>
@@ -45,6 +45,7 @@
 //   36      payout_input_index_complete   — backfill completion marker
 //   37      lp_allowances_cutover         — one-time legacy approval invalidation
 //   38      donation_receipts_v1          — permanent keyed reserve-accounting receipts
+//   39      payout_archive_proofs          — provisional bounded ICRC-3 chain cursors
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -111,6 +112,8 @@ const MEM_PAYOUT_INPUT_INDEX_CURSOR: MemoryId = MemoryId::new(35);
 const MEM_PAYOUT_INPUT_INDEX_COMPLETE: MemoryId = MemoryId::new(36);
 const MEM_LP_ALLOWANCES_CUTOVER: MemoryId = MemoryId::new(37);
 const MEM_DONATION_RECEIPTS_V1: MemoryId = MemoryId::new(38);
+const MEM_PAYOUT_ARCHIVE_PROOFS: MemoryId = MemoryId::new(39);
+const MAX_PAYOUT_ARCHIVE_PROOF_CURSORS: u64 = 64;
 
 /// Caller-scoped keyed donation identity `(caller, backend op_nonce)`.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -528,6 +531,7 @@ impl_storable_candid_unbounded!(ThreePoolPendingClaim);
 impl_storable_candid_unbounded!(crate::receipts::SwapReceiptV1);
 impl_storable_candid_unbounded!(crate::payouts::PayoutEntitlement);
 impl_storable_candid_unbounded!(crate::payouts::PayoutJournalEvent);
+impl_storable_candid_unbounded!(crate::payout_reconciliation::ArchivePayoutProofProgress);
 
 impl Storable for DonationReceiptV1 {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
@@ -698,6 +702,8 @@ thread_local! {
         );
     pub(crate) static PAYOUT_CURRENT: RefCell<StableBTreeMap<StorableU128, crate::payouts::PayoutEntitlement, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_CURRENT))));
+    pub(crate) static PAYOUT_ARCHIVE_PROOFS: RefCell<StableBTreeMap<StorableU128, crate::payout_reconciliation::ArchivePayoutProofProgress, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_ARCHIVE_PROOFS))));
     pub(crate) static PAYOUT_FENCE: RefCell<StableCell<StorableU128, Memory>> = RefCell::new(
         StableCell::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_FENCE)), StorableU128(0))
             .expect("init payout fence"),
@@ -1273,6 +1279,7 @@ pub mod payouts {
     /// append-only node growth.
     pub fn remove_no_effect(id: u64, owner: Principal) -> bool {
         let key = StorableU128(id as u128);
+        payout_archive_proofs::remove(id);
         let removed_value = PAYOUT_CURRENT.with(|map| map.borrow_mut().remove(&key));
         let removed = removed_value.is_some();
         if let Some(value) = removed_value.filter(is_unsettled_input) {
@@ -1289,6 +1296,23 @@ pub mod payouts {
     }
 
     pub fn insert(value: crate::payouts::PayoutEntitlement) {
+        if let Some(progress) = payout_archive_proofs::get(value.id) {
+            let current_attempt = value.attempts.last();
+            let still_same_ambiguous_attempt = !value.settled
+                && current_attempt.is_some_and(|attempt| {
+                    attempt.number == progress.attempt_number
+                        && attempt.transfer == progress.transfer
+                        && attempt.transfer.ledger == progress.ledger
+                        && matches!(
+                            attempt.outcome,
+                            crate::payouts::PayoutOutcome::Unresolved { .. }
+                                | crate::payouts::PayoutOutcome::Submitted
+                        )
+                });
+            if !still_same_ambiguous_attempt {
+                payout_archive_proofs::remove(value.id);
+            }
+        }
         PAYOUT_CURRENT.with(|map| {
             let key = StorableU128(value.id as u128);
             let previous = map.borrow().get(&key);
@@ -1499,6 +1523,37 @@ pub mod payouts {
             cell.set(StorableU128(0)).expect("clear payout fence identity");
             true
         })
+    }
+}
+
+/// Provisional archived-payout proof cursors. A cursor has no settlement
+/// authority until a later bounded page reaches a directly served ledger block.
+pub(crate) mod payout_archive_proofs {
+    use super::*;
+
+    pub(crate) fn get(claim_id: u64) -> Option<crate::payout_reconciliation::ArchivePayoutProofProgress> {
+        PAYOUT_ARCHIVE_PROOFS.with(|map| map.borrow().get(&StorableU128(claim_id as u128)))
+    }
+
+    /// Keep provisional history cursors bounded. Unresolved attempts retain
+    /// their cursor until proof reaches a direct block, the attempt changes,
+    /// or its payout is settled/retired. A full map fails closed on new cursors.
+    pub(crate) fn insert(claim_id: u64, progress: crate::payout_reconciliation::ArchivePayoutProofProgress) -> bool {
+        PAYOUT_ARCHIVE_PROOFS.with(|map| {
+            let mut map = map.borrow_mut();
+            let key = StorableU128(claim_id as u128);
+            if !map.contains_key(&key) && map.len() >= MAX_PAYOUT_ARCHIVE_PROOF_CURSORS {
+                return false;
+            }
+            map.insert(key, progress);
+            true
+        })
+    }
+
+    pub(crate) fn remove(claim_id: u64) {
+        PAYOUT_ARCHIVE_PROOFS.with(|map| {
+            map.borrow_mut().remove(&StorableU128(claim_id as u128));
+        });
     }
 }
 
