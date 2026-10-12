@@ -2,7 +2,7 @@
   const report = {
     date: 'October 12, 2026',
     datetime: '2026-10-12',
-    source: 'origin/main at 4dd5e72a · includes PRs #540 and #541',
+    source: 'origin/main at 96f77e0f · includes PR #545',
     snapshot: '3pool upgrade and module readback · October 12, 2026'
   };
 
@@ -61,6 +61,14 @@
       state: 'Merged · peer installs pending',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/532'
+    },
+    {
+      pr: '#545',
+      title: 'Stability Pool deposit-intent recovery',
+      summary: 'Merged into main on October 12. The source records a caller-bound deposit intent before an external transfer and requires linked ledger evidence before crediting a recovered deposit. The merged PR includes focused PocketIC coverage and Candid compatibility checks. A post-merge readback at 21:31 UTC still showed the earlier Stability Pool module SHA-256 54245b779feb30c4da7ac3f60e9cb62afb99f1accd2ea5affc7adda8a28e4754 and emergency_paused=true. The merged fix has not been installed, and source checks do not resolve any historical deposit or refund obligation.',
+      state: 'Merged · Stability Pool paused · not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/545'
     },
     {
       pr: '#527',
@@ -231,7 +239,8 @@
             modules remained; AMM maintenance and the Stability Pool pause were active.
             Borrowing had resumed under a temporary cap at the October 11 readback, and that
             cap still reported 22,000 icUSD on October 12. PRs #531 and #507 remain source-only;
-            the backend and Stability Pool changes in PR #532 remain uninstalled.
+            the backend and Stability Pool changes in PR #532 remain uninstalled. PR #545's
+            Stability Pool deposit-intent fix is merged but also remains uninstalled.
           </p>
         </div>
         <aside class="report-stamp" aria-label={report.snapshot}>
@@ -266,7 +275,7 @@
       <div class="section-heading section-heading-wide">
         <p class="section-label">Selected changes</p>
         <h2 id="updates-title">Change and release status</h2>
-        <p>This October 12 snapshot reports the highest evidence stage available for each change. The 3pool release includes PR #535 recovery source and the final PR #540/#541 artifact; PR #507 remains merged source only. A source merge and a live installation remain separate states.</p>
+        <p>This October 12 snapshot reports the highest evidence stage available for each change. The 3pool release includes PR #535 recovery source and the final PR #540/#541 artifact; PRs #507 and #545 remain merged source only. A source merge and a live installation remain separate states.</p>
       </div>
       <div class="change-list">
         {#each changes as item}
