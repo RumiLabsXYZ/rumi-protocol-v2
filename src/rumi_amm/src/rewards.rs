@@ -71,7 +71,10 @@ mod tests {
 
     #[test]
     fn settle_folds_into_claimable() {
-        let mut s = RewardState { reward_debt: 0, claimable: 100 };
+        let mut s = RewardState {
+            reward_debt: 0,
+            claimable: 100,
+        };
         let acc = 5 * REWARD_SCALE;
         settle(&mut s, 1_000, acc);
         assert_eq!(s.claimable, 100 + 5_000);

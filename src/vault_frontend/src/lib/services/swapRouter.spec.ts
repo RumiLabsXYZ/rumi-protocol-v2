@@ -72,11 +72,11 @@ const {
 } = mocks;
 
 vi.mock('./providers/rumiAmmProvider', () => ({
-  RumiAmmProvider: vi.fn(() => mocks.rumiAmmMock),
+  RumiAmmProvider: vi.fn(function () { return mocks.rumiAmmMock; }),
 }));
 
 vi.mock('./providers/icpswapProvider', () => ({
-  IcpswapProvider: vi.fn((config: { id: string }) => {
+  IcpswapProvider: vi.fn(function (config: { id: string }) {
     switch (config.id) {
       case 'icpswap_icusd_icp': return mocks.icpswapIcUsdMock;
       case 'icpswap_ckusdt_icusd': return mocks.stableCkusdtIcusdMock;
@@ -626,6 +626,26 @@ describe('swapRouter — provider registry integration', () => {
       expect(out).toBe(1_499n);
     });
 
+  });
+
+  describe('multi-hop recovery hold', () => {
+    it.each(['stable_to_icp', 'icp_to_stable'] as const)(
+      'does not dispatch either leg for %s routes', async (type) => {
+        const route: SwapRoute = {
+          type,
+          pathDisplay: 'multi-hop',
+          hops: 2,
+          estimatedOutput: 900n,
+          grossOutput: 910n,
+          feeDisplay: '0.30%',
+        };
+        await expect(executeRoute(route, ckUsdc, icp, 1_000n, 50))
+          .rejects.toThrow(/multi-hop swap is temporarily held/i);
+        expect(threePoolMock.addLiquidity).not.toHaveBeenCalled();
+        expect(threePoolMock.removeOneCoin).not.toHaveBeenCalled();
+        expect(rumiAmmMock.swap).not.toHaveBeenCalled();
+      },
+    );
   });
 
   // ──────────────────────────────────────────────────────────────

@@ -7,6 +7,14 @@ import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
 import { getOisySignerAgent, createOisyActor } from './oisySigner';
 import { fetchLedgerFee, getCachedLedgerFee } from './ledgerFeeService';
+import {
+	applyInboundOperationStatus,
+	ammOperationStore,
+	prepareSupportedAmmOperation,
+	markUnavailableAfterSequenceConflict,
+	releaseDefinitelyUnstartedSequenceCollision,
+	type AmmOperation
+} from './ammOperationStore';
 
 // ──────────────────────────────────────────────────────────────
 // Types — mirrors the AMM Candid interface
@@ -187,6 +195,10 @@ export function formatTokenAmount(amount: bigint, decimals: number): string {
 // ──────────────────────────────────────────────────────────────
 
 const AMM_CANISTER_ID = CANISTER_IDS.RUMI_AMM;
+// Fail closed until the production canister has completed durable v2 request
+// reservation, replay, and settlement. Method presence alone is not readiness.
+export const AMM_SWAP_V2_READY = false;
+export const AMM_ADD_LIQUIDITY_V2_READY = false;
 
 class AmmService {
   private _anonAgent: HttpAgent | null = null;
@@ -328,16 +340,38 @@ class AmmService {
     inputToken: AmmToken
   ): Promise<SwapResult> {
     const wallet = get(walletStore);
-    if (!wallet.isConnected) throw new Error('Wallet not connected');
-
-    const oisyDetected = isOisyWallet();
-    const approveAmt = await approvalAmount(amountIn, inputToken);
-
-    if (oisyDetected && wallet.principal) {
+    if (!wallet.isConnected || !wallet.principal) throw new Error('Wallet not connected');
+    if (!AMM_SWAP_V2_READY) {
+      throw new Error('AMM swaps are temporarily unavailable until request-receipt support is ready. No approval or AMM mutation was started.');
+    }
+    const principalText = wallet.principal.toText();
+    const request = { operation: 'swap' as const, poolId, tokenIn: tokenIn.toText(), amountIn: amountIn.toString(), minAmountOut: minAmountOut.toString() };
+    return ammOperationStore.withCallerLock(AMM_CANISTER_ID, principalText, async () => {
+      const capabilityActor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+      assertAmmWallet(principalText);
+      const operation = await prepareSupportedAmmOperation(
+			ammOperationStore, capabilityActor, 'swap_v2', AMM_CANISTER_ID, principalText, request,
+			async () => {
+				assertActorMethod(capabilityActor, 'get_next_inbound_sequence');
+				const response = await capabilityActor.get_next_inbound_sequence();
+				assertAmmWallet(principalText);
+				if ('Err' in response) throw new Error(this.formatError(response.Err));
+				return BigInt(response.Ok);
+			}
+		);
+      const oisyDetected = isOisyWallet();
+      const approveAmt = oisyDetected
+        ? amountIn + tokenFeeCached(inputToken)
+        : await approvalAmount(amountIn, inputToken);
+      assertAmmWallet(principalText);
+      if (oisyDetected) {
       console.log(`[Oisy] Sequential approve + AMM swap via @icp-sdk/signer v5`);
-      const signerAgent = await getOisySignerAgent(wallet.principal);
+      const signerAgent = await getOisySignerAgent(wallet.principal!);
+      assertAmmWallet(principalText);
       const ledgerActor = createOisyActor(inputToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
-      const ammActor = createOisyActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm, signerAgent);
+      const ammActor = createOisyActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm, signerAgent) as any;
+      assertActorMethod(ammActor, 'swap_v2');
+      ammOperationStore.update(operation.requestId, { state: 'held', message: 'Approval or dispatch may have started; resume with this request ID.' });
 
       // 1) Approve (first Oisy consent screen, Tier 1 native).
       const approveResult = await ledgerActor.icrc2_approve({
@@ -346,34 +380,55 @@ class AmmService {
         expires_at: [], expected_allowance: [], memo: [], fee: [],
         from_subaccount: [], created_at_time: [],
       });
+      assertAmmWallet(principalText);
       if (approveResult && 'Err' in approveResult) {
         throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
       }
 
       // 2) AMM swap (second Oisy consent screen).
-      const swapResult = await ammActor.swap(poolId, tokenIn, amountIn, minAmountOut);
-      if ('Err' in swapResult) throw new Error(this.formatError(swapResult.Err));
+      const swapResult = await ammActor.swap_v2(operation.requestId, poolId, tokenIn, amountIn, minAmountOut);
+      assertAmmWallet(principalText);
+      if ('Err' in swapResult) {
+			if (releaseDefinitelyUnstartedSequenceCollision(ammOperationStore, operation.requestId, swapResult.Err))
+				throw new Error('The authenticated AMM response proves this request was not started and no input transfer was dispatched. You may retry this form manually to fetch the current sequence; no replacement request is created automatically.');
+			if (markUnavailableAfterSequenceConflict(ammOperationStore, operation.requestId, swapResult.Err))
+				throw new Error('The authenticated AMM response says this request ID cannot execute again, but its result is unavailable. The terminal record may have been compacted or another caller may have consumed the global sequence, so the result is ambiguous. Do not replay or create a replacement. Verify token balances and transaction history manually.');
+			throw new Error(this.formatError(swapResult.Err));
+		}
+      ammOperationStore.update(operation.requestId, { state: 'complete', message: 'AMM reported completion.' });
       return swapResult.Ok;
-    } else {
+      } else {
+      ammOperationStore.update(operation.requestId, { state: 'held', message: 'Approval or dispatch may have started; resume with this request ID.' });
       const ledgerActor = await walletStore.getActor(inputToken.ledgerId, CONFIG.icusd_ledgerIDL) as any;
+      assertAmmWallet(principalText);
       const approveResult = await ledgerActor.icrc2_approve({
         amount: approveAmt,
         spender: { owner: Principal.fromText(AMM_CANISTER_ID), subaccount: [] },
         expires_at: [], expected_allowance: [], memo: [], fee: [],
         from_subaccount: [], created_at_time: [],
       });
+      assertAmmWallet(principalText);
 
       if (approveResult && 'Err' in approveResult) {
         throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
       }
 
       await new Promise(r => setTimeout(r, 2000));
+      assertAmmWallet(principalText);
 
-      const ammActor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
-      const result = await ammActor.swap(poolId, tokenIn, amountIn, minAmountOut);
-      if ('Err' in result) throw new Error(this.formatError(result.Err));
+      const result = await capabilityActor.swap_v2(operation.requestId, poolId, tokenIn, amountIn, minAmountOut);
+      assertAmmWallet(principalText);
+      if ('Err' in result) {
+			if (releaseDefinitelyUnstartedSequenceCollision(ammOperationStore, operation.requestId, result.Err))
+				throw new Error('The authenticated AMM response proves this request was not started and no input transfer was dispatched. You may retry this form manually to fetch the current sequence; no replacement request is created automatically.');
+			if (markUnavailableAfterSequenceConflict(ammOperationStore, operation.requestId, result.Err))
+				throw new Error('The authenticated AMM response says this request ID cannot execute again, but its result is unavailable. The terminal record may have been compacted or another caller may have consumed the global sequence, so the result is ambiguous. Do not replay or create a replacement. Verify token balances and transaction history manually.');
+			throw new Error(this.formatError(result.Err));
+		}
+      ammOperationStore.update(operation.requestId, { state: 'complete', message: 'AMM reported completion.' });
       return result.Ok;
-    }
+      }
+    });
   }
 
   async addLiquidity(
@@ -385,7 +440,25 @@ class AmmService {
     tokenB: AmmToken
   ): Promise<bigint> {
     const wallet = get(walletStore);
-    if (!wallet.isConnected) throw new Error('Wallet not connected');
+    if (!wallet.isConnected || !wallet.principal) throw new Error('Wallet not connected');
+    if (!AMM_ADD_LIQUIDITY_V2_READY) {
+      throw new Error('Adding AMM liquidity is temporarily unavailable until request-receipt support is ready. No approval or AMM mutation was started.');
+    }
+    const principalText = wallet.principal.toText();
+    const request = { operation: 'add_liquidity' as const, poolId, amountA: amountA.toString(), amountB: amountB.toString(), minLpShares: minLpShares.toString() };
+    return ammOperationStore.withCallerLock(AMM_CANISTER_ID, principalText, async () => {
+    const capabilityActor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+    assertAmmWallet(principalText);
+		const operation = await prepareSupportedAmmOperation(
+		ammOperationStore, capabilityActor, 'add_liquidity_v2', AMM_CANISTER_ID, principalText, request,
+		async () => {
+			assertActorMethod(capabilityActor, 'get_next_inbound_sequence');
+			const response = await capabilityActor.get_next_inbound_sequence();
+			assertAmmWallet(principalText);
+			if ('Err' in response) throw new Error(this.formatError(response.Err));
+			return BigInt(response.Ok);
+		}, AMM_ADD_LIQUIDITY_V2_READY
+	);
 
     const oisyDetected = isOisyWallet();
 
@@ -396,10 +469,13 @@ class AmmService {
     // AmmLiquidityPanel warms the fee cache on mount.
     const approveA = amountA > 0n ? amountA + tokenFeeCached(tokenA) : 0n;
     const approveB = amountB > 0n ? amountB + tokenFeeCached(tokenB) : 0n;
-
     if (oisyDetected && wallet.principal) {
       console.log(`[Oisy] Sequential approve(s) + AMM add_liquidity via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
+      assertAmmWallet(principalText);
+      const ammActor = createOisyActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm, signerAgent) as any;
+      assertActorMethod(ammActor, 'add_liquidity_v2');
+      ammOperationStore.update(operation.requestId, { state: 'held', message: 'Approval or dispatch may have started; resume with this request ID.' });
 
       // 1) Approve token A (first Oisy consent screen, if needed).
       if (amountA > 0n) {
@@ -410,6 +486,7 @@ class AmmService {
           expires_at: [], expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: [],
         });
+        assertAmmWallet(principalText);
         if (approveResultA && 'Err' in approveResultA) {
           throw new Error(`Approval failed for ${tokenA.symbol}: ${JSON.stringify(approveResultA.Err)}`);
         }
@@ -424,46 +501,90 @@ class AmmService {
           expires_at: [], expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: [],
         });
+        assertAmmWallet(principalText);
         if (approveResultB && 'Err' in approveResultB) {
           throw new Error(`Approval failed for ${tokenB.symbol}: ${JSON.stringify(approveResultB.Err)}`);
         }
       }
 
       // 3) add_liquidity (final consent screen).
-      const ammActor = createOisyActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm, signerAgent);
-      const addResult = await ammActor.add_liquidity(poolId, amountA, amountB, minLpShares);
-      if ('Err' in addResult) throw new Error(this.formatError(addResult.Err));
+      const addResult = await ammActor.add_liquidity_v2(operation.requestId, poolId, amountA, amountB, minLpShares);
+      assertAmmWallet(principalText);
+			if ('Err' in addResult) {
+				if (releaseDefinitelyUnstartedSequenceCollision(ammOperationStore, operation.requestId, addResult.Err))
+					throw new Error('The authenticated AMM response proves this request was not started and no input transfer was dispatched. You may retry this form manually to fetch the current sequence; no replacement request is created automatically.');
+				if (markUnavailableAfterSequenceConflict(ammOperationStore, operation.requestId, addResult.Err))
+					throw new Error('The authenticated AMM response says this request ID cannot execute again, but its result is unavailable. The terminal record may have been compacted or another caller may have consumed the global sequence, so the result is ambiguous. Do not replay or create a replacement. Verify token balances and transaction history manually.');
+				throw new Error(this.formatError(addResult.Err));
+			}
+      ammOperationStore.update(operation.requestId, { state: 'complete', message: 'AMM reported completion.' });
       return addResult.Ok;
     } else {
+      ammOperationStore.update(operation.requestId, { state: 'held', message: 'Approval or dispatch may have started; resume with this request ID.' });
       const spender = { owner: Principal.fromText(AMM_CANISTER_ID), subaccount: [] };
 
       if (amountA > 0n) {
         const ledgerA = await walletStore.getActor(tokenA.ledgerId, CONFIG.icusd_ledgerIDL) as any;
+        assertAmmWallet(principalText);
         const r = await ledgerA.icrc2_approve({
           amount: approveA, spender,
           expires_at: [], expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: [],
         });
+        assertAmmWallet(principalText);
         if (r && 'Err' in r) throw new Error(`Approval failed for ${tokenA.symbol}: ${JSON.stringify(r.Err)}`);
         await new Promise(r => setTimeout(r, 2000));
+        assertAmmWallet(principalText);
       }
 
       if (amountB > 0n) {
         const ledgerB = await walletStore.getActor(tokenB.ledgerId, CONFIG.icusd_ledgerIDL) as any;
+        assertAmmWallet(principalText);
         const r = await ledgerB.icrc2_approve({
           amount: approveB, spender,
           expires_at: [], expected_allowance: [], memo: [], fee: [],
           from_subaccount: [], created_at_time: [],
         });
+        assertAmmWallet(principalText);
         if (r && 'Err' in r) throw new Error(`Approval failed for ${tokenB.symbol}: ${JSON.stringify(r.Err)}`);
         await new Promise(r => setTimeout(r, 2000));
+        assertAmmWallet(principalText);
       }
 
-      const ammActor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
-      const result = await ammActor.add_liquidity(poolId, amountA, amountB, minLpShares);
-      if ('Err' in result) throw new Error(this.formatError(result.Err));
+      const result = await capabilityActor.add_liquidity_v2(operation.requestId, poolId, amountA, amountB, minLpShares);
+      assertAmmWallet(principalText);
+      if ('Err' in result) {
+			if (releaseDefinitelyUnstartedSequenceCollision(ammOperationStore, operation.requestId, result.Err))
+				throw new Error('The authenticated AMM response proves this request was not started and no input transfer was dispatched. You may retry this form manually to fetch the current sequence; no replacement request is created automatically.');
+			if (markUnavailableAfterSequenceConflict(ammOperationStore, operation.requestId, result.Err))
+				throw new Error('The authenticated AMM response says this request ID cannot execute again, but its result is unavailable. The terminal record may have been compacted or another caller may have consumed the global sequence, so the result is ambiguous. Do not replay or create a replacement. Verify token balances and transaction history manually.');
+			throw new Error(this.formatError(result.Err));
+		}
+      ammOperationStore.update(operation.requestId, { state: 'complete', message: 'AMM reported completion.' });
       return result.Ok;
     }
+    });
+  }
+
+  getHeldOperations(): AmmOperation[] {
+    const wallet = get(walletStore);
+    if (!wallet.principal) return [];
+    return ammOperationStore.unresolved(AMM_CANISTER_ID, wallet.principal.toText());
+  }
+
+  async checkOperation(requestId: number[]): Promise<unknown> {
+    const wallet = get(walletStore);
+    if (!wallet.principal) throw new Error('Wallet not connected');
+    const principalText = wallet.principal.toText();
+    const operation = ammOperationStore.list(AMM_CANISTER_ID, principalText).find((op) => op.requestId.length === requestId.length && op.requestId.every((b, i) => b === requestId[i]));
+    if (!operation) throw new Error('Saved AMM operation not found for this wallet.');
+    const actor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+    assertAmmWallet(principalText);
+    assertActorMethod(actor, 'get_inbound_operation');
+    const result = await actor.get_inbound_operation(requestId);
+    assertAmmWallet(principalText);
+    applyInboundOperationStatus(ammOperationStore, requestId, result);
+    return result;
   }
 
   async removeLiquidity(
@@ -509,3 +630,20 @@ class AmmService {
 }
 
 export const ammService = new AmmService();
+
+function assertAmmWallet(expectedPrincipal: string): void {
+  const current = get(walletStore);
+  if (!isSameAmmWallet(current.isConnected, current.principal?.toText(), expectedPrincipal)) {
+    throw new Error('Wallet identity changed during the AMM operation. Its request ID is retained; reconnect the original wallet to check status or replay it.');
+  }
+}
+
+function assertActorMethod(actor: Record<string, unknown>, method: string): asserts actor is Record<string, (...args: any[]) => Promise<any>> {
+  if (typeof actor?.[method] !== 'function') {
+    throw new Error(`AMM request-receipt endpoint ${method} is unavailable. No approval or AMM mutation was started; your saved request remains available for recovery.`);
+  }
+}
+
+export function isSameAmmWallet(connected: boolean, currentPrincipal: string | undefined, expectedPrincipal: string): boolean {
+  return connected && currentPrincipal === expectedPrincipal;
+}

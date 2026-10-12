@@ -1,7 +1,8 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { walletStore } from '../../stores/wallet';
-  import { ammService, AMM_TOKENS, parseTokenAmount, formatTokenAmount, type AmmToken } from '../../services/ammService';
+  import { ammService, AMM_SWAP_V2_READY, AMM_TOKENS, parseTokenAmount, formatTokenAmount, type AmmToken } from '../../services/ammService';
+  import type { AmmOperation } from '../../services/ammOperationStore';
   import {
     resolveRoute, executeRoute, preWarmOisySigner, preWarmOisyFees,
     checkIcpswapUnusedBalances, recoverIcpswapBalance, preWarmRecovery,
@@ -51,6 +52,9 @@
   let unusedBalances: IcpswapUnusedBalance[] = [];
   let recovering = false;
   let recoveryMessage = '';
+  let heldAmmOperations: AmmOperation[] = [];
+  let ammStatusLoading = '';
+  let ammStatusMessage = '';
 
   // Pre-quote snapshot of destination-token balance.
   //
@@ -66,8 +70,10 @@
   let beforeToBalanceSnapshot: bigint | null = null;
 
   $: isConnected = $walletStore.isConnected;
+  $: if ($walletStore.principal) heldAmmOperations = ammService.getHeldOperations();
   $: fromToken = SWAP_TOKENS[fromIdx];
   $: toToken = SWAP_TOKENS[toIdx];
+  $: multiHopRecoveryHold = currentRoute?.type === 'stable_to_icp' || currentRoute?.type === 'icp_to_stable';
 
   // Wallet balance for "from" token
   $: walletBalance = (() => {
@@ -124,6 +130,20 @@
         if (unusedBalances.length > 0) preWarmRecovery(unusedBalances).catch(() => {});
       }
       walletStore.refreshBalance({ skipCache: true });
+    }
+  }
+
+  async function checkAmmOperation(requestId: number[]) {
+    ammStatusLoading = requestId.join(',');
+    ammStatusMessage = '';
+    try {
+      const status = await ammService.checkOperation(requestId);
+      ammStatusMessage = JSON.stringify(status, (_key, value) => typeof value === 'bigint' ? value.toString() : value);
+      heldAmmOperations = ammService.getHeldOperations();
+    } catch (err: any) {
+      ammStatusMessage = err.message || 'Status check failed';
+    } finally {
+      ammStatusLoading = '';
     }
   }
 
@@ -373,6 +393,7 @@
       }
     } finally {
       loading = false;
+      heldAmmOperations = ammService.getHeldOperations();
       // Always refresh wallet balances and check for stuck deposits after swap.
       // skipCache bypasses TokenService's 30s cache so the destination balance
       // reflects the just-completed swap immediately instead of showing the
@@ -611,7 +632,7 @@
     <button
       class="submit-btn"
       on:click={handleSwap}
-      disabled={loading || !amount || parseFloat(amount) <= 0 || currentRoute === null}
+      disabled={loading || !amount || parseFloat(amount) <= 0 || currentRoute === null || multiHopRecoveryHold || (currentRoute?.type === 'amm_swap' && !AMM_SWAP_V2_READY)}
     >
       {#if loading}
         <span class="spinner"></span>
@@ -620,6 +641,17 @@
         Swap {fromToken.symbol} → {toToken.symbol}
       {/if}
     </button>
+
+    {#if multiHopRecoveryHold}
+      <div class="notice-bar" role="status">
+        This two-canister route is temporarily unavailable while durable recovery for both legs is completed. No funds have been submitted.
+      </div>
+    {/if}
+    {#if currentRoute?.type === 'amm_swap' && !AMM_SWAP_V2_READY}
+      <div class="notice-bar" role="status">
+        Direct AMM swaps are temporarily unavailable until durable request-receipt support is ready. No approval or AMM mutation will be started.
+      </div>
+    {/if}
 
     {#if error}
       <div class="error-bar">
@@ -631,6 +663,25 @@
     {/if}
     {#if notice}
       <div class="notice-bar">{notice}</div>
+    {/if}
+    {#if heldAmmOperations.length > 0}
+      <div class="notice-bar" role="status">
+        <strong>AMM operation held for recovery.</strong> Keep its request ID; do not start a replacement swap for that pool.
+        {#each heldAmmOperations as operation}
+          <p>{operation.state === 'prepared'
+            ? 'The request is saved, but no approval or AMM call started. Retry only this exact request when the request-receipt endpoint is available.'
+            : operation.state === 'unavailable'
+              ? operation.message
+              : 'Approval or dispatch may have started. Check status before taking another action.'}</p>
+          <div class="amm-held-row">
+            <span>{operation.request.operation === 'swap' ? 'Swap' : 'Add liquidity'} · {operation.poolId} · ID {operation.requestId.map((byte) => byte.toString(16).padStart(2, '0')).join('')}</span>
+            <button type="button" disabled={ammStatusLoading === operation.requestId.join(',')} on:click={() => checkAmmOperation(operation.requestId)}>
+              {ammStatusLoading === operation.requestId.join(',') ? 'Checking…' : 'Check status'}
+            </button>
+          </div>
+          {#if ammStatusMessage}<pre>{ammStatusMessage}</pre>{/if}
+        {/each}
+      </div>
     {/if}
   {/if}
 </div>
@@ -1081,6 +1132,11 @@
     color: var(--rumi-danger);
     font-size: 0.8125rem;
   }
+
+  .amm-held-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-top: 0.4rem; }
+  .amm-held-row span { overflow-wrap: anywhere; font-size: 0.75rem; }
+  .amm-held-row button { border: 1px solid currentColor; border-radius: 0.35rem; padding: 0.25rem 0.5rem; white-space: nowrap; }
+  .notice-bar pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 
   /* ── Notice (Oisy resilient success / informational) ── */
   .notice-bar {
