@@ -2,8 +2,8 @@
   const report = {
     date: 'October 11, 2026',
     datetime: '2026-10-11',
-    source: 'origin/main at 3d1c82c · includes PR #521',
-    snapshot: 'Mainnet readback · October 11, 2026 · backend maintenance and borrowing hold'
+    source: 'origin/main at 1a3a3f3 · includes PR #529',
+    snapshot: 'Mainnet readback · later October 11, 2026 · capped borrowing resumed'
   };
 
   const states = [
@@ -14,6 +14,22 @@
   ];
 
   const changes = [
+    {
+      pr: 'Live',
+      title: 'Backend and bot readback with capped borrowing',
+      summary: 'The upgraded backend reports module SHA-256 e325ce0d9ee4b5dcd1e68caafc6c69e58ec0d8cae46efd2930dfaed4f97ad352 and is running. The liquidation bot reports module SHA-256 184fe54ee091935f4e5dd5331c58a2743ea4cfa80f6c55a18db13556cc8e19a7 and is running. A later readback showed the protocol-wide new-mint cap at 22,000 icUSD, with debt below that cap, so limited borrowing admission resumed. This does not prove a completed user borrow, settle historical operations, or establish that every finding is closed. Treasury remained on its earlier module.',
+      state: 'Installed · capped borrowing',
+      tone: 'installed',
+      href: null
+    },
+    {
+      pr: '#527',
+      title: 'Treasury interest mint and deposit receipts',
+      summary: 'The source change journals Treasury interest mints and exact deposit receipts. The later backend upgrade is separately recorded above. Treasury still reports its earlier module, so this row does not claim its new code is installed or that held interest has been reconciled.',
+      state: 'Merged · Treasury not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/527'
+    },
     {
       pr: '#450',
       title: 'Points release and historical reconciliation',
@@ -64,65 +80,65 @@
     },
     {
       pr: '#455',
-      title: 'Bot upgrade pause',
-      summary: 'Source is merged. The liquidation_bot canister (nygob-3qaaa-aaaap-qttcq-cai) still reports its earlier module hash, f336ccf377d16d6ab675fe958205ba9fa3a799da4daf6d21b2d08f26871235c6.',
-      state: 'Merged · not installed',
+      title: 'Pause liquidation bot after upgrades',
+      summary: 'This merged source change makes the bot start paused after an upgrade. The separate later live readback above confirms a running upgraded bot; it does not show that PR #455 itself installed a canister or that every recovery path has completed.',
+      state: 'Merged · live install recorded separately',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/455'
     },
     {
       pr: '#456',
       title: 'P08 account migration',
-      summary: 'Source is merged. The rumi_protocol_backend canister (tfesu-vyaaa-aaaap-qrd7a-cai) still reports its earlier module hash, 1714712f12525a5058c288bde8f456b09e2e893e4ac51fe7a82992ac07b0ecf1. This row does not imply installation on the other affected canisters.',
-      state: 'Merged · backend not installed',
+      summary: 'The earlier October snapshot recorded an old backend module. The separate later live readback above superseded that observation. The wider 3USD account cutover and other affected canisters require their own activation and migration evidence.',
+      state: 'Backend installed · cutover open',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/456'
     },
     {
       pr: '#457',
       title: 'P08 populated-state upgrade proof',
-      summary: 'The source and upgrade evidence are merged. The live backend remains at the earlier module hash shown above; this report makes no claim that the change is installed.',
-      state: 'Merged · backend not installed',
+      summary: 'The source and upgrade evidence are merged. A later backend upgrade superseded the earlier not-installed snapshot; that does not by itself prove the wider account migration or live recovery.',
+      state: 'Backend installed · migration open',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/457'
     },
     {
       pr: '#458',
       title: 'BOT-10 recovery guard',
-      summary: 'Source is merged. The live backend and liquidation bot still report their earlier module hashes shown above; this report makes no claim that either change is installed.',
-      state: 'Merged · not installed',
+      summary: 'Source is merged. Later backend and bot upgrades superseded the earlier old-module readbacks. Claim and payment journal outcomes still need exact reconciliation.',
+      state: 'Installed · recovery open',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/458'
     },
     {
       pr: '#460',
       title: 'CL-02 collateral-return proof',
-      summary: 'Source is merged. The live backend still reports its earlier module hash shown above; this report makes no claim that the change is installed.',
-      state: 'Merged · backend not installed',
+      summary: 'Source is merged. A later backend upgrade superseded the earlier old-module readback. Historical claim outcomes and receipts remain separate evidence.',
+      state: 'Backend installed · receipts open',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/460'
     },
     {
       pr: '#468',
       title: 'Backend release compatibility',
-      summary: 'The backend compatibility change is merged into main. The live backend still reports its earlier module hash shown above; no installation is claimed here.',
-      state: 'Merged · backend not installed',
-      tone: 'held',
+      summary: 'The backend compatibility change is merged into main. A later source-matched backend upgrade superseded the earlier not-installed observation.',
+      state: 'Backend installed',
+      tone: 'installed',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/468'
     },
     {
       pr: '#511',
       title: 'Borrow-mint recovery and temporary borrowing hold',
-      summary: 'Receipt-based borrow recovery is merged in source, but the backend still runs its earlier module. On October 10, the live global icUSD mint cap was reduced from 3,000,000,000,000 to 1 raw unit and read back at 1. The backend was subsequently stopped and remained stopped at the October 11 readback. A coordinated upgrade is being prepared. This does not install the recovery code or settle any earlier mint.',
-      state: 'Source merged · backend stopped',
+      summary: 'Receipt-based borrow recovery is merged in source and the later backend upgrade superseded the old-module observation. The October 10 cap of one raw unit was a temporary hold; a later October 11 readback showed a 22,000 icUSD protocol-wide cap and the backend running. Historical mint recovery remains a separate obligation.',
+      state: 'Backend installed · borrowing capped',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/511'
     },
     {
       pr: '#521',
       title: 'Borrowing-fee receipt and Treasury indexing',
-      summary: 'The backend fee outbox and Treasury physical-block index are merged in source. On October 11, the backend was stopped on its earlier module hash shown above; Treasury (tlg74-oiaaa-aaaap-qrd6a-cai) was running on its earlier module SHA-256 4163a25f7e1d5119768cf16d6c75b6c98925682b0a89e99ced5cfe5aa0107300. Neither new code path nor the historical index migration is installed or complete. The release plan keeps borrowing held until the coordinated upgrade and post-upgrade checks finish.',
-      state: 'Merged · backend and Treasury not installed',
+      summary: 'The backend fee outbox and Treasury physical-block index are merged in source. The later backend upgrade superseded the old backend readback, but Treasury (tlg74-oiaaa-aaaap-qrd6a-cai) still reports its earlier module SHA-256 4163a25f7e1d5119768cf16d6c75b6c98925682b0a89e99ced5cfe5aa0107300. Its index migration and held interest reconciliation are not complete; borrowing is currently available only within the temporary cap.',
+      state: 'Backend installed · Treasury pending',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/521'
     }
@@ -141,8 +157,8 @@
     },
     {
       system: 'Vault borrowing',
-      status: 'Backend stopped for maintenance',
-      detail: 'The October 11 management readback showed the backend stopped. Calls to it, including borrowing, repayment, and collateral withdrawal, are unavailable while it is stopped. The last cap readback was 1 raw icUSD unit, below the minimum borrow. Neither the stop nor the cap proves that historical obligations are settled.'
+      status: 'Available within a temporary cap',
+      detail: 'A later October 11 readback showed the backend running with a protocol-wide new-mint cap of 22,000 icUSD and existing debt below that limit. Borrowing admission has resumed within the remaining capacity; individual collateral ceilings and normal checks still apply. This does not prove a completed user borrow or settle historical obligations.'
     },
     {
       system: 'Scope',
@@ -156,7 +172,7 @@
   <title>October 2026 Security Status · Rumi Protocol</title>
   <meta
     name="description"
-    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, October 11 mainnet readback, AMM maintenance, and the backend maintenance hold."
+    content="A dated Rumi Protocol security follow-up report separating merged source, installed modules, capped borrowing, and remaining operational holds."
   />
 </svelte:head>
 
@@ -170,16 +186,17 @@
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
             This snapshot separates merged source from mainnet installation. The October 10
-            Cycle Sentinel and AMM releases are installed with recorded state readbacks. On
-            October 11 the backend was stopped, so backend calls are unavailable. A coordinated
-            upgrade is being prepared. The AMM remains in maintenance mode and the Stability Pool remains
-            paused; newer backend, bot, Treasury, and Stability Pool code is not yet installed.
+            Cycle Sentinel and AMM releases are installed with recorded state readbacks.
+            Later on October 11, a readback confirmed the backend and bot running on their reviewed
+            upgrades, with borrowing admission resumed under a temporary cap. The AMM remains in
+            maintenance mode and the Stability Pool remains paused. Treasury and Stability Pool
+            follow-up code is not yet installed.
           </p>
         </div>
         <aside class="report-stamp" aria-label={report.snapshot}>
           <span class="stamp-label">Publication state</span>
           <strong>{report.snapshot}</strong>
-          <p>On October 11, the backend was stopped, Treasury and the bot still reported older modules, the Stability Pool was paused, and AMM maintenance mode remained on. The installed AMM, Cycle Sentinel, 3pool, and Points release evidence comes from earlier dated readbacks. This page combines time-scoped records; it is not live telemetry.</p>
+          <p>A later October 11 readback confirmed the backend and bot running on their reviewed upgrades with capped borrowing admission. Treasury still reported its older module, the Stability Pool remained paused, and AMM maintenance remained on. Other installation evidence comes from earlier dated readbacks. This page combines time-scoped records; it is not live telemetry.</p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
@@ -217,7 +234,9 @@
             <div class="change-main">
               <h3>{item.title}</h3>
               <p>{item.summary}</p>
-              <a href={item.href} target="_blank" rel="noopener noreferrer">Review public source record <span aria-hidden="true">↗</span></a>
+              {#if item.href}
+                <a href={item.href} target="_blank" rel="noopener noreferrer">Review public source record <span aria-hidden="true">↗</span></a>
+              {/if}
             </div>
             <div class="change-state">
               <span class="badge" class:badge-held={item.tone === 'held'} class:badge-installed={item.tone === 'installed'}>{item.state}</span>

@@ -91,12 +91,12 @@
             <span>Release status</span>
             <span class="status-label">In progress</span>
           </div>
-          <h2 id="release-status-title">Backend maintenance is in progress</h2>
+          <h2 id="release-status-title">Capped borrowing has resumed</h2>
           <p>
-            The October 11 readback showed the backend stopped, so backend calls are unavailable.
-            A coordinated upgrade is being prepared. The Stability Pool remains paused and the bot is
-            stopped. Selected 3pool, Points, AMM, and Cycle Sentinel releases are installed, but
-            backend and Treasury follow-up changes remain uninstalled. Broader findings are open.
+            A later October 11 readback confirmed the backend and liquidation bot running on their
+            reviewed upgrades. New borrowing is available within a temporary protocol-wide cap.
+            Treasury still runs its earlier module; the Stability Pool remains paused and the AMM
+            remains in maintenance mode. Broader findings and recovery work remain open.
           </p>
           <div class="status-divider"></div>
           <p class="status-footnote">
@@ -160,10 +160,10 @@
         <p class="state-label">Mainnet</p>
         <h3>Source changes do not update canisters</h3>
         <p>
-          The October 11 readback shows the backend stopped, the bot stopped, and the Stability
-          Pool paused. Selected 3pool, Points, AMM, and Cycle Sentinel releases are installed;
-          backend and Treasury follow-up changes remain uninstalled. A source merge does not
-          prove installation, feature activation, migration, or successful live operation.
+          The later October 11 readback shows the backend and bot running on their reviewed
+          upgrades, with borrowing enabled under a temporary cap. Treasury remains on its earlier
+          module, the Stability Pool is paused, and the AMM is in maintenance mode. A source merge
+          does not prove installation, feature activation, migration, or successful live operation.
         </p>
       </article>
     </div>
@@ -177,8 +177,8 @@
       </div>
       <h2 id="october-report-title">October security review status</h2>
       <p class="report-description">
-        Read the public summary of selected merged and installed changes, the current backend
-        maintenance hold, and the Points epoch 18 hold with epoch 19 policy still scheduled.
+        Read the public summary of selected merged and installed changes, capped borrowing,
+        remaining operational holds, and the Points epoch 18 review.
       </p>
       <div class="report-links">
         <a href="/security/october-2026">Read the October status report <span aria-hidden="true">↗</span></a>
