@@ -25,7 +25,7 @@
     {
       pr: '#535',
       title: 'Archived 3pool payout recovery',
-      summary: 'Merged and installed on October 12 as part of the 3pool module SHA-256 74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae. Archived payout receipts can be reconciled only through exact evidence linked to the configured ledger; uncertain claims remain held. A hash-gated PocketIC regression used Wasm bytes matching the installed predecessor and final candidate. A fresh pre-upgrade snapshot was taken while stopped, then the canister restarted on the new hash. Immediate readback found unchanged LP supply, reserves, virtual price, and admin fees, with zero pending claims. The new admin inventory enumerated ten payout records, all marked settled; this does not prove every historical ledger obligation or settle a new payout.',
+      summary: 'Merged and installed on October 12 as part of the 3pool module SHA-256 74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae. Archived payout receipts can be reconciled only through exact evidence linked to the configured ledger; uncertain claims remain held. A hash-gated PocketIC regression used Wasm bytes matching the installed predecessor and final candidate. A fresh pre-upgrade snapshot was taken while stopped, then the canister restarted on the new hash. Immediate readback found unchanged LP supply, reserves, virtual price, and admin fees, with zero pending claims. The admin inventory contained five confirmed swap outputs and five closed, non-dispatched refund reservations; this does not prove every historical ledger obligation or settle a new payout.',
       state: 'Installed · readback passed',
       tone: 'installed',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/535'
@@ -33,7 +33,7 @@
     {
       pr: '#540/#541',
       title: 'Global payout inventory and exact upgrade pin',
-      summary: 'The installed 3pool module adds a bounded admin-only page over its payout journal. The final artifact was rebuilt twice with the same SHA-256, pinned in the exact-installed-predecessor PocketIC upgrade test, and checked against the authored Candid service. The first live inventory page returned all ten recorded payouts as settled and no next cursor. Caller-visible receipts and external-ledger history remain separate evidence.',
+      summary: 'The installed 3pool module adds a bounded admin-only page over its retained payout entitlements. The final artifact was rebuilt twice with the same SHA-256, pinned in the exact-installed-predecessor PocketIC upgrade test, and checked against the authored Candid service. The complete first live inventory page held five confirmed swap outputs and five closed, non-dispatched refund reservations; there was no next cursor. Caller-visible receipts and external-ledger history remain separate evidence.',
       state: 'Installed · inventory available',
       tone: 'installed',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/540'
