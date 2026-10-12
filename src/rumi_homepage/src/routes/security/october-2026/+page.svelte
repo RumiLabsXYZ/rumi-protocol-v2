@@ -1,9 +1,9 @@
 <script>
   const report = {
-    date: 'October 11, 2026',
-    datetime: '2026-10-11',
-    source: 'origin/main at 6a9c9a86 · includes PR #532',
-    snapshot: 'Mainnet readback · later October 11, 2026 · capped borrowing resumed'
+    date: 'October 12, 2026',
+    datetime: '2026-10-12',
+    source: 'origin/main at f0dbbc91 · includes PRs #535 and #507',
+    snapshot: 'Module and pause readback · October 12, 2026'
   };
 
   const states = [
@@ -17,10 +17,26 @@
     {
       pr: 'Live',
       title: 'Backend and bot readback with capped borrowing',
-      summary: 'The backend reports module SHA-256 e325ce0d9ee4b5dcd1e68caafc6c69e58ec0d8cae46efd2930dfaed4f97ad352 and is running. The liquidation bot reports module SHA-256 184fe54ee091935f4e5dd5331c58a2743ea4cfa80f6c55a18db13556cc8e19a7 and is running. An October 11 readback showed the protocol-wide new-mint cap at 22,000 icUSD, with debt below that cap, so limited borrowing admission resumed. These installed modules predate PRs #531 and #532. This does not prove a completed user borrow, settle historical operations, or establish that every finding is closed. Treasury remained on its earlier module.',
+      summary: 'An October 12 module readback found the backend still at SHA-256 e325ce0d9ee4b5dcd1e68caafc6c69e58ec0d8cae46efd2930dfaed4f97ad352 and the liquidation bot still at 184fe54ee091935f4e5dd5331c58a2743ea4cfa80f6c55a18db13556cc8e19a7. The backend still reported a 22,000 icUSD protocol-wide new-mint cap. An October 11 readback found debt below that cap; remaining capacity was not recalculated for this update. These installed modules predate PRs #531 and #532. This does not prove a completed user borrow, settle historical operations, or establish that every finding is closed. Treasury still reported its earlier module.',
       state: 'Installed · capped borrowing',
       tone: 'installed',
       href: null
+    },
+    {
+      pr: '#535',
+      title: 'Archived 3pool payout recovery',
+      summary: 'Merged into main on October 12. The source can reconcile an archived payout receipt only after the evidence links to a block served directly by its configured ledger; incomplete or mismatched evidence leaves the claim held. Focused tests, an independent source review, and a production-profile build passed. The October 12 mainnet module hash remained 9797bf2454923ef41d6ef6a003435e0430aaa2b2b413734c6d9e6e921889dfc0, so this new source is not installed. No historical payout was reconciled by this merge.',
+      state: 'Merged · not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/535'
+    },
+    {
+      pr: '#507',
+      title: 'AMM transfer and payout recovery',
+      summary: 'Merged into main on October 12. The source journals inbound pulls and outbound payouts before ledger calls and keeps uncertain outcomes held. A focused PocketIC test exercised the public native-ICP recovery endpoint against the official ledger, using a seeded ambiguous journal row; it did not reproduce an effect followed by a lost callback. Production swap and deposit routes in this candidate remain held. The October 12 mainnet module hash remained 832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2, and a fresh query confirmed maintenance mode was still active. The new recovery source is not installed, and no historical liability was settled by this merge.',
+      state: 'Merged · not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/507'
     },
     {
       pr: '#531',
@@ -65,7 +81,7 @@
     {
       pr: '#483',
       title: '3pool upgrade verification and state preservation',
-      summary: 'Merged on October 9. The rumi_3pool canister (fohh4-yyaaa-aaaap-qtkpa-cai) reports module SHA-256 9797bf2454923ef41d6ef6a003435e0430aaa2b2b413734c6d9e6e921889dfc0. A clean-source rebuild matched the installed module. Immediate readback found LP supply, reserves, virtual price, admin fees, and pending-claim count unchanged. This installed module predates the PR #532 donation-receipt changes.',
+      summary: 'Merged on October 9. The rumi_3pool canister (fohh4-yyaaa-aaaap-qtkpa-cai) reported module SHA-256 9797bf2454923ef41d6ef6a003435e0430aaa2b2b413734c6d9e6e921889dfc0 again on October 12. A clean-source rebuild matched the installed module. The October 9 immediate readback found LP supply, reserves, virtual price, admin fees, and pending-claim count unchanged. This installed module predates PRs #532 and #535.',
       state: 'Installed · rebuild matched · readback recorded',
       tone: 'installed',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/483'
@@ -81,7 +97,7 @@
     {
       pr: '#504',
       title: '3USD account boundary and AMM custody',
-      summary: 'Source merged on October 10. The matching Rumi AMM upgrade is installed at module SHA-256 832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2. Its single 3USD/ICP pool retained its reserves and LP supply, with no pending claims, and its 3USD ledger balance matched the reserve at readback. Later on October 10, AMM maintenance mode was enabled during a separate transfer-recovery review; a fresh query confirmed the mode active and the pending-claim list empty. The 3pool account guard is not installed; the backend V1/V2 cutover and historical account compatibility remain under review.',
+      summary: 'Source merged on October 10. The matching Rumi AMM upgrade remains installed at module SHA-256 832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2 on October 12. Its single 3USD/ICP pool retained its reserves and LP supply, with no pending claims, and its 3USD ledger balance matched the reserve at the earlier readback. AMM maintenance mode was enabled on October 10 and a fresh October 12 query confirmed it was still active. The later PR #507 recovery source and the 3pool account guard are not installed; the backend V1/V2 cutover and historical account compatibility remain under review.',
       state: 'AMM installed · maintenance on · 3pool guard held',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/504'
@@ -89,7 +105,7 @@
     {
       pr: '#459',
       title: 'Stability Pool containment',
-      summary: 'The rumi_stability_pool canister (tmhzi-dqaaa-aaaap-qrd6q-cai) is emergency-paused and still runs module SHA-256 54245b779feb30c4da7ac3f60e9cb62afb99f1accd2ea5affc7adda8a28e4754; the newer source is not installed there. The October 8 pause readback recorded 13 depositors. A later read confirmed the pause and depositor count; aggregate deposits are omitted because the later total differs from the earlier snapshot and has not been analyzed.',
+      summary: 'An October 12 query confirmed that the rumi_stability_pool canister (tmhzi-dqaaa-aaaap-qrd6q-cai) remained emergency-paused, with module SHA-256 54245b779feb30c4da7ac3f60e9cb62afb99f1accd2ea5affc7adda8a28e4754; the newer source is not installed there. The October 8 pause readback recorded 13 depositors. Aggregate deposits are omitted because later totals differ from that snapshot and have not been fully analyzed.',
       state: 'Paused · newer source not installed',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/459'
@@ -164,7 +180,7 @@
     {
       system: 'AMM',
       status: 'Maintenance mode active',
-      detail: 'New swaps and liquidity deposits are temporarily held while transfer recovery is reviewed. The current canister source leaves the liquidity withdrawal route callable during maintenance. This is an operational hold, not a claim that any historical transfer has been settled.'
+      detail: 'An October 12 query confirmed maintenance mode remained active. New swaps and liquidity deposits are held while transfer recovery is reviewed. The installed canister leaves the liquidity withdrawal route callable during maintenance. The merged PR #507 source is not installed, and this hold does not establish settlement of any historical transfer.'
     },
     {
       system: 'Points',
@@ -173,8 +189,8 @@
     },
     {
       system: 'Vault borrowing',
-      status: 'Available within a temporary cap',
-      detail: 'A later October 11 readback showed the backend running with a protocol-wide new-mint cap of 22,000 icUSD and existing debt below that limit. Borrowing admission has resumed within the remaining capacity; individual collateral ceilings and normal checks still apply. This does not prove a completed user borrow or settle historical obligations.'
+      status: 'Temporary cap configured',
+      detail: 'An October 12 query confirmed the backend still reports a protocol-wide new-mint cap of 22,000 icUSD. An October 11 readback found existing debt below that limit, so borrowing admission had resumed within the remaining capacity at that time. Remaining capacity was not recalculated for this update; individual collateral ceilings and normal checks still apply. This does not prove a completed user borrow or settle historical obligations.'
     },
     {
       system: 'Scope',
@@ -201,23 +217,22 @@
           <p class="issue-line">Status report <span>—</span> <time datetime={report.datetime}>{report.date}</time></p>
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
-            This snapshot separates merged source from mainnet installation. The October 10
-            Cycle Sentinel and AMM releases are installed with recorded state readbacks.
-            Later on October 11, a readback confirmed the backend and bot running, with borrowing
-            admission resumed under a temporary cap. The AMM remains in
-            maintenance mode and the Stability Pool remains paused. Treasury and Stability Pool
-            follow-up code is not yet installed. The newer PR #531 and #532 source changes are merged
-            but have not been installed.
+            This snapshot separates merged source from mainnet installation. October 12
+            readbacks confirmed the earlier backend, bot, AMM, 3pool, Treasury, and Stability Pool
+            module hashes; the AMM remained in maintenance mode and the Stability Pool remained
+            paused. Borrowing had resumed under a temporary cap at the October 11 readback, and
+            that cap still reported 22,000 icUSD on October 12. PRs #531, #532, #535, and #507
+            are merged source changes, not new installations.
           </p>
         </div>
         <aside class="report-stamp" aria-label={report.snapshot}>
           <span class="stamp-label">Publication state</span>
           <strong>{report.snapshot}</strong>
-          <p>A later October 11 readback confirmed the backend and bot running with capped borrowing admission. Treasury still reported its older module, the Stability Pool remained paused, and AMM maintenance remained on. PRs #531 and #532 are merged source only. Other installation evidence comes from earlier dated readbacks. This page combines time-scoped records; it is not live telemetry.</p>
+          <p>October 12 module and pause readbacks confirmed unchanged module hashes, the Stability Pool pause, and the AMM maintenance flag. The borrowing cap remained 22,000 icUSD; remaining debt capacity was last checked on October 11. PRs #531, #532, #535, and #507 are merged source only. Other installation evidence comes from earlier dated readbacks. This page combines time-scoped records; it is not live telemetry.</p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
-      <div class="rule-caption"><span>Source cutoff · {report.source} · October 11, 2026</span><span>Selected remediation and release follow-up</span></div>
+      <div class="rule-caption"><span>Source cutoff · {report.source} · October 12, 2026</span><span>Selected remediation and release follow-up</span></div>
     </div>
   </section>
 
@@ -242,7 +257,7 @@
       <div class="section-heading section-heading-wide">
         <p class="section-label">Selected changes</p>
         <h2 id="updates-title">Change and release status</h2>
-        <p>This October 11 snapshot reports the highest evidence stage available for each change, including the later PR #531 and #532 source merges. A source merge and a live installation remain separate states.</p>
+        <p>This October 12 snapshot reports the highest evidence stage available for each change, including the newer PR #535 and #507 source merges. A source merge and a live installation remain separate states.</p>
       </div>
       <div class="change-list">
         {#each changes as item}
@@ -288,7 +303,7 @@
       </div>
       <p>
         Source review, tests, builds, installation, activation, and live behavior are distinct claims.
-        This page records an October 11 snapshot; it does not publish private audit material or
+        This page records an October 12 snapshot; it does not publish private audit material or
         establish that every finding is closed.
       </p>
     </div>

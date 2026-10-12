@@ -66,7 +66,7 @@
   <title>Security · Rumi Protocol</title>
   <meta
     name="description"
-    content="Security review history, selected October 11 release and maintenance status, and responsible disclosure for Rumi Protocol."
+    content="Security review history, selected October 12 release and maintenance status, and responsible disclosure for Rumi Protocol."
   />
 </svelte:head>
 
@@ -82,7 +82,7 @@
             code. A passing test, a source change, and an installed canister are different kinds
             of evidence.
           </p>
-          <p class="review-date">Status snapshot <time datetime="2026-10-11">October 11, 2026</time></p>
+          <p class="review-date">Status snapshot <time datetime="2026-10-12">October 12, 2026</time></p>
         </div>
 
         <aside class="status-card" aria-labelledby="release-status-title">
@@ -91,16 +91,18 @@
             <span>Release status</span>
             <span class="status-label">In progress</span>
           </div>
-          <h2 id="release-status-title">Capped borrowing has resumed</h2>
+          <h2 id="release-status-title">Borrowing reopened under a cap</h2>
           <p>
-            A later October 11 readback confirmed the backend and liquidation bot running on their
-            reviewed upgrades. New borrowing is available within a temporary protocol-wide cap.
-            Treasury still runs its earlier module; the Stability Pool remains paused and the AMM
-            remains in maintenance mode. Broader findings and recovery work remain open.
+            An October 11 readback confirmed the backend and liquidation bot running on their
+            reviewed upgrades, with new borrowing available within a temporary protocol-wide cap.
+            October 12 queries confirmed that cap and unchanged module hashes; remaining borrowing
+            capacity was not recalculated. Treasury still reports its earlier module, the Stability
+            Pool remains paused, and the AMM remains in maintenance mode. Broader findings and
+            recovery work remain open.
           </p>
           <div class="status-divider"></div>
           <p class="status-footnote">
-            These October 11 readbacks are dated snapshots, not live telemetry. This is a release
+            These readbacks are dated snapshots, not live telemetry. This is a release
             update, not a finding-by-finding closure statement. See the October report for the
             scope and limits of these statements.
           </p>
@@ -149,7 +151,7 @@
         <p class="state-label">Source work</p>
         <h3>A newer review is still being closed out</h3>
         <p>
-          A later internal review led to changes in a release branch. Some targeted tests and
+          A later internal review led to changes merged into main. Some targeted tests and
           source checks have passed, while additional finding adjudication and operational
           evidence remain open. No final public report for that cycle is posted here.
         </p>
@@ -160,9 +162,10 @@
         <p class="state-label">Mainnet</p>
         <h3>Source changes do not update canisters</h3>
         <p>
-          The later October 11 readback shows the backend and bot running on their reviewed
-          upgrades, with borrowing enabled under a temporary cap. Treasury remains on its earlier
-          module, the Stability Pool is paused, and the AMM is in maintenance mode. A source merge
+          The October 11 readback showed the backend and bot running on their reviewed upgrades,
+          with borrowing enabled under a temporary cap. October 12 queries confirmed the cap and
+          unchanged module hashes; remaining capacity was not recalculated. Treasury remains on its
+          earlier module, the Stability Pool is paused, and the AMM is in maintenance mode. A source merge
           does not prove installation, feature activation, migration, or successful live operation.
         </p>
       </article>
@@ -172,7 +175,7 @@
   <section class="section page-width" aria-labelledby="october-report-title">
     <article class="report-card featured october-report-card">
       <div class="report-card-top">
-        <span class="report-kind">Status report · October 11, 2026</span>
+        <span class="report-kind">Status report · October 12, 2026</span>
         <span class="latest-tag">Latest status snapshot</span>
       </div>
       <h2 id="october-report-title">October security review status</h2>
@@ -271,7 +274,7 @@
   </section>
 
   <footer class="page-width page-foot">
-    <span>Security status snapshot dated October 11, 2026.</span>
+    <span>Security status snapshot dated October 12, 2026.</span>
     <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener">
       Verify source and release history <span aria-hidden="true">↗</span>
     </a>
