@@ -25,7 +25,7 @@
     {
       pr: '#535',
       title: 'Archived 3pool payout recovery',
-      summary: 'Merged into main on October 12. The source can reconcile an archived payout receipt only after the evidence links to a block served directly by its configured ledger; incomplete or mismatched evidence leaves the claim held. Focused tests, an independent source review, and a production-profile build passed. The October 12 mainnet module hash remained 9797bf2454923ef41d6ef6a003435e0430aaa2b2b413734c6d9e6e921889dfc0, so this new source is not installed. No historical payout was reconciled by this merge.',
+      summary: 'Merged into main on October 12. The source can reconcile an archived payout receipt only after the evidence links to a block served directly by its configured ledger; incomplete or mismatched evidence leaves the claim held. Focused tests, an independent source review, and a production-profile build passed. A hash-gated PocketIC regression in PR #537 then passed 1/1 using Wasm bytes matching the installed predecessor and the reviewed candidate. Representative LP balances and supply, reserves, admin fees, and token balances survived; a legacy allowance was cleared once and a new allowance survived a second upgrade. The fixture had zero pending claims, so this does not test nonzero legacy claims or establish complete live liabilities. The candidate remains uninstalled, and no historical payout was reconciled by this merge.',
       state: 'Merged · not installed',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/535'
@@ -33,7 +33,7 @@
     {
       pr: '#507',
       title: 'AMM transfer and payout recovery',
-      summary: 'Merged into main on October 12. The source journals inbound pulls and outbound payouts before ledger calls and keeps uncertain outcomes held. A focused PocketIC test exercised the public native-ICP recovery endpoint against the official ledger, using a seeded ambiguous journal row; it did not reproduce an effect followed by a lost callback. Production swap and deposit routes in this candidate remain held. The October 12 mainnet module hash remained 832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2, and a fresh query confirmed maintenance mode was still active. The new recovery source is not installed, and no historical liability was settled by this merge.',
+      summary: 'Merged into main on October 12. The source journals inbound pulls and outbound payouts before ledger calls and keeps uncertain outcomes held. A follow-up hash-gated PocketIC test in PR #538 passed 1/1: an official-ledger native ICP payout committed, AMM callback processing trapped before recording its receipt, and public exact-block recovery after upgrade recorded the existing transfer without a second payout. This covers that callback-trap path; it does not establish complete historical-liability recovery or restored trading. Production swap and deposit routes in this candidate remain held. The October 12 mainnet module hash remained 832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2, and a fresh query confirmed maintenance mode was still active. The recovery source is not installed, and no historical liability was settled by this merge.',
       state: 'Merged · not installed',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/507'
