@@ -1521,6 +1521,22 @@ export interface ReserveBalance {
   'ledger' : Principal,
   'symbol' : string,
 }
+export interface ReserveRedemptionAdminStatus {
+  'journal_count' : bigint,
+  'operation_id' : [] | [bigint],
+  'unresolved_leg' : [] | [ReserveRedemptionLegHint],
+  'phase' : [] | [string],
+}
+export interface ReserveRedemptionLegHint {
+  'to' : Account,
+  'leg' : string,
+  'created_at_time_ns' : bigint,
+  'from' : Account,
+  'memo' : Uint8Array | number[],
+  'ledger' : Principal,
+  'amount' : bigint,
+  'spender' : [] | [Account],
+}
 export interface ReserveRedemptionResult {
   'icusd_block_index' : bigint,
   'stable_token_used' : Principal,
@@ -1610,6 +1626,8 @@ export type Result_34 = { 'Ok' : XrpSpAbsorbPreflight } |
 export type Result_35 = { 'Ok' : XrpSpAbsorbStatus } |
   { 'Err' : ProtocolError };
 export type Result_36 = { 'Ok' : number } |
+  { 'Err' : ProtocolError };
+export type Result_37 = { 'Ok' : ReserveRedemptionAdminStatus } |
   { 'Err' : ProtocolError };
 export type Result_4 = { 'Ok' : SuccessWithFee } |
   { 'Err' : ProtocolError };
@@ -1995,8 +2013,13 @@ export interface _SERVICE {
     [Array<VaultDebtCorrection>],
     Result_2
   >,
+  'admin_get_reserve_redemption_status' : ActorMethod<[], Result_37>,
   'admin_mint_icusd' : ActorMethod<[bigint, Principal, string], Result>,
   'admin_quarantine_xrp_claim' : ActorMethod<[bigint, string], Result_1>,
+  'admin_reconcile_reserve_redemption' : ActorMethod<
+    [bigint, [] | [bigint]],
+    Result_1
+  >,
   'admin_resolve_stuck_claim' : ActorMethod<[bigint, boolean], Result_1>,
   'admin_resolve_xrp_claim' : ActorMethod<
     [bigint, XrpClaimResolution],

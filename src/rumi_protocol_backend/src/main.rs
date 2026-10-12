@@ -73,6 +73,131 @@ pub struct ReserveRedemptionStatus {
     pub phase: String,
 }
 
+/// Controller-only release preflight view. The sole journal's presence and
+/// operation ID are enough to detect downgrade-sensitive retained state.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ReserveRedemptionAdminStatus {
+    pub journal_count: u64,
+    pub operation_id: Option<u128>,
+    pub phase: Option<String>,
+    pub unresolved_leg: Option<ReserveRedemptionLegHint>,
+}
+
+/// Exact transfer coordinates for resolving the current ambiguous ledger leg.
+/// The tuple is copied from the durable journal; `spender` is populated only
+/// for the ICRC-2 pull.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ReserveRedemptionLegHint {
+    pub leg: String,
+    pub ledger: Principal,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    pub amount: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub spender: Option<icrc_ledger_types::icrc1::account::Account>,
+}
+
+fn reserve_redemption_unresolved_leg_hint(
+    row: &rumi_protocol_backend::state::ReserveRedemptionJournal,
+) -> Option<ReserveRedemptionLegHint> {
+    use rumi_protocol_backend::state::ReserveRedemptionPhase as P;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    let backend_account = |subaccount: Option<[u8; 32]>| Account {
+        owner: row.pull_to.owner,
+        subaccount,
+    };
+    match row.phase {
+        P::PullSubmitted => Some(ReserveRedemptionLegHint {
+            leg: "pull".into(),
+            ledger: row.pull_ledger,
+            from: row.pull_from.clone(),
+            to: row.pull_to.clone(),
+            amount: row.pull_amount_e8s,
+            memo: row.pull_memo.clone(),
+            created_at_time_ns: row.pull_created_at_time_ns,
+            spender: Some(backend_account(None)),
+        }),
+        P::PayoutSubmitted | P::PayoutAmbiguous => Some(ReserveRedemptionLegHint {
+            leg: "payout".into(),
+            ledger: row.payout_ledger,
+            from: backend_account(row.payout_from_subaccount),
+            to: row.payout_to.clone(),
+            amount: row.payout_amount_e6s,
+            memo: row.payout_memo.clone(),
+            created_at_time_ns: row.payout_created_at_time_ns,
+            spender: None,
+        }),
+        P::TreasuryFeeSubmitted | P::TreasuryFeeAmbiguous => Some(ReserveRedemptionLegHint {
+            leg: "treasury_fee".into(),
+            ledger: row.treasury_ledger?,
+            from: backend_account(None),
+            to: row.treasury_to.clone()?,
+            amount: row.treasury_amount_e6s?,
+            memo: row.treasury_memo.clone()?,
+            created_at_time_ns: row.treasury_created_at_time_ns?,
+            spender: None,
+        }),
+        P::RefundSubmitted | P::RefundRetrySubmitted => Some(ReserveRedemptionLegHint {
+            leg: "refund".into(),
+            ledger: row.refund_ledger?,
+            from: backend_account(None),
+            to: Account { owner: row.caller, subaccount: None },
+            amount: row.refund_amount_e8s?,
+            memo: row.refund_memo.clone()?,
+            created_at_time_ns: row.refund_created_at_time_ns?,
+            spender: None,
+        }),
+        _ => None,
+    }
+}
+
+fn reserve_redemption_phase_name(
+    phase: rumi_protocol_backend::state::ReserveRedemptionPhase,
+) -> &'static str {
+    use rumi_protocol_backend::state::ReserveRedemptionPhase as P;
+    match phase {
+        P::PullSubmitted => "pull_submitted",
+        P::PullSettled => "pull_settled",
+        P::PayoutSubmitted => "payout_submitted",
+        P::PayoutNoEffect => "payout_no_effect",
+        P::PayoutSettled => "payout_settled",
+        P::PayoutAmbiguous => "payout_ambiguous",
+        P::TreasuryFeeSubmitted => "treasury_fee_submitted",
+        P::TreasuryFeeSettled => "treasury_fee_settled",
+        P::TreasuryFeeNoEffect => "treasury_fee_no_effect",
+        P::TreasuryFeeAmbiguous => "treasury_fee_ambiguous",
+        P::RefundSubmitted => "refund_submitted",
+        P::RefundRetrySubmitted => "refund_retry_submitted",
+        P::RefundNoEffect => "refund_no_effect",
+        P::RefundSettled => "refund_settled",
+    }
+}
+
+fn reserve_redemption_admin_status_in(state: &State) -> ReserveRedemptionAdminStatus {
+    let journal_count = u64::try_from(state.reserve_redemption_journals.len()).unwrap_or(u64::MAX);
+    let sole = if journal_count == 1 {
+        state.reserve_redemption_journals.values().next()
+    } else {
+        None
+    };
+    ReserveRedemptionAdminStatus {
+        journal_count,
+        operation_id: sole.map(|row| row.operation_id),
+        phase: sole.map(|row| reserve_redemption_phase_name(row.phase).to_string()),
+        unresolved_leg: sole.and_then(reserve_redemption_unresolved_leg_hint),
+    }
+}
+
+fn controller_authorization(is_controller: bool) -> Result<(), ProtocolError> {
+    if is_controller {
+        Ok(())
+    } else {
+        Err(ProtocolError::CallerNotOwner)
+    }
+}
+
 fn reserve_redemption_status_in(
     state: &State,
     caller: Principal,
@@ -81,21 +206,6 @@ fn reserve_redemption_status_in(
         .reserve_redemption_journals
         .values()
         .find(|row| row.caller == caller)?;
-    let phase = match row.phase {
-        rumi_protocol_backend::state::ReserveRedemptionPhase::PullSubmitted => "pull_submitted",
-        rumi_protocol_backend::state::ReserveRedemptionPhase::PullSettled => "pull_settled",
-        rumi_protocol_backend::state::ReserveRedemptionPhase::PayoutSubmitted => "payout_submitted",
-        rumi_protocol_backend::state::ReserveRedemptionPhase::PayoutSettled => "payout_settled",
-        rumi_protocol_backend::state::ReserveRedemptionPhase::PayoutAmbiguous => "payout_ambiguous",
-        rumi_protocol_backend::state::ReserveRedemptionPhase::TreasuryFeeSubmitted => "treasury_fee_submitted",
-        rumi_protocol_backend::state::ReserveRedemptionPhase::TreasuryFeeSettled => "treasury_fee_settled",
-        rumi_protocol_backend::state::ReserveRedemptionPhase::TreasuryFeeNoEffect => "treasury_fee_no_effect",
-        rumi_protocol_backend::state::ReserveRedemptionPhase::TreasuryFeeAmbiguous => "treasury_fee_ambiguous",
-        rumi_protocol_backend::state::ReserveRedemptionPhase::RefundSubmitted => "refund_submitted",
-        rumi_protocol_backend::state::ReserveRedemptionPhase::RefundRetrySubmitted => "refund_retry_submitted",
-        rumi_protocol_backend::state::ReserveRedemptionPhase::RefundNoEffect => "refund_no_effect",
-        rumi_protocol_backend::state::ReserveRedemptionPhase::RefundSettled => "refund_settled",
-    };
     Some(ReserveRedemptionStatus {
         icusd_amount_e8s: row.icusd_amount_e8s,
         stable_token: row.payout_ledger,
@@ -106,7 +216,7 @@ fn reserve_redemption_status_in(
         treasury_block_index: row.treasury_block_index,
         refund_amount_e8s: row.refund_amount_e8s,
         refund_block_index: row.refund_block_index,
-        phase: phase.into(),
+        phase: reserve_redemption_phase_name(row.phase).into(),
     })
 }
 
@@ -13705,11 +13815,7 @@ fn get_reserve_redemption_fee() -> f64 {
 // ── Admin safety functions (controller-only) ──────────────────────────────────
 
 fn require_controller() -> Result<(), ProtocolError> {
-    if ic_cdk::api::is_controller(&ic_cdk::caller()) {
-        Ok(())
-    } else {
-        Err(ProtocolError::CallerNotOwner)
-    }
+    controller_authorization(ic_cdk::api::is_controller(&ic_cdk::caller()))
 }
 
 /// Manually enter Recovery mode. Automatic mode transitions are suppressed
@@ -13929,15 +14035,40 @@ fn get_reserve_redemption_status() -> Option<ReserveRedemptionStatus> {
     reserve_redemption_status_for(ic_cdk::api::caller())
 }
 
-/// Retry a refund only after the ledger returned a typed no-effect result, or
-/// record a caller-supplied candidate index after direct-ledger ICRC-3 proves
-/// the exact journaled leg. This endpoint records one positive receipt; it
-/// cannot infer absence or finalize the remaining saga/accounting.
+/// Controller-only view for release preflight and bounded recovery operations.
+#[candid_method(query)]
+#[query]
+fn admin_get_reserve_redemption_status() -> Result<ReserveRedemptionAdminStatus, ProtocolError> {
+    require_controller()?;
+    Ok(read_state(reserve_redemption_admin_status_in))
+}
+
+/// Retry a refund only after a typed no-effect result, or verify a caller-
+/// supplied block against the exact journaled leg and continue the saga.
+/// Recovery uses pinned ledger tuples and does not need a fresh oracle price.
 #[candid_method(update)]
 #[update]
 async fn reconcile_reserve_redemption(candidate_block_index: Option<u64>) -> Result<(), ProtocolError> {
-    validate_call().await?;
+    validate_authenticated_not_frozen()?;
     rumi_protocol_backend::vault::reconcile_reserve_redemption(candidate_block_index).await
+}
+
+/// Controller-only recovery for one exact retained operation. The protocol
+/// freeze remains authoritative; ledger destinations and amounts come only
+/// from the persisted journal.
+#[candid_method(update)]
+#[update]
+async fn admin_reconcile_reserve_redemption(
+    operation_id: u128,
+    candidate_block_index: Option<u64>,
+) -> Result<(), ProtocolError> {
+    require_controller()?;
+    validate_not_frozen()?;
+    rumi_protocol_backend::vault::admin_reconcile_reserve_redemption(
+        operation_id,
+        candidate_block_index,
+    )
+    .await
 }
 
 /// Admin: mint icUSD to a recipient (developer only).
@@ -19365,7 +19496,10 @@ mod borrow_recovery_gate_tests {
 
 #[cfg(test)]
 mod reserve_redemption_status_tests {
-    use super::reserve_redemption_status_in;
+    use super::{
+        controller_authorization, reserve_redemption_admin_status_in,
+        reserve_redemption_status_in, ProtocolError,
+    };
     use candid::Principal;
     use icrc_ledger_types::icrc1::account::Account;
     use rumi_protocol_backend::state::{
@@ -19410,12 +19544,18 @@ mod reserve_redemption_status_tests {
                 treasury_memo: None,
                 treasury_created_at_time_ns: None,
                 treasury_op_nonce: None,
+                treasury_fee_required: false,
                 treasury_block_index: None,
+                payout_no_effect_tuples: Vec::new(),
                 refund_ledger: None,
                 refund_amount_e8s: None,
                 refund_memo: None,
                 refund_created_at_time_ns: None,
                 refund_op_nonce: None,
+                refund_history: Vec::new(),
+                refund_history_pruned_count: 0,
+                refund_retry_count: 0,
+                refund_retry_is_same_tuple: false,
                 refund_block_index: None,
                 pull_block_index: Some(7),
                 payout_block_index: None,
@@ -19428,5 +19568,160 @@ mod reserve_redemption_status_tests {
         assert_eq!(visible.pull_block_index, Some(7));
         assert_eq!(visible.stable_amount_e6s, 100);
         assert!(reserve_redemption_status_in(&state, stranger).is_none());
+        let admin = reserve_redemption_admin_status_in(&state);
+        assert_eq!(admin.journal_count, 1);
+        assert_eq!(admin.operation_id, Some(99));
+        assert_eq!(admin.phase.as_deref(), Some("payout_ambiguous"));
+        assert_eq!(admin.unresolved_leg.as_ref().map(|leg| leg.leg.as_str()), Some("payout"));
+    }
+
+    #[test]
+    fn admin_status_reports_presence_even_when_the_journal_cardinality_is_invalid() {
+        let mut state = State::default();
+        let empty = reserve_redemption_admin_status_in(&state);
+        assert_eq!(empty.journal_count, 0);
+        assert_eq!(empty.operation_id, None);
+        assert_eq!(empty.phase, None);
+
+        // Two rows are invalid under the state invariant, but release
+        // preflight must still see that downgrade-sensitive state is present.
+        state.reserve_redemption_journals.insert(1, test_journal(1));
+        state.reserve_redemption_journals.insert(2, test_journal(2));
+        let multiple = reserve_redemption_admin_status_in(&state);
+        assert_eq!(multiple.journal_count, 2);
+        assert_eq!(multiple.operation_id, None);
+        assert_eq!(multiple.phase, None);
+        assert_eq!(multiple.unresolved_leg, None);
+    }
+
+    #[test]
+    fn controller_gate_rejects_non_controllers() {
+        assert!(matches!(controller_authorization(false), Err(ProtocolError::CallerNotOwner)));
+        assert!(controller_authorization(true).is_ok());
+    }
+
+    #[test]
+    fn unresolved_leg_hint_selects_only_the_current_phase_tuple() {
+        use rumi_protocol_backend::state::ReserveRedemptionPhase as P;
+
+        let mut row = test_journal(99);
+        row.payout_memo = vec![8, 9];
+        row.payout_created_at_time_ns = 88;
+        row.treasury_ledger = Some(Principal::from_slice(&[35]));
+        row.treasury_to = Some(Account { owner: Principal::from_slice(&[36]), subaccount: None });
+        row.treasury_amount_e6s = Some(37);
+        row.treasury_memo = Some(vec![3, 7]);
+        row.treasury_created_at_time_ns = Some(38);
+        row.refund_ledger = Some(Principal::from_slice(&[39]));
+        row.refund_amount_e8s = Some(40);
+        row.refund_memo = Some(vec![4, 0]);
+        row.refund_created_at_time_ns = Some(41);
+
+        row.phase = P::PullSubmitted;
+        let hint = super::reserve_redemption_unresolved_leg_hint(&row).unwrap();
+        assert_eq!(hint.leg, "pull");
+        assert_eq!(hint.ledger, row.pull_ledger);
+        assert_eq!(hint.from, row.pull_from);
+        assert_eq!(hint.to, row.pull_to);
+        assert_eq!(hint.amount, row.pull_amount_e8s);
+        assert_eq!(hint.memo, row.pull_memo);
+        assert_eq!(hint.created_at_time_ns, row.pull_created_at_time_ns);
+        assert_eq!(hint.spender, Some(Account { owner: row.pull_to.owner, subaccount: None }));
+
+        for phase in [P::PayoutSubmitted, P::PayoutAmbiguous] {
+            row.phase = phase;
+            let hint = super::reserve_redemption_unresolved_leg_hint(&row).unwrap();
+            assert_eq!(hint.leg, "payout");
+            assert_eq!(hint.ledger, row.payout_ledger);
+            assert_eq!(hint.from, Account { owner: row.pull_to.owner, subaccount: row.payout_from_subaccount });
+            assert_eq!(hint.to, row.payout_to);
+            assert_eq!(hint.amount, row.payout_amount_e6s);
+            assert_eq!(hint.memo, row.payout_memo);
+            assert_eq!(hint.created_at_time_ns, row.payout_created_at_time_ns);
+            assert_eq!(hint.spender, None);
+        }
+
+        for phase in [P::TreasuryFeeSubmitted, P::TreasuryFeeAmbiguous] {
+            row.phase = phase;
+            let hint = super::reserve_redemption_unresolved_leg_hint(&row).unwrap();
+            assert_eq!(hint.leg, "treasury_fee");
+            assert_eq!(hint.ledger, row.treasury_ledger.unwrap());
+            assert_eq!(hint.from, Account { owner: row.pull_to.owner, subaccount: None });
+            assert_eq!(hint.to, row.treasury_to.clone().unwrap());
+            assert_eq!(hint.amount, row.treasury_amount_e6s.unwrap());
+            assert_eq!(hint.memo, row.treasury_memo.clone().unwrap());
+            assert_eq!(hint.created_at_time_ns, row.treasury_created_at_time_ns.unwrap());
+            assert_eq!(hint.spender, None);
+        }
+
+        for phase in [P::RefundSubmitted, P::RefundRetrySubmitted] {
+            row.phase = phase;
+            let hint = super::reserve_redemption_unresolved_leg_hint(&row).unwrap();
+            assert_eq!(hint.leg, "refund");
+            assert_eq!(hint.ledger, row.refund_ledger.unwrap());
+            assert_eq!(hint.from, Account { owner: row.pull_to.owner, subaccount: None });
+            assert_eq!(hint.to, Account { owner: row.caller, subaccount: None });
+            assert_eq!(hint.amount, row.refund_amount_e8s.unwrap());
+            assert_eq!(hint.memo, row.refund_memo.clone().unwrap());
+            assert_eq!(hint.created_at_time_ns, row.refund_created_at_time_ns.unwrap());
+            assert_eq!(hint.spender, None);
+        }
+
+        for phase in [P::PullSettled, P::PayoutNoEffect, P::PayoutSettled, P::TreasuryFeeNoEffect, P::RefundNoEffect] {
+            row.phase = phase;
+            assert!(super::reserve_redemption_unresolved_leg_hint(&row).is_none());
+        }
+    }
+
+    fn test_journal(operation_id: u128) -> ReserveRedemptionJournal {
+        let owner = Principal::from_slice(&[31]);
+        let ledger = Principal::from_slice(&[33]);
+        let protocol = Principal::from_slice(&[34]);
+        ReserveRedemptionJournal {
+            operation_id,
+            caller: owner,
+            icusd_amount_e8s: 10_000,
+            fee_icusd_e8s: 0,
+            fee_stable_e6s: 0,
+            raw_dust_refund_e8s: 0,
+            pull_ledger: ledger,
+            pull_from: Account { owner, subaccount: None },
+            pull_to: Account { owner: protocol, subaccount: None },
+            pull_amount_e8s: 10_000,
+            pull_fee_e8s: None,
+            pull_memo: operation_id.to_be_bytes().to_vec(),
+            pull_created_at_time_ns: 1,
+            pull_op_nonce: operation_id,
+            payout_ledger: ledger,
+            payout_from_subaccount: None,
+            payout_to: Account { owner, subaccount: None },
+            payout_amount_e6s: 100,
+            payout_fee_e6s: None,
+            payout_memo: operation_id.to_be_bytes().to_vec(),
+            payout_created_at_time_ns: 1,
+            payout_op_nonce: operation_id,
+            treasury_ledger: None,
+            treasury_to: None,
+            treasury_amount_e6s: None,
+            treasury_memo: None,
+            treasury_created_at_time_ns: None,
+            treasury_op_nonce: None,
+            treasury_fee_required: false,
+            treasury_block_index: None,
+            payout_no_effect_tuples: Vec::new(),
+            refund_ledger: None,
+            refund_amount_e8s: None,
+            refund_memo: None,
+            refund_created_at_time_ns: None,
+            refund_op_nonce: None,
+            refund_history: Vec::new(),
+            refund_history_pruned_count: 0,
+            refund_retry_count: 0,
+            refund_retry_is_same_tuple: false,
+            refund_block_index: None,
+            pull_block_index: Some(7),
+            payout_block_index: None,
+            phase: ReserveRedemptionPhase::PayoutAmbiguous,
+        }
     }
 }

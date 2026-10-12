@@ -1341,6 +1341,22 @@ type ReserveRedemptionResult = record {
   fee_amount : nat64;
   stable_amount_sent : nat64;
 };
+type ReserveRedemptionAdminStatus = record {
+  journal_count : nat64;
+  operation_id : opt nat;
+  phase : opt text;
+  unresolved_leg : opt ReserveRedemptionLegHint;
+};
+type ReserveRedemptionLegHint = record {
+  leg : text;
+  ledger : principal;
+  from : Account;
+  to : Account;
+  amount : nat64;
+  memo : blob;
+  created_at_time_ns : nat64;
+  spender : opt Account;
+};
 type ReserveRedemptionStatus = record {
   stable_token : principal;
   treasury_fee_e6s : nat64;
@@ -1421,6 +1437,7 @@ type Result_33 = variant { Ok : XrpSpAbsorbResult; Err : ProtocolError };
 type Result_34 = variant { Ok : XrpSpAbsorbPreflight; Err : ProtocolError };
 type Result_35 = variant { Ok : XrpSpAbsorbStatus; Err : ProtocolError };
 type Result_36 = variant { Ok : nat32; Err : ProtocolError };
+type Result_37 = variant { Ok : ReserveRedemptionAdminStatus; Err : ProtocolError };
 type Result_4 = variant { Ok : SuccessWithFee; Err : ProtocolError };
 type Result_5 = variant { Ok : BotLiquidationResult; Err : ProtocolError };
 type Result_6 = variant { Ok : opt nat64; Err : ProtocolError };
@@ -1770,6 +1787,7 @@ type XrpVaultOpenInfo = record {
   vault_id : nat64;
 };
 service : (ProtocolArg) -> {
+  admin_get_reserve_redemption_status : () -> (Result_37) query;
   ack_vault_operation : (VaultOperationIdArg) -> (Result);
   acknowledge_three_usd_reserve_v2_client : () -> (Result_1);
   add_collateral_token : (AddCollateralArg) -> (Result_1);
@@ -1779,6 +1797,7 @@ service : (ProtocolArg) -> {
   admin_correct_vault_collateral : (nat64, nat64, text) -> (Result_1);
   admin_correct_vault_debts : (vec VaultDebtCorrection) -> (Result_2);
   admin_mint_icusd : (nat64, principal, text) -> (Result);
+  admin_reconcile_reserve_redemption : (nat, opt nat64) -> (Result_1);
   admin_quarantine_xrp_claim : (nat64, text) -> (Result_1);
   admin_resolve_stuck_claim : (nat64, bool) -> (Result_1);
   admin_resolve_xrp_claim : (nat64, XrpClaimResolution) -> (Result_1);

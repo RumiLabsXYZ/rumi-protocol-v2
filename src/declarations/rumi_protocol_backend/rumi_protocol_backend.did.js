@@ -117,6 +117,30 @@ export const idlFactory = ({ IDL }) => {
     'correct_borrowed_e8s' : IDL.Nat64,
   });
   const Result_2 = IDL.Variant({ 'Ok' : IDL.Text, 'Err' : ProtocolError });
+  const Account = IDL.Record({
+    'owner' : IDL.Principal,
+    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+  });
+  const ReserveRedemptionLegHint = IDL.Record({
+    'to' : Account,
+    'leg' : IDL.Text,
+    'created_at_time_ns' : IDL.Nat64,
+    'from' : Account,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'ledger' : IDL.Principal,
+    'amount' : IDL.Nat64,
+    'spender' : IDL.Opt(Account),
+  });
+  const ReserveRedemptionAdminStatus = IDL.Record({
+    'journal_count' : IDL.Nat64,
+    'operation_id' : IDL.Opt(IDL.Nat),
+    'unresolved_leg' : IDL.Opt(ReserveRedemptionLegHint),
+    'phase' : IDL.Opt(IDL.Text),
+  });
+  const Result_37 = IDL.Variant({
+    'Ok' : ReserveRedemptionAdminStatus,
+    'Err' : ProtocolError,
+  });
   const XrpClaimResolution = IDL.Variant({
     'ReleaseForRetry' : IDL.Null,
     'ConfirmPaid' : IDL.Null,
@@ -498,10 +522,6 @@ export const idlFactory = ({ IDL }) => {
   const LegacySpProofLedger = IDL.Variant({
     'IcusdBurn' : IDL.Null,
     'ThreePoolTransfer' : IDL.Null,
-  });
-  const Account = IDL.Record({
-    'owner' : IDL.Principal,
-    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
   });
   const EventTypeFilter = IDL.Variant({
     'BreakerTripped' : IDL.Null,
@@ -1976,6 +1996,11 @@ export const idlFactory = ({ IDL }) => {
         [Result_2],
         [],
       ),
+    'admin_get_reserve_redemption_status' : IDL.Func(
+        [],
+        [Result_37],
+        ['query'],
+      ),
     'admin_mint_icusd' : IDL.Func(
         [IDL.Nat64, IDL.Principal, IDL.Text],
         [Result],
@@ -1983,6 +2008,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'admin_quarantine_xrp_claim' : IDL.Func(
         [IDL.Nat64, IDL.Text],
+        [Result_1],
+        [],
+      ),
+    'admin_reconcile_reserve_redemption' : IDL.Func(
+        [IDL.Nat, IDL.Opt(IDL.Nat64)],
         [Result_1],
         [],
       ),

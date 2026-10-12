@@ -2602,8 +2602,9 @@ pub(crate) fn reserve_redemption_payout_refund_allowed(
 
 fn classify_reserve_redemption_refund_too_old(
     phase: crate::state::ReserveRedemptionPhase,
+    exact_tuple_retry: bool,
 ) -> DurableTransferError {
-    if phase == crate::state::ReserveRedemptionPhase::RefundRetrySubmitted {
+    if phase == crate::state::ReserveRedemptionPhase::RefundRetrySubmitted && exact_tuple_retry {
         // This request is the exact same tuple that already received a typed
         // no-effect response. TooOld applies to this retry's timestamp and
         // does not erase the earlier proof that the operation tuple had no
@@ -2798,9 +2799,9 @@ pub async fn transfer_reserve_redemption_payout(
 }
 
 /// Dispatch the exact icUSD refund tuple saved in a reserve-redemption
-/// journal. Typed ledger errors are definitive no-effect and permit a retry of
-/// this unchanged tuple; rejects, GenericError, TooOld, and malformed replies
-/// remain ambiguous and must never authorize a new refund tuple.
+/// journal. A typed no-effect response permits one exact tuple retry, then a
+/// later proven no-effect permits fresh memo/time issuance. Rejects,
+/// GenericError, and TooOld on a new tuple remain ambiguous.
 pub async fn transfer_reserve_redemption_refund(
     journal: &crate::state::ReserveRedemptionJournal,
 ) -> Result<u64, DurableTransferError> {
@@ -2831,7 +2832,10 @@ pub async fn transfer_reserve_redemption_refund(
             )))
         }
         Ok(Err(TransferError::TooOld)) => Err(
-            classify_reserve_redemption_refund_too_old(journal.phase),
+            classify_reserve_redemption_refund_too_old(
+                journal.phase,
+                journal.refund_retry_is_same_tuple,
+            ),
         ),
         other => classify_durable_transfer_outcome(other),
     }
@@ -3781,15 +3785,19 @@ mod sweep_deposit_limit_tests {
         use crate::state::ReserveRedemptionPhase as Phase;
 
         assert!(matches!(
-            super::classify_reserve_redemption_refund_too_old(Phase::RefundRetrySubmitted),
+            super::classify_reserve_redemption_refund_too_old(Phase::RefundRetrySubmitted, true),
             DurableTransferError::LedgerNoEffect(TransferError::TooOld)
         ));
         for phase in [Phase::RefundSubmitted, Phase::RefundNoEffect, Phase::PayoutSettled] {
             assert!(matches!(
-                super::classify_reserve_redemption_refund_too_old(phase),
+                super::classify_reserve_redemption_refund_too_old(phase, false),
                 DurableTransferError::AmbiguousResponse(_)
             ), "TooOld must remain ambiguous outside the persisted same-tuple retry dispatch");
         }
+        assert!(matches!(
+            super::classify_reserve_redemption_refund_too_old(Phase::RefundRetrySubmitted, false),
+            DurableTransferError::AmbiguousResponse(_)
+        ), "TooOld on a newly renewed tuple is still its ambiguous first attempt");
     }
 
     #[test]
