@@ -461,17 +461,17 @@ pub async fn deposit_with_intent(
     intent_seq: u64,
     token_ledger: Principal,
     amount: u64,
-) -> Result<DepositIntentResult, StabilityPoolError> {
+) -> Result<DepositIntentResult, DepositIntentError> {
     let caller = ic_cdk::api::caller();
     if caller == Principal::anonymous() {
-        return Err(StabilityPoolError::Unauthorized);
+        return Err(DepositIntentError::Unauthorized);
     }
     let _intent_guard = DepositIntentGuard::reserve(caller)?;
     let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new();
 
     if let Some(completed) = read_state(|state| state.completed_deposit_intent(caller, intent_seq)) {
         if completed.token_ledger != token_ledger || completed.amount != amount {
-            return Err(StabilityPoolError::DepositIntentPayloadMismatch);
+            return Err(DepositIntentError::DepositIntentPayloadMismatch);
         }
         return Ok(completed.result);
     }
@@ -479,12 +479,12 @@ pub async fn deposit_with_intent(
     let existing = read_state(|state| state.pending_deposit_intent(caller));
     let intent = if let Some(intent) = existing {
         if intent.intent_seq != intent_seq {
-            return Err(StabilityPoolError::DepositIntentUnresolved {
+            return Err(DepositIntentError::DepositIntentUnresolved {
                 active_seq: intent.intent_seq,
             });
         }
         if intent.token_ledger != token_ledger || intent.amount != amount {
-            return Err(StabilityPoolError::DepositIntentPayloadMismatch);
+            return Err(DepositIntentError::DepositIntentPayloadMismatch);
         }
         intent
     } else {
@@ -496,29 +496,29 @@ pub async fn deposit_with_intent(
                 .unwrap_or(0)
                 .checked_add(1)
         })
-        .ok_or(StabilityPoolError::DepositIntentSequenceExhausted)?;
+        .ok_or(DepositIntentError::DepositIntentSequenceExhausted)?;
         if intent_seq != expected {
-            return Err(StabilityPoolError::DepositIntentSequenceMismatch {
+            return Err(DepositIntentError::DepositIntentSequenceMismatch {
                 expected_seq: expected,
             });
         }
         if crate::pool_token_balance_mutation_blocked(&[token_ledger]) {
-            return Err(StabilityPoolError::SystemBusy);
+            return Err(StabilityPoolError::SystemBusy.into());
         }
         let config = read_state(|state| state.get_stablecoin_config(&token_ledger).cloned())
             .ok_or(StabilityPoolError::TokenNotAccepted { ledger: token_ledger })?;
         if !config.is_active {
-            return Err(StabilityPoolError::TokenNotActive { ledger: token_ledger });
+            return Err(StabilityPoolError::TokenNotActive { ledger: token_ledger }.into());
         }
         let amount_e8s = normalize_to_e8s(amount, config.decimals);
         let minimum = read_state(|state| state.configuration.min_deposit_e8s);
         if amount_e8s < minimum {
             return Err(StabilityPoolError::AmountTooLow {
                 minimum_e8s: minimum,
-            });
+            }.into());
         }
         if read_state(|state| state.configuration.emergency_pause) {
-            return Err(StabilityPoolError::EmergencyPaused);
+            return Err(StabilityPoolError::EmergencyPaused.into());
         }
 
         let created_at_time_ns = mutate_state(|state| {
@@ -552,23 +552,23 @@ pub async fn deposit_with_intent(
         if let Err(reserve_error) = reserve_result {
             return Err(match reserve_error {
                 crate::state::DepositIntentReserveError::Active(active_seq) => {
-                    StabilityPoolError::DepositIntentUnresolved { active_seq }
+                    DepositIntentError::DepositIntentUnresolved { active_seq }
                 }
                 crate::state::DepositIntentReserveError::SequenceMismatch(expected_seq) => {
-                    StabilityPoolError::DepositIntentSequenceMismatch { expected_seq }
+                    DepositIntentError::DepositIntentSequenceMismatch { expected_seq }
                 }
                 crate::state::DepositIntentReserveError::SequenceExhausted => {
-                    StabilityPoolError::DepositIntentSequenceExhausted
+                    DepositIntentError::DepositIntentSequenceExhausted
                 }
                 crate::state::DepositIntentReserveError::CapacityReached => {
-                    StabilityPoolError::DepositIntentCapacityReached
+                    DepositIntentError::DepositIntentCapacityReached
                 }
             });
         }
         intent
     };
 
-    resume_deposit_intent(intent).await
+    resume_deposit_intent(intent).await.map_err(Into::into)
 }
 
 /// Authoritative caller-scoped status. This is intentionally exposed as an

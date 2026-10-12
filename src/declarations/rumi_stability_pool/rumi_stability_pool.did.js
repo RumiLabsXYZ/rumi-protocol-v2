@@ -4,7 +4,6 @@ export const idlFactory = ({ IDL }) => {
     'authorized_admins' : IDL.Vec(IDL.Principal),
   });
   const StabilityPoolError = IDL.Variant({
-    'DepositIntentUnresolved' : IDL.Record({ 'active_seq' : IDL.Nat64 }),
     'LedgerTransferFailed' : IDL.Record({ 'reason' : IDL.Text }),
     'RefundClaimNotFound' : IDL.Null,
     'EmergencyPaused' : IDL.Null,
@@ -25,22 +24,16 @@ export const idlFactory = ({ IDL }) => {
       'target' : IDL.Text,
     }),
     'PayoutAddressRequired' : IDL.Record({ 'collateral' : IDL.Principal }),
-    'DepositIntentSequenceMismatch' : IDL.Record({
-      'expected_seq' : IDL.Nat64,
-    }),
-    'DepositIntentSequenceExhausted' : IDL.Null,
     'XrpClaimStillOutstanding' : IDL.Record({ 'claim_id' : IDL.Nat64 }),
     'LiquidationFailed' : IDL.Record({
       'vault_id' : IDL.Nat64,
       'reason' : IDL.Text,
     }),
-    'DepositIntentCapacityReached' : IDL.Null,
     'XrpClaimStatusCheckFailed' : IDL.Record({ 'reason' : IDL.Text }),
     'SystemBusy' : IDL.Null,
     'AlreadyOptedIn' : IDL.Record({ 'collateral' : IDL.Principal }),
     'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
     'InsufficientPoolBalance' : IDL.Null,
-    'DepositIntentPayloadMismatch' : IDL.Null,
   });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
@@ -83,6 +76,45 @@ export const idlFactory = ({ IDL }) => {
       'token_ledger' : IDL.Principal,
       'reason' : IDL.Opt(IDL.Text),
     }),
+  });
+  const DepositIntentError = IDL.Variant({
+    'DepositIntentUnresolved' : IDL.Record({ 'active_seq' : IDL.Nat64 }),
+    'LedgerTransferFailed' : IDL.Record({ 'reason' : IDL.Text }),
+    'RefundClaimNotFound' : IDL.Null,
+    'EmergencyPaused' : IDL.Null,
+    'AlreadyOptedOut' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'TokenNotActive' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'InsufficientBalance' : IDL.Record({
+      'token' : IDL.Principal,
+      'available' : IDL.Nat64,
+      'required' : IDL.Nat64,
+    }),
+    'InvalidPayoutAddress' : IDL.Record({ 'reason' : IDL.Text }),
+    'CollateralNotFound' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'NoPositionFound' : IDL.Null,
+    'AmountTooLow' : IDL.Record({ 'minimum_e8s' : IDL.Nat64 }),
+    'Unauthorized' : IDL.Null,
+    'InterCanisterCallFailed' : IDL.Record({
+      'method' : IDL.Text,
+      'target' : IDL.Text,
+    }),
+    'PayoutAddressRequired' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'DepositIntentSequenceMismatch' : IDL.Record({
+      'expected_seq' : IDL.Nat64,
+    }),
+    'DepositIntentSequenceExhausted' : IDL.Null,
+    'XrpClaimStillOutstanding' : IDL.Record({ 'claim_id' : IDL.Nat64 }),
+    'LiquidationFailed' : IDL.Record({
+      'vault_id' : IDL.Nat64,
+      'reason' : IDL.Text,
+    }),
+    'DepositIntentCapacityReached' : IDL.Null,
+    'XrpClaimStatusCheckFailed' : IDL.Record({ 'reason' : IDL.Text }),
+    'SystemBusy' : IDL.Null,
+    'AlreadyOptedIn' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'InsufficientPoolBalance' : IDL.Null,
+    'DepositIntentPayloadMismatch' : IDL.Null,
   });
   const LiquidationResult = IDL.Record({
     'error_message' : IDL.Opt(IDL.Text),
@@ -128,6 +160,12 @@ export const idlFactory = ({ IDL }) => {
     'completed_at_ns' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
   });
+  const DepositIntentStatus = IDL.Record({
+    'next_seq' : IDL.Opt(IDL.Nat64),
+    'intent' : IDL.Opt(DepositIntentResult),
+    'high_watermark' : IDL.Nat64,
+    'active_intent' : IDL.Opt(DepositIntentResult),
+  });
   const InterestMintReceiptCapacity = IDL.Record({
     'warning' : IDL.Bool,
     'legacy_unknown' : IDL.Opt(IDL.Nat64),
@@ -137,12 +175,6 @@ export const idlFactory = ({ IDL }) => {
     'legacy_floor' : IDL.Opt(IDL.Nat64),
     'capacity' : IDL.Nat64,
     'admission_blocked_reason' : IDL.Opt(IDL.Text),
-  });
-  const DepositIntentStatus = IDL.Record({
-    'next_seq' : IDL.Opt(IDL.Nat64),
-    'intent' : IDL.Opt(DepositIntentResult),
-    'high_watermark' : IDL.Nat64,
-    'active_intent' : IDL.Opt(DepositIntentResult),
   });
   const LedgerReconciliationEntry = IDL.Record({
     'healthy' : IDL.Bool,
@@ -564,7 +596,7 @@ export const idlFactory = ({ IDL }) => {
         [
           IDL.Variant({
             'Ok' : DepositIntentResult,
-            'Err' : StabilityPoolError,
+            'Err' : DepositIntentError,
           }),
         ],
         [],
@@ -594,12 +626,12 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(ChainSpAbsorbCompletion)],
         ['query'],
       ),
+    'get_deposit_intent' : IDL.Func([IDL.Nat64], [DepositIntentStatus], []),
     'get_interest_mint_receipt_capacity' : IDL.Func(
         [],
         [InterestMintReceiptCapacity],
         ['query'],
       ),
-    'get_deposit_intent' : IDL.Func([IDL.Nat64], [DepositIntentStatus], []),
     'get_ledger_reconciliation' : IDL.Func(
         [],
         [

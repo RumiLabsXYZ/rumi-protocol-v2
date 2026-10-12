@@ -912,6 +912,65 @@ pub enum StabilityPoolError {
     },
     EmergencyPaused,
     SystemBusy,
+    AlreadyOptedOut {
+        collateral: Principal,
+    },
+    AlreadyOptedIn {
+        collateral: Principal,
+    },
+    PayoutAddressRequired {
+        collateral: Principal,
+    },
+    InvalidPayoutAddress {
+        reason: String,
+    },
+    XrpClaimStillOutstanding {
+        claim_id: u64,
+    },
+    XrpClaimStatusCheckFailed {
+        reason: String,
+    },
+    RefundClaimNotFound,
+}
+
+/// Errors returned only by the durable deposit-intent endpoint. Keeping these
+/// separate preserves the wire shape of `StabilityPoolError`, which is shared
+/// by the Stability Pool's existing public methods.
+#[derive(CandidType, Debug, Clone, Deserialize)]
+pub enum DepositIntentError {
+    InsufficientBalance {
+        token: Principal,
+        required: u64,
+        available: u64,
+    },
+    AmountTooLow {
+        minimum_e8s: u64,
+    },
+    NoPositionFound,
+    InsufficientPoolBalance,
+    Unauthorized,
+    TokenNotAccepted {
+        ledger: Principal,
+    },
+    TokenNotActive {
+        ledger: Principal,
+    },
+    CollateralNotFound {
+        ledger: Principal,
+    },
+    LedgerTransferFailed {
+        reason: String,
+    },
+    InterCanisterCallFailed {
+        target: String,
+        method: String,
+    },
+    LiquidationFailed {
+        vault_id: u64,
+        reason: String,
+    },
+    EmergencyPaused,
+    SystemBusy,
     DepositIntentSequenceMismatch {
         expected_seq: u64,
     },
@@ -940,6 +999,39 @@ pub enum StabilityPoolError {
         reason: String,
     },
     RefundClaimNotFound,
+}
+
+impl From<StabilityPoolError> for DepositIntentError {
+    fn from(error: StabilityPoolError) -> Self {
+        match error {
+            StabilityPoolError::InsufficientBalance { token, required, available } => {
+                Self::InsufficientBalance { token, required, available }
+            }
+            StabilityPoolError::AmountTooLow { minimum_e8s } => Self::AmountTooLow { minimum_e8s },
+            StabilityPoolError::NoPositionFound => Self::NoPositionFound,
+            StabilityPoolError::InsufficientPoolBalance => Self::InsufficientPoolBalance,
+            StabilityPoolError::Unauthorized => Self::Unauthorized,
+            StabilityPoolError::TokenNotAccepted { ledger } => Self::TokenNotAccepted { ledger },
+            StabilityPoolError::TokenNotActive { ledger } => Self::TokenNotActive { ledger },
+            StabilityPoolError::CollateralNotFound { ledger } => Self::CollateralNotFound { ledger },
+            StabilityPoolError::LedgerTransferFailed { reason } => Self::LedgerTransferFailed { reason },
+            StabilityPoolError::InterCanisterCallFailed { target, method } => {
+                Self::InterCanisterCallFailed { target, method }
+            }
+            StabilityPoolError::LiquidationFailed { vault_id, reason } => {
+                Self::LiquidationFailed { vault_id, reason }
+            }
+            StabilityPoolError::EmergencyPaused => Self::EmergencyPaused,
+            StabilityPoolError::SystemBusy => Self::SystemBusy,
+            StabilityPoolError::AlreadyOptedOut { collateral } => Self::AlreadyOptedOut { collateral },
+            StabilityPoolError::AlreadyOptedIn { collateral } => Self::AlreadyOptedIn { collateral },
+            StabilityPoolError::PayoutAddressRequired { collateral } => Self::PayoutAddressRequired { collateral },
+            StabilityPoolError::InvalidPayoutAddress { reason } => Self::InvalidPayoutAddress { reason },
+            StabilityPoolError::XrpClaimStillOutstanding { claim_id } => Self::XrpClaimStillOutstanding { claim_id },
+            StabilityPoolError::XrpClaimStatusCheckFailed { reason } => Self::XrpClaimStatusCheckFailed { reason },
+            StabilityPoolError::RefundClaimNotFound => Self::RefundClaimNotFound,
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────

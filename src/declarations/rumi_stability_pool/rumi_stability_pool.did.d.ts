@@ -139,6 +139,39 @@ export interface CycleManagerMetric {
   'count' : bigint,
   'label' : [] | [string],
 }
+export type DepositIntentError = {
+    'DepositIntentUnresolved' : { 'active_seq' : bigint }
+  } |
+  { 'LedgerTransferFailed' : { 'reason' : string } } |
+  { 'RefundClaimNotFound' : null } |
+  { 'EmergencyPaused' : null } |
+  { 'AlreadyOptedOut' : { 'collateral' : Principal } } |
+  { 'TokenNotActive' : { 'ledger' : Principal } } |
+  {
+    'InsufficientBalance' : {
+      'token' : Principal,
+      'available' : bigint,
+      'required' : bigint,
+    }
+  } |
+  { 'InvalidPayoutAddress' : { 'reason' : string } } |
+  { 'CollateralNotFound' : { 'ledger' : Principal } } |
+  { 'NoPositionFound' : null } |
+  { 'AmountTooLow' : { 'minimum_e8s' : bigint } } |
+  { 'Unauthorized' : null } |
+  { 'InterCanisterCallFailed' : { 'method' : string, 'target' : string } } |
+  { 'PayoutAddressRequired' : { 'collateral' : Principal } } |
+  { 'DepositIntentSequenceMismatch' : { 'expected_seq' : bigint } } |
+  { 'DepositIntentSequenceExhausted' : null } |
+  { 'XrpClaimStillOutstanding' : { 'claim_id' : bigint } } |
+  { 'LiquidationFailed' : { 'vault_id' : bigint, 'reason' : string } } |
+  { 'DepositIntentCapacityReached' : null } |
+  { 'XrpClaimStatusCheckFailed' : { 'reason' : string } } |
+  { 'SystemBusy' : null } |
+  { 'AlreadyOptedIn' : { 'collateral' : Principal } } |
+  { 'TokenNotAccepted' : { 'ledger' : Principal } } |
+  { 'InsufficientPoolBalance' : null } |
+  { 'DepositIntentPayloadMismatch' : null };
 export type DepositIntentPhase = { 'Dispatching' : null } |
   { 'Prepared' : null } |
   { 'ReceiptVerification' : null } |
@@ -364,9 +397,8 @@ export interface SpWritedownProof {
   'vault_id_memo' : bigint,
 }
 export type StabilityPoolError = {
-    'DepositIntentUnresolved' : { 'active_seq' : bigint }
+    'LedgerTransferFailed' : { 'reason' : string }
   } |
-  { 'LedgerTransferFailed' : { 'reason' : string } } |
   { 'RefundClaimNotFound' : null } |
   { 'EmergencyPaused' : null } |
   { 'AlreadyOptedOut' : { 'collateral' : Principal } } |
@@ -385,17 +417,13 @@ export type StabilityPoolError = {
   { 'Unauthorized' : null } |
   { 'InterCanisterCallFailed' : { 'method' : string, 'target' : string } } |
   { 'PayoutAddressRequired' : { 'collateral' : Principal } } |
-  { 'DepositIntentSequenceMismatch' : { 'expected_seq' : bigint } } |
-  { 'DepositIntentSequenceExhausted' : null } |
   { 'XrpClaimStillOutstanding' : { 'claim_id' : bigint } } |
   { 'LiquidationFailed' : { 'vault_id' : bigint, 'reason' : string } } |
-  { 'DepositIntentCapacityReached' : null } |
   { 'XrpClaimStatusCheckFailed' : { 'reason' : string } } |
   { 'SystemBusy' : null } |
   { 'AlreadyOptedIn' : { 'collateral' : Principal } } |
   { 'TokenNotAccepted' : { 'ledger' : Principal } } |
-  { 'InsufficientPoolBalance' : null } |
-  { 'DepositIntentPayloadMismatch' : null };
+  { 'InsufficientPoolBalance' : null };
 export interface StabilityPoolInitArgs {
   'protocol_canister_id' : Principal,
   'authorized_admins' : Array<Principal>,
@@ -512,7 +540,7 @@ export interface _SERVICE {
   'deposit_with_intent' : ActorMethod<
     [bigint, Principal, bigint],
     { 'Ok' : DepositIntentResult } |
-      { 'Err' : StabilityPoolError }
+      { 'Err' : DepositIntentError }
   >,
   'emergency_pause' : ActorMethod<
     [],
@@ -530,11 +558,11 @@ export interface _SERVICE {
     [[] | [bigint]],
     Array<ChainSpAbsorbCompletion>
   >,
+  'get_deposit_intent' : ActorMethod<[bigint], DepositIntentStatus>,
   'get_interest_mint_receipt_capacity' : ActorMethod<
     [],
     InterestMintReceiptCapacity
   >,
-  'get_deposit_intent' : ActorMethod<[bigint], DepositIntentStatus>,
   'get_ledger_reconciliation' : ActorMethod<
     [],
     { 'Ok' : Array<LedgerReconciliationEntry> } |

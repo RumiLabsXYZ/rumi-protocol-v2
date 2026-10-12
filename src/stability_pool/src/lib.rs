@@ -423,7 +423,7 @@ pub async fn deposit_with_intent(
     intent_seq: u64,
     token_ledger: Principal,
     amount: u64,
-) -> Result<DepositIntentResult, StabilityPoolError> {
+) -> Result<DepositIntentResult, DepositIntentError> {
     crate::deposits::deposit_with_intent(intent_seq, token_ledger, amount).await
 }
 

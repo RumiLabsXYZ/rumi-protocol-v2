@@ -369,6 +369,29 @@ type StabilityPoolError = variant {
   LiquidationFailed : record { vault_id : nat64; reason : text };
   EmergencyPaused;
   SystemBusy;
+  AlreadyOptedOut : record { collateral : principal };
+  AlreadyOptedIn : record { collateral : principal };
+  PayoutAddressRequired : record { collateral : principal };
+  InvalidPayoutAddress : record { reason : text };
+  XrpClaimStillOutstanding : record { claim_id : nat64 };
+  XrpClaimStatusCheckFailed : record { reason : text };
+  RefundClaimNotFound;
+};
+
+type DepositIntentError = variant {
+  InsufficientBalance : record { token : principal; required : nat64; available : nat64 };
+  AmountTooLow : record { minimum_e8s : nat64 };
+  NoPositionFound;
+  InsufficientPoolBalance;
+  Unauthorized;
+  TokenNotAccepted : record { ledger : principal };
+  TokenNotActive : record { ledger : principal };
+  CollateralNotFound : record { ledger : principal };
+  LedgerTransferFailed : record { reason : text };
+  InterCanisterCallFailed : record { target : text; method : text };
+  LiquidationFailed : record { vault_id : nat64; reason : text };
+  EmergencyPaused;
+  SystemBusy;
   DepositIntentSequenceMismatch : record { expected_seq : nat64 };
   DepositIntentSequenceExhausted;
   DepositIntentPayloadMismatch;
@@ -489,7 +512,7 @@ service : (StabilityPoolInitArgs) -> {
 
   // ── Deposit / Withdraw / Claim ──
   deposit : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
-  deposit_with_intent : (nat64, principal, nat64) -> (variant { Ok : DepositIntentResult; Err : StabilityPoolError });
+  deposit_with_intent : (nat64, principal, nat64) -> (variant { Ok : DepositIntentResult; Err : DepositIntentError });
   get_deposit_intent : (nat64) -> (DepositIntentStatus);
   withdraw : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
   deposit_as_3usd : (principal, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });

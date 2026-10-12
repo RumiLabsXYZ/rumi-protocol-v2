@@ -486,7 +486,7 @@ fn complete_deposit_intent(
     ).expect("deposit intent call");
     match result {
         WasmResult::Reply(bytes) => {
-            let result: Result<DepositIntentResult, StabilityPoolError> =
+            let result: Result<DepositIntentResult, DepositIntentError> =
                 decode_one(&bytes).expect("decode deposit intent");
             match result.expect("deposit intent succeeds") {
                 completed @ DepositIntentResult::Completed { .. } => completed,
@@ -878,7 +878,7 @@ fn deposit_intent_replay_is_idempotent_across_status_and_upgrade() {
         "deposit_with_intent",
         encode_args((1u64, ledger, amount)).unwrap(),
     ).expect("intent deposit update");
-    let first_result: Result<DepositIntentResult, StabilityPoolError> = match first {
+    let first_result: Result<DepositIntentResult, DepositIntentError> = match first {
         WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode intent result"),
         WasmResult::Reject(message) => panic!("intent deposit rejected: {message}"),
     };
@@ -927,7 +927,7 @@ fn deposit_intent_replay_is_idempotent_across_status_and_upgrade() {
         "deposit_with_intent",
         encode_args((1u64, ledger, amount)).unwrap(),
     ).expect("replay intent update");
-    let replay_result: Result<DepositIntentResult, StabilityPoolError> = match replay {
+    let replay_result: Result<DepositIntentResult, DepositIntentError> = match replay {
         WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode replay result"),
         WasmResult::Reject(message) => panic!("intent replay rejected: {message}"),
     };
@@ -990,7 +990,7 @@ fn deposit_intent_recovers_committed_generic_error_once_across_upgrade() {
     ).expect("ambiguous intent call");
     match initial {
         WasmResult::Reply(bytes) => {
-            let result: Result<DepositIntentResult, StabilityPoolError> = decode_one(&bytes).unwrap();
+            let result: Result<DepositIntentResult, DepositIntentError> = decode_one(&bytes).unwrap();
             assert!(matches!(&result, Ok(DepositIntentResult::Pending { intent_seq: 1, .. })),
                 "committed GenericError must remain unresolved until receipt proof: {result:?}");
         }
@@ -1010,7 +1010,7 @@ fn deposit_intent_recovers_committed_generic_error_once_across_upgrade() {
     ).expect("reconcile saved ledger tip");
     match first_retry {
         WasmResult::Reply(bytes) => {
-            let result: Result<DepositIntentResult, StabilityPoolError> = decode_one(&bytes).unwrap();
+            let result: Result<DepositIntentResult, DepositIntentError> = decode_one(&bytes).unwrap();
             assert!(matches!(&result, Ok(DepositIntentResult::Pending { intent_seq: 1, .. })),
                 "first retry should advance the bounded history tip: {result:?}");
         }
