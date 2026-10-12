@@ -33,7 +33,7 @@ jobs:
           rustup toolchain install 1.92.0 --profile minimal
           rustup +1.92.0 target add wasm32-unknown-unknown
           sudo apt-get update
-          sudo apt-get install -y libclang-dev liblmdb-dev pkg-config protobuf-compiler
+          sudo apt-get install -y libclang-dev liblmdb-dev libunwind-dev pkg-config protobuf-compiler
       - name: Install pinned PocketIC server
         run: |
           curl --fail --location --retry 3 --output "$RUNNER_TEMP/pocket-ic.gz" \
