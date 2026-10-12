@@ -33,6 +33,7 @@ macro_rules! ensure_eq {
 mod treasury_interest_snapshot_tests {
     use super::{
         BorrowMintTuple, State, TreasuryInterestMintJournal, TreasuryInterestMintPhase,
+        TreasuryInterestMintRoute,
     };
     use candid::Principal;
 
@@ -51,6 +52,7 @@ mod treasury_interest_snapshot_tests {
                     op_nonce: 42,
                 },
                 treasury: Principal::from_slice(&[2]),
+                route: TreasuryInterestMintRoute::Treasury,
                 phase: TreasuryInterestMintPhase::NotifyPending { mint_block_index: 77 },
                 history_floor: Some(70),
                 expiry_proven: false,
@@ -59,12 +61,19 @@ mod treasury_interest_snapshot_tests {
         );
         state.treasury_interest_mint_retry_cursor = 42;
         state.pending_treasury_interest_fallback_e8s = 500;
+        state
+            .pending_stability_pool_interest_fallback_e8s
+            .insert(Principal::from_slice(&[3]), 100);
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&state, &mut bytes).unwrap();
         let restored: State = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         assert_eq!(restored.pending_treasury_interest_mints, state.pending_treasury_interest_mints);
         assert_eq!(restored.treasury_interest_mint_retry_cursor, 42);
         assert_eq!(restored.pending_treasury_interest_fallback_e8s, 500);
+        assert_eq!(
+            restored.pending_stability_pool_interest_fallback_e8s,
+            state.pending_stability_pool_interest_fallback_e8s
+        );
 
         let row = state.pending_treasury_interest_mints[&42].clone();
         let mut row_bytes = Vec::new();
@@ -74,7 +83,7 @@ mod treasury_interest_snapshot_tests {
             other => panic!("expected CBOR row map, got {other:?}"),
         };
         row_fields.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name)
-            if name == "history_floor" || name == "expiry_proven" || name == "absence_scan"));
+            if name == "history_floor" || name == "expiry_proven" || name == "absence_scan" || name == "route"));
         let mut legacy_row_bytes = Vec::new();
         ciborium::ser::into_writer(&ciborium::value::Value::Map(row_fields), &mut legacy_row_bytes).unwrap();
         let legacy_row: TreasuryInterestMintJournal =
@@ -82,6 +91,7 @@ mod treasury_interest_snapshot_tests {
         assert_eq!(legacy_row.history_floor, None);
         assert!(!legacy_row.expiry_proven);
         assert_eq!(legacy_row.absence_scan, None);
+        assert_eq!(legacy_row.route, TreasuryInterestMintRoute::Treasury);
 
         let mut map = match ciborium::de::from_reader::<ciborium::value::Value, _>(bytes.as_slice()).unwrap() {
             ciborium::value::Value::Map(map) => map,
@@ -90,13 +100,15 @@ mod treasury_interest_snapshot_tests {
         map.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name)
             if name == "pending_treasury_interest_mints"
                 || name == "treasury_interest_mint_retry_cursor"
-                || name == "pending_treasury_interest_fallback_e8s"));
+                || name == "pending_treasury_interest_fallback_e8s"
+                || name == "pending_stability_pool_interest_fallback_e8s"));
         let mut old_bytes = Vec::new();
         ciborium::ser::into_writer(&ciborium::value::Value::Map(map), &mut old_bytes).unwrap();
         let old: State = ciborium::de::from_reader(old_bytes.as_slice()).unwrap();
         assert!(old.pending_treasury_interest_mints.is_empty());
         assert_eq!(old.treasury_interest_mint_retry_cursor, 0);
         assert_eq!(old.pending_treasury_interest_fallback_e8s, 0);
+        assert!(old.pending_stability_pool_interest_fallback_e8s.is_empty());
     }
 }
 
@@ -2414,6 +2426,10 @@ pub struct BorrowMintTuple {
 pub struct TreasuryInterestMintJournal {
     pub tuple: BorrowMintTuple,
     pub treasury: Principal,
+    /// Delivery route for the minted interest. Missing legacy snapshot fields
+    /// decode as Treasury so pre-existing rows keep their original meaning.
+    #[serde(default)]
+    pub route: TreasuryInterestMintRoute,
     pub phase: TreasuryInterestMintPhase,
     /// Ledger-global exclusive log length captured before the first mint.
     /// Rows predating this field may only use exact positive receipt recovery.
@@ -2425,6 +2441,18 @@ pub struct TreasuryInterestMintJournal {
     /// Fixed-tip, bounded direct-ledger scan for a held unknown mint.
     #[serde(default)]
     pub absence_scan: Option<BorrowMintAbsenceScan>,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum TreasuryInterestMintRoute {
+    Treasury,
+    StabilityPool { collateral_type: Principal },
+}
+
+impl Default for TreasuryInterestMintRoute {
+    fn default() -> Self {
+        Self::Treasury
+    }
 }
 
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -3330,6 +3358,11 @@ pub struct State {
     /// log recovery if a stable snapshot cannot be loaded.
     #[serde(default)]
     pub pending_treasury_interest_fallback_e8s: u128,
+    /// Stablecoin-denominated Stability Pool shares waiting for an exact mint
+    /// journal slot or for the pool destination to be configured. Keyed by
+    /// collateral because the eventual SP notification is collateral-specific.
+    #[serde(default)]
+    pub pending_stability_pool_interest_fallback_e8s: BTreeMap<Principal, u128>,
     /// Fair cursor for the bounded retry timer.
     #[serde(default)]
     pub treasury_interest_mint_retry_cursor: u128,
@@ -4020,6 +4053,7 @@ impl Default for State {
             pending_interest_for_pools: BTreeMap::new(),
             pending_treasury_interest_mints: BTreeMap::new(),
             pending_treasury_interest_fallback_e8s: 0,
+            pending_stability_pool_interest_fallback_e8s: BTreeMap::new(),
             treasury_interest_mint_retry_cursor: 0,
             pending_stability_pool_interest_notifications: BTreeMap::new(),
             pending_amm1_donations: std::collections::VecDeque::new(),
@@ -4325,6 +4359,7 @@ impl From<InitArg> for State {
             pending_interest_for_pools: BTreeMap::new(),
             pending_treasury_interest_mints: BTreeMap::new(),
             pending_treasury_interest_fallback_e8s: 0,
+            pending_stability_pool_interest_fallback_e8s: BTreeMap::new(),
             treasury_interest_mint_retry_cursor: 0,
             pending_stability_pool_interest_notifications: BTreeMap::new(),
             pending_amm1_donations: std::collections::VecDeque::new(),

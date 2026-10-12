@@ -10430,7 +10430,7 @@ async fn set_stability_pool_principal(
         )
     }) {
         return Err(ProtocolError::TemporarilyUnavailable(
-            "old Stability Pool has unresolved 3USD ingress or refund obligations".into(),
+            "old Stability Pool has unresolved 3USD ingress, refund, or stablecoin-interest obligations".into(),
         ));
     }
 
