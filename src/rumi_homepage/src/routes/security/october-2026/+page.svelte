@@ -342,7 +342,7 @@
   .report-stamp { padding: 1.2rem 1.25rem; border: 1px solid color-mix(in srgb, #e7a94c 32%, var(--rumi-border)); border-top: 3px solid #e7a94c; background: color-mix(in srgb, var(--rumi-bg-surface1) 88%, transparent); }
   .stamp-label { display: block; margin-bottom: .65rem; color: #e7bb72; font-size: .68rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
   .report-stamp strong { display: block; font-size: 1.12rem; line-height: 1.4; }
-  .report-stamp p { margin: .65rem 0 1rem; color: var(--report-muted); font-size: .82rem; line-height: 1.6; }
+  .report-stamp p { margin: .65rem 0 1rem; color: var(--report-muted); font-size: .82rem; line-height: 1.6; overflow-wrap: anywhere; }
   .report-stamp a, .change-main a, .page-foot a { color: var(--rumi-teal-bright); text-decoration: none; text-underline-offset: 4px; }
   .report-stamp a:hover, .change-main a:hover, .page-foot a:hover { text-decoration: underline; }
   .rule-caption { display: flex; justify-content: space-between; gap: 1rem; margin-top: clamp(3rem, 7vw, 5.8rem); padding-block: .8rem; border-top: 1px solid var(--rumi-border); color: var(--report-muted); font-size: .73rem; }
