@@ -1461,12 +1461,9 @@ impl fmt::Display for Reason {
     }
 }
 
-/// Query the XRC canister to retrieve the last BTC/USD price.
-/// https://github.com/dfinity/exchange-rate-canister
-pub async fn fetch_icp_price() -> Result<GetExchangeRateResult, String> {
-    const XRC_CALL_COST_CYCLES: u64 = 1_000_000_000;
-    const XRC_MARGIN_SEC: u64 = 60;
-
+/// Request XRC's latest available ICP/USD bar. The returned source timestamp
+/// still has to pass the separate freshness check before publication.
+fn icp_price_request() -> GetExchangeRateRequest {
     let icp = Asset {
         symbol: "ICP".to_string(),
         class: AssetClass::Cryptocurrency,
@@ -1476,13 +1473,19 @@ pub async fn fetch_icp_price() -> Result<GetExchangeRateResult, String> {
         class: AssetClass::FiatCurrency,
     };
 
-    let timestamp_sec = ic_cdk::api::time() / crate::SEC_NANOS - XRC_MARGIN_SEC;
-
-    let args = GetExchangeRateRequest {
+    GetExchangeRateRequest {
         base_asset: icp,
         quote_asset: usd,
-        timestamp: Some(timestamp_sec),
-    };
+        timestamp: None,
+    }
+}
+
+/// Query the XRC canister to retrieve the latest available ICP/USD price.
+/// https://github.com/dfinity/exchange-rate-canister
+pub async fn fetch_icp_price() -> Result<GetExchangeRateResult, String> {
+    const XRC_CALL_COST_CYCLES: u64 = 1_000_000_000;
+
+    let args = icp_price_request();
 
     let xrc_principal = read_state(|s| s.xrc_principal);
 
@@ -1509,6 +1512,22 @@ pub async fn fetch_icp_price() -> Result<GetExchangeRateResult, String> {
                 code, msg
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod icp_price_request_tests {
+    use super::icp_price_request;
+    use ic_xrc_types::AssetClass;
+
+    #[test]
+    fn requests_latest_icp_usd_bar_without_forcing_previous_minute() {
+        let request = icp_price_request();
+        assert_eq!(request.base_asset.symbol, "ICP");
+        assert_eq!(request.base_asset.class, AssetClass::Cryptocurrency);
+        assert_eq!(request.quote_asset.symbol, "USD");
+        assert_eq!(request.quote_asset.class, AssetClass::FiatCurrency);
+        assert_eq!(request.timestamp, None);
     }
 }
 

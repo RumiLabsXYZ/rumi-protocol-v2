@@ -14,6 +14,8 @@ use rumi_amm::types::{
 };
 use sha2::{Digest, Sha256};
 
+const CANDIDATE_SHA256: &str = "1f3fddd44fb7832585c9a45d0b46ef607805381531c71f71a8d517a7eddabf6a";
+
 fn reply<T: for<'de> candid::Deserialize<'de> + candid::CandidType>(result: WasmResult) -> T {
     match result {
         WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode AMM reply"),
@@ -39,11 +41,12 @@ fn expect_held<T: for<'de> candid::Deserialize<'de> + candid::CandidType>(
 fn production_wasm_holds_all_unjournaled_swap_and_deposit_ingress() {
     let wasm_path = std::env::var("RUMI_AMM_PRODUCTION_WASM")
         .expect("set RUMI_AMM_PRODUCTION_WASM to the source-matched upload artifact");
-    let expected_sha = std::env::var("RUMI_AMM_PRODUCTION_WASM_SHA256")
-        .expect("set RUMI_AMM_PRODUCTION_WASM_SHA256 to the reviewed upload hash");
     let wasm = std::fs::read(&wasm_path).expect("read production AMM Wasm");
     let actual_sha = format!("{:x}", Sha256::digest(&wasm));
-    assert_eq!(actual_sha, expected_sha, "wrong production AMM artifact");
+    assert_eq!(
+        actual_sha, CANDIDATE_SHA256,
+        "wrong production AMM artifact"
+    );
     let pic = PocketIcBuilder::new().with_application_subnet().build();
     let admin = Principal::self_authenticating(b"amm-release-admin");
     let caller = Principal::self_authenticating(b"amm-release-caller");

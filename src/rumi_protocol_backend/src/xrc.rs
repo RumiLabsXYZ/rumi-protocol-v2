@@ -12,9 +12,9 @@ use rust_decimal_macros::dec;
 use std::time::Duration;
 use std::{cell::RefCell, collections::BTreeMap};
 
-/// Bound paid provider work to one attempt per source bar and feed. The
-/// provider timestamp is not known until after the paid call, so admission is
-/// keyed by the requested source bar and also enforces a 60-second minimum
+/// Bound paid provider work to one attempt per requested minute and feed.
+/// The returned provider timestamp is unknown until after the paid call and
+/// may belong to an older bar, so admission also enforces a 60-second minimum
 /// interval between attempts for that exact feed.
 const PAID_ORACLE_BAR_SECS: u64 = 60;
 const PAID_ORACLE_LEASE_TTL_NS: u64 = 120 * crate::SEC_NANOS;
@@ -60,9 +60,9 @@ impl Drop for PaidOracleFetchLease {
     }
 }
 
-/// Acquire one bounded paid refresh for a provider feed and requested bar.
+/// Acquire one bounded paid refresh for a provider feed and requested minute.
 /// Both a completed response and a failed call consume the bar's allowance;
-/// this prevents repeated callers from buying the same provider observation.
+/// this prevents repeated callers from buying the same requested minute.
 pub(crate) fn try_acquire_paid_oracle_refresh(
     feed: String,
     requested_timestamp_secs: u64,
@@ -115,7 +115,9 @@ pub(crate) fn try_acquire_icp_price_refresh(
     now_ns: u64,
 ) -> Option<PaidOracleFetchLease> {
     let feed = format!("icp:{collateral_type}:{source:?}");
-    try_acquire_paid_oracle_refresh(feed, xrc_requested_timestamp_secs(now_ns), now_ns)
+    // ICP uses XRC's latest available bar; admission follows the current
+    // minute even if XRC temporarily serves the prior one while it is inflight.
+    try_acquire_paid_oracle_refresh(feed, now_ns / crate::SEC_NANOS, now_ns)
 }
 
 pub(crate) fn try_acquire_collateral_price_refresh(
@@ -388,23 +390,20 @@ pub fn register_collateral_price_timer(ledger_id: Principal) {
 /// Each XRC call costs ~1B cycles. The 480s cadence is background-only;
 /// price-sensitive operations still fetch on demand when their cache is stale.
 /// Price-sensitive operations will fetch on-demand if the cached price is older
-/// than `PRICE_FRESHNESS_THRESHOLD_NANOS` (120s including XRC's 60s bar
-/// margin), so this timer is just a lazy background refresh for display/query
-/// purposes.
+/// than `PRICE_FRESHNESS_THRESHOLD_NANOS` (120s), so this timer is just a
+/// lazy background refresh for display/query purposes.
 pub const FETCHING_ICP_RATE_INTERVAL: Duration = Duration::from_secs(480);
 
 /// Maximum age (in nanoseconds) of a cached price before a price-sensitive
 /// operation triggers an on-demand XRC fetch.
 ///
-/// The XRC `timestamp` field is the CEX bar time, populated as
-/// `(now - XRC_MARGIN_SEC=60)`, so a freshly
-/// fetched price already starts 60s "old" from this canister's clock. The
-/// 120s threshold allows one additional minute of reuse while rejecting
-/// future timestamps.
+/// XRC reports the CEX bar time, which can be older than the request time.
+/// Keep the 120s source-age bound even when asking XRC for its latest bar;
+/// a delayed or inflight bar must not bypass the protocol's stale-price hold.
 pub const PRICE_FRESHNESS_THRESHOLD_NANOS: u64 = 120 * 1_000_000_000;
 
 /// An XRC source timestamp is usable only when it is not in the future and
-/// falls within the cache window (which includes XRC's 60-second bar margin).
+/// falls within the cache window.
 pub(crate) fn source_timestamp_is_fresh(timestamp_ns: u64, now_ns: u64) -> bool {
     timestamp_ns <= now_ns && now_ns - timestamp_ns <= PRICE_FRESHNESS_THRESHOLD_NANOS
 }
@@ -631,7 +630,7 @@ mod oracle_cache_and_outlier_timestamp_tests {
     }
 
     #[test]
-    fn cache_window_includes_xrc_margin_and_rejects_old_or_future_samples() {
+    fn source_age_gate_accepts_exact_boundary_and_rejects_old_or_future_samples() {
         let now = 10_000_000_000_000;
         assert_eq!(PRICE_FRESHNESS_THRESHOLD_NANOS, 120_000_000_000);
         assert_eq!(STABLE_PRICE_FRESHNESS_NANOS, PRICE_FRESHNESS_THRESHOLD_NANOS);
@@ -639,6 +638,20 @@ mod oracle_cache_and_outlier_timestamp_tests {
         assert!(source_timestamp_is_fresh(now - PRICE_FRESHNESS_THRESHOLD_NANOS, now));
         assert!(!source_timestamp_is_fresh(now - PRICE_FRESHNESS_THRESHOLD_NANOS - 1, now));
         assert!(!source_timestamp_is_fresh(now + 1, now));
+    }
+
+    #[test]
+    fn icp_paid_refresh_uses_current_minute_and_retains_one_attempt_per_requested_minute() {
+        let collateral = Principal::from_slice(&[251, 42]);
+        let now = 10_000 * crate::SEC_NANOS;
+        let first = try_acquire_icp_price_refresh(collateral, None, now)
+            .expect("first current-minute request is admitted");
+        assert!(try_acquire_icp_price_refresh(collateral, None, now).is_none());
+        drop(first);
+        assert!(try_acquire_icp_price_refresh(collateral, None, now).is_none());
+
+        let next_minute = now + 61 * crate::SEC_NANOS;
+        assert!(try_acquire_icp_price_refresh(collateral, None, next_minute).is_some());
     }
 
     #[test]

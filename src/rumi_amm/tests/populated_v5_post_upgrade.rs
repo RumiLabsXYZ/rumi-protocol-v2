@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
 
 const PREDECESSOR_SHA256: &str = "832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2";
-const CANDIDATE_SHA256: &str = "994ad8efadf9f5fa178f2c824c68d0d200f898d414498745f924d517d61ac2b1";
+const CANDIDATE_SHA256: &str = "1f3fddd44fb7832585c9a45d0b46ef607805381531c71f71a8d517a7eddabf6a";
 const ICUSD_LEDGER_PRINCIPAL: &str = "t6bor-paaaa-aaaap-qrd5q-cai";
 
 #[derive(CandidType, Deserialize)]
@@ -400,12 +400,10 @@ fn snapshot() -> (LegacyAmmStateV5, Principal, Principal, String) {
 fn production_post_upgrade_preserves_populated_v5_snapshot() {
     let wasm_path = std::env::var("RUMI_AMM_PRODUCTION_WASM")
         .expect("set RUMI_AMM_PRODUCTION_WASM to the source-matched upload artifact");
-    let expected_sha = std::env::var("RUMI_AMM_PRODUCTION_WASM_SHA256")
-        .expect("set RUMI_AMM_PRODUCTION_WASM_SHA256 to the reviewed upload hash");
     let wasm = std::fs::read(&wasm_path).expect("read production AMM Wasm");
     assert_eq!(
         format!("{:x}", Sha256::digest(&wasm)),
-        expected_sha,
+        CANDIDATE_SHA256,
         "wrong production AMM artifact"
     );
 

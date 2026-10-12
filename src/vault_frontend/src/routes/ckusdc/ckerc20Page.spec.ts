@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { Principal } from '@dfinity/principal';
+import type { CkErc20LockManager } from '$lib/utils/ckerc20WithdrawalLock';
 
 const mocks = vi.hoisted(() => {
 	function readable<T>(initial: T) {
@@ -17,6 +18,9 @@ const mocks = vi.hoisted(() => {
 		getMinter: vi.fn(),
 		discoverTokens: vi.fn(),
 		getLedger: vi.fn(),
+		getQuote: vi.fn(),
+		parseAmount: vi.fn(),
+		approveAndWithdraw: vi.fn(),
 	};
 });
 
@@ -38,7 +42,7 @@ vi.mock('$lib/services/ckerc20Minter', () => ({
 	discoverCkErc20Tokens: mocks.discoverTokens,
 	getCkErc20MinterActor: mocks.getMinter,
 	getCkErc20LedgerActor: mocks.getLedger,
-	approveAndWithdrawCkErc20: vi.fn(),
+	approveAndWithdrawCkErc20: mocks.approveAndWithdraw,
 	assertTokenSupported: vi.fn(),
 	encodeAddressWord: vi.fn(() => '0'.repeat(64)),
 	encodeDepositErc20: vi.fn(),
@@ -49,8 +53,8 @@ vi.mock('$lib/services/ckerc20Minter', () => ({
 		const fraction = (amount % scale).toString().padStart(decimals, '0').slice(0, maxFraction).replace(/0+$/, '');
 		return fraction ? `${whole}.${fraction}` : whole.toString();
 	},
-	getCkErc20WithdrawalQuote: vi.fn(),
-	parseTokenAmount: vi.fn(),
+	getCkErc20WithdrawalQuote: mocks.getQuote,
+	parseTokenAmount: mocks.parseAmount,
 	validateEthereumAddress: vi.fn(() => true),
 }));
 
@@ -149,6 +153,13 @@ beforeEach(() => {
 	mocks.principal.set(OWNER);
 	mocks.getMinter.mockReset().mockResolvedValue({ get_minter_info: vi.fn().mockResolvedValue({ deposit_with_subaccount_helper_contract_address: [HELPER] }) });
 	mocks.discoverTokens.mockReset().mockResolvedValue([CKUSDC, CKLINK]);
+	mocks.parseAmount.mockReset().mockReturnValue(1n);
+	mocks.getQuote.mockReset().mockImplementation((token: typeof CKUSDC, amount: bigint, owner: Principal) => Promise.resolve({
+		owner, tokenLedgerId: token.ledgerId, amount, ckTokenFee: 1n, ckEthFee: 1n,
+		maxTransactionFee: 1n, ckTokenAllowance: 2n, ckEthAllowance: 2n,
+		ckTokenBalance: 10n, ckEthBalance: 10n, quotedAtMs: Date.now(), minterPriceTimestampMs: null,
+	}));
+	mocks.approveAndWithdraw.mockReset();
 	mocks.getLedger.mockReset().mockImplementation((ledgerId: string) => Promise.resolve({
 		icrc1_total_supply: vi.fn().mockResolvedValue(ledgerId === CKLINK.ledgerId ? 900_000_000_000_000_000n : 50_000_000n),
 		icrc1_balance_of: vi.fn().mockResolvedValue(0n),
@@ -167,6 +178,76 @@ afterEach(() => {
 });
 
 describe('ckERC20 page wallet and supply regressions', () => {
+	it('holds one owner lock across different-token withdrawal submissions', async () => {
+		const held = new Set<string>();
+		const names: string[] = [];
+		const locks: CkErc20LockManager = {
+			async request<T>(name: string, _options: { mode: 'exclusive'; ifAvailable: true }, callback: (lock: unknown | null) => Promise<T>): Promise<T> {
+				names.push(name);
+				if (held.has(name)) return callback(null);
+				held.add(name);
+				try { return await callback({}); } finally { held.delete(name); }
+			},
+		};
+		const oldLocks = Object.getOwnPropertyDescriptor(navigator, 'locks');
+		Object.defineProperty(navigator, 'locks', { configurable: true, value: locks });
+		const releaseFirst = deferred<{ ckEthBurnBlock: bigint; ckTokenBurnBlock: bigint }>();
+		mocks.approveAndWithdraw.mockImplementationOnce(() => releaseFirst.promise)
+			.mockResolvedValue({ ckEthBurnBlock: 3n, ckTokenBurnBlock: 4n });
+		const firstHost = host;
+		let secondHost: HTMLDivElement | undefined;
+		let secondInstance: unknown;
+		try {
+			render();
+			await settle();
+			clickButton(/^Redeem$/);
+			await settle();
+			const firstAmount = host.querySelector<HTMLInputElement>('#redeem-amount')!;
+			firstAmount.value = '1';
+			firstAmount.dispatchEvent(new Event('input', { bubbles: true }));
+			const firstAddress = host.querySelector<HTMLInputElement>('#redeem-address')!;
+			firstAddress.value = ACCOUNT;
+			firstAddress.dispatchEvent(new Event('input', { bubbles: true }));
+			clickButton(/Get current fee quote/);
+			await settle();
+			clickButton(/Approve and request USDC redemption/);
+			await settle();
+			expect(mocks.approveAndWithdraw).toHaveBeenCalledTimes(1);
+
+			secondHost = document.createElement('div');
+			document.body.appendChild(secondHost);
+			host = secondHost;
+			secondInstance = mount(Page, { target: secondHost });
+			flushSync();
+			await settle();
+			clickButton(/^Redeem$/);
+			await settle();
+			await chooseMintToken(CKLINK.ledgerId, CKLINK.symbol);
+			await settle();
+			const secondAmount = host.querySelector<HTMLInputElement>('input[id="redeem-amount"]')!;
+			secondAmount.value = '1';
+			secondAmount.dispatchEvent(new Event('input', { bubbles: true }));
+			const secondAddress = host.querySelector<HTMLInputElement>('input[id="redeem-address"]')!;
+			secondAddress.value = ACCOUNT;
+			secondAddress.dispatchEvent(new Event('input', { bubbles: true }));
+			clickButton(/Get current fee quote/);
+			await settle();
+			clickButton(/Approve and request LINK redemption/);
+			await settle();
+			expect(names).toEqual([`rumi:ckerc20:withdrawal:${OWNER.toText()}`, `rumi:ckerc20:withdrawal:${OWNER.toText()}`]);
+			expect(mocks.approveAndWithdraw).toHaveBeenCalledTimes(1);
+			expect(host.textContent).toContain('withdrawal for this wallet is active in another tab');
+		} finally {
+			releaseFirst.resolve({ ckEthBurnBlock: 1n, ckTokenBurnBlock: 2n });
+			await settle();
+			if (secondInstance) unmount(secondInstance as any);
+			secondHost?.remove();
+			host = firstHost;
+			if (oldLocks) Object.defineProperty(navigator, 'locks', oldLocks);
+			else Reflect.deleteProperty(navigator, 'locks');
+		}
+	});
+
 	it('disconnects locally, ignores late balance/account updates, and remembers the choice after remount', async () => {
 		const lateBalance = deferred<string>();
 		const fixture = makeProvider({
