@@ -409,8 +409,28 @@ async fn fetch_virtual_prices() {
 // ─── Deposit / Withdraw / Claim ───
 
 #[update]
-pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
-    crate::deposits::deposit(token_ledger, amount).await
+pub async fn deposit(_token_ledger: Principal, _amount: u64) -> Result<(), StabilityPoolError> {
+    // The legacy call has no operation identity. A client retry after an
+    // ambiguous ledger reply can pull and credit a second time, so keep its
+    // Candid signature for old clients but reject before any ledger call.
+    Err(StabilityPoolError::SystemBusy)
+}
+
+/// Caller-scoped idempotent deposit. Reuse `intent_seq` and the identical
+/// payload on every retry until a terminal result is returned.
+#[update]
+pub async fn deposit_with_intent(
+    intent_seq: u64,
+    token_ledger: Principal,
+    amount: u64,
+) -> Result<DepositIntentResult, StabilityPoolError> {
+    crate::deposits::deposit_with_intent(intent_seq, token_ledger, amount).await
+}
+
+/// Authoritative status update for recovery after reload or on another device.
+#[update]
+pub fn get_deposit_intent(intent_seq: u64) -> DepositIntentStatus {
+    crate::deposits::deposit_intent_status(ic_cdk::api::caller(), intent_seq)
 }
 
 #[update]

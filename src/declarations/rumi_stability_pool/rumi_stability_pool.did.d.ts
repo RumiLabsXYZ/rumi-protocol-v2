@@ -139,6 +139,41 @@ export interface CycleManagerMetric {
   'count' : bigint,
   'label' : [] | [string],
 }
+export type DepositIntentPhase = { 'Dispatching' : null } |
+  { 'Prepared' : null } |
+  { 'ReceiptVerification' : null } |
+  { 'Reconciling' : null };
+export type DepositIntentResult = {
+    'NoEffect' : {
+      'amount' : bigint,
+      'intent_seq' : bigint,
+      'token_ledger' : Principal,
+      'reason' : string,
+    }
+  } |
+  {
+    'Completed' : {
+      'block_index' : bigint,
+      'amount' : bigint,
+      'intent_seq' : bigint,
+      'token_ledger' : Principal,
+    }
+  } |
+  {
+    'Pending' : {
+      'phase' : DepositIntentPhase,
+      'amount' : bigint,
+      'intent_seq' : bigint,
+      'token_ledger' : Principal,
+      'reason' : [] | [string],
+    }
+  };
+export interface DepositIntentStatus {
+  'next_seq' : [] | [bigint],
+  'intent' : [] | [DepositIntentResult],
+  'high_watermark' : bigint,
+  'active_intent' : [] | [DepositIntentResult],
+}
 export interface Icrc10SupportedStandard { 'url' : string, 'name' : string }
 export interface Icrc21ConsentInfo {
   'metadata' : Icrc21ConsentMessageResponseMetadata,
@@ -329,8 +364,9 @@ export interface SpWritedownProof {
   'vault_id_memo' : bigint,
 }
 export type StabilityPoolError = {
-    'LedgerTransferFailed' : { 'reason' : string }
+    'DepositIntentUnresolved' : { 'active_seq' : bigint }
   } |
+  { 'LedgerTransferFailed' : { 'reason' : string } } |
   { 'RefundClaimNotFound' : null } |
   { 'EmergencyPaused' : null } |
   { 'AlreadyOptedOut' : { 'collateral' : Principal } } |
@@ -349,13 +385,17 @@ export type StabilityPoolError = {
   { 'Unauthorized' : null } |
   { 'InterCanisterCallFailed' : { 'method' : string, 'target' : string } } |
   { 'PayoutAddressRequired' : { 'collateral' : Principal } } |
+  { 'DepositIntentSequenceMismatch' : { 'expected_seq' : bigint } } |
+  { 'DepositIntentSequenceExhausted' : null } |
   { 'XrpClaimStillOutstanding' : { 'claim_id' : bigint } } |
   { 'LiquidationFailed' : { 'vault_id' : bigint, 'reason' : string } } |
+  { 'DepositIntentCapacityReached' : null } |
   { 'XrpClaimStatusCheckFailed' : { 'reason' : string } } |
   { 'SystemBusy' : null } |
   { 'AlreadyOptedIn' : { 'collateral' : Principal } } |
   { 'TokenNotAccepted' : { 'ledger' : Principal } } |
-  { 'InsufficientPoolBalance' : null };
+  { 'InsufficientPoolBalance' : null } |
+  { 'DepositIntentPayloadMismatch' : null };
 export interface StabilityPoolInitArgs {
   'protocol_canister_id' : Principal,
   'authorized_admins' : Array<Principal>,
@@ -469,6 +509,11 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : StabilityPoolError }
   >,
+  'deposit_with_intent' : ActorMethod<
+    [bigint, Principal, bigint],
+    { 'Ok' : DepositIntentResult } |
+      { 'Err' : StabilityPoolError }
+  >,
   'emergency_pause' : ActorMethod<
     [],
     { 'Ok' : null } |
@@ -489,6 +534,7 @@ export interface _SERVICE {
     [],
     InterestMintReceiptCapacity
   >,
+  'get_deposit_intent' : ActorMethod<[bigint], DepositIntentStatus>,
   'get_ledger_reconciliation' : ActorMethod<
     [],
     { 'Ok' : Array<LedgerReconciliationEntry> } |
