@@ -2,8 +2,8 @@
   const report = {
     date: 'October 12, 2026',
     datetime: '2026-10-12',
-    source: 'origin/main at f0dbbc91 · includes PRs #535 and #507',
-    snapshot: 'Module and pause readback · October 12, 2026'
+    source: 'origin/main at 4dd5e72a · includes PRs #540 and #541',
+    snapshot: '3pool upgrade and module readback · October 12, 2026'
   };
 
   const states = [
@@ -25,10 +25,18 @@
     {
       pr: '#535',
       title: 'Archived 3pool payout recovery',
-      summary: 'Merged into main on October 12. The source can reconcile an archived payout receipt only after the evidence links to a block served directly by its configured ledger; incomplete or mismatched evidence leaves the claim held. Focused tests, an independent source review, and a production-profile build passed. A hash-gated PocketIC regression in PR #537 then passed 1/1 using Wasm bytes matching the installed predecessor and the reviewed candidate. Representative LP balances and supply, reserves, admin fees, and token balances survived; a legacy allowance was cleared once and a new allowance survived a second upgrade. The fixture had zero pending claims, so this does not test nonzero legacy claims or establish complete live liabilities. The candidate remains uninstalled, and no historical payout was reconciled by this merge.',
-      state: 'Merged · not installed',
-      tone: 'held',
+      summary: 'Merged and installed on October 12 as part of the 3pool module SHA-256 74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae. Archived payout receipts can be reconciled only through exact evidence linked to the configured ledger; uncertain claims remain held. A hash-gated PocketIC regression used Wasm bytes matching the installed predecessor and final candidate. A fresh pre-upgrade snapshot was taken while stopped, then the canister restarted on the new hash. Immediate readback found unchanged LP supply, reserves, virtual price, and admin fees, with zero pending claims. The new admin inventory enumerated ten payout records, all marked settled; this does not prove every historical ledger obligation or settle a new payout.',
+      state: 'Installed · readback passed',
+      tone: 'installed',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/535'
+    },
+    {
+      pr: '#540/#541',
+      title: 'Global payout inventory and exact upgrade pin',
+      summary: 'The installed 3pool module adds a bounded admin-only page over its payout journal. The final artifact was rebuilt twice with the same SHA-256, pinned in the exact-installed-predecessor PocketIC upgrade test, and checked against the authored Candid service. The first live inventory page returned all ten recorded payouts as settled and no next cursor. Caller-visible receipts and external-ledger history remain separate evidence.',
+      state: 'Installed · inventory available',
+      tone: 'installed',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/540'
     },
     {
       pr: '#507',
@@ -49,8 +57,8 @@
     {
       pr: '#532',
       title: 'Interest and stablecoin transfer journals',
-      summary: 'Merged into main on October 11. The backend now journals interest mints and Treasury-directed stablecoin transfers; Stability Pool interest receipts and 3pool donation receipts are also recorded for exact retry. Local source-matched tests and a backend build passed. The running backend, Stability Pool, and 3pool modules all predate this change, and cross-canister failure and upgrade recovery remain unverified in production.',
-      state: 'Merged · not installed',
+      summary: 'Merged into main on October 11. The backend now journals interest mints and Treasury-directed stablecoin transfers; Stability Pool interest receipts and 3pool donation receipts are also recorded for exact retry. Local source-matched tests and a backend build passed. The later 3pool upload was built from main after this merge, but the October 12 installation belongs to the separately listed PRs #540 and #541. The running backend and Stability Pool still predate this PR. Cross-canister failure and upgrade recovery remain unverified in production.',
+      state: 'Merged · peer installs pending',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/532'
     },
@@ -81,8 +89,8 @@
     {
       pr: '#483',
       title: '3pool upgrade verification and state preservation',
-      summary: 'Merged on October 9. The rumi_3pool canister (fohh4-yyaaa-aaaap-qtkpa-cai) reported module SHA-256 9797bf2454923ef41d6ef6a003435e0430aaa2b2b413734c6d9e6e921889dfc0 again on October 12. A clean-source rebuild matched the installed module. The October 9 immediate readback found LP supply, reserves, virtual price, admin fees, and pending-claim count unchanged. This installed module predates PRs #532 and #535.',
-      state: 'Installed · rebuild matched · readback recorded',
+      summary: 'Merged on October 9. The rumi_3pool canister (fohh4-yyaaa-aaaap-qtkpa-cai) reported module SHA-256 9797bf2454923ef41d6ef6a003435e0430aaa2b2b413734c6d9e6e921889dfc0 before the October 12 upgrade. A clean-source rebuild matched that predecessor module, and its immediate October 9 state readback passed. The October 12 installation described above superseded it.',
+      state: 'Installed October 9 · superseded',
       tone: 'installed',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/483'
     },
@@ -97,8 +105,8 @@
     {
       pr: '#504',
       title: '3USD account boundary and AMM custody',
-      summary: 'Source merged on October 10. The matching Rumi AMM upgrade remains installed at module SHA-256 832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2 on October 12. Its single 3USD/ICP pool retained its reserves and LP supply, with no pending claims, and its 3USD ledger balance matched the reserve at the earlier readback. AMM maintenance mode was enabled on October 10 and a fresh October 12 query confirmed it was still active. The later PR #507 recovery source and the 3pool account guard are not installed; the backend V1/V2 cutover and historical account compatibility remain under review.',
-      state: 'AMM installed · maintenance on · 3pool guard held',
+      summary: 'Source merged on October 10. The matching Rumi AMM upgrade remains installed at module SHA-256 832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2 on October 12. Its single 3USD/ICP pool retained its reserves and LP supply, with no pending claims, and its 3USD ledger balance matched the reserve at the earlier readback. AMM maintenance mode was enabled on October 10 and a fresh October 12 query confirmed it was still active. The later PR #507 recovery source remains uninstalled. The October 12 3pool upgrade includes the account guard; backend V1/V2 cutover and historical account compatibility remain under review.',
+      state: 'AMM installed · maintenance on · 3pool guard installed',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/504'
     },
@@ -218,17 +226,18 @@
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
             This snapshot separates merged source from mainnet installation. October 12
-            readbacks confirmed the earlier backend, bot, AMM, 3pool, Treasury, and Stability Pool
-            module hashes; the AMM remained in maintenance mode and the Stability Pool remained
-            paused. Borrowing had resumed under a temporary cap at the October 11 readback, and
-            that cap still reported 22,000 icUSD on October 12. PRs #531, #532, #535, and #507
-            are merged source changes, not new installations.
+            readbacks confirmed the new 3pool module from PRs #540 and #541, with unchanged
+            LP supply and reserves. The earlier backend, bot, AMM, Treasury, and Stability Pool
+            modules remained; AMM maintenance and the Stability Pool pause were active.
+            Borrowing had resumed under a temporary cap at the October 11 readback, and that
+            cap still reported 22,000 icUSD on October 12. PRs #531 and #507 remain source-only;
+            the backend and Stability Pool changes in PR #532 remain uninstalled.
           </p>
         </div>
         <aside class="report-stamp" aria-label={report.snapshot}>
           <span class="stamp-label">Publication state</span>
           <strong>{report.snapshot}</strong>
-          <p>October 12 module and pause readbacks confirmed unchanged module hashes, the Stability Pool pause, and the AMM maintenance flag. The borrowing cap remained 22,000 icUSD; remaining debt capacity was last checked on October 11. PRs #531, #532, #535, and #507 are merged source only. Other installation evidence comes from earlier dated readbacks. This page combines time-scoped records; it is not live telemetry.</p>
+          <p>The October 12 upgrade installed the final 3pool artifact from PRs #540 and #541. Its module hash is SHA-256 74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae. The Stability Pool remained paused and the AMM stayed in maintenance mode. The borrowing cap remained 22,000 icUSD; remaining debt capacity was last checked on October 11. This page combines time-scoped records; it is not live telemetry.</p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
@@ -257,7 +266,7 @@
       <div class="section-heading section-heading-wide">
         <p class="section-label">Selected changes</p>
         <h2 id="updates-title">Change and release status</h2>
-        <p>This October 12 snapshot reports the highest evidence stage available for each change, including the newer PR #535 and #507 source merges. A source merge and a live installation remain separate states.</p>
+        <p>This October 12 snapshot reports the highest evidence stage available for each change. The 3pool release includes PR #535 recovery source and the final PR #540/#541 artifact; PR #507 remains merged source only. A source merge and a live installation remain separate states.</p>
       </div>
       <div class="change-list">
         {#each changes as item}
