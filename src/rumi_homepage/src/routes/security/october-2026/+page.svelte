@@ -2,7 +2,7 @@
   const report = {
     date: 'October 12, 2026',
     datetime: '2026-10-12',
-    source: 'origin/main through PR #552',
+    source: 'origin/main through PR #553',
     snapshot: '3pool, Points, and AMM upgrades with module readback · October 12, 2026'
   };
 
@@ -37,6 +37,14 @@
       state: 'Installed · inventory available',
       tone: 'installed',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/540'
+    },
+    {
+      pr: '#553',
+      title: 'Archived 3pool input recovery',
+      summary: 'The merged source adds ledger-anchored proof for archived input transfers during refund reconciliation. The candidate production Wasm is SHA-256 d1bc983879dc4a385ec87a398168f798802027b428bbef0f1c8382435ed96c6e. An opt-in exact-Wasm PocketIC test in PR #555 passed an upgrade from the installed predecessor with populated pool state. At the October 12 preflight, the live 3pool still reported SHA-256 74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae. A fresh snapshot was taken while stopped; the original module was restarted and the temporary pause lifted. A non-atomic admin read across four pages returned 62 retained payout records with internal status “settled”; a separate pending-claim query returned zero. The new candidate has not been installed, and those readbacks do not prove every external ledger outcome.',
+      state: 'Merged · not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/553'
     },
     {
       pr: '#507',
@@ -250,7 +258,8 @@
             Borrowing had resumed under a temporary cap at the October 11 readback, and that
             cap still reported 22,000 icUSD on October 12. PR #531 remains source-only;
             the backend and Stability Pool changes in PR #532 remain uninstalled. PR #545's
-            Stability Pool deposit-intent fix is merged but also remains uninstalled.
+            Stability Pool deposit-intent fix is merged but also remains uninstalled. PR #553's
+            archived 3pool input-recovery source is merged, with its candidate still uninstalled.
           </p>
         </div>
         <aside class="report-stamp" aria-label={report.snapshot}>
@@ -285,7 +294,7 @@
       <div class="section-heading section-heading-wide">
         <p class="section-label">Selected changes</p>
         <h2 id="updates-title">Change and release status</h2>
-        <p>This October 12 snapshot reports the highest evidence stage available for each change. The 3pool release includes PR #535 recovery source and the final PR #540/#541 artifact; the AMM recovery source from PR #507 is now installed, while PR #545 remains merged source only. A source merge and a live installation remain separate states.</p>
+        <p>This October 12 snapshot reports the highest evidence stage available for each change. The 3pool release includes PR #535 recovery source and the final PR #540/#541 artifact; the new PR #553 input-recovery source is merged but not installed. The AMM recovery source from PR #507 is now installed, while PR #545 remains merged source only. A source merge and a live installation remain separate states.</p>
       </div>
       <div class="change-list">
         {#each changes as item}
@@ -295,7 +304,7 @@
               <h3>{item.title}</h3>
               <p>{item.summary}</p>
               {#if item.href}
-                <a href={item.href} target="_blank" rel="noopener noreferrer">Review public source record <span aria-hidden="true">↗</span></a>
+                <a href={item.href} target="_blank" rel="noopener noreferrer">Review {item.pr} public source record <span aria-hidden="true">↗</span></a>
               {/if}
             </div>
             <div class="change-state">
