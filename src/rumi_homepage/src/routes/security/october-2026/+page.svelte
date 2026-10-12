@@ -2,8 +2,8 @@
   const report = {
     date: 'October 12, 2026',
     datetime: '2026-10-12',
-    source: 'origin/main at 96f77e0f · includes PR #545',
-    snapshot: '3pool upgrade and module readback · October 12, 2026'
+    source: 'origin/main through PR #550 · October 12, 2026',
+    snapshot: '3pool and Points upgrades with module readback · October 12, 2026'
   };
 
   const states = [
@@ -81,17 +81,17 @@
     {
       pr: '#450',
       title: 'Points release and historical reconciliation',
-      summary: 'Merged and deployed to the Points canister and frontend. The running Points module reports SHA-256 dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277. The original 401 ledger rows are preserved; 16 tagged rows add an approximate historical uplift of 2,151.74119482 points, bringing the ledger to 417 rows. This does not recreate discarded historical snapshot selection. An October 12 administrative read confirms epoch 18 remains open with A complete, B incomplete, and the driver off. No epoch close or reward release is shown. Flat 4× is scheduled for epoch 19 and is not active yet.',
-      state: 'Installed · epoch 18 held',
+      summary: 'Merged and deployed to the Points canister and frontend. The October 8 Points module reported SHA-256 dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277; the later October 12 redaction upgrade below superseded that module. The original 401 ledger rows are preserved; 16 tagged rows add an approximate historical uplift of 2,151.74119482 points, bringing the ledger to 417 rows. This does not recreate discarded historical snapshot selection. Epoch 18 remains open and held with A complete, B incomplete, and the driver off. No epoch close or reward release is shown. Flat 4× is scheduled for epoch 19 and is not active yet.',
+      state: 'Installed October 8 · superseded',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/450'
     },
     {
       pr: '2d1d3793',
       title: 'Points snapshot-time redaction',
-      summary: 'The October 12 readback found that public status still exposes B’s scheduled time before capture: the administrative view reports B incomplete, while the public time field is populated. The redaction fix is merged in source but is not installed on the running Points module. The driver remains disabled, and epoch 18 remains held for review.',
-      state: 'Merged · Points upgrade pending',
-      tone: 'held',
+      summary: 'The October 12 pre-upgrade readback found that public status exposed B’s scheduled time before capture. A fresh Points-only snapshot was taken while the canister was stopped; it was restarted, then upgraded to the reviewed Wasm. The running Points module now reports SHA-256 b0b168e4513a62df86344035615fbd4564b57bcd2b919542948814d1ad7e5b32. Immediate readback found B incomplete and its public time absent, epoch 18 still held, the driver disabled, the ledger unchanged at 417 rows, and the fiat-stable policy unchanged. This does not resolve the held epoch or award its points.',
+      state: 'Installed · public B time withheld',
+      tone: 'installed',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/2d1d37931471a104cc8aa44b47b13fbb6680b33c'
     },
     {
@@ -209,7 +209,7 @@
     {
       system: 'Points',
       status: 'Epoch 18 held · epoch 19 scheduled',
-      detail: 'The October 8 release evidence confirms the deployed module and completed historical adjustments. An October 12 administrative read shows A complete, B incomplete, epoch 18 still open, and the driver disabled. Snapshot-time redaction is merged in source but awaits a Points upgrade. The ledger has 417 rows, but its total does not prove an epoch 18 reward release. Future flat 4× accrual is scheduled for epoch 19, not active.'
+      detail: 'The October 8 release evidence confirms the historical adjustments. The October 12 Points upgrade now withholds the incomplete B snapshot time from public status. An immediate administrative read shows A complete, B incomplete, epoch 18 still open and held, and the driver disabled. The ledger remains at 417 rows, but its total does not prove an epoch 18 reward release. Future flat 4× accrual is scheduled for epoch 19, not active.'
     },
     {
       system: 'Vault borrowing',

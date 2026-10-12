@@ -150,10 +150,15 @@ override of the PTS-002 review hold.
 
 1. Build and independently hash the reviewed `rumi_points` Wasm. Create a
    management snapshot for the points canister only, immediately before the
-   install. The exact CLI shape verified by the coordinator is:
+   install. The canister must be stopped for the snapshot; restart it promptly
+   before the upgrade and verify it is running:
 
    ```bash
+   icp canister stop rumi_points \
+     --environment mainnet-live --identity rumi_identity
    icp canister snapshot create rumi_points \
+     --environment mainnet-live --identity rumi_identity
+   icp canister start rumi_points \
      --environment mainnet-live --identity rumi_identity
    ```
 
@@ -170,7 +175,7 @@ override of the PTS-002 review hold.
      --identity rumi_identity \
      --mode upgrade \
      --wasm "$POINTS_WASM" \
-     --args '(null)'
+     --args '()'
    ```
 
    Before proceeding, verify the installed module hash, controller set, and
@@ -233,7 +238,7 @@ override. Recovery of the open epoch 18 is a deferred operator-review action;
 it is not silently added as a prerequisite to the fiat-stable 4x policy or
 historical migration.
 
-## Release disposition
+## October 7 preflight disposition (historical)
 
 | Gate | Result |
 | --- | --- |
@@ -247,12 +252,14 @@ historical migration.
 | Upgrade continuation of active legacy epoch | BLOCKED: uninterrupted continuation is unsafe; upgrade into the durable security hold is the expected state |
 | Fiat-stable cutover and historical migration | PENDING: may be scheduled/processed separately; current epoch remains legacy and cutover 19 is not active |
 
-The concrete release sequence is the points-only snapshot, explicit upgrade,
+The following was the October 7 planned release sequence, before the later
+Points installations described below: the points-only snapshot, explicit upgrade,
 anonymous/admin post-status checks, regenerated `vault_frontend` asset sync,
 policy scheduling and bounded historical reconciliation. Old cached clients
 may need to reload because their old Candid decoders lack the new source variants. The open epoch 18 recovery decision remains
 with the named operator/review task and must not be inferred from deployment
-authorization. This report provides no deploy or live-clearance claim.
+authorization. This October 7 disposition provided no deploy or live-clearance claim;
+the later Points release readback is recorded below.
 
 For isolated checkout reconstruction, the source of truth is
 `icp.yaml:635-642` for the `rumi_points` recipe (`@dfinity/rust@v3.2.0`, package
@@ -261,8 +268,33 @@ For isolated checkout reconstruction, the source of truth is
 
 ## Refreshed live target during implementation
 
-An independent authorized security release upgraded points during this task. Before any fiat release mutation, the coordinator refreshed status and verified the new points module hash is `5860109f5dde4bacc1e02480c563bd3f38ef7f6a07674029d32a475d944585a5`. Its pinned source is `f72d1459`; `git diff 4b4b1680 f72d1459 -- src/rumi_points src/declarations/rumi_points` is empty, so this release retains all that deployed points source. The earlier `b092...` hash is historical preflight evidence, not the current module.
+An independent authorized security release upgraded points during this task. At that earlier refresh, before the October 12 PTS-002 release, the coordinator verified module hash `5860109f5dde4bacc1e02480c563bd3f38ef7f6a07674029d32a475d944585a5`. Its pinned source is `f72d1459`; `git diff 4b4b1680 f72d1459 -- src/rumi_points src/declarations/rumi_points` is empty, so this release retained all that deployed points source. The earlier `b092...` hash is historical preflight evidence, not the current module.
 
-The refreshed live admin status confirms epoch 18, A complete/B incomplete, `legacy_transition_held=true`, `legacy_reseed_pending=false`, and `driver_enabled=false`. Poll configuration remains enabled but fenced by the security hold. Backend ingest cursor advanced to 512671 before the hold; the other source cursors remained 110/1870/5. The ledger remains 401 rows. The new fiat-policy method is still absent. The fiat release will preserve this established held state, rather than introducing a new live pause.
+## October 12 PTS-002 release readback
 
-The pinned pre-randomness Wasm `/private/tmp/rumi_points_pre_randomness_5a20.wasm` became available from the security verification, with exact SHA-256 `d3fc3919ab50d75f245c2ad9539fb5c83a8da38a25c22d36b8f97e82ba0a3fbc`. The fiat candidate must rerun the existing legacy epoch-18 upgrade regression against it.
+This section supersedes the earlier live-module observations above for Points.
+Immediately before this release, the canister was running module SHA-256
+`dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277`.
+Epoch 18 was open and held, A was complete, B was incomplete, the driver was
+off, and the public status exposed B's scheduled time. The ledger contained
+417 rows. The checked-in and live Candid services were byte-identical.
+
+The reviewed production Wasm was rebuilt from merged source and hashed
+`b0b168e4513a62df86344035615fbd4564b57bcd2b919542948814d1ad7e5b32`.
+All 187 `rumi_points` library tests passed. The controller stopped the canister,
+created a fresh Points-only management snapshot, verified it in the snapshot
+list, restarted the canister, and installed that exact Wasm in upgrade mode
+with empty Candid arguments. The new installed module hash matched the artifact.
+
+Immediate readback found epoch 18 still open and held, A complete, B
+incomplete, close not started, the driver still off, and the 417-row ledger
+unchanged. The public B time is now absent; the fiat-stable policy response is
+byte-identical to its pre-upgrade response. The snapshot ID and raw scheduled
+times remain private. This upgrade did not resolve the held epoch, run its
+driver, or award points. An exact old-installed-Wasm-to-new-Wasm PocketIC
+reproduction was unavailable; existing migration and redaction tests and the
+live readback provide narrower evidence.
+
+The following earlier refresh is historical and predates the October 12 readback above. At that time, live admin status confirmed epoch 18, A complete/B incomplete, `legacy_transition_held=true`, `legacy_reseed_pending=false`, and `driver_enabled=false`. Poll configuration remained enabled but fenced by the security hold. Backend ingest cursor had advanced to 512671 before the hold; the other source cursors were 110/1870/5. The ledger then had 401 rows, and the fiat-policy method was absent. Later releases superseded those ledger and interface observations.
+
+The historical fiat-release plan used a pinned pre-randomness Wasm `/private/tmp/rumi_points_pre_randomness_5a20.wasm`, with SHA-256 `d3fc3919ab50d75f245c2ad9539fb5c83a8da38a25c22d36b8f97e82ba0a3fbc`, for its legacy epoch-18 upgrade regression. This does not establish byte identity with the module installed immediately before the October 12 PTS-002 upgrade.
