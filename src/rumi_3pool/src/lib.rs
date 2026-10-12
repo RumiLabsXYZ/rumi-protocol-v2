@@ -2416,7 +2416,23 @@ pub async fn receive_donation(token_index: u8, amount: u128) -> Result<(), Three
     }
     receive_donation_accounting(token_index, amount, caller, None)
         .await
+        .map(|_| ())
         .map_err(donation_receipt_error_to_legacy)
+}
+
+/// Read-only telemetry for the permanent keyed donation receipt table. This
+/// exposes the hard admission cap and its early-warning threshold so an
+/// operator can plan a cap-raising upgrade without deleting replay history.
+#[query]
+pub fn get_donation_receipt_capacity_v1() -> DonationReceiptCapacityV1 {
+    let receipt_count = storage::donation_receipts::len();
+    DonationReceiptCapacityV1 {
+        receipt_count,
+        max_receipts: storage::MAX_DONATION_RECEIPTS_V1,
+        warning_threshold: storage::DONATION_RECEIPT_WARNING_THRESHOLD_V1,
+        warning_threshold_reached:
+            storage::donation_receipt_warning_threshold_reached(receipt_count),
+    }
 }
 
 /// Idempotent protocol donation ingress. The exact backend operation nonce is
@@ -2450,7 +2466,9 @@ pub async fn receive_donation_v2(
             Err(DonationReceiptErrorV1::PayloadConflict)
         };
     }
-    receive_donation_accounting(token_index, amount, caller, Some((op_nonce, receipt))).await
+    receive_donation_accounting(token_index, amount, caller, Some((op_nonce, receipt)))
+        .await
+        .map(|_| ())
 }
 
 fn donation_caller_authorized(caller: Principal) -> bool {
@@ -2529,14 +2547,15 @@ async fn receive_donation_accounting(
         });
     }
 
-    mutate_state(|s| -> Result<(), DonationReceiptErrorV1> {
+    let receipt_inserted = mutate_state(|s| -> Result<bool, DonationReceiptErrorV1> {
         if s.balances != balances_before || s.admin_fees != admin_fees_before {
             return Err(DonationReceiptErrorV1::PoolLocked);
         }
+        let mut receipt_inserted = false;
         if let Some((op_nonce, receipt)) = receipt {
             match storage::donation_receipts::insert_if_absent(caller, op_nonce, receipt) {
-                storage::DonationReceiptInsert::Inserted => {}
-                storage::DonationReceiptInsert::Existing => return Ok(()),
+                storage::DonationReceiptInsert::Inserted => receipt_inserted = true,
+                storage::DonationReceiptInsert::Existing => return Ok(false),
                 storage::DonationReceiptInsert::Conflict => {
                     return Err(DonationReceiptErrorV1::PayloadConflict)
                 }
@@ -2546,10 +2565,29 @@ async fn receive_donation_accounting(
             }
         }
         s.balances[idx] = reserve_after;
-        Ok(())
+        Ok(receipt_inserted)
     })?;
 
-    log!(INFO, "ReceiveDonation: {} of {} (token {}) from {}", amount, symbol, token_index, caller);
+    if receipt_inserted
+        && storage::donation_receipts::len()
+            == storage::DONATION_RECEIPT_WARNING_THRESHOLD_V1
+    {
+        log!(
+            INFO,
+            "Donation receipt capacity warning: {} of {} permanent receipts ({} threshold); raise cap before exhaustion",
+            storage::donation_receipts::len(),
+            storage::MAX_DONATION_RECEIPTS_V1,
+            storage::DONATION_RECEIPT_WARNING_THRESHOLD_V1,
+        );
+    }
+    log!(
+        INFO,
+        "ReceiveDonation: {} of {} (token {}) from {}",
+        amount,
+        symbol,
+        token_index,
+        caller
+    );
     Ok(())
 }
 

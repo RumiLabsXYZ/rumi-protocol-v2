@@ -99,6 +99,12 @@ export type DeviceSpec = { 'GenericDisplay' : null } |
       'lines_per_page' : number,
     }
   };
+export interface DonationReceiptCapacityV1 {
+  'max_receipts' : bigint,
+  'warning_threshold_reached' : boolean,
+  'receipt_count' : bigint,
+  'warning_threshold' : bigint,
+}
 export type DonationReceiptErrorV1 = { 'PoolPaused' : null } |
   { 'InvalidCoinIndex' : null } |
   { 'PayloadConflict' : null } |
@@ -617,6 +623,10 @@ export interface _SERVICE {
   'get_balance_series' : ActorMethod<
     [StatsWindow, bigint],
     Array<BalancePoint>
+  >,
+  'get_donation_receipt_capacity_v1' : ActorMethod<
+    [],
+    DonationReceiptCapacityV1
   >,
   'get_fee_curve_params' : ActorMethod<[], FeeCurveParams>,
   'get_fee_series' : ActorMethod<[StatsWindow, bigint], Array<FeePoint>>,

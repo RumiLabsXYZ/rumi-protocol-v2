@@ -448,6 +448,15 @@ pub struct DonationReceiptV1 {
     pub source_mint_block: u64,
 }
 
+/// Read-only capacity telemetry for the permanent donation idempotency map.
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DonationReceiptCapacityV1 {
+    pub receipt_count: u64,
+    pub max_receipts: u64,
+    pub warning_threshold: u64,
+    pub warning_threshold_reached: bool,
+}
+
 /// A record of tokens the pool owes a user after a value-moving operation
 /// pulled or debited their funds but a subsequent ledger transfer failed.
 ///
