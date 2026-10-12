@@ -58,7 +58,7 @@ jobs:
               assert source.count(old) == 1, f"unexpected {name} crate types"
               manifest.write_text(source.replace(old, 'crate-type = ["rlib"]'))
           PY
-      - name: Prove archived deposit recovery across upgrade
+      - name: Prove Stability Pool deposit recovery across upgrade
         env:
           # This host executable imports types from two canister rlibs. Their
           # unused ICP entrypoint export names overlap; PocketIC runs the
@@ -67,6 +67,4 @@ jobs:
           POCKET_IC_BIN: ${{ runner.temp }}/pocket-ic
           RUMI_SP_WASM_PATH: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/stability_pool.wasm
           RUMI_FLAKY_LEDGER_WASM_PATH: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/flaky_ledger.wasm
-        run: |
-          cargo +1.92.0 test --locked -p stability_pool --test pocket_ic_3usd \
-            deposit_intent_authenticates_archived_history_segment_across_upgrade -- --exact --nocapture
+        run: cargo +1.92.0 test --locked -p stability_pool --test pocket_ic_3usd -- --nocapture
