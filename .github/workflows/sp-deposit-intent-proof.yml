@@ -42,7 +42,7 @@ jobs:
           gzip --decompress --stdout "$RUNNER_TEMP/pocket-ic.gz" > "$RUNNER_TEMP/pocket-ic"
           chmod +x "$RUNNER_TEMP/pocket-ic"
       - name: Build exact test Wasms
-        run: cargo +1.92.0 build --release --target wasm32-unknown-unknown --locked -p stability_pool -p flaky_ledger
+        run: cargo +1.92.0 build --release --target wasm32-unknown-unknown --locked -p stability_pool -p flaky_ledger -p rumi_3pool
       - name: Select rlib-only host test builds
         run: |
           # The canister Wasms above use the unchanged manifests. Linux cannot
@@ -67,4 +67,5 @@ jobs:
           POCKET_IC_BIN: ${{ runner.temp }}/pocket-ic
           RUMI_SP_WASM_PATH: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/stability_pool.wasm
           RUMI_FLAKY_LEDGER_WASM_PATH: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/flaky_ledger.wasm
+          RUMI_THREE_POOL_WASM_PATH: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/rumi_3pool.wasm
         run: cargo +1.92.0 test --locked -p stability_pool --test pocket_ic_3usd -- --nocapture
