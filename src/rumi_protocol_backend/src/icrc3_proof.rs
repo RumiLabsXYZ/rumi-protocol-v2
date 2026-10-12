@@ -503,6 +503,253 @@ pub fn validate_icrc3_transfer_block(
     Ok(())
 }
 
+/// Verify a caller-selected candidate block for the exact leg currently held
+/// in a reserve-redemption journal. Candidate indices are pointers only: the
+/// block must be served directly by the configured ledger and match the
+/// journaled accounts, amount, memo, timestamp, operation, and (for transfer
+/// from) spender. Archive callbacks and absence scans are deliberately not
+/// accepted as settlement proof.
+pub async fn verify_reserve_redemption_candidate(
+    journal: &crate::state::ReserveRedemptionJournal,
+    block_index: u64,
+) -> Result<crate::state::ReserveRedemptionReceiptLeg, String> {
+    use crate::state::ReserveRedemptionPhase as Phase;
+
+    let ledger = match journal.phase {
+        Phase::PullSubmitted => journal.pull_ledger,
+        Phase::PayoutSubmitted | Phase::PayoutAmbiguous if journal.payout_amount_e6s > 0 => {
+            journal.payout_ledger
+        }
+        Phase::TreasuryFeeSubmitted | Phase::TreasuryFeeAmbiguous =>
+            journal.treasury_ledger.ok_or("treasury fee ledger is absent")?,
+        Phase::RefundSubmitted | Phase::RefundRetrySubmitted | Phase::RefundNoEffect =>
+            journal.refund_ledger.ok_or("refund ledger is absent")?,
+        _ => return Err("journal phase has no unresolved receipt candidate".into()),
+    };
+    let block = fetch_icrc3_block_direct(ledger, block_index).await?;
+    validate_reserve_redemption_candidate_block(journal, &block)
+}
+
+/// Pure half of reserve-redemption candidate verification; tests exercise
+/// exact tuple and wrong-leg rejection without a replica or archive callback.
+pub fn validate_reserve_redemption_candidate_block(
+    journal: &crate::state::ReserveRedemptionJournal,
+    block: &DecodedBlock,
+) -> Result<crate::state::ReserveRedemptionReceiptLeg, String> {
+    use crate::state::{ReserveRedemptionPhase as Phase, ReserveRedemptionReceiptLeg as Leg};
+    let leg = match journal.phase {
+        Phase::PullSubmitted => Leg::Pull,
+        Phase::PayoutSubmitted | Phase::PayoutAmbiguous if journal.payout_amount_e6s > 0 => Leg::Payout,
+        Phase::TreasuryFeeSubmitted | Phase::TreasuryFeeAmbiguous => Leg::TreasuryFee,
+        Phase::RefundSubmitted | Phase::RefundRetrySubmitted | Phase::RefundNoEffect => Leg::Refund,
+        _ => return Err("journal phase has no unresolved receipt candidate".into()),
+    };
+    match leg {
+        Leg::Pull => {
+            let expected_spender = Account { owner: journal.pull_to.owner, subaccount: None };
+            if block.btype.as_deref() != Some("2xfer")
+                || block.op != "xfer"
+                || block.from.as_ref() != Some(&journal.pull_from)
+                || block.to.as_ref() != Some(&journal.pull_to)
+                || block.spender.as_ref() != Some(&expected_spender)
+                || block.amount != u128::from(journal.pull_amount_e8s)
+                || block.memo.as_deref() != Some(journal.pull_memo.as_slice())
+                || block.created_at_time != Some(journal.pull_created_at_time_ns)
+            {
+                return Err("candidate block does not match the exact reserve-redemption ICRC-2 pull tuple".into());
+            }
+        }
+        Leg::Payout => {
+            if block.btype.as_deref() != Some("1xfer") {
+                return Err("candidate payout block is missing the exact 1xfer type".into());
+            }
+            if block.to.as_ref() != Some(&journal.payout_to) {
+                return Err("candidate payout destination account is not exact".into());
+            }
+            validate_icrc3_transfer_block(
+                &block,
+                Some(Account { owner: journal.pull_to.owner, subaccount: journal.payout_from_subaccount }),
+                journal.payout_to.clone(),
+                journal.payout_amount_e6s,
+                Some(&journal.payout_memo),
+                Some(journal.payout_created_at_time_ns),
+            )?;
+        }
+        Leg::TreasuryFee => {
+            let (Some(to), Some(amount), Some(memo), Some(created_at)) = (
+                journal.treasury_to.as_ref(),
+                journal.treasury_amount_e6s,
+                journal.treasury_memo.as_deref(),
+                journal.treasury_created_at_time_ns,
+            ) else { return Err("treasury fee tuple is incomplete".into()) };
+            if block.btype.as_deref() != Some("1xfer") {
+                return Err("candidate treasury block is missing the exact 1xfer type".into());
+            }
+            if block.to.as_ref() != Some(to) {
+                return Err("candidate treasury destination account is not exact".into());
+            }
+            validate_icrc3_transfer_block(
+                &block,
+                Some(Account { owner: journal.pull_to.owner, subaccount: None }),
+                to.clone(), amount, Some(memo), Some(created_at),
+            )?;
+        }
+        Leg::Refund => {
+            let (Some(amount), Some(memo), Some(created_at)) = (
+                journal.refund_amount_e8s,
+                journal.refund_memo.as_deref(),
+                journal.refund_created_at_time_ns,
+            ) else { return Err("refund tuple is incomplete".into()) };
+            if block.btype.as_deref() != Some("1xfer") {
+                return Err("candidate refund block is missing the exact 1xfer type".into());
+            }
+            let expected_to = Account { owner: journal.caller, subaccount: None };
+            if block.to.as_ref() != Some(&expected_to) {
+                return Err("candidate refund destination account is not exact".into());
+            }
+            validate_icrc3_transfer_block(
+                &block,
+                Some(Account { owner: journal.pull_to.owner, subaccount: None }),
+                expected_to,
+                amount, Some(memo), Some(created_at),
+            )?;
+        }
+    }
+    Ok(leg)
+}
+
+#[cfg(test)]
+mod reserve_redemption_candidate_tests {
+    use super::{validate_reserve_redemption_candidate_block, DecodedBlock};
+    use crate::state::{ReserveRedemptionJournal, ReserveRedemptionPhase as Phase, ReserveRedemptionReceiptLeg as Leg};
+    use candid::Principal;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    fn journal() -> ReserveRedemptionJournal {
+        let caller = Principal::from_slice(&[1]);
+        let canister = Principal::from_slice(&[2]);
+        let ledger = Principal::from_slice(&[3]);
+        ReserveRedemptionJournal {
+            operation_id: 7,
+            caller,
+            icusd_amount_e8s: 100_000,
+            fee_icusd_e8s: 0,
+            fee_stable_e6s: 0,
+            raw_dust_refund_e8s: 0,
+            pull_ledger: ledger,
+            pull_from: Account { owner: caller, subaccount: None },
+            pull_to: Account { owner: canister, subaccount: None },
+            pull_amount_e8s: 100_000,
+            pull_fee_e8s: None,
+            pull_memo: 7u128.to_be_bytes().to_vec(),
+            pull_created_at_time_ns: 70,
+            pull_op_nonce: 7,
+            payout_ledger: ledger,
+            payout_from_subaccount: None,
+            payout_to: Account { owner: caller, subaccount: None },
+            payout_amount_e6s: 900,
+            payout_fee_e6s: None,
+            payout_memo: 8u128.to_be_bytes().to_vec(),
+            payout_created_at_time_ns: 80,
+            payout_op_nonce: 8,
+            treasury_ledger: None,
+            treasury_to: None,
+            treasury_amount_e6s: None,
+            treasury_memo: None,
+            treasury_created_at_time_ns: None,
+            treasury_op_nonce: None,
+            treasury_fee_required: false,
+            treasury_block_index: None,
+            payout_no_effect_tuples: Vec::new(),
+            refund_ledger: None,
+            refund_amount_e8s: None,
+            refund_memo: None,
+            refund_created_at_time_ns: None,
+            refund_op_nonce: None,
+            refund_history: Vec::new(),
+            refund_history_pruned_count: 0,
+            refund_retry_count: 0,
+            refund_retry_is_same_tuple: false,
+            refund_block_index: None,
+            pull_block_index: None,
+            payout_block_index: None,
+            phase: Phase::PayoutAmbiguous,
+        }
+    }
+
+    fn transfer(from: Account, to: Account, amount: u64, memo: Vec<u8>, ts: u64) -> DecodedBlock {
+        DecodedBlock {
+            btype: Some("1xfer".into()), op: "xfer".into(),
+            from: Some(from), to: Some(to), spender: None,
+            amount: amount.into(), fee: Some(10), created_at_time: Some(ts), memo: Some(memo),
+        }
+    }
+
+    #[test]
+    fn candidate_receipt_requires_the_exact_current_leg_tuple() {
+        let row = journal();
+        let block = transfer(
+            Account { owner: row.pull_to.owner, subaccount: None },
+            row.payout_to.clone(), row.payout_amount_e6s,
+            row.payout_memo.clone(), row.payout_created_at_time_ns,
+        );
+        assert_eq!(validate_reserve_redemption_candidate_block(&row, &block), Ok(Leg::Payout));
+        let mut wrong = block.clone();
+        wrong.memo.as_mut().unwrap()[0] ^= 1;
+        assert!(validate_reserve_redemption_candidate_block(&row, &wrong).is_err());
+        let mut wrong_amount = block;
+        wrong_amount.amount -= 1;
+        assert!(validate_reserve_redemption_candidate_block(&row, &wrong_amount).is_err());
+        let mut completed = row;
+        completed.phase = Phase::PayoutSettled;
+        assert!(validate_reserve_redemption_candidate_block(&completed, &transfer(
+            Account { owner: completed.pull_to.owner, subaccount: None },
+            completed.payout_to.clone(), completed.payout_amount_e6s,
+            completed.payout_memo.clone(), completed.payout_created_at_time_ns,
+        )).is_err(), "a candidate cannot advance a different or already-settled phase");
+    }
+
+    #[test]
+    fn pull_candidate_requires_transfer_from_spender_and_nonce_tuple() {
+        let mut row = journal();
+        row.phase = Phase::PullSubmitted;
+        let block = DecodedBlock {
+            btype: Some("2xfer".into()), op: "xfer".into(),
+            from: Some(row.pull_from.clone()), to: Some(row.pull_to.clone()),
+            spender: Some(row.pull_to.clone()), amount: row.pull_amount_e8s.into(),
+            fee: Some(10), created_at_time: Some(row.pull_created_at_time_ns),
+            memo: Some(row.pull_memo.clone()),
+        };
+        assert_eq!(validate_reserve_redemption_candidate_block(&row, &block), Ok(Leg::Pull));
+        let mut wrong = block;
+        wrong.spender = Some(Account { owner: Principal::from_slice(&[9]), subaccount: None });
+        assert!(validate_reserve_redemption_candidate_block(&row, &wrong).is_err());
+    }
+
+    #[test]
+    fn retry_submitted_refund_can_be_reconciled_against_its_saved_tuple() {
+        let mut row = journal();
+        row.phase = Phase::RefundRetrySubmitted;
+        row.pull_block_index = Some(9);
+        row.refund_ledger = Some(row.pull_ledger);
+        row.refund_amount_e8s = Some(row.icusd_amount_e8s);
+        row.refund_op_nonce = Some(44);
+        row.refund_memo = Some(44u128.to_be_bytes().to_vec());
+        row.refund_created_at_time_ns = Some(440);
+        let exact = transfer(
+            Account { owner: row.pull_to.owner, subaccount: None },
+            Account { owner: row.caller, subaccount: None },
+            row.icusd_amount_e8s,
+            row.refund_memo.clone().unwrap(),
+            row.refund_created_at_time_ns.unwrap(),
+        );
+        assert_eq!(validate_reserve_redemption_candidate_block(&row, &exact), Ok(Leg::Refund));
+        let mut changed = exact;
+        changed.memo.as_mut().unwrap()[0] ^= 1;
+        assert!(validate_reserve_redemption_candidate_block(&row, &changed).is_err());
+    }
+}
+
 /// Validate the stronger evidence required to recover an AMM1 donation after
 /// an ambiguous/TooOld mint outcome. Unlike the generic transfer validator,
 /// an ICRC-1 mint must explicitly carry the standard `1mint` block type.

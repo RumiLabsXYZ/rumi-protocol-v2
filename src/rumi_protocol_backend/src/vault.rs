@@ -537,6 +537,443 @@ fn persist_rejected_redemption_refund(
     );
 }
 
+fn reserve_redemption_admission_blocked(state: &crate::state::State) -> bool {
+    !state.reserve_redemption_journals.is_empty()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReserveRedemptionRefundOutcome {
+    Settled,
+    DefinitiveNoEffect,
+    AmbiguousOrUnstarted,
+}
+
+/// Persist the exact refund tuple before dispatch. A typed no-effect response
+/// permits one exact retry; if that retry also has no effect, retain its tuple
+/// in bounded history and renew the memo/time. First-attempt TooOld, rejects,
+/// and GenericError remain ambiguous.
+async fn refund_reserve_redemption(
+    operation_id: u128,
+    pull_block_index: u64,
+    amount_e8s: u64,
+) -> ReserveRedemptionRefundOutcome {
+    let journal = mutate_state(|state| {
+        let existing = state.reserve_redemption_journals.get(&operation_id)?.clone();
+        if existing.pull_block_index != Some(pull_block_index) || amount_e8s == 0 {
+            return None;
+        }
+        if existing.phase == crate::state::ReserveRedemptionPhase::RefundNoEffect {
+            // A typed ledger rejection proves the original attempt had no
+            // effect. Retry only the exact previously persisted transfer.
+            if existing.refund_amount_e8s != Some(amount_e8s)
+                || existing.refund_ledger != Some(existing.pull_ledger)
+            {
+                return None;
+            }
+            return state.begin_reserve_redemption_refund_retry(operation_id, &existing);
+        }
+        let full_refund = amount_e8s == existing.icusd_amount_e8s;
+        let allowed = if full_refund {
+            existing.phase == crate::state::ReserveRedemptionPhase::PayoutNoEffect
+        } else {
+            matches!(existing.phase,
+                crate::state::ReserveRedemptionPhase::PayoutSettled
+                    | crate::state::ReserveRedemptionPhase::TreasuryFeeSettled
+                    | crate::state::ReserveRedemptionPhase::TreasuryFeeNoEffect)
+        };
+        if !allowed {
+            return None;
+        }
+        let refund_nonce = state.next_op_nonce();
+        let row = state.reserve_redemption_journals.get_mut(&operation_id)?;
+        let expected = existing.clone();
+        if row != &expected {
+            return None;
+        }
+        row.refund_ledger = Some(row.pull_ledger);
+        row.refund_amount_e8s = Some(amount_e8s);
+        row.refund_memo = Some(refund_nonce.to_be_bytes().to_vec());
+        row.refund_created_at_time_ns = Some(management::nonce_to_created_at_time(refund_nonce));
+        row.refund_op_nonce = Some(refund_nonce);
+        row.phase = crate::state::ReserveRedemptionPhase::RefundSubmitted;
+        Some(row.clone())
+    });
+    let Some(journal) = journal else {
+        return ReserveRedemptionRefundOutcome::AmbiguousOrUnstarted;
+    };
+    match management::transfer_reserve_redemption_refund(&journal).await {
+        Ok(refund_block) => {
+            log!(INFO,
+                "[redeem_reserves] icUSD refund settled for operation {} (pull block {}, refund block {}, amount {})",
+                operation_id, pull_block_index, refund_block, amount_e8s
+            );
+            if mutate_state(|state| {
+                state.mark_reserve_redemption_refund_settled(
+                    operation_id,
+                    &journal,
+                    refund_block,
+                )
+            }) {
+                ReserveRedemptionRefundOutcome::Settled
+            } else {
+                ReserveRedemptionRefundOutcome::AmbiguousOrUnstarted
+            }
+        }
+        Err(error) => {
+            if let management::DurableTransferError::LedgerNoEffect(_) = &error {
+                mutate_state(|state| {
+                    state.mark_reserve_redemption_refund_no_effect(
+                        operation_id,
+                        &journal,
+                    )
+                });
+            }
+            log!(INFO,
+                "[redeem_reserves] icUSD refund attempt did not settle for operation {} (pull block {}, amount {}): {:?}",
+                operation_id, pull_block_index, amount_e8s, error
+            );
+            if matches!(error, management::DurableTransferError::LedgerNoEffect(_)) {
+                ReserveRedemptionRefundOutcome::DefinitiveNoEffect
+            } else {
+                ReserveRedemptionRefundOutcome::AmbiguousOrUnstarted
+            }
+        }
+    }
+}
+
+/// Continue every journal phase from persisted evidence. Each dispatch is
+/// preceded by an exact-row CAS and every callback is likewise guarded by the
+/// snapshot that was submitted, so reconciliation can safely win a race.
+async fn continue_reserve_redemption(
+    operation_id: u128,
+) -> Result<Option<crate::ReserveRedemptionResult>, ProtocolError> {
+    use crate::state::{ReserveRedemptionPhase as P, ReserveRedemptionReceiptLeg as Leg};
+    loop {
+        let Some(journal) = read_state(|state| state.reserve_redemption_journals.get(&operation_id).cloned()) else {
+            return Ok(None);
+        };
+        match journal.phase {
+            P::PullSubmitted => return Err(ProtocolError::TemporarilyUnavailable(
+                "The icUSD pull remains unresolved; reconcile its exact ledger receipt before continuing.".into(),
+            )),
+            P::PullSettled => {
+                if journal.payout_amount_e6s == 0 {
+                    if mutate_state(|state| state.cas_reserve_redemption_phase(operation_id, &journal, P::PayoutSettled).is_none()) { continue; }
+                    continue;
+                }
+                let submitted = mutate_state(|state| state.cas_reserve_redemption_phase(
+                    operation_id, &journal, P::PayoutSubmitted,
+                ));
+                let Some(submitted) = submitted else { continue };
+                match management::transfer_reserve_redemption_payout(&submitted).await {
+                    Ok(block) => {
+                        let advanced = mutate_state(|state| state.record_reserve_redemption_receipt(
+                            operation_id, &submitted, block, Leg::Payout,
+                        ));
+                        if !advanced { continue; }
+                    }
+                    Err(error) if management::reserve_redemption_payout_refund_allowed(&error) => {
+                        let proved = mutate_state(|state| state.mark_reserve_redemption_payout_no_effect(
+                            operation_id, &submitted,
+                        ));
+                        if !proved { continue; }
+                        match refund_reserve_redemption(operation_id, submitted.pull_block_index.unwrap_or_default(), submitted.icusd_amount_e8s).await {
+                            ReserveRedemptionRefundOutcome::Settled => {
+                                let cleared = mutate_state(|state| state.clear_reserve_redemption_after_full_refund(operation_id));
+                                if cleared { return Ok(None); }
+                                return Err(ProtocolError::TemporarilyUnavailable("The full icUSD refund settled, but its journal remains held.".into()));
+                            }
+                            ReserveRedemptionRefundOutcome::DefinitiveNoEffect => return Err(ProtocolError::TemporarilyUnavailable("The payout had a persisted typed no-effect result; the full refund also had no effect and remains journaled for retry.".into())),
+                            ReserveRedemptionRefundOutcome::AmbiguousOrUnstarted => return Err(ProtocolError::TemporarilyUnavailable("The payout had a persisted typed no-effect result; the full refund is unresolved and remains journaled.".into())),
+                        }
+                    }
+                    Err(error) => {
+                        let _ = mutate_state(|state| state.cas_reserve_redemption_phase(operation_id, &submitted, P::PayoutAmbiguous));
+                        return Err(ProtocolError::TemporarilyUnavailable(format!("Stable payout outcome is ambiguous; redemption remains held: {error:?}")));
+                    }
+                }
+            }
+            P::PayoutNoEffect => {
+                let pull_block = journal.pull_block_index.ok_or_else(|| ProtocolError::TemporarilyUnavailable("Payout no-effect journal is missing its pull receipt.".into()))?;
+                match refund_reserve_redemption(operation_id, pull_block, journal.icusd_amount_e8s).await {
+                    ReserveRedemptionRefundOutcome::Settled => {
+                        let cleared = mutate_state(|state| state.clear_reserve_redemption_after_full_refund(operation_id));
+                        if cleared { return Ok(None); }
+                        return Err(ProtocolError::TemporarilyUnavailable("The full icUSD refund settled, but its journal remains held.".into()));
+                    }
+                    ReserveRedemptionRefundOutcome::DefinitiveNoEffect => return Err(ProtocolError::TemporarilyUnavailable("The full icUSD refund had a persisted typed no-effect result and may be retried through reconciliation.".into())),
+                    ReserveRedemptionRefundOutcome::AmbiguousOrUnstarted => return Err(ProtocolError::TemporarilyUnavailable("The full icUSD refund is unresolved and remains journaled.".into())),
+                }
+            }
+            P::PayoutSubmitted | P::PayoutAmbiguous => return Err(ProtocolError::TemporarilyUnavailable("The stable payout remains unresolved; reconcile its exact ledger receipt before continuing.".into())),
+            P::PayoutSettled => {
+                let dispatch_treasury = reserve_redemption_treasury_dispatch_required(&journal)
+                    .map_err(|message| ProtocolError::TemporarilyUnavailable(message.into()))?;
+                if dispatch_treasury {
+                    let treasury_tuple_complete = journal.treasury_ledger.is_some()
+                        && journal.treasury_to.is_some()
+                        && journal.treasury_amount_e6s.is_some()
+                        && journal.treasury_memo.is_some()
+                        && journal.treasury_created_at_time_ns.is_some()
+                        && journal.treasury_op_nonce.is_some();
+                    if !treasury_tuple_complete {
+                        return Err(ProtocolError::TemporarilyUnavailable(
+                            "Treasury dispatch was admitted, but its exact persisted tuple is incomplete.".into(),
+                        ));
+                    }
+                    let Some(submitted) = mutate_state(|state| state.cas_reserve_redemption_phase(operation_id, &journal, P::TreasuryFeeSubmitted)) else { continue };
+                    match management::transfer_reserve_redemption_treasury_fee(&submitted).await {
+                        Ok(block) => {
+                            if !mutate_state(|state| state.record_reserve_redemption_receipt(operation_id, &submitted, block, Leg::TreasuryFee)) { continue; }
+                        }
+                        Err(management::DurableTransferError::LedgerNoEffect(_)) => {
+                            if !mutate_state(|state| state.cas_reserve_redemption_phase(operation_id, &submitted, P::TreasuryFeeNoEffect).is_some()) { continue; }
+                        }
+                        Err(error) => {
+                            let _ = mutate_state(|state| state.cas_reserve_redemption_phase(operation_id, &submitted, P::TreasuryFeeAmbiguous));
+                            return Err(ProtocolError::TemporarilyUnavailable(format!("Treasury fee outcome is ambiguous; redemption remains held: {error:?}")));
+                        }
+                    }
+                } else {
+                    return finish_reserve_redemption_after_fee(operation_id, &journal).await;
+                }
+            }
+            P::TreasuryFeeSubmitted | P::TreasuryFeeAmbiguous => return Err(ProtocolError::TemporarilyUnavailable("Treasury fee outcome remains unresolved; reconcile its exact receipt.".into())),
+            P::TreasuryFeeSettled | P::TreasuryFeeNoEffect => return finish_reserve_redemption_after_fee(operation_id, &journal).await,
+            P::RefundNoEffect => return Err(ProtocolError::TemporarilyUnavailable("The refund had a persisted typed no-effect result and may be retried through reconciliation.".into())),
+            P::RefundSubmitted | P::RefundRetrySubmitted => return Err(ProtocolError::TemporarilyUnavailable("The refund is unresolved; reconcile its exact ledger receipt.".into())),
+            P::RefundSettled => {
+                if journal.refund_amount_e8s == Some(journal.icusd_amount_e8s) && journal.payout_block_index.is_none() {
+                    if mutate_state(|state| state.clear_reserve_redemption_after_full_refund(operation_id)) { return Ok(None); }
+                    return Err(ProtocolError::TemporarilyUnavailable("Full refund settled, but the journal remains held.".into()));
+                }
+                continue_accounting(operation_id, &journal)?;
+                return Ok(Some(reserve_redemption_result(&journal)));
+            }
+        }
+    }
+}
+
+fn reserve_redemption_treasury_dispatch_required(
+    journal: &crate::state::ReserveRedemptionJournal,
+) -> Result<bool, &'static str> {
+    let complete = journal.treasury_ledger.is_some()
+        && journal.treasury_to.is_some()
+        && journal.treasury_amount_e6s.is_some()
+        && journal.treasury_memo.is_some()
+        && journal.treasury_created_at_time_ns.is_some()
+        && journal.treasury_op_nonce.is_some();
+    if journal.treasury_fee_required && !complete {
+        return Err("Admission requires a treasury fee dispatch, but its exact persisted tuple is incomplete.");
+    }
+    if journal.treasury_fee_required || complete {
+        if journal.fee_stable_e6s == 0
+            || journal.treasury_amount_e6s != Some(journal.fee_stable_e6s)
+        {
+            return Err("Treasury fee tuple amount differs from the admitted redemption fee.");
+        }
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+fn reserve_redemption_dust_refund_due(journal: &crate::state::ReserveRedemptionJournal) -> bool {
+    journal.raw_dust_refund_e8s > 0
+}
+
+async fn finish_reserve_redemption_after_fee(
+    operation_id: u128,
+    journal: &crate::state::ReserveRedemptionJournal,
+) -> Result<Option<crate::ReserveRedemptionResult>, ProtocolError> {
+    if reserve_redemption_dust_refund_due(journal) {
+        let pull_block = journal.pull_block_index.ok_or_else(|| ProtocolError::TemporarilyUnavailable("Dust refund is missing its pull receipt.".into()))?;
+        match refund_reserve_redemption(operation_id, pull_block, journal.raw_dust_refund_e8s).await {
+            ReserveRedemptionRefundOutcome::Settled => {
+                let settled = read_state(|state| state.reserve_redemption_journals.get(&operation_id).cloned())
+                    .ok_or_else(|| ProtocolError::TemporarilyUnavailable("Settled dust refund journal disappeared before accounting.".into()))?;
+                if settled.phase != crate::state::ReserveRedemptionPhase::RefundSettled {
+                    return Err(ProtocolError::TemporarilyUnavailable("Dust refund receipt was superseded; journal remains held.".into()));
+                }
+                continue_accounting(operation_id, &settled)?;
+                Ok(Some(reserve_redemption_result(&settled)))
+            }
+            ReserveRedemptionRefundOutcome::DefinitiveNoEffect => Err(ProtocolError::TemporarilyUnavailable("The redemption payout settled, but the dust refund had a persisted typed no-effect result.".into())),
+            ReserveRedemptionRefundOutcome::AmbiguousOrUnstarted => Err(ProtocolError::TemporarilyUnavailable("The dust refund is unresolved; the redemption remains held.".into())),
+        }
+    } else {
+        continue_accounting(operation_id, journal)?;
+        Ok(Some(reserve_redemption_result(journal)))
+    }
+}
+
+fn reserve_redemption_result(journal: &crate::state::ReserveRedemptionJournal) -> crate::ReserveRedemptionResult {
+    crate::ReserveRedemptionResult {
+        icusd_block_index: journal.pull_block_index.unwrap_or_default(),
+        stable_amount_sent: journal.payout_amount_e6s,
+        fee_amount: journal.fee_icusd_e8s,
+        stable_token_used: journal.payout_ledger,
+        vault_spillover_amount: 0,
+    }
+}
+
+/// Event and fee routing are synchronous with journal removal in one IC
+/// message. A trap rolls back all of them; a repeated continuation sees either
+/// the retained row or the fully committed result, never a partial accounting.
+fn continue_accounting(operation_id: u128, expected: &crate::state::ReserveRedemptionJournal) -> Result<(), ProtocolError> {
+    let committed = mutate_state(|state| {
+        if state.reserve_redemption_journals.get(&operation_id) != Some(expected) {
+            return false;
+        }
+        if !matches!(expected.phase,
+            crate::state::ReserveRedemptionPhase::PayoutSettled
+                | crate::state::ReserveRedemptionPhase::TreasuryFeeSettled
+                | crate::state::ReserveRedemptionPhase::TreasuryFeeNoEffect
+                | crate::state::ReserveRedemptionPhase::RefundSettled)
+        { return false; }
+        crate::event::record_reserve_redemption(
+            expected.caller,
+            expected.icusd_amount_e8s.into(),
+            expected.fee_icusd_e8s.into(),
+            expected.payout_ledger,
+            expected.payout_amount_e6s,
+            expected.fee_stable_e6s,
+            expected.pull_block_index.unwrap_or_default(),
+        );
+        if expected.fee_icusd_e8s > 0 {
+            let fee: ICUSD = expected.fee_icusd_e8s.into();
+            let _ = crate::treasury::plan_fee_routing(state, fee, crate::event::FeeSource::RedemptionFee);
+        }
+        state.reserve_redemption_journals.remove(&operation_id);
+        true
+    });
+    if committed { Ok(()) } else { Err(ProtocolError::TemporarilyUnavailable("Redemption accounting could not be committed from the current journal snapshot.".into())) }
+}
+
+/// Reconcile one caller-owned reserve-redemption journal using positive
+/// evidence only. A candidate block index is checked against the exact
+/// unresolved leg using the configured ledger's direct ICRC-3 response. `None`
+/// resumes only a phase with a persisted receipt or typed no-effect result;
+/// a refund no-effect retries its pinned tuple. A positive receipt resumes the remaining saga; no
+/// absence is inferred from expiry or history gaps.
+pub async fn reconcile_reserve_redemption(
+    candidate_block_index: Option<u64>,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let operation_id = read_state(|state| {
+        state.reserve_redemption_journals.values()
+            .find(|row| row.caller == caller).map(|row| row.operation_id)
+    }).ok_or_else(|| ProtocolError::GenericError(
+        "No unresolved reserve redemption belongs to this caller.".into(),
+    ))?;
+    reconcile_reserve_redemption_operation(operation_id, candidate_block_index).await
+}
+
+/// Controller entry point selects only the supplied operation ID. The shared
+/// core re-reads that exact row and never accepts caller-provided transfer data.
+pub async fn admin_reconcile_reserve_redemption(
+    operation_id: u128,
+    candidate_block_index: Option<u64>,
+) -> Result<(), ProtocolError> {
+    reconcile_reserve_redemption_operation(operation_id, candidate_block_index).await
+}
+
+fn reserve_redemption_journal_by_id(
+    state: &crate::state::State,
+    operation_id: u128,
+) -> Option<crate::state::ReserveRedemptionJournal> {
+    state.reserve_redemption_journals.get(&operation_id).cloned()
+}
+
+fn reserve_redemption_retry_without_candidate_allowed(
+    journal: &crate::state::ReserveRedemptionJournal,
+) -> bool {
+    use crate::state::ReserveRedemptionPhase as P;
+    match journal.phase {
+        P::PullSettled => journal.pull_block_index.is_some(),
+        P::PayoutSettled => journal.payout_amount_e6s == 0 || journal.payout_block_index.is_some(),
+        P::TreasuryFeeSettled => journal.treasury_block_index.is_some(),
+        P::RefundSettled => journal.refund_block_index.is_some(),
+        P::PayoutNoEffect => journal.payout_no_effect_tuples.len() == 1,
+        P::TreasuryFeeNoEffect | P::RefundNoEffect => true,
+        _ => false,
+    }
+}
+
+async fn reconcile_reserve_redemption_operation(
+    operation_id: u128,
+    candidate_block_index: Option<u64>,
+) -> Result<(), ProtocolError> {
+    let journal = read_state(|state| reserve_redemption_journal_by_id(state, operation_id))
+        .ok_or_else(|| ProtocolError::GenericError(
+        "No retained reserve-redemption journal matches the requested operation ID.".into(),
+    ))?;
+
+    if let Some(block_index) = candidate_block_index {
+        let leg = crate::icrc3_proof::verify_reserve_redemption_candidate(
+            &journal,
+            block_index,
+        ).await.map_err(|error| ProtocolError::TemporarilyUnavailable(
+            format!("Candidate receipt was not accepted; the journal remains held: {error}"),
+        ))?;
+        let recorded = mutate_state(|state| {
+            state.record_reserve_redemption_receipt(
+                journal.operation_id,
+                &journal,
+                block_index,
+                leg,
+            )
+        });
+        if !recorded {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "The journal changed while the candidate was being verified; it remains held.".into(),
+            ));
+        }
+        if leg == crate::state::ReserveRedemptionReceiptLeg::Refund
+            && journal.refund_amount_e8s == Some(journal.icusd_amount_e8s)
+            && journal.payout_block_index.is_none()
+        {
+            let cleared = mutate_state(|state| {
+                state.clear_reserve_redemption_after_full_refund(journal.operation_id)
+            });
+            if !cleared {
+                return Err(ProtocolError::TemporarilyUnavailable(
+                    "The exact full-refund receipt was recorded, but its journal remains held.".into(),
+                ));
+            }
+            return Ok(());
+        }
+        return continue_reserve_redemption(journal.operation_id).await.map(|_| ());
+    }
+
+    if !reserve_redemption_retry_without_candidate_allowed(&journal) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "No candidate index was supplied, and the current phase lacks positive receipt or typed no-effect proof for continuation.".into(),
+        ));
+    }
+    if journal.phase != crate::state::ReserveRedemptionPhase::RefundNoEffect {
+        return continue_reserve_redemption(journal.operation_id).await.map(|_| ());
+    }
+    let (Some(pull_block_index), Some(refund_amount)) = (
+        journal.pull_block_index,
+        journal.refund_amount_e8s,
+    ) else {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "The persisted refund tuple is incomplete; manual reconciliation is required.".into(),
+        ));
+    };
+    match refund_reserve_redemption(journal.operation_id, pull_block_index, refund_amount).await {
+        ReserveRedemptionRefundOutcome::Settled => {}
+        ReserveRedemptionRefundOutcome::DefinitiveNoEffect => return Err(ProtocolError::TemporarilyUnavailable(
+            "The ledger again proved the exact refund had no effect; its tuple remains available for another exact retry.".into(),
+        )),
+        ReserveRedemptionRefundOutcome::AmbiguousOrUnstarted => return Err(ProtocolError::TemporarilyUnavailable(
+            "The exact refund retry is ambiguous or was not dispatched; the journal remains held.".into(),
+        )),
+    }
+    continue_reserve_redemption(journal.operation_id).await.map(|_| ())
+}
+
 pub(crate) fn redemption_ranking_is_fresh(
     state: &crate::state::State,
     runs: &[crate::state::RedemptionRun],
@@ -1660,13 +2097,23 @@ impl From<Vault> for CandidVault {
 }
 
 /// Redeem icUSD for ckStable tokens from the protocol's reserves.
-/// Two-tier system: reserves first (flat fee), then vault spillover (dynamic fee).
+/// Requests requiring vault spillover are held before the icUSD pull until
+/// spillover receipt recovery is supported by the reserve journal.
 pub async fn redeem_reserves(
     icusd_amount_raw: u64,
     preferred_token: Option<Principal>,
 ) -> Result<crate::ReserveRedemptionResult, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let _guard_principal = GuardPrincipal::new(caller, "redeem_reserves")?;
+
+    // A retained row means a previous pull, payout, or refund may have settled
+    // without a trustworthy reply. Until exact ledger history resolves it, do
+    // not start another redemption for any caller.
+    if read_state(reserve_redemption_admission_blocked) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "A prior reserve redemption is awaiting exact settlement reconciliation.".into(),
+        ));
+    }
 
     // RED-101 / RED-003: gate on protocol mode here too. The endpoint keeps its
     // own validate_mode() (defense in depth), but the spillover branch below
@@ -1686,13 +2133,14 @@ pub async fn redeem_reserves(
     }
 
     // Check reserve redemptions are enabled
-    let (enabled, reserve_fee_ratio, ckusdt_ledger, ckusdc_ledger, treasury) = read_state(|s| {
+    let (enabled, reserve_fee_ratio, ckusdt_ledger, ckusdc_ledger, treasury, icusd_ledger) = read_state(|s| {
         (
             s.reserve_redemptions_enabled,
             s.reserve_redemption_fee,
             s.ckusdt_ledger_principal,
             s.ckusdc_ledger_principal,
             s.treasury_principal,
+            s.icusd_ledger_principal,
         )
     });
 
@@ -1751,392 +2199,169 @@ pub async fn redeem_reserves(
         .await
         .unwrap_or(10_000); // fallback to 10_000 e6s (0.01 USD) if query fails
     let fee_budget = if fee_e6s > 0 {
-        ledger_fee * 2
+        ledger_fee.checked_mul(2)
     } else {
-        ledger_fee
-    };
-    let total_needed_e6s = net_e6s + fee_e6s + fee_budget;
+        Some(ledger_fee)
+    }.ok_or_else(|| ProtocolError::GenericError("Reserve ledger fee budget overflowed.".into()))?;
+    let total_needed_e6s = net_e6s.checked_add(fee_e6s)
+        .and_then(|amount| amount.checked_add(fee_budget))
+        .ok_or_else(|| ProtocolError::GenericError("Reserve redemption requirement overflowed.".into()))?;
+    let reserve_fee_floor = fee_e6s.checked_add(fee_budget)
+        .ok_or_else(|| ProtocolError::GenericError("Reserve fee requirement overflowed.".into()))?;
     let available_for_user = if reserve_balance >= total_needed_e6s {
         net_e6s
-    } else if reserve_balance > fee_e6s + fee_budget {
+    } else if reserve_balance > reserve_fee_floor {
         // Partial: reserve can cover some but not all
-        reserve_balance - fee_e6s - fee_budget
+        reserve_balance - reserve_fee_floor
     } else {
         0
     };
 
-    let spillover_e6s = net_e6s - available_for_user;
-    let spillover_e8s = spillover_e6s * 100; // convert back to icUSD e8s
+    let spillover_e6s = net_e6s.saturating_sub(available_for_user);
+    let spillover_e8s = spillover_e6s.checked_mul(100)
+        .ok_or_else(|| ProtocolError::GenericError("Reserve spillover amount overflowed.".into()))?;
+    if spillover_e8s > 0 {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Reserve redemption is held when vault spillover is required; retry after reserve liquidity is restored.".into(),
+        ));
+    }
     let raw_spillover_refund_budget_e8s =
         reserve_spillover_raw_refund_budget(net_icusd.to_u64(), available_for_user, rmr);
 
-    // Bound a native-collateral spillover before the icUSD pull. The reserve
-    // portion is settled separately, so only the planned remainder is checked.
-    // The nominal target is conservative across any within-run allocation and
-    // protects the u64 pending-payout/event representation.
-    let spillover_plan = if spillover_e8s > 0 {
-        refresh_redemption_candidate_prices().await?;
-        let plan = read_state(|state| {
-            let run = legacy_reserve_spillover_run(state, spillover_e8s)?
-                .expect("positive spillover must have a selected run");
-            let amount = ICUSD::from(spillover_e8s);
-            let fee = amount * state.get_redemption_fee_for(&run.collateral_type, amount);
-            let effective = amount - fee; // RMR was applied above.
-            let price = Decimal::from_f64_retain(run.price_usd).ok_or_else(|| {
-                ProtocolError::TemporarilyUnavailable(
-                    "The reserve spillover collateral price is unavailable.".to_string(),
-                )
-            })?;
-            if !theoretical_collateral_target_fits_u64(effective, price, run.decimals) {
-                return Err(ProtocolError::TemporarilyUnavailable(
-                    "The reserve spillover exceeds the supported native payout range; try a smaller amount.".to_string(),
-                ));
-            }
-            Ok(RedemptionRunSnapshot::capture(&run))
-        })?;
-        Some(plan)
-    } else {
-        None
-    };
-
-    // Pull icUSD from caller (effectively burns it)
-    let icusd_block_index = transfer_icusd_from(icusd_amount, caller)
-        .await
-        .map_err(|e| ProtocolError::TransferFromError(e, icusd_amount.to_u64()))?;
-
-    // The pull awaited. Revalidate the same run before the first reserve
-    // settlement so a changed price/rank can still be compensated in full.
-    if let Some(expected_snapshot) = &spillover_plan {
-        let refreshed = refresh_redemption_candidate_prices().await;
-        let still_representable = refreshed.is_ok()
-            && read_state(|state| {
-                let Some(run) = current_legacy_reserve_run_for_snapshot(state, expected_snapshot)
-                else {
-                    return false;
-                };
-                let amount = ICUSD::from(spillover_e8s);
-                let fee = amount * state.get_redemption_fee_for(&run.collateral_type, amount);
-                let effective = amount - fee; // RMR was applied above.
-                Decimal::from_f64_retain(run.price_usd)
-                    .map(|price| {
-                        theoretical_collateral_target_fits_u64(effective, price, run.decimals)
-                    })
-                    .unwrap_or(false)
-            });
-        if !still_representable {
-            return Err(refund_rejected_quoted_redemption(
-                caller,
-                icusd_amount.to_u64(),
-                icusd_block_index,
-                ProtocolError::TemporarilyUnavailable(
-                    "The reserve spillover ranking or payout range changed; the icUSD refund was started."
-                        .to_string(),
-                ),
-            )
-            .await);
-        }
-    }
-
-    // Transfer ckStable to user from reserves.
-    // CRITICAL: If this fails we MUST refund the icUSD, otherwise the user
-    // loses funds with nothing received. ICP inter-canister calls are NOT
-    // atomic, so we implement the saga/compensation pattern manually.
-    //
-    // Wave-4 ICC-007: if the inline refund itself fails, persist a
-    // `PendingRefund` keyed by `icusd_block_index`; `process_pending_transfer`
-    // retries it until success or MAX_PENDING_RETRIES. The op_nonce is minted
-    // once and reused across retries (idempotent at the icUSD ledger).
-    if available_for_user > 0 {
-        if let Err(transfer_err) =
-            management::transfer_collateral(available_for_user, caller, stable_ledger).await
+    // Reserve the complete external-operation tuple before the icUSD pull.
+    // This row is the upgrade-safe fail-closed boundary for every later leg.
+    let journal = mutate_state(|state| {
+        let still_supported = Some(stable_ledger) == state.ckusdt_ledger_principal
+            || Some(stable_ledger) == state.ckusdc_ledger_principal;
+        if state.mode == Mode::ReadOnly
+            || icusd_amount < state.min_icusd_amount
+            || !state.reserve_redemptions_enabled
+            || state.reserve_redemption_fee != reserve_fee_ratio
+            || state.get_redemption_margin_ratio() != rmr
+            || !still_supported
+            || state.treasury_principal != treasury
+            || state.icusd_ledger_principal != icusd_ledger
+            || reserve_redemption_admission_blocked(state)
         {
-            log!(
-                crate::INFO,
-                "[redeem_reserves] ckStable transfer failed for {}: {:?}. Refunding {} icUSD.",
-                caller,
-                transfer_err,
-                icusd_amount.to_u64()
-            );
-            let refund_nonce = mutate_state(|s| s.next_op_nonce());
-            match management::transfer_icusd_with_nonce(icusd_amount, caller, refund_nonce).await {
-                Ok(refund_block) => {
-                    log!(
-                        crate::INFO,
-                        "[redeem_reserves] Refunded {} icUSD to {} (block {})",
-                        icusd_amount.to_u64(),
-                        caller,
-                        refund_block
-                    );
-                }
-                Err(refund_err) => {
-                    log!(crate::INFO,
-                        "[redeem_reserves] ckStable transfer failed AND inline icUSD refund failed for {}! \
-                         Amount: {} icUSD, ckStable error: {:?}, refund error: {:?}. \
-                         Enqueueing durable refund (block {}).",
-                        caller, icusd_amount.to_u64(), transfer_err, refund_err, icusd_block_index
-                    );
-                    mutate_state(|s| {
-                        s.pending_refunds.insert(
-                            icusd_block_index,
-                            crate::state::PendingRefund {
-                                user: caller,
-                                amount_e8s: icusd_amount.to_u64(),
-                                retry_count: 0,
-                                op_nonce: refund_nonce,
-                            },
-                        );
-                    });
-                    ic_cdk_timers::set_timer(std::time::Duration::from_secs(2), || {
-                        ic_cdk::spawn(crate::process_pending_transfer())
-                    });
-                }
-            }
-            return Err(ProtocolError::GenericError(format!(
-                "Reserve transfer failed; your icUSD refund is in flight. Error: {:?}",
-                transfer_err
-            )));
+            return None;
         }
-    }
-
-    // Transfer fee to treasury (if configured), otherwise fee stays in reserves
-    if fee_e6s > 0 {
-        if let Some(treasury_principal) = treasury {
-            if let Err(e) =
-                management::transfer_collateral(fee_e6s, treasury_principal, stable_ledger).await
-            {
-                log!(crate::INFO,
-                    "[redeem_reserves] WARNING: treasury fee transfer failed ({} e6s to {}): {:?}. Fee stays in reserves.",
-                    fee_e6s, treasury_principal, e
-                );
-            }
-        }
-    }
-
-    // Record the reserve redemption event
-    crate::event::record_reserve_redemption(
-        caller,
-        icusd_amount,
-        fee_icusd,
-        stable_ledger,
-        available_for_user,
-        fee_e6s,
-        icusd_block_index,
-    );
-
-    // Wave-8e LIQ-005: route the reserves-portion fee (in icUSD e8s)
-    // through deficit repayment. The redeemer's icUSD was burned via
-    // `transfer_icusd_from` above, so this is a pure state mutation.
-    // The stablecoin fee transfer to treasury (line ~349) is unaffected
-    // — that ckUSDT/ckUSDC payment is the actual revenue, the deficit
-    // bookkeeping is the foregone-equity offset.
-    if fee_icusd.0 > 0 {
-        mutate_state(|s| {
-            let _routing = crate::treasury::plan_fee_routing(
-                s,
-                fee_icusd,
-                crate::event::FeeSource::RedemptionFee,
-            );
-        });
-    }
-
-    // Handle vault spillover if reserves didn't cover everything
-    let refund_e8s = if spillover_e8s > 0 {
-        mutate_state(|s| {
-            let spillover_icusd = ICUSD::from(spillover_e8s);
-            // Stable and treasury ledger calls have awaited. Compare the full
-            // pre-pull snapshot before the synchronous event mutation. If any
-            // part changed, do not seize and refund only the spillover tail.
-            let Some(expected_snapshot) = &spillover_plan else {
-                return reserve_spillover_snapshot_mismatch_refund(
-                    spillover_e8s,
-                    rmr,
-                    raw_spillover_refund_budget_e8s,
-                );
-            };
-            let Some(run) = current_legacy_reserve_run_for_snapshot(s, expected_snapshot) else {
-                return reserve_spillover_snapshot_mismatch_refund(
-                    spillover_e8s,
-                    rmr,
-                    raw_spillover_refund_budget_e8s,
-                );
-            };
-            // Stable and treasury transfers may span the full oracle freshness
-            // window without changing the tuple's numeric price. Recheck the
-            // complete candidate set synchronously at the seizure cutpoint.
-            let now = ic_cdk::api::time();
-            if current_fresh_legacy_reserve_run_for_snapshot(s, expected_snapshot, now).is_none() {
-                return reserve_spillover_snapshot_mismatch_refund(
-                    spillover_e8s,
-                    rmr,
-                    raw_spillover_refund_budget_e8s,
-                );
-            }
-            let Some(config) = s.get_collateral_config(&run.collateral_type) else {
-                return reserve_spillover_snapshot_mismatch_refund(
-                    spillover_e8s,
-                    rmr,
-                    raw_spillover_refund_budget_e8s,
-                );
-            };
-            let Some(price_decimal) = config
-                .last_price
-                .and_then(Decimal::from_f64_retain)
-                .filter(|price| *price > Decimal::ZERO)
-            else {
-                return reserve_spillover_snapshot_mismatch_refund(
-                    spillover_e8s,
-                    rmr,
-                    raw_spillover_refund_budget_e8s,
-                );
-            };
-            let current_price = UsdIcp::from(price_decimal);
-
-            // Wave-14b CDP-03: per-collateral fee path (see redeem_collateral
-            // for full rationale). The spillover redeems against the selected run,
-            // so the base rate is read from and written back to that
-            // collateral's config alone.
-            let base_fee = s.get_redemption_fee_for(&run.collateral_type, spillover_icusd);
-            let vault_fee = spillover_icusd * base_fee;
-
-            // Note: RMR was already applied when computing spillover_e8s (line 160).
-            // Do NOT apply it again here — that would double-discount.
-            let effective_spillover = spillover_icusd - vault_fee;
-
-            // A ckStable transfer awaited before this point. Cap the remaining
-            // native payout against the current price/decimals so the event's
-            // historical u64 sum and pending transfer amount stay representable.
-            let safe_effective_e8s =
-                max_effective_icusd_for_u64_payout(price_decimal, run.decimals);
-            let bounded_effective =
-                ICUSD::new(effective_spillover.to_u64().min(safe_effective_e8s));
-            let Some(simulated) = s.simulate_redemption_for_vault_ids(
-                bounded_effective,
-                current_price,
-                &run.collateral_type,
-                &run.vault_ids,
-            ) else {
-                return reserve_spillover_snapshot_mismatch_refund(
-                    spillover_e8s,
-                    rmr,
-                    raw_spillover_refund_budget_e8s,
-                );
-            };
-            if simulated_collateral_total_raw(&simulated).is_none() {
-                return reserve_spillover_snapshot_mismatch_refund(
-                    spillover_e8s,
-                    rmr,
-                    raw_spillover_refund_budget_e8s,
-                );
-            }
-
-            let outcome = match crate::event::record_redemption_on_vault_run(
-                s,
-                caller,
-                bounded_effective,
-                vault_fee,
-                current_price,
-                icusd_block_index,
-                run.collateral_type,
-                &run.vault_ids,
-                None,
-            ) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    log!(
-                        crate::INFO,
-                        "[redeem_reserves] Spillover recorder rejected before mutation: {:?}",
-                        error
-                    );
-                    return reserve_spillover_snapshot_mismatch_refund(
-                        spillover_e8s,
-                        rmr,
-                        raw_spillover_refund_budget_e8s,
-                    );
-                }
-            };
-
-            crate::record_per_collateral_redemption_fee(
-                s,
-                &run.collateral_type,
-                base_fee,
-                ic_cdk::api::time(),
-            );
-
-            // Wave-8e LIQ-005: route the spillover-portion fee through
-            // deficit repayment. icUSD already burned via `transfer_icusd_from`.
-            let _routing = crate::treasury::plan_fee_routing(
-                s,
-                vault_fee,
-                crate::event::FeeSource::RedemptionFee,
-            );
-
-            // Return the raw amount not represented by the settled stable
-            // payment, committed vault fee, and actual debt consumption. Apply
-            // one aggregate RMR conversion so the legs cannot each round away
-            // a separate unit.
-            reserve_post_settlement_raw_refund(
-                net_icusd.to_u64(),
-                available_for_user,
-                vault_fee.to_u64(),
-                outcome.consumed.to_u64(),
-                rmr,
-            )
-        })
-    } else {
-        // Even a fully reserve-funded redemption can leave raw icUSD dust
-        // because the stable payout is quantized to e6.
-        raw_spillover_refund_budget_e8s
-    };
-    if refund_e8s > 0 {
-        let refund_nonce = mutate_state(|s| s.next_op_nonce());
-        match management::transfer_icusd_with_nonce(ICUSD::from(refund_e8s), caller, refund_nonce)
-            .await
-        {
-            Ok(refund_block) => {
-                log!(
-                    crate::INFO,
-                    "[redeem_reserves] Refunded {} unconsumed spillover icUSD to {} (block {})",
-                    refund_e8s,
-                    caller,
-                    refund_block
-                );
-            }
-            Err(refund_err) => {
-                log!(crate::INFO,
-                    "[redeem_reserves] Unconsumed-spillover refund of {} icUSD to {} failed: {:?}. Enqueueing durable refund (block {}).",
-                    refund_e8s, caller, refund_err, icusd_block_index
-                );
-                mutate_state(|s| {
-                    s.pending_refunds.insert(
-                        icusd_block_index,
-                        crate::state::PendingRefund {
-                            user: caller,
-                            amount_e8s: refund_e8s,
-                            retry_count: 0,
-                            op_nonce: refund_nonce,
-                        },
-                    );
-                });
-            }
-        }
-    }
-    ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), || {
-        ic_cdk::spawn(crate::process_pending_transfer())
+        let operation_id = state.next_op_nonce();
+        let payout_op_nonce = state.next_op_nonce();
+        let treasury_op_nonce = if fee_e6s > 0 && treasury.is_some() {
+            Some(state.next_op_nonce())
+        } else {
+            None
+        };
+        let pull_created_at_time_ns = management::nonce_to_created_at_time(operation_id);
+        let payout_created_at_time_ns = management::nonce_to_created_at_time(payout_op_nonce);
+        let journal = crate::state::ReserveRedemptionJournal {
+            operation_id,
+            caller,
+            icusd_amount_e8s: icusd_amount.to_u64(),
+            fee_icusd_e8s: fee_icusd.to_u64(),
+            fee_stable_e6s: fee_e6s,
+            raw_dust_refund_e8s: raw_spillover_refund_budget_e8s,
+            pull_ledger: state.icusd_ledger_principal,
+            pull_from: icrc_ledger_types::icrc1::account::Account {
+                owner: caller,
+                subaccount: None,
+            },
+            pull_to: icrc_ledger_types::icrc1::account::Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            },
+            pull_amount_e8s: icusd_amount.to_u64(),
+            pull_fee_e8s: None,
+            pull_memo: operation_id.to_be_bytes().to_vec(),
+            pull_created_at_time_ns,
+            pull_op_nonce: operation_id,
+            payout_ledger: stable_ledger,
+            payout_from_subaccount: None,
+            payout_to: icrc_ledger_types::icrc1::account::Account {
+                owner: caller,
+                subaccount: None,
+            },
+            payout_amount_e6s: available_for_user,
+            payout_fee_e6s: None,
+            payout_memo: payout_op_nonce.to_be_bytes().to_vec(),
+            payout_created_at_time_ns,
+            payout_op_nonce,
+            treasury_ledger: treasury_op_nonce.map(|_| stable_ledger),
+            treasury_to: treasury.filter(|_| treasury_op_nonce.is_some()).map(|owner| {
+                icrc_ledger_types::icrc1::account::Account { owner, subaccount: None }
+            }),
+            treasury_amount_e6s: treasury_op_nonce.map(|_| fee_e6s),
+            treasury_memo: treasury_op_nonce.map(|nonce| nonce.to_be_bytes().to_vec()),
+            treasury_created_at_time_ns: treasury_op_nonce
+                .map(management::nonce_to_created_at_time),
+            treasury_op_nonce,
+            treasury_fee_required: treasury_op_nonce.is_some(),
+            treasury_block_index: None,
+            payout_no_effect_tuples: Vec::new(),
+            refund_ledger: None,
+            refund_amount_e8s: None,
+            refund_memo: None,
+            refund_created_at_time_ns: None,
+            refund_op_nonce: None,
+            refund_history: Vec::new(),
+            refund_history_pruned_count: 0,
+            refund_retry_count: 0,
+            refund_retry_is_same_tuple: false,
+            refund_block_index: None,
+            pull_block_index: None,
+            payout_block_index: None,
+            phase: crate::state::ReserveRedemptionPhase::PullSubmitted,
+        };
+        state.reserve_redemption_journals.insert(operation_id, journal.clone());
+        Some(journal)
     });
+    let Some(journal) = journal else {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Another reserve redemption has already reserved settlement.".into(),
+        ));
+    };
 
-    log!(INFO, "[redeem_reserves] {} redeemed {} icUSD: {} e6s from reserves, {} e8s vault spillover, fee {} e6s",
-        caller, icusd_amount.to_u64(), available_for_user, spillover_e8s, fee_e6s);
-
-    Ok(crate::ReserveRedemptionResult {
+    // A typed ledger rejection proves this first attempt had no effect. Remove
+    // only the exact pre-dispatch reservation; a reconciler may already have
+    // advanced it while the callback was in flight.
+    let icusd_block_index = match management::transfer_reserve_redemption_pull(&journal).await {
+        Ok(block_index) => block_index,
+        Err(management::ReserveRedemptionPullError::DefinitiveNoEffect(error)) => {
+            mutate_state(|state| {
+                if state.reserve_redemption_journals.get(&journal.operation_id) == Some(&journal) {
+                    state.reserve_redemption_journals.remove(&journal.operation_id);
+                }
+            });
+            return Err(ProtocolError::TransferFromError(error, icusd_amount.to_u64()));
+        }
+        Err(management::ReserveRedemptionPullError::Ambiguous(error)) => {
+            log!(INFO, "[redeem_reserves] icUSD pull outcome is unresolved for operation {}: {:?}", journal.operation_id, error);
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "The icUSD pull outcome is unresolved; this redemption is held for reconciliation.".into(),
+            ));
+        }
+    };
+    if !mutate_state(|state| state.record_reserve_redemption_receipt(
+        journal.operation_id,
+        &journal,
         icusd_block_index,
-        stable_amount_sent: available_for_user,
-        fee_amount: fee_icusd.to_u64(),
-        stable_token_used: stable_ledger,
-        // Preserve the historical response meaning: effective spillover
-        // before the vault fee/capacity outcome, not the amount actually
-        // consumed by selected vaults.
-        vault_spillover_amount: spillover_e8s,
-    })
+        crate::state::ReserveRedemptionReceiptLeg::Pull,
+    )) {
+        // Reconciliation owns the newer snapshot. Continue only from that
+        // persisted state, never from the stale callback's local tuple.
+        return match continue_reserve_redemption(journal.operation_id).await? {
+            Some(result) => Ok(result),
+            None => Err(ProtocolError::TemporarilyUnavailable(
+                "The redemption was completed or refunded while its original callback was stale.".into(),
+            )),
+        };
+    }
+    match continue_reserve_redemption(journal.operation_id).await? {
+        Some(result) => Ok(result),
+        None => Err(ProtocolError::TemporarilyUnavailable(
+            "The stable payout had a definitive no-effect response and the full icUSD refund settled.".into(),
+        )),
+    }
 }
 
 /// Thin wrapper for backward compatibility. Calls `redeem_collateral` with ICP.
@@ -15407,5 +15632,273 @@ mod add_margin_overflow_tests {
             },
         );
         assert!(matches!(mapped_ambiguous, ProtocolError::GenericError(message) if message.contains("ambiguous")));
+    }
+
+    #[test]
+    fn unresolved_redemption_upgrade_and_refund_phase_receipt_lifecycle() {
+        use crate::state::{ReserveRedemptionJournal, ReserveRedemptionPhase, State};
+        use icrc_ledger_types::icrc1::account::Account;
+
+        let caller = Principal::from_slice(&[201]);
+        let ledger = Principal::from_slice(&[202]);
+        let protocol = Principal::from_slice(&[203]);
+        let mut state = State::default();
+        assert!(!reserve_redemption_admission_blocked(&state));
+        let row = ReserveRedemptionJournal {
+            operation_id: 9,
+            caller,
+            icusd_amount_e8s: 500,
+            fee_icusd_e8s: 0,
+            fee_stable_e6s: 0,
+            raw_dust_refund_e8s: 0,
+            pull_ledger: ledger,
+            pull_from: Account { owner: caller, subaccount: None },
+            pull_to: Account { owner: protocol, subaccount: None },
+            pull_amount_e8s: 500,
+            pull_fee_e8s: None,
+            pull_memo: 9u128.to_be_bytes().to_vec(),
+            pull_created_at_time_ns: management::nonce_to_created_at_time(9),
+            pull_op_nonce: 9,
+            payout_ledger: ledger,
+            payout_from_subaccount: None,
+            payout_to: Account { owner: caller, subaccount: None },
+            payout_amount_e6s: 5,
+            payout_fee_e6s: None,
+            payout_memo: 10u128.to_be_bytes().to_vec(),
+            payout_created_at_time_ns: management::nonce_to_created_at_time(10),
+            payout_op_nonce: 10,
+            treasury_ledger: None,
+            treasury_to: None,
+            treasury_amount_e6s: None,
+            treasury_memo: None,
+            treasury_created_at_time_ns: None,
+            treasury_op_nonce: None,
+            treasury_fee_required: false,
+            treasury_block_index: None,
+            payout_no_effect_tuples: Vec::new(),
+            refund_ledger: None,
+            refund_amount_e8s: None,
+            refund_memo: None,
+            refund_created_at_time_ns: None,
+            refund_op_nonce: None,
+            refund_history: Vec::new(),
+            refund_history_pruned_count: 0,
+            refund_retry_count: 0,
+            refund_retry_is_same_tuple: false,
+            refund_block_index: None,
+            pull_block_index: Some(11),
+            payout_block_index: None,
+            phase: ReserveRedemptionPhase::PayoutAmbiguous,
+        };
+        assert!(super::reserve_redemption_journal_by_id(&state, 9).is_none());
+        state.reserve_redemption_journals.insert(row.operation_id, row.clone());
+        assert!(super::reserve_redemption_journal_by_id(&state, 10).is_none(),
+            "admin recovery must reject every operation ID except the exact journal key");
+        assert_eq!(super::reserve_redemption_journal_by_id(&state, 9), Some(row.clone()));
+        assert!(!super::reserve_redemption_retry_without_candidate_allowed(&row),
+            "candidate-less recovery cannot retry an ambiguous payout");
+        let mut refund_no_effect = row.clone();
+        refund_no_effect.phase = ReserveRedemptionPhase::RefundNoEffect;
+        assert!(super::reserve_redemption_retry_without_candidate_allowed(&refund_no_effect));
+        let mut payout_no_effect = row.clone();
+        payout_no_effect.phase = ReserveRedemptionPhase::PayoutNoEffect;
+        payout_no_effect.payout_no_effect_tuples.push((
+            payout_no_effect.payout_op_nonce,
+            payout_no_effect.payout_memo.clone(),
+            payout_no_effect.payout_created_at_time_ns,
+        ));
+        assert!(super::reserve_redemption_retry_without_candidate_allowed(&payout_no_effect),
+            "a persisted payout no-effect must be able to resume its full-refund saga after a trap or upgrade");
+        for phase in [
+            ReserveRedemptionPhase::PullSettled,
+            ReserveRedemptionPhase::PayoutSettled,
+            ReserveRedemptionPhase::TreasuryFeeSettled,
+            ReserveRedemptionPhase::TreasuryFeeNoEffect,
+            ReserveRedemptionPhase::RefundSettled,
+        ] {
+            let mut confirmed = row.clone();
+            confirmed.phase = phase;
+            match phase {
+                ReserveRedemptionPhase::PayoutSettled => confirmed.payout_block_index = Some(12),
+                ReserveRedemptionPhase::TreasuryFeeSettled => confirmed.treasury_block_index = Some(13),
+                ReserveRedemptionPhase::RefundSettled => confirmed.refund_block_index = Some(14),
+                _ => {}
+            }
+            assert!(super::reserve_redemption_retry_without_candidate_allowed(&confirmed),
+                "a retained confirmed phase must be resumable without inventing a new receipt");
+        }
+        for phase in [
+            ReserveRedemptionPhase::PullSubmitted,
+            ReserveRedemptionPhase::PayoutSubmitted,
+            ReserveRedemptionPhase::PayoutAmbiguous,
+            ReserveRedemptionPhase::TreasuryFeeSubmitted,
+            ReserveRedemptionPhase::TreasuryFeeAmbiguous,
+            ReserveRedemptionPhase::RefundSubmitted,
+            ReserveRedemptionPhase::RefundRetrySubmitted,
+        ] {
+            let mut unresolved = row.clone();
+            unresolved.phase = phase;
+            assert!(!super::reserve_redemption_retry_without_candidate_allowed(&unresolved),
+                "an unresolved transfer needs an exact positive receipt before continuation");
+        }
+        assert_eq!(super::reserve_redemption_treasury_dispatch_required(&row), Ok(false));
+        let mut missing_required_treasury = row.clone();
+        missing_required_treasury.treasury_fee_required = true;
+        missing_required_treasury.fee_stable_e6s = 1;
+        assert!(super::reserve_redemption_treasury_dispatch_required(&missing_required_treasury).is_err(),
+            "a missing exact treasury tuple must hold accounting when admission required the fee transfer");
+        let mut dust_without_treasury = row.clone();
+        dust_without_treasury.raw_dust_refund_e8s = 1;
+        assert!(!super::reserve_redemption_treasury_dispatch_required(&dust_without_treasury).unwrap());
+        assert!(super::reserve_redemption_dust_refund_due(&dust_without_treasury),
+            "a reserve-funded dust tail remains due when no treasury transfer was configured");
+        assert!(reserve_redemption_admission_blocked(&state),
+            "a duplicate call with no operation ID must fail closed while the prior payout is unresolved");
+
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&state, &mut encoded).unwrap();
+        let restored: State = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        assert_eq!(
+            restored.reserve_redemption_journals,
+            state.reserve_redemption_journals,
+            "the exact operation tuples and ambiguous phase survive an upgrade snapshot"
+        );
+        let mut cbor: ciborium::value::Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        let ciborium::value::Value::Map(fields) = &mut cbor else { panic!("State must encode as a map") };
+        fields.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name) if name == "reserve_redemption_journals"));
+        let mut legacy_bytes = Vec::new();
+        ciborium::ser::into_writer(&cbor, &mut legacy_bytes).unwrap();
+        let legacy: State = ciborium::de::from_reader(legacy_bytes.as_slice()).unwrap();
+        assert!(legacy.reserve_redemption_journals.is_empty(),
+            "old snapshots decode with an empty journal map");
+
+        // A dust refund may settle before redemption event/fee accounting.
+        // Persist its receipt and retain the row across that boundary.
+        let mut dust_state = State::default();
+        let mut dust_row = row.clone();
+        dust_row.phase = ReserveRedemptionPhase::RefundSubmitted;
+        dust_row.payout_block_index = Some(12);
+        dust_row.refund_ledger = Some(ledger);
+        dust_row.refund_amount_e8s = Some(1);
+        dust_row.refund_memo = Some(11u128.to_be_bytes().to_vec());
+        dust_row.refund_created_at_time_ns = Some(management::nonce_to_created_at_time(11));
+        dust_row.refund_op_nonce = Some(11);
+        dust_state.reserve_redemption_journals.insert(9, dust_row.clone());
+        assert!(dust_state.mark_reserve_redemption_refund_settled(9, &dust_row, 77));
+        let settled_dust = dust_state.reserve_redemption_journals.get(&9).unwrap();
+        assert_eq!(settled_dust.phase, ReserveRedemptionPhase::RefundSettled);
+        assert_eq!(settled_dust.refund_block_index, Some(77));
+        assert!(reserve_redemption_admission_blocked(&dust_state));
+        assert!(dust_state.check_invariants().is_ok());
+        assert!(!dust_state.clear_reserve_redemption_after_full_refund(9));
+        assert!(dust_state.clear_accounted_reserve_redemption(9));
+        assert!(!reserve_redemption_admission_blocked(&dust_state));
+
+        // A full refund after an exact no-effect payout may release the row as
+        // soon as its refund receipt is known; no redemption accounting is due.
+        let mut full_refund_state = State::default();
+        let mut full_refund = row.clone();
+        full_refund.phase = ReserveRedemptionPhase::RefundSubmitted;
+        full_refund.refund_ledger = Some(ledger);
+        full_refund.refund_amount_e8s = Some(full_refund.icusd_amount_e8s);
+        full_refund.refund_memo = Some(12u128.to_be_bytes().to_vec());
+        full_refund.refund_created_at_time_ns = Some(management::nonce_to_created_at_time(12));
+        full_refund.refund_op_nonce = Some(12);
+        full_refund_state.reserve_redemption_journals.insert(9, full_refund.clone());
+        assert!(full_refund_state.mark_reserve_redemption_refund_no_effect(9, &full_refund));
+        let no_effect_retry = full_refund_state.reserve_redemption_journals.get(&9).unwrap().clone();
+        assert_eq!(no_effect_retry.phase, ReserveRedemptionPhase::RefundNoEffect);
+        assert_eq!(no_effect_retry.refund_op_nonce, Some(12));
+        let retry_submitted = full_refund_state
+            .begin_reserve_redemption_refund_retry_at(9, &no_effect_retry, 1_700_000_000_000_000_000)
+            .expect("only a persisted typed no-effect refund can start an exact retry");
+        assert_eq!(retry_submitted.phase, ReserveRedemptionPhase::RefundRetrySubmitted);
+        assert_eq!(retry_submitted.refund_op_nonce, no_effect_retry.refund_op_nonce);
+        assert_eq!(retry_submitted.refund_memo, no_effect_retry.refund_memo);
+        assert_eq!(retry_submitted.refund_created_at_time_ns, no_effect_retry.refund_created_at_time_ns);
+        assert_eq!(retry_submitted.refund_amount_e8s, no_effect_retry.refund_amount_e8s);
+        assert!(retry_submitted.refund_retry_is_same_tuple);
+        assert!(full_refund_state.mark_reserve_redemption_refund_no_effect(9, &retry_submitted));
+        let second_too_old = full_refund_state.reserve_redemption_journals.get(&9).unwrap().clone();
+        assert_eq!(second_too_old.phase, ReserveRedemptionPhase::RefundNoEffect);
+        assert_eq!(second_too_old.refund_op_nonce, Some(12));
+        assert!(full_refund_state.check_invariants().is_ok());
+        let mut renewal_state = State::default();
+        renewal_state
+            .reserve_redemption_journals
+            .insert(9, second_too_old.clone());
+        let renewed = renewal_state
+            .begin_reserve_redemption_refund_retry_at(9, &second_too_old, 1_700_000_000_000_000_001)
+            .expect("a second persisted no-effect result permits a fresh tuple");
+        assert_ne!(renewed.refund_op_nonce, Some(12));
+        assert!(!renewed.refund_retry_is_same_tuple,
+            "TooOld on a newly issued tuple remains an ambiguous first attempt");
+        assert_eq!(renewed.refund_amount_e8s, Some(renewed.icusd_amount_e8s));
+        assert_eq!(renewed.refund_ledger, Some(ledger));
+        assert_eq!(renewed.refund_history, vec![(12, 12u128.to_be_bytes().to_vec(), management::nonce_to_created_at_time(12))]);
+        assert!(!renewal_state.record_reserve_redemption_receipt(
+            9, &second_too_old, 80, crate::state::ReserveRedemptionReceiptLeg::Refund,
+        ), "a stale callback cannot settle the superseded tuple");
+        assert!(renewal_state.check_invariants().is_ok());
+        let mut bounded_history_state = State::default();
+        bounded_history_state
+            .reserve_redemption_journals
+            .insert(9, second_too_old.clone());
+        for attempt in 0..(crate::state::MAX_RESERVE_REFUND_TUPLE_HISTORY + 3) {
+            let current = bounded_history_state.reserve_redemption_journals.get(&9).unwrap().clone();
+            let submitted = bounded_history_state
+                .begin_reserve_redemption_refund_retry_at(9, &current, 1_700_000_000_000_000_100 + attempt as u64)
+                .expect("bounded audit pruning must never block a proven-no-effect retry");
+            if !submitted.refund_retry_is_same_tuple {
+                assert!(bounded_history_state.mark_reserve_redemption_refund_no_effect(9, &submitted));
+                let exact_retry = bounded_history_state.reserve_redemption_journals.get(&9).unwrap().clone();
+                let exact_retry = bounded_history_state
+                    .begin_reserve_redemption_refund_retry_at(9, &exact_retry, 1_700_000_000_000_000_200 + attempt as u64)
+                    .expect("typed no-effect permits one unchanged retry");
+                assert!(exact_retry.refund_retry_is_same_tuple);
+                assert!(bounded_history_state.mark_reserve_redemption_refund_no_effect(9, &exact_retry));
+            } else {
+                assert!(bounded_history_state.mark_reserve_redemption_refund_no_effect(9, &submitted));
+            }
+        }
+        let rolling = bounded_history_state.reserve_redemption_journals.get(&9).unwrap().clone();
+        assert_eq!(rolling.refund_history.len(), crate::state::MAX_RESERVE_REFUND_TUPLE_HISTORY);
+        assert_eq!(rolling.refund_history_pruned_count, 3,
+            "each evicted tuple was already proven no-effect and is counted");
+        let before_pruned_retry = rolling.clone();
+        let still_retryable = bounded_history_state
+            .begin_reserve_redemption_refund_retry_at(9, &rolling, 1_700_000_000_000_000_300)
+            .expect("reaching the ring limit cannot permanently lock the reserve");
+        assert!(!still_retryable.refund_retry_is_same_tuple,
+            "after each proven no-effect tuple, retry continues with a fresh idempotency tuple");
+        assert!(!bounded_history_state.record_reserve_redemption_receipt(
+            9, &before_pruned_retry, 81, crate::state::ReserveRedemptionReceiptLeg::Refund,
+        ), "callback for a superseded/pruned tuple cannot create a positive receipt");
+        assert!(bounded_history_state.check_invariants().is_ok());
+        assert!(full_refund_state.record_reserve_redemption_receipt(
+            9,
+            &second_too_old,
+            79,
+            crate::state::ReserveRedemptionReceiptLeg::Refund,
+        ));
+        assert_eq!(
+            full_refund_state.reserve_redemption_journals.get(&9).unwrap().refund_op_nonce,
+            Some(12),
+            "a proven no-effect refund retry preserves the exact original nonce/memo tuple"
+        );
+        assert!(full_refund_state.clear_reserve_redemption_after_full_refund(9));
+        assert!(full_refund_state.reserve_redemption_journals.is_empty());
+
+        let mut payout_state = State::default();
+        let mut payout_submitted = row;
+        payout_submitted.phase = ReserveRedemptionPhase::PayoutSubmitted;
+        payout_state.reserve_redemption_journals.insert(9, payout_submitted.clone());
+        assert!(payout_state.mark_reserve_redemption_payout_no_effect(9, &payout_submitted));
+        let payout_no_effect = payout_state.reserve_redemption_journals.get(&9).unwrap();
+        assert_eq!(payout_no_effect.phase, ReserveRedemptionPhase::PayoutNoEffect);
+        assert_eq!(payout_no_effect.payout_no_effect_tuples.len(), 1);
+        assert!(!payout_state.cas_reserve_redemption_phase(9, &payout_submitted, ReserveRedemptionPhase::PayoutAmbiguous).is_some(),
+            "the original callback cannot overwrite a reconciler's newer state");
+        assert!(payout_state.check_invariants().is_ok());
     }
 }
