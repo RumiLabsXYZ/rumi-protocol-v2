@@ -2,7 +2,7 @@
   const report = {
     date: 'October 12, 2026',
     datetime: '2026-10-12',
-    source: 'origin/main through PR #550 · October 12, 2026',
+    source: 'origin/main through PR #551',
     snapshot: '3pool and Points upgrades with module readback · October 12, 2026'
   };
 
@@ -243,7 +243,8 @@
           <p class="lede">
             This snapshot separates merged source from mainnet installation. October 12
             readbacks confirmed the new 3pool module from PRs #540 and #541, with unchanged
-            LP supply and reserves. The earlier backend, bot, AMM, Treasury, and Stability Pool
+            LP supply and reserves. The Points upgrade now withholds the unfinished B snapshot
+            time, while epoch 18 remains held with its driver off. The earlier backend, bot, AMM, Treasury, and Stability Pool
             modules remained; AMM maintenance and the Stability Pool pause were active.
             Borrowing had resumed under a temporary cap at the October 11 readback, and that
             cap still reported 22,000 icUSD on October 12. PRs #531 and #507 remain source-only;
@@ -254,7 +255,7 @@
         <aside class="report-stamp" aria-label={report.snapshot}>
           <span class="stamp-label">Publication state</span>
           <strong>{report.snapshot}</strong>
-          <p>The October 12 upgrade installed the final 3pool artifact from PRs #540 and #541. Its module hash is SHA-256 74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae. The Stability Pool remained paused and the AMM stayed in maintenance mode. The borrowing cap remained 22,000 icUSD; remaining debt capacity was last checked on October 11. This page combines time-scoped records; it is not live telemetry.</p>
+          <p>The October 12 upgrades installed the final 3pool artifact from PRs #540 and #541 and the Points timing-redaction fix. The 3pool module hash is SHA-256 74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae; the Points hash is listed below. The Stability Pool remained paused and the AMM stayed in maintenance mode. The borrowing cap remained 22,000 icUSD; remaining debt capacity was last checked on October 11. This page combines time-scoped records; it is not live telemetry.</p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
