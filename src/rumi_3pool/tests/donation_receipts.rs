@@ -6,7 +6,7 @@ use candid::{decode_one, encode_args, encode_one, Nat, Principal};
 use common::deploy_pool_with_liquidity_and_swaps;
 use icrc_ledger_types::icrc1::{account::Account, transfer::TransferArg};
 use pocket_ic::WasmResult;
-use rumi_3pool::types::{DonationReceiptErrorV1, PoolStatus};
+use rumi_3pool::types::{DonationReceiptCapacityV1, DonationReceiptErrorV1, PoolStatus};
 
 fn call_result<T: for<'de> candid::Deserialize<'de> + candid::CandidType>(
     result: WasmResult,
@@ -29,6 +29,20 @@ fn pool_status(h: &common::ThreePoolHarness) -> PoolStatus {
             )
             .unwrap(),
         "get_pool_status",
+    )
+}
+
+fn donation_receipt_capacity(h: &common::ThreePoolHarness) -> DonationReceiptCapacityV1 {
+    call_result(
+        h.pic
+            .query_call(
+                h.three_pool,
+                Principal::anonymous(),
+                "get_donation_receipt_capacity_v1",
+                encode_args(()).unwrap(),
+            )
+            .unwrap(),
+        "get_donation_receipt_capacity_v1",
     )
 }
 
@@ -84,6 +98,11 @@ fn keyed_donation_is_authenticated_conflict_checked_and_upgrade_idempotent() {
     let op_nonce = 0xfeed_u128;
     let source_mint_block = 88;
     let amount = 25_000u128;
+    let capacity = donation_receipt_capacity(&h);
+    assert_eq!(capacity.receipt_count, 0);
+    assert_eq!(capacity.max_receipts, 1_000_000);
+    assert_eq!(capacity.warning_threshold, 800_000);
+    assert!(!capacity.warning_threshold_reached);
 
     assert!(matches!(
         receive_v2(&h, h.user, op_nonce, source_mint_block, 1, amount),
@@ -103,6 +122,7 @@ fn keyed_donation_is_authenticated_conflict_checked_and_upgrade_idempotent() {
         Ok(())
     );
     assert_eq!(pool_status(&h).balances[1], before + amount);
+    assert_eq!(donation_receipt_capacity(&h).receipt_count, 1);
 
     assert_eq!(
         receive_v2(&h, h.admin, op_nonce, source_mint_block, 1, amount),
@@ -112,6 +132,11 @@ fn keyed_donation_is_authenticated_conflict_checked_and_upgrade_idempotent() {
         pool_status(&h).balances[1],
         before + amount,
         "exact replay must not add reserves twice"
+    );
+    assert_eq!(
+        donation_receipt_capacity(&h).receipt_count,
+        1,
+        "replay must not consume receipt capacity"
     );
     assert!(matches!(
         receive_v2(&h, h.admin, op_nonce, source_mint_block + 1, 1, amount),
@@ -140,11 +165,17 @@ fn keyed_donation_is_authenticated_conflict_checked_and_upgrade_idempotent() {
         Ok(())
     );
     assert_eq!(pool_status(&h).balances[1], before + amount * 2);
+    assert_eq!(donation_receipt_capacity(&h).receipt_count, 2);
     assert_eq!(
         receive_v2(&h, second_caller, op_nonce, source_mint_block, 1, amount),
         Ok(())
     );
     assert_eq!(pool_status(&h).balances[1], before + amount * 2);
+    assert_eq!(
+        donation_receipt_capacity(&h).receipt_count,
+        2,
+        "upgrade replay must retain one receipt per caller"
+    );
 
     h.pic
         .upgrade_canister(

@@ -144,7 +144,22 @@ impl Storable for DonationReceiptKey {
     };
 }
 
-const MAX_DONATION_RECEIPTS_V1: u64 = 10_000;
+/// Permanent replay receipts use at most 46 key bytes and 128 value bytes.
+/// At the cap, the serialized key/value payload upper bound is therefore
+/// 174 MB (decimal), before StableBTreeMap node/page overhead. This is a
+/// bounded ceiling, not a production memory forecast.
+pub const MAX_DONATION_RECEIPTS_V1: u64 = 1_000_000;
+/// Warn at 80% so there is time for a cap-raising upgrade before admission stops.
+pub const DONATION_RECEIPT_WARNING_THRESHOLD_V1: u64 =
+    MAX_DONATION_RECEIPTS_V1 * 4 / 5;
+
+pub fn donation_receipts_can_admit(receipt_count: u64) -> bool {
+    receipt_count < MAX_DONATION_RECEIPTS_V1
+}
+
+pub fn donation_receipt_warning_threshold_reached(receipt_count: u64) -> bool {
+    receipt_count >= DONATION_RECEIPT_WARNING_THRESHOLD_V1
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DonationReceiptInsert {
@@ -728,6 +743,8 @@ pub fn set_slim(slim: SlimState) {
 /// Durable, caller-scoped idempotency receipts for protocol donation
 /// accounting. Rows are intentionally retained forever and admission is
 /// bounded; exhausting the cap fails closed rather than permitting a replay.
+/// Operators can query count and the warning threshold before reaching the
+/// admission ceiling. Raising the code cap in an upgrade preserves all rows.
 pub mod donation_receipts {
     use super::{DonationReceiptInsert, DonationReceiptKey, DONATION_RECEIPTS_V1};
     use crate::types::DonationReceiptV1;
@@ -754,7 +771,7 @@ pub mod donation_receipts {
                     DonationReceiptInsert::Conflict
                 };
             }
-            if map.len() >= super::MAX_DONATION_RECEIPTS_V1 {
+            if !super::donation_receipts_can_admit(map.len()) {
                 return DonationReceiptInsert::Full;
             }
             map.insert(key, receipt);
@@ -764,6 +781,26 @@ pub mod donation_receipts {
 
     pub fn len() -> u64 {
         DONATION_RECEIPTS_V1.with(|map| map.borrow().len())
+    }
+}
+
+#[cfg(test)]
+mod donation_receipt_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn donation_receipt_capacity_warning_precedes_fail_closed_limit() {
+        assert!(donation_receipts_can_admit(DONATION_RECEIPT_WARNING_THRESHOLD_V1 - 1));
+        assert!(!donation_receipt_warning_threshold_reached(
+            DONATION_RECEIPT_WARNING_THRESHOLD_V1 - 1
+        ));
+
+        assert!(donation_receipts_can_admit(DONATION_RECEIPT_WARNING_THRESHOLD_V1));
+        assert!(donation_receipt_warning_threshold_reached(DONATION_RECEIPT_WARNING_THRESHOLD_V1));
+
+        assert!(donation_receipts_can_admit(MAX_DONATION_RECEIPTS_V1 - 1));
+        assert!(donation_receipt_warning_threshold_reached(MAX_DONATION_RECEIPTS_V1 - 1));
+        assert!(!donation_receipts_can_admit(MAX_DONATION_RECEIPTS_V1));
     }
 }
 
