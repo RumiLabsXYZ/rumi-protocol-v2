@@ -19,7 +19,9 @@ const ICP_LEDGER: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
 const OFFICIAL_LEDGER_GZIP_SHA256: &str =
     "51f4be010f23064137defacd627ffbec024c5133210c68ca3b80ab8f257101d6";
 const CANDIDATE_AMM_SHA256: &str =
-    "994ad8efadf9f5fa178f2c824c68d0d200f898d414498745f924d517d61ac2b1";
+    "1f3fddd44fb7832585c9a45d0b46ef607805381531c71f71a8d517a7eddabf6a";
+const POCKETIC_TEST_AMM_SHA256: &str =
+    "d21a0123e8e27e3831ded245679f0cf61c67a0cae81673a624e33639a5bc656b";
 const FEE: u64 = 10_000;
 
 #[derive(CandidType, Deserialize)]
@@ -158,7 +160,7 @@ fn wasm_from_env(path_key: &str, sha_key: &str, expected_sha: Option<&str>) -> V
     let path = std::env::var(path_key).unwrap_or_else(|_| panic!("set {path_key}"));
     let expected = std::env::var(sha_key).unwrap_or_else(|_| panic!("set {sha_key}"));
     if let Some(pin) = expected_sha {
-        assert_eq!(expected, pin, "wrong reviewed production candidate pin");
+        assert_eq!(expected, pin, "wrong reviewed Wasm pin");
     }
     let wasm = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     assert_eq!(format!("{:x}", Sha256::digest(&wasm)), expected);
@@ -171,7 +173,7 @@ fn callback_trap_recovers_exact_native_icp_receipt_once_after_upgrade() {
     let test_wasm = wasm_from_env(
         "RUMI_AMM_POCKETIC_TEST_WASM",
         "RUMI_AMM_POCKETIC_TEST_WASM_SHA256",
-        None,
+        Some(POCKETIC_TEST_AMM_SHA256),
     );
     let production_wasm = wasm_from_env(
         "RUMI_AMM_PRODUCTION_WASM",
