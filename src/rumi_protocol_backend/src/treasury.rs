@@ -6,8 +6,9 @@
 //! All treasury operations are **non-critical**: failures are logged but
 //! never block user-facing operations (borrow, repay, liquidation).
 
-use candid::{CandidType, Deserialize, Principal};
+use candid::{CandidType, Deserialize, Nat, Principal};
 use ic_canister_log::log;
+use num_traits::ToPrimitive;
 use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,6 +22,9 @@ const BORROWING_FEE_ONCE_METHOD: &str = "deposit_borrowing_fee_once";
 const INTEREST_REVENUE_ONCE_METHOD: &str = "deposit_interest_revenue_once";
 const MAX_PENDING_TREASURY_INTEREST_MINTS: usize = 2048;
 const TREASURY_INTEREST_RETRY_BATCH: usize = 16;
+/// Stop automatic dispatch one hour before the standard 24-hour ICRC-1
+/// deduplication horizon. Old/ambiguous rows enter positive-receipt recovery.
+const TREASURY_STABLE_AUTO_RETRY_MAX_AGE_NS: u64 = 23 * 60 * 60 * 1_000_000_000;
 const TREASURY_INTEREST_AUTO_RETRY_MAX_AGE_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 const MAX_TREASURY_INTEREST_RECOVERY_PAGE: u16 = 100;
 
@@ -77,7 +81,7 @@ pub fn treasury_interest_mint_recovery_page(
 // ---------------------------------------------------------------------------
 
 /// Mirrors `rumi_treasury::types::DepositType`.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum DepositType {
     BorrowingFee,
     RedemptionFee,
@@ -86,7 +90,7 @@ pub enum DepositType {
 }
 
 /// Mirrors `rumi_treasury::types::AssetType`.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum AssetType {
     ICUSD,
     ICP,
@@ -143,6 +147,22 @@ thread_local! {
         RefCell::new(BTreeSet::new());
     static IN_FLIGHT_TREASURY_INTEREST_MINTS: RefCell<BTreeSet<u128>> =
         RefCell::new(BTreeSet::new());
+    static IN_FLIGHT_TREASURY_STABLE_TRANSFERS: RefCell<BTreeSet<crate::state::TreasuryStableTransferSource>> =
+        RefCell::new(BTreeSet::new());
+}
+
+struct TreasuryStableTransferGuard(crate::state::TreasuryStableTransferSource);
+impl TreasuryStableTransferGuard {
+    fn try_new(source: &crate::state::TreasuryStableTransferSource) -> Option<Self> {
+        IN_FLIGHT_TREASURY_STABLE_TRANSFERS.with(|busy| {
+            busy.borrow_mut().insert(source.clone()).then_some(Self(source.clone()))
+        })
+    }
+}
+impl Drop for TreasuryStableTransferGuard {
+    fn drop(&mut self) {
+        IN_FLIGHT_TREASURY_STABLE_TRANSFERS.with(|busy| { busy.borrow_mut().remove(&self.0); });
+    }
 }
 
 struct TreasuryInterestMintGuard(u128);
@@ -203,6 +223,210 @@ pub struct DepositArgs {
     pub amount: u64,
     pub block_index: u64,
     pub memo: Option<String>,
+}
+
+/// Mirrors the new replay-safe Treasury endpoint. It is deliberately distinct
+/// from legacy `deposit`, whose block handling is not exact-replay safe.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ExternalTokenDepositArgs {
+    pub ledger: Principal,
+    pub deposit_type: DepositType,
+    pub asset_type: AssetType,
+    pub amount: u64,
+    pub block_index: u64,
+    pub memo: Option<String>,
+}
+
+#[cfg(test)]
+mod external_token_treasury_candid_compatibility_tests {
+    use super::{AssetType, DepositType, ExternalTokenDepositArgs};
+    use candid::{CandidType, Principal};
+
+    // Frozen counterpart of src/rumi_treasury/src/types.rs on origin/main
+    // 4c824fb1. Keep the structural byte comparison so backend mirrors cannot
+    // silently drift from the receiver's new method argument.
+    #[derive(CandidType)]
+    enum ReceiverDepositType { BorrowingFee, RedemptionFee, LiquidationFee, InterestRevenue }
+    #[derive(CandidType)]
+    enum ReceiverAssetType { ICUSD, ICP, CKBTC, CKUSDT, CKUSDC }
+    #[derive(CandidType)]
+    struct ReceiverExternalTokenDepositArgs {
+        ledger: Principal,
+        deposit_type: ReceiverDepositType,
+        asset_type: ReceiverAssetType,
+        amount: u64,
+        block_index: u64,
+        memo: Option<String>,
+    }
+
+    #[test]
+    fn outgoing_method_argument_matches_merged_receiver_candid_shape() {
+        let ledger = Principal::from_slice(&[1]);
+        for (backend_deposit, receiver_deposit, backend_asset, receiver_asset) in [
+            (DepositType::InterestRevenue, ReceiverDepositType::InterestRevenue,
+                AssetType::CKUSDT, ReceiverAssetType::CKUSDT),
+            (DepositType::InterestRevenue, ReceiverDepositType::InterestRevenue,
+                AssetType::CKUSDC, ReceiverAssetType::CKUSDC),
+            (DepositType::LiquidationFee, ReceiverDepositType::LiquidationFee,
+                AssetType::CKUSDT, ReceiverAssetType::CKUSDT),
+            (DepositType::LiquidationFee, ReceiverDepositType::LiquidationFee,
+                AssetType::CKUSDC, ReceiverAssetType::CKUSDC),
+        ] {
+            let backend = ExternalTokenDepositArgs {
+                ledger,
+                deposit_type: backend_deposit,
+                asset_type: backend_asset,
+                amount: 123_456,
+                block_index: 789,
+                memo: Some("rumi-stable-v1:source".into()),
+            };
+            let receiver = ReceiverExternalTokenDepositArgs {
+                ledger,
+                deposit_type: receiver_deposit,
+                asset_type: receiver_asset,
+                amount: 123_456,
+                block_index: 789,
+                memo: Some("rumi-stable-v1:source".into()),
+            };
+            assert_eq!(candid::encode_one(backend).unwrap(), candid::encode_one(receiver).unwrap());
+        }
+    }
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq)]
+pub struct TreasuryStableTransferRecoveryPage {
+    pub items: Vec<crate::state::TreasuryStableTransferJournal>,
+    pub next_cursor: Option<crate::state::TreasuryStableTransferSource>,
+}
+
+pub fn treasury_stable_transfer_recovery_page(
+    after_source: Option<crate::state::TreasuryStableTransferSource>, limit: u16,
+) -> Result<TreasuryStableTransferRecoveryPage, String> {
+    if limit == 0 { return Err("page limit must be greater than zero".into()); }
+    let limit = usize::from(limit.min(100));
+    crate::state::read_state(|s| {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let mut rows: Vec<_> = match after_source {
+            Some(cursor) => s.pending_treasury_stable_transfers.range((Excluded(cursor), Unbounded))
+                .take(limit + 1).map(|(_, row)| row.clone()).collect(),
+            None => s.pending_treasury_stable_transfers.iter().take(limit + 1)
+                .map(|(_, row)| row.clone()).collect(),
+        };
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        let next_cursor = if has_more { rows.last().map(|row| row.source.clone()) } else { None };
+        Ok(TreasuryStableTransferRecoveryPage { items: rows, next_cursor })
+    })
+}
+
+/// Developer-authorized resolution can bind missing configuration before
+/// preflight, resume a confirmed receipt when its frozen configuration returns,
+/// or reissue only after a complete positive absence proof. That last action
+/// preserves the source obligation and payload while assigning a fresh ledger
+/// attempt tuple.
+pub fn resolve_pending_treasury_stable_transfer(op_nonce: u128, caller: Principal) -> Result<(), String> {
+    crate::state::mutate_state(|s| {
+        if caller == Principal::anonymous() || caller != s.developer_principal {
+            return Err("developer authorization required".into());
+        }
+        let Some((source, expected)) = s.pending_treasury_stable_transfers.iter()
+            .find(|(_, row)| row.op_nonce == op_nonce).map(|(source, row)| (source.clone(), row.clone()))
+        else { return Err("no pending Treasury stable transfer exists".into()); };
+        let configured_ledger = match &expected.asset_type {
+            AssetType::CKUSDT => s.ckusdt_ledger_principal,
+            AssetType::CKUSDC => s.ckusdc_ledger_principal,
+            _ => None,
+        };
+        if configured_ledger != Some(expected.ledger) {
+            return Err("configured stable ledger does not match the frozen transfer tuple".into());
+        }
+        let mut updated = expected.clone();
+        match expected.phase {
+            crate::state::TreasuryStableTransferPhase::ReceiptRecoveryRequired => {
+                rearm_stable_transfer_after_proven_absence(s, &source, &expected, ic_cdk::api::time())?;
+                return Ok(());
+            }
+            crate::state::TreasuryStableTransferPhase::ConfigurationHold
+                if expected.fee_e6s.is_none() && expected.history_floor.is_none() => {
+                    let configured_treasury = s.treasury_principal.ok_or_else(|| "Treasury is not configured".to_string())?;
+                    if expected.treasury.is_some_and(|pinned| pinned != configured_treasury) {
+                        return Err("configured Treasury differs from the frozen destination".into());
+                    }
+                    updated.treasury = Some(configured_treasury);
+                    updated.phase = crate::state::TreasuryStableTransferPhase::AwaitingPreflight;
+                }
+            crate::state::TreasuryStableTransferPhase::ConfigurationReviewRequired { block_index } => {
+                if expected.treasury != s.treasury_principal {
+                    return Err("configured Treasury differs from the frozen destination".into());
+                }
+                updated.phase = crate::state::TreasuryStableTransferPhase::NotifyPending { block_index };
+            }
+            _ => return Err("row is not in an explicitly resolvable phase".into()),
+        }
+        crate::storage::record_pending_payout_event(
+            &crate::event::PendingPayoutEvent::TreasuryStableTransferUpdated { operation: updated.clone() },
+        );
+        s.pending_treasury_stable_transfers.insert(source, updated);
+        Ok(())
+    })
+}
+
+/// A new ledger attempt is permitted only after the old exact tuple has aged
+/// out, a typed TooOld response was persisted, and every direct block in the
+/// pinned history prefix was scanned without an exact receipt. This is an
+/// explicit developer action; age alone never authorizes a second payout.
+fn rearm_stable_transfer_after_proven_absence(
+    s: &mut crate::state::State,
+    source: &crate::state::TreasuryStableTransferSource,
+    expected: &crate::state::TreasuryStableTransferJournal,
+    now: u64,
+) -> Result<(), String> {
+    let scan = expected.recovery_scan.as_ref()
+        .ok_or_else(|| "absence proof is incomplete".to_string())?;
+    if !expected.expiry_proven
+        || expected.phase != crate::state::TreasuryStableTransferPhase::ReceiptRecoveryRequired
+        || expected.fee_e6s.is_none()
+        || expected.history_floor.is_none()
+        || scan.fixed_tip.is_none()
+        || scan.next_block_index != scan.fixed_tip.unwrap_or_default()
+        || scan.candidate_block_index.is_some()
+    {
+        return Err("a complete expiry and no-receipt proof is required".into());
+    }
+    if s.pending_treasury_stable_transfers.get(source) != Some(expected) {
+        return Err("stable transfer changed during resolution".into());
+    }
+    let nonce = s.next_op_nonce_at(now);
+    let mut updated = expected.clone();
+    updated.op_nonce = nonce;
+    updated.memo = management::nonce_to_memo(nonce).0.as_slice()
+        .try_into().expect("nonce memo is 16 bytes");
+    updated.created_at_time_ns = management::nonce_to_created_at_time(nonce);
+    updated.fee_e6s = None;
+    updated.history_floor = None;
+    updated.recovery_scan = None;
+    updated.expiry_proven = false;
+    updated.phase = crate::state::TreasuryStableTransferPhase::AwaitingPreflight;
+    crate::storage::record_pending_payout_event(
+        &crate::event::PendingPayoutEvent::TreasuryStableTransferUpdated { operation: updated.clone() },
+    );
+    s.pending_treasury_stable_transfers.insert(source.clone(), updated);
+    Ok(())
+}
+
+pub async fn advance_pending_treasury_stable_transfer_recovery(
+    op_nonce: u128, caller: Principal,
+) -> Result<(), String> {
+    let Some(source) = crate::state::read_state(|s| s.pending_treasury_stable_transfers.iter()
+        .find(|(_, row)| row.op_nonce == op_nonce).map(|(source, _)| source.clone())) else {
+        return Err("no pending Treasury stable transfer exists".into());
+    };
+    if caller == Principal::anonymous()
+        || caller != crate::state::read_state(|s| s.developer_principal) {
+        return Err("developer authorization required".into());
+    }
+    process_treasury_stable_transfer(source).await;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +563,540 @@ pub async fn notify_treasury_deposit(
     }
 }
 
+/// Create an immutable source-keyed obligation synchronously with the source
+/// event/state transition. Repeated source callbacks return the original row.
+pub fn admit_treasury_stable_transfer(
+    source: crate::state::TreasuryStableTransferSource,
+    transfer_ledger: Principal,
+    amount_e6s: u64,
+    asset_type: AssetType,
+    deposit_type: DepositType,
+) -> Option<u128> {
+    if amount_e6s == 0 { return None; }
+    crate::state::mutate_state(|s| {
+        let treasury = s.treasury_principal;
+        admit_treasury_stable_transfer_in_state(
+            s, source, transfer_ledger, treasury, amount_e6s, asset_type, deposit_type,
+        )
+    })
+}
+
+pub fn admit_treasury_stable_transfer_in_state(
+    s: &mut crate::state::State,
+    source: crate::state::TreasuryStableTransferSource,
+    transfer_ledger: Principal,
+    frozen_treasury: Option<Principal>,
+    amount_e6s: u64,
+    asset_type: AssetType,
+    deposit_type: DepositType,
+) -> Option<u128> {
+    admit_treasury_stable_transfer_in_state_at(
+        s, source, transfer_ledger, frozen_treasury, amount_e6s, asset_type,
+        deposit_type, ic_cdk::api::time(),
+    )
+}
+
+fn admit_treasury_stable_transfer_in_state_at(
+    s: &mut crate::state::State,
+    source: crate::state::TreasuryStableTransferSource,
+    transfer_ledger: Principal,
+    frozen_treasury: Option<Principal>,
+    amount_e6s: u64,
+    asset_type: AssetType,
+    deposit_type: DepositType,
+    now: u64,
+) -> Option<u128> {
+    if amount_e6s == 0 { return None; }
+    if s.completed_treasury_stable_transfer_sources.contains_key(&source) { return None; }
+    if let Some(existing) = s.pending_treasury_stable_transfers.get(&source) {
+        if existing.amount_e6s == amount_e6s && existing.asset_type == asset_type
+            && existing.deposit_type == deposit_type && existing.ledger == transfer_ledger
+            && existing.treasury == frozen_treasury {
+            return Some(existing.op_nonce);
+        }
+        let mut held = existing.clone();
+        held.phase = crate::state::TreasuryStableTransferPhase::ReceiptRecoveryRequired;
+        held.recovery_scan = None;
+        crate::storage::record_pending_payout_event(
+            &crate::event::PendingPayoutEvent::TreasuryStableTransferUpdated { operation: held.clone() },
+        );
+        s.pending_treasury_stable_transfers.insert(source, held);
+        return None;
+    }
+    let treasury = frozen_treasury;
+    let configured_ledger = match &asset_type {
+            AssetType::CKUSDT => s.ckusdt_ledger_principal,
+            AssetType::CKUSDC => s.ckusdc_ledger_principal,
+            _ => None,
+        };
+    let ledger = transfer_ledger;
+    let configuration_matches = treasury.is_some()
+        && s.treasury_principal == treasury && configured_ledger == Some(ledger);
+    let nonce = s.next_op_nonce_at(now);
+    let operation = crate::state::TreasuryStableTransferJournal {
+        source: source.clone(), ledger, treasury, asset_type, deposit_type, amount_e6s,
+        fee_e6s: None, history_floor: None, recovery_scan: None, expiry_proven: false,
+        memo: management::nonce_to_memo(nonce).0.as_slice().try_into().expect("nonce memo is 16 bytes"),
+        created_at_time_ns: management::nonce_to_created_at_time(nonce), op_nonce: nonce,
+        phase: if configuration_matches { crate::state::TreasuryStableTransferPhase::AwaitingPreflight }
+            else { crate::state::TreasuryStableTransferPhase::ConfigurationHold },
+    };
+    crate::storage::record_pending_payout_event(
+        &crate::event::PendingPayoutEvent::TreasuryStableTransferStarted { operation: operation.clone() },
+    );
+    s.pending_treasury_stable_transfers.insert(source, operation);
+    Some(nonce)
+}
+
+fn persist_stable_transfer(
+    expected: &crate::state::TreasuryStableTransferJournal,
+    operation: &crate::state::TreasuryStableTransferJournal,
+) -> bool {
+    crate::state::mutate_state(|s| {
+        if s.pending_treasury_stable_transfers.get(&operation.source) != Some(expected) { return false; }
+        crate::storage::record_pending_payout_event(
+            &crate::event::PendingPayoutEvent::TreasuryStableTransferUpdated { operation: operation.clone() },
+        );
+        s.pending_treasury_stable_transfers.insert(operation.source.clone(), operation.clone());
+        true
+    })
+}
+
+fn complete_stable_transfer(
+    expected: &crate::state::TreasuryStableTransferJournal,
+    block_index: u64,
+) -> bool {
+    crate::state::mutate_state(|s| {
+        if s.pending_treasury_stable_transfers.get(&expected.source) != Some(expected)
+            || expected.phase != (crate::state::TreasuryStableTransferPhase::NotifyPending { block_index }) {
+            return false;
+        }
+        crate::storage::record_pending_payout_event(
+            &crate::event::PendingPayoutEvent::TreasuryStableTransferCompleted {
+                source: expected.source.clone(), block_index,
+            },
+        );
+        s.pending_treasury_stable_transfers.remove(&expected.source);
+        s.completed_treasury_stable_transfer_sources.insert(expected.source.clone(), Some(block_index));
+        true
+    })
+}
+
+fn stable_transfer_with_initial_scan(
+    operation: &crate::state::TreasuryStableTransferJournal,
+    fixed_tip: u64,
+) -> Option<crate::state::TreasuryStableTransferJournal> {
+    let floor = operation.history_floor?;
+    if fixed_tip < floor { return None; }
+    let mut updated = operation.clone();
+    updated.recovery_scan = Some(crate::state::BorrowMintAbsenceScan {
+        next_block_index: floor,
+        fixed_tip: Some(fixed_tip),
+        candidate_block_index: None,
+    });
+    Some(updated)
+}
+
+fn treasury_external_memo(source: &crate::state::TreasuryStableTransferSource) -> String {
+    // ASCII, bounded (<128 bytes), stable across retries and independent from
+    // process-local nonce generation.
+    format!("rumi-stable-v1:{}:{}:{}:{}", source.ledger.to_text(), source.block_index, source.lane, source.slot)
+}
+
+async fn notify_external_stable_transfer(
+    operation: &crate::state::TreasuryStableTransferJournal,
+    block_index: u64,
+) -> Result<(), String> {
+    let configured = crate::state::read_state(|s| {
+        let ledger = match operation.asset_type {
+            AssetType::CKUSDT => s.ckusdt_ledger_principal,
+            AssetType::CKUSDC => s.ckusdc_ledger_principal,
+            _ => None,
+        };
+        operation.treasury.is_some_and(|treasury| s.treasury_principal == Some(treasury))
+            && ledger == Some(operation.ledger)
+    });
+    if !configured {
+        let mut held = operation.clone();
+        held.phase = crate::state::TreasuryStableTransferPhase::ConfigurationReviewRequired { block_index };
+        persist_stable_transfer(operation, &held);
+        return Err("Treasury or stablecoin ledger configuration differs from the frozen transfer".into());
+    }
+    let args = ExternalTokenDepositArgs {
+        ledger: operation.ledger,
+        deposit_type: operation.deposit_type.clone(),
+        asset_type: operation.asset_type.clone(),
+        amount: operation.amount_e6s,
+        block_index,
+        memo: Some(treasury_external_memo(&operation.source)),
+    };
+    let result: Result<(Result<u64, String>,), _> =
+        ic_cdk::call(operation.treasury.expect("configuration checked"), "record_external_token_deposit_once", (args,)).await;
+    match result {
+        Ok((Ok(_),)) => {
+            complete_stable_transfer(operation, block_index);
+            Ok(())
+        }
+        Ok((Err(error),)) => Err(error),
+        Err((_, error)) => Err(error),
+    }
+}
+
+async fn advance_stable_transfer_receipt_scan(
+    operation: &crate::state::TreasuryStableTransferJournal,
+) {
+    if operation.history_floor.is_none() { return; }
+    let Some(treasury) = operation.treasury else { return; };
+    let mut current = operation.clone();
+    if !current.expiry_proven {
+        let tuple = crate::state::BorrowMintTuple {
+            ledger: current.ledger, destination: treasury, amount_e8s: current.amount_e6s,
+            memo: current.memo, created_at_time_ns: current.created_at_time_ns,
+            op_nonce: current.op_nonce,
+        };
+        if probe_stable_transfer_expiry(&tuple).await.is_err() { return; }
+        let mut expired = current.clone();
+        expired.expiry_proven = true;
+        if !persist_stable_transfer(&current, &expired) { return; }
+        current = expired;
+    }
+    let scan = if let Some(scan) = current.recovery_scan.clone() {
+        scan
+    } else {
+        let Ok(tip) = crate::icrc3_proof::icrc3_history_floor(current.ledger).await else { return; };
+        let Some(updated) = stable_transfer_with_initial_scan(&current, tip) else { return; };
+        if !persist_stable_transfer(&current, &updated) { return; }
+        current = updated.clone();
+        updated.recovery_scan.unwrap()
+    };
+    let Some(tip) = scan.fixed_tip else { return; };
+    if scan.next_block_index >= tip { return; }
+    let start = scan.next_block_index;
+    let end = tip.min(start.saturating_add(64));
+    let request = vec![icrc_ledger_types::icrc3::blocks::GetBlocksRequest {
+        start: candid::Nat::from(start), length: candid::Nat::from(end - start),
+    }];
+    let result: Result<(icrc_ledger_types::icrc3::blocks::GetBlocksResult,), _> =
+        ic_cdk::call(operation.ledger, "icrc3_get_blocks", (request,)).await;
+    let Ok((response,)) = result else { return; };
+    let tuple = crate::state::BorrowMintTuple {
+        ledger: operation.ledger, destination: treasury, amount_e8s: operation.amount_e6s,
+        memo: operation.memo, created_at_time_ns: operation.created_at_time_ns,
+        op_nonce: operation.op_nonce,
+    };
+    let Some(expected_fee) = operation.fee_e6s else { return; };
+    let Ok(candidate) = crate::icrc3_proof::validate_treasury_stable_transfer_scan_page(
+        start, end, tip, &response, ic_cdk::id(), &tuple, expected_fee,
+    ) else { return; };
+    let mut advanced_scan = scan;
+    if let Some(block_index) = candidate {
+        if advanced_scan.candidate_block_index.is_some_and(|prior| prior != block_index) {
+            return;
+        }
+        advanced_scan.candidate_block_index = Some(block_index);
+    }
+    advanced_scan.next_block_index = end;
+    let mut advanced = current.clone();
+    if end == tip {
+        if let Some(block_index) = advanced_scan.candidate_block_index {
+            advanced.phase = crate::state::TreasuryStableTransferPhase::NotifyPending { block_index };
+            advanced.recovery_scan = None;
+        } else {
+            // Complete, archive-free scan with typed TooOld expiry and no
+            // exact tuple. Retain the proof for developer-authorized reissue.
+            advanced.recovery_scan = Some(advanced_scan);
+        }
+    } else {
+        advanced.recovery_scan = Some(advanced_scan);
+    }
+    if persist_stable_transfer(&current, &advanced) {
+        if let crate::state::TreasuryStableTransferPhase::NotifyPending { block_index } = advanced.phase {
+            let _ = notify_external_stable_transfer(&advanced, block_index).await;
+        }
+    }
+}
+
+struct StableTransferExpiryProbeArgs {
+    subaccount: [u8; 32],
+    transfer: icrc_ledger_types::icrc1::transfer::TransferArg,
+}
+
+fn stable_transfer_expiry_probe_args(
+    tuple: &crate::state::BorrowMintTuple,
+    entropy: [u8; 32],
+) -> Result<StableTransferExpiryProbeArgs, String> {
+    use icrc_ledger_types::icrc1::account::Account;
+    use icrc_ledger_types::icrc1::transfer::{Memo, TransferArg};
+    use sha2::{Digest, Sha256};
+
+    let mut subaccount_hash = Sha256::new();
+    subaccount_hash.update(b"RUMI-STABLE-TRANSFER-EXPIRY-SUBACCOUNT-V1");
+    subaccount_hash.update(tuple.ledger.as_slice());
+    subaccount_hash.update(tuple.destination.as_slice());
+    subaccount_hash.update(tuple.op_nonce.to_be_bytes());
+    subaccount_hash.update(tuple.created_at_time_ns.to_be_bytes());
+    subaccount_hash.update(entropy);
+    let subaccount: [u8; 32] = subaccount_hash.finalize().into();
+
+    let mut sink_seed = b"RUMI-STABLE-TRANSFER-EXPIRY-SINK-V2".to_vec();
+    sink_seed.extend_from_slice(tuple.ledger.as_slice());
+    sink_seed.extend_from_slice(tuple.destination.as_slice());
+    sink_seed.extend_from_slice(&tuple.op_nonce.to_be_bytes());
+    sink_seed.extend_from_slice(&tuple.created_at_time_ns.to_be_bytes());
+    sink_seed.extend_from_slice(&entropy);
+    let sink = Principal::self_authenticating(&sink_seed);
+    if sink == tuple.destination {
+        return Err("expiry sink collides with Treasury".into());
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"RUMI-STABLE-TRANSFER-EXPIRY-PROBE-MEMO-V2");
+    hash.update(tuple.ledger.as_slice());
+    hash.update(tuple.destination.as_slice());
+    hash.update(tuple.op_nonce.to_be_bytes());
+    hash.update(tuple.created_at_time_ns.to_be_bytes());
+    hash.update(entropy);
+    let memo = hash.finalize().to_vec();
+    if memo.as_slice() == tuple.memo {
+        return Err("expiry probe memo collides with transfer memo".into());
+    }
+    Ok(StableTransferExpiryProbeArgs {
+        subaccount,
+        transfer: TransferArg {
+            from_subaccount: Some(subaccount),
+            to: Account {
+                owner: sink,
+                subaccount: None,
+            },
+            fee: None,
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(Memo::from(memo)),
+            amount: Nat::from(1u8),
+        },
+    })
+}
+
+fn stable_transfer_expiry_was_proven(
+    result: &Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
+) -> bool {
+    matches!(
+        result,
+        Err(icrc_ledger_types::icrc1::transfer::TransferError::TooOld)
+    )
+}
+
+async fn probe_stable_transfer_expiry(tuple: &crate::state::BorrowMintTuple) -> Result<(), String> {
+    use icrc_ledger_types::icrc1::account::Account;
+    use icrc_ledger_types::icrc1::transfer::TransferError;
+
+    // The pinned ICRC ledger checks a supplied fee before transaction age.
+    // Use fee=None so its current fee is accepted. A fresh one-unit transfer
+    // from a private, empty subaccount cannot debit anything, even at zero fee;
+    // only a typed TooOld response may establish that the original timestamp
+    // has aged out. A separate exact-history scan still proves absence.
+    let entropy: [u8; 32] = ic_cdk::api::management_canister::main::raw_rand()
+        .await
+        .map_err(|(code, error)| format!("expiry probe entropy unavailable ({code:?}): {error}"))?
+        .0
+        .try_into()
+        .map_err(|_| "expiry probe entropy had an invalid length".to_string())?;
+    let args = stable_transfer_expiry_probe_args(tuple, entropy)?;
+    let source = Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(args.subaccount),
+    };
+    let balance: Result<(Nat,), _> =
+        ic_cdk::call(tuple.ledger, "icrc1_balance_of", (source,)).await;
+    let (balance,) = balance.map_err(|(code, error)| {
+        format!("expiry probe source balance unavailable ({code:?}): {error}")
+    })?;
+    if balance != Nat::from(0u8) {
+        return Err("expiry probe source subaccount was not empty; held".into());
+    }
+    let minting: Result<(Option<Account>,), _> =
+        ic_cdk::call(tuple.ledger, "icrc1_minting_account", ()).await;
+    let (minting,) = minting.map_err(|(code, error)| {
+        format!("expiry probe minting account unavailable ({code:?}): {error}")
+    })?;
+    if minting.as_ref() == Some(&source) || minting.as_ref() == Some(&args.transfer.to) {
+        return Err("expiry probe account collides with ledger minting account; held".into());
+    }
+    let outcome: Result<(Result<Nat, TransferError>,), _> =
+        ic_cdk::call(tuple.ledger, "icrc1_transfer", (args.transfer,)).await;
+    match outcome {
+        Ok((result,)) if stable_transfer_expiry_was_proven(&result) => Ok(()),
+        Ok((Ok(_),)) => Err("expiry probe unexpectedly succeeded; held".into()),
+        Ok((Err(error),)) => Err(format!("expiry probe was not typed TooOld: {error:?}")),
+        Err((code, error)) => Err(format!("expiry probe call rejected ({code:?}): {error}")),
+    }
+}
+
+#[cfg(test)]
+mod stable_transfer_expiry_probe_tests {
+    use super::{stable_transfer_expiry_probe_args, stable_transfer_expiry_was_proven};
+    use crate::state::BorrowMintTuple;
+    use candid::{Nat, Principal};
+    use icrc_ledger_types::icrc1::transfer::TransferError;
+
+    fn tuple() -> BorrowMintTuple {
+        BorrowMintTuple {
+            ledger: Principal::from_slice(&[1]),
+            destination: Principal::from_slice(&[2]),
+            amount_e8s: 123_456,
+            memo: [0xA5; 16],
+            created_at_time_ns: 42,
+            op_nonce: 7,
+        }
+    }
+
+    #[test]
+    fn probe_uses_randomized_empty_source_and_distinct_destination_and_memo() {
+        let tuple = tuple();
+        let entropy = [0x5A; 32];
+        let args = stable_transfer_expiry_probe_args(&tuple, entropy).unwrap();
+
+        assert_eq!(args.subaccount.len(), 32);
+        assert_eq!(args.transfer.from_subaccount, Some(args.subaccount));
+        assert_eq!(args.transfer.amount, Nat::from(1u8));
+        assert_eq!(args.transfer.fee, None);
+        assert_eq!(
+            args.transfer.created_at_time,
+            Some(tuple.created_at_time_ns)
+        );
+        assert_ne!(args.transfer.to.owner, tuple.destination);
+        let probe_memo = args.transfer.memo.as_ref().unwrap();
+        assert_ne!(probe_memo.0.as_ref(), tuple.memo.as_slice());
+
+        let other_entropy = [0x5B; 32];
+        let other_args = stable_transfer_expiry_probe_args(&tuple, other_entropy).unwrap();
+        assert_ne!(args.subaccount, other_args.subaccount);
+    }
+
+    #[test]
+    fn only_typed_too_old_proves_expiry() {
+        assert!(stable_transfer_expiry_was_proven(&Err(
+            TransferError::TooOld
+        )));
+        assert!(!stable_transfer_expiry_was_proven(&Ok(Nat::from(1u8))));
+        assert!(!stable_transfer_expiry_was_proven(&Err(
+            TransferError::BadFee {
+                expected_fee: Nat::from(10u8),
+            }
+        )));
+        assert!(!stable_transfer_expiry_was_proven(&Err(
+            TransferError::InsufficientFunds {
+                balance: Nat::from(0u8)
+            }
+        )));
+    }
+}
+
+pub async fn process_treasury_stable_transfer(source: crate::state::TreasuryStableTransferSource) {
+    let Some(_guard) = TreasuryStableTransferGuard::try_new(&source) else { return; };
+    let Some(mut operation) = crate::state::read_state(|s| s.pending_treasury_stable_transfers.get(&source).cloned()) else { return; };
+    if matches!(operation.phase, crate::state::TreasuryStableTransferPhase::ReceiptRecoveryRequired) {
+        advance_stable_transfer_receipt_scan(&operation).await;
+        return;
+    }
+    if operation.treasury.is_none() { return; }
+    let config_matches = crate::state::read_state(|s| {
+        let configured_ledger = match &operation.asset_type {
+            AssetType::CKUSDT => s.ckusdt_ledger_principal,
+            AssetType::CKUSDC => s.ckusdc_ledger_principal,
+            _ => None,
+        };
+        s.treasury_principal == operation.treasury && configured_ledger == Some(operation.ledger)
+    });
+    if !config_matches {
+        if !matches!(operation.phase, crate::state::TreasuryStableTransferPhase::ConfigurationHold |
+            crate::state::TreasuryStableTransferPhase::ConfigurationReviewRequired { .. }) {
+            let old = operation.clone();
+            operation.phase = crate::state::TreasuryStableTransferPhase::ConfigurationHold;
+            persist_stable_transfer(&old, &operation);
+        }
+        return;
+    }
+    if operation.phase == crate::state::TreasuryStableTransferPhase::AwaitingPreflight {
+        let result: Result<(Nat,), _> = ic_cdk::call(operation.ledger, "icrc1_fee", ()).await;
+        let Ok((fee_nat,)) = result else { return; };
+        let Some(fee) = fee_nat.0.to_u64() else { return; };
+        let Ok(history_floor) = crate::icrc3_proof::icrc3_history_floor(operation.ledger).await else { return; };
+        let previous = operation.clone();
+        operation.fee_e6s = Some(fee);
+        operation.history_floor = Some(history_floor);
+        operation.phase = crate::state::TreasuryStableTransferPhase::TransferPending;
+        if !persist_stable_transfer(&previous, &operation) { return; }
+    }
+    if let crate::state::TreasuryStableTransferPhase::NotifyPending { block_index } = operation.phase {
+        let _ = notify_external_stable_transfer(&operation, block_index).await;
+        return;
+    }
+    if operation.phase != crate::state::TreasuryStableTransferPhase::TransferPending { return; }
+    if ic_cdk::api::time().saturating_sub(operation.created_at_time_ns)
+        >= TREASURY_STABLE_AUTO_RETRY_MAX_AGE_NS {
+        let previous = operation.clone();
+        operation.phase = crate::state::TreasuryStableTransferPhase::ReceiptRecoveryRequired;
+        if persist_stable_transfer(&previous, &operation) {
+            // The timer will pick up the persisted held row on its next fair
+            // pass. Do not use the stale pre-transition local snapshot here.
+        }
+        return;
+    }
+    let Some(fee) = operation.fee_e6s else { return; };
+    match management::transfer_collateral_with_nonce_and_fee_status(
+        operation.amount_e6s, Some(fee), operation.treasury.expect("preflight requires Treasury"), operation.ledger, operation.op_nonce,
+    ).await {
+        Ok(block_index) => {
+            let previous = operation.clone();
+            operation.phase = crate::state::TreasuryStableTransferPhase::NotifyPending { block_index };
+            if persist_stable_transfer(&previous, &operation) {
+                let _ = notify_external_stable_transfer(&operation, block_index).await;
+            }
+        }
+        Err(management::DurableTransferError::LedgerNoEffect(
+            icrc_ledger_types::icrc1::transfer::TransferError::TooOld,
+        )) => {
+            let previous = operation.clone();
+            operation.phase = crate::state::TreasuryStableTransferPhase::ReceiptRecoveryRequired;
+            persist_stable_transfer(&previous, &operation);
+        }
+        Err(management::DurableTransferError::LedgerNoEffect(
+            icrc_ledger_types::icrc1::transfer::TransferError::BadFee { .. },
+        )) => {
+            // Explicit fee was rejected with typed no-effect. Do not mutate
+            // the frozen tuple; require operator resolution.
+            let previous = operation.clone();
+            operation.phase = crate::state::TreasuryStableTransferPhase::ReceiptRecoveryRequired;
+            persist_stable_transfer(&previous, &operation);
+        }
+        Err(_) => {} // exact tuple remains retryable; ambiguous replies never mint a new nonce
+    }
+}
+
+/// Bounded recovery of pending stablecoin transfers and notification receipts.
+pub async fn flush_pending_treasury_stable_transfers() {
+    const BATCH: usize = 8;
+    let sources = crate::state::mutate_state(|s| {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let mut selected: Vec<_> = match &s.treasury_stable_transfer_retry_cursor {
+            Some(cursor) => s.pending_treasury_stable_transfers
+                .range((Excluded(cursor.clone()), Unbounded)).take(BATCH)
+                .map(|(source, _)| source.clone()).collect(),
+            None => s.pending_treasury_stable_transfers.iter().take(BATCH)
+                .map(|(source, _)| source.clone()).collect(),
+        };
+        if selected.len() < BATCH {
+            let remaining = BATCH - selected.len();
+            if let Some(cursor) = &s.treasury_stable_transfer_retry_cursor {
+                selected.extend(s.pending_treasury_stable_transfers.range(..=cursor.clone())
+                    .take(remaining).map(|(source, _)| source.clone()));
+            }
+        }
+        if let Some(last) = selected.last() { s.treasury_stable_transfer_retry_cursor = Some(last.clone()); }
+        selected
+    });
+    for source in sources { process_treasury_stable_transfer(source).await; }
+}
+
 /// Notify Treasury through the versioned, idempotent borrowing-fee API.
 /// This uses a separate method name so an old Treasury can only reject the
 /// call as method-not-found instead of processing a retry through its legacy
@@ -413,6 +1171,156 @@ mod borrowing_fee_endpoint_tests {
         assert_eq!(args.amount, 75);
         assert_eq!(args.block_index, 912);
         assert_eq!(args.memo, None);
+    }
+}
+
+#[cfg(test)]
+mod treasury_stable_transfer_admission_tests {
+    use super::{
+        admit_treasury_stable_transfer_in_state_at, persist_stable_transfer,
+        rearm_stable_transfer_after_proven_absence, stable_interest_share_e6s,
+        stable_transfer_with_initial_scan,
+        AssetType, DepositType,
+    };
+    use crate::state::{self, State, TreasuryStableTransferPhase, TreasuryStableTransferSource};
+    use candid::Principal;
+
+    fn source() -> TreasuryStableTransferSource {
+        TreasuryStableTransferSource {
+            ledger: Principal::from_slice(&[1]),
+            block_index: 77,
+            lane: "stable_repay_surcharge".into(),
+            slot: 0,
+        }
+    }
+
+    fn configured() -> (Principal, Principal) {
+        let treasury = Principal::from_slice(&[2]);
+        let ledger = Principal::from_slice(&[3]);
+        let mut s = State::default();
+        s.treasury_principal = Some(treasury);
+        s.ckusdt_ledger_principal = Some(ledger);
+        state::replace_state(s);
+        (treasury, ledger)
+    }
+
+    #[test]
+    fn exact_source_retry_returns_same_nonce_and_payload_conflict_holds() {
+        let (treasury, ledger) = configured();
+        let key = source();
+        let nonce = state::mutate_state(|s| admit_treasury_stable_transfer_in_state_at(
+            s, key.clone(), ledger, Some(treasury), 123, AssetType::CKUSDT,
+            DepositType::InterestRevenue, 99,
+        )).unwrap();
+        let same = state::mutate_state(|s| admit_treasury_stable_transfer_in_state_at(
+            s, key.clone(), ledger, Some(treasury), 123, AssetType::CKUSDT,
+            DepositType::InterestRevenue, 100,
+        ));
+        assert_eq!(same, Some(nonce));
+        let conflict = state::mutate_state(|s| admit_treasury_stable_transfer_in_state_at(
+            s, key.clone(), ledger, Some(treasury), 124, AssetType::CKUSDT,
+            DepositType::InterestRevenue, 101,
+        ));
+        assert_eq!(conflict, None);
+        assert_eq!(state::read_state(|s| s.pending_treasury_stable_transfers[&key].phase.clone()),
+            TreasuryStableTransferPhase::ReceiptRecoveryRequired);
+    }
+
+    #[test]
+    fn stable_interest_conversion_preserves_legacy_floor_and_sub_e6_dust() {
+        assert_eq!(stable_interest_share_e6s(99), 0);
+        assert_eq!(stable_interest_share_e6s(100), 1);
+        assert_eq!(stable_interest_share_e6s(199), 1);
+        assert_eq!(stable_interest_share_e6s(200), 2);
+    }
+
+    #[test]
+    fn expiry_hold_initializes_first_scan_from_the_post_transition_cas_row() {
+        let (treasury, ledger) = configured();
+        let key = source();
+        let nonce = state::mutate_state(|s| admit_treasury_stable_transfer_in_state_at(
+            s, key.clone(), ledger, Some(treasury), 123, AssetType::CKUSDT,
+            DepositType::InterestRevenue, 99,
+        )).unwrap();
+        let awaiting = state::read_state(|s| s.pending_treasury_stable_transfers[&key].clone());
+        assert_eq!(awaiting.op_nonce, nonce);
+        let mut original = awaiting.clone();
+        original.fee_e6s = Some(7);
+        original.history_floor = Some(100);
+        original.phase = TreasuryStableTransferPhase::TransferPending;
+        assert!(persist_stable_transfer(&awaiting, &original));
+        let mut held = original.clone();
+        held.phase = TreasuryStableTransferPhase::ReceiptRecoveryRequired;
+        held.expiry_proven = true;
+        assert!(persist_stable_transfer(&original, &held));
+
+        let mut first_scan = stable_transfer_with_initial_scan(&held, 120).unwrap();
+        assert!(persist_stable_transfer(&held, &first_scan));
+        let scan = first_scan.recovery_scan.take().unwrap();
+        assert_eq!(scan.next_block_index, 100);
+        assert_eq!(scan.fixed_tip, Some(120));
+        assert_eq!(scan.candidate_block_index, None);
+        // The stale pre-hold snapshot must never be allowed to initialize or
+        // overwrite this recovery cursor.
+        assert!(!persist_stable_transfer(&original, &held));
+    }
+
+    #[test]
+    fn absence_reissue_requires_complete_clean_scan_and_changes_only_attempt_tuple() {
+        let (treasury, ledger) = configured();
+        let key = source();
+        state::mutate_state(|s| admit_treasury_stable_transfer_in_state_at(
+            s, key.clone(), ledger, Some(treasury), 123, AssetType::CKUSDT,
+            DepositType::InterestRevenue, 99,
+        ));
+        let mut held = state::read_state(|s| s.pending_treasury_stable_transfers[&key].clone());
+        held.phase = TreasuryStableTransferPhase::ReceiptRecoveryRequired;
+        held.fee_e6s = Some(7);
+        held.history_floor = Some(100);
+        held.expiry_proven = true;
+        held.recovery_scan = Some(crate::state::BorrowMintAbsenceScan {
+            next_block_index: 120, fixed_tip: Some(120), candidate_block_index: None,
+        });
+        assert!(persist_stable_transfer(
+            &state::read_state(|s| s.pending_treasury_stable_transfers[&key].clone()), &held,
+        ));
+        let original = held.clone();
+
+        // Incomplete and candidate-bearing scans cannot authorize reissue.
+        let incomplete = state::mutate_state(|s| {
+            let mut partial = original.clone();
+            partial.recovery_scan.as_mut().unwrap().next_block_index = 119;
+            s.pending_treasury_stable_transfers.insert(key.clone(), partial.clone());
+            rearm_stable_transfer_after_proven_absence(s, &key, &partial, 500)
+        });
+        assert!(incomplete.is_err());
+        let candidate = state::mutate_state(|s| {
+            let mut found = original.clone();
+            found.recovery_scan.as_mut().unwrap().candidate_block_index = Some(110);
+            s.pending_treasury_stable_transfers.insert(key.clone(), found.clone());
+            rearm_stable_transfer_after_proven_absence(s, &key, &found, 500)
+        });
+        assert!(candidate.is_err());
+
+        state::mutate_state(|s| {
+            s.pending_treasury_stable_transfers.insert(key.clone(), original.clone());
+            rearm_stable_transfer_after_proven_absence(s, &key, &original, 500).unwrap();
+        });
+        let rearmed = state::read_state(|s| s.pending_treasury_stable_transfers[&key].clone());
+        assert_eq!(rearmed.phase, TreasuryStableTransferPhase::AwaitingPreflight);
+        assert_eq!(rearmed.source, original.source);
+        assert_eq!(rearmed.ledger, original.ledger);
+        assert_eq!(rearmed.treasury, original.treasury);
+        assert_eq!(rearmed.asset_type, original.asset_type);
+        assert_eq!(rearmed.deposit_type, original.deposit_type);
+        assert_eq!(rearmed.amount_e6s, original.amount_e6s);
+        assert_ne!(rearmed.op_nonce, original.op_nonce);
+        assert_ne!(rearmed.memo, original.memo);
+        assert_ne!(rearmed.created_at_time_ns, original.created_at_time_ns);
+        assert_eq!(rearmed.fee_e6s, None);
+        assert_eq!(rearmed.history_floor, None);
+        assert_eq!(rearmed.recovery_scan, None);
+        assert!(!rearmed.expiry_proven);
     }
 }
 
@@ -1612,11 +2520,15 @@ pub async fn distribute_stablecoin_interest(
     interest_e8s: u64,
     collateral_type: Principal,
     token_type: crate::StableTokenType,
+    source_block_index: u64,
+    source_ledger: Principal,
 ) {
     distribute_stablecoin_interest_at(
         interest_e8s,
         collateral_type,
         token_type,
+        source_block_index,
+        source_ledger,
         ic_cdk::api::time(),
     )
     .await;
@@ -1626,6 +2538,8 @@ async fn distribute_stablecoin_interest_at(
     interest_e8s: u64,
     collateral_type: Principal,
     token_type: crate::StableTokenType,
+    source_block_index: u64,
+    source_ledger: Principal,
     now: u64,
 ) {
     if interest_e8s == 0 {
@@ -1639,6 +2553,27 @@ async fn distribute_stablecoin_interest_at(
             s.stability_pool_canister,
         )
     });
+
+    // Admit every Treasury-directed stablecoin share before the first pool,
+    // AMM, or other recipient await. The e8->e6 conversion intentionally
+    // floors as before; sub-e6 dust remains in the existing reserve economics.
+    {
+        for (slot, recipient) in split.iter().enumerate() {
+            if recipient.destination == crate::state::InterestDestination::Treasury {
+                let share_e8s = ((interest_e8s as u128) * (recipient.bps as u128) / 10_000) as u64;
+                let amount_e6s = stable_interest_share_e6s(share_e8s);
+                let asset_type = match token_type {
+                    crate::StableTokenType::CKUSDT => AssetType::CKUSDT,
+                    crate::StableTokenType::CKUSDC => AssetType::CKUSDC,
+                };
+                admit_treasury_stable_transfer(
+                    crate::state::TreasuryStableTransferSource {
+                        ledger: source_ledger, block_index: source_block_index, lane: "stable_interest".into(), slot: slot as u32,
+                    }, source_ledger, amount_e6s, asset_type, DepositType::InterestRevenue,
+                );
+            }
+        }
+    }
 
     // A missing donation destination converts its share into an icUSD mint
     // for Treasury. Put that share in the durable aggregate before any await:
@@ -1697,42 +2632,8 @@ async fn distribute_stablecoin_interest_at(
                 }
             }
             crate::state::InterestDestination::Treasury => {
-                // Transfer stablecoins (not icUSD) to treasury
-                let treasury_e6s = share_e8s / 100; // e8s → e6s
-                if treasury_e6s > 0 {
-                    let (treasury_principal, stable_ledger) = read_state(|s| {
-                        let ledger = match token_type {
-                            crate::StableTokenType::CKUSDT => s.ckusdt_ledger_principal,
-                            crate::StableTokenType::CKUSDC => s.ckusdc_ledger_principal,
-                        };
-                        (s.treasury_principal, ledger)
-                    });
-                    if let (Some(tp), Some(ledger)) = (treasury_principal, stable_ledger) {
-                        match crate::management::transfer_collateral(treasury_e6s, tp, ledger).await
-                        {
-                            Ok(block_index) => {
-                                log!(INFO, "[treasury] Transferred {} {:?} interest to treasury (block {})", treasury_e6s, token_type, block_index);
-                                let asset_type = match token_type {
-                                    crate::StableTokenType::CKUSDT => AssetType::CKUSDT,
-                                    crate::StableTokenType::CKUSDC => AssetType::CKUSDC,
-                                };
-                                let _ = notify_treasury_deposit(
-                                    tp,
-                                    DepositType::InterestRevenue,
-                                    asset_type,
-                                    treasury_e6s,
-                                    block_index,
-                                )
-                                .await;
-                            }
-                            Err(e) => log!(
-                                INFO,
-                                "[treasury] WARNING: stablecoin interest transfer failed: {:?}",
-                                e
-                            ),
-                        }
-                    }
-                }
+                // Durable outbox admission happened before any recipient await.
+                let _ = share_e8s;
             }
             crate::state::InterestDestination::ThreePool => {
                 if let Some(op_nonce) = three_pool_jobs.get(&index).copied().flatten() {
@@ -1792,6 +2693,12 @@ fn reserve_stablecoin_sp_interest_shares(
         }
     }
     jobs
+}
+
+/// Convert an e8 stable-interest share to the CK ledger's e6 units. Floor as
+/// the legacy path did; the remainder stays in the reserve accounting.
+fn stable_interest_share_e6s(share_e8s: u64) -> u64 {
+    share_e8s / 100
 }
 
 fn reserve_stablecoin_three_pool_shares(
@@ -3165,6 +4072,8 @@ mod treasury_interest_mint_tests {
                 500,
                 Principal::from_slice(&[3]),
                 crate::StableTokenType::CKUSDC,
+                7,
+                Principal::from_slice(&[2]),
                 1_000,
             ));
             assert_eq!(state::read_state(|s| s.pending_treasury_interest_fallback_e8s), 500);

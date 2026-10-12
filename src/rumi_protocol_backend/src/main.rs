@@ -6476,6 +6476,40 @@ async fn advance_pending_treasury_interest_mint_recovery(
     ).await.map_err(ProtocolError::GenericError)
 }
 
+/// Developer-only paginated view of exact Treasury-directed CK stablecoin
+/// transfer obligations and their current recovery phase.
+#[candid_method(query)]
+#[query]
+fn get_pending_treasury_stable_transfer_recovery_page(
+    after_source: Option<rumi_protocol_backend::state::TreasuryStableTransferSource>, limit: u16,
+) -> Result<rumi_protocol_backend::treasury::TreasuryStableTransferRecoveryPage, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous()
+        || caller != rumi_protocol_backend::state::read_state(|s| s.developer_principal) {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+    rumi_protocol_backend::treasury::treasury_stable_transfer_recovery_page(after_source, limit)
+        .map_err(ProtocolError::GenericError)
+}
+
+/// Developer-authorized config resolution or one bounded exact-receipt scan
+/// step. This never changes or blindly retries a frozen transfer tuple.
+#[candid_method(update)]
+#[update]
+async fn advance_pending_treasury_stable_transfer_recovery(op_nonce: u128) -> Result<(), ProtocolError> {
+    rumi_protocol_backend::treasury::advance_pending_treasury_stable_transfer_recovery(
+        op_nonce, ic_cdk::caller(),
+    ).await.map_err(ProtocolError::GenericError)
+}
+
+#[candid_method(update)]
+#[update]
+fn resolve_pending_treasury_stable_transfer(op_nonce: u128) -> Result<(), ProtocolError> {
+    rumi_protocol_backend::treasury::resolve_pending_treasury_stable_transfer(
+        op_nonce, ic_cdk::caller(),
+    ).map_err(ProtocolError::GenericError)
+}
+
 /// Retry a retained borrowing-fee mint with its original ledger tuple, or
 /// retry its idempotent treasury deposit notification.
 #[candid_method(update)]

@@ -2471,6 +2471,53 @@ pub enum TreasuryInterestMintPhase {
     AwaitingHistoryFloor,
 }
 
+/// Source identity for a Treasury-directed CK stablecoin transfer. The key is
+/// derived from the inbound ledger and block plus the accounting lane/index;
+/// completed rows remain as tombstones so replayed source events cannot queue
+/// the same transfer twice.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, Serialize)]
+pub struct TreasuryStableTransferSource {
+    pub ledger: Principal,
+    pub block_index: u64,
+    pub lane: String,
+    pub slot: u32,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct TreasuryStableTransferJournal {
+    pub source: TreasuryStableTransferSource,
+    pub ledger: Principal,
+    pub treasury: Option<Principal>,
+    pub asset_type: crate::treasury::AssetType,
+    pub deposit_type: crate::treasury::DepositType,
+    pub amount_e6s: u64,
+    pub fee_e6s: Option<u64>,
+    #[serde(default)]
+    pub history_floor: Option<u64>,
+    #[serde(default)]
+    pub recovery_scan: Option<BorrowMintAbsenceScan>,
+    #[serde(default)]
+    pub expiry_proven: bool,
+    pub memo: [u8; 16],
+    pub created_at_time_ns: u64,
+    pub op_nonce: u128,
+    pub phase: TreasuryStableTransferPhase,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum TreasuryStableTransferPhase {
+    AwaitingPreflight,
+    TransferPending,
+    NotifyPending { block_index: u64 },
+    ConfigurationHold,
+    /// Never retry a transfer after TooOld/expired ambiguity without exact
+    /// positive ICRC-3 evidence.
+    ReceiptRecoveryRequired,
+    /// Exact token receipt is known, but Treasury config differs from the
+    /// frozen destination/ledger. Requires reviewed resolution.
+    ConfigurationReviewRequired { block_index: u64 },
+}
+
 /// Durable debt reservation for one borrow whose icUSD mint has not yet been
 /// applied to the vault. Rows are held across ambiguous outcomes and upgrades.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -3357,6 +3404,17 @@ pub struct State {
     /// Durable interest mints to Treasury, keyed by the frozen operation nonce.
     #[serde(default)]
     pub pending_treasury_interest_mints: BTreeMap<u128, TreasuryInterestMintJournal>,
+    /// Exact CK stablecoin Treasury transfers. Completed source rows are kept
+    /// as replay tombstones to prevent a repeated source callback enqueueing
+    /// the same obligation.
+    #[serde(default)]
+    pub pending_treasury_stable_transfers: BTreeMap<TreasuryStableTransferSource, TreasuryStableTransferJournal>,
+    #[serde(default)]
+    pub treasury_stable_transfer_retry_cursor: Option<TreasuryStableTransferSource>,
+    /// Compact durable dedup tombstones retain only the source key and the
+    /// confirmed ledger block after the full pending journal is completed.
+    #[serde(default)]
+    pub completed_treasury_stable_transfer_sources: BTreeMap<TreasuryStableTransferSource, Option<u64>>,
     /// Unadmitted stablecoin-interest fallbacks. Every credit and drain has a
     /// private replay event; unlike the legacy aggregate this survives event
     /// log recovery if a stable snapshot cannot be loaded.
@@ -4056,6 +4114,9 @@ impl Default for State {
             borrowing_fee_curve: None,
             pending_interest_for_pools: BTreeMap::new(),
             pending_treasury_interest_mints: BTreeMap::new(),
+            pending_treasury_stable_transfers: BTreeMap::new(),
+            treasury_stable_transfer_retry_cursor: None,
+            completed_treasury_stable_transfer_sources: BTreeMap::new(),
             pending_treasury_interest_fallback_e8s: 0,
             pending_stability_pool_interest_fallback_e8s: BTreeMap::new(),
             treasury_interest_mint_retry_cursor: 0,
@@ -4362,6 +4423,9 @@ impl From<InitArg> for State {
             // Periodic interest distribution
             pending_interest_for_pools: BTreeMap::new(),
             pending_treasury_interest_mints: BTreeMap::new(),
+            pending_treasury_stable_transfers: BTreeMap::new(),
+            treasury_stable_transfer_retry_cursor: None,
+            completed_treasury_stable_transfer_sources: BTreeMap::new(),
             pending_treasury_interest_fallback_e8s: 0,
             pending_stability_pool_interest_fallback_e8s: BTreeMap::new(),
             treasury_interest_mint_retry_cursor: 0,
