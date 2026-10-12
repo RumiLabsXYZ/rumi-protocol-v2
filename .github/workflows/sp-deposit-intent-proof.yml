@@ -43,6 +43,21 @@ jobs:
           chmod +x "$RUNNER_TEMP/pocket-ic"
       - name: Build exact test Wasms
         run: cargo +1.92.0 build --release --target wasm32-unknown-unknown --locked -p stability_pool -p flaky_ledger
+      - name: Select rlib-only host test builds
+        run: |
+          # The canister Wasms above use the unchanged manifests. Linux cannot
+          # link native cdylibs with ICP's spaced canister export names; the
+          # host test needs only the rlibs alongside those exact Wasms.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          for name in ("stability_pool", "rumi_3pool"):
+              manifest = Path(f"src/{name}/Cargo.toml")
+              source = manifest.read_text()
+              old = 'crate-type = ["cdylib", "rlib"]'
+              assert source.count(old) == 1, f"unexpected {name} crate types"
+              manifest.write_text(source.replace(old, 'crate-type = ["rlib"]'))
+          PY
       - name: Prove archived deposit recovery across upgrade
         env:
           POCKET_IC_BIN: ${{ runner.temp }}/pocket-ic
