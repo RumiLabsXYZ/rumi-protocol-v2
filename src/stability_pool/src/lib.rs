@@ -1321,24 +1321,35 @@ pub fn icrc21_canister_call_consent_message(
 ) -> Icrc21ConsentMessageResponse {
     let message_text = match request.method.as_str() {
         "deposit" => {
-            match candid::decode_args::<(Principal, u64)>(&request.arg) {
-                Ok((token_ledger, amount)) => {
+            "## Legacy Stability Pool Deposit Unavailable\n\n\
+             This older deposit method is disabled. Update the app to use a retry-safe deposit intent."
+                .to_string()
+        }
+        "deposit_with_intent" => {
+            match candid::decode_args::<(u64, Principal, u64)>(&request.arg) {
+                Ok((intent_seq, token_ledger, amount)) => {
                     let (symbol, decimals) = read_state(|s| {
                         s.stablecoin_registry
                             .get(&token_ledger)
                             .map(|c| (c.symbol.clone(), c.decimals))
                             .unwrap_or_else(|| (format!("token {}", token_ledger), 8))
                     });
-                    let formatted = format_token_amount(amount, decimals);
                     format!(
                         "## Deposit to Stability Pool\n\n\
-                         You are depositing **{} {}** into the Rumi Protocol Stability Pool.\n\n\
-                         Your deposit earns liquidation rewards proportional to your share of the pool.",
-                        formatted, symbol
+                         You are depositing **{} {}** into the Rumi Protocol Stability Pool. \
+                         Intent #{} keeps retries tied to this same transfer.",
+                        format_token_amount(amount, decimals),
+                        symbol,
+                        intent_seq
                     )
                 }
-                Err(_) => "Deposit stablecoins into the Rumi Protocol Stability Pool.".to_string(),
+                Err(_) => "Deposit stablecoins into the Rumi Protocol Stability Pool with a retry-safe intent.".to_string(),
             }
+        }
+        "get_deposit_intent" => {
+            "## Check Stability Pool Deposit\n\n\
+             You are checking the status of your pending deposit so the app can safely resume or finish it."
+                .to_string()
         }
         "withdraw" => {
             match candid::decode_args::<(Principal, u64)>(&request.arg) {
