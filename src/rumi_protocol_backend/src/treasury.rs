@@ -1472,10 +1472,59 @@ async fn distribute_interest_at(interest: ICUSD, collateral_type: Principal, now
 
     let total_e8s = interest.to_u64();
 
-    // Claim every ledger-minted share before the first await. Each row owns
-    // the exact ledger tuple even if the mint reply is lost or this canister
-    // upgrades while the call is outstanding.
+    // Reserve every asynchronous side effect before the first await. Each
+    // journal owns its exact tuple even if an earlier recipient's call traps
+    // this callback or the canister upgrades while a call is outstanding.
+    let (interest_jobs, amm1_jobs, amm1_missing) = reserve_interest_distribution_jobs(
+        total_e8s,
+        collateral_type,
+        &split,
+        three_pool,
+        now,
+    );
+    for (index, recipient) in split.iter().enumerate() {
+        let share_e8s = ((total_e8s as u128) * (recipient.bps as u128) / 10_000) as u64;
+        if share_e8s == 0 {
+            continue;
+        }
+        if matches!(
+            recipient.destination,
+            crate::state::InterestDestination::Amm1
+        ) && !amm1_missing {
+            match amm1_jobs.get(&index).copied().flatten() {
+                Some(notify_nonce) => process_amm1_donation(notify_nonce).await,
+                None => {
+                    // Reservation failure is held or restored synchronously.
+                    // Never allocate a replacement identity after an await.
+                }
+            }
+            continue;
+        }
+        if let Some(Some(op_nonce)) = interest_jobs.get(&index) {
+            process_treasury_interest_mint(*op_nonce).await;
+        }
+    }
+    ICUSD::new(0)
+}
+
+/// Reserve every mint and AMM1 donation for a distribution synchronously.
+/// `None` in the AMM1 map means the share was held or restored without an
+/// external call; it must not be assigned a new nonce later in the flow.
+fn reserve_interest_distribution_jobs(
+    total_e8s: u64,
+    collateral_type: Principal,
+    split: &[crate::state::InterestRecipient],
+    three_pool: Option<Principal>,
+    now: u64,
+) -> (
+    BTreeMap<usize, Option<u128>>,
+    BTreeMap<usize, Option<u64>>,
+    bool,
+) {
+    // Each row owns its exact ledger tuple even if a call reply is lost or
+    // this canister upgrades while the call is outstanding.
     let mut interest_jobs: BTreeMap<usize, Option<u128>> = BTreeMap::new();
+    let mut amm1_jobs: BTreeMap<usize, Option<u64>> = BTreeMap::new();
     let amm1_missing = read_state(|s| s.amm1_canister.is_none());
     for (index, recipient) in split.iter().enumerate() {
         let (journaled, target) = match &recipient.destination {
@@ -1502,13 +1551,32 @@ async fn distribute_interest_at(interest: ICUSD, collateral_type: Principal, now
                     principal, crate::state::TreasuryInterestMintRoute::Treasury,
                 )))
             }),
-            _ => (false, None),
+            crate::state::InterestDestination::Amm1 => (true, None),
         };
         if !journaled {
             continue;
         }
         let share_e8s = ((total_e8s as u128) * (recipient.bps as u128) / 10_000) as u64;
         if share_e8s == 0 {
+            continue;
+        }
+        if matches!(
+            recipient.destination,
+            crate::state::InterestDestination::Amm1
+        ) && !amm1_missing {
+            let notify_nonce = match start_amm1_donation_at(share_e8s, now) {
+                Ok(Some(notify_nonce)) => Some(notify_nonce),
+                Ok(None) => {
+                    // Configuration changed since the route snapshot. There
+                    // is no durable AMM1 row, so preserve only this share.
+                    crate::state::mutate_state(|state| {
+                        state.restore_pending_interest_for_pool(collateral_type, share_e8s)
+                    });
+                    None
+                }
+                Err(()) => None, // The existing held-donation row owns it.
+            };
+            amm1_jobs.insert(index, notify_nonce);
             continue;
         }
         let nonce = target.and_then(|(destination, route)| {
@@ -1529,56 +1597,7 @@ async fn distribute_interest_at(interest: ICUSD, collateral_type: Principal, now
         }
         interest_jobs.insert(index, nonce);
     }
-
-    for (index, recipient) in split.iter().enumerate() {
-        let share_e8s = ((total_e8s as u128) * (recipient.bps as u128) / 10_000) as u64;
-        if share_e8s == 0 {
-            continue;
-        }
-        match &recipient.destination {
-            crate::state::InterestDestination::StabilityPool => {
-                if let Some(op_nonce) = interest_jobs.get(&index).copied().flatten() {
-                    process_treasury_interest_mint(op_nonce).await;
-                }
-            }
-            crate::state::InterestDestination::Treasury => {
-                if let Some(op_nonce) = interest_jobs.get(&index).copied().flatten() {
-                    process_treasury_interest_mint(op_nonce).await;
-                }
-            }
-            crate::state::InterestDestination::ThreePool => {
-                if let Some(op_nonce) = interest_jobs.get(&index).copied().flatten() {
-                    process_treasury_interest_mint(op_nonce).await;
-                }
-            }
-            crate::state::InterestDestination::Amm1 => {
-                if amm1_missing {
-                    log!(INFO, "[treasury] AMM1 interest share ({} icUSD) has no target; using reserved Treasury fallback", share_e8s);
-                    if let Some(op_nonce) = interest_jobs.get(&index).copied().flatten() {
-                        process_treasury_interest_mint(op_nonce).await;
-                    }
-                    continue;
-                }
-                match start_amm1_donation(share_e8s) {
-                    Ok(Some(notify_nonce)) => {
-                        process_amm1_donation(notify_nonce).await;
-                        // Keep this outside pending_interest_for_pools: that
-                        // bucket would re-split the obligation on retry.
-                    }
-                    Ok(None) => {
-                        // Configuration disappeared after the initial route
-                        // snapshot. No Treasury fallback was reserved then.
-                        crate::state::mutate_state(|s| {
-                            s.restore_pending_interest_for_pool(collateral_type, share_e8s)
-                        });
-                        log!(INFO, "[treasury] AMM1 target changed; retained {} icUSD in pending interest", share_e8s);
-                    }
-                    Err(()) => log!(INFO, "[treasury] AMM1 interest share ({}) held: AMM1 pool ID is missing", share_e8s),
-                }
-            }
-        }
-    }
-    ICUSD::new(0)
+    (interest_jobs, amm1_jobs, amm1_missing)
 }
 
 /// Distribute stablecoin-denominated interest revenue.
@@ -1641,6 +1660,12 @@ async fn distribute_stablecoin_interest_at(
         interest_e8s,
         &split,
         three_pool,
+        now,
+    );
+    let amm1_jobs = reserve_stablecoin_amm1_donations(
+        interest_e8s,
+        &split,
+        amm1_missing,
         now,
     );
     for recipient in &split {
@@ -1721,16 +1746,12 @@ async fn distribute_stablecoin_interest_at(
                     log!(INFO, "[treasury] AMM1 interest fallback ({} icUSD) queued for Treasury", share_e8s);
                     continue;
                 }
-                match start_amm1_donation(share_e8s) {
-                    Ok(Some(notify_nonce)) => process_amm1_donation(notify_nonce).await,
-                    Ok(None) => {
-                        // The target changed after this distribution began.
-                        // No Treasury fallback was pre-queued, so retain it
-                        // now instead of silently dropping the share.
-                        queue_treasury_interest_fallback(share_e8s);
-                        log!(INFO, "[treasury] AMM1 target changed; queued {} icUSD for Treasury", share_e8s);
-                    }
-                    Err(()) => log!(INFO, "[treasury] AMM1 stablecoin interest share ({}) held: AMM1 pool ID is missing", share_e8s),
+                if let Some(notify_nonce) = amm1_jobs.get(&index).copied().flatten() {
+                    process_amm1_donation(notify_nonce).await;
+                } else {
+                    // A missing pool ID is already represented by a durable
+                    // held-donation row; never allocate a replacement here.
+                    log!(INFO, "[treasury] AMM1 stablecoin interest share ({}) held or restored during reservation", share_e8s);
                 }
             }
         }
@@ -1807,6 +1828,36 @@ fn reserve_stablecoin_three_pool_shares(
     jobs
 }
 
+fn reserve_stablecoin_amm1_donations(
+    interest_e8s: u64,
+    split: &[crate::state::InterestRecipient],
+    amm1_missing: bool,
+    now: u64,
+) -> BTreeMap<usize, Option<u64>> {
+    let mut jobs = BTreeMap::new();
+    for (index, recipient) in split.iter().enumerate() {
+        if recipient.destination != crate::state::InterestDestination::Amm1 {
+            continue;
+        }
+        let share_e8s = ((interest_e8s as u128) * u128::from(recipient.bps) / 10_000) as u64;
+        if share_e8s == 0 || amm1_missing {
+            continue;
+        }
+        let notify_nonce = match start_amm1_donation_at(share_e8s, now) {
+            Ok(Some(notify_nonce)) => Some(notify_nonce),
+            Ok(None) => {
+                // No stablecoin source bucket exists for this callback. Keep
+                // the already-earned share in the existing Treasury fallback.
+                queue_treasury_interest_fallback(share_e8s);
+                None
+            }
+            Err(()) => None, // The exact share is owned by the held row.
+        };
+        jobs.insert(index, notify_nonce);
+    }
+    jobs
+}
+
 /// Candid-compatible mirror of the additive ThreePool donation receipt error.
 #[derive(CandidType, Deserialize, Clone, Debug)]
 enum ThreePoolDonationReceiptError {
@@ -1826,12 +1877,8 @@ enum ThreePoolDonationReceiptError {
 }
 
 /// Record the exact transfer and notification tuple before any await. None
-/// means AMM1 is not configured and the existing treasury fallback applies;
-/// Err means AMM1 exists but the pool ID is missing, so the share is held.
-fn start_amm1_donation(amount_e8s: u64) -> Result<Option<u64>, ()> {
-    start_amm1_donation_at(amount_e8s, ic_cdk::api::time())
-}
-
+/// means AMM1 is not configured; Err means AMM1 exists but the pool ID is
+/// missing, so the share is held.
 fn start_amm1_donation_at(amount_e8s: u64, now: u64) -> Result<Option<u64>, ()> {
     crate::state::mutate_state(|s| {
         let Some(amm_canister) = s.amm1_canister else {
@@ -2651,7 +2698,8 @@ mod treasury_interest_mint_tests {
         advance_pending_treasury_interest_mint_recovery_with, distribute_interest_at,
         distribute_stablecoin_interest_at, process_treasury_interest_mint_with_now,
         admit_stability_pool_interest_fallback_at, reserve_stablecoin_sp_interest_shares,
-        reserve_stablecoin_three_pool_shares,
+        reserve_stablecoin_amm1_donations, reserve_stablecoin_three_pool_shares,
+        reserve_interest_distribution_jobs,
         start_routed_interest_mint_at, start_treasury_interest_mint_at,
         TreasuryInterestMintFailure, TREASURY_INTEREST_AUTO_RETRY_MAX_AGE_NS,
     };
@@ -2669,6 +2717,114 @@ mod treasury_interest_mint_tests {
         state.treasury_principal = Some(Principal::from_slice(&[2]));
         state.developer_principal = Principal::from_slice(&[9]);
         state::replace_state(state);
+    }
+
+    #[test]
+    fn amm1_share_is_journaled_before_first_recipient_await() {
+        configured_state();
+        let collateral = Principal::from_slice(&[3]);
+        state::mutate_state(|s| {
+            s.stability_pool_canister = Some(Principal::from_slice(&[4]));
+            s.amm1_canister = Some(Principal::from_slice(&[5]));
+            s.amm1_pool_id = Some("pool".to_string());
+            s.interest_split = vec![
+                InterestRecipient { destination: InterestDestination::StabilityPool, bps: 7_500 },
+                InterestRecipient { destination: InterestDestination::Amm1, bps: 2_500 },
+            ];
+            s.pending_interest_for_pools.insert(collateral, 10_000);
+            assert_eq!(s.take_pending_interest_for_pool(collateral), 10_000);
+        });
+        let split = state::read_state(|s| s.interest_split.clone());
+
+        // This is the synchronous pre-await reservation pass used by
+        // distribute_interest_at. Simulate interruption at the first await:
+        // no processor runs, but every share already has a durable owner.
+        let reservations = std::cell::RefCell::new(None);
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            futures::executor::block_on(async {
+                reservations.replace(Some(reserve_interest_distribution_jobs(
+                    10_000, collateral, &split, None, 1_000,
+                )));
+                async { panic!("simulated trap at first recipient await") }.await;
+            });
+        }));
+        assert!(interrupted.is_err());
+
+        let (mint_jobs, amm1_jobs, amm1_missing) = reservations.into_inner().unwrap();
+        assert!(!amm1_missing);
+        let mint_nonce = mint_jobs[&0].expect("SP mint reservation");
+        let donation_nonce = amm1_jobs[&1].expect("AMM1 donation reservation");
+        let sp_amount = state::read_state(|s| {
+            s.pending_treasury_interest_mints[&mint_nonce].tuple.amount_e8s
+        });
+        let donation_amount = state::read_state(|s| {
+            s.pending_amm1_donation_operations[&donation_nonce].amount_e8s
+        });
+        assert_eq!(sp_amount, 7_500);
+        assert_eq!(donation_amount, 2_500);
+        assert_eq!(sp_amount + donation_amount, 10_000);
+        assert_eq!(
+            state::read_state(|s| s
+                .pending_interest_for_pools
+                .get(&collateral)
+                .copied()
+                .unwrap_or(0)),
+            0
+        );
+        assert_eq!(state::read_state(|s| s.pending_amm1_donation_operations.len()), 1);
+    }
+
+    #[test]
+    fn stablecoin_amm1_share_is_journaled_before_first_recipient_await() {
+        configured_state();
+        let collateral = Principal::from_slice(&[3]);
+        let stability_pool = Principal::from_slice(&[4]);
+        state::mutate_state(|s| {
+            s.stability_pool_canister = Some(stability_pool);
+            s.amm1_canister = Some(Principal::from_slice(&[5]));
+            s.amm1_pool_id = Some("pool".to_string());
+            s.interest_split = vec![
+                InterestRecipient { destination: InterestDestination::StabilityPool, bps: 7_500 },
+                InterestRecipient { destination: InterestDestination::Amm1, bps: 2_500 },
+            ];
+        });
+        let split = state::read_state(|s| s.interest_split.clone());
+
+        // Both reservation helpers are called before stablecoin distribution's
+        // first await. Simulate interruption there and verify that both source
+        // shares already have exact durable owners.
+        let reservations = std::cell::RefCell::new(None);
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            futures::executor::block_on(async {
+                let sp_jobs = reserve_stablecoin_sp_interest_shares(
+                    10_000,
+                    collateral,
+                    &split,
+                    Some(stability_pool),
+                    1_000,
+                );
+                let amm1_jobs = reserve_stablecoin_amm1_donations(10_000, &split, false, 1_000);
+                reservations.replace(Some((sp_jobs, amm1_jobs)));
+                async { panic!("simulated trap at first recipient await") }.await;
+            });
+        }));
+        assert!(interrupted.is_err());
+
+        let (sp_jobs, amm1_jobs) = reservations.into_inner().unwrap();
+        let sp_nonce = sp_jobs[&0];
+        let donation_nonce = amm1_jobs[&1].expect("AMM1 donation reservation");
+        let (sp_amount, sp_destination) = state::read_state(|s| {
+            let row = &s.pending_treasury_interest_mints[&sp_nonce];
+            (row.tuple.amount_e8s, row.tuple.destination)
+        });
+        let donation_amount = state::read_state(|s| {
+            s.pending_amm1_donation_operations[&donation_nonce].amount_e8s
+        });
+        assert_eq!(sp_destination, stability_pool);
+        assert_eq!(sp_amount, 7_500);
+        assert_eq!(donation_amount, 2_500);
+        assert_eq!(sp_amount + donation_amount, 10_000);
+        assert_eq!(state::read_state(|s| s.pending_amm1_donation_operations.len()), 1);
     }
 
     fn arm_mint(nonce: u128) {
