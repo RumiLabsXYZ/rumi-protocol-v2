@@ -1898,7 +1898,10 @@ pub async fn redeem_reserves(
         }
     }
 
-    // Transfer fee to treasury (if configured), otherwise fee stays in reserves
+    // Transfer fee to treasury (if configured), otherwise fee stays in reserves.
+    // This legacy path remains unchanged until the reserve payout has its own
+    // durable exact-receipt saga; its current one-shot payout/refund risk is
+    // tracked separately from the stable Treasury outbox routes.
     if fee_e6s > 0 {
         if let Some(treasury_principal) = treasury {
             if let Err(e) =
@@ -8892,11 +8895,30 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
         }
     };
 
+    // Pin the exact ledger used by the incoming pull before the await.
+    let stable_ledger = read_state(|s| match arg.token_type {
+        StableTokenType::CKUSDT => s.ckusdt_ledger_principal,
+        StableTokenType::CKUSDC => s.ckusdc_ledger_principal,
+    });
     // Transfer the stable token from user (in 6-decimal units)
     match transfer_stable_from(arg.token_type.clone(), total_pull_e6s, caller).await {
         Ok(block_index) => {
-            let interest_share =
-                mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
+            let interest_share = mutate_state(|s| {
+                let share = record_repayed_to_vault(s, arg.vault_id, amount, block_index);
+                if let Some(ledger) = stable_ledger {
+                    let (asset, kind) = match arg.token_type {
+                        StableTokenType::CKUSDT => (crate::treasury::AssetType::CKUSDT, crate::treasury::DepositType::InterestRevenue),
+                        StableTokenType::CKUSDC => (crate::treasury::AssetType::CKUSDC, crate::treasury::DepositType::InterestRevenue),
+                    };
+                    let frozen_treasury = s.treasury_principal;
+                    crate::treasury::admit_treasury_stable_transfer_in_state(
+                        s,
+                        crate::state::TreasuryStableTransferSource { ledger, block_index, lane: "stable_repay_surcharge".into(), slot: 0 },
+                        ledger, frozen_treasury, fee_e6s, asset, kind,
+                    );
+                }
+                share
+            });
 
             // Route interest via N-way split (stablecoin-denominated)
             if interest_share.to_u64() > 0 {
@@ -8904,45 +8926,12 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
                     interest_share.to_u64(),
                     vault.collateral_type,
                     arg.token_type.clone(),
+                    block_index,
+                    stable_ledger.expect("successful stable pull must have a ledger"),
                 )
                 .await;
             }
 
-            // Route fee surcharge to treasury as stablecoins
-            if fee_e6s > 0 {
-                let (treasury, stable_ledger) = read_state(|s| {
-                    let ledger = match arg.token_type {
-                        StableTokenType::CKUSDT => s.ckusdt_ledger_principal,
-                        StableTokenType::CKUSDC => s.ckusdc_ledger_principal,
-                    };
-                    (s.treasury_principal, ledger)
-                });
-                if let (Some(treasury_principal), Some(stable_ledger)) = (treasury, stable_ledger) {
-                    match management::transfer_collateral(
-                        fee_e6s,
-                        treasury_principal,
-                        stable_ledger,
-                    )
-                    .await
-                    {
-                        Ok(block) => {
-                            log!(
-                                INFO,
-                                "[repay_with_stable] Transferred {} e6s fee to treasury (block {})",
-                                fee_e6s,
-                                block
-                            );
-                        }
-                        Err(e) => {
-                            // Non-critical: fee stays in reserves if transfer fails
-                            log!(INFO,
-                                "[repay_with_stable] Fee transfer to treasury failed: {:?}. Fee remains in reserves.",
-                                e
-                            );
-                        }
-                    }
-                }
-            }
 
             guard_principal.complete();
             Ok(block_index)
@@ -10996,6 +10985,11 @@ pub async fn liquidate_vault_partial_with_stable(
             }
         };
 
+    // Pin the exact ledger used by the incoming stablecoin pull before await.
+    let stable_transfer_ledger = read_state(|s| match token_type {
+        StableTokenType::CKUSDT => s.ckusdt_ledger_principal,
+        StableTokenType::CKUSDC => s.ckusdc_ledger_principal,
+    });
     let stable_block_index =
         match transfer_stable_from(token_type.clone(), total_pull_e6s, caller).await {
             Ok(block_index) => {
@@ -11018,7 +11012,7 @@ pub async fn liquidate_vault_partial_with_stable(
         };
 
     // Step 3: Update protocol state (partial liquidation)
-    let (interest_share, xrp_claim_id) = mutate_state(|s| {
+    let (interest_share, xrp_claim_id, applied_stable_protocol_cut) = mutate_state(|s| {
         // Compute proportional interest share before reducing debt
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
             if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
@@ -11055,7 +11049,8 @@ pub async fn liquidate_vault_partial_with_stable(
             vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
             vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
-        let payout_to_liquidator = ICP::from(collateral_applied.saturating_sub(protocol_cut));
+        let applied_protocol_cut = protocol_cut.min(collateral_applied);
+        let payout_to_liquidator = ICP::from(collateral_applied.saturating_sub(applied_protocol_cut));
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
         // window log for the mass-liquidation circuit breaker.
@@ -11098,7 +11093,7 @@ pub async fn liquidate_vault_partial_with_stable(
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
             protocol_fee_collateral: if protocol_cut > 0 {
-                Some(protocol_cut.min(collateral_applied))
+                Some(applied_protocol_cut)
             } else {
                 None
             },
@@ -11107,6 +11102,21 @@ pub async fn liquidate_vault_partial_with_stable(
             three_usd_reserves_e8s: None,
         };
         crate::storage::record_event(&event);
+
+        if let Some(ledger) = stable_transfer_ledger {
+            let asset = match token_type {
+                StableTokenType::CKUSDT => crate::treasury::AssetType::CKUSDT,
+                StableTokenType::CKUSDC => crate::treasury::AssetType::CKUSDC,
+            };
+            let frozen_treasury = s.treasury_principal;
+            crate::treasury::admit_treasury_stable_transfer_in_state(
+                s,
+                crate::state::TreasuryStableTransferSource {
+                    ledger, block_index: stable_block_index, lane: "stable_liquidation_surcharge".into(), slot: 0,
+                },
+                ledger, frozen_treasury, fee_e6s, asset, crate::treasury::DepositType::LiquidationFee,
+            );
+        }
 
         // Create pending transfer for liquidator reward
         let nonce = s.next_op_nonce();
@@ -11135,7 +11145,7 @@ pub async fn liquidate_vault_partial_with_stable(
             INFO,
             "[liquidate_vault_stable] Partial liquidation completed, pending transfer created"
         );
-        (interest_share, xrp_claim_id)
+        (interest_share, xrp_claim_id, applied_protocol_cut)
     });
 
     // Route interest via N-way split (stablecoin-denominated)
@@ -11144,40 +11154,15 @@ pub async fn liquidate_vault_partial_with_stable(
             interest_share.to_u64(),
             vault.collateral_type,
             token_type.clone(),
+            stable_block_index,
+            stable_transfer_ledger.expect("successful stable pull must have a ledger"),
         )
         .await;
     }
 
-    // Route fee surcharge to treasury as stablecoins (mirrors repay_to_vault_with_stable)
-    if fee_e6s > 0 {
-        let (treasury, stable_ledger) = read_state(|s| {
-            let ledger = match token_type {
-                StableTokenType::CKUSDT => s.ckusdt_ledger_principal,
-                StableTokenType::CKUSDC => s.ckusdc_ledger_principal,
-            };
-            (s.treasury_principal, ledger)
-        });
-        if let (Some(treasury_principal), Some(stable_ledger)) = (treasury, stable_ledger) {
-            match management::transfer_collateral(fee_e6s, treasury_principal, stable_ledger).await
-            {
-                Ok(block) => {
-                    log!(INFO,
-                        "[liquidate_vault_stable] Transferred {} e6s fee surcharge to treasury (block {})",
-                        fee_e6s, block
-                    );
-                }
-                Err(e) => {
-                    log!(INFO,
-                        "[liquidate_vault_stable] Fee surcharge transfer to treasury failed: {:?}. Fee remains in reserves.",
-                        e
-                    );
-                }
-            }
-        }
-    }
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
-    if protocol_cut > 0 {
+    if applied_stable_protocol_cut > 0 {
         if vault.collateral_type == crate::state::xrp_collateral_principal() {
             // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
             // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
@@ -11191,14 +11176,14 @@ pub async fn liquidate_vault_partial_with_stable(
                     dev,
                     vault.owner,
                     vault.vault_id,
-                    protocol_cut.to_u64().unwrap_or(0),
+                    applied_stable_protocol_cut,
                     now_ns,
                 );
             });
         } else {
             let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
             crate::treasury::send_liquidation_fee_to_treasury(
-                protocol_cut,
+                applied_stable_protocol_cut,
                 vault.collateral_type,
                 asset_type,
             )

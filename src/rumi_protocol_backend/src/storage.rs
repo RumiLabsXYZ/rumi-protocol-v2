@@ -523,6 +523,43 @@ mod state_snapshot_tests {
     }
 
     #[test]
+    fn pre_stable_transfer_snapshot_defaults_new_treasury_outbox_fields() {
+        let state = crate::state::State::default();
+        let encoded = encode_state(&state);
+        let mut snapshot: ciborium::value::Value =
+            ciborium::de::from_reader(encoded.as_slice()).expect("decode production State CBOR");
+        let fields = match &mut snapshot {
+            ciborium::value::Value::Map(fields) => fields,
+            other => panic!("State must encode as a CBOR map, got {other:?}"),
+        };
+        let added_fields = [
+            "pending_treasury_stable_transfers",
+            "treasury_stable_transfer_retry_cursor",
+            "completed_treasury_stable_transfer_sources",
+        ];
+        let mut removed = 0;
+        fields.retain(|(key, _)| {
+            let is_added_field = matches!(
+                key,
+                ciborium::value::Value::Text(name) if added_fields.contains(&name.as_str())
+            );
+            removed += usize::from(is_added_field);
+            !is_added_field
+        });
+        assert_eq!(removed, added_fields.len(), "all three new fields must be present before omission");
+
+        let mut older_snapshot = Vec::new();
+        ciborium::ser::into_writer(&snapshot, &mut older_snapshot)
+            .expect("encode older State-shaped CBOR snapshot");
+        let decoded = decode_state_body(&older_snapshot)
+            .expect("snapshot without the new fields must decode through the upgrade codec");
+
+        assert!(decoded.pending_treasury_stable_transfers.is_empty());
+        assert_eq!(decoded.treasury_stable_transfer_retry_cursor, None);
+        assert!(decoded.completed_treasury_stable_transfer_sources.is_empty());
+    }
+
+    #[test]
     fn submitted_p08_default_account_refund_survives_state_snapshot_round_trip() {
         use crate::state::{PendingThreeUsdRefund, ThreeUsdRefundSource};
 
