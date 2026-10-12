@@ -9,6 +9,8 @@ on:
       - src/stability_pool/**
       - src/flaky_ledger/**
       - src/rumi_3pool/**
+      - src/rumi_protocol_backend/**
+      - src/rumi_cycle_manager/**
       - src/ledger/ic-icrc1-ledger.wasm
 
 permissions:
@@ -31,7 +33,7 @@ jobs:
           rustup toolchain install 1.92.0 --profile minimal
           rustup +1.92.0 target add wasm32-unknown-unknown
           sudo apt-get update
-          sudo apt-get install -y libclang-dev
+          sudo apt-get install -y libclang-dev protobuf-compiler
       - name: Install pinned PocketIC server
         run: |
           curl --fail --location --retry 3 --output "$RUNNER_TEMP/pocket-ic.gz" \
