@@ -2,8 +2,8 @@
   const report = {
     date: 'October 12, 2026',
     datetime: '2026-10-12',
-    source: 'origin/main through PR #551',
-    snapshot: '3pool and Points upgrades with module readback · October 12, 2026'
+    source: 'origin/main through PR #552',
+    snapshot: '3pool, Points, and AMM upgrades with module readback · October 12, 2026'
   };
 
   const states = [
@@ -41,9 +41,9 @@
     {
       pr: '#507',
       title: 'AMM transfer and payout recovery',
-      summary: 'Merged into main on October 12. The source journals inbound pulls and outbound payouts before ledger calls and keeps uncertain outcomes held. A follow-up hash-gated PocketIC test in PR #538 passed 1/1: an official-ledger native ICP payout committed, AMM callback processing trapped before recording its receipt, and public exact-block recovery after upgrade recorded the existing transfer without a second payout. This covers that callback-trap path; it does not establish complete historical-liability recovery or restored trading. Production swap and deposit routes in this candidate remain held. The October 12 mainnet module hash remained 832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2, and a fresh query confirmed maintenance mode was still active. The recovery source is not installed, and no historical liability was settled by this merge.',
-      state: 'Merged · not installed',
-      tone: 'held',
+      summary: 'Merged and installed on October 12 as module SHA-256 1f3fddd44fb7832585c9a45d0b46ef607805381531c71f71a8d517a7eddabf6a. The source journals inbound pulls and outbound payouts before ledger calls and holds uncertain outcomes. A hash-gated PocketIC test in PR #538 recovered one official-ledger native ICP payout after a callback trap without paying twice; it does not prove every reply-loss path. The canister was stopped, a fresh snapshot was verified, and the reviewed Wasm was installed before restart. Immediate readback matched the pre-upgrade pool, LP, rewards, events, claims, maintenance setting, and three checked ledger balances. The new unresolved-payout journal was empty. Swap and deposit routes remain held, while exits and reward claims remain callable. The ICP pool account holds 540,000 raw units above its tracked reserve; the icUSD reward account holds 900,021 raw units whose historical obligations remain unattributed. Installation did not settle those balances or restore trading.',
+      state: 'Installed · recovery available · trading held',
+      tone: 'installed',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/507'
     },
     {
@@ -121,8 +121,8 @@
     {
       pr: '#504',
       title: '3USD account boundary and AMM custody',
-      summary: 'Source merged on October 10. The matching Rumi AMM upgrade remains installed at module SHA-256 832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2 on October 12. Its single 3USD/ICP pool retained its reserves and LP supply, with no pending claims, and its 3USD ledger balance matched the reserve at the earlier readback. AMM maintenance mode was enabled on October 10 and a fresh October 12 query confirmed it was still active. The later PR #507 recovery source remains uninstalled. The October 12 3pool upgrade includes the account guard; backend V1/V2 cutover and historical account compatibility remain under review.',
-      state: 'AMM installed · maintenance on · 3pool guard installed',
+      summary: 'Source merged on October 10. The AMM installation at SHA-256 832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2 was superseded by the October 12 recovery upgrade above. The single 3USD/ICP pool retained its reserves and LP supply; its 3USD ledger balance matched the tracked reserve at the latest readback. AMM maintenance remains active. The October 12 3pool upgrade includes the account guard; backend V1/V2 cutover and historical account compatibility remain under review.',
+      state: 'AMM installation superseded · 3pool guard installed',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/504'
     },
@@ -204,7 +204,7 @@
     {
       system: 'AMM',
       status: 'Maintenance mode active',
-      detail: 'An October 12 query confirmed maintenance mode remained active. New swaps and liquidity deposits are held while transfer recovery is reviewed. The installed canister leaves the liquidity withdrawal route callable during maintenance. The merged PR #507 source is not installed, and this hold does not establish settlement of any historical transfer.'
+      detail: 'The October 12 AMM upgrade installed the PR #507 recovery source, with maintenance mode still active. New swaps and liquidity deposits remain held; liquidity exits and reward claims remain callable. Exact payout recovery is available for journaled transfers, but the upgrade did not settle a historical liability or explain the pre-existing ledger balances.'
     },
     {
       system: 'Points',
@@ -244,10 +244,11 @@
             This snapshot separates merged source from mainnet installation. October 12
             readbacks confirmed the new 3pool module from PRs #540 and #541, with unchanged
             LP supply and reserves. The Points upgrade now withholds the unfinished B snapshot
-            time, while epoch 18 remains held with its driver off. The earlier backend, bot, AMM, Treasury, and Stability Pool
-            modules remained; AMM maintenance and the Stability Pool pause were active.
+            time, while epoch 18 remains held with its driver off. The AMM recovery upgrade now
+            runs with its pre-upgrade pool and ledger state preserved; trading and deposits remain held.
+            The earlier backend, bot, Treasury, and Stability Pool modules remained, and the Stability Pool pause stayed active.
             Borrowing had resumed under a temporary cap at the October 11 readback, and that
-            cap still reported 22,000 icUSD on October 12. PRs #531 and #507 remain source-only;
+            cap still reported 22,000 icUSD on October 12. PR #531 remains source-only;
             the backend and Stability Pool changes in PR #532 remain uninstalled. PR #545's
             Stability Pool deposit-intent fix is merged but also remains uninstalled.
           </p>
@@ -255,7 +256,7 @@
         <aside class="report-stamp" aria-label={report.snapshot}>
           <span class="stamp-label">Publication state</span>
           <strong>{report.snapshot}</strong>
-          <p>The October 12 upgrades installed the final 3pool artifact from PRs #540 and #541 and the Points timing-redaction fix. The 3pool module hash is SHA-256 74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae; the Points hash is listed below. The Stability Pool remained paused and the AMM stayed in maintenance mode. The borrowing cap remained 22,000 icUSD; remaining debt capacity was last checked on October 11. This page combines time-scoped records; it is not live telemetry.</p>
+          <p>The October 12 upgrades installed the final 3pool artifact from PRs #540 and #541, the Points timing-redaction fix, and the AMM recovery upgrade. Their module hashes and readbacks are listed below. The Stability Pool remained paused and the AMM stayed in maintenance mode, with swaps and deposits held. The borrowing cap remained 22,000 icUSD; remaining debt capacity was last checked on October 11. This page combines time-scoped records; it is not live telemetry.</p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
@@ -284,7 +285,7 @@
       <div class="section-heading section-heading-wide">
         <p class="section-label">Selected changes</p>
         <h2 id="updates-title">Change and release status</h2>
-        <p>This October 12 snapshot reports the highest evidence stage available for each change. The 3pool release includes PR #535 recovery source and the final PR #540/#541 artifact; PRs #507 and #545 remain merged source only. A source merge and a live installation remain separate states.</p>
+        <p>This October 12 snapshot reports the highest evidence stage available for each change. The 3pool release includes PR #535 recovery source and the final PR #540/#541 artifact; the AMM recovery source from PR #507 is now installed, while PR #545 remains merged source only. A source merge and a live installation remain separate states.</p>
       </div>
       <div class="change-list">
         {#each changes as item}
