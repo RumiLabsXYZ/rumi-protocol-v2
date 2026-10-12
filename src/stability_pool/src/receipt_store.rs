@@ -7,6 +7,7 @@
 //! completed receipts live in an append-only StableBTreeMap.
 
 use candid::{CandidType, Decode, Encode, Principal};
+use ic_canister_log::log;
 use ic_stable_structures::{
     memory_manager::{MemoryId, MemoryManager, VirtualMemory},
     storable::Bound,
@@ -22,13 +23,15 @@ use crate::{
 
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 type ReceiptMap = StableBTreeMap<(Principal, u64), StableReceiptRecord, Memory>;
+type InterestMap = StableBTreeMap<u64, StableInterestMintRecord, Memory>;
 type SnapshotCell = StableCell<Vec<u8>, Memory>;
 type VersionCell = StableCell<u8, Memory>;
 
 const MEM_RECEIPTS: MemoryId = MemoryId::new(0);
 const MEM_SNAPSHOT: MemoryId = MemoryId::new(1);
 const MEM_LAYOUT_VERSION: MemoryId = MemoryId::new(2);
-pub const LAYOUT_VERSION: u8 = 1;
+const MEM_INTEREST_MINT_RECEIPTS: MemoryId = MemoryId::new(3);
+pub const LAYOUT_VERSION: u8 = 2;
 const MAX_LEGACY_SNAPSHOT_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_CLAIM_RECEIPT_PAGE: usize = 100;
 /// The heap snapshot keeps only a small cache; the old history query keeps its
@@ -52,6 +55,35 @@ thread_local! {
     static RECEIPTS: RefCell<Option<ReceiptMap>> = const { RefCell::new(None) };
     static SNAPSHOT: RefCell<Option<SnapshotCell>> = const { RefCell::new(None) };
     static LAYOUT: RefCell<Option<VersionCell>> = const { RefCell::new(None) };
+    static INTEREST_RECEIPTS: RefCell<Option<InterestMap>> = const { RefCell::new(None) };
+}
+
+#[derive(CandidType, Deserialize)]
+struct InterestReceiptEnvelope { version: u8, payload: Vec<u8> }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StableInterestMintRecord { Known(state::InterestMintReceipt), Opaque(Vec<u8>) }
+
+impl Storable for StableInterestMintRecord {
+    const BOUND: Bound = Bound::Unbounded;
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let bytes = match self {
+            Self::Known(receipt) => {
+                let payload = Encode!(receipt).expect("encode SP interest receipt");
+                Encode!(&InterestReceiptEnvelope { version: 1, payload }).expect("encode SP interest receipt envelope")
+            }
+            Self::Opaque(bytes) => bytes.clone(),
+        };
+        Cow::Owned(bytes)
+    }
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let raw = bytes.into_owned();
+        match Decode!(&raw, InterestReceiptEnvelope) {
+            Ok(envelope) if envelope.version == 1 => Decode!(&envelope.payload, state::InterestMintReceipt)
+                .map(Self::Known).unwrap_or(Self::Opaque(raw)),
+            _ => Self::Opaque(raw),
+        }
+    }
 }
 
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,10 +252,148 @@ pub fn init_layout() {
         .expect("initialize SP claim snapshot cell");
     let layout = StableCell::init(manager.get(MEM_LAYOUT_VERSION), 0u8)
         .expect("initialize SP claim layout marker");
+    let interest_receipts = StableBTreeMap::init(manager.get(MEM_INTEREST_MINT_RECEIPTS));
     MEMORY_MANAGER.with(|cell| *cell.borrow_mut() = Some(manager));
     RECEIPTS.with(|cell| *cell.borrow_mut() = Some(receipts));
     SNAPSHOT.with(|cell| *cell.borrow_mut() = Some(snapshot));
     LAYOUT.with(|cell| *cell.borrow_mut() = Some(layout));
+    INTEREST_RECEIPTS.with(|cell| *cell.borrow_mut() = Some(interest_receipts));
+}
+
+fn with_interest_receipts<R>(f: impl FnOnce(&InterestMap) -> R) -> R {
+    INTEREST_RECEIPTS.with(|cell| f(cell.borrow().as_ref().expect("SP interest receipt store not initialized")))
+}
+fn with_interest_receipts_mut<R>(f: impl FnOnce(&mut InterestMap) -> R) -> R {
+    INTEREST_RECEIPTS.with(|cell| f(cell.borrow_mut().as_mut().expect("SP interest receipt store not initialized")))
+}
+
+fn interest_status_for_map<M: ic_stable_structures::Memory>(
+    map: &StableBTreeMap<u64, StableInterestMintRecord, M>,
+    state: &StabilityPoolState,
+    block: u64,
+    payload: &state::InterestMintReceiptPayload,
+    capacity: usize,
+) -> state::InterestMintReceiptStatus {
+    use state::{InterestMintReceiptDisposition as D, InterestMintReceiptStatus as S};
+    if let Some(row) = map.get(&block) {
+        return match row {
+            StableInterestMintRecord::Opaque(_) => S::LegacyUnknown,
+            StableInterestMintRecord::Known(row) => {
+                let Some(old) = row.payload.as_ref() else { return S::LegacyUnknown; };
+                if old != payload { return S::PayloadConflict; }
+                match row.disposition {
+                    D::Distributed | D::Forwarded(_) => S::Duplicate,
+                    D::ForwardPending(id) => S::PendingForward(id),
+                    D::LegacyUnknown | D::LegacyUnknownForward(_) => S::LegacyUnknown,
+                }
+            }
+        };
+    }
+    if state.unallocated_interest_mint_index.as_ref().is_some_and(|i| i.contains_key(&block))
+        || state.legacy_interest_mint_receipt_floor.as_ref().and_then(|f| f.through).is_some_and(|floor| block <= floor) {
+        return S::LegacyUnknown;
+    }
+    if state.unallocated_interest_mint_index.is_none() { return S::OutsideReplayWindow; }
+    if map.len() >= capacity as u64 { return S::CapacityReached; }
+    S::New
+}
+
+pub fn interest_mint_receipt_status(state: &StabilityPoolState, block: u64, payload: &state::InterestMintReceiptPayload) -> state::InterestMintReceiptStatus {
+    with_interest_receipts(|map| interest_status_for_map(map, state, block, payload, state::MAX_INTEREST_MINT_RECEIPTS))
+}
+
+/// Insert one exact accepted receipt. The caller performs this inside the same
+/// IC message/state mutation as the accounting effect; a trap rolls both back.
+pub fn record_interest_mint_receipt(pool: &StabilityPoolState, block: u64, receipt: state::InterestMintReceipt) -> state::InterestMintReceiptStatus {
+    with_interest_receipts_mut(|map| record_interest_for_map(map, pool, block, receipt, state::MAX_INTEREST_MINT_RECEIPTS))
+}
+
+fn record_interest_for_map<M: ic_stable_structures::Memory>(map: &mut StableBTreeMap<u64, StableInterestMintRecord, M>, pool: &StabilityPoolState, block: u64, receipt: state::InterestMintReceipt, capacity: usize) -> state::InterestMintReceiptStatus {
+    use state::InterestMintReceiptStatus as S;
+    let Some(payload) = receipt.payload.as_ref() else { return S::LegacyUnknown; };
+    match interest_status_for_map(map, pool, block, payload, capacity) {
+        S::New => {
+            map.insert(block, StableInterestMintRecord::Known(receipt));
+            if map.len() == state::INTEREST_MINT_RECEIPT_WARNING_THRESHOLD as u64 {
+                log!(crate::logs::INFO, "CL-10 interest receipt capacity warning: {} permanent rows reached the 80% threshold; admission remains fail-closed at hard capacity {} and rows are never pruned", map.len(), state::MAX_INTEREST_MINT_RECEIPTS);
+            }
+            S::New
+        }
+        status => status,
+    }
+}
+
+/// Mark exact forward rows after the Treasury ACK. Unknown legacy rows remain
+/// unknown because their payload cannot be reconstructed from coalesced batches.
+pub fn mark_interest_forwarded(blocks: &[u64], batch_id: u64) {
+    with_interest_receipts_mut(|map| for block in blocks {
+        if let Some(StableInterestMintRecord::Known(mut row)) = map.get(block) {
+            if row.disposition == state::InterestMintReceiptDisposition::ForwardPending(batch_id) {
+                row.disposition = state::InterestMintReceiptDisposition::Forwarded(batch_id);
+                map.insert(*block, StableInterestMintRecord::Known(row));
+            }
+        }
+    });
+}
+
+pub fn migrate_interest_mint_receipts(state: &mut StabilityPoolState) -> Result<(u64, Option<u64>), String> {
+    with_interest_receipts_mut(|map| migrate_interest_map(map, state))
+}
+
+fn migrate_interest_map<M: ic_stable_structures::Memory>(map: &mut StableBTreeMap<u64, StableInterestMintRecord, M>, state: &mut StabilityPoolState) -> Result<(u64, Option<u64>), String> {
+    if let Some(floor) = state.legacy_interest_mint_receipt_floor.as_ref() {
+        return Ok((map.len(), floor.through));
+    }
+    let (through, rows) = state.legacy_interest_mint_receipt_rows();
+    let mut missing = std::collections::BTreeSet::new();
+    for (block, _) in &rows {
+        if !map.contains_key(block) { missing.insert(*block); }
+    }
+    if map.len().saturating_add(missing.len() as u64) > state::MAX_INTEREST_MINT_RECEIPTS as u64 {
+        return Err("legacy interest receipt history exceeds permanent receipt capacity".to_string());
+    }
+    for (block, row) in rows {
+            if let Some(existing) = map.get(&block) {
+                // Upgrade a generic processed tombstone to a forward-owned
+                // tombstone when the same source also appears in an old batch.
+                if let (StableInterestMintRecord::Known(mut old), state::InterestMintReceiptDisposition::LegacyUnknownForward(batch)) =
+                    (existing, &row.disposition)
+                {
+                    if old.payload.is_none() && old.disposition == state::InterestMintReceiptDisposition::LegacyUnknown {
+                        old.disposition = state::InterestMintReceiptDisposition::LegacyUnknownForward(*batch);
+                        map.insert(block, StableInterestMintRecord::Known(old));
+                    }
+                }
+                continue;
+            }
+            map.insert(block, StableInterestMintRecord::Known(row));
+    }
+    state.set_legacy_interest_mint_receipt_floor(through);
+    Ok((map.len(), through))
+}
+
+pub fn interest_mint_receipt_capacity(state: &StabilityPoolState) -> state::InterestMintReceiptCapacity {
+    with_interest_receipts(|map| interest_capacity_for_map(map, state))
+}
+
+fn interest_capacity_for_map<M: ic_stable_structures::Memory>(map: &StableBTreeMap<u64, StableInterestMintRecord, M>, state: &StabilityPoolState) -> state::InterestMintReceiptCapacity {
+    let retained = map.len();
+    let floor = state.legacy_interest_mint_receipt_floor.as_ref().and_then(|f| f.through);
+    let warning = retained >= state::INTEREST_MINT_RECEIPT_WARNING_THRESHOLD as u64;
+    let admission_blocked_reason = if retained >= state::MAX_INTEREST_MINT_RECEIPTS as u64 {
+        Some("permanent_interest_receipt_capacity_reached".to_string())
+    } else if state.unallocated_interest_mint_index.is_none() {
+        Some("legacy_forward_receipt_index_unavailable".to_string())
+    } else {
+        None
+    };
+    state::InterestMintReceiptCapacity {
+        retained: Some(retained), legacy_unknown: None,
+        capacity: state::MAX_INTEREST_MINT_RECEIPTS as u64,
+        warning_threshold: state::INTEREST_MINT_RECEIPT_WARNING_THRESHOLD as u64,
+        warning, accepts_new: admission_blocked_reason.is_none(), admission_blocked_reason,
+        legacy_floor: floor,
+    }
 }
 
 /// A successfully decoded predecessor snapshot may start with bytes that
@@ -672,6 +842,107 @@ mod tests {
     fn map_for(memory: &VectorMemory) -> ReceiptMap {
         let manager = MemoryManager::init(memory.clone());
         StableBTreeMap::init(manager.get(MEM_RECEIPTS))
+    }
+
+    fn interest_map_for(memory: &VectorMemory) -> InterestMap {
+        let manager = MemoryManager::init(memory.clone());
+        StableBTreeMap::init(manager.get(MEM_INTEREST_MINT_RECEIPTS))
+    }
+
+    fn interest_payload(amount: u64) -> state::InterestMintReceiptPayload {
+        state::InterestMintReceiptPayload { token_ledger: Principal::from_slice(&[9]), amount, collateral_type: None }
+    }
+
+    fn exact_distributed(payload: state::InterestMintReceiptPayload) -> state::InterestMintReceipt {
+        state::InterestMintReceipt { payload: Some(payload), disposition: state::InterestMintReceiptDisposition::Distributed }
+    }
+
+    #[test]
+    fn interest_receipts_are_exact_permanent_and_survive_map_reopen() {
+        let memory = VectorMemory::default();
+        let manager = MemoryManager::init(memory.clone());
+        let mut layout = StableCell::init(manager.get(MEM_LAYOUT_VERSION), 0u8).unwrap();
+        layout.set(1).unwrap(); // existing V1 MemoryManager layout
+        drop(layout);
+        let mut map = interest_map_for(&memory);
+        let receipt = exact_distributed(interest_payload(123));
+        let pool = StabilityPoolState::default();
+        assert_eq!(record_interest_for_map(&mut map, &pool, 55, receipt.clone(), 2), state::InterestMintReceiptStatus::New);
+        assert_eq!(record_interest_for_map(&mut map, &pool, 55, receipt.clone(), 2), state::InterestMintReceiptStatus::Duplicate);
+        let conflict = exact_distributed(interest_payload(124));
+        assert_eq!(record_interest_for_map(&mut map, &pool, 55, conflict, 2), state::InterestMintReceiptStatus::PayloadConflict);
+
+        let mut sp = StabilityPoolState::default();
+        let payload = interest_payload(123);
+        assert_eq!(interest_status_for_map(&map, &sp, 55, &payload, 2), state::InterestMintReceiptStatus::Duplicate);
+        let snapshot = Encode!(&sp).unwrap();
+        sp = state::try_decode_state(&snapshot).unwrap();
+        drop(map);
+        let manager = MemoryManager::init(memory.clone());
+        let mut layout = StableCell::init(manager.get(MEM_LAYOUT_VERSION), 0u8).unwrap();
+        assert_eq!(*layout.get(), 1);
+        layout.set(LAYOUT_VERSION).unwrap();
+        drop(layout);
+        let mut reopened = interest_map_for(&memory);
+        let manager = MemoryManager::init(memory.clone());
+        let layout = StableCell::init(manager.get(MEM_LAYOUT_VERSION), 0u8).unwrap();
+        assert_eq!(*layout.get(), 2, "V1 to V2 marker advances without replacing the MemoryId 3 rows");
+        drop(layout);
+        assert_eq!(interest_status_for_map(&reopened, &sp, 55, &payload, 2), state::InterestMintReceiptStatus::Duplicate);
+        assert_eq!(interest_status_for_map(&reopened, &sp, 56, &payload, 2), state::InterestMintReceiptStatus::New);
+        assert_eq!(record_interest_for_map(&mut reopened, &sp, 56, exact_distributed(interest_payload(123)), 2), state::InterestMintReceiptStatus::New);
+        assert_eq!(interest_status_for_map(&reopened, &sp, 57, &payload, 2), state::InterestMintReceiptStatus::CapacityReached);
+    }
+
+    #[test]
+    fn interest_legacy_migration_keeps_evicted_floor_and_forward_rows_unknown() {
+        let memory = VectorMemory::default();
+        let mut map = interest_map_for(&memory);
+        let mut sp = StabilityPoolState::default();
+        sp.legacy_interest_mint_receipt_floor = None;
+        sp.processed_interest_mint_blocks = Some([9_999, 10_000].into_iter().collect());
+        sp.processed_interest_mint_block_high_watermark = None;
+        let id = sp.queue_unallocated_interest_forward_at(10_000, Principal::from_slice(&[9]), 1, 1).unwrap();
+        // Simulate an old state whose index and coalesced forward batch contain
+        // a source ID but whose exact mint payload was never persisted.
+        assert_eq!(id, 0);
+        let (len, floor) = migrate_interest_map(&mut map, &mut sp).unwrap();
+        assert_eq!(floor, Some(10_000));
+        assert_eq!(len, 2);
+        assert_eq!(sp.legacy_interest_mint_receipt_floor.as_ref().unwrap().through, Some(10_000));
+        assert_eq!(interest_status_for_map(&map, &sp, 9_999, &interest_payload(1), 10), state::InterestMintReceiptStatus::LegacyUnknown);
+        assert_eq!(interest_status_for_map(&map, &sp, 7_000, &interest_payload(1), 10), state::InterestMintReceiptStatus::LegacyUnknown);
+        assert_eq!(interest_status_for_map(&map, &sp, 10_001, &interest_payload(1), 10), state::InterestMintReceiptStatus::New);
+        assert!(matches!(map.get(&10_000), Some(StableInterestMintRecord::Known(row)) if matches!(row.disposition, state::InterestMintReceiptDisposition::LegacyUnknownForward(0))));
+
+        let bytes = Encode!(&sp).unwrap();
+        let mut restored = state::try_decode_state(&bytes).unwrap();
+        assert_eq!(migrate_interest_map(&mut map, &mut restored).unwrap().1, Some(10_000));
+        assert_eq!(interest_status_for_map(&map, &restored, 7_000, &interest_payload(1), 10), state::InterestMintReceiptStatus::LegacyUnknown);
+    }
+
+    #[test]
+    fn opaque_interest_row_is_preserved_and_fails_closed() {
+        let memory = VectorMemory::default();
+        let mut map = interest_map_for(&memory);
+        let unknown_bytes = vec![0xff, 0, 4, 9];
+        map.insert(3, StableInterestMintRecord::Opaque(unknown_bytes.clone()));
+        assert_eq!(interest_status_for_map(&map, &StabilityPoolState::default(), 3, &interest_payload(1), 10), state::InterestMintReceiptStatus::LegacyUnknown);
+        assert_eq!(record_interest_for_map(&mut map, &StabilityPoolState::default(), 3, exact_distributed(interest_payload(1)), 10), state::InterestMintReceiptStatus::LegacyUnknown);
+        drop(map);
+        let reopened = interest_map_for(&memory);
+        assert_eq!(reopened.get(&3), Some(StableInterestMintRecord::Opaque(unknown_bytes)));
+    }
+
+    #[test]
+    fn interest_capacity_query_reports_legacy_index_admission_hold() {
+        let memory = VectorMemory::default();
+        let map = interest_map_for(&memory);
+        let mut pool = StabilityPoolState::default();
+        pool.unallocated_interest_mint_index = None;
+        let capacity = interest_capacity_for_map(&map, &pool);
+        assert!(!capacity.accepts_new);
+        assert_eq!(capacity.admission_blocked_reason.as_deref(), Some("legacy_forward_receipt_index_unavailable"));
     }
 
     #[test]
