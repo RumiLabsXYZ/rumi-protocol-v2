@@ -60,6 +60,10 @@ jobs:
           PY
       - name: Prove archived deposit recovery across upgrade
         env:
+          # This host executable imports types from two canister rlibs. Their
+          # unused ICP entrypoint export names overlap; PocketIC runs the
+          # separately built Wasms above, not these host entrypoints.
+          RUSTFLAGS: -C link-arg=-Wl,--allow-multiple-definition
           POCKET_IC_BIN: ${{ runner.temp }}/pocket-ic
           RUMI_SP_WASM_PATH: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/stability_pool.wasm
           RUMI_FLAKY_LEDGER_WASM_PATH: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/flaky_ledger.wasm
