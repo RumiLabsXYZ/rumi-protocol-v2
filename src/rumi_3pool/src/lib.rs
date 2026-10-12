@@ -1196,6 +1196,7 @@ pub async fn reconcile_aged_input(claim_id: u64, block_index: u64) -> Result<(),
     };
 
     crate::payout_reconciliation::verify_exact_input_block(
+        claim_id,
         input.ledger,
         block_index,
         &input,
@@ -1203,6 +1204,9 @@ pub async fn reconcile_aged_input(claim_id: u64, block_index: u64) -> Result<(),
             owner: ic_cdk::id(),
             subaccount: None,
         },
+        entitlement.input_action,
+        entitlement.kind,
+        entitlement.compensation_for,
     )
     .await
     .map_err(|reason| ThreePoolError::TransferFailed {
@@ -1214,10 +1218,13 @@ pub async fn reconcile_aged_input(claim_id: u64, block_index: u64) -> Result<(),
     // input. The guard also excludes competing pool writers during the await.
     let mut current = payouts::get(claim_id).ok_or(ThreePoolError::ClaimNotFound)?;
     if current.input_transfer.as_ref() != Some(&input)
+        || current.input_action != entitlement.input_action
+        || current.kind != entitlement.kind
         || current.compensation_for != entitlement.compensation_for
         || current.settled
         || !matches!(current.input_outcome, Some(crate::payouts::PayoutInputOutcome::Submitted | crate::payouts::PayoutInputOutcome::Unresolved { .. }))
     {
+        crate::storage::input_archive_proofs::remove(claim_id);
         return Err(ThreePoolError::TransferFailed {
             token: entitlement.symbol,
             reason: "input identity changed while exact block evidence was being fetched".into(),

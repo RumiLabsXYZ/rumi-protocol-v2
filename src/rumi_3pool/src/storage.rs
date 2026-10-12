@@ -12,7 +12,7 @@
 //     first time on the new wasm (one-shot drain from the legacy blob) or
 //     subsequent times (load `SlimState` from its cell).
 //
-// Memory ID layout (40 IDs used; 255 available):
+// Memory ID layout (41 IDs used; 255 available):
 //
 //   0       SlimState cell              — bounded residual heap
 //   1       lp_balances                 — BTreeMap<Principal, u128>
@@ -46,6 +46,7 @@
 //   37      lp_allowances_cutover         — one-time legacy approval invalidation
 //   38      donation_receipts_v1          — permanent keyed reserve-accounting receipts
 //   39      payout_archive_proofs          — provisional bounded ICRC-3 chain cursors
+//   40      input_archive_proofs           — provisional bounded ICRC-3 input cursors
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -113,7 +114,9 @@ const MEM_PAYOUT_INPUT_INDEX_COMPLETE: MemoryId = MemoryId::new(36);
 const MEM_LP_ALLOWANCES_CUTOVER: MemoryId = MemoryId::new(37);
 const MEM_DONATION_RECEIPTS_V1: MemoryId = MemoryId::new(38);
 const MEM_PAYOUT_ARCHIVE_PROOFS: MemoryId = MemoryId::new(39);
+const MEM_INPUT_ARCHIVE_PROOFS: MemoryId = MemoryId::new(40);
 const MAX_PAYOUT_ARCHIVE_PROOF_CURSORS: u64 = 64;
+const MAX_INPUT_ARCHIVE_PROOF_CURSORS: u64 = 64;
 
 /// Caller-scoped keyed donation identity `(caller, backend op_nonce)`.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -532,6 +535,7 @@ impl_storable_candid_unbounded!(crate::receipts::SwapReceiptV1);
 impl_storable_candid_unbounded!(crate::payouts::PayoutEntitlement);
 impl_storable_candid_unbounded!(crate::payouts::PayoutJournalEvent);
 impl_storable_candid_unbounded!(crate::payout_reconciliation::ArchivePayoutProofProgress);
+impl_storable_candid_unbounded!(crate::payout_reconciliation::ArchiveInputProofProgress);
 
 impl Storable for DonationReceiptV1 {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
@@ -704,6 +708,8 @@ thread_local! {
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_CURRENT))));
     pub(crate) static PAYOUT_ARCHIVE_PROOFS: RefCell<StableBTreeMap<StorableU128, crate::payout_reconciliation::ArchivePayoutProofProgress, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_ARCHIVE_PROOFS))));
+    pub(crate) static INPUT_ARCHIVE_PROOFS: RefCell<StableBTreeMap<StorableU128, crate::payout_reconciliation::ArchiveInputProofProgress, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_INPUT_ARCHIVE_PROOFS))));
     pub(crate) static PAYOUT_FENCE: RefCell<StableCell<StorableU128, Memory>> = RefCell::new(
         StableCell::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_FENCE)), StorableU128(0))
             .expect("init payout fence"),
@@ -1280,6 +1286,7 @@ pub mod payouts {
     pub fn remove_no_effect(id: u64, owner: Principal) -> bool {
         let key = StorableU128(id as u128);
         payout_archive_proofs::remove(id);
+        input_archive_proofs::remove(id);
         let removed_value = PAYOUT_CURRENT.with(|map| map.borrow_mut().remove(&key));
         let removed = removed_value.is_some();
         if let Some(value) = removed_value.filter(is_unsettled_input) {
@@ -1311,6 +1318,22 @@ pub mod payouts {
                 });
             if !still_same_ambiguous_attempt {
                 payout_archive_proofs::remove(value.id);
+            }
+        }
+        if let Some(progress) = input_archive_proofs::get(value.id) {
+            let still_same_ambiguous_input = !value.settled
+                && value.input_transfer.as_ref() == Some(&progress.transfer)
+                && value.ledger == progress.ledger
+                && value.input_action == progress.input_action
+                && value.kind == progress.payout_kind
+                && value.compensation_for == progress.compensation_for
+                && matches!(
+                    value.input_outcome,
+                    Some(crate::payouts::PayoutInputOutcome::Unresolved { .. })
+                        | Some(crate::payouts::PayoutInputOutcome::Submitted)
+                );
+            if !still_same_ambiguous_input {
+                input_archive_proofs::remove(value.id);
             }
         }
         PAYOUT_CURRENT.with(|map| {
@@ -1585,6 +1608,34 @@ pub(crate) mod payout_archive_proofs {
 
     pub(crate) fn remove(claim_id: u64) {
         PAYOUT_ARCHIVE_PROOFS.with(|map| {
+            map.borrow_mut().remove(&StorableU128(claim_id as u128));
+        });
+    }
+}
+
+/// Provisional inbound archive cursors. At most 64 IDs may retain progress;
+/// completion, retirement, or identity/status changes remove their entries.
+pub(crate) mod input_archive_proofs {
+    use super::*;
+
+    pub(crate) fn get(claim_id: u64) -> Option<crate::payout_reconciliation::ArchiveInputProofProgress> {
+        INPUT_ARCHIVE_PROOFS.with(|map| map.borrow().get(&StorableU128(claim_id as u128)))
+    }
+
+    pub(crate) fn insert(claim_id: u64, progress: crate::payout_reconciliation::ArchiveInputProofProgress) -> bool {
+        INPUT_ARCHIVE_PROOFS.with(|map| {
+            let mut map = map.borrow_mut();
+            let key = StorableU128(claim_id as u128);
+            if !map.contains_key(&key) && map.len() >= MAX_INPUT_ARCHIVE_PROOF_CURSORS {
+                return false;
+            }
+            map.insert(key, progress);
+            true
+        })
+    }
+
+    pub(crate) fn remove(claim_id: u64) {
+        INPUT_ARCHIVE_PROOFS.with(|map| {
             map.borrow_mut().remove(&StorableU128(claim_id as u128));
         });
     }

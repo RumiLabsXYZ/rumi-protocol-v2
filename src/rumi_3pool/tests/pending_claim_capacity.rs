@@ -809,7 +809,7 @@ fn committed_add_input_with_lost_reply_is_reconciled_before_refund() {
 }
 
 #[test]
-fn aged_ambiguous_add_input_requires_exact_direct_block_before_refund() {
+fn aged_ambiguous_add_input_requires_directly_anchored_archive_chain_before_refund() {
     let h = setup();
     let balance_before = balance(&h, h.ledgers[0], h.user);
     h.pic.update_call(
@@ -860,27 +860,99 @@ fn aged_ambiguous_add_input_requires_exact_direct_block_before_refund() {
         h.ledgers[0], h.user, "set_icrc3_archive_range",
         encode_one(Some((block_index, 1u64))).unwrap(),
     ).unwrap();
-    let archived: Result<(), ThreePoolError> = decode_one(&reply(
+    let unavailable_archive: Result<(), ThreePoolError> = decode_one(&reply(
         h.pic.update_call(
             h.pool, h.user, "reconcile_aged_input",
             encode_args((held.id, block_index)).unwrap(),
         ).unwrap(),
     )).unwrap();
-    assert!(matches!(archived, Err(ThreePoolError::TransferFailed { .. })));
+    assert!(matches!(unavailable_archive, Err(ThreePoolError::TransferFailed { .. })));
+
+    // Leave nine archived child blocks followed by one directly served anchor.
+    // The first reconciliation persists only the verified prefix; after an
+    // upgrade, the next bounded page reaches the direct anchor and settles.
+    for _ in 0..9 {
+        let _: () = decode_one(&reply(h.pic.update_call(
+            h.ledgers[0], h.admin, "mint",
+            encode_args((Account { owner: h.admin, subaccount: None }, Nat::from(1u8))).unwrap(),
+        ).unwrap())).unwrap();
+    }
     h.pic.update_call(
-        h.ledgers[0], h.user, "set_icrc3_archive_range", encode_one(None::<(u64, u64)>).unwrap(),
+        h.ledgers[0], h.user, "set_icrc3_archive_range",
+        encode_one(Some((block_index, 9u64))).unwrap(),
     ).unwrap();
+    h.pic.update_call(
+        h.ledgers[0], h.user, "set_icrc3_archive_callback_enabled", encode_one(true).unwrap(),
+    ).unwrap();
+    let forged_candidate: Result<(), ThreePoolError> = decode_one(&reply(h.pic.update_call(
+        h.pool, h.user, "reconcile_aged_input", encode_args((held.id, block_index + 1)).unwrap(),
+    ).unwrap())).unwrap();
+    assert!(matches!(forged_candidate, Err(ThreePoolError::TransferFailed { .. })));
+
+    // A callback can return the exact candidate but a child with a false
+    // parent hash. That archived evidence must be rejected and its cursor
+    // discarded before retrying the uncorrupted history.
+    h.pic.update_call(
+        h.ledgers[0], h.user, "set_icrc3_corrupt_archived_phash_at",
+        encode_one(Some(block_index + 1)).unwrap(),
+    ).unwrap();
+    let broken_link: Result<(), ThreePoolError> = decode_one(&reply(h.pic.update_call(
+        h.pool, h.user, "reconcile_aged_input", encode_args((held.id, block_index)).unwrap(),
+    ).unwrap())).unwrap();
+    assert!(matches!(broken_link, Err(ThreePoolError::TransferFailed { .. })));
+    h.pic.update_call(
+        h.ledgers[0], h.user, "set_icrc3_corrupt_archived_phash_at", encode_one(None::<u64>).unwrap(),
+    ).unwrap();
+
+    let bounded_progress: Result<(), ThreePoolError> = decode_one(&reply(h.pic.update_call(
+        h.pool, h.user, "reconcile_aged_input", encode_args((held.id, block_index)).unwrap(),
+    ).unwrap())).unwrap();
+    assert!(matches!(bounded_progress, Err(ThreePoolError::TransferFailed { .. })));
+    assert!(matches!(payout(&h, h.user, held.id).input_outcome,
+        Some(rumi_3pool::payouts::PayoutInputOutcome::Unresolved { .. })));
 
     h.pic.upgrade_canister(
         h.pool, wasm_artifact("rumi_3pool.wasm"), encode_args(()).unwrap(), None,
     ).unwrap();
+    let wrong_cursor_identity: Result<(), ThreePoolError> = decode_one(&reply(h.pic.update_call(
+        h.pool, h.user, "reconcile_aged_input", encode_args((held.id, block_index + 1)).unwrap(),
+    ).unwrap())).unwrap();
+    assert!(matches!(wrong_cursor_identity, Err(ThreePoolError::TransferFailed { .. })));
+    let restarted: Result<(), ThreePoolError> = decode_one(&reply(h.pic.update_call(
+        h.pool, h.user, "reconcile_aged_input", encode_args((held.id, block_index)).unwrap(),
+    ).unwrap())).unwrap();
+    assert!(matches!(restarted, Err(ThreePoolError::TransferFailed { .. })),
+        "changing the candidate must discard the cursor and restart bounded proof");
+
+    // Move the archive boundary over the would-be direct anchor. The verified
+    // cursor may advance through callback data but must remain held at log end.
+    h.pic.update_call(
+        h.ledgers[0], h.user, "set_icrc3_archive_range",
+        encode_one(Some((block_index, 10u64))).unwrap(),
+    ).unwrap();
+    let archived_anchor: Result<(), ThreePoolError> = decode_one(&reply(h.pic.update_call(
+        h.pool, h.user, "reconcile_aged_input", encode_args((held.id, block_index)).unwrap(),
+    ).unwrap())).unwrap();
+    assert!(matches!(archived_anchor, Err(ThreePoolError::TransferFailed { .. })));
+    let absent_anchor: Result<(), ThreePoolError> = decode_one(&reply(h.pic.update_call(
+        h.pool, h.user, "reconcile_aged_input", encode_args((held.id, block_index)).unwrap(),
+    ).unwrap())).unwrap();
+    assert!(matches!(absent_anchor, Err(ThreePoolError::TransferFailed { .. })));
+    assert!(!payout(&h, h.user, held.id).settled);
+
+    // A later block served directly by the ledger supplies the required
+    // anchor; archived data alone has not changed the held entitlement.
+    let _: () = decode_one(&reply(h.pic.update_call(
+        h.ledgers[0], h.admin, "mint",
+        encode_args((Account { owner: h.admin, subaccount: None }, Nat::from(1u8))).unwrap(),
+    ).unwrap())).unwrap();
     let reconciled: Result<(), ThreePoolError> = decode_one(&reply(
         h.pic.update_call(
             h.pool, h.user, "reconcile_aged_input",
             encode_args((held.id, block_index)).unwrap(),
         ).unwrap(),
     )).unwrap();
-    reconciled.expect("exact ICRC-2 block proof should authorize the original refund");
+    reconciled.expect("archived exact ICRC-2 proof should authorize the original refund after upgrade");
     assert_eq!(balance(&h, h.ledgers[0], h.user), balance_before);
     assert!(payout(&h, h.user, held.id).settled);
     let replay: Result<(), ThreePoolError> = decode_one(&reply(
