@@ -12,7 +12,7 @@
 //     first time on the new wasm (one-shot drain from the legacy blob) or
 //     subsequent times (load `SlimState` from its cell).
 //
-// Memory ID layout (38 IDs used; 255 available):
+// Memory ID layout (39 IDs used; 255 available):
 //
 //   0       SlimState cell              — bounded residual heap
 //   1       lp_balances                 — BTreeMap<Principal, u128>
@@ -44,6 +44,7 @@
 //   35      payout_input_index_cursor     — resumable bounded index backfill cursor
 //   36      payout_input_index_complete   — backfill completion marker
 //   37      lp_allowances_cutover         — one-time legacy approval invalidation
+//   38      donation_receipts_v1          — permanent keyed reserve-accounting receipts
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -63,8 +64,8 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 
 use crate::types::{
-    Icrc3Block, LiquidityEventV1, LiquidityEventV2, LpAllowance, PoolConfig, SwapEventV1,
-    SwapEventV2, ThreePoolAdminEvent, ThreePoolPendingClaim, VirtualPriceSnapshot,
+    DonationReceiptV1, Icrc3Block, LiquidityEventV1, LiquidityEventV2, LpAllowance, PoolConfig,
+    SwapEventV1, SwapEventV2, ThreePoolAdminEvent, ThreePoolPendingClaim, VirtualPriceSnapshot,
 };
 
 pub type Memory = VirtualMemory<DefaultMemoryImpl>;
@@ -109,6 +110,49 @@ const MEM_UNSETTLED_INPUT_INDEX: MemoryId = MemoryId::new(34);
 const MEM_PAYOUT_INPUT_INDEX_CURSOR: MemoryId = MemoryId::new(35);
 const MEM_PAYOUT_INPUT_INDEX_COMPLETE: MemoryId = MemoryId::new(36);
 const MEM_LP_ALLOWANCES_CUTOVER: MemoryId = MemoryId::new(37);
+const MEM_DONATION_RECEIPTS_V1: MemoryId = MemoryId::new(38);
+
+/// Caller-scoped keyed donation identity `(caller, backend op_nonce)`.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct DonationReceiptKey {
+    pub caller: Principal,
+    pub op_nonce: u128,
+}
+
+impl Storable for DonationReceiptKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let principal = self.caller.as_slice();
+        let mut bytes = Vec::with_capacity(1 + principal.len() + 16);
+        bytes.push(principal.len() as u8);
+        bytes.extend_from_slice(principal);
+        bytes.extend_from_slice(&self.op_nonce.to_be_bytes());
+        Cow::Owned(bytes)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let bytes = bytes.as_ref();
+        let principal_len = bytes[0] as usize;
+        let nonce_start = 1 + principal_len;
+        let caller = Principal::from_slice(&bytes[1..nonce_start]);
+        let op_nonce = u128::from_be_bytes(bytes[nonce_start..].try_into().expect("donation nonce key length"));
+        Self { caller, op_nonce }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 46,
+        is_fixed_size: false,
+    };
+}
+
+const MAX_DONATION_RECEIPTS_V1: u64 = 10_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DonationReceiptInsert {
+    Inserted,
+    Existing,
+    Conflict,
+    Full,
+}
 
 const PAYOUT_INPUT_INDEX_CURSOR_START: u128 = u128::MAX;
 const PAYOUT_INPUT_INDEX_BACKFILL_BATCH: usize = 16;
@@ -470,6 +514,21 @@ impl_storable_candid_unbounded!(crate::receipts::SwapReceiptV1);
 impl_storable_candid_unbounded!(crate::payouts::PayoutEntitlement);
 impl_storable_candid_unbounded!(crate::payouts::PayoutJournalEvent);
 
+impl Storable for DonationReceiptV1 {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).expect("encode DonationReceiptV1"))
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        Decode!(bytes.as_ref(), DonationReceiptV1).expect("decode DonationReceiptV1")
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 128,
+        is_fixed_size: false,
+    };
+}
+
 // ─── MemoryManager + stable structures (thread-local) ────────────────────────
 //
 // Everything here is lazy-initialized on first access. The MemoryManager
@@ -517,6 +576,8 @@ thread_local! {
         StableCell::init(MM.with(|m| m.borrow().get(MEM_LP_ALLOWANCES_CUTOVER)), 0)
             .expect("init LP allowance cutover cell"),
     );
+    pub(crate) static DONATION_RECEIPTS_V1: RefCell<StableBTreeMap<DonationReceiptKey, DonationReceiptV1, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_DONATION_RECEIPTS_V1))));
 
     pub(crate) static BURN_CALLERS: RefCell<StableBTreeMap<StorablePrincipal, Unit, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_BURN_CALLERS))));
@@ -662,6 +723,48 @@ pub fn set_slim(slim: SlimState) {
     SLIM_STATE
         .with(|c| c.borrow_mut().set(slim))
         .expect("set SlimState cell");
+}
+
+/// Durable, caller-scoped idempotency receipts for protocol donation
+/// accounting. Rows are intentionally retained forever and admission is
+/// bounded; exhausting the cap fails closed rather than permitting a replay.
+pub mod donation_receipts {
+    use super::{DonationReceiptInsert, DonationReceiptKey, DONATION_RECEIPTS_V1};
+    use crate::types::DonationReceiptV1;
+    use candid::Principal;
+
+    pub fn get(caller: Principal, op_nonce: u128) -> Option<DonationReceiptV1> {
+        DONATION_RECEIPTS_V1.with(|map| {
+            map.borrow().get(&DonationReceiptKey { caller, op_nonce })
+        })
+    }
+
+    pub fn insert_if_absent(
+        caller: Principal,
+        op_nonce: u128,
+        receipt: DonationReceiptV1,
+    ) -> DonationReceiptInsert {
+        DONATION_RECEIPTS_V1.with(|map| {
+            let mut map = map.borrow_mut();
+            let key = DonationReceiptKey { caller, op_nonce };
+            if let Some(existing) = map.get(&key) {
+                return if existing == receipt {
+                    DonationReceiptInsert::Existing
+                } else {
+                    DonationReceiptInsert::Conflict
+                };
+            }
+            if map.len() >= super::MAX_DONATION_RECEIPTS_V1 {
+                return DonationReceiptInsert::Full;
+            }
+            map.insert(key, receipt);
+            DonationReceiptInsert::Inserted
+        })
+    }
+
+    pub fn len() -> u64 {
+        DONATION_RECEIPTS_V1.with(|map| map.borrow().len())
+    }
 }
 
 // ─── Public API: lp_balances ─────────────────────────────────────────────────

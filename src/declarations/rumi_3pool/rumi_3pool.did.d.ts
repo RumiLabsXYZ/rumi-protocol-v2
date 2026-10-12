@@ -99,6 +99,16 @@ export type DeviceSpec = { 'GenericDisplay' : null } |
       'lines_per_page' : number,
     }
   };
+export type DonationReceiptErrorV1 = { 'PoolPaused' : null } |
+  { 'InvalidCoinIndex' : null } |
+  { 'PayloadConflict' : null } |
+  { 'CapacityExceeded' : null } |
+  { 'ZeroAmount' : null } |
+  { 'PoolLocked' : null } |
+  { 'MathOverflow' : null } |
+  { 'Unauthorized' : null } |
+  { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
+  { 'PoolEmpty' : null };
 export interface ErrorInfo { 'description' : string }
 export interface FeeBucket {
   'volume_per_token' : Array<bigint>,
@@ -732,6 +742,11 @@ export interface _SERVICE {
     [number, bigint],
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
+  >,
+  'receive_donation_v2' : ActorMethod<
+    [bigint, bigint, number, bigint],
+    { 'Ok' : null } |
+      { 'Err' : DonationReceiptErrorV1 }
   >,
   'reconcile_aged_input' : ActorMethod<
     [bigint, bigint],
