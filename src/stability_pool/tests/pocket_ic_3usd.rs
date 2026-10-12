@@ -67,11 +67,21 @@ fn icrc1_ledger_wasm() -> Vec<u8> {
 }
 
 fn three_pool_wasm() -> Vec<u8> {
-    include_bytes!("../../../target/wasm32-unknown-unknown/release/rumi_3pool.wasm").to_vec()
+    let path = std::env::var("RUMI_THREE_POOL_WASM_PATH")
+        .unwrap_or_else(|_| "target/wasm32-unknown-unknown/release/rumi_3pool.wasm".into());
+    std::fs::read(path).expect("read 3pool Wasm test fixture")
 }
 
 fn stability_pool_wasm() -> Vec<u8> {
-    include_bytes!("../../../target/wasm32-unknown-unknown/release/stability_pool.wasm").to_vec()
+    let path = std::env::var("RUMI_SP_WASM_PATH")
+        .unwrap_or_else(|_| "target/wasm32-unknown-unknown/release/stability_pool.wasm".into());
+    std::fs::read(path).expect("read stability pool Wasm test fixture")
+}
+
+fn flaky_ledger_wasm() -> Vec<u8> {
+    let path = std::env::var("RUMI_FLAKY_LEDGER_WASM_PATH")
+        .unwrap_or_else(|_| "target/wasm32-unknown-unknown/release/flaky_ledger.wasm".into());
+    std::fs::read(path).expect("build flaky_ledger Wasm test fixture")
 }
 
 // ─── Test Environment ───
@@ -435,6 +445,58 @@ fn ledger_allowance(
     }
 }
 
+fn flaky_ledger_allowance(
+    pic: &pocket_ic::PocketIc,
+    ledger: Principal,
+    owner: Principal,
+    spender: Principal,
+) -> u128 {
+    let args = AllowanceArgs {
+        account: Account { owner, subaccount: None },
+        spender: Account { owner: spender, subaccount: None },
+    };
+    let result = pic.update_call(
+        ledger,
+        Principal::anonymous(),
+        "icrc2_allowance",
+        encode_one(args).unwrap(),
+    ).expect("flaky ledger icrc2_allowance call");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let response: AllowanceResponse = decode_one(&bytes).expect("decode flaky ledger allowance");
+            response.allowance.0.try_into().expect("flaky ledger allowance overflow")
+        }
+        WasmResult::Reject(message) => panic!("flaky ledger allowance rejected: {message}"),
+    }
+}
+
+fn complete_deposit_intent(
+    pic: &pocket_ic::PocketIc,
+    sp_id: Principal,
+    caller: Principal,
+    intent_seq: u64,
+    ledger: Principal,
+    amount: u64,
+) -> DepositIntentResult {
+    let result = pic.update_call(
+        sp_id,
+        caller,
+        "deposit_with_intent",
+        encode_args((intent_seq, ledger, amount)).unwrap(),
+    ).expect("deposit intent call");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let result: Result<DepositIntentResult, DepositIntentError> =
+                decode_one(&bytes).expect("decode deposit intent");
+            match result.expect("deposit intent succeeds") {
+                completed @ DepositIntentResult::Completed { .. } => completed,
+                other => panic!("deposit intent did not complete: {other:?}"),
+            }
+        }
+        WasmResult::Reject(message) => panic!("deposit intent rejected: {message}"),
+    }
+}
+
 // ─── Tests ───
 
 #[test]
@@ -507,17 +569,7 @@ fn test_ckusdc_max_withdraw_drains_position_net_of_ledger_fee() {
     });
 
     let deposit_amount = 1_010_000u64; // 1.0100 ckUSDC
-    let result = pic.update_call(
-        sp_id, test_user, "deposit",
-        encode_args((ckusdc_ledger, deposit_amount)).unwrap()
-    ).expect("deposit call failed");
-    match result {
-        WasmResult::Reply(bytes) => {
-            let r: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode deposit");
-            r.expect("deposit failed");
-        }
-        WasmResult::Reject(msg) => panic!("deposit rejected: {}", msg),
-    }
+    complete_deposit_intent(&pic, sp_id, test_user, 1, ckusdc_ledger, deposit_amount);
     assert_eq!(
         ledger_balance(&pic, ckusdc_ledger, sp_id),
         deposit_amount as u128,
@@ -621,21 +673,7 @@ fn run_ckusdc_sole_holder_ledger_shortfall_withdraw(withdraw_recorded_amount: bo
     });
 
     let deposit_amount = 1_010_000u64;
-    let result = pic
-        .update_call(
-            sp_id,
-            test_user,
-            "deposit",
-            encode_args((ckusdc_ledger, deposit_amount)).unwrap(),
-        )
-        .expect("deposit call failed");
-    match result {
-        WasmResult::Reply(bytes) => {
-            let r: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode deposit");
-            r.expect("deposit failed");
-        }
-        WasmResult::Reject(msg) => panic!("deposit rejected: {}", msg),
-    }
+    complete_deposit_intent(&pic, sp_id, test_user, 1, ckusdc_ledger, deposit_amount);
 
     let drift_transfer = TransferArg {
         from_subaccount: None,
@@ -720,18 +758,7 @@ fn test_direct_icusd_deposit() {
 
     let deposit_amount: u64 = 100_00000000; // 100 icUSD
 
-    let result = env.pic.update_call(
-        env.sp_id, env.test_user, "deposit",
-        encode_args((env.icusd_ledger, deposit_amount)).unwrap()
-    ).expect("deposit call failed");
-
-    match result {
-        WasmResult::Reply(bytes) => {
-            let r: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode deposit");
-            r.expect("deposit failed");
-        }
-        WasmResult::Reject(msg) => panic!("deposit rejected: {}", msg),
-    }
+    complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 1, env.icusd_ledger, deposit_amount);
 
     // Verify user position
     let pos = get_user_position(&env.pic, env.sp_id, env.test_user)
@@ -750,6 +777,392 @@ fn test_direct_icusd_deposit() {
     assert_eq!(status.total_deposits_e8s, deposit_amount);
 }
 
+#[test]
+fn legacy_deposit_fails_before_ledger_transfer_or_pool_credit() {
+    let env = setup_test_env();
+    let amount = 100_00000000u64;
+    let user_before = ledger_balance(&env.pic, env.icusd_ledger, env.test_user);
+    let pool_before = ledger_balance(&env.pic, env.icusd_ledger, env.sp_id);
+    let allowance_before = ledger_allowance(&env.pic, env.icusd_ledger, env.test_user, env.sp_id);
+
+    let result = env.pic.update_call(
+        env.sp_id,
+        env.test_user,
+        "deposit",
+        encode_args((env.icusd_ledger, amount)).unwrap(),
+    ).expect("legacy deposit call");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let result: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode legacy deposit");
+            assert!(matches!(&result, Err(StabilityPoolError::SystemBusy)), "legacy deposit should fail closed: {result:?}");
+        }
+        WasmResult::Reject(message) => panic!("legacy deposit transport rejected: {message}"),
+    }
+
+    assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.test_user), user_before);
+    assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.sp_id), pool_before);
+    assert_eq!(ledger_allowance(&env.pic, env.icusd_ledger, env.test_user, env.sp_id), allowance_before);
+    assert!(get_user_position(&env.pic, env.sp_id, env.test_user).is_none());
+    let status = get_pool_status(&env.pic, env.sp_id);
+    assert_eq!(status.total_depositors, 0);
+    assert_eq!(status.total_deposits_e8s, 0);
+}
+
+#[test]
+fn deposit_intent_replay_is_idempotent_across_status_and_upgrade() {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let minting_account = Principal::self_authenticating(&[41, 42, 43]);
+    let test_user = Principal::self_authenticating(&[44, 45, 46]);
+    let admin = Principal::self_authenticating(&[47, 48, 49]);
+    let protocol_id = Principal::self_authenticating(&[50, 51, 52]);
+    let ledger = pic.create_canister();
+    pic.add_cycles(ledger, 2_000_000_000_000);
+    let ledger_init = LedgerInitArgs {
+        minting_account: Account { owner: minting_account, subaccount: None },
+        fee_collector_account: None,
+        transfer_fee: 10_000u64.into(),
+        decimals: Some(8),
+        max_memo_length: Some(32),
+        token_name: "intent test token".into(),
+        token_symbol: "INTENT".into(),
+        metadata: vec![],
+        initial_balances: vec![(
+            Account { owner: test_user, subaccount: None },
+            100_000_000_000u64.into(),
+        )],
+        feature_flags: Some(FeatureFlags { icrc2: true }),
+        maximum_number_of_accounts: None,
+        accounts_overflow_trim_quantity: None,
+        archive_options: ArchiveOptions {
+            num_blocks_to_archive: 2_000,
+            trigger_threshold: 1_000,
+            controller_id: admin,
+            max_transactions_per_response: None,
+            max_message_size_bytes: None,
+            cycles_for_archive_creation: None,
+            node_max_memory_size_bytes: None,
+            more_controller_ids: None,
+        },
+    };
+    pic.install_canister(
+        ledger,
+        icrc1_ledger_wasm(),
+        encode_args((LedgerArg::Init(ledger_init),)).unwrap(),
+        None,
+    );
+    let sp_id = pic.create_canister();
+    pic.add_cycles(sp_id, 2_000_000_000_000);
+    let init_args = StabilityPoolInitArgs {
+        protocol_canister_id: protocol_id,
+        authorized_admins: vec![admin],
+    };
+    let sp_wasm = stability_pool_wasm();
+    pic.install_canister(sp_id, sp_wasm.clone(), encode_one(init_args.clone()).unwrap(), None);
+    approve(&pic, ledger, test_user, sp_id, u128::MAX);
+    register_stablecoin(&pic, sp_id, admin, StablecoinConfig {
+        ledger_id: ledger,
+        symbol: "INTENT".into(),
+        decimals: 8,
+        priority: 1,
+        is_active: true,
+        transfer_fee: Some(10_000),
+        is_lp_token: None,
+        underlying_pool: None,
+    });
+
+    let amount = 100_000_000u64;
+    let initial_user_balance = ledger_balance(&pic, ledger, test_user);
+    let first = pic.update_call(
+        sp_id,
+        test_user,
+        "deposit_with_intent",
+        encode_args((1u64, ledger, amount)).unwrap(),
+    ).expect("intent deposit update");
+    let first_result: Result<DepositIntentResult, DepositIntentError> = match first {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode intent result"),
+        WasmResult::Reject(message) => panic!("intent deposit rejected: {message}"),
+    };
+    let completed = first_result.expect("intent deposit succeeds");
+    if !matches!(completed, DepositIntentResult::Completed { .. }) {
+        let request = vec![icrc_ledger_types::icrc3::blocks::GetBlocksRequest {
+            start: 0u64.into(),
+            length: 10u64.into(),
+        }];
+        if let WasmResult::Reply(bytes) = pic.query_call(
+            ledger,
+            test_user,
+            "icrc3_get_blocks",
+            encode_one(request).unwrap(),
+        ).expect("inspect ICRC-3 blocks") {
+            let response: icrc_ledger_types::icrc3::blocks::GetBlocksResult =
+                decode_one(&bytes).expect("decode ICRC-3 history");
+            for entry in response.blocks {
+                eprintln!("intent debug block {} => {:?}", entry.id, rumi_protocol_backend::icrc3_proof::decode_block(&entry.block));
+            }
+        }
+    }
+    assert!(matches!(completed, DepositIntentResult::Completed { intent_seq: 1, amount: got, .. } if got == amount), "unexpected result: {completed:?}");
+    assert_eq!(ledger_balance(&pic, ledger, test_user), initial_user_balance - u128::from(amount) - 10_000);
+    assert_eq!(ledger_balance(&pic, ledger, sp_id), u128::from(amount));
+
+    let status_call = pic.update_call(
+        sp_id,
+        test_user,
+        "get_deposit_intent",
+        encode_one(1u64).unwrap(),
+    ).expect("authoritative status update");
+    let status: DepositIntentStatus = match status_call {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode intent status"),
+        WasmResult::Reject(message) => panic!("status rejected: {message}"),
+    };
+    assert_eq!(status.high_watermark, 1);
+    assert_eq!(status.next_seq, Some(2));
+    assert_eq!(status.intent, Some(completed.clone()));
+
+    pic.upgrade_canister(sp_id, sp_wasm, encode_one(init_args).unwrap(), None)
+        .expect("upgrade intent canister");
+    let replay = pic.update_call(
+        sp_id,
+        test_user,
+        "deposit_with_intent",
+        encode_args((1u64, ledger, amount)).unwrap(),
+    ).expect("replay intent update");
+    let replay_result: Result<DepositIntentResult, DepositIntentError> = match replay {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode replay result"),
+        WasmResult::Reject(message) => panic!("intent replay rejected: {message}"),
+    };
+    assert_eq!(replay_result.unwrap(), completed);
+    assert_eq!(ledger_balance(&pic, ledger, sp_id), u128::from(amount));
+    let position = get_user_position(&pic, sp_id, test_user).expect("position survives retry/upgrade");
+    assert_eq!(position.stablecoin_balances.iter().find(|(token, _)| **token == ledger).map(|(_, value)| *value), Some(amount));
+}
+
+/// The fixture commits `icrc2_transfer_from` and then returns a typed
+/// GenericError. Retrying the same intent after an SP upgrade proves the
+/// existing ICRC-3 receipt exactly once; this models a lost typed reply, not
+/// a literal callback trap.
+#[test]
+fn deposit_intent_recovers_committed_generic_error_once_across_upgrade() {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let user = Principal::self_authenticating(&[61, 62, 63]);
+    let admin = Principal::self_authenticating(&[64, 65, 66]);
+    let protocol_id = Principal::self_authenticating(&[67, 68, 69]);
+    let ledger = pic.create_canister();
+    pic.add_cycles(ledger, 2_000_000_000_000);
+    pic.install_canister(ledger, flaky_ledger_wasm(), encode_one(()).unwrap(), None);
+
+    let sp_id = pic.create_canister();
+    pic.add_cycles(sp_id, 2_000_000_000_000);
+    let init_args = StabilityPoolInitArgs {
+        protocol_canister_id: protocol_id,
+        authorized_admins: vec![admin],
+    };
+    let sp_wasm = stability_pool_wasm();
+    pic.install_canister(sp_id, sp_wasm.clone(), encode_one(init_args.clone()).unwrap(), None);
+
+    pic.update_call(
+        ledger,
+        Principal::anonymous(),
+        "mint",
+        encode_args((Account { owner: user, subaccount: None }, candid::Nat::from(1_000_000_000u64))).unwrap(),
+    ).expect("mint fixture balance");
+    approve(&pic, ledger, user, sp_id, u128::MAX);
+    register_stablecoin(&pic, sp_id, admin, StablecoinConfig {
+        ledger_id: ledger,
+        symbol: "FLAKY".into(),
+        decimals: 8,
+        priority: 1,
+        is_active: true,
+        transfer_fee: Some(0),
+        is_lp_token: None,
+        underlying_pool: None,
+    });
+
+    pic.update_call(ledger, Principal::anonymous(), "set_phantom_failures", encode_one(1u32).unwrap())
+        .expect("arm committed-transfer GenericError");
+    let amount = 100_000_000u64;
+    let user_before = ledger_balance(&pic, ledger, user);
+    let initial = pic.update_call(
+        sp_id,
+        user,
+        "deposit_with_intent",
+        encode_args((1u64, ledger, amount)).unwrap(),
+    ).expect("ambiguous intent call");
+    match initial {
+        WasmResult::Reply(bytes) => {
+            let result: Result<DepositIntentResult, DepositIntentError> = decode_one(&bytes).unwrap();
+            assert!(matches!(&result, Ok(DepositIntentResult::Pending { intent_seq: 1, .. })),
+                "committed GenericError must remain unresolved until receipt proof: {result:?}");
+        }
+        WasmResult::Reject(message) => panic!("ambiguous intent rejected: {message}"),
+    }
+    assert_eq!(ledger_balance(&pic, ledger, user), user_before - u128::from(amount));
+    assert_eq!(ledger_balance(&pic, ledger, sp_id), u128::from(amount));
+    assert!(get_user_position(&pic, sp_id, user).is_none(), "unproved transfer must not be credited");
+
+    pic.upgrade_canister(sp_id, sp_wasm, encode_one(init_args).unwrap(), None)
+        .expect("upgrade with unresolved intent");
+    let first_retry = pic.update_call(
+        sp_id,
+        user,
+        "deposit_with_intent",
+        encode_args((1u64, ledger, amount)).unwrap(),
+    ).expect("reconcile saved ledger tip");
+    match first_retry {
+        WasmResult::Reply(bytes) => {
+            let result: Result<DepositIntentResult, DepositIntentError> = decode_one(&bytes).unwrap();
+            assert!(matches!(&result, Ok(DepositIntentResult::Pending { intent_seq: 1, .. })),
+                "first retry should advance the bounded history tip: {result:?}");
+        }
+        WasmResult::Reject(message) => panic!("first retry rejected: {message}"),
+    }
+    assert!(get_user_position(&pic, sp_id, user).is_none(), "tip advance alone must not credit");
+    let completed = complete_deposit_intent(&pic, sp_id, user, 1, ledger, amount);
+    assert!(matches!(completed, DepositIntentResult::Completed { intent_seq: 1, amount: got, .. } if got == amount));
+    assert_eq!(ledger_balance(&pic, ledger, user), user_before - u128::from(amount));
+    assert_eq!(ledger_balance(&pic, ledger, sp_id), u128::from(amount));
+    assert_eq!(flaky_ledger_allowance(&pic, ledger, user, sp_id), u128::MAX - u128::from(amount));
+    let position = get_user_position(&pic, sp_id, user).expect("receipt proof credits position");
+    assert_eq!(position.stablecoin_balances.get(&ledger).copied(), Some(amount));
+    let status = get_pool_status(&pic, sp_id);
+    assert_eq!(status.total_depositors, 1);
+    assert_eq!(status.total_deposits_e8s, amount);
+}
+
+/// A no-index lost reply must authenticate an unrelated archived predecessor
+/// and the exact archived transfer as one prefix before a direct anchor can
+/// authorize credit. The proof cursor and provisional match must survive an
+/// upgrade between the archived prefix and its direct anchor.
+#[test]
+fn deposit_intent_authenticates_archived_history_segment_across_upgrade() {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let user = Principal::self_authenticating(&[71, 72, 73]);
+    let admin = Principal::self_authenticating(&[74, 75, 76]);
+    let protocol_id = Principal::self_authenticating(&[77, 78, 79]);
+    let ledger = pic.create_canister();
+    pic.add_cycles(ledger, 2_000_000_000_000);
+    pic.install_canister(ledger, flaky_ledger_wasm(), encode_one(()).unwrap(), None);
+
+    let sp_id = pic.create_canister();
+    pic.add_cycles(sp_id, 2_000_000_000_000);
+    let init_args = StabilityPoolInitArgs {
+        protocol_canister_id: protocol_id,
+        authorized_admins: vec![admin],
+    };
+    let sp_wasm = stability_pool_wasm();
+    pic.install_canister(sp_id, sp_wasm.clone(), encode_one(init_args.clone()).unwrap(), None);
+
+    pic.update_call(
+        ledger,
+        Principal::anonymous(),
+        "mint",
+        encode_args((Account { owner: user, subaccount: None }, candid::Nat::from(1_000_000_000u64))).unwrap(),
+    ).expect("mint fixture balance");
+    approve(&pic, ledger, user, sp_id, u128::MAX);
+    register_stablecoin(&pic, sp_id, admin, StablecoinConfig {
+        ledger_id: ledger,
+        symbol: "FLAKY".into(),
+        decimals: 8,
+        priority: 1,
+        is_active: true,
+        transfer_fee: Some(0),
+        is_lp_token: None,
+        underlying_pool: None,
+    });
+
+    // The ledger inserts index 2 immediately before the exact transfer at 3.
+    pic.update_call(ledger, Principal::anonymous(), "set_transfer_from_prelude_mint", encode_one(true).unwrap())
+        .expect("arm unrelated archived predecessor");
+    pic.update_call(ledger, Principal::anonymous(), "set_phantom_failures", encode_one(1u32).unwrap())
+        .expect("arm committed-transfer GenericError");
+    let amount = 100_000_000u64;
+    let user_before = ledger_balance(&pic, ledger, user);
+    let initial = pic.update_call(
+        sp_id,
+        user,
+        "deposit_with_intent",
+        encode_args((1u64, ledger, amount)).unwrap(),
+    ).expect("ambiguous intent call");
+    match initial {
+        WasmResult::Reply(bytes) => {
+            let result: Result<DepositIntentResult, DepositIntentError> = decode_one(&bytes).unwrap();
+            assert!(matches!(result, Ok(DepositIntentResult::Pending { intent_seq: 1, .. })), "unexpected result: {result:?}");
+        }
+        WasmResult::Reject(message) => panic!("ambiguous intent rejected: {message}"),
+    }
+    assert!(get_user_position(&pic, sp_id, user).is_none());
+
+    // Archive the predecessor, exact candidate, and six following blocks.
+    pic.update_call(ledger, Principal::anonymous(), "set_icrc3_archive_range", encode_one(Some((2u64, 8u64))).unwrap())
+        .expect("archive candidate segment");
+    pic.update_call(ledger, Principal::anonymous(), "set_icrc3_archive_callback_enabled", encode_one(true).unwrap())
+        .expect("enable archive callback");
+    for _ in 0..6 {
+        pic.update_call(
+            ledger,
+            Principal::anonymous(),
+            "mint",
+            encode_args((Account { owner: Principal::anonymous(), subaccount: None }, candid::Nat::from(1u64))).unwrap(),
+        ).expect("append archived segment filler");
+    }
+    pic.update_call(
+        ledger,
+        Principal::anonymous(),
+        "mint",
+        encode_args((Account { owner: Principal::anonymous(), subaccount: None }, candid::Nat::from(1u64))).unwrap(),
+    ).expect("append directly served anchor");
+
+    // First retry pins the new tip; no archived evidence may credit yet.
+    let first_retry = pic.update_call(sp_id, user, "deposit_with_intent", encode_args((1u64, ledger, amount)).unwrap())
+        .expect("first retry pins the new history tip");
+    assert!(matches!(
+        first_retry,
+        WasmResult::Reply(bytes) if matches!(decode_one::<Result<DepositIntentResult, DepositIntentError>>(&bytes).unwrap(), Ok(DepositIntentResult::Pending { intent_seq: 1, .. }))
+    ));
+    assert!(get_user_position(&pic, sp_id, user).is_none());
+
+    // A malformed phash in the first archived row must stay pending and must
+    // discard provisional progress, so clearing the fixture fault can recover.
+    pic.update_call(ledger, Principal::anonymous(), "set_icrc3_corrupt_archived_phash_at", encode_one(Some(2u64)).unwrap())
+        .expect("corrupt one archived phash");
+    let corrupted = pic.update_call(sp_id, user, "deposit_with_intent", encode_args((1u64, ledger, amount)).unwrap())
+        .expect("retry against corrupted archived phash");
+    match corrupted {
+        WasmResult::Reply(bytes) => {
+            let result: Result<DepositIntentResult, DepositIntentError> = decode_one(&bytes).unwrap();
+            assert!(matches!(result, Ok(DepositIntentResult::Pending { intent_seq: 1, .. })), "corrupt archived proof must remain pending: {result:?}");
+        }
+        WasmResult::Reject(message) => panic!("corrupted archive proof rejected: {message}"),
+    }
+    assert!(get_user_position(&pic, sp_id, user).is_none(), "corrupt archived evidence cannot credit");
+    assert_eq!(ledger_balance(&pic, ledger, user), user_before - u128::from(amount));
+    assert_eq!(flaky_ledger_allowance(&pic, ledger, user, sp_id), u128::MAX - u128::from(amount));
+
+    pic.update_call(ledger, Principal::anonymous(), "set_icrc3_corrupt_archived_phash_at", encode_one(None::<u64>).unwrap())
+        .expect("clear archived phash corruption");
+    let recovered_prefix = pic.update_call(sp_id, user, "deposit_with_intent", encode_args((1u64, ledger, amount)).unwrap())
+        .expect("resume proof after restoring archive contents");
+    match recovered_prefix {
+        WasmResult::Reply(bytes) => {
+            let result: Result<DepositIntentResult, DepositIntentError> = decode_one(&bytes).unwrap();
+            assert!(matches!(result, Ok(DepositIntentResult::Pending { intent_seq: 1, .. })), "valid archived prefix remains pending until direct anchor: {result:?}");
+        }
+        WasmResult::Reject(message) => panic!("recovered archive proof rejected: {message}"),
+    }
+    assert!(get_user_position(&pic, sp_id, user).is_none(), "recovered but unanchored archive cannot credit");
+    assert_eq!(ledger_balance(&pic, ledger, user), user_before - u128::from(amount));
+    assert_eq!(flaky_ledger_allowance(&pic, ledger, user, sp_id), u128::MAX - u128::from(amount));
+
+    pic.upgrade_canister(sp_id, sp_wasm, encode_one(init_args).unwrap(), None)
+        .expect("upgrade with persisted archived proof cursor");
+    let completed = complete_deposit_intent(&pic, sp_id, user, 1, ledger, amount);
+    assert!(matches!(completed, DepositIntentResult::Completed { intent_seq: 1, amount: got, block_index: 3, .. } if got == amount));
+    assert_eq!(ledger_balance(&pic, ledger, user), user_before - u128::from(amount));
+    assert_eq!(ledger_balance(&pic, ledger, sp_id), u128::from(amount));
+    let position = get_user_position(&pic, sp_id, user).expect("anchored archived transfer credits position");
+    assert_eq!(position.stablecoin_balances.get(&ledger).copied(), Some(amount));
+}
+
 /// Backend inline delivery and its timer retry can overlap or replay after a
 /// lost response. The source mint block must credit interest once and survive
 /// an SP upgrade so the same backend receipt remains acknowledged without a
@@ -758,17 +1171,7 @@ fn test_direct_icusd_deposit() {
 fn test_interest_v2_duplicate_receipt_is_idempotent_across_upgrade() {
     let env = setup_test_env();
     let deposit_amount = 100_00000000u64;
-    let deposit = env.pic.update_call(
-        env.sp_id,
-        env.test_user,
-        "deposit",
-        encode_args((env.icusd_ledger, deposit_amount)).unwrap(),
-    ).expect("deposit call");
-    match deposit {
-        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
-            .unwrap().expect("deposit succeeds"),
-        WasmResult::Reject(message) => panic!("deposit rejected: {message}"),
-    }
+    complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 1, env.icusd_ledger, deposit_amount);
 
     let event_count_before = match env.pic.query_call(env.sp_id, Principal::anonymous(), "get_pool_event_count", encode_args(()).unwrap()).unwrap() {
         WasmResult::Reply(bytes) => decode_one::<u64>(&bytes).unwrap(),
@@ -1023,21 +1426,7 @@ fn test_get_ledger_reconciliation_reports_healthy_and_is_admin_gated() {
     let env = setup_test_env();
     let deposit_amount: u64 = 100_00000000; // 100 icUSD
 
-    let result = env
-        .pic
-        .update_call(
-            env.sp_id,
-            env.test_user,
-            "deposit",
-            encode_args((env.icusd_ledger, deposit_amount)).unwrap(),
-        )
-        .expect("deposit call failed");
-    match result {
-        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
-            .unwrap()
-            .expect("deposit failed"),
-        WasmResult::Reject(msg) => panic!("deposit rejected: {}", msg),
-    }
+    complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 1, env.icusd_ledger, deposit_amount);
 
     // Non-admin callers are rejected (the endpoint triggers per-token outcalls).
     let denied = env
@@ -1386,17 +1775,7 @@ fn test_mixed_pool_status_balances() {
 
     // Deposit 1000 icUSD directly
     let direct_amount: u64 = 1000_00000000;
-    let result = env.pic.update_call(
-        env.sp_id, env.test_user, "deposit",
-        encode_args((env.icusd_ledger, direct_amount)).unwrap()
-    ).expect("deposit call failed");
-    match result {
-        WasmResult::Reply(bytes) => {
-            let r: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode");
-            r.expect("deposit failed");
-        }
-        WasmResult::Reject(msg) => panic!("deposit rejected: {}", msg),
-    }
+    complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 1, env.icusd_ledger, direct_amount);
 
     // Also deposit 1000 icUSD as 3USD
     let three_usd_amount: u64 = 1000_00000000;
@@ -1485,17 +1864,7 @@ fn test_mixed_deposit_balances() {
 
     // Deposit icUSD directly
     let icusd_deposit: u64 = 500_00000000;
-    let result = env.pic.update_call(
-        env.sp_id, env.test_user, "deposit",
-        encode_args((env.icusd_ledger, icusd_deposit)).unwrap()
-    ).expect("deposit call failed");
-    match result {
-        WasmResult::Reply(bytes) => {
-            let r: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode");
-            r.expect("deposit failed");
-        }
-        WasmResult::Reject(msg) => panic!("deposit rejected: {}", msg),
-    }
+    complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 1, env.icusd_ledger, icusd_deposit);
 
     // Deposit ckUSDT via deposit_as_3usd (tests that non-icUSD stablecoins also work)
     let ckusdt_deposit: u64 = 500_000_000; // 500 ckUSDT (6 dec)
@@ -1539,20 +1908,12 @@ fn test_mixed_deposit_balances() {
 }
 
 #[test]
-fn same_round_identical_deposits_use_distinct_transfer_identities() {
+fn sequential_identical_deposit_intents_use_distinct_transfer_identities() {
     let env = setup_test_env();
     let amount = 100_00000000u64;
-    let first = env.pic.submit_call(env.sp_id, env.test_user, "deposit",
-        encode_args((env.icusd_ledger, amount)).unwrap()).expect("first submission");
-    let second = env.pic.submit_call(env.sp_id, env.test_user, "deposit",
-        encode_args((env.icusd_ledger, amount)).unwrap()).expect("second submission");
-    for call in [first, second] {
-        match env.pic.await_call(call).expect("deposit execution") {
-            WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
-                .expect("decode deposit").expect("unique pull succeeds"),
-            WasmResult::Reject(message) => panic!("deposit rejected: {message}"),
-        }
-    }
+    let first = complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 1, env.icusd_ledger, amount);
+    let second = complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 2, env.icusd_ledger, amount);
+    assert_ne!(first, second, "distinct intent sequences produce distinct completed receipts");
     let position = get_user_position(&env.pic, env.sp_id, env.test_user).unwrap();
     assert_eq!(position.stablecoin_balances.get(&env.icusd_ledger).copied(), Some(2 * amount));
     match env.pic.query_call(env.icusd_ledger, Principal::anonymous(), "icrc1_balance_of",
@@ -1564,7 +1925,7 @@ fn same_round_identical_deposits_use_distinct_transfer_identities() {
 
 #[test]
 #[ignore = "depends on successful deposit_as_3usd, disabled pending a durable conversion saga"]
-fn same_round_ordinary_and_convenience_deposits_use_distinct_pulls() {
+fn sequential_intent_and_convenience_deposits_use_distinct_pulls() {
     let env = setup_test_env();
     register_stablecoin(&env.pic, env.sp_id, env.admin, StablecoinConfig {
         ledger_id: env.pool_id, symbol: "3USD".to_string(), decimals: 8, priority: 0,
@@ -1572,20 +1933,14 @@ fn same_round_ordinary_and_convenience_deposits_use_distinct_pulls() {
         underlying_pool: Some(env.pool_id),
     });
     let amount = 100_00000000u64;
-    let routed = env.pic.submit_call(env.sp_id, env.test_user, "deposit_as_3usd",
-        encode_args((env.icusd_ledger, amount)).unwrap()).expect("routed submission");
-    let ordinary = env.pic.submit_call(env.sp_id, env.test_user, "deposit",
-        encode_args((env.icusd_ledger, amount)).unwrap()).expect("ordinary submission");
-    let lp_minted = match env.pic.await_call(routed).expect("routed execution") {
+    let routed = env.pic.update_call(env.sp_id, env.test_user, "deposit_as_3usd",
+        encode_args((env.icusd_ledger, amount)).unwrap()).expect("routed call");
+    let lp_minted = match routed {
         WasmResult::Reply(bytes) => decode_one::<Result<u64, StabilityPoolError>>(&bytes)
             .expect("decode routed").expect("routed pull succeeds"),
         WasmResult::Reject(message) => panic!("routed deposit rejected: {message}"),
     };
-    match env.pic.await_call(ordinary).expect("ordinary execution") {
-        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
-            .expect("decode ordinary").expect("ordinary pull succeeds"),
-        WasmResult::Reject(message) => panic!("ordinary deposit rejected: {message}"),
-    }
+    complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 1, env.icusd_ledger, amount);
     let position = get_user_position(&env.pic, env.sp_id, env.test_user).unwrap();
     assert_eq!(position.stablecoin_balances.get(&env.icusd_ledger).copied(), Some(amount));
     assert_eq!(position.stablecoin_balances.get(&env.pool_id).copied(), Some(lp_minted));

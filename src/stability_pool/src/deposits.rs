@@ -9,9 +9,10 @@ use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
+use num_traits::ToPrimitive;
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use num_traits::ToPrimitive;
 
 /// Conservative fallback for a stablecoin ledger's transfer fee (native units),
 /// used when the live `icrc1_fee` query fails. Known stablecoin registry values
@@ -27,6 +28,37 @@ thread_local! {
     /// Prevent concurrent claims for one stable refund while its callback is
     /// outstanding. The stable journal remains authoritative after traps.
     static ACTIVE_PENDING_REFUND_CLAIMS: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
+    /// Prevent overlapping retries for one durable deposit intent while an
+    /// inter-canister call or ICRC-3 reconciliation is outstanding.
+    static ACTIVE_DEPOSIT_INTENTS: RefCell<BTreeSet<Principal>> = RefCell::new(BTreeSet::new());
+}
+
+const MAX_DEPOSIT_INTENT_HISTORY_BLOCKS_PER_CALL: u64 = 8;
+const MAX_DEPOSIT_INTENT_ARCHIVE_PROOF_BLOCKS_PER_CALL: u64 = 8;
+const MAX_DEPOSIT_INTENT_ARCHIVE_CALLBACKS_PER_CALL: usize = 8;
+const DEPOSIT_INTENT_MEMO_PREFIX: &[u8; 8] = b"RSPDI001";
+const DEPOSIT_INTENT_MEMO_DIGEST_BYTES: usize = 24;
+
+struct DepositIntentGuard(Principal);
+
+impl DepositIntentGuard {
+    fn reserve(caller: Principal) -> Result<Self, StabilityPoolError> {
+        ACTIVE_DEPOSIT_INTENTS.with(|active| {
+            if active.borrow_mut().insert(caller) {
+                Ok(Self(caller))
+            } else {
+                Err(StabilityPoolError::SystemBusy)
+            }
+        })
+    }
+}
+
+impl Drop for DepositIntentGuard {
+    fn drop(&mut self) {
+        ACTIVE_DEPOSIT_INTENTS.with(|active| {
+            active.borrow_mut().remove(&self.0);
+        });
+    }
 }
 
 const MAX_PENDING_REFUND_HISTORY_BLOCKS_PER_CLAIM: u64 = 8;
@@ -421,6 +453,957 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
                 method: "icrc2_transfer_from".to_string(),
             })
         }
+    }
+}
+
+/// Submit or reconcile one caller-scoped monotonic deposit intent. The caller
+/// must reuse the same sequence and payload until this returns a terminal
+/// result. A new sequence is never allocated while an older intent is pending.
+pub async fn deposit_with_intent(
+    intent_seq: u64,
+    token_ledger: Principal,
+    amount: u64,
+) -> Result<DepositIntentResult, DepositIntentError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(DepositIntentError::Unauthorized);
+    }
+    let _intent_guard = DepositIntentGuard::reserve(caller)?;
+    let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new();
+
+    if let Some(completed) = read_state(|state| state.completed_deposit_intent(caller, intent_seq)) {
+        if completed.token_ledger != token_ledger || completed.amount != amount {
+            return Err(DepositIntentError::DepositIntentPayloadMismatch);
+        }
+        return Ok(completed.result);
+    }
+
+    let existing = read_state(|state| state.pending_deposit_intent(caller));
+    let intent = if let Some(intent) = existing {
+        if intent.intent_seq != intent_seq {
+            return Err(DepositIntentError::DepositIntentUnresolved {
+                active_seq: intent.intent_seq,
+            });
+        }
+        if intent.token_ledger != token_ledger || intent.amount != amount {
+            return Err(DepositIntentError::DepositIntentPayloadMismatch);
+        }
+        intent
+    } else {
+        let expected = read_state(|state| {
+            state
+                .deposit_intent_high_watermarks
+                .as_ref()
+                .and_then(|watermarks| watermarks.get(&caller).copied())
+                .unwrap_or(0)
+                .checked_add(1)
+        })
+        .ok_or(DepositIntentError::DepositIntentSequenceExhausted)?;
+        if intent_seq != expected {
+            return Err(DepositIntentError::DepositIntentSequenceMismatch {
+                expected_seq: expected,
+            });
+        }
+        if crate::pool_token_balance_mutation_blocked(&[token_ledger]) {
+            return Err(StabilityPoolError::SystemBusy.into());
+        }
+        let config = read_state(|state| state.get_stablecoin_config(&token_ledger).cloned())
+            .ok_or(StabilityPoolError::TokenNotAccepted { ledger: token_ledger })?;
+        if !config.is_active {
+            return Err(StabilityPoolError::TokenNotActive { ledger: token_ledger }.into());
+        }
+        let amount_e8s = normalize_to_e8s(amount, config.decimals);
+        let minimum = read_state(|state| state.configuration.min_deposit_e8s);
+        if amount_e8s < minimum {
+            return Err(StabilityPoolError::AmountTooLow {
+                minimum_e8s: minimum,
+            }.into());
+        }
+        if read_state(|state| state.configuration.emergency_pause) {
+            return Err(StabilityPoolError::EmergencyPaused.into());
+        }
+
+        let created_at_time_ns = mutate_state(|state| {
+            state.reserve_deposit_transfer_timestamp(ic_cdk::api::time())
+        })
+        .map_err(|_| StabilityPoolError::SystemBusy)?;
+        let memo = deposit_intent_memo(caller, intent_seq, token_ledger, amount);
+        let intent = DepositIntent {
+            caller,
+            intent_seq,
+            token_ledger,
+            amount,
+            from: Account {
+                owner: caller,
+                subaccount: None,
+            },
+            to: Account {
+                owner: ic_cdk::api::id(),
+                subaccount: None,
+            },
+            memo,
+            created_at_time_ns,
+            history_start_index: None,
+            history_next_index: None,
+            history_tip: None,
+            expected_block_index: None,
+            dispatch_started: false,
+            last_error: None,
+        };
+        let reserve_result = mutate_state(|state| state.reserve_deposit_intent(intent.clone()));
+        if let Err(reserve_error) = reserve_result {
+            return Err(match reserve_error {
+                crate::state::DepositIntentReserveError::Active(active_seq) => {
+                    DepositIntentError::DepositIntentUnresolved { active_seq }
+                }
+                crate::state::DepositIntentReserveError::SequenceMismatch(expected_seq) => {
+                    DepositIntentError::DepositIntentSequenceMismatch { expected_seq }
+                }
+                crate::state::DepositIntentReserveError::SequenceExhausted => {
+                    DepositIntentError::DepositIntentSequenceExhausted
+                }
+                crate::state::DepositIntentReserveError::CapacityReached => {
+                    DepositIntentError::DepositIntentCapacityReached
+                }
+            });
+        }
+        intent
+    };
+
+    resume_deposit_intent(intent).await.map_err(Into::into)
+}
+
+/// Authoritative caller-scoped status. This is intentionally exposed as an
+/// update method by `lib.rs`; an uncertified query is not enough to unlock or
+/// allocate a financial retry.
+pub fn deposit_intent_status(caller: Principal, intent_seq: u64) -> DepositIntentStatus {
+    read_state(|state| state.deposit_intent_status(caller, intent_seq))
+}
+
+fn deposit_intent_transfer_args(intent: &DepositIntent) -> TransferFromArgs {
+    TransferFromArgs {
+        from: intent.from.clone(),
+        to: intent.to.clone(),
+        amount: intent.amount.into(),
+        fee: None,
+        memo: Some(intent.memo.clone().into()),
+        created_at_time: Some(intent.created_at_time_ns.into()),
+        spender_subaccount: None,
+    }
+}
+
+fn deposit_intent_memo(
+    caller: Principal,
+    intent_seq: u64,
+    token_ledger: Principal,
+    amount: u64,
+) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update((caller.as_slice().len() as u8).to_be_bytes());
+    hasher.update(caller.as_slice());
+    hasher.update(intent_seq.to_be_bytes());
+    hasher.update((token_ledger.as_slice().len() as u8).to_be_bytes());
+    hasher.update(token_ledger.as_slice());
+    hasher.update(amount.to_be_bytes());
+    let digest = hasher.finalize();
+    let mut memo = DEPOSIT_INTENT_MEMO_PREFIX.to_vec();
+    memo.extend_from_slice(&digest[..DEPOSIT_INTENT_MEMO_DIGEST_BYTES]);
+    memo
+}
+
+fn pending_deposit_intent_result(
+    intent: &DepositIntent,
+    phase: DepositIntentPhase,
+    reason: Option<String>,
+) -> DepositIntentResult {
+    DepositIntentResult::Pending {
+        intent_seq: intent.intent_seq,
+        token_ledger: intent.token_ledger,
+        amount: intent.amount,
+        phase,
+        reason,
+    }
+}
+
+fn save_deposit_intent(intent: &DepositIntent) -> bool {
+    mutate_state(|state| state.update_deposit_intent(intent.clone()))
+}
+
+fn finish_deposit_intent_no_effect(
+    intent: &DepositIntent,
+    reason: String,
+) -> Result<DepositIntentResult, StabilityPoolError> {
+    let result = DepositIntentResult::NoEffect {
+        intent_seq: intent.intent_seq,
+        token_ledger: intent.token_ledger,
+        amount: intent.amount,
+        reason,
+    };
+    if !mutate_state(|state| {
+        state.release_deposit_intent_no_effect(intent.caller, intent.intent_seq)
+    }) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(result)
+}
+
+fn finish_deposit_intent_completed(
+    intent: &DepositIntent,
+    block_index: u64,
+) -> Result<DepositIntentResult, StabilityPoolError> {
+    crate::ensure_pool_token_balance_mutation_allowed(&[intent.token_ledger])?;
+    let result = DepositIntentResult::Completed {
+        intent_seq: intent.intent_seq,
+        token_ledger: intent.token_ledger,
+        amount: intent.amount,
+        block_index,
+    };
+    if !mutate_state(|state| {
+        state.finalize_deposit_intent(
+            intent.caller,
+            intent.intent_seq,
+            result.clone(),
+            ic_cdk::api::time(),
+        )
+    }) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(result)
+}
+
+fn exact_deposit_intent_block(
+    intent: &DepositIntent,
+    pool: Principal,
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+) -> bool {
+    (block.op == "transfer" || block.op == "xfer")
+        // The in-tree pinned ICRC-1 ledger encodes this transaction as
+        // `tx.op = "xfer"` without top-level btype. If present, btype must be
+        // the ICRC-2 transfer_from type; exact spender and tuple fields below
+        // still distinguish it from an ordinary transfer.
+        && block.btype.as_deref().is_none_or(|kind| kind == "2xfer")
+        && block.from.as_ref() == Some(&intent.from)
+        && block.to.as_ref() == Some(&intent.to)
+        && block.spender.as_ref().is_some_and(|spender| {
+            spender.owner == pool && spender.subaccount.is_none()
+        })
+        && block.amount == u128::from(intent.amount)
+        && block.memo.as_deref() == Some(intent.memo.as_slice())
+        && block.created_at_time == Some(intent.created_at_time_ns)
+}
+
+fn possible_deposit_intent_block(intent: &DepositIntent, block: &rumi_protocol_backend::icrc3_proof::DecodedBlock) -> bool {
+    block.memo.as_deref() == Some(intent.memo.as_slice())
+        || (block.from.as_ref() == Some(&intent.from)
+            && block.to.as_ref() == Some(&intent.to)
+            && block.amount == u128::from(intent.amount)
+            && block.created_at_time == Some(intent.created_at_time_ns))
+}
+
+async fn deposit_intent_history_tip(ledger: Principal) -> Result<u64, StabilityPoolError> {
+    pending_refund_history_tip(ledger).await
+}
+
+#[derive(Clone, Debug)]
+struct FetchedDepositIntentBlock {
+    index: u64,
+    block: ICRC3Value,
+    direct_from_ledger: bool,
+}
+
+/// Fetch a bounded complete block prefix, following only the exact archive
+/// callbacks advertised by the configured ledger. Archive contents can
+/// identify a receipt candidate, but only a phash chain ending at a directly
+/// served ledger block can authorize credit.
+async fn fetch_deposit_intent_page(
+    ledger: Principal,
+    start: u64,
+    length: u64,
+) -> Result<Vec<FetchedDepositIntentBlock>, String> {
+    if length == 0 || length > MAX_DEPOSIT_INTENT_ARCHIVE_PROOF_BLOCKS_PER_CALL {
+        return Err("ICRC-3 deposit proof page exceeds its fixed bound".into());
+    }
+    let requested_end = start
+        .checked_add(length)
+        .ok_or_else(|| "ICRC-3 deposit proof range overflow".to_string())?;
+    let request = vec![GetBlocksRequest {
+        start: start.into(),
+        length: length.into(),
+    }];
+    let result: Result<(GetBlocksResult,), _> =
+        call(ledger, "icrc3_get_blocks", (request,)).await;
+    let (response,) = result.map_err(|(code, message)| {
+        format!("icrc3_get_blocks call failed: {code:?} {message}")
+    })?;
+    let log_length = response
+        .log_length
+        .0
+        .to_u64()
+        .ok_or_else(|| "ICRC-3 deposit log length exceeds u64".to_string())?;
+    if log_length <= start {
+        return Err("ICRC-3 deposit log does not include the requested block".into());
+    }
+    let page_end = requested_end.min(log_length);
+    let expected_count = usize::try_from(page_end - start)
+        .map_err(|_| "ICRC-3 deposit page exceeds platform limits".to_string())?;
+    let mut blocks = BTreeMap::<u64, FetchedDepositIntentBlock>::new();
+    for block in response.blocks {
+        insert_deposit_intent_page_block(&mut blocks, block.id, block.block, true, start, page_end)?;
+    }
+    if response.archived_blocks.len() > MAX_DEPOSIT_INTENT_ARCHIVE_CALLBACKS_PER_CALL
+        || response.archived_blocks.len() > expected_count
+    {
+        return Err("ledger returned too many archive callbacks for the bounded deposit page".into());
+    }
+    let mut callback_ids = BTreeSet::new();
+    for archived in response.archived_blocks {
+        if archived.callback.method.trim().is_empty()
+            || archived.callback.canister_id == Principal::anonymous()
+            || archived.args.is_empty()
+            || archived.args.len() > expected_count
+        {
+            return Err("ledger returned an invalid ICRC-3 deposit archive callback".into());
+        }
+        let mut allowed_ids = BTreeSet::new();
+        for arg in &archived.args {
+            let arg_start = arg.start.0.to_u64()
+                .ok_or_else(|| "deposit archive range start exceeds u64".to_string())?;
+            let arg_length = arg.length.0.to_u64()
+                .ok_or_else(|| "deposit archive range length exceeds u64".to_string())?;
+            let arg_end = arg_start.checked_add(arg_length)
+                .ok_or_else(|| "deposit archive range overflow".to_string())?;
+            if arg_length == 0 || arg_start < start || arg_end > page_end {
+                return Err("deposit archive callback exceeds the requested proof page".into());
+            }
+            for index in arg_start..arg_end {
+                if !callback_ids.insert(index) || !allowed_ids.insert(index) {
+                    return Err("deposit archive callbacks contain overlapping ranges".into());
+                }
+            }
+        }
+        let (archive_response,): (GetBlocksResult,) = call(
+            archived.callback.canister_id,
+            archived.callback.method.as_str(),
+            (archived.args,),
+        ).await.map_err(|(code, message)| {
+            format!("ICRC-3 deposit archive callback failed: {code:?} {message}")
+        })?;
+        if !archive_response.archived_blocks.is_empty()
+            || archive_response.blocks.len() > allowed_ids.len()
+        {
+            return Err("deposit archive callback returned nested or oversized history".into());
+        }
+        for block in archive_response.blocks {
+            let index = block.id.0.to_u64()
+                .ok_or_else(|| "archived deposit block ID exceeds u64".to_string())?;
+            if !allowed_ids.contains(&index) {
+                return Err("deposit archive callback returned a block outside its range".into());
+            }
+            insert_deposit_intent_page_block(
+                &mut blocks, block.id, block.block, false, start, page_end,
+            )?;
+        }
+    }
+    let mut prefix_end = start;
+    while prefix_end < page_end && blocks.contains_key(&prefix_end) {
+        prefix_end += 1;
+    }
+    if (prefix_end..page_end).any(|index| blocks.contains_key(&index)) {
+        return Err("ICRC-3 deposit history has a gap before a later block".into());
+    }
+    if prefix_end == start {
+        return Err("ICRC-3 deposit page contains no complete block prefix".into());
+    }
+    Ok(blocks.into_values().collect())
+}
+
+fn insert_deposit_intent_page_block(
+    blocks: &mut BTreeMap<u64, FetchedDepositIntentBlock>,
+    id: Nat,
+    block: ICRC3Value,
+    direct_from_ledger: bool,
+    start: u64,
+    end: u64,
+) -> Result<(), String> {
+    let index = id.0.to_u64()
+        .ok_or_else(|| "ICRC-3 deposit block ID exceeds u64".to_string())?;
+    if index < start || index >= end {
+        return Err("ICRC-3 deposit response returned a block outside its requested range".into());
+    }
+    if blocks.insert(index, FetchedDepositIntentBlock { index, block, direct_from_ledger }).is_some() {
+        return Err("ICRC-3 deposit response contains duplicate block IDs".into());
+    }
+    Ok(())
+}
+
+async fn fetch_deposit_intent_block(
+    ledger: Principal,
+    block_index: u64,
+) -> Result<FetchedDepositIntentBlock, String> {
+    fetch_deposit_intent_page(ledger, block_index, 1).await?
+        .into_iter()
+        .find(|block| block.index == block_index)
+        .ok_or_else(|| "ledger did not return the exact deposit block".to_string())
+}
+
+fn deposit_intent_parent_hash(block: &ICRC3Value, index: u64) -> Result<Option<[u8; 32]>, String> {
+    let map = match block {
+        ICRC3Value::Map(map) => map,
+        _ => return Err("ICRC-3 deposit block is not a map".into()),
+    };
+    match map.get("phash") {
+        Some(ICRC3Value::Blob(bytes)) if bytes.len() == 32 => {
+            let mut hash = [0; 32];
+            hash.copy_from_slice(bytes);
+            Ok(Some(hash))
+        }
+        Some(_) => Err("ICRC-3 deposit parent hash is not a 32-byte blob".into()),
+        None if index == 0 => Ok(None),
+        None => Err("non-genesis ICRC-3 deposit block has no parent hash".into()),
+    }
+}
+
+fn deposit_intent_block_hash(block: &ICRC3Value) -> Result<[u8; 32], String> {
+    fn contains_int(value: &ICRC3Value) -> bool {
+        match value {
+            ICRC3Value::Int(_) => true,
+            ICRC3Value::Array(values) => values.iter().any(contains_int),
+            ICRC3Value::Map(values) => values.values().any(contains_int),
+            ICRC3Value::Blob(_) | ICRC3Value::Text(_) | ICRC3Value::Nat(_) => false,
+        }
+    }
+    if contains_int(block) {
+        return Err("ICRC-3 deposit block contains Int unsupported by the pinned hash implementation".into());
+    }
+    Ok(block.clone().hash())
+}
+
+fn deposit_intent_transfer_digest(intent: &DepositIntent) -> Result<[u8; 32], String> {
+    let bytes = candid::encode_args((
+        intent.caller,
+        intent.intent_seq,
+        intent.token_ledger,
+        intent.amount,
+        &intent.from,
+        &intent.to,
+        &intent.memo,
+        intent.created_at_time_ns,
+    )).map_err(|error| format!("could not encode deposit transfer identity: {error}"))?;
+    Ok(Sha256::digest(bytes).into())
+}
+
+fn hold_deposit_intent(intent: &DepositIntent, reason: String) -> DepositIntentResult {
+    let mut held = intent.clone();
+    held.last_error = Some(reason.clone());
+    save_deposit_intent(&held);
+    pending_deposit_intent_result(&held, DepositIntentPhase::Reconciling, Some(reason))
+}
+
+async fn verify_deposit_intent_receipt(
+    intent: &DepositIntent,
+) -> Result<DepositIntentResult, StabilityPoolError> {
+    let block_index = intent.expected_block_index.expect("receipt index was checked");
+    let digest = match deposit_intent_transfer_digest(intent) {
+        Ok(digest) => digest,
+        Err(reason) => return Ok(hold_deposit_intent(intent, reason)),
+    };
+    let mut progress = match read_state(|state| state.deposit_intent_archive_proof(intent.caller)) {
+        Some(progress)
+            if !progress.history_segment
+                && progress.token_ledger == intent.token_ledger
+                && progress.intent_seq == intent.intent_seq
+                && progress.segment_start_index == block_index
+                && progress.transfer_digest == digest
+                && progress.exact_match.as_ref().is_some_and(|(index, _)| *index == block_index)
+                && progress.latest_verified_block_index.checked_add(1)
+                    == Some(progress.next_block_index) => progress,
+        Some(_) => return Ok(hold_deposit_intent(intent, "saved archive proof cursor does not match this exact deposit intent".into())),
+        None => {
+            let candidate = match fetch_deposit_intent_block(intent.token_ledger, block_index).await {
+                Ok(candidate) => candidate,
+                Err(reason) => return Ok(hold_deposit_intent(intent, format!("exact ICRC-3 receipt is unavailable: {reason}"))),
+            };
+            let decoded = match rumi_protocol_backend::icrc3_proof::decode_block(&candidate.block) {
+                Ok(decoded) => decoded,
+                Err(reason) => return Ok(hold_deposit_intent(intent, format!("deposit candidate block is malformed: {reason}"))),
+            };
+            if !exact_deposit_intent_block(intent, ic_cdk::api::id(), &decoded) {
+                return Ok(hold_deposit_intent(intent, "ledger block does not match the persisted ICRC-2 transfer tuple".into()));
+            }
+            if candidate.direct_from_ledger {
+                return finish_deposit_intent_completed(intent, block_index);
+            }
+            let prior_block_hash = match deposit_intent_block_hash(&candidate.block) {
+                Ok(hash) => hash,
+                Err(reason) => return Ok(hold_deposit_intent(intent, reason)),
+            };
+            let next_block_index = match block_index.checked_add(1) {
+                Some(next) => next,
+                None => return Ok(hold_deposit_intent(intent, "deposit candidate block index overflow".into())),
+            };
+            let progress = crate::state::DepositIntentArchiveProofProgress {
+                token_ledger: intent.token_ledger,
+                intent_seq: intent.intent_seq,
+                transfer_digest: digest,
+                history_segment: false,
+                segment_start_index: block_index,
+                pinned_history_tip: None,
+                exact_match: Some((block_index, prior_block_hash)),
+                possible_mismatch: false,
+                multiple_exact_matches: false,
+                latest_verified_block_index: block_index,
+                next_block_index,
+                prior_block_hash,
+            };
+            if !mutate_state(|state| state.save_deposit_intent_archive_proof(intent.caller, progress.clone())) {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            progress
+        }
+    };
+    let page = match fetch_deposit_intent_page(
+        intent.token_ledger,
+        progress.next_block_index,
+        MAX_DEPOSIT_INTENT_ARCHIVE_PROOF_BLOCKS_PER_CALL,
+    ).await {
+        Ok(page) => page,
+        Err(reason) => return Ok(hold_deposit_intent(intent, format!("archived receipt proof remains pending: {reason}"))),
+    };
+    match advance_deposit_intent_archive_proof(intent, &mut progress, page)? {
+        DepositIntentArchiveAdvance::Exact(block_index) => finish_deposit_intent_completed(intent, block_index),
+        DepositIntentArchiveAdvance::Restart => {
+            mutate_state(|state| state.remove_deposit_intent_archive_proof(intent.caller));
+            Ok(hold_deposit_intent(intent, "archived receipt chain changed or contained a malformed row; proof will restart from the exact candidate".into()))
+        }
+        DepositIntentArchiveAdvance::Ambiguous => Ok(hold_deposit_intent(intent, "archived receipt proof found conflicting or plausible transfer rows; credit remains held".into())),
+        DepositIntentArchiveAdvance::AnchoredNoMatch => Ok(hold_deposit_intent(intent, "archived receipt proof anchored without the exact transfer tuple".into())),
+        DepositIntentArchiveAdvance::Pending => Ok(hold_deposit_intent(intent, "archived receipt proof is still progressing; retry to continue".into())),
+    }
+}
+
+/// Classify one authenticated-chain row. Classification is provisional until
+/// the page reaches a block the configured ledger served directly.
+fn classify_deposit_intent_archive_row(
+    intent: &DepositIntent,
+    progress: &mut crate::state::DepositIntentArchiveProofProgress,
+    block: &FetchedDepositIntentBlock,
+) -> Result<(), String> {
+    let decoded = rumi_protocol_backend::icrc3_proof::decode_block(&block.block)?;
+    if exact_deposit_intent_block(intent, ic_cdk::api::id(), &decoded) {
+        let hash = deposit_intent_block_hash(&block.block)?;
+        if progress.exact_match.is_some() {
+            progress.multiple_exact_matches = true;
+        } else {
+            progress.exact_match = Some((block.index, hash));
+        }
+    } else if possible_deposit_intent_block(intent, &decoded) {
+        progress.possible_mismatch = true;
+    }
+    Ok(())
+}
+
+/// Advance one archived segment in linear time. The caller persists the
+/// initial archived row before awaiting the next page; each accepted row is
+/// then saved before the next update can continue the walk.
+enum DepositIntentArchiveAdvance {
+    Pending,
+    Restart,
+    AnchoredNoMatch,
+    Ambiguous,
+    Exact(u64),
+}
+
+fn advance_deposit_intent_archive_proof(
+    intent: &DepositIntent,
+    progress: &mut crate::state::DepositIntentArchiveProofProgress,
+    page: Vec<FetchedDepositIntentBlock>,
+) -> Result<DepositIntentArchiveAdvance, StabilityPoolError> {
+    for block in page {
+        if block.index != progress.next_block_index
+            || deposit_intent_parent_hash(&block.block, block.index).ok().flatten()
+                != Some(progress.prior_block_hash)
+        {
+            return Ok(DepositIntentArchiveAdvance::Restart);
+        }
+        if let Err(reason) = classify_deposit_intent_archive_row(intent, progress, &block) {
+            log!(INFO, "deposit archive proof row {} is malformed: {}", block.index, reason);
+            return Ok(DepositIntentArchiveAdvance::Restart);
+        }
+        if block.direct_from_ledger {
+            if progress.possible_mismatch || progress.multiple_exact_matches {
+                return Ok(DepositIntentArchiveAdvance::Ambiguous);
+            }
+            if let Some((exact_index, _)) = progress.exact_match {
+                if progress.history_segment {
+                    crate::ensure_pool_token_balance_mutation_allowed(&[intent.token_ledger])?;
+                    let mut advanced = intent.clone();
+                    advanced.expected_block_index = Some(exact_index);
+                    advanced.history_next_index = Some(exact_index);
+                    advanced.last_error = None;
+                    if !save_deposit_intent(&advanced) {
+                        return Err(StabilityPoolError::SystemBusy);
+                    }
+                }
+                return Ok(DepositIntentArchiveAdvance::Exact(exact_index));
+            }
+            if progress.history_segment {
+                let mut advanced = intent.clone();
+                advanced.history_next_index = block.index.checked_add(1);
+                advanced.last_error = None;
+                if !save_deposit_intent(&advanced) {
+                    return Err(StabilityPoolError::SystemBusy);
+                }
+                mutate_state(|state| state.remove_deposit_intent_archive_proof(intent.caller));
+            }
+            return Ok(DepositIntentArchiveAdvance::AnchoredNoMatch);
+        }
+        progress.prior_block_hash = match deposit_intent_block_hash(&block.block) {
+            Ok(hash) => hash,
+            Err(reason) => {
+                log!(INFO, "deposit archive proof hash failed at {}: {}", block.index, reason);
+                return Ok(DepositIntentArchiveAdvance::Restart);
+            }
+        };
+        progress.latest_verified_block_index = block.index;
+        progress.next_block_index = match block.index.checked_add(1) {
+            Some(next) => next,
+            None => return Ok(DepositIntentArchiveAdvance::Pending),
+        };
+        if !mutate_state(|state| state.save_deposit_intent_archive_proof(intent.caller, progress.clone())) {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+    }
+    Ok(DepositIntentArchiveAdvance::Pending)
+}
+
+async fn reconcile_deposit_intent_history(
+    intent: &mut DepositIntent,
+) -> Result<Option<DepositIntentResult>, StabilityPoolError> {
+    let latest_tip = match deposit_intent_history_tip(intent.token_ledger).await {
+        Ok(tip) => tip,
+        Err(error) => {
+            return Ok(Some(hold_deposit_intent(
+                intent,
+                format!("ledger history tip unavailable: {error:?}"),
+            )));
+        }
+    };
+    let start = intent.history_start_index.ok_or_else(|| {
+        StabilityPoolError::LedgerTransferFailed {
+            reason: "deposit intent has no persisted ledger history boundary".to_string(),
+        }
+    })?;
+    let mut cursor = intent.history_next_index.unwrap_or(start);
+    let mut pinned_tip = intent.history_tip.unwrap_or(latest_tip);
+    if latest_tip < start || latest_tip < pinned_tip || cursor > pinned_tip {
+        return Ok(Some(hold_deposit_intent(
+            intent,
+            "ledger tip or saved history cursor precedes the persisted dispatch boundary".to_string(),
+        )));
+    }
+
+    let digest = match deposit_intent_transfer_digest(intent) {
+        Ok(digest) => digest,
+        Err(reason) => return Ok(Some(hold_deposit_intent(intent, reason))),
+    };
+    if let Some(mut progress) = read_state(|state| state.deposit_intent_archive_proof(intent.caller)) {
+        if !progress.history_segment
+            || progress.token_ledger != intent.token_ledger
+            || progress.intent_seq != intent.intent_seq
+            || progress.transfer_digest != digest
+            || progress.segment_start_index != cursor
+            || progress.pinned_history_tip != Some(pinned_tip)
+            || progress.latest_verified_block_index.checked_add(1) != Some(progress.next_block_index)
+        {
+            return Ok(Some(hold_deposit_intent(intent, "saved archive history cursor does not match this exact deposit intent".into())));
+        }
+        if latest_tip > pinned_tip {
+            pinned_tip = latest_tip;
+            intent.history_tip = Some(pinned_tip);
+            progress.pinned_history_tip = Some(pinned_tip);
+            if !mutate_state(|state| {
+                state.update_deposit_intent(intent.clone())
+                    && state.save_deposit_intent_archive_proof(intent.caller, progress.clone())
+            }) {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+        }
+        if progress.next_block_index >= pinned_tip {
+            return Ok(Some(hold_deposit_intent(intent, "archived history prefix has no directly served anchor yet".into())));
+        }
+        let length = (pinned_tip - progress.next_block_index)
+            .min(MAX_DEPOSIT_INTENT_ARCHIVE_PROOF_BLOCKS_PER_CALL);
+        let page = match fetch_deposit_intent_page(intent.token_ledger, progress.next_block_index, length).await {
+            Ok(page) => page,
+            Err(reason) => return Ok(Some(hold_deposit_intent(intent, format!("archived history proof remains pending: {reason}")))),
+        };
+        return match advance_deposit_intent_archive_proof(intent, &mut progress, page)? {
+            DepositIntentArchiveAdvance::Exact(index) => Ok(Some(finish_deposit_intent_completed(intent, index)?)),
+            DepositIntentArchiveAdvance::Restart => {
+                mutate_state(|state| state.remove_deposit_intent_archive_proof(intent.caller));
+                Ok(Some(hold_deposit_intent(
+                    intent,
+                    "archived history chain changed or contained a malformed row; proof will restart from the saved history boundary".into(),
+                )))
+            }
+            DepositIntentArchiveAdvance::AnchoredNoMatch => Ok(Some(pending_deposit_intent_result(
+                intent,
+                DepositIntentPhase::Reconciling,
+                Some("authenticated archived history continues after its direct anchor".into()),
+            ))),
+            DepositIntentArchiveAdvance::Ambiguous => Ok(Some(hold_deposit_intent(
+                intent,
+                "authenticated archived history contains a plausible or repeated transfer candidate".into(),
+            ))),
+            DepositIntentArchiveAdvance::Pending => Ok(Some(hold_deposit_intent(
+                intent,
+                "archived history proof is incomplete; retry to continue".into(),
+            ))),
+        };
+    }
+
+    if cursor == pinned_tip {
+        if latest_tip > pinned_tip {
+            intent.history_tip = Some(latest_tip);
+            if !save_deposit_intent(intent) {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            return Ok(Some(pending_deposit_intent_result(
+                intent,
+                DepositIntentPhase::Reconciling,
+                Some("ledger history advanced; continuing exact receipt reconciliation".to_string()),
+            )));
+        }
+        return Ok(None);
+    }
+    intent.history_tip = Some(pinned_tip);
+    let length = (pinned_tip - cursor).min(MAX_DEPOSIT_INTENT_HISTORY_BLOCKS_PER_CALL);
+    let page = match fetch_deposit_intent_page(intent.token_ledger, cursor, length).await {
+        Ok(page) => page,
+        Err(reason) => return Ok(Some(hold_deposit_intent(intent, format!("ICRC-3 history page is unavailable or unverified: {reason}")))),
+    };
+    for (offset, fetched) in page.iter().enumerate() {
+        if fetched.index != cursor {
+            return Ok(Some(hold_deposit_intent(intent, "ICRC-3 history page contains a gap or wrong block ID".into())));
+        }
+        if !fetched.direct_from_ledger {
+            let hash = match deposit_intent_block_hash(&fetched.block) {
+                Ok(hash) => hash,
+                Err(reason) => return Ok(Some(hold_deposit_intent(intent, reason))),
+            };
+            let mut progress = crate::state::DepositIntentArchiveProofProgress {
+                token_ledger: intent.token_ledger,
+                intent_seq: intent.intent_seq,
+                transfer_digest: digest,
+                history_segment: true,
+                segment_start_index: cursor,
+                pinned_history_tip: Some(pinned_tip),
+                exact_match: None,
+                possible_mismatch: false,
+                multiple_exact_matches: false,
+                latest_verified_block_index: cursor,
+                next_block_index: cursor.checked_add(1).ok_or_else(|| StabilityPoolError::LedgerTransferFailed { reason: "archive proof block index overflow".into() })?,
+                prior_block_hash: hash,
+            };
+            if let Err(reason) = classify_deposit_intent_archive_row(intent, &mut progress, fetched) {
+                return Ok(Some(hold_deposit_intent(intent, format!("archived history block {cursor} is malformed: {reason}"))));
+            }
+            if !mutate_state(|state| state.save_deposit_intent_archive_proof(intent.caller, progress.clone())) {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            let remainder = page.iter().skip(offset + 1).cloned().collect();
+            return match advance_deposit_intent_archive_proof(intent, &mut progress, remainder)? {
+                DepositIntentArchiveAdvance::Exact(index) => Ok(Some(finish_deposit_intent_completed(intent, index)?)),
+                DepositIntentArchiveAdvance::Restart => {
+                    mutate_state(|state| state.remove_deposit_intent_archive_proof(intent.caller));
+                    Ok(Some(hold_deposit_intent(
+                        intent,
+                        "archived history chain changed or contained a malformed row; proof will restart from the saved history boundary".into(),
+                    )))
+                }
+                DepositIntentArchiveAdvance::AnchoredNoMatch => Ok(Some(pending_deposit_intent_result(
+                    intent,
+                    DepositIntentPhase::Reconciling,
+                    Some("authenticated archived history continues after its direct anchor".into()),
+                ))),
+                DepositIntentArchiveAdvance::Ambiguous => Ok(Some(hold_deposit_intent(
+                    intent,
+                    "authenticated archived history contains a plausible or repeated transfer candidate".into(),
+                ))),
+                DepositIntentArchiveAdvance::Pending => Ok(Some(hold_deposit_intent(
+                    intent,
+                    "archived history proof is incomplete; retry to continue".into(),
+                ))),
+            };
+        }
+        let block = match rumi_protocol_backend::icrc3_proof::decode_block(&fetched.block) {
+            Ok(block) => block,
+            Err(reason) => return Ok(Some(hold_deposit_intent(intent, format!("ICRC-3 history block {cursor} is malformed: {reason}")))),
+        };
+        if exact_deposit_intent_block(intent, ic_cdk::api::id(), &block) {
+            intent.expected_block_index = Some(cursor);
+            intent.history_next_index = Some(cursor);
+            if !save_deposit_intent(intent) { return Err(StabilityPoolError::SystemBusy); }
+            return Ok(Some(verify_deposit_intent_receipt(intent).await?));
+        }
+        if possible_deposit_intent_block(intent, &block) {
+            return Ok(Some(hold_deposit_intent(intent, format!("ICRC-3 block {cursor} resembles this intent but does not prove its exact tuple"))));
+        }
+        cursor += 1;
+        intent.history_next_index = Some(cursor);
+        if !save_deposit_intent(intent) { return Err(StabilityPoolError::SystemBusy); }
+    }
+    if cursor < pinned_tip {
+        return Ok(Some(pending_deposit_intent_result(
+            intent,
+            DepositIntentPhase::Reconciling,
+            Some(format!("history reconciliation continues at ledger block {cursor}")),
+        )));
+    }
+    if latest_tip > pinned_tip {
+        intent.history_tip = Some(latest_tip);
+        if !save_deposit_intent(intent) {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        return Ok(Some(pending_deposit_intent_result(
+            intent,
+            DepositIntentPhase::Reconciling,
+            Some("ledger history advanced; continuing exact receipt reconciliation".to_string()),
+        )));
+    }
+    Ok(None)
+}
+
+fn confirmed_no_effect_transfer_error(error: &TransferFromError) -> bool {
+    matches!(
+        error,
+        TransferFromError::BadFee { .. }
+            | TransferFromError::BadBurn { .. }
+            | TransferFromError::InsufficientFunds { .. }
+            | TransferFromError::InsufficientAllowance { .. }
+            | TransferFromError::TooOld
+            | TransferFromError::CreatedInFuture { .. }
+    )
+}
+
+async fn resume_deposit_intent(
+    mut intent: DepositIntent,
+) -> Result<DepositIntentResult, StabilityPoolError> {
+    if intent.expected_block_index.is_some() {
+        return verify_deposit_intent_receipt(&intent).await;
+    }
+
+    let previously_dispatched = intent.dispatch_started;
+    let mut absence_proven = false;
+    if previously_dispatched {
+        if let Some(result) = reconcile_deposit_intent_history(&mut intent).await? {
+            if matches!(result, DepositIntentResult::Completed { .. }) {
+                return Ok(result);
+            }
+            return Ok(result);
+        }
+        absence_proven = true;
+    } else if intent.history_start_index.is_none() {
+        let tip = match deposit_intent_history_tip(intent.token_ledger).await {
+            Ok(tip) => tip,
+            Err(error) => {
+                return Ok(hold_deposit_intent(
+                    &intent,
+                    format!("pre-dispatch ledger history boundary unavailable: {error:?}"),
+                ));
+            }
+        };
+        intent.history_start_index = Some(tip);
+        intent.history_next_index = Some(tip);
+        intent.history_tip = Some(tip);
+        if !save_deposit_intent(&intent) {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+    }
+
+    // Reconciliation may have taken multiple update calls. Recheck the shared
+    // mutation gate immediately before every initial or replayed ledger pull;
+    // a liquidation that began before this call acquired its async guard must
+    // not race a new transfer_from.
+    if crate::pool_token_balance_mutation_blocked(&[intent.token_ledger]) {
+        return Ok(hold_deposit_intent(
+            &intent,
+            "pool token balance mutation is blocked; exact intent remains pending".to_string(),
+        ));
+    }
+    let (token_is_active, emergency_paused) = read_state(|state| {
+        (
+            state
+                .get_stablecoin_config(&intent.token_ledger)
+                .is_some_and(|config| config.is_active),
+            state.configuration.emergency_pause,
+        )
+    });
+    if !token_is_active || emergency_paused {
+        return Ok(hold_deposit_intent(
+            &intent,
+            if emergency_paused {
+                "emergency pause prevents a new transfer; exact intent remains pending".to_string()
+            } else {
+                "token is inactive; exact intent remains pending".to_string()
+            },
+        ));
+    }
+
+    let args = deposit_intent_transfer_args(&intent);
+    intent.dispatch_started = true;
+    intent.last_error = None;
+    if !save_deposit_intent(&intent) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let call_result: Result<(Result<candid::Nat, TransferFromError>,), _> =
+        call(intent.token_ledger, "icrc2_transfer_from", (args,)).await;
+    match call_result {
+        Ok((Ok(block),)) => {
+            let block_index = match block.0.try_into() {
+                Ok(index) => index,
+                Err(_) => {
+                    return Ok(hold_deposit_intent(
+                        &intent,
+                        "transfer block index exceeds u64; exact receipt remains unresolved".to_string(),
+                    ));
+                }
+            };
+            intent.expected_block_index = Some(block_index);
+            if !save_deposit_intent(&intent) {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            verify_deposit_intent_receipt(&intent).await
+        }
+        Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => {
+            let block_index = match duplicate_of.0.try_into() {
+                Ok(index) => index,
+                Err(_) => {
+                    return Ok(hold_deposit_intent(
+                        &intent,
+                        "duplicate block index exceeds u64; exact receipt remains unresolved".to_string(),
+                    ));
+                }
+            };
+            intent.expected_block_index = Some(block_index);
+            if !save_deposit_intent(&intent) {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            verify_deposit_intent_receipt(&intent).await
+        }
+        Ok((Err(error),)) if confirmed_no_effect_transfer_error(&error)
+            && (!previously_dispatched || absence_proven) =>
+        {
+            finish_deposit_intent_no_effect(&intent, format!("ledger confirmed no transfer: {error:?}"))
+        }
+        Ok((Err(error),)) => Ok(hold_deposit_intent(
+            &intent,
+            format!("ledger returned an unresolved transfer error: {error:?}"),
+        )),
+        Err(error) => Ok(hold_deposit_intent(
+            &intent,
+            format!("transfer call outcome is ambiguous: {error:?}"),
+        )),
     }
 }
 
@@ -1877,6 +2860,82 @@ pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolEr
 mod tests {
     use super::*;
     use rumi_protocol_backend::chains::config::ChainId;
+
+    #[test]
+    fn deposit_intent_receipt_binds_full_icrc2_identity() {
+        let caller = principal(1);
+        let pool = principal(2);
+        let ledger = principal(3);
+        let intent = DepositIntent {
+            caller,
+            intent_seq: 4,
+            token_ledger: ledger,
+            amount: 900,
+            from: Account { owner: caller, subaccount: None },
+            to: Account { owner: pool, subaccount: None },
+            memo: b"RSPDI001caller-seq-4".to_vec(),
+            created_at_time_ns: 12345,
+            history_start_index: Some(10),
+            history_next_index: Some(10),
+            history_tip: Some(10),
+            expected_block_index: Some(10),
+            dispatch_started: true,
+            last_error: None,
+        };
+        let block = rumi_protocol_backend::icrc3_proof::DecodedBlock {
+            btype: Some("2xfer".to_string()),
+            op: "transfer".to_string(),
+            from: Some(intent.from.clone()),
+            to: Some(intent.to.clone()),
+            spender: Some(Account { owner: pool, subaccount: None }),
+            amount: u128::from(intent.amount),
+            fee: Some(7),
+            created_at_time: Some(intent.created_at_time_ns),
+            memo: Some(intent.memo.clone()),
+        };
+        assert!(exact_deposit_intent_block(&intent, pool, &block));
+
+        let mut block_without_btype = block.clone();
+        block_without_btype.btype = None;
+        block_without_btype.op = "xfer".to_string();
+        assert!(exact_deposit_intent_block(&intent, pool, &block_without_btype));
+
+        let mut changed = block.clone();
+        changed.amount += 1;
+        assert!(!exact_deposit_intent_block(&intent, pool, &changed));
+        let mut changed = block.clone();
+        changed.memo = Some(b"different-sequence".to_vec());
+        assert!(!exact_deposit_intent_block(&intent, pool, &changed));
+        let mut changed = block.clone();
+        changed.spender = Some(Account { owner: principal(9), subaccount: None });
+        assert!(!exact_deposit_intent_block(&intent, pool, &changed));
+        let mut changed = block;
+        changed.created_at_time = Some(intent.created_at_time_ns + 1);
+        assert!(!exact_deposit_intent_block(&intent, pool, &changed));
+    }
+
+    #[test]
+    fn deposit_intent_archive_parent_hash_requires_a_well_formed_link() {
+        let mut block = BTreeMap::new();
+        assert!(deposit_intent_parent_hash(&ICRC3Value::Map(block.clone()), 7).is_err());
+        block.insert("phash".into(), ICRC3Value::Blob(vec![1; 31].into()));
+        assert!(deposit_intent_parent_hash(&ICRC3Value::Map(block.clone()), 7).is_err());
+        block.insert("phash".into(), ICRC3Value::Blob(vec![1; 32].into()));
+        assert_eq!(deposit_intent_parent_hash(&ICRC3Value::Map(block), 7).unwrap(), Some([1; 32]));
+    }
+
+    #[test]
+    fn deposit_intent_memo_is_bounded_and_binds_the_pinned_payload() {
+        let caller = principal(1);
+        let ledger = principal(2);
+        let memo = deposit_intent_memo(caller, 4, ledger, 900);
+        assert_eq!(memo.len(), 32);
+        assert!(memo.starts_with(DEPOSIT_INTENT_MEMO_PREFIX));
+        assert_eq!(memo, deposit_intent_memo(caller, 4, ledger, 900));
+        assert_ne!(memo, deposit_intent_memo(caller, 5, ledger, 900));
+        assert_ne!(memo, deposit_intent_memo(caller, 4, ledger, 901));
+        assert_ne!(memo, deposit_intent_memo(principal(9), 4, ledger, 900));
+    }
 
     fn principal(byte: u8) -> Principal {
         Principal::from_slice(&[byte])

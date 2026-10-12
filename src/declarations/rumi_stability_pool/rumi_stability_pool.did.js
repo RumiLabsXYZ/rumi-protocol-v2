@@ -50,6 +50,72 @@ export const idlFactory = ({ IDL }) => {
     'healthy' : IDL.Bool,
     'freeze_threshold_secs' : IDL.Nat64,
   });
+  const DepositIntentPhase = IDL.Variant({
+    'Dispatching' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'ReceiptVerification' : IDL.Null,
+    'Reconciling' : IDL.Null,
+  });
+  const DepositIntentResult = IDL.Variant({
+    'NoEffect' : IDL.Record({
+      'amount' : IDL.Nat64,
+      'intent_seq' : IDL.Nat64,
+      'token_ledger' : IDL.Principal,
+      'reason' : IDL.Text,
+    }),
+    'Completed' : IDL.Record({
+      'block_index' : IDL.Nat64,
+      'amount' : IDL.Nat64,
+      'intent_seq' : IDL.Nat64,
+      'token_ledger' : IDL.Principal,
+    }),
+    'Pending' : IDL.Record({
+      'phase' : DepositIntentPhase,
+      'amount' : IDL.Nat64,
+      'intent_seq' : IDL.Nat64,
+      'token_ledger' : IDL.Principal,
+      'reason' : IDL.Opt(IDL.Text),
+    }),
+  });
+  const DepositIntentError = IDL.Variant({
+    'DepositIntentUnresolved' : IDL.Record({ 'active_seq' : IDL.Nat64 }),
+    'LedgerTransferFailed' : IDL.Record({ 'reason' : IDL.Text }),
+    'RefundClaimNotFound' : IDL.Null,
+    'EmergencyPaused' : IDL.Null,
+    'AlreadyOptedOut' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'TokenNotActive' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'InsufficientBalance' : IDL.Record({
+      'token' : IDL.Principal,
+      'available' : IDL.Nat64,
+      'required' : IDL.Nat64,
+    }),
+    'InvalidPayoutAddress' : IDL.Record({ 'reason' : IDL.Text }),
+    'CollateralNotFound' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'NoPositionFound' : IDL.Null,
+    'AmountTooLow' : IDL.Record({ 'minimum_e8s' : IDL.Nat64 }),
+    'Unauthorized' : IDL.Null,
+    'InterCanisterCallFailed' : IDL.Record({
+      'method' : IDL.Text,
+      'target' : IDL.Text,
+    }),
+    'PayoutAddressRequired' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'DepositIntentSequenceMismatch' : IDL.Record({
+      'expected_seq' : IDL.Nat64,
+    }),
+    'DepositIntentSequenceExhausted' : IDL.Null,
+    'XrpClaimStillOutstanding' : IDL.Record({ 'claim_id' : IDL.Nat64 }),
+    'LiquidationFailed' : IDL.Record({
+      'vault_id' : IDL.Nat64,
+      'reason' : IDL.Text,
+    }),
+    'DepositIntentCapacityReached' : IDL.Null,
+    'XrpClaimStatusCheckFailed' : IDL.Record({ 'reason' : IDL.Text }),
+    'SystemBusy' : IDL.Null,
+    'AlreadyOptedIn' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'InsufficientPoolBalance' : IDL.Null,
+    'DepositIntentPayloadMismatch' : IDL.Null,
+  });
   const LiquidationResult = IDL.Record({
     'error_message' : IDL.Opt(IDL.Text),
     'stables_consumed' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
@@ -93,6 +159,12 @@ export const idlFactory = ({ IDL }) => {
     'result' : ChainSpAbsorbResult,
     'completed_at_ns' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
+  });
+  const DepositIntentStatus = IDL.Record({
+    'next_seq' : IDL.Opt(IDL.Nat64),
+    'intent' : IDL.Opt(DepositIntentResult),
+    'high_watermark' : IDL.Nat64,
+    'active_intent' : IDL.Opt(DepositIntentResult),
   });
   const InterestMintReceiptCapacity = IDL.Record({
     'warning' : IDL.Bool,
@@ -519,6 +591,16 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : StabilityPoolError })],
         [],
       ),
+    'deposit_with_intent' : IDL.Func(
+        [IDL.Nat64, IDL.Principal, IDL.Nat64],
+        [
+          IDL.Variant({
+            'Ok' : DepositIntentResult,
+            'Err' : DepositIntentError,
+          }),
+        ],
+        [],
+      ),
     'emergency_pause' : IDL.Func(
         [],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
@@ -544,6 +626,7 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(ChainSpAbsorbCompletion)],
         ['query'],
       ),
+    'get_deposit_intent' : IDL.Func([IDL.Nat64], [DepositIntentStatus], []),
     'get_interest_mint_receipt_capacity' : IDL.Func(
         [],
         [InterestMintReceiptCapacity],

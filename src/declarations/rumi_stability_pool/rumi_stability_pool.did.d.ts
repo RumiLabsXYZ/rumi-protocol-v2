@@ -139,6 +139,74 @@ export interface CycleManagerMetric {
   'count' : bigint,
   'label' : [] | [string],
 }
+export type DepositIntentError = {
+    'DepositIntentUnresolved' : { 'active_seq' : bigint }
+  } |
+  { 'LedgerTransferFailed' : { 'reason' : string } } |
+  { 'RefundClaimNotFound' : null } |
+  { 'EmergencyPaused' : null } |
+  { 'AlreadyOptedOut' : { 'collateral' : Principal } } |
+  { 'TokenNotActive' : { 'ledger' : Principal } } |
+  {
+    'InsufficientBalance' : {
+      'token' : Principal,
+      'available' : bigint,
+      'required' : bigint,
+    }
+  } |
+  { 'InvalidPayoutAddress' : { 'reason' : string } } |
+  { 'CollateralNotFound' : { 'ledger' : Principal } } |
+  { 'NoPositionFound' : null } |
+  { 'AmountTooLow' : { 'minimum_e8s' : bigint } } |
+  { 'Unauthorized' : null } |
+  { 'InterCanisterCallFailed' : { 'method' : string, 'target' : string } } |
+  { 'PayoutAddressRequired' : { 'collateral' : Principal } } |
+  { 'DepositIntentSequenceMismatch' : { 'expected_seq' : bigint } } |
+  { 'DepositIntentSequenceExhausted' : null } |
+  { 'XrpClaimStillOutstanding' : { 'claim_id' : bigint } } |
+  { 'LiquidationFailed' : { 'vault_id' : bigint, 'reason' : string } } |
+  { 'DepositIntentCapacityReached' : null } |
+  { 'XrpClaimStatusCheckFailed' : { 'reason' : string } } |
+  { 'SystemBusy' : null } |
+  { 'AlreadyOptedIn' : { 'collateral' : Principal } } |
+  { 'TokenNotAccepted' : { 'ledger' : Principal } } |
+  { 'InsufficientPoolBalance' : null } |
+  { 'DepositIntentPayloadMismatch' : null };
+export type DepositIntentPhase = { 'Dispatching' : null } |
+  { 'Prepared' : null } |
+  { 'ReceiptVerification' : null } |
+  { 'Reconciling' : null };
+export type DepositIntentResult = {
+    'NoEffect' : {
+      'amount' : bigint,
+      'intent_seq' : bigint,
+      'token_ledger' : Principal,
+      'reason' : string,
+    }
+  } |
+  {
+    'Completed' : {
+      'block_index' : bigint,
+      'amount' : bigint,
+      'intent_seq' : bigint,
+      'token_ledger' : Principal,
+    }
+  } |
+  {
+    'Pending' : {
+      'phase' : DepositIntentPhase,
+      'amount' : bigint,
+      'intent_seq' : bigint,
+      'token_ledger' : Principal,
+      'reason' : [] | [string],
+    }
+  };
+export interface DepositIntentStatus {
+  'next_seq' : [] | [bigint],
+  'intent' : [] | [DepositIntentResult],
+  'high_watermark' : bigint,
+  'active_intent' : [] | [DepositIntentResult],
+}
 export interface Icrc10SupportedStandard { 'url' : string, 'name' : string }
 export interface Icrc21ConsentInfo {
   'metadata' : Icrc21ConsentMessageResponseMetadata,
@@ -469,6 +537,11 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : StabilityPoolError }
   >,
+  'deposit_with_intent' : ActorMethod<
+    [bigint, Principal, bigint],
+    { 'Ok' : DepositIntentResult } |
+      { 'Err' : DepositIntentError }
+  >,
   'emergency_pause' : ActorMethod<
     [],
     { 'Ok' : null } |
@@ -485,6 +558,7 @@ export interface _SERVICE {
     [[] | [bigint]],
     Array<ChainSpAbsorbCompletion>
   >,
+  'get_deposit_intent' : ActorMethod<[bigint], DepositIntentStatus>,
   'get_interest_mint_receipt_capacity' : ActorMethod<
     [],
     InterestMintReceiptCapacity

@@ -1,0 +1,71 @@
+name: Stability Pool deposit-intent proof
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/sp-deposit-intent-proof.yml
+      - Cargo.lock
+      - Cargo.toml
+      - src/stability_pool/**
+      - src/flaky_ledger/**
+      - src/rumi_3pool/**
+      - src/rumi_protocol_backend/**
+      - src/rumi_cycle_manager/**
+      - src/ledger/ic-icrc1-ledger.wasm
+
+permissions:
+  contents: read
+
+jobs:
+  archived-receipt:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Rust target and native build dependency
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal
+          rustup +1.92.0 target add wasm32-unknown-unknown
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev liblmdb-dev libunwind-dev pkg-config protobuf-compiler
+      - name: Install pinned PocketIC server
+        run: |
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/pocket-ic.gz" \
+            https://github.com/dfinity/pocketic/releases/download/7.0.0/pocket-ic-x86_64-linux.gz
+          echo "0935ee6ece312719aae4eabddec2dfc6af34d5edbddf4d3af53bccd1b3636044  $RUNNER_TEMP/pocket-ic.gz" | sha256sum --check
+          gzip --decompress --stdout "$RUNNER_TEMP/pocket-ic.gz" > "$RUNNER_TEMP/pocket-ic"
+          chmod +x "$RUNNER_TEMP/pocket-ic"
+      - name: Build exact test Wasms
+        run: cargo +1.92.0 build --release --target wasm32-unknown-unknown --locked -p stability_pool -p flaky_ledger -p rumi_3pool
+      - name: Select rlib-only host test builds
+        run: |
+          # The canister Wasms above use the unchanged manifests. Linux cannot
+          # link native cdylibs with ICP's spaced canister export names; the
+          # host test needs only the rlibs alongside those exact Wasms.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          for name in ("stability_pool", "rumi_3pool"):
+              manifest = Path(f"src/{name}/Cargo.toml")
+              source = manifest.read_text()
+              old = 'crate-type = ["cdylib", "rlib"]'
+              assert source.count(old) == 1, f"unexpected {name} crate types"
+              manifest.write_text(source.replace(old, 'crate-type = ["rlib"]'))
+          PY
+      - name: Prove Stability Pool deposit recovery across upgrade
+        env:
+          # This host executable imports types from two canister rlibs. Their
+          # unused ICP entrypoint export names overlap; PocketIC runs the
+          # separately built Wasms above, not these host entrypoints.
+          RUSTFLAGS: -C link-arg=-Wl,--allow-multiple-definition
+          POCKET_IC_BIN: ${{ runner.temp }}/pocket-ic
+          RUMI_SP_WASM_PATH: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/stability_pool.wasm
+          RUMI_FLAKY_LEDGER_WASM_PATH: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/flaky_ledger.wasm
+          RUMI_THREE_POOL_WASM_PATH: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/rumi_3pool.wasm
+        run: cargo +1.92.0 test --locked -p stability_pool --test pocket_ic_3usd -- --nocapture

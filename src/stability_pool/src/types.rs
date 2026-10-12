@@ -699,6 +699,92 @@ pub struct PendingRefundPayoutAttempt {
     pub last_error: Option<String>,
 }
 
+/// Public outcome for the caller-scoped, idempotent ICRC-2 deposit endpoint.
+/// `Pending` is durable and requires the caller to retry the same sequence and
+/// payload; it never authorizes a new sequence or a balance-delta inference.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DepositIntentResult {
+    Completed {
+        intent_seq: u64,
+        token_ledger: Principal,
+        amount: u64,
+        block_index: u64,
+    },
+    NoEffect {
+        intent_seq: u64,
+        token_ledger: Principal,
+        amount: u64,
+        reason: String,
+    },
+    Pending {
+        intent_seq: u64,
+        token_ledger: Principal,
+        amount: u64,
+        phase: DepositIntentPhase,
+        reason: Option<String>,
+    },
+}
+
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DepositIntentPhase {
+    Prepared,
+    Dispatching,
+    Reconciling,
+    ReceiptVerification,
+}
+
+/// Authoritative update response from `get_deposit_intent`. A missing retained
+/// row is represented by `intent: None`; callers must consult the watermark and
+/// must not infer a no-effect result from retention pruning.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DepositIntentStatus {
+    pub high_watermark: u64,
+    pub next_seq: Option<u64>,
+    pub intent: Option<DepositIntentResult>,
+    /// Current caller-wide unresolved intent, even when the requested seq is
+    /// different. Lets another device discover which seq it must reconcile.
+    pub active_intent: Option<DepositIntentResult>,
+}
+
+/// Immutable transfer identity plus bounded ICRC-3 reconciliation progress.
+/// All fields needed to reconstruct the ICRC-2 call are persisted before the
+/// first outbound ledger call.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DepositIntent {
+    pub caller: Principal,
+    pub intent_seq: u64,
+    pub token_ledger: Principal,
+    pub amount: u64,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    /// First global ledger block that could contain this transfer.
+    #[serde(default)]
+    pub history_start_index: Option<u64>,
+    /// Durable cursor and pinned log tip for bounded recovery scans.
+    #[serde(default)]
+    pub history_next_index: Option<u64>,
+    #[serde(default)]
+    pub history_tip: Option<u64>,
+    /// A returned ledger index still requires exact ICRC-3 verification.
+    #[serde(default)]
+    pub expected_block_index: Option<u64>,
+    #[serde(default)]
+    pub dispatch_started: bool,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedDepositIntent {
+    pub caller: Principal,
+    pub intent_seq: u64,
+    pub token_ledger: Principal,
+    pub amount: u64,
+    pub result: DepositIntentResult,
+}
+
 /// A durable, batched forward of interest that could not be allocated because
 /// no icUSD depositor was eligible for its source collateral.  The transfer
 /// timestamp and memo are persisted before the first ledger call so a retry
@@ -845,6 +931,107 @@ pub enum StabilityPoolError {
         reason: String,
     },
     RefundClaimNotFound,
+}
+
+/// Errors returned only by the durable deposit-intent endpoint. Keeping these
+/// separate preserves the wire shape of `StabilityPoolError`, which is shared
+/// by the Stability Pool's existing public methods.
+#[derive(CandidType, Debug, Clone, Deserialize)]
+pub enum DepositIntentError {
+    InsufficientBalance {
+        token: Principal,
+        required: u64,
+        available: u64,
+    },
+    AmountTooLow {
+        minimum_e8s: u64,
+    },
+    NoPositionFound,
+    InsufficientPoolBalance,
+    Unauthorized,
+    TokenNotAccepted {
+        ledger: Principal,
+    },
+    TokenNotActive {
+        ledger: Principal,
+    },
+    CollateralNotFound {
+        ledger: Principal,
+    },
+    LedgerTransferFailed {
+        reason: String,
+    },
+    InterCanisterCallFailed {
+        target: String,
+        method: String,
+    },
+    LiquidationFailed {
+        vault_id: u64,
+        reason: String,
+    },
+    EmergencyPaused,
+    SystemBusy,
+    DepositIntentSequenceMismatch {
+        expected_seq: u64,
+    },
+    DepositIntentSequenceExhausted,
+    DepositIntentPayloadMismatch,
+    DepositIntentCapacityReached,
+    DepositIntentUnresolved {
+        active_seq: u64,
+    },
+    AlreadyOptedOut {
+        collateral: Principal,
+    },
+    AlreadyOptedIn {
+        collateral: Principal,
+    },
+    PayoutAddressRequired {
+        collateral: Principal,
+    },
+    InvalidPayoutAddress {
+        reason: String,
+    },
+    XrpClaimStillOutstanding {
+        claim_id: u64,
+    },
+    XrpClaimStatusCheckFailed {
+        reason: String,
+    },
+    RefundClaimNotFound,
+}
+
+impl From<StabilityPoolError> for DepositIntentError {
+    fn from(error: StabilityPoolError) -> Self {
+        match error {
+            StabilityPoolError::InsufficientBalance { token, required, available } => {
+                Self::InsufficientBalance { token, required, available }
+            }
+            StabilityPoolError::AmountTooLow { minimum_e8s } => Self::AmountTooLow { minimum_e8s },
+            StabilityPoolError::NoPositionFound => Self::NoPositionFound,
+            StabilityPoolError::InsufficientPoolBalance => Self::InsufficientPoolBalance,
+            StabilityPoolError::Unauthorized => Self::Unauthorized,
+            StabilityPoolError::TokenNotAccepted { ledger } => Self::TokenNotAccepted { ledger },
+            StabilityPoolError::TokenNotActive { ledger } => Self::TokenNotActive { ledger },
+            StabilityPoolError::CollateralNotFound { ledger } => Self::CollateralNotFound { ledger },
+            StabilityPoolError::LedgerTransferFailed { reason } => Self::LedgerTransferFailed { reason },
+            StabilityPoolError::InterCanisterCallFailed { target, method } => {
+                Self::InterCanisterCallFailed { target, method }
+            }
+            StabilityPoolError::LiquidationFailed { vault_id, reason } => {
+                Self::LiquidationFailed { vault_id, reason }
+            }
+            StabilityPoolError::EmergencyPaused => Self::EmergencyPaused,
+            StabilityPoolError::SystemBusy => Self::SystemBusy,
+            StabilityPoolError::AlreadyOptedOut { collateral } => Self::AlreadyOptedOut { collateral },
+            StabilityPoolError::AlreadyOptedIn { collateral } => Self::AlreadyOptedIn { collateral },
+            StabilityPoolError::PayoutAddressRequired { collateral } => Self::PayoutAddressRequired { collateral },
+            StabilityPoolError::InvalidPayoutAddress { reason } => Self::InvalidPayoutAddress { reason },
+            StabilityPoolError::XrpClaimStillOutstanding { claim_id } => Self::XrpClaimStillOutstanding { claim_id },
+            StabilityPoolError::XrpClaimStatusCheckFailed { reason } => Self::XrpClaimStatusCheckFailed { reason },
+            StabilityPoolError::RefundClaimNotFound => Self::RefundClaimNotFound,
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────
