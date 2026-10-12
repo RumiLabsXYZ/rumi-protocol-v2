@@ -81,10 +81,18 @@
     {
       pr: '#450',
       title: 'Points release and historical reconciliation',
-      summary: 'Merged and deployed to the Points canister and frontend. The running Points module reports SHA-256 dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277. The original 401 ledger rows are preserved; 16 tagged rows add an approximate historical uplift of 2,151.74119482 points, bringing the ledger to 417 rows. This does not recreate discarded historical snapshot selection. An October 10 administrative read confirms epoch 18 remains open with A complete, B incomplete, and the driver off. The visible scheduled B time does not establish that capture occurred. No epoch close or reward release is shown. Flat 4× is scheduled for epoch 19 and is not active yet.',
+      summary: 'Merged and deployed to the Points canister and frontend. The running Points module reports SHA-256 dd9b8d5475069c23084ed08aff414faf81dda94081c62b7c4a111d232d7d6277. The original 401 ledger rows are preserved; 16 tagged rows add an approximate historical uplift of 2,151.74119482 points, bringing the ledger to 417 rows. This does not recreate discarded historical snapshot selection. An October 12 administrative read confirms epoch 18 remains open with A complete, B incomplete, and the driver off. No epoch close or reward release is shown. Flat 4× is scheduled for epoch 19 and is not active yet.',
       state: 'Installed · epoch 18 held',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/450'
+    },
+    {
+      pr: '2d1d3793',
+      title: 'Points snapshot-time redaction',
+      summary: 'The October 12 readback found that public status still exposes B’s scheduled time before capture: the administrative view reports B incomplete, while the public time field is populated. The redaction fix is merged in source but is not installed on the running Points module. The driver remains disabled, and epoch 18 remains held for review.',
+      state: 'Merged · Points upgrade pending',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/2d1d37931471a104cc8aa44b47b13fbb6680b33c'
     },
     {
       pr: '#466',
@@ -201,7 +209,7 @@
     {
       system: 'Points',
       status: 'Epoch 18 held · epoch 19 scheduled',
-      detail: 'The October 8 release evidence confirms the deployed module and completed historical adjustments. An October 10 administrative read shows A complete, B incomplete, epoch 18 still open, and the driver disabled. The ledger has 417 rows, but its total does not prove an epoch 18 reward release. Future flat 4× accrual is scheduled for epoch 19, not active.'
+      detail: 'The October 8 release evidence confirms the deployed module and completed historical adjustments. An October 12 administrative read shows A complete, B incomplete, epoch 18 still open, and the driver disabled. Snapshot-time redaction is merged in source but awaits a Points upgrade. The ledger has 417 rows, but its total does not prove an epoch 18 reward release. Future flat 4× accrual is scheduled for epoch 19, not active.'
     },
     {
       system: 'Vault borrowing',
