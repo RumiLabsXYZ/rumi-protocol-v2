@@ -2296,10 +2296,10 @@ pub async fn mint_icusd(amount: ICUSD, to: Principal) -> Result<u64, TransferErr
     .await
 }
 
-/// Mint icUSD using the exact tuple durably reserved by a borrow operation.
-/// Retries must call this with the same journal row so ledger deduplication
-/// can return `Duplicate` as the original block.
-pub async fn mint_icusd_with_borrow_tuple(
+/// Mint icUSD using an exact tuple durably reserved before the first call.
+/// Retries must reuse the same tuple so ledger deduplication returns
+/// `Duplicate` as the original block after a lost response.
+pub async fn mint_icusd_with_exact_tuple(
     tuple: &crate::state::BorrowMintTuple,
 ) -> Result<u64, TransferError> {
     let client = ICRC1Client {
@@ -2320,6 +2320,13 @@ pub async fn mint_icusd_with_borrow_tuple(
         })
         .await;
     handle_borrow_mint_outcome(tuple.ledger, outer)
+}
+
+/// Compatibility name retained for existing borrow-mint callers.
+pub async fn mint_icusd_with_borrow_tuple(
+    tuple: &crate::state::BorrowMintTuple,
+) -> Result<u64, TransferError> {
+    mint_icusd_with_exact_tuple(tuple).await
 }
 
 /// Submit a zero-value, domain-separated operation using the original borrow

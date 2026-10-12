@@ -2297,6 +2297,10 @@ pub struct TreasuryInterestMintJournal {
 pub enum TreasuryInterestMintRoute {
     Treasury,
     StabilityPool { collateral_type: Principal },
+    /// Minted to the 3pool canister, then accounted as a donation. The
+    /// non-idempotent 3pool notification is issued at most once after the mint
+    /// receipt is durably committed.
+    ThreePool,
 }
 
 impl Default for TreasuryInterestMintRoute {
