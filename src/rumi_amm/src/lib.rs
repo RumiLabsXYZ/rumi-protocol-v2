@@ -1481,6 +1481,16 @@ fn pocketic_fail_next_second_payout_link() -> Result<(), AmmError> {
     Ok(())
 }
 
+/// Arm a one-shot trap after the official native ICP ledger applies a payout
+/// but before this canister records the returned block index. Test-only.
+#[cfg(feature = "pocketic-test")]
+#[update]
+fn pocketic_trap_next_native_payout_callback() -> Result<(), AmmError> {
+    caller_is_admin()?;
+    crate::transfers::pocketic_trap_next_native_payout_callback();
+    Ok(())
+}
+
 async fn swap_v2_inner(
     request_id: Vec<u8>,
     pool_id: PoolId,
