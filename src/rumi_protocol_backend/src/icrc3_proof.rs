@@ -633,6 +633,7 @@ mod vault_collateral_pull_receipt_tests {
             request: VaultCollateralPullRequest::OpenVault { collateral_type: ledger, amount_e8s: 500 },
             vault_id: 9,
             ledger,
+            spender: None,
             from: from.clone(),
             to: to.clone(),
             amount_e8s: 500,
@@ -643,6 +644,7 @@ mod vault_collateral_pull_receipt_tests {
             dispatch_attempts: 1,
             receipt_recovery_cooldown_until_ns: 0,
             phase: VaultCollateralPullPhase::Submitted,
+            stable_execution: None,
         };
         let block = DecodedBlock {
             btype: Some("2xfer".into()),
@@ -679,7 +681,7 @@ mod vault_collateral_pull_receipt_tests {
 
     #[test]
     fn lost_transfer_callback_then_too_old_recovers_only_from_exact_receipt() {
-        use crate::state::{State, VaultOperationResult};
+        use crate::state::{State, VaultOperationPhaseView, VaultOperationResult, VaultOperationResultView};
         let (journal, spender, expected) = fixture();
         let owner = journal.owner;
         let mut state = State::default();
@@ -702,7 +704,7 @@ mod vault_collateral_pull_receipt_tests {
             block_index: 77,
         }).unwrap();
         assert_eq!(state.vault_operation_status(owner).active.unwrap().phase,
-            VaultCollateralPullPhase::Completed { result: VaultOperationResult::OpenVault {
+            VaultOperationPhaseView::Completed { result: VaultOperationResultView::OpenVault {
                 vault_id: journal.vault_id, block_index: 77,
             }});
         assert!(validate_vault_collateral_pull_block(

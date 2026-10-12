@@ -1476,6 +1476,16 @@ type StabilityPoolLiquidationResult = record {
   collateral_received : nat64;
 };
 type StableTokenType = variant { CKUSDC; CKUSDT };
+type StableVaultOperationStatus = record {
+  active : opt StableVaultOperationView;
+  acknowledged_through : nat64;
+};
+type StableVaultOperationView = record {
+  operation_id : nat64;
+  vault_id : nat64;
+  phase : VaultCollateralPullPhase;
+  token_type : StableTokenType;
+};
 type StandardRecord = record { url : text; name : text };
 type SuccessWithFee = record {
   block_index : nat64;
@@ -1623,6 +1633,12 @@ type VaultArgWithToken = record {
   amount : nat64;
   token_type : StableTokenType;
 };
+type VaultStableOperationArgs = record {
+  operation_id : nat64;
+  vault_id : nat64;
+  amount : nat64;
+  token_type : StableTokenType;
+};
 type VaultCollateralPullPhase = variant {
   SafeNoEffect : record { message : text };
   Prepared;
@@ -1639,6 +1655,33 @@ type VaultCollateralPullRequest = variant {
     borrow_amount_e8s : nat64;
     collateral_type : principal;
   };
+};
+type VaultOperationRequestView = variant {
+  AddMargin : record { vault_id : nat64; amount_e8s : nat64 };
+  OpenVault : record { amount_e8s : nat64; collateral_type : principal };
+  OpenVaultAndBorrow : record {
+    amount_e8s : nat64;
+    borrow_amount_e8s : nat64;
+    collateral_type : principal;
+  };
+};
+type VaultOperationResultView = variant {
+  AddMargin : record { block_index : nat64; vault_id : nat64 };
+  OpenVault : record { block_index : nat64; vault_id : nat64 };
+  OpenVaultAndBorrow : record {
+    failure : opt text;
+    block_index : nat64;
+    vault_id : nat64;
+    borrowed : bool;
+  };
+};
+type VaultOperationPhaseView = variant {
+  SafeNoEffect : record { message : text };
+  Prepared;
+  VaultCredited : record { block_index : nat64 };
+  PullConfirmed : record { block_index : nat64 };
+  Submitted;
+  Completed : record { result : VaultOperationResultView };
 };
 type VaultDebtCorrection = record {
   correct_accrued_interest_e8s : nat64;
@@ -1659,7 +1702,9 @@ type VaultIntent = record {
 type VaultOperationIdArg = record { operation_id : nat64 };
 type VaultOperationResult = variant {
   AddMargin : record { block_index : nat64; vault_id : nat64 };
+  StableRepay : record { block_index : nat64 };
   OpenVault : record { block_index : nat64; vault_id : nat64 };
+  StableLiquidation : SuccessWithFee;
   OpenVaultAndBorrow : record {
     failure : opt text;
     block_index : nat64;
@@ -1672,10 +1717,10 @@ type VaultOperationStatus = record {
   acknowledged_through : nat64;
 };
 type VaultOperationView = record {
-  request : VaultCollateralPullRequest;
+  request : VaultOperationRequestView;
   operation_id : nat64;
   vault_id : nat64;
-  phase : VaultCollateralPullPhase;
+  phase : VaultOperationPhaseView;
 };
 type VaultRedemption = record {
   icusd_redeemed_e8s : nat64;
@@ -1953,6 +1998,9 @@ service : (ProtocolArg) -> {
     ) query;
   get_vault_interest_rate : (nat64) -> (Result_14) query;
   get_vault_operation_status : () -> (Result_15) query;
+  get_stable_vault_operation_status : () -> (
+      variant { Ok : StableVaultOperationStatus; Err : ProtocolError },
+    ) query;
   get_vaults : (opt principal) -> (vec CandidVault) query;
   get_vaults_page : (nat64, nat64) -> (VaultsPageResponse) query;
   get_xrp_claims : () -> (vec record { nat64; XrpClaim }) query;
@@ -2025,6 +2073,7 @@ service : (ProtocolArg) -> {
   repay_and_close_vault : (VaultArg) -> (Result_27);
   repay_to_vault : (VaultArg) -> (Result);
   repay_to_vault_with_stable : (VaultArgWithToken) -> (Result);
+  repay_to_vault_with_stable_v2 : (VaultStableOperationArgs) -> (Result);
   reset_bot_budget : (nat64) -> (Result_1);
   resolve_stuck_settlement_op : (nat32, nat64) -> (Result_1);
   set_amm1_canister : (principal) -> (Result_1);

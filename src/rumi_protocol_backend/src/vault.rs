@@ -5,12 +5,12 @@ use crate::guard::{GuardPrincipal, VaultLiquidationGuard};
 use crate::logs::INFO;
 use crate::management;
 use crate::management::{
-    transfer_collateral, transfer_collateral_from, transfer_icusd_from, transfer_stable_from,
+    transfer_collateral, transfer_collateral_from, transfer_icusd_from, transfer_stable_from_legacy,
 };
 use crate::numeric::{Ratio, UsdIcp, ICP, ICUSD};
 use crate::state::{
     PendingMarginTransfer, VaultCollateralPullJournal, VaultCollateralPullPhase,
-    VaultCollateralPullRequest, VaultOperationResult,
+    VaultCollateralPullRequest, VaultOperationResult, StableVaultPullExecution,
 };
 use crate::state::{compute_redemption_fee_with_rate, Mode, RedemptionSimulationPlan, State};
 use crate::GuardError;
@@ -198,6 +198,7 @@ pub(crate) fn redemption_candidate_types(state: &crate::state::State) -> Vec<Pri
         if vault.borrowed_icusd_amount == 0
             || vault.bot_processing
             || state.has_unresolved_push_sweep_for_vault(vault.vault_id)
+            || state.has_active_stable_vault_pull(vault.vault_id)
             || crate::guard::is_vault_liquidating(vault.vault_id)
         {
             continue;
@@ -1518,6 +1519,14 @@ pub struct AddMarginV2Args {
 #[derive(CandidType, Clone, Debug, Deserialize, Serialize)]
 pub struct VaultOperationIdArg {
     pub operation_id: u64,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct VaultStableOperationArgs {
+    pub operation_id: u64,
+    pub vault_id: u64,
+    pub amount: u64,
+    pub token_type: StableTokenType,
 }
 
 fn completed_compound_operation_response(
@@ -2963,7 +2972,9 @@ async fn prepare_or_resume_vault_operation(
     let amount_e8s = match &request {
         VaultCollateralPullRequest::OpenVault { amount_e8s, .. }
         | VaultCollateralPullRequest::OpenVaultAndBorrow { amount_e8s, .. }
-        | VaultCollateralPullRequest::AddMargin { amount_e8s, .. } => *amount_e8s,
+        | VaultCollateralPullRequest::AddMargin { amount_e8s, .. }
+        | VaultCollateralPullRequest::StableRepay { amount_e8s, .. }
+        | VaultCollateralPullRequest::StableLiquidation { amount_e8s, .. } => *amount_e8s,
     };
     let fee_e8s = management::preflight_vault_collateral_pull(owner, ledger, ic_cdk::id(), amount_e8s)
         .await
@@ -2984,7 +2995,12 @@ async fn dispatch_vault_collateral_operation(
     }
     let dispatch = mutate_state(|s| s.mark_vault_collateral_pull_dispatched(&owner, &journal))
         .map_err(ProtocolError::TemporarilyUnavailable)?;
-    match management::transfer_collateral_from_journal(&dispatch).await {
+    let transfer_result = if dispatch.stable_execution.is_some() {
+        management::transfer_stable_from_journal(&dispatch).await
+    } else {
+        management::transfer_collateral_from_journal(&dispatch).await
+    };
+    match transfer_result {
         Ok(block_index) => mutate_state(|s| s.record_vault_pull_confirmed(&owner, &dispatch, block_index))
             .map_err(ProtocolError::TemporarilyUnavailable),
         Err(error) => {
@@ -3037,10 +3053,17 @@ pub async fn reconcile_vault_collateral_pull_from_block(
             "operation is not awaiting collateral pull receipt recovery".into(),
         ));
     }
+    if journal.stable_execution.is_some() && journal.spender != Some(ic_cdk::id()) {
+        return Err(ProtocolError::GenericError(
+            "stable pull spender no longer matches its pinned identity".into(),
+        ));
+    }
     let guard_name = match journal.request {
         VaultCollateralPullRequest::OpenVault { .. } => "open_vault_v2".to_string(),
         VaultCollateralPullRequest::OpenVaultAndBorrow { .. } => "open_vault_and_borrow_v2".to_string(),
         VaultCollateralPullRequest::AddMargin { vault_id, .. } => format!("add_margin_vault_v2_{vault_id}"),
+        VaultCollateralPullRequest::StableRepay { vault_id, .. } => format!("repay_stable_v2_{vault_id}"),
+        VaultCollateralPullRequest::StableLiquidation { vault_id, .. } => format!("liquidate_stable_v2_{vault_id}"),
     };
     let guard = GuardPrincipal::new(owner, &guard_name)?;
     let generation = mutate_state(|s| s.reserve_vault_pull_receipt_recovery(
@@ -3818,6 +3841,11 @@ pub fn stability_pool_preflight_xrp_absorb_in_state(
     if state.has_unresolved_push_sweep_for_vault(vault_id) {
         return Err(ProtocolError::TemporarilyUnavailable(format!(
             "Vault #{vault_id} has an unresolved push-deposit sweep"
+        )));
+    }
+    if state.has_active_stable_vault_pull(vault_id) {
+        return Err(ProtocolError::TemporarilyUnavailable(format!(
+            "Vault #{vault_id} has an unresolved stable pull"
         )));
     }
 
@@ -8779,17 +8807,147 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
 
 /// Repay vault debt using ckUSDT or ckUSDC (1:1 with icUSD, plus configurable fee)
 pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, ProtocolError> {
+    repay_to_vault_with_stable_inner(arg, None).await
+}
+
+/// Operation-bound stable repayment. The request ID is part of the journal key;
+/// retries after reply loss reuse the original persisted ICRC-2 tuple.
+pub async fn repay_to_vault_with_stable_v2(
+    args: VaultStableOperationArgs,
+) -> Result<u64, ProtocolError> {
+    let operation_id = args.operation_id;
+    repay_to_vault_with_stable_inner(
+        VaultArgWithToken { vault_id: args.vault_id, amount: args.amount, token_type: args.token_type },
+        Some(operation_id),
+    ).await
+}
+
+async fn resume_stable_repay(
+    owner: Principal,
+    operation_id: u64,
+    request: &VaultCollateralPullRequest,
+) -> Result<Option<(u64, ICUSD)>, ProtocolError> {
+    let Some(existing) = read_state(|s| s.vault_collateral_pull_journals.get(&owner).cloned()) else {
+        return Ok(None);
+    };
+    if existing.operation_id != operation_id || &existing.request != request {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "another operation is active or this operation ID is bound to different arguments".into(),
+        ));
+    }
+    let journal = match existing.phase {
+        VaultCollateralPullPhase::Completed { result: VaultOperationResult::StableRepay { block_index } } => {
+            return Ok(Some((block_index, ICUSD::new(0))));
+        }
+        VaultCollateralPullPhase::Completed { .. } => {
+            return Err(ProtocolError::GenericError("stable repayment journal has an invalid terminal result".into()));
+        }
+        _ => dispatch_vault_collateral_operation(owner, existing).await?,
+    };
+    let block_index = match journal.phase {
+        VaultCollateralPullPhase::PullConfirmed { block_index } => block_index,
+        VaultCollateralPullPhase::Completed { result: VaultOperationResult::StableRepay { block_index } } => {
+            return Ok(Some((block_index, ICUSD::new(0))));
+        }
+        VaultCollateralPullPhase::SafeNoEffect { .. } => {
+            return Err(ProtocolError::TemporarilyUnavailable("stable pull had a typed no-effect response; retry the same operation ID".into()));
+        }
+        _ => return Err(ProtocolError::TemporarilyUnavailable("stable pull is unresolved; reconcile a positive ledger receipt before accounting".into())),
+    };
+    let execution = journal.stable_execution.clone().ok_or_else(|| ProtocolError::GenericError("stable repayment journal is missing its accounting inputs".into()))?;
+    let StableVaultPullExecution::Repay { debt_e8s, fee_e6s: _, total_pull_e6s: _ } = execution else {
+        return Err(ProtocolError::GenericError("stable repayment journal contains the wrong operation kind".into()));
+    };
+    let amount = ICUSD::new(debt_e8s);
+    let interest_share = mutate_state(|s| {
+        let current = s.vault_collateral_pull_journals.get(&owner).cloned();
+        let Some(current) = current else { return Err("stable repayment journal disappeared before accounting".to_string()); };
+        if current.operation_id != operation_id || current.phase != (VaultCollateralPullPhase::PullConfirmed { block_index }) {
+            return Err("stable repayment journal changed before accounting".to_string());
+        }
+        if s.stable_vault_pull_locks.get(&current.vault_id) != Some(&(owner, operation_id)) {
+            return Err("stable repayment no longer owns the durable vault lock".to_string());
+        }
+        let Some(vault) = s.vault_id_to_vaults.get(&current.vault_id) else {
+            return Err("vault disappeared after stable pull; receipt remains held".to_string());
+        };
+        if vault.owner != owner {
+            return Err("vault owner changed after stable pull; receipt remains held".to_string());
+        }
+        let interest_share = record_repayed_to_vault(s, current.vault_id, amount, block_index);
+        s.complete_vault_operation(
+            &owner,
+            operation_id,
+            VaultOperationResult::StableRepay { block_index },
+        )?;
+        Ok::<_, String>(interest_share)
+    }).map_err(ProtocolError::TemporarilyUnavailable)?;
+    Ok(Some((block_index, interest_share)))
+}
+
+async fn repay_to_vault_with_stable_inner(
+    arg: VaultArgWithToken,
+    operation_id: Option<u64>,
+) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal =
         GuardPrincipal::new(caller, &format!("repay_vault_stable_{}", arg.vault_id))?;
-    // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
-    let _vault_op_guard = match VaultLiquidationGuard::new(arg.vault_id) {
+    // The runtime lock blocks concurrent updates in this execution; the
+    // durable stable journal supplies the same exclusion after upgrades.
+    let raw_amount_e8s = arg.amount - (arg.amount % 100);
+    let _vault_op_guard_result = if let Some(operation_id) = operation_id {
+        let active_retry = read_state(|s| s.vault_collateral_pull_journals.get(&caller).is_some_and(|journal| {
+            journal.operation_id == operation_id
+                && journal.vault_id == arg.vault_id
+                && journal.stable_execution.is_some()
+                && !matches!(journal.phase, VaultCollateralPullPhase::Completed { .. })
+        }));
+        if active_retry {
+            VaultLiquidationGuard::new_for_stable_repay_retry(
+                arg.vault_id, caller, operation_id, raw_amount_e8s, arg.token_type.clone(),
+            )
+        } else {
+            VaultLiquidationGuard::new(arg.vault_id)
+        }
+    } else {
+        VaultLiquidationGuard::new(arg.vault_id)
+    };
+    let _vault_op_guard = match _vault_op_guard_result {
         Ok(g) => g,
         Err(e) => {
             guard_principal.fail();
             return Err(e);
         }
     };
+
+    if let Some(operation_id) = operation_id {
+        let request = VaultCollateralPullRequest::StableRepay {
+            vault_id: arg.vault_id,
+            amount_e8s: raw_amount_e8s,
+            token_type: arg.token_type.clone(),
+        };
+        match resume_stable_repay(caller, operation_id, &request).await {
+            Ok(Some((block_index, interest_share))) => {
+                // Secondary treasury routing is best effort as in the legacy
+                // endpoint. The stable pull and debt mutation are already complete.
+                if interest_share.to_u64() > 0 {
+                    let collateral_type = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).map(|v| v.collateral_type));
+                    if let Some(collateral_type) = collateral_type {
+                        crate::treasury::distribute_stablecoin_interest(
+                            interest_share.to_u64(), collateral_type, arg.token_type.clone(),
+                        ).await;
+                    }
+                }
+                guard_principal.complete();
+                return Ok(block_index);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                guard_principal.fail();
+                return Err(error);
+            }
+        }
+    }
 
     // Check if the selected stable token is enabled
     let is_enabled = read_state(|s| match arg.token_type {
@@ -8892,69 +9050,88 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
         }
     };
 
-    // Transfer the stable token from user (in 6-decimal units)
-    match transfer_stable_from(arg.token_type.clone(), total_pull_e6s, caller).await {
-        Ok(block_index) => {
-            let interest_share =
-                mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
-
-            // Route interest via N-way split (stablecoin-denominated)
-            if interest_share.to_u64() > 0 {
-                crate::treasury::distribute_stablecoin_interest(
-                    interest_share.to_u64(),
-                    vault.collateral_type,
-                    arg.token_type.clone(),
-                )
-                .await;
-            }
-
-            // Route fee surcharge to treasury as stablecoins
-            if fee_e6s > 0 {
-                let (treasury, stable_ledger) = read_state(|s| {
-                    let ledger = match arg.token_type {
-                        StableTokenType::CKUSDT => s.ckusdt_ledger_principal,
-                        StableTokenType::CKUSDC => s.ckusdc_ledger_principal,
-                    };
-                    (s.treasury_principal, ledger)
-                });
-                if let (Some(treasury_principal), Some(stable_ledger)) = (treasury, stable_ledger) {
-                    match management::transfer_collateral(
-                        fee_e6s,
-                        treasury_principal,
-                        stable_ledger,
-                    )
-                    .await
-                    {
-                        Ok(block) => {
-                            log!(
-                                INFO,
-                                "[repay_with_stable] Transferred {} e6s fee to treasury (block {})",
-                                fee_e6s,
-                                block
-                            );
-                        }
-                        Err(e) => {
-                            // Non-critical: fee stays in reserves if transfer fails
-                            log!(INFO,
-                                "[repay_with_stable] Fee transfer to treasury failed: {:?}. Fee remains in reserves.",
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-
-            guard_principal.complete();
-            Ok(block_index)
-        }
-        Err(transfer_from_error) => {
+    let (block_index, interest_share) = if let Some(operation_id) = operation_id {
+        let raw_amount_e8s = arg.amount - (arg.amount % 100);
+        let request = VaultCollateralPullRequest::StableRepay {
+            vault_id: arg.vault_id,
+            amount_e8s: raw_amount_e8s,
+            token_type: arg.token_type.clone(),
+        };
+        let Some(ledger) = management::stable_ledger(arg.token_type.clone()) else {
             guard_principal.fail();
-            Err(ProtocolError::TransferFromError(
-                transfer_from_error,
+            return Err(ProtocolError::TemporarilyUnavailable("selected stable ledger is not configured".into()));
+        };
+        let ledger_fee = match management::preflight_vault_collateral_pull(caller, ledger, ic_cdk::id(), total_pull_e6s).await {
+            Ok(fee) => fee,
+            Err(error) => {
+                guard_principal.fail();
+                return Err(ProtocolError::TemporarilyUnavailable(error));
+            }
+        };
+        let prepared = mutate_state(|s| s.prepare_stable_vault_pull(
+            caller,
+            operation_id,
+            request.clone(),
+            ledger,
+            ic_cdk::id(),
+            total_pull_e6s,
+            ledger_fee,
+            StableVaultPullExecution::Repay {
+                debt_e8s: amount.to_u64(),
+                fee_e6s,
                 total_pull_e6s,
-            ))
+            },
+            ic_cdk::api::time(),
+        ));
+        if let Err(error) = prepared {
+            guard_principal.fail();
+            return Err(ProtocolError::TemporarilyUnavailable(error));
+        }
+        match resume_stable_repay(caller, operation_id, &request).await {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                guard_principal.fail();
+                return Err(ProtocolError::TemporarilyUnavailable("stable pull journal was not created".into()));
+            }
+            Err(error) => {
+                guard_principal.fail();
+                return Err(error);
+            }
+        }
+    } else {
+        match transfer_stable_from_legacy(arg.token_type.clone(), total_pull_e6s, caller).await {
+            Ok(block_index) => {
+                let interest_share = mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
+                (block_index, interest_share)
+            }
+            Err(error) => {
+                guard_principal.fail();
+                return Err(ProtocolError::TransferFromError(error, total_pull_e6s));
+            }
+        }
+    };
+
+    if interest_share.to_u64() > 0 {
+        crate::treasury::distribute_stablecoin_interest(
+            interest_share.to_u64(), vault.collateral_type, arg.token_type.clone(),
+        ).await;
+    }
+    if fee_e6s > 0 {
+        let (treasury, stable_ledger) = read_state(|s| {
+            let ledger = match arg.token_type {
+                StableTokenType::CKUSDT => s.ckusdt_ledger_principal,
+                StableTokenType::CKUSDC => s.ckusdc_ledger_principal,
+            };
+            (s.treasury_principal, ledger)
+        });
+        if let (Some(treasury_principal), Some(stable_ledger)) = (treasury, stable_ledger) {
+            if let Err(error) = management::transfer_collateral(fee_e6s, treasury_principal, stable_ledger).await {
+                log!(INFO, "[repay_with_stable] Fee transfer to treasury failed: {:?}. Fee remains in reserves.", error);
+            }
         }
     }
+    guard_principal.complete();
+    Ok(block_index)
 }
 
 pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
@@ -10997,7 +11174,7 @@ pub async fn liquidate_vault_partial_with_stable(
         };
 
     let stable_block_index =
-        match transfer_stable_from(token_type.clone(), total_pull_e6s, caller).await {
+        match transfer_stable_from_legacy(token_type.clone(), total_pull_e6s, caller).await {
             Ok(block_index) => {
                 log!(
                     INFO,

@@ -1601,6 +1601,7 @@ export const idlFactory = ({ IDL }) => {
       'block_index' : IDL.Nat64,
       'vault_id' : IDL.Nat64,
     }),
+    'StableRepay' : IDL.Record({ 'block_index' : IDL.Nat64 }),
     'OpenVault' : IDL.Record({
       'block_index' : IDL.Nat64,
       'vault_id' : IDL.Nat64,
@@ -1611,6 +1612,7 @@ export const idlFactory = ({ IDL }) => {
       'vault_id' : IDL.Nat64,
       'borrowed' : IDL.Bool,
     }),
+    'StableLiquidation' : SuccessWithFee,
   });
   const VaultCollateralPullPhase = IDL.Variant({
     'SafeNoEffect' : IDL.Record({ 'message' : IDL.Text }),
@@ -1620,16 +1622,36 @@ export const idlFactory = ({ IDL }) => {
     'Submitted' : IDL.Null,
     'Completed' : IDL.Record({ 'result' : VaultOperationResult }),
   });
+  const VaultOperationRequestView = IDL.Variant({
+    'AddMargin' : IDL.Record({ 'vault_id' : IDL.Nat64, 'amount_e8s' : IDL.Nat64 }),
+    'OpenVault' : IDL.Record({ 'amount_e8s' : IDL.Nat64, 'collateral_type' : IDL.Principal }),
+    'OpenVaultAndBorrow' : IDL.Record({ 'amount_e8s' : IDL.Nat64, 'borrow_amount_e8s' : IDL.Nat64, 'collateral_type' : IDL.Principal }),
+  });
+  const VaultOperationResultView = IDL.Variant({
+    'AddMargin' : IDL.Record({ 'block_index' : IDL.Nat64, 'vault_id' : IDL.Nat64 }),
+    'OpenVault' : IDL.Record({ 'block_index' : IDL.Nat64, 'vault_id' : IDL.Nat64 }),
+    'OpenVaultAndBorrow' : IDL.Record({ 'failure' : IDL.Opt(IDL.Text), 'block_index' : IDL.Nat64, 'vault_id' : IDL.Nat64, 'borrowed' : IDL.Bool }),
+  });
+  const VaultOperationPhaseView = IDL.Variant({
+    'SafeNoEffect' : IDL.Record({ 'message' : IDL.Text }),
+    'Prepared' : IDL.Null,
+    'VaultCredited' : IDL.Record({ 'block_index' : IDL.Nat64 }),
+    'PullConfirmed' : IDL.Record({ 'block_index' : IDL.Nat64 }),
+    'Submitted' : IDL.Null,
+    'Completed' : IDL.Record({ 'result' : VaultOperationResultView }),
+  });
   const VaultOperationView = IDL.Record({
-    'request' : VaultCollateralPullRequest,
+    'request' : VaultOperationRequestView,
     'operation_id' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
-    'phase' : VaultCollateralPullPhase,
+    'phase' : VaultOperationPhaseView,
   });
   const VaultOperationStatus = IDL.Record({
     'active' : IDL.Opt(VaultOperationView),
     'acknowledged_through' : IDL.Nat64,
   });
+  const StableVaultOperationView = IDL.Record({ 'operation_id' : IDL.Nat64, 'vault_id' : IDL.Nat64, 'phase' : VaultCollateralPullPhase, 'token_type' : StableTokenType });
+  const StableVaultOperationStatus = IDL.Record({ 'active' : IDL.Opt(StableVaultOperationView), 'acknowledged_through' : IDL.Nat64 });
   const Result_15 = IDL.Variant({
     'Ok' : VaultOperationStatus,
     'Err' : ProtocolError,
@@ -1693,6 +1715,7 @@ export const idlFactory = ({ IDL }) => {
     'amount' : IDL.Nat64,
     'token_type' : StableTokenType,
   });
+  const VaultStableOperationArgs = IDL.Record({ 'operation_id' : IDL.Nat64, 'vault_id' : IDL.Nat64, 'amount' : IDL.Nat64, 'token_type' : StableTokenType });
   const ChainVaultPage = IDL.Record({
     'done' : IDL.Bool,
     'vaults' : IDL.Vec(ChainVaultV1),
@@ -2414,6 +2437,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'get_vault_interest_rate' : IDL.Func([IDL.Nat64], [Result_14], ['query']),
     'get_vault_operation_status' : IDL.Func([], [Result_15], ['query']),
+    'get_stable_vault_operation_status' : IDL.Func([], [IDL.Variant({ 'Ok' : StableVaultOperationStatus, 'Err' : ProtocolError })], ['query']),
     'get_vaults' : IDL.Func(
         [IDL.Opt(IDL.Principal)],
         [IDL.Vec(CandidVault)],
@@ -2604,6 +2628,7 @@ export const idlFactory = ({ IDL }) => {
     'repay_and_close_vault' : IDL.Func([VaultArg], [Result_27], []),
     'repay_to_vault' : IDL.Func([VaultArg], [Result], []),
     'repay_to_vault_with_stable' : IDL.Func([VaultArgWithToken], [Result], []),
+    'repay_to_vault_with_stable_v2' : IDL.Func([VaultStableOperationArgs], [Result], []),
     'reset_bot_budget' : IDL.Func([IDL.Nat64], [Result_1], []),
     'resolve_stuck_settlement_op' : IDL.Func(
         [IDL.Nat32, IDL.Nat64],

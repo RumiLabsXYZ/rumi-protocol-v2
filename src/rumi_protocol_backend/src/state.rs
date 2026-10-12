@@ -429,6 +429,75 @@ mod three_usd_reserve_ingress_state_tests {
     }
 
     #[test]
+    fn stable_repay_commit_lost_reply_reuses_exact_tuple_after_state_roundtrip() {
+        use super::{
+            State, StableVaultPullExecution, VaultCollateralPullPhase,
+            VaultCollateralPullRequest, VaultOperationResult,
+        };
+        use crate::StableTokenType;
+        let owner = Principal::from_slice(&[111]);
+        let ledger = Principal::from_slice(&[112]);
+        let spender = Principal::from_slice(&[113]);
+        let request = VaultCollateralPullRequest::StableRepay {
+            vault_id: 77,
+            amount_e8s: 12_345_600,
+            token_type: StableTokenType::CKUSDC,
+        };
+        let execution = StableVaultPullExecution::Repay {
+            debt_e8s: 12_345_600,
+            fee_e6s: 12_345,
+            total_pull_e6s: 12_358_345,
+        };
+        let mut state = State::default();
+        state.vault_id_to_vaults.insert(77, crate::vault::Vault {
+            owner,
+            borrowed_icusd_amount: crate::numeric::ICUSD::new(20_000_000),
+            collateral_amount: 30_000_000,
+            vault_id: 77,
+            collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: crate::numeric::ICUSD::new(0),
+            bot_processing: false,
+        });
+        let prepared = state.prepare_stable_vault_pull(
+            owner, 1, request.clone(), ledger, spender, 12_358_345, 10_000,
+            execution.clone(), 99,
+        ).unwrap();
+        let sent = state.mark_vault_collateral_pull_dispatched(&owner, &prepared).unwrap();
+        assert!(state.has_active_stable_vault_pull(77));
+        let ledger_committed_tuple = (
+            sent.ledger, sent.from.clone(), sent.spender, sent.to.clone(), sent.amount_e8s,
+            sent.fee_e8s, sent.memo, sent.created_at_time_ns,
+        );
+
+        // The ledger committed, but the backend's outer reply never arrived.
+        // Simulate an upgrade before the client retries its same operation ID.
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let mut restored: State = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let replay = restored.prepare_stable_vault_pull(
+            owner, 1, request, ledger, spender, 12_358_345, 999_999,
+            execution, 999_999,
+        ).unwrap();
+        assert_eq!(replay, sent, "retry must retain the complete original ICRC-2 tuple");
+        let resent = restored.mark_vault_collateral_pull_dispatched(&owner, &replay).unwrap();
+        assert_eq!(
+            (resent.ledger, resent.from.clone(), resent.spender, resent.to.clone(), resent.amount_e8s,
+             resent.fee_e8s, resent.memo, resent.created_at_time_ns),
+            ledger_committed_tuple,
+            "the ledger sees its original duplicate key and cannot debit a second tuple",
+        );
+        assert!(restored.has_active_stable_vault_pull(77), "upgrade retains the per-vault lock");
+        restored.record_vault_pull_confirmed(&owner, &resent, 501).unwrap();
+        restored.complete_vault_operation(&owner, 1, VaultOperationResult::StableRepay { block_index: 501 }).unwrap();
+        assert!(!restored.has_active_stable_vault_pull(77), "terminal accounting releases the durable per-vault lock");
+        let completed = restored.vault_collateral_pull_journals.get(&owner).unwrap();
+        assert!(matches!(completed.phase, VaultCollateralPullPhase::Completed { .. }));
+        assert!(restored.vault_operation_status(owner).active.is_none(), "legacy Candid status stays on its old request/phase variants");
+        assert_eq!(restored.stable_vault_operation_status(owner).active.unwrap().operation_id, 1);
+    }
+
+    #[test]
     fn vault_pull_reservation_rechecks_config_after_preflight_race() {
         use super::{CollateralStatus, State, VaultCollateralPullRequest};
         let owner = Principal::from_slice(&[81]);
@@ -597,6 +666,7 @@ mod three_usd_reserve_ingress_state_tests {
             request: VaultCollateralPullRequest::AddMargin { vault_id: 7, amount_e8s: 200 },
             vault_id: 7,
             ledger,
+            spender: None,
             from: icrc_ledger_types::icrc1::account::Account { owner, subaccount: None },
             to: icrc_ledger_types::icrc1::account::Account {
                 owner: Principal::management_canister(),
@@ -610,6 +680,7 @@ mod three_usd_reserve_ingress_state_tests {
             dispatch_attempts: 1,
             receipt_recovery_cooldown_until_ns: 0,
             phase: VaultCollateralPullPhase::PullConfirmed { block_index: 55 },
+            stable_execution: None,
         };
         state.vault_collateral_pull_journals.insert(owner, journal.clone());
 
@@ -2609,6 +2680,8 @@ pub enum VaultCollateralPullRequest {
     OpenVault { collateral_type: Principal, amount_e8s: u64 },
     OpenVaultAndBorrow { collateral_type: Principal, amount_e8s: u64, borrow_amount_e8s: u64 },
     AddMargin { vault_id: u64, amount_e8s: u64 },
+    StableRepay { vault_id: u64, amount_e8s: u64, token_type: crate::StableTokenType },
+    StableLiquidation { vault_id: u64, amount_e8s: u64, token_type: crate::StableTokenType },
 }
 
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -2616,6 +2689,31 @@ pub enum VaultOperationResult {
     OpenVault { vault_id: u64, block_index: u64 },
     OpenVaultAndBorrow { vault_id: u64, block_index: u64, borrowed: bool, failure: Option<String> },
     AddMargin { vault_id: u64, block_index: u64 },
+    StableRepay { block_index: u64 },
+    StableLiquidation {
+        block_index: u64,
+        fee_amount_paid: u64,
+        collateral_amount_received: Option<u64>,
+        debt_liquidated_e8s: Option<u64>,
+        stable_pulled_e6s: Option<u64>,
+        xrp_claim_id: Option<u64>,
+    },
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum StableVaultPullExecution {
+    Repay { debt_e8s: u64, fee_e6s: u64, total_pull_e6s: u64 },
+    Liquidate {
+        debt_e8s: u64,
+        collateral_type: Principal,
+        collateral_price_usd_e8s: u64,
+        config_decimals: u8,
+        collateral_to_liquidator_e8s: u64,
+        total_to_seize_e8s: u64,
+        protocol_cut_e8s: u64,
+        fee_e6s: u64,
+        total_pull_e6s: u64,
+    },
 }
 
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -2636,6 +2734,10 @@ pub struct VaultCollateralPullJournal {
     /// Newly reserved for open operations; the existing vault for add-margin.
     pub vault_id: u64,
     pub ledger: Principal,
+    /// Pinned ICRC-2 spender identity for stable pulls. Absent only on older
+    /// collateral journals, which retain their historic canister-spender rule.
+    #[serde(default)]
+    pub spender: Option<Principal>,
     pub from: icrc_ledger_types::icrc1::account::Account,
     pub to: icrc_ledger_types::icrc1::account::Account,
     pub amount_e8s: u64,
@@ -2648,6 +2750,10 @@ pub struct VaultCollateralPullJournal {
     #[serde(default)]
     pub receipt_recovery_cooldown_until_ns: u64,
     pub phase: VaultCollateralPullPhase,
+    /// Exact accounting inputs for stable repayment/liquidation pulls. Missing
+    /// in pre-existing CBOR snapshots; `serde(default)` keeps upgrades additive.
+    #[serde(default)]
+    pub stable_execution: Option<StableVaultPullExecution>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, Serialize)]
@@ -2666,9 +2772,49 @@ pub const VAULT_PULL_RECEIPT_RECOVERY_COOLDOWN_NS: u64 = 5_000_000_000;
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct VaultOperationView {
     pub operation_id: u64,
-    pub request: VaultCollateralPullRequest,
+    pub request: VaultOperationRequestView,
     pub vault_id: u64,
+    pub phase: VaultOperationPhaseView,
+}
+
+/// Stable compatibility projection for the original status endpoint. Keep
+/// this shape limited to the variants that endpoint has historically exposed.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum VaultOperationRequestView {
+    OpenVault { collateral_type: Principal, amount_e8s: u64 },
+    OpenVaultAndBorrow { collateral_type: Principal, amount_e8s: u64, borrow_amount_e8s: u64 },
+    AddMargin { vault_id: u64, amount_e8s: u64 },
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum VaultOperationResultView {
+    OpenVault { vault_id: u64, block_index: u64 },
+    OpenVaultAndBorrow { vault_id: u64, block_index: u64, borrowed: bool, failure: Option<String> },
+    AddMargin { vault_id: u64, block_index: u64 },
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum VaultOperationPhaseView {
+    Prepared,
+    Submitted,
+    PullConfirmed { block_index: u64 },
+    VaultCredited { block_index: u64 },
+    SafeNoEffect { message: String },
+    Completed { result: VaultOperationResultView },
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct StableVaultOperationView {
+    pub operation_id: u64,
+    pub vault_id: u64,
+    pub token_type: crate::StableTokenType,
     pub phase: VaultCollateralPullPhase,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct StableVaultOperationStatus {
+    pub acknowledged_through: u64,
+    pub active: Option<StableVaultOperationView>,
 }
 
 /// The result is available until explicit ACK. After ACK only the watermark
@@ -3325,6 +3471,10 @@ pub struct State {
     /// One resumable or terminal client operation per owner, keyed by owner.
     #[serde(default)]
     pub vault_collateral_pull_journals: BTreeMap<Principal, VaultCollateralPullJournal>,
+    /// Reverse index for nonterminal operation-bound stable pulls. The guard
+    /// checks this per-vault map rather than scanning every owner's journal.
+    #[serde(default)]
+    pub stable_vault_pull_locks: BTreeMap<u64, (Principal, u64)>,
     /// Expiring leases bound aggregate canister-paid direct ledger reads.
     #[serde(default)]
     pub vault_pull_receipt_recovery_leases: BTreeMap<Principal, VaultPullReceiptRecoveryLease>,
@@ -3903,6 +4053,7 @@ impl Default for State {
             push_sweep_journals: BTreeMap::new(),
             vault_operation_acknowledged_through: BTreeMap::new(),
             vault_collateral_pull_journals: BTreeMap::new(),
+            stable_vault_pull_locks: BTreeMap::new(),
             vault_pull_receipt_recovery_leases: BTreeMap::new(),
             vault_pull_receipt_recovery_generation: 0,
             pending_outlier_prices: BTreeMap::new(),
@@ -4212,6 +4363,7 @@ impl From<InitArg> for State {
             push_sweep_journals: BTreeMap::new(),
             vault_operation_acknowledged_through: BTreeMap::new(),
             vault_collateral_pull_journals: BTreeMap::new(),
+            stable_vault_pull_locks: BTreeMap::new(),
             vault_pull_receipt_recovery_leases: BTreeMap::new(),
             vault_pull_receipt_recovery_generation: 0,
             pending_outlier_prices: BTreeMap::new(),
@@ -5002,15 +5154,68 @@ impl State {
     }
 
     pub fn vault_operation_status(&self, owner: Principal) -> VaultOperationStatus {
+        let active = self.vault_collateral_pull_journals.get(&owner).and_then(|journal| {
+            if journal.stable_execution.is_some() { return None; }
+            let request = match &journal.request {
+                VaultCollateralPullRequest::OpenVault { collateral_type, amount_e8s } =>
+                    VaultOperationRequestView::OpenVault { collateral_type: *collateral_type, amount_e8s: *amount_e8s },
+                VaultCollateralPullRequest::OpenVaultAndBorrow { collateral_type, amount_e8s, borrow_amount_e8s } =>
+                    VaultOperationRequestView::OpenVaultAndBorrow { collateral_type: *collateral_type, amount_e8s: *amount_e8s, borrow_amount_e8s: *borrow_amount_e8s },
+                VaultCollateralPullRequest::AddMargin { vault_id, amount_e8s } =>
+                    VaultOperationRequestView::AddMargin { vault_id: *vault_id, amount_e8s: *amount_e8s },
+                VaultCollateralPullRequest::StableRepay { .. }
+                | VaultCollateralPullRequest::StableLiquidation { .. } => return None,
+            };
+            let phase = match &journal.phase {
+                VaultCollateralPullPhase::Prepared => VaultOperationPhaseView::Prepared,
+                VaultCollateralPullPhase::Submitted => VaultOperationPhaseView::Submitted,
+                VaultCollateralPullPhase::PullConfirmed { block_index } => VaultOperationPhaseView::PullConfirmed { block_index: *block_index },
+                VaultCollateralPullPhase::VaultCredited { block_index } => VaultOperationPhaseView::VaultCredited { block_index: *block_index },
+                VaultCollateralPullPhase::SafeNoEffect { message } => VaultOperationPhaseView::SafeNoEffect { message: message.clone() },
+                VaultCollateralPullPhase::Completed { result } => {
+                    let result = match result {
+                        VaultOperationResult::OpenVault { vault_id, block_index } => VaultOperationResultView::OpenVault { vault_id: *vault_id, block_index: *block_index },
+                        VaultOperationResult::OpenVaultAndBorrow { vault_id, block_index, borrowed, failure } =>
+                            VaultOperationResultView::OpenVaultAndBorrow { vault_id: *vault_id, block_index: *block_index, borrowed: *borrowed, failure: failure.clone() },
+                        VaultOperationResult::AddMargin { vault_id, block_index } => VaultOperationResultView::AddMargin { vault_id: *vault_id, block_index: *block_index },
+                        VaultOperationResult::StableRepay { .. } | VaultOperationResult::StableLiquidation { .. } => return None,
+                    };
+                    VaultOperationPhaseView::Completed { result }
+                }
+            };
+            Some(VaultOperationView { operation_id: journal.operation_id, request, vault_id: journal.vault_id, phase })
+        });
         VaultOperationStatus {
             acknowledged_through: self.vault_operation_acknowledged_through.get(&owner).copied().unwrap_or(0),
-            active: self.vault_collateral_pull_journals.get(&owner).map(|journal| VaultOperationView {
-                operation_id: journal.operation_id,
-                request: journal.request.clone(),
-                vault_id: journal.vault_id,
-                phase: journal.phase.clone(),
-            }),
+            active,
         }
+    }
+
+    pub fn stable_vault_operation_status(&self, owner: Principal) -> StableVaultOperationStatus {
+        let active = self.vault_collateral_pull_journals.get(&owner).and_then(|journal| {
+            let token_type = match &journal.request {
+                VaultCollateralPullRequest::StableRepay { token_type, .. }
+                | VaultCollateralPullRequest::StableLiquidation { token_type, .. } => token_type.clone(),
+                _ => return None,
+            };
+            Some(StableVaultOperationView {
+                operation_id: journal.operation_id,
+                vault_id: journal.vault_id,
+                token_type,
+                phase: journal.phase.clone(),
+            })
+        });
+        StableVaultOperationStatus {
+            acknowledged_through: self.vault_operation_acknowledged_through.get(&owner).copied().unwrap_or(0),
+            active,
+        }
+    }
+
+    /// True while a stable pull for this vault might already have committed.
+    /// Completed receipts no longer exclude unrelated work; every other phase
+    /// remains a durable per-vault lock across upgrades.
+    pub fn has_active_stable_vault_pull(&self, vault_id: u64) -> bool {
+        self.stable_vault_pull_locks.contains_key(&vault_id)
     }
 
     fn validate_vault_pull_admission(
@@ -5047,6 +5252,10 @@ impl State {
                 }
                 if config.min_collateral_deposit > *amount_e8s { return Err("collateral amount is below the current minimum".into()); }
             }
+            VaultCollateralPullRequest::StableRepay { .. }
+            | VaultCollateralPullRequest::StableLiquidation { .. } => {
+                return Err("stable vault pulls require the operation-bound admission path".into());
+            }
         }
         Ok(())
     }
@@ -5065,6 +5274,12 @@ impl State {
             if saved.operation_id != operation_id || saved.request != request {
                 return Err("another vault operation is active; replay it or ACK its terminal receipt first".into());
             }
+            if saved.stable_execution.is_some()
+                && !matches!(saved.phase, VaultCollateralPullPhase::Completed { .. })
+                && self.stable_vault_pull_locks.get(&saved.vault_id) != Some(&(owner, operation_id))
+            {
+                return Err("stable pull journal is missing its durable vault lock; operation remains held".into());
+            }
             if matches!(saved.phase, VaultCollateralPullPhase::Submitted | VaultCollateralPullPhase::PullConfirmed { .. }
                 | VaultCollateralPullPhase::VaultCredited { .. } | VaultCollateralPullPhase::Completed { .. }) {
                 return Ok(saved);
@@ -5075,7 +5290,9 @@ impl State {
             retry.amount_e8s = match request {
                 VaultCollateralPullRequest::OpenVault { amount_e8s, .. }
                 | VaultCollateralPullRequest::OpenVaultAndBorrow { amount_e8s, .. }
-                | VaultCollateralPullRequest::AddMargin { amount_e8s, .. } => amount_e8s,
+                | VaultCollateralPullRequest::AddMargin { amount_e8s, .. }
+                | VaultCollateralPullRequest::StableRepay { amount_e8s, .. }
+                | VaultCollateralPullRequest::StableLiquidation { amount_e8s, .. } => amount_e8s,
             };
             retry.fee_e8s = fee_e8s;
             retry.op_nonce = self.next_op_nonce_at(now_ns);
@@ -5099,6 +5316,8 @@ impl State {
             | VaultCollateralPullRequest::OpenVaultAndBorrow { amount_e8s, .. } =>
                 (self.increment_vault_id(), *amount_e8s),
             VaultCollateralPullRequest::AddMargin { vault_id, amount_e8s } => (*vault_id, *amount_e8s),
+            VaultCollateralPullRequest::StableRepay { vault_id, amount_e8s, .. }
+            | VaultCollateralPullRequest::StableLiquidation { vault_id, amount_e8s, .. } => (*vault_id, *amount_e8s),
         };
         let op_nonce = self.next_op_nonce_at(now_ns);
         let journal = VaultCollateralPullJournal {
@@ -5107,6 +5326,7 @@ impl State {
             request,
             vault_id,
             ledger,
+            spender: None,
             from: icrc_ledger_types::icrc1::account::Account { owner, subaccount: None },
             to: icrc_ledger_types::icrc1::account::Account { owner: protocol, subaccount: None },
             amount_e8s,
@@ -5117,8 +5337,87 @@ impl State {
             dispatch_attempts: 0,
             receipt_recovery_cooldown_until_ns: 0,
             phase: VaultCollateralPullPhase::Prepared,
+            stable_execution: None,
         };
         self.vault_collateral_pull_journals.insert(owner, journal.clone());
+        Ok(journal)
+    }
+
+    pub fn prepare_stable_vault_pull(
+        &mut self,
+        owner: Principal,
+        operation_id: u64,
+        request: VaultCollateralPullRequest,
+        ledger: Principal,
+        protocol: Principal,
+        amount_e6s: u64,
+        fee_e6s: u64,
+        execution: StableVaultPullExecution,
+        now_ns: u64,
+    ) -> Result<VaultCollateralPullJournal, String> {
+        if !matches!(&request, VaultCollateralPullRequest::StableRepay { .. } | VaultCollateralPullRequest::StableLiquidation { .. }) {
+            return Err("stable pull request has the wrong operation kind".into());
+        }
+        if let Some(saved) = self.vault_collateral_pull_journals.get(&owner).cloned() {
+            if saved.operation_id != operation_id || saved.request != request {
+                return Err("another vault operation is active; replay it or ACK its terminal receipt first".into());
+            }
+            // A retry always reuses the original fee, memo, created_at_time,
+            // and ledger tuple, including after a typed no-effect response.
+            return Ok(saved);
+        }
+        let acknowledged = self.vault_operation_acknowledged_through.get(&owner).copied().unwrap_or(0);
+        if operation_id <= acknowledged {
+            return Err("stale vault operation ID has already been acknowledged".into());
+        }
+        if operation_id != acknowledged.saturating_add(1) {
+            return Err(format!("expected vault operation ID {}", acknowledged.saturating_add(1)));
+        }
+        let vault_id = match &request {
+            VaultCollateralPullRequest::StableRepay { vault_id, .. }
+            | VaultCollateralPullRequest::StableLiquidation { vault_id, .. } => *vault_id,
+            _ => unreachable!("request kind checked above"),
+        };
+        match (&request, &execution) {
+            (VaultCollateralPullRequest::StableRepay { .. }, StableVaultPullExecution::Repay { debt_e8s, .. }) => {
+                let vault = self.vault_id_to_vaults.get(&vault_id).ok_or("vault no longer exists")?;
+                if vault.owner != owner { return Err("caller no longer owns the target vault".into()); }
+                if vault.bot_processing { return Err("vault is locked for bot liquidation".into()); }
+                if *debt_e8s == 0 || ICUSD::new(*debt_e8s) > vault.borrowed_icusd_amount {
+                    return Err("pinned repayment exceeds the current vault debt".into());
+                }
+                if self.get_collateral_status(&vault.collateral_type).is_some_and(|status| !status.allows_repay()) {
+                    return Err("repayment is no longer allowed for this collateral".into());
+                }
+            }
+            (VaultCollateralPullRequest::StableLiquidation { .. }, StableVaultPullExecution::Liquidate { .. }) => {}
+            _ => return Err("stable pull execution does not match its request".into()),
+        }
+        if self.stable_vault_pull_locks.contains_key(&vault_id) {
+            return Err("vault has another unresolved stable pull".into());
+        }
+        let op_nonce = self.next_op_nonce_at(now_ns);
+        let journal = VaultCollateralPullJournal {
+            owner,
+            operation_id,
+            request,
+            vault_id,
+            ledger,
+            spender: Some(protocol),
+            from: icrc_ledger_types::icrc1::account::Account { owner, subaccount: None },
+            to: icrc_ledger_types::icrc1::account::Account { owner: protocol, subaccount: None },
+            amount_e8s: amount_e6s,
+            fee_e8s: fee_e6s,
+            memo: op_nonce.to_be_bytes(),
+            created_at_time_ns: (op_nonce >> 64) as u64,
+            op_nonce,
+            dispatch_attempts: 0,
+            receipt_recovery_cooldown_until_ns: 0,
+            phase: VaultCollateralPullPhase::Prepared,
+            stable_execution: Some(execution),
+        };
+        self.vault_collateral_pull_journals.insert(owner, journal.clone());
+        self.stable_vault_pull_locks.insert(vault_id, (owner, operation_id));
         Ok(journal)
     }
 
@@ -5131,7 +5430,7 @@ impl State {
             return Err("collateral pull intent disappeared before dispatch".into());
         };
         if saved != expected { return Err("collateral pull intent changed before dispatch".into()); }
-        if !matches!(saved.phase, VaultCollateralPullPhase::Prepared | VaultCollateralPullPhase::Submitted) {
+        if !matches!(saved.phase, VaultCollateralPullPhase::Prepared | VaultCollateralPullPhase::Submitted | VaultCollateralPullPhase::SafeNoEffect { .. }) {
             return Err("collateral pull is not dispatchable in its current phase".into());
         }
         saved.dispatch_attempts = saved.dispatch_attempts.saturating_add(1);
@@ -5290,11 +5589,23 @@ impl State {
                                 && !self.pending_borrow_mints.contains_key(&saved.vault_id)
                         }
                 }
+            (VaultCollateralPullRequest::StableRepay { .. }, VaultCollateralPullPhase::PullConfirmed { block_index },
+                VaultOperationResult::StableRepay { block_index: result_block }) => block_index == result_block,
+            (VaultCollateralPullRequest::StableLiquidation { .. }, VaultCollateralPullPhase::PullConfirmed { block_index },
+                VaultOperationResult::StableLiquidation { block_index: result_block, .. }) => block_index == result_block,
             _ => false,
         };
         if !completion_is_valid { return Err("vault operation cannot complete from its current phase or with a mismatched result".into()); }
+        if saved.stable_execution.is_some()
+            && self.stable_vault_pull_locks.get(&saved.vault_id) != Some(&(*owner, operation_id))
+        {
+            return Err("stable pull durable vault lock is missing at completion".into());
+        }
         self.vault_collateral_pull_journals.get_mut(owner).expect("journal was checked above").phase =
             VaultCollateralPullPhase::Completed { result };
+        if saved.stable_execution.is_some() {
+            self.stable_vault_pull_locks.remove(&saved.vault_id);
+        }
         Ok(())
     }
 
@@ -5304,6 +5615,14 @@ impl State {
         let Some(journal) = self.vault_collateral_pull_journals.get(&owner) else { return Err("no terminal vault operation receipt to ACK".into()); };
         if journal.operation_id != operation_id || !matches!(journal.phase, VaultCollateralPullPhase::SafeNoEffect { .. } | VaultCollateralPullPhase::Completed { .. }) {
             return Err("vault operation is not terminal and cannot be ACKed".into());
+        }
+        if journal.stable_execution.is_some()
+            && !matches!(journal.phase, VaultCollateralPullPhase::Completed { .. })
+        {
+            if self.stable_vault_pull_locks.get(&journal.vault_id) != Some(&(owner, operation_id)) {
+                return Err("stable pull durable vault lock is missing at ACK".into());
+            }
+            self.stable_vault_pull_locks.remove(&journal.vault_id);
         }
         self.vault_collateral_pull_journals.remove(&owner);
         self.vault_operation_acknowledged_through.insert(owner, operation_id);
@@ -5557,6 +5876,7 @@ impl State {
             if vault.borrowed_icusd_amount == 0
                 || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_active_stable_vault_pull(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
             {
                 continue;
@@ -7831,6 +8151,7 @@ impl State {
             // this scan (see `apply_vault_redemptions`).
             if vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_active_stable_vault_pull(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
             {
                 continue;
@@ -8073,6 +8394,7 @@ impl State {
             // this scan (see `apply_vault_redemptions`).
             if vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_active_stable_vault_pull(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
             {
                 continue;
@@ -8264,6 +8586,7 @@ impl State {
             if vault.borrowed_icusd_amount == 0
                 || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_active_stable_vault_pull(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
             {
                 continue;
@@ -8404,6 +8727,7 @@ impl State {
             }
             if vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_active_stable_vault_pull(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
             {
                 continue;

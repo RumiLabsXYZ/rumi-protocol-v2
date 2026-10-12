@@ -6612,6 +6612,16 @@ fn get_vault_operation_status() -> Result<rumi_protocol_backend::state::VaultOpe
     Ok(rumi_protocol_backend::state::read_state(|s| s.vault_operation_status(caller)))
 }
 
+#[candid_method(query)]
+#[query]
+fn get_stable_vault_operation_status() -> Result<rumi_protocol_backend::state::StableVaultOperationStatus, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    Ok(rumi_protocol_backend::state::read_state(|s| s.stable_vault_operation_status(caller)))
+}
+
 #[candid_method(update)]
 #[update]
 fn ack_vault_operation(arg: rumi_protocol_backend::vault::VaultOperationIdArg) -> Result<u64, ProtocolError> {
@@ -6676,6 +6686,26 @@ async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
 async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, ProtocolError> {
     validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::repay_to_vault_with_stable(arg).await)
+}
+
+/// Operation-bound retry-safe stable repayment. Existing V1 remains available
+/// for client compatibility; new clients should persist and replay this ID.
+#[candid_method(update)]
+#[update]
+async fn repay_to_vault_with_stable_v2(
+    args: rumi_protocol_backend::vault::VaultStableOperationArgs,
+) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    validate_authenticated_not_frozen()?;
+    let has_journal = rumi_protocol_backend::state::read_state(|s| {
+        s.vault_collateral_pull_journals.get(&caller).is_some_and(|journal| {
+            journal.operation_id == args.operation_id && journal.stable_execution.is_some()
+        })
+    });
+    if !has_journal {
+        validate_call().await?;
+    }
+    check_postcondition(rumi_protocol_backend::vault::repay_to_vault_with_stable_v2(args).await)
 }
 
 #[candid_method(update)]

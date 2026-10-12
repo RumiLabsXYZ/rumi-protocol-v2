@@ -215,7 +215,7 @@ impl VaultLiquidationGuard {
     /// flight; the caller should back off (the stability pool, per project
     /// rule, must NOT retry — it falls through to manual, which is correct).
     pub fn new(vault_id: u64) -> Result<Self, crate::ProtocolError> {
-        Self::acquire(vault_id, None, false)
+        Self::acquire(vault_id, None, None, false)
     }
 
     /// Acquire the lock only for the exact caller/vault add-margin retry whose
@@ -225,7 +225,34 @@ impl VaultLiquidationGuard {
         vault_id: u64,
         owner: Principal,
     ) -> Result<Self, crate::ProtocolError> {
-        Self::acquire(vault_id, Some(owner), false)
+        Self::acquire(vault_id, Some(owner), None, false)
+    }
+
+    /// Permit only the exact operation-bound stable repayment whose durable
+    /// pull journal owns this vault. The ID and full request are checked here
+    /// because the heap lock is intentionally lost across upgrades.
+    pub fn new_for_stable_repay_retry(
+        vault_id: u64,
+        owner: Principal,
+        operation_id: u64,
+        amount_e8s: u64,
+        token_type: crate::StableTokenType,
+    ) -> Result<Self, crate::ProtocolError> {
+        let exact = read_state(|s| s.vault_collateral_pull_journals.get(&owner).is_some_and(|journal| {
+            journal.operation_id == operation_id
+                && journal.vault_id == vault_id
+                && journal.stable_execution.is_some()
+                && journal.request == crate::state::VaultCollateralPullRequest::StableRepay {
+                    vault_id, amount_e8s, token_type: token_type.clone(),
+                }
+                && !matches!(journal.phase, crate::state::VaultCollateralPullPhase::Completed { .. })
+        }));
+        if !exact {
+            return Err(crate::ProtocolError::TemporarilyUnavailable(
+                "no matching unresolved stable repayment journal owns this vault".into(),
+            ));
+        }
+        Self::acquire(vault_id, None, Some((owner, operation_id)), false)
     }
 
     /// Only the already-authorized exact borrow retry may pass its own
@@ -242,12 +269,13 @@ impl VaultLiquidationGuard {
                 "Vault #{vault_id} has an unresolved bot liquidation; retry after it settles"
             )));
         }
-        Self::acquire(vault_id, None, true)
+        Self::acquire(vault_id, None, None, true)
     }
 
     fn acquire(
         vault_id: u64,
         retry_owner: Option<Principal>,
+        stable_retry: Option<(Principal, u64)>,
         allow_pending_borrow: bool,
     ) -> Result<Self, crate::ProtocolError> {
         let pending = read_state(|s| {
@@ -266,6 +294,12 @@ impl VaultLiquidationGuard {
         {
             return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
                 "Vault #{vault_id} has an unresolved push-deposit sweep; retry that exact operation"
+            )));
+        }
+        let stable_pending = read_state(|s| s.stable_vault_pull_locks.get(&vault_id).copied());
+        if stable_pending.is_some() && stable_pending != stable_retry {
+            return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                "Vault #{vault_id} has an unresolved stable pull; retry its exact operation ID"
             )));
         }
         if !allow_pending_borrow && crate::state::has_pending_borrow_mint(vault_id) {
@@ -445,6 +479,51 @@ mod vault_liquidation_guard_tests {
         // Once vault 42's liquidation finishes (guard dropped), it can be re-acquired.
         let _g3 = VaultLiquidationGuard::new(42).expect("re-acquire vault 42 after release");
         drop(g2);
+    }
+
+    #[test]
+    fn durable_stable_pull_lock_blocks_other_ops_and_only_exact_retry_can_enter() {
+        let owner = Principal::from_slice(&[121]);
+        let token_type = crate::StableTokenType::CKUSDC;
+        let vault_id = 122;
+        let operation_id = 1;
+        let mut state = crate::state::State::default();
+        state.stable_vault_pull_locks.insert(vault_id, (owner, operation_id));
+        state.vault_collateral_pull_journals.insert(owner, crate::state::VaultCollateralPullJournal {
+            owner,
+            operation_id,
+            request: crate::state::VaultCollateralPullRequest::StableRepay {
+                vault_id, amount_e8s: 10_000, token_type: token_type.clone(),
+            },
+            vault_id,
+            ledger: Principal::from_slice(&[123]),
+            spender: Some(Principal::from_slice(&[124])),
+            from: icrc_ledger_types::icrc1::account::Account { owner, subaccount: None },
+            to: icrc_ledger_types::icrc1::account::Account { owner: Principal::from_slice(&[124]), subaccount: None },
+            amount_e8s: 101,
+            fee_e8s: 1,
+            memo: [1; 16],
+            created_at_time_ns: 2,
+            op_nonce: 3,
+            dispatch_attempts: 1,
+            receipt_recovery_cooldown_until_ns: 0,
+            phase: crate::state::VaultCollateralPullPhase::Submitted,
+            stable_execution: Some(crate::state::StableVaultPullExecution::Repay {
+                debt_e8s: 10_000, fee_e6s: 100, total_pull_e6s: 101,
+            }),
+        });
+        crate::state::replace_state(state);
+
+        assert!(VaultLiquidationGuard::new(vault_id).is_err());
+        assert!(VaultLiquidationGuard::new_for_stable_repay_retry(
+            vault_id, owner, operation_id + 1, 10_000, token_type.clone(),
+        ).is_err(), "a different operation ID cannot borrow the unresolved vault lock");
+        let retry = VaultLiquidationGuard::new_for_stable_repay_retry(
+            vault_id, owner, operation_id, 10_000, token_type,
+        ).expect("only the exact operation can reacquire after upgrade");
+        assert!(VaultLiquidationGuard::new(vault_id).is_err(), "retry shares the same exclusive lock");
+        drop(retry);
+        assert!(VaultLiquidationGuard::new(vault_id).is_err(), "dropping heap guard cannot release durable journal lock");
     }
 
     #[test]

@@ -2808,23 +2808,48 @@ pub async fn preflight_vault_collateral_pull(
     Ok(fee_e8s)
 }
 
-/// Transfer ckUSDT or ckUSDC from a user to the protocol (for vault repayment/liquidation)
-/// Amount is in e6s (6-decimal stable token units)
-pub async fn transfer_stable_from(token_type: StableTokenType, amount_e6s: u64, caller: Principal) -> Result<u64, TransferFromError> {
-    let ledger_principal = match token_type {
+/// Resolve the configured stable ledger for a vault pull.
+pub fn stable_ledger(token_type: StableTokenType) -> Option<Principal> {
+    match token_type {
         StableTokenType::CKUSDT => read_state(|s| s.ckusdt_ledger_principal),
         StableTokenType::CKUSDC => read_state(|s| s.ckusdc_ledger_principal),
-    }.ok_or_else(|| TransferFromError::GenericError {
-        error_code: Nat::from(0u64),
-        message: format!("{:?} ledger not configured", token_type),
-    })?;
+    }
+}
 
-    let op_nonce = crate::state::mutate_state(|s| s.next_op_nonce());
-    let protocol_id = ic_cdk::id();
+/// Dispatch the exact ICRC-2 tuple saved in a vault pull journal. This helper
+/// never allocates a nonce or changes transfer arguments; retries therefore
+/// remain the same ledger operation.
+pub async fn transfer_stable_from_journal(
+    journal: &crate::state::VaultCollateralPullJournal,
+) -> Result<u64, VaultCollateralPullDispatchError> {
+    if journal.spender != Some(ic_cdk::id()) {
+        return Err(VaultCollateralPullDispatchError::Rejected {
+            code: 0,
+            message: "stable pull spender differs from the journaled canister identity".into(),
+        });
+    }
+    transfer_collateral_from_journal(journal).await
+}
+
+/// Legacy stable pull used by the original Candid methods. It cannot bind a
+/// caller retry to the original ICRC-2 tuple because those methods have no
+/// operation ID. New retry-safe methods must use the journal dispatcher.
+pub async fn transfer_stable_from_legacy(
+    token_type: StableTokenType,
+    amount_e6s: u64,
+    caller: Principal,
+) -> Result<u64, TransferFromError> {
+    let ledger_principal = stable_ledger(token_type.clone()).ok_or_else(|| {
+        TransferFromError::GenericError {
+            error_code: Nat::from(0u64),
+            message: format!("{:?} ledger not configured", token_type),
+        }
+    })?;
+    let op_nonce = mutate_state(|s| s.next_op_nonce());
     transfer_from_idempotent(
         ledger_principal,
         Account { owner: caller, subaccount: None },
-        Account { owner: protocol_id, subaccount: None },
+        Account { owner: ic_cdk::id(), subaccount: None },
         amount_e6s as u128,
         op_nonce,
         None,

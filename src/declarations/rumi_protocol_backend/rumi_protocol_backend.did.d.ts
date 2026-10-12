@@ -1869,6 +1869,7 @@ export interface VaultOperationIdArg { 'operation_id' : bigint }
 export type VaultOperationResult = {
     'AddMargin' : { 'block_index' : bigint, 'vault_id' : bigint }
   } |
+  { 'StableRepay' : { 'block_index' : bigint } } |
   { 'OpenVault' : { 'block_index' : bigint, 'vault_id' : bigint } } |
   {
     'OpenVaultAndBorrow' : {
@@ -1877,16 +1878,48 @@ export type VaultOperationResult = {
       'vault_id' : bigint,
       'borrowed' : boolean,
     }
-  };
+  } |
+  { 'StableLiquidation' : SuccessWithFee };
+export type VaultOperationRequestView =
+  { 'AddMargin' : { 'vault_id' : bigint, 'amount_e8s' : bigint } } |
+  { 'OpenVault' : { 'amount_e8s' : bigint, 'collateral_type' : Principal } } |
+  { 'OpenVaultAndBorrow' : { 'amount_e8s' : bigint, 'borrow_amount_e8s' : bigint, 'collateral_type' : Principal } };
+export type VaultOperationResultView =
+  { 'AddMargin' : { 'block_index' : bigint, 'vault_id' : bigint } } |
+  { 'OpenVault' : { 'block_index' : bigint, 'vault_id' : bigint } } |
+  { 'OpenVaultAndBorrow' : { 'failure' : [] | [string], 'block_index' : bigint, 'vault_id' : bigint, 'borrowed' : boolean } };
+export type VaultOperationPhaseView =
+  { 'SafeNoEffect' : { 'message' : string } } |
+  { 'Prepared' : null } |
+  { 'VaultCredited' : { 'block_index' : bigint } } |
+  { 'PullConfirmed' : { 'block_index' : bigint } } |
+  { 'Submitted' : null } |
+  { 'Completed' : { 'result' : VaultOperationResultView } };
 export interface VaultOperationStatus {
   'active' : [] | [VaultOperationView],
   'acknowledged_through' : bigint,
 }
 export interface VaultOperationView {
-  'request' : VaultCollateralPullRequest,
+  'request' : VaultOperationRequestView,
+  'operation_id' : bigint,
+  'vault_id' : bigint,
+  'phase' : VaultOperationPhaseView,
+}
+export interface StableVaultOperationStatus {
+  'active' : [] | [StableVaultOperationView],
+  'acknowledged_through' : bigint,
+}
+export interface StableVaultOperationView {
   'operation_id' : bigint,
   'vault_id' : bigint,
   'phase' : VaultCollateralPullPhase,
+  'token_type' : StableTokenType,
+}
+export interface VaultStableOperationArgs {
+  'operation_id' : bigint,
+  'vault_id' : bigint,
+  'amount' : bigint,
+  'token_type' : StableTokenType,
 }
 export interface VaultRedemption {
   'icusd_redeemed_e8s' : bigint,
@@ -2257,6 +2290,7 @@ export interface _SERVICE {
   >,
   'get_vault_interest_rate' : ActorMethod<[bigint], Result_14>,
   'get_vault_operation_status' : ActorMethod<[], Result_15>,
+  'get_stable_vault_operation_status' : ActorMethod<[], { 'Ok' : StableVaultOperationStatus } | { 'Err' : ProtocolError }>,
   'get_vaults' : ActorMethod<[[] | [Principal]], Array<CandidVault>>,
   'get_vaults_page' : ActorMethod<[bigint, bigint], VaultsPageResponse>,
   'get_xrp_claims' : ActorMethod<[], Array<[bigint, XrpClaim]>>,
@@ -2372,6 +2406,7 @@ export interface _SERVICE {
   'repay_and_close_vault' : ActorMethod<[VaultArg], Result_27>,
   'repay_to_vault' : ActorMethod<[VaultArg], Result>,
   'repay_to_vault_with_stable' : ActorMethod<[VaultArgWithToken], Result>,
+  'repay_to_vault_with_stable_v2' : ActorMethod<[VaultStableOperationArgs], Result>,
   'reset_bot_budget' : ActorMethod<[bigint], Result_1>,
   'resolve_stuck_settlement_op' : ActorMethod<[number, bigint], Result_1>,
   'retry_pending_borrow_fee_mint' : ActorMethod<[bigint], Result_1>,
