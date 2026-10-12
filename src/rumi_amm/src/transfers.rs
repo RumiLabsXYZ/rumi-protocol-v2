@@ -8,6 +8,9 @@ use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromErro
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+#[cfg(feature = "pocketic-test")]
+use std::cell::Cell;
+
 /// Standard ICRC-1 transfer fee (e8s), used as a conservative fallback when a
 /// ledger's `icrc1_fee` query cannot be reached. Erring high keeps the pool
 /// solvent (we send slightly less) rather than risking an over-send.
@@ -26,6 +29,27 @@ thread_local! {
     /// first outbound transfer to a ledger. Heap-only (not persisted), so it is
     /// simply re-warmed after an upgrade.
     static LEDGER_FEES: RefCell<HashMap<Principal, u128>> = RefCell::new(HashMap::new());
+    /// One-shot callback trap used only by the PocketIC failure-injection wasm.
+    /// It is consumed before the native ledger await so the disarm survives a
+    /// later trap while processing the ledger's response.
+    #[cfg(feature = "pocketic-test")]
+    static TRAP_NEXT_NATIVE_PAYOUT_CALLBACK: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(feature = "pocketic-test")]
+pub(crate) fn pocketic_trap_next_native_payout_callback() {
+    TRAP_NEXT_NATIVE_PAYOUT_CALLBACK.with(|armed| armed.set(true));
+}
+
+#[cfg(feature = "pocketic-test")]
+fn take_native_payout_callback_trap(ledger: Principal) -> bool {
+    const NATIVE_ICP_LEDGER: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
+    if Principal::from_text(NATIVE_ICP_LEDGER).ok() != Some(ledger) {
+        return false;
+    }
+    // Consume before awaiting the ledger so the one-shot disarm is committed
+    // in the outgoing-call segment even if callback processing later traps.
+    TRAP_NEXT_NATIVE_PAYOUT_CALLBACK.with(|armed| armed.replace(false))
 }
 
 /// Fetch a ledger's transfer fee, caching the result per ledger. On query
@@ -348,13 +372,29 @@ pub async fn dispatch_outbound_payout(id: u64) -> Result<u64, String> {
     }
     crate::state::set_outbound_payout_status(id, crate::state::OutboundPayoutStatus::Dispatched)?;
     let args = outbound_transfer_arg(&payout);
+    #[cfg(feature = "pocketic-test")]
+    let trap_after_native_callback = take_native_payout_callback_trap(payout.ledger);
 
     let result: Result<(Result<candid::Nat, TransferError>,), _> =
         ic_cdk::call(payout.ledger, "icrc1_transfer", (args,)).await;
 
     match result {
-        Ok((Ok(block_index),)) => payout_block_index(id, block_index, "block index"),
+        Ok((Ok(block_index),)) => {
+            #[cfg(feature = "pocketic-test")]
+            if trap_after_native_callback {
+                ic_cdk::trap(
+                    "PocketIC-only trap after successful native ICP ledger transfer callback",
+                );
+            }
+            payout_block_index(id, block_index, "block index")
+        }
         Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            #[cfg(feature = "pocketic-test")]
+            if trap_after_native_callback {
+                ic_cdk::trap(
+                    "PocketIC-only trap after successful native ICP ledger transfer callback",
+                );
+            }
             payout_block_index(id, duplicate_of, "duplicate block index")
         }
         Ok((Err(e),)) => {
