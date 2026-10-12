@@ -682,9 +682,41 @@ async fn admin_backfill_add_margin_events(
     }
     let want = batch_size.clamp(1, 5_000).min(count - cursor);
     let events = sources::backend::get_events(backend, cursor, want).await?;
+    // The source calls above yield, so another admin invocation can finish
+    // this same range first. Compare and commit the rows and cursor together
+    // after the final await; a stale invocation must not emit duplicate rows
+    // or move the cursor behind the winning invocation.
+    Ok(state::mutate_state(|s| {
+        commit_add_margin_backfill_batch(s, cursor, &events, count, |row| {
+            storage::events::evt_vaults::push(row)
+        })
+    }))
+}
+
+fn commit_add_margin_backfill_batch<F>(
+    state: &mut SlimState,
+    expected_cursor: u64,
+    events: &[sources::backend::BackendEvent],
+    total_events: u64,
+    mut emit: F,
+) -> types::BackfillProgress
+where
+    F: FnMut(storage::events::AnalyticsVaultEvent),
+{
+    let current_cursor = state.add_margin_backfill_cursor.unwrap_or(0);
+    if current_cursor != expected_cursor {
+        return types::BackfillProgress {
+            from: current_cursor,
+            scanned: 0,
+            emitted: 0,
+            cursor_after: current_cursor,
+            total_events,
+            complete: current_cursor >= total_events,
+        };
+    }
+
     let mut emitted = 0u64;
-    for (i, event) in events.iter().enumerate() {
-        let event_id = cursor + i as u64;
+    for (offset, event) in events.iter().enumerate() {
         if let sources::backend::BackendEvent::AddMarginToVault {
             vault_id,
             margin_added,
@@ -693,9 +725,9 @@ async fn admin_backfill_add_margin_events(
             ..
         } = event
         {
-            storage::events::evt_vaults::push(storage::events::AnalyticsVaultEvent {
+            emit(storage::events::AnalyticsVaultEvent {
                 timestamp_ns: timestamp.unwrap_or(0),
-                source_event_id: event_id,
+                source_event_id: expected_cursor + offset as u64,
                 vault_id: *vault_id,
                 owner: actor.unwrap_or(candid::Principal::anonymous()),
                 event_kind: storage::events::VaultEventKind::CollateralDeposited,
@@ -706,18 +738,17 @@ async fn admin_backfill_add_margin_events(
             emitted += 1;
         }
     }
-    let cursor_after = cursor + events.len() as u64;
-    state::mutate_state(|s| {
-        s.add_margin_backfill_cursor = Some(cursor_after);
-    });
-    Ok(types::BackfillProgress {
-        from: cursor,
+
+    let cursor_after = expected_cursor + events.len() as u64;
+    state.add_margin_backfill_cursor = Some(cursor_after);
+    types::BackfillProgress {
+        from: expected_cursor,
         scanned: events.len() as u64,
         emitted,
         cursor_after,
-        total_events: count,
-        complete: cursor_after >= count,
-    })
+        total_events,
+        complete: cursor_after >= total_events,
+    }
 }
 
 #[ic_cdk_macros::update]
@@ -908,5 +939,37 @@ mod cycle_manager_tests {
                 pull_schedule::effective_period_ns(Some(period_secs)),
             ))
         );
+    }
+
+    #[test]
+    fn stale_add_margin_backfill_batch_does_not_emit_or_rewind_cursor() {
+        let actor = principal(7);
+        let events = [sources::backend::BackendEvent::AddMarginToVault {
+            vault_id: 42,
+            margin_added: 500,
+            block_index: 0,
+            caller: Some(actor),
+            timestamp: Some(99),
+        }];
+        let mut slim = SlimState {
+            add_margin_backfill_cursor: Some(10),
+            ..SlimState::default()
+        };
+        let mut emitted = Vec::new();
+
+        let winner =
+            commit_add_margin_backfill_batch(&mut slim, 10, &events, 11, |row| emitted.push(row));
+        let stale =
+            commit_add_margin_backfill_batch(&mut slim, 10, &events, 11, |row| emitted.push(row));
+
+        assert_eq!(winner.scanned, 1);
+        assert_eq!(winner.emitted, 1);
+        assert_eq!(winner.cursor_after, 11);
+        assert_eq!(stale.scanned, 0);
+        assert_eq!(stale.emitted, 0);
+        assert_eq!(stale.cursor_after, 11);
+        assert_eq!(slim.add_margin_backfill_cursor, Some(11));
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].source_event_id, 10);
     }
 }
