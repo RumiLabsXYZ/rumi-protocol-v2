@@ -186,6 +186,15 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
             retained
         );
     }
+    let migration = mutate_state(|s| receipt_store::migrate_interest_mint_receipts(s));
+    let (receipt_count, legacy_floor) = match migration {
+        Ok(count) => count,
+        Err(reason) => ic_cdk::trap(&format!("SP interest receipt migration failed closed: {reason}")),
+    };
+    receipt_store::set_layout_version(receipt_store::LAYOUT_VERSION);
+    if receipt_count >= state::INTEREST_MINT_RECEIPT_WARNING_THRESHOLD as u64 {
+        log!(INFO, "CL-10 interest receipt capacity warning: {} permanent rows (legacy floor {:?}); 80% threshold {}, hard capacity {}. Never pruned; admission fails closed at capacity.", receipt_count, legacy_floor, state::INTEREST_MINT_RECEIPT_WARNING_THRESHOLD, state::MAX_INTEREST_MINT_RECEIPTS);
+    }
     log!(
         INFO,
         "Stability Pool post-upgrade: state restored. {} depositors, {} liquidations",
@@ -838,12 +847,20 @@ pub async fn receive_interest_revenue_v2(
         });
     }
 
-    match read_state(|s| s.interest_mint_receipt_status(source_mint_block)) {
+    let payload = state::InterestMintReceiptPayload {
+        token_ledger,
+        amount,
+        collateral_type: collateral_type.clone(),
+    };
+    match read_state(|s| receipt_store::interest_mint_receipt_status(s, source_mint_block, &payload)) {
         state::InterestMintReceiptStatus::PendingForward(batch_id) => {
             return process_unallocated_interest_forward(batch_id).await;
         }
         state::InterestMintReceiptStatus::Duplicate => return Ok(()),
-        state::InterestMintReceiptStatus::OutsideReplayWindow => {
+        state::InterestMintReceiptStatus::LegacyUnknown
+        | state::InterestMintReceiptStatus::PayloadConflict
+        | state::InterestMintReceiptStatus::CapacityReached
+        | state::InterestMintReceiptStatus::OutsideReplayWindow => {
             // Keep the backend's durable notification pending. A stale receipt
             // must never be acknowledged as a new distribution.
             return Err(StabilityPoolError::SystemBusy);
@@ -853,8 +870,12 @@ pub async fn receive_interest_revenue_v2(
 
     if read_state(|s| s.has_eligible_interest_recipient(collateral_type.as_ref())) {
         return match mutate_state(
-            |s| match s.record_interest_mint_receipt(source_mint_block) {
+            |s| match receipt_store::record_interest_mint_receipt(s, source_mint_block, state::InterestMintReceipt {
+                payload: Some(payload.clone()),
+                disposition: state::InterestMintReceiptDisposition::Distributed,
+            }) {
                 state::InterestMintReceiptStatus::New => {
+                    s.record_interest_mint_legacy_cache(source_mint_block);
                     s.distribute_interest_revenue(token_ledger, amount, collateral_type);
                     s.push_event(
                         caller,
@@ -875,7 +896,15 @@ pub async fn receive_interest_revenue_v2(
     }
 
     let batch_id = mutate_state(|s| {
-        s.queue_unallocated_interest_forward(source_mint_block, token_ledger, amount)
+        s.queue_unallocated_interest_forward_at_with_admission(
+            source_mint_block, token_ledger, amount, ic_cdk::api::time(),
+            |pool, id| match receipt_store::record_interest_mint_receipt(pool, source_mint_block, state::InterestMintReceipt {
+                payload: Some(payload), disposition: state::InterestMintReceiptDisposition::ForwardPending(id),
+            }) {
+                state::InterestMintReceiptStatus::New => Ok(()),
+                _ => Err(StabilityPoolError::SystemBusy),
+            },
+        )
     })?;
     process_unallocated_interest_forward(batch_id).await
 }
@@ -977,9 +1006,11 @@ async fn process_unallocated_interest_forward(batch_id: u64) -> Result<(), Stabi
     })?;
     result.map_err(|reason| StabilityPoolError::LedgerTransferFailed { reason })?;
 
+    let source_blocks = read_state(|s| s.unallocated_interest_forward_batch(batch_id).map(|b| b.source_mint_blocks).unwrap_or_default());
     mutate_state(|s| {
         s.mark_unallocated_interest_forward_recorded(batch_id);
     });
+    receipt_store::mark_interest_forwarded(&source_blocks, batch_id);
     Ok(())
 }
 
@@ -988,6 +1019,11 @@ async fn process_unallocated_interest_forward(batch_id: u64) -> Result<(), Stabi
 #[query]
 pub fn get_pool_status() -> StabilityPoolStatus {
     read_state(|s| s.get_pool_status())
+}
+
+#[query]
+pub fn get_interest_mint_receipt_capacity() -> state::InterestMintReceiptCapacity {
+    read_state(receipt_store::interest_mint_receipt_capacity)
 }
 
 #[query]

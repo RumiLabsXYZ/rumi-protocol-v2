@@ -94,6 +94,16 @@ export const idlFactory = ({ IDL }) => {
     'completed_at_ns' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
   });
+  const InterestMintReceiptCapacity = IDL.Record({
+    'warning' : IDL.Bool,
+    'legacy_unknown' : IDL.Opt(IDL.Nat64),
+    'accepts_new' : IDL.Bool,
+    'retained' : IDL.Opt(IDL.Nat64),
+    'warning_threshold' : IDL.Nat64,
+    'legacy_floor' : IDL.Opt(IDL.Nat64),
+    'capacity' : IDL.Nat64,
+    'admission_blocked_reason' : IDL.Opt(IDL.Text),
+  });
   const LedgerReconciliationEntry = IDL.Record({
     'healthy' : IDL.Bool,
     'ledger' : IDL.Principal,
@@ -532,6 +542,11 @@ export const idlFactory = ({ IDL }) => {
     'get_completed_chain_absorbs' : IDL.Func(
         [IDL.Opt(IDL.Nat64)],
         [IDL.Vec(ChainSpAbsorbCompletion)],
+        ['query'],
+      ),
+    'get_interest_mint_receipt_capacity' : IDL.Func(
+        [],
+        [InterestMintReceiptCapacity],
         ['query'],
       ),
     'get_ledger_reconciliation' : IDL.Func(

@@ -188,6 +188,16 @@ export interface IcrcAccount {
   'owner' : Principal,
   'subaccount' : [] | [Uint8Array | number[]],
 }
+export interface InterestMintReceiptCapacity {
+  'warning' : boolean,
+  'legacy_unknown' : [] | [bigint],
+  'accepts_new' : boolean,
+  'retained' : [] | [bigint],
+  'warning_threshold' : bigint,
+  'legacy_floor' : [] | [bigint],
+  'capacity' : bigint,
+  'admission_blocked_reason' : [] | [string],
+}
 export interface LedgerReconciliationEntry {
   'healthy' : boolean,
   'ledger' : Principal,
@@ -474,6 +484,10 @@ export interface _SERVICE {
   'get_completed_chain_absorbs' : ActorMethod<
     [[] | [bigint]],
     Array<ChainSpAbsorbCompletion>
+  >,
+  'get_interest_mint_receipt_capacity' : ActorMethod<
+    [],
+    InterestMintReceiptCapacity
   >,
   'get_ledger_reconciliation' : ActorMethod<
     [],
