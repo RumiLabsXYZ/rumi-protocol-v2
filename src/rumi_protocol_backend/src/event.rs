@@ -27,6 +27,7 @@ mod treasury_interest_event_tests {
     use super::{apply_pending_payout_event, PendingPayoutEvent};
     use crate::state::{
         BorrowMintTuple, State, TreasuryInterestMintJournal, TreasuryInterestMintPhase,
+        TreasuryInterestMintRoute,
     };
     use candid::Principal;
 
@@ -42,6 +43,7 @@ mod treasury_interest_event_tests {
                 op_nonce: 42,
             },
             treasury,
+            route: TreasuryInterestMintRoute::Treasury,
             phase: TreasuryInterestMintPhase::MintPending,
             history_floor: Some(70),
             expiry_proven: false,
@@ -133,6 +135,34 @@ mod treasury_interest_event_tests {
         assert_eq!(state.pending_treasury_interest_fallback_e8s, 0);
         assert_eq!(state.pending_treasury_interest_mints[&42].phase,
             TreasuryInterestMintPhase::MintPending);
+    }
+
+    #[test]
+    fn private_log_admits_exact_collateral_share_after_recording_sp_journal() {
+        let mut state = State::default();
+        let collateral = Principal::from_slice(&[3]);
+        let pool = Principal::from_slice(&[4]);
+        let mut sp_operation = operation();
+        sp_operation.tuple.destination = pool;
+        sp_operation.treasury = pool;
+        sp_operation.tuple.amount_e8s = 425;
+        sp_operation.route = TreasuryInterestMintRoute::StabilityPool {
+            collateral_type: collateral,
+        };
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::StabilityPoolInterestFallbackCredited {
+                collateral_type: collateral,
+                amount_e8s: 425,
+            });
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::StabilityPoolInterestFallbackAdmitted {
+                collateral_type: collateral,
+                amount_e8s: 425,
+                operation: sp_operation.clone(),
+            });
+
+        assert_eq!(state.pending_treasury_interest_mints[&42], sp_operation);
+        assert!(state.pending_stability_pool_interest_fallback_e8s.is_empty());
     }
 }
 
@@ -1145,6 +1175,15 @@ pub enum PendingPayoutEvent {
     TreasuryInterestMintCompleted { op_nonce: u128 },
     TreasuryInterestFallbackCredited { amount_e8s: u64 },
     TreasuryInterestFallbackAdmitted { amount_e8s: u64 },
+    StabilityPoolInterestFallbackCredited {
+        collateral_type: Principal,
+        amount_e8s: u64,
+    },
+    StabilityPoolInterestFallbackAdmitted {
+        collateral_type: Principal,
+        amount_e8s: u64,
+        operation: crate::state::TreasuryInterestMintJournal,
+    },
     ThreeUsdReservePayoutPrepared {
         key: crate::state::ThreeUsdReserveIngressKey,
         payout: crate::state::ThreeUsdReserveCollateralPayout,
@@ -1895,6 +1934,59 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
                 .pending_treasury_interest_fallback_e8s
                 .checked_sub(u128::from(amount_e8s))
                 .expect("Treasury interest fallback replay underflow");
+        }
+        PendingPayoutEvent::StabilityPoolInterestFallbackCredited {
+            collateral_type,
+            amount_e8s,
+        } => {
+            let entry = state
+                .pending_stability_pool_interest_fallback_e8s
+                .entry(collateral_type)
+                .or_default();
+            *entry = entry
+                .checked_add(u128::from(amount_e8s))
+                .expect("Stability Pool interest fallback replay overflow");
+        }
+        PendingPayoutEvent::StabilityPoolInterestFallbackAdmitted {
+            collateral_type,
+            amount_e8s,
+            operation,
+        } => {
+            assert_eq!(
+                operation.tuple.amount_e8s, amount_e8s,
+                "Stability Pool fallback row amount diverged from its source debit"
+            );
+            assert_eq!(
+                operation.tuple.destination, operation.treasury,
+                "Stability Pool fallback row destination diverged"
+            );
+            assert_eq!(
+                operation.route,
+                crate::state::TreasuryInterestMintRoute::StabilityPool { collateral_type },
+                "Stability Pool fallback row route diverged from its collateral"
+            );
+            let current = state
+                .pending_stability_pool_interest_fallback_e8s
+                .get(&collateral_type)
+                .copied()
+                .expect("Stability Pool interest fallback replay missing credit");
+            let remaining = current
+                .checked_sub(u128::from(amount_e8s))
+                .expect("Stability Pool interest fallback replay underflow");
+            let nonce = operation.tuple.op_nonce;
+            state.op_nonce_counter = state
+                .op_nonce_counter
+                .max((nonce as u64).wrapping_add(1));
+            state.pending_treasury_interest_mints.insert(nonce, operation);
+            if remaining == 0 {
+                state
+                    .pending_stability_pool_interest_fallback_e8s
+                    .remove(&collateral_type);
+            } else {
+                state
+                    .pending_stability_pool_interest_fallback_e8s
+                    .insert(collateral_type, remaining);
+            }
         }
         PendingPayoutEvent::ThreeUsdReservePayoutPrepared { key, payout } => {
             if payout.operation_id == 0
