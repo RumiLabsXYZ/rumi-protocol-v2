@@ -983,9 +983,10 @@ pub fn get_pending_claim_count() -> u64 {
 /// every field. This path never treats absent or incomplete history as proof
 /// of non-payment and never creates a replacement transfer.
 ///
-/// Archive-backed responses are deliberately rejected. Archive recovery stays
-/// open until archive-controller governance and certified-chain membership are
-/// verified for the configured ledgers.
+/// Archived candidates count only after every intervening ICRC-3 parent hash
+/// is verified through a bounded sequence of blocks to one served directly by
+/// the configured ledger. Missing, partial, or unverifiable archive history
+/// leaves the payout ambiguous and held.
 #[update]
 #[candid_method(update)]
 pub async fn reconcile_aged_payout(claim_id: u64, block_index: u64) -> Result<(), ThreePoolError> {
@@ -1040,7 +1041,9 @@ pub async fn reconcile_aged_payout(claim_id: u64, block_index: u64) -> Result<()
         });
     }
 
-    crate::payout_reconciliation::verify_exact_block(
+    crate::payout_reconciliation::verify_exact_payout_block(
+        claim_id,
+        attempt.number,
         attempt.transfer.ledger,
         block_index,
         &attempt.transfer,
@@ -1063,6 +1066,7 @@ pub async fn reconcile_aged_payout(claim_id: u64, block_index: u64) -> Result<()
         || current_attempt.replay_count != attempt.replay_count
         || !matches!(current_attempt.outcome, crate::payouts::PayoutOutcome::Unresolved { .. } | crate::payouts::PayoutOutcome::Submitted)
     {
+        crate::storage::payout_archive_proofs::remove(claim_id);
         return Err(ThreePoolError::TransferFailed {
             token: entitlement.symbol,
             reason: "payout attempt changed while exact block evidence was being fetched".into(),

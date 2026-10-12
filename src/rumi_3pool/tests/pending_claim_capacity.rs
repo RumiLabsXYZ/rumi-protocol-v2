@@ -1525,6 +1525,35 @@ fn aged_ambiguous_payout_accepts_only_exact_positive_block_proof_and_survives_up
         PayoutOutcome::Unresolved { .. }
     ));
 
+    // The fixture advertises an archive callback that is deliberately not
+    // implemented. That response cannot confirm the payout or create a
+    // settlement-capable proof cursor.
+    h.pic.update_call(
+        h.ledgers[1],
+        h.user,
+        "set_icrc3_archive_range",
+        encode_one(Some((block_index, 1u64))).unwrap(),
+    ).unwrap();
+    let unverifiable_archive: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool,
+            h.user,
+            "reconcile_aged_payout",
+            encode_args((claim.id, block_index)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(unverifiable_archive, Err(ThreePoolError::TransferFailed { .. })));
+    assert!(matches!(
+        &payout(&h, h.user, claim.id).attempts.last().unwrap().outcome,
+        PayoutOutcome::Unresolved { .. }
+    ));
+    h.pic.update_call(
+        h.ledgers[1],
+        h.user,
+        "set_icrc3_archive_range",
+        encode_one(None::<(u64, u64)>).unwrap(),
+    ).unwrap();
+
     let reconciled: Result<(), ThreePoolError> = decode_one(&reply(
         h.pic
             .update_call(
@@ -1555,6 +1584,157 @@ fn aged_ambiguous_payout_accepts_only_exact_positive_block_proof_and_survives_up
         PayoutOutcome::Confirmed { block: Nat::from(block_index) },
     );
     assert_eq!(balance(&h, h.ledgers[1], h.user), before_reconciliation);
+}
+
+#[test]
+fn aged_ambiguous_payout_reconciles_archived_chain_after_upgrade_without_repayment() {
+    let h = setup();
+    h.pic
+        .update_call(
+            h.ledgers[1],
+            h.user,
+            "set_phantom_failures",
+            encode_one(1u32).unwrap(),
+        )
+        .unwrap();
+    let result: Result<u128, ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "swap",
+                encode_args((0u8, 1u8, 100_000_000u128, 1u128)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(result, Err(ThreePoolError::TransferFailed { .. })));
+
+    let claim = claims(&h)
+        .into_iter()
+        .find(|claim| claim.token_index == 1)
+        .unwrap();
+    let user_balance_before_reconciliation = balance(&h, h.ledgers[1], h.user);
+    let attempt = payout(&h, h.user, claim.id)
+        .attempts
+        .last()
+        .unwrap()
+        .clone();
+    let block_index = ledger_block_for_memo(&h, h.ledgers[1], &attempt.transfer.memo);
+    assert!(matches!(attempt.outcome, PayoutOutcome::Unresolved { .. }));
+
+    // Extend the ledger after the ambiguous transfer so the proof has 33
+    // archived links followed by a directly served child as its anchor.
+    for _ in 0..33 {
+        let _: () = decode_one(&reply(
+            h.pic
+                .update_call(
+                    h.ledgers[1],
+                    h.admin,
+                    "mint",
+                    encode_args((
+                        Account {
+                            owner: h.admin,
+                            subaccount: None,
+                        },
+                        Nat::from(1u8),
+                    ))
+                    .unwrap(),
+                )
+                .unwrap(),
+        ))
+        .unwrap();
+    }
+
+    let now = h.pic.get_time();
+    h.pic.set_time(now + std::time::Duration::from_secs(24 * 60 * 60));
+    h.pic
+        .update_call(
+            h.ledgers[1],
+            h.user,
+            "set_icrc3_archive_range",
+            encode_one(Some((block_index, 33u64))).unwrap(),
+        )
+        .unwrap();
+    h.pic
+        .update_call(
+            h.ledgers[1],
+            h.user,
+            "set_icrc3_archive_callback_enabled",
+            encode_one(true).unwrap(),
+        )
+        .unwrap();
+
+    let bounded_progress: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic
+            .update_call(
+                h.pool,
+                h.user,
+                "reconcile_aged_payout",
+                encode_args((claim.id, block_index)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(
+        bounded_progress,
+        Err(ThreePoolError::TransferFailed { .. })
+    ));
+    assert!(matches!(
+        &payout(&h, h.user, claim.id).attempts.last().unwrap().outcome,
+        PayoutOutcome::Unresolved { .. }
+    ));
+    assert_eq!(
+        balance(&h, h.ledgers[1], h.user),
+        user_balance_before_reconciliation
+    );
+
+    h.pic
+        .upgrade_canister(
+            h.pool,
+            wasm_artifact("rumi_3pool.wasm"),
+            encode_args(()).unwrap(),
+            None,
+        )
+        .unwrap();
+    // The verifier caps each page at eight blocks, matching its callback cap
+    // so one archive callback per block still advances on each bounded retry.
+    for step in 0..4 {
+        let reconciled: Result<(), ThreePoolError> = decode_one(&reply(
+            h.pic
+                .update_call(
+                    h.pool,
+                    h.user,
+                    "reconcile_aged_payout",
+                    encode_args((claim.id, block_index)).unwrap(),
+                )
+                .unwrap(),
+        ))
+        .unwrap();
+        if step < 3 {
+            assert!(matches!(
+                reconciled,
+                Err(ThreePoolError::TransferFailed { .. })
+            ));
+            assert!(matches!(
+                &payout(&h, h.user, claim.id).attempts.last().unwrap().outcome,
+                PayoutOutcome::Unresolved { .. }
+            ));
+        } else {
+            reconciled.expect("the archived chain must reach its direct-ledger anchor");
+        }
+    }
+
+    assert_eq!(balance(&h, h.ledgers[1], h.user), user_balance_before_reconciliation);
+    assert!(claims(&h).iter().all(|pending| pending.id != claim.id));
+    let settled = payout(&h, h.user, claim.id);
+    assert!(settled.settled);
+    assert_eq!(
+        settled.attempts.last().unwrap().outcome,
+        PayoutOutcome::Confirmed {
+            block: Nat::from(block_index)
+        },
+    );
 }
 
 #[test]
