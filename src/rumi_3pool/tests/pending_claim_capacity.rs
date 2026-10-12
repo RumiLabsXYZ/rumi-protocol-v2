@@ -9,7 +9,9 @@ use icrc_ledger_types::icrc2::approve::ApproveArgs;
 use num_traits::ToPrimitive;
 use pocket_ic::common::rest::{CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
-use rumi_3pool::payouts::{PayoutEntitlement, PayoutInputAction, PayoutKind, PayoutOutcome};
+use rumi_3pool::payouts::{
+    GlobalPayoutInventoryPage, PayoutEntitlement, PayoutInputAction, PayoutKind, PayoutOutcome,
+};
 use rumi_3pool::types::{PoolStatus, ThreePoolError, ThreePoolInitArgs, ThreePoolPendingClaim, TokenConfig};
 
 const USER_FUNDS: [u128; 3] = [
@@ -53,6 +55,14 @@ fn wasm_artifact(name: &str) -> Vec<u8> {
 }
 
 fn setup() -> Harness {
+    setup_with_pool_wasm(wasm_artifact("rumi_3pool.wasm"))
+}
+
+fn setup_with_pool_wasm(pool_wasm: Vec<u8>) -> Harness {
+    setup_with_pool_wasm_and_seed(pool_wasm, true)
+}
+
+fn setup_with_pool_wasm_and_seed(pool_wasm: Vec<u8>, seed_liquidity: bool) -> Harness {
     let pic = PocketIcBuilder::new().with_application_subnet().build();
     let user = Principal::self_authenticating(&[11, 12, 13]);
     let admin = Principal::self_authenticating(&[21, 22, 23]);
@@ -118,7 +128,7 @@ fn setup() -> Harness {
     };
     pic.install_canister(
         pool,
-        wasm_artifact("rumi_3pool.wasm"),
+        pool_wasm,
         encode_one(pool_args).unwrap(),
         None,
     );
@@ -144,17 +154,19 @@ fn setup() -> Harness {
         )
         .unwrap();
     }
-    let seeded: Result<Nat, ThreePoolError> = decode_one(&reply(
-        pic.update_call(
-            pool,
-            user,
-            "add_liquidity",
-            encode_args((SEED.to_vec(), 0u128)).unwrap(),
-        )
-        .unwrap(),
-    ))
-    .unwrap();
-    seeded.expect("bootstrap liquidity");
+    if seed_liquidity {
+        let seeded: Result<Nat, ThreePoolError> = decode_one(&reply(
+            pic.update_call(
+                pool,
+                user,
+                "add_liquidity",
+                encode_args((SEED.to_vec(), 0u128)).unwrap(),
+            )
+            .unwrap(),
+        ))
+        .unwrap();
+        seeded.expect("bootstrap liquidity");
+    }
 
     Harness {
         pic,
@@ -297,6 +309,25 @@ fn payouts(h: &Harness, owner: Principal) -> Vec<PayoutEntitlement> {
                 owner,
                 "get_payout_entitlements",
                 encode_args((0u64, 100u64)).unwrap(),
+            )
+            .unwrap(),
+    ))
+    .unwrap()
+}
+
+fn global_payout_inventory(
+    h: &Harness,
+    caller: Principal,
+    after_id: Option<u64>,
+    limit: u64,
+) -> Result<GlobalPayoutInventoryPage, ThreePoolError> {
+    decode_one(&reply(
+        h.pic
+            .query_call(
+                h.pool,
+                caller,
+                "get_global_payout_inventory",
+                encode_args((after_id, limit)).unwrap(),
             )
             .unwrap(),
     ))
@@ -2062,4 +2093,63 @@ fn settled_swap_claim_cannot_clear_another_swaps_payout_fence() {
         &payout(&h, h.user, current.id).attempts.last().unwrap().outcome,
         PayoutOutcome::Unresolved { .. }
     ));
+}
+
+#[test]
+fn global_payout_inventory_is_admin_only_and_paginates_gappy_ids() {
+    let h = setup_with_pool_wasm_and_seed(
+        wasm_artifact("rumi_3pool_test_endpoints.wasm"),
+        false,
+    );
+    let other_owner = Principal::self_authenticating(&[41, 42, 43]);
+    for (id, owner, settled) in [
+        (2u64, h.user, false),
+        (5, other_owner, false),
+        (9, h.user, true),
+    ]
+    .into_iter()
+    .chain((10u64..=29).map(|id| (id, h.user, false)))
+    {
+        h.pic
+            .update_call(
+                h.pool,
+                h.admin,
+                "test_insert_payout_entitlement",
+                encode_args((id, owner, settled)).unwrap(),
+            )
+            .unwrap();
+    }
+
+    let user_view = payouts(&h, h.user);
+    assert!(user_view.iter().all(|entry| entry.owner == h.user));
+    assert!(user_view.iter().any(|entry| entry.id == 2));
+    assert!(user_view.iter().any(|entry| entry.id == 9));
+    let other_view = payouts(&h, other_owner);
+    assert_eq!(other_view.iter().map(|entry| entry.id).collect::<Vec<_>>(), [5]);
+
+    let first = global_payout_inventory(&h, h.admin, None, 2).unwrap();
+    assert_eq!(first.total_count, 23);
+    assert_eq!(first.entries.iter().map(|entry| entry.id).collect::<Vec<_>>(), [2, 5]);
+    assert_eq!(first.next_cursor, Some(5));
+
+    let second = global_payout_inventory(&h, h.admin, first.next_cursor, 2).unwrap();
+    assert_eq!(second.total_count, 23);
+    assert_eq!(second.entries.iter().map(|entry| entry.id).collect::<Vec<_>>(), [9, 10]);
+    assert!(second.entries[0].settled, "settled retained row remains in the inventory");
+    assert_eq!(second.next_cursor, Some(10));
+
+    let capped = global_payout_inventory(&h, h.admin, None, u64::MAX).unwrap();
+    assert_eq!(capped.total_count, 23);
+    assert_eq!(capped.entries.len(), 20, "requested limit is capped at 20");
+    assert_eq!(capped.entries.last().map(|entry| entry.id), Some(26));
+    assert_eq!(capped.next_cursor, Some(26));
+
+    let exact_boundary = global_payout_inventory(&h, h.admin, Some(26), 3).unwrap();
+    assert_eq!(exact_boundary.entries.iter().map(|entry| entry.id).collect::<Vec<_>>(), [27, 28, 29]);
+    assert_eq!(exact_boundary.next_cursor, None);
+
+    let unauthorized = global_payout_inventory(&h, h.user, None, 2);
+    assert!(matches!(unauthorized, Err(ThreePoolError::Unauthorized)));
+    let anonymous = global_payout_inventory(&h, Principal::anonymous(), None, 2);
+    assert!(matches!(anonymous, Err(ThreePoolError::Unauthorized)));
 }

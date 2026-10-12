@@ -146,6 +146,11 @@ export interface GetBlocksResult {
   'blocks' : Array<BlockWithId>,
   'archived_blocks' : Array<ArchivedBlocks>,
 }
+export interface GlobalPayoutInventoryPage {
+  'entries' : Array<PayoutEntitlement>,
+  'next_cursor' : [] | [bigint],
+  'total_count' : bigint,
+}
 export type Icrc21Error = {
     'GenericError' : { 'description' : string, 'error_code' : bigint }
   } |
@@ -631,6 +636,11 @@ export interface _SERVICE {
   'get_fee_curve_params' : ActorMethod<[], FeeCurveParams>,
   'get_fee_series' : ActorMethod<[StatsWindow, bigint], Array<FeePoint>>,
   'get_fee_stats' : ActorMethod<[StatsWindow], FeeStats>,
+  'get_global_payout_inventory' : ActorMethod<
+    [[] | [bigint], bigint],
+    { 'Ok' : GlobalPayoutInventoryPage } |
+      { 'Err' : ThreePoolError }
+  >,
   'get_imbalance_history' : ActorMethod<
     [bigint, bigint],
     Array<ImbalanceSnapshot>

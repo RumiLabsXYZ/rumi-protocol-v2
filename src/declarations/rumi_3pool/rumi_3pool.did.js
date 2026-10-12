@@ -132,61 +132,6 @@ export const idlFactory = ({ IDL }) => {
     'rebalancing_swap_pct' : IDL.Nat32,
     'buckets' : IDL.Vec(FeeBucket),
   });
-  const ImbalanceEventKind = IDL.Variant({
-    'Swap' : IDL.Null,
-    'Liquidity' : IDL.Null,
-  });
-  const ImbalanceSnapshot = IDL.Record({
-    'imbalance_after' : IDL.Nat64,
-    'virtual_price_after' : IDL.Nat,
-    'timestamp' : IDL.Nat64,
-    'event_kind' : ImbalanceEventKind,
-  });
-  const ImbalanceStats = IDL.Record({
-    'avg' : IDL.Nat64,
-    'max' : IDL.Nat64,
-    'min' : IDL.Nat64,
-    'samples' : IDL.Vec(IDL.Tuple(IDL.Nat64, IDL.Nat64)),
-    'current' : IDL.Nat64,
-  });
-  const LiquidityAction = IDL.Variant({
-    'AddLiquidity' : IDL.Null,
-    'Donate' : IDL.Null,
-    'RemoveOneCoin' : IDL.Null,
-    'RemoveLiquidity' : IDL.Null,
-  });
-  const LiquidityEvent = IDL.Record({
-    'id' : IDL.Nat64,
-    'fee' : IDL.Opt(IDL.Nat),
-    'action' : LiquidityAction,
-    'lp_amount' : IDL.Nat,
-    'amounts' : IDL.Vec(IDL.Nat),
-    'timestamp' : IDL.Nat64,
-    'caller' : IDL.Principal,
-    'coin_index' : IDL.Opt(IDL.Nat8),
-  });
-  const LiquidityEventV2 = IDL.Record({
-    'id' : IDL.Nat64,
-    'fee' : IDL.Opt(IDL.Nat),
-    'action' : LiquidityAction,
-    'imbalance_after' : IDL.Nat64,
-    'is_rebalancing' : IDL.Bool,
-    'virtual_price_after' : IDL.Nat,
-    'lp_amount' : IDL.Nat,
-    'pool_balances_after' : IDL.Vec(IDL.Nat),
-    'fee_bps' : IDL.Opt(IDL.Nat16),
-    'imbalance_before' : IDL.Nat64,
-    'migrated' : IDL.Bool,
-    'amounts' : IDL.Vec(IDL.Nat),
-    'timestamp' : IDL.Nat64,
-    'caller' : IDL.Principal,
-    'coin_index' : IDL.Opt(IDL.Nat8),
-  });
-  const ForwardLiquidityEventsV2 = IDL.Record({
-    'next_start' : IDL.Nat64,
-    'reached_end' : IDL.Bool,
-    'events' : IDL.Vec(IDL.Tuple(IDL.Nat64, LiquidityEventV2)),
-  });
   const PayoutKind = IDL.Variant({
     'RemoveOneCoin' : IDL.Null,
     'SwapOutput' : IDL.Null,
@@ -277,6 +222,66 @@ export const idlFactory = ({ IDL }) => {
     'swap_context' : IDL.Opt(PayoutSwapContext),
     'dispatch_ready' : IDL.Opt(IDL.Bool),
     'symbol' : IDL.Text,
+  });
+  const GlobalPayoutInventoryPage = IDL.Record({
+    'entries' : IDL.Vec(PayoutEntitlement),
+    'next_cursor' : IDL.Opt(IDL.Nat64),
+    'total_count' : IDL.Nat64,
+  });
+  const ImbalanceEventKind = IDL.Variant({
+    'Swap' : IDL.Null,
+    'Liquidity' : IDL.Null,
+  });
+  const ImbalanceSnapshot = IDL.Record({
+    'imbalance_after' : IDL.Nat64,
+    'virtual_price_after' : IDL.Nat,
+    'timestamp' : IDL.Nat64,
+    'event_kind' : ImbalanceEventKind,
+  });
+  const ImbalanceStats = IDL.Record({
+    'avg' : IDL.Nat64,
+    'max' : IDL.Nat64,
+    'min' : IDL.Nat64,
+    'samples' : IDL.Vec(IDL.Tuple(IDL.Nat64, IDL.Nat64)),
+    'current' : IDL.Nat64,
+  });
+  const LiquidityAction = IDL.Variant({
+    'AddLiquidity' : IDL.Null,
+    'Donate' : IDL.Null,
+    'RemoveOneCoin' : IDL.Null,
+    'RemoveLiquidity' : IDL.Null,
+  });
+  const LiquidityEvent = IDL.Record({
+    'id' : IDL.Nat64,
+    'fee' : IDL.Opt(IDL.Nat),
+    'action' : LiquidityAction,
+    'lp_amount' : IDL.Nat,
+    'amounts' : IDL.Vec(IDL.Nat),
+    'timestamp' : IDL.Nat64,
+    'caller' : IDL.Principal,
+    'coin_index' : IDL.Opt(IDL.Nat8),
+  });
+  const LiquidityEventV2 = IDL.Record({
+    'id' : IDL.Nat64,
+    'fee' : IDL.Opt(IDL.Nat),
+    'action' : LiquidityAction,
+    'imbalance_after' : IDL.Nat64,
+    'is_rebalancing' : IDL.Bool,
+    'virtual_price_after' : IDL.Nat,
+    'lp_amount' : IDL.Nat,
+    'pool_balances_after' : IDL.Vec(IDL.Nat),
+    'fee_bps' : IDL.Opt(IDL.Nat16),
+    'imbalance_before' : IDL.Nat64,
+    'migrated' : IDL.Bool,
+    'amounts' : IDL.Vec(IDL.Nat),
+    'timestamp' : IDL.Nat64,
+    'caller' : IDL.Principal,
+    'coin_index' : IDL.Opt(IDL.Nat8),
+  });
+  const ForwardLiquidityEventsV2 = IDL.Record({
+    'next_start' : IDL.Nat64,
+    'reached_end' : IDL.Bool,
+    'events' : IDL.Vec(IDL.Tuple(IDL.Nat64, LiquidityEventV2)),
   });
   const ThreePoolPendingClaim = IDL.Record({
     'id' : IDL.Nat64,
@@ -715,6 +720,16 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_fee_stats' : IDL.Func([StatsWindow], [FeeStats], ['query']),
+    'get_global_payout_inventory' : IDL.Func(
+        [IDL.Opt(IDL.Nat64), IDL.Nat64],
+        [
+          IDL.Variant({
+            'Ok' : GlobalPayoutInventoryPage,
+            'Err' : ThreePoolError,
+          }),
+        ],
+        ['query'],
+      ),
     'get_imbalance_history' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [IDL.Vec(ImbalanceSnapshot)],

@@ -181,6 +181,12 @@ type PayoutEntitlement = record {
   attempts : vec PayoutAttempt;
 };
 
+type GlobalPayoutInventoryPage = record {
+  entries : vec PayoutEntitlement;
+  next_cursor : opt nat64;
+  total_count : nat64;
+};
+
 type SwapEvent = record {
   id : nat64;
   timestamp : nat64;
@@ -687,6 +693,7 @@ service : (ThreePoolInitArgs) -> {
   reconcile_aged_payout : (nat64, nat64) -> (variant { Ok; Err : ThreePoolError });
   get_payout_entitlement : (nat64) -> (opt PayoutEntitlement) query;
   get_payout_entitlements : (nat64, nat64) -> (vec PayoutEntitlement) query;
+  get_global_payout_inventory : (opt nat64, nat64) -> (variant { Ok : GlobalPayoutInventoryPage; Err : ThreePoolError }) query;
   get_pending_claims : (nat64, nat64) -> (vec ThreePoolPendingClaim) query;
   get_pending_claim_count : () -> (nat64) query;
   calc_swap : (nat8, nat8, nat) -> (variant { Ok : nat; Err : ThreePoolError }) query;
