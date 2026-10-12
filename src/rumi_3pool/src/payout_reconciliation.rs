@@ -34,10 +34,28 @@ pub(crate) struct ArchivePayoutProofProgress {
     pub(crate) prior_block_hash: [u8; 32],
 }
 
+/// Provisional inbound proof cursor, separate from outbound payout proofs.
+#[derive(CandidType, Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ArchiveInputProofProgress {
+    pub(crate) ledger: Principal,
+    pub(crate) candidate_block_index: u64,
+    pub(crate) transfer_digest: [u8; 32],
+    pub(crate) transfer: PayoutInputTransfer,
+    pub(crate) spender: Account,
+    pub(crate) input_action: Option<crate::payouts::PayoutInputAction>,
+    pub(crate) payout_kind: crate::payouts::PayoutKind,
+    pub(crate) compensation_for: Option<u64>,
+    pub(crate) latest_verified_block_index: u64,
+    pub(crate) next_block_index: u64,
+    pub(crate) prior_block_hash: [u8; 32],
+}
+
 // One callback per block is a valid archive response shape. Keep the maximum
 // page at the callback cap so even that shape can make bounded progress.
 const MAX_ARCHIVE_CHAIN_BLOCKS_PER_CALL: u64 = 8;
 const MAX_ARCHIVE_CALLBACKS_PER_CALL: usize = 8;
+const MAX_ARCHIVE_BLOCK_BYTES: usize = 64 * 1024;
+const MAX_ARCHIVE_PAGE_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DecodedTransferBlock {
@@ -262,9 +280,16 @@ async fn fetch_ledger_page(
     let page_end = requested_end.min(log_length);
     let expected_count = usize::try_from(page_end - start)
         .map_err(|_| "ICRC-3 proof page length exceeds platform limits".to_string())?;
+    if response.blocks.len() > expected_count {
+        return Err("ledger returned too many direct blocks for the bounded page".into());
+    }
     let mut blocks = BTreeMap::<u64, FetchedBlock>::new();
 
+    let mut page_bytes = 0usize;
     for block in response.blocks {
+        page_bytes = page_bytes.checked_add(checked_block_bytes(&block.block)?)
+            .filter(|bytes| *bytes <= MAX_ARCHIVE_PAGE_BYTES)
+            .ok_or_else(|| "ICRC-3 direct block page exceeds the byte bound".to_string())?;
         insert_page_block(&mut blocks, block.id, block.block, true, start, page_end)?;
     }
 
@@ -276,6 +301,7 @@ async fn fetch_ledger_page(
     let mut archive_requested_ids = std::collections::BTreeSet::new();
     for archived in response.archived_blocks {
         if archived.callback.method.trim().is_empty()
+            || archived.callback.method.as_bytes().len() > 128
             || archived.callback.canister_id == Principal::anonymous()
             || archived.args.is_empty()
             || archived.args.len() > expected_count
@@ -310,6 +336,11 @@ async fn fetch_ledger_page(
         if callback_ids.len() > expected_count {
             return Err("archive callback work exceeds the bounded proof page".into());
         }
+        let callback_args = candid::encode_args((&archived.args,))
+            .map_err(|error| format!("could not encode bounded archive callback args: {error}"))?;
+        page_bytes = page_bytes.checked_add(callback_args.len())
+            .filter(|bytes| *bytes <= MAX_ARCHIVE_PAGE_BYTES)
+            .ok_or_else(|| "archive callback args exceed the page byte bound".to_string())?;
         let (archive_response,): (GetBlocksResult,) = ic_cdk::call(
             archived.callback.canister_id,
             archived.callback.method.as_str(),
@@ -326,6 +357,9 @@ async fn fetch_ledger_page(
         }
         let allowed_ids: std::collections::BTreeSet<u64> = callback_ids.into_iter().collect();
         for block in archive_response.blocks {
+            page_bytes = page_bytes.checked_add(checked_block_bytes(&block.block)?)
+                .filter(|bytes| *bytes <= MAX_ARCHIVE_PAGE_BYTES)
+                .ok_or_else(|| "ICRC-3 archive page exceeds the byte bound".to_string())?;
             let id = block
                 .id
                 .0
@@ -339,6 +373,15 @@ async fn fetch_ledger_page(
     }
 
     complete_block_prefix(blocks, start, page_end)
+}
+
+fn checked_block_bytes(block: &ICRC3Value) -> Result<usize, String> {
+    let encoded = candid::encode_one(block)
+        .map_err(|error| format!("could not encode ICRC-3 block for size check: {error}"))?;
+    if encoded.len() > MAX_ARCHIVE_BLOCK_BYTES {
+        return Err("ICRC-3 block exceeds the per-block byte bound".into());
+    }
+    Ok(encoded.len())
 }
 
 fn complete_block_prefix(
@@ -436,38 +479,115 @@ fn block_hash(block: &ICRC3Value) -> Result<[u8; 32], String> {
 }
 
 pub(crate) async fn verify_exact_input_block(
+    claim_id: u64,
     ledger: Principal,
     block_index: u64,
     transfer: &PayoutInputTransfer,
     spender: Account,
+    input_action: Option<crate::payouts::PayoutInputAction>,
+    payout_kind: crate::payouts::PayoutKind,
+    compensation_for: Option<u64>,
 ) -> Result<(), String> {
-    let value = fetch_direct_block(ledger, block_index).await?;
-    let decoded = decode_block(&value)?;
-    validate_exact_input_transfer(&decoded, transfer, spender)
-}
+    let mut progress = match crate::storage::input_archive_proofs::get(claim_id) {
+        Some(progress) => {
+            if progress.ledger != ledger
+                || progress.candidate_block_index != block_index
+                || progress.transfer != *transfer
+                || progress.spender != spender
+                || progress.input_action != input_action
+                || progress.payout_kind != payout_kind
+                || progress.compensation_for != compensation_for
+                || progress.transfer_digest != input_transfer_digest(transfer, &spender, input_action, payout_kind, compensation_for)?
+                || progress.latest_verified_block_index.checked_add(1)
+                    != Some(progress.next_block_index)
+            {
+                crate::storage::input_archive_proofs::remove(claim_id);
+                return Err("stored archive proof belongs to a different input identity".into());
+            }
+            progress
+        }
+        None => {
+            let page = fetch_ledger_page(ledger, block_index, 1).await?;
+            let candidate = page.into_iter().next()
+                .filter(|candidate| candidate.index == block_index)
+                .ok_or_else(|| "ledger did not return the exact input candidate block".to_string())?;
+            let decoded = decode_block(&candidate.block)?;
+            validate_exact_input_transfer(&decoded, transfer, spender.clone())?;
+            if candidate.direct_from_ledger {
+                return Ok(());
+            }
+            block_parent_hash(&candidate.block, block_index)?;
+            let next_block_index = block_index.checked_add(1)
+                .ok_or_else(|| "input candidate block index overflow".to_string())?;
+            let progress = ArchiveInputProofProgress {
+                ledger,
+                candidate_block_index: block_index,
+                transfer_digest: input_transfer_digest(transfer, &spender, input_action, payout_kind, compensation_for)?,
+                transfer: transfer.clone(),
+                spender,
+                input_action,
+                payout_kind,
+                compensation_for,
+                latest_verified_block_index: block_index,
+                next_block_index,
+                prior_block_hash: block_hash(&candidate.block)?,
+            };
+            if !crate::storage::input_archive_proofs::insert(claim_id, progress.clone()) {
+                return Err("bounded input archive proof cursor capacity is exhausted".into());
+            }
+            progress
+        }
+    };
 
-async fn fetch_direct_block(ledger: Principal, block_index: u64) -> Result<ICRC3Value, String> {
-    let args = vec![GetBlocksRequest {
-        start: Nat::from(block_index),
-        length: Nat::from(1u64),
-    }];
-    let (response,): (GetBlocksResult,) = ic_cdk::call(ledger, "icrc3_get_blocks", (args,))
-        .await
-        .map_err(|(code, message)| {
-        format!("icrc3_get_blocks call to {ledger} failed: {code:?} {message}")
-    })?;
-    if response
-        .log_length
-        .0
-        .to_u64()
-        .is_none_or(|length| length <= block_index)
-    {
-        return Err("ICRC-3 log length does not include the supplied block".into());
+    let page = fetch_ledger_page(ledger, progress.next_block_index, MAX_ARCHIVE_CHAIN_BLOCKS_PER_CALL).await?;
+    if page.is_empty() {
+        return Err("ledger returned no blocks while input archive proof remains incomplete".into());
     }
-
-    direct_block_value(&response, block_index)
+    for block in page {
+        if block.index != progress.next_block_index {
+            crate::storage::input_archive_proofs::remove(claim_id);
+            return Err("ICRC-3 input archive proof contains a block gap or wrong ID".into());
+        }
+        let parent_hash = block_parent_hash(&block.block, block.index).map_err(|reason| {
+            crate::storage::input_archive_proofs::remove(claim_id);
+            reason
+        })?;
+        if !verify_chain_link(progress.prior_block_hash, parent_hash) {
+            crate::storage::input_archive_proofs::remove(claim_id);
+            return Err("ICRC-3 input archive block does not link to the prior verified block".into());
+        }
+        if block.direct_from_ledger {
+            crate::storage::input_archive_proofs::remove(claim_id);
+            return Ok(());
+        }
+        progress.prior_block_hash = block_hash(&block.block).map_err(|reason| {
+            crate::storage::input_archive_proofs::remove(claim_id);
+            reason
+        })?;
+        progress.latest_verified_block_index = block.index;
+        progress.next_block_index = block.index.checked_add(1)
+            .ok_or_else(|| "input archive proof block index overflow".to_string())?;
+        if !crate::storage::input_archive_proofs::insert(claim_id, progress.clone()) {
+            return Err("bounded input archive proof cursor capacity is exhausted".into());
+        }
+    }
+    Err("input archive proof is still progressing; retry reconciliation to continue".into())
 }
 
+fn input_transfer_digest(
+    transfer: &PayoutInputTransfer,
+    spender: &Account,
+    input_action: Option<crate::payouts::PayoutInputAction>,
+    payout_kind: crate::payouts::PayoutKind,
+    compensation_for: Option<u64>,
+) -> Result<[u8; 32], String> {
+    use sha2::Digest;
+    let encoded = candid::encode_args((transfer, spender, input_action, payout_kind, compensation_for))
+        .map_err(|error| format!("could not encode input tuple for archive proof: {error}"))?;
+    Ok(sha2::Sha256::digest(encoded).into())
+}
+
+#[cfg(test)]
 fn direct_block_value(response: &GetBlocksResult, block_index: u64) -> Result<ICRC3Value, String> {
     if !response.archived_blocks.is_empty() {
         return Err("archive-backed ICRC-3 proof is unsupported; transfer remains held".into());
@@ -767,6 +887,65 @@ mod tests {
             })
             .unwrap()
         );
+    }
+
+    #[test]
+    fn input_archive_progress_is_storable_and_binds_spender_and_settlement_context() {
+        use ic_stable_structures::storable::Storable;
+        let payout = transfer();
+        let input = PayoutInputTransfer {
+            ledger: payout.ledger,
+            from: payout.from,
+            to: payout.to,
+            amount: 100,
+            fee: Some(10),
+            memo: Some(vec![8; 32]),
+            created_at_time: 77,
+        };
+        let spender = Account { owner: Principal::from_slice(&[7]), subaccount: None };
+        let progress = ArchiveInputProofProgress {
+            ledger: input.ledger,
+            candidate_block_index: 12,
+            transfer_digest: input_transfer_digest(
+                &input, &spender, Some(crate::payouts::PayoutInputAction::Swap),
+                crate::payouts::PayoutKind::SwapInputRefund, Some(44),
+            ).unwrap(),
+            transfer: input.clone(),
+            spender: spender.clone(),
+            input_action: Some(crate::payouts::PayoutInputAction::Swap),
+            payout_kind: crate::payouts::PayoutKind::SwapInputRefund,
+            compensation_for: Some(44),
+            latest_verified_block_index: 12,
+            next_block_index: 13,
+            prior_block_hash: [0x5a; 32],
+        };
+        let decoded = ArchiveInputProofProgress::from_bytes(progress.to_bytes());
+        assert_eq!(decoded, progress);
+        assert_ne!(
+            decoded.transfer_digest,
+            input_transfer_digest(
+                &input,
+                &Account { owner: Principal::from_slice(&[6]), subaccount: None },
+                decoded.input_action,
+                decoded.payout_kind,
+                decoded.compensation_for,
+            ).unwrap(),
+        );
+        assert_ne!(
+            decoded.transfer_digest,
+            input_transfer_digest(
+                &input, &spender, Some(crate::payouts::PayoutInputAction::Donation),
+                decoded.payout_kind, decoded.compensation_for,
+            ).unwrap(),
+        );
+    }
+
+    #[test]
+    fn oversized_nested_icrc3_vectors_fail_before_hashing_or_persisting() {
+        let block = V::Map(BTreeMap::from([(
+            "tx".into(), V::Array(vec![V::Blob(vec![7; MAX_ARCHIVE_BLOCK_BYTES].into())]),
+        )]));
+        assert!(checked_block_bytes(&block).unwrap_err().contains("per-block byte bound"));
     }
 
     #[test]
