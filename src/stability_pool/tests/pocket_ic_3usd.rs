@@ -78,6 +78,12 @@ fn stability_pool_wasm() -> Vec<u8> {
     std::fs::read(path).expect("read stability pool Wasm test fixture")
 }
 
+fn flaky_ledger_wasm() -> Vec<u8> {
+    let path = std::env::var("RUMI_FLAKY_LEDGER_WASM_PATH")
+        .unwrap_or_else(|_| "target/wasm32-unknown-unknown/release/flaky_ledger.wasm".into());
+    std::fs::read(path).expect("build flaky_ledger Wasm test fixture")
+}
+
 // ─── Test Environment ───
 
 #[allow(dead_code)]
@@ -439,6 +445,58 @@ fn ledger_allowance(
     }
 }
 
+fn flaky_ledger_allowance(
+    pic: &pocket_ic::PocketIc,
+    ledger: Principal,
+    owner: Principal,
+    spender: Principal,
+) -> u128 {
+    let args = AllowanceArgs {
+        account: Account { owner, subaccount: None },
+        spender: Account { owner: spender, subaccount: None },
+    };
+    let result = pic.update_call(
+        ledger,
+        Principal::anonymous(),
+        "icrc2_allowance",
+        encode_one(args).unwrap(),
+    ).expect("flaky ledger icrc2_allowance call");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let response: AllowanceResponse = decode_one(&bytes).expect("decode flaky ledger allowance");
+            response.allowance.0.try_into().expect("flaky ledger allowance overflow")
+        }
+        WasmResult::Reject(message) => panic!("flaky ledger allowance rejected: {message}"),
+    }
+}
+
+fn complete_deposit_intent(
+    pic: &pocket_ic::PocketIc,
+    sp_id: Principal,
+    caller: Principal,
+    intent_seq: u64,
+    ledger: Principal,
+    amount: u64,
+) -> DepositIntentResult {
+    let result = pic.update_call(
+        sp_id,
+        caller,
+        "deposit_with_intent",
+        encode_args((intent_seq, ledger, amount)).unwrap(),
+    ).expect("deposit intent call");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let result: Result<DepositIntentResult, StabilityPoolError> =
+                decode_one(&bytes).expect("decode deposit intent");
+            match result.expect("deposit intent succeeds") {
+                completed @ DepositIntentResult::Completed { .. } => completed,
+                other => panic!("deposit intent did not complete: {other:?}"),
+            }
+        }
+        WasmResult::Reject(message) => panic!("deposit intent rejected: {message}"),
+    }
+}
+
 // ─── Tests ───
 
 #[test]
@@ -511,17 +569,7 @@ fn test_ckusdc_max_withdraw_drains_position_net_of_ledger_fee() {
     });
 
     let deposit_amount = 1_010_000u64; // 1.0100 ckUSDC
-    let result = pic.update_call(
-        sp_id, test_user, "deposit",
-        encode_args((ckusdc_ledger, deposit_amount)).unwrap()
-    ).expect("deposit call failed");
-    match result {
-        WasmResult::Reply(bytes) => {
-            let r: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode deposit");
-            r.expect("deposit failed");
-        }
-        WasmResult::Reject(msg) => panic!("deposit rejected: {}", msg),
-    }
+    complete_deposit_intent(&pic, sp_id, test_user, 1, ckusdc_ledger, deposit_amount);
     assert_eq!(
         ledger_balance(&pic, ckusdc_ledger, sp_id),
         deposit_amount as u128,
@@ -625,21 +673,7 @@ fn run_ckusdc_sole_holder_ledger_shortfall_withdraw(withdraw_recorded_amount: bo
     });
 
     let deposit_amount = 1_010_000u64;
-    let result = pic
-        .update_call(
-            sp_id,
-            test_user,
-            "deposit",
-            encode_args((ckusdc_ledger, deposit_amount)).unwrap(),
-        )
-        .expect("deposit call failed");
-    match result {
-        WasmResult::Reply(bytes) => {
-            let r: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode deposit");
-            r.expect("deposit failed");
-        }
-        WasmResult::Reject(msg) => panic!("deposit rejected: {}", msg),
-    }
+    complete_deposit_intent(&pic, sp_id, test_user, 1, ckusdc_ledger, deposit_amount);
 
     let drift_transfer = TransferArg {
         from_subaccount: None,
@@ -724,18 +758,7 @@ fn test_direct_icusd_deposit() {
 
     let deposit_amount: u64 = 100_00000000; // 100 icUSD
 
-    let result = env.pic.update_call(
-        env.sp_id, env.test_user, "deposit",
-        encode_args((env.icusd_ledger, deposit_amount)).unwrap()
-    ).expect("deposit call failed");
-
-    match result {
-        WasmResult::Reply(bytes) => {
-            let r: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode deposit");
-            r.expect("deposit failed");
-        }
-        WasmResult::Reject(msg) => panic!("deposit rejected: {}", msg),
-    }
+    complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 1, env.icusd_ledger, deposit_amount);
 
     // Verify user position
     let pos = get_user_position(&env.pic, env.sp_id, env.test_user)
@@ -752,6 +775,37 @@ fn test_direct_icusd_deposit() {
     let status = get_pool_status(&env.pic, env.sp_id);
     assert_eq!(status.total_depositors, 1);
     assert_eq!(status.total_deposits_e8s, deposit_amount);
+}
+
+#[test]
+fn legacy_deposit_fails_before_ledger_transfer_or_pool_credit() {
+    let env = setup_test_env();
+    let amount = 100_00000000u64;
+    let user_before = ledger_balance(&env.pic, env.icusd_ledger, env.test_user);
+    let pool_before = ledger_balance(&env.pic, env.icusd_ledger, env.sp_id);
+    let allowance_before = ledger_allowance(&env.pic, env.icusd_ledger, env.test_user, env.sp_id);
+
+    let result = env.pic.update_call(
+        env.sp_id,
+        env.test_user,
+        "deposit",
+        encode_args((env.icusd_ledger, amount)).unwrap(),
+    ).expect("legacy deposit call");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let result: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode legacy deposit");
+            assert!(matches!(&result, Err(StabilityPoolError::SystemBusy)), "legacy deposit should fail closed: {result:?}");
+        }
+        WasmResult::Reject(message) => panic!("legacy deposit transport rejected: {message}"),
+    }
+
+    assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.test_user), user_before);
+    assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.sp_id), pool_before);
+    assert_eq!(ledger_allowance(&env.pic, env.icusd_ledger, env.test_user, env.sp_id), allowance_before);
+    assert!(get_user_position(&env.pic, env.sp_id, env.test_user).is_none());
+    let status = get_pool_status(&env.pic, env.sp_id);
+    assert_eq!(status.total_depositors, 0);
+    assert_eq!(status.total_deposits_e8s, 0);
 }
 
 #[test]
@@ -883,6 +937,98 @@ fn deposit_intent_replay_is_idempotent_across_status_and_upgrade() {
     assert_eq!(position.stablecoin_balances.iter().find(|(token, _)| **token == ledger).map(|(_, value)| *value), Some(amount));
 }
 
+/// The fixture commits `icrc2_transfer_from` and then returns a typed
+/// GenericError. Retrying the same intent after an SP upgrade proves the
+/// existing ICRC-3 receipt exactly once; this models a lost typed reply, not
+/// a literal callback trap.
+#[test]
+fn deposit_intent_recovers_committed_generic_error_once_across_upgrade() {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let user = Principal::self_authenticating(&[61, 62, 63]);
+    let admin = Principal::self_authenticating(&[64, 65, 66]);
+    let protocol_id = Principal::self_authenticating(&[67, 68, 69]);
+    let ledger = pic.create_canister();
+    pic.add_cycles(ledger, 2_000_000_000_000);
+    pic.install_canister(ledger, flaky_ledger_wasm(), encode_one(()).unwrap(), None);
+
+    let sp_id = pic.create_canister();
+    pic.add_cycles(sp_id, 2_000_000_000_000);
+    let init_args = StabilityPoolInitArgs {
+        protocol_canister_id: protocol_id,
+        authorized_admins: vec![admin],
+    };
+    let sp_wasm = stability_pool_wasm();
+    pic.install_canister(sp_id, sp_wasm.clone(), encode_one(init_args.clone()).unwrap(), None);
+
+    pic.update_call(
+        ledger,
+        Principal::anonymous(),
+        "mint",
+        encode_args((Account { owner: user, subaccount: None }, candid::Nat::from(1_000_000_000u64))).unwrap(),
+    ).expect("mint fixture balance");
+    approve(&pic, ledger, user, sp_id, u128::MAX);
+    register_stablecoin(&pic, sp_id, admin, StablecoinConfig {
+        ledger_id: ledger,
+        symbol: "FLAKY".into(),
+        decimals: 8,
+        priority: 1,
+        is_active: true,
+        transfer_fee: Some(0),
+        is_lp_token: None,
+        underlying_pool: None,
+    });
+
+    pic.update_call(ledger, Principal::anonymous(), "set_phantom_failures", encode_one(1u32).unwrap())
+        .expect("arm committed-transfer GenericError");
+    let amount = 100_000_000u64;
+    let user_before = ledger_balance(&pic, ledger, user);
+    let initial = pic.update_call(
+        sp_id,
+        user,
+        "deposit_with_intent",
+        encode_args((1u64, ledger, amount)).unwrap(),
+    ).expect("ambiguous intent call");
+    match initial {
+        WasmResult::Reply(bytes) => {
+            let result: Result<DepositIntentResult, StabilityPoolError> = decode_one(&bytes).unwrap();
+            assert!(matches!(&result, Ok(DepositIntentResult::Pending { intent_seq: 1, .. })),
+                "committed GenericError must remain unresolved until receipt proof: {result:?}");
+        }
+        WasmResult::Reject(message) => panic!("ambiguous intent rejected: {message}"),
+    }
+    assert_eq!(ledger_balance(&pic, ledger, user), user_before - u128::from(amount));
+    assert_eq!(ledger_balance(&pic, ledger, sp_id), u128::from(amount));
+    assert!(get_user_position(&pic, sp_id, user).is_none(), "unproved transfer must not be credited");
+
+    pic.upgrade_canister(sp_id, sp_wasm, encode_one(init_args).unwrap(), None)
+        .expect("upgrade with unresolved intent");
+    let first_retry = pic.update_call(
+        sp_id,
+        user,
+        "deposit_with_intent",
+        encode_args((1u64, ledger, amount)).unwrap(),
+    ).expect("reconcile saved ledger tip");
+    match first_retry {
+        WasmResult::Reply(bytes) => {
+            let result: Result<DepositIntentResult, StabilityPoolError> = decode_one(&bytes).unwrap();
+            assert!(matches!(&result, Ok(DepositIntentResult::Pending { intent_seq: 1, .. })),
+                "first retry should advance the bounded history tip: {result:?}");
+        }
+        WasmResult::Reject(message) => panic!("first retry rejected: {message}"),
+    }
+    assert!(get_user_position(&pic, sp_id, user).is_none(), "tip advance alone must not credit");
+    let completed = complete_deposit_intent(&pic, sp_id, user, 1, ledger, amount);
+    assert!(matches!(completed, DepositIntentResult::Completed { intent_seq: 1, amount: got, .. } if got == amount));
+    assert_eq!(ledger_balance(&pic, ledger, user), user_before - u128::from(amount));
+    assert_eq!(ledger_balance(&pic, ledger, sp_id), u128::from(amount));
+    assert_eq!(flaky_ledger_allowance(&pic, ledger, user, sp_id), u128::MAX - u128::from(amount));
+    let position = get_user_position(&pic, sp_id, user).expect("receipt proof credits position");
+    assert_eq!(position.stablecoin_balances.get(&ledger).copied(), Some(amount));
+    let status = get_pool_status(&pic, sp_id);
+    assert_eq!(status.total_depositors, 1);
+    assert_eq!(status.total_deposits_e8s, amount);
+}
+
 /// Backend inline delivery and its timer retry can overlap or replay after a
 /// lost response. The source mint block must credit interest once and survive
 /// an SP upgrade so the same backend receipt remains acknowledged without a
@@ -891,17 +1037,7 @@ fn deposit_intent_replay_is_idempotent_across_status_and_upgrade() {
 fn test_interest_v2_duplicate_receipt_is_idempotent_across_upgrade() {
     let env = setup_test_env();
     let deposit_amount = 100_00000000u64;
-    let deposit = env.pic.update_call(
-        env.sp_id,
-        env.test_user,
-        "deposit",
-        encode_args((env.icusd_ledger, deposit_amount)).unwrap(),
-    ).expect("deposit call");
-    match deposit {
-        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
-            .unwrap().expect("deposit succeeds"),
-        WasmResult::Reject(message) => panic!("deposit rejected: {message}"),
-    }
+    complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 1, env.icusd_ledger, deposit_amount);
 
     let event_count_before = match env.pic.query_call(env.sp_id, Principal::anonymous(), "get_pool_event_count", encode_args(()).unwrap()).unwrap() {
         WasmResult::Reply(bytes) => decode_one::<u64>(&bytes).unwrap(),
@@ -1156,21 +1292,7 @@ fn test_get_ledger_reconciliation_reports_healthy_and_is_admin_gated() {
     let env = setup_test_env();
     let deposit_amount: u64 = 100_00000000; // 100 icUSD
 
-    let result = env
-        .pic
-        .update_call(
-            env.sp_id,
-            env.test_user,
-            "deposit",
-            encode_args((env.icusd_ledger, deposit_amount)).unwrap(),
-        )
-        .expect("deposit call failed");
-    match result {
-        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
-            .unwrap()
-            .expect("deposit failed"),
-        WasmResult::Reject(msg) => panic!("deposit rejected: {}", msg),
-    }
+    complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 1, env.icusd_ledger, deposit_amount);
 
     // Non-admin callers are rejected (the endpoint triggers per-token outcalls).
     let denied = env
@@ -1519,17 +1641,7 @@ fn test_mixed_pool_status_balances() {
 
     // Deposit 1000 icUSD directly
     let direct_amount: u64 = 1000_00000000;
-    let result = env.pic.update_call(
-        env.sp_id, env.test_user, "deposit",
-        encode_args((env.icusd_ledger, direct_amount)).unwrap()
-    ).expect("deposit call failed");
-    match result {
-        WasmResult::Reply(bytes) => {
-            let r: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode");
-            r.expect("deposit failed");
-        }
-        WasmResult::Reject(msg) => panic!("deposit rejected: {}", msg),
-    }
+    complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 1, env.icusd_ledger, direct_amount);
 
     // Also deposit 1000 icUSD as 3USD
     let three_usd_amount: u64 = 1000_00000000;
@@ -1618,17 +1730,7 @@ fn test_mixed_deposit_balances() {
 
     // Deposit icUSD directly
     let icusd_deposit: u64 = 500_00000000;
-    let result = env.pic.update_call(
-        env.sp_id, env.test_user, "deposit",
-        encode_args((env.icusd_ledger, icusd_deposit)).unwrap()
-    ).expect("deposit call failed");
-    match result {
-        WasmResult::Reply(bytes) => {
-            let r: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode");
-            r.expect("deposit failed");
-        }
-        WasmResult::Reject(msg) => panic!("deposit rejected: {}", msg),
-    }
+    complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 1, env.icusd_ledger, icusd_deposit);
 
     // Deposit ckUSDT via deposit_as_3usd (tests that non-icUSD stablecoins also work)
     let ckusdt_deposit: u64 = 500_000_000; // 500 ckUSDT (6 dec)
@@ -1672,20 +1774,12 @@ fn test_mixed_deposit_balances() {
 }
 
 #[test]
-fn same_round_identical_deposits_use_distinct_transfer_identities() {
+fn sequential_identical_deposit_intents_use_distinct_transfer_identities() {
     let env = setup_test_env();
     let amount = 100_00000000u64;
-    let first = env.pic.submit_call(env.sp_id, env.test_user, "deposit",
-        encode_args((env.icusd_ledger, amount)).unwrap()).expect("first submission");
-    let second = env.pic.submit_call(env.sp_id, env.test_user, "deposit",
-        encode_args((env.icusd_ledger, amount)).unwrap()).expect("second submission");
-    for call in [first, second] {
-        match env.pic.await_call(call).expect("deposit execution") {
-            WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
-                .expect("decode deposit").expect("unique pull succeeds"),
-            WasmResult::Reject(message) => panic!("deposit rejected: {message}"),
-        }
-    }
+    let first = complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 1, env.icusd_ledger, amount);
+    let second = complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 2, env.icusd_ledger, amount);
+    assert_ne!(first, second, "distinct intent sequences produce distinct completed receipts");
     let position = get_user_position(&env.pic, env.sp_id, env.test_user).unwrap();
     assert_eq!(position.stablecoin_balances.get(&env.icusd_ledger).copied(), Some(2 * amount));
     match env.pic.query_call(env.icusd_ledger, Principal::anonymous(), "icrc1_balance_of",
@@ -1697,7 +1791,7 @@ fn same_round_identical_deposits_use_distinct_transfer_identities() {
 
 #[test]
 #[ignore = "depends on successful deposit_as_3usd, disabled pending a durable conversion saga"]
-fn same_round_ordinary_and_convenience_deposits_use_distinct_pulls() {
+fn sequential_intent_and_convenience_deposits_use_distinct_pulls() {
     let env = setup_test_env();
     register_stablecoin(&env.pic, env.sp_id, env.admin, StablecoinConfig {
         ledger_id: env.pool_id, symbol: "3USD".to_string(), decimals: 8, priority: 0,
@@ -1705,20 +1799,14 @@ fn same_round_ordinary_and_convenience_deposits_use_distinct_pulls() {
         underlying_pool: Some(env.pool_id),
     });
     let amount = 100_00000000u64;
-    let routed = env.pic.submit_call(env.sp_id, env.test_user, "deposit_as_3usd",
-        encode_args((env.icusd_ledger, amount)).unwrap()).expect("routed submission");
-    let ordinary = env.pic.submit_call(env.sp_id, env.test_user, "deposit",
-        encode_args((env.icusd_ledger, amount)).unwrap()).expect("ordinary submission");
-    let lp_minted = match env.pic.await_call(routed).expect("routed execution") {
+    let routed = env.pic.update_call(env.sp_id, env.test_user, "deposit_as_3usd",
+        encode_args((env.icusd_ledger, amount)).unwrap()).expect("routed call");
+    let lp_minted = match routed {
         WasmResult::Reply(bytes) => decode_one::<Result<u64, StabilityPoolError>>(&bytes)
             .expect("decode routed").expect("routed pull succeeds"),
         WasmResult::Reject(message) => panic!("routed deposit rejected: {message}"),
     };
-    match env.pic.await_call(ordinary).expect("ordinary execution") {
-        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
-            .expect("decode ordinary").expect("ordinary pull succeeds"),
-        WasmResult::Reject(message) => panic!("ordinary deposit rejected: {message}"),
-    }
+    complete_deposit_intent(&env.pic, env.sp_id, env.test_user, 1, env.icusd_ledger, amount);
     let position = get_user_position(&env.pic, env.sp_id, env.test_user).unwrap();
     assert_eq!(position.stablecoin_balances.get(&env.icusd_ledger).copied(), Some(amount));
     assert_eq!(position.stablecoin_balances.get(&env.pool_id).copied(), Some(lp_minted));
