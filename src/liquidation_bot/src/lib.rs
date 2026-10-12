@@ -140,6 +140,11 @@ fn post_upgrade() {
         state::load_config_from_stable();
     }
 
+    // Repair history cursors on upgrades from versions that marked migration
+    // complete after copying only the first 500 events. The full legacy vector
+    // remains in the config snapshot and continues to serve the uncopied tail.
+    history::repair_legacy_history_index();
+
     // Stop automatic liquidation after every upgrade. Persist the pause before
     // reinstalling the 30-second worker timer so no queued work can run before
     // an operator has inspected state and explicitly resumed processing.

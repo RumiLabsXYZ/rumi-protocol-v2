@@ -87,6 +87,53 @@ pub fn next_id() -> u64 {
     })
 }
 
+/// Keep newly allocated history IDs beyond both the stable records and any
+/// legacy events retained in the config snapshot. This also repairs bots that
+/// already migrated only the historical 500-record prefix.
+pub fn ensure_next_id_at_least(minimum: u64) {
+    NEXT_ID.with(|c| {
+        let mut borrow = c.borrow_mut();
+        let cell = borrow.as_mut().expect("History not initialized");
+        if *cell.get() < minimum {
+            cell.set(minimum).expect("Failed to advance NEXT_ID");
+        }
+    });
+}
+
+/// Preserve legacy events that were not copied by the bounded migration.
+/// Older versions could already have allocated stable IDs starting at 500,
+/// so place the uncopied tail after the existing cursor and persist that
+/// mapping in the config snapshot before allocating any new record IDs.
+pub fn repair_legacy_history_index() {
+    const MIGRATED_PREFIX: u64 = 500;
+    let (legacy_len, existing_start) = crate::state::read_state(|s| {
+        (
+            u64::try_from(s.liquidation_events.len()).unwrap_or(u64::MAX),
+            s.legacy_history_start_id,
+        )
+    });
+
+    if legacy_len <= MIGRATED_PREFIX {
+        ensure_next_id_at_least(legacy_len);
+        return;
+    }
+
+    let start = existing_start.unwrap_or_else(current_next_id);
+    let start = start.max(MIGRATED_PREFIX);
+    let end = start.saturating_add(legacy_len - MIGRATED_PREFIX);
+    crate::state::mutate_state(|s| s.legacy_history_start_id = Some(start));
+    ensure_next_id_at_least(end);
+}
+
+fn current_next_id() -> u64 {
+    NEXT_ID.with(|c| {
+        *c.borrow()
+            .as_ref()
+            .expect("History not initialized")
+            .get()
+    })
+}
+
 pub fn insert_record(record: LiquidationRecordVersioned) {
     let id = match &record {
         LiquidationRecordVersioned::V1(r) => r.id,
@@ -105,6 +152,7 @@ pub fn get_record(id: u64) -> Option<LiquidationRecordVersioned> {
             .as_ref()
             .expect("History not initialized")
             .get(&id)
+            .or_else(|| legacy_event_record(id))
     })
 }
 
@@ -119,17 +167,29 @@ pub fn get_records(offset: u64, limit: u64) -> Vec<LiquidationRecordVersioned> {
         }
         let start = count.saturating_sub(offset.saturating_add(limit));
         let end = count.saturating_sub(offset);
-        (start..end).filter_map(|id| map.get(&id)).collect()
+        (start..end)
+            .filter_map(|id| map.get(&id).or_else(|| legacy_event_record(id)))
+            .collect()
     })
 }
 
 pub fn record_count() -> u64 {
-    NEXT_ID.with(|c| {
+    let stable_count = NEXT_ID.with(|c| {
         *c.borrow()
             .as_ref()
             .expect("History not initialized")
             .get()
-    })
+    });
+    let legacy_end = crate::state::read_state(|s| {
+        let legacy_len = u64::try_from(s.liquidation_events.len()).unwrap_or(u64::MAX);
+        match s.legacy_history_start_id {
+            Some(start) if legacy_len > 500 => {
+                start.saturating_add(legacy_len.saturating_sub(500))
+            }
+            _ => legacy_len.min(500),
+        }
+    });
+    stable_count.max(legacy_end)
 }
 
 /// Returns stuck records (TransferFailed or ConfirmFailed), scanning from newest first.
@@ -174,35 +234,140 @@ pub fn update_record_status(id: u64, new_status: LiquidationStatus) {
     });
 }
 
-/// Migrate legacy BotLiquidationEvent entries into the new stable map.
-/// Capped at 500 entries to avoid trapping in post_upgrade due to instruction limit.
-/// In practice the bot has far fewer legacy events than this.
+/// Migrate the first legacy events into the stable map. The config snapshot
+/// keeps the full legacy vector, and the query path serves any tail that is
+/// beyond this bounded upgrade-time copy.
 pub fn migrate_legacy_events(events: &[crate::state::BotLiquidationEvent]) {
-    let events = if events.len() > 500 { &events[..500] } else { events };
-    for event in events {
-        let id = next_id();
-        let status = if event.success {
+    for (index, event) in events.iter().take(500).enumerate() {
+        insert_record(LiquidationRecordVersioned::V1(record_from_legacy_event(
+            index as u64,
+            event,
+        )));
+    }
+}
+
+fn legacy_event_record(id: u64) -> Option<LiquidationRecordVersioned> {
+    crate::state::read_state(|s| {
+        let index = if id < 500 {
+            id
+        } else {
+            let start = s.legacy_history_start_id?;
+            if id < start {
+                return None;
+            }
+            500u64.checked_add(id - start)?
+        };
+        let index = usize::try_from(index).ok()?;
+        s.liquidation_events
+            .get(index)
+            .map(|event| LiquidationRecordVersioned::V1(record_from_legacy_event(id, event)))
+    })
+}
+
+fn record_from_legacy_event(
+    id: u64,
+    event: &crate::state::BotLiquidationEvent,
+) -> LiquidationRecordV1 {
+    LiquidationRecordV1 {
+        id,
+        vault_id: event.vault_id,
+        timestamp: event.timestamp,
+        status: if event.success {
             LiquidationStatus::Completed
         } else {
             LiquidationStatus::SwapFailed
-        };
-        let record = LiquidationRecordV1 {
-            id,
-            vault_id: event.vault_id,
-            timestamp: event.timestamp,
-            status,
-            collateral_claimed_e8s: event.collateral_received_e8s,
-            debt_to_cover_e8s: event.debt_covered_e8s,
+        },
+        collateral_claimed_e8s: event.collateral_received_e8s,
+        debt_to_cover_e8s: event.debt_covered_e8s,
+        icp_swapped_e8s: 0,
+        ckusdc_received_e6: 0,
+        ckusdc_transferred_e6: 0,
+        icp_to_treasury_e8s: event.collateral_to_treasury_e8s,
+        oracle_price_e8s: event.effective_price_e8s,
+        effective_price_e8s: event.effective_price_e8s,
+        slippage_bps: event.slippage_bps,
+        error_message: event.error_message.clone(),
+        confirm_retry_count: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn legacy_event(vault_id: u64) -> crate::state::BotLiquidationEvent {
+        crate::state::BotLiquidationEvent {
+            timestamp: vault_id + 1_000,
+            vault_id,
+            debt_covered_e8s: 10,
+            collateral_received_e8s: 20,
+            icusd_burned_e8s: 10,
+            collateral_to_treasury_e8s: 2,
+            swap_route: "legacy".to_string(),
+            effective_price_e8s: 3,
+            slippage_bps: 4,
+            success: true,
+            error_message: None,
+        }
+    }
+
+    #[test]
+    fn legacy_history_over_500_remains_queryable_and_cursor_skips_tail() {
+        crate::memory::init_memory_manager();
+        init_history();
+        let events: Vec<_> = (0..503).map(legacy_event).collect();
+        crate::state::init_state(crate::state::BotState {
+            liquidation_events: events.clone(),
+            migrated_to_stable_structures: true,
+            ..Default::default()
+        });
+
+        // Reproduce the former migration followed by one new stable record
+        // taking ID 500 before this compatibility repair is installed.
+        for (id, event) in events.iter().take(500).enumerate() {
+            insert_record(LiquidationRecordVersioned::V1(record_from_legacy_event(
+                id as u64, event,
+            )));
+        }
+        insert_record(LiquidationRecordVersioned::V1(LiquidationRecordV1 {
+            id: 500,
+            vault_id: 90_000,
+            timestamp: 90_001,
+            status: LiquidationStatus::Completed,
+            collateral_claimed_e8s: 0,
+            debt_to_cover_e8s: 0,
             icp_swapped_e8s: 0,
             ckusdc_received_e6: 0,
             ckusdc_transferred_e6: 0,
-            icp_to_treasury_e8s: event.collateral_to_treasury_e8s,
-            oracle_price_e8s: event.effective_price_e8s,
-            effective_price_e8s: event.effective_price_e8s,
-            slippage_bps: event.slippage_bps,
-            error_message: event.error_message.clone(),
+            icp_to_treasury_e8s: 0,
+            oracle_price_e8s: 0,
+            effective_price_e8s: 0,
+            slippage_bps: 0,
+            error_message: None,
             confirm_retry_count: 0,
-        };
-        insert_record(LiquidationRecordVersioned::V1(record));
+        }));
+        ensure_next_id_at_least(501);
+        repair_legacy_history_index();
+        crate::state::save_config_to_stable();
+        crate::state::load_config_from_stable();
+
+        assert_eq!(record_count(), 504);
+        for id in [0, 499, 501, 503] {
+            let record = get_record(id).expect("legacy event remains queryable");
+            match record {
+                LiquidationRecordVersioned::V1(record) => {
+                    assert_eq!(record.id, id);
+                    let expected_vault = if id < 500 { id } else { id - 1 };
+                    assert_eq!(record.vault_id, expected_vault);
+                }
+            }
+        }
+        let occupied = get_record(500).expect("new stable record remains queryable");
+        match occupied {
+            LiquidationRecordVersioned::V1(record) => assert_eq!(record.vault_id, 90_000),
+        }
+        let page = get_records(0, 1_000);
+        assert_eq!(page.len(), 504);
+        assert_eq!(next_id(), 504, "new records must not reuse the legacy tail IDs");
     }
 }

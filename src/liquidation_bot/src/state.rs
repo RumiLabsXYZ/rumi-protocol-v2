@@ -357,6 +357,10 @@ pub struct BotState {
     pub config: Option<BotConfig>,
     pub stats: BotStats,
     pub liquidation_events: Vec<BotLiquidationEvent>,
+    /// Stable history ID assigned to the uncopied tail of the legacy event
+    /// vector. Missing in older snapshots; set during upgrade when needed.
+    #[serde(default)]
+    pub legacy_history_start_id: Option<u64>,
     pub pending_vaults: Vec<LiquidatableVaultInfo>,
     #[serde(default)]
     pub admin_events: Vec<BotAdminEvent>,
@@ -889,10 +893,28 @@ mod tests {
         let msg = catch_panic_message(load_config_from_stable)
             .expect("corrupt length must trap, not silently wipe state to default");
         assert!(
-            msg.contains("UPG-001") && msg.contains("implausible"),
+            msg.contains("UPG-001") && msg.contains("invalid config snapshot length"),
             "trap message must name the finding, got: {}",
             msg
         );
+        STATE.with(|s| assert!(s.borrow().is_none(), "state must stay uninitialized"));
+    }
+
+    #[test]
+    fn upg_001_length_validation_rejects_wasm32_wrap_and_truncated_regions() {
+        assert!(config_payload_len((u32::MAX as u64) + 17, 65_536).is_err());
+        assert!(config_payload_len(65_529, 1).is_err());
+        assert_eq!(config_payload_len(100, 2).unwrap(), 100);
+
+        memory::init_memory_manager();
+        let mut mem = memory::get_memory(memory::MEM_ID_CONFIG);
+        let mut writer = Writer::new(&mut mem, 0);
+        writer
+            .write(&((u32::MAX as u64) + 17).to_le_bytes())
+            .expect("write corrupt length");
+        let msg = catch_panic_message(load_config_from_stable)
+            .expect("a wasm32-wrapping length must trap before allocation");
+        assert!(msg.contains("UPG-001") && msg.contains("invalid config snapshot length"));
         STATE.with(|s| assert!(s.borrow().is_none(), "state must stay uninitialized"));
     }
 
@@ -1015,10 +1037,10 @@ pub fn load_config_from_stable() {
 
     let mut len_bytes = [0u8; 8];
     ic_stable_structures::Memory::read(&mem, 0, &mut len_bytes);
-    let len = u64::from_le_bytes(len_bytes) as usize;
+    let raw_len = u64::from_le_bytes(len_bytes);
 
     // A zero length is treated as "no data" (region grown but never written).
-    if len == 0 {
+    if raw_len == 0 {
         init_state(fresh_migrated_state());
         return;
     }
@@ -1027,13 +1049,13 @@ pub fn load_config_from_stable() {
     // an implausible length means the region is corrupt, not empty. UPG-001:
     // trap (upgrade rolls back, old wasm + state stay intact) instead of
     // silently wiping to default.
-    if len > 10_000_000 {
-        trap(&format!(
-            "liquidation_bot UPG-001: implausible config snapshot length {} in MEM_ID_CONFIG; \
-             refusing to wipe state, aborting upgrade",
-            len
-        ));
-    }
+    let len = match config_payload_len(raw_len, ic_stable_structures::Memory::size(&mem)) {
+        Ok(len) => len,
+        Err(reason) => trap(&format!(
+            "liquidation_bot UPG-001: invalid config snapshot length {} in MEM_ID_CONFIG ({}); refusing to wipe state, aborting upgrade",
+            raw_len, reason
+        )),
+    };
 
     let mut bytes = vec![0u8; len];
     ic_stable_structures::Memory::read(&mem, 8, &mut bytes);
@@ -1055,4 +1077,26 @@ pub fn load_config_from_stable() {
             ));
         }
     }
+}
+
+/// Validate the persisted u64 length before converting it to the host's
+/// address size or allocating. `memory_pages` is the virtual region's byte
+/// capacity in 64-KiB stable-memory pages.
+fn config_payload_len(raw_len: u64, memory_pages: u64) -> Result<usize, &'static str> {
+    const MAX_CONFIG_BYTES: u64 = 10_000_000;
+    const STABLE_PAGE_BYTES: u64 = 65_536;
+
+    if raw_len > MAX_CONFIG_BYTES {
+        return Err("length exceeds the supported snapshot limit");
+    }
+    let end = raw_len
+        .checked_add(8)
+        .ok_or("length plus header overflows")?;
+    let capacity = memory_pages
+        .checked_mul(STABLE_PAGE_BYTES)
+        .ok_or("memory capacity overflows")?;
+    if end > capacity {
+        return Err("length exceeds the config region capacity");
+    }
+    usize::try_from(raw_len).map_err(|_| "length does not fit this platform")
 }
