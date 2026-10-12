@@ -5,7 +5,7 @@
 //! `7b2d0dbf690fa0a64007e99ba016a89e31f61491`; its SHA-256 matches the
 //! installed module (`9797bf2454923ef41d6ef6a003435e0430aaa2b2b413734c6d9e6e921889dfc0`).
 //! The candidate is the production artifact at SHA-256
-//! `ae8491da84212c1e49b2d1b7f21598e8e82532cb3395d6066dc5e2880bd50034`.
+//! `74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae`.
 //! This ignored, opt-in test reads both artifacts from explicit environment
 //! paths and verifies their hashes before installing or upgrading.
 
@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 const PREDECESSOR_WASM_SHA256: &str =
     "9797bf2454923ef41d6ef6a003435e0430aaa2b2b413734c6d9e6e921889dfc0";
 const CANDIDATE_WASM_SHA256: &str =
-    "ae8491da84212c1e49b2d1b7f21598e8e82532cb3395d6066dc5e2880bd50034";
+    "74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae";
 const LEGACY_ALLOWANCE: u128 = 1_234_567;
 const LP_TRANSFER: u128 = 100_000;
 
