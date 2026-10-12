@@ -1360,6 +1360,39 @@ pub mod payouts {
         })
     }
 
+    /// Return one ID-ordered page from the complete retained current map.
+    /// The extra lookahead row determines whether another page exists; ID gaps
+    /// are expected because definitive no-effect reservations are retired.
+    pub fn list_global_after(
+        after_id: Option<u64>,
+        limit: usize,
+    ) -> (u64, Vec<crate::payouts::PayoutEntitlement>, bool) {
+        PAYOUT_CURRENT.with(|map| {
+            let map = map.borrow();
+            let total_count = map.len();
+            let mut entries: Vec<_> = match after_id {
+                Some(id) => map
+                    .range((
+                        std::ops::Bound::Excluded(StorableU128(id as u128)),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .take(limit.saturating_add(1))
+                    .map(|(_, value)| value)
+                    .collect(),
+                None => map
+                    .iter()
+                    .take(limit.saturating_add(1))
+                    .map(|(_, value)| value)
+                    .collect(),
+            };
+            let has_more = entries.len() > limit;
+            if has_more {
+                entries.pop();
+            }
+            (total_count, entries, has_more)
+        })
+    }
+
     pub fn list_for_owner(
         owner: Principal,
         offset: u64,

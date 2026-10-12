@@ -966,6 +966,36 @@ pub fn get_payout_entitlements(offset: u64, limit: u64) -> Vec<crate::payouts::P
     payouts::list_for_owner(ic_cdk::api::caller(), offset, limit.min(100))
 }
 
+/// Admin-only inventory of retained payout identities across every owner.
+/// IDs are monotonic but may have gaps when definitive no-effect reservations
+/// are retired. `total_count` describes the map during this query, including
+/// settled rows; separate page calls can observe later insertions or removals,
+/// so this API does not promise an atomic multi-page snapshot.
+#[query]
+pub fn get_global_payout_inventory(
+    after_id: Option<u64>,
+    limit: u64,
+) -> Result<crate::payouts::GlobalPayoutInventoryPage, ThreePoolError> {
+    let caller = ic_cdk::api::caller();
+    let admin = read_state(|s| s.config.admin);
+    if caller != admin || caller == Principal::anonymous() {
+        return Err(ThreePoolError::Unauthorized);
+    }
+
+    // Entitlements can contain multiple transfer attempts; keep query payloads
+    // small even when callers request an unbounded page.
+    const MAX_PAGE_SIZE: usize = 20;
+    let page_size = usize::try_from(limit.clamp(1, MAX_PAGE_SIZE as u64))
+        .expect("page size is bounded by MAX_PAGE_SIZE");
+    let (total_count, entries, has_more) = storage::payouts::list_global_after(after_id, page_size);
+    let next_cursor = has_more.then(|| entries.last().expect("lookahead requires a page row").id);
+    Ok(crate::payouts::GlobalPayoutInventoryPage {
+        total_count,
+        entries,
+        next_cursor,
+    })
+}
+
 /// View outstanding pending claims (bounded page; `limit` capped at 1000).
 #[query]
 pub fn get_pending_claims(offset: u64, limit: u64) -> Vec<crate::types::ThreePoolPendingClaim> {
@@ -4208,6 +4238,33 @@ pub fn test_trap_after_admin_fee_first_leg() {
 #[query]
 pub fn test_payout_storage_counts() -> (u64, u64) {
     (storage::payouts::retained_count(), storage::payouts::evidence_count())
+}
+
+/// Test-only fixture insertion for global payout inventory pagination and
+/// caller-scope integration checks. Never enabled in production builds.
+#[cfg(feature = "test_endpoints")]
+#[update]
+pub fn test_insert_payout_entitlement(id: u64, owner: Principal, settled: bool) {
+    assert_eq!(ic_cdk::api::caller(), read_state(|s| s.config.admin), "admin only");
+    let ledger = read_state(|s| s.config.tokens[0].ledger_id);
+    payouts::save(crate::payouts::PayoutEntitlement {
+        id,
+        owner,
+        token_index: 0,
+        ledger,
+        symbol: "TEST".into(),
+        gross: 1,
+        kind: crate::payouts::PayoutKind::RemoveLiquidity,
+        swap_context: None,
+        compensation_id: None,
+        compensation_for: None,
+        dispatch_ready: Some(false),
+        input_transfer: None,
+        input_outcome: None,
+        input_action: None,
+        settled,
+        attempts: Vec::new(),
+    });
 }
 
 #[cfg(feature = "test_endpoints")]

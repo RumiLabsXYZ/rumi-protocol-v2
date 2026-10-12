@@ -136,6 +136,18 @@ pub struct PayoutEntitlement {
     pub attempts: Vec<PayoutAttempt>,
 }
 
+/// One bounded page of the retained global payout identity map. `total_count`
+/// counts current map rows, including settled rows; callers classify liability
+/// state from each entitlement's `settled` and attempt fields.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GlobalPayoutInventoryPage {
+    pub total_count: u64,
+    pub entries: Vec<PayoutEntitlement>,
+    /// Exclusive ID cursor for the next page. `None` means this query observed
+    /// no additional row after this page.
+    pub next_cursor: Option<u64>,
+}
+
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PayoutJournalEventKind {
     // Retained for decoding journal entries created by early saga builds.
