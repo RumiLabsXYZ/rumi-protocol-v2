@@ -150,6 +150,11 @@ struct LedgerState {
     /// When enabled, advertise the fixture's bounded archived-block query
     /// callback instead of the deliberately missing callback above.
     icrc3_archive_callback_enabled: bool,
+    /// Optional archived block whose phash is corrupted only in callback output.
+    icrc3_corrupt_archived_phash_at: Option<u64>,
+    /// Append one unrelated mint immediately before the next transfer_from
+    /// block. Used to place an archived nonmatch before a lost-reply receipt.
+    transfer_from_prelude_mint: bool,
     fee: u128,
     fail_fee_query: bool,
     fail_transfers: bool,
@@ -655,6 +660,14 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
         let charged_fee = state.fee;
         *state.balances.entry(from.clone()).or_insert(0) -= amount + charged_fee;
         *state.balances.entry(args.to.clone()).or_insert(0) += amount;
+        if state.transfer_from_prelude_mint {
+            state.transfer_from_prelude_mint = false;
+            let prelude_account = Account {
+                owner: Principal::anonymous(),
+                subaccount: None,
+            };
+            append_block(&mut state, mint_block(&prelude_account, 1));
+        }
         let landed_block = append_block(
             &mut state,
             transfer_block(
@@ -814,7 +827,13 @@ fn icrc3_get_archived_blocks(args: Vec<GetBlocksRequest>) -> GetBlocksResult {
                     break;
                 }
                 if let Some(block) = state.blocks.get(index as usize) {
-                    blocks.push(block.clone());
+                    let mut block = block.clone();
+                    if state.icrc3_corrupt_archived_phash_at == Some(index) {
+                        if let ICRC3Value::Map(fields) = &mut block.block {
+                            fields.insert("phash".into(), ICRC3Value::Blob(vec![0xa5; 32].into()));
+                        }
+                    }
+                    blocks.push(block);
                 }
             }
         }
@@ -982,6 +1001,19 @@ fn set_icrc3_archive_range(range: Option<(u64, u64)>) {
 #[update]
 fn set_icrc3_archive_callback_enabled(enabled: bool) {
     STATE.with(|s| s.borrow_mut().icrc3_archive_callback_enabled = enabled);
+}
+
+/// Corrupt the phash of one archived row in callback responses; None restores
+/// the exact stored ledger history.
+#[update]
+fn set_icrc3_corrupt_archived_phash_at(index: Option<u64>) {
+    STATE.with(|s| s.borrow_mut().icrc3_corrupt_archived_phash_at = index);
+}
+
+/// Append one unrelated mint immediately before the next transfer_from block.
+#[update]
+fn set_transfer_from_prelude_mint(enabled: bool) {
+    STATE.with(|s| s.borrow_mut().transfer_from_prelude_mint = enabled);
 }
 
 #[cfg(test)]

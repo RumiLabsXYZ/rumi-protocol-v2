@@ -1029,6 +1029,140 @@ fn deposit_intent_recovers_committed_generic_error_once_across_upgrade() {
     assert_eq!(status.total_deposits_e8s, amount);
 }
 
+/// A no-index lost reply must authenticate an unrelated archived predecessor
+/// and the exact archived transfer as one prefix before a direct anchor can
+/// authorize credit. The proof cursor and provisional match must survive an
+/// upgrade between the archived prefix and its direct anchor.
+#[test]
+fn deposit_intent_authenticates_archived_history_segment_across_upgrade() {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let user = Principal::self_authenticating(&[71, 72, 73]);
+    let admin = Principal::self_authenticating(&[74, 75, 76]);
+    let protocol_id = Principal::self_authenticating(&[77, 78, 79]);
+    let ledger = pic.create_canister();
+    pic.add_cycles(ledger, 2_000_000_000_000);
+    pic.install_canister(ledger, flaky_ledger_wasm(), encode_one(()).unwrap(), None);
+
+    let sp_id = pic.create_canister();
+    pic.add_cycles(sp_id, 2_000_000_000_000);
+    let init_args = StabilityPoolInitArgs {
+        protocol_canister_id: protocol_id,
+        authorized_admins: vec![admin],
+    };
+    let sp_wasm = stability_pool_wasm();
+    pic.install_canister(sp_id, sp_wasm.clone(), encode_one(init_args.clone()).unwrap(), None);
+
+    pic.update_call(
+        ledger,
+        Principal::anonymous(),
+        "mint",
+        encode_args((Account { owner: user, subaccount: None }, candid::Nat::from(1_000_000_000u64))).unwrap(),
+    ).expect("mint fixture balance");
+    approve(&pic, ledger, user, sp_id, u128::MAX);
+    register_stablecoin(&pic, sp_id, admin, StablecoinConfig {
+        ledger_id: ledger,
+        symbol: "FLAKY".into(),
+        decimals: 8,
+        priority: 1,
+        is_active: true,
+        transfer_fee: Some(0),
+        is_lp_token: None,
+        underlying_pool: None,
+    });
+
+    // The ledger inserts index 2 immediately before the exact transfer at 3.
+    pic.update_call(ledger, Principal::anonymous(), "set_transfer_from_prelude_mint", encode_one(true).unwrap())
+        .expect("arm unrelated archived predecessor");
+    pic.update_call(ledger, Principal::anonymous(), "set_phantom_failures", encode_one(1u32).unwrap())
+        .expect("arm committed-transfer GenericError");
+    let amount = 100_000_000u64;
+    let user_before = ledger_balance(&pic, ledger, user);
+    let initial = pic.update_call(
+        sp_id,
+        user,
+        "deposit_with_intent",
+        encode_args((1u64, ledger, amount)).unwrap(),
+    ).expect("ambiguous intent call");
+    match initial {
+        WasmResult::Reply(bytes) => {
+            let result: Result<DepositIntentResult, DepositIntentError> = decode_one(&bytes).unwrap();
+            assert!(matches!(result, Ok(DepositIntentResult::Pending { intent_seq: 1, .. })), "unexpected result: {result:?}");
+        }
+        WasmResult::Reject(message) => panic!("ambiguous intent rejected: {message}"),
+    }
+    assert!(get_user_position(&pic, sp_id, user).is_none());
+
+    // Archive the predecessor, exact candidate, and six following blocks.
+    pic.update_call(ledger, Principal::anonymous(), "set_icrc3_archive_range", encode_one(Some((2u64, 8u64))).unwrap())
+        .expect("archive candidate segment");
+    pic.update_call(ledger, Principal::anonymous(), "set_icrc3_archive_callback_enabled", encode_one(true).unwrap())
+        .expect("enable archive callback");
+    for _ in 0..6 {
+        pic.update_call(
+            ledger,
+            Principal::anonymous(),
+            "mint",
+            encode_args((Account { owner: Principal::anonymous(), subaccount: None }, candid::Nat::from(1u64))).unwrap(),
+        ).expect("append archived segment filler");
+    }
+    pic.update_call(
+        ledger,
+        Principal::anonymous(),
+        "mint",
+        encode_args((Account { owner: Principal::anonymous(), subaccount: None }, candid::Nat::from(1u64))).unwrap(),
+    ).expect("append directly served anchor");
+
+    // First retry pins the new tip; no archived evidence may credit yet.
+    let first_retry = pic.update_call(sp_id, user, "deposit_with_intent", encode_args((1u64, ledger, amount)).unwrap())
+        .expect("first retry pins the new history tip");
+    assert!(matches!(
+        first_retry,
+        WasmResult::Reply(bytes) if matches!(decode_one::<Result<DepositIntentResult, DepositIntentError>>(&bytes).unwrap(), Ok(DepositIntentResult::Pending { intent_seq: 1, .. }))
+    ));
+    assert!(get_user_position(&pic, sp_id, user).is_none());
+
+    // A malformed phash in the first archived row must stay pending and must
+    // discard provisional progress, so clearing the fixture fault can recover.
+    pic.update_call(ledger, Principal::anonymous(), "set_icrc3_corrupt_archived_phash_at", encode_one(Some(2u64)).unwrap())
+        .expect("corrupt one archived phash");
+    let corrupted = pic.update_call(sp_id, user, "deposit_with_intent", encode_args((1u64, ledger, amount)).unwrap())
+        .expect("retry against corrupted archived phash");
+    match corrupted {
+        WasmResult::Reply(bytes) => {
+            let result: Result<DepositIntentResult, DepositIntentError> = decode_one(&bytes).unwrap();
+            assert!(matches!(result, Ok(DepositIntentResult::Pending { intent_seq: 1, .. })), "corrupt archived proof must remain pending: {result:?}");
+        }
+        WasmResult::Reject(message) => panic!("corrupted archive proof rejected: {message}"),
+    }
+    assert!(get_user_position(&pic, sp_id, user).is_none(), "corrupt archived evidence cannot credit");
+    assert_eq!(ledger_balance(&pic, ledger, user), user_before - u128::from(amount));
+    assert_eq!(flaky_ledger_allowance(&pic, ledger, user, sp_id), u128::MAX - u128::from(amount));
+
+    pic.update_call(ledger, Principal::anonymous(), "set_icrc3_corrupt_archived_phash_at", encode_one(None::<u64>).unwrap())
+        .expect("clear archived phash corruption");
+    let recovered_prefix = pic.update_call(sp_id, user, "deposit_with_intent", encode_args((1u64, ledger, amount)).unwrap())
+        .expect("resume proof after restoring archive contents");
+    match recovered_prefix {
+        WasmResult::Reply(bytes) => {
+            let result: Result<DepositIntentResult, DepositIntentError> = decode_one(&bytes).unwrap();
+            assert!(matches!(result, Ok(DepositIntentResult::Pending { intent_seq: 1, .. })), "valid archived prefix remains pending until direct anchor: {result:?}");
+        }
+        WasmResult::Reject(message) => panic!("recovered archive proof rejected: {message}"),
+    }
+    assert!(get_user_position(&pic, sp_id, user).is_none(), "recovered but unanchored archive cannot credit");
+    assert_eq!(ledger_balance(&pic, ledger, user), user_before - u128::from(amount));
+    assert_eq!(flaky_ledger_allowance(&pic, ledger, user, sp_id), u128::MAX - u128::from(amount));
+
+    pic.upgrade_canister(sp_id, sp_wasm, encode_one(init_args).unwrap(), None)
+        .expect("upgrade with persisted archived proof cursor");
+    let completed = complete_deposit_intent(&pic, sp_id, user, 1, ledger, amount);
+    assert!(matches!(completed, DepositIntentResult::Completed { intent_seq: 1, amount: got, block_index: 3, .. } if got == amount));
+    assert_eq!(ledger_balance(&pic, ledger, user), user_before - u128::from(amount));
+    assert_eq!(ledger_balance(&pic, ledger, sp_id), u128::from(amount));
+    let position = get_user_position(&pic, sp_id, user).expect("anchored archived transfer credits position");
+    assert_eq!(position.stablecoin_balances.get(&ledger).copied(), Some(amount));
+}
+
 /// Backend inline delivery and its timer retry can overlap or replay after a
 /// lost response. The source mint block must credit interest once and survive
 /// an SP upgrade so the same backend receipt remains acknowledged without a

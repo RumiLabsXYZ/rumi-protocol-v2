@@ -63,6 +63,27 @@ pub struct LegacyInterestMintReceiptFloor {
     pub through: Option<u64>,
 }
 
+/// Upgrade-safe progress for proving an archived ICRC-2 deposit receipt.
+/// The caller key is kept in `deposit_intent_archive_proofs`; all other fields
+/// bind the cursor to one immutable intent and one candidate block.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DepositIntentArchiveProofProgress {
+    pub token_ledger: Principal,
+    pub intent_seq: u64,
+    pub transfer_digest: [u8; 32],
+    /// Receipt proves one exact candidate; HistorySegment authenticates a
+    /// contiguous archive prefix during no-index history reconciliation.
+    pub history_segment: bool,
+    pub segment_start_index: u64,
+    pub pinned_history_tip: Option<u64>,
+    pub exact_match: Option<(u64, [u8; 32])>,
+    pub possible_mismatch: bool,
+    pub multiple_exact_matches: bool,
+    pub latest_verified_block_index: u64,
+    pub next_block_index: u64,
+    pub prior_block_hash: [u8; 32],
+}
+
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InterestMintReceiptCapacity {
     pub retained: Option<u64>,
@@ -258,6 +279,10 @@ pub struct StabilityPoolState {
     /// Bounded terminal response window keyed by `(caller, intent_seq)`.
     #[serde(default)]
     pub completed_deposit_intents: Option<BTreeMap<(Principal, u64), CompletedDepositIntent>>,
+    /// Bounded hash-chain cursors for archived exact deposit receipts.
+    #[serde(default)]
+    pub deposit_intent_archive_proofs:
+        Option<BTreeMap<Principal, DepositIntentArchiveProofProgress>>,
     /// Recent source-ledger mint blocks already allocated to eligible SP depositors.
     #[serde(default)]
     pub processed_interest_mint_blocks: Option<BTreeSet<u64>>,
@@ -322,6 +347,7 @@ impl Default for StabilityPoolState {
             deposit_intent_high_watermarks: Some(BTreeMap::new()),
             pending_deposit_intents: Some(BTreeMap::new()),
             completed_deposit_intents: Some(BTreeMap::new()),
+            deposit_intent_archive_proofs: Some(BTreeMap::new()),
             processed_interest_mint_blocks: Some(BTreeSet::new()),
             processed_interest_mint_block_high_watermark: None,
             legacy_interest_mint_receipt_floor: Some(LegacyInterestMintReceiptFloor { through: None }),
@@ -882,6 +908,52 @@ impl StabilityPoolState {
             .and_then(|completed| completed.get(&(caller, intent_seq)).cloned())
     }
 
+    pub fn deposit_intent_archive_proof(
+        &self,
+        caller: Principal,
+    ) -> Option<DepositIntentArchiveProofProgress> {
+        self.deposit_intent_archive_proofs
+            .as_ref()
+            .and_then(|proofs| proofs.get(&caller).cloned())
+    }
+
+    pub fn save_deposit_intent_archive_proof(
+        &mut self,
+        caller: Principal,
+        progress: DepositIntentArchiveProofProgress,
+    ) -> bool {
+        let Some(intent) = self
+            .pending_deposit_intents
+            .as_ref()
+            .and_then(|pending| pending.get(&caller))
+        else {
+            return false;
+        };
+        if intent.intent_seq != progress.intent_seq
+            || intent.token_ledger != progress.token_ledger
+            || (progress.history_segment
+                && (intent.expected_block_index.is_some()
+                    || intent.history_next_index != Some(progress.segment_start_index)
+                    || intent.history_tip != progress.pinned_history_tip))
+            || (!progress.history_segment
+                && intent.expected_block_index != Some(progress.segment_start_index))
+            || progress.latest_verified_block_index.checked_add(1)
+                != Some(progress.next_block_index)
+        {
+            return false;
+        }
+        self.deposit_intent_archive_proofs
+            .get_or_insert_with(BTreeMap::new)
+            .insert(caller, progress);
+        true
+    }
+
+    pub fn remove_deposit_intent_archive_proof(&mut self, caller: Principal) {
+        if let Some(proofs) = self.deposit_intent_archive_proofs.as_mut() {
+            proofs.remove(&caller);
+        }
+    }
+
     /// Reserve the caller's next sequence and exact ledger tuple atomically.
     /// No ledger call may occur before this succeeds.
     pub fn reserve_deposit_intent(
@@ -954,6 +1026,7 @@ impl StabilityPoolState {
             .as_mut()
             .expect("pending intent existed")
             .remove(&caller);
+        self.remove_deposit_intent_archive_proof(caller);
         let previous_seq = intent_seq.saturating_sub(1);
         let watermarks = self
             .deposit_intent_high_watermarks
@@ -1034,6 +1107,7 @@ impl StabilityPoolState {
             .as_mut()
             .expect("pending map was present")
             .remove(&caller);
+        self.remove_deposit_intent_archive_proof(caller);
         let completed = self
             .completed_deposit_intents
             .get_or_insert_with(BTreeMap::new);
@@ -4446,6 +4520,7 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             deposit_intent_high_watermarks: Some(BTreeMap::new()),
             pending_deposit_intents: Some(BTreeMap::new()),
             completed_deposit_intents: Some(BTreeMap::new()),
+            deposit_intent_archive_proofs: Some(BTreeMap::new()),
             processed_interest_mint_blocks: Some(BTreeSet::new()),
             processed_interest_mint_block_high_watermark: None,
             legacy_interest_mint_receipt_floor: Some(LegacyInterestMintReceiptFloor { through: None }),
@@ -4618,6 +4693,36 @@ mod tests {
             restored.deposit_intent_status(caller, 1).active_intent,
             Some(DepositIntentResult::Pending { intent_seq: 1, .. })
         ));
+    }
+
+    #[test]
+    fn deposit_intent_archive_proof_cursor_survives_stable_round_trip() {
+        let caller = Principal::from_slice(&[45]);
+        let mut state = StabilityPoolState::default();
+        let mut intent = deposit_intent_for_test(caller, 1, 500);
+        state.reserve_deposit_intent(intent.clone()).unwrap();
+        intent.history_tip = Some(20);
+        assert!(state.update_deposit_intent(intent.clone()));
+        let progress = DepositIntentArchiveProofProgress {
+            token_ledger: intent.token_ledger,
+            intent_seq: intent.intent_seq,
+            transfer_digest: [9; 32],
+            history_segment: true,
+            segment_start_index: 3,
+            pinned_history_tip: Some(20),
+            exact_match: Some((5, [8; 32])),
+            possible_mismatch: false,
+            multiple_exact_matches: false,
+            latest_verified_block_index: 7,
+            next_block_index: 8,
+            prior_block_hash: [7; 32],
+        };
+        assert!(state.save_deposit_intent_archive_proof(caller, progress.clone()));
+
+        let bytes = Encode!(&state).expect("encode archived receipt proof cursor");
+        let restored = try_decode_state(&bytes).expect("decode archived receipt proof cursor");
+        assert_eq!(restored.deposit_intent_archive_proof(caller), Some(progress));
+        assert_eq!(restored.pending_deposit_intent(caller), Some(intent));
     }
 
     #[test]
