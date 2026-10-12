@@ -85,19 +85,25 @@ fn post_upgrade() {
     // STEP 1: Rescue legacy JSON blob BEFORE MemoryManager::init.
     // Raw stable64_read is safe here because MemoryManager hasn't been initialized yet.
     // On second+ upgrades, offset 0 contains the MemoryManager header (magic b"MGR" + version).
-    // Interpreted as a little-endian u64, this exceeds 10_000_000, so the len check below
-    // correctly returns None and we fall through to load_config_from_stable().
+    // Recognize that layout explicitly; unknown nonempty bytes must trap before initialization.
     let size = ic_cdk::api::stable::stable64_size();
     let legacy_state: Option<BotState> = if size > 0 {
         let mut len_bytes = [0u8; 8];
         ic_cdk::api::stable::stable64_read(0, &mut len_bytes);
-        let len = u64::from_le_bytes(len_bytes) as usize;
-        if len > 0 && len < 10_000_000 {
-            let mut bytes = vec![0u8; len];
-            ic_cdk::api::stable::stable64_read(8, &mut bytes);
-            serde_json::from_slice(&bytes).ok()
-        } else {
-            None
+        match legacy_state_len(size, &len_bytes) {
+            Ok(Some(len)) => {
+                let mut bytes = vec![0u8; len];
+                ic_cdk::api::stable::stable64_read(8, &mut bytes);
+                Some(decode_legacy_state(&bytes).unwrap_or_else(|error| {
+                    ic_cdk::trap(&format!(
+                        "liquidation_bot UPG-001: nonempty legacy state failed to decode before MemoryManager initialization ({error}); refusing to discard state"
+                    ))
+                }))
+            }
+            Ok(None) => None,
+            Err(error) => ic_cdk::trap(&format!(
+                "liquidation_bot UPG-001: cannot classify nonempty stable memory before MemoryManager initialization ({error}); refusing to discard state"
+            )),
         }
     } else {
         None
@@ -140,6 +146,100 @@ fn post_upgrade() {
     state::mutate_state(state::pause_after_upgrade);
     state::save_config_to_stable();
     setup_timer();
+}
+
+const MAX_LEGACY_STATE_BYTES: u64 = 10_000_000;
+const STABLE_PAGE_BYTES: u64 = 65_536;
+
+/// Return the payload length only for a plausible length-prefixed legacy state.
+/// Empty memory and the recognized MemoryManager header are the only non-legacy
+/// formats that may proceed without a rescued BotState.
+fn legacy_state_len(stable_pages: u64, header: &[u8; 8]) -> Result<Option<usize>, String> {
+    if stable_pages == 0 || memory::is_memory_manager_header(header) {
+        return Ok(None);
+    }
+
+    let len = u64::from_le_bytes(*header);
+    if len == 0 {
+        return Err("nonempty memory has a zero legacy payload length".into());
+    }
+    if len >= MAX_LEGACY_STATE_BYTES {
+        return Err(format!(
+            "legacy payload length {len} is outside the supported bound"
+        ));
+    }
+    let capacity = stable_pages
+        .checked_mul(STABLE_PAGE_BYTES)
+        .ok_or_else(|| "stable memory size overflow".to_string())?;
+    let end = len
+        .checked_add(8)
+        .ok_or_else(|| "legacy payload end overflow".to_string())?;
+    if end > capacity {
+        return Err(format!(
+            "legacy payload length {len} exceeds stable memory capacity"
+        ));
+    }
+    usize::try_from(len)
+        .map(Some)
+        .map_err(|_| "legacy payload length does not fit this platform".to_string())
+}
+
+fn decode_legacy_state(bytes: &[u8]) -> Result<BotState, String> {
+    serde_json::from_slice(bytes).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod upg_001_legacy_rescue_tests {
+    use super::*;
+
+    fn length_header(len: u64) -> [u8; 8] {
+        len.to_le_bytes()
+    }
+
+    #[test]
+    fn fresh_empty_memory_and_current_memory_manager_layout_are_recognized() {
+        assert_eq!(legacy_state_len(0, &length_header(0)).unwrap(), None);
+
+        let manager_header = *b"MGR\x01\0\0\0\0";
+        assert_eq!(legacy_state_len(1, &manager_header).unwrap(), None);
+    }
+
+    #[test]
+    fn valid_legacy_snapshot_decodes_without_losing_state() {
+        let mut expected = BotState::default();
+        expected.stats.events_count = 41;
+        let payload = serde_json::to_vec(&expected).unwrap();
+        let len = legacy_state_len(1, &length_header(payload.len() as u64))
+            .unwrap()
+            .expect("valid prefix is a legacy layout");
+        let restored = decode_legacy_state(&payload).unwrap();
+
+        assert_eq!(len, payload.len());
+        assert_eq!(restored.stats.events_count, 41);
+        assert!(!restored.migrated_to_stable_structures);
+    }
+
+    #[test]
+    fn malformed_legacy_payload_is_an_error_instead_of_absent_state() {
+        let payload = b"not json";
+        let len = legacy_state_len(1, &length_header(payload.len() as u64))
+            .unwrap()
+            .expect("plausible legacy length");
+        assert_eq!(len, payload.len());
+        assert!(decode_legacy_state(payload).is_err());
+    }
+
+    #[test]
+    fn unknown_nonempty_raw_bytes_are_rejected_before_initialization() {
+        let unknown = *b"unknown!";
+        assert!(legacy_state_len(1, &unknown).is_err());
+    }
+
+    #[test]
+    fn zero_or_out_of_bounds_legacy_lengths_are_rejected() {
+        assert!(legacy_state_len(1, &length_header(0)).is_err());
+        assert!(legacy_state_len(1, &length_header(65_529)).is_err());
+    }
 }
 
 fn setup_timer() {
