@@ -24,10 +24,9 @@
 //!      approved the protocol to spend its 3USD; the entry point's pre-pull
 //!      validation (which does NOT check the kill switch) passes, the pull
 //!      lands, and `liquidate_vault_debt_already_burned` rejects with
-//!      `TemporarilyUnavailable` before any state mutation. The Wave-4
-//!      `Err` arm fires the refund: the SP's 3USD balance is restored,
-//!      `protocol_3usd_reserves` stays at zero, and the INFO log carries
-//!      a `refunded ... after liquidation rollback` line keyed to the vault.
+//!      `TemporarilyUnavailable` before any state mutation. The refund is
+//!      journaled before dispatch, then the worker restores the SP's 3USD
+//!      balance while `protocol_3usd_reserves` stays at zero.
 //!
 //!   3. `icc_002_pic_refund_failure_enqueues_durable_retry_and_heals` — the
 //!      refund-of-refund failure. Same setup as #2, but the 3USD ledger
@@ -56,9 +55,10 @@
 //! kill-switch reject exercises it identically to a real
 //! "vault closed mid-flight" or "proof verification failed" error.
 //!
-//! Standard scenarios use the real `rumi_3pool` LP canister so its status,
-//! transfer, and ICRC-3 interfaces share one principal. The flaky ledger is
-//! retained only for the kill-switch refund retry case.
+//! Legacy V1 scenarios use `flaky_ledger` because the current `rumi_3pool` LP
+//! token rejects the non-default reserve subaccount used by V1. This tests
+//! V1 refund accounting without implying the old route works on current 3pool;
+//! the V2 route uses the default account after its separate cutover.
 
 use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Nat, Principal};
 use ic_cdk::api::management_canister::http_request::{
@@ -490,6 +490,47 @@ fn flaky_set_fail_transfers(pic: &PocketIc, ledger: Principal, fail: bool) {
         encode_one(fail).unwrap(),
     )
     .expect("set_fail_transfers failed");
+}
+
+fn flaky_arm_bad_fee_after_transfer_from(pic: &PocketIc, ledger: Principal) {
+    pic.update_call(
+        ledger,
+        Principal::anonymous(),
+        "set_bad_fee_after_transfer_from",
+        encode_one(true).unwrap(),
+    )
+    .expect("set_bad_fee_after_transfer_from failed");
+}
+
+fn flaky_icrc3_log_length(pic: &PocketIc, ledger: Principal) -> u64 {
+    use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
+    let result = pic
+        .query_call(
+            ledger,
+            Principal::anonymous(),
+            "icrc3_get_blocks",
+            encode_one(vec![GetBlocksRequest {
+                start: Nat::from(0u8),
+                length: Nat::from(0u8),
+            }])
+            .unwrap(),
+        )
+        .expect("query flaky ledger ICRC-3 log length");
+    let response: GetBlocksResult = match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode ICRC-3 log length"),
+        WasmResult::Reject(message) => panic!("ICRC-3 log length query rejected: {message}"),
+    };
+    response.log_length.0.try_into().expect("log length fits u64")
+}
+
+fn flaky_set_icrc3_archive_range(pic: &PocketIc, ledger: Principal, range: Option<(u64, u64)>) {
+    pic.update_call(
+        ledger,
+        Principal::anonymous(),
+        "set_icrc3_archive_range",
+        encode_one(range).unwrap(),
+    )
+    .expect("set_icrc3_archive_range failed");
 }
 
 fn xrc_set_rate(
@@ -1121,7 +1162,7 @@ fn setup_fixture_with_backend_wasm_and_sp(
 /// failure tests below contrast against.
 #[test]
 fn icc_002_pic_happy_path_no_refund_no_orphan() {
-    let f = setup_fixture(ThreePoolKind::Standard);
+    let f = setup_fixture(ThreePoolKind::Flaky);
 
     // The backend now checks vault health after pulling reserves. Publish
     // three distinct low-price observations so this vault is liquidatable.
@@ -1580,6 +1621,363 @@ fn p08_02_v2_ingress_is_default_account_proof_bound_and_replay_safe() {
     );
 }
 
+/// A typed BadFee from the V2 child refund proves that the dispatch did not
+/// commit. Keep the principal liability, clear only that exact submitted
+/// fence, and allow a developer rearm to settle the same child tuple later.
+#[test]
+fn p08_v2_child_refund_bad_fee_releases_fence_and_rearms() {
+    use rumi_protocol_backend::{
+        ThreeUsdReserveIngressV2Status as Status, ThreeUsdReserveIngressV2StatusView,
+        MAX_PENDING_RETRIES,
+    };
+
+    let f = setup_fixture(ThreePoolKind::Flaky);
+    let requested_debt_e8s = 2_000_000_000u64;
+    let ingress_amount_e8s = 2_000_000_000u64;
+    let absorb_id = 1u64;
+
+    let acknowledged: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.sp_principal,
+            "acknowledge_three_usd_reserve_v2_client",
+            encode_args(()).unwrap(),
+        )
+        .expect("acknowledge V2 client")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 acknowledgement"),
+        WasmResult::Reject(message) => panic!("V2 acknowledgement rejected: {message}"),
+    };
+    acknowledged.expect("registered SP may acknowledge the V2 client interface");
+    let enabled: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "set_three_usd_reserve_ingress_enabled",
+            encode_one(true).unwrap(),
+        )
+        .expect("enable V2 ingress")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 enable result"),
+        WasmResult::Reject(message) => panic!("V2 enable rejected: {message}"),
+    };
+    enabled.expect("developer may enable V2 in the isolated test canister");
+
+    xrc_set_rate(&f.pic, f.xrc_id, f.developer, "ICP", "USD", 20_000_000);
+    for _ in 0..3 {
+        f.pic.advance_time(Duration::from_secs(481));
+        for _ in 0..10 {
+            f.pic.tick();
+        }
+    }
+
+    let sp_before = icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal));
+    let backend_before = icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.protocol_id));
+    icrc2_approve_call(
+        &f.pic,
+        f.three_pool_ledger,
+        f.sp_principal,
+        f.protocol_id,
+        (ingress_amount_e8s as u128) * 2,
+    );
+    // The V2 ingress uses ICRC-2 transfer_from, so this one-shot ICRC-1 fault
+    // can only be consumed by the later protocol-to-SP child refund.
+    flaky_arm_bad_fee_after_transfer_from(&f.pic, f.three_pool_ledger);
+
+    let ingress: Result<StabilityPoolLiquidationResult, ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.sp_principal,
+            "stability_pool_liquidate_with_reserves_v2",
+            encode_args((
+                f.vault_id,
+                absorb_id,
+                requested_debt_e8s,
+                ingress_amount_e8s,
+                f.three_pool_ledger,
+            ))
+            .unwrap(),
+        )
+        .expect("V2 ingress call")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 ingress result"),
+        WasmResult::Reject(message) => panic!("V2 ingress rejected: {message}"),
+    };
+    let ingress = ingress.expect("proof-verified V2 ingress should partially liquidate the vault");
+    assert_eq!(
+        ingress.liquidated_debt, 1_000_000_000,
+        "fixture vault has 1B debt"
+    );
+
+    drain_pending_transfers(&f.pic);
+    let held = get_pending_3usd_refunds(&f.pic, f.protocol_id);
+    assert_eq!(
+        held.len(),
+        1,
+        "the proportional refund remains a durable child"
+    );
+    assert_eq!(
+        held[0].retry_count, MAX_PENDING_RETRIES,
+        "typed BadFee caps the known-unsent child"
+    );
+    assert_eq!(
+        held[0].amount_e8s, 1_000_000_000,
+        "half the gross ingress is the refund principal"
+    );
+    assert_ne!(held[0].op_nonce, Nat::from(0u8));
+    let refund_nonce = held[0].op_nonce.clone();
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)),
+        sp_before - ingress_amount_e8s as u128,
+        "BadFee must not credit the SP"
+    );
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.protocol_id)),
+        backend_before + ingress_amount_e8s as u128,
+        "BadFee must not debit the backend default account"
+    );
+
+    let rearmed: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "rearm_unsent_v2_default_account_refund",
+            encode_one(refund_nonce.clone()).unwrap(),
+        )
+        .expect("developer rearm call")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 rearm result"),
+        WasmResult::Reject(message) => panic!("V2 rearm endpoint rejected: {message}"),
+    };
+    rearmed.expect("developer may rearm the exact known-unsent V2 child");
+    drain_pending_transfers(&f.pic);
+
+    assert!(get_pending_3usd_refunds(&f.pic, f.protocol_id).is_empty());
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)),
+        sp_before - 1_000_000_000,
+        "the SP retains the net 1B corresponding to the debt actually liquidated"
+    );
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.protocol_id)),
+        backend_before + 1_000_000_000,
+        "the protocol keeps exactly the realized reserve principal"
+    );
+    assert_eq!(
+        get_protocol_3usd_reserves(&f.pic, f.protocol_id),
+        1_000_000_000
+    );
+
+    let status: ThreeUsdReserveIngressV2StatusView = match f
+        .pic
+        .query_call(
+            f.protocol_id,
+            f.sp_principal,
+            "get_stability_pool_liquidate_with_reserves_v2_status",
+            encode_args((f.vault_id, absorb_id)).unwrap(),
+        )
+        .expect("query V2 status")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 status"),
+        WasmResult::Reject(message) => panic!("V2 status query rejected: {message}"),
+    };
+    assert!(
+        matches!(
+            status.status,
+            Status::Absorbed {
+                proportional_refund: Some(_),
+                ..
+            }
+        ),
+        "the same child must settle only after an exact refund receipt: {:?}",
+        status.status
+    );
+}
+
+/// A successful V2 child transfer whose direct ICRC-3 read is held behind an
+/// archive descriptor remains a liability until a developer supplies the
+/// exact direct-ledger candidate. The recovery endpoint does not transfer or
+/// rearm, rejects outsiders, and cannot settle the same child twice.
+#[test]
+fn p08_v2_child_refund_direct_candidate_reconciles_once() {
+    use rumi_protocol_backend::{
+        ThreeUsdReserveIngressV2Status as Status, ThreeUsdReserveIngressV2StatusView,
+    };
+
+    let f = setup_fixture(ThreePoolKind::Flaky);
+    let requested_debt_e8s = 2_000_000_000u64;
+    let ingress_amount_e8s = 2_000_000_000u64;
+    let absorb_id = 1u64;
+    let acknowledged: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.sp_principal,
+            "acknowledge_three_usd_reserve_v2_client",
+            encode_args(()).unwrap(),
+        )
+        .expect("acknowledge V2 client")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 acknowledgement"),
+        WasmResult::Reject(message) => panic!("V2 acknowledgement rejected: {message}"),
+    };
+    acknowledged.expect("registered SP may acknowledge V2");
+    let enabled: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "set_three_usd_reserve_ingress_enabled",
+            encode_one(true).unwrap(),
+        )
+        .expect("enable V2 ingress")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 enable result"),
+        WasmResult::Reject(message) => panic!("V2 enable rejected: {message}"),
+    };
+    enabled.expect("developer may enable V2 in the isolated test canister");
+    xrc_set_rate(&f.pic, f.xrc_id, f.developer, "ICP", "USD", 20_000_000);
+    for _ in 0..3 {
+        f.pic.advance_time(Duration::from_secs(481));
+        for _ in 0..10 {
+            f.pic.tick();
+        }
+    }
+
+    let sp_before = icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal));
+    let backend_before = icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.protocol_id));
+    icrc2_approve_call(
+        &f.pic,
+        f.three_pool_ledger,
+        f.sp_principal,
+        f.protocol_id,
+        (ingress_amount_e8s as u128) * 2,
+    );
+    // The ingress transfer occupies N; the proportional refund is the next
+    // ledger block N+1. Archive only that future block so ingress proof stays
+    // direct while the worker's refund receipt fetch fails closed.
+    let ingress_block_index = flaky_icrc3_log_length(&f.pic, f.three_pool_ledger);
+    let candidate_block_index = ingress_block_index + 1;
+    flaky_set_icrc3_archive_range(
+        &f.pic,
+        f.three_pool_ledger,
+        Some((candidate_block_index, 1)),
+    );
+
+    let ingress: Result<StabilityPoolLiquidationResult, ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.sp_principal,
+            "stability_pool_liquidate_with_reserves_v2",
+            encode_args((
+                f.vault_id,
+                absorb_id,
+                requested_debt_e8s,
+                ingress_amount_e8s,
+                f.three_pool_ledger,
+            ))
+            .unwrap(),
+        )
+        .expect("V2 ingress call")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode V2 result"),
+        WasmResult::Reject(message) => panic!("V2 ingress rejected: {message}"),
+    };
+    let ingress = ingress.expect("V2 ingress and its direct proof should succeed");
+    assert_eq!(ingress.liquidated_debt, 1_000_000_000);
+    drain_pending_transfers(&f.pic);
+
+    let held = get_pending_3usd_refunds(&f.pic, f.protocol_id);
+    assert_eq!(held.len(), 1, "the unproved successful transfer stays queued");
+    let refund_nonce = held[0].op_nonce.clone();
+    assert_eq!(held[0].amount_e8s, 1_000_000_000);
+    assert!(fetch_info_logs(&f.pic, f.protocol_id)
+        .iter()
+        .any(|message| message.contains("exact ICRC-3 proof failed")));
+
+    let outsider: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            Principal::from_slice(&[8]),
+            "reconcile_v2_default_account_three_usd_refund_candidate_block",
+            encode_args((refund_nonce.clone(), candidate_block_index)).unwrap(),
+        )
+        .expect("outsider reconciliation call transport")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode outsider result"),
+        WasmResult::Reject(message) => panic!("outsider call rejected at transport: {message}"),
+    };
+    assert!(outsider.is_err(), "only the configured developer can reconcile");
+    assert_eq!(get_pending_3usd_refunds(&f.pic, f.protocol_id).len(), 1);
+
+    flaky_set_icrc3_archive_range(&f.pic, f.three_pool_ledger, None);
+    let reconciled: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "reconcile_v2_default_account_three_usd_refund_candidate_block",
+            encode_args((refund_nonce.clone(), candidate_block_index)).unwrap(),
+        )
+        .expect("developer reconciliation call")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode reconciliation result"),
+        WasmResult::Reject(message) => panic!("reconciliation rejected at transport: {message}"),
+    };
+    reconciled.expect("exact direct refund block reconciles the V2 child");
+    assert!(get_pending_3usd_refunds(&f.pic, f.protocol_id).is_empty());
+
+    let duplicate: Result<(), ProtocolError> = match f
+        .pic
+        .update_call(
+            f.protocol_id,
+            f.developer,
+            "reconcile_v2_default_account_three_usd_refund_candidate_block",
+            encode_args((refund_nonce, candidate_block_index)).unwrap(),
+        )
+        .expect("duplicate reconciliation call transport")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode duplicate result"),
+        WasmResult::Reject(message) => panic!("duplicate call rejected at transport: {message}"),
+    };
+    assert!(duplicate.is_err(), "a removed child cannot be settled twice");
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)),
+        sp_before - 1_000_000_000,
+        "receipt reconciliation never submits a second refund transfer"
+    );
+    assert_eq!(
+        icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.protocol_id)),
+        backend_before + 1_000_000_000,
+        "the protocol retains only the realized reserve principal"
+    );
+
+    let status: ThreeUsdReserveIngressV2StatusView = match f
+        .pic
+        .query_call(
+            f.protocol_id,
+            f.sp_principal,
+            "get_stability_pool_liquidate_with_reserves_v2_status",
+            encode_args((f.vault_id, absorb_id)).unwrap(),
+        )
+        .expect("query reconciled V2 status")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode reconciled status"),
+        WasmResult::Reject(message) => panic!("status query rejected: {message}"),
+    };
+    assert!(
+        matches!(status.status, Status::Absorbed { proportional_refund: Some(_), .. }),
+        "the parent status carries the exact settled child receipt: {:?}",
+        status.status
+    );
+}
+
 /// CL-07 value/principal preflight: the real 3pool principal is both the LP
 /// ledger and the source of virtual price. Wrong-principal and under-valued
 /// pulls reject before any SP balance change; the happy-path control above
@@ -1628,11 +2026,11 @@ fn cl07_rejects_wrong_ledger_and_under_valued_reserves_before_pull() {
 /// **Refund happens.** Arm `set_sp_writedown_disabled(true)` so the
 /// writedown rejects with `TemporarilyUnavailable` AFTER the entry-point
 /// pre-validation has passed and the 3USD pull has landed. The Wave-4 `Err`
-/// arm fires the refund: SP balance is restored, no orphan in
-/// `protocol_3usd_reserves`, and the INFO log carries the refund line.
+/// arm journals the refund before dispatch. The worker restores the SP
+/// balance and leaves no orphan in `protocol_3usd_reserves`.
 #[test]
 fn icc_002_pic_writedown_failure_refunds_3usd_to_sp() {
-    let f = setup_fixture(ThreePoolKind::Standard);
+    let f = setup_fixture(ThreePoolKind::Flaky);
 
     let icusd_debt: u64 = 500_000_000;
     let three_usd_amount: u64 = 500_000_000;
@@ -1677,6 +2075,11 @@ fn icc_002_pic_writedown_failure_refunds_3usd_to_sp() {
         err
     );
 
+    let pending = get_pending_3usd_refunds(&f.pic, f.protocol_id);
+    assert_eq!(pending.len(), 1, "the full refund must be journaled before dispatch");
+    assert_eq!(pending[0].amount_e8s, three_usd_amount);
+    drain_pending_transfers(&f.pic);
+
     let sp_balance_after = icrc1_balance_of(
         &f.pic,
         f.three_pool_ledger,
@@ -1696,34 +2099,21 @@ fn icc_002_pic_writedown_failure_refunds_3usd_to_sp() {
          BEFORE the state mutation that increments it"
     );
 
-    let logs = fetch_info_logs(&f.pic, f.protocol_id);
-    let vault_tag = format!("vault {}", f.vault_id);
-    assert!(
-        logs.iter().any(|m| {
-            m.contains("[stability_pool_liquidate_with_reserves] refunded")
-                && m.contains(&vault_tag)
-                && m.contains("after liquidation rollback")
-        }),
-        "expected Wave-4 refund INFO log keyed to vault #{}; saw logs: {:?}",
-        f.vault_id, logs
-    );
-    assert!(
-        !logs.iter().any(|m| m.contains("CRITICAL: refund of")),
-        "refund succeeded — there must be no CRITICAL log"
-    );
+    assert!(get_pending_3usd_refunds(&f.pic, f.protocol_id).is_empty(),
+        "verified immediate refund must leave no unresolved liability");
 }
 
-/// **Refund failure is durable, not stranded.** Same setup as the prior test
+/// **Fresh refund failure is durable, not stranded.** Same setup as the prior test
 /// but the 3USD ledger is `flaky_ledger` with `set_fail_transfers(true)`. The
 /// pull (`icrc2_transfer_from`) is unaffected and lands; the kill-switch reject
 /// fires the refund arm; the refund (`icrc1_transfer`) fails.
 ///
 /// Pre-fix, that failure only logged CRITICAL and left the 3USD stranded in the
 /// protocol's reserves subaccount, dropping the SP's live balance below its
-/// tracked aggregate and blocking every non-sole-holder withdrawal. This test
-/// pins the fix: the failed refund is persisted to `pending_3usd_refunds` and
-/// `process_pending_transfer` retries it. Once the ledger recovers, the queue
-/// drains, the SP is made whole, and the queue empties — no manual reconcile.
+/// tracked aggregate and blocking every non-sole-holder withdrawal. This
+/// current-source scenario creates a fresh row with retry provenance, verifies
+/// it remains eligible for bounded automatic retry, and confirms the queue
+/// drains when the ledger recovers.
 #[test]
 fn icc_002_pic_refund_failure_enqueues_durable_retry_and_heals() {
     let f = setup_fixture(ThreePoolKind::Flaky);
@@ -1801,18 +2191,6 @@ fn icc_002_pic_refund_failure_enqueues_durable_retry_and_heals() {
         "queued refund amount must equal the stranded excess (3USD fee is 0)"
     );
 
-    let logs = fetch_info_logs(&f.pic, f.protocol_id);
-    let vault_tag = format!("vault {}", f.vault_id);
-    assert!(
-        logs.iter().any(|m| {
-            m.contains("[stability_pool_liquidate_with_reserves] refund of")
-                && m.contains(&vault_tag)
-                && m.contains("enqueued for durable retry")
-        }),
-        "expected the enqueue-for-retry INFO log keyed to vault #{}; saw logs: {:?}",
-        f.vault_id, logs
-    );
-
     // Now the ledger recovers. Draining the timer must settle the refund.
     flaky_set_fail_transfers(&f.pic, f.three_pool_ledger, false);
     drain_pending_transfers(&f.pic);
@@ -1850,23 +2228,17 @@ fn icc_002_pic_refund_failure_enqueues_durable_retry_and_heals() {
         reserves_subacct_balance
     );
 
-    let settled_log = fetch_info_logs(&f.pic, f.protocol_id);
-    assert!(
-        settled_log.iter().any(|m| {
-            m.contains("[refunding] 3USD reserve refund settled")
-                && m.contains(&format!("vault {}", f.vault_id))
-        }),
-        "expected a settled-refund log after the queue drained; saw logs: {:?}",
-        settled_log
-    );
 }
 
 /// A refund row created with the pre-P08 backend source at 9d5f359e keeps its
-/// legacy hashed-reserve source and exact retry identity when upgraded to P08.
+/// legacy hashed-reserve source and exact identity when upgraded to P08, but it
+/// is held because the old snapshot cannot prove no earlier refund dispatch
+/// committed. The exact candidate-block reconciliation endpoint is the only
+/// way to clear this predecessor liability.
 /// Set `RUMI_P08_PRE_P08_BACKEND_WASM` to that pinned source-built artifact.
 #[test]
 #[ignore = "requires the pre-P08 backend Wasm built from source 9d5f359e"]
-fn p08_upgrade_preserves_parent_legacy_refund_identity_and_recovers() {
+fn p08_upgrade_preserves_parent_legacy_refund_identity_and_holds_without_receipt() {
     let parent_path = std::env::var("RUMI_P08_PRE_P08_BACKEND_WASM")
         .expect("set RUMI_P08_PRE_P08_BACKEND_WASM to the source-9d5f359e backend Wasm");
     let parent_wasm = std::fs::read(parent_path).expect("read parent backend Wasm");
@@ -1908,8 +2280,8 @@ fn p08_upgrade_preserves_parent_legacy_refund_identity_and_recovers() {
     f.pic.upgrade_canister(f.protocol_id, protocol_wasm(), encode_args((upgrade,)).unwrap(), None)
         .expect("upgrade parent backend to P08");
 
-    // Run the zero-delay post-upgrade timer explicitly before checking that it
-    // made exactly one retry against the still-failing ledger.
+    // Run the zero-delay post-upgrade timer explicitly. The old snapshot has no
+    // fresh-row provenance marker, so P08 must retain it without dispatching.
     f.pic.tick();
 
     let after = get_pending_3usd_refunds(&f.pic, f.protocol_id);
@@ -1918,19 +2290,39 @@ fn p08_upgrade_preserves_parent_legacy_refund_identity_and_recovers() {
     assert_eq!(after[0].ledger, row.ledger);
     assert_eq!(after[0].amount_e8s, row.amount_e8s);
     assert_eq!(after[0].vault_id, row.vault_id);
-    assert_eq!(after[0].retry_count, row.retry_count.saturating_add(1),
-        "post-upgrade worker makes one bounded retry while the ledger is still failing");
+    assert_eq!(after[0].retry_count, row.retry_count,
+        "predecessor row must remain held; upgrade must not dispatch it automatically");
     assert_eq!(after[0].op_nonce, row.op_nonce, "retry must reuse exact nonce");
     assert_eq!(get_protocol_3usd_reserves(&f.pic, f.protocol_id), reserve_counter_before,
         "upgrade must not change reserve accounting");
     assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, reserve_account.clone()),
         three_usd_amount as u128, "legacy refund source remains the hashed reserve account");
 
+    // Recovering the ledger does not turn an ambiguous predecessor row into a
+    // retryable fresh row. Drain timers and prove the identity and balances
+    // stay unchanged until direct receipt reconciliation supplies proof.
     flaky_set_fail_transfers(&f.pic, f.three_pool_ledger, false);
     drain_pending_transfers(&f.pic);
-    assert!(get_pending_3usd_refunds(&f.pic, f.protocol_id).is_empty());
-    assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)), sp_balance_before,
-        "terminal recovery restores the stability pool's exact balance");
-    assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, reserve_account), 0,
-        "terminal recovery drains the legacy hashed reserve account");
+    let rearm = f.pic.update_call(
+        f.protocol_id,
+        f.developer,
+        "rearm_unsent_legacy_three_usd_refund",
+        encode_one(row.op_nonce.clone()).unwrap(),
+    ).expect("rearm endpoint call executes");
+    let rearm_result: Result<(), ProtocolError> = match rearm {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode rearm result"),
+        WasmResult::Reject(message) => panic!("rearm endpoint rejected: {message}"),
+    };
+    assert!(rearm_result.is_err(), "old snapshot row must not use fresh-row rearm");
+
+    let still_held = get_pending_3usd_refunds(&f.pic, f.protocol_id);
+    assert_eq!(still_held.len(), 1, "predecessor liability remains durable");
+    assert_eq!(still_held[0].retry_count, row.retry_count);
+    assert_eq!(still_held[0].op_nonce, row.op_nonce);
+    assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, account(f.sp_principal)),
+        sp_balance_before - three_usd_amount as u128,
+        "held predecessor refund must not credit the SP without exact receipt proof");
+    assert_eq!(icrc1_balance_of(&f.pic, f.three_pool_ledger, reserve_account),
+        three_usd_amount as u128,
+        "held predecessor principal remains in the legacy hashed reserve account");
 }

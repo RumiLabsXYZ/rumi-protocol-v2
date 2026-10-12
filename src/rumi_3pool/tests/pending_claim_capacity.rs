@@ -778,6 +778,145 @@ fn committed_add_input_with_lost_reply_is_reconciled_before_refund() {
 }
 
 #[test]
+fn aged_ambiguous_add_input_requires_exact_direct_block_before_refund() {
+    let h = setup();
+    let balance_before = balance(&h, h.ledgers[0], h.user);
+    h.pic.update_call(
+        h.ledgers[0], h.user, "set_phantom_failures", encode_one(1u32).unwrap(),
+    ).unwrap();
+    let result: Result<Nat, ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool, h.user, "add_liquidity", encode_args((ADD.to_vec(), 0u128)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(result, Err(ThreePoolError::TransferFailed { .. })));
+    let held = payouts(&h, h.user).into_iter()
+        .find(|item| item.kind == PayoutKind::AddLiquidityRefund
+            && item.input_transfer.as_ref().map(|transfer| transfer.amount) == Some(ADD[0]))
+        .expect("ambiguous input identity is retained");
+    let input = held.input_transfer.clone().unwrap();
+    let block_index = ledger_block_for_memo(&h, h.ledgers[0], input.memo.as_ref().unwrap());
+    assert_eq!(balance_before - balance(&h, h.ledgers[0], h.user), ADD[0]);
+
+    let unauthorized: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool, Principal::anonymous(), "reconcile_aged_input",
+            encode_args((held.id, block_index)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(unauthorized, Err(ThreePoolError::Unauthorized)));
+    let early: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool, h.user, "reconcile_aged_input",
+            encode_args((held.id, block_index)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(early, Err(ThreePoolError::TransferFailed { .. })));
+
+    let now = h.pic.get_time();
+    h.pic.set_time(now + std::time::Duration::from_secs(24 * 60 * 60));
+    let wrong: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool, h.user, "reconcile_aged_input",
+            encode_args((held.id, block_index.saturating_sub(1))).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(wrong, Err(ThreePoolError::TransferFailed { .. })));
+    assert!(matches!(payout(&h, h.user, held.id).input_outcome,
+        Some(rumi_3pool::payouts::PayoutInputOutcome::Unresolved { .. })));
+
+    h.pic.update_call(
+        h.ledgers[0], h.user, "set_icrc3_archive_range",
+        encode_one(Some((block_index, 1u64))).unwrap(),
+    ).unwrap();
+    let archived: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool, h.user, "reconcile_aged_input",
+            encode_args((held.id, block_index)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(archived, Err(ThreePoolError::TransferFailed { .. })));
+    h.pic.update_call(
+        h.ledgers[0], h.user, "set_icrc3_archive_range", encode_one(None::<(u64, u64)>).unwrap(),
+    ).unwrap();
+
+    h.pic.upgrade_canister(
+        h.pool, wasm_artifact("rumi_3pool.wasm"), encode_args(()).unwrap(), None,
+    ).unwrap();
+    let reconciled: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool, h.user, "reconcile_aged_input",
+            encode_args((held.id, block_index)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    reconciled.expect("exact ICRC-2 block proof should authorize the original refund");
+    assert_eq!(balance(&h, h.ledgers[0], h.user), balance_before);
+    assert!(payout(&h, h.user, held.id).settled);
+    let replay: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool, h.user, "reconcile_aged_input",
+            encode_args((held.id, block_index)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(replay, Err(ThreePoolError::TransferFailed { .. })));
+    assert_eq!(balance(&h, h.ledgers[0], h.user), balance_before);
+}
+
+#[test]
+fn aged_ambiguous_swap_input_proof_resumes_only_the_bound_output() {
+    let h = setup();
+    let input_before = balance(&h, h.ledgers[0], h.user);
+    let output_before = balance(&h, h.ledgers[1], h.user);
+    h.pic.update_call(
+        h.ledgers[0], h.user, "set_phantom_failures", encode_one(1u32).unwrap(),
+    ).unwrap();
+    let result: Result<u128, ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool, h.user, "swap",
+            encode_args((0u8, 1u8, 100_000_000u128, 1u128)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(result, Err(ThreePoolError::TransferFailed { .. })));
+    let refund = payouts(&h, h.user).into_iter()
+        .find(|item| item.kind == PayoutKind::SwapInputRefund)
+        .expect("swap input and refund identity remain bound");
+    let parent_id = refund.compensation_for.expect("prebound output");
+    let input = refund.input_transfer.as_ref().unwrap();
+    let block_index = ledger_block_for_memo(&h, h.ledgers[0], input.memo.as_ref().unwrap());
+    assert_eq!(balance(&h, h.ledgers[0], h.user), input_before - 100_000_000);
+    assert_eq!(balance(&h, h.ledgers[1], h.user), output_before);
+
+    let now = h.pic.get_time();
+    h.pic.set_time(now + std::time::Duration::from_secs(24 * 60 * 60));
+    let recovered: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool, h.user, "reconcile_aged_input",
+            encode_args((refund.id, block_index)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    recovered.expect("confirmed input resumes the original output entitlement");
+    assert!(balance(&h, h.ledgers[1], h.user) > output_before);
+    assert_eq!(balance(&h, h.ledgers[0], h.user), input_before - 100_000_000);
+    assert!(payout(&h, h.user, parent_id).settled);
+    let canceled_refund = payout(&h, h.user, refund.id);
+    assert!(canceled_refund.settled, "confirmed input evidence is retained");
+    assert_eq!(canceled_refund.dispatch_ready, Some(false));
+    assert!(canceled_refund.attempts.iter().all(|attempt|
+        matches!(attempt.outcome, PayoutOutcome::Prepared)),
+        "input refund was never dispatched");
+    assert!(claims(&h).is_empty());
+    let output_after = balance(&h, h.ledgers[1], h.user);
+    let replay: Result<(), ThreePoolError> = decode_one(&reply(
+        h.pic.update_call(
+            h.pool, h.user, "reconcile_aged_input",
+            encode_args((refund.id, block_index)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    assert!(matches!(replay, Err(ThreePoolError::TransferFailed { .. })));
+    assert_eq!(balance(&h, h.ledgers[1], h.user), output_after);
+}
+
+#[test]
 fn committed_swap_input_with_lost_reply_recovers_same_identity_without_second_pull() {
     let h = setup();
     let input_before = balance(&h, h.ledgers[0], h.user);

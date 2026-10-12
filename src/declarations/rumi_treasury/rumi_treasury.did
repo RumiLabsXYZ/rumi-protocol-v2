@@ -36,6 +36,22 @@ type TreasuryStatus = record {
   is_paused: bool;
 };
 
+type CycleManagerCyclesStatus = record {
+  balance : nat;
+  low_watermark : nat;
+  healthy : bool;
+  freeze_threshold_secs : nat64;
+  stable_memory_bytes : opt nat64;
+  heap_memory_bytes : opt nat64;
+  idle_burn_cycles_per_day : opt nat;
+};
+type CycleManagerMetric = record {
+  key : text;
+  count : nat64;
+  value : nat;
+  label : opt text;
+};
+
 type TreasuryInitArgs = record {
   controller: principal;
   icusd_ledger: principal;
@@ -51,6 +67,27 @@ type DepositArgs = record {
   amount: nat64;
   block_index: nat64;
   memo: opt text;
+};
+
+type ExternalTokenDepositArgs = record {
+  ledger: principal;
+  deposit_type: DepositType;
+  asset_type: AssetType;
+  amount: nat64;
+  block_index: nat64;
+  memo: opt text;
+};
+
+type ExternalTokenDepositBackfill = variant {
+  Uninitialized;
+  InProgress: record { next_deposit_id: nat64; snapshot_max_id: nat64 };
+  Complete;
+};
+
+type ExternalTokenDepositBackfillStatus = record {
+  state: ExternalTokenDepositBackfill;
+  indexed_through_deposit_id: nat64;
+  ambiguous_legacy_blocks: nat64;
 };
 
 type WithdrawArgs = record {
@@ -82,10 +119,20 @@ type TreasuryEvent = record {
 
 service : (TreasuryInitArgs) -> {
   deposit: (DepositArgs) -> (variant { Ok : nat64; Err : text });
+  deposit_borrowing_fee_once: (DepositArgs) -> (variant { Ok : nat64; Err : text });
+  continue_icusd_deposit_block_backfill: () -> (variant { Ok : text; Err : text });
+  record_stability_pool_unallocated_interest: (nat64, nat64, vec nat64) -> (variant { Ok : nat64; Err : text });
+  set_stability_pool_reporter: (opt principal) -> (variant { Ok; Err : text });
   withdraw: (WithdrawArgs) -> (variant { Ok : WithdrawResult; Err : text });
+  cycles_status: () -> (CycleManagerCyclesStatus) query;
+  cycle_manager_metrics: () -> (vec CycleManagerMetric) query;
   get_status: () -> (TreasuryStatus) query;
   get_deposits: (opt nat64, opt nat64) -> (vec DepositRecord) query;
   get_events: (opt nat64, opt nat64) -> (vec TreasuryEvent) query;
   get_event_count: () -> (nat64) query;
   set_paused: (bool) -> (variant { Ok; Err : text });
+  deposit_interest_revenue_once: (DepositArgs) -> (variant { Ok : nat64; Err : text });
+  record_external_token_deposit_once: (ExternalTokenDepositArgs) -> (variant { Ok : nat64; Err : text });
+  continue_external_token_deposit_backfill: () -> (variant { Ok : text; Err : text });
+  get_external_token_deposit_backfill_status: () -> (ExternalTokenDepositBackfillStatus) query;
 }

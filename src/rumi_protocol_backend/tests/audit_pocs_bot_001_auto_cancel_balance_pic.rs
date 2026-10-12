@@ -17,8 +17,16 @@
 //! breaker is left at its default-disabled state since the BOT-001 path
 //! sits *above* the breaker gate in `check_vaults`.
 
+#![allow(unexpected_cfgs)]
+
 use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Nat, Principal};
 use num_traits::ToPrimitive;
+#[cfg(feature = "pocketic9_wrapper")]
+#[path = "support/pocketic9_compat.rs"]
+mod pocket_ic;
+#[cfg(feature = "pocketic9_wrapper")]
+use self::pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
+#[cfg(not(feature = "pocketic9_wrapper"))]
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 use std::time::{Duration, SystemTime};
 

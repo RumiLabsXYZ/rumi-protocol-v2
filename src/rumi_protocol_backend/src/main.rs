@@ -59,6 +59,171 @@ pub struct PendingIcusdRefundView {
     pub held_for_manual_retry: bool,
 }
 
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ReserveRedemptionStatus {
+    pub icusd_amount_e8s: u64,
+    pub stable_token: Principal,
+    pub stable_amount_e6s: u64,
+    pub treasury_fee_e6s: u64,
+    pub pull_block_index: Option<u64>,
+    pub payout_block_index: Option<u64>,
+    pub treasury_block_index: Option<u64>,
+    pub refund_amount_e8s: Option<u64>,
+    pub refund_block_index: Option<u64>,
+    pub phase: String,
+}
+
+/// Controller-only release preflight view. The sole journal's presence and
+/// operation ID are enough to detect downgrade-sensitive retained state.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ReserveRedemptionAdminStatus {
+    pub journal_count: u64,
+    pub operation_id: Option<u128>,
+    pub phase: Option<String>,
+    pub unresolved_leg: Option<ReserveRedemptionLegHint>,
+}
+
+/// Exact transfer coordinates for resolving the current ambiguous ledger leg.
+/// The tuple is copied from the durable journal; `spender` is populated only
+/// for the ICRC-2 pull.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ReserveRedemptionLegHint {
+    pub leg: String,
+    pub ledger: Principal,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    pub amount: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    pub spender: Option<icrc_ledger_types::icrc1::account::Account>,
+}
+
+fn reserve_redemption_unresolved_leg_hint(
+    row: &rumi_protocol_backend::state::ReserveRedemptionJournal,
+) -> Option<ReserveRedemptionLegHint> {
+    use rumi_protocol_backend::state::ReserveRedemptionPhase as P;
+    use icrc_ledger_types::icrc1::account::Account;
+
+    let backend_account = |subaccount: Option<[u8; 32]>| Account {
+        owner: row.pull_to.owner,
+        subaccount,
+    };
+    match row.phase {
+        P::PullSubmitted => Some(ReserveRedemptionLegHint {
+            leg: "pull".into(),
+            ledger: row.pull_ledger,
+            from: row.pull_from.clone(),
+            to: row.pull_to.clone(),
+            amount: row.pull_amount_e8s,
+            memo: row.pull_memo.clone(),
+            created_at_time_ns: row.pull_created_at_time_ns,
+            spender: Some(backend_account(None)),
+        }),
+        P::PayoutSubmitted | P::PayoutAmbiguous => Some(ReserveRedemptionLegHint {
+            leg: "payout".into(),
+            ledger: row.payout_ledger,
+            from: backend_account(row.payout_from_subaccount),
+            to: row.payout_to.clone(),
+            amount: row.payout_amount_e6s,
+            memo: row.payout_memo.clone(),
+            created_at_time_ns: row.payout_created_at_time_ns,
+            spender: None,
+        }),
+        P::TreasuryFeeSubmitted | P::TreasuryFeeAmbiguous => Some(ReserveRedemptionLegHint {
+            leg: "treasury_fee".into(),
+            ledger: row.treasury_ledger?,
+            from: backend_account(None),
+            to: row.treasury_to.clone()?,
+            amount: row.treasury_amount_e6s?,
+            memo: row.treasury_memo.clone()?,
+            created_at_time_ns: row.treasury_created_at_time_ns?,
+            spender: None,
+        }),
+        P::RefundSubmitted | P::RefundRetrySubmitted => Some(ReserveRedemptionLegHint {
+            leg: "refund".into(),
+            ledger: row.refund_ledger?,
+            from: backend_account(None),
+            to: Account { owner: row.caller, subaccount: None },
+            amount: row.refund_amount_e8s?,
+            memo: row.refund_memo.clone()?,
+            created_at_time_ns: row.refund_created_at_time_ns?,
+            spender: None,
+        }),
+        _ => None,
+    }
+}
+
+fn reserve_redemption_phase_name(
+    phase: rumi_protocol_backend::state::ReserveRedemptionPhase,
+) -> &'static str {
+    use rumi_protocol_backend::state::ReserveRedemptionPhase as P;
+    match phase {
+        P::PullSubmitted => "pull_submitted",
+        P::PullSettled => "pull_settled",
+        P::PayoutSubmitted => "payout_submitted",
+        P::PayoutNoEffect => "payout_no_effect",
+        P::PayoutSettled => "payout_settled",
+        P::PayoutAmbiguous => "payout_ambiguous",
+        P::TreasuryFeeSubmitted => "treasury_fee_submitted",
+        P::TreasuryFeeSettled => "treasury_fee_settled",
+        P::TreasuryFeeNoEffect => "treasury_fee_no_effect",
+        P::TreasuryFeeAmbiguous => "treasury_fee_ambiguous",
+        P::RefundSubmitted => "refund_submitted",
+        P::RefundRetrySubmitted => "refund_retry_submitted",
+        P::RefundNoEffect => "refund_no_effect",
+        P::RefundSettled => "refund_settled",
+    }
+}
+
+fn reserve_redemption_admin_status_in(state: &State) -> ReserveRedemptionAdminStatus {
+    let journal_count = u64::try_from(state.reserve_redemption_journals.len()).unwrap_or(u64::MAX);
+    let sole = if journal_count == 1 {
+        state.reserve_redemption_journals.values().next()
+    } else {
+        None
+    };
+    ReserveRedemptionAdminStatus {
+        journal_count,
+        operation_id: sole.map(|row| row.operation_id),
+        phase: sole.map(|row| reserve_redemption_phase_name(row.phase).to_string()),
+        unresolved_leg: sole.and_then(reserve_redemption_unresolved_leg_hint),
+    }
+}
+
+fn controller_authorization(is_controller: bool) -> Result<(), ProtocolError> {
+    if is_controller {
+        Ok(())
+    } else {
+        Err(ProtocolError::CallerNotOwner)
+    }
+}
+
+fn reserve_redemption_status_in(
+    state: &State,
+    caller: Principal,
+) -> Option<ReserveRedemptionStatus> {
+    let row = state
+        .reserve_redemption_journals
+        .values()
+        .find(|row| row.caller == caller)?;
+    Some(ReserveRedemptionStatus {
+        icusd_amount_e8s: row.icusd_amount_e8s,
+        stable_token: row.payout_ledger,
+        stable_amount_e6s: row.payout_amount_e6s,
+        treasury_fee_e6s: row.treasury_amount_e6s.unwrap_or(0),
+        pull_block_index: row.pull_block_index,
+        payout_block_index: row.payout_block_index,
+        treasury_block_index: row.treasury_block_index,
+        refund_amount_e8s: row.refund_amount_e8s,
+        refund_block_index: row.refund_block_index,
+        phase: reserve_redemption_phase_name(row.phase).into(),
+    })
+}
+
+fn reserve_redemption_status_for(caller: Principal) -> Option<ReserveRedemptionStatus> {
+    read_state(|state| reserve_redemption_status_in(state, caller))
+}
+
 fn pending_refund_visible_to(claim_owner: Principal, caller: Principal) -> bool {
     claim_owner == caller
 }
@@ -129,6 +294,22 @@ fn validate_authenticated_not_frozen() -> Result<(), ProtocolError> {
         return Err(ProtocolError::AnonymousCallerNotAllowed);
     }
     validate_not_frozen()
+}
+
+/// Exact collateral-pull replays must be able to resolve after mode/oracle
+/// changes. The vault module still checks owner, operation ID, and full request
+/// equality before it can redispatch the pinned tuple.
+fn has_recoverable_vault_operation(owner: Principal, operation_id: u64) -> bool {
+    rumi_protocol_backend::state::read_state(|state| {
+        state.vault_collateral_pull_journals.get(&owner).is_some_and(|journal| {
+            journal.operation_id == operation_id
+                && !matches!(
+                    journal.phase,
+                    rumi_protocol_backend::state::VaultCollateralPullPhase::Prepared
+                        | rumi_protocol_backend::state::VaultCollateralPullPhase::SafeNoEffect { .. }
+                )
+        })
+    })
 }
 
 /// The emergency freeze remains authoritative even for exact ledger retries.
@@ -6217,6 +6398,162 @@ fn get_my_pending_borrow_mints() -> Vec<rumi_protocol_backend::state::BorrowMint
     rumi_protocol_backend::state::pending_borrow_mint_statuses(ic_cdk::caller())
 }
 
+/// Owner-authenticated view of durable borrowing-fee outbox rows.
+#[candid_method(query)]
+#[query]
+fn get_my_pending_borrow_fee_mints(
+    after_op_nonce: Option<u128>,
+    limit: u16,
+) -> Result<rumi_protocol_backend::state::BorrowFeeMintRecoveryPage, ProtocolError> {
+    rumi_protocol_backend::state::pending_borrow_fee_mint_recovery_page(
+        Some(ic_cdk::caller()),
+        after_op_nonce,
+        limit,
+    )
+    .map_err(ProtocolError::GenericError)
+}
+
+/// Developer-only bounded recovery listing for retained fee outbox rows.
+#[candid_method(query)]
+#[query]
+fn get_pending_borrow_fee_mint_recovery_page(
+    after_op_nonce: Option<u128>,
+    limit: u16,
+) -> Result<rumi_protocol_backend::state::BorrowFeeMintRecoveryPage, ProtocolError> {
+    if ic_cdk::caller() != rumi_protocol_backend::state::read_state(|s| s.developer_principal)
+        || ic_cdk::caller() == Principal::anonymous()
+    {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+    rumi_protocol_backend::state::pending_borrow_fee_mint_recovery_page(None, after_op_nonce, limit)
+        .map_err(ProtocolError::GenericError)
+}
+
+/// Developer-only paginated view of retained treasury-interest mint rows.
+/// Each item includes the complete pinned ledger tuple and current phase.
+#[candid_method(query)]
+#[query]
+fn get_pending_treasury_interest_mint_recovery_page(
+    after_op_nonce: Option<u128>,
+    limit: u16,
+) -> Result<rumi_protocol_backend::treasury::TreasuryInterestMintRecoveryPage, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous()
+        || caller != rumi_protocol_backend::state::read_state(|s| s.developer_principal)
+    {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+    rumi_protocol_backend::treasury::treasury_interest_mint_recovery_page(
+        after_op_nonce,
+        limit,
+    ).map_err(ProtocolError::GenericError)
+}
+
+/// Reconcile a held treasury-interest mint only from a positive exact ICRC-3
+/// block. No mint is submitted by this recovery method.
+#[candid_method(update)]
+#[update]
+async fn reconcile_pending_treasury_interest_mint_from_block(
+    op_nonce: u128,
+    candidate_block_index: u64,
+) -> Result<(), ProtocolError> {
+    rumi_protocol_backend::treasury::reconcile_treasury_interest_mint_from_block(
+        op_nonce,
+        candidate_block_index,
+    ).await.map_err(ProtocolError::GenericError)
+}
+
+/// Developer-only bounded recovery for a held Treasury-interest mint. Each
+/// call advances at most one direct ICRC-3 page or performs one proof-backed
+/// transition; no recovery call resends the old tuple.
+#[candid_method(update)]
+#[update]
+async fn advance_pending_treasury_interest_mint_recovery(
+    op_nonce: u128,
+) -> Result<(), ProtocolError> {
+    rumi_protocol_backend::treasury::advance_pending_treasury_interest_mint_recovery(
+        op_nonce,
+    ).await.map_err(ProtocolError::GenericError)
+}
+
+/// Developer-only paginated view of exact Treasury-directed CK stablecoin
+/// transfer obligations and their current recovery phase.
+#[candid_method(query)]
+#[query]
+fn get_pending_treasury_stable_transfer_recovery_page(
+    after_source: Option<rumi_protocol_backend::state::TreasuryStableTransferSource>, limit: u16,
+) -> Result<rumi_protocol_backend::treasury::TreasuryStableTransferRecoveryPage, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous()
+        || caller != rumi_protocol_backend::state::read_state(|s| s.developer_principal) {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+    rumi_protocol_backend::treasury::treasury_stable_transfer_recovery_page(after_source, limit)
+        .map_err(ProtocolError::GenericError)
+}
+
+/// Developer-authorized config resolution or one bounded exact-receipt scan
+/// step. This never changes or blindly retries a frozen transfer tuple.
+#[candid_method(update)]
+#[update]
+async fn advance_pending_treasury_stable_transfer_recovery(op_nonce: u128) -> Result<(), ProtocolError> {
+    rumi_protocol_backend::treasury::advance_pending_treasury_stable_transfer_recovery(
+        op_nonce, ic_cdk::caller(),
+    ).await.map_err(ProtocolError::GenericError)
+}
+
+#[candid_method(update)]
+#[update]
+fn resolve_pending_treasury_stable_transfer(op_nonce: u128) -> Result<(), ProtocolError> {
+    rumi_protocol_backend::treasury::resolve_pending_treasury_stable_transfer(
+        op_nonce, ic_cdk::caller(),
+    ).map_err(ProtocolError::GenericError)
+}
+
+/// Retry a retained borrowing-fee mint with its original ledger tuple, or
+/// retry its idempotent treasury deposit notification.
+#[candid_method(update)]
+#[update]
+async fn retry_pending_borrow_fee_mint(borrow_op_nonce: u128) -> Result<(), ProtocolError> {
+    validate_authenticated_not_frozen()?;
+    check_postcondition(
+        rumi_protocol_backend::vault::retry_pending_borrow_fee_mint(borrow_op_nonce).await,
+    )
+}
+
+/// Bind a formerly missing treasury destination after explicit developer
+/// review, then dispatch the tuple created by this one-time binding.
+#[candid_method(update)]
+#[update]
+async fn bind_and_retry_missing_borrow_fee_treasury(
+    borrow_op_nonce: u128,
+) -> Result<(), ProtocolError> {
+    validate_authenticated_not_frozen()?;
+    check_postcondition(
+        rumi_protocol_backend::vault::bind_and_retry_missing_borrow_fee_treasury(
+            borrow_op_nonce,
+        )
+        .await,
+    )
+}
+
+/// Reconcile an ambiguous borrowing-fee mint from an exact ICRC-3 block.
+#[candid_method(update)]
+#[update]
+async fn reconcile_pending_borrow_fee_mint_from_block(
+    borrow_op_nonce: u128,
+    candidate_block_index: u64,
+) -> Result<(), ProtocolError> {
+    validate_authenticated_not_frozen()?;
+    check_postcondition(
+        rumi_protocol_backend::vault::reconcile_pending_borrow_fee_mint_from_block(
+            borrow_op_nonce,
+            candidate_block_index,
+        )
+        .await,
+    )
+}
+
 /// Reconcile an ambiguous borrow only from a positive, exact ICRC-3 mint
 /// receipt. Candidate indexes are untrusted and checked against the journal.
 #[candid_method(update)]
@@ -6416,13 +6753,24 @@ async fn redeem_quoted(request: RedeemQuotedRequest) -> Result<RedemptionResult,
 #[candid_method(update)]
 #[update]
 async fn open_vault(
-    collateral_amount: u64,
-    collateral_type: Option<Principal>,
+    _collateral_amount: u64,
+    _collateral_type: Option<Principal>,
 ) -> Result<OpenVaultSuccess, ProtocolError> {
-    validate_call().await?;
-    check_postcondition(
-        rumi_protocol_backend::vault::open_vault(collateral_amount, collateral_type).await,
-    )
+    Err(ProtocolError::TemporarilyUnavailable(
+        "this endpoint is disabled; use open_vault_v2 with a client operation ID".into(),
+    ))
+}
+
+#[candid_method(update)]
+#[update]
+async fn open_vault_v2(args: rumi_protocol_backend::vault::OpenVaultV2Args) -> Result<OpenVaultSuccess, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if has_recoverable_vault_operation(caller, args.operation_id) {
+        validate_authenticated_not_frozen()?;
+    } else {
+        validate_call().await?;
+    }
+    check_postcondition(rumi_protocol_backend::vault::open_vault_v2(args).await)
 }
 
 /// Compound open vault + borrow in a single canister call.
@@ -6430,19 +6778,64 @@ async fn open_vault(
 #[candid_method(update)]
 #[update]
 async fn open_vault_and_borrow(
-    collateral_amount: u64,
-    borrow_amount: u64,
-    collateral_type: Option<Principal>,
+    _collateral_amount: u64,
+    _borrow_amount: u64,
+    _collateral_type: Option<Principal>,
 ) -> Result<OpenVaultSuccess, ProtocolError> {
-    validate_call().await?;
-    validate_mode()?;
-    // ORACLE-001: refresh the (possibly non-ICP) collateral price before minting.
-    validate_freshness_for_collateral(collateral_type).await?;
+    Err(ProtocolError::TemporarilyUnavailable(
+        "this endpoint is disabled; use open_vault_and_borrow_v2 with a client operation ID".into(),
+    ))
+}
+
+#[candid_method(update)]
+#[update]
+async fn open_vault_and_borrow_v2(args: rumi_protocol_backend::vault::OpenVaultAndBorrowV2Args) -> Result<OpenVaultSuccess, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if has_recoverable_vault_operation(caller, args.operation_id) {
+        validate_authenticated_not_frozen()?;
+    } else {
+        validate_call().await?;
+        validate_mode()?;
+        validate_freshness_for_collateral(args.collateral_type).await?;
+    }
+    check_postcondition(rumi_protocol_backend::vault::open_vault_and_borrow_v2(args).await)
+}
+
+#[candid_method(query)]
+#[query]
+fn get_vault_operation_status() -> Result<rumi_protocol_backend::state::VaultOperationStatus, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    Ok(rumi_protocol_backend::state::read_state(|s| s.vault_operation_status(caller)))
+}
+
+#[candid_method(update)]
+#[update]
+fn ack_vault_operation(arg: rumi_protocol_backend::vault::VaultOperationIdArg) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::GenericError("anonymous caller cannot ACK a vault operation".into()));
+    }
+    mutate_state(|s| s.acknowledge_vault_operation(caller, arg.operation_id))
+        .map_err(ProtocolError::GenericError)
+}
+
+/// Positive-only recovery for an ambiguous collateral transfer_from. The
+/// ledger-global block index is a candidate; the backend fetches and checks
+/// the direct block against the authenticated caller's pinned journal.
+#[candid_method(update)]
+#[update]
+async fn reconcile_vault_collateral_pull_from_block(
+    arg: rumi_protocol_backend::vault::VaultOperationIdArg,
+    block_index: u64,
+) -> Result<(), ProtocolError> {
+    validate_authenticated_not_frozen()?;
     check_postcondition(
-        rumi_protocol_backend::vault::open_vault_and_borrow(
-            collateral_amount,
-            borrow_amount,
-            collateral_type,
+        rumi_protocol_backend::vault::reconcile_vault_collateral_pull_from_block(
+            arg.operation_id,
+            block_index,
         )
         .await,
     )
@@ -6487,8 +6880,33 @@ async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, Proto
 #[candid_method(update)]
 #[update]
 async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
-    validate_call().await?;
-    check_postcondition(rumi_protocol_backend::vault::add_margin_to_vault(arg).await)
+    let _ = arg;
+    Err(ProtocolError::TemporarilyUnavailable(
+        "this endpoint is disabled; use add_margin_to_vault_v2 with a client operation ID".into(),
+    ))
+}
+
+#[candid_method(update)]
+#[update]
+async fn add_margin_to_vault_v2(args: rumi_protocol_backend::vault::AddMarginV2Args) -> Result<u64, ProtocolError> {
+    let _ = args;
+    Err(ProtocolError::TemporarilyUnavailable(
+        "operation-ID add-margin is held pending a safe recovery path; no collateral was pulled".into(),
+    ))
+}
+
+#[cfg(test)]
+#[test]
+fn add_margin_v2_wrapper_fails_before_canister_validation() {
+    let result = futures::executor::block_on(add_margin_to_vault_v2(
+        rumi_protocol_backend::vault::AddMarginV2Args {
+            operation_id: 1,
+            vault_id: 99,
+            amount: 100,
+        },
+    ));
+    assert!(matches!(result, Err(ProtocolError::TemporarilyUnavailable(message))
+        if message.contains("no collateral was pulled")));
 }
 
 // ─── Push-deposit endpoints (Oisy wallet integration) ───
@@ -7372,9 +7790,14 @@ async fn stability_pool_liquidate_with_reserves(
             "Caller is not the registered stability pool canister".to_string(),
         ));
     }
-    if read_state(|s| s.three_usd_reserve_ingress_enabled) {
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    if read_state(rumi_protocol_backend::management::three_usd_reserve_v1_is_retired) {
         return Err(ProtocolError::TemporarilyUnavailable(
-            "V1 3USD reserve ingress is disabled after the V2 client cutover".into(),
+            "V1 3USD reserve ingress is retired or quarantined".into(),
         ));
     }
 
@@ -7464,6 +7887,29 @@ async fn stability_pool_liquidate_with_reserves(
     })
     .map_err(ProtocolError::GenericError)?;
 
+    // Last admission check after every validation await. The shared guard is
+    // held across dispatch and the entire V1 saga, so the V2 toggle cannot
+    // retire this path between the check and the ledger call.
+    if read_state(rumi_protocol_backend::management::three_usd_reserve_v1_is_retired) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "V1 3USD reserve ingress is retired after V2 cutover".into(),
+        ));
+    }
+    let prior_cutover = read_state(|state| state.three_usd_reserve_v1_cutover.clone());
+    // V1 has no durable ingress identity. Commit quarantine before the first
+    // ledger-dispatch await so an upgrade or lost reply cannot erase an
+    // unresolved old-account transfer from the cutover decision.
+    mutate_state(|state| {
+        if rumi_protocol_backend::management::three_usd_reserve_v1_is_retired(state) {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "V1 3USD reserve ingress is retired or quarantined".into(),
+            ));
+        }
+        state.three_usd_reserve_v1_cutover =
+            rumi_protocol_backend::state::ThreeUsdReserveV1Cutover::Quarantined;
+        Ok::<_, ProtocolError>(())
+    })?;
+
     // Pull 3USD from the SP into protocol reserves subaccount (ICRC-2 transfer_from).
     // Only runs after validation passes — no tokens move if vault is stale.
     // The block index returned drives the Phase-2 internal proof below.
@@ -7494,7 +7940,7 @@ async fn stability_pool_liquidate_with_reserves(
     // the 3USD is stranded in our reserves subaccount and the SP's bookkeeping never
     // got a chance to mark it consumed. Refund it so the SP's ledger balance and
     // bookkeeping stay in sync.
-    match rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
+    let result = match rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
         vault_id,
         icusd_debt_covered_e8s,
         caller,
@@ -7528,17 +7974,37 @@ async fn stability_pool_liquidate_with_reserves(
                         icusd_debt_covered_e8s,
                         excess
                     );
-                    refund_3usd_to_stability_pool(three_usd_ledger, caller, excess, vault_id).await;
+                    refund_3usd_to_stability_pool(
+                        three_usd_ledger,
+                        caller,
+                        excess,
+                        vault_id,
+                    )
+                    .await;
                 }
             }
             Ok(success)
         }
         Err(liq_error) => {
-            refund_3usd_to_stability_pool(three_usd_ledger, caller, three_usd_amount_e8s, vault_id)
-                .await;
+            refund_3usd_to_stability_pool(
+                three_usd_ledger,
+                caller,
+                three_usd_amount_e8s,
+                vault_id,
+            )
+            .await;
             Err(liq_error)
         }
+    };
+    if result.is_ok() {
+        mutate_state(|state| {
+            rumi_protocol_backend::management::finish_three_usd_reserve_v1_success(
+                state,
+                &prior_cutover,
+            );
+        });
     }
+    result
 }
 
 /// V2 reserve ingress: the absorb identity and full ICRC-2 tuple are journaled
@@ -7609,6 +8075,24 @@ async fn stability_pool_liquidate_with_reserves_v2(
             "exact ingress tuple was proven absent; refusing to dispatch it again".into(),
         )),
         _ => {}
+    }
+
+    // Old snapshots may retain an enabled toggle without any record of an
+    // in-flight V1 transfer. Quarantine only fresh admission; existing
+    // submitted journals remain eligible for exact receipt/refund recovery.
+    if matches!(journal.phase, Phase::AdmissionPending)
+        && read_state(rumi_protocol_backend::management::three_usd_reserve_v2_admission_quarantined)
+    {
+        let reason = "V2 3USD ingress is held by legacy V1 upgrade quarantine".to_string();
+        mutate_state(|state| {
+            if let Some(row) = state.three_usd_reserve_ingress_journals.get_mut(&key) {
+                if matches!(row.phase, Phase::AdmissionPending) {
+                    row.phase = Phase::PreTransferRejected { reason: reason.clone() };
+                    row.protocol_refund_fee_reserve_e8s = 0;
+                }
+            }
+        });
+        return Err(ProtocolError::TemporarilyUnavailable(reason));
     }
 
     // Persist a typed no-transfer terminal before replying when rollout is
@@ -7902,7 +8386,7 @@ async fn stability_pool_liquidate_with_reserves_v2(
                     _ => {}
                 }
             }
-        });
+                        });
     }
     match rumi_protocol_backend::vault::liquidate_vault_debt_already_burned_v2(
         vault_id, icusd_debt_covered_e8s, caller, three_usd_amount_e8s, three_usd_ledger,
@@ -7947,7 +8431,9 @@ async fn stability_pool_liquidate_with_reserves_v2(
                         dispatch_amount_e8s: None,
                         dispatch_fee_e8s: None,
                         dispatch_submitted: false,
+                        legacy_dispatch_retryable: false,
                         dispatch_block_index: None,
+                        resolution: None,
                     });
                 }
             });
@@ -7974,7 +8460,9 @@ async fn stability_pool_liquidate_with_reserves_v2(
                         dispatch_amount_e8s: None,
                         dispatch_fee_e8s: None,
                         dispatch_submitted: false,
+                        legacy_dispatch_retryable: false,
                         dispatch_block_index: None,
+                        resolution: None,
                     });
                 }
             });
@@ -8419,6 +8907,184 @@ async fn reconcile_three_usd_reserve_ingress_candidate_block(
     })
 }
 
+/// Reconcile an old or ambiguous V1 reserve refund using a developer-supplied
+/// candidate block. Only a direct response from the row's recorded ledger and
+/// an exact historical transfer tuple can clear the durable liability.
+#[update]
+#[candid_method(update)]
+async fn reconcile_legacy_three_usd_refund_candidate_block(
+    op_nonce: u128,
+    candidate_block_index: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || read_state(|state| state.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let refund = read_state(|state| state.pending_3usd_refunds.get(&op_nonce).copied())
+        .ok_or_else(|| ProtocolError::GenericError("unknown legacy 3USD refund nonce".into()))?;
+    if refund.source != rumi_protocol_backend::state::ThreeUsdRefundSource::LegacyHashedReserve
+        || refund.resolution.is_some()
+    {
+        return Err(ProtocolError::GenericError(
+            "candidate proof requires an unresolved legacy refund".into(),
+        ));
+    }
+    let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block_direct(
+        refund.ledger,
+        candidate_block_index,
+    )
+    .await
+    .map_err(|reason| ProtocolError::TemporarilyUnavailable(
+        format!("candidate is not available directly from the recorded ledger: {reason}"),
+    ))?;
+    let receipt = rumi_protocol_backend::verify_legacy_three_usd_refund_receipt(
+        &refund,
+        ic_cdk::id(),
+        candidate_block_index,
+        Ok(block),
+    )
+    .map_err(|reason| ProtocolError::TemporarilyUnavailable(
+        format!("candidate block does not prove the exact legacy refund: {reason}"),
+    ))?;
+    mutate_state(|state| {
+        rumi_protocol_backend::commit_legacy_three_usd_refund_candidate(
+            state,
+            op_nonce,
+            refund,
+            &receipt,
+            ic_cdk::api::time(),
+            caller,
+            ic_cdk::id(),
+        )
+        .then_some(())
+        .ok_or_else(|| ProtocolError::TemporarilyUnavailable(
+            "legacy refund changed or developer authorization changed during proof".into(),
+        ))
+    })
+}
+
+/// Reconcile a submitted V2 default-account refund child from one direct ICRC-3
+/// candidate block. This endpoint never submits or rearms the transfer.
+#[update]
+#[candid_method(update)]
+async fn reconcile_v2_default_account_three_usd_refund_candidate_block(
+    op_nonce: u128,
+    candidate_block_index: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || read_state(|state| state.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    let (refund, key, journal) = read_state(|state| {
+        let refund = state.pending_3usd_refunds.get(&op_nonce).copied()?;
+        let parent_absorb_id = refund.parent_absorb_id?;
+        let key = rumi_protocol_backend::state::ThreeUsdReserveIngressKey {
+            stability_pool: refund.stability_pool,
+            vault_id: refund.vault_id,
+            absorb_id: parent_absorb_id,
+        };
+        let journal = state.three_usd_reserve_ingress_journals.get(&key)?.clone();
+        Some((refund, key, journal))
+    })
+    .ok_or_else(|| {
+        ProtocolError::GenericError(
+            "unknown V2 default-account refund child or parent journal".into(),
+        )
+    })?;
+    if refund.source != rumi_protocol_backend::state::ThreeUsdRefundSource::DefaultAccount
+        || refund.parent_absorb_id != Some(key.absorb_id)
+    {
+        return Err(ProtocolError::GenericError(
+            "candidate proof requires a V2 default-account refund child".into(),
+        ));
+    }
+    let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block_direct(
+        refund.ledger,
+        candidate_block_index,
+    )
+    .await;
+    let receipt = rumi_protocol_backend::verify_v2_default_account_three_usd_refund_candidate(
+        &refund,
+        ic_cdk::id(),
+        candidate_block_index,
+        block,
+    )
+    .map_err(|reason| {
+        ProtocolError::TemporarilyUnavailable(format!(
+            "candidate block does not prove the exact V2 refund child: {reason}"
+        ))
+    })?;
+    mutate_state(|state| {
+        rumi_protocol_backend::commit_v2_default_account_three_usd_refund_candidate(
+            state,
+            op_nonce,
+            refund,
+            &key,
+            &journal,
+            &receipt,
+            caller,
+            ic_cdk::id(),
+        )
+        .then_some(())
+        .ok_or_else(|| {
+            ProtocolError::TemporarilyUnavailable(
+                "V2 refund child, parent journal, or developer authorization changed during proof"
+                    .into(),
+            )
+        })
+    })
+}
+
+/// Resume a capped legacy 3USD refund only when its saved state proves the
+/// worker never pinned or submitted a transfer tuple. This changes only the
+/// retry counter; old snapshots and ambiguous dispatches require receipt proof.
+#[update]
+#[candid_method(update)]
+fn rearm_unsent_legacy_three_usd_refund(op_nonce: u128) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    mutate_state(|state| {
+        rumi_protocol_backend::management::rearm_unsent_legacy_three_usd_refund(
+            state, caller, op_nonce,
+        )
+        .map_err(|error| ProtocolError::GenericError(error.into()))
+    })?;
+    ic_cdk::spawn(rumi_protocol_backend::process_pending_transfer());
+    Ok(())
+}
+
+/// Resume a capped V2 refund only when its journal proves that no transfer
+/// remains submitted and no receipt has been recorded. The worker rechecks the
+/// current zero-fee ledger policy and the full liability balance before it
+/// pins a new attempt; a nonzero fee keeps the obligation held.
+#[update]
+#[candid_method(update)]
+fn rearm_unsent_v2_default_account_refund(op_nonce: u128) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    mutate_state(|state| {
+        rumi_protocol_backend::management::rearm_unsent_v2_default_account_refund(
+            state, caller, op_nonce,
+        )
+        .map_err(|error| ProtocolError::GenericError(error.into()))
+    })?;
+    ic_cdk::spawn(rumi_protocol_backend::process_pending_transfer());
+    Ok(())
+}
+
 fn three_usd_reserve_refund_receipt_matches(
     backend: Principal,
     stability_pool: Principal,
@@ -8561,24 +9227,47 @@ fn set_three_usd_reserve_ingress_enabled(enabled: bool) -> Result<(), ProtocolEr
     if read_state(|s| s.developer_principal) != caller {
         return Err(ProtocolError::GenericError("Only developer can toggle V2 3USD reserve ingress".into()));
     }
-    mutate_state(|s| {
-        if enabled && s.three_pool_is_registered_as_collateral() {
-            return Err(ProtocolError::TemporarilyUnavailable(
-                "configured 3pool ledger is registered as collateral; V2 ingress remains disabled".into(),
-            ));
-        }
-        if enabled && !s.three_usd_reserve_v2_client_ready {
-            return Err(ProtocolError::TemporarilyUnavailable(
-                "registered Stability Pool has not acknowledged the V2 client interface".into(),
-            ));
-        }
-        s.three_usd_reserve_ingress_enabled = enabled;
-        if !enabled {
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    mutate_state(|s| -> Result<(), ProtocolError> {
+        if enabled {
+            if s.three_pool_is_registered_as_collateral() {
+                return Err(ProtocolError::TemporarilyUnavailable(
+                    "configured 3pool ledger is registered as collateral; V2 ingress remains disabled".into(),
+                ));
+            }
+            rumi_protocol_backend::management::commit_three_usd_reserve_v2_activation(s)
+                .map_err(|error| ProtocolError::TemporarilyUnavailable(error.into()))?;
+        } else {
+            s.three_usd_reserve_ingress_enabled = false;
             s.three_usd_reserve_v2_client_ready = false;
         }
         Ok(())
     })?;
     Ok(())
+}
+
+#[update]
+#[candid_method(update)]
+fn reconcile_three_usd_reserve_v1_cutover(evidence_sha256: Vec<u8>) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    mutate_state(|state| {
+        rumi_protocol_backend::management::record_three_usd_reserve_v1_cutover_reconciliation(
+            state,
+            caller,
+            &evidence_sha256,
+            ic_cdk::api::time(),
+        )
+        .map_err(|error| ProtocolError::GenericError(error.into()))
+    })
 }
 
 #[update]
@@ -8618,106 +9307,30 @@ fn protocol_refund_buffer_can_be_reserved(
 /// when the second-stage backend call fails after `transfer_3usd_to_reserves`
 /// already moved tokens. Wave-4 ICC-002.
 ///
-/// On success, logs the refund block index. On any failure (including BadFee or
-/// fee-too-large), logs CRITICAL so an operator can manually reconcile via
-/// `recover_pending_transfer` or a direct ICRC-1 transfer from the reserves
-/// subaccount. The refund itself uses Wave-3's idempotent transfer helper, so
-/// retries from the SP side won't double-credit even if the reply is dropped.
+/// Persist the full-principal refund before dispatch. The durable worker pins
+/// the fee and checks reserve liquidity before transferring, so this entry
+/// point never creates an unjournaled ambiguous ledger call.
 async fn refund_3usd_to_stability_pool(
     three_usd_ledger: Principal,
     sp_caller: Principal,
     amount_e8s: u64,
     vault_id: u64,
 ) {
-    use ic_canister_log::log;
-    use rumi_protocol_backend::logs::INFO;
-
-    // Mint the dedup nonce up front so a stranded refund is enqueued under the
-    // SAME nonce it (may have) attempted the transfer with; a retry then
-    // deduplicates on the 3USD ledger instead of double-refunding.
-    let refund_nonce = mutate_state(|s| s.next_op_nonce());
-
-    let fee =
-        match rumi_protocol_backend::management::get_or_refresh_fee(three_usd_ledger).await {
-            Ok(f) => f,
-            Err(e) => {
-                // Couldn't determine the fee, so no transfer was attempted. Queue the
-                // gross excess (fee applied at retry time) so it heals automatically.
-                log!(INFO,
-                "[stability_pool_liquidate_with_reserves] refund of {} 3USD for vault {} to SP {} \
-                 deferred (could not fetch ledger fee: {}); enqueued for durable retry.",
-                amount_e8s, vault_id, sp_caller, e
-            );
-                enqueue_pending_3usd_refund(
-                    three_usd_ledger,
-                    sp_caller,
-                    amount_e8s,
-                    vault_id,
-                    refund_nonce,
-                );
-                return;
-            }
-        };
-    if amount_e8s <= fee {
-        // Sub-fee dust: a refund can never cover the ledger fee, so there is
-        // nothing recoverable to queue. This is unreachable while the 3USD fee
-        // is 0 and only ever concerns amounts of at most one fee.
-        log!(
-            INFO,
-            "[stability_pool_liquidate_with_reserves] CRITICAL: refund of {} 3USD for vault {} \
-             to SP {} aborted (amount does not cover ledger fee {}). Dust stranded in reserves.",
-            amount_e8s,
-            vault_id,
-            sp_caller,
-            fee
-        );
+    // Journal the full principal before any refund transfer. The worker pins
+    // the fee, reserves protocol-owned fee liquidity, and sends the full
+    // principal with fee: Some(fee), so the SP receives exactly the amount that
+    // was previously pulled even when the ledger fee is nonzero.
+    if amount_e8s == 0 {
         return;
     }
-    let refund_amount = amount_e8s - fee;
-    let result = rumi_protocol_backend::management::transfer_idempotent(
+    let refund_nonce = mutate_state(|s| s.next_op_nonce());
+    enqueue_pending_3usd_refund(
         three_usd_ledger,
-        Some(rumi_protocol_backend::management::protocol_3usd_reserves_subaccount()),
-        icrc_ledger_types::icrc1::account::Account {
-            owner: sp_caller,
-            subaccount: None,
-        },
-        refund_amount as u128,
+        sp_caller,
+        amount_e8s,
+        vault_id,
         refund_nonce,
-        None,
-    )
-    .await;
-    match result {
-        Ok(block) => {
-            log!(INFO,
-                "[stability_pool_liquidate_with_reserves] refunded {} 3USD (net of {} fee) to SP {} \
-                 for vault {} after liquidation rollback (block {})",
-                refund_amount, fee, sp_caller, vault_id, block
-            );
-        }
-        Err(e) => {
-            // Do NOT strand: persist the refund so `process_pending_transfer`
-            // retries it (reusing `refund_nonce` for ledger dedup) until it
-            // settles or hits MAX_PENDING_RETRIES. Without this the SP's live
-            // 3USD balance stays below its tracked aggregate and its withdraw
-            // guard blocks every non-sole-holder with `InsufficientPoolBalance`.
-            log!(
-                INFO,
-                "[stability_pool_liquidate_with_reserves] refund of {} 3USD for vault {} to SP {} \
-                 FAILED: {:?}; enqueued for durable retry.",
-                refund_amount,
-                vault_id,
-                sp_caller,
-                e
-            );
-            enqueue_pending_3usd_refund(
-                three_usd_ledger,
-                sp_caller,
-                refund_amount,
-                vault_id,
-                refund_nonce,
-            );
-        }
-    }
+    );
 }
 
 /// Persist a stranded 3USD reserve refund so `process_pending_transfer` heals it.
@@ -8730,34 +9343,26 @@ fn enqueue_pending_3usd_refund(
     vault_id: u64,
     op_nonce: u128,
 ) {
+    let Some(refund) = rumi_protocol_backend::management::new_legacy_three_usd_refund(
+        sp_caller,
+        three_usd_ledger,
+        amount_e8s,
+        vault_id,
+        op_nonce,
+    ) else {
+        return;
+    };
     mutate_state(|s| {
-        s.pending_3usd_refunds.insert(
-            op_nonce,
-            rumi_protocol_backend::state::PendingThreeUsdRefund {
-                stability_pool: sp_caller,
-                ledger: three_usd_ledger,
-                amount_e8s,
-                vault_id,
-                retry_count: 0,
-                op_nonce,
-                source: rumi_protocol_backend::state::ThreeUsdRefundSource::LegacyHashedReserve,
-                parent_absorb_id: None,
-                dispatch_amount_e8s: None,
-                dispatch_fee_e8s: None,
-                dispatch_submitted: false,
-                dispatch_block_index: None,
-            },
-        );
+        s.pending_3usd_refunds.insert(op_nonce, refund);
     });
     // Kick the durable-transfer drain loop so the refund is retried promptly
     // (it self-reschedules every 5s while any queue is non-empty).
     ic_cdk::spawn(rumi_protocol_backend::process_pending_transfer());
 }
 
-/// Stranded 3USD reserve refunds awaiting durable retry by
-/// `process_pending_transfer`. Non-empty means the stability pool is owed 3USD
-/// that a refund transfer failed to deliver; the queue self-heals but this
-/// surfaces the shortfall for monitoring. Empty in normal operation.
+/// Unresolved 3USD reserve refunds. Settled rows remain durable tombstones in
+/// state but are omitted here so monitoring does not report paid liabilities
+/// as still owed.
 #[derive(candid::CandidType, Clone)]
 struct LegacyPendingThreeUsdRefund {
     retry_count: u8,
@@ -8771,7 +9376,7 @@ struct LegacyPendingThreeUsdRefund {
 #[query]
 #[candid_method(query)]
 fn get_pending_3usd_refunds() -> Vec<LegacyPendingThreeUsdRefund> {
-    read_state(|s| s.pending_3usd_refunds.values().map(|row| LegacyPendingThreeUsdRefund {
+    read_state(|s| s.pending_3usd_refunds.values().filter(|row| row.resolution.is_none()).map(|row| LegacyPendingThreeUsdRefund {
         retry_count: row.retry_count,
         vault_id: row.vault_id,
         amount_e8s: row.amount_e8s,
@@ -8781,7 +9386,7 @@ fn get_pending_3usd_refunds() -> Vec<LegacyPendingThreeUsdRefund> {
     }).collect())
 }
 
-/// Cumulative 3USD held in protocol reserves from stability pool liquidations (e8s).
+/// Net 3USD principal retained in protocol reserves from stability pool liquidations (e8s).
 #[query]
 #[candid_method(query)]
 fn get_protocol_3usd_reserves() -> u64 {
@@ -9844,6 +10449,22 @@ async fn set_stability_pool_principal(
     if !is_developer {
         return Err(ProtocolError::GenericError(
             "Only developer can set stability pool principal".to_string(),
+        ));
+    }
+
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    if read_state(|state| {
+        rumi_protocol_backend::management::stability_pool_change_has_v2_obligations(
+            state,
+            stability_pool_principal,
+        )
+    }) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "old Stability Pool has unresolved 3USD ingress, refund, or stablecoin-interest obligations".into(),
         ));
     }
 
@@ -11909,13 +12530,13 @@ async fn bot_confirm_liquidation_with_proofs(
             .iter()
             .map(|proof| {
                 bot_payment_replay_status_for_ledger(
-                    &s.consumed_bot_payment_proofs,
-                    &s.consumed_bot_payment_blocks,
-                    s.legacy_consumed_payment_ledger,
-                    proof.ledger_principal,
-                    proof.block_index,
-                    proof.vault_id,
-                    proof.claim_generation,
+        &s.consumed_bot_payment_proofs,
+        &s.consumed_bot_payment_blocks,
+        s.legacy_consumed_payment_ledger,
+        proof.ledger_principal,
+        proof.block_index,
+        proof.vault_id,
+        proof.claim_generation,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -13228,11 +13849,7 @@ fn get_reserve_redemption_fee() -> f64 {
 // ── Admin safety functions (controller-only) ──────────────────────────────────
 
 fn require_controller() -> Result<(), ProtocolError> {
-    if ic_cdk::api::is_controller(&ic_cdk::caller()) {
-        Ok(())
-    } else {
-        Err(ProtocolError::CallerNotOwner)
-    }
+    controller_authorization(ic_cdk::api::is_controller(&ic_cdk::caller()))
 }
 
 /// Manually enter Recovery mode. Automatic mode transitions are suppressed
@@ -13401,7 +14018,8 @@ fn get_liquidation_ordering_tolerance_bps() -> u64 {
 
 // ── End admin safety functions ────────────────────────────────────────────────
 
-/// Redeem icUSD for ckStable tokens from reserves (with vault spillover fallback)
+/// Redeem icUSD for ckStable tokens from reserves. Requests requiring vault
+/// spillover are held before the icUSD pull until receipt recovery is supported.
 #[candid_method(update)]
 #[update]
 async fn redeem_reserves(
@@ -13441,6 +14059,50 @@ fn get_reserve_balances() -> Vec<ReserveBalance> {
         }
     });
     balances
+}
+
+/// Return the caller's retained reserve-redemption settlement status.
+/// Raw ledger tuples and operation nonces remain private to backend state.
+#[candid_method(query)]
+#[query]
+fn get_reserve_redemption_status() -> Option<ReserveRedemptionStatus> {
+    reserve_redemption_status_for(ic_cdk::api::caller())
+}
+
+/// Controller-only view for release preflight and bounded recovery operations.
+#[candid_method(query)]
+#[query]
+fn admin_get_reserve_redemption_status() -> Result<ReserveRedemptionAdminStatus, ProtocolError> {
+    require_controller()?;
+    Ok(read_state(reserve_redemption_admin_status_in))
+}
+
+/// Retry a refund only after a typed no-effect result, or verify a caller-
+/// supplied block against the exact journaled leg and continue the saga.
+/// Recovery uses pinned ledger tuples and does not need a fresh oracle price.
+#[candid_method(update)]
+#[update]
+async fn reconcile_reserve_redemption(candidate_block_index: Option<u64>) -> Result<(), ProtocolError> {
+    validate_authenticated_not_frozen()?;
+    rumi_protocol_backend::vault::reconcile_reserve_redemption(candidate_block_index).await
+}
+
+/// Controller-only recovery for one exact retained operation. The protocol
+/// freeze remains authoritative; ledger destinations and amounts come only
+/// from the persisted journal.
+#[candid_method(update)]
+#[update]
+async fn admin_reconcile_reserve_redemption(
+    operation_id: u128,
+    candidate_block_index: Option<u64>,
+) -> Result<(), ProtocolError> {
+    require_controller()?;
+    validate_not_frozen()?;
+    rumi_protocol_backend::vault::admin_reconcile_reserve_redemption(
+        operation_id,
+        candidate_block_index,
+    )
+    .await
 }
 
 /// Admin: mint icUSD to a recipient (developer only).
@@ -14737,6 +15399,21 @@ async fn set_three_pool_canister(canister_id: Principal) -> Result<(), ProtocolE
     if !is_developer {
         return Err(ProtocolError::GenericError(
             "Only the developer principal can set 3pool canister".to_string(),
+        ));
+    }
+    let Some(_admission_guard) =
+        rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire()
+    else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    if read_state(|state| {
+        rumi_protocol_backend::management::three_pool_canister_change_has_old_ledger_obligations(
+            state,
+            canister_id,
+        )
+    }) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "old 3pool ledger has unresolved reserve, ingress, or refund obligations".into(),
         ));
     }
     let is_collateral = read_state(|s| s.is_registered_collateral_ledger(canister_id));
@@ -17292,126 +17969,30 @@ async fn admin_correct_vault_collateral(
     Ok(())
 }
 
-/// Sweep untracked ICP surplus from the backend to treasury.
-///
-/// Auto-calculates the surplus: actual ICP balance minus the sum of all
-/// ICP vault collateral, pending margin/excess/redemption transfers, and
-/// pending treasury collateral. Only the surplus can be swept — it is
-/// physically impossible to touch tracked collateral with this function.
+/// Treasury sweeps are held until shared-account liabilities and ambiguous
+/// outbound sweep transfers have durable accounting and recovery.
 #[update]
-async fn admin_sweep_to_treasury(reason: String) -> Result<u64, ProtocolError> {
-    let caller = ic_cdk::caller();
-    let is_developer = read_state(|s| s.developer_principal == caller);
-    if !is_developer {
-        return Err(ProtocolError::GenericError(
-            "Only developer can sweep to treasury".to_string(),
+async fn admin_sweep_to_treasury(_reason: String) -> Result<u64, ProtocolError> {
+    Err(ProtocolError::GenericError(
+        "ICP treasury sweep is disabled until shared-account liabilities and ambiguous outbound sweeps are durably accounted".to_string(),
+    ))
+}
+
+#[cfg(test)]
+mod admin_icp_treasury_sweep_gate_tests {
+    use super::{admin_sweep_to_treasury, ProtocolError};
+
+    #[test]
+    fn admin_sweep_endpoint_is_fail_closed() {
+        let result = futures::executor::block_on(admin_sweep_to_treasury("test".into()));
+
+        assert!(matches!(
+            result,
+            Err(ProtocolError::GenericError(message))
+                if message.contains("disabled")
+                    && message.contains("shared-account liabilities")
         ));
     }
-
-    let (treasury, icp_ledger, icp_fee) = read_state(|s| {
-        (
-            s.treasury_principal,
-            s.icp_ledger_principal,
-            s.icp_ledger_fee,
-        )
-    });
-    let treasury = treasury.ok_or(ProtocolError::GenericError(
-        "Treasury principal not configured".to_string(),
-    ))?;
-
-    // 1. Query actual ICP balance of this canister
-    let actual_balance = management::get_token_balance(icp_ledger)
-        .await
-        .map_err(|e| ProtocolError::GenericError(format!("Failed to query ICP balance: {}", e)))?;
-
-    // 2. Sum all tracked ICP obligations
-    let tracked = read_state(|s| {
-        let mut total: u64 = 0;
-
-        // All ICP vault collateral
-        for vault in s.vault_id_to_vaults.values() {
-            if vault.collateral_type == s.icp_ledger_principal {
-                total = total.saturating_add(vault.collateral_amount);
-            }
-        }
-
-        // Pending margin transfers (ICP only)
-        for pmt in s.pending_margin_transfers.values() {
-            if pmt.collateral_type == s.icp_ledger_principal
-                || pmt.collateral_type == Principal::anonymous()
-            {
-                total = total.saturating_add(pmt.margin.0);
-            }
-        }
-
-        // Pending excess transfers (ICP only)
-        for pmt in s.pending_excess_transfers.values() {
-            if pmt.collateral_type == s.icp_ledger_principal
-                || pmt.collateral_type == Principal::anonymous()
-            {
-                total = total.saturating_add(pmt.margin.0);
-            }
-        }
-
-        // Pending redemption transfers (ICP only)
-        for pmt in s.pending_redemption_transfer.values() {
-            if pmt.collateral_type == s.icp_ledger_principal
-                || pmt.collateral_type == Principal::anonymous()
-            {
-                total = total.saturating_add(pmt.margin.0);
-            }
-        }
-
-        // Pending treasury collateral (ICP only)
-        for (amount, ledger) in &s.pending_treasury_collateral {
-            if *ledger == s.icp_ledger_principal {
-                total = total.saturating_add(*amount);
-            }
-        }
-
-        total
-    });
-
-    // 3. Compute surplus (leave 1 transfer fee as buffer)
-    let fee_buffer = icp_fee.0;
-    let surplus = actual_balance
-        .saturating_sub(tracked)
-        .saturating_sub(fee_buffer);
-
-    if surplus == 0 {
-        return Err(ProtocolError::GenericError(format!(
-            "No surplus to sweep (actual: {}, tracked: {}, fee buffer: {})",
-            actual_balance, tracked, fee_buffer
-        )));
-    }
-
-    // 4. Transfer surplus to treasury
-    let block_index = management::transfer_collateral(surplus, treasury, icp_ledger)
-        .await
-        .map_err(|e| ProtocolError::GenericError(format!("Transfer failed: {:?}", e)))?;
-
-    log!(
-        INFO,
-        "[admin_sweep_to_treasury] Swept {} e8s ICP to treasury (block {}). Reason: {}",
-        surplus,
-        block_index,
-        reason
-    );
-
-    // 5. Record audit event
-    event::record_admin_sweep_to_treasury(surplus, treasury, block_index, reason.clone());
-
-    // 6. Notify treasury for bookkeeping (non-critical)
-    let _ = treasury::notify_treasury_deposit(
-        treasury,
-        treasury::DepositType::LiquidationFee, // closest category for recovered funds
-        treasury::AssetType::ICP,
-        surplus,
-        block_index,
-    )
-    .await;
-
-    Ok(block_index)
 }
 
 // ── Admin Debt Correction ─────────────────────────────────────────────────
@@ -18944,5 +19525,237 @@ mod borrow_recovery_gate_tests {
         assert!(has_owned_pending_borrow_in_state(&state, owner, 77));
         assert!(!has_owned_pending_borrow_in_state(&state, other, 77));
         assert!(!has_owned_pending_borrow_in_state(&state, owner, 78));
+    }
+}
+
+#[cfg(test)]
+mod reserve_redemption_status_tests {
+    use super::{
+        controller_authorization, reserve_redemption_admin_status_in,
+        reserve_redemption_status_in, ProtocolError,
+    };
+    use candid::Principal;
+    use icrc_ledger_types::icrc1::account::Account;
+    use rumi_protocol_backend::state::{
+        ReserveRedemptionJournal, ReserveRedemptionPhase, State,
+    };
+
+    #[test]
+    fn reserve_redemption_status_is_visible_only_to_its_caller() {
+        let owner = Principal::from_slice(&[31]);
+        let stranger = Principal::from_slice(&[32]);
+        let ledger = Principal::from_slice(&[33]);
+        let protocol = Principal::from_slice(&[34]);
+        let mut state = State::default();
+        state.reserve_redemption_journals.insert(
+            99,
+            ReserveRedemptionJournal {
+                operation_id: 99,
+                caller: owner,
+                icusd_amount_e8s: 10_000,
+                fee_icusd_e8s: 0,
+                fee_stable_e6s: 0,
+                raw_dust_refund_e8s: 0,
+                pull_ledger: ledger,
+                pull_from: Account { owner, subaccount: None },
+                pull_to: Account { owner: protocol, subaccount: None },
+                pull_amount_e8s: 10_000,
+                pull_fee_e8s: None,
+                pull_memo: 99u128.to_be_bytes().to_vec(),
+                pull_created_at_time_ns: 1,
+                pull_op_nonce: 99,
+                payout_ledger: ledger,
+                payout_from_subaccount: None,
+                payout_to: Account { owner, subaccount: None },
+                payout_amount_e6s: 100,
+                payout_fee_e6s: None,
+                payout_memo: 100u128.to_be_bytes().to_vec(),
+                payout_created_at_time_ns: 1,
+                payout_op_nonce: 100,
+                treasury_ledger: None,
+                treasury_to: None,
+                treasury_amount_e6s: None,
+                treasury_memo: None,
+                treasury_created_at_time_ns: None,
+                treasury_op_nonce: None,
+                treasury_fee_required: false,
+                treasury_block_index: None,
+                payout_no_effect_tuples: Vec::new(),
+                refund_ledger: None,
+                refund_amount_e8s: None,
+                refund_memo: None,
+                refund_created_at_time_ns: None,
+                refund_op_nonce: None,
+                refund_history: Vec::new(),
+                refund_history_pruned_count: 0,
+                refund_retry_count: 0,
+                refund_retry_is_same_tuple: false,
+                refund_block_index: None,
+                pull_block_index: Some(7),
+                payout_block_index: None,
+                phase: ReserveRedemptionPhase::PayoutAmbiguous,
+            },
+        );
+
+        let visible = reserve_redemption_status_in(&state, owner).unwrap();
+        assert_eq!(visible.phase, "payout_ambiguous");
+        assert_eq!(visible.pull_block_index, Some(7));
+        assert_eq!(visible.stable_amount_e6s, 100);
+        assert!(reserve_redemption_status_in(&state, stranger).is_none());
+        let admin = reserve_redemption_admin_status_in(&state);
+        assert_eq!(admin.journal_count, 1);
+        assert_eq!(admin.operation_id, Some(99));
+        assert_eq!(admin.phase.as_deref(), Some("payout_ambiguous"));
+        assert_eq!(admin.unresolved_leg.as_ref().map(|leg| leg.leg.as_str()), Some("payout"));
+    }
+
+    #[test]
+    fn admin_status_reports_presence_even_when_the_journal_cardinality_is_invalid() {
+        let mut state = State::default();
+        let empty = reserve_redemption_admin_status_in(&state);
+        assert_eq!(empty.journal_count, 0);
+        assert_eq!(empty.operation_id, None);
+        assert_eq!(empty.phase, None);
+
+        // Two rows are invalid under the state invariant, but release
+        // preflight must still see that downgrade-sensitive state is present.
+        state.reserve_redemption_journals.insert(1, test_journal(1));
+        state.reserve_redemption_journals.insert(2, test_journal(2));
+        let multiple = reserve_redemption_admin_status_in(&state);
+        assert_eq!(multiple.journal_count, 2);
+        assert_eq!(multiple.operation_id, None);
+        assert_eq!(multiple.phase, None);
+        assert_eq!(multiple.unresolved_leg, None);
+    }
+
+    #[test]
+    fn controller_gate_rejects_non_controllers() {
+        assert!(matches!(controller_authorization(false), Err(ProtocolError::CallerNotOwner)));
+        assert!(controller_authorization(true).is_ok());
+    }
+
+    #[test]
+    fn unresolved_leg_hint_selects_only_the_current_phase_tuple() {
+        use rumi_protocol_backend::state::ReserveRedemptionPhase as P;
+
+        let mut row = test_journal(99);
+        row.payout_memo = vec![8, 9];
+        row.payout_created_at_time_ns = 88;
+        row.treasury_ledger = Some(Principal::from_slice(&[35]));
+        row.treasury_to = Some(Account { owner: Principal::from_slice(&[36]), subaccount: None });
+        row.treasury_amount_e6s = Some(37);
+        row.treasury_memo = Some(vec![3, 7]);
+        row.treasury_created_at_time_ns = Some(38);
+        row.refund_ledger = Some(Principal::from_slice(&[39]));
+        row.refund_amount_e8s = Some(40);
+        row.refund_memo = Some(vec![4, 0]);
+        row.refund_created_at_time_ns = Some(41);
+
+        row.phase = P::PullSubmitted;
+        let hint = super::reserve_redemption_unresolved_leg_hint(&row).unwrap();
+        assert_eq!(hint.leg, "pull");
+        assert_eq!(hint.ledger, row.pull_ledger);
+        assert_eq!(hint.from, row.pull_from);
+        assert_eq!(hint.to, row.pull_to);
+        assert_eq!(hint.amount, row.pull_amount_e8s);
+        assert_eq!(hint.memo, row.pull_memo);
+        assert_eq!(hint.created_at_time_ns, row.pull_created_at_time_ns);
+        assert_eq!(hint.spender, Some(Account { owner: row.pull_to.owner, subaccount: None }));
+
+        for phase in [P::PayoutSubmitted, P::PayoutAmbiguous] {
+            row.phase = phase;
+            let hint = super::reserve_redemption_unresolved_leg_hint(&row).unwrap();
+            assert_eq!(hint.leg, "payout");
+            assert_eq!(hint.ledger, row.payout_ledger);
+            assert_eq!(hint.from, Account { owner: row.pull_to.owner, subaccount: row.payout_from_subaccount });
+            assert_eq!(hint.to, row.payout_to);
+            assert_eq!(hint.amount, row.payout_amount_e6s);
+            assert_eq!(hint.memo, row.payout_memo);
+            assert_eq!(hint.created_at_time_ns, row.payout_created_at_time_ns);
+            assert_eq!(hint.spender, None);
+        }
+
+        for phase in [P::TreasuryFeeSubmitted, P::TreasuryFeeAmbiguous] {
+            row.phase = phase;
+            let hint = super::reserve_redemption_unresolved_leg_hint(&row).unwrap();
+            assert_eq!(hint.leg, "treasury_fee");
+            assert_eq!(hint.ledger, row.treasury_ledger.unwrap());
+            assert_eq!(hint.from, Account { owner: row.pull_to.owner, subaccount: None });
+            assert_eq!(hint.to, row.treasury_to.clone().unwrap());
+            assert_eq!(hint.amount, row.treasury_amount_e6s.unwrap());
+            assert_eq!(hint.memo, row.treasury_memo.clone().unwrap());
+            assert_eq!(hint.created_at_time_ns, row.treasury_created_at_time_ns.unwrap());
+            assert_eq!(hint.spender, None);
+        }
+
+        for phase in [P::RefundSubmitted, P::RefundRetrySubmitted] {
+            row.phase = phase;
+            let hint = super::reserve_redemption_unresolved_leg_hint(&row).unwrap();
+            assert_eq!(hint.leg, "refund");
+            assert_eq!(hint.ledger, row.refund_ledger.unwrap());
+            assert_eq!(hint.from, Account { owner: row.pull_to.owner, subaccount: None });
+            assert_eq!(hint.to, Account { owner: row.caller, subaccount: None });
+            assert_eq!(hint.amount, row.refund_amount_e8s.unwrap());
+            assert_eq!(hint.memo, row.refund_memo.clone().unwrap());
+            assert_eq!(hint.created_at_time_ns, row.refund_created_at_time_ns.unwrap());
+            assert_eq!(hint.spender, None);
+        }
+
+        for phase in [P::PullSettled, P::PayoutNoEffect, P::PayoutSettled, P::TreasuryFeeNoEffect, P::RefundNoEffect] {
+            row.phase = phase;
+            assert!(super::reserve_redemption_unresolved_leg_hint(&row).is_none());
+        }
+    }
+
+    fn test_journal(operation_id: u128) -> ReserveRedemptionJournal {
+        let owner = Principal::from_slice(&[31]);
+        let ledger = Principal::from_slice(&[33]);
+        let protocol = Principal::from_slice(&[34]);
+        ReserveRedemptionJournal {
+            operation_id,
+            caller: owner,
+            icusd_amount_e8s: 10_000,
+            fee_icusd_e8s: 0,
+            fee_stable_e6s: 0,
+            raw_dust_refund_e8s: 0,
+            pull_ledger: ledger,
+            pull_from: Account { owner, subaccount: None },
+            pull_to: Account { owner: protocol, subaccount: None },
+            pull_amount_e8s: 10_000,
+            pull_fee_e8s: None,
+            pull_memo: operation_id.to_be_bytes().to_vec(),
+            pull_created_at_time_ns: 1,
+            pull_op_nonce: operation_id,
+            payout_ledger: ledger,
+            payout_from_subaccount: None,
+            payout_to: Account { owner, subaccount: None },
+            payout_amount_e6s: 100,
+            payout_fee_e6s: None,
+            payout_memo: operation_id.to_be_bytes().to_vec(),
+            payout_created_at_time_ns: 1,
+            payout_op_nonce: operation_id,
+            treasury_ledger: None,
+            treasury_to: None,
+            treasury_amount_e6s: None,
+            treasury_memo: None,
+            treasury_created_at_time_ns: None,
+            treasury_op_nonce: None,
+            treasury_fee_required: false,
+            treasury_block_index: None,
+            payout_no_effect_tuples: Vec::new(),
+            refund_ledger: None,
+            refund_amount_e8s: None,
+            refund_memo: None,
+            refund_created_at_time_ns: None,
+            refund_op_nonce: None,
+            refund_history: Vec::new(),
+            refund_history_pruned_count: 0,
+            refund_retry_count: 0,
+            refund_retry_is_same_tuple: false,
+            refund_block_index: None,
+            pull_block_index: Some(7),
+            payout_block_index: None,
+            phase: ReserveRedemptionPhase::PayoutAmbiguous,
+        }
     }
 }

@@ -22,6 +22,221 @@ pub struct VaultRedemption {
     pub collateral_seized: u64,
 }
 
+#[cfg(test)]
+mod treasury_interest_event_tests {
+    use super::{apply_pending_payout_event, PendingPayoutEvent};
+    use crate::state::{
+        BorrowMintTuple, State, TreasuryInterestMintJournal, TreasuryInterestMintPhase,
+        TreasuryInterestMintRoute,
+    };
+    use candid::Principal;
+
+    fn operation() -> TreasuryInterestMintJournal {
+        let treasury = Principal::from_slice(&[2]);
+        TreasuryInterestMintJournal {
+            tuple: BorrowMintTuple {
+                ledger: Principal::from_slice(&[1]),
+                destination: treasury,
+                amount_e8s: 500,
+                memo: 42u128.to_be_bytes(),
+                created_at_time_ns: 1_000,
+                op_nonce: 42,
+            },
+            treasury,
+            route: TreasuryInterestMintRoute::Treasury,
+            phase: TreasuryInterestMintPhase::MintPending,
+            history_floor: Some(70),
+            expiry_proven: false,
+            absence_scan: None,
+        }
+    }
+
+    #[test]
+    fn private_log_replays_exact_interest_mint_phases() {
+        let mut state = State::default();
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryInterestMintStarted {
+            operation: operation(),
+        });
+        assert_eq!(state.pending_treasury_interest_mints[&42].phase,
+            TreasuryInterestMintPhase::MintPending);
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryInterestMintAccepted {
+            op_nonce: 42, block_index: 77,
+        });
+        assert_eq!(state.pending_treasury_interest_mints[&42].phase,
+            TreasuryInterestMintPhase::NotifyPending { mint_block_index: 77 });
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryInterestMintCompleted {
+            op_nonce: 42,
+        });
+        assert!(!state.pending_treasury_interest_mints.contains_key(&42));
+    }
+
+    #[test]
+    fn private_log_replays_unknown_mint_hold() {
+        let mut state = State::default();
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryInterestMintStarted {
+            operation: operation(),
+        });
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryInterestMintHeld {
+            op_nonce: 42,
+        });
+        assert_eq!(state.pending_treasury_interest_mints[&42].phase,
+            TreasuryInterestMintPhase::ReceiptRecoveryRequired);
+    }
+
+    #[test]
+    fn private_log_replays_floor_scan_and_proven_absence_replacement() {
+        let mut state = State::default();
+        let mut first = operation();
+        first.phase = TreasuryInterestMintPhase::AwaitingHistoryFloor;
+        first.history_floor = None;
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestMintStarted { operation: first.clone() });
+
+        first.phase = TreasuryInterestMintPhase::MintPending;
+        first.history_floor = Some(70);
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestMintUpdated { operation: first.clone() });
+        assert_eq!(state.pending_treasury_interest_mints[&42], first);
+
+        first.phase = TreasuryInterestMintPhase::ReceiptRecoveryRequired;
+        first.expiry_proven = true;
+        first.absence_scan = Some(crate::state::BorrowMintAbsenceScan {
+            next_block_index: 71,
+            fixed_tip: Some(72),
+            candidate_block_index: None,
+        });
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestMintUpdated { operation: first });
+
+        let mut replacement = operation();
+        replacement.tuple.op_nonce = 43;
+        replacement.tuple.memo = 43u128.to_be_bytes();
+        replacement.phase = TreasuryInterestMintPhase::AwaitingHistoryFloor;
+        replacement.history_floor = None;
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestMintReplaced {
+                old_nonce: 42,
+                operation: replacement.clone(),
+            });
+        assert!(!state.pending_treasury_interest_mints.contains_key(&42));
+        assert_eq!(state.pending_treasury_interest_mints[&43], replacement);
+    }
+
+    #[test]
+    fn private_log_replays_stablecoin_fallback_credit_and_admission() {
+        let mut state = State::default();
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestFallbackCredited { amount_e8s: 500 });
+        assert_eq!(state.pending_treasury_interest_fallback_e8s, 500);
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestMintStarted { operation: operation() });
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::TreasuryInterestFallbackAdmitted { amount_e8s: 500 });
+        assert_eq!(state.pending_treasury_interest_fallback_e8s, 0);
+        assert_eq!(state.pending_treasury_interest_mints[&42].phase,
+            TreasuryInterestMintPhase::MintPending);
+    }
+
+    #[test]
+    fn private_log_admits_exact_collateral_share_after_recording_sp_journal() {
+        let mut state = State::default();
+        let collateral = Principal::from_slice(&[3]);
+        let pool = Principal::from_slice(&[4]);
+        let mut sp_operation = operation();
+        sp_operation.tuple.destination = pool;
+        sp_operation.treasury = pool;
+        sp_operation.tuple.amount_e8s = 425;
+        sp_operation.route = TreasuryInterestMintRoute::StabilityPool {
+            collateral_type: collateral,
+        };
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::StabilityPoolInterestFallbackCredited {
+                collateral_type: collateral,
+                amount_e8s: 425,
+            });
+        apply_pending_payout_event(&mut state,
+            PendingPayoutEvent::StabilityPoolInterestFallbackAdmitted {
+                collateral_type: collateral,
+                amount_e8s: 425,
+                operation: sp_operation.clone(),
+            });
+
+        assert_eq!(state.pending_treasury_interest_mints[&42], sp_operation);
+        assert!(state.pending_stability_pool_interest_fallback_e8s.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod treasury_stable_transfer_event_tests {
+    use super::{apply_pending_payout_event, PendingPayoutEvent};
+    use crate::state::{State, TreasuryStableTransferJournal, TreasuryStableTransferPhase,
+        TreasuryStableTransferSource};
+    use crate::treasury::{AssetType, DepositType};
+    use candid::Principal;
+
+    fn operation() -> TreasuryStableTransferJournal {
+        TreasuryStableTransferJournal {
+            source: TreasuryStableTransferSource {
+                ledger: Principal::from_slice(&[1]), block_index: 44,
+                lane: "stable_interest".into(), slot: 2,
+            },
+            ledger: Principal::from_slice(&[3]), treasury: Some(Principal::from_slice(&[2])),
+            asset_type: AssetType::CKUSDT, deposit_type: DepositType::InterestRevenue,
+            amount_e6s: 900, fee_e6s: Some(10), history_floor: Some(100),
+            recovery_scan: None, expiry_proven: false, memo: [4; 16],
+            created_at_time_ns: 1_000, op_nonce: 5,
+            phase: TreasuryStableTransferPhase::TransferPending,
+        }
+    }
+
+    #[test]
+    fn source_transfer_events_replay_phases_and_completed_tombstone() {
+        let mut state = State::default();
+        let mut row = operation();
+        let source = row.source.clone();
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryStableTransferStarted {
+            operation: row.clone(),
+        });
+        row.phase = TreasuryStableTransferPhase::NotifyPending { block_index: 120 };
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryStableTransferUpdated {
+            operation: row,
+        });
+        assert_eq!(state.pending_treasury_stable_transfers[&source].phase,
+            TreasuryStableTransferPhase::NotifyPending { block_index: 120 });
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryStableTransferCompleted {
+            source: source.clone(), block_index: 120,
+        });
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryStableTransferStarted {
+            operation: operation(),
+        });
+        assert!(!state.pending_treasury_stable_transfers.contains_key(&source));
+        assert_eq!(state.completed_treasury_stable_transfer_sources[&source], Some(120));
+    }
+
+    #[test]
+    fn replayed_reissue_nonce_advances_counter_at_the_same_timestamp() {
+        let mut state = State::default();
+        let mut original = operation();
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryStableTransferStarted {
+            operation: original.clone(),
+        });
+        // Started nonce 5 leaves counter 6. This is the exact nonce a
+        // same-timestamp developer reissue would allocate before replay.
+        let reissued_nonce = ((1_000u128) << 64) | 6;
+        original.op_nonce = reissued_nonce;
+        original.memo = [9; 16];
+        original.created_at_time_ns = 1_000;
+        original.phase = TreasuryStableTransferPhase::AwaitingPreflight;
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::TreasuryStableTransferUpdated {
+            operation: original,
+        });
+
+        let next = state.next_op_nonce_at(1_000);
+        assert_ne!(next, reissued_nonce);
+        assert_eq!(next, ((1_000u128) << 64) | 7);
+    }
+}
+
 /// Wave-8e LIQ-005: identifies which fee revenue stream a deficit
 /// repayment was sourced from. Persisted in the `DeficitRepaid` event so
 /// the explorer can attribute repayment volume per source.
@@ -129,8 +344,11 @@ pub enum Event {
         ledger_fee_collateral: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<u64>,
-        /// 3USD (LP tokens) credited to protocol reserves during this liquidation.
-        /// None for legacy burn-path liquidations; Some(amount_e8s) for reserves-path.
+        /// Net 3USD principal retained in protocol reserves after any proportional
+        /// Stability Pool refund. The source proof and V2 absorb record retain gross
+        /// ingress separately. Older events replay their recorded value unchanged
+        /// because they lack the covered-principal denominator. None for legacy
+        /// burn-path liquidations.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         three_usd_reserves_e8s: Option<u64>,
     },
@@ -1017,6 +1235,32 @@ pub enum PendingPayoutEvent {
     Amm1DonationReconciliationRequired { notify_nonce: u64, reason: crate::state::Amm1DonationReconciliationReason },
     Amm1DonationCompleted { notify_nonce: u64 },
     Amm1DonationHeld { donation: HeldAmm1Donation },
+    TreasuryInterestMintStarted { operation: crate::state::TreasuryInterestMintJournal },
+    TreasuryInterestMintUpdated { operation: crate::state::TreasuryInterestMintJournal },
+    TreasuryInterestMintReplaced {
+        old_nonce: u128,
+        operation: crate::state::TreasuryInterestMintJournal,
+    },
+    TreasuryInterestMintAccepted { op_nonce: u128, block_index: u64 },
+    TreasuryInterestMintHeld { op_nonce: u128 },
+    TreasuryInterestMintCompleted { op_nonce: u128 },
+    TreasuryStableTransferStarted { operation: crate::state::TreasuryStableTransferJournal },
+    TreasuryStableTransferUpdated { operation: crate::state::TreasuryStableTransferJournal },
+    TreasuryStableTransferCompleted {
+        source: crate::state::TreasuryStableTransferSource,
+        block_index: u64,
+    },
+    TreasuryInterestFallbackCredited { amount_e8s: u64 },
+    TreasuryInterestFallbackAdmitted { amount_e8s: u64 },
+    StabilityPoolInterestFallbackCredited {
+        collateral_type: Principal,
+        amount_e8s: u64,
+    },
+    StabilityPoolInterestFallbackAdmitted {
+        collateral_type: Principal,
+        amount_e8s: u64,
+        operation: crate::state::TreasuryInterestMintJournal,
+    },
     ThreeUsdReservePayoutPrepared {
         key: crate::state::ThreeUsdReserveIngressKey,
         payout: crate::state::ThreeUsdReserveCollateralPayout,
@@ -1722,6 +1966,122 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
                     && held.amount_e8s == donation.amount_e8s
             }) {
                 state.held_amm1_donations.push(donation);
+            }
+        }
+        PendingPayoutEvent::TreasuryInterestMintStarted { operation } => {
+            let nonce = operation.tuple.op_nonce;
+            state.op_nonce_counter = state.op_nonce_counter.max((nonce as u64).wrapping_add(1));
+            state.pending_treasury_interest_mints.insert(nonce, operation);
+        }
+        PendingPayoutEvent::TreasuryInterestMintUpdated { operation } => {
+            let nonce = operation.tuple.op_nonce;
+            if state.pending_treasury_interest_mints.contains_key(&nonce) {
+                state.pending_treasury_interest_mints.insert(nonce, operation);
+            }
+        }
+        PendingPayoutEvent::TreasuryInterestMintReplaced { old_nonce, operation } => {
+            let nonce = operation.tuple.op_nonce;
+            state.op_nonce_counter = state.op_nonce_counter.max((nonce as u64).wrapping_add(1));
+            state.pending_treasury_interest_mints.remove(&old_nonce);
+            state.pending_treasury_interest_mints.insert(nonce, operation);
+        }
+        PendingPayoutEvent::TreasuryInterestMintAccepted { op_nonce, block_index } => {
+            if let Some(operation) = state.pending_treasury_interest_mints.get_mut(&op_nonce) {
+                operation.phase = crate::state::TreasuryInterestMintPhase::NotifyPending {
+                    mint_block_index: block_index,
+                };
+            }
+        }
+        PendingPayoutEvent::TreasuryInterestMintHeld { op_nonce } => {
+            if let Some(operation) = state.pending_treasury_interest_mints.get_mut(&op_nonce) {
+                operation.phase = crate::state::TreasuryInterestMintPhase::ReceiptRecoveryRequired;
+            }
+        }
+        PendingPayoutEvent::TreasuryInterestMintCompleted { op_nonce } => {
+            state.pending_treasury_interest_mints.remove(&op_nonce);
+        }
+        PendingPayoutEvent::TreasuryStableTransferStarted { operation } => {
+            let nonce = operation.op_nonce;
+            state.op_nonce_counter = state.op_nonce_counter.max((nonce as u64).wrapping_add(1));
+            if !state.completed_treasury_stable_transfer_sources.contains_key(&operation.source) {
+                state.pending_treasury_stable_transfers
+                    .entry(operation.source.clone()).or_insert(operation);
+            }
+        }
+        PendingPayoutEvent::TreasuryStableTransferUpdated { operation } => {
+            let nonce = operation.op_nonce;
+            state.op_nonce_counter = state.op_nonce_counter.max((nonce as u64).wrapping_add(1));
+            if state.pending_treasury_stable_transfers.contains_key(&operation.source) {
+                state.pending_treasury_stable_transfers.insert(operation.source.clone(), operation);
+            }
+        }
+        PendingPayoutEvent::TreasuryStableTransferCompleted { source, block_index } => {
+            state.pending_treasury_stable_transfers.remove(&source);
+            state.completed_treasury_stable_transfer_sources.insert(source, Some(block_index));
+        }
+        PendingPayoutEvent::TreasuryInterestFallbackCredited { amount_e8s } => {
+            state.pending_treasury_interest_fallback_e8s = state
+                .pending_treasury_interest_fallback_e8s
+                .checked_add(u128::from(amount_e8s))
+                .expect("Treasury interest fallback replay overflow");
+        }
+        PendingPayoutEvent::TreasuryInterestFallbackAdmitted { amount_e8s } => {
+            state.pending_treasury_interest_fallback_e8s = state
+                .pending_treasury_interest_fallback_e8s
+                .checked_sub(u128::from(amount_e8s))
+                .expect("Treasury interest fallback replay underflow");
+        }
+        PendingPayoutEvent::StabilityPoolInterestFallbackCredited {
+            collateral_type,
+            amount_e8s,
+        } => {
+            let entry = state
+                .pending_stability_pool_interest_fallback_e8s
+                .entry(collateral_type)
+                .or_default();
+            *entry = entry
+                .checked_add(u128::from(amount_e8s))
+                .expect("Stability Pool interest fallback replay overflow");
+        }
+        PendingPayoutEvent::StabilityPoolInterestFallbackAdmitted {
+            collateral_type,
+            amount_e8s,
+            operation,
+        } => {
+            assert_eq!(
+                operation.tuple.amount_e8s, amount_e8s,
+                "Stability Pool fallback row amount diverged from its source debit"
+            );
+            assert_eq!(
+                operation.tuple.destination, operation.treasury,
+                "Stability Pool fallback row destination diverged"
+            );
+            assert_eq!(
+                operation.route,
+                crate::state::TreasuryInterestMintRoute::StabilityPool { collateral_type },
+                "Stability Pool fallback row route diverged from its collateral"
+            );
+            let current = state
+                .pending_stability_pool_interest_fallback_e8s
+                .get(&collateral_type)
+                .copied()
+                .expect("Stability Pool interest fallback replay missing credit");
+            let remaining = current
+                .checked_sub(u128::from(amount_e8s))
+                .expect("Stability Pool interest fallback replay underflow");
+            let nonce = operation.tuple.op_nonce;
+            state.op_nonce_counter = state
+                .op_nonce_counter
+                .max((nonce as u64).wrapping_add(1));
+            state.pending_treasury_interest_mints.insert(nonce, operation);
+            if remaining == 0 {
+                state
+                    .pending_stability_pool_interest_fallback_e8s
+                    .remove(&collateral_type);
+            } else {
+                state
+                    .pending_stability_pool_interest_fallback_e8s
+                    .insert(collateral_type, remaining);
             }
         }
         PendingPayoutEvent::ThreeUsdReservePayoutPrepared { key, payout } => {
@@ -4761,6 +5121,48 @@ mod filter_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn reserve_replay_uses_realized_principal_after_partial_refund() {
+        let init = Event::Init(payout_init_args(icp_token()));
+        let partial = Event::PartialLiquidateVault {
+            vault_id: 1,
+            liquidator_payment: ICUSD::new(60),
+            icp_to_liquidator: ICP::new(50),
+            liquidator: None,
+            icp_rate: None,
+            protocol_fee_collateral: None,
+            ledger_fee_collateral: None,
+            timestamp: None,
+            // Gross ingress 100 with 60/100 debt realized leaves 40 refunded.
+            // The event now stores net reserve backing, matching runtime.
+            three_usd_reserves_e8s: Some(60),
+        };
+        let replayed = super::replay([init, partial].into_iter())
+            .expect("partial reserve event must replay");
+        assert_eq!(replayed.protocol_3usd_reserves, 60);
+    }
+
+    #[test]
+    fn legacy_reserve_replay_preserves_recorded_gross_amount() {
+        let init = Event::Init(payout_init_args(icp_token()));
+        let legacy_partial = Event::PartialLiquidateVault {
+            vault_id: 1,
+            liquidator_payment: ICUSD::new(60),
+            icp_to_liquidator: ICP::new(50),
+            liquidator: None,
+            icp_rate: None,
+            protocol_fee_collateral: None,
+            ledger_fee_collateral: None,
+            timestamp: None,
+            // Historical events do not retain the original covered-principal
+            // denominator, so replay cannot safely infer the refund amount.
+            three_usd_reserves_e8s: Some(100),
+        };
+        let replayed = super::replay([init, legacy_partial].into_iter())
+            .expect("legacy reserve event must replay without reinterpretation");
+        assert_eq!(replayed.protocol_3usd_reserves, 100);
     }
 
     fn p(seed: u8) -> Principal {

@@ -159,7 +159,7 @@ fn inspect_message() {
         "set_config" | "admin_resolve_pool_ordering" | "admin_approve_pool"
         | "admin_sweep_ckusdc" | "admin_retry_stuck_claim"
         | "set_processing_paused" | "admin_reconcile_payment_block" | "admin_reconcile_return_block"
-        | "admin_authorize_shortfall_topup"
+        | "admin_authorize_shortfall_topup" | "admin_reconcile_shortfall_topup_block"
         | "admin_refresh_fees" | "admin_test_swap" | "admin_reconcile_treasury_block" => {
             if ic_cdk::api::caller() != Principal::anonymous() {
                 ic_cdk::api::call::accept_message();
@@ -681,6 +681,17 @@ async fn admin_reconcile_payment_block(vault_id: u64, block_index: u64) -> Resul
     let config = state::read_state(|s| s.config.clone())
         .ok_or_else(|| "Config not set".to_string())?;
     process::admin_reconcile_payment_block(&config, vault_id, block_index).await
+}
+
+/// Reconcile the exact residual ckUSDC transfer for a previously short claim.
+#[update]
+async fn admin_reconcile_shortfall_topup_block(vault_id: u64, block_index: u64) -> Result<(), String> {
+    require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .map_err(|_| "Another operation is in progress".to_string())?;
+    let config = state::read_state(|s| s.config.clone())
+        .ok_or_else(|| "Config not set".to_string())?;
+    process::admin_reconcile_shortfall_topup_block(&config, vault_id, block_index).await
 }
 
 /// Reconcile one unresolved treasury bonus using an operator-supplied candidate

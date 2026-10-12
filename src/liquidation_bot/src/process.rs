@@ -119,6 +119,50 @@ fn shortfall_residual(journal: &state::BotPaymentJournal) -> Result<(u64, u64), 
     Ok((receipt.amount, residual))
 }
 
+/// Bind an operator-supplied ledger block to the already persisted residual
+/// intent. The backend independently proves this tuple before this helper is
+/// called; keeping the checks pure makes it difficult to accidentally replace
+/// the original short receipt or accept a changed claim tuple.
+fn reconciled_shortfall_receipt(
+    journal: &state::BotPaymentJournal,
+    block_index: u64,
+) -> Result<swap::TransferReceipt, String> {
+    if !journal.shortfall_receipt_observed {
+        return Err("payment journal is not in shortfall recovery".into());
+    }
+    let (_, residual) = shortfall_residual(journal)?;
+    let topup = journal.shortfall_topup.as_ref()
+        .ok_or_else(|| "shortfall residual intent is missing".to_string())?;
+    if topup.backend_principal != journal.backend_principal
+        || topup.ledger_principal != journal.ledger_principal
+        || topup.memo != journal.memo
+        || topup.amount_e6 != residual
+        || topup.funding_allocation_e6 != topup.amount_e6.checked_add(topup.fee_e6)
+            .ok_or_else(|| "residual amount plus fee overflowed".to_string())?
+        || topup.created_at_time <= journal.receipt.as_ref().unwrap().created_at_time
+    {
+        return Err("persisted residual tuple does not match the shortfall claim".into());
+    }
+    if let Some(receipt) = topup.receipt.as_ref() {
+        if receipt.block_index != block_index
+            || receipt.amount != topup.amount_e6
+            || receipt.created_at_time != topup.created_at_time
+        {
+            return Err("residual receipt is already bound to a different block".into());
+        }
+        return Ok(receipt.clone());
+    }
+    let original = journal.receipt.as_ref().expect("shortfall_residual checked receipt");
+    if block_index == original.block_index {
+        return Err("residual block must differ from the original short-payment block".into());
+    }
+    Ok(swap::TransferReceipt {
+        block_index,
+        amount: topup.amount_e6,
+        created_at_time: topup.created_at_time,
+    })
+}
+
 fn dispatch_only_after_original_receipt_verification<T>(
     verification: Result<(), String>,
     transfer: impl FnOnce() -> T,
@@ -2538,6 +2582,82 @@ pub async fn admin_reconcile_payment_block(
     }
 }
 
+/// Reconcile an ambiguous residual transfer from ICRC-3 history after its
+/// deduplication window has expired. This only records a block for the
+/// already persisted exact residual tuple; it never dispatches a transfer.
+pub async fn admin_reconcile_shortfall_topup_block(
+    config: &BotConfig,
+    vault_id: u64,
+    block_index: u64,
+) -> Result<(), String> {
+    let journal = state::read_state(|s| s.pending_payments.get(&vault_id).cloned())
+        .ok_or_else(|| "no pending payment journal for this vault".to_string())?;
+    reconciled_shortfall_receipt(&journal, block_index)?;
+    let topup = journal.shortfall_topup.as_ref().expect("receipt helper checked topup");
+    if config.backend_principal != journal.backend_principal
+        || config.ckusdc_ledger != journal.ledger_principal
+        || topup.backend_principal != journal.backend_principal
+        || topup.ledger_principal != journal.ledger_principal
+    {
+        return Err("configured backend or ckUSDC ledger differs from the persisted residual tuple".into());
+    }
+
+    // The trusted backend checks sender, receiver, ledger, amount, memo,
+    // timestamp, claim generation, and replay status against the active claim.
+    // A stored receipt came either from the ledger reply or from an earlier
+    // reconciliation. In that case cumulative confirmation itself is the
+    // idempotent retry boundary: the backend accepts the complete consumed
+    // proof batch after a lost confirmation reply. Its single-proof verifier
+    // intentionally rejects already-consumed blocks.
+    if topup.receipt.is_none() {
+        call_bot_verify_liquidation_payment_proof(
+            config,
+            BotPaymentProof {
+                vault_id: journal.vault_id,
+                claim_generation: journal.claim_generation,
+                ledger_principal: journal.ledger_principal,
+                block_index,
+                amount_e6s: topup.amount_e6,
+                created_at_time: topup.created_at_time,
+            },
+        ).await.map_err(|error| format!(
+            "candidate residual block did not prove the exact persisted claim-bound transfer; journal unchanged: {error}"
+        ))?;
+    }
+
+    // Re-read after the inter-canister await. Only write if the original
+    // receipt and entire persisted residual tuple are still the same.
+    let mut current = state::read_state(|s| s.pending_payments.get(&vault_id).cloned())
+        .ok_or_else(|| "payment journal disappeared during residual proof verification".to_string())?;
+    if current.claim_generation != journal.claim_generation
+        || current.receipt != journal.receipt
+        || current.shortfall_topup != journal.shortfall_topup
+        || current.backend_principal != journal.backend_principal
+        || current.ledger_principal != journal.ledger_principal
+        || current.memo != journal.memo
+    {
+        return Err("payment journal changed during residual proof verification".into());
+    }
+    let observed = reconciled_shortfall_receipt(&current, block_index)?;
+    let topup = current.shortfall_topup.as_mut().expect("receipt helper checked topup");
+    if topup.receipt.is_none() {
+        topup.receipt = Some(observed);
+        topup.status = state::BotPaymentStatus::ReceiptObserved;
+        state::mutate_state(|s| { s.pending_payments.insert(vault_id, current.clone()); });
+        state::save_config_to_stable();
+    }
+
+    // Confirmation rechecks both receipts and the cumulative exact debt at
+    // the backend. Reply loss is safe: the stored block is reused and backend
+    // confirmation is idempotent for the exact proof batch.
+    resume_shortfall_payment(config, current).await;
+    if state::read_state(|s| s.pending_payments.contains_key(&vault_id)) {
+        Err("residual block was recorded; cumulative confirmation remains pending; inspect the durable journal".into())
+    } else {
+        Ok(())
+    }
+}
+
 async fn call_bot_verify_liquidation_payment_proof(
     config: &BotConfig,
     proof: BotPaymentProof,
@@ -3145,6 +3265,57 @@ mod tests {
         assert!(prepare_shortfall_topup_intent(&with_receipt, 10_000, 124, 10_000).is_err());
         assert!(prepare_shortfall_topup_intent(&with_receipt, 10_000, 123, 10_001).is_err());
         assert_eq!(required_ckusdc_net(u64::MAX), u64::MAX / 100 + 1);
+    }
+
+    #[test]
+    fn reconciled_residual_block_uses_exact_persisted_tuple_and_preserves_original() {
+        let original = crate::swap::TransferReceipt {
+            block_index: 8, amount: 999_999, created_at_time: 123,
+        };
+        let journal = state::BotPaymentJournal {
+            record_id: None, vault_id: 19,
+            backend_principal: candid::Principal::anonymous(),
+            ledger_principal: candid::Principal::management_canister(),
+            claim_generation: 4, debt_covered_e8s: 100_000_000,
+            collateral_amount_e8s: 200_000_000, collateral_received_amount_e8s: None,
+            collateral_price_e8s: 100_000_000, icp_swapped_e8s: 110_000_000,
+            ckusdc_received_e6: 1_010_000, held_surplus_e6: 0,
+            gross_amount_e6: 1_010_000, amount_e6: 1_000_000, fee_e6: 10_000,
+            created_at_time: 123, memo: b"claim-19-4".to_vec(),
+            status: state::BotPaymentStatus::Ambiguous,
+            receipt: Some(original.clone()), shortfall_receipt_observed: true,
+            shortfall_topup: Some(state::BotPaymentTopUpJournal {
+                backend_principal: candid::Principal::anonymous(),
+                ledger_principal: candid::Principal::management_canister(),
+                amount_e6: 1, fee_e6: 10_000, created_at_time: 124,
+                memo: b"claim-19-4".to_vec(), funding_allocation_e6: 10_001,
+                status: state::BotPaymentStatus::Ambiguous, receipt: None,
+            }),
+        };
+        // The API constructs this proof from the saved claim generation and
+        // tuple; these checks reject an original-block replay or tuple drift.
+        assert_eq!(reconciled_shortfall_receipt(&journal, 9).unwrap(), crate::swap::TransferReceipt {
+            block_index: 9, amount: 1, created_at_time: 124,
+        });
+        assert_eq!(journal.receipt.as_ref(), Some(&original));
+        assert!(reconciled_shortfall_receipt(&journal, 8).is_err());
+        assert!(reconciled_shortfall_receipt(&state::BotPaymentJournal {
+            shortfall_topup: None, ..journal.clone()
+        }, 9).is_err());
+        assert!(reconciled_shortfall_receipt(&state::BotPaymentJournal {
+            shortfall_topup: Some(state::BotPaymentTopUpJournal {
+                amount_e6: 2, ..journal.shortfall_topup.clone().unwrap()
+            }), ..journal.clone()
+        }, 9).is_err());
+        let recorded = crate::swap::TransferReceipt { block_index: 9, amount: 1, created_at_time: 124 };
+        let recorded_journal = state::BotPaymentJournal {
+            shortfall_topup: Some(state::BotPaymentTopUpJournal {
+                receipt: Some(recorded.clone()), ..journal.shortfall_topup.clone().unwrap()
+            }), ..journal.clone()
+        };
+        assert_eq!(reconciled_shortfall_receipt(&recorded_journal, 9).unwrap(), recorded,
+            "retry after a lost reply reuses the exact durable residual receipt");
+        assert!(reconciled_shortfall_receipt(&recorded_journal, 10).is_err());
     }
 
     #[test]

@@ -66,7 +66,7 @@
   <title>Security · Rumi Protocol</title>
   <meta
     name="description"
-    content="Security review history, selected October 8 release status, and responsible disclosure for Rumi Protocol."
+    content="Security review history, selected October 11 release and maintenance status, and responsible disclosure for Rumi Protocol."
   />
 </svelte:head>
 
@@ -82,7 +82,7 @@
             code. A passing test, a source change, and an installed canister are different kinds
             of evidence.
           </p>
-          <p class="review-date">Status snapshot <time datetime="2026-10-08">October 8, 2026</time></p>
+          <p class="review-date">Status snapshot <time datetime="2026-10-11">October 11, 2026</time></p>
         </div>
 
         <aside class="status-card" aria-labelledby="release-status-title">
@@ -91,16 +91,16 @@
             <span>Release status</span>
             <span class="status-label">In progress</span>
           </div>
-          <h2 id="release-status-title">Selected releases are live</h2>
+          <h2 id="release-status-title">Capped borrowing has resumed</h2>
           <p>
-            The October 8 readback confirms the CL-01 3pool upgrade is installed. The Points
-            release is also installed, with epoch 18 still held and its driver off. The Stability
-            Pool remains paused; backend and bot follow-up changes remain uninstalled. Broader
-            findings are still open, and this is not a finding-by-finding closure statement.
+            A later October 11 readback confirmed the backend and liquidation bot running on their
+            reviewed upgrades. New borrowing is available within a temporary protocol-wide cap.
+            Treasury still runs its earlier module; the Stability Pool remains paused and the AMM
+            remains in maintenance mode. Broader findings and recovery work remain open.
           </p>
           <div class="status-divider"></div>
           <p class="status-footnote">
-            These October 8 readbacks are dated snapshots, not live telemetry. This is a release
+            These October 11 readbacks are dated snapshots, not live telemetry. This is a release
             update, not a finding-by-finding closure statement. See the October report for the
             scope and limits of these statements.
           </p>
@@ -120,7 +120,7 @@
         <span class="rail-line" aria-hidden="true"></span>
         <div class="evidence-step live">
           <span class="step-icon" aria-hidden="true">03</span>
-          <div><strong>Installed code</strong><span>3pool and Points confirmed in dated readbacks</span></div>
+          <div><strong>Installed code</strong><span>Selected canisters confirmed in dated readbacks</span></div>
         </div>
       </div>
     </div>
@@ -160,10 +160,10 @@
         <p class="state-label">Mainnet</p>
         <h3>Source changes do not update canisters</h3>
         <p>
-          The October 8 readbacks confirm selected 3pool and Points releases. Backend and bot
-          follow-up changes remain uninstalled, and the Stability Pool remains paused. A source
-          merge does not prove installation, feature activation, migration, or successful live
-          operation.
+          The later October 11 readback shows the backend and bot running on their reviewed
+          upgrades, with borrowing enabled under a temporary cap. Treasury remains on its earlier
+          module, the Stability Pool is paused, and the AMM is in maintenance mode. A source merge
+          does not prove installation, feature activation, migration, or successful live operation.
         </p>
       </article>
     </div>
@@ -172,13 +172,13 @@
   <section class="section page-width" aria-labelledby="october-report-title">
     <article class="report-card featured october-report-card">
       <div class="report-card-top">
-        <span class="report-kind">Status report · October 8, 2026</span>
+        <span class="report-kind">Status report · October 11, 2026</span>
         <span class="latest-tag">Latest status snapshot</span>
       </div>
       <h2 id="october-report-title">October security review status</h2>
       <p class="report-description">
-        Read the public summary of selected merged and installed changes, remaining backend and
-        bot installations, and the Points epoch 18 hold with epoch 19 policy still scheduled.
+        Read the public summary of selected merged and installed changes, capped borrowing,
+        remaining operational holds, and the Points epoch 18 review.
       </p>
       <div class="report-links">
         <a href="/security/october-2026">Read the October status report <span aria-hidden="true">↗</span></a>
@@ -271,7 +271,7 @@
   </section>
 
   <footer class="page-width page-foot">
-    <span>Security status snapshot dated October 8, 2026.</span>
+    <span>Security status snapshot dated October 11, 2026.</span>
     <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener">
       Verify source and release history <span aria-hidden="true">↗</span>
     </a>

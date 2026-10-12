@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+
+[package]
+name = "bot001-pocketic9-audit"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+pocketic9_wrapper = []
+
+[dependencies]
+candid = "0.10.6"
+num-traits = "0.2"
+pocket-ic-v9 = { package = "pocket-ic", version = "=9.0.2" }
+rumi_protocol_backend = { path = "../../src/rumi_protocol_backend" }
+serde = "=1.0.217"
+
+[[test]]
+name = "bot001"
+path = "tests/bot001.rs"

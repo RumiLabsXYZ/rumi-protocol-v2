@@ -2,7 +2,9 @@
 // This module implements the ICRC-21 standard for human-readable consent messages
 
 use candid::{CandidType, Decode, Deserialize, Principal};
-use crate::vault::VaultArg;
+use crate::vault::{
+    AddMarginV2Args, OpenVaultAndBorrowV2Args, OpenVaultV2Args, VaultArg, VaultOperationIdArg,
+};
 
 /// Metadata about the consent message request
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -347,99 +349,83 @@ fn generate_consent_message_for_caller(
     caller: Principal,
 ) -> Result<String, String> {
     match method {
-        "open_vault" => {
-            // Decode argument: (nat64, opt principal) — collateral amount in the
-            // token's smallest unit, plus the optional collateral type.
-            match try_decode_u64_opt_principal(arg, "open_vault")? {
-                Some((amount, collateral_type)) => {
-                    let (symbol, decimals) = resolve_collateral_display(collateral_type);
+        "open_vault_v2" => {
+            match Decode!(arg, OpenVaultV2Args) {
+                Ok(request) => {
+                    let (symbol, decimals) = resolve_collateral_display(request.collateral_type);
                     Ok(format!(
-                        "## Create New Vault\n\n\
-                        You are creating a new vault with **{}** as collateral.\n\n\
-                        This will:\n\
-                        - Lock your {} in the Rumi Protocol\n\
-                        - Create a new vault that you can borrow icUSD against\n\n\
-                        *Minimum collateral ratio: 150%*",
-                        format_collateral_amount(amount, decimals, &symbol),
-                        symbol
+                        "## Create Vault (operation {})\n\nYou are authorizing operation **{}** to pull **{}** from your wallet into the Rumi Protocol and create a vault. The client operation ID makes an exact retry safe if the response is lost.\n\nThe collateral will be locked in the protocol and can support icUSD borrowing.",
+                        request.operation_id,
+                        request.operation_id,
+                        format_collateral_amount(request.collateral_amount, decimals, &symbol),
                     ))
                 }
-                None => Ok(
-                    "## Create New Vault\n\n\
-                    You are creating a new vault in the Rumi Protocol.\n\n\
-                    This will:\n\
-                    - Lock your chosen collateral in the Rumi Protocol\n\
-                    - Create a new vault that you can borrow icUSD against\n\n\
-                    *Minimum collateral ratio: 150%*".to_string()
-                ),
+                Err(_) => Ok("## Create Vault\n\nThe operation ID and collateral details could not be decoded. Verify the request in Rumi before approving.".into()),
+            }
+        }
+
+        "open_vault" => {
+            Ok("## Create Vault\n\nThis legacy method is disabled. No collateral will be pulled. Refresh Rumi and use the operation-ID method before approving.".into())
+        }
+
+        "open_vault_and_borrow_v2" => {
+            match Decode!(arg, OpenVaultAndBorrowV2Args) {
+                Ok(request) => {
+                    let (symbol, decimals) = resolve_collateral_display(request.collateral_type);
+                    Ok(format!(
+                        "## Create Vault and Borrow (operation {})\n\nYou are authorizing operation **{}** to pull **{}** from your wallet into the Rumi Protocol, create a vault, and borrow **{}** to your wallet. The client operation ID makes exact retries resume the same collateral pull and borrow.\n\nA borrowing fee applies and the vault must satisfy the minimum collateral ratio.",
+                        request.operation_id,
+                        request.operation_id,
+                        format_collateral_amount(request.collateral_amount, decimals, &symbol),
+                        format_icusd_exact_amount(request.borrow_amount),
+                    ))
+                }
+                Err(_) => Ok("## Create Vault and Borrow\n\nThe operation ID and request details could not be decoded. Verify the request in Rumi before approving.".into()),
             }
         }
 
         "open_vault_and_borrow" => {
-            // Decode argument: (nat64, nat64, opt principal) — collateral amount,
-            // borrow amount in icUSD e8s, and the optional collateral type.
-            match try_decode_u64_u64_opt_principal(arg, "open_vault_and_borrow")? {
-                Some((collateral, borrow, collateral_type)) if borrow > 0 => {
-                    let (symbol, decimals) = resolve_collateral_display(collateral_type);
+            Ok("## Create Vault and Borrow\n\nThis legacy method is disabled. No collateral will be pulled or icUSD borrowed. Refresh Rumi and use the operation-ID method before approving.".into())
+        }
+
+        "add_margin_to_vault_v2" => {
+            match Decode!(arg, AddMarginV2Args) {
+                Ok(request) => {
                     Ok(format!(
-                        "## Create Vault & Borrow\n\n\
-                        You are creating a new vault with **{}** as collateral \
-                        and borrowing **{}**.\n\n\
-                        This will:\n\
-                        - Lock your {} in the Rumi Protocol\n\
-                        - Create a new vault\n\
-                        - Borrow icUSD to your wallet\n\n\
-                        *A small borrowing fee will be applied. Minimum collateral ratio: 150%*",
-                        format_collateral_amount(collateral, decimals, &symbol),
-                        format_icusd_amount(borrow),
-                        symbol
+                        "## Add Collateral (operation {})\n\nOperation-ID add-margin request **{}** is currently held pending a safe recovery path. This request will not pull collateral or change vault #{}. Refresh Rumi after this route is enabled.",
+                        request.operation_id,
+                        request.operation_id,
+                        request.vault_id,
                     ))
                 }
-                Some((collateral, _, collateral_type)) => {
-                    let (symbol, decimals) = resolve_collateral_display(collateral_type);
-                    Ok(format!(
-                        "## Create New Vault\n\n\
-                        You are creating a new vault with **{}** as collateral.\n\n\
-                        This will:\n\
-                        - Lock your {} in the Rumi Protocol\n\
-                        - Create a new vault that you can borrow icUSD against\n\n\
-                        *Minimum collateral ratio: 150%*",
-                        format_collateral_amount(collateral, decimals, &symbol),
-                        symbol
-                    ))
-                }
-                None => Ok(
-                    "## Create Vault & Borrow\n\n\
-                    You are creating a new vault and borrowing icUSD.\n\n\
-                    This will:\n\
-                    - Lock your chosen collateral in the Rumi Protocol\n\
-                    - Create a new vault\n\
-                    - Borrow icUSD to your wallet\n\n\
-                    *A small borrowing fee will be applied. Minimum collateral ratio: 150%*".to_string()
-                ),
+                Err(_) => Ok("## Add Collateral\n\nThe operation ID and request details could not be decoded. Verify the request in Rumi before approving.".into()),
             }
         }
 
         "add_margin_to_vault" => {
-            match try_decode_vault_arg(arg, "add_margin_to_vault")? {
-                Some(vault_arg) => {
-                    let (symbol, decimals) = resolve_collateral_for_vault(vault_arg.vault_id);
-                    Ok(format!(
-                        "## Add Collateral to Vault\n\n\
-                        You are adding **{}** to vault #{}.\n\n\
-                        This will increase your collateral ratio and reduce liquidation risk.",
-                        format_collateral_amount(vault_arg.amount, decimals, &symbol),
-                        vault_arg.vault_id
-                    ))
-                }
-                None => Ok(
-                    "## Add Collateral to Vault\n\n\
-                    You are adding collateral to your vault.\n\n\
-                    This will increase your collateral ratio and reduce liquidation risk.".to_string()
-                ),
-            }
+            Ok("## Add Collateral\n\nThis legacy method is disabled. No collateral will be pulled. Refresh Rumi and use the operation-ID method before approving.".into())
         }
-        
+
+        "ack_vault_operation" => match Decode!(arg, VaultOperationIdArg) {
+            Ok(request) => Ok(format!(
+                "## Acknowledge Vault Operation {}\n\nThis clears the saved terminal result for operation **{}**. After acknowledgement, the exact result is no longer available; the operation ID remains permanently stale and can never execute again.",
+                request.operation_id, request.operation_id
+            )),
+            Err(_) => Ok("## Acknowledge Vault Operation\n\nThe operation ID could not be decoded. Verify it before approving.".into()),
+        },
+
+        "get_vault_operation_status" => Ok(
+            "## Vault Operation Status\n\nThis authenticated query shows your operation watermark and the safe status of your active operation. It does not expose the ledger transfer tuple or move funds.".into()
+        ),
+
+        "reconcile_vault_collateral_pull_from_block" => match Decode!(arg, VaultOperationIdArg, u64) {
+            Ok((request, block_index)) => Ok(format!(
+                "## Verify Vault Collateral Pull (operation {})\n\nRumi will read ledger block **{}** and compare it with the exact collateral transfer already pinned for operation **{}**. This check does not send another transfer or move additional funds. If the block is not a direct exact match, the operation remains held.",
+                request.operation_id, block_index, request.operation_id
+            )),
+            Err(_) => Ok("## Verify Vault Collateral Pull\n\nThe operation ID and block index could not be decoded. Verify the request in Rumi before approving.".into()),
+        },
+
         "borrow_from_vault" => {
             match try_decode_vault_arg(arg, "borrow_from_vault")? {
                 Some(vault_arg) => Ok(format!(
@@ -1015,6 +1001,51 @@ mod tests {
         let withdraw_collateral = generate_consent_message("withdraw_collateral", &Encode!(&7u64).unwrap()).unwrap();
         assert!(withdraw_collateral.contains("all"));
         assert!(withdraw_collateral.contains("no outstanding icUSD debt"));
+    }
+
+    #[test]
+    fn v2_collateral_consent_names_operation_id_and_exact_effect() {
+        crate::state::replace_state(crate::state::State::default());
+        let open = OpenVaultV2Args {
+            operation_id: 41,
+            collateral_amount: 100_000_000,
+            collateral_type: None,
+        };
+        let open_message = generate_consent_message("open_vault_v2", &Encode!(&open).unwrap()).unwrap();
+        assert!(open_message.contains("operation **41**"));
+        assert!(open_message.contains("pull **1 collateral**"));
+
+        let compound = OpenVaultAndBorrowV2Args {
+            operation_id: 42,
+            collateral_amount: 200_000_000,
+            borrow_amount: 350_000_000,
+            collateral_type: None,
+        };
+        let compound_message = generate_consent_message("open_vault_and_borrow_v2", &Encode!(&compound).unwrap()).unwrap();
+        assert!(compound_message.contains("operation **42**"));
+        assert!(compound_message.contains("borrow **3.50000000 icUSD**"));
+
+        let margin = AddMarginV2Args { operation_id: 43, vault_id: 9, amount: 25_000_000 };
+        let margin_message = generate_consent_message("add_margin_to_vault_v2", &Encode!(&margin).unwrap()).unwrap();
+        assert!(margin_message.contains("request **43**"));
+        assert!(margin_message.contains("vault #9"));
+        assert!(margin_message.contains("will not pull collateral"));
+
+        let legacy = generate_consent_message("open_vault", &Encode!(&100_000_000u64, &None::<Principal>).unwrap()).unwrap();
+        assert!(legacy.contains("disabled"));
+        assert!(legacy.contains("No collateral will be pulled"));
+
+        let ack = VaultOperationIdArg { operation_id: 43 };
+        let ack_message = generate_consent_message("ack_vault_operation", &Encode!(&ack).unwrap()).unwrap();
+        assert!(ack_message.contains("exact result is no longer available"));
+        assert!(ack_message.contains("can never execute again"));
+
+        let receipt_message = generate_consent_message(
+            "reconcile_vault_collateral_pull_from_block",
+            &Encode!(&ack, &55u64).unwrap(),
+        ).unwrap();
+        assert!(receipt_message.contains("ledger block **55**"));
+        assert!(receipt_message.contains("does not send another transfer"));
     }
 
     #[test]

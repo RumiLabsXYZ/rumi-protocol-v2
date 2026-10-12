@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+
+[package]
+name = "borrow-mint-pocketic9-audit"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+candid = "0.10.6"
+icrc-ledger-types = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
+pocket-ic-v9 = { package = "pocket-ic", version = "=9.0.2" }
+rumi_protocol_backend = { path = "../../src/rumi_protocol_backend" }
+serde = "=1.0.217"
+
+[[test]]
+name = "borrow_mint_recovery"
+path = "tests/borrow_mint_recovery.rs"

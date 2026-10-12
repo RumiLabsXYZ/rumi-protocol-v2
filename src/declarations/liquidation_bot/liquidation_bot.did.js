@@ -228,6 +228,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
         [],
       ),
+    'admin_reconcile_shortfall_topup_block' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [],
+      ),
     'admin_reconcile_treasury_block' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],

@@ -70,6 +70,19 @@ export const idlFactory = ({ IDL }) => {
     'timestamp' : IDL.Nat64,
     'caller' : IDL.Principal,
   });
+  const ExternalTokenDepositBackfill = IDL.Variant({
+    'Complete' : IDL.Null,
+    'Uninitialized' : IDL.Null,
+    'InProgress' : IDL.Record({
+      'next_deposit_id' : IDL.Nat64,
+      'snapshot_max_id' : IDL.Nat64,
+    }),
+  });
+  const ExternalTokenDepositBackfillStatus = IDL.Record({
+    'state' : ExternalTokenDepositBackfill,
+    'indexed_through_deposit_id' : IDL.Nat64,
+    'ambiguous_legacy_blocks' : IDL.Nat64,
+  });
   const AssetBalance = IDL.Record({
     'total' : IDL.Nat64,
     'reserved' : IDL.Nat64,
@@ -80,6 +93,14 @@ export const idlFactory = ({ IDL }) => {
     'total_deposits' : IDL.Nat64,
     'is_paused' : IDL.Bool,
     'balances' : IDL.Vec(IDL.Tuple(AssetType, AssetBalance)),
+  });
+  const ExternalTokenDepositArgs = IDL.Record({
+    'asset_type' : AssetType,
+    'block_index' : IDL.Nat64,
+    'deposit_type' : DepositType,
+    'memo' : IDL.Opt(IDL.Text),
+    'ledger' : IDL.Principal,
+    'amount' : IDL.Nat64,
   });
   const WithdrawArgs = IDL.Record({
     'to' : IDL.Principal,
@@ -94,6 +115,16 @@ export const idlFactory = ({ IDL }) => {
     'amount_transferred' : IDL.Nat64,
   });
   return IDL.Service({
+    'continue_external_token_deposit_backfill' : IDL.Func(
+        [],
+        [IDL.Variant({ 'Ok' : IDL.Text, 'Err' : IDL.Text })],
+        [],
+      ),
+    'continue_icusd_deposit_block_backfill' : IDL.Func(
+        [],
+        [IDL.Variant({ 'Ok' : IDL.Text, 'Err' : IDL.Text })],
+        [],
+      ),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],
@@ -101,6 +132,16 @@ export const idlFactory = ({ IDL }) => {
       ),
     'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
     'deposit' : IDL.Func(
+        [DepositArgs],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],
+        [],
+      ),
+    'deposit_borrowing_fee_once' : IDL.Func(
+        [DepositArgs],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],
+        [],
+      ),
+    'deposit_interest_revenue_once' : IDL.Func(
         [DepositArgs],
         [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],
         [],
@@ -116,7 +157,17 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(TreasuryEvent)],
         ['query'],
       ),
+    'get_external_token_deposit_backfill_status' : IDL.Func(
+        [],
+        [ExternalTokenDepositBackfillStatus],
+        ['query'],
+      ),
     'get_status' : IDL.Func([], [TreasuryStatus], ['query']),
+    'record_external_token_deposit_once' : IDL.Func(
+        [ExternalTokenDepositArgs],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],
+        [],
+      ),
     'record_stability_pool_unallocated_interest' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, IDL.Vec(IDL.Nat64)],
         [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],

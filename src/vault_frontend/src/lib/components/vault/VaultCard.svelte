@@ -4,7 +4,7 @@
   import { protocolService } from '../../services/protocol';
   import { vaultStore } from '../../stores/vaultStore';
   import { protocolManager } from '../../services/ProtocolManager';
-  import { CONFIG, CANISTER_IDS } from '../../config';
+  import { CANISTER_IDS } from '../../config';
   import { createEventDispatcher, onDestroy, onMount } from 'svelte';
   import { interpolateMultiplier, computeProjectedRate } from '../../utils/interpolate';
   import { walletStore } from '../../stores/wallet';
@@ -12,7 +12,6 @@
   import { collateralStore } from '../../stores/collateralStore';
   import { TokenService } from '../../services/tokenService';
   import { toastStore } from '../../stores/toast';
-  import { isOisyWallet } from '../../services/protocol/walletOperations';
   import { ApiClient } from '../../services/protocol/apiClient';
   import MultiplierBadge from '../points/MultiplierBadge.svelte';
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
@@ -26,6 +25,10 @@
   export let icpPrice: number = 0;
   export let expandedVaultId: number | null = null;
   export let bitcoinOnly: boolean = false;
+
+  // The backend keeps AddMargin V2 as an explicit rejecting method until its
+  // journal can safely compensate a pull if liquidation removes the vault.
+  const ADD_MARGIN_V2_ENABLED: boolean = false;
 
   // ── Per-collateral derived values ──
   $: vaultCollateralType = vault.collateralType || CANISTER_IDS.ICP_LEDGER;
@@ -634,26 +637,15 @@
   })();
 
   async function handleAddCollateral() {
+    if (!ADD_MARGIN_V2_ENABLED) {
+      toastStore.error('Adding collateral is temporarily paused while safe recovery for an in-flight vault pull is finalized. No approval or transfer was started.', 8000);
+      return;
+    }
     const amount = parseFloat(addCollateralAmount);
     if (!amount || amount <= 0) { toastStore.error(`Enter a valid ${collateralSymbol} amount`, 8000); return; }
     if (addOverMax) { toastStore.error(`Exceeds wallet balance (${formatNumber(maxAddCollateral, 4)} ${collateralSymbol})`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
-      // Oisy: skip pre-approval — ApiClient handles approve+add_margin as two
-      // sequential consent screens. Any async work here burns the browser user
-      // gesture context before the first Oisy popup opens.
-      if (!isOisyWallet()) {
-        const ledgerCanisterId = vaultCollateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
-        const amountRaw = BigInt(Math.floor(amount * collateralDecimalsFactor));
-        const spenderCanisterId = CONFIG.currentCanisterId;
-        const currentAllowance = await protocolService.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
-        if (currentAllowance < amountRaw) {
-          const bufferAmount = amountRaw * BigInt(120) / BigInt(100);
-          const approvalResult = await protocolService.approveCollateralTransfer(bufferAmount, spenderCanisterId, ledgerCanisterId);
-          if (!approvalResult.success) { toastStore.error(approvalResult.error || 'Approval failed', 8000); return; }
-          await new Promise(r => setTimeout(r, 2000));
-        }
-      }
       const result = await protocolService.addMarginToVault(vault.vaultId, amount, vaultCollateralType);
       if (result.success) {
         const msg = result.oisyResilient
@@ -992,16 +984,19 @@
               <div class="action-input-row">
                 <input type="number" class="action-input" bind:value={addCollateralAmount}
                   on:blur={() => clampInput('add')}
-                  placeholder="0.00" min="0.001" step="0.01" disabled={isProcessing} />
+                  placeholder="0.00" min="0.001" step="0.01" disabled={isProcessing || !ADD_MARGIN_V2_ENABLED} />
                 <span class="input-suffix">{collateralSymbol}</span>
               </div>
+              {#if !ADD_MARGIN_V2_ENABLED}
+                <p class="muted" role="status">Depositing collateral is temporarily paused. No approval or transfer will be requested.</p>
+              {/if}
               <div class="input-submit-row">
                 {#if addCollateralAmount && parseFloat(addCollateralAmount) > 0}
                   <span class="input-usd-hint">≈ ${formatNumber(parseFloat(addCollateralAmount) * vaultCollateralPrice, 2)}</span>
                 {/if}
                 <button class="btn-submit btn-submit-collateral" on:click={handleAddCollateral}
-                  disabled={isProcessing || !addCollateralAmount || addOverMax}>
-                  {isProcessing ? '...' : 'Deposit'}
+                  disabled={!ADD_MARGIN_V2_ENABLED || isProcessing || !addCollateralAmount || addOverMax}>
+                  {isProcessing ? '...' : ADD_MARGIN_V2_ENABLED ? 'Deposit' : 'Temporarily paused'}
                 </button>
               </div>
 

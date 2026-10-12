@@ -80,7 +80,7 @@ fn install_ledger(pic: &pocket_ic::PocketIc, minter: Principal) -> Principal {
     let init = LedgerArgument::Init(LedgerInitArgs {
         minting_account: account(minter),
         fee_collector_account: None,
-        transfer_fee: Nat::from(0u8),
+        transfer_fee: Nat::from(10u8),
         decimals: Some(8),
         max_memo_length: Some(64),
         token_name: "Rumi icUSD".to_string(),
@@ -123,7 +123,9 @@ fn call_transfer(
         from_subaccount: None,
         to: account(Principal::anonymous()),
         amount: Nat::from(amount),
-        fee: None,
+        // Pin a zero fee: if the backend were not configured as minter, an
+        // implicit fee must not turn this zero-value probe into a debit.
+        fee: Some(Nat::from(0u8)),
         memo: Some(memo.to_vec().into()),
         created_at_time: Some(created_at_time),
     };
@@ -191,8 +193,31 @@ fn official_ledger_fresh_zero_and_expired_transfers_have_expected_effects() {
     let initial_minter_balance = balance(&pic, ledger, minter);
     let initial_recipient_balance = balance(&pic, ledger, recipient);
 
-    // A fresh zero amount is a distinct ledger operation. Record whether it
-    // creates an ICRC-3 entry while leaving both account balances unchanged.
+    // An explicit zero fee cannot silently spend a non-minter's balance. The
+    // exact ledger Wasm must reject it against the configured nonzero fee.
+    let non_minter = Principal::self_authenticating(b"borrow-mint-ledger-non-minter");
+    let before_non_minter_log = log_length(&pic, ledger);
+    let before_non_minter_balance = balance(&pic, ledger, non_minter);
+    let zero_fee_non_minter = call_transfer(
+        &pic,
+        ledger,
+        non_minter,
+        0,
+        BASE_TIME_NS,
+        b"borrow-mint-zero-fee-non-minter",
+    );
+    assert_eq!(
+        zero_fee_non_minter,
+        Err(TransferError::BadFee {
+            expected_fee: Nat::from(10u8),
+        })
+    );
+    assert_eq!(log_length(&pic, ledger), before_non_minter_log);
+    assert_eq!(balance(&pic, ledger, non_minter), before_non_minter_balance);
+
+    // A fresh zero amount with explicit zero fee is a distinct minter
+    // operation. Record whether it creates an ICRC-3 entry while leaving both
+    // account balances unchanged.
     let fresh_zero = call_transfer(
         &pic,
         ledger,
