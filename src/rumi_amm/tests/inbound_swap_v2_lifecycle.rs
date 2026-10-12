@@ -836,6 +836,9 @@ fn effect_then_error_replays_exact_input_once_and_survives_upgrade() {
         ),
         2_010_000
     );
+    let persisted_leg = pending.operation.legs[0].clone();
+    assert_eq!(persisted_leg.fee, Some(10));
+    assert!(get_pool_paused(&pic, amm, &pool));
 
     // This fixture intentionally omits icrc1:tx_window. A same-ID retry
     // cannot treat the ambiguous ICRC-2 result as permission to pull again.
@@ -856,6 +859,9 @@ fn effect_then_error_replays_exact_input_once_and_survives_upgrade() {
         Some(Principal::self_authenticating(&[81, 82, 83])),
     )
     .expect("upgrade preserves held inbound state");
+    let after_upgrade = status(&pic, amm, user, &id);
+    assert_eq!(after_upgrade.operation.legs[0], persisted_leg);
+    assert!(get_pool_paused(&pic, amm, &pool));
     let next_sequence: Result<u64, AmmError> = reply(
         pic.query_call(
             amm,
@@ -870,6 +876,9 @@ fn effect_then_error_replays_exact_input_once_and_survives_upgrade() {
         2,
         "global high-water survives upgrade"
     );
+    // The journaled fee, not today's mutable ledger fee, defines the exact
+    // transfer identity used by positive receipt reconciliation.
+    set_ledger_fee(&pic, token_a, 20);
     reconcile_inbound_leg_from_block(&pic, amm, user, user, &id, 0, input_block)
         .expect("exact direct ICRC-3 2xfer proof confirms the pull");
     assert!(matches!(
@@ -881,6 +890,11 @@ fn effect_then_error_replays_exact_input_once_and_survives_upgrade() {
         input_block,
         "proof confirmation does not dispatch another input transfer"
     );
+    assert_eq!(status(&pic, amm, user, &id).operation.legs[0], {
+        let mut confirmed = persisted_leg.clone();
+        confirmed.status = rumi_amm::state::InboundLegStatus::Confirmed(input_block);
+        confirmed
+    });
     assert_eq!(
         balance(
             &pic,
@@ -933,6 +947,7 @@ fn effect_then_error_replays_exact_input_once_and_survives_upgrade() {
         ),
         before_out + recovered.amount_out
     );
+    assert!(!get_pool_paused(&pic, amm, &pool));
     assert_eq!(
         balance(
             &pic,
@@ -959,6 +974,184 @@ fn effect_then_error_replays_exact_input_once_and_survives_upgrade() {
         ),
         before_out + recovered.amount_out
     );
+}
+
+#[test]
+fn terminal_replay_is_idempotent_and_stale_sequence_ids_cannot_rebind() {
+    let (pic, amm, token_a, token_b, user, pool, _sub_a, _sub_b) = setup();
+    let id = request_id(1, 0x61);
+    let input_before = balance(
+        &pic,
+        token_a,
+        LedgerAccount {
+            owner: user,
+            subaccount: None,
+        },
+    );
+    let output_before = balance(
+        &pic,
+        token_b,
+        LedgerAccount {
+            owner: user,
+            subaccount: None,
+        },
+    );
+
+    let first = call_swap(&pic, amm, user, &id, &pool, token_a, 10_000)
+        .expect("first sequence request completes");
+    let after_first_input = balance(
+        &pic,
+        token_a,
+        LedgerAccount {
+            owner: user,
+            subaccount: None,
+        },
+    );
+    let after_first_output = balance(
+        &pic,
+        token_b,
+        LedgerAccount {
+            owner: user,
+            subaccount: None,
+        },
+    );
+    assert_eq!(after_first_input, input_before - 10_010);
+    assert_eq!(after_first_output, output_before + first.amount_out);
+
+    let terminal_replay = call_swap(&pic, amm, user, &id, &pool, token_a, 10_000)
+        .expect("same request returns its terminal result");
+    assert_eq!(terminal_replay.amount_out, first.amount_out);
+    assert_eq!(
+        balance(
+            &pic,
+            token_a,
+            LedgerAccount {
+                owner: user,
+                subaccount: None,
+            }
+        ),
+        after_first_input
+    );
+    assert_eq!(
+        balance(
+            &pic,
+            token_b,
+            LedgerAccount {
+                owner: user,
+                subaccount: None,
+            }
+        ),
+        after_first_output
+    );
+
+    let changed_args = call_swap(&pic, amm, user, &id, &pool, token_a, 10_001);
+    assert!(matches!(changed_args, Err(AmmError::InvalidInput { .. })));
+    let stale_id = request_id(1, 0x62);
+    let stale_replay = call_swap(&pic, amm, user, &stale_id, &pool, token_a, 10_000);
+    assert!(matches!(stale_replay, Err(AmmError::InvalidInput { .. })));
+    assert_eq!(
+        balance(
+            &pic,
+            token_a,
+            LedgerAccount {
+                owner: user,
+                subaccount: None,
+            }
+        ),
+        after_first_input
+    );
+    assert_eq!(
+        balance(
+            &pic,
+            token_b,
+            LedgerAccount {
+                owner: user,
+                subaccount: None,
+            }
+        ),
+        after_first_output
+    );
+
+    let next_sequence: Result<u64, AmmError> = reply(
+        pic.query_call(
+            amm,
+            user,
+            "get_next_inbound_sequence",
+            encode_args(()).unwrap(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(next_sequence.unwrap(), 2);
+}
+
+#[test]
+fn pool_pause_blocks_new_swap_and_cannot_clear_an_unresolved_inbound_fence() {
+    let (pic, amm, token_a, _token_b, user, pool, _sub_a, _sub_b) = setup();
+    let admin = Principal::self_authenticating(&[81, 82, 83]);
+    let id = request_id(1, 0x63);
+    let before = balance(
+        &pic,
+        token_a,
+        LedgerAccount {
+            owner: user,
+            subaccount: None,
+        },
+    );
+
+    let paused: Result<(), AmmError> = reply(
+        pic.update_call(amm, admin, "pause_pool", encode_one(pool.clone()).unwrap())
+            .unwrap(),
+    );
+    paused.expect("admin pauses pool");
+    assert!(get_pool_paused(&pic, amm, &pool));
+    assert!(matches!(
+        call_swap(&pic, amm, user, &id, &pool, token_a, 10_000),
+        Err(AmmError::PoolPaused)
+    ));
+    assert_eq!(
+        balance(
+            &pic,
+            token_a,
+            LedgerAccount {
+                owner: user,
+                subaccount: None,
+            }
+        ),
+        before
+    );
+    let absent: Result<InboundOperationStatus, AmmError> = reply(
+        pic.query_call(
+            amm,
+            user,
+            "get_inbound_operation",
+            encode_one(id.clone()).unwrap(),
+        )
+        .unwrap(),
+    );
+    assert!(absent.is_err(), "paused admission must not reserve a request ID");
+
+    let unpaused: Result<(), AmmError> = reply(
+        pic.update_call(amm, admin, "unpause_pool", encode_one(pool.clone()).unwrap())
+            .unwrap(),
+    );
+    unpaused.expect("admin unpauses idle pool");
+    set_fault_count(&pic, token_a, "set_phantom_failures", 1);
+    assert!(matches!(
+        call_swap(&pic, amm, user, &id, &pool, token_a, 10_000),
+        Err(AmmError::TransferFailed { .. })
+    ));
+    assert!(get_pool_paused(&pic, amm, &pool));
+    let pause_again: Result<(), AmmError> = reply(
+        pic.update_call(amm, admin, "pause_pool", encode_one(pool.clone()).unwrap())
+            .unwrap(),
+    );
+    assert!(matches!(pause_again, Err(AmmError::PoolBusy)));
+    let unpause_held: Result<(), AmmError> = reply(
+        pic.update_call(amm, admin, "unpause_pool", encode_one(pool.clone()).unwrap())
+            .unwrap(),
+    );
+    assert!(matches!(unpause_held, Err(AmmError::PoolBusy)));
+    assert!(get_pool_paused(&pic, amm, &pool));
 }
 
 #[test]

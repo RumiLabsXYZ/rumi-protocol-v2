@@ -6,12 +6,66 @@
 //! source-matched production artifact and its reviewed SHA-256 before running.
 
 use candid::{decode_one, encode_args, encode_one, CandidType, Principal};
-use pocket_ic::{PocketIcBuilder, WasmResult};
-use rumi_amm::state::OutboundPayout;
+use icrc_ledger_types::icrc1::account::Account;
+use icrc_ledger_types::icrc1::transfer::TransferArg;
+use icrc_ledger_types::icrc2::approve::ApproveArgs;
+use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
+use rumi_amm::state::{try_decode_state, OutboundPayout};
 use rumi_amm::types::*;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
+
+const PREDECESSOR_SHA256: &str = "832485e330faa18fd3f7b2d05b3dca670698227e420e255a128b0333c2979fb2";
+const CANDIDATE_SHA256: &str = "994ad8efadf9f5fa178f2c824c68d0d200f898d414498745f924d517d61ac2b1";
+const ICUSD_LEDGER_PRINCIPAL: &str = "t6bor-paaaa-aaaap-qrd5q-cai";
+
+#[derive(CandidType, Deserialize)]
+struct LedgerFeatureFlags {
+    icrc2: bool,
+}
+
+#[derive(CandidType, Deserialize)]
+struct LedgerArchiveOptions {
+    num_blocks_to_archive: u64,
+    trigger_threshold: u64,
+    controller_id: Principal,
+    max_transactions_per_response: Option<u64>,
+    max_message_size_bytes: Option<u64>,
+    cycles_for_archive_creation: Option<u64>,
+    node_max_memory_size_bytes: Option<u64>,
+    more_controller_ids: Option<Vec<Principal>>,
+}
+
+#[derive(CandidType, Deserialize)]
+enum LedgerMetadataValue {
+    Nat(candid::Nat),
+    Int(candid::Int),
+    Text(String),
+    Blob(Vec<u8>),
+}
+
+#[derive(CandidType, Deserialize)]
+struct LedgerInitArgs {
+    minting_account: Account,
+    fee_collector_account: Option<Account>,
+    transfer_fee: candid::Nat,
+    decimals: Option<u8>,
+    max_memo_length: Option<u16>,
+    token_name: String,
+    token_symbol: String,
+    metadata: Vec<(String, LedgerMetadataValue)>,
+    initial_balances: Vec<(Account, candid::Nat)>,
+    feature_flags: Option<LedgerFeatureFlags>,
+    maximum_number_of_accounts: Option<u64>,
+    accounts_overflow_trim_quantity: Option<u64>,
+    archive_options: LedgerArchiveOptions,
+}
+
+#[derive(CandidType, Deserialize)]
+enum LedgerArg {
+    Init(LedgerInitArgs),
+}
 
 /// Frozen pre-journal state shape used by the deployed V5 stable snapshot.
 #[derive(CandidType)]
@@ -50,6 +104,132 @@ fn expect_held<T: for<'de> Deserialize<'de> + CandidType>(result: WasmResult, ex
         matches!(result, Err(AmmError::InvalidInput { reason }) if reason == expected),
         "production ingress must return its specific held error"
     );
+}
+
+fn ledger_wasm() -> Vec<u8> {
+    include_bytes!("../../ledger/ic-icrc1-ledger.wasm").to_vec()
+}
+
+fn deploy_collateral_ledger(
+    pic: &PocketIc,
+    admin: Principal,
+    minting_account: Principal,
+    lp: Principal,
+    name: &str,
+) -> Principal {
+    let ledger = pic.create_canister_with_settings(Some(admin), None);
+    pic.add_cycles(ledger, 2_000_000_000_000);
+    let init = LedgerInitArgs {
+        minting_account: Account {
+            owner: minting_account,
+            subaccount: None,
+        },
+        fee_collector_account: None,
+        transfer_fee: candid::Nat::from(0_u64),
+        decimals: Some(8),
+        max_memo_length: Some(32),
+        token_name: name.to_string(),
+        token_symbol: name.to_string(),
+        metadata: vec![],
+        initial_balances: vec![(
+            Account {
+                owner: lp,
+                subaccount: None,
+            },
+            candid::Nat::from(1_000_000_000_000_u128),
+        )],
+        feature_flags: Some(LedgerFeatureFlags { icrc2: true }),
+        maximum_number_of_accounts: None,
+        accounts_overflow_trim_quantity: None,
+        archive_options: LedgerArchiveOptions {
+            num_blocks_to_archive: 2_000,
+            trigger_threshold: 1_000,
+            controller_id: admin,
+            max_transactions_per_response: None,
+            max_message_size_bytes: None,
+            cycles_for_archive_creation: None,
+            node_max_memory_size_bytes: None,
+            more_controller_ids: None,
+        },
+    };
+    pic.install_canister(
+        ledger,
+        ledger_wasm(),
+        encode_args((LedgerArg::Init(init),)).expect("encode ledger init"),
+        Some(admin),
+    );
+    ledger
+}
+
+fn approve_amm(pic: &PocketIc, ledger: Principal, amm: Principal, lp: Principal) {
+    let args = ApproveArgs {
+        from_subaccount: None,
+        spender: Account {
+            owner: amm,
+            subaccount: None,
+        },
+        amount: candid::Nat::from(u128::MAX),
+        expected_allowance: None,
+        expires_at: None,
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+    let result = pic
+        .update_call(ledger, lp, "icrc2_approve", encode_one(args).unwrap())
+        .expect("approve call transport");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let decoded: Result<candid::Nat, icrc_ledger_types::icrc2::approve::ApproveError> =
+                decode_one(&bytes).expect("decode approve result");
+            decoded.expect("approve AMM");
+        }
+        WasmResult::Reject(reason) => panic!("approve rejected: {reason}"),
+    }
+}
+
+fn reward_subaccount(pool_id: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rumi_amm:rewards:");
+    hasher.update(pool_id.as_bytes());
+    hasher.finalize().into()
+}
+
+fn mint_reward(
+    pic: &PocketIc,
+    ledger: Principal,
+    minting_account: Principal,
+    amm: Principal,
+    pool_id: &str,
+    amount: u128,
+) {
+    let args = TransferArg {
+        from_subaccount: None,
+        to: Account {
+            owner: amm,
+            subaccount: Some(reward_subaccount(pool_id)),
+        },
+        amount: candid::Nat::from(amount),
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+    let result = pic
+        .update_call(
+            ledger,
+            minting_account,
+            "icrc1_transfer",
+            encode_one(args).unwrap(),
+        )
+        .expect("mint reward transfer call");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let decoded: Result<candid::Nat, icrc_ledger_types::icrc1::transfer::TransferError> =
+                decode_one(&bytes).expect("decode reward transfer");
+            decoded.expect("mint reward funds");
+        }
+        WasmResult::Reject(reason) => panic!("reward transfer rejected: {reason}"),
+    }
 }
 
 fn snapshot() -> (LegacyAmmStateV5, Principal, Principal, String) {
@@ -483,4 +663,379 @@ fn production_post_upgrade_preserves_populated_v5_snapshot() {
         payouts.unwrap().is_empty(),
         "held ingress and V5 upgrade leave the payout journal empty"
     );
+}
+
+/// Unlike the injected V5 fixture above, this path runs the exact predecessor
+/// Wasm's pre_upgrade hook after building a real pool, LP position, and reward
+/// state through its ledger-backed public endpoints.
+#[test]
+#[ignore = "requires exact installed predecessor and reviewed candidate Wasm artifacts"]
+fn installed_predecessor_populated_state_survives_candidate_upgrade() {
+    let predecessor_path = std::env::var("RUMI_AMM_PREDECESSOR_WASM")
+        .expect("set RUMI_AMM_PREDECESSOR_WASM to the installed predecessor artifact");
+    let candidate_path = std::env::var("RUMI_AMM_PRODUCTION_WASM")
+        .expect("set RUMI_AMM_PRODUCTION_WASM to the reviewed candidate artifact");
+    let predecessor_wasm = std::fs::read(predecessor_path).expect("read predecessor Wasm");
+    let candidate_wasm = std::fs::read(candidate_path).expect("read candidate Wasm");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&predecessor_wasm)),
+        PREDECESSOR_SHA256,
+        "predecessor must match the currently installed AMM module"
+    );
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&candidate_wasm)),
+        CANDIDATE_SHA256,
+        "candidate must match the reviewed release Wasm"
+    );
+
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let admin = Principal::self_authenticating(b"predecessor-upgrade-admin");
+    let lp = Principal::self_authenticating(b"predecessor-upgrade-lp");
+    let minting_account = Principal::self_authenticating(b"predecessor-upgrade-mint");
+    let token_a = deploy_collateral_ledger(&pic, admin, minting_account, lp, "3USD");
+    let token_b = deploy_collateral_ledger(&pic, admin, minting_account, lp, "ICP");
+
+    let icusd_id = Principal::from_text(ICUSD_LEDGER_PRINCIPAL).expect("icUSD ledger principal");
+    let icusd_ledger = pic
+        .create_canister_with_id(Some(admin), None, icusd_id)
+        .expect("create test icUSD ledger at AMM's fixed ledger ID");
+    pic.add_cycles(icusd_ledger, 2_000_000_000_000);
+    let icusd_init = LedgerInitArgs {
+        minting_account: Account {
+            owner: minting_account,
+            subaccount: None,
+        },
+        fee_collector_account: None,
+        transfer_fee: candid::Nat::from(0_u64),
+        decimals: Some(8),
+        max_memo_length: Some(32),
+        token_name: "icUSD".to_string(),
+        token_symbol: "icUSD".to_string(),
+        metadata: vec![],
+        initial_balances: vec![],
+        feature_flags: Some(LedgerFeatureFlags { icrc2: true }),
+        maximum_number_of_accounts: None,
+        accounts_overflow_trim_quantity: None,
+        archive_options: LedgerArchiveOptions {
+            num_blocks_to_archive: 2_000,
+            trigger_threshold: 1_000,
+            controller_id: admin,
+            max_transactions_per_response: None,
+            max_message_size_bytes: None,
+            cycles_for_archive_creation: None,
+            node_max_memory_size_bytes: None,
+            more_controller_ids: None,
+        },
+    };
+    pic.install_canister(
+        icusd_ledger,
+        ledger_wasm(),
+        encode_args((LedgerArg::Init(icusd_init),)).unwrap(),
+        Some(admin),
+    );
+
+    let amm = pic.create_canister_with_settings(Some(admin), None);
+    pic.add_cycles(amm, 2_000_000_000_000);
+    pic.install_canister(
+        amm,
+        predecessor_wasm,
+        encode_one(AmmInitArgs { admin }).unwrap(),
+        Some(admin),
+    );
+    approve_amm(&pic, token_a, amm, lp);
+    approve_amm(&pic, token_b, amm, lp);
+
+    let pool_id: String = reply::<Result<String, AmmError>>(
+        pic.update_call(
+            amm,
+            admin,
+            "create_pool",
+            encode_one(CreatePoolArgs {
+                token_a,
+                token_b,
+                fee_bps: 30,
+                curve: CurveType::ConstantProduct,
+            })
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .expect("predecessor creates pool through public update endpoint");
+
+    let minted_shares: u128 = reply::<Result<u128, AmmError>>(
+        pic.update_call(
+            amm,
+            lp,
+            "add_liquidity",
+            encode_args((
+                pool_id.clone(),
+                1_000_000_000_u128,
+                1_000_000_000_u128,
+                0_u128,
+            ))
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .expect("predecessor adds ledger-backed liquidity");
+    assert!(minted_shares > 0);
+
+    reply::<Result<(), AmmError>>(
+        pic.update_call(
+            amm,
+            admin,
+            "set_protocol_backend_principal",
+            encode_one(admin).unwrap(),
+        )
+        .unwrap(),
+    )
+    .expect("configure reward notifier principal");
+    let reward_amount = 10_000_000_000_u128;
+    mint_reward(
+        &pic,
+        icusd_ledger,
+        minting_account,
+        amm,
+        &pool_id,
+        reward_amount,
+    );
+    reply::<Result<(), AmmError>>(
+        pic.update_call(
+            amm,
+            admin,
+            "notify_reward_received",
+            encode_args((pool_id.clone(), reward_amount, 701_u64)).unwrap(),
+        )
+        .unwrap(),
+    )
+    .expect("record reward through predecessor endpoint");
+
+    let pools_before: Vec<PoolInfo> = reply(
+        pic.query_call(amm, admin, "get_pools", encode_args(()).unwrap())
+            .unwrap(),
+    );
+    let shares_before: u128 = reply(
+        pic.query_call(
+            amm,
+            admin,
+            "get_lp_balance",
+            encode_args((pool_id.clone(), lp)).unwrap(),
+        )
+        .unwrap(),
+    );
+    let rewards_before: candid::Nat = reply(
+        pic.query_call(
+            amm,
+            admin,
+            "get_pending_rewards",
+            encode_args((pool_id.clone(), lp)).unwrap(),
+        )
+        .unwrap(),
+    );
+    let liquidity_before: Vec<AmmLiquidityEvent> = reply(
+        pic.query_call(
+            amm,
+            admin,
+            "get_amm_liquidity_events",
+            encode_args((0_u64, 100_u64)).unwrap(),
+        )
+        .unwrap(),
+    );
+    let admin_events_before: Vec<AmmAdminEvent> = reply(
+        pic.query_call(
+            amm,
+            admin,
+            "get_amm_admin_events",
+            encode_args((0_u64, 100_u64)).unwrap(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(pools_before.len(), 1);
+    assert!(pools_before[0].reserve_a > 0 && pools_before[0].reserve_b > 0);
+    assert!(shares_before > 0 && rewards_before.0 > candid::Nat::from(0_u8).0);
+    assert_eq!(liquidity_before.len(), 1);
+
+    // The installed predecessor—not a test fixture—runs pre_upgrade here and
+    // writes its in-memory state to stable memory before candidate post_upgrade.
+    pic.upgrade_canister(
+        amm,
+        candidate_wasm,
+        encode_one(AmmInitArgs { admin }).unwrap(),
+        Some(admin),
+    )
+    .expect("candidate upgrades the exact installed predecessor");
+
+    let pools_after: Vec<PoolInfo> = reply(
+        pic.query_call(amm, admin, "get_pools", encode_args(()).unwrap())
+            .unwrap(),
+    );
+    assert_eq!(
+        candid::encode_one(&pools_after).unwrap(),
+        candid::encode_one(&pools_before).unwrap(),
+        "pool reserves and total LP supply survive the real upgrade"
+    );
+    assert_eq!(
+        reply::<u128>(
+            pic.query_call(
+                amm,
+                admin,
+                "get_lp_balance",
+                encode_args((pool_id.clone(), lp)).unwrap(),
+            )
+            .unwrap(),
+        ),
+        shares_before
+    );
+    assert_eq!(
+        reply::<candid::Nat>(
+            pic.query_call(
+                amm,
+                admin,
+                "get_pending_rewards",
+                encode_args((pool_id.clone(), lp)).unwrap(),
+            )
+            .unwrap(),
+        ),
+        rewards_before
+    );
+    let liquidity_after: Vec<AmmLiquidityEvent> = reply(
+        pic.query_call(
+            amm,
+            admin,
+            "get_amm_liquidity_events",
+            encode_args((0_u64, 100_u64)).unwrap(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        candid::encode_one(&liquidity_after).unwrap(),
+        candid::encode_one(&liquidity_before).unwrap()
+    );
+    let admin_events_after: Vec<AmmAdminEvent> = reply(
+        pic.query_call(
+            amm,
+            admin,
+            "get_amm_admin_events",
+            encode_args((0_u64, 100_u64)).unwrap(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        candid::encode_one(&admin_events_after).unwrap(),
+        candid::encode_one(&admin_events_before).unwrap()
+    );
+
+    // Read the predecessor's emitted snapshot back from stable memory and
+    // inspect fields which the public Candid interface does not expose.
+    let stable = pic.get_stable_memory(amm);
+    assert!(
+        stable.len() >= 8,
+        "predecessor must persist a length prefix"
+    );
+    let len = u64::from_le_bytes(stable[..8].try_into().unwrap()) as usize;
+    assert!(len > 0 && len <= stable.len() - 8);
+    let persisted = try_decode_state(&stable[8..8 + len])
+        .expect("the actual predecessor snapshot must decode on the host");
+    let persisted_pool = persisted.pools.get(&pool_id).expect("persisted pool");
+    assert_eq!(persisted_pool.reserve_a, pools_before[0].reserve_a);
+    assert_eq!(persisted_pool.reserve_b, pools_before[0].reserve_b);
+    assert_eq!(persisted_pool.lp_shares.get(&lp), Some(&shares_before));
+    assert!(persisted_pool.acc_reward_per_share > 0);
+    assert_eq!(persisted_pool.total_rewards_distributed, reward_amount);
+    assert_eq!(persisted.reward_events.len(), 1);
+    assert_eq!(persisted.next_reward_event_id, 1);
+
+    let caller = Principal::self_authenticating(b"post-upgrade-held-caller");
+    let absent_ledger = Principal::self_authenticating(b"post-upgrade-no-ledger");
+    let swap_request = vec![0x71_u8; 32];
+    let add_request = vec![0x72_u8; 32];
+    expect_held::<SwapResult>(
+        pic.update_call(
+            amm,
+            caller,
+            "swap",
+            encode_args((pool_id.clone(), absent_ledger, 100_u128, 1_u128)).unwrap(),
+        )
+        .unwrap(),
+        "legacy swap is disabled; use swap_v2 with a durable request ID",
+    );
+    expect_held::<SwapResult>(
+        pic.update_call(
+            amm,
+            caller,
+            "swap_v2",
+            encode_args((
+                swap_request.clone(),
+                pool_id.clone(),
+                absent_ledger,
+                100_u128,
+                1_u128,
+            ))
+            .unwrap(),
+        )
+        .unwrap(),
+        "swap_v2 is held pending effect-then-error and upgrade lifecycle verification",
+    );
+    expect_held::<u128>(
+        pic.update_call(
+            amm,
+            caller,
+            "add_liquidity",
+            encode_args((pool_id.clone(), 100_u128, 100_u128, 1_u128)).unwrap(),
+        )
+        .unwrap(),
+        "legacy add_liquidity is disabled; use add_liquidity_v2 with a durable request ID",
+    );
+    expect_held::<u128>(
+        pic.update_call(
+            amm,
+            caller,
+            "add_liquidity_v2",
+            encode_args((
+                add_request.clone(),
+                pool_id.clone(),
+                100_u128,
+                100_u128,
+                1_u128,
+            ))
+            .unwrap(),
+        )
+        .unwrap(),
+        "add_liquidity_v2 remains held until both inbound legs have durable phase replay",
+    );
+    for request_id in [swap_request, add_request] {
+        let status: Result<rumi_amm::state::InboundOperationStatus, AmmError> = reply(
+            pic.query_call(
+                amm,
+                caller,
+                "get_inbound_operation",
+                encode_args((request_id,)).unwrap(),
+            )
+            .unwrap(),
+        );
+        assert!(matches!(
+            status,
+            Err(AmmError::InvalidInput { reason }) if reason == "inbound operation not found"
+        ));
+    }
+    let next_sequence: Result<u64, AmmError> = reply(
+        pic.query_call(
+            amm,
+            admin,
+            "get_next_inbound_sequence",
+            encode_args(()).unwrap(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(next_sequence.unwrap(), 1);
+    let payouts: Result<Vec<OutboundPayout>, AmmError> = reply(
+        pic.query_call(
+            amm,
+            admin,
+            "get_unresolved_outbound_payouts",
+            encode_args((0_u64, 100_u64)).unwrap(),
+        )
+        .unwrap(),
+    );
+    assert!(payouts.unwrap().is_empty());
 }
