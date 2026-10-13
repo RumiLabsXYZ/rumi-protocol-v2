@@ -270,7 +270,8 @@
             upgrade preserved LP supply and had zero pending claims. The Points upgrade now withholds the unfinished B snapshot
             time, while epoch 18 remains held with its driver off. The AMM recovery upgrade now
             runs with its pre-upgrade pool and ledger state preserved; trading and deposits remain held.
-            The earlier backend, bot, Treasury, and Stability Pool modules remained, and the Stability Pool pause stayed active.
+            The October 12 readback found upgraded backend and bot modules. Treasury and Stability
+            Pool remained on earlier modules, and the Stability Pool pause stayed active.
             Borrowing had resumed under a temporary cap at the October 11 readback, and that
             cap still reported 22,000 icUSD on October 12. PR #531 remains source-only;
             the backend and Stability Pool changes in PR #532 remain uninstalled. PR #545's
