@@ -454,28 +454,31 @@ fn block_parent_hash(block: &ICRC3Value, index: u64) -> Result<Option<[u8; 32]>,
     }
 }
 
-/// `icrc-ledger-types` 0.1.x hashes `Int` by converting through i128 and can
-/// panic for wider Candid integers. Its positive-Int encoding also differs
-/// from the signed representation required by ICRC-3. Refuse any Int value
-/// (including nested values) before calling the dependency hash implementation
-/// so unsupported ledger blocks fail closed instead of trapping this canister.
-fn block_hash(block: &ICRC3Value) -> Result<[u8; 32], String> {
-    fn contains_int(value: &ICRC3Value) -> bool {
-        match value {
-            ICRC3Value::Int(_) => true,
-            ICRC3Value::Array(values) => values.iter().any(contains_int),
-            ICRC3Value::Map(values) => values.values().any(contains_int),
-            ICRC3Value::Blob(_) | ICRC3Value::Text(_) | ICRC3Value::Nat(_) => false,
+/// Convert the ledger-types Value into the same generic Value implementation
+/// used by this canister's ICRC-3 certification path. In particular, both
+/// paths must use canonical arbitrary-width Nat/Int LEB128 encodings.
+fn certification_value(value: &ICRC3Value) -> crate::icrc3::Icrc3Value {
+    match value {
+        ICRC3Value::Blob(bytes) => crate::icrc3::Icrc3Value::Blob(bytes.to_vec()),
+        ICRC3Value::Text(text) => crate::icrc3::Icrc3Value::Text(text.clone()),
+        ICRC3Value::Nat(nat) => crate::icrc3::Icrc3Value::Nat(nat.clone()),
+        ICRC3Value::Int(int) => crate::icrc3::Icrc3Value::Int(int.clone()),
+        ICRC3Value::Array(values) => {
+            crate::icrc3::Icrc3Value::Array(values.iter().map(certification_value).collect())
         }
+        ICRC3Value::Map(values) => crate::icrc3::Icrc3Value::Map(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), certification_value(value)))
+                .collect(),
+        ),
     }
+}
 
-    if contains_int(block) {
-        return Err(
-            "ICRC-3 block contains Int, which the pinned hash implementation cannot safely authenticate"
-                .into(),
-        );
-    }
-    Ok(block.clone().hash())
+fn block_hash(block: &ICRC3Value) -> Result<[u8; 32], String> {
+    Ok(crate::certification::hash_value(&certification_value(
+        block,
+    )))
 }
 
 pub(crate) async fn verify_exact_input_block(
@@ -790,20 +793,95 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_int_values_fail_closed_without_hashing_or_trapping() {
+    fn icrc3_block_hash_supports_negative_and_arbitrary_width_nested_ints() {
+        let large_negative = candid::Int(-(candid::Int::from(1u64).0 << 200usize));
         let values = [
             V::Int(64i64.into()),
             V::Int((-42i64).into()),
             V::Map(BTreeMap::from([(
                 "nested".into(),
-                V::Array(vec![V::Int(candid::Int(candid::Int::from(1u64).0 << 200usize))]),
+                V::Array(vec![V::Map(BTreeMap::from([(
+                    "wide_negative".into(),
+                    V::Int(large_negative),
+                )]))]),
             )])),
         ];
         for value in values {
-            assert!(block_hash(&value)
-                .unwrap_err()
-                .contains("contains Int"));
+            assert!(block_hash(&value).is_ok());
         }
+    }
+
+    #[test]
+    fn archive_hash_matches_pinned_library_for_existing_nested_nat_blocks() {
+        let values = [
+            V::Map(BTreeMap::from([
+                (
+                    "tx".into(),
+                    V::Map(BTreeMap::from([
+                        ("amt".into(), V::Nat(Nat::from(u128::MAX))),
+                        (
+                            "boundaries".into(),
+                            V::Array(vec![
+                                V::Nat(Nat::from(0u64)),
+                                V::Nat(Nat::from(127u64)),
+                                V::Nat(Nat::from(128u64)),
+                                V::Nat(Nat::from(16_383u64)),
+                                V::Nat(Nat::from(16_384u64)),
+                                V::Nat(Nat::from(u64::MAX)),
+                                V::Nat(Nat(candid::Nat::from(1u64).0 << 200usize)),
+                            ]),
+                        ),
+                    ])),
+                ),
+                ("phash".into(), V::Blob(vec![0x5a; 32].into())),
+                ("memo".into(), V::Blob(vec![1, 2, 3].into())),
+            ])),
+            V::Array(vec![
+                V::Text("1xfer".into()),
+                V::Map(BTreeMap::from([(
+                    "amount".into(),
+                    V::Nat(Nat::from(128u64)),
+                )])),
+            ]),
+        ];
+
+        for value in values {
+            assert_eq!(
+                block_hash(&value).unwrap(),
+                value.clone().hash(),
+                "canonical archive hashing must preserve existing non-Int hashes",
+            );
+        }
+    }
+
+    #[test]
+    fn archived_chain_hashes_nested_negative_wide_int_intermediate() {
+        let candidate = V::Map(BTreeMap::from([("ts".into(), V::Nat(Nat::from(1u64)))]));
+        let candidate_hash = block_hash(&candidate).unwrap();
+        let intermediate = V::Map(BTreeMap::from([
+            ("phash".into(), V::Blob(candidate_hash.to_vec().into())),
+            (
+                "extension".into(),
+                V::Array(vec![V::Map(BTreeMap::from([(
+                    "signed_value".into(),
+                    V::Int(candid::Int(-(candid::Int::from(1u64).0 << 200usize))),
+                )]))]),
+            ),
+        ]));
+        let intermediate_hash = block_hash(&intermediate).unwrap();
+        let direct_anchor = V::Map(BTreeMap::from([(
+            "phash".into(),
+            V::Blob(intermediate_hash.to_vec().into()),
+        )]));
+
+        assert!(verify_chain_link(
+            candidate_hash,
+            block_parent_hash(&intermediate, 1).unwrap(),
+        ));
+        assert!(verify_chain_link(
+            intermediate_hash,
+            block_parent_hash(&direct_anchor, 2).unwrap(),
+        ));
     }
 
     #[test]
@@ -832,7 +910,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_anchor_needs_matching_parent_hash_but_not_its_own_value_hash() {
+    fn direct_anchor_validation_uses_matching_parent_hash() {
         let candidate = V::Map(BTreeMap::from([("ts".into(), V::Nat(Nat::from(1u64)))]));
         let candidate_hash = block_hash(&candidate).unwrap();
         let direct_anchor = V::Map(BTreeMap::from([
@@ -843,7 +921,7 @@ mod tests {
             candidate_hash,
             block_parent_hash(&direct_anchor, 1).unwrap()
         ));
-        assert!(block_hash(&direct_anchor).is_err());
+        assert!(block_hash(&direct_anchor).is_ok());
     }
 
     #[test]
