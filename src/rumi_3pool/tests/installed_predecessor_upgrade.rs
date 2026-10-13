@@ -1,11 +1,13 @@
-//! Upgrade the exact installed 3pool production Wasm with populated
-//! state into the exact candidate production Wasm under review.
+//! Upgrade exact 3pool production Wasm pairs with populated state.
 //!
 //! The predecessor fixture is reproducibly rebuilt from commit `5f776101`
 //! (the source base of PR #541); its SHA-256 matches the installed module
 //! (`74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae`).
 //! The candidate is the production artifact at SHA-256
 //! `d1bc983879dc4a385ec87a398168f798802027b428bbef0f1c8382435ed96c6e`.
+//! The October 2026 successor test starts with that same installed Wasm and
+//! upgrades to the PR #566 production artifact at SHA-256
+//! `7e5510608d9b2d0f27cc259afb3f9fe94681229a6b11298c1f703881cb481c6d`.
 //! This ignored, opt-in test reads both artifacts from explicit environment
 //! paths and verifies their hashes before installing or upgrading.
 
@@ -25,6 +27,8 @@ const PREDECESSOR_WASM_SHA256: &str =
     "74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae";
 const CANDIDATE_WASM_SHA256: &str =
     "d1bc983879dc4a385ec87a398168f798802027b428bbef0f1c8382435ed96c6e";
+const OCTOBER_CANDIDATE_WASM_SHA256: &str =
+    "7e5510608d9b2d0f27cc259afb3f9fe94681229a6b11298c1f703881cb481c6d";
 const PRE_UPGRADE_ALLOWANCE: u128 = 1_234_567;
 const LP_TRANSFER: u128 = 100_000;
 
@@ -263,11 +267,19 @@ fn global_payout_inventory(h: &ThreePoolHarness) -> Vec<PayoutEntitlement> {
 #[test]
 #[ignore = "opt-in exact production Wasm upgrade; requires PocketIC and both pinned artifact paths"]
 fn exact_installed_predecessor_upgrade_preserves_populated_pool_and_payouts() {
-    let predecessor_wasm = read_hash_pinned_wasm(
-        "RUMI_3POOL_INSTALLED_PREDECESSOR_WASM",
-        PREDECESSOR_WASM_SHA256,
-    );
-    let candidate_wasm = read_hash_pinned_wasm("RUMI_3POOL_CANDIDATE_WASM", CANDIDATE_WASM_SHA256);
+    verify_upgrade(PREDECESSOR_WASM_SHA256, CANDIDATE_WASM_SHA256);
+}
+
+#[test]
+#[ignore = "opt-in exact production Wasm upgrade; requires PocketIC and both pinned artifact paths"]
+fn october_candidate_upgrade_preserves_populated_pool_and_payouts() {
+    verify_upgrade(CANDIDATE_WASM_SHA256, OCTOBER_CANDIDATE_WASM_SHA256);
+}
+
+fn verify_upgrade(predecessor_hash: &str, candidate_hash: &str) {
+    let predecessor_wasm =
+        read_hash_pinned_wasm("RUMI_3POOL_INSTALLED_PREDECESSOR_WASM", predecessor_hash);
+    let candidate_wasm = read_hash_pinned_wasm("RUMI_3POOL_CANDIDATE_WASM", candidate_hash);
 
     // This deploys the exact predecessor and seeds its pool through the real
     // public add_liquidity endpoint against the shared PocketIC ledgers.
