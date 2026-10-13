@@ -1,11 +1,11 @@
-//! Upgrade the exact installed PR #483 3pool production Wasm with populated
+//! Upgrade the exact installed 3pool production Wasm with populated
 //! state into the exact candidate production Wasm under review.
 //!
-//! The predecessor fixture is reproducibly rebuilt from PR #483 merge commit
-//! `7b2d0dbf690fa0a64007e99ba016a89e31f61491`; its SHA-256 matches the
-//! installed module (`9797bf2454923ef41d6ef6a003435e0430aaa2b2b413734c6d9e6e921889dfc0`).
+//! The predecessor fixture is reproducibly rebuilt from commit `5f776101`
+//! (the source base of PR #541); its SHA-256 matches the installed module
+//! (`74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae`).
 //! The candidate is the production artifact at SHA-256
-//! `74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae`.
+//! `d1bc983879dc4a385ec87a398168f798802027b428bbef0f1c8382435ed96c6e`.
 //! This ignored, opt-in test reads both artifacts from explicit environment
 //! paths and verifies their hashes before installing or upgrading.
 
@@ -17,14 +17,15 @@ use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc2::allowance::{Allowance, AllowanceArgs};
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 use pocket_ic::WasmResult;
+use rumi_3pool::payouts::{GlobalPayoutInventoryPage, PayoutEntitlement};
 use rumi_3pool::types::{PoolStatus, ThreePoolError, ThreePoolPendingClaim};
 use sha2::{Digest, Sha256};
 
 const PREDECESSOR_WASM_SHA256: &str =
-    "9797bf2454923ef41d6ef6a003435e0430aaa2b2b413734c6d9e6e921889dfc0";
-const CANDIDATE_WASM_SHA256: &str =
     "74a81602f61ee08023bc1a6746f4961aebcdb8c7f98b0019c9eefbb63a3998ae";
-const LEGACY_ALLOWANCE: u128 = 1_234_567;
+const CANDIDATE_WASM_SHA256: &str =
+    "d1bc983879dc4a385ec87a398168f798802027b428bbef0f1c8382435ed96c6e";
+const PRE_UPGRADE_ALLOWANCE: u128 = 1_234_567;
 const LP_TRANSFER: u128 = 100_000;
 
 fn reply<T: for<'de> candid::Deserialize<'de> + candid::CandidType>(result: WasmResult) -> T {
@@ -230,9 +231,38 @@ fn pending_claims(
         .collect()
 }
 
+fn global_payout_inventory(h: &ThreePoolHarness) -> Vec<PayoutEntitlement> {
+    let mut entries = Vec::new();
+    let mut after_id = None;
+    loop {
+        let page: Result<GlobalPayoutInventoryPage, ThreePoolError> = reply(
+            h.pic
+                .query_call(
+                    h.three_pool,
+                    h.admin,
+                    "get_global_payout_inventory",
+                    encode_args((after_id, 20u64)).unwrap(),
+                )
+                .expect("global payout inventory query"),
+        );
+        let page = page.expect("admin can read the global payout inventory");
+        entries.extend(page.entries);
+        match page.next_cursor {
+            Some(cursor) => {
+                assert!(after_id.is_none_or(|previous| cursor > previous));
+                after_id = Some(cursor);
+            }
+            None => {
+                assert_eq!(entries.len() as u64, page.total_count);
+                return entries;
+            }
+        }
+    }
+}
+
 #[test]
 #[ignore = "opt-in exact production Wasm upgrade; requires PocketIC and both pinned artifact paths"]
-fn exact_installed_predecessor_upgrade_preserves_populated_pool_and_cuts_over_allowances_once() {
+fn exact_installed_predecessor_upgrade_preserves_populated_pool_and_payouts() {
     let predecessor_wasm = read_hash_pinned_wasm(
         "RUMI_3POOL_INSTALLED_PREDECESSOR_WASM",
         PREDECESSOR_WASM_SHA256,
@@ -245,8 +275,8 @@ fn exact_installed_predecessor_upgrade_preserves_populated_pool_and_cuts_over_al
     let spender = Principal::self_authenticating(&[51, 52, 53]);
     let shareholder = Principal::self_authenticating(&[54, 55, 56]);
 
-    // Seed a second LP owner, an allowance that must be invalidated, and
-    // accrued admin fees before taking the pre-upgrade snapshot.
+    // Seed a second LP owner, a valid post-cutover allowance, and accrued
+    // admin fees before taking the pre-upgrade snapshot.
     let transfer = icrc_ledger_types::icrc1::transfer::TransferArg {
         from_subaccount: None,
         to: Account {
@@ -269,8 +299,8 @@ fn exact_installed_predecessor_upgrade_preserves_populated_pool_and_cuts_over_al
             .expect("LP transfer update"),
     );
     transfer_result.expect("seed second LP shareholder");
-    approve_lp(&h, spender, LEGACY_ALLOWANCE);
-    assert_eq!(allowance(&h, h.user, spender), LEGACY_ALLOWANCE);
+    approve_lp(&h, spender, PRE_UPGRADE_ALLOWANCE);
+    assert_eq!(allowance(&h, h.user, spender), PRE_UPGRADE_ALLOWANCE);
 
     let swap: Result<u128, ThreePoolError> = reply(
         h.pic
@@ -294,6 +324,11 @@ fn exact_installed_predecessor_upgrade_preserves_populated_pool_and_cuts_over_al
     let user_tokens_before = ledger_balances(&h, h.user);
     let pool_tokens_before = ledger_balances(&h, h.three_pool);
     let claims_before = pending_claims(&h);
+    let payouts_before = global_payout_inventory(&h);
+    assert!(
+        !payouts_before.is_empty(),
+        "swap seeds a retained payout identity"
+    );
     eprintln!(
         "installed predecessor pending claim count: {}",
         claims_before.len()
@@ -331,8 +366,8 @@ fn exact_installed_predecessor_upgrade_preserves_populated_pool_and_cuts_over_al
     );
     assert_eq!(
         allowance(&h, h.user, spender),
-        0,
-        "ambiguous legacy LP allowance is invalidated once"
+        PRE_UPGRADE_ALLOWANCE,
+        "valid pre-upgrade LP allowance survives"
     );
     assert_eq!(ledger_balances(&h, h.user), user_tokens_before);
     assert_eq!(ledger_balances(&h, h.three_pool), pool_tokens_before);
@@ -341,9 +376,14 @@ fn exact_installed_predecessor_upgrade_preserves_populated_pool_and_cuts_over_al
         claims_before,
         "claims exposed by the installed predecessor survive"
     );
+    assert_eq!(
+        global_payout_inventory(&h),
+        payouts_before,
+        "global payout identities survive"
+    );
 
-    // A newly approved allowance is post-cutover data. A second upgrade must
-    // retain it, proving the legacy clear is one-time rather than every-upgrade.
+    // A newly approved allowance and the payout inventory must survive a
+    // second candidate-to-candidate upgrade as well.
     const POST_CUTOVER_ALLOWANCE: u128 = 765_432;
     approve_lp(&h, spender, POST_CUTOVER_ALLOWANCE);
     assert_eq!(allowance(&h, h.user, spender), POST_CUTOVER_ALLOWANCE);
@@ -360,6 +400,7 @@ fn exact_installed_predecessor_upgrade_preserves_populated_pool_and_cuts_over_al
     assert_eq!(total_supply(&h), supply_before);
     assert_eq!(pool_status(&h).balances, reserves_before);
     assert_eq!(admin_fees(&h), admin_fees_before);
+    assert_eq!(global_payout_inventory(&h), payouts_before);
     assert_eq!(ledger_balances(&h, h.user), user_tokens_before);
     assert_eq!(ledger_balances(&h, h.three_pool), pool_tokens_before);
 }
