@@ -104,6 +104,26 @@ type WithdrawResult = record {
   fee: nat64;
 };
 
+type WithdrawalIntentStatus = variant {
+  InFlight;
+  TransportAmbiguous;
+  ConfirmedUnrepresentable : record { block_index : text };
+  Held : record { reason : text };
+  Rejected : record { error : text };
+  Completed : WithdrawResult;
+};
+
+type WithdrawalIntentStatusView = record {
+  request_id : nat64;
+  asset_type : AssetType;
+  amount : nat64;
+  to : principal;
+  ledger : principal;
+  created_at_time : nat64;
+  may_have_committed : bool;
+  status : WithdrawalIntentStatus;
+};
+
 type TreasuryAction = variant {
   Deposit : record { deposit_type : DepositType; asset_type : AssetType; amount : nat64 };
   Withdraw : record { asset_type : AssetType; amount : nat64; to : principal };
@@ -127,6 +147,9 @@ service : (TreasuryInitArgs) -> {
   cycles_status: () -> (CycleManagerCyclesStatus) query;
   cycle_manager_metrics: () -> (vec CycleManagerMetric) query;
   get_status: () -> (TreasuryStatus) query;
+  get_withdrawal_intent_status: (nat64) -> (variant { Ok : opt WithdrawalIntentStatusView; Err : text }) query;
+  get_active_withdrawal_intent_status: () -> (variant { Ok : opt WithdrawalIntentStatusView; Err : text }) query;
+  is_caller_controller: () -> (bool) query;
   get_deposits: (opt nat64, opt nat64) -> (vec DepositRecord) query;
   get_events: (opt nat64, opt nat64) -> (vec TreasuryEvent) query;
   get_event_count: () -> (nat64) query;

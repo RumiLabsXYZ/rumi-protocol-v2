@@ -1,6 +1,7 @@
 use crate::types::{
     AssetBalance, AssetType, BalancesSnapshot, DepositRecord, ExternalTokenDepositArgs,
     ExternalTokenDepositBackfill, TreasuryAction, TreasuryEvent, TreasuryInitArgs,
+    WithdrawalIntent,
 };
 use candid::Principal;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
@@ -36,6 +37,7 @@ const MEM_EXTERNAL_TOKEN_LEGACY_BLOCKS: u8 = 11; // StableBTreeMap<(asset, block
 const MEM_EXTERNAL_TOKEN_BACKFILL: u8 = 12; // StableCell<ExternalTokenDepositBackfill>
 const MEM_EXTERNAL_TOKEN_INDEXED_THROUGH: u8 = 13; // StableCell<u64>
 const MEM_EXTERNAL_TOKEN_RECEIPTS_BY_ID: u8 = 14; // StableBTreeMap<deposit ID, receipt>
+const MEM_WITHDRAWAL_INTENTS: u8 = 15; // StableBTreeMap<request ID, durable withdrawal intent>
 
 const PRINCIPAL_KEY_MAX_BYTES: usize = 29;
 const EXTERNAL_RECEIPT_KEY_BYTES: usize = 1 + PRINCIPAL_KEY_MAX_BYTES + 8;
@@ -44,6 +46,9 @@ const EXTERNAL_RECEIPT_KEY_BYTES: usize = 1 + PRINCIPAL_KEY_MAX_BYTES + 8;
 /// treasury deposit log.
 pub const ICUSD_BLOCK_BACKFILL_BATCH_SIZE: usize = 100;
 pub const EXTERNAL_TOKEN_BLOCK_BACKFILL_BATCH_SIZE: usize = 100;
+/// Permanent withdrawal IDs cannot be pruned without losing at-most-once
+/// protection. Stop accepting new identities before journal growth is unbounded.
+const MAX_WITHDRAWAL_INTENTS: u64 = 10_000;
 
 /// Every stable memory slot this canister owns, paired with a human label.
 /// Single source of truth for the layout; iterated by the uniqueness test.
@@ -84,6 +89,7 @@ const MEMORY_LAYOUT: &[(u8, &str)] = &[
         MEM_EXTERNAL_TOKEN_RECEIPTS_BY_ID,
         "external_token_receipts_by_id",
     ),
+    (MEM_WITHDRAWAL_INTENTS, "withdrawal_intents"),
 ];
 
 /// A block is marked ambiguous when more than one historic ICUSD deposit used
@@ -253,6 +259,17 @@ impl ic_stable_structures::Storable for ExternalTokenDepositBackfill {
         ic_stable_structures::storable::Bound::Unbounded;
 }
 
+impl ic_stable_structures::Storable for WithdrawalIntent {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(candid::encode_one(self).expect("withdrawal intent Candid encoding"))
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        candid::decode_one(&bytes).expect("withdrawal intent Candid decoding")
+    }
+    const BOUND: ic_stable_structures::storable::Bound =
+        ic_stable_structures::storable::Bound::Unbounded;
+}
+
 /// Treasury state that persists across upgrades
 pub struct TreasuryState {
     /// All deposit records, indexed by deposit ID
@@ -269,10 +286,12 @@ pub struct TreasuryState {
     pub events: StableBTreeMap<u64, TreasuryEvent, Memory>,
     /// Next available event ID
     pub next_event_id: u64,
-    /// First-attempt `created_at_time` per withdrawal `request_id` (ICRC-003).
-    /// Persisted so a retry after an upgrade still reuses the original
-    /// timestamp and hits the ledger's dedup window.
+    /// Legacy timestamp-only withdrawal records. They are retained for
+    /// compatibility and block ID reuse; presence does not prove payment state.
     pub withdrawal_created_at: StableBTreeMap<u64, u64, Memory>,
+    /// Permanent request identities and transfer tuples. Never pruned: an
+    /// expired ambiguous request must not authorize a second ledger payment.
+    pub withdrawal_intents: StableBTreeMap<u64, WithdrawalIntent, Memory>,
     /// Backend mint block → deposit ID for exactly-once Stability Pool
     /// unallocated-interest reports.
     pub sp_unallocated_interest_blocks: StableBTreeMap<u64, u64, Memory>,
@@ -441,6 +460,9 @@ impl TreasuryState {
                 next_event_id: 1,
                 withdrawal_created_at: StableBTreeMap::init(
                     memory_manager.get(MemoryId::new(MEM_WITHDRAWAL_CREATED_AT)),
+                ),
+                withdrawal_intents: StableBTreeMap::init(
+                    memory_manager.get(MemoryId::new(MEM_WITHDRAWAL_INTENTS)),
                 ),
                 sp_unallocated_interest_blocks: StableBTreeMap::init(
                     memory_manager.get(MemoryId::new(MEM_SP_UNALLOCATED_INTEREST_BLOCKS)),
@@ -1188,38 +1210,123 @@ impl TreasuryState {
         self.persist_balances();
     }
 
-    /// ICRC-003: the `created_at_time` to use for this withdrawal request.
-    /// The first attempt's timestamp is persisted per `request_id` and reused
-    /// on retries so the ledger's `(created_at_time, memo, ...)` dedup
-    /// actually fires. Entries older than the ledger dedup window can no
-    /// longer dedup (the original transaction has expired), so they are
-    /// replaced with `now`; expired entries are pruned to bound growth.
-    pub fn created_at_time_for_request(&mut self, request_id: u64, now: u64) -> u64 {
-        // ICP/ICRC ledgers keep transactions for dedup for 24 hours.
-        const LEDGER_DEDUP_WINDOW_NANOS: u64 = 24 * 60 * 60 * 1_000_000_000;
-        let cutoff = now.saturating_sub(LEDGER_DEDUP_WINDOW_NANOS);
-        // Withdrawals are controller-only and rare, so a full scan is cheap.
-        let expired: Vec<u64> = self
-            .withdrawal_created_at
-            .iter()
-            .filter(|(_, t)| *t < cutoff)
-            .map(|(id, _)| id)
-            .collect();
-        for id in expired {
-            self.withdrawal_created_at.remove(&id);
+    /// Atomically verifies request identity, reserves the balance once, and
+    /// installs its permanent journal row. Existing rows are returned without
+    /// another debit; timestamp-only legacy rows cannot prove no payment.
+    pub fn reserve_withdrawal_intent(
+        &mut self,
+        intent: WithdrawalIntent,
+    ) -> Result<(WithdrawalIntent, bool), String> {
+        if let Some(existing) = self.withdrawal_intents.get(&intent.request_id) {
+            if existing.caller != intent.caller
+                || existing.asset_type != intent.asset_type
+                || existing.amount != intent.amount
+                || existing.to != intent.to
+                || existing.requested_memo != intent.requested_memo
+            {
+                return Err("Withdrawal request_id is already bound to a different request".into());
+            }
+            return Ok((existing, false));
         }
-        if let Some(t) = self.withdrawal_created_at.get(&request_id) {
-            return t;
+        if self.active_withdrawal_intent().is_some() {
+            return Err("An unresolved withdrawal already exists; operator reconciliation is required before another withdrawal".into());
         }
-        self.withdrawal_created_at.insert(request_id, now);
-        now
+        if self.withdrawal_created_at.get(&intent.request_id).is_some() {
+            return Err(
+                "Legacy withdrawal timestamp exists without payment proof; request is held".into(),
+            );
+        }
+        if self.withdrawal_intents.len() >= MAX_WITHDRAWAL_INTENTS {
+            return Err("Withdrawal intent journal is full; operator recovery is required".into());
+        }
+
+        self.withdraw(intent.asset_type.clone(), intent.amount)?;
+        self.withdrawal_created_at
+            .insert(intent.request_id, intent.created_at_time);
+        self.withdrawal_intents
+            .insert(intent.request_id, intent.clone());
+        Ok((intent, true))
     }
 
-    /// Drop the persisted `created_at_time` for a request whose timestamp the
-    /// ledger rejected (TooOld/CreatedInFuture), so the next attempt gets a
-    /// fresh one instead of failing forever.
-    pub fn clear_request_created_at(&mut self, request_id: u64) {
-        self.withdrawal_created_at.remove(&request_id);
+    pub fn withdrawal_intent(&self, request_id: u64) -> Option<WithdrawalIntent> {
+        self.withdrawal_intents.get(&request_id)
+    }
+
+    /// At most one nonterminal withdrawal may exist. New IDs are blocked until
+    /// an unresolved payment is positively reconciled by an operator.
+    pub fn active_withdrawal_intent(&self) -> Option<WithdrawalIntent> {
+        self.withdrawal_intents.iter().find_map(|(_, intent)| {
+            (!matches!(
+                intent.status,
+                crate::types::WithdrawalIntentStatus::Completed(_)
+                    | crate::types::WithdrawalIntentStatus::Rejected { .. }
+            ))
+            .then_some(intent)
+        })
+    }
+
+    pub fn set_withdrawal_intent(&mut self, intent: WithdrawalIntent) {
+        self.withdrawal_intents.insert(intent.request_id, intent);
+    }
+
+    /// Record confirmed completion and append exactly one audit event.
+    pub fn complete_withdrawal_intent(
+        &mut self,
+        request_id: u64,
+        result: crate::types::WithdrawResult,
+        caller: Principal,
+        now: u64,
+    ) -> Result<crate::types::WithdrawResult, String> {
+        let mut intent = self
+            .withdrawal_intents
+            .get(&request_id)
+            .ok_or_else(|| "Withdrawal intent disappeared".to_string())?;
+        if intent.caller != caller {
+            return Err("Withdrawal completion caller does not match the intent".into());
+        }
+        if let crate::types::WithdrawalIntentStatus::Completed(ref existing) = intent.status {
+            return Ok(existing.clone());
+        }
+        if !matches!(
+            intent.status,
+            crate::types::WithdrawalIntentStatus::InFlight
+                | crate::types::WithdrawalIntentStatus::TransportAmbiguous
+        ) {
+            return Err(
+                "Withdrawal intent cannot transition to completed from its current state".into(),
+            );
+        }
+        intent.may_have_committed = true;
+        intent.status = crate::types::WithdrawalIntentStatus::Completed(result.clone());
+        self.withdrawal_intents.insert(request_id, intent.clone());
+        self.push_event_at(
+            caller,
+            TreasuryAction::Withdraw {
+                asset_type: intent.asset_type,
+                amount: intent.amount,
+                to: intent.to,
+            },
+            now,
+        );
+        Ok(result)
+    }
+
+    /// A typed ledger rejection proves the submitted transfer did not apply.
+    /// Restore only once, and make this request ID terminal; a caller wishing
+    /// to try again must submit a fresh ID. Never clear a prior ambiguity.
+    pub fn reject_withdrawal_intent(&mut self, request_id: u64, error: String) {
+        if let Some(mut intent) = self.withdrawal_intents.get(&request_id) {
+            if !intent.may_have_committed
+                && matches!(
+                    intent.status,
+                    crate::types::WithdrawalIntentStatus::InFlight
+                )
+            {
+                self.restore_balance(&intent.asset_type, intent.amount);
+                intent.status = crate::types::WithdrawalIntentStatus::Rejected { error };
+                self.withdrawal_intents.insert(request_id, intent);
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1362,6 +1469,8 @@ pub fn restore_state() {
             // Re-open withdrawal created_at_time map
             let withdrawal_created_at: StableBTreeMap<u64, u64, Memory> =
                 StableBTreeMap::init(memory_manager.get(MemoryId::new(MEM_WITHDRAWAL_CREATED_AT)));
+            let withdrawal_intents: StableBTreeMap<u64, WithdrawalIntent, Memory> =
+                StableBTreeMap::init(memory_manager.get(MemoryId::new(MEM_WITHDRAWAL_INTENTS)));
             let sp_unallocated_interest_blocks: StableBTreeMap<u64, u64, Memory> =
                 StableBTreeMap::init(
                     memory_manager.get(MemoryId::new(MEM_SP_UNALLOCATED_INTEREST_BLOCKS)),
@@ -1508,6 +1617,7 @@ pub fn restore_state() {
                 events,
                 next_event_id,
                 withdrawal_created_at,
+                withdrawal_intents,
                 sp_unallocated_interest_blocks,
                 sp_unallocated_interest_transfer_blocks,
                 icusd_deposit_blocks,

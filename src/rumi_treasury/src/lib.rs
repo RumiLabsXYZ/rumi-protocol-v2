@@ -12,10 +12,11 @@ use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use state::{init_state, restore_state, with_state, with_state_mut};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use types::{
     AssetType, DepositArgs, DepositRecord, DepositType, ExternalTokenDepositArgs, TreasuryAction,
     TreasuryEvent, TreasuryInitArgs, TreasuryStatus, WithdrawArgs, WithdrawResult,
+    WithdrawalIntent, WithdrawalIntentStatus,
 };
 
 // Declare log buffer for debugging
@@ -25,12 +26,39 @@ declare_log_buffer!(name = LOG, capacity = 1000);
 /// ledger's `icrc1_fee` query cannot be reached. Erring high keeps the
 /// treasury solvent (we send slightly less) rather than risking an over-send.
 const DEFAULT_LEDGER_FEE_E8S: u64 = 10_000;
+// ICRC-1 ledgers must support at least 32 bytes; stay within that interoperable
+// floor so a valid Treasury memo cannot become an avoidable ambiguous hold.
+const MAX_WITHDRAWAL_MEMO_BYTES: usize = 32;
 
 thread_local! {
     /// Per-ledger transfer-fee cache, populated lazily from `icrc1_fee` on the
     /// first withdrawal against a ledger. Heap-only (not persisted), so it is
     /// simply re-warmed after an upgrade.
     static LEDGER_FEES: RefCell<HashMap<Principal, u64>> = RefCell::new(HashMap::new());
+    /// Prevent simultaneous same-ID ledger dispatches in one canister
+    /// incarnation. A persisted InFlight row after upgrade is treated as
+    /// ambiguous and never automatically dispatched again.
+    static WITHDRAWALS_IN_FLIGHT: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
+}
+
+struct WithdrawalGuard(u64);
+impl WithdrawalGuard {
+    fn acquire(request_id: u64) -> Result<Self, String> {
+        WITHDRAWALS_IN_FLIGHT.with(|ids| {
+            if ids.borrow_mut().insert(request_id) {
+                Ok(Self(request_id))
+            } else {
+                Err("Withdrawal request_id is already being processed".into())
+            }
+        })
+    }
+}
+impl Drop for WithdrawalGuard {
+    fn drop(&mut self) {
+        WITHDRAWALS_IN_FLIGHT.with(|ids| {
+            ids.borrow_mut().remove(&self.0);
+        });
+    }
 }
 
 /// Fetch a ledger's transfer fee, caching the result per ledger. On query
@@ -46,6 +74,16 @@ async fn ledger_fee(ledger: Principal) -> u64 {
     };
     LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, fee));
     fee
+}
+
+fn refresh_cached_fee_from_bad_fee(ledger: Principal, error: &TransferError) {
+    if let TransferError::BadFee { expected_fee } = error {
+        if let Ok(fee) = expected_fee.0.clone().try_into() {
+            LEDGER_FEES.with(|cache| {
+                cache.borrow_mut().insert(ledger, fee);
+            });
+        }
+    }
 }
 
 /// ICRC-002: amount to put on the wire for a withdrawal of `amount` given the
@@ -431,161 +469,262 @@ fn record_stability_pool_unallocated_interest(
     Ok(deposit_id)
 }
 
-/// Withdraw funds from treasury (controllers only).
-///
-/// Audit Wave-3 (ICRC-002/ICRC-003) hardening:
-/// - The recipient bears the ledger fee: bookkeeping is debited `amount` and
-///   `amount - fee` goes on the wire, so the canister account drops by exactly
-///   `amount` (the fee is queried via `icrc1_fee` with a per-ledger cache and
-///   a conservative fallback, mirroring the AMM's PR #230 fix).
-/// - `created_at_time` is the FIRST attempt's timestamp for this `request_id`,
-///   persisted in stable memory and reused on retries, so the ledger's dedup
-///   window actually catches a re-submitted transfer. `Duplicate` is treated
-///   as success.
-/// - The balance is restored ONLY for clear ledger errors; on a
-///   transport-layer error it stays deducted while a reconciliation hint is
-///   logged for the controller.
+/// Withdraw with a permanent request journal. A newly reserved intent may be
+/// submitted once; unresolved existing intents are held pending reconciliation.
 #[update]
 #[candid_method(update)]
 async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
     ensure_controller()?;
     let caller_principal = caller();
+    let request_id = args
+        .request_id
+        .ok_or_else(|| "An explicit request_id is required for withdrawals".to_string())?;
+    validate_withdrawal_memo(args.memo.as_deref())?;
+    let _guard = WithdrawalGuard::acquire(request_id)?;
 
-    log!(
-        LOG,
-        "Processing withdrawal: {} {:?} to {}",
-        args.amount,
-        args.asset_type,
-        args.to
-    );
-
-    // Resolve the ledger and fee BEFORE debiting, so an unconfigured ledger
-    // or a dust amount can't leave the bookkeeping debited with no transfer.
-    let ledger_principal = with_state(|s| {
-        let config = s.get_config();
-        match args.asset_type {
-            AssetType::ICUSD => Some(config.icusd_ledger),
-            AssetType::ICP => Some(config.icp_ledger),
-            AssetType::CKBTC => config.ckbtc_ledger,
-            AssetType::CKUSDT => config.ckusdt_ledger,
-            AssetType::CKUSDC => config.ckusdc_ledger,
+    let existing = with_state(|s| s.withdrawal_intent(request_id));
+    let intent = if let Some(mut existing) = existing {
+        validate_withdrawal_identity(&existing, caller_principal, &args)?;
+        if matches!(existing.status, WithdrawalIntentStatus::InFlight) {
+            // An InFlight row belongs to a prior invocation or incarnation.
+            // Without ledger-specific positive proof, it cannot be redispatched.
+            existing.may_have_committed = true;
+            existing.status = WithdrawalIntentStatus::TransportAmbiguous;
+            with_state_mut(|s| s.set_withdrawal_intent(existing.clone()));
         }
-    })
-    .ok_or("Ledger not configured for this asset type")?;
-
-    let fee = ledger_fee(ledger_principal).await;
-    let send_amount = withdrawal_send_amount(args.amount, fee)?;
-
-    with_state_mut(|s| s.withdraw(args.asset_type.clone(), args.amount))?;
-
-    let request_id = args.request_id.unwrap_or_else(|| {
-        derive_request_id(&caller_principal, &args.asset_type, args.amount, &args.to)
-    });
-    let created_at_time =
-        with_state_mut(|s| s.created_at_time_for_request(request_id, ic_cdk::api::time()));
-
-    let transfer_args = TransferArg {
-        from_subaccount: None,
-        to: Account {
-            owner: args.to,
-            subaccount: None,
-        },
-        amount: send_amount.into(),
-        fee: None,
-        memo: args
+        match &existing.status {
+            WithdrawalIntentStatus::Completed(result) => return Ok(result.clone()),
+            WithdrawalIntentStatus::Rejected { error } => {
+                return Err(format!("Withdrawal request was rejected: {}", error))
+            }
+            WithdrawalIntentStatus::ConfirmedUnrepresentable { block_index } => {
+                return Err(format!("Transfer confirmed with unrepresentable block index {}; request remains held (request_id={})", block_index, request_id))
+            }
+            WithdrawalIntentStatus::Held { reason } => {
+                return Err(format!("Withdrawal request is held: {}", reason))
+            }
+            WithdrawalIntentStatus::InFlight | WithdrawalIntentStatus::TransportAmbiguous => {
+                return Err(format!("Withdrawal request may have reached the ledger and is held; automatic redispatch is disabled (request_id={})", request_id))
+            }
+        }
+    } else {
+        let ledger = with_state(|s| {
+            let c = s.get_config();
+            match args.asset_type {
+                AssetType::ICUSD => Some(c.icusd_ledger),
+                AssetType::ICP => Some(c.icp_ledger),
+                AssetType::CKBTC => c.ckbtc_ledger,
+                AssetType::CKUSDT => c.ckusdt_ledger,
+                AssetType::CKUSDC => c.ckusdc_ledger,
+            }
+        })
+        .ok_or("Ledger not configured for this asset type")?;
+        let fee = ledger_fee(ledger).await;
+        let send_amount = withdrawal_send_amount(args.amount, fee)?;
+        let memo = args
             .memo
             .clone()
-            .map(|m| m.into_bytes().into())
-            .or_else(|| Some(request_id.to_be_bytes().to_vec().into())),
-        created_at_time: Some(created_at_time),
-    };
-
-    let block_index = match call_ledger_transfer(ledger_principal, transfer_args).await {
-        Ok(block_index) => block_index,
-        Err(LedgerError::Duplicate { duplicate_of }) => {
-            log!(LOG,
-                "Withdrawal returned Duplicate (block {}); treating as success — prior attempt landed",
-                duplicate_of
-            );
-            duplicate_of
-        }
-        Err(LedgerError::Ledger(e)) => {
-            with_state_mut(|s| {
-                // A TooOld/CreatedInFuture rejection means the persisted
-                // timestamp can never be accepted; drop it so the next
-                // attempt gets a fresh one.
-                if matches!(
-                    e,
-                    TransferError::TooOld | TransferError::CreatedInFuture { .. }
-                ) {
-                    s.clear_request_created_at(request_id);
+            .map(String::into_bytes)
+            .unwrap_or_else(|| request_id.to_be_bytes().to_vec());
+        let proposed = WithdrawalIntent {
+            request_id,
+            caller: caller_principal,
+            asset_type: args.asset_type.clone(),
+            amount: args.amount,
+            to: args.to,
+            requested_memo: args.memo.clone(),
+            ledger,
+            send_amount,
+            fee,
+            transfer_memo: memo,
+            created_at_time: ic_cdk::api::time(),
+            may_have_committed: false,
+            status: WithdrawalIntentStatus::InFlight,
+        };
+        let (intent, created) = with_state_mut(|s| s.reserve_withdrawal_intent(proposed))?;
+        validate_withdrawal_identity(&intent, caller_principal, &args)?;
+        if !created {
+            return match &intent.status {
+                WithdrawalIntentStatus::Completed(result) => Ok(result.clone()),
+                WithdrawalIntentStatus::Rejected { error } => {
+                    Err(format!("Withdrawal request was rejected: {}", error))
                 }
-                s.restore_balance(&args.asset_type, args.amount)
-            });
-            return Err(format!("Transfer failed: {:?}", e));
+                WithdrawalIntentStatus::ConfirmedUnrepresentable { block_index } => Err(format!(
+                    "Transfer confirmed with unrepresentable block index {}; request remains held (request_id={})",
+                    block_index, request_id
+                )),
+                WithdrawalIntentStatus::Held { reason } => {
+                    Err(format!("Withdrawal request is held: {}", reason))
+                }
+                WithdrawalIntentStatus::InFlight | WithdrawalIntentStatus::TransportAmbiguous => {
+                    let mut held = intent;
+                    held.may_have_committed = true;
+                    held.status = WithdrawalIntentStatus::TransportAmbiguous;
+                    with_state_mut(|s| s.set_withdrawal_intent(held));
+                    Err(format!("Withdrawal request may have reached the ledger and is held; automatic redispatch is disabled (request_id={})", request_id))
+                }
+            };
         }
-        Err(LedgerError::Transport(msg)) => {
-            log!(LOG,
-                "RECONCILIATION REQUIRED: transport error during withdrawal of {} {:?} to {} (request_id {}). \
-                 Balance NOT restored — the transfer may have committed. Verify on-chain via ledger \
-                 icrc3_get_blocks before retrying or reconciling. Error: {}",
-                args.amount, args.asset_type, args.to, request_id, msg
-            );
-            return Err(format!(
-                "Transport error: {} (reconciliation required, request_id={})",
-                msg, request_id
-            ));
-        }
+        intent
     };
 
-    with_state_mut(|s| {
-        s.push_event(
-            caller_principal,
-            TreasuryAction::Withdraw {
-                asset_type: args.asset_type.clone(),
-                amount: args.amount,
-                to: args.to,
-            },
-        )
-    });
-
-    log!(LOG, "Withdrawal completed, block index: {}", block_index);
-
-    Ok(WithdrawResult {
-        block_index,
-        amount_transferred: send_amount,
-        fee,
-    })
+    match &intent.status {
+        WithdrawalIntentStatus::Completed(result) => return Ok(result.clone()),
+        WithdrawalIntentStatus::Rejected { error } => return Err(format!("Withdrawal request was rejected: {}", error)),
+        WithdrawalIntentStatus::ConfirmedUnrepresentable { block_index } => return Err(format!("Transfer confirmed with unrepresentable block index {}; request remains held (request_id={})", block_index, request_id)),
+        WithdrawalIntentStatus::Held { reason } => return Err(format!("Withdrawal request is held: {}", reason)),
+        WithdrawalIntentStatus::InFlight => {}
+        WithdrawalIntentStatus::TransportAmbiguous => {
+            return Err(format!("Withdrawal request may have reached the ledger and is held; automatic redispatch is disabled (request_id={})", request_id));
+        }
+    }
+    if !withdrawal_intent_is_dispatchable(&intent) {
+        return Err(format!(
+            "Withdrawal request is held pending positive ledger-specific reconciliation (request_id={})",
+            request_id
+        ));
+    }
+    let transfer = TransferArg {
+        from_subaccount: None,
+        to: Account {
+            owner: intent.to,
+            subaccount: None,
+        },
+        amount: intent.send_amount.into(),
+        fee: Some(intent.fee.into()),
+        memo: Some(intent.transfer_memo.clone().into()),
+        created_at_time: Some(intent.created_at_time),
+    };
+    match call_ledger_transfer_exact(intent.ledger, transfer).await {
+        Ok(TransferOutcome::Applied(block)) | Ok(TransferOutcome::Duplicate(block)) => {
+            with_state_mut(|s| {
+                s.complete_withdrawal_intent(
+                    request_id,
+                    WithdrawResult {
+                        block_index: block,
+                        amount_transferred: intent.send_amount,
+                        fee: intent.fee,
+                    },
+                    intent.caller,
+                    ic_cdk::api::time(),
+                )
+            })
+        }
+        Ok(TransferOutcome::ConfirmedUnrepresentable(block)) => {
+            let mut intent = intent;
+            intent.may_have_committed = true;
+            intent.status = WithdrawalIntentStatus::ConfirmedUnrepresentable {
+                block_index: block.clone(),
+            };
+            with_state_mut(|s| s.set_withdrawal_intent(intent));
+            Err(format!("Transfer confirmed with unrepresentable block index {}; request held (request_id={})", block, request_id))
+        }
+        Err(LedgerError::Ledger(error)) => {
+            let message = format!("{:?}", error);
+            refresh_cached_fee_from_bad_fee(intent.ledger, &error);
+            let no_effect = transfer_error_proves_no_effect(&error);
+            if !no_effect || intent.may_have_committed {
+                let mut intent = intent;
+                intent.may_have_committed = true;
+                intent.status = WithdrawalIntentStatus::TransportAmbiguous;
+                with_state_mut(|s| s.set_withdrawal_intent(intent));
+                return Err(format!("Ledger response does not prove that this request had no prior effect; request held (request_id={})", request_id));
+            }
+            with_state_mut(|s| s.reject_withdrawal_intent(request_id, message.clone()));
+            Err(format!("Transfer failed: {}", message))
+        }
+        Err(LedgerError::Transport(error)) => {
+            let mut intent = intent;
+            intent.may_have_committed = true;
+            intent.status = WithdrawalIntentStatus::TransportAmbiguous;
+            with_state_mut(|s| s.set_withdrawal_intent(intent));
+            log!(LOG, "RECONCILIATION REQUIRED: ambiguous withdrawal request {}. Automatic redispatch is disabled absent positive ledger-specific proof. Error: {}", request_id, error);
+            Err(format!(
+                "Transport error: {} (reconciliation required, request_id={})",
+                error, request_id
+            ))
+        }
+    }
 }
 
-/// Derive a stable request_id from withdrawal args when the caller doesn't
-/// supply one. Bucketing the timestamp at one-minute resolution so a
-/// same-minute retry produces the same id (and therefore the same
-/// `created_at_time` at the ledger, enabling dedup).
-fn derive_request_id(
-    caller_principal: &Principal,
-    asset: &AssetType,
-    amount: u64,
-    to: &Principal,
-) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    caller_principal.as_slice().hash(&mut h);
-    format!("{:?}", asset).hash(&mut h);
-    amount.hash(&mut h);
-    to.as_slice().hash(&mut h);
-    let bucket = ic_cdk::api::time() / 60_000_000_000;
-    bucket.hash(&mut h);
-    h.finish()
+fn validate_withdrawal_identity(
+    intent: &WithdrawalIntent,
+    caller: Principal,
+    args: &WithdrawArgs,
+) -> Result<(), String> {
+    if intent.caller != caller
+        || intent.asset_type != args.asset_type
+        || intent.amount != args.amount
+        || intent.to != args.to
+        || intent.requested_memo != args.memo
+    {
+        return Err("Withdrawal request_id is already bound to a different request".into());
+    }
+    Ok(())
+}
+
+fn validate_withdrawal_memo(memo: Option<&str>) -> Result<(), String> {
+    if memo.is_some_and(|memo| memo.len() > MAX_WITHDRAWAL_MEMO_BYTES) {
+        return Err(format!(
+            "Withdrawal memo exceeds {} bytes",
+            MAX_WITHDRAWAL_MEMO_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn withdrawal_intent_is_dispatchable(intent: &WithdrawalIntent) -> bool {
+    !intent.may_have_committed && matches!(intent.status, WithdrawalIntentStatus::InFlight)
 }
 
 /// Distinguishes a clear ledger rejection from an ambiguous transport error.
 /// The withdraw flow restores the bookkeeping balance only on the former.
 enum LedgerError {
-    Duplicate { duplicate_of: u64 },
     Ledger(TransferError),
     Transport(String),
+}
+
+enum TransferOutcome {
+    Applied(u64),
+    Duplicate(u64),
+    ConfirmedUnrepresentable(String),
+}
+
+fn classify_block_index(block: candid::Nat, duplicate: bool) -> TransferOutcome {
+    match block.0.clone().try_into() {
+        Ok(index) if duplicate => TransferOutcome::Duplicate(index),
+        Ok(index) => TransferOutcome::Applied(index),
+        Err(_) => TransferOutcome::ConfirmedUnrepresentable(block.0.to_string()),
+    }
+}
+
+fn transfer_error_proves_no_effect(error: &TransferError) -> bool {
+    matches!(
+        error,
+        TransferError::BadFee { .. }
+            | TransferError::BadBurn { .. }
+            | TransferError::InsufficientFunds { .. }
+            | TransferError::TooOld
+            | TransferError::CreatedInFuture { .. }
+    )
+}
+
+/// Preserve oversized Nat indices as a confirmed-but-unrepresentable result.
+/// Converting them to zero or a typed failure would lose payment evidence.
+async fn call_ledger_transfer_exact(
+    ledger_principal: Principal,
+    args: TransferArg,
+) -> Result<TransferOutcome, LedgerError> {
+    let outer: Result<(Result<candid::Nat, TransferError>,), _> =
+        ic_cdk::call(ledger_principal, "icrc1_transfer", (args,)).await;
+    match outer {
+        Err((code, msg)) => Err(LedgerError::Transport(format!("{:?}: {}", code, msg))),
+        Ok((Ok(block),)) => Ok(classify_block_index(block, false)),
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            Ok(classify_block_index(duplicate_of, true))
+        }
+        Ok((Err(error),)) => Err(LedgerError::Ledger(error)),
+    }
 }
 
 /// Get treasury status
@@ -607,6 +746,59 @@ fn get_status() -> TreasuryStatus {
             is_paused: config.is_paused,
         }
     })
+}
+
+/// Bounded lookup for one durable withdrawal request, restricted to
+/// controllers because it exposes treasury operations and reconciliation state.
+#[query]
+#[candid_method(query)]
+fn get_withdrawal_intent_status(
+    request_id: u64,
+) -> Result<Option<types::WithdrawalIntentStatusView>, String> {
+    ensure_controller()?;
+    Ok(with_state(|s| {
+        s.withdrawal_intent(request_id)
+            .map(|intent| types::WithdrawalIntentStatusView {
+                request_id: intent.request_id,
+                asset_type: intent.asset_type,
+                amount: intent.amount,
+                to: intent.to,
+                ledger: intent.ledger,
+                created_at_time: intent.created_at_time,
+                may_have_committed: intent.may_have_committed,
+                status: intent.status,
+            })
+    }))
+}
+
+/// Return one unresolved withdrawal so controllers can recover the request ID
+/// even if browser-local request storage is lost.
+#[query]
+#[candid_method(query)]
+fn get_active_withdrawal_intent_status() -> Result<Option<types::WithdrawalIntentStatusView>, String>
+{
+    ensure_controller()?;
+    Ok(with_state(|s| {
+        s.active_withdrawal_intent()
+            .map(|intent| types::WithdrawalIntentStatusView {
+                request_id: intent.request_id,
+                asset_type: intent.asset_type,
+                amount: intent.amount,
+                to: intent.to,
+                ledger: intent.ledger,
+                created_at_time: intent.created_at_time,
+                may_have_committed: intent.may_have_committed,
+                status: intent.status,
+            })
+    }))
+}
+
+/// Let controller frontends determine their authorization without comparing
+/// the wallet principal to the Treasury canister principal.
+#[query]
+#[candid_method(query)]
+fn is_caller_controller() -> bool {
+    ic_cdk::api::is_controller(&caller())
 }
 
 #[query]
@@ -684,40 +876,108 @@ fn set_paused(paused: bool) -> Result<(), String> {
     result
 }
 
-/// Make actual ledger transfer call. Distinguishes Duplicate (success),
-/// ledger rejections (caller-recoverable), and transport errors (ambiguous).
-async fn call_ledger_transfer(
-    ledger_principal: Principal,
-    args: TransferArg,
-) -> Result<u64, LedgerError> {
-    let outer: Result<(Result<candid::Nat, TransferError>,), _> =
-        ic_cdk::call(ledger_principal, "icrc1_transfer", (args,)).await;
-
-    match outer {
-        Err((code, msg)) => Err(LedgerError::Transport(format!("{:?}: {}", code, msg))),
-        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
-            let block: u64 = duplicate_of.0.try_into().unwrap_or(0);
-            Err(LedgerError::Duplicate {
-                duplicate_of: block,
-            })
-        }
-        Ok((Err(e),)) => Err(LedgerError::Ledger(e)),
-        Ok((Ok(block_index),)) => {
-            let block_index: u64 = block_index.0.try_into().map_err(|_| {
-                LedgerError::Ledger(TransferError::GenericError {
-                    error_code: candid::Nat::from(501u32),
-                    message: "Block index too large".to_string(),
-                })
-            })?;
-            Ok(block_index)
-        }
-    }
-}
-
+// Export the generated Candid service definition.
 // Export candid interface
 candid::export_service!();
 
 #[query(name = "__get_candid_interface_tmp_hack")]
 fn export_candid() -> String {
     __export_service()
+}
+
+#[cfg(test)]
+mod withdrawal_conversion_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_ok_and_duplicate_blocks_remain_confirmed_and_unrepresentable() {
+        let oversized = candid::Nat::from((u64::MAX as u128) + 1);
+        assert!(matches!(
+            classify_block_index(oversized.clone(), false),
+            TransferOutcome::ConfirmedUnrepresentable(ref value) if value == "18446744073709551616"
+        ));
+        assert!(matches!(
+            classify_block_index(oversized, true),
+            TransferOutcome::ConfirmedUnrepresentable(ref value) if value == "18446744073709551616"
+        ));
+    }
+
+    #[test]
+    fn overlong_utf8_memo_is_rejected_before_intent_reservation() {
+        // `é` is two UTF-8 bytes, so this is 33 bytes despite 17 characters.
+        let memo = format!("{}a", "é".repeat(16));
+        assert_eq!(memo.len(), 33);
+        assert!(validate_withdrawal_memo(Some(&memo)).is_err());
+        assert!(validate_withdrawal_memo(Some(&"a".repeat(32))).is_ok());
+    }
+
+    #[test]
+    fn bad_fee_refreshes_cache_only_for_representable_expected_fee() {
+        let ledger = Principal::from_slice(&[77]);
+        LEDGER_FEES.with(|cache| cache.borrow_mut().insert(ledger, 10));
+        refresh_cached_fee_from_bad_fee(
+            ledger,
+            &TransferError::BadFee {
+                expected_fee: 25u64.into(),
+            },
+        );
+        assert_eq!(
+            LEDGER_FEES.with(|cache| cache.borrow().get(&ledger).copied()),
+            Some(25)
+        );
+
+        refresh_cached_fee_from_bad_fee(
+            ledger,
+            &TransferError::BadFee {
+                expected_fee: candid::Nat::from((u64::MAX as u128) + 1),
+            },
+        );
+        assert_eq!(
+            LEDGER_FEES.with(|cache| cache.borrow().get(&ledger).copied()),
+            Some(25)
+        );
+        LEDGER_FEES.with(|cache| cache.borrow_mut().remove(&ledger));
+    }
+
+    #[test]
+    fn persisted_or_ambiguous_intents_are_never_automatically_redispatched() {
+        let mut intent = WithdrawalIntent {
+            request_id: 99,
+            caller: Principal::from_slice(&[1]),
+            asset_type: AssetType::ICUSD,
+            amount: 100_000,
+            to: Principal::from_slice(&[2]),
+            requested_memo: None,
+            ledger: Principal::from_slice(&[3]),
+            send_amount: 99_990,
+            fee: 10,
+            transfer_memo: 99u64.to_be_bytes().to_vec(),
+            created_at_time: 1,
+            may_have_committed: false,
+            status: WithdrawalIntentStatus::InFlight,
+        };
+        assert!(withdrawal_intent_is_dispatchable(&intent));
+        intent.may_have_committed = true;
+        assert!(!withdrawal_intent_is_dispatchable(&intent));
+        intent.may_have_committed = false;
+        intent.status = WithdrawalIntentStatus::TransportAmbiguous;
+        assert!(!withdrawal_intent_is_dispatchable(&intent));
+    }
+
+    #[test]
+    fn only_known_no_effect_ledger_variants_allow_compensation() {
+        assert!(transfer_error_proves_no_effect(&TransferError::TooOld));
+        assert!(transfer_error_proves_no_effect(
+            &TransferError::CreatedInFuture { ledger_time: 1 }
+        ));
+        assert!(!transfer_error_proves_no_effect(
+            &TransferError::TemporarilyUnavailable
+        ));
+        assert!(!transfer_error_proves_no_effect(
+            &TransferError::GenericError {
+                error_code: 1u64.into(),
+                message: "unknown commit state".into(),
+            }
+        ));
+    }
 }

@@ -110,6 +110,22 @@ export interface WithdrawResult {
   'block_index' : bigint,
   'amount_transferred' : bigint,
 }
+export type WithdrawalIntentStatus = { 'Held' : { 'reason' : string } } |
+  { 'TransportAmbiguous' : null } |
+  { 'Rejected' : { 'error' : string } } |
+  { 'InFlight' : null } |
+  { 'ConfirmedUnrepresentable' : { 'block_index' : string } } |
+  { 'Completed' : WithdrawResult };
+export interface WithdrawalIntentStatusView {
+  'to' : Principal,
+  'request_id' : bigint,
+  'status' : WithdrawalIntentStatus,
+  'asset_type' : AssetType,
+  'may_have_committed' : boolean,
+  'ledger' : Principal,
+  'created_at_time' : bigint,
+  'amount' : bigint,
+}
 export interface _SERVICE {
   'continue_external_token_deposit_backfill' : ActorMethod<
     [],
@@ -138,6 +154,11 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : string }
   >,
+  'get_active_withdrawal_intent_status' : ActorMethod<
+    [],
+    { 'Ok' : [] | [WithdrawalIntentStatusView] } |
+      { 'Err' : string }
+  >,
   'get_deposits' : ActorMethod<
     [[] | [bigint], [] | [bigint]],
     Array<DepositRecord>
@@ -152,6 +173,12 @@ export interface _SERVICE {
     ExternalTokenDepositBackfillStatus
   >,
   'get_status' : ActorMethod<[], TreasuryStatus>,
+  'get_withdrawal_intent_status' : ActorMethod<
+    [bigint],
+    { 'Ok' : [] | [WithdrawalIntentStatusView] } |
+      { 'Err' : string }
+  >,
+  'is_caller_controller' : ActorMethod<[], boolean>,
   'record_external_token_deposit_once' : ActorMethod<
     [ExternalTokenDepositArgs],
     { 'Ok' : bigint } |
