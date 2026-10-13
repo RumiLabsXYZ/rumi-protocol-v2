@@ -1526,6 +1526,7 @@ pub mod native_icp_proof;
 pub mod numeric;
 pub mod payout_history;
 pub mod state;
+pub mod three_usd_inventory;
 pub mod storage;
 pub mod treasury;
 pub mod vault;

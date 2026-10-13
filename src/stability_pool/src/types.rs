@@ -477,6 +477,49 @@ pub struct ThreeUsdReserveAbsorbIntent {
     pub collateral_price_e8s: Option<u64>,
 }
 
+pub const MAX_THREE_USD_ABSORB_INVENTORY_PAGE: u16 = 100;
+pub const MAX_COMPLETED_THREE_USD_ABSORBS: usize = 10_000;
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThreeUsdAbsorbInventoryCursor {
+    AfterPendingVaultId(u64),
+    AfterCompletedAbsorbId(u64),
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThreeUsdAbsorbInventoryEntry {
+    Pending(ThreeUsdReserveAbsorbIntent),
+    CompletedAbsorbId(u64),
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreeUsdAbsorbInventoryPage {
+    pub entries: Vec<ThreeUsdAbsorbInventoryEntry>,
+    pub next_cursor: Option<ThreeUsdAbsorbInventoryCursor>,
+    pub pending_count: u64,
+    pub completed_id_count: u64,
+    pub completed_id_retention_limit: u64,
+    pub completed_rows_retain_ids_only: bool,
+}
+
+pub fn inventory_admin_authorized(caller: Principal, authorized_admins: &[Principal]) -> bool {
+    caller != Principal::anonymous() && authorized_admins.contains(&caller)
+}
+
+#[cfg(test)]
+mod inventory_auth_tests {
+    use super::inventory_admin_authorized;
+    use candid::Principal;
+
+    #[test]
+    fn inventory_auth_rejects_anonymous_and_unconfigured_callers() {
+        let admin = Principal::from_slice(&[1]);
+        assert!(inventory_admin_authorized(admin, &[admin]));
+        assert!(!inventory_admin_authorized(Principal::anonymous(), &[admin]));
+        assert!(!inventory_admin_authorized(Principal::from_slice(&[2]), &[admin]));
+    }
+}
+
 pub const MIN_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS: u64 = 60;
 pub const DEFAULT_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS: u64 = 300;
 pub const DEFAULT_CHAIN_ABSORB_AUTO_MAX_SCAN_PER_CHAIN: u64 = 1;

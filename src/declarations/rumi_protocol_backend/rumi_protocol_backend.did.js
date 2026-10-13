@@ -1653,6 +1653,194 @@ export const idlFactory = ({ IDL }) => {
     'total_e8s' : IDL.Nat,
     'per_chain' : IDL.Vec(SupplyAuditEntry),
   });
+  const ThreeUsdReserveIngressKey = IDL.Record({
+    'vault_id' : IDL.Nat64,
+    'absorb_id' : IDL.Nat64,
+    'stability_pool' : IDL.Principal,
+  });
+  const SpProofLedger = IDL.Variant({
+    'IcusdBurn' : IDL.Null,
+    'ThreePoolTransfer' : IDL.Null,
+    'ThreePoolTransferDefault' : IDL.Null,
+  });
+  const ThreeUsdReserveInventoryCursor = IDL.Variant({
+    'AfterCollateralPayout' : ThreeUsdReserveIngressKey,
+    'AfterPayoutCandidateScan' : ThreeUsdReserveIngressKey,
+    'AfterRefund' : IDL.Nat,
+    'AfterIngress' : ThreeUsdReserveIngressKey,
+    'AfterPayoutOperation' : IDL.Nat,
+    'AfterAbsorbProof' : IDL.Tuple(SpProofLedger, IDL.Nat64),
+  });
+  const ThreeUsdReserveV1Cutover = IDL.Variant({
+    'Reconciled' : IDL.Record({
+      'operator' : IDL.Principal,
+      'resolved_at_ns' : IDL.Nat64,
+      'evidence_sha256' : IDL.Vec(IDL.Nat8),
+    }),
+    'Retired' : IDL.Null,
+    'NoLegacyExposure' : IDL.Null,
+    'Quarantined' : IDL.Null,
+  });
+  const ThreeUsdReserveInventoryContext = IDL.Record({
+    'payout_rows' : IDL.Nat64,
+    'payout_candidate_scan_rows' : IDL.Nat64,
+    'v1_cutover' : ThreeUsdReserveV1Cutover,
+    'proof_result_rows' : IDL.Nat64,
+    'refund_rows' : IDL.Nat64,
+    'payout_operation_rows' : IDL.Nat64,
+    'three_usd_ledger' : IDL.Opt(IDL.Principal),
+    'v2_client_ready' : IDL.Bool,
+    'ingress_enabled' : IDL.Bool,
+    'ingress_rows' : IDL.Nat64,
+    'stability_pool_canister' : IDL.Opt(IDL.Principal),
+    'protocol_3usd_reserves_e8s' : IDL.Nat64,
+  });
+  const ThreeUsdReservePayoutCandidateScan = IDL.Record({
+    'next_index' : IDL.Nat64,
+    'operation_id' : IDL.Nat,
+    'multiple_candidates' : IDL.Bool,
+    'snapshot_log_length' : IDL.Nat64,
+    'candidate_block_index' : IDL.Opt(IDL.Nat64),
+    'snapshot_count' : IDL.Nat8,
+    'attempt_nonce' : IDL.Nat,
+    'start_index' : IDL.Nat64,
+  });
+  const ThreeUsdRefundSource = IDL.Variant({
+    'DefaultAccount' : IDL.Null,
+    'LegacyHashedReserve' : IDL.Null,
+  });
+  const ThreeUsdRefundResolution = IDL.Variant({
+    'ReceiptVerified' : IDL.Record({
+      'block_index' : IDL.Nat64,
+      'fee_e8s' : IDL.Nat64,
+      'reconciled_at_ns' : IDL.Nat64,
+    }),
+  });
+  const PendingThreeUsdRefund = IDL.Record({
+    'dispatch_amount_e8s' : IDL.Opt(IDL.Nat64),
+    'source' : ThreeUsdRefundSource,
+    'dispatch_submitted' : IDL.Bool,
+    'retry_count' : IDL.Nat8,
+    'vault_id' : IDL.Nat64,
+    'resolution' : IDL.Opt(ThreeUsdRefundResolution),
+    'amount_e8s' : IDL.Nat64,
+    'parent_absorb_id' : IDL.Opt(IDL.Nat64),
+    'ledger' : IDL.Principal,
+    'op_nonce' : IDL.Nat,
+    'legacy_dispatch_retryable' : IDL.Bool,
+    'dispatch_block_index' : IDL.Opt(IDL.Nat64),
+    'dispatch_fee_e8s' : IDL.Opt(IDL.Nat64),
+    'stability_pool' : IDL.Principal,
+  });
+  const ThreeUsdReserveIngressRequest = IDL.Record({
+    'three_usd_amount_e8s' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'icusd_debt_covered_e8s' : IDL.Nat64,
+  });
+  const ThreeUsdReserveIngressTuple = IDL.Record({
+    'destination' : Account,
+    'spender_subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'source' : Account,
+    'created_at_time_ns' : IDL.Nat64,
+    'spender_owner' : IDL.Principal,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'fee_e8s' : IDL.Opt(IDL.Nat64),
+    'amount_e8s' : IDL.Nat64,
+    'ledger_fee_e8s' : IDL.Nat64,
+    'parent_absorb_id' : IDL.Nat64,
+    'op_nonce' : IDL.Nat,
+  });
+  const ThreeUsdIngressNonInclusionScan = IDL.Record({
+    'tip_log_length' : IDL.Opt(IDL.Nat64),
+    'tuple' : ThreeUsdReserveIngressTuple,
+    'ledger' : IDL.Principal,
+    'next_block_index' : IDL.Nat64,
+  });
+  const ThreeUsdReserveIngressPhase = IDL.Variant({
+    'PreTransferRejected' : IDL.Record({ 'reason' : IDL.Text }),
+    'TransferConfirmed' : IDL.Record({
+      'tuple' : ThreeUsdReserveIngressTuple,
+      'block_index' : IDL.Nat64,
+    }),
+    'AdmissionPending' : IDL.Null,
+    'Absorbed' : IDL.Record({
+      'result' : StabilityPoolLiquidationResult,
+      'tuple' : ThreeUsdReserveIngressTuple,
+      'block_index' : IDL.Nat64,
+    }),
+    'FailedAfterTransfer' : IDL.Record({
+      'tuple' : ThreeUsdReserveIngressTuple,
+      'block_index' : IDL.Nat64,
+      'error' : IDL.Text,
+    }),
+    'NoTransferProven' : IDL.Record({
+      'tip_log_length' : IDL.Nat64,
+      'tuple' : ThreeUsdReserveIngressTuple,
+    }),
+    'SubmittedOrUnknown' : IDL.Record({
+      'tuple' : ThreeUsdReserveIngressTuple,
+    }),
+  });
+  const ThreeUsdReserveIngressRefund = IDL.Record({
+    'settled_receipt' : IDL.Opt(ThreeUsdReserveRefundReceipt),
+    'op_nonce' : IDL.Nat,
+    'required_net_credit_e8s' : IDL.Nat64,
+  });
+  const ThreeUsdReserveIngressJournal = IDL.Record({
+    'ingress_proof_verified' : IDL.Bool,
+    'request' : ThreeUsdReserveIngressRequest,
+    'non_inclusion_scan' : IDL.Opt(ThreeUsdIngressNonInclusionScan),
+    'protocol_refund_fee_reserve_e8s' : IDL.Nat64,
+    'phase' : ThreeUsdReserveIngressPhase,
+    'refund' : IDL.Opt(ThreeUsdReserveIngressRefund),
+  });
+  const SpWritedownProof = IDL.Record({
+    'block_index' : IDL.Nat64,
+    'ledger_kind' : SpProofLedger,
+    'vault_id_memo' : IDL.Nat64,
+  });
+  const StoredThreeUsdReserveAbsorbResult = IDL.Record({
+    'result' : StabilityPoolLiquidationResult,
+    'vault_id' : IDL.Nat64,
+    'three_usd_amount_e8s' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'caller' : IDL.Principal,
+    'absorb_id' : IDL.Nat64,
+    'proof' : SpWritedownProof,
+    'icusd_debt_covered_e8s' : IDL.Nat64,
+  });
+  const ThreeUsdReserveInventoryEntry = IDL.Variant({
+    'PayoutOperation' : IDL.Record({
+      'key' : ThreeUsdReserveIngressKey,
+      'operation_id' : IDL.Nat,
+    }),
+    'PayoutCandidateScan' : IDL.Record({
+      'key' : ThreeUsdReserveIngressKey,
+      'row' : ThreeUsdReservePayoutCandidateScan,
+    }),
+    'Refund' : IDL.Record({
+      'row' : PendingThreeUsdRefund,
+      'op_nonce' : IDL.Nat,
+    }),
+    'Ingress' : IDL.Record({
+      'key' : ThreeUsdReserveIngressKey,
+      'row' : ThreeUsdReserveIngressJournal,
+    }),
+    'CollateralPayout' : IDL.Record({
+      'key' : ThreeUsdReserveIngressKey,
+      'row' : ThreeUsdReserveCollateralPayout,
+    }),
+    'AbsorbProof' : IDL.Record({
+      'row' : StoredThreeUsdReserveAbsorbResult,
+      'block_index' : IDL.Nat64,
+      'ledger' : SpProofLedger,
+    }),
+  });
+  const ThreeUsdReserveInventoryPage = IDL.Record({
+    'context' : ThreeUsdReserveInventoryContext,
+    'entries' : IDL.Vec(ThreeUsdReserveInventoryEntry),
+    'next_cursor' : IDL.Opt(ThreeUsdReserveInventoryCursor),
+  });
   const TreasuryStats = IDL.Record({
     'pending_treasury_collateral_entries' : IDL.Nat64,
     'liquidation_protocol_share' : IDL.Float64,
@@ -1883,16 +2071,6 @@ export const idlFactory = ({ IDL }) => {
   const Result_25 = IDL.Variant({
     'Ok' : ChainHotWalletBalanceRefresh,
     'Err' : ProtocolError,
-  });
-  const SpProofLedger = IDL.Variant({
-    'IcusdBurn' : IDL.Null,
-    'ThreePoolTransfer' : IDL.Null,
-    'ThreePoolTransferDefault' : IDL.Null,
-  });
-  const SpWritedownProof = IDL.Record({
-    'block_index' : IDL.Nat64,
-    'ledger_kind' : SpProofLedger,
-    'vault_id_memo' : IDL.Nat64,
   });
   const SpBurnRefundReceipt = IDL.Record({
     'refund_memo' : IDL.Vec(IDL.Nat8),
@@ -2501,6 +2679,16 @@ export const idlFactory = ({ IDL }) => {
     'get_three_usd_reserve_ingress_enabled' : IDL.Func(
         [],
         [IDL.Bool],
+        ['query'],
+      ),
+    'get_three_usd_reserve_inventory_page' : IDL.Func(
+        [IDL.Opt(ThreeUsdReserveInventoryCursor), IDL.Nat16],
+        [
+          IDL.Variant({
+            'Ok' : ThreeUsdReserveInventoryPage,
+            'Err' : ProtocolError,
+          }),
+        ],
         ['query'],
       ),
     'get_treasury_principal' : IDL.Func(

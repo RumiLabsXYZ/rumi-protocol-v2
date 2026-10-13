@@ -1119,6 +1119,24 @@ pub fn get_pending_refunds(user: Option<Principal>) -> Vec<PendingRefund> {
     read_state(|s| s.pending_refunds_for(&target))
 }
 
+/// Authorized-admin inventory of pending 3USD intents and retained completed IDs.
+#[query]
+pub fn admin_get_three_usd_absorb_inventory_page(
+    after: Option<ThreeUsdAbsorbInventoryCursor>,
+    limit: u16,
+) -> Result<ThreeUsdAbsorbInventoryPage, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    let authorized = read_state(|state| {
+        inventory_admin_authorized(caller, &state.configuration.authorized_admins)
+    });
+    if !authorized {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    Ok(read_state(|state| {
+        state.three_usd_absorb_inventory_page(after, limit)
+    }))
+}
+
 /// Durable no-recipient interest routes that still need a ledger transfer or
 /// treasury bookkeeping acknowledgement. Public for transparent operations.
 #[query]
