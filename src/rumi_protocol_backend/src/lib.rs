@@ -548,6 +548,7 @@ mod v2_default_account_refund_candidate_tests {
             }),
             protocol_refund_fee_reserve_e8s: amount,
             non_inclusion_scan: None,
+            confirmed_unindexable_block: None,
         };
         let mut state = State::default();
         state.developer_principal = developer;
@@ -1071,6 +1072,7 @@ mod v2_default_account_refund_bad_fee_tests {
                 }),
                 protocol_refund_fee_reserve_e8s: refund.amount_e8s,
                 non_inclusion_scan: None,
+                confirmed_unindexable_block: None,
             },
         );
         state

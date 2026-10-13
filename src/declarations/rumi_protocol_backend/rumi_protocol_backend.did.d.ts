@@ -1773,6 +1773,7 @@ export interface ThreeUsdReserveIngressJournal {
   'non_inclusion_scan' : [] | [ThreeUsdIngressNonInclusionScan],
   'protocol_refund_fee_reserve_e8s' : bigint,
   'phase' : ThreeUsdReserveIngressPhase,
+  'confirmed_unindexable_block' : [] | [bigint],
   'refund' : [] | [ThreeUsdReserveIngressRefund],
 }
 export interface ThreeUsdReserveIngressKey {

@@ -115,13 +115,14 @@ mod treasury_interest_snapshot_tests {
 #[cfg(test)]
 mod three_usd_reserve_ingress_state_tests {
     use super::{
-        confirm_three_usd_ingress_candidate_block, PendingThreeUsdRefund,
+        confirm_three_usd_ingress_candidate_block, record_three_usd_ingress_ledger_receipt,
+        PendingThreeUsdRefund,
         ThreeUsdIngressNonInclusionScan, ThreeUsdRefundSource, ThreeUsdReserveIngressJournal,
         ThreeUsdReserveIngressPhase, ThreeUsdReserveIngressRequest,
         ThreeUsdReserveIngressTuple, PushSweepJournal, PushSweepRequest,
         ThreeUsdReserveV1Cutover,
     };
-    use candid::Principal;
+    use candid::{Nat, Principal};
     use icrc_ledger_types::icrc1::account::Account;
 
     #[derive(serde::Serialize)]
@@ -247,6 +248,7 @@ mod three_usd_reserve_ingress_state_tests {
             refund: None,
             protocol_refund_fee_reserve_e8s: 100,
             non_inclusion_scan: None,
+            confirmed_unindexable_block: None,
         };
         (journal, request, tuple)
     }
@@ -282,6 +284,50 @@ mod three_usd_reserve_ingress_state_tests {
         assert!(confirm_three_usd_ingress_candidate_block(
             &mut confirmed, &request, &tuple, 44,
         ).is_err(), "a terminal/reconciled journal cannot be promoted again");
+    }
+
+    #[test]
+    fn oversized_confirmed_ingress_keeps_full_nat_and_original_tuple_across_snapshot() {
+        let (mut journal, request, tuple) = submitted_journal();
+        journal.non_inclusion_scan = Some(ThreeUsdIngressNonInclusionScan {
+            tuple: tuple.clone(), ledger: request.ledger,
+            tip_log_length: Some(50), next_block_index: 0,
+        });
+        let wide = Nat::from(u64::MAX as u128 + 1);
+        assert_eq!(
+            record_three_usd_ingress_ledger_receipt(&mut journal, &request, &tuple, wide.clone()),
+            Ok(None),
+        );
+        assert!(!journal.ingress_proof_verified);
+        assert!(matches!(&journal.phase,
+            ThreeUsdReserveIngressPhase::SubmittedOrUnknown { tuple: stored }
+                if stored == &tuple));
+        assert_eq!(journal.confirmed_unindexable_block, Some(wide.clone()));
+        assert_eq!(journal.non_inclusion_scan, None);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&journal, &mut bytes).unwrap();
+        let restored: ThreeUsdReserveIngressJournal = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(restored, journal);
+        assert!(record_three_usd_ingress_ledger_receipt(
+            &mut journal, &request, &tuple, Nat::from(1u64),
+        ).is_err(), "a held confirmed transfer cannot dispatch or be overwritten");
+    }
+
+    #[test]
+    fn in_range_ingress_receipt_requires_same_submitted_request_and_tuple() {
+        let (mut journal, request, tuple) = submitted_journal();
+        let mut altered = tuple.clone();
+        altered.memo[0] ^= 1;
+        assert!(record_three_usd_ingress_ledger_receipt(
+            &mut journal, &request, &altered, Nat::from(44u64),
+        ).is_err());
+        assert!(matches!(journal.phase, ThreeUsdReserveIngressPhase::SubmittedOrUnknown { .. }));
+        assert_eq!(
+            record_three_usd_ingress_ledger_receipt(&mut journal, &request, &tuple, Nat::from(44u64)),
+            Ok(Some(44)),
+        );
+        assert!(matches!(journal.phase,
+            ThreeUsdReserveIngressPhase::TransferConfirmed { block_index: 44, .. }));
     }
 
     #[test]
@@ -323,6 +369,7 @@ mod three_usd_reserve_ingress_state_tests {
         ciborium::ser::into_writer(&legacy, &mut bytes).unwrap();
         let decoded: ThreeUsdReserveIngressJournal = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         assert_eq!(decoded.non_inclusion_scan, None);
+        assert_eq!(decoded.confirmed_unindexable_block, None);
     }
 
     #[test]
@@ -2747,6 +2794,11 @@ pub struct ThreeUsdReserveIngressJournal {
     /// an inner ledger TooOld response; it is not itself proof of absence.
     #[serde(default)]
     pub non_inclusion_scan: Option<ThreeUsdIngressNonInclusionScan>,
+    /// Exact ledger success/Duplicate index if it exceeds the current proof
+    /// API's u64 range. Keep the public phase variant unchanged for old Candid
+    /// clients, but refuse dispatch, candidate promotion, and absence scans.
+    #[serde(default)]
+    pub confirmed_unindexable_block: Option<candid::Nat>,
 }
 
 /// Immutable ICRC-1 tuple for the single collateral leg queued by a 3USD
@@ -2932,6 +2984,9 @@ pub fn confirm_three_usd_ingress_candidate_block(
     if &journal.request != expected_request {
         return Err("candidate block request no longer matches the ingress journal".into());
     }
+    if journal.confirmed_unindexable_block.is_some() {
+        return Err("confirmed wide ledger receipt cannot be replaced with a u64 candidate".into());
+    }
     match &journal.phase {
         ThreeUsdReserveIngressPhase::SubmittedOrUnknown { tuple }
             if tuple == expected_tuple =>
@@ -2944,6 +2999,38 @@ pub fn confirm_three_usd_ingress_candidate_block(
             Ok(())
         }
         _ => Err("candidate block cannot promote this ingress journal phase or tuple".into()),
+    }
+}
+
+/// Record the configured ledger's confirmed response for the exact submitted
+/// ICRC-2 tuple. A Nat outside the proof API's u64 range is still a confirmed
+/// transfer: hold the original operation with its full block identity rather
+/// than inventing block zero or retrying with a new tuple.
+pub fn record_three_usd_ingress_ledger_receipt(
+    journal: &mut ThreeUsdReserveIngressJournal,
+    expected_request: &ThreeUsdReserveIngressRequest,
+    expected_tuple: &ThreeUsdReserveIngressTuple,
+    block_index: candid::Nat,
+) -> Result<Option<u64>, String> {
+    if &journal.request != expected_request {
+        return Err("ledger response request no longer matches the ingress journal".into());
+    }
+    if journal.confirmed_unindexable_block.is_some() || !matches!(
+        &journal.phase,
+        ThreeUsdReserveIngressPhase::SubmittedOrUnknown { tuple } if tuple == expected_tuple
+    ) {
+        return Err("ledger response cannot promote this ingress journal phase or tuple".into());
+    }
+    if let Some(block) = block_index.0.to_u64() {
+        journal.phase = ThreeUsdReserveIngressPhase::TransferConfirmed {
+            tuple: expected_tuple.clone(),
+            block_index: block,
+        };
+        Ok(Some(block))
+    } else {
+        journal.confirmed_unindexable_block = Some(block_index);
+        journal.non_inclusion_scan = None;
+        Ok(None)
     }
 }
 

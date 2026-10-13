@@ -1792,6 +1792,7 @@ export const idlFactory = ({ IDL }) => {
     'non_inclusion_scan' : IDL.Opt(ThreeUsdIngressNonInclusionScan),
     'protocol_refund_fee_reserve_e8s' : IDL.Nat64,
     'phase' : ThreeUsdReserveIngressPhase,
+    'confirmed_unindexable_block' : IDL.Opt(IDL.Nat),
     'refund' : IDL.Opt(ThreeUsdReserveIngressRefund),
   });
   const SpWritedownProof = IDL.Record({
