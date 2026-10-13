@@ -26,9 +26,11 @@ declare_log_buffer!(name = LOG, capacity = 1000);
 /// ledger's `icrc1_fee` query cannot be reached. Erring high keeps the
 /// treasury solvent (we send slightly less) rather than risking an over-send.
 const DEFAULT_LEDGER_FEE_E8S: u64 = 10_000;
-// ICRC-1 ledgers must support at least 32 bytes; stay within that interoperable
-// floor so a valid Treasury memo cannot become an avoidable ambiguous hold.
-const MAX_WITHDRAWAL_MEMO_BYTES: usize = 32;
+// ICRC-1 ledgers must support at least 32 bytes. Reserve eight bytes for the
+// request ID in every on-ledger memo, including caller-supplied memos, so two
+// distinct withdrawals cannot share an ICRC-1 deduplication identity when
+// `ic_cdk::api::time()` returns the same timestamp.
+const MAX_WITHDRAWAL_MEMO_BYTES: usize = 24;
 
 thread_local! {
     /// Per-ledger transfer-fee cache, populated lazily from `icrc1_fee` on the
@@ -521,11 +523,7 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
         .ok_or("Ledger not configured for this asset type")?;
         let fee = ledger_fee(ledger).await;
         let send_amount = withdrawal_send_amount(args.amount, fee)?;
-        let memo = args
-            .memo
-            .clone()
-            .map(String::into_bytes)
-            .unwrap_or_else(|| request_id.to_be_bytes().to_vec());
+        let memo = withdrawal_transfer_memo(request_id, args.memo.as_deref());
         let proposed = WithdrawalIntent {
             request_id,
             caller: caller_principal,
@@ -671,6 +669,16 @@ fn validate_withdrawal_memo(memo: Option<&str>) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn withdrawal_transfer_memo(request_id: u64, requested_memo: Option<&str>) -> Vec<u8> {
+    let mut memo =
+        Vec::with_capacity(std::mem::size_of::<u64>() + requested_memo.map_or(0, str::len));
+    memo.extend_from_slice(&request_id.to_be_bytes());
+    if let Some(requested_memo) = requested_memo {
+        memo.extend_from_slice(requested_memo.as_bytes());
+    }
+    memo
 }
 
 fn withdrawal_intent_is_dispatchable(intent: &WithdrawalIntent) -> bool {
@@ -904,11 +912,28 @@ mod withdrawal_conversion_tests {
 
     #[test]
     fn overlong_utf8_memo_is_rejected_before_intent_reservation() {
-        // `é` is two UTF-8 bytes, so this is 33 bytes despite 17 characters.
-        let memo = format!("{}a", "é".repeat(16));
-        assert_eq!(memo.len(), 33);
+        // The first 24 bytes are available to the caller; eight bytes are
+        // reserved for the request ID in the ledger transfer memo.
+        let memo = format!("{}a", "é".repeat(12));
+        assert_eq!(memo.len(), 25);
         assert!(validate_withdrawal_memo(Some(&memo)).is_err());
-        assert!(validate_withdrawal_memo(Some(&"a".repeat(32))).is_ok());
+        assert!(validate_withdrawal_memo(Some(&"a".repeat(24))).is_ok());
+        assert!(validate_withdrawal_memo(Some(&"a".repeat(32))).is_err());
+    }
+
+    #[test]
+    fn distinct_request_ids_have_distinct_wire_memos_even_with_same_custom_memo_and_time() {
+        let first = withdrawal_transfer_memo(7, Some("payroll"));
+        let second = withdrawal_transfer_memo(8, Some("payroll"));
+        assert_ne!(first, second);
+        assert_eq!(&first[..8], &7u64.to_be_bytes());
+        assert_eq!(&second[..8], &8u64.to_be_bytes());
+        assert_eq!(&first[8..], b"payroll");
+        assert_eq!(
+            withdrawal_transfer_memo(7, None),
+            withdrawal_transfer_memo(7, Some(""))
+        );
+        assert_eq!(withdrawal_transfer_memo(7, Some(&"a".repeat(24))).len(), 32);
     }
 
     #[test]
