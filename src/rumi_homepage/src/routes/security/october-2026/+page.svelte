@@ -2,7 +2,7 @@
   const report = {
     date: 'October 12, 2026',
     datetime: '2026-10-12',
-    source: 'protocol code through PR #563 · live observations dated per row',
+    source: 'protocol source through PR #566 · live observations dated per row',
     snapshot: '3pool, Points, and AMM upgrades with module readback · October 12, 2026'
   };
 
@@ -289,7 +289,7 @@
           <p class="issue-line">Status report <span>—</span> <time datetime={report.datetime}>{report.date}</time></p>
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
-            This October 12 live baseline with October 13 source updates through PR #563 separates merged source from mainnet installation. October 12
+            This October 12 live baseline with October 13 source updates through PR #566 separates merged source from mainnet installation. October 12
             readbacks confirmed the 3pool modules from PRs #540, #541, and #553; the latest
             upgrade preserved LP supply and had zero pending claims. The Points upgrade now withholds the unfinished B snapshot
             time, while epoch 18 remains held with its driver off. The AMM recovery upgrade now
@@ -336,7 +336,7 @@
       <div class="section-heading section-heading-wide">
         <p class="section-label">Selected changes</p>
         <h2 id="updates-title">Change and release status</h2>
-        <p>The live readbacks below are dated October 12 unless a row states otherwise. October 13 source addenda are marked separately. The 3pool release includes PR #535 recovery source, the PR #540/#541 artifact, and the now-installed PR #553 input-recovery module. The AMM recovery source from PR #507 is also installed, while PRs #545, #548, and #557 remain merged source only. A source merge and a live installation remain separate states.</p>
+        <p>The live readbacks below are dated October 12 unless a row states otherwise. October 13 source addenda are marked separately. The 3pool release includes PR #535 recovery source, the PR #540/#541 artifact, and the now-installed PR #553 input-recovery module. The AMM recovery source from PR #507 is also installed, while PRs #545, #548, #557, and #566 remain merged source only. A source merge and a live installation remain separate states.</p>
       </div>
       <div class="change-list">
         {#each changes as item}
