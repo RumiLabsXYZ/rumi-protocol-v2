@@ -49,7 +49,7 @@
     {
       pr: 'Live',
       title: 'Backend and bot readback with capped borrowing',
-      summary: 'An October 13 UTC readback found the backend Running at SHA-256 e325ce0d9ee4b5dcd1e68caafc6c69e58ec0d8cae46efd2930dfaed4f97ad352. The latest bot module readback remains dated October 12. The backend reported a 22,000 icUSD protocol-wide new-mint cap and 20,945.39164477 icUSD borrowed, leaving about 1,054.61 icUSD of global headroom at that instant. Two directly served icUSD ledger blocks corroborate a borrower mint and its fee mint. The backend recorded one borrowing-fee notification pending; Treasury still reported its earlier module. These observations do not prove Treasury booked that fee, settle historical operations, or establish that every finding is closed. Per-collateral and vault checks still apply.',
+      summary: 'An October 13 UTC readback found the backend Running at SHA-256 e325ce0d9ee4b5dcd1e68caafc6c69e58ec0d8cae46efd2930dfaed4f97ad352. The latest bot module readback remains dated October 12. The backend reported a 22,000 icUSD protocol-wide new-mint cap and 20,945.39164477 icUSD borrowed, leaving about 1,054.61 icUSD between the cap and reported debt at that instant; in-flight reservations can reduce usable capacity. Two directly served icUSD ledger blocks corroborate a borrower mint and its fee mint. The backend recorded one borrowing-fee notification pending; Treasury still reported its earlier module. These observations do not prove Treasury booked that fee, settle historical operations, or establish that every finding is closed. Per-collateral and vault checks still apply.',
       state: 'Installed · capped borrowing',
       tone: 'installed',
       href: null
@@ -254,7 +254,7 @@
     {
       system: 'Vault borrowing',
       status: 'Temporary cap configured',
-      detail: 'An October 13 UTC query found a 22,000 icUSD protocol-wide new-mint cap and 20,945.39164477 icUSD borrowed, leaving about 1,054.61 icUSD of global headroom at that instant. The ledger served a borrower mint and a matching fee mint; the fee notification remains pending in the backend journal. Treasury booking and historical obligations remain unverified. Individual collateral ceilings and normal checks still apply.'
+      detail: 'An October 13 UTC query found a 22,000 icUSD protocol-wide new-mint cap and 20,945.39164477 icUSD borrowed, leaving about 1,054.61 icUSD between the cap and reported debt at that instant; in-flight reservations can reduce usable capacity. The ledger served a borrower mint and a matching fee mint; the fee notification remains pending in the backend journal. Treasury booking and historical obligations remain unverified. Individual collateral ceilings and normal checks still apply.'
     },
     {
       system: 'Scope',
@@ -289,7 +289,7 @@
             The October 12 readback found upgraded backend and bot modules. Treasury and Stability
             Pool remained on earlier modules, and the Stability Pool pause stayed active.
             Borrowing had resumed under a temporary cap at the October 11 readback. An October 13
-            query found about 1,054.61 icUSD of global headroom and one fee notification awaiting
+            query found about 1,054.61 icUSD between the cap and reported debt before in-flight reservations, and one fee notification awaiting
             Treasury booking. PR #531 remains source-only;
             the backend and Stability Pool changes in PR #532 remain uninstalled. PR #545's
             Stability Pool deposit-intent fix is merged but also remains uninstalled. PR #553's
@@ -299,7 +299,7 @@
         <aside class="report-stamp" aria-label={report.snapshot}>
           <span class="stamp-label">Publication state</span>
           <strong>{report.snapshot}</strong>
-          <p>The October 12 upgrades installed the 3pool recovery modules through PR #553, the Points timing-redaction fix, and the AMM recovery upgrade. Their module hashes and readbacks are listed below. The Stability Pool remained paused and the AMM stayed in maintenance mode, with swaps and deposits held. The October 13 backend readback found a 22,000 icUSD borrowing cap, about 1,054.61 icUSD of global headroom, and one fee notification pending Treasury booking. This page combines time-scoped records; it is not live telemetry.</p>
+          <p>The October 12 upgrades installed the 3pool recovery modules through PR #553, the Points timing-redaction fix, and the AMM recovery upgrade. Their module hashes and readbacks are listed below. The Stability Pool remained paused and the AMM stayed in maintenance mode, with swaps and deposits held. The October 13 backend readback found a 22,000 icUSD borrowing cap, about 1,054.61 icUSD between the cap and reported debt before in-flight reservations, and one fee notification pending Treasury booking. This page combines time-scoped records; it is not live telemetry.</p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
