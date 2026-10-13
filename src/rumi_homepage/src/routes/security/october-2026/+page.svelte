@@ -298,7 +298,7 @@
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
             This report combines an October 12 live baseline with October 13 source and live readbacks through PR #571. October 12
-            readbacks confirmed the 3pool modules from PRs #540, #541, and #553; the latest
+            readbacks confirmed the 3pool modules from PRs #540, #541, and #553; that
             upgrade preserved LP supply and had zero pending claims. The Points upgrade now withholds the unfinished B snapshot
             time, while epoch 18 remains held with its driver off. The AMM recovery upgrade now
             runs with its pre-upgrade pool and ledger state preserved; trading and deposits remain held.
@@ -391,7 +391,7 @@
       </div>
       <p>
         Source review, tests, builds, installation, activation, and live behavior are distinct claims.
-        This page records an October 12 snapshot; it does not publish private audit material or
+        This page records dated October 12 and 13 observations; it does not publish private audit material or
         establish that every finding is closed.
       </p>
     </div>
