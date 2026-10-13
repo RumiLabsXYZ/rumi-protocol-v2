@@ -6,8 +6,9 @@
 // and the IC certified-data interface so that ic-icrc1-index-ng can verify
 // the block chain via `icrc3_get_tip_certificate`.
 
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use crate::icrc3::Icrc3Value;
+use num_traits::Signed;
 
 // ─── Representation-independent hash of ICRC-3 Values ───
 
@@ -66,61 +67,76 @@ pub fn hash_value(value: &Icrc3Value) -> [u8; 32] {
 
 // ─── LEB128 encoding ───
 
+/// Extract canonical unsigned base-128 digits from a little-endian byte
+/// magnitude in one pass. Runtime and allocation are linear in input size.
+fn unsigned_leb128_digits(bytes: &[u8]) -> Vec<u8> {
+    let mut digits = Vec::with_capacity(bytes.len().saturating_mul(8) / 7 + 1);
+    let mut accumulator = 0u16;
+    let mut bit_count = 0u8;
+
+    for byte in bytes {
+        accumulator |= u16::from(*byte) << bit_count;
+        bit_count += 8;
+        while bit_count >= 7 {
+            digits.push((accumulator & 0x7f) as u8);
+            accumulator >>= 7;
+            bit_count -= 7;
+        }
+    }
+    if bit_count > 0 {
+        digits.push((accumulator & 0x7f) as u8);
+    }
+    while digits.len() > 1 && digits.last() == Some(&0) {
+        digits.pop();
+    }
+    if digits.is_empty() {
+        digits.push(0);
+    }
+    digits
+}
+
+/// Encode a Candid Nat as canonical unsigned LEB128 without narrowing it.
 fn leb128_encode_nat(nat: &candid::Nat) -> Vec<u8> {
-    // Convert Nat to bytes (big-endian), then encode as LEB128
-    let bytes = nat.0.to_bytes_be();
-    if bytes.is_empty() || (bytes.len() == 1 && bytes[0] == 0) {
-        return vec![0];
+    let mut digits = unsigned_leb128_digits(&nat.0.to_bytes_le());
+    let last = digits.len() - 1;
+    for digit in &mut digits[..last] {
+        *digit |= 0x80;
     }
-    // Convert big-endian bytes to a u128 for simpler LEB128 encoding.
-    // ICRC-3 amounts fit in u128 (max 2^128).
-    // For larger values, fall back to iterative big-endian processing.
-    if bytes.len() <= 16 {
-        let mut val: u128 = 0;
-        for &b in &bytes {
-            val = (val << 8) | b as u128;
-        }
-        return leb128_encode_u128(val);
-    }
-    // Fallback for very large values: process the BigUint bytes directly
-    // This shouldn't happen in practice for ICRC-3 token amounts
-    leb128_encode_u128(u128::MAX)
+    digits
 }
 
-fn leb128_encode_u128(mut val: u128) -> Vec<u8> {
-    if val == 0 {
-        return vec![0];
-    }
-    let mut buf = Vec::new();
-    while val > 0 {
-        let byte = (val & 0x7f) as u8;
-        val >>= 7;
-        if val > 0 {
-            buf.push(byte | 0x80);
-        } else {
-            buf.push(byte);
-        }
-    }
-    buf
-}
-
+/// Encode a Candid Int as canonical arbitrary-width signed LEB128.
 fn sleb128_encode_int(int: &candid::Int) -> Vec<u8> {
-    use num_traits::ToPrimitive;
-    // For ICRC-3 we only expect non-negative ints, but handle the general case
-    let mut val: i128 = int.0.to_i128().unwrap_or(0);
-    let mut buf = Vec::new();
-    loop {
-        let byte = (val & 0x7f) as u8;
-        val >>= 7;
-        let done = (val == 0 && byte & 0x40 == 0) || (val == -1 && byte & 0x40 != 0);
-        if done {
-            buf.push(byte);
-            break;
-        } else {
-            buf.push(byte | 0x80);
+    let negative = int.0.is_negative();
+    let (_, magnitude) = int.0.to_bytes_le();
+    let mut digits = unsigned_leb128_digits(&magnitude);
+
+    if negative {
+        // Negate the base-128 digits in place (radix complement plus one).
+        let mut carry = 1u16;
+        for digit in &mut digits {
+            let value = (0x7f - u16::from(*digit)) + carry;
+            *digit = (value & 0x7f) as u8;
+            carry = value >> 7;
         }
     }
-    buf
+
+    let last = digits.len() - 1;
+    let sign_bit_set = digits[last] & 0x40 != 0;
+    let needs_sign_extension = if negative {
+        !sign_bit_set
+    } else {
+        sign_bit_set
+    };
+    if needs_sign_extension {
+        digits[last] |= 0x80;
+        digits.push(if negative { 0x7f } else { 0x00 });
+    }
+    let continuation_len = digits.len() - 1;
+    for digit in &mut digits[..continuation_len] {
+        *digit |= 0x80;
+    }
+    digits
 }
 
 // ─── IC Hash Tree ───
@@ -286,4 +302,100 @@ pub fn recompute_hash_chain(blocks: &[crate::types::Icrc3Block]) -> Option<[u8; 
         last_hash = Some(hash_value(&encoded));
     }
     last_hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expected_hash(hex: &str) -> [u8; 32] {
+        let mut bytes = [0; 32];
+        for (index, slot) in bytes.iter_mut().enumerate() {
+            *slot = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn leb_hashes_match_published_icrc3_vectors() {
+        // DFINITY ICRC-3 HASHINGVALUES.md test vectors.
+        assert_eq!(leb128_encode_nat(&candid::Nat::from(42u64)), [0x2a]);
+        assert_eq!(sleb128_encode_int(&candid::Int::from(-42i64)), [0x56]);
+        assert_eq!(
+            hash_value(&Icrc3Value::Int(candid::Int::from(-42i64))),
+            expected_hash("de5a6f78116eca62d7fc5ce159d23ae6b889b365a1739ad2cf36f925a140d0cc"),
+        );
+    }
+
+    #[test]
+    fn sleb_encoder_handles_signed_seven_bit_boundaries() {
+        let vectors = [
+            (-1, vec![0x7f]),
+            (-64, vec![0x40]),
+            (-65, vec![0xbf, 0x7f]),
+            (-128, vec![0x80, 0x7f]),
+            (-129, vec![0xff, 0x7e]),
+            (63, vec![0x3f]),
+            (64, vec![0xc0, 0x00]),
+            (127, vec![0xff, 0x00]),
+            (128, vec![0x80, 0x01]),
+        ];
+        for (value, expected) in vectors {
+            assert_eq!(sleb128_encode_int(&candid::Int::from(value)), expected);
+        }
+    }
+
+    #[test]
+    fn leb_encoders_preserve_arbitrary_width_nat_and_int_values() {
+        let one_nat = candid::Nat::from(1u64).0;
+        let nat_2_200 = candid::Nat(one_nat << 200usize);
+        let one_int = candid::Int::from(1u64).0;
+        let int_2_200 = candid::Int(one_int << 200usize);
+        let int_minus_2_200 = candid::Int(-int_2_200.0.clone());
+
+        let mut positive_bytes = vec![0x80; 28];
+        positive_bytes.push(0x10);
+        let mut negative_bytes = vec![0x80; 28];
+        negative_bytes.push(0x70);
+
+        assert_eq!(leb128_encode_nat(&nat_2_200), positive_bytes);
+        assert_eq!(sleb128_encode_int(&int_2_200), positive_bytes);
+        assert_eq!(sleb128_encode_int(&int_minus_2_200), negative_bytes);
+        assert_eq!(
+            hash_value(&Icrc3Value::Nat(nat_2_200)),
+            expected_hash("1cbb68968241b14574304bfc0517a80258a09a34fec3972716ac9ed542f4abed"),
+        );
+        assert_eq!(
+            hash_value(&Icrc3Value::Int(int_minus_2_200)),
+            expected_hash("b5c7df05c9af015289f46d15cc7df00d2932c90fd6b2a8f9143af16d2e988a40"),
+        );
+    }
+
+    #[test]
+    fn leb_encoders_handle_64kib_integer_magnitudes_with_linear_output_size() {
+        const MAGNITUDE_BYTES: usize = 64 * 1024;
+        let bit_index = MAGNITUDE_BYTES * 8 - 1;
+        let nat = candid::Nat(candid::Nat::from(1u64).0 << bit_index);
+        let positive = candid::Int(candid::Int::from(1u64).0 << bit_index);
+        let negative = candid::Int(-positive.0.clone());
+        let expected_digits = (bit_index + 1 + 6) / 7;
+
+        assert_eq!(leb128_encode_nat(&nat).len(), expected_digits);
+        assert_eq!(sleb128_encode_int(&positive).len(), expected_digits);
+        assert_eq!(sleb128_encode_int(&negative).len(), expected_digits);
+    }
+
+    #[test]
+    fn nested_int_hash_matches_independent_composition_vector() {
+        let one_nat = candid::Nat::from(1u64).0;
+        let nat_2_200 = candid::Nat(one_nat << 200usize);
+        let value = Icrc3Value::Array(vec![
+            Icrc3Value::Int(candid::Int::from(-42i64)),
+            Icrc3Value::Nat(nat_2_200),
+        ]);
+        assert_eq!(
+            hash_value(&value),
+            expected_hash("079ec84d9858582abd980b87ae3fc5349b918ee6fd6bd32697abbaa618bce713"),
+        );
+    }
 }
