@@ -9386,6 +9386,21 @@ fn get_pending_3usd_refunds() -> Vec<LegacyPendingThreeUsdRefund> {
     }).collect())
 }
 
+/// Developer-only raw inventory of retained 3USD reserve refund, V2 ingress,
+/// proof-result, and payout reconciliation rows. Terminal rows remain visible.
+#[candid_method(query)]
+#[query]
+fn get_three_usd_reserve_inventory_page(
+    after: Option<rumi_protocol_backend::three_usd_inventory::ThreeUsdReserveInventoryCursor>,
+    limit: u16,
+) -> Result<
+    rumi_protocol_backend::three_usd_inventory::ThreeUsdReserveInventoryPage,
+    ProtocolError,
+> {
+    rumi_protocol_backend::three_usd_inventory::page(ic_cdk::caller(), after, limit)
+        .map_err(ProtocolError::GenericError)
+}
+
 /// Net 3USD principal retained in protocol reserves from stability pool liquidations (e8s).
 #[query]
 #[candid_method(query)]

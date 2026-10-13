@@ -35,6 +35,32 @@ export const idlFactory = ({ IDL }) => {
     'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
     'InsufficientPoolBalance' : IDL.Null,
   });
+  const ThreeUsdAbsorbInventoryCursor = IDL.Variant({
+    'AfterCompletedAbsorbId' : IDL.Nat64,
+    'AfterPendingVaultId' : IDL.Nat64,
+  });
+  const ThreeUsdReserveAbsorbIntent = IDL.Record({
+    'collateral_price_e8s' : IDL.Opt(IDL.Nat64),
+    'vault_id' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'collateral_ledger' : IDL.Opt(IDL.Principal),
+    'absorb_id' : IDL.Nat64,
+    'collateral_type' : IDL.Opt(IDL.Principal),
+    'amount' : IDL.Nat64,
+    'debt_e8s' : IDL.Nat64,
+  });
+  const ThreeUsdAbsorbInventoryEntry = IDL.Variant({
+    'CompletedAbsorbId' : IDL.Nat64,
+    'Pending' : ThreeUsdReserveAbsorbIntent,
+  });
+  const ThreeUsdAbsorbInventoryPage = IDL.Record({
+    'pending_count' : IDL.Nat64,
+    'completed_id_retention_limit' : IDL.Nat64,
+    'entries' : IDL.Vec(ThreeUsdAbsorbInventoryEntry),
+    'completed_rows_retain_ids_only' : IDL.Bool,
+    'completed_id_count' : IDL.Nat64,
+    'next_cursor' : IDL.Opt(ThreeUsdAbsorbInventoryCursor),
+  });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -529,6 +555,16 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Principal, IDL.Principal, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Text, 'Err' : StabilityPoolError })],
         [],
+      ),
+    'admin_get_three_usd_absorb_inventory_page' : IDL.Func(
+        [IDL.Opt(ThreeUsdAbsorbInventoryCursor), IDL.Nat16],
+        [
+          IDL.Variant({
+            'Ok' : ThreeUsdAbsorbInventoryPage,
+            'Err' : StabilityPoolError,
+          }),
+        ],
+        ['query'],
       ),
     'admin_recover_ambiguous_native_xrp_burn' : IDL.Func(
         [IDL.Nat64, IDL.Opt(IDL.Nat64)],

@@ -1292,6 +1292,22 @@ export interface PendingStabilityPoolInterestNotification {
   'collateral_type' : Principal,
   'token_ledger' : Principal,
 }
+export interface PendingThreeUsdRefund {
+  'dispatch_amount_e8s' : [] | [bigint],
+  'source' : ThreeUsdRefundSource,
+  'dispatch_submitted' : boolean,
+  'retry_count' : number,
+  'vault_id' : bigint,
+  'resolution' : [] | [ThreeUsdRefundResolution],
+  'amount_e8s' : bigint,
+  'parent_absorb_id' : [] | [bigint],
+  'ledger' : Principal,
+  'op_nonce' : bigint,
+  'legacy_dispatch_retryable' : boolean,
+  'dispatch_block_index' : [] | [bigint],
+  'dispatch_fee_e8s' : [] | [bigint],
+  'stability_pool' : Principal,
+}
 export interface PerCollateralRateCurve {
   'markers' : Array<[number, number]>,
   'base_rate' : number,
@@ -1692,6 +1708,16 @@ export interface StabilityPoolLiquidationResult {
 export type StableTokenType = { 'CKUSDC' : null } |
   { 'CKUSDT' : null };
 export interface StandardRecord { 'url' : string, 'name' : string }
+export interface StoredThreeUsdReserveAbsorbResult {
+  'result' : StabilityPoolLiquidationResult,
+  'vault_id' : bigint,
+  'three_usd_amount_e8s' : bigint,
+  'ledger' : Principal,
+  'caller' : Principal,
+  'absorb_id' : bigint,
+  'proof' : SpWritedownProof,
+  'icusd_debt_covered_e8s' : bigint,
+}
 export interface SuccessWithFee {
   'block_index' : bigint,
   'debt_liquidated_e8s' : [] | [bigint],
@@ -1709,6 +1735,21 @@ export interface SupplyAuditEntry {
   'display_name' : string,
   'chain_id' : number,
 }
+export interface ThreeUsdIngressNonInclusionScan {
+  'tip_log_length' : [] | [bigint],
+  'tuple' : ThreeUsdReserveIngressTuple,
+  'ledger' : Principal,
+  'next_block_index' : bigint,
+}
+export type ThreeUsdRefundResolution = {
+    'ReceiptVerified' : {
+      'block_index' : bigint,
+      'fee_e8s' : bigint,
+      'reconciled_at_ns' : bigint,
+    }
+  };
+export type ThreeUsdRefundSource = { 'DefaultAccount' : null } |
+  { 'LegacyHashedReserve' : null };
 export interface ThreeUsdReserveCollateralPayout {
   'destination' : Account,
   'source' : Account,
@@ -1725,6 +1766,73 @@ export interface ThreeUsdReserveCollateralPayout {
   'gross_e8s' : bigint,
   'rearmed_attempts' : Array<ThreeUsdReservePayoutAttempt>,
   'observed_fee_e8s' : [] | [bigint],
+}
+export interface ThreeUsdReserveIngressJournal {
+  'ingress_proof_verified' : boolean,
+  'request' : ThreeUsdReserveIngressRequest,
+  'non_inclusion_scan' : [] | [ThreeUsdIngressNonInclusionScan],
+  'protocol_refund_fee_reserve_e8s' : bigint,
+  'phase' : ThreeUsdReserveIngressPhase,
+  'refund' : [] | [ThreeUsdReserveIngressRefund],
+}
+export interface ThreeUsdReserveIngressKey {
+  'vault_id' : bigint,
+  'absorb_id' : bigint,
+  'stability_pool' : Principal,
+}
+export type ThreeUsdReserveIngressPhase = {
+    'PreTransferRejected' : { 'reason' : string }
+  } |
+  {
+    'TransferConfirmed' : {
+      'tuple' : ThreeUsdReserveIngressTuple,
+      'block_index' : bigint,
+    }
+  } |
+  { 'AdmissionPending' : null } |
+  {
+    'Absorbed' : {
+      'result' : StabilityPoolLiquidationResult,
+      'tuple' : ThreeUsdReserveIngressTuple,
+      'block_index' : bigint,
+    }
+  } |
+  {
+    'FailedAfterTransfer' : {
+      'tuple' : ThreeUsdReserveIngressTuple,
+      'block_index' : bigint,
+      'error' : string,
+    }
+  } |
+  {
+    'NoTransferProven' : {
+      'tip_log_length' : bigint,
+      'tuple' : ThreeUsdReserveIngressTuple,
+    }
+  } |
+  { 'SubmittedOrUnknown' : { 'tuple' : ThreeUsdReserveIngressTuple } };
+export interface ThreeUsdReserveIngressRefund {
+  'settled_receipt' : [] | [ThreeUsdReserveRefundReceipt],
+  'op_nonce' : bigint,
+  'required_net_credit_e8s' : bigint,
+}
+export interface ThreeUsdReserveIngressRequest {
+  'three_usd_amount_e8s' : bigint,
+  'ledger' : Principal,
+  'icusd_debt_covered_e8s' : bigint,
+}
+export interface ThreeUsdReserveIngressTuple {
+  'destination' : Account,
+  'spender_subaccount' : [] | [Uint8Array | number[]],
+  'source' : Account,
+  'created_at_time_ns' : bigint,
+  'spender_owner' : Principal,
+  'memo' : Uint8Array | number[],
+  'fee_e8s' : [] | [bigint],
+  'amount_e8s' : bigint,
+  'ledger_fee_e8s' : bigint,
+  'parent_absorb_id' : bigint,
+  'op_nonce' : bigint,
 }
 export type ThreeUsdReserveIngressV2Status = {
     'FailedAfterTransferRefunded' : {
@@ -1769,6 +1877,65 @@ export interface ThreeUsdReserveIngressV2StatusView {
   'absorb_id' : bigint,
   'stability_pool' : Principal,
 }
+export interface ThreeUsdReserveInventoryContext {
+  'payout_rows' : bigint,
+  'payout_candidate_scan_rows' : bigint,
+  'v1_cutover' : ThreeUsdReserveV1Cutover,
+  'proof_result_rows' : bigint,
+  'refund_rows' : bigint,
+  'payout_operation_rows' : bigint,
+  'three_usd_ledger' : [] | [Principal],
+  'v2_client_ready' : boolean,
+  'ingress_enabled' : boolean,
+  'ingress_rows' : bigint,
+  'stability_pool_canister' : [] | [Principal],
+  'protocol_3usd_reserves_e8s' : bigint,
+}
+export type ThreeUsdReserveInventoryCursor = {
+    'AfterCollateralPayout' : ThreeUsdReserveIngressKey
+  } |
+  { 'AfterPayoutCandidateScan' : ThreeUsdReserveIngressKey } |
+  { 'AfterRefund' : bigint } |
+  { 'AfterIngress' : ThreeUsdReserveIngressKey } |
+  { 'AfterPayoutOperation' : bigint } |
+  { 'AfterAbsorbProof' : [SpProofLedger, bigint] };
+export type ThreeUsdReserveInventoryEntry = {
+    'PayoutOperation' : {
+      'key' : ThreeUsdReserveIngressKey,
+      'operation_id' : bigint,
+    }
+  } |
+  {
+    'PayoutCandidateScan' : {
+      'key' : ThreeUsdReserveIngressKey,
+      'row' : ThreeUsdReservePayoutCandidateScan,
+    }
+  } |
+  { 'Refund' : { 'row' : PendingThreeUsdRefund, 'op_nonce' : bigint } } |
+  {
+    'Ingress' : {
+      'key' : ThreeUsdReserveIngressKey,
+      'row' : ThreeUsdReserveIngressJournal,
+    }
+  } |
+  {
+    'CollateralPayout' : {
+      'key' : ThreeUsdReserveIngressKey,
+      'row' : ThreeUsdReserveCollateralPayout,
+    }
+  } |
+  {
+    'AbsorbProof' : {
+      'row' : StoredThreeUsdReserveAbsorbResult,
+      'block_index' : bigint,
+      'ledger' : SpProofLedger,
+    }
+  };
+export interface ThreeUsdReserveInventoryPage {
+  'context' : ThreeUsdReserveInventoryContext,
+  'entries' : Array<ThreeUsdReserveInventoryEntry>,
+  'next_cursor' : [] | [ThreeUsdReserveInventoryCursor],
+}
 export interface ThreeUsdReservePayoutAttempt {
   'created_at_time_ns' : bigint,
   'memo' : Uint8Array | number[],
@@ -1776,6 +1943,16 @@ export interface ThreeUsdReservePayoutAttempt {
   'op_nonce' : bigint,
   'candidate_block_index' : [] | [bigint],
   'observed_fee_e8s' : [] | [bigint],
+}
+export interface ThreeUsdReservePayoutCandidateScan {
+  'next_index' : bigint,
+  'operation_id' : bigint,
+  'multiple_candidates' : boolean,
+  'snapshot_log_length' : bigint,
+  'candidate_block_index' : [] | [bigint],
+  'snapshot_count' : number,
+  'attempt_nonce' : bigint,
+  'start_index' : bigint,
 }
 export interface ThreeUsdReserveRefundReceipt {
   'tuple' : ThreeUsdReserveRefundTuple,
@@ -1791,6 +1968,16 @@ export interface ThreeUsdReserveRefundTuple {
   'amount_e8s' : bigint,
   'source_owner' : Principal,
 }
+export type ThreeUsdReserveV1Cutover = {
+    'Reconciled' : {
+      'operator' : Principal,
+      'resolved_at_ns' : bigint,
+      'evidence_sha256' : Uint8Array | number[],
+    }
+  } |
+  { 'Retired' : null } |
+  { 'NoLegacyExposure' : null } |
+  { 'Quarantined' : null };
 export type TransferError = {
     'GenericError' : { 'message' : string, 'error_code' : bigint }
   } |
@@ -2339,6 +2526,11 @@ export interface _SERVICE {
   >,
   'get_three_pool_canister' : ActorMethod<[], [] | [Principal]>,
   'get_three_usd_reserve_ingress_enabled' : ActorMethod<[], boolean>,
+  'get_three_usd_reserve_inventory_page' : ActorMethod<
+    [[] | [ThreeUsdReserveInventoryCursor], number],
+    { 'Ok' : ThreeUsdReserveInventoryPage } |
+      { 'Err' : ProtocolError }
+  >,
   'get_treasury_principal' : ActorMethod<[], [] | [Principal]>,
   'get_treasury_stats' : ActorMethod<[], TreasuryStats>,
   'get_vault_count' : ActorMethod<[], bigint>,

@@ -2081,6 +2081,83 @@ impl StabilityPoolState {
             .map_or(0, BTreeMap::len)
     }
 
+    /// Bounded keyset inventory of pending intents followed by completed IDs.
+    /// Completed absorb result details are not stored by this canister.
+    pub fn three_usd_absorb_inventory_page(
+        &self,
+        after: Option<ThreeUsdAbsorbInventoryCursor>,
+        limit: u16,
+    ) -> ThreeUsdAbsorbInventoryPage {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let limit = limit.clamp(1, MAX_THREE_USD_ABSORB_INVENTORY_PAGE);
+        let target = usize::from(limit) + 1;
+        let mut entries = Vec::with_capacity(target);
+        let pending = self.pending_three_usd_absorbs.as_ref();
+        let completed = self.completed_three_usd_absorbs.as_ref();
+        let completed_stage = matches!(
+            after,
+            Some(ThreeUsdAbsorbInventoryCursor::AfterCompletedAbsorbId(_))
+        );
+
+        if !completed_stage {
+            let after_vault = match &after {
+                Some(ThreeUsdAbsorbInventoryCursor::AfterPendingVaultId(id)) => Some(id),
+                _ => None,
+            };
+            if let Some(rows) = pending {
+                let iter: Box<dyn Iterator<Item = (&u64, &ThreeUsdReserveAbsorbIntent)>> =
+                    match after_vault {
+                        Some(id) => Box::new(rows.range((Excluded(id), Unbounded))),
+                        None => Box::new(rows.iter()),
+                    };
+                entries.extend(
+                    iter.take(target)
+                        .map(|(_, row)| ThreeUsdAbsorbInventoryEntry::Pending(row.clone())),
+                );
+            }
+        }
+
+        if entries.len() < target {
+            let after_absorb = match &after {
+                Some(ThreeUsdAbsorbInventoryCursor::AfterCompletedAbsorbId(id)) => Some(id),
+                _ => None,
+            };
+            if let Some(ids) = completed {
+                let iter: Box<dyn Iterator<Item = &u64>> = match after_absorb {
+                    Some(id) => Box::new(ids.range((Excluded(id), Unbounded))),
+                    None => Box::new(ids.iter()),
+                };
+                entries.extend(
+                    iter.take(target - entries.len())
+                        .map(|id| ThreeUsdAbsorbInventoryEntry::CompletedAbsorbId(*id)),
+                );
+            }
+        }
+
+        let has_more = entries.len() > usize::from(limit);
+        entries.truncate(usize::from(limit));
+        let next_cursor = if has_more {
+            entries.last().map(|entry| match entry {
+                ThreeUsdAbsorbInventoryEntry::Pending(intent) => {
+                    ThreeUsdAbsorbInventoryCursor::AfterPendingVaultId(intent.vault_id)
+                }
+                ThreeUsdAbsorbInventoryEntry::CompletedAbsorbId(id) => {
+                    ThreeUsdAbsorbInventoryCursor::AfterCompletedAbsorbId(*id)
+                }
+            })
+        } else {
+            None
+        };
+        ThreeUsdAbsorbInventoryPage {
+            entries,
+            next_cursor,
+            pending_count: pending.map_or(0, |rows| rows.len() as u64),
+            completed_id_count: completed.map_or(0, |ids| ids.len() as u64),
+            completed_id_retention_limit: MAX_COMPLETED_THREE_USD_ABSORBS as u64,
+            completed_rows_retain_ids_only: true,
+        }
+    }
+
     /// Return a fair bounded page of pending 3USD intents and persist the next
     /// round-robin position so a held low-key prefix cannot starve later rows.
     pub fn take_pending_three_usd_absorb_page(
@@ -2196,7 +2273,7 @@ impl StabilityPoolState {
             .completed_three_usd_absorbs
             .get_or_insert_with(BTreeSet::new);
         completed.insert(absorb_id);
-        while completed.len() > 10_000 {
+        while completed.len() > MAX_COMPLETED_THREE_USD_ABSORBS {
             if let Some(oldest) = completed.iter().next().copied() {
                 completed.remove(&oldest);
             }
@@ -8726,5 +8803,39 @@ mod tests {
             Some(10_00000000),
             "remaining depositor over-absorbs the escaped share",
         );
+    }
+
+    #[test]
+    fn three_usd_inventory_pages_pending_then_completed_ids_only() {
+        let mut state = StabilityPoolState::default();
+        let ledger = Principal::from_slice(&[73]);
+        state.pending_three_usd_absorbs = Some(BTreeMap::from([(
+            7,
+            ThreeUsdReserveAbsorbIntent {
+                absorb_id: 20,
+                vault_id: 7,
+                debt_e8s: 100,
+                amount: 90,
+                ledger,
+                collateral_type: None,
+                collateral_ledger: None,
+                collateral_price_e8s: None,
+            },
+        )]));
+        state.completed_three_usd_absorbs = Some(BTreeSet::from([21, 23]));
+
+        let first = state.three_usd_absorb_inventory_page(None, 1);
+        assert!(matches!(first.entries.as_slice(), [ThreeUsdAbsorbInventoryEntry::Pending(row)] if row.absorb_id == 20));
+        assert_eq!(first.next_cursor, Some(ThreeUsdAbsorbInventoryCursor::AfterPendingVaultId(7)));
+        assert_eq!(first.completed_id_count, 2);
+        assert_eq!(first.completed_id_retention_limit, MAX_COMPLETED_THREE_USD_ABSORBS as u64);
+        assert!(first.completed_rows_retain_ids_only);
+
+        let second = state.three_usd_absorb_inventory_page(first.next_cursor, 1);
+        assert_eq!(second.entries, vec![ThreeUsdAbsorbInventoryEntry::CompletedAbsorbId(21)]);
+        assert_eq!(second.next_cursor, Some(ThreeUsdAbsorbInventoryCursor::AfterCompletedAbsorbId(21)));
+        let third = state.three_usd_absorb_inventory_page(second.next_cursor, 1);
+        assert_eq!(third.entries, vec![ThreeUsdAbsorbInventoryEntry::CompletedAbsorbId(23)]);
+        assert_eq!(third.next_cursor, None);
     }
 }

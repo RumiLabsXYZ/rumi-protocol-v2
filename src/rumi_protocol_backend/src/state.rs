@@ -2697,7 +2697,7 @@ pub struct LiquidityWithdrawStatus {
     pub phase: LiquidityWithdrawPhase,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub enum ThreeUsdReserveIngressPhase {
     AdmissionPending,
     PreTransferRejected {
@@ -2728,7 +2728,7 @@ pub enum ThreeUsdReserveIngressPhase {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct ThreeUsdReserveIngressJournal {
     pub request: ThreeUsdReserveIngressRequest,
     pub phase: ThreeUsdReserveIngressPhase,
@@ -2908,7 +2908,7 @@ pub struct VaultOperationStatus {
     pub active: Option<VaultOperationView>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct ThreeUsdIngressNonInclusionScan {
     pub tuple: ThreeUsdReserveIngressTuple,
     pub ledger: Principal,
@@ -2947,7 +2947,7 @@ pub fn confirm_three_usd_ingress_candidate_block(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct ThreeUsdReserveIngressRefund {
     pub op_nonce: u128,
     pub required_net_credit_e8s: u64,
@@ -2973,7 +2973,7 @@ pub struct ThreeUsdReserveRefundReceipt {
     pub tuple: ThreeUsdReserveRefundTuple,
 }
 
-#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct StoredThreeUsdReserveAbsorbResult {
     pub caller: Principal,
     pub vault_id: u64,

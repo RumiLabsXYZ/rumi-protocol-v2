@@ -353,6 +353,33 @@ type DepositIntentStatus = record {
   active_intent : opt DepositIntentResult;
 };
 
+type ThreeUsdReserveAbsorbIntent = record {
+  absorb_id : nat64;
+  vault_id : nat64;
+  debt_e8s : nat64;
+  amount : nat64;
+  ledger : principal;
+  collateral_type : opt principal;
+  collateral_ledger : opt principal;
+  collateral_price_e8s : opt nat64;
+};
+type ThreeUsdAbsorbInventoryCursor = variant {
+  AfterPendingVaultId : nat64;
+  AfterCompletedAbsorbId : nat64;
+};
+type ThreeUsdAbsorbInventoryEntry = variant {
+  Pending : ThreeUsdReserveAbsorbIntent;
+  CompletedAbsorbId : nat64;
+};
+type ThreeUsdAbsorbInventoryPage = record {
+  entries : vec ThreeUsdAbsorbInventoryEntry;
+  next_cursor : opt ThreeUsdAbsorbInventoryCursor;
+  pending_count : nat64;
+  completed_id_count : nat64;
+  completed_id_retention_limit : nat64;
+  completed_rows_retain_ids_only : bool;
+};
+
 // ── Error type ──
 
 type StabilityPoolError = variant {
@@ -514,6 +541,10 @@ service : (StabilityPoolInitArgs) -> {
   deposit : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
   deposit_with_intent : (nat64, principal, nat64) -> (variant { Ok : DepositIntentResult; Err : DepositIntentError });
   get_deposit_intent : (nat64) -> (DepositIntentStatus);
+  admin_get_three_usd_absorb_inventory_page : (
+    opt ThreeUsdAbsorbInventoryCursor,
+    nat16,
+  ) -> (variant { Ok : ThreeUsdAbsorbInventoryPage; Err : StabilityPoolError }) query;
   withdraw : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
   deposit_as_3usd : (principal, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_collateral : (principal) -> (variant { Ok : nat64; Err : StabilityPoolError });

@@ -451,6 +451,30 @@ export interface StablecoinConfig {
   'is_lp_token' : [] | [boolean],
   'symbol' : string,
 }
+export type ThreeUsdAbsorbInventoryCursor = {
+    'AfterCompletedAbsorbId' : bigint
+  } |
+  { 'AfterPendingVaultId' : bigint };
+export type ThreeUsdAbsorbInventoryEntry = { 'CompletedAbsorbId' : bigint } |
+  { 'Pending' : ThreeUsdReserveAbsorbIntent };
+export interface ThreeUsdAbsorbInventoryPage {
+  'pending_count' : bigint,
+  'completed_id_retention_limit' : bigint,
+  'entries' : Array<ThreeUsdAbsorbInventoryEntry>,
+  'completed_rows_retain_ids_only' : boolean,
+  'completed_id_count' : bigint,
+  'next_cursor' : [] | [ThreeUsdAbsorbInventoryCursor],
+}
+export interface ThreeUsdReserveAbsorbIntent {
+  'collateral_price_e8s' : [] | [bigint],
+  'vault_id' : bigint,
+  'ledger' : Principal,
+  'collateral_ledger' : [] | [Principal],
+  'absorb_id' : bigint,
+  'collateral_type' : [] | [Principal],
+  'amount' : bigint,
+  'debt_e8s' : bigint,
+}
 export interface UnallocatedInterestForwardBatch {
   'id' : bigint,
   'fee' : [] | [bigint],
@@ -491,6 +515,11 @@ export interface _SERVICE {
   'admin_correct_collateral_gain' : ActorMethod<
     [Principal, Principal, bigint],
     { 'Ok' : string } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'admin_get_three_usd_absorb_inventory_page' : ActorMethod<
+    [[] | [ThreeUsdAbsorbInventoryCursor], number],
+    { 'Ok' : ThreeUsdAbsorbInventoryPage } |
       { 'Err' : StabilityPoolError }
   >,
   'admin_recover_ambiguous_native_xrp_burn' : ActorMethod<

@@ -1405,6 +1405,76 @@ type ReserveBalance = record {
   ledger : principal;
   symbol : text;
 };
+type ThreeUsdRefundResolution = variant { ReceiptVerified : record { block_index : nat64; fee_e8s : nat64; reconciled_at_ns : nat64 } };
+type ThreeUsdRefundSource = variant { LegacyHashedReserve; DefaultAccount };
+type PendingThreeUsdRefund = record {
+  stability_pool : principal; ledger : principal; amount_e8s : nat64; vault_id : nat64;
+  retry_count : nat8; op_nonce : nat; source : ThreeUsdRefundSource; parent_absorb_id : opt nat64;
+  dispatch_amount_e8s : opt nat64; dispatch_fee_e8s : opt nat64; dispatch_submitted : bool;
+  legacy_dispatch_retryable : bool; dispatch_block_index : opt nat64; resolution : opt ThreeUsdRefundResolution;
+};
+type ThreeUsdReserveIngressKey = record { stability_pool : principal; vault_id : nat64; absorb_id : nat64 };
+type ThreeUsdReserveIngressRequest = record { icusd_debt_covered_e8s : nat64; three_usd_amount_e8s : nat64; ledger : principal };
+type ThreeUsdReserveIngressTuple = record {
+  spender_owner : principal; spender_subaccount : opt blob; source : Account; destination : Account;
+  amount_e8s : nat64; fee_e8s : opt nat64; ledger_fee_e8s : nat64; memo : blob;
+  created_at_time_ns : nat64; op_nonce : nat; parent_absorb_id : nat64;
+};
+type ThreeUsdReserveIngressRefund = record { op_nonce : nat; required_net_credit_e8s : nat64; settled_receipt : opt ThreeUsdReserveRefundReceipt };
+type ThreeUsdReserveIngressPhase = variant {
+  AdmissionPending;
+  PreTransferRejected : record { reason : text };
+  SubmittedOrUnknown : record { tuple : ThreeUsdReserveIngressTuple };
+  TransferConfirmed : record { tuple : ThreeUsdReserveIngressTuple; block_index : nat64 };
+  Absorbed : record { tuple : ThreeUsdReserveIngressTuple; block_index : nat64; result : StabilityPoolLiquidationResult };
+  FailedAfterTransfer : record { tuple : ThreeUsdReserveIngressTuple; block_index : nat64; error : text };
+  NoTransferProven : record { tuple : ThreeUsdReserveIngressTuple; tip_log_length : nat64 };
+};
+type ThreeUsdIngressNonInclusionScan = record { tuple : ThreeUsdReserveIngressTuple; ledger : principal; tip_log_length : opt nat64; next_block_index : nat64 };
+type ThreeUsdReserveIngressJournal = record {
+  request : ThreeUsdReserveIngressRequest; phase : ThreeUsdReserveIngressPhase; ingress_proof_verified : bool;
+  refund : opt ThreeUsdReserveIngressRefund; protocol_refund_fee_reserve_e8s : nat64;
+  non_inclusion_scan : opt ThreeUsdIngressNonInclusionScan;
+};
+type StoredThreeUsdReserveAbsorbResult = record {
+  caller : principal; vault_id : nat64; absorb_id : nat64; icusd_debt_covered_e8s : nat64;
+  three_usd_amount_e8s : nat64; ledger : principal; proof : SpWritedownProof;
+  result : StabilityPoolLiquidationResult;
+};
+type ThreeUsdReservePayoutCandidateScan = record {
+  operation_id : nat; attempt_nonce : nat; start_index : nat64; snapshot_log_length : nat64;
+  snapshot_count : nat8; next_index : nat64; candidate_block_index : opt nat64; multiple_candidates : bool;
+};
+type ThreeUsdReserveV1Cutover = variant {
+  Quarantined; NoLegacyExposure;
+  Reconciled : record { operator : principal; resolved_at_ns : nat64; evidence_sha256 : blob };
+  Retired;
+};
+type ThreeUsdReserveInventoryCursor = variant {
+  AfterRefund : nat; AfterIngress : ThreeUsdReserveIngressKey;
+  AfterAbsorbProof : record { SpProofLedger; nat64 };
+  AfterCollateralPayout : ThreeUsdReserveIngressKey;
+  AfterPayoutCandidateScan : ThreeUsdReserveIngressKey; AfterPayoutOperation : nat;
+};
+type ThreeUsdReserveInventoryEntry = variant {
+  Refund : record { op_nonce : nat; row : PendingThreeUsdRefund };
+  Ingress : record { key : ThreeUsdReserveIngressKey; row : ThreeUsdReserveIngressJournal };
+  AbsorbProof : record { ledger : SpProofLedger; block_index : nat64; row : StoredThreeUsdReserveAbsorbResult };
+  CollateralPayout : record { key : ThreeUsdReserveIngressKey; row : ThreeUsdReserveCollateralPayout };
+  PayoutCandidateScan : record { key : ThreeUsdReserveIngressKey; row : ThreeUsdReservePayoutCandidateScan };
+  PayoutOperation : record { operation_id : nat; key : ThreeUsdReserveIngressKey };
+};
+type ThreeUsdReserveInventoryContext = record {
+  ingress_enabled : bool; v2_client_ready : bool; three_usd_ledger : opt principal;
+  stability_pool_canister : opt principal; v1_cutover : ThreeUsdReserveV1Cutover;
+  protocol_3usd_reserves_e8s : nat64; refund_rows : nat64; ingress_rows : nat64;
+  proof_result_rows : nat64; payout_rows : nat64; payout_candidate_scan_rows : nat64;
+  payout_operation_rows : nat64;
+};
+type ThreeUsdReserveInventoryPage = record {
+  entries : vec ThreeUsdReserveInventoryEntry; next_cursor : opt ThreeUsdReserveInventoryCursor;
+  context : ThreeUsdReserveInventoryContext;
+};
 type ReserveRedemptionResult = record {
   icusd_block_index : nat64;
   stable_token_used : principal;
@@ -1964,6 +2034,10 @@ service : (ProtocolArg) -> {
       vec record { nat64; XrpPendingDeposit },
     ) query;
   get_pending_3usd_refunds : () -> (vec LegacyPendingThreeUsdRefund) query;
+  get_three_usd_reserve_inventory_page : (
+    opt ThreeUsdReserveInventoryCursor,
+    nat16,
+  ) -> (variant { Ok : ThreeUsdReserveInventoryPage; Err : ProtocolError }) query;
   get_pending_amm1_donations_count : () -> (nat64) query;
   get_pending_borrow_fee_mint_recovery_page : (opt nat, nat16) -> (
       BorrowFeeMintRecoveryResult,
