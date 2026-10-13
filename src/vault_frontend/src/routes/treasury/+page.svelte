@@ -275,8 +275,8 @@
       withdrawalError = 'Please fill in all required fields with valid values';
       return;
     }
-    if (new TextEncoder().encode(withdrawalForm.memo).length > 32) {
-      withdrawalError = 'Memo must be 32 UTF-8 bytes or fewer.';
+    if (new TextEncoder().encode(withdrawalForm.memo).length > 24) {
+      withdrawalError = 'Memo must be 24 UTF-8 bytes or fewer; Treasury adds the request ID on the ledger.';
       return;
     }
     let normalizedDestination: string;
@@ -600,9 +600,10 @@
             type="text"
             bind:value={withdrawalForm.memo}
             class="w-full bg-gray-800/50 border border-gray-700 rounded-lg px-4 py-3 text-white"
-            placeholder="Treasury withdrawal for operations"
+            placeholder="Treasury operations"
             disabled={withdrawalInProgress}
           />
+          <p class="mt-1 text-xs text-gray-400">Maximum 24 UTF-8 bytes.</p>
         </div>
 
         <div class="md:col-span-2">
