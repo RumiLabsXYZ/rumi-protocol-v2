@@ -2,7 +2,7 @@
   const report = {
     date: 'October 12, 2026',
     datetime: '2026-10-12',
-    source: 'origin/main through PR #553',
+    source: 'origin/main through PR #557',
     snapshot: '3pool, Points, and AMM upgrades with module readback · October 12, 2026'
   };
 
@@ -14,6 +14,22 @@
   ];
 
   const changes = [
+    {
+      pr: '#557',
+      title: 'Bounded 3USD reserve inventory',
+      summary: 'Merged into main on October 13 UTC. The source adds developer/admin-gated, paginated views of retained backend reserve records and Stability Pool reserve-absorb intents and completed IDs so a later cutover can be reconciled against recorded state. A focused CI check passed. October 13 UTC readbacks still found the earlier backend and Stability Pool modules; the new inventory methods are not installed. The existing backend reported V2 reserve ingress disabled and an empty legacy pending-refund list, which does not establish that all historical obligations are settled.',
+      state: 'Merged · not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/557'
+    },
+    {
+      pr: '#548',
+      title: 'Latest-bar ICP oracle request',
+      summary: 'Merged source requests the latest available ICP/USD bar rather than a fixed one-minute-old bar, while retaining the 120-second source-age gate. The October 13 UTC backend module readback still matched the earlier PR #527 release, so this oracle change is not installed. A later accepted price can clear an oracle-triggered ReadOnly mode; that observed recovery is not proof that stale provider samples cannot recur.',
+      state: 'Merged · not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/548'
+    },
     {
       pr: 'Live',
       title: 'Backend and bot readback with capped borrowing',
@@ -269,7 +285,7 @@
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
-      <div class="rule-caption"><span>Source cutoff · {report.source} · October 12, 2026</span><span>Selected remediation and release follow-up</span></div>
+      <div class="rule-caption"><span>Source cutoff · {report.source} · October 13, 2026 UTC</span><span>October 12 live snapshot and later source addenda</span></div>
     </div>
   </section>
 
@@ -294,7 +310,7 @@
       <div class="section-heading section-heading-wide">
         <p class="section-label">Selected changes</p>
         <h2 id="updates-title">Change and release status</h2>
-        <p>This October 12 snapshot reports the highest evidence stage available for each change. The 3pool release includes PR #535 recovery source, the PR #540/#541 artifact, and the now-installed PR #553 input-recovery module. The AMM recovery source from PR #507 is also installed, while PR #545 remains merged source only. A source merge and a live installation remain separate states.</p>
+        <p>The live readbacks below are dated October 12 unless a row states otherwise. October 13 source addenda are marked separately. The 3pool release includes PR #535 recovery source, the PR #540/#541 artifact, and the now-installed PR #553 input-recovery module. The AMM recovery source from PR #507 is also installed, while PRs #545, #548, and #557 remain merged source only. A source merge and a live installation remain separate states.</p>
       </div>
       <div class="change-list">
         {#each changes as item}
@@ -347,7 +363,7 @@
   </section>
 
   <footer class="page-width page-foot">
-    <span>Evidence date: <time datetime={report.datetime}>{report.date}</time></span>
+    <span>Live snapshot date: <time datetime={report.datetime}>{report.date}</time></span>
     <a href="/security">Back to security reviews <span aria-hidden="true">↗</span></a>
   </footer>
 </main>
