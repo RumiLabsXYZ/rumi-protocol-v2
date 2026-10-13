@@ -2,7 +2,7 @@
   const report = {
     date: 'October 12, 2026',
     datetime: '2026-10-12',
-    source: 'protocol source through PR #566 · live observations dated per row',
+    source: 'protocol source through PR #569 · live observations dated per row',
     snapshot: '3pool, Points, and AMM upgrades with module readback · October 12, 2026'
   };
 
@@ -85,6 +85,14 @@
       state: 'Merged · not installed',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/566'
+    },
+    {
+      pr: '#569',
+      title: 'Exact 3USD ingress receipts',
+      summary: 'Merged on October 13 UTC. The backend now preserves the full ICRC-2 success or Duplicate block index in its 3USD ingress journal instead of turning an index wider than u64 into a false block-zero receipt. An unrepresentable index holds the operation before retry, absence scanning, refund, or debt write-down. The in-tree 3pool implementation uses u64 block IDs, and this exceptional hold has no automated recovery route. The latest backend module readback predates this merge, so this is a source fix, not an installed change or a settled historical obligation.',
+      state: 'Merged · backend not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/569'
     },
     {
       pr: '#507',
@@ -289,7 +297,7 @@
           <p class="issue-line">Status report <span>—</span> <time datetime={report.datetime}>{report.date}</time></p>
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
-            This October 12 live baseline with October 13 source updates through PR #566 separates merged source from mainnet installation. October 12
+            This October 12 live baseline with October 13 source updates through PR #569 separates merged source from mainnet installation. October 12
             readbacks confirmed the 3pool modules from PRs #540, #541, and #553; the latest
             upgrade preserved LP supply and had zero pending claims. The Points upgrade now withholds the unfinished B snapshot
             time, while epoch 18 remains held with its driver off. The AMM recovery upgrade now
