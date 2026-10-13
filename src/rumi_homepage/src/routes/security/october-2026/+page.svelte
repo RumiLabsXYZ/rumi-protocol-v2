@@ -79,6 +79,14 @@
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/553'
     },
     {
+      pr: '#566',
+      title: 'Archived 3pool payout proof follow-up',
+      summary: 'Merged source corrects hashing of wide signed values in archived ICRC-3 blocks used for exact payout reconciliation. Scoped Rust and archive-recovery tests passed; those tests are not a production receipt. At the October 13 05:26 UTC public status readback, 3pool still ran module SHA-256 d1bc983879dc4a385ec87a398168f798802027b428bbef0f1c8382435ed96c6e. This follow-up has not been installed, and no historical payout is marked settled by the source merge.',
+      state: 'Merged · not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/566'
+    },
+    {
       pr: '#507',
       title: 'AMM transfer and payout recovery',
       summary: 'Merged and installed on October 12 as module SHA-256 1f3fddd44fb7832585c9a45d0b46ef607805381531c71f71a8d517a7eddabf6a. The source journals inbound pulls and outbound payouts before ledger calls and holds uncertain outcomes. A hash-gated PocketIC test in PR #538 recovered one official-ledger native ICP payout after a callback trap without paying twice; it does not prove every reply-loss path. The canister was stopped, a fresh snapshot was verified, and the reviewed Wasm was installed before restart. Immediate readback matched the pre-upgrade pool, LP, rewards, events, claims, maintenance setting, and three checked ledger balances. The new unresolved-payout journal was empty. Swap and deposit routes remain held, while exits and reward claims remain callable. The ICP pool account holds 540,000 raw units above its tracked reserve; the icUSD reward account holds 900,021 raw units whose historical obligations remain unattributed. Installation did not settle those balances or restore trading.',
