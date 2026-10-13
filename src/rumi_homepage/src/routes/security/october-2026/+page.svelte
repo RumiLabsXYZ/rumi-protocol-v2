@@ -1,9 +1,9 @@
 <script>
   const report = {
-    date: 'October 12, 2026',
-    datetime: '2026-10-12',
-    source: 'protocol source through PR #569 · live observations dated per row',
-    snapshot: '3pool, Points, and AMM upgrades with module readback · October 12, 2026'
+    date: 'October 13, 2026',
+    datetime: '2026-10-13',
+    source: 'protocol source through PR #571 · live observations dated per row',
+    snapshot: '3pool follow-up installed · other holds remain · October 13, 2026'
   };
 
   const states = [
@@ -81,9 +81,9 @@
     {
       pr: '#566',
       title: 'Archived 3pool payout proof follow-up',
-      summary: 'Merged source corrects hashing of wide signed values in archived ICRC-3 blocks used for exact payout reconciliation. Scoped Rust and archive-recovery tests passed; those tests are not a production receipt. At the October 13 05:26 UTC public status readback, 3pool still ran module SHA-256 d1bc983879dc4a385ec87a398168f798802027b428bbef0f1c8382435ed96c6e. This follow-up has not been installed, and no historical payout is marked settled by the source merge.',
-      state: 'Merged · not installed',
-      tone: 'held',
+      summary: 'Merged source corrects hashing of wide signed values in archived ICRC-3 blocks used for exact payout reconciliation. The reviewed production Wasm SHA-256 7e5510608d9b2d0f27cc259afb3f9fe94681229a6b11298c1f703881cb481c6d was installed on October 13 at 09:45 UTC after a fresh stopped-state snapshot, then read back Running on that exact hash. The hash-pinned PR #571 PocketIC upgrade test passed from the previously installed module; a separate archive-recovery test passed. Immediate live reads preserved LP supply 1,485,147,981,057, reserves [1,037,774,538,248, 4,112,496,326, 2,225,089,988], virtual price, and admin fees [40,219, 0, 0]. Pending claims remained zero; four bounded inventory pages still contained 80 retained identities, all internally marked settled. Those flags do not prove every external ledger receipt or settle a new payout.',
+      state: 'Installed · readback passed',
+      tone: 'installed',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/566'
     },
     {
@@ -297,7 +297,7 @@
           <p class="issue-line">Status report <span>—</span> <time datetime={report.datetime}>{report.date}</time></p>
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
-            This October 12 live baseline with October 13 source updates through PR #569 separates merged source from mainnet installation. October 12
+            This report combines an October 12 live baseline with October 13 source and live readbacks through PR #571. October 12
             readbacks confirmed the 3pool modules from PRs #540, #541, and #553; the latest
             upgrade preserved LP supply and had zero pending claims. The Points upgrade now withholds the unfinished B snapshot
             time, while epoch 18 remains held with its driver off. The AMM recovery upgrade now
@@ -310,16 +310,17 @@
             the backend and Stability Pool changes in PR #532 remain uninstalled. PR #545's
             Stability Pool deposit-intent fix is merged but also remains uninstalled. PR #553's
             archived 3pool input-recovery module was installed after a fresh snapshot and post-upgrade readback.
+            The October 13 archived-payout proof follow-up from PR #566 is also installed on its exact reviewed hash; it does not by itself settle a historical payout.
           </p>
         </div>
         <aside class="report-stamp" aria-label={report.snapshot}>
           <span class="stamp-label">Publication state</span>
           <strong>{report.snapshot}</strong>
-          <p>The October 12 upgrades installed the 3pool recovery modules through PR #553, the Points timing-redaction fix, and the AMM recovery upgrade. Their module hashes and readbacks are listed below. The Stability Pool remained paused and the AMM stayed in maintenance mode, with swaps and deposits held. The October 13 backend readback found a 22,000 icUSD borrowing cap, about 1,054.61 icUSD between the cap and reported debt before in-flight reservations, and one fee notification pending Treasury booking. This page combines time-scoped records; it is not live telemetry.</p>
+          <p>The October 12 upgrades installed the 3pool recovery modules through PR #553, the Points timing-redaction fix, and the AMM recovery upgrade. The October 13 3pool follow-up installed PR #566 on its reviewed hash. Their module hashes and readbacks are listed below. The Stability Pool remained paused and the AMM stayed in maintenance mode, with swaps and deposits held. The October 13 backend readback found a 22,000 icUSD borrowing cap, about 1,054.61 icUSD between the cap and reported debt before in-flight reservations, and one fee notification pending Treasury booking. This page combines time-scoped records; it is not live telemetry.</p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
-      <div class="rule-caption"><span>Scope · {report.source} · October 13, 2026 UTC</span><span>October 12 live snapshot and later source addenda</span></div>
+      <div class="rule-caption"><span>Scope · {report.source} · October 13, 2026 UTC</span><span>October 12 baseline and dated October 13 readbacks</span></div>
     </div>
   </section>
 
@@ -344,7 +345,7 @@
       <div class="section-heading section-heading-wide">
         <p class="section-label">Selected changes</p>
         <h2 id="updates-title">Change and release status</h2>
-        <p>The live readbacks below are dated October 12 unless a row states otherwise. October 13 source addenda are marked separately. The 3pool release includes PR #535 recovery source, the PR #540/#541 artifact, and the now-installed PR #553 input-recovery module. The AMM recovery source from PR #507 is also installed, while PRs #545, #548, #557, and #566 remain merged source only. A source merge and a live installation remain separate states.</p>
+        <p>The live readbacks below are dated October 12 unless a row states otherwise. October 13 source and installation addenda are marked separately. The 3pool release includes PR #535 recovery source, the PR #540/#541 artifact, and the now-installed PR #553 input-recovery and PR #566 payout-proof modules. The AMM recovery source from PR #507 is also installed, while PRs #545, #548, and #557 remain merged source only. A source merge and a live installation remain separate states.</p>
       </div>
       <div class="change-list">
         {#each changes as item}
