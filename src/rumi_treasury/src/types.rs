@@ -151,18 +151,56 @@ pub struct WithdrawArgs {
     pub to: Principal,
     /// Optional memo for the transfer
     pub memo: Option<String>,
-    /// Caller-supplied idempotency token. The treasury persists the first
-    /// attempt's `created_at_time` per `request_id` and reuses it on retries,
-    /// so re-submitting with the same `request_id` lets the ledger
-    /// deduplicate (audit ICRC-003). If omitted, treasury derives one from
-    /// `(caller, asset_type, amount, to, floor(now / 60s))` so a same-minute
-    /// repeat still dedups.
+    /// Required idempotency token. `None` remains accepted by Candid for
+    /// compatibility, but withdrawals without an explicit durable identity
+    /// fail closed.
     #[serde(default)]
     pub request_id: Option<u64>,
 }
 
-/// Result of a successful withdrawal
+/// Durable identity and exact transfer tuple for one treasury withdrawal.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct WithdrawalIntent {
+    pub request_id: u64,
+    pub caller: Principal,
+    pub asset_type: AssetType,
+    pub amount: u64,
+    pub to: Principal,
+    pub requested_memo: Option<String>,
+    pub ledger: Principal,
+    pub send_amount: u64,
+    pub fee: u64,
+    pub transfer_memo: Vec<u8>,
+    pub created_at_time: u64,
+    pub may_have_committed: bool,
+    pub status: WithdrawalIntentStatus,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum WithdrawalIntentStatus {
+    InFlight,
+    TransportAmbiguous,
+    ConfirmedUnrepresentable { block_index: String },
+    Held { reason: String },
+    Rejected { error: String },
+    Completed(WithdrawResult),
+}
+
+/// Public, bounded recovery view for one exact request ID.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct WithdrawalIntentStatusView {
+    pub request_id: u64,
+    pub asset_type: AssetType,
+    pub amount: u64,
+    pub to: Principal,
+    pub ledger: Principal,
+    pub created_at_time: u64,
+    pub may_have_committed: bool,
+    pub status: WithdrawalIntentStatus,
+}
+
+/// Result of a successful withdrawal
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct WithdrawResult {
     /// Block index of the transfer
     pub block_index: u64,

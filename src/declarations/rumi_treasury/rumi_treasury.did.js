@@ -42,6 +42,29 @@ export const idlFactory = ({ IDL }) => {
     'memo' : IDL.Opt(IDL.Text),
     'amount' : IDL.Nat64,
   });
+  const WithdrawResult = IDL.Record({
+    'fee' : IDL.Nat64,
+    'block_index' : IDL.Nat64,
+    'amount_transferred' : IDL.Nat64,
+  });
+  const WithdrawalIntentStatus = IDL.Variant({
+    'Held' : IDL.Record({ 'reason' : IDL.Text }),
+    'TransportAmbiguous' : IDL.Null,
+    'Rejected' : IDL.Record({ 'error' : IDL.Text }),
+    'InFlight' : IDL.Null,
+    'ConfirmedUnrepresentable' : IDL.Record({ 'block_index' : IDL.Text }),
+    'Completed' : WithdrawResult,
+  });
+  const WithdrawalIntentStatusView = IDL.Record({
+    'to' : IDL.Principal,
+    'request_id' : IDL.Nat64,
+    'status' : WithdrawalIntentStatus,
+    'asset_type' : AssetType,
+    'may_have_committed' : IDL.Bool,
+    'ledger' : IDL.Principal,
+    'created_at_time' : IDL.Nat64,
+    'amount' : IDL.Nat64,
+  });
   const DepositRecord = IDL.Record({
     'id' : IDL.Nat64,
     'asset_type' : AssetType,
@@ -109,11 +132,6 @@ export const idlFactory = ({ IDL }) => {
     'memo' : IDL.Opt(IDL.Text),
     'amount' : IDL.Nat64,
   });
-  const WithdrawResult = IDL.Record({
-    'fee' : IDL.Nat64,
-    'block_index' : IDL.Nat64,
-    'amount_transferred' : IDL.Nat64,
-  });
   return IDL.Service({
     'continue_external_token_deposit_backfill' : IDL.Func(
         [],
@@ -146,6 +164,16 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],
         [],
       ),
+    'get_active_withdrawal_intent_status' : IDL.Func(
+        [],
+        [
+          IDL.Variant({
+            'Ok' : IDL.Opt(WithdrawalIntentStatusView),
+            'Err' : IDL.Text,
+          }),
+        ],
+        ['query'],
+      ),
     'get_deposits' : IDL.Func(
         [IDL.Opt(IDL.Nat64), IDL.Opt(IDL.Nat64)],
         [IDL.Vec(DepositRecord)],
@@ -163,6 +191,17 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_status' : IDL.Func([], [TreasuryStatus], ['query']),
+    'get_withdrawal_intent_status' : IDL.Func(
+        [IDL.Nat64],
+        [
+          IDL.Variant({
+            'Ok' : IDL.Opt(WithdrawalIntentStatusView),
+            'Err' : IDL.Text,
+          }),
+        ],
+        ['query'],
+      ),
+    'is_caller_controller' : IDL.Func([], [IDL.Bool], ['query']),
     'record_external_token_deposit_once' : IDL.Func(
         [ExternalTokenDepositArgs],
         [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],

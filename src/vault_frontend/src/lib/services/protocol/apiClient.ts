@@ -3948,16 +3948,44 @@ export class TreasuryService {
     }
   }
 
-  // Withdraw funds from treasury (controller only)
+  // One durable journal entry is exposed at a time so controllers can reconcile
+  // an update whose reply may have been lost.
+  static async getWithdrawalIntentStatus(requestId: bigint): Promise<any | null> {
+    const treasuryActor = await walletStore.getActor(this.TREASURY_CANISTER_ID, treasuryIDL) as any;
+    if (typeof treasuryActor.get_withdrawal_intent_status !== 'function') {
+      throw new Error('This Treasury canister does not expose withdrawal status. Do not retry an uncertain withdrawal.');
+    }
+    const result = await treasuryActor.get_withdrawal_intent_status(requestId);
+    if ('Err' in result) throw new Error(result.Err || 'Unable to read withdrawal status');
+    return result.Ok?.[0] ?? null;
+  }
+
+  static async getActiveWithdrawalIntentStatus(): Promise<any | null> {
+    const treasuryActor = await walletStore.getActor(this.TREASURY_CANISTER_ID, treasuryIDL) as any;
+    if (typeof treasuryActor.get_active_withdrawal_intent_status !== 'function') {
+      throw new Error('This Treasury canister cannot prove that no unresolved withdrawal exists. New withdrawals are disabled.');
+    }
+    const result = await treasuryActor.get_active_withdrawal_intent_status();
+    if ('Err' in result) throw new Error(result.Err || 'Unable to check for an active withdrawal');
+    return result.Ok?.[0] ?? null;
+  }
+
+  // Withdraw funds from treasury (controller only). The caller must retain and
+  // reuse requestId for every retry of the same exact payload.
   static async withdrawFromTreasury(
     assetType: 'ICUSD' | 'ICP' | 'CKBTC',
-    amount: number,
+    amountE8s: bigint,
     to: string,
+    requestId: bigint,
+    ownerPrincipal: string,
     memo?: string
-  ): Promise<{ success: boolean; blockIndex?: number; error?: string }> {
+  ): Promise<{ success: boolean; blockIndex?: string; error?: string }> {
     try {
       // Get authenticated actor (must be controller)
       const treasuryActor = await walletStore.getActor(this.TREASURY_CANISTER_ID, treasuryIDL) as any;
+      if (get(walletStore).principal?.toString() !== ownerPrincipal) {
+        throw new Error('Wallet identity changed before the Treasury withdrawal was sent');
+      }
       
       // Create the asset type object in the format expected by the treasury canister
       const assetTypeObj: any = {};
@@ -3965,9 +3993,10 @@ export class TreasuryService {
       
       const withdrawArgs = {
         asset_type: assetTypeObj,
-        amount: BigInt(Math.floor(amount * E8S)),
+        amount: amountE8s,
         to: Principal.fromText(to),
-        memo: memo ? [memo] : []
+        memo: memo ? [memo] : [],
+        request_id: [requestId]
       };
       
       const result = await treasuryActor.withdraw(withdrawArgs);
@@ -3975,7 +4004,7 @@ export class TreasuryService {
       if ('Ok' in result) {
         return {
           success: true,
-          blockIndex: Number(result.Ok.block_index)
+          blockIndex: result.Ok.block_index.toString()
         };
       } else {
         return {
@@ -3995,10 +4024,9 @@ export class TreasuryService {
   // Check if current user is treasury controller
   static async isController(): Promise<boolean> {
     try {
-      const status = await this.getTreasuryStatus();
-      const walletState = get(walletStore);
-      
-      return walletState.principal?.toString() === status.controller;
+      const treasuryActor = await walletStore.getActor(this.TREASURY_CANISTER_ID, treasuryIDL) as any;
+      if (typeof treasuryActor.is_caller_controller !== 'function') return false;
+      return Boolean(await treasuryActor.is_caller_controller());
     } catch (error) {
       console.error('Error checking controller status:', error);
       return false;

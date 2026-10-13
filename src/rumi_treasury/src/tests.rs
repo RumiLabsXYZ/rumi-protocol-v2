@@ -286,51 +286,226 @@ mod tests {
         assert_eq!(crate::withdrawal_send_amount(10_001, 10_000), Ok(1));
     }
 
-    #[test]
-    fn test_icrc_003_created_at_time_persisted_and_reused() {
-        init_test_treasury();
-
-        let t1 = 1_700_000_000_000_000_000u64;
-        let first = crate::state::with_state_mut(|s| s.created_at_time_for_request(42, t1));
-        assert_eq!(first, t1);
-
-        // A retry minutes later must reuse the first attempt's timestamp so
-        // the ledger's dedup window can catch a re-submitted transfer.
-        let t2 = t1 + 5 * 60 * 1_000_000_000;
-        let retried = crate::state::with_state_mut(|s| s.created_at_time_for_request(42, t2));
-        assert_eq!(retried, t1);
-
-        // A different request gets its own timestamp.
-        let other = crate::state::with_state_mut(|s| s.created_at_time_for_request(43, t2));
-        assert_eq!(other, t2);
-
-        // After a TooOld/CreatedInFuture rejection the entry is cleared and
-        // the next attempt gets a fresh timestamp.
-        crate::state::with_state_mut(|s| s.clear_request_created_at(42));
-        let t3 = t2 + 1_000_000_000;
-        let fresh = crate::state::with_state_mut(|s| s.created_at_time_for_request(42, t3));
-        assert_eq!(fresh, t3);
+    fn withdrawal_intent(request_id: u64, amount: u64) -> WithdrawalIntent {
+        WithdrawalIntent {
+            request_id,
+            caller: mock_principal(),
+            asset_type: AssetType::ICUSD,
+            amount,
+            to: Principal::from_slice(&[1]),
+            requested_memo: Some("memo".into()),
+            ledger: Principal::from_slice(&[2]),
+            send_amount: amount - 10,
+            fee: 10,
+            transfer_memo: b"memo".to_vec(),
+            created_at_time: 1_700_000_000_000_000_000,
+            may_have_committed: false,
+            status: WithdrawalIntentStatus::InFlight,
+        }
     }
 
     #[test]
-    fn test_icrc_003_expired_created_at_time_replaced_and_pruned() {
+    fn withdrawal_journal_reserves_once_binds_payload_and_completes_once() {
         init_test_treasury();
-
-        let t1 = 1_700_000_000_000_000_000u64;
         crate::state::with_state_mut(|s| {
-            s.created_at_time_for_request(7, t1);
-            s.created_at_time_for_request(8, t1);
+            s.add_deposit(deposit_record(
+                DepositType::InterestRevenue,
+                AssetType::ICUSD,
+                1_000_000,
+                3,
+                None,
+            ));
+        });
+        let proposed = withdrawal_intent(500, 100_000);
+        let (first, created) =
+            crate::state::with_state_mut(|s| s.reserve_withdrawal_intent(proposed.clone()))
+                .unwrap();
+        assert!(created);
+        assert_eq!(
+            crate::state::with_state(|s| s.balances[&AssetType::ICUSD].available),
+            900_000
+        );
+
+        crate::state::with_state_mut(|s| {
+            let mut ambiguous = s.withdrawal_intent(500).unwrap();
+            ambiguous.may_have_committed = true;
+            ambiguous.status = WithdrawalIntentStatus::TransportAmbiguous;
+            s.set_withdrawal_intent(ambiguous);
         });
 
-        // Past the 24h ledger dedup window the original transaction can no
-        // longer dedup, so the request gets a fresh timestamp and stale
-        // entries are pruned.
-        let later = t1 + 24 * 60 * 60 * 1_000_000_000 + 1;
-        let replaced = crate::state::with_state_mut(|s| s.created_at_time_for_request(7, later));
-        assert_eq!(replaced, later);
+        // Simulate retry after transport ambiguity with changed fee/config
+        // candidates. Reservation returns the frozen intent and never debits again.
+        let mut retry = proposed.clone();
+        retry.ledger = Principal::from_slice(&[9]);
+        retry.fee = 99;
+        retry.send_amount = 99_901;
+        retry.created_at_time += 50;
+        let (stored, created) =
+            crate::state::with_state_mut(|s| s.reserve_withdrawal_intent(retry)).unwrap();
+        assert!(!created);
+        assert_eq!(stored.ledger, first.ledger);
+        assert_eq!(stored.fee, first.fee);
+        assert_eq!(stored.send_amount, first.send_amount);
+        assert_eq!(stored.created_at_time, first.created_at_time);
+        assert!(stored.may_have_committed);
+        assert_eq!(stored.status, WithdrawalIntentStatus::TransportAmbiguous);
+        assert_eq!(
+            crate::state::with_state(|s| s.balances[&AssetType::ICUSD].available),
+            900_000
+        );
 
-        let pruned = crate::state::with_state(|s| s.withdrawal_created_at.get(&8));
-        assert_eq!(pruned, None);
+        // A later TooOld response proves only that latest attempt had no
+        // effect; it cannot restore after the earlier ambiguous submission.
+        crate::state::with_state_mut(|s| s.reject_withdrawal_intent(500, "TooOld".into()));
+        let still_held = crate::state::with_state(|s| s.withdrawal_intent(500).unwrap());
+        assert!(still_held.may_have_committed);
+        assert_eq!(
+            still_held.status,
+            WithdrawalIntentStatus::TransportAmbiguous
+        );
+        assert_eq!(
+            crate::state::with_state(|s| s.balances[&AssetType::ICUSD].available),
+            900_000
+        );
+
+        let mismatch = withdrawal_intent(500, 100_001);
+        assert!(crate::state::with_state_mut(|s| s.reserve_withdrawal_intent(mismatch)).is_err());
+        assert_eq!(
+            crate::state::with_state(|s| s.balances[&AssetType::ICUSD].available),
+            900_000
+        );
+
+        let result = WithdrawResult {
+            block_index: 42,
+            amount_transferred: 99_990,
+            fee: 10,
+        };
+        let first_result = crate::state::with_state_mut(|s| {
+            s.complete_withdrawal_intent(500, result.clone(), mock_principal(), 123)
+        })
+        .unwrap();
+        let retry_result = crate::state::with_state_mut(|s| {
+            s.complete_withdrawal_intent(500, result.clone(), mock_principal(), 456)
+        })
+        .unwrap();
+        assert_eq!(first_result, result);
+        assert_eq!(retry_result, result);
+        crate::state::with_state(|s| {
+            assert_eq!(s.get_events_count(), 1);
+            assert_eq!(s.active_withdrawal_intent(), None);
+        });
+        assert_eq!(
+            crate::state::with_state_mut(|s| {
+                s.reserve_withdrawal_intent(withdrawal_intent(504, 100_000))
+                    .map(|(_, created)| created)
+            }),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn proven_no_effect_restores_once_and_makes_request_terminal() {
+        init_test_treasury();
+        crate::state::with_state_mut(|s| {
+            s.add_deposit(deposit_record(
+                DepositType::InterestRevenue,
+                AssetType::ICUSD,
+                1_000_000,
+                3,
+                None,
+            ));
+            s.reserve_withdrawal_intent(withdrawal_intent(503, 100_000))
+                .unwrap();
+            s.reject_withdrawal_intent(503, "TooOld".into());
+            s.reject_withdrawal_intent(503, "TooOld".into());
+        });
+        let (available, status) = crate::state::with_state(|s| {
+            (
+                s.balances[&AssetType::ICUSD].available,
+                s.withdrawal_intent(503).unwrap().status,
+            )
+        });
+        assert_eq!(available, 1_000_000);
+        assert_eq!(
+            status,
+            WithdrawalIntentStatus::Rejected {
+                error: "TooOld".into()
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_timestamp_only_withdrawal_id_is_held_without_debit() {
+        init_test_treasury();
+        crate::state::with_state_mut(|s| {
+            s.add_deposit(deposit_record(
+                DepositType::InterestRevenue,
+                AssetType::ICUSD,
+                1_000_000,
+                3,
+                None,
+            ));
+            s.withdrawal_created_at
+                .insert(501, 1_700_000_000_000_000_000);
+        });
+        assert!(crate::state::with_state_mut(
+            |s| s.reserve_withdrawal_intent(withdrawal_intent(501, 100_000))
+        )
+        .is_err());
+        assert_eq!(
+            crate::state::with_state(|s| s.balances[&AssetType::ICUSD].available),
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn unresolved_withdrawal_blocks_new_ids_but_terminal_intents_do_not() {
+        init_test_treasury();
+        crate::state::with_state_mut(|s| {
+            s.add_deposit(deposit_record(
+                DepositType::InterestRevenue,
+                AssetType::ICUSD,
+                1_000_000,
+                3,
+                None,
+            ));
+            s.reserve_withdrawal_intent(withdrawal_intent(510, 100_000))
+                .unwrap();
+        });
+
+        let blocked = crate::state::with_state_mut(|s| {
+            s.reserve_withdrawal_intent(withdrawal_intent(511, 100_000))
+        });
+        assert!(blocked.is_err());
+        let (active, available) = crate::state::with_state(|s| {
+            (
+                s.active_withdrawal_intent().map(|i| i.request_id),
+                s.balances[&AssetType::ICUSD].available,
+            )
+        });
+        assert_eq!(active, Some(510));
+        assert_eq!(available, 900_000);
+
+        crate::state::with_state_mut(|s| s.reject_withdrawal_intent(510, "TooOld".into()));
+        assert_eq!(
+            crate::state::with_state_mut(|s| {
+                s.reserve_withdrawal_intent(withdrawal_intent(511, 100_000))
+                    .map(|(_, created)| created)
+            }),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn withdrawal_intent_journal_survives_state_restore() {
+        init_test_treasury();
+        let proposed = withdrawal_intent(502, 100_000);
+        crate::state::with_state_mut(|s| s.withdrawal_intents.insert(502, proposed.clone()));
+        crate::state::restore_state();
+        assert_eq!(
+            crate::state::with_state(|s| s.withdrawal_intent(502)),
+            Some(proposed)
+        );
     }
 
     #[test]
@@ -804,6 +979,9 @@ mod tests {
         assert!(service.contains("record_external_token_deposit_once"));
         assert!(service.contains("continue_external_token_deposit_backfill"));
         assert!(service.contains("get_external_token_deposit_backfill_status"));
+        assert!(service.contains("get_withdrawal_intent_status"));
+        assert!(service.contains("get_active_withdrawal_intent_status"));
+        assert!(service.contains("is_caller_controller"));
         assert!(service.contains("DepositArgs"));
         assert!(service.contains("ExternalTokenDepositArgs"));
     }
