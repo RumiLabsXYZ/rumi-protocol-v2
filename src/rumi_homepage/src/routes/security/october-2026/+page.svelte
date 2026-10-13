@@ -2,7 +2,7 @@
   const report = {
     date: 'October 12, 2026',
     datetime: '2026-10-12',
-    source: 'origin/main through PR #557',
+    source: 'protocol code through PR #557 · report status through PR #559',
     snapshot: '3pool, Points, and AMM upgrades with module readback · October 12, 2026'
   };
 
@@ -17,7 +17,7 @@
     {
       pr: '#557',
       title: 'Bounded 3USD reserve inventory',
-      summary: 'Merged into main on October 13 UTC. The source adds developer/admin-gated, paginated views of retained backend reserve records and Stability Pool reserve-absorb intents and completed IDs so a later cutover can be reconciled against recorded state. A focused CI check passed. October 13 UTC readbacks still found the earlier backend and Stability Pool modules; the new inventory methods are not installed. The existing backend reported V2 reserve ingress disabled and an empty legacy pending-refund list, which does not establish that all historical obligations are settled.',
+      summary: 'Merged into main on October 13 UTC. The source adds developer/admin-gated, paginated views of retained backend reserve records and Stability Pool reserve-absorb intents and completed IDs so a later cutover can be reconciled against recorded state. The pages are not an atomic snapshot; a complete multi-page inventory requires quiescence or a versioned snapshot. A focused CI check passed. October 13 UTC readbacks still found the earlier backend and Stability Pool modules; the new inventory methods are not installed. The existing backend reported V2 reserve ingress disabled and an empty legacy pending-refund list, which does not establish that all historical obligations are settled.',
       state: 'Merged · not installed',
       tone: 'held',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/557'
@@ -265,7 +265,7 @@
           <p class="issue-line">Status report <span>—</span> <time datetime={report.datetime}>{report.date}</time></p>
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
-            This snapshot separates merged source from mainnet installation. October 12
+            This October 12 live baseline with October 13 source updates separates merged source from mainnet installation. October 12
             readbacks confirmed the 3pool modules from PRs #540, #541, and #553; the latest
             upgrade preserved LP supply and had zero pending claims. The Points upgrade now withholds the unfinished B snapshot
             time, while epoch 18 remains held with its driver off. The AMM recovery upgrade now
@@ -286,7 +286,7 @@
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
-      <div class="rule-caption"><span>Source cutoff · {report.source} · October 13, 2026 UTC</span><span>October 12 live snapshot and later source addenda</span></div>
+      <div class="rule-caption"><span>Scope · {report.source} · October 13, 2026 UTC</span><span>October 12 live snapshot and later source addenda</span></div>
     </div>
   </section>
 
