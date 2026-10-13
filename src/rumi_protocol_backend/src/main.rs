@@ -8062,6 +8062,7 @@ async fn stability_pool_liquidate_with_reserves_v2(
             refund: None,
             protocol_refund_fee_reserve_e8s: 0,
             non_inclusion_scan: None,
+            confirmed_unindexable_block: None,
         };
         state.three_usd_reserve_ingress_journals.insert(key.clone(), row.clone());
         Ok(row)
@@ -8274,6 +8275,11 @@ async fn stability_pool_liquidate_with_reserves_v2(
 
     let mut current = rumi_protocol_backend::management::three_usd_reserve_ingress_journal(&key)
         .ok_or_else(|| ProtocolError::GenericError("3USD ingress journal disappeared".into()))?;
+    if current.confirmed_unindexable_block.is_some() {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "3USD transfer was confirmed at an index outside the proof API range; ingress remains held".into(),
+        ));
+    }
     if matches!(current.phase, Phase::SubmittedOrUnknown { .. })
         && current.non_inclusion_scan.is_some()
     {
@@ -8336,12 +8342,18 @@ async fn stability_pool_liquidate_with_reserves_v2(
         Some(block) => block,
         None => match rumi_protocol_backend::management::transfer_from_three_usd_ingress_tuple(three_usd_ledger, &tuple).await {
             Ok(block) => {
-                mutate_state(|s| {
-                    if let Some(row) = s.three_usd_reserve_ingress_journals.get_mut(&key) {
-                        row.phase = Phase::TransferConfirmed { tuple: tuple.clone(), block_index: block };
-                    }
-                });
-                block
+                let recorded = mutate_state(|s| {
+                    let row = s.three_usd_reserve_ingress_journals.get_mut(&key)
+                        .ok_or_else(|| "3USD ingress journal disappeared after ledger response".to_string())?;
+                    rumi_protocol_backend::state::record_three_usd_ingress_ledger_receipt(
+                        row, &current.request, &tuple, block,
+                    )
+                }).map_err(|reason| ProtocolError::TemporarilyUnavailable(
+                    format!("3USD transfer response remains unresolved: {reason}"),
+                ))?;
+                recorded.ok_or_else(|| ProtocolError::TemporarilyUnavailable(
+                    "3USD transfer is confirmed at an index outside the proof API range; ingress remains held".into(),
+                ))?
             }
             Err(error) => {
                 if matches!(&error, icrc_ledger_types::icrc2::transfer_from::TransferFromError::TooOld) {
@@ -8492,6 +8504,10 @@ fn get_stability_pool_liquidate_with_reserves_v2_status(
         match journal.phase {
             Phase::AdmissionPending => Status::AdmissionPending,
             Phase::PreTransferRejected { reason } => Status::PreTransferRejected { reason },
+            Phase::SubmittedOrUnknown { .. } if journal.confirmed_unindexable_block.is_some() =>
+                Status::ReconciliationRequired {
+                    reason: "configured ledger confirmed the exact ingress at a block index outside the proof API range; no debt was written down".into(),
+                },
             Phase::SubmittedOrUnknown { .. } => Status::TransferSubmittedOrUnknown,
             Phase::NoTransferProven { .. } => Status::PreTransferRejected {
                 reason: "exact ingress tuple was proven absent from the complete ordered ledger prefix".into(),
@@ -8741,6 +8757,11 @@ async fn advance_three_usd_ingress_non_inclusion_scan(
     expected: &rumi_protocol_backend::state::ThreeUsdReserveIngressJournal,
 ) -> Result<(), ProtocolError> {
     use rumi_protocol_backend::state::ThreeUsdReserveIngressPhase as Phase;
+    if expected.confirmed_unindexable_block.is_some() {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "a confirmed wide ledger receipt cannot be scanned as absent".into(),
+        ));
+    }
     let mut scan = expected.non_inclusion_scan.clone().ok_or_else(|| ProtocolError::GenericError(
         "non-inclusion scan was not durably initialized by an exact TooOld response".into(),
     ))?;
@@ -8763,6 +8784,7 @@ async fn advance_three_usd_ingress_non_inclusion_scan(
             }
             let Some(row) = state.three_usd_reserve_ingress_journals.get_mut(key) else { return false; };
             if row.request != expected.request || row.phase != expected.phase
+                || row.confirmed_unindexable_block.is_some()
                 || row.non_inclusion_scan.as_ref() != expected.non_inclusion_scan.as_ref() { return false; }
             row.non_inclusion_scan = Some(scan.clone());
             true
@@ -8781,6 +8803,7 @@ async fn advance_three_usd_ingress_non_inclusion_scan(
             if state.three_pool_canister != Some(scan.ledger) { return false; }
             let Some(row) = state.three_usd_reserve_ingress_journals.get_mut(key) else { return false; };
             if row.request != expected.request || row.phase != expected.phase
+                || row.confirmed_unindexable_block.is_some()
                 || row.non_inclusion_scan.as_ref() != Some(&scan) { return false; }
             row.phase = Phase::NoTransferProven { tuple: scan.tuple.clone(), tip_log_length: tip };
             row.non_inclusion_scan = None;
@@ -8808,6 +8831,7 @@ async fn advance_three_usd_ingress_non_inclusion_scan(
         if state.three_pool_canister != Some(scan.ledger) { return false; }
         let Some(row) = state.three_usd_reserve_ingress_journals.get_mut(key) else { return false; };
         if row.request != expected.request || row.phase != expected.phase
+            || row.confirmed_unindexable_block.is_some()
             || row.non_inclusion_scan.as_ref() != Some(&scan) { return false; }
         if let Some(block_index) = found {
             row.phase = Phase::TransferConfirmed { tuple: scan.tuple.clone(), block_index };
@@ -8868,6 +8892,11 @@ async fn reconcile_three_usd_reserve_ingress_candidate_block(
         .ok_or_else(|| ProtocolError::GenericError("unknown 3USD ingress identity".into()))?;
     if journal.request.ledger != ledger {
         return Err(ProtocolError::GenericError("ingress ledger differs from configured 3pool".into()));
+    }
+    if journal.confirmed_unindexable_block.is_some() {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "confirmed wide ledger receipt cannot be replaced with a u64 candidate".into(),
+        ));
     }
     let tuple = match &journal.phase {
         Phase::SubmittedOrUnknown { tuple } => tuple.clone(),

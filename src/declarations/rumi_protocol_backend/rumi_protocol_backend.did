@@ -1435,6 +1435,7 @@ type ThreeUsdReserveIngressJournal = record {
   request : ThreeUsdReserveIngressRequest; phase : ThreeUsdReserveIngressPhase; ingress_proof_verified : bool;
   refund : opt ThreeUsdReserveIngressRefund; protocol_refund_fee_reserve_e8s : nat64;
   non_inclusion_scan : opt ThreeUsdIngressNonInclusionScan;
+  confirmed_unindexable_block : opt nat;
 };
 type StoredThreeUsdReserveAbsorbResult = record {
   caller : principal; vault_id : nat64; absorb_id : nat64; icusd_debt_covered_e8s : nat64;

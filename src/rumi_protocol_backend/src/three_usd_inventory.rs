@@ -334,6 +334,7 @@ mod tests {
                     refund: None,
                     protocol_refund_fee_reserve_e8s: 0,
                     non_inclusion_scan: None,
+                    confirmed_unindexable_block: None,
                 },
             },
             ThreeUsdReserveInventoryEntry::AbsorbProof {

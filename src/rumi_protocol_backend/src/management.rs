@@ -561,7 +561,7 @@ pub async fn transfer_from_idempotent(
 pub async fn transfer_from_three_usd_ingress_tuple(
     ledger: Principal,
     tuple: &crate::state::ThreeUsdReserveIngressTuple,
-) -> Result<u64, TransferFromError> {
+) -> Result<Nat, TransferFromError> {
     use icrc_ledger_types::icrc2::transfer_from::TransferFromArgs;
     let client = ICRC1Client {
         runtime: CdkRuntime,
@@ -578,7 +578,62 @@ pub async fn transfer_from_three_usd_ingress_tuple(
             memo: Some(Memo(tuple.memo.to_vec().into())),
         })
         .await;
-    handle_transfer_from_outcome(ledger, outer)
+    handle_transfer_from_outcome_full_nat(ledger, outer)
+}
+
+/// A confirmed ICRC-2 transfer returns a Candid Nat, including for Duplicate.
+/// The V2 reserve ingress must retain that exact index until its coordinator
+/// can decide whether the u64-bound proof API can represent it. Narrowing to
+/// zero here would turn a successful pull into a false proof candidate.
+fn handle_transfer_from_outcome_full_nat(
+    ledger: Principal,
+    outer: Result<Result<Nat, TransferFromError>, (i32, String)>,
+) -> Result<Nat, TransferFromError> {
+    match outer {
+        Ok(Ok(block)) => Ok(block),
+        Ok(Err(TransferFromError::Duplicate { duplicate_of })) => {
+            log!(DEBUG,
+                "[transfer_from_three_usd_ingress_tuple] ledger {} reported Duplicate; preserving block {}",
+                ledger, duplicate_of
+            );
+            Ok(duplicate_of)
+        }
+        Ok(Err(TransferFromError::BadFee { expected_fee })) => {
+            if let Some(fee) = expected_fee.0.to_u64() {
+                set_cached_fee(ledger, fee);
+            }
+            Err(TransferFromError::BadFee { expected_fee })
+        }
+        Ok(Err(other)) => Err(other),
+        Err((code, msg)) => Err(TransferFromError::GenericError {
+            error_code: Nat::from(code.max(0) as u64),
+            message: msg,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod three_usd_ingress_nat_receipt_tests {
+    use super::handle_transfer_from_outcome_full_nat;
+    use candid::{Nat, Principal};
+    use icrc_ledger_types::icrc2::transfer_from::TransferFromError;
+
+    #[test]
+    fn successful_and_duplicate_wide_indexes_keep_the_full_confirmed_nat() {
+        let ledger = Principal::from_slice(&[77]);
+        let wide = Nat::from(u64::MAX as u128 + 1);
+        assert_eq!(
+            handle_transfer_from_outcome_full_nat(ledger, Ok(Ok(wide.clone()))),
+            Ok(wide.clone()),
+        );
+        assert_eq!(
+            handle_transfer_from_outcome_full_nat(
+                ledger,
+                Ok(Err(TransferFromError::Duplicate { duplicate_of: wide.clone() })),
+            ),
+            Ok(wide),
+        );
+    }
 }
 
 pub fn three_usd_reserve_ingress_journal(
