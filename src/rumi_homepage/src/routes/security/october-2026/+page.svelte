@@ -2,7 +2,7 @@
   const report = {
     date: 'October 12, 2026',
     datetime: '2026-10-12',
-    source: 'protocol code through PR #561 · report status through PR #559',
+    source: 'protocol code through PR #563 · live observations dated per row',
     snapshot: '3pool, Points, and AMM upgrades with module readback · October 12, 2026'
   };
 
@@ -14,6 +14,14 @@
   ];
 
   const changes = [
+    {
+      pr: '#563',
+      title: 'Treasury withdrawal request binding',
+      summary: 'Merged into main on October 13 UTC. Every new Treasury withdrawal ledger memo now includes its request ID, including when the controller provides a custom memo. The controller memo limit is 24 UTF-8 bytes so the complete transfer memo fits within 32 bytes; the Treasury form uses the same limit. Focused Treasury tests and a frontend build passed. An October 13 UTC readback still showed Treasury on its earlier module, so this change has not been installed and does not settle any held withdrawal.',
+      state: 'Merged · Treasury not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/563'
+    },
     {
       pr: '#561',
       title: 'Treasury withdrawal intent recovery',
@@ -273,7 +281,7 @@
           <p class="issue-line">Status report <span>—</span> <time datetime={report.datetime}>{report.date}</time></p>
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
-            This October 12 live baseline with October 13 source updates through PR #561 separates merged source from mainnet installation. October 12
+            This October 12 live baseline with October 13 source updates through PR #563 separates merged source from mainnet installation. October 12
             readbacks confirmed the 3pool modules from PRs #540, #541, and #553; the latest
             upgrade preserved LP supply and had zero pending claims. The Points upgrade now withholds the unfinished B snapshot
             time, while epoch 18 remains held with its driver off. The AMM recovery upgrade now
