@@ -95,10 +95,11 @@
           <p>
             An October 11 readback confirmed the backend and liquidation bot running on their
             reviewed upgrades, with new borrowing available within a temporary protocol-wide cap.
-            October 14 queries still showed the 22,000 icUSD cap and earlier Treasury, Stability
-            Pool, and 3pool modules. The Stability Pool remained paused at its latest readback;
-            the AMM was still in maintenance at its October 12 readback. The 3pool donation fix
-            from PR #577 is merged source only. Broader findings and recovery work remain open.
+            October 14 queries still showed the 22,000 icUSD cap and earlier Treasury and Stability
+            Pool modules. The 3pool donation fix from PR #577 was installed on its reviewed hash
+            and unpaused after matching state readbacks. The Stability Pool remained paused at its
+            latest readback; the AMM was still in maintenance at its October 12 readback. Broader
+            findings and recovery work remain open.
           </p>
           <div class="status-divider"></div>
           <p class="status-footnote">

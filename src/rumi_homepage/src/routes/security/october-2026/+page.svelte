@@ -3,7 +3,7 @@
     date: 'October 14, 2026',
     datetime: '2026-10-14',
     source: 'protocol source through PR #577 · live observations dated per row',
-    snapshot: '3pool predecessor installed · latest live checks October 14'
+    snapshot: '3pool PR #577 installed · latest live checks October 14'
   };
 
   const states = [
@@ -17,9 +17,9 @@
     {
       pr: '#577',
       title: '3pool donation liability fence',
-      summary: 'Merged into main on October 14 UTC. The source prevents an admin donation from treating tokens owed by an unsettled liquidity exit as surplus. After upgrade, donation attempts run a bounded backfill of the retained payout journal and remain held until indexing is complete. A pinned test upgraded the exact previously installed 3pool Wasm to the reviewed candidate and preserved populated pool state. An October 14 UTC readback still found the earlier 3pool module installed; the new fence has not been deployed. A six-page, non-atomic admin inventory returned 108 retained payout entries with none marked unsettled at that observation; this is not independent proof of every ledger payment.',
-      state: 'Merged · 3pool not installed',
-      tone: 'held',
+      summary: 'Merged and installed on October 14 UTC as 3pool module SHA-256 95b075c7c9f14d43bb8f44599264b37ff7ad8b3f84c49d216f1a46846500a991. The donation guard prevents tokens owed by an unsettled liquidity exit from being treated as surplus. Donation attempts run a bounded backfill of the retained payout journal and remain held until indexing is complete. A pinned test passed an upgrade from the exact predecessor Wasm to the reviewed candidate. The pool was paused and stopped for a fresh pre-upgrade snapshot, then restarted on the exact new hash. Paused readbacks found unchanged LP supply, reserves, and virtual price, with zero pending claims; the pool was then unpaused and reported healthy. A six-page, non-atomic admin inventory returned 108 retained payout entries with none internally marked unsettled. Those statuses do not independently prove every ledger payment.',
+      state: 'Merged · installed',
+      tone: 'installed',
       href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/577'
     },
     {
@@ -327,13 +327,13 @@
             Stability Pool deposit-intent fix is merged but also remains uninstalled. PR #553's
             archived 3pool input-recovery module was installed after a fresh snapshot and post-upgrade readback.
             The October 13 archived-payout proof follow-up from PR #566 is also installed on its exact reviewed hash; it does not by itself settle a historical payout.
-            PR #577's donation liability fence is merged, but the October 14 readback still found the earlier 3pool module installed.
+            PR #577's donation liability fence was installed on October 14 after a fresh snapshot and exact-Wasm upgrade check; the pool was unpaused after matching state readbacks.
           </p>
         </div>
         <aside class="report-stamp" aria-label={report.snapshot}>
           <span class="stamp-label">Publication state</span>
           <strong>{report.snapshot}</strong>
-          <p>The October 12 upgrades installed the 3pool recovery modules through PR #553, the Points timing-redaction fix, and the AMM recovery upgrade. The October 13 3pool follow-up installed PR #566 on its reviewed hash. Their module hashes and readbacks are listed below. The Stability Pool remained paused and the AMM stayed in maintenance mode, with swaps and deposits held. The October 13 backend readback found a 22,000 icUSD borrowing cap, about 1,054.61 icUSD between the cap and reported debt before in-flight reservations, and one fee notification pending Treasury booking. This page combines time-scoped records; it is not live telemetry.</p>
+          <p>The October 12 upgrades installed the 3pool recovery modules through PR #553, the Points timing-redaction fix, and the AMM recovery upgrade. The 3pool follow-ups installed PR #566 on October 13 and PR #577 on October 14, each on its reviewed hash. Their module hashes and readbacks are listed below. The Stability Pool remained paused and the AMM stayed in maintenance mode, with swaps and deposits held. The October 13 backend readback found a 22,000 icUSD borrowing cap, about 1,054.61 icUSD between the cap and reported debt before in-flight reservations, and one fee notification pending Treasury booking. This page combines time-scoped records; it is not live telemetry.</p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
@@ -362,7 +362,7 @@
       <div class="section-heading section-heading-wide">
         <p class="section-label">Selected changes</p>
         <h2 id="updates-title">Change and release status</h2>
-        <p>The live readbacks below are dated October 12 unless a row states otherwise. October 13 installation and October 14 source addenda are marked separately. The 3pool release includes PR #535 recovery source, the PR #540/#541 artifact, and the now-installed PR #553 input-recovery and PR #566 payout-proof modules. The AMM recovery source from PR #507 is also installed, while PRs #545, #548, #557, and #574 remain merged source only. A source merge and a live installation remain separate states.</p>
+        <p>The live readbacks below are dated October 12 unless a row states otherwise. October 13–14 installations and source addenda are marked separately. The 3pool release includes PR #535 recovery source, the PR #540/#541 artifact, and the now-installed PR #553 input-recovery, PR #566 payout-proof, and PR #577 donation-fence modules. The AMM recovery source from PR #507 is also installed, while PRs #545, #548, #557, and #574 remain merged source only. A source merge and a live installation remain separate states.</p>
       </div>
       <div class="change-list">
         {#each changes as item}
