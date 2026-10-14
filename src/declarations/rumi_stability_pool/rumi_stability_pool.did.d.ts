@@ -524,6 +524,11 @@ export interface _SERVICE {
     { 'Ok' : ThreeUsdAbsorbInventoryPage } |
       { 'Err' : StabilityPoolError }
   >,
+  'admin_recover_ambiguous_chain_burn' : ActorMethod<
+    [bigint, [] | [bigint]],
+    { 'Ok' : ChainSpAbsorbResult } |
+      { 'Err' : StabilityPoolError }
+  >,
   'admin_recover_ambiguous_native_xrp_burn' : ActorMethod<
     [bigint, [] | [bigint]],
     { 'Ok' : null } |

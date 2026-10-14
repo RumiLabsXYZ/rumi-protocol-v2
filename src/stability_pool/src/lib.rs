@@ -796,6 +796,23 @@ pub async fn admin_recover_ambiguous_native_xrp_burn(
     crate::liquidation::reconcile_pending_native_xrp_absorb_from_status(vault_id).await
 }
 
+/// Admin recovery for an ambiguous chain-vault icUSD burn. The optional index
+/// is only a candidate: direct ledger evidence must match the retained intent.
+/// On success, the existing idempotent absorb path resumes backend accounting
+/// from the proof without issuing another burn.
+#[update]
+pub async fn admin_recover_ambiguous_chain_burn(
+    vault_id: u64,
+    candidate_block_index: Option<u64>,
+) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    crate::liquidation::recover_ambiguous_chain_burn_proof(vault_id, candidate_block_index).await?;
+    crate::liquidation::sp_absorb_chain_vault(vault_id).await
+}
+
 #[update]
 pub async fn scan_chain_absorb_candidates(
     max_per_chain: Option<u64>,

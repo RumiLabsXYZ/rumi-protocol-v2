@@ -183,6 +183,236 @@ fn validate_ambiguous_native_xrp_burn_block(
     Ok(())
 }
 
+/// A direct icUSD ledger block can recover a chain absorb only when every
+/// ledger-visible field matches the retained intent. The remaining pinned
+/// fields (chain id, sentinel, and consumed stablecoins) are protected by the
+/// full-intent compare-and-swap after the ledger awaits.
+fn validate_ambiguous_chain_burn_block(
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+    intent: &ChainSpAbsorbIntent,
+    minting_account: &Account,
+    stability_pool: Principal,
+) -> Result<(), String> {
+    if block.btype.as_deref().is_some_and(|kind| kind != "1burn") || block.op != "burn" {
+        return Err("candidate is not a standard ICRC-1 burn block".into());
+    }
+    if minting_account != &intent.icusd_minting_account {
+        return Err("pinned ledger minting account differs from the persisted burn intent".into());
+    }
+    let expected_from = Account {
+        owner: stability_pool,
+        subaccount: None,
+    };
+    if block.from.as_ref() != Some(&expected_from) {
+        return Err("burn source account differs from the Stability Pool account".into());
+    }
+    if block.spender.is_some() {
+        return Err("ICRC-1 burn unexpectedly records a spender".into());
+    }
+    if block.to.as_ref().is_some_and(|to| to != minting_account) {
+        return Err("burn destination differs from the pinned minting account".into());
+    }
+    if block.amount != u128::from(intent.icusd_to_burn_e8s)
+        || block.memo.as_deref() != Some(encode_chain_writedown_memo(intent.vault_id).as_slice())
+        || block.created_at_time != Some(intent.burn_created_at_time_ns)
+    {
+        return Err("burn block does not match the persisted amount, memo, or timestamp".into());
+    }
+    if block.fee.is_some_and(|fee| fee != 0) {
+        return Err("burn block records a nonzero fee".into());
+    }
+    Ok(())
+}
+
+async fn direct_chain_burn_recovery_candidate(
+    intent: &ChainSpAbsorbIntent,
+    candidate_index: Option<u64>,
+) -> Result<u64, StabilityPoolError> {
+    let selected = chain_burn_recovery_candidate_index(intent, candidate_index)?;
+    let minting_account = fetch_icusd_minting_account(intent.icusd_ledger).await?;
+    if minting_account != intent.icusd_minting_account {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "pinned ledger minting account differs from the persisted burn intent".into(),
+        });
+    }
+    // A retained receipt or caller-supplied candidate identifies one direct
+    // index. Proofless legacy rows are rejected before this helper because
+    // they lack the durable single-dispatch provenance that makes this index
+    // attributable to one burn attempt.
+    let (start, length) = if let Some(index) = selected {
+        (index, 1)
+    } else {
+        let request = vec![GetBlocksRequest {
+            start: Nat::from(0u64),
+            length: Nat::from(0u64),
+        }];
+        let result: Result<(GetBlocksResult,), _> =
+            call(intent.icusd_ledger, "icrc3_get_blocks", (request,)).await;
+        let (response,) = result.map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+            target: intent.icusd_ledger.to_string(),
+            method: "icrc3_get_blocks".into(),
+        })?;
+        if !response.blocks.is_empty() || !response.archived_blocks.is_empty() {
+            return Err(StabilityPoolError::LedgerTransferFailed {
+                reason: "ledger tip response unexpectedly included blocks or archives".into(),
+            });
+        }
+        let log_length = response.log_length.0.to_u64().ok_or_else(|| {
+            StabilityPoolError::LedgerTransferFailed {
+                reason: "ledger log length does not fit in u64".into(),
+            }
+        })?;
+        let start = log_length.saturating_sub(AMBIGUOUS_BURN_RECOVERY_SCAN_BLOCKS);
+        (start, log_length.saturating_sub(start))
+    };
+    if length == 0 {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "icUSD ledger contains no candidate blocks to scan".into(),
+        });
+    }
+    let blocks = fetch_direct_icusd_burn_blocks(intent.icusd_ledger, start, length).await?;
+    let matches: Vec<u64> = blocks
+        .into_iter()
+        .filter_map(|(index, block)| {
+            block.and_then(|block| {
+                validate_ambiguous_chain_burn_block(
+                    &block,
+                    intent,
+                    &minting_account,
+                    ic_cdk::api::id(),
+                )
+                .ok()
+                .map(|()| index)
+            })
+        })
+        .collect();
+    if matches.len() != 1 {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: if matches.is_empty() {
+                "no exact direct ledger burn block matched the persisted chain intent".into()
+            } else {
+                "multiple direct ledger burn blocks matched the persisted chain intent".into()
+            },
+        });
+    }
+    Ok(matches[0])
+}
+
+fn chain_burn_recovery_candidate_index(
+    intent: &ChainSpAbsorbIntent,
+    candidate_index: Option<u64>,
+) -> Result<Option<u64>, StabilityPoolError> {
+    let retained_index =
+        match intent.burn_receipt_nat.as_ref() {
+            Some(receipt) => Some(receipt.0.to_u64().ok_or_else(|| {
+                StabilityPoolError::LedgerTransferFailed {
+                    reason: "retained icUSD burn receipt exceeds u64; chain absorb remains held"
+                        .into(),
+                }
+            })?),
+            None => None,
+        };
+    if let (Some(retained), Some(candidate)) = (retained_index, candidate_index) {
+        if retained != candidate {
+            return Err(StabilityPoolError::LedgerTransferFailed {
+                reason: "candidate block index contradicts the retained icUSD burn receipt".into(),
+            });
+        }
+    }
+    Ok(retained_index.or(candidate_index))
+}
+
+fn chain_burn_recovery_has_single_dispatch_provenance(intent: &ChainSpAbsorbIntent) -> bool {
+    intent.status == ChainSpAbsorbIntentStatus::Burned
+        && intent.legacy_ambiguous_burn != Some(true)
+        && intent.backend_result.is_none()
+}
+
+pub(crate) async fn recover_ambiguous_chain_burn_proof(
+    vault_id: u64,
+    candidate_index: Option<u64>,
+) -> Result<(), StabilityPoolError> {
+    if read_state(|state| state.completed_chain_absorb(vault_id)).is_some() {
+        return Ok(());
+    }
+    let intent = read_state(|state| state.get_pending_chain_absorb(vault_id)).ok_or_else(|| {
+        StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "missing pending chain absorb intent".into(),
+        }
+    })?;
+    if intent.legacy_ambiguous_burn == Some(true) {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "legacy ambiguous chain burn lacks single-dispatch provenance; manual reconciliation is required".into(),
+        });
+    }
+    if let Some(proof) = &intent.burn_proof {
+        if proof.ledger_kind != rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn
+            || proof.vault_id_memo != vault_id
+            || intent
+                .burn_receipt_nat
+                .as_ref()
+                .is_some_and(|receipt| receipt.0.to_u64() != Some(proof.block_index))
+            || candidate_index.is_some_and(|candidate| candidate != proof.block_index)
+        {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "retained chain burn proof conflicts with requested recovery".into(),
+            });
+        }
+        return Ok(());
+    }
+    if !chain_burn_recovery_has_single_dispatch_provenance(&intent) {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "intent is not an unresolved ambiguous chain burn".into(),
+        });
+    }
+    let block_index = direct_chain_burn_recovery_candidate(&intent, candidate_index).await?;
+    let proof = build_icusd_burn_proof(block_index, vault_id);
+    mutate_state(|state| {
+        mark_chain_absorb_recovered_burn_proof_in_state(state, &intent, proof, ic_cdk::api::time())
+    })
+}
+
+fn mark_chain_absorb_recovered_burn_proof_in_state(
+    state: &mut StabilityPoolState,
+    expected: &ChainSpAbsorbIntent,
+    proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+    now_ns: u64,
+) -> Result<(), StabilityPoolError> {
+    let vault_id = expected.vault_id;
+    let mut current = state.get_pending_chain_absorb(vault_id).ok_or_else(|| {
+        StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "pending chain intent disappeared during ledger verification".into(),
+        }
+    })?;
+    if current != *expected
+        || current.status != ChainSpAbsorbIntentStatus::Burned
+        || current.burn_proof.is_some()
+        || current.backend_result.is_some()
+        || current
+            .burn_receipt_nat
+            .as_ref()
+            .is_some_and(|receipt| receipt.0.to_u64() != Some(proof.block_index))
+        || proof.ledger_kind != rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn
+        || proof.vault_id_memo != vault_id
+    {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "pending chain intent changed or receipt conflicts after ledger verification"
+                .into(),
+        });
+    }
+    current.burn_receipt_nat = Some(Nat::from(proof.block_index));
+    current.burn_proof = Some(proof);
+    current.last_error = None;
+    current.updated_at_ns = now_ns;
+    state.put_pending_chain_absorb(current)
+}
+
 async fn fetch_direct_icusd_burn_blocks(
     ledger: Principal,
     start: u64,
@@ -4711,10 +4941,162 @@ type StabilityPoolLiquidationResult = rumi_protocol_backend::StabilityPoolLiquid
 mod tests {
     use super::*;
     use crate::state::{chain_collateral_sentinel, read_state, replace_state, StabilityPoolState};
-    use candid::Nat;
+    use candid::{Decode, Encode, Nat};
     use icrc_ledger_types::icrc::generic_value::{ICRC3Map, ICRC3Value};
     use icrc_ledger_types::icrc1::transfer::Memo;
     use serde_bytes::ByteBuf;
+
+    fn ambiguous_chain_burn_fixture() -> (StabilityPoolState, ChainSpAbsorbIntent) {
+        let mut state = test_state();
+        state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
+            .unwrap();
+        let plan = prepare_chain_absorb_plan_in_state(&state, &chain_vault(100_00000000, true))
+            .expect("covered chain vault");
+        prepare_or_reuse_chain_absorb_intent_in_state(&mut state, &plan, minting_account(), 123)
+            .expect("persist chain intent");
+        mark_chain_absorb_burn_attempted_in_state(&mut state, 77, 456).expect("mark burn dispatch");
+        let intent = state.get_pending_chain_absorb(77).unwrap();
+        (state, intent)
+    }
+
+    fn decoded_chain_burn_block(
+        intent: &ChainSpAbsorbIntent,
+        pool: Principal,
+    ) -> rumi_protocol_backend::icrc3_proof::DecodedBlock {
+        rumi_protocol_backend::icrc3_proof::DecodedBlock {
+            btype: Some("1burn".into()),
+            op: "burn".into(),
+            from: Some(Account {
+                owner: pool,
+                subaccount: None,
+            }),
+            to: Some(intent.icusd_minting_account.clone()),
+            spender: None,
+            amount: u128::from(intent.icusd_to_burn_e8s),
+            fee: Some(0),
+            created_at_time: Some(intent.burn_created_at_time_ns),
+            memo: Some(encode_chain_writedown_memo(intent.vault_id)),
+        }
+    }
+
+    #[test]
+    fn direct_chain_burn_tuple_rejects_wrong_id_and_ledger_fields() {
+        let (_, intent) = ambiguous_chain_burn_fixture();
+        let pool = Principal::from_slice(&[45]);
+        let exact = decoded_chain_burn_block(&intent, pool);
+        assert!(validate_ambiguous_chain_burn_block(
+            &exact,
+            &intent,
+            &intent.icusd_minting_account,
+            pool,
+        )
+        .is_ok());
+
+        let mut wrong_intent = intent.clone();
+        wrong_intent.vault_id += 1;
+        assert!(
+            validate_ambiguous_chain_burn_block(
+                &exact,
+                &wrong_intent,
+                &wrong_intent.icusd_minting_account,
+                pool,
+            )
+            .is_err(),
+            "memo must bind the exact vault id"
+        );
+        let mut wrong = exact.clone();
+        wrong.amount += 1;
+        assert!(validate_ambiguous_chain_burn_block(
+            &wrong,
+            &intent,
+            &intent.icusd_minting_account,
+            pool,
+        )
+        .is_err());
+        let mut wrong = exact.clone();
+        wrong.created_at_time = Some(intent.burn_created_at_time_ns + 1);
+        assert!(validate_ambiguous_chain_burn_block(
+            &wrong,
+            &intent,
+            &intent.icusd_minting_account,
+            pool,
+        )
+        .is_err());
+        let mut wrong = exact;
+        wrong.from = Some(Account {
+            owner: Principal::from_slice(&[46]),
+            subaccount: None,
+        });
+        assert!(validate_ambiguous_chain_burn_block(
+            &wrong,
+            &intent,
+            &intent.icusd_minting_account,
+            pool,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn recovered_chain_burn_proof_uses_full_intent_cas_and_never_reopens_burn() {
+        let (mut state, intent) = ambiguous_chain_burn_fixture();
+        let proof = build_icusd_burn_proof(44, intent.vault_id);
+        let mut changed = intent.clone();
+        changed
+            .stables_consumed
+            .insert(Principal::from_slice(&[91]), 1);
+        state.put_pending_chain_absorb(changed).unwrap();
+        assert!(
+            mark_chain_absorb_recovered_burn_proof_in_state(
+                &mut state,
+                &intent,
+                proof.clone(),
+                500,
+            )
+            .is_err(),
+            "any changed pinned tuple field must fail the CAS"
+        );
+
+        state.put_pending_chain_absorb(intent.clone()).unwrap();
+        mark_chain_absorb_recovered_burn_proof_in_state(&mut state, &intent, proof, 501)
+            .expect("exact unchanged intent accepts verified proof");
+        let recovered = state.get_pending_chain_absorb(intent.vault_id).unwrap();
+        assert_eq!(recovered.burn_receipt_nat, Some(Nat::from(44u64)));
+        assert!(recovered.burn_proof.is_some());
+        assert!(
+            mark_chain_absorb_burn_attempted_in_state(&mut state, intent.vault_id, 502).is_err()
+        );
+    }
+
+    #[test]
+    fn chain_recovery_candidate_must_agree_with_retained_receipt_and_fit_u64() {
+        let (_, mut intent) = ambiguous_chain_burn_fixture();
+        assert_eq!(
+            chain_burn_recovery_candidate_index(&intent, Some(44)).unwrap(),
+            Some(44)
+        );
+        intent.burn_receipt_nat = Some(Nat::from(44u64));
+        assert_eq!(
+            chain_burn_recovery_candidate_index(&intent, None).unwrap(),
+            Some(44)
+        );
+        assert!(chain_burn_recovery_candidate_index(&intent, Some(45)).is_err());
+        intent.burn_receipt_nat = Some(Nat::from(18_446_744_073_709_551_616u128));
+        assert!(chain_burn_recovery_candidate_index(&intent, Some(44)).is_err());
+        assert!(chain_burn_recovery_candidate_index(&intent, None).is_err());
+    }
+
+    #[test]
+    fn legacy_ambiguous_chain_burn_lacks_single_dispatch_recovery_provenance() {
+        let (_, mut intent) = ambiguous_chain_burn_fixture();
+        assert!(chain_burn_recovery_has_single_dispatch_provenance(&intent));
+        intent.legacy_ambiguous_burn = Some(true);
+        assert!(!chain_burn_recovery_has_single_dispatch_provenance(&intent));
+    }
 
     #[test]
     fn new_three_usd_absorb_requires_v2_readiness_before_intent_or_approval() {
