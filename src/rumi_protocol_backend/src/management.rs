@@ -2997,7 +2997,9 @@ pub async fn transfer_collateral_from(amount: u64, from: Principal, ledger: Prin
 pub enum VaultCollateralPullDispatchError {
     Ledger(TransferFromError),
     Rejected { code: i32, message: String },
-    InvalidBlockIndex,
+    /// The ledger confirmed the exact pull, but its receipt exceeds the
+    /// u64-bound vault/proof interface. The caller must retain and hold it.
+    ConfirmedBlockOutOfRange { block_index: Nat },
 }
 
 impl VaultCollateralPullDispatchError {
@@ -3026,18 +3028,26 @@ pub async fn transfer_collateral_from_journal(
         created_at_time: Some(journal.created_at_time_ns),
         memo: Some(Memo(journal.memo.to_vec().into())),
     }).await;
+    classify_vault_collateral_pull_outcome(outer)
+}
+
+fn classify_vault_collateral_pull_outcome(
+    outer: Result<Result<Nat, TransferFromError>, (i32, String)>,
+) -> Result<u64, VaultCollateralPullDispatchError> {
     let block = match outer {
         Ok(Ok(block)) => block.0,
         Ok(Err(TransferFromError::Duplicate { duplicate_of })) => duplicate_of.0,
         Ok(Err(error)) => return Err(VaultCollateralPullDispatchError::Ledger(error)),
         Err((code, message)) => return Err(VaultCollateralPullDispatchError::Rejected { code, message }),
     };
-    u64::try_from(block).map_err(|_| VaultCollateralPullDispatchError::InvalidBlockIndex)
+    u64::try_from(block.clone()).map_err(|_| {
+        VaultCollateralPullDispatchError::ConfirmedBlockOutOfRange { block_index: Nat(block) }
+    })
 }
 
 #[cfg(test)]
 mod vault_collateral_pull_error_tests {
-    use super::VaultCollateralPullDispatchError as DispatchError;
+    use super::{classify_vault_collateral_pull_outcome, VaultCollateralPullDispatchError as DispatchError};
     use icrc_ledger_types::icrc2::transfer_from::TransferFromError;
     use candid::Nat;
 
@@ -3063,7 +3073,25 @@ mod vault_collateral_pull_error_tests {
             assert!(!DispatchError::Ledger(error).is_typed_no_effect());
         }
         assert!(!DispatchError::Rejected { code: 5, message: "reply lost".into() }.is_typed_no_effect());
-        assert!(!DispatchError::InvalidBlockIndex.is_typed_no_effect());
+        assert!(!DispatchError::ConfirmedBlockOutOfRange {
+            block_index: Nat::from(u64::MAX as u128 + 1),
+        }.is_typed_no_effect());
+    }
+
+    #[test]
+    fn confirmed_wide_success_and_duplicate_keep_the_exact_nat() {
+        let wide = Nat::from(u64::MAX as u128 + 1);
+        assert_eq!(
+            classify_vault_collateral_pull_outcome(Ok(Ok(wide.clone()))),
+            Err(DispatchError::ConfirmedBlockOutOfRange { block_index: wide.clone() }),
+        );
+        assert_eq!(
+            classify_vault_collateral_pull_outcome(Ok(Err(TransferFromError::Duplicate {
+                duplicate_of: wide.clone(),
+            }))),
+            Err(DispatchError::ConfirmedBlockOutOfRange { block_index: wide }),
+        );
+        assert_eq!(classify_vault_collateral_pull_outcome(Ok(Ok(Nat::from(7u64)))), Ok(7));
     }
 }
 

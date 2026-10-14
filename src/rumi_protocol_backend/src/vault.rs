@@ -3207,12 +3207,26 @@ async fn dispatch_vault_collateral_operation(
         | VaultCollateralPullPhase::Completed { .. }) {
         return Ok(journal);
     }
+    if let Some(block_index) = &journal.confirmed_wide_block_index {
+        return Err(ProtocolError::TemporarilyUnavailable(format!(
+            "collateral pull was confirmed at ledger block {block_index}, which exceeds the current vault receipt range; operation {} is held for reconciliation and must not be retried",
+            journal.operation_id,
+        )));
+    }
     let dispatch = mutate_state(|s| s.mark_vault_collateral_pull_dispatched(&owner, &journal))
         .map_err(ProtocolError::TemporarilyUnavailable)?;
     match management::transfer_collateral_from_journal(&dispatch).await {
         Ok(block_index) => mutate_state(|s| s.record_vault_pull_confirmed(&owner, &dispatch, block_index))
             .map_err(ProtocolError::TemporarilyUnavailable),
         Err(error) => {
+            if let management::VaultCollateralPullDispatchError::ConfirmedBlockOutOfRange { block_index } = &error {
+                mutate_state(|s| s.hold_vault_pull_confirmed_wide(&owner, &dispatch, block_index.clone()))
+                    .map_err(ProtocolError::TemporarilyUnavailable)?;
+                return Err(ProtocolError::TemporarilyUnavailable(format!(
+                    "collateral pull was confirmed at ledger block {block_index}, which exceeds the current vault receipt range; operation {} is held for reconciliation and must not be retried",
+                    dispatch.operation_id,
+                )));
+            }
             if error.is_typed_no_effect() && dispatch.dispatch_attempts == 1 {
                 let message = match &error {
                     management::VaultCollateralPullDispatchError::Ledger(error) => error.to_string(),
@@ -3232,8 +3246,8 @@ async fn dispatch_vault_collateral_operation(
                     "a prior ambiguous dispatch remains unresolved",
                 management::VaultCollateralPullDispatchError::Rejected { .. } =>
                     "inter-canister call rejection leaves transfer outcome unknown",
-                management::VaultCollateralPullDispatchError::InvalidBlockIndex =>
-                    "ledger block index is invalid; transfer outcome remains held",
+                management::VaultCollateralPullDispatchError::ConfirmedBlockOutOfRange { .. } =>
+                    unreachable!("confirmed wide receipts are held above"),
             };
             Err(ProtocolError::TemporarilyUnavailable(format!(
                 "{detail}; retry operation ID {} with identical arguments",

@@ -1897,6 +1897,7 @@ export const idlFactory = ({ IDL }) => {
     'operation_id' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
     'phase' : VaultCollateralPullPhase,
+    'confirmed_wide_block_index' : IDL.Opt(IDL.Nat),
   });
   const VaultOperationStatus = IDL.Record({
     'active' : IDL.Opt(VaultOperationView),
