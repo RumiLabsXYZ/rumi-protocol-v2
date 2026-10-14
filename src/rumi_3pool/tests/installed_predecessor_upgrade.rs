@@ -29,6 +29,8 @@ const CANDIDATE_WASM_SHA256: &str =
     "d1bc983879dc4a385ec87a398168f798802027b428bbef0f1c8382435ed96c6e";
 const OCTOBER_CANDIDATE_WASM_SHA256: &str =
     "7e5510608d9b2d0f27cc259afb3f9fe94681229a6b11298c1f703881cb481c6d";
+const PR577_CANDIDATE_WASM_SHA256: &str =
+    "95b075c7c9f14d43bb8f44599264b37ff7ad8b3f84c49d216f1a46846500a991";
 const PRE_UPGRADE_ALLOWANCE: u128 = 1_234_567;
 const LP_TRANSFER: u128 = 100_000;
 
@@ -274,6 +276,15 @@ fn exact_installed_predecessor_upgrade_preserves_populated_pool_and_payouts() {
 #[ignore = "opt-in exact production Wasm upgrade; requires PocketIC and both pinned artifact paths"]
 fn october_candidate_upgrade_preserves_populated_pool_and_payouts() {
     verify_upgrade(CANDIDATE_WASM_SHA256, OCTOBER_CANDIDATE_WASM_SHA256);
+}
+
+#[test]
+#[ignore = "opt-in exact production Wasm upgrade; requires PocketIC and both pinned artifact paths"]
+fn pr577_candidate_upgrade_preserves_populated_pool_and_payouts() {
+    verify_upgrade(
+        OCTOBER_CANDIDATE_WASM_SHA256,
+        PR577_CANDIDATE_WASM_SHA256,
+    );
 }
 
 fn verify_upgrade(predecessor_hash: &str, candidate_hash: &str) {

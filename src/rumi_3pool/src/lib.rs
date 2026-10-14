@@ -2544,6 +2544,9 @@ async fn receive_donation_accounting(
     if storage::payouts::has_unsettled_input_for_token(token_index) {
         return Err(DonationReceiptErrorV1::PoolLocked);
     }
+    if storage::payouts::has_unsettled_exit_for_token(token_index) {
+        return Err(DonationReceiptErrorV1::PoolLocked);
+    }
 
     let (ledger, symbol) = read_state(|s| {
         (s.config.tokens[idx].ledger_id, s.config.tokens[idx].symbol.clone())
@@ -4289,6 +4292,23 @@ pub fn test_reset_unsettled_input_index_backfill() {
 #[query]
 pub fn test_unsettled_input_index_state() -> (bool, u64) {
     storage::payouts::test_unsettled_input_index_state()
+}
+
+#[cfg(feature = "test_endpoints")]
+#[update]
+pub fn test_reset_unsettled_exit_index_backfill() {
+    assert_eq!(
+        ic_cdk::api::caller(),
+        read_state(|s| s.config.admin),
+        "admin only"
+    );
+    storage::payouts::test_reset_unsettled_exit_index_backfill();
+}
+
+#[cfg(feature = "test_endpoints")]
+#[query]
+pub fn test_unsettled_exit_index_state() -> (bool, u64) {
+    storage::payouts::test_unsettled_exit_index_state()
 }
 
 #[cfg(test)]

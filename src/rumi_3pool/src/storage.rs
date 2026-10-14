@@ -12,7 +12,7 @@
 //     first time on the new wasm (one-shot drain from the legacy blob) or
 //     subsequent times (load `SlimState` from its cell).
 //
-// Memory ID layout (41 IDs used; 255 available):
+// Memory ID layout (44 IDs used; 255 available):
 //
 //   0       SlimState cell              — bounded residual heap
 //   1       lp_balances                 — BTreeMap<Principal, u128>
@@ -47,6 +47,9 @@
 //   38      donation_receipts_v1          — permanent keyed reserve-accounting receipts
 //   39      payout_archive_proofs          — provisional bounded ICRC-3 chain cursors
 //   40      input_archive_proofs           — provisional bounded ICRC-3 input cursors
+//   41      unsettled_exit_index            — (token, payout id) donation liability fence
+//   42      payout_exit_index_cursor         — resumable bounded backfill cursor
+//   43      payout_exit_index_complete       — backfill completion marker
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -115,6 +118,9 @@ const MEM_LP_ALLOWANCES_CUTOVER: MemoryId = MemoryId::new(37);
 const MEM_DONATION_RECEIPTS_V1: MemoryId = MemoryId::new(38);
 const MEM_PAYOUT_ARCHIVE_PROOFS: MemoryId = MemoryId::new(39);
 const MEM_INPUT_ARCHIVE_PROOFS: MemoryId = MemoryId::new(40);
+const MEM_UNSETTLED_EXIT_INDEX: MemoryId = MemoryId::new(41);
+const MEM_PAYOUT_EXIT_INDEX_CURSOR: MemoryId = MemoryId::new(42);
+const MEM_PAYOUT_EXIT_INDEX_COMPLETE: MemoryId = MemoryId::new(43);
 const MAX_PAYOUT_ARCHIVE_PROOF_CURSORS: u64 = 64;
 const MAX_INPUT_ARCHIVE_PROOF_CURSORS: u64 = 64;
 
@@ -177,6 +183,8 @@ pub enum DonationReceiptInsert {
 
 const PAYOUT_INPUT_INDEX_CURSOR_START: u128 = u128::MAX;
 const PAYOUT_INPUT_INDEX_BACKFILL_BATCH: usize = 16;
+const PAYOUT_EXIT_INDEX_CURSOR_START: u128 = u128::MAX;
+const PAYOUT_EXIT_INDEX_BACKFILL_BATCH: usize = 16;
 
 // ─── SlimState ───────────────────────────────────────────────────────────────
 //
@@ -710,6 +718,21 @@ thread_local! {
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_ARCHIVE_PROOFS))));
     pub(crate) static INPUT_ARCHIVE_PROOFS: RefCell<StableBTreeMap<StorableU128, crate::payout_reconciliation::ArchiveInputProofProgress, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_INPUT_ARCHIVE_PROOFS))));
+    pub(crate) static UNSETTLED_EXIT_INDEX: RefCell<StableBTreeMap<StorableU128, Unit, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_UNSETTLED_EXIT_INDEX))));
+    pub(crate) static PAYOUT_EXIT_INDEX_CURSOR: RefCell<StableCell<StorableU128, Memory>> =
+        RefCell::new(StableCell::init(
+            MM.with(|m| m.borrow().get(MEM_PAYOUT_EXIT_INDEX_CURSOR)),
+            StorableU128(PAYOUT_EXIT_INDEX_CURSOR_START),
+        ).expect("init payout exit index cursor"));
+    pub(crate) static PAYOUT_EXIT_INDEX_COMPLETE: RefCell<StableCell<StorableU128, Memory>> =
+        RefCell::new(StableCell::init(
+            MM.with(|m| m.borrow().get(MEM_PAYOUT_EXIT_INDEX_COMPLETE)),
+            StorableU128(0),
+        ).expect("init payout exit index completion marker"));
+    #[cfg(feature = "test_endpoints")]
+    static TEST_PAYOUT_EXIT_INDEX_BACKFILL_BATCH: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
     pub(crate) static PAYOUT_FENCE: RefCell<StableCell<StorableU128, Memory>> = RefCell::new(
         StableCell::init(MM.with(|m| m.borrow().get(MEM_PAYOUT_FENCE)), StorableU128(0))
             .expect("init payout fence"),
@@ -1289,12 +1312,17 @@ pub mod payouts {
         input_archive_proofs::remove(id);
         let removed_value = PAYOUT_CURRENT.with(|map| map.borrow_mut().remove(&key));
         let removed = removed_value.is_some();
-        if let Some(value) = removed_value.filter(is_unsettled_input) {
-            UNSETTLED_INPUT_INDEX.with(|index| {
-                index
-                    .borrow_mut()
-                    .remove(&unsettled_input_key(value.token_index, value.id));
-            });
+        if let Some(value) = removed_value.as_ref() {
+            if is_unsettled_input(value) {
+                UNSETTLED_INPUT_INDEX.with(|index| {
+                    index.borrow_mut().remove(&unsettled_input_key(value.token_index, value.id));
+                });
+            }
+            if is_unsettled_exit(value) {
+                UNSETTLED_EXIT_INDEX.with(|index| {
+                    index.borrow_mut().remove(&unsettled_exit_key(value.token_index, value.id));
+                });
+            }
         }
         PAYOUT_OWNER_INDEX.with(|index| {
             index.borrow_mut().remove(&PayoutOwnerKey { owner, id });
@@ -1348,6 +1376,11 @@ pub mod payouts {
                             .remove(&unsettled_input_key(previous.token_index, previous.id));
                     });
                 }
+                if is_unsettled_exit(&previous) {
+                    UNSETTLED_EXIT_INDEX.with(|index| {
+                        index.borrow_mut().remove(&unsettled_exit_key(previous.token_index, previous.id));
+                    });
+                }
             }
             if is_new {
                 PAYOUT_OWNER_INDEX.with(|index| {
@@ -1365,6 +1398,11 @@ pub mod payouts {
                     index
                         .borrow_mut()
                         .insert(unsettled_input_key(value.token_index, value.id), Unit);
+                });
+            }
+            if is_unsettled_exit(&value) {
+                UNSETTLED_EXIT_INDEX.with(|index| {
+                    index.borrow_mut().insert(unsettled_exit_key(value.token_index, value.id), Unit);
                 });
             }
             map.borrow_mut()
@@ -1454,6 +1492,85 @@ pub mod payouts {
         let start = unsettled_input_key(token_index, 0);
         let end = unsettled_input_key(token_index, u64::MAX);
         UNSETTLED_INPUT_INDEX.with(|index| index.borrow().range(start..=end).next().is_some())
+    }
+
+    /// Fail closed while old payout rows are scanned in bounded batches. Every
+    /// un-settled liquidity exit is a reserve-backed user liability, regardless
+    /// of dispatch readiness or whether a pending_claim projection exists.
+    pub fn has_unsettled_exit_for_token(token_index: u8) -> bool {
+        if !backfill_unsettled_exit_index() {
+            return true;
+        }
+        let start = unsettled_exit_key(token_index, 0);
+        let end = unsettled_exit_key(token_index, u64::MAX);
+        UNSETTLED_EXIT_INDEX.with(|index| index.borrow().range(start..=end).next().is_some())
+    }
+
+    fn is_unsettled_exit(value: &crate::payouts::PayoutEntitlement) -> bool {
+        !value.settled && matches!(
+            value.kind,
+            crate::payouts::PayoutKind::RemoveLiquidity | crate::payouts::PayoutKind::RemoveOneCoin
+        )
+    }
+
+    fn unsettled_exit_key(token_index: u8, id: u64) -> StorableU128 {
+        StorableU128(((token_index as u128) << 64) | id as u128)
+    }
+
+    fn backfill_unsettled_exit_index() -> bool {
+        if PAYOUT_EXIT_INDEX_COMPLETE.with(|complete| complete.borrow().get().0 != 0) {
+            return true;
+        }
+        let cursor = PAYOUT_EXIT_INDEX_CURSOR.with(|cell| cell.borrow().get().0);
+        #[cfg(feature = "test_endpoints")]
+        let batch_size = TEST_PAYOUT_EXIT_INDEX_BACKFILL_BATCH.with(|batch| batch.get()).unwrap_or(PAYOUT_EXIT_INDEX_BACKFILL_BATCH);
+        #[cfg(not(feature = "test_endpoints"))]
+        let batch_size = PAYOUT_EXIT_INDEX_BACKFILL_BATCH;
+        let entries: Vec<crate::payouts::PayoutEntitlement> = PAYOUT_CURRENT.with(|map| {
+            let map = map.borrow();
+            if cursor == PAYOUT_EXIT_INDEX_CURSOR_START {
+                map.iter().take(batch_size).map(|(_, value)| value).collect()
+            } else {
+                map.range((
+                    std::ops::Bound::Excluded(StorableU128(cursor)),
+                    std::ops::Bound::Unbounded,
+                )).take(batch_size).map(|(_, value)| value).collect()
+            }
+        });
+        if entries.is_empty() {
+            PAYOUT_EXIT_INDEX_COMPLETE.with(|complete| complete.borrow_mut().set(StorableU128(1)).expect("mark payout exit index complete"));
+            return true;
+        }
+        let last_id = entries.last().expect("non-empty exit backfill batch").id;
+        for value in &entries {
+            if is_unsettled_exit(value) {
+                UNSETTLED_EXIT_INDEX.with(|index| {
+                    index.borrow_mut().insert(unsettled_exit_key(value.token_index, value.id), Unit);
+                });
+            }
+        }
+        PAYOUT_EXIT_INDEX_CURSOR.with(|cell| cell.borrow_mut().set(StorableU128(last_id as u128)).expect("advance payout exit index cursor"));
+        if entries.len() < batch_size {
+            PAYOUT_EXIT_INDEX_COMPLETE.with(|complete| complete.borrow_mut().set(StorableU128(1)).expect("mark payout exit index complete"));
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "test_endpoints")]
+    pub fn test_reset_unsettled_exit_index_backfill() {
+        UNSETTLED_EXIT_INDEX.with(|index| index.borrow_mut().clear_new());
+        PAYOUT_EXIT_INDEX_CURSOR.with(|cell| cell.borrow_mut().set(StorableU128(PAYOUT_EXIT_INDEX_CURSOR_START)).expect("reset payout exit index cursor"));
+        PAYOUT_EXIT_INDEX_COMPLETE.with(|complete| complete.borrow_mut().set(StorableU128(0)).expect("reset payout exit index marker"));
+        TEST_PAYOUT_EXIT_INDEX_BACKFILL_BATCH.with(|batch| batch.set(Some(1)));
+    }
+
+    #[cfg(feature = "test_endpoints")]
+    pub fn test_unsettled_exit_index_state() -> (bool, u64) {
+        let complete = PAYOUT_EXIT_INDEX_COMPLETE.with(|cell| cell.borrow().get().0 != 0);
+        let count = UNSETTLED_EXIT_INDEX.with(|index| index.borrow().len());
+        (complete, count)
     }
 
     fn is_unsettled_input(value: &crate::payouts::PayoutEntitlement) -> bool {
