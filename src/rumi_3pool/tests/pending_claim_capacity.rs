@@ -1488,6 +1488,126 @@ fn receive_donation_cannot_reclassify_unresolved_donation_input() {
 }
 
 #[test]
+fn receive_donation_keeps_unsettled_exit_liability_out_of_donation_slack() {
+    let h = setup();
+    set_test_cap(&h, 0);
+    h.pic.update_call(
+        h.ledgers[0], h.user, "set_bad_fee_failures", encode_one(1u32).unwrap(),
+    ).unwrap();
+    call_ledger_nat(&h, h.ledgers[0], "set_fee", 100);
+
+    let exit: Result<Vec<Nat>, ThreePoolError> = decode_one(&reply(h.pic.update_call(
+        h.pool, h.user, "remove_liquidity",
+        encode_args((100_000_000u128, vec![0u128; 3])).unwrap(),
+    ).unwrap())).unwrap();
+    assert!(matches!(exit, Err(ThreePoolError::TransferFailed { .. })));
+    let entitlement = payouts(&h, h.user).into_iter()
+        .find(|p| p.kind == PayoutKind::RemoveLiquidity && p.token_index == 0 && !p.settled)
+        .expect("failed exit remains an unsettled current payout");
+    assert!(claims(&h).is_empty(), "journal-only exit must not require a pending_claim row");
+
+    let before: PoolStatus = decode_one(&reply(h.pic.query_call(
+        h.pool, h.user, "get_pool_status", encode_args(()).unwrap(),
+    ).unwrap())).unwrap();
+    let on_chain_before = balance(&h, h.ledgers[0], h.pool);
+    assert_eq!(
+        on_chain_before,
+        before.balances[0] + entitlement.gross,
+        "the failed no-effect exit leaves exactly its owed gross amount as apparent slack",
+    );
+    let donation: Result<(), ThreePoolError> = decode_one(&reply(h.pic.update_call(
+        h.pool, h.admin, "receive_donation",
+        encode_args((0u8, entitlement.gross)).unwrap(),
+    ).unwrap())).unwrap();
+    assert!(matches!(donation, Err(ThreePoolError::PoolLocked)));
+    let after_rejection: PoolStatus = decode_one(&reply(h.pic.query_call(
+        h.pool, h.user, "get_pool_status", encode_args(()).unwrap(),
+    ).unwrap())).unwrap();
+    assert_eq!(after_rejection.balances, before.balances, "rejected acknowledgement changes no reserves");
+    assert_eq!(balance(&h, h.ledgers[0], h.pool), on_chain_before);
+
+    // Simulate the pre-index stable layout: the current payout rows remain,
+    // while the newly introduced index must backfill one bounded page at a time.
+    h.pic.update_call(
+        h.pool, h.admin, "test_reset_unsettled_exit_index_backfill", encode_args(()).unwrap(),
+    ).unwrap();
+    h.pic.upgrade_canister(
+        h.pool, wasm_artifact("rumi_3pool.wasm"), encode_args(()).unwrap(), None,
+    ).expect("upgrade preserves old payout rows while the new index is incomplete");
+    // The test-only batch override is heap state and resets on upgrade. Reset
+    // the empty index again after upgrade so the following calls exercise one
+    // stable row per bounded backfill step against the preserved payout map.
+    h.pic.update_call(
+        h.pool, h.admin, "test_reset_unsettled_exit_index_backfill", encode_args(()).unwrap(),
+    ).unwrap();
+    let mut index_state: (bool, u64) = decode_args(&reply(h.pic.query_call(
+        h.pool, h.admin, "test_unsettled_exit_index_state", encode_args(()).unwrap(),
+    ).unwrap())).unwrap();
+    assert_eq!(index_state, (false, 0));
+
+    let result: Result<(), ThreePoolError> = decode_one(&reply(h.pic.update_call(
+        h.pool, h.admin, "receive_donation",
+        encode_args((0u8, entitlement.gross)).unwrap(),
+    ).unwrap())).unwrap();
+    assert!(matches!(result, Err(ThreePoolError::PoolLocked)));
+    index_state = decode_args(&reply(h.pic.query_call(
+        h.pool, h.admin, "test_unsettled_exit_index_state", encode_args(()).unwrap(),
+    ).unwrap())).unwrap();
+    assert_eq!(
+        index_state.0,
+        false,
+        "the first bounded page must leave backfill incomplete",
+    );
+
+    let retained_rows = payout_storage_counts(&h).0 as usize;
+    let mut saw_liability_while_incomplete = index_state.1 > 0;
+    for _ in 0..=retained_rows {
+        let result: Result<(), ThreePoolError> = decode_one(&reply(h.pic.update_call(
+            h.pool, h.admin, "receive_donation",
+            encode_args((0u8, entitlement.gross)).unwrap(),
+        ).unwrap())).unwrap();
+        assert!(matches!(result, Err(ThreePoolError::PoolLocked)));
+        index_state = decode_args(&reply(h.pic.query_call(
+            h.pool, h.admin, "test_unsettled_exit_index_state", encode_args(()).unwrap(),
+        ).unwrap())).unwrap();
+        saw_liability_while_incomplete |= !index_state.0 && index_state.1 > 0;
+        if index_state.0 { break; }
+    }
+    assert!(index_state.0, "bounded backfill completes without accepting donation during migration");
+    assert!(index_state.1 > 0, "backfill records the unsettled exit payout");
+    assert!(
+        saw_liability_while_incomplete,
+        "the exit liability must be indexed while later backfill pages remain and donation stays locked",
+    );
+
+    let recovered: Result<(), ThreePoolError> = decode_one(&reply(h.pic.update_call(
+        h.pool, h.user, "claim_pending", encode_one(entitlement.id).unwrap(),
+    ).unwrap())).unwrap();
+    recovered.expect("the exact rejected transfer should recover");
+    assert!(payout(&h, h.user, entitlement.id).settled);
+
+    // A real fresh transfer creates new slack. Once the old exit is paid, that
+    // separately transferred value can be acknowledged as a donation.
+    let fresh_amount = 50_000u128;
+    let transfer: Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError> = decode_one(&reply(h.pic.update_call(
+        h.ledgers[0], h.user, "icrc1_transfer",
+        encode_one(icrc_ledger_types::icrc1::transfer::TransferArg {
+            from_subaccount: None,
+            to: Account { owner: h.pool, subaccount: None },
+            amount: Nat::from(fresh_amount),
+            fee: None,
+            memo: None,
+            created_at_time: None,
+        }).unwrap(),
+    ).unwrap())).unwrap();
+    transfer.expect("fresh user-funded deposit transfer");
+    let accepted: Result<(), ThreePoolError> = decode_one(&reply(h.pic.update_call(
+        h.pool, h.admin, "receive_donation", encode_args((0u8, fresh_amount)).unwrap(),
+    ).unwrap())).unwrap();
+    accepted.expect("freshly transferred, unencumbered slack is accepted");
+}
+
+#[test]
 fn committed_output_with_lost_reply_replays_exact_identity_once_and_settles_after_upgrade() {
     let h = setup();
     let input_before = balance(&h, h.ledgers[0], h.user);
