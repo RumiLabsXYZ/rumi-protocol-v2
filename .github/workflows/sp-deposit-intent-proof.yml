@@ -69,3 +69,7 @@ jobs:
           RUMI_FLAKY_LEDGER_WASM_PATH: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/flaky_ledger.wasm
           RUMI_THREE_POOL_WASM_PATH: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/rumi_3pool.wasm
         run: cargo +1.92.0 test --locked -p stability_pool --test pocket_ic_3usd -- --nocapture
+      - name: Verify Stability Pool state transitions
+        env:
+          RUSTFLAGS: -C link-arg=-Wl,--allow-multiple-definition
+        run: cargo +1.92.0 test --locked -p stability_pool --lib

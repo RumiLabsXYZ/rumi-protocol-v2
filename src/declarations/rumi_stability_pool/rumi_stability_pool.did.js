@@ -301,11 +301,13 @@ export const idlFactory = ({ IDL }) => {
     'stables_consumed' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'updated_at_ns' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
+    'legacy_ambiguous_burn' : IDL.Opt(IDL.Bool),
     'chain_sentinel' : IDL.Principal,
     'created_at_ns' : IDL.Nat64,
     'burn_created_at_time_ns' : IDL.Nat64,
     'chain_id' : IDL.Nat32,
     'backend_result' : IDL.Opt(ChainStabilityPoolLiquidationResult),
+    'burn_receipt_nat' : IDL.Opt(IDL.Nat),
     'icusd_ledger' : IDL.Principal,
     'icusd_minting_account' : IcrcAccount,
   });

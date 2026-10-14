@@ -2962,6 +2962,8 @@ mod tests {
                 ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn,
                 vault_id_memo: 77,
             }),
+            burn_receipt_nat: Some(candid::Nat::from(44u8)),
+            legacy_ambiguous_burn: None,
             backend_result: None,
             last_error: None,
             created_at_ns: 123,

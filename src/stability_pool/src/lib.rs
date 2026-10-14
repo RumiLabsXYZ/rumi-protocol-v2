@@ -151,6 +151,16 @@ fn pre_upgrade() {
 #[post_upgrade]
 fn post_upgrade(_args: StabilityPoolInitArgs) {
     state::load_from_stable_memory();
+    let legacy_ambiguous_chain_absorbs = mutate_state(|s| {
+        s.hold_legacy_prepared_chain_absorbs(ic_cdk::api::time())
+    });
+    if legacy_ambiguous_chain_absorbs > 0 {
+        log!(
+            INFO,
+            "SP chain burn migration: held {} legacy Prepared intents as ambiguous; inspect burn_proof/legacy_ambiguous_burn before reconciliation",
+            legacy_ambiguous_chain_absorbs
+        );
+    }
     let recovered_payouts = mutate_state(|s| {
         s.initialize_pending_outbound_payouts();
         let pending = s.pending_outbound_payouts.as_ref().map_or(0, |p| p.len());
@@ -1752,6 +1762,8 @@ mod tests {
                 ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn,
                 vault_id_memo: 77,
             }),
+            burn_receipt_nat: Some(candid::Nat::from(44u8)),
+            legacy_ambiguous_burn: None,
             backend_result: None,
             last_error: None,
             created_at_ns: 123,
