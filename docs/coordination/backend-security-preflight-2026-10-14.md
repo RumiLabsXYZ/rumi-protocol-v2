@@ -1,8 +1,10 @@
 # Backend security upgrade: exact snapshot preflight (2026-10-14 UTC)
 
-This is a source and read-only live-state record, not authorization to stop,
-snapshot, upgrade, raise the borrowing cap, retry Treasury/Stability Pool
-installation, or clear any financial obligation.
+This is a source and read-only live-state record, not an execution log. The user
+later authorized replacement of the exact oldest backend snapshot named below;
+that operation is deferred until a reviewed upgrade window. This document does
+not authorize raising the borrowing cap, retrying Treasury/Stability Pool
+installation, or clearing any financial obligation.
 
 ## Source and candidate
 
@@ -69,7 +71,12 @@ The user previously approved replacing
 `00000000000000000000000001f088fe0101`. **That ID is absent from the live
 list.** This proposal names a different oldest snapshot,
 `00000000000000010000000001f088fe0101`; the earlier approval does not cover
-replacing it. The oldest snapshot was previously downloaded to a private,
+replacing it. On October 14 UTC, the user subsequently authorized replacing
+the exact oldest snapshot named above at the assistant's discretion. No backend
+stop or snapshot replacement has yet been executed under that authorization;
+the live ID, predecessor Wasm, financial state, and backup bytes must be checked
+again immediately before the operation. The oldest snapshot was previously
+downloaded to a private,
 mode-0700 local directory; its files are mode 0600. The host path is withheld
 from this proposal because the downloaded snapshot contains complete
 canister state.
@@ -83,7 +90,7 @@ do not upload or publish their contents. Retain them through the reviewed
 upgrade and recovery window. Any eventual deletion needs a separate retention
 decision and proof that the recovery obligation has ended.
 
-## Proposed exact operation, only after approval
+## Authorized snapshot operation, deferred until the upgrade window
 
 1. Immediately before stopping, re-read the backend's installed hash through
    controller-authorized management status and its financial state through
