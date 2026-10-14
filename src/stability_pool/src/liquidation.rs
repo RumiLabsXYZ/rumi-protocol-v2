@@ -4964,6 +4964,14 @@ mod tests {
         (state, intent)
     }
 
+    fn pending_intent() -> ChainSpAbsorbIntent {
+        let (_, mut intent) = ambiguous_chain_burn_fixture();
+        intent.burn_proof = Some(build_icusd_burn_proof(44, intent.vault_id));
+        intent.burn_receipt_nat = Some(Nat::from(44u64));
+        intent.last_error = None;
+        intent
+    }
+
     fn decoded_chain_burn_block(
         intent: &ChainSpAbsorbIntent,
         pool: Principal,
