@@ -1,10 +1,12 @@
 # Backend security upgrade: exact snapshot preflight (2026-10-14 UTC)
 
 This is a source and read-only live-state record, not an execution log. The user
-later authorized replacement of the exact oldest backend snapshot named below;
-that operation is deferred until a reviewed upgrade window. This document does
-not authorize raising the borrowing cap, retrying Treasury/Stability Pool
-installation, or clearing any financial obligation.
+later authorized replacement of the exact oldest backend snapshot named below.
+The release plan defers that already-authorized replacement until the reviewed
+backend upgrade window, to keep the fresh snapshot close to installation. This
+timing is a choice, not an additional condition on the snapshot authorization.
+This document does not authorize raising the borrowing cap, retrying
+Treasury/Stability Pool installation, or clearing any financial obligation.
 
 ## Source and candidate
 
@@ -90,7 +92,7 @@ do not upload or publish their contents. Retain them through the reviewed
 upgrade and recovery window. Any eventual deletion needs a separate retention
 decision and proof that the recovery obligation has ended.
 
-## Authorized snapshot operation, deferred until the upgrade window
+## Authorized snapshot operation, deferred by choice to the upgrade window
 
 1. Immediately before stopping, re-read the backend's installed hash through
    controller-authorized management status and its financial state through
@@ -104,7 +106,7 @@ decision and proof that the recovery obligation has ended.
 2. Recheck the downloaded oldest snapshot's file sizes and SHA-256 manifest;
    keep the local copy and nine other network snapshots intact. Confirm enough
    free disk for any needed additional evidence.
-3. Under a separately reviewed release sequence, stop the backend and wait
+3. At the chosen snapshot window, stop the backend and wait
    for confirmed `Stopped` status; `Stopping` can still finish in-flight
    callbacks and mutate financial state. Queries to a fully stopped canister
    cannot provide a fresh financial inventory. Treat the fresh snapshot as
