@@ -60,11 +60,13 @@ export interface ChainSpAbsorbIntent {
   'stables_consumed' : Array<[Principal, bigint]>,
   'updated_at_ns' : bigint,
   'vault_id' : bigint,
+  'legacy_ambiguous_burn' : [] | [boolean],
   'chain_sentinel' : Principal,
   'created_at_ns' : bigint,
   'burn_created_at_time_ns' : bigint,
   'chain_id' : number,
   'backend_result' : [] | [ChainStabilityPoolLiquidationResult],
+  'burn_receipt_nat' : [] | [bigint],
   'icusd_ledger' : Principal,
   'icusd_minting_account' : IcrcAccount,
 }
@@ -520,6 +522,11 @@ export interface _SERVICE {
   'admin_get_three_usd_absorb_inventory_page' : ActorMethod<
     [[] | [ThreeUsdAbsorbInventoryCursor], number],
     { 'Ok' : ThreeUsdAbsorbInventoryPage } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'admin_recover_ambiguous_chain_burn' : ActorMethod<
+    [bigint, [] | [bigint]],
+    { 'Ok' : ChainSpAbsorbResult } |
       { 'Err' : StabilityPoolError }
   >,
   'admin_recover_ambiguous_native_xrp_burn' : ActorMethod<

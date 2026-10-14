@@ -61,6 +61,18 @@ export const idlFactory = ({ IDL }) => {
     'completed_id_count' : IDL.Nat64,
     'next_cursor' : IDL.Opt(ThreeUsdAbsorbInventoryCursor),
   });
+  const ChainSpAbsorbResult = IDL.Record({
+    'collateral_price_e8s' : IDL.Nat64,
+    'liquidated_debt_e8s' : IDL.Nat,
+    'collateral_received_native' : IDL.Nat,
+    'block_index' : IDL.Nat64,
+    'claim_id' : IDL.Nat64,
+    'custody_address' : IDL.Text,
+    'vault_id' : IDL.Nat64,
+    'chain_id' : IDL.Nat32,
+    'icusd_burned_e8s' : IDL.Nat64,
+    'success' : IDL.Bool,
+  });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -149,18 +161,6 @@ export const idlFactory = ({ IDL }) => {
     'collateral_gained' : IDL.Nat64,
     'success' : IDL.Bool,
     'collateral_type' : IDL.Principal,
-  });
-  const ChainSpAbsorbResult = IDL.Record({
-    'collateral_price_e8s' : IDL.Nat64,
-    'liquidated_debt_e8s' : IDL.Nat,
-    'collateral_received_native' : IDL.Nat,
-    'block_index' : IDL.Nat64,
-    'claim_id' : IDL.Nat64,
-    'custody_address' : IDL.Text,
-    'vault_id' : IDL.Nat64,
-    'chain_id' : IDL.Nat32,
-    'icusd_burned_e8s' : IDL.Nat64,
-    'success' : IDL.Bool,
   });
   const ChainAbsorbAutoTickRecord = IDL.Record({
     'skipped_reason' : IDL.Opt(IDL.Text),
@@ -301,11 +301,13 @@ export const idlFactory = ({ IDL }) => {
     'stables_consumed' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'updated_at_ns' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
+    'legacy_ambiguous_burn' : IDL.Opt(IDL.Bool),
     'chain_sentinel' : IDL.Principal,
     'created_at_ns' : IDL.Nat64,
     'burn_created_at_time_ns' : IDL.Nat64,
     'chain_id' : IDL.Nat32,
     'backend_result' : IDL.Opt(ChainStabilityPoolLiquidationResult),
+    'burn_receipt_nat' : IDL.Opt(IDL.Nat),
     'icusd_ledger' : IDL.Principal,
     'icusd_minting_account' : IcrcAccount,
   });
@@ -565,6 +567,16 @@ export const idlFactory = ({ IDL }) => {
           }),
         ],
         ['query'],
+      ),
+    'admin_recover_ambiguous_chain_burn' : IDL.Func(
+        [IDL.Nat64, IDL.Opt(IDL.Nat64)],
+        [
+          IDL.Variant({
+            'Ok' : ChainSpAbsorbResult,
+            'Err' : StabilityPoolError,
+          }),
+        ],
+        [],
       ),
     'admin_recover_ambiguous_native_xrp_burn' : IDL.Func(
         [IDL.Nat64, IDL.Opt(IDL.Nat64)],

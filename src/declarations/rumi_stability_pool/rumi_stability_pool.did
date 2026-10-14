@@ -218,6 +218,8 @@ type ChainSpAbsorbIntent = record {
   burn_created_at_time_ns : nat64;
   status : ChainSpAbsorbIntentStatus;
   burn_proof : opt SpWritedownProof;
+  burn_receipt_nat : opt nat;
+  legacy_ambiguous_burn : opt bool;
   backend_result : opt ChainStabilityPoolLiquidationResult;
   last_error : opt text;
   created_at_ns : nat64;
@@ -567,6 +569,7 @@ service : (StabilityPoolInitArgs) -> {
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> (vec LiquidationResult);
   execute_liquidation : (nat64) -> (variant { Ok : LiquidationResult; Err : StabilityPoolError });
   sp_absorb_chain_vault : (nat64) -> (variant { Ok : ChainSpAbsorbResult; Err : StabilityPoolError });
+  admin_recover_ambiguous_chain_burn : (nat64, opt nat64) -> (variant { Ok : ChainSpAbsorbResult; Err : StabilityPoolError });
   admin_recover_ambiguous_native_xrp_burn : (nat64, opt nat64) -> (variant { Ok; Err : StabilityPoolError });
   scan_chain_absorb_candidates : (opt nat64) -> (variant { Ok : vec ChainSpAbsorbCandidate; Err : StabilityPoolError });
   set_chain_absorb_auto_config : (ChainAbsorbAutoConfig) -> (variant { Ok; Err : StabilityPoolError });

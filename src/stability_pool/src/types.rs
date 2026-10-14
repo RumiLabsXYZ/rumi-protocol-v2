@@ -417,6 +417,9 @@ pub struct ChainSpAbsorbResult {
 #[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChainSpAbsorbIntentStatus {
     Prepared,
+    /// A burn may have been dispatched. Inspect `burn_proof` before treating
+    /// this as a confirmed ledger burn; proofless Burned intents are held for
+    /// reconciliation and are never dispatched again automatically.
     Burned,
     BackendAccepted,
     LocalApplied,
@@ -442,6 +445,14 @@ pub struct ChainSpAbsorbIntent {
     pub burn_created_at_time_ns: u64,
     pub status: ChainSpAbsorbIntentStatus,
     pub burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
+    /// Full ledger receipt retained when Nat cannot be represented by the
+    /// backend's u64 proof index. `None` for intents created before this field.
+    #[serde(default)]
+    pub burn_receipt_nat: Option<Nat>,
+    /// True only for Prepared rows restored from a pre-containment snapshot:
+    /// the prior version may have dispatched a burn before losing its callback.
+    #[serde(default)]
+    pub legacy_ambiguous_burn: Option<bool>,
     pub backend_result: Option<ChainStabilityPoolLiquidationResult>,
     pub last_error: Option<String>,
     pub created_at_ns: u64,

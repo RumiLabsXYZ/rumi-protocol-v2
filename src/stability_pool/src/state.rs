@@ -2294,6 +2294,36 @@ impl StabilityPoolState {
             .unwrap_or_default()
     }
 
+    /// Hold Prepared intents restored by an upgrade from a version that did
+    /// not persist a pre-dispatch marker. Such a row could have been burned
+    /// before its callback was lost, so it must never be dispatched again.
+    /// This runs only from post_upgrade; newly created same-version Prepared
+    /// intents remain eligible for their first burn attempt.
+    pub fn hold_legacy_prepared_chain_absorbs(&mut self, now_ns: u64) -> usize {
+        let Some(pending) = self.pending_chain_absorbs.as_mut() else {
+            return 0;
+        };
+        let mut held = 0;
+        for intent in pending.values_mut() {
+            if intent.status != ChainSpAbsorbIntentStatus::Prepared
+                || intent.burn_proof.is_some()
+                || intent.backend_result.is_some()
+                || intent.legacy_ambiguous_burn == Some(true)
+            {
+                continue;
+            }
+            intent.status = ChainSpAbsorbIntentStatus::Burned;
+            intent.legacy_ambiguous_burn = Some(true);
+            intent.last_error = Some(
+                "legacy Prepared chain absorb held after upgrade: prior icUSD burn outcome is ambiguous"
+                    .to_string(),
+            );
+            intent.updated_at_ns = now_ns;
+            held += 1;
+        }
+        held
+    }
+
     pub fn completed_chain_absorbs(&self, limit: usize) -> Vec<ChainSpAbsorbCompletion> {
         self.completed_chain_absorbs
             .as_ref()
