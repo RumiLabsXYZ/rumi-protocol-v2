@@ -1,9 +1,9 @@
 <script>
   const report = {
-    date: 'October 13, 2026',
-    datetime: '2026-10-13',
-    source: 'protocol source through PR #571 · live observations dated per row',
-    snapshot: '3pool follow-up installed · other holds remain · October 13, 2026'
+    date: 'October 14, 2026',
+    datetime: '2026-10-14',
+    source: 'protocol source through PR #574 · live observations dated per row',
+    snapshot: '3pool installed · latest live checks October 13'
   };
 
   const states = [
@@ -14,6 +14,14 @@
   ];
 
   const changes = [
+    {
+      pr: '#574',
+      title: 'Vault collateral pull receipt retention',
+      summary: 'Merged into main on October 14 UTC. A journaled V2 vault collateral pull now retains a confirmed ledger block index even when it is too large for the current u64 receipt interface. That operation is held from redispatch while its exact receipt awaits a wider proof and accounting path. This change is limited to the journaled V2 vault pull; other transfer routes and final crediting of a held wide receipt remain open. The latest backend module readback predates this merge, so this is source-only and does not settle a live operation.',
+      state: 'Merged · backend not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/574'
+    },
     {
       pr: '#563',
       title: 'Treasury withdrawal request binding',
@@ -297,7 +305,7 @@
           <p class="issue-line">Status report <span>—</span> <time datetime={report.datetime}>{report.date}</time></p>
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
-            This report combines an October 12 live baseline with October 13 source and live readbacks through PR #571. October 12
+            This report combines an October 12 live baseline and October 13 readbacks with source through PR #574, merged October 14 UTC. October 12
             readbacks confirmed the 3pool modules from PRs #540, #541, and #553; that
             upgrade preserved LP supply and had zero pending claims. The Points upgrade now withholds the unfinished B snapshot
             time, while epoch 18 remains held with its driver off. The AMM recovery upgrade now
@@ -320,7 +328,7 @@
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
-      <div class="rule-caption"><span>Scope · {report.source} · October 13, 2026 UTC</span><span>October 12 baseline and dated October 13 readbacks</span></div>
+      <div class="rule-caption"><span>Scope · {report.source} · October 14, 2026 UTC</span><span>October 12 baseline and dated October 13 readbacks</span></div>
     </div>
   </section>
 
@@ -345,7 +353,7 @@
       <div class="section-heading section-heading-wide">
         <p class="section-label">Selected changes</p>
         <h2 id="updates-title">Change and release status</h2>
-        <p>The live readbacks below are dated October 12 unless a row states otherwise. October 13 source and installation addenda are marked separately. The 3pool release includes PR #535 recovery source, the PR #540/#541 artifact, and the now-installed PR #553 input-recovery and PR #566 payout-proof modules. The AMM recovery source from PR #507 is also installed, while PRs #545, #548, and #557 remain merged source only. A source merge and a live installation remain separate states.</p>
+        <p>The live readbacks below are dated October 12 unless a row states otherwise. October 13 installation and October 14 source addenda are marked separately. The 3pool release includes PR #535 recovery source, the PR #540/#541 artifact, and the now-installed PR #553 input-recovery and PR #566 payout-proof modules. The AMM recovery source from PR #507 is also installed, while PRs #545, #548, #557, and #574 remain merged source only. A source merge and a live installation remain separate states.</p>
       </div>
       <div class="change-list">
         {#each changes as item}
@@ -398,7 +406,7 @@
   </section>
 
   <footer class="page-width page-foot">
-    <span>Live snapshot date: <time datetime={report.datetime}>{report.date}</time></span>
+    <span>Report date: <time datetime={report.datetime}>{report.date}</time></span>
     <a href="/security">Back to security reviews <span aria-hidden="true">↗</span></a>
   </footer>
 </main>
