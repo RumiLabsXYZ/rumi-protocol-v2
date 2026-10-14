@@ -30,6 +30,8 @@ export interface VaultPullView {
 	request: VaultPullRequest;
 	vault_id: bigint;
 	phase: VaultPullPhase;
+	/** Exact positive ledger receipt when the existing u64 recovery API cannot represent it. */
+	confirmed_wide_block_index?: [] | [bigint];
 }
 
 export interface VaultPullStatus {
@@ -58,7 +60,7 @@ export function normalizeVaultPullStatus(status: VaultPullStatus): VaultPullStat
 	} else if (request.AddMargin) {
 		request = { AddMargin: { ...request.AddMargin } };
 	}
-	return { ...status, active: [{ ...view, request }] };
+	return { ...status, active: [{ ...view, request, confirmed_wide_block_index: view.confirmed_wide_block_index ?? [] }] };
 }
 
 function principalText(value: unknown): string {
@@ -213,6 +215,10 @@ function terminal(view: VaultPullView): boolean {
 
 function heldMessage(view: VaultPullView): string {
 	if ('Submitted' in view.phase) {
+		const wide = view.confirmed_wide_block_index?.[0];
+		if (wide !== undefined) {
+			return `Vault operation ${view.operation_id} was confirmed at ledger block ${wide}, which is beyond the current vault receipt range. The operation is held for reconciliation. Do not retry the transfer or submit a candidate block.`;
+		}
 		return `Vault operation ${view.operation_id} is submitted with an unknown transfer outcome. It remains held. Find and verify the exact collateral ledger transfer block index, then use reconcile_vault_collateral_pull_from_block for this operation ID. Do not guess a block or start another vault operation.`;
 	}
 	return `Vault operation ${view.operation_id} is still ${Object.keys(view.phase)[0]}. It remains held; retry the exact saved operation after recovery.`;
@@ -468,6 +474,8 @@ export async function recoverSubmittedVaultPullFromBlock<T>(args: {
 		const active = before.active[0];
 		if (!active || !('Submitted' in active.phase))
 			throw new Error(`There is no active Submitted vault operation to recover. Refresh its backend status.`);
+		if (active.confirmed_wide_block_index?.[0] !== undefined)
+			throw new Error(heldMessage(active));
 		if (!intent) {
 			intent = {
 				version: 1,

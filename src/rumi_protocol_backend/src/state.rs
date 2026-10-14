@@ -488,6 +488,58 @@ mod three_usd_reserve_ingress_state_tests {
     }
 
     #[test]
+    fn wide_confirmed_collateral_pull_keeps_receipt_and_cannot_dispatch_again() {
+        use super::{State, VaultCollateralPullRequest};
+        let owner = Principal::from_slice(&[64]);
+        let ledger = Principal::from_slice(&[65]);
+        let protocol = Principal::from_slice(&[66]);
+        let request = VaultCollateralPullRequest::OpenVault {
+            collateral_type: ledger,
+            amount_e8s: 100,
+        };
+        let mut state = State::default();
+        let mut collateral = super::xrp_collateral_config(
+            super::Ratio::new(rust_decimal_macros::dec!(0.005)),
+            super::Ratio::new(rust_decimal_macros::dec!(0.01)),
+            super::Ratio::new(rust_decimal_macros::dec!(1.0)),
+        );
+        collateral.ledger_canister_id = ledger;
+        collateral.custody_kind = None;
+        collateral.min_collateral_deposit = 0;
+        state.collateral_configs.insert(ledger, collateral);
+
+        let prepared = state.prepare_vault_collateral_pull(
+            owner, 1, request.clone(), ledger, protocol, 2, 10,
+        ).unwrap();
+        let submitted = state.mark_vault_collateral_pull_dispatched(&owner, &prepared).unwrap();
+        let wide = candid::Nat::from(u64::MAX as u128 + 1);
+        let held = state.hold_vault_pull_confirmed_wide(&owner, &submitted, wide.clone()).unwrap();
+        assert_eq!(held.confirmed_wide_block_index, Some(wide.clone()));
+        assert_eq!(state.vault_operation_status(owner).active.unwrap().confirmed_wide_block_index, Some(wide.clone()));
+        assert!(state.mark_vault_collateral_pull_dispatched(&owner, &held).is_err());
+        assert!(state.reserve_vault_pull_receipt_recovery(owner, 1, 11).is_err());
+        assert_eq!(state.prepare_vault_collateral_pull(
+            owner, 1, request.clone(), ledger, protocol, 2, 12,
+        ).unwrap(), held);
+        assert!(state.prepare_vault_collateral_pull(owner, 2, request, ledger, protocol, 2, 13).is_err());
+
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let restored: State = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(restored.vault_collateral_pull_journals.get(&owner), Some(&held));
+
+        let mut old_bytes = Vec::new();
+        ciborium::ser::into_writer(&submitted, &mut old_bytes).unwrap();
+        let mut old: ciborium::value::Value = ciborium::de::from_reader(old_bytes.as_slice()).unwrap();
+        let ciborium::value::Value::Map(fields) = &mut old else { panic!("journal must encode as a map") };
+        fields.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name) if name == "confirmed_wide_block_index"));
+        let mut legacy_bytes = Vec::new();
+        ciborium::ser::into_writer(&old, &mut legacy_bytes).unwrap();
+        let legacy: super::VaultCollateralPullJournal = ciborium::de::from_reader(legacy_bytes.as_slice()).unwrap();
+        assert_eq!(legacy, submitted);
+    }
+
+    #[test]
     fn vault_pull_reservation_rechecks_config_after_preflight_race() {
         use super::{CollateralStatus, State, VaultCollateralPullRequest};
         let owner = Principal::from_slice(&[81]);
@@ -667,6 +719,7 @@ mod three_usd_reserve_ingress_state_tests {
             created_at_time_ns: 10,
             op_nonce: 10,
             dispatch_attempts: 1,
+            confirmed_wide_block_index: None,
             receipt_recovery_cooldown_until_ns: 0,
             phase: VaultCollateralPullPhase::PullConfirmed { block_index: 55 },
         };
@@ -2925,6 +2978,11 @@ pub struct VaultCollateralPullJournal {
     pub created_at_time_ns: u64,
     pub op_nonce: u128,
     pub dispatch_attempts: u32,
+    /// Exact positive ledger receipt when its block index cannot fit the
+    /// existing u64-bound vault/proof API. A confirmed pull in this state must
+    /// never be sent again or treated as a failed transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_wide_block_index: Option<candid::Nat>,
     /// Wrong candidate receipt reads are throttled for this active operation.
     #[serde(default)]
     pub receipt_recovery_cooldown_until_ns: u64,
@@ -2950,6 +3008,9 @@ pub struct VaultOperationView {
     pub request: VaultCollateralPullRequest,
     pub vault_id: u64,
     pub phase: VaultCollateralPullPhase,
+    /// Present only when the ledger confirmed an index that the existing
+    /// u64-bound vault APIs cannot represent. The operation remains held.
+    pub confirmed_wide_block_index: Option<candid::Nat>,
 }
 
 /// The result is available until explicit ACK. After ACK only the watermark
@@ -5356,6 +5417,7 @@ impl State {
                 request: journal.request.clone(),
                 vault_id: journal.vault_id,
                 phase: journal.phase.clone(),
+                confirmed_wide_block_index: journal.confirmed_wide_block_index.clone(),
             }),
         }
     }
@@ -5429,6 +5491,7 @@ impl State {
             retry.memo = retry.op_nonce.to_be_bytes();
             retry.created_at_time_ns = (retry.op_nonce >> 64) as u64;
             retry.dispatch_attempts = 0;
+            retry.confirmed_wide_block_index = None;
             retry.phase = VaultCollateralPullPhase::Prepared;
             self.vault_collateral_pull_journals.insert(owner, retry.clone());
             return Ok(retry);
@@ -5462,6 +5525,7 @@ impl State {
             created_at_time_ns: (op_nonce >> 64) as u64,
             op_nonce,
             dispatch_attempts: 0,
+            confirmed_wide_block_index: None,
             receipt_recovery_cooldown_until_ns: 0,
             phase: VaultCollateralPullPhase::Prepared,
         };
@@ -5478,6 +5542,9 @@ impl State {
             return Err("collateral pull intent disappeared before dispatch".into());
         };
         if saved != expected { return Err("collateral pull intent changed before dispatch".into()); }
+        if saved.confirmed_wide_block_index.is_some() {
+            return Err("collateral pull has a confirmed wide ledger receipt; do not dispatch again".into());
+        }
         if !matches!(saved.phase, VaultCollateralPullPhase::Prepared | VaultCollateralPullPhase::Submitted) {
             return Err("collateral pull is not dispatchable in its current phase".into());
         }
@@ -5515,6 +5582,23 @@ impl State {
         Ok(saved.clone())
     }
 
+    pub fn hold_vault_pull_confirmed_wide(
+        &mut self,
+        owner: &Principal,
+        expected: &VaultCollateralPullJournal,
+        block_index: candid::Nat,
+    ) -> Result<VaultCollateralPullJournal, String> {
+        let Some(saved) = self.vault_collateral_pull_journals.get_mut(owner) else {
+            return Err("collateral pull journal missing".into());
+        };
+        if saved != expected || saved.phase != VaultCollateralPullPhase::Submitted
+            || saved.dispatch_attempts == 0 || block_index.0 <= u64::MAX.into() {
+            return Err("collateral pull is not awaiting a wide confirmed receipt".into());
+        }
+        saved.confirmed_wide_block_index = Some(block_index);
+        Ok(saved.clone())
+    }
+
     pub fn reserve_vault_pull_receipt_recovery(
         &mut self,
         owner: Principal,
@@ -5525,6 +5609,9 @@ impl State {
             .retain(|_, lease| lease.expires_at_ns > now_ns);
         let journal = self.vault_collateral_pull_journals.get(&owner)
             .ok_or("collateral pull journal missing")?;
+        if journal.confirmed_wide_block_index.is_some() {
+            return Err("confirmed wide collateral pull cannot use a u64 candidate receipt".into());
+        }
         if journal.operation_id != operation_id
             || journal.dispatch_attempts == 0
             || journal.phase != VaultCollateralPullPhase::Submitted

@@ -201,6 +201,21 @@ describe('runVaultPullOperation', () => {
 		expect(localStorage.getItem(`rumi:vault-pull-operation:v1:${owner}`)).toContain('9');
 	});
 
+	it('treats a confirmed wide collateral receipt as held and never offers candidate recovery', async () => {
+		const pending = {
+			...view(9n, openRequest, { Submitted: null }),
+			confirmed_wide_block_index: [18_446_744_073_709_551_616n] as [bigint]
+		};
+		const setup = adapter({ acknowledged_through: 8n, active: [pending] });
+		await expect(runVaultPullOperation({ owner, request: openRequest, adapter: setup.adapter }))
+			.rejects.toThrow('was confirmed at ledger block 18446744073709551616');
+		await expect(recoverSubmittedVaultPullFromBlock({ owner, blockIndex: 77n, adapter: setup.adapter }))
+			.rejects.toThrow('Do not retry the transfer or submit a candidate block');
+		expect(setup.adapter.dispatch).not.toHaveBeenCalled();
+		expect(setup.adapter.reconcileFromBlock).not.toHaveBeenCalled();
+		expect(setup.adapter.acknowledge).not.toHaveBeenCalled();
+	});
+
 	it('notifies the same tab when dispatch status first becomes Submitted', async () => {
 		const submitted = view(1n, openRequest, { Submitted: null });
 		const setup = adapter(

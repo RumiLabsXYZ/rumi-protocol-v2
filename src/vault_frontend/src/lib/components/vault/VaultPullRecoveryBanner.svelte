@@ -7,7 +7,7 @@
   import { toastStore } from '$lib/stores/toast';
   import { isCurrentVaultPullStatusRead } from '$lib/services/protocol/vaultPullRecoveryViewState';
 
-  let submitted: { operationId: bigint; request: VaultPullRequest } | null = null;
+  let submitted: { operationId: bigint; request: VaultPullRequest; confirmedWideBlockIndex: bigint | null } | null = null;
   let blockIndex = '';
   let busy = false;
   let statusReadError = '';
@@ -82,6 +82,10 @@
   });
 
   async function recover() {
+    if (submitted && submitted.confirmedWideBlockIndex !== null) {
+      toastStore.error('This transfer is already confirmed and held. Do not submit another block or retry it.', 8000);
+      return;
+    }
     const exact = blockIndex.trim();
     if (!/^\d+$/.test(exact)) {
       toastStore.error('Enter the exact nonnegative ledger-global block index for this transfer.', 8000);
@@ -109,6 +113,15 @@
 
 {#if owner && submitted}
   <section class="recovery" aria-label="Recover submitted vault collateral pull">
+    {#if submitted.confirmedWideBlockIndex !== null}
+    <p>
+      Vault operation {submitted.operationId.toString()} has a confirmed collateral transfer at ledger block {submitted.confirmedWideBlockIndex.toString()}.
+      Its index is beyond the range supported by vault recovery, so the operation is held. Do not retry the transfer or enter another block. Contact Rumi support with the operation ID and this exact ledger block.
+    </p>
+    <p class="operation-details">{requestDetails(submitted.request)}</p>
+    {#if statusReadError}<p class="status-error" role="status">Status refresh failed: {statusReadError} The last confirmed receipt shown above may be stale.</p>{/if}
+    <button on:click={refresh} disabled={busy}>Refresh status</button>
+    {:else}
     <p>
       Vault operation {submitted.operationId.toString()} has an unknown collateral transfer result.
       Enter the exact ledger-global block index shown for its matching transfer. A block that does not prove this transfer leaves the operation held.
@@ -130,6 +143,7 @@
       {busy ? 'Checking exact block…' : 'Verify block and resume'}
     </button>
     <button on:click={refresh} disabled={busy}>Refresh status</button>
+    {/if}
   </section>
 {:else if owner && statusReadError}
   <section class="recovery recovery-error" role="status">

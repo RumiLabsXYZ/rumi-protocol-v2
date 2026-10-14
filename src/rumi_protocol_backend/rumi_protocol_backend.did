@@ -1792,6 +1792,7 @@ type VaultOperationView = record {
   operation_id : nat64;
   vault_id : nat64;
   phase : VaultCollateralPullPhase;
+  confirmed_wide_block_index : opt nat;
 };
 type VaultRedemption = record {
   icusd_redeemed_e8s : nat64;

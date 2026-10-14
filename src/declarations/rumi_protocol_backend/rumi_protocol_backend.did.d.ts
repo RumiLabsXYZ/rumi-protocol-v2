@@ -2150,6 +2150,7 @@ export interface VaultOperationView {
   'operation_id' : bigint,
   'vault_id' : bigint,
   'phase' : VaultCollateralPullPhase,
+  'confirmed_wide_block_index' : [] | [bigint],
 }
 export interface VaultRedemption {
   'icusd_redeemed_e8s' : bigint,

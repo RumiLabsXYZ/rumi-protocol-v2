@@ -524,7 +524,7 @@ private static async refreshVaultData(): Promise<void> {
     }
 
     /** Return the authenticated active Submitted operation for the active wallet. */
-    static async getSubmittedVaultCollateralPull(): Promise<{ operationId: bigint; request: VaultPullRequest } | null> {
+    static async getSubmittedVaultCollateralPull(): Promise<{ operationId: bigint; request: VaultPullRequest; confirmedWideBlockIndex: bigint | null } | null> {
       if (USE_MOCK_DATA) return null;
       const walletAtStart = get(walletStore);
       const owner = walletAtStart.principal?.toText();
@@ -546,7 +546,11 @@ private static async refreshVaultData(): Promise<void> {
       if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
       const active = normalizeVaultPullStatus(response.Ok as any).active[0];
       if (!active || !('Submitted' in active.phase)) return null;
-      return { operationId: active.operation_id, request: active.request };
+      return {
+        operationId: active.operation_id,
+        request: active.request,
+        confirmedWideBlockIndex: active.confirmed_wide_block_index?.[0] ?? null,
+      };
     }
 
     /** Verify and recover the currently saved Submitted operation by exact block index. */

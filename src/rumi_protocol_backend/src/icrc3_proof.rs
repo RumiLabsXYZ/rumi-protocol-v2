@@ -985,6 +985,7 @@ mod vault_collateral_pull_receipt_tests {
             created_at_time_ns: 99,
             op_nonce: 88,
             dispatch_attempts: 1,
+            confirmed_wide_block_index: None,
             receipt_recovery_cooldown_until_ns: 0,
             phase: VaultCollateralPullPhase::Submitted,
         };
