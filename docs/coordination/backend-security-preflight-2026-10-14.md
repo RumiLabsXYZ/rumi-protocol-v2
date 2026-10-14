@@ -118,9 +118,11 @@ decision and proof that the recovery obligation has ended.
    source-matched offline decoder is available, compare the snapshot's
    financial state with the last pre-stop inventory; otherwise label the
    between-read callback delta unknown and compare after starting.
-5. If the already-reviewed upgrade can proceed immediately, install the exact
-   approved candidate **without starting the old backend between snapshot and
-   install**. Start the backend only after the install result and management
+5. **Snapshot approval alone does not authorize installation.** Only if a
+   separate backend-upgrade authorization and release review are complete may
+   the exact approved candidate be installed immediately, **without starting
+   the old backend between snapshot and install**. Start the backend only
+   after the install result and management
    status are authoritative; then re-read hash, cap, debt, supply, operations,
    and outboxes and reconcile any difference with the stopped-state snapshot.
    If the upgrade is deferred or the snapshot step fails without changing the
