@@ -2,8 +2,8 @@
   const report = {
     date: 'October 14, 2026',
     datetime: '2026-10-14',
-    source: 'protocol source through PR #574 · live observations dated per row',
-    snapshot: '3pool installed · latest live checks October 13'
+    source: 'protocol source through PR #577 · live observations dated per row',
+    snapshot: '3pool predecessor installed · latest live checks October 14'
   };
 
   const states = [
@@ -14,6 +14,14 @@
   ];
 
   const changes = [
+    {
+      pr: '#577',
+      title: '3pool donation liability fence',
+      summary: 'Merged into main on October 14 UTC. The source prevents an admin donation from treating tokens owed by an unsettled liquidity exit as surplus. After upgrade, donation attempts run a bounded backfill of the retained payout journal and remain held until indexing is complete. A pinned test upgraded the exact previously installed 3pool Wasm to the reviewed candidate and preserved populated pool state. An October 14 UTC readback still found the earlier 3pool module installed; the new fence has not been deployed. A six-page, non-atomic admin inventory returned 108 retained payout entries with none marked unsettled at that observation; this is not independent proof of every ledger payment.',
+      state: 'Merged · 3pool not installed',
+      tone: 'held',
+      href: 'https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/577'
+    },
     {
       pr: '#574',
       title: 'Vault collateral pull receipt retention',
@@ -305,7 +313,7 @@
           <p class="issue-line">Status report <span>—</span> <time datetime={report.datetime}>{report.date}</time></p>
           <h1>Security update,<br /><span>where things stand.</span></h1>
           <p class="lede">
-            This report combines an October 12 live baseline and October 13 readbacks with source through PR #574, merged October 14 UTC. October 12
+            This report combines an October 12 live baseline and October 13–14 readbacks with source through PR #577, merged October 14 UTC. October 12
             readbacks confirmed the 3pool modules from PRs #540, #541, and #553; that
             upgrade preserved LP supply and had zero pending claims. The Points upgrade now withholds the unfinished B snapshot
             time, while epoch 18 remains held with its driver off. The AMM recovery upgrade now
@@ -319,6 +327,7 @@
             Stability Pool deposit-intent fix is merged but also remains uninstalled. PR #553's
             archived 3pool input-recovery module was installed after a fresh snapshot and post-upgrade readback.
             The October 13 archived-payout proof follow-up from PR #566 is also installed on its exact reviewed hash; it does not by itself settle a historical payout.
+            PR #577's donation liability fence is merged, but the October 14 readback still found the earlier 3pool module installed.
           </p>
         </div>
         <aside class="report-stamp" aria-label={report.snapshot}>
@@ -328,7 +337,7 @@
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
-      <div class="rule-caption"><span>Scope · {report.source} · October 14, 2026 UTC</span><span>October 12 baseline and dated October 13 readbacks</span></div>
+      <div class="rule-caption"><span>Scope · {report.source} · October 14, 2026 UTC</span><span>October 12 baseline and dated October 13–14 readbacks</span></div>
     </div>
   </section>
 
@@ -399,7 +408,7 @@
       </div>
       <p>
         Source review, tests, builds, installation, activation, and live behavior are distinct claims.
-        This page records dated October 12 and 13 observations; it does not publish private audit material or
+        This page records dated October 12, 13, and 14 observations; it does not publish private audit material or
         establish that every finding is closed.
       </p>
     </div>
