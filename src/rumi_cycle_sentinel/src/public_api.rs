@@ -321,6 +321,14 @@ fn icp_available_e8s(now_secs: u64) -> Option<Nat> {
 
 pub fn get_public_overview_at(now_secs: u64) -> PublicOverview {
     let targets = state::list_targets_after(None, types::MAX_TARGETS);
+    let rows: Vec<_> = targets
+        .iter()
+        .map(|target| target_row(target, now_secs))
+        .collect();
+    overview_from_target_rows(&rows, now_secs)
+}
+
+fn overview_from_target_rows(targets: &[PublicTargetRow], now_secs: u64) -> PublicOverview {
     let cycles_cache = state::get_source_reserve().cache();
     let icp_cache = state::get_icp_source_reserve().cache();
     let unresolved_icp =
@@ -381,8 +389,7 @@ pub fn get_public_overview_at(now_secs: u64) -> PublicOverview {
         last_sample_at_secs: None,
         next_sample_at_secs: sampler::next_scheduled_check_at_secs(),
     };
-    for target in &targets {
-        let row = target_row(target, now_secs);
+    for row in targets {
         match row.state {
             PublicTargetState::Healthy => overview.healthy_count += 1,
             PublicTargetState::Low => overview.low_count += 1,
@@ -391,8 +398,8 @@ pub fn get_public_overview_at(now_secs: u64) -> PublicOverview {
             PublicTargetState::Unreachable => overview.unreachable_count += 1,
             PublicTargetState::Unobserved => overview.unobserved_count += 1,
         }
-        if let Some(balance) = row.advisory_balance_cycles {
-            overview.total_observed_cycles += balance;
+        if let Some(balance) = &row.advisory_balance_cycles {
+            overview.total_observed_cycles += balance.clone();
         }
         overview.last_sample_at_secs = overview.last_sample_at_secs.max(row.last_success_at_secs);
         // The global overview reports the actual armed runtime timer.  Do not
@@ -611,7 +618,7 @@ fn get_operator_dashboard_at_internal(
     let config = state::global_config();
 
     Ok(OperatorDashboard {
-        overview: get_public_overview_at(now_secs),
+        overview: overview_from_target_rows(&targets, now_secs),
         targets,
         alarms,
         topup_history,

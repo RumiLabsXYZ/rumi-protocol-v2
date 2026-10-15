@@ -409,6 +409,11 @@ struct PublicPage<T> {
     next_cursor: Option<String>,
 }
 
+#[derive(CandidType, Deserialize, Debug)]
+struct SampleTimestamp {
+    timestamp_secs: u64,
+}
+
 #[derive(CandidType, Deserialize, Debug, PartialEq, Eq)]
 enum PublicQueryError {
     InvalidCursor,
@@ -1448,8 +1453,10 @@ fn anonymous_authenticated_reads_and_mutations_are_rejected_in_canister_code() {
     );
     assert_eq!(proposals, Err(AuthenticatedQueryError::NotSigner));
 
-    let manual: Result<OperationStub, String> = call_update(
-        &pic,
+    // The existing ingress filter rejects these updates before dispatch, so
+    // there is no typed method reply to decode. Query authorization above is
+    // still checked by the method itself.
+    let manual = pic.update_call(
         sentinel,
         Principal::anonymous(),
         "manual_top_up",
@@ -1459,13 +1466,7 @@ fn anonymous_authenticated_reads_and_mutations_are_rejected_in_canister_code() {
         manual.is_err(),
         "anonymous manual mutation must fail closed"
     );
-    assert!(
-        manual.unwrap_err().contains("NotSigner"),
-        "failure identifies authorization boundary"
-    );
-
-    let explicit: Result<OperationStub, String> = call_update(
-        &pic,
+    let explicit = pic.update_call(
         sentinel,
         Principal::anonymous(),
         "manual_top_up_with_amount",
@@ -1480,7 +1481,6 @@ fn anonymous_authenticated_reads_and_mutations_are_rejected_in_canister_code() {
         explicit.is_err(),
         "anonymous explicit top-up must fail closed"
     );
-    assert!(explicit.unwrap_err().contains("NotSigner"));
 }
 
 #[test]
@@ -1525,19 +1525,16 @@ fn signer_only_reconciliation_endpoints_enforce_authentication() {
     };
     assert_eq!(value.0.id.get_id(), candid::idl_hash("Ok"));
 
-    let anonymous_refund = call_update_raw(
-        &pic,
+    let anonymous_refund = pic.update_call(
         sentinel,
         Principal::anonymous(),
         "attach_refund_block_proof",
         Encode!(&operation_id, &0u64).unwrap(),
     );
-    let values = IDLArgs::from_bytes(&anonymous_refund).expect("decode anonymous refund response");
-    let IDLValue::Variant(value) = &values.args[0] else {
-        panic!("expected refund Result")
-    };
-    assert_eq!(value.0.id.get_id(), candid::idl_hash("Err"));
-    assert!(matches!(&value.0.val, IDLValue::Text(message) if message.contains("NotSigner")));
+    assert!(
+        anonymous_refund.is_err(),
+        "ingress inspection rejects anonymous refund proofs"
+    );
 
     let signer_refund = call_update_raw(
         &pic,
@@ -2289,6 +2286,169 @@ fn live_stable_bounds_fill_prune_reject_and_survive_upgrade() {
             );
             assert_eq!(page.unwrap().items.len(), 100);
         }
+    }
+}
+
+#[test]
+fn production_dashboard_reads_full_wrapped_histories_within_replicated_query_budget() {
+    production_dashboard_history_upgrade(false);
+}
+
+#[test]
+fn production_dashboard_rebuilds_maximum_failed_histories_on_upgrade() {
+    production_dashboard_history_upgrade(true);
+}
+
+fn production_dashboard_history_upgrade(maximum_failed: bool) {
+    let (pic, sentinel, _) = boot_with_funding_and_interval(
+        10_000_000_000_000,
+        100_000_000_000_000,
+        20_000_000_000_000_000,
+        86_400,
+    );
+    let viewer = telemetry_viewer();
+    assert_ok(&call_update_raw(
+        &pic,
+        sentinel,
+        viewer,
+        "configure_single_operator_governance",
+        Encode!().unwrap(),
+    ));
+    let mut targets: Vec<Principal> = ALL_TARGETS.iter().map(|text| principal(text)).collect();
+    if maximum_failed {
+        let filled: Result<TestBoundsReport, String> = call_update(
+            &pic,
+            sentinel,
+            viewer,
+            "test_fill_bounds",
+            Encode!(&TestBoundsMode::Targets).unwrap(),
+        );
+        assert_eq!(filled.unwrap().target_count, 128);
+        let mut cursor = None::<String>;
+        targets.clear();
+        loop {
+            let page: Result<PublicPage<PublicTargetRow>, PublicQueryError> = call_query(
+                &pic,
+                sentinel,
+                viewer,
+                "list_public_targets",
+                Encode!(&cursor, &100u16).unwrap(),
+            );
+            let page = page.unwrap();
+            targets.extend(page.items.into_iter().map(|row| row.principal));
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(targets.len(), 128);
+    }
+    for target in &targets {
+        let seeded: Result<(), String> = call_update(
+            &pic,
+            sentinel,
+            viewer,
+            "test_record_dashboard_samples",
+            Encode!(target, &2_161u16, &!maximum_failed).unwrap(),
+        );
+        seeded.expect("seed a complete wrapped history without sampling or funding");
+    }
+    // The caller selects the actual production artifact, never the fixture Wasm.
+    // Pointing this at the hash-pinned installed predecessor reproduces IC0522.
+    let production_path = std::env::var_os("SENTINEL_DASHBOARD_PRODUCTION_WASM_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/wasm32-unknown-unknown/release/rumi_cycle_sentinel.wasm")
+        });
+    let production =
+        std::fs::read(production_path).expect("build production Sentinel Wasm before this test");
+    pic.upgrade_canister(sentinel, production, Encode!().unwrap(), None)
+        .expect("preserve seeded history on upgrade");
+    let reply = pic
+        .update_call(
+            sentinel,
+            viewer,
+            "get_operator_dashboard",
+            Encode!().unwrap(),
+        )
+        .expect("production replicated query must stay below the IC instruction limit");
+    let WasmResult::Reply(bytes) = reply else {
+        panic!("dashboard must reply: {reply:?}");
+    };
+    assert_ok(&bytes);
+    let values = IDLArgs::from_bytes(&bytes).expect("decode complete production dashboard");
+    assert!(!values.args.is_empty());
+    for target in targets {
+        let report: Result<PublicPage<SampleTimestamp>, PublicQueryError> = call_query(
+            &pic,
+            sentinel,
+            viewer,
+            "list_public_samples",
+            Encode!(&target, &None::<String>, &1u16).unwrap(),
+        );
+        assert_eq!(
+            report
+                .expect("retained history remains readable")
+                .items
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn dashboard_instruction_budget_with_failed_history_tails() {
+    let (pic, sentinel, _) = boot_with_funding_and_interval(
+        10_000_000_000_000,
+        100_000_000_000_000,
+        20_000_000_000_000_000,
+        86_400,
+    );
+    let viewer = telemetry_viewer();
+    assert_ok(&call_update_raw(
+        &pic,
+        sentinel,
+        viewer,
+        "configure_single_operator_governance",
+        Encode!().unwrap(),
+    ));
+    for (count, successful, label) in [
+        (2_161u16, true, "full healthy rings"),
+        (4, false, "failed latest observations"),
+        (2_160, false, "no retained successful observations"),
+    ] {
+        for text in ALL_TARGETS {
+            let seeded: Result<(), String> = call_update(
+                &pic,
+                sentinel,
+                viewer,
+                "test_record_dashboard_samples",
+                Encode!(&principal(text), &count, &successful).unwrap(),
+            );
+            seeded.expect("bounded sample seed");
+        }
+        let measured: Result<u64, String> = call_update(
+            &pic,
+            sentinel,
+            viewer,
+            "test_dashboard_instruction_count",
+            Encode!().unwrap(),
+        );
+        let instructions =
+            measured.expect("profile the exact dashboard projection and Candid encoding");
+        println!("dashboard instructions ({label}): {instructions}");
+        assert!(
+            instructions < 4_000_000_000,
+            "{label} must retain at least 20% query instruction headroom: {instructions}"
+        );
+        assert_ok(&call_update_raw(
+            &pic,
+            sentinel,
+            viewer,
+            "get_operator_dashboard",
+            Encode!().unwrap(),
+        ));
     }
 }
 
@@ -3215,9 +3375,11 @@ fn maintenance_rejects_anonymous_and_nonsigner_without_observation_or_funding() 
     assert!(before.cycles_ledger_available_cycles.is_none());
     assert!(before.icp_available_e8s.is_none());
     for caller in [Principal::anonymous(), Principal::from_slice(&[8; 10])] {
-        let error =
-            maintenance_now(&pic, sentinel, caller).expect_err("only a signer may check now");
-        assert!(error.contains("anonymous") || error.contains("NotSigner"));
+        assert!(
+            pic.update_call(sentinel, caller, "run_maintenance_now", Encode!().unwrap())
+                .is_err(),
+            "ingress inspection rejects unauthorized maintenance before dispatch"
+        );
     }
     let after = shared_overview(&pic, sentinel);
     assert_eq!(maintenance_generation(&pic, sentinel), 0);

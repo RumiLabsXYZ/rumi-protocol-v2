@@ -44,7 +44,8 @@
 //! is `MemoryManager`-backed and every write lands in stable memory
 //! synchronously at the moment of the call — there is nothing to flush at
 //! `pre_upgrade`, so this crate registers no `pre_upgrade` hook at all.
-//! `post_upgrade` only needs to call `validate_whole_state` (below); every
+//! `post_upgrade` validates stable state and rebuilds the derived display
+//! index; every
 //! `thread_local!` store below reopens its assigned region lazily via
 //! `StableCell::init`/`StableBTreeMap::init`, exactly the calls used at
 //! first install (`MemoryManager::init` itself already distinguishes
@@ -71,7 +72,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use candid::{CandidType, Principal};
 use ic_stable_structures::{
@@ -218,6 +219,15 @@ pub(crate) struct SampleMeta {
     pub(crate) last_success_at_secs: Option<u64>,
     pub(crate) last_attempt_at_secs: Option<u64>,
     pub(crate) total_writes: u64,
+}
+
+/// Derived display-only index. Stable samples remain authoritative; this
+/// bounded heap entry is rebuilt after upgrade and maintained by ring writes.
+/// `None` means the retained ring was inspected and has no eligible success.
+#[derive(Clone, Copy)]
+struct LatestSuccessIndex {
+    meta: SampleMeta,
+    sequence: Option<u64>,
 }
 
 /// Memory ID 7.
@@ -799,12 +809,13 @@ impl PartialOrd for SampleKey {
 
 // ─────────────────────── Thread-local stable structures ───────────────────────
 //
-// One `RefCell<Stable*>` per store, eagerly initialized. No `Option<State>`
-// heap mirror anywhere in this file: every value is read directly from its
-// `StableCell`/`StableBTreeMap` on demand, and none of these reads are
-// hot-loop-critical the way a per-transaction balance lookup would be.
+// Stable stores remain authoritative. The sole derived heap index below
+// avoids decoding complete sample histories for every dashboard read; funding
+// and observation decisions continue to read stable samples directly.
 
 thread_local! {
+    static LATEST_SUCCESS_INDEX: RefCell<BTreeMap<Principal, LatestSuccessIndex>> =
+        RefCell::new(BTreeMap::new());
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
 
@@ -1141,6 +1152,9 @@ pub(crate) fn remove_target(
             .map(|v| v.into_current())
     });
     if removed.is_some() {
+        LATEST_SUCCESS_INDEX.with(|index| {
+            index.borrow_mut().remove(&principal);
+        });
         SAMPLE_META.with(|m| {
             m.borrow_mut().remove(&StorablePrincipal(principal));
         });
@@ -1536,6 +1550,7 @@ pub(crate) fn record_sample(target: Principal, sample: Sample) -> Result<(), Rec
         return Err(RecordSampleError::UnregisteredTarget);
     }
     let mut meta = sample_meta(target).unwrap_or_default();
+    let old_meta = meta;
     let total_writes = meta
         .total_writes
         .checked_add(1)
@@ -1563,6 +1578,30 @@ pub(crate) fn record_sample(target: Principal, sample: Sample) -> Result<(), Rec
     SAMPLE_META.with(|m| {
         m.borrow_mut()
             .insert(StorablePrincipal(target), StoredSampleMeta::V2(meta));
+    });
+    LATEST_SUCCESS_INDEX.with(|index| {
+        let mut index = index.borrow_mut();
+        let previous = index
+            .get(&target)
+            .copied()
+            .filter(|entry| entry.meta == old_meta);
+        let sequence = if successful_sample(&sample) {
+            Some(Some(total_writes))
+        } else if let Some(previous) = previous {
+            Some(previous.sequence.filter(|sequence| {
+                *sequence >= oldest_retained_sequence(total_writes).unwrap()
+                    && *sequence <= old_meta.total_writes
+            }))
+        } else if old_meta.total_writes == 0 {
+            Some(None)
+        } else {
+            None
+        };
+        if let Some(sequence) = sequence {
+            index.insert(target, LatestSuccessIndex { meta, sequence });
+        } else {
+            index.remove(&target);
+        }
     });
     Ok(())
 }
@@ -1699,22 +1738,86 @@ pub(crate) fn sample_meta(target: Principal) -> Option<SampleMeta> {
 /// numerically greatest slot.
 pub(crate) fn latest_sample(target: Principal) -> Option<Sample> {
     let meta = sample_meta(target)?;
-    let sequence = meta.total_writes.checked_sub(1)?;
-    list_samples(target, Some(sequence), 1)
-        .ok()
-        .and_then(|mut rows| rows.pop().map(|(_, sample)| sample))
+    if meta.total_writes == 0 || meta.filled_slots == 0 {
+        return None;
+    }
+    let slot = (meta.next_slot + MAX_SAMPLES_PER_TARGET_U32 - 1) % MAX_SAMPLES_PER_TARGET_U32;
+    SAMPLES.with(|m| {
+        m.borrow()
+            .get(&SampleKey {
+                principal: target,
+                slot,
+            })
+            .map(|sample| sample.into_current())
+    })
 }
 
 pub(crate) fn latest_successful_sample(target: Principal) -> Option<Sample> {
-    list_samples(target, None, types::MAX_SAMPLES_PER_TARGET)
-        .ok()
-        .into_iter()
-        .flatten()
-        .rev()
-        .map(|(_, sample)| sample)
-        .find(|sample| {
-            sample.balance.is_some() && sample.state != types::PublicTargetState::Unreachable
-        })
+    let meta = sample_meta(target)?;
+    let cached = LATEST_SUCCESS_INDEX.with(|index| index.borrow().get(&target).copied());
+    if let Some(entry) = cached.filter(|entry| entry.meta == meta) {
+        match entry.sequence {
+            None => return None,
+            Some(sequence)
+                if oldest_retained_sequence(meta.total_writes)
+                    .is_some_and(|oldest| sequence >= oldest && sequence <= meta.total_writes) =>
+            {
+                let sample = SAMPLES.with(|m| {
+                    m.borrow()
+                        .get(&SampleKey {
+                            principal: target,
+                            slot: ((sequence - 1) % u64::from(MAX_SAMPLES_PER_TARGET_U32)) as u32,
+                        })
+                        .map(|sample| sample.into_current())
+                });
+                if sample.as_ref().is_some_and(successful_sample) {
+                    return sample;
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    // Correctness fallback for an absent/stale derived entry. Ordinary update
+    // writes and post_upgrade maintain coverage: query-side heap writes alone
+    // are not durable and cannot provide the replicated-query cost guarantee.
+    let found = SAMPLES.with(|m| {
+        let map = m.borrow();
+        let key = |slot| SampleKey {
+            principal: target,
+            slot,
+        };
+        // A wrapped ring has two physical ranges. Walk each range backward
+        // instead of repeating a B-tree point lookup for every failed sample.
+        map.range(key(0)..key(meta.next_slot))
+            .rev()
+            .chain(map.range(key(meta.next_slot)..key(meta.filled_slots)).rev())
+            .map(|(key, sample)| (key.slot, sample.into_current()))
+            .find(|(_, sample)| successful_sample(sample))
+    });
+    let sequence = found.as_ref().and_then(|(slot, _)| {
+        let offset =
+            (meta.next_slot + MAX_SAMPLES_PER_TARGET_U32 - 1 - slot) % MAX_SAMPLES_PER_TARGET_U32;
+        meta.total_writes.checked_sub(u64::from(offset))
+    });
+    LATEST_SUCCESS_INDEX.with(|index| {
+        index
+            .borrow_mut()
+            .insert(target, LatestSuccessIndex { meta, sequence });
+    });
+    found.map(|(_, sample)| sample)
+}
+
+fn successful_sample(sample: &Sample) -> bool {
+    sample.balance.is_some() && sample.state != types::PublicTargetState::Unreachable
+}
+
+/// Rebuild within the upgrade message's budget, before serving queries. No
+/// stable bytes are modified, and failed-only rings get explicit None entries.
+pub(crate) fn rebuild_latest_success_index() {
+    LATEST_SUCCESS_INDEX.with(|index| index.borrow_mut().clear());
+    for target in target_principals() {
+        latest_successful_sample(target);
+    }
 }
 
 /// Bounded scan over `TERMINAL_SUMMARIES` (<= `MAX_TERMINAL_SUMMARIES`
@@ -5038,6 +5141,97 @@ mod tests {
         let principal = record.principal();
         insert_target(record).unwrap();
         principal
+    }
+
+    #[test]
+    fn latest_successful_sample_preserves_ring_order_and_balance_fallbacks() {
+        let global = test_global_policy(1_000);
+        let target = register_test_target(1, &global);
+        assert!(latest_sample(target).is_none());
+        assert!(latest_successful_sample(target).is_none());
+
+        let mut zero_balance = test_sample(20, PublicTargetState::Healthy);
+        zero_balance.balance = Some(AdvisoryCyclesBalance::Exact(0));
+        record_sample(target, zero_balance.clone()).unwrap();
+        // Timestamps need not determine write order. Even a balance on an
+        // Unreachable observation is not eligible as a successful fallback.
+        record_sample(target, test_sample(19, PublicTargetState::Unreachable)).unwrap();
+        let mut no_balance = test_sample(18, PublicTargetState::Healthy);
+        no_balance.balance = None;
+        record_sample(target, no_balance.clone()).unwrap();
+        assert_eq!(latest_sample(target), Some(no_balance.clone()));
+        assert_eq!(latest_successful_sample(target), Some(zero_balance.clone()));
+        rebuild_latest_success_index();
+        assert_eq!(latest_successful_sample(target), Some(zero_balance.clone()));
+
+        for _ in 3..types::MAX_SAMPLES_PER_TARGET {
+            record_sample(target, no_balance.clone()).unwrap();
+        }
+        assert_eq!(latest_successful_sample(target), Some(zero_balance.clone()));
+        record_sample(target, no_balance).unwrap();
+        assert!(
+            latest_successful_sample(target).is_none(),
+            "evicted success is never resurrected"
+        );
+        rebuild_latest_success_index();
+        LATEST_SUCCESS_INDEX.with(|index| {
+            let entry = index.borrow().get(&target).copied().unwrap();
+            assert_eq!(entry.meta, sample_meta(target).unwrap());
+            assert_eq!(entry.sequence, None, "failed-only ring is fully indexed");
+        });
+        zero_balance.state = PublicTargetState::Stopped;
+        record_sample(target, zero_balance.clone()).unwrap();
+        assert_eq!(latest_sample(target), Some(zero_balance.clone()));
+        assert_eq!(latest_successful_sample(target), Some(zero_balance));
+        assert_eq!(
+            list_samples(target, None, types::MAX_SAMPLES_PER_TARGET)
+                .unwrap()
+                .len(),
+            types::MAX_SAMPLES_PER_TARGET
+        );
+    }
+
+    #[test]
+    fn latest_success_index_rebuild_handles_gaps_stale_metadata_and_target_reuse() {
+        let global = test_global_policy(1_000);
+        let target = register_test_target(1, &global);
+        let success = test_sample(30, PublicTargetState::Stopped);
+        record_sample(target, success.clone()).unwrap();
+        record_sample(target, test_sample(20, PublicTargetState::Unreachable)).unwrap();
+        record_sample(target, test_sample(10, PublicTargetState::Unreachable)).unwrap();
+        SAMPLES.with(|m| {
+            m.borrow_mut().remove(&SampleKey {
+                principal: target,
+                slot: 1,
+            });
+        });
+        rebuild_latest_success_index();
+        assert_eq!(latest_successful_sample(target), Some(success.clone()));
+        LATEST_SUCCESS_INDEX.with(|index| {
+            assert_eq!(index.borrow().get(&target).unwrap().sequence, Some(1));
+            index
+                .borrow_mut()
+                .get_mut(&target)
+                .unwrap()
+                .meta
+                .total_writes = 1;
+        });
+        assert_eq!(latest_successful_sample(target), Some(success));
+        LATEST_SUCCESS_INDEX.with(|index| {
+            index.borrow_mut().get_mut(&target).unwrap().sequence = Some(u64::MAX);
+        });
+        assert!(
+            latest_successful_sample(target).is_some(),
+            "invalid sequence falls back"
+        );
+        remove_target(target).unwrap();
+        LATEST_SUCCESS_INDEX.with(|index| assert!(!index.borrow().contains_key(&target)));
+        let same_target = register_test_target(1, &global);
+        assert_eq!(same_target, target);
+        record_sample(target, test_sample(30, PublicTargetState::Unreachable)).unwrap();
+        assert!(latest_successful_sample(target).is_none());
+        rebuild_latest_success_index();
+        assert!(latest_successful_sample(target).is_none());
     }
 
     #[test]

@@ -122,6 +122,38 @@ fn bounds_counts(sample_target: Principal) -> TestBoundsReport {
 /// Fill one bounded store from the live feature-gated Wasm and exercise its
 /// overflow/retention behavior. Each mode runs in its own canister instance;
 /// production has no endpoint capable of arbitrary state injection.
+pub(crate) fn record_dashboard_samples(
+    target: Principal,
+    count: u16,
+    successful: bool,
+    now_secs: u64,
+) -> Result<(), String> {
+    if state::get_target(target).is_none()
+        || usize::from(count) > crate::types::MAX_SAMPLES_PER_TARGET + 1
+    {
+        return Err("invalid bounded sample fixture".to_string());
+    }
+    for _ in 0..count {
+        state::record_sample(
+            target,
+            Sample {
+                timestamp_secs: now_secs,
+                balance: successful
+                    .then_some(crate::types::AdvisoryCyclesBalance::Exact(1_000_000)),
+                state: if successful {
+                    PublicTargetState::Healthy
+                } else {
+                    PublicTargetState::Unreachable
+                },
+                reported_operational_healthy: successful.then_some(true),
+                burn_cycles_per_hour: None,
+            },
+        )
+        .map_err(failure)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn fill_bounds(
     mode: TestBoundsMode,
     now_secs: u64,
