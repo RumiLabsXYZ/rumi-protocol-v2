@@ -16,6 +16,7 @@
   import PoolInfoCard from '../../lib/components/swap/PoolInfoCard.svelte';
   import LoadingSpinner from '../../lib/components/common/LoadingSpinner.svelte';
   import EarnSubNav from '../../lib/components/layout/EarnSubNav.svelte';
+  import type { DepositPolicyResult } from '../../lib/services/depositPolicy';
 
   let hasCachedData = _poolStatus !== null;
   let loading = !hasCachedData;
@@ -23,6 +24,20 @@
   let poolStatus: PoolStatus | null = _poolStatus;
   let userLpBalance: bigint = _userLpBalance ?? 0n;
   let apy: number | null = null;
+  let liquidityInterface: { addMinimumStable: () => void } | undefined;
+  let capPolicy: DepositPolicyResult | null = null;
+  let capLoading = false;
+  let capCardVisible = false;
+
+  function handleDepositPolicy(event: CustomEvent<{
+    policy: DepositPolicyResult | null;
+    loading: boolean;
+    visible: boolean;
+  }>) {
+    capPolicy = event.detail.policy;
+    capLoading = event.detail.loading;
+    capCardVisible = event.detail.visible;
+  }
 
   $: isConnected = $walletStore.isConnected;
   $: principal = $walletStore.principal;
@@ -148,12 +163,28 @@
       <!-- LEFT: 3USD Stats -->
       <div class="stats-column">
         <PoolInfoCard {poolStatus} {userLpBalance} {apy} />
+        {#if capCardVisible}
+          <div class="deposit-cap-note">
+            <div>
+              <strong>icUSD concentration cap: 66.6%</strong>
+              <span>Deposits are checked against the current pool. If icUSD is already above the cap, the incoming deposit's icUSD share must be at or below 66.6%; the stable side can be split across ckUSDT and/or ckUSDC. Stable-only deposits remain available.</span>
+            </div>
+            <button
+              class="cap-action"
+              type="button"
+              on:click={() => liquidityInterface?.addMinimumStable()}
+              disabled={capLoading || !capPolicy || capPolicy.allowed}
+            >
+              Add minimum stable
+            </button>
+          </div>
+        {/if}
       </div>
 
       <!-- RIGHT: Mint/Redeem panel -->
       <div class="action-column">
         <div class="action-panel">
-          <LiquidityInterface on:success={handleSuccess} />
+          <LiquidityInterface bind:this={liquidityInterface} on:depositPolicy={handleDepositPolicy} on:success={handleSuccess} />
         </div>
       </div>
     </div>
@@ -188,6 +219,44 @@
   }
 
   .stats-column { position: sticky; top: 5rem; }
+
+  .deposit-cap-note {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+    margin-top: 1rem;
+    padding: 0.75rem;
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.5rem;
+    background: var(--rumi-bg-surface2);
+    color: var(--rumi-text-secondary);
+    font-size: 0.72rem;
+    line-height: 1.45;
+  }
+
+  .deposit-cap-note strong,
+  .deposit-cap-note span { display: block; }
+
+  .deposit-cap-note strong {
+    margin-bottom: 0.2rem;
+    color: var(--rumi-text-primary);
+    font-size: 0.75rem;
+  }
+
+  .cap-action {
+    align-self: flex-start;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.35rem;
+    background: transparent;
+    color: var(--rumi-text-secondary);
+    font-size: 0.68rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .cap-action:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .action-column {
     min-width: 0;

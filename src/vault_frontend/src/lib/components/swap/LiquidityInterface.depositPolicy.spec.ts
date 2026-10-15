@@ -123,12 +123,11 @@ describe('LiquidityInterface deposit concentration UX', () => {
     flushSync();
     await settleQuote();
 
-    const preset = Array.from(host.querySelectorAll('button')).find((button) => button.textContent?.includes('Add minimum stable')) as HTMLButtonElement;
-    expect(preset.disabled).toBe(false);
+    expect(instance.addMinimumStable).toBeTypeOf('function');
     // The mounted fixture pool is already above cap, so the policy response
     // exposes the required stable side before the action is used.
     expect(host.textContent).toContain('more stablecoin value');
-    preset.click();
+    instance.addMinimumStable();
     flushSync();
     await settleQuote();
 
@@ -216,8 +215,8 @@ describe('LiquidityInterface deposit concentration UX', () => {
     flushSync();
     await settleQuote();
 
-    const fill = Array.from(host.querySelectorAll('button')).find((button) => button.textContent?.includes('Add minimum stable')) as HTMLButtonElement;
-    fill.click();
+    expect(instance.addMinimumStable).toBeTypeOf('function');
+    instance.addMinimumStable();
     flushSync();
     await settleQuote();
 

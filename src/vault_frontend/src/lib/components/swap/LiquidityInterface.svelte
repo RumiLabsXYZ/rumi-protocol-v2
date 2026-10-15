@@ -463,6 +463,16 @@
     addQuoting = true;
     void fetchAddQuote(version);
   }
+
+  export function addMinimumStable() {
+    applyCapFriendlyExample();
+  }
+
+  $: dispatch('depositPolicy', {
+    policy: addPolicy,
+    loading: addLoading,
+    visible: isConnected && activeTab === 'mint',
+  });
 </script>
 
 <svelte:window on:click={closeDropdowns} />
@@ -522,16 +532,6 @@
         />
       </div>
     {/each}
-
-    <div class="deposit-cap-note">
-      <div>
-        <strong>icUSD concentration cap: 66.6%</strong>
-        <span>Deposits are checked against the current pool. If icUSD is already above the cap, the incoming deposit's icUSD share must be at or below 66.6%; the stable side can be split across ckUSDT and/or ckUSDC. Stable-only deposits remain available.</span>
-      </div>
-      <button class="preset-btn" type="button" on:click={applyCapFriendlyExample} disabled={addLoading || !addPolicy || addPolicy.allowed}>
-        Add minimum stable
-      </button>
-    </div>
 
     {#if addPolicy && !addPolicy.allowed}
       <div class="policy-error" role="status">
@@ -845,54 +845,6 @@
   /* ── Token input groups ── */
   .token-input-group {
     margin-bottom: 0.75rem;
-  }
-
-  .deposit-cap-note {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 0.75rem;
-    margin: 0.75rem 0;
-    padding: 0.75rem;
-    border: 1px solid var(--rumi-border);
-    border-radius: 0.5rem;
-    background: var(--rumi-bg-surface2);
-    color: var(--rumi-text-secondary);
-    font-size: 0.72rem;
-    line-height: 1.45;
-  }
-
-  .deposit-cap-note strong,
-  .deposit-cap-note span {
-    display: block;
-  }
-
-  .deposit-cap-note strong {
-    margin-bottom: 0.2rem;
-    color: var(--rumi-text-primary);
-    font-size: 0.75rem;
-  }
-
-  .preset-btn {
-    flex: 0 0 auto;
-    padding: 0.35rem 0.5rem;
-    border: 1px solid var(--rumi-border);
-    border-radius: 0.35rem;
-    background: transparent;
-    color: var(--rumi-text-secondary);
-    font-size: 0.68rem;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .preset-btn:hover:not(:disabled) {
-    border-color: var(--rumi-accent);
-    color: var(--rumi-text-primary);
-  }
-
-  .preset-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
 
   .policy-error {
