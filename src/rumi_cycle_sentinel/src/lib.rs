@@ -72,6 +72,7 @@ fn post_upgrade() {
         ));
     }
     state::migrate_single_operator_setup_usage_on_upgrade();
+    state::rebuild_latest_success_index();
     sampler::setup_timer();
 }
 
@@ -473,6 +474,28 @@ fn test_fill_bounds(
 #[ic_cdk::query]
 fn test_get_bound_counts(sample_target: Principal) -> test_support::TestBoundsReport {
     test_support::get_bound_counts(sample_target)
+}
+
+/// Bounded history injection for the production dashboard instruction-budget regression.
+#[cfg(feature = "test_endpoints")]
+#[ic_cdk::update]
+fn test_record_dashboard_samples(
+    target: Principal,
+    count: u16,
+    successful: bool,
+) -> Result<(), String> {
+    require_maintenance_signer(ic_cdk::caller(), || state::is_signer(ic_cdk::caller()))?;
+    test_support::record_dashboard_samples(target, count, successful, now_secs())
+}
+
+#[cfg(feature = "test_endpoints")]
+#[ic_cdk::update(guard = "require_telemetry_viewer")]
+fn test_dashboard_instruction_count() -> Result<u64, String> {
+    let before = ic_cdk::api::performance_counter(0);
+    let dashboard = public_api::get_operator_dashboard_at(ic_cdk::caller(), now_secs())
+        .map_err(|error| format!("{error:?}"))?;
+    let _bytes = candid::encode_one(dashboard).map_err(|error| error.to_string())?;
+    Ok(ic_cdk::api::performance_counter(0) - before)
 }
 
 /// Reports completion of the scheduled maintenance pass for bounded
