@@ -56,7 +56,7 @@ describe('Cycle Sentinel telemetry route contract', () => {
     expect(source).toContain('OPERATOR_QUERY_TIMEOUT_MS = 25_000');
     expect(source).toContain("withOperatorQueryTimeout(loadOperatorDashboard(authenticated), 'Loading Sentinel telemetry and operator status')");
     const dataLoadSource = source.slice(source.indexOf('async function refresh()'), source.indexOf('function reconcileManualTopUpLock('));
-    expect(dataLoadSource).toContain('const authenticated = await createAuthenticatedSentinelActor()');
+    expect(dataLoadSource).toContain("withOperatorQueryTimeout(createAuthenticatedSentinelActor(), 'Connecting to the wallet')");
     expect(dataLoadSource).toContain('operatorDataError = signer && !next.operatorRecordsAvailable');
     expect(source).toContain('async function loadAllOperatorRecords()');
     expect(source).toContain("'Loading remaining operator records'");

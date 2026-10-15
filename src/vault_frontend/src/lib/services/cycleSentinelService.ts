@@ -22,7 +22,9 @@ import type {
   TargetPatch,
   TargetUpdate,
 } from '$declarations/rumi_cycle_sentinel/rumi_cycle_sentinel.did';
-import { auth } from './auth';
+import { get } from 'svelte/store';
+import { auth, currentWalletType, WALLET_TYPES } from './auth';
+import { pnp } from './pnp';
 import { CONFIG, CANISTER_IDS, isCycleSentinelConfigured } from '../config';
 export { isCycleSentinelConfigured } from '../config';
 
@@ -92,6 +94,9 @@ export function createAnonymousSentinelActor(id?: string): SentinelActor {
 
 export async function createAuthenticatedSentinelActor(): Promise<SentinelActor> {
   if (!isCycleSentinelConfigured) throw new Error('Cycle Sentinel is not configured yet.');
+  // Signer queries are replicated calls, so even a private read needs the
+  // wallet channel. Open it from the click before actor creation can await.
+  if (get(currentWalletType) === WALLET_TYPES.OISY) await pnp.openChannel();
   return auth.getActor<SentinelActor>(CANISTER_IDS.CYCLE_SENTINEL, idlFactory);
 }
 
