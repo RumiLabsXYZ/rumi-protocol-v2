@@ -1525,19 +1525,16 @@ fn signer_only_reconciliation_endpoints_enforce_authentication() {
     };
     assert_eq!(value.0.id.get_id(), candid::idl_hash("Ok"));
 
-    let anonymous_refund = call_update_raw(
-        &pic,
+    let anonymous_refund = pic.update_call(
         sentinel,
         Principal::anonymous(),
         "attach_refund_block_proof",
         Encode!(&operation_id, &0u64).unwrap(),
     );
-    let values = IDLArgs::from_bytes(&anonymous_refund).expect("decode anonymous refund response");
-    let IDLValue::Variant(value) = &values.args[0] else {
-        panic!("expected refund Result")
-    };
-    assert_eq!(value.0.id.get_id(), candid::idl_hash("Err"));
-    assert!(matches!(&value.0.val, IDLValue::Text(message) if message.contains("NotSigner")));
+    assert!(
+        anonymous_refund.is_err(),
+        "ingress inspection rejects anonymous refund proofs"
+    );
 
     let signer_refund = call_update_raw(
         &pic,
