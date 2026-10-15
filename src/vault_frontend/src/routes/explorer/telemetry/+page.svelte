@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { goto } from '$app/navigation';
   import { onMount, tick } from 'svelte';
   import { Principal } from '@dfinity/principal';
   import { walletStore } from '$lib/stores/wallet';
@@ -76,7 +75,7 @@
   let latestWalletConnection: { isConnected: boolean; principal: Principal | null } = { isConnected: false, principal: null };
   let latestWalletType: string | null = null;
   let latestWalletSessionGeneration = 0;
-  let loading = true;
+  let loading = false;
   let publicError = '';
   let authError = '';
   let actionMessage = '';
@@ -715,12 +714,13 @@
     // a previously-created authenticated actor.
     invalidateOperatorAccess();
     restoreManualTopUpMarker();
+    telemetryLoadEpoch += 1;
     snapshot = null;
-    if (!canViewSentinelTelemetry(latestWalletConnection.principal)) {
-      void goto('/explorer', { replaceState: true });
-      return;
-    }
-    void refresh();
+    loading = false;
+    publicError = '';
+    // Oisy needs a user gesture to open the signer for private reads. Wallet
+    // restoration must neither open it in the background nor redirect before
+    // the principal has finished restoring.
   }
 
   function fundingPolicy(): TargetFundingPolicy {
@@ -848,6 +848,7 @@
     && snapshot.unresolvedNextCursor.length === 0;
 
   async function refresh(): Promise<void> {
+    if (loading) return;
     const epoch = ++telemetryLoadEpoch;
     const accessEpoch = ++operatorAccessEpoch;
     const session = currentWalletSession();
@@ -862,7 +863,8 @@
       return;
     }
     try {
-      const authenticated = await createAuthenticatedSentinelActor();
+      const authenticated = await withOperatorQueryTimeout(createAuthenticatedSentinelActor(), 'Connecting to the wallet');
+      if (epoch !== telemetryLoadEpoch || accessEpoch !== operatorAccessEpoch || session !== currentWalletSession()) return;
       const next = await withOperatorQueryTimeout(loadOperatorDashboard(authenticated), 'Loading Sentinel telemetry and operator status');
       if (epoch === telemetryLoadEpoch && accessEpoch === operatorAccessEpoch && session === currentWalletSession()) {
         actor = authenticated;
@@ -878,9 +880,10 @@
           : '';
         reconcileManualTopUpLock(next, session);
       }
-    } catch {
+    } catch (error) {
       if (epoch === telemetryLoadEpoch && accessEpoch === operatorAccessEpoch && session === currentWalletSession()) {
-        publicError = 'Sentinel telemetry is private and unavailable to this identity.';
+        console.error('Cycle Sentinel telemetry load failed', error);
+        publicError = error instanceof Error ? error.message : String(error);
         signer = false;
         operatorChecked = false;
         checkedSession = undefined;
@@ -1093,9 +1096,13 @@
 <section class="telemetry-page">
   {#if canViewSentinelTelemetry($walletStore.principal)}
   {#if loading}
-    <div class="login-note">Verifying access to private Sentinel telemetry…</div>
+    <div class="login-note" role="status">Loading private Sentinel telemetry… Approve the read-only request if your wallet asks.</div>
   {:else if !snapshot}
-    <div class="login-note">{publicError || 'Sentinel telemetry is private. Connect with an approved principal.'}</div>
+    <div class="login-note">
+      <p>Sentinel telemetry is private. Load it with your connected wallet to confirm access. Oisy may ask you to approve this read-only request.</p>
+      {#if publicError}<p role="alert">Telemetry could not be loaded: {publicError}</p>{/if}
+      <button on:click={refresh}>Load telemetry</button>
+    </div>
   {:else}
   <header class="hero">
     <div class="hero-copy"><p class="eyebrow">RUMI OPERATIONS</p><h1>Cycle Sentinel</h1><p class="lede">Private runtime health and auditable cycle maintenance. Operator controls appear only after the canister confirms signer permission.</p></div>
@@ -1249,6 +1256,8 @@
     {:else}<p class="muted">{operatorChecked ? 'Telemetry and signer access were read together. After single-signature setup, any of the three listed operator principals can manage the Sentinel alone.' : 'Refresh telemetry to read telemetry and signer access together.'}</p>{/if}
   </section>{:else}<div class="login-note">Connect a wallet to check signer permissions and access operator controls.</div>{/if}
   {/if}
+  {:else}
+    <div class="login-note">Connect an approved wallet to view private Sentinel telemetry. If your wallet is reconnecting, this page will wait for it.</div>
   {/if}
 </section>
 
