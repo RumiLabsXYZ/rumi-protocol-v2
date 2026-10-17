@@ -6,14 +6,14 @@
 use candid::Principal;
 use ic_canister_log::{declare_log_buffer, log};
 
+use rumi_points::events::SourceId;
 use rumi_points::snapshot_seed::RevealedSeed;
+use rumi_points::source_types::three_pool;
 use rumi_points::types::{
     EpochStatus, EpochSummary, FiatStablePointsPolicy, FiatStableTopupProgress, IngestStatus,
     InitArgs, LeaderboardEntry, PointEntryPage, PointsConfig, PointsError, PrincipalState,
     PublicEpochStatus, RegistrationInfo, SourceStatus,
 };
-use rumi_points::events::SourceId;
-use rumi_points::source_types::three_pool;
 use rumi_points::{epoch, events, poll, state};
 
 // Canister debug-log buffer (retrievable in later phases; for now feeds the
@@ -21,6 +21,11 @@ use rumi_points::{epoch, events, poll, state};
 declare_log_buffer!(name = INFO, capacity = 2000);
 
 fn main() {}
+
+#[ic_cdk::query]
+fn get_held_epoch_recovery(index: u64) -> Option<rumi_points::types::HeldEpochRecoveryView> {
+    state::held_epoch_recovery_public(index)
+}
 
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
@@ -227,7 +232,13 @@ fn apply_fiat_stable_topups(max_rows: u32) -> Result<FiatStableTopupProgress, St
 /// 3 = AMM.
 #[ic_cdk::update]
 fn set_source_canister(source_tag: u8, canister: Principal) -> Result<(), PointsError> {
-    state::set_source_canister(ic_cdk::caller(), source_tag, canister)
+    match state::set_source_canister(ic_cdk::caller(), source_tag, canister) {
+        Ok(()) => Ok(()),
+        Err(state::SourceCanisterUpdateError::Unauthorized) => Err(PointsError::Unauthorized),
+        Err(state::SourceCanisterUpdateError::Locked) => {
+            ic_cdk::trap("source configuration is locked during points replay")
+        }
+    }
 }
 
 /// Admin-only manual poll of all configured sources. Returns the number of events
@@ -238,6 +249,30 @@ async fn trigger_poll() -> Result<u64, PointsError> {
         return Err(PointsError::Unauthorized);
     }
     Ok(poll::poll_all().await as u64)
+}
+
+/// Admin recovery poll while a legacy epoch remains held. Repeat until the
+/// source cursors reach their live tails, then call `admin_resume_held_points`.
+#[ic_cdk::update]
+async fn admin_poll_held_points_backlog() -> Result<u64, String> {
+    if !state::is_admin(ic_cdk::caller()) {
+        return Err("unauthorized".to_string());
+    }
+    poll::poll_held_backlog_once().await.map(|n| n as u64)
+}
+
+/// Admin recovery finalization. The canister verifies every source cursor is at
+/// its retained log tail before it securely reschedules B and resumes the timer.
+#[ic_cdk::update]
+async fn admin_resume_held_points() -> Result<(), String> {
+    let caller = ic_cdk::caller();
+    if !state::is_admin(caller) {
+        return Err("unauthorized".to_string());
+    }
+    epoch::admin_reschedule_held_open_epoch().await?;
+    state::set_epoch_driver_enabled(caller, true).map_err(|e| format!("{:?}", e))?;
+    epoch::setup_epoch_timer();
+    Ok(())
 }
 
 /// Admin-only repair: refetch the already-ingested 3pool liquidity history (ids
@@ -273,7 +308,10 @@ async fn admin_rebuild_3pool_recorded() -> Result<u64, String> {
         let resp = match res {
             Ok((r,)) => r,
             Err((code, msg)) => {
-                return Err(format!("3pool fetch at {} failed: {:?} {}", start, code, msg))
+                return Err(format!(
+                    "3pool fetch at {} failed: {:?} {}",
+                    start, code, msg
+                ))
             }
         };
         let (page, next_start, reached_end) = three_pool::normalize_forward(resp);
@@ -284,7 +322,12 @@ async fn admin_rebuild_3pool_recorded() -> Result<u64, String> {
         start = next_start;
     }
     let applied = events::rebuild_3pool_recorded(&all) as u64;
-    log!(INFO, "admin_rebuild_3pool_recorded: replayed {} events (cursor {})", applied, cursor);
+    log!(
+        INFO,
+        "admin_rebuild_3pool_recorded: replayed {} events (cursor {})",
+        applied,
+        cursor
+    );
     Ok(applied)
 }
 

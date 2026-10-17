@@ -152,7 +152,11 @@ fn next_capture_cursor(
 ) -> (Option<Principal>, bool) {
     let exhausted = (chunk_len as u64) < CAPTURE_CHUNK;
     let done = exhausted && !hit_error;
-    let next_cursor = if done { None } else { last_captured.or(prev_cursor) };
+    let next_cursor = if done {
+        None
+    } else {
+        last_captured.or(prev_cursor)
+    };
     (next_cursor, done)
 }
 
@@ -256,6 +260,108 @@ pub fn start_season(initial_seed: [u8; 32], now: u64) -> Result<(), StartSeasonE
     open_new_epoch(0, Some(initial_seed), now).map_err(StartSeasonError::Seed)
 }
 
+/// Release a held legacy epoch only after its paused event backlog has been
+/// replayed. Keep the captured A snapshot and existing scoring formula; move B
+/// to a fresh unpredictable time with management-canister entropy, then clear
+/// the durable hold. The caller must separately enable the periodic driver.
+pub async fn admin_reschedule_held_open_epoch() -> Result<(), String> {
+    let _epoch_guard = state::EpochGuard::new().ok_or("an epoch transition is already active")?;
+    let _poll_guard = state::PollGuard::new().ok_or("a points poll is already active")?;
+    let mut open = state::get_open_epoch().ok_or("no held epoch")?;
+    if state::held_epoch_recovery(open.epoch_index).is_some() {
+        if !state::legacy_transition_held() && state::held_epoch_recovery_matches(&open) {
+            return Ok(());
+        }
+        return Err("legacy recovery was already recorded; refusing another B schedule".into());
+    }
+    if !state::legacy_transition_held()
+        || open.epoch_index != 18
+        || !open.a_complete
+        || open.b_complete
+        || open.b_cursor.is_some()
+        || open.close_started
+        || open.close_cursor.is_some()
+        || open.close_active != 0
+        || open.close_points_accrued != 0
+    {
+        return Err("expected held epoch 18 with A complete and B/close untouched".into());
+    }
+    let before = state::with_state(Clone::clone);
+    let sources = state::source_canisters();
+    let ledgers = state::asset_ledgers();
+    let policy = state::fiat_stable_points_policy();
+    let config = (
+        state::epoch_driver_interval_secs(),
+        state::poll_interval_secs(),
+        state::poll_enabled(),
+    );
+    if !config.2 {
+        return Err("points polling must remain enabled".into());
+    }
+    let entropy = management_entropy()
+        .await
+        .map_err(|e| format!("secure recovery entropy unavailable: {:?}", e))?;
+    crate::poll::verify_held_backlog_drained().await?;
+    if state::with_state(Clone::clone) != before
+        || state::source_canisters() != sources
+        || state::asset_ledgers() != ledgers
+        || state::fiat_stable_points_policy() != policy
+        || (
+            state::epoch_driver_interval_secs(),
+            state::poll_interval_secs(),
+            state::poll_enabled(),
+        ) != config
+    {
+        return Err("points state or bindings changed while validating recovery".into());
+    }
+    let now = ic_cdk::api::time();
+    let earliest = now
+        .checked_add(15 * 60 * 1_000_000_000)
+        .ok_or("recovery time overflow")?;
+    let latest = now
+        .checked_add(30 * 60 * 1_000_000_000)
+        .ok_or("recovery time overflow")?;
+    let (season_start, season_end) = state::season_bounds();
+    let (_, next_epoch_end) = epoch_bounds(19, season_start, season_end);
+    let capture_budget = state::registered_count()
+        .div_ceil(CAPTURE_CHUNK)
+        .saturating_add(3)
+        .checked_mul(config.0)
+        .and_then(|v| v.checked_mul(1_000_000_000))
+        .ok_or("capture budget overflow")?;
+    if latest
+        .checked_add(capture_budget)
+        .ok_or("capture window overflow")?
+        >= next_epoch_end
+    {
+        return Err("insufficient remaining epoch 19 window to finish legacy recovery".into());
+    }
+    let random = u64::from_le_bytes(entropy[..8].try_into().expect("eight-byte entropy prefix"));
+    let replacement = earliest
+        .checked_add(random % (latest - earliest))
+        .ok_or("recovery schedule overflow")?;
+    if replacement <= open.snapshot_a_ns {
+        return Err("recovered B must follow saved A".into());
+    }
+    state::record_held_epoch_recovery(crate::types::HeldEpochRecoveryRecord {
+        epoch_index: open.epoch_index,
+        authorized_at_ns: now,
+        epoch_start_ns: open.epoch_start_ns,
+        epoch_end_ns: open.epoch_end_ns,
+        snapshot_a_ns: open.snapshot_a_ns,
+        original_b_ns: open.snapshot_b_ns,
+        replacement_b_ns: replacement,
+    })?;
+    open.snapshot_b_ns = replacement;
+    state::set_open_epoch(Some(open));
+    state::set_legacy_reseed_pending(false);
+    state::set_legacy_transition_held(false);
+    ic_cdk::println!(
+        "[epoch] authorized delayed legacy B recovery; original reward bounds retained"
+    );
+    Ok(())
+}
+
 /// Derive the epoch's seed + snapshot times, install a fresh `OpenEpoch`, and clear
 /// the snapshot buffer. Epoch 0 passes `Some(S0)`; epochs >= 1 pass `None` (the
 /// pre-loaded `current_seed` is used).
@@ -271,15 +377,9 @@ fn open_epoch_at(
     epoch_end_ns: u64,
     seed_arg: Option<[u8; 32]>,
 ) -> Result<(), SeedError> {
-    let (a_ns, b_ns) =
-        state::with_state_mut(|s| {
-            SeedManager::start_epoch(
-                &mut s.snapshot_seed,
-                epoch_start_ns,
-                epoch_end_ns,
-                seed_arg,
-            )
-        })?;
+    let (a_ns, b_ns) = state::with_state_mut(|s| {
+        SeedManager::start_epoch(&mut s.snapshot_seed, epoch_start_ns, epoch_end_ns, seed_arg)
+    })?;
     state::snapshot_buffer_clear();
     state::set_open_epoch(Some(OpenEpoch {
         epoch_index: index,
@@ -325,7 +425,8 @@ pub fn prepare_legacy_state_after_upgrade(now_ns: u64) {
             &open,
             state::current_epoch_entropy(),
             state::secure_seed_chain_v1(),
-        ) {
+        ) && !state::held_epoch_recovery_matches(&open)
+        {
             state::set_legacy_transition_held(true);
             state::set_legacy_reseed_pending(false);
             ic_cdk::println!(
@@ -514,7 +615,8 @@ pub async fn run_tick() {
             &open,
             state::current_epoch_entropy(),
             state::secure_seed_chain_v1(),
-        ) {
+        ) && !state::held_epoch_recovery_matches(&open)
+        {
             // Persist a poll fence before awaiting the poll guard. Existing
             // in-flight polls drain; subsequent poll calls see the pending bit.
             state::set_legacy_reseed_pending(true);
@@ -604,6 +706,11 @@ async fn capture(which: Snapshot) {
                 break;
             }
         };
+        if !icp_price_is_fresh(ctx.icp_price_timestamp_ns, ic_cdk::api::time()) {
+            ic_cdk::println!("[epoch] ICP price aged out during capture; preserving cursor and retrying");
+            hit_error = true;
+            break;
+        }
         let weights = accrual::snapshot_weights_for_policy(
             &accrual::build_snapshot_inputs(&raw, &ctx.prices),
             state::fiat_stable_4x_active_for_epoch(open.epoch_index),
@@ -684,12 +791,7 @@ async fn close_current_epoch(now: u64) {
             return;
         }
     };
-    match close_seed_after_entropy(
-        Ok(entropy_for_next_epoch),
-        &open,
-        ic_cdk::api::time(),
-        hash,
-    ) {
+    match close_seed_after_entropy(Ok(entropy_for_next_epoch), &open, ic_cdk::api::time(), hash) {
         Ok(revealed) => state::append_revealed_seed(revealed),
         // Unreachable in the live flow (`current_seed` is always `Some` once an
         // epoch is open). If it ever happens, trap to roll the whole close back
@@ -745,6 +847,7 @@ fn summary_hash(s: &EpochSummary) -> [u8; 32] {
 /// the resolved source-canister ids so the per-principal pass does not re-read them.
 struct SnapshotContext {
     prices: SnapshotPrices,
+    icp_price_timestamp_ns: u64,
     amm: Option<AmmPool>,
     icusd_ledger: Principal,
     threeusd_ledger: Principal,
@@ -759,14 +862,19 @@ async fn fetch_context() -> Option<SnapshotContext> {
     let threepool = state::get_source_canister(SourceId::ThreePool.tag())?;
     let amm_canister = state::get_source_canister(SourceId::Amm.tag())?;
     let sp = state::get_source_canister(SourceId::StabilityPool.tag());
-    let icp_rate = fetch_icp_rate(backend).await?;
+    let (icp_rate, icp_price_timestamp_ns) = fetch_icp_rate(backend).await?;
     let virtual_price = fetch_virtual_price(threepool).await?;
     let threeusd = state::get_asset_ledger(AssetType::ThreeUsd)?;
     let icp = state::get_asset_ledger(AssetType::Icp)?;
     let icusd = state::get_asset_ledger(AssetType::IcUsd)?;
-    let amm = fetch_amm_pool(amm_canister, threeusd, icp).await;
+    let amm = fetch_amm_pool(amm_canister, threeusd, icp).await?;
+    if !icp_price_is_fresh(icp_price_timestamp_ns, ic_cdk::api::time()) { return None; }
     Some(SnapshotContext {
-        prices: SnapshotPrices { icp_rate, virtual_price },
+        icp_price_timestamp_ns,
+        prices: SnapshotPrices {
+            icp_rate,
+            virtual_price,
+        },
         amm,
         icusd_ledger: icusd,
         threeusd_ledger: threeusd,
@@ -814,15 +922,23 @@ async fn fetch_raw_snapshot(p: Principal, ctx: &SnapshotContext) -> Option<RawSn
     })
 }
 
-async fn fetch_icp_rate(backend: Principal) -> Option<f64> {
+fn icp_price_is_fresh(timestamp_ns: u64, now_ns: u64) -> bool {
+    // Covers the healthy 480s publication cadence plus its 120s hard source gate.
+    timestamp_ns > 0 && timestamp_ns <= now_ns && now_ns - timestamp_ns <= 600 * 1_000_000_000
+}
+
+async fn fetch_icp_rate(backend: Principal) -> Option<(f64, u64)> {
     let res: CallResult<(balances::ProtocolStatus,)> =
         ic_cdk::call(backend, "get_protocol_status", ()).await;
     match res {
-        Ok((s,)) if s.last_icp_rate.is_finite() && s.last_icp_rate > 0.0 => Some(s.last_icp_rate),
+        Ok((s,)) if s.last_icp_rate.is_finite() && s.last_icp_rate > 0.0 && icp_price_is_fresh(s.last_icp_timestamp, ic_cdk::api::time()) => Some((s.last_icp_rate, s.last_icp_timestamp)),
         Ok((s,)) => {
             // A corrupt (non-finite / non-positive) oracle rate aborts the whole
             // capture to retry next tick, rather than valuing ICP positions wrong.
-            ic_cdk::println!("[epoch] get_protocol_status returned bad icp_rate {}; aborting capture", s.last_icp_rate);
+            ic_cdk::println!(
+                "[epoch] get_protocol_status returned bad icp_rate {}; aborting capture",
+                s.last_icp_rate
+            );
             None
         }
         Err((c, m)) => {
@@ -844,10 +960,10 @@ async fn fetch_virtual_price(threepool: Principal) -> Option<u128> {
     }
 }
 
-async fn fetch_amm_pool(amm: Principal, threeusd: Principal, icp: Principal) -> Option<AmmPool> {
+async fn fetch_amm_pool(amm: Principal, threeusd: Principal, icp: Principal) -> Option<Option<AmmPool>> {
     let res: CallResult<(Vec<balances::PoolInfo>,)> = ic_cdk::call(amm, "get_pools", ()).await;
     match res {
-        Ok((pools,)) => pick_amm_pool(&pools, threeusd, icp),
+        Ok((pools,)) => Some(pick_amm_pool(&pools, threeusd, icp)),
         Err((c, m)) => {
             ic_cdk::println!("[epoch] get_pools failed: {:?} {}", c, m);
             None
@@ -861,11 +977,9 @@ async fn fetch_vault_debt(backend: Principal, p: Principal) -> Option<u128> {
     let res: CallResult<(Vec<balances::CandidVault>,)> =
         ic_cdk::call(backend, "get_vaults", (Some(p),)).await;
     match res {
-        Ok((vaults,)) => Some(
-            vaults
-                .iter()
-                .fold(0u128, |acc, v| acc.saturating_add(v.borrowed_icusd_amount as u128)),
-        ),
+        Ok((vaults,)) => Some(vaults.iter().fold(0u128, |acc, v| {
+            acc.saturating_add(v.borrowed_icusd_amount as u128)
+        })),
         Err((c, m)) => {
             ic_cdk::println!("[epoch] get_vaults failed: {:?} {}", c, m);
             None
@@ -874,7 +988,10 @@ async fn fetch_vault_debt(backend: Principal, p: Principal) -> Option<u128> {
 }
 
 async fn fetch_wallet_3usd(threepool: Principal, p: Principal) -> Option<u128> {
-    let account = Account { owner: p, subaccount: None };
+    let account = Account {
+        owner: p,
+        subaccount: None,
+    };
     let res: CallResult<(Nat,)> = ic_cdk::call(threepool, "icrc1_balance_of", (account,)).await;
     match res {
         Ok((bal,)) => Some(nat_to_u128(&bal)),
@@ -923,7 +1040,11 @@ async fn fetch_amm_lp(amm: Principal, pool_id: &str, p: Principal) -> Option<u12
 /// or hostile ledger) must value to 0, NOT `u128::MAX` — a fail-open MAX would
 /// dwarf every other principal's points and route the whole pool to one reading.
 fn nat_to_u128(n: &Nat) -> u128 {
-    let digits: String = n.to_string().chars().filter(|c| c.is_ascii_digit()).collect();
+    let digits: String = n
+        .to_string()
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
     digits.parse::<u128>().unwrap_or(0)
 }
 

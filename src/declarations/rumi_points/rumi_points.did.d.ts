@@ -68,6 +68,17 @@ export interface FiatStableTopupProgress {
   'complete' : boolean,
   'next_offset' : bigint,
 }
+export interface HeldEpochRecoveryView {
+  'closed' : boolean,
+  'epoch_index' : bigint,
+  'replacement_b_ns' : [] | [bigint],
+  'kind' : string,
+  'epoch_start_ns' : bigint,
+  'authorized_at_ns' : bigint,
+  'original_b_ns' : [] | [bigint],
+  'snapshot_a_ns' : bigint,
+  'epoch_end_ns' : bigint,
+}
 export interface IngestStatus {
   'registered_count' : bigint,
   'poll_interval_secs' : bigint,
@@ -182,9 +193,9 @@ export type Result_1 = { 'Ok' : null } |
   { 'Err' : PointsError };
 export type Result_2 = { 'Ok' : bigint } |
   { 'Err' : string };
-export type Result_3 = { 'Ok' : FiatStableTopupProgress } |
+export type Result_3 = { 'Ok' : null } |
   { 'Err' : string };
-export type Result_4 = { 'Ok' : null } |
+export type Result_4 = { 'Ok' : FiatStableTopupProgress } |
   { 'Err' : string };
 export type Result_5 = { 'Ok' : bigint } |
   { 'Err' : PointsError };
@@ -208,8 +219,10 @@ export type Venue = { 'Amm' : null } |
 export interface _SERVICE {
   'activate_fiat_stable_4x' : ActorMethod<[], Result>,
   'add_excluded_principal' : ActorMethod<[Principal], Result_1>,
+  'admin_poll_held_points_backlog' : ActorMethod<[], Result_2>,
   'admin_rebuild_3pool_recorded' : ActorMethod<[], Result_2>,
-  'apply_fiat_stable_topups' : ActorMethod<[number], Result_3>,
+  'admin_resume_held_points' : ActorMethod<[], Result_3>,
+  'apply_fiat_stable_topups' : ActorMethod<[number], Result_4>,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'force_epoch_tick' : ActorMethod<[], Result_1>,
@@ -219,6 +232,10 @@ export interface _SERVICE {
   'get_epoch_status_admin' : ActorMethod<[], EpochStatus>,
   'get_excluded_principals' : ActorMethod<[], Array<Principal>>,
   'get_fiat_stable_points_policy' : ActorMethod<[], FiatStablePointsPolicy>,
+  'get_held_epoch_recovery' : ActorMethod<
+    [bigint],
+    [] | [HeldEpochRecoveryView]
+  >,
   'get_ingest_status' : ActorMethod<[], IngestStatus>,
   'get_leaderboard' : ActorMethod<[number, number], Array<LeaderboardEntry>>,
   'get_pending_commit' : ActorMethod<[], Uint8Array | number[]>,
@@ -242,9 +259,9 @@ export interface _SERVICE {
   'set_excluded_principals' : ActorMethod<[Array<Principal>], Result_1>,
   'set_poll_enabled' : ActorMethod<[boolean], Result_1>,
   'set_poll_interval_secs' : ActorMethod<[bigint], Result_1>,
-  'set_season_end_ns' : ActorMethod<[bigint], Result_4>,
+  'set_season_end_ns' : ActorMethod<[bigint], Result_3>,
   'set_source_canister' : ActorMethod<[number, Principal], Result_1>,
-  'start_season' : ActorMethod<[Uint8Array | number[]], Result_4>,
+  'start_season' : ActorMethod<[Uint8Array | number[]], Result_3>,
   'trigger_poll' : ActorMethod<[], Result_5>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;

@@ -60,6 +60,17 @@ type FiatStableTopupProgress = record {
   complete : bool;
   next_offset : nat64;
 };
+type HeldEpochRecoveryView = record {
+  closed : bool;
+  epoch_index : nat64;
+  replacement_b_ns : opt nat64;
+  kind : text;
+  epoch_start_ns : nat64;
+  authorized_at_ns : nat64;
+  original_b_ns : opt nat64;
+  snapshot_a_ns : nat64;
+  epoch_end_ns : nat64;
+};
 type IngestStatus = record {
   registered_count : nat64;
   poll_interval_secs : nat64;
@@ -174,8 +185,8 @@ type RepaymentEvent = record {
 type Result = variant { Ok : FiatStablePointsPolicy; Err : text };
 type Result_1 = variant { Ok; Err : PointsError };
 type Result_2 = variant { Ok : nat64; Err : text };
-type Result_3 = variant { Ok : FiatStableTopupProgress; Err : text };
-type Result_4 = variant { Ok; Err : text };
+type Result_3 = variant { Ok; Err : text };
+type Result_4 = variant { Ok : FiatStableTopupProgress; Err : text };
 type Result_5 = variant { Ok : nat64; Err : PointsError };
 type RevealedSeed = record {
   revealed_at_ns : nat64;
@@ -190,8 +201,10 @@ type Venue = variant { Amm; ThreePool; Vault; StabilityPool };
 service : (opt InitArgs) -> {
   activate_fiat_stable_4x : () -> (Result);
   add_excluded_principal : (principal) -> (Result_1);
+  admin_poll_held_points_backlog : () -> (Result_2);
   admin_rebuild_3pool_recorded : () -> (Result_2);
-  apply_fiat_stable_topups : (nat32) -> (Result_3);
+  admin_resume_held_points : () -> (Result_3);
+  apply_fiat_stable_topups : (nat32) -> (Result_4);
   cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   cycles_status : () -> (CycleManagerCyclesStatus) query;
   force_epoch_tick : () -> (Result_1);
@@ -201,6 +214,7 @@ service : (opt InitArgs) -> {
   get_epoch_status_admin : () -> (EpochStatus) query;
   get_excluded_principals : () -> (vec principal) query;
   get_fiat_stable_points_policy : () -> (FiatStablePointsPolicy) query;
+  get_held_epoch_recovery : (nat64) -> (opt HeldEpochRecoveryView) query;
   get_ingest_status : () -> (IngestStatus) query;
   get_leaderboard : (nat32, nat32) -> (vec LeaderboardEntry) query;
   get_pending_commit : () -> (blob) query;
@@ -223,8 +237,8 @@ service : (opt InitArgs) -> {
   set_excluded_principals : (vec principal) -> (Result_1);
   set_poll_enabled : (bool) -> (Result_1);
   set_poll_interval_secs : (nat64) -> (Result_1);
-  set_season_end_ns : (nat64) -> (Result_4);
+  set_season_end_ns : (nat64) -> (Result_3);
   set_source_canister : (nat8, principal) -> (Result_1);
-  start_season : (blob) -> (Result_4);
+  start_season : (blob) -> (Result_3);
   trigger_poll : () -> (Result_5);
 }

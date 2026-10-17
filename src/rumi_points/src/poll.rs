@@ -90,6 +90,235 @@ pub async fn poll_all() -> usize {
     applied
 }
 
+/// Admin recovery pass for a held legacy epoch. This deliberately bypasses only
+/// the legacy-hold check while keeping the epoch held; the normal timer and
+/// `trigger_poll` remain fenced until the operator explicitly reschedules B.
+pub async fn poll_held_backlog_once() -> Result<usize, String> {
+    if !state::legacy_transition_held() {
+        return Err("legacy points hold is not active".to_string());
+    }
+    let _guard =
+        state::PollGuard::new().ok_or_else(|| "another points poll is active".to_string())?;
+    if !state::legacy_transition_held() {
+        return Err("legacy points hold changed during recovery poll".to_string());
+    }
+    let open = state::get_open_epoch().ok_or("no open epoch to recover")?;
+    if !open.a_complete || open.b_complete || open.close_started {
+        return Err("open epoch is not in the held A-complete/B-pending state".to_string());
+    }
+    verify_held_log_coverage().await?;
+    let mut applied = 0;
+    applied += poll_backend_held().await?;
+    applied += poll_three_pool_held().await?;
+    applied += poll_stability_pool_held().await?;
+    applied += poll_amm_held().await?;
+    Ok(applied)
+}
+
+/// Refuse recovery ingestion before moving any cursor if a rotating source log
+/// no longer contains the event at that cursor. This check must precede the
+/// window pollers, which intentionally resume at the oldest retained event.
+async fn verify_held_log_coverage() -> Result<(), String> {
+    let sp = source_canister(SourceId::StabilityPool)
+        .ok_or_else(|| "Stability Pool source is not configured".to_string())?;
+    let (sp_count,): (u64,) = ic_cdk::call(sp, "get_pool_event_count", ())
+        .await
+        .map_err(|(code, msg)| format!("Stability Pool count query failed: {:?} {}", code, msg))?;
+    let sp_cursor = state::get_cursor(SourceId::StabilityPool.tag());
+    let sp_first_id = if sp_count == 0 {
+        None
+    } else {
+        let (oldest,): (Vec<stability_pool::PoolEvent>,) =
+            ic_cdk::call(sp, "get_pool_events", (0u64, 1u64))
+                .await
+                .map_err(|(code, msg)| {
+                    format!(
+                        "Stability Pool oldest-event query failed: {:?} {}",
+                        code, msg
+                    )
+                })?;
+        Some(
+            oldest
+                .first()
+                .ok_or_else(|| "Stability Pool log changed during coverage check".to_string())?
+                .id,
+        )
+    };
+    verify_retained_log_coverage(sp_cursor, sp_count, sp_first_id, "Stability Pool")?;
+
+    let amm_canister =
+        source_canister(SourceId::Amm).ok_or_else(|| "AMM source is not configured".to_string())?;
+    let (amm_count,): (u64,) = ic_cdk::call(amm_canister, "get_amm_liquidity_event_count", ())
+        .await
+        .map_err(|(code, msg)| format!("AMM count query failed: {:?} {}", code, msg))?;
+    let amm_cursor = state::get_cursor(SourceId::Amm.tag());
+    let amm_first_id = if amm_count == 0 {
+        None
+    } else {
+        let (oldest,): (Vec<amm::AmmLiquidityEvent>,) =
+            ic_cdk::call(amm_canister, "get_amm_liquidity_events", (0u64, 1u64))
+                .await
+                .map_err(|(code, msg)| {
+                    format!("AMM oldest-event query failed: {:?} {}", code, msg)
+                })?;
+        Some(
+            oldest
+                .first()
+                .ok_or_else(|| "AMM log changed during coverage check".to_string())?
+                .id,
+        )
+    };
+    verify_retained_log_coverage(amm_cursor, amm_count, amm_first_id, "AMM")?;
+    Ok(())
+}
+
+fn verify_retained_log_coverage(
+    cursor: u64,
+    retained_count: u64,
+    first_id: Option<u64>,
+    source: &str,
+) -> Result<(), String> {
+    match (retained_count, first_id) {
+        (0, None) if cursor == 0 => Ok(()),
+        (0, None) => Err(format!(
+            "{} has an empty retained log with a nonzero cursor",
+            source
+        )),
+        (_, Some(first)) if cursor >= first => Ok(()),
+        (_, Some(first)) => Err(format!(
+            "{} retention gap: cursor {} precedes oldest retained event {}",
+            source, cursor, first
+        )),
+        (_, None) => Err(format!("{} retained log is unavailable", source)),
+    }
+}
+
+/// Prove that every currently retained source log is at its tail before a held
+/// epoch can be resumed. For position-indexed rotating logs, reject a cursor
+/// older than the oldest retained event instead of treating lost history as a
+/// successful catch-up.
+pub async fn verify_held_backlog_drained() -> Result<(), String> {
+    if !state::legacy_transition_held() {
+        return Err("legacy points hold is not active".to_string());
+    }
+    verify_held_log_coverage().await?;
+    let backend = source_canister(SourceId::Backend)
+        .ok_or_else(|| "backend source is not configured".to_string())?;
+    let (backend_count,): (u64,) = ic_cdk::call(backend, "get_event_count", ())
+        .await
+        .map_err(|(code, msg)| format!("backend tail query failed: {:?} {}", code, msg))?;
+    let backend_cursor = state::get_cursor(SourceId::Backend.tag());
+    if backend_cursor < backend_count {
+        return Err(format!(
+            "backend backlog remains at cursor {} of {}",
+            backend_cursor, backend_count
+        ));
+    }
+
+    let three_pool = source_canister(SourceId::ThreePool)
+        .ok_or_else(|| "3pool source is not configured".to_string())?;
+    let (three_pool_count,): (u64,) = ic_cdk::call(three_pool, "get_liquidity_event_count_v2", ())
+        .await
+        .map_err(|(code, msg)| format!("3pool tail query failed: {:?} {}", code, msg))?;
+    let three_pool_cursor = state::get_cursor(SourceId::ThreePool.tag());
+    if three_pool_cursor < three_pool_count {
+        return Err(format!(
+            "3pool backlog remains at cursor {} of {}",
+            three_pool_cursor, three_pool_count
+        ));
+    }
+
+    let sp = source_canister(SourceId::StabilityPool)
+        .ok_or_else(|| "Stability Pool source is not configured".to_string())?;
+    let (sp_count,): (u64,) = ic_cdk::call(sp, "get_pool_event_count", ())
+        .await
+        .map_err(|(code, msg)| format!("Stability Pool tail query failed: {:?} {}", code, msg))?;
+    if sp_count > 0 {
+        let (oldest,): (Vec<stability_pool::PoolEvent>,) =
+            ic_cdk::call(sp, "get_pool_events", (0u64, 1u64))
+                .await
+                .map_err(|(code, msg)| {
+                    format!(
+                        "Stability Pool oldest-event query failed: {:?} {}",
+                        code, msg
+                    )
+                })?;
+        let (newest,): (Vec<stability_pool::PoolEvent>,) =
+            ic_cdk::call(sp, "get_pool_events", (sp_count - 1, 1u64))
+                .await
+                .map_err(|(code, msg)| {
+                    format!(
+                        "Stability Pool newest-event query failed: {:?} {}",
+                        code, msg
+                    )
+                })?;
+        let first_id = oldest
+            .first()
+            .ok_or_else(|| "Stability Pool log changed during tail check".to_string())?
+            .id;
+        let last_id = newest
+            .first()
+            .ok_or_else(|| "Stability Pool log changed during tail check".to_string())?
+            .id;
+        let cursor = state::get_cursor(SourceId::StabilityPool.tag());
+        if cursor < first_id {
+            return Err(format!(
+                "Stability Pool retention gap: cursor {} precedes oldest retained event {}",
+                cursor, first_id
+            ));
+        }
+        if cursor <= last_id {
+            return Err(format!(
+                "Stability Pool backlog remains at cursor {} through event {}",
+                cursor, last_id
+            ));
+        }
+    }
+
+    let amm_canister =
+        source_canister(SourceId::Amm).ok_or_else(|| "AMM source is not configured".to_string())?;
+    let (amm_count,): (u64,) = ic_cdk::call(amm_canister, "get_amm_liquidity_event_count", ())
+        .await
+        .map_err(|(code, msg)| format!("AMM tail query failed: {:?} {}", code, msg))?;
+    if amm_count > 0 {
+        let (oldest,): (Vec<amm::AmmLiquidityEvent>,) =
+            ic_cdk::call(amm_canister, "get_amm_liquidity_events", (0u64, 1u64))
+                .await
+                .map_err(|(code, msg)| {
+                    format!("AMM oldest-event query failed: {:?} {}", code, msg)
+                })?;
+        let (newest,): (Vec<amm::AmmLiquidityEvent>,) = ic_cdk::call(
+            amm_canister,
+            "get_amm_liquidity_events",
+            (amm_count - 1, 1u64),
+        )
+        .await
+        .map_err(|(code, msg)| format!("AMM newest-event query failed: {:?} {}", code, msg))?;
+        let first_id = oldest
+            .first()
+            .ok_or_else(|| "AMM log changed during tail check".to_string())?
+            .id;
+        let last_id = newest
+            .first()
+            .ok_or_else(|| "AMM log changed during tail check".to_string())?
+            .id;
+        let cursor = state::get_cursor(SourceId::Amm.tag());
+        if cursor < first_id {
+            return Err(format!(
+                "AMM retention gap: cursor {} precedes oldest retained event {}",
+                cursor, first_id
+            ));
+        }
+        if cursor <= last_id {
+            return Err(format!(
+                "AMM backlog remains at cursor {} through event {}",
+                cursor, last_id
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn source_canister(source: SourceId) -> Option<Principal> {
     state::get_source_canister(source.tag())
 }
@@ -116,7 +345,11 @@ async fn poll_backend() -> usize {
             n
         }
         Err((code, msg)) => {
-            ic_cdk::println!("[poll] backend get_events_forward_filtered failed: {:?} {}", code, msg);
+            ic_cdk::println!(
+                "[poll] backend get_events_forward_filtered failed: {:?} {}",
+                code,
+                msg
+            );
             0
         }
     }
@@ -129,8 +362,12 @@ async fn poll_three_pool() -> usize {
     };
     let tag = SourceId::ThreePool.tag();
     let cursor = state::get_cursor(tag);
-    let res: CallResult<(three_pool::ForwardLiquidityEventsV2,)> =
-        ic_cdk::call(canister, "get_liquidity_events_v2_forward", (cursor, THREE_POOL_SCAN)).await;
+    let res: CallResult<(three_pool::ForwardLiquidityEventsV2,)> = ic_cdk::call(
+        canister,
+        "get_liquidity_events_v2_forward",
+        (cursor, THREE_POOL_SCAN),
+    )
+    .await;
     match res {
         Ok((resp,)) => {
             let (events, next_start, _reached_end) = three_pool::normalize_forward(resp);
@@ -140,10 +377,64 @@ async fn poll_three_pool() -> usize {
             n
         }
         Err((code, msg)) => {
-            ic_cdk::println!("[poll] 3pool get_liquidity_events_v2_forward failed: {:?} {}", code, msg);
+            ic_cdk::println!(
+                "[poll] 3pool get_liquidity_events_v2_forward failed: {:?} {}",
+                code,
+                msg
+            );
             0
         }
     }
+}
+
+/// Recovery variants propagate failures to the admin endpoint instead of
+/// reporting a misleading zero-event pass while the held backlog remains.
+async fn poll_backend_held() -> Result<usize, String> {
+    let canister = source_canister(SourceId::Backend)
+        .ok_or_else(|| "backend source is not configured".to_string())?;
+    let tag = SourceId::Backend.tag();
+    let cursor = state::get_cursor(tag);
+    let res: CallResult<(backend::ForwardFilteredEventsResponse,)> = ic_cdk::call(
+        canister,
+        "get_events_forward_filtered",
+        (cursor, BACKEND_SCAN, Some(backend::points_event_filter())),
+    )
+    .await;
+    let (resp,) = res.map_err(|(code, msg)| {
+        format!(
+            "backend get_events_forward_filtered failed: {:?} {}",
+            code, msg
+        )
+    })?;
+    let (events, next_start, _) = backend::normalize_forward(resp);
+    let n = events.len();
+    events::apply_events(&events);
+    state::set_cursor(tag, next_start);
+    Ok(n)
+}
+
+async fn poll_three_pool_held() -> Result<usize, String> {
+    let canister = source_canister(SourceId::ThreePool)
+        .ok_or_else(|| "3pool source is not configured".to_string())?;
+    let tag = SourceId::ThreePool.tag();
+    let cursor = state::get_cursor(tag);
+    let res: CallResult<(three_pool::ForwardLiquidityEventsV2,)> = ic_cdk::call(
+        canister,
+        "get_liquidity_events_v2_forward",
+        (cursor, THREE_POOL_SCAN),
+    )
+    .await;
+    let (resp,) = res.map_err(|(code, msg)| {
+        format!(
+            "3pool get_liquidity_events_v2_forward failed: {:?} {}",
+            code, msg
+        )
+    })?;
+    let (events, next_start, _) = three_pool::normalize_forward(resp);
+    let n = events.len();
+    events::apply_events(&events);
+    state::set_cursor(tag, next_start);
+    Ok(n)
 }
 
 // ── PTS-001: rotation-safe windowing over position-indexed source logs ──────
@@ -159,7 +450,12 @@ async fn poll_three_pool() -> usize {
 /// `None` when there is nothing new to fetch. If the cursor's id was already
 /// trimmed away (`cursor < first_id`), starts at position 0: those events are
 /// unrecoverable and waiting cannot bring them back.
-pub fn plan_window(cursor: u64, count: u64, first_id_in_window: u64, batch: u64) -> Option<(u64, u64)> {
+pub fn plan_window(
+    cursor: u64,
+    count: u64,
+    first_id_in_window: u64,
+    batch: u64,
+) -> Option<(u64, u64)> {
     if count == 0 {
         return None;
     }
@@ -175,8 +471,109 @@ pub fn plan_window(cursor: u64, count: u64, first_id_in_window: u64, batch: u64)
 /// (`ingest_batch` then leaves the cursor unchanged on an empty batch), so a
 /// stale `count`/probe race can never double-ingest. Returns the number applied.
 fn ingest_window(source: SourceId, window: Vec<IngestedEvent>, cursor: u64) -> usize {
-    let events: Vec<_> = window.into_iter().filter(|e| e.event_id >= cursor).collect();
+    let events: Vec<_> = window
+        .into_iter()
+        .filter(|e| e.event_id >= cursor)
+        .collect();
     events::ingest_batch(source, &events)
+}
+
+/// Held recovery never starts at a newly rotated oldest event unless it is the
+/// exact next id at the current cursor. Rechecking the first fetched id closes
+/// the gap between the retention probe and the position-indexed page read.
+fn ingest_held_window(
+    source: SourceId,
+    window: Vec<IngestedEvent>,
+    cursor: u64,
+) -> Result<usize, String> {
+    let first_id = window
+        .first()
+        .map(|event| event.event_id)
+        .ok_or_else(|| format!("{:?} page changed or emptied during held replay", source))?;
+    if first_id != cursor {
+        return Err(format!(
+            "{:?} replay page no longer begins at cursor {} (begins at {}); refusing to skip events",
+            source, cursor, first_id
+        ));
+    }
+    Ok(events::ingest_batch(source, &window))
+}
+
+async fn poll_stability_pool_held() -> Result<usize, String> {
+    let canister = source_canister(SourceId::StabilityPool)
+        .ok_or_else(|| "Stability Pool source is not configured".to_string())?;
+    let cursor = state::get_cursor(SourceId::StabilityPool.tag());
+    let (count,): (u64,) = ic_cdk::call(canister, "get_pool_event_count", ())
+        .await
+        .map_err(|(code, msg)| format!("Stability Pool count query failed: {:?} {}", code, msg))?;
+    let (probe,): (Vec<stability_pool::PoolEvent>,) = if count == 0 {
+        (Vec::new(),)
+    } else {
+        ic_cdk::call(canister, "get_pool_events", (0u64, 1u64))
+            .await
+            .map_err(|(code, msg)| {
+                format!(
+                    "Stability Pool oldest-event query failed: {:?} {}",
+                    code, msg
+                )
+            })?
+    };
+    if count == 0 {
+        return verify_retained_log_coverage(cursor, count, None, "Stability Pool").map(|()| 0);
+    }
+    let first_id = probe
+        .first()
+        .ok_or_else(|| "Stability Pool log changed during held replay probe".to_string())?
+        .id;
+    verify_retained_log_coverage(cursor, count, Some(first_id), "Stability Pool")?;
+    let (start, length) = match plan_window(cursor, count, first_id, SP_BATCH) {
+        Some(window) => window,
+        None if cursor >= first_id.saturating_add(count) => return Ok(0),
+        None => return Err("Stability Pool backlog changed during held replay".to_string()),
+    };
+    let (raw,): (Vec<stability_pool::PoolEvent>,) =
+        ic_cdk::call(canister, "get_pool_events", (start, length))
+            .await
+            .map_err(|(code, msg)| {
+                format!("Stability Pool page query failed: {:?} {}", code, msg)
+            })?;
+    let events = raw.into_iter().map(stability_pool::normalize).collect();
+    ingest_held_window(SourceId::StabilityPool, events, cursor)
+}
+
+async fn poll_amm_held() -> Result<usize, String> {
+    let canister =
+        source_canister(SourceId::Amm).ok_or_else(|| "AMM source is not configured".to_string())?;
+    let cursor = state::get_cursor(SourceId::Amm.tag());
+    let (count,): (u64,) = ic_cdk::call(canister, "get_amm_liquidity_event_count", ())
+        .await
+        .map_err(|(code, msg)| format!("AMM count query failed: {:?} {}", code, msg))?;
+    let (probe,): (Vec<amm::AmmLiquidityEvent>,) = if count == 0 {
+        (Vec::new(),)
+    } else {
+        ic_cdk::call(canister, "get_amm_liquidity_events", (0u64, 1u64))
+            .await
+            .map_err(|(code, msg)| format!("AMM oldest-event query failed: {:?} {}", code, msg))?
+    };
+    if count == 0 {
+        return verify_retained_log_coverage(cursor, count, None, "AMM").map(|()| 0);
+    }
+    let first_id = probe
+        .first()
+        .ok_or_else(|| "AMM log changed during held replay probe".to_string())?
+        .id;
+    verify_retained_log_coverage(cursor, count, Some(first_id), "AMM")?;
+    let (start, length) = match plan_window(cursor, count, first_id, AMM_BATCH) {
+        Some(window) => window,
+        None if cursor >= first_id.saturating_add(count) => return Ok(0),
+        None => return Err("AMM backlog changed during held replay".to_string()),
+    };
+    let (raw,): (Vec<amm::AmmLiquidityEvent>,) =
+        ic_cdk::call(canister, "get_amm_liquidity_events", (start, length))
+            .await
+            .map_err(|(code, msg)| format!("AMM page query failed: {:?} {}", code, msg))?;
+    let events = raw.into_iter().map(amm::normalize).collect();
+    ingest_held_window(SourceId::Amm, events, cursor)
 }
 
 async fn poll_stability_pool() -> usize {
@@ -233,7 +630,11 @@ async fn poll_amm() -> usize {
         match ic_cdk::call::<_, (u64,)>(canister, "get_amm_liquidity_event_count", ()).await {
             Ok((c,)) => c,
             Err((code, msg)) => {
-                ic_cdk::println!("[poll] AMM get_amm_liquidity_event_count failed: {:?} {}", code, msg);
+                ic_cdk::println!(
+                    "[poll] AMM get_amm_liquidity_event_count failed: {:?} {}",
+                    code,
+                    msg
+                );
                 return 0;
             }
         };
@@ -245,7 +646,11 @@ async fn poll_amm() -> usize {
             None => return 0,
         },
         Err((code, msg)) => {
-            ic_cdk::println!("[poll] AMM get_amm_liquidity_events probe failed: {:?} {}", code, msg);
+            ic_cdk::println!(
+                "[poll] AMM get_amm_liquidity_events probe failed: {:?} {}",
+                code,
+                msg
+            );
             return 0;
         }
     };
@@ -261,7 +666,11 @@ async fn poll_amm() -> usize {
             ingest_window(SourceId::Amm, events, cursor)
         }
         Err((code, msg)) => {
-            ic_cdk::println!("[poll] AMM get_amm_liquidity_events failed: {:?} {}", code, msg);
+            ic_cdk::println!(
+                "[poll] AMM get_amm_liquidity_events failed: {:?} {}",
+                code,
+                msg
+            );
             0
         }
     }
