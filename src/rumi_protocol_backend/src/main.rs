@@ -16963,6 +16963,16 @@ async fn register_icrc_collateral_token(
         ));
     }
 
+    // All metadata calls above yielded to other messages. Recheck the
+    // duplicate invariant at the commit point so two concurrent registrations
+    // cannot both pass the initial guard and append duplicate state/events.
+    let already_exists = read_state(|s| s.collateral_configs.contains_key(&arg.ledger_canister_id));
+    if already_exists {
+        return Err(ProtocolError::GenericError(
+            "Collateral type already exists".to_string(),
+        ));
+    }
+
     mutate_state(|s| {
         event::record_add_collateral_type(s, arg.ledger_canister_id, config);
     });
@@ -17140,6 +17150,140 @@ async fn register_ckdoge_collateral() -> Result<(), ProtocolError> {
         }),
     )
     .await
+}
+
+/// Register mainnet ckSOL as ordinary ICRC collateral. Risk terms are copied
+/// from the current live ckETH configuration, while token precision and the
+/// XRC pair are ckSOL-specific. Repeated calls are a no-op once the fixed
+/// ledger principal is present.
+#[candid_method(update)]
+#[update]
+async fn register_cksol_collateral() -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous() || !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer can register ckSOL collateral".to_string(),
+        ));
+    }
+
+    let cksol_ledger = rumi_protocol_backend::cksol::ledger_principal();
+    if read_state(|s| s.collateral_configs.contains_key(&cksol_ledger)) {
+        return Ok(());
+    }
+
+    let cketh_ledger = Principal::from_text("ss2fx-dyaaa-aaaar-qacoq-cai")
+        .expect("ckETH ledger principal is valid");
+    let cketh = read_state(|s| s.get_collateral_config(&cketh_ledger).cloned())
+        .ok_or_else(|| ProtocolError::GenericError("ckETH collateral must be registered before ckSOL".into()))?;
+    if cketh.decimals != 18 {
+        return Err(ProtocolError::GenericError(format!(
+            "ckETH collateral has unexpected precision {} (expected 18)",
+            cketh.decimals
+        )));
+    }
+    let min_collateral_deposit = rumi_protocol_backend::cksol::convert_minimum_deposit(
+        cketh.min_collateral_deposit,
+        cketh.decimals,
+        rumi_protocol_backend::cksol::CKSOL_DECIMALS,
+    )
+    .map_err(ProtocolError::GenericError)?;
+
+    // Use the existing registration path's live ledger metadata handling, but
+    // fail closed if the fixed ckSOL ledger ever advertises a different
+    // precision than its verified contract.
+    let decimals_result: Result<(u8,), _> = ic_cdk::call(cksol_ledger, "icrc1_decimals", ()).await;
+    match decimals_result {
+        Ok((9,)) => {}
+        Ok((decimals,)) => {
+            return Err(ProtocolError::GenericError(format!(
+                "ckSOL ledger advertises unexpected precision {decimals} (expected 9)"
+            )));
+        }
+        Err((code, message)) => {
+            return Err(ProtocolError::GenericError(format!(
+                "Failed to query ckSOL decimals: {code:?} {message}"
+            )));
+        }
+    }
+
+    register_icrc_collateral_token(
+        rumi_protocol_backend::AddCollateralArg {
+            ledger_canister_id: cksol_ledger,
+            price_source: rumi_protocol_backend::state::PriceSource::Xrc {
+                base_asset: "SOL".to_string(),
+                base_asset_class: rumi_protocol_backend::state::XrcAssetClass::Cryptocurrency,
+                quote_asset: "USD".to_string(),
+                quote_asset_class: rumi_protocol_backend::state::XrcAssetClass::FiatCurrency,
+            },
+            liquidation_ratio: cketh.liquidation_ratio.to_f64(),
+            borrow_threshold_ratio: cketh.borrow_threshold_ratio.to_f64(),
+            liquidation_bonus: cketh.liquidation_bonus.to_f64(),
+            borrowing_fee: cketh.borrowing_fee.to_f64(),
+            debt_ceiling: cketh.debt_ceiling,
+            min_vault_debt: cketh.min_vault_debt.to_u64(),
+            interest_rate_apr: cketh.interest_rate_apr.to_f64(),
+            min_collateral_deposit,
+            display_color: Some("#9945FF".to_string()),
+            redemption_fee_floor: Some(cketh.redemption_fee_floor.to_f64()),
+            redemption_fee_ceiling: Some(cketh.redemption_fee_ceiling.to_f64()),
+            redemption_tier: Some(cketh.redemption_tier),
+        },
+        Some(IcrcCollateralRiskParameters {
+            liquidation_ratio: cketh.liquidation_ratio,
+            borrow_threshold_ratio: cketh.borrow_threshold_ratio,
+            liquidation_bonus: cketh.liquidation_bonus,
+            borrowing_fee: cketh.borrowing_fee,
+            interest_rate_apr: cketh.interest_rate_apr,
+            redemption_fee_floor: cketh.redemption_fee_floor,
+            redemption_fee_ceiling: cketh.redemption_fee_ceiling,
+            recovery_target_cr: cketh.recovery_target_cr,
+            recovery_borrowing_fee: cketh.recovery_borrowing_fee,
+            recovery_interest_rate_apr: cketh.recovery_interest_rate_apr,
+            healthy_cr: cketh.healthy_cr,
+            rate_curve: cketh.rate_curve,
+            min_xrc_sources: cketh.min_xrc_sources,
+        }),
+    )
+    .await
+}
+
+#[candid_method(update)]
+#[update]
+fn set_cksol_relay_budget(budget: u64) -> Result<(), String> {
+    rumi_protocol_backend::cksol::set_budget(ic_cdk::caller(), budget)
+}
+
+#[candid_method(query)]
+#[query]
+fn get_cksol_relay_budget() -> u64 {
+    rumi_protocol_backend::cksol::budget()
+}
+
+#[candid_method(update)]
+#[update]
+async fn start_cksol_deposit() -> Result<u64, String> {
+    rumi_protocol_backend::cksol::start(ic_cdk::caller()).await
+}
+
+#[candid_method(query)]
+#[query]
+fn get_cksol_deposit(owner: Principal) -> Option<rumi_protocol_backend::state::CkSolRelayAttempt> {
+    rumi_protocol_backend::cksol::attempt(owner)
+}
+
+#[candid_method(update)]
+#[update]
+async fn clear_cksol_deposit() -> Result<(), String> {
+    rumi_protocol_backend::cksol::clear(ic_cdk::caller()).await
+}
+
+/// Bind a deposit id observed by an operator to a retained unknown relay
+/// attempt. This only changes reconciliation state; it never calls the minter
+/// and cannot mint, spend cycles, or choose a different owner/subaccount.
+#[candid_method(update)]
+#[update]
+fn recover_cksol_deposit_id(owner: Principal, deposit_id: u64) -> Result<(), String> {
+    rumi_protocol_backend::cksol::bind_observed_id(ic_cdk::caller(), owner, deposit_id)
 }
 
 /// One-time (idempotent) admin backfill of `CollateralConfig.symbol` for

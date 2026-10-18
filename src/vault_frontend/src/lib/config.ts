@@ -44,6 +44,9 @@ export const CANISTER_IDS = {
   // Rumi Points (airdrop accrual engine). Live on mainnet 2026-06-09; setting
   // this id flips POINTS_ENABLED true so the /points section renders.
   RUMI_POINTS: "bfnu3-6aaaa-aaaab-qhanq-cai",
+  // Official ckSOL mainnet deployment: dfinity/cksol (9 decimal lamports).
+  CKSOL_MINTER: "lh22c-kyaaa-aaaar-qb5nq-cai",
+  CKSOL_LEDGER: "ls5lp-lqaaa-aaaar-qb5oa-cai",
   // ckDOGE minter and ledger on ICP mainnet
   CKDOGE_MINTER: "eqltq-xqaaa-aaaar-qb3vq-cai",
   CKDOGE_LEDGER: "efmc5-wyaaa-aaaar-qb3wa-cai",

@@ -116,6 +116,7 @@
         <a href="/bitcoin/borrow" class="footer-link">Borrow with Bitcoin</a>
       {:else}
       <a href="/redeem" class="footer-link">Redeem</a>
+      <a href="/solana" class="footer-link">ckSOL Minter</a>
       <a href="/doge" class="footer-link">ckDOGE Minter</a>
       <a href="/bitcoin" class="footer-link">Bitcoin Minter</a>
       <a href="/bitcoin/borrow" class="footer-link">Borrow with Bitcoin</a>

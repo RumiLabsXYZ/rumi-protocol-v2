@@ -206,10 +206,16 @@
     loadProtocolData();
     refreshPrice();
     seasonStore.ensureLoaded();
-    // Ensure collateral configs are loaded (provides per-asset CR, fees, etc.)
-    collateralStore.fetchSupportedCollateral();
+    // A minter can link directly to its registered collateral. Only select a
+    // currently active, visible collateral after the backend config resolves.
+    let cancelled = false;
+    const requestedCollateral = new URLSearchParams(window.location.search).get('collateral');
+    collateralStore.fetchSupportedCollateral().then((collaterals) => {
+      if (!cancelled && requestedCollateral && collaterals.some((c) => c.principal === requestedCollateral && c.status === 'Active')
+          && !isHiddenForNewVaults(requestedCollateral)) selectCollateral(requestedCollateral);
+    });
     priceRefreshInterval = setInterval(refreshPrice, 30000);
-    return () => { if (priceRefreshInterval) clearInterval(priceRefreshInterval); };
+    return () => { cancelled = true; if (priceRefreshInterval) clearInterval(priceRefreshInterval); };
   });
 
   onDestroy(() => { if (priceRefreshInterval) clearInterval(priceRefreshInterval); });

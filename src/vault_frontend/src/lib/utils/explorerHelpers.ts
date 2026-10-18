@@ -123,6 +123,7 @@ export const KNOWN_TOKENS: Record<string, TokenInfo> = {
   // Collateral tokens
   'mxzaz-hqaaa-aaaar-qaada-cai': { symbol: 'ckBTC', name: 'Chain-Key Bitcoin', decimals: 8 },
   'ss2fx-dyaaa-aaaar-qacoq-cai': { symbol: 'ckETH', name: 'Chain-Key Ethereum', decimals: 18 },
+  'ls5lp-lqaaa-aaaar-qb5oa-cai': { symbol: 'ckSOL', name: 'Chain-Key Solana', decimals: 9 },
   'efmc5-wyaaa-aaaar-qb3wa-cai': { symbol: 'ckDOGE', name: 'Chain-Key Dogecoin', decimals: 8 },
   'o7oak-6yaaa-aaaap-qhgbq-cai': { symbol: 'ckXAUT', name: 'Chain-Key Gold', decimals: 6 },
   'buwm7-7yaaa-aaaar-qagva-cai': { symbol: 'nICP', name: 'WaterNeuron Staked ICP', decimals: 8 },
