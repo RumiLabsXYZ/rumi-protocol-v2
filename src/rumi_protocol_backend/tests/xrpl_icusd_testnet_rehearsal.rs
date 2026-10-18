@@ -24,6 +24,7 @@
 //!   REHEARSAL_BACKEND_WASM  fixture backend wasm, raw or gzip (default $DIR/backend_fixture.wasm.gz)
 //!   REHEARSAL_II_WASM       internet_identity_dev.wasm.gz, the II backend (default $DIR/ii.wasm.gz)
 //!   REHEARSAL_II_FRONTEND_WASM  internet_identity_frontend.wasm.gz (default $DIR/ii_frontend.wasm.gz)
+//!   REHEARSAL_SERVER_URL    long-lived pocket-ic server, e.g. http://127.0.0.1:4951 (start it with --ttl 86400)
 //!   REHEARSAL_PORT          gateway port (default 4950; never 4943)
 
 use candid::{encode_args, encode_one, CandidType, Decode, Deserialize, Encode, Nat, Principal, Reserved};
@@ -199,11 +200,14 @@ struct Local {
 
 /// Create every canister at its id, install, then switch the instance to live mode.
 fn build_local(operator_genesis_e8s: u64) -> Local {
-    let mut pic = PocketIcBuilder::new()
-        .with_nns_subnet()
-        .with_ii_subnet()
-        .with_application_subnet()
-        .build();
+    // The crate-spawned server dies after a 60s TTL once the client goes idle, so the
+    // long-lived harness connects to a server started separately with a long TTL:
+    //   pocket-ic --port 4951 --ttl 86400
+    let mut builder = PocketIcBuilder::new().with_nns_subnet().with_ii_subnet().with_application_subnet();
+    if let Ok(u) = std::env::var("REHEARSAL_SERVER_URL") {
+        builder = builder.with_server_url(u.parse().expect("REHEARSAL_SERVER_URL"));
+    }
+    let mut pic = builder.build();
     let (backend, icusd, icp, ii) = (p(BACKEND_ID), p(ICUSD_ID), p(ICP_LEDGER_ID), p(II_ID));
     for (name, id) in [("backend", backend), ("icusd", icusd), ("icp ledger", icp), ("ii", ii)] {
         pic.create_canister_with_id(None, None, id)
