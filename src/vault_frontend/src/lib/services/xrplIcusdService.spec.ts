@@ -319,14 +319,13 @@ describe('request nonces', () => {
   });
 });
 
-describe('api feature detection', () => {
-  it('reports unavailable instead of crashing when the actor lacks a method', async () => {
+describe('api config availability', () => {
+  it('reports unavailable instead of crashing when the actor lacks the config method', async () => {
     const api = createXrplIcusdApi({ getActor: async () => ({}) as any, getPublicActor: async () => ({}) as any });
+    expect(await api.getConfig()).toMatchObject({ ok: false, kind: 'unavailable' });
+    // A missing update method is a transport failure, never a crash and never "definitive".
     const r = await api.borrowToXrpl({ vaultId: 7n, grossE8s: 1n, recipient: USER, network: 'testnet', requestNonce: new Uint8Array(32) });
-    expect(r).toMatchObject({ ok: false, kind: 'unavailable' });
-    expect(await api.prepareRepayment({ vaultId: 7n, maxE8s: 1n, payer: USER, network: 'testnet', requestNonce: new Uint8Array(32), fullClose: false, topUpOperation: null })).toMatchObject({ ok: false, kind: 'unavailable' });
-    expect(await api.observeRepayment(1n, 'AB')).toMatchObject({ ok: false, kind: 'unavailable' });
-    expect(await api.capabilities()).toEqual({ borrow: false, prepareRepayment: false, observeRepayment: false });
+    expect(r).toMatchObject({ ok: false, kind: 'network', definitive: false });
   });
   it('passes nonce, network variant and optional top-up to the actor and maps errors', async () => {
     const prepare = vi.fn(async () => ({ Ok: {
@@ -346,5 +345,36 @@ describe('api feature detection', () => {
     const e = await err.prepareRepayment({ vaultId: 7n, maxE8s: 1n, payer: USER, network: 'testnet', requestNonce: nonce, fullClose: false, topUpOperation: null });
     expect(e).toMatchObject({ ok: false, kind: 'backend' });
     if (!e.ok) expect(e.error).toMatch(/trust line/i);
+  });
+});
+
+describe('final Candid shapes', () => {
+  it('maps the held phase, cutoff and ResolveClaim actions from the generated OperationView', () => {
+    const ui = mapOperation(view({
+      kind: { Repayment: null }, phase: { Held: null }, next_action: { ResolveClaim: null },
+      held_exact_amount: ['12.5'], settlement_cutoff_ns: [99n],
+    }));
+    expect(ui.state).toBe('held');
+    expect(ui.heldExact).toBe('12.5');
+    expect(ui.settlementCutoffNs).toBe(99n);
+    expect(ui.claimActions).toEqual(['ReceiveCanonical', 'ReissueXrpl']);
+  });
+  it('offers only CancelUnexecutedRepayment while the escrow burn is pending', () => {
+    expect(claimActionsFor(view({ kind: { Repayment: null }, phase: { EscrowBurnPending: null }, next_action: { ResolveClaim: null } })))
+      .toEqual(['CancelUnexecutedRepayment']);
+  });
+  it('formats every error variant in the generated XrplIcusdError', async () => {
+    const { formatXrplIcusdError } = await import('./xrplIcusdService');
+    for (const k of ['InvalidArgument', 'NotApplicable', 'Policy', 'CoverageUnavailable', 'MintingAccount', 'Unavailable', 'Internal']) {
+      expect(formatXrplIcusdError({ [k]: 'why' })).toContain('why');
+    }
+    expect(formatXrplIcusdError({ NonceConflict: null })).toMatch(/already used/);
+  });
+  it('observeRepayment returns the backend operation view and sends the generated argument shape', async () => {
+    const observe = vi.fn(async () => ({ Ok: view({ kind: { Repayment: null }, phase: { ReturnVerified: null } }) }));
+    const api = createXrplIcusdApi({ getActor: async () => ({ observe_xrpl_repayment: observe }) as any, getPublicActor: async () => ({}) as any });
+    const r = await api.observeRepayment(9n, 'ABCD');
+    expect(observe).toHaveBeenCalledWith({ operation_id: 9n, tx_hash: 'ABCD' });
+    expect(r.ok && r.data.state).toBe('repay_xrpl_received');
   });
 });

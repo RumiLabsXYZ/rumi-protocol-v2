@@ -40,6 +40,10 @@
   /** Native-XRP vaults to borrow against / repay. Defaults to the user's native-XRP vaults. */
   export let vaults: Array<{ vaultId: number; borrowedIcusd: number; collateralType: string }> | null = null;
 
+  /** When set (e.g. from a vault card's "Repay from XRPL wallet"), selects that vault. */
+  export let focusVaultId: number | null = null;
+  let lastFocus: number | null = null;
+
   const POLL_MS = 15_000;
 
   let controller: XrplIcusdController | null = null;
@@ -64,6 +68,10 @@
   )) as Array<{ vaultId: number; borrowedIcusd: number; collateralType: string }>;
   $: if (nativeVaults.length > 0 && (selectedVaultId === null || !nativeVaults.some((v) => v.vaultId === selectedVaultId))) {
     selectedVaultId = nativeVaults[0].vaultId;
+  }
+  $: if (focusVaultId !== null && focusVaultId !== lastFocus && nativeVaults.some((v) => v.vaultId === focusVaultId)) {
+    selectedVaultId = focusVaultId;
+    lastFocus = focusVaultId;
   }
   $: selectedVault = nativeVaults.find((v) => v.vaultId === selectedVaultId) ?? null;
   // Display-only residual from the vault list; the backend operation view is authoritative.
@@ -248,10 +256,9 @@
             {:else if borrowText.trim() !== ''}
               <p class="xi-warn">Enter an amount with at most 8 decimals.</p>
             {/if}
-            <button class="xi-primary" disabled={!conn || !networkOk || !amountOrNull(grossE8s) || s.borrow.phase === 'submitting' || s.capabilities?.borrow === false} on:click={doBorrow}>
+            <button class="xi-primary" disabled={!conn || !networkOk || !amountOrNull(grossE8s) || s.borrow.phase === 'submitting'} on:click={doBorrow}>
               {s.borrow.phase === 'submitting' ? 'Authorizing…' : 'Borrow to XRPL'}
             </button>
-            {#if s.capabilities?.borrow === false}<p class="xi-muted">Borrowing to XRPL is not available on this deployment yet.</p>{/if}
             {#if s.borrow.error}<p class="xi-warn">{s.borrow.error}</p>{/if}
           </div>
 
@@ -269,10 +276,9 @@
             {/if}
 
             {#if s.repay.phase === 'idle' || s.repay.phase === 'error' || s.repay.phase === 'rejected' || s.repay.phase === 'invalidated' || s.repay.phase === 'observed'}
-              <button class="xi-primary" disabled={!conn || !networkOk || !amountOrNull(repayE8s) || s.capabilities?.prepareRepayment === false} on:click={doPrepareRepay}>
+              <button class="xi-primary" disabled={!conn || !networkOk || !amountOrNull(repayE8s)} on:click={doPrepareRepay}>
                 Prepare repayment
               </button>
-              {#if s.capabilities?.prepareRepayment === false}<p class="xi-muted">Repaying on XRPL is not available on this deployment yet.</p>{/if}
             {/if}
             {#if s.repay.phase === 'preparing'}<p class="xi-muted">Preparing…</p>{/if}
             {#if s.repay.phase === 'prepared' && s.repay.intent}

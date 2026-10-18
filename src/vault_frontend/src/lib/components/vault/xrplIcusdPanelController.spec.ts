@@ -68,7 +68,6 @@ function ok<T>(data: T) { return { ok: true as const, data }; }
 
 function makeApi(over: Record<string, any> = {}) {
   return {
-    capabilities: vi.fn(async () => ({ borrow: true, prepareRepayment: true, observeRepayment: true })),
     getConfig: vi.fn(async () => ok(cfg())),
     listMyOperations: vi.fn(async () => ok([] as any[])),
     issueFromCanonical: vi.fn(async () => ok(op({ kind: { Import: null }, operation_id: 11n, vault_id: [], phase: { Prepared: null }, fee_e8s: 0n, gross_e8s: 5_00000000n, net_e8s: 5_00000000n }))),
@@ -76,7 +75,7 @@ function makeApi(over: Record<string, any> = {}) {
     resolveClaim: vi.fn(async () => ok(op({ phase: { ClaimResolved: null } }))),
     borrowToXrpl: vi.fn(async () => ok(op())),
     prepareRepayment: vi.fn(async () => ok(intent())),
-    observeRepayment: vi.fn(async () => ok(null)),
+    observeRepayment: vi.fn(async () => ok(op({ kind: { Repayment: null }, operation_id: 9n, phase: { ReturnVerified: null } }))),
     ...over,
   };
 }
@@ -344,7 +343,6 @@ describe('borrow', () => {
   });
   it('reports not available instead of crashing when the endpoint is missing', async () => {
     const api = makeApi({
-      capabilities: vi.fn(async () => ({ borrow: false, prepareRepayment: false, observeRepayment: false })),
       borrowToXrpl: vi.fn(async () => ({ ok: false, kind: 'unavailable', definitive: true, error: 'Borrowing to XRPL is not available on this deployment yet.' })),
     });
     const t = setup({ api });

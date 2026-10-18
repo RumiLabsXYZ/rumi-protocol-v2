@@ -16,12 +16,21 @@
  *    "submitted" result is a hint and never marks debt paid or icUSD delivered.
  *  - Request nonces are 32 random bytes from crypto, persisted per intent so a
  *    retried click reuses them (the backend de-duplicates on the nonce).
- *  - Endpoints that the deployed actor does not have yet (borrow_to_xrpl,
- *    prepare_xrpl_repayment, observe_xrpl_repayment) are feature-detected and
- *    reported as "not available" instead of crashing.
+ *  - Wire shapes come from the generated declarations. The lane is switched on
+ *    and off by `get_xrpl_icusd_config`; when the actor cannot answer it the UI
+ *    shows "not available" instead of crashing.
  */
 
-import type { _SERVICE } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
+import type {
+  _SERVICE,
+  ClaimAction,
+  OperationPage,
+  OperationView,
+  PublicXrplIcusdConfig,
+  RepaymentIntentView,
+  XrplIcusdError,
+  XrplNetwork,
+} from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
 import type {
   XrplConnection,
   XrplPaymentTx,
@@ -98,7 +107,7 @@ export function networkText(v: unknown): XrplNetworkText | null {
   return null;
 }
 
-function networkVariant(n: XrplNetworkText): { Mainnet: null } | { Testnet: null } {
+function networkVariant(n: XrplNetworkText): XrplNetwork {
   return n === 'mainnet' ? { Mainnet: null } : { Testnet: null };
 }
 
@@ -106,7 +115,7 @@ function opt<T>(v: [] | [T] | undefined | null): T | null {
   return Array.isArray(v) && v.length > 0 ? (v[0] as T) : null;
 }
 
-export function mapConfig(raw: any): XrplIcusdConfigView {
+export function mapConfig(raw: PublicXrplIcusdConfig): XrplIcusdConfigView {
   return {
     enabled: !!raw.enabled,
     ready: !!raw.ready,
@@ -228,12 +237,14 @@ export interface OperationUi {
   recipient: string | null;
   xrplTxHashes: string[];
   nextAction: string;
+  /** Held-payment settlement cutoff (ns since epoch), when the backend set one. */
+  settlementCutoffNs: bigint | null;
   canResume: boolean;
   claimActions: ClaimActionName[];
   notes: string[];
   createdAtNs: bigint;
   updatedAtNs: bigint;
-  raw: any;
+  raw: OperationView;
 }
 
 function variantKey(v: unknown): string {
@@ -242,7 +253,7 @@ function variantKey(v: unknown): string {
 
 const TERMINAL_PHASES = new Set(['Delivered', 'Complete', 'ClaimResolved', 'Cancelled']);
 
-export function claimActionsFor(op: any): ClaimActionName[] {
+export function claimActionsFor(op: Pick<OperationView, 'next_action' | 'resolution' | 'kind' | 'phase'>): ClaimActionName[] {
   if (variantKey(op.next_action) !== 'ResolveClaim') return [];
   if (opt(op.resolution)) return [];
   const kind = variantKey(op.kind);
@@ -251,7 +262,7 @@ export function claimActionsFor(op: any): ClaimActionName[] {
   return ['ReceiveCanonical', 'ReissueXrpl'];
 }
 
-export function mapOperation(op: any): OperationUi {
+export function mapOperation(op: OperationView): OperationUi {
   const kind = variantKey(op.kind) as OperationUi['kind'];
   const phase = variantKey(op.phase);
   const nextAction = variantKey(op.next_action) || 'None';
@@ -322,11 +333,12 @@ export function mapOperation(op: any): OperationUi {
     observedExact: opt<string>(op.observed_exact_amount),
     heldExact: opt<string>(op.held_exact_amount),
     recipient: opt<string>(op.recipient),
-    xrplTxHashes: Array.isArray(op.xrpl_tx_hashes) ? op.xrpl_tx_hashes.map(String) : [],
+    xrplTxHashes: op.xrpl_tx_hashes.map(String),
     nextAction,
+    settlementCutoffNs: opt<bigint>(op.settlement_cutoff_ns),
     canResume,
     claimActions,
-    notes: Array.isArray(op.notes) ? op.notes.map(String) : [],
+    notes: op.notes.map(String),
     createdAtNs: BigInt(op.created_at_ns ?? 0n),
     updatedAtNs: BigInt(op.updated_at_ns ?? 0n),
     raw: op,
@@ -512,10 +524,10 @@ function safeLocalStorage(): Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
 
 // --- errors ------------------------------------------------------------------
 
-export function formatXrplIcusdError(err: unknown): string {
+export function formatXrplIcusdError(err: XrplIcusdError | unknown): string {
   if (!err || typeof err !== 'object') return String(err);
   const key = Object.keys(err as object)[0];
-  const val = (err as any)[key];
+  const val = (err as Record<string, unknown>)[key];
   const text = typeof val === 'string' && val ? val : '';
   switch (key) {
     case 'TrustLineMissing': return `Your XRPL wallet has no icUSD trust line yet. Enable icUSD first.${text ? ` (${text})` : ''}`;
@@ -529,6 +541,13 @@ export function formatXrplIcusdError(err: unknown): string {
     case 'LimitExceeded': return `Limit reached. ${text}`.trim();
     case 'Ambiguous': return `Outcome is not certain yet; Rumi is reconciling. ${text}`.trim();
     case 'WrongPhase': return `This operation cannot do that right now. ${text}`.trim();
+    case 'InvalidArgument': return `Invalid request. ${text}`.trim();
+    case 'NotApplicable': return `Not available for this vault. ${text}`.trim();
+    case 'Policy': return `Blocked by protocol policy. ${text}`.trim();
+    case 'CoverageUnavailable': return `Backing check is unavailable right now; try again shortly. ${text}`.trim();
+    case 'MintingAccount': return `XRPL icUSD issuer is not verified yet. ${text}`.trim();
+    case 'Unavailable': return `Temporarily unavailable; try again shortly. ${text}`.trim();
+    case 'Internal': return text ? `Internal error: ${text}` : 'Internal error';
     default: return text ? `${key}: ${text}` : key || 'Unknown error';
   }
 }
@@ -545,14 +564,7 @@ export type ApiResult<T> =
   | { ok: true; data: T }
   | { ok: false; kind: 'unavailable' | 'backend' | 'network'; error: string; definitive: boolean };
 
-export interface XrplCapabilities {
-  borrow: boolean;
-  prepareRepayment: boolean;
-  observeRepayment: boolean;
-}
-
 export interface XrplIcusdApi {
-  capabilities(): Promise<XrplCapabilities>;
   getConfig(): Promise<ApiResult<XrplIcusdConfigView>>;
   listMyOperations(): Promise<ApiResult<OperationUi[]>>;
   issueFromCanonical(a: { amountE8s: bigint; recipient: string; network: XrplNetworkText; requestNonce: Uint8Array }): Promise<ApiResult<OperationUi>>;
@@ -563,39 +575,36 @@ export interface XrplIcusdApi {
     vaultId: bigint; maxE8s: bigint; payer: string; network: XrplNetworkText; requestNonce: Uint8Array;
     fullClose: boolean; topUpOperation: bigint | null;
   }): Promise<ApiResult<RepaymentIntent>>;
-  observeRepayment(operationId: bigint, txHash: string): Promise<ApiResult<OperationUi | null>>;
+  observeRepayment(operationId: bigint, txHash: string): Promise<ApiResult<OperationUi>>;
 }
 
 export interface XrplIcusdApiDeps {
   /** Authenticated actor (caller-scoped reads and all updates). */
-  getActor: () => Promise<any>;
+  getActor: () => Promise<Partial<_SERVICE>>;
   /** Anonymous actor for public config reads. */
-  getPublicActor: () => Promise<any>;
+  getPublicActor: () => Promise<Partial<_SERVICE>>;
 }
 
 const MAX_OPERATION_PAGES = 4;
 const PAGE_LIMIT = 50;
 
 export function createXrplIcusdApi(deps: XrplIcusdApiDeps): XrplIcusdApi {
-  const unavailable = (what: string): ApiResult<never> => ({
-    ok: false, kind: 'unavailable', definitive: true,
-    error: `${what} is not available on this deployment yet.`,
-  });
   const networkFail = (e: unknown): ApiResult<never> => ({
     ok: false, kind: 'network', definitive: false,
     error: e instanceof Error ? e.message : String(e),
   });
-  const backendFail = (err: unknown): ApiResult<never> => ({
+  const backendFail = (err: XrplIcusdError): ApiResult<never> => ({
     ok: false, kind: 'backend', definitive: isDefinitiveError(err), error: formatXrplIcusdError(err),
   });
 
-  async function opResult(call: (actor: any) => Promise<any>, method: string, label: string): Promise<ApiResult<OperationUi>> {
-    let actor: any;
-    try { actor = await deps.getActor(); } catch (e) { return networkFail(e); }
-    if (typeof actor?.[method] !== 'function') return unavailable(label);
+  /** Run an update call that returns XrplOperationResult and map it. */
+  async function opResult(
+    call: (actor: _SERVICE) => Promise<{ Ok: OperationView } | { Err: XrplIcusdError }>
+  ): Promise<ApiResult<OperationUi>> {
     try {
+      const actor = (await deps.getActor()) as _SERVICE;
       const r = await call(actor);
-      if (r && 'Err' in r) return backendFail(r.Err);
+      if ('Err' in r) return backendFail(r.Err);
       return { ok: true, data: mapOperation(r.Ok) };
     } catch (e) {
       return networkFail(e);
@@ -603,21 +612,12 @@ export function createXrplIcusdApi(deps: XrplIcusdApiDeps): XrplIcusdApi {
   }
 
   return {
-    async capabilities() {
-      let actor: any = null;
-      try { actor = await deps.getActor(); } catch { /* none */ }
-      const has = (m: string) => typeof actor?.[m] === 'function';
-      return {
-        borrow: has('borrow_to_xrpl'),
-        prepareRepayment: has('prepare_xrpl_repayment'),
-        observeRepayment: has('observe_xrpl_repayment'),
-      };
-    },
-
     async getConfig() {
       try {
         const actor = await deps.getPublicActor();
-        if (typeof actor?.get_xrpl_icusd_config !== 'function') return unavailable('XRPL icUSD');
+        if (typeof actor?.get_xrpl_icusd_config !== 'function') {
+          return { ok: false, kind: 'unavailable', definitive: true, error: 'XRPL icUSD is not available on this deployment yet.' };
+        }
         return { ok: true, data: mapConfig(await actor.get_xrpl_icusd_config()) };
       } catch (e) {
         return networkFail(e);
@@ -626,12 +626,11 @@ export function createXrplIcusdApi(deps: XrplIcusdApiDeps): XrplIcusdApi {
 
     async listMyOperations() {
       try {
-        const actor = (await deps.getActor()) as Partial<_SERVICE> | null;
-        if (typeof actor?.get_my_xrpl_operations !== 'function') return unavailable('XRPL operations');
+        const actor = (await deps.getActor()) as _SERVICE;
         const out: OperationUi[] = [];
         let cursor: [] | [bigint] = [];
         for (let i = 0; i < MAX_OPERATION_PAGES; i++) {
-          const page: { items: any[]; next_cursor: [] | [bigint] } = await actor.get_my_xrpl_operations(cursor, PAGE_LIMIT);
+          const page: OperationPage = await actor.get_my_xrpl_operations(cursor, PAGE_LIMIT);
           out.push(...page.items.map(mapOperation));
           const next: bigint | null = opt<bigint>(page.next_cursor);
           if (next === null) break;
@@ -644,69 +643,51 @@ export function createXrplIcusdApi(deps: XrplIcusdApiDeps): XrplIcusdApi {
     },
 
     issueFromCanonical(a) {
-      return opResult(
-        (actor) => actor.issue_xrpl_from_canonical({
-          request_nonce: a.requestNonce, recipient: a.recipient, network: networkVariant(a.network), amount_e8s: a.amountE8s,
-        }),
-        'issue_xrpl_from_canonical', 'Moving icUSD to XRPL'
-      );
+      return opResult((actor) => actor.issue_xrpl_from_canonical({
+        request_nonce: a.requestNonce, recipient: a.recipient, network: networkVariant(a.network), amount_e8s: a.amountE8s,
+      }));
     },
     resume(operationId) {
-      return opResult((actor) => actor.resume_xrpl_operation(operationId), 'resume_xrpl_operation', 'Resume');
+      return opResult((actor) => actor.resume_xrpl_operation(operationId));
     },
     resolveClaim(operationId, action) {
-      return opResult(
-        (actor) => actor.resolve_xrpl_claim({ operation_id: operationId, action: { [action]: null } }),
-        'resolve_xrpl_claim', 'Claim recovery'
-      );
+      return opResult((actor) => actor.resolve_xrpl_claim({
+        operation_id: operationId, action: { [action]: null } as ClaimAction,
+      }));
     },
     borrowToXrpl(a) {
-      return opResult(
-        (actor) => actor.borrow_to_xrpl({
-          vault_id: a.vaultId, gross_e8s: a.grossE8s, recipient: a.recipient,
-          network: networkVariant(a.network), request_nonce: a.requestNonce,
-        }),
-        'borrow_to_xrpl', 'Borrowing to XRPL'
-      );
+      return opResult((actor) => actor.borrow_to_xrpl({
+        vault_id: a.vaultId, gross_e8s: a.grossE8s, recipient: a.recipient,
+        network: networkVariant(a.network), request_nonce: a.requestNonce,
+      }));
     },
     async prepareRepayment(a) {
-      let actor: any;
-      try { actor = await deps.getActor(); } catch (e) { return networkFail(e); }
-      if (typeof actor?.prepare_xrpl_repayment !== 'function') return unavailable('XRPL repayment');
       try {
+        const actor = (await deps.getActor()) as _SERVICE;
         const r = await actor.prepare_xrpl_repayment({
           vault_id: a.vaultId, max_e8s: a.maxE8s, payer: a.payer, network: networkVariant(a.network),
           request_nonce: a.requestNonce, full_close: a.fullClose,
           top_up_operation: a.topUpOperation === null ? [] : [a.topUpOperation],
         });
-        if (r && 'Err' in r) return backendFail(r.Err);
-        const v = r.Ok;
+        if ('Err' in r) return backendFail(r.Err);
+        const v: RepaymentIntentView = r.Ok;
         const net = networkText(v.network);
         if (!net) return { ok: false, kind: 'backend', definitive: false, error: 'Backend returned an unknown network.' };
         return {
           ok: true,
           data: {
-            operationId: BigInt(v.operation_id), issuer: String(v.issuer), currency: String(v.currency),
-            payer: String(v.payer), destinationTag: Number(v.destination_tag), maxE8s: BigInt(v.max_e8s),
-            network: net, paymentJson: String(v.payment_json), quoteTimeNs: BigInt(v.quote_time_ns ?? 0n),
+            operationId: v.operation_id, issuer: v.issuer, currency: v.currency,
+            payer: v.payer, destinationTag: v.destination_tag, maxE8s: v.max_e8s,
+            network: net, paymentJson: v.payment_json, quoteTimeNs: v.quote_time_ns,
           },
         };
       } catch (e) {
         return networkFail(e);
       }
     },
+    /** Hint only (the backend throttles it per operation); returns the current operation view. */
     async observeRepayment(operationId, txHash) {
-      let actor: any;
-      try { actor = await deps.getActor(); } catch (e) { return networkFail(e); }
-      if (typeof actor?.observe_xrpl_repayment !== 'function') return unavailable('Repayment check');
-      try {
-        const r = await actor.observe_xrpl_repayment({ operation_id: operationId, tx_hash: txHash });
-        if (r && typeof r === 'object' && 'Err' in r) return backendFail(r.Err);
-        const ok = r && typeof r === 'object' && 'Ok' in r ? r.Ok : null;
-        return { ok: true, data: ok && typeof ok === 'object' && 'operation_id' in ok ? mapOperation(ok) : null };
-      } catch (e) {
-        return networkFail(e);
-      }
+      return opResult((actor) => actor.observe_xrpl_repayment({ operation_id: operationId, tx_hash: txHash }));
     },
   };
 }
@@ -720,8 +701,8 @@ export async function createDefaultXrplIcusdApi(): Promise<XrplIcusdApi> {
     import('./protocol/apiClient'),
   ]);
   return createXrplIcusdApi({
-    getActor: () => walletStore.getActor(CONFIG.currentCanisterId, idl.idlFactory) as Promise<any>,
-    getPublicActor: async () => publicActor as any,
+    getActor: () => walletStore.getActor(CONFIG.currentCanisterId, idl.idlFactory) as Promise<_SERVICE>,
+    getPublicActor: async () => publicActor as unknown as _SERVICE,
   });
 }
 

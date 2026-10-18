@@ -25,7 +25,6 @@
   import { walletStore } from '$lib/stores/wallet';
   import { toastStore } from '$lib/stores/toast';
   import { formatAddress } from '$lib/utils/format';
-  import XrplIcusdPanel from './XrplIcusdPanel.svelte';
 
   // Notifies the vaults page to reload the main vault list once a deposit confirms
   // (the confirmed vault becomes a normal VaultCard, which this panel doesn't own).
@@ -352,11 +351,6 @@
   {/if}
 
   <!-- XRPL icUSD lane: trust line, borrow to XRPL, repay with XRPL icUSD (Task 6). -->
-  {#if connected}
-    {#key $walletStore.principal?.toText?.() ?? ''}
-      <XrplIcusdPanel />
-    {/key}
-  {/if}
 </section>
 
 <style>

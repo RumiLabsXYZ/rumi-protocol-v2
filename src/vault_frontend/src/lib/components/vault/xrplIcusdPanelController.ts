@@ -32,7 +32,6 @@ import {
   type NonceStore,
   type OperationUi,
   type RepaymentIntent,
-  type XrplCapabilities,
   type XrplIcusdApi,
   type XrplIcusdConfigView,
 } from '$lib/services/xrplIcusdService';
@@ -150,7 +149,6 @@ export interface XrplIcusdPanelState {
   config: XrplIcusdConfigView | null;
   gate: ConfigGate | null;
   configError: string | null;
-  capabilities: XrplCapabilities | null;
   connection: XrplConnection | null;
   trustLine: { status: TrustLineStatus; limit: string | null; balance: string | null; error: string | null };
   reserve: OwnerReserve;
@@ -248,7 +246,7 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
   const hintKey = `${REPAY_HINT_PREFIX}${deps.ownerKey}`;
 
   let state: XrplIcusdPanelState = {
-    config: null, gate: null, configError: null, capabilities: null,
+    config: null, gate: null, configError: null,
     connection: deps.wallet.getConnection(),
     trustLine: { status: 'unknown', limit: null, balance: null, error: null },
     reserve: { drops: FALLBACK_OWNER_RESERVE_DROPS, live: false },
@@ -461,7 +459,6 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
     async init() {
       set({ connection: deps.wallet.getConnection() });
       await loadConfig();
-      try { set({ capabilities: await deps.api.capabilities() }); } catch { /* feature detection only */ }
       // Source of truth is the authenticated backend. A gesture-gated signer
       // (Oisy) cannot make that read without a popup, so show the cache until
       // the user clicks Refresh.
@@ -638,7 +635,7 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
         setRepay({ phase: prev === 'observed' ? 'observed' : 'submitted', error: `${failedMessage(res)} Your payment is safe; try again in a moment.` });
         return;
       }
-      if (res.data) mergeOp(res.data);
+      mergeOp(res.data);
       // The backend decides what the payment did; show its state, not ours.
       if (!deps.isOisy() || !opts?.auto) await refreshOps();
       setRepay({ phase: 'observed', error: null });
