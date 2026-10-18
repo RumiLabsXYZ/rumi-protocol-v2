@@ -7,6 +7,7 @@ import { idlFactory as icusdIndexIDL } from '$declarations/icusd_index/icusd_ind
 import { idlFactory as analyticsIDL } from '$declarations/rumi_analytics/rumi_analytics.did.js';
 import { canisterId as cycleSentinelCanisterId } from '$declarations/rumi_cycle_sentinel';
 import { idlFactory as icpswapPoolIDL } from '$declarations/icpswap_pool/icpswap_pool.did.js';
+import { LOCAL_IC_HOST } from './localNetwork';
 
 // Canister IDs for production (Rumi Protocol v2 - mainnet)
 export const CANISTER_IDS = {
@@ -203,7 +204,7 @@ export const CONFIG = {
   // Configure the host based on environment
   get host() {
     if (this.isLocal) {
-      return 'http://localhost:4943';
+      return LOCAL_IC_HOST;
     }
     return 'https://icp0.io'; // Fixed: Use standard IC endpoint
   },
@@ -214,7 +215,7 @@ export const CONFIG = {
   // Network configurations
   networks: {
     local: {
-      host: 'http://localhost:4943',
+      host: LOCAL_IC_HOST,
     },
     ic: {
       host: 'https://icp0.io',
