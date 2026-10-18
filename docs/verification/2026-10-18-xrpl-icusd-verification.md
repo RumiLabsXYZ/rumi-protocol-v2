@@ -87,3 +87,18 @@ All reviews were Sonnet, independent of the implementers.
 - **Partial liquidation with a stable token.** `liquidate_vault_partial_with_stable` with XRPL supply outstanding is not covered end to end.
 - **Instruction cost.** The cycle and instruction cost of the `opt-level = "s"` backend versus the default is not measured on staging.
 - **Observer cost.** The observer's real cycle burn is not measured.
+
+## After merging main `ed99a4d7` (ckSOL collateral)
+
+The Candid conflict was resolved by regenerating the `.did` from the merged Rust source, then regenerating the declarations. Every method on main is present; only generated `Result_N` names were renumbered.
+
+Re-checked on the merged tree:
+
+| Check | Result |
+| --- | --- |
+| Backend library | 1446 passed, 0 failed, 1 ignored |
+| Bin, including Candid compatibility | 85 passed |
+| Frontend | 1242 tests passed; build passes |
+| Release code section after shrink | 11,712,624 bytes (limit 12,582,912) |
+
+The PocketIC suites were not rerun after the merge. The merge touched only Candid and declaration files on this branch's side.
