@@ -2582,3 +2582,63 @@ fn reserve_redemption_with_xrpl_supply_outstanding_leaves_escrow_xrpl_supply_and
     assert_eq!(fx.debt(vault), 100 * E8);
     assert_eq!(fx.escrow_bal(), escrow);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 1b. Pre-existing protocol deficit: the borrowing fee routes to the deficit first
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct ProtocolStatusSubset {
+    protocol_deficit_icusd: u64,
+    total_deficit_repaid_icusd: u64,
+}
+
+impl Fx {
+    fn status(&self) -> ProtocolStatusSubset {
+        self.query(Principal::anonymous(), "get_protocol_status", Encode!().unwrap())
+    }
+}
+
+#[test]
+fn borrow_fee_routes_to_an_existing_deficit_before_the_treasury_and_gross_debt_exceeds_minted_supply() {
+    let (fx, vault_b) = lane_fx(500, 0.0);
+    // A second owner takes a thin vault that will go underwater and create a deficit.
+    let vault_a = fx.open_and_fund_vault(other_user(), 21);
+    fx.gap();
+    fx.legacy_borrow(other_user(), vault_a, 65 * E8 / 10).expect("vault A borrow");
+    fx.legacy_borrow(user(), vault_b, 40 * E8).expect("vault B legacy borrow");
+    // Two in-band crashes: $0.50 -> $0.36 -> $0.26. Vault A (20 XRP, 6.5 debt) is underwater.
+    // Each step is accepted by a periodic price refresh (one in-band move per fetch).
+    fx.set_xrp_price(36 * E8 / 100);
+    fx.run(310, 8);
+    fx.set_xrp_price(26 * E8 / 100);
+    fx.run(310, 8);
+    fx.mint_icusd(liquidator(), 10 * E8);
+    fx.approve(liquidator(), fx.backend, 10 * E8);
+    let r = fx.legacy::<rumi_protocol_backend::SuccessWithFee>(liquidator(), "liquidate_vault", Encode!(&vault_a).unwrap());
+    r.expect("underwater liquidation of vault A");
+    let deficit = fx.status().protocol_deficit_icusd;
+    assert!(deficit > 0, "an underwater liquidation seeded a protocol deficit");
+
+    // The lane borrow: gross 30, fee 0.3. Default deficit fraction 0.5 -> 0.15 to the
+    // deficit (never minted), 0.15 minted to the treasury.
+    let treasury_before = fx.bal(treasury(), None);
+    let supply_before = fx.supply();
+    let repaid_before = fx.status().total_deficit_repaid_icusd;
+    let v = borrow_delivered(&fx, vault_b, 30 * E8, 7);
+    assert_eq!((v.gross_e8s, v.fee_e8s, v.net_e8s), (30 * E8, 30_000_000, 2_970_000_000));
+    let st = fx.status();
+    assert_eq!(deficit - st.protocol_deficit_icusd, 15_000_000, "half the fee repaid the deficit");
+    assert_eq!(st.total_deficit_repaid_icusd - repaid_before, 15_000_000);
+    assert_eq!(fx.bal(treasury(), None) - treasury_before, 15_000_000, "only the other half was minted to the treasury");
+    assert_eq!(fx.escrow_bal(), 2_970_000_000, "escrow = net proceeds");
+    assert_eq!(
+        fx.supply() - supply_before,
+        2_970_000_000 + 15_000_000,
+        "minted supply = net + treasury remainder; the deficit share is never minted"
+    );
+    assert_eq!(fx.debt(vault_b), 70 * E8, "debt = legacy 40 + GROSS 30");
+    assert_eq!(fx.x.holder_balance(HOLDER), e8(2_970_000_000), "XRPL delivery is the NET amount");
+    let cov = fx.coverage();
+    assert_eq!(format!("{:?}", cov.status), "Covered", "{cov:?}");
+}
