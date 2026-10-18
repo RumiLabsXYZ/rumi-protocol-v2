@@ -1116,6 +1116,24 @@ impl Fx {
         }
     }
 
+    /// Advance time, then keep ticking and answering XRPL requests until the canister has
+    /// been quiet for a while (timer-driven background work runs to completion).
+    fn run_pumped(&self, secs: u64) {
+        self.pic.advance_time(Duration::from_secs(secs));
+        let mut idle = 0;
+        for _ in 0..600 {
+            self.pic.tick();
+            if self.x.serve(&self.pic) == 0 {
+                idle += 1;
+                if idle >= IDLE_TICKS {
+                    break;
+                }
+            } else {
+                idle = 0;
+            }
+        }
+    }
+
     /// Step over the per-caller new-request throttle.
     fn gap(&self) {
         self.run(12, 4);
@@ -1254,6 +1272,24 @@ impl Fx {
         let args = icrc_ledger_types::icrc1::transfer::TransferArg {
             from_subaccount: None,
             to: Account { owner: to, subaccount: None },
+            fee: None,
+            created_at_time: None,
+            memo: None,
+            amount: Nat::from(amount),
+        };
+        match self.pic.update_call(self.icusd, from, "icrc1_transfer", Encode!(&args).unwrap()).unwrap() {
+            WasmResult::Reply(b) => {
+                Decode!(&b, Result<Nat, Reserved>).unwrap().unwrap_or_else(|_| panic!("transfer failed"));
+            }
+            WasmResult::Reject(m) => panic!("{m}"),
+        }
+    }
+
+    /// Plain ICRC-1 transfer from `from` (default account) to an arbitrary account.
+    fn transfer_to_account(&self, from: Principal, to: Account, amount: u64) {
+        let args = icrc_ledger_types::icrc1::transfer::TransferArg {
+            from_subaccount: None,
+            to,
             fee: None,
             created_at_time: None,
             memo: None,
@@ -2049,6 +2085,168 @@ fn stale_full_close_quote_is_held_without_burn_then_topup_child_closes() {
     let p = fx.op(user(), parent.operation_id);
     assert_eq!(p.debt_applied_e8s, burned, "applied once, on the parent");
     // The unpaid margin is an exact claim; coverage still accounts for everything.
+    let cov = fx.coverage();
+    assert_eq!(format!("{:?}", cov.status), "Covered", "{cov:?}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 7. History gap, fractional and excess returns
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn history_gap_holds_the_cursor_and_the_debt_then_recovers() {
+    let (fx, vault) = lane_fx(500, 0.0);
+    borrow_delivered(&fx, vault, 100 * E8, 1);
+    fx.gap();
+    let intent = fx.prepare_repay(vault, 40 * E8, false, 2, None).expect("prepare");
+    let hash = fx.x.holder_pays(&ReturnOpts::simple(HOLDER, intent.destination_tag, "40"));
+    // Providers do not hold complete history for the interval.
+    fx.x.set_complete_ledgers(Some("1-100"));
+    let history_calls = fx.x.count("account_tx");
+    for _ in 0..3 {
+        fx.run_pumped(310);
+    }
+    assert_eq!(fx.x.count("account_tx"), history_calls, "no history page is read over a gap");
+    let v = fx.op(user(), intent.operation_id);
+    expect_phase(&v, Phase::IntentPrepared);
+    assert_eq!(fx.debt(vault), 100 * E8, "no debt effect over a gap");
+    assert_eq!(fx.escrow_bal(), 99 * E8);
+    // A wallet hint cannot bypass the observer's evidence rules either: it is a lookup
+    // key only, and here the receipt itself is fine, so it settles once (hint + later
+    // scan would apply once; that dedup is covered by the unit suite). The gap case
+    // is the scan: recover coverage and the SAME cursor interval is read.
+    fx.x.set_complete_ledgers(None);
+    for _ in 0..4 {
+        fx.run_pumped(310);
+        if phase_is(&fx.op(user(), intent.operation_id), Phase::Complete) {
+            break;
+        }
+    }
+    let v = fx.op(user(), intent.operation_id);
+    expect_phase(&v, Phase::Complete);
+    assert!(fx.x.count("account_tx") > history_calls, "history was read after recovery");
+    assert_eq!(fx.debt(vault), 60 * E8);
+    assert_eq!(fx.escrow_bal(), 59 * E8);
+    assert_eq!(v.debt_applied_e8s, 40 * E8);
+    // The same transaction reported by a wallet hint afterwards changes nothing.
+    fx.run(12, 3);
+    let again = fx.observe(intent.operation_id, &hash).expect("late hint");
+    assert_eq!(again.debt_applied_e8s, 40 * E8);
+    assert_eq!(fx.debt(vault), 60 * E8, "applied exactly once");
+    // Once caught up the lane goes idle: no more outcalls without open work.
+    let calls = fx.x.total_http();
+    fx.run_pumped(900);
+    assert_eq!(fx.x.total_http(), calls, "idle lane makes zero outcalls");
+}
+
+#[test]
+fn sub_e8s_return_keeps_the_exact_fractional_liability_and_owner_can_reissue_it() {
+    let (fx, vault) = lane_fx(500, 0.0);
+    borrow_delivered(&fx, vault, 100 * E8, 1);
+    fx.gap();
+    let intent = fx.prepare_repay(vault, 40 * E8, false, 2, None).expect("prepare");
+    let hash = fx.x.holder_pays(&ReturnOpts::simple(HOLDER, intent.destination_tag, "40.000000005"));
+    let v = fx.observe(intent.operation_id, &hash).expect("observe");
+    let v = drive_to(&fx, user(), v.operation_id, Phase::Held);
+    assert_eq!(v.debt_applied_e8s, 40 * E8, "only whole e8s are applied to the debt");
+    assert_eq!(v.held_exact_amount.as_deref(), Some("0.000000005"), "the sub-e8s part stays an exact liability");
+    assert_eq!(fx.debt(vault), 60 * E8);
+    assert_eq!(fx.escrow_bal(), 59 * E8, "escrow still backs the holder balance AND the held dust");
+    let cov = fx.coverage();
+    assert_eq!(format!("{:?}", cov.status), "Covered", "{cov:?}");
+    assert_eq!(cov.h_e8s, 1, "the held dust is counted (rounded up)");
+    // Another principal cannot touch the claim.
+    let r: Result<OperationView, XrplIcusdError> = fx.lane(
+        other_user(),
+        "resolve_xrpl_claim",
+        Encode!(&rumi_protocol_backend::xrpl_icusd::ResolveClaimArg {
+            operation_id: v.operation_id,
+            action: rumi_protocol_backend::xrpl_icusd::ClaimAction::ReissueXrpl,
+        })
+        .unwrap(),
+    );
+    assert!(r.is_err(), "claims are owner-only: {r:?}");
+    // The owner re-issues the exact fraction to the payer on XRPL.
+    fx.gap();
+    let r: Result<OperationView, XrplIcusdError> = fx.lane(
+        user(),
+        "resolve_xrpl_claim",
+        Encode!(&rumi_protocol_backend::xrpl_icusd::ResolveClaimArg {
+            operation_id: v.operation_id,
+            action: rumi_protocol_backend::xrpl_icusd::ClaimAction::ReissueXrpl,
+        })
+        .unwrap(),
+    );
+    r.expect("owner resolves");
+    for _ in 0..6 {
+        if fx.x.payments_submitted().len() >= 2 {
+            break;
+        }
+        fx.run(31, 3);
+        let _ = fx.resume(v.operation_id);
+    }
+    let pays = fx.x.payments_submitted();
+    assert!(pays.len() >= 2, "the re-issue Payment was signed");
+    let (_, d) = pays.last().unwrap();
+    assert_eq!(d.amount.unwrap().0, exact("0.000000005"), "the exact fraction, not rounded");
+    assert_eq!(d.destination, Some(account_id_from_classic_address(HOLDER).unwrap()));
+}
+
+#[test]
+fn excess_return_is_a_backed_owned_claim_the_owner_can_take_as_canonical_icusd() {
+    let (fx, vault) = lane_fx(500, 0.0);
+    borrow_delivered(&fx, vault, 100 * E8, 1);
+    fx.gap();
+    let intent = fx.prepare_repay(vault, 40 * E8, false, 2, None).expect("prepare");
+    // The wallet sends 50 against a 40 intent: 40 applied, 10 held.
+    let hash = fx.x.holder_pays(&ReturnOpts::simple(HOLDER, intent.destination_tag, "50"));
+    let v = fx.observe(intent.operation_id, &hash).expect("observe");
+    let v = drive_to(&fx, user(), v.operation_id, Phase::Held);
+    assert_eq!(v.debt_applied_e8s, 40 * E8);
+    assert_eq!(v.held_exact_amount.as_deref(), Some("10"), "the excess is exact");
+    assert_eq!(fx.debt(vault), 60 * E8);
+    assert_eq!(fx.escrow_bal(), 59 * E8, "backing: holder 49 + held 10");
+    // The claim is backed: coverage counts it.
+    let cov = fx.coverage();
+    assert_eq!(format!("{:?}", cov.status), "Covered", "{cov:?}");
+    assert_eq!(cov.h_e8s, u128::from(10 * E8));
+    // A canonical return costs an IC ledger fee that must NOT come out of holder backing:
+    // with zero surplus the request is refused (a coverage error, nothing moves).
+    fx.gap();
+    let refused: Result<OperationView, XrplIcusdError> = fx.lane(
+        user(),
+        "resolve_xrpl_claim",
+        Encode!(&rumi_protocol_backend::xrpl_icusd::ResolveClaimArg {
+            operation_id: v.operation_id,
+            action: rumi_protocol_backend::xrpl_icusd::ClaimAction::ReceiveCanonical,
+        })
+        .unwrap(),
+    );
+    assert!(
+        matches!(refused, Err(XrplIcusdError::CoverageUnavailable(_))),
+        "no fee surplus -> the canonical return is refused: {refused:?}"
+    );
+    assert_eq!(fx.escrow_bal(), 59 * E8, "nothing moved");
+    // The operator funds a fee surplus (the protocol treasury donates to escrow).
+    let donation = 10 * LEDGER_FEE;
+    fx.transfer_to_account(treasury(), fx.escrow_account(), donation);
+    // Owner takes the 10 as canonical icUSD from escrow.
+    let before = fx.bal(user(), None);
+    fx.gap();
+    let r: Result<OperationView, XrplIcusdError> = fx.lane(
+        user(),
+        "resolve_xrpl_claim",
+        Encode!(&rumi_protocol_backend::xrpl_icusd::ResolveClaimArg {
+            operation_id: v.operation_id,
+            action: rumi_protocol_backend::xrpl_icusd::ClaimAction::ReceiveCanonical,
+        })
+        .unwrap(),
+    );
+    r.expect("owner resolves to canonical");
+    let v = drive_to(&fx, user(), v.operation_id, Phase::ClaimResolved);
+    assert_eq!(fx.bal(user(), None) - before, 10 * E8, "owner received the excess in full");
+    assert_eq!(fx.escrow_bal(), 59 * E8 + donation - 10 * E8 - LEDGER_FEE, "escrow paid the claim plus its own ledger fee out of the surplus");
+    assert!(v.held_exact_amount.is_none() || v.held_exact_amount.as_deref() == Some("0"));
     let cov = fx.coverage();
     assert_eq!(format!("{:?}", cov.status), "Covered", "{cov:?}");
 }
