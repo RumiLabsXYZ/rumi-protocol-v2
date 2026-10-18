@@ -930,18 +930,19 @@ struct Fx {
     icusd: Principal,
     icp: Principal,
     xrc: Principal,
+    ckusdc: Principal,
     x: Xrpl,
 }
 
 /// Idle ticks (no parked HTTP request) after which a pumped call is considered quiet.
 const IDLE_TICKS: u32 = 30;
 
-fn install_ledger(pic: &PocketIc, ledger: Principal, minter: Principal, name: &str) {
+fn install_ledger(pic: &PocketIc, ledger: Principal, minter: Principal, name: &str, decimals: u8, fee: u64) {
     let args = LedgerArg::Init(LedgerInitArgs {
         minting_account: Account { owner: minter, subaccount: None },
         fee_collector_account: None,
-        transfer_fee: Nat::from(LEDGER_FEE),
-        decimals: Some(8),
+        transfer_fee: Nat::from(fee),
+        decimals: Some(decimals),
         max_memo_length: Some(64),
         token_name: name.to_string(),
         token_symbol: name.to_string(),
@@ -986,9 +987,12 @@ fn boot_with(flaky: bool) -> Fx {
         pic.update_call(icusd, Principal::anonymous(), "set_minter", Encode!(&Some(backend)).unwrap())
             .expect("set_minter");
     } else {
-        install_ledger(&pic, icusd, backend, "icUSD");
+        install_ledger(&pic, icusd, backend, "icUSD", 8, LEDGER_FEE);
     }
-    install_ledger(&pic, icp, backend, "ICP");
+    install_ledger(&pic, icp, backend, "ICP", 8, LEDGER_FEE);
+    // ckUSDC reserve token (6 decimals), minted by the controller principal.
+    let ckusdc = mk(&pic);
+    install_ledger(&pic, ckusdc, ctrl(), "ckUSDC", 6, 10);
     let mut rates = HashMap::new();
     rates.insert("ICP/USD".to_string(), 10 * E8);
     rates.insert("XRP/USD".to_string(), E8 / 2);
@@ -1002,14 +1006,14 @@ fn boot_with(flaky: bool) -> Fx {
         treasury_principal: Some(treasury()),
         stability_pool_principal: None,
         ckusdt_ledger_principal: None,
-        ckusdc_ledger_principal: None,
+        ckusdc_ledger_principal: Some(ckusdc),
     });
     pic.install_canister(backend, backend_wasm(), encode_args((init,)).unwrap(), None);
     pic.set_controllers(backend, None, vec![ctrl()]).expect("set controllers");
     for _ in 0..5 {
         pic.tick();
     }
-    Fx { pic, backend, icusd, icp, xrc, x: Xrpl::new() }
+    Fx { pic, backend, icusd, icp, xrc, ckusdc, x: Xrpl::new() }
 }
 
 impl Fx {
@@ -2499,4 +2503,82 @@ fn stability_pool_absorbs_an_xrp_vault_with_xrpl_supply_outstanding_and_backing_
     let cov = fx.coverage();
     assert_eq!(format!("{:?}", cov.status), "Covered", "{cov:?}");
     assert_eq!(cov.o_e8s, u128::from(escrow));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 4. Reserve redemption with XRPL supply outstanding
+// ═══════════════════════════════════════════════════════════════════════════════
+
+impl Fx {
+    fn token_bal(&self, ledger: Principal, owner: Principal) -> u64 {
+        let n: Nat = match self
+            .pic
+            .query_call(ledger, Principal::anonymous(), "icrc1_balance_of", Encode!(&Account { owner, subaccount: None }).unwrap())
+            .expect("balance_of")
+        {
+            WasmResult::Reply(b) => Decode!(&b, Nat).unwrap(),
+            WasmResult::Reject(m) => panic!("{m}"),
+        };
+        u64::try_from(n.0).unwrap()
+    }
+}
+
+#[test]
+fn reserve_redemption_with_xrpl_supply_outstanding_leaves_escrow_xrpl_supply_and_vault_untouched() {
+    let (fx, vault) = lane_fx(500, 0.0);
+    borrow_delivered(&fx, vault, 100 * E8, 1);
+    let escrow = fx.escrow_bal();
+    let holder_xrpl = fx.x.holder_balance(HOLDER);
+    fx.plain_ok::<()>(dev(), "set_reserve_redemptions_enabled", Encode!(&true).unwrap());
+    // Protocol reserves: 1,000 ckUSDC (e6) held by the backend.
+    match fx
+        .pic
+        .update_call(
+            fx.ckusdc,
+            ctrl(),
+            "icrc1_transfer",
+            Encode!(&icrc_ledger_types::icrc1::transfer::TransferArg {
+                from_subaccount: None,
+                to: Account { owner: fx.backend, subaccount: None },
+                fee: None,
+                created_at_time: None,
+                memo: None,
+                amount: Nat::from(1_000_000_000u64),
+            })
+            .unwrap(),
+        )
+        .unwrap()
+    {
+        WasmResult::Reply(b) => {
+            Decode!(&b, Result<Nat, Reserved>).unwrap().unwrap_or_else(|_| panic!("fund reserves"));
+        }
+        WasmResult::Reject(m) => panic!("{m}"),
+    }
+    // A redeemer with canonical icUSD (unrelated to escrow) redeems 10 icUSD from reserves.
+    fx.mint_icusd(other_user(), 12 * E8);
+    fx.approve(other_user(), fx.backend, 11 * E8);
+    let supply_before = fx.supply();
+    let ck_before = fx.token_bal(fx.ckusdc, other_user());
+    let r: LegacyResult<rumi_protocol_backend::ReserveRedemptionResult> = fx.legacy(
+        other_user(),
+        "redeem_reserves",
+        Encode!(&(10 * E8), &Some(fx.ckusdc)).unwrap(),
+    );
+    r.as_ref().unwrap_or_else(|e| panic!("reserve redemption must work with XRPL supply outstanding: {e:?}"));
+    assert!(fx.token_bal(fx.ckusdc, other_user()) > ck_before, "redeemer received ckUSDC");
+    assert!(fx.supply() < supply_before, "the redeemed icUSD left supply");
+    // XRPL side and the vault are untouched.
+    assert_eq!(fx.escrow_bal(), escrow, "escrow backing untouched by a reserve redemption");
+    assert_eq!(fx.x.holder_balance(HOLDER), holder_xrpl);
+    assert_eq!(fx.debt(vault), 100 * E8, "reserve redemption does not touch vault debt");
+    let cov = fx.coverage();
+    assert_eq!(format!("{:?}", cov.status), "Covered", "{cov:?}");
+
+    // Vault redemption cannot reach a native-XRP vault at all, XRPL-issued debt or not.
+    fx.approve(other_user(), fx.backend, E8);
+    let r: LegacyResult<rumi_protocol_backend::SuccessWithFee> =
+        fx.legacy(other_user(), "redeem_collateral", Encode!(&xrp_collateral_principal(), &(E8)).unwrap());
+    assert!(r.is_err(), "native-XRP vaults are not redeemable: {r:?}");
+    assert_eq!(fx.debt(vault), 100 * E8);
+    assert_eq!(fx.escrow_bal(), escrow);
 }
