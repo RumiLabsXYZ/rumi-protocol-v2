@@ -215,6 +215,29 @@ pub fn plan_resolution(
     }
 }
 
+/// The explicit refusal of a canonical return the escrow cannot fund: the IC ledger
+/// fee of a return is charged from an OPERATOR-FUNDED surplus above holder backing
+/// (rounding buffer + pending ledger fees + this return's fee), never from holders.
+pub fn fee_surplus_error(
+    st: &XrplIcusdState,
+    escrow_balance_e8s: u128,
+    required_e8s: u128,
+    fee_e8s: u64,
+) -> XrplIcusdError {
+    let holder = st.required_backing_e8s(0).unwrap_or(required_e8s);
+    let holder_only = holder
+        .saturating_sub(u128::from(st.config.rounding_buffer_e8s))
+        .saturating_sub(st.buckets().map(|b| b.ic_fee_reserve_e8s).unwrap_or(0));
+    XrplIcusdError::CoverageUnavailable(format!(
+        "ledger-fee surplus not funded: escrow holds {escrow_balance_e8s} e8s but \
+         {required_e8s} e8s are required (holder backing {holder_only} + rounding buffer {} + \
+         pending ledger fees + this return's fee {fee_e8s}); an operator must fund the shortfall \
+         of {} e8s into the escrow account (see get_xrpl_icusd_coverage.fee_surplus_required_e8s)",
+        st.config.rounding_buffer_e8s,
+        required_e8s.saturating_sub(escrow_balance_e8s),
+    ))
+}
+
 impl XrplIcusdState {
     /// Backing the escrow must hold for every liability, the buffer, pending IC fees
     /// and `extra_fee_e8s` of a new canonical return.
@@ -275,10 +298,7 @@ pub fn begin_receive_canonical(
     };
     let required = st.required_backing_e8s(fee_e8s)?;
     if escrow_balance_e8s < required {
-        return Err(XrplIcusdError::CoverageUnavailable(format!(
-            "escrow holds {escrow_balance_e8s} e8s but {required} e8s are required including the \
-             ledger fee reserve"
-        )));
+        return Err(fee_surplus_error(st, escrow_balance_e8s, required, fee_e8s));
     }
     let idx = st.add_job(
         op_id,

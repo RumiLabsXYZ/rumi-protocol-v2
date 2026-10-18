@@ -1416,6 +1416,7 @@ impl Fx {
                 per_operation_cap_e8s: Some(1_000_000 * E8),
                 rounding_buffer_e8s: Some(0),
                 max_fee_drops: Some(1_000),
+                min_auto_refund_e8s: None,
             })
             .unwrap(),
         );

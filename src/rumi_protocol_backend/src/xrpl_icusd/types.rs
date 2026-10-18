@@ -20,6 +20,8 @@ pub type OperationId = u64;
 
 /// 10 active operations per owner, 10,000 operations globally, 50 rows per page.
 pub const MAX_ACTIVE_OPS_PER_OWNER: usize = 10;
+/// Cap on USER-created operations (system refund records never count against it, so
+/// an attacker who pushes refund records can never make user admissions fail).
 pub const MAX_OPERATIONS_GLOBAL: usize = 10_000;
 pub const MAX_PAGE: u32 = 50;
 pub const MAX_NOTES: usize = 16;
@@ -354,6 +356,9 @@ pub struct XrplIcusdConfig {
     /// account and differs from the escrow account.
     pub verified_minting_account: Option<Account>,
     pub config_version: u64,
+    /// Aggregated unattributed value below this (e8s) is retained exactly and never
+    /// auto-refunded: a refund costs the issuer XRP, so it must exceed that cost.
+    pub min_auto_refund_e8s: u64,
 }
 
 impl Default for XrplIcusdConfig {
@@ -373,6 +378,7 @@ impl Default for XrplIcusdConfig {
             max_fee_drops: 0,
             verified_minting_account: None,
             config_version: 0,
+            min_auto_refund_e8s: MIN_AUTO_REFUND_E8S,
         }
     }
 }
@@ -455,6 +461,10 @@ pub struct IcLedgerJob {
     pub scan: Option<ScanProgress>,
     #[serde(default)]
     pub sends: u32,
+    /// When the job last became `InFlight` (a stale in-flight job is normalised to
+    /// `Unknown`, then reconciled the normal way).
+    #[serde(default)]
+    pub in_flight_since_ns: Option<u64>,
 }
 
 impl IcLedgerJob {
@@ -845,6 +855,17 @@ pub struct CoverageReport {
     pub snapshot_e8s: Option<u128>,
     pub snapshot_ledger_index: Option<u32>,
     pub in_flight_e8s: u128,
+    /// Holder backing alone: `ceil(O + D + R + H)`.
+    pub holder_backing_e8s: u128,
+    /// The operator-funded surplus the escrow must hold ABOVE holder backing: the
+    /// rounding buffer plus pending IC ledger fees. Canonical returns charge the IC
+    /// ledger fee from this surplus, never from holder backing; if it is not funded a
+    /// canonical return is refused with `CoverageUnavailable("ledger-fee surplus not
+    /// funded ...")`. Launch action: fund the escrow with at least this amount (plus
+    /// one ledger fee per expected return).
+    pub fee_surplus_required_e8s: u128,
+    /// Value moved out of `O` into the quarantined-receipt bucket (part of `H`).
+    pub quarantined_e8s: u128,
 }
 
 impl CoverageReport {
@@ -880,6 +901,7 @@ pub struct PublicXrplIcusdConfig {
     pub verified_minting_account: Option<Account>,
     pub escrow_account: Account,
     pub config_version: u64,
+    pub min_auto_refund_e8s: u64,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -891,6 +913,7 @@ pub struct ConfigureXrplIcusdArg {
     pub per_operation_cap_e8s: Option<u64>,
     pub rounding_buffer_e8s: Option<u64>,
     pub max_fee_drops: Option<u64>,
+    pub min_auto_refund_e8s: Option<u64>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -970,6 +993,9 @@ pub enum NextAction {
     ResolveClaim,
     /// Needs the operator (quarantine).
     ContactOperator,
+    /// A replay-rebuilt borrow whose escrow mint outcome is unknown: the operator
+    /// resolves it only with ledger proof (`reconcile_xrpl_borrow_mint`).
+    ReconcileMint,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1020,6 +1046,10 @@ pub fn system_owner() -> Principal {
     Principal::management_canister()
 }
 
+fn anonymous_principal() -> Principal {
+    Principal::anonymous()
+}
+
 /// What happened to a value-bearing return (one that reduced `O`). Keyed by
 /// `(network, issuer, tx hash)`: a return is consumed exactly once.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1029,8 +1059,14 @@ pub enum ReturnDisposition {
     /// A top-up child's receipt combined with its held parent.
     MergedIntoParent { child: OperationId, parent: OperationId },
     /// Not attributable (unknown/consumed tag, payer mismatch, anomalous payment):
-    /// value held in a refund operation for the verified sender.
+    /// the value joined the verified sender's aggregate (and is refunded in chunks).
     Refund { op_id: OperationId, reason: String },
+    /// Unattributed value folded into the per-(network, sender) aggregate: no
+    /// per-transaction operation exists.
+    Aggregated { reason: String },
+    /// A value-bearing receipt that failed the strict evidence checks: the value left
+    /// `O` into the quarantined bucket (held; never debt credit).
+    Quarantined { reason: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1055,11 +1091,100 @@ pub struct QuarantineRecord {
     pub at_ns: u64,
 }
 
+/// Candid view of a held quarantined receipt.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct QuarantinedReceiptView {
+    pub tx_hash: String,
+    pub ledger_index: u32,
+    pub sender: String,
+    pub destination_tag: Option<u32>,
+    /// Exact decimal amount.
+    pub amount: String,
+    pub reason: String,
+    pub at_ns: u64,
+}
+
+impl From<&QuarantinedReceipt> for QuarantinedReceiptView {
+    fn from(q: &QuarantinedReceipt) -> Self {
+        Self {
+            tx_hash: q.tx_hash.clone(),
+            ledger_index: q.ledger_index,
+            sender: q.sender.clone(),
+            destination_tag: q.destination_tag,
+            amount: q.amount.to_decimal_string(),
+            reason: q.reason.clone(),
+            at_ns: q.at_ns,
+        }
+    }
+}
+
 pub const MAX_QUARANTINE_LOG: usize = 200;
-pub const MAX_PROCESSED_RETURNS: usize = 100_000;
-/// Returns below this (e8s) are retained exactly but never auto-refunded: a refund
-/// transaction costs the issuer XRP, so dust must not be a cost-symmetric drain.
-pub const MIN_AUTO_REFUND_E8S: u64 = 1_000;
+/// Hard cap on dedup records. Records below the scan frontier are compacted (see
+/// `XrplIcusdState::compact_processed_returns`), so the cap only binds while the
+/// observer lags.
+pub const MAX_PROCESSED_RETURNS: usize = 25_000;
+/// Records this many ledgers behind the fully-scanned frontier are dropped (about a
+/// day of XRPL ledgers). Dedup stays correct: see `dedup_floor_ledger`.
+pub const PROCESSED_RETAIN_LEDGERS: u32 = 20_000;
+/// Aggregated unattributed value below this (e8s) is retained exactly but never
+/// auto-refunded: a refund costs the issuer XRP (up to `max_fee_drops`), so the
+/// default (0.01 icUSD) exceeds the fee value at any plausible XRP price. Configurable.
+pub const MIN_AUTO_REFUND_E8S: u64 = 1_000_000;
+/// Per-pass budget of refund operations the system may create from aggregates.
+pub const REFUNDS_PER_PASS: usize = 8;
+/// Cap on live system refund records. Separate from user admissions: reaching it only
+/// defers further refunds (value stays in its aggregate), it never blocks a user.
+pub const MAX_SYSTEM_REFUND_OPS: usize = 1_000;
+/// Cap on per-(network, sender) aggregates; beyond it value joins ONE overflow
+/// aggregate that is never auto-refunded (operator-visible).
+pub const MAX_UNATTRIBUTED_SENDERS: usize = 2_000;
+/// Cap on quarantined value-bearing receipts held individually; beyond it value joins
+/// the overflow quarantine entry.
+pub const MAX_QUARANTINED_RECEIPTS: usize = 500;
+/// Sender key of the overflow aggregate / quarantine entry.
+pub const OVERFLOW_SENDER: &str = "*overflow*";
+/// Terminal operations are pruned after this retention window.
+pub const OP_RETENTION_NS: u64 = 30 * 24 * 3_600 * 1_000_000_000;
+/// Terminal operations pruned per tick pass.
+pub const PRUNE_PER_PASS: usize = 200;
+/// A ledger job stuck `InFlight` longer than this is treated as `Unknown`.
+pub const STALE_IN_FLIGHT_NS: u64 = 10 * 60 * 1_000_000_000;
+/// Fresh-nonce retries of a proven-failed borrow fee-remainder mint before it is held
+/// for the operator.
+pub const MAX_FEE_MINT_AUTO_RETRIES: usize = 3;
+
+/// Unattributed (or dust) value from one sender, folded into ONE record instead of
+/// one operation per transaction. Exact: sums use [`WideAmount`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UnattributedReturns {
+    pub network: XrplNetwork,
+    pub sender: String,
+    /// Value received and not yet moved into a refund operation (part of `H`).
+    pub total: WideAmount,
+    pub tx_count: u64,
+    pub first_ledger: u32,
+    pub last_ledger: u32,
+    pub last_tx: String,
+    pub last_reason: String,
+    pub updated_at_ns: u64,
+    /// Refund operations already cut from this aggregate (feeds the deterministic
+    /// refund nonce).
+    pub refunds_issued: u32,
+}
+
+/// A value-bearing receipt that failed strict evidence checks. Its value left `O`
+/// (the ledger reduced issuer obligations by it) and is held here until a controller
+/// re-verifies and books it. NEVER debt credit; NEVER auto-refunded.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct QuarantinedReceipt {
+    pub tx_hash: String,
+    pub ledger_index: u32,
+    pub sender: String,
+    pub destination_tag: Option<u32>,
+    pub amount: WideAmount,
+    pub reason: String,
+    pub at_ns: u64,
+}
 /// An unused repayment intent expires (the destination tag is never reassigned).
 pub const INTENT_TTL_NS: u64 = 7 * 24 * 3_600 * 1_000_000_000;
 
@@ -1075,6 +1200,9 @@ pub struct ObserverState {
     pub progress: u64,
     pub last_pass_ns: u64,
     pub last_note: Option<String>,
+    /// `checked_at_ns` of the coverage record whose snapshot-below-`O` condition the
+    /// observer has already caught up on (so it does not poll again for that record).
+    pub settled_coverage_ns: u64,
 }
 
 // ----------------------------------------------------------------------------------
@@ -1131,11 +1259,21 @@ pub enum XrplIcusdEvent {
         interest_share_e8s: u64,
         last_accrual_time: u64,
     },
+    /// Carries everything an analytics/points/explorer consumer needs to index an
+    /// XRPL repayment WITHOUT a separate `RepayToVault` event (which replay would
+    /// apply a second time): the vault, the owner, the debt actually applied and the
+    /// interest share.
     RepaySettled {
         op_id: u64,
         vault_id: u64,
         burn_block: u64,
         settled_at: u64,
+        #[serde(default = "anonymous_principal")]
+        owner: Principal,
+        #[serde(default)]
+        applied_e8s: u64,
+        #[serde(default)]
+        interest_share_e8s: u64,
     },
     RepayCancelled {
         op_id: u64,
@@ -1157,7 +1295,8 @@ impl XrplIcusdEvent {
     pub fn owner(&self) -> Option<Principal> {
         match self {
             XrplIcusdEvent::ReservationBegun { owner, .. }
-            | XrplIcusdEvent::RepayCutoffBegun { owner, .. } => Some(*owner),
+            | XrplIcusdEvent::RepayCutoffBegun { owner, .. }
+            | XrplIcusdEvent::RepaySettled { owner, .. } => Some(*owner),
             _ => None,
         }
     }

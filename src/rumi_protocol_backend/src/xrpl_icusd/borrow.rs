@@ -384,6 +384,10 @@ pub fn advance_borrow(
                 return Ok(BorrowAdvance::Held);
             }
             // ---- the commit: frozen terms, once, in this synchronous block ----
+            // Bring the vault's interest up to date BEFORE the new principal lands,
+            // exactly as the legacy borrow does, so the new debt never inherits (or
+            // skips) accrual for the time the mint was pending.
+            state.accrue_single_vault(vault_id, now_ns);
             // Owner attribution is the SAVED owner, never a timer/resume caller.
             crate::event::record_borrow_from_vault_at(
                 state,
@@ -539,4 +543,271 @@ impl XrplIcusdState {
             .map(|o| o.id)
             .collect()
     }
+}
+
+// ----------------------------------------------------------------------------------
+// Fee-remainder mint: retry and hold (never silently dropped)
+// ----------------------------------------------------------------------------------
+
+/// What state a Borrow's fee-remainder mint is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeeMintState {
+    /// No remainder to mint (or not a committed Borrow).
+    NotApplicable,
+    /// A job is queued, in flight, unknown or done: the normal driver handles it.
+    InProgress,
+    /// The last job was PROVEN never executed: a fresh-nonce successor is due.
+    RetryDue,
+    /// The remainder is owed but no treasury was configured at the commit: held.
+    HeldNoTreasury,
+    /// Proven-failed attempts exhausted the automatic budget: held for the operator.
+    HeldExhausted,
+}
+
+pub fn fee_mint_state(op: &Operation) -> FeeMintState {
+    let OperationKind::Borrow {
+        fee_split: Some(split),
+        ..
+    } = &op.kind
+    else {
+        return FeeMintState::NotApplicable;
+    };
+    if split.to_treasury_remainder_e8s == 0 {
+        return FeeMintState::NotApplicable;
+    }
+    let jobs: Vec<&IcLedgerJob> = op
+        .ic_jobs
+        .iter()
+        .filter(|j| j.purpose == IcJobPurpose::FeeMint)
+        .collect();
+    let Some(last) = jobs.last() else {
+        return if split.treasury.is_none() {
+            FeeMintState::HeldNoTreasury
+        } else {
+            FeeMintState::InProgress
+        };
+    };
+    match last.status {
+        IcJobStatus::Failed { .. } => {
+            if jobs.len() > MAX_FEE_MINT_AUTO_RETRIES {
+                FeeMintState::HeldExhausted
+            } else {
+                FeeMintState::RetryDue
+            }
+        }
+        _ => FeeMintState::InProgress,
+    }
+}
+
+fn add_fee_mint_successor(
+    state: &mut State,
+    op_id: OperationId,
+    treasury: Principal,
+    now_ns: u64,
+) -> Result<(), XrplIcusdError> {
+    let (remainder, tip) = {
+        let op = state.xrpl_icusd.op(op_id).ok_or(XrplIcusdError::NotFound)?;
+        let OperationKind::Borrow {
+            fee_split: Some(split),
+            ..
+        } = &op.kind
+        else {
+            return Err(XrplIcusdError::NotApplicable("not a committed borrow".into()));
+        };
+        let tip = op
+            .ic_jobs
+            .iter()
+            .rfind(|j| j.purpose == IcJobPurpose::FeeMint)
+            .or_else(|| op.ic_jobs.iter().find(|j| j.purpose == IcJobPurpose::EscrowMint))
+            .and_then(|j| j.ledger_tip_before)
+            .unwrap_or(0);
+        (split.to_treasury_remainder_e8s, tip)
+    };
+    // A NEW nonce (hence a new created_at_time and memo): the previous attempt is
+    // proven never executed, so a fresh one cannot double-mint.
+    let nonce = state.next_op_nonce_at(now_ns);
+    state.xrpl_icusd.add_job(
+        op_id,
+        ledger::fee_mint_job_spec(
+            Account {
+                owner: treasury,
+                subaccount: None,
+            },
+            remainder,
+            tip,
+        ),
+        nonce,
+        now_ns,
+    )?;
+    let op = state.xrpl_icusd.op_mut(op_id)?;
+    if let OperationKind::Borrow {
+        fee_split: Some(split),
+        ..
+    } = &mut op.kind
+    {
+        split.treasury = Some(treasury);
+    }
+    Ok(())
+}
+
+/// Automatic successor of a PROVEN-failed fee-remainder mint (fresh nonce), within the
+/// retry budget. Returns whether a job was added. Past the budget (or without a
+/// treasury) the remainder stays held and visible (`NextAction::ContactOperator`).
+pub fn retry_failed_fee_mint(
+    state: &mut State,
+    op_id: OperationId,
+    now_ns: u64,
+) -> Result<bool, XrplIcusdError> {
+    let (fm, treasury) = {
+        let op = state.xrpl_icusd.op(op_id).ok_or(XrplIcusdError::NotFound)?;
+        let t = match &op.kind {
+            OperationKind::Borrow {
+                fee_split: Some(split),
+                ..
+            } => split.treasury,
+            _ => None,
+        };
+        (fee_mint_state(op), t)
+    };
+    match (fm, treasury) {
+        (FeeMintState::RetryDue, Some(t)) => {
+            add_fee_mint_successor(state, op_id, t, now_ns)?;
+            let op = state.xrpl_icusd.op_mut(op_id)?;
+            op.push_note("fee-remainder mint proven unexecuted; retrying with a fresh nonce");
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Controller-triggered retry of a HELD fee remainder (no treasury at the commit, or
+/// the automatic budget exhausted): uses the CURRENT treasury principal. Refuses while
+/// any earlier job is not proven unexecuted.
+pub fn operator_retry_fee_mint(
+    state: &mut State,
+    op_id: OperationId,
+    now_ns: u64,
+) -> Result<(), XrplIcusdError> {
+    let fm = state
+        .xrpl_icusd
+        .op(op_id)
+        .map(fee_mint_state)
+        .ok_or(XrplIcusdError::NotFound)?;
+    match fm {
+        FeeMintState::HeldNoTreasury | FeeMintState::HeldExhausted | FeeMintState::RetryDue => {}
+        FeeMintState::InProgress => {
+            return Err(XrplIcusdError::Ambiguous(
+                "a fee-remainder mint is queued or unresolved; it cannot be retried until it is \
+                 proven unexecuted"
+                    .into(),
+            ))
+        }
+        FeeMintState::NotApplicable => {
+            return Err(XrplIcusdError::NotApplicable(
+                "this operation has no fee remainder to mint".into(),
+            ))
+        }
+    }
+    let treasury = state.treasury_principal.ok_or_else(|| {
+        XrplIcusdError::Disabled("no treasury principal is configured to receive the fee".into())
+    })?;
+    add_fee_mint_successor(state, op_id, treasury, now_ns)?;
+    let op = state.xrpl_icusd.op_mut(op_id)?;
+    op.push_note("operator retried the held fee-remainder mint");
+    Ok(())
+}
+
+// ----------------------------------------------------------------------------------
+// Replay-rebuilt reservations: ledger-proof reconciliation
+// ----------------------------------------------------------------------------------
+
+/// Pure check + booking of a controller-supplied escrow-mint block for a
+/// replay-rebuilt Borrow (`Prepared`, no jobs). Replay rebuilds the reservation and
+/// the vault exclusion but cannot know whether the mint executed. The block must be
+/// an escrow MINT of exactly `net_e8s` and must not already be the proven mint of
+/// another operation. On success the operation carries a synthetic proven mint job
+/// and moves to `EscrowMintPending`, so the normal `advance_borrow` commits the debt
+/// once. No block, no resolution: absence cannot be shown from here.
+pub fn apply_rebuilt_mint_proof(
+    st: &mut XrplIcusdState,
+    op_id: OperationId,
+    block: u64,
+    decoded: &crate::icrc3_proof::DecodedBlock,
+    backend: Principal,
+    now_ns: u64,
+) -> Result<(), XrplIcusdError> {
+    let net = {
+        let op = st.op(op_id).ok_or(XrplIcusdError::NotFound)?;
+        let OperationKind::Borrow { net_e8s, .. } = &op.kind else {
+            return Err(XrplIcusdError::NotApplicable("not a borrow".into()));
+        };
+        if op.phase != Phase::Prepared || !op.ic_jobs.is_empty() {
+            return Err(XrplIcusdError::WrongPhase(
+                "only a replay-rebuilt borrow with no mint job needs mint reconciliation".into(),
+            ));
+        }
+        *net_e8s
+    };
+    let escrow = escrow_account(backend);
+    if decoded.op != "mint"
+        || decoded.from.is_some()
+        || decoded.to != Some(escrow)
+        || decoded.amount != u128::from(net)
+    {
+        return Err(XrplIcusdError::InvalidArgument(
+            "the block is not a mint of exactly the reserved net amount into the escrow account"
+                .into(),
+        ));
+    }
+    let claimed = st.operations.values().any(|o| {
+        o.id != op_id
+            && o.ic_jobs
+                .iter()
+                .any(|j| j.purpose == IcJobPurpose::EscrowMint && j.done_block() == Some(block))
+    });
+    if claimed {
+        return Err(XrplIcusdError::InvalidArgument(
+            "that mint block already belongs to another operation".into(),
+        ));
+    }
+    let op = st.op_mut(op_id)?;
+    op.ic_jobs.push(IcLedgerJob {
+        purpose: IcJobPurpose::EscrowMint,
+        op_nonce: 0,
+        created_at_time: 0,
+        from_subaccount: None,
+        from_owner: None,
+        to: escrow,
+        amount_e8s: net,
+        memo: vec![],
+        reserved_fee_e8s: 0,
+        ledger_tip_before: Some(block),
+        status: IcJobStatus::Done { block },
+        proof_verified: true,
+        scan_required: false,
+        scan: None,
+        sends: 0,
+        in_flight_since_ns: None,
+    });
+    op.phase = Phase::EscrowMintPending;
+    op.updated_at_ns = now_ns;
+    op.push_note(format!(
+        "escrow mint proven by controller-supplied ledger block {block} (replay-rebuilt reservation)"
+    ));
+    st.live_ops.insert(op_id);
+    Ok(())
+}
+
+/// Controller-only: fetch the ledger block and book it (see
+/// [`apply_rebuilt_mint_proof`]), then drive the operation.
+pub async fn reconcile_borrow_mint(op_id: OperationId, block: u64) -> Result<(), XrplIcusdError> {
+    let ledger_id = read_state(|s| s.icusd_ledger_principal);
+    let decoded = crate::icrc3_proof::fetch_icrc3_block(ledger_id, block)
+        .await
+        .map_err(XrplIcusdError::Unavailable)?;
+    let backend = ic_cdk::id();
+    mutate_state(|s| apply_rebuilt_mint_proof(&mut s.xrpl_icusd, op_id, block, &decoded, backend, super::now()))?;
+    super::ensure_xrpl_tick_scheduled();
+    let _ = super::run_op_step(op_id).await;
+    Ok(())
 }

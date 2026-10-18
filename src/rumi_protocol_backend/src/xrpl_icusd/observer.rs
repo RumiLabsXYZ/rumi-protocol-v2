@@ -151,6 +151,11 @@ pub fn plan_page(
         if !relevant(tx, issuer) {
             continue;
         }
+        // Below the dedup floor everything was already settled by the scan (see
+        // `retention`): the record may be compacted, the receipt is never new.
+        if tx.ledger_index < st.dedup_floor_ledger {
+            continue;
+        }
         // `delivered` is the truth for what moved; fall back to the nominal amount
         // only to decide whether it is worth a receipt lookup.
         let ours = is_our_asset(&tx.delivered, asset).or_else(|| is_our_asset(&tx.amount, asset));
@@ -349,7 +354,16 @@ pub async fn observer_pass_with<T: ObserverTransport>(t: &T, now_ns: u64) -> Pas
             };
             let min = read_state(|s| s.xrpl_icusd.observer.next_ledger_min).unwrap_or(ready_ledger);
             if min > tip {
-                mutate_state(|s| s.xrpl_icusd.observer.last_pass_ns = now_ns);
+                mutate_state(|s| {
+                    let st = &mut s.xrpl_icusd;
+                    st.observer.last_pass_ns = now_ns;
+                    // Caught up on the coverage record that asked for the scan: do
+                    // not poll again until the next coverage check.
+                    if let Some(c) = st.last_coverage.as_ref() {
+                        st.observer.settled_coverage_ns =
+                            st.observer.settled_coverage_ns.max(c.checked_at_ns);
+                    }
+                });
                 return PassOutcome::CaughtUp;
             }
             let c = match IssuerHistoryCursor::new(min, tip) {
@@ -520,4 +534,132 @@ pub async fn observe_xrpl_repayment(
         let _ = super::run_op_step(id).await;
     }
     Ok(super::view_for(&caller, view.operation_id).unwrap_or(view))
+}
+
+// ----------------------------------------------------------------------------------
+// Controller reconciliation of quarantined value-bearing receipts
+// ----------------------------------------------------------------------------------
+
+/// Pure booking of a RE-VERIFIED receipt for a held quarantine entry. The amount is
+/// never supplied by the caller: it must equal what the quarantine recorded AND what
+/// the receipt's own metadata shows leaving the holders' lines of the issuer (so the
+/// issuer's obligations shrank by exactly that amount). The value moves from the
+/// quarantine bucket into the verified sender's refundable aggregate: `O` and the
+/// liability sum are untouched (it was taken out of `O` when it was quarantined), and
+/// no debt is ever credited.
+pub fn apply_quarantine_reconcile(
+    st: &mut super::state::XrplIcusdState,
+    network: XrplNetwork,
+    issuer: &str,
+    r: &crate::chains::xrp::issued_rpc::VerifiedIssuedReceipt,
+    now_ns: u64,
+) -> Result<QuarantinedReceiptView, XrplIcusdError> {
+    let hash = r.hash.to_ascii_uppercase();
+    let entry = st
+        .quarantined_receipts
+        .get(&hash)
+        .cloned()
+        .ok_or(XrplIcusdError::NotFound)?;
+    if !r.validated || r.engine_result != "tesSUCCESS" || r.destination != issuer {
+        return Err(XrplIcusdError::InvalidArgument(
+            "the re-verified receipt is not a validated tesSUCCESS payment to the issuer".into(),
+        ));
+    }
+    if r.account != entry.sender || r.ledger_index != entry.ledger_index {
+        return Err(XrplIcusdError::InvalidArgument(
+            "the re-verified receipt differs from the quarantined record (sender or ledger)".into(),
+        ));
+    }
+    let delivered = WideAmount::from_exact(&r.delivered_amount)
+        .map_err(|_| XrplIcusdError::InvalidArgument("delivered amount is not representable".into()))?;
+    if delivered != entry.amount {
+        return Err(XrplIcusdError::InvalidArgument(
+            "the re-verified delivered amount differs from the quarantined amount".into(),
+        ));
+    }
+    // The issuer's obligations must have shrunk by exactly the delivered amount: the
+    // sum of the holders' balance changes on lines with the issuer.
+    let mut holder_delta = crate::chains::xrp::issued_amount::ExactIssuedAmount::ZERO;
+    let mut seen = false;
+    for c in &r.balance_changes {
+        let holder = if c.low_account == issuer {
+            &c.high_account
+        } else if c.high_account == issuer {
+            &c.low_account
+        } else {
+            continue;
+        };
+        if let Some(d) = c.delta_for(holder) {
+            holder_delta = holder_delta
+                .checked_add(&d)
+                .map_err(|_| XrplIcusdError::Internal("balance change overflow".into()))?;
+            seen = true;
+        }
+    }
+    if !seen || holder_delta != r.delivered_amount.negated() {
+        return Err(XrplIcusdError::InvalidArgument(
+            "the receipt metadata does not show the issuer's obligations shrinking by exactly the \
+             delivered amount; it stays quarantined"
+                .into(),
+        ));
+    }
+    st.fold_unattributed(
+        network,
+        &entry.sender,
+        &entry.amount,
+        &entry.tx_hash,
+        entry.ledger_index,
+        "booked after controller reconciliation of a quarantined receipt",
+        now_ns,
+    )?;
+    st.quarantined_receipts.remove(&hash);
+    let key = repay::processed_key(network, issuer, &hash);
+    if let Some(p) = st.processed_returns.get_mut(&key) {
+        p.disposition = ReturnDisposition::Aggregated {
+            reason: "reconciled quarantined receipt".into(),
+        };
+    }
+    Ok(QuarantinedReceiptView::from(&entry))
+}
+
+/// Controller-only: re-read the quarantined transaction through the quorum lookup and
+/// book it (see [`apply_quarantine_reconcile`]). There is no assertion-only path.
+pub async fn reconcile_quarantined_with<T: ObserverTransport>(
+    t: &T,
+    tx_hash: &str,
+    now_ns: u64,
+) -> Result<QuarantinedReceiptView, XrplIcusdError> {
+    let hash = normalize_tx_hash(tx_hash)
+        .map_err(|_| XrplIcusdError::InvalidArgument("tx_hash must be 64 hex characters".into()))?;
+    let (network, issuer) = read_state(|s| {
+        let st = &s.xrpl_icusd;
+        if !st.quarantined_receipts.contains_key(&hash.to_ascii_uppercase()) {
+            return Err(XrplIcusdError::NotFound);
+        }
+        Ok((
+            st.config
+                .network
+                .ok_or_else(|| XrplIcusdError::Disabled("network not configured".into()))?,
+            st.config
+                .issuer_address
+                .clone()
+                .ok_or_else(|| XrplIcusdError::Disabled("issuer address not derived".into()))?,
+        ))
+    })?;
+    let asset = IssuedAsset::icusd(&issuer).map_err(|e| XrplIcusdError::Internal(e.to_string()))?;
+    match t.receipt(network, &hash, &asset).await {
+        Ok(ReceiptLookup::Verified(r)) => {
+            mutate_state(|s| apply_quarantine_reconcile(&mut s.xrpl_icusd, network, &issuer, &r, now_ns))
+        }
+        Ok(_) => Err(XrplIcusdError::Unavailable(
+            "the transaction could not be re-verified by the providers right now".into(),
+        )),
+        Err(e) => Err(XrplIcusdError::Unavailable(e.to_string())),
+    }
+}
+
+pub async fn reconcile_quarantined_receipt(tx_hash: String) -> Result<QuarantinedReceiptView, XrplIcusdError> {
+    let out = reconcile_quarantined_with(&IcTransport, &tx_hash, super::now()).await?;
+    super::ensure_xrpl_tick_scheduled();
+    Ok(out)
 }

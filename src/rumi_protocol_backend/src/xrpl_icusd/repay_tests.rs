@@ -16,6 +16,7 @@ use super::ledger::*;
 use super::observer::{self, ObserverTransport, PassOutcome};
 use super::repay::{self, IntentRequest, RepayAdvance, ReturnOutcome, SettleOutcome};
 use super::settlement::*;
+use super::state::CoverageInput;
 use super::tests::{backend, holder_addr, issuer_addr, owner, TESTNET};
 use super::types::*;
 use crate::chains::xrp::issued_amount::{ExactIssuedAmount, IssuedAsset};
@@ -439,6 +440,22 @@ fn processed_count() -> usize {
     read_state(|s| s.xrpl_icusd.processed_returns.len())
 }
 
+/// The aggregate of unattributed value from `sender` (zero when none).
+fn agg_total(sender: &str) -> WideAmount {
+    read_state(|s| {
+        s.xrpl_icusd
+            .unattributed
+            .get(&super::retention::aggregate_key(TESTNET, sender))
+            .map(|u| u.total)
+            .unwrap_or(WideAmount::ZERO)
+    })
+}
+
+/// Cut refund operations from aggregates (what the tick does).
+fn drain() -> Vec<OperationId> {
+    mutate_state(|s| s.xrpl_icusd.drain_refunds(NOW))
+}
+
 fn refund_ops() -> Vec<OperationId> {
     read_state(|s| {
         s.xrpl_icusd
@@ -640,36 +657,26 @@ fn wrong_currency_issuer_tag_payer_not_applied() {
     // Wrong tag: a valid return nobody can claim. O falls (the token left circulation),
     // the intent gets NO credit and the value is a refund for the verified sender.
     let unknown = ret(5, &payer(), Some(tag + 1000), "10");
-    match apply_ret(&unknown) {
-        ReturnOutcome::Refund { op_id } => {
-            read_state(|s| match &s.xrpl_icusd.op(op_id).unwrap().kind {
-                OperationKind::Refund { recipient, .. } => assert_eq!(*recipient, payer()),
-                k => panic!("{k:?}"),
-            })
-        }
-        o => panic!("{o:?}"),
-    }
+    assert_eq!(apply_ret(&unknown), ReturnOutcome::Unattributed);
+    assert_eq!(agg_total(&payer()), WideAmount::from_e8s(10 * E8), "aggregated for the verified sender");
     // Wrong payer: the tag is right but the SENDER is not the intent's payer.
     let wrong_payer = ret(6, &other(), Some(tag), "20");
-    match apply_ret(&wrong_payer) {
-        ReturnOutcome::Refund { op_id } => {
-            read_state(|s| match &s.xrpl_icusd.op(op_id).unwrap().kind {
-                OperationKind::Refund { recipient, .. } => assert_eq!(*recipient, other()),
-                k => panic!("{k:?}"),
-            })
-        }
-        o => panic!("{o:?}"),
-    }
+    assert_eq!(apply_ret(&wrong_payer), ReturnOutcome::Unattributed);
+    assert_eq!(agg_total(&other()), WideAmount::from_e8s(20 * E8));
     // No tag at all.
-    assert!(matches!(apply_ret(&ret(10, &payer(), None, "1")), ReturnOutcome::Refund { .. }));
+    assert_eq!(apply_ret(&ret(10, &payer(), None, "1")), ReturnOutcome::Unattributed);
     read_state(|s| {
         assert_eq!(s.xrpl_icusd.op(id).unwrap().phase, Phase::IntentPrepared, "intent untouched");
         assert_eq!(s.xrpl_icusd.issued_outstanding, WideAmount::from_e8s((300 - 10 - 20 - 1) * E8));
     });
     assert_eq!(settle(id), SettleOutcome::NotApplicable);
     assert_eq!(debt_of(1), 100 * E8, "no debt credit");
-    // Bad evidence (the sender's line did not move by the delivered amount) is
-    // quarantined with no effect at all.
+    // Bad evidence. A receipt that was NOT a value-bearing return (failed, wrong
+    // destination) has no effect at all. One that DID shrink the issuer's obligations
+    // but whose sender line did not move by the delivered amount (e.g. a path payment)
+    // keeps the books in step with the ledger: O falls, the value is HELD, nobody is
+    // credited and nothing is refunded.
+    let o_before = read_state(|s| s.xrpl_icusd.issued_outstanding);
     let mut forged = ret(11, &payer(), Some(tag), "30");
     forged.balance_changes[0].final_low_balance = forged.balance_changes[0].previous_low_balance;
     assert!(matches!(apply_ret(&forged), ReturnOutcome::Quarantined(_)));
@@ -682,7 +689,17 @@ fn wrong_currency_issuer_tag_payer_not_applied() {
     let mut not_issuer = ret(14, &payer(), Some(tag), "30");
     not_issuer.destination = other();
     assert!(matches!(apply_ret(&not_issuer), ReturnOutcome::Quarantined(_)));
-    assert_eq!(processed_count(), 3, "quarantined evidence is not a consumed return");
+    assert_eq!(processed_count(), 3 + 2, "only the two value-bearing quarantines are consumed");
+    read_state(|s| {
+        assert_eq!(
+            s.xrpl_icusd.issued_outstanding,
+            o_before.checked_sub(&WideAmount::from_e8s(60 * E8)).unwrap(),
+            "O follows the ledger for the two value-bearing quarantines"
+        );
+        assert_eq!(s.xrpl_icusd.quarantined_receipts.len(), 2);
+        assert_eq!(s.xrpl_icusd.op(id).unwrap().phase, Phase::IntentPrepared, "no credit");
+    });
+    assert_eq!(debt_of(1), 100 * E8, "quarantine never reduces debt");
 }
 
 #[test]
@@ -695,8 +712,8 @@ fn nominal_amount_partial_payment_never_credited() {
     let mut partial = ret(1, &payer(), Some(tag), "40");
     partial.flags = TF_PARTIAL_PAYMENT;
     partial.nominal_amount = Some(ExactIssuedAmount::parse("100").unwrap());
-    let ReturnOutcome::Refund { op_id } = apply_ret(&partial) else { panic!() };
-    assert_eq!(held_of(op_id), WideAmount::from_e8s(40 * E8), "exactly the delivered amount");
+    assert_eq!(apply_ret(&partial), ReturnOutcome::Unattributed);
+    assert_eq!(agg_total(&payer()), WideAmount::from_e8s(40 * E8), "exactly the delivered amount");
     read_state(|s| {
         assert_eq!(s.xrpl_icusd.issued_outstanding, WideAmount::from_e8s(260 * E8));
         assert_eq!(s.xrpl_icusd.op(id).unwrap().phase, Phase::IntentPrepared);
@@ -704,11 +721,11 @@ fn nominal_amount_partial_payment_never_credited() {
     // Delivered != nominal without the flag is the same.
     let mut short = ret(2, &payer(), Some(tag), "10");
     short.nominal_amount = Some(ExactIssuedAmount::parse("100").unwrap());
-    assert!(matches!(apply_ret(&short), ReturnOutcome::Refund { .. }));
+    assert_eq!(apply_ret(&short), ReturnOutcome::Unattributed);
     // Paths / SendMax likewise.
     let mut paths = ret(3, &payer(), Some(tag), "10");
     paths.has_paths = true;
-    assert!(matches!(apply_ret(&paths), ReturnOutcome::Refund { .. }));
+    assert_eq!(apply_ret(&paths), ReturnOutcome::Unattributed);
     assert_eq!(settle(id), SettleOutcome::NotApplicable);
     assert_eq!(debt_of(1), 100 * E8);
     // The intent can still be paid correctly afterwards.
@@ -722,16 +739,16 @@ fn a_tag_accepts_one_payment_and_only_while_open() {
     let tag = tag_of(id);
     assert!(matches!(apply_ret(&ret(1, &payer(), Some(tag), "10")), ReturnOutcome::Attributed { .. }));
     // A second payment with the same tag is new money: a refund, not a second credit.
-    assert!(matches!(apply_ret(&ret(2, &payer(), Some(tag), "10")), ReturnOutcome::Refund { .. }));
+    assert_eq!(apply_ret(&ret(2, &payer(), Some(tag), "10")), ReturnOutcome::Unattributed);
     assert_eq!(held_of(id), WideAmount::from_e8s(10 * E8));
     // An expired intent's tag is never reassigned; a late payment is refunded.
     let id2 = intent(1, 5 * E8, 2, false);
     mutate_state(|s| repay::expire_stale_intents(&mut s.xrpl_icusd, NOW + INTENT_TTL_NS + 1));
     assert_eq!(op_phase(id2), Phase::Cancelled);
-    assert!(matches!(
+    assert_eq!(
         apply_ret(&ret(3, &payer(), Some(tag_of(id2)), "5")),
-        ReturnOutcome::Refund { .. }
-    ));
+        ReturnOutcome::Unattributed
+    );
     let id3 = intent(1, 5 * E8, 3, false);
     assert!(tag_of(id3) > tag_of(id2), "expired tags are not reused");
 }
@@ -1051,8 +1068,9 @@ fn topup_owner_payer_vault_and_once_only_binding() {
     assert!(matches!(apply_ret(&r), ReturnOutcome::Merged { .. }));
     assert_eq!(apply_ret(&r), ReturnOutcome::Duplicate);
     let r_again_other_hash_same_tag = ret(3, &payer(), Some(tag_of(child)), "1");
-    assert!(
-        matches!(apply_ret(&r_again_other_hash_same_tag), ReturnOutcome::Refund { .. }),
+    assert_eq!(
+        apply_ret(&r_again_other_hash_same_tag),
+        ReturnOutcome::Unattributed,
         "the child's tag takes one payment"
     );
     read_state(|s| match &s.xrpl_icusd.op(parent).unwrap().kind {
@@ -1397,13 +1415,18 @@ fn unattributed_refund_only_to_verified_sender() {
     replace_state(rworld(100 * E8, 0, 100 * E8, Decimal::ZERO));
     let _id = intent(1, 100 * E8, 1, false);
     let r = ret(1, &other(), Some(424_242), "25");
-    let ReturnOutcome::Refund { op_id } = apply_ret(&r) else { panic!() };
+    assert_eq!(apply_ret(&r), ReturnOutcome::Unattributed);
     // The once-only state exists BEFORE anything is signed, and replay finds it.
     assert_eq!(apply_ret(&r), ReturnOutcome::Duplicate);
+    assert!(refund_ops().is_empty(), "value waits in the sender aggregate until drained");
+    assert_eq!(liabilities(), 100 * E8 as u128, "the aggregate is held, backed value");
+    let created = drain();
+    assert_eq!(created.len(), 1);
+    let op_id = created[0];
     assert_eq!(refund_ops(), vec![op_id]);
-    let expected_nonce = repay::refund_nonce(TESTNET, &issuer_addr(), &hash_of(1));
+    assert!(agg_total(&other()).is_zero(), "the value moved into the refund operation");
+    assert!(drain().is_empty(), "nothing left to cut");
     read_state(|s| {
-        assert_eq!(s.xrpl_icusd.request_nonce_index.get(&(system_owner(), expected_nonce)), Some(&op_id));
         let op = s.xrpl_icusd.op(op_id).unwrap();
         assert_eq!(op.owner, system_owner());
         assert_eq!(op.phase, Phase::RefundPending);
@@ -1411,7 +1434,7 @@ fn unattributed_refund_only_to_verified_sender() {
         let OperationKind::Refund { recipient, amount, source_tx } = &op.kind else { panic!() };
         assert_eq!(*recipient, other(), "the verified XRPL sender, never an arbitrary claimant");
         assert_eq!(*amount, ExactIssuedAmount::parse("25").unwrap());
-        assert_eq!(*source_tx, hash_of(1));
+        assert!(source_tx.starts_with(&format!("aggregate:{}", hash_of(1))));
         assert_eq!(s.xrpl_icusd.issued_outstanding, WideAmount::from_e8s(75 * E8));
     });
     // Nobody can drive or redirect it: it belongs to no principal.
@@ -1460,11 +1483,13 @@ fn unattributed_refund_only_to_verified_sender() {
     mutate_state(|s| s.xrpl_icusd.apply_reconcile(LeaseHolder::Operation(op_id), v, NOW + 9)).unwrap();
     assert_eq!(op_phase(op_id), Phase::Delivered);
     assert_eq!(liabilities(), 100 * E8 as u128);
-    // Dust is retained exactly but never auto-refunded (a refund costs the issuer XRP).
+    // Dust is retained exactly in the sender aggregate but never auto-refunded (a
+    // refund costs the issuer XRP): no operation is created for it.
     let dust = ret(2, &other(), Some(7), "0.0000001");
-    let ReturnOutcome::Refund { op_id: d } = apply_ret(&dust) else { panic!() };
-    assert_eq!(op_phase(d), Phase::Held);
-    assert!(!read_state(|s| s.xrpl_icusd.op(d).unwrap().needs_work()));
+    assert_eq!(apply_ret(&dust), ReturnOutcome::Unattributed);
+    assert_eq!(agg_total(&other()), WideAmount::from_e8s(10));
+    assert!(drain().is_empty());
+    assert_eq!(refund_ops(), vec![op_id], "no new operation for dust");
 }
 
 fn other_principal() -> Principal {
@@ -1757,4 +1782,660 @@ fn cutoff_without_settle_replays_frozen_and_settles_to_the_live_debt() {
     let (d, a, t, frozen) = debt_of_replay(full);
     assert!(!frozen);
     assert_eq!((d, a, t), live_final, "replay settles to exactly the live debt");
+}
+
+// ---- review hardening: bounded growth, quarantined value, retention -------------------
+
+fn hash_n(i: u64) -> String {
+    format!("{i:064X}")
+}
+
+/// A validated direct return with an arbitrary hash/ledger (for volume tests).
+fn ret_vol(i: u64, sender: &str, tag: Option<u32>, amount: &str, ledger: u32) -> VerifiedIssuedReceipt {
+    let mut r = ret(1, sender, tag, amount);
+    r.hash = hash_n(i);
+    r.ledger_index = ledger;
+    r
+}
+
+/// Liabilities recomputed from EVERY operation (no index): the oracle the index-based
+/// `buckets()` must always agree with.
+fn buckets_by_full_scan(st: &super::state::XrplIcusdState) -> super::state::Buckets {
+    let mut b = super::state::Buckets {
+        o: st.issued_outstanding,
+        ..Default::default()
+    };
+    for op in st.operations.values() {
+        super::state::add_op_liability(&mut b, op).unwrap();
+    }
+    for u in st.unattributed.values() {
+        b.h = b.h.checked_add(&u.total).unwrap();
+    }
+    for q in st.quarantined_receipts.values() {
+        b.h = b.h.checked_add(&q.amount).unwrap();
+    }
+    b
+}
+
+#[test]
+fn ten_thousand_dust_returns_do_not_block_users_or_grow_state() {
+    // 10k dust returns from ONE sender, 10k more from DISTINCT senders (past the
+    // aggregate cap): no operation is created, user admission keeps working, the
+    // exact value stays backed, and the encoded lane state stays small.
+    replace_state(rworld(100 * E8, 0, 1_000 * E8, Decimal::ZERO));
+    let ops_before = read_state(|s| s.xrpl_icusd.operations.len());
+    let liabilities_before = liabilities();
+    let dust = "0.00000001"; // 1 e8s
+    for i in 0..10_000u64 {
+        let r = ret_vol(i, &payer(), None, dust, 2_000);
+        assert_eq!(apply_ret(&r), ReturnOutcome::Unattributed);
+    }
+    for i in 10_000..20_000u64 {
+        let sender = format!("rDust{i:05}");
+        let r = ret_vol(i, &sender, None, dust, 2_000);
+        assert_eq!(apply_ret(&r), ReturnOutcome::Unattributed);
+    }
+    read_state(|s| {
+        let st = &s.xrpl_icusd;
+        assert_eq!(st.operations.len(), ops_before, "no operation per dust transaction");
+        assert!(
+            st.unattributed.len() <= MAX_UNATTRIBUTED_SENDERS + 1,
+            "aggregates are capped (+ one overflow record)"
+        );
+        let overflow = st
+            .unattributed
+            .get(&super::retention::aggregate_key(TESTNET, OVERFLOW_SENDER))
+            .expect("excess senders share the overflow aggregate");
+        assert!(overflow.tx_count > 0);
+        // Exactness: 20,000 e8s of dust left O and is held, nothing lost.
+        assert_eq!(
+            st.issued_outstanding,
+            WideAmount::from_e8s(1_000 * E8 - 20_000)
+        );
+        assert_eq!(buckets_by_full_scan(st), st.buckets().unwrap());
+        // Users are unaffected: admission still works, and the limits count only users.
+        assert_eq!(st.user_op_count(), 0);
+        assert!(st
+            .admit(
+                &owner(1),
+                &[9; 32],
+                TESTNET,
+                &OperationKind::Import { amount_e8s: 1, recipient: payer() }
+            )
+            .is_ok());
+    });
+    assert_eq!(liabilities(), liabilities_before, "value moved O -> H, backing unchanged");
+    // Dust never becomes a refund operation (a refund costs the issuer XRP).
+    assert!(drain().is_empty());
+    assert!(refund_ops().is_empty());
+    // A user operation can still be created and works end to end.
+    let id = intent(1, 10 * E8, 77, false);
+    assert_eq!(op_phase(id), Phase::IntentPrepared);
+    // The encoded lane state is bounded by what is retained, not by traffic.
+    let bytes = read_state(|s| {
+        let mut b = Vec::new();
+        ciborium::ser::into_writer(&s.xrpl_icusd, &mut b).unwrap();
+        b.len()
+    });
+    assert!(bytes < 6 * 1024 * 1024, "20k dust returns encode to {bytes} bytes");
+}
+
+#[test]
+fn encoded_state_at_the_configured_caps_stays_under_budget() {
+    // Documented budget: the lane state at EVERY configured cap simultaneously must
+    // encode below 64 MiB. Measured at the time of writing: about 38 MB of operations
+    // (10,000 user + 1,000 system records, each with two proven ledger jobs, a full
+    // signed XRPL attempt and four maximum-length notes: a deliberate worst case), 7 MB
+    // of dedup records, 0.8 MB of aggregates and quarantine. The snapshot is written to
+    // stable memory on upgrade, so this is what an upgrade's serialization carries.
+    // Terminal operations leave after `OP_RETENTION_NS`, so the operations term is a
+    // ceiling, not the steady state.
+    const BUDGET: usize = 64 * 1024 * 1024;
+    let mut st = ready_lane();
+    // Dedup records at their hard cap.
+    for i in 0..MAX_PROCESSED_RETURNS as u64 {
+        st.processed_returns.insert(
+            repay::processed_key(TESTNET, &issuer_addr(), &hash_n(i)),
+            ProcessedReturn {
+                disposition: ReturnDisposition::Aggregated {
+                    reason: "no destination tag".into(),
+                },
+                ledger_index: 3_000,
+                sender: holder_addr(9),
+                destination_tag: Some(1),
+                delivered: "0.12345678".into(),
+                recorded_at_ns: NOW,
+            },
+        );
+    }
+    // Aggregates and quarantine at their caps.
+    for i in 0..MAX_UNATTRIBUTED_SENDERS as u64 {
+        st.fold_unattributed(
+            TESTNET,
+            &format!("{}{i:04}", holder_addr(9)),
+            &WideAmount::from_e8s(5),
+            &hash_n(i),
+            3_000,
+            "unknown destination tag",
+            NOW,
+        )
+        .unwrap();
+    }
+    for i in 0..MAX_QUARANTINED_RECEIPTS as u64 {
+        st.hold_quarantined(QuarantinedReceipt {
+            tx_hash: hash_n(i),
+            ledger_index: 3_000,
+            sender: holder_addr(9),
+            destination_tag: Some(1),
+            amount: WideAmount::from_e8s(7),
+            reason: "sender trust-line change differs from the delivered amount".into(),
+            at_ns: NOW,
+        })
+        .unwrap();
+    }
+    for i in 0..MAX_QUARANTINE_LOG as u64 {
+        st.log_quarantine(QuarantineRecord {
+            tx_hash: hash_n(i),
+            ledger_index: Some(3_000),
+            sender: Some(holder_addr(9)),
+            destination_tag: Some(1),
+            reason: "x".repeat(60),
+            at_ns: NOW,
+        });
+    }
+    // User operations at the global cap (worst case: each with a proven job, a
+    // signed XRPL attempt and notes), plus system refund records at their cap.
+    for i in 0..MAX_OPERATIONS_GLOBAL as u64 {
+        let mut op = fat_operation(i, Principal::from_slice(&i.to_be_bytes()), false);
+        op.request_nonce = [(i % 251) as u8; 32];
+        st.request_nonce_index.insert((op.owner, op.request_nonce), i);
+        st.operations.insert(i, op);
+    }
+    for i in 0..MAX_SYSTEM_REFUND_OPS as u64 {
+        let id = MAX_OPERATIONS_GLOBAL as u64 + i;
+        let op = fat_operation(id, system_owner(), true);
+        st.request_nonce_index.insert((op.owner, [(i % 251) as u8; 32]), id);
+        st.operations.insert(id, op);
+    }
+    st.rebuild_indexes();
+    let size_of = |v: &dyn Fn(&mut Vec<u8>)| {
+        let mut b = Vec::new();
+        v(&mut b);
+        b.len()
+    };
+    eprintln!(
+        "ops {} processed {} agg {} quarantine {}",
+        size_of(&|b| ciborium::ser::into_writer(&st.operations, b).unwrap()),
+        size_of(&|b| ciborium::ser::into_writer(&st.processed_returns, b).unwrap()),
+        size_of(&|b| ciborium::ser::into_writer(&st.unattributed, b).unwrap()),
+        size_of(&|b| ciborium::ser::into_writer(&st.quarantined_receipts, b).unwrap()),
+    );
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&st, &mut bytes).unwrap();
+    eprintln!("lane state at every cap: {} bytes", bytes.len());
+    assert!(
+        bytes.len() < BUDGET,
+        "lane state at the configured caps encodes to {} bytes (budget {BUDGET})",
+        bytes.len()
+    );
+    // The user cap is independent of system refund records.
+    assert_eq!(st.user_op_count(), MAX_OPERATIONS_GLOBAL);
+    assert!(matches!(
+        st.admit(&owner(1), &[9; 32], TESTNET, &OperationKind::Import { amount_e8s: 1, recipient: payer() }),
+        Err(XrplIcusdError::LimitExceeded(_))
+    ));
+}
+
+fn ready_lane() -> super::state::XrplIcusdState {
+    super::tests::ready_state()
+}
+
+/// A worst-case-sized operation: a proven ledger job, a signed issuer attempt with a
+/// full-size blob, and a few notes.
+fn fat_operation(id: u64, owner_p: Principal, refund: bool) -> Operation {
+    let kind = if refund {
+        OperationKind::Refund {
+            source_tx: format!("aggregate:{}:0", hash_n(id)),
+            recipient: holder_addr(9),
+            amount: ExactIssuedAmount::parse("12.5").unwrap(),
+        }
+    } else {
+        OperationKind::Borrow {
+            vault_id: id,
+            collateral_type: Principal::from_slice(&[7; 10]),
+            gross_e8s: 100 * E8,
+            fee_e8s: E8,
+            net_e8s: 99 * E8,
+            recipient: holder_addr(9),
+            policy_version: 1,
+            fee_split: Some(FeeSplit {
+                to_deficit_e8s: 1,
+                to_treasury_remainder_e8s: 1,
+                treasury: Some(Principal::from_slice(&[8; 10])),
+            }),
+        }
+    };
+    let job = |purpose| IcLedgerJob {
+        purpose,
+        op_nonce: u128::from(id) << 70,
+        created_at_time: NOW,
+        from_subaccount: None,
+        from_owner: None,
+        to: Account { owner: Principal::from_slice(&[9; 10]), subaccount: Some([3; 32]) },
+        amount_e8s: 99 * E8,
+        memo: vec![1; 16],
+        reserved_fee_e8s: 0,
+        ledger_tip_before: Some(5),
+        status: IcJobStatus::Done { block: id },
+        proof_verified: true,
+        scan_required: false,
+        scan: None,
+        sends: 1,
+        in_flight_since_ns: None,
+    };
+    Operation {
+        id,
+        owner: owner_p,
+        created_at_ns: NOW,
+        updated_at_ns: NOW,
+        request_nonce: [0; 32],
+        network: TESTNET,
+        kind,
+        phase: if refund { Phase::RefundPending } else { Phase::Delivered },
+        ic_jobs: vec![job(IcJobPurpose::EscrowMint), job(IcJobPurpose::FeeMint)],
+        xrpl_attempts: vec![IssuerTxAttempt {
+            purpose: AttemptPurpose::Delivery,
+            tx: AttemptTx::Payment {
+                destination: holder_addr(9),
+                amount: ExactIssuedAmount::parse("99").unwrap(),
+                destination_tag: None,
+            },
+            account: issuer_addr(),
+            sequence: 1,
+            last_ledger_sequence: 2,
+            prepared_ledger: 1,
+            fee_drops: 12,
+            unsigned_hex: "AB".repeat(180),
+            signed_hex: Some("CD".repeat(260)),
+            tx_hash: Some(hash_n(id)),
+            status: AttemptStatus::Validated { ledger_index: 9 },
+            created_at_ns: NOW,
+            submit_count: 1,
+            last_submit_ns: NOW,
+            note: None,
+        }],
+        notes: vec!["n".repeat(MAX_NOTE_LEN); 4],
+        resolution: None,
+        attempt_budget_base: 0,
+        delivery_halted: false,
+    }
+}
+
+#[test]
+fn refunds_are_cut_from_aggregates_with_threshold_budget_and_separate_cap() {
+    replace_state(rworld(100 * E8, 0, 100_000 * E8, Decimal::ZERO));
+    let threshold = read_state(|s| s.xrpl_icusd.config.min_auto_refund_e8s);
+    assert!(threshold >= 1_000_000, "above the issuer XRP fee value by default");
+    // Several tiny returns from one sender add up exactly; below the threshold: nothing.
+    for i in 0..5u64 {
+        apply_ret(&ret_vol(i, &payer(), None, "0.001", 2_000));
+    }
+    assert_eq!(agg_total(&payer()), WideAmount::from_e8s(500_000));
+    assert!(drain().is_empty(), "below the floor: retained exactly, not refunded");
+    // Crossing the threshold cuts ONE refund for the whole aggregate (sum, not N ops).
+    for i in 5..15u64 {
+        apply_ret(&ret_vol(i, &payer(), None, "0.001", 2_000));
+    }
+    let made = drain();
+    assert_eq!(made.len(), 1);
+    assert_eq!(held_of(made[0]), WideAmount::from_e8s(1_500_000), "exact sum of 15 returns");
+    assert!(agg_total(&payer()).is_zero());
+    // Per-pass budget: many senders over the threshold are refunded REFUNDS_PER_PASS at a time.
+    for n in 0..20u64 {
+        apply_ret(&ret_vol(100 + n, &format!("rBudget{n:03}"), None, "5", 2_000));
+    }
+    assert_eq!(drain().len(), REFUNDS_PER_PASS);
+    assert_eq!(drain().len(), REFUNDS_PER_PASS);
+    assert_eq!(drain().len(), 20 - 2 * REFUNDS_PER_PASS);
+    assert!(drain().is_empty());
+    // The system cap defers refunds (value stays held) and NEVER blocks a user admit.
+    mutate_state(|s| {
+        let st = &mut s.xrpl_icusd;
+        let mut id = 1_000_000;
+        while st.system_refund_ops.len() < MAX_SYSTEM_REFUND_OPS {
+            id += 1;
+            let op = fat_operation(id, system_owner(), true);
+            st.request_nonce_index.insert((op.owner, [0; 32]), id);
+            st.operations.insert(id, op);
+            st.register_op(id);
+        }
+    });
+    apply_ret(&ret_vol(500, &other(), None, "5", 2_000));
+    assert!(drain().is_empty(), "system refund cap reached: deferred");
+    assert_eq!(agg_total(&other()), WideAmount::from_e8s(5 * E8), "still held, still backed");
+    assert!(read_state(|s| s
+        .xrpl_icusd
+        .admit(&owner(1), &[44; 32], TESTNET, &OperationKind::Import { amount_e8s: 1, recipient: payer() })
+        .is_ok()));
+    read_state(|s| assert_eq!(buckets_by_full_scan(&s.xrpl_icusd), s.xrpl_icusd.buckets().unwrap()));
+}
+
+#[test]
+fn value_bearing_quarantine_keeps_o_in_step_with_the_ledger_and_restores_coverage() {
+    // The issuer's real obligations shrank by 40 (a path payment whose sender line
+    // delta does not match), so the XRPL snapshot is 60 while recorded O is 100.
+    replace_state(rworld(100 * E8, 0, 100 * E8, Decimal::ZERO));
+    let cov = |snap: u64| CoverageInput {
+        escrow_balance_e8s: 1_000 * E8 as u128,
+        snapshot: Some(super::state::SnapshotSummary {
+            ledger_index: 3_000,
+            total: WideAmount::from_e8s(snap),
+        }),
+        unprocessed_return_allowance: WideAmount::ZERO,
+    };
+    let before = read_state(|s| s.xrpl_icusd.check_coverage(&cov(60 * E8)).unwrap());
+    assert!(matches!(before.status, CoverageStatus::SnapshotDisagrees { .. }));
+    // Disagreement below O wakes the observer (once per coverage record).
+    mutate_state(|s| {
+        s.xrpl_icusd.last_coverage = Some(CoverageRecord { checked_at_ns: NOW, report: before.clone() });
+    });
+    read_state(|s| {
+        assert!(s.xrpl_icusd.coverage_scan_wanted());
+        assert!(s.xrpl_icusd.observer_has_work(), "no open intent, yet the scan runs");
+        assert!(super::plan_tick(&s.xrpl_icusd, 6, 0).contains(&super::TickItem::Observer));
+    });
+    // The offending receipt arrives (scan or hint): value-bearing but unverifiable.
+    let mut pathy = ret_vol(900, &payer(), None, "40", 2_500);
+    pathy.balance_changes[0].final_low_balance = pathy.balance_changes[0].previous_low_balance;
+    assert!(matches!(apply_ret(&pathy), ReturnOutcome::Quarantined(_)));
+    read_state(|s| {
+        let st = &s.xrpl_icusd;
+        assert_eq!(st.issued_outstanding, WideAmount::from_e8s(60 * E8), "O tracks the ledger");
+        assert_eq!(st.quarantined_receipts.len(), 1);
+        let b = st.buckets().unwrap();
+        assert_eq!(b.h, WideAmount::from_e8s(40 * E8), "the value is held, part of H");
+        assert_eq!(buckets_by_full_scan(st), b);
+        // Coverage now agrees with the ledger and still requires full backing.
+        let after = st.check_coverage(&cov(60 * E8)).unwrap();
+        assert_eq!(after.status, CoverageStatus::Covered);
+        assert_eq!(after.quarantined_e8s, 40 * E8 as u128);
+        assert_eq!(after.holder_backing_e8s, 100 * E8 as u128, "O + H, nothing released");
+        // No auto-refund, no debt credit.
+        assert!(!st.refund_drain_possible());
+    });
+    assert!(drain().is_empty());
+    assert_eq!(debt_of(1), 100 * E8);
+    // Seeing the same transaction again is a no-op.
+    assert_eq!(apply_ret(&pathy), ReturnOutcome::Duplicate);
+}
+
+#[test]
+fn controller_reconcile_re_verifies_then_books_to_the_verified_sender() {
+    replace_state(rworld(100 * E8, 0, 100 * E8, Decimal::ZERO));
+    let mut pathy = ret_vol(901, &payer(), None, "40", 2_500);
+    // Metadata: the sender's line did not move, but another holder's line (rippled
+    // through) shrank by exactly the delivered amount: obligations fell by 40.
+    pathy.balance_changes[0].final_low_balance = pathy.balance_changes[0].previous_low_balance;
+    let before = ExactIssuedAmount::parse("500").unwrap();
+    pathy.balance_changes.push(TrustLineBalanceChange {
+        low_account: other(),
+        high_account: issuer_addr(),
+        previous_low_balance: before,
+        final_low_balance: before.checked_sub(&ExactIssuedAmount::parse("40").unwrap()).unwrap(),
+    });
+    apply_ret(&pathy);
+    let h = hash_n(901);
+    // Wrong evidence is refused with no change.
+    let mut bad = pathy.clone();
+    bad.delivered_amount = ExactIssuedAmount::parse("39").unwrap();
+    let e = block_on(observer::reconcile_quarantined_with(
+        &Mock::default().with_receipt(&bad),
+        &h,
+        NOW + 9,
+    ))
+    .unwrap_err();
+    assert!(matches!(e, XrplIcusdError::InvalidArgument(_)), "{e:?}");
+    let e = block_on(observer::reconcile_quarantined_with(&Mock::default(), &h, NOW + 9)).unwrap_err();
+    assert!(matches!(e, XrplIcusdError::Unavailable(_)), "unverifiable receipts book nothing");
+    assert_eq!(read_state(|s| s.xrpl_icusd.quarantined_receipts.len()), 1);
+    // A receipt whose metadata does NOT show the issuer's obligations shrinking by the
+    // delivered amount stays quarantined (no assertion-only adjustment).
+    let mut vague = pathy.clone();
+    vague.balance_changes.pop();
+    let e = block_on(observer::reconcile_quarantined_with(
+        &Mock::default().with_receipt(&vague),
+        &h,
+        NOW + 9,
+    ))
+    .unwrap_err();
+    assert!(matches!(e, XrplIcusdError::InvalidArgument(_)), "{e:?}");
+    // The genuine re-verified receipt books the value to the verified sender.
+    let view = block_on(observer::reconcile_quarantined_with(
+        &Mock::default().with_receipt(&pathy),
+        &h,
+        NOW + 9,
+    ))
+    .expect("booked");
+    assert_eq!(view.amount, "40");
+    read_state(|s| {
+        assert!(s.xrpl_icusd.quarantined_receipts.is_empty());
+        assert_eq!(s.xrpl_icusd.issued_outstanding, WideAmount::from_e8s(60 * E8), "O unchanged by booking");
+    });
+    assert_eq!(agg_total(&payer()), WideAmount::from_e8s(40 * E8));
+    assert_eq!(liabilities(), 100 * E8 as u128, "the liability sum never moved");
+    assert_eq!(debt_of(1), 100 * E8, "still no debt credit");
+    // Once only.
+    let e = block_on(observer::reconcile_quarantined_with(
+        &Mock::default().with_receipt(&pathy),
+        &h,
+        NOW + 10,
+    ))
+    .unwrap_err();
+    assert_eq!(e, XrplIcusdError::NotFound);
+}
+
+#[test]
+fn observer_stops_polling_after_catching_up_on_a_coverage_record() {
+    replace_state(rworld(100 * E8, 0, 100 * E8, Decimal::ZERO));
+    let report = read_state(|s| {
+        s.xrpl_icusd
+            .check_coverage(&CoverageInput {
+                escrow_balance_e8s: 1_000 * E8 as u128,
+                snapshot: Some(super::state::SnapshotSummary {
+                    ledger_index: 3_000,
+                    total: WideAmount::from_e8s(60 * E8),
+                }),
+                unprocessed_return_allowance: WideAmount::ZERO,
+            })
+            .unwrap()
+    });
+    mutate_state(|s| s.xrpl_icusd.last_coverage = Some(CoverageRecord { checked_at_ns: NOW, report }));
+    // Caught up (cursor at the tip, nothing new): the pass records it and goes quiet.
+    mutate_state(|s| s.xrpl_icusd.observer.next_ledger_min = Some(5_000));
+    let m = Mock::default().with_tip(4_000);
+    assert_eq!(pass(&m), PassOutcome::CaughtUp);
+    read_state(|s| {
+        assert!(!s.xrpl_icusd.coverage_scan_wanted());
+        assert!(!s.xrpl_icusd.observer_has_work(), "no polling until the next coverage record");
+    });
+}
+
+#[test]
+fn terminal_operations_are_pruned_but_dedup_and_nonces_survive() {
+    replace_state(rworld(100 * E8, 0, 300 * E8, Decimal::ZERO));
+    // A repayment intent that expires and an old delivered import.
+    let id = intent(1, 10 * E8, 1, false);
+    let tag = tag_of(id);
+    mutate_state(|s| {
+        repay::expire_stale_intents(&mut s.xrpl_icusd, NOW + INTENT_TTL_NS + 1);
+    });
+    assert_eq!(op_phase(id), Phase::Cancelled);
+    let imp = mutate_state(|s| {
+        let st = &mut s.xrpl_icusd;
+        let mut op = fat_operation(50, owner(2), false);
+        op.kind = OperationKind::Import { amount_e8s: E8, recipient: payer() };
+        op.request_nonce = [50; 32];
+        op.ic_jobs.truncate(1);
+        st.request_nonce_index.insert((op.owner, op.request_nonce), 50);
+        st.operations.insert(50, op);
+        st.register_op(50);
+        50u64
+    });
+    // A consumed return referencing the intent stays in the dedup map.
+    let r = ret_vol(7, &payer(), Some(tag), "1", 2_000);
+    apply_ret(&r);
+    let later = NOW + INTENT_TTL_NS + OP_RETENTION_NS + 10;
+    // Not before the retention window.
+    assert_eq!(mutate_state(|s| s.xrpl_icusd.maintain(NOW + 1)), 0);
+    let pruned = mutate_state(|s| s.xrpl_icusd.maintain(later));
+    assert_eq!(pruned, 2, "the expired intent and the delivered import");
+    read_state(|s| {
+        let st = &s.xrpl_icusd;
+        assert!(st.op(id).is_none() && st.op(imp).is_none());
+        assert!(!st.tag_index.contains_key(&tag), "the tag mapping is released (never reused)");
+        assert!(!st.live_ops.contains(&id) && !st.vault_ops.contains_key(&1)
+            || st.vault_ops.get(&1).is_none_or(|v| !v.contains(&id)));
+        assert_eq!(buckets_by_full_scan(st), st.buckets().unwrap());
+        assert!(st.processed_returns.contains_key(&repay::processed_key(TESTNET, &issuer_addr(), &r.hash)));
+    });
+    // Dedup survives: the same return again changes nothing.
+    assert_eq!(apply_ret(&r), ReturnOutcome::Duplicate);
+    // The import's nonce stays spent: a replayed request cannot create a second one.
+    let again = read_state(|s| {
+        s.xrpl_icusd.admit(
+            &owner(2),
+            &[50; 32],
+            TESTNET,
+            &OperationKind::Import { amount_e8s: E8, recipient: payer() },
+        )
+    });
+    assert_eq!(again, Err(XrplIcusdError::NonceConflict));
+    // An unknown (pruned) tag is simply an unattributed return for the sender.
+    assert_eq!(
+        apply_ret(&ret_vol(8, &payer(), Some(tag), "1", 2_001)),
+        ReturnOutcome::Unattributed
+    );
+}
+
+#[test]
+fn compaction_drops_old_dedup_records_without_ever_double_counting() {
+    replace_state(rworld(100 * E8, 0, 100 * E8, Decimal::ZERO));
+    let old = ret_vol(1, &payer(), None, "1", 1_600);
+    let recent = ret_vol(2, &payer(), None, "1", 2_000);
+    let ahead = ret_vol(3, &payer(), None, "1", 2_100); // hinted ahead of the scan
+    for r in [&old, &recent, &ahead] {
+        assert_eq!(apply_ret(r), ReturnOutcome::Unattributed);
+    }
+    assert_eq!(processed_count(), 3);
+    // No fully-scanned frontier yet: nothing may be compacted.
+    mutate_state(|s| s.xrpl_icusd.compact_processed_returns());
+    assert_eq!(processed_count(), 3);
+    // The scan has fully covered [.., 2_000): everything behind the retention window
+    // goes, a window of PROCESSED_RETAIN_LEDGERS is kept, anything ahead is never touched.
+    mutate_state(|s| s.xrpl_icusd.observer.next_ledger_min = Some(2_000 + PROCESSED_RETAIN_LEDGERS));
+    mutate_state(|s| s.xrpl_icusd.compact_processed_returns());
+    assert_eq!(processed_count(), 2, "only the record below frontier - window is dropped");
+    let o_after = read_state(|s| s.xrpl_icusd.issued_outstanding);
+    // The dropped record can neither be re-applied by a hint nor by the scan.
+    assert_eq!(apply_ret(&old), ReturnOutcome::Duplicate, "below the dedup floor");
+    assert_eq!(read_state(|s| s.xrpl_icusd.issued_outstanding), o_after, "no double credit");
+    assert_eq!(apply_ret(&recent), ReturnOutcome::Duplicate);
+    assert_eq!(apply_ret(&ahead), ReturnOutcome::Duplicate);
+    // Near the hard cap the compaction is aggressive (everything behind the frontier).
+    mutate_state(|s| {
+        let floor = s.xrpl_icusd.dedup_floor_ledger;
+        assert!(floor > 1_600 && floor <= 2_000 + PROCESSED_RETAIN_LEDGERS);
+        s.xrpl_icusd.observer.next_ledger_min = Some(2_050);
+        for i in 0..(MAX_PROCESSED_RETURNS as u64 / 10 * 9) {
+            s.xrpl_icusd.processed_returns.insert(
+                repay::processed_key(TESTNET, &issuer_addr(), &hash_n(10_000 + i)),
+                ProcessedReturn {
+                    disposition: ReturnDisposition::Aggregated { reason: "x".into() },
+                    ledger_index: 2_040,
+                    sender: payer(),
+                    destination_tag: None,
+                    delivered: "1".into(),
+                    recorded_at_ns: NOW,
+                },
+            );
+        }
+    });
+    let n = processed_count();
+    assert!(n >= MAX_PROCESSED_RETURNS / 10 * 9);
+    mutate_state(|s| s.xrpl_icusd.compact_processed_returns());
+    assert!(processed_count() < n, "pressure compaction relieves the cap");
+    // Frontier never moves the floor backwards or past the frontier.
+    read_state(|s| assert!(s.xrpl_icusd.dedup_floor_ledger <= 2_050.max(2_000 + PROCESSED_RETAIN_LEDGERS)));
+}
+
+#[test]
+fn indexes_agree_with_a_full_scan_and_survive_upgrade_and_replay() {
+    replace_state(rworld(100 * E8, 0, 300 * E8, Decimal::ZERO));
+    let id = intent(1, 40 * E8, 1, false);
+    apply_ret(&ret(1, &payer(), Some(tag_of(id)), "40"));
+    assert!(matches!(settle(id), SettleOutcome::BurnAdmitted { .. }));
+    read_state(|s| {
+        let st = &s.xrpl_icusd;
+        assert!(st.vault_has_open_operation(1));
+        assert!(!st.vault_has_open_operation(3));
+        assert_eq!(buckets_by_full_scan(st), st.buckets().unwrap());
+    });
+    upgrade_roundtrip();
+    read_state(|s| {
+        let st = &s.xrpl_icusd;
+        assert!(st.live_ops.contains(&id));
+        assert!(st.vault_has_open_operation(1));
+        assert_eq!(buckets_by_full_scan(st), st.buckets().unwrap());
+    });
+    // Settled terminal operations drop out of the hot set but remain queryable.
+    prove_burn(id, 5);
+    advance_at(id, NOW + 50);
+    mutate_state(|s| s.xrpl_icusd.maintain(NOW + 60));
+    read_state(|s| {
+        let st = &s.xrpl_icusd;
+        assert!(st.op(id).is_some());
+        assert!(!st.vault_has_open_operation(1), "terminal repayment no longer holds the vault");
+        assert_eq!(buckets_by_full_scan(st), st.buckets().unwrap());
+    });
+}
+
+#[test]
+fn repay_settled_event_carries_what_consumers_need() {
+    replace_state(rworld(100 * E8, 0, 100 * E8, Decimal::ZERO));
+    set_vault(2, 100 * E8, 0);
+    let id = inject_verified(2, 40 * E8, 40 * E8, false);
+    assert!(matches!(settle(id), SettleOutcome::BurnAdmitted { .. }));
+    prove_burn(id, 321);
+    advance_at(id, NOW + 100);
+    let settled: Vec<XrplIcusdEvent> = crate::storage::events()
+        .filter_map(|e| match e {
+            crate::event::Event::XrplIcusd(x @ XrplIcusdEvent::RepaySettled { .. }) => Some(x),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(settled.len(), 1);
+    match &settled[0] {
+        XrplIcusdEvent::RepaySettled {
+            vault_id,
+            owner: o,
+            applied_e8s,
+            interest_share_e8s,
+            burn_block,
+            ..
+        } => {
+            assert_eq!(*vault_id, 2);
+            assert_eq!(*o, owner(2));
+            assert_eq!(*applied_e8s, 40 * E8);
+            assert_eq!(*interest_share_e8s, 0);
+            assert_eq!(*burn_block, 321);
+        }
+        _ => unreachable!(),
+    }
+    // No RepayToVault event exists for it (replay would apply the debt a second time).
+    assert_eq!(
+        crate::storage::events()
+            .filter(|e| matches!(e, crate::event::Event::RepayToVault { .. }))
+            .count(),
+        0
+    );
 }

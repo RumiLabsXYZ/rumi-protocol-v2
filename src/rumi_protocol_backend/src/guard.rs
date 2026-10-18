@@ -215,7 +215,19 @@ impl VaultLiquidationGuard {
     /// flight; the caller should back off (the stability pool, per project
     /// rule, must NOT retry — it falls through to manual, which is correct).
     pub fn new(vault_id: u64) -> Result<Self, crate::ProtocolError> {
-        Self::acquire(vault_id, None, false)
+        Self::acquire(vault_id, None, false, true)
+    }
+
+    /// Per-vault lock for settling an EXISTING XRP claim (`settle_xrp_claim`). The
+    /// claim's custody nonce is the source vault id; the lock only serializes the
+    /// custody address' XRPL Sequence. Settling pays out collateral that already left
+    /// the vault's books and never touches the vault's debt, interest or collateral
+    /// accounting, so the XRPL icUSD lane's durable vault exclusion (which protects a
+    /// saved debt/interest snapshot or a headroom reservation) does not apply. Every
+    /// other guard (push sweeps, pending borrow mints, in-flight operations) still
+    /// does.
+    pub fn new_for_claim_settlement(vault_id: u64) -> Result<Self, crate::ProtocolError> {
+        Self::acquire(vault_id, None, false, false)
     }
 
     /// Acquire the lock only for the exact caller/vault add-margin retry whose
@@ -225,7 +237,7 @@ impl VaultLiquidationGuard {
         vault_id: u64,
         owner: Principal,
     ) -> Result<Self, crate::ProtocolError> {
-        Self::acquire(vault_id, Some(owner), false)
+        Self::acquire(vault_id, Some(owner), false, true)
     }
 
     /// Only the already-authorized exact borrow retry may pass its own
@@ -242,13 +254,14 @@ impl VaultLiquidationGuard {
                 "Vault #{vault_id} has an unresolved bot liquidation; retry after it settles"
             )));
         }
-        Self::acquire(vault_id, None, true)
+        Self::acquire(vault_id, None, true, true)
     }
 
     fn acquire(
         vault_id: u64,
         retry_owner: Option<Principal>,
         allow_pending_borrow: bool,
+        respect_xrpl_exclusion: bool,
     ) -> Result<Self, crate::ProtocolError> {
         let pending = read_state(|s| {
             s.push_sweep_journals
@@ -277,7 +290,7 @@ impl VaultLiquidationGuard {
         // admitted repayment burn) excludes every conflicting mutation of this
         // vault. This also covers the borrow-retry and push-sweep-retry entries:
         // neither retry is an XRPL-lane operation.
-        if crate::state::has_xrpl_vault_exclusion(vault_id) {
+        if respect_xrpl_exclusion && crate::state::has_xrpl_vault_exclusion(vault_id) {
             return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
                 "Vault #{vault_id} is locked by an unresolved XRPL icUSD operation; retry after it settles"
             )));
@@ -662,6 +675,34 @@ mod vault_liquidation_guard_tests {
         });
         let _guard = VaultLiquidationGuard::new_for_borrow_retry(vault_id)
             .expect("retry may acquire only after both persisted bot markers clear");
+    }
+
+    #[test]
+    fn claim_settlement_guard_ignores_only_the_xrpl_exclusion() {
+        let vault_id = 4242;
+        let mut state = crate::state::State::default();
+        // A durable XRPL operation excludes the vault from conflicting mutations.
+        state.xrpl_icusd.vault_exclusions.insert(vault_id);
+        crate::state::replace_state(state);
+        assert!(
+            VaultLiquidationGuard::new(vault_id).is_err(),
+            "debt-touching mutations stay excluded"
+        );
+        assert!(VaultLiquidationGuard::new_for_borrow_retry(vault_id).is_err());
+        // Settling an existing XRP claim pays out collateral that is already off the
+        // vault's books and never touches debt: it must not be blocked.
+        let held = VaultLiquidationGuard::new_for_claim_settlement(vault_id)
+            .expect("claim settlement is not blocked by the XRPL exclusion");
+        // It still serializes against every other operation on the same vault (the
+        // custody address' XRPL Sequence).
+        assert!(VaultLiquidationGuard::new_for_claim_settlement(vault_id).is_err());
+        assert!(VaultLiquidationGuard::new(vault_id).is_err());
+        drop(held);
+        // A pending borrow mint / push sweep keeps blocking it (unchanged).
+        crate::state::mutate_state(|s| {
+            s.xrpl_icusd.vault_exclusions.clear();
+        });
+        let _ok = VaultLiquidationGuard::new_for_claim_settlement(vault_id).unwrap();
     }
 
     #[test]

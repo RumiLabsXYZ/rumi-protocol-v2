@@ -428,6 +428,7 @@ impl XrplIcusdState {
             ));
         }
         let effect = apply_call_result(job, r);
+        job.in_flight_since_ns = None;
         let op = self.op_mut(op_id)?;
         op.updated_at_ns = now_ns;
         if let JobEffect::Failed(m) | JobEffect::Unknown(m) = &effect {
@@ -620,7 +621,13 @@ pub async fn execute_job(op_id: OperationId, idx: usize) -> Result<JobEffect, Xr
         Some((false, _)) => {}
     }
     let ledger = ledger();
-    let job = crate::state::mutate_state(|s| s.xrpl_icusd.begin_job_call(op_id, idx))?;
+    let job = crate::state::mutate_state(|s| {
+        let job = s.xrpl_icusd.begin_job_call(op_id, idx)?;
+        // Stamp the start so a continuation that never runs (a trap after the await)
+        // cannot leave the job `InFlight` forever: see `expire_stale_in_flight`.
+        s.xrpl_icusd.job_mut(op_id, idx)?.in_flight_since_ns = Some(now());
+        Ok::<_, XrplIcusdError>(job)
+    })?;
     let result = send_job(ledger, &job).await;
     crate::state::mutate_state(|s| s.xrpl_icusd.finish_job_call(op_id, idx, result, now()))
 }

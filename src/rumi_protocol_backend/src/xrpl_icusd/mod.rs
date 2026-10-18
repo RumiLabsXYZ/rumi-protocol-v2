@@ -16,6 +16,7 @@ pub mod issuance;
 pub mod ledger;
 pub mod observer;
 pub mod repay;
+pub mod retention;
 pub mod settlement;
 pub mod state;
 pub mod types;
@@ -169,6 +170,7 @@ pub struct ConfigUpdate {
     pub per_operation_cap_e8s: Option<u64>,
     pub rounding_buffer_e8s: Option<u64>,
     pub max_fee_drops: Option<u64>,
+    pub min_auto_refund_e8s: Option<u64>,
 }
 
 impl XrplIcusdState {
@@ -224,6 +226,9 @@ impl XrplIcusdState {
         }
         if let Some(v) = u.max_fee_drops {
             self.config.max_fee_drops = v;
+        }
+        if let Some(v) = u.min_auto_refund_e8s {
+            self.config.min_auto_refund_e8s = v;
         }
         self.config.config_version += 1;
         Ok(())
@@ -284,6 +289,7 @@ pub async fn configure(arg: ConfigureXrplIcusdArg) -> Result<PublicXrplIcusdConf
             per_operation_cap_e8s: arg.per_operation_cap_e8s,
             rounding_buffer_e8s: arg.rounding_buffer_e8s,
             max_fee_drops: arg.max_fee_drops,
+            min_auto_refund_e8s: arg.min_auto_refund_e8s,
         })?;
         Ok(public_config(&s.xrpl_icusd, backend))
     })
@@ -358,6 +364,14 @@ pub async fn run_op_step(op_id: OperationId) -> Result<(), XrplIcusdError> {
     // block may add the persisted fee-remainder mint job, which is driven right away.
     let advance = mutate_state(|s| borrow::advance_borrow(s, op_id, now()));
     if matches!(advance, Ok(borrow::BorrowAdvance::Committed)) {
+        drive_ic_jobs(op_id).await;
+    }
+    // A fee-remainder mint PROVEN unexecuted gets a fresh-nonce successor (bounded);
+    // beyond the budget it stays held for the operator.
+    if matches!(
+        mutate_state(|s| borrow::retry_failed_fee_mint(s, op_id, now())),
+        Ok(true)
+    ) {
         drive_ic_jobs(op_id).await;
     }
     // A repayment: settle a verified return against the debt, prove the burn, apply
@@ -604,13 +618,14 @@ pub fn plan_tick(st: &XrplIcusdState, max: usize, after: OperationId) -> Vec<Tic
     if st.observer_has_work() {
         items.push(TickItem::Observer);
     }
-    let later = st.operations.range(after.saturating_add(1)..);
-    let earlier = st.operations.range(..=after);
-    for (id, op) in later.chain(earlier) {
+    // Only live operations can have work: settled history is never walked.
+    let later = st.live_ops.range(after.saturating_add(1)..);
+    let earlier = st.live_ops.range(..=after);
+    for id in later.chain(earlier) {
         if items.len() >= max {
             break;
         }
-        if op.needs_work() {
+        if st.operations.get(id).is_some_and(|op| op.needs_work()) {
             items.push(TickItem::Op(*id));
         }
     }
@@ -619,8 +634,9 @@ pub fn plan_tick(st: &XrplIcusdState, max: usize, after: OperationId) -> Vec<Tic
 
 fn progress_fingerprint(st: &XrplIcusdState) -> (u64, u64, bool, u64) {
     (
-        st.operations
-            .values()
+        st.live_ops
+            .iter()
+            .filter_map(|id| st.operations.get(id))
             .map(|o| o.updated_at_ns)
             .max()
             .unwrap_or(0),
@@ -684,6 +700,14 @@ pub async fn xrpl_icusd_tick() {
     let Some(_guard) = TickGuard::acquire() else {
         return;
     };
+    // Bounded housekeeping first: stale in-flight calls, retention of settled
+    // operations, dedup compaction, and the (budgeted) refund records cut from the
+    // per-sender aggregates.
+    mutate_state(|s| {
+        let st = &mut s.xrpl_icusd;
+        st.maintain(now());
+        st.drain_refunds(now());
+    });
     let before = read_state(|s| progress_fingerprint(&s.xrpl_icusd));
     let plan = read_state(|s| {
         plan_tick(

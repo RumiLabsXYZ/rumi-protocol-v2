@@ -1927,6 +1927,7 @@ type ConfigureXrplIcusdArg = record {
   outstanding_cap_e8s : opt nat64;
   rounding_buffer_e8s : opt nat64;
   policy : opt IssuerPolicy;
+  min_auto_refund_e8s : opt nat64;
 };
 type CoverageReport = record {
   status : CoverageStatus;
@@ -1942,6 +1943,9 @@ type CoverageReport = record {
   d_e8s : nat;
   ic_fee_reserve_e8s : nat;
   r_e8s : nat;
+  holder_backing_e8s : nat;
+  fee_surplus_required_e8s : nat;
+  quarantined_e8s : nat;
 };
 type BorrowToXrplArg = record {
   request_nonce : blob;
@@ -1982,7 +1986,13 @@ type IssuerSetupStep = variant {
   DefaultRipple;
   TransferRate;
 };
-type NextAction = variant { ContactOperator; None; Wait; ResolveClaim };
+type NextAction = variant {
+  ContactOperator;
+  None;
+  Wait;
+  ResolveClaim;
+  ReconcileMint;
+};
 type ObserveRepaymentArg = record { tx_hash : text; operation_id : nat64 };
 type PrepareRepaymentArg = record {
   request_nonce : blob;
@@ -2067,6 +2077,16 @@ type PublicXrplIcusdConfig = record {
   ready : bool;
   issuance_paused : bool;
   policy : opt IssuerPolicy;
+  min_auto_refund_e8s : nat64;
+};
+type QuarantinedReceiptView = record {
+  tx_hash : text;
+  ledger_index : nat32;
+  sender : text;
+  destination_tag : opt nat32;
+  amount : text;
+  reason : text;
+  at_ns : nat64;
 };
 type ReleaseReason = variant { MintFailed; DebtCommitted };
 type ResolveClaimArg = record { action : ClaimAction; operation_id : nat64 };
@@ -2138,6 +2158,9 @@ type XrplIcusdEvent = variant {
     op_id : nat64;
     vault_id : nat64;
     settled_at : nat64;
+    owner : principal;
+    applied_e8s : nat64;
+    interest_share_e8s : nat64;
   };
 };
 type XrplNetwork = variant { Mainnet; Testnet };
@@ -2147,6 +2170,8 @@ type XrplCoverageResult = variant { Ok : CoverageReport; Err : XrplIcusdError };
 type XrplIntentResult = variant { Ok : RepaymentIntentView; Err : XrplIcusdError };
 type XrplOperationResult = variant { Ok : OperationView; Err : XrplIcusdError };
 type XrplSetupResult = variant { Ok : IssuerSetupStatus; Err : XrplIcusdError };
+type XrplQuarantineResult = variant { Ok : QuarantinedReceiptView; Err : XrplIcusdError };
+type XrplQuarantineListResult = variant { Ok : vec QuarantinedReceiptView; Err : XrplIcusdError };
 
 service : (ProtocolArg) -> {
   borrow_to_xrpl : (BorrowToXrplArg) -> (XrplOperationResult);
@@ -2157,6 +2182,10 @@ service : (ProtocolArg) -> {
   issue_xrpl_from_canonical : (IssueFromCanonicalArg) -> (XrplOperationResult);
   observe_xrpl_repayment : (ObserveRepaymentArg) -> (XrplOperationResult);
   prepare_xrpl_repayment : (PrepareRepaymentArg) -> (XrplIntentResult);
+  get_xrpl_quarantined_receipts : () -> (XrplQuarantineListResult) query;
+  reconcile_xrpl_borrow_mint : (nat64, nat64) -> (XrplOperationResult);
+  reconcile_xrpl_quarantined_receipt : (text) -> (XrplQuarantineResult);
+  retry_xrpl_fee_mint : (nat64) -> (XrplOperationResult);
   resolve_xrpl_claim : (ResolveClaimArg) -> (XrplOperationResult);
   resume_xrpl_operation : (nat64) -> (XrplOperationResult);
   run_xrpl_issuer_setup_step : () -> (XrplSetupResult);

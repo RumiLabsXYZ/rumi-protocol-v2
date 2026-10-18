@@ -307,8 +307,9 @@ pub fn create_intent(
 /// handled as an unattributed return (refunded to the verified sender).
 pub fn expire_stale_intents(st: &mut XrplIcusdState, now_ns: u64) -> usize {
     let stale: Vec<OperationId> = st
-        .operations
-        .values()
+        .live_ops
+        .iter()
+        .filter_map(|id| st.operations.get(id))
         .filter(|o| {
             matches!(o.kind, OperationKind::Repayment { .. })
                 && o.phase == Phase::IntentPrepared
@@ -336,9 +337,11 @@ pub enum ReturnOutcome {
     Duplicate,
     Attributed { op_id: OperationId },
     Merged { child: OperationId, parent: OperationId },
-    /// Value-bearing but not attributable: a refund operation for the verified sender.
-    Refund { op_id: OperationId },
-    /// No financial effect (bad evidence); recorded in the quarantine log.
+    /// Value-bearing but not attributable: folded into the verified sender's
+    /// aggregate (refunded in chunks, never one operation per transaction).
+    Unattributed,
+    /// Bad evidence. A receipt with no value is only logged; a value-bearing one also
+    /// moves its delivered amount from `O` into the quarantined bucket (held).
     Quarantined(String),
 }
 
@@ -350,13 +353,14 @@ pub fn processed_key(network: XrplNetwork, issuer: &str, tx_hash: &str) -> (Stri
     )
 }
 
-/// Deterministic request nonce of the refund for one return.
-pub fn refund_nonce(network: XrplNetwork, issuer: &str, tx_hash: &str) -> [u8; 32] {
+/// Request nonce of a system refund cut from a sender aggregate; bound to the
+/// never-reused operation id.
+pub fn aggregate_refund_nonce(network: XrplNetwork, sender: &str, op_id: OperationId) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(b"rumi:xrpl-icusd:refund:v1");
+    h.update(b"rumi:xrpl-icusd:refund-aggregate:v1");
     h.update(network.name().as_bytes());
-    h.update(issuer.as_bytes());
-    h.update(tx_hash.to_ascii_uppercase().as_bytes());
+    h.update(sender.as_bytes());
+    h.update(op_id.to_be_bytes());
     h.finalize().into()
 }
 
@@ -369,19 +373,34 @@ pub fn reissue_nonce(parent: OperationId, ordinal: usize) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Receipt evidence that must hold before ANY value moves. `None` means sound.
-fn evidence_problem(r: &VerifiedIssuedReceipt, issuer: &str) -> Option<String> {
+/// How much the strict evidence checks trust a receipt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Evidence {
+    /// Everything holds: the tokens verifiably came back from the sender.
+    Sound,
+    /// Not a value-bearing return at all (failed, wrong destination, the issuer's own
+    /// payment, nothing delivered). Logged only.
+    NoEffect(String),
+    /// A validated `tesSUCCESS` payment to the issuer that delivered a positive amount
+    /// (so issuer obligations DID shrink by it) whose sender-side metadata does not
+    /// show exactly that amount leaving the sender (e.g. a path payment). The value
+    /// must leave `O` to keep the ledger and the books in step, but nobody is
+    /// credited: it is held until a controller re-verifies it.
+    ValueUnverified(String),
+}
+
+fn classify_evidence(r: &VerifiedIssuedReceipt, issuer: &str) -> Evidence {
     if !r.validated || r.engine_result != "tesSUCCESS" {
-        return Some("not a validated tesSUCCESS payment".into());
+        return Evidence::NoEffect("not a validated tesSUCCESS payment".into());
     }
     if r.destination != issuer {
-        return Some("destination is not the issuer".into());
+        return Evidence::NoEffect("destination is not the issuer".into());
     }
     if r.account == issuer {
-        return Some("the issuer's own payment is not a return".into());
+        return Evidence::NoEffect("the issuer's own payment is not a return".into());
     }
     if r.delivered_amount.is_zero() || r.delivered_amount.is_negative() {
-        return Some("zero or negative delivered amount".into());
+        return Evidence::NoEffect("zero or negative delivered amount".into());
     }
     // The trust line between the sender and the issuer must show exactly the
     // delivered amount leaving the sender: the tokens really came back.
@@ -391,9 +410,13 @@ fn evidence_problem(r: &VerifiedIssuedReceipt, issuer: &str) -> Option<String> {
         pair.then(|| c.delta_for(&r.account)).flatten()
     });
     match moved {
-        Some(d) if d == r.delivered_amount.negated() => None,
-        Some(_) => Some("sender trust-line change differs from the delivered amount".into()),
-        None => Some("no sender trust-line balance change in the receipt metadata".into()),
+        Some(d) if d == r.delivered_amount.negated() => Evidence::Sound,
+        Some(_) => Evidence::ValueUnverified(
+            "sender trust-line change differs from the delivered amount".into(),
+        ),
+        None => Evidence::ValueUnverified(
+            "no sender trust-line balance change in the receipt metadata".into(),
+        ),
     }
 }
 
@@ -413,10 +436,13 @@ pub fn apply_verified_return(
     now_ns: u64,
 ) -> Result<ReturnOutcome, XrplIcusdError> {
     let key = processed_key(network, issuer, &r.hash);
-    if st.processed_returns.contains_key(&key) {
+    // Below the dedup floor the scan already settled everything and the dedup record
+    // may have been compacted: a receipt there is never new (see `retention`).
+    if st.processed_returns.contains_key(&key) || r.ledger_index < st.dedup_floor_ledger {
         return Ok(ReturnOutcome::Duplicate);
     }
-    if let Some(problem) = evidence_problem(r, issuer) {
+    let evidence = classify_evidence(r, issuer);
+    if let Evidence::NoEffect(problem) = &evidence {
         st.log_quarantine(QuarantineRecord {
             tx_hash: r.hash.to_ascii_uppercase(),
             ledger_index: Some(r.ledger_index),
@@ -425,7 +451,7 @@ pub fn apply_verified_return(
             reason: problem.clone(),
             at_ns: now_ns,
         });
-        return Ok(ReturnOutcome::Quarantined(problem));
+        return Ok(ReturnOutcome::Quarantined(problem.clone()));
     }
     let delivered = match WideAmount::from_exact(&r.delivered_amount) {
         Ok(w) => w,
@@ -443,9 +469,12 @@ pub fn apply_verified_return(
         }
     };
     if st.processed_returns.len() >= MAX_PROCESSED_RETURNS {
-        return Err(XrplIcusdError::LimitExceeded(
-            "processed-return capacity reached".into(),
-        ));
+        st.compact_processed_returns();
+        if st.processed_returns.len() >= MAX_PROCESSED_RETURNS {
+            return Err(XrplIcusdError::LimitExceeded(
+                "processed-return capacity reached".into(),
+            ));
+        }
     }
     // The tokens left circulation: O must cover them. A return observed before the
     // delivery that created it was reconciled is retried later, never half-applied.
@@ -455,6 +484,43 @@ pub fn apply_verified_return(
                 .into(),
         )
     })?;
+
+    // Quarantine WITH value: O shrinks (the ledger's obligations did), the value is
+    // held, nobody is credited and nothing is auto-refunded.
+    if let Evidence::ValueUnverified(problem) = evidence {
+        st.hold_quarantined(QuarantinedReceipt {
+            tx_hash: r.hash.to_ascii_uppercase(),
+            ledger_index: r.ledger_index,
+            sender: r.account.clone(),
+            destination_tag: r.destination_tag,
+            amount: delivered,
+            reason: problem.clone(),
+            at_ns: now_ns,
+        })?;
+        st.issued_outstanding = new_o;
+        st.log_quarantine(QuarantineRecord {
+            tx_hash: r.hash.to_ascii_uppercase(),
+            ledger_index: Some(r.ledger_index),
+            sender: Some(r.account.clone()),
+            destination_tag: r.destination_tag,
+            reason: format!("{problem}; value held"),
+            at_ns: now_ns,
+        });
+        st.processed_returns.insert(
+            key,
+            ProcessedReturn {
+                disposition: ReturnDisposition::Quarantined {
+                    reason: problem.clone(),
+                },
+                ledger_index: r.ledger_index,
+                sender: r.account.clone(),
+                destination_tag: r.destination_tag,
+                delivered: r.delivered_amount.to_decimal_string(),
+                recorded_at_ns: now_ns,
+            },
+        );
+        return Ok(ReturnOutcome::Quarantined(problem));
+    }
 
     let eligible = r.credit_eligibility() == CreditEligibility::Eligible;
     let intent = r
@@ -484,13 +550,20 @@ pub fn apply_verified_return(
             } else {
                 "tag is not an open intent of this sender"
             };
-            let op_id = create_refund(st, network, issuer, r, reason, now_ns)?;
+            st.fold_unattributed(
+                network,
+                &r.account,
+                &delivered,
+                &r.hash,
+                r.ledger_index,
+                reason,
+                now_ns,
+            )?;
             (
-                ReturnDisposition::Refund {
-                    op_id,
+                ReturnDisposition::Aggregated {
                     reason: reason.to_string(),
                 },
-                ReturnOutcome::Refund { op_id },
+                ReturnOutcome::Unattributed,
             )
         }
     };
@@ -589,60 +662,6 @@ fn attach_to_intent(
         ReturnDisposition::Attributed { op_id },
         ReturnOutcome::Attributed { op_id },
     ))
-}
-
-/// A refund operation for the verified sender, created with a deterministic nonce
-/// BEFORE anything is signed: the once-only state is bound first. System-created
-/// operations bypass the user admission caps (the observer must always be able to
-/// record value it has already consumed from `O`).
-fn create_refund(
-    st: &mut XrplIcusdState,
-    network: XrplNetwork,
-    issuer: &str,
-    r: &VerifiedIssuedReceipt,
-    reason: &str,
-    now_ns: u64,
-) -> Result<OperationId, XrplIcusdError> {
-    let nonce = refund_nonce(network, issuer, &r.hash);
-    let owner = system_owner();
-    if let Some(id) = st.request_nonce_index.get(&(owner, nonce)) {
-        return Ok(*id);
-    }
-    let whole = WideAmount::from_exact(&r.delivered_amount)
-        .map_err(|e| XrplIcusdError::Internal(format!("{e:?}")))?;
-    let dust = whole.whole_e8s < u128::from(MIN_AUTO_REFUND_E8S);
-    let id = st.allocate_operation_id();
-    let mut op = Operation {
-        id,
-        owner,
-        created_at_ns: now_ns,
-        updated_at_ns: now_ns,
-        request_nonce: nonce,
-        network,
-        kind: OperationKind::Refund {
-            source_tx: r.hash.to_ascii_uppercase(),
-            recipient: r.account.clone(),
-            amount: r.delivered_amount,
-        },
-        phase: if dust { Phase::Held } else { Phase::RefundPending },
-        ic_jobs: vec![],
-        xrpl_attempts: vec![],
-        notes: vec![],
-        resolution: None,
-        attempt_budget_base: 0,
-        delivery_halted: false,
-    };
-    op.push_note(format!(
-        "unattributed return ({reason}) from {} at ledger {}",
-        r.account, r.ledger_index
-    ));
-    if dust {
-        op.push_note("below the automatic refund floor: retained exactly, not refunded");
-    }
-    st.request_nonce_index.insert((owner, nonce), id);
-    st.next_operation_id = st.next_operation_id.max(id + 1);
-    st.operations.insert(id, op);
-    Ok(id)
 }
 
 // ----------------------------------------------------------------------------------
@@ -935,6 +954,17 @@ pub fn advance_repayment(
         return Ok(RepayAdvance::Waiting);
     };
     if burn.is_proven_done() {
+        // What a consumer needs to index this repayment without a RepayToVault event.
+        let (settled_owner, settled_applied, settled_share) = state
+            .xrpl_icusd
+            .op(op_id)
+            .map(|op| match &op.kind {
+                OperationKind::Repayment {
+                    cutoff: Some(c), ..
+                } => (op.owner, c.repay_e8s, c.interest_share_e8s),
+                _ => (op.owner, 0, 0),
+            })
+            .unwrap_or((Principal::anonymous(), 0, 0));
         record_lane_event(
             state,
             XrplIcusdEvent::RepaySettled {
@@ -942,6 +972,9 @@ pub fn advance_repayment(
                 vault_id,
                 burn_block: burn.done_block().unwrap_or_default(),
                 settled_at: now_ns,
+                owner: settled_owner,
+                applied_e8s: settled_applied,
+                interest_share_e8s: settled_share,
             },
         );
         // Live-only: queue the interest share for distribution (replay never does).
@@ -1240,10 +1273,7 @@ pub fn begin_receive_canonical_held(
     }
     let required = st.required_backing_e8s(fee_e8s)?;
     if escrow_balance_e8s < required {
-        return Err(XrplIcusdError::CoverageUnavailable(format!(
-            "escrow holds {escrow_balance_e8s} e8s but {required} e8s are required including the \
-             ledger fee reserve"
-        )));
+        return Err(super::issuance::fee_surplus_error(st, escrow_balance_e8s, required, fee_e8s));
     }
     let idx = st.add_job(
         op_id,

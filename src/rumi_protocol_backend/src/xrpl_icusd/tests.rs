@@ -294,7 +294,9 @@ fn lane_state_survives_a_cbor_roundtrip() {
     fund_import(&mut s, id);
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&s, &mut bytes).unwrap();
-    let back: XrplIcusdState = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+    let mut back: XrplIcusdState = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+    // The derived indexes are not serialized: the decoder rebuilds them.
+    back.rebuild_indexes();
     assert_eq!(s, back);
 }
 
@@ -420,6 +422,9 @@ fn replay_rebuilds_freeze_before_accrual_event() {
         vault_id: vault,
         burn_block: 4_321,
         settled_at: 3_000,
+        owner: owner(2),
+        applied_e8s: 500,
+        interest_share_e8s: 20,
     });
     let s2 = crate::event::replay_with_nonce_time(
         vec![init.clone(), cutoff.clone(), accrue.clone(), settled].into_iter(),
@@ -988,6 +993,7 @@ fn held_and_return_buckets_consume_backing() {
             delivery_halted: false,
         },
     );
+    s.rebuild_indexes();
     let b = s.buckets().unwrap();
     assert_eq!(b.r, WideAmount::from_e8s(700));
     assert_eq!(b.h, WideAmount::from_e8s(300));
@@ -1014,6 +1020,7 @@ fn held_and_return_buckets_consume_backing() {
             delivery_halted: false,
         },
     );
+    s.rebuild_indexes();
     let b = s.buckets().unwrap();
     assert_eq!(b.h, WideAmount::from_e8s(301));
     // Required backing rounds the sum UP.
@@ -2080,4 +2087,55 @@ fn job_specs_pin_who_pays_whom() {
     assert_eq!(fee.purpose, IcJobPurpose::FeeMint);
     assert_ne!(fee.to, escrow_account(b), "fee remainder is never minted into escrow");
     assert_eq!(mint.ledger_tip_before, Some(9));
+}
+
+// ---- review hardening: stale in-flight, fee-surplus reason -----------------------------
+
+#[test]
+fn stale_in_flight_job_becomes_unknown_then_resends_the_identical_tuple() {
+    let mut s = ready_state();
+    let id = new_import(&mut s, owner(1), 1, 5_000);
+    let first = s.job(id, 0).unwrap().clone();
+    s.begin_job_call(id, 0).unwrap();
+    s.op_mut(id).unwrap().ic_jobs[0].in_flight_since_ns = Some(1_000);
+    // A call that may still be outstanding is left alone.
+    assert_eq!(s.expire_stale_in_flight(1_000 + STALE_IN_FLIGHT_NS), 0);
+    assert_eq!(s.job(id, 0).unwrap().status, IcJobStatus::InFlight);
+    // Past the timeout its continuation is presumed lost: Unknown ("possibly executed").
+    assert_eq!(s.expire_stale_in_flight(1_000 + STALE_IN_FLIGHT_NS + 1), 1);
+    assert!(matches!(s.job(id, 0).unwrap().status, IcJobStatus::Unknown { .. }));
+    assert!(s.op(id).unwrap().needs_work(), "the normal reconciliation picks it up");
+    // The resend carries the IDENTICAL persisted tuple (dedup turns a landed first
+    // attempt into Duplicate), never a fresh nonce.
+    let again = s.begin_job_call(id, 0).unwrap();
+    assert_eq!(
+        (again.op_nonce, again.created_at_time, again.memo.clone(), again.amount_e8s),
+        (first.op_nonce, first.created_at_time, first.memo.clone(), first.amount_e8s)
+    );
+    // A job with no recorded start (state from before the stamp existed) is stale at once.
+    s.op_mut(id).unwrap().ic_jobs[0].in_flight_since_ns = None;
+    assert_eq!(s.expire_stale_in_flight(2_000), 1);
+}
+
+#[test]
+fn canonical_return_refusal_names_the_unfunded_ledger_fee_surplus() {
+    let mut s = ready_state();
+    s.config.rounding_buffer_e8s = 25;
+    let id = new_import(&mut s, owner(1), 1, 5_000);
+    fund_import(&mut s, id);
+    let fee = 10;
+    // Holder backing alone (5,000) is present, but the operator-funded surplus
+    // (buffer 25 + this return's fee 10) is not.
+    let e = issuance::begin_receive_canonical(&mut s, id, fee, 5_000, nonce(70), 100, 1).unwrap_err();
+    let XrplIcusdError::CoverageUnavailable(m) = e else { panic!("{e:?}") };
+    assert!(m.contains("ledger-fee surplus not funded"), "{m}");
+    assert!(m.contains("get_xrpl_icusd_coverage"), "{m}");
+    assert!(m.contains("35 e8s"), "names the shortfall (25 + 10): {m}");
+    // The coverage report exposes the surplus the operator must fund.
+    let r = s.check_coverage(&cov(5_025, Some((1, WideAmount::ZERO)))).unwrap();
+    assert_eq!(r.holder_backing_e8s, 5_000);
+    assert_eq!(r.fee_surplus_required_e8s, 25 + u128::from(r.ic_fee_reserve_e8s));
+    assert_eq!(r.required_e8s, r.holder_backing_e8s + r.fee_surplus_required_e8s);
+    // With the surplus funded the same return is admitted.
+    assert!(issuance::begin_receive_canonical(&mut s, id, fee, 5_035, nonce(71), 100, 1).is_ok());
 }

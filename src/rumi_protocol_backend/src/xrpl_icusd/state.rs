@@ -48,6 +48,46 @@ pub struct XrplIcusdState {
     pub quarantine_log: Vec<QuarantineRecord>,
     /// Durable issuer-history position.
     pub observer: ObserverState,
+    /// Unattributed / dust value folded per `(network, sender)` (part of `H`). One
+    /// record per sender instead of one operation per transaction.
+    pub unattributed: BTreeMap<(String, String), UnattributedReturns>,
+    /// Value-bearing receipts that failed strict evidence checks: their value left `O`
+    /// and is held here (part of `H`) until a controller re-verifies and books them.
+    pub quarantined_receipts: BTreeMap<String, QuarantinedReceipt>,
+    /// Receipts at ledgers below this are treated as already settled by the scan
+    /// (their dedup records may have been compacted away). Only ever raised, and
+    /// never above the fully-scanned frontier, so it can never hide an unprocessed
+    /// return: see [`XrplIcusdState::compact_processed_returns`].
+    pub dedup_floor_ledger: u32,
+
+    // ---- derived indexes (NOT serialized; rebuilt at load/upgrade by `rebuild_indexes`
+    // and maintained by every creation/transition site) -------------------------------
+    /// Superset of the operations that can still matter to a hot path: every
+    /// non-terminal operation plus terminal ones that still own work or liability.
+    /// Settled terminal operations leave it (`maintain`), so hot scans are O(live),
+    /// never O(history).
+    #[serde(skip)]
+    pub live_ops: BTreeSet<OperationId>,
+    /// `vault -> Borrow/Repayment operations` (membership never shrinks until pruned).
+    #[serde(skip)]
+    pub vault_ops: BTreeMap<u64, BTreeSet<OperationId>>,
+    /// Durable headroom reservations (uncommitted borrows).
+    #[serde(skip)]
+    pub reservations: BTreeMap<OperationId, Reservation>,
+    /// System-owned refund records (capped separately from user operations).
+    #[serde(skip)]
+    pub system_refund_ops: BTreeSet<OperationId>,
+    /// Round-robin position of the retention sweep over `operations`.
+    #[serde(skip)]
+    pub prune_cursor: OperationId,
+}
+
+/// One durable borrow reservation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reservation {
+    pub collateral: Principal,
+    pub gross_e8s: u64,
+    pub net_e8s: u64,
 }
 
 /// True when a durable operation excludes `vault_id` from conflicting legacy
@@ -124,6 +164,59 @@ fn import_claim_phase(p: Phase) -> bool {
     matches!(p, Phase::IssuePrepared | Phase::Signed | Phase::Submitted)
 }
 
+/// One operation's contribution to the disjoint liability buckets (and the pending
+/// IC fee reserve).
+pub(crate) fn add_op_liability(b: &mut Buckets, op: &Operation) -> Result<(), XrplIcusdError> {
+    let signed_ambiguous = op.has_signed_ambiguity();
+    match &op.kind {
+        OperationKind::Borrow { net_e8s, .. } if borrow_claim_phase(op.phase) => {
+            add(&mut b.d, &wide(*net_e8s))?;
+            if signed_ambiguous {
+                add(&mut b.in_flight, &wide(*net_e8s))?;
+            }
+        }
+        OperationKind::Import { amount_e8s, .. } if import_claim_phase(op.phase) => {
+            add(&mut b.d, &wide(*amount_e8s))?;
+            if signed_ambiguous {
+                add(&mut b.in_flight, &wide(*amount_e8s))?;
+            }
+        }
+        OperationKind::Repayment {
+            applied_e8s, held, ..
+        } => {
+            if matches!(op.phase, Phase::ReturnVerified | Phase::EscrowBurnPending) {
+                add(&mut b.r, &wide(*applied_e8s))?;
+            }
+            if !matches!(op.phase, Phase::Cancelled | Phase::ClaimResolved) {
+                add(&mut b.h, held)?;
+            }
+        }
+        OperationKind::Refund { amount, .. }
+            if matches!(op.phase, Phase::RefundPending | Phase::Held) =>
+        {
+            add(&mut b.h, &WideAmount::from_exact(amount).map_err(internal)?)?;
+        }
+        // A refund payment whose issuer transaction is signed is a claim
+        // awaiting `D -> O`, exactly like a delivery.
+        OperationKind::Refund { amount, .. }
+            if matches!(op.phase, Phase::Signed | Phase::Submitted) =>
+        {
+            let w = WideAmount::from_exact(amount).map_err(internal)?;
+            add(&mut b.d, &w)?;
+            if signed_ambiguous {
+                add(&mut b.in_flight, &w)?;
+            }
+        }
+        _ => {}
+    }
+    for j in &op.ic_jobs {
+        if j.purpose == IcJobPurpose::CanonicalReturn && !j.is_resolved() {
+            b.ic_fee_reserve_e8s += u128::from(j.reserved_fee_e8s);
+        }
+    }
+    Ok(())
+}
+
 impl XrplIcusdState {
     // ---- readiness / admission ----------------------------------------------------
 
@@ -159,11 +252,19 @@ impl XrplIcusdState {
         Ok(())
     }
 
+    /// Non-terminal operations of `owner`. Terminal operations are never in
+    /// `live_ops`' non-terminal subset, so this scans only the live set.
     pub fn active_ops_for(&self, owner: &Principal) -> usize {
-        self.operations
-            .values()
+        self.live_ops
+            .iter()
+            .filter_map(|id| self.operations.get(id))
             .filter(|o| o.owner == *owner && !o.phase.is_terminal())
             .count()
+    }
+
+    /// User-created operations currently stored (system refund records excluded).
+    pub fn user_op_count(&self) -> usize {
+        self.operations.len().saturating_sub(self.system_refund_ops.len())
     }
 
     /// Dedup + limits. `Existing` means the request was already accepted (idempotent
@@ -176,15 +277,17 @@ impl XrplIcusdState {
         kind: &OperationKind,
     ) -> Result<Admission, XrplIcusdError> {
         if let Some(id) = self.request_nonce_index.get(&(*owner, *request_nonce)) {
-            let existing = self.operations.get(id).ok_or_else(|| {
-                XrplIcusdError::Internal("request nonce index points at a missing operation".into())
-            })?;
+            // A pruned (archived) operation keeps its nonce so a replayed request can
+            // never create a second one: the nonce is simply spent.
+            let Some(existing) = self.operations.get(id) else {
+                return Err(XrplIcusdError::NonceConflict);
+            };
             if existing.network != network || !same_request(&existing.kind, kind) {
                 return Err(XrplIcusdError::NonceConflict);
             }
             return Ok(Admission::Existing(*id));
         }
-        if self.operations.len() >= MAX_OPERATIONS_GLOBAL {
+        if self.user_op_count() >= MAX_OPERATIONS_GLOBAL {
             return Err(XrplIcusdError::LimitExceeded(
                 "global operation limit reached".into(),
             ));
@@ -245,7 +348,9 @@ impl XrplIcusdState {
         }
         self.request_nonce_index.insert(key, op.id);
         self.next_operation_id = self.next_operation_id.max(op.id + 1);
-        self.operations.insert(op.id, op);
+        let id = op.id;
+        self.operations.insert(id, op);
+        self.register_op(id);
         Ok(())
     }
 
@@ -274,44 +379,27 @@ impl XrplIcusdState {
     // ---- durable reservations -------------------------------------------------------
 
     /// Gross e8s of uncommitted XRPL borrows (phase `Prepared`/`EscrowMintPending`)
-    /// against `collateral`. Legacy and XRPL admissions must both count this.
+    /// against `collateral`. Legacy and XRPL admissions must both count this. Reads
+    /// the reservation index, not the operation table.
     pub fn durable_reserved_for(&self, collateral: Principal) -> u64 {
-        self.operations
+        self.reservations
             .values()
-            .filter(|o| o.phase.is_reservation())
-            .filter_map(|o| match &o.kind {
-                OperationKind::Borrow {
-                    collateral_type,
-                    gross_e8s,
-                    ..
-                } if *collateral_type == collateral => Some(*gross_e8s),
-                _ => None,
-            })
-            .fold(0u64, |a, g| a.saturating_add(g))
+            .filter(|r| r.collateral == collateral)
+            .fold(0u64, |a, r| a.saturating_add(r.gross_e8s))
     }
 
     /// Net payout of Borrow operations that are still durable reservations (their
     /// escrow mint is not yet proven, so they are not in bucket `D`).
     pub fn reserved_borrow_net_e8s(&self) -> u64 {
-        self.operations
+        self.reservations
             .values()
-            .filter(|o| o.phase.is_reservation())
-            .filter_map(|o| match &o.kind {
-                OperationKind::Borrow { net_e8s, .. } => Some(*net_e8s),
-                _ => None,
-            })
-            .fold(0u64, |a, g| a.saturating_add(g))
+            .fold(0u64, |a, r| a.saturating_add(r.net_e8s))
     }
 
     pub fn durable_reserved_total(&self) -> u64 {
-        self.operations
+        self.reservations
             .values()
-            .filter(|o| o.phase.is_reservation())
-            .filter_map(|o| match &o.kind {
-                OperationKind::Borrow { gross_e8s, .. } => Some(*gross_e8s),
-                _ => None,
-            })
-            .fold(0u64, |a, g| a.saturating_add(g))
+            .fold(0u64, |a, r| a.saturating_add(r.gross_e8s))
     }
 
     // ---- liabilities -----------------------------------------------------------------
@@ -321,54 +409,18 @@ impl XrplIcusdState {
             o: self.issued_outstanding,
             ..Default::default()
         };
-        for op in self.operations.values() {
-            let signed_ambiguous = op.has_signed_ambiguity();
-            match &op.kind {
-                OperationKind::Borrow { net_e8s, .. } if borrow_claim_phase(op.phase) => {
-                    add(&mut b.d, &wide(*net_e8s))?;
-                    if signed_ambiguous {
-                        add(&mut b.in_flight, &wide(*net_e8s))?;
-                    }
-                }
-                OperationKind::Import { amount_e8s, .. } if import_claim_phase(op.phase) => {
-                    add(&mut b.d, &wide(*amount_e8s))?;
-                    if signed_ambiguous {
-                        add(&mut b.in_flight, &wide(*amount_e8s))?;
-                    }
-                }
-                OperationKind::Repayment {
-                    applied_e8s, held, ..
-                } => {
-                    if matches!(op.phase, Phase::ReturnVerified | Phase::EscrowBurnPending) {
-                        add(&mut b.r, &wide(*applied_e8s))?;
-                    }
-                    if !matches!(op.phase, Phase::Cancelled | Phase::ClaimResolved) {
-                        add(&mut b.h, held)?;
-                    }
-                }
-                OperationKind::Refund { amount, .. }
-                    if matches!(op.phase, Phase::RefundPending | Phase::Held) =>
-                {
-                    add(&mut b.h, &WideAmount::from_exact(amount).map_err(internal)?)?;
-                }
-                // A refund payment whose issuer transaction is signed is a claim
-                // awaiting `D -> O`, exactly like a delivery.
-                OperationKind::Refund { amount, .. }
-                    if matches!(op.phase, Phase::Signed | Phase::Submitted) =>
-                {
-                    let w = WideAmount::from_exact(amount).map_err(internal)?;
-                    add(&mut b.d, &w)?;
-                    if signed_ambiguous {
-                        add(&mut b.in_flight, &w)?;
-                    }
-                }
-                _ => {}
+        // Only live operations can carry liability or fee reserve: settled terminal
+        // operations are removed from `live_ops` by `maintain`.
+        for id in &self.live_ops {
+            if let Some(op) = self.operations.get(id) {
+                add_op_liability(&mut b, op)?;
             }
-            for j in &op.ic_jobs {
-                if j.purpose == IcJobPurpose::CanonicalReturn && !j.is_resolved() {
-                    b.ic_fee_reserve_e8s += u128::from(j.reserved_fee_e8s);
-                }
-            }
+        }
+        for u in self.unattributed.values() {
+            add(&mut b.h, &u.total)?;
+        }
+        for q in self.quarantined_receipts.values() {
+            add(&mut b.h, &q.amount)?;
         }
         Ok(b)
     }
@@ -435,6 +487,14 @@ impl XrplIcusdState {
             snapshot_e8s: input.snapshot.as_ref().map(|s| s.total.ceil_e8s()),
             snapshot_ledger_index: input.snapshot.as_ref().map(|s| s.ledger_index),
             in_flight_e8s: b.in_flight.ceil_e8s(),
+            holder_backing_e8s: sum.ceil_e8s(),
+            fee_surplus_required_e8s: buffer + b.ic_fee_reserve_e8s,
+            quarantined_e8s: self
+                .quarantined_receipts
+                .values()
+                .try_fold(WideAmount::ZERO, |a, q| a.checked_add(&q.amount))
+                .map(|w| w.ceil_e8s())
+                .unwrap_or(0),
         })
     }
 
@@ -466,10 +526,14 @@ impl XrplIcusdState {
             scan_required: false,
             scan: None,
             sends: 0,
+            in_flight_since_ns: None,
         };
         op.ic_jobs.push(job);
         op.updated_at_ns = now_ns;
-        Ok(op.ic_jobs.len() - 1)
+        let idx = op.ic_jobs.len() - 1;
+        // A terminal operation can gain a job (a fee-remainder retry): keep it live.
+        self.live_ops.insert(op_id);
+        Ok(idx)
     }
 
     /// After an upgrade no call is outstanding: an `InFlight` job may have executed.
@@ -481,9 +545,138 @@ impl XrplIcusdState {
                     j.status = IcJobStatus::Unknown {
                         detail: "upgrade while a call was outstanding".into(),
                     };
+                    j.in_flight_since_ns = None;
                 }
             }
         }
+        self.rebuild_indexes();
+    }
+
+    /// Normalise a ledger job whose continuation never ran (a trap after the await)
+    /// and so left it `InFlight` forever: past [`STALE_IN_FLIGHT_NS`] it is `Unknown`
+    /// ("possibly executed"), which the normal resend/scan reconciliation resolves.
+    /// A job with no recorded start time (older state) is treated as stale at once.
+    /// Returns how many jobs were normalised.
+    pub fn expire_stale_in_flight(&mut self, now_ns: u64) -> usize {
+        let mut n = 0;
+        let ids: Vec<OperationId> = self.live_ops.iter().copied().collect();
+        for id in ids {
+            let Some(op) = self.operations.get_mut(&id) else {
+                continue;
+            };
+            let mut touched = false;
+            for (idx, j) in op.ic_jobs.iter_mut().enumerate() {
+                if j.status != IcJobStatus::InFlight {
+                    continue;
+                }
+                let stale = j
+                    .in_flight_since_ns
+                    .is_none_or(|t| now_ns.saturating_sub(t) > STALE_IN_FLIGHT_NS);
+                if stale {
+                    j.status = IcJobStatus::Unknown {
+                        detail: format!("job {idx}: call never completed (continuation lost)"),
+                    };
+                    j.in_flight_since_ns = None;
+                    touched = true;
+                    n += 1;
+                }
+            }
+            if touched {
+                op.updated_at_ns = now_ns;
+                op.push_note("a stale in-flight ledger call was normalised to unknown");
+            }
+        }
+        n
+    }
+
+    // ---- derived indexes --------------------------------------------------------------
+
+    /// Recompute every derived index from `operations`. Idempotent; called by the
+    /// snapshot decoder and `recover_after_upgrade`.
+    pub fn rebuild_indexes(&mut self) {
+        self.live_ops.clear();
+        self.vault_ops.clear();
+        self.reservations.clear();
+        self.system_refund_ops.clear();
+        let ids: Vec<OperationId> = self.operations.keys().copied().collect();
+        for id in ids {
+            self.register_op_inner(id, false);
+        }
+        // Settled terminal operations do not belong in the live set.
+        let settled: Vec<OperationId> = self
+            .live_ops
+            .iter()
+            .copied()
+            .filter(|id| self.is_settled(*id))
+            .collect();
+        for id in settled {
+            self.live_ops.remove(&id);
+        }
+    }
+
+    /// Register a (new) operation in every index. Must follow each insertion into
+    /// `operations`.
+    pub fn register_op(&mut self, id: OperationId) {
+        self.register_op_inner(id, true);
+    }
+
+    fn register_op_inner(&mut self, id: OperationId, _live: bool) {
+        let Some(op) = self.operations.get(&id) else {
+            return;
+        };
+        self.live_ops.insert(id);
+        if let Some(v) = op.kind.vault_id() {
+            self.vault_ops.entry(v).or_default().insert(id);
+        }
+        if op.owner == system_owner() && matches!(op.kind, OperationKind::Refund { .. }) {
+            self.system_refund_ops.insert(id);
+        }
+        self.sync_reservation(id);
+    }
+
+    /// Make the reservation index agree with the operation's current phase.
+    pub fn sync_reservation(&mut self, id: OperationId) {
+        let r = self.operations.get(&id).and_then(|op| match &op.kind {
+            OperationKind::Borrow {
+                collateral_type,
+                gross_e8s,
+                net_e8s,
+                ..
+            } if op.phase.is_reservation() => Some(Reservation {
+                collateral: *collateral_type,
+                gross_e8s: *gross_e8s,
+                net_e8s: *net_e8s,
+            }),
+            _ => None,
+        });
+        match r {
+            Some(r) => {
+                self.reservations.insert(id, r);
+            }
+            None => {
+                self.reservations.remove(&id);
+            }
+        }
+    }
+
+    /// A terminal operation with no outstanding work and no liability: safe to drop
+    /// from the live set (and later to prune).
+    pub fn is_settled(&self, id: OperationId) -> bool {
+        let Some(op) = self.operations.get(&id) else {
+            return true;
+        };
+        if !op.phase.is_terminal() || op.needs_work() {
+            return false;
+        }
+        let mut b = Buckets::default();
+        if add_op_liability(&mut b, op).is_err() {
+            return false;
+        }
+        b.d.is_zero()
+            && b.r.is_zero()
+            && b.h.is_zero()
+            && b.in_flight.is_zero()
+            && b.ic_fee_reserve_e8s == 0
     }
 
     /// Anything for the background tick to do?
@@ -491,18 +684,41 @@ impl XrplIcusdState {
         self.setup_attempt
             .as_ref()
             .is_some_and(|a| a.status.holds_lease())
-            || self.operations.values().any(Operation::needs_work)
+            || self
+                .live_ops
+                .iter()
+                .filter_map(|id| self.operations.get(id))
+                .any(Operation::needs_work)
             || self.observer_has_work()
+            || self.refund_drain_possible()
     }
 
     /// Issuer-history maintenance exists ONLY while a repayment intent is open (its
     /// return may be on the ledger already). With none, the timer quiesces and a
     /// later intent resumes from the durable cursor.
     pub fn observer_has_work(&self) -> bool {
-        self.config.enabled
-            && self.operations.values().any(|o| {
+        self.config.enabled && (self.open_intent_exists() || self.coverage_scan_wanted())
+    }
+
+    fn open_intent_exists(&self) -> bool {
+        self.live_ops
+            .iter()
+            .filter_map(|id| self.operations.get(id))
+            .any(|o| {
                 matches!(o.kind, OperationKind::Repayment { .. }) && o.phase == Phase::IntentPrepared
             })
+    }
+
+    /// The last coverage check found the XRPL obligation snapshot BELOW recorded `O`:
+    /// a return that the lane has not ingested yet (an externally initiated one, or
+    /// one the wallet never hinted). The observer then runs until it catches up, once
+    /// per coverage record (so it can never poll forever).
+    pub fn coverage_scan_wanted(&self) -> bool {
+        self.last_coverage.as_ref().is_some_and(|c| {
+            matches!(c.report.status, CoverageStatus::SnapshotDisagrees { .. })
+                && c.report.snapshot_e8s.is_some_and(|s| s < c.report.o_e8s)
+                && c.checked_at_ns > self.observer.settled_coverage_ns
+        })
     }
 
     /// Never-reused destination tag (monotonic). `0` is never issued.
@@ -579,6 +795,7 @@ impl XrplIcusdState {
         self.request_nonce_index.insert((owner, nonce), op_id);
         self.next_operation_id = self.next_operation_id.max(op_id + 1);
         self.operations.insert(op_id, op);
+        self.register_op(op_id);
         self.vault_exclusions.insert(vault_id);
     }
 
@@ -600,6 +817,7 @@ impl XrplIcusdState {
                 op.updated_at_ns = timestamp;
             }
         }
+        self.sync_reservation(op_id);
         self.vault_exclusions.remove(&vault_id);
     }
 
@@ -683,6 +901,7 @@ impl XrplIcusdState {
                 self.next_destination_tag = self.next_destination_tag.max(destination_tag.saturating_add(1));
                 self.next_operation_id = self.next_operation_id.max(op_id + 1);
                 self.operations.insert(op_id, op);
+                self.register_op(op_id);
             }
         }
         self.vault_exclusions.insert(vault_id);
@@ -732,10 +951,11 @@ impl XrplIcusdState {
     pub fn vault_has_open_operation(&self, vault_id: u64) -> bool {
         self.vault_exclusions.contains(&vault_id)
             || self.accrual_frozen_vaults.contains(&vault_id)
-            || self
-                .operations
-                .values()
-                .any(|o| o.kind.vault_id() == Some(vault_id) && !o.phase.is_terminal())
+            || self.vault_ops.get(&vault_id).is_some_and(|ids| {
+                ids.iter()
+                    .filter_map(|id| self.operations.get(id))
+                    .any(|o| !o.phase.is_terminal())
+            })
     }
 }
 
@@ -746,6 +966,13 @@ impl Operation {
             .ic_jobs
             .iter()
             .any(|j| !j.is_resolved() || (j.done_block().is_some() && !j.proof_verified));
+        // A proven-failed fee-remainder mint owes a fresh-nonce successor.
+        let fee_retry = super::borrow::fee_mint_state(self) == super::borrow::FeeMintState::RetryDue
+            && matches!(
+                &self.kind,
+                OperationKind::Borrow { fee_split: Some(f), .. } if f.treasury.is_some()
+            );
+        let jobs_open = jobs_open || fee_retry;
         // A terminal operation can still own an unresolved ledger job (a borrow's
         // fee-remainder mint outlives a quick delivery): keep driving it.
         if self.phase.is_terminal() {
@@ -912,6 +1139,9 @@ pub fn operation_view(op: &Operation) -> OperationView {
         .xrpl_attempts
         .iter()
         .any(|a| matches!(a.status, AttemptStatus::Quarantined { .. }));
+    let needs_mint_reconcile = matches!(op.kind, OperationKind::Borrow { .. })
+        && op.phase == Phase::Prepared
+        && op.ic_jobs.is_empty();
     let held_repayment = matches!(op.kind, OperationKind::Repayment { .. })
         && op.phase == Phase::Held
         && op.resolution.is_none();
@@ -921,8 +1151,19 @@ pub fn operation_view(op: &Operation) -> OperationView {
             .iter()
             .rfind(|j| j.purpose == IcJobPurpose::EscrowBurn)
             .is_some_and(|j| matches!(j.status, IcJobStatus::Failed { .. }));
-    let next_action = if op.phase.is_terminal() {
+    let fee_held = matches!(
+        super::borrow::fee_mint_state(op),
+        super::borrow::FeeMintState::HeldNoTreasury | super::borrow::FeeMintState::HeldExhausted
+    );
+    let next_action = if op.phase.is_terminal() && fee_held {
+        // The borrow itself is done, but its fee-remainder mint needs the operator.
+        NextAction::ContactOperator
+    } else if op.phase.is_terminal() {
         NextAction::None
+    } else if needs_mint_reconcile {
+        // Rebuilt by event replay: the escrow mint's outcome is unknown. Never
+        // advanced automatically; a controller resolves it with ledger proof.
+        NextAction::ReconcileMint
     } else if quarantined {
         NextAction::ContactOperator
     } else if held_repayment || burn_failed {
@@ -979,6 +1220,7 @@ pub fn public_config(st: &XrplIcusdState, backend: Principal) -> PublicXrplIcusd
         verified_minting_account: c.verified_minting_account,
         escrow_account: escrow_account(backend),
         config_version: c.config_version,
+        min_auto_refund_e8s: c.min_auto_refund_e8s,
     }
 }
 

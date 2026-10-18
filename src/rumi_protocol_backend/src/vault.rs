@@ -5177,7 +5177,7 @@ pub async fn settle_xrp_claim_as(
     // Per-custody-address sequence serialization: custody_nonce == the source vault
     // id, so this per-vault lock prevents two concurrent Payments from one custody
     // address colliding on the XRPL Sequence.
-    let _seq_guard = match VaultLiquidationGuard::new(claim.custody_nonce) {
+    let _seq_guard = match VaultLiquidationGuard::new_for_claim_settlement(claim.custody_nonce) {
         Ok(g) => g,
         Err(e) => {
             guard_principal.fail();

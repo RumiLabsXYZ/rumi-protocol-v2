@@ -677,7 +677,7 @@ fn mixed_collateral_global_cap_and_upgrade() {
         ciborium::ser::into_writer(s, &mut bytes).unwrap();
         bytes
     });
-    let restored: State = ciborium::de::from_reader(snapshot.as_slice()).unwrap();
+    let restored: State = crate::storage::decode_state_body(snapshot.as_slice()).unwrap();
     replace_state(restored);
     read_state(|s| {
         assert_eq!(s.xrpl_icusd.durable_reserved_total(), 100 * E8);
@@ -1092,4 +1092,243 @@ fn borrow_events_replay_the_same_debt_and_release() {
     assert_eq!(replayed.xrpl_icusd.durable_reserved_total(), 0);
     assert_eq!(replayed.xrpl_icusd.op(id).unwrap().phase, Phase::DebtCommitted);
     assert_eq!(replayed.xrpl_icusd.op(id).unwrap().owner, owner(1));
+}
+
+// ---- review hardening: fee-remainder retry, accrual before commit, replay mint ------------
+
+fn fail_job(id: OperationId, idx: usize) {
+    mutate_state(|s| {
+        s.xrpl_icusd.begin_job_call(id, idx).unwrap();
+        s.xrpl_icusd
+            .finish_job_call(id, idx, LedgerCallResult::Rejected("bad fee".into()), NOW + 3)
+            .unwrap();
+    });
+}
+
+fn fee_jobs(id: OperationId) -> Vec<IcLedgerJob> {
+    read_state(|s| {
+        s.xrpl_icusd
+            .op(id)
+            .unwrap()
+            .ic_jobs
+            .iter()
+            .filter(|j| j.purpose == IcJobPurpose::FeeMint)
+            .cloned()
+            .collect()
+    })
+}
+
+fn committed_borrow() -> OperationId {
+    let mut w = world();
+    w.protocol_deficit_icusd = ICUSD::new(0);
+    replace_state(w);
+    let id = open_borrow(owner(1), &arg(1, 100 * E8, 1));
+    prove_mint(id, 55);
+    assert_eq!(advance(id), BorrowAdvance::Committed);
+    id
+}
+
+#[test]
+fn failed_fee_remainder_mint_retries_with_fresh_nonces_then_holds_for_the_operator() {
+    let id = committed_borrow();
+    let first = fee_jobs(id);
+    assert_eq!(first.len(), 1);
+    // In progress: nothing to retry.
+    assert_eq!(read_state(|s| borrow::fee_mint_state(s.xrpl_icusd.op(id).unwrap())), borrow::FeeMintState::InProgress);
+    assert!(!mutate_state(|s| borrow::retry_failed_fee_mint(s, id, NOW + 4)).unwrap());
+    // Proven rejected: a successor with a NEW nonce (hence new created_at_time/memo).
+    fail_job(id, 1);
+    assert!(read_state(|s| s.xrpl_icusd.op(id).unwrap().needs_work()), "terminal-or-not, the retry is work");
+    assert!(mutate_state(|s| borrow::retry_failed_fee_mint(s, id, NOW + 5)).unwrap());
+    let jobs = fee_jobs(id);
+    assert_eq!(jobs.len(), 2);
+    assert_ne!(jobs[0].op_nonce, jobs[1].op_nonce);
+    assert_ne!(jobs[0].memo, jobs[1].memo);
+    assert_eq!(jobs[0].amount_e8s, jobs[1].amount_e8s, "same remainder, never doubled");
+    assert_eq!(jobs[0].to, jobs[1].to);
+    // An unresolved (unknown) successor is never retried over.
+    mutate_state(|s| {
+        s.xrpl_icusd.begin_job_call(id, 2).unwrap();
+        s.xrpl_icusd
+            .finish_job_call(id, 2, classify_transfer(Err((4, "no reply".into()))), NOW + 6)
+            .unwrap();
+    });
+    assert!(!mutate_state(|s| borrow::retry_failed_fee_mint(s, id, NOW + 7)).unwrap());
+    assert!(matches!(
+        mutate_state(|s| borrow::operator_retry_fee_mint(s, id, NOW + 7)),
+        Err(XrplIcusdError::Ambiguous(_))
+    ));
+    // Exhaust the automatic budget: held and surfaced to the operator.
+    mutate_state(|s| {
+        // The unknown one resolves as proven-failed (same tuple resent and rejected).
+        s.xrpl_icusd.begin_job_call(id, 2).unwrap();
+        s.xrpl_icusd
+            .finish_job_call(id, 2, LedgerCallResult::Rejected("bad fee".into()), NOW + 8)
+            .unwrap();
+    });
+    let mut idx = 3;
+    while mutate_state(|s| borrow::retry_failed_fee_mint(s, id, NOW + 9)).unwrap() {
+        fail_job(id, idx);
+        idx += 1;
+    }
+    assert_eq!(fee_jobs(id).len(), MAX_FEE_MINT_AUTO_RETRIES + 1);
+    // The borrow itself is delivered; only the fee remainder is outstanding.
+    mutate_state(|s| s.xrpl_icusd.op_mut(id).unwrap().phase = Phase::Delivered);
+    read_state(|s| {
+        let op = s.xrpl_icusd.op(id).unwrap();
+        assert_eq!(borrow::fee_mint_state(op), borrow::FeeMintState::HeldExhausted);
+        assert!(!op.needs_work(), "no endless background retries");
+        assert_eq!(operation_view(op).next_action, NextAction::ContactOperator);
+    });
+    // The operator retries (current treasury) with yet another fresh nonce.
+    mutate_state(|s| borrow::operator_retry_fee_mint(s, id, NOW + 20)).unwrap();
+    let all = fee_jobs(id);
+    assert_eq!(all.len(), MAX_FEE_MINT_AUTO_RETRIES + 2);
+    let mut nonces: Vec<u128> = all.iter().map(|j| j.op_nonce).collect();
+    nonces.sort();
+    nonces.dedup();
+    assert_eq!(nonces.len(), all.len(), "every attempt has its own nonce");
+}
+
+#[test]
+fn missing_treasury_keeps_a_held_fee_that_the_operator_can_release() {
+    let mut w = world();
+    w.treasury_principal = None;
+    w.protocol_deficit_icusd = ICUSD::new(0);
+    replace_state(w);
+    let id = open_borrow(owner(1), &arg(1, 100 * E8, 1));
+    prove_mint(id, 55);
+    assert_eq!(advance(id), BorrowAdvance::Committed);
+    assert!(fee_jobs(id).is_empty(), "no destination yet: no job");
+    read_state(|s| {
+        let op = s.xrpl_icusd.op(id).unwrap();
+        assert_eq!(borrow::fee_mint_state(op), borrow::FeeMintState::HeldNoTreasury);
+        let OperationKind::Borrow { fee_split: Some(f), .. } = &op.kind else { panic!() };
+        assert!(f.to_treasury_remainder_e8s > 0, "the remainder is recorded, not dropped");
+        assert_eq!(operation_view(op).next_action, NextAction::Wait, "delivery still in progress");
+    });
+    // Still no treasury: the operator cannot retry.
+    assert!(matches!(
+        mutate_state(|s| borrow::operator_retry_fee_mint(s, id, NOW + 20)),
+        Err(XrplIcusdError::Disabled(_))
+    ));
+    mutate_state(|s| s.treasury_principal = Some(treasury()));
+    mutate_state(|s| borrow::operator_retry_fee_mint(s, id, NOW + 21)).unwrap();
+    let jobs = fee_jobs(id);
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].to, Account { owner: treasury(), subaccount: None });
+    read_state(|s| {
+        let op = s.xrpl_icusd.op(id).unwrap();
+        let OperationKind::Borrow { fee_split: Some(f), .. } = &op.kind else { panic!() };
+        assert_eq!(f.treasury, Some(treasury()));
+        assert_eq!(borrow::fee_mint_state(op), borrow::FeeMintState::InProgress);
+    });
+    // And not twice.
+    assert!(matches!(
+        mutate_state(|s| borrow::operator_retry_fee_mint(s, id, NOW + 22)),
+        Err(XrplIcusdError::Ambiguous(_))
+    ));
+}
+
+#[test]
+fn debt_commit_accrues_interest_first() {
+    let mut w = world();
+    if let Some(c) = w.collateral_configs.get_mut(&xrp()) {
+        c.interest_rate_apr = Ratio::from(dec!(0.10));
+    }
+    // The vault already carries debt, last accrued at NOW.
+    w.vault_id_to_vaults.get_mut(&1).unwrap().borrowed_icusd_amount = ICUSD::new(100 * E8);
+    replace_state(w);
+    let id = open_borrow(owner(1), &arg(1, 50 * E8, 1));
+    prove_mint(id, 55);
+    let later = NOW + 30 * 24 * 3_600 * 1_000_000_000;
+    assert_eq!(
+        mutate_state(|s| borrow::advance_borrow(s, id, later)).unwrap(),
+        BorrowAdvance::Committed
+    );
+    read_state(|s| {
+        let v = &s.vault_id_to_vaults[&1];
+        assert_eq!(v.last_accrual_time, later, "accrued up to the commit");
+        assert!(v.accrued_interest.to_u64() > 0, "interest on the OLD principal was booked");
+        assert!(
+            v.borrowed_icusd_amount.to_u64() > 150 * E8,
+            "capitalised interest on the old principal plus the new 50"
+        );
+    });
+}
+
+fn rebuilt_by_replay() -> OperationId {
+    // The live path persists the mint job with the reservation; replay cannot.
+    let mut w = world();
+    let mut lane = w.xrpl_icusd.clone();
+    lane.apply_reservation_begun(
+        9, owner(1), &[9; 32], TESTNET, 1, xrp(), 100 * E8, E8, 99 * E8, &holder_addr(9), 1, NOW,
+    );
+    w.xrpl_icusd = lane;
+    replace_state(w);
+    9
+}
+
+#[test]
+fn replay_rebuilt_borrow_is_surfaced_and_resolved_only_by_ledger_proof() {
+    let id = rebuilt_by_replay();
+    let backend_p = backend();
+    read_state(|s| {
+        let op = s.xrpl_icusd.op(id).unwrap();
+        assert_eq!(op.phase, Phase::Prepared);
+        assert!(op.ic_jobs.is_empty());
+        assert_eq!(operation_view(op).next_action, NextAction::ReconcileMint, "surfaced, not silently stuck");
+        assert!(s.xrpl_icusd.vault_exclusions.contains(&1), "the vault stays excluded");
+        assert_eq!(s.xrpl_icusd.durable_reserved_total(), 100 * E8);
+    });
+    // It is never advanced on its own.
+    assert_eq!(advance(id), BorrowAdvance::Waiting);
+    assert_eq!(debt_of(1), 0);
+    let mint = |to: Account, amount: u128, op: &str, from: Option<Account>| crate::icrc3_proof::DecodedBlock {
+        btype: None,
+        op: op.to_string(),
+        from,
+        to: Some(to),
+        spender: None,
+        amount,
+        fee: None,
+        created_at_time: None,
+        memo: None,
+    };
+    let esc = escrow_account(backend_p);
+    let net = 99 * E8;
+    // Wrong amount / wrong account / not a mint / has a source: refused, nothing changes.
+    for bad in [
+        mint(esc, u128::from(net) + 1, "mint", None),
+        mint(Account { owner: owner(4), subaccount: None }, u128::from(net), "mint", None),
+        mint(esc, u128::from(net), "xfer", None),
+        mint(esc, u128::from(net), "mint", Some(Account { owner: owner(4), subaccount: None })),
+    ] {
+        let r = mutate_state(|s| borrow::apply_rebuilt_mint_proof(&mut s.xrpl_icusd, id, 77, &bad, backend_p, NOW + 5));
+        assert!(matches!(r, Err(XrplIcusdError::InvalidArgument(_))), "{r:?}");
+    }
+    assert_eq!(read_state(|s| s.xrpl_icusd.op(id).unwrap().phase), Phase::Prepared);
+    // The exact mint block is accepted; the normal commit then runs exactly once.
+    let good = mint(esc, u128::from(net), "mint", None);
+    mutate_state(|s| borrow::apply_rebuilt_mint_proof(&mut s.xrpl_icusd, id, 77, &good, backend_p, NOW + 5)).unwrap();
+    assert_eq!(advance(id), BorrowAdvance::Committed);
+    assert_eq!(debt_of(1), 100 * E8);
+    read_state(|s| {
+        assert!(s.xrpl_icusd.vault_exclusions.is_empty());
+        assert_ne!(operation_view(s.xrpl_icusd.op(id).unwrap()).next_action, NextAction::ReconcileMint);
+    });
+    // Not twice, and the same block cannot prove a second operation.
+    assert!(matches!(
+        mutate_state(|s| borrow::apply_rebuilt_mint_proof(&mut s.xrpl_icusd, id, 77, &good, backend_p, NOW + 6)),
+        Err(XrplIcusdError::WrongPhase(_))
+    ));
+    mutate_state(|s| {
+        s.xrpl_icusd.apply_reservation_begun(
+            10, owner(3), &[10; 32], TESTNET, 3, xrp(), 100 * E8, E8, 99 * E8, &holder_addr(9), 1, NOW,
+        );
+    });
+    assert!(matches!(
+        mutate_state(|s| borrow::apply_rebuilt_mint_proof(&mut s.xrpl_icusd, 10, 77, &good, backend_p, NOW + 7)),
+        Err(XrplIcusdError::InvalidArgument(_))
+    ));
 }

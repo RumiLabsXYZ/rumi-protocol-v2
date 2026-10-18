@@ -9742,7 +9742,7 @@ fn xrp_transform_issuer_objects(
 use rumi_protocol_backend::xrpl_icusd::{
     self as xrpl, BorrowToXrplArg, ConfigureXrplIcusdArg, CoverageReport, IssueFromCanonicalArg, IssuerSetupStatus,
     ObserveRepaymentArg, OperationPage, OperationView, PrepareRepaymentArg, PublicXrplIcusdConfig,
-    RepaymentIntentView, ResolveClaimArg, SetPausesArg, XrplIcusdError,
+    QuarantinedReceiptView, RepaymentIntentView, ResolveClaimArg, SetPausesArg, XrplIcusdError,
 };
 
 fn xrpl_require_controller() -> Result<(), XrplIcusdError> {
@@ -9881,6 +9881,65 @@ async fn run_xrpl_issuer_setup_step() -> Result<IssuerSetupStatus, XrplIcusdErro
 async fn get_xrpl_icusd_coverage() -> Result<CoverageReport, XrplIcusdError> {
     xrpl_require_controller()?;
     xrpl::coverage_report().await
+}
+
+/// Controller-only: the value-bearing receipts held in quarantine (their value left
+/// `O` and is part of `H`; none is credited as debt repayment).
+#[candid_method(query)]
+#[query]
+fn get_xrpl_quarantined_receipts() -> Result<Vec<QuarantinedReceiptView>, XrplIcusdError> {
+    xrpl_require_controller()?;
+    Ok(read_state(|s| {
+        s.xrpl_icusd
+            .quarantined_receipts
+            .values()
+            .map(QuarantinedReceiptView::from)
+            .collect()
+    }))
+}
+
+/// Controller-only: re-read a quarantined transaction through the provider quorum and
+/// book its value into the verified sender's refundable aggregate. There is no
+/// assertion-only path: the amount comes from the re-verified receipt and must match
+/// the quarantine record and the receipt's own issuer-line metadata.
+#[candid_method(update)]
+#[update]
+async fn reconcile_xrpl_quarantined_receipt(
+    tx_hash: String,
+) -> Result<QuarantinedReceiptView, XrplIcusdError> {
+    xrpl_require_controller()?;
+    xrpl::observer::reconcile_quarantined_receipt(tx_hash).await
+}
+
+/// Controller-only: retry a HELD borrow fee-remainder mint (no treasury at the debt
+/// commit, or the automatic fresh-nonce budget is exhausted). Refused unless every
+/// earlier fee-mint job is proven unexecuted.
+#[candid_method(update)]
+#[update]
+async fn retry_xrpl_fee_mint(operation_id: u64) -> Result<OperationView, XrplIcusdError> {
+    xrpl_require_controller()?;
+    mutate_state(|s| {
+        xrpl::borrow::operator_retry_fee_mint(s, operation_id, ic_cdk::api::time())
+    })?;
+    xrpl::ensure_xrpl_tick_scheduled();
+    let _ = xrpl::run_op_step(operation_id).await;
+    read_state(|s| s.xrpl_icusd.op(operation_id).map(xrpl::operation_view))
+        .ok_or(XrplIcusdError::NotFound)
+}
+
+/// Controller-only: resolve a replay-rebuilt borrow (`NextAction::ReconcileMint`) by
+/// supplying the ledger block of its escrow mint. The block is fetched and verified
+/// against the reservation terms; without a block the borrow stays surfaced.
+#[candid_method(update)]
+#[update]
+async fn reconcile_xrpl_borrow_mint(
+    operation_id: u64,
+    block_index: u64,
+) -> Result<OperationView, XrplIcusdError> {
+    xrpl_require_controller()?;
+    xrpl::borrow::reconcile_borrow_mint(operation_id, block_index).await?;
+    read_state(|s| s.xrpl_icusd.op(operation_id).map(xrpl::operation_view))
+        .ok_or(XrplIcusdError::NotFound)
 }
 
 /// Developer-only guard for the experimental XRP observability endpoints below.

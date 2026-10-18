@@ -417,6 +417,7 @@ export interface ConfigureXrplIcusdArg {
   'per_operation_cap_e8s' : [] | [bigint],
   'outstanding_cap_e8s' : [] | [bigint],
   'rounding_buffer_e8s' : [] | [bigint],
+  'min_auto_refund_e8s' : [] | [bigint],
   'policy' : [] | [IssuerPolicy],
 }
 export interface ConsentInfo {
@@ -441,6 +442,8 @@ export interface ConsentMessageSpec {
   'device_spec' : [] | [DeviceSpec],
 }
 export interface CoverageReport {
+  'holder_backing_e8s' : bigint,
+  'quarantined_e8s' : bigint,
   'status' : CoverageStatus,
   'snapshot_e8s' : [] | [bigint],
   'snapshot_ledger_index' : [] | [number],
@@ -448,6 +451,7 @@ export interface CoverageReport {
   'h_e8s' : bigint,
   'o_e8s' : bigint,
   'escrow_balance_e8s' : bigint,
+  'fee_surplus_required_e8s' : bigint,
   'surplus_e8s' : bigint,
   'required_e8s' : bigint,
   'buffer_e8s' : bigint,
@@ -1304,7 +1308,8 @@ export type Mode = { 'ReadOnly' : null } |
 export type NextAction = { 'ContactOperator' : null } |
   { 'None' : null } |
   { 'Wait' : null } |
-  { 'ResolveClaim' : null };
+  { 'ResolveClaim' : null } |
+  { 'ReconcileMint' : null };
 export interface ObserveRepaymentArg {
   'operation_id' : bigint,
   'tx_hash' : string,
@@ -1585,10 +1590,20 @@ export interface PublicXrplIcusdConfig {
   'per_operation_cap_e8s' : bigint,
   'outstanding_cap_e8s' : bigint,
   'config_version' : bigint,
+  'min_auto_refund_e8s' : bigint,
   'currency_hex' : string,
   'ready' : boolean,
   'issuance_paused' : boolean,
   'policy' : [] | [IssuerPolicy],
+}
+export interface QuarantinedReceiptView {
+  'at_ns' : bigint,
+  'ledger_index' : number,
+  'sender' : string,
+  'destination_tag' : [] | [number],
+  'tx_hash' : string,
+  'amount' : string,
+  'reason' : string,
 }
 export interface RateCurve {
   'method' : InterpolationMethod,
@@ -2481,8 +2496,11 @@ export type XrplIcusdEvent = {
   {
     'RepaySettled' : {
       'burn_block' : bigint,
+      'interest_share_e8s' : bigint,
       'op_id' : bigint,
+      'owner' : Principal,
       'vault_id' : bigint,
+      'applied_e8s' : bigint,
       'settled_at' : bigint,
     }
   };
@@ -2491,6 +2509,12 @@ export type XrplIntentResult = { 'Ok' : RepaymentIntentView } |
 export type XrplNetwork = { 'Mainnet' : null } |
   { 'Testnet' : null };
 export type XrplOperationResult = { 'Ok' : OperationView } |
+  { 'Err' : XrplIcusdError };
+export type XrplQuarantineListResult = {
+    'Ok' : Array<QuarantinedReceiptView>
+  } |
+  { 'Err' : XrplIcusdError };
+export type XrplQuarantineResult = { 'Ok' : QuarantinedReceiptView } |
   { 'Err' : XrplIcusdError };
 export type XrplSetupResult = { 'Ok' : IssuerSetupStatus } |
   { 'Err' : XrplIcusdError };
@@ -2825,6 +2849,7 @@ export interface _SERVICE {
   'get_xrp_schnorr_key_name' : ActorMethod<[], string>,
   'get_xrpl_icusd_config' : ActorMethod<[], PublicXrplIcusdConfig>,
   'get_xrpl_icusd_coverage' : ActorMethod<[], XrplCoverageResult>,
+  'get_xrpl_quarantined_receipts' : ActorMethod<[], XrplQuarantineListResult>,
   'harvest_chain_interest' : ActorMethod<[number], Result>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse_1>,
   'icrc10_supported_standards' : ActorMethod<[], Array<StandardRecord>>,
@@ -2926,6 +2951,14 @@ export interface _SERVICE {
     [VaultOperationIdArg, bigint],
     Result_1
   >,
+  'reconcile_xrpl_borrow_mint' : ActorMethod<
+    [bigint, bigint],
+    XrplOperationResult
+  >,
+  'reconcile_xrpl_quarantined_receipt' : ActorMethod<
+    [string],
+    XrplQuarantineResult
+  >,
   'recover_pending_payout' : ActorMethod<[bigint], Result_22>,
   'recover_pending_transfer' : ActorMethod<[bigint], Result_22>,
   'recover_stuck_chain_vault' : ActorMethod<[number, bigint], Result_1>,
@@ -2950,6 +2983,7 @@ export interface _SERVICE {
   'resolve_xrpl_claim' : ActorMethod<[ResolveClaimArg], XrplOperationResult>,
   'resume_xrpl_operation' : ActorMethod<[bigint], XrplOperationResult>,
   'retry_pending_borrow_fee_mint' : ActorMethod<[bigint], Result_1>,
+  'retry_xrpl_fee_mint' : ActorMethod<[bigint], XrplOperationResult>,
   'run_xrpl_issuer_setup_step' : ActorMethod<[], XrplSetupResult>,
   'set_amm1_canister' : ActorMethod<[Principal], Result_1>,
   'set_amm1_pool_id' : ActorMethod<[string], Result_1>,
