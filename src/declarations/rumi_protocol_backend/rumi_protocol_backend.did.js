@@ -2203,6 +2203,10 @@ export const idlFactory = ({ IDL }) => {
     'scanned_count' : IDL.Nat16,
     'next_start_after' : IDL.Opt(IDL.Nat64),
   });
+  const ObserveRepaymentArg = IDL.Record({
+    'operation_id' : IDL.Nat64,
+    'tx_hash' : IDL.Text,
+  });
   const Result_17 = IDL.Variant({ 'Ok' : ChainVaultV1, 'Err' : ProtocolError });
   const OpenVaultSuccess = IDL.Record({
     'block_index' : IDL.Nat64,
@@ -2248,6 +2252,30 @@ export const idlFactory = ({ IDL }) => {
   const Result_20 = IDL.Variant({
     'Ok' : PreparedRedemptionOffer,
     'Err' : RedemptionOfferRefreshError,
+  });
+  const PrepareRepaymentArg = IDL.Record({
+    'request_nonce' : IDL.Vec(IDL.Nat8),
+    'top_up_operation' : IDL.Opt(IDL.Nat64),
+    'network' : XrplNetwork,
+    'vault_id' : IDL.Nat64,
+    'payer' : IDL.Text,
+    'max_e8s' : IDL.Nat64,
+    'full_close' : IDL.Bool,
+  });
+  const RepaymentIntentView = IDL.Record({
+    'payment_json' : IDL.Text,
+    'quote_time_ns' : IDL.Nat64,
+    'network' : XrplNetwork,
+    'operation_id' : IDL.Nat64,
+    'destination_tag' : IDL.Nat32,
+    'issuer' : IDL.Text,
+    'currency' : IDL.Text,
+    'payer' : IDL.Text,
+    'max_e8s' : IDL.Nat64,
+  });
+  const XrplIntentResult = IDL.Variant({
+    'Ok' : RepaymentIntentView,
+    'Err' : XrplIcusdError,
   });
   const ChainSupplyReconciliation = IDL.Record({
     'recorded_supply_e8s' : IDL.Nat,
@@ -3053,6 +3081,11 @@ export const idlFactory = ({ IDL }) => {
         [ChainVaultPage],
         ['query'],
       ),
+    'observe_xrpl_repayment' : IDL.Func(
+        [ObserveRepaymentArg],
+        [XrplOperationResult],
+        [],
+      ),
     'open_chain_vault' : IDL.Func(
         [IDL.Nat32, IDL.Nat, IDL.Nat, IDL.Text],
         [Result],
@@ -3093,6 +3126,11 @@ export const idlFactory = ({ IDL }) => {
     'partial_liquidate_vault' : IDL.Func([VaultArg], [Result_4], []),
     'partial_repay_to_vault' : IDL.Func([VaultArg], [Result], []),
     'prepare_redemption_offer' : IDL.Func([IDL.Nat64], [Result_20], []),
+    'prepare_xrpl_repayment' : IDL.Func(
+        [PrepareRepaymentArg],
+        [XrplIntentResult],
+        [],
+      ),
     'provide_liquidity' : IDL.Func([IDL.Nat64], [Result], []),
     'rearm_unsent_legacy_three_usd_refund' : IDL.Func(
         [IDL.Nat],

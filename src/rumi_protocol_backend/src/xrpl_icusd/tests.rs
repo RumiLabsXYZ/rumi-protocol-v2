@@ -427,7 +427,8 @@ fn replay_rebuilds_freeze_before_accrual_event() {
     )
     .unwrap();
     assert!(!xrpl_accrual_frozen(&s2, vault) && !xrpl_vault_excluded(&s2, vault));
-    assert_eq!(s2.xrpl_icusd.op(1).unwrap().phase, Phase::DebtApplied);
+    // Task 5: a settled repayment with nothing left over is Complete.
+    assert_eq!(s2.xrpl_icusd.op(1).unwrap().phase, Phase::Complete);
     // Cancelled burn: lifted and held.
     let cancelled = crate::event::Event::XrplIcusd(XrplIcusdEvent::RepayCancelled {
         op_id: 1,
@@ -974,8 +975,9 @@ fn held_and_return_buckets_consume_backing() {
                 receipts: vec![],
                 cutoff: None,
                 applied_e8s: 700,
-                held: ExactIssuedAmount::parse("0.000003").unwrap(),
+                held: WideAmount::from_exact(&ExactIssuedAmount::parse("0.000003").unwrap()).unwrap(),
                 children: vec![],
+                pending_interest: None,
             },
             phase: Phase::EscrowBurnPending,
             ic_jobs: vec![],

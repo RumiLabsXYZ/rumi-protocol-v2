@@ -6507,6 +6507,12 @@ impl State {
     /// Re-keying inside passive accrual would be O(N log N) per timer tick for
     /// zero ordering benefit at the band tolerance scale (default 1% CR).
     pub fn accrue_single_vault(&mut self, vault_id: u64, now_nanos: u64) {
+        // XRPL icUSD lane: while a repayment burn is unresolved the vault's accrual
+        // clock is frozen at the saved settlement cutoff (every accrual path, including
+        // `Event::AccrueInterest` replay, defers this vault; others continue normally).
+        if self.xrpl_icusd.accrual_frozen_vaults.contains(&vault_id) {
+            return;
+        }
         // Phase 1: compute rate (immutable borrow of self)
         let rate_and_elapsed = {
             let s: &State = &*self;
@@ -6574,7 +6580,11 @@ impl State {
                 .unwrap_or(UsdIcp::from(rust_decimal_macros::dec!(1.0)));
             s.vault_id_to_vaults
                 .iter()
-                .filter(|(_, v)| v.borrowed_icusd_amount.0 > 0 && v.last_accrual_time < now_nanos)
+                .filter(|(id, v)| {
+                    v.borrowed_icusd_amount.0 > 0
+                        && v.last_accrual_time < now_nanos
+                        && !s.xrpl_icusd.accrual_frozen_vaults.contains(id)
+                })
                 .map(|(id, vault)| {
                     let cr = crate::compute_collateral_ratio(vault, dummy_rate, s);
                     let rate = s.get_dynamic_interest_rate_for(&vault.collateral_type, cr);
@@ -6619,7 +6629,13 @@ impl State {
     /// will re-accumulate before the next harvest). `borrowed_icusd_amount` is unchanged
     /// so user debt is unaffected.
     pub fn harvest_accrued_interest(&mut self) {
-        for vault in self.vault_id_to_vaults.values_mut() {
+        for (vault_id, vault) in self.vault_id_to_vaults.iter_mut() {
+            // XRPL icUSD lane: the accrued allocation of a vault with an unresolved
+            // repayment burn is part of the saved cutoff snapshot; harvesting it now
+            // would let the settlement distribute the same interest twice.
+            if self.xrpl_icusd.accrual_frozen_vaults.contains(vault_id) {
+                continue;
+            }
             let interest = vault.accrued_interest.to_u64();
             if interest > 0 {
                 *self
@@ -7607,22 +7623,11 @@ impl State {
                 // clamp instead of asserting so any residual drift degrades
                 // to a smaller applied repayment, never a trap-after-pull.
                 let repayed_amount = repayed_amount.min(vault.borrowed_icusd_amount);
-                let interest_share =
-                    if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
-                        let share = crate::numeric::checked_proportional_amount(
-                            repayed_amount.0,
-                            vault.borrowed_icusd_amount.0,
-                            vault.accrued_interest.0,
-                        )
-                        .unwrap_or(0);
-                        // INT-001: also cap by `repayed_amount` so the saturating
-                        // subtraction below cannot lose principal silently. The
-                        // deduct-side clamp keeps `accrued <= borrowed`, but defense
-                        // in depth here pins the property even on legacy state.
-                        ICUSD::new(share.min(vault.accrued_interest.0).min(repayed_amount.0))
-                    } else {
-                        ICUSD::new(0)
-                    };
+                let interest_share = ICUSD::new(proportional_repay_interest_share(
+                    repayed_amount.0,
+                    vault.borrowed_icusd_amount.0,
+                    vault.accrued_interest.0,
+                ));
                 // INT-001: saturating subtraction so a stale `accrued > borrowed`
                 // state cannot panic the canister via `Token::Sub`. With the
                 // `.min(repayed_amount)` cap above this can never under-flow
@@ -9788,6 +9793,21 @@ pub fn has_pending_borrow_mint(vault_id: u64) -> bool {
             .as_ref()
             .is_some_and(|s| s.pending_borrow_mints.contains_key(&vault_id))
     })
+}
+
+/// Interest portion of a repayment: proportional to how much of the vault's debt is
+/// accrued interest. The ONE formula shared by the legacy `repay_to_vault` and the
+/// XRPL lane's non-mutating cutoff snapshot.
+pub fn proportional_repay_interest_share(repay: u64, debt: u64, accrued: u64) -> u64 {
+    if accrued > 0 && debt > 0 {
+        let share = crate::numeric::checked_proportional_amount(repay, debt, accrued).unwrap_or(0);
+        // INT-001: also cap by `repay` so the saturating subtraction in the caller
+        // cannot lose principal silently. The deduct-side clamp keeps
+        // `accrued <= borrowed`, but defense in depth pins the property on legacy state.
+        share.min(accrued).min(repay)
+    } else {
+        0
+    }
 }
 
 /// Safe pre-initialization probe: a durable XRPL icUSD operation excludes the vault

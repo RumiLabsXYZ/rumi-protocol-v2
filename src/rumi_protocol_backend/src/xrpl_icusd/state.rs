@@ -37,6 +37,17 @@ pub struct XrplIcusdState {
     pub issuer_lease: Option<LeaseHolder>,
     pub setup_attempt: Option<IssuerTxAttempt>,
     pub last_coverage: Option<CoverageRecord>,
+    /// Never-reused repayment destination tags (monotonic; persisted so an upgrade
+    /// can never reassign one).
+    pub next_destination_tag: u32,
+    /// `destination tag -> repayment intent`.
+    pub tag_index: BTreeMap<u32, OperationId>,
+    /// Value-bearing returns consumed so far, keyed `(network, issuer, tx hash)`.
+    pub processed_returns: BTreeMap<(String, String, String), ProcessedReturn>,
+    /// Bounded evidence log for payments that had no financial effect.
+    pub quarantine_log: Vec<QuarantineRecord>,
+    /// Durable issuer-history position.
+    pub observer: ObserverState,
 }
 
 /// True when a durable operation excludes `vault_id` from conflicting legacy
@@ -332,13 +343,24 @@ impl XrplIcusdState {
                         add(&mut b.r, &wide(*applied_e8s))?;
                     }
                     if !matches!(op.phase, Phase::Cancelled | Phase::ClaimResolved) {
-                        add(&mut b.h, &WideAmount::from_exact(held).map_err(internal)?)?;
+                        add(&mut b.h, held)?;
                     }
                 }
                 OperationKind::Refund { amount, .. }
                     if matches!(op.phase, Phase::RefundPending | Phase::Held) =>
                 {
                     add(&mut b.h, &WideAmount::from_exact(amount).map_err(internal)?)?;
+                }
+                // A refund payment whose issuer transaction is signed is a claim
+                // awaiting `D -> O`, exactly like a delivery.
+                OperationKind::Refund { amount, .. }
+                    if matches!(op.phase, Phase::Signed | Phase::Submitted) =>
+                {
+                    let w = WideAmount::from_exact(amount).map_err(internal)?;
+                    add(&mut b.d, &w)?;
+                    if signed_ambiguous {
+                        add(&mut b.in_flight, &w)?;
+                    }
                 }
                 _ => {}
             }
@@ -470,6 +492,34 @@ impl XrplIcusdState {
             .as_ref()
             .is_some_and(|a| a.status.holds_lease())
             || self.operations.values().any(Operation::needs_work)
+            || self.observer_has_work()
+    }
+
+    /// Issuer-history maintenance exists ONLY while a repayment intent is open (its
+    /// return may be on the ledger already). With none, the timer quiesces and a
+    /// later intent resumes from the durable cursor.
+    pub fn observer_has_work(&self) -> bool {
+        self.config.enabled
+            && self.operations.values().any(|o| {
+                matches!(o.kind, OperationKind::Repayment { .. }) && o.phase == Phase::IntentPrepared
+            })
+    }
+
+    /// Never-reused destination tag (monotonic). `0` is never issued.
+    pub fn allocate_destination_tag(&mut self) -> Result<u32, XrplIcusdError> {
+        let next = self.next_destination_tag.max(1);
+        let after = next
+            .checked_add(1)
+            .ok_or_else(|| XrplIcusdError::LimitExceeded("destination tags exhausted".into()))?;
+        self.next_destination_tag = after;
+        Ok(next)
+    }
+
+    pub fn log_quarantine(&mut self, rec: QuarantineRecord) {
+        if self.quarantine_log.len() >= MAX_QUARANTINE_LOG {
+            self.quarantine_log.remove(0);
+        }
+        self.quarantine_log.push(rec);
     }
 
     // ---- reservation / exclusion events (replayed through the same functions) ----------
@@ -554,7 +604,10 @@ impl XrplIcusdState {
     }
 
     /// Repayment cutoff begun: the vault is excluded AND its interest accrual is
-    /// frozen until the burn resolves.
+    /// frozen until the burn resolves. Live and replay share this. The first Begun of
+    /// a burn cycle moves the applicable amount out of `held` into `applied_e8s` (a
+    /// later cycle, after a proven-unexecuted cancel, starts from the op's `Held`
+    /// phase again).
     #[allow(clippy::too_many_arguments)]
     pub fn apply_repay_cutoff_begun(
         &mut self,
@@ -571,7 +624,20 @@ impl XrplIcusdState {
     ) {
         match self.operations.get_mut(&op_id) {
             Some(op) => {
-                if let OperationKind::Repayment { cutoff: c, .. } = &mut op.kind {
+                let new_cycle = op.phase != Phase::EscrowBurnPending;
+                if let OperationKind::Repayment {
+                    cutoff: c,
+                    applied_e8s,
+                    held,
+                    ..
+                } = &mut op.kind
+                {
+                    if new_cycle {
+                        *applied_e8s = cutoff.repay_e8s;
+                        if let Ok(h) = held.checked_sub(&wide(cutoff.repay_e8s)) {
+                            *held = h;
+                        }
+                    }
                     *c = Some(cutoff.clone());
                 }
                 op.phase = Phase::EscrowBurnPending;
@@ -600,8 +666,9 @@ impl XrplIcusdState {
                         receipts: vec![],
                         cutoff: Some(cutoff),
                         applied_e8s: repay,
-                        held: crate::chains::xrp::issued_amount::ExactIssuedAmount::ZERO,
+                        held: WideAmount::ZERO,
                         children: vec![],
+                        pending_interest: None,
                     },
                     phase: Phase::EscrowBurnPending,
                     ic_jobs: vec![],
@@ -612,6 +679,8 @@ impl XrplIcusdState {
                     delivery_halted: false,
                 };
                 self.request_nonce_index.insert((owner, nonce), op_id);
+                self.tag_index.insert(destination_tag, op_id);
+                self.next_destination_tag = self.next_destination_tag.max(destination_tag.saturating_add(1));
                 self.next_operation_id = self.next_operation_id.max(op_id + 1);
                 self.operations.insert(op_id, op);
             }
@@ -620,30 +689,53 @@ impl XrplIcusdState {
         self.accrual_frozen_vaults.insert(vault_id);
     }
 
-    /// Minimal set-maintenance for a settled repayment burn: lifts the freeze and the
-    /// exclusion and records the phase. TASK 5 extends this (through
-    /// `State::apply_xrpl_repay_settlement`) with the frozen debt/interest math and the
-    /// post-cutoff `accrue_single_vault`.
+    /// Operation bookkeeping of a settled repayment burn: lifts the freeze and the
+    /// exclusion. The vault's debt/interest effects are applied by
+    /// `State::apply_xrpl_repay_settlement`, the single function used by BOTH the live
+    /// path and replay. What remains of the receipt (excess, sub-e8s) stays held.
     pub fn apply_repay_settled(&mut self, op_id: u64, vault_id: u64, settled_at: u64) {
         if let Some(op) = self.operations.get_mut(&op_id) {
-            op.phase = Phase::DebtApplied;
+            let leftover = matches!(&op.kind, OperationKind::Repayment { held, .. } if !held.is_zero());
+            op.phase = if leftover { Phase::Held } else { Phase::Complete };
             op.updated_at_ns = settled_at;
         }
         self.accrual_frozen_vaults.remove(&vault_id);
         self.vault_exclusions.remove(&vault_id);
     }
 
-    /// Minimal set-maintenance for a proven never-executed burn: lifts the freeze and
-    /// the exclusion and moves the operation to `Held`. TASK 5 extends this with
-    /// `accrue_single_vault(at)` on the full still-unpaid debt and the held-receipt
-    /// bookkeeping.
+    /// Operation bookkeeping of a proven never-executed burn: the applied amount goes
+    /// back to the payer's held claim; the freeze and the exclusion are lifted.
     pub fn apply_repay_cancelled(&mut self, op_id: u64, vault_id: u64, at: u64) {
         if let Some(op) = self.operations.get_mut(&op_id) {
+            if let OperationKind::Repayment {
+                applied_e8s,
+                held,
+                cutoff,
+                ..
+            } = &mut op.kind
+            {
+                if let Ok(h) = held.checked_add(&wide(*applied_e8s)) {
+                    *held = h;
+                }
+                *applied_e8s = 0;
+                *cutoff = None;
+            }
             op.phase = Phase::Held;
             op.updated_at_ns = at;
         }
         self.accrual_frozen_vaults.remove(&vault_id);
         self.vault_exclusions.remove(&vault_id);
+    }
+
+    /// True when `vault_id` has an XRPL operation that must keep it alive: an
+    /// exclusion, an accrual freeze, or an unresolved borrow/repayment.
+    pub fn vault_has_open_operation(&self, vault_id: u64) -> bool {
+        self.vault_exclusions.contains(&vault_id)
+            || self.accrual_frozen_vaults.contains(&vault_id)
+            || self
+                .operations
+                .values()
+                .any(|o| o.kind.vault_id() == Some(vault_id) && !o.phase.is_terminal())
     }
 }
 
@@ -659,6 +751,22 @@ impl Operation {
         if self.phase.is_terminal() {
             return jobs_open;
         }
+        if let OperationKind::Repayment {
+            pending_interest, ..
+        } = &self.kind
+        {
+            // IntentPrepared has no per-operation work: the observer watches for the
+            // return. A verified return settles; an admitted burn is driven to proof.
+            let advance_pending = self.resolution == Some(ClaimAction::ReceiveCanonical)
+                && self
+                    .ic_jobs
+                    .iter()
+                    .any(|j| j.purpose == IcJobPurpose::CanonicalReturn && j.is_resolved());
+            return jobs_open
+                || matches!(self.phase, Phase::ReturnVerified | Phase::EscrowBurnPending)
+                || pending_interest.is_some()
+                || advance_pending;
+        }
         // A borrow stays active until its escrow mint is proven and the debt is
         // committed (or the mint definitively fails).
         let borrow_active = matches!(self.kind, OperationKind::Borrow { .. })
@@ -666,15 +774,10 @@ impl Operation {
                 self.phase,
                 Phase::Prepared | Phase::EscrowMintPending | Phase::DebtCommitted
             );
-        let claim = matches!(
-            self.kind,
-            OperationKind::Borrow { .. } | OperationKind::Import { .. }
-        );
-        let delivering = claim
-            && matches!(
-                self.phase,
-                Phase::IssuePrepared | Phase::Signed | Phase::Submitted
-            )
+        let payout = self.kind.payout_amount().is_some();
+        let delivering = payout
+            && self.phase == self.kind.ready_phase()
+            && self.phase != Phase::Prepared
             && !self.delivery_halted
             && self.resolution.is_none();
         // A resolved job whose phase transition has not been applied yet.
@@ -809,12 +912,26 @@ pub fn operation_view(op: &Operation) -> OperationView {
         .xrpl_attempts
         .iter()
         .any(|a| matches!(a.status, AttemptStatus::Quarantined { .. }));
+    let held_repayment = matches!(op.kind, OperationKind::Repayment { .. })
+        && op.phase == Phase::Held
+        && op.resolution.is_none();
+    let burn_failed = op.phase == Phase::EscrowBurnPending
+        && op
+            .ic_jobs
+            .iter()
+            .rfind(|j| j.purpose == IcJobPurpose::EscrowBurn)
+            .is_some_and(|j| matches!(j.status, IcJobStatus::Failed { .. }));
     let next_action = if op.phase.is_terminal() {
         NextAction::None
     } else if quarantined {
         NextAction::ContactOperator
+    } else if held_repayment || burn_failed {
+        NextAction::ResolveClaim
     } else if op.delivery_halted
-        && matches!(op.phase, Phase::DebtCommitted | Phase::IssuePrepared)
+        && matches!(
+            op.phase,
+            Phase::DebtCommitted | Phase::IssuePrepared | Phase::RefundPending
+        )
     {
         NextAction::ResolveClaim
     } else {
@@ -979,11 +1096,12 @@ pub fn apply_xrpl_icusd_event(state: &mut crate::state::State, ev: &XrplIcusdEve
             vault_id,
             settled_at,
             ..
-        } => state
-            .xrpl_icusd
-            .apply_repay_settled(*op_id, *vault_id, *settled_at),
+        } => {
+            // The single settlement function: live and replay agree by construction.
+            let _ = state.apply_xrpl_repay_settlement(*op_id, *vault_id, *settled_at);
+        }
         XrplIcusdEvent::RepayCancelled { op_id, vault_id, at } => {
-            state.xrpl_icusd.apply_repay_cancelled(*op_id, *vault_id, *at)
+            state.apply_xrpl_repay_cancellation(*op_id, *vault_id, *at)
         }
     }
 }

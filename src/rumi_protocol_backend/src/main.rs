@@ -1111,10 +1111,17 @@ fn post_upgrade(arg: ProtocolArg) {
             );
         }
         // Remove empty vaults (fully liquidated shells with zero debt and zero collateral)
+        // XRPL icUSD lane: never remove a vault that carries an XRPL exclusion, an
+        // accrual freeze, or an unresolved borrow/repayment operation (its settlement
+        // needs the vault, and the shell is its only record).
         let empty_vault_ids: Vec<u64> = s
             .vault_id_to_vaults
             .iter()
-            .filter(|(_, v)| v.borrowed_icusd_amount.0 == 0 && v.collateral_amount == 0)
+            .filter(|(id, v)| {
+                v.borrowed_icusd_amount.0 == 0
+                    && v.collateral_amount == 0
+                    && !s.xrpl_icusd.vault_has_open_operation(**id)
+            })
             .map(|(id, _)| *id)
             .collect();
         for vault_id in &empty_vault_ids {
@@ -9734,8 +9741,8 @@ fn xrp_transform_issuer_objects(
 
 use rumi_protocol_backend::xrpl_icusd::{
     self as xrpl, BorrowToXrplArg, ConfigureXrplIcusdArg, CoverageReport, IssueFromCanonicalArg, IssuerSetupStatus,
-    OperationPage, OperationView, PublicXrplIcusdConfig, ResolveClaimArg, SetPausesArg,
-    XrplIcusdError,
+    ObserveRepaymentArg, OperationPage, OperationView, PrepareRepaymentArg, PublicXrplIcusdConfig,
+    RepaymentIntentView, ResolveClaimArg, SetPausesArg, XrplIcusdError,
 };
 
 fn xrpl_require_controller() -> Result<(), XrplIcusdError> {
@@ -9807,6 +9814,26 @@ async fn resume_xrpl_operation(operation_id: u64) -> Result<OperationView, XrplI
 #[update]
 async fn resolve_xrpl_claim(arg: ResolveClaimArg) -> Result<OperationView, XrplIcusdError> {
     xrpl::resolve_claim(ic_cdk::caller(), arg).await
+}
+
+/// Prepare a repayment of the caller's own XRP-vault debt with XRPL icUSD. Returns the
+/// exact `Payment` (to the issuer, with a unique never-reused destination tag) the
+/// wallet must sign. Nothing is credited until the backend itself verifies the
+/// validated return; `top_up_operation` binds a follow-up payment to a HELD repayment.
+#[candid_method(update)]
+#[update]
+fn prepare_xrpl_repayment(arg: PrepareRepaymentArg) -> Result<RepaymentIntentView, XrplIcusdError> {
+    validate_authenticated_not_frozen().map_err(xrpl::borrow::map_protocol_error)?;
+    xrpl::repay::prepare_xrpl_repayment(ic_cdk::caller(), arg)
+}
+
+/// A wallet-reported transaction hash is a HINT only: the backend re-reads and
+/// verifies the transaction itself (the same private consumer as the issuer-history
+/// scan, so a return found by both applies once). Owner-only and throttled.
+#[candid_method(update)]
+#[update]
+async fn observe_xrpl_repayment(arg: ObserveRepaymentArg) -> Result<OperationView, XrplIcusdError> {
+    xrpl::observer::observe_xrpl_repayment(ic_cdk::caller(), arg).await
 }
 
 /// Caller-scoped, paged (at most 50 rows).
@@ -18304,6 +18331,16 @@ fn admin_correct_vault_debts(
 
     mutate_state(|s| {
         for c in &corrections {
+            // XRPL icUSD lane: a vault with an exclusion, accrual freeze or open XRPL
+            // operation holds a saved debt/interest snapshot; rewriting its debt here
+            // would desynchronise the pending settlement. Refuse.
+            if s.xrpl_icusd.vault_has_open_operation(c.vault_id) {
+                results.push(format!(
+                    "vault#{}: REFUSED (unresolved XRPL icUSD operation)",
+                    c.vault_id
+                ));
+                continue;
+            }
             if let Some(vault) = s.vault_id_to_vaults.get_mut(&c.vault_id) {
                 let old_borrowed = vault.borrowed_icusd_amount.0;
                 let old_accrued = vault.accrued_interest.0;

@@ -575,7 +575,7 @@ impl XrplIcusdState {
             }
             LeaseHolder::Operation(id) => {
                 let op = self.op_mut(id)?;
-                if op.phase != Phase::IssuePrepared
+                if op.phase != op.kind.ready_phase()
                     || op.delivery_halted
                     || op.resolution.is_some()
                     || op.unresolved_attempt().is_some()
@@ -722,7 +722,7 @@ impl XrplIcusdState {
                     let op = self.op_mut(id)?;
                     // The claim is intact; a successor attempt (fresh sequence read)
                     // may follow, within the budget.
-                    op.phase = Phase::IssuePrepared;
+                    op.phase = op.kind.ready_phase();
                     op.updated_at_ns = now_ns;
                     let used = (op.xrpl_attempts.len() as u32).saturating_sub(op.attempt_budget_base);
                     if used >= MAX_ATTEMPTS_PER_BUDGET {
@@ -986,16 +986,18 @@ pub fn coverage_permits(st: &XrplIcusdState, now_ns: u64) -> bool {
 /// Start (if needed) and advance the delivery of one backed claim.
 pub async fn drive_delivery(op_id: OperationId) -> Result<ReconcileEffect, XrplIcusdError> {
     let holder = LeaseHolder::Operation(op_id);
-    let (ctx, kind_ok, unresolved, start_ok, recipient, amount_e8s) = crate::state::read_state(|s| {
+    let (ctx, kind_ok, unresolved, start_ok, recipient, amount) = crate::state::read_state(|s| {
         let st = &s.xrpl_icusd;
         let ctx = st.issuer_ctx();
         let Some(op) = st.op(op_id) else {
-            return (ctx, false, false, false, String::new(), 0);
+            return (ctx, false, false, false, String::new(), Ok(ExactIssuedAmount::ZERO));
         };
-        let claim = op.kind.claim_e8s();
-        let kind_ok = claim.is_some() && !op.phase.is_terminal();
+        // Delivery claims (borrow/import) and refunds share the pipeline; both pay an
+        // EXACT amount from the single issuer sequencer.
+        let payout = op.kind.payout_amount();
+        let kind_ok = payout.is_some() && !op.phase.is_terminal();
         let unresolved = op.unresolved_attempt().is_some();
-        let start_ok = op.phase == Phase::IssuePrepared
+        let start_ok = op.phase == op.kind.ready_phase()
             && !op.delivery_halted
             && op.resolution.is_none()
             && st.issuer_lease.is_none();
@@ -1005,7 +1007,7 @@ pub async fn drive_delivery(op_id: OperationId) -> Result<ReconcileEffect, XrplI
             unresolved,
             start_ok,
             op.kind.recipient().unwrap_or_default().to_string(),
-            claim.unwrap_or(0),
+            payout.unwrap_or(Ok(ExactIssuedAmount::ZERO)),
         )
     });
     let ctx = ctx?;
@@ -1018,6 +1020,7 @@ pub async fn drive_delivery(op_id: OperationId) -> Result<ReconcileEffect, XrplI
     if !start_ok || ctx.settlement_paused {
         return Ok(ReconcileEffect::None);
     }
+    let amount = amount.map_err(|e| XrplIcusdError::InvalidArgument(format!("amount: {e}")))?;
     // ---- start a new attempt ----
     let _issuer = super::IssuerGuard::acquire()?;
     if !crate::state::read_state(|s| coverage_permits(&s.xrpl_icusd, now())) {
@@ -1033,10 +1036,27 @@ pub async fn drive_delivery(op_id: OperationId) -> Result<ReconcileEffect, XrplI
     }
     let asset = IssuedAsset::icusd(&ctx.issuer_address)
         .map_err(|e| XrplIcusdError::Internal(e.to_string()))?;
+    // A system refund whose sender no longer has a trust line stays pending (never
+    // dropped), but must not cost a paid quorum read every tick: re-check hourly.
+    let system_refund = crate::state::read_state(|s| {
+        s.xrpl_icusd
+            .op(op_id)
+            .is_some_and(|o| o.owner == system_owner() && matches!(o.kind, OperationKind::Refund { .. }))
+    });
+    if system_refund
+        && !super::throttle_ok(
+            super::THROTTLE_KIND_REFUND_CHECK,
+            &op_id.to_be_bytes(),
+            now(),
+            super::REFUND_CHECK_GAP_NS,
+        )
+    {
+        return Ok(ReconcileEffect::None);
+    }
     let proof = fetch_trust_line(ctx.network, &recipient, &asset)
         .await
         .map_err(unavailable)?;
-    if let Err(e) = check_trust_line(proof.line.as_ref(), amount_e8s) {
+    if let Err(e) = check_trust_line_exact(proof.line.as_ref(), &amount) {
         crate::state::mutate_state(|s| {
             if let Ok(op) = s.xrpl_icusd.op_mut(op_id) {
                 op.push_note(format!("delivery waiting on trust line: {e}"));
@@ -1071,10 +1091,16 @@ pub async fn drive_delivery(op_id: OperationId) -> Result<ReconcileEffect, XrplI
         });
         return Ok(ReconcileEffect::None);
     }
-    let amount = ExactIssuedAmount::try_from_e8s(amount_e8s)
-        .map_err(|e| XrplIcusdError::InvalidArgument(format!("amount: {e}")))?;
+    let purpose = if matches!(
+        crate::state::read_state(|s| s.xrpl_icusd.op(op_id).map(|o| o.kind.tag())),
+        Some(OperationKindTag::Refund)
+    ) {
+        AttemptPurpose::Refund
+    } else {
+        AttemptPurpose::Delivery
+    };
     let attempt = prepare_attempt(&PrepareInput {
-        purpose: AttemptPurpose::Delivery,
+        purpose,
         tx: AttemptTx::Payment {
             destination: recipient,
             amount,
@@ -1098,6 +1124,16 @@ pub fn check_trust_line(
     line: Option<&crate::chains::xrp::issued_rpc::TrustLine>,
     amount_e8s: u64,
 ) -> Result<(), XrplIcusdError> {
+    let amount = ExactIssuedAmount::try_from_e8s(amount_e8s)
+        .map_err(|e| XrplIcusdError::InvalidArgument(format!("amount: {e}")))?;
+    check_trust_line_exact(line, &amount)
+}
+
+/// [`check_trust_line`] for an exact (possibly sub-e8s) amount, as refunds need.
+pub fn check_trust_line_exact(
+    line: Option<&crate::chains::xrp::issued_rpc::TrustLine>,
+    amount: &ExactIssuedAmount,
+) -> Result<(), XrplIcusdError> {
     let line = line.ok_or_else(|| {
         XrplIcusdError::TrustLineMissing("the recipient has no trust line for icUSD".into())
     })?;
@@ -1106,12 +1142,10 @@ pub fn check_trust_line(
             "the issuer has frozen this trust line".into(),
         ));
     }
-    let amount = ExactIssuedAmount::try_from_e8s(amount_e8s)
-        .map_err(|e| XrplIcusdError::InvalidArgument(format!("amount: {e}")))?;
     let room = line.limit.checked_sub(&line.balance).map_err(|_| {
         XrplIcusdError::TrustLineMissing("trust-line limit/balance cannot be evaluated exactly".into())
     })?;
-    let after = room.checked_sub(&amount).map_err(|_| {
+    let after = room.checked_sub(amount).map_err(|_| {
         XrplIcusdError::TrustLineMissing("trust-line room cannot be evaluated exactly".into())
     })?;
     if after.is_negative() {

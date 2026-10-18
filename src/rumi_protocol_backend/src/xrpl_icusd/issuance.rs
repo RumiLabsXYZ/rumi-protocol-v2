@@ -321,7 +321,19 @@ pub fn advance_resolution(
         return Ok(false);
     };
     if job.is_proven_done() {
-        op.phase = Phase::ClaimResolved;
+        let paid = job.amount_e8s;
+        // A held repayment keeps what was NOT returned (sub-e8s, exactly); a delivery
+        // claim is resolved in full.
+        let mut leftover = false;
+        if let OperationKind::Repayment { held, .. } = &mut op.kind {
+            if let Ok(h) = held.checked_sub(&WideAmount::from_e8s(paid)) {
+                *held = h;
+            }
+            leftover = !held.is_zero();
+            // A repayment's resolution is complete; a delivery claim stays terminal.
+            op.resolution = None;
+        }
+        op.phase = if leftover { Phase::Held } else { Phase::ClaimResolved };
         op.updated_at_ns = now_ns;
         return Ok(true);
     }

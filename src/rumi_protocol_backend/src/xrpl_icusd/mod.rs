@@ -14,12 +14,16 @@
 pub mod borrow;
 pub mod issuance;
 pub mod ledger;
+pub mod observer;
+pub mod repay;
 pub mod settlement;
 pub mod state;
 pub mod types;
 
 #[cfg(test)]
 mod borrow_tests;
+#[cfg(test)]
+mod repay_tests;
 #[cfg(test)]
 mod tests;
 
@@ -69,6 +73,12 @@ pub const NEW_REQUEST_GAP_NS: u64 = 10_000_000_000;
 pub const RESUME_GAP_NS: u64 = 30_000_000_000;
 const THROTTLE_KIND_NEW: u8 = 1;
 const THROTTLE_KIND_RESUME: u8 = 2;
+const THROTTLE_KIND_OBSERVE: u8 = 3;
+const THROTTLE_KIND_REFUND_CHECK: u8 = 4;
+/// A system refund waiting on the sender's trust line is re-checked at most hourly.
+pub const REFUND_CHECK_GAP_NS: u64 = 3_600_000_000_000;
+/// Minimum gap between two accepted wallet hints per repayment (each costs outcalls).
+pub const OBSERVE_GAP_NS: u64 = 10_000_000_000;
 const THROTTLE_MAX_ENTRIES: usize = 4_096;
 
 /// True (and records `now_ns`) when `min_gap_ns` has elapsed since the last accepted
@@ -350,6 +360,9 @@ pub async fn run_op_step(op_id: OperationId) -> Result<(), XrplIcusdError> {
     if matches!(advance, Ok(borrow::BorrowAdvance::Committed)) {
         drive_ic_jobs(op_id).await;
     }
+    // A repayment: settle a verified return against the debt, prove the burn, apply
+    // or cancel, distribute the interest share (all idempotent, state-driven).
+    repay::drive_repayment(op_id).await;
     mutate_state(|s| {
         let st = &mut s.xrpl_icusd;
         let _ = issuance::advance_import(st, op_id, now());
@@ -365,7 +378,7 @@ pub async fn run_op_step(op_id: OperationId) -> Result<(), XrplIcusdError> {
 }
 
 /// Send / scan / verify every unresolved ledger job of one operation.
-async fn drive_ic_jobs(op_id: OperationId) {
+pub(crate) async fn drive_ic_jobs(op_id: OperationId) {
     let job_count = read_state(|s| s.xrpl_icusd.op(op_id).map(|o| o.ic_jobs.len())).unwrap_or(0);
     for idx in 0..job_count {
         let (resolved, done, verified) = read_state(|s| {
@@ -499,6 +512,11 @@ pub async fn resolve_claim(
     if caller == Principal::anonymous() {
         return Err(XrplIcusdError::AnonymousCaller);
     }
+    // Repayment and refund claims have their own resolution rules.
+    let kind = read_state(|s| s.xrpl_icusd.op_for_owner(&caller, arg.operation_id).map(|o| o.kind.tag()))?;
+    if matches!(kind, OperationKindTag::Repayment | OperationKindTag::Refund) {
+        return repay::resolve_repayment_claim(caller, arg).await;
+    }
     let plan = read_state(|s| issuance::plan_resolution(&s.xrpl_icusd, &caller, &arg))?;
     match plan {
         issuance::ResolutionPlan::Reissue => {
@@ -568,6 +586,8 @@ pub fn next_tick_delay(has_work: bool, progressed: bool, current_secs: u64) -> O
 pub enum TickItem {
     Op(OperationId),
     Setup,
+    /// Issuer-history maintenance; present ONLY while a repayment intent is open.
+    Observer,
 }
 
 /// Which operations (and the setup attempt) the next pass should touch: at most
@@ -580,6 +600,9 @@ pub fn plan_tick(st: &XrplIcusdState, max: usize, after: OperationId) -> Vec<Tic
         .is_some_and(|a| a.status.holds_lease())
     {
         items.push(TickItem::Setup);
+    }
+    if st.observer_has_work() {
+        items.push(TickItem::Observer);
     }
     let later = st.operations.range(after.saturating_add(1)..);
     let earlier = st.operations.range(..=after);
@@ -594,7 +617,7 @@ pub fn plan_tick(st: &XrplIcusdState, max: usize, after: OperationId) -> Vec<Tic
     items
 }
 
-fn progress_fingerprint(st: &XrplIcusdState) -> (u64, u64, bool) {
+fn progress_fingerprint(st: &XrplIcusdState) -> (u64, u64, bool, u64) {
     (
         st.operations
             .values()
@@ -603,6 +626,7 @@ fn progress_fingerprint(st: &XrplIcusdState) -> (u64, u64, bool) {
             .unwrap_or(0),
         st.config.config_version,
         st.issuer_lease.is_some(),
+        st.observer.progress,
     )
 }
 
@@ -676,6 +700,9 @@ pub async fn xrpl_icusd_tick() {
             TickItem::Op(id) => {
                 TICK_CURSOR.with(|c| c.set(id));
                 let _ = run_op_step(id).await;
+            }
+            TickItem::Observer => {
+                let _ = observer::observer_pass().await;
             }
         }
     }

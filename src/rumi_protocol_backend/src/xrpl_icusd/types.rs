@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::chains::xrp::issued_amount::{AmountError, ExactIssuedAmount};
-use crate::chains::xrp::issued_rpc::ObligationTotal;
+use crate::chains::xrp::issued_rpc::{IssuerHistoryCursor, ObligationTotal};
 use crate::chains::xrp::network::XrplNetwork;
 
 pub type OperationId = u64;
@@ -234,6 +234,12 @@ impl WideAmount {
             whole_e8s: whole,
             frac_units: frac % UNITS_PER_E8S,
         })
+    }
+
+    /// Exact XRPL amount, or an error when it needs more than 16 significant digits
+    /// (never rounded).
+    pub fn to_exact_issued(&self) -> Result<ExactIssuedAmount, AmountError> {
+        ExactIssuedAmount::parse(&self.to_decimal_string())
     }
 
     /// Whole e8s, rounded UP (the conservative backing requirement).
@@ -627,6 +633,10 @@ pub struct VerifiedReceiptRef {
     pub ledger_index: u32,
     pub delivered: ExactIssuedAmount,
     pub applied_e8s: u64,
+    /// The signed ceiling (`max_e8s`) of the intent this receipt was attached under:
+    /// debt application never exceeds the sum of these, whatever was delivered.
+    #[serde(default)]
+    pub authorized_e8s: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -637,6 +647,12 @@ pub struct CutoffSnapshot {
     pub repay_e8s: u64,
     pub interest_share_e8s: u64,
     pub last_accrual_time: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingInterest {
+    pub collateral_type: Principal,
+    pub amount_e8s: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -665,8 +681,14 @@ pub enum OperationKind {
         receipts: Vec<VerifiedReceiptRef>,
         cutoff: Option<CutoffSnapshot>,
         applied_e8s: u64,
-        held: ExactIssuedAmount,
+        /// Exact value received and NOT (or not yet) part of the admitted burn: the
+        /// payer's backed, owned claim. Wide exact accumulator (never `Inexact`).
+        held: WideAmount,
         children: Vec<OperationId>,
+        /// Interest share of a settled burn still to be distributed (live only;
+        /// replay never sets it, so a rebuilt state cannot re-mint).
+        #[serde(default)]
+        pending_interest: Option<PendingInterest>,
     },
     /// Unattributed or held value returned on the XRPL.
     Refund {
@@ -708,6 +730,26 @@ impl OperationKind {
             }
             OperationKind::Refund { recipient, .. } => Some(recipient),
             OperationKind::Repayment { payer, .. } => Some(payer),
+        }
+    }
+    /// The exact token amount the issuer pays out for this operation, when it is a
+    /// payout operation (delivery claims and refunds).
+    pub fn payout_amount(&self) -> Option<Result<ExactIssuedAmount, AmountError>> {
+        match self {
+            OperationKind::Borrow { net_e8s, .. } => Some(ExactIssuedAmount::try_from_e8s(*net_e8s)),
+            OperationKind::Import { amount_e8s, .. } => {
+                Some(ExactIssuedAmount::try_from_e8s(*amount_e8s))
+            }
+            OperationKind::Refund { amount, .. } => Some(Ok(*amount)),
+            OperationKind::Repayment { .. } => None,
+        }
+    }
+    /// The phase in which a payout operation waits to start (or restart) an issuer
+    /// attempt.
+    pub fn ready_phase(&self) -> Phase {
+        match self {
+            OperationKind::Refund { .. } => Phase::RefundPending,
+            _ => Phase::IssuePrepared,
         }
     }
 }
@@ -880,6 +922,45 @@ pub struct ResolveClaimArg {
     pub action: ClaimAction,
 }
 
+/// Request to prepare a repayment intent: the user will return `max_e8s` of XRPL icUSD
+/// from `payer` to the issuer with the returned destination tag.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct PrepareRepaymentArg {
+    pub vault_id: u64,
+    pub max_e8s: u64,
+    pub payer: String,
+    pub network: XrplNetwork,
+    pub request_nonce: Vec<u8>,
+    pub full_close: bool,
+    /// Bind this intent to a HELD parent repayment (same owner, vault, payer, network
+    /// and asset): its verified receipt is combined with the parent exactly once.
+    pub top_up_operation: Option<OperationId>,
+}
+
+/// What the wallet must sign. `payment_json` is the exact XRPL `Payment` (issued
+/// currency, to the issuer, with `DestinationTag`, no `Paths`, no `tfPartialPayment`).
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RepaymentIntentView {
+    pub operation_id: OperationId,
+    pub issuer: String,
+    /// 160-bit currency hex.
+    pub currency: String,
+    pub payer: String,
+    pub destination_tag: u32,
+    pub max_e8s: u64,
+    pub network: XrplNetwork,
+    pub payment_json: String,
+    pub quote_time_ns: u64,
+}
+
+/// A wallet-reported transaction hash: a LOOKUP KEY only. The backend re-reads and
+/// verifies the transaction itself.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ObserveRepaymentArg {
+    pub operation_id: OperationId,
+    pub tx_hash: String,
+}
+
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum NextAction {
     None,
@@ -927,6 +1008,73 @@ pub struct IssuerSetupStatus {
     pub issuer_address: Option<String>,
     pub attempt_status: Option<AttemptStatus>,
     pub note: Option<String>,
+}
+
+// ----------------------------------------------------------------------------------
+// Returns, quarantine and the issuer-history observer (Task 5)
+// ----------------------------------------------------------------------------------
+
+/// Owner of operations the backend creates by itself (unattributed refunds). It can
+/// never be a caller, so no principal can drive or resolve such an operation.
+pub fn system_owner() -> Principal {
+    Principal::management_canister()
+}
+
+/// What happened to a value-bearing return (one that reduced `O`). Keyed by
+/// `(network, issuer, tx hash)`: a return is consumed exactly once.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ReturnDisposition {
+    /// Attached to a repayment intent.
+    Attributed { op_id: OperationId },
+    /// A top-up child's receipt combined with its held parent.
+    MergedIntoParent { child: OperationId, parent: OperationId },
+    /// Not attributable (unknown/consumed tag, payer mismatch, anomalous payment):
+    /// value held in a refund operation for the verified sender.
+    Refund { op_id: OperationId, reason: String },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ProcessedReturn {
+    pub disposition: ReturnDisposition,
+    pub ledger_index: u32,
+    pub sender: String,
+    pub destination_tag: Option<u32>,
+    /// Exact decimal text of the delivered amount.
+    pub delivered: String,
+    pub recorded_at_ns: u64,
+}
+
+/// Evidence for a payment that had NO financial effect (wrong asset, bad receipt).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct QuarantineRecord {
+    pub tx_hash: String,
+    pub ledger_index: Option<u32>,
+    pub sender: Option<String>,
+    pub destination_tag: Option<u32>,
+    pub reason: String,
+    pub at_ns: u64,
+}
+
+pub const MAX_QUARANTINE_LOG: usize = 200;
+pub const MAX_PROCESSED_RETURNS: usize = 100_000;
+/// Returns below this (e8s) are retained exactly but never auto-refunded: a refund
+/// transaction costs the issuer XRP, so dust must not be a cost-symmetric drain.
+pub const MIN_AUTO_REFUND_E8S: u64 = 1_000;
+/// An unused repayment intent expires (the destination tag is never reassigned).
+pub const INTENT_TTL_NS: u64 = 7 * 24 * 3_600 * 1_000_000_000;
+
+/// Durable issuer-history position. `next_ledger_min` is the first ledger not yet
+/// fully processed; `cursor` is an in-progress `[min, max]` interval with rippled's
+/// continuation marker. Neither moves over unprocessed history.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct ObserverState {
+    pub next_ledger_min: Option<u32>,
+    pub cursor: Option<IssuerHistoryCursor>,
+    /// Bumped whenever a pass made durable progress (drives the tick back-off).
+    pub progress: u64,
+    pub last_pass_ns: u64,
+    pub last_note: Option<String>,
 }
 
 // ----------------------------------------------------------------------------------

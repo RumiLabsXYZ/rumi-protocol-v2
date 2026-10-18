@@ -1305,6 +1305,10 @@ export type NextAction = { 'ContactOperator' : null } |
   { 'None' : null } |
   { 'Wait' : null } |
   { 'ResolveClaim' : null };
+export interface ObserveRepaymentArg {
+  'operation_id' : bigint,
+  'tx_hash' : string,
+}
 export interface OpenVaultAndBorrowV2Args {
   'collateral_amount' : bigint,
   'operation_id' : bigint,
@@ -1438,6 +1442,15 @@ export type Phase = { 'EscrowMintPending' : null } |
   { 'Signed' : null } |
   { 'IssuePrepared' : null } |
   { 'DebtCommitted' : null };
+export interface PrepareRepaymentArg {
+  'request_nonce' : Uint8Array | number[],
+  'top_up_operation' : [] | [bigint],
+  'network' : XrplNetwork,
+  'vault_id' : bigint,
+  'payer' : string,
+  'max_e8s' : bigint,
+  'full_close' : boolean,
+}
 export interface PreparedRedemptionOffer {
   'queue' : RedemptionQueue,
   'quote' : Result_12,
@@ -1686,6 +1699,17 @@ export type ReleaseReason = { 'MintFailed' : null } |
 export interface RepayAndCloseSuccess {
   'collateral_return_block_index' : [] | [bigint],
   'repay_block_index' : bigint,
+}
+export interface RepaymentIntentView {
+  'payment_json' : string,
+  'quote_time_ns' : bigint,
+  'network' : XrplNetwork,
+  'operation_id' : bigint,
+  'destination_tag' : number,
+  'issuer' : string,
+  'currency' : string,
+  'payer' : string,
+  'max_e8s' : bigint,
 }
 export interface ReserveBalance {
   'balance' : bigint,
@@ -2462,6 +2486,8 @@ export type XrplIcusdEvent = {
       'settled_at' : bigint,
     }
   };
+export type XrplIntentResult = { 'Ok' : RepaymentIntentView } |
+  { 'Err' : XrplIcusdError };
 export type XrplNetwork = { 'Mainnet' : null } |
   { 'Testnet' : null };
 export type XrplOperationResult = { 'Ok' : OperationView } |
@@ -2823,6 +2849,10 @@ export interface _SERVICE {
     [number, [] | [bigint], number],
     ChainVaultPage
   >,
+  'observe_xrpl_repayment' : ActorMethod<
+    [ObserveRepaymentArg],
+    XrplOperationResult
+  >,
   'open_chain_vault' : ActorMethod<[number, bigint, bigint, string], Result>,
   'open_chain_vault_evm' : ActorMethod<
     [VaultIntent, Uint8Array | number[]],
@@ -2847,6 +2877,10 @@ export interface _SERVICE {
   'partial_liquidate_vault' : ActorMethod<[VaultArg], Result_4>,
   'partial_repay_to_vault' : ActorMethod<[VaultArg], Result>,
   'prepare_redemption_offer' : ActorMethod<[bigint], Result_20>,
+  'prepare_xrpl_repayment' : ActorMethod<
+    [PrepareRepaymentArg],
+    XrplIntentResult
+  >,
   'provide_liquidity' : ActorMethod<[bigint], Result>,
   'rearm_unsent_legacy_three_usd_refund' : ActorMethod<[bigint], Result_1>,
   'rearm_unsent_v2_default_account_refund' : ActorMethod<[bigint], Result_1>,

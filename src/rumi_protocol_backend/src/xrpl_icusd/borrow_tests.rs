@@ -24,20 +24,20 @@ use crate::state::{
 use crate::vault::{admit_borrow, BorrowReserve, Vault};
 use crate::ProtocolError;
 
-const E8: u64 = 100_000_000;
-const NOW: u64 = 1_000_000_000_000;
+pub(super) const E8: u64 = 100_000_000;
+pub(super) const NOW: u64 = 1_000_000_000_000;
 
-fn treasury() -> Principal {
+pub(super) fn treasury() -> Principal {
     Principal::from_slice(&[0x77; 10])
 }
-fn sp() -> Principal {
+pub(super) fn sp() -> Principal {
     Principal::from_slice(&[0x53; 10])
 }
-fn xrp() -> Principal {
+pub(super) fn xrp() -> Principal {
     xrp_collateral_principal()
 }
 
-fn xrp_vault(id: u64, owner_p: Principal, drops: u64) -> Vault {
+pub(super) fn xrp_vault(id: u64, owner_p: Principal, drops: u64) -> Vault {
     Vault {
         owner: owner_p,
         vault_id: id,
@@ -54,7 +54,7 @@ fn xrp_vault(id: u64, owner_p: Principal, drops: u64) -> Vault {
 /// 1,000 icUSD ceiling), vault 1 (owner 1, 1,000 XRP), vault 3 (owner 3) and vault 4
 /// (owner 4) of the same size, an ICP vault 2 (owner 2), a ready XRPL lane, a treasury
 /// and a registered stability pool.
-fn world() -> State {
+pub(super) fn world() -> State {
     let mut state = State::from(crate::InitArg {
         xrc_principal: Principal::anonymous(),
         icusd_ledger_principal: Principal::from_slice(&[0x10; 10]),
@@ -167,11 +167,11 @@ fn borrow_terms(id: OperationId) -> (u64, u64, u64) {
     })
 }
 
-fn set_xrp_cfg(f: impl FnOnce(&mut crate::state::CollateralConfig)) {
+pub(super) fn set_xrp_cfg(f: impl FnOnce(&mut crate::state::CollateralConfig)) {
     mutate_state(|s| f(s.collateral_configs.get_mut(&xrp()).unwrap()));
 }
 
-fn debt_of(vault: u64) -> u64 {
+pub(super) fn debt_of(vault: u64) -> u64 {
     read_state(|s| s.vault_id_to_vaults[&vault].borrowed_icusd_amount.to_u64())
 }
 

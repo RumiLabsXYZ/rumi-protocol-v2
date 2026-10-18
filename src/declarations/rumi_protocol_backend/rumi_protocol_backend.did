@@ -1983,6 +1983,27 @@ type IssuerSetupStep = variant {
   TransferRate;
 };
 type NextAction = variant { ContactOperator; None; Wait; ResolveClaim };
+type ObserveRepaymentArg = record { tx_hash : text; operation_id : nat64 };
+type PrepareRepaymentArg = record {
+  request_nonce : blob;
+  network : XrplNetwork;
+  vault_id : nat64;
+  max_e8s : nat64;
+  full_close : bool;
+  payer : text;
+  top_up_operation : opt nat64;
+};
+type RepaymentIntentView = record {
+  issuer : text;
+  currency : text;
+  network : XrplNetwork;
+  max_e8s : nat64;
+  payer : text;
+  payment_json : text;
+  operation_id : nat64;
+  destination_tag : nat32;
+  quote_time_ns : nat64;
+};
 type OperationKindTag = variant { Repayment; Refund; Import; Borrow };
 type OperationPage = record {
   next_cursor : opt nat64;
@@ -2123,6 +2144,7 @@ type XrplNetwork = variant { Mainnet; Testnet };
 type XrplAccountResult = variant { Ok : Account; Err : XrplIcusdError };
 type XrplConfigResult = variant { Ok : PublicXrplIcusdConfig; Err : XrplIcusdError };
 type XrplCoverageResult = variant { Ok : CoverageReport; Err : XrplIcusdError };
+type XrplIntentResult = variant { Ok : RepaymentIntentView; Err : XrplIcusdError };
 type XrplOperationResult = variant { Ok : OperationView; Err : XrplIcusdError };
 type XrplSetupResult = variant { Ok : IssuerSetupStatus; Err : XrplIcusdError };
 
@@ -2133,6 +2155,8 @@ service : (ProtocolArg) -> {
   get_xrpl_icusd_config : () -> (PublicXrplIcusdConfig) query;
   get_xrpl_icusd_coverage : () -> (XrplCoverageResult);
   issue_xrpl_from_canonical : (IssueFromCanonicalArg) -> (XrplOperationResult);
+  observe_xrpl_repayment : (ObserveRepaymentArg) -> (XrplOperationResult);
+  prepare_xrpl_repayment : (PrepareRepaymentArg) -> (XrplIntentResult);
   resolve_xrpl_claim : (ResolveClaimArg) -> (XrplOperationResult);
   resume_xrpl_operation : (nat64) -> (XrplOperationResult);
   run_xrpl_issuer_setup_step : () -> (XrplSetupResult);
