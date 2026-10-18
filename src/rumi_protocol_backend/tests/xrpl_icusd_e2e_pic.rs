@@ -273,6 +273,7 @@ struct Decoded {
     account: [u8; 20],
     destination: Option<[u8; 20]>,
     amount: Option<(ExactIssuedAmount, [u8; 20], [u8; 20])>,
+    native_drops: Option<u64>,
     fee_drops: u64,
     pubkey: Vec<u8>,
     signature: Vec<u8>,
@@ -325,6 +326,8 @@ fn decode_blob(blob: &[u8]) -> Decoded {
                     i += 8;
                     if f == 8 {
                         d.fee_drops = raw & 0x3fff_ffff_ffff_ffff;
+                    } else if f == 1 {
+                        d.native_drops = Some(raw & 0x3fff_ffff_ffff_ffff);
                     }
                 } else {
                     let wire = u64::from_be_bytes(blob[i..i + 8].try_into().unwrap());
@@ -393,6 +396,8 @@ struct World {
     history: Vec<HistTx>,
     pending: Vec<(String, Decoded)>,
     submits: Vec<(String, Vec<u8>, Decoded)>,
+    /// Native-XRP payments from OTHER accounts (collateral custody settlements): hash -> drops.
+    native_submits: BTreeMap<String, u64>,
     auto_validate: bool,
     submit_mode: SubmitMode,
     complete_ledgers: Option<String>,
@@ -419,6 +424,7 @@ impl World {
             history: vec![],
             pending: vec![],
             submits: vec![],
+            native_submits: BTreeMap::new(),
             auto_validate: true,
             submit_mode: SubmitMode::Include,
             complete_ledgers: None,
@@ -672,6 +678,12 @@ impl World {
                         "ledger_hash": ledger_hash_of(t.ledger), "validated": true, "meta": meta
                     } }));
                 }
+                if let Some(drops) = self.native_submits.get(&hash) {
+                    return Some(json!({ "result": {
+                        "validated": true, "hash": hash, "ledger_index": self.ledger,
+                        "meta": { "TransactionResult": "tesSUCCESS", "delivered_amount": drops.to_string() }
+                    } }));
+                }
                 if let Some((h, d)) = self.pending.iter().find(|(h, _)| *h == hash) {
                     let _ = d;
                     return Some(json!({ "result": {
@@ -690,6 +702,11 @@ impl World {
                 let blob = hex::decode(blob_hex).expect("submit blob hex");
                 let hash = hex::encode_upper(tx_hash(&blob));
                 let d = decode_blob(&blob);
+                if d.account != account_id_from_classic_address(&self.issuer).unwrap_or([0; 20]) {
+                    // A native-XRP custody settlement from the collateral rail.
+                    self.native_submits.insert(hash.clone(), d.native_drops.unwrap_or(0));
+                    return Some(json!({ "result": { "engine_result": "tesSUCCESS", "tx_json": { "hash": hash } } }));
+                }
                 // Verify the threshold signature host-side: the issuer really signed it.
                 let msg = [&[0x53, 0x54, 0x58, 0x00][..], &d.unsigned].concat();
                 assert_eq!(d.pubkey.len(), 33, "ed25519 signing key carries the 0xED prefix");
@@ -2249,4 +2266,118 @@ fn excess_return_is_a_backed_owned_claim_the_owner_can_take_as_canonical_icusd()
     assert!(v.held_exact_amount.is_none() || v.held_exact_amount.as_deref() == Some("0"));
     let cov = fx.coverage();
     assert_eq!(format!("{:?}", cov.status), "Covered", "{cov:?}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3. Liquidation coexistence (R7)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+impl Fx {
+    fn xrp_claims_full(&self) -> Vec<(u64, XrpClaimView)> {
+        match self.pic.query_call(self.backend, dev(), "get_xrp_claims", Encode!().unwrap()) {
+            Ok(WasmResult::Reply(b)) => Decode!(&b, Vec<(u64, XrpClaimView)>).unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn resolve(&self, who: Principal, op: u64, action: rumi_protocol_backend::xrpl_icusd::ClaimAction) -> Result<OperationView, XrplIcusdError> {
+        self.lane(
+            who,
+            "resolve_xrpl_claim",
+            Encode!(&rumi_protocol_backend::xrpl_icusd::ResolveClaimArg { operation_id: op, action }).unwrap(),
+        )
+    }
+}
+
+#[test]
+fn manual_liquidation_with_xrpl_supply_outstanding_keeps_backing_and_a_late_return_becomes_a_payer_claim() {
+    // 199 XRP @ $0.50, XRPL borrow gross 60 (CR ~166%).
+    let (fx, vault) = lane_fx(200, 0.0);
+    borrow_delivered(&fx, vault, 60 * E8, 1);
+    assert_eq!(fx.escrow_bal(), 5_940_000_000);
+    assert_eq!(fx.bal(treasury(), None), 60_000_000);
+    let holder_xrpl = fx.x.holder_balance(HOLDER);
+    assert_eq!(holder_xrpl, e8(5_940_000_000));
+    // A repayment intent is opened BEFORE the liquidation (the wallet pays later).
+    fx.gap();
+    let intent = fx.prepare_repay(vault, 40 * E8, false, 2, None).expect("prepare");
+
+    // Crash to $0.36 (inside the 0.7 sanity band): CR ~119% < 133%.
+    fx.set_xrp_price(36 * E8 / 100);
+    fx.mint_icusd(liquidator(), 70 * E8);
+    fx.approve(liquidator(), fx.backend, 70 * E8);
+    let supply_before = fx.supply();
+    let liq_bal_before = fx.bal(liquidator(), None);
+    let claims_before = fx.xrp_claims_full();
+    let r = fx
+        .legacy::<rumi_protocol_backend::SuccessWithFee>(
+            liquidator(),
+            "liquidate_vault_partial",
+            Encode!(&VaultArg { vault_id: vault, amount: 30 * E8 }).unwrap(),
+        )
+        .expect("partial liquidation is unaffected by outstanding XRPL supply");
+    let repaid = r.debt_liquidated_e8s.expect("debt liquidated");
+    assert!(repaid > 0 && repaid <= 30 * E8, "partial liquidation repaid {repaid}");
+    assert_eq!(fx.debt(vault), 60 * E8 - repaid, "debt reduced by exactly the liquidated amount");
+    let claim_id = r.xrp_claim_id.expect("manual native-XRP liquidation returns the liquidator claim");
+    let claims_after = fx.xrp_claims_full();
+    assert!(claims_after.len() > claims_before.len());
+    let (_, claim) = claims_after.iter().find(|(id, _)| *id == claim_id).expect("claim exists");
+    assert_eq!(claim.claimant, liquidator());
+    assert_eq!(Some(claim.drops), r.collateral_amount_received, "claim carries the exact reward");
+    assert_eq!(fx.supply(), supply_before - repaid, "liquidator's repayment retired exactly the liquidated debt");
+    assert!(liq_bal_before - fx.bal(liquidator(), None) >= repaid, "liquidator paid the debt");
+    // XRPL backing is untouched by the liquidation.
+    assert_eq!(fx.escrow_bal(), 5_940_000_000, "escrow backing intact");
+    assert_eq!(fx.x.holder_balance(HOLDER), holder_xrpl, "XRPL supply intact");
+    let cov = fx.coverage();
+    assert_eq!(format!("{:?}", cov.status), "Covered", "{cov:?}");
+    assert_eq!(cov.o_e8s, 5_940_000_000u128);
+
+    // Liquidate what the existing partial cap allows, until nothing more can be taken.
+    for _ in 0..4 {
+        let remaining = fx.debt(vault);
+        if remaining == 0 {
+            break;
+        }
+        let r = fx.legacy::<rumi_protocol_backend::SuccessWithFee>(
+            liquidator(),
+            "liquidate_vault_partial",
+            Encode!(&VaultArg { vault_id: vault, amount: remaining }).unwrap(),
+        );
+        if r.is_err() {
+            break;
+        }
+    }
+    let left = fx.debt(vault);
+    assert!(left < 30 * E8, "liquidations reduced the debt (left {left})");
+    assert_eq!(fx.escrow_bal(), 5_940_000_000, "escrow backing still intact after repeated liquidation");
+
+    // The wallet pays 40 AFTER the liquidations: only the debt that still exists can be
+    // repaid; the rest is held for its payer as a backed claim and nothing else burns.
+    let h = fx.x.holder_pays(&ReturnOpts::simple(HOLDER, intent.destination_tag, "40"));
+    let v = fx.observe(intent.operation_id, &h).expect("observe");
+    let v = drive_to(&fx, user(), v.operation_id, Phase::Held);
+    let applied = v.debt_applied_e8s;
+    assert_eq!(applied, left, "only the remaining debt was repaid");
+    assert_eq!(fx.debt(vault), 0);
+    let held = 40 * E8 - applied;
+    assert_eq!(v.held_exact_amount, Some(e8(held).to_decimal_string()), "the unused part of the receipt is an exact claim");
+    assert_eq!(fx.escrow_bal(), 5_940_000_000 - applied, "exactly the applied amount burned");
+    let cov = fx.coverage();
+    assert_eq!(format!("{:?}", cov.status), "Covered", "{cov:?}");
+    // The owner re-issues it to the payer on XRPL: the payer is made whole.
+    fx.gap();
+    fx.resolve(user(), v.operation_id, rumi_protocol_backend::xrpl_icusd::ClaimAction::ReissueXrpl)
+        .expect("resolve");
+    let want = e8(5_940_000_000 - applied);
+    for _ in 0..6 {
+        if fx.x.holder_balance(HOLDER) == want {
+            break;
+        }
+        fx.run(31, 3);
+        let _ = fx.resume(v.operation_id);
+    }
+    assert_eq!(fx.x.holder_balance(HOLDER), want, "the payer got the unused part back on XRPL");
+    assert_eq!(fx.escrow_bal(), 5_940_000_000 - applied, "XRPL supply == escrow: fully backed");
 }
