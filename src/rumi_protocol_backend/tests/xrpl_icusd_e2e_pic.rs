@@ -1992,3 +1992,63 @@ fn full_close_mid_burn_upgrade_stays_zero_after_settlement_across_interest_and_h
     assert_eq!((later.borrowed_icusd_amount, later.accrued_interest), (0, 0), "and stays zero through interest and harvest ticks");
     assert!(v.held_exact_amount.is_some(), "the margin stays an exact owned claim: {v:?}");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2. Accrued-interest full close: stale quote is held, then a top-up child closes
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn stale_full_close_quote_is_held_without_burn_then_topup_child_closes() {
+    let (fx, vault) = lane_fx(500, 1.0);
+    // Fixture floor: a vault may not be left with less than 1 icUSD of debt.
+    fx.plain_ok::<()>(dev(), "set_collateral_min_vault_debt", Encode!(&xrp_collateral_principal(), &E8).unwrap());
+    borrow_delivered(&fx, vault, 100 * E8, 1);
+    import_to_holder(&fx, 8 * E8, 9); // holder now has 107 on XRPL, escrow backs 107
+    assert_eq!(fx.escrow_bal(), 107 * E8);
+
+    // Quote the debt after 10 days of 100% APR interest.
+    fx.run(10 * DAY, 6);
+    let quote = fx.vault(user(), vault).unwrap().borrowed_icusd_amount;
+    assert!(quote > 100 * E8, "interest accrued: {quote}");
+    fx.gap();
+    let intent = fx.prepare_repay(vault, quote, true, 2, None).expect("prepare full close");
+    // One more day passes before the wallet payment lands: the quote is stale by ~0.28
+    // icUSD, so applying it would leave a forbidden sub-minimum debt (< min_vault_debt).
+    fx.run(DAY, 6);
+    let h1 = fx.x.holder_pays(&ReturnOpts::simple(HOLDER, intent.destination_tag, &e8(quote).to_decimal_string()));
+    let parent = fx.observe(intent.operation_id, &h1).expect("observe stale payment");
+    let parent = drive_to(&fx, user(), parent.operation_id, Phase::Held);
+    assert_eq!(parent.debt_applied_e8s, 0, "a payment below the debt at burn admission burns nothing");
+    assert_eq!(fx.escrow_bal(), 107 * E8, "no burn: escrow backing untouched");
+    let stale_debt = fx.vault(user(), vault).unwrap().borrowed_icusd_amount;
+    assert!(stale_debt > quote, "the vault kept accruing and is still indebted: {stale_debt} vs quote {quote}");
+    assert_eq!(parent.held_exact_amount.as_deref(), Some(e8(quote).to_decimal_string().as_str()), "the whole receipt is held, exactly");
+
+    // Top-up child bound to the held parent covers the shortfall (plus a margin).
+    fx.gap();
+    let need = stale_debt - quote;
+    let child_amount = need + 5_000_000; // + 0.05 icUSD margin for the seconds in between
+    let child = fx.prepare_repay(vault, child_amount, true, 3, Some(parent.operation_id)).expect("top-up intent");
+    assert_ne!(child.destination_tag, intent.destination_tag, "a new tag per intent, never reused");
+    let h2 = fx.x.holder_pays(&ReturnOpts::simple(HOLDER, child.destination_tag, &e8(child_amount).to_decimal_string()));
+    let c = fx.observe(child.operation_id, &h2).expect("observe top-up");
+    // The combined receipts close the vault; the parent carries the settlement.
+    for _ in 0..6 {
+        let after = fx.vault(user(), vault).unwrap();
+        if after.borrowed_icusd_amount == 0 {
+            break;
+        }
+        fx.run(31, 3);
+        let _ = fx.resume(parent.operation_id);
+        let _ = fx.resume(c.operation_id);
+    }
+    let after = fx.vault(user(), vault).unwrap();
+    assert_eq!((after.borrowed_icusd_amount, after.accrued_interest), (0, 0), "top-up closed the vault");
+    let burned = 107 * E8 - fx.escrow_bal();
+    assert!(burned >= stale_debt && burned <= stale_debt + 5_000_000, "burned exactly the debt at admission: {burned} vs {stale_debt}");
+    let p = fx.op(user(), parent.operation_id);
+    assert_eq!(p.debt_applied_e8s, burned, "applied once, on the parent");
+    // The unpaid margin is an exact claim; coverage still accounts for everything.
+    let cov = fx.coverage();
+    assert_eq!(format!("{:?}", cov.status), "Covered", "{cov:?}");
+}
