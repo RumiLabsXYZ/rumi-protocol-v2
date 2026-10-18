@@ -18,3 +18,13 @@ members = [
     "src/flaky_ledger",
 ]
 resolver = "2"
+
+# The backend's Wasm code section must stay under the IC limit of 12 MiB
+# (https://docs.internetcomputer.org/references/resource-limits.md). Measured
+# after the production `ic-wasm shrink` step: main 2c071994 at the default
+# opt-level was already 12,153,827 bytes (96.6% of the limit), and the XRPL
+# icUSD lane added about 1.9 MB. Optimising this one crate for size puts the
+# backend at 11,438,007 bytes. Other workspace canisters keep the default
+# profile, and `lto` was measured as larger, not smaller.
+[profile.release.package.rumi_protocol_backend]
+opt-level = "s"
