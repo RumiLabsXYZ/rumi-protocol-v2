@@ -3446,12 +3446,23 @@ pub struct XrpVaultOpenInfo {
 
 fn require_xrp_production_key() -> Result<(), ProtocolError> {
     let configured_key = crate::chains::xrp::config::xrp_schnorr_key_name();
-    if crate::chains::xrp::config::is_xrp_production_key_name(&configured_key) {
-        return Ok(());
+    // Fixture-only branch: the default-off `xrpl-testnet-fixture` artifact accepts
+    // `test_key_1` (and only that) so public-testnet collateral can be exercised.
+    // In every normal build this is the original production-key check, unchanged.
+    #[cfg(feature = "xrpl-testnet-fixture")]
+    {
+        return crate::chains::xrp::network::require_collateral_key(&configured_key)
+            .map_err(ProtocolError::GenericError);
     }
-    Err(ProtocolError::GenericError(format!(
-        "native-XRP operations require production Schnorr key key_1 (configured: {configured_key})"
-    )))
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
+    {
+        if crate::chains::xrp::config::is_xrp_production_key_name(&configured_key) {
+            return Ok(());
+        }
+        Err(ProtocolError::GenericError(format!(
+            "native-XRP operations require production Schnorr key key_1 (configured: {configured_key})"
+        )))
+    }
 }
 
 /// P3 (native-XRP collateral): open a vault in the open-then-verify staging area.

@@ -2333,6 +2333,10 @@ service : (ProtocolArg) -> {
   xrp_custody_address : (principal, nat64) -> (Result_2);
   xrp_settlement_address : () -> (Result_2);
   xrp_transform_account : (TransformArgs) -> (HttpResponse) query;
+  xrp_transform_account_tx : (TransformArgs) -> (HttpResponse) query;
+  xrp_transform_issued_tx : (TransformArgs) -> (HttpResponse) query;
+  xrp_transform_lines : (TransformArgs) -> (HttpResponse) query;
+  xrp_transform_server_info : (TransformArgs) -> (HttpResponse) query;
   xrp_transform_server : (TransformArgs) -> (HttpResponse) query;
   xrp_transform_submit : (TransformArgs) -> (HttpResponse) query;
   xrp_transform_tx : (TransformArgs) -> (HttpResponse) query;

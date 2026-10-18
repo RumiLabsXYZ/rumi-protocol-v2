@@ -9641,6 +9641,64 @@ fn xrp_transform_tx(
     rumi_protocol_backend::chains::xrp::xrp_rpc::transform_tx(args)
 }
 
+// Issued-token (icUSD) lane transforms: strict reducers (status pinned, only the
+// consumed fields kept) for trust lines, validated receipts, issuer history and
+// server_info coverage. Read-only; no money-moving endpoint is added here.
+
+#[query]
+fn xrp_transform_lines(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::issued_rpc::transform_lines(args)
+}
+
+#[query]
+fn xrp_transform_issued_tx(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::issued_rpc::transform_issued_tx(args)
+}
+
+#[query]
+fn xrp_transform_account_tx(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::issued_rpc::transform_account_tx(args)
+}
+
+#[query]
+fn xrp_transform_server_info(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::issued_rpc::transform_server_info(args)
+}
+
+// XRPL build-environment marker. The final Wasm carries a PUBLIC custom section
+// `rumi:xrpl-environment` whose value is `production` for every normal build and
+// `testnet-fixture` for the default-off `xrpl-testnet-fixture` artifact (the latter
+// also exports the `xrpl_fixture_environment_marker` query below). It is a
+// `link_section` static (not an `ic-wasm metadata` post-step) so it travels with the
+// code and survives `ic-wasm shrink`. `scripts/verify-xrpl-icusd-artifact.sh
+// --require-mainnet`, run by the normal backend build, rejects a fixture marker or
+// query; the fixture runner requires them.
+#[cfg(all(target_arch = "wasm32", not(feature = "xrpl-testnet-fixture")))]
+#[used]
+#[link_section = "icp:public rumi:xrpl-environment"]
+static XRPL_ENVIRONMENT_MARKER: [u8; 10] = *b"production";
+
+#[cfg(all(target_arch = "wasm32", feature = "xrpl-testnet-fixture"))]
+#[used]
+#[link_section = "icp:public rumi:xrpl-environment"]
+static XRPL_ENVIRONMENT_MARKER: [u8; 15] = *b"testnet-fixture";
+
+/// Feature-only (fixture artifact) marker query; absent from every normal build and
+/// deliberately not in the Candid file.
+#[cfg(feature = "xrpl-testnet-fixture")]
+#[query]
+fn xrpl_fixture_environment_marker() -> String {
+    rumi_protocol_backend::chains::xrp::network::build_environment().to_string()
+}
+
 /// Developer-only guard for the experimental XRP observability endpoints below.
 fn xrp_require_developer() -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
