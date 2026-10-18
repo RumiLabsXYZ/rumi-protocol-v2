@@ -90,7 +90,7 @@ const HELD_EPOCH_RECOVERY_MEM_ID: MemoryId = MemoryId::new(15);
 
 const WASM_PAGE_SIZE: u64 = 65_536; // 64 KiB
 
-type VMem = VirtualMemory<DefaultMemoryImpl>;
+pub(crate) type VMem = VirtualMemory<DefaultMemoryImpl>;
 
 // ── At-rest versioned wrappers ──────────────────────────────────────────────
 
@@ -919,6 +919,30 @@ pub fn append_point_entry(entry: PointEntry) {
             .append(&StoredPointEntry::V1(entry))
             .expect("failed to append point entry");
     });
+}
+
+// New region reserved exclusively for the additive outage reconciliation draft.
+// No State, OpenEpoch, or existing StableLog / map encoding changes.
+pub(crate) fn outage_reconciliation_memory() -> VMem {
+    MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(16)))
+}
+
+pub(crate) fn preflight_outage_credit(principal: &Principal, amount: u128) -> Result<(), String> {
+    let ps = get_principal_state(principal).ok_or("outage participant disappeared")?;
+    ps.total_points
+        .checked_add(amount)
+        .ok_or("outage credit would overflow total points")?;
+    Ok(())
+}
+
+pub(crate) fn commit_outage_credit(principal: &Principal, amount: u128) {
+    let mut ps = get_principal_state(principal)
+        .unwrap_or_else(|| ic_cdk::trap("outage participant disappeared after preflight"));
+    ps.total_points = ps
+        .total_points
+        .checked_add(amount)
+        .unwrap_or_else(|| ic_cdk::trap("outage total overflow after preflight"));
+    put_principal_state(ps);
 }
 
 pub fn point_ledger_len() -> u64 {
