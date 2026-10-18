@@ -499,6 +499,7 @@ type DeviceSpec = variant {
 type DexKind = variant { UniswapV2 };
 type ErrorInfo = record { description : text };
 type Event = variant {
+  xrpl_icusd : XrplIcusdEvent;
   set_borrowing_fee : record { rate : text };
   supply_invariant_self_check_failed : record {
     sum_chain_supplies_e8s : nat;
@@ -1903,7 +1904,232 @@ type ReserveRedemptionStatus = record {
   phase : text;
 };
 type Result_37 = variant { Ok : ReserveRedemptionAdminStatus; Err : ProtocolError };
+// ---- XRPL icUSD lane (additive) ----
+type AttemptStatus = variant {
+  Prepared;
+  FailedOnLedger : record { result : text };
+  Submitted;
+  Quarantined : record { reason : text };
+  Validated : record { ledger_index : nat32 };
+  Signed;
+  Expired : record { validated_ledger : nat32 };
+};
+type ClaimAction = variant {
+  ReissueXrpl;
+  CancelUnexecutedRepayment;
+  ReceiveCanonical;
+};
+type ConfigureXrplIcusdArg = record {
+  max_fee_drops : opt nat64;
+  network : opt XrplNetwork;
+  enabled : opt bool;
+  per_operation_cap_e8s : opt nat64;
+  outstanding_cap_e8s : opt nat64;
+  rounding_buffer_e8s : opt nat64;
+  policy : opt IssuerPolicy;
+};
+type CoverageReport = record {
+  status : CoverageStatus;
+  snapshot_e8s : opt nat;
+  snapshot_ledger_index : opt nat32;
+  in_flight_e8s : nat;
+  h_e8s : nat;
+  o_e8s : nat;
+  escrow_balance_e8s : nat;
+  surplus_e8s : nat;
+  required_e8s : nat;
+  buffer_e8s : nat;
+  d_e8s : nat;
+  ic_fee_reserve_e8s : nat;
+  r_e8s : nat;
+};
+type CoverageStatus = variant {
+  SnapshotDisagrees : record { detail : text };
+  Shortfall : record { short_e8s : nat };
+  Covered;
+  SnapshotMissing;
+};
+type IssueFromCanonicalArg = record {
+  request_nonce : blob;
+  recipient : text;
+  network : XrplNetwork;
+  amount_e8s : nat64;
+};
+type IssuerPolicy = record { no_freeze : bool; allow_clawback : bool };
+type IssuerSetupState = variant {
+  Configuring : record { step : IssuerSetupStep };
+  Ready : record { ledger_index : nat32 };
+  Verifying;
+  NotStarted;
+};
+type IssuerSetupStatus = record {
+  issuer_address : opt text;
+  note : opt text;
+  setup : IssuerSetupState;
+  attempt_status : opt AttemptStatus;
+};
+type IssuerSetupStep = variant {
+  AllowClawback;
+  NoFreeze;
+  RequireDest;
+  DefaultRipple;
+  TransferRate;
+};
+type NextAction = variant { ContactOperator; None; Wait; ResolveClaim };
+type OperationKindTag = variant { Repayment; Refund; Import; Borrow };
+type OperationPage = record {
+  next_cursor : opt nat64;
+  items : vec OperationView;
+};
+type OperationView = record {
+  observed_exact_amount : opt text;
+  kind : OperationKindTag;
+  net_e8s : nat64;
+  recipient : opt text;
+  network : XrplNetwork;
+  fee_e8s : nat64;
+  xrpl_tx_hashes : vec text;
+  updated_at_ns : nat64;
+  operation_id : nat64;
+  vault_id : opt nat64;
+  ic_ledger_blocks : vec nat64;
+  resolution : opt ClaimAction;
+  created_at_ns : nat64;
+  held_exact_amount : opt text;
+  next_action : NextAction;
+  notes : vec text;
+  debt_applied_e8s : nat64;
+  phase : Phase;
+  gross_e8s : nat64;
+  settlement_cutoff_ns : opt nat64;
+};
+type Phase = variant {
+  EscrowMintPending;
+  EscrowPullPending;
+  Held;
+  Delivered;
+  Complete;
+  ClaimResolved;
+  RefundPending;
+  EscrowBurnPending;
+  Prepared;
+  ReturnVerified;
+  Cancelled;
+  Submitted;
+  ReturnObserved;
+  IntentPrepared;
+  DebtApplied;
+  Signed;
+  IssuePrepared;
+  DebtCommitted;
+};
+type PublicXrplIcusdConfig = record {
+  settlement_paused : bool;
+  issuer_setup : IssuerSetupState;
+  verified_minting_account : opt Account;
+  escrow_account : Account;
+  issuer_address : opt text;
+  max_fee_drops : nat64;
+  network : opt XrplNetwork;
+  enabled : bool;
+  per_operation_cap_e8s : nat64;
+  outstanding_cap_e8s : nat64;
+  config_version : nat64;
+  currency_hex : text;
+  ready : bool;
+  issuance_paused : bool;
+  policy : opt IssuerPolicy;
+};
+type ReleaseReason = variant { MintFailed; DebtCommitted };
+type ResolveClaimArg = record { action : ClaimAction; operation_id : nat64 };
+type SetPausesArg = record {
+  settlement_paused : opt bool;
+  issuance_paused : opt bool;
+};
+type XrplIcusdError = variant {
+  Internal : text;
+  NotApplicable : text;
+  TrustLineMissing : text;
+  Paused : text;
+  Policy : text;
+  CoverageUnavailable : text;
+  Disabled : text;
+  Ambiguous : text;
+  NotFound;
+  WrongPhase : text;
+  Unauthorized;
+  InvalidArgument : text;
+  NonceConflict;
+  MintingAccount : text;
+  Unavailable : text;
+  LimitExceeded : text;
+  WrongNetwork : text;
+  AnonymousCaller;
+};
+type XrplIcusdEvent = variant {
+  RepayCancelled : record { at : nat64; op_id : nat64; vault_id : nat64 };
+  ReservationBegun : record {
+    request_nonce : blob;
+    op_id : nat64;
+    owner : principal;
+    net_e8s : nat64;
+    recipient : text;
+    network : XrplNetwork;
+    fee_e8s : nat64;
+    vault_id : nat64;
+    timestamp : nat64;
+    collateral_type : principal;
+    policy_version : nat64;
+    gross_e8s : nat64;
+  };
+  ReservationReleased : record {
+    op_id : nat64;
+    vault_id : nat64;
+    timestamp : nat64;
+    reason : ReleaseReason;
+  };
+  RepayCutoffBegun : record {
+    interest_share_e8s : nat64;
+    request_nonce : blob;
+    op_id : nat64;
+    owner : principal;
+    snapshot_accrued_e8s : nat64;
+    snapshot_debt_e8s : nat64;
+    network : XrplNetwork;
+    vault_id : nat64;
+    repay_e8s : nat64;
+    destination_tag : nat32;
+    payer : text;
+    max_e8s : nat64;
+    last_accrual_time : nat64;
+    cutoff_ns : nat64;
+    full_close : bool;
+  };
+  RepaySettled : record {
+    burn_block : nat64;
+    op_id : nat64;
+    vault_id : nat64;
+    settled_at : nat64;
+  };
+};
+type XrplNetwork = variant { Mainnet; Testnet };
+type XrplAccountResult = variant { Ok : Account; Err : XrplIcusdError };
+type XrplConfigResult = variant { Ok : PublicXrplIcusdConfig; Err : XrplIcusdError };
+type XrplCoverageResult = variant { Ok : CoverageReport; Err : XrplIcusdError };
+type XrplOperationResult = variant { Ok : OperationView; Err : XrplIcusdError };
+type XrplSetupResult = variant { Ok : IssuerSetupStatus; Err : XrplIcusdError };
+
 service : (ProtocolArg) -> {
+  configure_xrpl_icusd : (ConfigureXrplIcusdArg) -> (XrplConfigResult);
+  get_my_xrpl_operations : (opt nat64, nat32) -> (OperationPage) query;
+  get_xrpl_icusd_config : () -> (PublicXrplIcusdConfig) query;
+  get_xrpl_icusd_coverage : () -> (XrplCoverageResult);
+  issue_xrpl_from_canonical : (IssueFromCanonicalArg) -> (XrplOperationResult);
+  resolve_xrpl_claim : (ResolveClaimArg) -> (XrplOperationResult);
+  resume_xrpl_operation : (nat64) -> (XrplOperationResult);
+  run_xrpl_issuer_setup_step : () -> (XrplSetupResult);
+  set_xrpl_icusd_pauses : (SetPausesArg) -> (XrplConfigResult);
+  verify_xrpl_icusd_minting_account : () -> (XrplAccountResult);
   ack_vault_operation : (VaultOperationIdArg) -> (Result);
   acknowledge_three_usd_reserve_v2_client : () -> (Result_1);
   add_collateral_token : (AddCollateralArg) -> (Result_1);
@@ -2334,7 +2560,10 @@ service : (ProtocolArg) -> {
   xrp_settlement_address : () -> (Result_2);
   xrp_transform_account : (TransformArgs) -> (HttpResponse) query;
   xrp_transform_account_tx : (TransformArgs) -> (HttpResponse) query;
+  xrp_transform_fee : (TransformArgs) -> (HttpResponse) query;
   xrp_transform_issued_tx : (TransformArgs) -> (HttpResponse) query;
+  xrp_transform_issuer_account : (TransformArgs) -> (HttpResponse) query;
+  xrp_transform_issuer_objects : (TransformArgs) -> (HttpResponse) query;
   xrp_transform_lines : (TransformArgs) -> (HttpResponse) query;
   xrp_transform_server_info : (TransformArgs) -> (HttpResponse) query;
   xrp_transform_server : (TransformArgs) -> (HttpResponse) query;

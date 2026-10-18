@@ -217,6 +217,77 @@ export const idlFactory = ({ IDL }) => {
     'context' : IDL.Vec(IDL.Nat8),
     'response' : HttpResponse,
   });
+  const XrplNetwork = IDL.Variant({
+    'Mainnet' : IDL.Null,
+    'Testnet' : IDL.Null,
+  });
+  const IssuerPolicy = IDL.Record({
+    'no_freeze' : IDL.Bool,
+    'allow_clawback' : IDL.Bool,
+  });
+  const ConfigureXrplIcusdArg = IDL.Record({
+    'max_fee_drops' : IDL.Opt(IDL.Nat64),
+    'network' : IDL.Opt(XrplNetwork),
+    'enabled' : IDL.Opt(IDL.Bool),
+    'per_operation_cap_e8s' : IDL.Opt(IDL.Nat64),
+    'outstanding_cap_e8s' : IDL.Opt(IDL.Nat64),
+    'rounding_buffer_e8s' : IDL.Opt(IDL.Nat64),
+    'policy' : IDL.Opt(IssuerPolicy),
+  });
+  const IssuerSetupStep = IDL.Variant({
+    'AllowClawback' : IDL.Null,
+    'NoFreeze' : IDL.Null,
+    'RequireDest' : IDL.Null,
+    'DefaultRipple' : IDL.Null,
+    'TransferRate' : IDL.Null,
+  });
+  const IssuerSetupState = IDL.Variant({
+    'Configuring' : IDL.Record({ 'step' : IssuerSetupStep }),
+    'Ready' : IDL.Record({ 'ledger_index' : IDL.Nat32 }),
+    'Verifying' : IDL.Null,
+    'NotStarted' : IDL.Null,
+  });
+  const PublicXrplIcusdConfig = IDL.Record({
+    'settlement_paused' : IDL.Bool,
+    'issuer_setup' : IssuerSetupState,
+    'verified_minting_account' : IDL.Opt(Account),
+    'escrow_account' : Account,
+    'issuer_address' : IDL.Opt(IDL.Text),
+    'max_fee_drops' : IDL.Nat64,
+    'network' : IDL.Opt(XrplNetwork),
+    'enabled' : IDL.Bool,
+    'per_operation_cap_e8s' : IDL.Nat64,
+    'outstanding_cap_e8s' : IDL.Nat64,
+    'config_version' : IDL.Nat64,
+    'currency_hex' : IDL.Text,
+    'ready' : IDL.Bool,
+    'issuance_paused' : IDL.Bool,
+    'policy' : IDL.Opt(IssuerPolicy),
+  });
+  const XrplIcusdError = IDL.Variant({
+    'Internal' : IDL.Text,
+    'NotApplicable' : IDL.Text,
+    'TrustLineMissing' : IDL.Text,
+    'Paused' : IDL.Text,
+    'Policy' : IDL.Text,
+    'CoverageUnavailable' : IDL.Text,
+    'Disabled' : IDL.Text,
+    'Ambiguous' : IDL.Text,
+    'NotFound' : IDL.Null,
+    'WrongPhase' : IDL.Text,
+    'Unauthorized' : IDL.Null,
+    'InvalidArgument' : IDL.Text,
+    'NonceConflict' : IDL.Null,
+    'MintingAccount' : IDL.Text,
+    'Unavailable' : IDL.Text,
+    'LimitExceeded' : IDL.Text,
+    'WrongNetwork' : IDL.Text,
+    'AnonymousCaller' : IDL.Null,
+  });
+  const XrplConfigResult = IDL.Variant({
+    'Ok' : PublicXrplIcusdConfig,
+    'Err' : XrplIcusdError,
+  });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -583,6 +654,60 @@ export const idlFactory = ({ IDL }) => {
     'Redemption' : IDL.Null,
     'Excess' : IDL.Null,
   });
+  const ReleaseReason = IDL.Variant({
+    'MintFailed' : IDL.Null,
+    'DebtCommitted' : IDL.Null,
+  });
+  const XrplIcusdEvent = IDL.Variant({
+    'RepayCancelled' : IDL.Record({
+      'at' : IDL.Nat64,
+      'op_id' : IDL.Nat64,
+      'vault_id' : IDL.Nat64,
+    }),
+    'ReservationBegun' : IDL.Record({
+      'request_nonce' : IDL.Vec(IDL.Nat8),
+      'op_id' : IDL.Nat64,
+      'owner' : IDL.Principal,
+      'net_e8s' : IDL.Nat64,
+      'recipient' : IDL.Text,
+      'network' : XrplNetwork,
+      'fee_e8s' : IDL.Nat64,
+      'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Nat64,
+      'collateral_type' : IDL.Principal,
+      'policy_version' : IDL.Nat64,
+      'gross_e8s' : IDL.Nat64,
+    }),
+    'ReservationReleased' : IDL.Record({
+      'op_id' : IDL.Nat64,
+      'vault_id' : IDL.Nat64,
+      'timestamp' : IDL.Nat64,
+      'reason' : ReleaseReason,
+    }),
+    'RepayCutoffBegun' : IDL.Record({
+      'interest_share_e8s' : IDL.Nat64,
+      'request_nonce' : IDL.Vec(IDL.Nat8),
+      'op_id' : IDL.Nat64,
+      'owner' : IDL.Principal,
+      'snapshot_accrued_e8s' : IDL.Nat64,
+      'snapshot_debt_e8s' : IDL.Nat64,
+      'network' : XrplNetwork,
+      'vault_id' : IDL.Nat64,
+      'repay_e8s' : IDL.Nat64,
+      'destination_tag' : IDL.Nat32,
+      'payer' : IDL.Text,
+      'max_e8s' : IDL.Nat64,
+      'last_accrual_time' : IDL.Nat64,
+      'cutoff_ns' : IDL.Nat64,
+      'full_close' : IDL.Bool,
+    }),
+    'RepaySettled' : IDL.Record({
+      'burn_block' : IDL.Nat64,
+      'op_id' : IDL.Nat64,
+      'vault_id' : IDL.Nat64,
+      'settled_at' : IDL.Nat64,
+    }),
+  });
   const FeeSource = IDL.Variant({
     'BorrowingFee' : IDL.Null,
     'RedemptionFee' : IDL.Null,
@@ -786,6 +911,7 @@ export const idlFactory = ({ IDL }) => {
       'reason' : IDL.Text,
     }),
     'set_rmr_floor_cr' : IDL.Record({ 'value' : IDL.Text }),
+    'xrpl_icusd' : XrplIcusdEvent,
     'chain_pending_burn_settled' : IDL.Record({
       'amount_e8s' : IDL.Nat,
       'chain_id' : IDL.Nat32,
@@ -1233,6 +1359,69 @@ export const idlFactory = ({ IDL }) => {
     'custody_address' : IDL.Text,
     'opened_at_ns' : IDL.Nat64,
     'derivation_nonce' : IDL.Nat64,
+  });
+  const OperationKindTag = IDL.Variant({
+    'Repayment' : IDL.Null,
+    'Refund' : IDL.Null,
+    'Import' : IDL.Null,
+    'Borrow' : IDL.Null,
+  });
+  const ClaimAction = IDL.Variant({
+    'ReissueXrpl' : IDL.Null,
+    'CancelUnexecutedRepayment' : IDL.Null,
+    'ReceiveCanonical' : IDL.Null,
+  });
+  const NextAction = IDL.Variant({
+    'ContactOperator' : IDL.Null,
+    'None' : IDL.Null,
+    'Wait' : IDL.Null,
+    'ResolveClaim' : IDL.Null,
+  });
+  const Phase = IDL.Variant({
+    'EscrowMintPending' : IDL.Null,
+    'EscrowPullPending' : IDL.Null,
+    'Held' : IDL.Null,
+    'Delivered' : IDL.Null,
+    'Complete' : IDL.Null,
+    'ClaimResolved' : IDL.Null,
+    'RefundPending' : IDL.Null,
+    'EscrowBurnPending' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'ReturnVerified' : IDL.Null,
+    'Cancelled' : IDL.Null,
+    'Submitted' : IDL.Null,
+    'ReturnObserved' : IDL.Null,
+    'IntentPrepared' : IDL.Null,
+    'DebtApplied' : IDL.Null,
+    'Signed' : IDL.Null,
+    'IssuePrepared' : IDL.Null,
+    'DebtCommitted' : IDL.Null,
+  });
+  const OperationView = IDL.Record({
+    'observed_exact_amount' : IDL.Opt(IDL.Text),
+    'kind' : OperationKindTag,
+    'net_e8s' : IDL.Nat64,
+    'recipient' : IDL.Opt(IDL.Text),
+    'network' : XrplNetwork,
+    'fee_e8s' : IDL.Nat64,
+    'xrpl_tx_hashes' : IDL.Vec(IDL.Text),
+    'updated_at_ns' : IDL.Nat64,
+    'operation_id' : IDL.Nat64,
+    'vault_id' : IDL.Opt(IDL.Nat64),
+    'ic_ledger_blocks' : IDL.Vec(IDL.Nat64),
+    'resolution' : IDL.Opt(ClaimAction),
+    'created_at_ns' : IDL.Nat64,
+    'held_exact_amount' : IDL.Opt(IDL.Text),
+    'next_action' : NextAction,
+    'notes' : IDL.Vec(IDL.Text),
+    'debt_applied_e8s' : IDL.Nat64,
+    'phase' : Phase,
+    'gross_e8s' : IDL.Nat64,
+    'settlement_cutoff_ns' : IDL.Opt(IDL.Nat64),
+  });
+  const OperationPage = IDL.Record({
+    'next_cursor' : IDL.Opt(IDL.Nat64),
+    'items' : IDL.Vec(OperationView),
   });
   const LegacyPendingThreeUsdRefund = IDL.Record({
     'retry_count' : IDL.Nat8,
@@ -1907,6 +2096,31 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : VaultOperationStatus,
     'Err' : ProtocolError,
   });
+  const CoverageStatus = IDL.Variant({
+    'SnapshotDisagrees' : IDL.Record({ 'detail' : IDL.Text }),
+    'Shortfall' : IDL.Record({ 'short_e8s' : IDL.Nat }),
+    'Covered' : IDL.Null,
+    'SnapshotMissing' : IDL.Null,
+  });
+  const CoverageReport = IDL.Record({
+    'status' : CoverageStatus,
+    'snapshot_e8s' : IDL.Opt(IDL.Nat),
+    'snapshot_ledger_index' : IDL.Opt(IDL.Nat32),
+    'in_flight_e8s' : IDL.Nat,
+    'h_e8s' : IDL.Nat,
+    'o_e8s' : IDL.Nat,
+    'escrow_balance_e8s' : IDL.Nat,
+    'surplus_e8s' : IDL.Nat,
+    'required_e8s' : IDL.Nat,
+    'buffer_e8s' : IDL.Nat,
+    'd_e8s' : IDL.Nat,
+    'ic_fee_reserve_e8s' : IDL.Nat,
+    'r_e8s' : IDL.Nat,
+  });
+  const XrplCoverageResult = IDL.Variant({
+    'Ok' : CoverageReport,
+    'Err' : XrplIcusdError,
+  });
   const HttpRequest = IDL.Record({
     'url' : IDL.Text,
     'method' : IDL.Text,
@@ -1960,6 +2174,16 @@ export const idlFactory = ({ IDL }) => {
   const Result_16 = IDL.Variant({ 'Ok' : ConsentInfo, 'Err' : Icrc21Error });
   const Icrc28TrustedOriginsResponse = IDL.Record({
     'trusted_origins' : IDL.Vec(IDL.Text),
+  });
+  const IssueFromCanonicalArg = IDL.Record({
+    'request_nonce' : IDL.Vec(IDL.Nat8),
+    'recipient' : IDL.Text,
+    'network' : XrplNetwork,
+    'amount_e8s' : IDL.Nat64,
+  });
+  const XrplOperationResult = IDL.Variant({
+    'Ok' : OperationView,
+    'Err' : XrplIcusdError,
   });
   const VaultArgWithToken = IDL.Record({
     'vault_id' : IDL.Nat64,
@@ -2114,12 +2338,39 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : RepayAndCloseSuccess,
     'Err' : ProtocolError,
   });
+  const ResolveClaimArg = IDL.Record({
+    'action' : ClaimAction,
+    'operation_id' : IDL.Nat64,
+  });
+  const AttemptStatus = IDL.Variant({
+    'Prepared' : IDL.Null,
+    'FailedOnLedger' : IDL.Record({ 'result' : IDL.Text }),
+    'Submitted' : IDL.Null,
+    'Quarantined' : IDL.Record({ 'reason' : IDL.Text }),
+    'Validated' : IDL.Record({ 'ledger_index' : IDL.Nat32 }),
+    'Signed' : IDL.Null,
+    'Expired' : IDL.Record({ 'validated_ledger' : IDL.Nat32 }),
+  });
+  const IssuerSetupStatus = IDL.Record({
+    'issuer_address' : IDL.Opt(IDL.Text),
+    'note' : IDL.Opt(IDL.Text),
+    'setup' : IssuerSetupState,
+    'attempt_status' : IDL.Opt(AttemptStatus),
+  });
+  const XrplSetupResult = IDL.Variant({
+    'Ok' : IssuerSetupStatus,
+    'Err' : XrplIcusdError,
+  });
   const UpdateChainConfigArg = IDL.Record({
     'rpc_endpoints' : IDL.Opt(IDL.Vec(IDL.Text)),
     'gas_strategy' : IDL.Opt(GasStrategy),
     'finality_depth' : IDL.Opt(IDL.Nat32),
     'display_name' : IDL.Opt(IDL.Text),
     'min_quorum_providers' : IDL.Opt(IDL.Opt(IDL.Nat32)),
+  });
+  const SetPausesArg = IDL.Record({
+    'settlement_paused' : IDL.Opt(IDL.Bool),
+    'issuance_paused' : IDL.Opt(IDL.Bool),
   });
   const BurnSettlementProofArg = IDL.Record({
     'log_index' : IDL.Nat64,
@@ -2210,6 +2461,10 @@ export const idlFactory = ({ IDL }) => {
     'Err' : ProtocolError,
   });
   const Result_34 = IDL.Variant({ 'Ok' : IDL.Nat32, 'Err' : ProtocolError });
+  const XrplAccountResult = IDL.Variant({
+    'Ok' : Account,
+    'Err' : XrplIcusdError,
+  });
   return IDL.Service({
     'ack_vault_operation' : IDL.Func([VaultOperationIdArg], [Result], []),
     'acknowledge_three_usd_reserve_v2_client' : IDL.Func([], [Result_1], []),
@@ -2337,6 +2592,11 @@ export const idlFactory = ({ IDL }) => {
         [TransformArgs],
         [HttpResponse],
         ['query'],
+      ),
+    'configure_xrpl_icusd' : IDL.Func(
+        [ConfigureXrplIcusdArg],
+        [XrplConfigResult],
+        [],
       ),
     'confirm_xrp_deposit' : IDL.Func([IDL.Nat64], [Result], []),
     'cycle_manager_metrics' : IDL.Func(
@@ -2551,6 +2811,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(IDL.Tuple(IDL.Nat64, XrpPendingDeposit))],
         ['query'],
       ),
+    'get_my_xrpl_operations' : IDL.Func(
+        [IDL.Opt(IDL.Nat64), IDL.Nat32],
+        [OperationPage],
+        ['query'],
+      ),
     'get_pending_3usd_refunds' : IDL.Func(
         [],
         [IDL.Vec(LegacyPendingThreeUsdRefund)],
@@ -2738,6 +3003,8 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_xrp_schnorr_key_name' : IDL.Func([], [IDL.Text], ['query']),
+    'get_xrpl_icusd_config' : IDL.Func([], [PublicXrplIcusdConfig], ['query']),
+    'get_xrpl_icusd_coverage' : IDL.Func([], [XrplCoverageResult], []),
     'harvest_chain_interest' : IDL.Func([IDL.Nat32], [Result], []),
     'http_request' : IDL.Func([HttpRequest], [HttpResponse_1], ['query']),
     'icrc10_supported_standards' : IDL.Func(
@@ -2754,6 +3021,11 @@ export const idlFactory = ({ IDL }) => {
         [],
         [Icrc28TrustedOriginsResponse],
         ['query'],
+      ),
+    'issue_xrpl_from_canonical' : IDL.Func(
+        [IssueFromCanonicalArg],
+        [XrplOperationResult],
+        [],
       ),
     'liquidate_chain_vault' : IDL.Func([IDL.Nat64], [Result], []),
     'liquidate_vault' : IDL.Func([IDL.Nat64], [Result_4], []),
@@ -2918,7 +3190,14 @@ export const idlFactory = ({ IDL }) => {
         [Result_1],
         [],
       ),
+    'resolve_xrpl_claim' : IDL.Func(
+        [ResolveClaimArg],
+        [XrplOperationResult],
+        [],
+      ),
+    'resume_xrpl_operation' : IDL.Func([IDL.Nat64], [XrplOperationResult], []),
     'retry_pending_borrow_fee_mint' : IDL.Func([IDL.Nat], [Result_1], []),
+    'run_xrpl_issuer_setup_step' : IDL.Func([], [XrplSetupResult], []),
     'set_amm1_canister' : IDL.Func([IDL.Principal], [Result_1], []),
     'set_amm1_pool_id' : IDL.Func([IDL.Text], [Result_1], []),
     'set_borrowing_fee' : IDL.Func([IDL.Float64], [Result_1], []),
@@ -3164,6 +3443,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'set_xrc_fetch_interval_secs' : IDL.Func([IDL.Nat64], [Result_1], []),
     'set_xrp_schnorr_key_name' : IDL.Func([IDL.Text], [Result_1], []),
+    'set_xrpl_icusd_pauses' : IDL.Func([SetPausesArg], [XrplConfigResult], []),
     'settle_pending_chain_burn' : IDL.Func(
         [IDL.Nat32, IDL.Nat, IDL.Text],
         [Result_1],
@@ -3267,6 +3547,7 @@ export const idlFactory = ({ IDL }) => {
         [Result_1],
         [],
       ),
+    'verify_xrpl_icusd_minting_account' : IDL.Func([], [XrplAccountResult], []),
     'withdraw_and_close_vault' : IDL.Func([IDL.Nat64], [Result_6], []),
     'withdraw_chain_collateral' : IDL.Func(
         [IDL.Nat64, IDL.Nat, IDL.Text],
@@ -3299,7 +3580,38 @@ export const idlFactory = ({ IDL }) => {
         [HttpResponse],
         ['query'],
       ),
+    'xrp_transform_account_tx' : IDL.Func(
+        [TransformArgs],
+        [HttpResponse],
+        ['query'],
+      ),
+    'xrp_transform_fee' : IDL.Func([TransformArgs], [HttpResponse], ['query']),
+    'xrp_transform_issued_tx' : IDL.Func(
+        [TransformArgs],
+        [HttpResponse],
+        ['query'],
+      ),
+    'xrp_transform_issuer_account' : IDL.Func(
+        [TransformArgs],
+        [HttpResponse],
+        ['query'],
+      ),
+    'xrp_transform_issuer_objects' : IDL.Func(
+        [TransformArgs],
+        [HttpResponse],
+        ['query'],
+      ),
+    'xrp_transform_lines' : IDL.Func(
+        [TransformArgs],
+        [HttpResponse],
+        ['query'],
+      ),
     'xrp_transform_server' : IDL.Func(
+        [TransformArgs],
+        [HttpResponse],
+        ['query'],
+      ),
+    'xrp_transform_server_info' : IDL.Func(
         [TransformArgs],
         [HttpResponse],
         ['query'],

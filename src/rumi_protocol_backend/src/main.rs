@@ -1208,6 +1208,10 @@ fn post_upgrade(arg: ProtocolArg) {
         chain_vaults
     );
 
+    // XRPL icUSD lane: normalise calls that were in flight across the upgrade and
+    // re-arm the one-shot tick only if durable work remains (idle-free otherwise).
+    rumi_protocol_backend::xrpl_icusd::on_post_upgrade();
+
     setup_timers();
     // Async futures are cancelled by an upgrade. Resume durable payout and
     // refund queues from stable state instead of waiting for an unrelated call.
@@ -9699,6 +9703,129 @@ fn xrpl_fixture_environment_marker() -> String {
     rumi_protocol_backend::chains::xrp::network::build_environment().to_string()
 }
 
+// Issuer-side token-lane transforms (account state, base fee, owner-directory probe).
+
+#[query]
+fn xrp_transform_issuer_account(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::issuer_rpc::transform_issuer_account(args)
+}
+
+#[query]
+fn xrp_transform_fee(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::issuer_rpc::transform_fee(args)
+}
+
+#[query]
+fn xrp_transform_issuer_objects(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::issuer_rpc::transform_objects(args)
+}
+
+// ─── XRPL icUSD lane (Task 3 foundation; DISABLED until configured) ───────────
+// User methods reject anonymous callers and are caller-scoped (another principal's
+// operation is "not found"). Admin methods are controller-only. Nothing here signs
+// arbitrary bytes: the issuer sequencer only signs transactions it built from a
+// persisted, owner-authorized operation or the explicit-policy setup steps.
+
+use rumi_protocol_backend::xrpl_icusd::{
+    self as xrpl, ConfigureXrplIcusdArg, CoverageReport, IssueFromCanonicalArg, IssuerSetupStatus,
+    OperationPage, OperationView, PublicXrplIcusdConfig, ResolveClaimArg, SetPausesArg,
+    XrplIcusdError,
+};
+
+fn xrpl_require_controller() -> Result<(), XrplIcusdError> {
+    if ic_cdk::api::is_controller(&ic_cdk::caller()) {
+        Ok(())
+    } else {
+        Err(XrplIcusdError::Unauthorized)
+    }
+}
+
+/// Public, key-free configuration of the XRPL icUSD lane.
+#[candid_method(query)]
+#[query]
+fn get_xrpl_icusd_config() -> PublicXrplIcusdConfig {
+    xrpl::get_public_config()
+}
+
+/// Move canonical icUSD (explicit ICRC-2 allowance, stable-nonce pull) into escrow and
+/// issue the same amount on the XRPL to `recipient`. Creates NO debt and NO fee.
+#[candid_method(update)]
+#[update]
+async fn issue_xrpl_from_canonical(
+    arg: IssueFromCanonicalArg,
+) -> Result<OperationView, XrplIcusdError> {
+    xrpl::issue_from_canonical(ic_cdk::caller(), arg).await
+}
+
+/// Owner-scoped: drive one of the caller's operations forward (reconciliation stays
+/// available while issuance or settlement is paused).
+#[candid_method(update)]
+#[update]
+async fn resume_xrpl_operation(operation_id: u64) -> Result<OperationView, XrplIcusdError> {
+    xrpl::resume_operation(ic_cdk::caller(), operation_id).await
+}
+
+/// Owner-scoped claim resolution: take the canonical backing back, or reissue on the
+/// XRPL. Refused while a signed issuance for the claim is unresolved.
+#[candid_method(update)]
+#[update]
+async fn resolve_xrpl_claim(arg: ResolveClaimArg) -> Result<OperationView, XrplIcusdError> {
+    xrpl::resolve_claim(ic_cdk::caller(), arg).await
+}
+
+/// Caller-scoped, paged (at most 50 rows).
+#[candid_method(query)]
+#[query]
+fn get_my_xrpl_operations(cursor: Option<u64>, limit: u32) -> OperationPage {
+    xrpl::get_operations(ic_cdk::caller(), cursor, limit)
+}
+
+#[candid_method(update)]
+#[update]
+async fn configure_xrpl_icusd(
+    arg: ConfigureXrplIcusdArg,
+) -> Result<PublicXrplIcusdConfig, XrplIcusdError> {
+    xrpl_require_controller()?;
+    xrpl::configure(arg).await
+}
+
+#[candid_method(update)]
+#[update]
+fn set_xrpl_icusd_pauses(arg: SetPausesArg) -> Result<PublicXrplIcusdConfig, XrplIcusdError> {
+    xrpl_require_controller()?;
+    Ok(xrpl::set_pauses(arg))
+}
+
+#[candid_method(update)]
+#[update]
+async fn verify_xrpl_icusd_minting_account(
+) -> Result<icrc_ledger_types::icrc1::account::Account, XrplIcusdError> {
+    xrpl_require_controller()?;
+    xrpl::verify_minting_account().await
+}
+
+#[candid_method(update)]
+#[update]
+async fn run_xrpl_issuer_setup_step() -> Result<IssuerSetupStatus, XrplIcusdError> {
+    xrpl_require_controller()?;
+    xrpl::run_issuer_setup_step().await
+}
+
+/// Refreshes and returns the coverage report (escrow balance vs liabilities vs the
+/// fixed-ledger issuer obligation snapshot).
+#[candid_method(update)]
+#[update]
+async fn get_xrpl_icusd_coverage() -> Result<CoverageReport, XrplIcusdError> {
+    xrpl_require_controller()?;
+    xrpl::coverage_report().await
+}
+
 /// Developer-only guard for the experimental XRP observability endpoints below.
 fn xrp_require_developer() -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
@@ -9713,12 +9840,19 @@ fn xrp_require_developer() -> Result<(), ProtocolError> {
 
 fn xrp_require_production_schnorr_key() -> Result<(), ProtocolError> {
     let configured_key = rumi_protocol_backend::chains::xrp::config::xrp_schnorr_key_name();
-    if rumi_protocol_backend::chains::xrp::config::is_xrp_production_key_name(&configured_key) {
+    // Same key gate as the collateral guardrails: production `key_1` in every normal
+    // build; only the default-off `xrpl-testnet-fixture` artifact accepts `test_key_1`.
+    if rumi_protocol_backend::state::xrp_collateral_key_ok(&configured_key) {
         return Ok(());
     }
-    let required = rumi_protocol_backend::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME;
+    let required = rumi_protocol_backend::chains::xrp::network::expected_collateral_key_name();
+    let kind = if rumi_protocol_backend::chains::xrp::network::FIXTURE_BUILD {
+        "fixture"
+    } else {
+        "production"
+    };
     Err(ProtocolError::GenericError(format!(
-        "XRP collateral registration requires production Schnorr key {required} (configured: {configured_key})"
+        "XRP collateral registration requires {kind} Schnorr key {required} (configured: {configured_key})"
     )))
 }
 
