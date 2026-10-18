@@ -132,6 +132,26 @@ export const idlFactory = ({ IDL }) => {
     'rank' : IDL.Nat32,
     'estimated_share_bps' : IDL.Nat32,
   });
+  const OutageCreditKind = IDL.Variant({ 'OutageMakeWhole' : IDL.Null });
+  const OutageCredit = IDL.Record({
+    'principal' : IDL.Principal,
+    'normal_ledger_cutoff' : IDL.Nat64,
+    'scheduled_period_end_ns' : IDL.Nat64,
+    'applied_at_ns' : IDL.Nat64,
+    'epoch_index' : IDL.Nat64,
+    'allocation_digest' : IDL.Vec(IDL.Nat8),
+    'kind' : OutageCreditKind,
+    'normal_points_earned' : IDL.Nat,
+    'credited_points' : IDL.Nat,
+    'target_epoch_points' : IDL.Nat,
+    'evidence_digest' : IDL.Vec(IDL.Nat8),
+    'scheduled_period_start_ns' : IDL.Nat64,
+  });
+  const OutageCreditPage = IDL.Record({
+    'reached_end' : IDL.Bool,
+    'entries' : IDL.Vec(OutageCredit),
+    'next_offset' : IDL.Nat64,
+  });
   const PointSource = IDL.Variant({
     'CkStable3PoolMatched' : IDL.Null,
     'Registration' : IDL.Null,
@@ -270,6 +290,12 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(LeaderboardEntry)],
         ['query'],
       ),
+    'get_outage_credit_entries' : IDL.Func(
+        [IDL.Nat64, IDL.Nat32],
+        [OutageCreditPage],
+        ['query'],
+      ),
+    'get_outage_credit_len' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_pending_commit' : IDL.Func([], [IDL.Vec(IDL.Nat8)], ['query']),
     'get_point_entries' : IDL.Func(
         [IDL.Nat64, IDL.Nat32],
@@ -278,6 +304,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'get_point_ledger_len' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_points_config' : IDL.Func([], [PointsConfig], ['query']),
+    'get_principal_outage_credit_entries' : IDL.Func(
+        [IDL.Principal, IDL.Nat64, IDL.Nat32],
+        [OutageCreditPage],
+        ['query'],
+      ),
     'get_principal_point_entries' : IDL.Func(
         [IDL.Principal, IDL.Nat64, IDL.Nat32],
         [PointEntryPage],

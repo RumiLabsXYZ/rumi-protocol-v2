@@ -29,7 +29,7 @@ const PREFIX_DOMAIN: &[u8] = b"rumi-points-october-2026-original-ledger-v1\0";
 // Setting this requires a separately reviewed immutable allocation manifest.
 const APPROVED_ALLOCATION_DIGEST: Option<[u8; 32]> = None;
 
-/// Reference breakdown for a total epoch floor, not ordinary earning records.
+/// Breakdown of ordinary earning records used to offset a total epoch floor.
 /// Existing credit in any source offsets the total. The actual make-whole
 /// credit is recorded with its own kind and never masquerades as a snapshot
 /// award or the historical unmatched-row correction.
@@ -237,6 +237,32 @@ pub fn credit_entries(offset: u64, limit: u32) -> OutageCreditPage {
             entries,
             next_offset: end,
             reached_end: end == log.len(),
+        }
+    })
+}
+
+/// Filtered audit view. Scan at most 100 underlying rows per call so a page
+/// with no matching entries still advances its cursor. Callers must continue
+/// until reached_end; entry count alone does not indicate completion.
+pub fn principal_credit_entries(principal: Principal, offset: u64, limit: u32) -> OutageCreditPage {
+    CREDITS.with(|log| {
+        let log = log.borrow();
+        let start = offset.min(log.len());
+        let scan_end = start.saturating_add(100).min(log.len());
+        let wanted = usize::try_from(limit.min(100)).expect("bounded page size");
+        let mut next = start;
+        let mut entries = Vec::new();
+        while next < scan_end && entries.len() < wanted {
+            let StoredOutageCredit::V1(row) = log.get(next).expect("missing outage audit row");
+            next += 1;
+            if row.principal == principal {
+                entries.push(row);
+            }
+        }
+        OutageCreditPage {
+            entries,
+            next_offset: next,
+            reached_end: next == log.len(),
         }
     })
 }

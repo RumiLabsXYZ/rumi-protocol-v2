@@ -96,8 +96,9 @@ fn get_point_ledger_len() -> u64 {
 }
 
 /// A page of the raw audit ledger. Together with `get_principal_point_entries`
-/// this is what makes `total_points` auditable: it decomposes every principal's
-/// total into per-source, per-epoch deltas.
+/// this decomposes ordinary earnings into per-source, per-epoch deltas.
+/// Any separately applied outage compensation is exposed by the outage-credit
+/// readers; both ledgers together explain `total_points`.
 #[ic_cdk::query]
 fn get_point_entries(offset: u64, limit: u32) -> PointEntryPage {
     state::point_entries(offset, limit)
@@ -108,6 +109,29 @@ fn get_point_entries(offset: u64, limit: u32) -> PointEntryPage {
 #[ic_cdk::query]
 fn get_principal_point_entries(principal: Principal, offset: u64, limit: u32) -> PointEntryPage {
     state::principal_point_entries(principal, offset, limit)
+}
+
+/// Separate compensation audit; ordinary PointEntry rows remain unchanged.
+#[ic_cdk::query]
+fn get_outage_credit_len() -> u64 {
+    rumi_points::outage_reconciliation::credit_count()
+}
+
+#[ic_cdk::query]
+fn get_outage_credit_entries(
+    offset: u64,
+    limit: u32,
+) -> rumi_points::outage_reconciliation::OutageCreditPage {
+    rumi_points::outage_reconciliation::credit_entries(offset, limit)
+}
+
+#[ic_cdk::query]
+fn get_principal_outage_credit_entries(
+    principal: Principal,
+    offset: u64,
+    limit: u32,
+) -> rumi_points::outage_reconciliation::OutageCreditPage {
+    rumi_points::outage_reconciliation::principal_credit_entries(principal, offset, limit)
 }
 
 #[ic_cdk::query]

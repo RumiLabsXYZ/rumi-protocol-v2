@@ -113,6 +113,26 @@ export interface OpenEpoch {
   'close_points_accrued' : bigint,
   'epoch_end_ns' : bigint,
 }
+export interface OutageCredit {
+  'principal' : Principal,
+  'normal_ledger_cutoff' : bigint,
+  'scheduled_period_end_ns' : bigint,
+  'applied_at_ns' : bigint,
+  'epoch_index' : bigint,
+  'allocation_digest' : Uint8Array | number[],
+  'kind' : OutageCreditKind,
+  'normal_points_earned' : bigint,
+  'credited_points' : bigint,
+  'target_epoch_points' : bigint,
+  'evidence_digest' : Uint8Array | number[],
+  'scheduled_period_start_ns' : bigint,
+}
+export type OutageCreditKind = { 'OutageMakeWhole' : null };
+export interface OutageCreditPage {
+  'reached_end' : boolean,
+  'entries' : Array<OutageCredit>,
+  'next_offset' : bigint,
+}
 export interface PointEntry {
   'principal' : Principal,
   'epoch_index' : bigint,
@@ -238,10 +258,16 @@ export interface _SERVICE {
   >,
   'get_ingest_status' : ActorMethod<[], IngestStatus>,
   'get_leaderboard' : ActorMethod<[number, number], Array<LeaderboardEntry>>,
+  'get_outage_credit_entries' : ActorMethod<[bigint, number], OutageCreditPage>,
+  'get_outage_credit_len' : ActorMethod<[], bigint>,
   'get_pending_commit' : ActorMethod<[], Uint8Array | number[]>,
   'get_point_entries' : ActorMethod<[bigint, number], PointEntryPage>,
   'get_point_ledger_len' : ActorMethod<[], bigint>,
   'get_points_config' : ActorMethod<[], PointsConfig>,
+  'get_principal_outage_credit_entries' : ActorMethod<
+    [Principal, bigint, number],
+    OutageCreditPage
+  >,
   'get_principal_point_entries' : ActorMethod<
     [Principal, bigint, number],
     PointEntryPage

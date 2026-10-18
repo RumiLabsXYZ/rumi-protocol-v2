@@ -43,9 +43,14 @@ their existing contract. Once integrated, the complete aggregate identity is:
 
 `principal total = normal audit-ledger credits + separate outage credits`.
 
-A future public audit projection and frontend breakdown must show this second
-ledger; ordinary-ledger rows alone must not be claimed to decompose the new
-total. No such ingress or frontend integration exists yet.
+Three additive public queries now expose the separate count, global pages and
+principal-filtered pages. Each page examines or returns at most100rows; callers
+must follow the cursor even when a filtered page is empty. JS/TS declarations
+are regenerated. The dashboard renders compensation separately from ordinary
+earnings; admin breakdowns include the compensation kind. Missing older query
+support is shown as unavailable, not asserted zero; failures and incomplete
+pagination are not cached as completed credit history. These source changes
+have not been published or installed.
 
 Staging requires both epochs to have actually closed, their summaries to match
 the scheduled end, and the established legacy-18 / flat-4x-19 cutover and original
@@ -77,16 +82,29 @@ A log found without its progress record fails closed instead of starting over.
 - Mutation helpers require the existing nonanonymous admin predicate, both
   writer guards, checked totals and the immutable approved allocation digest.
 - The digest pin is **unset**, rejected before lazy progress initialization.
-  No main.rs ingress reaches staging, continuation or the new query helpers.
+  No main.rs update ingress reaches staging or continuation. The three new
+  query-only readers cannot stage or apply a credit.
 - Existing timers, hold and the original resume timing safeguard are unchanged.
 - No tests were added or run. Locked offline native compilation is not
   production artifact, retained-state, interruption or live activation proof.
 
+## Current additive audit checks
+
+Native lib/bin compilation passed. A native source-derived export (whose main
+only prints generated Candid) matches the committed DID structurally. Backward
+compatibility against the retained live DID passed. No tests were added or run.
+The full frontend diagnostic command failed with30errors in untouched files;
+none were reported in the changed points service/store/views/declarations. This
+is not a green full-frontend check or a production artifact verification.
+The initial DID parse failed on an unquoted reserved field label; quoting that
+label fixed parsing before bindings were generated. Original failed receipts
+are retained locally.
+
 ## Still required
 
 Finish and accept the economic policy; close the numerical/historical exceptions;
-seal a complete allocation; configure its digest; integrate bounded ingress,
-audit projection and frontend; verify actual retained state and restart/reply-loss
+seal a complete allocation; configure its digest; integrate bounded application
+ingress; verify actual retained state and restart/reply-loss
 behavior; produce exact compatible artifacts; obtain original-request disposition;
 and observe normal resume/epoch advancement and the reconciled ledger.
 

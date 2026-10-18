@@ -21,6 +21,7 @@ import type {
   EpochSummary,
   IngestStatus,
   PointEntry,
+  OutageCredit,
 } from '$declarations/rumi_points/rumi_points.did';
 import {
   LEGACY_FIAT_STABLE_POINTS_POLICY,
@@ -245,4 +246,38 @@ export async function getPrincipalPointEntries(p: Principal): Promise<PointEntry
     throw e;
   }
   return setCache<PointEntry[] | null>(key, entries);
+}
+
+/** Compensation audit is separate from ordinary earnings. Missing older query
+ * is unavailable, not an asserted zero; partial/error pages are never cached. */
+export async function getPrincipalOutageCredits(p: Principal): Promise<OutageCredit[] | null> {
+  const key = `points:outage:${p.toText()}`;
+  const cached = getCached<OutageCredit[] | null>(key, TTL.ADMIN);
+  if (cached.hit) return cached.value;
+  const entries: OutageCredit[] = [];
+  const seen = new Set<string>();
+  let offset = 0n;
+  try {
+    for (let pageIndex = 0; pageIndex < 200; pageIndex++) {
+      const page = await withRetry(() => getActor().get_principal_outage_credit_entries(p, offset, 100));
+      if (page.next_offset < offset || (!page.reached_end && page.next_offset === offset)) {
+        throw new Error('Outage audit cursor did not advance');
+      }
+      for (const row of page.entries) {
+        if (row.principal.toText() !== p.toText() || !('OutageMakeWhole' in row.kind)) {
+          throw new Error('Unexpected outage audit identity');
+        }
+        const identity = `${Array.from(row.allocation_digest).join(',')}:${row.epoch_index}`;
+        if (seen.has(identity)) throw new Error('Duplicate outage audit credit');
+        seen.add(identity);
+        entries.push(row);
+      }
+      if (page.reached_end) return setCache(key, entries);
+      offset = page.next_offset;
+    }
+    throw new Error('Outage audit pagination exceeded its bounded reader');
+  } catch (error) {
+    if (/no query method/i.test(String(error))) return setCache<OutageCredit[] | null>(key, null);
+    throw error;
+  }
 }

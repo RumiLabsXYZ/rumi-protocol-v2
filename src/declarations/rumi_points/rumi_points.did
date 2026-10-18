@@ -1,3 +1,23 @@
+type OutageCreditKind = variant { OutageMakeWhole };
+type OutageCredit = record {
+  kind : OutageCreditKind;
+  allocation_digest : vec nat8;
+  evidence_digest : vec nat8;
+  "principal" : principal;
+  epoch_index : nat64;
+  scheduled_period_start_ns : nat64;
+  scheduled_period_end_ns : nat64;
+  normal_ledger_cutoff : nat64;
+  normal_points_earned : nat;
+  target_epoch_points : nat;
+  credited_points : nat;
+  applied_at_ns : nat64;
+};
+type OutageCreditPage = record {
+  entries : vec OutageCredit;
+  next_offset : nat64;
+  reached_end : bool;
+};
 type AssetType = variant { Icp; IcUsd; CkUsdc; CkUsdt; ThreeUsd };
 type CycleManagerCyclesStatus = record {
   idle_burn_cycles_per_day : opt nat;
@@ -220,6 +240,9 @@ service : (opt InitArgs) -> {
   get_pending_commit : () -> (blob) query;
   get_point_entries : (nat64, nat32) -> (PointEntryPage) query;
   get_point_ledger_len : () -> (nat64) query;
+  get_outage_credit_len : () -> (nat64) query;
+  get_outage_credit_entries : (nat64, nat32) -> (OutageCreditPage) query;
+  get_principal_outage_credit_entries : (principal, nat64, nat32) -> (OutageCreditPage) query;
   get_points_config : () -> (PointsConfig) query;
   get_principal_point_entries : (principal, nat64, nat32) -> (
       PointEntryPage,
