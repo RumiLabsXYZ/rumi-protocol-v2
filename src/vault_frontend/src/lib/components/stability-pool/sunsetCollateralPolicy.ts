@@ -2,9 +2,14 @@ import type { CollateralInfo } from '../../services/stabilityPoolService';
 
 const BOB_COLLATERAL_PRINCIPAL = '7pail-xaaaa-aaaas-aabmq-cai';
 const EXE_COLLATERAL_PRINCIPAL = 'rh2pm-ryaaa-aaaan-qeniq-cai';
+const CKDOGE_COLLATERAL_PRINCIPAL = 'efmc5-wyaaa-aaaar-qb3wa-cai';
 // Sunset collaterals in one-way wind-down. Add to this set (not the call
 // sites) when another collateral is sunset.
-const SUNSET_COLLATERAL_PRINCIPALS = new Set([BOB_COLLATERAL_PRINCIPAL, EXE_COLLATERAL_PRINCIPAL]);
+const SUNSET_COLLATERAL_PRINCIPALS = new Set([
+	BOB_COLLATERAL_PRINCIPAL,
+	EXE_COLLATERAL_PRINCIPAL,
+	CKDOGE_COLLATERAL_PRINCIPAL
+]);
 const HIDDEN_GAIN_SYMBOLS = new Set(['PHASMA']);
 
 // Sunset wind-down policy is principal-bound here. Do not advertise re-entry
