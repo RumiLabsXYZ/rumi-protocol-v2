@@ -407,6 +407,17 @@ export class XrpVaultService {
     });
   }
 
+  /**
+   * Does the caller's vault list (a public QUERY, never a signer call) contain
+   * this vault? Used after `confirm_xrp_deposit` reports "No pending XRP deposit":
+   * a consumed pending deposit means the vault was created by an earlier confirm,
+   * which is success, not a failed deposit. The backend list is the authority.
+   */
+  static async ownsVault(vaultId: number): Promise<boolean> {
+    const vaults = await ApiClient.getUserVaults(true);
+    return vaults.some((v) => v.vaultId === vaultId);
+  }
+
   static async hasOutstandingClaim(claimId: XrpClaimId | number | bigint): Promise<boolean> {
     const claimIdText = xrpClaimIdToBigInt(claimId).toString();
     const actor = await this.actor();
