@@ -209,6 +209,9 @@ fn ledger_wasm() -> Vec<u8> {
 fn xrc_wasm() -> Vec<u8> {
     include_bytes!("../../xrc_demo/xrc/xrc.wasm").to_vec()
 }
+fn flaky_wasm() -> Vec<u8> {
+    include_bytes!("../../../target/wasm32-unknown-unknown/release/flaky_ledger.wasm").to_vec()
+}
 fn stability_pool_wasm() -> Vec<u8> {
     include_bytes!("../../../target/wasm32-unknown-unknown/release/stability_pool.wasm").to_vec()
 }
@@ -945,6 +948,12 @@ fn install_ledger(pic: &PocketIc, ledger: Principal, minter: Principal, name: &s
 }
 
 fn boot() -> Fx {
+    boot_with(false)
+}
+
+/// `flaky = true` installs the fault-injecting `flaky_ledger` as the icUSD ledger (minting
+/// account = backend, burn-aware) so reply loss and `TooOld` can be injected.
+fn boot_with(flaky: bool) -> Fx {
     let pic = PocketIcBuilder::new().with_ii_subnet().with_application_subnet().build();
     let mk = |pic: &PocketIc| {
         let c = pic.create_canister();
@@ -955,7 +964,13 @@ fn boot() -> Fx {
     let icusd = mk(&pic);
     let icp = mk(&pic);
     let xrc = mk(&pic);
-    install_ledger(&pic, icusd, backend, "icUSD");
+    if flaky {
+        pic.install_canister(icusd, flaky_wasm(), Encode!().unwrap(), None);
+        pic.update_call(icusd, Principal::anonymous(), "set_minter", Encode!(&Some(backend)).unwrap())
+            .expect("set_minter");
+    } else {
+        install_ledger(&pic, icusd, backend, "icUSD");
+    }
     install_ledger(&pic, icp, backend, "ICP");
     let mut rates = HashMap::new();
     rates.insert("ICP/USD".to_string(), 10 * E8);
@@ -1405,11 +1420,19 @@ impl Fx {
         self.lane(user(), "resume_xrpl_operation", Encode!(&op).unwrap())
     }
 
+    /// Update call on the (flaky) icUSD ledger's test controls.
+    fn flaky(&self, method: &str, args: Vec<u8>) {
+        match self.pic.update_call(self.icusd, Principal::anonymous(), method, args).unwrap() {
+            WasmResult::Reply(_) => {}
+            WasmResult::Reject(m) => panic!("flaky {method}: {m}"),
+        }
+    }
+
     /// Upgrade the backend with the same wasm (an `Upgrade` argument).
     fn upgrade_backend(&self) {
         let arg = ProtocolArg::Upgrade(UpgradeArg { mode: None, description: Some("e2e upgrade".into()) });
         self.pic
-            .upgrade_canister(self.backend, backend_wasm(), encode_args((arg,)).unwrap(), None)
+            .upgrade_canister(self.backend, backend_wasm(), encode_args((arg,)).unwrap(), Some(ctrl()))
             .expect("upgrade backend");
         for _ in 0..3 {
             self.pic.tick();
@@ -1579,4 +1602,83 @@ fn full_lifecycle_deposit_borrow_deliver_repay_import_close() {
         fx.bal(treasury(), None) + fx.bal(other_user(), None),
         "supply = treasury fee + fixture holder remainder (every other unit was retired)"
     );
+}
+
+// ─── shared scenario fixture ─────────────────────────────────────────────────
+
+/// Booted fixture with XRP registered, a funded vault, the lane Ready and a trust
+/// line for [`HOLDER`]. `interest_apr` is the XRP collateral's interest rate.
+fn lane_fx(deposit_xrp: u64, interest_apr: f64) -> (Fx, u64) {
+    lane_fx_with(deposit_xrp, interest_apr, false)
+}
+
+fn lane_fx_with(deposit_xrp: u64, interest_apr: f64, flaky: bool) -> (Fx, u64) {
+    let fx = boot_with(flaky);
+    fx.register_xrp();
+    fx.zero_interest_one_percent_fee();
+    if interest_apr > 0.0 {
+        fx.plain_ok::<()>(
+            dev(),
+            "set_interest_rate",
+            Encode!(&xrp_collateral_principal(), &interest_apr).unwrap(),
+        );
+    }
+    let vault = fx.open_and_fund_vault(user(), deposit_xrp);
+    fx.lane_setup();
+    fx.x.add_holder(HOLDER, "1000000");
+    (fx, vault)
+}
+
+/// Borrow `gross` into XRPL and drive it to Delivered.
+fn borrow_delivered(fx: &Fx, vault: u64, gross: u64, nonce: u8) -> OperationView {
+    fx.gap();
+    let b = fx.borrow_to_xrpl(vault, gross, nonce).expect("borrow_to_xrpl");
+    drive_to(fx, user(), b.operation_id, Phase::Delivered)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 6. Lost response / dedup expiry (flaky icUSD ledger)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A mint whose reply is lost: the same persisted nonce is re-sent, the ledger
+/// answers Duplicate, and exactly ONE escrow mint exists.
+#[test]
+fn escrow_mint_reply_lost_same_nonce_reconciles_without_second_mint() {
+    let (fx, vault) = lane_fx_with(500, 0.0, true);
+    fx.gap();
+    fx.flaky("set_trap_icrc1_after_commit", Encode!(&1u32).unwrap());
+    let b = fx.borrow_to_xrpl(vault, 100 * E8, 1).expect("borrow_to_xrpl accepts the request");
+    let id = b.operation_id;
+    // The mint committed on the ledger but the backend never saw the reply.
+    assert_eq!(fx.escrow_bal(), 99 * E8, "the mint landed");
+    let v = fx.op(user(), id);
+    expect_phase(&v, Phase::EscrowMintPending);
+    assert_eq!(fx.vault(user(), vault).unwrap().borrowed_icusd_amount, 0, "no debt before proof");
+    assert_eq!(fx.log_length(), 1, "exactly one block so far");
+    // Reconcile: same nonce -> Duplicate -> proven; debt is committed once.
+    let v = drive_to(&fx, user(), id, Phase::Delivered);
+    assert_eq!(fx.escrow_bal(), 99 * E8, "no second mint");
+    assert_eq!(fx.log_length(), 2, "escrow mint + fee mint only");
+    assert_eq!(fx.vault(user(), vault).unwrap().borrowed_icusd_amount, 100 * E8, "debt committed exactly once");
+    assert_eq!(v.xrpl_tx_hashes.len(), 1);
+    assert_eq!(fx.x.holder_balance(HOLDER), e8(99 * E8));
+}
+
+/// The dedup window has passed (simulated `TooOld` on the exact retry): recovery
+/// proves the original mint from the ICRC-3 block log; no second effect.
+#[test]
+fn escrow_mint_too_old_after_loss_is_proven_from_block_scan() {
+    let (fx, vault) = lane_fx_with(500, 0.0, true);
+    fx.gap();
+    fx.flaky("set_trap_icrc1_after_commit", Encode!(&1u32).unwrap());
+    fx.flaky("set_too_old_after_phantom_mint", Encode!(&1u32).unwrap());
+    let b = fx.borrow_to_xrpl(vault, 100 * E8, 1).expect("borrow_to_xrpl");
+    let id = b.operation_id;
+    assert_eq!(fx.escrow_bal(), 99 * E8);
+    expect_phase(&fx.op(user(), id), Phase::EscrowMintPending);
+    let v = drive_to(&fx, user(), id, Phase::Delivered);
+    assert_eq!(fx.escrow_bal(), 99 * E8, "TooOld never produced a second mint");
+    assert_eq!(fx.log_length(), 2, "still exactly the escrow mint + fee mint");
+    assert_eq!(fx.vault(user(), vault).unwrap().borrowed_icusd_amount, 100 * E8);
+    assert_eq!(v.ic_ledger_blocks.len(), 2);
 }
