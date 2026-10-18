@@ -1808,6 +1808,21 @@ pub struct XrpLaunchGuardrailMigration {
 /// (the audit's F-01 fix). Intentionally idempotent so upgrades, replay recovery,
 /// and tests can call it without a one-shot migration flag. The debt ceiling is NOT
 /// clamped here — XRP uses a normal `debt_ceiling` like every other collateral.
+/// Key gate for native-XRP collateral activation. Normal builds: the production
+/// Schnorr key only (unchanged). The default-off `xrpl-testnet-fixture` artifact:
+/// `test_key_1` only (`network::require_collateral_key`), so the testnet fixture can
+/// activate XRP collateral and can never do so with the production key.
+pub fn xrp_collateral_key_ok(key: &str) -> bool {
+    #[cfg(feature = "xrpl-testnet-fixture")]
+    {
+        crate::chains::xrp::network::require_collateral_key(key).is_ok()
+    }
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
+    {
+        crate::chains::xrp::config::is_xrp_production_key_name(key)
+    }
+}
+
 pub fn enforce_xrp_launch_guardrails(state: &mut State) -> XrpLaunchGuardrailMigration {
     let mut migration = XrpLaunchGuardrailMigration::default();
     let xrp_ct = xrp_collateral_principal();
@@ -1815,7 +1830,7 @@ pub fn enforce_xrp_launch_guardrails(state: &mut State) -> XrpLaunchGuardrailMig
         return migration;
     };
 
-    if !crate::chains::xrp::config::is_xrp_production_key_name(&state.xrp_schnorr_key_name)
+    if !xrp_collateral_key_ok(&state.xrp_schnorr_key_name)
         && !matches!(
             config.status,
             CollateralStatus::Frozen | CollateralStatus::Deprecated
@@ -1867,11 +1882,16 @@ pub fn validate_xrp_launch_config_update(
     if !matches!(
         config.status,
         CollateralStatus::Frozen | CollateralStatus::Deprecated
-    ) && !crate::chains::xrp::config::is_xrp_production_key_name(configured_key)
+    ) && !xrp_collateral_key_ok(configured_key)
     {
+        let kind = if crate::chains::xrp::network::FIXTURE_BUILD {
+            "fixture"
+        } else {
+            "production"
+        };
         return Err(ProtocolError::GenericError(format!(
-            "XRP collateral cannot be activated without production Schnorr key {} (configured: {})",
-            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME,
+            "XRP collateral cannot be activated without {kind} Schnorr key {} (configured: {})",
+            crate::chains::xrp::network::expected_collateral_key_name(),
             configured_key
         )));
     }
@@ -4033,6 +4053,12 @@ pub struct State {
     /// snapshot that lacks this key decodes with the field defaulting to 0.
     #[serde(default)]
     pub chain_vault_id_counter: u64,
+
+    /// XRPL icUSD lane (Task 3): configuration (DISABLED by default), operations,
+    /// durable reservations/exclusions, issuer sequencer state. `#[serde(default)]`
+    /// so a pre-lane snapshot decodes to a disabled, empty lane.
+    #[serde(default)]
+    pub xrpl_icusd: crate::xrpl_icusd::XrplIcusdState,
 }
 
 /// Upgrade-safe gate between the non-journaled V1 reserve path and V2's
@@ -4344,6 +4370,7 @@ impl Default for State {
             sol_rpc_principal_override: None,
             solana_workers_enabled: false,
             chain_vault_id_counter: 0,
+            xrpl_icusd: Default::default(),
         }
     }
 }
@@ -4658,6 +4685,7 @@ impl From<InitArg> for State {
             sol_rpc_principal_override: None,
             solana_workers_enabled: false,
             chain_vault_id_counter: 0,
+            xrpl_icusd: Default::default(),
         }
     }
 }
@@ -12574,6 +12602,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
     fn xrp_launch_guardrails_freeze_non_production_key_without_clamping_ceiling() {
         let mut state = test_state();
         let xrp = xrp_collateral_principal();
@@ -12618,6 +12647,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
     fn xrp_launch_config_update_allows_any_ceiling_but_keeps_key_gate() {
         let xrp = xrp_collateral_principal();
         let mut cfg = xrp_collateral_config(
@@ -12644,6 +12674,80 @@ mod tests {
             ),
             Err(ProtocolError::GenericError(_))
         ));
+    }
+
+    /// Fixture build: `test_key_1` activates XRP collateral (no freeze, update
+    /// accepted) and the production key is rejected, so the testnet fixture can never
+    /// activate collateral with `key_1`.
+    #[test]
+    #[cfg(feature = "xrpl-testnet-fixture")]
+    fn xrp_fixture_build_activates_with_test_key_and_refuses_production_key() {
+        let mut state = test_state();
+        let xrp = xrp_collateral_principal();
+        let mut cfg = xrp_collateral_config(
+            Ratio::new(dec!(0.005)),
+            Ratio::new(dec!(0.0)),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        cfg.status = CollateralStatus::Active;
+        state.collateral_configs.insert(xrp, cfg.clone());
+        state.xrp_schnorr_key_name =
+            crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME.to_string();
+        let migration = enforce_xrp_launch_guardrails(&mut state);
+        assert_eq!(migration.previous_status, None, "test_key_1 must not freeze the fixture");
+        assert_eq!(state.collateral_configs[&xrp].status, CollateralStatus::Active);
+        assert!(validate_xrp_launch_config_update(
+            xrp,
+            &cfg,
+            crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME,
+        )
+        .is_ok());
+        // The production key is refused (and a state on it is frozen) in the fixture.
+        assert!(validate_xrp_launch_config_update(
+            xrp,
+            &cfg,
+            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME,
+        )
+        .is_err());
+        state.xrp_schnorr_key_name =
+            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME.to_string();
+        assert_eq!(
+            enforce_xrp_launch_guardrails(&mut state).previous_status,
+            Some(CollateralStatus::Active)
+        );
+    }
+
+    /// Normal build: the original behaviour, byte for byte: only `key_1` activates.
+    #[test]
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
+    fn xrp_normal_build_key_gate_is_production_only() {
+        assert!(xrp_collateral_key_ok(
+            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME
+        ));
+        assert!(!xrp_collateral_key_ok(
+            crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME
+        ));
+        let xrp = xrp_collateral_principal();
+        let mut cfg = xrp_collateral_config(
+            Ratio::new(dec!(0.005)),
+            Ratio::new(dec!(0.0)),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        cfg.status = CollateralStatus::Active;
+        let err = validate_xrp_launch_config_update(
+            xrp,
+            &cfg,
+            crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME,
+        )
+        .unwrap_err();
+        match err {
+            ProtocolError::GenericError(m) => assert_eq!(
+                m,
+                "XRP collateral cannot be activated without production Schnorr key key_1 (configured: test_key_1)",
+                "the normal-build message is unchanged"
+            ),
+            other => panic!("unexpected error {other:?}"),
+        }
     }
 
     #[test]

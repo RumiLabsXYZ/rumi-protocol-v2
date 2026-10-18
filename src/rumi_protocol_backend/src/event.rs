@@ -1188,6 +1188,13 @@ pub enum Event {
         reason: String,
         timestamp: u64,
     },
+
+    /// XRPL icUSD lane: durable borrow reservations, vault exclusions and
+    /// repayment interest-accrual freezes (see `xrpl_icusd::XrplIcusdEvent`). One
+    /// wrapping variant keeps the public Event surface additive; replay applies the
+    /// sub-event through the same pure functions the live path uses.
+    #[serde(rename = "xrpl_icusd")]
+    XrplIcusd(crate::xrpl_icusd::XrplIcusdEvent),
 }
 
 /// Durable bot proof audit transitions. These are kept in the private ordered
@@ -1325,6 +1332,7 @@ impl Event {
     // Define a method to check if the event contains vault_id
     pub fn is_vault_related(&self, filter_vault_id: &u64) -> bool {
         match self {
+            Event::XrplIcusd(e) => e.vault_id() == *filter_vault_id,
             Event::OpenVault { vault, .. } => &vault.vault_id == filter_vault_id,
             Event::CloseVault { vault_id, .. } => vault_id == filter_vault_id,
             Event::MarginTransfer { vault_id, .. } => vault_id == filter_vault_id,
@@ -1611,6 +1619,8 @@ impl Event {
             Event::ChainSettlementFailed { .. } => Some("ChainSettlementFailed"),
             Event::ChainReorgDetected { .. } => Some("ChainReorgDetected"),
             Event::ChainHotWalletLow { .. } => Some("ChainHotWalletLow"),
+            // XRPL icUSD lane bookkeeping (reservations, exclusions, accrual freezes).
+            Event::XrplIcusd(e) => Some(e.type_name()),
             // Any variant that surfaces `Admin` via `type_filter` but isn't
             // enumerated here still matches `Admin` type filters; it just
             // carries no fine-grained label.
@@ -1666,6 +1676,7 @@ impl Event {
             Event::ChainBadDebtCircuitThresholdSet { timestamp, .. } => Some(*timestamp),
             Event::ChainBadDebtCircuitTripped { timestamp, .. } => Some(*timestamp),
             Event::ChainBadDebtCircuitCleared { timestamp, .. } => Some(*timestamp),
+            Event::XrplIcusd(e) => Some(e.timestamp()),
             _ => None,
         }
     }
@@ -1677,6 +1688,11 @@ impl Event {
     pub fn collateral_token(&self, vault_lookup: &HashMap<u64, Principal>) -> Option<Principal> {
         match self {
             Event::OpenVault { vault, .. } => Some(vault.collateral_type),
+            Event::XrplIcusd(crate::xrpl_icusd::XrplIcusdEvent::ReservationBegun {
+                collateral_type,
+                ..
+            }) => Some(*collateral_type),
+            Event::XrplIcusd(e) => vault_lookup.get(&e.vault_id()).copied(),
             Event::AddCollateralType {
                 collateral_type, ..
             }
@@ -1769,6 +1785,12 @@ impl Event {
             Event::BorrowFromVault {
                 borrowed_amount, ..
             } => Some(borrowed_amount.0),
+            Event::XrplIcusd(crate::xrpl_icusd::XrplIcusdEvent::ReservationBegun {
+                gross_e8s, ..
+            }) => Some(*gross_e8s),
+            Event::XrplIcusd(crate::xrpl_icusd::XrplIcusdEvent::RepayCutoffBegun {
+                repay_e8s, ..
+            }) => Some(*repay_e8s),
             Event::RepayToVault { repayed_amount, .. } => Some(repayed_amount.0),
             Event::RedemptionOnVaults { icusd_amount, .. } => Some(icusd_amount.0),
             Event::ReserveRedemption { icusd_amount, .. } => Some(icusd_amount.0),
@@ -1883,6 +1905,7 @@ impl Event {
             Event::WithdrawLiquidity { caller, .. } => caller == p,
             Event::ClaimLiquidityReturns { caller, .. } => caller == p,
             Event::AdminMint { to, .. } => to == p,
+            Event::XrplIcusd(e) => e.owner().as_ref() == Some(p),
             _ => false,
         }
     }
@@ -2484,7 +2507,7 @@ pub fn replay_with_pending_payout_events(
 }
 
 #[cfg(test)]
-fn replay_with_nonce_time(
+pub(crate) fn replay_with_nonce_time(
     events: impl Iterator<Item = Event>,
     nonce_time: impl FnMut() -> u64,
 ) -> Result<State, ReplayLogError> {
@@ -3240,6 +3263,11 @@ fn replay_with_nonce_time_and_payout_events(
             | Event::ChainReserveBurnSettled { .. }
             | Event::ChainLiquidationDeferred { .. }
             | Event::ChainHotWalletLow { .. } => {},
+            // XRPL icUSD lane: rebuild durable reservations, vault exclusions and
+            // interest-accrual freezes IN LOG ORDER (before any later AccrueInterest).
+            Event::XrplIcusd(ev) => {
+                crate::xrpl_icusd::apply_xrpl_icusd_event(&mut state, &ev);
+            },
         }
         public_event_count = public_event_count.saturating_add(1);
     }

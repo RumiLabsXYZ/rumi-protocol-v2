@@ -126,6 +126,15 @@ pub fn collateral_network_for_key(chain_key_name: &str) -> XrplNetwork {
     }
 }
 
+/// The Schnorr key name this build's native-XRP collateral gate accepts.
+pub const fn expected_collateral_key_name() -> &'static str {
+    if FIXTURE_BUILD {
+        XRP_TEST_SCHNORR_KEY_NAME
+    } else {
+        XRP_PRODUCTION_SCHNORR_KEY_NAME
+    }
+}
+
 /// Key-name gate for native-XRP collateral operations. Normal builds require the
 /// production key; ONLY the fixture build accepts `test_key_1` (and then rejects
 /// `key_1`, so the fixture can never sign with the production key).

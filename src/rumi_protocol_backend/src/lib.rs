@@ -1533,6 +1533,7 @@ pub mod storage;
 pub mod treasury;
 pub mod vault;
 pub mod xrc;
+pub mod xrpl_icusd;
 
 #[cfg(any(test, feature = "test_endpoints"))]
 pub mod test_helpers;

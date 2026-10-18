@@ -123,10 +123,10 @@ impl From<NetworkError> for IssuedRpcError {
 
 // ---- small helpers ------------------------------------------------------------
 
-fn s(v: Option<&Value>) -> Option<String> {
+pub(super) fn s(v: Option<&Value>) -> Option<String> {
     v.and_then(Value::as_str).map(str::to_owned)
 }
-fn u32_of(v: Option<&Value>) -> Option<u32> {
+pub(super) fn u32_of(v: Option<&Value>) -> Option<u32> {
     v.and_then(|v| {
         v.as_u64()
             .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
@@ -134,7 +134,7 @@ fn u32_of(v: Option<&Value>) -> Option<u32> {
     .and_then(|n| u32::try_from(n).ok())
 }
 
-fn is_hex64(h: &str) -> bool {
+pub(super) fn is_hex64(h: &str) -> bool {
     h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -149,7 +149,7 @@ pub fn normalize_tx_hash(h: &str) -> Result<String, IssuedRpcError> {
     }
 }
 
-fn check_account(a: &str) -> Result<(), IssuedRpcError> {
+pub(super) fn check_account(a: &str) -> Result<(), IssuedRpcError> {
     account_id_from_classic_address(a)
         .map(|_| ())
         .map_err(IssuedRpcError::InvalidInput)
@@ -601,7 +601,7 @@ pub struct ParsedTx {
     pub line_changes: Vec<RawLineChange>,
 }
 
-fn parse_reduced_tx(v: &Value) -> Result<ParsedTx, String> {
+pub(super) fn parse_reduced_tx(v: &Value) -> Result<ParsedTx, String> {
     let line_changes = v
         .get("lines")
         .and_then(Value::as_array)
@@ -1459,7 +1459,7 @@ pub fn quorum_history_page(
 
 // ---- async fetchers ------------------------------------------------------------------------
 
-enum Verdict {
+pub(super) enum Verdict {
     Retry(String),
     Fatal(IssuedRpcError),
 }
@@ -1489,7 +1489,7 @@ where
 
 /// Fan a read out to `urls`, then hand the tagged bodies to `quorum`; consensus-miss
 /// class transport errors and `Retry` verdicts are retried (reads are idempotent).
-async fn read_with_quorum<F, T, Q>(
+pub(super) async fn read_with_quorum<F, T, Q>(
     urls: &[&str],
     build: F,
     cycles: u128,
@@ -1518,7 +1518,7 @@ where
     Err(IssuedRpcError::Transport(last))
 }
 
-fn verdict(e: IssuedRpcError) -> Verdict {
+pub(super) fn verdict(e: IssuedRpcError) -> Verdict {
     if e.is_recoverable() {
         Verdict::Retry(e.to_string())
     } else {
@@ -1572,7 +1572,7 @@ pub async fn fetch_issued_receipt(
     .await
 }
 
-async fn fetch_server_infos(urls: &[&str]) -> Vec<(String, Result<ServerInfo, IssuedRpcError>)> {
+pub(super) async fn fetch_server_infos(urls: &[&str]) -> Vec<(String, Result<ServerInfo, IssuedRpcError>)> {
     let (bodies, errors, _) = call_providers(
         urls,
         &|u: &str| server_info_request_to_url(u).into_http(),

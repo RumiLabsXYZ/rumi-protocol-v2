@@ -23,6 +23,7 @@ pub mod config;
 pub mod issued_amount;
 pub mod issued_codec;
 pub mod issued_rpc;
+pub mod issuer_rpc;
 pub mod network;
 pub mod sign;
 pub mod ted25519;
