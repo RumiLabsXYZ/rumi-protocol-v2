@@ -1143,6 +1143,10 @@ pub const MAX_UNATTRIBUTED_SENDERS: usize = 2_000;
 pub const MAX_QUARANTINED_RECEIPTS: usize = 500;
 /// Sender key of the overflow aggregate / quarantine entry.
 pub const OVERFLOW_SENDER: &str = "*overflow*";
+/// Cap on per-transaction evidence kept for value that joined an overflow bucket (only
+/// contributions of at least `min_auto_refund_e8s` are recorded). Past it, a larger
+/// contribution replaces the smallest recorded one.
+pub const MAX_OVERFLOW_EVIDENCE: usize = 500;
 /// Terminal operations are pruned after this retention window.
 pub const OP_RETENTION_NS: u64 = 30 * 24 * 3_600 * 1_000_000_000;
 /// Terminal operations pruned per tick pass.
@@ -1170,6 +1174,29 @@ pub struct UnattributedReturns {
     /// Refund operations already cut from this aggregate (feeds the deterministic
     /// refund nonce).
     pub refunds_issued: u32,
+}
+
+/// Which overflow bucket a contribution joined.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverflowKind {
+    Unattributed,
+    Quarantine,
+}
+
+/// Per-transaction evidence for a contribution that joined an overflow bucket (the
+/// bucket itself is only a sum). It is what lets a controller re-verify THAT receipt
+/// through the provider quorum and move exactly its amount to the verified sender's
+/// attributed aggregate, once (the entry is consumed by the move).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OverflowEvidence {
+    pub network: XrplNetwork,
+    pub kind: OverflowKind,
+    pub tx_hash: String,
+    pub sender: String,
+    pub ledger_index: u32,
+    pub destination_tag: Option<u32>,
+    pub amount: WideAmount,
+    pub at_ns: u64,
 }
 
 /// A value-bearing receipt that failed strict evidence checks. Its value left `O`

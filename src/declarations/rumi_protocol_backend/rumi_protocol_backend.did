@@ -2183,8 +2183,10 @@ service : (ProtocolArg) -> {
   observe_xrpl_repayment : (ObserveRepaymentArg) -> (XrplOperationResult);
   prepare_xrpl_repayment : (PrepareRepaymentArg) -> (XrplIntentResult);
   get_xrpl_quarantined_receipts : () -> (XrplQuarantineListResult) query;
+  get_xrpl_overflow_evidence : () -> (XrplQuarantineListResult) query;
   reconcile_xrpl_borrow_mint : (nat64, nat64) -> (XrplOperationResult);
   reconcile_xrpl_quarantined_receipt : (text) -> (XrplQuarantineResult);
+  reconcile_xrpl_overflow_receipt : (text) -> (XrplQuarantineResult);
   retry_xrpl_fee_mint : (nat64) -> (XrplOperationResult);
   resolve_xrpl_claim : (ResolveClaimArg) -> (XrplOperationResult);
   resume_xrpl_operation : (nat64) -> (XrplOperationResult);

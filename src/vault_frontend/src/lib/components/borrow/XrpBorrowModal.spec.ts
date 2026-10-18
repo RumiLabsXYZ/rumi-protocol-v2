@@ -452,3 +452,85 @@ describe('fetchValidatedBalanceDrops', () => {
     await expect(fetchValidatedBalanceDrops(CUSTODY, ['https://a'], f as any)).rejects.toThrow();
   });
 });
+
+describe('unknown pending state (signer wallet, empty cache)', () => {
+  it('opens nothing until the user explicitly confirms there is no unfinished deposit', async () => {
+    const vault = makeVault();
+    vault.readPendingDeposits.mockResolvedValue({ ok: true as const, deposits: [], unknown: true } as any);
+    const { controller } = setup({ vault, oisy: true });
+    await controller.prepare(12_345_678n);
+    expect(vault.open).not.toHaveBeenCalled();
+    expect(controller.getState()).toMatchObject({ phase: 'needs_open_confirmation', vault: null });
+    expect(controller.getState().error).toMatch(/unfinished XRP deposit/);
+    // A repeated prepare() (e.g. a re-render) still opens nothing.
+    await controller.prepare(12_345_678n);
+    expect(vault.open).not.toHaveBeenCalled();
+    // The explicit click opens exactly one vault.
+    await controller.acknowledgeNoPendingAndOpen();
+    await controller.acknowledgeNoPendingAndOpen();
+    expect(vault.open).toHaveBeenCalledTimes(1);
+    expect(controller.getState().phase).toBe('awaiting_payment');
+  });
+
+  it('a hint, or a backend-confirmed empty list, needs no extra click', async () => {
+    const confirmed = makeVault();
+    const a = setup({ vault: confirmed });
+    await a.controller.prepare(12_345_678n);
+    expect(confirmed.open).toHaveBeenCalledTimes(1); // ok:true without unknown
+
+    const pending = makeVault({ pending: [3] });
+    pending.readPendingDeposits.mockResolvedValue({
+      ok: true as const, unknown: true,
+      deposits: [{ vaultId: 3, custodyAddress: CUSTODY, reserveBaseDrops: RESERVE, openedAtMs: 3 }],
+    } as any);
+    const b = setup({ vault: pending, oisy: true });
+    await b.controller.prepare(12_345_678n);
+    expect(pending.open).not.toHaveBeenCalled(); // adopts the cached pending vault
+    expect(b.controller.getState().vault?.vaultId).toBe(3);
+  });
+
+  it('acknowledge is refused outside the confirmation phase', async () => {
+    const vault = makeVault();
+    const { controller } = setup({ vault });
+    await controller.acknowledgeNoPendingAndOpen();
+    expect(vault.open).not.toHaveBeenCalled();
+  });
+});
+
+describe('a wallet failure before any request exists does not pin the amount', () => {
+  it('signAndSubmit throwing without a prompt clears payStarted and the committed amount', async () => {
+    const storage = memoryStorage();
+    const wallet = makeWallet();
+    wallet.signAndSubmit.mockRejectedValueOnce(new Error('popup blocked'));
+    const { controller } = setup({ storage, wallet, balance: 'unfunded' });
+    await controller.prepare(12_345_678n);
+    controller.propose();
+    await controller.pay();
+    expect(controller.getState()).toMatchObject({ phase: 'awaiting_payment' });
+    expect(controller.getState().error).toMatch(/popup blocked/);
+    const hint = JSON.parse(storage.m.get('rumi_xrpl_deposit_hint_v1:owner-1')!);
+    expect(hint.payStarted).toBeUndefined();
+    // Reload with a re-typed amount: nothing was committed, so the new amount is used.
+    const b = setup({ storage, vault: makeVault({ pending: [7] }) });
+    await b.controller.prepare(20_000_000n);
+    b.controller.propose();
+    expect(b.controller.getState().proposal?.sendDrops).toBe(20_000_000n);
+  });
+
+  it('a throw AFTER the wallet request was created keeps the commitment', async () => {
+    const storage = memoryStorage();
+    const wallet = makeWallet();
+    let prompt: ((p: any) => void) | null = null;
+    wallet.onPrompt = ((h: any) => { prompt = h; return () => { prompt = null; }; }) as any;
+    wallet.signAndSubmit.mockImplementation((async () => {
+      prompt?.({ requestId: 'req-open', deepLink: 'x', qrPng: null });
+      throw new Error('connection dropped');
+    }) as any);
+    const { controller } = setup({ storage, wallet, balance: 'unfunded' });
+    await controller.prepare(12_345_678n);
+    controller.propose();
+    await controller.pay();
+    const hint = JSON.parse(storage.m.get('rumi_xrpl_deposit_hint_v1:owner-1')!);
+    expect(hint).toMatchObject({ payStarted: true, requestId: 'req-open', sendDrops: '12345678' });
+  });
+});

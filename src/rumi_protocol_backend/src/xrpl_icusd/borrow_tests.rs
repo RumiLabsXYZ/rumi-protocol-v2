@@ -1292,7 +1292,7 @@ fn replay_rebuilt_borrow_is_surfaced_and_resolved_only_by_ledger_proof() {
         spender: None,
         amount,
         fee: None,
-        created_at_time: None,
+        created_at_time: Some(NOW + 1),
         memo: None,
     };
     let esc = escrow_account(backend_p);
@@ -1303,6 +1303,9 @@ fn replay_rebuilt_borrow_is_surfaced_and_resolved_only_by_ledger_proof() {
         mint(Account { owner: owner(4), subaccount: None }, u128::from(net), "mint", None),
         mint(esc, u128::from(net), "xfer", None),
         mint(esc, u128::from(net), "mint", Some(Account { owner: owner(4), subaccount: None })),
+        // Not bound to THIS borrow: no timestamp, or created before the reservation.
+        crate::icrc3_proof::DecodedBlock { created_at_time: None, ..mint(esc, u128::from(net), "mint", None) },
+        crate::icrc3_proof::DecodedBlock { created_at_time: Some(NOW - 1), ..mint(esc, u128::from(net), "mint", None) },
     ] {
         let r = mutate_state(|s| borrow::apply_rebuilt_mint_proof(&mut s.xrpl_icusd, id, 77, &bad, backend_p, NOW + 5));
         assert!(matches!(r, Err(XrplIcusdError::InvalidArgument(_))), "{r:?}");
@@ -1331,4 +1334,84 @@ fn replay_rebuilt_borrow_is_surfaced_and_resolved_only_by_ledger_proof() {
         mutate_state(|s| borrow::apply_rebuilt_mint_proof(&mut s.xrpl_icusd, 10, 77, &good, backend_p, NOW + 7)),
         Err(XrplIcusdError::InvalidArgument(_))
     ));
+}
+
+#[test]
+fn rebuilt_borrow_proof_cannot_reuse_a_block_of_a_pruned_operation() {
+    let id = rebuilt_by_replay();
+    let backend_p = backend();
+    let esc = escrow_account(backend_p);
+    let net = 99 * E8;
+    let good = crate::icrc3_proof::DecodedBlock {
+        btype: None,
+        op: "mint".into(),
+        from: None,
+        to: Some(esc),
+        spender: None,
+        amount: u128::from(net),
+        fee: None,
+        created_at_time: Some(NOW + 1),
+        memo: None,
+    };
+    mutate_state(|s| borrow::apply_rebuilt_mint_proof(&mut s.xrpl_icusd, id, 77, &good, backend_p, NOW + 5)).unwrap();
+    assert!(read_state(|s| s.xrpl_icusd.proven_escrow_mint_blocks.contains(&77)));
+    // The proving operation disappears (pruned): the block stays spent.
+    mutate_state(|s| s.xrpl_icusd.remove_operation(id));
+    assert!(read_state(|s| s.xrpl_icusd.op(id).is_none()));
+    mutate_state(|s| {
+        s.xrpl_icusd.apply_reservation_begun(
+            10, owner(3), &[10; 32], TESTNET, 3, xrp(), 100 * E8, E8, 99 * E8, &holder_addr(9), 1, NOW + 2,
+        );
+    });
+    let r = mutate_state(|s| borrow::apply_rebuilt_mint_proof(&mut s.xrpl_icusd, 10, 77, &good, backend_p, NOW + 7));
+    assert!(matches!(r, Err(XrplIcusdError::InvalidArgument(_))), "{r:?}");
+    // A distinct, later block for the second borrow is accepted.
+    let later = crate::icrc3_proof::DecodedBlock { created_at_time: Some(NOW + 3), ..good };
+    mutate_state(|s| borrow::apply_rebuilt_mint_proof(&mut s.xrpl_icusd, 10, 78, &later, backend_p, NOW + 8)).unwrap();
+}
+
+#[test]
+fn an_operation_with_a_held_or_unresolved_fee_mint_is_never_pruned() {
+    let mut w = world();
+    w.treasury_principal = None;
+    w.protocol_deficit_icusd = ICUSD::new(0);
+    replace_state(w);
+    let id = open_borrow(owner(1), &arg(1, 100 * E8, 1));
+    prove_mint(id, 55);
+    assert_eq!(advance(id), BorrowAdvance::Committed);
+    // Force the borrow terminal and old; the fee remainder is still HELD (no treasury).
+    mutate_state(|s| {
+        let op = s.xrpl_icusd.op_mut(id).unwrap();
+        op.phase = Phase::Complete;
+        op.updated_at_ns = NOW;
+    });
+    let later = NOW + OP_RETENTION_NS + 1_000;
+    assert!(read_state(|s| borrow::fee_mint_unresolved(s.xrpl_icusd.op(id).unwrap())));
+    assert_eq!(mutate_state(|s| s.xrpl_icusd.maintain(later)), 0, "held fee: kept");
+    assert!(read_state(|s| s.xrpl_icusd.op(id).is_some()));
+    // The operator releases it; while the job is queued it is still kept.
+    mutate_state(|s| s.treasury_principal = Some(treasury()));
+    mutate_state(|s| borrow::operator_retry_fee_mint(s, id, NOW + 21)).unwrap();
+    assert_eq!(mutate_state(|s| s.xrpl_icusd.maintain(later)), 0, "queued fee job: kept");
+    // Once the fee mint is delivered and proven the record may go.
+    let idx = read_state(|s| {
+        s.xrpl_icusd
+            .op(id)
+            .unwrap()
+            .ic_jobs
+            .iter()
+            .rposition(|j| j.purpose == IcJobPurpose::FeeMint)
+            .unwrap()
+    });
+    mutate_state(|s| {
+        s.xrpl_icusd.begin_job_call(id, idx).unwrap();
+        s.xrpl_icusd
+            .finish_job_call(id, idx, LedgerCallResult::Ok(56), NOW + 30)
+            .unwrap();
+        s.xrpl_icusd.mark_proof_verified(id, idx).unwrap();
+    });
+    assert!(!read_state(|s| borrow::fee_mint_unresolved(s.xrpl_icusd.op(id).unwrap())));
+    assert_eq!(mutate_state(|s| s.xrpl_icusd.maintain(later)), 1, "resolved: pruned");
+    // Its escrow mint block stays spent after pruning.
+    assert!(read_state(|s| s.xrpl_icusd.proven_escrow_mint_blocks.contains(&55)));
 }

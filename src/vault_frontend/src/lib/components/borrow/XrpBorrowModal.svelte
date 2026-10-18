@@ -114,6 +114,12 @@
       phase = 'awaiting';
     }
     if (s.phase === 'confirming') phase = 'confirming';
+    if (s.phase === 'needs_open_confirmation' && !s.vault) {
+      // Pending state unknown (signer wallet, empty cache): nothing opened until the user says so.
+      phase = 'error';
+      errorMessage = s.error ?? '';
+      return;
+    }
     if (s.phase === 'error' && !s.vault) {
       phase = 'error';
       errorMessage = s.error ?? 'Could not reserve an XRP custody address.';
@@ -170,6 +176,23 @@
     errorMessage = '';
     try {
       await controller.prepare(sendDrops);
+      const v = controller.getState().vault;
+      if (v) await generateQr(buildXrpPaymentUri(v.custodyAddress, controller.getState().sentDrops ?? sendDrops));
+    } catch (err) {
+      phase = 'error';
+      errorMessage = err instanceof Error ? err.message : 'Could not reserve an XRP custody address.';
+    }
+  }
+
+  /** Explicit confirmation that no unfinished XRP deposit exists: only then open a new vault. */
+  async function acknowledgeAndOpen() {
+    if (!controller) return;
+    const sendDrops = copy.sendDrops;
+    if (sendDrops === null || sendDrops <= 0n) return;
+    phase = 'opening';
+    errorMessage = '';
+    try {
+      await controller.acknowledgeNoPendingAndOpen();
       const v = controller.getState().vault;
       if (v) await generateQr(buildXrpPaymentUri(v.custodyAddress, controller.getState().sentDrops ?? sendDrops));
     } catch (err) {
@@ -391,6 +414,12 @@
       <button class="secondary-action" type="button" disabled={isBusy} on:click={close}>
         {awaitingBorrowApproval ? 'Finish later' : 'Cancel'}
       </button>
+
+      {#if dep?.phase === 'needs_open_confirmation' && !opened}
+        <button class="primary-action" type="button" on:click={acknowledgeAndOpen}>
+          I have no unfinished XRP deposit, open a new one
+        </button>
+      {/if}
 
       {#if dep?.pendingReadFailed && !opened}
         <button class="primary-action" type="button" on:click={retryPrepare}>Try again</button>

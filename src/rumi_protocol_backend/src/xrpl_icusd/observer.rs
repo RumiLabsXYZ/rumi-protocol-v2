@@ -540,39 +540,30 @@ pub async fn observe_xrpl_repayment(
 // Controller reconciliation of quarantined value-bearing receipts
 // ----------------------------------------------------------------------------------
 
-/// Pure booking of a RE-VERIFIED receipt for a held quarantine entry. The amount is
-/// never supplied by the caller: it must equal what the quarantine recorded AND what
-/// the receipt's own metadata shows leaving the holders' lines of the issuer (so the
-/// issuer's obligations shrank by exactly that amount). The value moves from the
-/// quarantine bucket into the verified sender's refundable aggregate: `O` and the
-/// liability sum are untouched (it was taken out of `O` when it was quarantined), and
-/// no debt is ever credited.
-pub fn apply_quarantine_reconcile(
-    st: &mut super::state::XrplIcusdState,
-    network: XrplNetwork,
-    issuer: &str,
+/// Re-verified receipt vs a held record: a validated tesSUCCESS payment to the issuer
+/// from the recorded sender at the recorded ledger, delivering exactly the recorded
+/// amount, whose own metadata shows the issuer's obligations shrinking by exactly that
+/// amount (the sum of the holders' balance changes on lines with the issuer).
+fn verify_reconcile_receipt(
     r: &crate::chains::xrp::issued_rpc::VerifiedIssuedReceipt,
-    now_ns: u64,
-) -> Result<QuarantinedReceiptView, XrplIcusdError> {
-    let hash = r.hash.to_ascii_uppercase();
-    let entry = st
-        .quarantined_receipts
-        .get(&hash)
-        .cloned()
-        .ok_or(XrplIcusdError::NotFound)?;
+    issuer: &str,
+    sender: &str,
+    ledger_index: u32,
+    amount: &WideAmount,
+) -> Result<(), XrplIcusdError> {
     if !r.validated || r.engine_result != "tesSUCCESS" || r.destination != issuer {
         return Err(XrplIcusdError::InvalidArgument(
             "the re-verified receipt is not a validated tesSUCCESS payment to the issuer".into(),
         ));
     }
-    if r.account != entry.sender || r.ledger_index != entry.ledger_index {
+    if r.account != sender || r.ledger_index != ledger_index {
         return Err(XrplIcusdError::InvalidArgument(
             "the re-verified receipt differs from the quarantined record (sender or ledger)".into(),
         ));
     }
     let delivered = WideAmount::from_exact(&r.delivered_amount)
         .map_err(|_| XrplIcusdError::InvalidArgument("delivered amount is not representable".into()))?;
-    if delivered != entry.amount {
+    if delivered != *amount {
         return Err(XrplIcusdError::InvalidArgument(
             "the re-verified delivered amount differs from the quarantined amount".into(),
         ));
@@ -603,6 +594,30 @@ pub fn apply_quarantine_reconcile(
                 .into(),
         ));
     }
+    Ok(())
+}
+
+/// Pure booking of a RE-VERIFIED receipt for a held quarantine entry. The amount is
+/// never supplied by the caller: it must equal what the quarantine recorded AND what
+/// the receipt's own metadata shows leaving the holders' lines of the issuer (so the
+/// issuer's obligations shrank by exactly that amount). The value moves from the
+/// quarantine bucket into the verified sender's refundable aggregate: `O` and the
+/// liability sum are untouched (it was taken out of `O` when it was quarantined), and
+/// no debt is ever credited.
+pub fn apply_quarantine_reconcile(
+    st: &mut super::state::XrplIcusdState,
+    network: XrplNetwork,
+    issuer: &str,
+    r: &crate::chains::xrp::issued_rpc::VerifiedIssuedReceipt,
+    now_ns: u64,
+) -> Result<QuarantinedReceiptView, XrplIcusdError> {
+    let hash = r.hash.to_ascii_uppercase();
+    let entry = st
+        .quarantined_receipts
+        .get(&hash)
+        .cloned()
+        .ok_or(XrplIcusdError::NotFound)?;
+    verify_reconcile_receipt(r, issuer, &entry.sender, entry.ledger_index, &entry.amount)?;
     st.fold_unattributed(
         network,
         &entry.sender,
@@ -660,6 +675,155 @@ pub async fn reconcile_quarantined_with<T: ObserverTransport>(
 
 pub async fn reconcile_quarantined_receipt(tx_hash: String) -> Result<QuarantinedReceiptView, XrplIcusdError> {
     let out = reconcile_quarantined_with(&IcTransport, &tx_hash, super::now()).await?;
+    super::ensure_xrpl_tick_scheduled();
+    Ok(out)
+}
+
+// ----------------------------------------------------------------------------------
+// Controller reconciliation of OVERFLOW contributions
+// ----------------------------------------------------------------------------------
+
+/// Pure booking of a RE-VERIFIED receipt that joined an overflow bucket (the
+/// unattributed overflow aggregate or the overflow quarantine entry). The recorded
+/// per-transaction evidence is consumed exactly once: the receipt must re-verify against
+/// it (sender, ledger, amount, issuer obligations shrinking by exactly that amount) and
+/// then exactly that amount moves from the overflow bucket into the verified sender's
+/// own attributed aggregate (refundable when it reaches the threshold). `O` and the
+/// liability sum are untouched. If the sender cannot get its own slot (every slot is a
+/// refundable aggregate) nothing changes and the call can be retried after refunds drain.
+pub fn apply_overflow_reconcile(
+    st: &mut super::state::XrplIcusdState,
+    network: XrplNetwork,
+    issuer: &str,
+    r: &crate::chains::xrp::issued_rpc::VerifiedIssuedReceipt,
+    now_ns: u64,
+) -> Result<QuarantinedReceiptView, XrplIcusdError> {
+    let hash = r.hash.to_ascii_uppercase();
+    let ev = st
+        .overflow_evidence
+        .get(&hash)
+        .cloned()
+        .ok_or(XrplIcusdError::NotFound)?;
+    if ev.network != network {
+        return Err(XrplIcusdError::InvalidArgument(
+            "the evidence belongs to another network".into(),
+        ));
+    }
+    verify_reconcile_receipt(r, issuer, &ev.sender, ev.ledger_index, &ev.amount)?;
+    // The bucket must still hold at least this contribution.
+    let bucket_ok = match ev.kind {
+        OverflowKind::Unattributed => st
+            .unattributed
+            .get(&super::retention::aggregate_key(network, OVERFLOW_SENDER))
+            .is_some_and(|u| u.total >= ev.amount),
+        OverflowKind::Quarantine => st
+            .quarantined_receipts
+            .get(OVERFLOW_SENDER)
+            .is_some_and(|q| q.amount >= ev.amount),
+    };
+    if !bucket_ok {
+        return Err(XrplIcusdError::Internal(
+            "the overflow bucket holds less than the recorded contribution".into(),
+        ));
+    }
+    // Book into the sender's own slot FIRST (refuses without touching state when no slot
+    // is available), then take the same amount out of the bucket.
+    let overflowed = st.fold_unattributed_inner(
+        network,
+        &ev.sender,
+        &ev.amount,
+        &ev.tx_hash,
+        ev.ledger_index,
+        "booked after controller reconciliation of an overflow receipt",
+        now_ns,
+        false,
+    )?;
+    debug_assert!(!overflowed);
+    match ev.kind {
+        OverflowKind::Unattributed => {
+            let key = super::retention::aggregate_key(network, OVERFLOW_SENDER);
+            if let Some(u) = st.unattributed.get_mut(&key) {
+                u.total = u.total.checked_sub(&ev.amount).unwrap_or(WideAmount::ZERO);
+                u.tx_count = u.tx_count.saturating_sub(1);
+                u.updated_at_ns = now_ns;
+                if u.total.is_zero() {
+                    st.unattributed.remove(&key);
+                }
+            }
+        }
+        OverflowKind::Quarantine => {
+            if let Some(q) = st.quarantined_receipts.get_mut(OVERFLOW_SENDER) {
+                q.amount = q.amount.checked_sub(&ev.amount).unwrap_or(WideAmount::ZERO);
+                if q.amount.is_zero() {
+                    st.quarantined_receipts.remove(OVERFLOW_SENDER);
+                }
+            }
+        }
+    }
+    st.overflow_evidence.remove(&hash);
+    let key = repay::processed_key(network, issuer, &hash);
+    if let Some(p) = st.processed_returns.get_mut(&key) {
+        p.disposition = ReturnDisposition::Aggregated {
+            reason: "reconciled overflow receipt".into(),
+        };
+    }
+    Ok(overflow_view(&ev))
+}
+
+/// Candid view of one evidence entry (`reason` names the bucket).
+pub fn overflow_view(ev: &OverflowEvidence) -> QuarantinedReceiptView {
+    QuarantinedReceiptView {
+        tx_hash: ev.tx_hash.clone(),
+        ledger_index: ev.ledger_index,
+        sender: ev.sender.clone(),
+        destination_tag: ev.destination_tag,
+        amount: ev.amount.to_decimal_string(),
+        reason: match ev.kind {
+            OverflowKind::Unattributed => "overflow: unattributed aggregate".to_string(),
+            OverflowKind::Quarantine => "overflow: quarantine".to_string(),
+        },
+        at_ns: ev.at_ns,
+    }
+}
+
+/// Controller-only: re-read the overflow receipt through the quorum lookup and move it
+/// to its sender (see [`apply_overflow_reconcile`]). No assertion-only path.
+pub async fn reconcile_overflow_with<T: ObserverTransport>(
+    t: &T,
+    tx_hash: &str,
+    now_ns: u64,
+) -> Result<QuarantinedReceiptView, XrplIcusdError> {
+    let hash = normalize_tx_hash(tx_hash)
+        .map_err(|_| XrplIcusdError::InvalidArgument("tx_hash must be 64 hex characters".into()))?;
+    let (network, issuer) = read_state(|s| {
+        let st = &s.xrpl_icusd;
+        if !st.overflow_evidence.contains_key(&hash.to_ascii_uppercase()) {
+            return Err(XrplIcusdError::NotFound);
+        }
+        Ok((
+            st.config
+                .network
+                .ok_or_else(|| XrplIcusdError::Disabled("network not configured".into()))?,
+            st.config
+                .issuer_address
+                .clone()
+                .ok_or_else(|| XrplIcusdError::Disabled("issuer address not derived".into()))?,
+        ))
+    })?;
+    let asset = IssuedAsset::icusd(&issuer).map_err(|e| XrplIcusdError::Internal(e.to_string()))?;
+    match t.receipt(network, &hash, &asset).await {
+        Ok(ReceiptLookup::Verified(r)) => {
+            mutate_state(|s| apply_overflow_reconcile(&mut s.xrpl_icusd, network, &issuer, &r, now_ns))
+        }
+        Ok(_) => Err(XrplIcusdError::Unavailable(
+            "the transaction could not be re-verified by the providers right now".into(),
+        )),
+        Err(e) => Err(XrplIcusdError::Unavailable(e.to_string())),
+    }
+}
+
+pub async fn reconcile_overflow_receipt(tx_hash: String) -> Result<QuarantinedReceiptView, XrplIcusdError> {
+    let out = reconcile_overflow_with(&IcTransport, &tx_hash, super::now()).await?;
     super::ensure_xrpl_tick_scheduled();
     Ok(out)
 }

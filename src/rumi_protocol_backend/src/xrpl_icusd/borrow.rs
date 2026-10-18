@@ -599,6 +599,21 @@ pub fn fee_mint_state(op: &Operation) -> FeeMintState {
     }
 }
 
+/// True while a Borrow's fee-remainder mint is owed and not yet delivered: held (no
+/// treasury / budget exhausted), due for a retry, or admitted with no job cut yet. A
+/// Done job, or no remainder at all, is resolved. Such an operation must never be pruned.
+pub fn fee_mint_unresolved(op: &Operation) -> bool {
+    match fee_mint_state(op) {
+        FeeMintState::NotApplicable => false,
+        FeeMintState::HeldNoTreasury | FeeMintState::HeldExhausted | FeeMintState::RetryDue => true,
+        FeeMintState::InProgress => !op
+            .ic_jobs
+            .iter()
+            .rfind(|j| j.purpose == IcJobPurpose::FeeMint)
+            .is_some_and(|j| j.done_block().is_some()),
+    }
+}
+
 fn add_fee_mint_successor(
     state: &mut State,
     op_id: OperationId,
@@ -736,7 +751,7 @@ pub fn apply_rebuilt_mint_proof(
     backend: Principal,
     now_ns: u64,
 ) -> Result<(), XrplIcusdError> {
-    let net = {
+    let (net, reserved_at_ns) = {
         let op = st.op(op_id).ok_or(XrplIcusdError::NotFound)?;
         let OperationKind::Borrow { net_e8s, .. } = &op.kind else {
             return Err(XrplIcusdError::NotApplicable("not a borrow".into()));
@@ -746,7 +761,7 @@ pub fn apply_rebuilt_mint_proof(
                 "only a replay-rebuilt borrow with no mint job needs mint reconciliation".into(),
             ));
         }
-        *net_e8s
+        (*net_e8s, op.created_at_ns)
     };
     let escrow = escrow_account(backend);
     if decoded.op != "mint"
@@ -757,6 +772,25 @@ pub fn apply_rebuilt_mint_proof(
         return Err(XrplIcusdError::InvalidArgument(
             "the block is not a mint of exactly the reserved net amount into the escrow account"
                 .into(),
+        ));
+    }
+    // Bind the block to THIS borrow: the backend stamps its own mint with the
+    // `created_at_time` it chose after the reservation began, so an earlier equal-amount
+    // escrow mint (another borrow's, or a pruned one's) can never prove this one.
+    // (Replay carries no `ledger_tip_before`, so the timestamp is the bound.)
+    match decoded.created_at_time {
+        Some(t) if t >= reserved_at_ns => {}
+        _ => {
+            return Err(XrplIcusdError::InvalidArgument(
+                "the block's created_at_time is missing or predates the reservation; it cannot \
+                 be this borrow's mint"
+                    .into(),
+            ))
+        }
+    }
+    if st.proven_escrow_mint_blocks.contains(&block) {
+        return Err(XrplIcusdError::InvalidArgument(
+            "that mint block was already used as proof for another borrow".into(),
         ));
     }
     let claimed = st.operations.values().any(|o| {
@@ -770,6 +804,7 @@ pub fn apply_rebuilt_mint_proof(
             "that mint block already belongs to another operation".into(),
         ));
     }
+    st.remember_proven_mint_block(block);
     let op = st.op_mut(op_id)?;
     op.ic_jobs.push(IcLedgerJob {
         purpose: IcJobPurpose::EscrowMint,

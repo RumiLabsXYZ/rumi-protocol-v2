@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readCachedPendingDeposits, writeCachedPendingDeposits, XrpVaultService } from './xrpVaultService';
 import { walletStore } from '../stores/wallet';
+import { currentWalletType, WALLET_TYPES } from './auth';
 
 const OWNER = 'aaaaa-aa';
 const CACHE_KEY = `rumi_xrp_pending_deposits:${OWNER}`;
@@ -70,5 +71,33 @@ describe('readMyPendingDeposits (tri-state)', () => {
     } as any);
     const r = await XrpVaultService.readMyPendingDeposits();
     expect(r).toEqual({ ok: true, source: 'backend', deposits: [{ vaultId: 7, custodyAddress: 'rC', openedAtMs: 5, reserveBaseDrops: 1_000_000n }] });
+  });
+});
+
+describe('readMyPendingDeposits for a gesture-gated signer (Oisy)', () => {
+  beforeEach(() => { localStorage.clear(); vi.restoreAllMocks(); });
+  afterEach(() => { currentWalletType.set(null); });
+
+  it('an EMPTY cache is "unknown", never a clean empty answer', async () => {
+    currentWalletType.set(WALLET_TYPES.OISY);
+    const actorSpy = vi.spyOn(walletStore, 'getActor');
+    const r = await XrpVaultService.readMyPendingDeposits();
+    expect(r).toEqual({ ok: true, deposits: [], source: 'cache', unknown: true });
+    expect(actorSpy).not.toHaveBeenCalled(); // no signer popup
+  });
+
+  it('a non-empty cache is returned as a cache hit (not flagged unknown)', async () => {
+    currentWalletType.set(WALLET_TYPES.OISY);
+    vi.spyOn(walletStore, 'subscribe').mockImplementation(((fn: (s: unknown) => void) => {
+      fn({ principal: { toText: () => OWNER } });
+      return () => {};
+    }) as any);
+    writeCachedPendingDeposits(
+      [{ vaultId: 4, custodyAddress: 'rC', openedAtMs: 1, reserveBaseDrops: 1_000_000n }],
+      OWNER
+    );
+    const r = await XrpVaultService.readMyPendingDeposits();
+    expect(r.ok && r.source).toBe('cache');
+    expect(r.ok && r.unknown).toBeUndefined();
   });
 });

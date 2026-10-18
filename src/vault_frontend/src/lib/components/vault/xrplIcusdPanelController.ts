@@ -156,6 +156,8 @@ export interface XrplIcusdPanelState {
   trustSet: { phase: TrustSetPhase; proposal: { account: string; network: string } | null; requestId: string | null; hash: string | null; error: string | null };
   operations: OperationUi[];
   operationsSource: 'none' | 'cache' | 'backend';
+  /** When the operation list was last read from (or confirmed by) the backend; 0 = unknown. */
+  operationsAsOfMs: number;
   operationsError: string | null;
   repay: {
     phase: RepayPhase;
@@ -227,6 +229,11 @@ const OPS_CACHE_PREFIX = 'rumi_xrpl_icusd_ops_v1:';
 const REPAY_HINT_PREFIX = 'rumi_xrpl_icusd_repay_v1:';
 const TRUST_WATCH_TRIES = 8;
 const TRUST_WATCH_MS = 3000;
+/**
+ * A gesture-gated signer (Oisy) cannot re-read the backend without a click, so a cached
+ * IntentPrepared only authorises a NEW payment while the cache is younger than this.
+ */
+const OISY_CACHE_MAX_AGE_MS = 2 * 60 * 1000;
 /** A prepared repayment intent is honoured for 7 days from its quote time. */
 const INTENT_TTL_NS = 7n * 24n * 3600n * 1_000_000_000n;
 
@@ -286,6 +293,7 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
   const fetchImpl = deps.fetchImpl ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
   const nonces: NonceStore = createNonceStore({ storage, owner: deps.ownerKey });
   const opsKey = `${OPS_CACHE_PREFIX}${deps.ownerKey}`;
+  const opsAtKey = `${OPS_CACHE_PREFIX}${deps.ownerKey}:at`;
   const hintKey = `${REPAY_HINT_PREFIX}${deps.ownerKey}`;
 
   let state: XrplIcusdPanelState = {
@@ -294,7 +302,7 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
     trustLine: { status: 'unknown', limit: null, balance: null, error: null },
     reserve: { drops: FALLBACK_OWNER_RESERVE_DROPS, live: false },
     trustSet: { phase: 'idle', proposal: null, requestId: null, hash: null, error: null },
-    operations: [], operationsSource: 'none', operationsError: null,
+    operations: [], operationsSource: 'none', operationsAsOfMs: 0, operationsError: null,
     repay: { phase: 'idle', operationId: null, intent: null, snapshot: null, requestId: null, hash: null, error: null },
     borrow: { phase: 'idle', operationId: null, error: null },
     importFlow: { phase: 'idle', amountE8s: null, disclosure: null, snapshot: null, error: null },
@@ -350,12 +358,24 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
     } catch { return []; }
   }
   function writeOpsCache(ops: OperationUi[]) {
-    try { storage?.setItem(opsKey, ser(ops.map((o) => o.raw))); } catch { /* hints only */ }
+    try {
+      storage?.setItem(opsKey, ser(ops.map((o) => o.raw)));
+      storage?.setItem(opsAtKey, String(nowMs()));
+    } catch { /* hints only */ }
+  }
+  function readOpsCacheAt(): number {
+    try {
+      const n = Number(storage?.getItem(opsAtKey));
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    } catch { return 0; }
   }
 
   function setOps(ops: OperationUi[], source: 'cache' | 'backend') {
     const sorted = [...ops].sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
-    set({ operations: sorted, operationsSource: source, operationsError: null });
+    set({
+      operations: sorted, operationsSource: source, operationsError: null,
+      ...(source === 'backend' ? { operationsAsOfMs: nowMs() } : {}),
+    });
     if (source === 'backend') {
       writeOpsCache(sorted);
       const hints = readHints();
@@ -513,13 +533,22 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
    * Non-Oisy re-reads the operation by query; Oisy (no passive authenticated
    * read) uses the cached view. Returns a refusal message, or null if fine.
    */
-  async function repayStaleness(opId: bigint, quoteTimeNs: bigint | null, alreadySigned: boolean): Promise<string | null> {
+  async function repayStaleness(
+    opId: bigint, quoteTimeNs: bigint | null, alreadySigned: boolean, requireFresh = false
+  ): Promise<string | null> {
     const oisy = deps.isOisy();
     if (!oisy) {
       await refreshOps();
       if (state.operationsError) return `Could not confirm that this repayment is still open (${state.operationsError}). Nothing was sent. Try again.`;
     }
     const cur = state.operations.find((o) => o.id === opId);
+    if (oisy && requireFresh && !alreadySigned && cur && cur.phase === 'IntentPrepared'
+      && nowMs() - state.operationsAsOfMs > OISY_CACHE_MAX_AGE_MS) {
+      // No passive authenticated read exists for a signer wallet and the backend has no
+      // public query for a caller's operation: a stale cached "waiting" proves nothing.
+      return 'Rumi has not confirmed in the last 2 minutes that this repayment is still waiting for a payment. '
+        + 'Press Refresh (your wallet will ask to approve a read), then pay. Nothing was sent.';
+    }
     if (!cur && !oisy) return 'Rumi no longer lists this repayment. Prepare it again; do not pay this one.';
     if (cur && cur.phase !== 'IntentPrepared') {
       return `This repayment is no longer waiting for a payment (${cur.label}). Do not pay it again.`;
@@ -558,6 +587,8 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
     // Keep the nonce until the operation leaves IntentPrepared: a reload and a
     // repeated click then get the SAME operation back instead of a second one.
     saveHint(r.data.operationId, { intentKey, intent: dehydrateIntent(r.data) });
+    // The prepare reply itself is a fresh backend confirmation that the intent is open.
+    set({ operationsAsOfMs: nowMs() });
     setRepay({ phase: 'prepared', intent: r.data, operationId: r.data.operationId, error: null });
     void refreshOpsIfAllowed();
   }
@@ -582,7 +613,7 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
       // the user clicks Refresh.
       if (deps.isOisy()) {
         const cached = readOpsCache();
-        if (cached.length) set({ operations: cached, operationsSource: 'cache' });
+        if (cached.length) set({ operations: cached, operationsSource: 'cache', operationsAsOfMs: readOpsCacheAt() });
       } else {
         await refreshOps();
       }
@@ -755,7 +786,7 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
           return;
         }
         // Operation still open and quote still fresh? (refuse before the wallet is asked)
-        const stale = await repayStaleness(r.operationId, r.intent.quoteTimeNs, false);
+        const stale = await repayStaleness(r.operationId, r.intent.quoteTimeNs, false, true);
         if (stale) { setRepay({ phase: 'error', error: stale }); return; }
         inflightRepay = { operationId: r.operationId, paymentJson: JSON.stringify(tx), account: u.conn.address };
         setRepay({ phase: 'awaiting_wallet', error: null });

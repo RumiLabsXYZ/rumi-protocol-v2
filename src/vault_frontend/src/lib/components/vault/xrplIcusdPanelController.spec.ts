@@ -691,6 +691,62 @@ describe('recovery review fixes', () => {
     expect(t.c.getState().repay.error).toMatch(/no longer waiting/i);
   });
 
+  it('Oisy: a stale cached IntentPrepared cannot authorise a NEW payment until a Refresh click', async () => {
+    let clock = 1_000;
+    const api = repayApi();
+    const t = setup({ oisy: true, api });
+    const c = createXrplIcusdController({ ...t.deps, now: () => clock });
+    await c.init();
+    await c.refresh(); // click: backend view shows #9 IntentPrepared
+    await c.prepareRepayment(PAY);
+    // Older than 2 minutes: refused with no wallet request and no signer read.
+    clock += 3 * 60_000;
+    const reads = api.listMyOperations.mock.calls.length;
+    await c.payRepayment();
+    expect(t.wallet.signAndSubmit).not.toHaveBeenCalled();
+    expect(api.listMyOperations.mock.calls.length).toBe(reads);
+    expect(c.getState().repay.phase).toBe('error');
+    expect(c.getState().repay.error).toMatch(/Press Refresh/i);
+
+    // The explicit Refresh click re-reads the backend; the payment is then allowed.
+    await c.refresh();
+    expect(api.listMyOperations.mock.calls.length).toBe(reads + 1);
+    await c.prepareRepayment(PAY);
+    await c.payRepayment();
+    expect(t.wallet.signAndSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it('Oisy: a cached IntentPrepared younger than the threshold still allows the payment', async () => {
+    let clock = 1_000;
+    const t = setup({ oisy: true, api: repayApi() });
+    const c = createXrplIcusdController({ ...t.deps, now: () => clock });
+    await c.init();
+    await c.refresh();
+    await c.prepareRepayment(PAY);
+    clock += 60_000;
+    await c.payRepayment();
+    expect(t.wallet.signAndSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it('Oisy: a cache loaded after a reload is stale until refreshed (age persisted with the cache)', async () => {
+    const storage = mem();
+    let clock = 1_000;
+    const first = setup({ oisy: false, storage, api: repayApi() });
+    const c1 = createXrplIcusdController({ ...first.deps, now: () => clock });
+    await c1.init();
+    clock += 10 * 60_000;
+    const api2 = repayApi();
+    const second = setup({ oisy: true, storage, api: api2 });
+    const c2 = createXrplIcusdController({ ...second.deps, now: () => clock });
+    await c2.init();
+    await c2.prepareRepayment(PAY);
+    // prepare itself confirms the intent as fresh; age it past the threshold.
+    clock += 5 * 60_000;
+    await c2.payRepayment();
+    expect(second.wallet.signAndSubmit).not.toHaveBeenCalled();
+    expect(c2.getState().repay.error).toMatch(/Press Refresh/i);
+  });
+
   it('Oisy observe click makes exactly one authenticated call (no refreshOps after it)', async () => {
     const t = setup({ oisy: true });
     await t.c.init();

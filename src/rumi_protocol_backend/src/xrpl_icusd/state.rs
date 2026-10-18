@@ -59,6 +59,14 @@ pub struct XrplIcusdState {
     /// never above the fully-scanned frontier, so it can never hide an unprocessed
     /// return: see [`XrplIcusdState::compact_processed_returns`].
     pub dedup_floor_ledger: u32,
+    /// Per-transaction evidence for value held in an overflow bucket (see
+    /// [`OverflowEvidence`]); keyed by upper-case tx hash. Not value: the bucket sums
+    /// are the liability, this only makes individual receipts reconcilable.
+    pub overflow_evidence: BTreeMap<String, OverflowEvidence>,
+    /// Block indexes of escrow mints already used as the proof of a replay-rebuilt
+    /// borrow, or owned by an operation that was pruned. A block can prove at most one
+    /// borrow, ever (bounded: see `retention::remember_proven_mint_block`).
+    pub proven_escrow_mint_blocks: BTreeSet<u64>,
 
     // ---- derived indexes (NOT serialized; rebuilt at load/upgrade by `rebuild_indexes`
     // and maintained by every creation/transition site) -------------------------------

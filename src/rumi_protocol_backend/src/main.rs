@@ -9911,6 +9911,34 @@ async fn reconcile_xrpl_quarantined_receipt(
     xrpl::observer::reconcile_quarantined_receipt(tx_hash).await
 }
 
+/// Controller-only: per-transaction evidence for value held in an overflow bucket
+/// (contributions at or above the auto-refund threshold; bounded).
+#[candid_method(query)]
+#[query]
+fn get_xrpl_overflow_evidence() -> Result<Vec<QuarantinedReceiptView>, XrplIcusdError> {
+    xrpl_require_controller()?;
+    Ok(read_state(|s| {
+        s.xrpl_icusd
+            .overflow_evidence
+            .values()
+            .map(xrpl::observer::overflow_view)
+            .collect()
+    }))
+}
+
+/// Controller-only: re-read ONE overflow receipt through the provider quorum and move
+/// exactly its amount from the overflow bucket to the verified sender's attributed
+/// aggregate (refundable at the threshold). Works once per receipt; there is no
+/// assertion-only path.
+#[candid_method(update)]
+#[update]
+async fn reconcile_xrpl_overflow_receipt(
+    tx_hash: String,
+) -> Result<QuarantinedReceiptView, XrplIcusdError> {
+    xrpl_require_controller()?;
+    xrpl::observer::reconcile_overflow_receipt(tx_hash).await
+}
+
 /// Controller-only: retry a HELD borrow fee-remainder mint (no treasury at the debt
 /// commit, or the automatic fresh-nonce budget is exhausted). Refused unless every
 /// earlier fee-mint job is proven unexecuted.

@@ -93,6 +93,7 @@ export async function fetchValidatedBalanceDrops(
 export type XrpDepositPhase =
   | 'idle'
   | 'opening'
+  | 'needs_open_confirmation'
   | 'awaiting_payment'
   | 'signing'
   | 'wallet_pending'
@@ -134,7 +135,12 @@ export interface XrpDepositState {
 
 /** Tri-state: a failed read is never treated as "no pending deposits". */
 export type PendingDepositsResult =
-  | { ok: true; deposits: Array<{ vaultId: number; custodyAddress: string; reserveBaseDrops: bigint; openedAtMs?: number }> }
+  | {
+      ok: true;
+      deposits: Array<{ vaultId: number; custodyAddress: string; reserveBaseDrops: bigint; openedAtMs?: number }>;
+      /** An empty answer that is NOT proof of "nothing pending" (e.g. a signer wallet's local cache). */
+      unknown?: boolean;
+    }
   | { ok: false; error: string };
 
 export interface XrpDepositVaultApi {
@@ -188,6 +194,12 @@ export interface XrpDepositController {
   confirmFromClick(): Promise<void>;
   /** Explicit user click on the manual "I've sent the XRP" path (any pre-confirm phase). */
   confirmNow(): Promise<void>;
+  /**
+   * Explicit user click: "I have no unfinished XRP deposit, open a new one". Required
+   * only when the pending-deposit state is unknown (empty cache of a signer wallet) and
+   * there is no local hint; without it no vault is opened.
+   */
+  acknowledgeNoPendingAndOpen(): Promise<void>;
   dispose(): void;
 }
 
@@ -209,6 +221,8 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
   let confirmInFlight = false;
   let pollRun = 0;
   let desiredSend: bigint | null = null;
+  /** The user explicitly said they have no unfinished deposit (unknown pending state). */
+  let noPendingAcknowledged = false;
   /** Amount already committed to a wallet request for this vault (survives reload via the hint). */
   let committedSend: bigint | null = null;
 
@@ -366,6 +380,18 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
       // is reused instead of opening a second vault.
       const newest = [...pending].sort((a, b) => (b.openedAtMs ?? 0) - (a.openedAtMs ?? 0) || b.vaultId - a.vaultId)[0];
       adoptPending(newest, null, sendDrops);
+      return;
+    }
+
+    if (read.unknown && !hint && !noPendingAcknowledged) {
+      // The empty list is only a local cache: opening could create a second vault next
+      // to an unfinished deposit this browser never saw. The user must say so.
+      set({
+        phase: 'needs_open_confirmation',
+        error:
+          'Rumi could not check your account for an unfinished XRP deposit without a wallet approval. ' +
+          'If you already started an XRP deposit, finish that one instead. Otherwise confirm to open a new one.',
+      });
       return;
     }
 
@@ -528,10 +554,16 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
       };
       set({ phase: 'signing', error: null });
       // Commit the amount BEFORE the wallet request exists, so a reload while the
-      // request is open resumes that same amount instead of a re-typed one.
+      // request is open resumes that same amount instead of a re-typed one. If the
+      // wallet throws before any request was created, the commitment is undone below
+      // (nothing exists to resume, and a stale commitment would pin the amount forever).
+      const priorCommitted = committedSend;
+      const priorHint = readHint();
+      let requestCreated = false;
       committedSend = proposal.sendDrops;
       writeHint({ sendDrops: proposal.sendDrops.toString(), payStarted: true });
       const offPrompt = deps.wallet.onPrompt?.((p) => {
+        requestCreated = true;
         writeHint({ requestId: p.requestId });
         set({ requestId: p.requestId });
       });
@@ -539,6 +571,13 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
       try {
         sub = await deps.wallet.signAndSubmit(tx, { key: `xrp-deposit-vault-${proposal.vaultId}` });
       } catch (e) {
+        if (!requestCreated && !state.requestId) {
+          committedSend = priorCommitted;
+          writeHint({
+            sendDrops: priorHint?.sendDrops ?? proposal.sendDrops.toString(),
+            payStarted: priorHint?.payStarted,
+          });
+        }
         set({ phase: 'awaiting_payment', error: e instanceof Error ? e.message : String(e) });
         return;
       } finally {
@@ -570,6 +609,13 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
     async confirmFromClick() {
       if (state.phase !== 'ready_to_confirm' && state.phase !== 'timed_out') return;
       await doConfirm();
+    },
+    async acknowledgeNoPendingAndOpen() {
+      if (state.phase !== 'needs_open_confirmation' || state.vault || preparing) return;
+      noPendingAcknowledged = true;
+      const send = desiredSend ?? 0n;
+      preparing = doPrepare(send).finally(() => { preparing = null; });
+      await preparing;
     },
     async confirmNow() {
       if (!state.vault || ['opening', 'signing', 'confirming', 'confirmed', 'idle'].includes(state.phase)) return;

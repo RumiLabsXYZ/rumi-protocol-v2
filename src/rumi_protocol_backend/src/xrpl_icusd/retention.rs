@@ -30,10 +30,19 @@ pub fn aggregate_key(network: XrplNetwork, sender: &str) -> (String, String) {
     (network.name().to_string(), sender.to_string())
 }
 
+/// Cap on remembered proven escrow-mint blocks (8 bytes each). Eviction drops the
+/// lowest index; that is safe because a rebuilt borrow's proof must also carry a
+/// timestamp at or after its reservation (see `borrow::apply_rebuilt_mint_proof`).
+pub const MAX_PROVEN_MINT_BLOCKS: usize = 50_000;
+
 impl XrplIcusdState {
     /// Fold unattributed value from `sender` into its aggregate. Never fails for
-    /// capacity: past [`MAX_UNATTRIBUTED_SENDERS`] the value joins the overflow
-    /// aggregate (held, operator-visible, never auto-refunded).
+    /// capacity: when the sender slots are full, the smallest sub-threshold (dust)
+    /// aggregate is merged into the overflow aggregate so a LARGER new sender still gets
+    /// its own attributed slot; otherwise the value joins the overflow aggregate (held,
+    /// operator-visible, never auto-refunded) and, if it is at least the auto-refund
+    /// threshold, its per-transaction evidence is kept so a controller can later move
+    /// exactly that receipt to its verified sender (`reconcile_xrpl_overflow_receipt`).
     #[allow(clippy::too_many_arguments)]
     pub fn fold_unattributed(
         &mut self,
@@ -45,10 +54,40 @@ impl XrplIcusdState {
         reason: &str,
         now_ns: u64,
     ) -> Result<(), XrplIcusdError> {
+        self.fold_unattributed_inner(network, sender, amount, tx_hash, ledger_index, reason, now_ns, true)
+            .map(|_| ())
+    }
+
+    /// `allow_overflow = false` refuses (state untouched) instead of using the overflow
+    /// aggregate: used when value is being MOVED OUT of overflow to its own sender.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn fold_unattributed_inner(
+        &mut self,
+        network: XrplNetwork,
+        sender: &str,
+        amount: &WideAmount,
+        tx_hash: &str,
+        ledger_index: u32,
+        reason: &str,
+        now_ns: u64,
+        allow_overflow: bool,
+    ) -> Result<bool, XrplIcusdError> {
         let mut key = aggregate_key(network, sender);
+        let mut overflowed = false;
         if !self.unattributed.contains_key(&key) && self.unattributed.len() >= MAX_UNATTRIBUTED_SENDERS
         {
-            key = aggregate_key(network, OVERFLOW_SENDER);
+            if let Some(victim) = self.evictable_dust_slot(amount) {
+                self.merge_into_overflow(&victim, now_ns)?;
+            } else if allow_overflow {
+                key = aggregate_key(network, OVERFLOW_SENDER);
+                overflowed = true;
+            } else {
+                return Err(XrplIcusdError::Unavailable(
+                    "no free sender aggregate slot (all are above the dust threshold); retry once \
+                     refunds drain"
+                        .into(),
+                ));
+            }
         }
         let entry = self
             .unattributed
@@ -75,20 +114,121 @@ impl XrplIcusdState {
         entry.last_tx = tx_hash.to_ascii_uppercase();
         entry.last_reason = reason.chars().take(MAX_NOTE_LEN).collect();
         entry.updated_at_ns = now_ns;
+        if overflowed {
+            self.record_overflow_evidence(OverflowEvidence {
+                network,
+                kind: OverflowKind::Unattributed,
+                tx_hash: tx_hash.to_ascii_uppercase(),
+                sender: sender.to_string(),
+                ledger_index,
+                destination_tag: None,
+                amount: *amount,
+                at_ns: now_ns,
+            });
+        }
+        Ok(overflowed)
+    }
+
+    /// The smallest per-sender aggregate that is below the auto-refund threshold (dust
+    /// that would never be paid out) and strictly smaller than `incoming`. The overflow
+    /// aggregate itself is never a candidate.
+    fn evictable_dust_slot(&self, incoming: &WideAmount) -> Option<(String, String)> {
+        let min = u128::from(self.config.min_auto_refund_e8s);
+        self.unattributed
+            .iter()
+            .filter(|((_, sender), u)| {
+                sender != OVERFLOW_SENDER && u.total.whole_e8s < min && u.total < *incoming
+            })
+            .min_by(|(_, a), (_, b)| a.total.cmp(&b.total))
+            .map(|(k, _)| k.clone())
+    }
+
+    /// Merge a dust aggregate into its network's overflow aggregate (value exact).
+    fn merge_into_overflow(
+        &mut self,
+        victim: &(String, String),
+        now_ns: u64,
+    ) -> Result<(), XrplIcusdError> {
+        let Some(v) = self.unattributed.get(victim).cloned() else {
+            return Ok(());
+        };
+        let okey = aggregate_key(v.network, OVERFLOW_SENDER);
+        let entry = self
+            .unattributed
+            .entry(okey.clone())
+            .or_insert_with(|| UnattributedReturns {
+                network: v.network,
+                sender: OVERFLOW_SENDER.to_string(),
+                total: WideAmount::ZERO,
+                tx_count: 0,
+                first_ledger: v.first_ledger,
+                last_ledger: v.last_ledger,
+                last_tx: v.last_tx.clone(),
+                last_reason: "dust aggregates merged to free sender slots".into(),
+                updated_at_ns: now_ns,
+                refunds_issued: 0,
+            });
+        entry.total = entry
+            .total
+            .checked_add(&v.total)
+            .map_err(|e| XrplIcusdError::Internal(format!("aggregate overflow: {e:?}")))?;
+        entry.tx_count = entry.tx_count.saturating_add(v.tx_count);
+        entry.first_ledger = entry.first_ledger.min(v.first_ledger);
+        entry.last_ledger = entry.last_ledger.max(v.last_ledger);
+        entry.updated_at_ns = now_ns;
+        self.unattributed.remove(victim);
         Ok(())
+    }
+
+    /// Keep per-transaction evidence for an overflow contribution at or above the
+    /// auto-refund threshold. Bounded: when full, a larger entry replaces the smallest.
+    fn record_overflow_evidence(&mut self, ev: OverflowEvidence) {
+        if ev.amount.whole_e8s < u128::from(self.config.min_auto_refund_e8s) {
+            return;
+        }
+        if self.overflow_evidence.len() >= MAX_OVERFLOW_EVIDENCE
+            && !self.overflow_evidence.contains_key(&ev.tx_hash)
+        {
+            let smallest = self
+                .overflow_evidence
+                .iter()
+                .min_by(|(_, a), (_, b)| a.amount.cmp(&b.amount))
+                .map(|(k, e)| (k.clone(), e.amount));
+            match smallest {
+                Some((k, amt)) if ev.amount > amt => {
+                    self.overflow_evidence.remove(&k);
+                }
+                _ => return,
+            }
+        }
+        self.overflow_evidence.insert(ev.tx_hash.clone(), ev);
     }
 
     /// Hold a value-bearing receipt that failed strict evidence checks. Its value has
     /// already been taken out of `O` by the caller.
-    pub fn hold_quarantined(&mut self, rec: QuarantinedReceipt) -> Result<(), XrplIcusdError> {
-        let key = if self.quarantined_receipts.len() >= MAX_QUARANTINED_RECEIPTS
-            && !self.quarantined_receipts.contains_key(&rec.tx_hash)
-        {
+    pub fn hold_quarantined(
+        &mut self,
+        network: XrplNetwork,
+        rec: QuarantinedReceipt,
+    ) -> Result<(), XrplIcusdError> {
+        let overflowed = self.quarantined_receipts.len() >= MAX_QUARANTINED_RECEIPTS
+            && !self.quarantined_receipts.contains_key(&rec.tx_hash);
+        let key = if overflowed {
             // Overflow entry: summed, still exact, still operator-visible.
             OVERFLOW_SENDER.to_string()
         } else {
             rec.tx_hash.clone()
         };
+        let evidence = overflowed.then(|| OverflowEvidence {
+            network,
+            kind: OverflowKind::Quarantine,
+            tx_hash: rec.tx_hash.to_ascii_uppercase(),
+            sender: rec.sender.clone(),
+            ledger_index: rec.ledger_index,
+            destination_tag: rec.destination_tag,
+            amount: rec.amount,
+            at_ns: rec.at_ns,
+        });
         match self.quarantined_receipts.get_mut(&key) {
             Some(e) => {
                 e.amount = e
@@ -106,7 +246,21 @@ impl XrplIcusdState {
                 self.quarantined_receipts.insert(key, rec);
             }
         }
+        if let Some(ev) = evidence {
+            self.record_overflow_evidence(ev);
+        }
         Ok(())
+    }
+
+    /// Remember a proven escrow-mint block (bounded; the lowest index is dropped first).
+    pub fn remember_proven_mint_block(&mut self, block: u64) {
+        self.proven_escrow_mint_blocks.insert(block);
+        while self.proven_escrow_mint_blocks.len() > MAX_PROVEN_MINT_BLOCKS {
+            let Some(low) = self.proven_escrow_mint_blocks.iter().next().copied() else {
+                break;
+            };
+            self.proven_escrow_mint_blocks.remove(&low);
+        }
     }
 
     /// Whole-e8s refund amount an aggregate may release now, if any.
@@ -244,6 +398,9 @@ impl XrplIcusdState {
                 .ic_jobs
                 .iter()
                 .all(|j| j.is_resolved() && (j.done_block().is_none() || j.proof_verified))
+            // A borrow whose fee-remainder mint is held, queued or awaiting retry still
+            // owes the treasury value and the operator needs its record.
+            && !super::borrow::fee_mint_unresolved(op)
             && self.is_settled(op.id)
     }
 
@@ -289,6 +446,14 @@ impl XrplIcusdState {
         let Some(op) = self.operations.remove(&id) else {
             return;
         };
+        // Its proven escrow-mint blocks stay spent after the record is gone.
+        for j in &op.ic_jobs {
+            if j.purpose == IcJobPurpose::EscrowMint {
+                if let Some(b) = j.done_block() {
+                    self.remember_proven_mint_block(b);
+                }
+            }
+        }
         self.live_ops.remove(&id);
         self.reservations.remove(&id);
         self.system_refund_ops.remove(&id);

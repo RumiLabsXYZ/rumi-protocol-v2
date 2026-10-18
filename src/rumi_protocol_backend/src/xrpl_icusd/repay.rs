@@ -488,7 +488,7 @@ pub fn apply_verified_return(
     // Quarantine WITH value: O shrinks (the ledger's obligations did), the value is
     // held, nobody is credited and nothing is auto-refunded.
     if let Evidence::ValueUnverified(problem) = evidence {
-        st.hold_quarantined(QuarantinedReceipt {
+        st.hold_quarantined(network, QuarantinedReceipt {
             tx_hash: r.hash.to_ascii_uppercase(),
             ledger_index: r.ledger_index,
             sender: r.account.clone(),

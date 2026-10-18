@@ -3067,6 +3067,11 @@ export const idlFactory = ({ IDL }) => {
     'get_xrp_schnorr_key_name' : IDL.Func([], [IDL.Text], ['query']),
     'get_xrpl_icusd_config' : IDL.Func([], [PublicXrplIcusdConfig], ['query']),
     'get_xrpl_icusd_coverage' : IDL.Func([], [XrplCoverageResult], []),
+    'get_xrpl_overflow_evidence' : IDL.Func(
+        [],
+        [XrplQuarantineListResult],
+        ['query'],
+      ),
     'get_xrpl_quarantined_receipts' : IDL.Func(
         [],
         [XrplQuarantineListResult],
@@ -3232,6 +3237,11 @@ export const idlFactory = ({ IDL }) => {
     'reconcile_xrpl_borrow_mint' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [XrplOperationResult],
+        [],
+      ),
+    'reconcile_xrpl_overflow_receipt' : IDL.Func(
+        [IDL.Text],
+        [XrplQuarantineResult],
         [],
       ),
     'reconcile_xrpl_quarantined_receipt' : IDL.Func(

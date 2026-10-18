@@ -1922,7 +1922,7 @@ fn encoded_state_at_the_configured_caps_stays_under_budget() {
         .unwrap();
     }
     for i in 0..MAX_QUARANTINED_RECEIPTS as u64 {
-        st.hold_quarantined(QuarantinedReceipt {
+        st.hold_quarantined(TESTNET, QuarantinedReceipt {
             tx_hash: hash_n(i),
             ledger_index: 3_000,
             sender: holder_addr(9),
@@ -2438,4 +2438,160 @@ fn repay_settled_event_carries_what_consumers_need() {
             .count(),
         0
     );
+}
+
+// ---- overflow handling (re-review F1) -----------------------------------------------
+
+#[test]
+fn dust_attacker_filling_every_slot_cannot_strand_a_larger_legitimate_return() {
+    replace_state(rworld(100 * E8, 0, 1_000 * E8, Decimal::ZERO));
+    for i in 0..MAX_UNATTRIBUTED_SENDERS as u64 {
+        let r = ret_vol(i, &format!("rDust{i:05}"), None, "0.00000001", 2_000);
+        assert_eq!(apply_ret(&r), ReturnOutcome::Unattributed);
+    }
+    assert_eq!(read_state(|s| s.xrpl_icusd.unattributed.len()), MAX_UNATTRIBUTED_SENDERS);
+    // A legitimate unattributed return from a new sender: it gets its OWN slot.
+    let big = ret_vol(9_000, &payer(), None, "40", 2_500);
+    assert_eq!(apply_ret(&big), ReturnOutcome::Unattributed);
+    assert_eq!(agg_total(&payer()), WideAmount::from_e8s(40 * E8), "attributed, not overflow");
+    read_state(|s| {
+        let st = &s.xrpl_icusd;
+        let overflow = st
+            .unattributed
+            .get(&super::retention::aggregate_key(TESTNET, OVERFLOW_SENDER))
+            .expect("the evicted dust sits in the overflow aggregate");
+        assert_eq!(overflow.total, WideAmount::from_e8s(1), "exactly the one evicted dust slot");
+        assert!(st.overflow_evidence.is_empty(), "the large return needed no overflow evidence");
+        assert_eq!(buckets_by_full_scan(st), st.buckets().unwrap());
+        assert!(st.refund_drain_possible(), "the legitimate return is refundable");
+    });
+    assert_eq!(drain().len(), 1);
+    // Equal-or-larger dust does NOT churn out smaller dust; it goes to overflow.
+    let r = ret_vol(9_001, "rDustLate", None, "0.00000001", 2_000);
+    assert_eq!(apply_ret(&r), ReturnOutcome::Unattributed);
+    assert_eq!(agg_total("rDustLate"), WideAmount::ZERO);
+}
+
+/// Receipt whose metadata shows the issuer's obligations shrinking via ANOTHER holder's
+/// line (sender line unchanged): value-bearing, but not creditable as debt repayment.
+fn pathy_receipt(i: u64, sender: &str, amount: &str, ledger: u32) -> VerifiedIssuedReceipt {
+    let mut r = ret_vol(i, sender, None, amount, ledger);
+    r.balance_changes[0].final_low_balance = r.balance_changes[0].previous_low_balance;
+    let before = ExactIssuedAmount::parse("500").unwrap();
+    r.balance_changes.push(TrustLineBalanceChange {
+        low_account: other(),
+        high_account: issuer_addr(),
+        previous_low_balance: before,
+        final_low_balance: before.checked_sub(&r.delivered_amount).unwrap(),
+    });
+    r
+}
+
+#[test]
+fn overflow_unattributed_receipt_is_reconciled_by_proof_exactly_once() {
+    replace_state(rworld(100 * E8, 0, 1_000 * E8, Decimal::ZERO));
+    // Every slot is a REFUNDABLE aggregate (0.02 icUSD >= the 0.01 threshold): nothing to evict.
+    for i in 0..MAX_UNATTRIBUTED_SENDERS as u64 {
+        let r = ret_vol(i, &format!("rBig{i:05}"), None, "0.02", 2_000);
+        assert_eq!(apply_ret(&r), ReturnOutcome::Unattributed);
+    }
+    let late = ret_vol(9_100, &payer(), None, "40", 2_500);
+    assert_eq!(apply_ret(&late), ReturnOutcome::Unattributed);
+    assert_eq!(agg_total(&payer()), WideAmount::ZERO, "overflowed");
+    let h = hash_n(9_100);
+    let overflow_total = || {
+        read_state(|s| {
+            s.xrpl_icusd
+                .unattributed
+                .get(&super::retention::aggregate_key(TESTNET, OVERFLOW_SENDER))
+                .map(|u| u.total)
+                .unwrap_or(WideAmount::ZERO)
+        })
+    };
+    assert_eq!(overflow_total(), WideAmount::from_e8s(40 * E8));
+    assert!(read_state(|s| s.xrpl_icusd.overflow_evidence.contains_key(&h)));
+    let liabilities_before = liabilities();
+    // Wrong evidence is refused; nothing moves.
+    let mut bad = late.clone();
+    bad.delivered_amount = ExactIssuedAmount::parse("39").unwrap();
+    let e = block_on(observer::reconcile_overflow_with(&Mock::default().with_receipt(&bad), &h, NOW + 9))
+        .unwrap_err();
+    assert!(matches!(e, XrplIcusdError::InvalidArgument(_)), "{e:?}");
+    // Unverifiable by the providers: nothing moves.
+    let e = block_on(observer::reconcile_overflow_with(&Mock::default(), &h, NOW + 9)).unwrap_err();
+    assert!(matches!(e, XrplIcusdError::Unavailable(_)), "{e:?}");
+    // No free slot (every aggregate is refundable): refused, state untouched, retryable.
+    let e = block_on(observer::reconcile_overflow_with(&Mock::default().with_receipt(&late), &h, NOW + 9))
+        .unwrap_err();
+    assert!(matches!(e, XrplIcusdError::Unavailable(_)), "{e:?}");
+    assert_eq!(overflow_total(), WideAmount::from_e8s(40 * E8));
+    assert!(read_state(|s| s.xrpl_icusd.overflow_evidence.contains_key(&h)));
+    // Refunds drain slots; the reconcile then succeeds.
+    assert_eq!(drain().len(), REFUNDS_PER_PASS);
+    let view = block_on(observer::reconcile_overflow_with(&Mock::default().with_receipt(&late), &h, NOW + 10))
+        .expect("moved to the verified sender");
+    assert_eq!(view.amount, "40");
+    assert_eq!(agg_total(&payer()), WideAmount::from_e8s(40 * E8));
+    assert_eq!(overflow_total(), WideAmount::ZERO);
+    assert!(read_state(|s| s.xrpl_icusd.overflow_evidence.is_empty()));
+    assert_eq!(liabilities(), liabilities_before, "the liability sum never moved");
+    read_state(|s| assert_eq!(buckets_by_full_scan(&s.xrpl_icusd), s.xrpl_icusd.buckets().unwrap()));
+    assert_eq!(debt_of(1), 100 * E8, "no debt credit");
+    // Exactly once.
+    let e = block_on(observer::reconcile_overflow_with(&Mock::default().with_receipt(&late), &h, NOW + 11))
+        .unwrap_err();
+    assert_eq!(e, XrplIcusdError::NotFound);
+    assert_eq!(agg_total(&payer()), WideAmount::from_e8s(40 * E8));
+}
+
+#[test]
+fn overflow_quarantine_receipt_is_reconciled_by_proof_exactly_once() {
+    replace_state(rworld(100 * E8, 0, 1_000 * E8, Decimal::ZERO));
+    for i in 0..MAX_QUARANTINED_RECEIPTS as u64 {
+        mutate_state(|s| {
+            s.xrpl_icusd.hold_quarantined(
+                TESTNET,
+                QuarantinedReceipt {
+                    tx_hash: hash_n(i),
+                    ledger_index: 2_000,
+                    sender: holder_addr(9),
+                    destination_tag: None,
+                    amount: WideAmount::from_e8s(7),
+                    reason: "filler".into(),
+                    at_ns: NOW,
+                },
+            )
+        })
+        .unwrap();
+    }
+    let pathy = pathy_receipt(9_200, &payer(), "40", 2_500);
+    assert!(matches!(apply_ret(&pathy), ReturnOutcome::Quarantined(_)));
+    let h = hash_n(9_200);
+    read_state(|s| {
+        let q = s.xrpl_icusd.quarantined_receipts.get(OVERFLOW_SENDER).expect("overflow entry");
+        assert_eq!(q.amount, WideAmount::from_e8s(40 * E8));
+        assert!(s.xrpl_icusd.overflow_evidence.contains_key(&h));
+    });
+    let liabilities_before = liabilities();
+    // The ordinary quarantine reconcile cannot reach it.
+    let e = block_on(observer::reconcile_quarantined_with(&Mock::default().with_receipt(&pathy), &h, NOW + 9))
+        .unwrap_err();
+    assert_eq!(e, XrplIcusdError::NotFound);
+    let mut vague = pathy.clone();
+    vague.balance_changes.pop();
+    let e = block_on(observer::reconcile_overflow_with(&Mock::default().with_receipt(&vague), &h, NOW + 9))
+        .unwrap_err();
+    assert!(matches!(e, XrplIcusdError::InvalidArgument(_)), "{e:?}");
+    let view = block_on(observer::reconcile_overflow_with(&Mock::default().with_receipt(&pathy), &h, NOW + 10))
+        .expect("moved");
+    assert_eq!(view.amount, "40");
+    read_state(|s| {
+        assert!(!s.xrpl_icusd.quarantined_receipts.contains_key(OVERFLOW_SENDER));
+        assert!(s.xrpl_icusd.overflow_evidence.is_empty());
+    });
+    assert_eq!(agg_total(&payer()), WideAmount::from_e8s(40 * E8));
+    assert_eq!(liabilities(), liabilities_before);
+    let e = block_on(observer::reconcile_overflow_with(&Mock::default().with_receipt(&pathy), &h, NOW + 11))
+        .unwrap_err();
+    assert_eq!(e, XrplIcusdError::NotFound);
 }

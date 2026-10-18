@@ -2849,6 +2849,7 @@ export interface _SERVICE {
   'get_xrp_schnorr_key_name' : ActorMethod<[], string>,
   'get_xrpl_icusd_config' : ActorMethod<[], PublicXrplIcusdConfig>,
   'get_xrpl_icusd_coverage' : ActorMethod<[], XrplCoverageResult>,
+  'get_xrpl_overflow_evidence' : ActorMethod<[], XrplQuarantineListResult>,
   'get_xrpl_quarantined_receipts' : ActorMethod<[], XrplQuarantineListResult>,
   'harvest_chain_interest' : ActorMethod<[number], Result>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse_1>,
@@ -2954,6 +2955,10 @@ export interface _SERVICE {
   'reconcile_xrpl_borrow_mint' : ActorMethod<
     [bigint, bigint],
     XrplOperationResult
+  >,
+  'reconcile_xrpl_overflow_receipt' : ActorMethod<
+    [string],
+    XrplQuarantineResult
   >,
   'reconcile_xrpl_quarantined_receipt' : ActorMethod<
     [string],

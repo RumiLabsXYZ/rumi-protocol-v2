@@ -86,7 +86,17 @@ export interface XrpOpResult<T> {
  * same as "no pending deposits" (see {@link XrpVaultService.readMyPendingDeposits}).
  */
 export type XrpPendingDepositsRead =
-  | { ok: true; deposits: XrpPendingDepositView[]; source: 'backend' | 'cache' }
+  | {
+      ok: true;
+      deposits: XrpPendingDepositView[];
+      source: 'backend' | 'cache';
+      /**
+       * True when the answer cannot be trusted as "nothing pending": a cache-sourced
+       * EMPTY list (gesture-gated signer, no backend read possible) only means this
+       * browser has not seen a pending deposit, not that the backend has none.
+       */
+      unknown?: boolean;
+    }
   | { ok: false; error: string };
 
 interface CachedXrpPendingDeposit extends XrpPendingDepositView {
@@ -465,7 +475,8 @@ export class XrpVaultService {
    */
   static async readMyPendingDeposits(options: XrpReadOptions = {}): Promise<XrpPendingDepositsRead> {
     if (isOisySignerWallet() && !options.allowSigner) {
-      return { ok: true, deposits: readCachedPendingDeposits(), source: 'cache' };
+      const cached = readCachedPendingDeposits();
+      return { ok: true, deposits: cached, source: 'cache', ...(cached.length === 0 ? { unknown: true } : {}) };
     }
     try {
       const actor = await this.actor();
