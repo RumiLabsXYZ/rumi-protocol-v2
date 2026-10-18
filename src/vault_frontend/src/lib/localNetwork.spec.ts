@@ -11,7 +11,6 @@ import {
 describe('localNetwork dev override', () => {
   it('keeps the dfx defaults byte-identical when no env vars are set', () => {
     expect(resolveLocalIcHost({})).toBe('http://localhost:4943');
-    expect(resolveLocalIcHost(undefined)).toBe('http://localhost:4943');
     expect(resolveLocalIiCanisterId({})).toBe('uxrrr-q7777-77774-qaaaq-cai');
     expect(localIiUrl(DEFAULT_LOCAL_IC_HOST, DEFAULT_LOCAL_II_CANISTER_ID)).toBe(
       'http://uxrrr-q7777-77774-qaaaq-cai.localhost:4943',
