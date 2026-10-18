@@ -1079,6 +1079,17 @@ impl Fx {
         }
     }
 
+    /// Typed call WITHOUT the HTTP pump (endpoints that make no XRPL outcall).
+    fn plain_lane<T>(&self, sender: Principal, method: &str, args: Vec<u8>) -> T
+    where
+        T: CandidType + for<'a> Deserialize<'a>,
+    {
+        match self.plain(sender, method, args) {
+            WasmResult::Reply(b) => Decode!(&b, T).unwrap_or_else(|e| panic!("decode {method}: {e}")),
+            WasmResult::Reject(m) => panic!("{method} rejected: {m}"),
+        }
+    }
+
     fn lane_ok(&self, sender: Principal, method: &str, args: Vec<u8>) -> OperationView {
         let r: Result<OperationView, XrplIcusdError> = self.lane(sender, method, args);
         r.unwrap_or_else(|e| panic!("{method} failed: {e:?}"))
@@ -1337,7 +1348,7 @@ impl Fx {
     // ── XRPL lane configuration (controller flow) ──
 
     fn lane_setup(&self) {
-        let cfg: Result<PublicXrplIcusdConfig, XrplIcusdError> = self.lane(
+        let cfg: Result<PublicXrplIcusdConfig, XrplIcusdError> = self.plain_lane(
             ctrl(),
             "configure_xrpl_icusd",
             Encode!(&ConfigureXrplIcusdArg {
@@ -1356,7 +1367,7 @@ impl Fx {
         assert!(issuer.starts_with('r'));
         assert!(!cfg.ready, "not ready before setup");
         self.x.set_issuer(&issuer);
-        let acct: Result<Account, XrplIcusdError> = self.lane(ctrl(), "verify_xrpl_icusd_minting_account", Encode!().unwrap());
+        let acct: Result<Account, XrplIcusdError> = self.plain_lane(ctrl(), "verify_xrpl_icusd_minting_account", Encode!().unwrap());
         assert_eq!(acct.expect("minting account verified").owner, self.backend);
         for step in 0..12 {
             let st: Result<IssuerSetupStatus, XrplIcusdError> = self.lane(ctrl(), "run_xrpl_issuer_setup_step", Encode!().unwrap());
@@ -1368,7 +1379,7 @@ impl Fx {
         }
         let cfg = self.config();
         assert!(format!("{:?}", cfg.issuer_setup).starts_with("Ready"), "issuer setup reached Ready: {:?}", cfg.issuer_setup);
-        let r: Result<PublicXrplIcusdConfig, XrplIcusdError> = self.lane(
+        let r: Result<PublicXrplIcusdConfig, XrplIcusdError> = self.plain_lane(
             ctrl(),
             "set_xrpl_icusd_pauses",
             Encode!(&SetPausesArg { issuance_paused: Some(false), settlement_paused: Some(false) }).unwrap(),
@@ -1392,7 +1403,7 @@ impl Fx {
     }
 
     fn prepare_repay(&self, vault: u64, max: u64, full: bool, nonce: u8, top_up: Option<u64>) -> Result<RepaymentIntentView, XrplIcusdError> {
-        self.lane(
+        self.plain_lane(
             user(),
             "prepare_xrpl_repayment",
             Encode!(&PrepareRepaymentArg {
@@ -1502,7 +1513,7 @@ fn drive_to(fx: &Fx, who: Principal, op: u64, want: Phase) -> OperationView {
         let _ = fx.resume(op);
     }
     let v = fx.op(who, op);
-    panic!("operation {op} did not reach {want:?}: {:?} notes={:?}", v.phase, v.notes);
+    panic!("operation {op} did not reach {want:?}: {:?} full={v:#?}", v.phase);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1681,4 +1692,303 @@ fn escrow_mint_too_old_after_loss_is_proven_from_block_scan() {
     assert_eq!(fx.log_length(), 2, "still exactly the escrow mint + fee mint");
     assert_eq!(fx.vault(user(), vault).unwrap().borrowed_icusd_amount, 100 * E8);
     assert_eq!(v.ic_ledger_blocks.len(), 2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 8 / 5a. Exclusion + upgrade while the escrow mint is unresolved
+// ═══════════════════════════════════════════════════════════════════════════════
+
+type LegacyResult<T> = Result<T, rumi_protocol_backend::ProtocolError>;
+
+impl Fx {
+    fn legacy<T>(&self, sender: Principal, method: &str, args: Vec<u8>) -> LegacyResult<T>
+    where
+        T: CandidType + for<'a> Deserialize<'a>,
+    {
+        self.plain_lane(sender, method, args)
+    }
+
+    fn legacy_borrow(&self, who: Principal, vault: u64, amount: u64) -> LegacyResult<rumi_protocol_backend::SuccessWithFee> {
+        self.legacy(who, "borrow_from_vault", Encode!(&VaultArg { vault_id: vault, amount }).unwrap())
+    }
+
+    fn debt(&self, vault: u64) -> u64 {
+        self.vault(user(), vault).unwrap().borrowed_icusd_amount
+    }
+}
+
+/// Every legacy mutation of `vault` must be refused BY THE XRPL EXCLUSION while the
+/// operation is unresolved, and none of them may change the vault.
+fn assert_legacy_paths_blocked(fx: &Fx, vault: u64, expected_debt: u64) {
+    let before = fx.vault(user(), vault).unwrap();
+    let check = |name: &str, r: Result<String, rumi_protocol_backend::ProtocolError>| {
+        let e = r.expect_err(&format!("legacy {name} must be refused while the XRPL operation is unresolved"));
+        let msg = format!("{e:?}");
+        assert!(msg.contains("XRPL icUSD"), "legacy {name} was refused, but not by the XRPL exclusion: {msg}");
+    };
+    check("borrow_from_vault", fx.legacy_borrow(user(), vault, E8).map(|_| String::new()));
+    check(
+        "repay_to_vault",
+        fx.legacy::<u64>(user(), "repay_to_vault", Encode!(&VaultArg { vault_id: vault, amount: E8 }).unwrap())
+            .map(|_| String::new()),
+    );
+    check(
+        "withdraw_and_close_vault",
+        fx.legacy::<Option<u64>>(user(), "withdraw_and_close_vault", Encode!(&vault).unwrap()).map(|_| String::new()),
+    );
+    check(
+        "withdraw_partial_collateral",
+        fx.legacy::<u64>(user(), "withdraw_partial_collateral", Encode!(&VaultArg { vault_id: vault, amount: XRP }).unwrap())
+            .map(|_| String::new()),
+    );
+    check(
+        "close_vault",
+        fx.legacy::<Option<u64>>(user(), "close_vault", Encode!(&vault).unwrap()).map(|_| String::new()),
+    );
+    let after = fx.vault(user(), vault).unwrap();
+    assert_eq!(after.borrowed_icusd_amount, expected_debt, "blocked calls changed the debt");
+    assert_eq!(after.collateral_amount, before.collateral_amount, "blocked calls changed the collateral");
+}
+
+fn assert_liquidation_blocked(fx: &Fx, vault: u64) {
+    let r = fx.legacy::<rumi_protocol_backend::SuccessWithFee>(
+        liquidator(),
+        "liquidate_vault_partial",
+        Encode!(&VaultArg { vault_id: vault, amount: 10 * E8 }).unwrap(),
+    );
+    let msg = format!("{:?}", r.expect_err("manual partial liquidation must wait for the unresolved operation"));
+    assert!(msg.contains("XRPL icUSD"), "{msg}");
+    let r = fx.legacy::<rumi_protocol_backend::SuccessWithFee>(liquidator(), "liquidate_vault", Encode!(&vault).unwrap());
+    let msg = format!("{:?}", r.expect_err("full liquidation must wait for the unresolved operation"));
+    assert!(msg.contains("XRPL icUSD"), "{msg}");
+}
+
+#[test]
+fn exclusion_blocks_legacy_borrow_withdraw_liquidation_during_unresolved_mint_and_survives_upgrade() {
+    // 100 XRP @ $0.50: legacy 30 icUSD debt; the XRPL borrow adds a small 3 icUSD.
+    let (fx, vault) = lane_fx_with(100, 0.0, true);
+    fx.gap();
+    fx.legacy_borrow(user(), vault, 30 * E8).expect("legacy borrow before the XRPL op");
+    assert_eq!(fx.debt(vault), 30 * E8);
+    fx.mint_icusd(liquidator(), 40 * E8);
+    fx.approve(liquidator(), fx.backend, 40 * E8);
+    fx.gap();
+    fx.flaky("set_trap_icrc1_after_commit", Encode!(&1u32).unwrap());
+    let b = fx.borrow_to_xrpl(vault, 3 * E8, 1).expect("borrow_to_xrpl accepted");
+    let id = b.operation_id;
+    expect_phase(&fx.op(user(), id), Phase::EscrowMintPending);
+    let escrow_after_mint = fx.escrow_bal();
+    assert_eq!(escrow_after_mint, 297_000_000, "the mint landed (3 - 1% fee)");
+    // Keep the ledger unreachable so the background tick cannot reconcile the mint yet.
+    fx.pic.stop_canister(fx.icusd, None).expect("stop ledger");
+    assert_legacy_paths_blocked(&fx, vault, 30 * E8);
+
+    // A price crash makes the vault liquidatable, but liquidation is ALSO refused.
+    fx.set_xrp_price(36 * E8 / 100);
+    fx.run(60, 6);
+    expect_phase(&fx.op(user(), id), Phase::EscrowMintPending);
+    assert_liquidation_blocked(&fx, vault);
+    assert_eq!(fx.debt(vault), 30 * E8);
+
+    // The exclusion is durable: it survives an upgrade (R6/R9).
+    fx.upgrade_backend();
+    assert_legacy_paths_blocked(&fx, vault, 30 * E8);
+    assert_liquidation_blocked(&fx, vault);
+    expect_phase(&fx.op(user(), id), Phase::EscrowMintPending);
+
+    // Ledger back: the same nonce reconciles once, debt is committed once, lock released.
+    fx.pic.start_canister(fx.icusd, None).expect("start ledger");
+    let v = drive_to(&fx, user(), id, Phase::Delivered);
+    assert_eq!(fx.escrow_bal(), escrow_after_mint, "no second mint across the upgrade");
+    assert_eq!(fx.debt(vault), 33 * E8, "debt = legacy 30 + XRPL gross 3, committed once");
+    assert_eq!(v.xrpl_tx_hashes.len(), 1);
+    assert_eq!(fx.x.payments_submitted().len(), 1);
+
+    // Resolved: liquidation is no longer held back by XRPL issuance.
+    let r = fx.legacy::<rumi_protocol_backend::SuccessWithFee>(
+        liquidator(),
+        "liquidate_vault_partial",
+        Encode!(&VaultArg { vault_id: vault, amount: 10 * E8 }).unwrap(),
+    );
+    assert!(r.is_ok(), "liquidation proceeds once the mint is proven: {r:?}");
+    assert!(fx.debt(vault) < 33 * E8, "liquidation reduced the debt");
+    assert_eq!(fx.escrow_bal(), escrow_after_mint, "XRPL backing untouched by liquidation");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5b. Upgrade after the issuer transaction was signed
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn upgrade_after_issuer_tx_signed_recovers_the_blob_and_delivers_exactly_once() {
+    let (fx, vault) = lane_fx(500, 0.0);
+    fx.gap();
+    // Hold the `submit` outcall: by then the signed blob and the lease are persisted
+    // (the lane records "submit attempted" BEFORE it calls out).
+    fx.x.set_intercept_submit(true);
+    let (msg, stopped) = fx.call_until(
+        user(),
+        "borrow_to_xrpl",
+        Encode!(&BorrowToXrplArg {
+            request_nonce: vec![1; 32],
+            recipient: HOLDER.to_string(),
+            network: XrplNetwork::Mainnet,
+            vault_id: vault,
+            gross_e8s: 100 * E8,
+        })
+        .unwrap(),
+        |fx| fx.x.intercepted(),
+    );
+    assert!(stopped, "the issuer submit outcall was reached (signing succeeded)");
+    assert!(fx.x.payments_submitted().is_empty(), "XRPL has not seen the transaction");
+    assert_eq!(fx.escrow_bal(), 99 * E8);
+    assert_eq!(fx.debt(vault), 100 * E8, "debt was committed before the issuer step");
+    fx.x.set_intercept_submit(false);
+    fx.upgrade_backend();
+    let _ = fx.finish(msg);
+    let id = fx.ops(user())[0].operation_id;
+    let v = fx.op(user(), id);
+    assert!(
+        matches!(v.phase, Phase::Signed | Phase::Submitted),
+        "the signed attempt survived the upgrade: {:?}",
+        v.phase
+    );
+    assert_eq!(v.xrpl_tx_hashes.len(), 1, "the signed blob's hash is recoverable from state");
+    let hash = v.xrpl_tx_hashes[0].clone();
+    // Resume: the SAME blob is (re)submitted and validated; no second signature.
+    let v = drive_to(&fx, user(), id, Phase::Delivered);
+    let pays = fx.x.payments_submitted();
+    assert_eq!(pays.len(), 1, "exactly one distinct signed Payment ever reached XRPL");
+    assert_eq!(pays[0].0, hash, "the recovered hash is the delivered hash");
+    assert_payment(&fx, &pays[0].1, HOLDER, 99 * E8);
+    assert_eq!(v.xrpl_tx_hashes, vec![hash]);
+    assert_eq!(fx.x.holder_balance(HOLDER), e8(99 * E8));
+    assert_eq!(fx.escrow_bal(), 99 * E8);
+    assert_eq!(fx.debt(vault), 100 * E8);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5c / 8b. Burn reply lost; upgrade; interest + harvest ticks; settlement
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const DAY: u64 = 86_400;
+
+/// Move `amount` canonical icUSD from a funded fixture holder onto XRPL for [`HOLDER`].
+fn import_to_holder(fx: &Fx, amount: u64, nonce: u8) -> OperationView {
+    fx.mint_icusd(other_user(), amount + 3 * LEDGER_FEE);
+    fx.approve(other_user(), fx.backend, amount + 2 * LEDGER_FEE);
+    fx.gap();
+    let imp = fx.lane_ok(
+        other_user(),
+        "issue_xrpl_from_canonical",
+        Encode!(&IssueFromCanonicalArg {
+            request_nonce: vec![nonce; 32],
+            recipient: HOLDER.to_string(),
+            network: XrplNetwork::Mainnet,
+            amount_e8s: amount,
+        })
+        .unwrap(),
+    );
+    drive_to(fx, other_user(), imp.operation_id, Phase::Delivered)
+}
+
+/// Borrow `gross` (delivered), then prepare a repayment of `max`, pay it on XRPL and
+/// let the escrow burn commit with its reply lost. Returns the repayment op id.
+fn stage_unknown_burn(fx: &Fx, vault: u64, max: u64, full: bool, pay: &str) -> u64 {
+    fx.gap();
+    let intent = fx.prepare_repay(vault, max, full, 2, None).expect("prepare");
+    let hash = fx.x.holder_pays(&ReturnOpts::simple(HOLDER, intent.destination_tag, pay));
+    fx.flaky("set_trap_icrc1_after_commit", Encode!(&1u32).unwrap());
+    let v = fx.observe(intent.operation_id, &hash).expect("observe accepts the hint");
+    expect_phase(&v, Phase::EscrowBurnPending);
+    assert!(v.settlement_cutoff_ns.is_some(), "the cutoff is persisted at burn admission");
+    intent.operation_id
+}
+
+#[test]
+fn partial_repay_mid_burn_upgrade_freezes_accrual_then_accrues_only_the_remainder_and_distributes_once() {
+    let (fx, vault) = lane_fx_with(500, 0.10, true);
+    borrow_delivered(&fx, vault, 100 * E8, 1);
+    fx.run(30 * DAY, 6);
+    let before = fx.vault(user(), vault).unwrap();
+    let t_admit = fx.pic.get_time();
+    let op = stage_unknown_burn(&fx, vault, 40 * E8, false, "40");
+    let frozen = fx.vault(user(), vault).unwrap();
+    assert!(frozen.borrowed_icusd_amount >= before.borrowed_icusd_amount, "interest accrued up to the cutoff");
+    let snapshot_debt = frozen.borrowed_icusd_amount;
+    assert_legacy_paths_blocked(&fx, vault, snapshot_debt);
+
+    // Timer-driven interest + harvest run for 60 days while the burn is unresolved,
+    // across an upgrade: the vault stays frozen at its cutoff snapshot.
+    fx.pic.stop_canister(fx.icusd, None).expect("stop ledger");
+    fx.run(30 * DAY, 6);
+    fx.upgrade_backend();
+    fx.run(30 * DAY, 6);
+    let still = fx.vault(user(), vault).unwrap();
+    assert_eq!(still.borrowed_icusd_amount, snapshot_debt, "no accrual while the burn is unresolved");
+    assert_eq!(still.accrued_interest, frozen.accrued_interest, "accrued interest is frozen too");
+    expect_phase(&fx.op(user(), op), Phase::EscrowBurnPending);
+
+    // Ledger back: the same burn tuple is Duplicate -> proven; applied exactly once.
+    fx.pic.start_canister(fx.icusd, None).expect("start ledger");
+    let t_settle = fx.pic.get_time();
+    let escrow_before_resume = fx.escrow_bal();
+    let v = drive_to(&fx, user(), op, Phase::Complete);
+    assert_eq!(v.debt_applied_e8s, 40 * E8);
+    assert_eq!(fx.escrow_bal(), 59 * E8, "exactly one burn of 40 ({escrow_before_resume} before)");
+    let after = fx.vault(user(), vault).unwrap();
+    // The 60 days since the cutoff accrue on the REMAINDER (debt - 40) only.
+    let secs = t_settle.duration_since(t_admit).unwrap().as_secs_f64();
+    let remainder = (snapshot_debt - 40 * E8) as f64;
+    let expected = remainder * (1.0 + 0.10 * secs / (365.0 * DAY as f64));
+    let wrong = snapshot_debt as f64 * (1.0 + 0.10 * secs / (365.0 * DAY as f64)) - 40.0 * E8 as f64;
+    let got = after.borrowed_icusd_amount as f64;
+    assert!(got > remainder, "interest resumed on the remainder: {got} vs {remainder}");
+    assert!(
+        (got - expected).abs() < 0.2 * E8 as f64,
+        "accrual on the remainder only: got {got}, expected ~{expected}, whole-debt would be ~{wrong}"
+    );
+    assert!(wrong - expected > 0.4 * E8 as f64, "the fixture can tell the two apart");
+    // The saved interest share was distributed exactly once.
+    let once = fx.bal(treasury(), None);
+    for _ in 0..2 {
+        fx.run(31, 3);
+        let _ = fx.resume(op);
+    }
+    assert_eq!(fx.bal(treasury(), None), once, "resuming a settled repayment never distributes again");
+}
+
+#[test]
+fn full_close_mid_burn_upgrade_stays_zero_after_settlement_across_interest_and_harvest_ticks() {
+    let (fx, vault) = lane_fx_with(500, 0.10, true);
+    borrow_delivered(&fx, vault, 100 * E8, 1);
+    fx.run(30 * DAY, 6);
+    let d = fx.vault(user(), vault).unwrap().borrowed_icusd_amount;
+    // Pay the quote plus a small margin; the margin is an exact backed claim.
+    let margin = 3_000_000u64; // 0.03 icUSD
+    let pay = e8(d + margin).to_decimal_string();
+    // The holder only received 99 on XRPL; fund the extra via a canonical import
+    // (a funded fixture holder moves 2 icUSD onto XRPL), so the return is possible.
+    import_to_holder(&fx, 2 * E8, 9);
+    let op = stage_unknown_burn(&fx, vault, d + margin, true, &pay);
+    let frozen = fx.vault(user(), vault).unwrap();
+    let snapshot = frozen.borrowed_icusd_amount;
+    assert!(snapshot >= d && snapshot < d + 1_000_000, "cutoff accrual is only the seconds since the quote");
+    assert!(snapshot <= d + margin, "the payment covers the debt at the cutoff");
+    fx.pic.stop_canister(fx.icusd, None).expect("stop ledger");
+    fx.run(20 * DAY, 6);
+    fx.upgrade_backend();
+    fx.run(20 * DAY, 6);
+    assert_eq!(fx.vault(user(), vault).unwrap().borrowed_icusd_amount, snapshot, "frozen across timers and upgrade");
+    fx.pic.start_canister(fx.icusd, None).expect("start ledger");
+    // The debt was burned in full; the margin above it is an exact, owned claim (Held).
+    let v = drive_to(&fx, user(), op, Phase::Held);
+    assert_eq!(v.debt_applied_e8s, snapshot, "the whole debt at the cutoff was applied");
+    assert_eq!(fx.escrow_bal() as u128 + u128::from(snapshot), 101 * E8 as u128, "exactly one burn of the debt");
+    let after = fx.vault(user(), vault).unwrap();
+    assert_eq!((after.borrowed_icusd_amount, after.accrued_interest), (0, 0), "full close is zero after settlement");
+    fx.run(40 * DAY, 8);
+    let later = fx.vault(user(), vault).unwrap();
+    assert_eq!((later.borrowed_icusd_amount, later.accrued_interest), (0, 0), "and stays zero through interest and harvest ticks");
+    assert!(v.held_exact_amount.is_some(), "the margin stays an exact owned claim: {v:?}");
 }
