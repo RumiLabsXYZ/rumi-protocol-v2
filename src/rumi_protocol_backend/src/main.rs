@@ -9733,7 +9733,7 @@ fn xrp_transform_issuer_objects(
 // persisted, owner-authorized operation or the explicit-policy setup steps.
 
 use rumi_protocol_backend::xrpl_icusd::{
-    self as xrpl, ConfigureXrplIcusdArg, CoverageReport, IssueFromCanonicalArg, IssuerSetupStatus,
+    self as xrpl, BorrowToXrplArg, ConfigureXrplIcusdArg, CoverageReport, IssueFromCanonicalArg, IssuerSetupStatus,
     OperationPage, OperationView, PublicXrplIcusdConfig, ResolveClaimArg, SetPausesArg,
     XrplIcusdError,
 };
@@ -9761,6 +9761,36 @@ async fn issue_xrpl_from_canonical(
     arg: IssueFromCanonicalArg,
 ) -> Result<OperationView, XrplIcusdError> {
     xrpl::issue_from_canonical(ic_cdk::caller(), arg).await
+}
+
+/// Borrow icUSD against the caller's own native-XRP vault and deliver it as XRPL
+/// icUSD to `recipient` (a funded classic account with the exact trust line). Debt
+/// is recorded through the normal borrow event only after the canonical escrow mint
+/// is proven; delivery then follows as a backed, owner-held claim.
+#[candid_method(update)]
+#[update]
+async fn borrow_to_xrpl(arg: BorrowToXrplArg) -> Result<OperationView, XrplIcusdError> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous() {
+        return Err(XrplIcusdError::AnonymousCaller);
+    }
+    validate_authenticated_not_frozen().map_err(xrpl::borrow::map_protocol_error)?;
+    // An exact retry of an accepted request resolves the existing operation and
+    // must not depend on a fresh price or an unchanged mode.
+    let already_accepted = <[u8; 32]>::try_from(arg.request_nonce.as_slice())
+        .map(|n| {
+            read_state(|s| s.xrpl_icusd.request_nonce_index.contains_key(&(caller, n)))
+        })
+        .unwrap_or(false);
+    if !already_accepted {
+        validate_call().await.map_err(xrpl::borrow::map_protocol_error)?;
+        validate_mode().map_err(xrpl::borrow::map_protocol_error)?;
+        // ORACLE-001: refresh this vault's collateral price before debt increases.
+        validate_freshness_for_vault(arg.vault_id)
+            .await
+            .map_err(xrpl::borrow::map_protocol_error)?;
+    }
+    xrpl::borrow::borrow_to_xrpl(caller, arg).await
 }
 
 /// Owner-scoped: drive one of the caller's operations forward (reconciliation stays
@@ -12064,6 +12094,7 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         if vault.bot_processing
             || s.has_unresolved_push_sweep_for_vault(vault_id)
             || s.bot_claims.contains_key(&vault_id)
+            || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
         {
             return Err(ProtocolError::GenericError(format!(
                 "Vault #{} is already being processed",
@@ -12104,7 +12135,10 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
                 ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
             })?;
 
-            if vault.bot_processing || s.has_unresolved_push_sweep_for_vault(vault_id) {
+            if vault.bot_processing
+                || s.has_unresolved_push_sweep_for_vault(vault_id)
+                || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
+            {
                 return Err(ProtocolError::GenericError(format!(
                     "Vault #{} is already being processed",
                     vault_id
@@ -12262,6 +12296,7 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         if vault.bot_processing
             || s.has_unresolved_push_sweep_for_vault(vault_id)
             || s.bot_claims.contains_key(&vault_id)
+            || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
         {
             return Err(ProtocolError::GenericError(format!(
                 "Vault #{} already has active liquidation work", vault_id
@@ -13065,7 +13100,10 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
                 ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
             })?;
 
-            if vault.bot_processing || s.has_unresolved_push_sweep_for_vault(vault_id) {
+            if vault.bot_processing
+                || s.has_unresolved_push_sweep_for_vault(vault_id)
+                || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
+            {
                 return Err(ProtocolError::GenericError(format!(
                     "Vault #{} is already being processed",
                     vault_id
@@ -13230,7 +13268,10 @@ async fn dev_force_partial_bot_liquidate(
                 ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
             })?;
 
-            if vault.bot_processing || s.has_unresolved_push_sweep_for_vault(vault_id) {
+            if vault.bot_processing
+                || s.has_unresolved_push_sweep_for_vault(vault_id)
+                || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
+            {
                 return Err(ProtocolError::GenericError(format!(
                     "Vault #{} is already being processed",
                     vault_id
@@ -13385,7 +13426,10 @@ async fn dev_test_pool_only_liquidation(vault_id: u64) -> Result<String, Protoco
             .get(&vault_id)
             .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
 
-        if vault.bot_processing || s.has_unresolved_push_sweep_for_vault(vault_id) {
+        if vault.bot_processing
+                || s.has_unresolved_push_sweep_for_vault(vault_id)
+                || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
+            {
             return Err(ProtocolError::GenericError(format!(
                 "Vault #{} is locked by bot_processing",
                 vault_id

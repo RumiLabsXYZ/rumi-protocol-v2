@@ -26,28 +26,28 @@ use crate::icrc3_proof::DecodedBlock;
 
 // ---- fixtures ------------------------------------------------------------------------
 
-const TESTNET: XrplNetwork = XrplNetwork::Testnet;
+pub(super) const TESTNET: XrplNetwork = XrplNetwork::Testnet;
 
-fn issuer_pk() -> [u8; 32] {
+pub(super) fn issuer_pk() -> [u8; 32] {
     [7u8; 32]
 }
-fn issuer_addr() -> String {
+pub(super) fn issuer_addr() -> String {
     classic_address_from_ed25519_pubkey(&issuer_pk())
 }
-fn holder_addr(n: u8) -> String {
+pub(super) fn holder_addr(n: u8) -> String {
     classic_address_from_ed25519_pubkey(&[n; 32])
 }
-fn owner(n: u8) -> Principal {
+pub(super) fn owner(n: u8) -> Principal {
     Principal::from_slice(&[n; 10])
 }
-fn backend() -> Principal {
+pub(super) fn backend() -> Principal {
     Principal::from_slice(&[200; 10])
 }
-fn nonce(n: u64) -> u128 {
+pub(super) fn nonce(n: u64) -> u128 {
     ((1_000_000_000u128 + u128::from(n)) << 64) | u128::from(n)
 }
 
-fn ready_state() -> XrplIcusdState {
+pub(super) fn ready_state() -> XrplIcusdState {
     let mut s = XrplIcusdState::default();
     let c = &mut s.config;
     c.enabled = true;
@@ -119,7 +119,7 @@ fn borrow_reservation(s: &mut XrplIcusdState, id: u64, vault: u64, gross: u64, f
     );
 }
 
-fn prepared_payment(s: &XrplIcusdState, id: OperationId, seq: u32) -> IssuerTxAttempt {
+pub(super) fn prepared_payment(s: &XrplIcusdState, id: OperationId, seq: u32) -> IssuerTxAttempt {
     let op = s.op(id).unwrap();
     let amount = ExactIssuedAmount::try_from_e8s(op.kind.claim_e8s().unwrap()).unwrap();
     prepare_attempt(&PrepareInput {
@@ -140,13 +140,13 @@ fn prepared_payment(s: &XrplIcusdState, id: OperationId, seq: u32) -> IssuerTxAt
     .unwrap()
 }
 
-fn sign_and_submit(s: &mut XrplIcusdState, id: OperationId) {
+pub(super) fn sign_and_submit(s: &mut XrplIcusdState, id: OperationId) {
     let h = LeaseHolder::Operation(id);
     s.record_signature(h, &[9u8; 64], &issuer_pk(), 3_100).unwrap();
     s.record_submit(h, 3_200, None).unwrap();
 }
 
-fn receipt_for(a: &IssuerTxAttempt) -> VerifiedIssuedReceipt {
+pub(super) fn receipt_for(a: &IssuerTxAttempt) -> VerifiedIssuedReceipt {
     let AttemptTx::Payment {
         destination, amount, ..
     } = &a.tx
@@ -172,7 +172,7 @@ fn receipt_for(a: &IssuerTxAttempt) -> VerifiedIssuedReceipt {
     }
 }
 
-fn succeeded(a: &IssuerTxAttempt) -> Observation {
+pub(super) fn succeeded(a: &IssuerTxAttempt) -> Observation {
     let r = receipt_for(a);
     Observation {
         tx: TxView::Succeeded {

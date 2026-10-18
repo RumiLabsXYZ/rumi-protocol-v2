@@ -99,6 +99,13 @@ export interface BorrowMintTuple {
   'ledger' : Principal,
   'op_nonce' : bigint,
 }
+export interface BorrowToXrplArg {
+  'request_nonce' : Uint8Array | number[],
+  'recipient' : string,
+  'network' : XrplNetwork,
+  'vault_id' : bigint,
+  'gross_e8s' : bigint,
+}
 export interface BotCollateralReturnProofArg {
   'block_index' : bigint,
   'claim_generation' : bigint,
@@ -2508,6 +2515,7 @@ export interface _SERVICE {
     Result_1
   >,
   'borrow_from_vault' : ActorMethod<[VaultArg], Result_4>,
+  'borrow_to_xrpl' : ActorMethod<[BorrowToXrplArg], XrplOperationResult>,
   'bot_cancel_liquidation' : ActorMethod<[bigint], Result_1>,
   'bot_claim_liquidation' : ActorMethod<[bigint], Result_5>,
   'bot_confirm_liquidation' : ActorMethod<[bigint], Result_1>,

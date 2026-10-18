@@ -3783,13 +3783,18 @@ pub fn record_deficit_repaid(
     timestamp: u64,
 ) {
     state.apply_deficit_repayment(amount);
-    record_event(&Event::DeficitRepaid {
-        amount,
-        source,
-        remaining_deficit: state.protocol_deficit_icusd,
-        anchor_block_index,
+    // Pinned timestamp: the callers pass the time they already captured (the
+    // production wrapper passes the IC clock), so the side log agrees with the event.
+    record_event_at(
+        &Event::DeficitRepaid {
+            amount,
+            source,
+            remaining_deficit: state.protocol_deficit_icusd,
+            anchor_block_index,
+            timestamp,
+        },
         timestamp,
-    });
+    );
 }
 
 /// Admin: tune the per-fee fraction routed to deficit repayment.

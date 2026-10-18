@@ -273,6 +273,15 @@ impl VaultLiquidationGuard {
                 "Vault #{vault_id} has an unresolved icUSD mint; retry the exact borrow to reconcile it"
             )));
         }
+        // XRPL icUSD lane: a durable operation (unresolved borrow mint, or an
+        // admitted repayment burn) excludes every conflicting mutation of this
+        // vault. This also covers the borrow-retry and push-sweep-retry entries:
+        // neither retry is an XRPL-lane operation.
+        if crate::state::has_xrpl_vault_exclusion(vault_id) {
+            return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                "Vault #{vault_id} is locked by an unresolved XRPL icUSD operation; retry after it settles"
+            )));
+        }
         LIQUIDATING_VAULTS.with(|set| {
             let mut set = set.borrow_mut();
             if set.contains(&vault_id) {
@@ -364,13 +373,87 @@ pub struct BorrowReservationGuard {
     amount: u64,
 }
 
+/// In-flight (heap) reservations: `(this collateral, all collaterals)`.
+pub fn heap_borrow_reserved(collateral: Principal) -> (u64, u64) {
+    BORROW_RESERVATIONS.with(|r| {
+        let map = r.borrow();
+        (
+            map.get(&collateral).copied().unwrap_or(0),
+            map.values().copied().sum(),
+        )
+    })
+}
+
+/// Pure headroom rule shared by every admission (legacy heap reservation and the
+/// XRPL lane's durable reservation): committed + every reservation bucket + the new
+/// amount must fit under the per-collateral ceiling and the global mint cap.
+#[allow(clippy::too_many_arguments)]
+fn headroom_rule(
+    coll_reserved: u64,
+    total_reserved: u64,
+    amount: u64,
+    current_collateral_debt: u64,
+    debt_ceiling: u64,
+    current_global_borrowed: u64,
+    global_cap: u64,
+) -> Result<(), String> {
+    if current_collateral_debt
+        .saturating_add(coll_reserved)
+        .saturating_add(amount)
+        > debt_ceiling
+    {
+        return Err(format!(
+            "Borrow would exceed debt ceiling incl in-flight ({} + {} + {} > {})",
+            current_collateral_debt, coll_reserved, amount, debt_ceiling
+        ));
+    }
+    if current_global_borrowed
+        .saturating_add(total_reserved)
+        .saturating_add(amount)
+        > global_cap
+    {
+        return Err(format!(
+            "Borrow would exceed global icUSD mint cap incl in-flight ({} + {} + {} > {})",
+            current_global_borrowed, total_reserved, amount, global_cap
+        ));
+    }
+    Ok(())
+}
+
+/// Read-only headroom check against committed debt, the legacy heap reservations
+/// (read here) and the durable XRPL reservations (passed in). Used by the XRPL lane,
+/// whose reservation is a durable operation inserted in the same synchronous block.
+#[allow(clippy::too_many_arguments)]
+pub fn check_borrow_headroom(
+    collateral: Principal,
+    amount: u64,
+    current_collateral_debt: u64,
+    debt_ceiling: u64,
+    current_global_borrowed: u64,
+    global_cap: u64,
+    durable_collateral: u64,
+    durable_total: u64,
+) -> Result<(), String> {
+    let (heap_coll, heap_total) = heap_borrow_reserved(collateral);
+    headroom_rule(
+        heap_coll.saturating_add(durable_collateral),
+        heap_total.saturating_add(durable_total),
+        amount,
+        current_collateral_debt,
+        debt_ceiling,
+        current_global_borrowed,
+        global_cap,
+    )
+}
+
 impl BorrowReservationGuard {
     /// Reserve `amount` for `collateral` iff, counting all in-flight
     /// reservations, the per-collateral ceiling and the global mint cap both
     /// still hold. The committed aggregates (`current_collateral_debt`,
-    /// `current_global_borrowed`) are read by the caller and passed in. Returns
-    /// `Err` (no reservation taken) when a concurrent in-flight borrow has
-    /// already consumed the headroom.
+    /// `current_global_borrowed`) are read by the caller and passed in. The
+    /// durable XRPL-lane reservations are read from state here, so EVERY caller
+    /// counts them without remembering to. Returns `Err` (no reservation taken)
+    /// when a concurrent in-flight borrow has already consumed the headroom.
     pub fn try_reserve(
         collateral: Principal,
         amount: u64,
@@ -379,32 +462,45 @@ impl BorrowReservationGuard {
         current_global_borrowed: u64,
         global_cap: u64,
     ) -> Result<Self, String> {
+        let (durable_collateral, durable_total) = crate::state::xrpl_durable_reserved(collateral);
+        Self::try_reserve_with_durable(
+            collateral,
+            amount,
+            current_collateral_debt,
+            debt_ceiling,
+            current_global_borrowed,
+            global_cap,
+            durable_collateral,
+            durable_total,
+        )
+    }
+
+    /// As [`Self::try_reserve`], with the durable XRPL reservations given explicitly
+    /// (the check and the heap insert happen in one synchronous section).
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_reserve_with_durable(
+        collateral: Principal,
+        amount: u64,
+        current_collateral_debt: u64,
+        debt_ceiling: u64,
+        current_global_borrowed: u64,
+        global_cap: u64,
+        durable_collateral: u64,
+        durable_total: u64,
+    ) -> Result<Self, String> {
         BORROW_RESERVATIONS.with(|r| {
             let mut map = r.borrow_mut();
             let coll_reserved: u64 = map.get(&collateral).copied().unwrap_or(0);
             let total_reserved: u64 = map.values().copied().sum();
-
-            if current_collateral_debt
-                .saturating_add(coll_reserved)
-                .saturating_add(amount)
-                > debt_ceiling
-            {
-                return Err(format!(
-                    "Borrow would exceed debt ceiling incl in-flight ({} + {} + {} > {})",
-                    current_collateral_debt, coll_reserved, amount, debt_ceiling
-                ));
-            }
-            if current_global_borrowed
-                .saturating_add(total_reserved)
-                .saturating_add(amount)
-                > global_cap
-            {
-                return Err(format!(
-                    "Borrow would exceed global icUSD mint cap incl in-flight ({} + {} + {} > {})",
-                    current_global_borrowed, total_reserved, amount, global_cap
-                ));
-            }
-
+            headroom_rule(
+                coll_reserved.saturating_add(durable_collateral),
+                total_reserved.saturating_add(durable_total),
+                amount,
+                current_collateral_debt,
+                debt_ceiling,
+                current_global_borrowed,
+                global_cap,
+            )?;
             *map.entry(collateral).or_insert(0) += amount;
             Ok(Self { collateral, amount })
         })

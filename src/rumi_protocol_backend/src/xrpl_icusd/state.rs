@@ -203,6 +203,9 @@ impl XrplIcusdState {
         add(&mut total, &b.d)?;
         add(&mut total, &b.r)?;
         add(&mut total, &b.h)?;
+        // Borrows still awaiting their escrow mint are not in `D` yet, but their net
+        // payout WILL be: count it so two concurrent borrows cannot both pass.
+        add(&mut total, &wide(self.reserved_borrow_net_e8s()))?;
         add(&mut total, &wide(add_e8s))?;
         if total.ceil_e8s() > u128::from(c.outstanding_cap_e8s) {
             return Err(XrplIcusdError::LimitExceeded(format!(
@@ -271,6 +274,19 @@ impl XrplIcusdState {
                     gross_e8s,
                     ..
                 } if *collateral_type == collateral => Some(*gross_e8s),
+                _ => None,
+            })
+            .fold(0u64, |a, g| a.saturating_add(g))
+    }
+
+    /// Net payout of Borrow operations that are still durable reservations (their
+    /// escrow mint is not yet proven, so they are not in bucket `D`).
+    pub fn reserved_borrow_net_e8s(&self) -> u64 {
+        self.operations
+            .values()
+            .filter(|o| o.phase.is_reservation())
+            .filter_map(|o| match &o.kind {
+                OperationKind::Borrow { net_e8s, .. } => Some(*net_e8s),
                 _ => None,
             })
             .fold(0u64, |a, g| a.saturating_add(g))
@@ -634,13 +650,22 @@ impl XrplIcusdState {
 impl Operation {
     /// Does background work remain for this operation?
     pub fn needs_work(&self) -> bool {
-        if self.phase.is_terminal() {
-            return false;
-        }
         let jobs_open = self
             .ic_jobs
             .iter()
             .any(|j| !j.is_resolved() || (j.done_block().is_some() && !j.proof_verified));
+        // A terminal operation can still own an unresolved ledger job (a borrow's
+        // fee-remainder mint outlives a quick delivery): keep driving it.
+        if self.phase.is_terminal() {
+            return jobs_open;
+        }
+        // A borrow stays active until its escrow mint is proven and the debt is
+        // committed (or the mint definitively fails).
+        let borrow_active = matches!(self.kind, OperationKind::Borrow { .. })
+            && matches!(
+                self.phase,
+                Phase::Prepared | Phase::EscrowMintPending | Phase::DebtCommitted
+            );
         let claim = matches!(
             self.kind,
             OperationKind::Borrow { .. } | OperationKind::Import { .. }
@@ -656,7 +681,11 @@ impl Operation {
         let advance_pending = (self.phase == Phase::EscrowPullPending
             || self.resolution == Some(ClaimAction::ReceiveCanonical))
             && self.ic_jobs.iter().any(|j| j.is_resolved());
-        jobs_open || self.unresolved_attempt().is_some() || delivering || advance_pending
+        jobs_open
+            || self.unresolved_attempt().is_some()
+            || delivering
+            || advance_pending
+            || borrow_active
     }
 }
 

@@ -199,6 +199,7 @@ pub(crate) fn redemption_candidate_types(state: &crate::state::State) -> Vec<Pri
             || vault.bot_processing
             || state.has_unresolved_push_sweep_for_vault(vault.vault_id)
             || crate::guard::is_vault_liquidating(vault.vault_id)
+            || crate::xrpl_icusd::xrpl_vault_excluded(state, vault.vault_id)
         {
             continue;
         }
@@ -2046,6 +2047,13 @@ pub fn require_vault_not_processing(vault: &Vault) -> Result<(), ProtocolError> 
     } else if crate::state::has_pending_borrow_mint(vault.vault_id) {
         Err(ProtocolError::TemporarilyUnavailable(format!(
             "Vault #{} has an unresolved icUSD mint; retry the exact borrow to reconcile it",
+            vault.vault_id
+        )))
+    } else if crate::state::has_xrpl_vault_exclusion(vault.vault_id) {
+        // XRPL icUSD lane: an unresolved borrow mint or admitted repayment burn
+        // holds a durable exclusion on this vault.
+        Err(ProtocolError::TemporarilyUnavailable(format!(
+            "Vault #{} is locked by an unresolved XRPL icUSD operation; retry after it settles",
             vault.vault_id
         )))
     } else {
@@ -4070,6 +4078,13 @@ pub fn stability_pool_preflight_xrp_absorb_in_state(
             "Vault #{vault_id} has an unresolved push-deposit sweep"
         )));
     }
+    // Refused BEFORE the SP burns anything: an unresolved XRPL icUSD borrow mint or
+    // repayment burn holds this vault.
+    if crate::xrpl_icusd::xrpl_vault_excluded(state, vault_id) {
+        return Err(ProtocolError::TemporarilyUnavailable(format!(
+            "Vault #{vault_id} is locked by an unresolved XRPL icUSD operation"
+        )));
+    }
 
     let sizing = xrp_sp_absorb_sizing(state, vault_id, expected_icusd_burn_e8s)?;
     let mut preflight = sizing.preflight;
@@ -4165,6 +4180,11 @@ fn ensure_no_active_xrp_sp_absorb_preflight(
     vault_id: u64,
     now_ns: u64,
 ) -> Result<(), ProtocolError> {
+    if crate::xrpl_icusd::xrpl_vault_excluded(state, vault_id) {
+        return Err(ProtocolError::TemporarilyUnavailable(format!(
+            "Vault #{vault_id} is locked by an unresolved XRPL icUSD operation; retry after it settles"
+        )));
+    }
     if let Some(preflight) = state.sp_xrp_absorb_preflights.get(&vault_id) {
         if preflight.expires_at_ns >= now_ns {
             return Err(ProtocolError::TemporarilyUnavailable(format!(
@@ -4463,6 +4483,16 @@ pub fn stability_pool_liquidate_xrp_vault_in_state(
         )));
     }
 
+    // The XRPL lane refuses to open a borrow reservation while ANY SP preflight
+    // exists for the vault, so an exclusion here means a repayment burn is
+    // unresolved. Nothing is mutated; the persisted reservation stays so the
+    // post-burn submit can complete once the exclusion lifts.
+    if crate::xrpl_icusd::xrpl_vault_excluded(state, request.vault_id) {
+        return Err(ProtocolError::TemporarilyUnavailable(format!(
+            "Vault #{} is locked by an unresolved XRPL icUSD operation; the reserved absorb stays pending",
+            request.vault_id
+        )));
+    }
     let preflight =
         matching_xrp_absorb_preflight(state, request.vault_id, request.icusd_burned_e8s, caller)
             .ok_or_else(|| {
@@ -6471,6 +6501,247 @@ fn compound_borrow_retry_guard(
     }
 }
 
+/// How [`admit_borrow`] accounts the new borrow's headroom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BorrowReserve {
+    /// Legacy path: take a transient heap reservation, returned to the caller.
+    Transient,
+    /// XRPL lane: check headroom only; the caller inserts its durable reservation
+    /// in the same synchronous block.
+    CheckOnly,
+}
+
+/// The frozen terms of an admitted borrow.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BorrowQuote {
+    pub owner: Principal,
+    pub vault_id: u64,
+    pub gross_e8s: u64,
+    pub fee_e8s: u64,
+    pub net_e8s: u64,
+    pub collateral_type: Principal,
+    /// Fingerprint of the price/mode/status/cap inputs the quote was computed
+    /// from; a commit-time revalidator re-runs [`admit_borrow`] and compares.
+    pub state_version: u64,
+}
+
+/// Factored admission for a new borrow: owner check, vault/price/config lookup,
+/// processing locks (bot, pending mint, XRPL exclusion), collateral status, XRP key,
+/// per-collateral ceiling and global cap (committed + legacy pending journals +
+/// legacy heap reservations + durable XRPL reservations), CR after the borrow
+/// (recovery-mode aware), and the borrowing fee at the projected CR.
+///
+/// This is SYNCHRONOUS once called (no await), so the quote and the reservation
+/// decision are consistent. The legacy `borrow_from_vault` and the XRPL lane share it.
+pub fn admit_borrow(
+    caller: Principal,
+    vault_id: u64,
+    amount: ICUSD,
+    now_ns: u64,
+    reserve: BorrowReserve,
+) -> Result<(BorrowQuote, Option<crate::guard::BorrowReservationGuard>), ProtocolError> {
+    if amount < read_state(|s| s.min_icusd_amount) {
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
+        });
+    }
+    if !read_state(|s| s.vault_id_to_vaults.get(&vault_id).is_some_and(|vault| vault.owner == caller)) {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+
+    // Accrue interest on this vault before borrowing so CR check uses up-to-date debt.
+    reject_active_xrp_sp_absorb_preflight(vault_id, now_ns)?;
+    mutate_state(|s| s.accrue_single_vault(vault_id, now_ns));
+
+    let (vault, collateral_price, config_decimals, is_native_xrp) =
+        read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
+            Some(vault) => {
+                let price = s
+                    .get_collateral_price_decimal(&vault.collateral_type)
+                    .ok_or("No price available for collateral. Price feed may be down.")?;
+                let config = s
+                    .get_collateral_config(&vault.collateral_type)
+                    .ok_or("Collateral type not configured.")?;
+                Ok((
+                    vault.clone(),
+                    price,
+                    config.decimals,
+                    config.is_native_xrp(),
+                ))
+            }
+            None => Err("Vault not found. Please check the vault ID."),
+        })
+        .map_err(|msg: &str| ProtocolError::GenericError(msg.to_string()))?;
+
+    require_vault_not_processing(&vault)?;
+
+    // Check collateral status allows borrowing
+    let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
+    if let Some(status) = collateral_status {
+        if !status.allows_borrow() {
+            return Err(ProtocolError::GenericError(
+                "Borrowing is not allowed for this collateral type.".to_string(),
+            ));
+        }
+    }
+    if is_native_xrp {
+        require_xrp_production_key()?;
+    }
+
+    if caller != vault.owner {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+
+    // Check debt ceiling + global mint cap AND reserve the headroom atomically.
+    //
+    // BK-003 (audit 2026-06-05): these caps are checked here but the debt is not
+    // recorded until the ledger confirms. Two borrows from
+    // DIFFERENT owners both pass this check against the same committed aggregate,
+    // both mint, and jointly exceed the cap (the per-caller GuardPrincipal does
+    // not serialize distinct owners against the aggregate). The reservation guard
+    // Durable pending journals count across await and upgrades; the transient
+    // reservation protects admission until the journal is inserted, then drops.
+    // The durable XRPL-lane reservations count too (read inside the guard, or
+    // explicitly for the check-only mode), so a legacy and an XRPL borrow can
+    // never jointly exceed a cap.
+    let (current_debt, pending_collateral_debt, pending_global_debt, durable_coll, durable_total) =
+        read_state(|s| {
+            let mut pending_collateral = 0u64;
+            let mut pending_global = 0u64;
+            for journal in s.pending_borrow_mints.values() {
+                pending_global = pending_global.saturating_add(journal.borrowed_amount_e8s);
+                if journal.collateral_type == vault.collateral_type {
+                    pending_collateral =
+                        pending_collateral.saturating_add(journal.borrowed_amount_e8s);
+                }
+            }
+            (
+                s.total_debt_for_collateral(&vault.collateral_type),
+                pending_collateral,
+                pending_global,
+                s.xrpl_icusd.durable_reserved_for(vault.collateral_type),
+                s.xrpl_icusd.durable_reserved_total(),
+            )
+        });
+    let debt_ceiling = read_state(|s| {
+        s.get_collateral_config(&vault.collateral_type)
+            .map(|c| c.debt_ceiling)
+            .unwrap_or(u64::MAX)
+    });
+    let (global_cap, total_borrowed) =
+        read_state(|s| (s.global_icusd_mint_cap, s.total_borrowed_icusd_amount()));
+    let committed_collateral = current_debt
+        .to_u64()
+        .saturating_add(pending_collateral_debt);
+    let committed_global = total_borrowed.to_u64().saturating_add(pending_global_debt);
+    let reservation = match reserve {
+        BorrowReserve::Transient => Some(
+            crate::guard::BorrowReservationGuard::try_reserve_with_durable(
+                vault.collateral_type,
+                amount.to_u64(),
+                committed_collateral,
+                debt_ceiling,
+                committed_global,
+                global_cap,
+                durable_coll,
+                durable_total,
+            )
+            .map_err(ProtocolError::GenericError)?,
+        ),
+        BorrowReserve::CheckOnly => {
+            crate::guard::check_borrow_headroom(
+                vault.collateral_type,
+                amount.to_u64(),
+                committed_collateral,
+                debt_ceiling,
+                committed_global,
+                global_cap,
+                durable_coll,
+                durable_total,
+            )
+            .map_err(ProtocolError::GenericError)?;
+            None
+        }
+    };
+
+    let collateral_value = crate::numeric::collateral_usd_value(
+        vault.collateral_amount,
+        collateral_price,
+        config_decimals,
+    );
+    let min_ratio = read_state(|s| {
+        let base = s.get_min_collateral_ratio_for(&vault.collateral_type);
+        if s.mode == Mode::Recovery {
+            let recovery_cr = s.get_recovery_cr_for(&vault.collateral_type);
+            if recovery_cr > base {
+                recovery_cr
+            } else {
+                base
+            }
+        } else {
+            base
+        }
+    });
+    let max_borrowable_amount: ICUSD = collateral_value / min_ratio;
+
+    // Reject debt overflow before the external icUSD mint. The state update
+    // after mint repeats this addition while the per-vault borrow guard is held.
+    let new_total_debt = crate::numeric::checked_icusd_add(vault.borrowed_icusd_amount, amount)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "Borrow would exceed the representable icUSD debt range.".to_string(),
+            )
+        })?;
+    if new_total_debt > max_borrowable_amount {
+        return Err(ProtocolError::GenericError(format!(
+            "failed to borrow from vault, max borrowable: {max_borrowable_amount}, borrowed: {}, requested: {amount}",
+            vault.borrowed_icusd_amount
+        )));
+    }
+
+    // Compute projected vault CR after this borrow (for dynamic fee multiplier)
+    let projected_cr = if new_total_debt.to_u64() == 0 {
+        Ratio::new(dec!(999))
+    } else {
+        Ratio::from(
+            Decimal::from_u64(collateral_value.to_u64()).unwrap_or(Decimal::ZERO)
+                / Decimal::from_u64(new_total_debt.to_u64()).unwrap_or(Decimal::ONE),
+        )
+    };
+
+    let fee: ICUSD = read_state(|s| {
+        let base_fee = s.get_borrowing_fee_for(&vault.collateral_type);
+        let multiplier = s.get_borrowing_fee_multiplier(projected_cr);
+        let raw_fee: ICUSD = amount * base_fee * multiplier;
+        // INT-003: clamp so `amount - fee >= 1 e8s`. Defense in depth: the
+        // curve validator caps the multiplier, but a legacy or migrated curve
+        // (or any future code path that writes the fee state outside
+        // `set_borrowing_fee_curve`) cannot panic the borrow path.
+        clamp_borrow_fee(amount, raw_fee)
+    });
+
+    let state_version = read_state(|s| {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        collateral_price.to_string().hash(&mut h);
+        format!("{:?}", s.mode).hash(&mut h);
+        format!("{:?}", collateral_status).hash(&mut h);
+        debt_ceiling.hash(&mut h);
+        global_cap.hash(&mut h);
+        h.finish()
+    });
+    let quote = BorrowQuote {
+        owner: caller,
+        vault_id,
+        gross_e8s: amount.to_u64(),
+        fee_e8s: fee.to_u64(),
+        net_e8s: (amount - fee).to_u64(),
+        collateral_type: vault.collateral_type,
+        state_version,
+    };
+    Ok((quote, reservation))
+}
+
 async fn borrow_from_vault_internal_with<F, Fut, N, H, HFut>(
     caller: Principal,
     arg: VaultArg,
@@ -6571,147 +6842,17 @@ where
     }
     let now_ns = now();
 
-    // Accrue interest on this vault before borrowing so CR check uses up-to-date debt.
-    reject_active_xrp_sp_absorb_preflight(arg.vault_id, now_ns)?;
-    mutate_state(|s| s.accrue_single_vault(arg.vault_id, now_ns));
-
-    let (vault, collateral_price, config_decimals, is_native_xrp) =
-        read_state(|s| match s.vault_id_to_vaults.get(&arg.vault_id) {
-            Some(vault) => {
-                let price = s
-                    .get_collateral_price_decimal(&vault.collateral_type)
-                    .ok_or("No price available for collateral. Price feed may be down.")?;
-                let config = s
-                    .get_collateral_config(&vault.collateral_type)
-                    .ok_or("Collateral type not configured.")?;
-                Ok((
-                    vault.clone(),
-                    price,
-                    config.decimals,
-                    config.is_native_xrp(),
-                ))
-            }
-            None => Err("Vault not found. Please check the vault ID."),
-        })
-        .map_err(|msg: &str| ProtocolError::GenericError(msg.to_string()))?;
-
-    require_vault_not_processing(&vault)?;
-
-    // Check collateral status allows borrowing
-    let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
-    if let Some(status) = collateral_status {
-        if !status.allows_borrow() {
-            return Err(ProtocolError::GenericError(
-                "Borrowing is not allowed for this collateral type.".to_string(),
-            ));
-        }
-    }
-    if is_native_xrp {
-        require_xrp_production_key()?;
-    }
-
-    if caller != vault.owner {
-        return Err(ProtocolError::CallerNotOwner);
-    }
-
-    // Check debt ceiling + global mint cap AND reserve the headroom atomically.
-    //
-    // BK-003 (audit 2026-06-05): these caps are checked here but the debt is not
-    // recorded until the ledger confirms. Two borrows from
-    // DIFFERENT owners both pass this check against the same committed aggregate,
-    // both mint, and jointly exceed the cap (the per-caller GuardPrincipal does
-    // not serialize distinct owners against the aggregate). The reservation guard
-    // Durable pending journals count across await and upgrades; the transient
-    // reservation protects admission until the journal is inserted, then drops.
-    let (current_debt, pending_collateral_debt, pending_global_debt) = read_state(|s| {
-        let mut pending_collateral = 0u64;
-        let mut pending_global = 0u64;
-        for journal in s.pending_borrow_mints.values() {
-            pending_global = pending_global.saturating_add(journal.borrowed_amount_e8s);
-            if journal.collateral_type == vault.collateral_type {
-                pending_collateral = pending_collateral.saturating_add(journal.borrowed_amount_e8s);
-            }
-        }
-        (
-            s.total_debt_for_collateral(&vault.collateral_type),
-            pending_collateral,
-            pending_global,
-        )
-    });
-    let debt_ceiling = read_state(|s| {
-        s.get_collateral_config(&vault.collateral_type)
-            .map(|c| c.debt_ceiling)
-            .unwrap_or(u64::MAX)
-    });
-    let (global_cap, total_borrowed) =
-        read_state(|s| (s.global_icusd_mint_cap, s.total_borrowed_icusd_amount()));
-    let _borrow_reservation = crate::guard::BorrowReservationGuard::try_reserve(
-        vault.collateral_type,
-        amount.to_u64(),
-        current_debt
-            .to_u64()
-            .saturating_add(pending_collateral_debt),
-        debt_ceiling,
-        total_borrowed.to_u64().saturating_add(pending_global_debt),
-        global_cap,
-    )
-    .map_err(ProtocolError::GenericError)?;
-
-    let collateral_value = crate::numeric::collateral_usd_value(
-        vault.collateral_amount,
-        collateral_price,
-        config_decimals,
-    );
-    let min_ratio = read_state(|s| {
-        let base = s.get_min_collateral_ratio_for(&vault.collateral_type);
-        if s.mode == Mode::Recovery {
-            let recovery_cr = s.get_recovery_cr_for(&vault.collateral_type);
-            if recovery_cr > base {
-                recovery_cr
-            } else {
-                base
-            }
-        } else {
-            base
-        }
-    });
-    let max_borrowable_amount: ICUSD = collateral_value / min_ratio;
-
-    // Reject debt overflow before the external icUSD mint. The state update
-    // after mint repeats this addition while the per-vault borrow guard is held.
-    let new_total_debt = crate::numeric::checked_icusd_add(vault.borrowed_icusd_amount, amount)
-        .ok_or_else(|| {
-            ProtocolError::GenericError(
-                "Borrow would exceed the representable icUSD debt range.".to_string(),
-            )
-        })?;
-    if new_total_debt > max_borrowable_amount {
-        return Err(ProtocolError::GenericError(format!(
-            "failed to borrow from vault, max borrowable: {max_borrowable_amount}, borrowed: {}, requested: {amount}",
-            vault.borrowed_icusd_amount
-        )));
-    }
-
-    // Compute projected vault CR after this borrow (for dynamic fee multiplier)
-    let projected_cr = if new_total_debt.to_u64() == 0 {
-        Ratio::new(dec!(999))
-    } else {
-        Ratio::from(
-            Decimal::from_u64(collateral_value.to_u64()).unwrap_or(Decimal::ZERO)
-                / Decimal::from_u64(new_total_debt.to_u64()).unwrap_or(Decimal::ONE),
-        )
-    };
-
-    let fee: ICUSD = read_state(|s| {
-        let base_fee = s.get_borrowing_fee_for(&vault.collateral_type);
-        let multiplier = s.get_borrowing_fee_multiplier(projected_cr);
-        let raw_fee: ICUSD = amount * base_fee * multiplier;
-        // INT-003: clamp so `amount - fee >= 1 e8s`. Defense in depth: the
-        // curve validator caps the multiplier, but a legacy or migrated curve
-        // (or any future code path that writes the fee state outside
-        // `set_borrowing_fee_curve`) cannot panic the borrow path.
-        clamp_borrow_fee(amount, raw_fee)
-    });
+    // Shared admission (owner, status, CR with the projected fee multiplier, caps
+    // incl. durable XRPL reservations, fee). The transient reservation is held
+    // until the durable journal below carries this headroom.
+    let (quote, _borrow_reservation) = admit_borrow(
+        caller,
+        arg.vault_id,
+        amount,
+        now_ns,
+        BorrowReserve::Transient,
+    )?;
+    let fee: ICUSD = ICUSD::new(quote.fee_e8s);
 
     let op_nonce = mutate_state(|s| s.next_op_nonce_at(now_ns));
     let tuple = crate::state::BorrowMintTuple {
@@ -6725,7 +6866,7 @@ where
     let journal = crate::state::BorrowMintJournal {
         vault_id: arg.vault_id,
         owner: caller,
-        collateral_type: vault.collateral_type,
+        collateral_type: quote.collateral_type,
         borrowed_amount_e8s: amount.to_u64(),
         fee_amount_e8s: fee.to_u64(),
         tuple,

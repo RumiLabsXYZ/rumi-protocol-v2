@@ -6020,6 +6020,7 @@ impl State {
                 || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -7365,7 +7366,9 @@ impl State {
                     None => continue, // index drift — ignore
                 };
                 visited += 1;
-                if vault.bot_processing {
+                if vault.bot_processing
+                    || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
+                {
                     continue;
                 }
                 if compute_collateral_ratio(vault, rate, self)
@@ -8294,6 +8297,7 @@ impl State {
             if vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -8536,6 +8540,7 @@ impl State {
             if vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -8727,6 +8732,7 @@ impl State {
                 || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -8867,6 +8873,7 @@ impl State {
             if vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -9780,6 +9787,33 @@ pub fn has_pending_borrow_mint(vault_id: u64) -> bool {
             .borrow()
             .as_ref()
             .is_some_and(|s| s.pending_borrow_mints.contains_key(&vault_id))
+    })
+}
+
+/// Safe pre-initialization probe: a durable XRPL icUSD operation excludes the vault
+/// from every conflicting mutation (see `xrpl_icusd::xrpl_vault_excluded`).
+pub fn has_xrpl_vault_exclusion(vault_id: u64) -> bool {
+    __STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .is_some_and(|s| crate::xrpl_icusd::xrpl_vault_excluded(s, vault_id))
+    })
+}
+
+/// Durable XRPL borrow reservations `(for collateral, total)`; `(0, 0)` before init.
+pub fn xrpl_durable_reserved(collateral: Principal) -> (u64, u64) {
+    __STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .map(|s| {
+                (
+                    s.xrpl_icusd.durable_reserved_for(collateral),
+                    s.xrpl_icusd.durable_reserved_total(),
+                )
+            })
+            .unwrap_or((0, 0))
     })
 }
 

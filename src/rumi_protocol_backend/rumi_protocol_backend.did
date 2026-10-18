@@ -1943,6 +1943,13 @@ type CoverageReport = record {
   ic_fee_reserve_e8s : nat;
   r_e8s : nat;
 };
+type BorrowToXrplArg = record {
+  request_nonce : blob;
+  recipient : text;
+  network : XrplNetwork;
+  vault_id : nat64;
+  gross_e8s : nat64;
+};
 type CoverageStatus = variant {
   SnapshotDisagrees : record { detail : text };
   Shortfall : record { short_e8s : nat };
@@ -2120,6 +2127,7 @@ type XrplOperationResult = variant { Ok : OperationView; Err : XrplIcusdError };
 type XrplSetupResult = variant { Ok : IssuerSetupStatus; Err : XrplIcusdError };
 
 service : (ProtocolArg) -> {
+  borrow_to_xrpl : (BorrowToXrplArg) -> (XrplOperationResult);
   configure_xrpl_icusd : (ConfigureXrplIcusdArg) -> (XrplConfigResult);
   get_my_xrpl_operations : (opt nat64, nat32) -> (OperationPage) query;
   get_xrpl_icusd_config : () -> (PublicXrplIcusdConfig) query;

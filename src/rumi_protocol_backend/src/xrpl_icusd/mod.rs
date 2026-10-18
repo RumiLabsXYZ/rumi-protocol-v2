@@ -11,12 +11,15 @@
 //! (issuer sequencer) -> `issuance` (backed claims, resolution) -> this module
 //! (guards, configuration, public async entry points, the tick).
 
+pub mod borrow;
 pub mod issuance;
 pub mod ledger;
 pub mod settlement;
 pub mod state;
 pub mod types;
 
+#[cfg(test)]
+mod borrow_tests;
 #[cfg(test)]
 mod tests;
 
@@ -337,8 +340,33 @@ fn view_for(caller: &Principal, id: OperationId) -> Result<OperationView, XrplIc
 /// phase advancement, and the issuer delivery. Safe to call at any time: every step
 /// is idempotent and loads its inputs from state.
 pub async fn run_op_step(op_id: OperationId) -> Result<(), XrplIcusdError> {
-    let job_count = read_state(|s| s.xrpl_icusd.op(op_id).map(|o| o.ic_jobs.len()))
-        .ok_or(XrplIcusdError::NotFound)?;
+    if read_state(|s| s.xrpl_icusd.op(op_id).is_none()) {
+        return Err(XrplIcusdError::NotFound);
+    }
+    drive_ic_jobs(op_id).await;
+    // A borrow's proven escrow mint becomes debt (once) in one synchronous block; the
+    // block may add the persisted fee-remainder mint job, which is driven right away.
+    let advance = mutate_state(|s| borrow::advance_borrow(s, op_id, now()));
+    if matches!(advance, Ok(borrow::BorrowAdvance::Committed)) {
+        drive_ic_jobs(op_id).await;
+    }
+    mutate_state(|s| {
+        let st = &mut s.xrpl_icusd;
+        let _ = issuance::advance_import(st, op_id, now());
+        let _ = issuance::advance_resolution(st, op_id, now());
+    });
+    if let Ok(_g) = OpGuard::acquire(op_id) {
+        let _ = settlement::drive_delivery(op_id).await;
+    }
+    mutate_state(|s| {
+        let _ = issuance::advance_import(&mut s.xrpl_icusd, op_id, now());
+    });
+    Ok(())
+}
+
+/// Send / scan / verify every unresolved ledger job of one operation.
+async fn drive_ic_jobs(op_id: OperationId) {
+    let job_count = read_state(|s| s.xrpl_icusd.op(op_id).map(|o| o.ic_jobs.len())).unwrap_or(0);
     for idx in 0..job_count {
         let (resolved, done, verified) = read_state(|s| {
             s.xrpl_icusd
@@ -360,18 +388,6 @@ pub async fn run_op_step(op_id: OperationId) -> Result<(), XrplIcusdError> {
             let _ = ledger::verify_done_job(op_id, idx).await;
         }
     }
-    mutate_state(|s| {
-        let st = &mut s.xrpl_icusd;
-        let _ = issuance::advance_import(st, op_id, now());
-        let _ = issuance::advance_resolution(st, op_id, now());
-    });
-    if let Ok(_g) = OpGuard::acquire(op_id) {
-        let _ = settlement::drive_delivery(op_id).await;
-    }
-    mutate_state(|s| {
-        let _ = issuance::advance_import(&mut s.xrpl_icusd, op_id, now());
-    });
-    Ok(())
 }
 
 pub async fn resume_operation(

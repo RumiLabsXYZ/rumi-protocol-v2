@@ -611,8 +611,14 @@ impl Phase {
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct FeeSplit {
-    pub to_treasury_e8s: u64,
-    pub to_remainder_e8s: u64,
+    /// Part of the borrowing fee that repaid the protocol deficit (recorded once by
+    /// `plan_fee_routing_at`; a retry never re-runs the allocation).
+    pub to_deficit_e8s: u64,
+    /// Remainder of the fee to mint to the treasury (the FeeMint job's amount).
+    pub to_treasury_remainder_e8s: u64,
+    /// Treasury principal captured at the commit; `None` while the remainder is
+    /// held (no FeeMint job exists, mirroring the legacy `TreasuryMissing` hold).
+    pub treasury: Option<Principal>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -854,6 +860,15 @@ pub struct SetPausesArg {
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub struct IssueFromCanonicalArg {
     pub amount_e8s: u64,
+    pub recipient: String,
+    pub network: XrplNetwork,
+    pub request_nonce: Vec<u8>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct BorrowToXrplArg {
+    pub vault_id: u64,
+    pub gross_e8s: u64,
     pub recipient: String,
     pub network: XrplNetwork,
     pub request_nonce: Vec<u8>,

@@ -172,6 +172,100 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : SuccessWithFee,
     'Err' : ProtocolError,
   });
+  const XrplNetwork = IDL.Variant({
+    'Mainnet' : IDL.Null,
+    'Testnet' : IDL.Null,
+  });
+  const BorrowToXrplArg = IDL.Record({
+    'request_nonce' : IDL.Vec(IDL.Nat8),
+    'recipient' : IDL.Text,
+    'network' : XrplNetwork,
+    'vault_id' : IDL.Nat64,
+    'gross_e8s' : IDL.Nat64,
+  });
+  const OperationKindTag = IDL.Variant({
+    'Repayment' : IDL.Null,
+    'Refund' : IDL.Null,
+    'Import' : IDL.Null,
+    'Borrow' : IDL.Null,
+  });
+  const ClaimAction = IDL.Variant({
+    'ReissueXrpl' : IDL.Null,
+    'CancelUnexecutedRepayment' : IDL.Null,
+    'ReceiveCanonical' : IDL.Null,
+  });
+  const NextAction = IDL.Variant({
+    'ContactOperator' : IDL.Null,
+    'None' : IDL.Null,
+    'Wait' : IDL.Null,
+    'ResolveClaim' : IDL.Null,
+  });
+  const Phase = IDL.Variant({
+    'EscrowMintPending' : IDL.Null,
+    'EscrowPullPending' : IDL.Null,
+    'Held' : IDL.Null,
+    'Delivered' : IDL.Null,
+    'Complete' : IDL.Null,
+    'ClaimResolved' : IDL.Null,
+    'RefundPending' : IDL.Null,
+    'EscrowBurnPending' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'ReturnVerified' : IDL.Null,
+    'Cancelled' : IDL.Null,
+    'Submitted' : IDL.Null,
+    'ReturnObserved' : IDL.Null,
+    'IntentPrepared' : IDL.Null,
+    'DebtApplied' : IDL.Null,
+    'Signed' : IDL.Null,
+    'IssuePrepared' : IDL.Null,
+    'DebtCommitted' : IDL.Null,
+  });
+  const OperationView = IDL.Record({
+    'observed_exact_amount' : IDL.Opt(IDL.Text),
+    'kind' : OperationKindTag,
+    'net_e8s' : IDL.Nat64,
+    'recipient' : IDL.Opt(IDL.Text),
+    'network' : XrplNetwork,
+    'fee_e8s' : IDL.Nat64,
+    'xrpl_tx_hashes' : IDL.Vec(IDL.Text),
+    'updated_at_ns' : IDL.Nat64,
+    'operation_id' : IDL.Nat64,
+    'vault_id' : IDL.Opt(IDL.Nat64),
+    'ic_ledger_blocks' : IDL.Vec(IDL.Nat64),
+    'resolution' : IDL.Opt(ClaimAction),
+    'created_at_ns' : IDL.Nat64,
+    'held_exact_amount' : IDL.Opt(IDL.Text),
+    'next_action' : NextAction,
+    'notes' : IDL.Vec(IDL.Text),
+    'debt_applied_e8s' : IDL.Nat64,
+    'phase' : Phase,
+    'gross_e8s' : IDL.Nat64,
+    'settlement_cutoff_ns' : IDL.Opt(IDL.Nat64),
+  });
+  const XrplIcusdError = IDL.Variant({
+    'Internal' : IDL.Text,
+    'NotApplicable' : IDL.Text,
+    'TrustLineMissing' : IDL.Text,
+    'Paused' : IDL.Text,
+    'Policy' : IDL.Text,
+    'CoverageUnavailable' : IDL.Text,
+    'Disabled' : IDL.Text,
+    'Ambiguous' : IDL.Text,
+    'NotFound' : IDL.Null,
+    'WrongPhase' : IDL.Text,
+    'Unauthorized' : IDL.Null,
+    'InvalidArgument' : IDL.Text,
+    'NonceConflict' : IDL.Null,
+    'MintingAccount' : IDL.Text,
+    'Unavailable' : IDL.Text,
+    'LimitExceeded' : IDL.Text,
+    'WrongNetwork' : IDL.Text,
+    'AnonymousCaller' : IDL.Null,
+  });
+  const XrplOperationResult = IDL.Variant({
+    'Ok' : OperationView,
+    'Err' : XrplIcusdError,
+  });
   const BotLiquidationResult = IDL.Record({
     'collateral_amount' : IDL.Nat64,
     'collateral_price_e8s' : IDL.Nat64,
@@ -217,10 +311,6 @@ export const idlFactory = ({ IDL }) => {
     'context' : IDL.Vec(IDL.Nat8),
     'response' : HttpResponse,
   });
-  const XrplNetwork = IDL.Variant({
-    'Mainnet' : IDL.Null,
-    'Testnet' : IDL.Null,
-  });
   const IssuerPolicy = IDL.Record({
     'no_freeze' : IDL.Bool,
     'allow_clawback' : IDL.Bool,
@@ -263,26 +353,6 @@ export const idlFactory = ({ IDL }) => {
     'ready' : IDL.Bool,
     'issuance_paused' : IDL.Bool,
     'policy' : IDL.Opt(IssuerPolicy),
-  });
-  const XrplIcusdError = IDL.Variant({
-    'Internal' : IDL.Text,
-    'NotApplicable' : IDL.Text,
-    'TrustLineMissing' : IDL.Text,
-    'Paused' : IDL.Text,
-    'Policy' : IDL.Text,
-    'CoverageUnavailable' : IDL.Text,
-    'Disabled' : IDL.Text,
-    'Ambiguous' : IDL.Text,
-    'NotFound' : IDL.Null,
-    'WrongPhase' : IDL.Text,
-    'Unauthorized' : IDL.Null,
-    'InvalidArgument' : IDL.Text,
-    'NonceConflict' : IDL.Null,
-    'MintingAccount' : IDL.Text,
-    'Unavailable' : IDL.Text,
-    'LimitExceeded' : IDL.Text,
-    'WrongNetwork' : IDL.Text,
-    'AnonymousCaller' : IDL.Null,
   });
   const XrplConfigResult = IDL.Variant({
     'Ok' : PublicXrplIcusdConfig,
@@ -1360,65 +1430,6 @@ export const idlFactory = ({ IDL }) => {
     'opened_at_ns' : IDL.Nat64,
     'derivation_nonce' : IDL.Nat64,
   });
-  const OperationKindTag = IDL.Variant({
-    'Repayment' : IDL.Null,
-    'Refund' : IDL.Null,
-    'Import' : IDL.Null,
-    'Borrow' : IDL.Null,
-  });
-  const ClaimAction = IDL.Variant({
-    'ReissueXrpl' : IDL.Null,
-    'CancelUnexecutedRepayment' : IDL.Null,
-    'ReceiveCanonical' : IDL.Null,
-  });
-  const NextAction = IDL.Variant({
-    'ContactOperator' : IDL.Null,
-    'None' : IDL.Null,
-    'Wait' : IDL.Null,
-    'ResolveClaim' : IDL.Null,
-  });
-  const Phase = IDL.Variant({
-    'EscrowMintPending' : IDL.Null,
-    'EscrowPullPending' : IDL.Null,
-    'Held' : IDL.Null,
-    'Delivered' : IDL.Null,
-    'Complete' : IDL.Null,
-    'ClaimResolved' : IDL.Null,
-    'RefundPending' : IDL.Null,
-    'EscrowBurnPending' : IDL.Null,
-    'Prepared' : IDL.Null,
-    'ReturnVerified' : IDL.Null,
-    'Cancelled' : IDL.Null,
-    'Submitted' : IDL.Null,
-    'ReturnObserved' : IDL.Null,
-    'IntentPrepared' : IDL.Null,
-    'DebtApplied' : IDL.Null,
-    'Signed' : IDL.Null,
-    'IssuePrepared' : IDL.Null,
-    'DebtCommitted' : IDL.Null,
-  });
-  const OperationView = IDL.Record({
-    'observed_exact_amount' : IDL.Opt(IDL.Text),
-    'kind' : OperationKindTag,
-    'net_e8s' : IDL.Nat64,
-    'recipient' : IDL.Opt(IDL.Text),
-    'network' : XrplNetwork,
-    'fee_e8s' : IDL.Nat64,
-    'xrpl_tx_hashes' : IDL.Vec(IDL.Text),
-    'updated_at_ns' : IDL.Nat64,
-    'operation_id' : IDL.Nat64,
-    'vault_id' : IDL.Opt(IDL.Nat64),
-    'ic_ledger_blocks' : IDL.Vec(IDL.Nat64),
-    'resolution' : IDL.Opt(ClaimAction),
-    'created_at_ns' : IDL.Nat64,
-    'held_exact_amount' : IDL.Opt(IDL.Text),
-    'next_action' : NextAction,
-    'notes' : IDL.Vec(IDL.Text),
-    'debt_applied_e8s' : IDL.Nat64,
-    'phase' : Phase,
-    'gross_e8s' : IDL.Nat64,
-    'settlement_cutoff_ns' : IDL.Opt(IDL.Nat64),
-  });
   const OperationPage = IDL.Record({
     'next_cursor' : IDL.Opt(IDL.Nat64),
     'items' : IDL.Vec(OperationView),
@@ -2181,10 +2192,6 @@ export const idlFactory = ({ IDL }) => {
     'network' : XrplNetwork,
     'amount_e8s' : IDL.Nat64,
   });
-  const XrplOperationResult = IDL.Variant({
-    'Ok' : OperationView,
-    'Err' : XrplIcusdError,
-  });
   const VaultArgWithToken = IDL.Record({
     'vault_id' : IDL.Nat64,
     'amount' : IDL.Nat64,
@@ -2540,6 +2547,7 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'borrow_from_vault' : IDL.Func([VaultArg], [Result_4], []),
+    'borrow_to_xrpl' : IDL.Func([BorrowToXrplArg], [XrplOperationResult], []),
     'bot_cancel_liquidation' : IDL.Func([IDL.Nat64], [Result_1], []),
     'bot_claim_liquidation' : IDL.Func([IDL.Nat64], [Result_5], []),
     'bot_confirm_liquidation' : IDL.Func([IDL.Nat64], [Result_1], []),
