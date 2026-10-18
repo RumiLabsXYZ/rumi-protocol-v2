@@ -418,6 +418,14 @@ fn generate_consent_message_for_caller(
             "## Vault Operation Status\n\nThis authenticated query shows your operation watermark and the safe status of your active operation. It does not expose the ledger transfer tuple or move funds.".into()
         ),
 
+        "start_cksol_deposit" => Ok(
+            "## Start ckSOL Deposit\n\nRumi will ask the fixed ckSOL minter to queue a SOL deposit for your wallet principal. This action does not pull tokens or spend wallet funds; it uses Rumi's bounded relay cycle budget and returns a deposit id. Send SOL only to the separately displayed ckSOL deposit address, then wait for the minter status to reach Minted or Dropped.".into()
+        ),
+
+        "clear_cksol_deposit" => Ok(
+            "## Clear Completed ckSOL Deposit\n\nRumi will read the fixed ckSOL minter status and forget this completed relay record only when the upstream status is Minted or Dropped. This action does not pull tokens, spend wallet funds, or send cycles.".into()
+        ),
+
         "reconcile_vault_collateral_pull_from_block" => match Decode!(arg, VaultOperationIdArg, u64) {
             Ok((request, block_index)) => Ok(format!(
                 "## Verify Vault Collateral Pull (operation {})\n\nRumi will read ledger block **{}** and compare it with the exact collateral transfer already pinned for operation **{}**. This check does not send another transfer or move additional funds. If the block is not a direct exact match, the operation remains held.",

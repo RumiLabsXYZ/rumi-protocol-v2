@@ -3198,6 +3198,22 @@ where
     d.deserialize_map(V)
 }
 
+/// Durable status for the bounded ckSOL minter relay. `SubmittedOrUnknown` is
+/// intentionally a terminal application lock until an operator has recovered
+/// the upstream outcome; it must never be interpreted as a retry permission.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CkSolRelayStatus {
+    SubmittedOrUnknown,
+    Rejected(String),
+    Queued(u64),
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CkSolRelayAttempt {
+    pub started_at_ns: u64,
+    pub status: CkSolRelayStatus,
+}
+
 // serde(default): when deserializing old CBOR that's missing fields added in a
 // later upgrade, serde fills those fields from Default::default() instead of
 // failing. This prevents fallback to event replay (which causes interest drift).
@@ -3527,6 +3543,20 @@ pub struct State {
     // Multi-collateral support
     pub collateral_configs: BTreeMap<CollateralType, CollateralConfig>,
     pub collateral_to_vault_ids: BTreeMap<CollateralType, BTreeSet<u64>>,
+
+    /// Remaining developer-funded cycle budget for the fixed ckSOL browser
+    /// relay. New fields are additive so old snapshots decode with the safe
+    /// zero-budget default.
+    #[serde(default)]
+    pub cksol_relay_budget: u64,
+    /// One bounded attempt per owner. Rows are retained until the upstream
+    /// minter reports Minted or Dropped, or until explicit operator recovery.
+    #[serde(default)]
+    pub cksol_relay_attempts: BTreeMap<Principal, CkSolRelayAttempt>,
+    /// Transient single-flight fence; an in-flight await must never be
+    /// serialized into an upgrade snapshot.
+    #[serde(default, skip_serializing)]
+    pub cksol_relay_in_flight: BTreeSet<Principal>,
 
     // Dynamic interest rates (Layer 1 global + Layer 2 recovery)
     /// Global default rate curve (used when an asset has no per-asset rate_curve).
@@ -4254,6 +4284,9 @@ impl Default for State {
             last_admin_mint_time: 0,
             collateral_configs: BTreeMap::new(),
             collateral_to_vault_ids: BTreeMap::new(),
+            cksol_relay_budget: 0,
+            cksol_relay_attempts: BTreeMap::new(),
+            cksol_relay_in_flight: BTreeSet::new(),
             global_rate_curve: RateCurve::default(),
             recovery_rate_curve: Vec::new(),
             weighted_avg_recovery_cr: Ratio::from(Decimal::ZERO),
@@ -4497,6 +4530,10 @@ impl From<InitArg> for State {
                 configs
             },
             collateral_to_vault_ids: BTreeMap::new(),
+
+            cksol_relay_budget: 0,
+            cksol_relay_attempts: BTreeMap::new(),
+            cksol_relay_in_flight: BTreeSet::new(),
 
             // Dynamic interest rates
             global_rate_curve: RateCurve {
