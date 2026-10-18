@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const BOB_COLLATERAL_PRINCIPAL: &str = "7pail-xaaaa-aaaas-aabmq-cai";
 pub const EXE_COLLATERAL_PRINCIPAL: &str = "rh2pm-ryaaa-aaaan-qeniq-cai";
+pub const CKDOGE_COLLATERAL_PRINCIPAL: &str = "efmc5-wyaaa-aaaar-qb3wa-cai";
 
 pub fn bob_collateral() -> Principal {
     Principal::from_text(BOB_COLLATERAL_PRINCIPAL)
@@ -15,12 +16,17 @@ pub fn exe_collateral() -> Principal {
         .expect("EXE collateral principal is a valid principal")
 }
 
+pub fn ckdoge_collateral() -> Principal {
+    Principal::from_text(CKDOGE_COLLATERAL_PRINCIPAL)
+        .expect("ckDOGE collateral principal is a valid principal")
+}
+
 /// Collateral types in one-way wind-down: existing positions may exit via
 /// `opt_out_collateral`, but neither a new nor a former participant may
 /// create fresh liquidation exposure to them. Add to this set (not the call
 /// sites) when another collateral is sunset.
 pub fn sunset_collaterals() -> BTreeSet<Principal> {
-    BTreeSet::from([bob_collateral(), exe_collateral()])
+    BTreeSet::from([bob_collateral(), exe_collateral(), ckdoge_collateral()])
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1406,6 +1412,15 @@ mod icusd_value_tests {
 
         assert!(position.opted_out_collateral.contains(&exe));
         assert!(!position.is_opted_in(&exe));
+    }
+
+    #[test]
+    fn new_depositor_is_opted_out_of_sunset_ckdoge_liquidations() {
+        let ckdoge = ckdoge_collateral();
+        let position = DepositPosition::new(0);
+
+        assert!(position.opted_out_collateral.contains(&ckdoge));
+        assert!(!position.is_opted_in(&ckdoge));
     }
 
     #[test]

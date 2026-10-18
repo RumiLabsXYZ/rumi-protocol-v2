@@ -2555,7 +2555,7 @@ impl StabilityPoolState {
         user: &Principal,
         collateral_type: Principal,
     ) -> Result<(), StabilityPoolError> {
-        // Sunset collaterals (BOB, EXE, ...) are in wind-down. Existing
+        // Sunset collaterals (BOB, EXE, ckDOGE, ...) are in wind-down. Existing
         // receiving positions may leave through `opt_out_collateral`, but
         // neither a new nor former participant may create fresh exposure.
         if sunset_collaterals().contains(&collateral_type) {
@@ -5901,6 +5901,27 @@ mod tests {
 
         let err = state.opt_in_collateral(&user_a(), exe).unwrap_err();
         assert!(matches!(err, StabilityPoolError::TokenNotActive { ledger } if ledger == exe));
+    }
+
+    #[test]
+    fn legacy_ckdoge_participant_can_exit_but_cannot_reenter() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+        let ckdoge = crate::types::ckdoge_collateral();
+
+        state
+            .deposits
+            .get_mut(&user_a())
+            .unwrap()
+            .opted_out_collateral
+            .remove(&ckdoge);
+        assert_eq!(state.effective_pool_for_collateral(&ckdoge), 10_00000000);
+
+        state.opt_out_collateral(&user_a(), ckdoge).unwrap();
+        assert_eq!(state.effective_pool_for_collateral(&ckdoge), 0);
+
+        let err = state.opt_in_collateral(&user_a(), ckdoge).unwrap_err();
+        assert!(matches!(err, StabilityPoolError::TokenNotActive { ledger } if ledger == ckdoge));
     }
 
     #[test]
