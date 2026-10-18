@@ -184,6 +184,28 @@ pub struct OutageProgress {
     pub applied: Vec<AppliedRow>,
 }
 
+/// Public operational receipt without unpublished participant target rows.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OutageProgressView {
+    pub allocation_digest: [u8; 32],
+    pub evidence_digest: [u8; 32],
+    pub original_ledger_prefix_len: u64,
+    pub ledger_cutoff: u64,
+    pub scanned_through: u64,
+    pub rows_total: u32,
+    pub rows_applied: u32,
+    pub credited_points: u128,
+    pub complete: bool,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OutageReconciliationStatus {
+    pub configured_allocation_digest: Option<[u8; 32]>,
+    pub progress: Option<OutageProgressView>,
+    pub credit_log_len: u64,
+    pub audit_count_matches_receipts: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 enum StoredOutageReconciliation {
     V1(Option<OutageProgress>),
@@ -281,6 +303,46 @@ pub fn progress() -> Option<OutageProgress> {
     })
 }
 
+fn progress_view(saved: &OutageProgress, count_matches: bool) -> OutageProgressView {
+    OutageProgressView {
+        allocation_digest: saved.allocation_digest,
+        evidence_digest: saved.allocation.evidence_digest,
+        original_ledger_prefix_len: saved.allocation.original_ledger_prefix_len,
+        ledger_cutoff: saved.ledger_cutoff,
+        scanned_through: saved.scanned_through,
+        rows_total: u32::try_from(saved.allocation.rows.len()).expect("bounded allocation rows"),
+        rows_applied: u32::try_from(saved.applied.len()).expect("bounded applied receipts"),
+        credited_points: saved
+            .applied
+            .iter()
+            .try_fold(0u128, |sum, row| sum.checked_add(row.credited_points))
+            .expect("outage receipt sum overflow"),
+        complete: saved.scanned_through == saved.ledger_cutoff
+            && saved.applied.len() == saved.allocation.rows.len()
+            && count_matches,
+    }
+}
+
+/// Query-only projection. It reveals no pending seed, capture times, target
+/// amounts or participant rows from a staged-but-unapplied allocation.
+pub fn status() -> OutageReconciliationStatus {
+    let saved = progress();
+    let credit_log_len = credit_count();
+    let receipted_count = saved.as_ref().map_or(0, |p| {
+        p.applied
+            .iter()
+            .filter(|row| row.credit_log_offset.is_some())
+            .count() as u64
+    });
+    let count_matches = credit_log_len == receipted_count;
+    OutageReconciliationStatus {
+        configured_allocation_digest: APPROVED_ALLOCATION_DIGEST,
+        progress: saved.as_ref().map(|p| progress_view(p, count_matches)),
+        credit_log_len,
+        audit_count_matches_receipts: count_matches,
+    }
+}
+
 fn persist(progress: OutageProgress) {
     PROGRESS.with(|cell| {
         cell.borrow_mut()
@@ -340,8 +402,8 @@ fn approved_digest(allocation: &OutageAllocation) -> Result<[u8; 32], String> {
     Ok(digest)
 }
 
-/// Called only by a future reviewed admin ingress. Kept out of main.rs while
-/// allocation policy, source completeness and execution disposition are open.
+/// Admin ingress cannot stage anything until a separately reviewed immutable
+/// allocation digest is compiled in. The present pin remains unset.
 pub fn stage(caller: Principal, allocation: OutageAllocation) -> Result<OutageProgress, String> {
     if !state::is_admin(caller) {
         return Err("unauthorized".into());

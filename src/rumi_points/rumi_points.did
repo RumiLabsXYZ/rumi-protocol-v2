@@ -1,22 +1,7 @@
-type OutageCreditKind = variant { OutageMakeWhole };
-type OutageCredit = record {
-  kind : OutageCreditKind;
-  allocation_digest : vec nat8;
-  evidence_digest : vec nat8;
+type AllocationRow = record {
   "principal" : principal;
   epoch_index : nat64;
-  scheduled_period_start_ns : nat64;
-  scheduled_period_end_ns : nat64;
-  normal_ledger_cutoff : nat64;
-  normal_points_earned : nat;
   target_epoch_points : nat;
-  credited_points : nat;
-  applied_at_ns : nat64;
-};
-type OutageCreditPage = record {
-  entries : vec OutageCredit;
-  next_offset : nat64;
-  reached_end : bool;
 };
 type AssetType = variant { Icp; IcUsd; CkUsdc; CkUsdt; ThreeUsd };
 type CycleManagerCyclesStatus = record {
@@ -125,6 +110,51 @@ type OpenEpoch = record {
   close_points_accrued : nat;
   epoch_end_ns : nat64;
 };
+type OutageAllocation = record {
+  rows : vec AllocationRow;
+  original_ledger_prefix_digest : blob;
+  evidence_digest : blob;
+  season_start_ns : nat64;
+  original_ledger_prefix_len : nat64;
+  season_end_ns : nat64;
+};
+type OutageCredit = record {
+  "principal" : principal;
+  normal_ledger_cutoff : nat64;
+  scheduled_period_end_ns : nat64;
+  applied_at_ns : nat64;
+  epoch_index : nat64;
+  allocation_digest : blob;
+  kind : OutageCreditKind;
+  normal_points_earned : nat;
+  credited_points : nat;
+  target_epoch_points : nat;
+  evidence_digest : blob;
+  scheduled_period_start_ns : nat64;
+};
+type OutageCreditKind = variant { OutageMakeWhole };
+type OutageCreditPage = record {
+  reached_end : bool;
+  entries : vec OutageCredit;
+  next_offset : nat64;
+};
+type OutageProgressView = record {
+  scanned_through : nat64;
+  allocation_digest : blob;
+  rows_total : nat32;
+  ledger_cutoff : nat64;
+  credited_points : nat;
+  complete : bool;
+  evidence_digest : blob;
+  original_ledger_prefix_len : nat64;
+  rows_applied : nat32;
+};
+type OutageReconciliationStatus = record {
+  progress : opt OutageProgressView;
+  audit_count_matches_receipts : bool;
+  configured_allocation_digest : opt blob;
+  credit_log_len : nat64;
+};
 type PointEntry = record {
   "principal" : principal;
   epoch_index : nat64;
@@ -204,10 +234,11 @@ type RepaymentEvent = record {
 };
 type Result = variant { Ok : FiatStablePointsPolicy; Err : text };
 type Result_1 = variant { Ok; Err : PointsError };
-type Result_2 = variant { Ok : nat64; Err : text };
-type Result_3 = variant { Ok; Err : text };
-type Result_4 = variant { Ok : FiatStableTopupProgress; Err : text };
-type Result_5 = variant { Ok : nat64; Err : PointsError };
+type Result_2 = variant { Ok : OutageReconciliationStatus; Err : text };
+type Result_3 = variant { Ok : nat64; Err : text };
+type Result_4 = variant { Ok; Err : text };
+type Result_5 = variant { Ok : FiatStableTopupProgress; Err : text };
+type Result_6 = variant { Ok : nat64; Err : PointsError };
 type RevealedSeed = record {
   revealed_at_ns : nat64;
   epoch_index : nat64;
@@ -221,10 +252,12 @@ type Venue = variant { Amm; ThreePool; Vault; StabilityPool };
 service : (opt InitArgs) -> {
   activate_fiat_stable_4x : () -> (Result);
   add_excluded_principal : (principal) -> (Result_1);
-  admin_poll_held_points_backlog : () -> (Result_2);
-  admin_rebuild_3pool_recorded : () -> (Result_2);
-  admin_resume_held_points : () -> (Result_3);
-  apply_fiat_stable_topups : (nat32) -> (Result_4);
+  admin_continue_outage_reconciliation : () -> (Result_2);
+  admin_poll_held_points_backlog : () -> (Result_3);
+  admin_rebuild_3pool_recorded : () -> (Result_3);
+  admin_resume_held_points : () -> (Result_4);
+  admin_stage_outage_allocation : (OutageAllocation) -> (Result_2);
+  apply_fiat_stable_topups : (nat32) -> (Result_5);
   cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   cycles_status : () -> (CycleManagerCyclesStatus) query;
   force_epoch_tick : () -> (Result_1);
@@ -237,13 +270,16 @@ service : (opt InitArgs) -> {
   get_held_epoch_recovery : (nat64) -> (opt HeldEpochRecoveryView) query;
   get_ingest_status : () -> (IngestStatus) query;
   get_leaderboard : (nat32, nat32) -> (vec LeaderboardEntry) query;
+  get_outage_credit_entries : (nat64, nat32) -> (OutageCreditPage) query;
+  get_outage_credit_len : () -> (nat64) query;
+  get_outage_reconciliation_status : () -> (OutageReconciliationStatus) query;
   get_pending_commit : () -> (blob) query;
   get_point_entries : (nat64, nat32) -> (PointEntryPage) query;
   get_point_ledger_len : () -> (nat64) query;
-  get_outage_credit_len : () -> (nat64) query;
-  get_outage_credit_entries : (nat64, nat32) -> (OutageCreditPage) query;
-  get_principal_outage_credit_entries : (principal, nat64, nat32) -> (OutageCreditPage) query;
   get_points_config : () -> (PointsConfig) query;
+  get_principal_outage_credit_entries : (principal, nat64, nat32) -> (
+      OutageCreditPage,
+    ) query;
   get_principal_point_entries : (principal, nat64, nat32) -> (
       PointEntryPage,
     ) query;
@@ -260,8 +296,8 @@ service : (opt InitArgs) -> {
   set_excluded_principals : (vec principal) -> (Result_1);
   set_poll_enabled : (bool) -> (Result_1);
   set_poll_interval_secs : (nat64) -> (Result_1);
-  set_season_end_ns : (nat64) -> (Result_3);
+  set_season_end_ns : (nat64) -> (Result_4);
   set_source_canister : (nat8, principal) -> (Result_1);
-  start_season : (blob) -> (Result_3);
-  trigger_poll : () -> (Result_5);
+  start_season : (blob) -> (Result_4);
+  trigger_poll : () -> (Result_6);
 }

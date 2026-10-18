@@ -2,6 +2,11 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
+export interface AllocationRow {
+  'principal' : Principal,
+  'epoch_index' : bigint,
+  'target_epoch_points' : bigint,
+}
 export type AssetType = { 'Icp' : null } |
   { 'IcUsd' : null } |
   { 'CkUsdc' : null } |
@@ -113,6 +118,14 @@ export interface OpenEpoch {
   'close_points_accrued' : bigint,
   'epoch_end_ns' : bigint,
 }
+export interface OutageAllocation {
+  'rows' : Array<AllocationRow>,
+  'original_ledger_prefix_digest' : Uint8Array | number[],
+  'evidence_digest' : Uint8Array | number[],
+  'season_start_ns' : bigint,
+  'original_ledger_prefix_len' : bigint,
+  'season_end_ns' : bigint,
+}
 export interface OutageCredit {
   'principal' : Principal,
   'normal_ledger_cutoff' : bigint,
@@ -132,6 +145,23 @@ export interface OutageCreditPage {
   'reached_end' : boolean,
   'entries' : Array<OutageCredit>,
   'next_offset' : bigint,
+}
+export interface OutageProgressView {
+  'scanned_through' : bigint,
+  'allocation_digest' : Uint8Array | number[],
+  'rows_total' : number,
+  'ledger_cutoff' : bigint,
+  'credited_points' : bigint,
+  'complete' : boolean,
+  'evidence_digest' : Uint8Array | number[],
+  'original_ledger_prefix_len' : bigint,
+  'rows_applied' : number,
+}
+export interface OutageReconciliationStatus {
+  'progress' : [] | [OutageProgressView],
+  'audit_count_matches_receipts' : boolean,
+  'configured_allocation_digest' : [] | [Uint8Array | number[]],
+  'credit_log_len' : bigint,
 }
 export interface PointEntry {
   'principal' : Principal,
@@ -211,13 +241,15 @@ export type Result = { 'Ok' : FiatStablePointsPolicy } |
   { 'Err' : string };
 export type Result_1 = { 'Ok' : null } |
   { 'Err' : PointsError };
-export type Result_2 = { 'Ok' : bigint } |
+export type Result_2 = { 'Ok' : OutageReconciliationStatus } |
   { 'Err' : string };
-export type Result_3 = { 'Ok' : null } |
+export type Result_3 = { 'Ok' : bigint } |
   { 'Err' : string };
-export type Result_4 = { 'Ok' : FiatStableTopupProgress } |
+export type Result_4 = { 'Ok' : null } |
   { 'Err' : string };
-export type Result_5 = { 'Ok' : bigint } |
+export type Result_5 = { 'Ok' : FiatStableTopupProgress } |
+  { 'Err' : string };
+export type Result_6 = { 'Ok' : bigint } |
   { 'Err' : PointsError };
 export interface RevealedSeed {
   'revealed_at_ns' : bigint,
@@ -239,10 +271,12 @@ export type Venue = { 'Amm' : null } |
 export interface _SERVICE {
   'activate_fiat_stable_4x' : ActorMethod<[], Result>,
   'add_excluded_principal' : ActorMethod<[Principal], Result_1>,
-  'admin_poll_held_points_backlog' : ActorMethod<[], Result_2>,
-  'admin_rebuild_3pool_recorded' : ActorMethod<[], Result_2>,
-  'admin_resume_held_points' : ActorMethod<[], Result_3>,
-  'apply_fiat_stable_topups' : ActorMethod<[number], Result_4>,
+  'admin_continue_outage_reconciliation' : ActorMethod<[], Result_2>,
+  'admin_poll_held_points_backlog' : ActorMethod<[], Result_3>,
+  'admin_rebuild_3pool_recorded' : ActorMethod<[], Result_3>,
+  'admin_resume_held_points' : ActorMethod<[], Result_4>,
+  'admin_stage_outage_allocation' : ActorMethod<[OutageAllocation], Result_2>,
+  'apply_fiat_stable_topups' : ActorMethod<[number], Result_5>,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'force_epoch_tick' : ActorMethod<[], Result_1>,
@@ -260,6 +294,10 @@ export interface _SERVICE {
   'get_leaderboard' : ActorMethod<[number, number], Array<LeaderboardEntry>>,
   'get_outage_credit_entries' : ActorMethod<[bigint, number], OutageCreditPage>,
   'get_outage_credit_len' : ActorMethod<[], bigint>,
+  'get_outage_reconciliation_status' : ActorMethod<
+    [],
+    OutageReconciliationStatus
+  >,
   'get_pending_commit' : ActorMethod<[], Uint8Array | number[]>,
   'get_point_entries' : ActorMethod<[bigint, number], PointEntryPage>,
   'get_point_ledger_len' : ActorMethod<[], bigint>,
@@ -285,10 +323,10 @@ export interface _SERVICE {
   'set_excluded_principals' : ActorMethod<[Array<Principal>], Result_1>,
   'set_poll_enabled' : ActorMethod<[boolean], Result_1>,
   'set_poll_interval_secs' : ActorMethod<[bigint], Result_1>,
-  'set_season_end_ns' : ActorMethod<[bigint], Result_3>,
+  'set_season_end_ns' : ActorMethod<[bigint], Result_4>,
   'set_source_canister' : ActorMethod<[number, Principal], Result_1>,
-  'start_season' : ActorMethod<[Uint8Array | number[]], Result_3>,
-  'trigger_poll' : ActorMethod<[], Result_5>,
+  'start_season' : ActorMethod<[Uint8Array | number[]], Result_4>,
+  'trigger_poll' : ActorMethod<[], Result_6>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];

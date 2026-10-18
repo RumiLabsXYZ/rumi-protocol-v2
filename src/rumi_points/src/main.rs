@@ -249,6 +249,34 @@ fn apply_fiat_stable_topups(max_rows: u32) -> Result<FiatStableTopupProgress, St
     state::apply_fiat_stable_topups(ic_cdk::caller(), max_rows, ic_cdk::api::time())
 }
 
+/// Admin-only: stage exactly the compiled allocation. An unset pin rejects
+/// before touching progress memory; this is not an arbitrary credit endpoint.
+#[ic_cdk::update]
+fn admin_stage_outage_allocation(
+    allocation: rumi_points::outage_reconciliation::OutageAllocation,
+) -> Result<rumi_points::outage_reconciliation::OutageReconciliationStatus, String> {
+    rumi_points::outage_reconciliation::stage(ic_cdk::caller(), allocation)?;
+    Ok(rumi_points::outage_reconciliation::status())
+}
+
+/// Admin-only: at most100 scanned ordinary rows OR one participant/epoch
+/// credit, atomically with its receipt. Unset allocation pin rejects every call.
+#[ic_cdk::update]
+fn admin_continue_outage_reconciliation(
+) -> Result<rumi_points::outage_reconciliation::OutageReconciliationStatus, String> {
+    rumi_points::outage_reconciliation::continue_reconciliation(
+        ic_cdk::caller(),
+        ic_cdk::api::time(),
+    )?;
+    Ok(rumi_points::outage_reconciliation::status())
+}
+
+#[ic_cdk::query]
+fn get_outage_reconciliation_status(
+) -> rumi_points::outage_reconciliation::OutageReconciliationStatus {
+    rumi_points::outage_reconciliation::status()
+}
+
 // ── Phase 2: ingestion control ──────────────────────────────────────────────
 
 /// Admin-set a source canister id (point the poller at the right canister per

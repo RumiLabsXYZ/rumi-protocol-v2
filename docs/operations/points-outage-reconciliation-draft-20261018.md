@@ -82,11 +82,28 @@ A log found without its progress record fails closed instead of starting over.
 - Mutation helpers require the existing nonanonymous admin predicate, both
   writer guards, checked totals and the immutable approved allocation digest.
 - The digest pin is **unset**, rejected before lazy progress initialization.
-  No main.rs update ingress reaches staging or continuation. The three new
-  query-only readers cannot stage or apply a credit.
+  Two admin-only update entry points now call staging and bounded continuation,
+  but the unset pin rejects both before progress initialization or any credit.
+  Public count/page/status queries cannot stage or apply credits.
 - Existing timers, hold and the original resume timing safeguard are unchanged.
 - No tests were added or run. Locked offline native compilation is not
   production artifact, retained-state, interruption or live activation proof.
+
+## Operator interface, still disabled
+
+`admin_stage_outage_allocation` accepts the exact immutable allocation and
+`admin_continue_outage_reconciliation` scans at most100ordinary entries or applies
+one participant/epoch row. Both retain the existing nonanonymous admin predicate,
+epoch/poller writer guards and closed-period checks. The current unset compiled
+pin rejects every staging/continuation call before progress initialization.
+Neither endpoint grants authority to retry an unresolved upgrade request.
+
+`get_outage_reconciliation_status` and update replies expose a redacted progress
+view: digests, frozen/scanned offsets, applied/total row counts, credited total,
+log count and receipt-count agreement. Participant target rows, future seed and
+capture schedules are not exposed by this view. Its `complete` flag describes
+the staged allocation cursor and receipt counts, not normal-processing recovery
+or proof of the economic correctness of the missing observations.
 
 ## Current additive audit checks
 
@@ -103,8 +120,8 @@ are retained locally.
 ## Still required
 
 Finish and accept the economic policy; close the numerical/historical exceptions;
-seal a complete allocation; configure its digest; integrate bounded application
-ingress; verify actual retained state and restart/reply-loss
+seal a complete allocation; configure its digest; verify actual retained state
+and restart/reply-loss
 behavior; produce exact compatible artifacts; obtain original-request disposition;
 and observe normal resume/epoch advancement and the reconciled ledger.
 
