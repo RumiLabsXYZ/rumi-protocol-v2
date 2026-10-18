@@ -5,90 +5,90 @@ Points processing remains held. The original request disposition still forbids
 another live upgrade, replay, resume or credit. No production call is part of
 this draft.
 
-## Why this code is needed
+## Purpose and current scope
 
-The requested result includes credits for the paused period. The existing
-PR583 resume path preserves old rows but cannot by itself cover the late opening
-of epoch 19. Its A/B captures also cannot reconstruct inputs that were never
-observed. The accounting evidence at `points-no-gap-accounting-evidence-20261018.md`
-therefore requires a separate immutable make-whole allocation.
+The requested result includes points for the paused period. The existing
+PR583 resume path preserves old rows but cannot by itself cover epoch 19's late
+opening. Some random snapshot inputs were never observed. See the separate
+accounting evidence and `points-makewhole-policy-proposal-20261018.md`.
 
-This draft implements the **application mechanism**, leaving the economic
-allocation explicitly unfinished. It does not turn the illustrative references
-into credits. In particular, current debt plus repayments is still not a strict
-historical bound because of unlogged dust forgiveness.
+This module implements application of a future immutable allocation. It does
+not determine its economic policy. Neither the proposed policy nor any
+worksheet is approved, sealed or applied. Resolving numerical compensation
+must not become an extra prerequisite to restoring the reviewed normal driver
+once the original execution hold and its actual release prerequisites clear.
 
-## Implemented mechanism
+## Application mechanism
 
-`src/rumi_points/src/outage_reconciliation.rs` accepts a future reviewed allocation
-for the full scheduled epochs 18 and 19, with 15 unique participants in each,
-including zero-target rows. The allocation is ordered by epoch and principal and
-binds the evidence digest, season and original 417-row ledger prefix digest.
-Candid encoding plus a fixed domain defines its immutable SHA256 digest.
+A future reviewed allocation binds the full scheduled epochs 18 and 19, exactly
+15 unique original participants in each (including zero targets), season bounds,
+an evidence digest and the original 417-entry normal-ledger prefix digest.
+Rows are canonical by epoch and principal. Domain-separated Candid encoding
+identifies the immutable allocation.
 
-Each row specifies a total epoch floor through an explicit source breakdown.
-Existing credits **in every source** offset that total floor. The addition is
-`max(sum(target) - sum(already_earned), 0)`. It is attributed deterministically
-only to positive source deficits, never to registration. If another source
-already earned more, that excess is preserved and reduces the addition; the
-code does not promise independent extra floors in every source.
+Each row is a **total epoch floor**. Every ordinary credit already earned in
+that epoch offsets it. The addition is `max(target - already_earned, 0)`; existing
+excess is preserved. The ordinary earning sources are never rewritten.
 
-Staging requires actual closed summaries for both epochs and the established
-legacy-18 / flat-4x-19 cutover and completed original corrections. Epoch 19 may
-have a later actual start, but its full scheduled interval is what the final
-allocation must cover. This prevents overlap with normal rewards: original
-credits are subtracted after close, rather than adding a second full award.
-It also means final reconciliation cannot be applied before epoch 19 closes.
-A future integration must separately resume processing and cover any later
-missed interval if delay extends beyond these two epochs.
+The first draft attributed additions to ordinary PointSource categories. That
+representation is superseded: a ceiling allowance for an unobserved snapshot
+is compensation, and cannot be presented as an observed debt award or as the
+existing `floor(original_unmatched /3)` correction.
 
-The mechanism scans at most 100 frozen ledger rows per call. It verifies every
-original prefix entry using the following hash chain:
+The new separate append-only credit log labels each addition `OutageMakeWhole`.
+It records allocation/evidence digests, participant, epoch, scheduled coverage,
+the frozen normal-ledger cutoff, normal points, target, added points and actual
+application time. Original PointEntry/PointSource types and readers retain
+their existing contract. Once integrated, the complete aggregate identity is:
 
-1. Start with SHA256 of `rumi-points-october-2026-original-ledger-v1\0`.
-2. For each original offset 0 through 416, replace the digest with
-   SHA256(previous digest || offset as little-endian u64 ||
-   `candid::encode_one(PointEntry)`).
-3. Require the result and the 15 original registration principals to match the
-   reviewed allocation before writing any credit.
+`principal total = normal audit-ledger credits + separate outage credits`.
 
-Then each call applies at most one participant/epoch row. Appends, aggregate
-principal total and receipt commit in one synchronous IC message, without an
-await. A retry uses the stored cursor/receipt. Applied receipts retain added
-source amounts, original ledger offsets and actual application time. They
-identify adjustments separately from original snapshot observations.
+A future public audit projection and frontend breakdown must show this second
+ledger; ordinary-ledger rows alone must not be claimed to decompose the new
+total. No such ingress or frontend integration exists yet.
 
-## Compatibility and current safety boundary
+Staging requires both epochs to have actually closed, their summaries to match
+the scheduled end, and the established legacy-18 / flat-4x-19 cutover and original
+corrections to be complete. This mechanism cannot apply credits before epoch 19
+closes. Normal resume is a separate step. If delay extends beyond epoch 19,
+coverage must be extended explicitly before claiming completion.
 
-- Existing State, OpenEpoch, PrincipalState, PointEntry and version wrappers
-  are unchanged. The original ledger remains append-only.
-- Only new MemoryId 16 is reserved for versioned reconciliation progress.
-- Deposits, repayment windows, last processed epoch, source cursors, A/B
-  snapshots, seed chain, existing timing safeguard and timers are unchanged.
-- Existing PointSource variants and all IC method signatures remain unchanged.
-- Both mutation functions require the existing nonanonymous admin predicate,
-  epoch/poll writer guards and checked arithmetic.
-- The allocation digest pin is **unset**. Staging and continuation therefore
-  fail closed before accessing lazy progress storage. There is no main.rs ingress for these functions. The draft
-  cannot currently be invoked through the IC interface.
-- No tests were added or run. A locked offline native compilation covers the
-  library and binary; it is not production artifact or retained-state proof.
+Each call scans at most 100 frozen normal-ledger rows **or** applies one
+participant/epoch row. The original prefix chain starts at SHA256 of
+`rumi-points-october-2026-original-ledger-v1\0`; for offsets 0 through416 it hashes
+previous digest || offset as little-endian u64 || `candid::encode_one(PointEntry)`.
+Both the digest and 15 original registration principals must match before any
+credit. This is a canonical logical-entry binding, not a hash of raw stable pages.
 
-## Remaining work before use
+A credit's separate audit append, aggregate principal increment and durable
+receipt are synchronous, without await or returned error after the first write.
+Retries use the stored application cursor; zero additions still receive a
+progress receipt. The separate credit-log count must agree with durable receipts.
+A log found without its progress record fails closed instead of starting over.
 
-1. Finish the numerical allocation from retained evidence, including dust,
-   missing historical observations, time bounds, registration and eligibility.
-   The original economic policy remains unchanged unless an explicit make-whole
-   exception is reviewed and accepted.
-2. Freeze readable input/allocation manifests and independently verify amounts.
-   Only then configure the immutable digest and add reviewed bounded ingress
-   plus an audit projection. Include generated Candid compatibility proof.
-3. Verify actual snapshot preservation and reconciliation accounting, restart,
-   reply-loss and replay behavior. Native compilation alone does not prove them.
-4. Integrate the normal resume sequence, the mandatory timing safeguard and
-   coverage after epoch 19 if needed. This draft does not resolve the execution
-   request hold and is not a substitute for observed normal epoch advancement.
+## Compatibility and disabled state
 
-Do not merge or install this draft as a complete recovery, claim no-gap coverage,
-or describe any allocation as applied. Existing reviewed release binaries remain
-frozen separately from this source draft.
+- Existing State, OpenEpoch, PrincipalState, PointEntry, seed, cursor, policy,
+  snapshot and version wrappers are unchanged. Normal ledger stays append-only.
+- New MemoryId16 holds progress; new17/18 hold the outage audit log index/data.
+  These draft types have never been installed. Earlier draft layouts are not
+  claimed to have been deployed or to be frozen release schemas.
+- No new PointSource variant or existing IC signature is changed.
+- Mutation helpers require the existing nonanonymous admin predicate, both
+  writer guards, checked totals and the immutable approved allocation digest.
+- The digest pin is **unset**, rejected before lazy progress initialization.
+  No main.rs ingress reaches staging, continuation or the new query helpers.
+- Existing timers, hold and the original resume timing safeguard are unchanged.
+- No tests were added or run. Locked offline native compilation is not
+  production artifact, retained-state, interruption or live activation proof.
+
+## Still required
+
+Finish and accept the economic policy; close the numerical/historical exceptions;
+seal a complete allocation; configure its digest; integrate bounded ingress,
+audit projection and frontend; verify actual retained state and restart/reply-loss
+behavior; produce exact compatible artifacts; obtain original-request disposition;
+and observe normal resume/epoch advancement and the reconciled ledger.
+
+Do not merge or install this draft as a complete repair. The separately frozen
+original release remains distinct from this changing draft source.

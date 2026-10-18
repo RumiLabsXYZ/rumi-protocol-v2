@@ -3,7 +3,7 @@
 //! This is a draft implementation, not an allocation policy. No approved
 //! allocation digest is configured, so staging is fail-closed. The existing
 //! snapshot driver, hold, seed chain and original ledger encodings are intact.
-//! A future reviewed allocation must specify total floors with per-source attribution for the FULL
+//! A future reviewed allocation must specify explicit total floors for the FULL
 //! scheduled epochs 18 and 19. Reconciliation runs only after both epochs have
 //! actually closed, subtracting their original credits before adding anything.
 //! Missing random snapshots are never represented as observed captures.
@@ -12,11 +12,11 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 
 use candid::{CandidType, Principal};
-use ic_stable_structures::{storable::Bound, StableCell, Storable};
+use ic_stable_structures::{log::Log as StableLog, storable::Bound, StableCell, Storable};
 use serde::{Deserialize, Serialize};
 
 use crate::state;
-use crate::types::{PointEntry, PointSource};
+use crate::types::PointSource;
 
 const FIRST_EPOCH: u64 = 18;
 const LAST_EPOCH: u64 = 19;
@@ -29,9 +29,10 @@ const PREFIX_DOMAIN: &[u8] = b"rumi-points-october-2026-original-ledger-v1\0";
 // Setting this requires a separately reviewed immutable allocation manifest.
 const APPROVED_ALLOCATION_DIGEST: Option<[u8; 32]> = None;
 
-/// Fixed attribution order. The sum is the guaranteed floor: existing extra
-/// credit in one source offsets a deficit in another. Recovery never promises
-/// every component independently on top of an already larger epoch award.
+/// Reference breakdown for a total epoch floor, not ordinary earning records.
+/// Existing credit in any source offsets the total. The actual make-whole
+/// credit is recorded with its own kind and never masquerades as a snapshot
+/// award or the historical unmatched-row correction.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct SourcePoints {
     pub icusd_debt: u128,
@@ -89,20 +90,6 @@ impl SourcePoints {
         ]
     }
 
-    fn shortfall(&self, earned: &Self) -> Result<Self, String> {
-        let mut remaining = self.total()?.saturating_sub(earned.total()?);
-        let mut result = Self::default();
-        for ((source, target), (_, prior)) in self.entries().into_iter().zip(earned.entries()) {
-            let addition = target.saturating_sub(prior).min(remaining);
-            result.add(source, addition)?;
-            remaining -= addition;
-        }
-        if remaining != 0 {
-            return Err("allocation attribution does not cover the total shortfall".into());
-        }
-        Ok(result)
-    }
-
     fn total(&self) -> Result<u128, String> {
         self.entries()
             .into_iter()
@@ -117,7 +104,7 @@ impl SourcePoints {
 pub struct AllocationRow {
     pub epoch_index: u64,
     pub principal: Principal,
-    pub target_points: SourcePoints,
+    pub target_epoch_points: u128,
 }
 
 /// All 30 rows are mandatory, including zero targets. The input-evidence digest
@@ -134,10 +121,55 @@ pub struct OutageAllocation {
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AppliedRow {
-    pub added: SourcePoints,
-    pub first_ledger_offset: u64,
-    pub end_ledger_offset: u64,
+    pub credited_points: u128,
+    pub credit_log_offset: Option<u64>,
     pub applied_at_ns: u64,
+}
+
+/// Separate audit identity: ordinary PointEntry / PointSource remain frozen.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum OutageCreditKind {
+    OutageMakeWhole,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OutageCredit {
+    pub kind: OutageCreditKind,
+    pub allocation_digest: [u8; 32],
+    pub evidence_digest: [u8; 32],
+    pub principal: Principal,
+    pub epoch_index: u64,
+    pub scheduled_period_start_ns: u64,
+    pub scheduled_period_end_ns: u64,
+    pub normal_ledger_cutoff: u64,
+    pub normal_points_earned: u128,
+    pub target_epoch_points: u128,
+    pub credited_points: u128,
+    pub applied_at_ns: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OutageCreditPage {
+    pub entries: Vec<OutageCredit>,
+    pub next_offset: u64,
+    pub reached_end: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+enum StoredOutageCredit {
+    V1(OutageCredit),
+}
+
+impl Storable for StoredOutageCredit {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(self, &mut bytes).expect("encode outage credit");
+        Cow::Owned(bytes)
+    }
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        ciborium::de::from_reader(bytes.as_ref()).expect("decode outage credit")
+    }
+    const BOUND: Bound = Bound::Unbounded;
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -170,10 +202,51 @@ impl Storable for StoredOutageReconciliation {
 }
 
 thread_local! {
-    // New MemoryId 16 only; no previous at-rest type is extended or rewritten.
+    // New MemoryIds 16/17/18 only. No previous at-rest type is rewritten.
     static PROGRESS: RefCell<StableCell<StoredOutageReconciliation, state::VMem>> =
         RefCell::new(StableCell::init(state::outage_reconciliation_memory(),
             StoredOutageReconciliation::V1(None)).expect("initialize outage reconciliation"));
+}
+
+thread_local! {
+    static CREDITS: RefCell<StableLog<StoredOutageCredit, state::VMem, state::VMem>> = {
+        let (index, data) = state::outage_credit_memories();
+        RefCell::new(StableLog::init(index, data).expect("initialize outage credit log"))
+    };
+}
+
+pub fn credit_count() -> u64 {
+    CREDITS.with(|log| log.borrow().len())
+}
+
+pub fn credit_entries(offset: u64, limit: u32) -> OutageCreditPage {
+    CREDITS.with(|log| {
+        let log = log.borrow();
+        let start = offset.min(log.len());
+        let end = start
+            .saturating_add(u64::from(limit.min(100)))
+            .min(log.len());
+        let entries = (start..end)
+            .map(
+                |index| match log.get(index).expect("missing outage audit row") {
+                    StoredOutageCredit::V1(row) => row,
+                },
+            )
+            .collect();
+        OutageCreditPage {
+            entries,
+            next_offset: end,
+            reached_end: end == log.len(),
+        }
+    })
+}
+
+fn append_credit(credit: OutageCredit) -> u64 {
+    CREDITS.with(|log| {
+        log.borrow()
+            .append(&StoredOutageCredit::V1(credit))
+            .expect("append outage credit")
+    })
 }
 
 pub fn progress() -> Option<OutageProgress> {
@@ -194,6 +267,10 @@ pub fn allocation_digest(allocation: &OutageAllocation) -> Result<[u8; 32], Stri
     if allocation.rows.len() != PARTICIPANTS * 2 {
         return Err("allocation must contain exactly 30 ordered participant/epoch rows".into());
     }
+    allocation.rows.iter().try_fold(0u128, |sum, row| {
+        sum.checked_add(row.target_epoch_points)
+            .ok_or("combined allocation exceeds u128")
+    })?;
     let bytes = candid::encode_one(allocation).map_err(|e| format!("encode allocation: {e}"))?;
     Ok(crate::snapshot_seed::sha256(&[DOMAIN, &bytes]))
 }
@@ -251,6 +328,9 @@ pub fn stage(caller: Principal, allocation: OutageAllocation) -> Result<OutagePr
             Err("this outage already has an immutable allocation".into())
         };
     }
+    if credit_count() != 0 {
+        return Err("outage credit log exists without its progress record".into());
+    }
     let _epoch_guard = state::EpochGuard::new().ok_or("epoch transition active")?;
     let _poll_guard = state::PollGuard::new().ok_or("points writer active")?;
     require_closed_epochs()?;
@@ -276,15 +356,6 @@ pub fn stage(caller: Principal, allocation: OutageAllocation) -> Result<OutagePr
         if participant.registered_at_ns > start || state::is_excluded(&row.principal) {
             return Err("allocation includes an ineligible participant".into());
         }
-        if row.epoch_index == FIRST_EPOCH && row.target_points.ck_flat4x != 0
-            || row.epoch_index == LAST_EPOCH
-                && (row.target_points.ck_unmatched != 0
-                    || row.target_points.ck_matched != 0
-                    || row.target_points.ck_unmatched_topup != 0)
-        {
-            return Err("allocation changes the existing fiat-stable policy cutover".into());
-        }
-        row.target_points.total()?;
         keys.push((row.epoch_index, row.principal));
     }
     if keys.windows(2).any(|pair| pair[0] >= pair[1])
@@ -326,6 +397,15 @@ pub fn continue_reconciliation(caller: Principal, now_ns: u64) -> Result<OutageP
     let _epoch_guard = state::EpochGuard::new().ok_or("epoch transition active")?;
     let _poll_guard = state::PollGuard::new().ok_or("points writer active")?;
     require_closed_epochs()?;
+    let receipted_count = saved
+        .applied
+        .iter()
+        .filter(|row| row.credit_log_offset.is_some())
+        .count() as u64;
+    if credit_count() != receipted_count {
+        return Err("outage credit log and durable receipts disagree".into());
+    }
+
     if state::point_ledger_len() < saved.ledger_cutoff
         || saved.ledger_cutoff < saved.allocation.original_ledger_prefix_len
     {
@@ -399,30 +479,39 @@ pub fn continue_reconciliation(caller: Principal, now_ns: u64) -> Result<OutageP
     if state::is_excluded(&row.principal) {
         return Err("participant eligibility changed".into());
     }
-    let added = row.target_points.shortfall(&saved.earned[index])?;
-    let total = added.total()?;
-    // Preflight overflow before the first ledger append. This helper preserves
-    // deposits, repayment windows and last_epoch_processed exactly as they are.
-    state::preflight_outage_credit(&row.principal, total)?;
-    let start = state::point_ledger_len();
-    for (source, points_delta) in added
-        .entries()
-        .into_iter()
-        .filter(|(_, points)| *points > 0)
-    {
-        state::append_point_entry(PointEntry {
+    let normal_points_earned = saved.earned[index].total()?;
+    let target_epoch_points = row.target_epoch_points;
+    let credited_points = target_epoch_points.saturating_sub(normal_points_earned);
+    state::preflight_outage_credit(&row.principal, credited_points)?;
+    let (scheduled_period_start_ns, scheduled_period_end_ns) = crate::epoch::epoch_bounds(
+        row.epoch_index,
+        saved.allocation.season_start_ns,
+        saved.allocation.season_end_ns,
+    );
+    // No returned error or await follows this first write. The separate audit
+    // row, aggregate increment and receipt commit or trap/roll back together.
+    let credit_log_offset = if credited_points > 0 {
+        Some(append_credit(OutageCredit {
+            kind: OutageCreditKind::OutageMakeWhole,
+            allocation_digest: saved.allocation_digest,
+            evidence_digest: saved.allocation.evidence_digest,
             principal: row.principal,
             epoch_index: row.epoch_index,
-            points_delta,
-            source,
-            recorded_at_ns: now_ns,
-        });
-    }
-    state::commit_outage_credit(&row.principal, total);
+            scheduled_period_start_ns,
+            scheduled_period_end_ns,
+            normal_ledger_cutoff: saved.ledger_cutoff,
+            normal_points_earned,
+            target_epoch_points,
+            credited_points,
+            applied_at_ns: now_ns,
+        }))
+    } else {
+        None
+    };
+    state::commit_outage_credit(&row.principal, credited_points);
     saved.applied.push(AppliedRow {
-        added,
-        first_ledger_offset: start,
-        end_ledger_offset: state::point_ledger_len(),
+        credited_points,
+        credit_log_offset,
         applied_at_ns: now_ns,
     });
     persist(saved.clone());

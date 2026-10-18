@@ -927,6 +927,13 @@ pub(crate) fn outage_reconciliation_memory() -> VMem {
     MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(16)))
 }
 
+pub(crate) fn outage_credit_memories() -> (VMem, VMem) {
+    MEMORY_MANAGER.with(|m| {
+        let manager = m.borrow();
+        (manager.get(MemoryId::new(17)), manager.get(MemoryId::new(18)))
+    })
+}
+
 pub(crate) fn preflight_outage_credit(principal: &Principal, amount: u128) -> Result<(), String> {
     let ps = get_principal_state(principal).ok_or("outage participant disappeared")?;
     ps.total_points
