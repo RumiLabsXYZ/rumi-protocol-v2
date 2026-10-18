@@ -2642,3 +2642,35 @@ fn borrow_fee_routes_to_an_existing_deficit_before_the_treasury_and_gross_debt_e
     let cov = fx.coverage();
     assert_eq!(format!("{:?}", cov.status), "Covered", "{cov:?}");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 7b. Unattributed return: refunded only to the verified sender, never credited
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn unattributed_return_is_refunded_to_the_verified_sender_and_never_credited() {
+    let (fx, vault) = lane_fx(500, 0.0);
+    borrow_delivered(&fx, vault, 100 * E8, 1);
+    let escrow = fx.escrow_bal();
+    let before = fx.x.holder_balance(HOLDER);
+    // A payment to the issuer with a tag no intent ever owned.
+    fx.x.holder_pays(&ReturnOpts::simple(HOLDER, 4_000_000_001, "5"));
+    assert_eq!(fx.x.holder_balance(HOLDER), before.checked_sub(&exact("5")).unwrap());
+    // Keep the observer alive: it only runs while there is open work, so open an
+    // intent (the wallet-side "I am about to pay" signal), then let the timers run.
+    fx.gap();
+    let _intent = fx.prepare_repay(vault, 10 * E8, false, 2, None).expect("prepare");
+    for _ in 0..8 {
+        if fx.x.holder_balance(HOLDER) == before {
+            break;
+        }
+        fx.run_pumped(310);
+    }
+    assert_eq!(fx.x.holder_balance(HOLDER), before, "the verified sender was refunded in full on XRPL");
+    assert_eq!(fx.debt(vault), 100 * E8, "an unattributed payment never reduces debt");
+    assert_eq!(fx.escrow_bal(), escrow, "and never burns backing");
+    let pays = fx.x.payments_submitted();
+    let (_, d) = pays.last().unwrap();
+    assert_eq!(d.destination, Some(account_id_from_classic_address(HOLDER).unwrap()), "refund goes to the verified payer only");
+    assert_eq!(d.amount.unwrap().0, exact("5"));
+}

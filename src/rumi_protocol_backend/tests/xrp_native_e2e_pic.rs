@@ -1048,15 +1048,17 @@ fn xrp_vault_is_absorbed_by_stability_pool_via_automated_dispatch() {
     let sp_deposit_amount = 100 * E8;
     mint_icusd(&pic, icusd, backend, depositor(), sp_deposit_amount + 10 * E8);
     approve_icusd(&pic, icusd, depositor(), sp_id, sp_deposit_amount + E8);
-    decode_result::<()>(
+    // The legacy `deposit` endpoint is disabled in the pool (it has no operation
+    // identity); deposits are intent-keyed.
+    decode_result::<Reserved>(
         update_as(
             &pic,
             sp_id,
             depositor(),
-            "deposit",
-            Encode!(&icusd, &sp_deposit_amount).unwrap(),
+            "deposit_with_intent",
+            Encode!(&1u64, &icusd, &sp_deposit_amount).unwrap(),
         ),
-        "deposit",
+        "deposit_with_intent",
     )
     .expect("pool deposit");
     decode_result::<()>(
