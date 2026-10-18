@@ -226,3 +226,35 @@ Backend uses Terra because a retry-safe persisted migration must coexist with in
 
 | PS4-REVIEW-3A | Complete | round3_a | GPT-6 Luna | Independent source review | Consistent unscheduled frontend metadata gap accepted and fixed |
 | PS4-REVIEW-3B | Complete | round3_b | GPT-6 Luna | Independent source review | Same metadata gap independently confirmed |
+
+## ckSOL integration — 2026-10-18
+
+Worktree: `/private/tmp/rumi-cksol-20261018`; branch: `codex/cksol-collateral-minter`.
+
+| Card | State | Owner | Scope | Acceptance / evidence |
+| --- | --- | --- | --- | --- |
+| CKSOL-1 | Done | Ben | Backend registration, finite-budget deposit relay, Candid and backend tests | Copy current ckETH risk terms; caller-bound mint owner; durable budget/attempts; no live mutations. Sonnet provider check rejected by automatic approval review for private-repo export; native fallback. |
+| CKSOL-2 | Done | Rob's coordinator | Frontend minter, collateral metadata, upstream bindings, tests | Exact bigint lamports, wallet session binding, durable recovery, status semantics, dynamic collateral. |
+| CKSOL-3 | Done | Dana and Eli | Read-only adversarial verification | Deterministic checks first; two isolated reviews; resolve concrete findings. |
+
+### Shared API contract
+
+- Upstream pinned `dfinity/cksol` `2acf44e9e2243f1d10ac0fd75f264f6a0dfb52a2`; deployed Candid matches the sweep API.
+- Minter `lh22c-kyaaa-aaaar-qb5nq-cai`; ledger `ls5lp-lqaaa-aaaar-qb5oa-cai`; 9 decimals.
+- Backend `register_cksol_collateral() -> Result<(), ProtocolError>`.
+- Backend `set_cksol_relay_budget(cycles: u64) -> Result<(), String>` developer only. Finite remaining budget, default zero; cap 100T.
+- Backend query `get_cksol_relay_budget() -> u64`.
+- Backend `start_cksol_deposit() -> Result<u64, String>` caller is credited owner, default subaccount; retain/reuse accepted deposit id while pending.
+- Backend query `get_cksol_deposit(owner: Principal) -> opt CkSolRelayAttempt`; attempt exposes `status: variant { SubmittedOrUnknown; Rejected: text; Queued: nat64 }`, `started_at_ns: nat64`.
+- Budget reserves entire 1T attached cycles before dispatch, conservatively never refunds budget on callback. User-visible fees are distinct from sponsorship allocation.
+- Unknown outcomes block resubmission; developer recovery method may bind an observed deposit id but cannot spend/mint.
+- No deployment, activation, wallet signing, token movements, or governance calls.
+
+### ckSOL source verification
+
+- Backend: 10 focused tests passed; backend binary check passed; source-generated Candid compatibility passed; `didc check` against the prior service passed. Backend declarations regenerated.
+- Frontend: 82 focused and existing ckBTC/ckDOGE regression tests passed; production build and authentication-asset verification passed. Full typecheck has exactly the baseline's 30 errors and 66 warnings in 25 files, with identical error paths/messages.
+- Final independent reviews: Dana PASS and Eli PASS, scoped to source readiness. Initial reviews led to operation-bound journal/status protections, active signer checks, commit-time registration protection, and bounded reclamation of abandoned definite rejections.
+- Browser: signed-out desktop and 390px mobile layout and direction-tab interaction checked in the in-app browser; mainnet ckSOL actions disabled on localhost. Existing global live-data queries fail against the local replica. A preview server required restart after rebuilt asset hashes replaced its original manifest.
+- Limits: no PocketIC minter/relay lifecycle, optimized Wasm artifact/install, connected-wallet action, deployment, collateral activation, sponsorship allocation, or SOL settlement proof. These remain distinct from this source acceptance.
+- Safe worktree inventory under disk pressure: zero eligible removals; dirty/locked/unmerged/active trees preserved.

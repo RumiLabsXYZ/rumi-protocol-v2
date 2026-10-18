@@ -18,6 +18,7 @@
     BOB: '/bob-logo.png',
     EXE: '/windoge98-logo.webp',
     ckETH: '/cketh-logo.svg',
+    ckSOL: '/cksol-logo.svg',
     nICP: '/nicp-logo.png',
   };
 
