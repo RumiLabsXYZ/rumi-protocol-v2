@@ -26,8 +26,11 @@ export interface XrplConnection {
 export interface XrplPaymentTx {
   TransactionType: 'Payment';
   Destination: string;
-  /** Native XRP amount in drops, as a decimal string. */
-  Amount: string;
+  /**
+   * Native XRP amount in drops (decimal string), or an exact issued-token
+   * amount (XRPL icUSD repayment). Never carries Paths/SendMax/Flags.
+   */
+  Amount: string | { currency: string; issuer: string; value: string };
   DestinationTag?: number;
 }
 
