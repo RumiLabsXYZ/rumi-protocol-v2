@@ -25,6 +25,8 @@ export interface XrplConnection {
 
 export interface XrplPaymentTx {
   TransactionType: 'Payment';
+  /** Pinned to the frozen connection address by the adapter before Xaman sees it. */
+  Account?: string;
   Destination: string;
   /**
    * Native XRP amount in drops (decimal string), or an exact issued-token
@@ -36,6 +38,8 @@ export interface XrplPaymentTx {
 
 export interface XrplTrustSetTx {
   TransactionType: 'TrustSet';
+  /** Pinned to the frozen connection address by the adapter before Xaman sees it. */
+  Account?: string;
   LimitAmount: { currency: string; issuer: string; value: string };
 }
 
@@ -46,6 +50,13 @@ export interface WalletSubmission {
   status: 'pending' | 'submitted' | 'rejected';
   signed: boolean;
   hash: string | null;
+  /**
+   * Why a request was treated as rejected when it was NOT a plain user
+   * rejection (signed by a different account, or refused by the XRP Ledger).
+   */
+  warning?: string;
+  /** Engine result Xaman reported after dispatch (e.g. tesSUCCESS), if any. */
+  engineResult?: string | null;
 }
 
 export interface WalletSigningPrompt {
@@ -72,7 +83,12 @@ export interface XrplWalletAdapter {
   connect(): Promise<XrplConnection>;
   getConnection(): XrplConnection | null;
   signAndSubmit(tx: XrplPaymentOrTrustSet, opts?: SignOptions): Promise<WalletSubmission>;
-  resumeRequest(requestId: string): Promise<WalletSubmission>;
+  /**
+   * Resume a stored request. `expectedAccount` pins the signer; when omitted the
+   * account frozen at creation (persisted with the request id) is used.
+   * An unsigned request re-emits its signing prompt.
+   */
+  resumeRequest(requestId: string, expectedAccount?: string): Promise<WalletSubmission>;
   disconnect(): void;
   onChange(handler: (conn: XrplConnection | null) => void): () => void;
   /** Deep link / QR for a freshly created request. */
@@ -115,6 +131,7 @@ export interface XamanAdapterOptions {
 }
 
 const REQUEST_STORE_KEY = 'rumi_xrpl_wallet_requests_v1';
+const REQUEST_ACCOUNT_KEY = 'rumi_xrpl_wallet_request_accounts_v1';
 const DEFAULT_POLL_MS = 2000;
 const DEFAULT_MAX_WAIT_MS = 120_000;
 /** Xaman payload lifetime in minutes. */
@@ -133,16 +150,41 @@ function networkFromXaman(networkId: number | undefined, networkType: string | u
 
 /**
  * Map a Xaman payload (as returned by `payload.get`) to a WalletSubmission.
- * Only a payload that is signed AND carries a transaction id is 'submitted'.
+ * Only a payload that is signed, carries a transaction id, was signed by the
+ * expected account and was not refused by the XRP Ledger is 'submitted'.
+ *
+ * `expectedAccount` is the connection address frozen when the request was
+ * created: a payload signed by any other account is 'rejected' with a warning.
  */
-export function payloadToSubmission(requestId: string, payload: any | null | undefined): WalletSubmission {
+export function payloadToSubmission(
+  requestId: string,
+  payload: any | null | undefined,
+  expectedAccount?: string
+): WalletSubmission {
   const meta = payload?.meta;
   if (!meta) return { requestId, status: 'pending', signed: false, hash: null };
   const txid = typeof payload?.response?.txid === 'string' && payload.response.txid ? payload.response.txid : null;
   if (meta.signed) {
+    const signer = payload?.response?.account;
+    if (expectedAccount && signer !== expectedAccount) {
+      return {
+        requestId, status: 'rejected', signed: false, hash: null,
+        warning: `The request was signed by ${typeof signer === 'string' && signer ? signer : 'a different account'}, not the connected wallet ${expectedAccount}. It was not used.`,
+      };
+    }
+    const engine = typeof payload?.response?.dispatched_result === 'string' && payload.response.dispatched_result
+      ? payload.response.dispatched_result
+      : null;
+    if (engine && engine !== 'tesSUCCESS') {
+      return {
+        requestId, status: 'rejected', signed: false, hash: null, engineResult: engine,
+        warning: `The XRP Ledger refused this transaction (${engine}). Nothing was applied.`,
+      };
+    }
+    const extra = engine ? { engineResult: engine } : {};
     return txid
-      ? { requestId, status: 'submitted', signed: true, hash: txid }
-      : { requestId, status: 'pending', signed: true, hash: null };
+      ? { requestId, status: 'submitted', signed: true, hash: txid, ...extra }
+      : { requestId, status: 'pending', signed: true, hash: null, ...extra };
   }
   if (meta.cancelled || meta.expired || meta.resolved) {
     return { requestId, status: 'rejected', signed: false, hash: null };
@@ -204,6 +246,26 @@ export function createXamanAdapter(options: XamanAdapterOptions): XrplWalletAdap
     memoryRequests.set(key, requestId);
     writeRequests({ ...readRequests(), [key]: requestId });
   }
+  // requestId -> account that must sign it (frozen when the request was created).
+  const memoryAccounts = new Map<string, string>();
+  function readAccounts(): Record<string, string> {
+    try {
+      const raw = storage?.getItem(REQUEST_ACCOUNT_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  function rememberAccount(requestId: string, account: string) {
+    memoryAccounts.set(requestId, account);
+    try {
+      storage?.setItem(REQUEST_ACCOUNT_KEY, JSON.stringify({ ...readAccounts(), [requestId]: account }));
+    } catch { /* hints only */ }
+  }
+  function accountFor(requestId: string): string | undefined {
+    return memoryAccounts.get(requestId) ?? readAccounts()[requestId];
+  }
 
   function setConnection(next: XrplConnection | null) {
     const same = connection?.address === next?.address && connection?.network === next?.network;
@@ -227,9 +289,24 @@ export function createXamanAdapter(options: XamanAdapterOptions): XrplWalletAdap
     return { address: account, network: networkFromXaman(networkId, networkType) };
   }
 
-  async function waitForResolution(requestId: string, s: XamanSdkLike): Promise<WalletSubmission> {
+  function emitPrompt(requestId: string, payload: any) {
+    const deepLink = payload?.next?.always;
+    const qrPng = payload?.refs?.qr_png;
+    if (typeof deepLink !== 'string' && typeof qrPng !== 'string') return;
+    promptHandlers.forEach((h) =>
+      h({ requestId, deepLink: typeof deepLink === 'string' ? deepLink : '', qrPng: typeof qrPng === 'string' ? qrPng : null })
+    );
+  }
+
+  async function waitForResolution(
+    requestId: string,
+    s: XamanSdkLike,
+    expectedAccount: string | undefined,
+    reemitPrompt = false
+  ): Promise<WalletSubmission> {
     let waited = 0;
     let last: WalletSubmission = { requestId, status: 'pending', signed: false, hash: null };
+    let prompted = !reemitPrompt;
     for (;;) {
       let payload: any = null;
       try {
@@ -237,7 +314,11 @@ export function createXamanAdapter(options: XamanAdapterOptions): XrplWalletAdap
       } catch {
         payload = null;
       }
-      last = payloadToSubmission(requestId, payload);
+      last = payloadToSubmission(requestId, payload, expectedAccount);
+      if (!prompted && last.status === 'pending' && !last.signed && payload) {
+        prompted = true;
+        emitPrompt(requestId, payload);
+      }
       if (last.status !== 'pending') return last;
       if (waited >= maxWaitMs) return last;
       await sleep(pollMs);
@@ -245,14 +326,21 @@ export function createXamanAdapter(options: XamanAdapterOptions): XrplWalletAdap
     }
   }
 
-  /** A rejected/expired request must not pin its key forever: a retry creates a fresh one. */
-  function settleKeyed(key: string | undefined, sub: WalletSubmission): WalletSubmission {
-    if (key && sub.status === 'rejected') {
-      memoryRequests.delete(key);
-      const map = readRequests();
-      delete map[key];
-      writeRequests(map);
-    }
+  function forgetKey(key: string) {
+    memoryRequests.delete(key);
+    const map = readRequests();
+    delete map[key];
+    writeRequests(map);
+  }
+
+  /**
+   * A rejected/expired request must not pin its key forever: a retry creates a
+   * fresh one. A TrustSet is also released once it returns a hash, so an old
+   * signed payload can never be replayed as the answer to a later "Enable icUSD".
+   */
+  function settleKeyed(key: string | undefined, sub: WalletSubmission, tx: XrplPaymentOrTrustSet): WalletSubmission {
+    if (!key) return sub;
+    if (sub.status === 'rejected' || (tx.TransactionType === 'TrustSet' && sub.hash)) forgetKey(key);
     return sub;
   }
 
@@ -299,11 +387,21 @@ export function createXamanAdapter(options: XamanAdapterOptions): XrplWalletAdap
       const s = await sdk();
       if (!s.payload) throw new Error('Xaman payload API is unavailable. Reconnect and try again.');
       const key = opts?.key;
+      // Freeze the signer: Xaman must sign as exactly this account, and a result
+      // from any other account is never accepted.
+      const account = connection.address;
+      if ((tx as any).Account !== undefined && (tx as any).Account !== account) {
+        throw new Error('The transaction account does not match the connected wallet.');
+      }
       const existing = key ? lookupRequest(key) : undefined;
-      if (existing) return settleKeyed(key!, await waitForResolution(existing, s));
+      if (existing) {
+        const pinned = accountFor(existing) ?? account;
+        return settleKeyed(key, await waitForResolution(existing, s, pinned, true), tx);
+      }
+      const txjson = { ...tx, Account: account };
 
       const created = await s.payload.create({
-        txjson: tx,
+        txjson,
         options: {
           submit: true,
           expire: PAYLOAD_EXPIRE_MINUTES,
@@ -312,16 +410,17 @@ export function createXamanAdapter(options: XamanAdapterOptions): XrplWalletAdap
         custom_meta: { instruction: 'Rumi Protocol' },
       });
       if (!created?.uuid) throw new Error('Xaman did not create the signing request.');
+      rememberAccount(created.uuid, account);
       if (key) rememberRequest(key, created.uuid);
       promptHandlers.forEach((h) =>
         h({ requestId: created.uuid, deepLink: created.next?.always ?? '', qrPng: created.refs?.qr_png ?? null })
       );
-      return settleKeyed(key, await waitForResolution(created.uuid, s));
+      return settleKeyed(key, await waitForResolution(created.uuid, s, account), tx);
     },
-    async resumeRequest(requestId) {
+    async resumeRequest(requestId, expectedAccount) {
       const s = await sdk();
       if (!s.payload) throw new Error('Xaman payload API is unavailable. Reconnect and try again.');
-      return waitForResolution(requestId, s);
+      return waitForResolution(requestId, s, expectedAccount ?? accountFor(requestId) ?? connection?.address, true);
     },
     disconnect() {
       const s = sdkPromise;

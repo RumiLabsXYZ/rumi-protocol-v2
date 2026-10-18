@@ -24,6 +24,7 @@
   import {
     createDefaultXrplIcusdApi,
     estimateBorrow,
+    fetchVaultDebtE8s,
     formatE8s,
     parseE8s,
     repaymentSummary,
@@ -74,8 +75,24 @@
     lastFocus = focusVaultId;
   }
   $: selectedVault = nativeVaults.find((v) => v.vaultId === selectedVaultId) ?? null;
-  // Display-only residual from the vault list; the backend operation view is authoritative.
-  $: vaultDebtE8s = selectedVault ? parseE8s(selectedVault.borrowedIcusd.toFixed(8)) : null;
+  // Exact debt (bigint e8s) from the backend vault query. The float on the vault
+  // card is never used for an amount that is sent or compared.
+  let exactDebtE8s: bigint | null = null;
+  let debtReadFailed = false;
+  let debtReq = 0;
+  async function loadDebt(vaultId: number | null) {
+    const req = ++debtReq;
+    if (vaultId === null) { exactDebtE8s = null; debtReadFailed = false; return; }
+    const v = await fetchVaultDebtE8s(vaultId);
+    if (req !== debtReq) return;
+    exactDebtE8s = v;
+    debtReadFailed = v === null;
+  }
+  $: void loadDebt(selectedVaultId);
+  // The debt changes after a payment is applied: read it again.
+  $: if (s?.repay.phase === 'observed') void loadDebt(selectedVaultId);
+  $: vaultDebtE8s = exactDebtE8s;
+  $: repayOp = s && s.repay.operationId !== null ? s.operations.find((o) => o.id === s!.repay.operationId) ?? null : null;
 
   $: active = s?.gate?.state === 'active';
   $: conn = s?.connection ?? null;
@@ -136,9 +153,20 @@
     if (!controller || selectedVaultId === null || !amountOrNull(grossE8s)) return;
     void controller.borrow({ vaultId: BigInt(selectedVaultId), grossE8s });
   }
-  function doPrepareRepay() {
-    if (!controller || selectedVaultId === null || !amountOrNull(repayE8s)) return;
-    void controller.prepareRepayment({ vaultId: BigInt(selectedVaultId), maxE8s: repayE8s, fullClose });
+  async function doPrepareRepay() {
+    if (!controller || selectedVaultId === null) return;
+    let max = repayE8s;
+    if (fullClose) {
+      // Re-read the exact debt right now: the quote must cover what is owed at this moment.
+      max = await fetchVaultDebtE8s(selectedVaultId);
+      if (max === null) { debtReadFailed = true; return; }
+      exactDebtE8s = max;
+    }
+    if (!amountOrNull(max)) return;
+    void controller.prepareRepayment({ vaultId: BigInt(selectedVaultId), maxE8s: max, fullClose });
+  }
+  function cutoffText(ns: bigint): string {
+    try { return new Date(Number(ns / 1_000_000n)).toLocaleString(); } catch { return ''; }
   }
   function doAddPayment(op: OperationUi) {
     if (!controller) return;
@@ -192,11 +220,11 @@
 
     <XrplWalletConnect />
 
-    {#if s.notice}<p class="xi-note">{s.notice}</p>{/if}
+    {#if s.notice}<p class="xi-note" role="status" aria-live="polite">{s.notice}</p>{/if}
 
     {#if active}
       {#if conn && !networkOk}
-        <p class="xi-warn">Your wallet is on {conn.network}; XRPL icUSD runs on {s.config?.network}. Switch network in your wallet and reconnect.</p>
+        <p class="xi-warn" role="alert">Your wallet is on {conn.network}; XRPL icUSD runs on {s.config?.network}. Switch network in your wallet and reconnect.</p>
       {/if}
 
       <!-- Trust line -->
@@ -205,7 +233,7 @@
         {#if !conn}
           <p class="xi-muted">Connect an XRPL wallet to continue.</p>
         {:else if s.trustLine.status === 'present'}
-          <p class="xi-ok">icUSD is enabled for {formatAddress(conn.address, 8, 6)}{s.trustLine.limit ? ` (limit ${s.trustLine.limit})` : ''}.</p>
+          <p class="xi-ok" role="status">icUSD is enabled for {formatAddress(conn.address, 8, 6)}{s.trustLine.limit ? ` (limit ${s.trustLine.limit})` : ''}.</p>
         {:else}
           <p class="xi-muted">
             One-time setup: a trust line to Rumi's icUSD issuer. XRPL holds
@@ -216,13 +244,19 @@
             <p class="xi-muted">Review in your wallet: {s.config?.issuerAddress ? formatAddress(s.config.issuerAddress, 8, 6) : ''} icUSD, limit {formatE8s(s.config?.outstandingCapE8s ?? 0n)}.</p>
             <button class="xi-primary" on:click={() => controller?.signTrustSet()}>Approve in wallet</button>
           {:else if s.trustSet.phase === 'awaiting_wallet' || s.trustSet.phase === 'wallet_pending'}
-            <p class="xi-muted">Waiting for your wallet…</p>
+            <p class="xi-muted" role="status" aria-live="polite">Waiting for your wallet…</p>
+            {#if s.prompt && s.prompt.flow === 'trustset'}
+              <div class="xi-prompt" data-testid="xrpl-icusd-prompt">
+                <p class="xi-muted">Approve in Xaman. <a href={s.prompt.deepLink} target="_blank" rel="noopener noreferrer">Open in Xaman</a></p>
+                {#if s.prompt.qrPng}<img class="xi-qr" src={s.prompt.qrPng} alt="Xaman signing QR code" />{/if}
+              </div>
+            {/if}
           {:else if s.trustSet.phase === 'submitted'}
-            <p class="xi-muted">Submitted. Waiting for the XRP Ledger to show the trust line.</p>
+            <p class="xi-muted" role="status" aria-live="polite">Submitted. Waiting for the XRP Ledger to show the trust line.</p>
           {:else}
             <button class="xi-primary" disabled={!networkOk} on:click={() => controller?.proposeTrustSet()}>Enable icUSD</button>
           {/if}
-          {#if s.trustSet.error}<p class="xi-warn">{s.trustSet.error}</p>{/if}
+          {#if s.trustSet.error}<p class="xi-warn" role="alert">{s.trustSet.error}</p>{/if}
           <button class="xi-link" on:click={() => controller?.checkTrustLine()}>Re-check</button>
         {/if}
       </div>
@@ -254,12 +288,12 @@
               </dl>
               <p class="xi-muted">Rumi records the debt first; the icUSD arrives on XRPL after validation. The final fee is set by the protocol when you confirm.</p>
             {:else if borrowText.trim() !== ''}
-              <p class="xi-warn">Enter an amount with at most 8 decimals.</p>
+              <p class="xi-warn" role="alert">Enter an amount with at most 8 decimals.</p>
             {/if}
             <button class="xi-primary" disabled={!conn || !networkOk || !amountOrNull(grossE8s) || s.borrow.phase === 'submitting'} on:click={doBorrow}>
               {s.borrow.phase === 'submitting' ? 'Authorizing…' : 'Borrow to XRPL'}
             </button>
-            {#if s.borrow.error}<p class="xi-warn">{s.borrow.error}</p>{/if}
+            {#if s.borrow.error}<p class="xi-warn" role="alert">{s.borrow.error}</p>{/if}
           </div>
 
           <div class="xi-card" data-testid="xrpl-icusd-repay">
@@ -271,16 +305,19 @@
               <input type="checkbox" bind:checked={fullClose} />
               <span>Pay the whole debt{vaultDebtE8s !== null ? ` (${formatE8s(vaultDebtE8s)} icUSD now)` : ''}</span>
             </label>
+            {#if fullClose && debtReadFailed}
+              <p class="xi-warn" role="alert">Could not read the exact debt right now. Try again in a moment.</p>
+            {/if}
             {#if fullClose}
               <p class="xi-muted">Interest may grow before your payment lands. If it falls short, Rumi holds the payment untouched and you can add the difference.</p>
             {/if}
 
             {#if s.repay.phase === 'idle' || s.repay.phase === 'error' || s.repay.phase === 'rejected' || s.repay.phase === 'invalidated' || s.repay.phase === 'observed'}
-              <button class="xi-primary" disabled={!conn || !networkOk || !amountOrNull(repayE8s)} on:click={doPrepareRepay}>
+              <button class="xi-primary" disabled={!conn || !networkOk || !amountOrNull(repayE8s)} on:click={() => doPrepareRepay()}>
                 Prepare repayment
               </button>
             {/if}
-            {#if s.repay.phase === 'preparing'}<p class="xi-muted">Preparing…</p>{/if}
+            {#if s.repay.phase === 'preparing'}<p class="xi-muted" role="status" aria-live="polite">Preparing…</p>{/if}
             {#if s.repay.phase === 'prepared' && s.repay.intent}
               <dl class="xi-dl">
                 <dt>You will send at most</dt><dd>{formatE8s(s.repay.intent.maxE8s)} icUSD</dd>
@@ -294,17 +331,29 @@
               </div>
             {/if}
             {#if s.repay.phase === 'awaiting_wallet' || s.repay.phase === 'wallet_pending'}
-              <p class="xi-muted">Waiting for your wallet to approve the payment…</p>
+              <p class="xi-muted" role="status" aria-live="polite">Waiting for your wallet to approve the payment…</p>
               {#if s.repay.phase === 'wallet_pending'}
                 <button class="xi-link" on:click={() => controller?.payRepayment()}>Check wallet again</button>
               {/if}
             {/if}
             {#if s.repay.phase === 'submitted'}
-              <p class="xi-muted">Payment submitted. Your debt changes only after XRPL validates it and Rumi verifies it.</p>
+              <p class="xi-muted" role="status" aria-live="polite">Payment submitted. Your debt changes only after XRPL validates it and Rumi verifies it.</p>
               <button class="xi-primary" on:click={() => controller?.observeRepayment()}>Tell Rumi about my payment</button>
             {/if}
-            {#if s.repay.phase === 'observing'}<p class="xi-muted">Rumi is checking your payment…</p>{/if}
-            {#if s.repay.error}<p class="xi-warn">{s.repay.error}</p>{/if}
+            {#if s.repay.phase === 'observing'}<p class="xi-muted" role="status" aria-live="polite">Rumi is checking your payment…</p>{/if}
+            {#if s.prompt && s.prompt.flow === 'repay'}
+              <div class="xi-prompt" data-testid="xrpl-icusd-prompt">
+                <p class="xi-muted">Approve in Xaman. <a href={s.prompt.deepLink} target="_blank" rel="noopener noreferrer">Open in Xaman</a></p>
+                {#if s.prompt.qrPng}<img class="xi-qr" src={s.prompt.qrPng} alt="Xaman signing QR code" />{/if}
+              </div>
+            {/if}
+            {#if repayOp && (repayOp.observedExact !== null || repayOp.debtAppliedE8s > 0n)}
+              <dl class="xi-dl" data-testid="xrpl-icusd-repay-amounts">
+                {#if repayOp.observedExact !== null}<dt>Received by Rumi</dt><dd>{repayOp.observedExact} icUSD</dd>{/if}
+                <dt>Applied to debt</dt><dd>{formatE8s(repayOp.debtAppliedE8s)} icUSD</dd>
+              </dl>
+            {/if}
+            {#if s.repay.error}<p class="xi-warn" role="alert">{s.repay.error}</p>{/if}
           </div>
         {/if}
       </div>
@@ -333,8 +382,8 @@
             {s.importFlow.phase === 'approving' ? 'Approving…' : s.importFlow.phase === 'submitting' ? 'Moving…' : oisy ? 'Approve icUSD' : 'Move icUSD to XRPL'}
           </button>
         {/if}
-        {#if s.importFlow.phase === 'done'}<p class="xi-ok">Import recorded. Delivery completes after XRPL validation.</p>{/if}
-        {#if s.importFlow.error}<p class="xi-warn">{s.importFlow.error}</p>{/if}
+        {#if s.importFlow.phase === 'done'}<p class="xi-ok" role="status">Import recorded. Delivery completes after XRPL validation.</p>{/if}
+        {#if s.importFlow.error}<p class="xi-warn" role="alert">{s.importFlow.error}</p>{/if}
       </div>
     {/if}
 
@@ -344,7 +393,7 @@
         Your XRPL operations
         {#if s.operationsSource === 'cache'}<span class="xi-muted">(saved view; click Refresh to update)</span>{/if}
       </div>
-      {#if s.operationsError}<p class="xi-warn">{s.operationsError}</p>{/if}
+      {#if s.operationsError}<p class="xi-warn" role="alert">{s.operationsError}</p>{/if}
       {#if s.operations.length === 0}
         <p class="xi-muted">Nothing yet.</p>
       {/if}
@@ -354,7 +403,10 @@
             <span class="xi-op-title">#{o.id} {opTitle(o)}</span>
             <span class="xi-chip xi-{o.state}">{o.label}</span>
           </div>
-          {#if o.detail}<p class="xi-muted">{o.detail}</p>{/if}
+          {#if o.detail}<p class="xi-muted" role="status" aria-live="polite">{o.detail}</p>{/if}
+          {#if o.settlementCutoffNs !== null}
+            <p class="xi-muted" data-testid="xrpl-icusd-cutoff">Rumi holds this until {cutoffText(o.settlementCutoffNs)}.</p>
+          {/if}
 
           {#if o.kind === 'Borrow' || o.kind === 'Import'}
             <dl class="xi-dl">
@@ -439,5 +491,8 @@
   .xi-primary { padding: 7px 14px; border-radius: 10px; border: none; background: var(--rumi-accent, #14b8a6); color: #04211d; font-weight: 600; cursor: pointer; align-self: flex-start; }
   .xi-secondary { padding: 6px 12px; border-radius: 10px; border: 1px solid var(--rumi-border, rgba(148, 163, 184, 0.25)); background: rgba(15, 23, 42, 0.45); color: var(--rumi-text-secondary, #cbd5e1); font-weight: 600; cursor: pointer; }
   .xi-link { background: none; border: none; color: var(--rumi-accent, #14b8a6); cursor: pointer; padding: 0; font-size: 0.82rem; align-self: flex-start; }
+  .xi-qr { width: 160px; height: 160px; border-radius: 8px; background: #fff; padding: 6px; }
+  .xi-prompt { display: flex; flex-direction: column; gap: 6px; }
+  .xi-prompt a { color: var(--rumi-accent, #14b8a6); }
   .xi-primary:disabled, .xi-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

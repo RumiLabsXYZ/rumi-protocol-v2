@@ -40,10 +40,16 @@ function makeWallet(initial: XrplConnection | null = { address: USER, network: '
   return wallet;
 }
 
-function makeVault(opts: { pending?: number[]; confirmResult?: any; owns?: boolean } = {}) {
+function makeVault(opts: { pending?: number[]; confirmResult?: any; owns?: boolean; readFails?: boolean } = {}) {
+  // Simulated backend list: open() adds vault 7 to it, like the real canister.
+  const list = (opts.pending ?? []).map((vaultId) => ({ vaultId, custodyAddress: CUSTODY, reserveBaseDrops: RESERVE, openedAtMs: vaultId }));
   return {
-    open: vi.fn(async () => ({ success: true, data: { vaultId: 7, custodyAddress: CUSTODY, reserveBaseDrops: RESERVE } })),
-    pendingDeposits: vi.fn(async () => (opts.pending ?? [7]).map((vaultId) => ({ vaultId }))),
+    open: vi.fn(async () => {
+      list.push({ vaultId: 7, custodyAddress: CUSTODY, reserveBaseDrops: RESERVE, openedAtMs: 7 });
+      return { success: true, data: { vaultId: 7, custodyAddress: CUSTODY, reserveBaseDrops: RESERVE } };
+    }),
+    readPendingDeposits: vi.fn(async () =>
+      opts.readFails ? { ok: false as const, error: 'replica unreachable' } : { ok: true as const, deposits: [...list] }),
     confirm: vi.fn(async () => opts.confirmResult ?? ({ success: true, data: { creditedDrops: 11_345_678n } })),
     ownsVault: vi.fn(async () => opts.owns ?? true),
   };
@@ -94,7 +100,7 @@ describe('XrpBorrowModal deposit flow', () => {
     expect(vault.open).toHaveBeenCalledTimes(1);
     expect(wallet.signAndSubmit).toHaveBeenCalledTimes(1);
     const [tx] = wallet.signAndSubmit.mock.calls[0] as any[];
-    expect(tx).toEqual({ TransactionType: 'Payment', Destination: CUSTODY, Amount: '12345678' });
+    expect(tx).toEqual({ TransactionType: 'Payment', Account: USER, Destination: CUSTODY, Amount: '12345678' });
     expect(typeof tx.Amount).toBe('string');
   });
 
@@ -191,7 +197,7 @@ describe('XrpBorrowModal deposit flow', () => {
     expect(controller.getState().phase).toBe('ready_to_confirm');
     await Promise.resolve();
     expect(vault.confirm).not.toHaveBeenCalled();
-    expect(vault.pendingDeposits).not.toHaveBeenCalledTimes(99); // sanity: no polling signer reads
+    expect(vault.readPendingDeposits).not.toHaveBeenCalledTimes(99); // sanity: no polling signer reads
     await controller.confirmFromClick();
     expect(vault.confirm).toHaveBeenCalledTimes(1);
     expect(vault.confirm).toHaveBeenCalledWith(7);
@@ -286,6 +292,144 @@ describe('XrpBorrowModal deposit flow', () => {
     expect(controller.getState().phase).toBe('error');
     controller.propose();
     await controller.pay();
+    expect(vault.confirm).not.toHaveBeenCalled();
+  });
+});
+
+describe('deposit reload never opens a second vault', () => {
+  it('a failed backend read keeps the hint, blocks open and offers retry', async () => {
+    const storage = memoryStorage();
+    const wallet = makeWallet();
+    wallet.signAndSubmit.mockResolvedValue({ requestId: 'req-1', status: 'pending', signed: true, hash: null });
+    const a = setup({ storage, wallet, balance: 'unfunded' });
+    await a.controller.prepare(12_345_678n);
+    a.controller.propose();
+    await a.controller.pay();
+    const hintBefore = storage.m.get('rumi_xrpl_deposit_hint_v1:owner-1');
+    expect(hintBefore).toBeTruthy();
+
+    const failing = makeVault({ readFails: true });
+    const b = setup({ storage, wallet, vault: failing });
+    await b.controller.prepare(12_345_678n);
+    expect(failing.open).not.toHaveBeenCalled();
+    expect(failing.ownsVault).not.toHaveBeenCalled();
+    expect(b.controller.getState()).toMatchObject({ phase: 'error', pendingReadFailed: true, vault: null });
+    expect(b.controller.getState().error).toMatch(/Nothing was opened/);
+    expect(storage.m.get('rumi_xrpl_deposit_hint_v1:owner-1')).toBe(hintBefore); // hint kept
+
+    // Retry once the backend answers: same vault recovered, still no open.
+    const healthy = makeVault({ pending: [7] });
+    const c = setup({ storage, wallet, vault: healthy });
+    await c.controller.prepare(12_345_678n);
+    expect(healthy.open).not.toHaveBeenCalled();
+    expect(c.controller.getState()).toMatchObject({ phase: 'wallet_pending', pendingReadFailed: false });
+  });
+
+  it('retrying prepare() after a failed read opens exactly one vault once the read works', async () => {
+    let fail = true;
+    const vault = makeVault();
+    vault.readPendingDeposits.mockImplementation(async () => (fail ? { ok: false as const, error: 'down' } : { ok: true as const, deposits: [] }));
+    const { controller } = setup({ vault });
+    await controller.prepare(12_345_678n);
+    expect(vault.open).not.toHaveBeenCalled();
+    fail = false;
+    await controller.prepare(12_345_678n);
+    expect(vault.open).toHaveBeenCalledTimes(1);
+    expect(controller.getState().phase).toBe('awaiting_payment');
+  });
+
+  it('with no hint, adopts an existing backend pending deposit (custody + reserve from the backend)', async () => {
+    const vault = makeVault();
+    vault.readPendingDeposits.mockResolvedValue({
+      ok: true as const,
+      deposits: [{ vaultId: 3, custodyAddress: 'rBackendCustody', reserveBaseDrops: 2_000_000n, openedAtMs: 5 }],
+    });
+    const { controller } = setup({ vault });
+    await controller.prepare(12_345_678n);
+    expect(vault.open).not.toHaveBeenCalled();
+    expect(controller.getState().vault).toEqual({ vaultId: 3, custodyAddress: 'rBackendCustody', reserveBaseDrops: 2_000_000n });
+    expect(controller.getState().reservedDrops).toBe(2_000_000n);
+  });
+
+  it('a hint with a tampered custody address never wins over the backend', async () => {
+    const storage = memoryStorage();
+    storage.setItem('rumi_xrpl_deposit_hint_v1:owner-1', JSON.stringify({
+      vaultId: 7, custodyAddress: 'rAttackerAddress', reserveBaseDrops: '1', sendDrops: '12345678',
+    }));
+    const { controller, wallet, vault } = setup({ storage, vault: makeVault({ pending: [7] }) });
+    await controller.prepare(12_345_678n);
+    expect(controller.getState().vault?.custodyAddress).toBe(CUSTODY);
+    expect(controller.getState().vault?.reserveBaseDrops).toBe(RESERVE);
+    controller.propose();
+    await controller.pay();
+    expect((wallet.signAndSubmit.mock.calls[0] as any[])[0].Destination).toBe(CUSTODY);
+    expect(vault.open).not.toHaveBeenCalled();
+  });
+
+  it('a stale hint plus an unreadable vault list does not drop the hint or open a vault', async () => {
+    const storage = memoryStorage();
+    storage.setItem('rumi_xrpl_deposit_hint_v1:owner-1', JSON.stringify({
+      vaultId: 9, custodyAddress: CUSTODY, reserveBaseDrops: '1000000', sendDrops: '12345678',
+    }));
+    const vault = makeVault({ pending: [] });
+    vault.ownsVault.mockRejectedValue(new Error('vault list unavailable'));
+    const { controller } = setup({ storage, vault });
+    await controller.prepare(12_345_678n);
+    expect(vault.open).not.toHaveBeenCalled();
+    expect(storage.getItem('rumi_xrpl_deposit_hint_v1:owner-1')).toBeTruthy();
+    expect(controller.getState()).toMatchObject({ phase: 'error', pendingReadFailed: true });
+  });
+});
+
+describe('deposit resume amount drift', () => {
+  it('persists the amount at pay time and a reload with a re-typed amount keeps the committed one', async () => {
+    const storage = memoryStorage();
+    const wallet = makeWallet();
+    // Reload while the wallet request is still open: signAndSubmit never resolved, but the prompt fired.
+    let prompt: ((p: any) => void) | null = null;
+    wallet.onPrompt = ((h: any) => { prompt = h; return () => { prompt = null; }; }) as any;
+    wallet.signAndSubmit.mockImplementation((async () => {
+      prompt?.({ requestId: 'req-open', deepLink: 'x', qrPng: null });
+      return new Promise<WalletSubmission>(() => {});
+    }) as any);
+    const a = setup({ storage, wallet, balance: 'unfunded' });
+    await a.controller.prepare(12_345_678n);
+    a.controller.propose();
+    void a.controller.pay();
+    await Promise.resolve();
+    const hint = JSON.parse(storage.m.get('rumi_xrpl_deposit_hint_v1:owner-1')!);
+    expect(hint).toMatchObject({ sendDrops: '12345678', payStarted: true, requestId: 'req-open' });
+
+    // Reload: the user types a different amount; the committed one is shown and paid.
+    const b = setup({ storage, vault: makeVault({ pending: [7] }) });
+    await b.controller.prepare(20_000_000n);
+    expect(b.controller.getState()).toMatchObject({ phase: 'wallet_pending', sentDrops: 12_345_678n });
+    expect(b.controller.getState().requestId).toBe('req-open');
+  });
+
+  it('before any request id exists, a re-proposed payment still uses the committed amount', async () => {
+    const storage = memoryStorage();
+    storage.setItem('rumi_xrpl_deposit_hint_v1:owner-1', JSON.stringify({
+      vaultId: 7, custodyAddress: CUSTODY, reserveBaseDrops: '1000000', sendDrops: '12345678', payStarted: true,
+    }));
+    const { controller, wallet } = setup({ storage, vault: makeVault({ pending: [7] }) });
+    await controller.prepare(20_000_000n);
+    controller.propose();
+    await controller.pay();
+    expect((wallet.signAndSubmit.mock.calls[0] as any[])[0].Amount).toBe('12345678');
+  });
+});
+
+describe('wallet warnings reach the deposit UI', () => {
+  it('a payload signed by another account or refused by the ledger is rejected with the warning, never credited', async () => {
+    const wallet = makeWallet();
+    wallet.signAndSubmit.mockResolvedValue({ requestId: 'req-1', status: 'rejected', signed: false, hash: null, warning: 'The XRP Ledger refused this transaction (tecUNFUNDED_PAYMENT). Nothing was applied.' });
+    const { controller, vault } = setup({ wallet });
+    await controller.prepare(12_345_678n);
+    controller.propose();
+    await controller.pay();
+    expect(controller.getState().phase).toBe('rejected');
+    expect(controller.getState().error).toMatch(/tecUNFUNDED_PAYMENT/);
     expect(vault.confirm).not.toHaveBeenCalled();
   });
 });

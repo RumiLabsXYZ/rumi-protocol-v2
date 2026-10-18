@@ -177,6 +177,7 @@ export function buildTrustSetTx(
   if (limit <= 0n) throw new Error('Trust line limit must be positive.');
   return {
     TransactionType: 'TrustSet',
+    Account: conn.address,
     LimitAmount: { currency: cfg.currencyHex.toUpperCase(), issuer: cfg.issuerAddress, value: limitDecimal(limit) },
   };
 }
@@ -278,9 +279,16 @@ export function mapOperation(op: OperationView): OperationUi {
   let deliveredE8s: bigint | null = null;
 
   if (phase === 'Held') {
-    state = 'held'; label = 'Held for recovery'; detail = 'Your payment was received but could not be applied. Choose how to recover it.';
+    state = 'held'; label = 'Held for recovery';
+    detail = nextAction === 'ResolveClaim'
+      ? 'Your payment was received but could not be applied. Choose how to recover it.'
+      : 'Your payment was received but could not be applied. Rumi is holding it safely; nothing is needed from you right now.';
   } else if (phase === 'RefundPending') {
-    state = 'refund_pending'; label = 'Refund pending'; detail = 'Choose how to receive your funds.';
+    state = 'refund_pending'; label = 'Refund pending';
+    // Copy follows the backend's next_action: only offer a choice when it asks for one.
+    detail = nextAction === 'ResolveClaim'
+      ? 'Choose how to receive your funds.'
+      : 'Rumi is arranging your refund. Nothing is needed from you.';
   } else if (phase === 'Cancelled') {
     state = 'cancelled'; label = 'Cancelled'; detail = '';
   } else if (kind === 'Borrow' || kind === 'Import' || kind === 'Refund') {
@@ -443,6 +451,8 @@ export function buildRepaymentPayment(
 
   return {
     TransactionType: 'Payment',
+    // The validated payer (== the connected wallet): the wallet must sign as this account.
+    Account: intent.payer,
     Destination: issuer,
     DestinationTag: intent.destinationTag,
     Amount: { currency, issuer, value: String(amt.value).trim() },
@@ -704,6 +714,19 @@ export async function createDefaultXrplIcusdApi(): Promise<XrplIcusdApi> {
     getActor: () => walletStore.getActor(CONFIG.currentCanisterId, idl.idlFactory) as Promise<_SERVICE>,
     getPublicActor: async () => publicActor as unknown as _SERVICE,
   });
+}
+
+/**
+ * Exact vault debt in e8s (bigint) from the backend vault list, a public query
+ * (no signer popup). Null when it cannot be read. Never derived from a JS number.
+ */
+export async function fetchVaultDebtE8s(vaultId: number): Promise<bigint | null> {
+  try {
+    const { ApiClient } = await import('./protocol/apiClient');
+    return await ApiClient.getRawBorrowedE8s(vaultId);
+  } catch {
+    return null;
+  }
 }
 
 export { networkVariant };

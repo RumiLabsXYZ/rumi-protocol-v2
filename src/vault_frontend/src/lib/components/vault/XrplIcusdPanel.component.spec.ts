@@ -21,7 +21,7 @@ const h = vi.hoisted(() => {
       get: () => v,
     };
   }
-  return { store, actor: {} as Record<string, any>, wallet: {} as any };
+  return { store, actor: {} as Record<string, any>, wallet: {} as any, debt: 50_00000000n as bigint | null };
 });
 
 vi.mock('$lib/stores/wallet', () => ({
@@ -45,6 +45,7 @@ vi.mock('$lib/services/xrplIcusdService', async () => {
   const actual = await vi.importActual<typeof import('$lib/services/xrplIcusdService')>('$lib/services/xrplIcusdService');
   return {
     ...actual,
+    fetchVaultDebtE8s: async () => h.debt,
     createDefaultXrplIcusdApi: async () =>
       actual.createXrplIcusdApi({ getActor: async () => h.actor as any, getPublicActor: async () => h.actor as any }),
   };
@@ -71,6 +72,7 @@ function opView(over: Record<string, unknown> = {}) {
 function makeWallet(network = 'testnet') {
   let conn: { address: string; network: string } | null = { address: USER, network };
   const handlers = new Set<(c: any) => void>();
+  const prompts = new Set<(p: any) => void>();
   return {
     id: 'xaman', availability: () => ({ available: true }),
     connect: vi.fn(async () => conn!), getConnection: () => conn,
@@ -78,7 +80,8 @@ function makeWallet(network = 'testnet') {
     resumeRequest: vi.fn(async (id: string) => ({ requestId: id, status: 'submitted', signed: true, hash: 'HASH1' })),
     disconnect: vi.fn(), restore: vi.fn(async () => conn),
     onChange: (fn: (c: any) => void) => { handlers.add(fn); return () => handlers.delete(fn); },
-    onPrompt: () => () => {},
+    onPrompt: (fn: (p: any) => void) => { prompts.add(fn); return () => prompts.delete(fn); },
+    emitPrompt(p: any) { prompts.forEach((fn) => fn(p)); },
     setConn(c: any) { conn = c; handlers.forEach((fn) => fn(c)); },
   };
 }
@@ -96,7 +99,7 @@ function makeActor() {
       ops.push(opView());
       return { Ok: {
         operation_id: 9n, issuer: ISSUER, currency: CURRENCY, payer: arg.payer, destination_tag: 777, max_e8s: arg.max_e8s,
-        network: arg.network, quote_time_ns: 1n,
+        network: arg.network, quote_time_ns: BigInt(Date.now()) * 1_000_000n,
         payment_json: JSON.stringify({ TransactionType: 'Payment', Account: arg.payer, Destination: ISSUER, DestinationTag: 777,
           Amount: { currency: CURRENCY, issuer: ISSUER, value: '10' } }),
       } };
@@ -117,6 +120,9 @@ let comp: ReturnType<typeof mount> | null = null;
 
 function render() {
   comp = mount(XrplIcusdPanel, { target, props: { vaults: VAULTS } });
+}
+function mountWithVaults(vaults: any[]) {
+  comp = mount(XrplIcusdPanel, { target, props: { vaults } });
 }
 function teardown() { if (comp) { unmount(comp); comp = null; } }
 const text = () => target.textContent ?? '';
@@ -145,6 +151,7 @@ function stubRpc() {
 
 beforeEach(() => {
   localStorage.clear();
+  h.debt = 50_00000000n;
   target = document.createElement('div');
   document.body.appendChild(target);
   h.actor = makeActor();
@@ -182,6 +189,10 @@ describe('XRPL icUSD panel (mocked actor, Xaman adapter and XRPL RPC)', () => {
     expect(h.actor.observe_xrpl_repayment).toHaveBeenCalledTimes(1);
     expect(h.actor.observe_xrpl_repayment).toHaveBeenCalledWith({ operation_id: 9n, tx_hash: 'HASH1' });
     expect(text()).toMatch(/Repayment complete/);
+    // The repay card shows the exact amounts the backend verified.
+    const amounts = target.querySelector('[data-testid="xrpl-icusd-repay-amounts"]')?.textContent ?? '';
+    expect(amounts).toMatch(/Received by Rumi\s*10 icUSD/);
+    expect(amounts).toMatch(/Applied to debt\s*10\.00 icUSD/);
   });
 
   it('rejection: the user declines in the wallet, nothing is sent to Rumi, and they can retry', async () => {
@@ -237,5 +248,71 @@ describe('XRPL icUSD panel (mocked actor, Xaman adapter and XRPL RPC)', () => {
     await flush();
     expect(target.querySelector('[data-testid="xrpl-icusd-gate"]')?.textContent).toMatch(/not enabled/);
     expect(target.querySelector('[data-testid="xrpl-icusd-repay"]')).toBeNull();
+  });
+});
+
+describe('recovery review fixes (panel)', () => {
+  it('shows the Open-in-Xaman link and QR while a repay request is open', async () => {
+    let finish: (v: any) => void = () => {};
+    h.wallet.signAndSubmit.mockImplementation(() => new Promise((r) => { finish = r; }));
+    render();
+    await flush();
+    await prepareTen();
+    await click(/Pay in wallet/);
+    h.wallet.emitPrompt({ requestId: 'req-open', deepLink: 'https://xumm.app/sign/req-open', qrPng: 'https://xumm.app/sign/req-open_q.png' });
+    await flush();
+    const box = target.querySelector('[data-testid="xrpl-icusd-prompt"]')!;
+    expect(box.querySelector('a')?.getAttribute('href')).toBe('https://xumm.app/sign/req-open');
+    expect(box.querySelector('img')?.getAttribute('src')).toBe('https://xumm.app/sign/req-open_q.png');
+    finish({ requestId: 'req-open', status: 'rejected', signed: false, hash: null });
+    await flush();
+    expect(target.querySelector('[data-testid="xrpl-icusd-prompt"]')).toBeNull();
+  });
+
+  it('Pay the whole debt sends the exact bigint e8s from the backend, not a float', async () => {
+    // The vault card float cannot represent this debt; the backend e8s value can.
+    h.debt = 123456789012345678n;
+    const exact = '1234567890.12345678';
+    mountWithVaults([{ vaultId: 7, borrowedIcusd: 1234567890.1234567, collateralType: 'xrp' }]);
+    await flush();
+    expect(text()).toContain(`${exact} icUSD now`);
+    const box = target.querySelector<HTMLInputElement>('[data-testid="xrpl-icusd-repay"] input[type="checkbox"]')!;
+    box.click();
+    await flush(2);
+    await click(/Prepare repayment/);
+    const arg = h.actor.prepare_xrpl_repayment.mock.calls[0][0];
+    expect(arg.max_e8s).toBe(123456789012345678n);
+    expect(arg.full_close).toBe(true);
+  });
+
+  it('full close is blocked with a message when the exact debt cannot be read', async () => {
+    h.debt = null;
+    render();
+    await flush();
+    target.querySelector<HTMLInputElement>('[data-testid="xrpl-icusd-repay"] input[type="checkbox"]')!.click();
+    await flush(2);
+    expect(button(/Prepare repayment/).disabled).toBe(true);
+    expect(text()).toMatch(/Could not read the exact debt/);
+  });
+
+  it('refund pending with Wait says Rumi is arranging it, and a held payment shows its settlement cutoff', async () => {
+    h.actor.ops.push(opView({ operation_id: 3n, kind: { Refund: null }, phase: { RefundPending: null }, next_action: { Wait: null } }));
+    h.actor.ops.push(opView({ operation_id: 4n, phase: { Held: null }, next_action: { ResolveClaim: null }, held_exact_amount: ['5'], settlement_cutoff_ns: [1_800_000_000_000_000_000n] }));
+    render();
+    await flush();
+    expect(text()).toMatch(/Rumi is arranging your refund/);
+    expect(text()).not.toMatch(/Choose how to receive your funds/);
+    expect(target.querySelector('[data-testid="xrpl-icusd-cutoff"]')?.textContent).toMatch(/Rumi holds this until/);
+  });
+
+  it('status and error messages are announced (role=status / role=alert)', async () => {
+    h.wallet.signAndSubmit.mockResolvedValueOnce({ requestId: 'req-x', status: 'rejected', signed: false, hash: null, warning: 'The XRP Ledger refused this transaction (tecPATH_DRY). Nothing was applied.' });
+    render();
+    await flush();
+    await prepareTen();
+    await click(/Pay in wallet/);
+    const alert = target.querySelector('[role="alert"]');
+    expect(alert?.textContent).toMatch(/tecPATH_DRY/);
+    expect(target.querySelector('[role="status"]')).not.toBeNull();
   });
 });

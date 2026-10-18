@@ -81,6 +81,14 @@ export interface XrpOpResult<T> {
   oisyResilient?: boolean;
 }
 
+/**
+ * Tri-state read of the caller's pending deposits: a failed read is NOT the
+ * same as "no pending deposits" (see {@link XrpVaultService.readMyPendingDeposits}).
+ */
+export type XrpPendingDepositsRead =
+  | { ok: true; deposits: XrpPendingDepositView[]; source: 'backend' | 'cache' }
+  | { ok: false; error: string };
+
 interface CachedXrpPendingDeposit extends XrpPendingDepositView {
   updatedAtMs: number;
 }
@@ -445,6 +453,34 @@ export class XrpVaultService {
     } catch (e) {
       console.error('getMyPendingDeposits failed:', e);
       return isOisySignerWallet() ? visiblePendingDeposits(readCachedPendingDeposits()) : [];
+    }
+  }
+
+  /**
+   * Like {@link getMyPendingDeposits} but a failed read is observable and the
+   * list is NOT filtered by user-hidden ids. Used before opening a new vault so
+   * a transient error or a dismissed banner can never lead to a second vault.
+   * A gesture-gated signer (Oisy) without `allowSigner` gets the local cache
+   * (`source: 'cache'`) because a backend read would need a signer popup.
+   */
+  static async readMyPendingDeposits(options: XrpReadOptions = {}): Promise<XrpPendingDepositsRead> {
+    if (isOisySignerWallet() && !options.allowSigner) {
+      return { ok: true, deposits: readCachedPendingDeposits(), source: 'cache' };
+    }
+    try {
+      const actor = await this.actor();
+      const pending = await actor.get_my_xrp_pending_deposits();
+      const views = pending.map(([vaultId, dep]) => ({
+        vaultId: Number(vaultId),
+        custodyAddress: dep.custody_address,
+        openedAtMs: Number(dep.opened_at_ns / 1_000_000n),
+        reserveBaseDrops: dep.reserve_base_drops,
+      }));
+      writeCachedPendingDeposits(views);
+      return { ok: true, deposits: views, source: 'backend' };
+    } catch (e) {
+      console.error('readMyPendingDeposits failed:', e);
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   }
 

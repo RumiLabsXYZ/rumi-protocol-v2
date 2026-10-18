@@ -36,6 +36,7 @@ import {
   type XrplIcusdConfigView,
 } from '$lib/services/xrplIcusdService';
 import type {
+  WalletSigningPrompt,
   WalletSubmission,
   XrplConnection,
   XrplWalletAdapter,
@@ -173,6 +174,8 @@ export interface XrplIcusdPanelState {
     snapshot: { account: string; network: string } | null;
     error: string | null;
   };
+  /** Deep link / QR for the wallet request that is currently open, if any. */
+  prompt: (WalletSigningPrompt & { flow: 'trustset' | 'repay' | 'other' }) | null;
   /** Transient message for actions that were skipped (e.g. needs a click). */
   notice: string | null;
   busy: string | null;
@@ -188,6 +191,8 @@ export interface XrplIcusdControllerDeps {
   fetchImpl?: typeof fetch;
   endpoints: (network: string) => string[];
   sleep?: (ms: number) => Promise<void>;
+  /** Wall clock (ms) used for the repayment quote lifetime check. */
+  now?: () => number;
   /** ICRC-2 approve on the icUSD ledger for the backend as spender. */
   approve: (amountE8s: bigint) => Promise<{ success: boolean; error?: string }>;
   /** Current icUSD ledger fee. */
@@ -222,6 +227,43 @@ const OPS_CACHE_PREFIX = 'rumi_xrpl_icusd_ops_v1:';
 const REPAY_HINT_PREFIX = 'rumi_xrpl_icusd_repay_v1:';
 const TRUST_WATCH_TRIES = 8;
 const TRUST_WATCH_MS = 3000;
+/** A prepared repayment intent is honoured for 7 days from its quote time. */
+const INTENT_TTL_NS = 7n * 24n * 3600n * 1_000_000_000n;
+
+interface RepayHint {
+  requestId?: string;
+  hash?: string;
+  /** The exact Payment handed to the wallet (validated by buildRepaymentPayment). */
+  paymentJson?: string;
+  /** Account the request was created for. */
+  account?: string;
+  /** Request-nonce key kept until the operation leaves IntentPrepared. */
+  intentKey?: string;
+  /** Backend intent (bigints as decimal strings) so a reload can re-derive it. */
+  intent?: {
+    operationId: string; issuer: string; currency: string; payer: string; destinationTag: number;
+    maxE8s: string; network: 'mainnet' | 'testnet'; paymentJson: string; quoteTimeNs: string;
+  };
+}
+
+function dehydrateIntent(i: RepaymentIntent): NonNullable<RepayHint['intent']> {
+  return {
+    operationId: i.operationId.toString(), issuer: i.issuer, currency: i.currency, payer: i.payer,
+    destinationTag: i.destinationTag, maxE8s: i.maxE8s.toString(), network: i.network,
+    paymentJson: i.paymentJson, quoteTimeNs: i.quoteTimeNs.toString(),
+  };
+}
+function hydrateIntent(h: RepayHint | undefined): RepaymentIntent | null {
+  const i = h?.intent;
+  if (!i) return null;
+  try {
+    return {
+      operationId: BigInt(i.operationId), issuer: i.issuer, currency: i.currency, payer: i.payer,
+      destinationTag: i.destinationTag, maxE8s: BigInt(i.maxE8s), network: i.network,
+      paymentJson: i.paymentJson, quoteTimeNs: BigInt(i.quoteTimeNs),
+    };
+  } catch { return null; }
+}
 
 // bigint-safe JSON for the operation cache (hints only).
 function ser(value: unknown): string {
@@ -240,6 +282,7 @@ const INFLIGHT_REPAY: RepayPhase[] = ['preparing', 'awaiting_wallet', 'observing
 export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIcusdController {
   const storage = deps.storage === undefined ? safeLocalStorage() : deps.storage;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const nowMs = deps.now ?? (() => Date.now());
   const fetchImpl = deps.fetchImpl ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
   const nonces: NonceStore = createNonceStore({ storage, owner: deps.ownerKey });
   const opsKey = `${OPS_CACHE_PREFIX}${deps.ownerKey}`;
@@ -255,7 +298,7 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
     repay: { phase: 'idle', operationId: null, intent: null, snapshot: null, requestId: null, hash: null, error: null },
     borrow: { phase: 'idle', operationId: null, error: null },
     importFlow: { phase: 'idle', amountE8s: null, disclosure: null, snapshot: null, error: null },
-    notice: null, busy: null,
+    prompt: null, notice: null, busy: null,
   };
   const listeners = new Set<(s: XrplIcusdPanelState) => void>();
   let disposed = false;
@@ -266,23 +309,30 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
     state = { ...state, ...patch };
     listeners.forEach((l) => l(state));
   }
-  const setRepay = (p: Partial<XrplIcusdPanelState['repay']>) => set({ repay: { ...state.repay, ...p } });
-  const setTrustSet = (p: Partial<XrplIcusdPanelState['trustSet']>) => set({ trustSet: { ...state.trustSet, ...p } });
+  const WALLET_OPEN = ['awaiting_wallet', 'wallet_pending'];
+  const setRepay = (p: Partial<XrplIcusdPanelState['repay']>) => {
+    const dropPrompt = p.phase !== undefined && !WALLET_OPEN.includes(p.phase) && state.prompt?.flow === 'repay';
+    set({ repay: { ...state.repay, ...p }, ...(dropPrompt ? { prompt: null } : {}) });
+  };
+  const setTrustSet = (p: Partial<XrplIcusdPanelState['trustSet']>) => {
+    const dropPrompt = p.phase !== undefined && !WALLET_OPEN.includes(p.phase) && state.prompt?.flow === 'trustset';
+    set({ trustSet: { ...state.trustSet, ...p }, ...(dropPrompt ? { prompt: null } : {}) });
+  };
   const setImport = (p: Partial<XrplIcusdPanelState['importFlow']>) => set({ importFlow: { ...state.importFlow, ...p } });
   const setBorrow = (p: Partial<XrplIcusdPanelState['borrow']>) => set({ borrow: { ...state.borrow, ...p } });
 
   // --- local hints ---
-  function readHints(): Record<string, { requestId?: string; hash?: string }> {
+  function readHints(): Record<string, RepayHint> {
     try {
       const raw = storage?.getItem(hintKey);
       const p = raw ? JSON.parse(raw) : {};
       return p && typeof p === 'object' ? p : {};
     } catch { return {}; }
   }
-  function writeHints(h: Record<string, { requestId?: string; hash?: string }>) {
+  function writeHints(h: Record<string, RepayHint>) {
     try { storage?.setItem(hintKey, JSON.stringify(h)); } catch { /* hints only */ }
   }
-  function saveHint(opId: bigint, patch: { requestId?: string; hash?: string }) {
+  function saveHint(opId: bigint, patch: Partial<RepayHint>) {
     const h = readHints();
     h[String(opId)] = { ...(h[String(opId)] ?? {}), ...patch };
     writeHints(h);
@@ -309,7 +359,18 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
     if (source === 'backend') {
       writeOpsCache(sorted);
       const hints = readHints();
-      for (const o of sorted) if (o.terminal && hints[String(o.id)]) clearHint(o.id);
+      for (const o of sorted) {
+        const h = hints[String(o.id)];
+        if (!h) continue;
+        if (o.terminal) {
+          if (h.intentKey) nonces.forget(h.intentKey);
+          clearHint(o.id);
+        } else if (o.phase !== 'IntentPrepared' && (h.intentKey || h.intent)) {
+          // The intent was used: its request nonce has done its job.
+          if (h.intentKey) nonces.forget(h.intentKey);
+          saveHint(o.id, { intentKey: undefined, intent: undefined });
+        }
+      }
     }
   }
   function mergeOp(op: OperationUi) {
@@ -355,6 +416,23 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
     void checkTrustLine();
   });
 
+  // --- wallet prompts (deep link / QR) ---
+  /** The Payment handed to the wallet for the repayment currently being signed. */
+  let inflightRepay: { operationId: bigint; paymentJson: string; account: string } | null = null;
+  const offPrompt = deps.wallet.onPrompt?.((p) => {
+    const flow: 'trustset' | 'repay' | 'other' = WALLET_OPEN.includes(state.repay.phase)
+      ? 'repay'
+      : WALLET_OPEN.includes(state.trustSet.phase) ? 'trustset' : 'other';
+    set({ prompt: { ...p, flow } });
+    // Persist the signed-payment bookkeeping the moment the request exists, so a
+    // reload while the user is approving in Xaman resumes this same request.
+    if (flow === 'repay' && inflightRepay) {
+      saveHint(inflightRepay.operationId, {
+        requestId: p.requestId, paymentJson: inflightRepay.paymentJson, account: inflightRepay.account,
+      });
+    }
+  });
+
   // --- reads ---
   async function loadConfig() {
     const r = await deps.api.getConfig();
@@ -398,13 +476,26 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
       await checkTrustLine();
       if (state.trustLine.status === 'present') return;
     }
+    if (disposed || run !== trustWatchRun) return;
+    // The line never appeared: do not leave the user on "Submitted. Waiting".
+    // Offer "Enable icUSD" again (a new TrustSet request is created on demand).
+    setTrustSet({
+      phase: 'idle',
+      error: 'The XRP Ledger has not shown the icUSD trust line yet. If your wallet approved it, press Re-check in a moment; otherwise enable icUSD again.',
+    });
   }
 
   // --- repay wallet handling ---
   async function handleSubmission(sub: WalletSubmission, opId: bigint) {
     if (sub.status === 'rejected') {
-      clearHint(opId);
-      setRepay({ phase: 'rejected', requestId: sub.requestId, hash: null, error: 'The wallet request was rejected or expired. Nothing was sent and your debt is unchanged.' });
+      // Keep the prepared intent (the operation is still IntentPrepared); drop only the request.
+      saveHint(opId, { requestId: undefined, hash: undefined, paymentJson: undefined, account: undefined });
+      setRepay({
+        phase: 'rejected', requestId: sub.requestId, hash: null,
+        error: sub.warning
+          ? `${sub.warning} Your debt is unchanged.`
+          : 'The wallet request was rejected or expired. Nothing was sent and your debt is unchanged.',
+      });
       return;
     }
     saveHint(opId, { requestId: sub.requestId, hash: sub.hash ?? undefined });
@@ -414,6 +505,31 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
     }
     setRepay({ phase: 'submitted', requestId: sub.requestId, hash: sub.hash, error: null });
     await controller.observeRepayment({ auto: true });
+  }
+
+  /**
+   * Before building or resuming a repayment payment: the backend operation must
+   * still be waiting for it, and the quote must not be older than 7 days.
+   * Non-Oisy re-reads the operation by query; Oisy (no passive authenticated
+   * read) uses the cached view. Returns a refusal message, or null if fine.
+   */
+  async function repayStaleness(opId: bigint, quoteTimeNs: bigint | null, alreadySigned: boolean): Promise<string | null> {
+    const oisy = deps.isOisy();
+    if (!oisy) {
+      await refreshOps();
+      if (state.operationsError) return `Could not confirm that this repayment is still open (${state.operationsError}). Nothing was sent. Try again.`;
+    }
+    const cur = state.operations.find((o) => o.id === opId);
+    if (!cur && !oisy) return 'Rumi no longer lists this repayment. Prepare it again; do not pay this one.';
+    if (cur && cur.phase !== 'IntentPrepared') {
+      return `This repayment is no longer waiting for a payment (${cur.label}). Do not pay it again.`;
+    }
+    if (!alreadySigned && quoteTimeNs !== null && BigInt(nowMs()) * 1_000_000n > quoteTimeNs + INTENT_TTL_NS) {
+      const key = readHints()[String(opId)]?.intentKey;
+      if (key) nonces.forget(key);
+      return 'This repayment quote has expired (older than 7 days). Prepare a new one.';
+    }
+    return null;
   }
 
   async function startRepayIntent(
@@ -439,7 +555,9 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
       setRepay({ phase: 'error', error: failedMessage(r) });
       return;
     }
-    nonces.forget(intentKey);
+    // Keep the nonce until the operation leaves IntentPrepared: a reload and a
+    // repeated click then get the SAME operation back instead of a second one.
+    saveHint(r.data.operationId, { intentKey, intent: dehydrateIntent(r.data) });
     setRepay({ phase: 'prepared', intent: r.data, operationId: r.data.operationId, error: null });
     void refreshOpsIfAllowed();
   }
@@ -472,17 +590,30 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
         void fetchOwnerReserve(deps.endpoints(state.config!.network!), fetchImpl).then((reserve) => { if (!disposed) set({ reserve }); });
       }
       await checkTrustLine();
-      // Recover a wallet request that was handed over before a reload.
+      // Recover a repayment that was prepared / handed to the wallet before a reload.
       const hints = readHints();
       for (const o of state.operations) {
         const h = hints[String(o.id)];
-        if (o.kind === 'Repayment' && o.state === 'repay_payment_pending' && h?.requestId && state.repay.phase === 'idle') {
-          setRepay({ operationId: o.id, requestId: h.requestId, phase: 'wallet_pending' });
+        if (o.kind !== 'Repayment' || o.state !== 'repay_payment_pending' || !h || state.repay.phase !== 'idle') continue;
+        const intent = hydrateIntent(h);
+        const snapshot = h.account ? { account: h.account, network: state.config?.network ?? '' }
+          : intent ? { account: intent.payer, network: intent.network } : null;
+        if (h.requestId) {
+          // A signed (or open) payment exists: resume that request, never prompt a second payment.
+          const stale = await repayStaleness(o.id, intent?.quoteTimeNs ?? null, !!h.hash);
+          if (stale) { setRepay({ operationId: o.id, intent, snapshot, phase: 'error', error: stale }); break; }
+          setRepay({ operationId: o.id, intent, snapshot, requestId: h.requestId, hash: h.hash ?? null, phase: 'wallet_pending' });
           try {
-            await handleSubmission(await deps.wallet.resumeRequest(h.requestId), o.id);
+            const sub = await (h.account ? deps.wallet.resumeRequest(h.requestId, h.account) : deps.wallet.resumeRequest(h.requestId));
+            await handleSubmission(sub, o.id);
           } catch {
             setRepay({ phase: 'wallet_pending' });
           }
+          break;
+        }
+        if (intent) {
+          // Prepared but not yet paid: restore the card instead of making a second operation.
+          setRepay({ operationId: o.id, intent, snapshot, phase: 'prepared', error: null });
           break;
         }
       }
@@ -541,7 +672,12 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
           key: `xrpl-icusd-trustset:${u.conn.address}:${u.conn.network}:${u.cfg.issuerAddress}:${u.cfg.currencyHex.toUpperCase()}`,
         });
         if (sub.status === 'rejected') {
-          setTrustSet({ phase: 'rejected', requestId: sub.requestId, error: 'The wallet request was rejected or expired. No trust line was created.' });
+          setTrustSet({
+            phase: 'rejected', requestId: sub.requestId,
+            error: sub.warning
+              ? `${sub.warning} No trust line was created.`
+              : 'The wallet request was rejected or expired. No trust line was created.',
+          });
           return;
         }
         setTrustSet({
@@ -591,8 +727,14 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
       try {
         // A request already handed to the wallet is resumed, never re-created.
         if (hint?.requestId && r.operationId !== null) {
+          const stale = await repayStaleness(r.operationId, r.intent?.quoteTimeNs ?? hydrateIntent(hint)?.quoteTimeNs ?? null, !!hint.hash);
+          if (stale) { setRepay({ phase: 'error', error: stale }); return; }
           setRepay({ phase: 'awaiting_wallet', error: null });
-          await handleSubmission(await deps.wallet.resumeRequest(hint.requestId), r.operationId);
+          inflightRepay = hint.paymentJson && r.snapshot
+            ? { operationId: r.operationId, paymentJson: hint.paymentJson, account: hint.account ?? r.snapshot.account }
+            : null;
+          const sub = await (hint.account ? deps.wallet.resumeRequest(hint.requestId, hint.account) : deps.wallet.resumeRequest(hint.requestId));
+          await handleSubmission(sub, r.operationId);
           return;
         }
         if (!r.intent || r.operationId === null) {
@@ -612,11 +754,17 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
           }
           return;
         }
+        // Operation still open and quote still fresh? (refuse before the wallet is asked)
+        const stale = await repayStaleness(r.operationId, r.intent.quoteTimeNs, false);
+        if (stale) { setRepay({ phase: 'error', error: stale }); return; }
+        inflightRepay = { operationId: r.operationId, paymentJson: JSON.stringify(tx), account: u.conn.address };
         setRepay({ phase: 'awaiting_wallet', error: null });
         const sub = await deps.wallet.signAndSubmit(tx, { key: `xrpl-icusd-repay:${r.operationId}` });
         await handleSubmission(sub, r.operationId);
       } catch (e) {
         setRepay({ phase: 'error', error: e instanceof Error ? e.message : 'The wallet request failed.' });
+      } finally {
+        inflightRepay = null;
       }
     },
 
@@ -637,7 +785,9 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
       }
       mergeOp(res.data);
       // The backend decides what the payment did; show its state, not ours.
-      if (!deps.isOisy() || !opts?.auto) await refreshOps();
+      // Oisy: the observe click was the one authenticated call; the returned
+      // view is already merged, so no second signer request (a refresh needs its own click).
+      if (!deps.isOisy()) await refreshOps();
       setRepay({ phase: 'observed', error: null });
     },
 
@@ -717,6 +867,7 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
       disposed = true;
       trustWatchRun++;
       offWallet();
+      offPrompt?.();
       listeners.clear();
     },
   };

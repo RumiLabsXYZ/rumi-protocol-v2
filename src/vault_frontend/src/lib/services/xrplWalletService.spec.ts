@@ -165,7 +165,7 @@ describe('Xaman adapter (PKCE, public key only)', () => {
     const p = adapter.signAndSubmit(tx, { key: 'vault-7' });
     await vi.waitFor(() => expect(h.sdk.payload.create).toHaveBeenCalledTimes(1));
     const body = h.sdk.payload.create.mock.calls[0][0];
-    expect(body.txjson).toEqual(tx);
+    expect(body.txjson).toEqual({ ...tx, Account: 'rUser' });
     expect(body.options.force_network).toBe('TESTNET');
     expect(prompts[0]).toMatchObject({ requestId: 'uuid-1', deepLink: 'https://xumm.app/sign/uuid-1' });
     respond(h.payloads, 'uuid-1', { resolved: true, signed: true }, { txid: 'ABC123' });
@@ -219,5 +219,110 @@ describe('Xaman adapter (PKCE, public key only)', () => {
     expect(seen.at(-1)).toBeNull();
     off();
     expect(adapter.getConnection()).toBeNull();
+  });
+});
+
+describe('signing account is pinned', () => {
+  const pay = { TransactionType: 'Payment' as const, Destination: 'rCustody', Amount: '1000000' };
+
+  it('sends Account = the connected address in every txjson (Payment, TrustSet)', async () => {
+    const h = makeSdk();
+    const { adapter } = makeAdapter(h);
+    await adapter.connect();
+    await adapter.signAndSubmit(pay, { key: 'a' });
+    await adapter.signAndSubmit({ TransactionType: 'TrustSet', LimitAmount: { currency: 'C', issuer: 'rI', value: '1' } }, { key: 'b' });
+    expect(h.sdk.payload.create.mock.calls[0][0].txjson.Account).toBe('rUser');
+    expect(h.sdk.payload.create.mock.calls[1][0].txjson.Account).toBe('rUser');
+  });
+
+  it('refuses a transaction whose Account differs from the connected wallet', async () => {
+    const h = makeSdk();
+    const { adapter } = makeAdapter(h);
+    await adapter.connect();
+    await expect(adapter.signAndSubmit({ ...pay, Account: 'rOther' }, { key: 'a' })).rejects.toThrow(/does not match/i);
+    expect(h.sdk.payload.create).not.toHaveBeenCalled();
+  });
+
+  it('treats a payload signed by another account as rejected, never submitted', async () => {
+    const h = makeSdk();
+    const { adapter } = makeAdapter(h);
+    await adapter.connect();
+    const first = await adapter.signAndSubmit(pay, { key: 'a' });
+    expect(first.status).toBe('pending');
+    respond(h.payloads, 'uuid-1', { resolved: true, signed: true }, { txid: 'EVIL', account: 'rAttacker' });
+    const res = await adapter.resumeRequest('uuid-1');
+    expect(res).toMatchObject({ status: 'rejected', signed: false, hash: null });
+    expect(res.warning).toMatch(/rAttacker/);
+    expect(payloadToSubmission('r', { meta: { signed: true }, response: { txid: 'T', account: 'rA' } }, 'rB').status).toBe('rejected');
+    expect(payloadToSubmission('r', { meta: { signed: true }, response: { txid: 'T' } }, 'rB').status).toBe('rejected');
+  });
+});
+
+describe('engine result and TrustSet idempotency', () => {
+  const trust = { TransactionType: 'TrustSet' as const, LimitAmount: { currency: 'C', issuer: 'rI', value: '1' } };
+
+  it('a non-tesSUCCESS dispatched_result is rejected with a warning', () => {
+    const p = { meta: { signed: true, resolved: true }, response: { txid: 'H', account: 'rUser', dispatched_result: 'tecNO_LINE' } };
+    expect(payloadToSubmission('r', p, 'rUser')).toMatchObject({ status: 'rejected', hash: null, engineResult: 'tecNO_LINE' });
+    expect(payloadToSubmission('r', p, 'rUser').warning).toMatch(/tecNO_LINE/);
+    const ok = { meta: { signed: true, resolved: true }, response: { txid: 'H', account: 'rUser', dispatched_result: 'tesSUCCESS' } };
+    expect(payloadToSubmission('r', ok, 'rUser')).toMatchObject({ status: 'submitted', hash: 'H', engineResult: 'tesSUCCESS' });
+  });
+
+  it('a failed engine result frees the key so a retry makes a fresh request', async () => {
+    const h = makeSdk();
+    const { adapter } = makeAdapter(h, { maxWaitMs: 1_000_000, sleep: () => new Promise((r) => setTimeout(r, 1)) });
+    await adapter.connect();
+    const p = adapter.signAndSubmit(trust, { key: 'ts' });
+    await vi.waitFor(() => expect(h.sdk.payload.create).toHaveBeenCalledTimes(1));
+    respond(h.payloads, 'uuid-1', { resolved: true, signed: true }, { txid: 'H', dispatched_result: 'tecNO_LINE_INSUF_RESERVE' });
+    await expect(p).resolves.toMatchObject({ status: 'rejected' });
+    const again = adapter.signAndSubmit(trust, { key: 'ts' });
+    await vi.waitFor(() => expect(h.sdk.payload.create).toHaveBeenCalledTimes(2));
+    respond(h.payloads, 'uuid-2', { resolved: true, signed: true }, { txid: 'H2', dispatched_result: 'tesSUCCESS' });
+    await expect(again).resolves.toMatchObject({ status: 'submitted', hash: 'H2' });
+  });
+
+  it('a TrustSet key is released once a hash is returned (no old payload replay)', async () => {
+    const h = makeSdk();
+    const { adapter } = makeAdapter(h, { maxWaitMs: 1_000_000, sleep: () => new Promise((r) => setTimeout(r, 1)) });
+    await adapter.connect();
+    const p = adapter.signAndSubmit(trust, { key: 'ts' });
+    await vi.waitFor(() => expect(h.sdk.payload.create).toHaveBeenCalledTimes(1));
+    respond(h.payloads, 'uuid-1', { resolved: true, signed: true }, { txid: 'H', dispatched_result: 'tesSUCCESS' });
+    await expect(p).resolves.toMatchObject({ status: 'submitted', hash: 'H' });
+    // Enable icUSD again later (line was removed): a NEW request, not the old signed one.
+    const again = adapter.signAndSubmit(trust, { key: 'ts' });
+    await vi.waitFor(() => expect(h.sdk.payload.create).toHaveBeenCalledTimes(2));
+    again.catch(() => {});
+  });
+
+  it('a Payment key still resumes the same request after a hash (never pays twice)', async () => {
+    const h = makeSdk();
+    const { adapter } = makeAdapter(h);
+    await adapter.connect();
+    const pay = { TransactionType: 'Payment' as const, Destination: 'r', Amount: '1' };
+    await adapter.signAndSubmit(pay, { key: 'k' });
+    respond(h.payloads, 'uuid-1', { resolved: true, signed: true }, { txid: 'H', dispatched_result: 'tesSUCCESS' });
+    const second = await adapter.signAndSubmit(pay, { key: 'k' });
+    expect(second).toMatchObject({ requestId: 'uuid-1', hash: 'H' });
+    expect(h.sdk.payload.create).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('prompt re-emitted on resume', () => {
+  it('an unsigned request re-emits its deep link and QR when resumed', async () => {
+    const h = makeSdk();
+    const { adapter } = makeAdapter(h);
+    await adapter.connect();
+    await adapter.signAndSubmit({ TransactionType: 'Payment', Destination: 'r', Amount: '1' }, { key: 'k' });
+    h.payloads.get('uuid-1').response = {
+      meta: { exists: true, signed: false, resolved: false, cancelled: false, expired: false },
+      response: { txid: null }, next: { always: 'https://xumm.app/sign/uuid-1' }, refs: { qr_png: 'https://xumm.app/sign/uuid-1_q.png' },
+    };
+    const prompts: any[] = [];
+    adapter.onPrompt((p) => prompts.push(p));
+    await adapter.resumeRequest('uuid-1');
+    expect(prompts[0]).toEqual({ requestId: 'uuid-1', deepLink: 'https://xumm.app/sign/uuid-1', qrPng: 'https://xumm.app/sign/uuid-1_q.png' });
   });
 });

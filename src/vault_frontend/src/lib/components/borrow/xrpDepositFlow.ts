@@ -128,11 +128,19 @@ export interface XrpDepositState {
   txHash: string | null;
   requestId: string | null;
   error: string | null;
+  /** True when the backend pending-deposit check failed: nothing was opened; retry via prepare(). */
+  pendingReadFailed: boolean;
 }
+
+/** Tri-state: a failed read is never treated as "no pending deposits". */
+export type PendingDepositsResult =
+  | { ok: true; deposits: Array<{ vaultId: number; custodyAddress: string; reserveBaseDrops: bigint; openedAtMs?: number }> }
+  | { ok: false; error: string };
 
 export interface XrpDepositVaultApi {
   open(): Promise<XrpOpResult<XrpVaultOpenView>>;
-  pendingDeposits(): Promise<Array<{ vaultId: number }>>;
+  /** Backend pending deposits, unfiltered by user-hidden ids. */
+  readPendingDeposits(): Promise<PendingDepositsResult>;
   confirm(vaultId: number): Promise<XrpOpResult<{ creditedDrops: bigint }>>;
   ownsVault(vaultId: number): Promise<boolean>;
 }
@@ -160,6 +168,8 @@ interface DepositHint {
   requestId?: string;
   hash?: string;
   confirmed?: boolean;
+  /** Set the moment a wallet request is about to be created: the amount is then committed. */
+  payStarted?: boolean;
 }
 
 const HINT_PREFIX = 'rumi_xrpl_deposit_hint_v1:';
@@ -191,7 +201,7 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
   let state: XrpDepositState = {
     phase: 'idle', vault: null, proposal: null, sentDrops: null, reservedDrops: null,
     expectedCreditedDrops: null, creditedDrops: null, alreadyConfirmed: false, oisyResilient: false,
-    txHash: null, requestId: null, error: null,
+    txHash: null, requestId: null, error: null, pendingReadFailed: false,
   };
   const listeners = new Set<(s: XrpDepositState) => void>();
   let disposed = false;
@@ -199,6 +209,8 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
   let confirmInFlight = false;
   let pollRun = 0;
   let desiredSend: bigint | null = null;
+  /** Amount already committed to a wallet request for this vault (survives reload via the hint). */
+  let committedSend: bigint | null = null;
 
   function set(patch: Partial<XrpDepositState>) {
     state = { ...state, ...patch };
@@ -249,13 +261,49 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
     });
   }
 
+  function parseDrops(text: string | undefined, fallback: bigint): bigint {
+    try { return text ? BigInt(text) : fallback; } catch { return fallback; }
+  }
+
+  /**
+   * Adopt a pending deposit from the BACKEND list. The custody address and
+   * reserve always come from the backend, never from the local hint; the hint
+   * only contributes the wallet-request bookkeeping for the same vault.
+   */
+  function adoptPending(
+    p: { vaultId: number; custodyAddress: string; reserveBaseDrops: bigint },
+    hint: DepositHint | null,
+    sendDrops: bigint
+  ) {
+    const vault: XrpVaultOpenView = { vaultId: p.vaultId, custodyAddress: p.custodyAddress, reserveBaseDrops: p.reserveBaseDrops };
+    const same = !!hint && hint.vaultId === p.vaultId;
+    const requested = same && !!(hint!.requestId || hint!.hash);
+    const committed = same && (requested || !!hint!.payStarted);
+    const send = committed ? parseDrops(hint!.sendDrops, sendDrops) : sendDrops;
+    committedSend = committed ? send : null;
+    writeHint({
+      vaultId: vault.vaultId,
+      custodyAddress: vault.custodyAddress,
+      reserveBaseDrops: vault.reserveBaseDrops.toString(),
+      sendDrops: send.toString(),
+      requestId: same ? hint!.requestId : undefined,
+      hash: same ? hint!.hash : undefined,
+      payStarted: committed ? true : undefined,
+      confirmed: false,
+    });
+    applyVault(vault, send, { requestId: requested ? hint!.requestId ?? null : null, txHash: requested ? hint!.hash ?? null : null });
+    if (state.phase === 'awaiting_payment' && requested) {
+      set({ phase: 'wallet_pending', sentDrops: send });
+    }
+  }
+
   async function doPrepare(sendDrops: bigint) {
     desiredSend = sendDrops;
     if (state.vault) {
       // Already prepared: idempotent (never a second open).
       return;
     }
-    set({ phase: 'opening', error: null });
+    set({ phase: 'opening', error: null, pendingReadFailed: false });
     const hint = readHint();
 
     if (hint?.confirmed) {
@@ -265,24 +313,44 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
       return;
     }
 
+    // ALWAYS consult the backend before opening: a hint can be missing or stale
+    // and a failed read must never be mistaken for "nothing pending".
+    let read: PendingDepositsResult;
+    try {
+      read = await deps.vault.readPendingDeposits();
+    } catch (e) {
+      read = { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    if (!read.ok) {
+      set({
+        phase: 'error',
+        pendingReadFailed: true,
+        error: `Could not check for an existing XRP deposit address (${read.error}). Nothing was opened. Try again.`,
+      });
+      return;
+    }
+
+    const pending = read.deposits;
+    const hinted = hint ? pending.find((p) => p.vaultId === hint.vaultId) : undefined;
+    if (hinted) {
+      adoptPending(hinted, hint, sendDrops);
+      return;
+    }
+
     if (hint) {
-      let stillPending = true;
-      try {
-        stillPending = (await deps.vault.pendingDeposits()).some((p) => p.vaultId === hint.vaultId);
-      } catch { /* unknown: keep the hint, the backend confirm is authoritative */ }
-      if (stillPending) {
-        const vault = hintVault(hint);
-        // Once a request exists the amount is already committed to the wallet.
-        const send = hint.requestId || hint.hash ? BigInt(hint.sendDrops) : sendDrops;
-        applyVault(vault, send, { requestId: hint.requestId ?? null, txHash: hint.hash ?? null });
-        if (state.phase === 'awaiting_payment' && (hint.requestId || hint.hash)) {
-          set({ phase: 'wallet_pending', sentDrops: send });
-        }
-        return;
-      }
       // Not pending any more: either confirmed elsewhere or gone.
       let owned = false;
-      try { owned = await deps.vault.ownsVault(hint.vaultId); } catch { /* fall through */ }
+      try {
+        owned = await deps.vault.ownsVault(hint.vaultId);
+      } catch (e) {
+        // Cannot tell: keep the hint and do not open another vault.
+        set({
+          phase: 'error',
+          pendingReadFailed: true,
+          error: `Could not check whether your earlier XRP vault was already created (${e instanceof Error ? e.message : String(e)}). Nothing was opened. Try again.`,
+        });
+        return;
+      }
       if (owned) {
         const vault = hintVault(hint);
         writeHint({ confirmed: true });
@@ -293,17 +361,26 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
       writeHint(null);
     }
 
+    if (pending.length > 0) {
+      // An existing pending deposit (even one the user hid or lost the hint for)
+      // is reused instead of opening a second vault.
+      const newest = [...pending].sort((a, b) => (b.openedAtMs ?? 0) - (a.openedAtMs ?? 0) || b.vaultId - a.vaultId)[0];
+      adoptPending(newest, null, sendDrops);
+      return;
+    }
+
     const opened = await deps.vault.open();
     if (!opened.success || !opened.data) {
       set({ phase: 'error', error: opened.error ?? 'Could not reserve an XRP custody address.' });
       return;
     }
+    committedSend = null;
     writeHint({
       vaultId: opened.data.vaultId,
       custodyAddress: opened.data.custodyAddress,
       reserveBaseDrops: opened.data.reserveBaseDrops.toString(),
       sendDrops: sendDrops.toString(),
-      requestId: undefined, hash: undefined, confirmed: false,
+      requestId: undefined, hash: undefined, payStarted: undefined, confirmed: false,
     });
     applyVault(opened.data, sendDrops);
   }
@@ -315,8 +392,9 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
   function handleSubmission(sub: WalletSubmission, sendDrops: bigint) {
     set({ requestId: sub.requestId, txHash: sub.hash });
     if (sub.status === 'rejected') {
-      writeHint({ requestId: undefined, hash: undefined });
-      set({ phase: 'rejected', proposal: null, error: 'The wallet request was rejected or expired. Nothing was sent and no collateral was credited.' });
+      writeHint({ requestId: undefined, hash: undefined, payStarted: undefined });
+      committedSend = null;
+      set({ phase: 'rejected', proposal: null, error: sub.warning ?? 'The wallet request was rejected or expired. Nothing was sent and no collateral was credited.' });
       return Promise.resolve();
     }
     writeHint({ requestId: sub.requestId, hash: sub.hash ?? undefined, sendDrops: sendDrops.toString() });
@@ -407,7 +485,8 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
     },
     propose() {
       if (!state.vault || !['awaiting_payment', 'invalidated', 'rejected'].includes(state.phase)) return;
-      const sendDrops = desiredSend ?? 0n;
+      // An amount already committed to a wallet request wins over a re-typed one.
+      const sendDrops = committedSend ?? desiredSend ?? 0n;
       const b = xrpDepositBreakdown(sendDrops, state.vault.reserveBaseDrops);
       if (!(b.viable && b.expectedCreditedDrops >= minCollateral)) {
         set({ phase: 'error', error: 'The amount must exceed the XRPL account reserve plus the minimum collateral deposit.' });
@@ -443,16 +522,27 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
       }
       const tx: XrplPaymentTx = {
         TransactionType: 'Payment',
+        Account: proposal.account,
         Destination: proposal.destination,
         Amount: proposal.sendDrops.toString(),
       };
       set({ phase: 'signing', error: null });
+      // Commit the amount BEFORE the wallet request exists, so a reload while the
+      // request is open resumes that same amount instead of a re-typed one.
+      committedSend = proposal.sendDrops;
+      writeHint({ sendDrops: proposal.sendDrops.toString(), payStarted: true });
+      const offPrompt = deps.wallet.onPrompt?.((p) => {
+        writeHint({ requestId: p.requestId });
+        set({ requestId: p.requestId });
+      });
       let sub: WalletSubmission;
       try {
         sub = await deps.wallet.signAndSubmit(tx, { key: `xrp-deposit-vault-${proposal.vaultId}` });
       } catch (e) {
         set({ phase: 'awaiting_payment', error: e instanceof Error ? e.message : String(e) });
         return;
+      } finally {
+        offPrompt?.();
       }
       await handleSubmission(sub, proposal.sendDrops);
     },
@@ -511,8 +601,8 @@ export function createDefaultXrpDepositController(ownerKey: string, minCollatera
     wallet: getXrplWalletAdapter(),
     vault: {
       open: () => XrpVaultService.openXrpVault(),
-      // Passive Oisy reads stay cache-only inside the service.
-      pendingDeposits: () => XrpVaultService.getMyPendingDeposits(),
+      // Strict read (failure observable, hidden ids included). Oisy stays cache-only (no popup).
+      readPendingDeposits: () => XrpVaultService.readMyPendingDeposits(),
       confirm: (id) => XrpVaultService.confirmXrpDeposit(id),
       ownsVault: (id) => XrpVaultService.ownsVault(id),
     },

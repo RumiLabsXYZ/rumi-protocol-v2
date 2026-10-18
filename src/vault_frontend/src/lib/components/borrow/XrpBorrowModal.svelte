@@ -161,6 +161,23 @@
     }
   }
 
+  /** The pending-deposit check failed (nothing was opened): ask the backend again. */
+  async function retryPrepare() {
+    if (!controller) return;
+    const sendDrops = copy.sendDrops;
+    if (sendDrops === null || sendDrops <= 0n) return;
+    phase = 'opening';
+    errorMessage = '';
+    try {
+      await controller.prepare(sendDrops);
+      const v = controller.getState().vault;
+      if (v) await generateQr(buildXrpPaymentUri(v.custodyAddress, controller.getState().sentDrops ?? sendDrops));
+    } catch (err) {
+      phase = 'error';
+      errorMessage = err instanceof Error ? err.message : 'Could not reserve an XRP custody address.';
+    }
+  }
+
   async function depositFromWallet() {
     if (!controller) return;
     controller.propose();
@@ -259,7 +276,7 @@
         <p class="eyebrow">Native {copy.assetName} collateral</p>
         <h2 id="xrp-borrow-title">{modalTitle}</h2>
       </div>
-      <div class="status-pill" class:status-busy={isBusy}>
+      <div class="status-pill" class:status-busy={isBusy} role="status" aria-live="polite">
         {modalStatusLabel}
       </div>
     </div>
@@ -317,11 +334,13 @@
           <div><dt>Credited by Rumi</dt><dd>{dep.creditedDrops !== null ? `${formatDropsAsXrp(dep.creditedDrops)} XRP` : dep.phase === 'confirmed' ? 'Confirmed' : 'Not yet confirmed'}</dd></div>
         </dl>
 
-        {#if dep.phase === 'signing' && signingPrompt}
+        <div role="status" aria-live="polite">
+        {#if (dep.phase === 'signing' || dep.phase === 'wallet_pending') && signingPrompt}
           <p class="detail-line">Approve in Xaman.
             <a href={signingPrompt.deepLink} target="_blank" rel="noopener noreferrer">Open Xaman</a>
           </p>
           {#if promptQr}<img class="qr-code" src={promptQr} alt="Xaman signing QR code" />{/if}
+          <p class="detail-line">Waiting for the wallet to submit the payment. Do not pay again; resume the same request.</p>
         {:else if dep.phase === 'wallet_pending'}
           <p class="detail-line">Waiting for the wallet to submit the payment. Do not pay again; resume the same request.</p>
         {:else if dep.phase === 'polling'}
@@ -337,6 +356,7 @@
         {:else if walletDepositDone}
           <p class="detail-line">{dep.alreadyConfirmed ? 'This vault already has its deposit confirmed. No further payment is needed.' : 'Rumi confirmed the deposit.'}</p>
         {/if}
+        </div>
 
         <div class="wallet-actions">
           {#if canWalletDeposit}
@@ -364,13 +384,17 @@
     {/if}
 
     {#if errorMessage}
-      <div class="modal-error">{errorMessage}</div>
+      <div class="modal-error" role="alert" aria-live="assertive">{errorMessage}</div>
     {/if}
 
     <div class="modal-actions">
       <button class="secondary-action" type="button" disabled={isBusy} on:click={close}>
         {awaitingBorrowApproval ? 'Finish later' : 'Cancel'}
       </button>
+
+      {#if dep?.pendingReadFailed && !opened}
+        <button class="primary-action" type="button" on:click={retryPrepare}>Try again</button>
+      {/if}
 
       {#if modalPrimaryActionLabel}
         <button

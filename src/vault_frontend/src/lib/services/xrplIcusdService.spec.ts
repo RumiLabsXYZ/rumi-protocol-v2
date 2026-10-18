@@ -135,6 +135,7 @@ describe('trustline_exact_identity_and_limit', () => {
     const tx = buildTrustSetTx(config(), { address: USER, network: 'testnet' });
     expect(tx).toEqual({
       TransactionType: 'TrustSet',
+      Account: USER,
       LimitAmount: { currency: CURRENCY, issuer: ISSUER, value: '1000000' },
     });
   });
@@ -189,6 +190,7 @@ describe('repay_uses_exact_token_and_intent_tag', () => {
     const tx = buildRepaymentPayment(intent(), config(), { address: USER, network: 'testnet' });
     expect(tx).toEqual({
       TransactionType: 'Payment',
+      Account: USER,
       Destination: ISSUER,
       DestinationTag: 424242,
       Amount: { currency: CURRENCY, issuer: ISSUER, value: '40' },
@@ -345,6 +347,25 @@ describe('api config availability', () => {
     const e = await err.prepareRepayment({ vaultId: 7n, maxE8s: 1n, payer: USER, network: 'testnet', requestNonce: nonce, fullClose: false, topUpOperation: null });
     expect(e).toMatchObject({ ok: false, kind: 'backend' });
     if (!e.ok) expect(e.error).toMatch(/trust line/i);
+  });
+});
+
+describe('next_action driven copy', () => {
+  it('RefundPending with Wait says Rumi is arranging the refund and offers no action', () => {
+    const refund = mapOperation(view({ kind: { Refund: null }, phase: { RefundPending: null }, next_action: { Wait: null } }));
+    expect(refund.state).toBe('refund_pending');
+    expect(refund.detail).toMatch(/Rumi is arranging your refund/);
+    expect(refund.detail).not.toMatch(/choose/i);
+    expect(refund.claimActions).toEqual([]);
+    expect(refund.canResume).toBe(false);
+  });
+  it('RefundPending with ResolveClaim still asks the user to choose', () => {
+    const refund = mapOperation(view({ kind: { Refund: null }, phase: { RefundPending: null }, next_action: { ResolveClaim: null } }));
+    expect(refund.detail).toMatch(/choose/i);
+  });
+  it('a held payment with Wait does not ask for a choice', () => {
+    const held = mapOperation(view({ kind: { Repayment: null }, phase: { Held: null }, next_action: { Wait: null } }));
+    expect(held.detail).not.toMatch(/choose/i);
   });
 });
 

@@ -50,6 +50,7 @@ function intent(over: Partial<RepaymentIntent> = {}): RepaymentIntent {
 function makeWallet(initial: XrplConnection | null = { address: USER, network: 'testnet' }) {
   let conn = initial;
   const handlers = new Set<(c: XrplConnection | null) => void>();
+  const prompts = new Set<(p: any) => void>();
   return {
     id: 'xaman' as const,
     availability: () => ({ available: true }),
@@ -59,7 +60,8 @@ function makeWallet(initial: XrplConnection | null = { address: USER, network: '
     resumeRequest: vi.fn(async (id: string): Promise<WalletSubmission> => ({ requestId: id, status: 'submitted', signed: true, hash: 'HASH1' })),
     disconnect: vi.fn(),
     onChange: (h: (c: XrplConnection | null) => void) => { handlers.add(h); return () => handlers.delete(h); },
-    onPrompt: () => () => {},
+    onPrompt: (h: (p: any) => void) => { prompts.add(h); return () => prompts.delete(h); },
+    emitPrompt(p: any) { prompts.forEach((h) => h(p)); },
     setConn(c: XrplConnection | null) { conn = c; handlers.forEach((h) => h(c)); },
   };
 }
@@ -100,11 +102,16 @@ function setup(opts: { oisy?: boolean; api?: any; wallet?: ReturnType<typeof mak
   const ledgerFee = opts.ledgerFee ?? vi.fn(async () => 10_000n);
   const deps: XrplIcusdControllerDeps = {
     api, wallet, isOisy: () => !!opts.oisy, ownerKey: 'owner-1', storage, fetchImpl,
-    endpoints: () => ['https://rpc.test'], sleep: async () => {}, approve, ledgerFee,
+    endpoints: () => ['https://rpc.test'], sleep: async () => {}, approve, ledgerFee, now: () => 1,
   };
   const c = createXrplIcusdController(deps);
   return { c, api, wallet, storage, fetchImpl, approve, ledgerFee, deps };
 }
+
+/** Backend view of a repayment still waiting for its payment. */
+const preparedOp = () => op({ kind: { Repayment: null }, operation_id: 9n, phase: { IntentPrepared: null } });
+/** An API whose operation list shows repayment #9 waiting for payment (what the backend returns after prepare). */
+const repayApi = (over: Record<string, any> = {}) => makeApi({ listMyOperations: vi.fn(async () => ok([preparedOp()])), ...over });
 
 const updateMethods = ['issueFromCanonical', 'resume', 'resolveClaim', 'borrowToXrpl', 'prepareRepayment', 'observeRepayment'] as const;
 
@@ -146,7 +153,7 @@ describe('trust line (hint only, exact identity)', () => {
     await t.c.signTrustSet();
     expect(t.wallet.signAndSubmit).toHaveBeenCalledTimes(1);
     const sent = (t.wallet.signAndSubmit.mock.calls as any)[0][0];
-    expect(sent).toEqual({ TransactionType: 'TrustSet', LimitAmount: { currency: CURRENCY, issuer: ISSUER, value: '1000000' } });
+    expect(sent).toEqual({ TransactionType: 'TrustSet', Account: USER, LimitAmount: { currency: CURRENCY, issuer: ISSUER, value: '1000000' } });
     expect(t.c.getState().trustSet.phase).toBe('submitted');
     expect(t.c.getState().trustLine.status).not.toBe('present');
   });
@@ -197,12 +204,12 @@ describe('changed_wallet_cancels_stale_request', () => {
 
 describe('repayment flow', () => {
   it('signs exactly the verified intent payment with an idempotency key per intent', async () => {
-    const t = setup();
+    const t = setup({ api: repayApi() });
     await t.c.init();
     await t.c.prepareRepayment({ vaultId: 7n, maxE8s: 40_00000000n, fullClose: false });
     await t.c.payRepayment();
     const [tx, opts] = (t.wallet.signAndSubmit.mock.calls as any)[0];
-    expect(tx).toEqual({ TransactionType: 'Payment', Destination: ISSUER, DestinationTag: 777, Amount: { currency: CURRENCY, issuer: ISSUER, value: '40' } });
+    expect(tx).toEqual({ TransactionType: 'Payment', Account: USER, Destination: ISSUER, DestinationTag: 777, Amount: { currency: CURRENCY, issuer: ISSUER, value: '40' } });
     expect(opts).toEqual({ key: 'xrpl-icusd-repay:9' });
   });
 
@@ -222,7 +229,7 @@ describe('repayment flow', () => {
   it('wallet rejection creates no fake success and no observation', async () => {
     const wallet = makeWallet();
     wallet.signAndSubmit.mockResolvedValue({ requestId: 'r', status: 'rejected', signed: false, hash: null });
-    const t = setup({ wallet });
+    const t = setup({ wallet, api: repayApi() });
     await t.c.init();
     await t.c.prepareRepayment({ vaultId: 7n, maxE8s: 40_00000000n, fullClose: false });
     await t.c.payRepayment();
@@ -245,7 +252,7 @@ describe('repayment flow', () => {
   });
 
   it('non-Oisy sessions report the hash to the backend once, automatically', async () => {
-    const t = setup();
+    const t = setup({ api: repayApi() });
     await t.c.init();
     await t.c.prepareRepayment({ vaultId: 7n, maxE8s: 40_00000000n, fullClose: false });
     await t.c.payRepayment();
@@ -255,13 +262,17 @@ describe('repayment flow', () => {
 
   it('stale full-close quote never triggers a silent second payment', async () => {
     const held = op({ kind: { Repayment: null }, operation_id: 9n, phase: { Held: null }, next_action: { ResolveClaim: null }, observed_exact_amount: ['40'], held_exact_amount: ['40'] });
-    const api = makeApi({ listMyOperations: vi.fn(async () => ok([held])), observeRepayment: vi.fn(async () => ok(held)) });
+    let backendOp = preparedOp(); // the backend moves to Held only after the payment is observed
+    const api = makeApi({
+      listMyOperations: vi.fn(async () => ok([backendOp, op({ kind: { Repayment: null }, operation_id: 10n, phase: { IntentPrepared: null } })])),
+      observeRepayment: vi.fn(async () => { backendOp = held; return ok(held); }),
+    });
     const t = setup({ api });
     await t.c.init();
     await t.c.prepareRepayment({ vaultId: 7n, maxE8s: 40_00000000n, fullClose: true });
     await t.c.payRepayment();
     await t.c.refresh();
-    expect(t.c.getState().operations[0].state).toBe('held');
+    expect(t.c.getState().operations.find((o) => o.id === 9n)!.state).toBe('held');
     expect(t.wallet.signAndSubmit).toHaveBeenCalledTimes(1);
     expect(t.api.prepareRepayment).toHaveBeenCalledTimes(1);
     // a poll must not sign or prepare anything either
@@ -282,7 +293,7 @@ describe('repayment flow', () => {
   it('a second payRepayment for the same intent does not create another wallet request', async () => {
     const wallet = makeWallet();
     wallet.signAndSubmit.mockResolvedValue({ requestId: 'req-1', status: 'pending', signed: false, hash: null });
-    const t = setup({ wallet });
+    const t = setup({ wallet, api: repayApi() });
     await t.c.init();
     await t.c.prepareRepayment({ vaultId: 7n, maxE8s: 40_00000000n, fullClose: false });
     await t.c.payRepayment();
@@ -305,10 +316,17 @@ describe('repayment flow', () => {
     const n2 = (fails.prepareRepayment.mock.calls as any)[1][0].requestNonce;
     expect(n1.length).toBe(32);
     expect(n2).toEqual(n1);
-    // after success the nonce is forgotten: the same inputs later are a brand new intent
+    // The nonce is KEPT while the operation is still IntentPrepared (a reload + click returns the same operation)...
     await t.c.prepareRepayment({ vaultId: 7n, maxE8s: 40_00000000n, fullClose: false });
     expect(fails.prepareRepayment).toHaveBeenCalledTimes(3);
-    expect((fails.prepareRepayment.mock.calls as any)[2][0].requestNonce).not.toEqual(n1);
+    expect((fails.prepareRepayment.mock.calls as any)[2][0].requestNonce).toEqual(n1);
+    // ...and forgotten once the backend shows the operation has left IntentPrepared.
+    fails.listMyOperations.mockResolvedValue(ok([op({ kind: { Repayment: null }, operation_id: 9n, phase: { ReturnVerified: null } })]));
+    await t.c.refresh();
+    t.c.cancelRepayment();
+    fails.prepareRepayment.mockResolvedValueOnce(ok(intent({ operationId: 12n })));
+    await t.c.prepareRepayment({ vaultId: 7n, maxE8s: 40_00000000n, fullClose: false });
+    expect((fails.prepareRepayment.mock.calls as any)[3][0].requestNonce).not.toEqual(n1);
   });
 });
 
@@ -510,5 +528,191 @@ describe('Oisy: authenticated calls only from click handlers', () => {
     expect(t.api.observeRepayment).not.toHaveBeenCalled();
     await t.c.observeRepayment();
     expect(t.api.observeRepayment).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('recovery review fixes', () => {
+  const PAY = { vaultId: 7n, maxE8s: 40_00000000n, fullClose: false };
+  const PROMPT = { requestId: 'req-open', deepLink: 'https://xumm.app/sign/req-open', qrPng: 'https://xumm.app/sign/req-open_q.png' };
+
+  it('TrustSet: an engine failure from the wallet is shown as failed, never submitted', async () => {
+    const wallet = makeWallet();
+    wallet.signAndSubmit.mockResolvedValue({ requestId: 'r', status: 'rejected', signed: false, hash: null, warning: 'The XRP Ledger refused this transaction (tecNO_LINE_INSUF_RESERVE). Nothing was applied.' });
+    const t = setup({ wallet });
+    await t.c.init();
+    t.c.proposeTrustSet();
+    await t.c.signTrustSet();
+    expect(t.c.getState().trustSet.phase).toBe('rejected');
+    expect(t.c.getState().trustSet.error).toMatch(/tecNO_LINE_INSUF_RESERVE/);
+    // and the user can ask again (a fresh request), not stuck
+    await t.c.signTrustSet();
+    expect(wallet.signAndSubmit).toHaveBeenCalledTimes(2);
+  });
+
+  it('TrustSet: when the line never appears the user is offered Enable icUSD again', async () => {
+    const t = setup({ fetchImpl: rpcFetch({ account_lines: { status: 'success', validated: true, lines: [] } }) });
+    await t.c.init();
+    t.c.proposeTrustSet();
+    await t.c.signTrustSet();
+    expect(t.c.getState().trustSet.phase).toBe('submitted');
+    await vi.waitFor(() => expect(t.c.getState().trustSet.phase).toBe('idle'));
+    expect(t.c.getState().trustSet.error).toMatch(/enable icUSD again/i);
+    expect(t.c.getState().trustLine.status).toBe('missing');
+    t.c.proposeTrustSet();
+    expect(t.c.getState().trustSet.phase).toBe('proposed');
+  });
+
+  it('exposes the wallet prompt (deep link + QR) while a request is open and clears it afterwards', async () => {
+    const wallet = makeWallet();
+    let release: (s: WalletSubmission) => void = () => {};
+    wallet.signAndSubmit.mockImplementation(() => new Promise<WalletSubmission>((r) => { release = r; }));
+    const t = setup({ wallet });
+    await t.c.init();
+    t.c.proposeTrustSet();
+    const p = t.c.signTrustSet();
+    await Promise.resolve();
+    wallet.emitPrompt(PROMPT);
+    expect(t.c.getState().prompt).toMatchObject({ ...PROMPT, flow: 'trustset' });
+    release({ requestId: 'req-open', status: 'rejected', signed: false, hash: null });
+    await p;
+    expect(t.c.getState().prompt).toBeNull();
+  });
+
+  it('persists {operationId, requestId, paymentJson} the moment the request exists, then a reload resumes it without a second payment', async () => {
+    const storage = mem();
+    const wallet = makeWallet();
+    wallet.signAndSubmit.mockImplementation(async () => {
+      wallet.emitPrompt(PROMPT);
+      return new Promise<WalletSubmission>(() => {}); // the tab "reloads" while Xaman is open
+    });
+    const a = setup({ storage, wallet, api: repayApi() });
+    await a.c.init();
+    await a.c.prepareRepayment(PAY);
+    void a.c.payRepayment();
+    await vi.waitFor(() => expect(a.c.getState().prompt?.flow).toBe('repay'));
+    const hints = JSON.parse(storage.m.get('rumi_xrpl_icusd_repay_v1:owner-1')!);
+    expect(hints['9']).toMatchObject({ requestId: 'req-open', account: USER });
+    expect(JSON.parse(hints['9'].paymentJson)).toMatchObject({ TransactionType: 'Payment', Account: USER, Destination: ISSUER, DestinationTag: 777 });
+    expect(hints['9'].intent).toMatchObject({ operationId: '9', payer: USER, destinationTag: 777 });
+    a.c.dispose();
+
+    // Reload: new controller + wallet, same storage and backend.
+    const wallet2 = makeWallet();
+    wallet2.resumeRequest.mockResolvedValue({ requestId: 'req-open', status: 'submitted', signed: true, hash: 'HASH9' });
+    const b = setup({ storage, wallet: wallet2, api: repayApi() });
+    await b.c.init();
+    expect(wallet2.resumeRequest).toHaveBeenCalledWith('req-open', USER);
+    expect(wallet2.signAndSubmit).not.toHaveBeenCalled();
+    expect(b.api.prepareRepayment).not.toHaveBeenCalled();
+    expect(b.c.getState().repay).toMatchObject({ operationId: 9n, hash: 'HASH9' });
+    expect(b.c.getState().repay.intent?.destinationTag).toBe(777);
+    // non-Oisy reports the txid to the backend automatically
+    expect(b.api.observeRepayment).toHaveBeenCalledWith(9n, 'HASH9');
+  });
+
+  it('Oisy: a resumed signed payment waits for the observe click', async () => {
+    const storage = mem();
+    storage.setItem('rumi_xrpl_icusd_repay_v1:owner-1', JSON.stringify({ '9': { requestId: 'req-open', account: USER, intent: {
+      operationId: '9', issuer: ISSUER, currency: CURRENCY, payer: USER, destinationTag: 777, maxE8s: '4000000000', network: 'testnet', paymentJson: '{}', quoteTimeNs: '1',
+    } } }));
+    storage.setItem('rumi_xrpl_icusd_ops_v1:owner-1', JSON.stringify([preparedOp().raw].map((r) => JSON.parse(JSON.stringify(r, (_k, v) => (typeof v === 'bigint' ? { $b: v.toString() } : v))))));
+    const wallet = makeWallet();
+    wallet.resumeRequest.mockResolvedValue({ requestId: 'req-open', status: 'submitted', signed: true, hash: 'HASH9' });
+    const t = setup({ storage, wallet, oisy: true });
+    await t.c.init();
+    expect(wallet.resumeRequest).toHaveBeenCalledTimes(1);
+    expect(t.c.getState().repay.phase).toBe('submitted');
+    expect(t.api.observeRepayment).not.toHaveBeenCalled();
+    expect(t.api.listMyOperations).not.toHaveBeenCalled();
+    await t.c.observeRepayment();
+    expect(t.api.observeRepayment).toHaveBeenCalledWith(9n, 'HASH9');
+  });
+
+  it('a prepared-but-unpaid repayment is restored after reload and never prepared twice', async () => {
+    const storage = mem();
+    const a = setup({ storage, api: repayApi() });
+    await a.c.init();
+    await a.c.prepareRepayment(PAY);
+    const nonce1 = (a.api.prepareRepayment.mock.calls as any)[0][0].requestNonce;
+    a.c.dispose();
+    const b = setup({ storage, api: repayApi() });
+    await b.c.init();
+    expect(b.c.getState().repay).toMatchObject({ phase: 'prepared', operationId: 9n });
+    expect(b.api.prepareRepayment).not.toHaveBeenCalled();
+    // even a repeated Prepare click reuses the SAME nonce (backend returns the same operation)
+    b.c.cancelRepayment();
+    await b.c.prepareRepayment(PAY);
+    expect((b.api.prepareRepayment.mock.calls as any)[0][0].requestNonce).toEqual(nonce1);
+  });
+
+  it('refuses to pay when the backend operation is no longer IntentPrepared (non-Oisy re-reads first)', async () => {
+    let backendOp = preparedOp();
+    const api = repayApi({ listMyOperations: vi.fn(async () => ok([backendOp])) });
+    const t = setup({ api });
+    await t.c.init();
+    await t.c.prepareRepayment(PAY);
+    backendOp = op({ kind: { Repayment: null }, operation_id: 9n, phase: { ReturnVerified: null } });
+    await t.c.payRepayment();
+    expect(t.wallet.signAndSubmit).not.toHaveBeenCalled();
+    expect(t.c.getState().repay.phase).toBe('error');
+    expect(t.c.getState().repay.error).toMatch(/no longer waiting for a payment/i);
+  });
+
+  it('refuses a quote older than 7 days', async () => {
+    const day = 86_400_000;
+    let clock = 1_000;
+    const api = repayApi({ prepareRepayment: vi.fn(async () => ok(intent({ quoteTimeNs: 1_000n * 1_000_000n }))) });
+    const t = setup({ api });
+    const c = createXrplIcusdController({ ...t.deps, now: () => clock });
+    await c.init();
+    await c.prepareRepayment(PAY);
+    clock = 1_000 + 7 * day + 1;
+    await c.payRepayment();
+    expect(t.wallet.signAndSubmit).not.toHaveBeenCalled();
+    expect(c.getState().repay.error).toMatch(/expired/i);
+    clock = 1_000 + 6 * day;
+    await c.prepareRepayment(PAY);
+    await c.payRepayment();
+    expect(t.wallet.signAndSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it('Oisy uses the cached operation view for the staleness check (no signer read)', async () => {
+    const api = repayApi();
+    const t = setup({ oisy: true, api });
+    await t.c.init();
+    await t.c.refresh(); // click: loads the cached view with op 9 = ReturnVerified
+    api.listMyOperations.mockResolvedValue(ok([op({ kind: { Repayment: null }, operation_id: 9n, phase: { ReturnVerified: null } })]));
+    await t.c.refresh();
+    await t.c.prepareRepayment(PAY);
+    const reads = api.listMyOperations.mock.calls.length;
+    await t.c.payRepayment();
+    expect(api.listMyOperations.mock.calls.length).toBe(reads); // no extra authenticated read
+    expect(t.wallet.signAndSubmit).not.toHaveBeenCalled();
+    expect(t.c.getState().repay.error).toMatch(/no longer waiting/i);
+  });
+
+  it('Oisy observe click makes exactly one authenticated call (no refreshOps after it)', async () => {
+    const t = setup({ oisy: true });
+    await t.c.init();
+    await t.c.prepareRepayment(PAY);
+    await t.c.payRepayment();
+    const reads = t.api.listMyOperations.mock.calls.length;
+    await t.c.observeRepayment();
+    expect(t.api.observeRepayment).toHaveBeenCalledTimes(1);
+    expect(t.api.listMyOperations.mock.calls.length).toBe(reads);
+    expect(t.c.getState().operations.find((o) => o.id === 9n)).toBeTruthy(); // merged from the observe reply
+    expect(t.c.getState().repay.phase).toBe('observed');
+  });
+
+  it('a payment signed by another account or refused by the ledger shows the wallet warning, never submitted', async () => {
+    const wallet = makeWallet();
+    wallet.signAndSubmit.mockResolvedValue({ requestId: 'r', status: 'rejected', signed: false, hash: null, warning: 'The request was signed by rAttacker, not the connected wallet. It was not used.' });
+    const t = setup({ wallet, api: repayApi() });
+    await t.c.init();
+    await t.c.prepareRepayment(PAY);
+    await t.c.payRepayment();
+    expect(t.c.getState().repay.phase).toBe('rejected');
+    expect(t.c.getState().repay.error).toMatch(/rAttacker/);
+    expect(t.api.observeRepayment).not.toHaveBeenCalled();
   });
 });
