@@ -2381,3 +2381,122 @@ fn manual_liquidation_with_xrpl_supply_outstanding_keeps_backing_and_a_late_retu
     assert_eq!(fx.x.holder_balance(HOLDER), want, "the payer got the unused part back on XRPL");
     assert_eq!(fx.escrow_bal(), 5_940_000_000 - applied, "XRPL supply == escrow: fully backed");
 }
+
+#[derive(CandidType)]
+struct StabilityPoolInitArgs {
+    protocol_canister_id: Principal,
+    authorized_admins: Vec<Principal>,
+}
+
+#[derive(CandidType)]
+struct SpStablecoinConfig {
+    ledger_id: Principal,
+    symbol: String,
+    decimals: u8,
+    priority: u8,
+    is_active: bool,
+    transfer_fee: Option<u64>,
+    is_lp_token: Option<bool>,
+    underlying_pool: Option<Principal>,
+}
+
+fn sp_admin() -> Principal {
+    Principal::from_slice(&[0x5a, 0xd0, 0x01])
+}
+fn depositor() -> Principal {
+    Principal::from_slice(&[0xde, 0x90, 0x01])
+}
+
+#[test]
+fn stability_pool_absorbs_an_xrp_vault_with_xrpl_supply_outstanding_and_backing_stays_intact() {
+    let (fx, vault) = lane_fx(200, 0.0);
+    // Real stability pool wired to the backend (the same wiring as the native-XRP suite).
+    let sp = fx.pic.create_canister();
+    fx.pic.add_cycles(sp, 2_000_000_000_000);
+    fx.pic.install_canister(
+        sp,
+        stability_pool_wasm(),
+        encode_one(StabilityPoolInitArgs { protocol_canister_id: fx.backend, authorized_admins: vec![sp_admin()] }).unwrap(),
+        None,
+    );
+    fx.plain_ok::<()>(dev(), "set_stability_pool_principal", Encode!(&sp).unwrap());
+    // Let the pool's init-time balance queries settle before it takes deposits.
+    fx.run(5, 15);
+    let sp_call = |who: Principal, method: &str, args: Vec<u8>| {
+        match fx.pic.update_call(sp, who, method, args).unwrap() {
+            WasmResult::Reply(b) => {
+                if Decode!(&b, Result<(), Reserved>).unwrap().is_err() {
+                    let args = candid::IDLArgs::from_bytes(&b).map(|a| a.to_string()).unwrap_or_default();
+                    panic!("{method} failed: {args}");
+                }
+            }
+            WasmResult::Reject(m) => panic!("{method} rejected: {m}"),
+        }
+    };
+    sp_call(
+        sp_admin(),
+        "register_stablecoin",
+        Encode!(&SpStablecoinConfig {
+            ledger_id: fx.icusd,
+            symbol: "icUSD".into(),
+            decimals: 8,
+            priority: 1,
+            is_active: true,
+            transfer_fee: Some(LEDGER_FEE),
+            is_lp_token: None,
+            underlying_pool: None,
+        })
+        .unwrap(),
+    );
+    let dep_amount = 100 * E8;
+    fx.mint_icusd(depositor(), dep_amount + 10 * E8);
+    fx.approve(depositor(), sp, dep_amount + E8);
+    // The legacy `deposit` is disabled in the pool; deposits are intent-keyed.
+    match fx
+        .pic
+        .update_call(sp, depositor(), "deposit_with_intent", Encode!(&1u64, &fx.icusd, &dep_amount).unwrap())
+        .unwrap()
+    {
+        WasmResult::Reply(b) => assert!(
+            Decode!(&b, Result<Reserved, Reserved>).unwrap().is_ok(),
+            "deposit_with_intent failed: {}",
+            candid::IDLArgs::from_bytes(&b).map(|a| a.to_string()).unwrap_or_default()
+        ),
+        WasmResult::Reject(m) => panic!("deposit_with_intent rejected: {m}"),
+    }
+    sp_call(
+        depositor(),
+        "opt_in_native_collateral_with_tag",
+        Encode!(&xrp_collateral_principal(), &"rUn84CUYbNjRoTQ6mSW7BVJPSVJNLb1QLo".to_string(), &Option::<u32>::None).unwrap(),
+    );
+
+    borrow_delivered(&fx, vault, 60 * E8, 1);
+    let escrow = fx.escrow_bal();
+    assert_eq!(escrow, 5_940_000_000);
+    let holder_xrpl = fx.x.holder_balance(HOLDER);
+    fx.set_xrp_price(392 * E8 / 1000); // CR ~130% < 133%
+    fx.plain_ok::<()>(dev(), "set_check_vaults_full_sweep_every_n_ticks", Encode!(&1u64).unwrap());
+    let claims_before: Vec<u64> = fx.xrp_claims_full().into_iter().map(|(i, _)| i).collect();
+    assert!(fx.debt(vault) > 0);
+
+    // The automated cascade (5-minute check_vaults) absorbs the vault; no manual call.
+    for _ in 0..6 {
+        fx.run_pumped(300);
+        if fx.vault(user(), vault).map(|v| v.borrowed_icusd_amount).unwrap_or(0) == 0 {
+            break;
+        }
+    }
+    let after = fx.vault(user(), vault);
+    assert!(after.as_ref().map(|v| v.borrowed_icusd_amount == 0).unwrap_or(true), "SP absorb cleared the debt: {after:?}");
+    let claims_after: Vec<(u64, XrpClaimView)> = fx.xrp_claims_full();
+    assert!(
+        claims_after.iter().any(|(id, c)| !claims_before.contains(id) && c.claimant == depositor()),
+        "the opted-in depositor got an XrpClaim: {claims_after:?}"
+    );
+    // The existing outcome is unchanged AND the XRPL side is untouched.
+    assert_eq!(fx.escrow_bal(), escrow, "escrow backing intact after the SP absorb");
+    assert_eq!(fx.x.holder_balance(HOLDER), holder_xrpl, "XRPL supply intact");
+    let cov = fx.coverage();
+    assert_eq!(format!("{:?}", cov.status), "Covered", "{cov:?}");
+    assert_eq!(cov.o_e8s, u128::from(escrow));
+}
