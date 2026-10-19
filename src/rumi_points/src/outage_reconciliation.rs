@@ -3,9 +3,9 @@
 //! This is a draft implementation, not an allocation policy. No approved
 //! allocation digest is configured, so staging is fail-closed. The existing
 //! snapshot driver, hold, seed chain and original ledger encodings are intact.
-//! A future reviewed allocation must specify explicit total floors for the FULL
-//! scheduled epochs 18 and 19. Reconciliation runs only after both epochs have
-//! actually closed, subtracting their original credits before adding anything.
+//! A reviewed allocation must cover every audited participant and missed period.
+//! Whole-epoch targets offset real credits after close; a sealed pre-opening
+//! prefix never offsets later normal earnings. Missing epochs need gap proof.
 //! Missing random snapshots are never represented as observed captures.
 
 use std::borrow::Cow;
@@ -19,10 +19,11 @@ use crate::state;
 use crate::types::PointSource;
 
 const FIRST_EPOCH: u64 = 18;
-const LAST_EPOCH: u64 = 19;
+const LEGACY_LAST_EPOCH: u64 = 19;
+const MAX_ALLOCATION_ROWS: usize = 512;
 const PARTICIPANTS: usize = 15;
 const SCAN_CHUNK: u32 = 100;
-const DOMAIN: &[u8] = b"rumi-points-october-2026-outage-allocation-v1\0";
+const DOMAIN: &[u8] = b"rumi-points-october-2026-outage-allocation-v2\0";
 const PREFIX_DOMAIN: &[u8] = b"rumi-points-october-2026-original-ledger-v1\0";
 
 // Deliberately unset: evidence worksheets are not an approved allocation.
@@ -105,9 +106,15 @@ pub struct AllocationRow {
     pub epoch_index: u64,
     pub principal: Principal,
     pub target_epoch_points: u128,
+    /// Both absent for a whole-epoch floor. Both present only for the exact
+    /// audited pre-opening prefix of the real resumed epoch.
+    #[serde(default)]
+    pub coverage_start_ns: Option<u64>,
+    #[serde(default)]
+    pub coverage_end_ns: Option<u64>,
 }
 
-/// All 30 rows are mandatory, including zero targets. The input-evidence digest
+/// Every census principal/affected-period row is mandatory, including zeros. The input-evidence digest
 /// binds the reviewed assumptions and source inventories, not just the numbers.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct OutageAllocation {
@@ -141,6 +148,10 @@ pub struct OutageCredit {
     pub epoch_index: u64,
     pub scheduled_period_start_ns: u64,
     pub scheduled_period_end_ns: u64,
+    #[serde(default)]
+    pub coverage_start_ns: Option<u64>,
+    #[serde(default)]
+    pub coverage_end_ns: Option<u64>,
     pub normal_ledger_cutoff: u64,
     pub normal_points_earned: u128,
     pub target_epoch_points: u128,
@@ -303,6 +314,17 @@ pub fn progress() -> Option<OutageProgress> {
     })
 }
 
+fn require_current_census(saved:&OutageProgress)->Result<(),String>{
+    if let Some(r)=crate::recovery_v2::coverage(){
+        let cutoff=r.normal_start_ns.ok_or("normal coverage cutoff missing")?;
+        let known:Vec<_>=crate::recovery_v2::census()?.into_iter().filter(|p|state::get_principal_state(p)
+            .is_some_and(|s|s.registered_at_ns<cutoff)).collect();
+        let planned:Vec<_>=saved.allocation.rows.iter().filter(|r|r.epoch_index==FIRST_EPOCH).map(|r|r.principal).collect();
+        if known!=planned { return Err("new historical registration requires a reviewed replacement/supplemental allocation; completeness is not established".into()); }
+    }
+    Ok(())
+}
+
 fn progress_view(saved: &OutageProgress, count_matches: bool) -> OutageProgressView {
     OutageProgressView {
         allocation_digest: saved.allocation_digest,
@@ -319,7 +341,8 @@ fn progress_view(saved: &OutageProgress, count_matches: bool) -> OutageProgressV
             .expect("outage receipt sum overflow"),
         complete: saved.scanned_through == saved.ledger_cutoff
             && saved.applied.len() == saved.allocation.rows.len()
-            && count_matches,
+            && count_matches
+            && require_current_census(saved).is_ok(),
     }
 }
 
@@ -352,8 +375,8 @@ fn persist(progress: OutageProgress) {
 }
 
 pub fn allocation_digest(allocation: &OutageAllocation) -> Result<[u8; 32], String> {
-    if allocation.rows.len() != PARTICIPANTS * 2 {
-        return Err("allocation must contain exactly 30 ordered participant/epoch rows".into());
+    if allocation.rows.is_empty() || allocation.rows.len()>MAX_ALLOCATION_ROWS {
+        return Err("allocation row count is outside its reviewed bound".into());
     }
     allocation.rows.iter().try_fold(0u128, |sum, row| {
         sum.checked_add(row.target_epoch_points)
@@ -363,30 +386,50 @@ pub fn allocation_digest(allocation: &OutageAllocation) -> Result<[u8; 32], Stri
     Ok(crate::snapshot_seed::sha256(&[DOMAIN, &bytes]))
 }
 
-fn require_closed_epochs() -> Result<(), String> {
-    if state::current_epoch_index() <= LAST_EPOCH {
-        return Err("both affected epochs must close before reconciliation".into());
-    }
-    for index in FIRST_EPOCH..=LAST_EPOCH {
-        let summary = state::epoch_history(index, 1);
-        if summary.len() != 1 || summary[0].epoch_index != index {
-            return Err("affected epoch summary is missing".into());
+fn last_affected_epoch()->Result<u64,String>{
+    if crate::recovery_v2::coverage().is_some(){crate::recovery_v2::last_affected_epoch()}
+    else{Ok(LEGACY_LAST_EPOCH)}
+}
+
+/// Returns the actual compensated bounds and whether ordinary epoch credits
+/// offset this target. Prefix compensation is disjoint from normal accrual.
+fn accounting_period(row:&AllocationRow)->Result<(u64,u64,bool),String>{
+    let (scheduled,end)=crate::epoch::epoch_bounds(row.epoch_index,state::season_bounds().0,state::season_bounds().1);
+    if let Some(r)=crate::recovery_v2::coverage(){
+        if r.normal_epoch==Some(row.epoch_index) {
+            let opening=r.normal_start_ns.ok_or("normal coverage is not sealed")?;
+            if row.coverage_start_ns!=Some(scheduled)||row.coverage_end_ns!=Some(opening)||opening<=scheduled||opening>=end {
+                return Err("allocation prefix must exactly match the audited normal opening".into());
+            }
+            return Ok((scheduled,opening,false));
         }
-        let (start, end) =
-            crate::epoch::epoch_bounds(index, state::season_bounds().0, state::season_bounds().1);
-        if summary[0].epoch_start_ns < start
-            || summary[0].epoch_start_ns >= end
-            || summary[0].epoch_end_ns != end
-        {
-            return Err("affected epoch summary has unexpected coverage".into());
+    }
+    if row.coverage_start_ns.is_some()||row.coverage_end_ns.is_some(){
+        return Err("only the resumed epoch has a partial compensation interval".into());
+    }
+    Ok((scheduled,end,true))
+}
+
+fn require_accounting_boundary()->Result<(),String>{
+    let last=last_affected_epoch()?;
+    if last<FIRST_EPOCH || last-FIRST_EPOCH>=MAX_ALLOCATION_ROWS as u64 { return Err("affected epoch span exceeds reviewed bound".into()); }
+    for index in FIRST_EPOCH..=last {
+        if let Some(r)=crate::recovery_v2::coverage(){
+            if state::season_bounds()!=(r.season_start_ns,r.season_end_ns){return Err("recovery season bounds changed".into());}
+            if crate::recovery_v2::fully_missed_epoch(index){
+                if state::epoch_summary_by_index(index).is_some(){return Err("missed coverage conflicts with a real summary".into());}
+                continue;
+            }
+            if r.normal_epoch==Some(index){continue;} // disjoint prefix is sealed, normal accrual may continue
+        }
+        let summary=state::epoch_summary_by_index(index).ok_or("affected real epoch has not closed")?;
+        let (start,end)=crate::epoch::epoch_bounds(index,state::season_bounds().0,state::season_bounds().1);
+        if summary.epoch_start_ns<start||summary.epoch_start_ns>=end||summary.epoch_end_ns!=end{
+            return Err("affected real epoch has unexpected coverage".into());
         }
     }
-    let policy = state::fiat_stable_points_policy();
-    if policy.cutover_epoch != Some(19)
-        || policy.legacy_epoch != Some(18)
-        || !policy.historical_complete
-        || !policy.inline_legacy_topups_complete
-    {
+    let policy=state::fiat_stable_points_policy();
+    if policy.cutover_epoch!=Some(19)||policy.legacy_epoch!=Some(18)||!policy.historical_complete||!policy.inline_legacy_topups_complete{
         return Err("fixed fiat-stable cutover or original corrections are incomplete".into());
     }
     Ok(())
@@ -404,7 +447,7 @@ fn approved_digest(allocation: &OutageAllocation) -> Result<[u8; 32], String> {
 
 /// Admin ingress cannot stage anything until a separately reviewed immutable
 /// allocation digest is compiled in. The present pin remains unset.
-pub fn stage(caller: Principal, allocation: OutageAllocation) -> Result<OutageProgress, String> {
+pub async fn stage(caller: Principal, allocation: OutageAllocation) -> Result<OutageProgress, String> {
     if !state::is_admin(caller) {
         return Err("unauthorized".into());
     }
@@ -421,7 +464,17 @@ pub fn stage(caller: Principal, allocation: OutageAllocation) -> Result<OutagePr
     }
     let _epoch_guard = state::EpochGuard::new().ok_or("epoch transition active")?;
     let _poll_guard = state::PollGuard::new().ok_or("points writer active")?;
-    require_closed_epochs()?;
+    let before=state::with_state(Clone::clone);
+    let sources=state::source_canisters();let ledgers=state::asset_ledgers();
+    let policy=state::fiat_stable_points_policy();
+    let config=(state::epoch_driver_interval_secs(),state::poll_interval_secs(),state::poll_enabled());
+    crate::poll::verify_backlog_drained().await?;
+    if state::with_state(Clone::clone)!=before || state::source_canisters()!=sources || state::asset_ledgers()!=ledgers
+        || state::fiat_stable_points_policy()!=policy
+        || (state::epoch_driver_interval_secs(),state::poll_interval_secs(),state::poll_enabled())!=config {
+        return Err("state or source bindings changed during allocation validation".into());
+    }
+    require_accounting_boundary()?;
     if (allocation.season_start_ns, allocation.season_end_ns) != state::season_bounds()
         || allocation.original_ledger_prefix_len != 417
         || allocation.evidence_digest == [0; 32]
@@ -429,33 +482,32 @@ pub fn stage(caller: Principal, allocation: OutageAllocation) -> Result<OutagePr
     {
         return Err("unexpected incident, season or evidence binding".into());
     }
-    let mut keys = Vec::with_capacity(allocation.rows.len());
+    let last=last_affected_epoch()?;
+    let participants:Vec<Principal>=match crate::recovery_v2::coverage(){
+        Some(r)=>{
+            let cutoff=r.normal_start_ns.ok_or("normal opening cutoff not sealed")?;
+            crate::recovery_v2::census()?.into_iter().filter(|p|state::get_principal_state(p)
+                .is_some_and(|s|s.registered_at_ns<cutoff)).collect()
+        },
+        None=>allocation.rows.iter().filter(|r|r.epoch_index==FIRST_EPOCH).map(|r|r.principal).collect(),
+    };
+    if participants.is_empty() || participants.len() as u64>crate::recovery_v2::MAX_PARTICIPANTS {
+        return Err("recovery participant census is empty or too large".into());
+    }
+    if (last-FIRST_EPOCH+1).checked_mul(participants.len() as u64).is_none_or(|n|n>MAX_ALLOCATION_ROWS as u64) { return Err("allocation census/period product exceeds reviewed row bound".into()); }
+    let expected:Vec<_>=(FIRST_EPOCH..=last).flat_map(|epoch|participants.iter().map(move|p|(epoch,*p))).collect();
+    let keys:Vec<_>=allocation.rows.iter().map(|r|(r.epoch_index,r.principal)).collect();
+    if keys!=expected||keys.windows(2).any(|p|p[0]>=p[1]){
+        return Err("allocation must cover every audited participant and affected period in canonical order".into());
+    }
     for row in &allocation.rows {
-        if row.epoch_index < FIRST_EPOCH || row.epoch_index > LAST_EPOCH {
-            return Err("allocation is restricted to epochs 18 and 19".into());
+        let (_,end,_)=accounting_period(row)?;
+        let participant=state::get_principal_state(&row.principal).ok_or("allocation participant missing")?;
+        if (participant.registered_at_ns>=end||state::is_excluded(&row.principal)) && row.target_epoch_points!=0 {
+            return Err("ineligible participant/period must have a zero target".into());
         }
-        let (start, _) = crate::epoch::epoch_bounds(
-            row.epoch_index,
-            allocation.season_start_ns,
-            allocation.season_end_ns,
-        );
-        let participant =
-            state::get_principal_state(&row.principal).ok_or("allocation participant missing")?;
-        if participant.registered_at_ns > start || state::is_excluded(&row.principal) {
-            return Err("allocation includes an ineligible participant".into());
-        }
-        keys.push((row.epoch_index, row.principal));
     }
-    if keys.windows(2).any(|pair| pair[0] >= pair[1])
-        || keys[..PARTICIPANTS].iter().any(|key| key.0 != FIRST_EPOCH)
-        || keys[PARTICIPANTS..].iter().any(|key| key.0 != LAST_EPOCH)
-        || keys[..PARTICIPANTS]
-            .iter()
-            .map(|key| key.1)
-            .ne(keys[PARTICIPANTS..].iter().map(|key| key.1))
-    {
-        return Err("allocation must cover the same 15 unique principals in both epochs, in canonical order".into());
-    }
+    let allocation_row_count=allocation.rows.len();
     let saved = OutageProgress {
         allocation_digest: digest,
         allocation,
@@ -463,7 +515,7 @@ pub fn stage(caller: Principal, allocation: OutageAllocation) -> Result<OutagePr
         scanned_through: 0,
         original_prefix_digest_so_far: crate::snapshot_seed::sha256(&[PREFIX_DOMAIN]),
         original_registrations: Vec::new(),
-        earned: vec![SourcePoints::default(); PARTICIPANTS * 2],
+        earned: vec![SourcePoints::default(); allocation_row_count],
         applied: Vec::new(),
     };
     persist(saved.clone());
@@ -484,7 +536,8 @@ pub fn continue_reconciliation(caller: Principal, now_ns: u64) -> Result<OutageP
     }
     let _epoch_guard = state::EpochGuard::new().ok_or("epoch transition active")?;
     let _poll_guard = state::PollGuard::new().ok_or("points writer active")?;
-    require_closed_epochs()?;
+    require_accounting_boundary()?;
+    require_current_census(&saved)?;
     let receipted_count = saved
         .applied
         .iter()
@@ -532,10 +585,10 @@ pub fn continue_reconciliation(caller: Principal, now_ns: u64) -> Result<OutageP
                 }
                 if offset + 1 == saved.allocation.original_ledger_prefix_len {
                     saved.original_registrations.sort();
-                    let expected: Vec<_> = saved.allocation.rows[..PARTICIPANTS]
-                        .iter()
-                        .map(|row| row.principal)
-                        .collect();
+                    let first_epoch_start=crate::epoch::epoch_bounds(FIRST_EPOCH,saved.allocation.season_start_ns,saved.allocation.season_end_ns).0;
+                    let expected:Vec<_>=saved.allocation.rows.iter().filter(|r|r.epoch_index==FIRST_EPOCH)
+                        .filter(|r|state::get_principal_state(&r.principal).is_some_and(|p|p.registered_at_ns<=first_epoch_start))
+                        .map(|r|r.principal).collect();
                     if saved.original_prefix_digest_so_far
                         != saved.allocation.original_ledger_prefix_digest
                         || saved.original_registrations != expected
@@ -547,7 +600,7 @@ pub fn continue_reconciliation(caller: Principal, now_ns: u64) -> Result<OutageP
             if let Some(index) = saved.allocation.rows.iter().position(|row| {
                 row.epoch_index == entry.epoch_index && row.principal == entry.principal
             }) {
-                if entry.source != PointSource::Registration {
+                if entry.source != PointSource::Registration && accounting_period(&saved.allocation.rows[index])?.2 {
                     saved.earned[index].add(entry.source, entry.points_delta)?;
                 }
             }
@@ -564,9 +617,10 @@ pub fn continue_reconciliation(caller: Principal, now_ns: u64) -> Result<OutageP
         return Ok(saved);
     }
     let row = &saved.allocation.rows[index];
-    if state::is_excluded(&row.principal) {
+    if state::is_excluded(&row.principal) && row.target_epoch_points!=0 {
         return Err("participant eligibility changed".into());
     }
+    let (coverage_start,coverage_end,_)=accounting_period(row)?;
     let normal_points_earned = saved.earned[index].total()?;
     let target_epoch_points = row.target_epoch_points;
     let credited_points = target_epoch_points.saturating_sub(normal_points_earned);
@@ -587,6 +641,8 @@ pub fn continue_reconciliation(caller: Principal, now_ns: u64) -> Result<OutageP
             epoch_index: row.epoch_index,
             scheduled_period_start_ns,
             scheduled_period_end_ns,
+            coverage_start_ns:Some(coverage_start),
+            coverage_end_ns:Some(coverage_end),
             normal_ledger_cutoff: saved.ledger_cutoff,
             normal_points_earned,
             target_epoch_points,

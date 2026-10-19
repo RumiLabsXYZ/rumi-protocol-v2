@@ -51,7 +51,9 @@ export const idlFactory = ({ IDL }) => {
   const AllocationRow = IDL.Record({
     'principal' : IDL.Principal,
     'epoch_index' : IDL.Nat64,
+    'coverage_end_ns' : IDL.Opt(IDL.Nat64),
     'target_epoch_points' : IDL.Nat,
+    'coverage_start_ns' : IDL.Opt(IDL.Nat64),
   });
   const OutageAllocation = IDL.Record({
     'rows' : IDL.Vec(AllocationRow),
@@ -173,12 +175,14 @@ export const idlFactory = ({ IDL }) => {
     'scheduled_period_end_ns' : IDL.Nat64,
     'applied_at_ns' : IDL.Nat64,
     'epoch_index' : IDL.Nat64,
+    'coverage_end_ns' : IDL.Opt(IDL.Nat64),
     'allocation_digest' : IDL.Vec(IDL.Nat8),
     'kind' : OutageCreditKind,
     'normal_points_earned' : IDL.Nat,
     'credited_points' : IDL.Nat,
     'target_epoch_points' : IDL.Nat,
     'evidence_digest' : IDL.Vec(IDL.Nat8),
+    'coverage_start_ns' : IDL.Opt(IDL.Nat64),
     'scheduled_period_start_ns' : IDL.Nat64,
   });
   const OutageCreditPage = IDL.Record({
@@ -219,6 +223,21 @@ export const idlFactory = ({ IDL }) => {
     'season_start_ns' : IDL.Nat64,
     'season_end_ns' : IDL.Nat64,
     'current_epoch_index' : IDL.Nat64,
+  });
+  const RecoveryCoverage = IDL.Record({
+    'participants' : IDL.Vec(IDL.Principal),
+    'normal_end_ns' : IDL.Opt(IDL.Nat64),
+    'normal_epoch' : IDL.Opt(IDL.Nat64),
+    'authorized_at_ns' : IDL.Nat64,
+    'predecessor_next_commit' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'predecessor_epoch' : IDL.Nat64,
+    'bridge_digest' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'missed_start_ns' : IDL.Nat64,
+    'season_start_ns' : IDL.Nat64,
+    'predecessor_summary_digest' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'season_end_ns' : IDL.Nat64,
+    'normal_seed_commit' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'normal_start_ns' : IDL.Opt(IDL.Nat64),
   });
   const AssetType = IDL.Variant({
     'Icp' : IDL.Null,
@@ -284,6 +303,7 @@ export const idlFactory = ({ IDL }) => {
     'admin_poll_held_points_backlog' : IDL.Func([], [Result_3], []),
     'admin_rebuild_3pool_recorded' : IDL.Func([], [Result_3], []),
     'admin_resume_held_points' : IDL.Func([], [Result_4], []),
+    'admin_resume_points_recovery_v2' : IDL.Func([], [Result_4], []),
     'admin_stage_outage_allocation' : IDL.Func(
         [OutageAllocation],
         [Result_2],
@@ -349,6 +369,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'get_point_ledger_len' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_points_config' : IDL.Func([], [PointsConfig], ['query']),
+    'get_points_recovery_coverage' : IDL.Func(
+        [],
+        [IDL.Opt(RecoveryCoverage)],
+        ['query'],
+      ),
     'get_principal_outage_credit_entries' : IDL.Func(
         [IDL.Principal, IDL.Nat64, IDL.Nat32],
         [OutageCreditPage],

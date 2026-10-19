@@ -27,6 +27,21 @@ fn get_held_epoch_recovery(index: u64) -> Option<rumi_points::types::HeldEpochRe
     state::held_epoch_recovery_public(index)
 }
 
+#[ic_cdk::query]
+fn get_points_recovery_coverage() -> Option<rumi_points::recovery_v2::RecoveryCoverage> {
+    rumi_points::recovery_v2::coverage()
+}
+
+#[ic_cdk::update]
+async fn admin_resume_points_recovery_v2() -> Result<(),String> {
+    let caller=ic_cdk::caller();
+    if !state::is_admin(caller) { return Err("unauthorized".into()); }
+    epoch::admin_reschedule_held_open_epoch_v2().await?;
+    state::set_epoch_driver_enabled(caller,true).map_err(|e|format!("{e:?}"))?;
+    epoch::setup_epoch_timer();
+    Ok(())
+}
+
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
 #[ic_cdk::init]
@@ -252,10 +267,10 @@ fn apply_fiat_stable_topups(max_rows: u32) -> Result<FiatStableTopupProgress, St
 /// Admin-only: stage exactly the compiled allocation. An unset pin rejects
 /// before touching progress memory; this is not an arbitrary credit endpoint.
 #[ic_cdk::update]
-fn admin_stage_outage_allocation(
+async fn admin_stage_outage_allocation(
     allocation: rumi_points::outage_reconciliation::OutageAllocation,
 ) -> Result<rumi_points::outage_reconciliation::OutageReconciliationStatus, String> {
-    rumi_points::outage_reconciliation::stage(ic_cdk::caller(), allocation)?;
+    rumi_points::outage_reconciliation::stage(ic_cdk::caller(), allocation).await?;
     Ok(rumi_points::outage_reconciliation::status())
 }
 

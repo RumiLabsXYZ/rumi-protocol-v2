@@ -21,6 +21,7 @@ pub mod accrual;
 pub mod epoch;
 pub mod events;
 pub mod outage_reconciliation;
+pub mod recovery_v2;
 pub mod poll;
 pub mod snapshot_seed;
 pub mod source_types;

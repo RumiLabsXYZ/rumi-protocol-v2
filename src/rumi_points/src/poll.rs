@@ -201,6 +201,12 @@ pub async fn verify_held_backlog_drained() -> Result<(), String> {
     if !state::legacy_transition_held() {
         return Err("legacy points hold is not active".to_string());
     }
+    verify_backlog_drained().await
+}
+
+/// Retained source-tail check shared with guarded outage-allocation staging.
+/// Callers hold both writer guards and check bindings/state again after awaits.
+pub async fn verify_backlog_drained() -> Result<(), String> {
     verify_held_log_coverage().await?;
     let backend = source_canister(SourceId::Backend)
         .ok_or_else(|| "backend source is not configured".to_string())?;

@@ -134,7 +134,7 @@ thread_local! {
 
 /// Principals captured per driver tick. Season-1 scale fits one tick; larger
 /// seasons span several (the cursor in `OpenEpoch` resumes between ticks).
-const CAPTURE_CHUNK: u64 = 100;
+pub(crate) const CAPTURE_CHUNK: u64 = 100;
 
 /// Decide the snapshot's next resume cursor and completion flag from one chunk's
 /// outcome. Pure, so the capture book-keeping is unit-testable:
@@ -265,6 +265,15 @@ pub fn start_season(initial_seed: [u8; 32], now: u64) -> Result<(), StartSeasonE
 /// to a fresh unpredictable time with management-canister entropy, then clear
 /// the durable hold. The caller must separately enable the periodic driver.
 pub async fn admin_reschedule_held_open_epoch() -> Result<(), String> {
+    admin_reschedule_held_open_epoch_impl(false).await
+}
+
+/// Explicit late recovery. V1's epoch19 timing restriction remains unchanged.
+pub async fn admin_reschedule_held_open_epoch_v2() -> Result<(), String> {
+    admin_reschedule_held_open_epoch_impl(true).await
+}
+
+async fn admin_reschedule_held_open_epoch_impl(late: bool) -> Result<(), String> {
     let _epoch_guard = state::EpochGuard::new().ok_or("an epoch transition is already active")?;
     let _poll_guard = state::PollGuard::new().ok_or("a points poll is already active")?;
     let mut open = state::get_open_epoch().ok_or("no held epoch")?;
@@ -329,11 +338,14 @@ pub async fn admin_reschedule_held_open_epoch() -> Result<(), String> {
         .checked_mul(config.0)
         .and_then(|v| v.checked_mul(1_000_000_000))
         .ok_or("capture budget overflow")?;
-    if latest
-        .checked_add(capture_budget)
-        .ok_or("capture window overflow")?
-        >= next_epoch_end
-    {
+    let ready_after = latest.checked_add(capture_budget).ok_or("capture window overflow")?;
+    if late {
+        if crate::recovery_v2::coverage().is_some() {
+            return Err("late recovery was already authorized".into());
+        }
+        crate::recovery_v2::choose_epoch(ready_after, season_start, season_end)?;
+    }
+    if !late && ready_after >= next_epoch_end {
         return Err("insufficient remaining epoch 19 window to finish legacy recovery".into());
     }
     let random = u64::from_le_bytes(entropy[..8].try_into().expect("eight-byte entropy prefix"));
@@ -342,6 +354,9 @@ pub async fn admin_reschedule_held_open_epoch() -> Result<(), String> {
         .ok_or("recovery schedule overflow")?;
     if replacement <= open.snapshot_a_ns {
         return Err("recovered B must follow saved A".into());
+    }
+    if late {
+        crate::recovery_v2::authorize(now, open.epoch_end_ns)?;
     }
     state::record_held_epoch_recovery(crate::types::HeldEpochRecoveryRecord {
         epoch_index: open.epoch_index,
@@ -371,7 +386,7 @@ fn open_new_epoch(index: u64, seed_arg: Option<[u8; 32]>, _now: u64) -> Result<(
     open_epoch_at(index, start, end, seed_arg)
 }
 
-fn open_epoch_at(
+pub(crate) fn open_epoch_at(
     index: u64,
     epoch_start_ns: u64,
     epoch_end_ns: u64,
@@ -464,9 +479,7 @@ fn secure_seed_from_history(index: u64, entropy: &[u8; 32]) -> Result<[u8; 32], 
         .ok_or(SeedError::LegacyHistoryMissing)?;
     let previous_seed =
         state::get_revealed_seed(previous_index).ok_or(SeedError::LegacyHistoryMissing)?;
-    let previous_summary = state::epoch_history(previous_index, 1)
-        .into_iter()
-        .next()
+    let previous_summary = state::epoch_summary_by_index(previous_index)
         .ok_or(SeedError::LegacyHistoryMissing)?;
     Ok(sha256(&[
         &previous_seed.seed,
@@ -623,6 +636,13 @@ pub async fn run_tick() {
             resume_legacy_reseed().await;
             return;
         }
+    }
+    if crate::recovery_v2::pending_open() {
+        let _poll_guard = match state::PollGuard::new() { Some(g)=>g, None=>return };
+        if let Err(error)=crate::recovery_v2::open_pending(ic_cdk::api::time()) {
+            ic_cdk::println!("[epoch] late recovery opening remains pending: {}",error);
+        }
+        return;
     }
     let (season_start, season_end) = state::season_bounds();
     let open = state::get_open_epoch();
@@ -802,6 +822,7 @@ async fn close_current_epoch(now: u64) {
         )),
     }
     state::append_epoch_summary(summary);
+    if open.epoch_index==18 { crate::recovery_v2::record_close(hash); }
     state::advance_epoch_index();
     state::set_open_epoch(None);
 }

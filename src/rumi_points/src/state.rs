@@ -420,9 +420,7 @@ pub fn held_epoch_recovery_matches(open: &OpenEpoch) -> bool {
 
 pub fn held_epoch_recovery_public(index: u64) -> Option<crate::types::HeldEpochRecoveryView> {
     let r = held_epoch_recovery(index)?;
-    let closed = epoch_history(index, 1)
-        .iter()
-        .any(|e| e.epoch_index == index);
+    let closed = epoch_summary_by_index(index).is_some();
     let b_complete = closed
         || get_open_epoch()
             .map(|o| o.epoch_index == index && o.b_complete)
@@ -784,6 +782,16 @@ pub fn leaderboard(offset: u32, limit: u32) -> Vec<LeaderboardEntry> {
         .collect()
 }
 
+/// Logical lookup; public history offsets remain physical log offsets.
+pub fn epoch_summary_by_index(index: u64) -> Option<EpochSummary> {
+    EPOCH_SUMMARIES.with(|l| {
+        let log=l.borrow(); let (mut lo,mut hi)=(0,log.len());
+        while lo<hi {let mid=lo+(hi-lo)/2;let row=log.get(mid)?.into_current();
+            if row.epoch_index<index {lo=mid+1;}else{hi=mid;}}
+        log.get(lo).map(|r|r.into_current()).filter(|r|r.epoch_index==index)
+    })
+}
+
 pub fn epoch_history(offset: u64, limit: u64) -> Vec<EpochSummary> {
     EPOCH_SUMMARIES.with(|l| {
         let log = l.borrow();
@@ -923,6 +931,10 @@ pub fn append_point_entry(entry: PointEntry) {
 
 // New region reserved exclusively for the additive outage reconciliation draft.
 // No State, OpenEpoch, or existing StableLog / map encoding changes.
+pub(crate) fn late_recovery_memory() -> VMem {
+    MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(19)))
+}
+
 pub(crate) fn outage_reconciliation_memory() -> VMem {
     MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(16)))
 }
@@ -2241,9 +2253,14 @@ pub fn append_revealed_seed(seed: RevealedSeed) {
     });
 }
 
-/// The revealed seed for a CLOSED epoch (the log index equals the epoch index).
+/// Logical epoch lookup, including sparse history after an audited recovery.
 pub fn get_revealed_seed(epoch_index: u64) -> Option<RevealedSeed> {
-    REVEALED_SEEDS.with(|l| l.borrow().get(epoch_index).map(|s| s.into_current()))
+    REVEALED_SEEDS.with(|l| {
+        let log=l.borrow();let(mut lo,mut hi)=(0,log.len());
+        while lo<hi{let mid=lo+(hi-lo)/2;let row=log.get(mid)?.into_current();
+            if row.epoch_index<epoch_index{lo=mid+1;}else{hi=mid;}}
+        log.get(lo).map(|s|s.into_current()).filter(|s|s.epoch_index==epoch_index)
+    })
 }
 
 /// Advance `current_epoch_index` (called at epoch close).

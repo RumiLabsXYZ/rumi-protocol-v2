@@ -1,7 +1,9 @@
 type AllocationRow = record {
   "principal" : principal;
   epoch_index : nat64;
+  coverage_end_ns : opt nat64;
   target_epoch_points : nat;
+  coverage_start_ns : opt nat64;
 };
 type AssetType = variant { Icp; IcUsd; CkUsdc; CkUsdt; ThreeUsd };
 type CycleManagerCyclesStatus = record {
@@ -124,12 +126,14 @@ type OutageCredit = record {
   scheduled_period_end_ns : nat64;
   applied_at_ns : nat64;
   epoch_index : nat64;
+  coverage_end_ns : opt nat64;
   allocation_digest : blob;
   kind : OutageCreditKind;
   normal_points_earned : nat;
   credited_points : nat;
   target_epoch_points : nat;
   evidence_digest : blob;
+  coverage_start_ns : opt nat64;
   scheduled_period_start_ns : nat64;
 };
 type OutageCreditKind = variant { OutageMakeWhole };
@@ -221,6 +225,21 @@ type QualifyingAction = variant {
   DepositStabilityPool;
   RepayVault;
 };
+type RecoveryCoverage = record {
+  participants : vec principal;
+  normal_end_ns : opt nat64;
+  normal_epoch : opt nat64;
+  authorized_at_ns : nat64;
+  predecessor_next_commit : opt blob;
+  predecessor_epoch : nat64;
+  bridge_digest : opt blob;
+  missed_start_ns : nat64;
+  season_start_ns : nat64;
+  predecessor_summary_digest : opt blob;
+  season_end_ns : nat64;
+  normal_seed_commit : opt blob;
+  normal_start_ns : opt nat64;
+};
 type RegistrationInfo = record {
   "principal" : principal;
   registered_at_ns : nat64;
@@ -256,6 +275,7 @@ service : (opt InitArgs) -> {
   admin_poll_held_points_backlog : () -> (Result_3);
   admin_rebuild_3pool_recorded : () -> (Result_3);
   admin_resume_held_points : () -> (Result_4);
+  admin_resume_points_recovery_v2 : () -> (Result_4);
   admin_stage_outage_allocation : (OutageAllocation) -> (Result_2);
   apply_fiat_stable_topups : (nat32) -> (Result_5);
   cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
@@ -277,6 +297,7 @@ service : (opt InitArgs) -> {
   get_point_entries : (nat64, nat32) -> (PointEntryPage) query;
   get_point_ledger_len : () -> (nat64) query;
   get_points_config : () -> (PointsConfig) query;
+  get_points_recovery_coverage : () -> (opt RecoveryCoverage) query;
   get_principal_outage_credit_entries : (principal, nat64, nat32) -> (
       OutageCreditPage,
     ) query;
