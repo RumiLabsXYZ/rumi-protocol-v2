@@ -1,7 +1,7 @@
 //! Additive accounting for the October 2026 points outage.
 //!
-//! This is a draft implementation, not an allocation policy. No approved
-//! allocation digest is configured, so staging is fail-closed. The existing
+//! This candidate binds one reviewed numerical compensation proposal. Economic
+//! acceptance and installation require separate authorization. The existing
 //! snapshot driver, hold, seed chain and original ledger encodings are intact.
 //! A reviewed allocation must cover every audited participant and missed period.
 //! Whole-epoch targets offset real credits after close; a sealed pre-opening
@@ -26,9 +26,13 @@ const SCAN_CHUNK: u32 = 100;
 const DOMAIN: &[u8] = b"rumi-points-october-2026-outage-allocation-v2\0";
 const PREFIX_DOMAIN: &[u8] = b"rumi-points-october-2026-original-ledger-v1\0";
 
-// Deliberately unset: evidence worksheets are not an approved allocation.
-// Setting this requires a separately reviewed immutable allocation manifest.
-const APPROVED_ALLOCATION_DIGEST: Option<[u8; 32]> = None;
+// Exact reviewed proposal: 45 rows, 15 participants, epochs 18/19/20 prefix.
+// Candidate only: installing this pin and applying credits require explicit
+// acceptance of the compensation policy and a separately authorized upgrade.
+const APPROVED_ALLOCATION_DIGEST: Option<[u8; 32]> = Some([
+    0x26, 0xfa, 0xce, 0x06, 0x0f, 0xc4, 0xe1, 0xf2, 0x5f, 0x4c, 0x16, 0x14, 0xed, 0x19, 0xe6, 0x5c,
+    0xd4, 0x7f, 0x60, 0xbe, 0xdf, 0x59, 0x8a, 0xc6, 0xd6, 0xed, 0x4b, 0x85, 0xe2, 0x2c, 0x61, 0xcd,
+]);
 
 /// Breakdown of ordinary earning records used to offset a total epoch floor.
 /// Existing credit in any source offsets the total. The actual make-whole
@@ -446,7 +450,7 @@ fn approved_digest(allocation: &OutageAllocation) -> Result<[u8; 32], String> {
 }
 
 /// Admin ingress cannot stage anything until a separately reviewed immutable
-/// allocation digest is compiled in. The present pin remains unset.
+/// allocation digest is compiled in. This candidate pins only its exact proposal.
 pub async fn stage(caller: Principal, allocation: OutageAllocation) -> Result<OutageProgress, String> {
     if !state::is_admin(caller) {
         return Err("unauthorized".into());
