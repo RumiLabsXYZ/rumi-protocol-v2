@@ -1,6 +1,6 @@
 # ckSOL release receipt — 2026-10-18
 
-Status: deployed and activated. The supported same-path reconsideration succeeded; no competing upgrade was identified or cancelled.
+Status: backend and ckSOL collateral remain deployed and activated. Public sponsored SOL deposit processing was subsequently disabled at the user’s request; see the policy update below. The supported same-path reconsideration succeeded; no competing upgrade was identified or cancelled.
 
 User authorization: deploy and activate ckSOL with ckETH risk parameters and the official chain-key Solana minter integration.
 
@@ -55,3 +55,10 @@ Two independent audits inspected structured tool calls in Rumi session records: 
 The supported approval-reconsideration API requires an original serialized guardian event, which was not available. No event was fabricated, no approval policy or database was changed, and no alternative executor was used. Both Charles and Dana independently concluded that exactly one fresh submission of the same frozen artifact, command and target through the same automatic approval reviewer is supported reconsideration on materially new evidence. A further rejection must be honored without another retry loop.
 
 Fresh preflight at 23:05 UTC confirms the old backend still Running, ckSOL absent, the same controllers, cap 2,200,000,000,000 raw, reserve redemptions disabled, Stability Pool emergency-paused, mode GeneralAvailability and manual override false. Actual backend cycles were 11,645,765,573,789 at the subsequent status read. The old deployment lacks the new Treasury stable-transfer inspection method; that query's failure is unavailable visibility, not proof of an empty queue. Frozen artifact hashes and fresh Candid compatibility were reverified. Fresh snapshot `00000000000000110000000001f088fe0101` was taken at 23:08:46 UTC after completely archiving and verifying the oldest occupied snapshot2. The backend was immediately restarted on the old module. All fresh snapshot payload lengths and hashes were verified after download; saved Wasm equals the observed old module. Exactly one same-path reconsideration was subsequently accepted. The resulting install completed successfully; current deployment and activation receipts are recorded above.
+
+
+## Subsequent user policy update: public sponsorship disabled
+
+After reviewing the finite allowance, the user instructed Rumi to stop sponsoring public ckSOL deposit processing and to leave actual cycles in the backend. One `set_cksol_relay_budget(0)` call returned `Ok`; an independent live query confirmed the budget is zero. New sponsored deposit starts are disabled. Existing deposit reconciliation and ckSOL collateral registration were not changed. No cycles withdrawal or transfer was performed.
+
+The previous 10T allocation and successful enablement above are historical activation receipts, superseded by this policy change. A browser user-funded processing flow has not been implemented; ordinary ingress calls cannot attach cycles directly.
