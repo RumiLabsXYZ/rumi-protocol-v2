@@ -1902,7 +1902,7 @@ mod tests {
     }
 }
 
-// Scoped recovery endpoints. The manifest seal remains a denying preparation sentinel.
+// Scoped recovery endpoints bind the exact reviewed allocation seal; execution needs separate authority.
 #[update]
 pub fn stage_interest_recovery(manifest: interest_recovery::RecoveryManifest) -> Result<interest_recovery::RecoveryStatus, String> { interest_recovery::stage(manifest) }
 #[update]
