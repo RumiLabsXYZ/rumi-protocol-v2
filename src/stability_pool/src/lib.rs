@@ -9,6 +9,7 @@ pub mod liquidation;
 pub mod logs;
 pub mod pool_guard;
 pub mod receipt_store;
+pub mod interest_recovery;
 pub mod state;
 pub mod types;
 
@@ -151,6 +152,7 @@ fn pre_upgrade() {
 #[post_upgrade]
 fn post_upgrade(_args: StabilityPoolInitArgs) {
     state::load_from_stable_memory();
+    mutate_state(|s| { if s.interest_recovery.is_none() { s.interest_recovery_bootstrap_hold=Some(true); } });
     let legacy_ambiguous_chain_absorbs = mutate_state(|s| {
         s.hold_legacy_prepared_chain_absorbs(ic_cdk::api::time())
     });
@@ -259,6 +261,7 @@ fn setup_native_xrp_settle_sweep_timer() {
     ic_cdk_timers::set_timer_interval(
         Duration::from_secs(NATIVE_XRP_SETTLE_SWEEP_POLL_SECONDS),
         || {
+            if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() { return; }
             ic_cdk::spawn(async {
                 let cursor = SWEEP_CURSOR.with(|c| c.get());
                 let summary = crate::liquidation::run_native_xrp_settle_sweep_with_io(
@@ -296,6 +299,7 @@ fn setup_native_xrp_absorb_recovery_timer() {
     ic_cdk_timers::set_timer_interval(
         Duration::from_secs(NATIVE_XRP_ABSORB_RECOVERY_POLL_SECONDS),
         || {
+            if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() { return; }
             ic_cdk::spawn(async {
                 let cursor = RECOVERY_CURSOR.with(|c| c.get());
                 let vault_ids = crate::liquidation::pending_native_xrp_recovery_vault_ids(
@@ -331,6 +335,7 @@ fn setup_chain_absorb_auto_timer() {
     ic_cdk_timers::set_timer_interval(
         Duration::from_secs(CHAIN_ABSORB_AUTO_TIMER_POLL_SECONDS),
         || {
+            if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() { return; }
             ic_cdk::spawn(async {
                 if let Err(error) = crate::liquidation::run_chain_absorb_auto_tick().await {
                     log!(INFO, "chain absorb auto tick skipped: {:?}", error);
@@ -345,6 +350,7 @@ fn setup_chain_absorb_auto_timer() {
 /// absorb or deletion.
 fn setup_three_usd_absorb_recovery_timer() {
     ic_cdk_timers::set_timer_interval(Duration::from_secs(30), || {
+        if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() { return; }
         ic_cdk::spawn(crate::liquidation::recover_pending_three_usd_absorbs());
     });
 }
@@ -356,6 +362,7 @@ fn setup_unallocated_interest_forward_retry_timer() {
     ic_cdk_timers::set_timer_interval(
         Duration::from_secs(UNALLOCATED_INTEREST_FORWARD_RETRY_SECONDS),
         || {
+            if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() { return; }
             ic_cdk::spawn(async {
                 let next = read_state(|s| {
                     s.pending_unallocated_interest_forwards()
@@ -420,6 +427,7 @@ async fn fetch_virtual_prices() {
 
 #[update]
 pub async fn deposit(_token_ledger: Principal, _amount: u64) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     // The legacy call has no operation identity. A client retry after an
     // ambiguous ledger reply can pull and credit a second time, so keep its
     // Candid signature for old clients but reject before any ledger call.
@@ -434,6 +442,7 @@ pub async fn deposit_with_intent(
     token_ledger: Principal,
     amount: u64,
 ) -> Result<DepositIntentResult, DepositIntentError> {
+    interest_recovery::ensure_unlocked();
     crate::deposits::deposit_with_intent(intent_seq, token_ledger, amount).await
 }
 
@@ -445,16 +454,19 @@ pub fn get_deposit_intent(intent_seq: u64) -> DepositIntentStatus {
 
 #[update]
 pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::deposits::withdraw(token_ledger, amount).await
 }
 
 #[update]
 pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::deposits::claim_collateral(collateral_ledger).await
 }
 
 #[update]
 pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::deposits::claim_all_collateral().await
 }
 
@@ -466,6 +478,7 @@ pub async fn reconcile_collateral_claim(
     claim_owner: Principal,
     block_index: u64,
 ) -> Result<u64, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::deposits::reconcile_collateral_claim(collateral_ledger, claim_owner, block_index).await
 }
 
@@ -509,6 +522,7 @@ pub async fn deposit_as_3usd(
     token_ledger: Principal,
     amount: u64,
 ) -> Result<u64, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::deposits::deposit_as_3usd(token_ledger, amount).await
 }
 
@@ -517,6 +531,7 @@ pub async fn deposit_as_3usd(
 /// the net amount sent (gross minus the ledger transfer fee).
 #[update]
 pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::deposits::claim_pending_refund(refund_id).await
 }
 
@@ -525,6 +540,7 @@ pub async fn claim_cfx(
     chain_sentinel: Principal,
     dest_evm: String,
 ) -> Result<u128, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::liquidation::claim_cfx(chain_sentinel, dest_evm).await
 }
 
@@ -532,6 +548,7 @@ pub async fn claim_cfx(
 pub fn recredit_failed_cfx_claim_payout(
     recovery: CfxClaimPayoutRecovery,
 ) -> Result<bool, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     let expected = read_state(|s| s.protocol_canister_id);
     if caller != expected {
@@ -547,6 +564,7 @@ pub fn recredit_failed_cfx_claim_payout(
 
 #[update]
 pub fn opt_out_collateral(collateral_type: Principal) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     // SP-102 / AR-S-002: opt-in/out changes the apportionment denominator, so
     // it must not land between a liquidation's snapshot and its apportionment
     // (escape-the-burn + aggregate drift above the ledger balance).
@@ -564,6 +582,7 @@ pub fn opt_out_collateral(collateral_type: Principal) -> Result<(), StabilityPoo
 
 #[update]
 pub fn opt_in_collateral(collateral_type: Principal) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     // SP-102 / AR-S-002: see opt_out_collateral.
     // `pool_balance_mutation_blocked` includes `liquidation_in_progress`.
     if pool_balance_mutation_blocked() {
@@ -579,6 +598,7 @@ pub fn opt_in_collateral(collateral_type: Principal) -> Result<(), StabilityPool
 
 #[update]
 pub fn opt_in_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     // SP-102 / AR-S-002: see opt_out_collateral.
     if pool_balance_mutation_blocked() {
         return Err(StabilityPoolError::SystemBusy);
@@ -600,6 +620,7 @@ pub fn opt_in_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> {
 
 #[update]
 pub fn opt_out_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     // SP-102 / AR-S-002: see opt_out_collateral.
     if pool_balance_mutation_blocked() {
         return Err(StabilityPoolError::SystemBusy);
@@ -624,6 +645,7 @@ pub fn opt_in_native_collateral(
     collateral_type: Principal,
     payout_address: String,
 ) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     opt_in_native_collateral_with_tag(collateral_type, payout_address, None)
 }
 
@@ -633,6 +655,7 @@ pub fn opt_in_native_collateral_with_tag(
     payout_address: String,
     destination_tag: Option<u32>,
 ) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     // SP-102 / AR-S-002: see opt_out_collateral.
     if pool_balance_mutation_blocked() {
         return Err(StabilityPoolError::SystemBusy);
@@ -696,6 +719,7 @@ pub fn cycle_manager_metrics() -> Vec<rumi_cycle_manager::CycleManagerMetric> {
 
 #[update]
 pub async fn ack_native_xrp_payout_settled(claim_id: u64) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     let protocol_canister_id = read_state(|s| {
         s.native_xrp_pending_payout_for(&caller, claim_id)
@@ -742,6 +766,7 @@ async fn ensure_backend_xrp_claim_absent(
 pub async fn notify_liquidatable_vaults(
     vaults: Vec<LiquidatableVaultInfo>,
 ) -> Vec<LiquidationResult> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     let expected = read_state(|s| s.protocol_canister_id);
     if caller != expected {
@@ -766,6 +791,7 @@ pub async fn notify_liquidatable_vaults(
 /// Public fallback: trigger liquidation for a specific vault.
 #[update]
 pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::liquidation::execute_liquidation(vault_id).await
 }
 
@@ -773,6 +799,7 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
 pub async fn sp_absorb_chain_vault(
     vault_id: u64,
 ) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::liquidation::sp_absorb_chain_vault(vault_id).await
 }
 
@@ -787,6 +814,7 @@ pub async fn admin_recover_ambiguous_native_xrp_burn(
     vault_id: u64,
     candidate_block_index: Option<u64>,
 ) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -805,6 +833,7 @@ pub async fn admin_recover_ambiguous_chain_burn(
     vault_id: u64,
     candidate_block_index: Option<u64>,
 ) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -817,6 +846,7 @@ pub async fn admin_recover_ambiguous_chain_burn(
 pub async fn scan_chain_absorb_candidates(
     max_per_chain: Option<u64>,
 ) -> Result<Vec<ChainSpAbsorbCandidate>, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::liquidation::scan_chain_absorb_candidates(max_per_chain).await
 }
 
@@ -824,6 +854,7 @@ pub async fn scan_chain_absorb_candidates(
 pub fn set_chain_absorb_auto_config(
     config: ChainAbsorbAutoConfig,
 ) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if caller == Principal::anonymous() {
         return Err(StabilityPoolError::Unauthorized);
@@ -859,6 +890,7 @@ pub fn receive_interest_revenue(
     _amount: u64,
     _collateral_type: Option<Principal>,
 ) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     let expected = read_state(|s| s.protocol_canister_id);
     if caller != expected {
@@ -884,16 +916,6 @@ pub async fn receive_interest_revenue_v2(
     if caller != expected {
         return Err(StabilityPoolError::Unauthorized);
     }
-    ensure_pool_balance_mutation_allowed()?;
-    if read_state(|s| s.configuration.emergency_pause) {
-        return Err(StabilityPoolError::EmergencyPaused);
-    }
-    if !read_state(|s| s.stablecoin_registry.contains_key(&token_ledger)) {
-        return Err(StabilityPoolError::TokenNotAccepted {
-            ledger: token_ledger,
-        });
-    }
-
     let payload = state::InterestMintReceiptPayload {
         token_ledger,
         amount,
@@ -901,6 +923,7 @@ pub async fn receive_interest_revenue_v2(
     };
     match read_state(|s| receipt_store::interest_mint_receipt_status(s, source_mint_block, &payload)) {
         state::InterestMintReceiptStatus::PendingForward(batch_id) => {
+            if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() { return Err(StabilityPoolError::SystemBusy); }
             return process_unallocated_interest_forward(batch_id).await;
         }
         state::InterestMintReceiptStatus::Duplicate => return Ok(()),
@@ -915,6 +938,14 @@ pub async fn receive_interest_revenue_v2(
         state::InterestMintReceiptStatus::New => {}
     }
 
+    interest_recovery::ensure_unlocked();
+    ensure_pool_balance_mutation_allowed()?;
+    let paused=read_state(|s| s.configuration.emergency_pause);
+    if paused && !interest_recovery::live() { return Err(StabilityPoolError::EmergencyPaused); }
+    if !read_state(|s| s.stablecoin_registry.contains_key(&token_ledger)) { return Err(StabilityPoolError::TokenNotAccepted { ledger: token_ledger }); }
+    if paused && !read_state(|s| s.stablecoin_registry.get(&token_ledger).is_some_and(|c|c.symbol=="icUSD" && c.decimals==8)
+        && collateral_type.is_some_and(|c|s.collateral_registry.contains_key(&c))
+        && s.has_eligible_interest_recipient(collateral_type.as_ref())) { return Err(StabilityPoolError::SystemBusy); }
     if read_state(|s| s.has_eligible_interest_recipient(collateral_type.as_ref())) {
         return match mutate_state(
             |s| match receipt_store::record_interest_mint_receipt(s, source_mint_block, state::InterestMintReceipt {
@@ -1251,6 +1282,7 @@ async fn compute_ledger_reconciliation() -> Vec<LedgerReconciliationEntry> {
 #[update]
 pub async fn get_ledger_reconciliation(
 ) -> Result<Vec<LedgerReconciliationEntry>, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1290,6 +1322,7 @@ fn setup_ledger_reconciliation_timer() {
 
 #[update]
 pub fn register_stablecoin(config: StablecoinConfig) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1308,6 +1341,7 @@ pub fn register_stablecoin(config: StablecoinConfig) -> Result<(), StabilityPool
 
 #[update]
 pub fn register_collateral(info: CollateralInfo) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1326,6 +1360,7 @@ pub fn register_collateral(info: CollateralInfo) -> Result<(), StabilityPoolErro
 
 #[update]
 pub fn register_cfx_collateral(chain_id: u32) -> Result<Principal, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1347,6 +1382,7 @@ pub fn register_cfx_collateral(chain_id: u32) -> Result<Principal, StabilityPool
 
 #[update]
 pub fn update_pool_configuration(new_config: PoolConfiguration) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1364,6 +1400,7 @@ pub fn update_pool_configuration(new_config: PoolConfiguration) -> Result<(), St
 pub fn icrc21_canister_call_consent_message(
     request: Icrc21ConsentMessageRequest,
 ) -> Icrc21ConsentMessageResponse {
+    interest_recovery::ensure_unlocked();
     let message_text = match request.method.as_str() {
         "deposit" => {
             "## Legacy Stability Pool Deposit Unavailable\n\n\
@@ -1616,6 +1653,7 @@ pub fn emergency_pause() -> Result<(), StabilityPoolError> {
 
 #[update]
 pub fn resume_operations() -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1633,6 +1671,7 @@ pub fn resume_operations() -> Result<(), StabilityPoolError> {
 /// route is unsettled, so a persisted receipt can never be retargeted.
 #[update]
 pub fn set_interest_treasury(treasury: Option<Principal>) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1648,6 +1687,7 @@ pub fn set_interest_treasury(treasury: Option<Principal>) -> Result<(), Stabilit
 /// timestamp/memo is reused, so a retry after an ambiguous response is safe.
 #[update]
 pub async fn retry_unallocated_interest_forward(batch_id: u64) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1663,6 +1703,7 @@ pub async fn confirm_unallocated_interest_forward_transfer(
     batch_id: u64,
     transfer_block_index: u64,
 ) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1681,6 +1722,7 @@ pub fn admin_correct_balance(
     token_ledger: Principal,
     correct_amount: u64,
 ) -> Result<String, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1708,6 +1750,7 @@ pub fn admin_correct_collateral_gain(
     collateral_ledger: Principal,
     correct_amount: u64,
 ) -> Result<String, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1858,3 +1901,16 @@ mod tests {
         assert!(ensure_no_pool_balance_async_in_flight().is_ok());
     }
 }
+
+// Scoped recovery endpoints. The manifest seal remains a denying preparation sentinel.
+#[update]
+pub fn stage_interest_recovery(manifest: interest_recovery::RecoveryManifest) -> Result<interest_recovery::RecoveryStatus, String> { interest_recovery::stage(manifest) }
+#[update]
+pub fn continue_interest_recovery(manifest_hash: Vec<u8>, expected_next: u16, limit: u8) -> Result<interest_recovery::RecoveryStatus, String> { interest_recovery::continue_batch(manifest_hash,expected_next,limit) }
+#[update]
+pub fn finish_interest_recovery(manifest_hash: Vec<u8>) -> Result<interest_recovery::RecoveryStatus, String> { interest_recovery::finish(manifest_hash) }
+#[query]
+pub fn get_interest_recovery_status() -> Result<Option<interest_recovery::RecoveryStatus>, String> { interest_recovery::get_status() }
+/// Replicated read for the configured backend to prove an already-applied source credit.
+#[update]
+pub fn get_interest_recovery_packet_receipt(source_mint_block: u64) -> Result<Option<interest_recovery::RecoveryPacketReceipt>, String> { interest_recovery::get_receipt(source_mint_block) }

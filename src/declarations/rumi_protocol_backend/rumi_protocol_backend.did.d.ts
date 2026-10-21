@@ -2623,6 +2623,10 @@ export interface _SERVICE {
     Result_1
   >,
   'reconcile_chain_supply' : ActorMethod<[number], Result_27>,
+  'reconcile_held_sp_interest_receipt' : ActorMethod<
+    [PendingStabilityPoolInterestNotification, Uint8Array | number[]],
+    Result_28
+  >,
   'reconcile_legacy_three_usd_refund_candidate_block' : ActorMethod<
     [bigint, bigint],
     Result_1

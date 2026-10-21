@@ -268,6 +268,48 @@ export interface InterestMintReceiptCapacity {
   'capacity' : bigint,
   'admission_blocked_reason' : [] | [string],
 }
+export interface InterestRecoveryWire_InterestMintReceiptPayload {
+  'collateral_type' : [] | [Principal],
+  'amount' : bigint,
+  'token_ledger' : Principal,
+}
+export interface InterestRecoveryWire_RecoveryManifest {
+  'packets' : Array<InterestRecoveryWire_RecoveryPacket>,
+  'baseline_digest' : Uint8Array | number[],
+}
+export interface InterestRecoveryWire_RecoveryPacket {
+  'source_mint_block' : bigint,
+  'allocations' : Array<[Principal, bigint]>,
+  'collateral_type' : Principal,
+  'amount' : bigint,
+  'token_ledger' : Principal,
+}
+export interface InterestRecoveryWire_RecoveryPacketReceipt {
+  'source_mint_block' : bigint,
+  'allocation_digest' : Uint8Array | number[],
+  'manifest_hash' : Uint8Array | number[],
+  'credited' : boolean,
+  'payload' : InterestRecoveryWire_InterestMintReceiptPayload,
+}
+export interface InterestRecoveryWire_RecoveryStatus {
+  'next_packet' : number,
+  'manifest_hash' : Uint8Array | number[],
+  'credited_raw' : bigint,
+  'packet_count' : number,
+  'live_interest_only' : boolean,
+}
+export type InterestRecoveryWire_Result_10 = {
+    'Ok' : [] | [InterestRecoveryWire_RecoveryPacketReceipt]
+  } |
+  { 'Err' : string };
+export type InterestRecoveryWire_Result_11 = {
+    'Ok' : [] | [InterestRecoveryWire_RecoveryStatus]
+  } |
+  { 'Err' : string };
+export type InterestRecoveryWire_Result_7 = {
+    'Ok' : InterestRecoveryWire_RecoveryStatus
+  } |
+  { 'Err' : string };
 export interface LedgerReconciliationEntry {
   'healthy' : boolean,
   'ledger' : Principal,
@@ -561,6 +603,10 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
+  'continue_interest_recovery' : ActorMethod<
+    [Uint8Array | number[], number, number],
+    InterestRecoveryWire_Result_7
+  >,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'deposit' : ActorMethod<
@@ -588,6 +634,10 @@ export interface _SERVICE {
     { 'Ok' : LiquidationResult } |
       { 'Err' : StabilityPoolError }
   >,
+  'finish_interest_recovery' : ActorMethod<
+    [Uint8Array | number[]],
+    InterestRecoveryWire_Result_7
+  >,
   'get_chain_absorb_auto_status' : ActorMethod<[], ChainAbsorbAutoStatus>,
   'get_chain_collateral_sentinel' : ActorMethod<[number], Principal>,
   'get_completed_chain_absorbs' : ActorMethod<
@@ -598,6 +648,14 @@ export interface _SERVICE {
   'get_interest_mint_receipt_capacity' : ActorMethod<
     [],
     InterestMintReceiptCapacity
+  >,
+  'get_interest_recovery_packet_receipt' : ActorMethod<
+    [bigint],
+    InterestRecoveryWire_Result_10
+  >,
+  'get_interest_recovery_status' : ActorMethod<
+    [],
+    InterestRecoveryWire_Result_11
   >,
   'get_ledger_reconciliation' : ActorMethod<
     [],
@@ -741,6 +799,10 @@ export interface _SERVICE {
     [bigint],
     { 'Ok' : ChainSpAbsorbResult } |
       { 'Err' : StabilityPoolError }
+  >,
+  'stage_interest_recovery' : ActorMethod<
+    [InterestRecoveryWire_RecoveryManifest],
+    InterestRecoveryWire_Result_7
   >,
   'update_pool_configuration' : ActorMethod<
     [PoolConfiguration],

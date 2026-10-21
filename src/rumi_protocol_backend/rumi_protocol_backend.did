@@ -2274,6 +2274,10 @@ service : (ProtocolArg) -> {
   rearm_unsent_v2_default_account_refund : (nat) -> (Result_1);
   reconcile_amm1_donation_mint_candidate_block : (nat64, nat64) -> (Result_1);
   reconcile_chain_supply : (nat32) -> (Result_27);
+  reconcile_held_sp_interest_receipt : (
+      PendingStabilityPoolInterestNotification,
+      blob,
+    ) -> (Result_28);
   reconcile_legacy_three_usd_refund_candidate_block : (nat, nat64) -> (
       Result_1,
     );

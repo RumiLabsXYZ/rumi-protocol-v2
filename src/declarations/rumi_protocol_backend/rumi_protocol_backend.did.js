@@ -2849,6 +2849,11 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'reconcile_chain_supply' : IDL.Func([IDL.Nat32], [Result_27], []),
+    'reconcile_held_sp_interest_receipt' : IDL.Func(
+        [PendingStabilityPoolInterestNotification, IDL.Vec(IDL.Nat8)],
+        [Result_28],
+        [],
+      ),
     'reconcile_legacy_three_usd_refund_candidate_block' : IDL.Func(
         [IDL.Nat, IDL.Nat64],
         [Result_1],

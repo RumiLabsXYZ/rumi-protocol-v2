@@ -73,6 +73,17 @@ export const idlFactory = ({ IDL }) => {
     'icusd_burned_e8s' : IDL.Nat64,
     'success' : IDL.Bool,
   });
+  const InterestRecoveryWire_RecoveryStatus = IDL.Record({
+    'next_packet' : IDL.Nat16,
+    'manifest_hash' : IDL.Vec(IDL.Nat8),
+    'credited_raw' : IDL.Nat64,
+    'packet_count' : IDL.Nat16,
+    'live_interest_only' : IDL.Bool,
+  });
+  const InterestRecoveryWire_Result_7 = IDL.Variant({
+    'Ok' : InterestRecoveryWire_RecoveryStatus,
+    'Err' : IDL.Text,
+  });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -201,6 +212,26 @@ export const idlFactory = ({ IDL }) => {
     'legacy_floor' : IDL.Opt(IDL.Nat64),
     'capacity' : IDL.Nat64,
     'admission_blocked_reason' : IDL.Opt(IDL.Text),
+  });
+  const InterestRecoveryWire_InterestMintReceiptPayload = IDL.Record({
+    'collateral_type' : IDL.Opt(IDL.Principal),
+    'amount' : IDL.Nat64,
+    'token_ledger' : IDL.Principal,
+  });
+  const InterestRecoveryWire_RecoveryPacketReceipt = IDL.Record({
+    'source_mint_block' : IDL.Nat64,
+    'allocation_digest' : IDL.Vec(IDL.Nat8),
+    'manifest_hash' : IDL.Vec(IDL.Nat8),
+    'credited' : IDL.Bool,
+    'payload' : InterestRecoveryWire_InterestMintReceiptPayload,
+  });
+  const InterestRecoveryWire_Result_10 = IDL.Variant({
+    'Ok' : IDL.Opt(InterestRecoveryWire_RecoveryPacketReceipt),
+    'Err' : IDL.Text,
+  });
+  const InterestRecoveryWire_Result_11 = IDL.Variant({
+    'Ok' : IDL.Opt(InterestRecoveryWire_RecoveryStatus),
+    'Err' : IDL.Text,
   });
   const LedgerReconciliationEntry = IDL.Record({
     'healthy' : IDL.Bool,
@@ -536,6 +567,17 @@ export const idlFactory = ({ IDL }) => {
     'vault' : ChainLiquidatableVaultInfo,
     'pending_status' : IDL.Opt(ChainSpAbsorbIntentStatus),
   });
+  const InterestRecoveryWire_RecoveryPacket = IDL.Record({
+    'source_mint_block' : IDL.Nat64,
+    'allocations' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
+    'collateral_type' : IDL.Principal,
+    'amount' : IDL.Nat64,
+    'token_ledger' : IDL.Principal,
+  });
+  const InterestRecoveryWire_RecoveryManifest = IDL.Record({
+    'packets' : IDL.Vec(InterestRecoveryWire_RecoveryPacket),
+    'baseline_digest' : IDL.Vec(IDL.Nat8),
+  });
   const PoolConfiguration = IDL.Record({
     'emergency_pause' : IDL.Bool,
     'min_deposit_e8s' : IDL.Nat64,
@@ -623,6 +665,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
         [],
       ),
+    'continue_interest_recovery' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Nat16, IDL.Nat8],
+        [InterestRecoveryWire_Result_7],
+        [],
+      ),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],
@@ -659,6 +706,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : LiquidationResult, 'Err' : StabilityPoolError })],
         [],
       ),
+    'finish_interest_recovery' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [InterestRecoveryWire_Result_7],
+        [],
+      ),
     'get_chain_absorb_auto_status' : IDL.Func(
         [],
         [ChainAbsorbAutoStatus],
@@ -678,6 +730,16 @@ export const idlFactory = ({ IDL }) => {
     'get_interest_mint_receipt_capacity' : IDL.Func(
         [],
         [InterestMintReceiptCapacity],
+        ['query'],
+      ),
+    'get_interest_recovery_packet_receipt' : IDL.Func(
+        [IDL.Nat64],
+        [InterestRecoveryWire_Result_10],
+        [],
+      ),
+    'get_interest_recovery_status' : IDL.Func(
+        [],
+        [InterestRecoveryWire_Result_11],
         ['query'],
       ),
     'get_ledger_reconciliation' : IDL.Func(
@@ -865,6 +927,11 @@ export const idlFactory = ({ IDL }) => {
             'Err' : StabilityPoolError,
           }),
         ],
+        [],
+      ),
+    'stage_interest_recovery' : IDL.Func(
+        [InterestRecoveryWire_RecoveryManifest],
+        [InterestRecoveryWire_Result_7],
         [],
       ),
     'update_pool_configuration' : IDL.Func(

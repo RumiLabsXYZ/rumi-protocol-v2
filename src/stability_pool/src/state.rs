@@ -292,6 +292,12 @@ pub struct StabilityPoolState {
     /// Immutable boundary for history the old rolling replay set may have evicted.
     #[serde(default)]
     pub legacy_interest_mint_receipt_floor: Option<LegacyInterestMintReceiptFloor>,
+    /// Retained sealed packet allocations, cursor and positive per-source audit.
+    #[serde(default)]
+    pub interest_recovery: Option<crate::interest_recovery::RecoveryProgress>,
+    /// Hold all unrelated mutations immediately after this scoped repair upgrade.
+    #[serde(default)]
+    pub interest_recovery_bootstrap_hold: Option<bool>,
 }
 
 impl Default for StabilityPoolState {
@@ -351,6 +357,8 @@ impl Default for StabilityPoolState {
             processed_interest_mint_blocks: Some(BTreeSet::new()),
             processed_interest_mint_block_high_watermark: None,
             legacy_interest_mint_receipt_floor: Some(LegacyInterestMintReceiptFloor { through: None }),
+            interest_recovery: None,
+            interest_recovery_bootstrap_hold: None,
         }
     }
 }
@@ -4631,6 +4639,8 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             processed_interest_mint_blocks: Some(BTreeSet::new()),
             processed_interest_mint_block_high_watermark: None,
             legacy_interest_mint_receipt_floor: Some(LegacyInterestMintReceiptFloor { through: None }),
+            interest_recovery: None,
+            interest_recovery_bootstrap_hold: None,
         }
     }
 }

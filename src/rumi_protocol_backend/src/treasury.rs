@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::logs::INFO;
 use crate::management;
 use crate::numeric::ICUSD;
-use crate::state::read_state;
+use crate::state::{read_state, mutate_state};
 
 const BORROWING_FEE_ONCE_METHOD: &str = "deposit_borrowing_fee_once";
 const INTEREST_REVENUE_ONCE_METHOD: &str = "deposit_interest_revenue_once";
@@ -4487,4 +4487,59 @@ mod treasury_interest_mint_tests {
         assert_eq!(row.route, TreasuryInterestMintRoute::StabilityPool { collateral_type: collateral });
         assert_eq!(remaining, 265);
     }
+}
+
+/// Exact proposed recovery manifest seal; no production execution authority.
+const SP_INTEREST_RECOVERY_MANIFEST_HASH: [u8; 32] = [19, 250, 86, 84, 132, 109, 129, 109, 141, 235, 248, 222, 84, 76, 53, 143, 19, 210, 88, 116, 163, 110, 49, 174, 53, 34, 95, 172, 63, 186, 97, 131];
+
+#[derive(candid::CandidType, serde::Deserialize)]
+struct RecoveryInterestPayload {
+    token_ledger: Principal,
+    amount: u64,
+    collateral_type: Option<Principal>,
+}
+#[derive(candid::CandidType, serde::Deserialize)]
+struct RecoveryInterestReceipt {
+    manifest_hash: Vec<u8>,
+    source_mint_block: u64,
+    payload: RecoveryInterestPayload,
+    allocation_digest: Vec<u8>,
+    credited: bool,
+}
+
+/// Receipt-only reconciliation of one held legacy row. No mint, transfer,
+/// notification replay, version promotion or blind deletion is available.
+pub async fn reconcile_held_sp_interest_receipt(
+    caller: Principal,
+    notification: crate::state::PendingStabilityPoolInterestNotification,
+    manifest_hash: Vec<u8>,
+) -> Result<bool, crate::ProtocolError> {
+    let invalid=|reason:&str|crate::ProtocolError::GenericError(reason.to_string());
+    if SP_INTEREST_RECOVERY_MANIFEST_HASH==[0;32]
+        || manifest_hash.as_slice()!=SP_INTEREST_RECOVERY_MANIFEST_HASH.as_slice()
+        || notification.receipt_protocol_version.is_some() {
+        return Err(invalid("Only a sealed unversioned recovery tuple may be reconciled"));
+    }
+    let authorized=||read_state(|s|caller!=Principal::anonymous() && caller==s.developer_principal
+        && s.stability_pool_canister==Some(notification.pool_principal)
+        && s.icusd_ledger_principal==notification.token_ledger);
+    if !authorized(){return Err(invalid("Recovery caller or receiver binding changed"));}
+    let key=(notification.pool_principal,notification.token_ledger,notification.source_mint_block);
+    let _guard=InterestNotificationGuard::try_new(key).ok_or_else(||invalid("Notification already in flight"))?;
+    let existing=read_state(|s|s.pending_stability_pool_interest_notifications.get(&notification.source_mint_block).cloned());
+    if existing.as_ref().is_some_and(|row|row!=&notification){return Err(invalid("Retained notification differs from exact recovery tuple"));}
+    let response:Result<(Result<Option<RecoveryInterestReceipt>,String>,),_>=ic_cdk::call(
+        notification.pool_principal,"get_interest_recovery_packet_receipt",(notification.source_mint_block,)).await;
+    let receipt=match response {Ok((Ok(Some(receipt)),))=>receipt,_=>return Err(invalid("No positive exact receiver receipt; row retained"))};
+    if !receipt.credited || receipt.manifest_hash!=manifest_hash || receipt.source_mint_block!=notification.source_mint_block
+        || receipt.payload.token_ledger!=notification.token_ledger || receipt.payload.amount!=notification.amount_e8s
+        || receipt.payload.collateral_type!=Some(notification.collateral_type) || receipt.allocation_digest.len()!=32 {
+        return Err(invalid("Receiver receipt conflicts with sealed recovery tuple; row retained"));
+    }
+    if !authorized(){return Err(invalid("Recovery authority changed during receiver verification"));}
+    mutate_state(|s|match s.pending_stability_pool_interest_notifications.get(&notification.source_mint_block) {
+        Some(current) if current==&notification=>{s.pending_stability_pool_interest_notifications.remove(&notification.source_mint_block);Ok(true)},
+        None=>Ok(false), // Positive receipt was still verified on this repeated call.
+        _=>Err(invalid("Notification changed during receipt verification; retained")),
+    })
 }

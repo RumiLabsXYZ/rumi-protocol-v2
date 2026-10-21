@@ -19947,3 +19947,15 @@ mod reserve_redemption_status_tests {
         }
     }
 }
+
+/// Reconcile only a held legacy tuple after a positive sealed receiver credit.
+#[candid_method(update)]
+#[update]
+async fn reconcile_held_sp_interest_receipt(
+    notification: rumi_protocol_backend::state::PendingStabilityPoolInterestNotification,
+    manifest_hash: Vec<u8>,
+) -> Result<bool, ProtocolError> {
+    let caller=ic_cdk::api::caller();
+    if !read_state(|s|can_inspect_held_interest_notifications(caller,s.developer_principal)) { return Err(ProtocolError::GenericError("Only developer may reconcile a held interest receipt".into())); }
+    rumi_protocol_backend::treasury::reconcile_held_sp_interest_receipt(caller,notification,manifest_hash).await
+}
