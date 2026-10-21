@@ -2033,8 +2033,12 @@ export interface TreasuryInterestMintRecoveryRow {
   'phase' : TreasuryInterestMintPhase,
   'absence_scan' : [] | [BorrowMintAbsenceScan],
   'history_floor' : [] | [bigint],
+  'route' : TreasuryInterestMintRoute,
   'treasury' : Principal,
 }
+export type TreasuryInterestMintRoute = { 'ThreePool' : null } |
+  { 'StabilityPool' : { 'collateral_type' : Principal } } |
+  { 'Treasury' : null };
 export interface TreasuryStableTransferJournal {
   'asset_type' : AssetType,
   'source' : TreasuryStableTransferSource,

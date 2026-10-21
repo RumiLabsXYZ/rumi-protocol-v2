@@ -32,6 +32,9 @@ const MAX_TREASURY_INTEREST_RECOVERY_PAGE: u16 = 100;
 pub struct TreasuryInterestMintRecoveryRow {
     pub tuple: crate::state::BorrowMintTuple,
     pub treasury: Principal,
+    /// Exact retained destination semantics, including the source collateral
+    /// needed to reconcile delayed Stability Pool credits without guessing.
+    pub route: crate::state::TreasuryInterestMintRoute,
     pub phase: crate::state::TreasuryInterestMintPhase,
     pub history_floor: Option<u64>,
     pub expiry_proven: bool,
@@ -61,6 +64,7 @@ pub fn treasury_interest_mint_recovery_page(
             items.push(TreasuryInterestMintRecoveryRow {
                 tuple: row.tuple.clone(),
                 treasury: row.treasury,
+                route: row.route.clone(),
                 phase: row.phase.clone(),
                 history_floor: row.history_floor,
                 expiry_proven: row.expiry_proven,
