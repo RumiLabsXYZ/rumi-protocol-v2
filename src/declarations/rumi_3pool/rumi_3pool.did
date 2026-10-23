@@ -666,6 +666,91 @@ type SwapTransferV1 = record {
   created_at_time : nat64;
   amount : nat;
 };
+type ThreepoolRailWire_Account = record { owner : principal; subaccount : opt blob };
+type ThreepoolRailWire_AddLiquidityRequestV1 = record {
+  source_subaccount : opt blob;
+  min_lp : nat;
+  amounts : vec nat;
+  max_transfer_fee : opt nat;
+  intent_id : blob;
+};
+type ThreepoolRailWire_LiquidityLegStatusV1 = variant {
+  Skipped;
+  Refunded;
+  Confirmed : record { block : nat };
+  Prepared;
+  Unresolved : record { reason : text };
+  RejectedNoTransfer : record { reason : text };
+  Submitted;
+};
+type ThreepoolRailWire_LiquidityReceiptErrorV1 = variant {
+  RecoveryRequired;
+  Concurrent;
+  CapacityExceeded;
+  IntentConflict;
+  NotFound;
+  PoolLocked;
+  Unauthorized;
+  InvalidRequest;
+  InvalidIntentId;
+};
+type ThreepoolRailWire_LiquidityReceiptStatusV1 = variant {
+  Refunded;
+  RecoveryPending;
+  Executing;
+  Prepared;
+  Rejected;
+  Completed;
+};
+type ThreepoolRailWire_LiquidityReceiptV1 = record {
+  status : ThreepoolRailWire_LiquidityReceiptStatusV1;
+  balances_after : opt vec nat;
+  old_caller_lp : opt nat;
+  imbalance_after : opt nat64;
+  input_ids : vec opt nat64;
+  refund_transfers : vec opt ThreepoolRailWire_PayoutTransfer;
+  is_rebalancing : opt bool;
+  mint_event_id : opt nat64;
+  owner : principal;
+  old_balances : opt vec nat;
+  input_status : vec opt ThreepoolRailWire_LiquidityLegStatusV1;
+  request : ThreepoolRailWire_AddLiquidityRequestV1;
+  input_transfers : vec opt ThreepoolRailWire_PayoutInputTransfer;
+  fee_bps : opt nat16;
+  error : opt text;
+  imbalance_before : opt nat64;
+  refund_ids : vec opt nat64;
+  version : nat16;
+  compensation_started : bool;
+  lp_supply_after : opt nat;
+  refund_status : vec opt ThreepoolRailWire_LiquidityLegStatusV1;
+  caller_lp_after : opt nat;
+  old_lp_supply : opt nat;
+  lp_minted : opt nat;
+};
+type ThreepoolRailWire_PayoutInputTransfer = record {
+  to : ThreepoolRailWire_Account;
+  fee : opt nat;
+  from : ThreepoolRailWire_Account;
+  memo : opt blob;
+  ledger : principal;
+  created_at_time : nat64;
+  amount : nat;
+};
+type ThreepoolRailWire_PayoutTransfer = record {
+  to : ThreepoolRailWire_Account;
+  fee : nat;
+  net : nat;
+  from : ThreepoolRailWire_Account;
+  memo : blob;
+  ledger : principal;
+  gross : nat;
+  created_at_time : nat64;
+};
+type ThreepoolRailWire_Result_2 = variant {
+  Ok : ThreepoolRailWire_LiquidityReceiptV1;
+  Err : ThreepoolRailWire_LiquidityReceiptErrorV1;
+};
 
 service : (ThreePoolInitArgs) -> {
   get_swap_receipt_v1 : (blob) -> (opt SwapReceiptV1) query;
@@ -772,4 +857,7 @@ service : (ThreePoolInitArgs) -> {
   icrc3_get_archives : (GetArchivesArgs) -> (GetArchivesResult) query;
   icrc3_get_tip_certificate : () -> (opt Icrc3DataCertificate) query;
   icrc3_supported_block_types : () -> (vec SupportedBlockType) query;
-}
+add_liquidity_with_receipt_v1 : (ThreepoolRailWire_AddLiquidityRequestV1) -> (ThreepoolRailWire_Result_2);
+get_liquidity_receipt_v1 : (blob) -> (opt ThreepoolRailWire_LiquidityReceiptV1) query;
+recover_liquidity_receipt_v1 : (blob) -> (ThreepoolRailWire_Result_2);
+reconcile_liquidity_receipt_input_v1 : (blob, nat8, nat64) -> (ThreepoolRailWire_Result_2);}

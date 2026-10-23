@@ -47,6 +47,94 @@ export const idlFactory = ({ IDL }) => {
       'required' : IDL.Nat,
     }),
   });
+  const ThreepoolRailWire_AddLiquidityRequestV1 = IDL.Record({
+    'source_subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'min_lp' : IDL.Nat,
+    'amounts' : IDL.Vec(IDL.Nat),
+    'max_transfer_fee' : IDL.Opt(IDL.Nat),
+    'intent_id' : IDL.Vec(IDL.Nat8),
+  });
+  const ThreepoolRailWire_LiquidityReceiptStatusV1 = IDL.Variant({
+    'Refunded' : IDL.Null,
+    'RecoveryPending' : IDL.Null,
+    'Executing' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'Rejected' : IDL.Null,
+    'Completed' : IDL.Null,
+  });
+  const ThreepoolRailWire_Account = IDL.Record({
+    'owner' : IDL.Principal,
+    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+  });
+  const ThreepoolRailWire_PayoutTransfer = IDL.Record({
+    'to' : ThreepoolRailWire_Account,
+    'fee' : IDL.Nat,
+    'net' : IDL.Nat,
+    'from' : ThreepoolRailWire_Account,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'ledger' : IDL.Principal,
+    'gross' : IDL.Nat,
+    'created_at_time' : IDL.Nat64,
+  });
+  const ThreepoolRailWire_LiquidityLegStatusV1 = IDL.Variant({
+    'Skipped' : IDL.Null,
+    'Refunded' : IDL.Null,
+    'Confirmed' : IDL.Record({ 'block' : IDL.Nat }),
+    'Prepared' : IDL.Null,
+    'Unresolved' : IDL.Record({ 'reason' : IDL.Text }),
+    'RejectedNoTransfer' : IDL.Record({ 'reason' : IDL.Text }),
+    'Submitted' : IDL.Null,
+  });
+  const ThreepoolRailWire_PayoutInputTransfer = IDL.Record({
+    'to' : ThreepoolRailWire_Account,
+    'fee' : IDL.Opt(IDL.Nat),
+    'from' : ThreepoolRailWire_Account,
+    'memo' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'ledger' : IDL.Principal,
+    'created_at_time' : IDL.Nat64,
+    'amount' : IDL.Nat,
+  });
+  const ThreepoolRailWire_LiquidityReceiptV1 = IDL.Record({
+    'status' : ThreepoolRailWire_LiquidityReceiptStatusV1,
+    'balances_after' : IDL.Opt(IDL.Vec(IDL.Nat)),
+    'old_caller_lp' : IDL.Opt(IDL.Nat),
+    'imbalance_after' : IDL.Opt(IDL.Nat64),
+    'input_ids' : IDL.Vec(IDL.Opt(IDL.Nat64)),
+    'refund_transfers' : IDL.Vec(IDL.Opt(ThreepoolRailWire_PayoutTransfer)),
+    'is_rebalancing' : IDL.Opt(IDL.Bool),
+    'mint_event_id' : IDL.Opt(IDL.Nat64),
+    'owner' : IDL.Principal,
+    'old_balances' : IDL.Opt(IDL.Vec(IDL.Nat)),
+    'input_status' : IDL.Vec(IDL.Opt(ThreepoolRailWire_LiquidityLegStatusV1)),
+    'request' : ThreepoolRailWire_AddLiquidityRequestV1,
+    'input_transfers' : IDL.Vec(IDL.Opt(ThreepoolRailWire_PayoutInputTransfer)),
+    'fee_bps' : IDL.Opt(IDL.Nat16),
+    'error' : IDL.Opt(IDL.Text),
+    'imbalance_before' : IDL.Opt(IDL.Nat64),
+    'refund_ids' : IDL.Vec(IDL.Opt(IDL.Nat64)),
+    'version' : IDL.Nat16,
+    'compensation_started' : IDL.Bool,
+    'lp_supply_after' : IDL.Opt(IDL.Nat),
+    'refund_status' : IDL.Vec(IDL.Opt(ThreepoolRailWire_LiquidityLegStatusV1)),
+    'caller_lp_after' : IDL.Opt(IDL.Nat),
+    'old_lp_supply' : IDL.Opt(IDL.Nat),
+    'lp_minted' : IDL.Opt(IDL.Nat),
+  });
+  const ThreepoolRailWire_LiquidityReceiptErrorV1 = IDL.Variant({
+    'RecoveryRequired' : IDL.Null,
+    'Concurrent' : IDL.Null,
+    'CapacityExceeded' : IDL.Null,
+    'IntentConflict' : IDL.Null,
+    'NotFound' : IDL.Null,
+    'PoolLocked' : IDL.Null,
+    'Unauthorized' : IDL.Null,
+    'InvalidRequest' : IDL.Null,
+    'InvalidIntentId' : IDL.Null,
+  });
+  const ThreepoolRailWire_Result_2 = IDL.Variant({
+    'Ok' : ThreepoolRailWire_LiquidityReceiptV1,
+    'Err' : ThreepoolRailWire_LiquidityReceiptErrorV1,
+  });
   const AuthorizedRedeemAndBurnArgs = IDL.Record({
     'token_amount' : IDL.Nat,
     'lp_amount' : IDL.Nat,
@@ -645,6 +733,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : ThreePoolError })],
         [],
       ),
+    'add_liquidity_with_receipt_v1' : IDL.Func(
+        [ThreepoolRailWire_AddLiquidityRequestV1],
+        [ThreepoolRailWire_Result_2],
+        [],
+      ),
     'authorized_redeem_and_burn' : IDL.Func(
         [AuthorizedRedeemAndBurnArgs],
         [IDL.Variant({ 'Ok' : RedeemAndBurnResult, 'Err' : ThreePoolError })],
@@ -760,6 +853,11 @@ export const idlFactory = ({ IDL }) => {
     'get_liquidity_events_v2_forward' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [ForwardLiquidityEventsV2],
+        ['query'],
+      ),
+    'get_liquidity_receipt_v1' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [IDL.Opt(ThreepoolRailWire_LiquidityReceiptV1)],
         ['query'],
       ),
     'get_lp_balance' : IDL.Func([IDL.Principal], [IDL.Nat], ['query']),
@@ -948,6 +1046,16 @@ export const idlFactory = ({ IDL }) => {
     'reconcile_aged_payout' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
+        [],
+      ),
+    'reconcile_liquidity_receipt_input_v1' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Nat8, IDL.Nat64],
+        [ThreepoolRailWire_Result_2],
+        [],
+      ),
+    'recover_liquidity_receipt_v1' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [ThreepoolRailWire_Result_2],
         [],
       ),
     'remove_authorized_burn_caller' : IDL.Func(

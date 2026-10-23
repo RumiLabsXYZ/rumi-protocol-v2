@@ -880,7 +880,21 @@ async fn pool_route_and_quote(
             .await
             .map_err(|(_, message)| format!("calc_add_liquidity_query failed: {message}"))?;
     let quoted = quoted.map_err(|error| format!("3pool quote rejected: {error:?}"))?;
+    // The 3pool query treats the minimum as an input hint and may return a
+    // quote below it.  Enforce the caller's floor here, before this shared
+    // helper can be reached by either the public quote path or the funded
+    // conversion path.
+    ensure_quote_meets_min_lp(quoted, min_lp)?;
     Ok((coin_index as u8, quoted))
+}
+
+fn ensure_quote_meets_min_lp(quoted_lp: u128, min_lp: u128) -> Result<(), String> {
+    if quoted_lp < min_lp {
+        return Err(format!(
+            "3pool quote {quoted_lp} is below requested minimum LP {min_lp}"
+        ));
+    }
+    Ok(())
 }
 
 pub async fn quote_conversion(
@@ -2418,6 +2432,21 @@ mod tests {
         assert_eq!(fee_budget(0).unwrap(), 0);
         assert_eq!(fee_budget(7).unwrap(), 35);
         assert!(fee_budget(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn quote_minimum_equality_is_accepted() {
+        assert!(ensure_quote_meets_min_lp(1_999_602_769, 1_999_602_769).is_ok());
+    }
+
+    #[test]
+    fn quote_above_minimum_is_accepted() {
+        assert!(ensure_quote_meets_min_lp(1_999_602_770, 1_999_602_769).is_ok());
+    }
+
+    #[test]
+    fn quote_below_minimum_is_rejected() {
+        assert!(ensure_quote_meets_min_lp(1_999_602_768, 1_999_602_769).is_err());
     }
 
     #[test]
