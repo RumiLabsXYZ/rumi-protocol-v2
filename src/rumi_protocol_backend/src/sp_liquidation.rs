@@ -1052,7 +1052,7 @@ async fn settle_post_accounting(
         // ledger await, after any interest-distribution await. Once the
         // attempted fence is set, every retry reuses that exact nonce and
         // timestamp; a pre-dispatch quote can never age into a TooOld tuple.
-        let tuple = mutate_state(|state| {
+        let tuple = mutate_state(|state| -> Result<Option<(Principal, u64, u128)>, ProtocolError> {
             let snapshot = state.sp_liquidation_journals.get(&key).cloned().ok_or_else(|| {
                 ProtocolError::TemporarilyUnavailable("SP liquidation journal disappeared".into())
             })?;
