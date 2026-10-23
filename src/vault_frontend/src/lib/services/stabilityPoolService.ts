@@ -6,7 +6,7 @@ import { walletSessionGeneration } from './auth';
 import { get } from 'svelte/store';
 import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
-import { getOisySignerAgent, createOisyActor } from './oisySigner';
+import { getOisySignerAgent, createOisyActor, openOisySignerChannel } from './oisySigner';
 import {
   ackNativeXrpPayoutSettledWithActor,
   getMyNativeXrpPayoutsWithActor,
@@ -384,6 +384,18 @@ export function captureStabilityPoolActionContext(
     action,
     oisy: isOisyWallet(),
   });
+}
+
+/**
+ * Enter Oisy's signer channel while the caller is still inside the wallet
+ * button's user-gesture handler. The returned promise may be awaited only
+ * after this function has been invoked; putting the call behind a Web Locks
+ * callback or an async actor lookup is too late for PostMessageTransport's
+ * click guard. Non-signer wallets do not need a channel entry.
+ */
+export function prepareStabilityPoolOisySignerChannel(principal: Principal): Promise<void> {
+  if (!isOisyWallet()) return Promise.resolve();
+  return openOisySignerChannel(principal);
 }
 
 /** Pure validation for the click-time identity and operation parameters. */

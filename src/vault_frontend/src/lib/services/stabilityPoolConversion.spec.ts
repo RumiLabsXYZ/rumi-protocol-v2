@@ -28,6 +28,7 @@ import {
   parseExactTokenAmount,
   readPendingStabilityPoolConversion,
   convertStabilityPoolStableTo3Usd,
+  resumePendingStabilityPoolConversion,
   quoteStabilityPoolConversion,
   type StabilityPoolConversionStatus,
   type PendingStabilityPoolConversion,
@@ -53,6 +54,28 @@ function quote() {
 }
 
 function pendingStatus(seq = 1n) { return { Pending: { intent_seq: seq, phase: { Pulling: null }, reason: [] } }; }
+
+function pendingApproval(overrides: Partial<PendingStabilityPoolConversion> = {}): PendingStabilityPoolConversion {
+  return {
+    owner: mocks.ownerText,
+    ledger: mocks.ledgerText,
+    principalRaw: '1000000',
+    maxFeeBudgetRaw: '50',
+    minLp: '980100',
+    intentSeq: '7',
+    walletIcon: 'plug',
+    oisy: false,
+    createdAt: Date.now(),
+    stage: 'new',
+    approvalFeeRaw: '10',
+    approvalAmountRaw: '1000060',
+    approvalSpender: 'aaaaa-aa',
+    approvalMemoHex: '11'.repeat(32),
+    approvalCreatedAtNs: (BigInt(Date.now()) * 1_000_000n - 1_000_000n).toString(),
+    approvalExpiresAtNs: (BigInt(Date.now() + 10 * 60 * 1000) * 1_000_000n).toString(),
+    ...overrides,
+  };
+}
 
 beforeEach(() => {
   localStorage.clear();
@@ -150,6 +173,52 @@ describe('stability pool conversion recovery boundaries', () => {
     expect(args.memo[0]).toHaveLength(32);
   });
 
+  it.each([
+    ['rejected', { Err: { TemporarilyUnavailable: null } }],
+    ['cancelled', new Error('User rejected the wallet approval')],
+  ])('can Resume after the first wallet approval is %s without allocating a new sequence', async (_label, firstApprovalResult) => {
+    mocks.ledgerActor.icrc2_approve.mockImplementationOnce(async () => {
+      if (firstApprovalResult instanceof Error) throw firstApprovalResult;
+      return firstApprovalResult;
+    }).mockResolvedValueOnce({ Ok: 1n });
+    mocks.poolActor.start_3usd_conversion.mockResolvedValueOnce(pendingStatus(1n));
+
+    await expect(convertStabilityPoolStableTo3Usd(quote(), 980100n, context())).rejects.toThrow();
+    expect(readPendingStabilityPoolConversion(mocks.ownerText)).toMatchObject({ intentSeq: '1', stage: 'new' });
+
+    const status = await resumePendingStabilityPoolConversion(context());
+    expect('Pending' in (status as StabilityPoolConversionStatus)).toBe(true);
+    expect(mocks.poolActor.get_3usd_conversion_next_seq).toHaveBeenCalledOnce();
+    expect(mocks.ledgerActor.icrc2_approve).toHaveBeenCalledTimes(2);
+    expect(mocks.ledgerActor.icrc2_approve.mock.calls[1][0]).toEqual(mocks.ledgerActor.icrc2_approve.mock.calls[0][0]);
+    expect(mocks.poolActor.start_3usd_conversion).toHaveBeenCalledOnce();
+    expect(mocks.poolActor.start_3usd_conversion.mock.calls[0][0].intent_seq).toBe(1n);
+  });
+
+  it('refreshes only an expired wallet approval tuple while retaining the backend intent', async () => {
+    localStorage.setItem(`rumi:stability-pool:pending-conversion:${mocks.ownerText}`, JSON.stringify(pendingApproval({
+      approvalExpiresAtNs: '1',
+    })));
+    mocks.ledgerActor.icrc2_approve.mockResolvedValueOnce({ Ok: 1n });
+    mocks.poolActor.start_3usd_conversion.mockResolvedValueOnce(pendingStatus(7n));
+
+    const status = await resumePendingStabilityPoolConversion(context());
+    expect('Pending' in (status as StabilityPoolConversionStatus)).toBe(true);
+    expect(mocks.poolActor.get_3usd_conversion_next_seq).not.toHaveBeenCalled();
+    expect(mocks.ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
+    const args = mocks.ledgerActor.icrc2_approve.mock.calls[0][0];
+    expect(args.amount).toBe(1_000_060n);
+    expect(args.memo[0]).not.toEqual(new Uint8Array(32).fill(0x11));
+    expect(args.expires_at[0]).toBeGreaterThan(BigInt(Date.now()) * 1_000_000n);
+    expect(mocks.poolActor.start_3usd_conversion).toHaveBeenCalledWith({
+      intent_seq: 7n,
+      token_ledger: Principal.fromText(mocks.ledgerText),
+      principal_raw: 1_000_000n,
+      max_fee_budget_raw: 50n,
+      min_lp: 980100n,
+    });
+  });
+
   it('acknowledges only an authenticated duplicate for the exact approval tuple', async () => {
     mocks.ledgerActor.icrc2_approve.mockResolvedValueOnce({ Err: { Duplicate: { duplicate_of: 12_345n } } });
     mocks.poolActor.start_3usd_conversion.mockResolvedValueOnce(pendingStatus(1n));
@@ -179,6 +248,63 @@ describe('stability pool conversion recovery boundaries', () => {
     expect(mocks.poolActor.get_3usd_conversion_next_seq).not.toHaveBeenCalled();
     expect(mocks.ledgerActor.icrc2_approve).not.toHaveBeenCalled();
     expect(readPendingStabilityPoolConversion(mocks.ownerText)).toBeNull();
+  });
+
+  it('replays the same request when the backend is unknown without allocating a new sequence', async () => {
+    localStorage.setItem(`rumi:stability-pool:pending-conversion:${mocks.ownerText}`, JSON.stringify(pendingApproval({ stage: 'approval-submitted' })));
+    mocks.poolActor.resume_3usd_conversion.mockResolvedValueOnce({ Err: { NotFound: null } });
+    mocks.poolActor.get_3usd_conversion_status.mockResolvedValueOnce({ Err: { NotFound: null } });
+    mocks.poolActor.start_3usd_conversion.mockResolvedValueOnce(pendingStatus(7n));
+
+    const status = await resumePendingStabilityPoolConversion(context());
+    expect('Pending' in (status as StabilityPoolConversionStatus)).toBe(true);
+    expect(mocks.poolActor.get_3usd_conversion_next_seq).not.toHaveBeenCalled();
+    expect(mocks.ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(mocks.poolActor.start_3usd_conversion).toHaveBeenCalledOnce();
+    expect(mocks.poolActor.start_3usd_conversion.mock.calls[0][0].intent_seq).toBe(7n);
+  });
+
+  it.each(['approval-submitted', 'start-submitted'] as const)(
+    'renews an expired wallet approval for an authoritative NotFound at stage %s without changing the intent',
+    async stage => {
+      localStorage.setItem(`rumi:stability-pool:pending-conversion:${mocks.ownerText}`, JSON.stringify(pendingApproval({
+        stage,
+        approvalExpiresAtNs: '1',
+      })));
+      mocks.poolActor.resume_3usd_conversion.mockResolvedValueOnce({ Err: { NotFound: null } });
+      mocks.poolActor.get_3usd_conversion_status.mockResolvedValueOnce({ Err: { NotFound: null } });
+      mocks.poolActor.start_3usd_conversion.mockResolvedValueOnce(pendingStatus(7n));
+
+      const status = await resumePendingStabilityPoolConversion(context());
+      expect('Pending' in (status as StabilityPoolConversionStatus)).toBe(true);
+      expect(mocks.poolActor.get_3usd_conversion_next_seq).not.toHaveBeenCalled();
+      expect(mocks.ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
+      expect(mocks.ledgerActor.icrc2_approve.mock.calls[0][0].amount).toBe(1_000_060n);
+      expect(mocks.ledgerActor.icrc2_approve.mock.calls[0][0].fee).toEqual([10n]);
+      expect(mocks.ledgerActor.icrc2_approve.mock.calls[0][0].expires_at[0]).toBeGreaterThan(BigInt(Date.now()) * 1_000_000n);
+      expect(mocks.poolActor.start_3usd_conversion).toHaveBeenCalledOnce();
+      expect(mocks.poolActor.start_3usd_conversion.mock.calls[0][0]).toEqual({
+        intent_seq: 7n,
+        token_ledger: Principal.fromText(mocks.ledgerText),
+        principal_raw: 1_000_000n,
+        max_fee_budget_raw: 50n,
+        min_lp: 980100n,
+      });
+    },
+  );
+
+  it('does not reapprove an expired tuple when status proves the same intent is still pending', async () => {
+    localStorage.setItem(`rumi:stability-pool:pending-conversion:${mocks.ownerText}`, JSON.stringify(pendingApproval({
+      stage: 'start-submitted',
+      approvalExpiresAtNs: '1',
+    })));
+    mocks.poolActor.resume_3usd_conversion.mockResolvedValueOnce({ Err: { NotFound: null } });
+    mocks.poolActor.get_3usd_conversion_status.mockResolvedValueOnce(pendingStatus(7n));
+
+    const status = await resumePendingStabilityPoolConversion(context());
+    expect('Pending' in (status as StabilityPoolConversionStatus)).toBe(true);
+    expect(mocks.ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(mocks.poolActor.start_3usd_conversion).not.toHaveBeenCalled();
   });
 
   it('stops before a financial call when the captured wallet changes', async () => {

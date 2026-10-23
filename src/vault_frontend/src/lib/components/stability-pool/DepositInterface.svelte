@@ -5,6 +5,7 @@
   import {
     stabilityPoolService,
     captureStabilityPoolActionContext,
+    prepareStabilityPoolOisySignerChannel,
     parseTokenAmount,
     readPendingStabilityPoolDeposit,
     type PendingStabilityPoolDeposit,
@@ -12,6 +13,7 @@
   import { formatStableTokenDisplay, formatStableTokenTx } from '../../utils/format';
   import type { PoolStatus, StablecoinConfig, UserPosition } from '../../services/stabilityPoolService';
   import { CANISTER_IDS } from '../../config';
+  import { isOisyWallet } from '../../services/protocol/walletOperations';
   import { fetchLedgerFee, getCachedLedgerFee } from '../../services/ledgerFeeService';
   import { TokenService } from '../../services/tokenService';
   import PointsCallout from '../points/PointsCallout.svelte';
@@ -88,7 +90,7 @@
     ? conversionWalletRequirement(conversionQuote.principal_raw, conversionQuote.live_transfer_fee_raw, conversionQuote.minimum_fee_budget_raw)
     : 0n;
   $: conversionWalletHasBalance = !conversionQuote || walletBalance >= conversionWalletRequired;
-  $: if ($walletStore.principal && selectedToken && conversionDiscoveryOwner !== $walletStore.principal.toText()) {
+  $: if ($walletStore.principal && selectedToken && !isOisyWallet() && conversionDiscoveryOwner !== $walletStore.principal.toText()) {
     conversionDiscoveryOwner = $walletStore.principal.toText();
     try {
       const context = captureStabilityPoolActionContext(selectedToken.ledger_id, 'convert');
@@ -281,6 +283,10 @@
       const rawAmount = parseExactTokenAmount(amount, token.decimals);
       if (rawAmount <= 0n) throw new Error('Enter a valid amount');
       const context = captureStabilityPoolActionContext(token.ledger_id, 'convert');
+      // Enter Oisy's PostMessageTransport from this click before any actor
+      // lookup or Web Locks callback can consume the user-gesture window.
+      const channelReady = prepareStabilityPoolOisySignerChannel(Principal.fromText(context.principalText));
+      await channelReady;
       conversionQuote = await quoteStabilityPoolConversion(token.ledger_id, rawAmount, 0n, context);
       conversionContext = context;
       conversionAuthorized = false;
@@ -300,6 +306,8 @@
       error = '';
       const ledger = Principal.fromText(pendingConversion.ledger);
       const context = captureStabilityPoolActionContext(ledger, 'convert');
+      const channelReady = prepareStabilityPoolOisySignerChannel(Principal.fromText(context.principalText));
+      await channelReady;
       const status = await resumePendingStabilityPoolConversion(context);
       conversionStatusMessage = 'Completed conversion recovery. The pool balance will refresh shortly.';
       if ('Pending' in status) conversionStatusMessage = `Conversion ${pendingConversion.intentSeq} is still pending. Keep this request and resume it again later.`;
@@ -360,6 +368,8 @@
           if (!conversionAuthorized) throw new Error('Confirm the displayed maximum fees before continuing.');
           if (!conversionWalletHasBalance) throw new Error('Insufficient balance for the conversion amount and all displayed fees.');
           if (!conversionContext) throw new Error('Get a fresh conversion quote before authorizing the wallet.');
+          const channelReady = prepareStabilityPoolOisySignerChannel(Principal.fromText(conversionContext.principalText));
+          await channelReady;
           const status = await convertStabilityPoolStableTo3Usd(conversionQuote, conversionMinLp, conversionContext);
           conversionStatusMessage = 'Conversion request accepted. The exact request remains recoverable until the pool reports a terminal result.';
           if ('Pending' in status) conversionStatusMessage = `Conversion is pending (${status.Pending.reason?.[0] ?? 'reconciliation continues'}).`;

@@ -199,6 +199,10 @@ function approvalArgs(tuple: ApprovalTuple): Record<string, unknown> {
   };
 }
 
+function approvalExpired(tuple: ApprovalTuple): boolean {
+  return tuple.expiresAtNs <= BigInt(Date.now()) * 1_000_000n;
+}
+
 function exactContext(context: StabilityPoolActionContext, ledger: Principal): void {
   const wallet = get(walletStore);
   assertStabilityPoolActionContext(
@@ -288,6 +292,45 @@ function acknowledgeApprovalResult(result: unknown): void {
     // this approval only; all other errors remain failures.
     if (!isDuplicateApprovalError(error)) throw error;
   }
+}
+
+async function approvePendingConversion(
+  marker: PendingStabilityPoolConversion,
+  context: StabilityPoolActionContext,
+  ledger: Principal,
+): Promise<PendingStabilityPoolConversion> {
+  const amountRaw = BigInt(marker.principalRaw);
+  const budgetRaw = BigInt(marker.maxFeeBudgetRaw);
+  const retained = approvalTuple(marker);
+  if (!retained) {
+    throw new PendingStabilityPoolConversionError('This conversion has no retained wallet approval tuple. Keep it locked and recover the exact request before approving again.');
+  }
+  const expectedFee = retained.feeRaw;
+  const expectedAmount = amountRaw + budgetRaw + expectedFee;
+  if (retained.amountRaw !== expectedAmount ||
+      retained.spender.toText() !== Principal.fromText(CANISTER_IDS.STABILITY_POOL).toText()) {
+    throw new PendingStabilityPoolConversionError('The retained wallet approval tuple differs from the immutable conversion request. Keep it locked and recover it before approving again.');
+  }
+
+  // A user can return after the original approval expiry without changing the
+  // backend intent. Replace only the expired wallet tuple, and persist that
+  // exact replacement before dispatching another approval.
+  let next = marker;
+  let tuple = retained;
+  if (approvalExpired(tuple)) {
+    tuple = newApprovalTuple(expectedAmount, expectedFee);
+    next = { ...next, ...approvalFields(tuple) };
+    writePending(next, true);
+  }
+
+  const ledgerActor = await getStabilityPoolLedgerMutationActor(ledger);
+  exactContext(context, ledger);
+  const approval = await ledgerActor.icrc2_approve(approvalArgs(tuple));
+  exactContext(context, ledger);
+  acknowledgeApprovalResult(approval);
+  next = { ...next, stage: 'approval-submitted' };
+  writePending(next, true);
+  return next;
 }
 
 function terminal(status: StabilityPoolConversionStatus): boolean {
@@ -392,6 +435,30 @@ async function statusFor(actor: any, seq: bigint, context: StabilityPoolActionCo
   return resultOrThrow<StabilityPoolConversionStatus>(result);
 }
 
+/**
+ * A NotFound status is authoritative evidence that the backend did not retain
+ * this caller sequence. If the wallet approval tuple has expired, renew only
+ * that exact allowance before replaying the immutable start request. Never
+ * change the principal, fee budget, minimum LP, or sequence here.
+ */
+async function replayUnknownConversion(
+  marker: PendingStabilityPoolConversion,
+  actor: any,
+  context: StabilityPoolActionContext,
+  ledger: Principal,
+): Promise<StabilityPoolConversionStatus> {
+  const tuple = approvalTuple(marker);
+  const replayMarker = tuple && approvalExpired(tuple)
+    ? await approvePendingConversion(marker, context, ledger)
+    : marker;
+  exactContext(context, ledger);
+  const replay = await actor.start_3usd_conversion(startRequest(replayMarker));
+  exactContext(context, ledger);
+  const status = resultOrThrow<StabilityPoolConversionStatus>(replay);
+  if (terminal(status)) clearPending(replayMarker.owner, replayMarker.intentSeq);
+  return status;
+}
+
 export async function convertStabilityPoolStableTo3Usd(
   quote: StabilityPoolConversionQuote,
   minLp: bigint,
@@ -453,69 +520,61 @@ export async function convertStabilityPoolStableTo3Usd(
       writePending(marker);
     }
 
-    const fee = quote.live_transfer_fee_raw;
-    const allowance = quote.principal_raw + quote.minimum_fee_budget_raw + fee;
-    const tuple = approvalTuple(marker);
-    if (marker.stage === 'new' && !tuple) {
-      throw new PendingStabilityPoolConversionError('This conversion has no retained wallet approval tuple. Keep it locked and recover the exact request before approving again.');
-    }
-    if (marker.stage === 'new' && tuple &&
-        (tuple.amountRaw !== allowance || tuple.feeRaw !== fee || tuple.spender.toText() !== Principal.fromText(CANISTER_IDS.STABILITY_POOL).toText())) {
-      throw new PendingStabilityPoolConversionError('The retained wallet approval tuple differs from the current quote. Keep the exact request locked and recover it before approving again.');
-    }
-    const ledgerActor = await getStabilityPoolLedgerMutationActor(ledger);
     exactContext(context, ledger);
     if (marker.stage === 'new') {
-      exactContext(context, ledger);
-      const approval = await ledgerActor.icrc2_approve(approvalArgs(tuple!));
-      exactContext(context, ledger);
-      acknowledgeApprovalResult(approval);
-      marker = { ...marker, stage: 'approval-submitted' };
-      writePending(marker, true);
+      marker = await approvePendingConversion(marker, context, ledger);
     }
 
-    marker = { ...marker, stage: 'start-submitted' };
-    writePending(marker, true);
-    const request = startRequest(marker);
-    try {
-      exactContext(context, ledger);
-      const result = await actor.start_3usd_conversion(request);
-      exactContext(context, ledger);
-      const status = resultOrThrow<StabilityPoolConversionStatus>(result);
-      if (terminal(status)) clearPending(marker.owner, marker.intentSeq);
-      return status;
-    } catch {
-      try {
-        const status = await statusFor(actor, BigInt(marker.intentSeq), context, ledger);
-        if (terminal(status)) {
-          clearPending(marker.owner, marker.intentSeq);
-          return status;
-        }
-        return status;
-      } catch (statusError) {
-        if (isNotFoundError(statusError)) {
-          try {
-            exactContext(context, ledger);
-            const replay = await actor.start_3usd_conversion(request);
-            exactContext(context, ledger);
-            const replayStatus = resultOrThrow<StabilityPoolConversionStatus>(replay);
-            if (terminal(replayStatus)) clearPending(marker.owner, marker.intentSeq);
-            return replayStatus;
-          } catch {
-            // A replay with the same immutable request may itself be ambiguous;
-            // retain the marker and require status-backed recovery next time.
-          }
-        }
-        // Preserve the exact marker through a lost reply or unavailable status.
-      }
-      throw new PendingStabilityPoolConversionError(`Conversion intent ${marker.intentSeq} is unresolved. Resume this exact request; do not start a new one.`);
-    }
+    return submitStartConversion(marker, actor, context);
   });
+}
+
+async function submitStartConversion(
+  marker: PendingStabilityPoolConversion,
+  actor: any,
+  context: StabilityPoolActionContext,
+): Promise<StabilityPoolConversionStatus> {
+  const ledger = Principal.fromText(marker.ledger);
+  marker = { ...marker, stage: 'start-submitted' };
+  writePending(marker, true);
+  const request = startRequest(marker);
+  try {
+    exactContext(context, ledger);
+    const result = await actor.start_3usd_conversion(request);
+    exactContext(context, ledger);
+    const status = resultOrThrow<StabilityPoolConversionStatus>(result);
+    if (terminal(status)) clearPending(marker.owner, marker.intentSeq);
+    return status;
+  } catch {
+    try {
+      const status = await statusFor(actor, BigInt(marker.intentSeq), context, ledger);
+      if (terminal(status)) {
+        clearPending(marker.owner, marker.intentSeq);
+        return status;
+      }
+      return status;
+    } catch (statusError) {
+      if (isNotFoundError(statusError)) {
+        try {
+          exactContext(context, ledger);
+          const replay = await actor.start_3usd_conversion(request);
+          exactContext(context, ledger);
+          const replayStatus = resultOrThrow<StabilityPoolConversionStatus>(replay);
+          if (terminal(replayStatus)) clearPending(marker.owner, marker.intentSeq);
+          return replayStatus;
+        } catch {
+          // A replay with the same immutable request may itself be ambiguous;
+          // retain the marker and require status-backed recovery next time.
+        }
+      }
+      // Preserve the exact marker through a lost reply or unavailable status.
+    }
+    throw new PendingStabilityPoolConversionError(`Conversion intent ${marker.intentSeq} is unresolved. Resume this exact request; do not start a new one.`);
+  }
 }
 
 async function resumeConversionWithContext(seq: bigint, marker: PendingStabilityPoolConversion, actor: any, context: StabilityPoolActionContext): Promise<StabilityPoolConversionStatus> {
   const ledger = Principal.fromText(marker.ledger);
-  const request = startRequest(marker);
   try {
     exactContext(context, ledger);
     const result = await actor.resume_3usd_conversion(seq);
@@ -529,10 +588,7 @@ async function resumeConversionWithContext(seq: bigint, marker: PendingStability
     } catch (statusError) {
       if (isNotFoundError(statusError)) {
         try {
-          exactContext(context, ledger);
-          const replay = await actor.start_3usd_conversion(request);
-          exactContext(context, ledger);
-          return resultOrThrow<StabilityPoolConversionStatus>(replay);
+          return await replayUnknownConversion(marker, actor, context, ledger);
         } catch {
           // Preserve the marker when the same-request replay is ambiguous.
         }
@@ -555,6 +611,10 @@ export async function resumePendingStabilityPoolConversion(
   return conversionLock(context, async () => {
     const actor = await getStabilityPoolMutationActor() as any;
     exactContext(context, ledger);
+    if (marker.stage === 'new') {
+      const approved = await approvePendingConversion(marker, context, ledger);
+      return submitStartConversion(approved, actor, context);
+    }
     const status = await resumeConversionWithContext(BigInt(marker.intentSeq), marker, actor, context);
     if (terminal(status)) clearPending(marker.owner, marker.intentSeq);
     return status;
