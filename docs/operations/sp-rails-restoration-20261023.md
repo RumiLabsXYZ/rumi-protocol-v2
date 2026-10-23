@@ -1,10 +1,10 @@
 # SP conversion and liquidation restoration - 2026-10-23
 
-Status: final readiness PASS. All five local suites and both independent adversarial reviews pass. Production installation, activation and continuity are the next authorized steps.
+Status: DEPLOYED AND REOPENED. Backend, pool and SP candidate08 upgrades succeeded; pool opened at19:29:11UTC and SP resume completed at19:29:26UTC on2026-10-23. Frontend assets are published and all726 served HTTPS body hashes match the reviewed delivery. Production continuity checks passed.
 
 Production source: `8d7c7e7587d0e9cbb693803a90cbbbb715ed85b4`.
 
-The prior global SP reopening is already live. Normal deposits, withdrawals and receipt-backed interest are open. This release restores convenience stablecoin-to-3USD conversions and the incident-restricted ordinary/3USD liquidation paths.
+Normal deposits, withdrawals, receipt-backed interest, stablecoin-to-3USD conversions and the incident-restricted ordinary/3USD liquidation paths are open. The actual SP is configured as the pool receipt client, V2 reserve ingress is enabled and client-ready, and historical V1 ingress is retired after reconciliation.
 
 ## Real blockers fixed
 
@@ -45,16 +45,39 @@ Exact attestation SHA256: `735beb8ca505532c75b1c322188435bd170358aed7dd1672adf28
 
 Preserve3USD book8219310823raw, physical8471101833raw, hashed balance0 and unallocated excess251791010raw. All2489pool blocks and144backend liquidation events were reconciled. Do not credit, sweep, refund, spend or reclassify the excess. Keep all237completed recovery packets and53legacyNone holds; never replay recovery or call finish again.
 
-## Authorized production sequence after final verification
+## Completed production rollout
 
-Root only: fresh live capture, short SP+pool pause, paused inventories, exact backend/pool/SP upgrades, verify installed gzip hashes/public Candid/Running/settings and financial preservation. Configure pool client to the actual SP principal and query it back. Bind a fresh log extension to the original attestation, retire V1, acknowledge V2 through the actual SP, enable ingress, reopen pool then SP, sync only the reviewed frontend assets. Verify served hashes/auth/IDs and at least five-minute continuity. Exclusive dispatch markers precede each mutation; unknown outcomes require authoritative disposition and no blind retry. No rollback across newly admitted state.
+Root executed all11 actions once, with an exclusive dispatch marker before each request: pauseSP, pausePool, backend upgrade, pool upgrade, SP upgrade, configure actualSP receipt client, attest historicalV1 reconciliation, actualSP V2 acknowledgment, enableV2 ingress, openPool and resumeSP. Every receipt exited0; no unknown outcome or blind retry occurred. The historical state moved Quarantined→Reconciled at attestation and Reconciled→Retired atomically with V2 enablement.
 
-Separate native-chain staging/auto controls, bot collateral allowlists, reserve redemptions and unrelated routing are outside this incident restoration. Bounded journals remain fail-closed without eviction.
+Installed gzip hashes/public Candid, Running state, management settings and controls were verified. The frontend sync was submitted once after source/build/delivery binding; the asset module, management settings and Commit/ManagePermissions/Prepare permission sets remain unchanged. All726 published assets were paginated and their metadata and actual HTTPS body hashes match; `/stability-pool` serves the reviewed index with correct production principals. The three `.ic-assets.json` recipe sidecars are correctly excluded from the729-file delivery publication inventory.
+
+## Live preservation and continuity
+
+- Paused upgrade comparison:40checks passed, including all46 recorded vault debts/owners/collateral and all13SP positions unchanged across installation.
+- Reopened and later continuity:84checks passed. Every continuity request began at least370.571seconds after the actual resume receipt, and capture completed19:36:12UTC. All13SP positions, backing,290processed receipts,237completed recovery packets,53legacyNone holds,126settled payout identities and preexisting pending journals remain exact.
+- The one preexisting borrow-fee NotificationPending row forvault51 is preserved; no claim that all journals are empty is made.
+- Pool and SP are open; actualSP client is set; reserve ingress is enabled/client-ready; V1 is Retired; new V2 inventories and the pool active receipt fence are empty. Reserve book, physical balances, excess and2489-block historical tip remain unchanged.
+- Stored vault debts correctly continue to accrue interest. A separate194-check classification lists every vault's exact debt change:36positive debts grew by0.01141290icUSD at the first read and0.01892083icUSD cumulatively by the continuity read. All other46vault public fields remain exact. Captured AccrueInterest events530911 at19:27:44UTC and530915 at19:32:44UTC bracket these changes. The complete2000-event tail contains1587price updates,412interest accruals and the authorized upgrade; no borrow, repayment or liquidation events. TimerB records accrual, updates stored debt, then harvests interest for distribution. This classifies observed growth against the deployed path; it does not independently reproduce each dynamicAPR calculation.
+- No new SP interest receipt arrived in this observation window. The later treasury snapshot records0.29694829icUSD pending distribution; that later snapshot is not equated to either earlier debt delta.
+
+## Controls still retained
+
+| Control | Current state and reason |
+| --- | --- |
+| Old V1 reserve ingress | Retired after historical reconciliation; normal3USD liquidation uses enabledV2. This is not an outstanding reopening blocker. |
+| Foreign/native-chain SP automation | Disabled, with no configured chain pools in the captured SP inventory. Enabling additional chain rails requires their own configured pools and settlement evidence; it is outside restoration of the existing rails. |
+| Bot collateral allowlist | Existing ICP-only policy retained. This limits that bot's collateral selection; it does not re-pause the restored ordinary SP receipt path. No accepted finding requires expanding the allowlist to reopen these rails. |
+| Reserve redemptions | Existing disabled setting retained. This separate reserve-redemption feature is not the restored conversion/liquidation ingress. |
+| Legacy recovery holds |53legacyNone holds remain quarantined; completed237packets are preserved. Reopening never replays recovery or spends unallocated reserve excess. |
+
+Bounded receipt journals still fail closed at capacity without eviction. No outstanding blocker remains for the incident-restricted conversion and ordinary/3USD liquidation paths restored here.
 
 ## Proof limits
 
 No funded production probe, global green CI, merged PR, aged icUSD burn fault injection or isolated nonzero-interest aged fixture is claimed. Synthetic fixture initialization, actual saved-state migration, local settlement and enabled production state are distinct proof levels.
 
-Evidence root: `/private/tmp/rumi-sp-rails-restoration-20261023`. Release manifest, five runtime reports, migration comparisons, interface binding, UI hashes, review reports and exact-once execution receipts are retained separately.
+Evidence root: `/private/tmp/rumi-sp-rails-restoration-20261023`. A compact durable copy is retained in the primary checkout at `.recovery-artifacts/rumi-sp-rails-restoration-20261023/`. Release manifest, five runtime reports, migration comparisons, interface binding, UI hashes, review reports, exact-once execution receipts and actual live/served verification are retained separately.
+
+Production proof files: `paused-install-preservation-08.json`, `LIVE-RESTORATION-08.json`, `interest-accrual-continuity-08.json`, `frontend-production-sync08-02/verification.json`, and `frontend-served08-03/verification.json`. Source reviewers O/P passed before deployment; separate post-production O/P audits verify operations and served evidence. PR590 records the implementation; no merge or aggregate-green CI claim is made.
 
 Final readiness file: `FINAL-READINESS-08.json`, SHA256 `77cf1acf72689ff872e9427fbe8a9194eabde836f0cd3a2e7b0cc97b601b06e1`. The ready source/artifact/UI/migration/review bindings were rehashed before admission. Latest live preflight confirms normal interest receipt count290 and preserves53legacy holds, plus the preexisting borrow-fee NotificationPending row forvault51; no journal is declared empty by omission.
