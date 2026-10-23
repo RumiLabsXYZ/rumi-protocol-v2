@@ -2506,7 +2506,9 @@ mod tests {
     #[test]
     fn conversion_getter_consent_malformed_args_stay_bounded_and_read_only() {
         let caller = principal(44);
-        let wrong_empty_args = candid::encode_args((1u64,)).unwrap();
+        // Candid permits trailing arguments for a zero-argument method.
+        // Exercise malformed bytes rather than valid, extra arguments.
+        let wrong_empty_args = Vec::<u8>::new();
         for method in [
             "get_active_3usd_conversion_v1",
             "get_active_3usd_conversion",
