@@ -1934,6 +1934,46 @@ fn revoke_allowance_is_frozen(intent: &ConversionIntent) -> bool {
             || intent.pool_last_status.as_deref() == Some("Rejected"))
 }
 
+/// An approval can be positively reconciled after its five-minute expiry.  If
+/// that proof arrives before the first 3pool request, however, dispatching the
+/// pool call would be a new value-moving action against an allowance that is
+/// already zero at the ledger.  Treat that case as an authenticated no-pool
+/// rejection and enter the existing revoke/refund path.  Once either the pool
+/// request was dispatched or the pool positively consumed input, this predicate
+/// is false forever: those rows must recover the same pool receipt instead of
+/// being rebound to a synthetic no-effect marker.
+fn expired_approval_before_first_pool_dispatch(
+    pool_dispatched: bool,
+    approve_confirmed: bool,
+    pool_input_confirmed: Option<bool>,
+    pool_last_status: Option<&str>,
+    approve_expires_at_ns: u64,
+    now_ns: u64,
+) -> bool {
+    !pool_dispatched
+        && approve_confirmed
+        && pool_input_confirmed != Some(true)
+        && pool_last_status.is_none()
+        && now_ns >= approve_expires_at_ns
+}
+
+/// Persist the exact no-pool terminal marker before entering `Revoking`.
+/// `Rejected` is the existing terminal marker understood by
+/// `revoke_allowance_is_frozen`; the explicit false input/refund flags keep it
+/// distinct from an actual 3pool receipt and ensure no pool value is deducted.
+fn mark_expired_approval_no_pool(mut intent: ConversionIntent) -> ConversionIntent {
+    debug_assert!(!intent.pool_dispatched);
+    debug_assert!(intent.approve_confirmed);
+    debug_assert!(intent.pool_input_confirmed != Some(true));
+    debug_assert!(intent.pool_last_status.is_none());
+    intent.pool_last_status = Some("Rejected".into());
+    intent.pool_input_confirmed = Some(false);
+    intent.pool_refund_confirmed = Some(false);
+    intent.revoke_expected_allowance_raw = 0;
+    intent.last_error = None;
+    save_phase(intent, ConversionPhase::Revoking)
+}
+
 fn effective_approval_allowance(
     approved: u64,
     expires_at_ns: u64,
@@ -2230,15 +2270,25 @@ async fn recover_pool_receipt(mut intent: ConversionIntent) -> ConversionIntent 
 }
 
 async fn pool_call(mut intent: ConversionIntent) -> ConversionIntent {
-    if !intent.approve_confirmed {
-        return save_phase(intent, ConversionPhase::Refunding);
-    }
     if intent.pool_dispatched {
         // A nonterminal receipt (or an ambiguous add-liquidity callback) is
         // resumed through the 3pool recovery rail.  The durable pool intent
         // is the only identity accepted here; a fresh add request would be a
         // second spend attempt against the same escrow.
         return recover_pool_receipt(intent).await;
+    }
+    if !intent.approve_confirmed {
+        return save_phase(intent, ConversionPhase::Refunding);
+    }
+    if expired_approval_before_first_pool_dispatch(
+        intent.pool_dispatched,
+        intent.approve_confirmed,
+        intent.pool_input_confirmed,
+        intent.pool_last_status.as_deref(),
+        intent.approve_expires_at_ns,
+        ic_cdk::api::time(),
+    ) {
+        return mark_expired_approval_no_pool(intent);
     }
     if read_state(|state| state.configuration.emergency_pause) {
         return set_pending(intent, "conversion paused before 3pool request");
@@ -3726,6 +3776,37 @@ mod tests {
         ));
         assert!(!revoke_expired_zero_allowance_no_effect(
             true, false, u64::MAX, 0, &zero
+        ));
+    }
+
+    #[test]
+    fn expired_confirmed_approval_without_pool_dispatch_enters_no_pool_refund_path() {
+        assert!(expired_approval_before_first_pool_dispatch(
+            false, true, None, None, 300, 300
+        ));
+        assert!(expired_approval_before_first_pool_dispatch(
+            false, true, None, None, 300, 301
+        ));
+        assert!(!expired_approval_before_first_pool_dispatch(
+            false, true, None, None, 300, 299
+        ));
+    }
+
+    #[test]
+    fn dispatched_or_confirmed_pool_input_can_never_be_rebound_to_no_pool() {
+        assert!(!expired_approval_before_first_pool_dispatch(
+            true, true, None, None, 300, 301
+        ));
+        assert!(!expired_approval_before_first_pool_dispatch(
+            false, true, Some(true), None, 300, 301
+        ));
+        assert!(!expired_approval_before_first_pool_dispatch(
+            false, false, None, None, 300, 301
+        ));
+        // An existing terminal marker is already owned by the prior
+        // transition; applying the marker again must not rewrite its tuple.
+        assert!(!expired_approval_before_first_pool_dispatch(
+            false, true, Some(false), Some("Rejected"), 300, 301
         ));
     }
 
