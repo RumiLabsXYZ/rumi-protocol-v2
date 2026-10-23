@@ -112,6 +112,30 @@ pub fn get(owner: Principal, intent_id: &[u8]) -> Option<LiquidityReceiptV1> {
     storage::LIQUIDITY_RECEIPTS_V1.with(|map| map.borrow().get(&key(owner, intent_id)))
 }
 
+/// Check capacity without reserving a durable row.  Fresh public requests use
+/// this while holding the global admission guard, so an invalid or unfunded
+/// request cannot consume one of the bounded receipt slots.
+pub fn capacity_available() -> bool {
+    storage::LIQUIDITY_RECEIPTS_V1.with(|map| map.borrow().len() < MAX_RECEIPTS)
+}
+
+/// Pure funding gate used before a fresh receipt is reserved.  The source
+/// balance must cover both the requested pull and its pinned ledger fee; the
+/// ICRC-2 allowance must cover the full debit requested by this pool,
+/// including the ledger fee.
+pub fn preflight_leg_funded(
+    amount: u128,
+    fee: u128,
+    max_transfer_fee: Option<u128>,
+    source_balance: u128,
+    allowance: u128,
+) -> bool {
+    amount > fee
+        && max_transfer_fee.map_or(true, |cap| fee <= cap)
+        && source_balance >= amount.saturating_add(fee)
+        && allowance >= amount.saturating_add(fee)
+}
+
 pub fn save(receipt: &LiquidityReceiptV1) {
     storage::LIQUIDITY_RECEIPTS_V1.with(|map| {
         let key = key(receipt.owner, &receipt.request.intent_id);
@@ -516,6 +540,15 @@ mod tests {
         let (row, _) = reserve(owner, request()).unwrap();
         assert_eq!(reserve(owner, request()).unwrap().0, row);
         assert!(get(owner, &request().intent_id).is_some());
+    }
+
+    #[test]
+    fn preflight_funding_requires_full_debit_and_fee_cap() {
+        assert!(preflight_leg_funded(100, 10, Some(10), 110, 110));
+        assert!(!preflight_leg_funded(100, 10, Some(10), 109, 110));
+        assert!(!preflight_leg_funded(100, 10, Some(10), 110, 109));
+        assert!(!preflight_leg_funded(100, 10, Some(9), 110, 110));
+        assert!(!preflight_leg_funded(10, 10, None, 20, 20));
     }
 
     #[test]

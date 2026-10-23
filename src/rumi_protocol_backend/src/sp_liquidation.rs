@@ -167,6 +167,51 @@ fn request_binding_matches(
         && journal_max_gross_raw == request.max_gross_raw
 }
 
+/// Look up only an already durable prepare row. This helper performs no
+/// admission, quote, fee, oracle, or guard work, so callers can safely use it
+/// before those gates to replay an accepted request after a lost reply. A
+/// missing row returns `None`; the caller must continue through normal
+/// admission. A present row must match every immutable request field.
+fn lookup_existing_prepare(
+    caller: Principal,
+    request: &SpLiquidationRequest,
+    key: [u8; REQUEST_ID_LEN],
+) -> Result<Option<SpLiquidationReceipt>, ProtocolError> {
+    let Some(existing) = read_state(|state| state.sp_liquidation_journals.get(&key).cloned()) else {
+        return Ok(None);
+    };
+    if existing.request_id != key
+        || !request_binding_matches(
+            existing.caller,
+            existing.vault_id,
+            existing.payment,
+            existing.max_debt_e8s,
+            existing.max_gross_raw,
+            caller,
+            request,
+        )
+    {
+        return Err(ProtocolError::GenericError(
+            "SP liquidation request_id is already bound to different parameters".into(),
+        ));
+    }
+    Ok(Some(receipt(&existing)))
+}
+
+/// Authenticate and replay an already accepted request before mutable
+/// admission gates run. Invalid or unknown IDs return `None` so new requests
+/// still pass the ordinary wrapper and module gates in their normal order.
+pub fn replay_existing_prepare(
+    request: &SpLiquidationRequest,
+) -> Result<Option<SpLiquidationReceipt>, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    require_sp(caller)?;
+    let Ok(key) = request_id(&request.request_id) else {
+        return Ok(None);
+    };
+    lookup_existing_prepare(caller, request, key)
+}
+
 fn checked_payment_totals(
     principal_raw: u64,
     surcharge_raw: u64,
@@ -639,21 +684,8 @@ pub async fn prepare(request: SpLiquidationRequest) -> Result<SpLiquidationRecei
     if request.max_debt_e8s == 0 || request.max_gross_raw == 0 {
         return Err(ProtocolError::GenericError("SP liquidation limits must be nonzero".into()));
     }
-    if let Some(existing) = read_state(|state| state.sp_liquidation_journals.get(&key).cloned()) {
-        if !request_binding_matches(
-            existing.caller,
-            existing.vault_id,
-            existing.payment,
-            existing.max_debt_e8s,
-            existing.max_gross_raw,
-            caller,
-            &request,
-        ) {
-            return Err(ProtocolError::GenericError(
-                "SP liquidation request_id is already bound to different parameters".into(),
-            ));
-        }
-        return Ok(receipt(&existing));
+    if let Some(existing) = lookup_existing_prepare(caller, &request, key)? {
+        return Ok(existing);
     }
     if read_state(|state| state.frozen || state.liquidation_frozen) {
         return Err(ProtocolError::TemporarilyUnavailable(
@@ -1936,6 +1968,38 @@ mod tests {
             owner,
             &changed_budget,
         ));
+    }
+
+    #[test]
+    fn exact_existing_request_replay_is_independent_of_freeze_gate() {
+        let owner = Principal::from_slice(&[1, 2, 3]);
+        let original = request(SpLiquidationPayment::Ckusdc);
+        let mut changed = original.clone();
+        changed.max_debt_e8s += 1;
+
+        // The wrapper's pre-gate lookup uses only this immutable binding. A
+        // frozen protocol must replay the exact row, while a mismatch remains
+        // a conflict and never becomes an admission or a new journal.
+        for _frozen in [false, true] {
+            assert!(request_binding_matches(
+                owner,
+                original.vault_id,
+                original.payment,
+                original.max_debt_e8s,
+                original.max_gross_raw,
+                owner,
+                &original,
+            ));
+            assert!(!request_binding_matches(
+                owner,
+                original.vault_id,
+                original.payment,
+                original.max_debt_e8s,
+                original.max_gross_raw,
+                owner,
+                &changed,
+            ));
+        }
     }
 
     #[test]

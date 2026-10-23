@@ -19980,6 +19980,12 @@ async fn stability_pool_prepare_liquidation(
     request: rumi_protocol_backend::sp_liquidation::SpLiquidationRequest,
 ) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
     rumi_protocol_backend::sp_liquidation::validate_caller()?;
+    // Replay an already accepted request before freeze/oracle/freshness gates.
+    // A lost prepare reply must not strand the durable reservation when the
+    // protocol changes state before the SP retries the same immutable tuple.
+    if let Some(receipt) = rumi_protocol_backend::sp_liquidation::replay_existing_prepare(&request)? {
+        return Ok(receipt);
+    }
     validate_call().await?;
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;

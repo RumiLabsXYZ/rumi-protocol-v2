@@ -95,6 +95,13 @@ pub enum TransferFromError {
     GenericError { error_code: Nat, message: String },
 }
 
+fn transfer_from_debit(amount: u128, fee: u128) -> Result<u128, TransferFromError> {
+    amount.checked_add(fee).ok_or_else(|| TransferFromError::GenericError {
+        error_code: Nat::from(1u64),
+        message: "transfer-from amount plus fee overflows".into(),
+    })
+}
+
 #[derive(CandidType, Clone, Debug, Deserialize)]
 pub struct ApproveArgs {
     pub from_subaccount: Option<[u8; 32]>,
@@ -865,14 +872,15 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
             .get(&(from.clone(), spender_account.clone()))
             .map(|entry| effective_allowance(entry, now))
             .unwrap_or(0);
-        if amount > allowance {
+        let debit = transfer_from_debit(amount, state.fee)?;
+        if debit > allowance {
             return Err(TransferFromError::InsufficientAllowance {
                 allowance: Nat::from(allowance),
             });
         }
 
         let balance = state.balances.get(&from).copied().unwrap_or(0);
-        if amount + state.fee > balance {
+        if debit > balance {
             return Err(TransferFromError::InsufficientFunds {
                 balance: Nat::from(balance),
             });
@@ -882,11 +890,11 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
             .allowances
             .get_mut(&(from.clone(), spender_account.clone()))
         {
-            a.amount -= amount;
+            a.amount -= debit;
         }
 
         let charged_fee = state.fee;
-        *state.balances.entry(from.clone()).or_insert(0) -= amount + charged_fee;
+        *state.balances.entry(from.clone()).or_insert(0) -= debit;
         *state.balances.entry(args.to.clone()).or_insert(0) += amount;
         if state.transfer_from_prelude_mint {
             state.transfer_from_prelude_mint = false;
@@ -1313,6 +1321,15 @@ mod borrow_mint_retry_tests {
 #[cfg(test)]
 mod approve_semantics_tests {
     use super::*;
+
+    #[test]
+    fn transfer_from_consumes_principal_and_fee_from_allowance_once() {
+        let debit = transfer_from_debit(1_000, 10).unwrap();
+        assert_eq!(debit, 1_010);
+        assert_eq!(1_010 - debit, 0);
+        assert_eq!(transfer_from_debit(1_000, 0).unwrap(), 1_000);
+        assert!(transfer_from_debit(u128::MAX, 1).is_err());
+    }
 
     const NOW: u64 = 1_700_000_000_000_000_000;
 

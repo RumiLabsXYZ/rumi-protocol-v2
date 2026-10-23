@@ -3754,12 +3754,13 @@ fn three_usd_payout_block_matches(
         && block.created_at_time == Some(payout.created_at_time_ns)
 }
 
-/// Authenticate an ordinary SP liquidation's backend collateral payout
-/// against the canonical ledger's directly served block. The backend receipt
-/// is only a candidate: settlement must also prove the exact source,
-/// destination, net amount, fee, memo, timestamp, and block index here.
-/// Archive callbacks are intentionally rejected because they do not establish
-/// membership in the ledger's current canonical block log.
+/// Authenticate a new ordinary SP liquidation's backend collateral payout
+/// against the configured canonical collateral ledger. The backend receipt is
+/// only a candidate: settlement must also prove the exact source, destination,
+/// net amount, fee, memo, timestamp, and block index here. ICRC-3 ledgers use
+/// the backend's bounded ledger-directed archive proof; native ICP uses its
+/// canonical query_blocks helper. Legacy/native claim paths retain their
+/// stronger direct-only verifiers elsewhere in this module.
 pub(crate) async fn verify_ordinary_collateral_payout(
     protocol_id: Principal,
     receipt: &rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt,
@@ -3793,17 +3794,12 @@ pub(crate) async fn verify_ordinary_collateral_payout(
     }
 
     if rumi_protocol_backend::native_icp_proof::is_native_icp_ledger(payout.ledger) {
-        let (response,): (rumi_protocol_backend::native_icp_proof::QueryBlocksResponse,) = call(
+        let block = rumi_protocol_backend::native_icp_proof::query_block(
             payout.ledger,
-            "query_blocks",
-            (rumi_protocol_backend::native_icp_proof::GetBlocksArgs {
-                start: block_index,
-                length: 1,
-            },),
+            block_index,
         )
         .await
-        .map_err(|error| format!("native ICP payout proof failed: {error:?}"))?;
-        let block = native_icp_direct_candidate_block(response, block_index)?;
+        .map_err(|error| format!("native ICP ordinary payout proof failed: {error}"))?;
         let fee = rumi_protocol_backend::native_icp_proof::verify_transfer_block(
             &block,
             protocol_id,
@@ -3818,29 +3814,13 @@ pub(crate) async fn verify_ordinary_collateral_payout(
         return Ok(payout.amount_raw);
     }
 
-    let (response,): (GetBlocksResult,) = call(
+    let block_value = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block_value(
         payout.ledger,
-        "icrc3_get_blocks",
-        (vec![GetBlocksRequest {
-            start: Nat::from(block_index),
-            length: Nat::from(1u64),
-        }],),
+        block_index,
     )
     .await
-    .map_err(|error| format!("ordinary collateral ICRC-3 proof failed: {error:?}"))?;
-    let log_length = response
-        .log_length
-        .0
-        .to_u64()
-        .ok_or_else(|| "ordinary collateral ICRC-3 log length exceeds u64".to_string())?;
-    if log_length <= block_index
-        || !response.archived_blocks.is_empty()
-        || response.blocks.len() != 1
-        || response.blocks[0].id.0.to_u64() != Some(block_index)
-    {
-        return Err("ordinary collateral ledger did not directly serve its exact payout block".into());
-    }
-    let block = rumi_protocol_backend::icrc3_proof::decode_block(&response.blocks[0].block)
+    .map_err(|error| format!("ordinary collateral ICRC-3 proof failed: {error}"))?;
+    let block = rumi_protocol_backend::icrc3_proof::decode_block(&block_value)
         .map_err(|error| format!("malformed ordinary collateral payout block: {error}"))?;
     if !ordinary_payout_block_matches(payout, &block) {
         return Err("ordinary collateral block does not match the exact payout tuple".into());
@@ -5247,6 +5227,20 @@ fn ordinary_prepare_replay_allowed(
         && !intent.approval_attempted
 }
 
+fn retain_ordinary_prepare_replay_rejection(
+    request_id: [u8; 32],
+    reason: String,
+) -> Result<(), String> {
+    mutate_state(|state| {
+        state
+            .update_ordinary_liquidation(request_id, None, |current| {
+                current.last_error = Some(reason.clone());
+            })
+            .map(|_| ())
+            .map_err(|error| format!("ordinary replay rejection hold CAS failed: {error:?}"))
+    })
+}
+
 enum OrdinaryPrepareReceiptOutcome {
     Resume(crate::ordinary_liquidation::OrdinaryLiquidationIntent),
     Terminal(LiquidationResult),
@@ -5361,20 +5355,21 @@ async fn resume_ordinary_liquidation(
                     }
                 }
                 Err(OrdinaryBackendCallError::Rejected(reason)) => {
-                    // The backend typed rejection is the definitive
-                    // pre-dispatch no-effect response for this exact ID.
-                    return match mutate_state(|state| {
-                        state.complete_ordinary_liquidation_no_effect(
-                            request_id,
-                            crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect,
-                            reason.clone(),
-                            ic_cdk::api::time(),
-                        )
-                    }) {
+                    // A typed replay rejection is not proof that the original
+                    // prepare was never accepted. The backend may have
+                    // persisted the exact ID before a later mutable gate
+                    // rejected the replay. Reconcile through the exact
+                    // status/cancel rail; only a backend terminal receipt may
+                    // release the SP tombstone.
+                    let reason = format!(
+                        "ordinary prepare replay was rejected; exact backend disposition required: {reason}"
+                    );
+                    let _ = retain_ordinary_prepare_replay_rejection(request_id, reason.clone());
+                    return match cancel_admitted_ordinary(protocol_id, &intent, reason.clone()).await {
                         Ok(result) => result,
-                        Err(error) => ordinary_failure_for_intent_with_reason(
+                        Err(cancel_error) => ordinary_failure_for_intent_with_reason(
                             &intent,
-                            format!("ordinary prepare replay rejection tombstone failed: {error:?}"),
+                            format!("{reason}; exact backend status/cancel remains unresolved: {cancel_error}"),
                         ),
                     };
                 }
@@ -7726,6 +7721,31 @@ mod tests {
         };
 
         assert!(ordinary_prepare_replay_allowed(&intent));
+        let mut state = test_state();
+        state
+            .admit_ordinary_liquidation(intent.clone())
+            .expect("persist pre-prepare replay intent");
+        replace_state(state);
+        retain_ordinary_prepare_replay_rejection(
+            intent.request_id,
+            "backend replay rejected after the original reply was lost".into(),
+        )
+        .expect("retain ambiguous replay rejection");
+        read_state(|state| {
+            let pending = state
+                .get_pending_ordinary_liquidation(&intent.request_id)
+                .expect("ambiguous replay remains pending");
+            assert_eq!(
+                pending.phase,
+                crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendSubmitted
+            );
+            assert!(pending.last_error.is_some());
+            assert!(state
+                .get_completed_ordinary_liquidation(&intent.request_id)
+                .is_none());
+        });
+        replace_state(StabilityPoolState::default());
+
         let first_request = ordinary_prepare_request(&intent);
         // A recovery after the lost reply uses the journal row unchanged. The
         // request must therefore be byte-for-byte identical, including the
@@ -7845,6 +7865,52 @@ mod tests {
             );
         }
         assert!(!ordinary_approval_wire_expiry_matches(&approval, &wrong_value));
+    }
+
+    #[test]
+    fn ordinary_archived_or_direct_payout_candidate_still_requires_exact_tuple() {
+        let payout = rumi_protocol_backend::sp_liquidation::SpLiquidationPayoutTuple {
+            ledger: principal(71),
+            source: Account {
+                owner: principal(72),
+                subaccount: None,
+            },
+            destination: Account {
+                owner: principal(73),
+                subaccount: Some([0; 32]),
+            },
+            amount_raw: 90,
+            gross_raw: 100,
+            ledger_fee_raw: 10,
+            memo: vec![4, 5, 6],
+            created_at_time_ns: 123,
+            op_nonce: 7,
+        };
+        let block = rumi_protocol_backend::icrc3_proof::DecodedBlock {
+            btype: Some("1xfer".into()),
+            op: "xfer".into(),
+            from: Some(payout.source),
+            to: Some(payout.destination),
+            spender: None,
+            amount: 90,
+            fee: Some(10),
+            created_at_time: Some(123),
+            memo: Some(vec![4, 5, 6]),
+        };
+        assert!(ordinary_payout_block_matches(&payout, &block));
+
+        let mut wrong_amount = block.clone();
+        wrong_amount.amount = 91;
+        assert!(!ordinary_payout_block_matches(&payout, &wrong_amount));
+        let mut wrong_fee = block.clone();
+        wrong_fee.fee = Some(9);
+        assert!(!ordinary_payout_block_matches(&payout, &wrong_fee));
+        let mut wrong_destination = block;
+        wrong_destination.to = Some(Account {
+            owner: principal(74),
+            subaccount: None,
+        });
+        assert!(!ordinary_payout_block_matches(&payout, &wrong_destination));
     }
 
     #[test]

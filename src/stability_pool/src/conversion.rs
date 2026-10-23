@@ -12,6 +12,7 @@ use ic_cdk::call;
 use icrc_ledger_types::icrc::generic_value::ICRC3Value;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
+use icrc_ledger_types::icrc2::allowance::{Allowance, AllowanceArgs};
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use num_traits::ToPrimitive;
@@ -143,6 +144,12 @@ const MAX_FEE_LEGS: u64 = 5;
 
 thread_local! {
     static LIVE_CONVERSIONS: RefCell<BTreeSet<(Principal, u64)>> =
+        const { RefCell::new(BTreeSet::new()) };
+    /// A fresh intent keeps this guard while all read-only admission calls
+    /// are in flight.  It closes the gap before a durable row exists, where
+    /// repeated updates could otherwise admit many unfunded sequences from
+    /// the same balance/allowance snapshot.
+    static LIVE_CONVERSION_OWNERS: RefCell<BTreeSet<Principal>> =
         const { RefCell::new(BTreeSet::new()) };
 }
 
@@ -360,6 +367,28 @@ fn acquire_live(owner: Principal, intent_seq: u64) -> Result<LiveGuard, Conversi
     })
 }
 
+struct OwnerAdmissionGuard {
+    owner: Principal,
+}
+
+impl Drop for OwnerAdmissionGuard {
+    fn drop(&mut self) {
+        LIVE_CONVERSION_OWNERS.with(|active| {
+            active.borrow_mut().remove(&self.owner);
+        });
+    }
+}
+
+fn acquire_owner_admission(owner: Principal) -> Result<OwnerAdmissionGuard, ConversionError> {
+    LIVE_CONVERSION_OWNERS.with(|active| {
+        let mut active = active.borrow_mut();
+        if !active.insert(owner) {
+            return Err(ConversionError::SystemBusy);
+        }
+        Ok(OwnerAdmissionGuard { owner })
+    })
+}
+
 fn digest(domain: &[u8], owner: Principal, ledger: Principal, intent_seq: u64) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(domain);
@@ -476,6 +505,24 @@ fn get_intent(owner: Principal, intent_seq: u64) -> Option<ConversionIntent> {
     })
 }
 
+/// Return the owner's durable nonterminal sequence, ignoring terminal
+/// tombstones.  This is deliberately pure so the same rule can be exercised
+/// independently of stable-state mutation and the reserve path can enforce it
+/// atomically with the high-watermark update.
+fn active_owner_sequence<'a, I>(owner: Principal, intents: I) -> Option<u64>
+where
+    I: Iterator<Item = &'a ConversionIntent>,
+{
+    intents
+        .filter(|intent| intent.owner == owner && !is_terminal(&intent.status))
+        .map(|intent| intent.request.intent_seq)
+        .min()
+}
+
+fn owner_admission_is_free(active_sequence: Option<u64>) -> bool {
+    active_sequence.is_none()
+}
+
 fn save_intent(intent: ConversionIntent) -> bool {
     mutate_state(|state| {
         let rows = state.conversion_intents.get_or_insert_with(Default::default);
@@ -513,6 +560,18 @@ fn reserve_intent(
                 return Err(ConversionError::IntentConflict);
             }
             return Ok(existing.clone());
+        }
+        if let Some(active_seq) = state
+            .conversion_intents
+            .as_ref()
+            .and_then(|rows| active_owner_sequence(owner, rows.values()))
+        {
+            // The exact existing key was checked above.  Any other
+            // nonterminal sequence is a durable owner-level admission fence;
+            // a caller must resume it rather than reserve another row.
+            return Err(ConversionError::ActiveIntent {
+                intent_seq: active_seq,
+            });
         }
         let expected = state
             .conversion_high_watermarks
@@ -923,6 +982,130 @@ fn ensure_quote_meets_min_lp(quoted_lp: u128, min_lp: u128) -> Result<(), String
             "3pool quote {quoted_lp} is below requested minimum LP {min_lp}"
         ));
     }
+    Ok(())
+}
+
+fn preflight_pull_amount(
+    principal_raw: u64,
+    max_fee_budget_raw: u64,
+    pull_fee_raw: u64,
+) -> Result<u64, ConversionError> {
+    principal_raw
+        .checked_add(max_fee_budget_raw)
+        .and_then(|amount| amount.checked_add(pull_fee_raw))
+        .ok_or_else(|| ConversionError::InvalidRequest {
+            reason: "principal, fee budget, and ingress fee overflow".into(),
+        })
+}
+
+fn wallet_preflight_sufficient(
+    balance_raw: u128,
+    allowance_raw: u128,
+    required_raw: u128,
+) -> bool {
+    balance_raw >= required_raw && allowance_raw >= required_raw
+}
+
+/// Complete all read-only admission checks before the durable reservation.
+/// The owner guard held by the caller spans every await in this function,
+/// while the final route/admission check runs immediately before journaling.
+async fn preflight_new_intent(
+    owner: Principal,
+    request: &ConversionRequest,
+    route: (Principal, Principal, u64),
+) -> Result<(), ConversionError> {
+    let (lp_ledger, pool_canister, decimals) = route;
+    ensure_admission(request.token_ledger, request.principal_raw, decimals)?;
+
+    let live_fee = crate::deposits::current_ledger_transfer_fee(request.token_ledger)
+        .await
+        .map_err(|_| ConversionError::SystemBusy)?;
+    let minimum_budget = fee_budget(live_fee)?;
+    if request.max_fee_budget_raw < minimum_budget {
+        return Err(ConversionError::NonZeroFeeBudgetRequired {
+            fee_raw: live_fee,
+            minimum_budget_raw: minimum_budget,
+        });
+    }
+    let required_raw = preflight_pull_amount(
+        request.principal_raw,
+        request.max_fee_budget_raw,
+        live_fee,
+    )?;
+
+    pool_route_and_quote(
+        request.token_ledger,
+        pool_canister,
+        request.principal_raw,
+        request.min_lp,
+    )
+    .await
+    .map_err(|reason| ConversionError::InvalidRequest { reason })?;
+
+    let owner_account = Account {
+        owner,
+        subaccount: None,
+    };
+    let balance_result: Result<(Nat,), _> =
+        call(request.token_ledger, "icrc1_balance_of", (owner_account.clone(),)).await;
+    let (balance,) = balance_result.map_err(|_| ConversionError::SystemBusy)?;
+    let balance_raw = balance.0.to_u128().unwrap_or(u128::MAX);
+    if balance_raw < required_raw as u128 {
+        return Err(ConversionError::InvalidRequest {
+            reason: format!(
+                "wallet balance {balance_raw} is below required ingress amount {required_raw}"
+            ),
+        });
+    }
+
+    let allowance_result: Result<(Allowance,), _> = call(
+        request.token_ledger,
+        "icrc2_allowance",
+        (AllowanceArgs {
+            account: owner_account,
+            spender: Account {
+                owner: ic_cdk::api::id(),
+                subaccount: None,
+            },
+        },),
+    )
+    .await;
+    let (allowance,) = allowance_result.map_err(|_| ConversionError::SystemBusy)?;
+    if allowance
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= ic_cdk::api::time())
+    {
+        return Err(ConversionError::InvalidRequest {
+            reason: "SP allowance is expired".into(),
+        });
+    }
+    let allowance_raw = allowance.allowance.0.to_u128().unwrap_or(u128::MAX);
+    if !wallet_preflight_sufficient(balance_raw, allowance_raw, required_raw as u128) {
+        return Err(ConversionError::InvalidRequest {
+            reason: format!(
+                "SP allowance {allowance_raw} is below required ingress amount {required_raw}"
+            ),
+        });
+    }
+
+    // Treat a fee change during the read-only window as a stale admission
+    // snapshot.  Re-querying here avoids reserving a durable row whose
+    // already-checked wallet and allowance no longer cover the ingress tuple.
+    let final_fee = crate::deposits::current_ledger_transfer_fee(request.token_ledger)
+        .await
+        .map_err(|_| ConversionError::SystemBusy)?;
+    if final_fee != live_fee {
+        return Err(ConversionError::SystemBusy);
+    }
+
+    // The route and its configured decimal scale are immutable admission
+    // inputs. If another update changed them while the quote or ledger
+    // queries were suspended, fail before reserving rather than binding a
+    // request to a stale route.
+    if synchronous_route(request.token_ledger)? != (lp_ledger, pool_canister, decimals) {
+        return Err(ConversionError::SystemBusy);
+    }
+    ensure_admission(request.token_ledger, request.principal_raw, decimals)?;
     Ok(())
 }
 
@@ -2590,22 +2773,26 @@ pub async fn start_conversion(request: ConversionRequest) -> Result<ConversionSt
         let _live = acquire_live(owner, request.intent_seq)?;
         return Ok(run(existing).await);
     }
-    let (lp_ledger, pool_canister, decimals) = synchronous_route(request.token_ledger)?;
-    // Establish the caller's fee ceiling before admission reserves capacity or
-    // creates a durable sequence.  The same check is repeated from the
-    // journaled phase immediately before the pull, because the live fee may
-    // change while the quote is in flight.
-    let live_fee = crate::deposits::current_ledger_transfer_fee(request.token_ledger)
-        .await
-        .map_err(|_| ConversionError::SystemBusy)?;
-    let minimum_budget = fee_budget(live_fee)?;
-    if request.max_fee_budget_raw < minimum_budget {
-        return Err(ConversionError::NonZeroFeeBudgetRequired {
-            fee_raw: live_fee,
-            minimum_budget_raw: minimum_budget,
-        });
+    // Hold a transient owner fence across every read-only await.  The durable
+    // reserve below is the second fence, so a reentrant caller cannot fill
+    // permanent capacity with unfunded rows while this preflight is pending.
+    let owner_guard = acquire_owner_admission(owner)?;
+    let active_sequence = read_state(|state| {
+        state
+            .conversion_intents
+            .as_ref()
+            .and_then(|rows| active_owner_sequence(owner, rows.values()))
+    });
+    if let Some(active_seq) = active_sequence {
+        if !owner_admission_is_free(Some(active_seq)) {
+            return Err(ConversionError::ActiveIntent {
+                intent_seq: active_seq,
+            });
+        }
     }
-    ensure_admission(request.token_ledger, request.principal_raw, decimals)?;
+    let route = synchronous_route(request.token_ledger)?;
+    preflight_new_intent(owner, &request, route).await?;
+    let (lp_ledger, pool_canister, _) = route;
     let intent = reserve_intent(owner, request.clone(), lp_ledger, pool_canister)?;
     if intent.request != request {
         return Err(ConversionError::IntentConflict);
@@ -2613,6 +2800,7 @@ pub async fn start_conversion(request: ConversionRequest) -> Result<ConversionSt
     if is_terminal(&intent.status) {
         return Ok(intent.status);
     }
+    drop(owner_guard);
     let _live = acquire_live(owner, request.intent_seq)?;
     Ok(run(intent).await)
 }
@@ -3317,6 +3505,27 @@ mod tests {
         assert_eq!(fee_budget(0).unwrap(), 0);
         assert_eq!(fee_budget(7).unwrap(), 35);
         assert!(fee_budget(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn admission_requires_principal_budget_and_ingress_fee_without_overflow() {
+        assert_eq!(preflight_pull_amount(100, 20, 3).unwrap(), 123);
+        assert!(preflight_pull_amount(u64::MAX, 1, 0).is_err());
+        assert!(preflight_pull_amount(u64::MAX - 1, 0, 1).is_ok());
+    }
+
+    #[test]
+    fn admission_requires_both_wallet_balance_and_sp_allowance() {
+        assert!(wallet_preflight_sufficient(123, 123, 123));
+        assert!(!wallet_preflight_sufficient(122, 123, 123));
+        assert!(!wallet_preflight_sufficient(123, 122, 123));
+        assert!(!wallet_preflight_sufficient(u128::MAX, 122, 123));
+    }
+
+    #[test]
+    fn owner_admission_guard_rejects_only_nonterminal_owner_work() {
+        assert!(owner_admission_is_free(None));
+        assert!(!owner_admission_is_free(Some(7)));
     }
 
     #[test]

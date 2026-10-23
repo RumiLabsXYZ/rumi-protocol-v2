@@ -1766,13 +1766,22 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
     add_liquidity_inner(amounts, min_lp, None).await
 }
 
-/// Shared implementation for the legacy add-liquidity call and the durable
-/// receipt call.  The legacy path passes `None`, preserving its public
-/// signature and transfer tuples byte-for-byte.
 async fn add_liquidity_inner(
     amounts: Vec<u128>,
     min_lp: u128,
+    receipt: Option<&mut LiquidityReceiptV1>,
+) -> Result<u128, ThreePoolError> {
+    add_liquidity_inner_with_guard(amounts, min_lp, receipt, None).await
+}
+
+/// Shared implementation for the legacy add-liquidity call and the durable
+/// receipt call.  The legacy path passes `None`, preserving its public
+/// signature and transfer tuples byte-for-byte.
+async fn add_liquidity_inner_with_guard(
+    amounts: Vec<u128>,
+    min_lp: u128,
     mut receipt: Option<&mut LiquidityReceiptV1>,
+    mut held_pool_guard: Option<pool_guard::PoolGuard>,
 ) -> Result<u128, ThreePoolError> {
     let caller = ic_cdk::api::caller();
     if let Some(row) = receipt.as_deref_mut() {
@@ -1802,7 +1811,11 @@ async fn add_liquidity_inner(
     let _pool_guard = if let Some(row) = receipt.as_deref() {
         liquidity_receipts::claim_active(row.owner, &row.request.intent_id)
             .map_err(|_| ThreePoolError::PoolLocked)?;
-        pool_guard::PoolGuard::new_for_liquidity_receipt(row)?
+        if let Some(guard) = held_pool_guard.take() {
+            guard.handoff_to_liquidity_receipt(row)?
+        } else {
+            pool_guard::PoolGuard::new_for_liquidity_receipt(row)?
+        }
     } else {
         pool_guard::PoolGuard::new()?
     };
@@ -2273,16 +2286,69 @@ pub async fn add_liquidity_with_receipt_v1(
     request: AddLiquidityRequestV1,
 ) -> Result<LiquidityReceiptV1, LiquidityReceiptErrorV1> {
     let owner = ic_cdk::api::caller();
+    if owner == Principal::anonymous() {
+        return Err(LiquidityReceiptErrorV1::Unauthorized);
+    }
+    if request.intent_id.len() != 32 {
+        return Err(LiquidityReceiptErrorV1::InvalidIntentId);
+    }
+
+    // Replay/conflict lookup must precede every preflight call.  A retry of an
+    // already durable request never needs fresh ledger reads and never creates
+    // another admission attempt or payout identity.
+    if request.intent_id.len() == 32 {
+        if let Some(existing) = liquidity_receipts::get(owner, &request.intent_id) {
+            if existing.request != request {
+                return Err(LiquidityReceiptErrorV1::IntentConflict);
+            }
+            liquidity_receipts::clear_if_terminal(&existing);
+            return Ok(existing);
+        }
+    }
+
+    // Hold one global guard over all fresh-request awaits.  Invalid, unfunded,
+    // or allowance-free requests therefore leave no durable row and cannot
+    // consume the bounded receipt map.  The guard is handed directly to the
+    // receipt saga below, with no unlock/relock gap after reserve().
+    let admission = pool_guard::PoolGuard::new_liquidity_receipt_admission()
+        .map_err(|_| LiquidityReceiptErrorV1::PoolLocked)?;
+    if !liquidity_receipts::capacity_available() {
+        return Err(LiquidityReceiptErrorV1::CapacityExceeded);
+    }
+    preflight_new_liquidity_receipt(owner, &request).await?;
+
+    // The only awaits were in the read-only preflight.  Recheck the mutable
+    // admission conditions synchronously before creating the durable identity.
+    if read_state(|s| s.is_paused) {
+        return Err(LiquidityReceiptErrorV1::PoolLocked);
+    }
+    if receipts::fenced()
+        || storage::payouts::fenced()
+        || storage::liquidity_receipt_fence().is_some()
+    {
+        return Err(LiquidityReceiptErrorV1::PoolLocked);
+    }
+    if !liquidity_receipts::capacity_available() {
+        return Err(LiquidityReceiptErrorV1::CapacityExceeded);
+    }
     let (mut receipt, fresh) = liquidity_receipts::reserve(owner, request.clone())?;
     if !fresh {
-        // A terminal row may outlive the callback that cleared its transient
-        // guard.  Reconcile the exact durable fence while preserving the
-        // immutable terminal result.
         liquidity_receipts::clear_if_terminal(&receipt);
         return Ok(receipt);
     }
     let _live = liquidity_receipts::acquire_live(owner, &request.intent_id)?;
-    if let Err(error) = add_liquidity_inner(request.amounts, request.min_lp, Some(&mut receipt)).await {
+    liquidity_receipts::claim_active(owner, &request.intent_id)?;
+    let admission = admission
+        .handoff_to_liquidity_receipt(&receipt)
+        .map_err(|_| LiquidityReceiptErrorV1::PoolLocked)?;
+    if let Err(error) = add_liquidity_inner_with_guard(
+        request.amounts,
+        request.min_lp,
+        Some(&mut receipt),
+        Some(admission),
+    )
+    .await
+    {
         // Completed is terminal forever.  In particular, a synchronous
         // cleanup error after the accounting/event commit must never turn it
         // back into a retryable receipt (the receipt path traps instead).
@@ -2318,6 +2384,111 @@ pub fn get_liquidity_receipt_v1(intent_id: Vec<u8>) -> Option<LiquidityReceiptV1
 #[query]
 pub fn get_active_liquidity_receipt_v1() -> Option<(Principal, Vec<u8>)> {
     storage::liquidity_receipt_fence().map(|(owner, intent_id)| (owner, intent_id.to_vec()))
+}
+
+/// Preflight a fresh receipt while the global admission guard is held.  This
+/// performs only read calls and pure quote checks; no receipt row, payout
+/// identity, or durable fence is created until every positive leg has enough
+/// source balance and allowance.  Keeping the guard across these awaits makes
+/// the source snapshot single-admission: another fresh intent cannot pass the
+/// same balance/allowance check concurrently.
+async fn preflight_new_liquidity_receipt(
+    owner: Principal,
+    request: &AddLiquidityRequestV1,
+) -> Result<(), LiquidityReceiptErrorV1> {
+    if read_state(|s| s.is_paused) {
+        return Err(LiquidityReceiptErrorV1::PoolLocked);
+    }
+    if request.amounts.len() != 3 || request.amounts.iter().all(|amount| *amount == 0) {
+        return Err(LiquidityReceiptErrorV1::InvalidRequest);
+    }
+
+    let source = liquidity_receipts::source_account(owner, request.source_subaccount);
+    let token_meta: [(Principal, String); 3] = read_state(|s| {
+        [
+            (s.config.tokens[0].ledger_id, s.config.tokens[0].symbol.clone()),
+            (s.config.tokens[1].ledger_id, s.config.tokens[1].symbol.clone()),
+            (s.config.tokens[2].ledger_id, s.config.tokens[2].symbol.clone()),
+        ]
+    });
+
+    for (index, amount) in request.amounts.iter().copied().enumerate() {
+        if amount == 0 {
+            continue;
+        }
+        let ledger = token_meta[index].0;
+        let fee = crate::transfers::try_current_ledger_fee(ledger)
+            .await
+            .map_err(|_| LiquidityReceiptErrorV1::InvalidRequest)?;
+        let required_balance = amount
+            .checked_add(fee)
+            .ok_or(LiquidityReceiptErrorV1::InvalidRequest)?;
+        let balance: Result<(candid::Nat,), _> =
+            ic_cdk::call(ledger, "icrc1_balance_of", (source.clone(),)).await;
+        let balance: u128 = balance
+            .ok()
+            .and_then(|(value,)| value.0.try_into().ok())
+            .ok_or(LiquidityReceiptErrorV1::InvalidRequest)?;
+        if balance < required_balance {
+            return Err(LiquidityReceiptErrorV1::InvalidRequest);
+        }
+
+        let allowance_args = icrc_ledger_types::icrc2::allowance::AllowanceArgs {
+            account: source.clone(),
+            spender: icrc_ledger_types::icrc1::account::Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            },
+        };
+        let allowance: Result<(
+            icrc_ledger_types::icrc2::allowance::Allowance,
+        ), _> = ic_cdk::call(ledger, "icrc2_allowance", (allowance_args,)).await;
+        let allowance: u128 = allowance
+            .ok()
+            .and_then(|(value,)| {
+                if value.expires_at.is_some_and(|expires_at| expires_at < ic_cdk::api::time()) {
+                    Some(0)
+                } else {
+                    value.allowance.0.try_into().ok()
+                }
+            })
+            .ok_or(LiquidityReceiptErrorV1::InvalidRequest)?;
+        if !liquidity_receipts::preflight_leg_funded(
+            amount,
+            fee,
+            request.max_transfer_fee,
+            balance,
+            allowance,
+        ) || balance < required_balance
+        {
+            return Err(LiquidityReceiptErrorV1::InvalidRequest);
+        }
+    }
+
+    let amounts: [u128; 3] = request
+        .amounts
+        .clone()
+        .try_into()
+        .map_err(|_| LiquidityReceiptErrorV1::InvalidRequest)?;
+    let precision_muls = get_precision_muls();
+    let amp = get_current_a();
+    let (old_balances, lp_total_supply, fee_curve) = read_state(|s| {
+        (s.balances, s.lp_total_supply, s.config.fee_curve.unwrap_or_default())
+    });
+    let lp_minted = calc_add_liquidity(
+        &amounts,
+        &old_balances,
+        &precision_muls,
+        lp_total_supply,
+        amp,
+        &fee_curve,
+    )
+    .map_err(|_| LiquidityReceiptErrorV1::InvalidRequest)?
+    .lp_minted;
+    if lp_minted < request.min_lp {
+        return Err(LiquidityReceiptErrorV1::InvalidRequest);
+    }
+    Ok(())
 }
 
 /// Confirm one aged, ambiguous receipt input from a positive ICRC-3 proof and

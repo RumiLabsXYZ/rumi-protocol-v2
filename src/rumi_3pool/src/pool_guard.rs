@@ -38,6 +38,22 @@ impl PoolGuard {
         Self::acquire()
     }
 
+    /// Acquire the global pool admission lock for the asynchronous, read-only
+    /// preflight of a fresh liquidity receipt.  The lock is deliberately held
+    /// across the ledger balance/allowance queries so two fresh intents cannot
+    /// both pass against the same reserve snapshot and then consume receipt
+    /// capacity.  The caller must hand this guard directly to the receipt
+    /// operation before dropping it.
+    pub(crate) fn new_liquidity_receipt_admission() -> Result<Self, ThreePoolError> {
+        if crate::receipts::fenced()
+            || crate::storage::payouts::fenced()
+            || crate::storage::liquidity_receipt_fence().is_some()
+        {
+            return Err(ThreePoolError::PoolLocked);
+        }
+        Self::acquire()
+    }
+
     /// Recovery for an ordinary payout can cross its own durable payout fence,
     /// but never a receipt-backed swap fence.
     pub(crate) fn new_payout_recovery() -> Result<Self, ThreePoolError> {
@@ -55,6 +71,24 @@ impl PoolGuard {
     pub(crate) fn new_for_liquidity_receipt(
         receipt: &crate::liquidity_receipts::LiquidityReceiptV1,
     ) -> Result<Self, ThreePoolError> {
+        Self::validate_for_liquidity_receipt(receipt)?;
+        Self::acquire()
+    }
+
+    /// Convert a held fresh-receipt admission guard into the exact durable
+    /// receipt guard without an await or an unlock/relock gap.  The durable
+    /// receipt fence and any owned payout fence must already be present.
+    pub(crate) fn handoff_to_liquidity_receipt(
+        self,
+        receipt: &crate::liquidity_receipts::LiquidityReceiptV1,
+    ) -> Result<Self, ThreePoolError> {
+        Self::validate_for_liquidity_receipt(receipt)?;
+        Ok(self)
+    }
+
+    fn validate_for_liquidity_receipt(
+        receipt: &crate::liquidity_receipts::LiquidityReceiptV1,
+    ) -> Result<(), ThreePoolError> {
         if crate::receipts::fenced() {
             return Err(ThreePoolError::PoolLocked);
         }
@@ -95,7 +129,7 @@ impl PoolGuard {
                 return Err(ThreePoolError::PoolLocked);
             }
         }
-        Self::acquire()
+        Ok(())
     }
 
     fn acquire() -> Result<Self, ThreePoolError> {
@@ -207,6 +241,24 @@ mod tests {
         assert!(matches!(PoolGuard::new(), Err(ThreePoolError::PoolLocked)));
         drop(g1);
         let _g2 = PoolGuard::new().expect("second acquire after drop");
+    }
+
+    #[test]
+    fn fresh_receipt_admission_blocks_generic_pool_mutation_until_handoff() {
+        let _serial = TEST_LOCK.lock().expect("test lock");
+        let owner = Principal::self_authenticating(b"admission owner");
+        let intent_id = [43; 32];
+        let receipt = receipt(owner, intent_id);
+        let admission = PoolGuard::new_liquidity_receipt_admission()
+            .expect("fresh receipt admission");
+        assert!(matches!(PoolGuard::new(), Err(ThreePoolError::PoolLocked)));
+        liquidity_receipts::claim_active(owner, &intent_id).expect("claim receipt fence");
+        let handed = admission
+            .handoff_to_liquidity_receipt(&receipt)
+            .expect("handoff retains global lock");
+        assert!(matches!(PoolGuard::new(), Err(ThreePoolError::PoolLocked)));
+        drop(handed);
+        assert!(storage::clear_liquidity_receipt_fence(owner, intent_id));
     }
 
     #[test]
