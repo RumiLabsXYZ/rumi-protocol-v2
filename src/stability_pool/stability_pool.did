@@ -570,6 +570,51 @@ type InterestRecoveryWire_RecoveryStatus = record {
 type InterestRecoveryWire_Result_10 = variant { Ok : opt InterestRecoveryWire_RecoveryPacketReceipt; Err : text };
 type InterestRecoveryWire_Result_11 = variant { Ok : opt InterestRecoveryWire_RecoveryStatus; Err : text };
 type InterestRecoveryWire_Result_7 = variant { Ok : InterestRecoveryWire_RecoveryStatus; Err : text };
+type WithdrawalWire_Account = record { owner : principal; subaccount : opt blob };
+type WithdrawalWire_PendingOutboundPayoutStatus = record {
+  last_error : opt text;
+  ambiguous_seen : bool;
+  transfer_fee : nat64;
+  reconciliation_attempts : nat64;
+  last_reconciliation_at_ns : opt nat64;
+  recipient : WithdrawalWire_Account;
+  transfer_amount : nat64;
+  from_subaccount : opt blob;
+  transfer_created_at_time_ns : nat64;
+  ledger : principal;
+  candidate_block_index : opt nat64;
+  dispatch_in_flight : bool;
+  candidate_block_index_raw : opt text;
+  transfer_memo : blob;
+  gross_amount : nat64;
+};
+type WithdrawalWire_Result_6 = variant { Ok : nat64; Err : WithdrawalWire_StabilityPoolError };
+type WithdrawalWire_StabilityPoolError = variant {
+  LedgerTransferFailed : record { reason : text };
+  RefundClaimNotFound;
+  EmergencyPaused;
+  AlreadyOptedOut : record { collateral : principal };
+  TokenNotActive : record { ledger : principal };
+  InsufficientBalance : record {
+    token : principal;
+    available : nat64;
+    required : nat64;
+  };
+  InvalidPayoutAddress : record { reason : text };
+  CollateralNotFound : record { ledger : principal };
+  NoPositionFound;
+  AmountTooLow : record { minimum_e8s : nat64 };
+  Unauthorized;
+  InterCanisterCallFailed : record { method : text; target : text };
+  PayoutAddressRequired : record { collateral : principal };
+  XrpClaimStillOutstanding : record { claim_id : nat64 };
+  LiquidationFailed : record { vault_id : nat64; reason : text };
+  XrpClaimStatusCheckFailed : record { reason : text };
+  SystemBusy;
+  AlreadyOptedIn : record { collateral : principal };
+  TokenNotAccepted : record { ledger : principal };
+  InsufficientPoolBalance;
+};
 service : (StabilityPoolInitArgs) -> {
 
   // ── Deposit / Withdraw / Claim ──
@@ -665,4 +710,7 @@ service : (StabilityPoolInitArgs) -> {
   finish_interest_recovery : (blob) -> (InterestRecoveryWire_Result_7);
   get_interest_recovery_status : () -> (InterestRecoveryWire_Result_11) query;
   get_interest_recovery_packet_receipt : (nat64) -> (InterestRecoveryWire_Result_10);
+
+  get_my_pending_withdrawals : () -> (vec WithdrawalWire_PendingOutboundPayoutStatus) query;
+  reconcile_withdrawal : (principal, principal, nat64) -> (WithdrawalWire_Result_6);
 };

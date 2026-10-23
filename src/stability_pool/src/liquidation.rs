@@ -3773,6 +3773,91 @@ fn three_usd_backend_ready_for_new_absorb(readiness: Option<bool>) -> bool {
     readiness == Some(true)
 }
 
+#[async_trait::async_trait(?Send)]
+trait ThreeUsdAbsorbAdmissionIo {
+    async fn acknowledge_client(&mut self, protocol: Principal) -> bool;
+    async fn ingress_enabled(&mut self, protocol: Principal) -> Option<bool>;
+    async fn approval_fee(&mut self, ledger: Principal) -> u64;
+}
+
+struct CdkThreeUsdAbsorbAdmissionIo;
+
+#[async_trait::async_trait(?Send)]
+impl ThreeUsdAbsorbAdmissionIo for CdkThreeUsdAbsorbAdmissionIo {
+    async fn acknowledge_client(&mut self, protocol: Principal) -> bool {
+        let reply: Result<(Result<(), rumi_protocol_backend::ProtocolError>,), _> =
+            call(protocol, "acknowledge_three_usd_reserve_v2_client", ()).await;
+        matches!(reply, Ok((Ok(()),)))
+    }
+
+    async fn ingress_enabled(&mut self, protocol: Principal) -> Option<bool> {
+        let reply: Result<(bool,), _> =
+            call(protocol, "get_three_usd_reserve_ingress_enabled", ()).await;
+        reply.ok().map(|(enabled,)| enabled)
+    }
+
+    async fn approval_fee(&mut self, ledger: Principal) -> u64 {
+        crate::deposits::ledger_transfer_fee(ledger).await
+    }
+}
+
+/// Readiness checks have no authority to pull funds. Complete them before
+/// reserving depositor books: an Unseen request cannot be recovered by the
+/// settlement timer while backend ingress is disabled. Existing identities
+/// remain untouched and continue through the separate recovery path.
+async fn prepare_new_three_usd_absorb_with_io(
+    protocol: Principal,
+    vault: &LiquidatableVaultInfo,
+    ledger: Principal,
+    debt_e8s: u64,
+    amount: u64,
+    io: &mut dyn ThreeUsdAbsorbAdmissionIo,
+) -> Result<ThreeUsdReserveAbsorbIntent, StabilityPoolError> {
+    if let Some(existing) = read_state(|s| s.get_pending_three_usd_absorb(vault.vault_id)) {
+        return Ok(existing);
+    }
+    if read_state(|s| s.configuration.emergency_pause) {
+        return Err(StabilityPoolError::EmergencyPaused);
+    }
+    crate::ensure_no_pool_balance_async_in_flight()?;
+    if !io.acknowledge_client(protocol).await
+        || !three_usd_backend_ready_for_new_absorb(io.ingress_enabled(protocol).await)
+        || io.approval_fee(ledger).await != 0
+    {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+
+    // Every readiness call can yield to configuration and balance updates.
+    // Revalidate immediately before creating the first durable identity.
+    crate::ensure_no_pool_balance_async_in_flight()?;
+    mutate_state(|s| {
+        if s.configuration.emergency_pause {
+            return Err(StabilityPoolError::EmergencyPaused);
+        }
+        if s.protocol_canister_id != protocol {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        let config_matches = s.stablecoin_registry.get(&ledger).is_some_and(|config| {
+            config.ledger_id == ledger
+                && config.symbol == "3USD"
+                && config.is_lp_token == Some(true)
+                && config.decimals == 8
+                && config.is_active
+        });
+        if !config_matches || !s.collateral_registry.contains_key(&vault.collateral_type) {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        s.prepare_three_usd_absorb(
+            vault.vault_id,
+            debt_e8s,
+            amount,
+            ledger,
+            vault.collateral_type,
+            vault.collateral_price_e8s,
+        )
+    })
+}
+
 async fn resolve_three_usd_absorb_status(
     protocol_id: Principal,
     intent: &ThreeUsdReserveAbsorbIntent,
@@ -4500,44 +4585,25 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             continue;
         }
 
-        // Persist the immutable request before any inter-canister await. Pause
-        // blocks new admissions; it does not block recovery of an existing ID.
+        // Non-financial readiness checks precede a fresh reservation. The immutable
+        // request is still persisted before approval or backend dispatch.
+        // Existing identities never depend on new-admission readiness.
         let intent = match pending_intent {
             Some(intent) => intent,
             None => {
-                if read_state(|s| s.configuration.emergency_pause) {
-                    log!(INFO, "Holding new 3USD absorb for vault {} because the pool is paused", vault_info.vault_id);
-                    continue;
-                }
-                match mutate_state(|s| {
-                    if s.configuration.emergency_pause {
-                        return Err(StabilityPoolError::EmergencyPaused);
-                    }
-                    let config_matches = s.stablecoin_registry.get(token_ledger).is_some_and(|config| {
-                        config.ledger_id == *token_ledger
-                            && config.symbol == "3USD"
-                            && config.is_lp_token == Some(true)
-                            && config.decimals == 8
-                            && config.is_active
-                    });
-                    if !config_matches {
-                        return Err(StabilityPoolError::LiquidationFailed {
-                            vault_id: vault_info.vault_id,
-                            reason: "3USD ledger is no longer the configured LP ledger".into(),
-                        });
-                    }
-                    s.prepare_three_usd_absorb(
-                        vault_info.vault_id,
-                        icusd_equiv_e8s,
-                        requested_amount,
-                        *token_ledger,
-                        vault_info.collateral_type,
-                        vault_info.collateral_price_e8s,
-                    )
-                }) {
+                match prepare_new_three_usd_absorb_with_io(
+                    protocol_id,
+                    vault_info,
+                    *token_ledger,
+                    icusd_equiv_e8s,
+                    requested_amount,
+                    &mut CdkThreeUsdAbsorbAdmissionIo,
+                )
+                .await
+                {
                     Ok(intent) => intent,
                     Err(error) => {
-                        log!(INFO, "Could not persist 3USD reserve absorb for vault {}: {:?}", vault_info.vault_id, error);
+                        log!(INFO, "Skipping new 3USD reserve absorb for vault {} before reservation: {:?}", vault_info.vault_id, error);
                         continue;
                     }
                 }
@@ -4589,33 +4655,17 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             // An Unseen saved intent is still pre-dispatch, so it must pass the
             // readiness handshake on every retry. Dispatched requests bypass this
             // branch and remain recoverable even if admission is later disabled.
-            let ack: Result<(Result<(), rumi_protocol_backend::ProtocolError>,), _> =
-                call(protocol_id, "acknowledge_three_usd_reserve_v2_client", ()).await;
-            if !matches!(ack, Ok((Ok(()),))) {
-                log!(INFO, "Holding 3USD absorb {}: V2 client handshake failed", intent.absorb_id);
-                continue;
-            }
-            let ready: Result<(bool,), _> =
-                call(protocol_id, "get_three_usd_reserve_ingress_enabled", ()).await;
-            let readiness = match ready {
-                Ok((enabled,)) => Some(enabled),
-                Err(error) => {
-                    log!(INFO, "Holding 3USD absorb {}: backend V2 readiness is unavailable: {:?}", intent.absorb_id, error);
-                    None
+            // Fresh requests already completed these checks before persisting
+            // any lock. Retained Unseen requests keep their original identity.
+            if had_existing_intent {
+                let mut io = CdkThreeUsdAbsorbAdmissionIo;
+                if !io.acknowledge_client(protocol_id).await
+                    || !three_usd_backend_ready_for_new_absorb(io.ingress_enabled(protocol_id).await)
+                    || io.approval_fee(*token_ledger).await != 0
+                {
+                    log!(INFO, "Holding saved 3USD absorb {}: V2 admission or zero-fee readiness unavailable", intent.absorb_id);
+                    continue;
                 }
-            };
-            if !three_usd_backend_ready_for_new_absorb(readiness) {
-                log!(INFO, "Holding 3USD absorb {}: backend V2 ingress is disabled or unavailable", intent.absorb_id);
-                continue;
-            }
-            if read_state(|s| s.configuration.emergency_pause) {
-                log!(INFO, "Holding 3USD absorb {} before approval because the pool is paused", intent.absorb_id);
-                continue;
-            }
-            let live_approval_fee = crate::deposits::ledger_transfer_fee(*token_ledger).await;
-            if live_approval_fee != 0 {
-                log!(INFO, "Holding 3USD absorb {} because nonzero approval fees are unsupported", intent.absorb_id);
-                continue;
             }
             if read_state(|s| s.configuration.emergency_pause) {
                 log!(INFO, "Holding 3USD absorb {} after fee query because the pool is paused", intent.absorb_id);
@@ -5111,6 +5161,179 @@ mod tests {
         assert!(!three_usd_backend_ready_for_new_absorb(None));
         assert!(!three_usd_backend_ready_for_new_absorb(Some(false)));
         assert!(three_usd_backend_ready_for_new_absorb(Some(true)));
+    }
+
+    struct MockThreeUsdAdmissionIo {
+        acknowledge: bool,
+        enabled: Option<bool>,
+        fee: u64,
+        pause_after_fee: bool,
+        deactivate_after_fee: bool,
+        calls: Vec<&'static str>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl ThreeUsdAbsorbAdmissionIo for MockThreeUsdAdmissionIo {
+        async fn acknowledge_client(&mut self, _protocol: Principal) -> bool {
+            assert_eq!(read_state(|s| s.pending_three_usd_absorb_count()), 0);
+            self.calls.push("acknowledge");
+            self.acknowledge
+        }
+
+        async fn ingress_enabled(&mut self, _protocol: Principal) -> Option<bool> {
+            assert_eq!(read_state(|s| s.pending_three_usd_absorb_count()), 0);
+            self.calls.push("ingress");
+            self.enabled
+        }
+
+        async fn approval_fee(&mut self, ledger: Principal) -> u64 {
+            assert_eq!(read_state(|s| s.pending_three_usd_absorb_count()), 0);
+            self.calls.push("fee");
+            if self.pause_after_fee {
+                mutate_state(|s| s.configuration.emergency_pause = true);
+            }
+            if self.deactivate_after_fee {
+                mutate_state(|s| s.stablecoin_registry.get_mut(&ledger).unwrap().is_active = false);
+            }
+            self.fee
+        }
+    }
+
+    fn three_usd_admission_fixture() -> (Principal, LiquidatableVaultInfo, Principal) {
+        let protocol = principal(45);
+        let three_usd = principal(56);
+        let collateral = principal(55);
+        let mut state = test_state();
+        state.protocol_canister_id = protocol;
+        state.register_stablecoin(StablecoinConfig {
+            ledger_id: three_usd,
+            symbol: "3USD".into(),
+            decimals: 8,
+            priority: 3,
+            is_active: true,
+            transfer_fee: Some(0),
+            is_lp_token: Some(true),
+            underlying_pool: Some(principal(57)),
+        });
+        state.register_collateral(CollateralInfo {
+            ledger_id: collateral,
+            symbol: "ICP".into(),
+            decimals: 8,
+            status: CollateralStatus::Active,
+        });
+        add_deposit_direct(&mut state, user_a(), three_usd, 100_000_000);
+        replace_state(state);
+        (
+            protocol,
+            LiquidatableVaultInfo {
+                vault_id: 4244,
+                collateral_type: collateral,
+                debt_amount: 20_000_000,
+                collateral_amount: 1_000_000,
+                recommended_liquidation_amount: 0,
+                collateral_price_e8s: 100_000_000,
+            },
+            three_usd,
+        )
+    }
+
+    fn ready_three_usd_admission_io() -> MockThreeUsdAdmissionIo {
+        MockThreeUsdAdmissionIo {
+            acknowledge: true,
+            enabled: Some(true),
+            fee: 0,
+            pause_after_fee: false,
+            deactivate_after_fee: false,
+            calls: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unavailable_three_usd_admission_never_reserves_or_locks_depositor_books() {
+        for (acknowledge, enabled, fee) in [
+            (false, Some(true), 0),
+            (true, Some(false), 0),
+            (true, None, 0),
+            (true, Some(true), 1),
+        ] {
+            let (protocol, vault, ledger) = three_usd_admission_fixture();
+            let initial_next_id = read_state(|s| s.next_three_usd_absorb_id);
+            let mut io = MockThreeUsdAdmissionIo {
+                acknowledge,
+                enabled,
+                fee,
+                ..ready_three_usd_admission_io()
+            };
+            let result = futures::executor::block_on(prepare_new_three_usd_absorb_with_io(
+                protocol, &vault, ledger, 20_000_000, 20_000_000, &mut io,
+            ));
+            assert!(result.is_err());
+            assert!(!crate::pool_token_balance_mutation_blocked(&[ledger]));
+            read_state(|s| {
+                assert_eq!(s.pending_three_usd_absorb_count(), 0);
+                assert_eq!(s.next_three_usd_absorb_id, initial_next_id);
+                assert_eq!(s.deposits[&user_a()].stablecoin_balances[&ledger], 100_000_000);
+                assert_eq!(s.total_stablecoin_balances[&ledger], 100_000_000);
+            });
+        }
+        replace_state(StabilityPoolState::default());
+    }
+
+    #[test]
+    fn new_three_usd_admission_rechecks_pause_after_readiness_awaits() {
+        let (protocol, vault, ledger) = three_usd_admission_fixture();
+        let mut io = MockThreeUsdAdmissionIo {
+            pause_after_fee: true,
+            ..ready_three_usd_admission_io()
+        };
+        let result = futures::executor::block_on(prepare_new_three_usd_absorb_with_io(
+            protocol, &vault, ledger, 20_000_000, 20_000_000, &mut io,
+        ));
+        assert!(matches!(result, Err(StabilityPoolError::EmergencyPaused)));
+        assert_eq!(read_state(|s| s.pending_three_usd_absorb_count()), 0);
+        replace_state(StabilityPoolState::default());
+    }
+
+    #[test]
+    fn new_three_usd_admission_rechecks_registry_after_readiness_awaits() {
+        let (protocol, vault, ledger) = three_usd_admission_fixture();
+        let mut io = MockThreeUsdAdmissionIo {
+            deactivate_after_fee: true,
+            ..ready_three_usd_admission_io()
+        };
+        let result = futures::executor::block_on(prepare_new_three_usd_absorb_with_io(
+            protocol, &vault, ledger, 20_000_000, 20_000_000, &mut io,
+        ));
+        assert!(matches!(result, Err(StabilityPoolError::SystemBusy)));
+        assert_eq!(read_state(|s| s.pending_three_usd_absorb_count()), 0);
+        assert!(!crate::pool_token_balance_mutation_blocked(&[ledger]));
+        replace_state(StabilityPoolState::default());
+    }
+
+    #[test]
+    fn ready_three_usd_admission_reserves_once_and_keeps_saved_identity_without_calls() {
+        let (protocol, vault, ledger) = three_usd_admission_fixture();
+        let mut io = ready_three_usd_admission_io();
+        let intent = futures::executor::block_on(prepare_new_three_usd_absorb_with_io(
+            protocol, &vault, ledger, 20_000_000, 20_000_000, &mut io,
+        ))
+        .expect("all readiness checks completed before reservation");
+        assert_eq!(io.calls, vec!["acknowledge", "ingress", "fee"]);
+        assert!(crate::pool_token_balance_mutation_blocked(&[ledger]));
+        let mut unavailable = MockThreeUsdAdmissionIo {
+            acknowledge: false,
+            enabled: None,
+            fee: 100,
+            ..ready_three_usd_admission_io()
+        };
+        let retained = futures::executor::block_on(prepare_new_three_usd_absorb_with_io(
+            protocol, &vault, ledger, 99_000_000, 98_000_000, &mut unavailable,
+        ))
+        .expect("existing immutable request does not require fresh readiness");
+        assert_eq!(retained, intent);
+        assert!(unavailable.calls.is_empty());
+        assert_eq!(read_state(|s| s.pending_three_usd_absorb_count()), 1);
+        replace_state(StabilityPoolState::default());
     }
 
     #[test]

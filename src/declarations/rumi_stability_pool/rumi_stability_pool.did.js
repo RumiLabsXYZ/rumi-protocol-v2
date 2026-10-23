@@ -297,6 +297,27 @@ export const idlFactory = ({ IDL }) => {
     'transfer_memo' : IDL.Vec(IDL.Nat8),
     'gross_amount' : IDL.Nat64,
   });
+  const WithdrawalWire_Account = IDL.Record({
+    'owner' : IDL.Principal,
+    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+  });
+  const WithdrawalWire_PendingOutboundPayoutStatus = IDL.Record({
+    'last_error' : IDL.Opt(IDL.Text),
+    'ambiguous_seen' : IDL.Bool,
+    'transfer_fee' : IDL.Nat64,
+    'reconciliation_attempts' : IDL.Nat64,
+    'last_reconciliation_at_ns' : IDL.Opt(IDL.Nat64),
+    'recipient' : WithdrawalWire_Account,
+    'transfer_amount' : IDL.Nat64,
+    'from_subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'transfer_created_at_time_ns' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'candidate_block_index' : IDL.Opt(IDL.Nat64),
+    'dispatch_in_flight' : IDL.Bool,
+    'candidate_block_index_raw' : IDL.Opt(IDL.Text),
+    'transfer_memo' : IDL.Vec(IDL.Nat8),
+    'gross_amount' : IDL.Nat64,
+  });
   const ChainSpAbsorbIntentStatus = IDL.Variant({
     'BackendRejected' : IDL.Null,
     'Burned' : IDL.Null,
@@ -541,6 +562,42 @@ export const idlFactory = ({ IDL }) => {
     'vault_id' : IDL.Nat64,
     'collateral_type' : IDL.Principal,
   });
+  const WithdrawalWire_StabilityPoolError = IDL.Variant({
+    'LedgerTransferFailed' : IDL.Record({ 'reason' : IDL.Text }),
+    'RefundClaimNotFound' : IDL.Null,
+    'EmergencyPaused' : IDL.Null,
+    'AlreadyOptedOut' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'TokenNotActive' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'InsufficientBalance' : IDL.Record({
+      'token' : IDL.Principal,
+      'available' : IDL.Nat64,
+      'required' : IDL.Nat64,
+    }),
+    'InvalidPayoutAddress' : IDL.Record({ 'reason' : IDL.Text }),
+    'CollateralNotFound' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'NoPositionFound' : IDL.Null,
+    'AmountTooLow' : IDL.Record({ 'minimum_e8s' : IDL.Nat64 }),
+    'Unauthorized' : IDL.Null,
+    'InterCanisterCallFailed' : IDL.Record({
+      'method' : IDL.Text,
+      'target' : IDL.Text,
+    }),
+    'PayoutAddressRequired' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'XrpClaimStillOutstanding' : IDL.Record({ 'claim_id' : IDL.Nat64 }),
+    'LiquidationFailed' : IDL.Record({
+      'vault_id' : IDL.Nat64,
+      'reason' : IDL.Text,
+    }),
+    'XrpClaimStatusCheckFailed' : IDL.Record({ 'reason' : IDL.Text }),
+    'SystemBusy' : IDL.Null,
+    'AlreadyOptedIn' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'InsufficientPoolBalance' : IDL.Null,
+  });
+  const WithdrawalWire_Result_6 = IDL.Variant({
+    'Ok' : IDL.Nat64,
+    'Err' : WithdrawalWire_StabilityPoolError,
+  });
   const CfxClaimPayoutRecovery = IDL.Record({
     'claim_id' : IDL.Nat64,
     'claimant' : IDL.Principal,
@@ -777,6 +834,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(PendingOutboundPayoutStatus)],
         ['query'],
       ),
+    'get_my_pending_withdrawals' : IDL.Func(
+        [],
+        [IDL.Vec(WithdrawalWire_PendingOutboundPayoutStatus)],
+        ['query'],
+      ),
     'get_pending_chain_absorbs' : IDL.Func(
         [],
         [IDL.Vec(ChainSpAbsorbIntent)],
@@ -867,6 +929,11 @@ export const idlFactory = ({ IDL }) => {
     'reconcile_collateral_claim' : IDL.Func(
         [IDL.Principal, IDL.Principal, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'reconcile_withdrawal' : IDL.Func(
+        [IDL.Principal, IDL.Principal, IDL.Nat64],
+        [WithdrawalWire_Result_6],
         [],
       ),
     'recredit_failed_cfx_claim_payout' : IDL.Func(

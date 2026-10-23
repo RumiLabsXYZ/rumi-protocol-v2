@@ -169,7 +169,7 @@ pub(crate) async fn ledger_transfer_fee(ledger: Principal) -> u64 {
 /// Read the current fee without using the long-lived display/accounting cache.
 /// Value-moving calls use the result as an explicit `fee` so a fee change can
 /// cause a typed `BadFee` before transfer instead of an untracked debit.
-async fn current_ledger_transfer_fee(ledger: Principal) -> Result<u64, StabilityPoolError> {
+pub(crate) async fn current_ledger_transfer_fee(ledger: Principal) -> Result<u64, StabilityPoolError> {
     let (fee,): (candid::Nat,) = call(ledger, "icrc1_fee", ()).await.map_err(|_| {
         StabilityPoolError::InterCanisterCallFailed {
             target: ledger.to_string(),
@@ -1407,153 +1407,10 @@ async fn resume_deposit_intent(
     }
 }
 
-/// Withdraw a stablecoin from the pool (only unconsumed balances).
-///
-/// Uses deduct-before-transfer pattern to prevent TOCTOU double-spend:
-/// 1. Deduct balance from state (prevents concurrent withdrawals from passing balance check)
-/// 2. Transfer tokens to user
-/// 3. If transfer fails, rollback the deduction
+/// Withdraw with a durable exact transfer tuple. Unknown ledger outcomes keep
+/// the original debit and tuple pending; they never restore spendable credit.
 pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
-    // SP-102: refuse balance-mutating ops while a liquidation is apportioning,
-    // so a withdraw cannot land between a liquidation's snapshot and its burn
-    // apportionment and escape the depositor's share of the loss.
-    if crate::pool_token_balance_mutation_blocked(&[token_ledger]) {
-        return Err(StabilityPoolError::SystemBusy);
-    }
-    let caller = ic_cdk::api::caller();
-
-    if read_state(|s| s.configuration.emergency_pause) {
-        return Err(StabilityPoolError::EmergencyPaused);
-    }
-
-    // The ledger debits `transfer_amount + fee` from the pool. Query the live
-    // fee first so a max withdrawal drains the user's recorded position without
-    // overdrawing the pool ledger account.
-    let ledger_fee = ledger_transfer_fee(token_ledger).await;
-    let pool_ledger_balance = ledger_pool_balance(token_ledger).await;
-
-    // Fee/balance queries above await other canisters. Recheck after them so a
-    // burn intent created during those calls cannot race this withdrawal.
-    crate::ensure_pool_token_balance_mutation_allowed(&[token_ledger])?;
-
-    if amount <= ledger_fee {
-        return Err(StabilityPoolError::AmountTooLow {
-            minimum_e8s: ledger_fee + 1,
-        });
-    }
-
-    // Deduct full amount from state BEFORE transfer to prevent double-spend.
-    // If the transfer fails, we rollback below.
-    let (withdrawal_amount, correction_msg) = prepare_withdrawal_after_ledger_check(
-        caller,
-        token_ledger,
-        amount,
-        pool_ledger_balance,
-        ledger_fee,
-    )?;
-    if let Some(msg) = correction_msg {
-        log!(INFO, "Withdrawal reconciled ledger shortfall: {}", msg);
-    }
-    let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new();
-
-    // User receives amount minus fee; pool pays amount total (transfer + fee)
-    let transfer_amount = withdrawal_amount - ledger_fee;
-    log!(
-        INFO,
-        "Withdraw: {} (transfer {} - fee {}) from {} by {}",
-        withdrawal_amount,
-        transfer_amount,
-        ledger_fee,
-        token_ledger,
-        caller
-    );
-
-    let transfer_args = TransferArg {
-        to: Account {
-            owner: caller,
-            subaccount: None,
-        },
-        amount: transfer_amount.into(),
-        fee: None,
-        memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
-        from_subaccount: None,
-    };
-
-    let result: Result<(Result<candid::Nat, TransferError>,), _> =
-        call(token_ledger, "icrc1_transfer", (transfer_args,)).await;
-
-    match result {
-        Ok((Ok(block_index),)) => {
-            log!(
-                INFO,
-                "Withdrawal transfer succeeded, block: {}",
-                block_index
-            );
-            mutate_state(|s| {
-                s.push_event(
-                    caller,
-                    PoolEventType::Withdraw {
-                        token_ledger,
-                        amount: withdrawal_amount,
-                    },
-                )
-            });
-            Ok(())
-        }
-        // Audit Wave-3 (ICRC-003): Duplicate means the previous withdrawal
-        // attempt already paid the user. Don't restore — that would double-spend.
-        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
-            log!(
-                INFO,
-                "Withdrawal Duplicate (block {}); previous attempt landed, NOT restoring balance",
-                duplicate_of
-            );
-            mutate_state(|s| {
-                s.push_event(
-                    caller,
-                    PoolEventType::Withdraw {
-                        token_ledger,
-                        amount: withdrawal_amount,
-                    },
-                )
-            });
-            Ok(())
-        }
-        Ok((Err(transfer_error),)) => {
-            log!(
-                INFO,
-                "Withdrawal transfer failed, rolling back deduction: {:?}",
-                transfer_error
-            );
-            // Rollback: re-credit the user's balance (clear ledger rejection,
-            // tokens did NOT leave the pool).
-            mutate_state(|s| s.add_deposit(caller, token_ledger, withdrawal_amount));
-            Err(StabilityPoolError::LedgerTransferFailed {
-                reason: format!("{:?}", transfer_error),
-            })
-        }
-        Err(call_error) => {
-            log!(
-                INFO,
-                "Inter-canister call failed, rolling back deduction: {:?}",
-                call_error
-            );
-            // Rollback: re-credit the user's balance.
-            // NOTE: this is the audit ICRC-002 risk pattern — if the ledger
-            // committed but the reply was lost, restoring creates a phantom
-            // credit. The dedup hash (created_at_time) makes the user's
-            // immediate retry land as Duplicate (handled above), so no
-            // double-spend in practice; lose-then-don't-retry leaves the
-            // deduction restored AND the tokens transferred — a known
-            // operational risk that requires manual reconciliation.
-            mutate_state(|s| s.add_deposit(caller, token_ledger, withdrawal_amount));
-            Err(StabilityPoolError::InterCanisterCallFailed {
-                target: format!("{}", token_ledger),
-                method: "icrc1_transfer".to_string(),
-            })
-        }
-    }
+    crate::withdrawals::withdraw(token_ledger, amount).await
 }
 
 fn outbound_payout_memo(caller: Principal, ledger: Principal, created_at_time_ns: u64) -> Vec<u8> {
@@ -1629,7 +1486,7 @@ fn icrc3_account(value: &ICRC3Value, name: &str) -> Result<Account, String> {
     Ok(Account { owner, subaccount })
 }
 
-async fn verify_collateral_payout_block(
+pub(crate) async fn verify_collateral_payout_block(
     ledger: Principal,
     block_index: u64,
     payout: &PendingOutboundPayout,

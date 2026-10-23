@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 pub mod deposits;
+pub mod withdrawals;
 pub mod liquidation;
 pub mod logs;
 pub mod pool_guard;
@@ -163,6 +164,7 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
             legacy_ambiguous_chain_absorbs
         );
     }
+    mutate_state(|s| s.reconcile_pending_withdrawals_after_upgrade());
     let recovered_payouts = mutate_state(|s| {
         s.initialize_pending_outbound_payouts();
         let pending = s.pending_outbound_payouts.as_ref().map_or(0, |p| p.len());
@@ -456,6 +458,23 @@ pub fn get_deposit_intent(intent_seq: u64) -> DepositIntentStatus {
 pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
     interest_recovery::ensure_unlocked();
     crate::deposits::withdraw(token_ledger, amount).await
+}
+
+/// Exact unresolved stablecoin withdrawal transfers for the caller.
+#[query]
+pub fn get_my_pending_withdrawals() -> Vec<PendingOutboundPayoutStatus> {
+    read_state(|s| s.pending_withdrawals_for(&ic_cdk::api::caller()))
+}
+
+/// Settle an aged/ambiguous withdrawal from its exact ledger receipt.
+#[update]
+pub async fn reconcile_withdrawal(
+    token_ledger: Principal,
+    withdrawal_owner: Principal,
+    block_index: u64,
+) -> Result<u64, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
+    crate::withdrawals::reconcile(token_ledger, withdrawal_owner, block_index).await
 }
 
 #[update]

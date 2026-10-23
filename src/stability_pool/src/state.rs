@@ -259,6 +259,11 @@ pub struct StabilityPoolState {
     /// a first-attempt no-effect response. Missing on old snapshots is initialized empty.
     #[serde(default)]
     pub pending_outbound_payouts: Option<BTreeMap<(Principal, Principal), PendingOutboundPayout>>,
+    /// Stablecoin withdrawals already debited from depositor books. Exact
+    /// transfer tuples remain held until paid or an authoritative first-attempt
+    /// no-effect response. Separate from collateral-claim accounting.
+    #[serde(default)]
+    pub pending_withdrawals: Option<BTreeMap<(Principal, Principal), PendingOutboundPayout>>,
     /// Monotonic ICRC-1 created_at_time allocator shared by collateral claims.
     #[serde(default)]
     pub last_outbound_payout_created_at_ns: Option<u64>,
@@ -348,6 +353,7 @@ impl Default for StabilityPoolState {
             pending_refund_attempt_initialization: Some(BTreeSet::new()),
             last_deposit_transfer_created_at: None,
             pending_outbound_payouts: Some(BTreeMap::new()),
+            pending_withdrawals: Some(BTreeMap::new()),
             last_outbound_payout_created_at_ns: None,
             completed_outbound_payouts: Some(BTreeMap::new()),
             deposit_intent_high_watermarks: Some(BTreeMap::new()),
@@ -4630,6 +4636,7 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             pending_refund_attempt_initialization: Some(BTreeSet::new()),
             last_deposit_transfer_created_at: None,
             pending_outbound_payouts: Some(BTreeMap::new()),
+            pending_withdrawals: Some(BTreeMap::new()),
             last_outbound_payout_created_at_ns: None,
             completed_outbound_payouts: Some(BTreeMap::new()),
             deposit_intent_high_watermarks: Some(BTreeMap::new()),
@@ -8566,6 +8573,9 @@ mod tests {
 
         let mut decoded = try_decode_state(&bytes).expect("v1 snapshot must decode");
         assert!(decoded.pending_outbound_payouts.is_none());
+        assert!(decoded.pending_withdrawals.is_none());
+        decoded.reconcile_pending_withdrawals_after_upgrade();
+        assert!(decoded.pending_withdrawals.as_ref().unwrap().is_empty());
         decoded.initialize_pending_outbound_payouts();
         assert_eq!(
             decoded

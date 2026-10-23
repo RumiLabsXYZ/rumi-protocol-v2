@@ -545,6 +545,57 @@ export interface UserStabilityPosition {
   'total_usd_value_e8s' : bigint,
   'opted_out_collateral' : Array<Principal>,
 }
+export interface WithdrawalWire_Account {
+  'owner' : Principal,
+  'subaccount' : [] | [Uint8Array | number[]],
+}
+export interface WithdrawalWire_PendingOutboundPayoutStatus {
+  'last_error' : [] | [string],
+  'ambiguous_seen' : boolean,
+  'transfer_fee' : bigint,
+  'reconciliation_attempts' : bigint,
+  'last_reconciliation_at_ns' : [] | [bigint],
+  'recipient' : WithdrawalWire_Account,
+  'transfer_amount' : bigint,
+  'from_subaccount' : [] | [Uint8Array | number[]],
+  'transfer_created_at_time_ns' : bigint,
+  'ledger' : Principal,
+  'candidate_block_index' : [] | [bigint],
+  'dispatch_in_flight' : boolean,
+  'candidate_block_index_raw' : [] | [string],
+  'transfer_memo' : Uint8Array | number[],
+  'gross_amount' : bigint,
+}
+export type WithdrawalWire_Result_6 = { 'Ok' : bigint } |
+  { 'Err' : WithdrawalWire_StabilityPoolError };
+export type WithdrawalWire_StabilityPoolError = {
+    'LedgerTransferFailed' : { 'reason' : string }
+  } |
+  { 'RefundClaimNotFound' : null } |
+  { 'EmergencyPaused' : null } |
+  { 'AlreadyOptedOut' : { 'collateral' : Principal } } |
+  { 'TokenNotActive' : { 'ledger' : Principal } } |
+  {
+    'InsufficientBalance' : {
+      'token' : Principal,
+      'available' : bigint,
+      'required' : bigint,
+    }
+  } |
+  { 'InvalidPayoutAddress' : { 'reason' : string } } |
+  { 'CollateralNotFound' : { 'ledger' : Principal } } |
+  { 'NoPositionFound' : null } |
+  { 'AmountTooLow' : { 'minimum_e8s' : bigint } } |
+  { 'Unauthorized' : null } |
+  { 'InterCanisterCallFailed' : { 'method' : string, 'target' : string } } |
+  { 'PayoutAddressRequired' : { 'collateral' : Principal } } |
+  { 'XrpClaimStillOutstanding' : { 'claim_id' : bigint } } |
+  { 'LiquidationFailed' : { 'vault_id' : bigint, 'reason' : string } } |
+  { 'XrpClaimStatusCheckFailed' : { 'reason' : string } } |
+  { 'SystemBusy' : null } |
+  { 'AlreadyOptedIn' : { 'collateral' : Principal } } |
+  { 'TokenNotAccepted' : { 'ledger' : Principal } } |
+  { 'InsufficientPoolBalance' : null };
 export interface _SERVICE {
   'ack_native_xrp_payout_settled' : ActorMethod<
     [bigint],
@@ -679,6 +730,10 @@ export interface _SERVICE {
     [],
     Array<PendingOutboundPayoutStatus>
   >,
+  'get_my_pending_withdrawals' : ActorMethod<
+    [],
+    Array<WithdrawalWire_PendingOutboundPayoutStatus>
+  >,
   'get_pending_chain_absorbs' : ActorMethod<[], Array<ChainSpAbsorbIntent>>,
   'get_pending_refunds' : ActorMethod<[[] | [Principal]], Array<PendingRefund>>,
   'get_pending_unallocated_interest_forwards' : ActorMethod<
@@ -749,6 +804,10 @@ export interface _SERVICE {
     [Principal, Principal, bigint],
     { 'Ok' : bigint } |
       { 'Err' : StabilityPoolError }
+  >,
+  'reconcile_withdrawal' : ActorMethod<
+    [Principal, Principal, bigint],
+    WithdrawalWire_Result_6
   >,
   'recredit_failed_cfx_claim_payout' : ActorMethod<
     [CfxClaimPayoutRecovery],
