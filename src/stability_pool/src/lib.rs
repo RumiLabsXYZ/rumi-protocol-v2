@@ -1901,66 +1901,66 @@ fn conversion_consent_message(method: &str, arg: &[u8], caller: Principal) -> St
     let malformed = || match method {
         "quote_3usd_conversion" => {
             "## Quote 3USD Conversion\n\n\
-             You are requesting a read-only 3USD conversion quote. Verify the\
-             exact token ledger, amount, and minimum LP output shown by the\
+             You are requesting a read-only 3USD conversion quote. Verify the \
+             exact token ledger, amount, and minimum LP output shown by the \
              wallet. This call does not create an intent or move funds."
                 .to_string()
         }
         "start_3usd_conversion" => {
             "## Start 3USD Conversion\n\n\
-             You are authorizing a durable 3USD conversion intent. Verify the\
-             exact caller, token ledger, amount, downstream fee budget, and\
-             minimum LP output shown by the wallet. Retries remain bound to the\
-             same stored intent; this message does not authorize an arbitrary\
+             You are authorizing a durable 3USD conversion intent. Verify the \
+             exact caller, token ledger, amount, downstream fee budget, and \
+             minimum LP output shown by the wallet. Retries remain bound to the \
+             same stored intent; this message does not authorize an arbitrary \
              transfer."
                 .to_string()
         }
         "resume_3usd_conversion" => {
             "## Resume 3USD Conversion\n\n\
-             You are authorizing recovery of one stored 3USD conversion intent.\
-             Verify the exact intent shown by the wallet. This resumes the same\
+             You are authorizing recovery of one stored 3USD conversion intent. \
+             Verify the exact intent shown by the wallet. This resumes the same \
              persisted request and does not create a new sequence or fresh spend."
                 .to_string()
         }
         "cancel_3usd_conversion" => {
             "## Cancel 3USD Conversion\n\n\
-             You are requesting cancellation of one stored 3USD conversion\
-             intent. Cancellation is limited to that journaled request and does\
+             You are requesting cancellation of one stored 3USD conversion \
+             intent. Cancellation is limited to that journaled request and does \
              not authorize a new transfer or arbitrary refund."
                 .to_string()
         }
         "reconcile_3usd_conversion_pull_v1" => {
             "## Reconcile 3USD Conversion Pull\n\n\
-             You are reconciling one stored conversion intent against a candidate\
-             token-ledger block. This verifies the same ingress pull and does not\
+             You are reconciling one stored conversion intent against a candidate \
+             token-ledger block. This verifies the same ingress pull and does not \
              create a new intent or fresh spend."
                 .to_string()
         }
         "reconcile_3usd_conversion_pool_input_v1" => {
             "## Reconcile 3USD Pool Input\n\n\
-             You are reconciling one stored conversion intent and pool leg against\
-             a candidate block. This verifies the same pool input and does not\
+             You are reconciling one stored conversion intent and pool leg against \
+             a candidate block. This verifies the same pool input and does not \
              create a new intent or fresh spend."
                 .to_string()
         }
         "reconcile_3usd_conversion_approval_v1" => {
             "## Reconcile 3USD Conversion Approval\n\n\
-             You are reconciling the approval proof for one stored conversion\
-             intent against a candidate ledger block. This verifies the same\
+             You are reconciling the approval proof for one stored conversion \
+             intent against a candidate ledger block. This verifies the same \
              approval and does not authorize a new transfer."
                 .to_string()
         }
         "reconcile_3usd_conversion_revoke_v1" => {
             "## Reconcile 3USD Conversion Revoke\n\n\
-             You are reconciling the allowance revoke for one stored conversion\
-             intent against a candidate ledger block. This verifies the same\
+             You are reconciling the allowance revoke for one stored conversion \
+             intent against a candidate ledger block. This verifies the same \
              revoke and does not authorize a new transfer."
                 .to_string()
         }
         "reconcile_3usd_conversion_refund_v1" => {
             "## Reconcile 3USD Conversion Refund\n\n\
-             You are reconciling the refund proof for one stored conversion\
-             intent against a candidate ledger block. This verifies the same\
+             You are reconciling the refund proof for one stored conversion \
+             intent against a candidate ledger block. This verifies the same \
              refund and does not authorize a new transfer or arbitrary refund."
                 .to_string()
         }
@@ -1983,10 +1983,10 @@ fn conversion_consent_message(method: &str, arg: &[u8], caller: Principal) -> St
                     let (symbol, decimals) = token_details(token_ledger);
                     format!(
                         "## Quote 3USD Conversion\n\n\
-                         You are requesting a read-only 3USD conversion quote for **{} {}**\
-                         from token ledger `{}` with a minimum output of **{} LP base units**.\
-                         This call only queries the configured route; it does not create a\
-                         durable intent or move funds. Any wallet ingress ledger fee is\
+                         You are requesting a read-only 3USD conversion quote for **{} {}** \
+                         from token ledger `{}` with a minimum output of **{} LP base units**. \
+                         This call only queries the configured route; it does not create a \
+                         durable intent or move funds. Any wallet ingress ledger fee is \
                          reported separately from a downstream fee budget.",
                         format_token_amount(principal_raw, decimals),
                         symbol,
@@ -2003,11 +2003,11 @@ fn conversion_consent_message(method: &str, arg: &[u8], caller: Principal) -> St
                     let (symbol, decimals) = token_details(request.token_ledger);
                     format!(
                         "## Start 3USD Conversion\n\n\
-                         Caller principal `{}` is authorizing durable conversion intent **#{}**\
-                         for **{} {}** from token ledger `{}`. The explicit downstream fee\
-                         budget is **{} {}** and the minimum LP output is **{} LP base units**.\
-                         The wallet ingress transfer fee is charged separately by the token\
-                         ledger and is not included in this downstream escrow fee budget.\
+                         Caller principal `{}` is authorizing durable conversion intent **#{}** \
+                         for **{} {}** from token ledger `{}`. The explicit downstream fee \
+                         budget is **{} {}** and the minimum LP output is **{} LP base units**. \
+                         The wallet ingress transfer fee is charged separately by the token \
+                         ledger and is not included in this downstream escrow fee budget. \
                          Retries remain bound to this same intent and request.",
                         caller,
                         request.intent_seq,
@@ -2025,9 +2025,9 @@ fn conversion_consent_message(method: &str, arg: &[u8], caller: Principal) -> St
         "resume_3usd_conversion" => match candid::decode_args::<(u64,)>(arg) {
             Ok((intent_seq,)) => format!(
                 "## Resume 3USD Conversion\n\n\
-                 Caller principal `{}` is authorizing recovery of stored conversion intent\
-                 **#{}**. This resumes the exact persisted token, amount, fee budget, and\
-                 minimum LP request; it does not create a new sequence or authorize a fresh\
+                 Caller principal `{}` is authorizing recovery of stored conversion intent \
+                 **#{}**. This resumes the exact persisted token, amount, fee budget, and \
+                 minimum LP request; it does not create a new sequence or authorize a fresh \
                  spend.",
                 caller, intent_seq
             ),
@@ -2036,10 +2036,10 @@ fn conversion_consent_message(method: &str, arg: &[u8], caller: Principal) -> St
         "cancel_3usd_conversion" => match candid::decode_args::<(u64,)>(arg) {
             Ok((intent_seq,)) => format!(
                 "## Cancel 3USD Conversion\n\n\
-                 Caller principal `{}` is requesting cancellation of stored conversion intent\
-                 **#{}**. Cancellation is limited to the exact journaled request and is only\
-                 effective before value movement; otherwise that same intent remains for\
-                 status or reconciliation. This call does not authorize a new transfer or\
+                 Caller principal `{}` is requesting cancellation of stored conversion intent \
+                 **#{}**. Cancellation is limited to the exact journaled request and is only \
+                 effective before value movement; otherwise that same intent remains for \
+                 status or reconciliation. This call does not authorize a new transfer or \
                  arbitrary refund.",
                 caller, intent_seq
             ),
@@ -2049,9 +2049,9 @@ fn conversion_consent_message(method: &str, arg: &[u8], caller: Principal) -> St
             match candid::decode_args::<(u64, u64)>(arg) {
                 Ok((intent_seq, candidate_block)) => format!(
                     "## Reconcile 3USD Conversion Pull\n\n\
-                     Caller principal `{}` is reconciling the exact stored conversion intent\
-                     **#{}** using candidate token-ledger block **#{}**. This verifies or\
-                     resumes recovery of the same ingress pull; it does not create a new\
+                     Caller principal `{}` is reconciling the exact stored conversion intent \
+                     **#{}** using candidate token-ledger block **#{}**. This verifies or \
+                     resumes recovery of the same ingress pull; it does not create a new \
                      intent or fresh spend.",
                     caller, intent_seq, candidate_block
                 ),
@@ -2062,8 +2062,8 @@ fn conversion_consent_message(method: &str, arg: &[u8], caller: Principal) -> St
             match candid::decode_args::<(u64, u8, u64)>(arg) {
                 Ok((intent_seq, leg_index, candidate_block)) => format!(
                     "## Reconcile 3USD Pool Input\n\n\
-                     Caller principal `{}` is reconciling the exact stored conversion intent\
-                     **#{}**, pool leg **#{}**, using candidate block **#{}**. This verifies\
+                     Caller principal `{}` is reconciling the exact stored conversion intent \
+                     **#{}**, pool leg **#{}**, using candidate block **#{}**. This verifies \
                      the same pool input; it does not create a new intent or fresh spend.",
                     caller, intent_seq, leg_index, candidate_block
                 ),
@@ -2081,8 +2081,8 @@ fn conversion_consent_message(method: &str, arg: &[u8], caller: Principal) -> St
             match candid::decode_args::<(u64, u64)>(arg) {
                 Ok((intent_seq, candidate_block)) => format!(
                     "## Reconcile 3USD Conversion {}\n\n\
-                     Caller principal `{}` is reconciling the exact stored conversion intent\
-                     **#{}** against candidate ledger block **#{}**. This verifies the same\
+                     Caller principal `{}` is reconciling the exact stored conversion intent \
+                     **#{}** against candidate ledger block **#{}**. This verifies the same \
                      {} operation and does not authorize a new transfer.",
                     title.to_string(),
                     caller,
@@ -2396,7 +2396,7 @@ mod tests {
     #[test]
     fn conversion_consent_dispatch_is_bounded_and_quote_is_read_only() {
         let token = principal(41);
-        let args = candid::encode_args((token, 1_250u64, 99u128)).unwrap();
+        let args = candid::encode_args((token, 125_000_000u64, 99u128)).unwrap();
         let message = conversion_consent_message("quote_3usd_conversion", &args, principal(7));
 
         assert!(conversion_consent_method("quote_3usd_conversion"));
@@ -2457,7 +2457,7 @@ mod tests {
         let resume_args = candid::encode_args((7u64,)).unwrap();
         let resume_message =
             conversion_consent_message("resume_3usd_conversion", &resume_args, caller);
-        assert!(resume_message.contains("same persisted token, amount, fee budget"));
+        assert!(resume_message.contains("exact persisted token, amount, fee budget"));
         assert!(resume_message.contains("does not create a new sequence or authorize a fresh spend"));
 
         let cancel_args = candid::encode_args((7u64,)).unwrap();
