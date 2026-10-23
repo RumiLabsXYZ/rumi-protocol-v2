@@ -1,6 +1,6 @@
 # SP conversion and liquidation restoration - 2026-10-23
 
-Status: final local recovery regression pending. No production upgrade or activation submitted for this restoration.
+Status: final readiness PASS. All five local suites and both independent adversarial reviews pass. Production installation, activation and continuity are the next authorized steps.
 
 Production source: `8d7c7e7587d0e9cbb693803a90cbbbb715ed85b4`.
 
@@ -33,9 +33,9 @@ Installed module hashes are the gzip hashes below. Executable sections remain be
 - Exact-artifact local runtimes: standard130checks/452calls; agedconversion51/281; agedbackend115/522; agedpool42/191. These include lost replies, two-day aging, normal pending upgrades, wrong-proof rejection, positive proof adoption, exact balances/debt/fees and replay idempotence.
 - Frontend20conversion and21wallet-binding tests, offline build and auth/custom-domain checks pass. All534build inputs and74generated declaration files are bound. Typecheck retains30existingerrors66warnings with identical fingerprints and no introduced diagnostics.
 - Final frontend delivery:729files, treeSHA256 `4a5843eefd53aa934df00addf52d1adc9b8b37a99c9ff67b05b68407c4834076`.
-- Two fresh independent adversarial source passes found no remaining confirmed blocker. Their final verdicts await the additional no-admission runtime.
+- Two fresh independent adversarial reviews O and P returned final PASS with no unresolved blocker after validating all five runtime suites.
 
-The additional runtime uses real pool preflight rejection/refund and executable delayed replay, a real stopped-backend never-admitted prepare followed by normal owner repayment/closure, and V2 no-effect retirement. The AdmissionPending setup is explicitly synthetic and changes only one no-dispatch journal, with every other State field/virtual memory compared; an actual normal pending upgrade follows. No fabricated transfer proof or production initializer change is used.
+The additional no-admission runtime passed79checks/703typedcalls. All five suites total417checks/2149calls. It uses real pool preflight rejection/refund and executable delayed replay, a real stopped-backend never-admitted prepare followed by normal owner repayment/closure, and V2 no-effect retirement. The AdmissionPending setup is explicitly synthetic and changes only one no-dispatch journal, with every other State field/virtual memory compared; an actual normal pending upgrade follows. No fabricated transfer proof or production initializer change is used.
 
 ## Historical reserves and protected recovery
 
@@ -56,3 +56,5 @@ Separate native-chain staging/auto controls, bot collateral allowlists, reserve 
 No funded production probe, global green CI, merged PR, aged icUSD burn fault injection or isolated nonzero-interest aged fixture is claimed. Synthetic fixture initialization, actual saved-state migration, local settlement and enabled production state are distinct proof levels.
 
 Evidence root: `/private/tmp/rumi-sp-rails-restoration-20261023`. Release manifest, five runtime reports, migration comparisons, interface binding, UI hashes, review reports and exact-once execution receipts are retained separately.
+
+Final readiness file: `FINAL-READINESS-08.json`, SHA256 `77cf1acf72689ff872e9427fbe8a9194eabde836f0cd3a2e7b0cc97b601b06e1`. The ready source/artifact/UI/migration/review bindings were rehashed before admission. Latest live preflight confirms normal interest receipt count290 and preserves53legacy holds, plus the preexisting borrow-fee NotificationPending row forvault51; no journal is declared empty by omission.
